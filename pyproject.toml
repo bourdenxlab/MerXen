@@ -1,0 +1,78 @@
+[build-system]
+requires = ["setuptools>=68.0", "setuptools-scm>=8.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "merxen"
+version = "0.1.0"
+description = "Pre-processing, segmentation, and comparative analysis of paired MERSCOPE and Xenium spatial transcriptomics datasets"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.24,<3",
+    "pandas>=2.0",
+    "geopandas>=1.0",
+    "anndata>=0.10",
+    "spatialdata>=0.7",
+    "spatialdata-io>=0.6",
+    "xarray>=2024.0",
+    "cellpose>=3.0",
+    "scikit-image>=0.22",
+    "scipy>=1.12",
+    "shapely>=2.0",
+    "matplotlib>=3.8",
+    "seaborn>=0.13",
+    "tqdm>=4.60",
+    "psutil>=5.9",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "click>=8.1",
+    "zarr>=2.16",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.4",
+    "mypy>=1.0",
+    "pre-commit>=3.0",
+]
+
+[project.scripts]
+merxen = "merxen.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 88
+src = ["src"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "ANN",  # flake8-annotations (public functions)
+]
+ignore = ["ANN401"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["merxen"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+markers = ["slow: marks tests as slow (deselect with '-m \"not slow\"')"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
