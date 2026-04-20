@@ -86,6 +86,43 @@ class MemoryConfig(BaseModel):
     transcript_status_every_chunks: int = 5
 
 
+class MerscopeBuildConfig(BaseModel):
+    """Options for constructing a MERSCOPE SpatialData object."""
+
+    z_layers: list[int] | None = None
+    region_name: str | None = None
+    slide_name: str | None = None
+
+
+class XeniumBuildConfig(BaseModel):
+    """Options for constructing a Xenium SpatialData object."""
+
+    cells_boundaries: bool = True
+    nucleus_boundaries: bool = True
+    cells_as_circles: bool = False
+    cells_labels: bool = True
+    nucleus_labels: bool = True
+    transcripts: bool = True
+    morphology_mip: bool = False
+    morphology_focus: bool = True
+    aligned_images: bool = False
+    cells_table: bool = True
+
+
+class SpatialDataBuildConfig(BaseModel):
+    """Configuration for the raw-input to SpatialData build step."""
+
+    dataset_name: str
+    platform: Literal["MERSCOPE", "XENIUM"]
+    input_path: Path
+    output_path: Path
+    persistent_output_path: Path | None = None
+    merscope_transform_path: Path | None = None
+    xenium_spec_path: Path | None = None
+    merscope: MerscopeBuildConfig = MerscopeBuildConfig()
+    xenium: XeniumBuildConfig = XeniumBuildConfig()
+
+
 class DatasetConfig(BaseModel):
     """Configuration for a single dataset (one half of a pair)."""
 

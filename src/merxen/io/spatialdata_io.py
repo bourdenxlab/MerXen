@@ -14,6 +14,19 @@ from merxen.memory import force_release, log_status
 logger = logging.getLogger(__name__)
 
 
+def write_spatialdata_zarr(
+    sdata_obj: Any,
+    path: Path,
+    *,
+    overwrite: bool | None = None,
+) -> None:
+    """Write a SpatialData object with optional overwrite semantics."""
+    kwargs: dict[str, Any] = {}
+    if overwrite is not None:
+        kwargs["overwrite"] = overwrite
+    sdata_obj.write(path, **kwargs)
+
+
 def normalize_points_for_latest_write(
     points_obj: Any,
     points_key: str = "points",
@@ -106,7 +119,7 @@ def convert_to_latest_zarr(raw_path: Path, latest_path: Path) -> Path:
                 e,
             )
 
-    sdata.write(latest_path)
+    write_spatialdata_zarr(sdata, latest_path)
 
     del sdata
     force_release(note="after latest SpatialData write")
