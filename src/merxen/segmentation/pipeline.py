@@ -31,6 +31,27 @@ from merxen.segmentation.proseg import run_proseg_refinement
 logger = logging.getLogger(__name__)
 
 
+def _load_merscope_transform_matrix(config: SegmentationConfig) -> np.ndarray:
+    """Load the MERSCOPE micron-to-mosaic transform matrix."""
+    dataset = config.dataset
+    candidates: list[Path] = []
+    if dataset.transform_path is not None:
+        candidates.append(Path(dataset.transform_path))
+    candidates.append(Path(dataset.data_path) / "micron_to_mosaic_pixel_transform.csv")
+
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        matrix = np.loadtxt(candidate)
+        if matrix.shape == (3, 3):
+            return matrix
+    raise FileNotFoundError(
+        "Could not determine MERSCOPE transform. "
+        "Set dataset.transform_path or include "
+        "'micron_to_mosaic_pixel_transform.csv' in the SpatialData zarr."
+    )
+
+
 def _load_xenium_transform_matrix(config: SegmentationConfig) -> np.ndarray:
     """Load or derive Xenium micron-to-pixel transform matrix."""
     dataset = config.dataset
@@ -82,10 +103,8 @@ def _load_dataset_sdata(
     platform = dataset.platform.upper()
 
     if platform == "MERSCOPE":
-        if dataset.transform_path is None:
-            raise ValueError("MERSCOPE dataset.transform_path is required.")
         sdata = sd.read_zarr(dataset.data_path)
-        matrix = np.loadtxt(dataset.transform_path)
+        matrix = _load_merscope_transform_matrix(config)
 
         plane_keys = list_plane_keys(sdata.images, prefix=dataset.image_prefix)
         if dataset.z_range is None:
@@ -116,19 +135,22 @@ def _load_dataset_sdata(
         return sdata, fetch_tile_fn, height, width, matrix, sdata.points[points_key]
 
     if platform == "XENIUM":
-        sdata = xenium_reader(
-            dataset.data_path,
-            cells_table=False,
-            cells_as_circles=False,
-            cells_boundaries=False,
-            nucleus_boundaries=False,
-            cells_labels=False,
-            nucleus_labels=False,
-            transcripts=True,
-            morphology_focus=True,
-            morphology_mip=False,
-            aligned_images=False,
-        )
+        if Path(dataset.data_path).suffix == ".zarr":
+            sdata = sd.read_zarr(dataset.data_path)
+        else:
+            sdata = xenium_reader(
+                dataset.data_path,
+                cells_table=False,
+                cells_as_circles=False,
+                cells_boundaries=False,
+                nucleus_boundaries=False,
+                cells_labels=False,
+                nucleus_labels=False,
+                transcripts=True,
+                morphology_focus=True,
+                morphology_mip=False,
+                aligned_images=False,
+            )
         matrix = _load_xenium_transform_matrix(config)
         if len(sdata.images) == 0:
             raise RuntimeError(f"[{dataset.name}] No Xenium images found.")
