@@ -5,5 +5,5 @@ dependencies:
   - python=3.12
   - pip
   - pip:
-      - spatialdata==0.7.3a1
+      - spatialdata @ git+https://github.com/scverse/spatialdata.git@v0.7.3a1
       - -e ".[dev]"

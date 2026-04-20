@@ -535,7 +535,7 @@ spatial-image==1.2.3
     # via
     #   multiscale-spatial-image
     #   spatialdata
-spatialdata==0.7.3a1
+spatialdata @ git+https://github.com/scverse/spatialdata.git@78f75ef1c226e660256b5234dab2cb11ed8ec44a
     # via
     #   merxen (pyproject.toml)
     #   spatialdata-io
