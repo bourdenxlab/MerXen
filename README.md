@@ -6,9 +6,10 @@ Pre-processing, segmentation, and comparative analysis of paired MERSCOPE and Xe
 
 MerXen takes paired spatial transcriptomics datasets (one MERSCOPE, one Xenium per tissue section pair) and runs a standardised pipeline:
 
-1. **Cell segmentation** — Cellpose-SAM image-based segmentation followed by ProSeg transcript-based refinement
-2. **Section alignment** — Registers paired adjacent sections to a common coordinate system *(planned)*
-3. **Comparative analysis** — QC metrics, gene-level comparison, and visualisation across platforms
+1. **SpatialData build** — Builds platform-specific SpatialData zarrs from raw MERSCOPE and Xenium output folders
+2. **Cell segmentation** — Cellpose-SAM image-based segmentation followed by ProSeg transcript-based refinement
+3. **Section alignment** — Registers paired adjacent sections to a common coordinate system *(planned)*
+4. **Comparative analysis** — QC metrics, gene-level comparison, and visualisation across platforms
 
 The workflow is orchestrated by Nextflow to process multiple sample pairs with logging and reproducibility.
 
@@ -47,6 +48,18 @@ edit this file with your dataset-specific paths before running the workflow.
 ```bash
 cp workflows/samplesheet.example.csv workflows/samplesheet.csv
 ```
+
+The samplesheet now points at raw platform folders with optional reusable
+SpatialData cache paths:
+
+- `merscope_dir`: Raw MERSCOPE folder containing transcripts, boundaries, counts,
+  metadata, and `images/`.
+- `merscope_spatialdata_path`: Optional existing or desired reusable MERSCOPE
+  SpatialData zarr. If it already exists, the build step is skipped unless
+  `--force_spatialdata_build true` is supplied to Nextflow.
+- `xenium_dir`: Raw Xenium export folder.
+- `xenium_spatialdata_path`: Optional existing or desired reusable Xenium
+  SpatialData zarr.
 
 ## Running tests
 

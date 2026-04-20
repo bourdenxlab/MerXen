@@ -14,7 +14,7 @@ aioitertools==0.13.0
     # via aiobotocore
 aiosignal==1.4.0
     # via aiohttp
-anndata==0.12.6
+anndata==0.12.10
     # via
     #   merxen (pyproject.toml)
     #   annsel
@@ -341,7 +341,7 @@ packaging==26.1
     #   statsmodels
     #   xarray
     #   zarr
-pandas==3.0.2
+pandas==2.3.3
     # via
     #   merxen (pyproject.toml)
     #   anndata
@@ -452,6 +452,8 @@ python-discovery==1.2.2
     # via virtualenv
 python-dotenv==1.2.2
     # via pydantic-settings
+pytz==2026.1.post1
+    # via pandas
 pyyaml==6.0.3
     # via
     #   dask
@@ -533,7 +535,7 @@ spatial-image==1.2.3
     # via
     #   multiscale-spatial-image
     #   spatialdata
-spatialdata==0.7.2
+spatialdata==0.7.3a1
     # via
     #   merxen (pyproject.toml)
     #   spatialdata-io
@@ -595,6 +597,8 @@ typing-inspection==0.4.2
     # via
     #   pydantic
     #   pydantic-settings
+tzdata==2026.1
+    # via pandas
 umap-learn==0.5.12
     # via scanpy
 universal-pathlib==0.3.10

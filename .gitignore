@@ -221,3 +221,6 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Real samplesheets (non-example)
+workflows/samplesheet.p7113_p7513.csv
