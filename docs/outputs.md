@@ -49,17 +49,23 @@ Published with `mode: "symlink"` — the target of the symlink is the Nextflow
 work directory or the cached path. See
 [Caching and reuse](pipeline.md#caching-and-reuse).
 
+### Latest SpatialData
+
+Path: `${outdir}/<pair_id>/<platform>/latest/`
+
+| File | Contents |
+|------|----------|
+| `latest_spatialdata.zarr` | Durable current SpatialData artifact. Segmentation writes the refined ProSeg result here, then enrichment atomically replaces it with the fully enriched object. This is the primary downstream input. |
+
 ### Segmentation
 
 Path: `${outdir}/<pair_id>/<platform>/segmentation/`
 
 | File | Contents |
 |------|----------|
-| `proseg_base_latest.zarr` | Refined segmentation as SpatialData. **Primary downstream input.** |
-| `proseg_base_raw.zarr` | Raw ProSeg output before schema migration. Intermediate. |
+| `proseg_base_latest.zarr` | Staged symlink to `../latest/latest_spatialdata.zarr`. |
 | `cellpose_masks_tiled.npy` | Global-pixel uint32 mask from tiled Cellpose. Fed into enrichment. |
 | `transcripts_for_proseg.csv` | ProSeg input: per-transcript rows with seeded `cell_id`. Retained for debugging. |
-| `progress.json` | Best-effort status (dataset, stage, elapsed minutes). Overwritten throughout the run. |
 
 ### Enrichment
 
@@ -67,7 +73,7 @@ Path: `${outdir}/<pair_id>/<platform>/enrichment/`
 
 | File | Contents |
 |------|----------|
-| `latest_input.zarr` | The segmented zarr enriched in-place with explicit shape layers (ProSeg, Cellpose, vendor), vendor images, and per-shape `table_*` gene-count tables. |
+| `latest_input.zarr` | Staged symlink to `../latest/latest_spatialdata.zarr`. |
 | `enrich_out/` | Assignment summary CSVs per shape (transcripts assigned, gene totals). |
 
 ### QC

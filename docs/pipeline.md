@@ -67,8 +67,8 @@ For a samplesheet row with `pair_id=EXAMPLE01`:
 | Step | Nextflow process | CLI | Input | Output |
 |------|------------------|-----|-------|--------|
 | 1 | `BUILD_SPATIALDATA` × 2 | `merxen build-spatialdata` | raw export folders (or cached zarr) | `source_spatialdata.zarr` per platform |
-| 2 | `SEGMENT` × 2 | `merxen segment` | `source_spatialdata.zarr` | `proseg_base_latest.zarr`, `cellpose_masks_tiled.npy`, `transcripts_for_proseg.csv` |
-| 3 | `ENRICH` × 2 | `merxen enrich` | `proseg_base_latest.zarr` + Cellpose mask | `latest_input.zarr` with per-shape counts tables |
+| 2 | `SEGMENT` × 2 | `merxen segment` | `source_spatialdata.zarr` | durable `latest/latest_spatialdata.zarr`, `cellpose_masks_tiled.npy`, `transcripts_for_proseg.csv` |
+| 3 | `ENRICH` × 2 | `merxen enrich` | latest zarr + Cellpose mask | same durable `latest/latest_spatialdata.zarr`, now enriched with per-shape counts tables |
 | 4 | `QC` × 2 | `merxen qc` | enriched zarr | `qc_out/` (metrics CSV, plots) |
 | 5 | `COMPARE` × 1 | `merxen compare` | both platforms' enriched zarrs | `compare_out/` (gene comparison CSVs + metrics JSON) |
 | 6 | `VISUALIZE` × 1 | `merxen visualize` | both platforms' enriched zarrs | `visualize_out/` (PNG plots) |
@@ -86,7 +86,7 @@ Two independent caching layers:
   passed. Implemented in [src/merxen/io/builders/pipeline.py:14](../src/merxen/io/builders/pipeline.py#L14).
 - **Nextflow work-dir caching.** Resume a run with `nextflow run ... -resume`
   and completed processes will be skipped. `publishDir` modes are set so that
-  SpatialData builds are symlinked (fast) and downstream artifacts are copied.
+  SpatialData-heavy stages are symlinked rather than copied.
 
 ## Why Cellpose *and* ProSeg?
 

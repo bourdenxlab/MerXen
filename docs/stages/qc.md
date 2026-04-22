@@ -24,7 +24,7 @@ For the primary shape layer of the enriched zarr:
   inline by the process itself (no per-dataset parameters beyond the zarr
   path and output dir).
 - **Output:** `tuple(key, pair_id, platform, latest_zarr, qc_out/)`.
-- **publishDir:** `${outdir}/${pair_id}/${platform}/qc/` (copy mode).
+- **publishDir:** `${outdir}/${pair_id}/${platform}/qc/` (symlink mode).
 
 ## Python entry points
 

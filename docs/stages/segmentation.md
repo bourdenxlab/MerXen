@@ -29,7 +29,12 @@ dataset. This is the heaviest stage (default 75 CPUs, 500 GB RAM).
   - `segment_out/proseg_base_latest.zarr` — refined segmentation as SpatialData.
   - `segment_out/cellpose_masks_tiled.npy` — global-pixel mask (uint32).
   - `segment_out/transcripts_for_proseg.csv` — transcripts with seeded cell ids.
-- **publishDir:** `${outdir}/${pair_id}/${platform}/segmentation/` (copy mode).
+- **publishDir:** `${outdir}/${pair_id}/${platform}/segmentation/` (symlink mode).
+
+The durable latest zarr written by this stage lives at
+`${outdir}/${pair_id}/${platform}/latest/latest_spatialdata.zarr`. The
+`segment_out/proseg_base_latest.zarr` in the work dir is a staged symlink to
+that path.
 
 ## Python entry points
 
@@ -51,6 +56,7 @@ dataset. This is the heaviest stage (default 75 CPUs, 500 GB RAM).
 SegmentationConfig
 ├── dataset: DatasetConfig
 │   ├── name, platform, data_path, channels, output_dir
+│   ├── persistent_latest_zarr_path, persistent_mask_path, persistent_transcripts_path
 │   ├── MERSCOPE: image_prefix, z_range, transform_path
 │   ├── Xenium: xenium_spec_path, min_qv
 │   └── proseg_overrides: dict      # per-platform voxel_layers
@@ -91,17 +97,20 @@ for all fields and defaults.
    sampling over the transcript field, letting cell boundaries move to
    better match transcript density.
 6. **To "latest" zarr.** `convert_to_latest_zarr` rewrites the raw ProSeg
-   output so it can be read with the current SpatialData version.
+   output so it can be read with the current SpatialData version, then stages
+   that durable zarr back into the work dir for Nextflow.
 
 ## Outputs
 
 | File | Contents |
 |------|----------|
-| `proseg_base_latest.zarr` | SpatialData zarr with refined cell shapes and tables. |
-| `proseg_base_raw.zarr` | Raw ProSeg output before the "latest" conversion (intermediate). |
+| `latest/latest_spatialdata.zarr` | Durable refined SpatialData zarr. This is the object enrichment mutates in place. |
+| `segmentation/proseg_base_latest.zarr` | Staged symlink to the durable latest zarr. |
 | `cellpose_masks_tiled.npy` | Global-pixel Cellpose labels, consumed by enrichment. |
 | `transcripts_for_proseg.csv` | The transcript CSV fed into ProSeg. Retained for debugging. |
-| `progress.json` | Best-effort status file written throughout the run. |
+
+`proseg_base_raw.zarr` is treated as a transient intermediate and removed
+after the latest-format zarr is written successfully.
 
 ## Memory guardrails
 
@@ -124,5 +133,5 @@ for all fields and defaults.
   `x`, `global_x`, `x_location` and `gene`, `feature_name`, `target`.
 - **Cellpose GPU OOM** — lower `cellpose_bsize` or drop the largest entry
   from `tile_size_candidates`. Or pass `--cellpose_gpu false` to force CPU.
-- **Zarr half-written on crash** — delete `proseg_base_raw.zarr` and
-  `proseg_base_latest.zarr` from the work dir before rerunning.
+- **Zarr half-written on crash** — delete the durable
+  `latest/latest_spatialdata.zarr` and rerun with `-resume`.
