@@ -12,9 +12,15 @@ def remove_path(path: Path) -> None:
     if not path.exists() and not path.is_symlink():
         return
     if path.is_symlink() or path.is_file():
-        path.unlink()
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return
         return
-    shutil.rmtree(path)
+    try:
+        shutil.rmtree(path)
+    except FileNotFoundError:
+        return
 
 
 def stage_existing_output(source_path: Path, output_path: Path) -> None:

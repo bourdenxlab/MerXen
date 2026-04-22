@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from merxen.enrichment.enrich import (
     MERSCOPE_OLD_SHAPE_NAME,
@@ -44,6 +47,22 @@ def test_remove_path_deletes_real_directory_tree(tmp_path: Path) -> None:
     _remove_path(out_dir)
 
     assert not out_dir.exists()
+
+
+def test_remove_path_ignores_missing_entries_during_rmtree(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A partially-disappeared tree should not crash cleanup."""
+    out_dir = tmp_path / "out.zarr"
+    out_dir.mkdir()
+
+    def _fake_rmtree(path: Path) -> None:
+        raise FileNotFoundError("simulated race while removing a child entry")
+
+    monkeypatch.setattr(shutil, "rmtree", _fake_rmtree)
+
+    _remove_path(out_dir)
 
 
 def test_is_already_enriched_checks_platform_specific_merscope_layers() -> None:
