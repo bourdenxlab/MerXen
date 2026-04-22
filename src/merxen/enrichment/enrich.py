@@ -59,6 +59,16 @@ def _set_element(mapping: Any, key: str, value: Any, *, force: bool = False) -> 
     return True
 
 
+def _remove_path(path: Path) -> None:
+    """Remove a file, symlink, or directory tree if it exists."""
+    if not path.exists() and not path.is_symlink():
+        return
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+        return
+    shutil.rmtree(path)
+
+
 def _to_cyx(image_like: Any) -> Any:
     """Convert image-like input to (c, y, x) ordering."""
     da = _get_image_dataarray(image_like)
@@ -688,8 +698,7 @@ def enrich_single_latest(
     # 4. Safe write + atomic replace.
     tmp_out = latest_path.parent / f"{latest_path.stem}__enrich_tmp.zarr"
     backup_out = latest_path.parent / f"{latest_path.stem}__pre_enrich_backup.zarr"
-    if tmp_out.exists():
-        shutil.rmtree(tmp_out)
+    _remove_path(tmp_out)
 
     log_status(f"[{dataset_name}] Writing enriched zarr to temp path: {tmp_out}")
     write_spatialdata_zarr(dst, tmp_out, overwrite=True)
@@ -698,13 +707,12 @@ def enrich_single_latest(
     force_release(note=f"after writing enriched temp zarr ({dataset_name})")
 
     if keep_backup:
-        if backup_out.exists():
-            shutil.rmtree(backup_out)
-        if latest_path.exists():
+        _remove_path(backup_out)
+        if latest_path.exists() or latest_path.is_symlink():
             shutil.move(str(latest_path), str(backup_out))
             log_status(f"[{dataset_name}] Backup saved: {backup_out}")
-    elif latest_path.exists():
-        shutil.rmtree(latest_path)
+    elif latest_path.exists() or latest_path.is_symlink():
+        _remove_path(latest_path)
 
     shutil.move(str(tmp_out), str(latest_path))
     log_status(f"[{dataset_name}] Enrichment complete: {latest_path}")

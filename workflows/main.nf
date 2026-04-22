@@ -253,7 +253,7 @@ workflow {
                 dataset_name: "${pairId}_${platform}",
                 platform: platform,
                 latest_zarr_path: "latest_input.zarr",
-                mask_path: "cellpose_masks_tiled.npy",
+                mask_path: "enrich_input_mask.npy",
                 original_data_path: originalDataPath,
                 output_dir: "enrich_out",
                 transform_path: null,

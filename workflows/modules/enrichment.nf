@@ -13,8 +13,8 @@ process ENRICH {
     """
     set -euo pipefail
 
-    cp -r ${latest_zarr} latest_input.zarr
-    cp ${mask_path} cellpose_masks_tiled.npy
+    ln -s ${latest_zarr} latest_input.zarr
+    ln -s ${mask_path} enrich_input_mask.npy
 
     cat > enrich_config.json <<'JSON'
 ${enrich_config_json}
