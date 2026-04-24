@@ -4,7 +4,9 @@ process VISUALIZE {
     publishDir { "${params.outdir}/${pair_id}/visualization" }, mode: "copy", overwrite: true
 
     input:
-    tuple val(pair_id), path(merscope_zarr), path(xenium_zarr)
+    tuple val(pair_id),
+        path(merscope_zarr, stageAs: "merscope_latest_input.zarr"),
+        path(xenium_zarr, stageAs: "xenium_latest_input.zarr")
 
     output:
     tuple val(pair_id), path("visualize_out")
