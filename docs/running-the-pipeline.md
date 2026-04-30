@@ -26,10 +26,19 @@ Optional parameter everyone hits sooner or later:
 |------|-------------|
 | `--outdir` | Where all outputs are published. Defaults to `./results`. |
 | `--force_spatialdata_build` | Force rebuilding the SpatialData zarr even when a cached one exists. Defaults to `false`. |
+| `--enable_alignment` | Run optional Spateo alignment and alignment QC before comparison. Defaults to `false`. |
 
 Every other parameter has a default in
 [workflows/nextflow.config](../workflows/nextflow.config). See
 [Configuration](configuration.md) for the full list.
+
+To use alignment, install Spateo and then restore modern AnnData for
+SpatialData compatibility:
+
+```bash
+pip install spateo-release==1.1.1
+pip install "anndata>=0.12.10"
+```
 
 ## Resuming a run
 

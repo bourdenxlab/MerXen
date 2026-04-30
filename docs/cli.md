@@ -18,6 +18,8 @@ Commands:
   segment            Run Cellpose + ProSeg segmentation for one dataset
   enrich             Enrich a segmented zarr with per-shape tables
   qc                 Compute geometry and assignment QC metrics
+  align              Align MERSCOPE into paired Xenium coordinates
+  alignment-qc       Compute post-alignment QC metrics
   compare            Run cross-platform gene-level comparison
   visualize          Generate visualization artifacts for a pair
 ```
@@ -92,6 +94,45 @@ merxen qc --config qc_config.json
 | `--config PATH` | JSON validated against [`QCConfig`](../src/merxen/config.py#L169). |
 
 Details: [Stage 4 — QC](stages/qc.md).
+
+---
+
+## `merxen align`
+
+Align a MERSCOPE section into paired Xenium coordinates.
+
+```bash
+merxen align --config align_config.json
+```
+
+| Option | Description |
+|--------|-------------|
+| `--config PATH` | JSON validated against `AlignmentConfig`. |
+
+This command requires the optional alignment dependencies:
+
+```bash
+pip install spateo-release==1.1.1
+pip install "anndata>=0.12.10"
+```
+
+Details: [Section alignment](stages/alignment.md).
+
+---
+
+## `merxen alignment-qc`
+
+Compute SABench-style grid metrics and a centroid overlay for an aligned pair.
+
+```bash
+merxen alignment-qc --config alignment_qc_config.json
+```
+
+| Option | Description |
+|--------|-------------|
+| `--config PATH` | JSON validated against `AlignmentQCConfig`. |
+
+Details: [Section alignment](stages/alignment.md).
 
 ---
 

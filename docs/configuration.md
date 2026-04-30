@@ -79,6 +79,37 @@ any of them with `--<name>` on the command line.
 |-------|---------|-------------|
 | `xenium_min_qv` | `20.0` | Minimum transcript QV to retain. |
 
+### Alignment
+
+Alignment is optional because it requires Spateo and its heavier dependencies.
+Install Spateo, restore modern AnnData for SpatialData compatibility, then pass
+`--enable_alignment true` to Nextflow:
+
+```bash
+pip install spateo-release==1.1.1
+pip install "anndata>=0.12.10"
+```
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `enable_alignment` | `false` | Run `ALIGN` and `ALIGN_QC` between QC and comparison. |
+| `alignment_device` | `auto` | Spateo device; `auto` uses CUDA when available. |
+| `alignment_dtype` | `float32` | Spateo tensor precision; lower memory than float64. |
+| `alignment_selected_mode` | `nonrigid` | Coordinate set written to the aligned MERSCOPE zarr. |
+| `alignment_spateo_mode` | `SN-S` | Spateo morpho-align mode. |
+| `alignment_max_iter` | `500` | Spateo optimization iterations. |
+| `alignment_beta` | `1.0` | Spateo non-rigid kernel width. |
+| `alignment_lambda_vf` | `1.0` | Spateo vector-field regularization. |
+| `alignment_k` | `50` | Spateo control-point count. |
+| `alignment_partial_robust_level` | `50` | Robustness level for partial overlap. |
+| `alignment_n_sampling` | `1000` | SVI batch size. |
+| `alignment_chunk_capacity` | `1` | Spateo chunk capacity. |
+| `alignment_use_hvg` | `true` | Select highly variable genes before alignment. |
+| `alignment_n_top_genes` | `100` | Number of HVGs used for alignment. |
+| `alignment_max_nonrigid_anchors` | `5000` | Maximum RBF anchors for full-data transform application. |
+| `alignment_pytorch_cuda_alloc_conf` | `expandable_segments:True,max_split_size_mb:256` | PyTorch allocator setting exported by `ALIGN`. |
+| `alignment_qc_grid_rows` / `alignment_qc_grid_cols` | `10` / `10` | SABench-style QC grid dimensions. |
+
 ### Resource limits
 
 | Param | Default | Description |
@@ -105,6 +136,8 @@ Per-process CPU/memory requests ([nextflow.config:42-69](../workflows/nextflow.c
 | `SEGMENT` | 75 | 500 GB |
 | `ENRICH` | 16 | 200 GB |
 | `QC` | 8 | 100 GB |
+| `ALIGN` | 16 | 300 GB |
+| `ALIGN_QC` | 8 | 150 GB |
 | `COMPARE` | 8 | 200 GB |
 | `VISUALIZE` | 8 | 200 GB |
 
@@ -120,8 +153,10 @@ models is the ground truth for how stages are configured.
 | `SegmentationConfig` | `segment` | [config.py:146](../src/merxen/config.py#L146) |
 | `EnrichmentConfig` | `enrich` | [config.py:157](../src/merxen/config.py#L157) |
 | `QCConfig` | `qc` | [config.py:169](../src/merxen/config.py#L169) |
-| `ComparisonConfig` | `compare` | [config.py:177](../src/merxen/config.py#L177) |
-| `VisualizationConfig` | `visualize` | [config.py:186](../src/merxen/config.py#L186) |
+| `AlignmentConfig` | `align` | [config.py](../src/merxen/config.py) |
+| `AlignmentQCConfig` | `alignment-qc` | [config.py](../src/merxen/config.py) |
+| `ComparisonConfig` | `compare` | [config.py](../src/merxen/config.py) |
+| `VisualizationConfig` | `visualize` | [config.py](../src/merxen/config.py) |
 
 Nested sub-models:
 

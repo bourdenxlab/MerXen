@@ -34,9 +34,9 @@ scientific logic living in the installable Python package `merxen`.
 - [Segmentation](stages/segmentation.md) (Cellpose-SAM + ProSeg)
 - [Enrichment](stages/enrichment.md)
 - [QC](stages/qc.md)
+- [Section alignment](stages/alignment.md)
 - [Comparison](stages/comparison.md)
 - [Visualization](stages/visualization.md)
-- [Section alignment](stages/alignment.md) *(planned)*
 
 ### Developer reference
 - [Pipeline architecture](pipeline.md) — stage graph and data flow.

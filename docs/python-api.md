@@ -20,12 +20,12 @@ merxen/
 ├── enrichment/          # shape layers + per-shape gene tables
 ├── qc/                  # per-dataset and cross-platform metrics
 ├── visualization/       # plotting
-└── alignment/           # cross-section registration (planned)
+└── alignment/           # optional Spateo cross-section registration
 ```
 
 The subpackage structure mirrors the Nextflow stage graph:
-`build → segment → enrich → qc → compare → visualize` —
-with `alignment` planned between `qc` and `compare`.
+`build → segment → enrich → qc → align → alignment-qc → compare → visualize`.
+Alignment is skipped unless `--enable_alignment true` is set.
 
 ## `merxen.config`
 
@@ -33,7 +33,8 @@ All pipeline parameters as Pydantic v2 models. CLI commands validate JSON
 configs against these.
 
 - Top-level per-stage: `SpatialDataBuildConfig`, `SegmentationConfig`,
-  `EnrichmentConfig`, `QCConfig`, `ComparisonConfig`, `VisualizationConfig`.
+  `EnrichmentConfig`, `QCConfig`, `AlignmentConfig`, `AlignmentQCConfig`,
+  `ComparisonConfig`, `VisualizationConfig`.
 - Sub-models: `CellposeConfig`, `TilingConfig`, `MaskFilterConfig`,
   `ProsegConfig`, `MemoryConfig`, `DatasetConfig`,
   `MerscopeBuildConfig`, `XeniumBuildConfig`.
@@ -132,11 +133,16 @@ One module per plot family:
 All plotting functions take DataFrames / arrays (not zarrs) so they are
 easy to call from notebooks.
 
-## `merxen.alignment` *(planned)*
+## `merxen.alignment`
 
 - `TransformResult` dataclass.
-- `register_pair(merscope_sdata, xenium_sdata, config)` — currently raises
-  `NotImplementedError`. See [Section alignment](stages/alignment.md).
+- `register_pair(merscope_sdata, xenium_sdata, config)` — builds paired
+  AnnData objects, runs Spateo alignment, and fits affine/RBF transforms.
+- `run_alignment_pipeline(config)` — CLI/Nextflow entry point for `ALIGN`.
+- `run_alignment_qc(config)` — CLI/Nextflow entry point for `ALIGN_QC`.
+- `fit_affine_matrix`, `fit_nonrigid_transform` — reusable transform helpers.
+
+See [Section alignment](stages/alignment.md).
 
 ## `merxen.memory`
 

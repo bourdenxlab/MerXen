@@ -22,6 +22,8 @@ ${outdir}/
 │   │   ├── segmentation/
 │   │   ├── enrichment/
 │   │   └── qc/
+│   ├── alignment/
+│   ├── alignment_qc/
 │   ├── comparison/
 │   └── visualization/
 ├── <pair_id_2>/
@@ -88,6 +90,31 @@ Path: `${outdir}/<pair_id>/<platform>/qc/`
 | `qc_out/<dataset>_qc.pkl` | Pickle with summary + DataFrames for fast reload. |
 
 `<dataset>` is lowercased, e.g. `example01_merscope`.
+
+### Alignment
+
+Path: `${outdir}/<pair_id>/alignment/`
+
+Only present when `--enable_alignment true`.
+
+| File | Contents |
+|------|----------|
+| `align_out/merscope_aligned.zarr` | MERSCOPE SpatialData copy transformed into Xenium xy coordinates. |
+| `align_out/xenium_aligned.zarr` | Xenium reference SpatialData copy. |
+| `align_out/alignment_transform.json` | Spateo parameters, affine matrix, RBF metadata, and displacement summary. |
+| `align_out/alignment_coords/*.csv` | Raw, rigid, and non-rigid alignment centroid tables. |
+
+### Alignment QC
+
+Path: `${outdir}/<pair_id>/alignment_qc/`
+
+Only present when `--enable_alignment true`.
+
+| File | Contents |
+|------|----------|
+| `alignment_qc_out/<pair_id>_alignment_qc.json` | SABench-style grid metrics and centroid distance summary. |
+| `alignment_qc_out/<pair_id>_alignment_qc_metrics.csv` | Single-row CSV with the same metrics. |
+| `alignment_qc_out/<pair_id>_alignment_overlay.png` | Xenium/MERSCOPE centroid overlay after alignment. |
 
 ### Comparison
 

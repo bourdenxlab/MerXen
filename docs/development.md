@@ -28,7 +28,7 @@ Tests live under [tests/](../tests/) and mirror the source layout:
 | `src/merxen/enrichment/` | `tests/test_enrichment/` |
 | `src/merxen/qc/` | `tests/test_qc/` |
 | `src/merxen/visualization/` | `tests/test_visualization/` |
-| `src/merxen/alignment/` | `tests/test_alignment/` (placeholder for the planned stage) |
+| `src/merxen/alignment/` | `tests/test_alignment/` |
 
 Shared fixtures live in [tests/conftest.py](../tests/conftest.py). Mark
 anything that needs a large dataset or a real Cellpose model with

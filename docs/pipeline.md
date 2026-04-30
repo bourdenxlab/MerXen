@@ -38,6 +38,12 @@ channels.
            ▼
       (paired on pair_id)
            │
+           ▼
+  ┌─────────────────┐
+  │ ALIGN           │   optional Spateo MERSCOPE→Xenium
+  │ ALIGN_QC        │   registration and QC
+  └────────┬────────┘
+           │
     ┌──────┴──────┐
     ▼             ▼
 ┌────────┐   ┌───────────┐
@@ -47,11 +53,9 @@ channels.
 ```
 
 Both platforms traverse `BUILD_SPATIALDATA → SEGMENT → ENRICH → QC`
-independently. They are only rejoined for `COMPARE` and `VISUALIZE` once both
-halves of a pair have completed QC.
-
-Section alignment is conceptually between QC and COMPARE; it is
-[planned but not implemented](stages/alignment.md).
+independently. They are rejoined after QC. If `--enable_alignment true` is set,
+`ALIGN` and `ALIGN_QC` run before `COMPARE` / `VISUALIZE`; otherwise the paired
+stages consume the enriched zarrs directly.
 
 ## Channel keys and joins
 
@@ -70,8 +74,10 @@ For a samplesheet row with `pair_id=EXAMPLE01`:
 | 2 | `SEGMENT` × 2 | `merxen segment` | `source_spatialdata.zarr` | durable `latest/latest_spatialdata.zarr`, `cellpose_masks_tiled.npy`, `transcripts_for_proseg.csv` |
 | 3 | `ENRICH` × 2 | `merxen enrich` | latest zarr + Cellpose mask | same durable `latest/latest_spatialdata.zarr`, now enriched with per-shape counts tables |
 | 4 | `QC` × 2 | `merxen qc` | enriched zarr | `qc_out/` (metrics CSV, plots) |
-| 5 | `COMPARE` × 1 | `merxen compare` | both platforms' enriched zarrs | `compare_out/` (gene comparison CSVs + metrics JSON) |
-| 6 | `VISUALIZE` × 1 | `merxen visualize` | both platforms' enriched zarrs | `visualize_out/` (PNG plots) |
+| 5 | `ALIGN` × 1 | `merxen align` | both platforms' enriched zarrs | aligned zarrs + transform metadata, when enabled |
+| 6 | `ALIGN_QC` × 1 | `merxen alignment-qc` | aligned zarrs | `alignment_qc_out/`, when enabled |
+| 7 | `COMPARE` × 1 | `merxen compare` | aligned zarrs if enabled; otherwise enriched zarrs | `compare_out/` (gene comparison CSVs + metrics JSON) |
+| 8 | `VISUALIZE` × 1 | `merxen visualize` | aligned zarrs if enabled; otherwise enriched zarrs | `visualize_out/` (PNG plots) |
 
 All published artifacts land under
 `${params.outdir}/${pair_id}/<stage>/...`. See [Outputs](outputs.md).
