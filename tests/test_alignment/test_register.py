@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import sys
 from types import SimpleNamespace
 
 import anndata as ad
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+import pytest
 from shapely.geometry import box
 
 from merxen.alignment.register import (
+    _resolve_device,
     _spateo_pairwise_kwargs,
     register_pair,
     transform_xy_for_result,
@@ -147,6 +150,27 @@ def test_spateo_kwargs_map_sampling_to_installed_api() -> None:
     kwargs = _spateo_pairwise_kwargs(cfg, PairwiseWithBatchSize)
 
     assert kwargs == {"beta": 2.0, "batch_size": 123}
+
+
+def test_spateo_device_aliases_use_cuda_visible_device_ids() -> None:
+    """Spateo expects CUDA_VISIBLE_DEVICES-style GPU ids, not torch aliases."""
+    assert _resolve_device("cuda") == "0"
+    assert _resolve_device("cuda:0") == "0"
+    assert _resolve_device("CUDA:1") == "1"
+    assert _resolve_device(" 0 ") == "0"
+    assert _resolve_device("cpu") == "cpu"
+
+
+def test_spateo_auto_device_uses_gpu_index_when_cuda_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Auto device selection should pass Spateo a usable GPU id."""
+    fake_torch = SimpleNamespace(
+        cuda=SimpleNamespace(is_available=lambda: True),
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    assert _resolve_device("auto") == "0"
 
 
 def test_spateo_alignment_defaults_are_gpu_conservative() -> None:

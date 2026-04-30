@@ -397,14 +397,22 @@ def _coerce_alignment_config(config: Any) -> AlignmentConfig:
 
 
 def _resolve_device(device: str) -> str:
-    if device != "auto":
-        return device
-    try:
-        import torch
+    normalized = str(device).strip().lower()
+    if normalized in {"", "auto"}:
+        try:
+            import torch
 
-        return "cuda" if torch.cuda.is_available() else "cpu"
-    except Exception:  # noqa: BLE001
+            return "0" if torch.cuda.is_available() else "cpu"
+        except Exception:  # noqa: BLE001
+            return "cpu"
+    if normalized == "cpu":
         return "cpu"
+    if normalized == "cuda":
+        return "0"
+    if normalized.startswith("cuda:"):
+        cuda_device = normalized.removeprefix("cuda:").strip()
+        return cuda_device or "0"
+    return str(device).strip()
 
 
 def _obsm_or(
