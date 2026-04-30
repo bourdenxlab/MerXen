@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
+import geopandas as gpd
 import numpy as np
+import pandas as pd
+from shapely.geometry import box
 
 from merxen.visualization.sanity_plots import (
     _prepare_overlay_image,
+    plot_pair_sanity_crops,
     plot_sanity_overlay,
 )
 
@@ -44,4 +49,25 @@ def test_plot_sanity_overlay_writes_file_for_two_channel_image(
     result = plot_sanity_overlay(image, out, title="two-channel overlay")
 
     assert result == out
+    assert out.exists()
+
+
+def test_plot_pair_sanity_crops_writes_file(tmp_path: Path) -> None:
+    """Paired sanity crop plotting should succeed without image backgrounds."""
+    shapes = gpd.GeoDataFrame({"geometry": [box(0.0, 0.0, 10.0, 10.0)]})
+    points = pd.DataFrame({"x": [1.0, 5.0], "y": [1.0, 5.0]})
+    merscope = SimpleNamespace(
+        shapes={"MOSAIK_proseg": shapes},
+        points={"transcripts": points},
+        images={},
+    )
+    xenium = SimpleNamespace(
+        shapes={"MOSAIK_proseg": shapes},
+        points={"transcripts": points},
+        images={},
+    )
+    out = tmp_path / "pair_sanity.png"
+
+    plot_pair_sanity_crops(merscope, xenium, out)
+
     assert out.exists()

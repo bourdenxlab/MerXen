@@ -9,18 +9,16 @@ import pandas as pd
 import spatialdata as sd
 
 from merxen.config import VisualizationConfig, load_config_from_json
-from merxen.io.image_source import build_image_source, fetch_tile
-from merxen.io.transcript_io import first_existing_col, to_pandas
 from merxen.qc.gene_comparison import compute_gene_comparison_from_paths
 from merxen.qc.metrics import compute_dataset_qc
-from merxen.visualization.density_overview import plot_density_overview
+from merxen.visualization.density_overview import plot_transcript_overview
 from merxen.visualization.gene_scatter import plot_gene_scatter
 from merxen.visualization.qc_plots import (
     plot_assignment_bar,
-    plot_cell_metrics_violin,
-    plot_geometry_histograms,
+    plot_cell_metrics_violin_comparison,
+    plot_geometry_histograms_comparison,
 )
-from merxen.visualization.sanity_plots import plot_sanity_overlay
+from merxen.visualization.sanity_plots import plot_pair_sanity_crops
 
 
 @click.command(name="visualize")
@@ -64,20 +62,14 @@ def visualize_command(config_path: Path) -> None:
     )
 
     qc_records: list[dict[str, float | str]] = []
+    qc_by_dataset = {}
     dataset_items = [
         ("XENIUM", cfg.xenium_zarr_path),
         ("MERSCOPE", cfg.merscope_zarr_path),
     ]
     for dataset_name, zarr_path in dataset_items:
         qc = compute_dataset_qc(zarr_path, dataset_name=dataset_name)
-        geom_plot = (
-            cfg.output_dir / f"{cfg.pair_id}_{dataset_name.lower()}_geometry_hist.png"
-        )
-        cell_plot = (
-            cfg.output_dir / f"{cfg.pair_id}_{dataset_name.lower()}_cell_violin.png"
-        )
-        plot_geometry_histograms(qc["geometry_metrics"], geom_plot)
-        plot_cell_metrics_violin(qc["cell_metrics"], cell_plot)
+        qc_by_dataset[dataset_name] = qc
         qc_records.append(
             {
                 "dataset": dataset_name,
@@ -85,70 +77,39 @@ def visualize_command(config_path: Path) -> None:
             }
         )
 
-        # Density + sanity overlays using the first points/image/shapes elements.
-        sdata = sd.read_zarr(zarr_path)
-        if len(sdata.points) > 0:
-            points_key = list(sdata.points.keys())[0]
-            points_pdf = to_pandas(sdata.points[points_key])
-            x_col = first_existing_col(
-                points_pdf,
-                [
-                    "x",
-                    "x_micron",
-                    "x_location",
-                    "global_x",
-                    "x_global_px",
-                    "observed_x",
-                ],
-            )
-            y_col = first_existing_col(
-                points_pdf,
-                [
-                    "y",
-                    "y_micron",
-                    "y_location",
-                    "global_y",
-                    "y_global_px",
-                    "observed_y",
-                ],
-            )
-            if x_col is not None and y_col is not None:
-                density_plot = (
-                    cfg.output_dir
-                    / f"{cfg.pair_id}_{dataset_name.lower()}_density_overview.png"
-                )
-                plot_density_overview(
-                    points_pdf,
-                    density_plot,
-                    x_col=x_col,
-                    y_col=y_col,
-                    title=f"{dataset_name} Transcript Density",
-                )
+    geom_plot = cfg.output_dir / f"{cfg.pair_id}_geometry_hist.png"
+    cell_plot = cfg.output_dir / f"{cfg.pair_id}_cell_violin.png"
+    plot_geometry_histograms_comparison(
+        {
+            dataset_name: qc["geometry_metrics"]
+            for dataset_name, qc in qc_by_dataset.items()
+        },
+        geom_plot,
+    )
+    plot_cell_metrics_violin_comparison(
+        {
+            dataset_name: qc["cell_metrics"]
+            for dataset_name, qc in qc_by_dataset.items()
+        },
+        cell_plot,
+    )
 
-        if len(sdata.images) > 0:
-            image_key = list(sdata.images.keys())[0]
-            source = build_image_source(sdata.images[image_key], as_float32=False)
-            height, width, _ = source["shape"]
-            crop_size = int(min(1024, height, width))
-            y0 = max(0, (height - crop_size) // 2)
-            x0 = max(0, (width - crop_size) // 2)
-            tile = fetch_tile(source, y0, y0 + crop_size, x0, x0 + crop_size)
-
-            shapes = None
-            if len(sdata.shapes) > 0:
-                shapes_key = list(sdata.shapes.keys())[0]
-                shapes = sdata.shapes[shapes_key]
-
-            overlay_plot = (
-                cfg.output_dir
-                / f"{cfg.pair_id}_{dataset_name.lower()}_sanity_overlay.png"
-            )
-            plot_sanity_overlay(
-                tile,
-                overlay_plot,
-                shapes=shapes,
-                title=f"{dataset_name} Sanity Overlay",
-            )
+    merscope_sdata = sd.read_zarr(cfg.merscope_zarr_path)
+    xenium_sdata = sd.read_zarr(cfg.xenium_zarr_path)
+    overlay_plot = cfg.output_dir / f"{cfg.pair_id}_sanity_overlay.png"
+    plot_pair_sanity_crops(
+        merscope_sdata,
+        xenium_sdata,
+        overlay_plot,
+        merscope_zarr_path=cfg.merscope_zarr_path,
+        xenium_zarr_path=cfg.xenium_zarr_path,
+    )
+    transcript_overview_plot = cfg.output_dir / f"{cfg.pair_id}_transcript_overview.png"
+    plot_transcript_overview(
+        merscope_sdata,
+        xenium_sdata,
+        transcript_overview_plot,
+    )
 
     assignment_df = pd.DataFrame(qc_records)
     assign_plot = cfg.output_dir / f"{cfg.pair_id}_assignment_rate_bar.png"
@@ -157,4 +118,8 @@ def visualize_command(config_path: Path) -> None:
     click.echo("Visualization complete:")
     click.echo(f"- {total_scatter}")
     click.echo(f"- {assigned_scatter}")
+    click.echo(f"- {geom_plot}")
+    click.echo(f"- {cell_plot}")
+    click.echo(f"- {overlay_plot}")
+    click.echo(f"- {transcript_overview_plot}")
     click.echo(f"- {assign_plot}")

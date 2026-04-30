@@ -126,12 +126,13 @@ One module per plot family:
 | Module | Public functions |
 |--------|------------------|
 | `gene_scatter` | `plot_gene_scatter` |
-| `qc_plots` | `plot_geometry_histograms`, `plot_cell_metrics_violin`, `plot_assignment_bar` |
-| `density_overview` | `density_hist2d`, `plot_density_overview` |
-| `sanity_plots` | `plot_sanity_overlay` |
+| `qc_plots` | `plot_geometry_histograms`, `plot_geometry_histograms_comparison`, `plot_cell_metrics_violin`, `plot_cell_metrics_violin_comparison`, `plot_assignment_bar` |
+| `density_overview` | `density_hist2d`, `plot_density_overview`, `plot_transcript_overview` |
+| `sanity_plots` | `plot_sanity_overlay`, `plot_pair_sanity_crops` |
 
-All plotting functions take DataFrames / arrays (not zarrs) so they are
-easy to call from notebooks.
+Most plotting functions take DataFrames / arrays. The paired transcript and
+sanity plots take already-opened SpatialData objects so they can work lazily
+with large point tables and image pyramids.
 
 ## `merxen.alignment`
 

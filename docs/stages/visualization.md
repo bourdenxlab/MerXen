@@ -1,19 +1,19 @@
 # Stage 6 — Visualization
 
 Produces a fixed set of PNG plots for a pair: gene-level scatter plots,
-per-dataset QC plots, transcript density overviews, and a sanity-check image
-overlay. Runs once per pair, after comparison has completed.
+combined QC plots, a paired transcript overview, and a paired sanity-check
+image overlay. Runs once per pair, after comparison has completed.
 
 ## What it does
 
 1. Rerun the gene comparison internally (re-opens the enriched zarrs) and
    plot log-log scatter plots of MERSCOPE vs Xenium normalized counts.
-2. Recompute per-dataset QC metrics and plot geometry histograms and cell
-   metric violins for both platforms.
-3. For each dataset, plot a transcript density heatmap using the points
-   table.
-4. For each dataset, crop a central 1024×1024 region from the first image
-   and overlay the first shape layer for a visual sanity check.
+2. Recompute per-dataset QC metrics and plot combined geometry histograms and
+   cell metric violins across both platforms.
+3. Plot a paired 3x2 transcript overview with density heatmaps, full-field
+   scatter subsamples, and a fixed micron crop.
+4. Plot paired 250 um sanity crops with image backgrounds, all shape contours,
+   and ProSeg assigned/unassigned transcripts.
 5. Plot an assignment-rate bar chart comparing the percentage of transcripts
    assigned across platforms.
 
@@ -31,17 +31,17 @@ overlay. Runs once per pair, after comparison has completed.
 
 | Function | File |
 |----------|------|
-| CLI `visualize_command` | [cli/run_visualization.py:34](../../src/merxen/cli/run_visualization.py#L34) |
+| CLI `visualize_command` | [cli/run_visualization.py](../../src/merxen/cli/run_visualization.py) |
 | `plot_gene_scatter` | [visualization/gene_scatter.py:14](../../src/merxen/visualization/gene_scatter.py#L14) |
-| `plot_geometry_histograms` | [visualization/qc_plots.py:13](../../src/merxen/visualization/qc_plots.py#L13) |
-| `plot_cell_metrics_violin` | [visualization/qc_plots.py:44](../../src/merxen/visualization/qc_plots.py#L44) |
-| `plot_assignment_bar` | [visualization/qc_plots.py:70](../../src/merxen/visualization/qc_plots.py#L70) |
-| `plot_density_overview` | [visualization/density_overview.py:29](../../src/merxen/visualization/density_overview.py#L29) |
-| `plot_sanity_overlay` | [visualization/sanity_plots.py:13](../../src/merxen/visualization/sanity_plots.py#L13) |
+| `plot_geometry_histograms_comparison` | [visualization/qc_plots.py](../../src/merxen/visualization/qc_plots.py) |
+| `plot_cell_metrics_violin_comparison` | [visualization/qc_plots.py](../../src/merxen/visualization/qc_plots.py) |
+| `plot_assignment_bar` | [visualization/qc_plots.py](../../src/merxen/visualization/qc_plots.py) |
+| `plot_transcript_overview` | [visualization/density_overview.py](../../src/merxen/visualization/density_overview.py) |
+| `plot_pair_sanity_crops` | [visualization/sanity_plots.py](../../src/merxen/visualization/sanity_plots.py) |
 
 ## Config schema
 
-`VisualizationConfig` — [config.py:186](../../src/merxen/config.py#L186).
+`VisualizationConfig` — [config.py:246](../../src/merxen/config.py#L246).
 
 | Field | Description |
 |-------|-------------|
@@ -58,10 +58,10 @@ Written under `visualize_out/`:
 |------|------|----------|
 | Gene scatter | `<pair_id>_gene_scatter_total_normalized.png` | MERSCOPE vs Xenium, all transcripts (normalized). |
 | Gene scatter | `<pair_id>_gene_scatter_assigned_normalized.png` | MERSCOPE vs Xenium, transcripts assigned to cells. |
-| Geometry | `<pair_id>_<platform>_geometry_hist.png` | Histograms of area, eccentricity, etc. |
-| Cell metrics | `<pair_id>_<platform>_cell_violin.png` | Violin plots of transcripts/cell, genes/cell. |
-| Density | `<pair_id>_<platform>_density_overview.png` | 2D histogram of transcript locations. |
-| Sanity overlay | `<pair_id>_<platform>_sanity_overlay.png` | Central 1024×1024 image crop with polygons drawn on top. |
+| Geometry | `<pair_id>_geometry_hist.png` | Overlaid step histograms of area, eccentricity, etc. |
+| Cell metrics | `<pair_id>_cell_violin.png` | Platform violins for transcripts/cell and genes/cell on log y axes. |
+| Transcript overview | `<pair_id>_transcript_overview.png` | 3x2 density, full scatter, and fixed crop transcript overview. |
+| Sanity overlay | `<pair_id>_sanity_overlay.png` | Paired 250 um image crops with shape contours and assignment status. |
 | Assignment rate | `<pair_id>_assignment_rate_bar.png` | Bar chart of `pct_assigned` per platform. |
 
 ## Notes
@@ -69,11 +69,9 @@ Written under `visualize_out/`:
 - The visualization stage does **not** read the CSVs produced by the
   comparison stage; it recomputes them. This keeps stages independent but
   means large zarrs are opened twice per run.
-- The sanity overlay uses whichever image is keyed first in
-  `sdata.images` and whichever shape layer is keyed first in
-  `sdata.shapes`. For consistency it is worth running enrichment first so
-  that both layers exist.
+- The sanity overlay prefers `MERSCOPE_z_projection` and `morphology_focus`
+  image layers, uses `MOSAIK_proseg` as the assignment shape layer, and draws
+  every shape layer present in `sdata.shapes`.
 - Points coordinate columns are resolved with `first_existing_col` across
   `x`, `x_micron`, `x_location`, `global_x`, `x_global_px`, `observed_x`
-  (and the corresponding `y_*`). If none are present the density plot is
-  skipped silently.
+  (and the corresponding `y_*`) for transcript plotting.

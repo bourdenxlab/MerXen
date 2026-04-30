@@ -136,10 +136,10 @@ Path: `${outdir}/<pair_id>/visualization/`
 |------|----------|
 | `visualize_out/<pair_id>_gene_scatter_total_normalized.png` | MERSCOPE vs Xenium log-log scatter, all transcripts. |
 | `visualize_out/<pair_id>_gene_scatter_assigned_normalized.png` | MERSCOPE vs Xenium log-log scatter, assigned transcripts only. |
-| `visualize_out/<pair_id>_<platform>_geometry_hist.png` | Histograms of cell area, eccentricity, etc. |
-| `visualize_out/<pair_id>_<platform>_cell_violin.png` | Violin plots of transcripts-per-cell, genes-per-cell. |
-| `visualize_out/<pair_id>_<platform>_density_overview.png` | 2D histogram of transcript locations. |
-| `visualize_out/<pair_id>_<platform>_sanity_overlay.png` | Central 1024×1024 image crop with the first shape layer overlaid. |
+| `visualize_out/<pair_id>_geometry_hist.png` | Overlaid Xenium/MERSCOPE step histograms of cell area, eccentricity, etc. |
+| `visualize_out/<pair_id>_cell_violin.png` | Side-by-side platform violins for transcripts-per-cell and genes-per-cell. |
+| `visualize_out/<pair_id>_transcript_overview.png` | 3x2 density, full scatter, and fixed crop transcript overview. |
+| `visualize_out/<pair_id>_sanity_overlay.png` | Paired 250 um image crops with all shape contours and transcript assignment status. |
 | `visualize_out/<pair_id>_assignment_rate_bar.png` | Bar chart comparing `pct_assigned` across platforms. |
 
 ## Nextflow reports
