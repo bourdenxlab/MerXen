@@ -52,6 +52,7 @@ where = ["src"]
 [tool.ruff]
 line-length = 88
 src = ["src"]
+exclude = ["notebooks/"]
 
 [tool.ruff.lint]
 select = [
