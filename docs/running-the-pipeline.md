@@ -146,8 +146,12 @@ nextflow run workflows/main.nf \
 Starting at `segment` still needs `--proseg_binary`; starting later does not.
 Starting at `compare` or `visualize` with `--enable_alignment false` reads
 `${outdir}/${pair_id}/{merscope,xenium}/latest/latest_spatialdata.zarr`.
-With `--enable_alignment true`, those stages read the aligned zarrs under
-`${outdir}/${pair_id}/alignment/align_out/`.
+With `--enable_alignment true`, `ALIGN` updates
+`${outdir}/${pair_id}/merscope/latest/latest_spatialdata.zarr` in place with
+alignment metadata and `*_aligned_nonrigid` vector elements. Later stages read
+that updated MERSCOPE zarr and keep using
+`${outdir}/${pair_id}/xenium/latest/latest_spatialdata.zarr` as the fixed
+reference.
 
 ## Running on a cluster
 

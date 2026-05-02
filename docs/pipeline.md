@@ -73,10 +73,10 @@ For a samplesheet row with `pair_id=EXAMPLE01`:
 | 2 | `SEGMENT` × 2 | `merxen segment` | `source_spatialdata.zarr` | durable `latest/latest_spatialdata.zarr`, `cellpose_masks_tiled.npy`, `transcripts_for_proseg.csv` |
 | 3 | `ENRICH` × 2 | `merxen enrich` | latest zarr + Cellpose mask | same durable `latest/latest_spatialdata.zarr`, now enriched with per-shape counts tables |
 | 4 | `QC` × 2 | `merxen qc` | enriched zarr | `qc_out/` (metrics CSV, plots) |
-| 5 | `ALIGN` × 1 | `merxen align` | both platforms' enriched zarrs | aligned zarrs + transform metadata, when enabled |
-| 6 | `ALIGN_QC` × 1 | `merxen alignment-qc` | aligned zarrs | `alignment_qc_out/`, when enabled |
-| 7 | `COMPARE` × 1 | `merxen compare` | aligned zarrs if enabled; otherwise enriched zarrs | `compare_out/` (gene comparison CSVs + metrics JSON) |
-| 8 | `VISUALIZE` × 1 | `merxen visualize` | aligned zarrs if enabled; otherwise enriched zarrs | `visualize_out/` (PNG plots) |
+| 5 | `ALIGN` × 1 | `merxen align` | both platforms' enriched zarrs | in-place MERSCOPE aligned elements + transform metadata, when enabled |
+| 6 | `ALIGN_QC` × 1 | `merxen alignment-qc` | updated MERSCOPE zarr + original Xenium zarr | `alignment_qc_out/`, when enabled |
+| 7 | `COMPARE` × 1 | `merxen compare` | updated MERSCOPE zarr if enabled; otherwise enriched zarrs | `compare_out/` (gene comparison CSVs + metrics JSON) |
+| 8 | `VISUALIZE` × 1 | `merxen visualize` | updated MERSCOPE zarr if enabled; otherwise enriched zarrs | `visualize_out/` (PNG plots) |
 
 All published artifacts land under
 `${params.outdir}/${pair_id}/<stage>/...`. See [Outputs](outputs.md).

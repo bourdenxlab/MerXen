@@ -42,20 +42,29 @@ Key parameters live in `workflows/nextflow.config`:
 | `alignment_device` | `auto` | Spateo device; `auto` chooses CUDA when available. |
 | `alignment_dtype` | `float32` | Spateo tensor precision; keeps GPU memory lower. |
 | `alignment_selected_mode` | `nonrigid` | Coordinate set used for transformed outputs. |
-| `alignment_max_iter` | `500` | Spateo optimization iterations. |
-| `alignment_beta` | `1.0` | Spateo non-rigid kernel width. |
-| `alignment_lambda_vf` | `1.0` | Spateo vector-field regularization. |
-| `alignment_k` | `50` | Spateo low-rank control points. |
-| `alignment_partial_robust_level` | `50` | Robustness level for partial overlap. |
+| `alignment_max_iter` | `360` | Spateo optimization iterations. |
+| `alignment_nonrigid_start_iter` | `220` | Iteration where non-rigid refinement starts. |
+| `alignment_beta` | `0.005` | Spateo non-rigid kernel width. |
+| `alignment_lambda_vf` | `3000.0` | Spateo vector-field regularization. |
+| `alignment_k` | `15` | Spateo low-rank control points. |
+| `alignment_partial_robust_level` | `100` | Robustness level for partial overlap. |
+| `alignment_allow_flip` | `true` | Allow a mirrored coarse initialization before rigid/non-rigid refinement. |
+| `alignment_svi_mode` | `false` | Use full pairwise matching on the sampled cells instead of SVI mini-batches. |
 | `alignment_n_sampling` | `1000` | Stochastic variational batch size for GPU memory control. |
+| `alignment_sparse_top_k` | `512` | Sparse matching top-k used by Spateo. |
 | `alignment_chunk_capacity` | `1` | Spateo chunk capacity for lower peak memory. |
+| `alignment_use_hvg` | `false` | Use the full shared panel instead of HVGs. |
 | `alignment_n_top_genes` | `100` | HVG feature count used for alignment. |
+| `alignment_use_pca` | `true` | Run joint PCA on shared expression features before Spateo. |
+| `alignment_n_pcs` | `50` | Number of joint PCA components used for Spateo matching. |
+| `alignment_max_alignment_cells` | `35000` | Deterministic per-platform cell subsample used for Spateo optimization. |
+| `alignment_seed` | `21` | Seed for deterministic alignment subsampling. |
 | `alignment_max_nonrigid_anchors` | `5000` | Maximum RBF anchors used when applying non-rigid transforms. |
 | `alignment_qc_grid_rows` / `alignment_qc_grid_cols` | `10` / `10` | SABench-style QC grid. |
 
-These defaults are intentionally conservative for large pairs such as P7513 on
-a 24 GB GPU. Increase `alignment_n_sampling`, `alignment_n_top_genes`, or
-`alignment_k` only after the QC overlay looks stable.
+These defaults come from the P7513 tuning notebook. They use the shared panel,
+joint PCA, mirrored initialization, no SVI, and a 35k-cell per-platform
+subsample so the non-rigid pass fits comfortably on a 24 GB GPU.
 
 ## CLI
 
@@ -90,10 +99,14 @@ Published under `${outdir}/<pair_id>/alignment/`:
 
 | File | Contents |
 |------|----------|
-| `align_out/merscope_aligned.zarr` | MERSCOPE SpatialData copy with transformed shapes and points. |
-| `align_out/xenium_aligned.zarr` | Xenium reference SpatialData copy. |
-| `align_out/alignment_transform.json` | Affine matrix, RBF metadata, Spateo parameters, displacement summary. |
+| `align_out/alignment_transform.json` | Affine matrix, serialized RBF metadata, Spateo parameters, displacement summary. |
 | `align_out/alignment_coords/*.csv` | Raw, rigid, and non-rigid alignment centroids. |
+
+`ALIGN` updates the existing MERSCOPE latest zarr in place. Raw elements are
+left untouched, rigid affine transforms are saved to the `merxen_xenium`
+coordinate system, and new `*_aligned_nonrigid` vector elements are added with
+materialized non-rigid coordinates. Xenium remains the fixed reference and is
+not copied.
 
 Published under `${outdir}/<pair_id>/alignment_qc/`:
 

@@ -99,10 +99,14 @@ Only present when `--enable_alignment true`.
 
 | File | Contents |
 |------|----------|
-| `align_out/merscope_aligned.zarr` | MERSCOPE SpatialData copy transformed into Xenium xy coordinates. |
-| `align_out/xenium_aligned.zarr` | Xenium reference SpatialData copy. |
-| `align_out/alignment_transform.json` | Spateo parameters, affine matrix, RBF metadata, and displacement summary. |
+| `align_out/alignment_transform.json` | Spateo parameters, affine matrix, serialized RBF metadata, and displacement summary. |
 | `align_out/alignment_coords/*.csv` | Raw, rigid, and non-rigid alignment centroid tables. |
+
+`ALIGN` updates the existing MERSCOPE latest zarr in place: raw vector elements
+remain untouched, rigid affine transforms are saved to `merxen_xenium`, and new
+`*_aligned_nonrigid` vector elements store materialized non-rigid coordinates.
+Xenium is not copied; downstream stages keep using the original Xenium latest
+zarr as the fixed reference.
 
 ### Alignment QC
 

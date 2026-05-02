@@ -108,17 +108,25 @@ pip install "anndata>=0.12.10"
 | `enable_alignment` | `false` | Run `ALIGN` and `ALIGN_QC` between QC and comparison. |
 | `alignment_device` | `auto` | Spateo device; `auto` uses CUDA when available. |
 | `alignment_dtype` | `float32` | Spateo tensor precision; lower memory than float64. |
-| `alignment_selected_mode` | `nonrigid` | Coordinate set written to the aligned MERSCOPE zarr. |
+| `alignment_selected_mode` | `nonrigid` | Coordinate set used by downstream alignment transforms. |
 | `alignment_spateo_mode` | `SN-S` | Spateo morpho-align mode. |
-| `alignment_max_iter` | `500` | Spateo optimization iterations. |
-| `alignment_beta` | `1.0` | Spateo non-rigid kernel width. |
-| `alignment_lambda_vf` | `1.0` | Spateo vector-field regularization. |
-| `alignment_k` | `50` | Spateo control-point count. |
-| `alignment_partial_robust_level` | `50` | Robustness level for partial overlap. |
+| `alignment_max_iter` | `360` | Spateo optimization iterations. |
+| `alignment_nonrigid_start_iter` | `220` | Iteration where non-rigid refinement starts. |
+| `alignment_beta` | `0.005` | Spateo non-rigid kernel width. |
+| `alignment_lambda_vf` | `3000.0` | Spateo vector-field regularization. |
+| `alignment_k` | `15` | Spateo control-point count. |
+| `alignment_partial_robust_level` | `100` | Robustness level for partial overlap. |
+| `alignment_allow_flip` | `true` | Allow Spateo's coarse initialization to test a mirrored orientation. |
+| `alignment_svi_mode` | `false` | Use full pairwise matching on the sampled cells instead of SVI mini-batches. |
 | `alignment_n_sampling` | `1000` | SVI batch size. |
+| `alignment_sparse_top_k` | `512` | Sparse matching top-k used by Spateo. |
 | `alignment_chunk_capacity` | `1` | Spateo chunk capacity. |
-| `alignment_use_hvg` | `true` | Select highly variable genes before alignment. |
+| `alignment_use_hvg` | `false` | Select highly variable genes before alignment. `false` uses the shared panel. |
 | `alignment_n_top_genes` | `100` | Number of HVGs used for alignment. |
+| `alignment_use_pca` | `true` | Run joint PCA on shared expression features before Spateo. |
+| `alignment_n_pcs` | `50` | Number of joint PCA components used for Spateo matching. |
+| `alignment_max_alignment_cells` | `35000` | Deterministic per-platform cell subsample used for Spateo optimization. |
+| `alignment_seed` | `21` | Seed for deterministic alignment subsampling. |
 | `alignment_max_nonrigid_anchors` | `5000` | Maximum RBF anchors for full-data transform application. |
 | `alignment_pytorch_cuda_alloc_conf` | `expandable_segments:True,max_split_size_mb:256` | PyTorch allocator setting exported by `ALIGN`. |
 | `alignment_qc_grid_rows` / `alignment_qc_grid_cols` | `10` / `10` | SABench-style QC grid dimensions. |
