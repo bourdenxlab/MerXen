@@ -267,7 +267,7 @@ def _resolve_points_xy_cols(
 ) -> tuple[str, Any, str, str]:
     if len(sdata_obj.points) == 0:
         raise RuntimeError("No points found in SpatialData object.")
-    pts_key = list(sdata_obj.points.keys())[0]
+    pts_key = _reference_points_key(sdata_obj)
     pts = sdata_obj.points[pts_key]
     x_col = _first_existing_col(
         pts,
@@ -476,6 +476,13 @@ def _center_and_span(
     cy = 0.5 * (miny + maxy)
     span = max(maxx - minx, maxy - miny)
     return cx, cy, span
+
+
+def _reference_points_key(sdata_obj: Any) -> str:
+    for key in sdata_obj.points:
+        if str(key).endswith("_aligned_nonrigid"):
+            return key
+    return list(sdata_obj.points.keys())[0]
 
 
 def _first_existing_col(df_like: Any, candidates: list[str]) -> str | None:

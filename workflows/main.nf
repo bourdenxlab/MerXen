@@ -577,7 +577,15 @@ workflow {
             paired_zarrs_ch = merscope_qc_ch
                 .join(xenium_qc_ch)
                 .map { pairId, merscopeLatest, xeniumLatest ->
-                    tuple(pairId, file(merscopeLatest), file(xeniumLatest))
+                    def merscopePath = Paths.get(merscopeLatest.toString()).toRealPath().toString()
+                    def xeniumPath = Paths.get(xeniumLatest.toString()).toRealPath().toString()
+                    tuple(
+                        pairId,
+                        file(merscopeLatest),
+                        file(xeniumLatest),
+                        merscopePath,
+                        xeniumPath,
+                    )
                 }
         } else {
             paired_zarrs_ch = samplesheet_ch.map { row ->
@@ -603,7 +611,13 @@ workflow {
                     ),
                     "QC/enriched XENIUM latest zarr for ${pairId}",
                 )
-                tuple(pairId, merscopeLatest, xeniumLatest)
+                tuple(
+                    pairId,
+                    merscopeLatest,
+                    xeniumLatest,
+                    merscopeLatest.toRealPath().toString(),
+                    xeniumLatest.toRealPath().toString(),
+                )
             }
         }
     }
@@ -619,21 +633,23 @@ workflow {
                     if (!pairId) {
                         error "Found samplesheet row with missing pair_id: ${row}"
                     }
-                    def merscopeAligned = requireExistingPath(
-                        publishedPairPath(
+                    def merscopeLatest = requireExistingPath(
+                        publishedDatasetPath(
                             params.outdir,
                             pairId,
-                            "alignment/align_out/merscope_aligned.zarr",
+                            "MERSCOPE",
+                            "latest/latest_spatialdata.zarr",
                         ),
-                        "ALIGN MERSCOPE zarr for ${pairId}",
+                        "QC/enriched MERSCOPE latest zarr for ${pairId}",
                     )
-                    def xeniumAligned = requireExistingPath(
-                        publishedPairPath(
+                    def xeniumLatest = requireExistingPath(
+                        publishedDatasetPath(
                             params.outdir,
                             pairId,
-                            "alignment/align_out/xenium_aligned.zarr",
+                            "XENIUM",
+                            "latest/latest_spatialdata.zarr",
                         ),
-                        "ALIGN XENIUM zarr for ${pairId}",
+                        "QC/enriched XENIUM latest zarr for ${pairId}",
                     )
                     def transformJson = requireExistingPath(
                         publishedPairPath(
@@ -651,7 +667,13 @@ workflow {
                         ),
                         "ALIGN coordinate directory for ${pairId}",
                     )
-                    tuple(pairId, merscopeAligned, xeniumAligned, transformJson, coordsDir)
+                    tuple(
+                        pairId,
+                        merscopeLatest.toRealPath().toString(),
+                        xeniumLatest.toRealPath().toString(),
+                        transformJson,
+                        coordsDir,
+                    )
                 }
             }
 
@@ -660,12 +682,15 @@ workflow {
             }
 
             downstream_zarrs_ch = alignment_results_ch.map {
-                pairId, merscopeAligned, xeniumAligned, transformJson, coordsDir ->
-                    tuple(pairId, merscopeAligned, xeniumAligned)
+                pairId, merscopeLatest, xeniumLatest, transformJson, coordsDir ->
+                    tuple(pairId, file(merscopeLatest), xeniumLatest)
             }
         }
     } else if (runCompare || runVisualize) {
-        downstream_zarrs_ch = paired_zarrs_ch
+        downstream_zarrs_ch = paired_zarrs_ch.map {
+            pairId, merscopeLatest, xeniumLatest, merscopePath, xeniumPath ->
+                tuple(pairId, merscopeLatest, xeniumPath)
+        }
     }
 
     if (runCompare) {

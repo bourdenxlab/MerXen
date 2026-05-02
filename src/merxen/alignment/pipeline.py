@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-import shutil
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 import spatialdata as sd
 from shapely.ops import transform as shapely_transform
+from spatialdata.transformations import Affine, Identity, set_transformation
 
 from merxen.alignment.register import (
     TransformResult,
@@ -19,8 +20,11 @@ from merxen.alignment.register import (
     transform_xy_for_result,
 )
 from merxen.config import AlignmentConfig
-from merxen.io.spatialdata_io import write_spatialdata_zarr
 from merxen.io.transcript_io import first_existing_col
+
+MERXEN_ALIGNMENT_ATTR = "merxen_alignment"
+ALIGNMENT_COORDINATE_SYSTEM = "merxen_xenium"
+NONRIGID_ELEMENT_SUFFIX = "_aligned_nonrigid"
 
 
 def run_alignment_pipeline(config: AlignmentConfig) -> dict[str, Path]:
@@ -44,15 +48,12 @@ def run_alignment_pipeline(config: AlignmentConfig) -> dict[str, Path]:
     transform_json = cfg.output_dir / "alignment_transform.json"
     _write_transform_json(result, transform_json)
 
-    merscope_out = cfg.output_dir / "merscope_aligned.zarr"
-    xenium_out = cfg.output_dir / "xenium_aligned.zarr"
     if cfg.write_aligned_zarrs:
-        _write_moving_aligned_zarr(cfg.merscope_zarr_path, merscope_out, result)
-        _copy_zarr(cfg.xenium_zarr_path, xenium_out)
+        _write_moving_alignment_to_zarr(cfg.merscope_zarr_path, result)
 
     return {
-        "merscope_aligned_zarr": merscope_out,
-        "xenium_aligned_zarr": xenium_out,
+        "merscope_zarr": cfg.merscope_zarr_path,
+        "xenium_zarr": cfg.xenium_zarr_path,
         "transform_json": transform_json,
         "coords_dir": coords_dir,
     }
@@ -62,33 +63,122 @@ def _write_transform_json(result: TransformResult, path: Path) -> None:
     payload = {
         "merscope_to_common": result.merscope_to_common,
         "xenium_to_common": result.xenium_to_common,
+        "nonrigid_transform": _nonrigid_transform_payload(result),
         "metadata": result.metadata,
     }
     path.write_text(json.dumps(_jsonable(payload), indent=2))
 
 
-def _write_moving_aligned_zarr(
-    input_zarr: Path,
-    output_zarr: Path,
+def _write_moving_alignment_to_zarr(
+    zarr_path: Path,
     result: TransformResult,
 ) -> None:
-    if output_zarr.exists():
-        shutil.rmtree(output_zarr)
-    sdata_obj = sd.read_zarr(input_zarr)
+    sdata_obj = sd.read_zarr(zarr_path)
+    sdata_obj.attrs[MERXEN_ALIGNMENT_ATTR] = _alignment_attrs_payload(result)
 
-    for key in list(sdata_obj.shapes.keys()):
-        sdata_obj.shapes[key] = _transform_shapes(sdata_obj.shapes[key], result)
+    rigid = _rigid_affine_transformation(result)
+    nonrigid_identity = Identity()
 
-    for key in list(sdata_obj.points.keys()):
-        sdata_obj.points[key] = _transform_points(sdata_obj.points[key], result)
+    for key in [
+        k
+        for k in list(sdata_obj.shapes.keys())
+        if not k.endswith(NONRIGID_ELEMENT_SUFFIX)
+    ]:
+        set_transformation(
+            sdata_obj.shapes[key],
+            rigid,
+            to_coordinate_system=ALIGNMENT_COORDINATE_SYSTEM,
+        )
+        aligned_key = _nonrigid_element_key(key)
+        _delete_existing_element(sdata_obj, aligned_key, element_type="shapes")
+        sdata_obj.shapes[aligned_key] = _transform_shapes(
+            sdata_obj.shapes[key],
+            result,
+        )
+        set_transformation(
+            sdata_obj.shapes[aligned_key],
+            nonrigid_identity,
+            to_coordinate_system=ALIGNMENT_COORDINATE_SYSTEM,
+        )
+        sdata_obj.write_element(aligned_key, overwrite=True)
 
-    write_spatialdata_zarr(sdata_obj, output_zarr)
+    for key in [
+        k
+        for k in list(sdata_obj.points.keys())
+        if not k.endswith(NONRIGID_ELEMENT_SUFFIX)
+    ]:
+        set_transformation(
+            sdata_obj.points[key],
+            rigid,
+            to_coordinate_system=ALIGNMENT_COORDINATE_SYSTEM,
+        )
+        aligned_key = _nonrigid_element_key(key)
+        _delete_existing_element(sdata_obj, aligned_key, element_type="points")
+        sdata_obj.points[aligned_key] = _transform_points(sdata_obj.points[key], result)
+        set_transformation(
+            sdata_obj.points[aligned_key],
+            nonrigid_identity,
+            to_coordinate_system=ALIGNMENT_COORDINATE_SYSTEM,
+        )
+        sdata_obj.write_element(aligned_key, overwrite=True)
+
+    sdata_obj.write_transformations()
+    sdata_obj.write_metadata(write_attrs=True)
 
 
-def _copy_zarr(src: Path, dst: Path) -> None:
-    if dst.exists():
-        shutil.rmtree(dst)
-    shutil.copytree(src, dst, symlinks=True)
+def _delete_existing_element(
+    sdata_obj: sd.SpatialData,
+    key: str,
+    *,
+    element_type: str,
+) -> None:
+    container = getattr(sdata_obj, element_type)
+    if key not in container:
+        return
+    with suppress(Exception):
+        sdata_obj.delete_element_from_disk(key)
+    del container[key]
+
+
+def _nonrigid_element_key(key: str) -> str:
+    return f"{key}{NONRIGID_ELEMENT_SUFFIX}"
+
+
+def _rigid_affine_transformation(result: TransformResult) -> Affine:
+    matrix = np.asarray(
+        result.merscope_to_common["rigid_affine_matrix"],
+        dtype=np.float64,
+    )
+    return Affine(matrix, input_axes=("x", "y"), output_axes=("x", "y"))
+
+
+def _alignment_attrs_payload(result: TransformResult) -> dict[str, Any]:
+    return _jsonable(
+        {
+            "version": 1,
+            "alignment_coordinate_system": ALIGNMENT_COORDINATE_SYSTEM,
+            "nonrigid_element_suffix": NONRIGID_ELEMENT_SUFFIX,
+            "selected_mode": result.merscope_to_common.get("selected_mode"),
+            "rigid_affine_matrix": result.merscope_to_common.get("rigid_affine_matrix"),
+            "nonrigid_transform": _nonrigid_transform_payload(result),
+            "metadata": result.metadata,
+        }
+    )
+
+
+def _nonrigid_transform_payload(result: TransformResult) -> dict[str, Any] | None:
+    transform = result.nonrigid_transform
+    if transform is None:
+        return None
+    return {
+        "type": "affine_plus_rbf_residual",
+        "affine_matrix": transform.affine_matrix,
+        "anchors": transform.anchors,
+        "residuals": transform.residuals,
+        "neighbors": transform.neighbors,
+        "smoothing": transform.smoothing,
+        "support_radius": transform.support_radius,
+    }
 
 
 def _transform_shapes(

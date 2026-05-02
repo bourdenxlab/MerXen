@@ -87,6 +87,10 @@ def _choose_shape_key(sdata_obj: Any, preferred: str | None) -> str:
     if len(sdata_obj.shapes) == 0:
         raise RuntimeError("SpatialData object has no shapes for alignment")
     preferred_names = [
+        "MOSAIK_proseg_aligned_nonrigid",
+        "cell_boundaries_aligned_nonrigid",
+        "merscope_cell_boundaries_aligned_nonrigid",
+        "xenium_cell_boundaries_aligned_nonrigid",
         "MOSAIK_proseg",
         "cell_boundaries",
         "merscope_cell_boundaries",
@@ -94,6 +98,9 @@ def _choose_shape_key(sdata_obj: Any, preferred: str | None) -> str:
     ]
     for key in preferred_names:
         if key in sdata_obj.shapes:
+            return key
+    for key in sdata_obj.shapes:
+        if str(key).endswith("_aligned_nonrigid"):
             return key
     return list(sdata_obj.shapes.keys())[0]
 

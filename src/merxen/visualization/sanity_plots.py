@@ -161,7 +161,10 @@ def plot_sanity_crop_panel(
             alpha=0.95,
         )
 
-    shape_keys = list(sdata_obj.shapes.keys())
+    aligned_shape_keys = [
+        key for key in sdata_obj.shapes if str(key).endswith("_aligned_nonrigid")
+    ]
+    shape_keys = aligned_shape_keys or list(sdata_obj.shapes.keys())
     cmap = plt.get_cmap("tab10")
     shape_handles = []
 
@@ -271,7 +274,14 @@ def _shape_geometry_only(shape_obj: Any) -> gpd.GeoDataFrame:
 
 
 def _reference_shape_key(sdata_obj: Any) -> str:
-    for key in ["MOSAIK_proseg", "cell_boundaries", "MOSAIK_cellpose"]:
+    for key in [
+        "MOSAIK_proseg_aligned_nonrigid",
+        "cell_boundaries_aligned_nonrigid",
+        "MOSAIK_cellpose_aligned_nonrigid",
+        "MOSAIK_proseg",
+        "cell_boundaries",
+        "MOSAIK_cellpose",
+    ]:
         if key in sdata_obj.shapes:
             return key
     if len(sdata_obj.shapes) == 0:
@@ -405,7 +415,7 @@ def _crop_points(
     if len(sdata_obj.points) == 0:
         raise RuntimeError("No points found in SpatialData object.")
 
-    points_key = list(sdata_obj.points.keys())[0]
+    points_key = _reference_points_key(sdata_obj)
     pts = sdata_obj.points[points_key]
     x_col = _first_existing_col(
         pts,
@@ -418,6 +428,11 @@ def _crop_points(
     assign_col = _first_existing_col(pts, ["assignment", "cell", "cell_id"])
     if x_col is None or y_col is None:
         raise KeyError(f"Could not resolve x/y columns in points[{points_key}]")
+    if (
+        assignment_shape_key == SANITY_ASSIGNMENT_SHAPE_KEY
+        and f"{assignment_shape_key}_aligned_nonrigid" in sdata_obj.shapes
+    ):
+        assignment_shape_key = f"{assignment_shape_key}_aligned_nonrigid"
 
     x0, y0, x1, y1 = bbox
     cols = [x_col, y_col] + ([assign_col] if assign_col is not None else [])
@@ -460,6 +475,13 @@ def _crop_points(
         pdf = pdf.sample(n=max_points, random_state=random_state)
 
     return pdf, points_key, assign_col
+
+
+def _reference_points_key(sdata_obj: Any) -> str:
+    for key in sdata_obj.points:
+        if str(key).endswith("_aligned_nonrigid"):
+            return key
+    return list(sdata_obj.points.keys())[0]
 
 
 def _get_scale0_dataarray(image_elem: Any) -> Any:
