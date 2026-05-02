@@ -6,6 +6,7 @@
 *.h5ad
 
 # Nextflow
+work
 work/
 .nextflow/
 .nextflow.log*
@@ -16,6 +17,9 @@ dag-*.dot
 run_logs/
 results
 results/
+
+# Alignment testing
+alignment_test/
 
 # Workflow samplesheets
 workflows/*.csv
