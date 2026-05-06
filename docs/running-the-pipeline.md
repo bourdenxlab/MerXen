@@ -109,8 +109,8 @@ missing.
 Accepted stages are:
 
 `build_spatialdata`, `segment`, `enrich`, `qc`, `align`, `align_qc`, `compare`,
-and `visualize`. Alignment stages are only active when `--enable_alignment true`
-is set.
+`visualize`, and `clustering_squidpy`. Alignment stages are only active when
+`--enable_alignment true` is set.
 
 Run one stage:
 
@@ -144,7 +144,8 @@ nextflow run workflows/main.nf \
 ```
 
 Starting at `segment` still needs `--proseg_binary`; starting later does not.
-Starting at `compare` or `visualize` with `--enable_alignment false` reads
+Starting at `compare`, `visualize`, or `clustering_squidpy` with
+`--enable_alignment false` reads
 `${outdir}/${pair_id}/{merscope,xenium}/latest/latest_spatialdata.zarr`.
 With `--enable_alignment true`, `ALIGN` updates
 `${outdir}/${pair_id}/merscope/latest/latest_spatialdata.zarr` in place with

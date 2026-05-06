@@ -22,6 +22,7 @@ Commands:
   alignment-qc       Compute post-alignment QC metrics
   compare            Run cross-platform gene-level comparison
   visualize          Generate visualization artifacts for a pair
+  clustering-squidpy Run Scanpy/Squidpy clustering analysis
 ```
 
 Logging is configured in the root `main()` group and streams to stderr at
@@ -165,6 +166,23 @@ merxen visualize --config visualize_config.json
 | `--config PATH` | JSON validated against [`VisualizationConfig`](../src/merxen/config.py#L186). |
 
 Details: [Stage 6 — Visualization](stages/visualization.md).
+
+---
+
+## `merxen clustering-squidpy`
+
+Run per-platform Scanpy/Squidpy QC, clustering, UMAP, and spatial plots for
+one pair.
+
+```bash
+merxen clustering-squidpy --config clustering_squidpy_config.json
+```
+
+| Option | Description |
+|--------|-------------|
+| `--config PATH` | JSON validated against `ClusteringSquidpyConfig`. |
+
+Details: [Squidpy clustering](stages/clustering-squidpy.md).
 
 ---
 

@@ -50,12 +50,19 @@ channels.
 │COMPARE │   │ VISUALIZE │  gene scatter, density,
 │        │   │           │  sanity overlays
 └────────┘   └───────────┘
+                  │
+                  ▼
+           ┌───────────────────┐
+           │ CLUSTERING_       │  Scanpy/Squidpy QC,
+           │ SQUIDPY           │  UMAP, Leiden, spatial scatter
+           └───────────────────┘
 ```
 
 Both platforms traverse `BUILD_SPATIALDATA → SEGMENT → ENRICH → QC`
 independently. They are rejoined after QC. If `--enable_alignment true` is set,
-`ALIGN` and `ALIGN_QC` run before `COMPARE` / `VISUALIZE`; otherwise the paired
-stages consume the enriched zarrs directly.
+`ALIGN` and `ALIGN_QC` run before `COMPARE` / `VISUALIZE` /
+`CLUSTERING_SQUIDPY`; otherwise the paired stages consume the enriched zarrs
+directly.
 
 ## Channel keys and joins
 
@@ -77,6 +84,7 @@ For a samplesheet row with `pair_id=EXAMPLE01`:
 | 6 | `ALIGN_QC` × 1 | `merxen alignment-qc` | updated MERSCOPE zarr + original Xenium zarr | `alignment_qc_out/`, when enabled |
 | 7 | `COMPARE` × 1 | `merxen compare` | updated MERSCOPE zarr if enabled; otherwise enriched zarrs | `compare_out/` (gene comparison CSVs + metrics JSON) |
 | 8 | `VISUALIZE` × 1 | `merxen visualize` | updated MERSCOPE zarr if enabled; otherwise enriched zarrs | `visualize_out/` (PNG plots) |
+| 9 | `CLUSTERING_SQUIDPY` × 1 | `merxen clustering-squidpy` | same paired zarrs, after visualization in full runs | `clustering_squidpy_out/` (QC plots, UMAP/spatial plots, `.h5ad`) |
 
 All published artifacts land under
 `${params.outdir}/${pair_id}/<stage>/...`. See [Outputs](outputs.md).

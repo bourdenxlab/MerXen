@@ -25,7 +25,8 @@ ${outdir}/
 │   ├── alignment/
 │   ├── alignment_qc/
 │   ├── comparison/
-│   └── visualization/
+│   ├── visualization/
+│   └── clustering_squidpy/
 ├── <pair_id_2>/
 │   └── ...
 └── ...
@@ -145,6 +146,18 @@ Path: `${outdir}/<pair_id>/visualization/`
 | `visualize_out/<pair_id>_transcript_overview.png` | 3x2 density, full scatter, and fixed crop transcript overview. |
 | `visualize_out/<pair_id>_sanity_overlay.png` | Paired 250 um image crops with all shape contours and transcript assignment status. |
 | `visualize_out/<pair_id>_assignment_rate_bar.png` | Bar chart comparing `pct_assigned` across platforms. |
+
+### Squidpy clustering
+
+Path: `${outdir}/<pair_id>/clustering_squidpy/`
+
+| File | Contents |
+|------|----------|
+| `clustering_squidpy_out/<platform>/<pair_id>_<platform>_qc_histograms.png` | Histograms for transcripts/cell, genes/cell, cell area, nucleus ratio, and control/blank counts. |
+| `clustering_squidpy_out/<platform>/<pair_id>_<platform>_qc_metrics.csv` | Per-cell QC metrics used for the histogram panel. |
+| `clustering_squidpy_out/<platform>/<pair_id>_<platform>_umap.png` | Scanpy UMAP colored by total counts, genes by counts, and Leiden cluster. |
+| `clustering_squidpy_out/<platform>/<pair_id>_<platform>_spatial_scatter_leiden.png` | Squidpy spatial scatter colored by Leiden cluster. |
+| `clustering_squidpy_out/<platform>/<pair_id>_<platform>_clustered.h5ad` | Filtered, normalized, log-transformed, clustered AnnData object with raw counts in `layers["counts"]`. |
 
 ## Nextflow reports
 

@@ -20,12 +20,14 @@ merxen/
 ├── enrichment/          # shape layers + per-shape gene tables
 ├── qc/                  # per-dataset and cross-platform metrics
 ├── visualization/       # plotting
+├── analysis/            # Scanpy/Squidpy downstream analysis
 └── alignment/           # optional Spateo cross-section registration
 ```
 
 The subpackage structure mirrors the Nextflow stage graph:
-`build → segment → enrich → qc → align → alignment-qc → compare → visualize`.
-Alignment is skipped unless `--enable_alignment true` is set.
+`build → segment → enrich → qc → align → alignment-qc → compare → visualize
+→ clustering-squidpy`. Alignment is skipped unless `--enable_alignment true`
+is set.
 
 ## `merxen.config`
 
@@ -34,7 +36,7 @@ configs against these.
 
 - Top-level per-stage: `SpatialDataBuildConfig`, `SegmentationConfig`,
   `EnrichmentConfig`, `QCConfig`, `AlignmentConfig`, `AlignmentQCConfig`,
-  `ComparisonConfig`, `VisualizationConfig`.
+  `ComparisonConfig`, `VisualizationConfig`, `ClusteringSquidpyConfig`.
 - Sub-models: `CellposeConfig`, `TilingConfig`, `MaskFilterConfig`,
   `ProsegConfig`, `MemoryConfig`, `DatasetConfig`,
   `MerscopeBuildConfig`, `XeniumBuildConfig`.
@@ -144,6 +146,22 @@ with large point tables and image pyramids.
 - `fit_affine_matrix`, `fit_nonrigid_transform` — reusable transform helpers.
 
 See [Section alignment](stages/alignment.md).
+
+## `merxen.analysis`
+
+### `analysis.clustering_squidpy`
+- `load_spatialdata_adata(...)` — read a SpatialData zarr and return an
+  AnnData object with `.obsm["spatial"]` populated for Squidpy.
+- `add_qc_metrics(adata)` — compute Scanpy QC metrics plus
+  blank/control/negative probe summaries when present.
+- `run_scanpy_clustering(adata, ...)` — filter, normalize, log-transform,
+  PCA, neighbors, UMAP, and Leiden clustering.
+- `plot_qc_histograms`, `plot_umap`, `plot_spatial_scatter` — PNG writers.
+- `save_qc_metrics`, `save_clustered_adata` — CSV and `.h5ad` outputs.
+- `run_clustering_squidpy(config)` — full stage entry point for
+  `CLUSTERING_SQUIDPY`.
+
+See [Squidpy clustering](stages/clustering-squidpy.md).
 
 ## `merxen.memory`
 

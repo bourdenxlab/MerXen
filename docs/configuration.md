@@ -52,13 +52,13 @@ any of them with `--<name>` on the command line.
 | `outdir` | `./results` | Output root. |
 | `force_spatialdata_build` | `false` | Rebuild SpatialData zarrs even if cached. |
 | `start_stage` | `build_spatialdata` | First stage to run. Skipped upstream stages are read from published outputs. |
-| `stop_stage` | `visualize` | Last stage to run. Defaults to running through the end. |
+| `stop_stage` | `clustering_squidpy` | Last stage to run. Defaults to running through the end. |
 | `only_stage` | `null` | Run exactly one stage; overrides `start_stage` and `stop_stage` when set. |
 
 Stage names accepted by `start_stage`, `stop_stage`, and `only_stage` are:
 `build_spatialdata`, `segment`, `enrich`, `qc`, `align`, `align_qc`,
-`compare`, and `visualize`. `align` and `align_qc` are available only with
-`enable_alignment = true`.
+`compare`, `visualize`, and `clustering_squidpy`. `align` and `align_qc` are
+available only with `enable_alignment = true`.
 
 ### Cellpose
 
@@ -131,6 +131,20 @@ pip install "anndata>=0.12.10"
 | `alignment_pytorch_cuda_alloc_conf` | `expandable_segments:True,max_split_size_mb:256` | PyTorch allocator setting exported by `ALIGN`. |
 | `alignment_qc_grid_rows` / `alignment_qc_grid_cols` | `10` / `10` | SABench-style QC grid dimensions. |
 
+### Squidpy clustering
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `clustering_squidpy_min_counts` | `10` | Minimum counts per cell passed to `scanpy.pp.filter_cells`. |
+| `clustering_squidpy_min_cells` | `5` | Minimum cells per gene passed to `scanpy.pp.filter_genes`. |
+| `clustering_squidpy_normalize_target_sum` | `null` | Optional target sum for `scanpy.pp.normalize_total`; `null` uses Scanpy's default. |
+| `clustering_squidpy_n_pcs` | `50` | Maximum PCs for `scanpy.pp.pca`. |
+| `clustering_squidpy_n_neighbors` | `15` | Neighbor count for `scanpy.pp.neighbors`. |
+| `clustering_squidpy_leiden_resolution` | `1.0` | Leiden clustering resolution. |
+| `clustering_squidpy_random_seed` | `0` | Seed for PCA/UMAP/Leiden. |
+| `clustering_squidpy_spatial_point_size` | `2.0` | Point size for Squidpy spatial scatter plots. |
+| `clustering_squidpy_figure_dpi` | `160` | DPI for PNG plots. |
+
 ### Resource limits
 
 | Param | Default | Description |
@@ -161,6 +175,7 @@ Per-process CPU/memory requests ([nextflow.config:42-69](../workflows/nextflow.c
 | `ALIGN_QC` | 8 | 150 GB |
 | `COMPARE` | 8 | 200 GB |
 | `VISUALIZE` | 8 | 200 GB |
+| `CLUSTERING_SQUIDPY` | 8 | 200 GB |
 
 ## Pydantic config models
 
@@ -178,6 +193,7 @@ models is the ground truth for how stages are configured.
 | `AlignmentQCConfig` | `alignment-qc` | [config.py](../src/merxen/config.py) |
 | `ComparisonConfig` | `compare` | [config.py](../src/merxen/config.py) |
 | `VisualizationConfig` | `visualize` | [config.py](../src/merxen/config.py) |
+| `ClusteringSquidpyConfig` | `clustering-squidpy` | [config.py](../src/merxen/config.py) |
 
 Nested sub-models:
 
