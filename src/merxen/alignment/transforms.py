@@ -95,7 +95,7 @@ class NonRigidTransform:
             )
             disp = rbf(xy)
 
-        out = base + disp
+        out = np.asarray(base + disp, dtype=np.float64)
         if self.support_radius is not None and np.isfinite(self.support_radius):
             tree = cKDTree(self.anchors)
             dist, _ = tree.query(xy, k=1)

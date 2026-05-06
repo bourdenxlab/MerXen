@@ -101,8 +101,8 @@ def _choose_shape_key(sdata_obj: Any, preferred: str | None) -> str:
             return key
     for key in sdata_obj.shapes:
         if str(key).endswith("_aligned_nonrigid"):
-            return key
-    return list(sdata_obj.shapes.keys())[0]
+            return str(key)
+    return str(list(sdata_obj.shapes.keys())[0])
 
 
 def _choose_table_key(sdata_obj: Any, preferred: str) -> str:
@@ -110,7 +110,7 @@ def _choose_table_key(sdata_obj: Any, preferred: str) -> str:
         return preferred
     if len(sdata_obj.tables) == 0:
         raise RuntimeError("SpatialData object has no tables for alignment")
-    return list(sdata_obj.tables.keys())[0]
+    return str(list(sdata_obj.tables.keys())[0])
 
 
 def _shape_centroids(shapes: gpd.GeoDataFrame) -> pd.DataFrame:

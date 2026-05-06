@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import geopandas as gpd
 import numpy as np
@@ -153,7 +153,7 @@ def _rigid_affine_transformation(result: TransformResult) -> Affine:
 
 
 def _alignment_attrs_payload(result: TransformResult) -> dict[str, Any]:
-    return _jsonable(
+    payload = _jsonable(
         {
             "version": 1,
             "alignment_coordinate_system": ALIGNMENT_COORDINATE_SYSTEM,
@@ -164,6 +164,7 @@ def _alignment_attrs_payload(result: TransformResult) -> dict[str, Any]:
             "metadata": result.metadata,
         }
     )
+    return cast(dict[str, Any], payload)
 
 
 def _nonrigid_transform_payload(result: TransformResult) -> dict[str, Any] | None:

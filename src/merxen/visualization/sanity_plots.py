@@ -286,7 +286,7 @@ def _reference_shape_key(sdata_obj: Any) -> str:
             return key
     if len(sdata_obj.shapes) == 0:
         raise RuntimeError("No shapes found in SpatialData object.")
-    return list(sdata_obj.shapes.keys())[0]
+    return str(list(sdata_obj.shapes.keys())[0])
 
 
 def _bounded_interval(
@@ -480,8 +480,8 @@ def _crop_points(
 def _reference_points_key(sdata_obj: Any) -> str:
     for key in sdata_obj.points:
         if str(key).endswith("_aligned_nonrigid"):
-            return key
-    return list(sdata_obj.points.keys())[0]
+            return str(key)
+    return str(list(sdata_obj.points.keys())[0])
 
 
 def _get_scale0_dataarray(image_elem: Any) -> Any:
@@ -518,7 +518,7 @@ def _norm01(arr: np.ndarray) -> np.ndarray:
     lo, hi = np.percentile(values[finite], [1, 99])
     if hi <= lo:
         hi = lo + 1e-6
-    return np.clip((values - lo) / (hi - lo), 0.0, 1.0)
+    return np.asarray(np.clip((values - lo) / (hi - lo), 0.0, 1.0), dtype=np.float32)
 
 
 def _get_background_image_crop(

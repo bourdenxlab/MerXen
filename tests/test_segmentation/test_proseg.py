@@ -14,11 +14,11 @@ from merxen.segmentation.proseg import run_proseg_refinement
 class _FakePopen:
     """Minimal subprocess.Popen test double."""
 
-    def __init__(self, cmd: list[str], **_: object) -> None:
+    def __init__(self: _FakePopen, cmd: list[str], **_: object) -> None:
         self.cmd = cmd
         self.stdout = iter(["starting\n", "finished\n"])
 
-    def wait(self) -> int:
+    def wait(self: _FakePopen) -> int:
         return 0
 
 

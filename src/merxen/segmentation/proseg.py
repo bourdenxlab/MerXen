@@ -85,7 +85,7 @@ def _to_optional_path_array(
     """Materialize array-like input to disk and return a path."""
     if value is None:
         return None
-    if isinstance(value, (str, Path)):
+    if isinstance(value, str | Path):
         return Path(value)
 
     out_path = tmp_path / filename
@@ -184,7 +184,7 @@ def run_proseg_refinement(
     required_columns = [x_col, y_col, z_col, gene_col, cell_id_col]
     transcript_csv_path: Path | None = None
 
-    if isinstance(transcripts_df, (str, Path)):
+    if isinstance(transcripts_df, str | Path):
         transcript_csv_path = Path(transcripts_df)
         if not transcript_csv_path.exists():
             raise FileNotFoundError(f"Transcript CSV not found: {transcript_csv_path}")

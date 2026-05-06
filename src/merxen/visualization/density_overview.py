@@ -461,7 +461,7 @@ def _build_heatmap_display(
         )
 
     if log_scale:
-        norm = mcolors.LogNorm(vmin=heat_vmin, vmax=heat_vmax)
+        norm: mcolors.Normalize = mcolors.LogNorm(vmin=heat_vmin, vmax=heat_vmax)
         return norm, np.where(m_h > 0, m_h, np.nan), np.where(x_h > 0, x_h, np.nan)
 
     norm = mcolors.Normalize(vmin=heat_vmin, vmax=heat_vmax)
@@ -481,8 +481,8 @@ def _center_and_span(
 def _reference_points_key(sdata_obj: Any) -> str:
     for key in sdata_obj.points:
         if str(key).endswith("_aligned_nonrigid"):
-            return key
-    return list(sdata_obj.points.keys())[0]
+            return str(key)
+    return str(list(sdata_obj.points.keys())[0])
 
 
 def _first_existing_col(df_like: Any, candidates: list[str]) -> str | None:

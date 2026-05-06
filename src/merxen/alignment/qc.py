@@ -29,10 +29,12 @@ def run_alignment_qc(config: AlignmentQCConfig) -> dict[str, Path]:
     moving = build_alignment_adata(merscope_sdata, platform="MERSCOPE")
     fixed, moving = shared_gene_subset(fixed, moving)
 
-    metrics = compute_grid_alignment_metrics(
-        fixed,
-        moving,
-        grid_shape=(cfg.grid_rows, cfg.grid_cols),
+    metrics: dict[str, float | int | str] = dict(
+        compute_grid_alignment_metrics(
+            fixed,
+            moving,
+            grid_shape=(cfg.grid_rows, cfg.grid_cols),
+        )
     )
     metrics["pair_id"] = cfg.pair_id
     if cfg.transform_json_path is not None and Path(cfg.transform_json_path).exists():
