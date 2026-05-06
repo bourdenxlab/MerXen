@@ -123,17 +123,56 @@ def _shape_centroids(shapes: gpd.GeoDataFrame) -> pd.DataFrame:
         ["cell_id", "cell", "cells", "cell_ID", "region", "label_id"],
     )
     ids = gdf.index.astype(str) if id_col is None else gdf[id_col].astype(str)
-    cent = gdf.geometry.centroid
+    cent_x, cent_y = _robust_centroid_xy(gdf)
     out = pd.DataFrame(
         {
             "cell_id": ids.astype(str).to_numpy(),
-            "x": cent.x.to_numpy(float),
-            "y": cent.y.to_numpy(float),
+            "x": cent_x,
+            "y": cent_y,
         },
         index=pd.Index(ids.astype(str), name="cell_id"),
     )
     out = out[np.isfinite(out["x"]) & np.isfinite(out["y"])]
     return out[~out.index.duplicated(keep="first")]
+
+
+def _robust_centroid_xy(gdf: gpd.GeoDataFrame) -> tuple[np.ndarray, np.ndarray]:
+    """Return centroid-like points while guarding against invalid-geometry blowups."""
+    cent = gdf.geometry.centroid
+    bounds = gdf.geometry.bounds
+    x = cent.x.to_numpy(float)
+    y = cent.y.to_numpy(float)
+    minx = bounds["minx"].to_numpy(float)
+    miny = bounds["miny"].to_numpy(float)
+    maxx = bounds["maxx"].to_numpy(float)
+    maxy = bounds["maxy"].to_numpy(float)
+    bad = (
+        ~np.isfinite(x)
+        | ~np.isfinite(y)
+        | (x < minx)
+        | (x > maxx)
+        | (y < miny)
+        | (y > maxy)
+    )
+    if bad.any():
+        reps = gdf.geometry.representative_point()
+        rx = reps.x.to_numpy(float)
+        ry = reps.y.to_numpy(float)
+        use_rep = (
+            bad
+            & np.isfinite(rx)
+            & np.isfinite(ry)
+            & (rx >= minx)
+            & (rx <= maxx)
+            & (ry >= miny)
+            & (ry <= maxy)
+        )
+        x[use_rep] = rx[use_rep]
+        y[use_rep] = ry[use_rep]
+        fallback = bad & ~use_rep
+        x[fallback] = (minx[fallback] + maxx[fallback]) / 2.0
+        y[fallback] = (miny[fallback] + maxy[fallback]) / 2.0
+    return x, y
 
 
 def _align_table_to_centroids(table: ad.AnnData, centroids: pd.DataFrame) -> ad.AnnData:
