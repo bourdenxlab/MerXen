@@ -154,6 +154,8 @@ See [Section alignment](stages/alignment.md).
   AnnData object with `.obsm["spatial"]` populated for Squidpy.
 - `add_qc_metrics(adata)` — compute Scanpy QC metrics plus
   blank/control/negative probe summaries when present.
+- `remove_control_features(adata)` — drop blank/control/negative variables
+  before clustering while recording the removed names in `.uns`.
 - `run_scanpy_clustering(adata, ...)` — filter, normalize, log-transform,
   PCA, neighbors, UMAP, and Leiden clustering.
 - `plot_qc_histograms`, `plot_umap`, `plot_spatial_scatter` — PNG writers.

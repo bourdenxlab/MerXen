@@ -157,7 +157,7 @@ Path: `${outdir}/<pair_id>/clustering_squidpy/`
 | `clustering_squidpy_out/<platform>/<pair_id>_<platform>_qc_metrics.csv` | Per-cell QC metrics used for the histogram panel. |
 | `clustering_squidpy_out/<platform>/<pair_id>_<platform>_umap.png` | Scanpy UMAP colored by total counts, genes by counts, and Leiden cluster. |
 | `clustering_squidpy_out/<platform>/<pair_id>_<platform>_spatial_scatter_leiden.png` | Squidpy spatial scatter colored by Leiden cluster. |
-| `clustering_squidpy_out/<platform>/<pair_id>_<platform>_clustered.h5ad` | Filtered, normalized, log-transformed, clustered AnnData object with raw counts in `layers["counts"]`. |
+| `clustering_squidpy_out/<platform>/<pair_id>_<platform>_clustered.h5ad` | Control-feature-filtered, cell/gene-filtered, normalized, log-transformed, clustered AnnData object with raw non-control counts in `layers["counts"]`. |
 
 ## Nextflow reports
 

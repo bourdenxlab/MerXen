@@ -135,15 +135,21 @@ pip install "anndata>=0.12.10"
 
 | Param | Default | Description |
 |-------|---------|-------------|
+| `clustering_squidpy_drop_control_features` | `true` | Remove blank/negative/control-like features before cell/gene filtering and clustering. |
 | `clustering_squidpy_min_counts` | `10` | Minimum counts per cell passed to `scanpy.pp.filter_cells`. |
 | `clustering_squidpy_min_cells` | `5` | Minimum cells per gene passed to `scanpy.pp.filter_genes`. |
 | `clustering_squidpy_normalize_target_sum` | `null` | Optional target sum for `scanpy.pp.normalize_total`; `null` uses Scanpy's default. |
-| `clustering_squidpy_n_pcs` | `50` | Maximum PCs for `scanpy.pp.pca`. |
-| `clustering_squidpy_n_neighbors` | `15` | Neighbor count for `scanpy.pp.neighbors`. |
-| `clustering_squidpy_leiden_resolution` | `1.0` | Leiden clustering resolution. |
+| `clustering_squidpy_normalize_exclude_highly_expressed` | `false` | Exclude highly expressed genes from Scanpy size-factor calculation. |
+| `clustering_squidpy_normalize_max_fraction` | `0.05` | Fraction threshold used when excluding highly expressed genes. |
+| `clustering_squidpy_n_pcs` | `60` | Maximum PCs for `scanpy.pp.pca`. |
+| `clustering_squidpy_n_neighbors` | `30` | Neighbor count for `scanpy.pp.neighbors`. |
+| `clustering_squidpy_leiden_resolution` | `0.5` | Leiden clustering resolution. |
+| `clustering_squidpy_umap_min_dist` | `0.3` | Minimum distance parameter for `scanpy.tl.umap`. |
+| `clustering_squidpy_umap_spread` | `1.0` | Spread parameter for `scanpy.tl.umap`. |
 | `clustering_squidpy_random_seed` | `0` | Seed for PCA/UMAP/Leiden. |
-| `clustering_squidpy_spatial_point_size` | `2.0` | Point size for Squidpy spatial scatter plots. |
-| `clustering_squidpy_figure_dpi` | `160` | DPI for PNG plots. |
+| `clustering_squidpy_spatial_point_size` | `0.5` | Point size for Squidpy spatial scatter plots. |
+| `clustering_squidpy_figure_dpi` | `180` | DPI for PNG plots. |
+| `clustering_squidpy_use_gpu` | `true` | Use RAPIDS single-cell acceleration when available. |
 
 ### Resource limits
 

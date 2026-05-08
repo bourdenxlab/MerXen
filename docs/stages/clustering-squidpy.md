@@ -67,13 +67,17 @@ reads the published latest zarrs directly.
 | `pair_id` | Pair identifier used in output paths. |
 | `output_dir` | Where `clustering_squidpy_out/` is populated. |
 | `samples` | MERSCOPE and Xenium sample configs: `sample_id`, `platform`, `zarr_path`, optional `table_key`, optional `shape_key`. |
+| `drop_control_features` | Remove blank/negative/control-like variables before clustering. |
 | `min_counts` / `min_cells` | Gentle cell and gene filtering thresholds. |
 | `normalize_target_sum` | Optional `scanpy.pp.normalize_total` target sum. `null` uses Scanpy's default. |
+| `normalize_exclude_highly_expressed` / `normalize_max_fraction` | Optional Scanpy size-factor controls for very highly expressed genes. |
 | `n_pcs` / `n_neighbors` | PCA and neighbor graph settings. |
 | `leiden_resolution` | Leiden clustering resolution. |
+| `umap_min_dist` / `umap_spread` | UMAP layout controls for compact vs dispersed embeddings. |
 | `random_seed` | Seed for PCA/UMAP/Leiden. |
 | `spatial_point_size` | Squidpy spatial scatter point size. |
 | `figure_dpi` | PNG output DPI. |
+| `use_gpu` | Use RAPIDS single-cell acceleration when available. |
 
 ## Outputs
 
