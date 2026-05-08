@@ -52,13 +52,13 @@ any of them with `--<name>` on the command line.
 | `outdir` | `./results` | Output root. |
 | `force_spatialdata_build` | `false` | Rebuild SpatialData zarrs even if cached. |
 | `start_stage` | `build_spatialdata` | First stage to run. Skipped upstream stages are read from published outputs. |
-| `stop_stage` | `clustering_squidpy` | Last stage to run. Defaults to running through the end. |
+| `stop_stage` | `clustering_squidpy` | Last stage to run. MapMyCells is available after this but opt-in because it requires reference files. |
 | `only_stage` | `null` | Run exactly one stage; overrides `start_stage` and `stop_stage` when set. |
 
 Stage names accepted by `start_stage`, `stop_stage`, and `only_stage` are:
 `build_spatialdata`, `segment`, `enrich`, `qc`, `align`, `align_qc`,
-`compare`, `visualize`, and `clustering_squidpy`. `align` and `align_qc` are
-available only with `enable_alignment = true`.
+`compare`, `visualize`, `clustering_squidpy`, and `mapmycells`. `align` and
+`align_qc` are available only with `enable_alignment = true`.
 
 ### Cellpose
 
@@ -151,6 +151,28 @@ pip install "anndata>=0.12.10"
 | `clustering_squidpy_figure_dpi` | `180` | DPI for PNG plots. |
 | `clustering_squidpy_use_gpu` | `true` | Use RAPIDS single-cell acceleration when available. |
 
+### MapMyCells
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `mapmycells_marker_lookup_path` | `null` | JSON marker lookup file for `cell_type_mapper.cli.from_specified_markers`. Required when running `mapmycells`. |
+| `mapmycells_precomputed_stats_path` | `null` | HDF5 precomputed reference stats file. Required when running `mapmycells`. |
+| `mapmycells_drop_level` | `null` | Optional taxonomy level to drop before mapping. |
+| `mapmycells_normalization` | `raw` | Query normalization passed to MapMyCells. |
+| `mapmycells_bootstrap_factor` | `0.9` | Marker downsampling factor for bootstrapping; default keeps the historical spatial-data setting. |
+| `mapmycells_bootstrap_iteration` | `100` | Number of bootstrap iterations. |
+| `mapmycells_n_processors` | `8` | Number of worker processes passed to MapMyCells. |
+| `mapmycells_chunk_size` | `null` | Optional cells-per-worker chunk size. |
+| `mapmycells_rng_seed` | `null` | Optional mapper random seed. |
+| `mapmycells_max_gb` | `null` | Optional memory budget for H5AD conversion. |
+| `mapmycells_tmp_dir` | `null` | Optional fast temporary directory for mapper scratch data. |
+| `mapmycells_cloud_safe` | `false` | Passed to MapMyCells `cloud_safe`. |
+| `mapmycells_flatten` | `false` | Flatten taxonomy and map directly to leaf nodes. |
+| `mapmycells_verbose_csv` | `false` | Include verbose confidence columns when supported by the mapper. |
+| `mapmycells_query_layer` | `counts` | AnnData layer copied into `X` before mapping. Use `null` to keep current `X`. |
+| `mapmycells_gene_id_column` | `null` | Optional `var` column used as gene identifiers for the query H5AD. |
+| `mapmycells_obs_id_column` | `null` | Optional `obs` column used as cell identifiers for the query H5AD. |
+
 ### Resource limits
 
 | Param | Default | Description |
@@ -182,6 +204,7 @@ Per-process CPU/memory requests ([nextflow.config:42-69](../workflows/nextflow.c
 | `COMPARE` | 8 | 200 GB |
 | `VISUALIZE` | 8 | 200 GB |
 | `CLUSTERING_SQUIDPY` | 8 | 200 GB |
+| `MAPMYCELLS` | 8 | 200 GB |
 
 ## Pydantic config models
 
@@ -200,6 +223,7 @@ models is the ground truth for how stages are configured.
 | `ComparisonConfig` | `compare` | [config.py](../src/merxen/config.py) |
 | `VisualizationConfig` | `visualize` | [config.py](../src/merxen/config.py) |
 | `ClusteringSquidpyConfig` | `clustering-squidpy` | [config.py](../src/merxen/config.py) |
+| `MapMyCellsConfig` | `mapmycells` | [config.py](../src/merxen/config.py) |
 
 Nested sub-models:
 

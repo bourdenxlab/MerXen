@@ -23,6 +23,7 @@ Commands:
   compare            Run cross-platform gene-level comparison
   visualize          Generate visualization artifacts for a pair
   clustering-squidpy Run Scanpy/Squidpy clustering analysis
+  mapmycells         Run local MapMyCells cell type assignment
 ```
 
 Logging is configured in the root `main()` group and streams to stderr at
@@ -183,6 +184,25 @@ merxen clustering-squidpy --config clustering_squidpy_config.json
 | `--config PATH` | JSON validated against `ClusteringSquidpyConfig`. |
 
 Details: [Squidpy clustering](stages/clustering-squidpy.md).
+
+---
+
+## `merxen mapmycells`
+
+Run local Allen Institute MapMyCells cell type assignment on clustered AnnData
+outputs.
+
+```bash
+merxen mapmycells --config mapmycells_config.json
+```
+
+| Option | Description |
+|--------|-------------|
+| `--config PATH` | JSON validated against `MapMyCellsConfig`. |
+
+The active Python environment must include Allen's `cell_type_mapper` package.
+
+Details: [MapMyCells](stages/mapmycells.md).
 
 ---
 

@@ -26,8 +26,9 @@ merxen/
 
 The subpackage structure mirrors the Nextflow stage graph:
 `build → segment → enrich → qc → align → alignment-qc → compare → visualize
-→ clustering-squidpy`. Alignment is skipped unless `--enable_alignment true`
-is set.
+→ clustering-squidpy → mapmycells`. Alignment is skipped unless
+`--enable_alignment true` is set, and MapMyCells is opt-in because it requires
+local reference files.
 
 ## `merxen.config`
 
@@ -164,6 +165,18 @@ See [Section alignment](stages/alignment.md).
   `CLUSTERING_SQUIDPY`.
 
 See [Squidpy clustering](stages/clustering-squidpy.md).
+
+### `analysis.mapmycells`
+
+- `prepare_mapmycells_query(input_h5ad, output_h5ad, ...)` — copy the selected
+  AnnData layer, normally `counts`, into `X` for MapMyCells.
+- `build_mapmycells_command(config, ...)` — construct the local
+  `cell_type_mapper.cli.from_specified_markers` invocation.
+- `annotate_h5ad_with_mapmycells(input_h5ad, csv_path, output_h5ad)` — attach
+  CSV assignment columns to `obs`.
+- `run_mapmycells(config)` — full stage entry point for `MAPMYCELLS`.
+
+See [MapMyCells](stages/mapmycells.md).
 
 ## `merxen.memory`
 

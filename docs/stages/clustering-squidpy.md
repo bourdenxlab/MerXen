@@ -44,8 +44,9 @@ instance per `pair_id`.
 - **publishDir:** `${outdir}/${pair_id}/clustering_squidpy/` (copy mode).
 
 When `VISUALIZE` is also active, the workflow joins on its completion channel
-so clustering starts after visualisation. `--only_stage clustering_squidpy`
-reads the published latest zarrs directly.
+so clustering starts after visualisation. `MAPMYCELLS`, when selected, consumes
+the clustered H5ADs written here. `--only_stage clustering_squidpy` reads the
+published latest zarrs directly.
 
 ## Python entry points
 

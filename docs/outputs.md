@@ -26,7 +26,8 @@ ${outdir}/
 │   ├── alignment_qc/
 │   ├── comparison/
 │   ├── visualization/
-│   └── clustering_squidpy/
+│   ├── clustering_squidpy/
+│   └── mapmycells/
 ├── <pair_id_2>/
 │   └── ...
 └── ...
@@ -158,6 +159,20 @@ Path: `${outdir}/<pair_id>/clustering_squidpy/`
 | `clustering_squidpy_out/<platform>/<pair_id>_<platform>_umap.png` | Scanpy UMAP colored by total counts, genes by counts, and Leiden cluster. |
 | `clustering_squidpy_out/<platform>/<pair_id>_<platform>_spatial_scatter_leiden.png` | Squidpy spatial scatter colored by Leiden cluster. |
 | `clustering_squidpy_out/<platform>/<pair_id>_<platform>_clustered.h5ad` | Control-feature-filtered, cell/gene-filtered, normalized, log-transformed, clustered AnnData object with raw non-control counts in `layers["counts"]`. |
+
+### MapMyCells
+
+Path: `${outdir}/<pair_id>/mapmycells/`
+
+| File | Contents |
+|------|----------|
+| `mapmycells_out/<platform>/<pair_id>_<platform>_mapmycells_query.h5ad` | Local mapper query AnnData with selected counts copied into `X`. |
+| `mapmycells_out/<platform>/<pair_id>_<platform>_mapmycells.csv` | Per-cell MapMyCells assignments and confidence columns. |
+| `mapmycells_out/<platform>/<pair_id>_<platform>_mapmycells_extended.json` | Full MapMyCells JSON result, including config, log, marker genes, and taxonomy tree. |
+| `mapmycells_out/<platform>/<pair_id>_<platform>_mapmycells.log` | MapMyCells run log. |
+| `mapmycells_out/<platform>/<pair_id>_<platform>_mapmycells_command.json` | Exact command invoked by the stage. |
+| `mapmycells_out/<platform>/<pair_id>_<platform>_mapmycells_annotated.h5ad` | Clustered AnnData with assignment columns added to `obs` using the `mapmycells_` prefix. |
+| `mapmycells_out/<pair_id>_mapmycells_manifest.json` | Per-pair manifest summarizing references, bootstrap settings, and output paths. |
 
 ## Nextflow reports
 

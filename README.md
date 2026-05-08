@@ -9,7 +9,7 @@ MerXen takes paired spatial transcriptomics datasets (one MERSCOPE, one Xenium p
 1. **SpatialData build** — Builds platform-specific SpatialData zarrs from raw MERSCOPE and Xenium output folders
 2. **Cell segmentation** — Cellpose-SAM image-based segmentation followed by ProSeg transcript-based refinement
 3. **Section alignment** — Optionally registers paired adjacent sections to a Xenium reference coordinate system with Spateo
-4. **Comparative analysis** — QC metrics, gene-level comparison, visualisation, and first-pass Scanpy/Squidpy clustering across platforms
+4. **Comparative analysis** — QC metrics, gene-level comparison, visualisation, first-pass Scanpy/Squidpy clustering, and optional local MapMyCells cell type assignment across platforms
 
 The workflow is orchestrated by Nextflow to process multiple sample pairs with logging and reproducibility.
 
@@ -18,7 +18,7 @@ The workflow is orchestrated by Nextflow to process multiple sample pairs with l
 Full documentation lives in [docs/](docs/). Start with [docs/index.md](docs/index.md).
 
 - Usage: [Getting started](docs/getting-started.md) · [Samplesheet format](docs/samplesheet.md) · [Running the pipeline](docs/running-the-pipeline.md) · [Configuration](docs/configuration.md) · [Outputs](docs/outputs.md)
-- Pipeline stages: [SpatialData build](docs/stages/spatialdata-build.md) · [Segmentation](docs/stages/segmentation.md) · [Enrichment](docs/stages/enrichment.md) · [QC](docs/stages/qc.md) · [Alignment](docs/stages/alignment.md) · [Comparison](docs/stages/comparison.md) · [Visualization](docs/stages/visualization.md) · [Squidpy clustering](docs/stages/clustering-squidpy.md)
+- Pipeline stages: [SpatialData build](docs/stages/spatialdata-build.md) · [Segmentation](docs/stages/segmentation.md) · [Enrichment](docs/stages/enrichment.md) · [QC](docs/stages/qc.md) · [Alignment](docs/stages/alignment.md) · [Comparison](docs/stages/comparison.md) · [Visualization](docs/stages/visualization.md) · [Squidpy clustering](docs/stages/clustering-squidpy.md) · [MapMyCells](docs/stages/mapmycells.md)
 - Developer reference: [Pipeline architecture](docs/pipeline.md) · [Python API](docs/python-api.md) · [CLI reference](docs/cli.md) · [Development workflow](docs/development.md)
 
 ## Repository layout

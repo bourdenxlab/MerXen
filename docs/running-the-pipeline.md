@@ -109,8 +109,8 @@ missing.
 Accepted stages are:
 
 `build_spatialdata`, `segment`, `enrich`, `qc`, `align`, `align_qc`, `compare`,
-`visualize`, and `clustering_squidpy`. Alignment stages are only active when
-`--enable_alignment true` is set.
+`visualize`, `clustering_squidpy`, and `mapmycells`. Alignment stages are only
+active when `--enable_alignment true` is set.
 
 Run one stage:
 
@@ -153,6 +153,12 @@ alignment metadata and `*_aligned_nonrigid` vector elements. Later stages read
 that updated MERSCOPE zarr and keep using
 `${outdir}/${pair_id}/xenium/latest/latest_spatialdata.zarr` as the fixed
 reference.
+
+`mapmycells` is downstream of `clustering_squidpy` and requires local reference
+files. Run through it with `--stop_stage mapmycells` plus
+`--mapmycells_marker_lookup_path` and `--mapmycells_precomputed_stats_path`, or
+rerun only that stage with `--only_stage mapmycells` after clustering outputs
+already exist.
 
 ## Running on a cluster
 

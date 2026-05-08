@@ -38,6 +38,7 @@ scientific logic living in the installable Python package `merxen`.
 - [Comparison](stages/comparison.md)
 - [Visualization](stages/visualization.md)
 - [Squidpy clustering](stages/clustering-squidpy.md)
+- [MapMyCells](stages/mapmycells.md)
 
 ### Developer reference
 - [Pipeline architecture](pipeline.md) — stage graph and data flow.
