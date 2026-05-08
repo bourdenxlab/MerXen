@@ -46,6 +46,10 @@ dev = [
 alignment = [
     "spateo-release==1.1.1",
 ]
+# Install with: pip install -e ".[gpu]" --extra-index-url=https://pypi.nvidia.com
+gpu = [
+    "rapids-singlecell-cu12[rapids]",
+]
 
 [project.scripts]
 merxen = "merxen.cli:main"

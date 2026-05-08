@@ -275,15 +275,21 @@ class ClusteringSquidpyConfig(BaseModel):
     pair_id: str
     output_dir: Path
     samples: list[ClusteringSquidpySampleConfig]
+    drop_control_features: bool = True
     min_counts: int = 10
     min_cells: int = 5
     normalize_target_sum: float | None = None
-    n_pcs: int = 50
-    n_neighbors: int = 15
-    leiden_resolution: float = 1.0
+    normalize_exclude_highly_expressed: bool = False
+    normalize_max_fraction: float = 0.05
+    n_pcs: int = 60
+    n_neighbors: int = 30
+    leiden_resolution: float = 0.5
+    umap_min_dist: float = 0.3
+    umap_spread: float = 1.0
     random_seed: int = 0
-    spatial_point_size: float = 2.0
-    figure_dpi: int = 160
+    spatial_point_size: float = 0.5
+    figure_dpi: int = 180
+    use_gpu: bool = True
 
 
 class PipelineConfig(BaseSettings):

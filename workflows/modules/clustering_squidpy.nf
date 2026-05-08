@@ -31,15 +31,21 @@ process CLUSTERING_SQUIDPY {
       "zarr_path": "${xenium_zarr}"
     }
   ],
+  "drop_control_features": ${params.clustering_squidpy_drop_control_features},
   "min_counts": ${params.clustering_squidpy_min_counts},
   "min_cells": ${params.clustering_squidpy_min_cells},
   "normalize_target_sum": ${params.clustering_squidpy_normalize_target_sum},
+  "normalize_exclude_highly_expressed": ${params.clustering_squidpy_normalize_exclude_highly_expressed},
+  "normalize_max_fraction": ${params.clustering_squidpy_normalize_max_fraction},
   "n_pcs": ${params.clustering_squidpy_n_pcs},
   "n_neighbors": ${params.clustering_squidpy_n_neighbors},
   "leiden_resolution": ${params.clustering_squidpy_leiden_resolution},
+  "umap_min_dist": ${params.clustering_squidpy_umap_min_dist},
+  "umap_spread": ${params.clustering_squidpy_umap_spread},
   "random_seed": ${params.clustering_squidpy_random_seed},
   "spatial_point_size": ${params.clustering_squidpy_spatial_point_size},
-  "figure_dpi": ${params.clustering_squidpy_figure_dpi}
+  "figure_dpi": ${params.clustering_squidpy_figure_dpi},
+  "use_gpu": ${params.clustering_squidpy_use_gpu}
 }
 JSON
 

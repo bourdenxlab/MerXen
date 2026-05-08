@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import sys
+import warnings
 from pathlib import Path
 from typing import Any, cast
 
@@ -10,7 +12,8 @@ import anndata as ad
 import geopandas as gpd
 import matplotlib
 
-matplotlib.use("Agg", force=True)
+if "ipykernel" not in sys.modules:
+    matplotlib.use("Agg", force=True)
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -27,6 +30,8 @@ from merxen.memory import force_release, log_status
 
 logger = logging.getLogger(__name__)
 
+GPU_SPARSE_PCA_CHUNK_SIZE = 2048
+EXPECTED_PANEL_GENE_COUNT = 300
 CONTROL_TOKENS = (
     "blank",
     "control",
@@ -219,16 +224,56 @@ def add_qc_metrics(adata: ad.AnnData) -> ad.AnnData:
 def run_scanpy_clustering(
     adata: ad.AnnData,
     *,
+    drop_control_features: bool = True,
     min_counts: int = 10,
     min_cells: int = 5,
     normalize_target_sum: float | None = None,
-    n_pcs: int = 50,
-    n_neighbors: int = 15,
-    leiden_resolution: float = 1.0,
+    normalize_exclude_highly_expressed: bool = False,
+    normalize_max_fraction: float = 0.05,
+    n_pcs: int = 60,
+    n_neighbors: int = 30,
+    leiden_resolution: float = 0.5,
+    umap_min_dist: float = 0.3,
+    umap_spread: float = 1.0,
     random_seed: int = 0,
+    use_gpu: bool = True,
 ) -> ad.AnnData:
-    """Run the gentle Scanpy preprocessing and clustering workflow."""
+    """Run the Scanpy preprocessing and clustering workflow.
+
+    Args:
+        adata: Input AnnData object.
+        drop_control_features: Remove blank/negative/control variables before
+            cell, gene, normalization, PCA, and clustering steps.
+        min_counts: Minimum transcript counts per cell.
+        min_cells: Minimum cells per gene.
+        normalize_target_sum: Target sum for normalization (None = median).
+        normalize_exclude_highly_expressed: Exclude highly expressed genes from
+            size-factor calculation.
+        normalize_max_fraction: Max fraction a gene can occupy before being
+            excluded (only relevant when exclude_highly_expressed is True).
+        n_pcs: Number of principal components.
+        n_neighbors: Number of neighbors for the kNN graph.
+        leiden_resolution: Leiden clustering resolution.
+        umap_min_dist: UMAP minimum distance.
+        umap_spread: UMAP spread.
+        random_seed: Random seed for reproducibility.
+        use_gpu: Use rapids-singlecell GPU-accelerated PCA, neighbors, UMAP,
+            and Leiden. Falls back to CPU if rapids-singlecell is not installed.
+
+    Returns:
+        Clustered AnnData with ``leiden`` labels in ``.obs``.
+    """
     clustered = adata.copy()
+    if drop_control_features:
+        clustered = remove_control_features(clustered)
+    else:
+        _record_control_feature_filter(
+            clustered,
+            removed_features=[],
+            n_features_before=clustered.n_vars,
+            enabled=False,
+        )
+
     sc.pp.filter_cells(clustered, min_counts=int(min_counts))
     sc.pp.filter_genes(clustered, min_cells=int(min_cells))
     if clustered.n_obs < 3 or clustered.n_vars < 2:
@@ -236,37 +281,217 @@ def run_scanpy_clustering(
             "Too few cells/genes remain after filtering: "
             f"n_obs={clustered.n_obs}, n_vars={clustered.n_vars}"
         )
+    if clustered.n_vars != EXPECTED_PANEL_GENE_COUNT:
+        logger.warning(
+            "Expected %d genes after control-feature and min-cell filtering; "
+            "observed %d.",
+            EXPECTED_PANEL_GENE_COUNT,
+            clustered.n_vars,
+        )
+    filter_summary = dict(
+        clustered.uns.get("merxen_clustering_squidpy", {}).get(
+            "control_feature_filter", {}
+        )
+    )
+    if filter_summary:
+        filter_summary["n_features_after_min_cell_filter"] = int(clustered.n_vars)
+        filter_summary["has_expected_panel_gene_count_after_min_cell_filter"] = (
+            int(clustered.n_vars) == EXPECTED_PANEL_GENE_COUNT
+        )
+        clustered.uns["merxen_clustering_squidpy"] = {
+            **dict(clustered.uns.get("merxen_clustering_squidpy", {})),
+            "control_feature_filter": filter_summary,
+        }
 
     clustered.layers["counts"] = clustered.X.copy()
     sc.pp.normalize_total(
         clustered,
         target_sum=normalize_target_sum,
+        exclude_highly_expressed=bool(normalize_exclude_highly_expressed),
+        max_fraction=float(normalize_max_fraction),
         inplace=True,
     )
     sc.pp.log1p(clustered)
 
     max_pcs = min(int(n_pcs), clustered.n_obs - 1, clustered.n_vars - 1)
-    if max_pcs > 0:
-        sc.pp.pca(clustered, n_comps=max_pcs, random_state=int(random_seed))
-        n_pcs_for_neighbors: int | None = max_pcs
-    else:
-        n_pcs_for_neighbors = None
-
+    n_pcs_for_neighbors: int | None = max_pcs if max_pcs > 0 else None
     effective_neighbors = max(2, min(int(n_neighbors), clustered.n_obs - 1))
-    sc.pp.neighbors(
-        clustered,
-        n_neighbors=effective_neighbors,
-        n_pcs=n_pcs_for_neighbors,
-        random_state=int(random_seed),
-    )
-    sc.tl.umap(clustered, random_state=int(random_seed))
-    sc.tl.leiden(
-        clustered,
-        resolution=float(leiden_resolution),
-        random_state=int(random_seed),
-        key_added="leiden",
-    )
+
+    gpu_used = False
+    if use_gpu:
+        gpu_used = _run_gpu_clustering(
+            clustered,
+            max_pcs=max_pcs,
+            n_pcs_for_neighbors=n_pcs_for_neighbors,
+            effective_neighbors=effective_neighbors,
+            umap_min_dist=float(umap_min_dist),
+            umap_spread=float(umap_spread),
+            leiden_resolution=float(leiden_resolution),
+            random_seed=int(random_seed),
+        )
+
+    if not gpu_used:
+        if max_pcs > 0:
+            sc.pp.pca(clustered, n_comps=max_pcs, random_state=int(random_seed))
+        sc.pp.neighbors(
+            clustered,
+            n_neighbors=effective_neighbors,
+            n_pcs=n_pcs_for_neighbors,
+            random_state=int(random_seed),
+        )
+        sc.tl.umap(
+            clustered,
+            min_dist=float(umap_min_dist),
+            spread=float(umap_spread),
+            random_state=int(random_seed),
+        )
+        sc.tl.leiden(
+            clustered,
+            resolution=float(leiden_resolution),
+            random_state=int(random_seed),
+            key_added="leiden",
+        )
+
+    clustered.uns["merxen_clustering_params"] = {
+        "drop_control_features": bool(drop_control_features),
+        "min_counts": int(min_counts),
+        "min_cells": int(min_cells),
+        "normalize_target_sum": normalize_target_sum,
+        "normalize_exclude_highly_expressed": bool(normalize_exclude_highly_expressed),
+        "normalize_max_fraction": float(normalize_max_fraction),
+        "n_pcs": int(n_pcs),
+        "n_neighbors": int(n_neighbors),
+        "effective_neighbors": int(effective_neighbors),
+        "leiden_resolution": float(leiden_resolution),
+        "umap_min_dist": float(umap_min_dist),
+        "umap_spread": float(umap_spread),
+        "random_seed": int(random_seed),
+        "gpu_used": gpu_used,
+    }
     return clustered
+
+
+def remove_control_features(adata: ad.AnnData) -> ad.AnnData:
+    """Return a copy with blank/negative/control variables removed."""
+    control_mask = _control_feature_mask(adata)
+    removed_features = [str(x) for x in adata.var_names[control_mask]]
+    n_features_before = int(adata.n_vars)
+    filtered = adata[:, ~control_mask].copy() if control_mask.any() else adata.copy()
+    _record_control_feature_filter(
+        filtered,
+        removed_features=removed_features,
+        n_features_before=n_features_before,
+        enabled=True,
+    )
+    return filtered
+
+
+def _record_control_feature_filter(
+    adata: ad.AnnData,
+    *,
+    removed_features: list[str],
+    n_features_before: int,
+    enabled: bool,
+) -> None:
+    retained_features = [str(x) for x in adata.var_names]
+    adata.uns["merxen_clustering_squidpy"] = {
+        **dict(adata.uns.get("merxen_clustering_squidpy", {})),
+        "control_feature_filter": {
+            "enabled": bool(enabled),
+            "n_features_before": int(n_features_before),
+            "n_control_features_removed": len(removed_features),
+            "n_features_after_control_filter": int(adata.n_vars),
+            "expected_panel_gene_count": EXPECTED_PANEL_GENE_COUNT,
+            "has_expected_panel_gene_count": (
+                int(adata.n_vars) == EXPECTED_PANEL_GENE_COUNT
+            ),
+            "removed_control_features": removed_features,
+            "retained_features": retained_features,
+        },
+    }
+
+
+def _run_gpu_clustering(
+    adata: ad.AnnData,
+    *,
+    max_pcs: int,
+    n_pcs_for_neighbors: int | None,
+    effective_neighbors: int,
+    umap_min_dist: float,
+    umap_spread: float,
+    leiden_resolution: float,
+    random_seed: int,
+) -> bool:
+    """Run PCA, neighbors, UMAP, and Leiden on GPU via rapids-singlecell.
+
+    Returns True when GPU steps completed successfully, False when
+    rapids-singlecell is unavailable and the caller should use CPU instead.
+    """
+    try:
+        import rapids_singlecell as rsc
+    except ImportError:
+        logger.warning(
+            "rapids_singlecell not installed; falling back to CPU clustering. "
+            "Install with: pip install -e '.[gpu]' --extra-index-url=https://pypi.nvidia.com"
+        )
+        return False
+
+    rsc.get.anndata_to_GPU(adata)
+    try:
+        if max_pcs > 0:
+            pca_kwargs = _gpu_pca_kwargs(adata, max_pcs=max_pcs)
+            rsc.pp.pca(
+                adata,
+                n_comps=max_pcs,
+                random_state=random_seed,
+                **pca_kwargs,
+            )
+        use_rep = "X_pca" if max_pcs > 0 else None
+        rsc.pp.neighbors(
+            adata,
+            n_neighbors=effective_neighbors,
+            n_pcs=n_pcs_for_neighbors,
+            use_rep=use_rep,
+            random_state=random_seed,
+        )
+        rsc.tl.umap(
+            adata,
+            min_dist=umap_min_dist,
+            spread=umap_spread,
+            random_state=random_seed,
+        )
+        rsc.tl.leiden(
+            adata,
+            resolution=leiden_resolution,
+            random_state=random_seed,
+            key_added="leiden",
+        )
+    finally:
+        rsc.get.anndata_to_CPU(adata)
+    return True
+
+
+def _gpu_pca_kwargs(adata: ad.AnnData, *, max_pcs: int) -> dict[str, int | bool]:
+    """Return rapids-singlecell PCA kwargs for the current matrix layout."""
+    if not _is_sparse_matrix(adata.X):
+        return {}
+
+    chunk_size = min(
+        adata.n_obs,
+        max(GPU_SPARSE_PCA_CHUNK_SIZE, int(max_pcs) * 4, int(max_pcs) + 1),
+    )
+    return {"chunked": True, "chunk_size": int(chunk_size)}
+
+
+def _is_sparse_matrix(matrix: Any) -> bool:
+    """Return True for SciPy and CuPy sparse matrices."""
+    if sparse.issparse(matrix):
+        return True
+    try:
+        from cupyx.scipy import sparse as cupy_sparse
+    except ImportError:
+        return False
+    return bool(cupy_sparse.issparse(matrix))
 
 
 def plot_qc_histograms(
@@ -307,6 +532,7 @@ def plot_qc_histograms(
             ax.set_yticks([])
         else:
             sns.histplot(finite, kde=False, ax=ax)
+            ax.set_xlim(1, None)
             ax.set_xlabel(column)
     fig.suptitle(f"{sample_label} ({platform.upper()}) QC")
     fig.tight_layout()
@@ -347,6 +573,7 @@ def plot_spatial_scatter(
     *,
     color: str = "leiden",
     point_size: float = 2.0,
+    alpha: float = 0.6,
     dpi: int = 160,
 ) -> Path:
     """Save a Squidpy spatial scatter plot for the clustered AnnData object."""
@@ -356,25 +583,35 @@ def plot_spatial_scatter(
         raise KeyError("Expected adata.obsm['spatial'] for Squidpy spatial plot.")
 
     fig, ax = plt.subplots(figsize=(7, 7))
+    scatter_kwargs = {
+        "shape": None,
+        "color": [color],
+        "library_id": "",
+        "size": float(point_size),
+        "edgecolors": "none",
+        "linewidths": 0,
+        "img": False,
+        "ax": ax,
+        "return_ax": True,
+    }
     try:
-        sq.pl.spatial_scatter(
-            adata,
-            shape=None,
-            color=[color],
-            size=float(point_size),
-            img=False,
-            ax=ax,
-            return_ax=True,
-        )
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="No data for colormapping provided via 'c'.*",
+                category=UserWarning,
+            )
+            sq.pl.spatial_scatter(adata, alpha=alpha, **scatter_kwargs)
     except TypeError:
-        sq.pl.spatial_scatter(
-            adata,
-            shape=None,
-            color=[color],
-            size=float(point_size),
-            ax=ax,
-            return_ax=True,
-        )
+        scatter_kwargs.pop("edgecolors", None)
+        scatter_kwargs.pop("linewidths", None)
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="No data for colormapping provided via 'c'.*",
+                category=UserWarning,
+            )
+            sq.pl.spatial_scatter(adata, **scatter_kwargs)
     fig.savefig(output_path, dpi=int(dpi), bbox_inches="tight")
     plt.close(fig)
     return output_path
@@ -436,13 +673,21 @@ def run_clustering_squidpy(
 
         clustered = run_scanpy_clustering(
             adata,
+            drop_control_features=config.drop_control_features,
             min_counts=config.min_counts,
             min_cells=config.min_cells,
             normalize_target_sum=config.normalize_target_sum,
+            normalize_exclude_highly_expressed=(
+                config.normalize_exclude_highly_expressed
+            ),
+            normalize_max_fraction=config.normalize_max_fraction,
             n_pcs=config.n_pcs,
             n_neighbors=config.n_neighbors,
             leiden_resolution=config.leiden_resolution,
+            umap_min_dist=config.umap_min_dist,
+            umap_spread=config.umap_spread,
             random_seed=config.random_seed,
+            use_gpu=config.use_gpu,
         )
         umap_plot = plot_umap(
             clustered,
