@@ -130,6 +130,48 @@ def test_adata_from_spatialdata_adds_xenium_nucleus_ratio_from_shapes() -> None:
     np.testing.assert_allclose(out.obs["nucleus_ratio"].to_numpy(float), [0.25, 0.25])
 
 
+def test_adata_from_spatialdata_adds_ensembl_ids_from_original_table() -> None:
+    """Gene IDs from one SpatialData table should annotate clustering tables."""
+    obs = pd.DataFrame({"cell_id": ["x1", "x2"]}, index=["x1", "x2"])
+    adata = ad.AnnData(
+        X=np.array([[10, 1], [2, 8]], dtype=np.int64),
+        obs=obs,
+        var=pd.DataFrame({"gene": ["GeneA", "GeneB"]}, index=["GeneA", "GeneB"]),
+    )
+    adata.uns["spatialdata_attrs"] = {"region": "xenium_cell_boundaries"}
+    original = ad.AnnData(
+        X=np.ones((1, 2), dtype=np.float32),
+        obs=pd.DataFrame(index=["cell0"]),
+        var=pd.DataFrame(
+            {
+                "gene_ids": ["ENSG000001", "ENSG000002"],
+                "feature_types": ["Gene Expression", "Gene Expression"],
+            },
+            index=["GeneA", "GeneB"],
+        ),
+    )
+    cell_gdf = gpd.GeoDataFrame(
+        {
+            "cell_id": ["x1", "x2"],
+            "geometry": [box(0, 0, 1, 1), box(2, 0, 3, 1)],
+        },
+        geometry="geometry",
+    )
+    fake_sdata = SimpleNamespace(
+        tables={"table": adata, "table_original": original},
+        shapes={"xenium_cell_boundaries": cell_gdf},
+    )
+
+    out = adata_from_spatialdata(fake_sdata, platform="XENIUM")
+
+    assert list(out.var["ensembl_id"]) == ["ENSG000001", "ENSG000002"]
+    assert out.uns["merxen_clustering_squidpy"]["ensembl_id_mapping"] == {
+        "n_features": 2,
+        "n_mapped": 2,
+        "column": "ensembl_id",
+    }
+
+
 def test_run_scanpy_clustering_adds_umap_and_leiden() -> None:
     """The gentle Scanpy workflow should produce expected clustering fields."""
     rng = np.random.default_rng(1)
@@ -158,6 +200,39 @@ def test_run_scanpy_clustering_adds_umap_and_leiden() -> None:
     assert "leiden" in out.obs
     assert out.uns["merxen_clustering_params"]["umap_min_dist"] == 0.2
     assert out.uns["merxen_clustering_params"]["umap_spread"] == 1.5
+
+
+def test_run_scanpy_clustering_preserves_ensembl_ids() -> None:
+    """Filtering and clustering should retain gene IDs needed by MapMyCells."""
+    rng = np.random.default_rng(2)
+    adata = ad.AnnData(
+        X=rng.poisson(lam=4, size=(12, 4)).astype(np.float32),
+        obs=pd.DataFrame(index=[f"cell{i}" for i in range(12)]),
+        var=pd.DataFrame(
+            {
+                "gene": ["GeneA", "GeneB", "Blank-1", "GeneC"],
+                "ensembl_id": ["ENSG000001", "ENSG000002", "", "ENSG000003"],
+            },
+            index=["GeneA", "GeneB", "Blank-1", "GeneC"],
+        ),
+    )
+    adata.obsm["spatial"] = rng.normal(size=(12, 2))
+
+    out = run_scanpy_clustering(
+        adata,
+        min_counts=1,
+        min_cells=1,
+        n_pcs=2,
+        n_neighbors=3,
+        random_seed=2,
+        use_gpu=False,
+    )
+
+    assert list(out.var["ensembl_id"]) == [
+        "ENSG000001",
+        "ENSG000002",
+        "ENSG000003",
+    ]
 
 
 def test_remove_control_features_drops_blank_negative_and_unassigned() -> None:
