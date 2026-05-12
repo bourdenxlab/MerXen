@@ -32,6 +32,19 @@ logger = logging.getLogger(__name__)
 
 GPU_SPARSE_PCA_CHUNK_SIZE = 2048
 EXPECTED_PANEL_GENE_COUNT = 300
+ENSEMBL_ID_COLUMN = "ensembl_id"
+GENE_ID_COLUMN_CANDIDATES = (
+    ENSEMBL_ID_COLUMN,
+    "gene_ids",
+    "gene_id",
+    "feature_id",
+)
+GENE_SYMBOL_COLUMN_CANDIDATES = (
+    "gene",
+    "feature_name",
+    "feature",
+    "name",
+)
 CONTROL_TOKENS = (
     "blank",
     "control",
@@ -68,6 +81,7 @@ def load_spatialdata_adata(
     platform: str,
     table_key: str | None = None,
     shape_key: str | None = None,
+    gene_id_lookup: dict[str, str] | None = None,
 ) -> ad.AnnData:
     """Load a SpatialData zarr and return a Squidpy-ready AnnData table.
 
@@ -82,6 +96,9 @@ def load_spatialdata_adata(
         table_key: Optional explicit table key. Defaults to ``table`` when
             present.
         shape_key: Optional explicit shape key for spatial coordinates/area.
+        gene_id_lookup: Optional shared mapping from gene symbols to Ensembl
+            IDs. When present, the returned AnnData gets
+            ``.var["ensembl_id"]`` for downstream reference mapping.
 
     Returns:
         An AnnData object ready for Scanpy/Squidpy analysis.
@@ -95,6 +112,7 @@ def load_spatialdata_adata(
             platform=platform,
             table_key=table_key,
             shape_key=shape_key,
+            gene_id_lookup=gene_id_lookup,
         )
     finally:
         del sdata_obj
@@ -108,6 +126,7 @@ def adata_from_spatialdata(
     platform: str,
     table_key: str | None = None,
     shape_key: str | None = None,
+    gene_id_lookup: dict[str, str] | None = None,
 ) -> ad.AnnData:
     """Extract and annotate an AnnData table from an open SpatialData object."""
     resolved_table_key = _choose_table_key(sdata_obj, table_key)
@@ -121,6 +140,13 @@ def adata_from_spatialdata(
 
     adata = table.copy()
     _normalize_var_names(adata)
+    _apply_ensembl_id_metadata(
+        adata,
+        _merge_gene_id_lookups(
+            gene_id_lookup or {},
+            _extract_gene_id_lookup_from_spatialdata(sdata_obj),
+        ),
+    )
 
     if resolved_shape_key is not None:
         shape_metrics = _shape_metrics(sdata_obj.shapes[resolved_shape_key])
@@ -644,6 +670,7 @@ def run_clustering_squidpy(
     """Run the clustering_squidpy stage for every sample in a pair."""
     config.output_dir.mkdir(parents=True, exist_ok=True)
     results: dict[str, dict[str, Path]] = {}
+    gene_id_lookup = collect_gene_id_lookup_for_samples(config)
 
     for sample in config.samples:
         sample_dir = config.output_dir / sample.platform.lower()
@@ -657,6 +684,7 @@ def run_clustering_squidpy(
             platform=sample.platform,
             table_key=sample.table_key,
             shape_key=sample.shape_key,
+            gene_id_lookup=gene_id_lookup,
         )
 
         qc_plot = plot_qc_histograms(
@@ -716,6 +744,41 @@ def run_clustering_squidpy(
         force_release(note=f"after clustering_squidpy {sample.sample_id}")
 
     return results
+
+
+def collect_gene_id_lookup_for_samples(
+    config: ClusteringSquidpyConfig,
+) -> dict[str, str]:
+    """Collect a shared gene-symbol to Ensembl-ID lookup from sample zarrs.
+
+    Xenium source tables retain Ensembl IDs in ``var["gene_ids"]`` while the
+    downstream enriched tables used for clustering can carry gene symbols only.
+    Because paired MerXen datasets use the same panel, one platform can provide
+    the lookup used to annotate both clustered outputs.
+    """
+    combined: dict[str, str] = {}
+    for sample in config.samples:
+        zarr_path = Path(sample.zarr_path)
+        if not zarr_path.exists():
+            logger.warning(
+                "[%s] Cannot inspect gene IDs; zarr path is missing: %s",
+                sample.sample_id,
+                zarr_path,
+            )
+            continue
+        sdata_obj = sd.read_zarr(zarr_path)
+        try:
+            sample_lookup = _extract_gene_id_lookup_from_spatialdata(sdata_obj)
+        finally:
+            del sdata_obj
+            force_release(note=f"after collecting gene IDs {sample.sample_id}")
+        combined = _merge_gene_id_lookups(combined, sample_lookup)
+
+    if combined:
+        logger.info("Collected %d gene symbol -> Ensembl ID mappings.", len(combined))
+    else:
+        logger.warning("No Ensembl ID metadata found in clustering input zarrs.")
+    return combined
 
 
 def _choose_table_key(sdata_obj: Any, preferred: str | None) -> str:
@@ -809,6 +872,119 @@ def _normalize_var_names(adata: ad.AnnData) -> None:
         adata.var_names = pd.Index(adata.var_names.astype(str), name="gene")
     adata.var_names_make_unique()
     adata.var["gene"] = adata.var_names.astype(str)
+
+
+def _extract_gene_id_lookup_from_spatialdata(sdata_obj: Any) -> dict[str, str]:
+    lookup: dict[str, str] = {}
+    for table_key, table in sdata_obj.tables.items():
+        table_lookup = _extract_gene_id_lookup_from_var(table.var, table.var_names)
+        if table_lookup:
+            logger.info(
+                "Found %d Ensembl ID mappings in SpatialData table %r.",
+                len(table_lookup),
+                table_key,
+            )
+        lookup = _merge_gene_id_lookups(lookup, table_lookup)
+    return lookup
+
+
+def _extract_gene_id_lookup_from_var(
+    var: pd.DataFrame,
+    var_names: pd.Index,
+) -> dict[str, str]:
+    id_col = _first_existing_column(var, GENE_ID_COLUMN_CANDIDATES)
+    if id_col is None:
+        return {}
+
+    gene_ids = var[id_col].astype(str).to_numpy()
+    symbol_arrays: list[np.ndarray] = [var_names.astype(str).to_numpy()]
+    for col in GENE_SYMBOL_COLUMN_CANDIDATES:
+        if col in var.columns:
+            symbol_arrays.append(var[col].astype(str).to_numpy())
+
+    lookup: dict[str, str] = {}
+    for idx, raw_gene_id in enumerate(gene_ids):
+        gene_id = str(raw_gene_id).strip()
+        if not gene_id.startswith("ENSG"):
+            continue
+        for symbols in symbol_arrays:
+            symbol = str(symbols[idx]).strip()
+            if not symbol or symbol.lower() in {"nan", "none"}:
+                continue
+            lookup.setdefault(symbol, gene_id)
+    return lookup
+
+
+def _apply_ensembl_id_metadata(
+    adata: ad.AnnData,
+    gene_id_lookup: dict[str, str],
+) -> None:
+    existing_col = _first_existing_column(adata.var, GENE_ID_COLUMN_CANDIDATES)
+    existing_values = (
+        adata.var[existing_col].astype(str).to_numpy()
+        if existing_col is not None
+        else None
+    )
+    if existing_values is not None and any(
+        str(value).startswith("ENSG") for value in existing_values
+    ):
+        adata.var[ENSEMBL_ID_COLUMN] = existing_values
+        return
+
+    if not gene_id_lookup:
+        return
+
+    symbols = (
+        adata.var["gene"].astype(str).to_numpy()
+        if "gene" in adata.var.columns
+        else adata.var_names.astype(str).to_numpy()
+    )
+    ensembl_ids = [gene_id_lookup.get(str(symbol), "") for symbol in symbols]
+    n_mapped = sum(bool(value) for value in ensembl_ids)
+    if n_mapped == 0:
+        return
+
+    adata.var[ENSEMBL_ID_COLUMN] = pd.Series(
+        ensembl_ids,
+        index=adata.var_names,
+        dtype="object",
+    )
+    adata.uns["merxen_clustering_squidpy"] = {
+        **dict(adata.uns.get("merxen_clustering_squidpy", {})),
+        "ensembl_id_mapping": {
+            "n_features": int(adata.n_vars),
+            "n_mapped": int(n_mapped),
+            "column": ENSEMBL_ID_COLUMN,
+        },
+    }
+
+
+def _merge_gene_id_lookups(
+    left: dict[str, str],
+    right: dict[str, str],
+) -> dict[str, str]:
+    merged = dict(left)
+    for symbol, gene_id in right.items():
+        if symbol not in merged:
+            merged[symbol] = gene_id
+        elif merged[symbol] != gene_id:
+            logger.warning(
+                "Conflicting Ensembl IDs for gene %s: keeping %s, ignoring %s.",
+                symbol,
+                merged[symbol],
+                gene_id,
+            )
+    return merged
+
+
+def _first_existing_column(
+    df: pd.DataFrame,
+    candidates: tuple[str, ...],
+) -> str | None:
+    for candidate in candidates:
+        if candidate in df.columns:
+            return candidate
+    return None
 
 
 def _shape_metrics(shapes: gpd.GeoDataFrame) -> pd.DataFrame:
