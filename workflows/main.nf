@@ -199,11 +199,27 @@ workflow {
         error "Missing required parameter for SEGMENT: --proseg_binary"
     }
     if (runMapMyCells) {
-        if (!params.mapmycells_marker_lookup_path) {
+        def mapMyCellsReferenceMode = params.mapmycells_reference_mode == null
+            ? "both"
+            : params.mapmycells_reference_mode.toString().trim().toLowerCase()
+        if (!(mapMyCellsReferenceMode in ["whole_brain", "region", "both"])) {
+            error(
+                "Invalid MAPMYCELLS --mapmycells_reference_mode " +
+                "'${params.mapmycells_reference_mode}'. Valid values: " +
+                "whole_brain, region, both"
+            )
+        }
+        if (mapMyCellsReferenceMode in ["whole_brain", "both"] &&
+            !params.mapmycells_marker_lookup_path) {
             error "Missing required parameter for MAPMYCELLS: --mapmycells_marker_lookup_path"
         }
-        if (!params.mapmycells_precomputed_stats_path) {
+        if (mapMyCellsReferenceMode in ["whole_brain", "both"] &&
+            !params.mapmycells_precomputed_stats_path) {
             error "Missing required parameter for MAPMYCELLS: --mapmycells_precomputed_stats_path"
+        }
+        if (mapMyCellsReferenceMode in ["region", "both"] &&
+            !params.mapmycells_region_labels) {
+            error "Missing required parameter for MAPMYCELLS region mode: --mapmycells_region_labels"
         }
     }
 

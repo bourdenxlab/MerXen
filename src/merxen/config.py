@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -309,8 +309,22 @@ class MapMyCellsConfig(BaseModel):
     pair_id: str
     output_dir: Path
     samples: list[MapMyCellsSampleConfig]
-    marker_lookup_path: Path
-    precomputed_stats_path: Path
+    reference_mode: Literal["whole_brain", "region", "both"] = "both"
+    marker_lookup_path: Path | None = None
+    precomputed_stats_path: Path | None = None
+    region_name: str = "frontal_a44_a45_a46_a32_acc"
+    region_labels: list[str] = Field(
+        default_factory=lambda: [
+            "Human A44-A45",
+            "Human A46",
+            "Human A32",
+            "Human ACC",
+        ]
+    )
+    region_cache_dir: Path = Path("/media/mathieubo/SSD2/MerXen/mapmycells")
+    region_min_cells_per_leaf: int = Field(default=10, ge=1)
+    region_force_rebuild: bool = False
+    region_query_markers_n_per_utility: int = Field(default=10, ge=1)
     drop_level: str | None = None
     normalization: Literal["raw", "log2CPM"] = "raw"
     bootstrap_factor: float = Field(default=0.9, gt=0.0, le=1.0)
@@ -324,6 +338,56 @@ class MapMyCellsConfig(BaseModel):
     flatten: bool = False
     verbose_csv: bool = False
     extra_args: list[str] = Field(default_factory=list)
+
+    @field_validator("region_labels", mode="before")
+    @classmethod
+    def _parse_region_labels(cls: type[MapMyCellsConfig], value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return []
+            if raw.startswith("["):
+                import json
+
+                parsed = json.loads(raw)
+                if not isinstance(parsed, list):
+                    raise ValueError("region_labels JSON must decode to a list")
+                value = parsed
+            else:
+                return [part.strip() for part in raw.split(",") if part.strip()]
+        if isinstance(value, list | tuple | set):
+            return [str(item).strip() for item in value if str(item).strip()]
+        raise ValueError("region_labels must be a list or comma-separated string")
+
+    @field_validator("region_name")
+    @classmethod
+    def _validate_region_name(cls: type[MapMyCellsConfig], value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("region_name must not be empty")
+        return cleaned
+
+    @model_validator(mode="after")
+    def _validate_reference_inputs(self: MapMyCellsConfig) -> MapMyCellsConfig:
+        if self.reference_mode in {"whole_brain", "both"}:
+            if self.marker_lookup_path is None:
+                raise ValueError(
+                    "marker_lookup_path is required when reference_mode includes "
+                    "whole_brain"
+                )
+            if self.precomputed_stats_path is None:
+                raise ValueError(
+                    "precomputed_stats_path is required when reference_mode includes "
+                    "whole_brain"
+                )
+        if self.reference_mode in {"region", "both"} and not self.region_labels:
+            raise ValueError(
+                "region_labels must contain at least one Allen WHB ROI label when "
+                "reference_mode includes region"
+            )
+        return self
 
 
 class PipelineConfig(BaseSettings):

@@ -26,7 +26,9 @@ def mapmycells_command(config_path: Path) -> None:
     results = run_mapmycells(cfg)
 
     click.echo("mapmycells complete:")
-    for sample_id, paths in results.items():
+    for sample_id, reference_results in results.items():
         click.echo(f"- {sample_id}")
-        for key, value in paths.items():
-            click.echo(f"  - {key}: {value}")
+        for reference_name, paths in reference_results.items():
+            click.echo(f"  - {reference_name}")
+            for key, value in paths.items():
+                click.echo(f"    - {key}: {value}")

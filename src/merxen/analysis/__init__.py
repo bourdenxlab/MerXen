@@ -19,6 +19,7 @@ _EXPORT_MODULES = {
     "save_qc_metrics": "merxen.analysis.clustering_squidpy",
     "annotate_h5ad_with_mapmycells": "merxen.analysis.mapmycells",
     "build_mapmycells_command": "merxen.analysis.mapmycells",
+    "prepare_region_mapmycells_reference": "merxen.analysis.mapmycells",
     "prepare_mapmycells_query": "merxen.analysis.mapmycells",
     "read_mapmycells_csv": "merxen.analysis.mapmycells",
     "run_mapmycells": "merxen.analysis.mapmycells",
