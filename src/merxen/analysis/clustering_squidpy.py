@@ -376,6 +376,9 @@ def run_scanpy_clustering(
             resolution=float(leiden_resolution),
             random_state=int(random_seed),
             key_added="leiden",
+            flavor="igraph",
+            n_iterations=2,
+            directed=False,
         )
 
     clustered.uns["merxen_clustering_params"] = {

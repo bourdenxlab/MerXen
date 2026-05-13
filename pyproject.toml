@@ -83,6 +83,9 @@ known-first-party = ["merxen"]
 testpaths = ["tests"]
 addopts = "-v --tb=short"
 markers = ["slow: marks tests as slow (deselect with '-m \"not slow\"')"]
+filterwarnings = [
+    "ignore:Call to deprecated class Scaler.*:DeprecationWarning:ome_zarr\\.writer",
+]
 
 [tool.mypy]
 python_version = "3.12"
