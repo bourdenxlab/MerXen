@@ -176,6 +176,7 @@ pip install "anndata>=0.12.10"
 | `mapmycells_cloud_safe` | `false` | Passed to MapMyCells `cloud_safe`. |
 | `mapmycells_flatten` | `false` | Flatten taxonomy and map directly to leaf nodes. |
 | `mapmycells_verbose_csv` | `false` | Include verbose confidence columns when supported by the mapper. |
+| `mapmycells_plots_only` | `false` | Reuse existing mapper CSV/extended JSON outputs in published `mapmycells_out/` and regenerate only the annotated H5AD and plots. |
 | `mapmycells_query_layer` | `counts` | AnnData layer copied into `X` before mapping. Use `null` to keep current `X`. |
 | `mapmycells_gene_id_column` | `null` | Optional `var` column used as gene identifiers for the query H5AD. |
 | `mapmycells_obs_id_column` | `null` | Optional `obs` column used as cell identifiers for the query H5AD. |

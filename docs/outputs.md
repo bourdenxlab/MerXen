@@ -34,6 +34,7 @@ ${outdir}/
 ```
 
 `<pair_id>` comes straight from the `pair_id` column of the samplesheet.
+Every `.png` plot listed below is also written as a same-stem `.pdf`.
 
 Nextflow also keeps its own working directory at `./work/` (next to the
 `workflows/` folder by default). That's cache state, not output — safe to
@@ -146,6 +147,7 @@ Path: `${outdir}/<pair_id>/visualization/`
 | `visualize_out/<pair_id>_cell_violin.png` | Side-by-side platform violins for transcripts-per-cell and genes-per-cell. |
 | `visualize_out/<pair_id>_transcript_overview.png` | 3x2 density, full scatter, and fixed crop transcript overview. |
 | `visualize_out/<pair_id>_sanity_overlay.png` | Paired 250 um image crops with all shape contours and transcript assignment status. |
+| `visualize_out/<pair_id>_sanity_overlay_crop_location.png` | Helper plot showing the MERSCOPE raw, MERSCOPE aligned, and Xenium crop locations used for the sanity overlay. |
 | `visualize_out/<pair_id>_assignment_rate_bar.png` | Bar chart comparing `pct_assigned` across platforms. |
 
 ### Squidpy clustering
@@ -158,6 +160,7 @@ Path: `${outdir}/<pair_id>/clustering_squidpy/`
 | `clustering_squidpy_out/<platform>/<pair_id>_<platform>_qc_metrics.csv` | Per-cell QC metrics used for the histogram panel. |
 | `clustering_squidpy_out/<platform>/<pair_id>_<platform>_umap.png` | Scanpy UMAP colored by total counts, genes by counts, and Leiden cluster. |
 | `clustering_squidpy_out/<platform>/<pair_id>_<platform>_spatial_scatter_leiden.png` | Squidpy spatial scatter colored by Leiden cluster. |
+| `clustering_squidpy_out/<platform>/<pair_id>_<platform>_spatial_scatter_leiden_grid.png` | Small-multiple spatial grid with each de novo Leiden cluster highlighted in red against all other cells in grey. |
 | `clustering_squidpy_out/<platform>/<pair_id>_<platform>_clustered.h5ad` | Control-feature-filtered, cell/gene-filtered, normalized, log-transformed, clustered AnnData object with raw non-control counts in `layers["counts"]`. |
 
 ### MapMyCells
@@ -174,7 +177,12 @@ Path: `${outdir}/<pair_id>/mapmycells/`
 | `mapmycells_out/<platform>/<pair_id>_<platform>_mapmycells_stderr.log` | Captured stderr from the local mapper process, including startup/import errors. |
 | `mapmycells_out/<platform>/<pair_id>_<platform>_mapmycells_command.json` | Exact command invoked by the stage. |
 | `mapmycells_out/<platform>/<pair_id>_<platform>_mapmycells_umap.png` | Existing Squidpy/Scanpy UMAP coordinates colored by MapMyCells assignment. |
+| `mapmycells_out/<platform>/<pair_id>_<platform>_mapmycells_umap_cluster_by_supercluster/supercluster_<name>.png` | Per-supercluster UMAPs with cells outside the supercluster in grey and member cells colored by MapMyCells cluster. |
 | `mapmycells_out/<platform>/<pair_id>_<platform>_mapmycells_spatial.png` | Spatial coordinates colored by MapMyCells assignment. |
+| `mapmycells_out/<platform>/<pair_id>_<platform>_mapmycells_quality_scatter.png` | Extended-JSON QC panels for supercluster and cluster assignment quality. |
+| `mapmycells_out/<platform>/<pair_id>_<platform>_mapmycells_supercluster_assignment_qc.png` | Supercluster cell counts, confidence summaries, and low-confidence fractions. |
+| `mapmycells_out/<platform>/<pair_id>_<platform>_mapmycells_cluster_assignment_qc.png` | Cluster cell counts, confidence summaries, and low-confidence fractions. |
+| `mapmycells_out/<platform>/<pair_id>_<platform>_mapmycells_spatial_supercluster_grid.png` | Small-multiple spatial grid with each supercluster highlighted in red against all other cells in grey. |
 | `mapmycells_out/<platform>/<pair_id>_<platform>_mapmycells_annotated.h5ad` | Clustered AnnData with assignment columns added to `obs` using the `mapmycells_` prefix and mapper metadata in `uns["merxen_mapmycells"]`; plot paths are recorded, but plot images are separate PNGs. |
 | `mapmycells_out/region_<region_name>/<platform>/<pair_id>_<platform>_mapmycells_*` | Region-specific MapMyCells outputs when `mapmycells_reference_mode` includes `region`; annotated H5AD columns use `mapmycells_region_<region_name>_`. |
 | `mapmycells_out/<pair_id>_mapmycells_manifest.json` | Per-pair manifest summarizing selected reference mode, whole-brain and region references, ROI labels, filtering counts, bootstrap settings, and output paths. |

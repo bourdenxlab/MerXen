@@ -18,11 +18,18 @@ For each platform in a pair:
    stats HDF5 files. The region path builds or reuses a strict WHB ROI-specific
    reference in the durable MapMyCells cache first.
 4. Save the extended JSON, CSV, mapper log, stdout/stderr logs, command
-   manifest, query H5AD, standalone UMAP/spatial PNGs, and a clustered H5AD
+   manifest, query H5AD, standalone UMAP/spatial PNG/PDF plots, and a clustered H5AD
    annotated with MapMyCells assignments in `obs` columns prefixed with
    `mapmycells_`. The H5AD also records MapMyCells metadata in
    `uns["merxen_mapmycells"]`, including the paths to the separate PNGs; the
    plot images themselves are not embedded in the H5AD.
+
+Set `--mapmycells_plots_only true` to regenerate the annotated H5AD and plots
+from an existing published `mapmycells_out/` directory without preparing a new
+query H5AD, rebuilding a region reference, or rerunning MapMyCells. This is
+useful after changing plot code. Use it with `--only_stage mapmycells` and the
+same `--outdir`, `--mapmycells_reference_mode`, and `--mapmycells_region_name`
+used for the original run.
 
 The default `mapmycells_bootstrap_factor` is `0.9` because these data are
 spatial transcriptomics panels where the newer single-cell-oriented lower
@@ -82,6 +89,7 @@ Use `--only_stage mapmycells` to reuse an existing
 | `n_processors` / `chunk_size` / `rng_seed` | MapMyCells parallelism and reproducibility controls. |
 | `max_gb` / `tmp_dir` | Optional mapper memory and temporary storage controls. |
 | `cloud_safe` / `flatten` / `verbose_csv` | Direct MapMyCells CLI options. |
+| `plots_only` | Reuse existing mapper CSV/extended JSON outputs and regenerate only annotated H5AD + plots. |
 
 ## Outputs
 
@@ -97,8 +105,15 @@ Written under `mapmycells_out/<platform>/`:
 | Stderr log | `<sample_id>_mapmycells_stderr.log` | Captured process stderr for startup/import errors and mapper tracebacks. |
 | Command manifest | `<sample_id>_mapmycells_command.json` | Exact command used for the local mapper call. |
 | UMAP plot | `<sample_id>_mapmycells_umap.png` | Existing Squidpy/Scanpy UMAP coordinates colored by MapMyCells assignment. |
+| UMAP cluster-by-supercluster plots | `<sample_id>_mapmycells_umap_cluster_by_supercluster/supercluster_<name>.png` | Per-supercluster UMAPs with cells outside the supercluster in grey and member cells colored by MapMyCells cluster. |
 | Spatial plot | `<sample_id>_mapmycells_spatial.png` | Spatial coordinates colored by MapMyCells assignment. |
+| Quality scatter | `<sample_id>_mapmycells_quality_scatter.png` | Extended-JSON QC panels for supercluster and cluster assignments: cell complexity vs average correlation/bootstrap probability, correlation vs bootstrap probability, aggregate probability, and runner-up margin. |
+| Supercluster QC | `<sample_id>_mapmycells_supercluster_assignment_qc.png` | Supercluster cell counts, confidence summaries, and low-confidence fractions. |
+| Cluster QC | `<sample_id>_mapmycells_cluster_assignment_qc.png` | Cluster cell counts, confidence summaries, and low-confidence fractions. |
+| Supercluster spatial grid | `<sample_id>_mapmycells_spatial_supercluster_grid.png` | Small-multiple spatial grid with each supercluster highlighted in red against all other cells in grey. |
 | Annotated AnnData | `<sample_id>_mapmycells_annotated.h5ad` | Clustered AnnData with MapMyCells assignments added to `obs` and mapper metadata in `uns["merxen_mapmycells"]`. |
+
+Each listed `.png` plot is also written as a same-stem `.pdf`.
 
 Region-specific outputs use the same file names under
 `mapmycells_out/region_<mapmycells_region_name>/<platform>/`. Their annotated

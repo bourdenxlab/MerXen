@@ -84,12 +84,15 @@ published latest zarrs directly.
 
 Written under `clustering_squidpy_out/<platform>/`:
 
+Each listed `.png` plot is also written as a same-stem `.pdf`.
+
 | Kind | File | Contents |
 |------|------|----------|
 | QC plot | `<sample_id>_qc_histograms.png` | Histograms for count, gene, geometry, nucleus, and control metrics. |
 | QC table | `<sample_id>_qc_metrics.csv` | Per-cell QC metrics before filtering. |
 | UMAP | `<sample_id>_umap.png` | UMAP colored by total counts, genes by counts, and Leiden. |
 | Spatial | `<sample_id>_spatial_scatter_leiden.png` | Squidpy spatial scatter colored by Leiden. |
+| Spatial Leiden grid | `<sample_id>_spatial_scatter_leiden_grid.png` | Small-multiple spatial grid with each de novo Leiden cluster highlighted in red against all other cells in grey. |
 | AnnData | `<sample_id>_clustered.h5ad` | Filtered clustered object, with raw counts in `layers["counts"]`. |
 
 ## Notebook

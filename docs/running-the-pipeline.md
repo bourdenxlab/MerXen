@@ -162,6 +162,13 @@ already exist. Whole-brain-only runs require `--mapmycells_marker_lookup_path`
 and `--mapmycells_precomputed_stats_path`; region runs require
 `--mapmycells_region_labels`.
 
+If the mapper outputs already exist and only the final annotated H5AD/plots need
+to be regenerated, add `--mapmycells_plots_only true` to `--only_stage
+mapmycells`. The process copies the previously published
+`${outdir}/<pair_id>/mapmycells/mapmycells_out/` directory into the work
+directory, skips MapMyCells execution, and rewrites the plots from the existing
+CSV/extended JSON outputs.
+
 ## Running on a cluster
 
 The default executor is local (`executor = 'local'` in

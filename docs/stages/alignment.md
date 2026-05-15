@@ -116,6 +116,8 @@ Published under `${outdir}/<pair_id>/alignment_qc/`:
 | `alignment_qc_out/<pair_id>_alignment_qc_metrics.csv` | Single-row CSV form of the same metrics. |
 | `alignment_qc_out/<pair_id>_alignment_overlay.png` | Xenium/MERSCOPE centroid overlay after alignment. |
 
+The alignment overlay PNG is also written as a same-stem PDF.
+
 ## Notes
 
 The first implementation uses cell-level gene features and centroids. Image
