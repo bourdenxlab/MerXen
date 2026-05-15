@@ -18,6 +18,7 @@ from shapely.geometry import box
 from merxen.analysis.clustering_squidpy import (
     _run_gpu_clustering,
     adata_from_spatialdata,
+    plot_spatial_cluster_grid,
     plot_spatial_scatter,
     remove_control_features,
     run_scanpy_clustering,
@@ -352,5 +353,30 @@ def test_plot_spatial_scatter_suppresses_squidpy_noise(
     warning_text = "\n".join(str(item.message) for item in recorded)
     output_text = f"{captured.out}\n{captured.err}"
     assert output_path.exists()
+    assert output_path.with_suffix(".pdf").exists()
     assert "No data for colormapping provided via 'c'" not in warning_text
     assert "Please specify a valid `library_id`" not in output_text
+
+
+def test_plot_spatial_cluster_grid_writes_png_and_pdf(tmp_path: Path) -> None:
+    """Spatial cluster grid should highlight each Leiden cluster separately."""
+    adata = ad.AnnData(
+        X=np.ones((6, 2), dtype=np.float32),
+        obs=pd.DataFrame(
+            {"leiden": pd.Categorical(["0", "1", "0", "1", "2", "2"])},
+            index=[f"cell{i}" for i in range(6)],
+        ),
+        var=pd.DataFrame(index=["Gene0", "Gene1"]),
+    )
+    adata.obsm["spatial"] = np.column_stack(
+        [np.arange(adata.n_obs), np.arange(adata.n_obs)]
+    )
+
+    output_path = plot_spatial_cluster_grid(
+        adata,
+        tmp_path / "spatial_leiden_grid.png",
+        point_size_highlight=0.4,
+    )
+
+    assert output_path.exists()
+    assert output_path.with_suffix(".pdf").exists()

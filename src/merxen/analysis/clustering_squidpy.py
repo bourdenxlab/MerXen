@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import textwrap
 import warnings
 from pathlib import Path
 from typing import Any, cast
@@ -27,6 +28,7 @@ from scipy import sparse
 from merxen.config import ClusteringSquidpyConfig
 from merxen.io.transcript_io import first_existing_col
 from merxen.memory import force_release, log_status
+from merxen.plotting import prepare_plot_output, save_figure
 
 logger = logging.getLogger(__name__)
 
@@ -532,8 +534,7 @@ def plot_qc_histograms(
     dpi: int = 160,
 ) -> Path:
     """Plot transcript/gene/geometry/control QC histograms."""
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path = prepare_plot_output(output_path)
     panels = [
         ("total_counts", "Transcripts per cell"),
         ("n_genes_by_counts", "Genes per cell"),
@@ -565,7 +566,7 @@ def plot_qc_histograms(
             ax.set_xlabel(column)
     fig.suptitle(f"{sample_label} ({platform.upper()}) QC")
     fig.tight_layout()
-    fig.savefig(output_path, dpi=int(dpi), bbox_inches="tight")
+    save_figure(fig, output_path, dpi=int(dpi), bbox_inches="tight")
     plt.close(fig)
     return output_path
 
@@ -578,8 +579,7 @@ def plot_umap(
     dpi: int = 160,
 ) -> Path:
     """Save a Scanpy UMAP plot for the clustered AnnData object."""
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path = prepare_plot_output(output_path)
     colors = color or ["total_counts", "n_genes_by_counts", "leiden"]
     colors = [c for c in colors if c in adata.obs or c in adata.var_names]
     fig = sc.pl.umap(
@@ -591,7 +591,7 @@ def plot_umap(
     )
     if fig is None:
         fig = plt.gcf()
-    fig.savefig(output_path, dpi=int(dpi), bbox_inches="tight")
+    save_figure(fig, output_path, dpi=int(dpi), bbox_inches="tight")
     plt.close(fig)
     return output_path
 
@@ -606,8 +606,7 @@ def plot_spatial_scatter(
     dpi: int = 160,
 ) -> Path:
     """Save a Squidpy spatial scatter plot for the clustered AnnData object."""
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path = prepare_plot_output(output_path)
     if "spatial" not in adata.obsm:
         raise KeyError("Expected adata.obsm['spatial'] for Squidpy spatial plot.")
 
@@ -641,7 +640,99 @@ def plot_spatial_scatter(
                 category=UserWarning,
             )
             sq.pl.spatial_scatter(adata, **scatter_kwargs)
-    fig.savefig(output_path, dpi=int(dpi), bbox_inches="tight")
+    save_figure(fig, output_path, dpi=int(dpi), bbox_inches="tight")
+    plt.close(fig)
+    return output_path
+
+
+def plot_spatial_cluster_grid(
+    adata: ad.AnnData,
+    output_path: Path | str,
+    *,
+    color: str = "leiden",
+    point_size_background: float = 0.08,
+    point_size_highlight: float = 0.45,
+    alpha_background: float = 0.32,
+    alpha_highlight: float = 0.82,
+    dpi: int = 160,
+) -> Path:
+    """Save a spatial small-multiple grid highlighting each de novo cluster."""
+    output_path = prepare_plot_output(output_path)
+    if "spatial" not in adata.obsm:
+        raise KeyError("Expected adata.obsm['spatial'] for spatial cluster grid.")
+    if color not in adata.obs:
+        raise KeyError(f"Expected adata.obs[{color!r}] for spatial cluster grid.")
+
+    coords = np.asarray(adata.obsm["spatial"])
+    if coords.ndim != 2 or coords.shape[1] < 2:
+        raise ValueError(
+            "Expected adata.obsm['spatial'] to have at least two columns; "
+            f"found shape {coords.shape}."
+        )
+    labels = pd.Series(adata.obs[color], index=adata.obs_names).astype("string")
+    labels = labels.fillna("unassigned")
+    categories = [
+        str(label)
+        for label in labels.value_counts().index
+        if str(label) != "unassigned"
+    ]
+    if not categories:
+        fig, ax = plt.subplots(figsize=(7.0, 4.0))
+        _plot_empty_spatial_grid_axis(ax, f"No {color} labels were available.")
+        save_figure(fig, output_path, dpi=int(dpi), bbox_inches="tight")
+        plt.close(fig)
+        return output_path
+
+    n_categories = len(categories)
+    n_cols = min(4, int(np.ceil(np.sqrt(n_categories))))
+    n_rows = int(np.ceil(n_categories / n_cols))
+    fig, axes = plt.subplots(
+        n_rows,
+        n_cols,
+        figsize=(3.2 * n_cols, 3.2 * n_rows),
+        squeeze=False,
+        sharex=True,
+        sharey=True,
+    )
+    x = coords[:, 0]
+    y = coords[:, 1]
+    x_limits = _padded_limits(x)
+    y_limits = _padded_limits(y)
+    label_values = labels.astype(str).to_numpy()
+
+    for ax, category in zip(axes.ravel(), categories, strict=False):
+        mask = label_values == category
+        ax.scatter(
+            x,
+            y,
+            s=float(point_size_background),
+            c="#c7c7c7",
+            alpha=float(alpha_background),
+            linewidths=0,
+            rasterized=True,
+        )
+        ax.scatter(
+            x[mask],
+            y[mask],
+            s=float(point_size_highlight),
+            c="#d7191c",
+            alpha=float(alpha_highlight),
+            linewidths=0,
+            rasterized=True,
+        )
+        ax.set_title(_wrapped_cluster_title(f"{color} {category}"), fontsize=7)
+        ax.set_aspect("equal")
+        ax.set_xlim(*x_limits)
+        ax.set_ylim(*y_limits)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+    for ax in axes.ravel()[n_categories:]:
+        ax.set_visible(False)
+
+    fig.tight_layout(pad=0.5)
+    save_figure(fig, output_path, dpi=int(dpi), bbox_inches="tight")
     plt.close(fig)
     return output_path
 
@@ -731,6 +822,12 @@ def run_clustering_squidpy(
             point_size=config.spatial_point_size,
             dpi=config.figure_dpi,
         )
+        spatial_cluster_grid = plot_spatial_cluster_grid(
+            clustered,
+            sample_dir / f"{sample.sample_id}_spatial_scatter_leiden_grid.png",
+            point_size_highlight=config.spatial_point_size,
+            dpi=config.figure_dpi,
+        )
         h5ad = save_clustered_adata(
             clustered,
             sample_dir / f"{sample.sample_id}_clustered.h5ad",
@@ -741,6 +838,7 @@ def run_clustering_squidpy(
             "qc_csv": qc_csv,
             "umap_plot": umap_plot,
             "spatial_plot": spatial_plot,
+            "spatial_cluster_grid": spatial_cluster_grid,
             "h5ad": h5ad,
         }
         del adata, clustered
@@ -782,6 +880,37 @@ def collect_gene_id_lookup_for_samples(
     else:
         logger.warning("No Ensembl ID metadata found in clustering input zarrs.")
     return combined
+
+
+def _padded_limits(values: np.ndarray) -> tuple[float, float]:
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return (-1.0, 1.0)
+    min_value = float(finite.min())
+    max_value = float(finite.max())
+    span = max_value - min_value
+    padding = 0.02 * span if span > 0 else 1.0
+    return (min_value - padding, max_value + padding)
+
+
+def _plot_empty_spatial_grid_axis(ax: plt.Axes, message: str) -> None:
+    ax.text(
+        0.5,
+        0.5,
+        message,
+        transform=ax.transAxes,
+        ha="center",
+        va="center",
+        fontsize=9,
+        color="#555555",
+    )
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+
+def _wrapped_cluster_title(value: str, *, width: int = 34) -> str:
+    wrapped = textwrap.wrap(str(value), width=width)
+    return "\n".join(wrapped) if wrapped else str(value)
 
 
 def _choose_table_key(sdata_obj: Any, preferred: str | None) -> str:
