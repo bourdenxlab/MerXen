@@ -60,6 +60,169 @@ def chooseField(row, names) {
     return null
 }
 
+def normalizeAnalysisMode(rawValue) {
+    def raw = rawValue == null ? "paired" : rawValue.toString().trim()
+    if (!raw) {
+        raw = "paired"
+    }
+    def key = raw
+        .toLowerCase()
+        .replaceAll(/[^a-z0-9]+/, "_")
+        .replaceAll(/^_+|_+$/, "")
+    def aliases = [
+        "paired": "paired",
+        "pair": "paired",
+        "both": "paired",
+        "merscope": "merscope",
+        "merfish": "merscope",
+        "m": "merscope",
+        "xenium": "xenium",
+        "x": "xenium",
+    ]
+    if (!aliases.containsKey(key)) {
+        throw new IllegalArgumentException(
+            "Unknown analysis_mode '${raw}'. Valid values: paired, merscope, xenium"
+        )
+    }
+    return aliases[key]
+}
+
+def activePlatformsForMode(analysisMode) {
+    if (analysisMode == "paired") {
+        return ["MERSCOPE", "XENIUM"]
+    }
+    if (analysisMode == "merscope") {
+        return ["MERSCOPE"]
+    }
+    if (analysisMode == "xenium") {
+        return ["XENIUM"]
+    }
+    throw new IllegalArgumentException("Unknown analysis mode: ${analysisMode}")
+}
+
+def requirePlatformInput(row, pairId, platform) {
+    if (platform == "MERSCOPE") {
+        def merscopeDir = chooseField(row, ["merscope_dir"])
+        def merscopeSpatialdataPath = chooseField(
+            row,
+            ["merscope_spatialdata_path", "merscope_zarr_path"]
+        )
+        if (!merscopeDir && !merscopeSpatialdataPath) {
+            error(
+                "Samplesheet row for ${pairId} must provide " +
+                "merscope_dir or merscope_spatialdata_path"
+            )
+        }
+        return [inputDir: merscopeDir, spatialdataPath: merscopeSpatialdataPath]
+    }
+
+    if (platform == "XENIUM") {
+        def xeniumDir = chooseField(row, ["xenium_dir"])
+        def xeniumSpatialdataPath = chooseField(row, ["xenium_spatialdata_path"])
+        if (!xeniumDir && !xeniumSpatialdataPath) {
+            error(
+                "Samplesheet row for ${pairId} must provide " +
+                "xenium_dir or xenium_spatialdata_path"
+            )
+        }
+        return [inputDir: xeniumDir, spatialdataPath: xeniumSpatialdataPath]
+    }
+
+    throw new IllegalArgumentException("Unknown platform: ${platform}")
+}
+
+def buildConfigForPlatform(row, pairId, platform) {
+    def input = requirePlatformInput(row, pairId, platform)
+    if (platform == "MERSCOPE") {
+        return [
+            dataset_name: "${pairId}_MERSCOPE",
+            platform: "MERSCOPE",
+            input_path: input.inputDir ?: input.spatialdataPath,
+            output_path: "spatialdata_out/source_spatialdata.zarr",
+            persistent_output_path: input.spatialdataPath ?: null,
+            merscope_transform_path: chooseField(row, ["merscope_transform_path"]) ?: null,
+            merscope: [:],
+            xenium: [:],
+        ]
+    }
+
+    if (platform == "XENIUM") {
+        return [
+            dataset_name: "${pairId}_XENIUM",
+            platform: "XENIUM",
+            input_path: input.inputDir ?: input.spatialdataPath,
+            output_path: "spatialdata_out/source_spatialdata.zarr",
+            persistent_output_path: input.spatialdataPath ?: null,
+            xenium_spec_path: chooseField(row, ["xenium_spec_path"]) ?: null,
+            merscope: [:],
+            xenium: [:],
+        ]
+    }
+
+    throw new IllegalArgumentException("Unknown platform: ${platform}")
+}
+
+def segmentMetaForPlatform(row, platform, params) {
+    if (platform == "MERSCOPE") {
+        return [
+            channels: parseChannels(row.merscope_channels, ["DAPI", "PolyT"]),
+            image_prefix: chooseField(row, ["merscope_image_prefix"]) ?: null,
+            z_range: parseRange(row.merscope_z_range, 0, 6),
+            transform_path: chooseField(row, ["merscope_transform_path"]) ?: null,
+            xenium_spec_path: null,
+            min_qv: null,
+            voxel_layers: intOrDefault(
+                row.merscope_voxel_layers,
+                params.default_merscope_voxel_layers
+            ),
+        ]
+    }
+
+    if (platform == "XENIUM") {
+        return [
+            channels: parseChannels(row.xenium_channels, ["DAPI", "18S"]),
+            image_prefix: null,
+            z_range: null,
+            transform_path: null,
+            xenium_spec_path: chooseField(row, ["xenium_spec_path"]) ?: null,
+            min_qv: floatOrDefault(row.xenium_min_qv, params.xenium_min_qv),
+            voxel_layers: intOrDefault(
+                row.xenium_voxel_layers,
+                params.default_xenium_voxel_layers
+            ),
+        ]
+    }
+
+    throw new IllegalArgumentException("Unknown platform: ${platform}")
+}
+
+def samplesJsonForPlatforms(pairId, platforms, platformPaths = [:]) {
+    def samples = platforms.collect { platform ->
+        def sample = [
+            sample_id: "${pairId}_${platform}",
+            platform: platform,
+        ]
+        if (platformPaths.containsKey(platform)) {
+            sample.zarr_path = platformPaths[platform].toString()
+        }
+        return sample
+    }
+    return JsonOutput.prettyPrint(JsonOutput.toJson(samples))
+}
+
+def samplesJsonFromGroupedZarrs(pairId, activePlatforms, platformNames, zarrPaths) {
+    def names = platformNames.collect { it.toString() }
+    def pathsByPlatform = [:]
+    activePlatforms.each { platform ->
+        def idx = names.indexOf(platform)
+        if (idx < 0) {
+            error "Missing ${platform} latest zarr for ${pairId}"
+        }
+        pathsByPlatform[platform] = zarrPaths[idx].toString()
+    }
+    return samplesJsonForPlatforms(pairId, activePlatforms, pathsByPlatform)
+}
+
 def normalizeStage(rawValue, paramName) {
     def raw = rawValue == null ? "" : rawValue.toString().trim()
     if (!raw) {
@@ -108,12 +271,15 @@ def normalizeStage(rawValue, paramName) {
     return aliases[key]
 }
 
-def activeStageOrder(alignmentEnabled) {
+def activeStageOrder(alignmentEnabled, pairedMode) {
     def stages = ["build_spatialdata", "segment", "enrich", "qc"]
-    if (alignmentEnabled) {
+    if (pairedMode && alignmentEnabled) {
         stages += ["align", "align_qc"]
     }
-    stages += ["compare", "visualize", "clustering_squidpy", "mapmycells"]
+    if (pairedMode) {
+        stages += ["compare"]
+    }
+    stages += ["visualize", "clustering_squidpy", "mapmycells"]
     return stages
 }
 
@@ -162,8 +328,15 @@ workflow {
         error "Missing required parameter: --samplesheet"
     }
 
+    def analysisMode = normalizeAnalysisMode(params.analysis_mode)
+    def activePlatforms = activePlatformsForMode(analysisMode)
+    def pairedMode = analysisMode == "paired"
     def alignmentEnabled = params.enable_alignment.toString().toBoolean()
-    def stageOrder = activeStageOrder(alignmentEnabled)
+    if (!pairedMode && alignmentEnabled) {
+        error "Alignment requires paired analysis. Use --analysis_mode paired or disable --enable_alignment."
+    }
+
+    def stageOrder = activeStageOrder(alignmentEnabled, pairedMode)
     def onlyStageRaw = params.only_stage == null ? "" : params.only_stage.toString().trim()
     def startStage = normalizeStage(
         onlyStageRaw ? onlyStageRaw : params.start_stage,
@@ -230,6 +403,7 @@ workflow {
     }
 
     def selectedStages = stageOrder.findAll { stageInRange(it, startStage, stopStage, stageOrder) }
+    log.info "Analysis mode: ${analysisMode}; active platforms: ${activePlatforms.join(', ')}"
     log.info "Selected stages: ${selectedStages.join(' -> ')}"
 
     samplesheet_ch = Channel
@@ -243,66 +417,16 @@ workflow {
                 error "Found samplesheet row with missing pair_id: ${row}"
             }
 
-            def merscopeDir = chooseField(row, ["merscope_dir"])
-            def merscopeSpatialdataPath = chooseField(
-                row,
-                ["merscope_spatialdata_path", "merscope_zarr_path"]
-            )
-            def xeniumDir = chooseField(row, ["xenium_dir"])
-            def xeniumSpatialdataPath = chooseField(row, ["xenium_spatialdata_path"])
-
-            if (!merscopeDir && !merscopeSpatialdataPath) {
-                error(
-                    "Samplesheet row for ${pairId} must provide " +
-                    "merscope_dir or merscope_spatialdata_path"
+            activePlatforms.collect { platform ->
+                def key = "${pairId}|${platform}"
+                def buildConfig = buildConfigForPlatform(row, pairId, platform)
+                tuple(
+                    key,
+                    pairId,
+                    platform,
+                    JsonOutput.prettyPrint(JsonOutput.toJson(buildConfig)),
                 )
             }
-            if (!xeniumDir && !xeniumSpatialdataPath) {
-                error(
-                    "Samplesheet row for ${pairId} must provide " +
-                    "xenium_dir or xenium_spatialdata_path"
-                )
-            }
-
-            def merscopeBuildConfig = [
-                dataset_name: "${pairId}_MERSCOPE",
-                platform: "MERSCOPE",
-                input_path: merscopeDir ?: merscopeSpatialdataPath,
-                output_path: "spatialdata_out/source_spatialdata.zarr",
-                persistent_output_path: merscopeSpatialdataPath ?: null,
-                merscope_transform_path: chooseField(row, ["merscope_transform_path"]) ?: null,
-                merscope: [:],
-                xenium: [:],
-            ]
-
-            def xeniumBuildConfig = [
-                dataset_name: "${pairId}_XENIUM",
-                platform: "XENIUM",
-                input_path: xeniumDir ?: xeniumSpatialdataPath,
-                output_path: "spatialdata_out/source_spatialdata.zarr",
-                persistent_output_path: xeniumSpatialdataPath ?: null,
-                xenium_spec_path: chooseField(row, ["xenium_spec_path"]) ?: null,
-                merscope: [:],
-                xenium: [:],
-            ]
-
-            def merscopeKey = "${pairId}|MERSCOPE"
-            def xeniumKey = "${pairId}|XENIUM"
-
-            [
-                tuple(
-                    merscopeKey,
-                    pairId,
-                    "MERSCOPE",
-                    JsonOutput.prettyPrint(JsonOutput.toJson(merscopeBuildConfig)),
-                ),
-                tuple(
-                    xeniumKey,
-                    pairId,
-                    "XENIUM",
-                    JsonOutput.prettyPrint(JsonOutput.toJson(xeniumBuildConfig)),
-                ),
-            ]
         }
 
         build_results_ch = BUILD_SPATIALDATA(build_inputs_ch)
@@ -316,7 +440,7 @@ workflow {
                 error "Found samplesheet row with missing pair_id: ${row}"
             }
 
-            ["MERSCOPE", "XENIUM"].collect { platform ->
+            activePlatforms.collect { platform ->
                 def key = "${pairId}|${platform}"
                 def sourceSpatialdata = requireExistingPath(
                     publishedDatasetPath(
@@ -339,46 +463,12 @@ workflow {
                 error "Found samplesheet row with missing pair_id: ${row}"
             }
 
-            def merscopeVoxelLayers = intOrDefault(
-                row.merscope_voxel_layers,
-                params.default_merscope_voxel_layers
-            )
-            def xeniumVoxelLayers = intOrDefault(
-                row.xenium_voxel_layers,
-                params.default_xenium_voxel_layers
-            )
-            def xeniumMinQv = floatOrDefault(row.xenium_min_qv, params.xenium_min_qv)
-            def merscopeRange = parseRange(row.merscope_z_range, 0, 6)
-
-            def merscopeKey = "${pairId}|MERSCOPE"
-            def xeniumKey = "${pairId}|XENIUM"
-
-            [
+            activePlatforms.collect { platform ->
                 tuple(
-                    merscopeKey,
-                    [
-                        channels: parseChannels(row.merscope_channels, ["DAPI", "PolyT"]),
-                        image_prefix: chooseField(row, ["merscope_image_prefix"]) ?: null,
-                        z_range: merscopeRange,
-                        transform_path: chooseField(row, ["merscope_transform_path"]) ?: null,
-                        xenium_spec_path: null,
-                        min_qv: null,
-                        voxel_layers: merscopeVoxelLayers,
-                    ],
-                ),
-                tuple(
-                    xeniumKey,
-                    [
-                        channels: parseChannels(row.xenium_channels, ["DAPI", "18S"]),
-                        image_prefix: null,
-                        z_range: null,
-                        transform_path: null,
-                        xenium_spec_path: chooseField(row, ["xenium_spec_path"]) ?: null,
-                        min_qv: xeniumMinQv,
-                        voxel_layers: xeniumVoxelLayers,
-                    ],
-                ),
-            ]
+                    "${pairId}|${platform}",
+                    segmentMetaForPlatform(row, platform, params),
+                )
+            }
         }
 
         segment_inputs_ch = build_results_ch
@@ -474,7 +564,7 @@ workflow {
                 error "Found samplesheet row with missing pair_id: ${row}"
             }
 
-            ["MERSCOPE", "XENIUM"].collect { platform ->
+            activePlatforms.collect { platform ->
                 def key = "${pairId}|${platform}"
                 def latestZarr = requireExistingPath(
                     publishedDatasetPath(
@@ -566,7 +656,7 @@ workflow {
                     error "Found samplesheet row with missing pair_id: ${row}"
                 }
 
-                ["MERSCOPE", "XENIUM"].collect { platform ->
+                activePlatforms.collect { platform ->
                     def key = "${pairId}|${platform}"
                     def latestZarr = requireExistingPath(
                         publishedDatasetPath(
@@ -599,79 +689,58 @@ workflow {
         qc_results_ch = QC(qc_inputs_ch)
     }
 
-    def needPairedZarrs =
+    def needAnalysisZarrs =
         runAlign || runAlignQc || runCompare || runVisualize || runClusteringSquidpy
-    if (needPairedZarrs) {
+    if (needAnalysisZarrs) {
         if (runQc) {
-            merscope_qc_ch = qc_results_ch
-                .filter {
-                    key, pairId, platform, enrichedLatestZarr, qcOutDir ->
-                        platform == "MERSCOPE"
-                }
-                .map {
-                    key, pairId, platform, enrichedLatestZarr, qcOutDir ->
-                        tuple(pairId, enrichedLatestZarr)
-                }
-
-            xenium_qc_ch = qc_results_ch
-                .filter {
-                    key, pairId, platform, enrichedLatestZarr, qcOutDir ->
-                        platform == "XENIUM"
-                }
-                .map {
-                    key, pairId, platform, enrichedLatestZarr, qcOutDir ->
-                        tuple(pairId, enrichedLatestZarr)
-                }
-
-            paired_zarrs_ch = merscope_qc_ch
-                .join(xenium_qc_ch)
-                .map { pairId, merscopeLatest, xeniumLatest ->
-                    def merscopePath = Paths.get(merscopeLatest.toString()).toRealPath().toString()
-                    def xeniumPath = Paths.get(xeniumLatest.toString()).toRealPath().toString()
+            dataset_zarrs_ch = qc_results_ch.map {
+                key, pairId, platform, enrichedLatestZarr, qcOutDir ->
                     tuple(
                         pairId,
-                        file(merscopeLatest),
-                        file(xeniumLatest),
-                        merscopePath,
-                        xeniumPath,
+                        platform,
+                        Paths.get(enrichedLatestZarr.toString()).toRealPath().toString(),
                     )
                 }
         } else {
-            paired_zarrs_ch = samplesheet_ch.map { row ->
+            dataset_zarrs_ch = samplesheet_ch.flatMap { row ->
                 def pairId = row.pair_id?.toString()?.trim()
                 if (!pairId) {
                     error "Found samplesheet row with missing pair_id: ${row}"
                 }
-                def merscopeLatest = requireExistingPath(
-                    publishedDatasetPath(
-                        params.outdir,
-                        pairId,
-                        "MERSCOPE",
-                        "latest/latest_spatialdata.zarr",
-                    ),
-                    "QC/enriched MERSCOPE latest zarr for ${pairId}",
-                )
-                def xeniumLatest = requireExistingPath(
-                    publishedDatasetPath(
-                        params.outdir,
-                        pairId,
-                        "XENIUM",
-                        "latest/latest_spatialdata.zarr",
-                    ),
-                    "QC/enriched XENIUM latest zarr for ${pairId}",
-                )
-                tuple(
-                    pairId,
-                    merscopeLatest,
-                    xeniumLatest,
-                    merscopeLatest.toRealPath().toString(),
-                    xeniumLatest.toRealPath().toString(),
-                )
+
+                activePlatforms.collect { platform ->
+                    def latestZarr = requireExistingPath(
+                        publishedDatasetPath(
+                            params.outdir,
+                            pairId,
+                            platform,
+                            "latest/latest_spatialdata.zarr",
+                        ),
+                        "QC/enriched ${platform} latest zarr for ${pairId}",
+                    )
+                    tuple(pairId, platform, latestZarr.toRealPath().toString())
+                }
             }
         }
     }
 
-    if (alignmentEnabled) {
+    if (pairedMode && needAnalysisZarrs) {
+        merscope_zarr_ch = dataset_zarrs_ch
+            .filter { pairId, platform, zarrPath -> platform == "MERSCOPE" }
+            .map { pairId, platform, zarrPath -> tuple(pairId, zarrPath) }
+
+        xenium_zarr_ch = dataset_zarrs_ch
+            .filter { pairId, platform, zarrPath -> platform == "XENIUM" }
+            .map { pairId, platform, zarrPath -> tuple(pairId, zarrPath) }
+
+        paired_zarrs_ch = merscope_zarr_ch
+            .join(xenium_zarr_ch)
+            .map { pairId, merscopePath, xeniumPath ->
+                tuple(pairId, merscopePath, xeniumPath)
+            }
+    }
+
+    if (pairedMode && alignmentEnabled) {
         def needAlignmentResults =
             runAlign || runAlignQc || runCompare || runVisualize || runClusteringSquidpy
         if (needAlignmentResults) {
@@ -731,20 +800,47 @@ workflow {
                 ALIGN_QC(alignment_results_ch)
             }
 
-            downstream_zarrs_ch = alignment_results_ch.map {
+            paired_downstream_zarrs_ch = alignment_results_ch.map {
                 pairId, merscopeLatest, xeniumLatest, transformJson, coordsDir ->
-                    tuple(pairId, file(merscopeLatest), xeniumLatest)
+                    tuple(pairId, merscopeLatest, xeniumLatest)
             }
         }
-    } else if (runCompare || runVisualize || runClusteringSquidpy) {
-        downstream_zarrs_ch = paired_zarrs_ch.map {
-            pairId, merscopeLatest, xeniumLatest, merscopePath, xeniumPath ->
-                tuple(pairId, merscopeLatest, xeniumPath)
-        }
+    } else if (pairedMode && (runCompare || runVisualize || runClusteringSquidpy)) {
+        paired_downstream_zarrs_ch = paired_zarrs_ch
     }
 
     if (runCompare) {
-        compare_results_ch = COMPARE(downstream_zarrs_ch)
+        compare_results_ch = COMPARE(paired_downstream_zarrs_ch)
+    }
+
+    if (runVisualize || runClusteringSquidpy) {
+        if (pairedMode && alignmentEnabled) {
+            analysis_samples_ch = paired_downstream_zarrs_ch.map {
+                pairId, merscopePath, xeniumPath ->
+                    tuple(
+                        pairId,
+                        samplesJsonForPlatforms(
+                            pairId,
+                            ["MERSCOPE", "XENIUM"],
+                            ["MERSCOPE": merscopePath, "XENIUM": xeniumPath],
+                        ),
+                    )
+            }
+        } else {
+            analysis_samples_ch = dataset_zarrs_ch
+                .groupTuple()
+                .map { pairId, platformNames, zarrPaths ->
+                    tuple(
+                        pairId,
+                        samplesJsonFromGroupedZarrs(
+                            pairId,
+                            activePlatforms,
+                            platformNames,
+                            zarrPaths,
+                        ),
+                    )
+                }
+        }
     }
 
     if (runVisualize) {
@@ -753,13 +849,13 @@ workflow {
                 tuple(pairId, true)
             }
 
-            visualize_inputs_ch = downstream_zarrs_ch
+            visualize_inputs_ch = analysis_samples_ch
                 .join(compare_done_ch)
-                .map { pairId, merscopeLatest, xeniumLatest, doneFlag ->
-                    tuple(pairId, merscopeLatest, xeniumLatest)
+                .map { pairId, samplesJson, doneFlag ->
+                    tuple(pairId, samplesJson)
                 }
         } else {
-            visualize_inputs_ch = downstream_zarrs_ch
+            visualize_inputs_ch = analysis_samples_ch
         }
 
         visualize_results_ch = VISUALIZE(visualize_inputs_ch)
@@ -771,13 +867,13 @@ workflow {
                 tuple(pairId, true)
             }
 
-            clustering_inputs_ch = downstream_zarrs_ch
+            clustering_inputs_ch = analysis_samples_ch
                 .join(visualize_done_ch)
-                .map { pairId, merscopeLatest, xeniumLatest, doneFlag ->
-                    tuple(pairId, merscopeLatest, xeniumLatest)
+                .map { pairId, samplesJson, doneFlag ->
+                    tuple(pairId, samplesJson)
                 }
         } else {
-            clustering_inputs_ch = downstream_zarrs_ch
+            clustering_inputs_ch = analysis_samples_ch
         }
 
         clustering_results_ch = CLUSTERING_SQUIDPY(clustering_inputs_ch)
@@ -798,7 +894,11 @@ workflow {
                     ),
                     "CLUSTERING_SQUIDPY output directory for ${pairId}",
                 )
-                tuple(pairId, clusteringOut)
+                tuple(
+                    pairId,
+                    samplesJsonForPlatforms(pairId, activePlatforms),
+                    clusteringOut,
+                )
             }
         }
 

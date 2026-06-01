@@ -8,6 +8,7 @@ process MAPMYCELLS {
 
     input:
     tuple val(pair_id),
+        val(samples_json),
         path(clustering_out_dir, stageAs: "clustering_squidpy_input")
 
     output:
@@ -27,6 +28,20 @@ process MAPMYCELLS {
     def plotsOnly = params.mapmycells_plots_only == null ? false : params.mapmycells_plots_only.toString().trim().toLowerCase() == "true"
     def plotsOnlyJson = plotsOnly ? "true" : "false"
     def publishedMapMyCellsOut = "${params.outdir}/${pair_id}/mapmycells/mapmycells_out"
+    def clusteringSamples = new JsonSlurper().parseText(samples_json)
+    def mapmycellsSamples = clusteringSamples.collect { sample ->
+        def sampleId = sample.sample_id.toString()
+        def platform = sample.platform.toString()
+        [
+            sample_id: sampleId,
+            platform: platform,
+            anndata_path: "${clustering_out_dir}/${platform.toLowerCase()}/${sampleId}_clustered.h5ad",
+            query_layer: queryLayerJson == "null" ? null : params.mapmycells_query_layer.toString(),
+            gene_id_column: geneIdColumnJson == "null" ? null : params.mapmycells_gene_id_column.toString(),
+            obs_id_column: obsIdColumnJson == "null" ? null : params.mapmycells_obs_id_column.toString(),
+        ]
+    }
+    def mapmycellsSamplesJson = JsonOutput.prettyPrint(JsonOutput.toJson(mapmycellsSamples))
     def regionLabelValues = []
     if (params.mapmycells_region_labels instanceof List) {
         regionLabelValues = params.mapmycells_region_labels.collect { it.toString() }
@@ -59,24 +74,7 @@ process MAPMYCELLS {
 {
   "pair_id": "${pair_id}",
   "output_dir": "mapmycells_out",
-  "samples": [
-    {
-      "sample_id": "${pair_id}_MERSCOPE",
-      "platform": "MERSCOPE",
-      "anndata_path": "${clustering_out_dir}/merscope/${pair_id}_MERSCOPE_clustered.h5ad",
-      "query_layer": ${queryLayerJson},
-      "gene_id_column": ${geneIdColumnJson},
-      "obs_id_column": ${obsIdColumnJson}
-    },
-    {
-      "sample_id": "${pair_id}_XENIUM",
-      "platform": "XENIUM",
-      "anndata_path": "${clustering_out_dir}/xenium/${pair_id}_XENIUM_clustered.h5ad",
-      "query_layer": ${queryLayerJson},
-      "gene_id_column": ${geneIdColumnJson},
-      "obs_id_column": ${obsIdColumnJson}
-    }
-  ],
+  "samples": ${mapmycellsSamplesJson},
   "reference_mode": ${referenceModeJson},
   "marker_lookup_path": ${markerLookupJson},
   "precomputed_stats_path": ${precomputedStatsJson},

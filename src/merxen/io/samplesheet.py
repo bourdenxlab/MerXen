@@ -89,9 +89,7 @@ def parse_samplesheet(csv_path: Path) -> list[SamplePair]:
             )
 
         for row_num, row in enumerate(reader, start=2):
-            z_range_str = row.get("merscope_z_range", "0-6")
-            z_parts = z_range_str.split("-")
-            z_range = (int(z_parts[0]), int(z_parts[1]))
+            z_range = _parse_range(row.get("merscope_z_range"), default=(0, 6))
             merscope_spatialdata_raw = row.get("merscope_spatialdata_path") or row.get(
                 "merscope_zarr_path"
             )
@@ -106,16 +104,22 @@ def parse_samplesheet(csv_path: Path) -> list[SamplePair]:
                     row.get("merscope_transform_path")
                 ),
                 merscope_channels=_parse_list(
-                    row.get("merscope_channels", "DAPI,PolyT")
+                    row.get("merscope_channels"), default=["DAPI", "PolyT"]
                 ),
                 xenium_dir=_optional_path(row.get("xenium_dir")),
                 xenium_spatialdata_path=_optional_path(
                     row.get("xenium_spatialdata_path")
                 ),
-                xenium_channels=_parse_list(row.get("xenium_channels", "DAPI,18S")),
-                xenium_min_qv=float(row.get("xenium_min_qv", "20.0")),
-                merscope_voxel_layers=int(row.get("merscope_voxel_layers", "7")),
-                xenium_voxel_layers=int(row.get("xenium_voxel_layers", "2")),
+                xenium_channels=_parse_list(
+                    row.get("xenium_channels"), default=["DAPI", "18S"]
+                ),
+                xenium_min_qv=_parse_float(row.get("xenium_min_qv"), default=20.0),
+                merscope_voxel_layers=_parse_int(
+                    row.get("merscope_voxel_layers"), default=7
+                ),
+                xenium_voxel_layers=_parse_int(
+                    row.get("xenium_voxel_layers"), default=2
+                ),
                 xenium_spec_path=_optional_path(row.get("xenium_spec_path")),
             )
             pairs.append(pair)
@@ -124,29 +128,62 @@ def parse_samplesheet(csv_path: Path) -> list[SamplePair]:
     return pairs
 
 
-def validate_samplesheet(pairs: list[SamplePair]) -> None:
+def required_platforms_for_mode(analysis_mode: str = "paired") -> tuple[str, ...]:
+    """Return the platforms that must be present for a pipeline analysis mode."""
+    mode = analysis_mode.strip().lower().replace("-", "_")
+    aliases = {
+        "paired": ("MERSCOPE", "XENIUM"),
+        "pair": ("MERSCOPE", "XENIUM"),
+        "both": ("MERSCOPE", "XENIUM"),
+        "merscope": ("MERSCOPE",),
+        "merfish": ("MERSCOPE",),
+        "xenium": ("XENIUM",),
+    }
+    if mode not in aliases:
+        raise ValueError(
+            f"Unknown analysis_mode={analysis_mode!r}. "
+            "Valid values: paired, merscope, xenium."
+        )
+    return aliases[mode]
+
+
+def validate_samplesheet(
+    pairs: list[SamplePair],
+    *,
+    analysis_mode: str = "paired",
+) -> None:
     """Validate that all paths in a samplesheet exist.
 
     Args:
         pairs: List of SamplePair instances to validate.
+        analysis_mode: Required platform mode: ``paired`` (default),
+            ``merscope``, or ``xenium``.
 
     Raises:
         FileNotFoundError: If any required path does not exist.
     """
     errors = []
+    required_platforms = set(required_platforms_for_mode(analysis_mode))
     for pair in pairs:
-        if pair.merscope_dir is None and pair.merscope_spatialdata_path is None:
+        has_merscope = (
+            pair.merscope_dir is not None or pair.merscope_spatialdata_path is not None
+        )
+        has_xenium = (
+            pair.xenium_dir is not None or pair.xenium_spatialdata_path is not None
+        )
+        if "MERSCOPE" in required_platforms and not has_merscope:
             errors.append(
                 f"[{pair.pair_id}] Provide either merscope_dir or "
                 "merscope_spatialdata_path."
             )
-        if pair.xenium_dir is None and pair.xenium_spatialdata_path is None:
+        if "XENIUM" in required_platforms and not has_xenium:
             errors.append(
                 f"[{pair.pair_id}] Provide either xenium_dir or "
                 "xenium_spatialdata_path."
             )
         if (
-            pair.merscope_dir is not None
+            has_merscope
+            and pair.merscope_dir is not None
             and not pair.merscope_dir.exists()
             and pair.merscope_spatialdata_path is None
         ):
@@ -154,7 +191,8 @@ def validate_samplesheet(pairs: list[SamplePair]) -> None:
                 f"[{pair.pair_id}] MERSCOPE dir not found: {pair.merscope_dir}"
             )
         if (
-            pair.merscope_spatialdata_path is not None
+            has_merscope
+            and pair.merscope_spatialdata_path is not None
             and not pair.merscope_spatialdata_path.exists()
             and pair.merscope_dir is None
         ):
@@ -163,13 +201,15 @@ def validate_samplesheet(pairs: list[SamplePair]) -> None:
                 f"{pair.merscope_spatialdata_path}"
             )
         if (
-            pair.xenium_dir is not None
+            has_xenium
+            and pair.xenium_dir is not None
             and not pair.xenium_dir.exists()
             and pair.xenium_spatialdata_path is None
         ):
             errors.append(f"[{pair.pair_id}] Xenium dir not found: {pair.xenium_dir}")
         if (
-            pair.xenium_spatialdata_path is not None
+            has_xenium
+            and pair.xenium_spatialdata_path is not None
             and not pair.xenium_spatialdata_path.exists()
             and pair.xenium_dir is None
         ):
@@ -193,8 +233,38 @@ def validate_samplesheet(pairs: list[SamplePair]) -> None:
         raise FileNotFoundError("Samplesheet validation failed:\n" + "\n".join(errors))
 
 
-def _parse_list(value: str) -> list[str]:
+def _parse_range(
+    value: str | None,
+    *,
+    default: tuple[int, int],
+) -> tuple[int, int]:
+    """Parse an inclusive start-end range with a fallback for blank fields."""
+    if value is None or not value.strip():
+        return default
+    z_parts = [part.strip() for part in value.split("-")]
+    if len(z_parts) != 2:
+        return default
+    return (int(z_parts[0]), int(z_parts[1]))
+
+
+def _parse_float(value: str | None, *, default: float) -> float:
+    """Parse a float with a fallback for blank CSV fields."""
+    if value is None or not value.strip():
+        return default
+    return float(value)
+
+
+def _parse_int(value: str | None, *, default: int) -> int:
+    """Parse an integer with a fallback for blank CSV fields."""
+    if value is None or not value.strip():
+        return default
+    return int(value)
+
+
+def _parse_list(value: str | None, *, default: list[str]) -> list[str]:
     """Parse a comma-separated string into a list of stripped strings."""
+    if value is None or not value.strip():
+        return list(default)
     return [v.strip() for v in value.split(",") if v.strip()]
 
 

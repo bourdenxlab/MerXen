@@ -5,7 +5,7 @@ process COMPARE {
 
     input:
     tuple val(pair_id),
-        path(merscope_zarr, stageAs: "merscope_latest_input.zarr"),
+        val(merscope_zarr),
         val(xenium_zarr)
 
     output:

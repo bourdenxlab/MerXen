@@ -5,8 +5,7 @@ process VISUALIZE {
 
     input:
     tuple val(pair_id),
-        path(merscope_zarr, stageAs: "merscope_latest_input.zarr"),
-        val(xenium_zarr)
+        val(samples_json)
 
     output:
     tuple val(pair_id), path("visualize_out")
@@ -18,9 +17,8 @@ process VISUALIZE {
     cat > visualize_config.json <<JSON
 {
   "pair_id": "${pair_id}",
-  "merscope_zarr_path": "${merscope_zarr}",
-  "xenium_zarr_path": "${xenium_zarr}",
-  "output_dir": "visualize_out"
+  "output_dir": "visualize_out",
+  "samples": ${samples_json}
 }
 JSON
 

@@ -5,11 +5,10 @@ process CLUSTERING_SQUIDPY {
 
     input:
     tuple val(pair_id),
-        path(merscope_zarr, stageAs: "merscope_latest_input.zarr"),
-        val(xenium_zarr)
+        val(samples_json)
 
     output:
-    tuple val(pair_id), path("clustering_squidpy_out")
+    tuple val(pair_id), val(samples_json), path("clustering_squidpy_out")
 
     script:
     """
@@ -19,18 +18,7 @@ process CLUSTERING_SQUIDPY {
 {
   "pair_id": "${pair_id}",
   "output_dir": "clustering_squidpy_out",
-  "samples": [
-    {
-      "sample_id": "${pair_id}_MERSCOPE",
-      "platform": "MERSCOPE",
-      "zarr_path": "${merscope_zarr}"
-    },
-    {
-      "sample_id": "${pair_id}_XENIUM",
-      "platform": "XENIUM",
-      "zarr_path": "${xenium_zarr}"
-    }
-  ],
+  "samples": ${samples_json},
   "drop_control_features": ${params.clustering_squidpy_drop_control_features},
   "min_counts": ${params.clustering_squidpy_min_counts},
   "min_cells": ${params.clustering_squidpy_min_cells},
