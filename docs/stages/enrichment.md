@@ -84,9 +84,10 @@ forward.
    transcript points in chunks of `chunk_rows=750_000`. When a vendor table
    already exists (Xenium's cell_table, for example) it is cloned to the
    right region name rather than recomputed.
-6. **Atomic replace.** The enriched zarr is written to a temp sibling path,
-   then atomically moved over the durable `latest_spatialdata.zarr`. That is
-   the point where the non-enriched intermediate disappears.
+6. **In-place element writes.** Enrichment writes each added shape, image, and
+   table into the backed `latest_spatialdata.zarr` with SpatialData's
+   element-level writer. The stage no longer creates a full temp copy of the
+   zarr just to add these additive layers.
 
 ## Outputs
 
@@ -111,6 +112,5 @@ enrichment so all tables share a column order.
 - **`No points found`** — the transcripts table is missing from the
   SpatialData zarr; this can happen if the stage-1 build excluded
   transcripts.
-- **Conflicts on re-runs.** When re-running with edits, delete the
-  `table_*` elements first or rely on `--force-rerun` so the stage can
-  overwrite.
+- **Conflicts on re-runs.** When re-running with edits, rely on
+  `--force-rerun` so additive layers can be replaced element by element.

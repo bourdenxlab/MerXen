@@ -63,7 +63,7 @@ Path: `${outdir}/<pair_id>/<platform>/latest/`
 
 | File | Contents |
 |------|----------|
-| `latest_spatialdata.zarr` | Durable current SpatialData artifact. Segmentation writes the refined ProSeg result here, then enrichment atomically replaces it with the fully enriched object. This is the primary downstream input. |
+| `latest_spatialdata.zarr` | Durable current SpatialData artifact. Segmentation writes the refined ProSeg result here, then enrichment updates it in place with additive shapes, images, and tables. This is the primary downstream input. |
 
 ### Segmentation
 
