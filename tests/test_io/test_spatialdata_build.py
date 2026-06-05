@@ -7,12 +7,19 @@ import types
 from pathlib import Path
 from types import SimpleNamespace
 
+import dask.array as da
+import numpy as np
 import pytest
 
 from merxen.config import MerscopeBuildConfig, SpatialDataBuildConfig
-from merxen.io.builders.merscope import write_merscope_spatialdata
+from merxen.io.builders.merscope import (
+    ProjectionBuildResult,
+    _build_iterative_projection_store,
+    write_merscope_spatialdata,
+)
 from merxen.io.builders.pipeline import build_spatialdata_artifact
 from merxen.io.image_source import MERSCOPE_ZPROJ_IMAGE_NAME
+from merxen.path_utils import remove_path
 
 
 def test_build_spatialdata_artifact_reuses_existing_persistent_zarr(
@@ -100,6 +107,8 @@ def test_merscope_writer_builds_projection_without_reader_mosaics(
     output_path = tmp_path / "source.zarr"
     calls: dict[str, object] = {}
     projection = object()
+    projection_tmp = tmp_path / "projection_tmp"
+    projection_tmp.mkdir()
     written: list[tuple[object, Path, bool | None]] = []
 
     fake_spatialdata_io = types.ModuleType("spatialdata_io")
@@ -113,7 +122,7 @@ def test_merscope_writer_builds_projection_without_reader_mosaics(
     monkeypatch.setitem(sys.modules, "spatialdata_io", fake_spatialdata_io)
     monkeypatch.setattr(
         "merxen.io.builders.merscope._load_merscope_projection_from_raw",
-        lambda **kwargs: projection,
+        lambda **kwargs: ProjectionBuildResult(projection, projection_tmp),
     )
     monkeypatch.setattr(
         "merxen.io.builders.merscope.write_spatialdata_zarr",
@@ -137,3 +146,75 @@ def test_merscope_writer_builds_projection_without_reader_mosaics(
     assert path == output_path
     assert overwrite is True
     assert sdata.images == {MERSCOPE_ZPROJ_IMAGE_NAME: projection}
+    assert not projection_tmp.exists()
+
+
+def test_iterative_merscope_projection_store_bounds_active_planes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Iterative projection should produce the same max without stacking z planes."""
+    planes: dict[tuple[str, int], np.ndarray] = {
+        ("DAPI", 0): np.array([[1, 5], [3, 2]], dtype=np.uint16),
+        ("DAPI", 1): np.array([[4, 2], [9, 1]], dtype=np.uint16),
+        ("DAPI", 2): np.array([[0, 8], [7, 6]], dtype=np.uint16),
+        ("PolyT", 0): np.array([[10, 1], [2, 3]], dtype=np.uint16),
+        ("PolyT", 1): np.array([[4, 12], [1, 5]], dtype=np.uint16),
+        ("PolyT", 2): np.array([[6, 7], [8, 0]], dtype=np.uint16),
+    }
+    opened: list[tuple[str, int]] = []
+
+    def _fake_open_plane(**kwargs: object) -> da.Array:
+        stain = str(kwargs["stain"])
+        z_layer = int(kwargs["z_layer"])
+        opened.append((stain, z_layer))
+        return da.from_array(planes[(stain, z_layer)], chunks=(1, 1))
+
+    monkeypatch.setattr(
+        "merxen.io.builders.merscope._open_merscope_channel_plane_array",
+        _fake_open_plane,
+    )
+
+    result = _build_iterative_projection_store(
+        images_dir=tmp_path,
+        stainings=["DAPI", "PolyT"],
+        z_layers=[0, 1, 2],
+        image_models_kwargs={"chunks": (1, 1, 1), "scale_factors": [2]},
+        temp_root=tmp_path,
+    )
+
+    try:
+        projection = result.image.data.compute()
+        expected = np.stack(
+            [
+                np.maximum.reduce(
+                    [planes[("DAPI", 0)], planes[("DAPI", 1)], planes[("DAPI", 2)]]
+                ),
+                np.maximum.reduce(
+                    [
+                        planes[("PolyT", 0)],
+                        planes[("PolyT", 1)],
+                        planes[("PolyT", 2)],
+                    ]
+                ),
+            ],
+            axis=0,
+        )
+
+        assert result.temp_path is not None
+        assert result.temp_path.exists()
+        assert tuple(result.image.dims) == ("c", "y", "x")
+        assert list(result.image.coords["c"].values) == ["DAPI", "PolyT"]
+        assert opened == [
+            ("DAPI", 0),
+            ("DAPI", 0),
+            ("DAPI", 1),
+            ("DAPI", 2),
+            ("PolyT", 0),
+            ("PolyT", 1),
+            ("PolyT", 2),
+        ]
+        np.testing.assert_array_equal(projection, expected)
+    finally:
+        if result.temp_path is not None:
+            remove_path(result.temp_path)

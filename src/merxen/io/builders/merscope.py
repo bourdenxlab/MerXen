@@ -5,7 +5,9 @@ from __future__ import annotations
 import logging
 import re
 import shutil
+import tempfile
 import warnings
+from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -16,6 +18,7 @@ import geopandas
 import numpy as np
 import pandas as pd
 import xarray
+import zarr
 from dask import array as da
 from dask_image.imread import imread
 from shapely.geometry import MultiPolygon, Polygon
@@ -30,11 +33,20 @@ from merxen.io.image_source import (
 )
 from merxen.io.spatialdata_io import write_spatialdata_zarr
 from merxen.memory import force_release
+from merxen.path_utils import remove_path
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ProjectionBuildResult:
+    """Projection image plus the temporary store backing its lazy array."""
+
+    image: Any
+    temp_path: Path | None = None
 
 
 class MerscopeKeys:
@@ -132,18 +144,24 @@ def write_merscope_spatialdata(
 
     for key in list(sdata.images.keys()):
         del sdata.images[key]
-    sdata.images[MERSCOPE_ZPROJ_IMAGE_NAME] = _load_merscope_projection_from_raw(
+    projection = _load_merscope_projection_from_raw(
         input_path=input_path,
         z_layers=z_layers,
+        temp_root=output_path.parent,
     )
-    write_spatialdata_zarr(sdata, output_path, overwrite=True)
-    _copy_merscope_sidecars(
-        input_path=input_path,
-        output_path=output_path,
-        transform_path_override=transform_path_override,
-    )
-    del sdata
-    force_release(note="[MERSCOPE] after SpatialData build write")
+    sdata.images[MERSCOPE_ZPROJ_IMAGE_NAME] = projection.image
+    try:
+        write_spatialdata_zarr(sdata, output_path, overwrite=True)
+        _copy_merscope_sidecars(
+            input_path=input_path,
+            output_path=output_path,
+            transform_path_override=transform_path_override,
+        )
+    finally:
+        if projection.temp_path is not None:
+            remove_path(projection.temp_path)
+        del sdata, projection
+        force_release(note="[MERSCOPE] after SpatialData build write")
     return output_path
 
 
@@ -161,7 +179,8 @@ def _load_merscope_projection_from_raw(
     *,
     input_path: Path,
     z_layers: list[int],
-) -> Any:
+    temp_root: Path | None = None,
+) -> ProjectionBuildResult:
     """Build the final MERSCOPE projection image without storing z planes."""
     images_dir = Path(input_path) / MerscopeKeys.IMAGES_DIR
     stainings = _get_channel_names(images_dir)
@@ -172,22 +191,170 @@ def _load_merscope_projection_from_raw(
         "chunks": (1, 4096, 4096),
         "scale_factors": [2, 2, 2, 2],
     }
-    reader = _get_reader(None)
-    image_elements = [
-        reader(
-            images_dir,
-            stainings,
-            z_layer,
-            image_models_kwargs,
-        )
-        for z_layer in z_layers
-    ]
-    return build_merscope_z_projection(
-        {
-            f"MERSCOPE_z{z_layer}": image
-            for z_layer, image in zip(z_layers, image_elements, strict=True)
-        }
+    projection = _build_iterative_projection_store(
+        images_dir=images_dir,
+        stainings=stainings,
+        z_layers=z_layers,
+        image_models_kwargs=image_models_kwargs,
+        temp_root=temp_root,
     )
+    image = Image2DModel.parse(
+        projection.image,
+        c_coords=stainings,
+        rgb=None,
+        **image_models_kwargs,
+    )
+    return ProjectionBuildResult(image=image, temp_path=projection.temp_path)
+
+
+def _build_iterative_projection_store(
+    *,
+    images_dir: Path,
+    stainings: list[str],
+    z_layers: list[int],
+    image_models_kwargs: Mapping[str, Any],
+    temp_root: Path | None,
+) -> ProjectionBuildResult:
+    """Max-project raw MERSCOPE planes into a temporary zarr store."""
+    if len(z_layers) == 0:
+        raise ValueError("z_layers is empty")
+
+    chunk_y, chunk_x = tuple(image_models_kwargs["chunks"])[-2:]
+    first_plane = _open_merscope_channel_plane_array(
+        images_dir=images_dir,
+        stain=stainings[0],
+        z_layer=z_layers[0],
+        chunks=(int(chunk_y), int(chunk_x)),
+    )
+    height, width = (int(first_plane.shape[0]), int(first_plane.shape[1]))
+    dtype = np.dtype(first_plane.dtype)
+    del first_plane
+    store_chunks = (
+        1,
+        min(int(chunk_y), height),
+        min(int(chunk_x), width),
+    )
+
+    temp_parent = Path(temp_root) if temp_root is not None else None
+    if temp_parent is not None:
+        temp_parent.mkdir(parents=True, exist_ok=True)
+    temp_dir = Path(tempfile.mkdtemp(prefix="merscope_projection_", dir=temp_parent))
+    projection_path = temp_dir / "projection.zarr"
+    projection_store = zarr.open_array(
+        projection_path,
+        mode="w",
+        shape=(len(stainings), height, width),
+        chunks=store_chunks,
+        dtype=dtype,
+    )
+
+    try:
+        for channel_index, stain in enumerate(stainings):
+            logger.info(
+                "[MERSCOPE] Iteratively max-projecting channel %s (%d/%d)",
+                stain,
+                channel_index + 1,
+                len(stainings),
+            )
+            current = _open_merscope_channel_plane_array(
+                images_dir=images_dir,
+                stain=stain,
+                z_layer=z_layers[0],
+                chunks=(int(chunk_y), int(chunk_x)),
+            )
+            _store_projection_channel(
+                current,
+                projection_store,
+                channel_index=channel_index,
+                shape=(height, width),
+            )
+            del current
+
+            for z_layer in z_layers[1:]:
+                previous = da.from_zarr(projection_path)[channel_index, :, :]
+                plane = _open_merscope_channel_plane_array(
+                    images_dir=images_dir,
+                    stain=stain,
+                    z_layer=z_layer,
+                    chunks=(int(chunk_y), int(chunk_x)),
+                )
+                projected = da.maximum(previous, plane)
+                _store_projection_channel(
+                    projected,
+                    projection_store,
+                    channel_index=channel_index,
+                    shape=(height, width),
+                )
+                del previous, plane, projected
+                force_release(
+                    note=(
+                        f"[MERSCOPE] after projecting channel={stain} " f"z={z_layer}"
+                    )
+                )
+
+        projection_da = xarray.DataArray(
+            da.from_zarr(projection_path),
+            dims=("c", "y", "x"),
+            coords={"c": stainings},
+        )
+        return ProjectionBuildResult(image=projection_da, temp_path=temp_dir)
+    except Exception:
+        remove_path(temp_dir)
+        raise
+
+
+def _store_projection_channel(
+    source: da.Array,
+    projection_store: Any,
+    *,
+    channel_index: int,
+    shape: tuple[int, int],
+) -> None:
+    """Store one projected channel into the projection zarr."""
+    source_3d = source.reshape((1, int(shape[0]), int(shape[1])))
+    da.store(
+        source_3d,
+        projection_store,
+        regions=(slice(channel_index, channel_index + 1), slice(None), slice(None)),
+        compute=True,
+        lock=True,
+        scheduler="single-threaded",
+    )
+
+
+def _open_merscope_channel_plane_array(
+    *,
+    images_dir: Path,
+    stain: str,
+    z_layer: int,
+    chunks: tuple[int, int],
+) -> da.Array:
+    """Open one MERSCOPE channel/z plane as a 2D Dask array."""
+    tif_path = Path(images_dir) / f"mosaic_{stain}_z{z_layer}.tif"
+    if not tif_path.exists():
+        raise FileNotFoundError(f"Missing MERSCOPE image plane: {tif_path}")
+
+    try:
+        import rioxarray
+    except ModuleNotFoundError:
+        arr = imread(tif_path).squeeze()
+        return da.asarray(arr).rechunk(chunks)
+
+    from rasterio.errors import NotGeoreferencedWarning
+
+    warnings.simplefilter("ignore", category=NotGeoreferencedWarning)
+    data = (
+        rioxarray.open_rasterio(
+            tif_path,
+            chunks=(1, int(chunks[0]), int(chunks[1])),
+        )
+        .reset_coords("spatial_ref", drop=True)
+        .data
+    )
+    arr = da.asarray(data).squeeze()
+    if arr.ndim != 2:
+        raise ValueError(f"Expected 2D MERSCOPE plane, got shape={arr.shape}")
+    return arr.rechunk(chunks)
 
 
 def discover_merscope_z_layers(path: Path) -> list[int]:
