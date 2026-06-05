@@ -13,6 +13,11 @@ process BUILD_SPATIALDATA {
     def forceFlag = params.force_spatialdata_build ? "--force-rerun" : ""
     """
     set -euo pipefail
+    export OMP_NUM_THREADS="${task.cpus}"
+    export OPENBLAS_NUM_THREADS="${task.cpus}"
+    export MKL_NUM_THREADS="${task.cpus}"
+    export NUMEXPR_NUM_THREADS="${task.cpus}"
+    export DASK_NUM_WORKERS="${task.cpus}"
 
     cat > build_config.json <<'JSON'
 ${build_config_json}
