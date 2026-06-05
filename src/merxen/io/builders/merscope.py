@@ -338,7 +338,7 @@ def _open_merscope_channel_plane_array(
         import rioxarray
     except ModuleNotFoundError:
         arr = imread(tif_path).squeeze()
-        return da.asarray(arr).rechunk(chunks)
+        return cast(da.Array, da.asarray(arr).rechunk(chunks))
 
     from rasterio.errors import NotGeoreferencedWarning
 
@@ -354,7 +354,7 @@ def _open_merscope_channel_plane_array(
     arr = da.asarray(data).squeeze()
     if arr.ndim != 2:
         raise ValueError(f"Expected 2D MERSCOPE plane, got shape={arr.shape}")
-    return arr.rechunk(chunks)
+    return cast(da.Array, arr.rechunk(chunks))
 
 
 def discover_merscope_z_layers(path: Path) -> list[int]:
