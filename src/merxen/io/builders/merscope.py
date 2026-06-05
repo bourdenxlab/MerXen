@@ -29,6 +29,7 @@ from merxen.io.image_source import (
     build_merscope_z_projection,
 )
 from merxen.io.spatialdata_io import write_spatialdata_zarr
+from merxen.memory import force_release
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -111,6 +112,7 @@ def write_merscope_spatialdata(
                 z_layers=z_layers,
                 region_name=build_config.region_name,
                 slide_name=build_config.slide_name,
+                mosaic_images=False,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
@@ -125,15 +127,23 @@ def write_merscope_spatialdata(
             z_layers=z_layers,
             region_name=build_config.region_name,
             slide_name=build_config.slide_name,
+            mosaic_images=False,
         )
 
-    _replace_merscope_images_with_projection(sdata)
+    for key in list(sdata.images.keys()):
+        del sdata.images[key]
+    sdata.images[MERSCOPE_ZPROJ_IMAGE_NAME] = _load_merscope_projection_from_raw(
+        input_path=input_path,
+        z_layers=z_layers,
+    )
     write_spatialdata_zarr(sdata, output_path, overwrite=True)
     _copy_merscope_sidecars(
         input_path=input_path,
         output_path=output_path,
         transform_path_override=transform_path_override,
     )
+    del sdata
+    force_release(note="[MERSCOPE] after SpatialData build write")
     return output_path
 
 
@@ -145,6 +155,39 @@ def _replace_merscope_images_with_projection(sdata: SpatialData) -> None:
     for key in list(sdata.images.keys()):
         del sdata.images[key]
     sdata.images[MERSCOPE_ZPROJ_IMAGE_NAME] = projection
+
+
+def _load_merscope_projection_from_raw(
+    *,
+    input_path: Path,
+    z_layers: list[int],
+) -> Any:
+    """Build the final MERSCOPE projection image without storing z planes."""
+    images_dir = Path(input_path) / MerscopeKeys.IMAGES_DIR
+    stainings = _get_channel_names(images_dir)
+    if not stainings:
+        raise FileNotFoundError(f"No MERSCOPE mosaic images found in {images_dir}")
+
+    image_models_kwargs: dict[str, Any] = {
+        "chunks": (1, 4096, 4096),
+        "scale_factors": [2, 2, 2, 2],
+    }
+    reader = _get_reader(None)
+    image_elements = [
+        reader(
+            images_dir,
+            stainings,
+            z_layer,
+            image_models_kwargs,
+        )
+        for z_layer in z_layers
+    ]
+    return build_merscope_z_projection(
+        {
+            f"MERSCOPE_z{z_layer}": image
+            for z_layer, image in zip(z_layers, image_elements, strict=True)
+        }
+    )
 
 
 def discover_merscope_z_layers(path: Path) -> list[int]:
