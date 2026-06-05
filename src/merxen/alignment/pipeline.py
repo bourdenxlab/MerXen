@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from contextlib import suppress
 from pathlib import Path
 from typing import Any, cast
 
@@ -20,6 +19,10 @@ from merxen.alignment.register import (
     transform_xy_for_result,
 )
 from merxen.config import AlignmentConfig
+from merxen.io.spatialdata_io import (
+    write_or_replace_element,
+    write_spatialdata_metadata,
+)
 from merxen.io.transcript_io import first_existing_col
 
 MERXEN_ALIGNMENT_ATTR = "merxen_alignment"
@@ -90,17 +93,19 @@ def _write_moving_alignment_to_zarr(
             to_coordinate_system=ALIGNMENT_COORDINATE_SYSTEM,
         )
         aligned_key = _nonrigid_element_key(key)
-        _delete_existing_element(sdata_obj, aligned_key, element_type="shapes")
-        sdata_obj.shapes[aligned_key] = _transform_shapes(
-            sdata_obj.shapes[key],
-            result,
-        )
+        aligned_shapes = _transform_shapes(sdata_obj.shapes[key], result)
         set_transformation(
-            sdata_obj.shapes[aligned_key],
+            aligned_shapes,
             nonrigid_identity,
             to_coordinate_system=ALIGNMENT_COORDINATE_SYSTEM,
         )
-        sdata_obj.write_element(aligned_key, overwrite=True)
+        write_or_replace_element(
+            sdata_obj,
+            aligned_key,
+            "shapes",
+            aligned_shapes,
+            overwrite=True,
+        )
 
     for key in [
         k
@@ -113,31 +118,25 @@ def _write_moving_alignment_to_zarr(
             to_coordinate_system=ALIGNMENT_COORDINATE_SYSTEM,
         )
         aligned_key = _nonrigid_element_key(key)
-        _delete_existing_element(sdata_obj, aligned_key, element_type="points")
-        sdata_obj.points[aligned_key] = _transform_points(sdata_obj.points[key], result)
+        aligned_points = _transform_points(sdata_obj.points[key], result)
         set_transformation(
-            sdata_obj.points[aligned_key],
+            aligned_points,
             nonrigid_identity,
             to_coordinate_system=ALIGNMENT_COORDINATE_SYSTEM,
         )
-        sdata_obj.write_element(aligned_key, overwrite=True)
+        write_or_replace_element(
+            sdata_obj,
+            aligned_key,
+            "points",
+            aligned_points,
+            overwrite=True,
+        )
 
-    sdata_obj.write_transformations()
-    sdata_obj.write_metadata(write_attrs=True)
-
-
-def _delete_existing_element(
-    sdata_obj: sd.SpatialData,
-    key: str,
-    *,
-    element_type: str,
-) -> None:
-    container = getattr(sdata_obj, element_type)
-    if key not in container:
-        return
-    with suppress(Exception):
-        sdata_obj.delete_element_from_disk(key)
-    del container[key]
+    write_spatialdata_metadata(
+        sdata_obj,
+        write_attrs=True,
+        write_transformations=True,
+    )
 
 
 def _nonrigid_element_key(key: str) -> str:

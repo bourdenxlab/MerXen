@@ -81,6 +81,7 @@ def test_write_moving_aligned_zarr_adds_transforms_and_nonrigid_elements(
     )
 
     _write_moving_alignment_to_zarr(input_zarr, result)
+    _write_moving_alignment_to_zarr(input_zarr, result)
 
     aligned = sd.read_zarr(input_zarr)
     assert MERXEN_ALIGNMENT_ATTR in aligned.attrs
