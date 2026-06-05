@@ -12,6 +12,11 @@ process SEGMENT {
     script:
     """
     set -euo pipefail
+    export OMP_NUM_THREADS="${task.cpus}"
+    export OPENBLAS_NUM_THREADS="${task.cpus}"
+    export MKL_NUM_THREADS="${task.cpus}"
+    export NUMEXPR_NUM_THREADS="${task.cpus}"
+    export DASK_NUM_WORKERS="${task.cpus}"
 
     cat > segment_config.json <<'JSON'
 ${seg_config_json}
