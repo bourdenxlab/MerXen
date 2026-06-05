@@ -1,8 +1,5 @@
 nextflow.enable.dsl = 2
 
-import groovy.json.JsonOutput
-import java.nio.file.Paths
-
 include { BUILD_SPATIALDATA } from "./modules/spatialdata_build"
 include { SEGMENT } from "./modules/segmentation"
 include { ENRICH } from "./modules/enrichment"
@@ -51,13 +48,11 @@ def floatOrDefault(rawValue, defaultValue) {
 }
 
 def chooseField(row, names) {
-    for (name in names) {
+    def result = names.find { name ->
         def value = row[name]
-        if (value != null && value.toString().trim().length() > 0) {
-            return value.toString().trim()
-        }
+        value != null && value.toString().trim().length() > 0
     }
-    return null
+    return result ? row[result].toString().trim() : null
 }
 
 def normalizeAnalysisMode(rawValue) {
@@ -210,7 +205,7 @@ def samplesJsonForPlatforms(pairId, platforms, platformPaths = [:]) {
         }
         return sample
     }
-    return JsonOutput.prettyPrint(JsonOutput.toJson(samples))
+    return groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(samples))
 }
 
 def samplesJsonFromGroupedZarrs(pairId, activePlatforms, platformNames, zarrPaths) {
@@ -307,7 +302,7 @@ def stageInRange(stage, startStage, stopStage, stages) {
 }
 
 def requireExistingPath(rawPath, label) {
-    def p = Paths.get(rawPath.toString()).toAbsolutePath().normalize()
+    def p = java.nio.file.Paths.get(rawPath.toString()).toAbsolutePath().normalize()
     if (!p.toFile().exists()) {
         throw new IllegalArgumentException(
             "Missing expected ${label}: ${p}\n" +
@@ -427,7 +422,7 @@ workflow {
                     key,
                     pairId,
                     platform,
-                    JsonOutput.prettyPrint(JsonOutput.toJson(buildConfig)),
+                    groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(buildConfig)),
                 )
             }
         }
@@ -553,7 +548,7 @@ workflow {
                     key,
                     pairId,
                     platform,
-                    JsonOutput.prettyPrint(JsonOutput.toJson(segmentConfig)),
+                    groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(segmentConfig)),
                 )
             }
 
@@ -642,7 +637,7 @@ workflow {
                     key,
                     pairId,
                     platform,
-                    JsonOutput.prettyPrint(JsonOutput.toJson(enrichConfig)),
+                    groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(enrichConfig)),
                     latestZarr,
                     maskPath,
                 )
@@ -701,7 +696,7 @@ workflow {
                     tuple(
                         pairId,
                         platform,
-                        Paths.get(enrichedLatestZarr.toString()).toRealPath().toString(),
+                        java.nio.file.Paths.get(enrichedLatestZarr.toString()).toRealPath().toString(),
                     )
                 }
         } else {

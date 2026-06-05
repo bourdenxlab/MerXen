@@ -1,6 +1,3 @@
-import groovy.json.JsonOutput
-import groovy.json.JsonSlurper
-
 process MAPMYCELLS {
     tag "${pair_id}"
 
@@ -15,20 +12,20 @@ process MAPMYCELLS {
     tuple val(pair_id), path("mapmycells_out")
 
     script:
-    def dropLevelJson = params.mapmycells_drop_level == null ? "null" : JsonOutput.toJson(params.mapmycells_drop_level.toString())
-    def queryLayerJson = params.mapmycells_query_layer == null ? "null" : JsonOutput.toJson(params.mapmycells_query_layer.toString())
-    def geneIdColumnJson = params.mapmycells_gene_id_column == null ? "null" : JsonOutput.toJson(params.mapmycells_gene_id_column.toString())
-    def obsIdColumnJson = params.mapmycells_obs_id_column == null ? "null" : JsonOutput.toJson(params.mapmycells_obs_id_column.toString())
-    def tmpDirJson = params.mapmycells_tmp_dir == null ? "null" : JsonOutput.toJson(params.mapmycells_tmp_dir.toString())
-    def referenceModeJson = params.mapmycells_reference_mode == null ? JsonOutput.toJson("both") : JsonOutput.toJson(params.mapmycells_reference_mode.toString())
-    def markerLookupJson = params.mapmycells_marker_lookup_path == null ? "null" : JsonOutput.toJson(params.mapmycells_marker_lookup_path.toString())
-    def precomputedStatsJson = params.mapmycells_precomputed_stats_path == null ? "null" : JsonOutput.toJson(params.mapmycells_precomputed_stats_path.toString())
-    def regionNameJson = params.mapmycells_region_name == null ? JsonOutput.toJson("region") : JsonOutput.toJson(params.mapmycells_region_name.toString())
-    def regionCacheDirJson = params.mapmycells_region_cache_dir == null ? "null" : JsonOutput.toJson(params.mapmycells_region_cache_dir.toString())
+    def dropLevelJson = params.mapmycells_drop_level == null ? "null" : groovy.json.JsonOutput.toJson(params.mapmycells_drop_level.toString())
+    def queryLayerJson = params.mapmycells_query_layer == null ? "null" : groovy.json.JsonOutput.toJson(params.mapmycells_query_layer.toString())
+    def geneIdColumnJson = params.mapmycells_gene_id_column == null ? "null" : groovy.json.JsonOutput.toJson(params.mapmycells_gene_id_column.toString())
+    def obsIdColumnJson = params.mapmycells_obs_id_column == null ? "null" : groovy.json.JsonOutput.toJson(params.mapmycells_obs_id_column.toString())
+    def tmpDirJson = params.mapmycells_tmp_dir == null ? "null" : groovy.json.JsonOutput.toJson(params.mapmycells_tmp_dir.toString())
+    def referenceModeJson = params.mapmycells_reference_mode == null ? groovy.json.JsonOutput.toJson("both") : groovy.json.JsonOutput.toJson(params.mapmycells_reference_mode.toString())
+    def markerLookupJson = params.mapmycells_marker_lookup_path == null ? "null" : groovy.json.JsonOutput.toJson(params.mapmycells_marker_lookup_path.toString())
+    def precomputedStatsJson = params.mapmycells_precomputed_stats_path == null ? "null" : groovy.json.JsonOutput.toJson(params.mapmycells_precomputed_stats_path.toString())
+    def regionNameJson = params.mapmycells_region_name == null ? groovy.json.JsonOutput.toJson("region") : groovy.json.JsonOutput.toJson(params.mapmycells_region_name.toString())
+    def regionCacheDirJson = params.mapmycells_region_cache_dir == null ? "null" : groovy.json.JsonOutput.toJson(params.mapmycells_region_cache_dir.toString())
     def plotsOnly = params.mapmycells_plots_only == null ? false : params.mapmycells_plots_only.toString().trim().toLowerCase() == "true"
     def plotsOnlyJson = plotsOnly ? "true" : "false"
     def publishedMapMyCellsOut = "${params.outdir}/${pair_id}/mapmycells/mapmycells_out"
-    def clusteringSamples = new JsonSlurper().parseText(samples_json)
+    def clusteringSamples = new groovy.json.JsonSlurper().parseText(samples_json)
     def mapmycellsSamples = clusteringSamples.collect { sample ->
         def sampleId = sample.sample_id.toString()
         def platform = sample.platform.toString()
@@ -41,14 +38,14 @@ process MAPMYCELLS {
             obs_id_column: obsIdColumnJson == "null" ? null : params.mapmycells_obs_id_column.toString(),
         ]
     }
-    def mapmycellsSamplesJson = JsonOutput.prettyPrint(JsonOutput.toJson(mapmycellsSamples))
+    def mapmycellsSamplesJson = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(mapmycellsSamples))
     def regionLabelValues = []
     if (params.mapmycells_region_labels instanceof List) {
         regionLabelValues = params.mapmycells_region_labels.collect { it.toString() }
     } else if (params.mapmycells_region_labels != null) {
         def rawRegionLabels = params.mapmycells_region_labels.toString().trim()
         if (rawRegionLabels.startsWith("[")) {
-            regionLabelValues = new JsonSlurper().parseText(rawRegionLabels).collect { it.toString() }
+            regionLabelValues = new groovy.json.JsonSlurper().parseText(rawRegionLabels).collect { it.toString() }
         } else if (rawRegionLabels) {
             regionLabelValues = rawRegionLabels
                 .split(",")
@@ -56,7 +53,7 @@ process MAPMYCELLS {
                 .findAll { it.length() > 0 }
         }
     }
-    def regionLabelsJson = JsonOutput.toJson(regionLabelValues)
+    def regionLabelsJson = groovy.json.JsonOutput.toJson(regionLabelValues)
     """
     set -euo pipefail
 
