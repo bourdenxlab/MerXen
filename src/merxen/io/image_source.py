@@ -90,8 +90,18 @@ def max_project_image_elements(image_elements: list[Any]) -> Any:
         raise ValueError("image_elements is empty")
     if len(image_elements) == 1:
         return image_to_cyx(image_elements[0])
+
     plane_arrays = [image_to_cyx(element) for element in image_elements]
-    return xr.concat(plane_arrays, dim="z").max(dim="z", keep_attrs=True)
+    projection = plane_arrays[0]
+    for plane in plane_arrays[1:]:
+        projection = xr.apply_ufunc(
+            np.maximum,
+            projection,
+            plane,
+            dask="allowed",
+            keep_attrs=True,
+        )
+    return projection
 
 
 def build_merscope_z_projection(

@@ -180,6 +180,7 @@ def choose_working_tile_size(
         x0 = max(0, x1 - ts)
 
         log_status(f"[{dataset_name}] Probing Cellpose tile size={ts} on center tile")
+        tile = img_seg = masks = flows = styles = None
         try:
             tile = fetch_tile_fn(y0, y1, x0, x1)
             _, img_seg, _ = prepare_cellpose_input(tile, factor_rescale=1.0)
@@ -188,9 +189,6 @@ def choose_working_tile_size(
                 f"[{dataset_name}] Tile size {ts} succeeded "
                 f"(labels in probe={int(np.max(masks))})"
             )
-            del tile, img_seg, masks, flows, styles
-            clear_cuda_cache()
-            force_release()
             return ts
         except (RuntimeError, MemoryError) as e:
             msg = str(e).lower()
@@ -204,10 +202,12 @@ def choose_working_tile_size(
                     f"[{dataset_name}] Tile size {ts} failed due to memory; "
                     "trying smaller tile"
                 )
-                clear_cuda_cache()
-                force_release()
                 continue
             raise
+        finally:
+            del tile, img_seg, masks, flows, styles
+            clear_cuda_cache()
+            force_release()
 
     raise RuntimeError(
         f"[{dataset_name}] Could not find a working tile size "
