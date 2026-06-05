@@ -26,7 +26,7 @@ from merxen.io.image_source import (
     build_merscope_z_projection,
     image_to_cyx,
 )
-from merxen.io.spatialdata_io import write_spatialdata_zarr
+from merxen.io.spatialdata_io import write_or_replace_element
 from merxen.memory import force_release, log_status
 from merxen.path_utils import remove_path, stage_existing_output
 from merxen.segmentation.cellpose import build_cellpose_affine_to_microns
@@ -42,25 +42,6 @@ XENIUM_OLD_NUCLEUS_SHAPE_NAME = "xenium_nucleus"
 ORIGINAL_TABLE_NAME = "table_original"
 
 
-def _delete_if_exists(mapping: Any, key: str) -> None:
-    """Delete an element from a SpatialData mapping if present."""
-    try:
-        if key in mapping:
-            del mapping[key]
-    except Exception:  # noqa: BLE001
-        pass
-
-
-def _set_element(mapping: Any, key: str, value: Any, *, force: bool = False) -> bool:
-    """Set element in a SpatialData mapping with optional overwrite semantics."""
-    if (key in mapping) and (not force):
-        return False
-    if key in mapping and force:
-        _delete_if_exists(mapping, key)
-    mapping[key] = value
-    return True
-
-
 def _remove_path(path: Path) -> None:
     """Remove a file, symlink, or directory tree if it exists."""
     remove_path(path)
@@ -69,6 +50,15 @@ def _remove_path(path: Path) -> None:
 def _to_cyx(image_like: Any) -> Any:
     """Convert image-like input to (c, y, x) ordering."""
     return image_to_cyx(image_like)
+
+
+def _resolve_enrichment_write_path(latest_path: Path, target_path: Path) -> Path:
+    """Choose the backed zarr path that enrichment should update in place."""
+    if target_path == latest_path:
+        return latest_path
+    if target_path.exists() or target_path.is_symlink():
+        return target_path
+    return latest_path
 
 
 def _parse_shapes_with_template(
@@ -423,11 +413,12 @@ def _copy_xenium_shapes_from_sdata(
     )
     if cell_key is not None:
         copied += int(
-            _set_element(
-                dst_sdata.shapes,
+            write_or_replace_element(
+                dst_sdata,
                 XENIUM_OLD_CELL_SHAPE_NAME,
+                "shapes",
                 src_sdata.shapes[cell_key].copy(),
-                force=force,
+                overwrite=force,
             )
         )
 
@@ -437,11 +428,12 @@ def _copy_xenium_shapes_from_sdata(
     )
     if nucleus_key is not None:
         copied += int(
-            _set_element(
-                dst_sdata.shapes,
+            write_or_replace_element(
+                dst_sdata,
                 XENIUM_OLD_NUCLEUS_SHAPE_NAME,
+                "shapes",
                 src_sdata.shapes[nucleus_key].copy(),
-                force=force,
+                overwrite=force,
             )
         )
     return copied
@@ -470,11 +462,12 @@ def _copy_merscope_images(
         image_prefix=image_prefix,
     )
     return int(
-        _set_element(
-            dst_sdata.images,
+        write_or_replace_element(
+            dst_sdata,
             MERSCOPE_ZPROJ_IMAGE_NAME,
+            "images",
             projection,
-            force=force,
+            overwrite=force,
         )
     )
 
@@ -484,11 +477,12 @@ def _copy_xenium_images(dst_sdata: Any, src_sdata: Any, *, force: bool) -> int:
     copied = 0
     for key in list(src_sdata.images.keys()):
         copied += int(
-            _set_element(
-                dst_sdata.images,
+            write_or_replace_element(
+                dst_sdata,
                 key,
+                "images",
                 src_sdata.images[key],
-                force=force,
+                overwrite=force,
             )
         )
     return copied
@@ -534,16 +528,17 @@ def enrich_single_latest(
             f"[{dataset_name}] Latest zarr not found: {latest_path}"
         )
 
-    log_status(f"[{dataset_name}] Loading latest zarr for enrichment: {latest_path}")
-    dst = sd.read_zarr(latest_path)
+    write_path = _resolve_enrichment_write_path(latest_path, target_path)
+    log_status(f"[{dataset_name}] Loading latest zarr for enrichment: {write_path}")
+    dst = sd.read_zarr(write_path)
 
     if _is_already_enriched(dst, platform) and (not force_rerun):
         log_status(f"[{dataset_name}] Already enriched; skipping.")
         del dst
         force_release(note=f"after enrichment skip {dataset_name}")
-        if latest_path != target_path and target_path.exists():
-            stage_existing_output(target_path, latest_path)
-        return target_path
+        if latest_path != write_path:
+            stage_existing_output(write_path, latest_path)
+        return write_path
 
     # 1. Ensure explicit MOSAIK_proseg layer exists.
     proseg_src_key = None
@@ -562,11 +557,12 @@ def enrich_single_latest(
         raise RuntimeError(f"[{dataset_name}] No shapes found in latest zarr.")
 
     proseg_template = dst.shapes[proseg_src_key]
-    _set_element(
-        dst.shapes,
+    write_or_replace_element(
+        dst,
         MOSAIK_PROSEG_SHAPE_NAME,
+        "shapes",
         proseg_template.copy(),
-        force=force_rerun,
+        overwrite=force_rerun,
     )
 
     # 2. Add explicit Cellpose polygons.
@@ -580,7 +576,13 @@ def enrich_single_latest(
         polygon_show_progress=polygon_show_progress,
     )
     cp_shapes = _parse_shapes_with_template(cp_gdf, template_shape=proseg_template)
-    _set_element(dst.shapes, MOSAIK_CELLPOSE_SHAPE_NAME, cp_shapes, force=force_rerun)
+    write_or_replace_element(
+        dst,
+        MOSAIK_CELLPOSE_SHAPE_NAME,
+        "shapes",
+        cp_shapes,
+        overwrite=force_rerun,
+    )
 
     # 3. Load original source data and copy boundaries/images/table.
     src = _load_original_source(config)
@@ -589,11 +591,12 @@ def enrich_single_latest(
         if len(src.shapes) == 0:
             raise RuntimeError("[MERSCOPE] No original shapes found to copy.")
         old_key = list(src.shapes.keys())[0]
-        _set_element(
-            dst.shapes,
+        write_or_replace_element(
+            dst,
             MERSCOPE_OLD_SHAPE_NAME,
+            "shapes",
             src.shapes[old_key].copy(),
-            force=force_rerun,
+            overwrite=force_rerun,
         )
         added = _copy_merscope_images(
             dst,
@@ -609,12 +612,19 @@ def enrich_single_latest(
                 src.tables[old_tbl_key],
                 MERSCOPE_OLD_SHAPE_NAME,
             )
-            _set_element(dst.tables, ORIGINAL_TABLE_NAME, old_tbl, force=force_rerun)
+            write_or_replace_element(
+                dst,
+                ORIGINAL_TABLE_NAME,
+                "tables",
+                old_tbl,
+                overwrite=force_rerun,
+            )
         else:
             log_status("[MERSCOPE] WARNING: original source has no tables.")
 
     elif platform == "XENIUM":
         original_path = Path(config.original_data_path)
+        xenium_dir = original_path
         if original_path.suffix == ".zarr":
             copied_shapes = _copy_xenium_shapes_from_sdata(
                 dst,
@@ -637,11 +647,12 @@ def enrich_single_latest(
                 cell_gdf,
                 template_shape=proseg_template,
             )
-            _set_element(
-                dst.shapes,
+            write_or_replace_element(
+                dst,
                 XENIUM_OLD_CELL_SHAPE_NAME,
+                "shapes",
                 cell_shapes,
-                force=force_rerun,
+                overwrite=force_rerun,
             )
 
             nuc_gdf = _load_xenium_boundary_shapes_from_csv(xenium_dir, which="nucleus")
@@ -650,11 +661,12 @@ def enrich_single_latest(
                     nuc_gdf,
                     template_shape=proseg_template,
                 )
-                _set_element(
-                    dst.shapes,
+                write_or_replace_element(
+                    dst,
                     XENIUM_OLD_NUCLEUS_SHAPE_NAME,
+                    "shapes",
                     nuc_shapes,
-                    force=force_rerun,
+                    overwrite=force_rerun,
                 )
 
         added = _copy_xenium_images(dst, src, force=force_rerun)
@@ -668,34 +680,27 @@ def enrich_single_latest(
             old_tbl_src = _load_xenium_original_table_from_matrix(xenium_dir)
         if old_tbl_src is not None:
             old_tbl = _prepare_original_table(old_tbl_src, XENIUM_OLD_CELL_SHAPE_NAME)
-            _set_element(dst.tables, ORIGINAL_TABLE_NAME, old_tbl, force=force_rerun)
+            write_or_replace_element(
+                dst,
+                ORIGINAL_TABLE_NAME,
+                "tables",
+                old_tbl,
+                overwrite=force_rerun,
+            )
         else:
             log_status("[XENIUM] WARNING: no original Xenium table available.")
     else:
         raise ValueError(f"Unsupported platform: {config.platform}")
 
-    # 4. Safe write + atomic replace.
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_out = target_path.parent / f"{target_path.stem}__enrich_tmp.zarr"
-    backup_out = target_path.parent / f"{target_path.stem}__pre_enrich_backup.zarr"
-    _remove_path(tmp_out)
-
-    log_status(f"[{dataset_name}] Writing enriched zarr to temp path: {tmp_out}")
-    write_spatialdata_zarr(dst, tmp_out, overwrite=True)
-
     del dst, src, cp_gdf
-    force_release(note=f"after writing enriched temp zarr ({dataset_name})")
+    force_release(note=f"after in-place enrichment ({dataset_name})")
 
     if keep_backup:
-        _remove_path(backup_out)
-        if target_path.exists() or target_path.is_symlink():
-            target_path.replace(backup_out)
-            log_status(f"[{dataset_name}] Backup saved: {backup_out}")
-    elif target_path.exists() or target_path.is_symlink():
-        _remove_path(target_path)
-
-    tmp_out.replace(target_path)
-    if latest_path != target_path:
-        stage_existing_output(target_path, latest_path)
-    log_status(f"[{dataset_name}] Enrichment complete: {target_path}")
-    return target_path
+        log_status(
+            f"[{dataset_name}] keep_backup ignored; "
+            "enrichment writes elements in place."
+        )
+    if latest_path != write_path:
+        stage_existing_output(write_path, latest_path)
+    log_status(f"[{dataset_name}] Enrichment complete: {write_path}")
+    return write_path
