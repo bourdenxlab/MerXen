@@ -67,7 +67,9 @@ forward.
 
 1. **Skip if already enriched.** `_is_already_enriched` short-circuits the
    whole stage when the expected layers already exist and `force_rerun` is
-   false.
+   false. If a previous run left only a partial enrichment, the stage rebuilds
+   those partial artifacts and clears derived per-shape tables before
+   assignment runs again.
 2. **ProSeg shape layer.** Pick the best existing shape key
    (`cell_boundaries`, `cell_boundaries_refined`, `shapes`, ...) and
    mirror it to a canonical `MOSAIK_proseg` key. Downstream code always

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,6 +23,8 @@ from merxen.enrichment.enrich import (
     MOSAIK_PROSEG_SHAPE_NAME,
     ORIGINAL_TABLE_NAME,
     _is_already_enriched,
+    _read_latest_zarr_for_enrichment,
+    _remove_partial_enrichment_artifacts_from_zarr_path,
     _remove_path,
     enrich_single_latest,
 )
@@ -178,3 +181,200 @@ def test_enrich_single_latest_writes_elements_in_place(
     assert ORIGINAL_TABLE_NAME in dst.tables
     assert not any("__enrich_tmp" in path.name for path in target.parent.iterdir())
     assert not any("pre_enrich_backup" in path.name for path in target.parent.iterdir())
+
+
+def test_incomplete_enrichment_rebuilds_partial_elements(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Incomplete enrichment should overwrite partial artifacts, not preserve them."""
+    target = tmp_path / "results" / "latest" / "latest_spatialdata.zarr"
+    target.mkdir(parents=True)
+    latest = tmp_path / "latest_input.zarr"
+    latest.symlink_to(target, target_is_directory=True)
+    original = tmp_path / "source.zarr"
+    original.mkdir()
+    mask = tmp_path / "mask.npy"
+    np.save(mask, np.ones((4, 4), dtype=np.uint32))
+
+    proseg_shape = gpd.GeoDataFrame(
+        {"cell_id": ["1"], "geometry": [box(0.0, 0.0, 1.0, 1.0)]},
+        geometry="geometry",
+    )
+    original_shape = gpd.GeoDataFrame(
+        {"cell_id": ["old"], "geometry": [box(1.0, 1.0, 2.0, 2.0)]},
+        geometry="geometry",
+    )
+    original_table = ad.AnnData(
+        X=np.ones((1, 1), dtype=np.float32),
+        obs=pd.DataFrame(index=["old"]),
+        var=pd.DataFrame(index=["gene"]),
+    )
+    projection = xr.DataArray(
+        np.ones((1, 4, 4), dtype=np.uint16),
+        dims=("c", "y", "x"),
+        coords={"c": ["DAPI"]},
+    )
+    dst = SimpleNamespace(
+        shapes={
+            "cell_boundaries": proseg_shape,
+            MOSAIK_PROSEG_SHAPE_NAME: object(),
+            MOSAIK_CELLPOSE_SHAPE_NAME: object(),
+            MERSCOPE_OLD_SHAPE_NAME: object(),
+        },
+        images={MERSCOPE_ZPROJ_IMAGE_NAME: object()},
+        tables={"table_MOSAIK_proseg": object()},
+    )
+    src = SimpleNamespace(
+        shapes={"original_cells": original_shape},
+        images={MERSCOPE_ZPROJ_IMAGE_NAME: projection},
+        tables={"table": original_table},
+    )
+    writes: list[tuple[str, str, bool]] = []
+
+    def _fake_read_zarr(path: Path) -> SimpleNamespace:
+        resolved = Path(path).resolve()
+        if resolved == target.resolve():
+            return dst
+        if resolved == original.resolve():
+            return src
+        raise AssertionError(f"unexpected read_zarr path: {path}")
+
+    def _fake_write_or_replace(
+        sdata_obj: SimpleNamespace,
+        key: str,
+        element_type: str,
+        value: object,
+        *,
+        overwrite: bool = True,
+    ) -> bool:
+        writes.append((key, element_type, overwrite))
+        getattr(sdata_obj, element_type)[key] = value
+        return True
+
+    monkeypatch.setattr("merxen.enrichment.enrich.sd.read_zarr", _fake_read_zarr)
+    monkeypatch.setattr(
+        "merxen.enrichment.enrich.write_or_replace_element",
+        _fake_write_or_replace,
+    )
+    monkeypatch.setattr(
+        "merxen.enrichment.enrich._dataset_cellpose_transform",
+        lambda config: ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
+    )
+    monkeypatch.setattr(
+        "merxen.enrichment.enrich._cellpose_gdf_from_mask",
+        lambda *args, **kwargs: gpd.GeoDataFrame(
+            {"cell_id": ["cp"], "geometry": [box(2.0, 2.0, 3.0, 3.0)]},
+            geometry="geometry",
+        ),
+    )
+
+    cfg = EnrichmentConfig(
+        dataset_name="P1_MERSCOPE",
+        platform="MERSCOPE",
+        latest_zarr_path=latest,
+        mask_path=mask,
+        original_data_path=original,
+        output_dir=tmp_path / "enrich_out",
+        persistent_output_path=target,
+    )
+
+    enrich_single_latest(cfg)
+
+    assert "table_MOSAIK_proseg" not in dst.tables
+    assert ORIGINAL_TABLE_NAME in dst.tables
+    assert writes
+    assert all(overwrite for _, _, overwrite in writes)
+
+
+def test_partial_enrichment_cleanup_removes_rebuildable_zarr_artifacts(
+    tmp_path: Path,
+) -> None:
+    """Corrupt partial enrichment elements should be deleted with stale metadata."""
+    zarr_path = tmp_path / "latest_spatialdata.zarr"
+    for rel_path in [
+        f"images/{MERSCOPE_ZPROJ_IMAGE_NAME}/s0",
+        f"shapes/{MOSAIK_CELLPOSE_SHAPE_NAME}",
+        f"shapes/{MOSAIK_PROSEG_SHAPE_NAME}",
+        f"shapes/{MERSCOPE_OLD_SHAPE_NAME}",
+        "shapes/cell_boundaries",
+        f"tables/{ORIGINAL_TABLE_NAME}",
+        "tables/table_MOSAIK_cellpose",
+        "tables/table",
+    ]:
+        (zarr_path / rel_path).mkdir(parents=True)
+
+    root_metadata = {
+        "zarr_format": 3,
+        "node_type": "group",
+        "consolidated_metadata": {
+            "kind": "inline",
+            "must_understand": False,
+            "metadata": {
+                f"images/{MERSCOPE_ZPROJ_IMAGE_NAME}": {"attributes": {}},
+                f"images/{MERSCOPE_ZPROJ_IMAGE_NAME}/s0": {"attributes": {}},
+                f"shapes/{MOSAIK_CELLPOSE_SHAPE_NAME}": {"attributes": {}},
+                f"shapes/{MOSAIK_PROSEG_SHAPE_NAME}": {"attributes": {}},
+                f"shapes/{MERSCOPE_OLD_SHAPE_NAME}": {"attributes": {}},
+                "shapes/cell_boundaries": {"attributes": {"keep": True}},
+                f"tables/{ORIGINAL_TABLE_NAME}": {"attributes": {}},
+                "tables/table_MOSAIK_cellpose": {"attributes": {}},
+                "tables/table": {"attributes": {"keep": True}},
+            },
+        },
+    }
+    (zarr_path / "zarr.json").write_text(json.dumps(root_metadata))
+
+    _remove_partial_enrichment_artifacts_from_zarr_path(zarr_path, "MERSCOPE")
+
+    assert not (zarr_path / "images" / MERSCOPE_ZPROJ_IMAGE_NAME).exists()
+    assert not (zarr_path / "shapes" / MOSAIK_CELLPOSE_SHAPE_NAME).exists()
+    assert not (zarr_path / "shapes" / MOSAIK_PROSEG_SHAPE_NAME).exists()
+    assert not (zarr_path / "shapes" / MERSCOPE_OLD_SHAPE_NAME).exists()
+    assert not (zarr_path / "tables" / ORIGINAL_TABLE_NAME).exists()
+    assert not (zarr_path / "tables" / "table_MOSAIK_cellpose").exists()
+    assert (zarr_path / "shapes" / "cell_boundaries").exists()
+    assert (zarr_path / "tables" / "table").exists()
+
+    metadata = json.loads((zarr_path / "zarr.json").read_text())[
+        "consolidated_metadata"
+    ]["metadata"]
+    assert f"images/{MERSCOPE_ZPROJ_IMAGE_NAME}" not in metadata
+    assert f"images/{MERSCOPE_ZPROJ_IMAGE_NAME}/s0" not in metadata
+    assert f"shapes/{MOSAIK_CELLPOSE_SHAPE_NAME}" not in metadata
+    assert "tables/table_MOSAIK_cellpose" not in metadata
+    assert "shapes/cell_boundaries" in metadata
+    assert "tables/table" in metadata
+
+
+def test_read_latest_zarr_recovers_from_partial_enrichment_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Unreadable partial enrichment metadata should be cleaned before retrying."""
+    target = tmp_path / "latest_spatialdata.zarr"
+    target.mkdir()
+    recovered = object()
+    read_calls: list[Path] = []
+    cleanup_calls: list[tuple[Path, str]] = []
+
+    def _fake_read_zarr(path: Path) -> object:
+        read_calls.append(Path(path))
+        if len(read_calls) == 1:
+            raise KeyError("ome")
+        return recovered
+
+    def _fake_cleanup(path: Path, platform: str) -> None:
+        cleanup_calls.append((Path(path), platform))
+
+    monkeypatch.setattr("merxen.enrichment.enrich.sd.read_zarr", _fake_read_zarr)
+    monkeypatch.setattr(
+        "merxen.enrichment.enrich._remove_partial_enrichment_artifacts_from_zarr_path",
+        _fake_cleanup,
+    )
+
+    result = _read_latest_zarr_for_enrichment(target, "MERSCOPE", "P1_MERSCOPE")
+
+    assert result is recovered
+    assert read_calls == [target, target]
+    assert cleanup_calls == [(target, "MERSCOPE")]

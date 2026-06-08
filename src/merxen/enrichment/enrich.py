@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -504,6 +505,137 @@ def _is_already_enriched(dst_sdata: Any, platform: str) -> bool:
     return has_shapes and has_tables and has_images
 
 
+def _remove_per_shape_assignment_tables(dst_sdata: Any) -> None:
+    """Remove derived per-shape tables before rebuilding partial enrichment."""
+    table_keys = [
+        str(key)
+        for key in list(dst_sdata.tables.keys())
+        if str(key).startswith("table_") and str(key) != ORIGINAL_TABLE_NAME
+    ]
+    for table_key in table_keys:
+        try:
+            dst_sdata.delete_element_from_disk(table_key)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "delete_element_from_disk('%s') warning during enrichment rebuild: %s",
+                table_key,
+                exc,
+            )
+        with suppress(Exception):
+            del dst_sdata.tables[table_key]
+
+
+def _partial_enrichment_artifact_paths(zarr_path: Path, platform: str) -> set[str]:
+    """Return zarr-relative paths for enrichment artifacts that can be rebuilt."""
+    rel_paths = {
+        f"shapes/{MOSAIK_PROSEG_SHAPE_NAME}",
+        f"shapes/{MOSAIK_CELLPOSE_SHAPE_NAME}",
+        f"tables/{ORIGINAL_TABLE_NAME}",
+    }
+    if platform.upper() == "MERSCOPE":
+        rel_paths.update(
+            {
+                f"shapes/{MERSCOPE_OLD_SHAPE_NAME}",
+                f"images/{MERSCOPE_ZPROJ_IMAGE_NAME}",
+            }
+        )
+    else:
+        rel_paths.update(
+            {
+                f"shapes/{XENIUM_OLD_CELL_SHAPE_NAME}",
+                f"shapes/{XENIUM_OLD_NUCLEUS_SHAPE_NAME}",
+            }
+        )
+
+    tables_dir = Path(zarr_path) / "tables"
+    if tables_dir.exists():
+        for table_path in tables_dir.iterdir():
+            table_name = table_path.name
+            if table_name.startswith("table_") and table_name != ORIGINAL_TABLE_NAME:
+                rel_paths.add(f"tables/{table_name}")
+    return rel_paths
+
+
+def _prune_zarr_consolidated_metadata(
+    zarr_json_path: Path,
+    rel_paths: set[str],
+) -> None:
+    """Remove stale consolidated metadata entries for deleted zarr elements."""
+    if not rel_paths or not zarr_json_path.exists():
+        return
+    try:
+        data = json.loads(zarr_json_path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Could not read zarr metadata %s: %s", zarr_json_path, exc)
+        return
+
+    consolidated = data.get("consolidated_metadata")
+    metadata = consolidated.get("metadata") if isinstance(consolidated, dict) else None
+    if not isinstance(metadata, dict):
+        return
+
+    def _should_remove(key: str) -> bool:
+        return any(
+            key == rel_path or key.startswith(f"{rel_path}/") for rel_path in rel_paths
+        )
+
+    pruned = {
+        key: value for key, value in metadata.items() if not _should_remove(str(key))
+    }
+    if len(pruned) == len(metadata):
+        return
+    consolidated["metadata"] = pruned
+    zarr_json_path.write_text(json.dumps(data, indent=2) + "\n")
+
+
+def _remove_partial_enrichment_artifacts_from_zarr_path(
+    zarr_path: Path,
+    platform: str,
+) -> None:
+    """Delete known rebuildable enrichment artifacts from an on-disk zarr."""
+    zarr_path = Path(zarr_path)
+    rel_paths = _partial_enrichment_artifact_paths(zarr_path, platform)
+    for rel_path in sorted(rel_paths):
+        remove_path(zarr_path / rel_path)
+
+    _prune_zarr_consolidated_metadata(zarr_path / "zarr.json", rel_paths)
+    for container in ["images", "shapes", "tables"]:
+        container_rel_paths = {
+            rel_path.split("/", 1)[1]
+            for rel_path in rel_paths
+            if rel_path.startswith(f"{container}/")
+        }
+        _prune_zarr_consolidated_metadata(
+            zarr_path / container / "zarr.json",
+            container_rel_paths,
+        )
+
+
+def _is_partial_enrichment_read_error(exc: Exception) -> bool:
+    """Return True when a partial enrichment raster blocks SpatialData reads."""
+    return isinstance(exc, KeyError) and exc.args == ("ome",)
+
+
+def _read_latest_zarr_for_enrichment(
+    write_path: Path,
+    platform: str,
+    dataset_name: str,
+) -> Any:
+    """Read latest zarr, recovering from interrupted partial enrichment writes."""
+    try:
+        return sd.read_zarr(write_path)
+    except Exception as exc:
+        if not _is_partial_enrichment_read_error(exc):
+            raise
+        log_status(
+            f"[{dataset_name}] Latest zarr contains an unreadable partial "
+            "enrichment artifact; removing rebuildable enrichment artifacts."
+        )
+        _remove_partial_enrichment_artifacts_from_zarr_path(write_path, platform)
+        force_release(note=f"after partial enrichment cleanup {dataset_name}")
+        return sd.read_zarr(write_path)
+
+
 def enrich_single_latest(
     config: EnrichmentConfig,
     *,
@@ -530,15 +662,24 @@ def enrich_single_latest(
 
     write_path = _resolve_enrichment_write_path(latest_path, target_path)
     log_status(f"[{dataset_name}] Loading latest zarr for enrichment: {write_path}")
-    dst = sd.read_zarr(write_path)
+    dst = _read_latest_zarr_for_enrichment(write_path, platform, dataset_name)
 
-    if _is_already_enriched(dst, platform) and (not force_rerun):
+    already_enriched = _is_already_enriched(dst, platform)
+    if already_enriched and (not force_rerun):
         log_status(f"[{dataset_name}] Already enriched; skipping.")
         del dst
         force_release(note=f"after enrichment skip {dataset_name}")
         if latest_path != write_path:
             stage_existing_output(write_path, latest_path)
         return write_path
+
+    overwrite_existing = bool(force_rerun or not already_enriched)
+    if overwrite_existing and not force_rerun:
+        log_status(
+            f"[{dataset_name}] Existing enrichment is incomplete; "
+            "rebuilding partial enrichment artifacts."
+        )
+        _remove_per_shape_assignment_tables(dst)
 
     # 1. Ensure explicit MOSAIK_proseg layer exists.
     proseg_src_key = None
@@ -562,7 +703,7 @@ def enrich_single_latest(
         MOSAIK_PROSEG_SHAPE_NAME,
         "shapes",
         proseg_template.copy(),
-        overwrite=force_rerun,
+        overwrite=overwrite_existing,
     )
 
     # 2. Add explicit Cellpose polygons.
@@ -581,7 +722,7 @@ def enrich_single_latest(
         MOSAIK_CELLPOSE_SHAPE_NAME,
         "shapes",
         cp_shapes,
-        overwrite=force_rerun,
+        overwrite=overwrite_existing,
     )
 
     # 3. Load original source data and copy boundaries/images/table.
@@ -596,12 +737,12 @@ def enrich_single_latest(
             MERSCOPE_OLD_SHAPE_NAME,
             "shapes",
             src.shapes[old_key].copy(),
-            overwrite=force_rerun,
+            overwrite=overwrite_existing,
         )
         added = _copy_merscope_images(
             dst,
             src,
-            force=force_rerun,
+            force=overwrite_existing,
             image_prefix=None,
         )
         log_status(f"[MERSCOPE] Added/updated {added} image entries")
@@ -617,7 +758,7 @@ def enrich_single_latest(
                 ORIGINAL_TABLE_NAME,
                 "tables",
                 old_tbl,
-                overwrite=force_rerun,
+                overwrite=overwrite_existing,
             )
         else:
             log_status("[MERSCOPE] WARNING: original source has no tables.")
@@ -629,7 +770,7 @@ def enrich_single_latest(
             copied_shapes = _copy_xenium_shapes_from_sdata(
                 dst,
                 src,
-                force=force_rerun,
+                force=overwrite_existing,
             )
             if copied_shapes == 0:
                 raise RuntimeError(
@@ -652,7 +793,7 @@ def enrich_single_latest(
                 XENIUM_OLD_CELL_SHAPE_NAME,
                 "shapes",
                 cell_shapes,
-                overwrite=force_rerun,
+                overwrite=overwrite_existing,
             )
 
             nuc_gdf = _load_xenium_boundary_shapes_from_csv(xenium_dir, which="nucleus")
@@ -666,10 +807,10 @@ def enrich_single_latest(
                     XENIUM_OLD_NUCLEUS_SHAPE_NAME,
                     "shapes",
                     nuc_shapes,
-                    overwrite=force_rerun,
+                    overwrite=overwrite_existing,
                 )
 
-        added = _copy_xenium_images(dst, src, force=force_rerun)
+        added = _copy_xenium_images(dst, src, force=overwrite_existing)
         log_status(f"[XENIUM] Added/updated {added} image entries")
 
         if len(src.tables) > 0:
@@ -685,7 +826,7 @@ def enrich_single_latest(
                 ORIGINAL_TABLE_NAME,
                 "tables",
                 old_tbl,
-                overwrite=force_rerun,
+                overwrite=overwrite_existing,
             )
         else:
             log_status("[XENIUM] WARNING: no original Xenium table available.")
