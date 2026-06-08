@@ -1,14 +1,18 @@
 process CLUSTERING_SQUIDPY {
-    tag "${pair_id}"
+    tag "${pair_id}:${segmentation}"
 
-    publishDir { "${params.outdir}/${pair_id}/clustering_squidpy" }, mode: "copy", overwrite: true
+    publishDir { "${params.outdir}/${pair_id}/${segmentation}/clustering_squidpy" }, mode: "copy", overwrite: true
 
     input:
     tuple val(pair_id),
+        val(segmentation),
         val(samples_json)
 
     output:
-    tuple val(pair_id), val(samples_json), path("clustering_squidpy_out")
+    tuple val(pair_id),
+        val(segmentation),
+        val(samples_json),
+        path("clustering_squidpy_out")
 
     script:
     """
