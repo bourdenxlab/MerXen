@@ -141,6 +141,131 @@ def test_write_or_replace_element_deletes_only_after_overwrite_refusal() -> None
     assert calls == [("write", True), ("delete", "cells"), ("write", False)]
 
 
+def test_write_or_replace_element_retries_newer_zarr_store_refusal() -> None:
+    """Newer SpatialData same-store messages should use the same fallback."""
+    calls: list[tuple[str, object]] = []
+
+    def _write_element(key: str, *, overwrite: bool) -> None:
+        calls.append(("write", overwrite))
+        if len(calls) == 1:
+            raise ValueError(
+                "The Zarr store already exists. Use `overwrite=True` to try "
+                "overwriting the store. Please note that only Zarr stores not "
+                "currently in use by the current SpatialData object can be "
+                "overwritten."
+            )
+
+    def _delete_element(key: str) -> None:
+        calls.append(("delete", key))
+
+    sdata = SimpleNamespace(
+        images={"MERSCOPE_z_projection": object()},
+        write_element=_write_element,
+        delete_element_from_disk=_delete_element,
+    )
+
+    wrote = write_or_replace_element(
+        sdata,
+        "MERSCOPE_z_projection",
+        "images",
+        object(),
+        overwrite=True,
+    )
+
+    assert wrote
+    assert calls == [
+        ("write", True),
+        ("delete", "MERSCOPE_z_projection"),
+        ("write", False),
+    ]
+
+
+def test_write_or_replace_element_retries_orphaned_zarr_store_refusal() -> None:
+    """Orphaned on-disk stores should be deleted even when metadata missed them."""
+    calls: list[tuple[str, object]] = []
+
+    def _write_element(key: str, *, overwrite: bool) -> None:
+        calls.append(("write", overwrite))
+        if len(calls) == 1:
+            raise ValueError(
+                "The Zarr store already exists. Use `overwrite=True` to try "
+                "overwriting the store. Please note that only Zarr stores not "
+                "currently in use by the current SpatialData object can be "
+                "overwritten."
+            )
+
+    def _delete_element(key: str) -> None:
+        calls.append(("delete", key))
+
+    sdata = SimpleNamespace(
+        images={},
+        write_element=_write_element,
+        delete_element_from_disk=_delete_element,
+    )
+
+    wrote = write_or_replace_element(
+        sdata,
+        "MERSCOPE_z_projection",
+        "images",
+        object(),
+        overwrite=True,
+    )
+
+    assert wrote
+    assert calls == [
+        ("write", False),
+        ("delete", "MERSCOPE_z_projection"),
+        ("write", False),
+    ]
+
+
+def test_write_or_replace_element_removes_orphaned_store_by_path(
+    tmp_path: Path,
+) -> None:
+    """Path cleanup should handle stores not deletable through SpatialData."""
+    zarr_path = tmp_path / "latest.zarr"
+    orphan = zarr_path / "images" / "MERSCOPE_z_projection"
+    orphan.mkdir(parents=True)
+    calls: list[tuple[str, object]] = []
+
+    def _write_element(key: str, *, overwrite: bool) -> None:
+        calls.append(("write", overwrite))
+        if len(calls) == 1:
+            raise ValueError(
+                "The Zarr store already exists. Use `overwrite=True` to try "
+                "overwriting the store. Please note that only Zarr stores not "
+                "currently in use by the current SpatialData object can be "
+                "overwritten."
+            )
+
+    def _delete_element(key: str) -> None:
+        calls.append(("delete", key))
+        raise KeyError(key)
+
+    sdata = SimpleNamespace(
+        images={},
+        path=zarr_path,
+        write_element=_write_element,
+        delete_element_from_disk=_delete_element,
+    )
+
+    wrote = write_or_replace_element(
+        sdata,
+        "MERSCOPE_z_projection",
+        "images",
+        object(),
+        overwrite=True,
+    )
+
+    assert wrote
+    assert not orphan.exists()
+    assert calls == [
+        ("write", False),
+        ("delete", "MERSCOPE_z_projection"),
+        ("write", False),
+    ]
+
+
 def test_write_spatialdata_metadata_persists_metadata_and_transforms() -> None:
     """Metadata helper should delegate to SpatialData's narrow write APIs."""
     sdata = SimpleNamespace(

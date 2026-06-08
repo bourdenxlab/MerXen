@@ -10,6 +10,7 @@ from typing import Any
 import spatialdata as sd
 
 from merxen.memory import force_release, log_status
+from merxen.path_utils import remove_path
 
 logger = logging.getLogger(__name__)
 
@@ -73,20 +74,19 @@ def write_or_replace_element(
 
     write_element = getattr(sdata_obj, "write_element", None)
     if callable(write_element):
+        write_overwrite = exists
         try:
-            write_element(element_key, overwrite=exists)
+            write_element(element_key, overwrite=write_overwrite)
         except ValueError as exc:
-            if not (exists and overwrite and _can_retry_element_overwrite(exc)):
-                raise
-            delete_element = getattr(sdata_obj, "delete_element_from_disk", None)
-            if not callable(delete_element):
+            if not (overwrite and _can_retry_element_overwrite(exc)):
                 raise
             logger.warning(
-                "SpatialData write_element(overwrite=True) failed for %s; "
+                "SpatialData write_element(overwrite=%s) failed for %s; "
                 "falling back to delete-then-write for this element only.",
+                write_overwrite,
                 element_key,
             )
-            delete_element(element_key)
+            _delete_element_from_disk_or_path(sdata_obj, element_key, element_type)
             write_element(element_key, overwrite=False)
     else:
         path = getattr(sdata_obj, "path", None)
@@ -95,6 +95,39 @@ def write_or_replace_element(
             write_spatialdata_zarr(sdata_obj, Path(path), overwrite=True)
 
     return True
+
+
+def _delete_element_from_disk_or_path(
+    sdata_obj: Any,
+    element_key: str,
+    element_type: str,
+) -> None:
+    """Delete an element store, including orphaned stores missing from metadata."""
+    delete_element = getattr(sdata_obj, "delete_element_from_disk", None)
+    if callable(delete_element):
+        try:
+            delete_element(element_key)
+            return
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "delete_element_from_disk('%s') failed; trying path cleanup: %s",
+                element_key,
+                exc,
+            )
+
+    path = getattr(sdata_obj, "path", None)
+    normalized = _ELEMENT_TYPE_ALIASES.get(str(element_type).lower())
+    if path is None or normalized is None:
+        raise RuntimeError(
+            f"Cannot delete SpatialData element store for {element_key!r}; "
+            "the object has no disk path."
+        )
+    element_path = Path(path) / normalized / element_key
+    if not element_path.exists() and not element_path.is_symlink():
+        raise FileNotFoundError(
+            f"Cannot find on-disk SpatialData element store: {element_path}"
+        )
+    remove_path(element_path)
 
 
 def write_spatialdata_metadata(
@@ -126,7 +159,10 @@ def _get_element_container(sdata_obj: Any, element_type: str) -> Any:
 def _can_retry_element_overwrite(exc: ValueError) -> bool:
     """Return True for SpatialData's same-store overwrite refusal."""
     text = str(exc)
-    return "Cannot overwrite" in text and "target path" in text
+    return ("Cannot overwrite" in text and "target path" in text) or (
+        "Zarr store already exists" in text
+        and "currently in use by the current SpatialData object" in text
+    )
 
 
 def normalize_points_for_latest_write(
