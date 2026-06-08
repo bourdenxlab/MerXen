@@ -45,6 +45,7 @@ MerXen/
 ├── notebooks/                  # Exploratory notebooks only
 ├── pyproject.toml              # Dependencies, merxen entry point, tool config
 ├── environment.yml             # Conda env (Python 3.12 + pip)
+├── environment.alignment.yml   # Nextflow ALIGN env with Spateo bootstrap
 ├── requirements.lock           # Pinned dependency tree
 ├── .env.example                # Required environment variables template
 ├── Agents.md                   # Project standards (must-read for contributors)
@@ -58,14 +59,15 @@ MerXen/
 conda env create -f environment.yml
 conda activate merxen
 
-# Optional: enable Spateo-based section alignment
-pip install spateo-release==1.1.1
-pip install "anndata>=0.12.10"
-
 # Install pre-commit hooks
 pre-commit install
 pre-commit install --hook-type pre-push
 ```
+
+Nextflow uses `environment.alignment.yml` for the optional `ALIGN` process.
+That process bootstraps Spateo in its own conda env and restores modern
+AnnData, so regular pipeline stages are not affected by Spateo's older
+dependency metadata.
 
 ## Required environment variables
 

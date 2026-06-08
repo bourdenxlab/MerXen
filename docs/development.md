@@ -111,6 +111,10 @@ git push origin HEAD --tags
 - **Conda env (`environment.yml`)** is deliberately thin — Python 3.12,
   `spatialdata` from git, and `-e ".[dev]"`. Everything else comes through
   `pyproject.toml`.
+- **Alignment env (`environment.alignment.yml`)** mirrors the base env for
+  Nextflow `ALIGN`. Spateo/Dynamo are bootstrapped inside that env at runtime
+  because their older AnnData metadata has to be followed by a modern AnnData
+  restore step.
 
 For reproducible installs (CI, onboarding):
 

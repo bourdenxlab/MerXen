@@ -7,7 +7,11 @@ import sys
 
 import click
 
-from merxen.cli.run_alignment import align_command, alignment_qc_command
+from merxen.cli.run_alignment import (
+    align_command,
+    alignment_qc_command,
+    check_alignment_deps_command,
+)
 from merxen.cli.run_build_spatialdata import build_spatialdata_command
 from merxen.cli.run_clustering_squidpy import clustering_squidpy_command
 from merxen.cli.run_comparison import compare_command
@@ -36,6 +40,7 @@ main.add_command(enrich_command)
 main.add_command(qc_command)
 main.add_command(align_command)
 main.add_command(alignment_qc_command)
+main.add_command(check_alignment_deps_command)
 main.add_command(compare_command)
 main.add_command(visualize_command)
 main.add_command(clustering_squidpy_command)

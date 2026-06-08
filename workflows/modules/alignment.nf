@@ -19,6 +19,18 @@ process ALIGN {
     """
     set -euo pipefail
 
+    if ${params.alignment_bootstrap_dependencies}; then
+        if ! merxen check-alignment-deps >/dev/null 2>&1; then
+            python -m pip install --no-input \\
+                "${params.alignment_dynamo_requirement}" \\
+                "${params.alignment_spateo_requirement}"
+            python -m pip install --no-input --upgrade \\
+                "${params.alignment_anndata_requirement}"
+        fi
+    fi
+
+    merxen check-alignment-deps
+
     cat > align_config.json <<JSON
 {
   "pair_id": "${pair_id}",

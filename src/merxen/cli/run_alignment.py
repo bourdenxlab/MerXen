@@ -6,6 +6,7 @@ from pathlib import Path
 
 import click
 
+from merxen.alignment.dependencies import check_alignment_dependencies
 from merxen.alignment.pipeline import run_alignment_pipeline
 from merxen.alignment.qc import run_alignment_qc
 from merxen.config import AlignmentConfig, AlignmentQCConfig, load_config_from_json
@@ -47,3 +48,15 @@ def alignment_qc_command(config_path: Path) -> None:
     click.echo("Alignment QC complete:")
     for key, value in paths.items():
         click.echo(f"- {key}: {value}")
+
+
+@click.command(name="check-alignment-deps")
+def check_alignment_deps_command() -> None:
+    """Verify that optional Spateo alignment dependencies import."""
+    status = check_alignment_dependencies()
+    if not status.ok:
+        raise click.ClickException(status.message)
+
+    click.echo(status.message)
+    for package, package_version in status.versions.items():
+        click.echo(f"- {package}: {package_version}")

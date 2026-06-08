@@ -27,7 +27,9 @@ from merxen.config import AlignmentConfig, SpateoAlignmentConfig
 
 SPATEO_INSTALL_MESSAGE = (
     "Spateo alignment requires the optional alignment dependencies. "
-    "Install them with: pip install spateo-release==1.1.1 "
+    "For Nextflow, leave alignment_bootstrap_dependencies enabled or provide "
+    "an alignment_conda env where `merxen check-alignment-deps` passes. "
+    'For direct CLI use, run: pip install -e ".[alignment]" '
     '&& pip install "anndata>=0.12.10"'
 )
 

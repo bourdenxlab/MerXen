@@ -114,9 +114,12 @@ merxen align --config align_config.json
 This command requires the optional alignment dependencies:
 
 ```bash
-pip install spateo-release==1.1.1
+pip install -e ".[alignment]"
 pip install "anndata>=0.12.10"
 ```
+
+Nextflow handles this automatically for `ALIGN` through
+`environment.alignment.yml` and `merxen check-alignment-deps`.
 
 Details: [Section alignment](stages/alignment.md).
 

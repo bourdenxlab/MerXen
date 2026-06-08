@@ -58,6 +58,7 @@ scientific logic living in the installable Python package `merxen`.
 | [src/merxen/cli/](../src/merxen/cli/) | Click CLI entry points |
 | [tests/](../tests/) | pytest test suite, mirrors `src/merxen/` |
 | [environment.yml](../environment.yml) | Conda env (Python 3.12 + pip) |
+| [environment.alignment.yml](../environment.alignment.yml) | Conda env used by Nextflow `ALIGN` |
 | [pyproject.toml](../pyproject.toml) | Dependencies, `merxen` entry point, tool config |
 | [.env.example](../.env.example) | Required environment variables |
 
