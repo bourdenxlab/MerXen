@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import anndata as ad
 import numpy as np
 import pandas as pd
 import pytest
@@ -9,6 +12,7 @@ import pytest
 from merxen.qc.gene_comparison import (
     apply_dataset_filter,
     compare_df,
+    compute_gene_summary,
     fit_linear,
     normalize_counts,
 )
@@ -55,3 +59,31 @@ def test_fit_linear_returns_expected_slope() -> None:
     assert np.isclose(slope, 2.0)
     assert np.isclose(intercept, 1.0)
     assert np.isclose(r2, 1.0)
+
+
+def test_compute_gene_summary_uses_requested_table_key() -> None:
+    """Assigned gene counts should come from the branch-specific table."""
+    default = ad.AnnData(
+        X=np.array([[10, 0]], dtype=np.int64),
+        var=pd.DataFrame(index=["A", "B"]),
+    )
+    original = ad.AnnData(
+        X=np.array([[0, 5]], dtype=np.int64),
+        var=pd.DataFrame(index=["A", "B"]),
+    )
+    points = pd.DataFrame({"feature_name": ["A", "B", "B"]})
+    sdata_obj = SimpleNamespace(
+        tables={"table": default, "table_original": original},
+        points={"transcripts": points},
+    )
+
+    out = compute_gene_summary(
+        sdata_obj,
+        "MERSCOPE",
+        table_key="table_original",
+    )
+
+    assigned = out["assigned_counts_df"].set_index("gene")["count"]
+    assert assigned["A"] == 0.0
+    assert assigned["B"] == 5.0
+    assert out["table_key"] == "table_original"
