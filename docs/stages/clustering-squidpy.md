@@ -100,6 +100,7 @@ published latest zarrs directly.
 | `spatial_scatter_point_size` | Point size for regular spatial scatter plots. |
 | `figure_dpi` | PNG output DPI. |
 | `use_gpu` | Use RAPIDS single-cell acceleration when available. |
+| `clustering_squidpy_max_forks` | Nextflow-side concurrency guard. Defaults to `1` so GPU clustering runs one pair at a time on single-GPU systems. |
 | `hierarchical_enabled` | Run broad atlas annotation plus branch subclustering. Defaults to `true`; set `false` for the legacy one-shot Leiden workflow. |
 | `broad_round` | Round-specific broad clustering settings. Default Leiden resolution `0.2`; unspecified fields inherit top-level filtering/PCA/UMAP settings. |
 | `subcluster_round` | Default non-neuron branch settings. Default Leiden resolution `0.5`. |
