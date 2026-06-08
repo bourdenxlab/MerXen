@@ -27,6 +27,7 @@ Common optional parameters:
 | `--outdir` | Where all outputs are published. Defaults to `./results`. |
 | `--proseg_binary` | Absolute path to the ProSeg binary. Required when `SEGMENT` runs. |
 | `--analysis_mode` | `paired` (default), `merscope`, or `xenium`. Controls which platform columns are required and which stages are active. |
+| `--analysis_segmentation` | `both` (default), `reseg`, or `original_seg`. Controls whether downstream analysis runs on resegmented data, original instrument segmentation, or both. |
 | `--force_spatialdata_build` | Force rebuilding the SpatialData zarr even when a cached one exists. Defaults to `false`. |
 | `--enable_alignment` | Run optional Spateo alignment and alignment QC before comparison. Paired mode only. Defaults to `false`. |
 | `--start_stage` / `--stop_stage` | Run a contiguous stage range. Defaults to the full pipeline. |
@@ -67,6 +68,25 @@ for paired plots, including gene-abundance, one-platform transcript overview,
 and one-platform sanity crop outputs. `mapmycells` remains available after
 clustering. Alignment and comparison are rejected in single-platform mode
 because they require both datasets.
+
+## Analysis segmentation
+
+By default, stages from QC onward run twice per active sample: once on
+`reseg` layers (`table_MOSAIK_proseg` / `MOSAIK_proseg`) and once on
+`original_seg` layers (`table_original` plus the platform's original cell
+boundaries). Restrict the branch set when you only need one result family:
+
+```bash
+nextflow run workflows/main.nf \
+    --samplesheet workflows/samplesheet.csv \
+    --analysis_segmentation original_seg \
+    --outdir ./results \
+    --proseg_binary /path/to/proseg
+```
+
+The upstream build, segmentation, and enrichment stages remain shared. The
+enriched SpatialData zarr contains both segmentation families; downstream
+processes receive explicit table and shape keys for the selected branch.
 
 ## Resuming a run
 
@@ -194,7 +214,7 @@ and `--mapmycells_precomputed_stats_path`; region runs require
 If the mapper outputs already exist and only the final annotated H5AD/plots need
 to be regenerated, add `--mapmycells_plots_only true` to `--only_stage
 mapmycells`. The process copies the previously published
-`${outdir}/<pair_id>/mapmycells/mapmycells_out/` directory into the work
+`${outdir}/<pair_id>/<analysis_segmentation>/mapmycells/mapmycells_out/` directory into the work
 directory, skips MapMyCells execution, and rewrites the plots from the existing
 CSV/extended JSON outputs.
 

@@ -9,7 +9,7 @@ MerXen takes spatial transcriptomics datasets and runs a standardised pipeline. 
 1. **SpatialData build** — Builds platform-specific SpatialData zarrs from raw MERSCOPE and Xenium output folders
 2. **Cell segmentation** — Cellpose-SAM image-based segmentation followed by ProSeg transcript-based refinement
 3. **Section alignment** — Optionally registers paired adjacent sections to a Xenium reference coordinate system with Spateo
-4. **Analysis and visualisation** — QC metrics, paired gene-level comparison when both platforms are present, single-platform or paired visualisation, first-pass Scanpy/Squidpy clustering, and optional local MapMyCells cell type assignment
+4. **Analysis and visualisation** — QC metrics, paired gene-level comparison when both platforms are present, single-platform or paired visualisation, first-pass Scanpy/Squidpy clustering, and optional local MapMyCells cell type assignment. By default, downstream analysis runs for both ProSeg-resegmented cells and original instrument segmentations; use `--analysis_segmentation reseg` or `--analysis_segmentation original_seg` to restrict it.
 
 The workflow is orchestrated by Nextflow to process multiple sample pairs with logging and reproducibility.
 

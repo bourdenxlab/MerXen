@@ -16,18 +16,30 @@ ${outdir}/
 │   │   ├── spatialdata/
 │   │   ├── segmentation/
 │   │   ├── enrichment/
-│   │   └── qc/
+│   │   ├── reseg/
+│   │   │   └── qc/
+│   │   └── original_seg/
+│   │       └── qc/
 │   ├── xenium/
 │   │   ├── spatialdata/
 │   │   ├── segmentation/
 │   │   ├── enrichment/
-│   │   └── qc/
+│   │   ├── reseg/
+│   │   │   └── qc/
+│   │   └── original_seg/
+│   │       └── qc/
 │   ├── alignment/
 │   ├── alignment_qc/
-│   ├── comparison/
-│   ├── visualization/
-│   ├── clustering_squidpy/
-│   └── mapmycells/
+│   ├── reseg/
+│   │   ├── comparison/
+│   │   ├── visualization/
+│   │   ├── clustering_squidpy/
+│   │   └── mapmycells/
+│   └── original_seg/
+│       ├── comparison/
+│       ├── visualization/
+│       ├── clustering_squidpy/
+│       └── mapmycells/
 ├── <pair_id_2>/
 │   └── ...
 └── ...
@@ -37,6 +49,9 @@ ${outdir}/
 single-platform mode, only the selected `<platform>/` directory is present and
 paired-only `alignment/`, `alignment_qc/`, and `comparison/` directories are
 not written.
+`reseg/` and `original_seg/` are controlled by `--analysis_segmentation`;
+the default `both` writes both branches. Upstream build, segmentation,
+enrichment, and latest SpatialData artifacts are shared.
 Every `.png` plot listed below is also written as a same-stem `.pdf`.
 
 Nextflow also keeps its own working directory at `./work/` (next to the
@@ -86,7 +101,7 @@ Path: `${outdir}/<pair_id>/<platform>/enrichment/`
 
 ### QC
 
-Path: `${outdir}/<pair_id>/<platform>/qc/`
+Path: `${outdir}/<pair_id>/<platform>/<analysis_segmentation>/qc/`
 
 | File | Contents |
 |------|----------|
@@ -128,7 +143,7 @@ Only present when `--analysis_mode paired --enable_alignment true`.
 
 ### Comparison
 
-Path: `${outdir}/<pair_id>/comparison/`
+Path: `${outdir}/<pair_id>/<analysis_segmentation>/comparison/`
 
 Only present in `--analysis_mode paired`.
 
@@ -142,7 +157,7 @@ Only present in `--analysis_mode paired`.
 
 ### Visualization
 
-Path: `${outdir}/<pair_id>/visualization/`
+Path: `${outdir}/<pair_id>/<analysis_segmentation>/visualization/`
 
 | File | Contents |
 |------|----------|
@@ -172,7 +187,7 @@ Single-platform runs write the available-platform equivalents with
 
 ### Squidpy clustering
 
-Path: `${outdir}/<pair_id>/clustering_squidpy/`
+Path: `${outdir}/<pair_id>/<analysis_segmentation>/clustering_squidpy/`
 
 | File | Contents |
 |------|----------|
@@ -205,7 +220,7 @@ artifacts are written under
 
 ### MapMyCells
 
-Path: `${outdir}/<pair_id>/mapmycells/`
+Path: `${outdir}/<pair_id>/<analysis_segmentation>/mapmycells/`
 
 | File | Contents |
 |------|----------|

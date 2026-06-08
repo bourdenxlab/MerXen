@@ -51,6 +51,7 @@ any of them with `--<name>` on the command line.
 |-------|---------|-------------|
 | `outdir` | `./results` | Output root. |
 | `analysis_mode` | `paired` | `paired`, `merscope`, or `xenium`. Selects the platforms required from each samplesheet row and disables paired-only stages in single-platform runs. |
+| `analysis_segmentation` | `both` | Downstream analysis branches to run after enrichment. Valid values: `both`, `reseg`, `original_seg`; comma-separated combinations are accepted. |
 | `force_spatialdata_build` | `false` | Rebuild SpatialData zarrs even if cached. |
 | `start_stage` | `build_spatialdata` | First stage to run. Skipped upstream stages are read from published outputs. |
 | `stop_stage` | `clustering_squidpy` | Last stage to run. MapMyCells is available after this but opt-in because it requires reference files. |

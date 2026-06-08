@@ -1,18 +1,18 @@
 # Stage 4 — QC
 
-Computes per-cell geometry and transcript-assignment metrics on the enriched
-zarr of a single dataset. Runs independently for each active platform; results
-feed into cross-platform comparison in paired mode and visualization in all
-modes.
+Computes per-cell geometry and transcript-assignment metrics on one analysis
+segmentation branch of an enriched zarr. Runs independently for each active
+platform and selected branch; results feed into cross-platform comparison in
+paired mode and visualization in all modes.
 
 ## What it does
 
-For the primary shape layer of the enriched zarr:
+For the branch-specific shape/table pair selected by Nextflow:
 
 - **Geometry metrics per cell** — area, perimeter, convex area, circularity,
   solidity, eccentricity, aspect ratio, log10 area.
 - **Transcript metrics per cell** — transcripts per cell and unique genes
-  per cell, derived by grouping the points table on the assignment column.
+  per cell, derived from the selected AnnData table when `table_key` is set.
 - **Summary statistics** — n cells, n transcripts total/assigned, percent
   assigned, medians for area, eccentricity, transcripts/cell, genes/cell.
 
@@ -20,12 +20,11 @@ For the primary shape layer of the enriched zarr:
 
 [`QC`](../../workflows/modules/qc.nf) — one instance per dataset.
 
-- **Input:** `tuple(key, pair_id, platform, latest_zarr)`.
+- **Input:** `tuple(key, pair_id, platform, segmentation, latest_zarr, table_key, shape_key)`.
 - **CLI:** `merxen qc --config qc_config.json`. The config JSON is built
-  inline by the process itself (no per-dataset parameters beyond the zarr
-  path and output dir).
-- **Output:** `tuple(key, pair_id, platform, latest_zarr, qc_out/)`.
-- **publishDir:** `${outdir}/${pair_id}/${platform}/qc/` (symlink mode).
+  inline by the process itself.
+- **Output:** `tuple(key, pair_id, platform, segmentation, latest_zarr, qc_out/, table_key, shape_key)`.
+- **publishDir:** `${outdir}/${pair_id}/${platform}/${segmentation}/qc/` (symlink mode).
 
 ## Python entry points
 
@@ -44,27 +43,28 @@ For the primary shape layer of the enriched zarr:
 | `dataset_name` | Used as the output filename stem and the `dataset` column in every metric DataFrame. |
 | `latest_zarr_path` | Enriched zarr from stage 3. |
 | `output_dir` | Where `qc_out/` is populated. |
+| `table_key` | Optional AnnData table used for transcript/cell and gene/cell metrics. |
+| `shape_key` | Optional shape layer used for geometry metrics. |
 
 ## Walkthrough
 
-1. `compute_dataset_qc` opens the enriched zarr and picks the first shape
-   layer (`sdata.shapes[0]`) and the first points layer.
+1. `compute_dataset_qc` opens the enriched zarr and resolves the requested
+   `shape_key` and `table_key` when provided.
 2. Build a per-cell geometry DataFrame using shapely: area, perimeter,
    convex hull area, circularity
    (`4π·area / perimeter²`), solidity (`area / convex_area`), and
    eccentricity / aspect ratio from a fitted ellipse.
-3. Resolve assignment (`assignment` / `cell` / `cell_id`) and gene
-   (`feature_name` / `gene` / `target`) columns on the points table
-   using `first_existing_col`. Raise if neither shape is found.
-4. `_compute_cell_metrics_from_points` groups assigned points and computes
-   transcripts-per-cell and unique-genes-per-cell.
-5. Package the metrics into a dict with `summary`, `geometry_metrics`, and
+3. When a table is provided, compute transcripts-per-cell and unique genes
+   per cell directly from its expression matrix. Without a table key, fall
+   back to grouping the points table on `assignment` / `cell` / `cell_id`.
+4. Package the metrics into a dict with `summary`, `geometry_metrics`, and
    `cell_metrics`, and free the loaded zarr.
-6. `save_dataset_qc` writes CSVs and a pickle (see outputs below).
+5. `save_dataset_qc` writes CSVs and a pickle (see outputs below).
 
 ## Outputs
 
-Written under `qc_out/` (published to `${outdir}/${pair_id}/${platform}/qc/`):
+Written under `qc_out/` (published to
+`${outdir}/${pair_id}/${platform}/${segmentation}/qc/`):
 
 | File | Contents |
 |------|----------|
@@ -89,7 +89,6 @@ The `<dataset>` stem is lowercased, e.g. `example01_merscope_qc_summary.csv`.
 
 - **`No shapes found in <zarr>`** — enrichment failed or wrote an empty
   shape layer. Inspect the upstream enrichment log.
-- **`No assignment column found`** — the points table in the zarr lacks
-  `assignment` / `cell` / `cell_id`. Usually means ProSeg wasn't the last
-  writer.
+- **`No assignment column found`** — no `table_key` was supplied and the points
+  table lacks `assignment` / `cell` / `cell_id`.
 - **`No gene column found`** — same as above, for the gene label column.
