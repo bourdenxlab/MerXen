@@ -176,6 +176,8 @@ class QCConfig(BaseModel):
     dataset_name: str
     latest_zarr_path: Path
     output_dir: Path
+    table_key: str | None = None
+    shape_key: str | None = None
 
 
 class SpateoAlignmentConfig(BaseModel):
@@ -248,6 +250,8 @@ class ComparisonConfig(BaseModel):
     xenium_zarr_path: Path
     output_dir: Path
     pair_id: str
+    merscope_table_key: str | None = None
+    xenium_table_key: str | None = None
 
 
 class VisualizationSampleConfig(BaseModel):
@@ -256,6 +260,9 @@ class VisualizationSampleConfig(BaseModel):
     sample_id: str
     platform: Literal["MERSCOPE", "XENIUM"]
     zarr_path: Path
+    segmentation: str | None = None
+    table_key: str | None = None
+    shape_key: str | None = None
 
 
 class VisualizationConfig(BaseModel):
@@ -312,6 +319,7 @@ class ClusteringSquidpySampleConfig(BaseModel):
     sample_id: str
     platform: Literal["MERSCOPE", "XENIUM"]
     zarr_path: Path
+    segmentation: str | None = None
     table_key: str | None = None
     shape_key: str | None = None
 

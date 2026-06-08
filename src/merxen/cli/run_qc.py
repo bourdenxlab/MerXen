@@ -23,7 +23,12 @@ def qc_command(config_path: Path) -> None:
     cfg = load_config_from_json(config_path, QCConfig)
     assert isinstance(cfg, QCConfig)
 
-    qc_result = compute_dataset_qc(cfg.latest_zarr_path, cfg.dataset_name)
+    qc_result = compute_dataset_qc(
+        cfg.latest_zarr_path,
+        cfg.dataset_name,
+        table_key=cfg.table_key,
+        shape_key=cfg.shape_key,
+    )
     paths = save_dataset_qc(qc_result, cfg.output_dir, cfg.dataset_name)
 
     click.echo("QC complete:")

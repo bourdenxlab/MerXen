@@ -16,6 +16,7 @@ def _to_serializable_metrics(result: dict[str, Any]) -> dict[str, Any]:
     """Extract JSON-serializable metrics from comparison output."""
     return {
         "totals": result["totals"],
+        "table_keys": result.get("table_keys", {}),
         "fits": result["fits"],
         "n_genes": {
             "total_counts": int(len(result["total_counts_df"])),
@@ -42,6 +43,8 @@ def compare_command(config_path: Path) -> None:
     result = compute_gene_comparison_from_paths(
         xenium_zarr_path=cfg.xenium_zarr_path,
         merscope_zarr_path=cfg.merscope_zarr_path,
+        xenium_table_key=cfg.xenium_table_key,
+        merscope_table_key=cfg.merscope_table_key,
     )
 
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
