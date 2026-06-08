@@ -97,17 +97,20 @@ Stage names accepted by `start_stage`, `stop_stage`, and `only_stage` are:
 ### Alignment
 
 Alignment is optional because it requires Spateo and its heavier dependencies.
-Install Spateo, restore modern AnnData for SpatialData compatibility, then pass
-`--enable_alignment true` to Nextflow:
-
-```bash
-pip install spateo-release==1.1.1
-pip install "anndata>=0.12.10"
-```
+When `--enable_alignment true` is set, Nextflow runs `ALIGN` in
+`environment.alignment.yml`. The process checks whether MerXen's shimmed
+Spateo import works; if it does not, it installs pinned Spateo/Dynamo Git refs
+inside the alignment env and then restores modern AnnData for SpatialData
+compatibility. Non-alignment stages keep using `environment.yml`.
 
 | Param | Default | Description |
 |-------|---------|-------------|
 | `enable_alignment` | `false` | Run `ALIGN` and `ALIGN_QC` between QC and comparison. Requires `analysis_mode = paired`. |
+| `alignment_conda` | `environment.alignment.yml` | Conda env file or existing env path used only for `ALIGN`. |
+| `alignment_bootstrap_dependencies` | `true` | Install pinned Spateo/Dynamo requirements inside the `ALIGN` env when `merxen check-alignment-deps` fails. |
+| `alignment_dynamo_requirement` | Git pin for `dynamo-release` v1.5.3 | Requirement installed by the alignment bootstrap. |
+| `alignment_spateo_requirement` | Git pin for Spateo main commit `1bd8a35...` | Requirement installed by the alignment bootstrap; resolves to `spateo-release` 1.1.1. |
+| `alignment_anndata_requirement` | `anndata>=0.12.10` | Requirement installed after Spateo/Dynamo to restore SpatialData-compatible AnnData. |
 | `alignment_device` | `auto` | Spateo device; `auto` uses CUDA when available. |
 | `alignment_dtype` | `float32` | Spateo tensor precision; lower memory than float64. |
 | `alignment_selected_mode` | `nonrigid` | Coordinate set used by downstream alignment transforms. |
@@ -131,6 +134,7 @@ pip install "anndata>=0.12.10"
 | `alignment_seed` | `21` | Seed for deterministic alignment subsampling. |
 | `alignment_max_nonrigid_anchors` | `5000` | Maximum RBF anchors for full-data transform application. |
 | `alignment_pytorch_cuda_alloc_conf` | `expandable_segments:True,max_split_size_mb:256` | PyTorch allocator setting exported by `ALIGN`. |
+| `alignment_max_forks` | `1` | Maximum concurrent `ALIGN` tasks. Keep at `1` on a single 24 GB GPU to avoid CUDA OOM from multiple Spateo jobs. |
 | `alignment_qc_grid_rows` / `alignment_qc_grid_cols` | `10` / `10` | SABench-style QC grid dimensions. |
 
 ### Squidpy clustering
@@ -153,6 +157,7 @@ pip install "anndata>=0.12.10"
 | `clustering_squidpy_spatial_scatter_point_size` | `2.0` | Point size for regular spatial scatter plots. |
 | `clustering_squidpy_figure_dpi` | `180` | DPI for PNG plots. |
 | `clustering_squidpy_use_gpu` | `true` | Use RAPIDS single-cell acceleration when available. |
+| `clustering_squidpy_max_forks` | `1` | Maximum concurrent Squidpy clustering tasks. Default serializes GPU clustering on single-GPU systems. |
 | `clustering_squidpy_hierarchical_enabled` | `true` | Run broad atlas-guided annotation and per-branch subclustering. Set to `false` for the legacy one-shot Leiden workflow. |
 | `clustering_squidpy_broad_leiden_resolution` | `0.2` | Low-resolution Leiden round used for broad atlas annotation. |
 | `clustering_squidpy_subcluster_leiden_resolution` | `0.5` | Default Leiden resolution for non-neuron broad-class branches. |
@@ -218,20 +223,21 @@ executor {
 }
 ```
 
-Per-process CPU/memory requests ([nextflow.config:42-69](../workflows/nextflow.config#L42-L69)):
+Per-process CPU/memory requests and default concurrency guards
+([nextflow.config](../workflows/nextflow.config)):
 
-| Process | CPUs | Memory |
-|---------|-----:|-------:|
-| `BUILD_SPATIALDATA` | 8 | 200 GB |
-| `SEGMENT` | 75 | 500 GB |
-| `ENRICH` | 16 | 200 GB |
-| `QC` | 8 | 100 GB |
-| `ALIGN` | 16 | 300 GB |
-| `ALIGN_QC` | 8 | 150 GB |
-| `COMPARE` | 8 | 200 GB |
-| `VISUALIZE` | 8 | 200 GB |
-| `CLUSTERING_SQUIDPY` | 8 | 200 GB |
-| `MAPMYCELLS` | 8 | 200 GB |
+| Process | CPUs | Memory | Max forks |
+|---------|-----:|-------:|-----------|
+| `BUILD_SPATIALDATA` | 6 | 250 GB | `build_spatialdata_max_forks` = 1 |
+| `SEGMENT` | 50 | 350 GB | `segment_max_forks` = 1 |
+| `ENRICH` | 12 | 140 GB | unbounded |
+| `QC` | 6 | 70 GB | unbounded |
+| `ALIGN` | 12 | 70 GB | `alignment_max_forks` = 1 |
+| `ALIGN_QC` | 6 | 105 GB | unbounded |
+| `COMPARE` | 6 | 140 GB | unbounded |
+| `VISUALIZE` | 6 | 140 GB | unbounded |
+| `CLUSTERING_SQUIDPY` | 6 | 140 GB | `clustering_squidpy_max_forks` = 1 |
+| `MAPMYCELLS` | 6 | 140 GB | unbounded |
 
 ## Pydantic config models
 

@@ -36,13 +36,13 @@ Every other parameter has a default in
 [workflows/nextflow.config](../workflows/nextflow.config). See
 [Configuration](configuration.md) for the full list.
 
-To use alignment, install Spateo and then restore modern AnnData for
-SpatialData compatibility:
-
-```bash
-pip install spateo-release==1.1.1
-pip install "anndata>=0.12.10"
-```
+To use alignment, pass `--enable_alignment true`. Nextflow runs `ALIGN` in
+`environment.alignment.yml`, bootstraps Spateo/Dynamo from pinned Git refs if
+the shimmed import check fails, then restores modern AnnData for SpatialData
+compatibility. Other stages continue to use the regular `environment.yml`.
+On single-GPU systems, `ALIGN` and RAPIDS-backed `CLUSTERING_SQUIDPY` are
+serialized by default (`alignment_max_forks = 1` and
+`clustering_squidpy_max_forks = 1`) so multiple jobs do not exhaust VRAM.
 
 ## Analysis mode
 
@@ -78,6 +78,7 @@ nextflow run workflows/main.nf \
     --samplesheet workflows/samplesheet.csv \
     --outdir ./results \
     --proseg_binary /path/to/proseg \
+    --enable_alignment true \
     -resume
 ```
 

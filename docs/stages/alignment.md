@@ -62,11 +62,14 @@ Key parameters live in `workflows/nextflow.config`:
 | `alignment_max_alignment_cells` | `35000` | Deterministic per-platform cell subsample used for Spateo optimization. |
 | `alignment_seed` | `21` | Seed for deterministic alignment subsampling. |
 | `alignment_max_nonrigid_anchors` | `5000` | Maximum RBF anchors used when applying non-rigid transforms. |
+| `alignment_max_forks` | `1` | Maximum concurrent `ALIGN` tasks. Keep this at `1` on a single 24 GB GPU to avoid CUDA OOM from multiple Spateo jobs. |
 | `alignment_qc_grid_rows` / `alignment_qc_grid_cols` | `10` / `10` | SABench-style QC grid. |
 
 These defaults come from the P7513 tuning notebook. They use the shared panel,
 joint PCA, mirrored initialization, no SVI, and a 35k-cell per-platform
-subsample so the non-rigid pass fits comfortably on a 24 GB GPU.
+subsample so one non-rigid pass fits comfortably on a 24 GB GPU. Nextflow
+serializes `ALIGN` by default because multiple concurrent Spateo jobs can
+exhaust VRAM even when each job fits individually.
 
 ## CLI
 
@@ -85,10 +88,17 @@ package import path. MerXen keeps modern SpatialData/AnnData/Cellpose for the
 rest of the pipeline and applies narrow runtime compatibility shims before
 loading `spateo.align`.
 
-In the current MerXen environment, the tested install sequence is:
+Nextflow isolates this in `environment.alignment.yml`. `ALIGN` first runs
+`merxen check-alignment-deps`; when the shimmed import is unavailable, it
+installs pinned Spateo/Dynamo Git refs into the alignment env and then restores
+modern AnnData. This means future pipeline runs do not depend on manually
+patching a cached `work/conda` environment, and non-alignment stages do not
+inherit Spateo's dependency resolver choices.
+
+For direct CLI use outside Nextflow, the tested install sequence is:
 
 ```bash
-pip install spateo-release==1.1.1
+pip install -e ".[alignment]"
 pip install "anndata>=0.12.10"
 ```
 
