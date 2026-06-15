@@ -116,7 +116,7 @@ Path: `${outdir}/<pair_id>/<platform>/<analysis_segmentation>/qc/`
 
 Path: `${outdir}/<pair_id>/alignment/`
 
-Only present when `--analysis_mode paired --enable_alignment true`.
+Only present for paired rows whose effective `enable_alignment` value is `true`.
 
 | File | Contents |
 |------|----------|
@@ -133,7 +133,7 @@ zarr as the fixed reference.
 
 Path: `${outdir}/<pair_id>/alignment_qc/`
 
-Only present when `--analysis_mode paired --enable_alignment true`.
+Only present for paired rows whose effective `enable_alignment` value is `true`.
 
 | File | Contents |
 |------|----------|
@@ -197,6 +197,8 @@ Path: `${outdir}/<pair_id>/<analysis_segmentation>/clustering_squidpy/`
 | `clustering_squidpy_out/<platform>/plots/spatial/<pair_id>_<platform>_spatial_scatter_leiden.png` | Squidpy spatial scatter colored by Leiden cluster, with clean axes and a 200 um scale bar. |
 | `clustering_squidpy_out/<platform>/plots/spatial_grid/<pair_id>_<platform>_spatial_scatter_leiden_grid.png` | Small-multiple spatial grid with each de novo Leiden cluster highlighted in red against all other cells in grey. |
 | `clustering_squidpy_out/<platform>/<pair_id>_<platform>_clustered.h5ad` | Control-feature-filtered, cell/gene-filtered, normalized, log-transformed, clustered AnnData object with raw non-control counts in `layers["counts"]`. |
+| `clustering_squidpy_out/gpu_vram/<pair_id>_<analysis_segmentation>_summary.json` | Peak task-matched and total device VRAM sampled during the `CLUSTERING_SQUIDPY` task. |
+| `clustering_squidpy_out/gpu_vram/<pair_id>_<analysis_segmentation>_samples.tsv` | Raw `nvidia-smi` GPU memory samples, including compute-app PID matches. |
 
 By default, the same `<sample_id>_clustered.h5ad` path is still written and
 remains the downstream MapMyCells input. In hierarchical mode, the H5AD also

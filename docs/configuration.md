@@ -50,18 +50,20 @@ any of them with `--<name>` on the command line.
 | Param | Default | Description |
 |-------|---------|-------------|
 | `outdir` | `./results` | Output root. |
-| `analysis_mode` | `paired` | `paired`, `merscope`, or `xenium`. Selects the platforms required from each samplesheet row and disables paired-only stages in single-platform runs. |
-| `analysis_segmentation` | `both` | Downstream analysis branches to run after enrichment. Valid values: `both`, `reseg`, `original_seg`; comma-separated combinations are accepted. |
+| `analysis_mode` | `paired` | Fallback row mode: `paired`, `merscope`, or `xenium`. A non-empty samplesheet `analysis_mode` value overrides this per row. |
+| `enable_alignment` | `false` | Fallback row alignment switch. A non-empty samplesheet `enable_alignment` value overrides this per row; alignment only applies to paired rows. |
+| `analysis_segmentation` | `both` | Fallback downstream analysis branches after enrichment. Valid values: `both`, `reseg`, `original_seg`; comma-separated combinations are accepted. A non-empty samplesheet `analysis_segmentation` value overrides this per row. |
 | `force_spatialdata_build` | `false` | Rebuild SpatialData zarrs even if cached. |
-| `start_stage` | `build_spatialdata` | First stage to run. Skipped upstream stages are read from published outputs. |
-| `stop_stage` | `clustering_squidpy` | Last stage to run. MapMyCells is available after this but opt-in because it requires reference files. |
-| `only_stage` | `null` | Run exactly one stage; overrides `start_stage` and `stop_stage` when set. |
+| `start_stage` | `build_spatialdata` | Fallback first stage. Skipped upstream stages are read from published outputs. A samplesheet `start_stage` value overrides this per row. |
+| `stop_stage` | `clustering_squidpy` | Fallback last stage. MapMyCells is available after this but opt-in because it requires reference files. A samplesheet `stop_stage` value overrides this per row. |
+| `only_stage` | `null` | Fallback single-stage selector. A row-level `only_stage` overrides row start/stop values; row start/stop values suppress the global `only_stage` fallback for that row. |
 
 Stage names accepted by `start_stage`, `stop_stage`, and `only_stage` are:
 `build_spatialdata`, `segment`, `enrich`, `qc`, `align`, `align_qc`,
 `compare`, `visualize`, `clustering_squidpy`, and `mapmycells`. `align` and
-`align_qc` are available only with `enable_alignment = true`. `align`,
-`align_qc`, and `compare` are available only when `analysis_mode = paired`.
+`align_qc` are available only for rows whose effective `enable_alignment` value
+is `true`. `align`, `align_qc`, and `compare` are available only when
+`analysis_mode = paired`.
 
 ### Cellpose
 
@@ -85,7 +87,7 @@ Stage names accepted by `start_stage`, `stop_stage`, and `only_stage` are:
 | `proseg_nuclear_reassignment_prob` | `0.25` | Nuclear reassignment probability. |
 | `proseg_diffusion_probability` | `0.25` | Diffusion probability. |
 | `proseg_cell_compactness` | `0.04` | Cell compactness prior. |
-| `proseg_num_threads` | `75` | ProSeg thread count. |
+| `proseg_num_threads` | `32` | ProSeg thread count. |
 | `default_merscope_voxel_layers` | `7` | Fallback when samplesheet column is empty. |
 | `default_xenium_voxel_layers` | `2` | Fallback when samplesheet column is empty. |
 
@@ -98,15 +100,15 @@ Stage names accepted by `start_stage`, `stop_stage`, and `only_stage` are:
 ### Alignment
 
 Alignment is optional because it requires Spateo and its heavier dependencies.
-When `--enable_alignment true` is set, Nextflow runs `ALIGN` in
-`environment.alignment.yml`. The process checks whether MerXen's shimmed
-Spateo import works; if it does not, it installs pinned Spateo/Dynamo Git refs
-inside the alignment env and then restores modern AnnData for SpatialData
-compatibility. Non-alignment stages keep using `environment.yml`.
+When a paired row's effective `enable_alignment` value is `true`, Nextflow runs
+`ALIGN` in `environment.alignment.yml`. The process checks whether MerXen's
+shimmed Spateo import works; if it does not, it installs pinned Spateo/Dynamo
+Git refs inside the alignment env and then restores modern AnnData for
+SpatialData compatibility. Non-alignment stages keep using `environment.yml`.
 
 | Param | Default | Description |
 |-------|---------|-------------|
-| `enable_alignment` | `false` | Run `ALIGN` and `ALIGN_QC` between QC and comparison. Requires `analysis_mode = paired`. |
+| `enable_alignment` | `false` | Run `ALIGN` and `ALIGN_QC` between QC and comparison by default. A samplesheet `enable_alignment` value can override this per paired row. |
 | `alignment_conda` | `environment.alignment.yml` | Conda env file or existing env path used only for `ALIGN`. |
 | `alignment_bootstrap_dependencies` | `true` | Install pinned Spateo/Dynamo requirements inside the `ALIGN` env when `merxen check-alignment-deps` fails. |
 | `alignment_dynamo_requirement` | Git pin for `dynamo-release` v1.5.3 | Requirement installed by the alignment bootstrap. |
@@ -135,7 +137,7 @@ compatibility. Non-alignment stages keep using `environment.yml`.
 | `alignment_seed` | `21` | Seed for deterministic alignment subsampling. |
 | `alignment_max_nonrigid_anchors` | `5000` | Maximum RBF anchors for full-data transform application. |
 | `alignment_pytorch_cuda_alloc_conf` | `expandable_segments:True,max_split_size_mb:256` | PyTorch allocator setting exported by `ALIGN`. |
-| `alignment_max_forks` | `1` | Maximum concurrent `ALIGN` tasks. Keep at `1` on a single 24 GB GPU to avoid CUDA OOM from multiple Spateo jobs. |
+| `alignment_max_forks` | `2` | Maximum concurrent `ALIGN` tasks. Lower to `1` on a single-GPU system if Spateo jobs compete for VRAM. |
 | `alignment_qc_grid_rows` / `alignment_qc_grid_cols` | `10` / `10` | SABench-style QC grid dimensions. |
 
 ### Squidpy clustering
@@ -158,7 +160,9 @@ compatibility. Non-alignment stages keep using `environment.yml`.
 | `clustering_squidpy_spatial_scatter_point_size` | `2.0` | Point size for regular spatial scatter plots. |
 | `clustering_squidpy_figure_dpi` | `180` | DPI for PNG plots. |
 | `clustering_squidpy_use_gpu` | `true` | Use RAPIDS single-cell acceleration when available. |
-| `clustering_squidpy_max_forks` | `1` | Maximum concurrent Squidpy clustering tasks. Default serializes GPU clustering on single-GPU systems. |
+| `clustering_squidpy_max_forks` | `2` | Maximum concurrent Squidpy clustering tasks. Lower to `1` on a single-GPU system if RAPIDS jobs compete for VRAM. |
+| `clustering_squidpy_gpu_vram_monitor` | `true` | Run a lightweight `nvidia-smi` sampler around each `CLUSTERING_SQUIDPY` task. |
+| `clustering_squidpy_gpu_vram_monitor_interval_seconds` | `2` | Sampling interval for the clustering GPU VRAM monitor. |
 | `clustering_squidpy_hierarchical_enabled` | `true` | Run broad atlas-guided annotation and per-branch subclustering. Set to `false` for the legacy one-shot Leiden workflow. |
 | `clustering_squidpy_broad_leiden_resolution` | `0.2` | Low-resolution Leiden round used for broad atlas annotation. |
 | `clustering_squidpy_subcluster_leiden_resolution` | `0.5` | Default Leiden resolution for non-neuron broad-class branches. |
@@ -210,8 +214,8 @@ compatibility. Non-alignment stages keep using `environment.yml`.
 
 | Param | Default | Description |
 |-------|---------|-------------|
-| `max_ram_gb` | `600` | System memory limit passed to `MemoryConfig`. |
-| `warn_ram_gb` | `560` | RAM warning threshold. |
+| `max_ram_gb` | `640` | System memory limit passed to `MemoryConfig`. |
+| `warn_ram_gb` | `600` | RAM warning threshold. |
 | `transcript_chunk_rows` | `1_000_000` | Points chunk size when streaming transcripts. |
 
 The same values are enforced at the executor level:
@@ -219,8 +223,8 @@ The same values are enforced at the executor level:
 ```groovy
 executor {
     name = "local"
-    cpus = 75
-    memory = "600 GB"
+    cpus = 72
+    memory = "640 GB"
 }
 ```
 
@@ -229,16 +233,21 @@ Per-process CPU/memory requests and default concurrency guards
 
 | Process | CPUs | Memory | Max forks |
 |---------|-----:|-------:|-----------|
-| `BUILD_SPATIALDATA` | 6 | 250 GB | `build_spatialdata_max_forks` = 1 |
-| `SEGMENT` | 50 | 350 GB | `segment_max_forks` = 1 |
-| `ENRICH` | 12 | 140 GB | unbounded |
-| `QC` | 6 | 70 GB | unbounded |
-| `ALIGN` | 12 | 70 GB | `alignment_max_forks` = 1 |
-| `ALIGN_QC` | 6 | 105 GB | unbounded |
-| `COMPARE` | 6 | 140 GB | unbounded |
-| `VISUALIZE` | 6 | 140 GB | unbounded |
-| `CLUSTERING_SQUIDPY` | 6 | 140 GB | `clustering_squidpy_max_forks` = 1 |
-| `MAPMYCELLS` | 6 | 140 GB | unbounded |
+| `BUILD_SPATIALDATA` | 8 | 80 GB | `build_spatialdata_max_forks` = 3 |
+| `SEGMENT` | 32 | 220 GB | `segment_max_forks` = 2 |
+| `ENRICH` | 8 | 300 GB | unbounded |
+| `QC` | 4 | 24 GB | unbounded |
+| `ALIGN` | 12 | 100 GB | `alignment_max_forks` = 2 |
+| `ALIGN_QC` | 4 | 32 GB | unbounded |
+| `COMPARE` | 4 | 32 GB | unbounded |
+| `VISUALIZE` | 4 | 32 GB | unbounded |
+| `CLUSTERING_SQUIDPY` | 8 | 32 GB | `clustering_squidpy_max_forks` = 2 |
+| `MAPMYCELLS` | 8 | 160 GB | unbounded |
+
+All processes use `errorStrategy = "ignore"` with
+`workflow.failOnIgnore = true`. A failed task therefore stops only branches that
+depend on its missing outputs, while unrelated samples continue. The overall
+Nextflow run still exits non-zero if any task failure was ignored.
 
 ## Pydantic config models
 

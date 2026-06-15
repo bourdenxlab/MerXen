@@ -11,8 +11,8 @@ channels.
 ┌───────────────────────┐
 │ samplesheet.csv (row) │
 └──────────┬────────────┘
-           │ flatMap → active platform inputs
-           │ (--analysis_mode paired|merscope|xenium)
+           │ flatMap → row-level active platform inputs
+           │ (analysis_mode paired|merscope|xenium)
            ▼
   ┌─────────────────┐
   │ BUILD_SPATIAL-  │   raw MERSCOPE / Xenium export
@@ -65,23 +65,28 @@ channels.
            └───────────────────┘
 ```
 
-In `--analysis_mode paired`, both platforms traverse
-`BUILD_SPATIALDATA → SEGMENT → ENRICH → QC` independently and are rejoined
-after QC. If `--enable_alignment true` is set, `ALIGN` and `ALIGN_QC` run
-before `COMPARE` / `VISUALIZE` / `CLUSTERING_SQUIDPY`; otherwise the paired
-stages consume the enriched zarrs directly. In `--analysis_mode merscope` or
-`--analysis_mode xenium`, only the selected platform traverses those stages,
-and paired-only `ALIGN`, `ALIGN_QC`, and `COMPARE` are inactive. `MAPMYCELLS`
-consumes the AnnData files written by
+Rows inherit `analysis_mode`, `enable_alignment`, `analysis_segmentation`,
+`start_stage`, `stop_stage`, and `only_stage` from Nextflow params unless those
+columns are set in the samplesheet. For rows with `analysis_mode=paired`, both
+platforms traverse `BUILD_SPATIALDATA → SEGMENT → ENRICH → QC` independently
+and are rejoined after QC. If the row's effective `enable_alignment` value is
+`true`, `ALIGN` and `ALIGN_QC` run before `COMPARE` / `VISUALIZE` /
+`CLUSTERING_SQUIDPY`; otherwise the paired stages consume the enriched zarrs
+directly. In `analysis_mode=merscope` or `analysis_mode=xenium`, only the
+selected platform traverses those stages, and paired-only `ALIGN`, `ALIGN_QC`,
+and `COMPARE` are inactive for that row.
+`MAPMYCELLS` consumes the AnnData files written by
 `CLUSTERING_SQUIDPY` and is opt-in because it requires local reference files.
 
 ## Channel keys and joins
 
 Per-platform stages key on `"${pair_id}|${platform}"` (e.g. `P0001|MERSCOPE`).
-Paired-only stages key on `pair_id` alone. In paired mode, the workflow filters
-the QC channel into MERSCOPE and XENIUM sub-channels and joins them by
-`pair_id`. For visualization, clustering, and MapMyCells, the workflow passes a
-JSON `samples` list so those stages can handle either one or two platforms.
+Segmentation-specific analysis branches add the segmentation key. Paired-only
+stages join MERSCOPE and XENIUM branches by `pair_id` and segmentation, so a
+missing output from one platform prunes only the paired downstream branch that
+depends on it. For visualization, clustering, and MapMyCells, the workflow
+passes a JSON `samples` list so those stages can handle either one or two
+platforms.
 
 ## Data flow for one row
 
@@ -118,10 +123,15 @@ Two independent reuse paths and one Nextflow cache:
   `--only_stage` select a contiguous process range without invoking earlier
   stages. When an upstream stage is skipped, the workflow reads the expected
   artifact from `${outdir}` and errors if it is missing. This is useful when
-  `-resume` would pick the wrong Nextflow run lineage.
+  `-resume` would pick the wrong Nextflow run lineage. The same fields can be
+  set per row in the samplesheet.
 - **Nextflow work-dir caching.** Resume a run with `nextflow run ... -resume`
   and completed processes will be skipped. `publishDir` modes are set so that
   SpatialData-heavy stages are symlinked rather than copied.
+- **Branch-local failures.** Process failures use Nextflow's `ignore` error
+  strategy. A failed task emits no outputs, which prevents only dependent
+  downstream joins from firing. `workflow.failOnIgnore = true` keeps the final
+  run status non-zero when any task was ignored.
 
 ## Why Cellpose *and* ProSeg?
 
