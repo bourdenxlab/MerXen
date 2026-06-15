@@ -401,34 +401,86 @@ def publishedPairPath(outdir, pairId, suffix) {
     return "${outdir}/${pairId}/${suffix}"
 }
 
-workflow {
-    if (!params.samplesheet) {
-        error "Missing required parameter: --samplesheet"
+def rowFieldOrDefault(row, fieldName, fallback) {
+    def value = chooseField(row, [fieldName])
+    return value == null ? fallback : value
+}
+
+def boolOrDefault(rawValue, defaultValue, label) {
+    if (rawValue == null || rawValue.toString().trim().isEmpty()) {
+        return defaultValue as boolean
+    }
+    def key = rawValue
+        .toString()
+        .trim()
+        .toLowerCase()
+    if (key in ["true", "t", "yes", "y", "1"]) {
+        return true
+    }
+    if (key in ["false", "f", "no", "n", "0"]) {
+        return false
+    }
+    throw new IllegalArgumentException(
+        "Unknown boolean value for ${label}: '${rawValue}'. " +
+        "Use true or false."
+    )
+}
+
+def rowSampleSettings(row, params) {
+    def pairId = row.pair_id?.toString()?.trim()
+    if (!pairId) {
+        error "Found samplesheet row with missing pair_id: ${row}"
     }
 
-    def analysisMode = normalizeAnalysisMode(params.analysis_mode)
-    def activePlatforms = activePlatformsForMode(analysisMode)
+    def analysisMode = normalizeAnalysisMode(
+        rowFieldOrDefault(row, "analysis_mode", params.analysis_mode)
+    )
     def pairedMode = analysisMode == "paired"
-    def analysisSegmentations = normalizeAnalysisSegmentation(params.analysis_segmentation)
-    def alignmentEnabled = params.enable_alignment.toString().toBoolean()
-    if (!pairedMode && alignmentEnabled) {
-        error "Alignment requires paired analysis. Use --analysis_mode paired or disable --enable_alignment."
+    def activePlatforms = activePlatformsForMode(analysisMode)
+    def analysisSegmentations = normalizeAnalysisSegmentation(
+        rowFieldOrDefault(row, "analysis_segmentation", params.analysis_segmentation)
+    )
+    def requestedAlignmentEnabled = boolOrDefault(
+        rowFieldOrDefault(row, "enable_alignment", params.enable_alignment),
+        false,
+        "enable_alignment for ${pairId}",
+    )
+    def alignmentEnabled = pairedMode && requestedAlignmentEnabled
+
+    def rowOnlyStageRaw = chooseField(row, ["only_stage"])
+    def rowStartStageRaw = chooseField(row, ["start_stage"])
+    def rowStopStageRaw = chooseField(row, ["stop_stage"])
+    def hasRowStageRange = rowStartStageRaw != null || rowStopStageRaw != null
+    def globalOnlyStageRaw = params.only_stage == null
+        ? null
+        : params.only_stage.toString().trim()
+    if (!globalOnlyStageRaw) {
+        globalOnlyStageRaw = null
+    }
+
+    def onlyStageRaw = rowOnlyStageRaw ?: (hasRowStageRange ? null : globalOnlyStageRaw)
+    def startStageRaw = onlyStageRaw ?: (rowStartStageRaw ?: params.start_stage)
+    def stopStageRaw = onlyStageRaw ?: (rowStopStageRaw ?: params.stop_stage)
+    def startParamName = onlyStageRaw ? "only_stage" : "start_stage"
+    def stopParamName = onlyStageRaw ? "only_stage" : "stop_stage"
+    if (rowOnlyStageRaw) {
+        startParamName = "samplesheet only_stage for ${pairId}"
+        stopParamName = "samplesheet only_stage for ${pairId}"
+    } else if (hasRowStageRange) {
+        startParamName = "samplesheet start_stage for ${pairId}"
+        stopParamName = "samplesheet stop_stage for ${pairId}"
     }
 
     def stageOrder = activeStageOrder(alignmentEnabled, pairedMode)
-    def onlyStageRaw = params.only_stage == null ? "" : params.only_stage.toString().trim()
-    def startStage = normalizeStage(
-        onlyStageRaw ? onlyStageRaw : params.start_stage,
-        onlyStageRaw ? "only_stage" : "start_stage",
-    )
-    def stopStage = normalizeStage(
-        onlyStageRaw ? onlyStageRaw : params.stop_stage,
-        onlyStageRaw ? "only_stage" : "stop_stage",
-    )
-    validateStage(startStage, stageOrder, "start_stage", alignmentEnabled)
-    validateStage(stopStage, stageOrder, "stop_stage", alignmentEnabled)
+    def startStage = normalizeStage(startStageRaw, startParamName)
+    def stopStage = normalizeStage(stopStageRaw, stopParamName)
+    validateStage(startStage, stageOrder, startParamName, alignmentEnabled)
+    validateStage(stopStage, stageOrder, stopParamName, alignmentEnabled)
     if (stageOrder.indexOf(startStage) > stageOrder.indexOf(stopStage)) {
-        error "start_stage '${startStage}' comes after stop_stage '${stopStage}'."
+        error(
+            "Samplesheet row ${pairId} has start_stage '${startStage}' " +
+            "after stop_stage '${stopStage}'."
+        )
     }
 
     def runBuild = stageInRange("build_spatialdata", startStage, stopStage, stageOrder)
@@ -446,58 +498,108 @@ workflow {
         stageOrder,
     )
     def runMapMyCells = stageInRange("mapmycells", startStage, stopStage, stageOrder)
+    def needAnalysisZarrs =
+        runAlign || runAlignQc || runCompare || runVisualize || runClusteringSquidpy
+    def needAlignmentResults =
+        pairedMode && alignmentEnabled && needAnalysisZarrs
+    def needAlignmentDownstream =
+        pairedMode && alignmentEnabled && (runCompare || runVisualize || runClusteringSquidpy)
 
-    if (runSegment && !params.proseg_binary) {
-        error "Missing required parameter for SEGMENT: --proseg_binary"
-    }
-    if (runMapMyCells) {
-        def mapMyCellsReferenceMode = params.mapmycells_reference_mode == null
-            ? "both"
-            : params.mapmycells_reference_mode.toString().trim().toLowerCase()
-        def mapMyCellsPlotsOnly = params.mapmycells_plots_only == null
-            ? false
-            : params.mapmycells_plots_only.toString().trim().toLowerCase() == "true"
-        if (!(mapMyCellsReferenceMode in ["whole_brain", "region", "both"])) {
-            error(
-                "Invalid MAPMYCELLS --mapmycells_reference_mode " +
-                "'${params.mapmycells_reference_mode}'. Valid values: " +
-                "whole_brain, region, both"
-            )
-        }
-        if (!mapMyCellsPlotsOnly &&
-            mapMyCellsReferenceMode in ["whole_brain", "both"] &&
-            !params.mapmycells_marker_lookup_path) {
-            error "Missing required parameter for MAPMYCELLS: --mapmycells_marker_lookup_path"
-        }
-        if (!mapMyCellsPlotsOnly &&
-            mapMyCellsReferenceMode in ["whole_brain", "both"] &&
-            !params.mapmycells_precomputed_stats_path) {
-            error "Missing required parameter for MAPMYCELLS: --mapmycells_precomputed_stats_path"
-        }
-        if (!mapMyCellsPlotsOnly &&
-            mapMyCellsReferenceMode in ["region", "both"] &&
-            !params.mapmycells_region_labels) {
-            error "Missing required parameter for MAPMYCELLS region mode: --mapmycells_region_labels"
-        }
-    }
+    return [
+        pair_id: pairId,
+        analysis_mode: analysisMode,
+        enable_alignment: alignmentEnabled,
+        active_platforms: activePlatforms,
+        paired_mode: pairedMode,
+        analysis_segmentations: analysisSegmentations,
+        stage_order: stageOrder,
+        start_stage: startStage,
+        stop_stage: stopStage,
+        selected_stages: stageOrder.findAll {
+            stageInRange(it, startStage, stopStage, stageOrder)
+        },
+        run_build: runBuild,
+        run_segment: runSegment,
+        run_enrich: runEnrich,
+        run_qc: runQc,
+        run_align: runAlign,
+        run_align_qc: runAlignQc,
+        run_compare: runCompare,
+        run_visualize: runVisualize,
+        run_clustering_squidpy: runClusteringSquidpy,
+        run_mapmycells: runMapMyCells,
+        need_build_results: runSegment || runEnrich,
+        need_enriched_zarrs: runQc || needAnalysisZarrs,
+        need_analysis_zarrs: needAnalysisZarrs,
+        need_alignment_results: needAlignmentResults,
+        need_alignment_downstream: needAlignmentDownstream,
+    ]
+}
 
-    def selectedStages = stageOrder.findAll { stageInRange(it, startStage, stopStage, stageOrder) }
-    log.info "Analysis mode: ${analysisMode}; active platforms: ${activePlatforms.join(', ')}"
-    log.info "Analysis segmentations: ${analysisSegmentations.join(', ')}"
-    log.info "Selected stages: ${selectedStages.join(' -> ')}"
+def validateMapMyCellsParams(params) {
+    def mapMyCellsReferenceMode = params.mapmycells_reference_mode == null
+        ? "both"
+        : params.mapmycells_reference_mode.toString().trim().toLowerCase()
+    def mapMyCellsPlotsOnly = params.mapmycells_plots_only == null
+        ? false
+        : params.mapmycells_plots_only.toString().trim().toLowerCase() == "true"
+    if (!(mapMyCellsReferenceMode in ["whole_brain", "region", "both"])) {
+        throw new IllegalArgumentException(
+            "Invalid MAPMYCELLS --mapmycells_reference_mode " +
+            "'${params.mapmycells_reference_mode}'. Valid values: " +
+            "whole_brain, region, both"
+        )
+    }
+    if (!mapMyCellsPlotsOnly &&
+        mapMyCellsReferenceMode in ["whole_brain", "both"] &&
+        !params.mapmycells_marker_lookup_path) {
+        throw new IllegalArgumentException(
+            "Missing required parameter for MAPMYCELLS: --mapmycells_marker_lookup_path"
+        )
+    }
+    if (!mapMyCellsPlotsOnly &&
+        mapMyCellsReferenceMode in ["whole_brain", "both"] &&
+        !params.mapmycells_precomputed_stats_path) {
+        throw new IllegalArgumentException(
+            "Missing required parameter for MAPMYCELLS: --mapmycells_precomputed_stats_path"
+        )
+    }
+    if (!mapMyCellsPlotsOnly &&
+        mapMyCellsReferenceMode in ["region", "both"] &&
+        !params.mapmycells_region_labels) {
+        throw new IllegalArgumentException(
+            "Missing required parameter for MAPMYCELLS region mode: " +
+            "--mapmycells_region_labels"
+        )
+    }
+}
+
+workflow {
+    if (!params.samplesheet) {
+        error "Missing required parameter: --samplesheet"
+    }
 
     samplesheet_ch = Channel
         .fromPath(params.samplesheet, checkIfExists: true)
         .splitCsv(header: true, sep: ",", quote: '"', strip: true)
 
-    if (runBuild) {
-        build_inputs_ch = samplesheet_ch.flatMap { row ->
-            def pairId = row.pair_id?.toString()?.trim()
-            if (!pairId) {
-                error "Found samplesheet row with missing pair_id: ${row}"
-            }
+    sample_rows_ch = samplesheet_ch.map { row ->
+        def settings = rowSampleSettings(row, params)
+        log.info(
+            "Sample ${settings.pair_id}: analysis_mode=${settings.analysis_mode}; " +
+            "enable_alignment=${settings.enable_alignment}; " +
+            "active platforms=${settings.active_platforms.join(', ')}; " +
+            "analysis segmentations=${settings.analysis_segmentations.join(', ')}; " +
+            "selected stages=${settings.selected_stages.join(' -> ')}"
+        )
+        tuple(settings.pair_id, row, settings)
+    }
 
-            activePlatforms.collect { platform ->
+    build_inputs_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+        if (!settings.run_build) {
+            []
+        } else {
+            settings.active_platforms.collect { platform ->
                 def key = "${pairId}|${platform}"
                 def buildConfig = buildConfigForPlatform(row, pairId, platform)
                 tuple(
@@ -508,19 +610,15 @@ workflow {
                 )
             }
         }
-
-        build_results_ch = BUILD_SPATIALDATA(build_inputs_ch)
     }
 
-    def needBuildResults = runSegment || runEnrich
-    if (needBuildResults && !runBuild) {
-        build_results_ch = samplesheet_ch.flatMap { row ->
-            def pairId = row.pair_id?.toString()?.trim()
-            if (!pairId) {
-                error "Found samplesheet row with missing pair_id: ${row}"
-            }
+    build_task_results_ch = BUILD_SPATIALDATA(build_inputs_ch)
 
-            activePlatforms.collect { platform ->
+    build_published_results_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+        if (!(settings.need_build_results && !settings.run_build)) {
+            []
+        } else {
+            settings.active_platforms.collect { platform ->
                 def key = "${pairId}|${platform}"
                 def sourceSpatialdata = requireExistingPath(
                     publishedDatasetPath(
@@ -536,115 +634,114 @@ workflow {
         }
     }
 
-    if (runSegment) {
-        segment_meta_ch = samplesheet_ch.flatMap { row ->
-            def pairId = row.pair_id?.toString()?.trim()
-            if (!pairId) {
-                error "Found samplesheet row with missing pair_id: ${row}"
-            }
+    build_results_ch = build_task_results_ch.mix(build_published_results_ch)
 
-            activePlatforms.collect { platform ->
+    segment_meta_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+        if (!settings.run_segment) {
+            []
+        } else {
+            if (!params.proseg_binary) {
+                error "Missing required parameter for SEGMENT: --proseg_binary"
+            }
+            settings.active_platforms.collect { platform ->
                 tuple(
                     "${pairId}|${platform}",
                     segmentMetaForPlatform(row, platform, params),
                 )
             }
         }
-
-        segment_inputs_ch = build_results_ch
-            .join(segment_meta_ch)
-            .map { key, pairId, platform, sourceSpatialdata, meta ->
-                def persistentLatestZarrPath = file(
-                    publishedDatasetPath(
-                        params.outdir,
-                        pairId,
-                        platform,
-                        "latest/latest_spatialdata.zarr",
-                    )
-                ).toAbsolutePath().toString()
-                def persistentMaskPath = file(
-                    publishedDatasetPath(
-                        params.outdir,
-                        pairId,
-                        platform,
-                        "segmentation/cellpose_masks_tiled.npy",
-                    )
-                ).toAbsolutePath().toString()
-                def persistentTranscriptsPath = file(
-                    publishedDatasetPath(
-                        params.outdir,
-                        pairId,
-                        platform,
-                        "segmentation/transcripts_for_proseg.csv",
-                    )
-                ).toAbsolutePath().toString()
-                def baseConfig = [
-                    cellpose: [
-                        model_type: params.cellpose_model_type,
-                        gpu: params.cellpose_gpu,
-                        diameter: params.cellpose_diameter,
-                        flow_threshold: params.cellpose_flow_threshold,
-                        cellprob_threshold: params.cellpose_cellprob,
-                        tile_overlap: params.cellpose_tile_overlap,
-                        bsize: params.cellpose_bsize,
-                        factor_rescale: 1.0,
-                    ],
-                    proseg: [
-                        binary_path: params.proseg_binary,
-                        samples: params.proseg_samples,
-                        voxel_size: params.proseg_voxel_size,
-                        burnin_voxel_size: params.proseg_burnin_voxel_size,
-                        nuclear_reassignment_prob: params.proseg_nuclear_reassignment_prob,
-                        diffusion_probability: params.proseg_diffusion_probability,
-                        cell_compactness: params.proseg_cell_compactness,
-                        num_threads: params.proseg_num_threads,
-                        voxel_layers: 2,
-                    ],
-                    memory: [
-                        max_system_ram_gb: params.max_ram_gb,
-                        memory_warn_gb: params.warn_ram_gb,
-                        transcript_chunk_rows: params.transcript_chunk_rows,
-                    ],
-                ]
-
-                def segmentConfig = baseConfig + [
-                    dataset: [
-                        name: "${pairId}_${platform}",
-                        platform: platform,
-                        data_path: sourceSpatialdata.toString(),
-                        channels: meta.channels,
-                        output_dir: "segment_out",
-                        persistent_latest_zarr_path: persistentLatestZarrPath,
-                        persistent_mask_path: persistentMaskPath,
-                        persistent_transcripts_path: persistentTranscriptsPath,
-                        image_prefix: meta.image_prefix,
-                        z_range: meta.z_range,
-                        transform_path: meta.transform_path,
-                        xenium_spec_path: meta.xenium_spec_path,
-                        min_qv: meta.min_qv,
-                        proseg_overrides: [voxel_layers: meta.voxel_layers],
-                    ],
-                ]
-
-                tuple(
-                    key,
-                    pairId,
-                    platform,
-                    groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(segmentConfig)),
-                )
-            }
-
-        segment_results_ch = SEGMENT(segment_inputs_ch)
     }
 
-    if (runEnrich && !runSegment) {
-        segment_results_ch = samplesheet_ch.flatMap { row ->
-            def pairId = row.pair_id?.toString()?.trim()
-            if (!pairId) {
-                error "Found samplesheet row with missing pair_id: ${row}"
-            }
+    segment_inputs_ch = build_results_ch
+        .join(segment_meta_ch)
+        .map { key, pairId, platform, sourceSpatialdata, meta ->
+            def persistentLatestZarrPath = file(
+                publishedDatasetPath(
+                    params.outdir,
+                    pairId,
+                    platform,
+                    "latest/latest_spatialdata.zarr",
+                )
+            ).toAbsolutePath().toString()
+            def persistentMaskPath = file(
+                publishedDatasetPath(
+                    params.outdir,
+                    pairId,
+                    platform,
+                    "segmentation/cellpose_masks_tiled.npy",
+                )
+            ).toAbsolutePath().toString()
+            def persistentTranscriptsPath = file(
+                publishedDatasetPath(
+                    params.outdir,
+                    pairId,
+                    platform,
+                    "segmentation/transcripts_for_proseg.csv",
+                )
+            ).toAbsolutePath().toString()
+            def baseConfig = [
+                cellpose: [
+                    model_type: params.cellpose_model_type,
+                    gpu: params.cellpose_gpu,
+                    diameter: params.cellpose_diameter,
+                    flow_threshold: params.cellpose_flow_threshold,
+                    cellprob_threshold: params.cellpose_cellprob,
+                    tile_overlap: params.cellpose_tile_overlap,
+                    bsize: params.cellpose_bsize,
+                    factor_rescale: 1.0,
+                ],
+                proseg: [
+                    binary_path: params.proseg_binary,
+                    samples: params.proseg_samples,
+                    voxel_size: params.proseg_voxel_size,
+                    burnin_voxel_size: params.proseg_burnin_voxel_size,
+                    nuclear_reassignment_prob: params.proseg_nuclear_reassignment_prob,
+                    diffusion_probability: params.proseg_diffusion_probability,
+                    cell_compactness: params.proseg_cell_compactness,
+                    num_threads: params.proseg_num_threads,
+                    voxel_layers: 2,
+                ],
+                memory: [
+                    max_system_ram_gb: params.max_ram_gb,
+                    memory_warn_gb: params.warn_ram_gb,
+                    transcript_chunk_rows: params.transcript_chunk_rows,
+                ],
+            ]
 
-            activePlatforms.collect { platform ->
+            def segmentConfig = baseConfig + [
+                dataset: [
+                    name: "${pairId}_${platform}",
+                    platform: platform,
+                    data_path: sourceSpatialdata.toString(),
+                    channels: meta.channels,
+                    output_dir: "segment_out",
+                    persistent_latest_zarr_path: persistentLatestZarrPath,
+                    persistent_mask_path: persistentMaskPath,
+                    persistent_transcripts_path: persistentTranscriptsPath,
+                    image_prefix: meta.image_prefix,
+                    z_range: meta.z_range,
+                    transform_path: meta.transform_path,
+                    xenium_spec_path: meta.xenium_spec_path,
+                    min_qv: meta.min_qv,
+                    proseg_overrides: [voxel_layers: meta.voxel_layers],
+                ],
+            ]
+
+            tuple(
+                key,
+                pairId,
+                platform,
+                groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(segmentConfig)),
+            )
+        }
+
+    segment_task_results_ch = SEGMENT(segment_inputs_ch)
+
+    segment_published_results_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+        if (!(settings.run_enrich && !settings.run_segment)) {
+            []
+        } else {
+            settings.active_platforms.collect { platform ->
                 def key = "${pairId}|${platform}"
                 def latestZarr = requireExistingPath(
                     publishedDatasetPath(
@@ -678,67 +775,72 @@ workflow {
         }
     }
 
-    if (runEnrich) {
-        metadata_ch = build_results_ch.map { key, pairId, platform, sourceSpatialdata ->
-            tuple(key, pairId, platform, sourceSpatialdata.toString())
+    segment_results_ch = segment_task_results_ch.mix(segment_published_results_ch)
+
+    metadata_ch = build_results_ch.map { key, pairId, platform, sourceSpatialdata ->
+        tuple(key, pairId, platform, sourceSpatialdata.toString())
+    }
+
+    enrich_gate_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+        if (!settings.run_enrich) {
+            []
+        } else {
+            settings.active_platforms.collect { platform ->
+                tuple("${pairId}|${platform}", true)
+            }
         }
+    }
 
-        enrich_inputs_ch = segment_results_ch
-            .join(metadata_ch)
-            .map {
-                key, pairId, platform, latestZarr, maskPath, transcriptsCsv,
-                pairMeta, platformMeta, originalDataPath ->
-                if (pairId != pairMeta || platform != platformMeta) {
-                    error(
-                        "Internal channel mismatch for key=${key}: " +
-                        "${pairId}/${platform} vs ${pairMeta}/${platformMeta}"
-                    )
-                }
-
-                def persistentLatestZarrPath = file(
-                    publishedDatasetPath(
-                        params.outdir,
-                        pairId,
-                        platform,
-                        "latest/latest_spatialdata.zarr",
-                    )
-                ).toAbsolutePath().toString()
-
-                def enrichConfig = [
-                    dataset_name: "${pairId}_${platform}",
-                    platform: platform,
-                    latest_zarr_path: "latest_input.zarr",
-                    mask_path: "enrich_input_mask.npy",
-                    original_data_path: originalDataPath,
-                    output_dir: "enrich_out",
-                    persistent_output_path: persistentLatestZarrPath,
-                    transform_path: null,
-                ]
-
-                tuple(
-                    key,
-                    pairId,
-                    platform,
-                    groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(enrichConfig)),
-                    latestZarr,
-                    maskPath,
+    enrich_inputs_ch = segment_results_ch
+        .join(metadata_ch)
+        .join(enrich_gate_ch)
+        .map {
+            key, pairId, platform, latestZarr, maskPath, transcriptsCsv,
+            pairMeta, platformMeta, originalDataPath, runFlag ->
+            if (pairId != pairMeta || platform != platformMeta) {
+                error(
+                    "Internal channel mismatch for key=${key}: " +
+                    "${pairId}/${platform} vs ${pairMeta}/${platformMeta}"
                 )
             }
 
-        enrich_results_ch = ENRICH(enrich_inputs_ch)
-    }
+            def persistentLatestZarrPath = file(
+                publishedDatasetPath(
+                    params.outdir,
+                    pairId,
+                    platform,
+                    "latest/latest_spatialdata.zarr",
+                )
+            ).toAbsolutePath().toString()
 
-    def needAnalysisZarrs =
-        runAlign || runAlignQc || runCompare || runVisualize || runClusteringSquidpy
-    def needEnrichedZarrs = runQc || needAnalysisZarrs
-    if (needEnrichedZarrs && !runEnrich) {
-        enrich_results_ch = samplesheet_ch.flatMap { row ->
-            def pairId = row.pair_id?.toString()?.trim()
-            if (!pairId) {
-                error "Found samplesheet row with missing pair_id: ${row}"
-            }
+            def enrichConfig = [
+                dataset_name: "${pairId}_${platform}",
+                platform: platform,
+                latest_zarr_path: "latest_input.zarr",
+                mask_path: "enrich_input_mask.npy",
+                original_data_path: originalDataPath,
+                output_dir: "enrich_out",
+                persistent_output_path: persistentLatestZarrPath,
+                transform_path: null,
+            ]
 
-            activePlatforms.collect { platform ->
+            tuple(
+                key,
+                pairId,
+                platform,
+                groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(enrichConfig)),
+                latestZarr,
+                maskPath,
+            )
+        }
+
+    enrich_task_results_ch = ENRICH(enrich_inputs_ch)
+
+    enrich_published_results_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+        if (!(settings.need_enriched_zarrs && !settings.run_enrich)) {
+            []
+        } else {
+            settings.active_platforms.collect { platform ->
                 def key = "${pairId}|${platform}"
                 def latestZarr = requireExistingPath(
                     publishedDatasetPath(
@@ -763,248 +865,367 @@ workflow {
         }
     }
 
-    if (needEnrichedZarrs) {
-        enriched_zarrs_ch = enrich_results_ch.map {
-            key, pairId, platform, enrichedLatestZarr, enrichOutDir ->
-                tuple(
-                    key,
-                    pairId,
-                    platform,
-                    java.nio.file.Paths.get(enrichedLatestZarr.toString()).toRealPath().toString(),
-                )
+    enrich_results_ch = enrich_task_results_ch.mix(enrich_published_results_ch)
+
+    enriched_zarrs_ch = enrich_results_ch.map {
+        key, pairId, platform, enrichedLatestZarr, enrichOutDir ->
+            tuple(
+                key,
+                pairId,
+                platform,
+                java.nio.file.Paths.get(enrichedLatestZarr.toString()).toRealPath().toString(),
+            )
+    }
+
+    qc_branch_gate_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+        if (!settings.run_qc) {
+            []
+        } else {
+            settings.active_platforms.collect { platform ->
+                tuple("${pairId}|${platform}", settings.analysis_segmentations)
+            }
         }
     }
 
-    if (runQc) {
-        qc_inputs_ch = enriched_zarrs_ch.flatMap {
-            key, pairId, platform, enrichedLatestZarr ->
+    qc_inputs_ch = enriched_zarrs_ch
+        .join(qc_branch_gate_ch)
+        .flatMap { key, pairId, platform, enrichedLatestZarr, analysisSegmentations ->
+            analysisSegmentations.collect { segmentation ->
+                def layerKeys = analysisLayerKeys(platform, segmentation)
+                tuple(
+                    "${key}|${segmentation}",
+                    pairId,
+                    platform,
+                    segmentation,
+                    enrichedLatestZarr,
+                    layerKeys.table_key,
+                    layerKeys.shape_key,
+                )
+            }
+        }
+
+    qc_results_ch = QC(qc_inputs_ch)
+
+    analysis_branch_settings_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+        if (!settings.need_analysis_zarrs) {
+            []
+        } else {
+            settings.active_platforms.collectMany { platform ->
+                settings.analysis_segmentations.collect { segmentation ->
+                    tuple("${pairId}|${platform}|${segmentation}", settings)
+                }
+            }
+        }
+    }
+
+    analysis_from_qc_ch = qc_results_ch
+        .map {
+            key, pairId, platform, segmentation, enrichedLatestZarr,
+            qcOutDir, tableKey, shapeKey ->
+                tuple(
+                    "${pairId}|${platform}|${segmentation}",
+                    pairId,
+                    segmentation,
+                    platform,
+                    java.nio.file.Paths.get(enrichedLatestZarr.toString()).toRealPath().toString(),
+                    tableKey,
+                    shapeKey,
+                )
+        }
+        .join(analysis_branch_settings_ch)
+        .map {
+            branchKey, pairId, segmentation, platform, zarrPath,
+            tableKey, shapeKey, settings ->
+                tuple(
+                    pairId,
+                    segmentation,
+                    platform,
+                    zarrPath,
+                    tableKey,
+                    shapeKey,
+                    settings,
+                )
+        }
+
+    analysis_no_qc_gate_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+        if (!(settings.need_analysis_zarrs && !settings.run_qc)) {
+            []
+        } else {
+            settings.active_platforms.collect { platform ->
+                tuple("${pairId}|${platform}", settings.analysis_segmentations, settings)
+            }
+        }
+    }
+
+    analysis_without_qc_ch = enriched_zarrs_ch
+        .join(analysis_no_qc_gate_ch)
+        .flatMap {
+            key, pairId, platform, enrichedLatestZarr, analysisSegmentations, settings ->
                 analysisSegmentations.collect { segmentation ->
                     def layerKeys = analysisLayerKeys(platform, segmentation)
                     tuple(
-                        "${key}|${segmentation}",
                         pairId,
-                        platform,
                         segmentation,
+                        platform,
                         enrichedLatestZarr,
                         layerKeys.table_key,
                         layerKeys.shape_key,
+                        settings,
                     )
                 }
         }
 
-        qc_results_ch = QC(qc_inputs_ch)
-    }
+    analysis_dataset_zarrs_ch = analysis_from_qc_ch.mix(analysis_without_qc_ch)
 
-    if (needAnalysisZarrs) {
-        if (runQc) {
-            analysis_dataset_zarrs_ch = qc_results_ch.map {
-                key, pairId, platform, segmentation, enrichedLatestZarr,
-                qcOutDir, tableKey, shapeKey ->
-                    tuple(
-                        pairId,
-                        segmentation,
-                        platform,
-                        java.nio.file.Paths.get(enrichedLatestZarr.toString()).toRealPath().toString(),
-                        tableKey,
-                        shapeKey,
-                    )
-            }
+    merscope_zarr_ch = enriched_zarrs_ch
+        .filter { key, pairId, platform, zarrPath -> platform == "MERSCOPE" }
+        .map { key, pairId, platform, zarrPath -> tuple(pairId, zarrPath) }
+
+    xenium_zarr_ch = enriched_zarrs_ch
+        .filter { key, pairId, platform, zarrPath -> platform == "XENIUM" }
+        .map { key, pairId, platform, zarrPath -> tuple(pairId, zarrPath) }
+
+    paired_need_zarrs_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+        if (!(settings.paired_mode && settings.need_analysis_zarrs)) {
+            []
         } else {
-            analysis_dataset_zarrs_ch = enriched_zarrs_ch.flatMap {
-                key, pairId, platform, enrichedLatestZarr ->
-                    analysisSegmentations.collect { segmentation ->
-                        def layerKeys = analysisLayerKeys(platform, segmentation)
-                        tuple(
-                            pairId,
-                            segmentation,
-                            platform,
-                            enrichedLatestZarr,
-                            layerKeys.table_key,
-                            layerKeys.shape_key,
-                        )
-                    }
-            }
+            [tuple(pairId, settings)]
         }
     }
 
-    if (pairedMode && needAnalysisZarrs) {
-        merscope_zarr_ch = enriched_zarrs_ch
-            .filter { key, pairId, platform, zarrPath -> platform == "MERSCOPE" }
-            .map { key, pairId, platform, zarrPath -> tuple(pairId, zarrPath) }
+    paired_zarrs_ch = merscope_zarr_ch
+        .join(xenium_zarr_ch)
+        .join(paired_need_zarrs_ch)
+        .map { pairId, merscopePath, xeniumPath, settings ->
+            tuple(pairId, merscopePath, xeniumPath, settings)
+        }
 
-        xenium_zarr_ch = enriched_zarrs_ch
-            .filter { key, pairId, platform, zarrPath -> platform == "XENIUM" }
-            .map { key, pairId, platform, zarrPath -> tuple(pairId, zarrPath) }
-
-        paired_zarrs_ch = merscope_zarr_ch
-            .join(xenium_zarr_ch)
-            .map { pairId, merscopePath, xeniumPath ->
-                tuple(pairId, merscopePath, xeniumPath)
-            }
-
-        merscope_analysis_ch = analysis_dataset_zarrs_ch
-            .filter {
-                pairId, segmentation, platform, zarrPath, tableKey, shapeKey ->
-                    platform == "MERSCOPE"
-            }
-            .map {
-                pairId, segmentation, platform, zarrPath, tableKey, shapeKey ->
-                    tuple(
-                        "${pairId}|${segmentation}",
-                        pairId,
-                        segmentation,
-                        zarrPath,
-                        tableKey,
-                        shapeKey,
-                    )
-            }
-
-        xenium_analysis_ch = analysis_dataset_zarrs_ch
-            .filter {
-                pairId, segmentation, platform, zarrPath, tableKey, shapeKey ->
-                    platform == "XENIUM"
-            }
-            .map {
-                pairId, segmentation, platform, zarrPath, tableKey, shapeKey ->
-                    tuple(
-                        "${pairId}|${segmentation}",
-                        zarrPath,
-                        tableKey,
-                        shapeKey,
-                    )
-            }
-
-        paired_analysis_zarrs_ch = merscope_analysis_ch
-            .join(xenium_analysis_ch)
-            .map {
-                branchKey, pairId, segmentation, merscopePath, merscopeTableKey,
-                merscopeShapeKey, xeniumPath, xeniumTableKey, xeniumShapeKey ->
-                    tuple(
-                        pairId,
-                        segmentation,
-                        merscopePath,
-                        xeniumPath,
-                        merscopeTableKey,
-                        merscopeShapeKey,
-                        xeniumTableKey,
-                        xeniumShapeKey,
-                    )
-            }
-    }
-
-    if (pairedMode && alignmentEnabled) {
-        def needAlignmentResults =
-            runAlign || runAlignQc || runCompare || runVisualize || runClusteringSquidpy
-        if (needAlignmentResults) {
-            if (runAlign) {
-                alignment_results_ch = ALIGN(paired_zarrs_ch)
-            } else {
-                alignment_results_ch = samplesheet_ch.map { row ->
-                    def pairId = row.pair_id?.toString()?.trim()
-                    if (!pairId) {
-                        error "Found samplesheet row with missing pair_id: ${row}"
-                    }
-                    def merscopeLatest = requireExistingPath(
-                        publishedDatasetPath(
-                            params.outdir,
-                            pairId,
-                            "MERSCOPE",
-                            "latest/latest_spatialdata.zarr",
-                        ),
-                        "QC/enriched MERSCOPE latest zarr for ${pairId}",
-                    )
-                    def xeniumLatest = requireExistingPath(
-                        publishedDatasetPath(
-                            params.outdir,
-                            pairId,
-                            "XENIUM",
-                            "latest/latest_spatialdata.zarr",
-                        ),
-                        "QC/enriched XENIUM latest zarr for ${pairId}",
-                    )
-                    def transformJson = requireExistingPath(
-                        publishedPairPath(
-                            params.outdir,
-                            pairId,
-                            "alignment/align_out/alignment_transform.json",
-                        ),
-                        "ALIGN transform JSON for ${pairId}",
-                    )
-                    def coordsDir = requireExistingPath(
-                        publishedPairPath(
-                            params.outdir,
-                            pairId,
-                            "alignment/align_out/alignment_coords",
-                        ),
-                        "ALIGN coordinate directory for ${pairId}",
-                    )
-                    tuple(
-                        pairId,
-                        merscopeLatest.toRealPath().toString(),
-                        xeniumLatest.toRealPath().toString(),
-                        transformJson,
-                        coordsDir,
-                    )
-                }
-            }
-
-            if (runAlignQc) {
-                ALIGN_QC(alignment_results_ch)
-            }
-
-            alignment_done_ch = alignment_results_ch.map {
-                pairId, merscopeLatest, xeniumLatest, transformJson, coordsDir ->
-                    tuple(pairId, true)
-            }
-
-            paired_downstream_zarrs_ch = paired_analysis_zarrs_ch
-                .map {
-                    pairId, segmentation, merscopePath, xeniumPath,
-                    merscopeTableKey, merscopeShapeKey, xeniumTableKey,
-                    xeniumShapeKey ->
-                        tuple(
-                            "${pairId}|${segmentation}",
-                            pairId,
-                            segmentation,
-                            merscopePath,
-                            xeniumPath,
-                            merscopeTableKey,
-                            merscopeShapeKey,
-                            xeniumTableKey,
-                            xeniumShapeKey,
-                        )
-                }
-                .join(
-                    alignment_done_ch.flatMap { pairId, doneFlag ->
-                        analysisSegmentations.collect { segmentation ->
-                            tuple("${pairId}|${segmentation}", doneFlag)
-                        }
-                    }
+    merscope_analysis_ch = analysis_dataset_zarrs_ch
+        .filter {
+            pairId, segmentation, platform, zarrPath, tableKey, shapeKey, settings ->
+                settings.paired_mode && platform == "MERSCOPE"
+        }
+        .map {
+            pairId, segmentation, platform, zarrPath, tableKey, shapeKey, settings ->
+                tuple(
+                    "${pairId}|${segmentation}",
+                    pairId,
+                    segmentation,
+                    zarrPath,
+                    tableKey,
+                    shapeKey,
+                    settings,
                 )
-                .map {
-                    branchKey, pairId, segmentation, merscopePath, xeniumPath,
-                    merscopeTableKey, merscopeShapeKey, xeniumTableKey,
-                    xeniumShapeKey, doneFlag ->
-                        tuple(
-                            pairId,
-                            segmentation,
-                            merscopePath,
-                            xeniumPath,
-                            merscopeTableKey,
-                            merscopeShapeKey,
-                            xeniumTableKey,
-                            xeniumShapeKey,
-                        )
-                }
         }
-    } else if (pairedMode && (runCompare || runVisualize || runClusteringSquidpy)) {
-        paired_downstream_zarrs_ch = paired_analysis_zarrs_ch
+
+    xenium_analysis_ch = analysis_dataset_zarrs_ch
+        .filter {
+            pairId, segmentation, platform, zarrPath, tableKey, shapeKey, settings ->
+                settings.paired_mode && platform == "XENIUM"
+        }
+        .map {
+            pairId, segmentation, platform, zarrPath, tableKey, shapeKey, settings ->
+                tuple(
+                    "${pairId}|${segmentation}",
+                    zarrPath,
+                    tableKey,
+                    shapeKey,
+                )
+        }
+
+    paired_analysis_zarrs_ch = merscope_analysis_ch
+        .join(xenium_analysis_ch)
+        .map {
+            branchKey, pairId, segmentation, merscopePath, merscopeTableKey,
+            merscopeShapeKey, settings, xeniumPath, xeniumTableKey, xeniumShapeKey ->
+                tuple(
+                    pairId,
+                    segmentation,
+                    merscopePath,
+                    xeniumPath,
+                    merscopeTableKey,
+                    merscopeShapeKey,
+                    xeniumTableKey,
+                    xeniumShapeKey,
+                    settings,
+                )
+        }
+
+    align_inputs_ch = paired_zarrs_ch
+        .filter { pairId, merscopePath, xeniumPath, settings -> settings.run_align }
+        .map { pairId, merscopePath, xeniumPath, settings ->
+            tuple(pairId, merscopePath, xeniumPath)
+        }
+
+    alignment_task_results_ch = ALIGN(align_inputs_ch)
+
+    alignment_published_results_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+        if (!(settings.need_alignment_results && !settings.run_align)) {
+            []
+        } else {
+            def merscopeLatest = requireExistingPath(
+                publishedDatasetPath(
+                    params.outdir,
+                    pairId,
+                    "MERSCOPE",
+                    "latest/latest_spatialdata.zarr",
+                ),
+                "QC/enriched MERSCOPE latest zarr for ${pairId}",
+            )
+            def xeniumLatest = requireExistingPath(
+                publishedDatasetPath(
+                    params.outdir,
+                    pairId,
+                    "XENIUM",
+                    "latest/latest_spatialdata.zarr",
+                ),
+                "QC/enriched XENIUM latest zarr for ${pairId}",
+            )
+            def transformJson = requireExistingPath(
+                publishedPairPath(
+                    params.outdir,
+                    pairId,
+                    "alignment/align_out/alignment_transform.json",
+                ),
+                "ALIGN transform JSON for ${pairId}",
+            )
+            def coordsDir = requireExistingPath(
+                publishedPairPath(
+                    params.outdir,
+                    pairId,
+                    "alignment/align_out/alignment_coords",
+                ),
+                "ALIGN coordinate directory for ${pairId}",
+            )
+            [
+                tuple(
+                    pairId,
+                    merscopeLatest.toRealPath().toString(),
+                    xeniumLatest.toRealPath().toString(),
+                    transformJson,
+                    coordsDir,
+                )
+            ]
+        }
     }
 
-    if (runCompare) {
-        compare_inputs_ch = paired_downstream_zarrs_ch.map {
+    alignment_results_ch = alignment_task_results_ch.mix(alignment_published_results_ch)
+
+    align_qc_gate_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+        if (!settings.run_align_qc) {
+            []
+        } else {
+            [tuple(pairId, true)]
+        }
+    }
+
+    align_qc_inputs_ch = alignment_results_ch
+        .join(align_qc_gate_ch)
+        .map { pairId, merscopeLatest, xeniumLatest, transformJson, coordsDir, runFlag ->
+            tuple(pairId, merscopeLatest, xeniumLatest, transformJson, coordsDir)
+        }
+
+    alignment_qc_results_ch = ALIGN_QC(align_qc_inputs_ch)
+
+    alignment_done_no_qc_gate_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+        if (!(settings.need_alignment_downstream && !settings.run_align_qc)) {
+            []
+        } else {
+            [tuple(pairId, settings.analysis_segmentations)]
+        }
+    }
+
+    alignment_done_no_qc_ch = alignment_results_ch
+        .join(alignment_done_no_qc_gate_ch)
+        .flatMap {
+            pairId, merscopeLatest, xeniumLatest, transformJson, coordsDir, analysisSegmentations ->
+                analysisSegmentations.collect { segmentation ->
+                    tuple("${pairId}|${segmentation}", true)
+                }
+        }
+
+    alignment_done_after_qc_gate_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+        if (!(settings.need_alignment_downstream && settings.run_align_qc)) {
+            []
+        } else {
+            [tuple(pairId, settings.analysis_segmentations)]
+        }
+    }
+
+    alignment_done_after_qc_ch = alignment_qc_results_ch
+        .join(alignment_done_after_qc_gate_ch)
+        .flatMap { pairId, alignQcOut, analysisSegmentations ->
+            analysisSegmentations.collect { segmentation ->
+                tuple("${pairId}|${segmentation}", true)
+            }
+        }
+
+    alignment_done_branch_ch = alignment_done_no_qc_ch.mix(alignment_done_after_qc_ch)
+
+    paired_downstream_no_align_ch = paired_analysis_zarrs_ch
+        .filter {
             pairId, segmentation, merscopePath, xeniumPath, merscopeTableKey,
-            merscopeShapeKey, xeniumTableKey, xeniumShapeKey ->
+            merscopeShapeKey, xeniumTableKey, xeniumShapeKey, settings ->
+                !settings.enable_alignment &&
+                    (settings.run_compare ||
+                     settings.run_visualize ||
+                     settings.run_clustering_squidpy)
+        }
+
+    paired_downstream_align_ch = paired_analysis_zarrs_ch
+        .filter {
+            pairId, segmentation, merscopePath, xeniumPath, merscopeTableKey,
+            merscopeShapeKey, xeniumTableKey, xeniumShapeKey, settings ->
+                settings.enable_alignment &&
+                    (settings.run_compare ||
+                     settings.run_visualize ||
+                     settings.run_clustering_squidpy)
+        }
+        .map {
+            pairId, segmentation, merscopePath, xeniumPath, merscopeTableKey,
+            merscopeShapeKey, xeniumTableKey, xeniumShapeKey, settings ->
+                tuple(
+                    "${pairId}|${segmentation}",
+                    pairId,
+                    segmentation,
+                    merscopePath,
+                    xeniumPath,
+                    merscopeTableKey,
+                    merscopeShapeKey,
+                    xeniumTableKey,
+                    xeniumShapeKey,
+                    settings,
+                )
+        }
+        .join(alignment_done_branch_ch)
+        .map {
+            branchKey, pairId, segmentation, merscopePath, xeniumPath,
+            merscopeTableKey, merscopeShapeKey, xeniumTableKey,
+            xeniumShapeKey, settings, doneFlag ->
+                tuple(
+                    pairId,
+                    segmentation,
+                    merscopePath,
+                    xeniumPath,
+                    merscopeTableKey,
+                    merscopeShapeKey,
+                    xeniumTableKey,
+                    xeniumShapeKey,
+                    settings,
+                )
+        }
+
+    paired_downstream_zarrs_ch = paired_downstream_no_align_ch.mix(paired_downstream_align_ch)
+
+    compare_inputs_ch = paired_downstream_zarrs_ch
+        .filter {
+            pairId, segmentation, merscopePath, xeniumPath, merscopeTableKey,
+            merscopeShapeKey, xeniumTableKey, xeniumShapeKey, settings ->
+                settings.run_compare
+        }
+        .map {
+            pairId, segmentation, merscopePath, xeniumPath, merscopeTableKey,
+            merscopeShapeKey, xeniumTableKey, xeniumShapeKey, settings ->
                 tuple(
                     pairId,
                     segmentation,
@@ -1014,134 +1235,181 @@ workflow {
                     xeniumTableKey,
                 )
         }
-        compare_results_ch = COMPARE(compare_inputs_ch)
+
+    compare_results_ch = COMPARE(compare_inputs_ch)
+
+    compare_done_ch = compare_results_ch.map { pairId, segmentation, compareOutDir ->
+        tuple("${pairId}|${segmentation}", true)
     }
 
-    if (runVisualize || runClusteringSquidpy) {
-        if (pairedMode && alignmentEnabled) {
-            analysis_samples_ch = paired_downstream_zarrs_ch.map {
-                pairId, segmentation, merscopePath, xeniumPath, merscopeTableKey,
-                merscopeShapeKey, xeniumTableKey, xeniumShapeKey ->
-                    tuple(
-                        pairId,
-                        segmentation,
-                        samplesJsonForSegmentation(
-                            pairId,
-                            ["MERSCOPE", "XENIUM"],
-                            ["MERSCOPE": merscopePath, "XENIUM": xeniumPath],
-                            segmentation,
-                        ),
-                    )
-            }
-        } else {
-            analysis_samples_ch = analysis_dataset_zarrs_ch
-                .map {
-                    pairId, segmentation, platform, zarrPath, tableKey, shapeKey ->
-                        tuple(
-                            "${pairId}|${segmentation}",
-                            pairId,
-                            segmentation,
-                            platform,
-                            zarrPath,
-                        )
-                }
-                .groupTuple()
-                .map { branchKey, pairIds, segmentations, platformNames, zarrPaths ->
-                    def pairId = pairIds[0].toString()
-                    def segmentation = segmentations[0].toString()
-                    def pathsByPlatform = [:]
-                    platformNames.eachWithIndex { platform, idx ->
-                        pathsByPlatform[platform.toString()] = zarrPaths[idx].toString()
-                    }
-                    tuple(
-                        pairId,
-                        segmentation,
-                        samplesJsonForSegmentation(
-                            pairId,
-                            activePlatforms,
-                            pathsByPlatform,
-                            segmentation,
-                        ),
-                    )
-                }
+    analysis_samples_from_aligned_pairs_ch = paired_downstream_zarrs_ch
+        .filter {
+            pairId, segmentation, merscopePath, xeniumPath, merscopeTableKey,
+            merscopeShapeKey, xeniumTableKey, xeniumShapeKey, settings ->
+                settings.enable_alignment &&
+                    (settings.run_visualize || settings.run_clustering_squidpy)
         }
+        .map {
+            pairId, segmentation, merscopePath, xeniumPath, merscopeTableKey,
+            merscopeShapeKey, xeniumTableKey, xeniumShapeKey, settings ->
+                tuple(
+                    pairId,
+                    segmentation,
+                    samplesJsonForSegmentation(
+                        pairId,
+                        ["MERSCOPE", "XENIUM"],
+                        ["MERSCOPE": merscopePath, "XENIUM": xeniumPath],
+                        segmentation,
+                    ),
+                    settings,
+                )
+        }
+
+    analysis_samples_from_dataset_ch = analysis_dataset_zarrs_ch
+        .filter {
+            pairId, segmentation, platform, zarrPath, tableKey, shapeKey, settings ->
+                (!settings.paired_mode || !settings.enable_alignment) &&
+                    (settings.run_visualize || settings.run_clustering_squidpy)
+        }
+        .map {
+            pairId, segmentation, platform, zarrPath, tableKey, shapeKey, settings ->
+                tuple(
+                    "${pairId}|${segmentation}",
+                    pairId,
+                    segmentation,
+                    settings,
+                    platform,
+                    zarrPath,
+                )
+        }
+        .groupTuple()
+        .map { branchKey, pairIds, segmentations, settingsList, platformNames, zarrPaths ->
+            def pairId = pairIds[0].toString()
+            def segmentation = segmentations[0].toString()
+            def settings = settingsList[0]
+            def pathsByPlatform = [:]
+            platformNames.eachWithIndex { platform, idx ->
+                pathsByPlatform[platform.toString()] = zarrPaths[idx].toString()
+            }
+            tuple(
+                pairId,
+                segmentation,
+                samplesJsonForSegmentation(
+                    pairId,
+                    settings.active_platforms,
+                    pathsByPlatform,
+                    segmentation,
+                ),
+                settings,
+            )
+        }
+
+    analysis_samples_ch =
+        analysis_samples_from_aligned_pairs_ch.mix(analysis_samples_from_dataset_ch)
+
+    visualize_without_compare_ch = analysis_samples_ch
+        .filter { pairId, segmentation, samplesJson, settings ->
+            settings.run_visualize && !settings.run_compare
+        }
+        .map { pairId, segmentation, samplesJson, settings ->
+            tuple(pairId, segmentation, samplesJson)
+        }
+
+    visualize_after_compare_ch = analysis_samples_ch
+        .filter { pairId, segmentation, samplesJson, settings ->
+            settings.run_visualize && settings.run_compare
+        }
+        .map { pairId, segmentation, samplesJson, settings ->
+            tuple("${pairId}|${segmentation}", pairId, segmentation, samplesJson)
+        }
+        .join(compare_done_ch)
+        .map { branchKey, pairId, segmentation, samplesJson, doneFlag ->
+            tuple(pairId, segmentation, samplesJson)
+        }
+
+    visualize_inputs_ch = visualize_without_compare_ch.mix(visualize_after_compare_ch)
+
+    visualize_results_ch = VISUALIZE(visualize_inputs_ch)
+
+    visualize_done_ch = visualize_results_ch.map { pairId, segmentation, visualizeOutDir ->
+        tuple("${pairId}|${segmentation}", true)
     }
 
-    if (runVisualize) {
-        if (runCompare) {
-            compare_done_ch = compare_results_ch.map { pairId, segmentation, compareOutDir ->
+    clustering_without_visualize_ch = analysis_samples_ch
+        .filter { pairId, segmentation, samplesJson, settings ->
+            settings.run_clustering_squidpy && !settings.run_visualize
+        }
+        .map { pairId, segmentation, samplesJson, settings ->
+            tuple(pairId, segmentation, samplesJson)
+        }
+
+    clustering_after_visualize_ch = analysis_samples_ch
+        .filter { pairId, segmentation, samplesJson, settings ->
+            settings.run_clustering_squidpy && settings.run_visualize
+        }
+        .map { pairId, segmentation, samplesJson, settings ->
+            tuple("${pairId}|${segmentation}", pairId, segmentation, samplesJson)
+        }
+        .join(visualize_done_ch)
+        .map { branchKey, pairId, segmentation, samplesJson, doneFlag ->
+            tuple(pairId, segmentation, samplesJson)
+        }
+
+    clustering_inputs_ch =
+        clustering_without_visualize_ch.mix(clustering_after_visualize_ch)
+
+    clustering_results_ch = CLUSTERING_SQUIDPY(clustering_inputs_ch)
+
+    mapmycells_after_clustering_gate_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+        if (!(settings.run_mapmycells && settings.run_clustering_squidpy)) {
+            []
+        } else {
+            validateMapMyCellsParams(params)
+            settings.analysis_segmentations.collect { segmentation ->
                 tuple("${pairId}|${segmentation}", true)
             }
-
-            visualize_inputs_ch = analysis_samples_ch
-                .map { pairId, segmentation, samplesJson ->
-                    tuple("${pairId}|${segmentation}", pairId, segmentation, samplesJson)
-                }
-                .join(compare_done_ch)
-                .map { branchKey, pairId, segmentation, samplesJson, doneFlag ->
-                    tuple(pairId, segmentation, samplesJson)
-                }
-        } else {
-            visualize_inputs_ch = analysis_samples_ch
         }
-
-        visualize_results_ch = VISUALIZE(visualize_inputs_ch)
     }
 
-    if (runClusteringSquidpy) {
-        if (runVisualize) {
-            visualize_done_ch = visualize_results_ch.map {
-                pairId, segmentation, visualizeOutDir ->
-                    tuple("${pairId}|${segmentation}", true)
-            }
-
-            clustering_inputs_ch = analysis_samples_ch
-                .map { pairId, segmentation, samplesJson ->
-                    tuple("${pairId}|${segmentation}", pairId, segmentation, samplesJson)
-                }
-                .join(visualize_done_ch)
-                .map { branchKey, pairId, segmentation, samplesJson, doneFlag ->
-                    tuple(pairId, segmentation, samplesJson)
-                }
-        } else {
-            clustering_inputs_ch = analysis_samples_ch
+    mapmycells_from_clustering_ch = clustering_results_ch
+        .map { pairId, segmentation, samplesJson, clusteringOutDir ->
+            tuple("${pairId}|${segmentation}", pairId, segmentation, samplesJson, clusteringOutDir)
+        }
+        .join(mapmycells_after_clustering_gate_ch)
+        .map { branchKey, pairId, segmentation, samplesJson, clusteringOutDir, runFlag ->
+            tuple(pairId, segmentation, samplesJson, clusteringOutDir)
         }
 
-        clustering_results_ch = CLUSTERING_SQUIDPY(clustering_inputs_ch)
-    }
-
-    if (runMapMyCells) {
-        if (!runClusteringSquidpy) {
-            clustering_results_ch = samplesheet_ch.flatMap { row ->
-                def pairId = row.pair_id?.toString()?.trim()
-                if (!pairId) {
-                    error "Found samplesheet row with missing pair_id: ${row}"
-                }
-
-                analysisSegmentations.collect { segmentation ->
-                    def clusteringOut = requireExistingPath(
-                        publishedPairPath(
-                            params.outdir,
-                            pairId,
-                            "${segmentation}/clustering_squidpy/clustering_squidpy_out",
-                        ),
-                        "CLUSTERING_SQUIDPY ${segmentation} output directory for ${pairId}",
-                    )
-                    tuple(
+    mapmycells_published_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+        if (!(settings.run_mapmycells && !settings.run_clustering_squidpy)) {
+            []
+        } else {
+            validateMapMyCellsParams(params)
+            settings.analysis_segmentations.collect { segmentation ->
+                def clusteringOut = requireExistingPath(
+                    publishedPairPath(
+                        params.outdir,
                         pairId,
+                        "${segmentation}/clustering_squidpy/clustering_squidpy_out",
+                    ),
+                    "CLUSTERING_SQUIDPY ${segmentation} output directory for ${pairId}",
+                )
+                tuple(
+                    pairId,
+                    segmentation,
+                    samplesJsonForSegmentation(
+                        pairId,
+                        settings.active_platforms,
+                        [:],
                         segmentation,
-                        samplesJsonForSegmentation(
-                            pairId,
-                            activePlatforms,
-                            [:],
-                            segmentation,
-                        ),
-                        clusteringOut,
-                    )
-                }
+                    ),
+                    clusteringOut,
+                )
             }
         }
-
-        MAPMYCELLS(clustering_results_ch)
     }
+
+    mapmycells_inputs_ch = mapmycells_from_clustering_ch.mix(mapmycells_published_ch)
+
+    MAPMYCELLS(mapmycells_inputs_ch)
 }
