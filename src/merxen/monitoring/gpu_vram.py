@@ -18,7 +18,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 GPU_QUERY_FIELDS = (
     "index",
@@ -223,7 +223,7 @@ def monitor_process(
             summary_path=summary_path,
             reason="nvidia-smi not found",
         )
-        return json.loads(summary_path.read_text())
+        return cast(dict[str, Any], json.loads(summary_path.read_text()))
 
     samples_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.parent.mkdir(parents=True, exist_ok=True)
