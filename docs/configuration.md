@@ -76,6 +76,9 @@ is `true`. `align`, `align_qc`, and `compare` are available only when
 | `cellpose_cellprob` | `-5.0` | Cellpose cell probability threshold. |
 | `cellpose_tile_overlap` | `0.15` | Fractional overlap between core tiles. |
 | `cellpose_bsize` | `256` | Cellpose internal batch block size. |
+| `cellpose_final_min_area_um2` | `5.0` | Drop final Cellpose masks smaller than this area before ProSeg. |
+| `cellpose_final_max_area_um2` | `400.0` | Drop final Cellpose masks larger than this area before ProSeg. |
+| `cellpose_final_filter_chunk_mb` | `256` | Approximate row-chunk size for streaming the final mask filter. |
 
 ### ProSeg
 

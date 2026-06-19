@@ -87,7 +87,7 @@ Path: `${outdir}/<pair_id>/<platform>/segmentation/`
 | File | Contents |
 |------|----------|
 | `proseg_base_latest.zarr` | Staged symlink to `../latest/latest_spatialdata.zarr`. |
-| `cellpose_masks_tiled.npy` | Global-pixel uint32 mask from tiled Cellpose. Fed into enrichment. |
+| `cellpose_masks_tiled.npy` | Cleaned global-pixel uint32 mask from tiled Cellpose. Fed into ProSeg and enrichment. |
 | `transcripts_for_proseg.csv` | ProSeg input: per-transcript rows with seeded `cell_id`. Retained for debugging. |
 
 ### Enrichment

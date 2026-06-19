@@ -45,6 +45,7 @@ that path.
 | Orchestration `run_segmentation_pipeline` | [segmentation/pipeline.py:189](../../src/merxen/segmentation/pipeline.py#L189) |
 | Tiled Cellpose `run_tiled_cellpose` | [segmentation/cellpose.py:255](../../src/merxen/segmentation/cellpose.py#L255) |
 | Mask filter `filter_cell_by_regionprops` | [segmentation/mask_filter.py:78](../../src/merxen/segmentation/mask_filter.py#L78) |
+| Final area filter `filter_labeled_mask_by_area` | [segmentation/mask_filter.py](../../src/merxen/segmentation/mask_filter.py) |
 | Masks → polygons `masks_to_polygons` | [segmentation/mask_geometry.py:84](../../src/merxen/segmentation/mask_geometry.py#L84) |
 | ProSeg subprocess `run_proseg_refinement` | [segmentation/proseg.py:99](../../src/merxen/segmentation/proseg.py#L99) |
 | Transcript CSV `write_proseg_csv_from_points` | [io/transcript_io.py:140](../../src/merxen/io/transcript_io.py#L140) |
@@ -87,17 +88,22 @@ for all fields and defaults.
    platform transform with any rescale factor. This gives `(x_transform,
    y_transform)` 1D affine components used when writing the ProSeg CSV and
    seeding cell IDs.
-4. **Seed transcripts.** `write_proseg_csv_from_points` streams the
+4. **Final Cellpose area filter.** The saved mask is memory-mapped, label
+   areas are converted to square microns, and masks outside
+   `cellpose_final_min_area_um2` / `cellpose_final_max_area_um2` are removed in
+   row chunks. The cleaned `cellpose_masks_tiled.npy` is the only mask used by
+   the transcript seeding and ProSeg steps.
+5. **Seed transcripts.** `write_proseg_csv_from_points` streams the
    transcripts points object in chunks of
    `memory.transcript_chunk_rows`, looks each transcript's pixel location
    up in the mask, and writes a row with `x_micron`, `y_micron`, `z_micron`,
    `feature_name`, `cell_id` (0 if outside any cell). Xenium transcripts
    below `dataset.min_qv` are dropped.
-5. **ProSeg.** `run_proseg_refinement` spawns the external binary. ProSeg
+6. **ProSeg.** `run_proseg_refinement` spawns the external binary. ProSeg
    uses the Cellpose-seeded `cell_id` column as a prior and performs MCMC
    sampling over the transcript field, letting cell boundaries move to
    better match transcript density.
-6. **To "latest" zarr.** `convert_to_latest_zarr` rewrites the raw ProSeg
+7. **To "latest" zarr.** `convert_to_latest_zarr` rewrites the raw ProSeg
    output so it can be read with the current SpatialData version, then stages
    that durable zarr back into the work dir for Nextflow.
 
@@ -107,7 +113,7 @@ for all fields and defaults.
 |------|----------|
 | `latest/latest_spatialdata.zarr` | Durable refined SpatialData zarr. This is the object enrichment mutates in place. |
 | `segmentation/proseg_base_latest.zarr` | Staged symlink to the durable latest zarr. |
-| `cellpose_masks_tiled.npy` | Global-pixel Cellpose labels, consumed by enrichment. |
+| `cellpose_masks_tiled.npy` | Cleaned global-pixel Cellpose labels, consumed by ProSeg and enrichment. |
 | `transcripts_for_proseg.csv` | The transcript CSV fed into ProSeg. Retained for debugging. |
 
 `proseg_base_raw.zarr` is treated as a transient intermediate and removed
