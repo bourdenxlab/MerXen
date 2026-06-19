@@ -690,6 +690,11 @@ workflow {
                     bsize: params.cellpose_bsize,
                     factor_rescale: 1.0,
                 ],
+                mask_filter: [
+                    final_min_area_um2: params.cellpose_final_min_area_um2,
+                    final_max_area_um2: params.cellpose_final_max_area_um2,
+                    final_filter_chunk_mb: params.cellpose_final_filter_chunk_mb,
+                ],
                 proseg: [
                     binary_path: params.proseg_binary,
                     samples: params.proseg_samples,
