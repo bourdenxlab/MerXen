@@ -4,6 +4,9 @@
 *.tiff
 *.tif
 *.h5ad
+*.gz
+*.png
+*.pdf
 
 # Nextflow
 work

@@ -124,6 +124,36 @@ def test_validate_samplesheet_allows_xenium_only_mode_with_blank_merscope_fields
     validate_samplesheet(pairs, analysis_mode="xenium")
 
 
+def test_validate_samplesheet_uses_row_level_analysis_mode(
+    tmp_path: Path,
+) -> None:
+    """Rows can opt into different platform requirements in one samplesheet."""
+    merscope_dir = tmp_path / "merscope_raw"
+    merscope_dir.mkdir()
+    xenium_dir = tmp_path / "xenium_raw"
+    xenium_dir.mkdir()
+    csv_path = tmp_path / "mixed_mode.csv"
+    csv_path.write_text(
+        "pair_id,analysis_mode,enable_alignment,merscope_dir,xenium_dir,"
+        "analysis_segmentation,start_stage,stop_stage,only_stage\n"
+        f"P1,merscope,false,{merscope_dir},,reseg,segment,enrich,\n"
+        f"P2,xenium,true,,{xenium_dir},original_seg,,,qc\n"
+    )
+
+    pairs = parse_samplesheet(csv_path)
+
+    assert pairs[0].analysis_mode == "merscope"
+    assert pairs[0].enable_alignment is False
+    assert pairs[0].analysis_segmentation == "reseg"
+    assert pairs[0].start_stage == "segment"
+    assert pairs[0].stop_stage == "enrich"
+    assert pairs[1].analysis_mode == "xenium"
+    assert pairs[1].enable_alignment is True
+    assert pairs[1].analysis_segmentation == "original_seg"
+    assert pairs[1].only_stage == "qc"
+    validate_samplesheet(pairs)
+
+
 def test_required_platforms_for_mode_rejects_unknown_mode() -> None:
     """Unknown analysis modes should fail with a clear validation error."""
     with pytest.raises(ValueError, match="Unknown analysis_mode"):

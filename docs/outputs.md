@@ -16,18 +16,30 @@ ${outdir}/
 │   │   ├── spatialdata/
 │   │   ├── segmentation/
 │   │   ├── enrichment/
-│   │   └── qc/
+│   │   ├── reseg/
+│   │   │   └── qc/
+│   │   └── original_seg/
+│   │       └── qc/
 │   ├── xenium/
 │   │   ├── spatialdata/
 │   │   ├── segmentation/
 │   │   ├── enrichment/
-│   │   └── qc/
+│   │   ├── reseg/
+│   │   │   └── qc/
+│   │   └── original_seg/
+│   │       └── qc/
 │   ├── alignment/
 │   ├── alignment_qc/
-│   ├── comparison/
-│   ├── visualization/
-│   ├── clustering_squidpy/
-│   └── mapmycells/
+│   ├── reseg/
+│   │   ├── comparison/
+│   │   ├── visualization/
+│   │   ├── clustering_squidpy/
+│   │   └── mapmycells/
+│   └── original_seg/
+│       ├── comparison/
+│       ├── visualization/
+│       ├── clustering_squidpy/
+│       └── mapmycells/
 ├── <pair_id_2>/
 │   └── ...
 └── ...
@@ -37,6 +49,9 @@ ${outdir}/
 single-platform mode, only the selected `<platform>/` directory is present and
 paired-only `alignment/`, `alignment_qc/`, and `comparison/` directories are
 not written.
+`reseg/` and `original_seg/` are controlled by `--analysis_segmentation`;
+the default `both` writes both branches. Upstream build, segmentation,
+enrichment, and latest SpatialData artifacts are shared.
 Every `.png` plot listed below is also written as a same-stem `.pdf`.
 
 Nextflow also keeps its own working directory at `./work/` (next to the
@@ -72,7 +87,7 @@ Path: `${outdir}/<pair_id>/<platform>/segmentation/`
 | File | Contents |
 |------|----------|
 | `proseg_base_latest.zarr` | Staged symlink to `../latest/latest_spatialdata.zarr`. |
-| `cellpose_masks_tiled.npy` | Global-pixel uint32 mask from tiled Cellpose. Fed into enrichment. |
+| `cellpose_masks_tiled.npy` | Cleaned global-pixel uint32 mask from tiled Cellpose. Fed into ProSeg and enrichment. |
 | `transcripts_for_proseg.csv` | ProSeg input: per-transcript rows with seeded `cell_id`. Retained for debugging. |
 
 ### Enrichment
@@ -86,7 +101,7 @@ Path: `${outdir}/<pair_id>/<platform>/enrichment/`
 
 ### QC
 
-Path: `${outdir}/<pair_id>/<platform>/qc/`
+Path: `${outdir}/<pair_id>/<platform>/<analysis_segmentation>/qc/`
 
 | File | Contents |
 |------|----------|
@@ -101,7 +116,7 @@ Path: `${outdir}/<pair_id>/<platform>/qc/`
 
 Path: `${outdir}/<pair_id>/alignment/`
 
-Only present when `--analysis_mode paired --enable_alignment true`.
+Only present for paired rows whose effective `enable_alignment` value is `true`.
 
 | File | Contents |
 |------|----------|
@@ -118,7 +133,7 @@ zarr as the fixed reference.
 
 Path: `${outdir}/<pair_id>/alignment_qc/`
 
-Only present when `--analysis_mode paired --enable_alignment true`.
+Only present for paired rows whose effective `enable_alignment` value is `true`.
 
 | File | Contents |
 |------|----------|
@@ -128,7 +143,7 @@ Only present when `--analysis_mode paired --enable_alignment true`.
 
 ### Comparison
 
-Path: `${outdir}/<pair_id>/comparison/`
+Path: `${outdir}/<pair_id>/<analysis_segmentation>/comparison/`
 
 Only present in `--analysis_mode paired`.
 
@@ -142,7 +157,7 @@ Only present in `--analysis_mode paired`.
 
 ### Visualization
 
-Path: `${outdir}/<pair_id>/visualization/`
+Path: `${outdir}/<pair_id>/<analysis_segmentation>/visualization/`
 
 | File | Contents |
 |------|----------|
@@ -172,7 +187,7 @@ Single-platform runs write the available-platform equivalents with
 
 ### Squidpy clustering
 
-Path: `${outdir}/<pair_id>/clustering_squidpy/`
+Path: `${outdir}/<pair_id>/<analysis_segmentation>/clustering_squidpy/`
 
 | File | Contents |
 |------|----------|
@@ -182,6 +197,8 @@ Path: `${outdir}/<pair_id>/clustering_squidpy/`
 | `clustering_squidpy_out/<platform>/plots/spatial/<pair_id>_<platform>_spatial_scatter_leiden.png` | Squidpy spatial scatter colored by Leiden cluster, with clean axes and a 200 um scale bar. |
 | `clustering_squidpy_out/<platform>/plots/spatial_grid/<pair_id>_<platform>_spatial_scatter_leiden_grid.png` | Small-multiple spatial grid with each de novo Leiden cluster highlighted in red against all other cells in grey. |
 | `clustering_squidpy_out/<platform>/<pair_id>_<platform>_clustered.h5ad` | Control-feature-filtered, cell/gene-filtered, normalized, log-transformed, clustered AnnData object with raw non-control counts in `layers["counts"]`. |
+| `clustering_squidpy_out/gpu_vram/<pair_id>_<analysis_segmentation>_summary.json` | Peak task-matched and total device VRAM sampled during the `CLUSTERING_SQUIDPY` task. |
+| `clustering_squidpy_out/gpu_vram/<pair_id>_<analysis_segmentation>_samples.tsv` | Raw `nvidia-smi` GPU memory samples, including compute-app PID matches. |
 
 By default, the same `<sample_id>_clustered.h5ad` path is still written and
 remains the downstream MapMyCells input. In hierarchical mode, the H5AD also
@@ -205,7 +222,7 @@ artifacts are written under
 
 ### MapMyCells
 
-Path: `${outdir}/<pair_id>/mapmycells/`
+Path: `${outdir}/<pair_id>/<analysis_segmentation>/mapmycells/`
 
 | File | Contents |
 |------|----------|

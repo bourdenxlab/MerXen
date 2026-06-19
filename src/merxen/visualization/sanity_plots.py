@@ -143,6 +143,8 @@ def plot_pair_sanity_crops(
     xenium_zarr_path: Path | str | None = None,
     crop_size_um: float = SANITY_CROP_SIZE_UM,
     assignment_shape_key: str | None = SANITY_ASSIGNMENT_SHAPE_KEY,
+    merscope_assignment_shape_key: str | None = None,
+    xenium_assignment_shape_key: str | None = None,
 ) -> Path:
     """Plot paired MOSAIK-style 250 um sanity crops for MERSCOPE and Xenium."""
     output_path = prepare_plot_output(output_path)
@@ -159,7 +161,11 @@ def plot_pair_sanity_crops(
         "MERSCOPE",
         crop_bbox=merscope_plan.display_bbox,
         crop_size_um=crop_size_um,
-        assignment_shape_key=assignment_shape_key,
+        assignment_shape_key=(
+            merscope_assignment_shape_key
+            if merscope_assignment_shape_key is not None
+            else assignment_shape_key
+        ),
         prefer_aligned_vectors=merscope_plan.prefer_aligned_vectors,
         zarr_path=merscope_zarr_path,
     )
@@ -169,7 +175,11 @@ def plot_pair_sanity_crops(
         "XENIUM",
         crop_bbox=xenium_plan.display_bbox,
         crop_size_um=crop_size_um,
-        assignment_shape_key=assignment_shape_key,
+        assignment_shape_key=(
+            xenium_assignment_shape_key
+            if xenium_assignment_shape_key is not None
+            else assignment_shape_key
+        ),
         prefer_aligned_vectors=xenium_plan.prefer_aligned_vectors,
         zarr_path=xenium_zarr_path,
     )
@@ -1019,7 +1029,7 @@ def _crop_points(
         raise KeyError(f"Could not resolve x/y columns in points[{points_key}]")
     if (
         prefer_aligned_assignment
-        and assignment_shape_key == SANITY_ASSIGNMENT_SHAPE_KEY
+        and assignment_shape_key is not None
         and f"{assignment_shape_key}_aligned_nonrigid" in sdata_obj.shapes
     ):
         assignment_shape_key = f"{assignment_shape_key}_aligned_nonrigid"

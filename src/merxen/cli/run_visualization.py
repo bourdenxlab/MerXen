@@ -76,6 +76,8 @@ def _write_paired_visualizations(
     comparison = compute_gene_comparison_from_paths(
         xenium_zarr_path=xenium_sample.zarr_path,
         merscope_zarr_path=merscope_sample.zarr_path,
+        xenium_table_key=xenium_sample.table_key,
+        merscope_table_key=merscope_sample.table_key,
     )
     total_scatter = cfg.output_dir / f"{cfg.pair_id}_gene_scatter_total_normalized.png"
     assigned_scatter = (
@@ -102,11 +104,16 @@ def _write_paired_visualizations(
     qc_records: list[dict[str, float | str]] = []
     qc_by_dataset = {}
     dataset_items = [
-        ("XENIUM", xenium_sample.zarr_path),
-        ("MERSCOPE", merscope_sample.zarr_path),
+        ("XENIUM", xenium_sample),
+        ("MERSCOPE", merscope_sample),
     ]
-    for dataset_name, zarr_path in dataset_items:
-        qc = compute_dataset_qc(zarr_path, dataset_name=dataset_name)
+    for dataset_name, sample in dataset_items:
+        qc = compute_dataset_qc(
+            sample.zarr_path,
+            dataset_name=dataset_name,
+            table_key=sample.table_key,
+            shape_key=sample.shape_key,
+        )
         qc_by_dataset[dataset_name] = qc
         qc_records.append(
             {
@@ -145,6 +152,8 @@ def _write_paired_visualizations(
         overlay_plot,
         merscope_zarr_path=merscope_sample.zarr_path,
         xenium_zarr_path=xenium_sample.zarr_path,
+        merscope_assignment_shape_key=merscope_sample.shape_key,
+        xenium_assignment_shape_key=xenium_sample.shape_key,
     )
     transcript_overview_plot = cfg.output_dir / f"{cfg.pair_id}_transcript_overview.png"
     plot_transcript_overview(
@@ -172,6 +181,7 @@ def _write_single_visualizations(
     gene_summary = compute_gene_summary_from_path(
         sample.zarr_path,
         dataset_name=dataset_name,
+        table_key=sample.table_key,
     )
     total_gene_plot = (
         cfg.output_dir / f"{sample_id}_gene_abundance_total_normalized.png"
@@ -191,7 +201,12 @@ def _write_single_visualizations(
     )
     paths.extend([total_gene_plot, assigned_gene_plot])
 
-    qc = compute_dataset_qc(sample.zarr_path, dataset_name=dataset_name)
+    qc = compute_dataset_qc(
+        sample.zarr_path,
+        dataset_name=dataset_name,
+        table_key=sample.table_key,
+        shape_key=sample.shape_key,
+    )
     geom_plot = cfg.output_dir / f"{sample_id}_geometry_hist.png"
     cell_plot = cfg.output_dir / f"{sample_id}_cell_violin.png"
     plot_geometry_histograms(qc["geometry_metrics"], geom_plot)
@@ -208,6 +223,7 @@ def _write_single_visualizations(
         dataset_name,
         overlay_plot,
         zarr_path=sample.zarr_path,
+        assignment_shape_key=sample.shape_key,
     )
     transcript_overview_plot = cfg.output_dir / f"{sample_id}_transcript_overview.png"
     plot_single_transcript_overview(

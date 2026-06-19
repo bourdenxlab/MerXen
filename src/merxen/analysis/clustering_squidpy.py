@@ -2856,6 +2856,9 @@ def _choose_shape_key(
     if len(sdata_obj.shapes) == 0:
         return None
     if preferred is not None:
+        aligned_preferred = f"{preferred}_aligned_nonrigid"
+        if platform.upper() == "MERSCOPE" and aligned_preferred in sdata_obj.shapes:
+            return aligned_preferred
         if preferred not in sdata_obj.shapes:
             raise KeyError(
                 f"Requested shape_key={preferred!r} not found. "

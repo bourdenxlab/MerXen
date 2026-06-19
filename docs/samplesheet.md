@@ -1,9 +1,12 @@
 # Samplesheet format
 
 The samplesheet is a CSV with one row per biological sample or adjacent-section
-pair. In the default `--analysis_mode paired`, each row must contain one
-MERSCOPE and one Xenium dataset. In `--analysis_mode merscope` or
-`--analysis_mode xenium`, only the selected platform's source/cache columns are
+pair. By default, rows inherit `--analysis_mode`, `--enable_alignment`,
+`--analysis_segmentation`, `--start_stage`, `--stop_stage`, and `--only_stage`
+from the Nextflow command or config, but each row can override those settings
+with optional columns. In the default `analysis_mode=paired`, a row must contain
+one MERSCOPE and one Xenium dataset. In `analysis_mode=merscope` or
+`analysis_mode=xenium`, only the selected platform's source/cache columns are
 required. A template lives at
 [workflows/samplesheet.example.csv](../workflows/samplesheet.example.csv).
 
@@ -12,6 +15,12 @@ required. A template lives at
 | Column | Required | Description |
 |--------|----------|-------------|
 | `pair_id` | **yes** | Unique identifier for this row. Used as the top-level output directory name. |
+| `analysis_mode` | no | Row-level mode: `paired`, `merscope`, or `xenium`. Blank inherits `--analysis_mode`. |
+| `enable_alignment` | no | Row-level alignment switch: `true` or `false`. Blank inherits `--enable_alignment`; only paired rows can run alignment. |
+| `analysis_segmentation` | no | Row-level downstream branch set: `both`, `reseg`, `original_seg`, or comma-separated combinations. Blank inherits `--analysis_segmentation`. |
+| `start_stage` | no | Row-level first stage. Blank inherits `--start_stage` unless `only_stage` applies. |
+| `stop_stage` | no | Row-level final stage. Blank inherits `--stop_stage` unless `only_stage` applies. |
+| `only_stage` | no | Row-level single-stage override. If set, it overrides that row's start/stop stage settings. |
 | `merscope_dir` | required for MERSCOPE modes if no cache | Path to the raw MERSCOPE region export folder (contains `transcripts.parquet`, `cell_boundaries/`, `images/`, etc.). |
 | `merscope_spatialdata_path` | required for MERSCOPE modes if no raw dir | Path to an existing (or desired) reusable MERSCOPE SpatialData zarr. If it exists, the build step is **skipped** unless `--force_spatialdata_build true` is passed to Nextflow. |
 | `merscope_image_prefix` | no | Prefix used to match z-plane image keys when more than one run is present. |
@@ -36,12 +45,16 @@ for backwards compatibility.
 From [workflows/main.nf](../workflows/main.nf):
 
 - Every row must have a non-empty `pair_id`.
-- In `--analysis_mode paired`, every row must provide **either**
+- In `analysis_mode=paired`, the row must provide **either**
   `merscope_dir` **or** `merscope_spatialdata_path`, and **either**
   `xenium_dir` **or** `xenium_spatialdata_path`.
-- In `--analysis_mode merscope`, only MERSCOPE source/cache columns are
+- In `analysis_mode=merscope`, only MERSCOPE source/cache columns are
   required.
-- In `--analysis_mode xenium`, only Xenium source/cache columns are required.
+- In `analysis_mode=xenium`, only Xenium source/cache columns are required.
+- Blank row-level analysis, alignment, or stage settings inherit the matching Nextflow
+  parameter. Row-level `only_stage` overrides row-level `start_stage` and
+  `stop_stage`; when a row sets either start/stop column, the global
+  `--only_stage` fallback is ignored for that row.
 
 The Python-side parser lives in
 [src/merxen/io/samplesheet.py:52](../src/merxen/io/samplesheet.py#L52). It is
@@ -53,8 +66,8 @@ workflow parses the CSV itself.
 Paired mode:
 
 ```csv
-pair_id,merscope_dir,xenium_dir
-EXAMPLE01,/path/to/merscope/EXAMPLE01/region_R1,/path/to/xenium/EXAMPLE01
+pair_id,analysis_mode,enable_alignment,merscope_dir,xenium_dir
+EXAMPLE01,paired,true,/path/to/merscope/EXAMPLE01/region_R1,/path/to/xenium/EXAMPLE01
 ```
 
 This is enough to run the whole pipeline end-to-end with default parameters.
@@ -63,24 +76,26 @@ All other columns fall back to defaults.
 Xenium-only mode:
 
 ```csv
-pair_id,xenium_dir,xenium_spatialdata_path,xenium_channels,xenium_min_qv
-EXAMPLE01,/path/to/xenium/EXAMPLE01,/path/to/cache/EXAMPLE01_xenium.zarr,"DAPI,18S",20
+pair_id,analysis_mode,enable_alignment,xenium_dir,xenium_spatialdata_path,xenium_channels,xenium_min_qv
+EXAMPLE01,xenium,false,/path/to/xenium/EXAMPLE01,/path/to/cache/EXAMPLE01_xenium.zarr,"DAPI,18S",20
 ```
 
-Run it with `--analysis_mode xenium`. MERSCOPE-only samplesheets are analogous:
-provide `merscope_dir` or `merscope_spatialdata_path` and run with
-`--analysis_mode merscope`.
+The row-level `analysis_mode` is enough to run this alongside paired or
+MERSCOPE-only rows in the same file. MERSCOPE-only rows are analogous: provide
+`merscope_dir` or `merscope_spatialdata_path` and set `analysis_mode=merscope`.
 
 ## Full example
 
 ```csv
-pair_id,merscope_dir,merscope_spatialdata_path,merscope_image_prefix,merscope_z_range,merscope_transform_path,merscope_channels,xenium_dir,xenium_spatialdata_path,xenium_channels,xenium_min_qv,merscope_voxel_layers,xenium_voxel_layers,xenium_spec_path
-EXAMPLE01,/path/to/merscope/EXAMPLE01,/path/to/cache/EXAMPLE01_merscope.zarr,,0-6,,"DAPI,PolyT",/path/to/xenium/EXAMPLE01,/path/to/cache/EXAMPLE01_xenium.zarr,"DAPI,18S",20,7,2,
-EXAMPLE02,/path/to/merscope/EXAMPLE02,,,,,"DAPI,PolyT",/path/to/xenium/EXAMPLE02,,"DAPI,18S",20,7,2,
+pair_id,analysis_mode,enable_alignment,analysis_segmentation,start_stage,stop_stage,only_stage,merscope_dir,merscope_spatialdata_path,merscope_image_prefix,merscope_z_range,merscope_transform_path,merscope_channels,xenium_dir,xenium_spatialdata_path,xenium_channels,xenium_min_qv,merscope_voxel_layers,xenium_voxel_layers,xenium_spec_path
+EXAMPLE01,paired,true,both,,,,/path/to/merscope/EXAMPLE01,/path/to/cache/EXAMPLE01_merscope.zarr,,0-6,,"DAPI,PolyT",/path/to/xenium/EXAMPLE01,/path/to/cache/EXAMPLE01_xenium.zarr,"DAPI,18S",20,7,2,
+EXAMPLE02,merscope,false,reseg,segment,enrich,,/path/to/merscope/EXAMPLE02,,,,,"DAPI,PolyT",,,,,7,,
+EXAMPLE03,xenium,false,original_seg,,,visualize,,,,,,,/path/to/xenium/EXAMPLE03,,"DAPI,18S",20,,2,
 ```
 
-Row 1 uses cached SpatialData zarrs if they already exist. Row 2 builds
-everything fresh from the raw exports.
+Row 1 uses cached SpatialData zarrs if they already exist. Row 2 runs only
+MERSCOPE from segmentation through enrichment. Row 3 runs only the Xenium
+visualization stage, reading prior outputs from `--outdir`.
 
 ## Tips
 

@@ -21,6 +21,10 @@ def test_clustering_squidpy_nextflow_json_includes_hierarchical_fields() -> None
         '"neuron_subcluster_round"',
         '"broad_annotation"',
         '"spatial_scatter_point_size"',
+        "clustering_squidpy_gpu_vram_monitor = true",
+        "clustering_squidpy_gpu_vram_monitor_interval_seconds = 2",
+        "merxen.monitoring.gpu_vram",
+        "clustering_squidpy_out/gpu_vram",
         "clustering_squidpy_hierarchical_enabled = true",
         "clustering_squidpy_spatial_scatter_point_size = 2.0",
     ]:

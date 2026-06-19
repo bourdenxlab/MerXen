@@ -50,7 +50,7 @@ Reference: [Configuration → Pydantic config models](configuration.md#pydantic-
 
 ### `io.samplesheet` — [samplesheet.py](../src/merxen/io/samplesheet.py)
 - `SamplePair` dataclass — one samplesheet row with optional MERSCOPE and
-  Xenium inputs.
+  Xenium inputs plus optional row-level analysis/stage overrides.
 - `parse_samplesheet(csv_path) -> list[SamplePair]`.
 - `validate_samplesheet(pairs, analysis_mode="paired")`.
 - `required_platforms_for_mode(analysis_mode)`.

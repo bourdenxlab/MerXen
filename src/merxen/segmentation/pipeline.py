@@ -30,9 +30,21 @@ from merxen.segmentation.cellpose import (
     build_cellpose_affine_to_microns,
     run_tiled_cellpose,
 )
+from merxen.segmentation.mask_filter import filter_labeled_mask_by_area
 from merxen.segmentation.proseg import run_proseg_refinement
 
 logger = logging.getLogger(__name__)
+
+
+def _pixel_area_um2_from_affine(
+    x_transform: tuple[float, float, float],
+    y_transform: tuple[float, float, float],
+) -> float:
+    """Return square microns per mask pixel from pixel-to-micron affine terms."""
+    return abs(
+        (float(x_transform[0]) * float(y_transform[1]))
+        - (float(x_transform[1]) * float(y_transform[0]))
+    )
 
 
 def _load_merscope_transform_matrix(config: SegmentationConfig) -> np.ndarray:
@@ -321,6 +333,36 @@ def run_segmentation_pipeline(
     )
     log_status(f"[{dataset.name}] mask->micron x_transform={x_transform}")
     log_status(f"[{dataset.name}] mask->micron y_transform={y_transform}")
+
+    if (
+        config.mask_filter.final_min_area_um2 is not None
+        or config.mask_filter.final_max_area_um2 is not None
+    ):
+        pixel_area_um2 = _pixel_area_um2_from_affine(x_transform, y_transform)
+        _progress(
+            "cellpose_area_filtering",
+            min_area_um2=config.mask_filter.final_min_area_um2,
+            max_area_um2=config.mask_filter.final_max_area_um2,
+            pixel_area_um2=pixel_area_um2,
+        )
+        filter_stats = filter_labeled_mask_by_area(
+            mask_path,
+            pixel_area_um2=pixel_area_um2,
+            min_area_um2=config.mask_filter.final_min_area_um2,
+            max_area_um2=config.mask_filter.final_max_area_um2,
+            chunk_mb=config.mask_filter.final_filter_chunk_mb,
+            show_progress=config.mask_filter.show_progress,
+        )
+        log_status(
+            f"[{dataset.name}] Cellpose area filter kept "
+            f"{filter_stats['n_kept']:,}/{filter_stats['n_labels']:,} masks "
+            f"(removed small={filter_stats['n_removed_small']:,}, "
+            f"large={filter_stats['n_removed_large']:,}; "
+            f"bounds={config.mask_filter.final_min_area_um2}-"
+            f"{config.mask_filter.final_max_area_um2} um2)"
+        )
+        _progress("cellpose_area_filtered", **filter_stats)
+        force_release(note=f"after {dataset.name} Cellpose area filtering")
 
     x_col = resolve_col(points_obj, ["x", "global_x", "x_location"])
     y_col = resolve_col(points_obj, ["y", "global_y", "y_location"])

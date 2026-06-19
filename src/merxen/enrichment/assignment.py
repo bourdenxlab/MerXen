@@ -121,6 +121,7 @@ def clone_table_for_region(table_obj: ad.AnnData, region_name: str) -> ad.AnnDat
         instance_key = "cell_id"
         table_copy.obs[instance_key] = table_copy.obs_names.astype(str)
 
+    table_copy.uns.pop("spatialdata_attrs", None)
     return TableModel.parse(
         table_copy,
         region=region_name,
@@ -385,16 +386,11 @@ def run_per_shape_assignment_for_dataset(
                 )
                 continue
             except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    (
-                        "[%s] Clone from '%s' failed for '%s' (%s); "
-                        "falling back to sjoin assignment."
-                    ),
-                    dataset_name,
-                    source_table_key,
-                    shape_key,
-                    exc,
-                )
+                raise RuntimeError(
+                    f"[{dataset_name}] Failed to clone table '{source_table_key}' "
+                    f"for shape '{shape_key}'. Refusing to replace a source-backed "
+                    "assignment table with a geometric spatial-join fallback."
+                ) from exc
 
         table_obj, summary = compute_table_from_points_for_shape(
             dataset_name=dataset_name,

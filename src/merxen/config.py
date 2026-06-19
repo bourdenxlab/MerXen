@@ -43,8 +43,38 @@ class MaskFilterConfig(BaseModel):
     max_eccentricity: float = 0.99
     min_area_percentile: float = 1.0
     min_area_px: float | None = None
+    final_min_area_um2: float | None = 5.0
+    final_max_area_um2: float | None = 400.0
+    final_filter_chunk_mb: int = 256
     n_jobs: int = 16
     show_progress: bool = True
+
+    @field_validator("final_min_area_um2", "final_max_area_um2")
+    @classmethod
+    def _validate_optional_area(
+        cls: type[MaskFilterConfig],
+        v: float | None,
+    ) -> float | None:
+        if v is not None and v < 0:
+            raise ValueError("area thresholds must be non-negative")
+        return v
+
+    @field_validator("final_filter_chunk_mb")
+    @classmethod
+    def _validate_filter_chunk_mb(cls: type[MaskFilterConfig], v: int) -> int:
+        if int(v) <= 0:
+            raise ValueError("final_filter_chunk_mb must be positive")
+        return int(v)
+
+    @model_validator(mode="after")
+    def _validate_area_bounds(self: MaskFilterConfig) -> MaskFilterConfig:
+        if (
+            self.final_min_area_um2 is not None
+            and self.final_max_area_um2 is not None
+            and self.final_min_area_um2 > self.final_max_area_um2
+        ):
+            raise ValueError("final_min_area_um2 must be <= final_max_area_um2")
+        return self
 
 
 class TilingConfig(BaseModel):
@@ -176,6 +206,8 @@ class QCConfig(BaseModel):
     dataset_name: str
     latest_zarr_path: Path
     output_dir: Path
+    table_key: str | None = None
+    shape_key: str | None = None
 
 
 class SpateoAlignmentConfig(BaseModel):
@@ -248,6 +280,8 @@ class ComparisonConfig(BaseModel):
     xenium_zarr_path: Path
     output_dir: Path
     pair_id: str
+    merscope_table_key: str | None = None
+    xenium_table_key: str | None = None
 
 
 class VisualizationSampleConfig(BaseModel):
@@ -256,6 +290,9 @@ class VisualizationSampleConfig(BaseModel):
     sample_id: str
     platform: Literal["MERSCOPE", "XENIUM"]
     zarr_path: Path
+    segmentation: str | None = None
+    table_key: str | None = None
+    shape_key: str | None = None
 
 
 class VisualizationConfig(BaseModel):
@@ -312,6 +349,7 @@ class ClusteringSquidpySampleConfig(BaseModel):
     sample_id: str
     platform: Literal["MERSCOPE", "XENIUM"]
     zarr_path: Path
+    segmentation: str | None = None
     table_key: str | None = None
     shape_key: str | None = None
 

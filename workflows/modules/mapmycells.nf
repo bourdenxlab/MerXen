@@ -1,15 +1,16 @@
 process MAPMYCELLS {
-    tag "${pair_id}"
+    tag "${pair_id}:${segmentation}"
 
-    publishDir { "${params.outdir}/${pair_id}/mapmycells" }, mode: "copy", overwrite: true
+    publishDir { "${params.outdir}/${pair_id}/${segmentation}/mapmycells" }, mode: "copy", overwrite: true
 
     input:
     tuple val(pair_id),
+        val(segmentation),
         val(samples_json),
         path(clustering_out_dir, stageAs: "clustering_squidpy_input")
 
     output:
-    tuple val(pair_id), path("mapmycells_out")
+    tuple val(pair_id), val(segmentation), path("mapmycells_out")
 
     script:
     def dropLevelJson = params.mapmycells_drop_level == null ? "null" : groovy.json.JsonOutput.toJson(params.mapmycells_drop_level.toString())
@@ -24,7 +25,7 @@ process MAPMYCELLS {
     def regionCacheDirJson = params.mapmycells_region_cache_dir == null ? "null" : groovy.json.JsonOutput.toJson(params.mapmycells_region_cache_dir.toString())
     def plotsOnly = params.mapmycells_plots_only == null ? false : params.mapmycells_plots_only.toString().trim().toLowerCase() == "true"
     def plotsOnlyJson = plotsOnly ? "true" : "false"
-    def publishedMapMyCellsOut = "${params.outdir}/${pair_id}/mapmycells/mapmycells_out"
+    def publishedMapMyCellsOut = "${params.outdir}/${pair_id}/${segmentation}/mapmycells/mapmycells_out"
     def clusteringSamples = new groovy.json.JsonSlurper().parseText(samples_json)
     def mapmycellsSamples = clusteringSamples.collect { sample ->
         def sampleId = sample.sample_id.toString()
@@ -56,6 +57,16 @@ process MAPMYCELLS {
     def regionLabelsJson = groovy.json.JsonOutput.toJson(regionLabelValues)
     """
     set -euo pipefail
+    export OMP_NUM_THREADS="${task.cpus}"
+    export OPENBLAS_NUM_THREADS="${task.cpus}"
+    export MKL_NUM_THREADS="${task.cpus}"
+    export NUMEXPR_NUM_THREADS="${task.cpus}"
+    export NUMBA_NUM_THREADS="${task.cpus}"
+    export VECLIB_MAXIMUM_THREADS="${task.cpus}"
+    export BLIS_NUM_THREADS="${task.cpus}"
+    export RAYON_NUM_THREADS="${task.cpus}"
+    export POLARS_MAX_THREADS="${task.cpus}"
+    export DASK_NUM_WORKERS="${task.cpus}"
 
     if [[ "${plotsOnlyJson}" == "true" ]]; then
         previous_mapmycells_out="${publishedMapMyCellsOut}"

@@ -31,6 +31,16 @@ class SamplePair:
         xenium_min_qv: Minimum quality value for Xenium transcript filtering.
         merscope_voxel_layers: ProSeg voxel layers for MERSCOPE.
         xenium_voxel_layers: ProSeg voxel layers for Xenium.
+        analysis_mode: Optional row-level override for the pipeline analysis
+            mode. Blank or omitted values inherit the Nextflow parameter.
+        enable_alignment: Optional row-level override for optional alignment
+            and alignment QC. Only applies to paired rows.
+        analysis_segmentation: Optional row-level downstream segmentation
+            branch override. Blank or omitted values inherit the Nextflow
+            parameter.
+        start_stage: Optional row-level first stage.
+        stop_stage: Optional row-level final stage.
+        only_stage: Optional row-level single-stage override.
     """
 
     pair_id: str
@@ -47,6 +57,12 @@ class SamplePair:
     merscope_voxel_layers: int = 7
     xenium_voxel_layers: int = 2
     xenium_spec_path: Path | None = None
+    analysis_mode: str | None = None
+    enable_alignment: bool | None = None
+    analysis_segmentation: str | None = None
+    start_stage: str | None = None
+    stop_stage: str | None = None
+    only_stage: str | None = None
 
 
 def parse_samplesheet(csv_path: Path) -> list[SamplePair]:
@@ -56,7 +72,9 @@ def parse_samplesheet(csv_path: Path) -> list[SamplePair]:
         pair_id, merscope_dir, merscope_spatialdata_path, merscope_image_prefix,
         merscope_z_range, merscope_transform_path, merscope_channels,
         xenium_dir, xenium_spatialdata_path, xenium_channels, xenium_min_qv,
-        merscope_voxel_layers, xenium_voxel_layers, xenium_spec_path
+        merscope_voxel_layers, xenium_voxel_layers, xenium_spec_path,
+        analysis_mode, enable_alignment, analysis_segmentation, start_stage,
+        stop_stage, only_stage
 
     Backward-compatible aliases:
         merscope_zarr_path -> merscope_spatialdata_path
@@ -121,6 +139,14 @@ def parse_samplesheet(csv_path: Path) -> list[SamplePair]:
                     row.get("xenium_voxel_layers"), default=2
                 ),
                 xenium_spec_path=_optional_path(row.get("xenium_spec_path")),
+                analysis_mode=_optional_string(row.get("analysis_mode")),
+                enable_alignment=_parse_optional_bool(row.get("enable_alignment")),
+                analysis_segmentation=_optional_string(
+                    row.get("analysis_segmentation")
+                ),
+                start_stage=_optional_string(row.get("start_stage")),
+                stop_stage=_optional_string(row.get("stop_stage")),
+                only_stage=_optional_string(row.get("only_stage")),
             )
             pairs.append(pair)
             logger.info("Parsed sample pair %d: %s", row_num - 1, pair.pair_id)
@@ -163,8 +189,13 @@ def validate_samplesheet(
         FileNotFoundError: If any required path does not exist.
     """
     errors = []
-    required_platforms = set(required_platforms_for_mode(analysis_mode))
+    fallback_required_platforms = required_platforms_for_mode(analysis_mode)
     for pair in pairs:
+        required_platforms = set(
+            required_platforms_for_mode(pair.analysis_mode)
+            if pair.analysis_mode
+            else fallback_required_platforms
+        )
         has_merscope = (
             pair.merscope_dir is not None or pair.merscope_spatialdata_path is not None
         )
@@ -276,3 +307,23 @@ def _optional_path(value: str | None) -> Path | None:
     if not cleaned:
         return None
     return Path(cleaned)
+
+
+def _optional_string(value: str | None) -> str | None:
+    """Convert a possibly-empty string field into an optional string."""
+    if value is None:
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _parse_optional_bool(value: str | None) -> bool | None:
+    """Parse an optional boolean string from a CSV field."""
+    if value is None or not value.strip():
+        return None
+    key = value.strip().lower()
+    if key in {"true", "t", "yes", "y", "1"}:
+        return True
+    if key in {"false", "f", "no", "n", "0"}:
+        return False
+    raise ValueError(f"Invalid boolean value: {value!r}")

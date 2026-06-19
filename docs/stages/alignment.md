@@ -1,7 +1,8 @@
 # Section alignment
 
-> **Status: implemented as an optional stage.** Enable with
-> `--analysis_mode paired --enable_alignment true` after installing Spateo.
+> **Status: implemented as an optional stage.** Enable globally with
+> `--analysis_mode paired --enable_alignment true`, or per paired samplesheet
+> row with `enable_alignment=true`, after installing Spateo.
 
 ## Intent
 
@@ -29,8 +30,8 @@ alignment coordinate tables are retained for inspection.
 
 ## Nextflow
 
-`ALIGN` runs after per-platform `QC` and before `COMPARE` when
-`params.analysis_mode = paired` and `params.enable_alignment = true`.
+`ALIGN` runs after per-platform `QC` and before `COMPARE` for paired rows whose
+effective `enable_alignment` value is `true`.
 `ALIGN_QC` then computes post-alignment QC metrics and overlays. When
 alignment is disabled, `COMPARE` and `VISUALIZE` continue to receive the
 enriched zarrs directly. Alignment is not active in MERSCOPE-only or
@@ -40,7 +41,7 @@ Key parameters live in `workflows/nextflow.config`:
 
 | Param | Default | Description |
 |-------|---------|-------------|
-| `enable_alignment` | `false` | Run `ALIGN` and `ALIGN_QC`; requires paired analysis mode. |
+| `enable_alignment` | `false` | Run `ALIGN` and `ALIGN_QC` by default; can be overridden by samplesheet row and only applies to paired rows. |
 | `alignment_device` | `auto` | Spateo device; `auto` chooses CUDA when available. |
 | `alignment_dtype` | `float32` | Spateo tensor precision; keeps GPU memory lower. |
 | `alignment_selected_mode` | `nonrigid` | Coordinate set used for transformed outputs. |
@@ -62,14 +63,14 @@ Key parameters live in `workflows/nextflow.config`:
 | `alignment_max_alignment_cells` | `35000` | Deterministic per-platform cell subsample used for Spateo optimization. |
 | `alignment_seed` | `21` | Seed for deterministic alignment subsampling. |
 | `alignment_max_nonrigid_anchors` | `5000` | Maximum RBF anchors used when applying non-rigid transforms. |
-| `alignment_max_forks` | `1` | Maximum concurrent `ALIGN` tasks. Keep this at `1` on a single 24 GB GPU to avoid CUDA OOM from multiple Spateo jobs. |
+| `alignment_max_forks` | `2` | Maximum concurrent `ALIGN` tasks. Lower to `1` on a single-GPU system if Spateo jobs compete for VRAM. |
 | `alignment_qc_grid_rows` / `alignment_qc_grid_cols` | `10` / `10` | SABench-style QC grid. |
 
 These defaults come from the P7513 tuning notebook. They use the shared panel,
 joint PCA, mirrored initialization, no SVI, and a 35k-cell per-platform
 subsample so one non-rigid pass fits comfortably on a 24 GB GPU. Nextflow
-serializes `ALIGN` by default because multiple concurrent Spateo jobs can
-exhaust VRAM even when each job fits individually.
+limits concurrent `ALIGN` tasks with `alignment_max_forks`; set it to `1` when
+you want strict single-job GPU use.
 
 ## CLI
 

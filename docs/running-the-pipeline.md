@@ -27,28 +27,40 @@ Common optional parameters:
 | `--outdir` | Where all outputs are published. Defaults to `./results`. |
 | `--proseg_binary` | Absolute path to the ProSeg binary. Required when `SEGMENT` runs. |
 | `--analysis_mode` | `paired` (default), `merscope`, or `xenium`. Controls which platform columns are required and which stages are active. |
+| `--analysis_segmentation` | `both` (default), `reseg`, or `original_seg`. Controls whether downstream analysis runs on resegmented data, original instrument segmentation, or both. |
 | `--force_spatialdata_build` | Force rebuilding the SpatialData zarr even when a cached one exists. Defaults to `false`. |
 | `--enable_alignment` | Run optional Spateo alignment and alignment QC before comparison. Paired mode only. Defaults to `false`. |
 | `--start_stage` / `--stop_stage` | Run a contiguous stage range. Defaults to the full pipeline. |
 | `--only_stage` | Convenience alias for setting `start_stage` and `stop_stage` to the same stage. |
 
-Every other parameter has a default in
+The samplesheet may also include `analysis_mode`, `enable_alignment`,
+`analysis_segmentation`, `start_stage`, `stop_stage`, and `only_stage` columns.
+Non-empty row values override these command-line settings for that row only;
+blank cells inherit the command-line/config value. Every other parameter has a
+default in
 [workflows/nextflow.config](../workflows/nextflow.config). See
 [Configuration](configuration.md) for the full list.
 
-To use alignment, pass `--enable_alignment true`. Nextflow runs `ALIGN` in
-`environment.alignment.yml`, bootstraps Spateo/Dynamo from pinned Git refs if
-the shimmed import check fails, then restores modern AnnData for SpatialData
-compatibility. Other stages continue to use the regular `environment.yml`.
-On single-GPU systems, `ALIGN` and RAPIDS-backed `CLUSTERING_SQUIDPY` are
-serialized by default (`alignment_max_forks = 1` and
-`clustering_squidpy_max_forks = 1`) so multiple jobs do not exhaust VRAM.
+To use alignment for all paired rows by default, pass `--enable_alignment true`.
+To choose per row, add an `enable_alignment` column to the samplesheet and set
+paired rows to `true` or `false`; blank cells inherit `--enable_alignment`.
+Nextflow runs `ALIGN` in `environment.alignment.yml`, bootstraps Spateo/Dynamo
+from pinned Git refs if the shimmed import check fails, then restores modern
+AnnData for SpatialData compatibility. Other stages continue to use the regular
+`environment.yml`. `ALIGN` and RAPIDS-backed `CLUSTERING_SQUIDPY` default to
+two concurrent tasks (`alignment_max_forks = 2` and
+`clustering_squidpy_max_forks = 2`); lower either value to `1` on a single-GPU
+system if jobs compete for VRAM.
 
 ## Analysis mode
 
-`--analysis_mode paired` is the default and expects both MERSCOPE and Xenium
-inputs for every samplesheet row. It enables the paired-only stages:
+`--analysis_mode paired` is the default fallback and expects both MERSCOPE and
+Xenium inputs for rows that do not override `analysis_mode`. It enables the
+paired-only stages for those paired rows:
 `align`, `align_qc`, and `compare`.
+
+`align` and `align_qc` are active only for paired rows whose effective
+`enable_alignment` value is `true`.
 
 Use single-platform mode when a row has only one dataset:
 
@@ -60,13 +72,35 @@ nextflow run workflows/main.nf \
     --proseg_binary /path/to/proseg
 ```
 
-In `--analysis_mode merscope` or `--analysis_mode xenium`, the workflow runs
+In `analysis_mode=merscope` or `analysis_mode=xenium`, either from the command
+line or a row-level samplesheet value, the workflow runs
 `build_spatialdata → segment → enrich → qc → visualize → clustering_squidpy`
-for the selected platform. Visualization writes single-dataset alternatives
-for paired plots, including gene-abundance, one-platform transcript overview,
-and one-platform sanity crop outputs. `mapmycells` remains available after
-clustering. Alignment and comparison are rejected in single-platform mode
+for the selected platform. Visualization writes single-dataset alternatives for
+paired plots, including gene-abundance, one-platform transcript overview, and
+one-platform sanity crop outputs. `mapmycells` remains available after
+clustering. Alignment and comparison are rejected for single-platform rows
 because they require both datasets.
+
+## Analysis segmentation
+
+By default, stages from QC onward run twice per active sample: once on
+`reseg` layers (`table_MOSAIK_proseg` / `MOSAIK_proseg`) and once on
+`original_seg` layers (`table_original` plus the platform's original cell
+boundaries). Restrict the branch set when you only need one result family:
+
+```bash
+nextflow run workflows/main.nf \
+    --samplesheet workflows/samplesheet.csv \
+    --analysis_segmentation original_seg \
+    --outdir ./results \
+    --proseg_binary /path/to/proseg
+```
+
+The upstream build, segmentation, and enrichment stages remain shared for each
+row. The enriched SpatialData zarr contains both segmentation families;
+downstream processes receive explicit table and shape keys for the selected
+branch. A row-level `analysis_segmentation` value can restrict branches for one
+sample while other rows continue to use the global default.
 
 ## Resuming a run
 
@@ -83,6 +117,24 @@ nextflow run workflows/main.nf \
 ```
 
 Completed stages are skipped; only the failed stage and its downstreams re-run.
+
+## Failure behavior
+
+Task failures use Nextflow's `ignore` error strategy with
+`workflow.failOnIgnore = true`. This means a failed task does not terminate the
+whole run immediately. Instead, that task emits no outputs, so only channel
+branches that depend on those missing outputs stop:
+
+- A failed per-platform stage prevents later stages for that same
+  `pair_id`/platform branch.
+- A failed paired dependency prevents paired comparison and later paired
+  downstream stages for that `pair_id`/segmentation branch.
+- Other rows, platforms, or segmentation branches that do not depend on the
+  failed task continue running.
+
+The final Nextflow exit status is still non-zero if any task failure was
+ignored, so batch schedulers and shell scripts can detect that the run was not
+fully clean.
 
 ## Forcing a full rebuild
 
@@ -132,12 +184,19 @@ Skipped upstream stages are not invoked. Instead, the workflow checks for their
 published outputs under `--outdir` and fails early if an expected file is
 missing.
 
+The same fields can be set per row in the samplesheet. A row-level `only_stage`
+overrides that row's start/stop values. If a row sets either `start_stage` or
+`stop_stage`, the global `--only_stage` fallback is ignored for that row.
+For an already-aligned paired row, keep `enable_alignment=true` and start at
+`compare`; the workflow will read the published alignment outputs instead of
+rerunning `ALIGN` or `ALIGN_QC`.
+
 Accepted stages are:
 
 `build_spatialdata`, `segment`, `enrich`, `qc`, `align`, `align_qc`, `compare`,
 `visualize`, `clustering_squidpy`, and `mapmycells`. Alignment stages are only
-active when `--enable_alignment true` is set, and `align`, `align_qc`, and
-`compare` are active only in `--analysis_mode paired`.
+active for rows whose effective `enable_alignment` value is `true`, and
+`align`, `align_qc`, and `compare` are active only in paired rows.
 
 Run one stage:
 
@@ -171,12 +230,12 @@ nextflow run workflows/main.nf \
 ```
 
 Starting at `segment` still needs `--proseg_binary`; starting later does not.
-Starting at `compare`, `visualize`, or `clustering_squidpy` with
-`--enable_alignment false` reads
+Starting at `compare`, `visualize`, or `clustering_squidpy` with effective
+`enable_alignment=false` reads
 `${outdir}/${pair_id}/{merscope,xenium}/latest/latest_spatialdata.zarr`.
 In single-platform mode, starting at `visualize` or `clustering_squidpy` reads
 only `${outdir}/${pair_id}/<selected-platform>/latest/latest_spatialdata.zarr`.
-With `--enable_alignment true`, `ALIGN` updates
+With effective `enable_alignment=true`, `ALIGN` updates
 `${outdir}/${pair_id}/merscope/latest/latest_spatialdata.zarr` in place with
 alignment metadata and `*_aligned_nonrigid` vector elements. Later stages read
 that updated MERSCOPE zarr and keep using
@@ -194,7 +253,7 @@ and `--mapmycells_precomputed_stats_path`; region runs require
 If the mapper outputs already exist and only the final annotated H5AD/plots need
 to be regenerated, add `--mapmycells_plots_only true` to `--only_stage
 mapmycells`. The process copies the previously published
-`${outdir}/<pair_id>/mapmycells/mapmycells_out/` directory into the work
+`${outdir}/<pair_id>/<analysis_segmentation>/mapmycells/mapmycells_out/` directory into the work
 directory, skips MapMyCells execution, and rewrites the plots from the existing
 CSV/extended JSON outputs.
 
@@ -202,7 +261,7 @@ CSV/extended JSON outputs.
 
 The default executor is local (`executor = 'local'` in
 [nextflow.config:36-40](../workflows/nextflow.config#L36-L40)) with a hard
-ceiling of 75 CPUs and 600 GB memory. To target an HPC scheduler, add a
+ceiling of 72 CPUs and 640 GB memory. To target an HPC scheduler, add a
 profile or edit the `executor` block — see the
 [Nextflow executor docs](https://www.nextflow.io/docs/latest/executor.html).
 Per-process CPU and memory requests are already declared in the `process {}`

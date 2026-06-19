@@ -123,12 +123,17 @@ def fit_linear(x: np.ndarray, y: np.ndarray) -> tuple[float, float, float]:
 def compute_gene_comparison(
     xenium_sdata: Any,
     merscope_sdata: Any,
+    *,
+    xenium_table_key: str | None = None,
+    merscope_table_key: str | None = None,
 ) -> dict[str, Any]:
     """Compute cross-platform gene totals, normalized counts, and fit metrics."""
     logger.info("[Gene Compare] Computing per-gene totals from points and tables")
 
-    xenium_table = xenium_sdata.tables["table"]
-    merscope_table = merscope_sdata.tables["table"]
+    resolved_xenium_table_key = _choose_table_key(xenium_sdata, xenium_table_key)
+    resolved_merscope_table_key = _choose_table_key(merscope_sdata, merscope_table_key)
+    xenium_table = xenium_sdata.tables[resolved_xenium_table_key]
+    merscope_table = merscope_sdata.tables[resolved_merscope_table_key]
 
     x_total_all = gene_totals_from_points(xenium_sdata, assigned_only=False)
     m_total_all = gene_totals_from_points(merscope_sdata, assigned_only=False)
@@ -169,6 +174,10 @@ def compute_gene_comparison(
             "xenium_assigned_sum": x_assigned_sum,
             "merscope_assigned_sum": m_assigned_sum,
         },
+        "table_keys": {
+            "xenium": resolved_xenium_table_key,
+            "merscope": resolved_merscope_table_key,
+        },
         "fits": {
             "total_log10": {
                 "slope": total_fit[0],
@@ -196,10 +205,16 @@ def gene_summary_df(counts: pd.Series, normalized: pd.Series) -> pd.DataFrame:
     )
 
 
-def compute_gene_summary(sdata_obj: Any, dataset_name: str) -> dict[str, Any]:
+def compute_gene_summary(
+    sdata_obj: Any,
+    dataset_name: str,
+    *,
+    table_key: str | None = None,
+) -> dict[str, Any]:
     """Compute single-dataset total and assigned per-gene count summaries."""
     logger.info("[%s Gene Summary] Computing per-gene totals", dataset_name)
-    table = sdata_obj.tables["table"]
+    resolved_table_key = _choose_table_key(sdata_obj, table_key)
+    table = sdata_obj.tables[resolved_table_key]
 
     total_all = gene_totals_from_points(sdata_obj, assigned_only=False)
     assigned_all = gene_totals_from_table(table)
@@ -217,25 +232,54 @@ def compute_gene_summary(sdata_obj: Any, dataset_name: str) -> dict[str, Any]:
             "total_sum": total_sum,
             "assigned_sum": assigned_sum,
         },
+        "table_key": resolved_table_key,
     }
 
 
 def compute_gene_comparison_from_paths(
     xenium_zarr_path: Path | str,
     merscope_zarr_path: Path | str,
+    *,
+    xenium_table_key: str | None = None,
+    merscope_table_key: str | None = None,
 ) -> dict[str, Any]:
     """Load SpatialData zarrs and run cross-platform gene comparison."""
     xenium_sdata = sd.read_zarr(Path(xenium_zarr_path))
     merscope_sdata = sd.read_zarr(Path(merscope_zarr_path))
     return compute_gene_comparison(
-        xenium_sdata=xenium_sdata, merscope_sdata=merscope_sdata
+        xenium_sdata=xenium_sdata,
+        merscope_sdata=merscope_sdata,
+        xenium_table_key=xenium_table_key,
+        merscope_table_key=merscope_table_key,
     )
 
 
 def compute_gene_summary_from_path(
     zarr_path: Path | str,
     dataset_name: str,
+    *,
+    table_key: str | None = None,
 ) -> dict[str, Any]:
     """Load one SpatialData zarr and compute single-dataset gene summaries."""
     sdata_obj = sd.read_zarr(Path(zarr_path))
-    return compute_gene_summary(sdata_obj=sdata_obj, dataset_name=dataset_name)
+    return compute_gene_summary(
+        sdata_obj=sdata_obj,
+        dataset_name=dataset_name,
+        table_key=table_key,
+    )
+
+
+def _choose_table_key(sdata_obj: Any, preferred: str | None) -> str:
+    """Resolve an AnnData table key for assigned-count summaries."""
+    if preferred is not None:
+        if preferred not in sdata_obj.tables:
+            raise KeyError(
+                f"Requested table_key={preferred!r} not found. "
+                f"Available tables: {list(sdata_obj.tables.keys())}"
+            )
+        return preferred
+    if "table" in sdata_obj.tables:
+        return "table"
+    if len(sdata_obj.tables) == 0:
+        raise RuntimeError("SpatialData object has no AnnData tables.")
+    return str(list(sdata_obj.tables.keys())[0])

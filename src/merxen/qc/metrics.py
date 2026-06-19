@@ -108,8 +108,68 @@ def _compute_cell_metrics_from_points(
     return n_total, n_assigned, cell_metrics
 
 
+def _choose_shape_key(sdata_obj: Any, preferred: str | None) -> str:
+    """Resolve the shape key used for geometry QC."""
+    if preferred is not None:
+        if preferred not in sdata_obj.shapes:
+            raise KeyError(
+                f"Requested shape_key={preferred!r} not found. "
+                f"Available shapes: {list(sdata_obj.shapes.keys())}"
+            )
+        return preferred
+    if len(sdata_obj.shapes) == 0:
+        raise RuntimeError("SpatialData object has no shapes for QC.")
+    return str(list(sdata_obj.shapes.keys())[0])
+
+
+def _choose_table_key(sdata_obj: Any, preferred: str | None) -> str | None:
+    """Resolve the table key used for table-backed cell QC metrics."""
+    if preferred is not None:
+        if preferred not in sdata_obj.tables:
+            raise KeyError(
+                f"Requested table_key={preferred!r} not found. "
+                f"Available tables: {list(sdata_obj.tables.keys())}"
+            )
+        return preferred
+    return None
+
+
+def _cell_ids_from_table(adata_obj: Any) -> pd.Index:
+    """Return stable cell IDs from a SpatialData AnnData table."""
+    attrs = dict(getattr(adata_obj, "uns", {}).get("spatialdata_attrs", {}))
+    instance_key = attrs.get("instance_key")
+    if isinstance(instance_key, str) and instance_key in adata_obj.obs.columns:
+        values = adata_obj.obs[instance_key].astype(str).to_numpy()
+        return pd.Index(values, dtype=str, name="cell_id_norm")
+    return pd.Index(adata_obj.obs_names.astype(str), dtype=str, name="cell_id_norm")
+
+
+def _compute_cell_metrics_from_table(adata_obj: Any) -> tuple[int, pd.DataFrame]:
+    """Compute assigned transcript and gene counts from an AnnData cell table."""
+    x_matrix = adata_obj.X
+    transcripts_per_cell = np.asarray(x_matrix.sum(axis=1)).ravel()
+    if hasattr(x_matrix, "getnnz"):
+        genes_per_cell = np.asarray(x_matrix.getnnz(axis=1)).ravel()
+    else:
+        genes_per_cell = np.count_nonzero(np.asarray(x_matrix) > 0, axis=1)
+
+    cell_metrics = pd.DataFrame(
+        {
+            "cell_id_norm": _cell_ids_from_table(adata_obj).astype(str),
+            "transcripts_per_cell": transcripts_per_cell.astype(float),
+            "genes_per_cell": genes_per_cell.astype(float),
+        }
+    )
+    n_assigned = int(np.nansum(transcripts_per_cell))
+    return n_assigned, cell_metrics
+
+
 def compute_dataset_qc(
-    latest_zarr_path: Path | str, dataset_name: str
+    latest_zarr_path: Path | str,
+    dataset_name: str,
+    *,
+    table_key: str | None = None,
+    shape_key: str | None = None,
 ) -> dict[str, Any]:
     """Compute geometry and assignment QC metrics for a dataset output zarr."""
     latest_zarr_path = Path(latest_zarr_path)
@@ -121,8 +181,9 @@ def compute_dataset_qc(
     if len(sdata.points) == 0:
         raise RuntimeError(f"No points found in {latest_zarr_path}")
 
-    shape_key = list(sdata.shapes.keys())[0]
-    shapes = sdata.shapes[shape_key]
+    resolved_shape_key = _choose_shape_key(sdata, shape_key)
+    resolved_table_key = _choose_table_key(sdata, table_key)
+    shapes = sdata.shapes[resolved_shape_key]
     if "geometry" in shapes.columns:
         gdf = shapes[["geometry"]].copy()
     else:
@@ -152,28 +213,37 @@ def compute_dataset_qc(
 
     points_key = list(sdata.points.keys())[0]
     points_obj = sdata.points[points_key]
-    assign_col = first_existing_col(points_obj, ["assignment", "cell", "cell_id"])
     gene_col = first_existing_col(points_obj, ["feature_name", "gene", "target"])
-    if assign_col is None:
-        raise KeyError(
-            f"No assignment column found in points columns={list(points_obj.columns)}"
-        )
     if gene_col is None:
         raise KeyError(
             f"No gene column found in points columns={list(points_obj.columns)}"
         )
 
-    n_total, n_assigned, cell_metrics = _compute_cell_metrics_from_points(
-        points_obj,
-        assign_col=assign_col,
-        gene_col=gene_col,
-    )
+    if resolved_table_key is not None:
+        n_total = _point_count(points_obj)
+        n_assigned, cell_metrics = _compute_cell_metrics_from_table(
+            sdata.tables[resolved_table_key]
+        )
+    else:
+        assign_col = first_existing_col(points_obj, ["assignment", "cell", "cell_id"])
+        if assign_col is None:
+            raise KeyError(
+                "No assignment column found in points columns="
+                f"{list(points_obj.columns)}"
+            )
+        n_total, n_assigned, cell_metrics = _compute_cell_metrics_from_points(
+            points_obj,
+            assign_col=assign_col,
+            gene_col=gene_col,
+        )
     cell_metrics["dataset"] = dataset_name
     pct_assigned = 100.0 * n_assigned / max(n_total, 1)
 
     summary = {
         "dataset": dataset_name,
         "latest_zarr_path": str(latest_zarr_path),
+        "shape_key": resolved_shape_key,
+        "table_key": resolved_table_key,
         "n_cells": int(len(gdf)),
         "n_transcripts_total": int(n_total),
         "n_transcripts_assigned": int(n_assigned),
@@ -200,6 +270,13 @@ def compute_dataset_qc(
         "geometry_metrics": geom_df,
         "cell_metrics": cell_metrics,
     }
+
+
+def _point_count(points_obj: Any) -> int:
+    """Return row count for pandas or dask-backed SpatialData points."""
+    if hasattr(points_obj, "npartitions") and hasattr(points_obj, "partitions"):
+        return int(points_obj.shape[0].compute())
+    return int(len(points_obj))
 
 
 def save_dataset_qc(

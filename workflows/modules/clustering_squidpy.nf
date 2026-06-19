@@ -1,18 +1,32 @@
 process CLUSTERING_SQUIDPY {
-    tag "${pair_id}"
+    tag "${pair_id}:${segmentation}"
 
-    publishDir { "${params.outdir}/${pair_id}/clustering_squidpy" }, mode: "copy", overwrite: true
+    publishDir { "${params.outdir}/${pair_id}/${segmentation}/clustering_squidpy" }, mode: "copy", overwrite: true
 
     input:
     tuple val(pair_id),
+        val(segmentation),
         val(samples_json)
 
     output:
-    tuple val(pair_id), val(samples_json), path("clustering_squidpy_out")
+    tuple val(pair_id),
+        val(segmentation),
+        val(samples_json),
+        path("clustering_squidpy_out")
 
     script:
     """
     set -euo pipefail
+    export OMP_NUM_THREADS="${task.cpus}"
+    export OPENBLAS_NUM_THREADS="${task.cpus}"
+    export MKL_NUM_THREADS="${task.cpus}"
+    export NUMEXPR_NUM_THREADS="${task.cpus}"
+    export NUMBA_NUM_THREADS="${task.cpus}"
+    export VECLIB_MAXIMUM_THREADS="${task.cpus}"
+    export BLIS_NUM_THREADS="${task.cpus}"
+    export RAYON_NUM_THREADS="${task.cpus}"
+    export POLARS_MAX_THREADS="${task.cpus}"
+    export DASK_NUM_WORKERS="${task.cpus}"
 
     cat > clustering_squidpy_config.json <<JSON
 {
@@ -63,6 +77,26 @@ process CLUSTERING_SQUIDPY {
   }
 }
 JSON
+
+    if ${params.clustering_squidpy_gpu_vram_monitor}; then
+        mkdir -p clustering_squidpy_out/gpu_vram
+        gpu_vram_stem="${pair_id}_${segmentation}"
+        merxen clustering-squidpy --config clustering_squidpy_config.json &
+        clustering_pid=\$!
+        python -m merxen.monitoring.gpu_vram \
+            --pid "\${clustering_pid}" \
+            --interval-seconds ${params.clustering_squidpy_gpu_vram_monitor_interval_seconds} \
+            --samples-path "clustering_squidpy_out/gpu_vram/\${gpu_vram_stem}_samples.tsv" \
+            --summary-path "clustering_squidpy_out/gpu_vram/\${gpu_vram_stem}_summary.json" &
+        monitor_pid=\$!
+
+        set +e
+        wait "\${clustering_pid}"
+        clustering_exit=\$?
+        wait "\${monitor_pid}" || true
+        set -e
+        exit "\${clustering_exit}"
+    fi
 
     merxen clustering-squidpy --config clustering_squidpy_config.json
     """

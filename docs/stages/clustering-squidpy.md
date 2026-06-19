@@ -100,7 +100,9 @@ published latest zarrs directly.
 | `spatial_scatter_point_size` | Point size for regular spatial scatter plots. |
 | `figure_dpi` | PNG output DPI. |
 | `use_gpu` | Use RAPIDS single-cell acceleration when available. |
-| `clustering_squidpy_max_forks` | Nextflow-side concurrency guard. Defaults to `1` so GPU clustering runs one pair at a time on single-GPU systems. |
+| `clustering_squidpy_max_forks` | Nextflow-side concurrency guard. Defaults to `2`; lower to `1` for strict single-job GPU use. |
+| `clustering_squidpy_gpu_vram_monitor` | Nextflow wrapper flag that records `nvidia-smi` VRAM samples for each clustering task. Defaults to `true`. |
+| `clustering_squidpy_gpu_vram_monitor_interval_seconds` | Sampling interval for the VRAM monitor. Defaults to `2`. |
 | `hierarchical_enabled` | Run broad atlas annotation plus branch subclustering. Defaults to `true`; set `false` for the legacy one-shot Leiden workflow. |
 | `broad_round` | Round-specific broad clustering settings. Default Leiden resolution `0.2`; unspecified fields inherit top-level filtering/PCA/UMAP settings. |
 | `subcluster_round` | Default non-neuron branch settings. Default Leiden resolution `0.5`. |
@@ -124,6 +126,14 @@ Each listed `.png` plot is also written as a same-stem `.pdf`.
 | Spatial | `plots/spatial/<sample_id>_spatial_scatter_leiden.png` | Squidpy spatial scatter colored by Leiden with clean axes and a 200 um scale bar. |
 | Spatial Leiden grid | `plots/spatial_grid/<sample_id>_spatial_scatter_leiden_grid.png` | Small-multiple spatial grid with each de novo Leiden cluster highlighted in red against all other cells in grey. |
 | AnnData | `<sample_id>_clustered.h5ad` | Filtered clustered object, with raw counts in `layers["counts"]`. |
+
+When `clustering_squidpy_gpu_vram_monitor` is enabled, the Nextflow wrapper also
+writes task-level GPU telemetry under `clustering_squidpy_out/gpu_vram/`:
+
+| Kind | File | Contents |
+|------|------|----------|
+| GPU VRAM summary | `<pair_id>_<analysis_segmentation>_summary.json` | Peak task-matched and total device VRAM from the `nvidia-smi` sampler. |
+| GPU VRAM samples | `<pair_id>_<analysis_segmentation>_samples.tsv` | Per-sample GPU memory rows, including all compute apps and task-descendant PID matches. |
 
 With hierarchical mode enabled, additional artifacts are written under
 `clustering_squidpy_out/<platform>/<sample_id>_hierarchical/`:
