@@ -67,3 +67,39 @@ def test_nextflow_uses_row_level_settings_and_continues_after_task_errors() -> N
 
     assert 'errorStrategy = "ignore"' in config_text
     assert "failOnIgnore = true" in config_text
+
+
+def test_segment_bootstraps_proseg_from_configured_paths() -> None:
+    """The workflow should resolve ProSeg from config instead of a required flag."""
+    repo_root = Path(__file__).resolve().parents[2]
+    main_text = (repo_root / "workflows" / "main.nf").read_text()
+    config_text = (repo_root / "workflows" / "nextflow.config").read_text()
+    module_text = (
+        repo_root / "workflows" / "modules" / "proseg_bootstrap.nf"
+    ).read_text()
+
+    for expected in [
+        'include { ENSURE_PROSEG } from "./modules/proseg_bootstrap"',
+        "proseg_trigger_ch = segment_meta_ch.map { true }.take(1)",
+        "proseg_path_ch = ENSURE_PROSEG(proseg_trigger_ch)",
+        ".combine(proseg_path_ch)",
+        "binary_path: prosegBinaryPath",
+    ]:
+        assert expected in main_text
+
+    for expected in [
+        "proseg_search_paths",
+        "/usr/bin/proseg",
+        "proseg_install_path",
+        "proseg_auto_install = true",
+        'proseg_cargo_package = "proseg"',
+    ]:
+        assert expected in config_text
+
+    for expected in [
+        "process ENSURE_PROSEG",
+        "cargo install",
+        "sudo -v",
+        "proseg_path.txt",
+    ]:
+        assert expected in module_text
