@@ -88,7 +88,7 @@ with Groovy.
 
 ### `segmentation.cellpose` — [cellpose.py](../src/merxen/segmentation/cellpose.py)
 - `build_cellpose_model(config)`.
-- `run_tiled_cellpose(...)` — global-pixel mask from overlapping tiles.
+- `run_tiled_cellpose(...)` — global-pixel mask from core-owned object stitching.
 - `build_cellpose_affine_to_microns(matrix, ...)`.
 - `assign_labels_from_masks(...)`.
 

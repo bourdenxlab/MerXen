@@ -1,17 +1,16 @@
 # Running the pipeline
 
-Once you have a conda environment, a samplesheet, and, for full runs, a ProSeg
-binary (see [Getting started](getting-started.md) and
-[Samplesheet format](samplesheet.md)), the pipeline is driven by a single
-`nextflow run` invocation.
+Once you have a conda environment and a samplesheet (see
+[Getting started](getting-started.md) and [Samplesheet format](samplesheet.md)),
+the pipeline is driven by a single `nextflow run` invocation. ProSeg is resolved
+automatically from configured search paths and installed with Cargo if needed.
 
 ## Basic invocation
 
 ```bash
 nextflow run workflows/main.nf \
     --samplesheet workflows/samplesheet.csv \
-    --outdir ./results \
-    --proseg_binary /path/to/proseg
+    --outdir ./results
 ```
 
 Required parameter:
@@ -25,7 +24,6 @@ Common optional parameters:
 | Flag | Description |
 |------|-------------|
 | `--outdir` | Where all outputs are published. Defaults to `./results`. |
-| `--proseg_binary` | Absolute path to the ProSeg binary. Required when `SEGMENT` runs. |
 | `--analysis_mode` | `paired` (default), `merscope`, or `xenium`. Controls which platform columns are required and which stages are active. |
 | `--analysis_segmentation` | `both` (default), `reseg`, or `original_seg`. Controls whether downstream analysis runs on resegmented data, original instrument segmentation, or both. |
 | `--force_spatialdata_build` | Force rebuilding the SpatialData zarr even when a cached one exists. Defaults to `false`. |
@@ -68,8 +66,7 @@ Use single-platform mode when a row has only one dataset:
 nextflow run workflows/main.nf \
     --samplesheet workflows/xenium_only.csv \
     --analysis_mode xenium \
-    --outdir ./results \
-    --proseg_binary /path/to/proseg
+    --outdir ./results
 ```
 
 In `analysis_mode=merscope` or `analysis_mode=xenium`, either from the command
@@ -92,8 +89,7 @@ boundaries). Restrict the branch set when you only need one result family:
 nextflow run workflows/main.nf \
     --samplesheet workflows/samplesheet.csv \
     --analysis_segmentation original_seg \
-    --outdir ./results \
-    --proseg_binary /path/to/proseg
+    --outdir ./results
 ```
 
 The upstream build, segmentation, and enrichment stages remain shared for each
@@ -111,7 +107,6 @@ or mid-pipeline interruption, add `-resume`:
 nextflow run workflows/main.nf \
     --samplesheet workflows/samplesheet.csv \
     --outdir ./results \
-    --proseg_binary /path/to/proseg \
     --enable_alignment true \
     -resume
 ```
@@ -152,7 +147,6 @@ Any `nextflow.config` parameter can be overridden with `--<name> <value>`:
 ```bash
 nextflow run workflows/main.nf \
     --samplesheet workflows/samplesheet.csv \
-    --proseg_binary /path/to/proseg \
     --cellpose_gpu false \
     --cellpose_diameter 30.0 \
     --max_ram_gb 256
@@ -229,7 +223,8 @@ nextflow run workflows/main.nf \
     --stop_stage compare
 ```
 
-Starting at `segment` still needs `--proseg_binary`; starting later does not.
+Starting at `segment` runs the ProSeg resolver first; starting later does not
+need ProSeg because it reads published segmentation outputs.
 Starting at `compare`, `visualize`, or `clustering_squidpy` with effective
 `enable_alignment=false` reads
 `${outdir}/${pair_id}/{merscope,xenium}/latest/latest_spatialdata.zarr`.

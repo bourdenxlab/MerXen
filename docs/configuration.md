@@ -21,8 +21,8 @@ Variables, from [.env.example](../.env.example):
 
 | Variable | Default | Used by |
 |----------|---------|---------|
-| `PROSEG_BINARY` | — | Passed in to the Nextflow `--proseg_binary` flag; referenced by `ProsegConfig.binary_path`. |
 | `MERXEN_OUTPUT_ROOT` | `./results` | `PipelineConfig.output_root`. Not consumed directly by the pipeline today — Nextflow's `--outdir` is authoritative — but available to Python code that imports `PipelineConfig()`. |
+| `MERXEN_PROSEG_INSTALL_PATH` | `/usr/bin/proseg` | Optional Python-side default for `PipelineConfig.proseg_install_path`. Nextflow uses `proseg_install_path` from `workflows/nextflow.config`. |
 | `MERXEN_MAX_RAM_GB` | `600.0` | `PipelineConfig.max_ram_gb`. Mirrored into the Nextflow `max_ram_gb` param. |
 
 The `MERXEN_` prefix is wired up via `model_config = {"env_prefix": "MERXEN_"}`
@@ -43,7 +43,10 @@ any of them with `--<name>` on the command line.
 
 | Param | Default | Description |
 |-------|---------|-------------|
-| `proseg_binary` | `null` | Path to the ProSeg binary. Required only when `SEGMENT` runs. |
+| `proseg_search_paths` | `/usr/bin/proseg`, `/usr/local/bin/proseg` | Ordered paths checked by `ENSURE_PROSEG` before segmentation. Entries may be executable paths or directories containing `proseg`; `command -v proseg` is checked after this list. |
+| `proseg_install_path` | `/usr/bin/proseg` | Destination used when ProSeg is missing and automatic install is enabled. If the directory is not writable, the bootstrap step requests `sudo`. |
+| `proseg_auto_install` | `true` | Install ProSeg automatically with Cargo when no configured search path contains an executable binary. |
+| `proseg_cargo_package` | `proseg` | Cargo package name installed by the bootstrap step. |
 
 ### General
 
@@ -74,13 +77,29 @@ is `true`. `align`, `align_qc`, and `compare` are available only when
 | `cellpose_diameter` | `null` | Cell diameter (px). `null` → Cellpose auto-estimates. |
 | `cellpose_flow_threshold` | `0.8` | Cellpose flow threshold. |
 | `cellpose_cellprob` | `-5.0` | Cellpose cell probability threshold. |
-| `cellpose_tile_overlap` | `0.15` | Fractional overlap between core tiles. |
+| `cellpose_tile_overlap` | `0.15` | Cellpose model's internal fractional tile overlap. |
 | `cellpose_bsize` | `256` | Cellpose internal batch block size. |
+| `cellpose_tile_size_candidates` | `[6144, 4096, 3072, 2048]` | Candidate halo tile sizes probed from largest to smallest. |
+| `cellpose_min_tile_size` | `1024` | Smallest allowed Cellpose halo tile size. |
+| `cellpose_stitch_overlap_px` | `256` | Halo overlap, in pixels, used for MerXen object-level stitching. |
+| `cellpose_stitch_status_every_tiles` | `10` | Progress/status interval for Cellpose tile stitching. |
+| `cellpose_filter_per_tile` | `true` | Apply regionprops filtering to each tile before stitching. |
+| `cellpose_duplicate_iou_threshold` | `0.25` | Skip an owned tile object as a duplicate when overlap IoU with an existing label is at least this value. |
+| `cellpose_duplicate_overlap_fraction` | `0.5` | Skip an owned tile object as a duplicate when at least this fraction of its pixels overlap one existing label. |
+| `cellpose_min_remaining_fraction` | `0.05` | Skip a non-duplicate object if too little of it remains after preserving existing labels. |
+| `cellpose_edge_touch_policy` | `keep` | Keep or skip labels touching an artificial tile edge; `keep` records them in stitching stats. |
+| `cellpose_write_stitching_stats` | `true` | Write `cellpose_stitching_stats.json` beside the stitched mask. |
 | `cellpose_final_min_area_um2` | `5.0` | Drop final Cellpose masks smaller than this area before ProSeg. |
 | `cellpose_final_max_area_um2` | `400.0` | Drop final Cellpose masks larger than this area before ProSeg. |
 | `cellpose_final_filter_chunk_mb` | `256` | Approximate row-chunk size for streaming the final mask filter. |
 
 ### ProSeg
+
+Before `SEGMENT` runs, the `ENSURE_PROSEG` process checks
+`proseg_search_paths`, then `command -v proseg`. If no executable is found and
+`proseg_auto_install=true`, it runs `cargo install proseg` into a temporary
+root and copies the resulting binary to `proseg_install_path`. System-owned
+install paths trigger a `sudo` prompt.
 
 | Param | Default | Description |
 |-------|---------|-------------|
