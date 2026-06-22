@@ -37,6 +37,9 @@ def test_run_segmentation_pipeline_stages_persistent_outputs(
                 "persistent_transcripts_path": str(
                     persistent_root / "segmentation" / "transcripts_for_proseg.csv"
                 ),
+                "persistent_cellpose_stitching_stats_path": str(
+                    persistent_root / "segmentation" / "cellpose_stitching_stats.json"
+                ),
             }
         }
     )
@@ -47,13 +50,23 @@ def test_run_segmentation_pipeline_stages_persistent_outputs(
         "merxen.segmentation.pipeline._load_dataset_sdata",
         lambda config: (object(), object(), 8, 8, np.eye(3), points_df),
     )
+
+    def fake_cellpose(
+        *,
+        output_mask_path: Path,
+        output_stitching_stats_path: Path | None = None,
+        **_: object,
+    ) -> Path:
+        output_mask_path.parent.mkdir(parents=True, exist_ok=True)
+        np.save(output_mask_path, np.ones((4, 4), dtype=np.int32))
+        if output_stitching_stats_path is not None:
+            output_stitching_stats_path.parent.mkdir(parents=True, exist_ok=True)
+            output_stitching_stats_path.write_text('{"final_labels": 1}\n')
+        return output_mask_path
+
     monkeypatch.setattr(
         "merxen.segmentation.pipeline.run_tiled_cellpose",
-        lambda *, output_mask_path, **kwargs: (
-            output_mask_path.parent.mkdir(parents=True, exist_ok=True),
-            np.save(output_mask_path, np.ones((4, 4), dtype=np.int32)),
-            output_mask_path,
-        )[-1],
+        fake_cellpose,
     )
     monkeypatch.setattr(
         "merxen.segmentation.pipeline.build_cellpose_affine_to_microns",
@@ -90,6 +103,7 @@ def test_run_segmentation_pipeline_stages_persistent_outputs(
     staged_latest = work_dir / "proseg_base_latest.zarr"
     staged_mask = work_dir / "cellpose_masks_tiled.npy"
     staged_transcripts = work_dir / "transcripts_for_proseg.csv"
+    staged_stats = work_dir / "cellpose_stitching_stats.json"
 
     assert outputs["latest_output"] == staged_latest
     assert outputs["cellpose_mask_path"] == staged_mask
@@ -98,6 +112,7 @@ def test_run_segmentation_pipeline_stages_persistent_outputs(
     assert staged_latest.is_symlink()
     assert staged_mask.is_symlink()
     assert staged_transcripts.is_symlink()
+    assert staged_stats.is_symlink()
 
     assert (
         staged_latest.resolve()
@@ -107,6 +122,10 @@ def test_run_segmentation_pipeline_stages_persistent_outputs(
     assert (
         staged_transcripts.resolve()
         == Path(cfg.dataset.persistent_transcripts_path).resolve()
+    )
+    assert (
+        staged_stats.resolve()
+        == Path(cfg.dataset.persistent_cellpose_stitching_stats_path).resolve()
     )
 
     assert not (work_dir / "proseg_base_raw.zarr").exists()
@@ -139,13 +158,21 @@ def test_run_segmentation_pipeline_filters_cellpose_mask_before_proseg(
     points_df = pd.DataFrame({"x": [1.0], "y": [2.0], "gene": ["Gad1"]})
     captured: dict[str, np.ndarray] = {}
 
-    def fake_cellpose(*, output_mask_path: Path, **kwargs: object) -> Path:
+    def fake_cellpose(
+        *,
+        output_mask_path: Path,
+        output_stitching_stats_path: Path | None = None,
+        **kwargs: object,
+    ) -> Path:
+        del kwargs
         mask = np.zeros((64, 64), dtype=np.uint32)
         mask[1:3, 1:3] = 1
         mask[5:10, 5:10] = 2
         mask[12:34, 12:34] = 3
         output_mask_path.parent.mkdir(parents=True, exist_ok=True)
         np.save(output_mask_path, mask)
+        if output_stitching_stats_path is not None:
+            output_stitching_stats_path.write_text('{"final_labels": 3}\n')
         return output_mask_path
 
     def fake_write_csv(
@@ -202,5 +229,6 @@ def test_run_segmentation_pipeline_filters_cellpose_mask_before_proseg(
     cleaned = np.load(outputs["cellpose_mask_path"])
     assert np.unique(cleaned).tolist() == [0, 1]
     assert int((cleaned == 1).sum()) == 25
+    assert (work_dir / "cellpose_stitching_stats.json").exists()
     np.testing.assert_array_equal(captured["masks_seen_by_csv"], cleaned)
     np.testing.assert_array_equal(captured["masks_seen_by_proseg"], cleaned)
