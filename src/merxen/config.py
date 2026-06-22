@@ -90,7 +90,7 @@ class TilingConfig(BaseModel):
 class ProsegConfig(BaseModel):
     """Parameters for ProSeg transcript-based segmentation refinement."""
 
-    binary_path: Path = Path("/usr/local/bin/proseg")
+    binary_path: Path = Path("/usr/bin/proseg")
     samples: int = 1200
     voxel_size: float = 0.5
     burnin_voxel_size: float = 1.0
@@ -542,7 +542,12 @@ class PipelineConfig(BaseSettings):
     """Top-level pipeline configuration, loadable from env vars."""
 
     output_root: Path = Path("./results")
-    proseg_binary: Path = Path("/usr/local/bin/proseg")
+    proseg_search_paths: list[Path] = [
+        Path("/usr/bin/proseg"),
+        Path("/usr/local/bin/proseg"),
+    ]
+    proseg_install_path: Path = Path("/usr/bin/proseg")
+    proseg_auto_install: bool = True
     max_ram_gb: float = 600.0
 
     model_config = {"env_prefix": "MERXEN_"}

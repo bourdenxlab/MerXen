@@ -37,7 +37,8 @@ def _check_proseg_available(proseg_binary: str | Path) -> str:
     except (subprocess.CalledProcessError, FileNotFoundError) as exc:
         msg = (
             f"Proseg binary '{proseg_binary}' not found or not executable. "
-            "Install it from https://github.com/dcjones/proseg"
+            "Nextflow runs ENSURE_PROSEG automatically; for direct CLI use, "
+            "install it with `cargo install proseg`."
         )
         raise RuntimeError(msg) from exc
 

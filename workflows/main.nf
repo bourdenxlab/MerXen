@@ -1,6 +1,7 @@
 nextflow.enable.dsl = 2
 
 include { BUILD_SPATIALDATA } from "./modules/spatialdata_build"
+include { ENSURE_PROSEG } from "./modules/proseg_bootstrap"
 include { SEGMENT } from "./modules/segmentation"
 include { ENRICH } from "./modules/enrichment"
 include { QC } from "./modules/qc"
@@ -640,9 +641,6 @@ workflow {
         if (!settings.run_segment) {
             []
         } else {
-            if (!params.proseg_binary) {
-                error "Missing required parameter for SEGMENT: --proseg_binary"
-            }
             settings.active_platforms.collect { platform ->
                 tuple(
                     "${pairId}|${platform}",
@@ -652,9 +650,14 @@ workflow {
         }
     }
 
+    proseg_trigger_ch = segment_meta_ch.map { true }.take(1)
+    proseg_path_ch = ENSURE_PROSEG(proseg_trigger_ch)
+
     segment_inputs_ch = build_results_ch
         .join(segment_meta_ch)
-        .map { key, pairId, platform, sourceSpatialdata, meta ->
+        .combine(proseg_path_ch)
+        .map { key, pairId, platform, sourceSpatialdata, meta, prosegPathFile ->
+            def prosegBinaryPath = prosegPathFile.text.trim()
             def persistentLatestZarrPath = file(
                 publishedDatasetPath(
                     params.outdir,
@@ -696,7 +699,7 @@ workflow {
                     final_filter_chunk_mb: params.cellpose_final_filter_chunk_mb,
                 ],
                 proseg: [
-                    binary_path: params.proseg_binary,
+                    binary_path: prosegBinaryPath,
                     samples: params.proseg_samples,
                     voxel_size: params.proseg_voxel_size,
                     burnin_voxel_size: params.proseg_burnin_voxel_size,
