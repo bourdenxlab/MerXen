@@ -217,9 +217,9 @@ for attempt in range(MAX_RETRIES):
 
 ### Branches
 
-- Branch from `main` for every piece of work. Use short-lived feature branches — aim to merge within 1–2 days.
-- Merge via pull request. Do not push directly to `main`.
-- Delete branches after merge.
+- Commit directly to `main` by default for normal local work.
+- If changes are serious, risky, breaking, or span unrelated areas, ask whether they should go on a new branch before committing.
+- When using branches, branch from `main`, keep them short-lived, merge via pull request, and delete them after merge.
 
 ### Commit messages
 
