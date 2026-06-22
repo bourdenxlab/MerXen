@@ -227,6 +227,7 @@ class DatasetConfig(BaseModel):
     persistent_latest_zarr_path: Path | None = None
     persistent_mask_path: Path | None = None
     persistent_transcripts_path: Path | None = None
+    persistent_cellpose_stitching_stats_path: Path | None = None
 
     # MERSCOPE-specific
     image_prefix: str | None = None
