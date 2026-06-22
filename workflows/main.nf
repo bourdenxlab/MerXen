@@ -682,6 +682,14 @@ workflow {
                     "segmentation/transcripts_for_proseg.csv",
                 )
             ).toAbsolutePath().toString()
+            def persistentStitchingStatsPath = file(
+                publishedDatasetPath(
+                    params.outdir,
+                    pairId,
+                    platform,
+                    "segmentation/cellpose_stitching_stats.json",
+                )
+            ).toAbsolutePath().toString()
             def baseConfig = [
                 cellpose: [
                     model_type: params.cellpose_model_type,
@@ -692,6 +700,18 @@ workflow {
                     tile_overlap: params.cellpose_tile_overlap,
                     bsize: params.cellpose_bsize,
                     factor_rescale: 1.0,
+                ],
+                tiling: [
+                    tile_size_candidates: params.cellpose_tile_size_candidates,
+                    stitch_overlap_px: params.cellpose_stitch_overlap_px,
+                    min_tile_size: params.cellpose_min_tile_size,
+                    status_every_tiles: params.cellpose_stitch_status_every_tiles,
+                    filter_per_tile: params.cellpose_filter_per_tile,
+                    duplicate_iou_threshold: params.cellpose_duplicate_iou_threshold,
+                    duplicate_overlap_fraction: params.cellpose_duplicate_overlap_fraction,
+                    min_remaining_fraction: params.cellpose_min_remaining_fraction,
+                    edge_touch_policy: params.cellpose_edge_touch_policy,
+                    write_stitching_stats: params.cellpose_write_stitching_stats,
                 ],
                 mask_filter: [
                     final_min_area_um2: params.cellpose_final_min_area_um2,
@@ -726,6 +746,7 @@ workflow {
                     persistent_latest_zarr_path: persistentLatestZarrPath,
                     persistent_mask_path: persistentMaskPath,
                     persistent_transcripts_path: persistentTranscriptsPath,
+                    persistent_cellpose_stitching_stats_path: persistentStitchingStatsPath,
                     image_prefix: meta.image_prefix,
                     z_range: meta.z_range,
                     transform_path: meta.transform_path,

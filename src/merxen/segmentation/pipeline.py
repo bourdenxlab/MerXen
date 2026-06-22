@@ -239,6 +239,7 @@ def run_segmentation_pipeline(
     staged_latest_output = out_dir / "proseg_base_latest.zarr"
     staged_transcripts_csv = out_dir / "transcripts_for_proseg.csv"
     staged_mask_path = out_dir / "cellpose_masks_tiled.npy"
+    staged_stitching_stats_path = out_dir / "cellpose_stitching_stats.json"
     persistent_latest_output = (
         Path(dataset.persistent_latest_zarr_path)
         if dataset.persistent_latest_zarr_path is not None
@@ -254,9 +255,17 @@ def run_segmentation_pipeline(
         if dataset.persistent_mask_path is not None
         else None
     )
+    persistent_stitching_stats_path = (
+        Path(dataset.persistent_cellpose_stitching_stats_path)
+        if dataset.persistent_cellpose_stitching_stats_path is not None
+        else None
+    )
     latest_output = persistent_latest_output or staged_latest_output
     transcripts_csv = persistent_transcripts_csv or staged_transcripts_csv
     mask_path = persistent_mask_path or staged_mask_path
+    stitching_stats_path = (
+        persistent_stitching_stats_path or staged_stitching_stats_path
+    )
     progress_path = out_dir / "progress.json"
     _started_at = time.monotonic()
 
@@ -267,6 +276,14 @@ def run_segmentation_pipeline(
             stage_existing_output(transcripts_csv, staged_transcripts_csv)
         if mask_path != staged_mask_path:
             stage_existing_output(mask_path, staged_mask_path)
+        if (
+            stitching_stats_path.exists()
+            and stitching_stats_path != staged_stitching_stats_path
+        ):
+            stage_existing_output(
+                stitching_stats_path,
+                staged_stitching_stats_path,
+            )
         return staged_latest_output, staged_transcripts_csv, staged_mask_path
 
     def _progress(stage: str, **extra: object) -> None:
@@ -321,9 +338,15 @@ def run_segmentation_pipeline(
         mask_filter_config=config.mask_filter,
         tiling_config=config.tiling,
         memory_config=config.memory,
+        output_stitching_stats_path=stitching_stats_path,
         progress_callback=_progress,
     )
-    _progress("cellpose_done")
+    _progress(
+        "cellpose_done",
+        stitching_stats_path=(
+            str(stitching_stats_path) if stitching_stats_path.exists() else None
+        ),
+    )
 
     x_transform, y_transform = build_cellpose_affine_to_microns(
         matrix,
