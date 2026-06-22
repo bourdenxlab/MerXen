@@ -321,7 +321,7 @@ def _stitch_core_owned_tile_labels(
         stats["owned_labels"] += 1
         touches_edge = _label_touches_artificial_tile_edge(
             label_slice,
-            tile_mask.shape,
+            (int(tile_mask.shape[0]), int(tile_mask.shape[1])),
             tile,
         )
         if touches_edge:
