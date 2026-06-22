@@ -77,16 +77,16 @@ Copy `.env.example` to `.env` and fill in values:
 cp .env.example .env
 ```
 
-See [.env.example](.env.example) for required variables (ProSeg binary path, output root, etc.) and [docs/configuration.md](docs/configuration.md) for the full environment + Nextflow parameter reference.
+See [.env.example](.env.example) for optional machine defaults and [docs/configuration.md](docs/configuration.md) for the full environment + Nextflow parameter reference. ProSeg is resolved automatically from the configured search paths and installed with Cargo if needed.
 
 ## Running the pipeline
 
 ```bash
 # Run via Nextflow with a samplesheet
-nextflow run workflows/main.nf --samplesheet samples.csv --outdir ./results --proseg_binary /path/to/proseg
+nextflow run workflows/main.nf --samplesheet samples.csv --outdir ./results
 
 # Run a single-platform workflow
-nextflow run workflows/main.nf --samplesheet samples.csv --analysis_mode xenium --outdir ./results --proseg_binary /path/to/proseg
+nextflow run workflows/main.nf --samplesheet samples.csv --analysis_mode xenium --outdir ./results
 ```
 
 A template samplesheet is provided at [workflows/samplesheet.example.csv](workflows/samplesheet.example.csv). Copy and edit this file with your dataset-specific paths before running the workflow.

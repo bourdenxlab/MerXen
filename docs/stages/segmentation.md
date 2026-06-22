@@ -15,7 +15,8 @@ MCMC sampler starts from.
    platform transform matrix.
 5. Export transcripts to a ProSeg-friendly CSV, seeded with the cell id each
    transcript falls inside (from the Cellpose mask).
-6. Run the external ProSeg binary against that CSV + mask.
+6. Resolve or bootstrap the external ProSeg binary, then run it against that
+   CSV + mask.
 7. Convert ProSeg's raw output zarr to "latest" SpatialData format.
 
 ## Nextflow process
@@ -59,12 +60,13 @@ SegmentationConfig
 ├── dataset: DatasetConfig
 │   ├── name, platform, data_path, channels, output_dir
 │   ├── persistent_latest_zarr_path, persistent_mask_path, persistent_transcripts_path
+│   ├── persistent_cellpose_stitching_stats_path
 │   ├── MERSCOPE: image_prefix, z_range, transform_path
 │   ├── Xenium: xenium_spec_path, min_qv
 │   └── proseg_overrides: dict      # per-platform voxel_layers
 ├── cellpose: CellposeConfig         # model_type, gpu, diameter, thresholds
 ├── mask_filter: MaskFilterConfig    # eccentricity, area percentile
-├── tiling: TilingConfig             # tile sizes, overlap
+├── tiling: TilingConfig             # tile sizes, stitch overlap, duplicate policy
 ├── proseg: ProsegConfig             # binary path, MCMC params
 └── memory: MemoryConfig             # RAM cap, chunk sizes
 ```
@@ -81,8 +83,10 @@ for all fields and defaults.
 2. **Cellpose tiling.** `run_tiled_cellpose` picks a tile size from
    `TilingConfig.tile_size_candidates` (`6144 → 1024`) small enough for
    available RAM, iterates over overlapping tiles, runs Cellpose on each,
-   relabels local IDs into a global label space, and filters each tile's
-   masks by regionprops. The result is a `(H, W)` uint32 array saved as
+   filters each tile's masks by regionprops, and stitches whole objects whose
+   centroids fall inside each tile core. Duplicate objects from neighboring
+   halos are skipped by overlap thresholds, while accepted objects are pasted
+   into a global label space. The result is a `(H, W)` uint32 array saved as
    `cellpose_masks_tiled.npy`.
 3. **Transform to microns.** `build_cellpose_affine_to_microns` composes the
    platform transform with any rescale factor. This gives `(x_transform,
@@ -99,7 +103,10 @@ for all fields and defaults.
    up in the mask, and writes a row with `x_micron`, `y_micron`, `z_micron`,
    `feature_name`, `cell_id` (0 if outside any cell). Xenium transcripts
    below `dataset.min_qv` are dropped.
-6. **ProSeg.** `run_proseg_refinement` spawns the external binary. ProSeg
+6. **ProSeg.** The workflow resolves ProSeg via `ENSURE_PROSEG`; if it is not
+   found in the configured search paths, the bootstrap step installs it with
+   Cargo. `run_proseg_refinement` then spawns the resolved external binary.
+   ProSeg
    uses the Cellpose-seeded `cell_id` column as a prior and performs MCMC
    sampling over the transcript field, letting cell boundaries move to
    better match transcript density.
@@ -114,6 +121,7 @@ for all fields and defaults.
 | `latest/latest_spatialdata.zarr` | Durable refined SpatialData zarr. This is the object enrichment mutates in place. |
 | `segmentation/proseg_base_latest.zarr` | Staged symlink to the durable latest zarr. |
 | `cellpose_masks_tiled.npy` | Cleaned global-pixel Cellpose labels, consumed by ProSeg and enrichment. |
+| `cellpose_stitching_stats.json` | Tile stitching diagnostics: accepted labels, duplicates, conflicts, edge-touching labels, and thresholds. |
 | `transcripts_for_proseg.csv` | The transcript CSV fed into ProSeg. Retained for debugging. |
 
 `proseg_base_raw.zarr` is treated as a transient intermediate and removed
@@ -133,8 +141,9 @@ after the latest-format zarr is written successfully.
 
 ## Common failures
 
-- **`Proseg binary '...' not found or not executable`** — wrong
-  `--proseg_binary`, or binary missing the execute bit.
+- **ProSeg bootstrap failed** — no executable was found in
+  `proseg_search_paths`, `cargo install proseg` failed, or the configured
+  `proseg_install_path` needs `sudo` and permission was denied.
 - **All transcripts filtered out** — the QV filter (`xenium_min_qv`) is too
   strict, or the points columns didn't resolve. `resolve_col` tries
   `x`, `global_x`, `x_location` and `gene`, `feature_name`, `target`.

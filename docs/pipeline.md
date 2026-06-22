@@ -95,7 +95,7 @@ For a samplesheet row with `pair_id=EXAMPLE01`:
 | Step | Nextflow process | CLI | Input | Output |
 |------|------------------|-----|-------|--------|
 | 1 | `BUILD_SPATIALDATA` × 2 | `merxen build-spatialdata` | raw export folders (or cached zarr) | `source_spatialdata.zarr` per platform |
-| 2 | `SEGMENT` × 2 | `merxen segment` | `source_spatialdata.zarr` | durable `latest/latest_spatialdata.zarr`, `cellpose_masks_tiled.npy`, `transcripts_for_proseg.csv` |
+| 2 | `SEGMENT` × 2 | `merxen segment` | `source_spatialdata.zarr` | durable `latest/latest_spatialdata.zarr`, `cellpose_masks_tiled.npy`, `cellpose_stitching_stats.json`, `transcripts_for_proseg.csv` |
 | 3 | `ENRICH` × 2 | `merxen enrich` | latest zarr + Cellpose mask | same durable `latest/latest_spatialdata.zarr`, now enriched with per-shape counts tables |
 | 4 | `QC` × 2 | `merxen qc` | enriched zarr | `qc_out/` (metrics CSV, plots) |
 | 5 | `ALIGN` × 1 | `merxen align` | both platforms' enriched zarrs | in-place MERSCOPE aligned elements + transform metadata, when enabled |

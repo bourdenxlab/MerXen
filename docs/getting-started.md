@@ -9,8 +9,11 @@ This guide takes you from a fresh clone to a running pipeline.
 - [Conda](https://docs.conda.io/) or [Miniforge](https://github.com/conda-forge/miniforge).
 - [Nextflow](https://www.nextflow.io/docs/latest/getstarted.html) `>=23.04` on
   your `PATH`.
-- A [ProSeg](https://github.com/dcjones/proseg) binary built for your
-  architecture. MerXen calls it as an external subprocess.
+- Rust/Cargo on your `PATH`, or an existing
+  [ProSeg](https://github.com/dcjones/proseg) binary in one of the configured
+  search paths. MerXen searches `/usr/bin/proseg` and
+  `/usr/local/bin/proseg` by default, then falls back to `command -v proseg`;
+  if none exists, it installs ProSeg with Cargo before segmentation starts.
 - Ample RAM. Defaults target a **75-CPU / 600 GB** machine; segmentation alone
   reserves 500 GB by default. See [Configuration](configuration.md#resource-limits)
   to dial this down.
@@ -47,13 +50,13 @@ test suite. See [Development workflow](development.md).
 cp .env.example .env
 ```
 
-Fill in at least:
+Typically fill in:
 
 | Variable | Description |
 |----------|-------------|
-| `PROSEG_BINARY` | Absolute path to the ProSeg binary. |
 | `MERXEN_OUTPUT_ROOT` | Directory to write pipeline outputs into. |
 | `MERXEN_MAX_RAM_GB` | System RAM in GB the pipeline is allowed to use (default 600). |
+| `MERXEN_PROSEG_INSTALL_PATH` | Optional Python-side default. Nextflow uses `proseg_install_path` from `workflows/nextflow.config`. |
 
 `.env` is git-ignored. See [Configuration](configuration.md) for the full list
 and how these are consumed.
@@ -86,8 +89,7 @@ schema in [Samplesheet format](samplesheet.md).
 ```bash
 nextflow run workflows/main.nf \
     --samplesheet workflows/samplesheet.csv \
-    --outdir ./results \
-    --proseg_binary "$PROSEG_BINARY"
+    --outdir ./results
 ```
 
 Outputs land in `./results/<pair_id>/...`. Nextflow also writes an HTML
@@ -103,12 +105,14 @@ directory and file produced, see [Outputs](outputs.md).
 `conda activate merxen`. The `merxen` CLI is registered by
 [pyproject.toml:44](../pyproject.toml#L44).
 
-**`Proseg binary '...' not found or not executable`** — the `--proseg_binary`
-path is wrong, or the binary is not executable. `chmod +x` it, or rebuild from
-[github.com/dcjones/proseg](https://github.com/dcjones/proseg).
+**ProSeg bootstrap failed** — the workflow could not find ProSeg in
+`proseg_search_paths` and could not install it with `cargo install proseg`.
+Install Cargo or edit `proseg_install_path` in
+[workflows/nextflow.config](../workflows/nextflow.config). If the install path
+is system-owned, the bootstrap step asks for `sudo` permission.
 
 **`Missing required parameter: --samplesheet`** — you invoked `nextflow run`
-without `--samplesheet` or `--proseg_binary`. Both are required.
+without `--samplesheet`.
 
 **Out of memory** — lower the per-process memory requests in
 [workflows/nextflow.config](../workflows/nextflow.config) and set
