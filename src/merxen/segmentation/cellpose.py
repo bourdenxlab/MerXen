@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
-from cellpose import models
+from scipy.ndimage import find_objects
 from tqdm.auto import tqdm
 
 from merxen._typing import AffineComponent
@@ -24,8 +25,13 @@ from merxen.segmentation.mask_filter import filter_cell_by_regionprops
 
 logger = logging.getLogger(__name__)
 
+try:
+    from cellpose import models as cellpose_models
+except ImportError:  # pragma: no cover - exercised only in lightweight test envs
+    cellpose_models = None
 
-def build_cellpose_model(config: CellposeConfig) -> models.CellposeModel:
+
+def build_cellpose_model(config: CellposeConfig) -> Any:
     """Instantiate a Cellpose model from config.
 
     Args:
@@ -34,14 +40,20 @@ def build_cellpose_model(config: CellposeConfig) -> models.CellposeModel:
     Returns:
         A CellposeModel instance.
     """
+    if cellpose_models is None:
+        raise RuntimeError(
+            "Cellpose is not installed in this environment. "
+            "Install the MerXen segmentation dependencies before running Cellpose."
+        )
+
     kwargs: dict[str, Any] = {"gpu": config.gpu}
     if config.model_type is not None:
         kwargs["model_type"] = config.model_type
-    return models.CellposeModel(**kwargs)
+    return cellpose_models.CellposeModel(**kwargs)
 
 
 def run_cellpose_model_eval(
-    model: models.CellposeModel,
+    model: Any,
     img_seg: np.ndarray,
     config: CellposeConfig,
 ) -> tuple[np.ndarray, Any, Any]:
@@ -128,6 +140,8 @@ def iter_core_tiles(
                     "tile_y1": y_tile1,
                     "tile_x0": x_tile0,
                     "tile_x1": x_tile1,
+                    "image_height": int(height),
+                    "image_width": int(width),
                     "core_y0_in_tile": y_core0_in_tile,
                     "core_y1_in_tile": y_core1_in_tile,
                     "core_x0_in_tile": x_core0_in_tile,
@@ -142,7 +156,7 @@ def choose_working_tile_size(
     fetch_tile_fn: Any,
     height: int,
     width: int,
-    model: models.CellposeModel,
+    model: Any,
     config: CellposeConfig,
     candidates: list[int],
     dataset_name: str,
@@ -215,41 +229,181 @@ def choose_working_tile_size(
     )
 
 
-def relabel_core_to_global(
-    core_mask: np.ndarray,
-    next_label: int,
-) -> tuple[np.ndarray, int, int]:
-    """Relabel a core tile mask to avoid label collisions when merging tiles.
+def _count_positive_labels(mask: np.ndarray) -> int:
+    """Return the number of non-zero labels present in a mask."""
+    labels = np.unique(mask)
+    return int(np.count_nonzero(labels > 0))
 
-    Args:
-        core_mask: Labeled mask from a single tile's core region.
-        next_label: The next available global label ID.
 
-    Returns:
-        Tuple of (relabeled_mask, updated_next_label, n_new_labels).
-    """
-    core_mask = core_mask.astype(np.int64, copy=False)
-    labels = np.unique(core_mask)
-    labels = labels[labels > 0]
+def _empty_stitch_stats() -> dict[str, int]:
+    """Create a per-tile stitching counter dictionary."""
+    return {
+        "raw_labels": 0,
+        "filtered_labels": 0,
+        "owned_labels": 0,
+        "accepted_labels": 0,
+        "duplicate_skipped": 0,
+        "low_remaining_skipped": 0,
+        "edge_touching_labels": 0,
+        "edge_touching_skipped": 0,
+        "conflict_pixels": 0,
+        "filled_pixels": 0,
+    }
 
-    if labels.size == 0:
-        return np.zeros(core_mask.shape, dtype=np.uint32), int(next_label), 0
 
-    max_label = int(labels.max())
-    new_ids = np.arange(
-        int(next_label), int(next_label) + int(labels.size), dtype=np.uint32
+def _label_touches_artificial_tile_edge(
+    label_slice: tuple[slice, slice],
+    tile_mask_shape: tuple[int, int],
+    tile: dict[str, int],
+) -> bool:
+    """Return True when a label touches a tile edge that is not a global image edge."""
+    y_slice, x_slice = label_slice
+    tile_h, tile_w = tile_mask_shape
+    return (
+        (int(y_slice.start or 0) == 0 and int(tile["tile_y0"]) > 0)
+        or (
+            int(y_slice.stop or 0) >= tile_h
+            and int(tile["tile_y1"]) < int(tile["image_height"])
+        )
+        or (int(x_slice.start or 0) == 0 and int(tile["tile_x0"]) > 0)
+        or (
+            int(x_slice.stop or 0) >= tile_w
+            and int(tile["tile_x1"]) < int(tile["image_width"])
+        )
     )
 
-    if max_label < 20_000_000:
-        lut = np.zeros(max_label + 1, dtype=np.uint32)
-        lut[labels] = new_ids
-        core_global = lut[core_mask]
-    else:
-        core_global = np.zeros(core_mask.shape, dtype=np.uint32)
-        for old, new in zip(labels, new_ids, strict=False):
-            core_global[core_mask == old] = new
 
-    return core_global, int(next_label) + int(labels.size), int(labels.size)
+def _stitch_core_owned_tile_labels(
+    tile_mask: np.ndarray,
+    global_mask: np.ndarray,
+    tile: dict[str, int],
+    next_label: int,
+    global_label_areas: dict[int, int],
+    tiling_config: TilingConfig,
+) -> tuple[int, dict[str, int]]:
+    """Paste whole core-owned objects from one tile into the global mask.
+
+    A label is owned by a tile when its centroid falls inside the tile core.
+    Owned objects are pasted from the full halo tile, not cropped to the core,
+    so cells crossing a core boundary are not cut in half. Overlapping objects
+    from neighboring tiles are treated as duplicates when their overlap with an
+    existing global object is high enough.
+    """
+    stats = _empty_stitch_stats()
+    tile_mask = np.asarray(tile_mask)
+    stats["filtered_labels"] = _count_positive_labels(tile_mask)
+
+    if stats["filtered_labels"] == 0:
+        return int(next_label), stats
+
+    label_slices = find_objects(tile_mask)
+    core_y0 = int(tile["core_y0_in_tile"])
+    core_y1 = int(tile["core_y1_in_tile"])
+    core_x0 = int(tile["core_x0_in_tile"])
+    core_x1 = int(tile["core_x1_in_tile"])
+
+    for label_id, label_slice in enumerate(label_slices, start=1):
+        if label_slice is None:
+            continue
+
+        y_slice, x_slice = label_slice
+        local_mask = tile_mask[label_slice] == label_id
+        candidate_area = int(np.count_nonzero(local_mask))
+        if candidate_area == 0:
+            continue
+
+        yy, xx = np.nonzero(local_mask)
+        centroid_y = float((yy + int(y_slice.start or 0)).mean())
+        centroid_x = float((xx + int(x_slice.start or 0)).mean())
+        if not (core_y0 <= centroid_y < core_y1 and core_x0 <= centroid_x < core_x1):
+            continue
+
+        stats["owned_labels"] += 1
+        touches_edge = _label_touches_artificial_tile_edge(
+            label_slice,
+            tile_mask.shape,
+            tile,
+        )
+        if touches_edge:
+            stats["edge_touching_labels"] += 1
+            if tiling_config.edge_touch_policy == "skip":
+                stats["edge_touching_skipped"] += 1
+                continue
+
+        global_y0 = int(tile["tile_y0"]) + int(y_slice.start or 0)
+        global_y1 = int(tile["tile_y0"]) + int(y_slice.stop or 0)
+        global_x0 = int(tile["tile_x0"]) + int(x_slice.start or 0)
+        global_x1 = int(tile["tile_x0"]) + int(x_slice.stop or 0)
+
+        global_view = global_mask[global_y0:global_y1, global_x0:global_x1]
+        existing_under_candidate = global_view[local_mask]
+        conflict = existing_under_candidate > 0
+        conflict_pixels = int(np.count_nonzero(conflict))
+        stats["conflict_pixels"] += conflict_pixels
+
+        duplicate = False
+        if conflict_pixels > 0:
+            existing_labels, intersections = np.unique(
+                existing_under_candidate[conflict],
+                return_counts=True,
+            )
+            max_iou = 0.0
+            max_candidate_overlap = 0.0
+            for existing_label, intersection in zip(
+                existing_labels,
+                intersections,
+                strict=False,
+            ):
+                existing_label_int = int(existing_label)
+                intersection_int = int(intersection)
+                existing_area = int(global_label_areas.get(existing_label_int, 0))
+                union = candidate_area + existing_area - intersection_int
+                iou = intersection_int / union if union > 0 else 0.0
+                candidate_overlap = intersection_int / candidate_area
+                max_iou = max(max_iou, iou)
+                max_candidate_overlap = max(max_candidate_overlap, candidate_overlap)
+
+            duplicate = (
+                max_iou >= tiling_config.duplicate_iou_threshold
+                or max_candidate_overlap >= tiling_config.duplicate_overlap_fraction
+            )
+
+        if duplicate:
+            stats["duplicate_skipped"] += 1
+            continue
+
+        remaining_pixels = candidate_area - conflict_pixels
+        remaining_fraction = remaining_pixels / max(candidate_area, 1)
+        if remaining_fraction < tiling_config.min_remaining_fraction:
+            stats["low_remaining_skipped"] += 1
+            continue
+
+        fill_mask = local_mask & (global_view == 0)
+        filled_pixels = int(np.count_nonzero(fill_mask))
+        if filled_pixels == 0:
+            stats["low_remaining_skipped"] += 1
+            continue
+
+        global_view[fill_mask] = np.uint32(next_label)
+        global_label_areas[int(next_label)] = filled_pixels
+        stats["accepted_labels"] += 1
+        stats["filled_pixels"] += filled_pixels
+        next_label += 1
+
+    return int(next_label), stats
+
+
+def _merge_stitch_stats(total: dict[str, Any], tile_stats: dict[str, int]) -> None:
+    """Accumulate per-tile stitching counters into a run-level stats dict."""
+    for key, value in tile_stats.items():
+        total[key] = int(total.get(key, 0)) + int(value)
+
+
+def _write_stitching_stats(path: Path, stats: dict[str, Any]) -> None:
+    """Write Cellpose stitching stats as JSON."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(stats, indent=2, sort_keys=True))
 
 
 def run_tiled_cellpose(
@@ -262,12 +416,13 @@ def run_tiled_cellpose(
     mask_filter_config: MaskFilterConfig,
     tiling_config: TilingConfig,
     memory_config: MemoryConfig,
+    output_stitching_stats_path: Path | None = None,
     progress_callback: Any = None,
 ) -> Path:
     """Run tiled Cellpose segmentation across a full image.
 
     Adaptively selects tile size based on available GPU memory, then
-    processes all tiles with overlap-based stitching and per-tile mask filtering.
+    processes all tiles with object-level stitching and per-tile mask filtering.
 
     Args:
         fetch_tile_fn: Callable(y0, y1, x0, x1) -> ndarray.
@@ -279,6 +434,7 @@ def run_tiled_cellpose(
         mask_filter_config: Mask filtering parameters.
         tiling_config: Tiling parameters.
         memory_config: Memory management parameters.
+        output_stitching_stats_path: Optional path for stitching diagnostics JSON.
 
     Returns:
         Path to the written mask .npy file.
@@ -286,6 +442,10 @@ def run_tiled_cellpose(
     output_mask_path = Path(output_mask_path)
     if output_mask_path.exists():
         output_mask_path.unlink()
+    if output_stitching_stats_path is not None:
+        output_stitching_stats_path = Path(output_stitching_stats_path)
+        if output_stitching_stats_path.exists():
+            output_stitching_stats_path.unlink()
 
     candidates = [
         int(x)
@@ -312,11 +472,12 @@ def run_tiled_cellpose(
         height=height,
         width=width,
         tile_size=tile_size,
-        overlap=tiling_config.tile_overlap,
+        overlap=tiling_config.stitch_overlap_px,
     )
     log_status(
         f"[{dataset_name}] Running tiled Cellpose over {len(tiles)} tiles "
-        f"(tile_size={tile_size}, overlap={tiling_config.tile_overlap})"
+        f"(tile_size={tile_size}, stitch_overlap_px="
+        f"{tiling_config.stitch_overlap_px})"
     )
 
     mask_mem = np.lib.format.open_memmap(
@@ -328,8 +489,31 @@ def run_tiled_cellpose(
     mask_mem[:] = 0
 
     next_label = 1
-    total_new_labels = 0
+    global_label_areas: dict[int, int] = {}
     tile_filter_n_jobs = max(1, min(mask_filter_config.n_jobs, 4))
+    stitch_stats: dict[str, Any] = {
+        "dataset_name": dataset_name,
+        "height": int(height),
+        "width": int(width),
+        "tile_size": int(tile_size),
+        "stitch_overlap_px": int(tiling_config.stitch_overlap_px),
+        "tiles_total": len(tiles),
+        "duplicate_iou_threshold": float(tiling_config.duplicate_iou_threshold),
+        "duplicate_overlap_fraction": float(tiling_config.duplicate_overlap_fraction),
+        "min_remaining_fraction": float(tiling_config.min_remaining_fraction),
+        "edge_touch_policy": tiling_config.edge_touch_policy,
+        "raw_labels": 0,
+        "filtered_labels": 0,
+        "owned_labels": 0,
+        "accepted_labels": 0,
+        "duplicate_skipped": 0,
+        "low_remaining_skipped": 0,
+        "edge_touching_labels": 0,
+        "edge_touching_skipped": 0,
+        "conflict_pixels": 0,
+        "filled_pixels": 0,
+        "final_labels": 0,
+    }
 
     pbar = tqdm(
         tiles,
@@ -349,6 +533,7 @@ def run_tiled_cellpose(
         _, img_seg, _ = prepare_cellpose_input(tile, factor_rescale=1.0)
 
         masks, flows, styles = run_cellpose_model_eval(model, img_seg, cellpose_config)
+        raw_label_count = _count_positive_labels(masks)
 
         if tiling_config.filter_per_tile:
             masks = filter_cell_by_regionprops(
@@ -360,26 +545,26 @@ def run_tiled_cellpose(
                 min_area_px=mask_filter_config.min_area_px,
             )
 
-        core = masks[
-            t["core_y0_in_tile"] : t["core_y1_in_tile"],
-            t["core_x0_in_tile"] : t["core_x1_in_tile"],
-        ]
-
-        core_global, next_label, n_new = relabel_core_to_global(
-            core, next_label=next_label
+        next_label, tile_stats = _stitch_core_owned_tile_labels(
+            tile_mask=masks,
+            global_mask=mask_mem,
+            tile=t,
+            next_label=next_label,
+            global_label_areas=global_label_areas,
+            tiling_config=tiling_config,
         )
-        total_new_labels += n_new
-
-        mask_mem[t["core_y0"] : t["core_y1"], t["core_x0"] : t["core_x1"]] = core_global
+        tile_stats["raw_labels"] = raw_label_count
+        _merge_stitch_stats(stitch_stats, tile_stats)
 
         pbar.set_postfix_str(
-            f"labels={total_new_labels:,} rss={memory_snapshot_gb()['rss_gb']:.1f}GB"
+            f"labels={next_label - 1:,} rss={memory_snapshot_gb()['rss_gb']:.1f}GB"
         )
 
         if i % int(tiling_config.status_every_tiles) == 0:
             log_status(
                 f"[{dataset_name}] tile {i}/{len(tiles)} complete; "
-                f"accumulated labels={total_new_labels:,}"
+                f"accepted labels={next_label - 1:,}; "
+                f"duplicates skipped={stitch_stats['duplicate_skipped']:,}"
             )
             if progress_callback is not None:
                 progress_callback(
@@ -387,16 +572,20 @@ def run_tiled_cellpose(
                     tiles_done=i,
                     tiles_total=len(tiles),
                     pct=round(100 * i / len(tiles), 1),
-                    labels_found=total_new_labels,
+                    labels_found=next_label - 1,
+                    duplicate_skipped=stitch_stats["duplicate_skipped"],
                 )
 
-        del tile, img_seg, masks, flows, styles, core, core_global
+        del tile, img_seg, masks, flows, styles
         clear_cuda_cache()
 
         if i % int(memory_config.memory_check_every_chunks) == 0:
             force_release()
 
     mask_mem.flush()
+    stitch_stats["final_labels"] = int(next_label - 1)
+    if tiling_config.write_stitching_stats and output_stitching_stats_path is not None:
+        _write_stitching_stats(output_stitching_stats_path, stitch_stats)
     del mask_mem, model
     clear_cuda_cache()
     force_release(note=f"after tiled Cellpose {dataset_name}")
@@ -404,6 +593,11 @@ def run_tiled_cellpose(
     log_status(
         f"[{dataset_name}] Tiled Cellpose complete; wrote masks to {output_mask_path}"
     )
+    if tiling_config.write_stitching_stats and output_stitching_stats_path is not None:
+        log_status(
+            f"[{dataset_name}] Wrote Cellpose stitching stats to "
+            f"{output_stitching_stats_path}"
+        )
     return output_mask_path
 
 

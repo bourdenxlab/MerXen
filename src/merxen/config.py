@@ -80,11 +80,74 @@ class MaskFilterConfig(BaseModel):
 class TilingConfig(BaseModel):
     """Parameters for memory-adaptive Cellpose tiling."""
 
-    tile_size_candidates: list[int] = [6144, 4096, 3072, 2048]
-    tile_overlap: int = 256
+    model_config = {"populate_by_name": True}
+
+    tile_size_candidates: list[int] = Field(
+        default_factory=lambda: [6144, 4096, 3072, 2048]
+    )
+    stitch_overlap_px: int = Field(default=256, alias="tile_overlap")
     min_tile_size: int = 1024
     status_every_tiles: int = 10
     filter_per_tile: bool = True
+    duplicate_iou_threshold: float = 0.25
+    duplicate_overlap_fraction: float = 0.5
+    min_remaining_fraction: float = 0.05
+    edge_touch_policy: Literal["keep", "skip"] = "keep"
+    write_stitching_stats: bool = True
+
+    @field_validator("tile_size_candidates")
+    @classmethod
+    def _validate_tile_size_candidates(
+        cls: type[TilingConfig], v: list[int]
+    ) -> list[int]:
+        values = [int(x) for x in v]
+        if not values:
+            raise ValueError("tile_size_candidates must not be empty")
+        if any(x <= 0 for x in values):
+            raise ValueError("tile_size_candidates values must be positive")
+        return values
+
+    @field_validator("stitch_overlap_px")
+    @classmethod
+    def _validate_stitch_overlap_px(cls: type[TilingConfig], v: int) -> int:
+        if int(v) < 0:
+            raise ValueError("stitch_overlap_px must be non-negative")
+        return int(v)
+
+    @field_validator("min_tile_size", "status_every_tiles")
+    @classmethod
+    def _validate_positive_int(cls: type[TilingConfig], v: int) -> int:
+        if int(v) <= 0:
+            raise ValueError("tiling integer parameters must be positive")
+        return int(v)
+
+    @field_validator(
+        "duplicate_iou_threshold",
+        "duplicate_overlap_fraction",
+        "min_remaining_fraction",
+    )
+    @classmethod
+    def _validate_fraction(cls: type[TilingConfig], v: float) -> float:
+        value = float(v)
+        if value < 0.0 or value > 1.0:
+            raise ValueError("tiling fraction parameters must be between 0 and 1")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_core_size(self: TilingConfig) -> TilingConfig:
+        valid_candidates = [
+            x for x in self.tile_size_candidates if x >= int(self.min_tile_size)
+        ]
+        if not valid_candidates:
+            raise ValueError(
+                "tile_size_candidates must include at least one value >= min_tile_size"
+            )
+        for tile_size in valid_candidates:
+            if int(tile_size) - (2 * int(self.stitch_overlap_px)) > 0:
+                return self
+        raise ValueError(
+            "At least one tile_size_candidate must be larger than 2 * stitch_overlap_px"
+        )
 
 
 class ProsegConfig(BaseModel):
