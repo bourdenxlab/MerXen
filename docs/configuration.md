@@ -56,6 +56,7 @@ any of them with `--<name>` on the command line.
 | `analysis_mode` | `paired` | Fallback row mode: `paired`, `merscope`, or `xenium`. A non-empty samplesheet `analysis_mode` value overrides this per row. |
 | `enable_alignment` | `false` | Fallback row alignment switch. A non-empty samplesheet `enable_alignment` value overrides this per row; alignment only applies to paired rows. |
 | `analysis_segmentation` | `both` | Fallback downstream analysis branches after enrichment. Valid values: `both`, `reseg`, `original_seg`; comma-separated combinations are accepted. A non-empty samplesheet `analysis_segmentation` value overrides this per row. |
+| `mask_image_quantification_enabled` | `true` | Insert the Cellpose-mask image quantification stage between enrichment and QC. A non-empty samplesheet `mask_image_quantification_enabled` value overrides this per row. |
 | `force_spatialdata_build` | `false` | Rebuild SpatialData zarrs even if cached. |
 | `start_stage` | `build_spatialdata` | Fallback first stage. Skipped upstream stages are read from published outputs. A samplesheet `start_stage` value overrides this per row. |
 | `stop_stage` | `clustering_squidpy` | Fallback last stage. MapMyCells is available after this but opt-in because it requires reference files. A samplesheet `stop_stage` value overrides this per row. |
@@ -64,10 +65,12 @@ any of them with `--<name>` on the command line.
 | `gpu_process_lock_file` | `${projectDir}/.merxen_gpu.lock` | File used for the local GPU lock. Override only when coordinating multiple runs from the same machine. |
 
 Stage names accepted by `start_stage`, `stop_stage`, and `only_stage` are:
-`build_spatialdata`, `segment`, `enrich`, `qc`, `align`, `align_qc`,
-`compare`, `visualize`, `clustering_squidpy`, and `mapmycells`. `align` and
-`align_qc` are available only for rows whose effective `enable_alignment` value
-is `true`. `align`, `align_qc`, and `compare` are available only when
+`build_spatialdata`, `segment`, `enrich`, `mask_image_quantification`, `qc`,
+`align`, `align_qc`, `compare`, `visualize`, `clustering_squidpy`, and
+`mapmycells`. `mask_image_quantification` is available only when the effective
+`mask_image_quantification_enabled` value is `true`. `align` and `align_qc`
+are available only for rows whose effective `enable_alignment` value is `true`.
+`align`, `align_qc`, and `compare` are available only when
 `analysis_mode = paired`.
 
 ### Cellpose
@@ -94,6 +97,13 @@ is `true`. `align`, `align_qc`, and `compare` are available only when
 | `cellpose_final_min_area_um2` | `5.0` | Drop final Cellpose masks smaller than this area before ProSeg. |
 | `cellpose_final_max_area_um2` | `400.0` | Drop final Cellpose masks larger than this area before ProSeg. |
 | `cellpose_final_filter_chunk_mb` | `256` | Approximate row-chunk size for streaming the final mask filter. |
+
+### Mask image quantification
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `mask_image_quantification_enabled` | `true` | Run Cellpose-mask image quantification after enrichment by default. |
+| `mask_image_quantification_max_forks` | `2` | Maximum concurrent quantification processes. |
 
 ### ProSeg
 

@@ -33,6 +33,11 @@ channels.
   └────────┬────────┘
            ▼
   ┌─────────────────┐
+  │ MASK_IMAGE_     │   Cellpose-mask image-channel
+  │ QUANTIFICATION  │   min/median/mean/max/IQR table
+  └────────┬────────┘
+           ▼
+  ┌─────────────────┐
   │ QC              │   cell-level + transcript-assignment
   │                 │   metrics, histograms, violins
   └────────┬────────┘
@@ -68,13 +73,15 @@ channels.
 Rows inherit `analysis_mode`, `enable_alignment`, `analysis_segmentation`,
 `start_stage`, `stop_stage`, and `only_stage` from Nextflow params unless those
 columns are set in the samplesheet. For rows with `analysis_mode=paired`, both
-platforms traverse `BUILD_SPATIALDATA → SEGMENT → ENRICH → QC` independently
-and are rejoined after QC. If the row's effective `enable_alignment` value is
-`true`, `ALIGN` and `ALIGN_QC` run before `COMPARE` / `VISUALIZE` /
-`CLUSTERING_SQUIDPY`; otherwise the paired stages consume the enriched zarrs
-directly. In `analysis_mode=merscope` or `analysis_mode=xenium`, only the
-selected platform traverses those stages, and paired-only `ALIGN`, `ALIGN_QC`,
-and `COMPARE` are inactive for that row.
+platforms traverse `BUILD_SPATIALDATA → SEGMENT → ENRICH →
+MASK_IMAGE_QUANTIFICATION → QC` independently and are rejoined after QC. If
+mask image quantification is disabled or skipped by a stage range, downstream
+stages consume the enriched zarr directly. If the row's effective
+`enable_alignment` value is `true`, `ALIGN` and `ALIGN_QC` run before
+`COMPARE` / `VISUALIZE` / `CLUSTERING_SQUIDPY`; otherwise the paired stages
+consume the quantified/enriched zarrs directly. In `analysis_mode=merscope` or
+`analysis_mode=xenium`, only the selected platform traverses those stages, and
+paired-only `ALIGN`, `ALIGN_QC`, and `COMPARE` are inactive for that row.
 `MAPMYCELLS` consumes the AnnData files written by
 `CLUSTERING_SQUIDPY` and is opt-in because it requires local reference files.
 
@@ -97,13 +104,14 @@ For a samplesheet row with `pair_id=EXAMPLE01`:
 | 1 | `BUILD_SPATIALDATA` × 2 | `merxen build-spatialdata` | raw export folders (or cached zarr) | `source_spatialdata.zarr` per platform |
 | 2 | `SEGMENT` × 2 | `merxen segment` | `source_spatialdata.zarr` | durable `latest/latest_spatialdata.zarr`, `cellpose_masks_tiled.npy`, `cellpose_stitching_stats.json`, `transcripts_for_proseg.csv` |
 | 3 | `ENRICH` × 2 | `merxen enrich` | latest zarr + Cellpose mask | same durable `latest/latest_spatialdata.zarr`, now enriched with per-shape counts tables |
-| 4 | `QC` × 2 | `merxen qc` | enriched zarr | `qc_out/` (metrics CSV, plots) |
-| 5 | `ALIGN` × 1 | `merxen align` | both platforms' enriched zarrs | in-place MERSCOPE aligned elements + transform metadata, when enabled |
-| 6 | `ALIGN_QC` × 1 | `merxen alignment-qc` | updated MERSCOPE zarr + original Xenium zarr | `alignment_qc_out/`, when enabled |
-| 7 | `COMPARE` × 1 | `merxen compare` | updated MERSCOPE zarr if enabled; otherwise enriched zarrs | `compare_out/` (gene comparison CSVs + metrics JSON) |
-| 8 | `VISUALIZE` × 1 | `merxen visualize` | updated MERSCOPE zarr if enabled; otherwise enriched zarrs | `visualize_out/` (PNG plots) |
-| 9 | `CLUSTERING_SQUIDPY` × 1 | `merxen clustering-squidpy` | same paired zarrs, after visualization in full runs | `clustering_squidpy_out/` (QC plots, UMAP/spatial plots, `.h5ad`) |
-| 10 | `MAPMYCELLS` × 1 | `merxen mapmycells` | clustered `.h5ad` files from `clustering_squidpy_out/` | `mapmycells_out/` (query `.h5ad`, CSV/JSON assignments, annotated `.h5ad`) |
+| 4 | `MASK_IMAGE_QUANTIFICATION` × 2 | `merxen mask-image-quantification` | enriched zarr + Cellpose mask | same durable zarr, now with `table_MOSAIK_cellpose_image_quantification` plus sidecars |
+| 5 | `QC` × 2 | `merxen qc` | quantified zarr, or enriched zarr if quantification was skipped | `qc_out/` (metrics CSV, plots) |
+| 6 | `ALIGN` × 1 | `merxen align` | both platforms' quantified/enriched zarrs | in-place MERSCOPE aligned elements + transform metadata, when enabled |
+| 7 | `ALIGN_QC` × 1 | `merxen alignment-qc` | updated MERSCOPE zarr + original Xenium zarr | `alignment_qc_out/`, when enabled |
+| 8 | `COMPARE` × 1 | `merxen compare` | updated MERSCOPE zarr if enabled; otherwise quantified/enriched zarrs | `compare_out/` (gene comparison CSVs + metrics JSON) |
+| 9 | `VISUALIZE` × 1 | `merxen visualize` | updated MERSCOPE zarr if enabled; otherwise quantified/enriched zarrs | `visualize_out/` (PNG plots) |
+| 10 | `CLUSTERING_SQUIDPY` × 1 | `merxen clustering-squidpy` | same paired zarrs, after visualization in full runs | `clustering_squidpy_out/` (QC plots, UMAP/spatial plots, `.h5ad`) |
+| 11 | `MAPMYCELLS` × 1 | `merxen mapmycells` | clustered `.h5ad` files from `clustering_squidpy_out/` | `mapmycells_out/` (query `.h5ad`, CSV/JSON assignments, annotated `.h5ad`) |
 
 In single-platform mode, steps 1-4 run once per row, steps 5-7 are skipped,
 and steps 8-10 consume a one-sample config for the selected platform.

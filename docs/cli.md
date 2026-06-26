@@ -17,6 +17,8 @@ Commands:
   build-spatialdata  Build a platform-specific SpatialData zarr from raw input
   segment            Run Cellpose + ProSeg segmentation for one dataset
   enrich             Enrich a segmented zarr with per-shape tables
+  mask-image-quantification
+                      Quantify image channels over final Cellpose masks
   qc                 Compute geometry and assignment QC metrics
   align              Align MERSCOPE into paired Xenium coordinates
   alignment-qc       Compute post-alignment QC metrics
@@ -80,6 +82,23 @@ merxen enrich --config enrich_config.json [--force-rerun]
 | `--force-rerun` | Overwrite existing shape layers and tables. |
 
 Details: [Stage 3 — Enrichment](stages/enrichment.md).
+
+---
+
+## `merxen mask-image-quantification`
+
+Quantify all SpatialData image channels over final Cellpose label-mask pixels.
+
+```bash
+merxen mask-image-quantification --config mask_image_quantification_config.json [--force-rerun]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--config PATH` | JSON validated against `MaskImageQuantificationConfig`. |
+| `--force-rerun` | Recompute the SpatialData table and sidecar exports even when present. |
+
+Details: [Stage 4 — Mask image quantification](stages/mask-image-quantification.md).
 
 ---
 

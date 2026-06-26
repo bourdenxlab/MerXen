@@ -112,6 +112,14 @@ with Groovy.
 - `sanitize_table_key`, `resolve_points_cols`, `ensure_shape_has_cell_id`,
   `build_gene_list_from_base_table`, `clone_table_for_region`.
 
+## `merxen.mask_image_quantification`
+
+### `mask_image_quantification` — [mask_image_quantification.py](../src/merxen/mask_image_quantification.py)
+- `build_mask_image_quantification_table(...)` — exact image-channel stats
+  over nonzero Cellpose mask labels.
+- `run_mask_image_quantification(config, *, force_rerun)` — stage entry point
+  that writes the SpatialData table and sidecar outputs.
+
 ## `merxen.qc`
 
 ### `qc.metrics` — [metrics.py](../src/merxen/qc/metrics.py)

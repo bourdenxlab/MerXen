@@ -100,6 +100,17 @@ Path: `${outdir}/<pair_id>/<platform>/enrichment/`
 | `latest_input.zarr` | Staged symlink to `../latest/latest_spatialdata.zarr`. |
 | `enrich_out/` | Assignment summary CSVs per shape (transcripts assigned, gene totals). |
 
+### Mask Image Quantification
+
+Path: `${outdir}/<pair_id>/<platform>/mask_image_quantification/`
+
+| File | Contents |
+|------|----------|
+| `latest_input.zarr` | Staged symlink to `../latest/latest_spatialdata.zarr`, updated in place with `table_MOSAIK_cellpose_image_quantification`. |
+| `mask_image_quantification_out/*_mask_image_quantification.parquet` | Wide Cellpose cell × image-channel-stat matrix. |
+| `mask_image_quantification_out/*_mask_image_quantification_features.csv` | Feature metadata for image key, channel, and statistic. |
+| `mask_image_quantification_out/*_mask_image_quantification_summary.json` | Summary of quantified images, cells, features, and sidecar paths. |
+
 ### QC
 
 Path: `${outdir}/<pair_id>/<platform>/<analysis_segmentation>/qc/`
