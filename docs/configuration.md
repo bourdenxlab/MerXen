@@ -60,6 +60,8 @@ any of them with `--<name>` on the command line.
 | `start_stage` | `build_spatialdata` | Fallback first stage. Skipped upstream stages are read from published outputs. A samplesheet `start_stage` value overrides this per row. |
 | `stop_stage` | `clustering_squidpy` | Fallback last stage. MapMyCells is available after this but opt-in because it requires reference files. A samplesheet `stop_stage` value overrides this per row. |
 | `only_stage` | `null` | Fallback single-stage selector. A row-level `only_stage` overrides row start/stop values; row start/stop values suppress the global `only_stage` fallback for that row. |
+| `gpu_process_lock_enabled` | `true` | Serialize local GPU-heavy processes with a file lock so `SEGMENT`, GPU `ALIGN`, and GPU `CLUSTERING_SQUIDPY` do not compete for one workstation GPU. |
+| `gpu_process_lock_file` | `${projectDir}/.merxen_gpu.lock` | File used for the local GPU lock. Override only when coordinating multiple runs from the same machine. |
 
 Stage names accepted by `start_stage`, `stop_stage`, and `only_stage` are:
 `build_spatialdata`, `segment`, `enrich`, `qc`, `align`, `align_qc`,
@@ -159,7 +161,7 @@ SpatialData compatibility. Non-alignment stages keep using `environment.yml`.
 | `alignment_seed` | `21` | Seed for deterministic alignment subsampling. |
 | `alignment_max_nonrigid_anchors` | `5000` | Maximum RBF anchors for full-data transform application. |
 | `alignment_pytorch_cuda_alloc_conf` | `expandable_segments:True,max_split_size_mb:256` | PyTorch allocator setting exported by `ALIGN`. |
-| `alignment_max_forks` | `2` | Maximum concurrent `ALIGN` tasks. Lower to `1` on a single-GPU system if Spateo jobs compete for VRAM. |
+| `alignment_max_forks` | `1` | Maximum concurrent `ALIGN` tasks. Raise only when multiple GPUs or sufficient VRAM are available. |
 | `alignment_qc_grid_rows` / `alignment_qc_grid_cols` | `10` / `10` | SABench-style QC grid dimensions. |
 
 ### Squidpy clustering
@@ -182,7 +184,7 @@ SpatialData compatibility. Non-alignment stages keep using `environment.yml`.
 | `clustering_squidpy_spatial_scatter_point_size` | `2.0` | Point size for regular spatial scatter plots. |
 | `clustering_squidpy_figure_dpi` | `180` | DPI for PNG plots. |
 | `clustering_squidpy_use_gpu` | `true` | Use RAPIDS single-cell acceleration when available. |
-| `clustering_squidpy_max_forks` | `2` | Maximum concurrent Squidpy clustering tasks. Lower to `1` on a single-GPU system if RAPIDS jobs compete for VRAM. |
+| `clustering_squidpy_max_forks` | `4` | Maximum concurrent Squidpy clustering tasks. GPU-backed tasks still share the local GPU lock when enabled. |
 | `clustering_squidpy_gpu_vram_monitor` | `true` | Run a lightweight `nvidia-smi` sampler around each `CLUSTERING_SQUIDPY` task. |
 | `clustering_squidpy_gpu_vram_monitor_interval_seconds` | `2` | Sampling interval for the clustering GPU VRAM monitor. |
 | `clustering_squidpy_hierarchical_enabled` | `true` | Run broad atlas-guided annotation and per-branch subclustering. Set to `false` for the legacy one-shot Leiden workflow. |
@@ -256,15 +258,20 @@ Per-process CPU/memory requests and default concurrency guards
 | Process | CPUs | Memory | Max forks |
 |---------|-----:|-------:|-----------|
 | `BUILD_SPATIALDATA` | 8 | 80 GB | `build_spatialdata_max_forks` = 3 |
-| `SEGMENT` | 32 | 220 GB | `segment_max_forks` = 2 |
+| `SEGMENT` | 32 | 220 GB | `segment_max_forks` = 1 |
 | `ENRICH` | 8 | 300 GB | unbounded |
 | `QC` | 4 | 24 GB | unbounded |
-| `ALIGN` | 12 | 100 GB | `alignment_max_forks` = 2 |
+| `ALIGN` | 12 | 100 GB | `alignment_max_forks` = 1 |
 | `ALIGN_QC` | 4 | 32 GB | unbounded |
 | `COMPARE` | 4 | 32 GB | unbounded |
 | `VISUALIZE` | 4 | 32 GB | unbounded |
-| `CLUSTERING_SQUIDPY` | 8 | 32 GB | `clustering_squidpy_max_forks` = 2 |
+| `CLUSTERING_SQUIDPY` | 8 | 32 GB | `clustering_squidpy_max_forks` = 4 |
 | `MAPMYCELLS` | 8 | 160 GB | unbounded |
+
+On local single-GPU runs, `SEGMENT`, `ALIGN` when `alignment_device != "cpu"`,
+and `CLUSTERING_SQUIDPY` when `clustering_squidpy_use_gpu=true` also share
+`gpu_process_lock_file`. The lock is held for the full process shell, then
+released automatically when the task exits.
 
 All processes use `errorStrategy = "ignore"` with
 `workflow.failOnIgnore = true`. A failed task therefore stops only branches that

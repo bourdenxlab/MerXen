@@ -23,7 +23,7 @@ MCMC sampler starts from.
 
 [`SEGMENT`](../../workflows/modules/segmentation.nf) — one instance per
 dataset. This is one of the heaviest stages; the default Nextflow request is
-32 CPUs and 220 GB RAM with `segment_max_forks = 2`.
+32 CPUs and 220 GB RAM with `segment_max_forks = 1` for single-GPU safety.
 
 - **Input:** `tuple(key, pair_id, platform, seg_config_json)`.
 - **CLI:** `merxen segment --config segment_config.json`.

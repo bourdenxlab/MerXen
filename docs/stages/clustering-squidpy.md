@@ -100,7 +100,7 @@ published latest zarrs directly.
 | `spatial_scatter_point_size` | Point size for regular spatial scatter plots. |
 | `figure_dpi` | PNG output DPI. |
 | `use_gpu` | Use RAPIDS single-cell acceleration when available. |
-| `clustering_squidpy_max_forks` | Nextflow-side concurrency guard. Defaults to `2`; lower to `1` for strict single-job GPU use. |
+| `clustering_squidpy_max_forks` | Nextflow-side concurrency guard. Defaults to `4`; GPU-backed tasks still share the local GPU lock when enabled. |
 | `clustering_squidpy_gpu_vram_monitor` | Nextflow wrapper flag that records `nvidia-smi` VRAM samples for each clustering task. Defaults to `true`. |
 | `clustering_squidpy_gpu_vram_monitor_interval_seconds` | Sampling interval for the VRAM monitor. Defaults to `2`. |
 | `hierarchical_enabled` | Run broad atlas annotation plus branch subclustering. Defaults to `true`; set `false` for the legacy one-shot Leiden workflow. |
