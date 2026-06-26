@@ -20,7 +20,7 @@ report-*.html
 trace-*.txt
 dag-*.dot
 run_logs/
-results
+results*
 results/
 
 # Alignment testing
