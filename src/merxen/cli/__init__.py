@@ -17,6 +17,9 @@ from merxen.cli.run_clustering_squidpy import clustering_squidpy_command
 from merxen.cli.run_comparison import compare_command
 from merxen.cli.run_enrichment import enrich_command
 from merxen.cli.run_mapmycells import mapmycells_command
+from merxen.cli.run_mask_image_quantification import (
+    mask_image_quantification_command,
+)
 from merxen.cli.run_qc import qc_command
 from merxen.cli.run_segmentation import segment_command
 from merxen.cli.run_visualization import visualize_command
@@ -37,6 +40,7 @@ def main() -> None:
 main.add_command(build_spatialdata_command)
 main.add_command(segment_command)
 main.add_command(enrich_command)
+main.add_command(mask_image_quantification_command)
 main.add_command(qc_command)
 main.add_command(align_command)
 main.add_command(alignment_qc_command)

@@ -264,6 +264,29 @@ class EnrichmentConfig(BaseModel):
     transform_path: Path | None = None
 
 
+class MaskImageQuantificationConfig(BaseModel):
+    """Configuration for Cellpose-mask image-channel quantification."""
+
+    dataset_name: str
+    platform: Literal["MERSCOPE", "XENIUM"]
+    latest_zarr_path: Path
+    mask_path: Path
+    output_dir: Path
+    table_key: str = "table_MOSAIK_cellpose_image_quantification"
+    shape_key: str = "MOSAIK_cellpose"
+    tile_size: int = 2048
+
+    @field_validator("tile_size")
+    @classmethod
+    def _validate_tile_size(
+        cls: type[MaskImageQuantificationConfig],
+        value: int,
+    ) -> int:
+        if int(value) <= 0:
+            raise ValueError("tile_size must be positive")
+        return int(value)
+
+
 class QCConfig(BaseModel):
     """Configuration for QC metric computation."""
 
