@@ -4,6 +4,7 @@ include { BUILD_SPATIALDATA } from "./modules/spatialdata_build"
 include { ENSURE_PROSEG } from "./modules/proseg_bootstrap"
 include { SEGMENT } from "./modules/segmentation"
 include { ENRICH } from "./modules/enrichment"
+include { MASK_IMAGE_QUANTIFICATION } from "./modules/mask_image_quantification"
 include { QC } from "./modules/qc"
 include { ALIGN; ALIGN_QC } from "./modules/alignment"
 include { COMPARE } from "./modules/comparison"
@@ -320,6 +321,10 @@ def normalizeStage(rawValue, paramName) {
         "segmentation": "segment",
         "enrich": "enrich",
         "enrichment": "enrich",
+        "mask_image_quantification": "mask_image_quantification",
+        "image_quantification": "mask_image_quantification",
+        "quantify_images": "mask_image_quantification",
+        "mask_quantification": "mask_image_quantification",
         "qc": "qc",
         "align": "align",
         "alignment": "align",
@@ -343,15 +348,20 @@ def normalizeStage(rawValue, paramName) {
     if (!aliases.containsKey(key)) {
         throw new IllegalArgumentException(
             "Unknown ${paramName} '${raw}'. Valid stages: " +
-            "build_spatialdata, segment, enrich, qc, align, align_qc, " +
+            "build_spatialdata, segment, enrich, mask_image_quantification, " +
+            "qc, align, align_qc, " +
             "compare, visualize, clustering_squidpy, mapmycells"
         )
     }
     return aliases[key]
 }
 
-def activeStageOrder(alignmentEnabled, pairedMode) {
-    def stages = ["build_spatialdata", "segment", "enrich", "qc"]
+def activeStageOrder(alignmentEnabled, pairedMode, maskImageQuantificationEnabled) {
+    def stages = ["build_spatialdata", "segment", "enrich"]
+    if (maskImageQuantificationEnabled) {
+        stages += ["mask_image_quantification"]
+    }
+    stages += ["qc"]
     if (pairedMode && alignmentEnabled) {
         stages += ["align", "align_qc"]
     }
@@ -572,6 +582,15 @@ def rowSampleSettings(row, params) {
         "enable_alignment for ${pairId}",
     )
     def alignmentEnabled = pairedMode && requestedAlignmentEnabled
+    def maskImageQuantificationEnabled = boolOrDefault(
+        rowFieldOrDefault(
+            row,
+            "mask_image_quantification_enabled",
+            params.mask_image_quantification_enabled,
+        ),
+        true,
+        "mask_image_quantification_enabled for ${pairId}",
+    )
 
     def rowOnlyStageRaw = chooseField(row, ["only_stage"])
     def rowStartStageRaw = chooseField(row, ["start_stage"])
@@ -597,7 +616,11 @@ def rowSampleSettings(row, params) {
         stopParamName = "samplesheet stop_stage for ${pairId}"
     }
 
-    def stageOrder = activeStageOrder(alignmentEnabled, pairedMode)
+    def stageOrder = activeStageOrder(
+        alignmentEnabled,
+        pairedMode,
+        maskImageQuantificationEnabled,
+    )
     def startStage = normalizeStage(startStageRaw, startParamName)
     def stopStage = normalizeStage(stopStageRaw, stopParamName)
     validateStage(startStage, stageOrder, startParamName, alignmentEnabled)
@@ -612,6 +635,12 @@ def rowSampleSettings(row, params) {
     def runBuild = stageInRange("build_spatialdata", startStage, stopStage, stageOrder)
     def runSegment = stageInRange("segment", startStage, stopStage, stageOrder)
     def runEnrich = stageInRange("enrich", startStage, stopStage, stageOrder)
+    def runMaskImageQuantification = stageInRange(
+        "mask_image_quantification",
+        startStage,
+        stopStage,
+        stageOrder,
+    )
     def runQc = stageInRange("qc", startStage, stopStage, stageOrder)
     def runAlign = stageInRange("align", startStage, stopStage, stageOrder)
     def runAlignQc = stageInRange("align_qc", startStage, stopStage, stageOrder)
@@ -647,6 +676,7 @@ def rowSampleSettings(row, params) {
         run_build: runBuild,
         run_segment: runSegment,
         run_enrich: runEnrich,
+        run_mask_image_quantification: runMaskImageQuantification,
         run_qc: runQc,
         run_align: runAlign,
         run_align_qc: runAlignQc,
@@ -655,7 +685,8 @@ def rowSampleSettings(row, params) {
         run_clustering_squidpy: runClusteringSquidpy,
         run_mapmycells: runMapMyCells,
         need_build_results: runSegment || runEnrich,
-        need_enriched_zarrs: runQc || needAnalysisZarrs,
+        need_enriched_zarrs: runMaskImageQuantification || runQc || needAnalysisZarrs,
+        need_quantified_zarrs: runMaskImageQuantification,
         need_analysis_zarrs: needAnalysisZarrs,
         need_alignment_results: needAlignmentResults,
         need_alignment_downstream: needAlignmentDownstream,
@@ -906,7 +937,8 @@ workflow {
     segment_task_results_ch = SEGMENT(segment_inputs_ch)
 
     segment_published_results_ch = sample_rows_ch.flatMap { pairId, row, settings ->
-        if (!(settings.run_enrich && !settings.run_segment)) {
+        if (!((settings.run_enrich || settings.run_mask_image_quantification) &&
+              !settings.run_segment)) {
             []
         } else {
             settings.active_platforms.collect { platform ->
@@ -1045,6 +1077,76 @@ workflow {
             )
     }
 
+    mask_image_quantification_gate_ch = sample_rows_ch.flatMap {
+        pairId, row, settings ->
+            if (!settings.run_mask_image_quantification) {
+                []
+            } else {
+                settings.active_platforms.collect { platform ->
+                    tuple("${pairId}|${platform}", true)
+                }
+            }
+    }
+
+    mask_image_quantification_masks_ch = segment_results_ch.map {
+        key, pairId, platform, latestZarr, maskPath, transcriptsCsv ->
+            tuple(key, maskPath)
+    }
+
+    mask_image_quantification_inputs_ch = enriched_zarrs_ch
+        .join(mask_image_quantification_masks_ch)
+        .join(mask_image_quantification_gate_ch)
+        .map { key, pairId, platform, enrichedLatestZarr, maskPath, runFlag ->
+            def quantConfig = [
+                dataset_name: "${pairId}_${platform}",
+                platform: platform,
+                latest_zarr_path: "latest_input.zarr",
+                mask_path: "mask_image_quantification_input_mask.npy",
+                output_dir: "mask_image_quantification_out",
+            ]
+
+            tuple(
+                key,
+                pairId,
+                platform,
+                groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(quantConfig)),
+                enrichedLatestZarr,
+                maskPath,
+            )
+        }
+
+    mask_image_quantification_results_ch = MASK_IMAGE_QUANTIFICATION(
+        mask_image_quantification_inputs_ch
+    )
+
+    quantified_zarrs_ch = mask_image_quantification_results_ch.map {
+        key, pairId, platform, quantifiedLatestZarr, quantOutDir ->
+            tuple(
+                key,
+                pairId,
+                platform,
+                java.nio.file.Paths.get(quantifiedLatestZarr.toString()).toRealPath().toString(),
+            )
+    }
+
+    enriched_downstream_gate_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+        if (!(settings.need_enriched_zarrs && !settings.need_quantified_zarrs)) {
+            []
+        } else {
+            settings.active_platforms.collect { platform ->
+                tuple("${pairId}|${platform}", true)
+            }
+        }
+    }
+
+    enriched_downstream_zarrs_ch = enriched_zarrs_ch
+        .join(enriched_downstream_gate_ch)
+        .map { key, pairId, platform, enrichedLatestZarr, runFlag ->
+            tuple(key, pairId, platform, enrichedLatestZarr)
+        }
+
+    downstream_zarrs_ch = enriched_downstream_zarrs_ch.mix(quantified_zarrs_ch)
+
     qc_branch_gate_ch = sample_rows_ch.flatMap { pairId, row, settings ->
         if (!settings.run_qc) {
             []
@@ -1055,7 +1157,7 @@ workflow {
         }
     }
 
-    qc_inputs_ch = enriched_zarrs_ch
+    qc_inputs_ch = downstream_zarrs_ch
         .join(qc_branch_gate_ch)
         .flatMap { key, pairId, platform, enrichedLatestZarr, analysisSegmentations ->
             analysisSegmentations.collect { segmentation ->
@@ -1125,7 +1227,7 @@ workflow {
         }
     }
 
-    analysis_without_qc_ch = enriched_zarrs_ch
+    analysis_without_qc_ch = downstream_zarrs_ch
         .join(analysis_no_qc_gate_ch)
         .flatMap {
             key, pairId, platform, enrichedLatestZarr, analysisSegmentations, settings ->
@@ -1145,11 +1247,11 @@ workflow {
 
     analysis_dataset_zarrs_ch = analysis_from_qc_ch.mix(analysis_without_qc_ch)
 
-    merscope_zarr_ch = enriched_zarrs_ch
+    merscope_zarr_ch = downstream_zarrs_ch
         .filter { key, pairId, platform, zarrPath -> platform == "MERSCOPE" }
         .map { key, pairId, platform, zarrPath -> tuple(pairId, zarrPath) }
 
-    xenium_zarr_ch = enriched_zarrs_ch
+    xenium_zarr_ch = downstream_zarrs_ch
         .filter { key, pairId, platform, zarrPath -> platform == "XENIUM" }
         .map { key, pairId, platform, zarrPath -> tuple(pairId, zarrPath) }
 
