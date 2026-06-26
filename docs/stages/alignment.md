@@ -63,14 +63,14 @@ Key parameters live in `workflows/nextflow.config`:
 | `alignment_max_alignment_cells` | `35000` | Deterministic per-platform cell subsample used for Spateo optimization. |
 | `alignment_seed` | `21` | Seed for deterministic alignment subsampling. |
 | `alignment_max_nonrigid_anchors` | `5000` | Maximum RBF anchors used when applying non-rigid transforms. |
-| `alignment_max_forks` | `2` | Maximum concurrent `ALIGN` tasks. Lower to `1` on a single-GPU system if Spateo jobs compete for VRAM. |
+| `alignment_max_forks` | `1` | Maximum concurrent `ALIGN` tasks. Raise only when multiple GPUs or sufficient VRAM are available. |
 | `alignment_qc_grid_rows` / `alignment_qc_grid_cols` | `10` / `10` | SABench-style QC grid. |
 
 These defaults come from the P7513 tuning notebook. They use the shared panel,
 joint PCA, mirrored initialization, no SVI, and a 35k-cell per-platform
 subsample so one non-rigid pass fits comfortably on a 24 GB GPU. Nextflow
-limits concurrent `ALIGN` tasks with `alignment_max_forks`; set it to `1` when
-you want strict single-job GPU use.
+limits concurrent `ALIGN` tasks with `alignment_max_forks`; the default `1`
+keeps local single-GPU runs from overlapping Spateo jobs.
 
 ## CLI
 

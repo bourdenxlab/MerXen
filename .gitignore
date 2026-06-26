@@ -13,6 +13,7 @@ work
 work/
 .nextflow/
 .nextflow.log*
+workflows/.merxen_gpu.lock
 timeline-*.html
 report-*.html
 trace-*.txt

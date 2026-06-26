@@ -45,10 +45,18 @@ paired rows to `true` or `false`; blank cells inherit `--enable_alignment`.
 Nextflow runs `ALIGN` in `environment.alignment.yml`, bootstraps Spateo/Dynamo
 from pinned Git refs if the shimmed import check fails, then restores modern
 AnnData for SpatialData compatibility. Other stages continue to use the regular
-`environment.yml`. `ALIGN` and RAPIDS-backed `CLUSTERING_SQUIDPY` default to
-two concurrent tasks (`alignment_max_forks = 2` and
-`clustering_squidpy_max_forks = 2`); lower either value to `1` on a single-GPU
-system if jobs compete for VRAM.
+`environment.yml`. GPU-heavy `SEGMENT` and `ALIGN` default to one task at a
+time. RAPIDS-backed `CLUSTERING_SQUIDPY` allows up to four queued local tasks,
+but GPU execution is serialized by the shared workstation GPU lock when it is
+enabled.
+
+Before any task inputs are emitted, the workflow runs stage-aware preflight
+checks for reference files required by the selected stage range. For example,
+`clustering_squidpy` with hierarchical mode checks the broad marker lookup and
+Allen taxonomy paths, while `mapmycells` checks whole-brain marker/stat files
+only when that module is selected and the requested reference mode needs them.
+Missing references stop the run immediately with the selected stages and paths
+that need attention.
 
 ## Analysis mode
 
@@ -154,6 +162,11 @@ nextflow run workflows/main.nf \
 
 See [Configuration → Nextflow parameters](configuration.md#nextflow-parameters)
 for the complete list.
+
+By default, local GPU-heavy stages share a workstation GPU lock. This prevents
+Cellpose segmentation, GPU alignment, and GPU Squidpy clustering from starting
+at the same time on GPU 0 and failing with CUDA out-of-memory. Disable it only
+when a scheduler or multi-GPU setup is already isolating GPU work.
 
 ## Monitoring a run
 
