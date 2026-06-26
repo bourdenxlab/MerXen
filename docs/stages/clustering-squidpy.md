@@ -112,6 +112,10 @@ published latest zarrs directly.
 | `min_branch_cells` | Branches smaller than this are labeled but not reclustered. Default `50`. |
 | `broad_annotation` | Marker lookup, Allen taxonomy metadata/cache path, marker overlap limits, and ambiguity thresholds for atlas-guided cluster labels. |
 
+When this stage is selected and hierarchical mode is enabled, workflow preflight
+requires the broad marker lookup and taxonomy metadata to exist before any tasks
+start.
+
 ## Outputs
 
 Written under `clustering_squidpy_out/<platform>/`:

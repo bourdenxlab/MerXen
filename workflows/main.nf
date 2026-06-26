@@ -394,6 +394,131 @@ def requireExistingPath(rawPath, label) {
     return p
 }
 
+def isBlankPath(rawPath) {
+    if (rawPath == null) {
+        return true
+    }
+    def value = rawPath.toString().trim()
+    return !value || value.toLowerCase() == "null"
+}
+
+def normalizedPath(rawPath) {
+    return java.nio.file.Paths.get(rawPath.toString()).toAbsolutePath().normalize()
+}
+
+def appendPreflightFileCheck(errors, rawPath, label) {
+    if (isBlankPath(rawPath)) {
+        errors << "Missing required path parameter for ${label}"
+        return
+    }
+    def path = normalizedPath(rawPath)
+    if (!path.toFile().exists()) {
+        errors << "Missing ${label}: ${path}"
+    }
+}
+
+def findCachedTaxonomyMetadataPath(rawCacheDir) {
+    if (isBlankPath(rawCacheDir)) {
+        return null
+    }
+    def root = normalizedPath(rawCacheDir)
+    def taxonomyRoot = root.resolve("abc_whb/metadata/WHB-taxonomy").toFile()
+    if (!taxonomyRoot.isDirectory()) {
+        return null
+    }
+    def matches = []
+    taxonomyRoot.eachDir { versionDir ->
+        def candidate = versionDir.toPath().resolve("cluster_annotation_term.csv")
+        if (candidate.toFile().exists()) {
+            matches << candidate
+        }
+    }
+    return matches ? matches.sort { it.toString() }[-1] : null
+}
+
+def appendClusteringSquidpyPreflightChecks(errors, settings, params) {
+    def hierarchicalEnabled = boolOrDefault(
+        params.clustering_squidpy_hierarchical_enabled,
+        true,
+        "clustering_squidpy_hierarchical_enabled",
+    )
+    if (!(settings.run_clustering_squidpy && hierarchicalEnabled)) {
+        return
+    }
+    appendPreflightFileCheck(
+        errors,
+        params.clustering_squidpy_broad_marker_lookup_path,
+        "CLUSTERING_SQUIDPY broad marker lookup",
+    )
+    if (isBlankPath(params.clustering_squidpy_broad_taxonomy_metadata_path)) {
+        def cachedTaxonomy = findCachedTaxonomyMetadataPath(
+            params.clustering_squidpy_broad_reference_cache_dir,
+        )
+        if (cachedTaxonomy == null) {
+            errors << (
+                "Missing CLUSTERING_SQUIDPY broad taxonomy metadata: " +
+                "set --clustering_squidpy_broad_taxonomy_metadata_path " +
+                "or provide a cache containing " +
+                "abc_whb/metadata/WHB-taxonomy/*/cluster_annotation_term.csv"
+            )
+        }
+    } else {
+        appendPreflightFileCheck(
+            errors,
+            params.clustering_squidpy_broad_taxonomy_metadata_path,
+            "CLUSTERING_SQUIDPY broad taxonomy metadata",
+        )
+    }
+    if (!isBlankPath(params.clustering_squidpy_broad_cluster_membership_path)) {
+        appendPreflightFileCheck(
+            errors,
+            params.clustering_squidpy_broad_cluster_membership_path,
+            "CLUSTERING_SQUIDPY broad cluster membership metadata",
+        )
+    }
+}
+
+def appendMapMyCellsPreflightChecks(errors, settings, params) {
+    if (!settings.run_mapmycells) {
+        return
+    }
+    validateMapMyCellsParams(params)
+    def plotsOnly = params.mapmycells_plots_only == null
+        ? false
+        : params.mapmycells_plots_only.toString().trim().toLowerCase() == "true"
+    if (plotsOnly) {
+        return
+    }
+    def referenceMode = params.mapmycells_reference_mode == null
+        ? "both"
+        : params.mapmycells_reference_mode.toString().trim().toLowerCase()
+    if (referenceMode in ["whole_brain", "both"]) {
+        appendPreflightFileCheck(
+            errors,
+            params.mapmycells_marker_lookup_path,
+            "MAPMYCELLS whole-brain marker lookup",
+        )
+        appendPreflightFileCheck(
+            errors,
+            params.mapmycells_precomputed_stats_path,
+            "MAPMYCELLS whole-brain precomputed stats",
+        )
+    }
+}
+
+def runPreflightChecks(row, settings, params) {
+    def errors = []
+    appendClusteringSquidpyPreflightChecks(errors, settings, params)
+    appendMapMyCellsPreflightChecks(errors, settings, params)
+    if (errors) {
+        throw new IllegalArgumentException(
+            "Preflight checks failed for sample ${settings.pair_id} " +
+            "(selected stages: ${settings.selected_stages.join(' -> ')}):\n" +
+            errors.collect { " - ${it}" }.join("\n")
+        )
+    }
+}
+
 def publishedDatasetPath(outdir, pairId, platform, suffix) {
     return "${outdir}/${pairId}/${platform.toLowerCase()}/${suffix}"
 }
@@ -584,7 +709,7 @@ workflow {
         .fromPath(params.samplesheet, checkIfExists: true)
         .splitCsv(header: true, sep: ",", quote: '"', strip: true)
 
-    sample_rows_ch = samplesheet_ch.map { row ->
+    sample_rows_raw_ch = samplesheet_ch.map { row ->
         def settings = rowSampleSettings(row, params)
         log.info(
             "Sample ${settings.pair_id}: analysis_mode=${settings.analysis_mode}; " +
@@ -595,6 +720,20 @@ workflow {
         )
         tuple(settings.pair_id, row, settings)
     }
+
+    preflight_done_ch = sample_rows_raw_ch
+        .map { pairId, row, settings ->
+            runPreflightChecks(row, settings, params)
+            true
+        }
+        .collect()
+        .map { true }
+
+    sample_rows_ch = sample_rows_raw_ch
+        .combine(preflight_done_ch)
+        .map { pairId, row, settings, doneFlag ->
+            tuple(pairId, row, settings)
+        }
 
     build_inputs_ch = sample_rows_ch.flatMap { pairId, row, settings ->
         if (!settings.run_build) {

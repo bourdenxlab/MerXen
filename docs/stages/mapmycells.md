@@ -91,6 +91,10 @@ Use `--only_stage mapmycells` to reuse an existing
 | `cloud_safe` / `flatten` / `verbose_csv` | Direct MapMyCells CLI options. |
 | `plots_only` | Reuse existing mapper CSV/extended JSON outputs and regenerate only annotated H5AD + plots. |
 
+When this stage is selected, workflow preflight validates whole-brain marker and
+precomputed-stat paths before any tasks start, unless `mapmycells_plots_only` is
+enabled or `reference_mode` excludes `whole_brain`.
+
 ## Outputs
 
 Written under `mapmycells_out/<platform>/`:
