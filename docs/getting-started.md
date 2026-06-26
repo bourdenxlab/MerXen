@@ -42,7 +42,7 @@ pre-commit install --hook-type pre-push
 ```
 
 The pre-commit hook runs `ruff` on every commit; the pre-push hook runs the
-test suite. See [Development workflow](development.md).
+lockfile-backed local CI checks. See [Development workflow](development.md).
 
 ## 3. Set environment variables
 

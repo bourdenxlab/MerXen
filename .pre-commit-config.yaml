@@ -17,16 +17,9 @@ repos:
 
   - repo: local
     hooks:
-      - id: mypy
-        name: mypy
-        entry: conda run -n merxen mypy src/
-        language: system
-        stages: [pre-push]
-        always_run: true
-        pass_filenames: false
-      - id: pytest
-        name: pytest
-        entry: conda run -n merxen pytest -m "not slow"
+      - id: local-ci
+        name: local CI checks
+        entry: scripts/run_ci_checks.sh
         language: system
         stages: [pre-push]
         always_run: true

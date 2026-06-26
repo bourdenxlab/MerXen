@@ -287,9 +287,7 @@ def _build_iterative_projection_store(
                 )
                 del previous, plane, projected
                 force_release(
-                    note=(
-                        f"[MERSCOPE] after projecting channel={stain} " f"z={z_layer}"
-                    )
+                    note=(f"[MERSCOPE] after projecting channel={stain} z={z_layer}")
                 )
 
         projection_da = xarray.DataArray(

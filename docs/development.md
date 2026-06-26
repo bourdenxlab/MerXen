@@ -59,7 +59,8 @@ From [.pre-commit-config.yaml](../.pre-commit-config.yaml):
 
 - **On commit** — trailing-whitespace, EOF fixer, check-yaml, large-file
   guard (500 KB), ruff lint + format.
-- **On push** — the full `pytest` suite.
+- **On push** — the lockfile-backed local CI checks: lint, format, type check,
+  and tests.
 
 Both are local guardrails. They can be bypassed with `--no-verify`, but
 CI is the authoritative gate — don't bypass hooks unless you have a reason
@@ -75,6 +76,18 @@ to `main` and every PR:
 3. `ruff format --check .`
 4. `mypy src/`
 5. `pytest -m "not slow"`
+
+Run the same gate locally before pushing:
+
+```bash
+scripts/run_ci_checks.sh
+```
+
+The script creates or reuses `.ci-venv`, installs from
+[requirements.lock](../requirements.lock) with `uv`, installs the package with
+`--no-deps`, then runs the same lint, format, type-check, and test commands as
+GitHub Actions. Set `MERXEN_CI_VENV=/path/to/venv` to keep the reproducible
+environment somewhere else.
 
 Branch protection on `main` should require this workflow to pass.
 
@@ -170,7 +183,7 @@ For the full standards, see [Agents.md](../Agents.md). The short version:
 - PEP 8 naming, type hints on all public functions, Google-style
   docstrings.
 - Ruff for linting and formatting.
-- Pre-commit hooks for linting, pre-push hooks for tests.
+- Pre-commit hooks for linting, pre-push hooks for lockfile-backed local CI.
 - CI runs lint + format + mypy + pytest on every PR.
 - No production logic in notebooks. No secrets in git. No data files
   bigger than 500 KB.

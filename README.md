@@ -120,6 +120,9 @@ ruff format .
 # Type check
 mypy src/
 
+# Run the same lockfile-backed checks as GitHub Actions
+scripts/run_ci_checks.sh
+
 # Bump package version
 uv run bump-my-version bump patch  # small fixes, e.g. 0.1.0 -> 0.1.1
 uv run bump-my-version bump minor  # new features, e.g. 0.1.0 -> 0.2.0
