@@ -438,17 +438,17 @@ class ClusteringSquidpyAnnotationConfig(BaseModel):
     """Atlas marker options for hierarchical broad-cluster annotation."""
 
     marker_lookup_path: Path | None = Path(
-        "/media/mathieubo/SSD2/MerXen/mapmycells/query_markers.n10.20240221800.json"
+        "/media/mathieubo/SSD1/MerXen/mapmycells/query_markers.n10.20240221800.json"
     )
     taxonomy_metadata_path: Path | None = Path(
-        "/media/mathieubo/SSD2/MerXen/mapmycells/abc_whb/metadata/"
+        "/media/mathieubo/SSD1/MerXen/mapmycells/abc_whb/metadata/"
         "WHB-taxonomy/20240330/cluster_annotation_term.csv"
     )
     cluster_membership_path: Path | None = Path(
-        "/media/mathieubo/SSD2/MerXen/mapmycells/abc_whb/metadata/"
+        "/media/mathieubo/SSD1/MerXen/mapmycells/abc_whb/metadata/"
         "WHB-taxonomy/20240330/cluster_to_cluster_annotation_membership.csv"
     )
-    reference_cache_dir: Path | None = Path("/media/mathieubo/SSD2/MerXen/mapmycells")
+    reference_cache_dir: Path | None = Path("/media/mathieubo/SSD1/MerXen/mapmycells")
     reference_gene_metadata_paths: list[Path] = Field(default_factory=list)
     marker_level: str = "CCN202210140_SUPC"
     min_marker_overlap: int = Field(default=3, ge=1)
@@ -528,7 +528,7 @@ class MapMyCellsConfig(BaseModel):
             "Human ACC",
         ]
     )
-    region_cache_dir: Path = Path("/media/mathieubo/SSD2/MerXen/mapmycells")
+    region_cache_dir: Path = Path("/media/mathieubo/SSD1/MerXen/mapmycells")
     region_min_cells_per_leaf: int = Field(default=10, ge=1)
     region_force_rebuild: bool = False
     region_query_markers_n_per_utility: int = Field(default=10, ge=1)
