@@ -69,6 +69,51 @@ def test_nextflow_uses_row_level_settings_and_continues_after_task_errors() -> N
     assert "failOnIgnore = true" in config_text
 
 
+def test_mask_image_quantification_stage_is_wired_before_qc() -> None:
+    """Image quantification should run after enrichment and feed downstream zarrs."""
+    repo_root = Path(__file__).resolve().parents[2]
+    main_text = (repo_root / "workflows" / "main.nf").read_text()
+    config_text = (repo_root / "workflows" / "nextflow.config").read_text()
+    module_text = (
+        repo_root / "workflows" / "modules" / "mask_image_quantification.nf"
+    ).read_text()
+
+    for expected in [
+        (
+            "include { MASK_IMAGE_QUANTIFICATION } from "
+            '"./modules/mask_image_quantification"'
+        ),
+        '"mask_image_quantification": "mask_image_quantification"',
+        '"image_quantification": "mask_image_quantification"',
+        '"quantify_images": "mask_image_quantification"',
+        'stages += ["mask_image_quantification"]',
+        "settings.run_mask_image_quantification",
+        "need_quantified_zarrs: runMaskImageQuantification",
+        "MASK_IMAGE_QUANTIFICATION(",
+        "downstream_zarrs_ch = enriched_downstream_zarrs_ch.mix(quantified_zarrs_ch)",
+        "qc_inputs_ch = downstream_zarrs_ch",
+        "analysis_without_qc_ch = downstream_zarrs_ch",
+        "merscope_zarr_ch = downstream_zarrs_ch",
+        "xenium_zarr_ch = downstream_zarrs_ch",
+    ]:
+        assert expected in main_text
+
+    for expected in [
+        "mask_image_quantification_enabled = true",
+        "mask_image_quantification_max_forks",
+        'withName: "MASK_IMAGE_QUANTIFICATION"',
+    ]:
+        assert expected in config_text
+
+    for expected in [
+        "process MASK_IMAGE_QUANTIFICATION",
+        "mask_image_quantification_input_mask.npy",
+        "merxen mask-image-quantification",
+        "mask_image_quantification_out",
+    ]:
+        assert expected in module_text
+
+
 def test_segment_bootstraps_proseg_from_configured_paths() -> None:
     """The workflow should resolve ProSeg from config instead of a required flag."""
     repo_root = Path(__file__).resolve().parents[2]
