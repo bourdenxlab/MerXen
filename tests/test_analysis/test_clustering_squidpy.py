@@ -16,13 +16,16 @@ import pytest
 from scipy import sparse
 from shapely.geometry import box
 
+import merxen.analysis.clustering_squidpy as clustering_mod
 from merxen.analysis.clustering_squidpy import (
     AtlasMarkerSet,
     _add_spatial_scale_bar,
     _clean_spatial_axis,
+    _clustered_spatialdata_table_key,
     _make_neuron_split_marker_sets,
     _run_gpu_clustering,
     adata_from_spatialdata,
+    build_clustered_spatialdata_table,
     collapse_atlas_label_to_broad_class,
     compute_group_gene_summary,
     load_atlas_marker_sets,
@@ -31,8 +34,10 @@ from merxen.analysis.clustering_squidpy import (
     plot_spatial_cluster_grid,
     plot_spatial_scatter,
     remove_control_features,
+    run_clustering_squidpy,
     run_scanpy_clustering,
     score_clusters_by_atlas_markers,
+    write_clustered_spatialdata_table,
 )
 from merxen.config import ClusteringSquidpyConfig
 
@@ -593,6 +598,256 @@ def test_clustering_squidpy_config_defaults_enable_hierarchical_mode() -> None:
     assert cfg.subcluster_round.leiden_resolution == 0.5
     assert cfg.spatial_point_size == 0.5
     assert cfg.spatial_scatter_point_size == 2.0
+    assert cfg.write_spatialdata_table is True
+
+
+def test_clustered_spatialdata_table_key_uses_segmentation_defaults() -> None:
+    """Clustered SpatialData table names should be stable for analysis branches."""
+    assert (
+        _clustered_spatialdata_table_key("table_MOSAIK_proseg", "reseg")
+        == "table_MOSAIK_proseg_clustering_squidpy"
+    )
+    assert (
+        _clustered_spatialdata_table_key("table_original", "original_seg")
+        == "table_original_clustering_squidpy"
+    )
+    assert (
+        _clustered_spatialdata_table_key("table_custom", None)
+        == "table_custom_clustering_squidpy"
+    )
+
+
+def test_build_clustered_spatialdata_table_retargets_region() -> None:
+    """Existing SpatialData attrs should be rebuilt for the clustering shape."""
+    adata = ad.AnnData(
+        X=np.array([[1, 0], [0, 2]], dtype=np.float32),
+        obs=pd.DataFrame(
+            {
+                "cell": ["c1", "c2"],
+                "region": pd.Categorical(["MOSAIK_proseg", "MOSAIK_proseg"]),
+                "leiden": pd.Categorical(["0", "1"]),
+                "broad_class": pd.Categorical(["Astrocytes", "Neurons"]),
+            },
+            index=pd.Index(["c1", "c2"], name="cell"),
+        ),
+        var=pd.DataFrame({"gene": ["GeneA", "GeneB"]}, index=["GeneA", "GeneB"]),
+    )
+    adata.layers["counts"] = adata.X.copy()
+    adata.obsm["X_umap"] = np.array([[0.0, 1.0], [1.0, 0.0]])
+    adata.obsm["spatial"] = np.array([[10.0, 11.0], [20.0, 21.0]])
+    adata.uns["spatialdata_attrs"] = {
+        "region": "MOSAIK_proseg",
+        "region_key": "region",
+        "instance_key": "cell",
+    }
+    adata.uns["merxen_clustering_squidpy"] = {
+        "table_key": "table_MOSAIK_proseg",
+        "shape_key": "MOSAIK_proseg_aligned_nonrigid",
+    }
+
+    table = build_clustered_spatialdata_table(
+        adata,
+        output_table_key="table_MOSAIK_proseg_clustering_squidpy",
+        output_region="MOSAIK_proseg_aligned_nonrigid",
+        source_table_key="table_MOSAIK_proseg",
+        source_region="MOSAIK_proseg",
+    )
+
+    assert table.uns["spatialdata_attrs"] == {
+        "region": "MOSAIK_proseg_aligned_nonrigid",
+        "region_key": "region",
+        "instance_key": "cell",
+    }
+    assert table.obs["region"].astype(str).tolist() == [
+        "MOSAIK_proseg_aligned_nonrigid",
+        "MOSAIK_proseg_aligned_nonrigid",
+    ]
+    assert "counts" in table.layers
+    assert "X_umap" in table.obsm
+    assert "spatial" in table.obsm
+    assert list(table.obs["broad_class"].astype(str)) == ["Astrocytes", "Neurons"]
+    assert table.uns["merxen_clustering_squidpy"]["source_table_key"] == (
+        "table_MOSAIK_proseg"
+    )
+    assert table.uns["merxen_clustering_squidpy"]["written_table_key"] == (
+        "table_MOSAIK_proseg_clustering_squidpy"
+    )
+    assert table.uns["merxen_clustering_squidpy"]["written_region"] == (
+        "MOSAIK_proseg_aligned_nonrigid"
+    )
+    assert table.uns["merxen_clustering_squidpy"]["spatialdata_region"] == (
+        "MOSAIK_proseg_aligned_nonrigid"
+    )
+
+
+def test_write_clustered_spatialdata_table_persists_table(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Clustered AnnData should be parsed and written as a SpatialData table."""
+    adata = ad.AnnData(
+        X=np.array([[1, 0], [0, 2]], dtype=np.float32),
+        obs=pd.DataFrame(
+            {
+                "cell": ["c1", "c2"],
+                "region": pd.Categorical(["MOSAIK_proseg", "MOSAIK_proseg"]),
+            },
+            index=["c1", "c2"],
+        ),
+        var=pd.DataFrame(index=["GeneA", "GeneB"]),
+    )
+    adata.uns["spatialdata_attrs"] = {
+        "region": "MOSAIK_proseg",
+        "region_key": "region",
+        "instance_key": "cell",
+    }
+    adata.uns["merxen_clustering_squidpy"] = {
+        "table_key": "table_MOSAIK_proseg",
+        "shape_key": "MOSAIK_proseg_aligned_nonrigid",
+    }
+    fake_sdata = SimpleNamespace(tables={})
+    calls: dict[str, object] = {}
+
+    monkeypatch.setattr(clustering_mod.sd, "read_zarr", lambda path: fake_sdata)
+
+    def _fake_write(
+        sdata_obj: object,
+        key: str,
+        element_type: str,
+        value: ad.AnnData,
+        *,
+        overwrite: bool,
+    ) -> bool:
+        calls["sdata_obj"] = sdata_obj
+        calls["key"] = key
+        calls["element_type"] = element_type
+        calls["value"] = value
+        calls["overwrite"] = overwrite
+        return True
+
+    monkeypatch.setattr(clustering_mod, "write_or_replace_element", _fake_write)
+
+    zarr_path, table_key = write_clustered_spatialdata_table(
+        tmp_path / "latest_spatialdata.zarr",
+        adata,
+        segmentation="reseg",
+    )
+
+    assert zarr_path == tmp_path / "latest_spatialdata.zarr"
+    assert table_key == "table_MOSAIK_proseg_clustering_squidpy"
+    assert calls["sdata_obj"] is fake_sdata
+    assert calls["key"] == "table_MOSAIK_proseg_clustering_squidpy"
+    assert calls["element_type"] == "tables"
+    assert calls["overwrite"] is True
+    written = calls["value"]
+    assert isinstance(written, ad.AnnData)
+    assert written.uns["spatialdata_attrs"]["region"] == (
+        "MOSAIK_proseg_aligned_nonrigid"
+    )
+
+
+def test_run_clustering_squidpy_skips_spatialdata_write_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The config flag should allow H5AD-only clustering output."""
+    input_adata = ad.AnnData(
+        X=np.ones((4, 3), dtype=np.float32),
+        obs=pd.DataFrame(index=[f"cell{i}" for i in range(4)]),
+        var=pd.DataFrame(index=[f"Gene{i}" for i in range(3)]),
+    )
+    input_adata.obsm["spatial"] = np.arange(8, dtype=float).reshape(4, 2)
+    input_adata.uns["spatialdata_attrs"] = {
+        "region": "MOSAIK_proseg",
+        "region_key": "region",
+        "instance_key": "cell_id",
+    }
+    input_adata.uns["merxen_clustering_squidpy"] = {
+        "table_key": "table_MOSAIK_proseg",
+        "shape_key": "MOSAIK_proseg",
+    }
+    clustered = input_adata.copy()
+    clustered.obs["leiden"] = pd.Categorical(["0", "0", "1", "1"])
+    clustered.obsm["X_umap"] = np.arange(8, dtype=float).reshape(4, 2)
+
+    cfg = ClusteringSquidpyConfig.model_validate(
+        {
+            "pair_id": "pair1",
+            "output_dir": tmp_path / "out",
+            "samples": [
+                {
+                    "sample_id": "pair1_MERSCOPE",
+                    "platform": "MERSCOPE",
+                    "zarr_path": tmp_path / "latest_spatialdata.zarr",
+                    "segmentation": "reseg",
+                    "table_key": "table_MOSAIK_proseg",
+                    "shape_key": "MOSAIK_proseg",
+                }
+            ],
+            "hierarchical_enabled": False,
+            "write_spatialdata_table": False,
+        }
+    )
+
+    monkeypatch.setattr(
+        clustering_mod,
+        "collect_gene_id_lookup_for_samples",
+        lambda config: {},
+    )
+    monkeypatch.setattr(
+        clustering_mod,
+        "load_spatialdata_adata",
+        lambda *args, **kwargs: input_adata.copy(),
+    )
+    monkeypatch.setattr(
+        clustering_mod,
+        "run_scanpy_clustering",
+        lambda *args, **kwargs: clustered.copy(),
+    )
+    monkeypatch.setattr(
+        clustering_mod,
+        "plot_qc_histograms",
+        lambda _adata, output_path, **kwargs: Path(output_path),
+    )
+    monkeypatch.setattr(
+        clustering_mod,
+        "save_qc_metrics",
+        lambda _adata, output_path: Path(output_path),
+    )
+    monkeypatch.setattr(
+        clustering_mod,
+        "plot_umap",
+        lambda _adata, output_path, **kwargs: Path(output_path),
+    )
+    monkeypatch.setattr(
+        clustering_mod,
+        "plot_spatial_scatter",
+        lambda _adata, output_path, **kwargs: Path(output_path),
+    )
+    monkeypatch.setattr(
+        clustering_mod,
+        "plot_spatial_cluster_grid",
+        lambda _adata, output_path, **kwargs: Path(output_path),
+    )
+    monkeypatch.setattr(
+        clustering_mod,
+        "save_clustered_adata",
+        lambda _adata, output_path: Path(output_path),
+    )
+    monkeypatch.setattr(
+        clustering_mod,
+        "write_clustered_spatialdata_table",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("SpatialData write should be skipped")
+        ),
+    )
+
+    results = run_clustering_squidpy(cfg)
+
+    sample_results = results["pair1_MERSCOPE"]
+    assert "h5ad" in sample_results
+    assert "spatialdata_table_key" not in sample_results
+    assert "spatialdata_zarr" not in sample_results
 
 
 def test_run_gpu_clustering_uses_chunked_pca_for_sparse_input(
