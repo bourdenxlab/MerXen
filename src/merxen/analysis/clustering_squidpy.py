@@ -1347,8 +1347,7 @@ def write_clustered_spatialdata_table(
 
     with _spatialdata_zarr_write_lock(zarr_path):
         log_status(
-            f"Writing clustered SpatialData table '{output_table_key}' "
-            f"to {zarr_path}"
+            f"Writing clustered SpatialData table '{output_table_key}' to {zarr_path}"
         )
         sdata_obj = sd.read_zarr(zarr_path)
         try:
