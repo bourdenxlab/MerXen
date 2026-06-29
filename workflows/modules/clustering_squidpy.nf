@@ -49,6 +49,7 @@ process CLUSTERING_SQUIDPY {
   "spatial_scatter_point_size": ${params.clustering_squidpy_spatial_scatter_point_size},
   "figure_dpi": ${params.clustering_squidpy_figure_dpi},
   "use_gpu": ${params.clustering_squidpy_use_gpu},
+  "write_spatialdata_table": ${params.clustering_squidpy_write_spatialdata_table},
   "hierarchical_enabled": ${params.clustering_squidpy_hierarchical_enabled},
   "broad_round": {
     "leiden_resolution": ${params.clustering_squidpy_broad_leiden_resolution}

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import re
 import sys
 import textwrap
 import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -30,8 +33,10 @@ import squidpy as sq
 from matplotlib.lines import Line2D
 from scipy import sparse
 from scipy.cluster.hierarchy import leaves_list, linkage
+from spatialdata.models import TableModel
 
 from merxen.config import ClusteringSquidpyConfig
+from merxen.io.spatialdata_io import write_or_replace_element
 from merxen.io.transcript_io import first_existing_col
 from merxen.memory import force_release, log_status
 from merxen.plotting import prepare_plot_output, save_figure
@@ -1236,6 +1241,153 @@ def save_clustered_adata(adata: ad.AnnData, output_path: Path | str) -> Path:
     return output_path
 
 
+def _clustered_spatialdata_table_key(
+    source_table_key: str,
+    segmentation: str | None,
+) -> str:
+    """Return the derived SpatialData table key for a clustered AnnData table."""
+    segmentation_key = "" if segmentation is None else str(segmentation).strip().lower()
+    source_key = str(source_table_key)
+    if segmentation_key == "reseg" or source_key == "table_MOSAIK_proseg":
+        return "table_MOSAIK_proseg_clustering_squidpy"
+    if segmentation_key == "original_seg" or source_key == "table_original":
+        return "table_original_clustering_squidpy"
+    return f"{source_key}_clustering_squidpy"
+
+
+def build_clustered_spatialdata_table(
+    adata: ad.AnnData,
+    *,
+    output_table_key: str,
+    output_region: str,
+    source_table_key: str,
+    source_region: str | None,
+) -> ad.AnnData:
+    """Return a SpatialData table for the final clustered AnnData object."""
+    table = adata.copy()
+    spatial_attrs = dict(table.uns.get("spatialdata_attrs", {}))
+    region_key = str(spatial_attrs.get("region_key", "region"))
+    instance_key = spatial_attrs.get("instance_key")
+
+    if not isinstance(instance_key, str) or instance_key not in table.obs.columns:
+        instance_key = _first_existing_column(
+            table.obs,
+            (
+                "cell_id",
+                "cell",
+                "cells",
+                "cell_ID",
+                "EntityID",
+                "cell_labels",
+            ),
+        )
+    if instance_key is None:
+        instance_key = "cell_id"
+        table.obs[instance_key] = table.obs_names.astype(str)
+
+    if region_key not in table.obs.columns:
+        table.obs[region_key] = str(output_region)
+    table.obs[region_key] = pd.Categorical(
+        [str(output_region)] * table.n_obs,
+        categories=[str(output_region)],
+    )
+
+    clustering_meta = dict(table.uns.get("merxen_clustering_squidpy", {}))
+    clustering_meta.update(
+        {
+            "source_table_key": str(source_table_key),
+            "source_region": None if source_region is None else str(source_region),
+            "written_table_key": str(output_table_key),
+            "written_region": str(output_region),
+            "spatialdata_table_key": str(output_table_key),
+            "spatialdata_region": str(output_region),
+        }
+    )
+    table.uns["merxen_clustering_squidpy"] = clustering_meta
+    table.uns.pop("spatialdata_attrs", None)
+
+    return TableModel.parse(
+        table,
+        region=str(output_region),
+        region_key=region_key,
+        instance_key=str(instance_key),
+    )
+
+
+def write_clustered_spatialdata_table(
+    zarr_path: Path | str,
+    adata: ad.AnnData,
+    *,
+    segmentation: str | None,
+) -> tuple[Path, str]:
+    """Attach the final clustered AnnData object as a SpatialData table."""
+    zarr_path = Path(zarr_path)
+    clustering_meta = dict(adata.uns.get("merxen_clustering_squidpy", {}))
+    source_table_key = str(clustering_meta.get("table_key") or "table")
+    spatial_attrs = dict(adata.uns.get("spatialdata_attrs", {}))
+    source_region = _region_as_string(spatial_attrs.get("region"))
+    output_region = _region_as_string(clustering_meta.get("shape_key")) or source_region
+    if output_region is None:
+        raise ValueError(
+            "Cannot write clustered SpatialData table without a source or plotting "
+            "region in AnnData metadata."
+        )
+
+    output_table_key = _clustered_spatialdata_table_key(
+        source_table_key,
+        segmentation,
+    )
+    parsed_table = build_clustered_spatialdata_table(
+        adata,
+        output_table_key=output_table_key,
+        output_region=output_region,
+        source_table_key=source_table_key,
+        source_region=source_region,
+    )
+
+    with _spatialdata_zarr_write_lock(zarr_path):
+        log_status(
+            f"Writing clustered SpatialData table '{output_table_key}' "
+            f"to {zarr_path}"
+        )
+        sdata_obj = sd.read_zarr(zarr_path)
+        try:
+            write_or_replace_element(
+                sdata_obj,
+                output_table_key,
+                "tables",
+                parsed_table,
+                overwrite=True,
+            )
+        finally:
+            del sdata_obj
+            force_release(note=f"after writing clustered table {output_table_key}")
+
+    return zarr_path, output_table_key
+
+
+@contextmanager
+def _spatialdata_zarr_write_lock(zarr_path: Path | str) -> Iterator[None]:
+    """Serialize side-effectful writes to one SpatialData zarr path."""
+    lock_path = Path(f"{Path(zarr_path)}.clustering_squidpy.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("w", encoding="utf-8") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def _region_as_string(value: Any) -> str | None:
+    if isinstance(value, str):
+        cleaned = value.strip()
+        return cleaned or None
+    if isinstance(value, list | tuple) and len(value) > 0:
+        return _region_as_string(value[0])
+    return None
+
+
 def run_hierarchical_scanpy_clustering(
     adata: ad.AnnData,
     config: ClusteringSquidpyConfig,
@@ -2172,10 +2324,10 @@ def _safe_token(value: str) -> str:
 
 def run_clustering_squidpy(
     config: ClusteringSquidpyConfig,
-) -> dict[str, dict[str, Path]]:
+) -> dict[str, dict[str, Path | str]]:
     """Run the clustering_squidpy stage for every sample in a pair."""
     config.output_dir.mkdir(parents=True, exist_ok=True)
-    results: dict[str, dict[str, Path]] = {}
+    results: dict[str, dict[str, Path | str]] = {}
     gene_id_lookup = collect_gene_id_lookup_for_samples(config)
 
     for sample in config.samples:
@@ -2272,6 +2424,17 @@ def run_clustering_squidpy(
             clustered,
             sample_dir / f"{sample.sample_id}_clustered.h5ad",
         )
+        spatialdata_outputs: dict[str, Path | str] = {}
+        if config.write_spatialdata_table:
+            spatialdata_zarr, spatialdata_table_key = write_clustered_spatialdata_table(
+                sample.zarr_path,
+                clustered,
+                segmentation=sample.segmentation,
+            )
+            spatialdata_outputs = {
+                "spatialdata_zarr": spatialdata_zarr,
+                "spatialdata_table_key": spatialdata_table_key,
+            }
 
         results[sample.sample_id] = {
             "qc_plot": qc_plot,
@@ -2280,6 +2443,7 @@ def run_clustering_squidpy(
             "spatial_plot": spatial_plot,
             "spatial_cluster_grid": spatial_cluster_grid,
             "h5ad": h5ad,
+            **spatialdata_outputs,
             **hierarchical_artifacts,
         }
         del adata, clustered

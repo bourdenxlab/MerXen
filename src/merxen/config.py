@@ -502,6 +502,7 @@ class ClusteringSquidpyConfig(BaseModel):
     spatial_scatter_point_size: float = 2.0
     figure_dpi: int = 180
     use_gpu: bool = True
+    write_spatialdata_table: bool = True
     hierarchical_enabled: bool = True
     broad_round: ClusteringSquidpyRoundConfig = Field(
         default_factory=lambda: ClusteringSquidpyRoundConfig(leiden_resolution=0.2)
