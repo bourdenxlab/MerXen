@@ -23,6 +23,9 @@ run_logs/
 results*
 results/
 
+# Scratch notebooks
+notebooks/scratch/
+
 # Alignment testing
 alignment_test/
 
