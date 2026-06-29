@@ -176,6 +176,8 @@ See [Section alignment](stages/alignment.md).
   parsing and cluster-level atlas marker scoring used by hierarchical mode.
 - `plot_qc_histograms`, `plot_umap`, `plot_spatial_scatter` — PNG writers.
 - `save_qc_metrics`, `save_clustered_adata` — CSV and `.h5ad` outputs.
+- `write_clustered_spatialdata_table` — add or replace the final clustered
+  AnnData as a derived table in a SpatialData zarr.
 - `run_hierarchical_scanpy_clustering(adata, config, ...)` — default broad
   annotation, branch subclustering, neuron split, and hierarchical QC artifact
   writer when `hierarchical_enabled` is true.

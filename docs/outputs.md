@@ -216,8 +216,16 @@ By default, the same `<sample_id>_clustered.h5ad` path is still written and
 remains the downstream MapMyCells input. In hierarchical mode, the H5AD also
 includes `leiden_broad`,
 `broad_atlas_label`, `broad_class`, `neuron_split_label`,
-`subcluster_label`, and `hierarchical_cluster` in `obs`. Additional QC
-artifacts are written under
+`subcluster_label`, and `hierarchical_cluster` in `obs`.
+
+The stage also mutates each platform's
+`${outdir}/<pair_id>/<platform>/latest/latest_spatialdata.zarr` by default,
+adding or replacing the final clustered table for the active segmentation:
+`table_MOSAIK_proseg_clustering_squidpy` for `reseg` and
+`table_original_clustering_squidpy` for `original_seg`. Set
+`--clustering_squidpy_write_spatialdata_table false` for H5AD-only output.
+
+Additional QC artifacts are written under
 `clustering_squidpy_out/<platform>/<sample_id>_hierarchical/`:
 
 | File | Contents |

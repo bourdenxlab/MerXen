@@ -32,6 +32,10 @@ For each active platform in the run:
 
 6. Save a Scanpy UMAP, Squidpy spatial Leiden scatter, per-cell QC CSV, and the
    clustered `.h5ad`.
+7. By default, add or replace the final clustered AnnData as a derived table in
+   the originating `latest_spatialdata.zarr`. `reseg` writes
+   `table_MOSAIK_proseg_clustering_squidpy`; `original_seg` writes
+   `table_original_clustering_squidpy`.
 
 By default, the one-shot output path still writes `<sample_id>_clustered.h5ad`,
 but the clustering inside that file comes from an atlas-guided hierarchy:
@@ -103,6 +107,7 @@ published latest zarrs directly.
 | `clustering_squidpy_max_forks` | Nextflow-side concurrency guard. Defaults to `4`; GPU-backed tasks still share the local GPU lock when enabled. |
 | `clustering_squidpy_gpu_vram_monitor` | Nextflow wrapper flag that records `nvidia-smi` VRAM samples for each clustering task. Defaults to `true`. |
 | `clustering_squidpy_gpu_vram_monitor_interval_seconds` | Sampling interval for the VRAM monitor. Defaults to `2`. |
+| `write_spatialdata_table` | Add or replace the final clustered table in each sample's source `latest_spatialdata.zarr`. Defaults to `true`; set `--clustering_squidpy_write_spatialdata_table false` for H5AD-only output. |
 | `hierarchical_enabled` | Run broad atlas annotation plus branch subclustering. Defaults to `true`; set `false` for the legacy one-shot Leiden workflow. |
 | `broad_round` | Round-specific broad clustering settings. Default Leiden resolution `0.2`; unspecified fields inherit top-level filtering/PCA/UMAP settings. |
 | `subcluster_round` | Default non-neuron branch settings. Default Leiden resolution `0.5`. |
@@ -130,6 +135,12 @@ Each listed `.png` plot is also written as a same-stem `.pdf`.
 | Spatial | `plots/spatial/<sample_id>_spatial_scatter_leiden.png` | Squidpy spatial scatter colored by Leiden with clean axes and a 200 um scale bar. |
 | Spatial Leiden grid | `plots/spatial_grid/<sample_id>_spatial_scatter_leiden_grid.png` | Small-multiple spatial grid with each de novo Leiden cluster highlighted in red against all other cells in grey. |
 | AnnData | `<sample_id>_clustered.h5ad` | Filtered clustered object, with raw counts in `layers["counts"]`. |
+
+When `write_spatialdata_table` is true, rerunning this stage mutates
+`${outdir}/<pair_id>/<platform>/latest/latest_spatialdata.zarr` by adding or
+replacing the derived clustered table for the active analysis segmentation. The
+table contains the same final filtered cells, UMAP/spatial coordinates, counts
+layer, and clustering/cell-type columns as `<sample_id>_clustered.h5ad`.
 
 When `clustering_squidpy_gpu_vram_monitor` is enabled, the Nextflow wrapper also
 writes task-level GPU telemetry under `clustering_squidpy_out/gpu_vram/`:
