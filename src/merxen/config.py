@@ -297,6 +297,70 @@ class QCConfig(BaseModel):
     shape_key: str | None = None
 
 
+class CorticalDepthTableConfig(BaseModel):
+    """One cell table to annotate with cortical-depth coordinates."""
+
+    segmentation: str
+    table_key: str
+    shape_key: str | None = None
+
+
+class CorticalDepthConfig(BaseModel):
+    """Configuration for cortical-depth coordinate computation."""
+
+    dataset_name: str
+    platform: Literal["MERSCOPE", "XENIUM"]
+    latest_zarr_path: Path
+    output_dir: Path
+    tables: list[CorticalDepthTableConfig]
+    pial_boundary_path: Path | None = None
+    wm_boundary_path: Path | None = None
+    side_boundary_path: Path | None = None
+    exclusion_path: Path | None = None
+    ribbon_path: Path | None = None
+    annotation_path: Path | None = None
+    coordinate_unit_um: float = Field(default=1.0, gt=0.0)
+    raster_resolution_um: float = Field(default=5.0, gt=0.0)
+    raster_padding_um: float | None = Field(default=None, gt=0.0)
+    boundary_band_um: float | None = Field(default=None, gt=0.0)
+    boundary_smoothing_window: int = Field(default=0, ge=0)
+    streamline_spacing_um: float = Field(default=50.0, gt=0.0)
+    streamline_step_um: float | None = Field(default=None, gt=0.0)
+    streamline_max_steps: int = Field(default=4000, ge=1)
+    streamline_resample_points: int = Field(default=101, ge=2)
+    side_boundary_distance_um: float = Field(default=25.0, ge=0.0)
+    contour_levels: list[float] = Field(
+        default_factory=lambda: [round(i / 10.0, 1) for i in range(1, 10)]
+    )
+    write_spatialdata_table: bool = True
+
+    @field_validator("contour_levels")
+    @classmethod
+    def _validate_contour_levels(
+        cls: type[CorticalDepthConfig],
+        values: list[float],
+    ) -> list[float]:
+        levels = [float(value) for value in values]
+        if not levels:
+            raise ValueError("contour_levels must not be empty")
+        if any(value <= 0.0 or value >= 1.0 for value in levels):
+            raise ValueError("contour_levels must be strictly between 0 and 1")
+        return sorted(set(levels))
+
+    @model_validator(mode="after")
+    def _validate_annotation_inputs(self: CorticalDepthConfig) -> CorticalDepthConfig:
+        if not self.tables:
+            raise ValueError("CorticalDepthConfig requires at least one table")
+        if self.annotation_path is None and (
+            self.pial_boundary_path is None or self.wm_boundary_path is None
+        ):
+            raise ValueError(
+                "Provide pial_boundary_path and wm_boundary_path, or a combined "
+                "annotation_path containing pial and gray/white boundary roles"
+            )
+        return self
+
+
 class SpateoAlignmentConfig(BaseModel):
     """Spateo registration parameters for paired-section alignment."""
 
