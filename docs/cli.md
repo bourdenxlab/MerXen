@@ -19,6 +19,8 @@ Commands:
   enrich             Enrich a segmented zarr with per-shape tables
   mask-image-quantification
                       Quantify image channels over final Cellpose masks
+  compute-cortical-depth
+                      Compute Laplace/equal-area cortical-depth coordinates
   qc                 Compute geometry and assignment QC metrics
   align              Align MERSCOPE into paired Xenium coordinates
   alignment-qc       Compute post-alignment QC metrics
@@ -115,6 +117,22 @@ merxen qc --config qc_config.json
 | `--config PATH` | JSON validated against [`QCConfig`](../src/merxen/config.py#L169). |
 
 Details: [Stage 4 — QC](stages/qc.md).
+
+---
+
+## `merxen compute-cortical-depth`
+
+Compute cortical-depth coordinates and update selected AnnData tables.
+
+```bash
+merxen compute-cortical-depth --config cortical_depth_config.json
+```
+
+| Option | Description |
+|--------|-------------|
+| `--config PATH` | JSON validated against `CorticalDepthConfig`. |
+
+Details: [Cortical depth](stages/cortical-depth.md).
 
 ---
 
