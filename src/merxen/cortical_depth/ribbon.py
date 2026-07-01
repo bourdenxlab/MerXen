@@ -384,6 +384,8 @@ def _unique_valid_polygons(polygons: Iterable[Polygon]) -> list[Polygon]:
             continue
         candidate = polygon if polygon.is_valid else polygon.buffer(0)
         for part in _geometry_polygon_parts(candidate):
+            if any(_polygons_are_near_duplicates(part, existing) for existing in out):
+                continue
             key = (
                 round(float(part.area), 6),
                 round(float(part.centroid.x), 6),
@@ -394,6 +396,11 @@ def _unique_valid_polygons(polygons: Iterable[Polygon]) -> list[Polygon]:
             seen.add(key)
             out.append(part)
     return out
+
+
+def _polygons_are_near_duplicates(left: Polygon, right: Polygon) -> bool:
+    area_scale = max(float(left.area), float(right.area), 1.0)
+    return float(left.symmetric_difference(right).area) <= 1e-6 * area_scale
 
 
 def _polygon_boundary_line_coverage(polygon: Polygon, line: LineString) -> float:
