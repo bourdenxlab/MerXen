@@ -82,7 +82,8 @@ def plot_depth_overlay(
     masked = np.ma.masked_invalid(np.where(grid.mask, laplace_depth, np.nan))
     ax.imshow(masked, origin="lower", extent=extent, cmap="viridis", alpha=0.55)
     _plot_line(ax, grid.pial_line, color="#2c7fb8", linewidth=2.0, label="pia")
-    _plot_line(ax, grid.wm_line, color="#d95f0e", linewidth=2.0, label="WM")
+    if grid.wm_line is not None:
+        _plot_line(ax, grid.wm_line, color="#d95f0e", linewidth=2.0, label="WM")
     for side_line in grid.side_lines:
         _plot_line(ax, side_line, color="#666666", linewidth=1.0, linestyle="--")
     ax.contour(
@@ -127,7 +128,8 @@ def plot_cells_by_depth(
         alpha=0.15,
     )
     _plot_line(ax, grid.pial_line, color="#2c7fb8", linewidth=1.5)
-    _plot_line(ax, grid.wm_line, color="#d95f0e", linewidth=1.5)
+    if grid.wm_line is not None:
+        _plot_line(ax, grid.wm_line, color="#d95f0e", linewidth=1.5)
     valid = (
         np.isfinite(pd.to_numeric(cells.get("x"), errors="coerce"))
         & np.isfinite(pd.to_numeric(cells.get("y"), errors="coerce"))

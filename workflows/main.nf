@@ -668,11 +668,6 @@ def appendCorticalDepthPreflightChecks(errors, row, settings, params) {
                 corticalDepthAnnotationPath(row, platform, "pial"),
                 "${labelPrefix} pial boundary GeoJSON",
             )
-            appendPreflightFileCheck(
-                errors,
-                corticalDepthAnnotationPath(row, platform, "wm"),
-                "${labelPrefix} gray/white boundary GeoJSON",
-            )
         }
         ["side", "exclusion", "ribbon"].each { role ->
             def optionalPath = corticalDepthAnnotationPath(row, platform, role)

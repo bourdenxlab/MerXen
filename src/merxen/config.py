@@ -351,12 +351,10 @@ class CorticalDepthConfig(BaseModel):
     def _validate_annotation_inputs(self: CorticalDepthConfig) -> CorticalDepthConfig:
         if not self.tables:
             raise ValueError("CorticalDepthConfig requires at least one table")
-        if self.annotation_path is None and (
-            self.pial_boundary_path is None or self.wm_boundary_path is None
-        ):
+        if self.annotation_path is None and self.pial_boundary_path is None:
             raise ValueError(
-                "Provide pial_boundary_path and wm_boundary_path, or a combined "
-                "annotation_path containing pial and gray/white boundary roles"
+                "Provide pial_boundary_path, or a combined annotation_path containing "
+                "role-labelled cortical-depth annotations"
             )
         return self
 

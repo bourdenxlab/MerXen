@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -16,12 +17,16 @@ from spatialdata.models import TableModel
 
 from merxen.config import CorticalDepthConfig, CorticalDepthTableConfig
 from merxen.cortical_depth.assign_cells import (
+    CORTICAL_DEPTH_COLUMNS,
     apply_depth_columns,
     assign_cortical_depth_to_cells,
     assignment_summary,
     extract_cell_coordinates,
 )
-from merxen.cortical_depth.boundaries import load_boundary_annotations
+from merxen.cortical_depth.boundaries import (
+    BoundaryPieceAnnotations,
+    load_boundary_annotations,
+)
 from merxen.cortical_depth.equivolumetric import compute_equal_area_depth
 from merxen.cortical_depth.laplace import solve_laplace_depth
 from merxen.cortical_depth.plotting import (
@@ -30,7 +35,7 @@ from merxen.cortical_depth.plotting import (
     plot_depth_overlay,
     write_geojson,
 )
-from merxen.cortical_depth.ribbon import rasterize_cortical_ribbon
+from merxen.cortical_depth.ribbon import points_inside_mask, rasterize_cortical_ribbon
 from merxen.cortical_depth.streamlines import (
     Streamline,
     streamlines_to_dataframe,
@@ -41,6 +46,16 @@ from merxen.io.spatialdata_io import write_or_replace_element
 from merxen.memory import force_release, log_status
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class PieceDepthResult:
+    tissue_piece_id: str
+    piece_mode: str
+    grid: Any
+    solution: Any | None
+    equal_area_depth: Any | None
+    streamlines: list[Streamline]
 
 
 def run_cortical_depth(config: CorticalDepthConfig) -> dict[str, Path]:
@@ -61,13 +76,92 @@ def run_cortical_depth(config: CorticalDepthConfig) -> dict[str, Path]:
         annotation_path=config.annotation_path,
         smoothing_window=config.boundary_smoothing_window,
     )
+    piece_results = [
+        _process_annotation_piece(
+            config,
+            piece,
+            edge_line=annotations.edge,
+            side_boundaries=annotations.side_boundaries,
+        )
+        for piece in annotations.pieces
+    ]
+    primary_depth_result = next(
+        (result for result in piece_results if result.solution is not None), None
+    )
+    paths = _write_piece_geometry_outputs(
+        output_dir=output_dir,
+        dataset_name=config.dataset_name,
+        piece_results=piece_results,
+        contour_levels=config.contour_levels,
+    )
+
+    sdata_obj = sd.read_zarr(latest_path)
+    table_summaries: dict[str, Any] = {}
+    try:
+        for table_config in config.tables:
+            table_paths, summary = _annotate_table(
+                sdata_obj=sdata_obj,
+                table_config=table_config,
+                config=config,
+                output_dir=output_dir,
+                piece_results=piece_results,
+                primary_depth_result=primary_depth_result,
+            )
+            paths.update(table_paths)
+            table_summaries[table_config.segmentation] = summary
+    finally:
+        del sdata_obj
+        force_release(note=f"after {config.dataset_name} cortical depth")
+
+    summary_path = output_dir / "cortical_depth_qc_summary.json"
+    summary = _build_qc_summary(
+        config=config,
+        solution_residual=(
+            primary_depth_result.solution.residual
+            if primary_depth_result is not None
+            and primary_depth_result.solution is not None
+            else None
+        ),
+        streamlines=[line for result in piece_results for line in result.streamlines],
+        table_summaries=table_summaries,
+    )
+    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True))
+    paths["qc_summary"] = summary_path
+    paths["latest_zarr"] = latest_path
+    log_status(f"[{config.dataset_name}] Cortical-depth computation complete")
+    return paths
+
+
+def _process_annotation_piece(
+    config: CorticalDepthConfig,
+    piece: BoundaryPieceAnnotations,
+    *,
+    edge_line: Any,
+    side_boundaries: tuple[Any, ...] = (),
+) -> PieceDepthResult:
+    raster_annotations = (
+        piece.as_legacy_annotations(tuple(side_boundaries))
+        if edge_line is None and side_boundaries
+        else piece
+    )
     grid = rasterize_cortical_ribbon(
-        annotations,
+        raster_annotations,
         resolution_um=config.raster_resolution_um,
         coordinate_unit_um=config.coordinate_unit_um,
         padding_um=config.raster_padding_um,
         boundary_band_um=config.boundary_band_um,
+        edge_line=edge_line,
+        require_wm=piece.wm is not None,
     )
+    if piece.wm is None:
+        return PieceDepthResult(
+            tissue_piece_id=piece.tissue_piece_id,
+            piece_mode=piece.piece_mode,
+            grid=grid,
+            solution=None,
+            equal_area_depth=None,
+            streamlines=[],
+        )
     solution = solve_laplace_depth(grid)
     streamlines = trace_streamlines(
         solution.phi,
@@ -79,52 +173,70 @@ def run_cortical_depth(config: CorticalDepthConfig) -> dict[str, Path]:
         side_boundary_distance_um=config.side_boundary_distance_um,
     )
     equal_area = compute_equal_area_depth(solution.phi, grid, streamlines)
-
-    paths = _write_geometry_outputs(
-        output_dir=output_dir,
-        dataset_name=config.dataset_name,
+    return PieceDepthResult(
+        tissue_piece_id=piece.tissue_piece_id,
+        piece_mode=piece.piece_mode,
         grid=grid,
-        laplace_depth=solution.phi,
-        equal_area_depth=equal_area.depth,
+        solution=solution,
+        equal_area_depth=equal_area,
         streamlines=streamlines,
-        contour_levels=config.contour_levels,
     )
-    if not equal_area.column_summary.empty:
-        column_summary_path = output_dir / "equivolumetric_column_summary.parquet"
-        equal_area.column_summary.to_parquet(column_summary_path, index=False)
-        paths["equivolumetric_column_summary"] = column_summary_path
 
-    sdata_obj = sd.read_zarr(latest_path)
-    table_summaries: dict[str, Any] = {}
-    try:
-        for table_config in config.tables:
-            table_paths, summary = _annotate_table(
-                sdata_obj=sdata_obj,
-                table_config=table_config,
-                config=config,
-                output_dir=output_dir,
-                solution=solution,
-                equal_area_depth=equal_area,
-                streamlines=streamlines,
+
+def _assign_piecewise_cortical_depth_to_cells(
+    coords: Any,
+    piece_results: list[PieceDepthResult],
+    *,
+    side_boundary_distance_um: float,
+) -> pd.DataFrame:
+    points = np.asarray(coords.coordinates, dtype=float)
+    assignments = _empty_piecewise_assignments(
+        coords.cell_ids.astype(str), points.shape[0]
+    )
+    unassigned = np.ones(points.shape[0], dtype=bool)
+    for result in piece_results:
+        inside = points_inside_mask(points, result.grid)
+        take = unassigned & inside
+        if not take.any():
+            continue
+        if result.solution is not None and result.equal_area_depth is not None:
+            piece_assignments = assign_cortical_depth_to_cells(
+                coords,
+                result.solution,
+                result.equal_area_depth,
+                result.streamlines,
+                side_boundary_distance_um=side_boundary_distance_um,
             )
-            paths.update(table_paths)
-            table_summaries[table_config.segmentation] = summary
-    finally:
-        del sdata_obj
-        force_release(note=f"after {config.dataset_name} cortical depth")
+            for column in piece_assignments.columns:
+                assignments.loc[take, column] = piece_assignments.loc[
+                    take, column
+                ].to_numpy()
+        else:
+            assignments.loc[take, "inside_cortical_ribbon"] = True
+            assignments.loc[take, "cortical_depth_qc_flag"] = "pial_only_no_wm"
+        assignments.loc[take, "cortical_depth_piece_id"] = result.tissue_piece_id
+        assignments.loc[take, "cortical_depth_piece_mode"] = result.piece_mode
+        unassigned[take] = False
+    return assignments
 
-    summary_path = output_dir / "cortical_depth_qc_summary.json"
-    summary = _build_qc_summary(
-        config=config,
-        solution_residual=solution.residual,
-        streamlines=streamlines,
-        table_summaries=table_summaries,
+
+def _empty_piecewise_assignments(cell_ids: pd.Index, n_cells: int) -> pd.DataFrame:
+    assignments = pd.DataFrame(index=cell_ids.astype(str))
+    assignments["inside_cortical_ribbon"] = np.zeros(n_cells, dtype=bool)
+    assignments["cortical_depth_piece_id"] = pd.Series(
+        [None] * n_cells, index=assignments.index, dtype=object
     )
-    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True))
-    paths["qc_summary"] = summary_path
-    paths["latest_zarr"] = latest_path
-    log_status(f"[{config.dataset_name}] Cortical-depth computation complete")
-    return paths
+    assignments["cortical_depth_piece_mode"] = pd.Series(
+        [None] * n_cells, index=assignments.index, dtype=object
+    )
+    for column in CORTICAL_DEPTH_COLUMNS:
+        if column in assignments.columns:
+            continue
+        if column == "cortical_depth_qc_flag":
+            assignments[column] = "outside_ribbon"
+        else:
+            assignments[column] = np.nan
+    return assignments
 
 
 def _annotate_table(
@@ -133,9 +245,8 @@ def _annotate_table(
     table_config: CorticalDepthTableConfig,
     config: CorticalDepthConfig,
     output_dir: Path,
-    solution: Any,
-    equal_area_depth: Any,
-    streamlines: list[Streamline],
+    piece_results: list[PieceDepthResult],
+    primary_depth_result: PieceDepthResult | None,
 ) -> tuple[dict[str, Path], dict[str, Any]]:
     table_key = str(table_config.table_key)
     if table_key not in sdata_obj.tables:
@@ -154,11 +265,9 @@ def _annotate_table(
         sdata_obj=sdata_obj,
         shape_key=shape_key,
     )
-    assignments = assign_cortical_depth_to_cells(
+    assignments = _assign_piecewise_cortical_depth_to_cells(
         coords,
-        solution,
-        equal_area_depth,
-        streamlines,
+        piece_results,
         side_boundary_distance_um=config.side_boundary_distance_um,
     )
     cells = assignments.copy()
@@ -172,18 +281,19 @@ def _annotate_table(
     cells_path = segmentation_dir / f"{sample_stem}_cells_with_cortical_depth.parquet"
     cells.to_parquet(cells_path, index=False)
 
-    plot_cells_by_depth(
-        segmentation_dir / f"{sample_stem}_cells_laplace_depth.png",
-        cells,
-        solution.grid,
-        value_column="laplace_depth",
-    )
-    plot_cells_by_depth(
-        segmentation_dir / f"{sample_stem}_cells_equivolumetric_depth.png",
-        cells,
-        solution.grid,
-        value_column="equivolumetric_depth",
-    )
+    if primary_depth_result is not None:
+        plot_cells_by_depth(
+            segmentation_dir / f"{sample_stem}_cells_laplace_depth.png",
+            cells,
+            primary_depth_result.grid,
+            value_column="laplace_depth",
+        )
+        plot_cells_by_depth(
+            segmentation_dir / f"{sample_stem}_cells_equivolumetric_depth.png",
+            cells,
+            primary_depth_result.grid,
+            value_column="equivolumetric_depth",
+        )
 
     if config.write_spatialdata_table:
         updated = apply_depth_columns(sdata_obj.tables[table_key], assignments)
@@ -214,6 +324,147 @@ def _annotate_table(
         {f"{table_config.segmentation}_cells": cells_path},
         summary,
     )
+
+
+def _write_piece_geometry_outputs(
+    *,
+    output_dir: Path,
+    dataset_name: str,
+    piece_results: list[PieceDepthResult],
+    contour_levels: list[float],
+) -> dict[str, Path]:
+    paths: dict[str, Path] = {}
+    single_depth = len(piece_results) == 1 and piece_results[0].solution is not None
+    for result in piece_results:
+        piece_dir = (
+            output_dir
+            if single_depth
+            else output_dir / "pieces" / _safe_piece_id(result.tissue_piece_id)
+        )
+        piece_dir.mkdir(parents=True, exist_ok=True)
+        if result.solution is None or result.equal_area_depth is None:
+            mask_path = piece_dir / "cortical_ribbon_mask.tif"
+            skio.imsave(
+                mask_path,
+                (result.grid.mask.astype(np.uint8) * 255),
+                check_contrast=False,
+            )
+            paths[f"{result.tissue_piece_id}_ribbon_mask"] = mask_path
+            continue
+        piece_paths = _write_geometry_outputs(
+            output_dir=piece_dir,
+            dataset_name=dataset_name
+            if single_depth
+            else f"{dataset_name}_{result.tissue_piece_id}",
+            grid=result.grid,
+            laplace_depth=result.solution.phi,
+            equal_area_depth=result.equal_area_depth.depth,
+            streamlines=result.streamlines,
+            contour_levels=contour_levels,
+        )
+        for key, path in piece_paths.items():
+            paths[key if single_depth else f"{result.tissue_piece_id}_{key}"] = path
+        if not result.equal_area_depth.column_summary.empty:
+            summary = result.equal_area_depth.column_summary.copy()
+            summary.insert(0, "tissue_piece_id", result.tissue_piece_id)
+            column_summary_path = piece_dir / "equivolumetric_column_summary.parquet"
+            summary.to_parquet(column_summary_path, index=False)
+            paths[
+                "equivolumetric_column_summary"
+                if single_depth
+                else f"{result.tissue_piece_id}_equivolumetric_column_summary"
+            ] = column_summary_path
+
+    _write_combined_piece_vectors(
+        output_dir=output_dir,
+        piece_results=piece_results,
+        contour_levels=contour_levels,
+        paths=paths,
+    )
+    return paths
+
+
+def _write_combined_piece_vectors(
+    *,
+    output_dir: Path,
+    piece_results: list[PieceDepthResult],
+    contour_levels: list[float],
+    paths: dict[str, Path],
+) -> None:
+    streamline_features: list[dict[str, Any]] = []
+    streamline_rows: list[pd.DataFrame] = []
+    laplace_features: list[dict[str, Any]] = []
+    equiv_features: list[dict[str, Any]] = []
+    for result in piece_results:
+        if result.solution is None or result.equal_area_depth is None:
+            continue
+        streamline_fc = streamlines_to_geojson(result.streamlines)
+        for feature in streamline_fc.get("features", []):
+            _add_piece_properties(feature, result)
+            streamline_features.append(feature)
+        df = streamlines_to_dataframe(result.streamlines)
+        if not df.empty:
+            df.insert(0, "tissue_piece_id", result.tissue_piece_id)
+            df.insert(1, "piece_mode", result.piece_mode)
+            streamline_rows.append(df)
+        laplace_fc = depth_contours_to_geojson(
+            result.solution.phi,
+            result.grid,
+            levels=contour_levels,
+            property_name="laplace_depth",
+        )
+        for feature in laplace_fc.get("features", []):
+            _add_piece_properties(feature, result)
+            laplace_features.append(feature)
+        equiv_fc = depth_contours_to_geojson(
+            result.equal_area_depth.depth,
+            result.grid,
+            levels=contour_levels,
+            property_name="equivolumetric_depth",
+        )
+        for feature in equiv_fc.get("features", []):
+            _add_piece_properties(feature, result)
+            equiv_features.append(feature)
+    if streamline_features:
+        streamlines_geojson = output_dir / "streamlines.geojson"
+        write_geojson(
+            {"type": "FeatureCollection", "features": streamline_features},
+            streamlines_geojson,
+        )
+        paths["streamlines_geojson"] = streamlines_geojson
+    if streamline_rows:
+        streamlines_parquet = output_dir / "streamlines.parquet"
+        pd.concat(streamline_rows, ignore_index=True).to_parquet(
+            streamlines_parquet, index=False
+        )
+        paths["streamlines_parquet"] = streamlines_parquet
+    if laplace_features:
+        contours_geojson = output_dir / "depth_contours.geojson"
+        write_geojson(
+            {"type": "FeatureCollection", "features": laplace_features},
+            contours_geojson,
+        )
+        paths["depth_contours_geojson"] = contours_geojson
+    if equiv_features:
+        equiv_contours_geojson = output_dir / "equivolumetric_depth_contours.geojson"
+        write_geojson(
+            {"type": "FeatureCollection", "features": equiv_features},
+            equiv_contours_geojson,
+        )
+        paths["equivolumetric_contours_geojson"] = equiv_contours_geojson
+
+
+def _add_piece_properties(feature: dict[str, Any], result: PieceDepthResult) -> None:
+    properties = feature.setdefault("properties", {})
+    properties["tissue_piece_id"] = result.tissue_piece_id
+    properties["piece_mode"] = result.piece_mode
+
+
+def _safe_piece_id(piece_id: str) -> str:
+    safe = "".join(
+        ch if ch.isalnum() or ch in "._-" else "_" for ch in str(piece_id)
+    ).strip("_")
+    return safe or "piece"
 
 
 def _write_geometry_outputs(
@@ -343,7 +594,7 @@ def _region_from_attrs(attrs: dict[str, Any]) -> str | None:
 def _build_qc_summary(
     *,
     config: CorticalDepthConfig,
-    solution_residual: float,
+    solution_residual: float | None,
     streamlines: list[Streamline],
     table_summaries: dict[str, Any],
 ) -> dict[str, Any]:
@@ -354,7 +605,9 @@ def _build_qc_summary(
     return {
         "dataset_name": config.dataset_name,
         "platform": config.platform,
-        "laplace_residual": float(solution_residual),
+        "laplace_residual": None
+        if solution_residual is None
+        else float(solution_residual),
         "n_streamlines": int(len(streamlines)),
         "n_failed_or_flagged_streamlines": int(len(failed)),
         "mean_streamline_thickness_um": _array_stat(finite, "mean"),
