@@ -20,6 +20,8 @@ from merxen.io.transcript_io import first_existing_col
 
 CORTICAL_DEPTH_COLUMNS = [
     "inside_cortical_ribbon",
+    "cortical_depth_piece_id",
+    "cortical_depth_piece_mode",
     "laplace_depth",
     "equivolumetric_depth",
     "distance_to_pia_um",

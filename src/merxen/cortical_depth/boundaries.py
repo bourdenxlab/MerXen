@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 import numpy as np
 from shapely.geometry import (
@@ -43,10 +43,69 @@ class BoundaryAnnotations:
     """Boundary geometry needed to build a 2D cortical ribbon."""
 
     pial: LineString
-    wm: LineString
+    wm: LineString | None = None
     side_boundaries: tuple[LineString, ...] = ()
     exclusions: tuple[Polygon, ...] = ()
     ribbon: Polygon | MultiPolygon | None = None
+
+
+@dataclass(frozen=True)
+class BoundaryPieceAnnotations:
+    """Boundary geometry for one independently processed tissue piece."""
+
+    tissue_piece_id: str
+    pial: LineString
+    wm: LineString | None = None
+    exclusions: tuple[Polygon, ...] = ()
+    ribbon: Polygon | MultiPolygon | None = None
+
+    @property
+    def piece_mode(self: Self) -> str:
+        return "depth" if self.wm is not None else "mask_qc_only"
+
+    def as_legacy_annotations(
+        self: Self,
+        side_boundaries: tuple[LineString, ...] = (),
+    ) -> BoundaryAnnotations:
+        return BoundaryAnnotations(
+            pial=self.pial,
+            wm=self.wm,
+            side_boundaries=side_boundaries,
+            exclusions=self.exclusions,
+            ribbon=self.ribbon,
+        )
+
+
+@dataclass(frozen=True)
+class BoundaryAnnotationSet:
+    """Piece-aware cortical-depth annotations plus the global tissue edge."""
+
+    pieces: tuple[BoundaryPieceAnnotations, ...]
+    edge: LineString | None = None
+    side_boundaries: tuple[LineString, ...] = ()
+
+    @property
+    def pial(self: Self) -> LineString:
+        return self.pieces[0].pial
+
+    @property
+    def wm(self: Self) -> LineString | None:
+        return self.pieces[0].wm
+
+    @property
+    def exclusions(self: Self) -> tuple[Polygon, ...]:
+        return tuple(poly for piece in self.pieces for poly in piece.exclusions)
+
+    @property
+    def ribbon(self: Self) -> Polygon | MultiPolygon | None:
+        if len(self.pieces) == 1:
+            return self.pieces[0].ribbon
+        return None
+
+    def require_single_piece(self: Self) -> BoundaryAnnotations:
+        if len(self.pieces) != 1:
+            raise ValueError("Expected exactly one cortical-depth tissue piece.")
+        return self.pieces[0].as_legacy_annotations(self.side_boundaries)
 
 
 def load_boundary_annotations(
@@ -58,7 +117,7 @@ def load_boundary_annotations(
     ribbon_path: Path | str | None = None,
     annotation_path: Path | str | None = None,
     smoothing_window: int = 0,
-) -> BoundaryAnnotations:
+) -> BoundaryAnnotationSet:
     """Load pial/white-matter boundaries and optional masks from GeoJSON files.
 
     Args:
@@ -83,51 +142,92 @@ def load_boundary_annotations(
     """
     combined = _read_feature_geometries(annotation_path) if annotation_path else []
 
-    pial = (
-        read_line_annotation(pial_path, role="pia")
-        if pial_path is not None
-        else _line_from_features(combined, "pia")
-    )
-    wm = (
-        read_line_annotation(wm_path, role="wm")
-        if wm_path is not None
-        else _line_from_features(combined, "wm")
-    )
-    if pial is None:
-        raise ValueError("Missing pial boundary annotation.")
-    if wm is None:
-        raise ValueError("Missing gray/white matter boundary annotation.")
+    pial_by_piece: dict[str, list[LineString]] = {}
+    wm_by_piece: dict[str, list[LineString]] = {}
+    exclusions_by_piece: dict[str, list[Polygon]] = {}
+    ribbons_by_piece: dict[str, list[Polygon]] = {}
 
-    pial = smooth_line(pial, smoothing_window)
-    wm = smooth_line(wm, smoothing_window)
-    _validate_line(pial, "pial boundary")
-    _validate_line(wm, "gray/white matter boundary")
+    if pial_path is not None:
+        pial = read_line_annotation(pial_path, role="pia")
+        if pial is not None:
+            pial_by_piece.setdefault("piece_1", []).append(pial)
+    else:
+        _extend_line_groups(
+            pial_by_piece, _lines_by_piece_from_features(combined, "pia")
+        )
 
-    side_lines = []
+    if wm_path is not None:
+        wm = read_line_annotation(wm_path, role="wm")
+        if wm is not None:
+            wm_by_piece.setdefault("piece_1", []).append(wm)
+    else:
+        _extend_line_groups(wm_by_piece, _lines_by_piece_from_features(combined, "wm"))
+
+    side_lines: list[LineString] = []
     if side_boundary_path is not None:
         side_lines.extend(read_line_annotations(side_boundary_path, role="side"))
     side_lines.extend(_lines_from_features(combined, "side"))
     side_lines = [smooth_line(line, smoothing_window) for line in side_lines]
 
-    exclusions = []
     if exclusion_path is not None:
-        exclusions.extend(read_polygon_annotations(exclusion_path, role="exclusion"))
-    exclusions.extend(_polygons_from_features(combined, "exclusion"))
+        exclusions_by_piece.setdefault("piece_1", []).extend(
+            read_polygon_annotations(exclusion_path, role="exclusion")
+        )
+    _extend_polygon_groups(
+        exclusions_by_piece, _polygons_by_piece_from_features(combined, "exclusion")
+    )
 
-    ribbon = None
     if ribbon_path is not None:
         ribbon_polygons = read_polygon_annotations(ribbon_path, role="ribbon")
-        ribbon = _union_polygons(ribbon_polygons) if ribbon_polygons else None
-    if ribbon is None:
-        ribbon_polygons = _polygons_from_features(combined, "ribbon")
-        ribbon = _union_polygons(ribbon_polygons) if ribbon_polygons else None
+        if ribbon_polygons:
+            ribbons_by_piece.setdefault("piece_1", []).extend(ribbon_polygons)
+    _extend_polygon_groups(
+        ribbons_by_piece, _polygons_by_piece_from_features(combined, "ribbon")
+    )
 
-    return BoundaryAnnotations(
-        pial=pial,
-        wm=wm,
+    piece_ids = sorted(
+        set(pial_by_piece)
+        | set(wm_by_piece)
+        | set(exclusions_by_piece)
+        | set(ribbons_by_piece)
+    )
+    if not piece_ids:
+        raise ValueError("Missing pial boundary annotation.")
+
+    pieces: list[BoundaryPieceAnnotations] = []
+    for piece_id in piece_ids:
+        pial = _merge_piece_lines(
+            pial_by_piece.get(piece_id, []), f"{piece_id} pial boundary"
+        )
+        wm = _merge_piece_lines(
+            wm_by_piece.get(piece_id, []), f"{piece_id} gray/white boundary"
+        )
+        if pial is None:
+            if wm is not None:
+                raise ValueError(
+                    f"{piece_id} has a gray/white matter boundary but no pial boundary."
+                )
+            raise ValueError(f"{piece_id} is missing a pial boundary annotation.")
+        pial = smooth_line(pial, smoothing_window)
+        wm = smooth_line(wm, smoothing_window) if wm is not None else None
+        _validate_line(pial, f"{piece_id} pial boundary")
+        if wm is not None:
+            _validate_line(wm, f"{piece_id} gray/white matter boundary")
+        ribbon = _union_polygons(ribbons_by_piece.get(piece_id, []))
+        pieces.append(
+            BoundaryPieceAnnotations(
+                tissue_piece_id=piece_id,
+                pial=pial,
+                wm=wm,
+                exclusions=tuple(exclusions_by_piece.get(piece_id, ())),
+                ribbon=ribbon,
+            )
+        )
+
+    return BoundaryAnnotationSet(
+        pieces=tuple(pieces),
+        edge=side_lines[0] if len(side_lines) == 1 else None,
         side_boundaries=tuple(side_lines),
-        exclusions=tuple(exclusions),
-        ribbon=ribbon,
     )
 
 
@@ -257,6 +357,25 @@ def _lines_from_features(
     return [_validate_line(line, role) for line in lines if line.length > 0]
 
 
+def _lines_by_piece_from_features(
+    features: list[tuple[BaseGeometry, dict[str, Any]]],
+    role: str,
+) -> dict[str, list[LineString]]:
+    grouped: dict[str, list[LineString]] = {}
+    for geom, properties in features:
+        if _feature_matches_role(properties, role):
+            piece_id = _feature_piece_id(properties)
+            grouped.setdefault(piece_id, []).extend(_coerce_lines(geom))
+    return {
+        piece_id: [
+            _validate_line(line, f"{piece_id} {role}")
+            for line in lines
+            if line.length > 0
+        ]
+        for piece_id, lines in grouped.items()
+    }
+
+
 def _polygons_from_features(
     features: list[tuple[BaseGeometry, dict[str, Any]]],
     role: str,
@@ -266,6 +385,62 @@ def _polygons_from_features(
         if _feature_matches_role(properties, role):
             polygons.extend(_coerce_polygons(geom))
     return [_validate_polygon(poly, role) for poly in polygons if poly.area > 0]
+
+
+def _polygons_by_piece_from_features(
+    features: list[tuple[BaseGeometry, dict[str, Any]]],
+    role: str,
+) -> dict[str, list[Polygon]]:
+    grouped: dict[str, list[Polygon]] = {}
+    for geom, properties in features:
+        if _feature_matches_role(properties, role):
+            piece_id = _feature_piece_id(properties)
+            grouped.setdefault(piece_id, []).extend(_coerce_polygons(geom))
+    return {
+        piece_id: [
+            _validate_polygon(poly, f"{piece_id} {role}")
+            for poly in polygons
+            if poly.area > 0
+        ]
+        for piece_id, polygons in grouped.items()
+    }
+
+
+def _feature_piece_id(properties: dict[str, Any]) -> str:
+    for key in ("tissue_piece_id", "piece_id", "region_id", "component_id"):
+        value = properties.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return "piece_1"
+
+
+def _extend_line_groups(
+    target: dict[str, list[LineString]],
+    source: dict[str, list[LineString]],
+) -> None:
+    for piece_id, lines in source.items():
+        target.setdefault(piece_id, []).extend(lines)
+
+
+def _extend_polygon_groups(
+    target: dict[str, list[Polygon]],
+    source: dict[str, list[Polygon]],
+) -> None:
+    for piece_id, polygons in source.items():
+        target.setdefault(piece_id, []).extend(polygons)
+
+
+def _merge_piece_lines(lines: list[LineString], label: str) -> LineString | None:
+    if not lines:
+        return None
+    if len(lines) == 1:
+        return lines[0]
+    merged = linemerge(MultiLineString(lines))
+    if isinstance(merged, LineString):
+        return merged
+    raise ValueError(
+        f"Multiple {label} segments could not be merged into one continuous line."
+    )
 
 
 def _feature_matches_role(properties: dict[str, Any], role: str) -> bool:
