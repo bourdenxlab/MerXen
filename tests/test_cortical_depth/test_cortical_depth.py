@@ -24,7 +24,10 @@ from merxen.cortical_depth.pipeline import (
     PieceDepthResult,
     _assign_piecewise_cortical_depth_to_cells,
 )
-from merxen.cortical_depth.ribbon import rasterize_cortical_ribbon
+from merxen.cortical_depth.ribbon import (
+    _unique_valid_polygons,
+    rasterize_cortical_ribbon,
+)
 from merxen.cortical_depth.streamlines import trace_streamlines
 
 
@@ -138,6 +141,18 @@ def test_edge_overhang_with_near_snapped_endpoints_rasterizes() -> None:
     assert grid.mask.any()
     assert grid.pial_boundary.any()
     assert grid.wm_boundary.any()
+
+
+def test_near_duplicate_candidate_polygons_are_deduplicated() -> None:
+    """Projected and polygonized versions of one piece should not look ambiguous."""
+    square = Polygon([(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)])
+    near_square = Polygon([(0.0, 0.0), (10.0, 0.0), (10.0, 10.000001), (0.0, 10.0)])
+    distinct = Polygon([(20.0, 0.0), (30.0, 0.0), (30.0, 10.0), (20.0, 10.0)])
+
+    assert _unique_valid_polygons([square, near_square, distinct]) == [
+        square,
+        distinct,
+    ]
 
 
 def test_pial_only_piece_rasterizes_mask_qc_only_and_assigns_cells() -> None:
