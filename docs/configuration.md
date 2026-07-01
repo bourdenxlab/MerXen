@@ -57,7 +57,7 @@ any of them with `--<name>` on the command line.
 | `enable_alignment` | `false` | Fallback row alignment switch. A non-empty samplesheet `enable_alignment` value overrides this per row; alignment only applies to paired rows. |
 | `analysis_segmentation` | `both` | Fallback downstream analysis branches after enrichment. Valid values: `both`, `reseg`, `original_seg`; comma-separated combinations are accepted. A non-empty samplesheet `analysis_segmentation` value overrides this per row. |
 | `mask_image_quantification_enabled` | `true` | Insert the Cellpose-mask image quantification stage between enrichment and QC. A non-empty samplesheet `mask_image_quantification_enabled` value overrides this per row. |
-| `cortical_depth_enabled` | `false` | Insert the cortical-depth stage before QC. Requires per-sample pial and gray/white boundary GeoJSON annotations. A non-empty samplesheet `cortical_depth_enabled` value overrides this per row. |
+| `cortical_depth_enabled` | `false` | Insert the cortical-depth stage before QC. Requires per-sample pial/tissue-edge annotations, with optional gray/white boundaries for depth pieces. A non-empty samplesheet `cortical_depth_enabled` value overrides this per row. |
 | `force_spatialdata_build` | `false` | Rebuild SpatialData zarrs even if cached. |
 | `start_stage` | `build_spatialdata` | Fallback first stage. Skipped upstream stages are read from published outputs. A samplesheet `start_stage` value overrides this per row. |
 | `stop_stage` | `clustering_squidpy` | Fallback last stage. MapMyCells is available after this but opt-in because it requires reference files. A samplesheet `stop_stage` value overrides this per row. |

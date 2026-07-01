@@ -57,9 +57,10 @@ checks for reference files required by the selected stage range. For example,
 `clustering_squidpy` with hierarchical mode checks the broad marker lookup and
 Allen taxonomy paths, while `mapmycells` checks whole-brain marker/stat files
 only when that module is selected and the requested reference mode needs them.
-When `compute_cortical_depth` is selected, preflight checks pial/gray-white
-boundary GeoJSONs or a combined role-labelled annotation GeoJSON for every
-active platform.
+When `compute_cortical_depth` is selected, preflight checks pial/tissue-edge
+annotation GeoJSONs or a combined role-labelled annotation GeoJSON for every
+active platform. Gray/white boundaries are optional for pial-only mask/QC
+pieces.
 Missing references stop the run immediately with the selected stages and paths
 that need attention.
 

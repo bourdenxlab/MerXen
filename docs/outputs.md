@@ -128,7 +128,7 @@ Only present when `--cortical_depth_enabled true`.
 | `compute_cortical_depth_out/depth_contours.geojson` | Laplace depth contours, usually 10%-90%. |
 | `compute_cortical_depth_out/equivolumetric_depth_contours.geojson` | Equal-area/equivolumetric depth contours. |
 | `compute_cortical_depth_out/<segmentation>/*_cells_with_cortical_depth.parquet` | Per-cell sidecar table with depth columns for each selected segmentation branch. |
-| `compute_cortical_depth_out/*_cortical_depth_overlay.png` | QC overlay with pial/WM boundaries, ribbon, contours, and streamlines. PDF copy is also written. |
+| `compute_cortical_depth_out/*_cortical_depth_overlay.png` | QC overlay with pial, optional WM, ribbon, contours, and streamlines. PDF copy is also written. |
 | `compute_cortical_depth_out/<segmentation>/*_cells_laplace_depth.png` | Cells colored by `laplace_depth`. PDF copy is also written. |
 | `compute_cortical_depth_out/<segmentation>/*_cells_equivolumetric_depth.png` | Cells colored by `equivolumetric_depth`. PDF copy is also written. |
 | `compute_cortical_depth_out/cortical_depth_qc_summary.json` | Cell inside/outside counts, assigned counts, streamline thickness stats, failed/flagged streamlines, warnings. |

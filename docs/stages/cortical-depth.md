@@ -1,7 +1,8 @@
 # Cortical Depth
 
 Computes 2D cortical-depth coordinates for human cortex Xenium/MERSCOPE
-sections from user-annotated pial and gray/white matter boundaries.
+sections from user-annotated pial, tissue-edge, and optional gray/white matter
+boundaries.
 
 The stage solves a 2D Laplace equation inside a cortical ribbon, traces
 gradient streamlines from pia to white matter, and annotates each selected
@@ -20,21 +21,22 @@ GeoJSON:
 
 | Annotation | Meaning |
 |------------|---------|
-| Pial boundary polyline | Depth 0 boundary. |
-| Gray/white matter boundary polyline | Depth 1 boundary. |
+| Pial boundary polyline | Depth 0 boundary for a depth piece, or the surface boundary for a mask/QC-only piece. |
+| Tissue-edge polyline | One global tissue edge. It may be U-shaped or closed/box-like and is used to construct piece masks when no explicit ribbon is supplied. |
 
 Optional:
 
 | Annotation | Meaning |
 |------------|---------|
-| Side-boundary polylines | Artificial tissue/ribbon edges. These are treated as no-flux boundaries and flagged for nearby streamlines/cells. |
+| Gray/white matter boundary polyline | Depth 1 boundary for a tissue piece. Pieces without WM are kept as `mask_qc_only` and do not receive Laplace/equivolumetric depth. |
 | Exclusion polygons | Tears, folds, blood vessels, or artefacts removed from the ribbon. |
-| Cortical ribbon polygon | Complete ribbon mask. If omitted, MerXen connects pial and WM line endpoints. |
+| Cortical ribbon polygon | Complete ribbon mask for a piece. Use this when edge + pia + optional WM is ambiguous, especially for pial-only pieces. |
 
 For combined GeoJSON files, feature properties such as `role`, `type`, `name`,
 `label`, `boundary`, or `classification.name` are matched against aliases like
 `pial_boundary`, `grey_white_boundary`, `side_boundary`, `exclusion`, and
-`cortical_ribbon`.
+`cortical_ribbon`. Use `tissue_piece_id` to group pia, optional WM, exclusions,
+and ribbon polygons for independent tissue pieces.
 
 ## Running
 
@@ -64,10 +66,11 @@ columns such as `pial_boundary_geojson` / `wm_boundary_geojson`.
 
 ## Method
 
-1. Build a clean 2D cortical ribbon polygon from pial/WM boundaries, optional
-   side boundaries, optional ribbon polygon, and exclusion masks.
+1. Build clean 2D cortical piece polygons from the tissue edge, pial boundary,
+   optional WM boundary, optional ribbon polygon, and exclusion masks.
 2. Rasterize the ribbon at `--cortical_depth_raster_resolution_um`.
-3. Solve `del^2 phi = 0` with `phi=0` at pia and `phi=1` at gray/white matter.
+3. For pieces with WM, solve `del^2 phi = 0` with `phi=0` at pia and `phi=1`
+   at gray/white matter. Pial-only pieces are retained as mask/QC-only regions.
    Non-Dirichlet mask edges are handled as zero-normal-gradient boundaries.
 4. Trace normalized-gradient streamlines from the pial boundary to the WM
    boundary.

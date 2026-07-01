@@ -39,17 +39,18 @@ required. A template lives at
 ### Cortical-depth annotation columns
 
 When cortical depth is enabled, each active platform must provide either a
-combined role-labelled annotation GeoJSON or separate pial and gray/white
-boundary GeoJSON files. Platform-specific columns are preferred; generic
+combined role-labelled annotation GeoJSON or separate pial boundary GeoJSON
+files. Gray/white matter boundaries are optional for pial-only mask/QC pieces.
+Platform-specific columns are preferred; generic
 columns are accepted when one row uses a single active platform or the same
 annotation should be reused.
 
 | Column pattern | Description |
 |----------------|-------------|
-| `<platform>_cortical_depth_annotation_geojson` | Combined GeoJSON with role-labelled pial/WM features. `<platform>` is `merscope` or `xenium`. Generic alias: `cortical_depth_annotation_geojson`. |
+| `<platform>_cortical_depth_annotation_geojson` | Combined GeoJSON with role-labelled pial, tissue-edge, optional WM, and optional mask features. `<platform>` is `merscope` or `xenium`. Generic alias: `cortical_depth_annotation_geojson`. |
 | `<platform>_pial_boundary_geojson` | Pial boundary polyline. Generic alias: `pial_boundary_geojson`. |
-| `<platform>_wm_boundary_geojson` | Gray/white matter boundary polyline. Aliases include `grey_white_boundary_geojson`, `gray_white_boundary_geojson`, and `gm_wm_boundary_geojson`. |
-| `<platform>_side_boundaries_geojson` | Optional artificial side/tissue-edge polylines. Generic alias: `side_boundaries_geojson`. |
+| `<platform>_wm_boundary_geojson` | Optional gray/white matter boundary polyline. Aliases include `grey_white_boundary_geojson`, `gray_white_boundary_geojson`, and `gm_wm_boundary_geojson`. |
+| `<platform>_side_boundaries_geojson` | Tissue-edge polyline. New piece-aware annotations should contain exactly one edge line. Generic alias: `side_boundaries_geojson`. |
 | `<platform>_exclusion_masks_geojson` | Optional exclusion polygons for tears, folds, vessels, or artefacts. Generic alias: `exclusion_masks_geojson`. |
 | `<platform>_cortical_ribbon_geojson` | Optional complete ribbon polygon. Generic alias: `cortical_ribbon_geojson`. |
 
