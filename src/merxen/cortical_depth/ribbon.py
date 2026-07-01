@@ -226,13 +226,13 @@ def _edge_subchain_candidate_piece_polygons(
 
     pial_distances = _line_endpoint_edge_distances(edge_line, pial)
     if wm is None:
-        candidates: list[Polygon] = []
+        pial_only_candidates: list[Polygon] = []
         for edge_path in _edge_paths_between(
             edge_line, pial_distances[1], pial_distances[0]
         ):
             ring = _join_coordinate_parts([pial_coords, edge_path[1:]])
-            candidates.extend(_valid_polygons_from_ring_coordinates(ring))
-        return _unique_valid_polygons(candidates)
+            pial_only_candidates.extend(_valid_polygons_from_ring_coordinates(ring))
+        return _unique_valid_polygons(pial_only_candidates)
 
     wm_coords = _line_xy_array(wm)
     if wm_coords.shape[0] < 2:
