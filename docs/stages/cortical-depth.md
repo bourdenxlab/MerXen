@@ -87,6 +87,7 @@ Added to every selected AnnData table:
 | Column | Meaning |
 |--------|---------|
 | `inside_cortical_ribbon` | Cell centroid falls inside the rasterized cortical ribbon. |
+| `cortical_depth_annotation` | Whole-sample tissue category: `grey_matter`, `white_matter`, `excluded`, or `outside_brain`. |
 | `laplace_depth` | Bilinear interpolation of the Laplace scalar field, pia=0 and WM=1. |
 | `equivolumetric_depth` | 2D equal-area depth within the nearest streamline column. Preferred for layer-relevant comparisons. |
 | `distance_to_pia_um` | Distance along nearest streamline from pia to the nearest streamline sample. |
@@ -110,8 +111,10 @@ Published under
 | `compute_cortical_depth_out/equivolumetric_depth_contours.geojson` | Equal-area depth contours. |
 | `compute_cortical_depth_out/<segmentation>/*_cells_with_cortical_depth.parquet` | Per-cell depth sidecar for each selected segmentation branch. |
 | `compute_cortical_depth_out/*_cortical_depth_overlay.png` | Ribbon, boundaries, contours, and streamlines. PDF copy is also written. |
+| `compute_cortical_depth_out/*_laplace_equivolumetric_difference.png` | Raster difference plot of `laplace_depth - equivolumetric_depth`. PDF copy is also written. |
 | `compute_cortical_depth_out/<segmentation>/*_cells_laplace_depth.png` | Cells colored by Laplace depth. PDF copy is also written. |
 | `compute_cortical_depth_out/<segmentation>/*_cells_equivolumetric_depth.png` | Cells colored by equal-area depth. PDF copy is also written. |
+| `compute_cortical_depth_out/<segmentation>/*_cells_tissue_annotation.png` | All cells colored as `grey_matter`, `white_matter`, `excluded`, or `outside_brain`. PDF copy is also written. |
 | `compute_cortical_depth_out/cortical_depth_qc_summary.json` | Cell counts, streamline thickness stats, failed/flagged streamlines, warnings. |
 
 The stage updates the source `latest_spatialdata.zarr` in place by default.

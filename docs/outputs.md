@@ -129,14 +129,17 @@ Only present when `--cortical_depth_enabled true`.
 | `compute_cortical_depth_out/equivolumetric_depth_contours.geojson` | Equal-area/equivolumetric depth contours. |
 | `compute_cortical_depth_out/<segmentation>/*_cells_with_cortical_depth.parquet` | Per-cell sidecar table with depth columns for each selected segmentation branch. |
 | `compute_cortical_depth_out/*_cortical_depth_overlay.png` | QC overlay with pial, optional WM, ribbon, contours, and streamlines. PDF copy is also written. |
+| `compute_cortical_depth_out/*_laplace_equivolumetric_difference.png` | Raster difference plot of `laplace_depth - equivolumetric_depth`. PDF copy is also written. |
 | `compute_cortical_depth_out/<segmentation>/*_cells_laplace_depth.png` | Cells colored by `laplace_depth`. PDF copy is also written. |
 | `compute_cortical_depth_out/<segmentation>/*_cells_equivolumetric_depth.png` | Cells colored by `equivolumetric_depth`. PDF copy is also written. |
+| `compute_cortical_depth_out/<segmentation>/*_cells_tissue_annotation.png` | All cells colored as `grey_matter`, `white_matter`, `excluded`, or `outside_brain`. PDF copy is also written. |
 | `compute_cortical_depth_out/cortical_depth_qc_summary.json` | Cell inside/outside counts, assigned counts, streamline thickness stats, failed/flagged streamlines, warnings. |
 
 The updated AnnData `obs` columns include `inside_cortical_ribbon`,
-`laplace_depth`, `equivolumetric_depth`, `distance_to_pia_um`,
-`distance_to_wm_um`, `streamline_thickness_um`, `tangential_position_um`,
-`nearest_streamline_id`, `column_id`, and `cortical_depth_qc_flag`.
+`cortical_depth_annotation`, `laplace_depth`, `equivolumetric_depth`,
+`distance_to_pia_um`, `distance_to_wm_um`, `streamline_thickness_um`,
+`tangential_position_um`, `nearest_streamline_id`, `column_id`, and
+`cortical_depth_qc_flag`.
 
 ### QC
 
