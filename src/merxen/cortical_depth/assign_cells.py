@@ -22,6 +22,7 @@ CORTICAL_DEPTH_COLUMNS = [
     "inside_cortical_ribbon",
     "cortical_depth_piece_id",
     "cortical_depth_piece_mode",
+    "cortical_depth_annotation",
     "laplace_depth",
     "equivolumetric_depth",
     "distance_to_pia_um",
