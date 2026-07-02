@@ -15,7 +15,7 @@ from scipy.spatial import cKDTree
 from merxen.cortical_depth.equivolumetric import EquivolumetricResult
 from merxen.cortical_depth.laplace import LaplaceSolution, interpolate_scalar_field
 from merxen.cortical_depth.ribbon import RibbonGrid, points_inside_mask
-from merxen.cortical_depth.streamlines import Streamline
+from merxen.cortical_depth.streamlines import Streamline, select_valid_streamlines
 from merxen.io.transcript_io import first_existing_col
 
 CORTICAL_DEPTH_COLUMNS = [
@@ -231,7 +231,8 @@ def _nearest_streamline_values(
         "nearest_streamline_id": np.full(n_cells, np.nan, dtype=float),
         "column_id": np.full(n_cells, np.nan, dtype=float),
     }
-    lookup = build_streamline_lookup(streamlines)
+    valid = select_valid_streamlines(streamlines)
+    lookup = build_streamline_lookup(valid or streamlines)
     if lookup is None or n_cells == 0:
         return base
     finite = np.isfinite(points).all(axis=1)

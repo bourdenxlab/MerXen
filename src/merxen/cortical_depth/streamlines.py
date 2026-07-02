@@ -45,7 +45,20 @@ def compute_normalized_gradient(phi: np.ndarray, grid: RibbonGrid) -> np.ndarray
     norm = np.linalg.norm(gradient, axis=-1)
     keep = norm > 0
     gradient[keep] = gradient[keep] / norm[keep, None]
-    gradient[~keep] = np.nan
+    # Fill degenerate (zero-norm) nodes with the nearest valid unit vector.
+    # These are almost entirely the flat, nearest-value-filled band just outside
+    # the ribbon: leaving them NaN makes the linear gradient interpolator return
+    # NaN for any streamline whose stencil straddles the pial boundary, which
+    # kills a large fraction of seeds at their first step. Filling instead lets
+    # streamlines step inward off the pia and terminate on the ribbon/WM checks.
+    invalid = ~keep
+    if invalid.any() and keep.any():
+        nearest = ndimage.distance_transform_edt(
+            invalid,
+            return_distances=False,
+            return_indices=True,
+        )
+        gradient = gradient[nearest[0], nearest[1]]
     return gradient
 
 
@@ -128,6 +141,22 @@ def trace_streamlines(
             )
         )
     return streamlines
+
+
+def select_valid_streamlines(streamlines: list[Streamline]) -> list[Streamline]:
+    """Return streamlines that trace a real pia-to-white-matter path.
+
+    Failed seeds (``zero_or_nan_gradient``/``left_ribbon``) are still resampled to
+    the fixed point count and would otherwise pollute nearest-streamline lookups
+    and area-ratio estimates with degenerate stubs clustered on the pia.
+    """
+    return [
+        line
+        for line in streamlines
+        if line.reached_wm
+        and float(line.thickness_um) > 0.0
+        and np.asarray(line.points).shape[0] >= 2
+    ]
 
 
 def resample_path(path: np.ndarray, n_points: int) -> np.ndarray:
