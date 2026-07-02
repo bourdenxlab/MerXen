@@ -42,16 +42,16 @@ process MAPMYCELLS {
     def mapmycellsSamplesJson = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(mapmycellsSamples))
     def regionLabelValues = []
     if (params.mapmycells_region_labels instanceof List) {
-        regionLabelValues = params.mapmycells_region_labels.collect { it.toString() }
+        regionLabelValues = params.mapmycells_region_labels.collect { label -> label.toString() }
     } else if (params.mapmycells_region_labels != null) {
         def rawRegionLabels = params.mapmycells_region_labels.toString().trim()
         if (rawRegionLabels.startsWith("[")) {
-            regionLabelValues = new groovy.json.JsonSlurper().parseText(rawRegionLabels).collect { it.toString() }
+            regionLabelValues = new groovy.json.JsonSlurper().parseText(rawRegionLabels).collect { label -> label.toString() }
         } else if (rawRegionLabels) {
             regionLabelValues = rawRegionLabels
                 .split(",")
-                .collect { it.trim() }
-                .findAll { it.length() > 0 }
+                .collect { label -> label.trim() }
+                .findAll { label -> label.length() > 0 }
         }
     }
     def regionLabelsJson = groovy.json.JsonOutput.toJson(regionLabelValues)

@@ -20,8 +20,8 @@ def parseChannels(rawValue, defaults) {
     def values = rawValue
         .toString()
         .split(",")
-        .collect { it.trim() }
-        .findAll { it.length() > 0 }
+        .collect { value -> value.trim() }
+        .findAll { value -> value.length() > 0 }
     return values ? values : defaults
 }
 
@@ -29,7 +29,7 @@ def parseRange(rawValue, fallbackStart = 0, fallbackEnd = 6) {
     if (rawValue == null || rawValue.toString().trim().isEmpty()) {
         return [fallbackStart as int, fallbackEnd as int]
     }
-    def parts = rawValue.toString().split("-").collect { it.trim() }
+    def parts = rawValue.toString().split("-").collect { value -> value.trim() }
     if (parts.size() != 2) {
         return [fallbackStart as int, fallbackEnd as int]
     }
@@ -120,8 +120,8 @@ def normalizeAnalysisSegmentation(rawValue) {
     def selected = []
     raw
         .split(",")
-        .collect { it.trim() }
-        .findAll { it.length() > 0 }
+        .collect { value -> value.trim() }
+        .findAll { value -> value.length() > 0 }
         .each { value ->
             def key = value
                 .toLowerCase()
@@ -185,7 +185,7 @@ def buildConfigForPlatform(row, pairId, platform) {
             persistent_output_path: input.spatialdataPath ?: null,
             merscope_transform_path: chooseField(row, ["merscope_transform_path"]) ?: null,
             merscope: [
-                z_layers: (zRange[0]..zRange[1]).collect { it as int },
+                z_layers: (zRange[0]..zRange[1]).collect { layer -> layer as int },
             ],
             xenium: [:],
         ]
@@ -346,7 +346,7 @@ def corticalDepthConfigForPlatform(
 }
 
 def samplesJsonFromGroupedZarrs(pairId, activePlatforms, platformNames, zarrPaths) {
-    def names = platformNames.collect { it.toString() }
+    def names = platformNames.collect { platformName -> platformName.toString() }
     def pathsByPlatform = [:]
     activePlatforms.each { platform ->
         def idx = names.indexOf(platform)
@@ -513,7 +513,7 @@ def findCachedTaxonomyMetadataPath(rawCacheDir) {
             matches << candidate
         }
     }
-    return matches ? matches.sort { it.toString() }[-1] : null
+    return matches ? matches.sort { path -> path.toString() }[-1] : null
 }
 
 def appendClusteringSquidpyPreflightChecks(errors, settings, params) {
@@ -649,7 +649,7 @@ def corticalDepthAnnotationPath(row, platform, role) {
     return chooseField(row, candidatesByRole[role] ?: [])
 }
 
-def appendCorticalDepthPreflightChecks(errors, row, settings, params) {
+def appendCorticalDepthPreflightChecks(errors, row, settings, _params) {
     if (!settings.run_compute_cortical_depth) {
         return
     }
@@ -691,7 +691,7 @@ def runPreflightChecks(row, settings, params) {
         throw new IllegalArgumentException(
             "Preflight checks failed for sample ${settings.pair_id} " +
             "(selected stages: ${settings.selected_stages.join(' -> ')}):\n" +
-            errors.collect { " - ${it}" }.join("\n")
+            errors.collect { errorMessage -> " - ${errorMessage}" }.join("\n")
         )
     }
 }
@@ -853,8 +853,8 @@ def rowSampleSettings(row, params) {
         stage_order: stageOrder,
         start_stage: startStage,
         stop_stage: stopStage,
-        selected_stages: stageOrder.findAll {
-            stageInRange(it, startStage, stopStage, stageOrder)
+        selected_stages: stageOrder.findAll { stage ->
+            stageInRange(stage, startStage, stopStage, stageOrder)
         },
         run_build: runBuild,
         run_segment: runSegment,
@@ -925,7 +925,7 @@ workflow {
         error "Missing required parameter: --samplesheet"
     }
 
-    samplesheet_ch = Channel
+    samplesheet_ch = channel
         .fromPath(params.samplesheet, checkIfExists: true)
         .splitCsv(header: true, sep: ",", quote: '"', strip: true)
 
@@ -943,7 +943,7 @@ workflow {
     }
 
     preflight_done_ch = sample_rows_raw_ch
-        .map { pairId, row, settings ->
+        .map { _pairId, row, settings ->
             runPreflightChecks(row, settings, params)
             true
         }
@@ -952,7 +952,7 @@ workflow {
 
     sample_rows_ch = sample_rows_raw_ch
         .combine(preflight_done_ch)
-        .map { pairId, row, settings, doneFlag ->
+        .map { pairId, row, settings, _doneFlag ->
             tuple(pairId, row, settings)
         }
 
@@ -975,7 +975,7 @@ workflow {
 
     build_task_results_ch = BUILD_SPATIALDATA(build_inputs_ch)
 
-    build_published_results_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+    build_published_results_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
         if (!(settings.need_build_results && !settings.run_build)) {
             []
         } else {
@@ -1126,7 +1126,7 @@ workflow {
 
     segment_task_results_ch = SEGMENT(segment_inputs_ch)
 
-    segment_published_results_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+    segment_published_results_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
         if (!((settings.run_enrich || settings.run_mask_image_quantification) &&
               !settings.run_segment)) {
             []
@@ -1171,7 +1171,7 @@ workflow {
         tuple(key, pairId, platform, sourceSpatialdata.toString())
     }
 
-    enrich_gate_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+    enrich_gate_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
         if (!settings.run_enrich) {
             []
         } else {
@@ -1185,8 +1185,8 @@ workflow {
         .join(metadata_ch)
         .join(enrich_gate_ch)
         .map {
-            key, pairId, platform, latestZarr, maskPath, transcriptsCsv,
-            pairMeta, platformMeta, originalDataPath, runFlag ->
+            key, pairId, platform, latestZarr, maskPath, _transcriptsCsv,
+            pairMeta, platformMeta, originalDataPath, _runFlag ->
             if (pairId != pairMeta || platform != platformMeta) {
                 error(
                     "Internal channel mismatch for key=${key}: " +
@@ -1226,7 +1226,7 @@ workflow {
 
     enrich_task_results_ch = ENRICH(enrich_inputs_ch)
 
-    enrich_published_results_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+    enrich_published_results_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
         if (!(settings.need_enriched_zarrs && !settings.run_enrich)) {
             []
         } else {
@@ -1258,7 +1258,7 @@ workflow {
     enrich_results_ch = enrich_task_results_ch.mix(enrich_published_results_ch)
 
     enriched_zarrs_ch = enrich_results_ch.map {
-        key, pairId, platform, enrichedLatestZarr, enrichOutDir ->
+        key, pairId, platform, enrichedLatestZarr, _enrichOutDir ->
             tuple(
                 key,
                 pairId,
@@ -1268,7 +1268,7 @@ workflow {
     }
 
     mask_image_quantification_gate_ch = sample_rows_ch.flatMap {
-        pairId, row, settings ->
+        pairId, _row, settings ->
             if (!settings.run_mask_image_quantification) {
                 []
             } else {
@@ -1279,14 +1279,14 @@ workflow {
     }
 
     mask_image_quantification_masks_ch = segment_results_ch.map {
-        key, pairId, platform, latestZarr, maskPath, transcriptsCsv ->
+        key, _pairId, _platform, _latestZarr, maskPath, _transcriptsCsv ->
             tuple(key, maskPath)
     }
 
     mask_image_quantification_inputs_ch = enriched_zarrs_ch
         .join(mask_image_quantification_masks_ch)
         .join(mask_image_quantification_gate_ch)
-        .map { key, pairId, platform, enrichedLatestZarr, maskPath, runFlag ->
+        .map { key, pairId, platform, enrichedLatestZarr, maskPath, _runFlag ->
             def quantConfig = [
                 dataset_name: "${pairId}_${platform}",
                 platform: platform,
@@ -1310,7 +1310,7 @@ workflow {
     )
 
     quantified_zarrs_ch = mask_image_quantification_results_ch.map {
-        key, pairId, platform, quantifiedLatestZarr, quantOutDir ->
+        key, pairId, platform, quantifiedLatestZarr, _quantOutDir ->
             tuple(
                 key,
                 pairId,
@@ -1319,7 +1319,7 @@ workflow {
             )
     }
 
-    enriched_downstream_gate_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+    enriched_downstream_gate_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
         if (!(settings.need_enriched_zarrs && !settings.need_quantified_zarrs)) {
             []
         } else {
@@ -1331,7 +1331,7 @@ workflow {
 
     enriched_downstream_zarrs_ch = enriched_zarrs_ch
         .join(enriched_downstream_gate_ch)
-        .map { key, pairId, platform, enrichedLatestZarr, runFlag ->
+        .map { key, pairId, platform, enrichedLatestZarr, _runFlag ->
             tuple(key, pairId, platform, enrichedLatestZarr)
         }
 
@@ -1375,7 +1375,7 @@ workflow {
     )
 
     cortical_depth_zarrs_ch = compute_cortical_depth_results_ch.map {
-        key, pairId, platform, latestZarr, corticalDepthOutDir ->
+        key, pairId, platform, latestZarr, _corticalDepthOutDir ->
             tuple(
                 key,
                 pairId,
@@ -1384,7 +1384,7 @@ workflow {
             )
     }
 
-    no_cortical_depth_gate_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+    no_cortical_depth_gate_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
         if (!(settings.need_enriched_zarrs && !settings.run_compute_cortical_depth)) {
             []
         } else {
@@ -1396,14 +1396,14 @@ workflow {
 
     no_cortical_depth_zarrs_ch = downstream_zarrs_ch
         .join(no_cortical_depth_gate_ch)
-        .map { key, pairId, platform, latestZarr, runFlag ->
+        .map { key, pairId, platform, latestZarr, _runFlag ->
             tuple(key, pairId, platform, latestZarr)
         }
 
     analysis_ready_zarrs_ch =
         no_cortical_depth_zarrs_ch.mix(cortical_depth_zarrs_ch)
 
-    qc_branch_gate_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+    qc_branch_gate_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
         if (!settings.run_qc) {
             []
         } else {
@@ -1432,7 +1432,7 @@ workflow {
 
     qc_results_ch = QC(qc_inputs_ch)
 
-    analysis_branch_settings_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+    analysis_branch_settings_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
         if (!settings.need_analysis_zarrs) {
             []
         } else {
@@ -1446,8 +1446,8 @@ workflow {
 
     analysis_from_qc_ch = qc_results_ch
         .map {
-            key, pairId, platform, segmentation, enrichedLatestZarr,
-            qcOutDir, tableKey, shapeKey ->
+            _key, pairId, platform, segmentation, enrichedLatestZarr,
+            _qcOutDir, tableKey, shapeKey ->
                 tuple(
                     "${pairId}|${platform}|${segmentation}",
                     pairId,
@@ -1460,7 +1460,7 @@ workflow {
         }
         .join(analysis_branch_settings_ch)
         .map {
-            branchKey, pairId, segmentation, platform, zarrPath,
+            _branchKey, pairId, segmentation, platform, zarrPath,
             tableKey, shapeKey, settings ->
                 tuple(
                     pairId,
@@ -1473,7 +1473,7 @@ workflow {
                 )
         }
 
-    analysis_no_qc_gate_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+    analysis_no_qc_gate_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
         if (!(settings.need_analysis_zarrs && !settings.run_qc)) {
             []
         } else {
@@ -1486,7 +1486,7 @@ workflow {
     analysis_without_qc_ch = analysis_ready_zarrs_ch
         .join(analysis_no_qc_gate_ch)
         .flatMap {
-            key, pairId, platform, enrichedLatestZarr, analysisSegmentations, settings ->
+            _key, pairId, platform, enrichedLatestZarr, analysisSegmentations, settings ->
                 analysisSegmentations.collect { segmentation ->
                     def layerKeys = analysisLayerKeys(platform, segmentation)
                     tuple(
@@ -1504,14 +1504,14 @@ workflow {
     analysis_dataset_zarrs_ch = analysis_from_qc_ch.mix(analysis_without_qc_ch)
 
     merscope_zarr_ch = analysis_ready_zarrs_ch
-        .filter { key, pairId, platform, zarrPath -> platform == "MERSCOPE" }
-        .map { key, pairId, platform, zarrPath -> tuple(pairId, zarrPath) }
+        .filter { _key, _pairId, platform, _zarrPath -> platform == "MERSCOPE" }
+        .map { _key, pairId, _platform, zarrPath -> tuple(pairId, zarrPath) }
 
     xenium_zarr_ch = analysis_ready_zarrs_ch
-        .filter { key, pairId, platform, zarrPath -> platform == "XENIUM" }
-        .map { key, pairId, platform, zarrPath -> tuple(pairId, zarrPath) }
+        .filter { _key, _pairId, platform, _zarrPath -> platform == "XENIUM" }
+        .map { _key, pairId, _platform, zarrPath -> tuple(pairId, zarrPath) }
 
-    paired_need_zarrs_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+    paired_need_zarrs_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
         if (!(settings.paired_mode && settings.need_analysis_zarrs)) {
             []
         } else {
@@ -1528,11 +1528,11 @@ workflow {
 
     merscope_analysis_ch = analysis_dataset_zarrs_ch
         .filter {
-            pairId, segmentation, platform, zarrPath, tableKey, shapeKey, settings ->
+            _pairId, _segmentation, platform, _zarrPath, _tableKey, _shapeKey, settings ->
                 settings.paired_mode && platform == "MERSCOPE"
         }
         .map {
-            pairId, segmentation, platform, zarrPath, tableKey, shapeKey, settings ->
+            pairId, segmentation, _platform, zarrPath, tableKey, shapeKey, settings ->
                 tuple(
                     "${pairId}|${segmentation}",
                     pairId,
@@ -1546,11 +1546,11 @@ workflow {
 
     xenium_analysis_ch = analysis_dataset_zarrs_ch
         .filter {
-            pairId, segmentation, platform, zarrPath, tableKey, shapeKey, settings ->
+            _pairId, _segmentation, platform, _zarrPath, _tableKey, _shapeKey, settings ->
                 settings.paired_mode && platform == "XENIUM"
         }
         .map {
-            pairId, segmentation, platform, zarrPath, tableKey, shapeKey, settings ->
+            pairId, segmentation, _platform, zarrPath, tableKey, shapeKey, _settings ->
                 tuple(
                     "${pairId}|${segmentation}",
                     zarrPath,
@@ -1562,7 +1562,7 @@ workflow {
     paired_analysis_zarrs_ch = merscope_analysis_ch
         .join(xenium_analysis_ch)
         .map {
-            branchKey, pairId, segmentation, merscopePath, merscopeTableKey,
+            _branchKey, pairId, segmentation, merscopePath, merscopeTableKey,
             merscopeShapeKey, settings, xeniumPath, xeniumTableKey, xeniumShapeKey ->
                 tuple(
                     pairId,
@@ -1578,14 +1578,14 @@ workflow {
         }
 
     align_inputs_ch = paired_zarrs_ch
-        .filter { pairId, merscopePath, xeniumPath, settings -> settings.run_align }
-        .map { pairId, merscopePath, xeniumPath, settings ->
+        .filter { _pairId, _merscopePath, _xeniumPath, settings -> settings.run_align }
+        .map { pairId, merscopePath, xeniumPath, _settings ->
             tuple(pairId, merscopePath, xeniumPath)
         }
 
     alignment_task_results_ch = ALIGN(align_inputs_ch)
 
-    alignment_published_results_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+    alignment_published_results_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
         if (!(settings.need_alignment_results && !settings.run_align)) {
             []
         } else {
@@ -1637,7 +1637,7 @@ workflow {
 
     alignment_results_ch = alignment_task_results_ch.mix(alignment_published_results_ch)
 
-    align_qc_gate_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+    align_qc_gate_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
         if (!settings.run_align_qc) {
             []
         } else {
@@ -1647,13 +1647,13 @@ workflow {
 
     align_qc_inputs_ch = alignment_results_ch
         .join(align_qc_gate_ch)
-        .map { pairId, merscopeLatest, xeniumLatest, transformJson, coordsDir, runFlag ->
+        .map { pairId, merscopeLatest, xeniumLatest, transformJson, coordsDir, _runFlag ->
             tuple(pairId, merscopeLatest, xeniumLatest, transformJson, coordsDir)
         }
 
     alignment_qc_results_ch = ALIGN_QC(align_qc_inputs_ch)
 
-    alignment_done_no_qc_gate_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+    alignment_done_no_qc_gate_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
         if (!(settings.need_alignment_downstream && !settings.run_align_qc)) {
             []
         } else {
@@ -1664,13 +1664,13 @@ workflow {
     alignment_done_no_qc_ch = alignment_results_ch
         .join(alignment_done_no_qc_gate_ch)
         .flatMap {
-            pairId, merscopeLatest, xeniumLatest, transformJson, coordsDir, analysisSegmentations ->
+            pairId, _merscopeLatest, _xeniumLatest, _transformJson, _coordsDir, analysisSegmentations ->
                 analysisSegmentations.collect { segmentation ->
                     tuple("${pairId}|${segmentation}", true)
                 }
         }
 
-    alignment_done_after_qc_gate_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+    alignment_done_after_qc_gate_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
         if (!(settings.need_alignment_downstream && settings.run_align_qc)) {
             []
         } else {
@@ -1680,7 +1680,7 @@ workflow {
 
     alignment_done_after_qc_ch = alignment_qc_results_ch
         .join(alignment_done_after_qc_gate_ch)
-        .flatMap { pairId, alignQcOut, analysisSegmentations ->
+        .flatMap { pairId, _alignQcOut, analysisSegmentations ->
             analysisSegmentations.collect { segmentation ->
                 tuple("${pairId}|${segmentation}", true)
             }
@@ -1690,8 +1690,8 @@ workflow {
 
     paired_downstream_no_align_ch = paired_analysis_zarrs_ch
         .filter {
-            pairId, segmentation, merscopePath, xeniumPath, merscopeTableKey,
-            merscopeShapeKey, xeniumTableKey, xeniumShapeKey, settings ->
+            _pairId, _segmentation, _merscopePath, _xeniumPath, _merscopeTableKey,
+            _merscopeShapeKey, _xeniumTableKey, _xeniumShapeKey, settings ->
                 !settings.enable_alignment &&
                     (settings.run_compare ||
                      settings.run_visualize ||
@@ -1700,8 +1700,8 @@ workflow {
 
     paired_downstream_align_ch = paired_analysis_zarrs_ch
         .filter {
-            pairId, segmentation, merscopePath, xeniumPath, merscopeTableKey,
-            merscopeShapeKey, xeniumTableKey, xeniumShapeKey, settings ->
+            _pairId, _segmentation, _merscopePath, _xeniumPath, _merscopeTableKey,
+            _merscopeShapeKey, _xeniumTableKey, _xeniumShapeKey, settings ->
                 settings.enable_alignment &&
                     (settings.run_compare ||
                      settings.run_visualize ||
@@ -1725,9 +1725,9 @@ workflow {
         }
         .join(alignment_done_branch_ch)
         .map {
-            branchKey, pairId, segmentation, merscopePath, xeniumPath,
+            _branchKey, pairId, segmentation, merscopePath, xeniumPath,
             merscopeTableKey, merscopeShapeKey, xeniumTableKey,
-            xeniumShapeKey, settings, doneFlag ->
+            xeniumShapeKey, settings, _doneFlag ->
                 tuple(
                     pairId,
                     segmentation,
@@ -1745,13 +1745,13 @@ workflow {
 
     compare_inputs_ch = paired_downstream_zarrs_ch
         .filter {
-            pairId, segmentation, merscopePath, xeniumPath, merscopeTableKey,
-            merscopeShapeKey, xeniumTableKey, xeniumShapeKey, settings ->
+            _pairId, _segmentation, _merscopePath, _xeniumPath, _merscopeTableKey,
+            _merscopeShapeKey, _xeniumTableKey, _xeniumShapeKey, settings ->
                 settings.run_compare
         }
         .map {
             pairId, segmentation, merscopePath, xeniumPath, merscopeTableKey,
-            merscopeShapeKey, xeniumTableKey, xeniumShapeKey, settings ->
+            _merscopeShapeKey, xeniumTableKey, _xeniumShapeKey, _settings ->
                 tuple(
                     pairId,
                     segmentation,
@@ -1764,20 +1764,20 @@ workflow {
 
     compare_results_ch = COMPARE(compare_inputs_ch)
 
-    compare_done_ch = compare_results_ch.map { pairId, segmentation, compareOutDir ->
+    compare_done_ch = compare_results_ch.map { pairId, segmentation, _compareOutDir ->
         tuple("${pairId}|${segmentation}", true)
     }
 
     analysis_samples_from_aligned_pairs_ch = paired_downstream_zarrs_ch
         .filter {
-            pairId, segmentation, merscopePath, xeniumPath, merscopeTableKey,
-            merscopeShapeKey, xeniumTableKey, xeniumShapeKey, settings ->
+            _pairId, _segmentation, _merscopePath, _xeniumPath, _merscopeTableKey,
+            _merscopeShapeKey, _xeniumTableKey, _xeniumShapeKey, settings ->
                 settings.enable_alignment &&
                     (settings.run_visualize || settings.run_clustering_squidpy)
         }
         .map {
-            pairId, segmentation, merscopePath, xeniumPath, merscopeTableKey,
-            merscopeShapeKey, xeniumTableKey, xeniumShapeKey, settings ->
+            pairId, segmentation, merscopePath, xeniumPath, _merscopeTableKey,
+            _merscopeShapeKey, _xeniumTableKey, _xeniumShapeKey, settings ->
                 tuple(
                     pairId,
                     segmentation,
@@ -1793,12 +1793,12 @@ workflow {
 
     analysis_samples_from_dataset_ch = analysis_dataset_zarrs_ch
         .filter {
-            pairId, segmentation, platform, zarrPath, tableKey, shapeKey, settings ->
+            _pairId, _segmentation, _platform, _zarrPath, _tableKey, _shapeKey, settings ->
                 (!settings.paired_mode || !settings.enable_alignment) &&
                     (settings.run_visualize || settings.run_clustering_squidpy)
         }
         .map {
-            pairId, segmentation, platform, zarrPath, tableKey, shapeKey, settings ->
+            pairId, segmentation, platform, zarrPath, _tableKey, _shapeKey, settings ->
                 tuple(
                     "${pairId}|${segmentation}",
                     pairId,
@@ -1809,7 +1809,7 @@ workflow {
                 )
         }
         .groupTuple()
-        .map { branchKey, pairIds, segmentations, settingsList, platformNames, zarrPaths ->
+        .map { _branchKey, pairIds, segmentations, settingsList, platformNames, zarrPaths ->
             def pairId = pairIds[0].toString()
             def segmentation = segmentations[0].toString()
             def settings = settingsList[0]
@@ -1834,22 +1834,22 @@ workflow {
         analysis_samples_from_aligned_pairs_ch.mix(analysis_samples_from_dataset_ch)
 
     visualize_without_compare_ch = analysis_samples_ch
-        .filter { pairId, segmentation, samplesJson, settings ->
+        .filter { _pairId, _segmentation, _samplesJson, settings ->
             settings.run_visualize && !settings.run_compare
         }
-        .map { pairId, segmentation, samplesJson, settings ->
+        .map { pairId, segmentation, samplesJson, _settings ->
             tuple(pairId, segmentation, samplesJson)
         }
 
     visualize_after_compare_ch = analysis_samples_ch
-        .filter { pairId, segmentation, samplesJson, settings ->
+        .filter { _pairId, _segmentation, _samplesJson, settings ->
             settings.run_visualize && settings.run_compare
         }
-        .map { pairId, segmentation, samplesJson, settings ->
+        .map { pairId, segmentation, samplesJson, _settings ->
             tuple("${pairId}|${segmentation}", pairId, segmentation, samplesJson)
         }
         .join(compare_done_ch)
-        .map { branchKey, pairId, segmentation, samplesJson, doneFlag ->
+        .map { _branchKey, pairId, segmentation, samplesJson, _doneFlag ->
             tuple(pairId, segmentation, samplesJson)
         }
 
@@ -1857,27 +1857,27 @@ workflow {
 
     visualize_results_ch = VISUALIZE(visualize_inputs_ch)
 
-    visualize_done_ch = visualize_results_ch.map { pairId, segmentation, visualizeOutDir ->
+    visualize_done_ch = visualize_results_ch.map { pairId, segmentation, _visualizeOutDir ->
         tuple("${pairId}|${segmentation}", true)
     }
 
     clustering_without_visualize_ch = analysis_samples_ch
-        .filter { pairId, segmentation, samplesJson, settings ->
+        .filter { _pairId, _segmentation, _samplesJson, settings ->
             settings.run_clustering_squidpy && !settings.run_visualize
         }
-        .map { pairId, segmentation, samplesJson, settings ->
+        .map { pairId, segmentation, samplesJson, _settings ->
             tuple(pairId, segmentation, samplesJson)
         }
 
     clustering_after_visualize_ch = analysis_samples_ch
-        .filter { pairId, segmentation, samplesJson, settings ->
+        .filter { _pairId, _segmentation, _samplesJson, settings ->
             settings.run_clustering_squidpy && settings.run_visualize
         }
-        .map { pairId, segmentation, samplesJson, settings ->
+        .map { pairId, segmentation, samplesJson, _settings ->
             tuple("${pairId}|${segmentation}", pairId, segmentation, samplesJson)
         }
         .join(visualize_done_ch)
-        .map { branchKey, pairId, segmentation, samplesJson, doneFlag ->
+        .map { _branchKey, pairId, segmentation, samplesJson, _doneFlag ->
             tuple(pairId, segmentation, samplesJson)
         }
 
@@ -1886,7 +1886,7 @@ workflow {
 
     clustering_results_ch = CLUSTERING_SQUIDPY(clustering_inputs_ch)
 
-    mapmycells_after_clustering_gate_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+    mapmycells_after_clustering_gate_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
         if (!(settings.run_mapmycells && settings.run_clustering_squidpy)) {
             []
         } else {
@@ -1902,11 +1902,11 @@ workflow {
             tuple("${pairId}|${segmentation}", pairId, segmentation, samplesJson, clusteringOutDir)
         }
         .join(mapmycells_after_clustering_gate_ch)
-        .map { branchKey, pairId, segmentation, samplesJson, clusteringOutDir, runFlag ->
+        .map { _branchKey, pairId, segmentation, samplesJson, clusteringOutDir, _runFlag ->
             tuple(pairId, segmentation, samplesJson, clusteringOutDir)
         }
 
-    mapmycells_published_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+    mapmycells_published_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
         if (!(settings.run_mapmycells && !settings.run_clustering_squidpy)) {
             []
         } else {

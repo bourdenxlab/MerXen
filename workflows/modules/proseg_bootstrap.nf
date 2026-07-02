@@ -10,7 +10,7 @@ process ENSURE_PROSEG {
     script:
     def rawSearchPaths = params.proseg_search_paths instanceof List
         ? params.proseg_search_paths
-        : params.proseg_search_paths.toString().split(",").collect { it.trim() }
+        : params.proseg_search_paths.toString().split(",").collect { searchPath -> searchPath.trim() }
     def searchPathValues = []
     if (params.proseg_binary != null && !(params.proseg_binary instanceof Boolean)) {
         def legacyPath = params.proseg_binary.toString().trim()
@@ -18,7 +18,7 @@ process ENSURE_PROSEG {
             searchPathValues << legacyPath
         }
     }
-    searchPathValues.addAll(rawSearchPaths.collect { it.toString() })
+    searchPathValues.addAll(rawSearchPaths.collect { searchPath -> searchPath.toString() })
     def searchPaths = searchPathValues.join("\n")
     """
     set -euo pipefail
