@@ -15,6 +15,8 @@ if "ipykernel" not in sys.modules:
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.colors import TwoSlopeNorm
+from matplotlib.lines import Line2D
 from skimage import measure
 
 from merxen.cortical_depth.ribbon import RibbonGrid
@@ -147,6 +149,126 @@ def plot_cells_by_depth(
             linewidths=0,
         )
         fig.colorbar(scatter, ax=ax, shrink=0.7, label=value_column)
+    ax.set_aspect("equal")
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    _save_png_pdf(fig, output_path)
+    return output_path
+
+
+def plot_depth_difference(
+    path: Path | str,
+    grid: RibbonGrid,
+    laplace_depth: np.ndarray,
+    equivolumetric_depth: np.ndarray,
+) -> Path:
+    """Save a raster plot of Laplace minus equivolumetric depth."""
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    difference = np.asarray(laplace_depth, dtype=float) - np.asarray(
+        equivolumetric_depth, dtype=float
+    )
+    masked = np.ma.masked_invalid(np.where(grid.mask, difference, np.nan))
+    finite = np.asarray(masked.compressed(), dtype=float)
+    limit = float(np.nanmax(np.abs(finite))) if finite.size else 1.0
+    if not np.isfinite(limit) or limit <= 0:
+        limit = 1.0
+
+    fig, ax = plt.subplots(figsize=(8, 8), constrained_layout=True)
+    image = ax.imshow(
+        masked,
+        origin="lower",
+        extent=_extent(grid),
+        cmap="coolwarm",
+        norm=TwoSlopeNorm(vmin=-limit, vcenter=0.0, vmax=limit),
+    )
+    _plot_line(ax, grid.pial_line, color="#2c7fb8", linewidth=1.5)
+    if grid.wm_line is not None:
+        _plot_line(ax, grid.wm_line, color="#d95f0e", linewidth=1.5)
+    for side_line in grid.side_lines:
+        _plot_line(ax, side_line, color="#666666", linewidth=1.0, linestyle="--")
+    fig.colorbar(
+        image,
+        ax=ax,
+        shrink=0.7,
+        label="laplace_depth - equivolumetric_depth",
+    )
+    ax.set_aspect("equal")
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    _save_png_pdf(fig, output_path)
+    return output_path
+
+
+def plot_cells_by_annotation(
+    path: Path | str,
+    cells: pd.DataFrame,
+    grids: list[RibbonGrid],
+    *,
+    category_column: str = "cortical_depth_annotation",
+) -> Path:
+    """Save a whole-sample cell scatter plot colored by tissue annotation."""
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(8, 8), constrained_layout=True)
+    for grid in grids:
+        ax.imshow(
+            np.where(grid.mask, 1.0, np.nan),
+            origin="lower",
+            extent=_extent(grid),
+            cmap="Greys",
+            alpha=0.08,
+        )
+        _plot_line(ax, grid.pial_line, color="#2c7fb8", linewidth=1.0)
+        if grid.wm_line is not None:
+            _plot_line(ax, grid.wm_line, color="#d95f0e", linewidth=1.0)
+        for side_line in grid.side_lines:
+            _plot_line(ax, side_line, color="#666666", linewidth=0.6, linestyle="--")
+
+    valid = np.isfinite(pd.to_numeric(cells.get("x"), errors="coerce")) & np.isfinite(
+        pd.to_numeric(cells.get("y"), errors="coerce")
+    )
+    category_values = (
+        cells[category_column].astype(str)
+        if category_column in cells.columns
+        else pd.Series("outside_brain", index=cells.index)
+    )
+    categories = {
+        "outside_brain": ("outside brain", "#9aa7b2"),
+        "white_matter": ("white matter", "#f7f7f2"),
+        "grey_matter": ("grey matter", "#4d4d4d"),
+        "excluded": ("excluded", "#c44e52"),
+    }
+    for category, (_label, color) in categories.items():
+        take = valid & (category_values == category)
+        if not take.any():
+            continue
+        edgecolors = "#777777" if category == "white_matter" else "none"
+        ax.scatter(
+            cells.loc[take, "x"],
+            cells.loc[take, "y"],
+            s=2,
+            c=color,
+            linewidths=0.15,
+            edgecolors=edgecolors,
+        )
+
+    handles = [
+        Line2D(
+            [0],
+            [0],
+            marker="o",
+            color="none",
+            markerfacecolor=color,
+            markeredgecolor="#777777" if category == "white_matter" else color,
+            markersize=5,
+            label=label,
+        )
+        for category, (label, color) in categories.items()
+        if (valid & (category_values == category)).any()
+    ]
+    if handles:
+        ax.legend(handles=handles, loc="upper right", frameon=False)
     ax.set_aspect("equal")
     ax.set_xlabel("x")
     ax.set_ylabel("y")

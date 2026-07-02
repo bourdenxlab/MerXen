@@ -12,6 +12,10 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 import spatialdata as sd
+from shapely import contains_xy
+from shapely.geometry import LineString, MultiPolygon, Polygon
+from shapely.geometry.base import BaseGeometry
+from shapely.ops import unary_union
 from skimage import io as skio
 from spatialdata.models import TableModel
 
@@ -24,6 +28,7 @@ from merxen.cortical_depth.assign_cells import (
     extract_cell_coordinates,
 )
 from merxen.cortical_depth.boundaries import (
+    BoundaryAnnotationSet,
     BoundaryPieceAnnotations,
     load_boundary_annotations,
 )
@@ -31,7 +36,9 @@ from merxen.cortical_depth.equivolumetric import compute_equal_area_depth
 from merxen.cortical_depth.laplace import solve_laplace_depth
 from merxen.cortical_depth.plotting import (
     depth_contours_to_geojson,
+    plot_cells_by_annotation,
     plot_cells_by_depth,
+    plot_depth_difference,
     plot_depth_overlay,
     write_geojson,
 )
@@ -104,6 +111,7 @@ def run_cortical_depth(config: CorticalDepthConfig) -> dict[str, Path]:
                 table_config=table_config,
                 config=config,
                 output_dir=output_dir,
+                annotations=annotations,
                 piece_results=piece_results,
                 primary_depth_result=primary_depth_result,
             )
@@ -234,6 +242,8 @@ def _empty_piecewise_assignments(cell_ids: pd.Index, n_cells: int) -> pd.DataFra
             continue
         if column == "cortical_depth_qc_flag":
             assignments[column] = "outside_ribbon"
+        elif column == "cortical_depth_annotation":
+            assignments[column] = "outside_brain"
         else:
             assignments[column] = np.nan
     return assignments
@@ -245,6 +255,7 @@ def _annotate_table(
     table_config: CorticalDepthTableConfig,
     config: CorticalDepthConfig,
     output_dir: Path,
+    annotations: BoundaryAnnotationSet,
     piece_results: list[PieceDepthResult],
     primary_depth_result: PieceDepthResult | None,
 ) -> tuple[dict[str, Path], dict[str, Any]]:
@@ -270,6 +281,11 @@ def _annotate_table(
         piece_results,
         side_boundary_distance_um=config.side_boundary_distance_um,
     )
+    assignments["cortical_depth_annotation"] = _classify_cell_tissue_annotations(
+        coords.coordinates,
+        piece_results,
+        annotations,
+    )
     cells = assignments.copy()
     cells.insert(0, "cell_id", cells.index.astype(str))
     cells.insert(1, "x", coords.coordinates[:, 0])
@@ -281,19 +297,42 @@ def _annotate_table(
     cells_path = segmentation_dir / f"{sample_stem}_cells_with_cortical_depth.parquet"
     cells.to_parquet(cells_path, index=False)
 
+    plot_paths: dict[str, Path] = {}
     if primary_depth_result is not None:
+        laplace_plot_path = segmentation_dir / f"{sample_stem}_cells_laplace_depth.png"
         plot_cells_by_depth(
-            segmentation_dir / f"{sample_stem}_cells_laplace_depth.png",
+            laplace_plot_path,
             cells,
             primary_depth_result.grid,
             value_column="laplace_depth",
         )
+        plot_paths[f"{table_config.segmentation}_cells_laplace_depth_png"] = (
+            laplace_plot_path
+        )
+        equivolumetric_plot_path = (
+            segmentation_dir / f"{sample_stem}_cells_equivolumetric_depth.png"
+        )
         plot_cells_by_depth(
-            segmentation_dir / f"{sample_stem}_cells_equivolumetric_depth.png",
+            equivolumetric_plot_path,
             cells,
             primary_depth_result.grid,
             value_column="equivolumetric_depth",
         )
+        plot_paths[f"{table_config.segmentation}_cells_equivolumetric_depth_png"] = (
+            equivolumetric_plot_path
+        )
+
+    annotation_plot_path = (
+        segmentation_dir / f"{sample_stem}_cells_tissue_annotation.png"
+    )
+    plot_cells_by_annotation(
+        annotation_plot_path,
+        cells,
+        [result.grid for result in piece_results],
+    )
+    plot_paths[f"{table_config.segmentation}_cells_tissue_annotation_png"] = (
+        annotation_plot_path
+    )
 
     if config.write_spatialdata_table:
         updated = apply_depth_columns(sdata_obj.tables[table_key], assignments)
@@ -321,9 +360,69 @@ def _annotate_table(
         }
     )
     return (
-        {f"{table_config.segmentation}_cells": cells_path},
+        {f"{table_config.segmentation}_cells": cells_path, **plot_paths},
         summary,
     )
+
+
+def _classify_cell_tissue_annotations(
+    points: np.ndarray,
+    piece_results: list[PieceDepthResult],
+    annotations: BoundaryAnnotationSet,
+) -> np.ndarray:
+    """Classify cells as grey matter, white matter, excluded, or outside brain."""
+    coords = np.asarray(points, dtype=float)
+    labels = np.full(coords.shape[0], "outside_brain", dtype=object)
+
+    brain_polygon = _brain_polygon_from_annotations(annotations)
+    if brain_polygon is not None:
+        labels[_points_inside_geometry(coords, brain_polygon)] = "white_matter"
+
+    for result in piece_results:
+        labels[_points_inside_geometry(coords, result.grid.polygon)] = "grey_matter"
+
+    if annotations.exclusions:
+        exclusions = unary_union(list(annotations.exclusions))
+        labels[_points_inside_geometry(coords, exclusions)] = "excluded"
+    return labels
+
+
+def _brain_polygon_from_annotations(
+    annotations: BoundaryAnnotationSet,
+) -> Polygon | MultiPolygon | None:
+    edge_lines = [annotations.edge] if annotations.edge is not None else []
+    edge_lines.extend(annotations.side_boundaries)
+    for line in edge_lines:
+        polygon = _closed_line_polygon(line)
+        if polygon is not None:
+            return polygon
+    return None
+
+
+def _closed_line_polygon(line: LineString | None) -> Polygon | MultiPolygon | None:
+    if line is None:
+        return None
+    coords = np.asarray(line.coords, dtype=float)
+    if coords.shape[0] < 4:
+        return None
+    if not np.allclose(coords[0, :2], coords[-1, :2], rtol=0.0, atol=1e-9):
+        return None
+    polygon = Polygon(coords[:, :2])
+    if not polygon.is_valid:
+        polygon = polygon.buffer(0)
+    if isinstance(polygon, Polygon | MultiPolygon) and not polygon.is_empty:
+        return polygon
+    return None
+
+
+def _points_inside_geometry(points: np.ndarray, geometry: BaseGeometry) -> np.ndarray:
+    coords = np.asarray(points, dtype=float)
+    inside = np.zeros(coords.shape[0], dtype=bool)
+    finite = np.isfinite(coords).all(axis=1)
+    if not finite.any() or geometry.is_empty:
+        return inside
+    inside[finite] = contains_xy(geometry, coords[finite, 0], coords[finite, 1])
+    return inside
 
 
 def _write_piece_geometry_outputs(
@@ -523,6 +622,17 @@ def _write_geometry_outputs(
         contour_levels=contour_levels,
     )
     paths["overlay_png"] = overlay_path
+
+    difference_path = (
+        output_dir / f"{dataset_name.lower()}_laplace_equivolumetric_difference.png"
+    )
+    plot_depth_difference(
+        difference_path,
+        grid,
+        laplace_depth,
+        equal_area_depth,
+    )
+    paths["laplace_equivolumetric_difference_png"] = difference_path
     return paths
 
 
