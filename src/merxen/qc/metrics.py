@@ -12,7 +12,11 @@ import numpy as np
 import pandas as pd
 import spatialdata as sd
 
-from merxen.io.transcript_io import assignment_mask, first_existing_col, to_pandas
+from merxen.io.transcript_io import (
+    assignment_mask_from_points,
+    first_existing_col,
+    to_pandas,
+)
 from merxen.memory import force_release
 
 logger = logging.getLogger(__name__)
@@ -60,14 +64,18 @@ def _compute_cell_metrics_from_points(
     gene_col: str,
 ) -> tuple[int, int, pd.DataFrame]:
     """Compute assignment counts and per-cell transcript/gene metrics."""
+    cols = set(map(str, list(points_obj.columns)))
+    has_background = "background" in cols
+    point_cols = [assign_col, gene_col] + (["background"] if has_background else [])
     if hasattr(points_obj, "npartitions") and hasattr(points_obj, "partitions"):
         try:
-            pts_small = points_obj[[assign_col, gene_col]]
+            pts_small = points_obj[point_cols]
             n_total = int(pts_small.shape[0].compute())
 
-            assigned_mask_dd = pts_small[assign_col].map_partitions(
-                assignment_mask,
-                meta=(assign_col, "bool"),
+            assigned_mask_dd = pts_small.map_partitions(
+                assignment_mask_from_points,
+                assign_col=assign_col,
+                meta=("assigned", "bool"),
             )
             n_assigned = int(assigned_mask_dd.sum().compute())
 
@@ -91,7 +99,7 @@ def _compute_cell_metrics_from_points(
             )
 
     pts = to_pandas(points_obj)
-    is_assigned = assignment_mask(pts[assign_col])
+    is_assigned = assignment_mask_from_points(pts[point_cols], assign_col=assign_col)
     n_total = int(len(pts))
     n_assigned = int(is_assigned.sum())
 

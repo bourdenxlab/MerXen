@@ -6,10 +6,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import dask.dataframe as dd
+import pandas as pd
 import spatialdata as sd
 from spatialdata import datasets
 
 from merxen.io.spatialdata_io import (
+    normalize_points_for_latest_write,
     write_or_replace_element,
     write_spatialdata_metadata,
     write_spatialdata_zarr,
@@ -281,3 +284,55 @@ def test_write_spatialdata_metadata_persists_metadata_and_transforms() -> None:
 
     sdata.write_transformations.assert_called_once_with()
     sdata.write_metadata.assert_called_once_with(write_attrs=True)
+
+
+def test_normalize_points_preserves_proseg_assignment_zero_and_raw_xy() -> None:
+    """ProSeg nullable assignment and observed coordinates should survive."""
+    points = pd.DataFrame(
+        {
+            "x": [10.0, 20.0],
+            "y": [30.0, 40.0],
+            "z": [0.2, 0.8],
+            "observed_x": [1.0, 2.0],
+            "observed_y": [3.0, 4.0],
+            "observed_z": [0.0, 1.0],
+            "gene": ["A", "B"],
+            "assignment": [0.0, None],
+            "background": [False, True],
+        }
+    )
+
+    out = normalize_points_for_latest_write(points)
+
+    assert out["x"].tolist() == [1.0, 2.0]
+    assert out["y"].tolist() == [3.0, 4.0]
+    assert out["z"].tolist() == [0.0, 1.0]
+    assert out["proseg_moved_x"].tolist() == [10.0, 20.0]
+    assert out["proseg_moved_y"].tolist() == [30.0, 40.0]
+    assert out["proseg_moved_z"].tolist() == [0.2, 0.8]
+    assert int(out.loc[0, "assignment"]) == 0
+    assert pd.isna(out.loc[1, "assignment"])
+
+
+def test_normalize_points_handles_dask_proseg_points() -> None:
+    """Dask point partitions should keep nullable ProSeg assignments."""
+    points = pd.DataFrame(
+        {
+            "x": [10.0, 20.0, 30.0],
+            "y": [11.0, 21.0, 31.0],
+            "observed_x": [1.0, 2.0, 3.0],
+            "observed_y": [4.0, 5.0, 6.0],
+            "gene": ["A", "B", "C"],
+            "assignment": [0.0, 1.0, None],
+            "background": [False, False, True],
+        }
+    )
+    ddf = dd.from_pandas(points, npartitions=2)
+
+    out = normalize_points_for_latest_write(ddf).compute()
+
+    assert out["x"].tolist() == [1.0, 2.0, 3.0]
+    assert out["y"].tolist() == [4.0, 5.0, 6.0]
+    assert out["proseg_moved_x"].tolist() == [10.0, 20.0, 30.0]
+    assert out["assignment"].isna().tolist() == [False, False, True]
+    assert int(out.loc[0, "assignment"]) == 0

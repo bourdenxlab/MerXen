@@ -16,6 +16,7 @@ ${outdir}/
 │   │   ├── spatialdata/
 │   │   ├── segmentation/
 │   │   ├── enrichment/
+│   │   ├── compute_cortical_depth/
 │   │   ├── reseg/
 │   │   │   └── qc/
 │   │   └── original_seg/
@@ -24,6 +25,7 @@ ${outdir}/
 │   │   ├── spatialdata/
 │   │   ├── segmentation/
 │   │   ├── enrichment/
+│   │   ├── compute_cortical_depth/
 │   │   ├── reseg/
 │   │   │   └── qc/
 │   │   └── original_seg/
@@ -110,6 +112,31 @@ Path: `${outdir}/<pair_id>/<platform>/mask_image_quantification/`
 | `mask_image_quantification_out/*_mask_image_quantification.parquet` | Wide Cellpose cell × image-channel-stat matrix. |
 | `mask_image_quantification_out/*_mask_image_quantification_features.csv` | Feature metadata for image key, channel, and statistic. |
 | `mask_image_quantification_out/*_mask_image_quantification_summary.json` | Summary of quantified images, cells, features, and sidecar paths. |
+
+### Cortical Depth
+
+Path: `${outdir}/<pair_id>/<platform>/compute_cortical_depth/`
+
+Only present when `--cortical_depth_enabled true`.
+
+| File | Contents |
+|------|----------|
+| `latest_input.zarr` | Staged symlink to `../latest/latest_spatialdata.zarr`, updated in place with cortical-depth columns unless disabled. |
+| `compute_cortical_depth_out/cortical_ribbon_mask.tif` | Rasterized cortical ribbon mask. |
+| `compute_cortical_depth_out/streamlines.geojson` | Pial-to-WM streamlines as GeoJSON LineStrings. |
+| `compute_cortical_depth_out/streamlines.parquet` | Point-level streamline table with tangential position, thickness, and QC flags. |
+| `compute_cortical_depth_out/depth_contours.geojson` | Laplace depth contours, usually 10%-90%. |
+| `compute_cortical_depth_out/equivolumetric_depth_contours.geojson` | Equal-area/equivolumetric depth contours. |
+| `compute_cortical_depth_out/<segmentation>/*_cells_with_cortical_depth.parquet` | Per-cell sidecar table with depth columns for each selected segmentation branch. |
+| `compute_cortical_depth_out/*_cortical_depth_overlay.png` | QC overlay with pial, optional WM, ribbon, contours, and streamlines. PDF copy is also written. |
+| `compute_cortical_depth_out/<segmentation>/*_cells_laplace_depth.png` | Cells colored by `laplace_depth`. PDF copy is also written. |
+| `compute_cortical_depth_out/<segmentation>/*_cells_equivolumetric_depth.png` | Cells colored by `equivolumetric_depth`. PDF copy is also written. |
+| `compute_cortical_depth_out/cortical_depth_qc_summary.json` | Cell inside/outside counts, assigned counts, streamline thickness stats, failed/flagged streamlines, warnings. |
+
+The updated AnnData `obs` columns include `inside_cortical_ribbon`,
+`laplace_depth`, `equivolumetric_depth`, `distance_to_pia_um`,
+`distance_to_wm_um`, `streamline_thickness_um`, `tangential_position_um`,
+`nearest_streamline_id`, `column_id`, and `cortical_depth_qc_flag`.
 
 ### QC
 

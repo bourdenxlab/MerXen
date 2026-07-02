@@ -199,11 +199,7 @@ def compute_table_from_points_for_shape(
             )
 
             cell_series = joined[shape_id_col].astype(str)
-            assigned_mask = (
-                joined[shape_id_col].notna()
-                & (cell_series != "")
-                & (cell_series != "0")
-            )
+            assigned_mask = joined[shape_id_col].notna() & (cell_series != "")
             if assigned_mask.any():
                 assigned_cells = cell_series.loc[assigned_mask].to_numpy(dtype=object)
                 assigned_genes = (

@@ -91,10 +91,10 @@ def test_mask_image_quantification_stage_is_wired_before_qc() -> None:
         "need_quantified_zarrs: runMaskImageQuantification",
         "MASK_IMAGE_QUANTIFICATION(",
         "downstream_zarrs_ch = enriched_downstream_zarrs_ch.mix(quantified_zarrs_ch)",
-        "qc_inputs_ch = downstream_zarrs_ch",
-        "analysis_without_qc_ch = downstream_zarrs_ch",
-        "merscope_zarr_ch = downstream_zarrs_ch",
-        "xenium_zarr_ch = downstream_zarrs_ch",
+        "qc_inputs_ch = analysis_ready_zarrs_ch",
+        "analysis_without_qc_ch = analysis_ready_zarrs_ch",
+        "merscope_zarr_ch = analysis_ready_zarrs_ch",
+        "xenium_zarr_ch = analysis_ready_zarrs_ch",
     ]:
         assert expected in main_text
 
@@ -110,6 +110,50 @@ def test_mask_image_quantification_stage_is_wired_before_qc() -> None:
         "mask_image_quantification_input_mask.npy",
         "merxen mask-image-quantification",
         "mask_image_quantification_out",
+    ]:
+        assert expected in module_text
+
+
+def test_compute_cortical_depth_stage_is_wired_before_qc() -> None:
+    """Cortical depth should run after analysis-ready zarr creation and before QC."""
+    repo_root = Path(__file__).resolve().parents[2]
+    main_text = (repo_root / "workflows" / "main.nf").read_text()
+    config_text = (repo_root / "workflows" / "nextflow.config").read_text()
+    module_text = (
+        repo_root / "workflows" / "modules" / "compute_cortical_depth.nf"
+    ).read_text()
+
+    for expected in [
+        'include { COMPUTE_CORTICAL_DEPTH } from "./modules/compute_cortical_depth"',
+        '"compute_cortical_depth": "compute_cortical_depth"',
+        '"cortical_depth": "compute_cortical_depth"',
+        'stages += ["compute_cortical_depth"]',
+        "settings.run_compute_cortical_depth",
+        "appendCorticalDepthPreflightChecks",
+        "corticalDepthAnnotationPath",
+        "corticalDepthConfigForPlatform",
+        "COMPUTE_CORTICAL_DEPTH(",
+        "analysis_ready_zarrs_ch",
+        "qc_inputs_ch = analysis_ready_zarrs_ch",
+        "analysis_without_qc_ch = analysis_ready_zarrs_ch",
+        "merscope_zarr_ch = analysis_ready_zarrs_ch",
+        "xenium_zarr_ch = analysis_ready_zarrs_ch",
+    ]:
+        assert expected in main_text
+
+    for expected in [
+        "cortical_depth_enabled = false",
+        "cortical_depth_raster_resolution_um = 5.0",
+        "cortical_depth_streamline_spacing_um = 50.0",
+        'withName: "COMPUTE_CORTICAL_DEPTH"',
+    ]:
+        assert expected in config_text
+
+    for expected in [
+        "process COMPUTE_CORTICAL_DEPTH",
+        "compute_cortical_depth_out",
+        "cortical_depth_config.json",
+        "merxen compute-cortical-depth",
     ]:
         assert expected in module_text
 

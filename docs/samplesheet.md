@@ -21,6 +21,7 @@ required. A template lives at
 | `start_stage` | no | Row-level first stage. Blank inherits `--start_stage` unless `only_stage` applies. |
 | `stop_stage` | no | Row-level final stage. Blank inherits `--stop_stage` unless `only_stage` applies. |
 | `only_stage` | no | Row-level single-stage override. If set, it overrides that row's start/stop stage settings. |
+| `cortical_depth_enabled` | no | Row-level cortical-depth switch. Blank inherits `--cortical_depth_enabled`. |
 | `merscope_dir` | required for MERSCOPE modes if no cache | Path to the raw MERSCOPE region export folder (contains `transcripts.parquet`, `cell_boundaries/`, `images/`, etc.). |
 | `merscope_spatialdata_path` | required for MERSCOPE modes if no raw dir | Path to an existing (or desired) reusable MERSCOPE SpatialData zarr. If it exists, the build step is **skipped** unless `--force_spatialdata_build true` is passed to Nextflow. |
 | `merscope_image_prefix` | no | Prefix used to match z-plane image keys when more than one run is present. |
@@ -34,6 +35,24 @@ required. A template lives at
 | `xenium_min_qv` | no | Minimum transcript quality value to retain. Defaults to `20`. |
 | `xenium_voxel_layers` | no | ProSeg voxel layer count for Xenium. Defaults to `2`. |
 | `xenium_spec_path` | no | Override path to `experiment.xenium` or `specs.json` used to derive the micron→pixel transform. |
+
+### Cortical-depth annotation columns
+
+When cortical depth is enabled, each active platform must provide either a
+combined role-labelled annotation GeoJSON or separate pial boundary GeoJSON
+files. Gray/white matter boundaries are optional for pial-only mask/QC pieces.
+Platform-specific columns are preferred; generic
+columns are accepted when one row uses a single active platform or the same
+annotation should be reused.
+
+| Column pattern | Description |
+|----------------|-------------|
+| `<platform>_cortical_depth_annotation_geojson` | Combined GeoJSON with role-labelled pial, tissue-edge, optional WM, and optional mask features. `<platform>` is `merscope` or `xenium`. Generic alias: `cortical_depth_annotation_geojson`. |
+| `<platform>_pial_boundary_geojson` | Pial boundary polyline. Generic alias: `pial_boundary_geojson`. |
+| `<platform>_wm_boundary_geojson` | Optional gray/white matter boundary polyline. Aliases include `grey_white_boundary_geojson`, `gray_white_boundary_geojson`, and `gm_wm_boundary_geojson`. |
+| `<platform>_side_boundaries_geojson` | Tissue-edge polyline. New piece-aware annotations should contain exactly one edge line. Generic alias: `side_boundaries_geojson`. |
+| `<platform>_exclusion_masks_geojson` | Optional exclusion polygons for tears, folds, vessels, or artefacts. Generic alias: `exclusion_masks_geojson`. |
+| `<platform>_cortical_ribbon_geojson` | Optional complete ribbon polygon. Generic alias: `cortical_ribbon_geojson`. |
 
 ### Aliases
 
@@ -83,6 +102,13 @@ EXAMPLE01,xenium,false,/path/to/xenium/EXAMPLE01,/path/to/cache/EXAMPLE01_xenium
 The row-level `analysis_mode` is enough to run this alongside paired or
 MERSCOPE-only rows in the same file. MERSCOPE-only rows are analogous: provide
 `merscope_dir` or `merscope_spatialdata_path` and set `analysis_mode=merscope`.
+
+Cortical-depth example for a Xenium-only row:
+
+```csv
+pair_id,analysis_mode,cortical_depth_enabled,xenium_spatialdata_path,xenium_pial_boundary_geojson,xenium_wm_boundary_geojson,xenium_exclusion_masks_geojson
+EXAMPLE04,xenium,true,/path/to/cache/EXAMPLE04_xenium.zarr,/path/to/EXAMPLE04_pia.geojson,/path/to/EXAMPLE04_wm.geojson,/path/to/EXAMPLE04_exclusions.geojson
+```
 
 ## Full example
 

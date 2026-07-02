@@ -5,6 +5,7 @@ include { ENSURE_PROSEG } from "./modules/proseg_bootstrap"
 include { SEGMENT } from "./modules/segmentation"
 include { ENRICH } from "./modules/enrichment"
 include { MASK_IMAGE_QUANTIFICATION } from "./modules/mask_image_quantification"
+include { COMPUTE_CORTICAL_DEPTH } from "./modules/compute_cortical_depth"
 include { QC } from "./modules/qc"
 include { ALIGN; ALIGN_QC } from "./modules/alignment"
 include { COMPARE } from "./modules/comparison"
@@ -290,6 +291,60 @@ def samplesJsonForSegmentation(pairId, platforms, platformPaths, segmentation) {
     return groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(samples))
 }
 
+def corticalDepthConfigForPlatform(
+    row,
+    pairId,
+    platform,
+    analysisSegmentations,
+    params
+) {
+    def tables = analysisSegmentations.collect { segmentation ->
+        def layerKeys = analysisLayerKeys(platform, segmentation)
+        [
+            segmentation: segmentation,
+            table_key: layerKeys.table_key,
+            shape_key: layerKeys.shape_key,
+        ]
+    }
+    return [
+        dataset_name: "${pairId}_${platform}",
+        platform: platform,
+        latest_zarr_path: "latest_input.zarr",
+        output_dir: "compute_cortical_depth_out",
+        tables: tables,
+        pial_boundary_path: optionalNormalizedPathString(
+            corticalDepthAnnotationPath(row, platform, "pial")
+        ),
+        wm_boundary_path: optionalNormalizedPathString(
+            corticalDepthAnnotationPath(row, platform, "wm")
+        ),
+        side_boundary_path: optionalNormalizedPathString(
+            corticalDepthAnnotationPath(row, platform, "side")
+        ),
+        exclusion_path: optionalNormalizedPathString(
+            corticalDepthAnnotationPath(row, platform, "exclusion")
+        ),
+        ribbon_path: optionalNormalizedPathString(
+            corticalDepthAnnotationPath(row, platform, "ribbon")
+        ),
+        annotation_path: optionalNormalizedPathString(
+            corticalDepthAnnotationPath(row, platform, "annotation")
+        ),
+        coordinate_unit_um: params.cortical_depth_coordinate_unit_um,
+        raster_resolution_um: params.cortical_depth_raster_resolution_um,
+        raster_padding_um: params.cortical_depth_raster_padding_um,
+        boundary_band_um: params.cortical_depth_boundary_band_um,
+        boundary_smoothing_window: params.cortical_depth_boundary_smoothing_window,
+        streamline_spacing_um: params.cortical_depth_streamline_spacing_um,
+        streamline_step_um: params.cortical_depth_streamline_step_um,
+        streamline_max_steps: params.cortical_depth_streamline_max_steps,
+        streamline_resample_points: params.cortical_depth_streamline_resample_points,
+        side_boundary_distance_um: params.cortical_depth_side_boundary_distance_um,
+        contour_levels: params.cortical_depth_contour_levels,
+        write_spatialdata_table: params.cortical_depth_write_spatialdata_table,
+    ]
+}
+
 def samplesJsonFromGroupedZarrs(pairId, activePlatforms, platformNames, zarrPaths) {
     def names = platformNames.collect { it.toString() }
     def pathsByPlatform = [:]
@@ -325,6 +380,9 @@ def normalizeStage(rawValue, paramName) {
         "image_quantification": "mask_image_quantification",
         "quantify_images": "mask_image_quantification",
         "mask_quantification": "mask_image_quantification",
+        "compute_cortical_depth": "compute_cortical_depth",
+        "cortical_depth": "compute_cortical_depth",
+        "laplace_depth": "compute_cortical_depth",
         "qc": "qc",
         "align": "align",
         "alignment": "align",
@@ -349,17 +407,25 @@ def normalizeStage(rawValue, paramName) {
         throw new IllegalArgumentException(
             "Unknown ${paramName} '${raw}'. Valid stages: " +
             "build_spatialdata, segment, enrich, mask_image_quantification, " +
-            "qc, align, align_qc, " +
+            "compute_cortical_depth, qc, align, align_qc, " +
             "compare, visualize, clustering_squidpy, mapmycells"
         )
     }
     return aliases[key]
 }
 
-def activeStageOrder(alignmentEnabled, pairedMode, maskImageQuantificationEnabled) {
+def activeStageOrder(
+    alignmentEnabled,
+    pairedMode,
+    maskImageQuantificationEnabled,
+    corticalDepthEnabled
+) {
     def stages = ["build_spatialdata", "segment", "enrich"]
     if (maskImageQuantificationEnabled) {
         stages += ["mask_image_quantification"]
+    }
+    if (corticalDepthEnabled) {
+        stages += ["compute_cortical_depth"]
     }
     stages += ["qc"]
     if (pairedMode && alignmentEnabled) {
@@ -374,9 +440,13 @@ def activeStageOrder(alignmentEnabled, pairedMode, maskImageQuantificationEnable
 
 def validateStage(stage, stages, paramName, alignmentEnabled) {
     if (!stages.contains(stage)) {
-        def hint = stage in ["align", "align_qc"] && !alignmentEnabled
-            ? " Pass --enable_alignment true to use alignment stages."
-            : ""
+        def hint = ""
+        if (stage in ["align", "align_qc"] && !alignmentEnabled) {
+            hint = " Pass --enable_alignment true to use alignment stages."
+        }
+        if (stage == "compute_cortical_depth") {
+            hint = " Pass --cortical_depth_enabled true to use cortical depth."
+        }
         throw new IllegalArgumentException(
             "${paramName} '${stage}' is not active for this run.${hint} " +
             "Active stages: ${stages.join(', ')}"
@@ -516,10 +586,107 @@ def appendMapMyCellsPreflightChecks(errors, settings, params) {
     }
 }
 
+def optionalNormalizedPathString(rawPath) {
+    return isBlankPath(rawPath) ? null : normalizedPath(rawPath).toString()
+}
+
+def corticalDepthAnnotationPath(row, platform, role) {
+    def prefix = platform.toString().toLowerCase()
+    def candidatesByRole = [
+        annotation: [
+            "${prefix}_cortical_depth_annotation_geojson",
+            "${prefix}_cortical_depth_annotations_geojson",
+            "${prefix}_cortical_depth_annotation_path",
+            "cortical_depth_annotation_geojson",
+            "cortical_depth_annotations_geojson",
+            "cortical_depth_annotation_path",
+        ],
+        pial: [
+            "${prefix}_pial_boundary_geojson",
+            "${prefix}_pia_boundary_geojson",
+            "${prefix}_pial_boundary_path",
+            "pial_boundary_geojson",
+            "pia_boundary_geojson",
+            "pial_boundary_path",
+        ],
+        wm: [
+            "${prefix}_wm_boundary_geojson",
+            "${prefix}_grey_white_boundary_geojson",
+            "${prefix}_gray_white_boundary_geojson",
+            "${prefix}_gm_wm_boundary_geojson",
+            "${prefix}_wm_boundary_path",
+            "wm_boundary_geojson",
+            "grey_white_boundary_geojson",
+            "gray_white_boundary_geojson",
+            "gm_wm_boundary_geojson",
+            "wm_boundary_path",
+        ],
+        side: [
+            "${prefix}_side_boundary_geojson",
+            "${prefix}_side_boundaries_geojson",
+            "${prefix}_tissue_edge_geojson",
+            "side_boundary_geojson",
+            "side_boundaries_geojson",
+            "tissue_edge_geojson",
+        ],
+        exclusion: [
+            "${prefix}_exclusion_mask_geojson",
+            "${prefix}_exclusion_masks_geojson",
+            "${prefix}_cortical_depth_exclusion_geojson",
+            "exclusion_mask_geojson",
+            "exclusion_masks_geojson",
+            "cortical_depth_exclusion_geojson",
+        ],
+        ribbon: [
+            "${prefix}_cortical_ribbon_geojson",
+            "${prefix}_ribbon_geojson",
+            "${prefix}_cortical_ribbon_path",
+            "cortical_ribbon_geojson",
+            "ribbon_geojson",
+            "cortical_ribbon_path",
+        ],
+    ]
+    return chooseField(row, candidatesByRole[role] ?: [])
+}
+
+def appendCorticalDepthPreflightChecks(errors, row, settings, params) {
+    if (!settings.run_compute_cortical_depth) {
+        return
+    }
+    settings.active_platforms.each { platform ->
+        def labelPrefix = "COMPUTE_CORTICAL_DEPTH ${settings.pair_id}:${platform}"
+        def annotationPath = corticalDepthAnnotationPath(row, platform, "annotation")
+        if (!isBlankPath(annotationPath)) {
+            appendPreflightFileCheck(
+                errors,
+                annotationPath,
+                "${labelPrefix} combined annotation GeoJSON",
+            )
+        } else {
+            appendPreflightFileCheck(
+                errors,
+                corticalDepthAnnotationPath(row, platform, "pial"),
+                "${labelPrefix} pial boundary GeoJSON",
+            )
+        }
+        ["side", "exclusion", "ribbon"].each { role ->
+            def optionalPath = corticalDepthAnnotationPath(row, platform, role)
+            if (!isBlankPath(optionalPath)) {
+                appendPreflightFileCheck(
+                    errors,
+                    optionalPath,
+                    "${labelPrefix} ${role} annotation GeoJSON",
+                )
+            }
+        }
+    }
+}
+
 def runPreflightChecks(row, settings, params) {
     def errors = []
     appendClusteringSquidpyPreflightChecks(errors, settings, params)
     appendMapMyCellsPreflightChecks(errors, settings, params)
+    appendCorticalDepthPreflightChecks(errors, row, settings, params)
     if (errors) {
         throw new IllegalArgumentException(
             "Preflight checks failed for sample ${settings.pair_id} " +
@@ -591,6 +758,15 @@ def rowSampleSettings(row, params) {
         true,
         "mask_image_quantification_enabled for ${pairId}",
     )
+    def corticalDepthEnabled = boolOrDefault(
+        rowFieldOrDefault(
+            row,
+            "cortical_depth_enabled",
+            params.cortical_depth_enabled,
+        ),
+        false,
+        "cortical_depth_enabled for ${pairId}",
+    )
 
     def rowOnlyStageRaw = chooseField(row, ["only_stage"])
     def rowStartStageRaw = chooseField(row, ["start_stage"])
@@ -620,6 +796,7 @@ def rowSampleSettings(row, params) {
         alignmentEnabled,
         pairedMode,
         maskImageQuantificationEnabled,
+        corticalDepthEnabled,
     )
     def startStage = normalizeStage(startStageRaw, startParamName)
     def stopStage = normalizeStage(stopStageRaw, stopParamName)
@@ -637,6 +814,12 @@ def rowSampleSettings(row, params) {
     def runEnrich = stageInRange("enrich", startStage, stopStage, stageOrder)
     def runMaskImageQuantification = stageInRange(
         "mask_image_quantification",
+        startStage,
+        stopStage,
+        stageOrder,
+    )
+    def runComputeCorticalDepth = stageInRange(
+        "compute_cortical_depth",
         startStage,
         stopStage,
         stageOrder,
@@ -677,6 +860,7 @@ def rowSampleSettings(row, params) {
         run_segment: runSegment,
         run_enrich: runEnrich,
         run_mask_image_quantification: runMaskImageQuantification,
+        run_compute_cortical_depth: runComputeCorticalDepth,
         run_qc: runQc,
         run_align: runAlign,
         run_align_qc: runAlignQc,
@@ -685,7 +869,12 @@ def rowSampleSettings(row, params) {
         run_clustering_squidpy: runClusteringSquidpy,
         run_mapmycells: runMapMyCells,
         need_build_results: runSegment || runEnrich,
-        need_enriched_zarrs: runMaskImageQuantification || runQc || needAnalysisZarrs,
+        need_enriched_zarrs: (
+            runMaskImageQuantification ||
+            runComputeCorticalDepth ||
+            runQc ||
+            needAnalysisZarrs
+        ),
         need_quantified_zarrs: runMaskImageQuantification,
         need_analysis_zarrs: needAnalysisZarrs,
         need_alignment_results: needAlignmentResults,
@@ -745,6 +934,7 @@ workflow {
         log.info(
             "Sample ${settings.pair_id}: analysis_mode=${settings.analysis_mode}; " +
             "enable_alignment=${settings.enable_alignment}; " +
+            "cortical_depth=${settings.run_compute_cortical_depth}; " +
             "active platforms=${settings.active_platforms.join(', ')}; " +
             "analysis segmentations=${settings.analysis_segmentations.join(', ')}; " +
             "selected stages=${settings.selected_stages.join(' -> ')}"
@@ -1147,6 +1337,72 @@ workflow {
 
     downstream_zarrs_ch = enriched_downstream_zarrs_ch.mix(quantified_zarrs_ch)
 
+    compute_cortical_depth_gate_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+        if (!settings.run_compute_cortical_depth) {
+            []
+        } else {
+            settings.active_platforms.collect { platform ->
+                tuple(
+                    "${pairId}|${platform}",
+                    row,
+                    settings.analysis_segmentations,
+                )
+            }
+        }
+    }
+
+    compute_cortical_depth_inputs_ch = downstream_zarrs_ch
+        .join(compute_cortical_depth_gate_ch)
+        .map { key, pairId, platform, latestZarr, row, analysisSegmentations ->
+            def depthConfig = corticalDepthConfigForPlatform(
+                row,
+                pairId,
+                platform,
+                analysisSegmentations,
+                params,
+            )
+            tuple(
+                key,
+                pairId,
+                platform,
+                groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(depthConfig)),
+                latestZarr,
+            )
+        }
+
+    compute_cortical_depth_results_ch = COMPUTE_CORTICAL_DEPTH(
+        compute_cortical_depth_inputs_ch
+    )
+
+    cortical_depth_zarrs_ch = compute_cortical_depth_results_ch.map {
+        key, pairId, platform, latestZarr, corticalDepthOutDir ->
+            tuple(
+                key,
+                pairId,
+                platform,
+                java.nio.file.Paths.get(latestZarr.toString()).toRealPath().toString(),
+            )
+    }
+
+    no_cortical_depth_gate_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+        if (!(settings.need_enriched_zarrs && !settings.run_compute_cortical_depth)) {
+            []
+        } else {
+            settings.active_platforms.collect { platform ->
+                tuple("${pairId}|${platform}", true)
+            }
+        }
+    }
+
+    no_cortical_depth_zarrs_ch = downstream_zarrs_ch
+        .join(no_cortical_depth_gate_ch)
+        .map { key, pairId, platform, latestZarr, runFlag ->
+            tuple(key, pairId, platform, latestZarr)
+        }
+
+    analysis_ready_zarrs_ch =
+        no_cortical_depth_zarrs_ch.mix(cortical_depth_zarrs_ch)
+
     qc_branch_gate_ch = sample_rows_ch.flatMap { pairId, row, settings ->
         if (!settings.run_qc) {
             []
@@ -1157,7 +1413,7 @@ workflow {
         }
     }
 
-    qc_inputs_ch = downstream_zarrs_ch
+    qc_inputs_ch = analysis_ready_zarrs_ch
         .join(qc_branch_gate_ch)
         .flatMap { key, pairId, platform, enrichedLatestZarr, analysisSegmentations ->
             analysisSegmentations.collect { segmentation ->
@@ -1227,7 +1483,7 @@ workflow {
         }
     }
 
-    analysis_without_qc_ch = downstream_zarrs_ch
+    analysis_without_qc_ch = analysis_ready_zarrs_ch
         .join(analysis_no_qc_gate_ch)
         .flatMap {
             key, pairId, platform, enrichedLatestZarr, analysisSegmentations, settings ->
@@ -1247,11 +1503,11 @@ workflow {
 
     analysis_dataset_zarrs_ch = analysis_from_qc_ch.mix(analysis_without_qc_ch)
 
-    merscope_zarr_ch = downstream_zarrs_ch
+    merscope_zarr_ch = analysis_ready_zarrs_ch
         .filter { key, pairId, platform, zarrPath -> platform == "MERSCOPE" }
         .map { key, pairId, platform, zarrPath -> tuple(pairId, zarrPath) }
 
-    xenium_zarr_ch = downstream_zarrs_ch
+    xenium_zarr_ch = analysis_ready_zarrs_ch
         .filter { key, pairId, platform, zarrPath -> platform == "XENIUM" }
         .map { key, pairId, platform, zarrPath -> tuple(pairId, zarrPath) }
 
