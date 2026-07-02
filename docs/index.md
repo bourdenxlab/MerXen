@@ -34,6 +34,7 @@ scientific logic living in the installable Python package `merxen`.
 - [Segmentation](stages/segmentation.md) (Cellpose-SAM + ProSeg)
 - [Enrichment](stages/enrichment.md)
 - [Mask image quantification](stages/mask-image-quantification.md)
+- [Cortical depth](stages/cortical-depth.md)
 - [QC](stages/qc.md)
 - [Section alignment](stages/alignment.md)
 - [Comparison](stages/comparison.md)

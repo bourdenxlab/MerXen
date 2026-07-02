@@ -38,6 +38,11 @@ channels.
   └────────┬────────┘
            ▼
   ┌─────────────────┐
+  │ COMPUTE_        │   optional Laplace/equal-area
+  │ CORTICAL_DEPTH  │   cortical-depth cell columns
+  └────────┬────────┘
+           ▼
+  ┌─────────────────┐
   │ QC              │   cell-level + transcript-assignment
   │                 │   metrics, histograms, violins
   └────────┬────────┘
@@ -74,9 +79,13 @@ Rows inherit `analysis_mode`, `enable_alignment`, `analysis_segmentation`,
 `start_stage`, `stop_stage`, and `only_stage` from Nextflow params unless those
 columns are set in the samplesheet. For rows with `analysis_mode=paired`, both
 platforms traverse `BUILD_SPATIALDATA → SEGMENT → ENRICH →
-MASK_IMAGE_QUANTIFICATION → QC` independently and are rejoined after QC. If
+MASK_IMAGE_QUANTIFICATION → COMPUTE_CORTICAL_DEPTH → QC` independently and
+are rejoined after QC. `COMPUTE_CORTICAL_DEPTH` is present only when the row's
+effective `cortical_depth_enabled` value is `true`. If
 mask image quantification is disabled or skipped by a stage range, downstream
-stages consume the enriched zarr directly. If the row's effective
+stages consume the enriched zarr directly. If cortical depth is disabled or
+skipped by a stage range, downstream stages consume the quantified/enriched
+zarr directly. If the row's effective
 `enable_alignment` value is `true`, `ALIGN` and `ALIGN_QC` run before
 `COMPARE` / `VISUALIZE` / `CLUSTERING_SQUIDPY`; otherwise the paired stages
 consume the quantified/enriched zarrs directly. In `analysis_mode=merscope` or
@@ -105,16 +114,18 @@ For a samplesheet row with `pair_id=EXAMPLE01`:
 | 2 | `SEGMENT` × 2 | `merxen segment` | `source_spatialdata.zarr` | durable `latest/latest_spatialdata.zarr`, `cellpose_masks_tiled.npy`, `cellpose_stitching_stats.json`, `transcripts_for_proseg.csv` |
 | 3 | `ENRICH` × 2 | `merxen enrich` | latest zarr + Cellpose mask | same durable `latest/latest_spatialdata.zarr`, now enriched with per-shape counts tables |
 | 4 | `MASK_IMAGE_QUANTIFICATION` × 2 | `merxen mask-image-quantification` | enriched zarr + Cellpose mask | same durable zarr, now with `table_MOSAIK_cellpose_image_quantification` plus sidecars |
-| 5 | `QC` × 2 | `merxen qc` | quantified zarr, or enriched zarr if quantification was skipped | `qc_out/` (metrics CSV, plots) |
-| 6 | `ALIGN` × 1 | `merxen align` | both platforms' quantified/enriched zarrs | in-place MERSCOPE aligned elements + transform metadata, when enabled |
-| 7 | `ALIGN_QC` × 1 | `merxen alignment-qc` | updated MERSCOPE zarr + original Xenium zarr | `alignment_qc_out/`, when enabled |
-| 8 | `COMPARE` × 1 | `merxen compare` | updated MERSCOPE zarr if enabled; otherwise quantified/enriched zarrs | `compare_out/` (gene comparison CSVs + metrics JSON) |
-| 9 | `VISUALIZE` × 1 | `merxen visualize` | updated MERSCOPE zarr if enabled; otherwise quantified/enriched zarrs | `visualize_out/` (PNG plots) |
-| 10 | `CLUSTERING_SQUIDPY` × 1 | `merxen clustering-squidpy` | same paired zarrs, after visualization in full runs | `clustering_squidpy_out/` plus derived clustered tables in each durable zarr |
-| 11 | `MAPMYCELLS` × 1 | `merxen mapmycells` | clustered `.h5ad` files from `clustering_squidpy_out/` | `mapmycells_out/` (query `.h5ad`, CSV/JSON assignments, annotated `.h5ad`) |
+| 5 | `COMPUTE_CORTICAL_DEPTH` × 2 | `merxen compute-cortical-depth` | quantified/enriched zarr + boundary GeoJSON annotations | same durable zarr, now with cortical-depth columns plus sidecars, when enabled |
+| 6 | `QC` × 2 | `merxen qc` | cortical-depth zarr when enabled; otherwise quantified/enriched zarr | `qc_out/` (metrics CSV, plots) |
+| 7 | `ALIGN` × 1 | `merxen align` | both platforms' latest analysis-ready zarrs | in-place MERSCOPE aligned elements + transform metadata, when enabled |
+| 8 | `ALIGN_QC` × 1 | `merxen alignment-qc` | updated MERSCOPE zarr + original Xenium zarr | `alignment_qc_out/`, when enabled |
+| 9 | `COMPARE` × 1 | `merxen compare` | updated MERSCOPE zarr if enabled; otherwise analysis-ready zarrs | `compare_out/` (gene comparison CSVs + metrics JSON) |
+| 10 | `VISUALIZE` × 1 | `merxen visualize` | updated MERSCOPE zarr if enabled; otherwise analysis-ready zarrs | `visualize_out/` (PNG plots) |
+| 11 | `CLUSTERING_SQUIDPY` × 1 | `merxen clustering-squidpy` | same paired zarrs, after visualization in full runs | `clustering_squidpy_out/` plus derived clustered tables in each durable zarr |
+| 12 | `MAPMYCELLS` × 1 | `merxen mapmycells` | clustered `.h5ad` files from `clustering_squidpy_out/` | `mapmycells_out/` (query `.h5ad`, CSV/JSON assignments, annotated `.h5ad`) |
 
-In single-platform mode, steps 1-4 run once per row, steps 5-7 are skipped,
-and steps 8-10 consume a one-sample config for the selected platform.
+In single-platform mode, platform-local steps run once per row, paired-only
+alignment and comparison are skipped, and visualization/clustering consume a
+one-sample config for the selected platform.
 
 All published artifacts land under
 `${params.outdir}/${pair_id}/<stage>/...`. See [Outputs](outputs.md).

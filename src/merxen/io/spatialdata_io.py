@@ -7,6 +7,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
 import spatialdata as sd
 
 from merxen.memory import force_release, log_status
@@ -188,6 +189,9 @@ def normalize_points_for_latest_write(
     df = points_obj
     cols = set(map(str, list(df.columns)))
 
+    df = _preserve_observed_transcript_coordinates(df, cols)
+    cols = set(map(str, list(df.columns)))
+
     # Gene columns: force to plain string to avoid categorical overflow
     for gene_col in ("gene", "feature_name", "target"):
         if gene_col in cols:
@@ -196,10 +200,11 @@ def normalize_points_for_latest_write(
             except Exception:  # noqa: BLE001
                 df[gene_col] = df[gene_col].astype(str)
 
-    # Integer identifier columns: prefer unsigned ints, fall back to string
+    # Integer identifier columns: prefer unsigned ints, fall back to string.
+    # ProSeg's assignment column is nullable; NULL means background/unassigned,
+    # while 0 can be a valid zero-based ProSeg cell id.
     int_casts: dict[str, str] = {
         "transcript_id": "uint64",
-        "assignment": "uint32",
         "cell": "uint32",
     }
     for c, target_dtype in int_casts.items():
@@ -212,6 +217,19 @@ def normalize_points_for_latest_write(
                 except Exception:  # noqa: BLE001
                     df[c] = df[c].astype("string")
 
+    if "assignment" in cols:
+        try:
+            df["assignment"] = df["assignment"].astype("float64").astype("UInt32")
+        except Exception:  # noqa: BLE001
+            try:
+                numeric_assignment = pd.to_numeric(
+                    df["assignment"],
+                    errors="coerce",
+                )
+                df["assignment"] = numeric_assignment.astype("UInt32")
+            except Exception:  # noqa: BLE001
+                df["assignment"] = df["assignment"].astype("string")
+
     # cell_id as string for downstream assignment logic compatibility
     if "cell_id" in cols:
         try:
@@ -220,6 +238,26 @@ def normalize_points_for_latest_write(
             df["cell_id"] = df["cell_id"].astype(str)
 
     log_status(f"Normalized points schema for '{points_key}' (columns={len(cols)})")
+    return df
+
+
+def _preserve_observed_transcript_coordinates(df: Any, cols: set[str]) -> Any:
+    """Make observed transcript coordinates canonical when ProSeg moved them.
+
+    ProSeg writes inferred/repositioned transcript coordinates to ``x/y/z`` and
+    the physical detected coordinates to ``observed_x/observed_y/observed_z``.
+    MerXen's downstream code expects ``x/y`` to be physical transcript
+    positions, so keep the ProSeg coordinates under explicit names.
+    """
+    for coord in ("x", "y", "z"):
+        observed_col = f"observed_{coord}"
+        moved_col = f"proseg_moved_{coord}"
+        if coord not in cols or observed_col not in cols:
+            continue
+        if moved_col not in cols:
+            df[moved_col] = df[coord]
+            cols.add(moved_col)
+        df[coord] = df[observed_col]
     return df
 
 

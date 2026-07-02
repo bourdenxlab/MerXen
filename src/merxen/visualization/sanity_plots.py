@@ -21,6 +21,7 @@ from matplotlib import patheffects as path_effects
 from matplotlib.lines import Line2D
 from shapely.geometry import box as shapely_box
 
+from merxen.io.transcript_io import assignment_mask_from_points
 from merxen.plotting import prepare_plot_output, save_figure
 
 SANITY_CROP_SIZE_UM = 250.0
@@ -1025,6 +1026,7 @@ def _crop_points(
         ["y", "global_y", "y_location", "y_micron", "observed_y", "y_global_px"],
     )
     assign_col = _first_existing_col(pts, ["assignment", "cell", "cell_id"])
+    background_col = _first_existing_col(pts, ["background"])
     if x_col is None or y_col is None:
         raise KeyError(f"Could not resolve x/y columns in points[{points_key}]")
     if (
@@ -1035,7 +1037,11 @@ def _crop_points(
         assignment_shape_key = f"{assignment_shape_key}_aligned_nonrigid"
 
     x0, y0, x1, y1 = bbox
-    cols = [x_col, y_col] + ([assign_col] if assign_col is not None else [])
+    cols = [x_col, y_col]
+    if assign_col is not None:
+        cols.append(assign_col)
+    if background_col is not None and background_col not in cols:
+        cols.append(background_col)
 
     if hasattr(pts, "npartitions") and hasattr(pts, "partitions"):
         work = pts[cols]
@@ -1066,8 +1072,15 @@ def _crop_points(
         shape_crop = _crop_single_shape(sdata_obj, assignment_shape_key, bbox)
         pdf["assigned"] = _assign_points_by_shape(pdf, shape_crop)
         assign_col = f"shape:{assignment_shape_key}"
-    elif assign_col is not None and assign_col in pdf.columns:
-        pdf["assigned"] = _assignment_mask(pdf[assign_col]).values
+    elif (assign_col is not None and assign_col in pdf.columns) or (
+        background_col is not None and background_col in pdf.columns
+    ):
+        pdf["assigned"] = assignment_mask_from_points(
+            pdf,
+            assign_col=assign_col,
+            background_col=background_col or "background",
+        ).values
+        assign_col = assign_col or background_col
     else:
         pdf["assigned"] = True
 
@@ -1379,14 +1392,6 @@ def _affine_px_to_um(
         + float(y_transform[2])
     )
     return float(x_um), float(y_um)
-
-
-def _assignment_mask(series: pd.Series) -> pd.Series:
-    if pd.api.types.is_numeric_dtype(series):
-        return series.fillna(0).astype(float) > 0
-    values = series.astype("string")
-    bad = {"", "0", "-1", "nan", "None", "<NA>"}
-    return values.notna() & ~values.isin(bad)
 
 
 def _first_existing_col(df_like: Any, candidates: list[str]) -> str | None:

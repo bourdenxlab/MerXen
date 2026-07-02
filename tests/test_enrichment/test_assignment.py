@@ -15,6 +15,7 @@ from spatialdata.models import TableModel
 
 from merxen.enrichment.assignment import (
     clone_table_for_region,
+    compute_table_from_points_for_shape,
     run_per_shape_assignment_for_dataset,
 )
 
@@ -59,6 +60,39 @@ def test_clone_table_for_region_retargets_existing_spatialdata_table() -> None:
         "instance_key": "cell",
     }
     assert source.uns["spatialdata_attrs"]["region"] == "cell_boundaries"
+
+
+def test_compute_table_from_points_keeps_zero_shape_id() -> None:
+    """A geometric shape id of 0 is a real ProSeg cell, not unassigned."""
+    points = pd.DataFrame(
+        {
+            "x": [0.5, 2.5, 10.0],
+            "y": [0.5, 0.5, 10.0],
+            "gene": ["GeneA", "GeneA", "GeneA"],
+        }
+    )
+    shapes = gpd.GeoDataFrame(
+        {
+            "cell_id": ["0", "1"],
+            "geometry": [box(0.0, 0.0, 1.0, 1.0), box(2.0, 0.0, 3.0, 1.0)],
+        },
+        geometry="geometry",
+    )
+
+    table, summary = compute_table_from_points_for_shape(
+        dataset_name="P1_MERSCOPE",
+        points_obj=points,
+        shape_gdf=shapes,
+        shape_id_col="cell_id",
+        shape_key="MOSAIK_proseg",
+        gene_list=["GeneA"],
+        chunk_rows=10,
+    )
+
+    assert summary["n_points_assigned"] == 2
+    assert table.obs["cell_id"].astype(str).tolist() == ["0", "1"]
+    x_matrix = table.X.toarray() if hasattr(table.X, "toarray") else np.asarray(table.X)
+    np.testing.assert_array_equal(np.asarray(x_matrix).ravel(), np.array([1, 1]))
 
 
 def test_source_backed_clone_failure_does_not_use_spatial_join(

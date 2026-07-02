@@ -57,6 +57,7 @@ any of them with `--<name>` on the command line.
 | `enable_alignment` | `false` | Fallback row alignment switch. A non-empty samplesheet `enable_alignment` value overrides this per row; alignment only applies to paired rows. |
 | `analysis_segmentation` | `both` | Fallback downstream analysis branches after enrichment. Valid values: `both`, `reseg`, `original_seg`; comma-separated combinations are accepted. A non-empty samplesheet `analysis_segmentation` value overrides this per row. |
 | `mask_image_quantification_enabled` | `true` | Insert the Cellpose-mask image quantification stage between enrichment and QC. A non-empty samplesheet `mask_image_quantification_enabled` value overrides this per row. |
+| `cortical_depth_enabled` | `false` | Insert the cortical-depth stage before QC. Requires per-sample pial/tissue-edge annotations, with optional gray/white boundaries for depth pieces. A non-empty samplesheet `cortical_depth_enabled` value overrides this per row. |
 | `force_spatialdata_build` | `false` | Rebuild SpatialData zarrs even if cached. |
 | `start_stage` | `build_spatialdata` | Fallback first stage. Skipped upstream stages are read from published outputs. A samplesheet `start_stage` value overrides this per row. |
 | `stop_stage` | `clustering_squidpy` | Fallback last stage. MapMyCells is available after this but opt-in because it requires reference files. A samplesheet `stop_stage` value overrides this per row. |
@@ -65,11 +66,13 @@ any of them with `--<name>` on the command line.
 | `gpu_process_lock_file` | `${projectDir}/.merxen_gpu.lock` | File used for the local GPU lock. Override only when coordinating multiple runs from the same machine. |
 
 Stage names accepted by `start_stage`, `stop_stage`, and `only_stage` are:
-`build_spatialdata`, `segment`, `enrich`, `mask_image_quantification`, `qc`,
-`align`, `align_qc`, `compare`, `visualize`, `clustering_squidpy`, and
-`mapmycells`. `mask_image_quantification` is available only when the effective
-`mask_image_quantification_enabled` value is `true`. `align` and `align_qc`
-are available only for rows whose effective `enable_alignment` value is `true`.
+`build_spatialdata`, `segment`, `enrich`, `mask_image_quantification`,
+`compute_cortical_depth`, `qc`, `align`, `align_qc`, `compare`, `visualize`,
+`clustering_squidpy`, and `mapmycells`. `mask_image_quantification` is
+available only when the effective `mask_image_quantification_enabled` value is
+`true`. `compute_cortical_depth` is available only when the effective
+`cortical_depth_enabled` value is `true`. `align` and `align_qc` are available
+only for rows whose effective `enable_alignment` value is `true`.
 `align`, `align_qc`, and `compare` are available only when
 `analysis_mode = paired`.
 
@@ -104,6 +107,25 @@ are available only for rows whose effective `enable_alignment` value is `true`.
 |-------|---------|-------------|
 | `mask_image_quantification_enabled` | `true` | Run Cellpose-mask image quantification after enrichment by default. |
 | `mask_image_quantification_max_forks` | `2` | Maximum concurrent quantification processes. |
+
+### Cortical depth
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `cortical_depth_enabled` | `false` | Run `COMPUTE_CORTICAL_DEPTH` before QC. |
+| `cortical_depth_coordinate_unit_um` | `1.0` | Microns per coordinate unit in annotation/cell coordinates. Use the image pixel size if annotations are in pixel coordinates; keep `1.0` when coordinates are already microns. |
+| `cortical_depth_raster_resolution_um` | `5.0` | Finite-difference raster spacing. Smaller values improve geometry fidelity and increase memory/time. |
+| `cortical_depth_raster_padding_um` | `null` | Optional padding around the ribbon bounds. `null` uses a small automatic padding. |
+| `cortical_depth_boundary_band_um` | `null` | Width of the rasterized Dirichlet boundary band. `null` uses about 1.5 raster pixels. |
+| `cortical_depth_boundary_smoothing_window` | `0` | Optional moving-average smoothing window over boundary vertices. |
+| `cortical_depth_streamline_spacing_um` | `50.0` | Approximate pial arc-length spacing between streamline seeds. |
+| `cortical_depth_streamline_step_um` | `null` | Integration step length. `null` uses about half the raster resolution. |
+| `cortical_depth_streamline_max_steps` | `4000` | Maximum integration steps per streamline. |
+| `cortical_depth_streamline_resample_points` | `101` | Number of points stored per streamline. |
+| `cortical_depth_side_boundary_distance_um` | `25.0` | Distance from artificial side boundaries used to flag cells/streamlines. |
+| `cortical_depth_contour_levels` | `0.1..0.9` | Depth contours written to GeoJSON/QC overlays. |
+| `cortical_depth_write_spatialdata_table` | `true` | Replace selected SpatialData tables with cortical-depth columns added to `obs`. |
+| `cortical_depth_max_forks` | `2` | Maximum concurrent cortical-depth processes. |
 
 ### ProSeg
 

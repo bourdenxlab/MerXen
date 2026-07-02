@@ -28,11 +28,13 @@ Common optional parameters:
 | `--analysis_segmentation` | `both` (default), `reseg`, or `original_seg`. Controls whether downstream analysis runs on resegmented data, original instrument segmentation, or both. |
 | `--force_spatialdata_build` | Force rebuilding the SpatialData zarr even when a cached one exists. Defaults to `false`. |
 | `--enable_alignment` | Run optional Spateo alignment and alignment QC before comparison. Paired mode only. Defaults to `false`. |
+| `--cortical_depth_enabled` | Run cortical-depth coordinate computation before QC. Requires boundary GeoJSON annotations. Defaults to `false`. |
 | `--start_stage` / `--stop_stage` | Run a contiguous stage range. Defaults to the full pipeline. |
 | `--only_stage` | Convenience alias for setting `start_stage` and `stop_stage` to the same stage. |
 
 The samplesheet may also include `analysis_mode`, `enable_alignment`,
-`analysis_segmentation`, `start_stage`, `stop_stage`, and `only_stage` columns.
+`analysis_segmentation`, `cortical_depth_enabled`, `start_stage`, `stop_stage`,
+and `only_stage` columns.
 Non-empty row values override these command-line settings for that row only;
 blank cells inherit the command-line/config value. Every other parameter has a
 default in
@@ -55,6 +57,10 @@ checks for reference files required by the selected stage range. For example,
 `clustering_squidpy` with hierarchical mode checks the broad marker lookup and
 Allen taxonomy paths, while `mapmycells` checks whole-brain marker/stat files
 only when that module is selected and the requested reference mode needs them.
+When `compute_cortical_depth` is selected, preflight checks pial/tissue-edge
+annotation GeoJSONs or a combined role-labelled annotation GeoJSON for every
+active platform. Gray/white boundaries are optional for pial-only mask/QC
+pieces.
 Missing references stop the run immediately with the selected stages and paths
 that need attention.
 
@@ -79,8 +85,10 @@ nextflow run workflows/main.nf \
 
 In `analysis_mode=merscope` or `analysis_mode=xenium`, either from the command
 line or a row-level samplesheet value, the workflow runs
-`build_spatialdata → segment → enrich → qc → visualize → clustering_squidpy`
-for the selected platform. Visualization writes single-dataset alternatives for
+`build_spatialdata → segment → enrich → mask_image_quantification → qc →
+visualize → clustering_squidpy` for the selected platform. If
+`cortical_depth_enabled=true`, `compute_cortical_depth` is inserted before QC.
+Visualization writes single-dataset alternatives for
 paired plots, including gene-abundance, one-platform transcript overview, and
 one-platform sanity crop outputs. `mapmycells` remains available after
 clustering. Alignment and comparison are rejected for single-platform rows
@@ -200,10 +208,12 @@ rerunning `ALIGN` or `ALIGN_QC`.
 
 Accepted stages are:
 
-`build_spatialdata`, `segment`, `enrich`, `qc`, `align`, `align_qc`, `compare`,
-`visualize`, `clustering_squidpy`, and `mapmycells`. Alignment stages are only
-active for rows whose effective `enable_alignment` value is `true`, and
-`align`, `align_qc`, and `compare` are active only in paired rows.
+`build_spatialdata`, `segment`, `enrich`, `mask_image_quantification`,
+`compute_cortical_depth`, `qc`, `align`, `align_qc`, `compare`, `visualize`,
+`clustering_squidpy`, and `mapmycells`. `compute_cortical_depth` is only active
+for rows whose effective `cortical_depth_enabled` value is `true`. Alignment
+stages are only active for rows whose effective `enable_alignment` value is
+`true`, and `align`, `align_qc`, and `compare` are active only in paired rows.
 
 Run one stage:
 

@@ -18,6 +18,7 @@ merxen/
 │   └── builders/        # per-platform SpatialData builders
 ├── segmentation/        # Cellpose tiling, ProSeg subprocess, mask utilities
 ├── enrichment/          # shape layers + per-shape gene tables
+├── cortical_depth/      # Laplace/equal-area cortical-depth coordinates
 ├── qc/                  # per-dataset and cross-platform metrics
 ├── visualization/       # plotting
 ├── analysis/            # Scanpy/Squidpy downstream analysis
@@ -25,8 +26,10 @@ merxen/
 ```
 
 The subpackage structure mirrors the Nextflow stage graph:
-`build → segment → enrich → qc → align → alignment-qc → compare → visualize
-→ clustering-squidpy → mapmycells`. Alignment is skipped unless
+`build → segment → enrich → mask-image-quantification → compute-cortical-depth
+→ qc → align → alignment-qc → compare → visualize → clustering-squidpy
+→ mapmycells`. Cortical depth is skipped unless `--cortical_depth_enabled true`
+is set. Alignment is skipped unless
 `--enable_alignment true` is set, and MapMyCells is opt-in because it requires
 local reference files.
 
@@ -36,8 +39,9 @@ All pipeline parameters as Pydantic v2 models. CLI commands validate JSON
 configs against these.
 
 - Top-level per-stage: `SpatialDataBuildConfig`, `SegmentationConfig`,
-  `EnrichmentConfig`, `QCConfig`, `AlignmentConfig`, `AlignmentQCConfig`,
-  `ComparisonConfig`, `VisualizationConfig`, `ClusteringSquidpyConfig`.
+  `EnrichmentConfig`, `MaskImageQuantificationConfig`, `CorticalDepthConfig`,
+  `QCConfig`, `AlignmentConfig`, `AlignmentQCConfig`, `ComparisonConfig`,
+  `VisualizationConfig`, `ClusteringSquidpyConfig`.
 - Sub-models: `CellposeConfig`, `TilingConfig`, `MaskFilterConfig`,
   `ProsegConfig`, `MemoryConfig`, `DatasetConfig`,
   `MerscopeBuildConfig`, `XeniumBuildConfig`.
@@ -119,6 +123,20 @@ with Groovy.
   over nonzero Cellpose mask labels.
 - `run_mask_image_quantification(config, *, force_rerun)` — stage entry point
   that writes the SpatialData table and sidecar outputs.
+
+## `merxen.cortical_depth`
+
+### `cortical_depth.pipeline` — [pipeline.py](../src/merxen/cortical_depth/pipeline.py)
+- `run_cortical_depth(config)` — full stage entry point.
+
+### Internal modules
+- `boundaries.py` — read role-labelled GeoJSON boundaries and masks.
+- `ribbon.py` — construct/rasterize the cortical ribbon.
+- `laplace.py` — sparse 2D Laplace solve and bilinear interpolation.
+- `streamlines.py` — normalized-gradient streamlines.
+- `equivolumetric.py` — nearest-streamline equal-area depth approximation.
+- `assign_cells.py` — per-cell depth, thickness, tangential coordinate, and QC flags.
+- `plotting.py` — GeoJSON contours and QC overlays.
 
 ## `merxen.qc`
 

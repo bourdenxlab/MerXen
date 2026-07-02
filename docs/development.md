@@ -86,8 +86,47 @@ scripts/run_ci_checks.sh
 The script creates or reuses `.ci-venv`, installs from
 [requirements.lock](../requirements.lock) with `uv`, installs the package with
 `--no-deps`, then runs the same lint, format, type-check, and test commands as
-GitHub Actions. Set `MERXEN_CI_VENV=/path/to/venv` to keep the reproducible
-environment somewhere else.
+GitHub Actions on Linux. On macOS, the script defaults to a local editable
+`.[dev]` install instead of the lockfile because the lockfile can include
+Linux CUDA wheels from PyTorch that cannot be installed on Apple Silicon.
+
+Set `MERXEN_CI_VENV=/path/to/venv` to keep the reproducible environment
+somewhere else. Set `MERXEN_CI_INSTALL_MODE` to control dependency installation:
+
+| Mode | Behavior |
+|------|----------|
+| `auto` | Default. Uses `locked` on Linux and `local` on macOS. |
+| `locked` | Install exactly from `requirements.lock`, then `pip install -e . --no-deps`. Use this for Linux/server parity. |
+| `local` | Install `pip install -e ".[dev]"` through `uv` without the lockfile. Use this for macOS edit/test/push workflows when CUDA wheels are unavailable. |
+| `none` | Do not install dependencies; reuse the existing `.ci-venv`. |
+
+`MERXEN_CI_RUN_TESTS` controls the pytest step. Its default is `auto`, which
+runs pytest for locked installs and skips pytest for local macOS installs. This
+keeps local Mac pushes from being blocked by CUDA lockfile packages or
+platform-specific scientific wheel crashes while preserving Linux/server parity.
+Set `MERXEN_CI_RUN_TESTS=true` to force pytest, or use
+`MERXEN_CI_PYTEST_ARGS` to run a smaller target.
+
+For example, to push from a Mac while skipping lockfile CUDA packages:
+
+```bash
+MERXEN_CI_INSTALL_MODE=local git push
+```
+
+To force Linux/server-style locked checks locally:
+
+```bash
+MERXEN_CI_INSTALL_MODE=locked scripts/run_ci_checks.sh
+```
+
+To run a targeted pytest subset through the hook environment:
+
+```bash
+MERXEN_CI_INSTALL_MODE=local \
+MERXEN_CI_RUN_TESTS=true \
+MERXEN_CI_PYTEST_ARGS="tests/test_cortical_depth -q" \
+scripts/run_ci_checks.sh
+```
 
 Branch protection on `main` should require this workflow to pass.
 

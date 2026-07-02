@@ -50,6 +50,27 @@ def test_compute_cell_metrics_from_points_with_pandas_input() -> None:
     assert int(row2["genes_per_cell"]) == 1
 
 
+def test_compute_cell_metrics_from_points_uses_background_column() -> None:
+    """ProSeg cell id 0 should be assigned when background is false."""
+    points = pd.DataFrame(
+        {
+            "assignment": pd.Series([0, pd.NA, 2], dtype="UInt32"),
+            "background": [False, True, False],
+            "feature_name": ["A", "B", "A"],
+        }
+    )
+
+    n_total, n_assigned, cell_metrics = _compute_cell_metrics_from_points(
+        points,
+        assign_col="assignment",
+        gene_col="feature_name",
+    )
+
+    assert n_total == 3
+    assert n_assigned == 2
+    assert set(cell_metrics["cell_id_norm"]) == {"0", "2"}
+
+
 def test_compute_cell_metrics_from_table_uses_instance_key() -> None:
     """Table-backed QC should aggregate row sums and preserve table cell IDs."""
     adata = ad.AnnData(
