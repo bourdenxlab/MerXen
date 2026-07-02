@@ -14,6 +14,7 @@ from merxen.qc.gene_comparison import (
     compare_df,
     compute_gene_summary,
     fit_linear,
+    gene_totals_from_points,
     normalize_counts,
 )
 
@@ -87,3 +88,19 @@ def test_compute_gene_summary_uses_requested_table_key() -> None:
     assert assigned["A"] == 0.0
     assert assigned["B"] == 5.0
     assert out["table_key"] == "table_original"
+
+
+def test_gene_totals_from_points_uses_background_column_for_proseg() -> None:
+    """Assigned-only point counts should keep ProSeg cell id 0."""
+    points = pd.DataFrame(
+        {
+            "gene": ["A", "B", "A"],
+            "assignment": pd.Series([0, pd.NA, 2], dtype="UInt32"),
+            "background": [False, True, False],
+        }
+    )
+    sdata_obj = SimpleNamespace(points={"transcripts": points})
+
+    counts = gene_totals_from_points(sdata_obj, assigned_only=True)
+
+    assert counts.to_dict() == {"A": 2.0}

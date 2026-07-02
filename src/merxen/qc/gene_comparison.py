@@ -10,7 +10,11 @@ import numpy as np
 import pandas as pd
 import spatialdata as sd
 
-from merxen.io.transcript_io import assignment_mask, first_existing_col, to_pandas
+from merxen.io.transcript_io import (
+    assignment_mask_from_points,
+    first_existing_col,
+    to_pandas,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,19 +48,28 @@ def gene_totals_from_points(
         )
 
     assign_col: str | None = None
+    background_col = first_existing_col(pts, ["background"])
     if assigned_only:
         assign_col = first_existing_col(pts, ["assignment", "cell", "cell_id"])
-        if assign_col is None:
+        if assign_col is None and background_col is None:
             raise KeyError(
-                "Could not find assignment column in points "
+                "Could not find assignment/background column in points "
                 f"{points_key}: {list(pts.columns)}"
             )
 
     if hasattr(pts, "npartitions") and hasattr(pts, "partitions"):
         if assigned_only:
-            work = pts[[gene_col, assign_col]]
-            mask = work[assign_col].map_partitions(
-                assignment_mask, meta=("assigned", "bool")
+            cols = [gene_col]
+            if assign_col is not None:
+                cols.append(assign_col)
+            if background_col is not None:
+                cols.append(background_col)
+            work = pts[cols]
+            mask = work.map_partitions(
+                assignment_mask_from_points,
+                assign_col=assign_col,
+                background_col=background_col or "background",
+                meta=("assigned", "bool"),
             )
             counts = work.loc[mask].groupby(gene_col).size().compute()
         else:
@@ -64,7 +77,16 @@ def gene_totals_from_points(
     else:
         pdf = to_pandas(pts)
         if assigned_only:
-            mask = assignment_mask(pdf[assign_col])
+            cols = [gene_col]
+            if assign_col is not None:
+                cols.append(assign_col)
+            if background_col is not None:
+                cols.append(background_col)
+            mask = assignment_mask_from_points(
+                pdf[cols],
+                assign_col=assign_col,
+                background_col=background_col or "background",
+            )
             counts = pdf.loc[mask].groupby(gene_col).size()
         else:
             counts = pdf.groupby(gene_col).size()

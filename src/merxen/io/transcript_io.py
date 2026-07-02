@@ -79,9 +79,11 @@ def first_existing_col(df_like: Any, cols: list[str]) -> str | None:
 
 
 def assignment_mask(series: pd.Series) -> pd.Series:
-    """Boolean mask identifying assigned (non-null, non-zero) transcript values.
+    """Boolean mask identifying assigned transcript values.
 
     Handles both numeric cell IDs and string-based assignment columns.
+    Numeric columns with nulls are treated as nullable cell IDs, where any
+    non-null value, including 0, is a valid assignment.
 
     Args:
         series: A pandas Series of cell assignment values.
@@ -90,12 +92,44 @@ def assignment_mask(series: pd.Series) -> pd.Series:
         Boolean Series where True means the transcript is assigned to a cell.
     """
     if pd.api.types.is_numeric_dtype(series):
-        vals = pd.to_numeric(series, errors="coerce").fillna(0)
+        vals = pd.to_numeric(series, errors="coerce")
+        if bool(vals.isna().any()):
+            return vals.notna()
         return vals != 0
     s = series.astype(str).str.strip().str.lower()
     return (
         ~s.isin({"0", "0.0", "", "none", "nan", "null", "unassigned"})
     ) & series.notna()
+
+
+def background_mask(series: pd.Series) -> pd.Series:
+    """Boolean mask identifying background/unassigned transcript values."""
+    if pd.api.types.is_bool_dtype(series):
+        return series.fillna(True).astype(bool)
+    if pd.api.types.is_numeric_dtype(series):
+        vals = pd.to_numeric(series, errors="coerce").fillna(1)
+        return vals != 0
+
+    values = series.astype("string").str.strip().str.lower()
+    true_values = values.isin({"true", "t", "1", "yes", "y"})
+    false_values = values.isin({"false", "f", "0", "no", "n"})
+    unknown_values = values.isna() | ~(true_values | false_values)
+    return true_values | unknown_values
+
+
+def assignment_mask_from_points(
+    points_df: pd.DataFrame,
+    *,
+    assign_col: str | None = None,
+    background_col: str = "background",
+) -> pd.Series:
+    """Boolean mask identifying assigned transcripts from a points partition."""
+    cols = set(map(str, list(points_df.columns)))
+    if background_col in cols:
+        return ~background_mask(points_df[background_col])
+    if assign_col is None:
+        raise KeyError("No assignment or background column was provided.")
+    return assignment_mask(points_df[assign_col])
 
 
 def iter_points_chunks(
