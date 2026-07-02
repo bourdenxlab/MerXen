@@ -15,6 +15,7 @@ from merxen.cortical_depth.assign_cells import (
 )
 from merxen.cortical_depth.boundaries import (
     BoundaryAnnotations,
+    BoundaryAnnotationSet,
     BoundaryPieceAnnotations,
     load_boundary_annotations,
 )
@@ -23,6 +24,11 @@ from merxen.cortical_depth.laplace import interpolate_scalar_field, solve_laplac
 from merxen.cortical_depth.pipeline import (
     PieceDepthResult,
     _assign_piecewise_cortical_depth_to_cells,
+    _classify_cell_tissue_annotations,
+)
+from merxen.cortical_depth.plotting import (
+    plot_cells_by_annotation,
+    plot_depth_difference,
 )
 from merxen.cortical_depth.ribbon import (
     _unique_valid_polygons,
@@ -197,6 +203,56 @@ def test_pial_only_piece_rasterizes_mask_qc_only_and_assigns_cells() -> None:
     assert assignments.loc["outside", "cortical_depth_qc_flag"] == "outside_ribbon"
 
 
+def test_cell_tissue_annotation_classifies_whole_sample() -> None:
+    """Cells should be annotated as grey, white, excluded, or outside brain."""
+    exclusion = Polygon([(45, 20), (55, 20), (55, 30), (45, 30)])
+    edge = LineString([(0, 0), (100, 0), (100, 100), (0, 100), (0, 0)])
+    piece = BoundaryPieceAnnotations(
+        tissue_piece_id="piece_a",
+        pial=LineString([(0, 10), (100, 10)]),
+        wm=LineString([(0, 40), (100, 40)]),
+        exclusions=(exclusion,),
+    )
+    annotations = BoundaryAnnotationSet(
+        pieces=(piece,),
+        edge=edge,
+        side_boundaries=(edge,),
+    )
+    grid = rasterize_cortical_ribbon(
+        piece,
+        edge_line=edge,
+        resolution_um=2.0,
+        coordinate_unit_um=1.0,
+        boundary_band_um=2.0,
+    )
+    result = PieceDepthResult(
+        tissue_piece_id="piece_a",
+        piece_mode="depth",
+        grid=grid,
+        solution=None,
+        equal_area_depth=None,
+        streamlines=[],
+    )
+    points = np.array(
+        [
+            [20, 20],
+            [20, 70],
+            [50, 25],
+            [120, 20],
+        ],
+        dtype=float,
+    )
+
+    labels = _classify_cell_tissue_annotations(points, [result], annotations)
+
+    assert labels.tolist() == [
+        "grey_matter",
+        "white_matter",
+        "excluded",
+        "outside_brain",
+    ]
+
+
 def test_rectangular_ribbon_laplace_depth_is_approximately_linear() -> None:
     """A rectangular ribbon should produce monotone, nearly linear depth."""
     grid = rasterize_cortical_ribbon(
@@ -279,6 +335,47 @@ def test_cell_assignment_and_equal_area_depth_in_rectangle() -> None:
     assert inside["laplace_depth"].is_monotonic_increasing
     assert inside["equivolumetric_depth"].is_monotonic_increasing
     assert np.allclose(inside["streamline_thickness_um"], 50.0, atol=2.0)
+
+
+def test_cortical_depth_extra_plots_are_written(tmp_path: Path) -> None:
+    """Difference and tissue-annotation plots should write PNG and PDF copies."""
+    grid = rasterize_cortical_ribbon(
+        _rectangle_annotations(),
+        resolution_um=2.0,
+        coordinate_unit_um=1.0,
+        boundary_band_um=2.0,
+    )
+    solution = solve_laplace_depth(grid)
+    streamlines = trace_streamlines(solution.phi, grid, spacing_um=20.0, step_um=1.0)
+    equal_area = compute_equal_area_depth(solution.phi, grid, streamlines)
+    cells = pd.DataFrame(
+        {
+            "x": [10.0, 20.0, 120.0],
+            "y": [10.0, 30.0, 10.0],
+            "cortical_depth_annotation": [
+                "grey_matter",
+                "white_matter",
+                "outside_brain",
+            ],
+        }
+    )
+
+    difference_path = plot_depth_difference(
+        tmp_path / "difference.png",
+        grid,
+        solution.phi,
+        equal_area.depth,
+    )
+    annotation_path = plot_cells_by_annotation(
+        tmp_path / "annotation.png",
+        cells,
+        [grid],
+    )
+
+    assert difference_path.exists()
+    assert difference_path.with_suffix(".pdf").exists()
+    assert annotation_path.exists()
+    assert annotation_path.with_suffix(".pdf").exists()
 
 
 def test_curved_ribbon_produces_smooth_ordered_streamlines() -> None:
