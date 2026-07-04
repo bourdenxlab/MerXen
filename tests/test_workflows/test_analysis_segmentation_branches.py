@@ -116,8 +116,8 @@ def test_mask_image_quantification_stage_is_wired_before_qc() -> None:
         assert expected in module_text
 
 
-def test_compute_cortical_depth_stage_is_wired_before_qc() -> None:
-    """Cortical depth should run after analysis-ready zarr creation and before QC."""
+def test_compute_cortical_depth_stage_is_wired_after_clustering() -> None:
+    """Cortical depth should run after clustering when cluster labels are needed."""
     repo_root = Path(__file__).resolve().parents[2]
     main_text = (repo_root / "workflows" / "main.nf").read_text()
     config_text = (repo_root / "workflows" / "nextflow.config").read_text()
@@ -209,10 +209,8 @@ def test_spatial_gene_analysis_stage_is_wired_after_visualization() -> None:
         'include { SPATIAL_GENE_ANALYSIS } from "./modules/spatial_gene_analysis"',
         '"spatial_gene_analysis": "spatial_gene_analysis"',
         '"spatial_autocorrelation": "spatial_gene_analysis"',
-        (
-            'stages += ["visualize", "spatial_gene_analysis", '
-            '"clustering_squidpy", "mapmycells"]'
-        ),
+        ('stages += ["visualize", "spatial_gene_analysis", ' '"clustering_squidpy"]'),
+        'stages += ["mapmycells"]',
         "settings.run_spatial_gene_analysis",
         "spatial_gene_analysis_after_visualize_ch",
         "spatial_gene_analysis_done_ch",

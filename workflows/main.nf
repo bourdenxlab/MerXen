@@ -430,9 +430,6 @@ def activeStageOrder(
     if (maskImageQuantificationEnabled) {
         stages += ["mask_image_quantification"]
     }
-    if (corticalDepthEnabled) {
-        stages += ["compute_cortical_depth"]
-    }
     stages += ["qc"]
     if (pairedMode && alignmentEnabled) {
         stages += ["align", "align_qc"]
@@ -440,7 +437,14 @@ def activeStageOrder(
     if (pairedMode) {
         stages += ["compare"]
     }
-    stages += ["visualize", "spatial_gene_analysis", "clustering_squidpy", "mapmycells"]
+    stages += ["visualize", "spatial_gene_analysis", "clustering_squidpy"]
+    // compute_cortical_depth is sequenced AFTER clustering_squidpy so the per-cell
+    // cluster annotations exist for its depth violin plots. It is a terminal
+    // opt-in stage; see the default stop_stage handling in rowSampleSettings.
+    if (corticalDepthEnabled) {
+        stages += ["compute_cortical_depth"]
+    }
+    stages += ["mapmycells"]
     return stages
 }
 
@@ -808,6 +812,16 @@ def rowSampleSettings(row, params) {
     def stopStage = normalizeStage(stopStageRaw, stopParamName)
     validateStage(startStage, stageOrder, startParamName, alignmentEnabled)
     validateStage(stopStage, stageOrder, stopParamName, alignmentEnabled)
+    // compute_cortical_depth is sequenced after clustering_squidpy. When cortical
+    // depth is enabled and the stop stage is the clustering_squidpy default,
+    // extend the range so a normal run still produces the depth outputs.
+    // only_stage runs are left exact.
+    if (corticalDepthEnabled &&
+        !onlyStageRaw &&
+        stopStage == "clustering_squidpy" &&
+        stageOrder.contains("compute_cortical_depth")) {
+        stopStage = "compute_cortical_depth"
+    }
     if (stageOrder.indexOf(startStage) > stageOrder.indexOf(stopStage)) {
         error(
             "Samplesheet row ${pairId} has start_stage '${startStage}' " +
@@ -1362,71 +1376,13 @@ workflow {
 
     downstream_zarrs_ch = enriched_downstream_zarrs_ch.mix(quantified_zarrs_ch)
 
-    compute_cortical_depth_gate_ch = sample_rows_ch.flatMap { pairId, row, settings ->
-        if (!settings.run_compute_cortical_depth) {
-            []
-        } else {
-            settings.active_platforms.collect { platform ->
-                tuple(
-                    "${pairId}|${platform}",
-                    row,
-                    settings.analysis_segmentations,
-                )
-            }
-        }
-    }
-
-    compute_cortical_depth_inputs_ch = downstream_zarrs_ch
-        .join(compute_cortical_depth_gate_ch)
-        .map { key, pairId, platform, latestZarr, row, analysisSegmentations ->
-            def depthConfig = corticalDepthConfigForPlatform(
-                row,
-                pairId,
-                platform,
-                analysisSegmentations,
-                params,
-            )
-            tuple(
-                key,
-                pairId,
-                platform,
-                groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(depthConfig)),
-                latestZarr,
-            )
-        }
-
-    compute_cortical_depth_results_ch = COMPUTE_CORTICAL_DEPTH(
-        compute_cortical_depth_inputs_ch
-    )
-
-    cortical_depth_zarrs_ch = compute_cortical_depth_results_ch.map {
-        key, pairId, platform, latestZarr, _corticalDepthOutDir ->
-            tuple(
-                key,
-                pairId,
-                platform,
-                java.nio.file.Paths.get(latestZarr.toString()).toRealPath().toString(),
-            )
-    }
-
-    no_cortical_depth_gate_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
-        if (!(settings.need_enriched_zarrs && !settings.run_compute_cortical_depth)) {
-            []
-        } else {
-            settings.active_platforms.collect { platform ->
-                tuple("${pairId}|${platform}", true)
-            }
-        }
-    }
-
-    no_cortical_depth_zarrs_ch = downstream_zarrs_ch
-        .join(no_cortical_depth_gate_ch)
-        .map { key, pairId, platform, latestZarr, _runFlag ->
-            tuple(key, pairId, platform, latestZarr)
-        }
-
-    analysis_ready_zarrs_ch =
-        no_cortical_depth_zarrs_ch.mix(cortical_depth_zarrs_ch)
+    // Cortical depth now runs after clustering_squidpy (wired below) so that the
+    // per-cell broad_class / subcluster_label annotations exist and the depth
+    // violin plots can be produced. The analysis branch therefore reads the
+    // enriched/quantified zarrs directly and does not wait on cortical depth,
+    // which also breaks what would otherwise be a cycle:
+    // clustering -> cortical depth -> clustering.
+    analysis_ready_zarrs_ch = downstream_zarrs_ch
 
     qc_branch_gate_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
         if (!settings.run_qc) {
@@ -1972,6 +1928,83 @@ workflow {
             .mix(clustering_after_spatial_gene_analysis_ch)
 
     clustering_results_ch = CLUSTERING_SQUIDPY(clustering_inputs_ch)
+
+    // Cortical depth runs after clustering so the per-cell broad_class and
+    // subcluster_label annotations exist and the depth violin plots can be
+    // produced. Depth columns are not consumed by any other stage, so making
+    // cortical depth terminal loses no information downstream. The actual DAG
+    // execution order is enforced by the channel dependencies below (the
+    // stage-order list only drives start/stop range gating).
+    clustering_done_per_pair_ch = clustering_results_ch
+        .map { pairId, segmentation, _samplesJson, _clusteringOutDir ->
+            tuple(pairId, segmentation)
+        }
+        .groupTuple()
+        .map { pairId, _segmentations -> tuple(pairId, true) }
+
+    compute_cortical_depth_after_clustering_gate_ch =
+        sample_rows_ch.flatMap { pairId, row, settings ->
+            if (!(settings.run_compute_cortical_depth && settings.run_clustering_squidpy)) {
+                []
+            } else {
+                settings.active_platforms.collect { platform ->
+                    tuple("${pairId}|${platform}", row, settings.analysis_segmentations)
+                }
+            }
+        }
+
+    compute_cortical_depth_after_clustering_ch = downstream_zarrs_ch
+        .join(compute_cortical_depth_after_clustering_gate_ch)
+        .map { key, pairId, platform, latestZarr, row, analysisSegmentations ->
+            tuple(pairId, key, platform, latestZarr, row, analysisSegmentations)
+        }
+        .combine(clustering_done_per_pair_ch, by: 0)
+        .map { pairId, key, platform, latestZarr, row, analysisSegmentations, _done ->
+            tuple(key, pairId, platform, latestZarr, row, analysisSegmentations)
+        }
+
+    // Fallback for invocations where cortical depth is enabled but clustering is
+    // not run in the same pass (e.g. --only_stage compute_cortical_depth after a
+    // prior full run): read the enriched/quantified zarr directly. Violins are
+    // produced when a clustering table already exists in that zarr, otherwise
+    // they are skipped with a logged note.
+    compute_cortical_depth_without_clustering_gate_ch =
+        sample_rows_ch.flatMap { pairId, row, settings ->
+            if (!(settings.run_compute_cortical_depth && !settings.run_clustering_squidpy)) {
+                []
+            } else {
+                settings.active_platforms.collect { platform ->
+                    tuple("${pairId}|${platform}", row, settings.analysis_segmentations)
+                }
+            }
+        }
+
+    compute_cortical_depth_without_clustering_ch = downstream_zarrs_ch
+        .join(compute_cortical_depth_without_clustering_gate_ch)
+        .map { key, pairId, platform, latestZarr, row, analysisSegmentations ->
+            tuple(key, pairId, platform, latestZarr, row, analysisSegmentations)
+        }
+
+    compute_cortical_depth_inputs_ch = compute_cortical_depth_after_clustering_ch
+        .mix(compute_cortical_depth_without_clustering_ch)
+        .map { key, pairId, platform, latestZarr, row, analysisSegmentations ->
+            def depthConfig = corticalDepthConfigForPlatform(
+                row,
+                pairId,
+                platform,
+                analysisSegmentations,
+                params,
+            )
+            tuple(
+                key,
+                pairId,
+                platform,
+                groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(depthConfig)),
+                latestZarr,
+            )
+        }
+
+    COMPUTE_CORTICAL_DEPTH(compute_cortical_depth_inputs_ch)
 
     mapmycells_after_clustering_gate_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
         if (!(settings.run_mapmycells && settings.run_clustering_squidpy)) {
