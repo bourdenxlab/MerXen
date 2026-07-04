@@ -27,9 +27,9 @@ merxen/
 
 The subpackage structure mirrors the Nextflow stage graph:
 `build → segment → enrich → mask-image-quantification → compute-cortical-depth
-→ qc → align → alignment-qc → compare → visualize → clustering-squidpy
-→ mapmycells`. Cortical depth is skipped unless `--cortical_depth_enabled true`
-is set. Alignment is skipped unless
+→ qc → align → alignment-qc → compare → visualize → spatial-gene-analysis
+→ clustering-squidpy → mapmycells`. Cortical depth is skipped unless
+`--cortical_depth_enabled true` is set. Alignment is skipped unless
 `--enable_alignment true` is set, and MapMyCells is opt-in because it requires
 local reference files.
 
@@ -41,7 +41,8 @@ configs against these.
 - Top-level per-stage: `SpatialDataBuildConfig`, `SegmentationConfig`,
   `EnrichmentConfig`, `MaskImageQuantificationConfig`, `CorticalDepthConfig`,
   `QCConfig`, `AlignmentConfig`, `AlignmentQCConfig`, `ComparisonConfig`,
-  `VisualizationConfig`, `ClusteringSquidpyConfig`.
+  `VisualizationConfig`, `SpatialGeneAnalysisConfig`,
+  `ClusteringSquidpyConfig`.
 - Sub-models: `CellposeConfig`, `TilingConfig`, `MaskFilterConfig`,
   `ProsegConfig`, `MemoryConfig`, `DatasetConfig`,
   `MerscopeBuildConfig`, `XeniumBuildConfig`.
@@ -203,6 +204,21 @@ See [Section alignment](stages/alignment.md).
   `CLUSTERING_SQUIDPY`.
 
 See [Squidpy clustering](stages/clustering-squidpy.md).
+
+### `analysis.spatial_gene_analysis`
+- `run_spatial_gene_analysis(config)` — full stage entry point for
+  `SPATIAL_GENE_ANALYSIS`.
+- `prepare_spatial_autocorr_adata(adata, ...)` — remove controls, filter,
+  normalize, and log-transform input expression.
+- `add_spatial_neighbors(adata, ...)` — build the Squidpy generic-coordinate
+  spatial neighbor graph.
+- `compute_spatial_autocorrelation(adata)` — calculate per-gene Moran's I and
+  Geary's C.
+- `ranked_spatial_autocorr_genes(metrics, ...)` — extract top and bottom genes
+  per metric for reporting and plotting.
+- `plot_autocorr_distributions` / `plot_spatial_gene_expression` — PNG writers.
+
+See [Spatial gene analysis](stages/spatial-gene-analysis.md).
 
 ### `analysis.mapmycells`
 

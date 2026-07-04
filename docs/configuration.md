@@ -60,15 +60,17 @@ any of them with `--<name>` on the command line.
 | `cortical_depth_enabled` | `false` | Insert the cortical-depth stage before QC. Requires per-sample pial/tissue-edge annotations, with optional gray/white boundaries for depth pieces. A non-empty samplesheet `cortical_depth_enabled` value overrides this per row. |
 | `force_spatialdata_build` | `false` | Rebuild SpatialData zarrs even if cached. |
 | `start_stage` | `build_spatialdata` | Fallback first stage. Skipped upstream stages are read from published outputs. A samplesheet `start_stage` value overrides this per row. |
-| `stop_stage` | `clustering_squidpy` | Fallback last stage. MapMyCells is available after this but opt-in because it requires reference files. A samplesheet `stop_stage` value overrides this per row. |
+| `stop_stage` | `clustering_squidpy` | Fallback last stage. This includes `spatial_gene_analysis`, which runs between visualization and clustering. MapMyCells is available after clustering but opt-in because it requires reference files. A samplesheet `stop_stage` value overrides this per row. |
 | `only_stage` | `null` | Fallback single-stage selector. A row-level `only_stage` overrides row start/stop values; row start/stop values suppress the global `only_stage` fallback for that row. |
 | `gpu_process_lock_enabled` | `true` | Serialize local GPU-heavy processes with a file lock so `SEGMENT`, GPU `ALIGN`, and GPU `CLUSTERING_SQUIDPY` do not compete for one workstation GPU. |
 | `gpu_process_lock_file` | `${projectDir}/.merxen_gpu.lock` | File used for the local GPU lock. Override only when coordinating multiple runs from the same machine. |
 
 Stage names accepted by `start_stage`, `stop_stage`, and `only_stage` are:
 `build_spatialdata`, `segment`, `enrich`, `mask_image_quantification`,
-`compute_cortical_depth`, `qc`, `align`, `align_qc`, `compare`, `visualize`,
-`clustering_squidpy`, and `mapmycells`. `mask_image_quantification` is
+`qc`, `align`, `align_qc`, `compare`, `visualize`,
+`spatial_gene_analysis`, `clustering_squidpy`, `compute_cortical_depth`, and
+`mapmycells`.
+`mask_image_quantification` is
 available only when the effective `mask_image_quantification_enabled` value is
 `true`. `compute_cortical_depth` is available only when the effective
 `cortical_depth_enabled` value is `true`. `align` and `align_qc` are available
@@ -112,7 +114,7 @@ only for rows whose effective `enable_alignment` value is `true`.
 
 | Param | Default | Description |
 |-------|---------|-------------|
-| `cortical_depth_enabled` | `false` | Run `COMPUTE_CORTICAL_DEPTH` before QC. |
+| `cortical_depth_enabled` | `false` | Run `COMPUTE_CORTICAL_DEPTH` as a terminal stage after `CLUSTERING_SQUIDPY`. |
 | `cortical_depth_coordinate_unit_um` | `1.0` | Microns per coordinate unit in annotation/cell coordinates. Use the image pixel size if annotations are in pixel coordinates; keep `1.0` when coordinates are already microns. |
 | `cortical_depth_raster_resolution_um` | `5.0` | Finite-difference raster spacing. Smaller values improve geometry fidelity and increase memory/time. |
 | `cortical_depth_raster_padding_um` | `null` | Optional padding around the ribbon bounds. `null` uses a small automatic padding. |
@@ -236,6 +238,22 @@ SpatialData compatibility. Non-alignment stages keep using `environment.yml`.
 | `clustering_squidpy_broad_max_markers_per_label` | `80` | Maximum resolved markers used per atlas label. |
 | `clustering_squidpy_broad_score_margin_threshold` | `0.0` | Minimum difference between best and runner-up atlas scores; lower margins become `Mixed/Unknown`. |
 | `clustering_squidpy_broad_unknown_label` | `Mixed/Unknown` | Label used when no atlas marker set scores confidently. |
+
+### Spatial gene analysis
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `spatial_gene_analysis_drop_control_features` | `true` | Remove blank/negative/control-like genes before autocorrelation. |
+| `spatial_gene_analysis_min_counts` | `0` | Optional minimum total counts per cell before analysis. |
+| `spatial_gene_analysis_min_cells` | `5` | Minimum cells with a gene detected before calculating metrics. |
+| `spatial_gene_analysis_normalize_target_sum` | `null` | Optional target sum for `scanpy.pp.normalize_total`; `null` uses Scanpy's default. |
+| `spatial_gene_analysis_normalize_exclude_highly_expressed` | `false` | Exclude highly expressed genes from Scanpy size-factor calculation. |
+| `spatial_gene_analysis_normalize_max_fraction` | `0.05` | Fraction threshold used when excluding highly expressed genes. |
+| `spatial_gene_analysis_n_neighbors` | `6` | Spatial nearest-neighbor count used by Squidpy's generic-coordinate neighbor graph. |
+| `spatial_gene_analysis_top_n` | `10` | Number of highest and lowest genes retained for each metric ranking. |
+| `spatial_gene_analysis_spatial_point_size` | `2.0` | Point size for individual spatial gene expression plots. |
+| `spatial_gene_analysis_figure_dpi` | `180` | PNG output DPI. |
+| `spatial_gene_analysis_max_forks` | `4` | Maximum concurrent spatial gene analysis tasks. |
 
 ### MapMyCells
 

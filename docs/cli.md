@@ -26,6 +26,8 @@ Commands:
   alignment-qc       Compute post-alignment QC metrics
   compare            Run cross-platform gene-level comparison
   visualize          Generate visualization artifacts for a pair
+  spatial-gene-analysis
+                      Run per-gene spatial autocorrelation analysis
   clustering-squidpy Run Scanpy/Squidpy clustering analysis
   mapmycells         Run local MapMyCells cell type assignment
 ```
@@ -207,6 +209,22 @@ merxen visualize --config visualize_config.json
 | `--config PATH` | JSON validated against [`VisualizationConfig`](../src/merxen/config.py#L186). |
 
 Details: [Stage 6 — Visualization](stages/visualization.md).
+
+---
+
+## `merxen spatial-gene-analysis`
+
+Run per-gene Moran's I and Geary's C spatial autocorrelation analysis.
+
+```bash
+merxen spatial-gene-analysis --config spatial_gene_analysis_config.json
+```
+
+| Option | Description |
+|--------|-------------|
+| `--config PATH` | JSON validated against `SpatialGeneAnalysisConfig`. |
+
+Details: [Spatial gene analysis](stages/spatial-gene-analysis.md).
 
 ---
 

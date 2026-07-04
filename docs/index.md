@@ -39,6 +39,7 @@ scientific logic living in the installable Python package `merxen`.
 - [Section alignment](stages/alignment.md)
 - [Comparison](stages/comparison.md)
 - [Visualization](stages/visualization.md)
+- [Spatial gene analysis](stages/spatial-gene-analysis.md)
 - [Squidpy clustering](stages/clustering-squidpy.md)
 - [MapMyCells](stages/mapmycells.md)
 

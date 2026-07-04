@@ -2,8 +2,8 @@
 
 Runs a first-pass per-platform Scanpy/Squidpy analysis on the enriched
 SpatialData zarrs. In a full pipeline run this stage is downstream of
-`VISUALIZE`, so the usual alignment QC and visualisation artifacts have already
-been written.
+`SPATIAL_GENE_ANALYSIS`, so the usual alignment QC, visualisation, and per-gene
+spatial autocorrelation artifacts have already been written.
 
 ## What it does
 
@@ -67,10 +67,11 @@ instance per `pair_id`.
 - **Output:** `tuple(pair_id, samples_json, clustering_squidpy_out/)`.
 - **publishDir:** `${outdir}/${pair_id}/clustering_squidpy/` (copy mode).
 
-When `VISUALIZE` is also active, the workflow joins on its completion channel
-so clustering starts after visualisation. `MAPMYCELLS`, when selected, consumes
-the clustered H5ADs written here. `--only_stage clustering_squidpy` reads the
-published latest zarrs directly.
+When `SPATIAL_GENE_ANALYSIS` is active, the workflow joins on its completion
+channel so clustering starts after per-gene spatial analysis. Otherwise, when
+only `VISUALIZE` is active, clustering waits for visualisation.
+`MAPMYCELLS`, when selected, consumes the clustered H5ADs written here.
+`--only_stage clustering_squidpy` reads the published latest zarrs directly.
 
 ## Python entry points
 
