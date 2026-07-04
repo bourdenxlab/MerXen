@@ -157,11 +157,11 @@ class ProsegConfig(BaseModel):
     samples: int = 1200
     voxel_size: float = 0.5
     burnin_voxel_size: float = 1.0
-    nuclear_reassignment_prob: float = 0.25
-    diffusion_probability: float = 0.25
+    nuclear_reassignment_prob: float = 0.2
+    diffusion_probability: float = 0.2
     cell_compactness: float = 0.04
     expand_initialized_cells: int = 0
-    prior_seg_reassignment_prob: float = 0.5
+    prior_seg_reassignment_prob: float = 0.2
     use_cell_initialization: bool = True
     max_transcript_nucleus_distance: float = 60.0
     diffusion_sigma_far: float | None = None
