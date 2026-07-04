@@ -179,6 +179,7 @@ def _process_annotation_piece(
         max_steps=config.streamline_max_steps,
         resample_points=config.streamline_resample_points,
         side_boundary_distance_um=config.side_boundary_distance_um,
+        n_jobs=config.n_jobs,
     )
     equal_area = compute_equal_area_depth(solution.phi, grid, streamlines)
     return PieceDepthResult(

@@ -7,8 +7,10 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 from shapely.geometry import LineString, Polygon
 
+from merxen.cortical_depth import streamlines as streamlines_module
 from merxen.cortical_depth.assign_cells import (
     CellCoordinateTable,
     assign_cortical_depth_to_cells,
@@ -297,6 +299,40 @@ def test_streamlines_reach_white_matter_and_preserve_order() -> None:
     assert np.all(np.diff(mid_x) >= -1e-6)
     assert np.allclose(np.nanmedian(thickness), np.asarray(thickness).mean())
     assert np.allclose(np.nanmedian(thickness), 50.0, atol=2.0)
+
+
+def test_streamlines_serial_and_parallel_are_identical(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Parallel tracing must reproduce serial output bit-for-bit and in order."""
+    grid = rasterize_cortical_ribbon(
+        _rectangle_annotations(),
+        resolution_um=1.0,
+        coordinate_unit_um=1.0,
+        boundary_band_um=1.0,
+    )
+    solution = solve_laplace_depth(grid)
+    trace_kwargs = {
+        "spacing_um": 5.0,
+        "step_um": 1.0,
+        "resample_points": 21,
+        "side_boundary_distance_um": 5.0,
+    }
+    serial = trace_streamlines(solution.phi, grid, n_jobs=1, **trace_kwargs)
+
+    # Force the parallel branch regardless of seed count.
+    monkeypatch.setattr(streamlines_module, "_PARALLEL_STREAMLINE_THRESHOLD", 1)
+    parallel = trace_streamlines(solution.phi, grid, n_jobs=2, **trace_kwargs)
+
+    assert len(serial) == len(parallel) > 1
+    for expected, actual in zip(serial, parallel, strict=True):
+        assert expected.streamline_id == actual.streamline_id
+        assert expected.qc_flag == actual.qc_flag
+        assert expected.reached_wm == actual.reached_wm
+        assert expected.near_side_boundary == actual.near_side_boundary
+        assert expected.thickness_um == actual.thickness_um
+        assert expected.tangential_position_um == actual.tangential_position_um
+        np.testing.assert_array_equal(expected.points, actual.points)
 
 
 def test_cell_assignment_and_equal_area_depth_in_rectangle() -> None:

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import logging
+import multiprocessing as mp
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -11,8 +14,12 @@ from scipy import ndimage
 from scipy.interpolate import RegularGridInterpolator
 from scipy.spatial import cKDTree
 
-from merxen.cortical_depth.laplace import interpolate_scalar_field
 from merxen.cortical_depth.ribbon import RibbonGrid, points_inside_mask
+
+logger = logging.getLogger(__name__)
+
+# Below this many seeds, fork/IPC overhead outweighs any parallel speedup.
+_PARALLEL_STREAMLINE_THRESHOLD = 16
 
 
 @dataclass(frozen=True)
@@ -26,6 +33,36 @@ class Streamline:
     reached_wm: bool
     near_side_boundary: bool
     qc_flag: str
+
+
+@dataclass(frozen=True)
+class _TracingContext:
+    """Read-only shared state for tracing streamlines.
+
+    Streamlines are independent, so each is integrated with an identical copy of
+    this context. On ``fork`` platforms the context is inherited copy-on-write by
+    worker processes, so the large interpolators and trees are never pickled.
+    """
+
+    grid: RibbonGrid
+    gx: RegularGridInterpolator
+    gy: RegularGridInterpolator
+    phi_interp: RegularGridInterpolator
+    seeds: list[tuple[float, np.ndarray]]
+    step_units: float
+    max_steps: int
+    terminate_depth: float
+    valid_tree: cKDTree | None
+    valid_points: np.ndarray
+    snap_distance_units: float
+    side_distance_um: np.ndarray
+    side_boundary_distance_um: float
+    resample_points: int
+
+
+# Set in the parent immediately before forking a worker pool; worker processes
+# inherit it copy-on-write. ``None`` in the serial path.
+_TRACING_CONTEXT: _TracingContext | None = None
 
 
 def compute_normalized_gradient(phi: np.ndarray, grid: RibbonGrid) -> np.ndarray:
@@ -72,8 +109,17 @@ def trace_streamlines(
     resample_points: int = 101,
     terminate_depth: float = 0.995,
     side_boundary_distance_um: float = 25.0,
+    n_jobs: int | None = None,
 ) -> list[Streamline]:
-    """Trace streamlines from the pial boundary toward the white-matter boundary."""
+    """Trace streamlines from the pial boundary toward the white-matter boundary.
+
+    Streamlines are mutually independent, so integration is parallelised across
+    CPU cores when the seed count justifies the pool overhead. ``n_jobs`` sets the
+    worker count; ``None`` resolves it from the ``MERXEN_CORTICAL_DEPTH_WORKERS``
+    or ``OMP_NUM_THREADS`` environment variables, then the CPU count. The result
+    is identical to serial tracing: seeds keep their input order and each
+    streamline is integrated with the same arithmetic.
+    """
     if spacing_um <= 0:
         raise ValueError("spacing_um must be positive.")
     if resample_points < 2:
@@ -98,49 +144,139 @@ def trace_streamlines(
     )
     step_units = step_um / grid.spec.coordinate_unit_um
     seeds = _pial_seed_points(grid, spacing_um=spacing_um)
-    streamlines: list[Streamline] = []
-    for streamline_id, (position_um, seed) in enumerate(seeds):
-        path, reached_wm, flag = _integrate_one_streamline(
-            seed,
-            phi,
-            grid,
-            gx,
-            gy,
-            step_units=step_units,
-            max_steps=int(max_steps),
-            terminate_depth=float(terminate_depth),
-            valid_tree=valid_tree,
-            valid_points=valid_points,
-            snap_distance_units=max(3.0 * grid.spec.step, 3.0 * step_units),
-        )
-        if path.shape[0] >= 2:
-            resampled = resample_path(path, int(resample_points))
-            thickness_um = path_length_um(path, grid.spec.coordinate_unit_um)
-            near_side = _path_near_side(
-                resampled,
-                grid,
-                side_distance_um,
-                side_boundary_distance_um,
+    context = _TracingContext(
+        grid=grid,
+        gx=gx,
+        gy=gy,
+        # Building the depth interpolator once here (instead of rebuilding it on
+        # every integration step, as the old per-step call did) is the single
+        # biggest per-streamline speedup and does not change the interpolated
+        # values.
+        phi_interp=_field_interpolator(phi, grid),
+        seeds=seeds,
+        step_units=float(step_units),
+        max_steps=int(max_steps),
+        terminate_depth=float(terminate_depth),
+        valid_tree=valid_tree,
+        valid_points=valid_points,
+        snap_distance_units=max(3.0 * grid.spec.step, 3.0 * step_units),
+        side_distance_um=side_distance_um,
+        side_boundary_distance_um=float(side_boundary_distance_um),
+        resample_points=int(resample_points),
+    )
+    return _trace_all_streamlines(context, n_jobs=n_jobs)
+
+
+def _trace_all_streamlines(
+    context: _TracingContext,
+    *,
+    n_jobs: int | None,
+) -> list[Streamline]:
+    """Integrate every seed, in parallel when the seed count justifies it."""
+    n_seeds = len(context.seeds)
+    if n_seeds == 0:
+        return []
+    workers = _resolve_n_jobs(n_jobs)
+    if workers > 1 and n_seeds >= _PARALLEL_STREAMLINE_THRESHOLD:
+        parallel = _trace_streamlines_parallel(context, workers=workers)
+        if parallel is not None:
+            return parallel
+    return [_trace_one_streamline(index, context) for index in range(n_seeds)]
+
+
+def _trace_streamlines_parallel(
+    context: _TracingContext,
+    *,
+    workers: int,
+) -> list[Streamline] | None:
+    """Trace streamlines across a ``fork`` worker pool, or ``None`` on failure.
+
+    ``imap`` preserves seed order, so the returned list matches serial tracing.
+    """
+    global _TRACING_CONTEXT
+    n_seeds = len(context.seeds)
+    chunksize = max(1, n_seeds // (workers * 4))
+    _TRACING_CONTEXT = context
+    try:
+        pool_context = mp.get_context("fork")
+        with pool_context.Pool(processes=workers) as pool:
+            return list(
+                pool.imap(
+                    _trace_one_streamline_pooled,
+                    range(n_seeds),
+                    chunksize=chunksize,
+                )
             )
-        else:
-            resampled = np.repeat(path[:1], int(resample_points), axis=0)
-            thickness_um = 0.0
-            near_side = True
-            flag = "failed_short_path"
-        if near_side and flag == "ok":
-            flag = "near_side_boundary"
-        streamlines.append(
-            Streamline(
-                streamline_id=streamline_id,
-                points=resampled.astype(np.float32, copy=False),
-                tangential_position_um=float(position_um),
-                thickness_um=float(thickness_um),
-                reached_wm=bool(reached_wm),
-                near_side_boundary=bool(near_side),
-                qc_flag=flag,
-            )
+    except Exception:
+        logger.warning(
+            "Parallel streamline tracing failed; falling back to serial.",
+            exc_info=True,
         )
-    return streamlines
+        return None
+    finally:
+        _TRACING_CONTEXT = None
+
+
+def _trace_one_streamline_pooled(index: int) -> Streamline:
+    """Worker entry point; reads the fork-inherited tracing context."""
+    context = _TRACING_CONTEXT
+    if context is None:  # pragma: no cover - defensive
+        raise RuntimeError("Streamline tracing context is not initialized.")
+    return _trace_one_streamline(index, context)
+
+
+def _trace_one_streamline(index: int, context: _TracingContext) -> Streamline:
+    """Integrate and post-process a single seed into a ``Streamline``."""
+    position_um, seed = context.seeds[index]
+    path, reached_wm, flag = _integrate_one_streamline(
+        seed,
+        context.grid,
+        context.gx,
+        context.gy,
+        context.phi_interp,
+        step_units=context.step_units,
+        max_steps=context.max_steps,
+        terminate_depth=context.terminate_depth,
+        valid_tree=context.valid_tree,
+        valid_points=context.valid_points,
+        snap_distance_units=context.snap_distance_units,
+    )
+    if path.shape[0] >= 2:
+        resampled = resample_path(path, context.resample_points)
+        thickness_um = path_length_um(path, context.grid.spec.coordinate_unit_um)
+        near_side = _path_near_side(
+            resampled,
+            context.grid,
+            context.side_distance_um,
+            context.side_boundary_distance_um,
+        )
+    else:
+        resampled = np.repeat(path[:1], context.resample_points, axis=0)
+        thickness_um = 0.0
+        near_side = True
+        flag = "failed_short_path"
+    if near_side and flag == "ok":
+        flag = "near_side_boundary"
+    return Streamline(
+        streamline_id=index,
+        points=resampled.astype(np.float32, copy=False),
+        tangential_position_um=float(position_um),
+        thickness_um=float(thickness_um),
+        reached_wm=bool(reached_wm),
+        near_side_boundary=bool(near_side),
+        qc_flag=flag,
+    )
+
+
+def _resolve_n_jobs(n_jobs: int | None) -> int:
+    """Resolve the worker count from the argument, environment, or CPU count."""
+    if n_jobs is not None:
+        return max(1, int(n_jobs))
+    for variable in ("MERXEN_CORTICAL_DEPTH_WORKERS", "OMP_NUM_THREADS"):
+        value = os.environ.get(variable, "").strip()
+        if value.isdigit() and int(value) > 0:
+            return int(value)
+    return max(1, os.cpu_count() or 1)
 
 
 def select_valid_streamlines(streamlines: list[Streamline]) -> list[Streamline]:
@@ -270,10 +406,10 @@ def _pial_seed_points(
 
 def _integrate_one_streamline(
     seed: np.ndarray,
-    phi: np.ndarray,
     grid: RibbonGrid,
     gx: RegularGridInterpolator,
     gy: RegularGridInterpolator,
+    phi_interp: RegularGridInterpolator,
     *,
     step_units: float,
     max_steps: int,
@@ -307,7 +443,9 @@ def _integrate_one_streamline(
         if _point_in_boundary(new_point, grid, grid.wm_boundary):
             reached_wm = True
             break
-        depth = interpolate_scalar_field(phi, grid.spec, new_point.reshape(1, 2))[0]
+        depth = float(
+            phi_interp(np.asarray([[new_point[1], new_point[0]]], dtype=float))[0]
+        )
         if np.isfinite(depth) and depth >= terminate_depth:
             reached_wm = True
             break

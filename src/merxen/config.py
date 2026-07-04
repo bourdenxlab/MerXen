@@ -329,6 +329,7 @@ class CorticalDepthConfig(BaseModel):
     streamline_max_steps: int = Field(default=4000, ge=1)
     streamline_resample_points: int = Field(default=101, ge=2)
     side_boundary_distance_um: float = Field(default=25.0, ge=0.0)
+    n_jobs: int | None = Field(default=None, ge=1)
     contour_levels: list[float] = Field(
         default_factory=lambda: [round(i / 10.0, 1) for i in range(1, 10)]
     )

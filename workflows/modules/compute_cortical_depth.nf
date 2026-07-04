@@ -30,6 +30,7 @@ process COMPUTE_CORTICAL_DEPTH {
     export RAYON_NUM_THREADS="${task.cpus}"
     export POLARS_MAX_THREADS="${task.cpus}"
     export DASK_NUM_WORKERS="${task.cpus}"
+    export MERXEN_CORTICAL_DEPTH_WORKERS="${task.cpus}"
 
     if [[ ! -e latest_input.zarr ]]; then
         ln -s ${latest_zarr} latest_input.zarr
