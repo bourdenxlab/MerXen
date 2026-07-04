@@ -35,11 +35,13 @@ ${outdir}/
 │   ├── reseg/
 │   │   ├── comparison/
 │   │   ├── visualization/
+│   │   ├── spatial_gene_analysis/
 │   │   ├── clustering_squidpy/
 │   │   └── mapmycells/
 │   └── original_seg/
 │       ├── comparison/
 │       ├── visualization/
+│       ├── spatial_gene_analysis/
 │       ├── clustering_squidpy/
 │       └── mapmycells/
 ├── <pair_id_2>/
@@ -226,6 +228,18 @@ Single-platform runs write the available-platform equivalents with
 | `visualize_out/<sample_id>_sanity_overlay.png` | Single-platform 250 um sanity crop. |
 | `visualize_out/<sample_id>_sanity_overlay_crop_location.png` | Crop-location helper for the single-platform sanity crop. |
 | `visualize_out/<sample_id>_assignment_rate_bar.png` | Assignment-rate bar for the selected platform. |
+
+### Spatial gene analysis
+
+Path: `${outdir}/<pair_id>/<analysis_segmentation>/spatial_gene_analysis/`
+
+| File | Contents |
+|------|----------|
+| `spatial_gene_analysis_out/<platform>/<pair_id>_<platform>_spatial_gene_autocorrelation.csv` | Full per-gene Moran's I and Geary's C table, with available normal and FDR-adjusted p-values. |
+| `spatial_gene_analysis_out/<platform>/<pair_id>_<platform>_spatial_gene_autocorrelation_rankings.csv` | Top and bottom `spatial_gene_analysis_top_n` genes for Moran's I and Geary's C. |
+| `spatial_gene_analysis_out/<platform>/plots/distributions/<pair_id>_<platform>_spatial_autocorrelation_distribution.png` | Histograms of Moran's I and Geary's C values across genes. |
+| `spatial_gene_analysis_out/<platform>/plots/spatial_genes/<metric>/<top_or_bottom>/*.png` | Individual spatial expression plots for ranked genes. |
+| `spatial_gene_analysis_out/<platform>/<pair_id>_<platform>_spatial_gene_analysis_manifest.json` | Parameters, retained cell/gene counts, and output path manifest. |
 
 ### Squidpy clustering
 

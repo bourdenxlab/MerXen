@@ -64,6 +64,12 @@ channels.
                   │
                   ▼
            ┌───────────────────┐
+           │ SPATIAL_GENE_     │  per-gene Moran's I,
+           │ ANALYSIS          │  Geary's C, spatial gene plots
+           └───────────────────┘
+                  │
+                  ▼
+           ┌───────────────────┐
            │ CLUSTERING_       │  Scanpy/Squidpy QC,
            │ SQUIDPY           │  UMAP, Leiden, spatial scatter
            └───────────────────┘
@@ -79,15 +85,17 @@ Rows inherit `analysis_mode`, `enable_alignment`, `analysis_segmentation`,
 `start_stage`, `stop_stage`, and `only_stage` from Nextflow params unless those
 columns are set in the samplesheet. For rows with `analysis_mode=paired`, both
 platforms traverse `BUILD_SPATIALDATA → SEGMENT → ENRICH →
-MASK_IMAGE_QUANTIFICATION → COMPUTE_CORTICAL_DEPTH → QC` independently and
-are rejoined after QC. `COMPUTE_CORTICAL_DEPTH` is present only when the row's
-effective `cortical_depth_enabled` value is `true`. If
+MASK_IMAGE_QUANTIFICATION → QC` independently and
+are rejoined after QC. When the row's effective `cortical_depth_enabled` value is
+`true`, `COMPUTE_CORTICAL_DEPTH` runs as a terminal stage after
+`CLUSTERING_SQUIDPY` (consuming the clustering-updated zarr) so per-cell cluster
+annotations are available for its depth violin plots; its depth columns are not
+consumed by any other stage. If
 mask image quantification is disabled or skipped by a stage range, downstream
-stages consume the enriched zarr directly. If cortical depth is disabled or
-skipped by a stage range, downstream stages consume the quantified/enriched
-zarr directly. If the row's effective
+stages consume the enriched zarr directly. If the row's effective
 `enable_alignment` value is `true`, `ALIGN` and `ALIGN_QC` run before
-`COMPARE` / `VISUALIZE` / `CLUSTERING_SQUIDPY`; otherwise the paired stages
+`COMPARE` / `VISUALIZE` / `SPATIAL_GENE_ANALYSIS` /
+`CLUSTERING_SQUIDPY`; otherwise the paired stages
 consume the quantified/enriched zarrs directly. In `analysis_mode=merscope` or
 `analysis_mode=xenium`, only the selected platform traverses those stages, and
 paired-only `ALIGN`, `ALIGN_QC`, and `COMPARE` are inactive for that row.
@@ -100,9 +108,9 @@ Per-platform stages key on `"${pair_id}|${platform}"` (e.g. `P0001|MERSCOPE`).
 Segmentation-specific analysis branches add the segmentation key. Paired-only
 stages join MERSCOPE and XENIUM branches by `pair_id` and segmentation, so a
 missing output from one platform prunes only the paired downstream branch that
-depends on it. For visualization, clustering, and MapMyCells, the workflow
-passes a JSON `samples` list so those stages can handle either one or two
-platforms.
+depends on it. For visualization, spatial gene analysis, clustering, and
+MapMyCells, the workflow passes a JSON `samples` list so those stages can
+handle either one or two platforms.
 
 ## Data flow for one row
 
@@ -120,12 +128,13 @@ For a samplesheet row with `pair_id=EXAMPLE01`:
 | 8 | `ALIGN_QC` × 1 | `merxen alignment-qc` | updated MERSCOPE zarr + original Xenium zarr | `alignment_qc_out/`, when enabled |
 | 9 | `COMPARE` × 1 | `merxen compare` | updated MERSCOPE zarr if enabled; otherwise analysis-ready zarrs | `compare_out/` (gene comparison CSVs + metrics JSON) |
 | 10 | `VISUALIZE` × 1 | `merxen visualize` | updated MERSCOPE zarr if enabled; otherwise analysis-ready zarrs | `visualize_out/` (PNG plots) |
-| 11 | `CLUSTERING_SQUIDPY` × 1 | `merxen clustering-squidpy` | same paired zarrs, after visualization in full runs | `clustering_squidpy_out/` plus derived clustered tables in each durable zarr |
-| 12 | `MAPMYCELLS` × 1 | `merxen mapmycells` | clustered `.h5ad` files from `clustering_squidpy_out/` | `mapmycells_out/` (query `.h5ad`, CSV/JSON assignments, annotated `.h5ad`) |
+| 11 | `SPATIAL_GENE_ANALYSIS` × 1 | `merxen spatial-gene-analysis` | same paired zarrs, after visualization in full runs | `spatial_gene_analysis_out/` (Moran's I, Geary's C, rankings, spatial gene plots) |
+| 12 | `CLUSTERING_SQUIDPY` × 1 | `merxen clustering-squidpy` | same paired zarrs, after spatial gene analysis in full runs | `clustering_squidpy_out/` plus derived clustered tables in each durable zarr |
+| 13 | `MAPMYCELLS` × 1 | `merxen mapmycells` | clustered `.h5ad` files from `clustering_squidpy_out/` | `mapmycells_out/` (query `.h5ad`, CSV/JSON assignments, annotated `.h5ad`) |
 
 In single-platform mode, platform-local steps run once per row, paired-only
-alignment and comparison are skipped, and visualization/clustering consume a
-one-sample config for the selected platform.
+alignment and comparison are skipped, and visualization/spatial-gene/clustering
+stages consume a one-sample config for the selected platform.
 
 All published artifacts land under
 `${params.outdir}/${pair_id}/<stage>/...`. See [Outputs](outputs.md).

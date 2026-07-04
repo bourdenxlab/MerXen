@@ -86,8 +86,11 @@ nextflow run workflows/main.nf \
 In `analysis_mode=merscope` or `analysis_mode=xenium`, either from the command
 line or a row-level samplesheet value, the workflow runs
 `build_spatialdata → segment → enrich → mask_image_quantification → qc →
-visualize → clustering_squidpy` for the selected platform. If
-`cortical_depth_enabled=true`, `compute_cortical_depth` is inserted before QC.
+visualize → spatial_gene_analysis → clustering_squidpy` for the selected
+platform. If
+`cortical_depth_enabled=true`, `compute_cortical_depth` runs after
+`clustering_squidpy` so the per-cell cluster annotations are available for its
+depth violin plots (depth columns are not consumed by other stages).
 Visualization writes single-dataset alternatives for
 paired plots, including gene-abundance, one-platform transcript overview, and
 one-platform sanity crop outputs. `mapmycells` remains available after
@@ -209,8 +212,10 @@ rerunning `ALIGN` or `ALIGN_QC`.
 Accepted stages are:
 
 `build_spatialdata`, `segment`, `enrich`, `mask_image_quantification`,
-`compute_cortical_depth`, `qc`, `align`, `align_qc`, `compare`, `visualize`,
-`clustering_squidpy`, and `mapmycells`. `compute_cortical_depth` is only active
+`qc`, `align`, `align_qc`, `compare`, `visualize`,
+`spatial_gene_analysis`, `clustering_squidpy`, `compute_cortical_depth`, and
+`mapmycells`.
+`compute_cortical_depth` is only active
 for rows whose effective `cortical_depth_enabled` value is `true`. Alignment
 stages are only active for rows whose effective `enable_alignment` value is
 `true`, and `align`, `align_qc`, and `compare` are active only in paired rows.
@@ -248,11 +253,12 @@ nextflow run workflows/main.nf \
 
 Starting at `segment` runs the ProSeg resolver first; starting later does not
 need ProSeg because it reads published segmentation outputs.
-Starting at `compare`, `visualize`, or `clustering_squidpy` with effective
-`enable_alignment=false` reads
+Starting at `compare`, `visualize`, `spatial_gene_analysis`, or
+`clustering_squidpy` with effective `enable_alignment=false` reads
 `${outdir}/${pair_id}/{merscope,xenium}/latest/latest_spatialdata.zarr`.
-In single-platform mode, starting at `visualize` or `clustering_squidpy` reads
-only `${outdir}/${pair_id}/<selected-platform>/latest/latest_spatialdata.zarr`.
+In single-platform mode, starting at `visualize`, `spatial_gene_analysis`, or
+`clustering_squidpy` reads only
+`${outdir}/${pair_id}/<selected-platform>/latest/latest_spatialdata.zarr`.
 With effective `enable_alignment=true`, `ALIGN` updates
 `${outdir}/${pair_id}/merscope/latest/latest_spatialdata.zarr` in place with
 alignment metadata and `*_aligned_nonrigid` vector elements. Later stages read

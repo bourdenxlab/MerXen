@@ -10,7 +10,7 @@ MerXen takes spatial transcriptomics datasets and runs a standardised pipeline. 
 2. **Cell segmentation** — Cellpose-SAM image-based segmentation followed by ProSeg transcript-based refinement
 3. **Mask image quantification** — Quantifies all SpatialData image channels over final Cellpose masks
 4. **Section alignment** — Optionally registers paired adjacent sections to a Xenium reference coordinate system with Spateo
-5. **Analysis and visualisation** — QC metrics, paired gene-level comparison when both platforms are present, single-platform or paired visualisation, first-pass Scanpy/Squidpy clustering, and optional local MapMyCells cell type assignment. By default, downstream analysis runs for both ProSeg-resegmented cells and original instrument segmentations; use `--analysis_segmentation reseg` or `--analysis_segmentation original_seg` to restrict it.
+5. **Analysis and visualisation** — QC metrics, paired gene-level comparison when both platforms are present, single-platform or paired visualisation, per-gene spatial autocorrelation, first-pass Scanpy/Squidpy clustering, and optional local MapMyCells cell type assignment. By default, downstream analysis runs for both ProSeg-resegmented cells and original instrument segmentations; use `--analysis_segmentation reseg` or `--analysis_segmentation original_seg` to restrict it.
 
 The workflow is orchestrated by Nextflow to process multiple sample pairs with logging and reproducibility.
 
@@ -19,7 +19,7 @@ The workflow is orchestrated by Nextflow to process multiple sample pairs with l
 Full documentation lives in [docs/](docs/). Start with [docs/index.md](docs/index.md).
 
 - Usage: [Getting started](docs/getting-started.md) · [Samplesheet format](docs/samplesheet.md) · [Running the pipeline](docs/running-the-pipeline.md) · [Configuration](docs/configuration.md) · [Outputs](docs/outputs.md)
-- Pipeline stages: [SpatialData build](docs/stages/spatialdata-build.md) · [Segmentation](docs/stages/segmentation.md) · [Enrichment](docs/stages/enrichment.md) · [Mask image quantification](docs/stages/mask-image-quantification.md) · [Cortical depth](docs/stages/cortical-depth.md) · [QC](docs/stages/qc.md) · [Alignment](docs/stages/alignment.md) · [Comparison](docs/stages/comparison.md) · [Visualization](docs/stages/visualization.md) · [Squidpy clustering](docs/stages/clustering-squidpy.md) · [MapMyCells](docs/stages/mapmycells.md)
+- Pipeline stages: [SpatialData build](docs/stages/spatialdata-build.md) · [Segmentation](docs/stages/segmentation.md) · [Enrichment](docs/stages/enrichment.md) · [Mask image quantification](docs/stages/mask-image-quantification.md) · [Cortical depth](docs/stages/cortical-depth.md) · [QC](docs/stages/qc.md) · [Alignment](docs/stages/alignment.md) · [Comparison](docs/stages/comparison.md) · [Visualization](docs/stages/visualization.md) · [Spatial gene analysis](docs/stages/spatial-gene-analysis.md) · [Squidpy clustering](docs/stages/clustering-squidpy.md) · [MapMyCells](docs/stages/mapmycells.md)
 - Developer reference: [Pipeline architecture](docs/pipeline.md) · [Python API](docs/python-api.md) · [CLI reference](docs/cli.md) · [Development workflow](docs/development.md)
 
 ## Repository layout

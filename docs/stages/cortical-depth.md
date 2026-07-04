@@ -115,11 +115,44 @@ Published under
 | `compute_cortical_depth_out/<segmentation>/*_cells_laplace_depth.png` | Cells colored by Laplace depth. PDF copy is also written. |
 | `compute_cortical_depth_out/<segmentation>/*_cells_equivolumetric_depth.png` | Cells colored by equal-area depth. PDF copy is also written. |
 | `compute_cortical_depth_out/<segmentation>/*_cells_tissue_annotation.png` | All cells colored as `grey_matter`, `white_matter`, `excluded`, or `outside_brain`. PDF copy is also written. |
+| `compute_cortical_depth_out/<segmentation>/*_laplace_depth_violin_by_broad_class.png` | Violin of `laplace_depth` per broad cell-type cluster (`broad_class`). PDF copy is also written. |
+| `compute_cortical_depth_out/<segmentation>/*_equivolumetric_depth_violin_by_broad_class.png` | Violin of `equivolumetric_depth` per broad cell-type cluster. PDF copy is also written. |
+| `compute_cortical_depth_out/<segmentation>/*_laplace_depth_violin_by_subcluster.png` | Subplot grid, one broad class each, with `laplace_depth` violins per subclustered annotation (`subcluster_label`). PDF copy is also written. |
+| `compute_cortical_depth_out/<segmentation>/*_equivolumetric_depth_violin_by_subcluster.png` | Subplot grid, one broad class each, with `equivolumetric_depth` violins per subclustered annotation. PDF copy is also written. |
 | `compute_cortical_depth_out/cortical_depth_qc_summary.json` | Cell counts, streamline thickness stats, failed/flagged streamlines, warnings. |
+
+The per-cluster violin plots require broad-class and subcluster annotations from
+the [Squidpy clustering](clustering-squidpy.md) stage. This stage is therefore
+sequenced to run **after** `clustering_squidpy` (it consumes the clustering-updated
+SpatialData zarr), so in a default full run the annotations exist and the violin
+plots are produced. Depth columns are not consumed by any other stage, so running
+cortical depth last does not affect QC, comparison, visualization, or downstream
+analysis.
+
+If cortical depth is run without clustering in the same invocation — for example
+`--only_stage compute_cortical_depth` after a prior run, or with a `stop_stage`
+before `clustering_squidpy` — the violins are written only when a
+`*_clustering_squidpy` table already exists in the zarr. When those annotations
+are absent the depth values are still computed and the violin plots are skipped
+with a logged note. When annotations are present they are also joined into the
+per-cell `*_cells_with_cortical_depth.parquet` sidecar.
 
 The stage updates the source `latest_spatialdata.zarr` in place by default.
 Set `--cortical_depth_write_spatialdata_table false` to write sidecars and QC
 without replacing SpatialData tables.
+
+## Performance
+
+Streamline tracing dominates the runtime. Streamlines are mutually independent,
+so they are integrated in parallel across CPU cores. The worker count comes from
+the `n_jobs` config field when set, otherwise from the
+`MERXEN_CORTICAL_DEPTH_WORKERS` (exported by the Nextflow process as
+`task.cpus`) or `OMP_NUM_THREADS` environment variables, then the machine CPU
+count. Raise `cpus` for `COMPUTE_CORTICAL_DEPTH` in `nextflow.config` to give the
+stage more cores. Small sections fall back to serial tracing automatically, and
+any pool failure degrades gracefully to serial. Parallel output is identical to
+serial output: seeds keep their input order and each streamline is integrated
+with the same arithmetic.
 
 ## Interpreting Depths
 
