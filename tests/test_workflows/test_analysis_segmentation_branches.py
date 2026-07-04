@@ -209,7 +209,7 @@ def test_spatial_gene_analysis_stage_is_wired_after_visualization() -> None:
         'include { SPATIAL_GENE_ANALYSIS } from "./modules/spatial_gene_analysis"',
         '"spatial_gene_analysis": "spatial_gene_analysis"',
         '"spatial_autocorrelation": "spatial_gene_analysis"',
-        ('stages += ["visualize", "spatial_gene_analysis", ' '"clustering_squidpy"]'),
+        ('stages += ["visualize", "spatial_gene_analysis", "clustering_squidpy"]'),
         'stages += ["mapmycells"]',
         "settings.run_spatial_gene_analysis",
         "spatial_gene_analysis_after_visualize_ch",
