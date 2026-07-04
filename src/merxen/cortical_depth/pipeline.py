@@ -40,6 +40,8 @@ from merxen.cortical_depth.plotting import (
     plot_cells_by_depth,
     plot_depth_difference,
     plot_depth_overlay,
+    plot_depth_violins_by_broad_class,
+    plot_depth_violins_by_subcluster,
     write_geojson,
 )
 from merxen.cortical_depth.ribbon import points_inside_mask, rasterize_cortical_ribbon
@@ -53,6 +55,13 @@ from merxen.io.spatialdata_io import write_or_replace_element
 from merxen.memory import force_release, log_status
 
 logger = logging.getLogger(__name__)
+
+# Obs columns written by the clustering_squidpy stage. Kept in sync with
+# merxen.analysis.clustering_squidpy (BROAD_CLASS_KEY / SUBCLUSTER_LABEL_KEY);
+# duplicated here to avoid importing that heavy module into this stage.
+BROAD_CLASS_COLUMN = "broad_class"
+SUBCLUSTER_LABEL_COLUMN = "subcluster_label"
+DEPTH_COLUMNS_FOR_VIOLINS = ("laplace_depth", "equivolumetric_depth")
 
 
 @dataclass(frozen=True)
@@ -335,6 +344,39 @@ def _annotate_table(
         annotation_plot_path
     )
 
+    cluster_annotations = _load_cluster_annotations(
+        sdata_obj, table_config, dataset_name=config.dataset_name
+    )
+    if cluster_annotations is not None:
+        cells = cells.join(cluster_annotations)
+        matched = int(cells[BROAD_CLASS_COLUMN].notna().sum())
+        log_status(
+            f"[{config.dataset_name}] Matched clustering annotations to "
+            f"{matched}/{len(cells)} {table_config.segmentation!r} cells by cell_id."
+        )
+        if matched == 0:
+            log_status(
+                f"[{config.dataset_name}] No cell_id overlap between the depth "
+                f"table and clustering table for {table_config.segmentation!r}; "
+                "violin plots would be empty. Skipping."
+            )
+        else:
+            cells.to_parquet(cells_path, index=False)
+            plot_paths.update(
+                _plot_depth_distributions_by_cluster(
+                    cells,
+                    segmentation_dir=segmentation_dir,
+                    sample_stem=sample_stem,
+                    segmentation=table_config.segmentation,
+                )
+            )
+    else:
+        log_status(
+            f"[{config.dataset_name}] No clustering annotations found for "
+            f"segmentation {table_config.segmentation!r}; skipping cortical-depth "
+            "violin plots."
+        )
+
     if config.write_spatialdata_table:
         updated = apply_depth_columns(sdata_obj.tables[table_key], assignments)
         parsed = _parse_table_for_spatialdata(
@@ -364,6 +406,97 @@ def _annotate_table(
         {f"{table_config.segmentation}_cells": cells_path, **plot_paths},
         summary,
     )
+
+
+def _clustering_table_key(table_config: CorticalDepthTableConfig) -> str:
+    """Return the clustering_squidpy table key for a segmentation branch.
+
+    Mirrors ``merxen.analysis.clustering_squidpy._clustered_spatialdata_table_key``.
+    """
+    segmentation = str(table_config.segmentation).strip().lower()
+    source_key = str(table_config.table_key)
+    if segmentation == "reseg" or source_key == "table_MOSAIK_proseg":
+        return "table_MOSAIK_proseg_clustering_squidpy"
+    if segmentation == "original_seg" or source_key == "table_original":
+        return "table_original_clustering_squidpy"
+    return f"{source_key}_clustering_squidpy"
+
+
+def _load_cluster_annotations(
+    sdata_obj: Any,
+    table_config: CorticalDepthTableConfig,
+    *,
+    dataset_name: str = "",
+) -> pd.DataFrame | None:
+    """Load broad-class/subcluster labels for one segmentation, indexed by cell_id.
+
+    Returns ``None`` when the clustering_squidpy table for this segmentation is
+    absent (for example when clustering has not run yet) or lacks a broad-class
+    column. The reason is logged so a skipped violin plot is diagnosable.
+    """
+    prefix = f"[{dataset_name}] " if dataset_name else ""
+    table_key = _clustering_table_key(table_config)
+    if table_key not in sdata_obj.tables:
+        log_status(
+            f"{prefix}Clustering table {table_key!r} not found in zarr for "
+            f"segmentation {table_config.segmentation!r}. Available tables: "
+            f"{sorted(sdata_obj.tables.keys())}"
+        )
+        return None
+    table = sdata_obj.tables[table_key]
+    if BROAD_CLASS_COLUMN not in table.obs.columns:
+        log_status(
+            f"{prefix}Clustering table {table_key!r} has no {BROAD_CLASS_COLUMN!r} "
+            f"column. Available obs columns: {sorted(table.obs.columns)}"
+        )
+        return None
+    cell_ids = (
+        table.obs["cell_id"].astype(str)
+        if "cell_id" in table.obs.columns
+        else pd.Series(table.obs_names.astype(str))
+    )
+    frame = pd.DataFrame(index=pd.Index(cell_ids.to_numpy(), dtype=str))
+    columns = [
+        column
+        for column in (BROAD_CLASS_COLUMN, SUBCLUSTER_LABEL_COLUMN)
+        if column in table.obs.columns
+    ]
+    for column in columns:
+        frame[column] = pd.Categorical(table.obs[column].astype(str).to_numpy())
+    return frame[~frame.index.duplicated(keep="first")]
+
+
+def _plot_depth_distributions_by_cluster(
+    cells: pd.DataFrame,
+    *,
+    segmentation_dir: Path,
+    sample_stem: str,
+    segmentation: str,
+) -> dict[str, Path]:
+    """Write per-cluster depth violin plots for each available depth column."""
+    plot_paths: dict[str, Path] = {}
+    available_depths = [
+        column for column in DEPTH_COLUMNS_FOR_VIOLINS if column in cells.columns
+    ]
+    for depth_column in available_depths:
+        broad_path = (
+            segmentation_dir / f"{sample_stem}_{depth_column}_violin_by_broad_class.png"
+        )
+        plot_depth_violins_by_broad_class(broad_path, cells, depth_column=depth_column)
+        plot_paths[f"{segmentation}_{depth_column}_violin_by_broad_class_png"] = (
+            broad_path
+        )
+
+        subcluster_path = (
+            segmentation_dir / f"{sample_stem}_{depth_column}_violin_by_subcluster.png"
+        )
+        plot_depth_violins_by_subcluster(
+            subcluster_path, cells, depth_column=depth_column
+        )
+        plot_paths[f"{segmentation}_{depth_column}_violin_by_subcluster_png"] = (
+            subcluster_path
+        )
+    return plot_paths
 
 
 def _classify_cell_tissue_annotations(

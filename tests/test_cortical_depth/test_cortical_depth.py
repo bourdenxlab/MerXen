@@ -10,6 +10,7 @@ import pandas as pd
 import pytest
 from shapely.geometry import LineString, Polygon
 
+from merxen.config import CorticalDepthTableConfig
 from merxen.cortical_depth import streamlines as streamlines_module
 from merxen.cortical_depth.assign_cells import (
     CellCoordinateTable,
@@ -27,10 +28,13 @@ from merxen.cortical_depth.pipeline import (
     PieceDepthResult,
     _assign_piecewise_cortical_depth_to_cells,
     _classify_cell_tissue_annotations,
+    _clustering_table_key,
 )
 from merxen.cortical_depth.plotting import (
     plot_cells_by_annotation,
     plot_depth_difference,
+    plot_depth_violins_by_broad_class,
+    plot_depth_violins_by_subcluster,
 )
 from merxen.cortical_depth.ribbon import (
     _unique_valid_polygons,
@@ -412,6 +416,90 @@ def test_cortical_depth_extra_plots_are_written(tmp_path: Path) -> None:
     assert difference_path.with_suffix(".pdf").exists()
     assert annotation_path.exists()
     assert annotation_path.with_suffix(".pdf").exists()
+
+
+def _clustered_depth_cells() -> pd.DataFrame:
+    rng = np.random.default_rng(0)
+    n_per_group = 40
+    records = []
+    groups = [
+        ("Neurons", "L2/3 IT", 0.25),
+        ("Neurons", "L5 ET", 0.7),
+        ("Astrocytes", "Astro-1", 0.5),
+        ("Oligodendrocytes", "Oligo-1", 0.9),
+    ]
+    for broad_class, subcluster, center in groups:
+        depths = np.clip(center + rng.normal(0.0, 0.05, n_per_group), 0.0, 1.0)
+        for depth in depths:
+            records.append(
+                {
+                    "laplace_depth": float(depth),
+                    "equivolumetric_depth": float(np.clip(depth + 0.02, 0.0, 1.0)),
+                    "broad_class": broad_class,
+                    "subcluster_label": subcluster,
+                }
+            )
+    # Cells outside the ribbon carry NaN depth and should be dropped from violins.
+    records.append(
+        {
+            "laplace_depth": np.nan,
+            "equivolumetric_depth": np.nan,
+            "broad_class": "Mixed/Unknown",
+            "subcluster_label": "Mixed/Unknown",
+        }
+    )
+    return pd.DataFrame.from_records(records)
+
+
+def test_depth_violins_by_broad_class_writes_png_and_pdf(tmp_path: Path) -> None:
+    """Broad-class violin plots should write PNG and PDF copies per depth column."""
+    cells = _clustered_depth_cells()
+    for depth_column in ("laplace_depth", "equivolumetric_depth"):
+        path = plot_depth_violins_by_broad_class(
+            tmp_path / f"{depth_column}_broad.png",
+            cells,
+            depth_column=depth_column,
+        )
+        assert path.exists()
+        assert path.with_suffix(".pdf").exists()
+
+
+def test_depth_violins_by_subcluster_writes_png_and_pdf(tmp_path: Path) -> None:
+    """Subcluster violin grids should write PNG and PDF copies per depth column."""
+    cells = _clustered_depth_cells()
+    for depth_column in ("laplace_depth", "equivolumetric_depth"):
+        path = plot_depth_violins_by_subcluster(
+            tmp_path / f"{depth_column}_sub.png",
+            cells,
+            depth_column=depth_column,
+        )
+        assert path.exists()
+        assert path.with_suffix(".pdf").exists()
+
+
+def test_depth_violins_handle_missing_annotations(tmp_path: Path) -> None:
+    """Violin plots degrade gracefully when cluster columns are absent."""
+    cells = pd.DataFrame({"laplace_depth": [0.1, 0.5, 0.9]})
+    broad_path = plot_depth_violins_by_broad_class(
+        tmp_path / "broad.png", cells, depth_column="laplace_depth"
+    )
+    subcluster_path = plot_depth_violins_by_subcluster(
+        tmp_path / "sub.png", cells, depth_column="laplace_depth"
+    )
+    assert broad_path.exists()
+    assert subcluster_path.exists()
+
+
+def test_clustering_table_key_maps_segmentations() -> None:
+    """Segmentation branches should map to their clustering_squidpy table keys."""
+    reseg = CorticalDepthTableConfig(
+        segmentation="reseg", table_key="table_MOSAIK_proseg"
+    )
+    original = CorticalDepthTableConfig(
+        segmentation="original_seg", table_key="table_original"
+    )
+    assert _clustering_table_key(reseg) == "table_MOSAIK_proseg_clustering_squidpy"
+    assert _clustering_table_key(original) == "table_original_clustering_squidpy"
 
 
 def test_curved_ribbon_produces_smooth_ordered_streamlines() -> None:
