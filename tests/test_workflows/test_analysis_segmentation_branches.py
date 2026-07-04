@@ -34,6 +34,7 @@ def test_downstream_modules_publish_under_segmentation_branch() -> None:
         "qc.nf": "/${segmentation}/qc",
         "comparison.nf": "/${segmentation}/comparison",
         "visualization.nf": "/${segmentation}/visualization",
+        "spatial_gene_analysis.nf": "/${segmentation}/spatial_gene_analysis",
         "clustering_squidpy.nf": "/${segmentation}/clustering_squidpy",
         "mapmycells.nf": "/${segmentation}/mapmycells",
     }
@@ -61,6 +62,7 @@ def test_nextflow_uses_row_level_settings_and_continues_after_task_errors() -> N
         "settings.enable_alignment",
         "settings.run_compare",
         "settings.run_visualize",
+        "settings.run_spatial_gene_analysis",
         "settings.run_clustering_squidpy",
     ]:
         assert expected in main_text
@@ -190,5 +192,49 @@ def test_segment_bootstraps_proseg_from_configured_paths() -> None:
         "cargo install",
         "sudo -v",
         "proseg_path.txt",
+    ]:
+        assert expected in module_text
+
+
+def test_spatial_gene_analysis_stage_is_wired_after_visualization() -> None:
+    """Spatial gene analysis should run after visualization and before clustering."""
+    repo_root = Path(__file__).resolve().parents[2]
+    main_text = (repo_root / "workflows" / "main.nf").read_text()
+    config_text = (repo_root / "workflows" / "nextflow.config").read_text()
+    module_text = (
+        repo_root / "workflows" / "modules" / "spatial_gene_analysis.nf"
+    ).read_text()
+
+    for expected in [
+        'include { SPATIAL_GENE_ANALYSIS } from "./modules/spatial_gene_analysis"',
+        '"spatial_gene_analysis": "spatial_gene_analysis"',
+        '"spatial_autocorrelation": "spatial_gene_analysis"',
+        (
+            'stages += ["visualize", "spatial_gene_analysis", '
+            '"clustering_squidpy", "mapmycells"]'
+        ),
+        "settings.run_spatial_gene_analysis",
+        "spatial_gene_analysis_after_visualize_ch",
+        "spatial_gene_analysis_done_ch",
+        "clustering_after_spatial_gene_analysis_ch",
+        "SPATIAL_GENE_ANALYSIS(",
+    ]:
+        assert expected in main_text
+
+    for expected in [
+        "spatial_gene_analysis_n_neighbors = 6",
+        "spatial_gene_analysis_top_n = 10",
+        "spatial_gene_analysis_max_forks = 4",
+        'withName: "SPATIAL_GENE_ANALYSIS"',
+    ]:
+        assert expected in config_text
+
+    for expected in [
+        "process SPATIAL_GENE_ANALYSIS",
+        "spatial_gene_analysis_config.json",
+        "spatial_gene_analysis_out",
+        "merxen spatial-gene-analysis",
+        '"n_neighbors"',
+        '"top_n"',
     ]:
         assert expected in module_text

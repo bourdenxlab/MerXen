@@ -23,6 +23,7 @@ from merxen.cli.run_mask_image_quantification import (
 )
 from merxen.cli.run_qc import qc_command
 from merxen.cli.run_segmentation import segment_command
+from merxen.cli.run_spatial_gene_analysis import spatial_gene_analysis_command
 from merxen.cli.run_visualization import visualize_command
 
 
@@ -49,5 +50,6 @@ main.add_command(check_alignment_deps_command)
 main.add_command(compare_command)
 main.add_command(cortical_depth_command)
 main.add_command(visualize_command)
+main.add_command(spatial_gene_analysis_command)
 main.add_command(clustering_squidpy_command)
 main.add_command(mapmycells_command)
