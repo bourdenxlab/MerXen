@@ -585,6 +585,35 @@ class ClusteringSquidpyConfig(BaseModel):
     min_branch_cells: int = Field(default=50, ge=1)
 
 
+class SpatialGeneAnalysisSampleConfig(BaseModel):
+    """One SpatialData sample for per-gene spatial autocorrelation."""
+
+    sample_id: str
+    platform: Literal["MERSCOPE", "XENIUM"]
+    zarr_path: Path
+    segmentation: str | None = None
+    table_key: str | None = None
+    shape_key: str | None = None
+
+
+class SpatialGeneAnalysisConfig(BaseModel):
+    """Configuration for per-gene Squidpy spatial autocorrelation analysis."""
+
+    pair_id: str
+    output_dir: Path
+    samples: list[SpatialGeneAnalysisSampleConfig]
+    drop_control_features: bool = True
+    min_counts: int = Field(default=0, ge=0)
+    min_cells: int = Field(default=5, ge=1)
+    normalize_target_sum: float | None = None
+    normalize_exclude_highly_expressed: bool = False
+    normalize_max_fraction: float = 0.05
+    n_neighbors: int = Field(default=6, ge=1)
+    top_n: int = Field(default=10, ge=1)
+    spatial_point_size: float = Field(default=2.0, gt=0)
+    figure_dpi: int = Field(default=180, ge=72)
+
+
 class MapMyCellsSampleConfig(BaseModel):
     """One clustered AnnData sample to annotate with MapMyCells."""
 

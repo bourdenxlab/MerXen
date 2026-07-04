@@ -10,6 +10,7 @@ include { QC } from "./modules/qc"
 include { ALIGN; ALIGN_QC } from "./modules/alignment"
 include { COMPARE } from "./modules/comparison"
 include { VISUALIZE } from "./modules/visualization"
+include { SPATIAL_GENE_ANALYSIS } from "./modules/spatial_gene_analysis"
 include { CLUSTERING_SQUIDPY } from "./modules/clustering_squidpy"
 include { MAPMYCELLS } from "./modules/mapmycells"
 
@@ -394,6 +395,10 @@ def normalizeStage(rawValue, paramName) {
         "visualise": "visualize",
         "visualization": "visualize",
         "visualisation": "visualize",
+        "spatial_gene_analysis": "spatial_gene_analysis",
+        "spatial_genes": "spatial_gene_analysis",
+        "gene_spatial_analysis": "spatial_gene_analysis",
+        "spatial_autocorrelation": "spatial_gene_analysis",
         "cluster": "clustering_squidpy",
         "clustering": "clustering_squidpy",
         "clustering_squidpy": "clustering_squidpy",
@@ -408,7 +413,8 @@ def normalizeStage(rawValue, paramName) {
             "Unknown ${paramName} '${raw}'. Valid stages: " +
             "build_spatialdata, segment, enrich, mask_image_quantification, " +
             "compute_cortical_depth, qc, align, align_qc, " +
-            "compare, visualize, clustering_squidpy, mapmycells"
+            "compare, visualize, spatial_gene_analysis, " +
+            "clustering_squidpy, mapmycells"
         )
     }
     return aliases[key]
@@ -434,7 +440,7 @@ def activeStageOrder(
     if (pairedMode) {
         stages += ["compare"]
     }
-    stages += ["visualize", "clustering_squidpy", "mapmycells"]
+    stages += ["visualize", "spatial_gene_analysis", "clustering_squidpy", "mapmycells"]
     return stages
 }
 
@@ -829,6 +835,12 @@ def rowSampleSettings(row, params) {
     def runAlignQc = stageInRange("align_qc", startStage, stopStage, stageOrder)
     def runCompare = stageInRange("compare", startStage, stopStage, stageOrder)
     def runVisualize = stageInRange("visualize", startStage, stopStage, stageOrder)
+    def runSpatialGeneAnalysis = stageInRange(
+        "spatial_gene_analysis",
+        startStage,
+        stopStage,
+        stageOrder,
+    )
     def runClusteringSquidpy = stageInRange(
         "clustering_squidpy",
         startStage,
@@ -837,11 +849,23 @@ def rowSampleSettings(row, params) {
     )
     def runMapMyCells = stageInRange("mapmycells", startStage, stopStage, stageOrder)
     def needAnalysisZarrs =
-        runAlign || runAlignQc || runCompare || runVisualize || runClusteringSquidpy
+        runAlign ||
+        runAlignQc ||
+        runCompare ||
+        runVisualize ||
+        runSpatialGeneAnalysis ||
+        runClusteringSquidpy
     def needAlignmentResults =
         pairedMode && alignmentEnabled && needAnalysisZarrs
     def needAlignmentDownstream =
-        pairedMode && alignmentEnabled && (runCompare || runVisualize || runClusteringSquidpy)
+        pairedMode &&
+        alignmentEnabled &&
+        (
+            runCompare ||
+            runVisualize ||
+            runSpatialGeneAnalysis ||
+            runClusteringSquidpy
+        )
 
     return [
         pair_id: pairId,
@@ -866,6 +890,7 @@ def rowSampleSettings(row, params) {
         run_align_qc: runAlignQc,
         run_compare: runCompare,
         run_visualize: runVisualize,
+        run_spatial_gene_analysis: runSpatialGeneAnalysis,
         run_clustering_squidpy: runClusteringSquidpy,
         run_mapmycells: runMapMyCells,
         need_build_results: runSegment || runEnrich,
@@ -1695,6 +1720,7 @@ workflow {
                 !settings.enable_alignment &&
                     (settings.run_compare ||
                      settings.run_visualize ||
+                     settings.run_spatial_gene_analysis ||
                      settings.run_clustering_squidpy)
         }
 
@@ -1705,6 +1731,7 @@ workflow {
                 settings.enable_alignment &&
                     (settings.run_compare ||
                      settings.run_visualize ||
+                     settings.run_spatial_gene_analysis ||
                      settings.run_clustering_squidpy)
         }
         .map {
@@ -1773,7 +1800,11 @@ workflow {
             _pairId, _segmentation, _merscopePath, _xeniumPath, _merscopeTableKey,
             _merscopeShapeKey, _xeniumTableKey, _xeniumShapeKey, settings ->
                 settings.enable_alignment &&
-                    (settings.run_visualize || settings.run_clustering_squidpy)
+                    (
+                        settings.run_visualize ||
+                        settings.run_spatial_gene_analysis ||
+                        settings.run_clustering_squidpy
+                    )
         }
         .map {
             pairId, segmentation, merscopePath, xeniumPath, _merscopeTableKey,
@@ -1795,7 +1826,11 @@ workflow {
         .filter {
             _pairId, _segmentation, _platform, _zarrPath, _tableKey, _shapeKey, settings ->
                 (!settings.paired_mode || !settings.enable_alignment) &&
-                    (settings.run_visualize || settings.run_clustering_squidpy)
+                    (
+                        settings.run_visualize ||
+                        settings.run_spatial_gene_analysis ||
+                        settings.run_clustering_squidpy
+                    )
         }
         .map {
             pairId, segmentation, platform, zarrPath, _tableKey, _shapeKey, settings ->
@@ -1861,17 +1896,17 @@ workflow {
         tuple("${pairId}|${segmentation}", true)
     }
 
-    clustering_without_visualize_ch = analysis_samples_ch
+    spatial_gene_analysis_without_visualize_ch = analysis_samples_ch
         .filter { _pairId, _segmentation, _samplesJson, settings ->
-            settings.run_clustering_squidpy && !settings.run_visualize
+            settings.run_spatial_gene_analysis && !settings.run_visualize
         }
         .map { pairId, segmentation, samplesJson, _settings ->
             tuple(pairId, segmentation, samplesJson)
         }
 
-    clustering_after_visualize_ch = analysis_samples_ch
+    spatial_gene_analysis_after_visualize_ch = analysis_samples_ch
         .filter { _pairId, _segmentation, _samplesJson, settings ->
-            settings.run_clustering_squidpy && settings.run_visualize
+            settings.run_spatial_gene_analysis && settings.run_visualize
         }
         .map { pairId, segmentation, samplesJson, _settings ->
             tuple("${pairId}|${segmentation}", pairId, segmentation, samplesJson)
@@ -1881,8 +1916,60 @@ workflow {
             tuple(pairId, segmentation, samplesJson)
         }
 
+    spatial_gene_analysis_inputs_ch =
+        spatial_gene_analysis_without_visualize_ch.mix(
+            spatial_gene_analysis_after_visualize_ch
+        )
+
+    spatial_gene_analysis_results_ch = SPATIAL_GENE_ANALYSIS(
+        spatial_gene_analysis_inputs_ch
+    )
+
+    spatial_gene_analysis_done_ch = spatial_gene_analysis_results_ch.map {
+        pairId, segmentation, _spatialGeneAnalysisOutDir ->
+            tuple("${pairId}|${segmentation}", true)
+    }
+
+    clustering_without_dependencies_ch = analysis_samples_ch
+        .filter { _pairId, _segmentation, _samplesJson, settings ->
+            settings.run_clustering_squidpy &&
+                !settings.run_visualize &&
+                !settings.run_spatial_gene_analysis
+        }
+        .map { pairId, segmentation, samplesJson, _settings ->
+            tuple(pairId, segmentation, samplesJson)
+        }
+
+    clustering_after_visualize_ch = analysis_samples_ch
+        .filter { _pairId, _segmentation, _samplesJson, settings ->
+            settings.run_clustering_squidpy &&
+                settings.run_visualize &&
+                !settings.run_spatial_gene_analysis
+        }
+        .map { pairId, segmentation, samplesJson, _settings ->
+            tuple("${pairId}|${segmentation}", pairId, segmentation, samplesJson)
+        }
+        .join(visualize_done_ch)
+        .map { _branchKey, pairId, segmentation, samplesJson, _doneFlag ->
+            tuple(pairId, segmentation, samplesJson)
+        }
+
+    clustering_after_spatial_gene_analysis_ch = analysis_samples_ch
+        .filter { _pairId, _segmentation, _samplesJson, settings ->
+            settings.run_clustering_squidpy && settings.run_spatial_gene_analysis
+        }
+        .map { pairId, segmentation, samplesJson, _settings ->
+            tuple("${pairId}|${segmentation}", pairId, segmentation, samplesJson)
+        }
+        .join(spatial_gene_analysis_done_ch)
+        .map { _branchKey, pairId, segmentation, samplesJson, _doneFlag ->
+            tuple(pairId, segmentation, samplesJson)
+        }
+
     clustering_inputs_ch =
-        clustering_without_visualize_ch.mix(clustering_after_visualize_ch)
+        clustering_without_dependencies_ch
+            .mix(clustering_after_visualize_ch)
+            .mix(clustering_after_spatial_gene_analysis_ch)
 
     clustering_results_ch = CLUSTERING_SQUIDPY(clustering_inputs_ch)
 
