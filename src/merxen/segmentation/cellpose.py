@@ -49,6 +49,7 @@ def build_cellpose_model(config: CellposeConfig) -> Any:
     kwargs: dict[str, Any] = {"gpu": config.gpu}
     if config.model_type is not None:
         kwargs["model_type"] = config.model_type
+        kwargs["use_bfloat16"] = config.use_bfloat16
     return cellpose_models.CellposeModel(**kwargs)
 
 

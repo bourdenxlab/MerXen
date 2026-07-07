@@ -24,6 +24,7 @@ class CellposeConfig(BaseModel):
     tile_overlap: float = 0.15
     bsize: int = 256
     factor_rescale: float = 1.0
+    use_bfloat16: bool = True
 
     @field_validator("factor_rescale")
     @classmethod
