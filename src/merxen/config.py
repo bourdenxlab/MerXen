@@ -634,8 +634,12 @@ class MapMyCellsConfig(BaseModel):
     output_dir: Path
     samples: list[MapMyCellsSampleConfig]
     reference_mode: Literal["whole_brain", "region", "both"] = "both"
+    reference_atlas: Literal["whb", "wmb"] = "whb"
+    query_species: Literal["human", "mouse"] = "human"
+    auto_download_references: bool = True
     marker_lookup_path: Path | None = None
     precomputed_stats_path: Path | None = None
+    gene_mapping_db_path: Path | None = None
     region_name: str = "frontal_a44_a45_a46_a32_acc"
     region_labels: list[str] = Field(
         default_factory=lambda: [
@@ -645,7 +649,7 @@ class MapMyCellsConfig(BaseModel):
             "Human ACC",
         ]
     )
-    region_cache_dir: Path = Path("/media/mathieubo/SSD1/MerXen/mapmycells")
+    region_cache_dir: Path = Path("./mapmycells_cache")
     region_min_cells_per_leaf: int = Field(default=10, ge=1)
     region_force_rebuild: bool = False
     region_query_markers_n_per_utility: int = Field(default=10, ge=1)
@@ -696,16 +700,20 @@ class MapMyCellsConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_reference_inputs(self: MapMyCellsConfig) -> MapMyCellsConfig:
-        if not self.plots_only and self.reference_mode in {"whole_brain", "both"}:
+        if (
+            not self.plots_only
+            and self.reference_mode in {"whole_brain", "both"}
+            and not self.auto_download_references
+        ):
             if self.marker_lookup_path is None:
                 raise ValueError(
-                    "marker_lookup_path is required when reference_mode includes "
-                    "whole_brain"
+                    "marker_lookup_path is required when automatic reference "
+                    "downloads are disabled"
                 )
             if self.precomputed_stats_path is None:
                 raise ValueError(
-                    "precomputed_stats_path is required when reference_mode includes "
-                    "whole_brain"
+                    "precomputed_stats_path is required when automatic reference "
+                    "downloads are disabled"
                 )
         if (
             not self.plots_only
@@ -716,6 +724,33 @@ class MapMyCellsConfig(BaseModel):
                 "region_labels must contain at least one Allen WHB ROI label when "
                 "reference_mode includes region"
             )
+        if (
+            not self.plots_only
+            and self.reference_atlas == "wmb"
+            and self.query_species == "human"
+            and self.gene_mapping_db_path is None
+            and not self.auto_download_references
+        ):
+            raise ValueError(
+                "gene_mapping_db_path is required for human-to-WMB mapping when "
+                "automatic reference downloads are disabled"
+            )
+        if (
+            not self.plots_only
+            and self.reference_atlas == "wmb"
+            and self.reference_mode in {"region", "both"}
+            and any(label.lower().startswith("human ") for label in self.region_labels)
+        ):
+            raise ValueError(
+                "WMB region_labels must be mouse region_of_interest_acronym values, "
+                "not the default Human WHB labels"
+            )
+        if (
+            self.reference_atlas == "wmb"
+            and self.query_species == "human"
+            and self.drop_level is None
+        ):
+            self.drop_level = "CCN20230722_SUPT"
         return self
 
 

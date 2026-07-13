@@ -586,16 +586,30 @@ def appendMapMyCellsPreflightChecks(errors, settings, params) {
     def referenceMode = params.mapmycells_reference_mode == null
         ? "both"
         : params.mapmycells_reference_mode.toString().trim().toLowerCase()
+    def autoDownloadReferences = params.mapmycells_auto_download_references == null
+        ? true
+        : params.mapmycells_auto_download_references.toString().trim().toLowerCase() == "true"
     if (referenceMode in ["whole_brain", "both"]) {
+        if (!autoDownloadReferences || params.mapmycells_marker_lookup_path) {
+            appendPreflightFileCheck(
+                errors,
+                params.mapmycells_marker_lookup_path,
+                "MAPMYCELLS whole-brain marker lookup",
+            )
+        }
+        if (!autoDownloadReferences || params.mapmycells_precomputed_stats_path) {
+            appendPreflightFileCheck(
+                errors,
+                params.mapmycells_precomputed_stats_path,
+                "MAPMYCELLS whole-brain precomputed stats",
+            )
+        }
+    }
+    if (params.mapmycells_gene_mapping_db_path) {
         appendPreflightFileCheck(
             errors,
-            params.mapmycells_marker_lookup_path,
-            "MAPMYCELLS whole-brain marker lookup",
-        )
-        appendPreflightFileCheck(
-            errors,
-            params.mapmycells_precomputed_stats_path,
-            "MAPMYCELLS whole-brain precomputed stats",
+            params.mapmycells_gene_mapping_db_path,
+            "MAPMYCELLS gene mapping database",
         )
     }
 }
@@ -932,6 +946,15 @@ def validateMapMyCellsParams(params) {
     def mapMyCellsPlotsOnly = params.mapmycells_plots_only == null
         ? false
         : params.mapmycells_plots_only.toString().trim().toLowerCase() == "true"
+    def mapMyCellsReferenceAtlas = params.mapmycells_reference_atlas == null
+        ? "whb"
+        : params.mapmycells_reference_atlas.toString().trim().toLowerCase()
+    def mapMyCellsQuerySpecies = params.mapmycells_query_species == null
+        ? "human"
+        : params.mapmycells_query_species.toString().trim().toLowerCase()
+    def mapMyCellsAutoDownload = params.mapmycells_auto_download_references == null
+        ? true
+        : params.mapmycells_auto_download_references.toString().trim().toLowerCase() == "true"
     if (!(mapMyCellsReferenceMode in ["whole_brain", "region", "both"])) {
         throw new IllegalArgumentException(
             "Invalid MAPMYCELLS --mapmycells_reference_mode " +
@@ -939,8 +962,21 @@ def validateMapMyCellsParams(params) {
             "whole_brain, region, both"
         )
     }
+    if (!(mapMyCellsReferenceAtlas in ["whb", "wmb"])) {
+        throw new IllegalArgumentException(
+            "Invalid MAPMYCELLS --mapmycells_reference_atlas " +
+            "'${params.mapmycells_reference_atlas}'. Valid values: whb, wmb"
+        )
+    }
+    if (!(mapMyCellsQuerySpecies in ["human", "mouse"])) {
+        throw new IllegalArgumentException(
+            "Invalid MAPMYCELLS --mapmycells_query_species " +
+            "'${params.mapmycells_query_species}'. Valid values: human, mouse"
+        )
+    }
     if (!mapMyCellsPlotsOnly &&
         mapMyCellsReferenceMode in ["whole_brain", "both"] &&
+        !mapMyCellsAutoDownload &&
         !params.mapmycells_marker_lookup_path) {
         throw new IllegalArgumentException(
             "Missing required parameter for MAPMYCELLS: --mapmycells_marker_lookup_path"
@@ -948,9 +984,20 @@ def validateMapMyCellsParams(params) {
     }
     if (!mapMyCellsPlotsOnly &&
         mapMyCellsReferenceMode in ["whole_brain", "both"] &&
+        !mapMyCellsAutoDownload &&
         !params.mapmycells_precomputed_stats_path) {
         throw new IllegalArgumentException(
             "Missing required parameter for MAPMYCELLS: --mapmycells_precomputed_stats_path"
+        )
+    }
+    if (!mapMyCellsPlotsOnly &&
+        mapMyCellsReferenceAtlas == "wmb" &&
+        mapMyCellsQuerySpecies == "human" &&
+        !mapMyCellsAutoDownload &&
+        !params.mapmycells_gene_mapping_db_path) {
+        throw new IllegalArgumentException(
+            "Human-to-WMB MAPMYCELLS requires " +
+            "--mapmycells_gene_mapping_db_path when automatic downloads are disabled"
         )
     }
     if (!mapMyCellsPlotsOnly &&
