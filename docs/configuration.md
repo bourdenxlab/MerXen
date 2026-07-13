@@ -218,8 +218,10 @@ SpatialData compatibility. Non-alignment stages keep using `environment.yml`.
 | `clustering_squidpy_spatial_scatter_point_size` | `2.0` | Point size for regular spatial scatter plots. |
 | `clustering_squidpy_figure_dpi` | `180` | DPI for PNG plots. |
 | `clustering_squidpy_use_gpu` | `true` | Use RAPIDS single-cell acceleration when available. |
+| `clustering_squidpy_gpu_conda` | `environment.clustering-gpu.yml` | Dedicated RAPIDS environment used only by `CLUSTERING_SQUIDPY_COMPUTE`. |
+| `clustering_squidpy_gpu_container` | Site GPU image path | Dedicated RAPIDS image used only by `CLUSTERING_SQUIDPY_COMPUTE` with Apptainer. Build it from `Dockerfile.clustering-gpu` or override this path. |
 | `clustering_squidpy_max_forks` | `4` | Maximum concurrent Squidpy clustering tasks. GPU-backed tasks still share the local GPU lock when enabled. |
-| `clustering_squidpy_gpu_vram_monitor` | `true` | Run a lightweight `nvidia-smi` sampler around each `CLUSTERING_SQUIDPY` task. |
+| `clustering_squidpy_gpu_vram_monitor` | `true` | Run a lightweight `nvidia-smi` sampler around each `CLUSTERING_SQUIDPY_COMPUTE` task. |
 | `clustering_squidpy_gpu_vram_monitor_interval_seconds` | `2` | Sampling interval for the clustering GPU VRAM monitor. |
 | `clustering_squidpy_write_spatialdata_table` | `true` | Add or replace a final clustered AnnData table in each source `latest_spatialdata.zarr`. |
 | `clustering_squidpy_hierarchical_enabled` | `true` | Run broad atlas-guided annotation and per-branch subclustering. Set to `false` for the legacy one-shot Leiden workflow. |

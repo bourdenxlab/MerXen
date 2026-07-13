@@ -201,7 +201,10 @@ See [Section alignment](stages/alignment.md).
   annotation, branch subclustering, neuron split, and hierarchical QC artifact
   writer when `hierarchical_enabled` is true.
 - `run_clustering_squidpy(config)` — full stage entry point for
-  `CLUSTERING_SQUIDPY`.
+  direct single-environment CLI use.
+- `prepare_clustering_squidpy`, `compute_clustering_squidpy`,
+  `finalize_clustering_squidpy` — H5AD process boundary used by Nextflow so
+  RAPIDS compute never imports or writes SpatialData.
 
 See [Squidpy clustering](stages/clustering-squidpy.md).
 

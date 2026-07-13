@@ -13,7 +13,8 @@ dependencies = [
     "numpy>=1.24,<3",
     "pandas>=2.0",
     "geopandas>=1.0",
-    "anndata>=0.10",
+    "anndata>=0.10.9,<0.13.0",
+    "pyarrow>=15.0.0",
     "spatialdata>=0.8.0",
     "spatialdata-io>=0.6",
     "xarray>=2024.0",
@@ -48,10 +49,6 @@ dev = [
 alignment = [
     "dynamo-release @ git+https://github.com/aristoteleo/dynamo-release.git@v1.5.3",
     "spateo-release @ git+https://github.com/aristoteleo/spateo-release.git@1bd8a35e6e7b0dfc712d76b1c32987dc06652774",
-]
-# Install with: pip install -e ".[gpu]" --extra-index-url=https://pypi.nvidia.com
-gpu = [
-    "rapids-singlecell-cu12[rapids]",
 ]
 
 [project.scripts]
