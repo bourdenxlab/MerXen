@@ -59,6 +59,30 @@ def test_workflow_preflight_checks_reference_files_before_task_inputs() -> None:
         assert expected in main_text or expected in config_text
 
 
+def test_mapmycells_nextflow_exposes_wmb_cross_species_settings() -> None:
+    """Nextflow should pass atlas, species, download, and gene-mapper settings."""
+    repo_root = Path(__file__).resolve().parents[2]
+    module_text = (repo_root / "workflows/modules/mapmycells.nf").read_text()
+    main_text = (repo_root / "workflows/main.nf").read_text()
+    config_text = (repo_root / "workflows/nextflow.config").read_text()
+
+    for expected in [
+        '"reference_atlas"',
+        '"query_species"',
+        '"auto_download_references"',
+        '"gene_mapping_db_path"',
+        'mapmycells_reference_atlas = "whb"',
+        'mapmycells_query_species = "human"',
+        "mapmycells_auto_download_references = true",
+        "mapmycells_gene_mapping_db_path = null",
+        'mapMyCellsReferenceAtlas in ["whb", "wmb"]',
+        'mapMyCellsQuerySpecies in ["human", "mouse"]',
+    ]:
+        assert (
+            expected in module_text or expected in main_text or expected in config_text
+        )
+
+
 def test_gpu_processes_share_local_lock() -> None:
     """GPU-heavy local processes should not overlap on one workstation GPU."""
     repo_root = Path(__file__).resolve().parents[2]

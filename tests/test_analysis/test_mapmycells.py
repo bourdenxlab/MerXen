@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import pickle
 import subprocess
@@ -16,6 +17,9 @@ import pytest
 
 from merxen.analysis.mapmycells import (
     RegionReferenceArtifacts,
+    _ensure_url_file,
+    _ensure_wmb_expression_inputs,
+    _resolve_full_reference_artifacts,
     _run_command,
     _write_region_cell_metadata,
     build_mapmycells_command,
@@ -156,6 +160,7 @@ def test_mapmycells_config_validates_reference_modes(tmp_path: Path) -> None:
             output_dir=tmp_path / "mapmycells_out",
             samples=[],
             reference_mode="whole_brain",
+            auto_download_references=False,
         )
 
     with pytest.raises(ValueError, match="region_labels"):
@@ -176,6 +181,178 @@ def test_mapmycells_config_validates_reference_modes(tmp_path: Path) -> None:
         plots_only=True,
     )
     assert plots_only.plots_only is True
+
+
+def test_mapmycells_config_enables_human_to_wmb_defaults(tmp_path: Path) -> None:
+    """Human-to-WMB mapping should select the Allen cross-species drop level."""
+    cfg = MapMyCellsConfig(
+        pair_id="PAIR1",
+        output_dir=tmp_path / "mapmycells_out",
+        samples=[],
+        reference_mode="whole_brain",
+        reference_atlas="wmb",
+        query_species="human",
+    )
+
+    assert cfg.drop_level == "CCN20230722_SUPT"
+    assert cfg.auto_download_references is True
+
+    with pytest.raises(ValueError, match="mouse region_of_interest_acronym"):
+        MapMyCellsConfig(
+            pair_id="PAIR1",
+            output_dir=tmp_path / "mapmycells_out",
+            samples=[],
+            reference_mode="region",
+            reference_atlas="wmb",
+            query_species="human",
+        )
+
+
+def test_build_mapmycells_command_includes_gene_mapping_db(tmp_path: Path) -> None:
+    """Cross-species mapping should pass the mmc_gene_mapper database."""
+    gene_db = tmp_path / "gene_mapper.db"
+    cfg = MapMyCellsConfig(
+        pair_id="PAIR1",
+        output_dir=tmp_path / "mapmycells_out",
+        samples=[],
+        reference_mode="whole_brain",
+        reference_atlas="wmb",
+        gene_mapping_db_path=gene_db,
+        marker_lookup_path=tmp_path / "markers.json",
+        precomputed_stats_path=tmp_path / "stats.h5",
+    )
+
+    command = build_mapmycells_command(
+        cfg,
+        query_h5ad=tmp_path / "query.h5ad",
+        extended_json=tmp_path / "extended.json",
+        csv_path=tmp_path / "result.csv",
+        log_path=tmp_path / "mapper.log",
+    )
+
+    assert command[command.index("--gene_mapping.db_path") + 1] == str(gene_db)
+
+
+def test_full_wmb_reference_downloads_manifest_assets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing full-WMB files should be downloaded from the Allen manifest."""
+    manifest = {
+        "file_listing": {
+            "WMB-10X": {
+                "mapmycells": {
+                    "mouse_markers_230821": {"files": {"json": {"url": "markers"}}},
+                    "precomputed_stats_ABC_revision_230821": {
+                        "files": {"h5": {"url": "stats"}}
+                    },
+                }
+            }
+        }
+    }
+    monkeypatch.setattr(
+        "merxen.analysis.mapmycells._load_abc_manifest", lambda: manifest
+    )
+
+    def fake_ensure(info: dict[str, object], cache_dir: Path) -> Path:
+        suffix = ".json" if info["url"] == "markers" else ".h5"
+        path = cache_dir / f"downloaded{suffix}"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("asset")
+        return path
+
+    monkeypatch.setattr("merxen.analysis.mapmycells._ensure_manifest_file", fake_ensure)
+    cfg = MapMyCellsConfig(
+        pair_id="PAIR1",
+        output_dir=tmp_path / "mapmycells_out",
+        samples=[],
+        reference_mode="whole_brain",
+        reference_atlas="wmb",
+        query_species="mouse",
+        region_cache_dir=tmp_path / "cache",
+    )
+
+    marker_path, stats_path, metadata = _resolve_full_reference_artifacts(cfg)
+
+    assert marker_path.name == "downloaded.json"
+    assert stats_path.name == "downloaded.h5"
+    assert metadata["reference_atlas"] == "wmb"
+    assert metadata["downloaded"] is True
+
+
+def test_wmb_expression_download_resolves_feature_matrix_labels(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WMB expression downloads should resolve labels across rig directories."""
+    matrix_label = "WMB-10Xv3-Isocortex-1"
+    manifest = {
+        "file_listing": {
+            "WMB-10Xv2": {"expression_matrices": {}},
+            "WMB-10Xv3": {
+                "expression_matrices": {
+                    matrix_label: {"raw": {"files": {"h5ad": {"url": "matrix"}}}}
+                }
+            },
+            "WMB-10XMulti": {"expression_matrices": {}},
+        }
+    }
+    monkeypatch.setattr(
+        "merxen.analysis.mapmycells._load_abc_manifest", lambda: manifest
+    )
+
+    def fake_ensure(
+        info: dict[str, object],
+        cache_dir: Path,
+        *,
+        force_download: bool,
+    ) -> Path:
+        assert info["url"] == "matrix"
+        assert force_download is False
+        return cache_dir / "matrix.h5ad"
+
+    monkeypatch.setattr("merxen.analysis.mapmycells._ensure_manifest_file", fake_ensure)
+
+    paths = _ensure_wmb_expression_inputs(
+        tmp_path / "cache",
+        matrix_labels=[matrix_label],
+    )
+
+    assert paths == {f"{matrix_label}_raw": tmp_path / "cache/abc_atlas/matrix.h5ad"}
+
+
+def test_reference_download_resumes_partial_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Large Allen downloads should resume a retained partial file."""
+    output_path = tmp_path / "reference.db"
+    output_path.with_name("reference.db.tmp").write_bytes(b"abc")
+
+    class PartialResponse(io.BytesIO):
+        status = 206
+
+        def __enter__(self: PartialResponse) -> PartialResponse:
+            return self
+
+        def __exit__(self: PartialResponse, *args: object) -> None:
+            self.close()
+
+    def fake_urlopen(request: object) -> PartialResponse:
+        assert request.headers["Range"] == "bytes=3-"  # type: ignore[attr-defined]
+        return PartialResponse(b"def")
+
+    monkeypatch.setattr(
+        "merxen.analysis.mapmycells.urllib.request.urlopen", fake_urlopen
+    )
+
+    result = _ensure_url_file(
+        "https://example.invalid/reference.db",
+        output_path,
+        expected_size=6,
+    )
+
+    assert result.read_bytes() == b"abcdef"
 
 
 def test_run_mapmycells_writes_annotated_h5ad(
@@ -672,6 +849,39 @@ def test_region_cell_metadata_filters_multiple_rois_and_sparse_leaves(
     assert summary["dropped_leaf_aliases"] == {"2": 1}
 
 
+def test_region_cell_metadata_supports_wmb_acronyms(tmp_path: Path) -> None:
+    """Mouse ROI filtering should retain the required matrix shard labels."""
+    cell_metadata_path = tmp_path / "wmb_cell_metadata.csv"
+    pd.DataFrame(
+        {
+            "cell_label": ["c1", "c2", "c3"],
+            "region_of_interest_acronym": ["MOp", "MOp", "VIS"],
+            "feature_matrix_label": [
+                "WMB-10Xv3-Isocortex-1",
+                "WMB-10Xv3-Isocortex-1",
+                "WMB-10Xv2-Isocortex-2",
+            ],
+            "cluster_alias": [1, 1, 2],
+        }
+    ).to_csv(cell_metadata_path, index=False)
+    roi_path = tmp_path / "wmb_roi.csv"
+    pd.DataFrame({"region_of_interest_acronym": ["MOp", "VIS"]}).to_csv(
+        roi_path, index=False
+    )
+
+    summary = _write_region_cell_metadata(
+        cell_metadata_path=cell_metadata_path,
+        output_path=tmp_path / "filtered.csv",
+        region_labels=["MOp"],
+        min_cells_per_leaf=2,
+        roi_map_path=roi_path,
+        region_column="region_of_interest_acronym",
+    )
+
+    assert summary["matched_region_labels"] == ["MOp"]
+    assert summary["feature_matrix_labels"] == ["WMB-10Xv3-Isocortex-1"]
+
+
 def test_prepare_region_reference_reuses_cache_and_force_rebuilds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -756,6 +966,103 @@ def test_prepare_region_reference_reuses_cache_and_force_rebuilds(
     force_cfg = cfg.model_copy(update={"region_force_rebuild": True})
     prepare_region_mapmycells_reference(force_cfg)
     assert calls == {"precompute": 2, "reference": 2, "query": 2}
+
+
+def test_prepare_wmb_region_reference_selects_required_matrix_shards(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WMB region builds should download only shards represented in the ROI."""
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    cell_metadata = inputs / "cell_metadata.csv"
+    pd.DataFrame(
+        {
+            "cell_label": ["c1", "c2"],
+            "region_of_interest_acronym": ["MOp", "MOp"],
+            "feature_matrix_label": [
+                "WMB-10Xv3-Isocortex-1",
+                "WMB-10Xv3-Isocortex-1",
+            ],
+            "cluster_alias": [1, 1],
+        }
+    ).to_csv(cell_metadata, index=False)
+    roi_metadata = inputs / "roi.csv"
+    pd.DataFrame({"region_of_interest_acronym": ["MOp"]}).to_csv(
+        roi_metadata, index=False
+    )
+    cluster_annotation = inputs / "cluster_annotation.csv"
+    cluster_annotation.write_text("label\n")
+    cluster_membership = inputs / "cluster_membership.csv"
+    cluster_membership.write_text("cluster_alias\n")
+    expression = inputs / "isocortex.h5ad"
+    expression.write_text("expression")
+
+    monkeypatch.setattr(
+        "merxen.analysis.mapmycells._ensure_wmb_reference_metadata_inputs",
+        lambda cache_dir, force_download=False: {
+            "cell_metadata": cell_metadata,
+            "region_of_interest_metadata": roi_metadata,
+            "cluster_annotation_term": cluster_annotation,
+            "cluster_to_cluster_annotation_membership": cluster_membership,
+        },
+    )
+
+    def fake_expression_inputs(
+        cache_dir: Path,
+        *,
+        matrix_labels: list[str],
+        force_download: bool = False,
+    ) -> dict[str, Path]:
+        assert matrix_labels == ["WMB-10Xv3-Isocortex-1"]
+        return {"WMB-10Xv3-Isocortex-1_raw": expression}
+
+    monkeypatch.setattr(
+        "merxen.analysis.mapmycells._ensure_wmb_expression_inputs",
+        fake_expression_inputs,
+    )
+
+    def fake_precompute(config: dict[str, object]) -> None:
+        assert config["hierarchy"] == [
+            "CCN20230722_CLAS",
+            "CCN20230722_SUBC",
+            "CCN20230722_SUPT",
+            "CCN20230722_CLUS",
+        ]
+        assert config["h5ad_path_list"] == [str(expression)]
+        Path(str(config["output_path"])).write_bytes(b"stats")
+
+    def fake_reference(config: dict[str, object]) -> None:
+        output_dir = Path(str(config["output_dir"]))
+        (output_dir / "reference_markers.h5").write_bytes(b"markers")
+
+    def fake_query(config: dict[str, object]) -> None:
+        Path(str(config["output_path"])).write_text("{}\n")
+
+    monkeypatch.setattr(
+        "merxen.analysis.mapmycells._run_precomputation_abc", fake_precompute
+    )
+    monkeypatch.setattr(
+        "merxen.analysis.mapmycells._run_reference_markers", fake_reference
+    )
+    monkeypatch.setattr("merxen.analysis.mapmycells._run_query_markers", fake_query)
+    cfg = MapMyCellsConfig(
+        pair_id="PAIR1",
+        output_dir=tmp_path / "out",
+        samples=[],
+        reference_mode="region",
+        reference_atlas="wmb",
+        query_species="mouse",
+        region_name="motor",
+        region_labels=["MOp"],
+        region_cache_dir=tmp_path / "cache",
+        region_min_cells_per_leaf=2,
+    )
+
+    artifacts = prepare_region_mapmycells_reference(cfg)
+
+    assert "wmb_region_motor" in str(artifacts.manifest_path)
+    assert artifacts.manifest["config"]["reference_atlas"] == "wmb"
 
 
 def test_run_command_writes_logs_on_failure(
