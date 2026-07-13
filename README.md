@@ -47,6 +47,8 @@ MerXen/
 ├── pyproject.toml              # Dependencies, merxen entry point, tool config
 ├── environment.yml             # Conda env (Python 3.12 + pip)
 ├── environment.alignment.yml   # Nextflow ALIGN env with Spateo bootstrap
+├── environment.clustering-gpu.yml # Isolated RAPIDS clustering environment
+├── Dockerfile.clustering-gpu   # Isolated RAPIDS clustering image
 ├── requirements.lock           # Pinned dependency tree
 ├── .env.example                # Required environment variables template
 ├── Agents.md                   # Project standards (must-read for contributors)

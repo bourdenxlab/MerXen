@@ -160,13 +160,15 @@ git push origin HEAD --tags
 
 - **Never `pip install <pkg>` directly.** That leaves you out of sync with
   the lockfile and CI.
-- **Conda env (`environment.yml`)** is deliberately thin — Python 3.12,
-  `spatialdata` from git, and `-e ".[dev]"`. Everything else comes through
-  `pyproject.toml`.
+- **Conda env (`environment.yml`)** is deliberately thin — Python 3.12, pip,
+  and `-e ".[dev]"`. All Python dependencies come through `pyproject.toml`.
 - **Alignment env (`environment.alignment.yml`)** mirrors the base env for
   Nextflow `ALIGN`. Spateo/Dynamo are bootstrapped inside that env at runtime
   because their older AnnData metadata has to be followed by a modern AnnData
   restore step.
+- **Clustering GPU env (`environment.clustering-gpu.yml`)** contains RAPIDS and
+  its Dask pin. It receives H5AD inputs only; SpatialData reads and writes stay
+  in the base environment.
 
 For reproducible installs (CI, onboarding):
 
