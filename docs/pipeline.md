@@ -19,13 +19,11 @@ channels.
   │ DATA            │ → source_spatialdata.zarr
   └────────┬────────┘
            ▼
-  ┌─────────────────┐
-  │ SEGMENT         │   Cellpose-SAM tiled segmentation,
-  │                 │   then ProSeg transcript-based
-  │                 │   refinement with Cellpose as prior
-  │                 │ → proseg_base_latest.zarr,
-  │                 │   cellpose_masks_tiled.npy
-  └────────┬────────┘
+  ┌──────────────────────┐
+  │ SEGMENT subworkflow  │
+  │ CELLPOSE_SEGMENT GPU │ → mask, transcripts, affine
+  │ PROSEG_SEGMENT CPU   │ → proseg_base_latest.zarr
+  └──────────┬───────────┘
            ▼
   ┌─────────────────┐
   │ ENRICH          │   per-shape gene assignment tables
@@ -119,7 +117,8 @@ For a samplesheet row with `pair_id=EXAMPLE01`:
 | Step | Nextflow process | CLI | Input | Output |
 |------|------------------|-----|-------|--------|
 | 1 | `BUILD_SPATIALDATA` × 2 | `merxen build-spatialdata` | raw export folders (or cached zarr) | `source_spatialdata.zarr` per platform |
-| 2 | `SEGMENT` × 2 | `merxen segment` | `source_spatialdata.zarr` | durable `latest/latest_spatialdata.zarr`, `cellpose_masks_tiled.npy`, `cellpose_stitching_stats.json`, `transcripts_for_proseg.csv` |
+| 2a | `CELLPOSE_SEGMENT` × 2 | `merxen cellpose-segment` | `source_spatialdata.zarr` | `cellpose_masks_tiled.npy`, stitching stats, seeded transcript CSV, affine JSON |
+| 2b | `PROSEG_SEGMENT` × 2 | `merxen proseg-segment` | Cellpose artifacts | durable `latest/latest_spatialdata.zarr` |
 | 3 | `ENRICH` × 2 | `merxen enrich` | latest zarr + Cellpose mask | same durable `latest/latest_spatialdata.zarr`, now enriched with per-shape counts tables |
 | 4 | `MASK_IMAGE_QUANTIFICATION` × 2 | `merxen mask-image-quantification` | enriched zarr + Cellpose mask | same durable zarr, now with `table_MOSAIK_cellpose_image_quantification` plus sidecars |
 | 5 | `COMPUTE_CORTICAL_DEPTH` × 2 | `merxen compute-cortical-depth` | quantified/enriched zarr + boundary GeoJSON annotations | same durable zarr, now with cortical-depth columns plus sidecars, when enabled |
@@ -174,8 +173,9 @@ sits. Cellpose acts as a prior for ProSeg's MCMC sampler. Details in
 1. The workflow builds a nested Groovy map for each stage — cellpose params,
    proseg params, memory limits, dataset metadata — then serializes it with
    `JsonOutput.prettyPrint(JsonOutput.toJson(...))`.
-2. The process writes the JSON into a heredoc inside its work directory.
-3. The process runs `merxen <subcommand> --config <file>.json`.
+2. Each process writes the JSON into a heredoc inside its own work directory.
+3. The segmentation subworkflow runs separate Cellpose and ProSeg subcommands;
+   Nextflow stages their mask, transcript, and affine handoff files.
 4. The CLI loads the JSON, validates it against the matching Pydantic model
    from [src/merxen/config.py](../src/merxen/config.py), and calls the
    stage function.

@@ -47,8 +47,10 @@ paired rows to `true` or `false`; blank cells inherit `--enable_alignment`.
 Nextflow runs `ALIGN` in `environment.alignment.yml`, bootstraps Spateo/Dynamo
 from pinned Git refs if the shimmed import check fails, then restores modern
 AnnData for SpatialData compatibility. Other stages continue to use the regular
-`environment.yml`. GPU-heavy `SEGMENT` and `ALIGN` default to one task at a
-time. RAPIDS-backed `CLUSTERING_SQUIDPY` allows up to four queued local tasks,
+`environment.yml`. GPU-heavy `CELLPOSE_SEGMENT` and `ALIGN` default to one task
+at a time. CPU-only `PROSEG_SEGMENT` runs independently on a normal CPU node
+after each Cellpose task. RAPIDS-backed `CLUSTERING_SQUIDPY` allows up to four
+queued local tasks,
 but GPU execution is serialized by the shared workstation GPU lock when it is
 enabled.
 
@@ -290,3 +292,24 @@ profile or edit the `executor` block — see the
 [Nextflow executor docs](https://www.nextflow.io/docs/latest/executor.html).
 Per-process CPU and memory requests are already declared in the `process {}`
 block and will carry over to most schedulers unchanged.
+
+Use the existing Conda environment for a local workstation run:
+
+```bash
+nextflow run workflows/main.nf -profile conda,local \
+    --samplesheet workflows/samplesheet.csv --outdir ./results
+```
+
+For the configured Slurm/Apptainer cluster, use:
+
+```bash
+nextflow run workflows/main.nf -profile apptainer,gpu,azure_slurm_hpc \
+    --samplesheet workflows/samplesheet.csv --outdir ./results
+```
+
+Both segmentation processes use the existing `environment.yml` or main
+MerXen image. The `gpu` profile adds Apptainer `--nv` only to GPU processes.
+`CELLPOSE_SEGMENT` requests the `gpu` queue and one GPU, while
+`PROSEG_SEGMENT` requests the `htc` queue without GPU flags. Override those
+site-specific queue names in a local profile if your scheduler uses different
+partitions.

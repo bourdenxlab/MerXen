@@ -168,13 +168,15 @@ def test_segment_bootstraps_proseg_from_configured_paths() -> None:
     module_text = (
         repo_root / "workflows" / "modules" / "proseg_bootstrap.nf"
     ).read_text()
+    segmentation_module_text = (
+        repo_root / "workflows" / "modules" / "segmentation.nf"
+    ).read_text()
 
     for expected in [
         'include { ENSURE_PROSEG } from "./modules/proseg_bootstrap"',
         "proseg_trigger_ch = segment_meta_ch.map { true }.take(1)",
         "proseg_path_ch = ENSURE_PROSEG(proseg_trigger_ch)",
-        ".combine(proseg_path_ch)",
-        "binary_path: prosegBinaryPath",
+        "SEGMENT(segment_inputs_ch, proseg_path_ch)",
     ]:
         assert expected in main_text
 
@@ -194,6 +196,15 @@ def test_segment_bootstraps_proseg_from_configured_paths() -> None:
         "proseg_path.txt",
     ]:
         assert expected in module_text
+
+    for expected in [
+        "workflow SEGMENT",
+        "cellpose_results = CELLPOSE_SEGMENT(segment_inputs)",
+        ".combine(proseg_path)",
+        "segment_results = PROSEG_SEGMENT(proseg_inputs)",
+        '--proseg-binary "\\$(cat "${proseg_path_file}")"',
+    ]:
+        assert expected in segmentation_module_text
 
 
 def test_spatial_gene_analysis_stage_is_wired_after_visualization() -> None:

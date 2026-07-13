@@ -19,18 +19,30 @@ MCMC sampler starts from.
    CSV + mask.
 7. Convert ProSeg's raw output zarr to "latest" SpatialData format.
 
-## Nextflow process
+## Nextflow subworkflow
 
-[`SEGMENT`](../../workflows/modules/segmentation.nf) — one instance per
-dataset. This is one of the heaviest stages; the default Nextflow request is
-32 CPUs and 220 GB RAM with `segment_max_forks = 1` for single-GPU safety.
+[`SEGMENT`](../../workflows/modules/segmentation.nf) is a subworkflow with two
+independently scheduled processes per dataset:
+
+| Process | Tool | Default resources | Scheduler route |
+|---------|------|-------------------|-----------------|
+| `CELLPOSE_SEGMENT` | Cellpose-SAM | 12 CPUs, 212 GB RAM, `cellpose_segment_max_forks = 1` | GPU queue and one GPU when `cellpose_gpu=true`; local GPU lock on workstations |
+| `PROSEG_SEGMENT` | ProSeg | 32 CPUs, 220 GB RAM, `proseg_segment_max_forks = 2` | CPU/HTC queue; no GPU request, lock, or Apptainer `--nv` |
+
+This boundary prevents the long CPU-only ProSeg sampler from retaining a GPU
+node after Cellpose has finished. The two processes still form the single
+stage named `segment` for `--start_stage`, `--stop_stage`, and `--only_stage`.
 
 - **Input:** `tuple(key, pair_id, platform, seg_config_json)`.
-- **CLI:** `merxen segment --config segment_config.json`.
+- **CLIs:** `merxen cellpose-segment --config segment_config.json`, followed by
+  `merxen proseg-segment --config segment_config.json ...`. The original
+  `merxen segment` command remains available for direct, single-process use.
 - **Output:**
   - `segment_out/proseg_base_latest.zarr` — refined segmentation as SpatialData.
   - `segment_out/cellpose_masks_tiled.npy` — global-pixel mask (uint32).
   - `segment_out/transcripts_for_proseg.csv` — transcripts with seeded cell ids.
+  - `segment_out/cellpose_transforms.json` — affine metadata handed from
+    Cellpose to ProSeg.
 - **publishDir:** `${outdir}/${pair_id}/${platform}/segmentation/` (symlink mode).
 
 The durable latest zarr written by this stage lives at
@@ -43,7 +55,9 @@ that path.
 | Function | File |
 |----------|------|
 | CLI `segment_command` | [cli/run_segmentation.py](../../src/merxen/cli/run_segmentation.py) |
-| Orchestration `run_segmentation_pipeline` | [segmentation/pipeline.py:189](../../src/merxen/segmentation/pipeline.py#L189) |
+| Cellpose stage `run_cellpose_segmentation` | [segmentation/pipeline.py](../../src/merxen/segmentation/pipeline.py) |
+| ProSeg stage `run_proseg_segmentation` | [segmentation/pipeline.py](../../src/merxen/segmentation/pipeline.py) |
+| Compatibility orchestration `run_segmentation_pipeline` | [segmentation/pipeline.py](../../src/merxen/segmentation/pipeline.py) |
 | Tiled Cellpose `run_tiled_cellpose` | [segmentation/cellpose.py:255](../../src/merxen/segmentation/cellpose.py#L255) |
 | Mask filter `filter_cell_by_regionprops` | [segmentation/mask_filter.py:78](../../src/merxen/segmentation/mask_filter.py#L78) |
 | Final area filter `filter_labeled_mask_by_area` | [segmentation/mask_filter.py](../../src/merxen/segmentation/mask_filter.py) |
@@ -103,14 +117,16 @@ for all fields and defaults.
    up in the mask, and writes a row with `x_micron`, `y_micron`, `z_micron`,
    `feature_name`, `cell_id` (0 if outside any cell). Xenium transcripts
    below `dataset.min_qv` are dropped.
-6. **ProSeg.** The workflow resolves ProSeg via `ENSURE_PROSEG`; if it is not
+6. **Process handoff.** Nextflow stages the mask, transcript CSV, and affine
+   metadata from the GPU process into the CPU process work directory.
+7. **ProSeg.** The workflow resolves ProSeg via `ENSURE_PROSEG`; if it is not
    found in the configured search paths, the bootstrap step installs it with
    Cargo. `run_proseg_refinement` then spawns the resolved external binary.
    ProSeg
    uses the Cellpose-seeded `cell_id` column as a prior and performs MCMC
    sampling over the transcript field, letting cell boundaries move to
    better match transcript density.
-7. **To "latest" zarr.** `convert_to_latest_zarr` rewrites the raw ProSeg
+8. **To "latest" zarr.** `convert_to_latest_zarr` rewrites the raw ProSeg
    output so it can be read with the current SpatialData version, then stages
    that durable zarr back into the work dir for Nextflow.
 
@@ -123,13 +139,14 @@ for all fields and defaults.
 | `cellpose_masks_tiled.npy` | Cleaned global-pixel Cellpose labels, consumed by ProSeg and enrichment. |
 | `cellpose_stitching_stats.json` | Tile stitching diagnostics: accepted labels, duplicates, conflicts, edge-touching labels, and thresholds. |
 | `transcripts_for_proseg.csv` | The transcript CSV fed into ProSeg. Retained for debugging. |
+| `cellpose_transforms.json` | Pixel-to-micron affine terms used by the ProSeg process. |
 
 `proseg_base_raw.zarr` is treated as a transient intermediate and removed
 after the latest-format zarr is written successfully.
 
 ## Memory guardrails
 
-`run_segmentation_pipeline` frees memory aggressively:
+The stage functions free memory aggressively:
 
 - `force_release()` is called after the transcript CSV write and after the
   full run, triggering `gc.collect()` and `torch.cuda.empty_cache()`.
