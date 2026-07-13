@@ -27,7 +27,7 @@ def test_clustering_squidpy_nextflow_json_includes_hierarchical_fields() -> None
         "clustering_squidpy_write_spatialdata_table = true",
         "clustering_squidpy_max_forks = 4",
         "merxen.monitoring.gpu_vram",
-        "clustering_squidpy_out/gpu_vram",
+        "clustering_compute_out/gpu_vram",
         "clustering_squidpy_hierarchical_enabled = true",
         "clustering_squidpy_spatial_scatter_point_size = 2.0",
     ]:
@@ -70,9 +70,34 @@ def test_gpu_processes_share_local_lock() -> None:
         "flock 9",
         'withName: "SEGMENT"',
         'withName: "ALIGN"',
-        'withName: "CLUSTERING_SQUIDPY"',
+        'withName: "CLUSTERING_SQUIDPY_COMPUTE"',
         "params.cellpose_gpu",
         "params.alignment_device",
         "params.clustering_squidpy_use_gpu",
     ]:
         assert expected in config_text
+
+
+def test_clustering_gpu_compute_is_isolated_from_spatialdata_io() -> None:
+    """Only prepare/finalize should touch SpatialData around GPU compute."""
+    repo_root = Path(__file__).resolve().parents[2]
+    module_text = (
+        repo_root / "workflows" / "modules" / "clustering_squidpy.nf"
+    ).read_text()
+    main_text = (repo_root / "workflows" / "main.nf").read_text()
+    config_text = (repo_root / "workflows" / "nextflow.config").read_text()
+
+    for process_name in [
+        "CLUSTERING_SQUIDPY_PREPARE",
+        "CLUSTERING_SQUIDPY_COMPUTE",
+        "CLUSTERING_SQUIDPY_FINALIZE",
+    ]:
+        assert f"process {process_name}" in module_text
+        assert process_name in main_text
+
+    assert "clustering_squidpy_gpu_conda" in config_text
+    assert "environment.clustering-gpu.yml" in config_text
+    assert 'withName: "CLUSTERING_SQUIDPY_COMPUTE"' in config_text
+    assert "clustering_prepared_ch = CLUSTERING_SQUIDPY_PREPARE" in main_text
+    assert "clustering_computed_ch = CLUSTERING_SQUIDPY_COMPUTE" in main_text
+    assert "CLUSTERING_SQUIDPY_FINALIZE(clustering_computed_ch)" in main_text
