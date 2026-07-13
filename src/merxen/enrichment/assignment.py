@@ -192,7 +192,9 @@ def compute_table_from_points_for_shape(
                 crs=gdf_shapes.crs,
             ).reset_index(drop=True)
 
-            shapes_subset = gdf_shapes[[shape_id_col, "geometry"]].reset_index(drop=True)
+            shapes_subset = gdf_shapes[[shape_id_col, "geometry"]].reset_index(
+                drop=True
+            )
 
             joined = gpd.sjoin(
                 points,

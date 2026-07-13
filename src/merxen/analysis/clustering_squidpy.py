@@ -1,5 +1,7 @@
 """Scanpy/Squidpy clustering shim for enriched MerXen SpatialData outputs."""
 
+# ruff: noqa: E402
+
 from __future__ import annotations
 
 import os
@@ -13,7 +15,6 @@ import logging
 import re
 import sys
 import textwrap
-import warnings
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -21,7 +22,6 @@ from pathlib import Path
 from typing import Any, cast
 
 import anndata as ad
-import geopandas as gpd
 import matplotlib
 
 if "ipykernel" not in sys.modules:
@@ -33,15 +33,11 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 import seaborn as sns
-import spatialdata as sd
-import squidpy as sq
 from matplotlib.lines import Line2D
 from scipy import sparse
 from scipy.cluster.hierarchy import leaves_list, linkage
-from spatialdata.models import TableModel
 
 from merxen.config import ClusteringSquidpyConfig
-from merxen.io.spatialdata_io import write_or_replace_element
 from merxen.io.transcript_io import first_existing_col
 from merxen.memory import force_release, log_status
 from merxen.plotting import prepare_plot_output, save_figure
@@ -238,6 +234,8 @@ def load_spatialdata_adata(
     """
     zarr_path = Path(zarr_path)
     log_status(f"[{platform}] Loading SpatialData for clustering: {zarr_path}")
+    import spatialdata as sd
+
     sdata_obj = sd.read_zarr(zarr_path)
     try:
         adata = adata_from_spatialdata(
@@ -615,8 +613,7 @@ def _run_gpu_clustering(
     except ImportError:
         logger.warning(
             "rapids_singlecell not installed; falling back to CPU clustering. "
-            "Install with: pip install -e '.[gpu]' "
-            "--extra-index-url=https://pypi.nvidia.com"
+            "Run this command in MerXen's dedicated clustering GPU environment."
         )
         return False
 
@@ -759,41 +756,94 @@ def plot_spatial_scatter(
     scale_bar_um: float | None = 200.0,
     dpi: int = 160,
 ) -> Path:
-    """Save a Squidpy spatial scatter plot for the clustered AnnData object."""
+    """Save a spatial scatter plot without requiring SpatialData/Squidpy."""
     output_path = prepare_plot_output(output_path)
     if "spatial" not in adata.obsm:
         raise KeyError("Expected adata.obsm['spatial'] for Squidpy spatial plot.")
 
     fig, ax = plt.subplots(figsize=(7, 7))
-    scatter_kwargs = {
-        "shape": None,
-        "color": [color],
-        "library_id": "",
-        "size": float(point_size),
-        "edgecolors": "none",
-        "linewidths": 0,
-        "img": False,
-        "ax": ax,
-        "return_ax": True,
-    }
     try:
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                message="No data for colormapping provided via 'c'.*",
-                category=UserWarning,
+        import squidpy as sq
+    except ImportError:
+        sq = None
+    if sq is not None:
+        import warnings
+
+        scatter_kwargs = {
+            "shape": None,
+            "color": [color],
+            "library_id": "",
+            "size": float(point_size),
+            "edgecolors": "none",
+            "linewidths": 0,
+            "img": False,
+            "ax": ax,
+            "return_ax": True,
+        }
+        try:
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message="No data for colormapping provided via 'c'.*",
+                    category=UserWarning,
+                )
+                sq.pl.spatial_scatter(adata, alpha=alpha, **scatter_kwargs)
+        except TypeError:
+            scatter_kwargs.pop("edgecolors", None)
+            scatter_kwargs.pop("linewidths", None)
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message="No data for colormapping provided via 'c'.*",
+                    category=UserWarning,
+                )
+                sq.pl.spatial_scatter(adata, **scatter_kwargs)
+        _clean_spatial_axis(ax)
+        if scale_bar_um is not None:
+            _add_spatial_scale_bar(ax, length_um=float(scale_bar_um))
+        save_figure(fig, output_path, dpi=int(dpi), bbox_inches="tight")
+        plt.close(fig)
+        return output_path
+
+    coordinates = np.asarray(adata.obsm["spatial"])
+    values = pd.Series(adata.obs[color], index=adata.obs_names)
+    is_categorical = isinstance(values.dtype, pd.CategoricalDtype)
+    if is_categorical or not pd.api.types.is_numeric_dtype(values):
+        categories = pd.Categorical(values.astype(str))
+        scatter = ax.scatter(
+            coordinates[:, 0],
+            coordinates[:, 1],
+            c=categories.codes,
+            cmap="tab20",
+            s=float(point_size),
+            alpha=float(alpha),
+            edgecolors="none",
+        )
+        handles = [
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                linestyle="",
+                color=scatter.cmap(scatter.norm(index)),
+                label=str(label),
+                markersize=4,
             )
-            sq.pl.spatial_scatter(adata, alpha=alpha, **scatter_kwargs)
-    except TypeError:
-        scatter_kwargs.pop("edgecolors", None)
-        scatter_kwargs.pop("linewidths", None)
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                message="No data for colormapping provided via 'c'.*",
-                category=UserWarning,
-            )
-            sq.pl.spatial_scatter(adata, **scatter_kwargs)
+            for index, label in enumerate(categories.categories)
+        ]
+        if handles:
+            ax.legend(handles=handles, loc="center left", bbox_to_anchor=(1, 0.5))
+    else:
+        scatter = ax.scatter(
+            coordinates[:, 0],
+            coordinates[:, 1],
+            c=pd.to_numeric(values, errors="coerce"),
+            cmap="viridis",
+            s=float(point_size),
+            alpha=float(alpha),
+            edgecolors="none",
+        )
+        fig.colorbar(scatter, ax=ax, label=color)
     _clean_spatial_axis(ax)
     if scale_bar_um is not None:
         _add_spatial_scale_bar(ax, length_um=float(scale_bar_um))
@@ -1311,6 +1361,8 @@ def build_clustered_spatialdata_table(
     table.uns["merxen_clustering_squidpy"] = clustering_meta
     table.uns.pop("spatialdata_attrs", None)
 
+    from spatialdata.models import TableModel
+
     return TableModel.parse(
         table,
         region=str(output_region),
@@ -1349,6 +1401,10 @@ def write_clustered_spatialdata_table(
         source_table_key=source_table_key,
         source_region=source_region,
     )
+
+    import spatialdata as sd
+
+    from merxen.io.spatialdata_io import write_or_replace_element
 
     with _spatialdata_zarr_write_lock(zarr_path):
         log_status(
@@ -2326,21 +2382,108 @@ def _safe_token(value: str) -> str:
     return token or "value"
 
 
-def run_clustering_squidpy(
+def _cluster_loaded_adata(
+    adata: ad.AnnData,
     config: ClusteringSquidpyConfig,
-) -> dict[str, dict[str, Path | str]]:
-    """Run the clustering_squidpy stage for every sample in a pair."""
-    config.output_dir.mkdir(parents=True, exist_ok=True)
-    results: dict[str, dict[str, Path | str]] = {}
-    gene_id_lookup = collect_gene_id_lookup_for_samples(config)
+    *,
+    sample: Any,
+    sample_dir: Path,
+) -> tuple[ad.AnnData, dict[str, Path | str]]:
+    """Cluster one prepared AnnData object and write non-SpatialData artifacts."""
+    sample_dir.mkdir(parents=True, exist_ok=True)
+    qc_plot = plot_qc_histograms(
+        adata,
+        _plot_output_dir(sample_dir, "qc") / f"{sample.sample_id}_qc_histograms.png",
+        sample_label=sample.sample_id,
+        platform=sample.platform,
+        dpi=config.figure_dpi,
+    )
+    qc_csv = save_qc_metrics(adata, sample_dir / f"{sample.sample_id}_qc_metrics.csv")
 
-    for sample in config.samples:
-        sample_dir = config.output_dir / sample.platform.lower()
-        sample_dir.mkdir(parents=True, exist_ok=True)
-        log_status(
-            f"[{sample.sample_id}] Starting clustering_squidpy "
-            f"(platform={sample.platform})"
+    hierarchical_artifacts: dict[str, Path] = {}
+    if config.hierarchical_enabled:
+        clustered, hierarchical_artifacts = run_hierarchical_scanpy_clustering(
+            adata,
+            config,
+            output_dir=sample_dir / f"{sample.sample_id}_hierarchical",
+            sample_id=sample.sample_id,
         )
+        umap_colors = [
+            "total_counts",
+            "n_genes_by_counts",
+            BROAD_CLUSTER_KEY,
+            BROAD_CLASS_KEY,
+        ]
+        spatial_color = BROAD_CLASS_KEY
+    else:
+        clustered = run_scanpy_clustering(
+            adata,
+            drop_control_features=config.drop_control_features,
+            min_counts=config.min_counts,
+            min_cells=config.min_cells,
+            normalize_target_sum=config.normalize_target_sum,
+            normalize_exclude_highly_expressed=(
+                config.normalize_exclude_highly_expressed
+            ),
+            normalize_max_fraction=config.normalize_max_fraction,
+            n_pcs=config.n_pcs,
+            n_neighbors=config.n_neighbors,
+            leiden_resolution=config.leiden_resolution,
+            umap_min_dist=config.umap_min_dist,
+            umap_spread=config.umap_spread,
+            random_seed=config.random_seed,
+            use_gpu=config.use_gpu,
+        )
+        umap_colors = ["total_counts", "n_genes_by_counts", "leiden"]
+        spatial_color = "leiden"
+
+    umap_plot = plot_umap(
+        clustered,
+        _plot_output_dir(sample_dir, "umap") / f"{sample.sample_id}_umap.png",
+        color=umap_colors,
+        dpi=config.figure_dpi,
+    )
+    spatial_plot = plot_spatial_scatter(
+        clustered,
+        _plot_output_dir(sample_dir, "spatial")
+        / f"{sample.sample_id}_spatial_scatter_leiden.png",
+        color=spatial_color,
+        point_size=config.spatial_scatter_point_size,
+        dpi=config.figure_dpi,
+    )
+    spatial_cluster_grid = plot_spatial_cluster_grid(
+        clustered,
+        _plot_output_dir(sample_dir, "spatial_grid")
+        / f"{sample.sample_id}_spatial_scatter_leiden_grid.png",
+        color=spatial_color,
+        point_size_highlight=config.spatial_point_size,
+        dpi=config.figure_dpi,
+    )
+    h5ad = save_clustered_adata(
+        clustered,
+        sample_dir / f"{sample.sample_id}_clustered.h5ad",
+    )
+    return clustered, {
+        "qc_plot": qc_plot,
+        "qc_csv": qc_csv,
+        "umap_plot": umap_plot,
+        "spatial_plot": spatial_plot,
+        "spatial_cluster_grid": spatial_cluster_grid,
+        "h5ad": h5ad,
+        **hierarchical_artifacts,
+    }
+
+
+def prepare_clustering_squidpy(
+    config: ClusteringSquidpyConfig,
+    output_dir: Path | str,
+) -> Path:
+    """Export SpatialData-backed samples as portable H5AD compute inputs."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    gene_id_lookup = collect_gene_id_lookup_for_samples(config)
+    manifest: dict[str, str] = {}
+    for sample in config.samples:
         adata = load_spatialdata_adata(
             sample.zarr_path,
             platform=sample.platform,
@@ -2348,111 +2491,113 @@ def run_clustering_squidpy(
             shape_key=sample.shape_key,
             gene_id_lookup=gene_id_lookup,
         )
+        relative_path = Path(sample.platform.lower()) / (
+            f"{sample.sample_id}_prepared.h5ad"
+        )
+        save_clustered_adata(adata, output_dir / relative_path)
+        manifest[sample.sample_id] = str(relative_path)
+        del adata
+        force_release(note=f"after preparing clustering input {sample.sample_id}")
+    manifest_path = output_dir / "manifest.json"
+    manifest_path.write_text(json.dumps({"samples": manifest}, indent=2) + "\n")
+    return manifest_path
 
-        qc_plot = plot_qc_histograms(
+
+def compute_clustering_squidpy(
+    config: ClusteringSquidpyConfig,
+    prepared_dir: Path | str,
+    output_dir: Path | str,
+) -> dict[str, dict[str, Path | str]]:
+    """Run clustering from H5AD inputs without importing SpatialData."""
+    prepared_dir = Path(prepared_dir)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    manifest = json.loads((prepared_dir / "manifest.json").read_text())["samples"]
+    results: dict[str, dict[str, Path | str]] = {}
+    for sample in config.samples:
+        log_status(f"[{sample.sample_id}] Starting isolated clustering compute")
+        adata = ad.read_h5ad(prepared_dir / manifest[sample.sample_id])
+        clustered, artifacts = _cluster_loaded_adata(
             adata,
-            _plot_output_dir(sample_dir, "qc")
-            / f"{sample.sample_id}_qc_histograms.png",
-            sample_label=sample.sample_id,
-            platform=sample.platform,
-            dpi=config.figure_dpi,
+            config,
+            sample=sample,
+            sample_dir=output_dir / sample.platform.lower(),
         )
-        qc_csv = save_qc_metrics(
-            adata,
-            sample_dir / f"{sample.sample_id}_qc_metrics.csv",
-        )
+        results[sample.sample_id] = artifacts
+        del adata, clustered
+        force_release(note=f"after clustering compute {sample.sample_id}")
+    return results
 
-        hierarchical_artifacts: dict[str, Path] = {}
-        if config.hierarchical_enabled:
-            hierarchical_dir = sample_dir / f"{sample.sample_id}_hierarchical"
-            clustered, hierarchical_artifacts = run_hierarchical_scanpy_clustering(
-                adata,
-                config,
-                output_dir=hierarchical_dir,
-                sample_id=sample.sample_id,
-            )
-            umap_colors = [
-                "total_counts",
-                "n_genes_by_counts",
-                BROAD_CLUSTER_KEY,
-                BROAD_CLASS_KEY,
-            ]
-            spatial_color = BROAD_CLASS_KEY
-            spatial_grid_color = BROAD_CLASS_KEY
-        else:
-            clustered = run_scanpy_clustering(
-                adata,
-                drop_control_features=config.drop_control_features,
-                min_counts=config.min_counts,
-                min_cells=config.min_cells,
-                normalize_target_sum=config.normalize_target_sum,
-                normalize_exclude_highly_expressed=(
-                    config.normalize_exclude_highly_expressed
-                ),
-                normalize_max_fraction=config.normalize_max_fraction,
-                n_pcs=config.n_pcs,
-                n_neighbors=config.n_neighbors,
-                leiden_resolution=config.leiden_resolution,
-                umap_min_dist=config.umap_min_dist,
-                umap_spread=config.umap_spread,
-                random_seed=config.random_seed,
-                use_gpu=config.use_gpu,
-            )
-            umap_colors = ["total_counts", "n_genes_by_counts", "leiden"]
-            spatial_color = "leiden"
-            spatial_grid_color = "leiden"
 
-        umap_plot = plot_umap(
-            clustered,
-            _plot_output_dir(sample_dir, "umap") / f"{sample.sample_id}_umap.png",
-            color=umap_colors,
-            dpi=config.figure_dpi,
+def finalize_clustering_squidpy(
+    config: ClusteringSquidpyConfig,
+    computed_dir: Path | str,
+) -> dict[str, dict[str, Path | str]]:
+    """Publish compute artifacts and write clustered tables with SpatialData."""
+    import shutil
+
+    computed_dir = Path(computed_dir)
+    config.output_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(computed_dir, config.output_dir, dirs_exist_ok=True)
+    results: dict[str, dict[str, Path | str]] = {}
+    for sample in config.samples:
+        h5ad_path = (
+            config.output_dir
+            / sample.platform.lower()
+            / f"{sample.sample_id}_clustered.h5ad"
         )
-        spatial_plot = plot_spatial_scatter(
-            clustered,
-            _plot_output_dir(sample_dir, "spatial")
-            / f"{sample.sample_id}_spatial_scatter_leiden.png",
-            color=spatial_color,
-            point_size=config.spatial_scatter_point_size,
-            dpi=config.figure_dpi,
-        )
-        spatial_cluster_grid = plot_spatial_cluster_grid(
-            clustered,
-            _plot_output_dir(sample_dir, "spatial_grid")
-            / f"{sample.sample_id}_spatial_scatter_leiden_grid.png",
-            color=spatial_grid_color,
-            point_size_highlight=config.spatial_point_size,
-            dpi=config.figure_dpi,
-        )
-        h5ad = save_clustered_adata(
-            clustered,
-            sample_dir / f"{sample.sample_id}_clustered.h5ad",
-        )
-        spatialdata_outputs: dict[str, Path | str] = {}
+        sample_results: dict[str, Path | str] = {"h5ad": h5ad_path}
         if config.write_spatialdata_table:
-            spatialdata_zarr, spatialdata_table_key = write_clustered_spatialdata_table(
+            clustered = ad.read_h5ad(h5ad_path)
+            zarr_path, table_key = write_clustered_spatialdata_table(
                 sample.zarr_path,
                 clustered,
                 segmentation=sample.segmentation,
             )
-            spatialdata_outputs = {
-                "spatialdata_zarr": spatialdata_zarr,
-                "spatialdata_table_key": spatialdata_table_key,
-            }
+            sample_results.update(
+                spatialdata_zarr=zarr_path,
+                spatialdata_table_key=table_key,
+            )
+            del clustered
+        results[sample.sample_id] = sample_results
+        force_release(note=f"after clustering finalize {sample.sample_id}")
+    return results
 
-        results[sample.sample_id] = {
-            "qc_plot": qc_plot,
-            "qc_csv": qc_csv,
-            "umap_plot": umap_plot,
-            "spatial_plot": spatial_plot,
-            "spatial_cluster_grid": spatial_cluster_grid,
-            "h5ad": h5ad,
-            **spatialdata_outputs,
-            **hierarchical_artifacts,
-        }
+
+def run_clustering_squidpy(
+    config: ClusteringSquidpyConfig,
+) -> dict[str, dict[str, Path | str]]:
+    """Run the legacy single-process clustering path for direct CLI callers."""
+    config.output_dir.mkdir(parents=True, exist_ok=True)
+    results: dict[str, dict[str, Path | str]] = {}
+    gene_id_lookup = collect_gene_id_lookup_for_samples(config)
+    for sample in config.samples:
+        adata = load_spatialdata_adata(
+            sample.zarr_path,
+            platform=sample.platform,
+            table_key=sample.table_key,
+            shape_key=sample.shape_key,
+            gene_id_lookup=gene_id_lookup,
+        )
+        clustered, artifacts = _cluster_loaded_adata(
+            adata,
+            config,
+            sample=sample,
+            sample_dir=config.output_dir / sample.platform.lower(),
+        )
+        if config.write_spatialdata_table:
+            zarr_path, table_key = write_clustered_spatialdata_table(
+                sample.zarr_path,
+                clustered,
+                segmentation=sample.segmentation,
+            )
+            artifacts.update(
+                spatialdata_zarr=zarr_path,
+                spatialdata_table_key=table_key,
+            )
+        results[sample.sample_id] = artifacts
         del adata, clustered
         force_release(note=f"after clustering_squidpy {sample.sample_id}")
-
     return results
 
 
@@ -2466,6 +2611,8 @@ def collect_gene_id_lookup_for_samples(
     Because paired MerXen datasets use the same panel, one platform can provide
     the lookup used to annotate both clustered outputs.
     """
+    import spatialdata as sd
+
     combined: dict[str, str] = {}
     for sample in config.samples:
         zarr_path = Path(sample.zarr_path)
@@ -3207,9 +3354,11 @@ def _first_existing_column(
     return None
 
 
-def _shape_metrics(shapes: gpd.GeoDataFrame) -> pd.DataFrame:
+def _shape_metrics(shapes: Any) -> pd.DataFrame:
     gdf = shapes.copy()
     if "geometry" not in gdf.columns:
+        import geopandas as gpd
+
         gdf = gpd.GeoDataFrame({"geometry": gdf.geometry}, index=gdf.index)
     gdf = gdf[gdf.geometry.notna() & ~gdf.geometry.is_empty].copy()
     id_col = first_existing_col(
@@ -3232,7 +3381,7 @@ def _shape_metrics(shapes: gpd.GeoDataFrame) -> pd.DataFrame:
     return metrics[~metrics.index.duplicated(keep="first")]
 
 
-def _robust_centroid_xy(gdf: gpd.GeoDataFrame) -> tuple[np.ndarray, np.ndarray]:
+def _robust_centroid_xy(gdf: Any) -> tuple[np.ndarray, np.ndarray]:
     cent = gdf.geometry.centroid
     bounds = gdf.geometry.bounds
     x = cent.x.to_numpy(float)

@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pytest
+import spatialdata as sd
 from scipy import sparse
 from shapely.geometry import box
 
@@ -27,12 +28,15 @@ from merxen.analysis.clustering_squidpy import (
     adata_from_spatialdata,
     build_clustered_spatialdata_table,
     collapse_atlas_label_to_broad_class,
+    compute_clustering_squidpy,
     compute_group_gene_summary,
+    finalize_clustering_squidpy,
     load_atlas_marker_sets,
     plot_annotation_score_heatmap,
     plot_group_gene_dotplot,
     plot_spatial_cluster_grid,
     plot_spatial_scatter,
+    prepare_clustering_squidpy,
     remove_control_features,
     run_clustering_squidpy,
     run_scanpy_clustering,
@@ -708,7 +712,7 @@ def test_write_clustered_spatialdata_table_persists_table(
     fake_sdata = SimpleNamespace(tables={})
     calls: dict[str, object] = {}
 
-    monkeypatch.setattr(clustering_mod.sd, "read_zarr", lambda path: fake_sdata)
+    monkeypatch.setattr(sd, "read_zarr", lambda path: fake_sdata)
 
     def _fake_write(
         sdata_obj: object,
@@ -725,7 +729,10 @@ def test_write_clustered_spatialdata_table_persists_table(
         calls["overwrite"] = overwrite
         return True
 
-    monkeypatch.setattr(clustering_mod, "write_or_replace_element", _fake_write)
+    monkeypatch.setattr(
+        "merxen.io.spatialdata_io.write_or_replace_element",
+        _fake_write,
+    )
 
     zarr_path, table_key = write_clustered_spatialdata_table(
         tmp_path / "latest_spatialdata.zarr",
@@ -1021,3 +1028,87 @@ def test_group_gene_dotplot_writes_summary_plot(tmp_path: Path) -> None:
     assert fraction_expression.loc["1", "GeneC"] == pytest.approx(1.0)
     assert output_path.exists()
     assert output_path.with_suffix(".pdf").exists()
+
+
+def test_prepare_compute_finalize_clustering_process_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """H5AD should cross the GPU boundary before SpatialData write-back."""
+    cfg = ClusteringSquidpyConfig.model_validate(
+        {
+            "pair_id": "pair1",
+            "output_dir": tmp_path / "final",
+            "samples": [
+                {
+                    "sample_id": "pair1_MERSCOPE",
+                    "platform": "MERSCOPE",
+                    "zarr_path": tmp_path / "latest.zarr",
+                    "segmentation": "reseg",
+                }
+            ],
+            "hierarchical_enabled": False,
+        }
+    )
+    prepared_adata = ad.AnnData(
+        X=np.ones((4, 3), dtype=np.float32),
+        obs=pd.DataFrame(index=[f"cell{i}" for i in range(4)]),
+        var=pd.DataFrame(index=[f"Gene{i}" for i in range(3)]),
+    )
+    prepared_adata.obsm["spatial"] = np.arange(8, dtype=float).reshape(4, 2)
+    monkeypatch.setattr(
+        clustering_mod,
+        "collect_gene_id_lookup_for_samples",
+        lambda _config: {},
+    )
+    monkeypatch.setattr(
+        clustering_mod,
+        "load_spatialdata_adata",
+        lambda *args, **kwargs: prepared_adata.copy(),
+    )
+
+    prepared_dir = tmp_path / "prepared"
+    manifest_path = prepare_clustering_squidpy(cfg, prepared_dir)
+    assert manifest_path.exists()
+    assert (prepared_dir / "merscope/pair1_MERSCOPE_prepared.h5ad").exists()
+
+    def _fake_cluster(
+        adata: ad.AnnData,
+        config: ClusteringSquidpyConfig,
+        *,
+        sample: object,
+        sample_dir: Path,
+    ) -> tuple[ad.AnnData, dict[str, Path | str]]:
+        clustered = adata.copy()
+        clustered.obs["leiden"] = pd.Categorical(["0", "0", "1", "1"])
+        h5ad_path = sample_dir / "pair1_MERSCOPE_clustered.h5ad"
+        h5ad_path.parent.mkdir(parents=True, exist_ok=True)
+        clustered.write_h5ad(h5ad_path)
+        return clustered, {"h5ad": h5ad_path}
+
+    monkeypatch.setattr(clustering_mod, "_cluster_loaded_adata", _fake_cluster)
+    computed_dir = tmp_path / "computed"
+    compute_clustering_squidpy(cfg, prepared_dir, computed_dir)
+    assert (computed_dir / "merscope/pair1_MERSCOPE_clustered.h5ad").exists()
+
+    writes: list[tuple[Path, str | None]] = []
+
+    def _fake_write(
+        zarr_path: Path,
+        clustered: ad.AnnData,
+        *,
+        segmentation: str | None,
+    ) -> tuple[Path, str]:
+        writes.append((Path(zarr_path), segmentation))
+        return Path(zarr_path), "table_clustered"
+
+    monkeypatch.setattr(
+        clustering_mod,
+        "write_clustered_spatialdata_table",
+        _fake_write,
+    )
+    results = finalize_clustering_squidpy(cfg, computed_dir)
+
+    assert (tmp_path / "final/merscope/pair1_MERSCOPE_clustered.h5ad").exists()
+    assert writes == [(tmp_path / "latest.zarr", "reseg")]
+    assert results["pair1_MERSCOPE"]["spatialdata_table_key"] == "table_clustered"

@@ -1,7 +1,11 @@
 # Squidpy Clustering
 
 Runs a first-pass per-platform Scanpy/Squidpy analysis on the enriched
-SpatialData zarrs. In a full pipeline run this stage is downstream of
+SpatialData zarrs. The Nextflow stage is split across dependency boundaries:
+`CLUSTERING_SQUIDPY_PREPARE` reads SpatialData and exports H5AD,
+`CLUSTERING_SQUIDPY_COMPUTE` runs RAPIDS in its dedicated environment, and
+`CLUSTERING_SQUIDPY_FINALIZE` writes the clustered table with SpatialData 0.8.
+In a full pipeline run this stage is downstream of
 `SPATIAL_GENE_ANALYSIS`, so the usual alignment QC, visualisation, and per-gene
 spatial autocorrelation artifacts have already been written.
 
@@ -30,7 +34,7 @@ For each active platform in the run:
    sc.tl.leiden(adata)
    ```
 
-6. Save a Scanpy UMAP, Squidpy spatial Leiden scatter, per-cell QC CSV, and the
+6. Save a Scanpy UMAP, spatial Leiden scatter, per-cell QC CSV, and the
    clustered `.h5ad`.
 7. By default, add or replace the final clustered AnnData as a derived table in
    the originating `latest_spatialdata.zarr`. `reseg` writes
@@ -142,6 +146,23 @@ When `write_spatialdata_table` is true, rerunning this stage mutates
 replacing the derived clustered table for the active analysis segmentation. The
 table contains the same final filtered cells, UMAP/spatial coordinates, counts
 layer, and clustering/cell-type columns as `<sample_id>_clustered.h5ad`.
+
+The compute process uses `environment.clustering-gpu.yml` under the Conda
+profile. Under the Apptainer profile, set
+`clustering_squidpy_gpu_container` to an image built from
+`Dockerfile.clustering-gpu`. SpatialData is intentionally absent from this
+environment; only H5AD files cross the process boundary.
+
+Build and select the dedicated image with, for example:
+
+```bash
+docker build -f Dockerfile.clustering-gpu -t merxen-clustering-gpu .
+apptainer build merxen-clustering-gpu.sif docker-daemon://merxen-clustering-gpu
+nextflow run workflows/main.nf -profile apptainer,gpu \
+  --clustering_squidpy_gpu_container \
+  "file://$PWD/merxen-clustering-gpu.sif" \
+  --samplesheet workflows/samplesheet.example.csv
+```
 
 When `clustering_squidpy_gpu_vram_monitor` is enabled, the Nextflow wrapper also
 writes task-level GPU telemetry under `clustering_squidpy_out/gpu_vram/`:
