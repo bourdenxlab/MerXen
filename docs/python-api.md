@@ -232,7 +232,7 @@ See [Spatial gene analysis](stages/spatial-gene-analysis.md).
 - `annotate_h5ad_with_mapmycells(input_h5ad, csv_path, output_h5ad)` — attach
   CSV assignment columns to `obs`.
 - `prepare_region_mapmycells_reference(config)` — build or reuse cached Allen
-  WHB ROI-specific precomputed stats and marker lookup files.
+  WHB- or WMB-ROI-specific precomputed stats and marker lookup files.
 - `run_mapmycells(config)` — full stage entry point for `MAPMYCELLS`.
 
 See [MapMyCells](stages/mapmycells.md).

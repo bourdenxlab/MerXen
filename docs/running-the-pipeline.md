@@ -57,8 +57,9 @@ enabled.
 Before any task inputs are emitted, the workflow runs stage-aware preflight
 checks for reference files required by the selected stage range. For example,
 `clustering_squidpy` with hierarchical mode checks the broad marker lookup and
-Allen taxonomy paths, while `mapmycells` checks whole-brain marker/stat files
-only when that module is selected and the requested reference mode needs them.
+Allen taxonomy paths, while `mapmycells` checks explicitly configured
+marker/stat/gene-mapper files. Automatically downloaded MapMyCells assets are
+validated during cached download instead.
 When `compute_cortical_depth` is selected, preflight checks pial/tissue-edge
 annotation GeoJSONs or a combined role-labelled annotation GeoJSON for every
 active platform. Gray/white boundaries are optional for pial-only mask/QC
@@ -269,12 +270,19 @@ that updated MERSCOPE zarr and keep using
 reference.
 
 `mapmycells` is downstream of `clustering_squidpy`. By default it runs both the
-cached whole-brain reference and a configurable Allen WHB region reference
-(`mapmycells_reference_mode=both`). Run through it with `--stop_stage mapmycells`,
-or rerun only that stage with `--only_stage mapmycells` after clustering outputs
-already exist. Whole-brain-only runs require `--mapmycells_marker_lookup_path`
-and `--mapmycells_precomputed_stats_path`; region runs require
+Allen WHB whole-brain reference and a configurable WHB region reference
+(`mapmycells_reference_mode=both`). Missing published whole-brain assets are
+downloaded into `mapmycells_region_cache_dir`. Run through it with
+`--stop_stage mapmycells`, or rerun only that stage with `--only_stage
+mapmycells` after clustering outputs already exist. Region runs require
 `--mapmycells_region_labels`.
+
+Set `--mapmycells_reference_atlas wmb --mapmycells_query_species human` for
+human-to-Yao-2023-WMB mapping. The workflow downloads Allen's WMB stats,
+markers, and ortholog database automatically. A WMB region run additionally
+uses mouse ROI acronyms such as `MOp`; it downloads only the raw WMB expression
+shards represented by cells in the selected ROI. See [MapMyCells](stages/mapmycells.md#whole-mouse-brain-compatibility)
+for examples and storage requirements.
 
 If the mapper outputs already exist and only the final annotated H5AD/plots need
 to be regenerated, add `--mapmycells_plots_only true` to `--only_stage
