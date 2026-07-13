@@ -24,10 +24,10 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 RUN cargo install proseg
 RUN ln -sf /usr/local/cargo/bin/proseg /usr/local/bin/proseg
 
-# install spatialdata
-RUN python3 -m pip install --no-cache-dir "spatialdata==0.8.0" "spatialdata-io>=0.6" "anndata>=0.10.9,<0.13.0" "pyarrow>=15.0.0"
-
-# install MerXen
-RUN python3 -m pip install --no-cache-dir git+https://github.com/bourdenxlab/MerXen@a2d95c1
+# Install the checked-out MerXen source and its declared dependencies.
+WORKDIR /opt/merxen
+COPY pyproject.toml README.md ./
+COPY src ./src
+RUN python3 -m pip install --no-cache-dir .
 
 CMD ["python3"]
