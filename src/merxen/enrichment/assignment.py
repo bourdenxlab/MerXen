@@ -190,10 +190,13 @@ def compute_table_from_points_for_shape(
                 {"gene": pd.Series(g_valid, dtype=str)},
                 geometry=gpd.points_from_xy(x_valid, y_valid),
                 crs=gdf_shapes.crs,
-            )
+            ).reset_index(drop=True)
+
+            shapes_subset = gdf_shapes[[shape_id_col, "geometry"]].reset_index(drop=True)
+
             joined = gpd.sjoin(
                 points,
-                gdf_shapes[[shape_id_col, "geometry"]],
+                shapes_subset,
                 how="left",
                 predicate="within",
             )

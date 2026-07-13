@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import os
+
+os.environ["MPLCONFIGDIR"] = "./tmp/mpl"
+os.environ["NUMBA_CACHE_DIR"] = "./tmp/numba"
+
 import logging
 import shutil
 from pathlib import Path
@@ -12,6 +17,8 @@ import spatialdata as sd
 
 from merxen.memory import force_release, log_status
 from merxen.path_utils import remove_path
+
+
 
 logger = logging.getLogger(__name__)
 
