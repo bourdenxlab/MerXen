@@ -77,7 +77,7 @@ profile. Override either kind with `--<name>` on the command line.
 | `force_spatialdata_build` | `false` | Rebuild SpatialData zarrs even if cached. |
 | `force_proseg_rerun` | `false` | Rebuild ProSeg bases from the current Cellpose/transcript inputs instead of reusing a persistent `latest_spatialdata.zarr`. Useful with `-resume` after upstream inputs were rebuilt. |
 | `start_stage` | `build_spatialdata` | Fallback first stage. Skipped upstream stages are read from published outputs. A samplesheet `start_stage` value overrides this per row. |
-| `stop_stage` | `clustering_squidpy` | Fallback last stage. This includes `spatial_gene_analysis`, which runs between visualization and clustering. MapMyCells is available after clustering but opt-in because it requires reference files. A samplesheet `stop_stage` value overrides this per row. |
+| `stop_stage` | `clustering_squidpy` | Fallback last stage. This includes `spatial_gene_analysis`, which runs between visualization and clustering. MapMyCells is available after clustering but opt-in because its atlas downloads are large. A samplesheet `stop_stage` value overrides this per row. |
 | `only_stage` | `null` | Fallback single-stage selector. A row-level `only_stage` overrides row start/stop values; row start/stop values suppress the global `only_stage` fallback for that row. |
 | `gpu_process_lock_enabled` | Dwight: `true` | Serialize local GPU-heavy processes so `CELLPOSE_SEGMENT`, GPU `ALIGN`, and GPU `CLUSTERING_SQUIDPY` do not compete for one workstation GPU. ProSeg does not take this lock. |
 | `gpu_process_lock_file` | Dwight: `/tmp/merxen-dwight-gpu.lock` | One host-wide lock shared by tasks and concurrent launches on Dwight. |
@@ -486,11 +486,15 @@ runs once, and is shared across all samples and segmentation branches. See
 | Param | Default | Description |
 |-------|---------|-------------|
 | `mapmycells_reference_mode` | `both` | Which references to run: `whole_brain`, `region`, or `both`. |
-| `mapmycells_marker_lookup_path` | WHB marker JSON path | JSON marker lookup file for the whole-brain reference. Required when `reference_mode` includes `whole_brain`. |
-| `mapmycells_precomputed_stats_path` | WHB stats H5 path | HDF5 precomputed stats file for the whole-brain reference. Required when `reference_mode` includes `whole_brain`. |
+| `mapmycells_reference_atlas` | `whb` | Allen reference atlas: Whole Human Brain (`whb`) or Yao 2023 Whole Mouse Brain (`wmb`). |
+| `mapmycells_query_species` | `human` | Query species. Human-to-WMB mapping enables Allen ortholog mapping. |
+| `mapmycells_auto_download_references` | `true` | Download missing published stats, markers, and the WMB gene-mapper DB into the durable cache. |
+| `mapmycells_marker_lookup_path` | `null` | Optional explicit marker JSON. When unset, download the atlas-appropriate Allen asset. |
+| `mapmycells_precomputed_stats_path` | `null` | Optional explicit stats H5. When unset, download the atlas-appropriate Allen asset. |
+| `mapmycells_gene_mapping_db_path` | `null` | Optional `mmc_gene_mapper` SQLite DB. Human-to-WMB runs download it when automatic downloads are enabled. |
 | `mapmycells_region_name` | `frontal_a44_a45_a46_a32_acc` | Short safe name used in region output directories and annotation prefixes. |
-| `mapmycells_region_labels` | `["Human A44-A45", "Human A46", "Human A32", "Human ACC"]` | Allen WHB `region_of_interest_label` values used to build the strict region reference. May be a Nextflow list, JSON list, or comma-separated string. |
-| `mapmycells_region_cache_dir` | Dwight: `/media/mathieubo/SSD1/MerXen/mapmycells` | Durable cache for Allen WHB downloads and generated region reference files. Other host profiles must provide their own location. |
+| `mapmycells_region_labels` | `["Human A44-A45", "Human A46", "Human A32", "Human ACC"]` | WHB `region_of_interest_label` values or WMB `region_of_interest_acronym` values used to build the strict region reference. May be a Nextflow list, JSON list, or comma-separated string. |
+| `mapmycells_region_cache_dir` | `<outdir>/mapmycells_cache` | Durable cache for Allen WHB/WMB downloads, the gene mapper, and generated region reference files. The Dwight profile overrides this with `/media/mathieubo/SSD1/MerXen/mapmycells`. |
 | `mapmycells_region_min_cells_per_leaf` | `10` | Drop region taxonomy leaf aliases with fewer cells than this before precomputing stats. |
 | `mapmycells_region_force_rebuild` | `false` | Rebuild the generated region reference even if matching cached files exist. |
 | `mapmycells_region_query_markers_n_per_utility` | `10` | Marker count target passed to Allen's `QueryMarkerRunner` for the region reference. |

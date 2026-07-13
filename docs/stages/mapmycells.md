@@ -1,9 +1,9 @@
 # MapMyCells
 
 Runs local Allen Institute MapMyCells annotation on the per-platform AnnData
-objects produced by the Squidpy clustering stage. By default it maps against
-both the Allen Whole Human Brain reference and a configurable strict WHB region
-reference.
+objects produced by the Squidpy clustering stage. It supports the Allen Whole
+Human Brain (WHB) taxonomy and the Yao et al. 2023 Whole Mouse Brain (WMB)
+taxonomy, including human-to-mouse ortholog mapping. WHB remains the default.
 
 ## What it does
 
@@ -14,9 +14,9 @@ For each platform in a pair:
    into `X`. MapMyCells expects the query cell-by-gene matrix in `X`.
 3. Run MapMyCells locally through `python -m merxen.analysis.mapmycells_entrypoint`
    for the configured reference mode: `whole_brain`, `region`, or `both`.
-   The whole-brain path uses the configured marker lookup JSON and precomputed
-   stats HDF5 files. The region path builds or reuses a strict WHB ROI-specific
-   reference in the durable MapMyCells cache first.
+   The whole-brain path uses configured files or downloads Allen's published
+   marker lookup and precomputed-stat assets. The region path builds or reuses
+   a strict atlas/ROI-specific reference in the durable MapMyCells cache first.
 4. Save the extended JSON, CSV, mapper log, stdout/stderr logs, command
    manifest, query H5AD, standalone UMAP/spatial PNG/PDF plots, and a clustered H5AD
    annotated with MapMyCells assignments in `obs` columns prefixed with
@@ -40,6 +40,51 @@ For region mode, `mapmycells_region_labels` contains Allen WHB
 `["Human A44-A45", "Human A46", "Human A32", "Human ACC"]`, but the
 implementation accepts a list, a JSON list, or a comma-separated string so this
 can be adjusted to different frontal region sets later.
+
+## Whole Mouse Brain compatibility
+
+Set `mapmycells_reference_atlas=wmb` to use the Yao et al. 2023 WMB taxonomy.
+For human MerXen queries, also keep `mapmycells_query_species=human`. MerXen then
+downloads and caches Allen's full-WMB precomputed stats, mouse marker lookup,
+and the `mmc_gene_mapper` ortholog database, and passes the database through
+`gene_mapping.db_path`. It also drops `CCN20230722_SUPT` by default, matching
+Allen's human-to-WMB example. `cell_type_mapper` 1.7.2 or newer is required.
+
+```bash
+nextflow run workflows/main.nf \
+    --samplesheet workflows/samplesheet.csv \
+    --outdir ./results \
+    --stop_stage mapmycells \
+    --mapmycells_reference_mode whole_brain \
+    --mapmycells_reference_atlas wmb \
+    --mapmycells_query_species human \
+    --mapmycells_region_cache_dir /durable/mapmycells-cache
+```
+
+The automatic full-WMB downloads are approximately 1.4 GB for stats, 14 MB for
+markers, and 16.2 GB for the cross-species gene database. Explicit
+`mapmycells_marker_lookup_path`, `mapmycells_precomputed_stats_path`, and
+`mapmycells_gene_mapping_db_path` values override the downloads.
+
+For a mouse-region-specific WMB reference, select mouse
+`region_of_interest_acronym` values such as `MOp` or `VIS`:
+
+```bash
+nextflow run workflows/main.nf \
+    --samplesheet workflows/samplesheet.csv \
+    --outdir ./results \
+    --stop_stage mapmycells \
+    --mapmycells_reference_mode region \
+    --mapmycells_reference_atlas wmb \
+    --mapmycells_query_species human \
+    --mapmycells_region_name motor \
+    --mapmycells_region_labels MOp \
+    --mapmycells_region_cache_dir /durable/mapmycells-cache
+```
+
+Region generation downloads WMB metadata and only the raw expression-matrix
+shards named by the selected cells' `feature_matrix_label` values. Individual
+shards can be several GB, so the cache must have substantial free space.
 
 ## Nextflow process
 
@@ -75,10 +120,14 @@ Use `--only_stage mapmycells` to reuse an existing
 | `output_dir` | Where `mapmycells_out/` is populated. |
 | `samples` | One or two sample configs: `sample_id`, `platform`, `anndata_path`, optional `query_layer`, optional `gene_id_column`, optional `obs_id_column`. |
 | `reference_mode` | `whole_brain`, `region`, or `both`; default is `both`. |
-| `marker_lookup_path` | Whole-brain JSON marker lookup file. Required only when `reference_mode` includes `whole_brain`. |
-| `precomputed_stats_path` | Whole-brain HDF5 precomputed stats file. Required only when `reference_mode` includes `whole_brain`. |
-| `region_name` / `region_labels` | Short region output name and one or more Allen WHB ROI labels used to build the strict region reference. |
-| `region_cache_dir` | Durable cache for Allen WHB downloads and generated region stats/marker files. |
+| `reference_atlas` | `whb` or `wmb`; default is `whb`. |
+| `query_species` | `human` or `mouse`; controls whether WMB mapping needs cross-species gene mapping. |
+| `auto_download_references` | Download missing Allen stats, markers, and the WMB gene mapper into the durable cache. |
+| `marker_lookup_path` | Optional explicit whole-brain JSON marker lookup; otherwise downloaded when enabled. |
+| `precomputed_stats_path` | Optional explicit whole-brain HDF5 stats file; otherwise downloaded when enabled. |
+| `gene_mapping_db_path` | Optional `mmc_gene_mapper` SQLite database; required for human-to-WMB mapping when automatic downloads are disabled. |
+| `region_name` / `region_labels` | Short output name and WHB ROI labels or WMB ROI acronyms used to build the strict region reference. |
+| `region_cache_dir` | Durable cache for Allen WHB/WMB downloads and generated region stats/marker files. |
 | `region_min_cells_per_leaf` | Minimum ROI cells required for a leaf `cluster_alias` to stay in the region taxonomy. |
 | `region_force_rebuild` | Rebuild generated region reference files even if the cache manifest matches. |
 | `region_query_markers_n_per_utility` | Marker count target for region `QueryMarkerRunner`. |
@@ -91,9 +140,9 @@ Use `--only_stage mapmycells` to reuse an existing
 | `cloud_safe` / `flatten` / `verbose_csv` | Direct MapMyCells CLI options. |
 | `plots_only` | Reuse existing mapper CSV/extended JSON outputs and regenerate only annotated H5AD + plots. |
 
-When this stage is selected, workflow preflight validates whole-brain marker and
-precomputed-stat paths before any tasks start, unless `mapmycells_plots_only` is
-enabled or `reference_mode` excludes `whole_brain`.
+When explicit reference paths are configured, workflow preflight validates them
+before any tasks start. Automatically downloaded files are checked against the
+sizes in Allen's manifest and partial downloads can resume.
 
 ## Outputs
 
@@ -123,6 +172,12 @@ Region-specific outputs use the same file names under
 `mapmycells_out/region_<mapmycells_region_name>/<platform>/`. Their annotated
 H5AD columns use the prefix `mapmycells_region_<region_name>_`, and metadata is
 stored in `uns["merxen_mapmycells_region_<region_name>"]`.
+
+Full-WMB outputs are written under `mapmycells_out/wmb/<platform>/` with the
+`mapmycells_wmb_` column prefix. WMB region outputs are written under
+`mapmycells_out/wmb_region_<region_name>/<platform>/` with the
+`mapmycells_wmb_region_<region_name>_` prefix, keeping them distinct from WHB
+annotations.
 
 The stage also writes `<pair_id>_mapmycells_manifest.json` at the top of
 `mapmycells_out/`, including whole-brain and region reference paths, ROI labels,
