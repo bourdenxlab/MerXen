@@ -5,7 +5,6 @@ dependencies:
   - python=3.12
   - pip
   - pip:
-      - spatialdata @ git+https://github.com/scverse/spatialdata.git@v0.7.3a1
       - -e ".[dev]"
       # Spateo and Dynamo are bootstrapped by ALIGN after this base env is active.
       # They need a two-step install so AnnData can be restored for SpatialData.
