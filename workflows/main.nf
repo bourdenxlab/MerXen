@@ -11,7 +11,11 @@ include { ALIGN; ALIGN_QC } from "./modules/alignment"
 include { COMPARE } from "./modules/comparison"
 include { VISUALIZE } from "./modules/visualization"
 include { SPATIAL_GENE_ANALYSIS } from "./modules/spatial_gene_analysis"
-include { CLUSTERING_SQUIDPY } from "./modules/clustering_squidpy"
+include {
+    CLUSTERING_SQUIDPY_PREPARE;
+    CLUSTERING_SQUIDPY_COMPUTE;
+    CLUSTERING_SQUIDPY_FINALIZE
+} from "./modules/clustering_squidpy"
 include { MAPMYCELLS } from "./modules/mapmycells"
 
 def parseChannels(rawValue, defaults) {
@@ -1928,7 +1932,9 @@ workflow {
             .mix(clustering_after_visualize_ch)
             .mix(clustering_after_spatial_gene_analysis_ch)
 
-    clustering_results_ch = CLUSTERING_SQUIDPY(clustering_inputs_ch)
+    clustering_prepared_ch = CLUSTERING_SQUIDPY_PREPARE(clustering_inputs_ch)
+    clustering_computed_ch = CLUSTERING_SQUIDPY_COMPUTE(clustering_prepared_ch)
+    clustering_results_ch = CLUSTERING_SQUIDPY_FINALIZE(clustering_computed_ch)
 
     // Cortical depth runs after clustering so the per-cell broad_class and
     // subcluster_label annotations exist and the depth violin plots can be
