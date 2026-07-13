@@ -19,10 +19,15 @@ process MAPMYCELLS {
     def obsIdColumnJson = params.mapmycells_obs_id_column == null ? "null" : groovy.json.JsonOutput.toJson(params.mapmycells_obs_id_column.toString())
     def tmpDirJson = params.mapmycells_tmp_dir == null ? "null" : groovy.json.JsonOutput.toJson(params.mapmycells_tmp_dir.toString())
     def referenceModeJson = params.mapmycells_reference_mode == null ? groovy.json.JsonOutput.toJson("both") : groovy.json.JsonOutput.toJson(params.mapmycells_reference_mode.toString())
+    def referenceAtlasJson = params.mapmycells_reference_atlas == null ? groovy.json.JsonOutput.toJson("whb") : groovy.json.JsonOutput.toJson(params.mapmycells_reference_atlas.toString())
+    def querySpeciesJson = params.mapmycells_query_species == null ? groovy.json.JsonOutput.toJson("human") : groovy.json.JsonOutput.toJson(params.mapmycells_query_species.toString())
+    def autoDownloadReferencesJson = params.mapmycells_auto_download_references == null ? "true" : params.mapmycells_auto_download_references.toString()
     def markerLookupJson = params.mapmycells_marker_lookup_path == null ? "null" : groovy.json.JsonOutput.toJson(params.mapmycells_marker_lookup_path.toString())
     def precomputedStatsJson = params.mapmycells_precomputed_stats_path == null ? "null" : groovy.json.JsonOutput.toJson(params.mapmycells_precomputed_stats_path.toString())
+    def geneMappingDbJson = params.mapmycells_gene_mapping_db_path == null ? "null" : groovy.json.JsonOutput.toJson(params.mapmycells_gene_mapping_db_path.toString())
     def regionNameJson = params.mapmycells_region_name == null ? groovy.json.JsonOutput.toJson("region") : groovy.json.JsonOutput.toJson(params.mapmycells_region_name.toString())
-    def regionCacheDirJson = params.mapmycells_region_cache_dir == null ? "null" : groovy.json.JsonOutput.toJson(params.mapmycells_region_cache_dir.toString())
+    def defaultRegionCacheDir = file(params.outdir).toAbsolutePath().resolve("mapmycells_cache").toString()
+    def regionCacheDirJson = params.mapmycells_region_cache_dir == null ? groovy.json.JsonOutput.toJson(defaultRegionCacheDir) : groovy.json.JsonOutput.toJson(params.mapmycells_region_cache_dir.toString())
     def plotsOnly = params.mapmycells_plots_only == null ? false : params.mapmycells_plots_only.toString().trim().toLowerCase() == "true"
     def plotsOnlyJson = plotsOnly ? "true" : "false"
     def publishedMapMyCellsOut = "${params.outdir}/${pair_id}/${segmentation}/mapmycells/mapmycells_out"
@@ -84,8 +89,12 @@ process MAPMYCELLS {
   "output_dir": "mapmycells_out",
   "samples": ${mapmycellsSamplesJson},
   "reference_mode": ${referenceModeJson},
+  "reference_atlas": ${referenceAtlasJson},
+  "query_species": ${querySpeciesJson},
+  "auto_download_references": ${autoDownloadReferencesJson},
   "marker_lookup_path": ${markerLookupJson},
   "precomputed_stats_path": ${precomputedStatsJson},
+  "gene_mapping_db_path": ${geneMappingDbJson},
   "region_name": ${regionNameJson},
   "region_labels": ${regionLabelsJson},
   "region_cache_dir": ${regionCacheDirJson},
