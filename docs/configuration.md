@@ -62,7 +62,7 @@ any of them with `--<name>` on the command line.
 | `start_stage` | `build_spatialdata` | Fallback first stage. Skipped upstream stages are read from published outputs. A samplesheet `start_stage` value overrides this per row. |
 | `stop_stage` | `clustering_squidpy` | Fallback last stage. This includes `spatial_gene_analysis`, which runs between visualization and clustering. MapMyCells is available after clustering but opt-in because it requires reference files. A samplesheet `stop_stage` value overrides this per row. |
 | `only_stage` | `null` | Fallback single-stage selector. A row-level `only_stage` overrides row start/stop values; row start/stop values suppress the global `only_stage` fallback for that row. |
-| `gpu_process_lock_enabled` | `true` | Serialize local GPU-heavy processes with a file lock so `SEGMENT`, GPU `ALIGN`, and GPU `CLUSTERING_SQUIDPY` do not compete for one workstation GPU. |
+| `gpu_process_lock_enabled` | `true` | Serialize local GPU-heavy processes with a file lock so `CELLPOSE_SEGMENT`, GPU `ALIGN`, and GPU `CLUSTERING_SQUIDPY` do not compete for one workstation GPU. ProSeg does not take this lock. |
 | `gpu_process_lock_file` | `${projectDir}/.merxen_gpu.lock` | File used for the local GPU lock. Override only when coordinating multiple runs from the same machine. |
 
 Stage names accepted by `start_stage`, `stop_stage`, and `only_stage` are:
@@ -102,6 +102,7 @@ only for rows whose effective `enable_alignment` value is `true`.
 | `cellpose_final_min_area_um2` | `5.0` | Drop final Cellpose masks smaller than this area before ProSeg. |
 | `cellpose_final_max_area_um2` | `400.0` | Drop final Cellpose masks larger than this area before ProSeg. |
 | `cellpose_final_filter_chunk_mb` | `256` | Approximate row-chunk size for streaming the final mask filter. |
+| `cellpose_segment_max_forks` | `1` | Maximum concurrent GPU Cellpose processes. |
 
 ### Mask image quantification
 
@@ -140,6 +141,7 @@ install paths trigger a `sudo` prompt.
 | Param | Default | Description |
 |-------|---------|-------------|
 | `proseg_samples` | `1200` | MCMC samples. |
+| `proseg_segment_max_forks` | `2` | Maximum concurrent CPU-only ProSeg processes. |
 | `proseg_voxel_size` | `0.5` | Voxel size (µm). |
 | `proseg_burnin_voxel_size` | `1.0` | Burn-in voxel size (µm). |
 | `proseg_nuclear_reassignment_prob` | `0.25` | Nuclear reassignment probability. |
@@ -311,7 +313,8 @@ Per-process CPU/memory requests and default concurrency guards
 | Process | CPUs | Memory | Max forks |
 |---------|-----:|-------:|-----------|
 | `BUILD_SPATIALDATA` | 8 | 80 GB | `build_spatialdata_max_forks` = 3 |
-| `SEGMENT` | 32 | 220 GB | `segment_max_forks` = 1 |
+| `CELLPOSE_SEGMENT` | 12 | 212 GB | `cellpose_segment_max_forks` = 1 |
+| `PROSEG_SEGMENT` | 32 | 220 GB | `proseg_segment_max_forks` = 2 |
 | `ENRICH` | 8 | 300 GB | unbounded |
 | `QC` | 4 | 24 GB | unbounded |
 | `ALIGN` | 12 | 100 GB | `alignment_max_forks` = 1 |
@@ -321,7 +324,7 @@ Per-process CPU/memory requests and default concurrency guards
 | `CLUSTERING_SQUIDPY` | 8 | 32 GB | `clustering_squidpy_max_forks` = 4 |
 | `MAPMYCELLS` | 8 | 160 GB | unbounded |
 
-On local single-GPU runs, `SEGMENT`, `ALIGN` when `alignment_device != "cpu"`,
+On local single-GPU runs, `CELLPOSE_SEGMENT`, `ALIGN` when `alignment_device != "cpu"`,
 and `CLUSTERING_SQUIDPY` when `clustering_squidpy_use_gpu=true` also share
 `gpu_process_lock_file`. The lock is held for the full process shell, then
 released automatically when the task exits.

@@ -53,7 +53,8 @@ def test_workflow_preflight_checks_reference_files_before_task_inputs() -> None:
         "params.mapmycells_precomputed_stats_path",
         "Preflight checks failed for sample",
         "alignment_max_forks = 1",
-        "segment_max_forks = 1",
+        "cellpose_segment_max_forks = 1",
+        "proseg_segment_max_forks = 2",
     ]:
         assert expected in main_text or expected in config_text
 
@@ -68,7 +69,7 @@ def test_gpu_processes_share_local_lock() -> None:
         "gpu_process_lock_file",
         "Waiting for MerXen GPU process lock",
         "flock 9",
-        'withName: "SEGMENT"',
+        'withName: "CELLPOSE_SEGMENT"',
         'withName: "ALIGN"',
         'withName: "CLUSTERING_SQUIDPY_COMPUTE"',
         "params.cellpose_gpu",
