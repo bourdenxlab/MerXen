@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import os
+
+os.environ["MPLCONFIGDIR"] = "./tmp/mpl"
+os.environ["NUMBA_CACHE_DIR"] = "./tmp/numba"
+
 import fcntl
 import json
 import logging

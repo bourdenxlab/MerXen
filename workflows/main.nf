@@ -1099,6 +1099,7 @@ workflow {
                     tile_overlap: params.cellpose_tile_overlap,
                     bsize: params.cellpose_bsize,
                     factor_rescale: 1.0,
+                    use_bfloat16: params.cellpose_use_bfloat16,
                 ],
                 tiling: [
                     tile_size_candidates: params.cellpose_tile_size_candidates,
