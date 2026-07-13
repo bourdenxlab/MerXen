@@ -1,4 +1,4 @@
-process SEGMENT {
+process CELLPOSE_SEGMENT {
     tag "${pair_id}:${platform}"
 
     publishDir { "${params.outdir}/${pair_id}/${platform.toLowerCase()}/segmentation" }, mode: "symlink", overwrite: true
@@ -7,7 +7,36 @@ process SEGMENT {
     tuple val(key), val(pair_id), val(platform), val(seg_config_json)
 
     output:
-    tuple val(key), val(pair_id), val(platform), path("segment_out/proseg_base_latest.zarr"), path("segment_out/cellpose_masks_tiled.npy"), path("segment_out/transcripts_for_proseg.csv")
+    tuple val(key), val(pair_id), val(platform), val(seg_config_json), path("segment_out/cellpose_masks_tiled.npy"), path("segment_out/transcripts_for_proseg.csv"), path("segment_out/cellpose_transforms.json"), path("segment_out/cellpose_stitching_stats.json")
+
+    script:
+    """
+    set -euo pipefail
+    export OMP_NUM_THREADS="${task.cpus}"
+    export OPENBLAS_NUM_THREADS="${task.cpus}"
+    export MKL_NUM_THREADS="${task.cpus}"
+    export NUMEXPR_NUM_THREADS="${task.cpus}"
+    export NUMBA_NUM_THREADS="${task.cpus}"
+
+    cat > segment_config.json <<'JSON'
+${seg_config_json}
+JSON
+
+    merxen cellpose-segment --config segment_config.json
+    """
+}
+
+
+process PROSEG_SEGMENT {
+    tag "${pair_id}:${platform}"
+
+    publishDir { "${params.outdir}/${pair_id}/${platform.toLowerCase()}/segmentation" }, mode: "symlink", overwrite: true
+
+    input:
+    tuple val(key), val(pair_id), val(platform), val(seg_config_json), path(cellpose_mask), path(transcripts_csv), path(cellpose_transforms), path(_stitching_stats), path(proseg_path_file)
+
+    output:
+    tuple val(key), val(pair_id), val(platform), path("segment_out/proseg_base_latest.zarr"), path(cellpose_mask), path(transcripts_csv)
 
     script:
     """
@@ -27,6 +56,43 @@ process SEGMENT {
 ${seg_config_json}
 JSON
 
-    merxen segment --config segment_config.json
+    merxen proseg-segment \
+        --config segment_config.json \
+        --cellpose-mask "${cellpose_mask}" \
+        --transcripts-csv "${transcripts_csv}" \
+        --cellpose-transforms "${cellpose_transforms}" \
+        --proseg-binary "\$(cat "${proseg_path_file}")"
     """
+}
+
+
+workflow SEGMENT {
+    take:
+    segment_inputs
+    proseg_path
+
+    main:
+    cellpose_results = CELLPOSE_SEGMENT(segment_inputs)
+    proseg_inputs = cellpose_results
+        .combine(proseg_path)
+        .map {
+            key, pair_id, platform, seg_config_json, cellpose_mask,
+            transcripts_csv, cellpose_transforms, stitching_stats,
+            proseg_path_file ->
+            tuple(
+                key,
+                pair_id,
+                platform,
+                seg_config_json,
+                cellpose_mask,
+                transcripts_csv,
+                cellpose_transforms,
+                stitching_stats,
+                proseg_path_file,
+            )
+        }
+    segment_results = PROSEG_SEGMENT(proseg_inputs)
+
+    emit:
+    segment_results
 }

@@ -225,26 +225,20 @@ def _write_progress(path: Path, data: dict) -> None:
         pass
 
 
-def run_segmentation_pipeline(
+def run_cellpose_segmentation(
     config: SegmentationConfig,
     *,
     force_rerun: bool = False,
 ) -> dict[str, Path]:
-    """Run Cellpose + ProSeg segmentation for one dataset configuration."""
+    """Run Cellpose and prepare its mask-derived inputs for ProSeg."""
     dataset = config.dataset
     out_dir = Path(dataset.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    raw_output = out_dir / "proseg_base_raw.zarr"
-    staged_latest_output = out_dir / "proseg_base_latest.zarr"
     staged_transcripts_csv = out_dir / "transcripts_for_proseg.csv"
     staged_mask_path = out_dir / "cellpose_masks_tiled.npy"
     staged_stitching_stats_path = out_dir / "cellpose_stitching_stats.json"
-    persistent_latest_output = (
-        Path(dataset.persistent_latest_zarr_path)
-        if dataset.persistent_latest_zarr_path is not None
-        else None
-    )
+    transforms_path = out_dir / "cellpose_transforms.json"
     persistent_transcripts_csv = (
         Path(dataset.persistent_transcripts_path)
         if dataset.persistent_transcripts_path is not None
@@ -260,18 +254,15 @@ def run_segmentation_pipeline(
         if dataset.persistent_cellpose_stitching_stats_path is not None
         else None
     )
-    latest_output = persistent_latest_output or staged_latest_output
     transcripts_csv = persistent_transcripts_csv or staged_transcripts_csv
     mask_path = persistent_mask_path or staged_mask_path
     stitching_stats_path = (
         persistent_stitching_stats_path or staged_stitching_stats_path
     )
-    progress_path = out_dir / "progress.json"
+    progress_path = out_dir / "cellpose_progress.json"
     _started_at = time.monotonic()
 
-    def _stage_outputs() -> tuple[Path, Path, Path]:
-        if latest_output != staged_latest_output:
-            stage_existing_output(latest_output, staged_latest_output)
+    def _stage_outputs() -> tuple[Path, Path, Path, Path]:
         if transcripts_csv != staged_transcripts_csv:
             stage_existing_output(transcripts_csv, staged_transcripts_csv)
         if mask_path != staged_mask_path:
@@ -284,7 +275,12 @@ def run_segmentation_pipeline(
                 stitching_stats_path,
                 staged_stitching_stats_path,
             )
-        return staged_latest_output, staged_transcripts_csv, staged_mask_path
+        return (
+            staged_transcripts_csv,
+            staged_mask_path,
+            staged_stitching_stats_path,
+            transforms_path,
+        )
 
     def _progress(stage: str, **extra: object) -> None:
         _write_progress(
@@ -298,28 +294,25 @@ def run_segmentation_pipeline(
         )
 
     if (
-        latest_output.exists()
-        and transcripts_csv.exists()
+        transcripts_csv.exists()
         and mask_path.exists()
+        and transforms_path.exists()
         and not force_rerun
     ):
-        log_status(f"[{dataset.name}] Reusing existing latest output: {latest_output}")
-        staged_out, staged_transcripts, staged_mask = _stage_outputs()
+        log_status(f"[{dataset.name}] Reusing existing Cellpose outputs")
+        if not stitching_stats_path.exists():
+            stitching_stats_path.parent.mkdir(parents=True, exist_ok=True)
+            stitching_stats_path.write_text(
+                json.dumps({"write_stitching_stats": False}, indent=2) + "\n"
+            )
+        staged_transcripts, staged_mask, staged_stats, staged_transforms = (
+            _stage_outputs()
+        )
         return {
-            "latest_output": staged_out,
             "transcripts_csv": staged_transcripts,
             "cellpose_mask_path": staged_mask,
-        }
-
-    if raw_output.exists() and not force_rerun:
-        latest_output.parent.mkdir(parents=True, exist_ok=True)
-        latest_out = convert_to_latest_zarr(raw_output, latest_output)
-        remove_path(raw_output)
-        staged_out, staged_transcripts, staged_mask = _stage_outputs()
-        return {
-            "latest_output": Path(staged_out),
-            "transcripts_csv": Path(staged_transcripts),
-            "cellpose_mask_path": Path(staged_mask),
+            "stitching_stats_path": staged_stats,
+            "transforms_path": staged_transforms,
         }
 
     sdata, fetch_tile_fn, height, width, matrix, points_obj = _load_dataset_sdata(
@@ -430,12 +423,98 @@ def run_segmentation_pipeline(
         f"{prep_stats['n_seeded']:,} ({prep_stats['pct_seeded']:.2f}%)"
     )
 
+    transforms_path.write_text(
+        json.dumps(
+            {
+                "x_transform": list(x_transform),
+                "y_transform": list(y_transform),
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    if not stitching_stats_path.exists():
+        stitching_stats_path.write_text(
+            json.dumps({"write_stitching_stats": False}, indent=2) + "\n"
+        )
+
     del mask_mmap, points_obj, sdata
-    force_release(note=f"after {dataset.name} preprocessing, before ProSeg")
+    force_release(note=f"after {dataset.name} Cellpose segmentation")
+    _progress("done")
+    staged_transcripts, staged_mask, staged_stats, staged_transforms = _stage_outputs()
+    return {
+        "transcripts_csv": Path(staged_transcripts),
+        "cellpose_mask_path": Path(staged_mask),
+        "stitching_stats_path": Path(staged_stats),
+        "transforms_path": Path(staged_transforms),
+    }
+
+
+def run_proseg_segmentation(
+    config: SegmentationConfig,
+    *,
+    transcripts_csv: str | Path,
+    cellpose_mask_path: str | Path,
+    transforms_path: str | Path,
+    proseg_binary: str | Path | None = None,
+    force_rerun: bool = False,
+) -> dict[str, Path]:
+    """Refine a prepared Cellpose prior with the CPU-only ProSeg tool."""
+    dataset = config.dataset
+    out_dir = Path(dataset.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    raw_output = out_dir / "proseg_base_raw.zarr"
+    staged_latest_output = out_dir / "proseg_base_latest.zarr"
+    persistent_latest_output = (
+        Path(dataset.persistent_latest_zarr_path)
+        if dataset.persistent_latest_zarr_path is not None
+        else None
+    )
+    latest_output = persistent_latest_output or staged_latest_output
+    transcripts_csv = Path(transcripts_csv)
+    cellpose_mask_path = Path(cellpose_mask_path)
+    transforms_path = Path(transforms_path)
+    progress_path = out_dir / "proseg_progress.json"
+    started_at = time.monotonic()
+
+    def _progress(stage: str, **extra: object) -> None:
+        _write_progress(
+            progress_path,
+            {
+                "dataset": dataset.name,
+                "stage": stage,
+                "elapsed_min": round((time.monotonic() - started_at) / 60, 1),
+                **extra,
+            },
+        )
+
+    def _stage_latest() -> Path:
+        if latest_output != staged_latest_output:
+            stage_existing_output(latest_output, staged_latest_output)
+        return staged_latest_output
+
+    if latest_output.exists() and not force_rerun:
+        log_status(f"[{dataset.name}] Reusing existing latest output: {latest_output}")
+        return {"latest_output": _stage_latest()}
+
+    if raw_output.exists() and not force_rerun:
+        latest_output.parent.mkdir(parents=True, exist_ok=True)
+        convert_to_latest_zarr(raw_output, latest_output)
+        remove_path(raw_output)
+        return {"latest_output": _stage_latest()}
+
+    transforms = json.loads(transforms_path.read_text())
+    x_transform = tuple(float(value) for value in transforms["x_transform"])
+    y_transform = tuple(float(value) for value in transforms["y_transform"])
+    if len(x_transform) != 3 or len(y_transform) != 3:
+        raise ValueError("Cellpose transform metadata must contain 3-value affines.")
 
     _progress("proseg_starting")
     proseg_params = config.proseg.model_dump()
     proseg_params.update(dataset.proseg_overrides)
+    if proseg_binary is not None:
+        proseg_params["binary_path"] = Path(proseg_binary)
 
     raw_out = run_proseg_refinement(
         transcripts_df=transcripts_csv,
@@ -462,7 +541,7 @@ def run_segmentation_pipeline(
             "max_transcript_nucleus_distance"
         ),
         diffusion_sigma_far=proseg_params.get("diffusion_sigma_far"),
-        cellpose_masks=mask_path,
+        cellpose_masks=cellpose_mask_path,
         cellpose_x_transform=x_transform,
         cellpose_y_transform=y_transform,
         num_threads=int(proseg_params.get("num_threads", 12)),
@@ -474,13 +553,75 @@ def run_segmentation_pipeline(
     latest_output.parent.mkdir(parents=True, exist_ok=True)
     latest_out = convert_to_latest_zarr(raw_out, latest_output)
     remove_path(raw_out)
-    staged_out, staged_transcripts, staged_mask = _stage_outputs()
+    staged_out = _stage_latest()
     log_status(f"[{dataset.name}] Wrote latest output: {latest_out}")
-    force_release(note=f"after {dataset.name} full segmentation run")
+    force_release(note=f"after {dataset.name} ProSeg refinement")
     _progress("done")
 
+    return {"latest_output": Path(staged_out)}
+
+
+def run_segmentation_pipeline(
+    config: SegmentationConfig,
+    *,
+    force_rerun: bool = False,
+) -> dict[str, Path]:
+    """Run Cellpose then ProSeg in one process for CLI compatibility."""
+    dataset = config.dataset
+    out_dir = Path(dataset.output_dir)
+    staged_latest_output = out_dir / "proseg_base_latest.zarr"
+    staged_transcripts_csv = out_dir / "transcripts_for_proseg.csv"
+    staged_mask_path = out_dir / "cellpose_masks_tiled.npy"
+    persistent_latest_output = (
+        Path(dataset.persistent_latest_zarr_path)
+        if dataset.persistent_latest_zarr_path is not None
+        else staged_latest_output
+    )
+    reusable_transcripts = (
+        Path(dataset.persistent_transcripts_path)
+        if dataset.persistent_transcripts_path
+        else staged_transcripts_csv
+    )
+    reusable_mask = (
+        Path(dataset.persistent_mask_path)
+        if dataset.persistent_mask_path
+        else staged_mask_path
+    )
+
+    if (
+        persistent_latest_output.exists()
+        and reusable_transcripts.exists()
+        and reusable_mask.exists()
+        and not force_rerun
+    ):
+        if persistent_latest_output != staged_latest_output:
+            stage_existing_output(persistent_latest_output, staged_latest_output)
+        transcripts = reusable_transcripts
+        mask = reusable_mask
+        if transcripts != staged_transcripts_csv:
+            stage_existing_output(transcripts, staged_transcripts_csv)
+        if mask != staged_mask_path:
+            stage_existing_output(mask, staged_mask_path)
+        return {
+            "latest_output": staged_latest_output,
+            "transcripts_csv": staged_transcripts_csv,
+            "cellpose_mask_path": staged_mask_path,
+        }
+
+    cellpose_outputs = run_cellpose_segmentation(
+        config,
+        force_rerun=force_rerun,
+    )
+    proseg_outputs = run_proseg_segmentation(
+        config,
+        transcripts_csv=cellpose_outputs["transcripts_csv"],
+        cellpose_mask_path=cellpose_outputs["cellpose_mask_path"],
+        transforms_path=cellpose_outputs["transforms_path"],
+        force_rerun=force_rerun,
+    )
+
     return {
-        "latest_output": Path(staged_out),
-        "transcripts_csv": Path(staged_transcripts),
-        "cellpose_mask_path": Path(staged_mask),
+        "latest_output": proseg_outputs["latest_output"],
+        "transcripts_csv": cellpose_outputs["transcripts_csv"],
+        "cellpose_mask_path": cellpose_outputs["cellpose_mask_path"],
     }

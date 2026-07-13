@@ -1054,9 +1054,7 @@ workflow {
 
     segment_inputs_ch = build_results_ch
         .join(segment_meta_ch)
-        .combine(proseg_path_ch)
-        .map { key, pairId, platform, sourceSpatialdata, meta, prosegPathFile ->
-            def prosegBinaryPath = prosegPathFile.text.trim()
+        .map { key, pairId, platform, sourceSpatialdata, meta ->
             def persistentLatestZarrPath = file(
                 publishedDatasetPath(
                     params.outdir,
@@ -1119,7 +1117,7 @@ workflow {
                     final_filter_chunk_mb: params.cellpose_final_filter_chunk_mb,
                 ],
                 proseg: [
-                    binary_path: prosegBinaryPath,
+                    binary_path: params.proseg_binary,
                     samples: params.proseg_samples,
                     voxel_size: params.proseg_voxel_size,
                     burnin_voxel_size: params.proseg_burnin_voxel_size,
@@ -1164,7 +1162,7 @@ workflow {
             )
         }
 
-    segment_task_results_ch = SEGMENT(segment_inputs_ch)
+    segment_task_results_ch = SEGMENT(segment_inputs_ch, proseg_path_ch)
 
     segment_published_results_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
         if (!((settings.run_enrich || settings.run_mask_image_quantification) &&
