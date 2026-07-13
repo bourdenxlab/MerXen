@@ -50,10 +50,6 @@ alignment = [
     "dynamo-release @ git+https://github.com/aristoteleo/dynamo-release.git@v1.5.3",
     "spateo-release @ git+https://github.com/aristoteleo/spateo-release.git@1bd8a35e6e7b0dfc712d76b1c32987dc06652774",
 ]
-# Install with: pip install -e ".[gpu]" --extra-index-url=https://pypi.nvidia.com
-gpu = [
-    "rapids-singlecell-cu12[rapids]",
-]
 
 [project.scripts]
 merxen = "merxen.cli:main"

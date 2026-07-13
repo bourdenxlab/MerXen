@@ -1,7 +1,5 @@
-process CLUSTERING_SQUIDPY {
+process CLUSTERING_SQUIDPY_PREPARE {
     tag "${pair_id}:${segmentation}"
-
-    publishDir { "${params.outdir}/${pair_id}/${segmentation}/clustering_squidpy" }, mode: "copy", overwrite: true
 
     input:
     tuple val(pair_id),
@@ -12,7 +10,8 @@ process CLUSTERING_SQUIDPY {
     tuple val(pair_id),
         val(segmentation),
         val(samples_json),
-        path("clustering_squidpy_out")
+        path("clustering_squidpy_config.json"),
+        path("clustering_prepare_out")
 
     script:
     """
@@ -79,16 +78,52 @@ process CLUSTERING_SQUIDPY {
 }
 JSON
 
+    python -m merxen.clustering_squidpy_stages prepare \
+        --config clustering_squidpy_config.json \
+        --output-dir clustering_prepare_out
+    """
+}
+
+process CLUSTERING_SQUIDPY_COMPUTE {
+    tag "${pair_id}:${segmentation}"
+
+    input:
+    tuple val(pair_id),
+        val(segmentation),
+        val(samples_json),
+        path(clustering_config),
+        path(prepared_dir)
+
+    output:
+    tuple val(pair_id),
+        val(segmentation),
+        val(samples_json),
+        path("clustering_compute_out")
+
+    script:
+    """
+    set -euo pipefail
+    export PYTHONPATH="${projectDir}/../src:\${PYTHONPATH:-}"
+    export OMP_NUM_THREADS="${task.cpus}"
+    export OPENBLAS_NUM_THREADS="${task.cpus}"
+    export MKL_NUM_THREADS="${task.cpus}"
+    export NUMEXPR_NUM_THREADS="${task.cpus}"
+    export NUMBA_NUM_THREADS="${task.cpus}"
+    export DASK_NUM_WORKERS="${task.cpus}"
+
     if ${params.clustering_squidpy_gpu_vram_monitor}; then
-        mkdir -p clustering_squidpy_out/gpu_vram
+        mkdir -p clustering_compute_out/gpu_vram
         gpu_vram_stem="${pair_id}_${segmentation}"
-        merxen clustering-squidpy --config clustering_squidpy_config.json &
+        python -m merxen.clustering_squidpy_stages compute \
+            --config "${clustering_config}" \
+            --input-dir "${prepared_dir}" \
+            --output-dir clustering_compute_out &
         clustering_pid=\$!
         python -m merxen.monitoring.gpu_vram \
             --pid "\${clustering_pid}" \
             --interval-seconds ${params.clustering_squidpy_gpu_vram_monitor_interval_seconds} \
-            --samples-path "clustering_squidpy_out/gpu_vram/\${gpu_vram_stem}_samples.tsv" \
-            --summary-path "clustering_squidpy_out/gpu_vram/\${gpu_vram_stem}_summary.json" &
+            --samples-path "clustering_compute_out/gpu_vram/\${gpu_vram_stem}_samples.tsv" \
+            --summary-path "clustering_compute_out/gpu_vram/\${gpu_vram_stem}_summary.json" &
         monitor_pid=\$!
 
         set +e
@@ -99,6 +134,45 @@ JSON
         exit "\${clustering_exit}"
     fi
 
-    merxen clustering-squidpy --config clustering_squidpy_config.json
+    python -m merxen.clustering_squidpy_stages compute \
+        --config "${clustering_config}" \
+        --input-dir "${prepared_dir}" \
+        --output-dir clustering_compute_out
+    """
+}
+
+process CLUSTERING_SQUIDPY_FINALIZE {
+    tag "${pair_id}:${segmentation}"
+
+    publishDir { "${params.outdir}/${pair_id}/${segmentation}/clustering_squidpy" }, mode: "copy", overwrite: true
+
+    input:
+    tuple val(pair_id),
+        val(segmentation),
+        val(samples_json),
+        path(computed_dir)
+
+    output:
+    tuple val(pair_id),
+        val(segmentation),
+        val(samples_json),
+        path("clustering_squidpy_out")
+
+    script:
+    """
+    set -euo pipefail
+    cat > clustering_finalize_config.json <<JSON
+{
+  "pair_id": "${pair_id}",
+  "output_dir": "clustering_squidpy_out",
+  "samples": ${samples_json},
+  "write_spatialdata_table": ${params.clustering_squidpy_write_spatialdata_table}
+}
+JSON
+
+    python -m merxen.clustering_squidpy_stages finalize \
+        --config clustering_finalize_config.json \
+        --input-dir "${computed_dir}" \
+        --output-dir clustering_squidpy_out
     """
 }
