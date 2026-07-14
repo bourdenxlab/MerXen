@@ -2,7 +2,8 @@
 
 The samplesheet is a CSV with one row per biological sample or adjacent-section
 pair. By default, rows inherit `--analysis_mode`, `--enable_alignment`,
-`--analysis_segmentation`, `--start_stage`, `--stop_stage`, and `--only_stage`
+`--analysis_segmentation`, object-distance settings, `--start_stage`,
+`--stop_stage`, and `--only_stage`
 from the Nextflow command or config, but each row can override those settings
 with optional columns. In the default `analysis_mode=paired`, a row must contain
 one MERSCOPE and one Xenium dataset. In `analysis_mode=merscope` or
@@ -22,6 +23,8 @@ required. A template lives at
 | `stop_stage` | no | Row-level final stage. Blank inherits `--stop_stage` unless `only_stage` applies. |
 | `only_stage` | no | Row-level single-stage override. If set, it overrides that row's start/stop stage settings. |
 | `cortical_depth_enabled` | no | Row-level cortical-depth switch. Blank inherits `--cortical_depth_enabled`. |
+| `distance_from_object_enabled` | no | Row-level polygon-distance switch. Blank inherits `--distance_from_object_enabled`. |
+| `distance_from_object_segmentations` | no | Comma-separated object-distance branches: `reseg`, `original_seg`, and/or `proseg_mask`. Blank uses all three by default. |
 | `merscope_dir` | required for MERSCOPE modes if no cache | Path to the raw MERSCOPE region export folder (contains `transcripts.parquet`, `cell_boundaries/`, `images/`, etc.). |
 | `merscope_spatialdata_path` | required for MERSCOPE modes if no raw dir | Path to an existing (or desired) reusable MERSCOPE SpatialData zarr. If it exists, the build step is **skipped** unless `--force_spatialdata_build true` is passed to Nextflow. |
 | `merscope_image_prefix` | no | Prefix used to match z-plane image keys when more than one run is present. |
@@ -53,6 +56,18 @@ annotation should be reused.
 | `<platform>_side_boundaries_geojson` | Tissue-edge polyline. New piece-aware annotations should contain exactly one edge line. Generic alias: `side_boundaries_geojson`. |
 | `<platform>_exclusion_masks_geojson` | Optional exclusion polygons for tears, folds, vessels, or artefacts. Generic alias: `exclusion_masks_geojson`. |
 | `<platform>_cortical_ribbon_geojson` | Optional complete ribbon polygon. Generic alias: `cortical_ribbon_geojson`. |
+
+### Distance-from-object annotation columns
+
+When object distance is enabled, each active platform must provide a registered
+polygon GeoJSON. The viewer export contains a user-provided `object_type` and a
+stable `object_id` for each polygon. Coordinates must already match the cells;
+this stage performs no registration.
+
+| Column pattern | Description |
+|----------------|-------------|
+| `<platform>_distance_object_annotation_geojson` | Registered object polygon GeoJSON for `merscope` or `xenium`. Aliases include `<platform>_distance_from_object_annotation_geojson`, `<platform>_object_annotation_geojson`, and `<platform>_plaque_annotation_geojson`. |
+| `distance_object_annotation_geojson` | Generic single-platform/shared annotation path. The same `distance_from_object`, `object`, and `plaque` aliases are accepted. |
 
 ### Aliases
 
@@ -109,6 +124,17 @@ Cortical-depth example for a Xenium-only row:
 pair_id,analysis_mode,cortical_depth_enabled,xenium_spatialdata_path,xenium_pial_boundary_geojson,xenium_wm_boundary_geojson,xenium_exclusion_masks_geojson
 EXAMPLE04,xenium,true,/path/to/cache/EXAMPLE04_xenium.zarr,/path/to/EXAMPLE04_pia.geojson,/path/to/EXAMPLE04_wm.geojson,/path/to/EXAMPLE04_exclusions.geojson
 ```
+
+Object-distance example using an already cortical-annotated Xenium zarr:
+
+```csv
+pair_id,analysis_mode,distance_from_object_enabled,distance_from_object_segmentations,only_stage,xenium_spatialdata_path,xenium_distance_object_annotation_geojson
+BLOCK_01,xenium,true,"reseg,original_seg,proseg_mask",distance_from_object,/path/to/BLOCK_01_xenium.zarr,/path/to/BLOCK_01_xenium_objects.geojson
+```
+
+For paired cohorts, `pair_id` must be the tissue-block identifier used for the
+near/far blocking factor. Give each block its own row and platform-specific
+object GeoJSON.
 
 ## Full example
 

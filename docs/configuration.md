@@ -57,7 +57,9 @@ any of them with `--<name>` on the command line.
 | `enable_alignment` | `false` | Fallback row alignment switch. A non-empty samplesheet `enable_alignment` value overrides this per row; alignment only applies to paired rows. |
 | `analysis_segmentation` | `both` | Fallback downstream analysis branches after enrichment. Valid values: `both`, `reseg`, `original_seg`; comma-separated combinations are accepted. A non-empty samplesheet `analysis_segmentation` value overrides this per row. |
 | `mask_image_quantification_enabled` | `true` | Insert the Cellpose-mask image quantification stage between enrichment and QC. A non-empty samplesheet `mask_image_quantification_enabled` value overrides this per row. |
-| `cortical_depth_enabled` | `false` | Insert the cortical-depth stage before QC. Requires per-sample pial/tissue-edge annotations, with optional gray/white boundaries for depth pieces. A non-empty samplesheet `cortical_depth_enabled` value overrides this per row. |
+| `cortical_depth_enabled` | `false` | Insert the cortical-depth stage after clustering. Requires per-sample pial/tissue-edge annotations, with optional gray/white boundaries for depth pieces. A non-empty samplesheet `cortical_depth_enabled` value overrides this per row. |
+| `distance_from_object_enabled` | `false` | Insert registered polygon-edge distance analysis after cortical depth/clustering. A non-empty samplesheet value overrides this per row. |
+| `distance_from_object_segmentations` | `reseg, original_seg, proseg_mask` | Cell-table branches for object distance. A samplesheet value may override this per row. |
 | `force_spatialdata_build` | `false` | Rebuild SpatialData zarrs even if cached. |
 | `start_stage` | `build_spatialdata` | Fallback first stage. Skipped upstream stages are read from published outputs. A samplesheet `start_stage` value overrides this per row. |
 | `stop_stage` | `clustering_squidpy` | Fallback last stage. This includes `spatial_gene_analysis`, which runs between visualization and clustering. MapMyCells is available after clustering but opt-in because it requires reference files. A samplesheet `stop_stage` value overrides this per row. |
@@ -68,13 +70,15 @@ any of them with `--<name>` on the command line.
 Stage names accepted by `start_stage`, `stop_stage`, and `only_stage` are:
 `build_spatialdata`, `segment`, `enrich`, `mask_image_quantification`,
 `qc`, `align`, `align_qc`, `compare`, `visualize`,
-`spatial_gene_analysis`, `clustering_squidpy`, `compute_cortical_depth`, and
-`mapmycells`.
+`spatial_gene_analysis`, `clustering_squidpy`, `compute_cortical_depth`,
+`distance_from_object`, and `mapmycells`.
 `mask_image_quantification` is
 available only when the effective `mask_image_quantification_enabled` value is
 `true`. `compute_cortical_depth` is available only when the effective
 `cortical_depth_enabled` value is `true`. `align` and `align_qc` are available
 only for rows whose effective `enable_alignment` value is `true`.
+`distance_from_object` is available only when the effective
+`distance_from_object_enabled` value is `true`.
 `align`, `align_qc`, and `compare` are available only when
 `analysis_mode = paired`.
 
@@ -129,6 +133,23 @@ only for rows whose effective `enable_alignment` value is `true`.
 | `cortical_depth_contour_levels` | `0.1..0.9` | Depth contours written to GeoJSON/QC overlays. |
 | `cortical_depth_write_spatialdata_table` | `true` | Replace selected SpatialData tables with cortical-depth columns added to `obs`. |
 | `cortical_depth_max_forks` | `2` | Maximum concurrent cortical-depth processes. |
+
+### Distance from object
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `distance_from_object_enabled` | `false` | Run polygon-edge annotation and cohort pseudobulk analysis. |
+| `distance_from_object_segmentations` | `[reseg, original_seg, proseg_mask]` | Selected cell-table branches. |
+| `distance_from_object_object_types` | `null` | Optional object-type allow-list; `null` analyses every named type together. |
+| `distance_from_object_coordinate_unit_um` | `1.0` | Micrometres per registered coordinate unit. |
+| `distance_from_object_near_distance_um` | `50.0` | Exclusive upper boundary of `near`; polygon interiors are always near. |
+| `distance_from_object_far_distance_um` | `100.0` | Inclusive lower boundary of `far`; the intervening band is `middle`. |
+| `distance_from_object_max_distance_um` | `200.0` | Inclusive upper far boundary; larger distances are `beyond_max`. |
+| `distance_from_object_min_cells_per_pseudobulk` | `10` | Minimum eligible grey-matter cells in each pair/proximity pseudobulk. |
+| `distance_from_object_min_pairs` | `2` | Minimum complete tissue blocks with both near and far samples for PyDESeq2. |
+| `distance_from_object_n_cpus` | `8` | PyDESeq2 workers and cohort process CPUs. |
+| `distance_from_object_write_spatialdata_table` | `true` | Add distance columns to selected tables while preserving existing `obs`. |
+| `distance_from_object_max_forks` | `3` | Maximum concurrent per-platform annotation processes. |
 
 ### ProSeg
 

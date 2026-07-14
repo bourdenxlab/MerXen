@@ -17,6 +17,7 @@ ${outdir}/
 │   │   ├── segmentation/
 │   │   ├── enrichment/
 │   │   ├── compute_cortical_depth/
+│   │   ├── distance_from_object/
 │   │   ├── reseg/
 │   │   │   └── qc/
 │   │   └── original_seg/
@@ -26,6 +27,7 @@ ${outdir}/
 │   │   ├── segmentation/
 │   │   ├── enrichment/
 │   │   ├── compute_cortical_depth/
+│   │   ├── distance_from_object/
 │   │   ├── reseg/
 │   │   │   └── qc/
 │   │   └── original_seg/
@@ -46,6 +48,10 @@ ${outdir}/
 │       └── mapmycells/
 ├── <pair_id_2>/
 │   └── ...
+├── distance_from_object/
+│   └── cohort/
+│       ├── merscope/
+│       └── xenium/
 └── ...
 ```
 
@@ -142,6 +148,38 @@ The updated AnnData `obs` columns include `inside_cortical_ribbon`,
 `distance_to_pia_um`, `distance_to_wm_um`, `streamline_thickness_um`,
 `tangential_position_um`, `nearest_streamline_id`, `column_id`, and
 `cortical_depth_qc_flag`.
+
+### Distance from object
+
+Per-block path:
+`${outdir}/<pair_id>/<platform>/distance_from_object/`
+
+Only present when `--distance_from_object_enabled true`.
+
+| File | Contents |
+|------|----------|
+| `latest_input.zarr` | Durable zarr updated in place with nearest-object distance metadata on each selected table. |
+| `distance_from_object_out/registered_object_annotations.geojson` | Validated, normalized copy of the already registered polygon input. |
+| `distance_from_object_out/<segmentation>/cells_with_object_distance.parquet` | Per-cell coordinates, nearest object ID/type, unsigned/signed edge distance, inside flag, proximity bin, tissue annotation, and QC flag. |
+| `distance_from_object_out/<segmentation>/pseudobulk_counts.h5ad` | Raw near/far gene sums for this `pair_id`, restricted to grey matter. |
+| `distance_from_object_out/<segmentation>/pseudobulk_samples.csv` | Pseudobulk group and eligible-cell counts. |
+| `distance_from_object_out/<segmentation>/cells_object_distance.png` | Spatial distance QC plot; PDF is also written. |
+| `distance_from_object_out/<segmentation>/cells_object_proximity_counts.png` | Tissue-by-proximity counts; PDF is also written. |
+| `distance_from_object_out/distance_from_object_summary.json` | Object, tissue, proximity, and pseudobulk counts for all branches. |
+
+Cohort path:
+`${outdir}/distance_from_object/cohort/<platform>/`
+
+| File | Contents |
+|------|----------|
+| `distance_from_object_cohort_out/<segmentation>/paired_pseudobulk_counts.h5ad` | Complete near/far tissue-block pairs sharing a gene panel. |
+| `distance_from_object_cohort_out/<segmentation>/paired_pseudobulk_samples.csv` | PyDESeq2 sample metadata. |
+| `distance_from_object_cohort_out/<segmentation>/near_vs_far_differential_expression.csv` | Paired `~ pair_id + proximity` PyDESeq2 results. A Parquet copy is also written. |
+| `distance_from_object_cohort_out/<segmentation>/near_vs_far_volcano.png` | Near-versus-far volcano plot; PDF is also written. |
+| `distance_from_object_cohort_out/distance_from_object_cohort_summary.json` | Completion/skip status and complete block IDs for every branch. |
+
+See [Distance from object](stages/distance-from-object.md) for the exact bins,
+grey-matter filter, and segmentation mapping.
 
 ### QC
 
