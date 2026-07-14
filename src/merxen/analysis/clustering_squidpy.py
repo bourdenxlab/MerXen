@@ -33,6 +33,7 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 import seaborn as sns
+from matplotlib.colors import to_hex
 from matplotlib.lines import Line2D
 from scipy import sparse
 from scipy.cluster.hierarchy import leaves_list, linkage
@@ -810,7 +811,7 @@ def plot_spatial_scatter(
     is_categorical = isinstance(values.dtype, pd.CategoricalDtype)
     if is_categorical or not pd.api.types.is_numeric_dtype(values):
         categories = pd.Categorical(values.astype(str))
-        scatter = ax.scatter(
+        ax.scatter(
             coordinates[:, 0],
             coordinates[:, 1],
             c=categories.codes,
@@ -819,13 +820,15 @@ def plot_spatial_scatter(
             alpha=float(alpha),
             edgecolors="none",
         )
+        category_colormap = plt.get_cmap("tab20")
+        category_scale = max(len(categories.categories) - 1, 1)
         handles = [
             Line2D(
                 [0],
                 [0],
                 marker="o",
                 linestyle="",
-                color=scatter.cmap(scatter.norm(index)),
+                color=to_hex(category_colormap(index / category_scale)),
                 label=str(label),
                 markersize=4,
             )

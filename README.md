@@ -11,6 +11,7 @@ MerXen takes spatial transcriptomics datasets and runs a standardised pipeline. 
 3. **Mask image quantification** — Quantifies all SpatialData image channels over final Cellpose masks
 4. **Section alignment** — Optionally registers paired adjacent sections to a Xenium reference coordinate system with Spateo
 5. **Analysis and visualisation** — QC metrics, paired gene-level comparison when both platforms are present, single-platform or paired visualisation, per-gene spatial autocorrelation, first-pass Scanpy/Squidpy clustering, and optional local MapMyCells cell type assignment. By default, downstream analysis runs for both ProSeg-resegmented cells and original instrument segmentations; use `--analysis_segmentation reseg` or `--analysis_segmentation original_seg` to restrict it.
+6. **Distance from object** — Optionally annotates cells by nearest registered polygon edge and runs grey-matter-only, paired near-vs-far PyDESeq2 for resegmented, original, and mask-derived cells.
 
 The workflow is orchestrated by Nextflow to process multiple sample pairs with logging and reproducibility.
 
@@ -19,7 +20,7 @@ The workflow is orchestrated by Nextflow to process multiple sample pairs with l
 Full documentation lives in [docs/](docs/). Start with [docs/index.md](docs/index.md).
 
 - Usage: [Getting started](docs/getting-started.md) · [Samplesheet format](docs/samplesheet.md) · [Running the pipeline](docs/running-the-pipeline.md) · [Configuration](docs/configuration.md) · [Outputs](docs/outputs.md)
-- Pipeline stages: [SpatialData build](docs/stages/spatialdata-build.md) · [Segmentation](docs/stages/segmentation.md) · [Enrichment](docs/stages/enrichment.md) · [Mask image quantification](docs/stages/mask-image-quantification.md) · [Cortical depth](docs/stages/cortical-depth.md) · [QC](docs/stages/qc.md) · [Alignment](docs/stages/alignment.md) · [Comparison](docs/stages/comparison.md) · [Visualization](docs/stages/visualization.md) · [Spatial gene analysis](docs/stages/spatial-gene-analysis.md) · [Squidpy clustering](docs/stages/clustering-squidpy.md) · [MapMyCells](docs/stages/mapmycells.md)
+- Pipeline stages: [SpatialData build](docs/stages/spatialdata-build.md) · [Segmentation](docs/stages/segmentation.md) · [Enrichment](docs/stages/enrichment.md) · [Mask image quantification](docs/stages/mask-image-quantification.md) · [Cortical depth](docs/stages/cortical-depth.md) · [QC](docs/stages/qc.md) · [Alignment](docs/stages/alignment.md) · [Comparison](docs/stages/comparison.md) · [Visualization](docs/stages/visualization.md) · [Spatial gene analysis](docs/stages/spatial-gene-analysis.md) · [Squidpy clustering](docs/stages/clustering-squidpy.md) · [Distance from object](docs/stages/distance-from-object.md) · [MapMyCells](docs/stages/mapmycells.md)
 - Developer reference: [Pipeline architecture](docs/pipeline.md) · [Python API](docs/python-api.md) · [CLI reference](docs/cli.md) · [Development workflow](docs/development.md)
 
 ## Repository layout
@@ -40,6 +41,7 @@ MerXen/
 │   ├── qc/                     # Per-dataset and cross-platform metrics
 │   ├── visualization/          # Plotting
 │   ├── analysis/               # Scanpy/Squidpy downstream analyses
+│   ├── distance_from_object/   # Polygon-edge distance + paired pseudobulk DE
 │   └── alignment/              # Optional Spateo cross-section registration
 ├── tests/                      # pytest suite, mirrors src/merxen/
 ├── docs/                       # Project documentation (start at docs/index.md)
@@ -98,7 +100,7 @@ A template samplesheet is provided at [workflows/samplesheet.example.csv](workfl
 cp workflows/samplesheet.example.csv workflows/samplesheet.csv
 ```
 
-The samplesheet points at raw platform folders with optional reusable SpatialData cache paths (`merscope_dir`, `merscope_spatialdata_path`, `xenium_dir`, `xenium_spatialdata_path`, plus per-platform channel, z-range, and voxel-layer settings). Optional row-level columns (`analysis_mode`, `enable_alignment`, `analysis_segmentation`, `cortical_depth_enabled`, `start_stage`, `stop_stage`, `only_stage`) can override the run defaults per sample. In single-platform rows, only the selected platform's source/cache columns are required. The full schema, validation rules, and worked examples are documented in [docs/samplesheet.md](docs/samplesheet.md). For Nextflow invocation options — analysis mode, resuming, stage-range runs, force rebuild, parameter overrides, cluster execution — see [docs/running-the-pipeline.md](docs/running-the-pipeline.md).
+The samplesheet points at raw platform folders with optional reusable SpatialData cache paths (`merscope_dir`, `merscope_spatialdata_path`, `xenium_dir`, `xenium_spatialdata_path`, plus per-platform channel, z-range, and voxel-layer settings). Optional row-level columns (`analysis_mode`, `enable_alignment`, `analysis_segmentation`, `cortical_depth_enabled`, `distance_from_object_enabled`, `distance_from_object_segmentations`, `start_stage`, `stop_stage`, `only_stage`) can override the run defaults per sample. Object-distance runs also provide registered object GeoJSON paths per platform. In single-platform rows, only the selected platform's source/cache columns are required. The full schema, validation rules, and worked examples are documented in [docs/samplesheet.md](docs/samplesheet.md). For Nextflow invocation options — analysis mode, resuming, stage-range runs, force rebuild, parameter overrides, cluster execution — see [docs/running-the-pipeline.md](docs/running-the-pipeline.md).
 
 ## Running tests
 

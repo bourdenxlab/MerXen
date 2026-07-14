@@ -21,6 +21,10 @@ Commands:
                       Quantify image channels over final Cellpose masks
   compute-cortical-depth
                       Compute Laplace/equal-area cortical-depth coordinates
+  distance-from-object
+                      Assign registered polygon-edge distances and pseudobulks
+  distance-from-object-cohort
+                      Run paired near-vs-far PyDESeq2 by platform
   qc                 Compute geometry and assignment QC metrics
   align              Align MERSCOPE into paired Xenium coordinates
   alignment-qc       Compute post-alignment QC metrics
@@ -135,6 +139,28 @@ merxen compute-cortical-depth --config cortical_depth_config.json
 | `--config PATH` | JSON validated against `CorticalDepthConfig`. |
 
 Details: [Cortical depth](stages/cortical-depth.md).
+
+---
+
+## `merxen distance-from-object`
+
+Annotate one platform zarr and create tissue-block near/far pseudobulks.
+
+```bash
+merxen distance-from-object --config distance_from_object_config.json
+```
+
+## `merxen distance-from-object-cohort`
+
+Combine pair-level pseudobulks for one platform and run paired PyDESeq2.
+
+```bash
+merxen distance-from-object-cohort --config distance_from_object_cohort_config.json
+```
+
+The commands validate `DistanceFromObjectConfig` and
+`DistanceFromObjectCohortConfig`, respectively. See [Distance from
+object](stages/distance-from-object.md).
 
 ---
 

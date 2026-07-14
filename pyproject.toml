@@ -26,6 +26,7 @@ dependencies = [
     "seaborn>=0.13",
     "scanpy>=1.10",
     "squidpy>=1.6",
+    "pydeseq2>=0.5.4,<0.6",
     "cell_type_mapper @ git+https://github.com/AllenInstitute/cell_type_mapper@v1.5.5",
     "python-igraph>=0.11",
     "leidenalg>=0.10",
