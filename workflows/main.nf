@@ -4,6 +4,7 @@ include { BUILD_SPATIALDATA } from "./modules/spatialdata_build"
 include { ENSURE_PROSEG } from "./modules/proseg_bootstrap"
 include { SEGMENT } from "./modules/segmentation"
 include { ENRICH } from "./modules/enrichment"
+include { VIEWER_CACHE } from "./modules/viewer_cache"
 include { MASK_IMAGE_QUANTIFICATION } from "./modules/mask_image_quantification"
 include { COMPUTE_CORTICAL_DEPTH } from "./modules/compute_cortical_depth"
 include {
@@ -481,6 +482,10 @@ def normalizeStage(rawValue, paramName) {
         "segmentation": "segment",
         "enrich": "enrich",
         "enrichment": "enrich",
+        "build_viewer_caches": "build_viewer_caches",
+        "viewer_caches": "build_viewer_caches",
+        "viewer_cache": "build_viewer_caches",
+        "pyramids": "build_viewer_caches",
         "mask_image_quantification": "mask_image_quantification",
         "image_quantification": "mask_image_quantification",
         "quantify_images": "mask_image_quantification",
@@ -519,7 +524,8 @@ def normalizeStage(rawValue, paramName) {
     if (!aliases.containsKey(key)) {
         throw new IllegalArgumentException(
             "Unknown ${paramName} '${raw}'. Valid stages: " +
-            "build_spatialdata, segment, enrich, mask_image_quantification, " +
+            "build_spatialdata, segment, enrich, build_viewer_caches, " +
+            "mask_image_quantification, " +
             "compute_cortical_depth, distance_from_object, qc, align, align_qc, " +
             "compare, visualize, spatial_gene_analysis, " +
             "clustering_squidpy, mapmycells"
@@ -533,9 +539,13 @@ def activeStageOrder(
     pairedMode,
     maskImageQuantificationEnabled,
     corticalDepthEnabled,
-    distanceFromObjectEnabled
+    distanceFromObjectEnabled,
+    viewerCacheEnabled
 ) {
     def stages = ["build_spatialdata", "segment", "enrich"]
+    if (viewerCacheEnabled) {
+        stages += ["build_viewer_caches"]
+    }
     if (maskImageQuantificationEnabled) {
         stages += ["mask_image_quantification"]
     }
@@ -911,6 +921,15 @@ def rowSampleSettings(row, params) {
         true,
         "mask_image_quantification_enabled for ${pairId}",
     )
+    def viewerCacheEnabled = boolOrDefault(
+        rowFieldOrDefault(
+            row,
+            "viewer_cache_enabled",
+            params.viewer_cache_enabled,
+        ),
+        true,
+        "viewer_cache_enabled for ${pairId}",
+    )
     def corticalDepthEnabled = boolOrDefault(
         rowFieldOrDefault(
             row,
@@ -967,6 +986,7 @@ def rowSampleSettings(row, params) {
         maskImageQuantificationEnabled,
         corticalDepthEnabled,
         distanceFromObjectEnabled,
+        viewerCacheEnabled,
     )
     def startStage = normalizeStage(startStageRaw, startParamName)
     def stopStage = normalizeStage(stopStageRaw, stopParamName)
@@ -991,6 +1011,12 @@ def rowSampleSettings(row, params) {
     def runBuild = stageInRange("build_spatialdata", startStage, stopStage, stageOrder)
     def runSegment = stageInRange("segment", startStage, stopStage, stageOrder)
     def runEnrich = stageInRange("enrich", startStage, stopStage, stageOrder)
+    def runBuildViewerCaches = stageInRange(
+        "build_viewer_caches",
+        startStage,
+        stopStage,
+        stageOrder,
+    )
     def runMaskImageQuantification = stageInRange(
         "mask_image_quantification",
         startStage,
@@ -1063,6 +1089,7 @@ def rowSampleSettings(row, params) {
         run_build: runBuild,
         run_segment: runSegment,
         run_enrich: runEnrich,
+        run_build_viewer_caches: runBuildViewerCaches,
         run_mask_image_quantification: runMaskImageQuantification,
         run_compute_cortical_depth: runComputeCorticalDepth,
         run_distance_from_object: runDistanceFromObject,
@@ -1076,6 +1103,7 @@ def rowSampleSettings(row, params) {
         run_mapmycells: runMapMyCells,
         need_build_results: runSegment || runEnrich,
         need_enriched_zarrs: (
+            runBuildViewerCaches ||
             runMaskImageQuantification ||
             runComputeCorticalDepth ||
             runDistanceFromObject ||
@@ -1476,6 +1504,95 @@ workflow {
             )
     }
 
+    // Pre-build the napari viewer's derived caches (label masks + label/outline
+    // pyramids + image pyramid) into the enriched latest zarr. This is a separate
+    // writer of the shared store, so it is serialized into the post-enrich chain:
+    // the stages that consume the enriched zarr read `post_enrich_zarrs_ch` below,
+    // which is the viewer-cache output when the stage runs and the enriched zarr
+    // passthrough otherwise.
+    viewer_cache_gate_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
+        if (!settings.run_build_viewer_caches) {
+            []
+        } else {
+            settings.active_platforms.collect { platform ->
+                tuple("${pairId}|${platform}", true)
+            }
+        }
+    }
+
+    viewer_cache_transform_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+        if (!settings.run_build_viewer_caches) {
+            []
+        } else {
+            settings.active_platforms.collect { platform ->
+                def transformPath = platform == "MERSCOPE"
+                    ? chooseField(row, ["merscope_transform_path"])
+                    : chooseField(row, ["xenium_spec_path"])
+                tuple("${pairId}|${platform}", transformPath)
+            }
+        }
+    }
+
+    viewer_cache_inputs_ch = enriched_zarrs_ch
+        .join(viewer_cache_gate_ch)
+        .join(viewer_cache_transform_ch)
+        .map { key, pairId, platform, enrichedLatestZarr, _runFlag, transformPath ->
+            def resolvedTransform = (transformPath && transformPath.toString().trim())
+                ? file(transformPath).toAbsolutePath().toString()
+                : null
+            def viewerCacheConfig = [
+                dataset_name: "${pairId}_${platform}",
+                platform: platform,
+                latest_zarr_path: "latest_input.zarr",
+                original_data_path: "latest_input.zarr",
+                output_dir: "viewer_cache_out",
+                transform_path: resolvedTransform,
+                downsample: params.viewer_cache_downsample,
+                label_chunk_size: params.viewer_cache_label_chunk_size,
+                contour_width: params.viewer_cache_contour_width,
+                min_size: params.viewer_cache_min_size,
+                build_image_pyramid: params.viewer_cache_build_image_pyramid,
+            ]
+
+            tuple(
+                key,
+                pairId,
+                platform,
+                groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(viewerCacheConfig)),
+                enrichedLatestZarr,
+            )
+        }
+
+    viewer_cache_results_ch = VIEWER_CACHE(viewer_cache_inputs_ch)
+
+    viewer_cached_zarrs_ch = viewer_cache_results_ch.map {
+        key, pairId, platform, cachedLatestZarr, _viewerCacheOutDir ->
+            tuple(
+                key,
+                pairId,
+                platform,
+                java.nio.file.Paths.get(cachedLatestZarr.toString()).toRealPath().toString(),
+            )
+    }
+
+    viewer_cache_passthrough_gate_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
+        if (!(settings.need_enriched_zarrs && !settings.run_build_viewer_caches)) {
+            []
+        } else {
+            settings.active_platforms.collect { platform ->
+                tuple("${pairId}|${platform}", true)
+            }
+        }
+    }
+
+    viewer_cache_passthrough_ch = enriched_zarrs_ch
+        .join(viewer_cache_passthrough_gate_ch)
+        .map { key, pairId, platform, enrichedLatestZarr, _runFlag ->
+            tuple(key, pairId, platform, enrichedLatestZarr)
+        }
+
+    post_enrich_zarrs_ch = viewer_cached_zarrs_ch.mix(viewer_cache_passthrough_ch)
+
     mask_image_quantification_gate_ch = sample_rows_ch.flatMap {
         pairId, _row, settings ->
             if (!settings.run_mask_image_quantification) {
@@ -1492,7 +1609,7 @@ workflow {
             tuple(key, maskPath)
     }
 
-    mask_image_quantification_inputs_ch = enriched_zarrs_ch
+    mask_image_quantification_inputs_ch = post_enrich_zarrs_ch
         .join(mask_image_quantification_masks_ch)
         .join(mask_image_quantification_gate_ch)
         .map { key, pairId, platform, enrichedLatestZarr, maskPath, _runFlag ->
@@ -1538,7 +1655,7 @@ workflow {
         }
     }
 
-    enriched_downstream_zarrs_ch = enriched_zarrs_ch
+    enriched_downstream_zarrs_ch = post_enrich_zarrs_ch
         .join(enriched_downstream_gate_ch)
         .map { key, pairId, platform, enrichedLatestZarr, _runFlag ->
             tuple(key, pairId, platform, enrichedLatestZarr)

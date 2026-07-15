@@ -32,6 +32,7 @@ from merxen.cli.run_segmentation import (
     segment_command,
 )
 from merxen.cli.run_spatial_gene_analysis import spatial_gene_analysis_command
+from merxen.cli.run_viewer_cache import build_viewer_caches_command
 from merxen.cli.run_visualization import visualize_command
 
 
@@ -52,6 +53,7 @@ main.add_command(segment_command)
 main.add_command(cellpose_segment_command)
 main.add_command(proseg_segment_command)
 main.add_command(enrich_command)
+main.add_command(build_viewer_caches_command)
 main.add_command(mask_image_quantification_command)
 main.add_command(qc_command)
 main.add_command(align_command)
