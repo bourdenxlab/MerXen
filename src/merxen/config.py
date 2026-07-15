@@ -265,6 +265,29 @@ class EnrichmentConfig(BaseModel):
     transform_path: Path | None = None
 
 
+class ViewerCacheConfig(BaseModel):
+    """Configuration for pre-building the napari viewer's derived caches.
+
+    Runs after enrichment and materializes the label masks, label/outline
+    pyramids, and image pyramid the comparison viewer would otherwise build on
+    the fly. Parameter defaults mirror the viewer's own defaults; expose them via
+    Nextflow params to keep them in lockstep with the viewer's runtime settings.
+    """
+
+    dataset_name: str
+    platform: Literal["MERSCOPE", "XENIUM"]
+    latest_zarr_path: Path
+    original_data_path: Path
+    output_dir: Path
+    transform_path: Path | None = None
+    downsample: int = Field(default=4, ge=2)
+    label_chunk_size: int = Field(default=2048, gt=0)
+    contour_width: int = Field(default=1, ge=0)
+    min_size: int = Field(default=4096, gt=0)
+    shape_keys: list[str] | None = None
+    build_image_pyramid: bool = True
+
+
 class MaskImageQuantificationConfig(BaseModel):
     """Configuration for Cellpose-mask image-channel quantification."""
 
