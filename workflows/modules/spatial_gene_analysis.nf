@@ -41,7 +41,23 @@ process SPATIAL_GENE_ANALYSIS {
   "n_neighbors": ${params.spatial_gene_analysis_n_neighbors},
   "top_n": ${params.spatial_gene_analysis_top_n},
   "spatial_point_size": ${params.spatial_gene_analysis_spatial_point_size},
-  "figure_dpi": ${params.spatial_gene_analysis_figure_dpi}
+  "figure_dpi": ${params.spatial_gene_analysis_figure_dpi},
+  "transcript_analysis_enabled": ${params.spatial_gene_analysis_transcript_analysis_enabled},
+  "transcript_min_count": ${params.spatial_gene_analysis_transcript_min_count},
+  "paircorr_min_count": ${params.spatial_gene_analysis_paircorr_min_count},
+  "paircorr_max_transcripts_per_gene": ${params.spatial_gene_analysis_paircorr_max_transcripts_per_gene},
+  "paircorr_distance_edges_um": ${groovy.json.JsonOutput.toJson(params.spatial_gene_analysis_paircorr_distance_edges_um)},
+  "paircorr_permutations": ${params.spatial_gene_analysis_paircorr_permutations},
+  "paircorr_seed": ${params.spatial_gene_analysis_paircorr_seed},
+  "paircorr_n_jobs": ${task.cpus},
+  "transcript_chunk_rows": ${params.spatial_gene_analysis_transcript_chunk_rows},
+  "pericellular_distance_um": ${params.spatial_gene_analysis_pericellular_distance_um},
+  "membrane_distance_um": ${params.spatial_gene_analysis_membrane_distance_um},
+  "signed_distance_edges_um": ${groovy.json.JsonOutput.toJson(params.spatial_gene_analysis_signed_distance_edges_um)},
+  "transcript_diagnostic_top_n": ${params.spatial_gene_analysis_transcript_diagnostic_top_n},
+  "transcript_diagnostic_max_genes": ${params.spatial_gene_analysis_transcript_diagnostic_max_genes},
+  "transcript_diagnostic_window_um": ${params.spatial_gene_analysis_transcript_diagnostic_window_um},
+  "transcript_plot_max_points": ${params.spatial_gene_analysis_transcript_plot_max_points}
 }
 JSON
 

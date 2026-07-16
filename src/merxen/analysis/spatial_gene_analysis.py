@@ -7,6 +7,7 @@ import logging
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 import anndata as ad
 import matplotlib
@@ -21,10 +22,20 @@ import scanpy as sc
 import seaborn as sns
 import squidpy as sq
 from scipy import sparse
+from scipy.spatial import cKDTree
+from shapely import STRtree
+from shapely.geometry import box
+from shapely.geometry.base import BaseGeometry
 
 from merxen.analysis.clustering_squidpy import (
     load_spatialdata_adata,
     remove_control_features,
+)
+from merxen.analysis.transcript_spatial_patterns import (
+    COMPARTMENTS,
+    TranscriptPatternResults,
+    run_transcript_pattern_analysis,
+    transcript_indices_for_gene,
 )
 from merxen.config import SpatialGeneAnalysisConfig
 from merxen.memory import force_release, log_status
@@ -95,6 +106,108 @@ def run_spatial_gene_analysis(
             point_size=config.spatial_point_size,
             dpi=config.figure_dpi,
         )
+        n_cells = analysis_adata.n_obs
+        n_genes = analysis_adata.n_vars
+        del adata, analysis_adata
+        force_release(note=f"before transcript spatial analysis {sample.sample_id}")
+
+        transcript_outputs: dict[str, Path] = {}
+        transcript_counts: dict[str, int | float] = {}
+        transcript_gene_plots: dict[str, Path] = {}
+        if config.transcript_analysis_enabled:
+            import spatialdata as sd
+
+            sdata_obj = sd.read_zarr(sample.zarr_path)
+            try:
+                transcript_results = run_transcript_pattern_analysis(
+                    sdata_obj=sdata_obj,
+                    sample=sample,
+                    config=config,
+                )
+                summary_path = (
+                    sample_dir / f"{sample.sample_id}_transcript_spatial_patterns.csv"
+                )
+                paircorr_path = (
+                    sample_dir
+                    / f"{sample.sample_id}_transcript_pair_correlation.parquet"
+                )
+                signed_distance_path = (
+                    sample_dir
+                    / f"{sample.sample_id}_transcript_signed_distance.parquet"
+                )
+                transcript_rankings_path = (
+                    sample_dir
+                    / f"{sample.sample_id}_transcript_spatial_pattern_rankings.csv"
+                )
+                transcript_results.summary.to_csv(summary_path, index=False)
+                transcript_results.signed_distance.to_parquet(
+                    signed_distance_path,
+                    index=False,
+                )
+                transcript_results.paircorr.to_parquet(paircorr_path, index=False)
+                transcript_results.rankings.to_csv(
+                    transcript_rankings_path,
+                    index=False,
+                )
+                transcript_plot_dir = sample_dir / "plots" / "transcript_patterns"
+                transcript_gene_plots = plot_transcript_pattern_diagnostics(
+                    transcript_results,
+                    cell_shapes=sdata_obj.shapes[sample.shape_key],
+                    nuclei_shapes=sdata_obj.shapes[sample.nuclei_shape_key],
+                    output_dir=transcript_plot_dir,
+                    sample_id=sample.sample_id,
+                    top_n=config.transcript_diagnostic_top_n,
+                    max_genes=config.transcript_diagnostic_max_genes,
+                    window_um=config.transcript_diagnostic_window_um,
+                    max_points=config.transcript_plot_max_points,
+                    dpi=config.figure_dpi,
+                )
+                transcript_outputs = {
+                    "transcript_summary_csv": summary_path,
+                    "signed_distance_parquet": signed_distance_path,
+                    "paircorr_parquet": paircorr_path,
+                    "transcript_rankings_csv": transcript_rankings_path,
+                    "transcript_diagnostics_dir": transcript_plot_dir,
+                }
+                transcript_counts = {
+                    "n_transcripts_input": transcript_results.data.n_input,
+                    "n_transcripts_in_tissue": len(transcript_results.data.coordinates),
+                    "n_transcripts_outside_tissue": (
+                        transcript_results.data.n_outside_tissue
+                    ),
+                    "n_transcripts_invalid_coordinates": (
+                        transcript_results.data.n_invalid_coordinates
+                    ),
+                    "n_control_transcripts_excluded": (
+                        transcript_results.data.n_controls_excluded
+                    ),
+                    "n_transcript_genes": len(transcript_results.data.gene_names),
+                    "n_cell_overlap_ambiguous": int(
+                        np.count_nonzero(transcript_results.data.cell_overlap_count > 1)
+                    ),
+                    "n_nucleus_overlap_ambiguous": int(
+                        np.count_nonzero(
+                            transcript_results.data.nucleus_overlap_count > 1
+                        )
+                    ),
+                    "tissue_area_um2": float(transcript_results.tissue_polygon.area),
+                }
+                compartment_counts = np.bincount(
+                    transcript_results.data.compartments,
+                    minlength=len(COMPARTMENTS),
+                )
+                transcript_counts.update(
+                    {
+                        f"n_{compartment}_transcripts": int(compartment_counts[code])
+                        for code, compartment in enumerate(COMPARTMENTS)
+                    }
+                )
+                del transcript_results
+            finally:
+                del sdata_obj
+                force_release(
+                    note=f"after transcript spatial analysis {sample.sample_id}"
+                )
         manifest = write_spatial_gene_analysis_manifest(
             sample_dir / f"{sample.sample_id}_spatial_gene_analysis_manifest.json",
             sample_id=sample.sample_id,
@@ -103,9 +216,12 @@ def run_spatial_gene_analysis(
             rankings_csv=ranking_csv,
             distribution_plot=distribution_plot,
             gene_plots=gene_plots,
-            n_cells=analysis_adata.n_obs,
-            n_genes=analysis_adata.n_vars,
+            n_cells=n_cells,
+            n_genes=n_genes,
             config=config,
+            transcript_outputs=transcript_outputs,
+            transcript_counts=transcript_counts,
+            transcript_gene_plots=transcript_gene_plots,
         )
 
         results[sample.sample_id] = {
@@ -113,8 +229,8 @@ def run_spatial_gene_analysis(
             "rankings_csv": ranking_csv,
             "distribution_plot": distribution_plot,
             "manifest": manifest,
+            **transcript_outputs,
         }
-        del adata, analysis_adata
         force_release(note=f"after spatial_gene_analysis {sample.sample_id}")
 
     return results
@@ -372,6 +488,320 @@ def plot_spatial_gene_expression(
     return output_path
 
 
+def plot_transcript_pattern_diagnostics(
+    results: TranscriptPatternResults,
+    *,
+    cell_shapes: object,
+    nuclei_shapes: object,
+    output_dir: Path,
+    sample_id: str,
+    top_n: int = 3,
+    max_genes: int = 30,
+    window_um: float = 250.0,
+    max_points: int = 20_000,
+    dpi: int = 180,
+) -> dict[str, Path]:
+    """Plot tissue and subcellular views for representative ranked genes."""
+    genes = _select_transcript_diagnostic_genes(
+        results.rankings,
+        top_n=top_n,
+        max_genes=max_genes,
+    )
+    if not genes:
+        return {}
+
+    cell_geometries = _plot_geometries(cell_shapes)
+    nuclei_geometries = _plot_geometries(nuclei_shapes)
+    cell_tree = STRtree(cell_geometries)
+    nucleus_tree = STRtree(nuclei_geometries)
+    summary_by_gene = results.summary.set_index("gene")
+    paths: dict[str, Path] = {}
+    for gene in genes:
+        indices = transcript_indices_for_gene(results.data, gene)
+        if len(indices) == 0:
+            continue
+        coordinates = results.data.coordinates[indices]
+        compartments = results.data.compartments[indices]
+        tissue_take = _even_sample_indices(len(indices), max_points)
+        center = _densest_window_center(
+            coordinates,
+            window_um=window_um,
+            max_points=min(max_points, 5_000),
+        )
+        half = float(window_um) / 2.0
+        local = (
+            (coordinates[:, 0] >= center[0] - half)
+            & (coordinates[:, 0] <= center[0] + half)
+            & (coordinates[:, 1] >= center[1] - half)
+            & (coordinates[:, 1] <= center[1] + half)
+        )
+
+        fig, axes = plt.subplots(2, 2, figsize=(13.0, 11.0))
+        _plot_transcript_map(
+            axes[0, 0],
+            coordinates[tissue_take],
+            compartments[tissue_take],
+            title="Tissue-wide transcript locations",
+        )
+        _plot_geometry_outline(
+            axes[0, 0],
+            results.tissue_polygon,
+            color="#262626",
+            linewidth=0.8,
+        )
+
+        local_box = box(
+            center[0] - half,
+            center[1] - half,
+            center[0] + half,
+            center[1] + half,
+        )
+        _plot_local_shape_outlines(
+            axes[0, 1],
+            tree=cell_tree,
+            geometries=cell_geometries,
+            window=local_box,
+            color="#777777",
+            linewidth=0.45,
+        )
+        _plot_local_shape_outlines(
+            axes[0, 1],
+            tree=nucleus_tree,
+            geometries=nuclei_geometries,
+            window=local_box,
+            color="#2b6cb0",
+            linewidth=0.7,
+        )
+        _plot_transcript_map(
+            axes[0, 1],
+            coordinates[local],
+            compartments[local],
+            title=f"Densest {window_um:g} µm window",
+        )
+        axes[0, 1].set_xlim(center[0] - half, center[0] + half)
+        axes[0, 1].set_ylim(center[1] - half, center[1] + half)
+
+        _plot_signed_distance_profile(axes[1, 0], results, gene)
+        _plot_paircorr_profile(axes[1, 1], results, gene)
+        pattern = str(summary_by_gene.loc[gene, "pattern_label"])
+        fig.suptitle(
+            f"{sample_id}: {gene} · {pattern} · n={len(indices):,}",
+            fontsize=14,
+        )
+        fig.tight_layout()
+        out_path = prepare_plot_output(
+            output_dir / f"{sample_id}_{_safe_filename(gene)}.png"
+        )
+        save_figure(fig, out_path, dpi=dpi, bbox_inches="tight")
+        plt.close(fig)
+        paths[gene] = out_path
+    return paths
+
+
+def _select_transcript_diagnostic_genes(
+    rankings: pd.DataFrame,
+    *,
+    top_n: int,
+    max_genes: int,
+) -> list[str]:
+    if rankings.empty:
+        return []
+    categories = (
+        lambda metric: not metric.startswith(("paircorr_", "signed_distance_")),
+        lambda metric: metric.startswith("paircorr_compartment_"),
+        lambda metric: metric.startswith("signed_distance_"),
+    )
+    selected: list[str] = []
+    quota = max(1, int(max_genes) // len(categories))
+    for belongs in categories:
+        category_genes: list[str] = []
+        for row in rankings.itertuples(index=False):
+            if int(row.rank) > int(top_n) or not belongs(str(row.metric)):
+                continue
+            gene = str(row.gene)
+            if gene not in selected and gene not in category_genes:
+                category_genes.append(gene)
+            if len(category_genes) >= quota:
+                break
+        selected.extend(category_genes)
+    if len(selected) < max_genes:
+        for row in rankings.itertuples(index=False):
+            if int(row.rank) > int(top_n):
+                continue
+            gene = str(row.gene)
+            if gene not in selected:
+                selected.append(gene)
+            if len(selected) >= max_genes:
+                break
+    return selected[: int(max_genes)]
+
+
+def _plot_geometries(shapes: Any) -> np.ndarray:
+    geometries = np.asarray(shapes.geometry, dtype=object)
+    return np.asarray(
+        [geom for geom in geometries if geom is not None and not geom.is_empty],
+        dtype=object,
+    )
+
+
+def _even_sample_indices(length: int, maximum: int) -> np.ndarray:
+    if length <= maximum:
+        return np.arange(length, dtype=np.int64)
+    return np.linspace(0, length - 1, num=int(maximum), dtype=np.int64)
+
+
+def _densest_window_center(
+    coordinates: np.ndarray,
+    *,
+    window_um: float,
+    max_points: int,
+) -> np.ndarray:
+    take = _even_sample_indices(len(coordinates), max_points)
+    sampled = np.asarray(coordinates[take], dtype=float)
+    if len(sampled) == 1:
+        return np.asarray(sampled[0], dtype=float)
+    tree = cKDTree(sampled)
+    counts = tree.query_ball_point(
+        sampled,
+        r=float(window_um) / 2.0,
+        return_length=True,
+    )
+    return np.asarray(sampled[int(np.argmax(counts))], dtype=float)
+
+
+def _plot_transcript_map(
+    ax: plt.Axes,
+    coordinates: np.ndarray,
+    compartments: np.ndarray,
+    *,
+    title: str,
+) -> None:
+    colors = ("#805ad5", "#dd6b20", "#319795")
+    for code, (label, color) in enumerate(zip(COMPARTMENTS, colors, strict=True)):
+        take = compartments == code
+        if take.any():
+            ax.scatter(
+                coordinates[take, 0],
+                coordinates[take, 1],
+                s=3.0,
+                c=color,
+                alpha=0.65,
+                linewidths=0,
+                label=label,
+                rasterized=True,
+            )
+    ax.set_title(title)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlabel("x (µm)")
+    ax.set_ylabel("y (µm)")
+    ax.legend(loc="best", markerscale=2.5, frameon=False)
+
+
+def _plot_local_shape_outlines(
+    ax: plt.Axes,
+    *,
+    tree: STRtree,
+    geometries: np.ndarray,
+    window: BaseGeometry,
+    color: str,
+    linewidth: float,
+) -> None:
+    indices = np.asarray(tree.query(window), dtype=np.int64)[:2_000]
+    for index in indices:
+        _plot_geometry_outline(
+            ax,
+            geometries[index],
+            color=color,
+            linewidth=linewidth,
+        )
+
+
+def _plot_geometry_outline(
+    ax: plt.Axes,
+    geometry: BaseGeometry,
+    *,
+    color: str,
+    linewidth: float,
+) -> None:
+    boundary = geometry.boundary
+    parts = getattr(boundary, "geoms", (boundary,))
+    for part in parts:
+        coords = np.asarray(part.coords, dtype=float)
+        ax.plot(
+            coords[:, 0],
+            coords[:, 1],
+            color=color,
+            linewidth=linewidth,
+            alpha=0.8,
+        )
+
+
+def _plot_signed_distance_profile(
+    ax: plt.Axes,
+    results: TranscriptPatternResults,
+    gene: str,
+) -> None:
+    rows = results.signed_distance[results.signed_distance["gene"] == gene]
+    for boundary, color in (("cell", "#dd6b20"), ("nucleus", "#2b6cb0")):
+        subset = rows[rows["boundary"] == boundary].sort_values("bin_index")
+        ax.plot(
+            subset["bin_index"],
+            subset["enrichment_log2_odds"],
+            marker="o",
+            markersize=3.5,
+            color=color,
+            label=boundary,
+        )
+    labels = (
+        rows[rows["boundary"] == "cell"]
+        .sort_values("bin_index")["bin_label"]
+        .astype(str)
+    )
+    ax.set_xticks(np.arange(len(labels)), labels, rotation=70, ha="right")
+    ax.axhline(0.0, color="#555555", linewidth=0.8, linestyle="--")
+    ax.set_title("Signed-distance enrichment")
+    ax.set_ylabel("log2 odds vs all transcripts")
+    ax.legend(frameon=False)
+    ax.grid(axis="y", color="#e4e4e4", linewidth=0.6)
+
+
+def _plot_paircorr_profile(
+    ax: plt.Axes,
+    results: TranscriptPatternResults,
+    gene: str,
+) -> None:
+    rows = (
+        results.paircorr[results.paircorr["gene"] == gene]
+        if "gene" in results.paircorr.columns
+        else pd.DataFrame()
+    )
+    if rows.empty:
+        ax.text(0.5, 0.5, "Below pair-correlation count threshold", ha="center")
+        ax.set_axis_off()
+        return
+    colors = {"global": "#4a5568", "compartment_stratified": "#c53030"}
+    for null_model, subset in rows.groupby("null_model", sort=False):
+        subset = subset.sort_values("band_index")
+        ax.plot(
+            subset["band_index"],
+            subset["paircorr_enrichment"],
+            marker="o",
+            color=colors[str(null_model)],
+            label=str(null_model).replace("_", " "),
+        )
+    labels = (
+        rows[rows["null_model"] == "global"]
+        .sort_values("band_index")["band_label"]
+        .astype(str)
+    )
+    ax.set_xticks(np.arange(len(labels)), labels, rotation=35, ha="right")
+    ax.axhline(1.0, color="#555555", linewidth=0.8, linestyle="--")
+    ax.set_title("Multiscale same-gene pair enrichment")
+    ax.set_ylabel("observed / random-label mean")
+    ax.legend(frameon=False)
+    ax.grid(axis="y", color="#e4e4e4", linewidth=0.6)
+
+
 def write_spatial_gene_analysis_manifest(
     output_path: Path,
     *,
@@ -384,6 +814,9 @@ def write_spatial_gene_analysis_manifest(
     n_cells: int,
     n_genes: int,
     config: SpatialGeneAnalysisConfig,
+    transcript_outputs: dict[str, Path] | None = None,
+    transcript_counts: dict[str, int | float] | None = None,
+    transcript_gene_plots: dict[str, Path] | None = None,
 ) -> Path:
     """Write a compact JSON manifest for one sample's outputs."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -405,13 +838,35 @@ def write_spatial_gene_analysis_manifest(
             "top_n": config.top_n,
             "spatial_point_size": config.spatial_point_size,
             "figure_dpi": config.figure_dpi,
+            "transcript_analysis_enabled": config.transcript_analysis_enabled,
+            "transcript_min_count": config.transcript_min_count,
+            "paircorr_min_count": config.paircorr_min_count,
+            "paircorr_max_transcripts_per_gene": (
+                config.paircorr_max_transcripts_per_gene
+            ),
+            "paircorr_distance_edges_um": config.paircorr_distance_edges_um,
+            "paircorr_permutations": config.paircorr_permutations,
+            "paircorr_seed": config.paircorr_seed,
+            "paircorr_n_jobs": config.paircorr_n_jobs,
+            "pericellular_distance_um": config.pericellular_distance_um,
+            "membrane_distance_um": config.membrane_distance_um,
+            "signed_distance_edges_um": config.signed_distance_edges_um,
+            "transcript_diagnostic_top_n": config.transcript_diagnostic_top_n,
+            "transcript_diagnostic_max_genes": (config.transcript_diagnostic_max_genes),
+            "transcript_diagnostic_window_um": (config.transcript_diagnostic_window_um),
+            "transcript_plot_max_points": config.transcript_plot_max_points,
         },
         "outputs": {
             "metrics_csv": str(metrics_csv),
             "rankings_csv": str(rankings_csv),
             "distribution_plot": str(distribution_plot),
             "gene_plots": {key: str(value) for key, value in gene_plots.items()},
+            "transcript_gene_plots": {
+                key: str(value) for key, value in (transcript_gene_plots or {}).items()
+            },
+            **{key: str(value) for key, value in (transcript_outputs or {}).items()},
         },
+        "transcript_counts": transcript_counts or {},
     }
     output_path.write_text(json.dumps(manifest, indent=2) + "\n")
     return output_path

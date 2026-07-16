@@ -1,4 +1,4 @@
-"""CLI command for per-gene Squidpy spatial autocorrelation analysis."""
+"""CLI command for cell- and transcript-level spatial gene analysis."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from merxen.config import SpatialGeneAnalysisConfig, load_config_from_json
     help="Path to JSON config validated against SpatialGeneAnalysisConfig.",
 )
 def spatial_gene_analysis_command(config_path: Path) -> None:
-    """Run per-gene Moran's I and Geary's C spatial analysis."""
+    """Run cell autocorrelation and transcript-coordinate spatial analysis."""
     cfg = load_config_from_json(config_path, SpatialGeneAnalysisConfig)
     assert isinstance(cfg, SpatialGeneAnalysisConfig)
 
