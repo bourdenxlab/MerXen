@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -285,7 +286,7 @@ def _cellpose_gdf_from_mask(
     )
 
 
-def _load_merscope_transform(config: EnrichmentConfig) -> np.ndarray:
+def _load_merscope_transform(config: EnrichmentConfig | _TransformInputs) -> np.ndarray:
     """Load MERSCOPE transform matrix from config."""
     candidates: list[Path] = []
     if config.transform_path is not None:
@@ -306,7 +307,7 @@ def _load_merscope_transform(config: EnrichmentConfig) -> np.ndarray:
     )
 
 
-def _find_xenium_pixel_size(config: EnrichmentConfig) -> float:
+def _find_xenium_pixel_size(config: EnrichmentConfig | _TransformInputs) -> float:
     """Find Xenium micron-per-pixel value from config transform sources."""
     candidates: list[Path] = []
     if config.transform_path is not None:
@@ -341,8 +342,43 @@ def _find_xenium_pixel_size(config: EnrichmentConfig) -> float:
     )
 
 
+@dataclass(frozen=True)
+class _TransformInputs:
+    """Minimal fields the pixel->micron transform loaders read off a config.
+
+    Lets :func:`resolve_px_to_um_transform` reuse the merscope/xenium loaders
+    below (which only touch these three attributes) without constructing a full
+    :class:`EnrichmentConfig`.
+    """
+
+    platform: str
+    transform_path: Path | None
+    original_data_path: Path
+
+
+def resolve_px_to_um_transform(
+    platform: str,
+    original_data_path: Path,
+    transform_path: Path | None = None,
+) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    """Return the image pixel->micron affine ``(x_transform, y_transform)``.
+
+    Each tuple is ``(a, b, offset)`` such that ``x_um = a*x_px + b*y_px + offset``
+    (and likewise for y). This is the transform that maps morphology-image pixels
+    (and thus Cellpose mask pixels) into the micron coordinate system the shapes
+    live in. Shared by enrichment and the viewer-cache stage.
+    """
+    return _dataset_cellpose_transform(
+        _TransformInputs(
+            platform=str(platform),
+            transform_path=transform_path,
+            original_data_path=Path(original_data_path),
+        )
+    )
+
+
 def _dataset_cellpose_transform(
-    config: EnrichmentConfig,
+    config: EnrichmentConfig | _TransformInputs,
 ) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
     """Build Cellpose pixel->micron affine tuples for enrichment."""
     platform = config.platform.upper()

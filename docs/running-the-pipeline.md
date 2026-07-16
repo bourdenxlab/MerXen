@@ -28,13 +28,16 @@ Common optional parameters:
 | `--analysis_segmentation` | `both` (default), `reseg`, or `original_seg`. Controls whether downstream analysis runs on resegmented data, original instrument segmentation, or both. |
 | `--force_spatialdata_build` | Force rebuilding the SpatialData zarr even when a cached one exists. Defaults to `false`. |
 | `--enable_alignment` | Run optional Spateo alignment and alignment QC before comparison. Paired mode only. Defaults to `false`. |
-| `--cortical_depth_enabled` | Run cortical-depth coordinate computation before QC. Requires boundary GeoJSON annotations. Defaults to `false`. |
+| `--cortical_depth_enabled` | Run cortical-depth tissue/depth annotation after clustering. Requires boundary GeoJSON annotations. Defaults to `false`. |
+| `--distance_from_object_enabled` | Run registered polygon-edge distance annotation and paired near-vs-far pseudobulk analysis. Defaults to `false`. |
+| `--distance_from_object_segmentations` | Object-distance branches; defaults to `reseg,original_seg,proseg_mask`. |
 | `--start_stage` / `--stop_stage` | Run a contiguous stage range. Defaults to the full pipeline. |
 | `--only_stage` | Convenience alias for setting `start_stage` and `stop_stage` to the same stage. |
 
 The samplesheet may also include `analysis_mode`, `enable_alignment`,
-`analysis_segmentation`, `cortical_depth_enabled`, `start_stage`, `stop_stage`,
-and `only_stage` columns.
+`analysis_segmentation`, `cortical_depth_enabled`,
+`distance_from_object_enabled`, `distance_from_object_segmentations`,
+`start_stage`, `stop_stage`, and `only_stage` columns.
 Non-empty row values override these command-line settings for that row only;
 blank cells inherit the command-line/config value. Every other parameter has a
 default in
@@ -63,6 +66,9 @@ When `compute_cortical_depth` is selected, preflight checks pial/tissue-edge
 annotation GeoJSONs or a combined role-labelled annotation GeoJSON for every
 active platform. Gray/white boundaries are optional for pial-only mask/QC
 pieces.
+When `distance_from_object` is selected, preflight checks the registered object
+GeoJSON for every active platform. The stage itself verifies that every chosen
+table already has `cortical_depth_annotation`.
 Missing references stop the run immediately with the selected stages and paths
 that need attention.
 
@@ -89,10 +95,11 @@ In `analysis_mode=merscope` or `analysis_mode=xenium`, either from the command
 line or a row-level samplesheet value, the workflow runs
 `build_spatialdata → segment_nuclei → segment → enrich → mask_image_quantification → qc →
 visualize → spatial_gene_analysis → clustering_squidpy` for the selected
-platform. If
-`cortical_depth_enabled=true`, `compute_cortical_depth` runs after
+platform. If `cortical_depth_enabled=true`, `compute_cortical_depth` runs after
 `clustering_squidpy` so the per-cell cluster annotations are available for its
-depth violin plots (depth columns are not consumed by other stages).
+depth violin plots. If object distance is also enabled, it then consumes the
+tissue annotation written by cortical depth. Object distance can instead run
+alone against a zarr annotated by an earlier invocation.
 Visualization writes single-dataset alternatives for
 paired plots, including gene-abundance, one-platform transcript overview, and
 one-platform sanity crop outputs. `mapmycells` remains available after

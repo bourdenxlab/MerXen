@@ -16,6 +16,10 @@ from merxen.cli.run_build_spatialdata import build_spatialdata_command
 from merxen.cli.run_clustering_squidpy import clustering_squidpy_command
 from merxen.cli.run_comparison import compare_command
 from merxen.cli.run_cortical_depth import cortical_depth_command
+from merxen.cli.run_distance_from_object import (
+    distance_from_object_cohort_command,
+    distance_from_object_command,
+)
 from merxen.cli.run_enrichment import enrich_command
 from merxen.cli.run_mapmycells import mapmycells_command
 from merxen.cli.run_mask_image_quantification import (
@@ -29,6 +33,7 @@ from merxen.cli.run_segmentation import (
     segment_command,
 )
 from merxen.cli.run_spatial_gene_analysis import spatial_gene_analysis_command
+from merxen.cli.run_viewer_cache import build_viewer_caches_command
 from merxen.cli.run_visualization import visualize_command
 
 
@@ -50,6 +55,7 @@ main.add_command(cellpose_segment_command)
 main.add_command(cellpose_nuclei_segment_command)
 main.add_command(proseg_segment_command)
 main.add_command(enrich_command)
+main.add_command(build_viewer_caches_command)
 main.add_command(mask_image_quantification_command)
 main.add_command(qc_command)
 main.add_command(align_command)
@@ -57,6 +63,8 @@ main.add_command(alignment_qc_command)
 main.add_command(check_alignment_deps_command)
 main.add_command(compare_command)
 main.add_command(cortical_depth_command)
+main.add_command(distance_from_object_command)
+main.add_command(distance_from_object_cohort_command)
 main.add_command(visualize_command)
 main.add_command(spatial_gene_analysis_command)
 main.add_command(clustering_squidpy_command)

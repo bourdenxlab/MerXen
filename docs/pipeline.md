@@ -36,11 +36,6 @@ channels.
   └────────┬────────┘
            ▼
   ┌─────────────────┐
-  │ COMPUTE_        │   optional Laplace/equal-area
-  │ CORTICAL_DEPTH  │   cortical-depth cell columns
-  └────────┬────────┘
-           ▼
-  ┌─────────────────┐
   │ QC              │   cell-level + transcript-assignment
   │                 │   metrics, histograms, violins
   └────────┬────────┘
@@ -74,13 +69,26 @@ channels.
                   │
                   ▼
            ┌───────────────────┐
+           │ COMPUTE_          │  optional tissue annotation +
+           │ CORTICAL_DEPTH    │  Laplace/equal-area depth
+           └───────────────────┘
+                  │
+                  ▼
+           ┌───────────────────┐
+           │ DISTANCE_FROM_    │  optional registered object-edge
+           │ OBJECT            │  annotation + paired pseudobulk DE
+           └───────────────────┘
+                  │
+                  ▼
+           ┌───────────────────┐
            │ MAPMYCELLS        │  local reference-based
            │                   │  cell type assignment
            └───────────────────┘
 ```
 
 Rows inherit `analysis_mode`, `enable_alignment`, `analysis_segmentation`,
-`start_stage`, `stop_stage`, and `only_stage` from Nextflow params unless those
+object-distance settings, `start_stage`, `stop_stage`, and `only_stage` from
+Nextflow params unless those
 columns are set in the samplesheet. For rows with `analysis_mode=paired`, both
 platforms traverse `BUILD_SPATIALDATA → SEGMENT → ENRICH →
 MASK_IMAGE_QUANTIFICATION → QC` independently and
@@ -88,7 +96,11 @@ are rejoined after QC. When the row's effective `cortical_depth_enabled` value i
 `true`, `COMPUTE_CORTICAL_DEPTH` runs as a terminal stage after
 `CLUSTERING_SQUIDPY` (consuming the clustering-updated zarr) so per-cell cluster
 annotations are available for its depth violin plots; its depth columns are not
-consumed by any other stage. If
+consumed by the main comparison branch. When the row's effective
+`distance_from_object_enabled` value is `true`, `DISTANCE_FROM_OBJECT_ANNOTATE`
+runs after cortical depth (when selected) or after clustering and consumes
+`cortical_depth_annotation`. Pair-level pseudobulks are then grouped by
+platform for `DISTANCE_FROM_OBJECT_COHORT`. If
 mask image quantification is disabled or skipped by a stage range, downstream
 stages consume the enriched zarr directly. If the row's effective
 `enable_alignment` value is `true`, `ALIGN` and `ALIGN_QC` run before
@@ -122,15 +134,17 @@ For a samplesheet row with `pair_id=EXAMPLE01`:
 | 2b | `PROSEG_SEGMENT` × 2 | `merxen proseg-segment` | Cellpose artifacts | durable `latest/latest_spatialdata.zarr` |
 | 3 | `ENRICH` × 2 | `merxen enrich` | latest zarr + Cellpose mask | same durable `latest/latest_spatialdata.zarr`, now enriched with per-shape counts tables |
 | 4 | `MASK_IMAGE_QUANTIFICATION` × 2 | `merxen mask-image-quantification` | enriched zarr + Cellpose mask | same durable zarr, now with `table_MOSAIK_cellpose_image_quantification` plus sidecars |
-| 5 | `COMPUTE_CORTICAL_DEPTH` × 2 | `merxen compute-cortical-depth` | quantified/enriched zarr + boundary GeoJSON annotations | same durable zarr, now with cortical-depth columns plus sidecars, when enabled |
-| 6 | `QC` × 2 | `merxen qc` | cortical-depth zarr when enabled; otherwise quantified/enriched zarr | `qc_out/` (metrics CSV, plots) |
-| 7 | `ALIGN` × 1 | `merxen align` | both platforms' latest analysis-ready zarrs | in-place MERSCOPE aligned elements + transform metadata, when enabled |
-| 8 | `ALIGN_QC` × 1 | `merxen alignment-qc` | updated MERSCOPE zarr + original Xenium zarr | `alignment_qc_out/`, when enabled |
-| 9 | `COMPARE` × 1 | `merxen compare` | updated MERSCOPE zarr if enabled; otherwise analysis-ready zarrs | `compare_out/` (gene comparison CSVs + metrics JSON) |
-| 10 | `VISUALIZE` × 1 | `merxen visualize` | updated MERSCOPE zarr if enabled; otherwise analysis-ready zarrs | `visualize_out/` (PNG plots) |
-| 11 | `SPATIAL_GENE_ANALYSIS` × 1 | `merxen spatial-gene-analysis` | same paired zarrs plus tissue annotations, after visualization in full runs | `spatial_gene_analysis_out/` (Moran/Geary plus signed-distance, nested pair-null, rankings, and diagnostic plots) |
-| 12 | `CLUSTERING_SQUIDPY` × 1 | `merxen clustering-squidpy` | same paired zarrs, after spatial gene analysis in full runs | `clustering_squidpy_out/` plus derived clustered tables in each durable zarr |
-| 13 | `MAPMYCELLS` × 1 | `merxen mapmycells` | clustered `.h5ad` files from `clustering_squidpy_out/` | `mapmycells_out/` (query `.h5ad`, CSV/JSON assignments, annotated `.h5ad`) |
+| 5 | `QC` × 2 | `merxen qc` | quantified/enriched zarr | `qc_out/` (metrics CSV, plots) |
+| 6 | `ALIGN` × 1 | `merxen align` | both platforms' latest analysis-ready zarrs | in-place MERSCOPE aligned elements + transform metadata, when enabled |
+| 7 | `ALIGN_QC` × 1 | `merxen alignment-qc` | updated MERSCOPE zarr + original Xenium zarr | `alignment_qc_out/`, when enabled |
+| 8 | `COMPARE` × 1 | `merxen compare` | updated MERSCOPE zarr if enabled; otherwise analysis-ready zarrs | `compare_out/` (gene comparison CSVs + metrics JSON) |
+| 9 | `VISUALIZE` × 1 | `merxen visualize` | updated MERSCOPE zarr if enabled; otherwise analysis-ready zarrs | `visualize_out/` (PNG plots) |
+| 10 | `SPATIAL_GENE_ANALYSIS` × 1 | `merxen spatial-gene-analysis` | same paired zarrs plus tissue annotations, after visualization in full runs | `spatial_gene_analysis_out/` (Moran/Geary plus signed-distance, nested pair-null, rankings, and diagnostic plots) |
+| 11 | `CLUSTERING_SQUIDPY` × 1 | `merxen clustering-squidpy` | same paired zarrs, after spatial gene analysis in full runs | `clustering_squidpy_out/` plus derived clustered tables in each durable zarr |
+| 12 | `COMPUTE_CORTICAL_DEPTH` × platform | `merxen compute-cortical-depth` | durable zarr + boundary GeoJSON annotations | tissue/depth columns and sidecars, when enabled |
+| 13a | `DISTANCE_FROM_OBJECT_ANNOTATE` × platform | `merxen distance-from-object` | durable zarr + registered object GeoJSON | table metadata, per-cell sidecars, and pair-level near/far pseudobulks, when enabled |
+| 13b | `DISTANCE_FROM_OBJECT_COHORT` × platform | `merxen distance-from-object-cohort` | all pair-level platform pseudobulks | paired PyDESeq2 results for each segmentation branch |
+| 14 | `MAPMYCELLS` × 1 | `merxen mapmycells` | clustered `.h5ad` files from `clustering_squidpy_out/` | `mapmycells_out/` (query `.h5ad`, CSV/JSON assignments, annotated `.h5ad`) |
 
 In single-platform mode, platform-local steps run once per row, paired-only
 alignment and comparison are skipped, and visualization/spatial-gene/clustering
