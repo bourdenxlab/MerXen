@@ -66,7 +66,7 @@ any of them with `--<name>` on the command line.
 | `gpu_process_lock_file` | `${projectDir}/.merxen_gpu.lock` | File used for the local GPU lock. Override only when coordinating multiple runs from the same machine. |
 
 Stage names accepted by `start_stage`, `stop_stage`, and `only_stage` are:
-`build_spatialdata`, `segment`, `enrich`, `mask_image_quantification`,
+`build_spatialdata`, `segment_nuclei`, `segment`, `enrich`, `mask_image_quantification`,
 `qc`, `align`, `align_qc`, `compare`, `visualize`,
 `spatial_gene_analysis`, `clustering_squidpy`, `compute_cortical_depth`, and
 `mapmycells`.
@@ -79,6 +79,11 @@ only for rows whose effective `enable_alignment` value is `true`.
 `analysis_mode = paired`.
 
 ### Cellpose
+
+`segment_nuclei` uses DAPI only, the Cellpose `nuclei` model, and the same
+inference/tiling settings as cell Cellpose. Both masks use the default final
+area filter of 5–400 µm². `cellpose_segment_max_forks = 1` and the shared GPU
+lock serialize both Cellpose process types.
 
 | Param | Default | Description |
 |-------|---------|-------------|

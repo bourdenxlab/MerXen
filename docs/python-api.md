@@ -26,7 +26,7 @@ merxen/
 ```
 
 The subpackage structure mirrors the Nextflow stage graph:
-`build → segment → enrich → mask-image-quantification → compute-cortical-depth
+`build → segment-nuclei → segment → enrich → mask-image-quantification → compute-cortical-depth
 → qc → align → alignment-qc → compare → visualize → spatial-gene-analysis
 → clustering-squidpy → mapmycells`. Cortical depth is skipped unless
 `--cortical_depth_enabled true` is set. Alignment is skipped unless
@@ -90,6 +90,8 @@ with Groovy.
 
 ### `segmentation.pipeline` — [pipeline.py](../src/merxen/segmentation/pipeline.py)
 - `run_segmentation_pipeline(config, *, force_rerun)` — full stage entry point.
+- `run_cellpose_nuclei_segmentation(config, *, force_rerun)` — reusable
+  DAPI-only nuclei entry point.
 
 ### `segmentation.cellpose` — [cellpose.py](../src/merxen/segmentation/cellpose.py)
 - `build_cellpose_model(config)`.

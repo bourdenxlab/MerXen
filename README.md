@@ -7,7 +7,7 @@ Pre-processing, segmentation, and comparative analysis of MERSCOPE and Xenium sp
 MerXen takes spatial transcriptomics datasets and runs a standardised pipeline. By default, each samplesheet row is treated as a paired experiment (one MERSCOPE, one Xenium per tissue section pair), but the same workflow can run MERSCOPE-only or Xenium-only analyses with `--analysis_mode merscope` / `--analysis_mode xenium` or row-level `analysis_mode` values in the samplesheet.
 
 1. **SpatialData build** — Builds platform-specific SpatialData zarrs from raw MERSCOPE and Xenium output folders
-2. **Cell segmentation** — A `SEGMENT` subworkflow chains GPU Cellpose-SAM image segmentation and CPU-only ProSeg transcript refinement as independently scheduled processes
+2. **Cell and nuclei segmentation** — A reusable DAPI-only Cellpose nuclei stage precedes GPU Cellpose-SAM cell segmentation and CPU-only ProSeg transcript refinement
 3. **Mask image quantification** — Quantifies all SpatialData image channels over final Cellpose masks
 4. **Section alignment** — Optionally registers paired adjacent sections to a Xenium reference coordinate system with Spateo
 5. **Analysis and visualisation** — QC metrics, paired gene-level comparison when both platforms are present, single-platform or paired visualisation, per-gene spatial autocorrelation, first-pass Scanpy/Squidpy clustering, and optional local MapMyCells cell type assignment. By default, downstream analysis runs for both ProSeg-resegmented cells and original instrument segmentations; use `--analysis_segmentation reseg` or `--analysis_segmentation original_seg` to restrict it.

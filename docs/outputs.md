@@ -93,6 +93,8 @@ Path: `${outdir}/<pair_id>/<platform>/segmentation/`
 | `proseg_base_latest.zarr` | Staged symlink to `../latest/latest_spatialdata.zarr`. |
 | `cellpose_masks_tiled.npy` | Cleaned global-pixel uint32 mask from tiled Cellpose. Fed into ProSeg and enrichment. |
 | `cellpose_stitching_stats.json` | Diagnostics for object-level tile stitching, including accepted labels, duplicate skips, edge-touching labels, and conflict pixels. |
+| `cellpose_nuclei_masks_tiled.npy` | DAPI-only Cellpose `nuclei` labels, retained independently of transcript assignment. |
+| `cellpose_nuclei_stitching_stats.json` | Equivalent stitching diagnostics for the nuclei mask. |
 | `transcripts_for_proseg.csv` | ProSeg input: per-transcript rows with seeded `cell_id`. Retained for debugging. |
 
 ### Enrichment

@@ -115,12 +115,12 @@ EXAMPLE04,xenium,true,/path/to/cache/EXAMPLE04_xenium.zarr,/path/to/EXAMPLE04_pi
 ```csv
 pair_id,analysis_mode,enable_alignment,analysis_segmentation,start_stage,stop_stage,only_stage,merscope_dir,merscope_spatialdata_path,merscope_image_prefix,merscope_z_range,merscope_transform_path,merscope_channels,xenium_dir,xenium_spatialdata_path,xenium_channels,xenium_min_qv,merscope_voxel_layers,xenium_voxel_layers,xenium_spec_path
 EXAMPLE01,paired,true,both,,,,/path/to/merscope/EXAMPLE01,/path/to/cache/EXAMPLE01_merscope.zarr,,0-6,,"DAPI,PolyT",/path/to/xenium/EXAMPLE01,/path/to/cache/EXAMPLE01_xenium.zarr,"DAPI,18S",20,7,2,
-EXAMPLE02,merscope,false,reseg,segment,enrich,,/path/to/merscope/EXAMPLE02,,,,,"DAPI,PolyT",,,,,7,,
+EXAMPLE02,merscope,false,reseg,segment_nuclei,enrich,,/path/to/merscope/EXAMPLE02,,,,,"DAPI,PolyT",,,,,7,,
 EXAMPLE03,xenium,false,original_seg,,,visualize,,,,,,,/path/to/xenium/EXAMPLE03,,"DAPI,18S",20,,2,
 ```
 
 Row 1 uses cached SpatialData zarrs if they already exist. Row 2 runs only
-MERSCOPE from segmentation through enrichment. Row 3 runs only the Xenium
+MERSCOPE from nuclei and cell segmentation through enrichment. Row 3 runs only the Xenium
 visualization stage, reading prior outputs from `--outdir`.
 
 ## Tips

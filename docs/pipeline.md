@@ -117,6 +117,7 @@ For a samplesheet row with `pair_id=EXAMPLE01`:
 | Step | Nextflow process | CLI | Input | Output |
 |------|------------------|-----|-------|--------|
 | 1 | `BUILD_SPATIALDATA` × 2 | `merxen build-spatialdata` | raw export folders (or cached zarr) | `source_spatialdata.zarr` per platform |
+| 2n | `CELLPOSE_NUCLEI_SEGMENT` × 2 | `merxen cellpose-nuclei-segment` | `source_spatialdata.zarr`, DAPI only | `cellpose_nuclei_masks_tiled.npy` and stitching stats |
 | 2a | `CELLPOSE_SEGMENT` × 2 | `merxen cellpose-segment` | `source_spatialdata.zarr` | `cellpose_masks_tiled.npy`, stitching stats, seeded transcript CSV, affine JSON |
 | 2b | `PROSEG_SEGMENT` × 2 | `merxen proseg-segment` | Cellpose artifacts | durable `latest/latest_spatialdata.zarr` |
 | 3 | `ENRICH` × 2 | `merxen enrich` | latest zarr + Cellpose mask | same durable `latest/latest_spatialdata.zarr`, now enriched with per-shape counts tables |

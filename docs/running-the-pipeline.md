@@ -87,7 +87,7 @@ nextflow run workflows/main.nf \
 
 In `analysis_mode=merscope` or `analysis_mode=xenium`, either from the command
 line or a row-level samplesheet value, the workflow runs
-`build_spatialdata → segment → enrich → mask_image_quantification → qc →
+`build_spatialdata → segment_nuclei → segment → enrich → mask_image_quantification → qc →
 visualize → spatial_gene_analysis → clustering_squidpy` for the selected
 platform. If
 `cortical_depth_enabled=true`, `compute_cortical_depth` runs after
@@ -213,7 +213,7 @@ rerunning `ALIGN` or `ALIGN_QC`.
 
 Accepted stages are:
 
-`build_spatialdata`, `segment`, `enrich`, `mask_image_quantification`,
+`build_spatialdata`, `segment_nuclei`, `segment`, `enrich`, `mask_image_quantification`,
 `qc`, `align`, `align_qc`, `compare`, `visualize`,
 `spatial_gene_analysis`, `clustering_squidpy`, `compute_cortical_depth`, and
 `mapmycells`.
@@ -231,6 +231,18 @@ nextflow run workflows/main.nf \
     --enable_alignment false \
     --only_stage visualize
 ```
+
+Run only the independently reusable DAPI nuclei segmentation:
+
+```bash
+nextflow run workflows/main.nf \
+    --samplesheet workflows/samplesheet.csv \
+    --outdir ./results \
+    --only_stage segment_nuclei
+```
+
+If `segment` is selected without `segment_nuclei` in the same range, it reads
+the previously published nuclei mask and stitching statistics.
 
 Run from a stage through the end:
 
