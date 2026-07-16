@@ -296,6 +296,35 @@ def samplesJsonForSegmentation(pairId, platforms, platformPaths, segmentation) {
     return groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(samples))
 }
 
+def spatialGeneSamplesJson(samplesJson, row) {
+    def samples = new groovy.json.JsonSlurper().parseText(samplesJson.toString())
+    samples.each { sample ->
+        def platform = sample.platform.toString()
+        sample.nuclei_shape_key = "cellpose_nuclei"
+        sample.pial_boundary_path = optionalNormalizedPathString(
+            corticalDepthAnnotationPath(row, platform, "pial")
+        )
+        sample.wm_boundary_path = optionalNormalizedPathString(
+            corticalDepthAnnotationPath(row, platform, "wm")
+        )
+        sample.side_boundary_path = optionalNormalizedPathString(
+            corticalDepthAnnotationPath(row, platform, "side")
+        )
+        sample.exclusion_path = optionalNormalizedPathString(
+            corticalDepthAnnotationPath(row, platform, "exclusion")
+        )
+        sample.ribbon_path = optionalNormalizedPathString(
+            corticalDepthAnnotationPath(row, platform, "ribbon")
+        )
+        sample.annotation_path = optionalNormalizedPathString(
+            corticalDepthAnnotationPath(row, platform, "annotation")
+        )
+    }
+    return groovy.json.JsonOutput.prettyPrint(
+        groovy.json.JsonOutput.toJson(samples)
+    )
+}
+
 def corticalDepthConfigForPlatform(
     row,
     pairId,
@@ -701,11 +730,55 @@ def appendCorticalDepthPreflightChecks(errors, row, settings, _params) {
     }
 }
 
+def appendSpatialGeneTranscriptPreflightChecks(errors, row, settings, params) {
+    def transcriptAnalysisEnabled = boolOrDefault(
+        params.spatial_gene_analysis_transcript_analysis_enabled,
+        true,
+        "spatial_gene_analysis_transcript_analysis_enabled",
+    )
+    if (!settings.run_spatial_gene_analysis || !transcriptAnalysisEnabled) {
+        return
+    }
+    settings.active_platforms.each { platform ->
+        def labelPrefix = "SPATIAL_GENE_ANALYSIS ${settings.pair_id}:${platform}"
+        def annotationPath = corticalDepthAnnotationPath(row, platform, "annotation")
+        if (!isBlankPath(annotationPath)) {
+            appendPreflightFileCheck(
+                errors,
+                annotationPath,
+                "${labelPrefix} combined pia/tissue-edge annotation GeoJSON",
+            )
+        } else {
+            appendPreflightFileCheck(
+                errors,
+                corticalDepthAnnotationPath(row, platform, "pial"),
+                "${labelPrefix} pial boundary GeoJSON",
+            )
+            appendPreflightFileCheck(
+                errors,
+                corticalDepthAnnotationPath(row, platform, "side"),
+                "${labelPrefix} tissue-edge GeoJSON",
+            )
+        }
+        ["wm", "exclusion", "ribbon"].each { role ->
+            def optionalPath = corticalDepthAnnotationPath(row, platform, role)
+            if (!isBlankPath(optionalPath)) {
+                appendPreflightFileCheck(
+                    errors,
+                    optionalPath,
+                    "${labelPrefix} ${role} annotation GeoJSON",
+                )
+            }
+        }
+    }
+}
+
 def runPreflightChecks(row, settings, params) {
     def errors = []
     appendClusteringSquidpyPreflightChecks(errors, settings, params)
     appendMapMyCellsPreflightChecks(errors, settings, params)
     appendCorticalDepthPreflightChecks(errors, row, settings, params)
+    appendSpatialGeneTranscriptPreflightChecks(errors, row, settings, params)
     if (errors) {
         throw new IllegalArgumentException(
             "Preflight checks failed for sample ${settings.pair_id} " +
@@ -2015,10 +2088,34 @@ workflow {
             tuple(pairId, segmentation, samplesJson)
         }
 
-    spatial_gene_analysis_inputs_ch =
+    spatial_gene_analysis_unannotated_inputs_ch =
         spatial_gene_analysis_without_visualize_ch.mix(
             spatial_gene_analysis_after_visualize_ch
         )
+
+    spatial_gene_annotation_rows_ch = sample_rows_ch.flatMap {
+        pairId, row, settings ->
+            if (!settings.run_spatial_gene_analysis) {
+                []
+            } else {
+                settings.analysis_segmentations.collect { segmentation ->
+                    tuple("${pairId}|${segmentation}", row)
+                }
+            }
+    }
+
+    spatial_gene_analysis_inputs_ch = spatial_gene_analysis_unannotated_inputs_ch
+        .map { pairId, segmentation, samplesJson ->
+            tuple("${pairId}|${segmentation}", pairId, segmentation, samplesJson)
+        }
+        .join(spatial_gene_annotation_rows_ch)
+        .map { _key, pairId, segmentation, samplesJson, row ->
+            tuple(
+                pairId,
+                segmentation,
+                spatialGeneSamplesJson(samplesJson, row),
+            )
+        }
 
     spatial_gene_analysis_results_ch = SPATIAL_GENE_ANALYSIS(
         spatial_gene_analysis_inputs_ch

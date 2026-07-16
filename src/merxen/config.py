@@ -601,6 +601,13 @@ class SpatialGeneAnalysisSampleConfig(BaseModel):
     segmentation: str | None = None
     table_key: str | None = None
     shape_key: str | None = None
+    nuclei_shape_key: str = "cellpose_nuclei"
+    pial_boundary_path: Path | None = None
+    wm_boundary_path: Path | None = None
+    side_boundary_path: Path | None = None
+    exclusion_path: Path | None = None
+    ribbon_path: Path | None = None
+    annotation_path: Path | None = None
 
 
 class SpatialGeneAnalysisConfig(BaseModel):
@@ -619,6 +626,54 @@ class SpatialGeneAnalysisConfig(BaseModel):
     top_n: int = Field(default=10, ge=1)
     spatial_point_size: float = Field(default=2.0, gt=0)
     figure_dpi: int = Field(default=180, ge=72)
+    transcript_analysis_enabled: bool = True
+    transcript_min_count: int = Field(default=50, ge=2)
+    paircorr_min_count: int = Field(default=100, ge=2)
+    paircorr_max_transcripts_per_gene: int = Field(default=5_000, ge=10)
+    paircorr_distance_edges_um: list[float] = Field(
+        default_factory=lambda: [0.0, 2.0, 5.0, 20.0, 50.0, 200.0]
+    )
+    paircorr_permutations: int = Field(default=100, ge=1)
+    paircorr_seed: int = 0
+    paircorr_n_jobs: int = Field(default=1, ge=1)
+    transcript_chunk_rows: int = Field(default=500_000, ge=1)
+    pericellular_distance_um: float = Field(default=5.0, gt=0.0)
+    membrane_distance_um: float = Field(default=2.0, gt=0.0)
+    signed_distance_edges_um: list[float] = Field(
+        default_factory=lambda: [
+            -200.0,
+            -50.0,
+            -20.0,
+            -5.0,
+            -2.0,
+            0.0,
+            2.0,
+            5.0,
+            20.0,
+            50.0,
+            200.0,
+        ]
+    )
+    transcript_diagnostic_top_n: int = Field(default=3, ge=1)
+    transcript_diagnostic_max_genes: int = Field(default=30, ge=1)
+    transcript_diagnostic_window_um: float = Field(default=250.0, gt=0.0)
+    transcript_plot_max_points: int = Field(default=20_000, ge=100)
+
+    @field_validator("paircorr_distance_edges_um", "signed_distance_edges_um")
+    @classmethod
+    def _validate_distance_edges(
+        cls: type[SpatialGeneAnalysisConfig],
+        values: list[float],
+        info: Any,
+    ) -> list[float]:
+        edges = [float(value) for value in values]
+        if len(edges) < 2:
+            raise ValueError(f"{info.field_name} must contain at least 2 edges")
+        if info.field_name == "paircorr_distance_edges_um" and edges[0] != 0.0:
+            raise ValueError("paircorr_distance_edges_um must start at 0")
+        if any(right <= left for left, right in zip(edges, edges[1:], strict=False)):
+            raise ValueError(f"{info.field_name} must be strictly increasing")
+        return edges
 
 
 class MapMyCellsSampleConfig(BaseModel):
