@@ -174,9 +174,10 @@ def test_segment_bootstraps_proseg_from_configured_paths() -> None:
 
     for expected in [
         'include { ENSURE_PROSEG } from "./modules/proseg_bootstrap"',
-        "proseg_trigger_ch = segment_meta_ch.map { true }.take(1)",
+        "proseg_trigger_ch = cellpose_segment_inputs_ch.map { true }.take(1)",
         "proseg_path_ch = ENSURE_PROSEG(proseg_trigger_ch)",
-        "SEGMENT(segment_inputs_ch, proseg_path_ch)",
+        "nuclei_task_results_ch = CELLPOSE_NUCLEI_SEGMENT(",
+        "segment_task_results_ch = SEGMENT(",
     ]:
         assert expected in main_text
 
@@ -200,6 +201,7 @@ def test_segment_bootstraps_proseg_from_configured_paths() -> None:
     for expected in [
         "workflow SEGMENT",
         "cellpose_results = CELLPOSE_SEGMENT(segment_inputs)",
+        "nuclei_results",
         ".combine(proseg_path)",
         "segment_results = PROSEG_SEGMENT(proseg_inputs)",
         '--proseg-binary "\\$(cat "${proseg_path_file}")"',
@@ -247,3 +249,32 @@ def test_spatial_gene_analysis_stage_is_wired_after_visualization() -> None:
         '"top_n"',
     ]:
         assert expected in module_text
+
+
+def test_nuclei_cellpose_is_an_independent_serialized_stage() -> None:
+    """DAPI nuclei should be runnable alone and share the Cellpose GPU lock."""
+    repo_root = Path(__file__).resolve().parents[2]
+    main_text = (repo_root / "workflows" / "main.nf").read_text()
+    config_text = (repo_root / "workflows" / "nextflow.config").read_text()
+    module_text = (repo_root / "workflows" / "modules" / "segmentation.nf").read_text()
+
+    for expected in [
+        '"segment_nuclei": "segment_nuclei"',
+        '["build_spatialdata", "segment_nuclei", "segment", "enrich"]',
+        'stageInRange(\n        "segment_nuclei"',
+        "settings.run_segment_nuclei",
+        "CELLPOSE_NUCLEI_SEGMENT(nuclei_segment_inputs_ch)",
+        'model_type: "nuclei"',
+    ]:
+        assert expected in main_text
+
+    for expected in [
+        "process CELLPOSE_NUCLEI_SEGMENT",
+        "merxen cellpose-nuclei-segment",
+        "cellpose_nuclei_masks_tiled.npy",
+    ]:
+        assert expected in module_text
+
+    assert 'withName: "CELLPOSE_NUCLEI_SEGMENT"' in config_text
+    assert "cellpose_segment_max_forks = 1" in config_text
+    assert config_text.count("MERXEN_GPU_LOCK_FILE") >= 2

@@ -17,6 +17,7 @@ from shapely.geometry import box
 
 from merxen.config import EnrichmentConfig
 from merxen.enrichment.enrich import (
+    CELLPOSE_NUCLEI_SHAPE_NAME,
     MERSCOPE_OLD_SHAPE_NAME,
     MERSCOPE_ZPROJ_IMAGE_NAME,
     MOSAIK_CELLPOSE_SHAPE_NAME,
@@ -82,6 +83,7 @@ def test_is_already_enriched_checks_platform_specific_merscope_layers() -> None:
         shapes={
             MOSAIK_PROSEG_SHAPE_NAME: object(),
             MOSAIK_CELLPOSE_SHAPE_NAME: object(),
+            CELLPOSE_NUCLEI_SHAPE_NAME: object(),
             MERSCOPE_OLD_SHAPE_NAME: object(),
         },
         tables={ORIGINAL_TABLE_NAME: object()},
@@ -164,6 +166,7 @@ def test_enrich_single_latest_writes_elements_in_place(
         platform="MERSCOPE",
         latest_zarr_path=latest,
         mask_path=mask,
+        nuclei_mask_path=mask,
         original_data_path=original,
         output_dir=tmp_path / "enrich_out",
         persistent_output_path=target,
@@ -176,11 +179,104 @@ def test_enrich_single_latest_writes_elements_in_place(
     assert latest.resolve() == target.resolve()
     assert MOSAIK_PROSEG_SHAPE_NAME in dst.shapes
     assert MOSAIK_CELLPOSE_SHAPE_NAME in dst.shapes
+    assert CELLPOSE_NUCLEI_SHAPE_NAME in dst.shapes
     assert MERSCOPE_OLD_SHAPE_NAME in dst.shapes
     assert MERSCOPE_ZPROJ_IMAGE_NAME in dst.images
     assert ORIGINAL_TABLE_NAME in dst.tables
     assert not any("__enrich_tmp" in path.name for path in target.parent.iterdir())
     assert not any("pre_enrich_backup" in path.name for path in target.parent.iterdir())
+
+
+def test_enrich_single_latest_adds_missing_nuclei_without_rebuilding_tables(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A legacy enriched zarr should gain nuclei without losing derived tables."""
+    target = tmp_path / "results" / "latest" / "latest_spatialdata.zarr"
+    target.mkdir(parents=True)
+    latest = tmp_path / "latest_input.zarr"
+    latest.symlink_to(target, target_is_directory=True)
+    mask = tmp_path / "nuclei.npy"
+    np.save(mask, np.ones((4, 4), dtype=np.uint32))
+
+    proseg_shape = gpd.GeoDataFrame(
+        {"cell_id": ["1"], "geometry": [box(0.0, 0.0, 1.0, 1.0)]},
+        geometry="geometry",
+    )
+    preserved_tables = {
+        ORIGINAL_TABLE_NAME: object(),
+        "table_MOSAIK_proseg": object(),
+        "table_MOSAIK_proseg_clustering_squidpy": object(),
+    }
+    dst = SimpleNamespace(
+        shapes={
+            MOSAIK_PROSEG_SHAPE_NAME: proseg_shape,
+            MOSAIK_CELLPOSE_SHAPE_NAME: object(),
+            MERSCOPE_OLD_SHAPE_NAME: object(),
+        },
+        images={MERSCOPE_ZPROJ_IMAGE_NAME: object()},
+        tables=dict(preserved_tables),
+    )
+    writes: list[tuple[str, str, bool]] = []
+
+    monkeypatch.setattr(
+        "merxen.enrichment.enrich.sd.read_zarr",
+        lambda path: dst,
+    )
+    monkeypatch.setattr(
+        "merxen.enrichment.enrich._dataset_cellpose_transform",
+        lambda config: ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
+    )
+    monkeypatch.setattr(
+        "merxen.enrichment.enrich._cellpose_gdf_from_mask",
+        lambda *args, **kwargs: gpd.GeoDataFrame(
+            {"cell_id": ["nucleus_1"], "geometry": [box(0.1, 0.1, 0.9, 0.9)]},
+            geometry="geometry",
+        ),
+    )
+
+    def _fake_write_or_replace(
+        sdata_obj: SimpleNamespace,
+        key: str,
+        element_type: str,
+        value: object,
+        *,
+        overwrite: bool = True,
+    ) -> bool:
+        writes.append((key, element_type, overwrite))
+        getattr(sdata_obj, element_type)[key] = value
+        return True
+
+    monkeypatch.setattr(
+        "merxen.enrichment.enrich.write_or_replace_element",
+        _fake_write_or_replace,
+    )
+    monkeypatch.setattr(
+        "merxen.enrichment.enrich._remove_per_shape_assignment_tables",
+        lambda sdata: pytest.fail("incremental nuclei enrichment rebuilt tables"),
+    )
+    monkeypatch.setattr(
+        "merxen.enrichment.enrich._load_original_source",
+        lambda config: pytest.fail("incremental nuclei enrichment reloaded source"),
+    )
+
+    cfg = EnrichmentConfig(
+        dataset_name="P7513_IF_MERSCOPE",
+        platform="MERSCOPE",
+        latest_zarr_path=latest,
+        mask_path=mask,
+        nuclei_mask_path=mask,
+        original_data_path=tmp_path / "unused_source.zarr",
+        output_dir=tmp_path / "enrich_out",
+        persistent_output_path=target,
+    )
+
+    out = enrich_single_latest(cfg)
+
+    assert out == target
+    assert writes == [(CELLPOSE_NUCLEI_SHAPE_NAME, "shapes", False)]
+    assert CELLPOSE_NUCLEI_SHAPE_NAME in dst.shapes
+    assert dst.tables == preserved_tables
 
 
 def test_incomplete_enrichment_rebuilds_partial_elements(
@@ -220,6 +316,7 @@ def test_incomplete_enrichment_rebuilds_partial_elements(
             "cell_boundaries": proseg_shape,
             MOSAIK_PROSEG_SHAPE_NAME: object(),
             MOSAIK_CELLPOSE_SHAPE_NAME: object(),
+            CELLPOSE_NUCLEI_SHAPE_NAME: object(),
             MERSCOPE_OLD_SHAPE_NAME: object(),
         },
         images={MERSCOPE_ZPROJ_IMAGE_NAME: object()},
@@ -274,6 +371,7 @@ def test_incomplete_enrichment_rebuilds_partial_elements(
         platform="MERSCOPE",
         latest_zarr_path=latest,
         mask_path=mask,
+        nuclei_mask_path=mask,
         original_data_path=original,
         output_dir=tmp_path / "enrich_out",
         persistent_output_path=target,
@@ -295,6 +393,7 @@ def test_partial_enrichment_cleanup_removes_rebuildable_zarr_artifacts(
     for rel_path in [
         f"images/{MERSCOPE_ZPROJ_IMAGE_NAME}/s0",
         f"shapes/{MOSAIK_CELLPOSE_SHAPE_NAME}",
+        f"shapes/{CELLPOSE_NUCLEI_SHAPE_NAME}",
         f"shapes/{MOSAIK_PROSEG_SHAPE_NAME}",
         f"shapes/{MERSCOPE_OLD_SHAPE_NAME}",
         "shapes/cell_boundaries",
@@ -314,6 +413,7 @@ def test_partial_enrichment_cleanup_removes_rebuildable_zarr_artifacts(
                 f"images/{MERSCOPE_ZPROJ_IMAGE_NAME}": {"attributes": {}},
                 f"images/{MERSCOPE_ZPROJ_IMAGE_NAME}/s0": {"attributes": {}},
                 f"shapes/{MOSAIK_CELLPOSE_SHAPE_NAME}": {"attributes": {}},
+                f"shapes/{CELLPOSE_NUCLEI_SHAPE_NAME}": {"attributes": {}},
                 f"shapes/{MOSAIK_PROSEG_SHAPE_NAME}": {"attributes": {}},
                 f"shapes/{MERSCOPE_OLD_SHAPE_NAME}": {"attributes": {}},
                 "shapes/cell_boundaries": {"attributes": {"keep": True}},
@@ -329,6 +429,7 @@ def test_partial_enrichment_cleanup_removes_rebuildable_zarr_artifacts(
 
     assert not (zarr_path / "images" / MERSCOPE_ZPROJ_IMAGE_NAME).exists()
     assert not (zarr_path / "shapes" / MOSAIK_CELLPOSE_SHAPE_NAME).exists()
+    assert not (zarr_path / "shapes" / CELLPOSE_NUCLEI_SHAPE_NAME).exists()
     assert not (zarr_path / "shapes" / MOSAIK_PROSEG_SHAPE_NAME).exists()
     assert not (zarr_path / "shapes" / MERSCOPE_OLD_SHAPE_NAME).exists()
     assert not (zarr_path / "tables" / ORIGINAL_TABLE_NAME).exists()
