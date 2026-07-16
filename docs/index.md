@@ -41,6 +41,7 @@ scientific logic living in the installable Python package `merxen`.
 - [Visualization](stages/visualization.md)
 - [Spatial gene analysis](stages/spatial-gene-analysis.md)
 - [Squidpy clustering](stages/clustering-squidpy.md)
+- [Distance from object](stages/distance-from-object.md)
 - [MapMyCells](stages/mapmycells.md)
 
 ### Developer reference

@@ -19,6 +19,7 @@ merxen/
 ├── segmentation/        # Cellpose tiling, ProSeg subprocess, mask utilities
 ├── enrichment/          # shape layers + per-shape gene tables
 ├── cortical_depth/      # Laplace/equal-area cortical-depth coordinates
+├── distance_from_object/ # polygon-edge distance + paired pseudobulk DE
 ├── qc/                  # per-dataset and cross-platform metrics
 ├── visualization/       # plotting
 ├── analysis/            # Scanpy/Squidpy downstream analysis
@@ -26,12 +27,14 @@ merxen/
 ```
 
 The subpackage structure mirrors the Nextflow stage graph:
-`build → segment-nuclei → segment → enrich → mask-image-quantification → compute-cortical-depth
-→ qc → align → alignment-qc → compare → visualize → spatial-gene-analysis
-→ clustering-squidpy → mapmycells`. Cortical depth is skipped unless
-`--cortical_depth_enabled true` is set. Alignment is skipped unless
-`--enable_alignment true` is set, and MapMyCells is opt-in because it requires
-local reference files.
+`build → segment-nuclei → segment → enrich → mask-image-quantification → qc → align →
+alignment-qc → compare → visualize → spatial-gene-analysis →
+clustering-squidpy → compute-cortical-depth → distance-from-object →
+mapmycells`. Cortical depth is skipped unless `--cortical_depth_enabled true`
+is set. Alignment is skipped unless
+`--enable_alignment true` is set, object distance is skipped unless
+`--distance_from_object_enabled true` is set, and MapMyCells is opt-in because
+it requires local reference files.
 
 ## `merxen.config`
 
@@ -40,6 +43,7 @@ configs against these.
 
 - Top-level per-stage: `SpatialDataBuildConfig`, `SegmentationConfig`,
   `EnrichmentConfig`, `MaskImageQuantificationConfig`, `CorticalDepthConfig`,
+  `DistanceFromObjectConfig`, `DistanceFromObjectCohortConfig`,
   `QCConfig`, `AlignmentConfig`, `AlignmentQCConfig`, `ComparisonConfig`,
   `VisualizationConfig`, `SpatialGeneAnalysisConfig`,
   `ClusteringSquidpyConfig`.
@@ -140,6 +144,20 @@ with Groovy.
 - `equivolumetric.py` — nearest-streamline equal-area depth approximation.
 - `assign_cells.py` — per-cell depth, thickness, tangential coordinate, and QC flags.
 - `plotting.py` — GeoJSON contours and QC overlays.
+
+## `merxen.distance_from_object`
+
+- `load_object_annotations(...)` — validate registered Polygon/MultiPolygon
+  GeoJSON and normalize IDs/types.
+- `assign_distances_to_objects(...)` — assign centroids to nearest polygon
+  edges and label near/middle/far/beyond proximity.
+- `build_pair_pseudobulk(...)` — sum raw near/far counts for eligible grey
+  matter cells within one tissue block.
+- `run_paired_differential_expression(...)` — paired PyDESeq2 with
+  `~ pair_id + proximity`.
+- `run_distance_from_object(config)` and
+  `run_distance_from_object_cohort(config)` — per-platform and cohort stage
+  entry points.
 
 ## `merxen.qc`
 

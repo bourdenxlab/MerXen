@@ -4,8 +4,13 @@ include { BUILD_SPATIALDATA } from "./modules/spatialdata_build"
 include { ENSURE_PROSEG } from "./modules/proseg_bootstrap"
 include { CELLPOSE_NUCLEI_SEGMENT; SEGMENT } from "./modules/segmentation"
 include { ENRICH } from "./modules/enrichment"
+include { VIEWER_CACHE } from "./modules/viewer_cache"
 include { MASK_IMAGE_QUANTIFICATION } from "./modules/mask_image_quantification"
 include { COMPUTE_CORTICAL_DEPTH } from "./modules/compute_cortical_depth"
+include {
+    DISTANCE_FROM_OBJECT_ANNOTATE;
+    DISTANCE_FROM_OBJECT_COHORT
+} from "./modules/distance_from_object"
 include { QC } from "./modules/qc"
 include { ALIGN; ALIGN_QC } from "./modules/alignment"
 include { COMPARE } from "./modules/comparison"
@@ -275,7 +280,67 @@ def analysisLayerKeys(platform, segmentation) {
                 : "xenium_cell_boundaries",
         ]
     }
+    if (segmentation == "proseg_mask") {
+        return [
+            table_key: "table_MOSAIK_cellpose",
+            shape_key: "MOSAIK_cellpose",
+        ]
+    }
     throw new IllegalArgumentException("Unknown analysis segmentation: ${segmentation}")
+}
+
+def normalizeDistanceFromObjectSegmentations(rawValue) {
+    def rawValues = rawValue instanceof Collection
+        ? rawValue
+        : rawValue.toString().split(",")
+    def aliases = [
+        "reseg": "reseg",
+        "resegmented": "reseg",
+        "proseg": "reseg",
+        "original": "original_seg",
+        "original_seg": "original_seg",
+        "instrument": "original_seg",
+        "proseg_mask": "proseg_mask",
+        "mask": "proseg_mask",
+        "cellpose": "proseg_mask",
+        "cellpose_mask": "proseg_mask",
+    ]
+    def selected = []
+    rawValues.each { value ->
+        def key = value
+            .toString()
+            .trim()
+            .toLowerCase()
+            .replaceAll(/[^a-z0-9]+/, "_")
+            .replaceAll(/^_+|_+$/, "")
+        if (!key) {
+            return
+        }
+        if (!aliases.containsKey(key)) {
+            throw new IllegalArgumentException(
+                "Unknown distance_from_object segmentation '${value}'. Valid " +
+                "values: reseg, original_seg, proseg_mask"
+            )
+        }
+        if (!selected.contains(aliases[key])) {
+            selected << aliases[key]
+        }
+    }
+    return selected ?: ["reseg", "original_seg", "proseg_mask"]
+}
+
+def normalizeOptionalStringList(rawValue) {
+    if (rawValue == null) {
+        return null
+    }
+    def values = rawValue instanceof Collection
+        ? rawValue
+        : rawValue.toString().split(",")
+    def cleaned = values
+        .collect { value -> value.toString().trim() }
+        .findAll { value -> value.length() > 0 }
+        .unique()
+    return cleaned ?: null
 }
 
 def samplesJsonForSegmentation(pairId, platforms, platformPaths, segmentation) {
@@ -379,6 +444,42 @@ def corticalDepthConfigForPlatform(
     ]
 }
 
+def distanceFromObjectConfigForPlatform(
+    pairId,
+    platform,
+    segmentations,
+    params
+) {
+    def tables = segmentations.collect { segmentation ->
+        def layerKeys = analysisLayerKeys(platform, segmentation)
+        [
+            segmentation: segmentation,
+            table_key: layerKeys.table_key,
+            shape_key: layerKeys.shape_key,
+        ]
+    }
+    return [
+        pair_id: pairId,
+        dataset_name: "${pairId}_${platform}",
+        platform: platform,
+        latest_zarr_path: "latest_input.zarr",
+        output_dir: "distance_from_object_out",
+        object_annotation_path: "object_annotations.geojson",
+        tables: tables,
+        object_types: normalizeOptionalStringList(
+            params.distance_from_object_object_types
+        ),
+        coordinate_unit_um: params.distance_from_object_coordinate_unit_um,
+        near_distance_um: params.distance_from_object_near_distance_um,
+        far_distance_um: params.distance_from_object_far_distance_um,
+        max_distance_um: params.distance_from_object_max_distance_um,
+        tissue_annotation_column: "cortical_depth_annotation",
+        included_tissue_annotations: ["grey_matter"],
+        min_cells_per_pseudobulk: params.distance_from_object_min_cells_per_pseudobulk,
+        write_spatialdata_table: params.distance_from_object_write_spatialdata_table,
+    ]
+}
+
 def samplesJsonFromGroupedZarrs(pairId, activePlatforms, platformNames, zarrPaths) {
     def names = platformNames.collect { platformName -> platformName.toString() }
     def pathsByPlatform = [:]
@@ -414,6 +515,10 @@ def normalizeStage(rawValue, paramName) {
         "nuclei_cellpose": "segment_nuclei",
         "enrich": "enrich",
         "enrichment": "enrich",
+        "build_viewer_caches": "build_viewer_caches",
+        "viewer_caches": "build_viewer_caches",
+        "viewer_cache": "build_viewer_caches",
+        "pyramids": "build_viewer_caches",
         "mask_image_quantification": "mask_image_quantification",
         "image_quantification": "mask_image_quantification",
         "quantify_images": "mask_image_quantification",
@@ -421,6 +526,10 @@ def normalizeStage(rawValue, paramName) {
         "compute_cortical_depth": "compute_cortical_depth",
         "cortical_depth": "compute_cortical_depth",
         "laplace_depth": "compute_cortical_depth",
+        "distance_from_object": "distance_from_object",
+        "object_distance": "distance_from_object",
+        "distance_to_object": "distance_from_object",
+        "plaque_distance": "distance_from_object",
         "qc": "qc",
         "align": "align",
         "alignment": "align",
@@ -449,8 +558,8 @@ def normalizeStage(rawValue, paramName) {
         throw new IllegalArgumentException(
             "Unknown ${paramName} '${raw}'. Valid stages: " +
             "build_spatialdata, segment_nuclei, segment, enrich, " +
-            "mask_image_quantification, " +
-            "compute_cortical_depth, qc, align, align_qc, " +
+            "build_viewer_caches, mask_image_quantification, " +
+            "compute_cortical_depth, distance_from_object, qc, align, align_qc, " +
             "compare, visualize, spatial_gene_analysis, " +
             "clustering_squidpy, mapmycells"
         )
@@ -462,9 +571,14 @@ def activeStageOrder(
     alignmentEnabled,
     pairedMode,
     maskImageQuantificationEnabled,
-    corticalDepthEnabled
+    corticalDepthEnabled,
+    distanceFromObjectEnabled,
+    viewerCacheEnabled
 ) {
     def stages = ["build_spatialdata", "segment_nuclei", "segment", "enrich"]
+    if (viewerCacheEnabled) {
+        stages += ["build_viewer_caches"]
+    }
     if (maskImageQuantificationEnabled) {
         stages += ["mask_image_quantification"]
     }
@@ -482,6 +596,9 @@ def activeStageOrder(
     if (corticalDepthEnabled) {
         stages += ["compute_cortical_depth"]
     }
+    if (distanceFromObjectEnabled) {
+        stages += ["distance_from_object"]
+    }
     stages += ["mapmycells"]
     return stages
 }
@@ -494,6 +611,9 @@ def validateStage(stage, stages, paramName, alignmentEnabled) {
         }
         if (stage == "compute_cortical_depth") {
             hint = " Pass --cortical_depth_enabled true to use cortical depth."
+        }
+        if (stage == "distance_from_object") {
+            hint = " Pass --distance_from_object_enabled true to use object distance."
         }
         throw new IllegalArgumentException(
             "${paramName} '${stage}' is not active for this run.${hint} " +
@@ -697,6 +817,20 @@ def corticalDepthAnnotationPath(row, platform, role) {
     return chooseField(row, candidatesByRole[role] ?: [])
 }
 
+def distanceFromObjectAnnotationPath(row, platform) {
+    def prefix = platform.toString().toLowerCase()
+    return chooseField(row, [
+        "${prefix}_distance_object_annotation_geojson",
+        "${prefix}_distance_from_object_annotation_geojson",
+        "${prefix}_object_annotation_geojson",
+        "${prefix}_plaque_annotation_geojson",
+        "distance_object_annotation_geojson",
+        "distance_from_object_annotation_geojson",
+        "object_annotation_geojson",
+        "plaque_annotation_geojson",
+    ])
+}
+
 def appendCorticalDepthPreflightChecks(errors, row, settings, _params) {
     if (!settings.run_compute_cortical_depth) {
         return
@@ -773,12 +907,26 @@ def appendSpatialGeneTranscriptPreflightChecks(errors, row, settings, params) {
     }
 }
 
+def appendDistanceFromObjectPreflightChecks(errors, row, settings, _params) {
+    if (!settings.run_distance_from_object) {
+        return
+    }
+    settings.active_platforms.each { platform ->
+        appendPreflightFileCheck(
+            errors,
+            distanceFromObjectAnnotationPath(row, platform),
+            "DISTANCE_FROM_OBJECT ${settings.pair_id}:${platform} object GeoJSON",
+        )
+    }
+}
+
 def runPreflightChecks(row, settings, params) {
     def errors = []
     appendClusteringSquidpyPreflightChecks(errors, settings, params)
     appendMapMyCellsPreflightChecks(errors, settings, params)
     appendCorticalDepthPreflightChecks(errors, row, settings, params)
     appendSpatialGeneTranscriptPreflightChecks(errors, row, settings, params)
+    appendDistanceFromObjectPreflightChecks(errors, row, settings, params)
     if (errors) {
         throw new IllegalArgumentException(
             "Preflight checks failed for sample ${settings.pair_id} " +
@@ -850,6 +998,15 @@ def rowSampleSettings(row, params) {
         true,
         "mask_image_quantification_enabled for ${pairId}",
     )
+    def viewerCacheEnabled = boolOrDefault(
+        rowFieldOrDefault(
+            row,
+            "viewer_cache_enabled",
+            params.viewer_cache_enabled,
+        ),
+        true,
+        "viewer_cache_enabled for ${pairId}",
+    )
     def corticalDepthEnabled = boolOrDefault(
         rowFieldOrDefault(
             row,
@@ -858,6 +1015,22 @@ def rowSampleSettings(row, params) {
         ),
         false,
         "cortical_depth_enabled for ${pairId}",
+    )
+    def distanceFromObjectEnabled = boolOrDefault(
+        rowFieldOrDefault(
+            row,
+            "distance_from_object_enabled",
+            params.distance_from_object_enabled,
+        ),
+        false,
+        "distance_from_object_enabled for ${pairId}",
+    )
+    def distanceFromObjectSegmentations = normalizeDistanceFromObjectSegmentations(
+        rowFieldOrDefault(
+            row,
+            "distance_from_object_segmentations",
+            params.distance_from_object_segmentations,
+        )
     )
 
     def rowOnlyStageRaw = chooseField(row, ["only_stage"])
@@ -889,20 +1062,21 @@ def rowSampleSettings(row, params) {
         pairedMode,
         maskImageQuantificationEnabled,
         corticalDepthEnabled,
+        distanceFromObjectEnabled,
+        viewerCacheEnabled,
     )
     def startStage = normalizeStage(startStageRaw, startParamName)
     def stopStage = normalizeStage(stopStageRaw, stopParamName)
     validateStage(startStage, stageOrder, startParamName, alignmentEnabled)
     validateStage(stopStage, stageOrder, stopParamName, alignmentEnabled)
-    // compute_cortical_depth is sequenced after clustering_squidpy. When cortical
-    // depth is enabled and the stop stage is the clustering_squidpy default,
-    // extend the range so a normal run still produces the depth outputs.
-    // only_stage runs are left exact.
-    if (corticalDepthEnabled &&
-        !onlyStageRaw &&
-        stopStage == "clustering_squidpy" &&
-        stageOrder.contains("compute_cortical_depth")) {
-        stopStage = "compute_cortical_depth"
+    // Opt-in terminal analyses extend the historical clustering stop default.
+    // Explicit only_stage selections and non-default stop stages remain exact.
+    if (!onlyStageRaw && stopStage == "clustering_squidpy") {
+        if (distanceFromObjectEnabled && stageOrder.contains("distance_from_object")) {
+            stopStage = "distance_from_object"
+        } else if (corticalDepthEnabled && stageOrder.contains("compute_cortical_depth")) {
+            stopStage = "compute_cortical_depth"
+        }
     }
     if (stageOrder.indexOf(startStage) > stageOrder.indexOf(stopStage)) {
         error(
@@ -920,6 +1094,12 @@ def rowSampleSettings(row, params) {
     )
     def runSegment = stageInRange("segment", startStage, stopStage, stageOrder)
     def runEnrich = stageInRange("enrich", startStage, stopStage, stageOrder)
+    def runBuildViewerCaches = stageInRange(
+        "build_viewer_caches",
+        startStage,
+        stopStage,
+        stageOrder,
+    )
     def runMaskImageQuantification = stageInRange(
         "mask_image_quantification",
         startStage,
@@ -928,6 +1108,12 @@ def rowSampleSettings(row, params) {
     )
     def runComputeCorticalDepth = stageInRange(
         "compute_cortical_depth",
+        startStage,
+        stopStage,
+        stageOrder,
+    )
+    def runDistanceFromObject = stageInRange(
+        "distance_from_object",
         startStage,
         stopStage,
         stageOrder,
@@ -976,6 +1162,7 @@ def rowSampleSettings(row, params) {
         active_platforms: activePlatforms,
         paired_mode: pairedMode,
         analysis_segmentations: analysisSegmentations,
+        distance_from_object_segmentations: distanceFromObjectSegmentations,
         stage_order: stageOrder,
         start_stage: startStage,
         stop_stage: stopStage,
@@ -986,8 +1173,10 @@ def rowSampleSettings(row, params) {
         run_segment_nuclei: runSegmentNuclei,
         run_segment: runSegment,
         run_enrich: runEnrich,
+        run_build_viewer_caches: runBuildViewerCaches,
         run_mask_image_quantification: runMaskImageQuantification,
         run_compute_cortical_depth: runComputeCorticalDepth,
+        run_distance_from_object: runDistanceFromObject,
         run_qc: runQc,
         run_align: runAlign,
         run_align_qc: runAlignQc,
@@ -998,8 +1187,10 @@ def rowSampleSettings(row, params) {
         run_mapmycells: runMapMyCells,
         need_build_results: runSegmentNuclei || runSegment || runEnrich,
         need_enriched_zarrs: (
+            runBuildViewerCaches ||
             runMaskImageQuantification ||
             runComputeCorticalDepth ||
+            runDistanceFromObject ||
             runQc ||
             needAnalysisZarrs
         ),
@@ -1063,8 +1254,11 @@ workflow {
             "Sample ${settings.pair_id}: analysis_mode=${settings.analysis_mode}; " +
             "enable_alignment=${settings.enable_alignment}; " +
             "cortical_depth=${settings.run_compute_cortical_depth}; " +
+            "distance_from_object=${settings.run_distance_from_object}; " +
             "active platforms=${settings.active_platforms.join(', ')}; " +
             "analysis segmentations=${settings.analysis_segmentations.join(', ')}; " +
+            "distance segmentations=" +
+            "${settings.distance_from_object_segmentations.join(', ')}; " +
             "selected stages=${settings.selected_stages.join(' -> ')}"
         )
         tuple(settings.pair_id, row, settings)
@@ -1521,6 +1715,95 @@ workflow {
             )
     }
 
+    // Pre-build the napari viewer's derived caches (label masks + label/outline
+    // pyramids + image pyramid) into the enriched latest zarr. This is a separate
+    // writer of the shared store, so it is serialized into the post-enrich chain:
+    // the stages that consume the enriched zarr read `post_enrich_zarrs_ch` below,
+    // which is the viewer-cache output when the stage runs and the enriched zarr
+    // passthrough otherwise.
+    viewer_cache_gate_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
+        if (!settings.run_build_viewer_caches) {
+            []
+        } else {
+            settings.active_platforms.collect { platform ->
+                tuple("${pairId}|${platform}", true)
+            }
+        }
+    }
+
+    viewer_cache_transform_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+        if (!settings.run_build_viewer_caches) {
+            []
+        } else {
+            settings.active_platforms.collect { platform ->
+                def transformPath = platform == "MERSCOPE"
+                    ? chooseField(row, ["merscope_transform_path"])
+                    : chooseField(row, ["xenium_spec_path"])
+                tuple("${pairId}|${platform}", transformPath)
+            }
+        }
+    }
+
+    viewer_cache_inputs_ch = enriched_zarrs_ch
+        .join(viewer_cache_gate_ch)
+        .join(viewer_cache_transform_ch)
+        .map { key, pairId, platform, enrichedLatestZarr, _runFlag, transformPath ->
+            def resolvedTransform = (transformPath && transformPath.toString().trim())
+                ? file(transformPath).toAbsolutePath().toString()
+                : null
+            def viewerCacheConfig = [
+                dataset_name: "${pairId}_${platform}",
+                platform: platform,
+                latest_zarr_path: "latest_input.zarr",
+                original_data_path: "latest_input.zarr",
+                output_dir: "viewer_cache_out",
+                transform_path: resolvedTransform,
+                downsample: params.viewer_cache_downsample,
+                label_chunk_size: params.viewer_cache_label_chunk_size,
+                contour_width: params.viewer_cache_contour_width,
+                min_size: params.viewer_cache_min_size,
+                build_image_pyramid: params.viewer_cache_build_image_pyramid,
+            ]
+
+            tuple(
+                key,
+                pairId,
+                platform,
+                groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(viewerCacheConfig)),
+                enrichedLatestZarr,
+            )
+        }
+
+    viewer_cache_results_ch = VIEWER_CACHE(viewer_cache_inputs_ch)
+
+    viewer_cached_zarrs_ch = viewer_cache_results_ch.map {
+        key, pairId, platform, cachedLatestZarr, _viewerCacheOutDir ->
+            tuple(
+                key,
+                pairId,
+                platform,
+                java.nio.file.Paths.get(cachedLatestZarr.toString()).toRealPath().toString(),
+            )
+    }
+
+    viewer_cache_passthrough_gate_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
+        if (!(settings.need_enriched_zarrs && !settings.run_build_viewer_caches)) {
+            []
+        } else {
+            settings.active_platforms.collect { platform ->
+                tuple("${pairId}|${platform}", true)
+            }
+        }
+    }
+
+    viewer_cache_passthrough_ch = enriched_zarrs_ch
+        .join(viewer_cache_passthrough_gate_ch)
+        .map { key, pairId, platform, enrichedLatestZarr, _runFlag ->
+            tuple(key, pairId, platform, enrichedLatestZarr)
+        }
+
+    post_enrich_zarrs_ch = viewer_cached_zarrs_ch.mix(viewer_cache_passthrough_ch)
+
     mask_image_quantification_gate_ch = sample_rows_ch.flatMap {
         pairId, _row, settings ->
             if (!settings.run_mask_image_quantification) {
@@ -1538,7 +1821,7 @@ workflow {
             tuple(key, maskPath)
     }
 
-    mask_image_quantification_inputs_ch = enriched_zarrs_ch
+    mask_image_quantification_inputs_ch = post_enrich_zarrs_ch
         .join(mask_image_quantification_masks_ch)
         .join(mask_image_quantification_gate_ch)
         .map { key, pairId, platform, enrichedLatestZarr, maskPath, _runFlag ->
@@ -1584,7 +1867,7 @@ workflow {
         }
     }
 
-    enriched_downstream_zarrs_ch = enriched_zarrs_ch
+    enriched_downstream_zarrs_ch = post_enrich_zarrs_ch
         .join(enriched_downstream_gate_ch)
         .map { key, pairId, platform, enrichedLatestZarr, _runFlag ->
             tuple(key, pairId, platform, enrichedLatestZarr)
@@ -2172,11 +2455,9 @@ workflow {
     clustering_results_ch = CLUSTERING_SQUIDPY_FINALIZE(clustering_computed_ch)
 
     // Cortical depth runs after clustering so the per-cell broad_class and
-    // subcluster_label annotations exist and the depth violin plots can be
-    // produced. Depth columns are not consumed by any other stage, so making
-    // cortical depth terminal loses no information downstream. The actual DAG
-    // execution order is enforced by the channel dependencies below (the
-    // stage-order list only drives start/stop range gating).
+    // subcluster_label annotations exist and its depth violin plots can be
+    // produced. The distance-from-object branch consumes its tissue-region
+    // annotation when both opt-in stages run in the same invocation.
     clustering_done_per_pair_ch = clustering_results_ch
         .map { pairId, segmentation, _samplesJson, _clusteringOutDir ->
             tuple(pairId, segmentation)
@@ -2189,8 +2470,14 @@ workflow {
             if (!(settings.run_compute_cortical_depth && settings.run_clustering_squidpy)) {
                 []
             } else {
+                def corticalSegmentations = settings.analysis_segmentations
+                if (settings.run_distance_from_object) {
+                    corticalSegmentations = (
+                        corticalSegmentations + settings.distance_from_object_segmentations
+                    ).unique()
+                }
                 settings.active_platforms.collect { platform ->
-                    tuple("${pairId}|${platform}", row, settings.analysis_segmentations)
+                    tuple("${pairId}|${platform}", row, corticalSegmentations)
                 }
             }
         }
@@ -2215,8 +2502,14 @@ workflow {
             if (!(settings.run_compute_cortical_depth && !settings.run_clustering_squidpy)) {
                 []
             } else {
+                def corticalSegmentations = settings.analysis_segmentations
+                if (settings.run_distance_from_object) {
+                    corticalSegmentations = (
+                        corticalSegmentations + settings.distance_from_object_segmentations
+                    ).unique()
+                }
                 settings.active_platforms.collect { platform ->
-                    tuple("${pairId}|${platform}", row, settings.analysis_segmentations)
+                    tuple("${pairId}|${platform}", row, corticalSegmentations)
                 }
             }
         }
@@ -2246,7 +2539,182 @@ workflow {
             )
         }
 
-    COMPUTE_CORTICAL_DEPTH(compute_cortical_depth_inputs_ch)
+    compute_cortical_depth_results_ch = COMPUTE_CORTICAL_DEPTH(
+        compute_cortical_depth_inputs_ch
+    )
+
+    distance_from_object_after_cortical_gate_ch =
+        sample_rows_ch.flatMap { pairId, row, settings ->
+            if (!(settings.run_distance_from_object &&
+                  settings.run_compute_cortical_depth)) {
+                []
+            } else {
+                settings.active_platforms.collect { platform ->
+                    tuple(
+                        "${pairId}|${platform}",
+                        row,
+                        settings.distance_from_object_segmentations,
+                    )
+                }
+            }
+        }
+
+    distance_from_object_after_cortical_ch = compute_cortical_depth_results_ch
+        .join(distance_from_object_after_cortical_gate_ch)
+        .map {
+            key,
+            pairId,
+            platform,
+            latestZarr,
+            _corticalDepthOut,
+            row,
+            distanceSegmentations ->
+                tuple(
+                    key,
+                    pairId,
+                    platform,
+                    latestZarr,
+                    row,
+                    distanceSegmentations,
+                )
+        }
+
+    distance_from_object_after_clustering_gate_ch =
+        sample_rows_ch.flatMap { pairId, row, settings ->
+            if (!(settings.run_distance_from_object &&
+                  !settings.run_compute_cortical_depth &&
+                  settings.run_clustering_squidpy)) {
+                []
+            } else {
+                settings.active_platforms.collect { platform ->
+                    tuple(
+                        "${pairId}|${platform}",
+                        row,
+                        settings.distance_from_object_segmentations,
+                    )
+                }
+            }
+        }
+
+    distance_from_object_after_clustering_ch = downstream_zarrs_ch
+        .join(distance_from_object_after_clustering_gate_ch)
+        .map {
+            key, pairId, platform, latestZarr, row, distanceSegmentations ->
+                tuple(
+                    pairId,
+                    key,
+                    platform,
+                    latestZarr,
+                    row,
+                    distanceSegmentations,
+                )
+        }
+        .combine(clustering_done_per_pair_ch, by: 0)
+        .map {
+            pairId,
+            key,
+            platform,
+            latestZarr,
+            row,
+            distanceSegmentations,
+            _done ->
+                tuple(
+                    key,
+                    pairId,
+                    platform,
+                    latestZarr,
+                    row,
+                    distanceSegmentations,
+                )
+        }
+
+    distance_from_object_without_terminal_dependency_gate_ch =
+        sample_rows_ch.flatMap { pairId, row, settings ->
+            if (!(settings.run_distance_from_object &&
+                  !settings.run_compute_cortical_depth &&
+                  !settings.run_clustering_squidpy)) {
+                []
+            } else {
+                settings.active_platforms.collect { platform ->
+                    tuple(
+                        "${pairId}|${platform}",
+                        row,
+                        settings.distance_from_object_segmentations,
+                    )
+                }
+            }
+        }
+
+    distance_from_object_without_terminal_dependency_ch = downstream_zarrs_ch
+        .join(distance_from_object_without_terminal_dependency_gate_ch)
+        .map {
+            key, pairId, platform, latestZarr, row, distanceSegmentations ->
+                tuple(
+                    key,
+                    pairId,
+                    platform,
+                    latestZarr,
+                    row,
+                    distanceSegmentations,
+                )
+        }
+
+    distance_from_object_inputs_ch = distance_from_object_after_cortical_ch
+        .mix(distance_from_object_after_clustering_ch)
+        .mix(distance_from_object_without_terminal_dependency_ch)
+        .map {
+            key, pairId, platform, latestZarr, row, distanceSegmentations ->
+                def distanceConfig = distanceFromObjectConfigForPlatform(
+                    pairId,
+                    platform,
+                    distanceSegmentations,
+                    params,
+                )
+                def annotationPath = file(
+                    normalizedPath(distanceFromObjectAnnotationPath(row, platform))
+                )
+                tuple(
+                    key,
+                    pairId,
+                    platform,
+                    groovy.json.JsonOutput.prettyPrint(
+                        groovy.json.JsonOutput.toJson(distanceConfig)
+                    ),
+                    latestZarr,
+                    annotationPath,
+                )
+        }
+
+    distance_from_object_annotation_results_ch = DISTANCE_FROM_OBJECT_ANNOTATE(
+        distance_from_object_inputs_ch
+    )
+
+    distance_from_object_cohort_inputs_ch = distance_from_object_annotation_results_ch
+        .map { _key, _pairId, platform, _latestZarr, annotationOutputDir ->
+            tuple(platform, annotationOutputDir)
+        }
+        .groupTuple()
+        .map { platform, annotationOutputDirs ->
+            def cohortConfig = [
+                platform: platform,
+                annotation_output_dirs: ["pair_outputs"],
+                output_dir: "distance_from_object_cohort_out",
+                segmentations: normalizeDistanceFromObjectSegmentations(
+                    params.distance_from_object_segmentations
+                ),
+                min_pairs: params.distance_from_object_min_pairs,
+                n_cpus: params.distance_from_object_n_cpus,
+            ]
+            tuple(
+                platform,
+                groovy.json.JsonOutput.prettyPrint(
+                    groovy.json.JsonOutput.toJson(cohortConfig)
+                ),
+                annotationOutputDirs,
+            )
+        }
+
+    DISTANCE_FROM_OBJECT_COHORT(distance_from_object_cohort_inputs_ch)
 
     mapmycells_after_clustering_gate_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
         if (!(settings.run_mapmycells && settings.run_clustering_squidpy)) {

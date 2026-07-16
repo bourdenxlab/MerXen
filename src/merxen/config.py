@@ -270,6 +270,29 @@ class EnrichmentConfig(BaseModel):
     transform_path: Path | None = None
 
 
+class ViewerCacheConfig(BaseModel):
+    """Configuration for pre-building the napari viewer's derived caches.
+
+    Runs after enrichment and materializes the label masks, label/outline
+    pyramids, and image pyramid the comparison viewer would otherwise build on
+    the fly. Parameter defaults mirror the viewer's own defaults; expose them via
+    Nextflow params to keep them in lockstep with the viewer's runtime settings.
+    """
+
+    dataset_name: str
+    platform: Literal["MERSCOPE", "XENIUM"]
+    latest_zarr_path: Path
+    original_data_path: Path
+    output_dir: Path
+    transform_path: Path | None = None
+    downsample: int = Field(default=4, ge=2)
+    label_chunk_size: int = Field(default=2048, gt=0)
+    contour_width: int = Field(default=1, ge=0)
+    min_size: int = Field(default=4096, gt=0)
+    shape_keys: list[str] | None = None
+    build_image_pyramid: bool = True
+
+
 class MaskImageQuantificationConfig(BaseModel):
     """Configuration for Cellpose-mask image-channel quantification."""
 
@@ -364,6 +387,83 @@ class CorticalDepthConfig(BaseModel):
                 "role-labelled cortical-depth annotations"
             )
         return self
+
+
+class DistanceFromObjectTableConfig(BaseModel):
+    """One cell table to annotate with distances from polygon objects."""
+
+    segmentation: str
+    table_key: str
+    shape_key: str | None = None
+
+
+class DistanceFromObjectConfig(BaseModel):
+    """Configuration for per-sample distance-from-object annotation."""
+
+    pair_id: str
+    dataset_name: str
+    platform: Literal["MERSCOPE", "XENIUM"]
+    latest_zarr_path: Path
+    output_dir: Path
+    object_annotation_path: Path
+    tables: list[DistanceFromObjectTableConfig]
+    object_types: list[str] | None = None
+    coordinate_unit_um: float = Field(default=1.0, gt=0.0)
+    near_distance_um: float = Field(default=50.0, ge=0.0)
+    far_distance_um: float = Field(default=100.0, ge=0.0)
+    max_distance_um: float = Field(default=200.0, gt=0.0)
+    tissue_annotation_column: str = "cortical_depth_annotation"
+    included_tissue_annotations: list[str] = Field(
+        default_factory=lambda: ["grey_matter"]
+    )
+    min_cells_per_pseudobulk: int = Field(default=10, ge=1)
+    write_spatialdata_table: bool = True
+
+    @field_validator("object_types", "included_tissue_annotations")
+    @classmethod
+    def _validate_nonempty_strings(
+        cls: type[DistanceFromObjectConfig],
+        values: list[str] | None,
+    ) -> list[str] | None:
+        if values is None:
+            return None
+        cleaned = [str(value).strip() for value in values if str(value).strip()]
+        if not cleaned:
+            raise ValueError("Configured annotation lists must not be empty")
+        return list(dict.fromkeys(cleaned))
+
+    @model_validator(mode="after")
+    def _validate_distance_bands(
+        self: DistanceFromObjectConfig,
+    ) -> DistanceFromObjectConfig:
+        if not self.tables:
+            raise ValueError("DistanceFromObjectConfig requires at least one table")
+        if self.near_distance_um >= self.far_distance_um:
+            raise ValueError("near_distance_um must be less than far_distance_um")
+        if self.far_distance_um >= self.max_distance_um:
+            raise ValueError("far_distance_um must be less than max_distance_um")
+        return self
+
+
+class DistanceFromObjectCohortConfig(BaseModel):
+    """Configuration for cohort-level paired near-vs-far analysis."""
+
+    platform: Literal["MERSCOPE", "XENIUM"]
+    annotation_output_dirs: list[Path]
+    output_dir: Path
+    segmentations: list[str]
+    min_pairs: int = Field(default=2, ge=2)
+    n_cpus: int | None = Field(default=None, ge=1)
+
+    @field_validator("annotation_output_dirs", "segmentations")
+    @classmethod
+    def _validate_required_lists(
+        cls: type[DistanceFromObjectCohortConfig],
+        values: list[Any],
+    ) -> list[Any]:
+        if not values:
+            raise ValueError("Cohort analysis lists must not be empty")
+        return values
 
 
 class SpateoAlignmentConfig(BaseModel):
