@@ -736,11 +736,7 @@ def enrich_single_latest(
         return write_path
 
     nuclei_missing = CELLPOSE_NUCLEI_SHAPE_NAME not in dst.shapes
-    if (
-        not force_rerun
-        and nuclei_missing
-        and _is_enriched_except_nuclei(dst, platform)
-    ):
+    if not force_rerun and nuclei_missing and _is_enriched_except_nuclei(dst, platform):
         log_status(
             f"[{dataset_name}] Existing enrichment predates the nuclei layer; "
             "adding nuclei without rebuilding existing shapes or tables."
