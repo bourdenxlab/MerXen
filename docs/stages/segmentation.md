@@ -1,45 +1,59 @@
 # Stage 2 — Segmentation
 
-Runs image-based segmentation with Cellpose-SAM on DAPI/PolyT (MERSCOPE) or
-DAPI/18S (Xenium), then refines those masks using the actual transcript
-positions with ProSeg. The Cellpose output is the **prior** that ProSeg's
-MCMC sampler starts from.
+Runs two image-based segmentations: a DAPI-only Cellpose `nuclei` model and a
+cell segmentation on DAPI/PolyT (MERSCOPE) or DAPI/18S (Xenium). The cell mask
+is then refined using the actual transcript positions with ProSeg. The nuclei
+mask remains independent of transcript assignment and is retained for
+subcellular transcript analysis.
 
 ## What it does
 
-1. Load the SpatialData zarr from stage 1 and pick the right image channels.
-2. Tile the image, run Cellpose on each tile, merge masks back into a
+1. Run DAPI-only Cellpose with the `nuclei` model and write an independently
+   reusable nuclei mask.
+2. Load the SpatialData zarr from stage 1 and pick the cell channels.
+3. Tile the image, run Cellpose on each tile, merge masks back into a
    single global-pixel-coordinate mask array.
-3. Filter masks by eccentricity / area (reject junk).
-4. Convert the Cellpose mask from pixel coordinates to microns using the
+4. Filter both masks with the configured 5–400 µm² final area bounds.
+5. Convert the Cellpose mask from pixel coordinates to microns using the
    platform transform matrix.
-5. Export transcripts to a ProSeg-friendly CSV, seeded with the cell id each
+6. Export transcripts to a ProSeg-friendly CSV, seeded with the cell id each
    transcript falls inside (from the Cellpose mask).
-6. Resolve or bootstrap the external ProSeg binary, then run it against that
+7. Resolve or bootstrap the external ProSeg binary, then run it against that
    CSV + mask.
-7. Convert ProSeg's raw output zarr to "latest" SpatialData format.
+8. Convert ProSeg's raw output zarr to "latest" SpatialData format.
 
 ## Nextflow subworkflow
 
-[`SEGMENT`](../../workflows/modules/segmentation.nf) is a subworkflow with two
-independently scheduled processes per dataset:
+The module has three independently scheduled processes per dataset:
 
 | Process | Tool | Default resources | Scheduler route |
 |---------|------|-------------------|-----------------|
+| `CELLPOSE_NUCLEI_SEGMENT` | DAPI-only Cellpose `nuclei` model | 12 CPUs, 212 GB RAM, `cellpose_segment_max_forks = 1` | Same GPU queue and shared GPU lock as cell Cellpose |
 | `CELLPOSE_SEGMENT` | Cellpose-SAM | 12 CPUs, 212 GB RAM, `cellpose_segment_max_forks = 1` | GPU queue and one GPU when `cellpose_gpu=true`; local GPU lock on workstations |
 | `PROSEG_SEGMENT` | ProSeg | 32 CPUs, 220 GB RAM, `proseg_segment_max_forks = 2` | CPU/HTC queue; no GPU request, lock, or Apptainer `--nv` |
 
-This boundary prevents the long CPU-only ProSeg sampler from retaining a GPU
-node after Cellpose has finished. The two processes still form the single
-stage named `segment` for `--start_stage`, `--stop_stage`, and `--only_stage`.
+The two Cellpose process types use the same file lock, so only one GPU job can
+run at a time even across samples. `segment_nuclei` is a separate selectable
+pipeline stage immediately before `segment`:
+
+```bash
+nextflow run workflows/main.nf \
+  --samplesheet workflows/samplesheet.csv \
+  --only_stage segment_nuclei
+```
+
+A routine range run includes both stages. `--only_stage segment` reuses the
+published nuclei mask and fails early if it is absent.
 
 - **Input:** `tuple(key, pair_id, platform, seg_config_json)`.
-- **CLIs:** `merxen cellpose-segment --config segment_config.json`, followed by
+- **CLIs:** `merxen cellpose-nuclei-segment --config segment_config.json`,
+  `merxen cellpose-segment --config segment_config.json`, followed by
   `merxen proseg-segment --config segment_config.json ...`. The original
   `merxen segment` command remains available for direct, single-process use.
 - **Output:**
   - `segment_out/proseg_base_latest.zarr` — refined segmentation as SpatialData.
   - `segment_out/cellpose_masks_tiled.npy` — global-pixel mask (uint32).
+  - `segment_out/cellpose_nuclei_masks_tiled.npy` — DAPI-only nuclei labels.
   - `segment_out/transcripts_for_proseg.csv` — transcripts with seeded cell ids.
   - `segment_out/cellpose_transforms.json` — affine metadata handed from
     Cellpose to ProSeg.
@@ -56,6 +70,7 @@ that path.
 |----------|------|
 | CLI `segment_command` | [cli/run_segmentation.py](../../src/merxen/cli/run_segmentation.py) |
 | Cellpose stage `run_cellpose_segmentation` | [segmentation/pipeline.py](../../src/merxen/segmentation/pipeline.py) |
+| Nuclei stage `run_cellpose_nuclei_segmentation` | [segmentation/pipeline.py](../../src/merxen/segmentation/pipeline.py) |
 | ProSeg stage `run_proseg_segmentation` | [segmentation/pipeline.py](../../src/merxen/segmentation/pipeline.py) |
 | Compatibility orchestration `run_segmentation_pipeline` | [segmentation/pipeline.py](../../src/merxen/segmentation/pipeline.py) |
 | Tiled Cellpose `run_tiled_cellpose` | [segmentation/cellpose.py:255](../../src/merxen/segmentation/cellpose.py#L255) |
@@ -75,11 +90,14 @@ SegmentationConfig
 │   ├── name, platform, data_path, channels, output_dir
 │   ├── persistent_latest_zarr_path, persistent_mask_path, persistent_transcripts_path
 │   ├── persistent_cellpose_stitching_stats_path
+│   ├── persistent_nuclei_mask_path, persistent_nuclei_stitching_stats_path
 │   ├── MERSCOPE: image_prefix, z_range, transform_path
 │   ├── Xenium: xenium_spec_path, min_qv
 │   └── proseg_overrides: dict      # per-platform voxel_layers
 ├── cellpose: CellposeConfig         # model_type, gpu, diameter, thresholds
+├── nuclei_cellpose: CellposeConfig  # nuclei model; other inference defaults match
 ├── mask_filter: MaskFilterConfig    # eccentricity, area percentile
+├── nuclei_mask_filter: MaskFilterConfig
 ├── tiling: TilingConfig             # tile sizes, stitch overlap, duplicate policy
 ├── proseg: ProsegConfig             # binary path, MCMC params
 └── memory: MemoryConfig             # RAM cap, chunk sizes
@@ -137,7 +155,9 @@ for all fields and defaults.
 | `latest/latest_spatialdata.zarr` | Durable refined SpatialData zarr. This is the object enrichment mutates in place. |
 | `segmentation/proseg_base_latest.zarr` | Staged symlink to the durable latest zarr. |
 | `cellpose_masks_tiled.npy` | Cleaned global-pixel Cellpose labels, consumed by ProSeg and enrichment. |
+| `cellpose_nuclei_masks_tiled.npy` | Cleaned DAPI-only nuclei labels, consumed by enrichment and transcript spatial analysis. |
 | `cellpose_stitching_stats.json` | Tile stitching diagnostics: accepted labels, duplicates, conflicts, edge-touching labels, and thresholds. |
+| `cellpose_nuclei_stitching_stats.json` | Equivalent tile-stitching diagnostics for nuclei. |
 | `transcripts_for_proseg.csv` | The transcript CSV fed into ProSeg. Retained for debugging. |
 | `cellpose_transforms.json` | Pixel-to-micron affine terms used by the ProSeg process. |
 

@@ -16,6 +16,8 @@ Usage: merxen [OPTIONS] COMMAND [ARGS]...
 Commands:
   build-spatialdata  Build a platform-specific SpatialData zarr from raw input
   segment            Run Cellpose + ProSeg segmentation for one dataset
+  cellpose-nuclei-segment
+                      Run reusable DAPI-only Cellpose nuclei segmentation
   enrich             Enrich a segmented zarr with per-shape tables
   mask-image-quantification
                       Quantify image channels over final Cellpose masks
@@ -66,6 +68,25 @@ merxen segment --config segment_config.json [--force-rerun]
 |--------|-------------|
 | `--config PATH` | JSON validated against [`SegmentationConfig`](../src/merxen/config.py#L146). |
 | `--force-rerun` | Ignore cached `proseg_base_latest.zarr` / `proseg_base_raw.zarr` in the output dir. |
+
+Details: [Stage 2 — Segmentation](stages/segmentation.md).
+
+---
+
+## `merxen cellpose-nuclei-segment`
+
+Run only the reusable DAPI-only Cellpose nuclei process. It uses the `nuclei`
+model, cell Cellpose inference/tiling settings, and its own 5–400 µm² mask
+filter.
+
+```bash
+merxen cellpose-nuclei-segment --config segment_config.json [--force-rerun]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--config PATH` | JSON validated against `SegmentationConfig`. |
+| `--force-rerun` | Recompute the nuclei mask even if the durable output exists. |
 
 Details: [Stage 2 — Segmentation](stages/segmentation.md).
 

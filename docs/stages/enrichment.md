@@ -7,8 +7,8 @@ tables that downstream QC and comparison consume.
 ## What it does
 
 1. Add a canonical ProSeg shape layer under a standard key.
-2. Convert the Cellpose mask array to polygon geometries and add it as a
-   second shape layer.
+2. Convert the cell and nuclei Cellpose mask arrays to polygon geometries as
+   `MOSAIK_cellpose` and `cellpose_nuclei`.
 3. Copy the original platform shapes (MERSCOPE cell boundaries or Xenium
    cell/nucleus boundaries), source images, and vendor-provided cell table
    into the enriched zarr.
@@ -25,10 +25,11 @@ them head-to-head.
 [`ENRICH`](../../workflows/modules/enrichment.nf) — one instance per dataset.
 
 - **Input:** `tuple(key, pair_id, platform, enrich_config_json, latest_zarr,
-  mask_path)`.
+  mask_path, nuclei_mask_path)`.
   - The `SEGMENT` output (`proseg_base_latest.zarr`) is symlinked in as
     `latest_input.zarr`.
   - The Cellpose mask is symlinked in as `enrich_input_mask.npy`.
+  - The nuclei mask is symlinked in as `enrich_input_nuclei_mask.npy`.
 - **CLI:** `merxen enrich --config enrich_config.json`.
 - **Output:** `tuple(key, pair_id, platform, latest_input.zarr, enrich_out/)`.
 - **publishDir:** `${outdir}/${pair_id}/${platform}/enrichment/` (symlink mode).
@@ -58,6 +59,7 @@ forward.
 | `platform` | `"MERSCOPE"` or `"XENIUM"` — controls which vendor layers are copied. |
 | `latest_zarr_path` | Input zarr (copied in as `latest_input.zarr`). |
 | `mask_path` | The Cellpose mask produced by `SEGMENT` (`enrich_input_mask.npy` in the work dir). |
+| `nuclei_mask_path` | The DAPI-only nuclei mask produced by the `segment_nuclei` stage. |
 | `original_data_path` | Path back to the stage-1 `source_spatialdata.zarr`. Used to copy vendor shapes and images. |
 | `output_dir` | Where to write `enrich_out/` summaries. |
 | `persistent_output_path` | Durable "latest" zarr path under `results/.../latest/`. |
@@ -76,17 +78,19 @@ forward.
    looks at this stable key.
 3. **Cellpose shape layer.** Load `cellpose_masks_tiled.npy`, convert to
    polygons, and store as `MOSAIK_cellpose`.
-4. **Copy vendor layers.** For MERSCOPE: the original cell boundaries are
+4. **Nuclei shape layer.** Convert `cellpose_nuclei_masks_tiled.npy` with the
+   same pixel-to-micron transform and store it as `cellpose_nuclei`.
+5. **Copy vendor layers.** For MERSCOPE: the original cell boundaries are
    cloned to `merscope_old_shapes`, and only the max-projection image is stored
    under `MERSCOPE_z_projection`. Legacy source zarrs with one image per z
    plane are projected during enrichment rather than copied plane-by-plane. For
    Xenium: cell and nucleus boundaries and morphology focus images are copied.
-5. **Per-shape tables.** `run_per_shape_assignment_for_dataset` iterates over
+6. **Per-shape tables.** `run_per_shape_assignment_for_dataset` iterates over
    each shape layer and builds a gene × cell counts table by streaming
    transcript points in chunks of `chunk_rows=750_000`. When a vendor table
    already exists (Xenium's cell_table, for example) it is cloned to the
    right region name rather than recomputed.
-6. **In-place element writes.** Enrichment writes each added shape, image, and
+7. **In-place element writes.** Enrichment writes each added shape, image, and
    table into the backed `latest_spatialdata.zarr` with SpatialData's
    element-level writer. The stage no longer creates a full temp copy of the
    zarr just to add these additive layers.
