@@ -226,6 +226,8 @@ def test_spatial_gene_analysis_stage_is_wired_after_visualization() -> None:
         'stages += ["mapmycells"]',
         "settings.run_spatial_gene_analysis",
         "spatial_gene_analysis_after_visualize_ch",
+        "appendSpatialGeneTranscriptPreflightChecks",
+        "spatialGeneSamplesJson",
         "spatial_gene_analysis_done_ch",
         "clustering_after_spatial_gene_analysis_ch",
         "SPATIAL_GENE_ANALYSIS(",
@@ -236,6 +238,8 @@ def test_spatial_gene_analysis_stage_is_wired_after_visualization() -> None:
         "spatial_gene_analysis_n_neighbors = 6",
         "spatial_gene_analysis_top_n = 10",
         "spatial_gene_analysis_max_forks = 4",
+        "spatial_gene_analysis_paircorr_permutations = 100",
+        "spatial_gene_analysis_transcript_analysis_enabled = true",
         'withName: "SPATIAL_GENE_ANALYSIS"',
     ]:
         assert expected in config_text
@@ -247,6 +251,8 @@ def test_spatial_gene_analysis_stage_is_wired_after_visualization() -> None:
         "merxen spatial-gene-analysis",
         '"n_neighbors"',
         '"top_n"',
+        '"signed_distance_edges_um"',
+        '"paircorr_n_jobs"',
     ]:
         assert expected in module_text
 
