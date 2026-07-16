@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 MOSAIK_PROSEG_SHAPE_NAME = "MOSAIK_proseg"
 MOSAIK_CELLPOSE_SHAPE_NAME = "MOSAIK_cellpose"
+CELLPOSE_NUCLEI_SHAPE_NAME = "cellpose_nuclei"
 MERSCOPE_OLD_SHAPE_NAME = "merscope_cell_boundaries"
 XENIUM_OLD_CELL_SHAPE_NAME = "xenium_cell_boundaries"
 XENIUM_OLD_NUCLEUS_SHAPE_NAME = "xenium_nucleus"
@@ -228,6 +229,8 @@ def _cellpose_gdf_from_mask(
     *,
     polygon_n_jobs: int,
     polygon_show_progress: bool,
+    shape_name: str = MOSAIK_CELLPOSE_SHAPE_NAME,
+    id_prefix: str = "cellpose",
 ) -> gpd.GeoDataFrame:
     """Build a GeoDataFrame of Cellpose polygons in micron space."""
     if not mask_path.exists():
@@ -235,9 +238,7 @@ def _cellpose_gdf_from_mask(
             f"[{dataset_name}] Missing Cellpose mask file: {mask_path}"
         )
 
-    log_status(
-        f"[{dataset_name}] Building {MOSAIK_CELLPOSE_SHAPE_NAME} from {mask_path}"
-    )
+    log_status(f"[{dataset_name}] Building {shape_name} from {mask_path}")
     mask_mmap = np.load(mask_path, mmap_mode="r")
     polygons_px = masks_to_polygons(
         mask_mmap,
@@ -277,7 +278,7 @@ def _cellpose_gdf_from_mask(
 
     return gpd.GeoDataFrame(
         {
-            "cell_id": [f"cellpose_{i + 1}" for i in range(len(polygons_um))],
+            "cell_id": [f"{id_prefix}_{i + 1}" for i in range(len(polygons_um))],
             "geometry": polygons_um,
         },
         geometry="geometry",
@@ -491,7 +492,30 @@ def _copy_xenium_images(dst_sdata: Any, src_sdata: Any, *, force: bool) -> int:
 
 def _is_already_enriched(dst_sdata: Any, platform: str) -> bool:
     """Check whether required enrichment artifacts already exist."""
-    req_shapes = {MOSAIK_PROSEG_SHAPE_NAME, MOSAIK_CELLPOSE_SHAPE_NAME}
+    req_shapes = {
+        MOSAIK_PROSEG_SHAPE_NAME,
+        MOSAIK_CELLPOSE_SHAPE_NAME,
+        CELLPOSE_NUCLEI_SHAPE_NAME,
+    }
+    req_tables = {ORIGINAL_TABLE_NAME}
+    if platform.upper() == "MERSCOPE":
+        req_shapes.add(MERSCOPE_OLD_SHAPE_NAME)
+        req_images = {MERSCOPE_ZPROJ_IMAGE_NAME}
+    else:
+        req_shapes.update({XENIUM_OLD_CELL_SHAPE_NAME, XENIUM_OLD_NUCLEUS_SHAPE_NAME})
+        req_images = set()
+    has_shapes = req_shapes.issubset(set(map(str, dst_sdata.shapes.keys())))
+    has_tables = req_tables.issubset(set(map(str, dst_sdata.tables.keys())))
+    has_images = req_images.issubset(set(map(str, dst_sdata.images.keys())))
+    return has_shapes and has_tables and has_images
+
+
+def _is_enriched_except_nuclei(dst_sdata: Any, platform: str) -> bool:
+    """Check whether a pre-nuclei enrichment has every legacy artifact."""
+    req_shapes = {
+        MOSAIK_PROSEG_SHAPE_NAME,
+        MOSAIK_CELLPOSE_SHAPE_NAME,
+    }
     req_tables = {ORIGINAL_TABLE_NAME}
     if platform.upper() == "MERSCOPE":
         req_shapes.add(MERSCOPE_OLD_SHAPE_NAME)
@@ -530,6 +554,7 @@ def _partial_enrichment_artifact_paths(zarr_path: Path, platform: str) -> set[st
     rel_paths = {
         f"shapes/{MOSAIK_PROSEG_SHAPE_NAME}",
         f"shapes/{MOSAIK_CELLPOSE_SHAPE_NAME}",
+        f"shapes/{CELLPOSE_NUCLEI_SHAPE_NAME}",
         f"tables/{ORIGINAL_TABLE_NAME}",
     }
     if platform.upper() == "MERSCOPE":
@@ -652,6 +677,7 @@ def enrich_single_latest(
         else latest_path
     )
     mask_path = Path(config.mask_path)
+    nuclei_mask_path = Path(config.nuclei_mask_path)
     dataset_name = str(config.dataset_name).upper()
     platform = config.platform.upper()
 
@@ -671,6 +697,48 @@ def enrich_single_latest(
         force_release(note=f"after enrichment skip {dataset_name}")
         if latest_path != write_path:
             stage_existing_output(write_path, latest_path)
+        return write_path
+
+    nuclei_missing = CELLPOSE_NUCLEI_SHAPE_NAME not in dst.shapes
+    if (
+        not force_rerun
+        and nuclei_missing
+        and _is_enriched_except_nuclei(dst, platform)
+    ):
+        log_status(
+            f"[{dataset_name}] Existing enrichment predates the nuclei layer; "
+            "adding nuclei without rebuilding existing shapes or tables."
+        )
+        proseg_template = dst.shapes[MOSAIK_PROSEG_SHAPE_NAME]
+        x_transform, y_transform = _dataset_cellpose_transform(config)
+        nuclei_gdf = _cellpose_gdf_from_mask(
+            nuclei_mask_path,
+            x_transform,
+            y_transform,
+            dataset_name=dataset_name,
+            polygon_n_jobs=polygon_n_jobs,
+            polygon_show_progress=polygon_show_progress,
+            shape_name=CELLPOSE_NUCLEI_SHAPE_NAME,
+            id_prefix="nucleus",
+        )
+        nuclei_shapes = _parse_shapes_with_template(
+            nuclei_gdf,
+            template_shape=proseg_template,
+        )
+        write_or_replace_element(
+            dst,
+            CELLPOSE_NUCLEI_SHAPE_NAME,
+            "shapes",
+            nuclei_shapes,
+            overwrite=False,
+        )
+        del dst, nuclei_gdf
+        force_release(note=f"after incremental nuclei enrichment ({dataset_name})")
+        if latest_path != write_path:
+            stage_existing_output(write_path, latest_path)
+        log_status(
+            f"[{dataset_name}] Incremental nuclei enrichment complete: {write_path}"
+        )
         return write_path
 
     overwrite_existing = bool(force_rerun or not already_enriched)
@@ -722,6 +790,28 @@ def enrich_single_latest(
         MOSAIK_CELLPOSE_SHAPE_NAME,
         "shapes",
         cp_shapes,
+        overwrite=overwrite_existing,
+    )
+
+    nuclei_gdf = _cellpose_gdf_from_mask(
+        nuclei_mask_path,
+        x_transform,
+        y_transform,
+        dataset_name=dataset_name,
+        polygon_n_jobs=polygon_n_jobs,
+        polygon_show_progress=polygon_show_progress,
+        shape_name=CELLPOSE_NUCLEI_SHAPE_NAME,
+        id_prefix="nucleus",
+    )
+    nuclei_shapes = _parse_shapes_with_template(
+        nuclei_gdf,
+        template_shape=proseg_template,
+    )
+    write_or_replace_element(
+        dst,
+        CELLPOSE_NUCLEI_SHAPE_NAME,
+        "shapes",
+        nuclei_shapes,
         overwrite=overwrite_existing,
     )
 
@@ -833,7 +923,7 @@ def enrich_single_latest(
     else:
         raise ValueError(f"Unsupported platform: {config.platform}")
 
-    del dst, src, cp_gdf
+    del dst, src, cp_gdf, nuclei_gdf
     force_release(note=f"after in-place enrichment ({dataset_name})")
 
     if keep_backup:

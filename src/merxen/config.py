@@ -229,6 +229,8 @@ class DatasetConfig(BaseModel):
     persistent_mask_path: Path | None = None
     persistent_transcripts_path: Path | None = None
     persistent_cellpose_stitching_stats_path: Path | None = None
+    persistent_nuclei_mask_path: Path | None = None
+    persistent_nuclei_stitching_stats_path: Path | None = None
 
     # MERSCOPE-specific
     image_prefix: str | None = None
@@ -246,7 +248,9 @@ class SegmentationConfig(BaseModel):
 
     dataset: DatasetConfig
     cellpose: CellposeConfig = CellposeConfig()
+    nuclei_cellpose: CellposeConfig = CellposeConfig(model_type="nuclei")
     mask_filter: MaskFilterConfig = MaskFilterConfig()
+    nuclei_mask_filter: MaskFilterConfig = MaskFilterConfig()
     tiling: TilingConfig = TilingConfig()
     proseg: ProsegConfig = ProsegConfig()
     memory: MemoryConfig = MemoryConfig()
@@ -259,6 +263,7 @@ class EnrichmentConfig(BaseModel):
     platform: Literal["MERSCOPE", "XENIUM"]
     latest_zarr_path: Path
     mask_path: Path
+    nuclei_mask_path: Path
     original_data_path: Path
     output_dir: Path
     persistent_output_path: Path | None = None
