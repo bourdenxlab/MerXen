@@ -29,7 +29,7 @@ Commands:
   compare            Run cross-platform gene-level comparison
   visualize          Generate visualization artifacts for a pair
   spatial-gene-analysis
-                      Run per-gene spatial autocorrelation analysis
+                      Run cell and transcript-coordinate spatial gene analysis
   clustering-squidpy Run Scanpy/Squidpy clustering analysis
   mapmycells         Run local MapMyCells cell type assignment
 ```
@@ -235,7 +235,8 @@ Details: [Stage 6 — Visualization](stages/visualization.md).
 
 ## `merxen spatial-gene-analysis`
 
-Run per-gene Moran's I and Geary's C spatial autocorrelation analysis.
+Run cell-level Moran's I/Geary's C and assignment-independent transcript
+signed-distance and nested pair-correlation analyses.
 
 ```bash
 merxen spatial-gene-analysis --config spatial_gene_analysis_config.json

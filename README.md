@@ -10,7 +10,7 @@ MerXen takes spatial transcriptomics datasets and runs a standardised pipeline. 
 2. **Cell and nuclei segmentation** — A reusable DAPI-only Cellpose nuclei stage precedes GPU Cellpose-SAM cell segmentation and CPU-only ProSeg transcript refinement
 3. **Mask image quantification** — Quantifies all SpatialData image channels over final Cellpose masks
 4. **Section alignment** — Optionally registers paired adjacent sections to a Xenium reference coordinate system with Spateo
-5. **Analysis and visualisation** — QC metrics, paired gene-level comparison when both platforms are present, single-platform or paired visualisation, per-gene spatial autocorrelation, first-pass Scanpy/Squidpy clustering, and optional local MapMyCells cell type assignment. By default, downstream analysis runs for both ProSeg-resegmented cells and original instrument segmentations; use `--analysis_segmentation reseg` or `--analysis_segmentation original_seg` to restrict it.
+5. **Analysis and visualisation** — QC metrics, paired gene-level comparison when both platforms are present, single-platform or paired visualisation, cell-level spatial autocorrelation, assignment-independent transcript-coordinate spatial patterns, first-pass Scanpy/Squidpy clustering, and optional local MapMyCells cell type assignment. By default, downstream analysis runs for both ProSeg-resegmented cells and original instrument segmentations; use `--analysis_segmentation reseg` or `--analysis_segmentation original_seg` to restrict it.
 
 The workflow is orchestrated by Nextflow to process multiple sample pairs with logging and reproducibility.
 
