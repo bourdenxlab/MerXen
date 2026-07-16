@@ -450,6 +450,129 @@ def run_cellpose_segmentation(
     }
 
 
+def run_cellpose_nuclei_segmentation(
+    config: SegmentationConfig,
+    *,
+    force_rerun: bool = False,
+) -> dict[str, Path]:
+    """Run an independently reusable DAPI-only Cellpose nuclei segmentation."""
+    dataset = config.dataset
+    out_dir = Path(dataset.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    staged_mask_path = out_dir / "cellpose_nuclei_masks_tiled.npy"
+    staged_stats_path = out_dir / "cellpose_nuclei_stitching_stats.json"
+    persistent_mask_path = (
+        Path(dataset.persistent_nuclei_mask_path)
+        if dataset.persistent_nuclei_mask_path is not None
+        else None
+    )
+    persistent_stats_path = (
+        Path(dataset.persistent_nuclei_stitching_stats_path)
+        if dataset.persistent_nuclei_stitching_stats_path is not None
+        else None
+    )
+    mask_path = persistent_mask_path or staged_mask_path
+    stats_path = persistent_stats_path or staged_stats_path
+    progress_path = out_dir / "cellpose_nuclei_progress.json"
+    started_at = time.monotonic()
+
+    def _stage_outputs() -> tuple[Path, Path]:
+        if mask_path != staged_mask_path:
+            stage_existing_output(mask_path, staged_mask_path)
+        if stats_path.exists() and stats_path != staged_stats_path:
+            stage_existing_output(stats_path, staged_stats_path)
+        return staged_mask_path, staged_stats_path
+
+    def _progress(stage: str, **extra: object) -> None:
+        _write_progress(
+            progress_path,
+            {
+                "dataset": dataset.name,
+                "stage": stage,
+                "elapsed_min": round((time.monotonic() - started_at) / 60, 1),
+                **extra,
+            },
+        )
+
+    if mask_path.exists() and not force_rerun:
+        log_status(f"[{dataset.name}] Reusing existing DAPI-only nuclei mask")
+        if not stats_path.exists():
+            stats_path.parent.mkdir(parents=True, exist_ok=True)
+            stats_path.write_text(
+                json.dumps({"write_stitching_stats": False}, indent=2) + "\n"
+            )
+        staged_mask, staged_stats = _stage_outputs()
+        return {
+            "nuclei_mask_path": staged_mask,
+            "nuclei_stitching_stats_path": staged_stats,
+        }
+
+    nuclei_config = config.model_copy(deep=True)
+    nuclei_config.dataset.channels = ["DAPI"]
+    nuclei_config.cellpose = config.cellpose.model_copy(
+        update={"model_type": config.nuclei_cellpose.model_type}
+    )
+    nuclei_config.mask_filter = config.nuclei_mask_filter
+
+    sdata, fetch_tile_fn, height, width, matrix, points_obj = _load_dataset_sdata(
+        nuclei_config
+    )
+    _progress("cellpose_nuclei_starting")
+    mask_path.parent.mkdir(parents=True, exist_ok=True)
+    stats_path.parent.mkdir(parents=True, exist_ok=True)
+    run_tiled_cellpose(
+        fetch_tile_fn=fetch_tile_fn,
+        height=height,
+        width=width,
+        dataset_name=f"{dataset.name}:nuclei",
+        output_mask_path=mask_path,
+        cellpose_config=nuclei_config.cellpose,
+        mask_filter_config=nuclei_config.mask_filter,
+        tiling_config=nuclei_config.tiling,
+        memory_config=nuclei_config.memory,
+        output_stitching_stats_path=stats_path,
+        progress_callback=_progress,
+    )
+
+    x_transform, y_transform = build_cellpose_affine_to_microns(
+        matrix,
+        scale_factor=1.0,
+        x0=0.0,
+        y0=0.0,
+    )
+    if (
+        nuclei_config.mask_filter.final_min_area_um2 is not None
+        or nuclei_config.mask_filter.final_max_area_um2 is not None
+    ):
+        filter_stats = filter_labeled_mask_by_area(
+            mask_path,
+            pixel_area_um2=_pixel_area_um2_from_affine(x_transform, y_transform),
+            min_area_um2=nuclei_config.mask_filter.final_min_area_um2,
+            max_area_um2=nuclei_config.mask_filter.final_max_area_um2,
+            chunk_mb=nuclei_config.mask_filter.final_filter_chunk_mb,
+            show_progress=nuclei_config.mask_filter.show_progress,
+        )
+        _progress("cellpose_nuclei_area_filtered", **filter_stats)
+        log_status(
+            f"[{dataset.name}] Nuclei area filter kept "
+            f"{filter_stats['n_kept']:,}/{filter_stats['n_labels']:,} masks"
+        )
+
+    if not stats_path.exists():
+        stats_path.write_text(
+            json.dumps({"write_stitching_stats": False}, indent=2) + "\n"
+        )
+    del points_obj, sdata
+    force_release(note=f"after {dataset.name} DAPI-only nuclei segmentation")
+    _progress("done")
+    staged_mask, staged_stats = _stage_outputs()
+    return {
+        "nuclei_mask_path": staged_mask,
+        "nuclei_stitching_stats_path": staged_stats,
+    }
+
+
 def run_proseg_segmentation(
     config: SegmentationConfig,
     *,
@@ -572,6 +695,7 @@ def run_segmentation_pipeline(
     staged_latest_output = out_dir / "proseg_base_latest.zarr"
     staged_transcripts_csv = out_dir / "transcripts_for_proseg.csv"
     staged_mask_path = out_dir / "cellpose_masks_tiled.npy"
+    staged_nuclei_mask_path = out_dir / "cellpose_nuclei_masks_tiled.npy"
     persistent_latest_output = (
         Path(dataset.persistent_latest_zarr_path)
         if dataset.persistent_latest_zarr_path is not None
@@ -587,11 +711,17 @@ def run_segmentation_pipeline(
         if dataset.persistent_mask_path
         else staged_mask_path
     )
+    reusable_nuclei_mask = (
+        Path(dataset.persistent_nuclei_mask_path)
+        if dataset.persistent_nuclei_mask_path
+        else staged_nuclei_mask_path
+    )
 
     if (
         persistent_latest_output.exists()
         and reusable_transcripts.exists()
         and reusable_mask.exists()
+        and reusable_nuclei_mask.exists()
         and not force_rerun
     ):
         if persistent_latest_output != staged_latest_output:
@@ -602,13 +732,20 @@ def run_segmentation_pipeline(
             stage_existing_output(transcripts, staged_transcripts_csv)
         if mask != staged_mask_path:
             stage_existing_output(mask, staged_mask_path)
+        if reusable_nuclei_mask != staged_nuclei_mask_path:
+            stage_existing_output(reusable_nuclei_mask, staged_nuclei_mask_path)
         return {
             "latest_output": staged_latest_output,
             "transcripts_csv": staged_transcripts_csv,
             "cellpose_mask_path": staged_mask_path,
+            "nuclei_mask_path": staged_nuclei_mask_path,
         }
 
     cellpose_outputs = run_cellpose_segmentation(
+        config,
+        force_rerun=force_rerun,
+    )
+    nuclei_outputs = run_cellpose_nuclei_segmentation(
         config,
         force_rerun=force_rerun,
     )
@@ -624,4 +761,5 @@ def run_segmentation_pipeline(
         "latest_output": proseg_outputs["latest_output"],
         "transcripts_csv": cellpose_outputs["transcripts_csv"],
         "cellpose_mask_path": cellpose_outputs["cellpose_mask_path"],
+        "nuclei_mask_path": nuclei_outputs["nuclei_mask_path"],
     }

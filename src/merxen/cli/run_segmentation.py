@@ -9,6 +9,7 @@ import click
 
 from merxen.config import SegmentationConfig, load_config_from_json
 from merxen.segmentation.pipeline import (
+    run_cellpose_nuclei_segmentation,
     run_cellpose_segmentation,
     run_proseg_segmentation,
     run_segmentation_pipeline,
@@ -56,6 +57,28 @@ def cellpose_segment_command(config_path: Path, force_rerun: bool) -> None:
     assert isinstance(cfg, SegmentationConfig)
     outputs = run_cellpose_segmentation(cfg, force_rerun=force_rerun)
     click.echo("Cellpose segmentation complete:")
+    for key, value in outputs.items():
+        click.echo(f"- {key}: {value}")
+
+
+@click.command(name="cellpose-nuclei-segment")
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    required=True,
+    help="Path to JSON config validated against SegmentationConfig.",
+)
+@click.option("--force-rerun", is_flag=True, default=False)
+def cellpose_nuclei_segment_command(
+    config_path: Path,
+    force_rerun: bool,
+) -> None:
+    """Run independently reusable DAPI-only Cellpose nuclei segmentation."""
+    cfg = load_config_from_json(config_path, SegmentationConfig)
+    assert isinstance(cfg, SegmentationConfig)
+    outputs = run_cellpose_nuclei_segmentation(cfg, force_rerun=force_rerun)
+    click.echo("Cellpose nuclei segmentation complete:")
     for key, value in outputs.items():
         click.echo(f"- {key}: {value}")
 

@@ -23,6 +23,7 @@ from merxen.cli.run_mask_image_quantification import (
 )
 from merxen.cli.run_qc import qc_command
 from merxen.cli.run_segmentation import (
+    cellpose_nuclei_segment_command,
     cellpose_segment_command,
     proseg_segment_command,
     segment_command,
@@ -46,6 +47,7 @@ def main() -> None:
 main.add_command(build_spatialdata_command)
 main.add_command(segment_command)
 main.add_command(cellpose_segment_command)
+main.add_command(cellpose_nuclei_segment_command)
 main.add_command(proseg_segment_command)
 main.add_command(enrich_command)
 main.add_command(mask_image_quantification_command)

@@ -2,7 +2,7 @@ nextflow.enable.dsl = 2
 
 include { BUILD_SPATIALDATA } from "./modules/spatialdata_build"
 include { ENSURE_PROSEG } from "./modules/proseg_bootstrap"
-include { SEGMENT } from "./modules/segmentation"
+include { CELLPOSE_NUCLEI_SEGMENT; SEGMENT } from "./modules/segmentation"
 include { ENRICH } from "./modules/enrichment"
 include { MASK_IMAGE_QUANTIFICATION } from "./modules/mask_image_quantification"
 include { COMPUTE_CORTICAL_DEPTH } from "./modules/compute_cortical_depth"
@@ -379,6 +379,10 @@ def normalizeStage(rawValue, paramName) {
         "spatialdata_build": "build_spatialdata",
         "segment": "segment",
         "segmentation": "segment",
+        "segment_nuclei": "segment_nuclei",
+        "nuclei_segment": "segment_nuclei",
+        "cellpose_nuclei": "segment_nuclei",
+        "nuclei_cellpose": "segment_nuclei",
         "enrich": "enrich",
         "enrichment": "enrich",
         "mask_image_quantification": "mask_image_quantification",
@@ -415,7 +419,8 @@ def normalizeStage(rawValue, paramName) {
     if (!aliases.containsKey(key)) {
         throw new IllegalArgumentException(
             "Unknown ${paramName} '${raw}'. Valid stages: " +
-            "build_spatialdata, segment, enrich, mask_image_quantification, " +
+            "build_spatialdata, segment_nuclei, segment, enrich, " +
+            "mask_image_quantification, " +
             "compute_cortical_depth, qc, align, align_qc, " +
             "compare, visualize, spatial_gene_analysis, " +
             "clustering_squidpy, mapmycells"
@@ -430,7 +435,7 @@ def activeStageOrder(
     maskImageQuantificationEnabled,
     corticalDepthEnabled
 ) {
-    def stages = ["build_spatialdata", "segment", "enrich"]
+    def stages = ["build_spatialdata", "segment_nuclei", "segment", "enrich"]
     if (maskImageQuantificationEnabled) {
         stages += ["mask_image_quantification"]
     }
@@ -834,6 +839,12 @@ def rowSampleSettings(row, params) {
     }
 
     def runBuild = stageInRange("build_spatialdata", startStage, stopStage, stageOrder)
+    def runSegmentNuclei = stageInRange(
+        "segment_nuclei",
+        startStage,
+        stopStage,
+        stageOrder,
+    )
     def runSegment = stageInRange("segment", startStage, stopStage, stageOrder)
     def runEnrich = stageInRange("enrich", startStage, stopStage, stageOrder)
     def runMaskImageQuantification = stageInRange(
@@ -899,6 +910,7 @@ def rowSampleSettings(row, params) {
             stageInRange(stage, startStage, stopStage, stageOrder)
         },
         run_build: runBuild,
+        run_segment_nuclei: runSegmentNuclei,
         run_segment: runSegment,
         run_enrich: runEnrich,
         run_mask_image_quantification: runMaskImageQuantification,
@@ -911,7 +923,7 @@ def rowSampleSettings(row, params) {
         run_spatial_gene_analysis: runSpatialGeneAnalysis,
         run_clustering_squidpy: runClusteringSquidpy,
         run_mapmycells: runMapMyCells,
-        need_build_results: runSegment || runEnrich,
+        need_build_results: runSegmentNuclei || runSegment || runEnrich,
         need_enriched_zarrs: (
             runMaskImageQuantification ||
             runComputeCorticalDepth ||
@@ -1041,24 +1053,25 @@ workflow {
     build_results_ch = build_task_results_ch.mix(build_published_results_ch)
 
     segment_meta_ch = sample_rows_ch.flatMap { pairId, row, settings ->
-        if (!settings.run_segment) {
+        if (!(settings.run_segment_nuclei || settings.run_segment)) {
             []
         } else {
             settings.active_platforms.collect { platform ->
                 tuple(
                     "${pairId}|${platform}",
                     segmentMetaForPlatform(row, platform, params),
+                    settings.run_segment_nuclei,
+                    settings.run_segment,
                 )
             }
         }
     }
 
-    proseg_trigger_ch = segment_meta_ch.map { true }.take(1)
-    proseg_path_ch = ENSURE_PROSEG(proseg_trigger_ch)
-
-    segment_inputs_ch = build_results_ch
+    segmentation_config_inputs_ch = build_results_ch
         .join(segment_meta_ch)
-        .map { key, pairId, platform, sourceSpatialdata, meta ->
+        .map {
+            key, pairId, platform, sourceSpatialdata, meta,
+            runSegmentNuclei, runSegment ->
             def persistentLatestZarrPath = file(
                 publishedDatasetPath(
                     params.outdir,
@@ -1091,9 +1104,36 @@ workflow {
                     "segmentation/cellpose_stitching_stats.json",
                 )
             ).toAbsolutePath().toString()
+            def persistentNucleiMaskPath = file(
+                publishedDatasetPath(
+                    params.outdir,
+                    pairId,
+                    platform,
+                    "segmentation/cellpose_nuclei_masks_tiled.npy",
+                )
+            ).toAbsolutePath().toString()
+            def persistentNucleiStitchingStatsPath = file(
+                publishedDatasetPath(
+                    params.outdir,
+                    pairId,
+                    platform,
+                    "segmentation/cellpose_nuclei_stitching_stats.json",
+                )
+            ).toAbsolutePath().toString()
             def baseConfig = [
                 cellpose: [
                     model_type: params.cellpose_model_type,
+                    gpu: params.cellpose_gpu,
+                    diameter: params.cellpose_diameter,
+                    flow_threshold: params.cellpose_flow_threshold,
+                    cellprob_threshold: params.cellpose_cellprob,
+                    tile_overlap: params.cellpose_tile_overlap,
+                    bsize: params.cellpose_bsize,
+                    factor_rescale: 1.0,
+                    use_bfloat16: params.cellpose_use_bfloat16,
+                ],
+                nuclei_cellpose: [
+                    model_type: "nuclei",
                     gpu: params.cellpose_gpu,
                     diameter: params.cellpose_diameter,
                     flow_threshold: params.cellpose_flow_threshold,
@@ -1116,6 +1156,11 @@ workflow {
                     write_stitching_stats: params.cellpose_write_stitching_stats,
                 ],
                 mask_filter: [
+                    final_min_area_um2: params.cellpose_final_min_area_um2,
+                    final_max_area_um2: params.cellpose_final_max_area_um2,
+                    final_filter_chunk_mb: params.cellpose_final_filter_chunk_mb,
+                ],
+                nuclei_mask_filter: [
                     final_min_area_um2: params.cellpose_final_min_area_um2,
                     final_max_area_um2: params.cellpose_final_max_area_um2,
                     final_filter_chunk_mb: params.cellpose_final_filter_chunk_mb,
@@ -1149,6 +1194,8 @@ workflow {
                     persistent_mask_path: persistentMaskPath,
                     persistent_transcripts_path: persistentTranscriptsPath,
                     persistent_cellpose_stitching_stats_path: persistentStitchingStatsPath,
+                    persistent_nuclei_mask_path: persistentNucleiMaskPath,
+                    persistent_nuclei_stitching_stats_path: persistentNucleiStitchingStatsPath,
                     image_prefix: meta.image_prefix,
                     z_range: meta.z_range,
                     transform_path: meta.transform_path,
@@ -1163,10 +1210,82 @@ workflow {
                 pairId,
                 platform,
                 groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(segmentConfig)),
+                runSegmentNuclei,
+                runSegment,
             )
         }
 
-    segment_task_results_ch = SEGMENT(segment_inputs_ch, proseg_path_ch)
+    nuclei_segment_inputs_ch = segmentation_config_inputs_ch
+        .filter {
+            _key, _pairId, _platform, _segmentConfigJson,
+            runSegmentNuclei, _runSegment ->
+                runSegmentNuclei
+        }
+        .map {
+            key, pairId, platform, segmentConfigJson,
+            _runSegmentNuclei, _runSegment ->
+                tuple(key, pairId, platform, segmentConfigJson)
+        }
+
+    cellpose_segment_inputs_ch = segmentation_config_inputs_ch
+        .filter {
+            _key, _pairId, _platform, _segmentConfigJson,
+            _runSegmentNuclei, runSegment ->
+                runSegment
+        }
+        .map {
+            key, pairId, platform, segmentConfigJson,
+            _runSegmentNuclei, _runSegment ->
+                tuple(key, pairId, platform, segmentConfigJson)
+        }
+
+    nuclei_task_results_ch = CELLPOSE_NUCLEI_SEGMENT(nuclei_segment_inputs_ch)
+
+    nuclei_published_results_ch = segmentation_config_inputs_ch
+        .filter {
+            _key, _pairId, _platform, _segmentConfigJson,
+            runSegmentNuclei, runSegment ->
+                runSegment && !runSegmentNuclei
+        }
+        .map {
+            key, pairId, platform, segmentConfigJson,
+            _runSegmentNuclei, _runSegment ->
+                def nucleiMask = requireExistingPath(
+                    publishedDatasetPath(
+                        params.outdir,
+                        pairId,
+                        platform,
+                        "segmentation/cellpose_nuclei_masks_tiled.npy",
+                    ),
+                    "Cellpose nuclei mask for ${pairId}:${platform}",
+                )
+                def nucleiStats = requireExistingPath(
+                    publishedDatasetPath(
+                        params.outdir,
+                        pairId,
+                        platform,
+                        "segmentation/cellpose_nuclei_stitching_stats.json",
+                    ),
+                    "Cellpose nuclei stitching stats for ${pairId}:${platform}",
+                )
+                tuple(
+                    key,
+                    pairId,
+                    platform,
+                    segmentConfigJson,
+                    nucleiMask,
+                    nucleiStats,
+                )
+        }
+
+    nuclei_results_ch = nuclei_task_results_ch.mix(nuclei_published_results_ch)
+    proseg_trigger_ch = cellpose_segment_inputs_ch.map { true }.take(1)
+    proseg_path_ch = ENSURE_PROSEG(proseg_trigger_ch)
+    segment_task_results_ch = SEGMENT(
+        cellpose_segment_inputs_ch,
+        nuclei_results_ch,
+        proseg_path_ch,
+    )
 
     segment_published_results_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
         if (!((settings.run_enrich || settings.run_mask_image_quantification) &&
@@ -1202,7 +1321,24 @@ workflow {
                     ),
                     "SEGMENT transcript CSV for ${pairId}:${platform}",
                 )
-                tuple(key, pairId, platform, latestZarr, maskPath, transcriptsCsv)
+                def nucleiMaskPath = requireExistingPath(
+                    publishedDatasetPath(
+                        params.outdir,
+                        pairId,
+                        platform,
+                        "segmentation/cellpose_nuclei_masks_tiled.npy",
+                    ),
+                    "SEGMENT Cellpose nuclei mask for ${pairId}:${platform}",
+                )
+                tuple(
+                    key,
+                    pairId,
+                    platform,
+                    latestZarr,
+                    maskPath,
+                    transcriptsCsv,
+                    nucleiMaskPath,
+                )
             }
         }
     }
@@ -1228,6 +1364,7 @@ workflow {
         .join(enrich_gate_ch)
         .map {
             key, pairId, platform, latestZarr, maskPath, _transcriptsCsv,
+            nucleiMaskPath,
             pairMeta, platformMeta, originalDataPath, _runFlag ->
             if (pairId != pairMeta || platform != platformMeta) {
                 error(
@@ -1250,6 +1387,7 @@ workflow {
                 platform: platform,
                 latest_zarr_path: "latest_input.zarr",
                 mask_path: "enrich_input_mask.npy",
+                nuclei_mask_path: "enrich_input_nuclei_mask.npy",
                 original_data_path: originalDataPath,
                 output_dir: "enrich_out",
                 persistent_output_path: persistentLatestZarrPath,
@@ -1263,6 +1401,7 @@ workflow {
                 groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(enrichConfig)),
                 latestZarr,
                 maskPath,
+                nucleiMaskPath,
             )
         }
 
@@ -1321,7 +1460,8 @@ workflow {
     }
 
     mask_image_quantification_masks_ch = segment_results_ch.map {
-        key, _pairId, _platform, _latestZarr, maskPath, _transcriptsCsv ->
+        key, _pairId, _platform, _latestZarr, maskPath, _transcriptsCsv,
+        _nucleiMaskPath ->
             tuple(key, maskPath)
     }
 

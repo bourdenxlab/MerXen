@@ -4,7 +4,7 @@ process ENRICH {
     publishDir { "${params.outdir}/${pair_id}/${platform.toLowerCase()}/enrichment" }, mode: "symlink", overwrite: true
 
     input:
-    tuple val(key), val(pair_id), val(platform), val(enrich_config_json), path(latest_zarr), path(mask_path)
+    tuple val(key), val(pair_id), val(platform), val(enrich_config_json), path(latest_zarr), path(mask_path), path(nuclei_mask_path)
 
     output:
     tuple val(key), val(pair_id), val(platform), path("latest_input.zarr"), path("enrich_out")
@@ -25,6 +25,7 @@ process ENRICH {
 
     ln -s ${latest_zarr} latest_input.zarr
     ln -s ${mask_path} enrich_input_mask.npy
+    ln -s ${nuclei_mask_path} enrich_input_nuclei_mask.npy
 
     cat > enrich_config.json <<'JSON'
 ${enrich_config_json}
