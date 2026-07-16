@@ -241,6 +241,11 @@ Path: `${outdir}/<pair_id>/<analysis_segmentation>/spatial_gene_analysis/`
 | `spatial_gene_analysis_out/<platform>/<pair_id>_<platform>_spatial_gene_autocorrelation_rankings.csv` | Top and bottom `spatial_gene_analysis_top_n` genes for Moran's I and Geary's C. |
 | `spatial_gene_analysis_out/<platform>/plots/distributions/<pair_id>_<platform>_spatial_autocorrelation_distribution.png` | Histograms of Moran's I and Geary's C values across genes. |
 | `spatial_gene_analysis_out/<platform>/plots/spatial_genes/<metric>/<top_or_bottom>/*.png` | Individual spatial expression plots for ranked genes. |
+| `spatial_gene_analysis_out/<platform>/<pair_id>_<platform>_transcript_spatial_patterns.csv` | Per-gene nuclear/cytoplasmic/extracellular enrichment, signed-distance summaries, pair-band summaries, and pattern labels computed from transcript coordinates. |
+| `spatial_gene_analysis_out/<platform>/<pair_id>_<platform>_transcript_signed_distance.parquet` | Long gene × boundary × signed-distance-bin enrichment table. |
+| `spatial_gene_analysis_out/<platform>/<pair_id>_<platform>_transcript_pair_correlation.parquet` | Long gene × nested-null × distance-band table with thinning and empirical/FDR statistics. |
+| `spatial_gene_analysis_out/<platform>/<pair_id>_<platform>_transcript_spatial_pattern_rankings.csv` | Separate rankings for compartment, proximity, distance-bin, and pair-pattern metrics. |
+| `spatial_gene_analysis_out/<platform>/plots/transcript_patterns/*.png` | Tissue/local compartment maps with cell/nuclear outlines and distance/pair profiles. |
 | `spatial_gene_analysis_out/<platform>/<pair_id>_<platform>_spatial_gene_analysis_manifest.json` | Parameters, retained cell/gene counts, and output path manifest. |
 
 ### Squidpy clustering

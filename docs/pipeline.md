@@ -62,8 +62,8 @@ channels.
                   │
                   ▼
            ┌───────────────────┐
-           │ SPATIAL_GENE_     │  per-gene Moran's I,
-           │ ANALYSIS          │  Geary's C, spatial gene plots
+           │ SPATIAL_GENE_     │  cell Moran/Geary plus direct
+           │ ANALYSIS          │  transcript point patterns
            └───────────────────┘
                   │
                   ▼
@@ -128,7 +128,7 @@ For a samplesheet row with `pair_id=EXAMPLE01`:
 | 8 | `ALIGN_QC` × 1 | `merxen alignment-qc` | updated MERSCOPE zarr + original Xenium zarr | `alignment_qc_out/`, when enabled |
 | 9 | `COMPARE` × 1 | `merxen compare` | updated MERSCOPE zarr if enabled; otherwise analysis-ready zarrs | `compare_out/` (gene comparison CSVs + metrics JSON) |
 | 10 | `VISUALIZE` × 1 | `merxen visualize` | updated MERSCOPE zarr if enabled; otherwise analysis-ready zarrs | `visualize_out/` (PNG plots) |
-| 11 | `SPATIAL_GENE_ANALYSIS` × 1 | `merxen spatial-gene-analysis` | same paired zarrs, after visualization in full runs | `spatial_gene_analysis_out/` (Moran's I, Geary's C, rankings, spatial gene plots) |
+| 11 | `SPATIAL_GENE_ANALYSIS` × 1 | `merxen spatial-gene-analysis` | same paired zarrs plus tissue annotations, after visualization in full runs | `spatial_gene_analysis_out/` (Moran/Geary plus signed-distance, nested pair-null, rankings, and diagnostic plots) |
 | 12 | `CLUSTERING_SQUIDPY` × 1 | `merxen clustering-squidpy` | same paired zarrs, after spatial gene analysis in full runs | `clustering_squidpy_out/` plus derived clustered tables in each durable zarr |
 | 13 | `MAPMYCELLS` × 1 | `merxen mapmycells` | clustered `.h5ad` files from `clustering_squidpy_out/` | `mapmycells_out/` (query `.h5ad`, CSV/JSON assignments, annotated `.h5ad`) |
 
