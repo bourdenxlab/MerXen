@@ -243,6 +243,29 @@ See [Squidpy clustering](stages/clustering-squidpy.md).
 
 See [Spatial gene analysis](stages/spatial-gene-analysis.md).
 
+### `analysis.mecr`
+
+- `run_mecr_reference(config)` — stream the complete WHB neuron and non-neuron
+  references, discover panel-overlapping mutually exclusive broad-class
+  markers, and write audit tables.
+- `load_whb_panel_reference(config, panel_genes=...)` — join WHB taxonomy
+  metadata and build a sparse, panel-restricted normalized reference.
+- `discover_reference_markers(reference, ...)` — run Scanpy's Python Wilcoxon
+  and apply the paper's strict detection and marker-uniqueness rules.
+- `compute_mecr_pair_metrics(spatial_adata, markers)` — calculate binary
+  intersection-over-union rates for every cross-class marker pair.
+- `summarize_mecr_pair_metrics(pair_metrics, ...)` — calculate the unweighted
+  sample mean while recording undefined zero-union pairs.
+- `select_barnyard_pairs(pair_metrics, ...)` — deterministically choose
+  canonical, high-MECR, and highly detected eligible pairs.
+- `plot_reference_mecr_histogram`, `plot_platform_mecr_comparison`,
+  `plot_class_pair_mecr_heatmaps`, and `plot_barnyard_pairs` — reference and
+  spatial MECR diagnostic plot writers.
+- `run_mecr(config)` — score all active platforms for one pair and
+  segmentation and write combined tables and plots.
+
+See [Mutually exclusive co-expression rate](stages/mecr.md).
+
 ### `analysis.mapmycells`
 
 - `prepare_mapmycells_query(input_h5ad, output_h5ad, ...)` — copy the selected

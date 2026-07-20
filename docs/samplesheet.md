@@ -2,7 +2,7 @@
 
 The samplesheet is a CSV with one row per biological sample or adjacent-section
 pair. By default, rows inherit `--analysis_mode`, `--enable_alignment`,
-`--analysis_segmentation`, object-distance settings, `--start_stage`,
+`--analysis_segmentation`, `--mecr_enabled`, object-distance settings, `--start_stage`,
 `--stop_stage`, and `--only_stage`
 from the Nextflow command or config, but each row can override those settings
 with optional columns. In the default `analysis_mode=paired`, a row must contain
@@ -22,6 +22,7 @@ required. A template lives at
 | `start_stage` | no | Row-level first stage. Blank inherits `--start_stage` unless `only_stage` applies. |
 | `stop_stage` | no | Row-level final stage. Blank inherits `--stop_stage` unless `only_stage` applies. |
 | `only_stage` | no | Row-level single-stage override. If set, it overrides that row's start/stop stage settings. |
+| `mecr_enabled` | no | Row-level MECR switch. Blank inherits `--mecr_enabled`, which defaults to `true`. |
 | `cortical_depth_enabled` | no | Row-level cortical-depth switch. Blank inherits `--cortical_depth_enabled`. |
 | `distance_from_object_enabled` | no | Row-level polygon-distance switch. Blank inherits `--distance_from_object_enabled`. |
 | `distance_from_object_segmentations` | no | Comma-separated object-distance branches: `reseg`, `original_seg`, and/or `proseg_mask`. Blank uses all three by default. |

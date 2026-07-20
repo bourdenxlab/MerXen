@@ -39,6 +39,8 @@ channels.
   │ QC              │   cell-level + transcript-assignment
   │                 │   metrics, histograms, violins
   └────────┬────────┘
+           ├──────────────► MECR (independent branch)
+           │                 WHB-derived gene-pair rates
            ▼
       (paired on pair_id when both platforms are active)
            │
@@ -87,12 +89,16 @@ channels.
 ```
 
 Rows inherit `analysis_mode`, `enable_alignment`, `analysis_segmentation`,
+`mecr_enabled`,
 object-distance settings, `start_stage`, `stop_stage`, and `only_stage` from
 Nextflow params unless those
 columns are set in the samplesheet. For rows with `analysis_mode=paired`, both
 platforms traverse `BUILD_SPATIALDATA → SEGMENT → ENRICH →
 MASK_IMAGE_QUANTIFICATION → QC` independently and
-are rejoined after QC. When the row's effective `cortical_depth_enabled` value is
+are rejoined after QC. The default-enabled `MECR_REFERENCE` task prepares one
+panel-restricted marker set from the complete WHB reference, and `MECR` scores
+each selected segmentation branch. MECR does not require or block alignment.
+When the row's effective `cortical_depth_enabled` value is
 `true`, `COMPUTE_CORTICAL_DEPTH` runs as a terminal stage after
 `CLUSTERING_SQUIDPY` (consuming the clustering-updated zarr) so per-cell cluster
 annotations are available for its depth violin plots; its depth columns are not
@@ -135,6 +141,8 @@ For a samplesheet row with `pair_id=EXAMPLE01`:
 | 3 | `ENRICH` × 2 | `merxen enrich` | latest zarr + Cellpose mask | same durable `latest/latest_spatialdata.zarr`, now enriched with per-shape counts tables |
 | 4 | `MASK_IMAGE_QUANTIFICATION` × 2 | `merxen mask-image-quantification` | enriched zarr + Cellpose mask | same durable zarr, now with `table_MOSAIK_cellpose_image_quantification` plus sidecars |
 | 5 | `QC` × 2 | `merxen qc` | quantified/enriched zarr | `qc_out/` (metrics CSV, plots) |
+| 6a | `MECR_REFERENCE` × 1 | `merxen mecr-reference` | complete WHB reference + selected spatial panel | shared MECR marker/statistics tables |
+| 6b | `MECR` × 1 | `merxen mecr` | paired or single-platform count tables + shared markers | `mecr_out/` (pair rates, summaries, distribution plot) |
 | 6 | `ALIGN` × 1 | `merxen align` | both platforms' latest analysis-ready zarrs | in-place MERSCOPE aligned elements + transform metadata, when enabled |
 | 7 | `ALIGN_QC` × 1 | `merxen alignment-qc` | updated MERSCOPE zarr + original Xenium zarr | `alignment_qc_out/`, when enabled |
 | 8 | `COMPARE` × 1 | `merxen compare` | updated MERSCOPE zarr if enabled; otherwise analysis-ready zarrs | `compare_out/` (gene comparison CSVs + metrics JSON) |
