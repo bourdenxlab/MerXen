@@ -776,6 +776,97 @@ class SpatialGeneAnalysisConfig(BaseModel):
         return edges
 
 
+class MecrSampleConfig(BaseModel):
+    """One SpatialData cell-count table to score with MECR."""
+
+    sample_id: str
+    platform: Literal["MERSCOPE", "XENIUM"]
+    zarr_path: Path
+    segmentation: str | None = None
+    table_key: str | None = None
+
+
+class MecrReferenceConfig(BaseModel):
+    """Configuration for paper-standard WHB MECR marker discovery."""
+
+    output_dir: Path
+    samples: list[MecrSampleConfig]
+    neurons_h5ad_path: Path = Path(
+        "/media/mathieubo/SSD1/MerXen/mapmycells/abc_whb/"
+        "expression_matrices/WHB-10Xv3/20240330/WHB-10Xv3-Neurons-raw.h5ad"
+    )
+    nonneurons_h5ad_path: Path = Path(
+        "/media/mathieubo/SSD1/MerXen/mapmycells/abc_whb/"
+        "expression_matrices/WHB-10Xv3/20240330/WHB-10Xv3-Nonneurons-raw.h5ad"
+    )
+    cell_metadata_path: Path = Path(
+        "/media/mathieubo/SSD1/MerXen/mapmycells/abc_whb/metadata/"
+        "WHB-10Xv3/20241115/cell_metadata.csv"
+    )
+    taxonomy_metadata_path: Path = Path(
+        "/media/mathieubo/SSD1/MerXen/mapmycells/abc_whb/metadata/"
+        "WHB-taxonomy/20240330/cluster_annotation_term.csv"
+    )
+    cluster_membership_path: Path = Path(
+        "/media/mathieubo/SSD1/MerXen/mapmycells/abc_whb/metadata/"
+        "WHB-taxonomy/20240330/cluster_to_cluster_annotation_membership.csv"
+    )
+    taxonomy_level: str = "CCN202210140_SUPC"
+    gene_symbol_column: str = "gene_symbol"
+    target_broad_classes: list[str] = Field(
+        default_factory=lambda: [
+            "Neurons",
+            "Oligodendrocytes",
+            "Oligodendrocyte precursors",
+            "Astrocytes",
+            "Microglia",
+            "Fibroblasts",
+            "Vascular cells",
+        ]
+    )
+    marker_min_target_fraction: float = Field(default=0.25, ge=0.0, le=1.0)
+    marker_max_other_fraction: float = Field(default=0.01, ge=0.0, le=1.0)
+    normalize_target_sum: float = Field(default=10_000.0, gt=0.0)
+    reference_chunk_rows: int = Field(default=5_000, ge=1)
+    wilcoxon_tie_correct: bool = True
+    figure_dpi: int = Field(default=180, ge=72)
+
+    @model_validator(mode="after")
+    def _validate_mecr_reference(self: MecrReferenceConfig) -> MecrReferenceConfig:
+        if not self.samples:
+            raise ValueError("MecrReferenceConfig requires at least one sample")
+        if len(self.target_broad_classes) < 2:
+            raise ValueError(
+                "MECR marker discovery requires at least two broad classes"
+            )
+        if self.marker_min_target_fraction <= self.marker_max_other_fraction:
+            raise ValueError(
+                "marker_min_target_fraction must exceed marker_max_other_fraction"
+            )
+        return self
+
+
+class MecrConfig(BaseModel):
+    """Configuration for scoring spatial cell tables with MECR."""
+
+    pair_id: str
+    segmentation: str
+    output_dir: Path
+    samples: list[MecrSampleConfig]
+    reference_markers_path: Path
+    figure_dpi: int = Field(default=180, ge=72)
+    barnyard_top_n_pairs: int = Field(default=6, ge=0)
+    barnyard_max_points: int = Field(default=50_000, ge=100)
+    barnyard_random_seed: int = Field(default=0, ge=0)
+    barnyard_log1p: bool = False
+
+    @model_validator(mode="after")
+    def _validate_mecr_samples(self: MecrConfig) -> MecrConfig:
+        if not self.samples:
+            raise ValueError("MecrConfig requires at least one sample")
+        return self
+
+
 class MapMyCellsSampleConfig(BaseModel):
     """One clustered AnnData sample to annotate with MapMyCells."""
 
