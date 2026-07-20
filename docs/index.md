@@ -36,6 +36,7 @@ scientific logic living in the installable Python package `merxen`.
 - [Mask image quantification](stages/mask-image-quantification.md)
 - [Cortical depth](stages/cortical-depth.md)
 - [QC](stages/qc.md)
+- [Mutually exclusive co-expression rate (MECR)](stages/mecr.md)
 - [Section alignment](stages/alignment.md)
 - [Comparison](stages/comparison.md)
 - [Visualization](stages/visualization.md)

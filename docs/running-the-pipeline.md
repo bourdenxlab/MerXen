@@ -28,6 +28,7 @@ Common optional parameters:
 | `--analysis_segmentation` | `both` (default), `reseg`, or `original_seg`. Controls whether downstream analysis runs on resegmented data, original instrument segmentation, or both. |
 | `--force_spatialdata_build` | Force rebuilding the SpatialData zarr even when a cached one exists. Defaults to `false`. |
 | `--enable_alignment` | Run optional Spateo alignment and alignment QC before comparison. Paired mode only. Defaults to `false`. |
+| `--mecr_enabled` | Run mutually exclusive co-expression rate analysis after QC. Defaults to `true`. |
 | `--cortical_depth_enabled` | Run cortical-depth tissue/depth annotation after clustering. Requires boundary GeoJSON annotations. Defaults to `false`. |
 | `--distance_from_object_enabled` | Run registered polygon-edge distance annotation and paired near-vs-far pseudobulk analysis. Defaults to `false`. |
 | `--distance_from_object_segmentations` | Object-distance branches; defaults to `reseg,original_seg,proseg_mask`. |
@@ -36,6 +37,7 @@ Common optional parameters:
 
 The samplesheet may also include `analysis_mode`, `enable_alignment`,
 `analysis_segmentation`, `cortical_depth_enabled`,
+`mecr_enabled`,
 `distance_from_object_enabled`, `distance_from_object_segmentations`,
 `start_stage`, `stop_stage`, and `only_stage` columns.
 Non-empty row values override these command-line settings for that row only;
@@ -59,6 +61,8 @@ enabled.
 
 Before any task inputs are emitted, the workflow runs stage-aware preflight
 checks for reference files required by the selected stage range. For example,
+`mecr` checks both complete WHB raw H5AD files plus the cell and taxonomy
+metadata used to derive its seven broad classes,
 `clustering_squidpy` with hierarchical mode checks the broad marker lookup and
 Allen taxonomy paths, while `mapmycells` checks whole-brain marker/stat files
 only when that module is selected and the requested reference mode needs them.
@@ -93,7 +97,7 @@ nextflow run workflows/main.nf \
 
 In `analysis_mode=merscope` or `analysis_mode=xenium`, either from the command
 line or a row-level samplesheet value, the workflow runs
-`build_spatialdata → segment_nuclei → segment → enrich → mask_image_quantification → qc →
+`build_spatialdata → segment_nuclei → segment → enrich → mask_image_quantification → qc → mecr →
 visualize → spatial_gene_analysis → clustering_squidpy` for the selected
 platform. If `cortical_depth_enabled=true`, `compute_cortical_depth` runs after
 `clustering_squidpy` so the per-cell cluster annotations are available for its
@@ -221,9 +225,10 @@ rerunning `ALIGN` or `ALIGN_QC`.
 Accepted stages are:
 
 `build_spatialdata`, `segment_nuclei`, `segment`, `enrich`, `mask_image_quantification`,
-`qc`, `align`, `align_qc`, `compare`, `visualize`,
+`qc`, `mecr`, `align`, `align_qc`, `compare`, `visualize`,
 `spatial_gene_analysis`, `clustering_squidpy`, `compute_cortical_depth`, and
 `mapmycells`.
+`mecr` is only active for rows whose effective `mecr_enabled` value is `true`.
 `compute_cortical_depth` is only active
 for rows whose effective `cortical_depth_enabled` value is `true`. Alignment
 stages are only active for rows whose effective `enable_alignment` value is
@@ -274,10 +279,10 @@ nextflow run workflows/main.nf \
 
 Starting at `segment` runs the ProSeg resolver first; starting later does not
 need ProSeg because it reads published segmentation outputs.
-Starting at `compare`, `visualize`, `spatial_gene_analysis`, or
+Starting at `mecr`, `compare`, `visualize`, `spatial_gene_analysis`, or
 `clustering_squidpy` with effective `enable_alignment=false` reads
 `${outdir}/${pair_id}/{merscope,xenium}/latest/latest_spatialdata.zarr`.
-In single-platform mode, starting at `visualize`, `spatial_gene_analysis`, or
+In single-platform mode, starting at `mecr`, `visualize`, `spatial_gene_analysis`, or
 `clustering_squidpy` reads only
 `${outdir}/${pair_id}/<selected-platform>/latest/latest_spatialdata.zarr`.
 With effective `enable_alignment=true`, `ALIGN` updates

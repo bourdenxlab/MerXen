@@ -11,6 +11,8 @@ ${outdir}/
 │   ├── report.html
 │   ├── timeline.html
 │   └── trace.tsv
+├── mecr_reference/
+│   └── mecr_reference_out/
 ├── <pair_id_1>/
 │   ├── merscope/
 │   │   ├── spatialdata/
@@ -35,12 +37,14 @@ ${outdir}/
 │   ├── alignment/
 │   ├── alignment_qc/
 │   ├── reseg/
+│   │   ├── mecr/
 │   │   ├── comparison/
 │   │   ├── visualization/
 │   │   ├── spatial_gene_analysis/
 │   │   ├── clustering_squidpy/
 │   │   └── mapmycells/
 │   └── original_seg/
+│       ├── mecr/
 │       ├── comparison/
 │       ├── visualization/
 │       ├── spatial_gene_analysis/
@@ -195,6 +199,38 @@ Path: `${outdir}/<pair_id>/<platform>/<analysis_segmentation>/qc/`
 | `qc_out/<dataset>_qc.pkl` | Pickle with summary + DataFrames for fast reload. |
 
 `<dataset>` is lowercased, e.g. `example01_merscope`.
+
+### MECR
+
+Shared reference path: `${outdir}/mecr_reference/mecr_reference_out/`
+
+| File | Contents |
+|------|----------|
+| `mecr_reference_panel_genes.csv` | Union of spatial-panel genes requested from the complete WHB reference. |
+| `mecr_reference_gene_statistics.csv` | Per-gene, per-broad-class detection fractions and Python Wilcoxon statistics, including threshold and uniqueness flags. |
+| `mecr_reference_markers.csv` | Unique broad-class markers that pass the paper's strict detection thresholds. |
+| `mecr_reference_pairs.csv` | Reference intersection, union, and MECR for every eligible cross-class marker pair. |
+| `mecr_reference_distribution.png` | WHB reference pair-MECR histogram with descriptive mean and median lines; neither line is used for pair selection. |
+| `mecr_reference_manifest.json` | Reference paths, normalization, thresholds, class/cell counts, Wilcoxon settings, and output paths. |
+
+Per-branch path: `${outdir}/<pair_id>/<analysis_segmentation>/mecr/mecr_out/`
+
+| File | Contents |
+|------|----------|
+| `<platform>/<sample_id>_mecr_pairs.csv` | Every eligible cross-class gene pair with single-gene detection counts, intersection, union, and MECR. |
+| `<platform>/<sample_id>_mecr_summary.json` | Sample MECR, median pair rate, cell/panel counts, scored-pair count, and zero-union count. |
+| `<pair_id>_mecr_pairs.csv` | Combined long pair table for all active platforms. |
+| `<pair_id>_mecr_summary.csv` | One summary row per active platform for direct platform comparison. |
+| `<pair_id>_mecr_distribution.png` | Pair-level MECR distributions by platform; a PDF copy is also written. |
+| `<pair_id>_mecr_platform_comparison.png` | MERSCOPE-versus-Xenium scatter for exactly shared eligible pairs, with an identity line and the largest differences labelled. |
+| `<pair_id>_mecr_class_pair_heatmap.png` | Per-platform heatmaps of median MECR for each broad-class pairing. |
+| `<pair_id>_mecr_barnyard_pairs.csv` | Deterministic barnyard pair selection and its canonical, highest-MECR, or most-detected reason. |
+| `plots/barnyard/<gene_1>--<gene_2>.png` | Side-by-side platform cell-count scatterplots for a selected pair. Coordinates use natural raw-count space by default; titles report exact all-cell MECR and intersection/union counts. |
+| `<pair_id>_mecr_manifest.json` | Formula, aggregation and zero-union policies, reference marker path, sample summaries, and output paths. |
+
+The sample-level metric is the unweighted mean of finite pair rates. Undefined
+zero-union pairs remain in the pair table as NaN and are excluded from that
+mean. See [Mutually exclusive co-expression rate](stages/mecr.md).
 
 ### Alignment
 

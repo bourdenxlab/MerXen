@@ -34,6 +34,8 @@ Commands:
   visualize          Generate visualization artifacts for a pair
   spatial-gene-analysis
                       Run cell and transcript-coordinate spatial gene analysis
+  mecr-reference     Discover MECR markers in the complete WHB reference
+  mecr               Score mutually exclusive co-expression rates
   clustering-squidpy Run Scanpy/Squidpy clustering analysis
   mapmycells         Run local MapMyCells cell type assignment
 ```
@@ -273,6 +275,38 @@ merxen spatial-gene-analysis --config spatial_gene_analysis_config.json
 | `--config PATH` | JSON validated against `SpatialGeneAnalysisConfig`. |
 
 Details: [Spatial gene analysis](stages/spatial-gene-analysis.md).
+
+---
+
+## `merxen mecr-reference`
+
+Discover paper-standard mutually exclusive broad-class markers in the complete
+WHB-10Xv3 reference for the selected spatial panel.
+
+```bash
+merxen mecr-reference --config mecr_reference_config.json
+```
+
+| Option | Description |
+|--------|-------------|
+| `--config PATH` | JSON validated against `MecrReferenceConfig`. |
+
+The workflow normally calls this command once and shares its marker table with
+all MECR branch tasks.
+
+## `merxen mecr`
+
+Calculate pair-level and aggregate MECR values for one pair and segmentation.
+
+```bash
+merxen mecr --config mecr_config.json
+```
+
+| Option | Description |
+|--------|-------------|
+| `--config PATH` | JSON validated against `MecrConfig`. |
+
+Details: [Mutually exclusive co-expression rate](stages/mecr.md).
 
 ---
 

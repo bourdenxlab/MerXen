@@ -57,6 +57,7 @@ any of them with `--<name>` on the command line.
 | `enable_alignment` | `false` | Fallback row alignment switch. A non-empty samplesheet `enable_alignment` value overrides this per row; alignment only applies to paired rows. |
 | `analysis_segmentation` | `both` | Fallback downstream analysis branches after enrichment. Valid values: `both`, `reseg`, `original_seg`; comma-separated combinations are accepted. A non-empty samplesheet `analysis_segmentation` value overrides this per row. |
 | `mask_image_quantification_enabled` | `true` | Insert the Cellpose-mask image quantification stage between enrichment and QC. A non-empty samplesheet `mask_image_quantification_enabled` value overrides this per row. |
+| `mecr_enabled` | `true` | Insert mutually exclusive co-expression rate analysis after QC. A non-empty samplesheet `mecr_enabled` value overrides this per row. |
 | `cortical_depth_enabled` | `false` | Insert the cortical-depth stage after clustering. Requires per-sample pial/tissue-edge annotations, with optional gray/white boundaries for depth pieces. A non-empty samplesheet `cortical_depth_enabled` value overrides this per row. |
 | `distance_from_object_enabled` | `false` | Insert registered polygon-edge distance analysis after cortical depth/clustering. A non-empty samplesheet value overrides this per row. |
 | `distance_from_object_segmentations` | `reseg, original_seg, proseg_mask` | Cell-table branches for object distance. A samplesheet value may override this per row. |
@@ -69,7 +70,7 @@ any of them with `--<name>` on the command line.
 
 Stage names accepted by `start_stage`, `stop_stage`, and `only_stage` are:
 `build_spatialdata`, `segment_nuclei`, `segment`, `enrich`, `mask_image_quantification`,
-`qc`, `align`, `align_qc`, `compare`, `visualize`,
+`qc`, `mecr`, `align`, `align_qc`, `compare`, `visualize`,
 `spatial_gene_analysis`, `clustering_squidpy`, `compute_cortical_depth`,
 `distance_from_object`, and `mapmycells`.
 `mask_image_quantification` is
@@ -77,6 +78,7 @@ available only when the effective `mask_image_quantification_enabled` value is
 `true`. `compute_cortical_depth` is available only when the effective
 `cortical_depth_enabled` value is `true`. `align` and `align_qc` are available
 only for rows whose effective `enable_alignment` value is `true`.
+`mecr` is available only when the effective `mecr_enabled` value is `true`.
 `distance_from_object` is available only when the effective
 `distance_from_object_enabled` value is `true`.
 `align`, `align_qc`, and `compare` are available only when
@@ -285,6 +287,35 @@ SpatialData compatibility. Non-alignment stages keep using `environment.yml`.
 | `spatial_gene_analysis_figure_dpi` | `180` | PNG output DPI. |
 | `spatial_gene_analysis_max_forks` | `4` | Maximum concurrent spatial gene analysis tasks. |
 
+### MECR
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `mecr_enabled` | `true` | Run mutually exclusive co-expression rate analysis after QC. May be overridden per samplesheet row. |
+| `mecr_neurons_h5ad_path` | Complete WHB-10Xv3 neuron raw H5AD | Allen Whole Human Brain neuronal expression matrix. |
+| `mecr_nonneurons_h5ad_path` | Complete WHB-10Xv3 non-neuron raw H5AD | Allen Whole Human Brain non-neuronal expression matrix. |
+| `mecr_cell_metadata_path` | WHB-10Xv3 cell metadata CSV | Maps H5AD cell labels to cluster aliases. |
+| `mecr_taxonomy_metadata_path` | WHB taxonomy annotation CSV | Resolves taxonomy node labels. |
+| `mecr_cluster_membership_path` | WHB cluster-membership CSV | Maps cluster aliases to taxonomy nodes. |
+| `mecr_taxonomy_level` | `CCN202210140_SUPC` | WHB taxonomy level used before the existing broad-class collapse. |
+| `mecr_gene_symbol_column` | `gene_symbol` | Reference `var` column containing gene symbols. |
+| `mecr_target_broad_classes` | Seven core classes | Neurons, oligodendrocytes, oligodendrocyte precursors, astrocytes, microglia, fibroblasts, and vascular cells. |
+| `mecr_marker_min_target_fraction` | `0.25` | A marker must be detected in strictly more than this fraction of its target class. |
+| `mecr_marker_max_other_fraction` | `0.01` | A marker must be detected in strictly less than this fraction of the remaining retained cells. |
+| `mecr_normalize_target_sum` | `10000.0` | Full-library per-cell normalization target before `log1p` and Wilcoxon. |
+| `mecr_reference_chunk_rows` | `5000` | Reference rows streamed from each raw H5AD at a time. |
+| `mecr_wilcoxon_tie_correct` | `true` | Enable tie correction in Scanpy's Python Wilcoxon implementation. |
+| `mecr_figure_dpi` | `180` | Pair-rate distribution plot DPI. |
+| `mecr_barnyard_top_n_pairs` | `6` | Maximum canonical/high-MECR/high-detection pairs selected for barnyard count plots. Set to `0` to disable them. |
+| `mecr_barnyard_max_points` | `50000` | Deterministic maximum plotted cells per platform and barnyard pair; exact MECR still uses every cell. |
+| `mecr_barnyard_random_seed` | `0` | Seed for barnyard display-point downsampling. |
+| `mecr_barnyard_log1p` | `false` | Plot barnyard axes in natural count space by default. Set to `true` for `log1p`-transformed display coordinates. |
+| `mecr_max_forks` | `4` | Maximum concurrent branch-scoring tasks. The shared reference task always has one fork. |
+
+The reference task uses the union of genes in all selected spatial panels,
+runs once, and is shared across all samples and segmentation branches. See
+[Mutually exclusive co-expression rate](stages/mecr.md) for the method.
+
 ### MapMyCells
 
 | Param | Default | Description |
@@ -347,6 +378,8 @@ Per-process CPU/memory requests and default concurrency guards
 | `ALIGN_QC` | 4 | 32 GB | unbounded |
 | `COMPARE` | 4 | 32 GB | unbounded |
 | `VISUALIZE` | 4 | 32 GB | unbounded |
+| `MECR_REFERENCE` | 16 | 240 GB | 1 |
+| `MECR` | 4 | 48 GB | `mecr_max_forks` = 4 |
 | `CLUSTERING_SQUIDPY` | 8 | 32 GB | `clustering_squidpy_max_forks` = 4 |
 | `MAPMYCELLS` | 8 | 160 GB | unbounded |
 
@@ -376,6 +409,8 @@ models is the ground truth for how stages are configured.
 | `AlignmentQCConfig` | `alignment-qc` | [config.py](../src/merxen/config.py) |
 | `ComparisonConfig` | `compare` | [config.py](../src/merxen/config.py) |
 | `VisualizationConfig` | `visualize` | [config.py](../src/merxen/config.py) |
+| `MecrReferenceConfig` | `mecr-reference` | [config.py](../src/merxen/config.py) |
+| `MecrConfig` | `mecr` | [config.py](../src/merxen/config.py) |
 | `ClusteringSquidpyConfig` | `clustering-squidpy` | [config.py](../src/merxen/config.py) |
 | `MapMyCellsConfig` | `mapmycells` | [config.py](../src/merxen/config.py) |
 
@@ -385,6 +420,7 @@ Nested sub-models:
 - `ProsegConfig` — ProSeg parameters, including `binary_path`.
 - `MemoryConfig` — memory limits and chunk sizes.
 - `DatasetConfig` — one dataset (one half of a pair) within a `SegmentationConfig`.
+- `MecrSampleConfig` — one SpatialData cell-count table scored by MECR.
 - `MerscopeBuildConfig` / `XeniumBuildConfig` — platform-specific build options
   nested under `SpatialDataBuildConfig`.
 - `PipelineConfig(BaseSettings)` — top-level, loaded from `MERXEN_*` env vars.
