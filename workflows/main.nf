@@ -16,6 +16,7 @@ include { ALIGN; ALIGN_QC } from "./modules/alignment"
 include { COMPARE } from "./modules/comparison"
 include { VISUALIZE } from "./modules/visualization"
 include { SPATIAL_GENE_ANALYSIS } from "./modules/spatial_gene_analysis"
+include { MECR_REFERENCE; MECR } from "./modules/mecr"
 include {
     CLUSTERING_SQUIDPY_PREPARE;
     CLUSTERING_SQUIDPY_COMPUTE;
@@ -361,6 +362,23 @@ def samplesJsonForSegmentation(pairId, platforms, platformPaths, segmentation) {
     return groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(samples))
 }
 
+def mergeMecrSamplesJson(samplesJsonValues) {
+    def samplesByInput = [:]
+    samplesJsonValues.each { samplesJson ->
+        def samples = new groovy.json.JsonSlurper().parseText(samplesJson.toString())
+        samples.each { sample ->
+            def inputKey = [sample.zarr_path, sample.table_key].join("|")
+            samplesByInput[inputKey] = sample
+        }
+    }
+    def mergedSamples = samplesByInput.values().toList().sort { sample ->
+        [sample.sample_id, sample.table_key, sample.zarr_path].join("|")
+    }
+    return groovy.json.JsonOutput.prettyPrint(
+        groovy.json.JsonOutput.toJson(mergedSamples)
+    )
+}
+
 def spatialGeneSamplesJson(samplesJson, row) {
     def samples = new groovy.json.JsonSlurper().parseText(samplesJson.toString())
     samples.each { sample ->
@@ -545,6 +563,9 @@ def normalizeStage(rawValue, paramName) {
         "spatial_genes": "spatial_gene_analysis",
         "gene_spatial_analysis": "spatial_gene_analysis",
         "spatial_autocorrelation": "spatial_gene_analysis",
+        "mecr": "mecr",
+        "mutually_exclusive_coexpression": "mecr",
+        "mutually_exclusive_co_expression": "mecr",
         "cluster": "clustering_squidpy",
         "clustering": "clustering_squidpy",
         "clustering_squidpy": "clustering_squidpy",
@@ -560,7 +581,7 @@ def normalizeStage(rawValue, paramName) {
             "build_spatialdata, segment_nuclei, segment, enrich, " +
             "build_viewer_caches, mask_image_quantification, " +
             "compute_cortical_depth, distance_from_object, qc, align, align_qc, " +
-            "compare, visualize, spatial_gene_analysis, " +
+            "compare, visualize, spatial_gene_analysis, mecr, " +
             "clustering_squidpy, mapmycells"
         )
     }
@@ -573,7 +594,8 @@ def activeStageOrder(
     maskImageQuantificationEnabled,
     corticalDepthEnabled,
     distanceFromObjectEnabled,
-    viewerCacheEnabled
+    viewerCacheEnabled,
+    mecrEnabled
 ) {
     def stages = ["build_spatialdata", "segment_nuclei", "segment", "enrich"]
     if (viewerCacheEnabled) {
@@ -583,6 +605,9 @@ def activeStageOrder(
         stages += ["mask_image_quantification"]
     }
     stages += ["qc"]
+    if (mecrEnabled) {
+        stages += ["mecr"]
+    }
     if (pairedMode && alignmentEnabled) {
         stages += ["align", "align_qc"]
     }
@@ -614,6 +639,9 @@ def validateStage(stage, stages, paramName, alignmentEnabled) {
         }
         if (stage == "distance_from_object") {
             hint = " Pass --distance_from_object_enabled true to use object distance."
+        }
+        if (stage == "mecr") {
+            hint = " Pass --mecr_enabled true to use MECR."
         }
         throw new IllegalArgumentException(
             "${paramName} '${stage}' is not active for this run.${hint} " +
@@ -920,6 +948,21 @@ def appendDistanceFromObjectPreflightChecks(errors, row, settings, _params) {
     }
 }
 
+def appendMecrPreflightChecks(errors, settings, params) {
+    if (!settings.run_mecr) {
+        return
+    }
+    [
+        [params.mecr_neurons_h5ad_path, "WHB neuron raw H5AD"],
+        [params.mecr_nonneurons_h5ad_path, "WHB non-neuron raw H5AD"],
+        [params.mecr_cell_metadata_path, "WHB cell metadata"],
+        [params.mecr_taxonomy_metadata_path, "WHB taxonomy metadata"],
+        [params.mecr_cluster_membership_path, "WHB cluster membership metadata"],
+    ].each { rawPath, label ->
+        appendPreflightFileCheck(errors, rawPath, "MECR ${label}")
+    }
+}
+
 def runPreflightChecks(row, settings, params) {
     def errors = []
     appendClusteringSquidpyPreflightChecks(errors, settings, params)
@@ -927,6 +970,7 @@ def runPreflightChecks(row, settings, params) {
     appendCorticalDepthPreflightChecks(errors, row, settings, params)
     appendSpatialGeneTranscriptPreflightChecks(errors, row, settings, params)
     appendDistanceFromObjectPreflightChecks(errors, row, settings, params)
+    appendMecrPreflightChecks(errors, settings, params)
     if (errors) {
         throw new IllegalArgumentException(
             "Preflight checks failed for sample ${settings.pair_id} " +
@@ -1025,6 +1069,11 @@ def rowSampleSettings(row, params) {
         false,
         "distance_from_object_enabled for ${pairId}",
     )
+    def mecrEnabled = boolOrDefault(
+        rowFieldOrDefault(row, "mecr_enabled", params.mecr_enabled),
+        true,
+        "mecr_enabled for ${pairId}",
+    )
     def distanceFromObjectSegmentations = normalizeDistanceFromObjectSegmentations(
         rowFieldOrDefault(
             row,
@@ -1064,6 +1113,7 @@ def rowSampleSettings(row, params) {
         corticalDepthEnabled,
         distanceFromObjectEnabled,
         viewerCacheEnabled,
+        mecrEnabled,
     )
     def startStage = normalizeStage(startStageRaw, startParamName)
     def stopStage = normalizeStage(stopStageRaw, stopParamName)
@@ -1119,6 +1169,7 @@ def rowSampleSettings(row, params) {
         stageOrder,
     )
     def runQc = stageInRange("qc", startStage, stopStage, stageOrder)
+    def runMecr = stageInRange("mecr", startStage, stopStage, stageOrder)
     def runAlign = stageInRange("align", startStage, stopStage, stageOrder)
     def runAlignQc = stageInRange("align_qc", startStage, stopStage, stageOrder)
     def runCompare = stageInRange("compare", startStage, stopStage, stageOrder)
@@ -1139,12 +1190,11 @@ def rowSampleSettings(row, params) {
     def needAnalysisZarrs =
         runAlign ||
         runAlignQc ||
+        runMecr ||
         runCompare ||
         runVisualize ||
         runSpatialGeneAnalysis ||
         runClusteringSquidpy
-    def needAlignmentResults =
-        pairedMode && alignmentEnabled && needAnalysisZarrs
     def needAlignmentDownstream =
         pairedMode &&
         alignmentEnabled &&
@@ -1154,6 +1204,10 @@ def rowSampleSettings(row, params) {
             runSpatialGeneAnalysis ||
             runClusteringSquidpy
         )
+    def needAlignmentResults =
+        pairedMode &&
+        alignmentEnabled &&
+        (runAlign || runAlignQc || needAlignmentDownstream)
 
     return [
         pair_id: pairId,
@@ -1178,6 +1232,7 @@ def rowSampleSettings(row, params) {
         run_compute_cortical_depth: runComputeCorticalDepth,
         run_distance_from_object: runDistanceFromObject,
         run_qc: runQc,
+        run_mecr: runMecr,
         run_align: runAlign,
         run_align_qc: runAlignQc,
         run_compare: runCompare,
@@ -1982,6 +2037,59 @@ workflow {
         }
 
     analysis_dataset_zarrs_ch = analysis_from_qc_ch.mix(analysis_without_qc_ch)
+
+    mecr_samples_ch = analysis_dataset_zarrs_ch
+        .filter {
+            _pairId, _segmentation, _platform, _zarrPath, _tableKey, _shapeKey,
+            settings ->
+                settings.run_mecr
+        }
+        .map {
+            pairId, segmentation, platform, zarrPath, _tableKey, _shapeKey,
+            settings ->
+                tuple(
+                    "${pairId}|${segmentation}",
+                    pairId,
+                    segmentation,
+                    settings,
+                    platform,
+                    zarrPath,
+                )
+        }
+        .groupTuple()
+        .map {
+            _branchKey, pairIds, segmentations, settingsList, platformNames,
+            zarrPaths ->
+                def pairId = pairIds[0].toString()
+                def segmentation = segmentations[0].toString()
+                def settings = settingsList[0]
+                def pathsByPlatform = [:]
+                platformNames.eachWithIndex { platform, idx ->
+                    pathsByPlatform[platform.toString()] = zarrPaths[idx].toString()
+                }
+                tuple(
+                    pairId,
+                    segmentation,
+                    samplesJsonForSegmentation(
+                        pairId,
+                        settings.active_platforms,
+                        pathsByPlatform,
+                        segmentation,
+                    ),
+                )
+        }
+
+    mecr_reference_inputs_ch = mecr_samples_ch
+        .map { _pairId, _segmentation, samplesJson -> samplesJson }
+        .collect()
+        .map { samplesJsonValues -> mergeMecrSamplesJson(samplesJsonValues) }
+    mecr_reference_results_ch = MECR_REFERENCE(mecr_reference_inputs_ch)
+    mecr_inputs_ch = mecr_samples_ch
+        .combine(mecr_reference_results_ch)
+        .map { pairId, segmentation, samplesJson, referenceOut ->
+            tuple(pairId, segmentation, samplesJson, referenceOut)
+        }
+    mecr_results_ch = MECR(mecr_inputs_ch)
 
     merscope_zarr_ch = analysis_ready_zarrs_ch
         .filter { _key, _pairId, platform, _zarrPath -> platform == "MERSCOPE" }

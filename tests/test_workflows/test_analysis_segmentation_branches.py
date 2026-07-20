@@ -257,6 +257,51 @@ def test_spatial_gene_analysis_stage_is_wired_after_visualization() -> None:
         assert expected in module_text
 
 
+def test_mecr_stage_is_default_enabled_and_uses_one_reference_task() -> None:
+    """MECR should score every analysis branch from one cached WHB marker table."""
+    repo_root = Path(__file__).resolve().parents[2]
+    main_text = (repo_root / "workflows" / "main.nf").read_text()
+    config_text = (repo_root / "workflows" / "nextflow.config").read_text()
+    module_text = (repo_root / "workflows" / "modules" / "mecr.nf").read_text()
+
+    for expected in [
+        'include { MECR_REFERENCE; MECR } from "./modules/mecr"',
+        '"mecr": "mecr"',
+        'stages += ["mecr"]',
+        "settings.run_mecr",
+        "appendMecrPreflightChecks",
+        "mecr_reference_inputs_ch",
+        "mergeMecrSamplesJson",
+        ".collect()",
+        "MECR_REFERENCE(mecr_reference_inputs_ch)",
+        "MECR(mecr_inputs_ch)",
+    ]:
+        assert expected in main_text
+
+    for expected in [
+        "mecr_enabled = true",
+        "mecr_marker_min_target_fraction = 0.25",
+        "mecr_marker_max_other_fraction = 0.01",
+        "mecr_barnyard_top_n_pairs = 6",
+        "mecr_barnyard_max_points = 50000",
+        "mecr_barnyard_log1p = false",
+        'withName: "MECR_REFERENCE"',
+        'withName: "MECR"',
+    ]:
+        assert expected in config_text
+
+    for expected in [
+        "process MECR_REFERENCE",
+        "process MECR",
+        "merxen mecr-reference",
+        "merxen mecr --config",
+        "mecr_reference_markers.csv",
+        '"barnyard_top_n_pairs": ${params.mecr_barnyard_top_n_pairs}',
+        '"barnyard_log1p": ${params.mecr_barnyard_log1p}',
+    ]:
+        assert expected in module_text
+
+
 def test_nuclei_cellpose_is_an_independent_serialized_stage() -> None:
     """DAPI nuclei should be runnable alone and share the Cellpose GPU lock."""
     repo_root = Path(__file__).resolve().parents[2]
