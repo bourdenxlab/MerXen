@@ -25,6 +25,7 @@ from merxen.cli.run_mapmycells import mapmycells_command
 from merxen.cli.run_mask_image_quantification import (
     mask_image_quantification_command,
 )
+from merxen.cli.run_mecr import mecr_command, mecr_reference_command
 from merxen.cli.run_qc import qc_command
 from merxen.cli.run_segmentation import (
     cellpose_nuclei_segment_command,
@@ -67,5 +68,7 @@ main.add_command(distance_from_object_command)
 main.add_command(distance_from_object_cohort_command)
 main.add_command(visualize_command)
 main.add_command(spatial_gene_analysis_command)
+main.add_command(mecr_reference_command)
+main.add_command(mecr_command)
 main.add_command(clustering_squidpy_command)
 main.add_command(mapmycells_command)
