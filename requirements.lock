@@ -91,6 +91,7 @@ cycler==0.12.1
     #   squidpy
 dask==2026.7.0
     # via
+    #   merxen (pyproject.toml)
     #   dask-image
     #   distributed
     #   multiscale-spatial-image
