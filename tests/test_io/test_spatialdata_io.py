@@ -309,11 +309,7 @@ def test_write_or_replace_element_removes_orphaned_store_by_path(
 
     assert wrote
     assert not orphan.exists()
-    assert calls == [
-        ("write", False),
-        ("delete", "MERSCOPE_z_projection"),
-        ("write", False),
-    ]
+    assert calls == [("write", False), ("write", False)]
 
 
 def test_write_spatialdata_metadata_persists_metadata_and_transforms() -> None:

@@ -44,33 +44,39 @@ def test_quantifies_exact_stats_for_tiny_mask() -> None:
     )
     table = result.table
 
-    assert table.obs_names.tolist() == ["cellpose_1", "cellpose_2", "cellpose_3"]
+    assert table.obs_names.tolist() == ["1", "2", "3"]
+    assert table.obs["instance_id"].tolist() == [1, 2, 3]
+    assert table.obs["source_cell_id"].tolist() == [
+        "cellpose_1",
+        "cellpose_2",
+        "cellpose_3",
+    ]
     assert table.obs["label_id"].tolist() == [1, 2, 3]
     assert table.obs["mask_pixel_count"].tolist() == [3, 4, 2]
 
     df = table.to_df()
     np.testing.assert_allclose(
-        df.loc["cellpose_1", "image__DAPI__min"],
+        df.loc["1", "image__DAPI__min"],
         1.0,
     )
     np.testing.assert_allclose(
-        df.loc["cellpose_1", "image__DAPI__median"],
+        df.loc["1", "image__DAPI__median"],
         2.0,
     )
     np.testing.assert_allclose(
-        df.loc["cellpose_1", "image__DAPI__mean"],
+        df.loc["1", "image__DAPI__mean"],
         (1.0 + 2.0 + 5.0) / 3.0,
     )
     np.testing.assert_allclose(
-        df.loc["cellpose_1", "image__DAPI__max"],
+        df.loc["1", "image__DAPI__max"],
         5.0,
     )
     np.testing.assert_allclose(
-        df.loc["cellpose_1", "image__DAPI__iqr"],
+        df.loc["1", "image__DAPI__iqr"],
         2.0,
     )
     np.testing.assert_allclose(
-        df.loc["cellpose_1", "image__RNA__median"],
+        df.loc["1", "image__RNA__median"],
         102.0,
     )
 
@@ -91,8 +97,8 @@ def test_ignores_nan_pixels_for_statistics() -> None:
     df = table.to_df()
 
     assert table.obs["mask_pixel_count"].tolist() == [2, 2]
-    np.testing.assert_allclose(df.loc["cellpose_1", "img__DAPI__mean"], 1.0)
-    np.testing.assert_allclose(df.loc["cellpose_2", "img__DAPI__median"], 12.0)
+    np.testing.assert_allclose(df.loc["1", "img__DAPI__mean"], 1.0)
+    np.testing.assert_allclose(df.loc["2", "img__DAPI__median"], 12.0)
 
 
 def test_multiple_images_and_channels_are_wide_with_metadata() -> None:
@@ -191,4 +197,4 @@ def test_run_mask_image_quantification_writes_table_and_sidecars(
     assert outputs["feature_metadata"].exists()
     assert outputs["summary"].exists()
     wide = pd.read_parquet(outputs["wide_matrix"])
-    assert wide.index.tolist() == ["cellpose_1", "cellpose_2"]
+    assert wide.index.tolist() == ["1", "2"]

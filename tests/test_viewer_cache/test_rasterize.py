@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import geopandas as gpd
 import numpy as np
+import pytest
 from shapely.geometry import Polygon
 
 from merxen.viewer_cache.rasterize import (
@@ -36,6 +37,14 @@ def test_label_ids_promote_to_uint64_for_large_ids() -> None:
     series, dtype = label_ids_for_shapes(gdf)
     assert np.dtype(dtype) == np.uint64
     assert int(series.loc[big]) == big
+
+
+def test_label_ids_reject_reserved_zero() -> None:
+    """Zero cannot represent both a real cell and transparent background."""
+    gdf = gpd.GeoDataFrame(geometry=[_square(0, 0, 1)], index=[0])
+
+    with pytest.raises(ValueError, match="reserved"):
+        label_ids_for_shapes(gdf)
 
 
 def test_label_ids_fall_back_to_codes_for_noninteger_index() -> None:
