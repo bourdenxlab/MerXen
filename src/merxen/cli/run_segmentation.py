@@ -102,6 +102,11 @@ def cellpose_nuclei_segment_command(
     required=True,
 )
 @click.option(
+    "--cellpose-cellprob",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    required=True,
+)
+@click.option(
     "--cellpose-transforms",
     type=click.Path(path_type=Path, exists=True, dir_okay=False),
     required=True,
@@ -116,6 +121,7 @@ def proseg_segment_command(
     config_path: Path,
     transcripts_csv: Path,
     cellpose_mask: Path,
+    cellpose_cellprob: Path,
     cellpose_transforms: Path,
     proseg_binary: Path | None,
     force_rerun: bool,
@@ -127,6 +133,7 @@ def proseg_segment_command(
         cfg,
         transcripts_csv=transcripts_csv,
         cellpose_mask_path=cellpose_mask,
+        cellpose_cellprob_path=cellpose_cellprob,
         transforms_path=cellpose_transforms,
         proseg_binary=proseg_binary,
         force_rerun=force_rerun,

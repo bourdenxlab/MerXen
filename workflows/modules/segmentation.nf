@@ -7,7 +7,7 @@ process CELLPOSE_SEGMENT {
     tuple val(key), val(pair_id), val(platform), val(seg_config_json)
 
     output:
-    tuple val(key), val(pair_id), val(platform), val(seg_config_json), path("segment_out/cellpose_masks_tiled.npy"), path("segment_out/transcripts_for_proseg.csv"), path("segment_out/cellpose_transforms.json"), path("segment_out/cellpose_stitching_stats.json")
+    tuple val(key), val(pair_id), val(platform), val(seg_config_json), path("segment_out/cellpose_masks_tiled.npy"), path("segment_out/cellpose_cellprobs_tiled.npy"), path("segment_out/transcripts_for_proseg.csv"), path("segment_out/cellpose_transforms.json"), path("segment_out/cellpose_stitching_stats.json")
 
     script:
     """
@@ -62,7 +62,7 @@ process PROSEG_SEGMENT {
     publishDir { "${params.outdir}/${pair_id}/${platform.toLowerCase()}/segmentation" }, mode: "symlink", overwrite: true
 
     input:
-    tuple val(key), val(pair_id), val(platform), val(seg_config_json), path(cellpose_mask), path(transcripts_csv), path(cellpose_transforms), path(_stitching_stats), path(nuclei_mask), path(_nuclei_stitching_stats), path(proseg_path_file)
+    tuple val(key), val(pair_id), val(platform), val(seg_config_json), path(cellpose_mask), path(cellpose_cellprob), path(transcripts_csv), path(cellpose_transforms), path(_stitching_stats), path(nuclei_mask), path(_nuclei_stitching_stats), path(proseg_path_file)
 
     output:
     tuple val(key), val(pair_id), val(platform), path("segment_out/proseg_base_latest.zarr"), path(cellpose_mask), path(transcripts_csv), path(nuclei_mask)
@@ -88,6 +88,7 @@ JSON
     merxen proseg-segment \
         --config segment_config.json \
         --cellpose-mask "${cellpose_mask}" \
+        --cellpose-cellprob "${cellpose_cellprob}" \
         --transcripts-csv "${transcripts_csv}" \
         --cellpose-transforms "${cellpose_transforms}" \
         --proseg-binary "\$(cat "${proseg_path_file}")"
@@ -107,7 +108,7 @@ workflow SEGMENT {
         .join(nuclei_results)
         .map {
             key, pair_id, platform, seg_config_json, cellpose_mask,
-            transcripts_csv, cellpose_transforms, stitching_stats,
+            cellpose_cellprob, transcripts_csv, cellpose_transforms, stitching_stats,
             nuclei_pair_id, nuclei_platform, _nuclei_seg_config_json,
             nuclei_mask, nuclei_stitching_stats ->
             if (pair_id != nuclei_pair_id || platform != nuclei_platform) {
@@ -119,6 +120,7 @@ workflow SEGMENT {
                 platform,
                 seg_config_json,
                 cellpose_mask,
+                cellpose_cellprob,
                 transcripts_csv,
                 cellpose_transforms,
                 stitching_stats,
@@ -130,7 +132,7 @@ workflow SEGMENT {
         .combine(proseg_path)
         .map {
             key, pair_id, platform, seg_config_json, cellpose_mask,
-            transcripts_csv, cellpose_transforms, stitching_stats, nuclei_mask,
+            cellpose_cellprob, transcripts_csv, cellpose_transforms, stitching_stats, nuclei_mask,
             nuclei_stitching_stats,
             proseg_path_file ->
             tuple(
@@ -139,6 +141,7 @@ workflow SEGMENT {
                 platform,
                 seg_config_json,
                 cellpose_mask,
+                cellpose_cellprob,
                 transcripts_csv,
                 cellpose_transforms,
                 stitching_stats,

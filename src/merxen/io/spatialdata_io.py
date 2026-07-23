@@ -267,7 +267,12 @@ def _preserve_observed_transcript_coordinates(df: Any, cols: set[str]) -> Any:
     return df
 
 
-def convert_to_latest_zarr(raw_path: Path, latest_path: Path) -> Path:
+def convert_to_latest_zarr(
+    raw_path: Path,
+    latest_path: Path,
+    *,
+    quality_column_alias: str | None = None,
+) -> Path:
     """Migrate a raw ProSeg zarr output to SpatialData V2 format.
 
     Reads the raw zarr, normalizes point-table schemas to avoid pyarrow
@@ -276,6 +281,8 @@ def convert_to_latest_zarr(raw_path: Path, latest_path: Path) -> Path:
     Args:
         raw_path: Path to the raw zarr (from ProSeg output).
         latest_path: Destination path for the converted zarr.
+        quality_column_alias: Optional source-platform quality column name to
+            restore alongside the canonical ``qv`` column.
 
     Returns:
         The latest_path where the converted zarr was written.
@@ -291,9 +298,12 @@ def convert_to_latest_zarr(raw_path: Path, latest_path: Path) -> Path:
 
     for points_key in list(sdata.points.keys()):
         try:
-            sdata.points[points_key] = normalize_points_for_latest_write(
+            points = normalize_points_for_latest_write(
                 sdata.points[points_key], points_key=points_key
             )
+            if quality_column_alias is not None and "qv" in points.columns:
+                points[quality_column_alias] = points["qv"]
+            sdata.points[points_key] = points
         except Exception as e:  # noqa: BLE001
             logger.warning(
                 "Could not normalize points '%s' before latest write: %s",

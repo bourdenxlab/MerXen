@@ -227,6 +227,7 @@ class DatasetConfig(BaseModel):
     output_dir: Path
     persistent_latest_zarr_path: Path | None = None
     persistent_mask_path: Path | None = None
+    persistent_cellpose_cellprob_path: Path | None = None
     persistent_transcripts_path: Path | None = None
     persistent_cellpose_stitching_stats_path: Path | None = None
     persistent_nuclei_mask_path: Path | None = None
