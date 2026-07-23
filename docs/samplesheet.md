@@ -18,14 +18,14 @@ required. A template lives at
 | `pair_id` | **yes** | Unique identifier for this row. Used as the top-level output directory name. |
 | `analysis_mode` | no | Row-level mode: `paired`, `merscope`, or `xenium`. Blank inherits `--analysis_mode`. |
 | `enable_alignment` | no | Row-level alignment switch: `true` or `false`. Blank inherits `--enable_alignment`; only paired rows can run alignment. |
-| `analysis_segmentation` | no | Row-level downstream branch set: `both`, `reseg`, `original_seg`, or comma-separated combinations. Blank inherits `--analysis_segmentation`. |
+| `analysis_segmentation` | no | Row-level downstream branch set: `both`, `reseg`, `original_seg`, `proseg_hybrid`, or comma-separated combinations. `both` remains `reseg,original_seg`; blank inherits `--analysis_segmentation`. |
 | `start_stage` | no | Row-level first stage. Blank inherits `--start_stage` unless `only_stage` applies. |
 | `stop_stage` | no | Row-level final stage. Blank inherits `--stop_stage` unless `only_stage` applies. |
 | `only_stage` | no | Row-level single-stage override. If set, it overrides that row's start/stop stage settings. |
 | `mecr_enabled` | no | Row-level MECR switch. Blank inherits `--mecr_enabled`, which defaults to `true`. |
 | `cortical_depth_enabled` | no | Row-level cortical-depth switch. Blank inherits `--cortical_depth_enabled`. |
 | `distance_from_object_enabled` | no | Row-level polygon-distance switch. Blank inherits `--distance_from_object_enabled`. |
-| `distance_from_object_segmentations` | no | Comma-separated object-distance branches: `reseg`, `original_seg`, and/or `proseg_mask`. Blank uses all three by default. |
+| `distance_from_object_segmentations` | no | Comma-separated object-distance branches: `proseg`, `original`, and/or `cellpose`; optional `proseg_geometry_assignment` and `proseg_hybrid` are also accepted when present. Legacy names remain aliases. Blank uses the three defaults. |
 | `merscope_dir` | required for MERSCOPE modes if no cache | Path to the raw MERSCOPE region export folder (contains `transcripts.parquet`, `cell_boundaries/`, `images/`, etc.). |
 | `merscope_spatialdata_path` | required for MERSCOPE modes if no raw dir | Path to an existing (or desired) reusable MERSCOPE SpatialData zarr. If it exists, the build step is **skipped** unless `--force_spatialdata_build true` is passed to Nextflow. |
 | `merscope_image_prefix` | no | Prefix used to match z-plane image keys when more than one run is present. |
@@ -130,7 +130,7 @@ Object-distance example using an already cortical-annotated Xenium zarr:
 
 ```csv
 pair_id,analysis_mode,distance_from_object_enabled,distance_from_object_segmentations,only_stage,xenium_spatialdata_path,xenium_distance_object_annotation_geojson
-BLOCK_01,xenium,true,"reseg,original_seg,proseg_mask",distance_from_object,/path/to/BLOCK_01_xenium.zarr,/path/to/BLOCK_01_xenium_objects.geojson
+BLOCK_01,xenium,true,"proseg,original,cellpose",distance_from_object,/path/to/BLOCK_01_xenium.zarr,/path/to/BLOCK_01_xenium_objects.geojson
 ```
 
 For paired cohorts, `pair_id` must be the tissue-block identifier used for the

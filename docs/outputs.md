@@ -63,8 +63,9 @@ ${outdir}/
 single-platform mode, only the selected `<platform>/` directory is present and
 paired-only `alignment/`, `alignment_qc/`, and `comparison/` directories are
 not written.
-`reseg/` and `original_seg/` are controlled by `--analysis_segmentation`;
-the default `both` writes both branches. Upstream build, segmentation,
+`reseg/`, `original_seg/`, and optional `proseg_hybrid/` are controlled by
+`--analysis_segmentation`; the default `both` writes the first two branches.
+Upstream build, segmentation,
 enrichment, and latest SpatialData artifacts are shared.
 Every `.png` plot listed below is also written as a same-stem `.pdf`.
 
@@ -94,6 +95,42 @@ Path: `${outdir}/<pair_id>/<platform>/latest/`
 |------|----------|
 | `latest_spatialdata.zarr` | Durable current SpatialData artifact. Segmentation writes the refined ProSeg result here, then enrichment updates it in place with additive shapes, images, and tables. This is the primary downstream input. |
 
+#### SpatialData identifier contract
+
+MerXen writes a versioned `merxen_schema` root attribute. Its
+`segmentations` registry explicitly pairs each branch's points element and
+assignment column with its shape, table, instance key, coordinate variant, and
+ID namespace. Consumers must use this registry rather than selecting the first
+points element or inferring pairings from element names.
+
+Operational cell IDs use the positive `uint64` field `instance_id` everywhere:
+the point assignment, shape column and index, and table instance key have the
+same value and dtype. Raster label value `0` is reserved for background and a
+nullable point assignment uses null for unassigned. Source/vendor IDs remain in
+`source_cell_id`; ProSeg's zero-based ID remains in `proseg_internal_id`.
+`transcript_id` is a unique positive `uint64`, while a reader-provided ID is
+retained separately as `source_transcript_id`.
+
+The primary assignments are:
+
+| Registry branch | Point assignment | Shape | Table |
+|-----------------|------------------|-------|-------|
+| `original` | `original_assignment` when supplied by the instrument | vendor cell-boundary layer | `table` / `table_original` |
+| `proseg` | `assignment` | `MOSAIK_proseg` | `table_MOSAIK_proseg` |
+| `cellpose` | geometric table only | `MOSAIK_cellpose` | `table_MOSAIK_cellpose` |
+| `proseg_geometry_assignment` | `proseg_geometry_assignment` when present | `MOSAIK_proseg` | `table_MOSAIK_proseg_geometry_assignment` |
+| `proseg_hybrid` | `hybrid_assignment` | `MOSAIK_proseg_hybrid` | `table_MOSAIK_proseg_hybrid` |
+
+Aligned non-rigid variants receive their own registry entries. They refer to
+the aligned points and shapes explicitly and do not silently reuse a native
+coordinate-space pairing.
+
+SpatialData 0.8 stores point payloads as Parquet inside a Zarr metadata group.
+A generic Zarr traversal can therefore emit
+`Object at points.parquet is not recognized as a component of a Zarr
+hierarchy`. Use `spatialdata.read_zarr()` to read the store; the Parquet child
+is expected and is not, by itself, evidence of corruption.
+
 ### Segmentation
 
 Path: `${outdir}/<pair_id>/<platform>/segmentation/`
@@ -102,6 +139,7 @@ Path: `${outdir}/<pair_id>/<platform>/segmentation/`
 |------|----------|
 | `proseg_base_latest.zarr` | Staged symlink to `../latest/latest_spatialdata.zarr`. |
 | `cellpose_masks_tiled.npy` | Cleaned global-pixel uint32 mask from tiled Cellpose. Fed into ProSeg and enrichment. |
+| `cellpose_cellprobs_tiled.npy` | Float32 Cellpose probability logits aligned with accepted mask pixels and fed into ProSeg. |
 | `cellpose_stitching_stats.json` | Diagnostics for object-level tile stitching, including accepted labels, duplicate skips, edge-touching labels, and conflict pixels. |
 | `cellpose_nuclei_masks_tiled.npy` | DAPI-only Cellpose `nuclei` labels, retained independently of transcript assignment. |
 | `cellpose_nuclei_stitching_stats.json` | Equivalent stitching diagnostics for the nuclei mask. |

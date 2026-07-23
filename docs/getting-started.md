@@ -12,8 +12,9 @@ This guide takes you from a fresh clone to a running pipeline.
 - Rust/Cargo on your `PATH`, or an existing
   [ProSeg](https://github.com/dcjones/proseg) binary in one of the configured
   search paths. MerXen searches `/usr/bin/proseg` and
-  `/usr/local/bin/proseg` by default, then falls back to `command -v proseg`;
-  if none exists, it installs ProSeg with Cargo before segmentation starts.
+  `/usr/local/bin/proseg` by default, then falls back to `command -v proseg`.
+  A matching ProSeg 3.2.0 binary is required; if none exists, MerXen builds the
+  pinned Git revision with Cargo before segmentation starts.
 - Ample RAM. Defaults target a **75-CPU / 600 GB** machine; segmentation alone
   reserves 500 GB by default. See [Configuration](configuration.md#resource-limits)
   to dial this down.
@@ -105,8 +106,8 @@ directory and file produced, see [Outputs](outputs.md).
 `conda activate merxen`. The `merxen` CLI is registered by
 [pyproject.toml:44](../pyproject.toml#L44).
 
-**ProSeg bootstrap failed** — the workflow could not find ProSeg in
-`proseg_search_paths` and could not install it with `cargo install proseg`.
+**ProSeg bootstrap failed** — the workflow could not find ProSeg 3.2.0 in
+`proseg_search_paths` and could not build the pinned Git revision with Cargo.
 Install Cargo or edit `proseg_install_path` in
 [workflows/nextflow.config](../workflows/nextflow.config). If the install path
 is system-owned, the bootstrap step asks for `sudo` permission.

@@ -25,13 +25,13 @@ Common optional parameters:
 |------|-------------|
 | `--outdir` | Where all outputs are published. Defaults to `./results`. |
 | `--analysis_mode` | `paired` (default), `merscope`, or `xenium`. Controls which platform columns are required and which stages are active. |
-| `--analysis_segmentation` | `both` (default), `reseg`, or `original_seg`. Controls whether downstream analysis runs on resegmented data, original instrument segmentation, or both. |
+| `--analysis_segmentation` | `both` (default), `reseg`, `original_seg`, or `proseg_hybrid`. `both` still means only `reseg,original_seg`; select the new branch explicitly. |
 | `--force_spatialdata_build` | Force rebuilding the SpatialData zarr even when a cached one exists. Defaults to `false`. |
 | `--enable_alignment` | Run optional Spateo alignment and alignment QC before comparison. Paired mode only. Defaults to `false`. |
 | `--mecr_enabled` | Run mutually exclusive co-expression rate analysis after QC. Defaults to `true`. |
 | `--cortical_depth_enabled` | Run cortical-depth tissue/depth annotation after clustering. Requires boundary GeoJSON annotations. Defaults to `false`. |
 | `--distance_from_object_enabled` | Run registered polygon-edge distance annotation and paired near-vs-far pseudobulk analysis. Defaults to `false`. |
-| `--distance_from_object_segmentations` | Object-distance branches; defaults to `reseg,original_seg,proseg_mask`. |
+| `--distance_from_object_segmentations` | Object-distance branches; defaults to `proseg,original,cellpose`. The former names remain accepted aliases. |
 | `--start_stage` / `--stop_stage` | Run a contiguous stage range. Defaults to the full pipeline. |
 | `--only_stage` | Convenience alias for setting `start_stage` and `stop_stage` to the same stage. |
 
@@ -129,6 +129,11 @@ row. The enriched SpatialData zarr contains both segmentation families;
 downstream processes receive explicit table and shape keys for the selected
 branch. A row-level `analysis_segmentation` value can restrict branches for one
 sample while other rows continue to use the global default.
+
+The segmentation stage generates `proseg_hybrid` by default, but downstream
+analysis does not select it implicitly. To run the third branch alone, use
+`--analysis_segmentation proseg_hybrid`; comma-separated combinations such as
+`reseg,proseg_hybrid` are also accepted.
 
 ## Resuming a run
 
