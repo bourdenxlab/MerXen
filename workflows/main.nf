@@ -121,6 +121,9 @@ def normalizeAnalysisSegmentation(rawValue) {
         "resegmented": ["reseg"],
         "proseg": ["reseg"],
         "mosaik": ["reseg"],
+        "hybrid": ["proseg_hybrid"],
+        "proseg_hybrid": ["proseg_hybrid"],
+        "hybrid_seg": ["proseg_hybrid"],
         "original": ["original_seg"],
         "original_seg": ["original_seg"],
         "original_segmentation": ["original_seg"],
@@ -141,7 +144,7 @@ def normalizeAnalysisSegmentation(rawValue) {
             if (!aliases.containsKey(key)) {
                 throw new IllegalArgumentException(
                     "Unknown analysis_segmentation '${value}'. Valid values: " +
-                    "both, reseg, original_seg"
+                    "both, reseg, original_seg, proseg_hybrid"
                 )
             }
             aliases[key].each { segmentation ->
@@ -267,13 +270,13 @@ def samplesJsonForPlatforms(pairId, platforms, platformPaths = [:]) {
 }
 
 def analysisLayerKeys(platform, segmentation) {
-    if (segmentation == "reseg") {
+    if (segmentation in ["proseg", "reseg"]) {
         return [
             table_key: "table_MOSAIK_proseg",
             shape_key: "MOSAIK_proseg",
         ]
     }
-    if (segmentation == "original_seg") {
+    if (segmentation in ["original", "original_seg"]) {
         return [
             table_key: "table_original",
             shape_key: platform == "MERSCOPE"
@@ -281,10 +284,22 @@ def analysisLayerKeys(platform, segmentation) {
                 : "xenium_cell_boundaries",
         ]
     }
-    if (segmentation == "proseg_mask") {
+    if (segmentation == "proseg_hybrid") {
+        return [
+            table_key: "table_MOSAIK_proseg_hybrid",
+            shape_key: "MOSAIK_proseg_hybrid",
+        ]
+    }
+    if (segmentation in ["cellpose", "proseg_mask"]) {
         return [
             table_key: "table_MOSAIK_cellpose",
             shape_key: "MOSAIK_cellpose",
+        ]
+    }
+    if (segmentation == "proseg_geometry_assignment") {
+        return [
+            table_key: "table_MOSAIK_proseg_geometry_assignment",
+            shape_key: "MOSAIK_proseg",
         ]
     }
     throw new IllegalArgumentException("Unknown analysis segmentation: ${segmentation}")
@@ -295,16 +310,20 @@ def normalizeDistanceFromObjectSegmentations(rawValue) {
         ? rawValue
         : rawValue.toString().split(",")
     def aliases = [
-        "reseg": "reseg",
-        "resegmented": "reseg",
-        "proseg": "reseg",
-        "original": "original_seg",
-        "original_seg": "original_seg",
-        "instrument": "original_seg",
-        "proseg_mask": "proseg_mask",
-        "mask": "proseg_mask",
-        "cellpose": "proseg_mask",
-        "cellpose_mask": "proseg_mask",
+        "reseg": "proseg",
+        "resegmented": "proseg",
+        "proseg": "proseg",
+        "original": "original",
+        "original_seg": "original",
+        "instrument": "original",
+        "proseg_mask": "cellpose",
+        "mask": "cellpose",
+        "cellpose": "cellpose",
+        "cellpose_mask": "cellpose",
+        "proseg_geometry": "proseg_geometry_assignment",
+        "proseg_geometry_assignment": "proseg_geometry_assignment",
+        "hybrid": "proseg_hybrid",
+        "proseg_hybrid": "proseg_hybrid",
     ]
     def selected = []
     rawValues.each { value ->
@@ -320,14 +339,14 @@ def normalizeDistanceFromObjectSegmentations(rawValue) {
         if (!aliases.containsKey(key)) {
             throw new IllegalArgumentException(
                 "Unknown distance_from_object segmentation '${value}'. Valid " +
-                "values: reseg, original_seg, proseg_mask"
+                "values: proseg, original, cellpose, proseg_geometry_assignment"
             )
         }
         if (!selected.contains(aliases[key])) {
             selected << aliases[key]
         }
     }
-    return selected ?: ["reseg", "original_seg", "proseg_mask"]
+    return selected ?: ["proseg", "original", "cellpose"]
 }
 
 def normalizeOptionalStringList(rawValue) {
@@ -1505,6 +1524,22 @@ workflow {
                     cell_compactness: params.proseg_cell_compactness,
                     num_threads: params.proseg_num_threads,
                     voxel_layers: 2,
+                ],
+                proseg_hybrid: [
+                    enabled: params.proseg_hybrid_enabled,
+                    min_transcripts: params.proseg_hybrid_min_transcripts,
+                    outlier_neighbors: params.proseg_hybrid_outlier_neighbors,
+                    outlier_mad_multiplier: params.proseg_hybrid_outlier_mad_multiplier,
+                    minimum_external_group: params.proseg_hybrid_minimum_external_group,
+                    chain_radius_scale: params.proseg_hybrid_chain_radius_scale,
+                    near_surface_radius_fraction: params.proseg_hybrid_near_surface_radius_fraction,
+                    maximum_expansion_radius_fraction: params.proseg_hybrid_maximum_expansion_radius_fraction,
+                    attachment_arc_width_scale: params.proseg_hybrid_attachment_arc_width_scale,
+                    rounding_radius_fraction: params.proseg_hybrid_rounding_radius_fraction,
+                    smoothing_radius_um: params.proseg_hybrid_smoothing_radius_um,
+                    outward_rounding_um: params.proseg_hybrid_outward_rounding_um,
+                    smoothing_quad_segs: params.proseg_hybrid_smoothing_quad_segs,
+                    containment_tolerance_um: params.proseg_hybrid_containment_tolerance_um,
                 ],
                 memory: [
                     max_system_ram_gb: params.max_ram_gb,

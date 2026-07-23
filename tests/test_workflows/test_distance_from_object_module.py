@@ -20,7 +20,7 @@ def test_distance_from_object_processes_and_three_branches_are_wired() -> None:
         '"table_MOSAIK_proseg"',
         '"table_original"',
         '"table_MOSAIK_cellpose"',
-        '"proseg_mask"',
+        '"cellpose"',
         "settings.distance_from_object_segmentations",
         "distance_from_object_after_cortical_ch",
         "distance_from_object_annotation_results_ch",
@@ -32,7 +32,7 @@ def test_distance_from_object_processes_and_three_branches_are_wired() -> None:
 
     for expected in [
         "distance_from_object_enabled = false",
-        'distance_from_object_segmentations = ["reseg", "original_seg", "proseg_mask"]',
+        'distance_from_object_segmentations = ["proseg", "original", "cellpose"]',
         "distance_from_object_near_distance_um = 50.0",
         "distance_from_object_far_distance_um = 100.0",
         "distance_from_object_max_distance_um = 200.0",
