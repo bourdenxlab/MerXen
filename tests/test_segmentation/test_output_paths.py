@@ -51,7 +51,8 @@ def test_run_segmentation_pipeline_stages_persistent_outputs(
                     / "segmentation"
                     / "cellpose_nuclei_stitching_stats.json"
                 ),
-            }
+            },
+            "proseg_hybrid": {"enabled": False},
         }
     )
 
@@ -204,6 +205,7 @@ def test_run_segmentation_pipeline_filters_cellpose_mask_before_proseg(
                 "final_filter_chunk_mb": 1,
                 "show_progress": False,
             },
+            "proseg_hybrid": {"enabled": False},
         }
     )
 
