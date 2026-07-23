@@ -36,7 +36,12 @@ process ENSURE_PROSEG {
             candidate="\$candidate/proseg"
         fi
         if [ -x "\$candidate" ]; then
-            "\$candidate" --version >/dev/null
+            local actual_version
+            actual_version="\$("\$candidate" --version 2>/dev/null | awk '{print \$NF}')"
+            if [ "\$actual_version" != "${params.proseg_version}" ]; then
+                echo "Ignoring ProSeg \$candidate (version \$actual_version; required ${params.proseg_version})." >&2
+                return 0
+            fi
             printf '%s\\n' "\$candidate" > proseg_path.txt
             echo "Using ProSeg: \$candidate" >&2
             "\$candidate" --version >&2
@@ -74,8 +79,12 @@ PATHS
     tmp_root="\$(mktemp -d)"
     trap 'rm -rf "\$tmp_root"' EXIT
 
-    echo "Installing ProSeg with cargo package '${params.proseg_cargo_package}'..." >&2
-    cargo install "${params.proseg_cargo_package}" --root "\$tmp_root"
+    echo "Installing ProSeg ${params.proseg_version} from ${params.proseg_git_url}@${params.proseg_git_rev}..." >&2
+    cargo install \
+        --git "${params.proseg_git_url}" \
+        --rev "${params.proseg_git_rev}" \
+        --root "\$tmp_root" \
+        "${params.proseg_cargo_package}"
 
     built_binary="\$tmp_root/bin/proseg"
     if [ ! -x "\$built_binary" ]; then
@@ -91,6 +100,11 @@ PATHS
         sudo install -m 755 "\$built_binary" "\$install_path"
     fi
 
+    installed_version="\$("\$install_path" --version | awk '{print \$NF}')"
+    if [ "\$installed_version" != "${params.proseg_version}" ]; then
+        echo "Installed ProSeg version \$installed_version does not match required ${params.proseg_version}." >&2
+        exit 1
+    fi
     "\$install_path" --version >&2
     printf '%s\\n' "\$install_path" > proseg_path.txt
     """

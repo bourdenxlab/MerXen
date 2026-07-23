@@ -82,6 +82,62 @@ def run_cellpose_model_eval(
     return np.asarray(masks), flows, styles
 
 
+def extract_cellpose_probability_logits(
+    flows: Any,
+    mask_shape: tuple[int, int],
+) -> np.ndarray:
+    """Extract Cellpose's per-pixel cell-probability logits from model flows.
+
+    Args:
+        flows: Flow payload returned by ``CellposeModel.eval``.
+        mask_shape: Expected two-dimensional mask shape.
+
+    Returns:
+        Float32 logits with the same shape as the mask.
+
+    Raises:
+        ValueError: If the Cellpose flow payload has no compatible probability map.
+    """
+    if not isinstance(flows, list | tuple) or len(flows) < 3:
+        raise ValueError("Cellpose did not return a cell-probability flow map.")
+    logits = np.asarray(flows[2]).squeeze()
+    if logits.shape != tuple(mask_shape):
+        raise ValueError(
+            "Cellpose probability shape does not match masks: "
+            f"{logits.shape} != {tuple(mask_shape)}"
+        )
+    return logits.astype(np.float32, copy=False)
+
+
+def synchronize_cellpose_probability_logits(
+    mask_path: Path | str,
+    probability_path: Path | str,
+    *,
+    chunk_rows: int = 2048,
+) -> None:
+    """Zero probability logits wherever the final Cellpose mask is background.
+
+    Args:
+        mask_path: Final two-dimensional Cellpose label image.
+        probability_path: Stitched float32 Cellpose probability-logit image.
+        chunk_rows: Number of image rows updated per memory-bounded chunk.
+    """
+    masks = np.load(Path(mask_path), mmap_mode="r")
+    probabilities = np.load(Path(probability_path), mmap_mode="r+")
+    if masks.shape != probabilities.shape:
+        raise ValueError(
+            "Cellpose mask and probability shapes differ: "
+            f"{masks.shape} != {probabilities.shape}"
+        )
+    rows = max(1, int(chunk_rows))
+    for start in range(0, int(masks.shape[0]), rows):
+        stop = min(start + rows, int(masks.shape[0]))
+        probability_chunk = probabilities[start:stop]
+        probability_chunk[masks[start:stop] == 0] = 0.0
+    probabilities.flush()
+    del masks, probabilities
+
+
 def iter_core_tiles(
     height: int,
     width: int,
@@ -281,6 +337,8 @@ def _stitch_core_owned_tile_labels(
     next_label: int,
     global_label_areas: dict[int, int],
     tiling_config: TilingConfig,
+    tile_cellprobs: np.ndarray | None = None,
+    global_cellprobs: np.ndarray | None = None,
 ) -> tuple[int, dict[str, int]]:
     """Paste whole core-owned objects from one tile into the global mask.
 
@@ -386,6 +444,13 @@ def _stitch_core_owned_tile_labels(
             continue
 
         global_view[fill_mask] = np.uint32(next_label)
+        if tile_cellprobs is not None and global_cellprobs is not None:
+            probability_view = global_cellprobs[
+                global_y0:global_y1,
+                global_x0:global_x1,
+            ]
+            tile_probability_view = tile_cellprobs[label_slice]
+            probability_view[fill_mask] = tile_probability_view[fill_mask]
         global_label_areas[int(next_label)] = filled_pixels
         stats["accepted_labels"] += 1
         stats["filled_pixels"] += filled_pixels
@@ -418,6 +483,7 @@ def run_tiled_cellpose(
     tiling_config: TilingConfig,
     memory_config: MemoryConfig,
     output_stitching_stats_path: Path | None = None,
+    output_cellprob_path: Path | None = None,
     progress_callback: Any = None,
 ) -> Path:
     """Run tiled Cellpose segmentation across a full image.
@@ -436,6 +502,7 @@ def run_tiled_cellpose(
         tiling_config: Tiling parameters.
         memory_config: Memory management parameters.
         output_stitching_stats_path: Optional path for stitching diagnostics JSON.
+        output_cellprob_path: Optional path for stitched Cellpose probability logits.
 
     Returns:
         Path to the written mask .npy file.
@@ -447,6 +514,11 @@ def run_tiled_cellpose(
         output_stitching_stats_path = Path(output_stitching_stats_path)
         if output_stitching_stats_path.exists():
             output_stitching_stats_path.unlink()
+    if output_cellprob_path is not None:
+        output_cellprob_path = Path(output_cellprob_path)
+        output_cellprob_path.parent.mkdir(parents=True, exist_ok=True)
+        if output_cellprob_path.exists():
+            output_cellprob_path.unlink()
 
     candidates = [
         int(x)
@@ -488,6 +560,18 @@ def run_tiled_cellpose(
         shape=(int(height), int(width)),
     )
     mask_mem[:] = 0
+    cellprob_mem: np.memmap | None = None
+    if output_cellprob_path is not None:
+        cellprob_mem = cast(
+            np.memmap,
+            np.lib.format.open_memmap(
+                str(output_cellprob_path),
+                mode="w+",
+                dtype=np.float32,
+                shape=(int(height), int(width)),
+            ),
+        )
+        cellprob_mem[:] = 0.0
 
     next_label = 1
     global_label_areas: dict[int, int] = {}
@@ -534,6 +618,11 @@ def run_tiled_cellpose(
         _, img_seg, _ = prepare_cellpose_input(tile, factor_rescale=1.0)
 
         masks, flows, styles = run_cellpose_model_eval(model, img_seg, cellpose_config)
+        cellprob_logits = (
+            extract_cellpose_probability_logits(flows, masks.shape)
+            if cellprob_mem is not None
+            else None
+        )
         raw_label_count = _count_positive_labels(masks)
 
         if tiling_config.filter_per_tile:
@@ -553,6 +642,8 @@ def run_tiled_cellpose(
             next_label=next_label,
             global_label_areas=global_label_areas,
             tiling_config=tiling_config,
+            tile_cellprobs=cellprob_logits,
+            global_cellprobs=cellprob_mem,
         )
         tile_stats["raw_labels"] = raw_label_count
         _merge_stitch_stats(stitch_stats, tile_stats)
@@ -577,17 +668,19 @@ def run_tiled_cellpose(
                     duplicate_skipped=stitch_stats["duplicate_skipped"],
                 )
 
-        del tile, img_seg, masks, flows, styles
+        del tile, img_seg, masks, flows, styles, cellprob_logits
         clear_cuda_cache()
 
         if i % int(memory_config.memory_check_every_chunks) == 0:
             force_release()
 
     mask_mem.flush()
+    if cellprob_mem is not None:
+        cellprob_mem.flush()
     stitch_stats["final_labels"] = int(next_label - 1)
     if tiling_config.write_stitching_stats and output_stitching_stats_path is not None:
         _write_stitching_stats(output_stitching_stats_path, stitch_stats)
-    del mask_mem, model
+    del mask_mem, cellprob_mem, model
     clear_cuda_cache()
     force_release(note=f"after tiled Cellpose {dataset_name}")
 

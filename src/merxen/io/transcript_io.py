@@ -184,6 +184,7 @@ def write_proseg_csv_from_points(
     *,
     qv_col: str | None = None,
     min_qv: float | None = None,
+    excluded_gene_pattern: str | None = None,
     chunk_rows: int = 1_000_000,
     dataset_name: str = "DATASET",
     status_every_chunks: int = 5,
@@ -208,6 +209,8 @@ def write_proseg_csv_from_points(
         gene_col: Column name for gene/feature labels.
         qv_col: Optional quality value column for filtering.
         min_qv: Minimum QV threshold (requires qv_col).
+        excluded_gene_pattern: Optional regular expression matched against the
+            start of feature names. Matching transcripts are omitted.
         chunk_rows: Rows per processing chunk.
         dataset_name: Name for log messages.
         status_every_chunks: Log status every N chunks.
@@ -239,6 +242,8 @@ def write_proseg_csv_from_points(
     n_input = 0
     n_written = 0
     n_seeded = 0
+    n_excluded_genes = 0
+    next_transcript_id = 0
     header_written = False
 
     log_status(f"[{dataset_name}] Writing ProSeg CSV lazily to: {csv_path}")
@@ -270,20 +275,40 @@ def write_proseg_csv_from_points(
         valid &= pd.notna(gene_vals)
         valid &= gene_vals != ""
 
+        if excluded_gene_pattern is not None:
+            excluded = pd.Series(gene_vals, dtype="string").str.match(
+                excluded_gene_pattern,
+                na=False,
+            )
+            excluded_values = excluded.to_numpy(dtype=bool)
+            n_excluded_genes += int(np.count_nonzero(valid & excluded_values))
+            valid &= ~excluded_values
+
+        qv_vals: np.ndarray | None = None
         if qv_col is not None and min_qv is not None:
             qv_vals = pd.to_numeric(chunk[qv_col], errors="coerce").to_numpy(np.float64)
             valid &= np.isfinite(qv_vals) & (qv_vals >= float(min_qv))
+        elif qv_col is not None:
+            qv_vals = pd.to_numeric(chunk[qv_col], errors="coerce").to_numpy(np.float64)
+            valid &= np.isfinite(qv_vals)
 
         if np.any(valid):
             xv = x_vals[valid]
             yv = y_vals[valid]
             zv = z_vals[valid]
             gv = gene_vals[valid]
+            transcript_ids = np.arange(
+                next_transcript_id,
+                next_transcript_id + len(xv),
+                dtype=np.uint64,
+            )
+            next_transcript_id += len(xv)
 
             labels = assign_labels_from_masks(xv, yv, masks, a_inv=a_inv, b=b)
 
             out_df = pd.DataFrame(
                 {
+                    "transcript_id": transcript_ids,
                     "x_micron": xv.astype(np.float32, copy=False),
                     "y_micron": yv.astype(np.float32, copy=False),
                     "z_micron": zv.astype(np.float32, copy=False),
@@ -291,6 +316,8 @@ def write_proseg_csv_from_points(
                     "cell_id": labels.astype(np.int32, copy=False),
                 }
             )
+            if qv_vals is not None:
+                out_df["qv"] = qv_vals[valid].astype(np.float32, copy=False)
 
             out_df.to_csv(
                 csv_path,
@@ -303,7 +330,7 @@ def write_proseg_csv_from_points(
             n_written += len(out_df)
             n_seeded += int((labels != 0).sum())
 
-            del xv, yv, zv, gv, labels, out_df
+            del xv, yv, zv, gv, transcript_ids, labels, out_df
 
         if i % status_every_chunks == 0:
             log_status(
@@ -318,7 +345,7 @@ def write_proseg_csv_from_points(
                 warn_gb=warn_ram_gb,
             )
 
-        del chunk, x_vals, y_vals, z_vals, gene_vals, valid
+        del chunk, x_vals, y_vals, z_vals, gene_vals, qv_vals, valid
 
     if not header_written:
         raise RuntimeError(
@@ -338,4 +365,5 @@ def write_proseg_csv_from_points(
         "n_written": int(n_written),
         "n_seeded": int(n_seeded),
         "pct_seeded": float(pct_seeded),
+        "n_excluded_genes": int(n_excluded_genes),
     }

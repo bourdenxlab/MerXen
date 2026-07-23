@@ -1410,6 +1410,14 @@ workflow {
                     "segmentation/cellpose_masks_tiled.npy",
                 )
             ).toAbsolutePath().toString()
+            def persistentCellprobPath = file(
+                publishedDatasetPath(
+                    params.outdir,
+                    pairId,
+                    platform,
+                    "segmentation/cellpose_cellprobs_tiled.npy",
+                )
+            ).toAbsolutePath().toString()
             def persistentTranscriptsPath = file(
                 publishedDatasetPath(
                     params.outdir,
@@ -1514,6 +1522,7 @@ workflow {
                     output_dir: "segment_out",
                     persistent_latest_zarr_path: persistentLatestZarrPath,
                     persistent_mask_path: persistentMaskPath,
+                    persistent_cellpose_cellprob_path: persistentCellprobPath,
                     persistent_transcripts_path: persistentTranscriptsPath,
                     persistent_cellpose_stitching_stats_path: persistentStitchingStatsPath,
                     persistent_nuclei_mask_path: persistentNucleiMaskPath,

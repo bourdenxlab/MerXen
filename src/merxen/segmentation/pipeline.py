@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import spatialdata as sd
 from spatialdata_io import xenium as xenium_reader
 
@@ -29,6 +30,7 @@ from merxen.path_utils import remove_path, stage_existing_output
 from merxen.segmentation.cellpose import (
     build_cellpose_affine_to_microns,
     run_tiled_cellpose,
+    synchronize_cellpose_probability_logits,
 )
 from merxen.segmentation.mask_filter import filter_labeled_mask_by_area
 from merxen.segmentation.proseg import run_proseg_refinement
@@ -237,6 +239,7 @@ def run_cellpose_segmentation(
 
     staged_transcripts_csv = out_dir / "transcripts_for_proseg.csv"
     staged_mask_path = out_dir / "cellpose_masks_tiled.npy"
+    staged_cellprob_path = out_dir / "cellpose_cellprobs_tiled.npy"
     staged_stitching_stats_path = out_dir / "cellpose_stitching_stats.json"
     transforms_path = out_dir / "cellpose_transforms.json"
     persistent_transcripts_csv = (
@@ -249,6 +252,11 @@ def run_cellpose_segmentation(
         if dataset.persistent_mask_path is not None
         else None
     )
+    persistent_cellprob_path = (
+        Path(dataset.persistent_cellpose_cellprob_path)
+        if dataset.persistent_cellpose_cellprob_path is not None
+        else None
+    )
     persistent_stitching_stats_path = (
         Path(dataset.persistent_cellpose_stitching_stats_path)
         if dataset.persistent_cellpose_stitching_stats_path is not None
@@ -256,17 +264,20 @@ def run_cellpose_segmentation(
     )
     transcripts_csv = persistent_transcripts_csv or staged_transcripts_csv
     mask_path = persistent_mask_path or staged_mask_path
+    cellprob_path = persistent_cellprob_path or staged_cellprob_path
     stitching_stats_path = (
         persistent_stitching_stats_path or staged_stitching_stats_path
     )
     progress_path = out_dir / "cellpose_progress.json"
     _started_at = time.monotonic()
 
-    def _stage_outputs() -> tuple[Path, Path, Path, Path]:
+    def _stage_outputs() -> tuple[Path, Path, Path, Path, Path]:
         if transcripts_csv != staged_transcripts_csv:
             stage_existing_output(transcripts_csv, staged_transcripts_csv)
         if mask_path != staged_mask_path:
             stage_existing_output(mask_path, staged_mask_path)
+        if cellprob_path != staged_cellprob_path:
+            stage_existing_output(cellprob_path, staged_cellprob_path)
         if (
             stitching_stats_path.exists()
             and stitching_stats_path != staged_stitching_stats_path
@@ -278,6 +289,7 @@ def run_cellpose_segmentation(
         return (
             staged_transcripts_csv,
             staged_mask_path,
+            staged_cellprob_path,
             staged_stitching_stats_path,
             transforms_path,
         )
@@ -296,6 +308,7 @@ def run_cellpose_segmentation(
     if (
         transcripts_csv.exists()
         and mask_path.exists()
+        and cellprob_path.exists()
         and transforms_path.exists()
         and not force_rerun
     ):
@@ -305,12 +318,17 @@ def run_cellpose_segmentation(
             stitching_stats_path.write_text(
                 json.dumps({"write_stitching_stats": False}, indent=2) + "\n"
             )
-        staged_transcripts, staged_mask, staged_stats, staged_transforms = (
-            _stage_outputs()
-        )
+        (
+            staged_transcripts,
+            staged_mask,
+            staged_cellprob,
+            staged_stats,
+            staged_transforms,
+        ) = _stage_outputs()
         return {
             "transcripts_csv": staged_transcripts,
             "cellpose_mask_path": staged_mask,
+            "cellpose_cellprob_path": staged_cellprob,
             "stitching_stats_path": staged_stats,
             "transforms_path": staged_transforms,
         }
@@ -327,6 +345,7 @@ def run_cellpose_segmentation(
         width=width,
         dataset_name=dataset.name,
         output_mask_path=mask_path,
+        output_cellprob_path=cellprob_path,
         cellpose_config=config.cellpose,
         mask_filter_config=config.mask_filter,
         tiling_config=config.tiling,
@@ -380,6 +399,8 @@ def run_cellpose_segmentation(
         _progress("cellpose_area_filtered", **filter_stats)
         force_release(note=f"after {dataset.name} Cellpose area filtering")
 
+    synchronize_cellpose_probability_logits(mask_path, cellprob_path)
+
     x_col = resolve_col(points_obj, ["x", "global_x", "x_location"])
     y_col = resolve_col(points_obj, ["y", "global_y", "y_location"])
     z_col = resolve_col(points_obj, ["z", "global_z", "z_location"], required=False)
@@ -389,13 +410,22 @@ def run_cellpose_segmentation(
             "Could not resolve required points columns for ProSeg CSV export."
         )
 
+    platform = dataset.platform.upper()
     qv_col = None
     min_qv = None
-    if dataset.platform.upper() == "XENIUM":
+    excluded_gene_pattern = None
+    if platform == "XENIUM":
         qv_col = resolve_col(
             points_obj, ["qv", "quality", "quality_value"], required=False
         )
         min_qv = dataset.min_qv
+        excluded_gene_pattern = r"^(Deprecated|NegControl|Unassigned|Intergenic)"
+    elif platform == "MERSCOPE":
+        qv_col = resolve_col(
+            points_obj,
+            ["transcript_score", "qv", "quality", "quality_value"],
+            required=False,
+        )
 
     transcripts_csv.parent.mkdir(parents=True, exist_ok=True)
     mask_mmap = np.load(mask_path, mmap_mode="r")
@@ -411,6 +441,7 @@ def run_cellpose_segmentation(
         gene_col=gene_col,
         qv_col=qv_col,
         min_qv=min_qv,
+        excluded_gene_pattern=excluded_gene_pattern,
         chunk_rows=config.memory.transcript_chunk_rows,
         dataset_name=dataset.name,
         status_every_chunks=config.memory.transcript_status_every_chunks,
@@ -441,10 +472,17 @@ def run_cellpose_segmentation(
     del mask_mmap, points_obj, sdata
     force_release(note=f"after {dataset.name} Cellpose segmentation")
     _progress("done")
-    staged_transcripts, staged_mask, staged_stats, staged_transforms = _stage_outputs()
+    (
+        staged_transcripts,
+        staged_mask,
+        staged_cellprob,
+        staged_stats,
+        staged_transforms,
+    ) = _stage_outputs()
     return {
         "transcripts_csv": Path(staged_transcripts),
         "cellpose_mask_path": Path(staged_mask),
+        "cellpose_cellprob_path": Path(staged_cellprob),
         "stitching_stats_path": Path(staged_stats),
         "transforms_path": Path(staged_transforms),
     }
@@ -578,6 +616,7 @@ def run_proseg_segmentation(
     *,
     transcripts_csv: str | Path,
     cellpose_mask_path: str | Path,
+    cellpose_cellprob_path: str | Path,
     transforms_path: str | Path,
     proseg_binary: str | Path | None = None,
     force_rerun: bool = False,
@@ -597,6 +636,7 @@ def run_proseg_segmentation(
     latest_output = persistent_latest_output or staged_latest_output
     transcripts_csv = Path(transcripts_csv)
     cellpose_mask_path = Path(cellpose_mask_path)
+    cellpose_cellprob_path = Path(cellpose_cellprob_path)
     transforms_path = Path(transforms_path)
     progress_path = out_dir / "proseg_progress.json"
     started_at = time.monotonic()
@@ -623,7 +663,13 @@ def run_proseg_segmentation(
 
     if raw_output.exists() and not force_rerun:
         latest_output.parent.mkdir(parents=True, exist_ok=True)
-        convert_to_latest_zarr(raw_output, latest_output)
+        convert_to_latest_zarr(
+            raw_output,
+            latest_output,
+            quality_column_alias=(
+                "transcript_score" if dataset.platform.upper() == "MERSCOPE" else None
+            ),
+        )
         remove_path(raw_output)
         return {"latest_output": _stage_latest()}
 
@@ -638,6 +684,7 @@ def run_proseg_segmentation(
     proseg_params.update(dataset.proseg_overrides)
     if proseg_binary is not None:
         proseg_params["binary_path"] = Path(proseg_binary)
+    transcript_columns = set(pd.read_csv(transcripts_csv, nrows=0).columns)
 
     raw_out = run_proseg_refinement(
         transcripts_df=transcripts_csv,
@@ -648,6 +695,8 @@ def run_proseg_segmentation(
         z_col="z_micron",
         gene_col="feature_name",
         cell_id_col="cell_id",
+        transcript_id_col="transcript_id",
+        qv_col="qv" if "qv" in transcript_columns else None,
         samples=int(proseg_params["samples"]),
         burnin_voxel_size=proseg_params.get("burnin_voxel_size"),
         voxel_size=float(proseg_params["voxel_size"]),
@@ -665,6 +714,7 @@ def run_proseg_segmentation(
         ),
         diffusion_sigma_far=proseg_params.get("diffusion_sigma_far"),
         cellpose_masks=cellpose_mask_path,
+        cellpose_cellprobs=cellpose_cellprob_path,
         cellpose_x_transform=x_transform,
         cellpose_y_transform=y_transform,
         num_threads=int(proseg_params.get("num_threads", 12)),
@@ -674,7 +724,13 @@ def run_proseg_segmentation(
     )
 
     latest_output.parent.mkdir(parents=True, exist_ok=True)
-    latest_out = convert_to_latest_zarr(raw_out, latest_output)
+    latest_out = convert_to_latest_zarr(
+        raw_out,
+        latest_output,
+        quality_column_alias=(
+            "transcript_score" if dataset.platform.upper() == "MERSCOPE" else None
+        ),
+    )
     remove_path(raw_out)
     staged_out = _stage_latest()
     log_status(f"[{dataset.name}] Wrote latest output: {latest_out}")
@@ -695,6 +751,7 @@ def run_segmentation_pipeline(
     staged_latest_output = out_dir / "proseg_base_latest.zarr"
     staged_transcripts_csv = out_dir / "transcripts_for_proseg.csv"
     staged_mask_path = out_dir / "cellpose_masks_tiled.npy"
+    staged_cellprob_path = out_dir / "cellpose_cellprobs_tiled.npy"
     staged_nuclei_mask_path = out_dir / "cellpose_nuclei_masks_tiled.npy"
     persistent_latest_output = (
         Path(dataset.persistent_latest_zarr_path)
@@ -711,6 +768,11 @@ def run_segmentation_pipeline(
         if dataset.persistent_mask_path
         else staged_mask_path
     )
+    reusable_cellprob = (
+        Path(dataset.persistent_cellpose_cellprob_path)
+        if dataset.persistent_cellpose_cellprob_path
+        else staged_cellprob_path
+    )
     reusable_nuclei_mask = (
         Path(dataset.persistent_nuclei_mask_path)
         if dataset.persistent_nuclei_mask_path
@@ -721,6 +783,7 @@ def run_segmentation_pipeline(
         persistent_latest_output.exists()
         and reusable_transcripts.exists()
         and reusable_mask.exists()
+        and reusable_cellprob.exists()
         and reusable_nuclei_mask.exists()
         and not force_rerun
     ):
@@ -732,12 +795,15 @@ def run_segmentation_pipeline(
             stage_existing_output(transcripts, staged_transcripts_csv)
         if mask != staged_mask_path:
             stage_existing_output(mask, staged_mask_path)
+        if reusable_cellprob != staged_cellprob_path:
+            stage_existing_output(reusable_cellprob, staged_cellprob_path)
         if reusable_nuclei_mask != staged_nuclei_mask_path:
             stage_existing_output(reusable_nuclei_mask, staged_nuclei_mask_path)
         return {
             "latest_output": staged_latest_output,
             "transcripts_csv": staged_transcripts_csv,
             "cellpose_mask_path": staged_mask_path,
+            "cellpose_cellprob_path": staged_cellprob_path,
             "nuclei_mask_path": staged_nuclei_mask_path,
         }
 
@@ -753,6 +819,7 @@ def run_segmentation_pipeline(
         config,
         transcripts_csv=cellpose_outputs["transcripts_csv"],
         cellpose_mask_path=cellpose_outputs["cellpose_mask_path"],
+        cellpose_cellprob_path=cellpose_outputs["cellpose_cellprob_path"],
         transforms_path=cellpose_outputs["transforms_path"],
         force_rerun=force_rerun,
     )
@@ -761,5 +828,6 @@ def run_segmentation_pipeline(
         "latest_output": proseg_outputs["latest_output"],
         "transcripts_csv": cellpose_outputs["transcripts_csv"],
         "cellpose_mask_path": cellpose_outputs["cellpose_mask_path"],
+        "cellpose_cellprob_path": cellpose_outputs["cellpose_cellprob_path"],
         "nuclei_mask_path": nuclei_outputs["nuclei_mask_path"],
     }

@@ -106,6 +106,8 @@ def run_proseg_refinement(
     z_col: str = "z",
     gene_col: str = "feature_name",
     cell_id_col: str = "cell_id",
+    transcript_id_col: str | None = None,
+    qv_col: str | None = None,
     samples: int = 1000,
     burnin_voxel_size: float | None = None,
     voxel_size: float = 0.5,
@@ -141,6 +143,8 @@ def run_proseg_refinement(
         z_col: Z coordinate column name.
         gene_col: Gene/feature column name.
         cell_id_col: Seed assignment column name.
+        transcript_id_col: Optional stable numeric transcript identifier column.
+        qv_col: Optional transcript quality-value column.
         samples: Number of MCMC samples.
         burnin_voxel_size: Optional burn-in voxel size (must be >= voxel_size).
         voxel_size: Voxel size for inference.
@@ -183,6 +187,10 @@ def run_proseg_refinement(
         )
 
     required_columns = [x_col, y_col, z_col, gene_col, cell_id_col]
+    if transcript_id_col is not None:
+        required_columns.append(transcript_id_col)
+    if qv_col is not None:
+        required_columns.append(qv_col)
     transcript_csv_path: Path | None = None
 
     if isinstance(transcripts_df, str | Path):
@@ -278,6 +286,10 @@ def run_proseg_refinement(
         if int(samples) < 100:
             # ProSeg's default recorded-samples=100 can fail for small sample counts.
             cmd.extend(["--recorded-samples", str(int(samples))])
+        if transcript_id_col is not None:
+            cmd.extend(["--transcript-id-column", transcript_id_col])
+        if qv_col is not None:
+            cmd.extend(["--qv-column", qv_col])
         if cell_compactness is not None:
             cmd.extend(["--cell-compactness", str(float(cell_compactness))])
         if expand_initialized_cells is not None:
