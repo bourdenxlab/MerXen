@@ -20,6 +20,12 @@ from merxen.alignment.pipeline import (
 )
 from merxen.alignment.register import TransformResult
 from merxen.alignment.transforms import fit_nonrigid_transform
+from merxen.io.spatialdata_schema import (
+    MERXEN_SCHEMA_ATTR,
+    PROSEG_ID_NAMESPACE,
+    register_segmentation_branch,
+    stamp_merxen_schema,
+)
 
 
 def test_write_moving_aligned_zarr_adds_transforms_and_nonrigid_elements(
@@ -34,14 +40,14 @@ def test_write_moving_aligned_zarr_adds_transforms_and_nonrigid_elements(
     shapes = ShapesModel.parse(
         gpd.GeoDataFrame(
             {
-                "cell_id": ["a", "b", "c"],
+                "instance_id": np.asarray([1, 2, 3], dtype=np.uint64),
                 "geometry": [
                     box(0.0, 0.0, 1.0, 1.0),
                     box(2.0, 0.0, 3.0, 1.0),
                     box(0.0, 2.0, 1.0, 3.0),
                 ],
             },
-            index=["a", "b", "c"],
+            index=pd.Index([1, 2, 3], dtype="uint64", name="instance_id"),
         ),
         transformations={"global": Identity()},
     )
@@ -52,6 +58,8 @@ def test_write_moving_aligned_zarr_adds_transforms_and_nonrigid_elements(
                     "x": source_xy[:, 0],
                     "y": source_xy[:, 1],
                     "gene": ["A", "B", "C"],
+                    "transcript_id": np.asarray([1, 2, 3], dtype=np.uint64),
+                    "assignment": pd.Series([1, 2, 3], dtype="UInt64"),
                 }
             ),
             npartitions=1,
@@ -60,9 +68,18 @@ def test_write_moving_aligned_zarr_adds_transforms_and_nonrigid_elements(
         feature_key="gene",
         transformations={"global": Identity()},
     )
-    SpatialData(shapes={"cells": shapes}, points={"transcripts": points}).write(
-        input_zarr
+    source = SpatialData(shapes={"cells": shapes}, points={"transcripts": points})
+    stamp_merxen_schema(source, primary_points_key="transcripts")
+    register_segmentation_branch(
+        source,
+        "proseg",
+        points_key="transcripts",
+        assignment_column="assignment",
+        shape_key="cells",
+        table_key=None,
+        id_namespace=PROSEG_ID_NAMESPACE,
     )
+    source.write(input_zarr)
 
     transform = fit_nonrigid_transform(
         source_xy,
@@ -89,6 +106,12 @@ def test_write_moving_aligned_zarr_adds_transforms_and_nonrigid_elements(
     assert "cells_aligned_nonrigid" in aligned.shapes
     assert "transcripts" in aligned.points
     assert "transcripts_aligned_nonrigid" in aligned.points
+    registry = aligned.attrs[MERXEN_SCHEMA_ATTR]["segmentations"]
+    assert registry["proseg_aligned_nonrigid"]["points"] == (
+        "transcripts_aligned_nonrigid"
+    )
+    assert registry["proseg_aligned_nonrigid"]["shape"] == ("cells_aligned_nonrigid")
+    assert registry["proseg_aligned_nonrigid"]["coordinate_variant_of"] == "proseg"
 
     rigid = get_transformation(
         aligned.shapes["cells"],

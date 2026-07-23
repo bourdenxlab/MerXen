@@ -48,8 +48,10 @@ def test_clone_table_for_region_retargets_existing_spatialdata_table() -> None:
     cloned = clone_table_for_region(source, "MOSAIK_proseg")
 
     np.testing.assert_array_equal(np.asarray(cloned.X), np.asarray(source.X))
-    assert cloned.obs_names.equals(source.obs_names)
+    assert cloned.obs_names.tolist() == ["1", "2"]
     assert cloned.var_names.equals(source.var_names)
+    assert cloned.obs["instance_id"].tolist() == [1, 2]
+    assert cloned.obs["source_cell_id"].tolist() == ["cell_a", "cell_b"]
     assert cloned.obs["region"].astype(str).tolist() == [
         "MOSAIK_proseg",
         "MOSAIK_proseg",
@@ -57,13 +59,13 @@ def test_clone_table_for_region_retargets_existing_spatialdata_table() -> None:
     assert cloned.uns["spatialdata_attrs"] == {
         "region": "MOSAIK_proseg",
         "region_key": "region",
-        "instance_key": "cell",
+        "instance_key": "instance_id",
     }
     assert source.uns["spatialdata_attrs"]["region"] == "cell_boundaries"
 
 
-def test_compute_table_from_points_keeps_zero_shape_id() -> None:
-    """A geometric shape id of 0 is a real ProSeg cell, not unassigned."""
+def test_compute_table_from_points_uses_positive_shape_ids() -> None:
+    """Generated tables should preserve positive canonical shape IDs."""
     points = pd.DataFrame(
         {
             "x": [0.5, 2.5, 10.0],
@@ -73,7 +75,7 @@ def test_compute_table_from_points_keeps_zero_shape_id() -> None:
     )
     shapes = gpd.GeoDataFrame(
         {
-            "cell_id": ["0", "1"],
+            "instance_id": [1, 2],
             "geometry": [box(0.0, 0.0, 1.0, 1.0), box(2.0, 0.0, 3.0, 1.0)],
         },
         geometry="geometry",
@@ -83,14 +85,14 @@ def test_compute_table_from_points_keeps_zero_shape_id() -> None:
         dataset_name="P1_MERSCOPE",
         points_obj=points,
         shape_gdf=shapes,
-        shape_id_col="cell_id",
+        shape_id_col="instance_id",
         shape_key="MOSAIK_proseg",
         gene_list=["GeneA"],
         chunk_rows=10,
     )
 
     assert summary["n_points_assigned"] == 2
-    assert table.obs["cell_id"].astype(str).tolist() == ["0", "1"]
+    assert table.obs["instance_id"].tolist() == [1, 2]
     x_matrix = table.X.toarray() if hasattr(table.X, "toarray") else np.asarray(table.X)
     np.testing.assert_array_equal(np.asarray(x_matrix).ravel(), np.array([1, 1]))
 
