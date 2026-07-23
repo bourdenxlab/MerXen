@@ -187,12 +187,16 @@ def test_segment_bootstraps_proseg_from_configured_paths() -> None:
         "proseg_install_path",
         "proseg_auto_install = true",
         'proseg_cargo_package = "proseg"',
+        'proseg_version = "3.2.0"',
+        "proseg_git_rev",
     ]:
         assert expected in config_text
 
     for expected in [
         "process ENSURE_PROSEG",
         "cargo install",
+        '--git "${params.proseg_git_url}"',
+        '--rev "${params.proseg_git_rev}"',
         "sudo -v",
         "proseg_path.txt",
     ]:

@@ -34,6 +34,9 @@ def test_run_segmentation_pipeline_stages_persistent_outputs(
                 "persistent_mask_path": str(
                     persistent_root / "segmentation" / "cellpose_masks_tiled.npy"
                 ),
+                "persistent_cellpose_cellprob_path": str(
+                    persistent_root / "segmentation" / "cellpose_cellprobs_tiled.npy"
+                ),
                 "persistent_transcripts_path": str(
                     persistent_root / "segmentation" / "transcripts_for_proseg.csv"
                 ),
@@ -65,12 +68,16 @@ def test_run_segmentation_pipeline_stages_persistent_outputs(
     def fake_cellpose(
         *,
         output_mask_path: Path,
+        output_cellprob_path: Path | None = None,
         output_stitching_stats_path: Path | None = None,
         **kwargs: object,
     ) -> Path:
         cellpose_calls.append(kwargs)
         output_mask_path.parent.mkdir(parents=True, exist_ok=True)
         np.save(output_mask_path, np.ones((4, 4), dtype=np.int32))
+        if output_cellprob_path is not None:
+            output_cellprob_path.parent.mkdir(parents=True, exist_ok=True)
+            np.save(output_cellprob_path, np.ones((4, 4), dtype=np.float32))
         if output_stitching_stats_path is not None:
             output_stitching_stats_path.parent.mkdir(parents=True, exist_ok=True)
             output_stitching_stats_path.write_text('{"final_labels": 1}\n')
@@ -102,7 +109,7 @@ def test_run_segmentation_pipeline_stages_persistent_outputs(
     )
     monkeypatch.setattr(
         "merxen.segmentation.pipeline.convert_to_latest_zarr",
-        lambda raw_path, latest_path: (
+        lambda raw_path, latest_path, **kwargs: (
             latest_path.parent.mkdir(parents=True, exist_ok=True),
             latest_path.mkdir(parents=True, exist_ok=True),
             (latest_path / "marker.txt").write_text("latest"),
@@ -114,6 +121,7 @@ def test_run_segmentation_pipeline_stages_persistent_outputs(
 
     staged_latest = work_dir / "proseg_base_latest.zarr"
     staged_mask = work_dir / "cellpose_masks_tiled.npy"
+    staged_cellprob = work_dir / "cellpose_cellprobs_tiled.npy"
     staged_transcripts = work_dir / "transcripts_for_proseg.csv"
     staged_stats = work_dir / "cellpose_stitching_stats.json"
     staged_nuclei_mask = work_dir / "cellpose_nuclei_masks_tiled.npy"
@@ -121,11 +129,13 @@ def test_run_segmentation_pipeline_stages_persistent_outputs(
 
     assert outputs["latest_output"] == staged_latest
     assert outputs["cellpose_mask_path"] == staged_mask
+    assert outputs["cellpose_cellprob_path"] == staged_cellprob
     assert outputs["transcripts_csv"] == staged_transcripts
     assert outputs["nuclei_mask_path"] == staged_nuclei_mask
 
     assert staged_latest.is_symlink()
     assert staged_mask.is_symlink()
+    assert staged_cellprob.is_symlink()
     assert staged_transcripts.is_symlink()
     assert staged_stats.is_symlink()
     assert staged_nuclei_mask.is_symlink()
@@ -136,6 +146,10 @@ def test_run_segmentation_pipeline_stages_persistent_outputs(
         == Path(cfg.dataset.persistent_latest_zarr_path).resolve()
     )
     assert staged_mask.resolve() == Path(cfg.dataset.persistent_mask_path).resolve()
+    assert (
+        staged_cellprob.resolve()
+        == Path(cfg.dataset.persistent_cellpose_cellprob_path).resolve()
+    )
     assert (
         staged_transcripts.resolve()
         == Path(cfg.dataset.persistent_transcripts_path).resolve()
@@ -199,6 +213,7 @@ def test_run_segmentation_pipeline_filters_cellpose_mask_before_proseg(
     def fake_cellpose(
         *,
         output_mask_path: Path,
+        output_cellprob_path: Path | None = None,
         output_stitching_stats_path: Path | None = None,
         **kwargs: object,
     ) -> Path:
@@ -209,6 +224,8 @@ def test_run_segmentation_pipeline_filters_cellpose_mask_before_proseg(
         mask[12:34, 12:34] = 3
         output_mask_path.parent.mkdir(parents=True, exist_ok=True)
         np.save(output_mask_path, mask)
+        if output_cellprob_path is not None:
+            np.save(output_cellprob_path, np.full(mask.shape, 2.0, dtype=np.float32))
         if output_stitching_stats_path is not None:
             output_stitching_stats_path.write_text('{"final_labels": 3}\n')
         return output_mask_path
@@ -256,7 +273,7 @@ def test_run_segmentation_pipeline_filters_cellpose_mask_before_proseg(
     )
     monkeypatch.setattr(
         "merxen.segmentation.pipeline.convert_to_latest_zarr",
-        lambda raw_path, latest_path: (
+        lambda raw_path, latest_path, **kwargs: (
             latest_path.mkdir(parents=True, exist_ok=True),
             latest_path,
         )[-1],
@@ -270,3 +287,6 @@ def test_run_segmentation_pipeline_filters_cellpose_mask_before_proseg(
     assert (work_dir / "cellpose_stitching_stats.json").exists()
     np.testing.assert_array_equal(captured["masks_seen_by_csv"], cleaned)
     np.testing.assert_array_equal(captured["masks_seen_by_proseg"], cleaned)
+    probabilities = np.load(outputs["cellpose_cellprob_path"])
+    assert np.all(probabilities[cleaned == 0] == 0.0)
+    assert np.all(probabilities[cleaned > 0] == 2.0)

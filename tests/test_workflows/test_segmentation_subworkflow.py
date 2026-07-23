@@ -16,6 +16,8 @@ def test_segmentation_routes_cellpose_to_gpu_and_proseg_to_cpu() -> None:
         "merxen cellpose-segment",
         "process PROSEG_SEGMENT",
         "merxen proseg-segment",
+        "cellpose_cellprobs_tiled.npy",
+        '--cellpose-cellprob "${cellpose_cellprob}"',
         "workflow SEGMENT",
     ]:
         assert expected in module_text

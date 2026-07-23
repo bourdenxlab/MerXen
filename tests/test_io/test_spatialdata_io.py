@@ -8,15 +8,62 @@ from unittest.mock import MagicMock
 
 import dask.dataframe as dd
 import pandas as pd
+import pytest
 import spatialdata as sd
 from spatialdata import datasets
 
 from merxen.io.spatialdata_io import (
+    convert_to_latest_zarr,
     normalize_points_for_latest_write,
     write_or_replace_element,
     write_spatialdata_metadata,
     write_spatialdata_zarr,
 )
+
+
+def test_convert_to_latest_retains_merscope_transcript_score_alias(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """MERSCOPE scores should survive ProSeg's canonical qv output name."""
+    sdata_obj = SimpleNamespace(
+        points={
+            "transcripts": pd.DataFrame(
+                {
+                    "x": [1.0, 2.0],
+                    "y": [3.0, 4.0],
+                    "gene": ["A", "B"],
+                    "qv": [0.91, 0.82],
+                }
+            )
+        }
+    )
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        "merxen.io.spatialdata_io.sd.read_zarr",
+        lambda path: sdata_obj,
+    )
+
+    def _capture_write(obj: object, path: Path, **kwargs: object) -> None:
+        captured["obj"] = obj
+        captured["path"] = path
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(
+        "merxen.io.spatialdata_io.write_spatialdata_zarr",
+        _capture_write,
+    )
+
+    output = convert_to_latest_zarr(
+        tmp_path / "raw.zarr",
+        tmp_path / "latest.zarr",
+        quality_column_alias="transcript_score",
+    )
+
+    points = sdata_obj.points["transcripts"]
+    assert output == tmp_path / "latest.zarr"
+    assert points["transcript_score"].tolist() == [0.91, 0.82]
+    assert points["qv"].tolist() == [0.91, 0.82]
 
 
 def test_write_spatialdata_zarr_writes_blobs_dataset(tmp_path: Path) -> None:
