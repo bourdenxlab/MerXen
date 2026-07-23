@@ -17,6 +17,9 @@ def test_nextflow_exposes_analysis_segmentation_branches() -> None:
         "rowSampleSettings",
         "settings.analysis_segmentations",
         '"table_MOSAIK_proseg"',
+        '"table_MOSAIK_proseg_hybrid"',
+        '"table_MOSAIK_proseg_geometry_assignment"',
+        '"MOSAIK_proseg_hybrid"',
         '"table_original"',
         '"merscope_cell_boundaries"',
         '"xenium_cell_boundaries"',
@@ -178,6 +181,10 @@ def test_segment_bootstraps_proseg_from_configured_paths() -> None:
         "proseg_path_ch = ENSURE_PROSEG(proseg_trigger_ch)",
         "nuclei_task_results_ch = CELLPOSE_NUCLEI_SEGMENT(",
         "segment_task_results_ch = SEGMENT(",
+        "minimum_external_group: params.proseg_hybrid_minimum_external_group",
+        "chain_radius_scale: params.proseg_hybrid_chain_radius_scale",
+        "smoothing_radius_um: params.proseg_hybrid_smoothing_radius_um",
+        "outward_rounding_um: params.proseg_hybrid_outward_rounding_um",
     ]:
         assert expected in main_text
 
@@ -189,6 +196,13 @@ def test_segment_bootstraps_proseg_from_configured_paths() -> None:
         'proseg_cargo_package = "proseg"',
         'proseg_version = "3.2.0"',
         "proseg_git_rev",
+        "proseg_hybrid_enabled = true",
+        "proseg_hybrid_outlier_neighbors = 2",
+        "proseg_hybrid_outlier_mad_multiplier = 2.0",
+        "proseg_hybrid_minimum_external_group = 3",
+        "proseg_hybrid_maximum_expansion_radius_fraction = 1.0",
+        "proseg_hybrid_smoothing_radius_um = 10.0",
+        "proseg_hybrid_outward_rounding_um = 0.2",
     ]:
         assert expected in config_text
 
