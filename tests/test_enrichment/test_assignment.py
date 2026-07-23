@@ -135,3 +135,39 @@ def test_source_backed_clone_failure_does_not_use_spatial_join(
 
     with pytest.raises(RuntimeError, match="Refusing to replace"):
         run_per_shape_assignment_for_dataset("P1_MERSCOPE", tmp_path / "latest.zarr")
+
+
+def test_hybrid_assignment_table_is_preserved_during_forced_reassignment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Generic per-shape assignment must not replace overlap-aware hybrid counts."""
+    hybrid_table = object()
+    sdata = SimpleNamespace(
+        points={
+            "transcripts": pd.DataFrame({"x": [0.5], "y": [0.5], "gene": ["GeneA"]})
+        },
+        shapes={
+            "MOSAIK_proseg_hybrid": gpd.GeoDataFrame(
+                {"cell_id": ["1"], "geometry": [box(0, 0, 1, 1)]},
+                geometry="geometry",
+            )
+        },
+        tables={
+            "table": _source_table(),
+            "table_MOSAIK_proseg_hybrid": hybrid_table,
+        },
+    )
+    monkeypatch.setattr(
+        "merxen.enrichment.assignment.sd.read_zarr",
+        lambda path: sdata,
+    )
+
+    summaries = run_per_shape_assignment_for_dataset(
+        "P1_MERSCOPE",
+        tmp_path / "latest.zarr",
+        force_rerun=True,
+    )
+
+    assert summaries == []
+    assert sdata.tables["table_MOSAIK_proseg_hybrid"] is hybrid_table
