@@ -30,10 +30,14 @@ from merxen.io.image_source import (
     image_to_cyx,
 )
 from merxen.io.spatialdata_io import write_or_replace_element
+from merxen.io.spatialdata_schema import (
+    INSTANCE_ID_COLUMN,
+    SOURCE_CELL_ID_COLUMN,
+)
 from merxen.memory import force_release, log_status
 from merxen.path_utils import remove_path, stage_existing_output
 from merxen.segmentation.cellpose import build_cellpose_affine_to_microns
-from merxen.segmentation.mask_geometry import masks_to_polygons
+from merxen.segmentation.mask_geometry import masks_to_labeled_polygons
 
 logger = logging.getLogger(__name__)
 
@@ -217,7 +221,7 @@ def _cellpose_gdf_from_mask(
 
     log_status(f"[{dataset_name}] Building {shape_name} from {mask_path}")
     mask_mmap = np.load(mask_path, mmap_mode="r")
-    polygons_px = masks_to_polygons(
+    labeled_polygons_px = masks_to_labeled_polygons(
         mask_mmap,
         factor_rescale=0,
         n_jobs=int(polygon_n_jobs),
@@ -233,9 +237,9 @@ def _cellpose_gdf_from_mask(
         float(y_transform[2]),
     ]
 
-    polygons_um: list[Polygon] = []
-    for poly in tqdm(
-        polygons_px,
+    labeled_polygons_um: list[tuple[int, Polygon]] = []
+    for label_id, poly in tqdm(
+        labeled_polygons_px,
         desc=f"[{dataset_name}] cellpose polygons->microns",
         unit="poly",
     ):
@@ -243,23 +247,34 @@ def _cellpose_gdf_from_mask(
             continue
         transformed = affine_transform(poly, coeffs)
         if transformed is not None and not transformed.is_empty:
-            polygons_um.append(transformed)
+            labeled_polygons_um.append((int(label_id), transformed))
 
-    del mask_mmap, polygons_px
+    del mask_mmap, labeled_polygons_px
     force_release(note=f"after {dataset_name} cellpose polygon conversion")
 
-    if len(polygons_um) == 0:
+    if len(labeled_polygons_um) == 0:
         raise RuntimeError(
             f"[{dataset_name}] No valid polygons created from Cellpose masks."
         )
 
-    return gpd.GeoDataFrame(
+    labels = np.asarray(
+        [label_id for label_id, _ in labeled_polygons_um],
+        dtype=np.uint64,
+    )
+    gdf = gpd.GeoDataFrame(
         {
-            "cell_id": [f"{id_prefix}_{i + 1}" for i in range(len(polygons_um))],
-            "geometry": polygons_um,
+            INSTANCE_ID_COLUMN: labels,
+            SOURCE_CELL_ID_COLUMN: [f"{id_prefix}_{label_id}" for label_id in labels],
+            "geometry": [polygon for _, polygon in labeled_polygons_um],
         },
         geometry="geometry",
     )
+    gdf.index = pd.Index(
+        labels,
+        dtype="uint64",
+        name=INSTANCE_ID_COLUMN,
+    )
+    return gdf
 
 
 def _load_merscope_transform(config: EnrichmentConfig | _TransformInputs) -> np.ndarray:

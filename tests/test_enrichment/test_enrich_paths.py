@@ -23,12 +23,37 @@ from merxen.enrichment.enrich import (
     MOSAIK_CELLPOSE_SHAPE_NAME,
     MOSAIK_PROSEG_SHAPE_NAME,
     ORIGINAL_TABLE_NAME,
+    _cellpose_gdf_from_mask,
     _is_already_enriched,
     _read_latest_zarr_for_enrichment,
     _remove_partial_enrichment_artifacts_from_zarr_path,
     _remove_path,
     enrich_single_latest,
 )
+
+
+def test_cellpose_polygon_export_preserves_sparse_mask_labels(
+    tmp_path: Path,
+) -> None:
+    """Filtered masks must retain their original positive label identities."""
+    mask = np.zeros((8, 8), dtype=np.uint32)
+    mask[1:3, 1:3] = 2
+    mask[5:7, 5:7] = 9
+    mask_path = tmp_path / "cellpose.npy"
+    np.save(mask_path, mask)
+
+    gdf = _cellpose_gdf_from_mask(
+        mask_path,
+        (1.0, 0.0, 0.0),
+        (0.0, 1.0, 0.0),
+        "P1_MERSCOPE",
+        polygon_n_jobs=1,
+        polygon_show_progress=False,
+    )
+
+    assert gdf.index.tolist() == [2, 9]
+    assert gdf["instance_id"].tolist() == [2, 9]
+    assert gdf["source_cell_id"].tolist() == ["cellpose_2", "cellpose_9"]
 
 
 def test_remove_path_unlinks_directory_symlink_without_touching_target(
