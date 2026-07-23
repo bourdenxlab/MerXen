@@ -12,6 +12,7 @@ from merxen.config import TilingConfig
 from merxen.segmentation.cellpose import (
     _stitch_core_owned_tile_labels,
     _write_stitching_stats,
+    extract_cellpose_probability_logits,
 )
 
 
@@ -165,3 +166,34 @@ def test_write_stitching_stats_json(tmp_path: Path) -> None:
 
     assert stats_path.read_text().strip().startswith("{")
     assert '"final_labels": 3' in stats_path.read_text()
+
+
+def test_extract_cellpose_probability_logits_uses_flow_index_two() -> None:
+    """Cellpose probability logits should be read without applying sigmoid."""
+    expected = np.asarray([[1.0, -2.0], [3.0, -4.0]], dtype=np.float32)
+    logits = extract_cellpose_probability_logits([None, None, expected], (2, 2))
+
+    np.testing.assert_array_equal(logits, expected)
+
+
+def test_stitching_writes_probabilities_only_for_accepted_mask_pixels() -> None:
+    """Stitched Cellpose logits should remain aligned with accepted labels."""
+    global_mask = np.zeros((8, 8), dtype=np.uint32)
+    global_probs = np.zeros((8, 8), dtype=np.float32)
+    tile_mask = np.zeros((8, 8), dtype=np.int32)
+    tile_mask[2:6, 2:6] = 1
+    tile_probs = np.full((8, 8), 7.0, dtype=np.float32)
+
+    _stitch_core_owned_tile_labels(
+        tile_mask=tile_mask,
+        global_mask=global_mask,
+        tile=_tile(image_width=8),
+        next_label=1,
+        global_label_areas={},
+        tiling_config=TilingConfig(stitch_overlap_px=2),
+        tile_cellprobs=tile_probs,
+        global_cellprobs=global_probs,
+    )
+
+    assert np.all(global_probs[global_mask == 1] == 7.0)
+    assert np.all(global_probs[global_mask == 0] == 0.0)

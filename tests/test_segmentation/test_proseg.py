@@ -45,11 +45,13 @@ def test_run_proseg_refinement_builds_command(
     output_path.mkdir()
     transcripts = pd.DataFrame(
         {
+            "transcript_id": [10, 11],
             "x": [1.0, 2.0],
             "y": [1.5, 2.5],
             "z": [0.0, 0.0],
             "feature_name": ["A", "B"],
             "cell_id": [0, 1],
+            "qv": [0.95, 0.9],
         }
     )
 
@@ -59,12 +61,21 @@ def test_run_proseg_refinement_builds_command(
         proseg_binary="/usr/bin/proseg",
         samples=10,
         num_threads=2,
+        transcript_id_col="transcript_id",
+        qv_col="qv",
+        cellpose_masks=np.ones((2, 2), dtype=np.uint32),
+        cellpose_cellprobs=np.asarray([[2.0, -1.0], [0.5, 3.0]], dtype=np.float32),
+        cellpose_scale=1.0,
     )
 
     assert out == output_path
     assert "--output-spatialdata" in captured["cmd"]
     assert "--recorded-samples" in captured["cmd"]
     assert "--samples" in captured["cmd"]
+    assert "--transcript-id-column" in captured["cmd"]
+    assert "--qv-column" in captured["cmd"]
+    assert "--cellpose-masks" in captured["cmd"]
+    assert "--cellpose-cellprobs" in captured["cmd"]
 
 
 def test_run_proseg_refinement_requires_cellpose_transform(
