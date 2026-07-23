@@ -170,6 +170,25 @@ class ProsegConfig(BaseModel):
     voxel_layers: int = 2
 
 
+class ProsegHybridConfig(BaseModel):
+    """Transcript-supported post-processing of Cellpose and Proseg results."""
+
+    enabled: bool = True
+    min_transcripts: int = Field(default=10, ge=3)
+    outlier_neighbors: int = Field(default=2, ge=1)
+    outlier_mad_multiplier: float = Field(default=2.0, gt=0.0)
+    minimum_external_group: int = Field(default=3, ge=2)
+    chain_radius_scale: float = Field(default=2.0, gt=0.0)
+    near_surface_radius_fraction: float = Field(default=0.25, ge=0.0)
+    maximum_expansion_radius_fraction: float = Field(default=1.0, gt=0.0)
+    attachment_arc_width_scale: float = Field(default=0.5, gt=0.0)
+    rounding_radius_fraction: float = Field(default=0.15, ge=0.0)
+    smoothing_radius_um: float = Field(default=10.0, ge=0.0)
+    outward_rounding_um: float = Field(default=0.2, ge=0.0)
+    smoothing_quad_segs: int = Field(default=32, ge=8)
+    containment_tolerance_um: float = Field(default=1.0e-5, gt=0.0)
+
+
 class MemoryConfig(BaseModel):
     """Memory management parameters."""
 
@@ -254,6 +273,7 @@ class SegmentationConfig(BaseModel):
     nuclei_mask_filter: MaskFilterConfig = MaskFilterConfig()
     tiling: TilingConfig = TilingConfig()
     proseg: ProsegConfig = ProsegConfig()
+    proseg_hybrid: ProsegHybridConfig = ProsegHybridConfig()
     memory: MemoryConfig = MemoryConfig()
 
 

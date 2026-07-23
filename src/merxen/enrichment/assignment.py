@@ -36,6 +36,10 @@ from merxen.io.spatialdata_schema import (
 )
 from merxen.io.transcript_io import first_existing_col, iter_points_chunks
 from merxen.memory import enforce_memory_limit, force_release, log_status
+from merxen.segmentation.proseg_hybrid import (
+    PROSEG_HYBRID_SHAPE_NAME,
+    PROSEG_HYBRID_TABLE_NAME,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -488,6 +492,18 @@ def run_per_shape_assignment_for_dataset(
     ):
         table_key = sanitize_table_key(shape_key, table_prefix=table_prefix)
         table_exists = table_key in sdata_obj.tables
+        if shape_key == PROSEG_HYBRID_SHAPE_NAME:
+            if not table_exists:
+                raise RuntimeError(
+                    f"[{dataset_name}] Hybrid shape exists without its assignment "
+                    f"table '{PROSEG_HYBRID_TABLE_NAME}'. Refusing to replace the "
+                    "overlap-aware assignments with a geometric spatial join."
+                )
+            log_status(
+                f"[{dataset_name}] Preserving overlap-aware hybrid table "
+                f"'{PROSEG_HYBRID_TABLE_NAME}'"
+            )
+            continue
         if table_exists and (not force_rerun):
             _register_assignment_branch(
                 sdata_obj,
