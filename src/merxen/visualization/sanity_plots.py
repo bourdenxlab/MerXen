@@ -21,6 +21,7 @@ from matplotlib import patheffects as path_effects
 from matplotlib.lines import Line2D
 from shapely.geometry import box as shapely_box
 
+from merxen.io.spatialdata_schema import choose_primary_points_key
 from merxen.io.transcript_io import assignment_mask_from_points
 from merxen.plotting import prepare_plot_output, save_figure
 
@@ -1095,14 +1096,14 @@ def _reference_points_key(
     *,
     prefer_aligned: bool = True,
 ) -> str:
+    primary = choose_primary_points_key(sdata_obj)
+    if primary is None:
+        raise RuntimeError("No transcript points found in SpatialData object.")
     if prefer_aligned:
-        for key in sdata_obj.points:
-            if str(key).endswith("_aligned_nonrigid"):
-                return str(key)
-    for key in sdata_obj.points:
-        if not str(key).endswith("_aligned_nonrigid"):
-            return str(key)
-    return str(list(sdata_obj.points.keys())[0])
+        aligned = f"{primary}_aligned_nonrigid"
+        if aligned in sdata_obj.points:
+            return aligned
+    return primary
 
 
 def _get_scale0_dataarray(image_elem: Any) -> Any:

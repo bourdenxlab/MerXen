@@ -14,10 +14,26 @@ import numpy as np
 import pandas as pd
 import spatialdata as sd
 from scipy import sparse
-from spatialdata.models import TableModel
+from spatialdata.models import ShapesModel, TableModel
+from spatialdata.transformations import get_transformation
 from tqdm.auto import tqdm
 
-from merxen.io.spatialdata_io import write_spatialdata_zarr
+from merxen.io.spatialdata_io import (
+    write_or_replace_element,
+    write_spatialdata_metadata,
+    write_spatialdata_zarr,
+)
+from merxen.io.spatialdata_schema import (
+    INSTANCE_ID_COLUMN,
+    ORIGINAL_ID_NAMESPACE,
+    PROSEG_ASSIGNMENT_COLUMN,
+    PROSEG_ID_NAMESPACE,
+    SOURCE_CELL_ID_COLUMN,
+    canonical_instance_series,
+    choose_primary_points_key,
+    register_segmentation_branch,
+    stamp_merxen_schema,
+)
 from merxen.io.transcript_io import first_existing_col, iter_points_chunks
 from merxen.memory import enforce_memory_limit, force_release, log_status
 
@@ -41,7 +57,10 @@ def resolve_points_cols(points_obj: Any) -> tuple[str, str, str, str | None]:
         ["y", "y_micron", "y_location", "global_y", "y_global_px", "observed_y"],
     )
     gene_col = first_existing_col(points_obj, ["gene", "feature_name", "target"])
-    qv_col = first_existing_col(points_obj, ["qv", "quality", "quality_value"])
+    qv_col = first_existing_col(
+        points_obj,
+        ["transcript_score", "qv", "quality", "quality_value"],
+    )
 
     if x_col is None or y_col is None or gene_col is None:
         raise KeyError(
@@ -56,33 +75,66 @@ def ensure_shape_has_cell_id(
     sdata_obj: Any,
     shape_key: str,
 ) -> tuple[gpd.GeoDataFrame, str]:
-    """Return a shape GeoDataFrame with a normalized ``cell_id`` column."""
+    """Return a shape GeoDataFrame with canonical positive instance IDs."""
     shp = sdata_obj.shapes[shape_key]
+    if INSTANCE_ID_COLUMN in shp.columns:
+        gdf = shp.copy()
+        instance_ids = canonical_instance_series(
+            gdf[INSTANCE_ID_COLUMN],
+            field_name=f"{shape_key}.{INSTANCE_ID_COLUMN}",
+        )
+        if bool(instance_ids.duplicated().any()):
+            raise ValueError(f"[{shape_key}] Duplicate instance IDs")
+        gdf[INSTANCE_ID_COLUMN] = instance_ids.to_numpy(dtype=np.uint64)
+        gdf.index = pd.Index(
+            gdf[INSTANCE_ID_COLUMN],
+            dtype="uint64",
+            name=INSTANCE_ID_COLUMN,
+        )
+        return gdf, INSTANCE_ID_COLUMN
+
     candidate = first_existing_col(
         shp,
-        ["cell_id", "cell", "cells", "cell_ID", "region", "label_id"],
+        [
+            SOURCE_CELL_ID_COLUMN,
+            "cell_id",
+            "cell",
+            "cells",
+            "cell_ID",
+            "region",
+            "label_id",
+        ],
     )
 
     gdf = shp.copy()
-    if candidate is None:
-        gdf["cell_id"] = gdf.index.astype(str)
-    else:
-        gdf["cell_id"] = gdf[candidate].astype(str)
-
-    gdf["cell_id"] = gdf["cell_id"].fillna("").astype(str)
-    empty_mask = gdf["cell_id"].str.len() == 0
-    if empty_mask.any():
-        gdf.loc[empty_mask, "cell_id"] = gdf.index.astype(str)[empty_mask]
-
-    if gdf["cell_id"].duplicated().any():
-        dup_rank = gdf.groupby("cell_id").cumcount()
-        dup_mask = dup_rank > 0
-        gdf.loc[dup_mask, "cell_id"] = (
-            gdf.loc[dup_mask, "cell_id"] + "__" + dup_rank[dup_mask].astype(str)
+    source_ids = (
+        gdf[candidate].astype(str)
+        if candidate is not None
+        else pd.Series(gdf.index.astype(str), index=gdf.index)
+    )
+    if bool(source_ids.duplicated().any()):
+        raise ValueError(
+            f"[{shape_key}] Duplicate source cell IDs cannot be normalized safely"
         )
-        log_status(f"[{shape_key}] Duplicate IDs detected; using suffixed IDs.")
-
-    return gdf, "cell_id"
+    numeric = pd.to_numeric(source_ids, errors="coerce")
+    if bool(numeric.notna().all()) and bool((numeric >= 0).all()):
+        if bool((numeric == 0).any()):
+            numeric = numeric + 1
+        instance_ids = numeric.astype("uint64")
+    else:
+        ordered = {
+            source_id: index + 1
+            for index, source_id in enumerate(sorted(source_ids.tolist()))
+        }
+        instance_ids = source_ids.map(ordered).astype("uint64")
+    gdf[SOURCE_CELL_ID_COLUMN] = source_ids.to_numpy(dtype=object)
+    gdf[INSTANCE_ID_COLUMN] = instance_ids.to_numpy(dtype=np.uint64)
+    gdf.index = pd.Index(
+        gdf[INSTANCE_ID_COLUMN],
+        dtype="uint64",
+        name=INSTANCE_ID_COLUMN,
+    )
+    return gdf, INSTANCE_ID_COLUMN
 
 
 def build_gene_list_from_base_table(sdata_obj: Any) -> list[str]:
@@ -118,15 +170,38 @@ def clone_table_for_region(table_obj: ad.AnnData, region_name: str) -> ad.AnnDat
                 instance_key = cand
                 break
     if (instance_key is None) or (instance_key not in table_copy.obs.columns):
-        instance_key = "cell_id"
+        instance_key = SOURCE_CELL_ID_COLUMN
         table_copy.obs[instance_key] = table_copy.obs_names.astype(str)
 
+    source_ids = table_copy.obs[instance_key].astype(str)
+    if bool(source_ids.duplicated().any()):
+        raise ValueError("Table contains duplicate source instance identifiers")
+    if instance_key == INSTANCE_ID_COLUMN:
+        instance_ids = canonical_instance_series(
+            table_copy.obs[INSTANCE_ID_COLUMN],
+            field_name=f"{region_name}.{INSTANCE_ID_COLUMN}",
+        )
+    else:
+        numeric = pd.to_numeric(source_ids, errors="coerce")
+        if bool(numeric.notna().all()) and bool((numeric >= 0).all()):
+            if bool((numeric == 0).any()):
+                numeric = numeric + 1
+            instance_ids = numeric.astype("uint64")
+        else:
+            ordered = {
+                source_id: index + 1
+                for index, source_id in enumerate(sorted(source_ids.tolist()))
+            }
+            instance_ids = source_ids.map(ordered).astype("uint64")
+        table_copy.obs[SOURCE_CELL_ID_COLUMN] = source_ids.to_numpy(dtype=object)
+    table_copy.obs[INSTANCE_ID_COLUMN] = instance_ids.to_numpy(dtype=np.uint64)
+    table_copy.obs_names = table_copy.obs[INSTANCE_ID_COLUMN].astype(str).to_numpy()
     table_copy.uns.pop("spatialdata_attrs", None)
     return TableModel.parse(
         table_copy,
         region=region_name,
         region_key=region_key,
-        instance_key=instance_key,
+        instance_key=INSTANCE_ID_COLUMN,
     )
 
 
@@ -151,10 +226,13 @@ def compute_table_from_points_for_shape(
     gdf_shapes = gdf_shapes[
         gdf_shapes.geometry.notna() & ~gdf_shapes.geometry.is_empty
     ].copy()
-    gdf_shapes[shape_id_col] = gdf_shapes[shape_id_col].astype(str)
+    gdf_shapes[shape_id_col] = canonical_instance_series(
+        gdf_shapes[shape_id_col],
+        field_name=f"{shape_key}.{shape_id_col}",
+    ).to_numpy(dtype=np.uint64)
 
-    cell_ids = gdf_shapes[shape_id_col].astype(str).tolist()
-    cell_to_idx = {cell_id: i for i, cell_id in enumerate(cell_ids)}
+    cell_ids = gdf_shapes[shape_id_col].astype("uint64").tolist()
+    cell_to_idx = {int(cell_id): i for i, cell_id in enumerate(cell_ids)}
     genes = [str(g) for g in gene_list]
     gene_to_idx = {gene: i for i, gene in enumerate(genes)}
 
@@ -203,16 +281,21 @@ def compute_table_from_points_for_shape(
                 predicate="within",
             )
 
-            cell_series = joined[shape_id_col].astype(str)
-            assigned_mask = joined[shape_id_col].notna() & (cell_series != "")
+            cell_series = pd.to_numeric(
+                joined[shape_id_col],
+                errors="coerce",
+            ).astype("UInt64")
+            assigned_mask = cell_series.notna()
             if assigned_mask.any():
-                assigned_cells = cell_series.loc[assigned_mask].to_numpy(dtype=object)
+                assigned_cells = cell_series.loc[assigned_mask].to_numpy(
+                    dtype=np.uint64,
+                )
                 assigned_genes = (
                     joined.loc[assigned_mask, "gene"].astype(str).to_numpy(dtype=object)
                 )
 
                 cidx = np.fromiter(
-                    (cell_to_idx.get(cell, -1) for cell in assigned_cells),
+                    (cell_to_idx.get(int(cell), -1) for cell in assigned_cells),
                     dtype=np.int64,
                     count=len(assigned_cells),
                 )
@@ -252,8 +335,14 @@ def compute_table_from_points_for_shape(
 
         del chunk, xv, yv, gv, valid
 
-    obs = pd.DataFrame(index=pd.Index(cell_ids, dtype=str, name="cell_id"))
-    obs["cell_id"] = obs.index.astype(str)
+    obs = pd.DataFrame(
+        index=pd.Index(
+            np.asarray(cell_ids, dtype=np.uint64).astype(str),
+            dtype=str,
+            name="obs_id",
+        )
+    )
+    obs[INSTANCE_ID_COLUMN] = np.asarray(cell_ids, dtype=np.uint64)
     obs["region"] = pd.Categorical([shape_key] * len(obs), categories=[shape_key])
 
     var = pd.DataFrame(index=pd.Index(genes, dtype=str, name="gene"))
@@ -264,7 +353,7 @@ def compute_table_from_points_for_shape(
         adata,
         region=shape_key,
         region_key="region",
-        instance_key="cell_id",
+        instance_key=INSTANCE_ID_COLUMN,
     )
 
     summary = {
@@ -287,6 +376,62 @@ def shape_to_existing_table_source(shape_key: str) -> str | None:
     if shape_key in {"merscope_cell_boundaries", "xenium_cell_boundaries"}:
         return "table_original"
     return None
+
+
+def _register_assignment_branch(
+    sdata_obj: Any,
+    *,
+    points_key: str,
+    shape_key: str,
+    table_key: str,
+) -> None:
+    """Register a completed per-shape table using explicit branch semantics."""
+    aliases: tuple[str, ...]
+    if shape_key == "MOSAIK_proseg":
+        branch = "proseg"
+        assignment_column = (
+            PROSEG_ASSIGNMENT_COLUMN
+            if PROSEG_ASSIGNMENT_COLUMN in sdata_obj.points[points_key].columns
+            else None
+        )
+        background_column = (
+            "background"
+            if "background" in sdata_obj.points[points_key].columns
+            else None
+        )
+        namespace = PROSEG_ID_NAMESPACE
+        aliases = ("reseg",)
+    elif shape_key == "MOSAIK_cellpose":
+        branch = "cellpose"
+        assignment_column = None
+        background_column = None
+        namespace = PROSEG_ID_NAMESPACE
+        aliases = ("proseg_mask", "cellpose_mask")
+    elif shape_key in {"merscope_cell_boundaries", "xenium_cell_boundaries"}:
+        branch = "original"
+        assignment_column = (
+            "original_assignment"
+            if "original_assignment" in sdata_obj.points[points_key].columns
+            else None
+        )
+        background_column = None
+        namespace = ORIGINAL_ID_NAMESPACE
+        aliases = ("original_seg",)
+        if "table_original" in sdata_obj.tables:
+            table_key = "table_original"
+    else:
+        return
+    register_segmentation_branch(
+        sdata_obj,
+        branch,
+        points_key=points_key,
+        assignment_column=assignment_column,
+        background_column=background_column,
+        shape_key=shape_key,
+        table_key=table_key,
+        id_namespace=namespace,
+        legacy_aliases=aliases,
+    )
 
 
 def _write_table_element(sdata_obj: Any, table_key: str) -> None:
@@ -323,14 +468,18 @@ def run_per_shape_assignment_for_dataset(
     if len(sdata_obj.points) == 0:
         raise RuntimeError(f"[{dataset_name}] No points found in {latest_path}")
 
-    points_key = list(sdata_obj.points.keys())[0]
+    points_key = choose_primary_points_key(sdata_obj)
+    if points_key is None:
+        raise RuntimeError(f"[{dataset_name}] No primary transcript element found")
     points_obj = sdata_obj.points[points_key]
+    stamp_merxen_schema(sdata_obj, primary_points_key=points_key)
     gene_list = build_gene_list_from_base_table(sdata_obj)
     shape_keys = list(sdata_obj.shapes.keys())
     log_status(f"[{dataset_name}] Points key='{points_key}', shape layers={shape_keys}")
 
     summaries: list[dict[str, Any]] = []
     wrote_any = False
+    metadata_changed = True
 
     for shape_key in tqdm(
         shape_keys,
@@ -340,6 +489,12 @@ def run_per_shape_assignment_for_dataset(
         table_key = sanitize_table_key(shape_key, table_prefix=table_prefix)
         table_exists = table_key in sdata_obj.tables
         if table_exists and (not force_rerun):
+            _register_assignment_branch(
+                sdata_obj,
+                points_key=points_key,
+                shape_key=shape_key,
+                table_key=table_key,
+            )
             log_status(f"[{dataset_name}] Skipping existing table '{table_key}'")
             continue
 
@@ -357,6 +512,30 @@ def run_per_shape_assignment_for_dataset(
                 del sdata_obj.tables[table_key]
 
         shp, id_col = ensure_shape_has_cell_id(sdata_obj, shape_key)
+        if (
+            INSTANCE_ID_COLUMN not in sdata_obj.shapes[shape_key].columns
+            or sdata_obj.shapes[shape_key].index.name != INSTANCE_ID_COLUMN
+        ):
+            try:
+                transformations = get_transformation(
+                    sdata_obj.shapes[shape_key],
+                    get_all=True,
+                )
+            except (AssertionError, KeyError):
+                transformations = None
+            shp.attrs.pop("transform", None)
+            normalized_shape = (
+                ShapesModel.parse(shp, transformations=transformations)
+                if transformations is not None
+                else ShapesModel.parse(shp)
+            )
+            write_or_replace_element(
+                sdata_obj,
+                shape_key,
+                "shapes",
+                normalized_shape,
+                overwrite=True,
+            )
         source_table_key = shape_to_existing_table_source(shape_key)
         if source_table_key in sdata_obj.tables:
             try:
@@ -366,6 +545,12 @@ def run_per_shape_assignment_for_dataset(
                 )
                 sdata_obj.tables[table_key] = table_obj
                 _write_table_element(sdata_obj, table_key)
+                _register_assignment_branch(
+                    sdata_obj,
+                    points_key=points_key,
+                    shape_key=shape_key,
+                    table_key=table_key,
+                )
                 wrote_any = True
                 summaries.append(
                     {
@@ -408,6 +593,12 @@ def run_per_shape_assignment_for_dataset(
         )
         sdata_obj.tables[table_key] = table_obj
         _write_table_element(sdata_obj, table_key)
+        _register_assignment_branch(
+            sdata_obj,
+            points_key=points_key,
+            shape_key=shape_key,
+            table_key=table_key,
+        )
         wrote_any = True
 
         summary["table_key"] = table_key
@@ -422,11 +613,15 @@ def run_per_shape_assignment_for_dataset(
     if wrote_any:
         if not hasattr(sdata_obj, "write_element"):
             write_spatialdata_zarr(sdata_obj, latest_path, overwrite=True)
+        else:
+            write_spatialdata_metadata(sdata_obj, write_attrs=True)
         force_release(note=f"after per-shape table writes ({dataset_name})")
         log_status(
             f"[{dataset_name}] Per-shape assignment tables written to: {latest_path}"
         )
     else:
+        if metadata_changed and hasattr(sdata_obj, "write_metadata"):
+            write_spatialdata_metadata(sdata_obj, write_attrs=True)
         force_release(note=f"after per-shape assignment no-op ({dataset_name})")
         log_status(f"[{dataset_name}] No per-shape assignment updates were needed")
 

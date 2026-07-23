@@ -109,8 +109,8 @@ def label_ids_for_shapes(gdf: gpd.GeoDataFrame) -> tuple[pd.Series, Any]:
     Ported from the viewer's ``_label_ids_for_shapes``: each polygon is labelled
     with its own GeoDataFrame index value (the instance id). ``id_series`` is
     indexed by ``gdf.index``. ``dtype`` is the smallest unsigned integer holding
-    every id (uint32, or uint64 for large ids such as merscope EntityIDs). Id 0
-    collides with the transparent background; no real segmentation uses cell 0.
+    every id (uint32, or uint64 for large ids). ID 0 is rejected because it
+    collides with transparent raster background.
     """
     index = pd.Series(np.asarray(gdf.index), index=gdf.index)
     numeric = pd.to_numeric(index, errors="coerce")
@@ -121,6 +121,8 @@ def label_ids_for_shapes(gdf: gpd.GeoDataFrame) -> tuple[pd.Series, Any]:
         and np.array_equal(numeric.to_numpy(), np.floor(numeric.to_numpy()))
     )
     if is_integer_ids:
+        if bool((numeric == 0).any()):
+            raise ValueError("Shape instance ID 0 is reserved for raster background")
         ids = numeric.astype("int64")
     else:
         logger.warning(

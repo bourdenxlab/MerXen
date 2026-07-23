@@ -111,7 +111,16 @@ def shape_centroids(shapes: Any) -> pd.DataFrame:
     gdf = gdf[gdf.geometry.notna() & ~gdf.geometry.is_empty].copy()
     id_col = first_existing_col(
         gdf,
-        ["cell_id", "cell", "cells", "cell_ID", "region", "label_id", "EntityID"],
+        [
+            "instance_id",
+            "cell_id",
+            "cell",
+            "cells",
+            "cell_ID",
+            "region",
+            "label_id",
+            "EntityID",
+        ],
     )
     ids = gdf.index.astype(str) if id_col is None else gdf[id_col].astype(str)
     centroids = gdf.geometry.centroid
@@ -288,8 +297,13 @@ def build_streamline_lookup(streamlines: list[Streamline]) -> StreamlineLookup |
 
 
 def _table_cell_ids(table: ad.AnnData) -> pd.Index:
-    if "cell_id" in table.obs.columns:
-        return pd.Index(table.obs["cell_id"].astype(str), dtype=str)
+    attrs = dict(table.uns.get("spatialdata_attrs", {}))
+    instance_key = attrs.get("instance_key")
+    if isinstance(instance_key, str) and instance_key in table.obs.columns:
+        return pd.Index(table.obs[instance_key].astype(str), dtype=str)
+    for column in ("instance_id", "cell_id"):
+        if column in table.obs.columns:
+            return pd.Index(table.obs[column].astype(str), dtype=str)
     return pd.Index(table.obs_names.astype(str), dtype=str)
 
 

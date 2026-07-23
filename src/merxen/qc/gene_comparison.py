@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import spatialdata as sd
 
+from merxen.io.spatialdata_schema import choose_primary_points_key
 from merxen.io.transcript_io import (
     assignment_mask_from_points,
     first_existing_col,
@@ -34,11 +35,13 @@ def gene_totals_from_points(
     sdata_obj: Any,
     assigned_only: bool = False,
 ) -> pd.Series:
-    """Aggregate per-gene transcript counts from the first points table."""
+    """Aggregate per-gene transcript counts from the primary points table."""
     if len(sdata_obj.points) == 0:
         raise RuntimeError("No points found in spatialdata object.")
 
-    points_key = list(sdata_obj.points.keys())[0]
+    points_key = choose_primary_points_key(sdata_obj)
+    if points_key is None:
+        raise RuntimeError("No transcript points found in SpatialData object.")
     pts = sdata_obj.points[points_key]
 
     gene_col = first_existing_col(pts, ["gene", "feature_name", "target"])

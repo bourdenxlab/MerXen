@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 import spatialdata as sd
 
+from merxen.io.spatialdata_schema import choose_primary_points_key
 from merxen.io.transcript_io import (
     assignment_mask_from_points,
     first_existing_col,
@@ -219,7 +220,9 @@ def compute_dataset_qc(
     geom_df["aspect_ratio"] = [x[1] for x in ea]
     geom_df["log10_area"] = np.log10(np.clip(geom_df["area"].values, 1e-9, None))
 
-    points_key = list(sdata.points.keys())[0]
+    points_key = choose_primary_points_key(sdata)
+    if points_key is None:
+        raise RuntimeError("No transcript points found in SpatialData object.")
     points_obj = sdata.points[points_key]
     gene_col = first_existing_col(points_obj, ["feature_name", "gene", "target"])
     if gene_col is None:

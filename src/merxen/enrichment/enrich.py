@@ -23,6 +23,7 @@ from spatialdata_io import xenium as xenium_reader
 from tqdm.auto import tqdm
 
 from merxen.config import EnrichmentConfig
+from merxen.enrichment.assignment import clone_table_for_region
 from merxen.io.image_source import (
     MERSCOPE_ZPROJ_IMAGE_NAME,
     build_merscope_z_projection,
@@ -83,32 +84,7 @@ def _parse_shapes_with_template(
 
 def _prepare_original_table(adata: ad.AnnData, target_region_name: str) -> ad.AnnData:
     """Clone and normalize a platform-original AnnData table for enrichment output."""
-    tbl = adata.copy()
-    spatial_attrs = dict(tbl.uns.get("spatialdata_attrs", {}))
-    region_key = str(spatial_attrs.get("region_key", "region"))
-    instance_key = spatial_attrs.get("instance_key")
-
-    if region_key not in tbl.obs.columns:
-        region_key = "region"
-        tbl.obs[region_key] = target_region_name
-    tbl.obs[region_key] = pd.Categorical([target_region_name] * tbl.n_obs)
-
-    if (instance_key is None) or (instance_key not in tbl.obs.columns):
-        for cand in ["cell_id", "cell", "cell_ID", "region"]:
-            if cand in tbl.obs.columns:
-                instance_key = cand
-                break
-
-    if (instance_key is None) or (instance_key not in tbl.obs.columns):
-        instance_key = "cell_id"
-        tbl.obs[instance_key] = tbl.obs_names.astype(str)
-
-    tbl.uns["spatialdata_attrs"] = {
-        "region": target_region_name,
-        "region_key": region_key,
-        "instance_key": instance_key,
-    }
-    return tbl
+    return clone_table_for_region(adata, target_region_name)
 
 
 def _load_xenium_original_table_from_matrix(xenium_dir: Path) -> ad.AnnData | None:
@@ -567,10 +543,16 @@ def _is_enriched_except_nuclei(dst_sdata: Any, platform: str) -> bool:
 
 def _remove_per_shape_assignment_tables(dst_sdata: Any) -> None:
     """Remove derived per-shape tables before rebuilding partial enrichment."""
+    protected_tables = {
+        "table_MOSAIK_proseg_hybrid",
+        "table_MOSAIK_proseg_geometry_assignment",
+    }
     table_keys = [
         str(key)
         for key in list(dst_sdata.tables.keys())
-        if str(key).startswith("table_") and str(key) != ORIGINAL_TABLE_NAME
+        if str(key).startswith("table_")
+        and str(key) != ORIGINAL_TABLE_NAME
+        and str(key) not in protected_tables
     ]
     for table_key in table_keys:
         try:

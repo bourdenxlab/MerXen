@@ -19,6 +19,10 @@ from spatialdata.models import TableModel
 from merxen.config import MaskImageQuantificationConfig
 from merxen.io.image_source import build_image_source, fetch_tile
 from merxen.io.spatialdata_io import write_or_replace_element
+from merxen.io.spatialdata_schema import (
+    INSTANCE_ID_COLUMN,
+    SOURCE_CELL_ID_COLUMN,
+)
 from merxen.memory import force_release, log_status
 
 logger = logging.getLogger(__name__)
@@ -91,8 +95,15 @@ def build_mask_image_quantification_table(
 
     x_matrix = np.concatenate(matrix_parts, axis=1)
     var = pd.concat(var_frames, axis=0)
-    obs = pd.DataFrame(index=pd.Index(_cell_ids(label_ids), dtype=str, name="cell_id"))
-    obs["cell_id"] = obs.index.astype(str)
+    obs = pd.DataFrame(
+        index=pd.Index(
+            label_ids.astype(str),
+            dtype=str,
+            name="obs_id",
+        )
+    )
+    obs[INSTANCE_ID_COLUMN] = label_ids.astype(np.uint64, copy=False)
+    obs[SOURCE_CELL_ID_COLUMN] = _cell_ids(label_ids)
     obs["label_id"] = label_ids.astype(np.int64, copy=False)
     obs["mask_pixel_count"] = label_counts.astype(np.int64, copy=False)
     obs["region"] = pd.Categorical([shape_key] * len(obs), categories=[shape_key])
@@ -161,7 +172,7 @@ def run_mask_image_quantification(
             result.table,
             region=config.shape_key,
             region_key="region",
-            instance_key="cell_id",
+            instance_key=INSTANCE_ID_COLUMN,
         )
         write_or_replace_element(
             sdata_obj,

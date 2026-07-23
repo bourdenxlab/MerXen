@@ -1285,8 +1285,11 @@ def save_qc_metrics(adata: ad.AnnData, output_path: Path | str) -> Path:
     columns = [col for col in QC_COLUMNS if col in adata.obs]
     df = adata.obs.loc[:, columns].copy()
     df.insert(0, "obs_name", adata.obs_names.astype(str))
+    if "instance_id" in adata.obs and "instance_id" not in df.columns:
+        df.insert(1, "instance_id", adata.obs["instance_id"].to_numpy())
     if "cell_id" in adata.obs and "cell_id" not in df.columns:
-        df.insert(1, "cell_id", adata.obs["cell_id"].astype(str).to_numpy())
+        position = 2 if "instance_id" in df.columns else 1
+        df.insert(position, "cell_id", adata.obs["cell_id"].astype(str).to_numpy())
     df.to_csv(output_path, index=False)
     return output_path
 
@@ -1331,6 +1334,7 @@ def build_clustered_spatialdata_table(
         instance_key = _first_existing_column(
             table.obs,
             (
+                "instance_id",
                 "cell_id",
                 "cell",
                 "cells",
@@ -3366,7 +3370,16 @@ def _shape_metrics(shapes: Any) -> pd.DataFrame:
     gdf = gdf[gdf.geometry.notna() & ~gdf.geometry.is_empty].copy()
     id_col = first_existing_col(
         gdf,
-        ["cell_id", "cell", "cells", "cell_ID", "region", "label_id", "EntityID"],
+        [
+            "instance_id",
+            "cell_id",
+            "cell",
+            "cells",
+            "cell_ID",
+            "region",
+            "label_id",
+            "EntityID",
+        ],
     )
     ids = gdf.index.astype(str) if id_col is None else gdf[id_col].astype(str)
     centroids = _robust_centroid_xy(gdf)
@@ -3449,7 +3462,7 @@ def _apply_shape_metrics(
             )
         if "cell_area" not in adata.obs or adata.obs["cell_area"].isna().all():
             adata.obs["cell_area"] = areas
-        if "cell_id" not in adata.obs:
+        if "instance_id" not in adata.obs and "cell_id" not in adata.obs:
             adata.obs["cell_id"] = table_ids.astype(str).to_numpy()
         return
 
@@ -3457,7 +3470,7 @@ def _apply_shape_metrics(
         adata.obsm["spatial"] = metrics[["spatial_x", "spatial_y"]].to_numpy(float)
         if "cell_area" not in adata.obs or adata.obs["cell_area"].isna().all():
             adata.obs["cell_area"] = metrics["cell_area"].to_numpy(float)
-        if "cell_id" not in adata.obs:
+        if "instance_id" not in adata.obs and "cell_id" not in adata.obs:
             adata.obs["cell_id"] = metrics.index.astype(str).to_numpy()
 
 
@@ -3480,7 +3493,11 @@ def _apply_area_metric(
 
 
 def _table_cell_ids(adata: ad.AnnData) -> pd.Index:
-    for col in ["cell_id", "cell", "cells", "cell_ID", "EntityID"]:
+    attrs = dict(adata.uns.get("spatialdata_attrs", {}))
+    instance_key = attrs.get("instance_key")
+    if isinstance(instance_key, str) and instance_key in adata.obs.columns:
+        return pd.Index(adata.obs[instance_key].astype(str))
+    for col in ["instance_id", "cell_id", "cell", "cells", "cell_ID", "EntityID"]:
         if col in adata.obs.columns:
             return pd.Index(adata.obs[col].astype(str))
     return pd.Index(adata.obs_names.astype(str))

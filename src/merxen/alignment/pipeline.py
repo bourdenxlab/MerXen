@@ -23,6 +23,11 @@ from merxen.io.spatialdata_io import (
     write_or_replace_element,
     write_spatialdata_metadata,
 )
+from merxen.io.spatialdata_schema import (
+    MERXEN_SCHEMA_ATTR,
+    register_segmentation_branch,
+    stamp_merxen_schema,
+)
 from merxen.io.transcript_io import first_existing_col
 
 MERXEN_ALIGNMENT_ATTR = "merxen_alignment"
@@ -130,6 +135,35 @@ def _write_moving_alignment_to_zarr(
             "points",
             aligned_points,
             overwrite=True,
+        )
+
+    stamp_merxen_schema(sdata_obj)
+    schema = dict(sdata_obj.attrs.get(MERXEN_SCHEMA_ATTR, {}))
+    native_branches = dict(schema.get("segmentations", {}))
+    for branch, entry in native_branches.items():
+        if entry.get("coordinate_variant_of") is not None:
+            continue
+        points_key = str(entry.get("points", ""))
+        shape_key = str(entry.get("shape", ""))
+        aligned_points_key = _nonrigid_element_key(points_key)
+        aligned_shape_key = _nonrigid_element_key(shape_key)
+        if (
+            aligned_points_key not in sdata_obj.points
+            or aligned_shape_key not in sdata_obj.shapes
+        ):
+            continue
+        register_segmentation_branch(
+            sdata_obj,
+            f"{branch}{NONRIGID_ELEMENT_SUFFIX}",
+            points_key=aligned_points_key,
+            assignment_column=entry.get("assignment_column"),
+            background_column=entry.get("background_column"),
+            assignment_source_column=entry.get("assignment_source_column"),
+            shape_key=aligned_shape_key,
+            table_key=None,
+            instance_key=str(entry.get("instance_key", "instance_id")),
+            id_namespace=str(entry.get("id_namespace", branch)),
+            coordinate_variant_of=str(branch),
         )
 
     write_spatialdata_metadata(

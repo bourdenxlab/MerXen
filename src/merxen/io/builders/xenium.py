@@ -7,7 +7,10 @@ import shutil
 from pathlib import Path
 
 from merxen.config import XeniumBuildConfig
-from merxen.io.spatialdata_io import write_spatialdata_zarr
+from merxen.io.spatialdata_io import (
+    prepare_source_spatialdata_contract,
+    write_spatialdata_zarr,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +54,7 @@ def write_xenium_spatialdata(
         aligned_images=build_config.aligned_images,
         cells_table=build_config.cells_table,
     )
+    prepare_source_spatialdata_contract(sdata, platform="XENIUM")
     write_spatialdata_zarr(sdata, output_path, overwrite=True)
     _copy_xenium_sidecars(
         input_path=input_path,

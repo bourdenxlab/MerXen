@@ -201,6 +201,11 @@ def _raw_counts_matrix(table: ad.AnnData) -> sparse.csr_matrix:
 
 
 def _table_cell_ids(table: ad.AnnData) -> pd.Index:
-    if "cell_id" in table.obs.columns:
-        return pd.Index(table.obs["cell_id"].astype(str), dtype=str)
+    attrs = dict(table.uns.get("spatialdata_attrs", {}))
+    instance_key = attrs.get("instance_key")
+    if isinstance(instance_key, str) and instance_key in table.obs.columns:
+        return pd.Index(table.obs[instance_key].astype(str), dtype=str)
+    for column in ("instance_id", "cell_id"):
+        if column in table.obs.columns:
+            return pd.Index(table.obs[column].astype(str), dtype=str)
     return pd.Index(table.obs_names.astype(str), dtype=str)
