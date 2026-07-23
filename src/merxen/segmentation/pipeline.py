@@ -23,7 +23,11 @@ from merxen.io.image_source import (
     list_plane_keys,
     prepare_merscope_plane_sources,
 )
-from merxen.io.spatialdata_io import convert_to_latest_zarr
+from merxen.io.spatialdata_io import (
+    convert_to_latest_zarr,
+    upgrade_spatialdata_contract,
+)
+from merxen.io.spatialdata_schema import choose_primary_points_key
 from merxen.io.transcript_io import resolve_col, write_proseg_csv_from_points
 from merxen.memory import force_release, log_status
 from merxen.path_utils import remove_path, stage_existing_output
@@ -139,7 +143,9 @@ def _load_dataset_sdata(
             def fetch_tile_fn(y0: int, y1: int, x0: int, x1: int) -> np.ndarray:
                 return fetch_tile(source, y0, y1, x0, x1)
 
-            points_key = list(sdata.points.keys())[0]
+            points_key = choose_primary_points_key(sdata)
+            if points_key is None:
+                raise RuntimeError(f"[{dataset.name}] No transcript points found.")
             return (
                 sdata,
                 fetch_tile_fn,
@@ -174,7 +180,9 @@ def _load_dataset_sdata(
         def fetch_tile_fn(y0: int, y1: int, x0: int, x1: int) -> np.ndarray:
             return fetch_merscope_projected_tile(plane_sources, y0, y1, x0, x1)
 
-        points_key = list(sdata.points.keys())[0]
+        points_key = choose_primary_points_key(sdata)
+        if points_key is None:
+            raise RuntimeError(f"[{dataset.name}] No transcript points found.")
         return sdata, fetch_tile_fn, height, width, matrix, sdata.points[points_key]
 
     if platform == "XENIUM":
@@ -212,7 +220,9 @@ def _load_dataset_sdata(
         def fetch_tile_fn(y0: int, y1: int, x0: int, x1: int) -> np.ndarray:
             return fetch_tile(source, y0, y1, x0, x1)
 
-        points_key = list(sdata.points.keys())[0]
+        points_key = choose_primary_points_key(sdata)
+        if points_key is None:
+            raise RuntimeError(f"[{dataset.name}] No transcript points found.")
         return sdata, fetch_tile_fn, height, width, matrix, sdata.points[points_key]
 
     raise ValueError(f"Unsupported platform: {dataset.platform}")
@@ -657,8 +667,29 @@ def run_proseg_segmentation(
             stage_existing_output(latest_output, staged_latest_output)
         return staged_latest_output
 
+    def _ensure_contract() -> None:
+        is_spatialdata_store = (latest_output / "zarr.json").exists() or (
+            latest_output / ".zgroup"
+        ).exists()
+        upgraded = (
+            upgrade_spatialdata_contract(
+                latest_output,
+                quality_column_alias=(
+                    "transcript_score"
+                    if dataset.platform.upper() == "MERSCOPE"
+                    else None
+                ),
+                platform=dataset.platform,
+            )
+            if is_spatialdata_store
+            else False
+        )
+        if upgraded:
+            _progress("spatialdata_schema_upgraded")
+
     if latest_output.exists() and not force_rerun:
         log_status(f"[{dataset.name}] Reusing existing latest output: {latest_output}")
+        _ensure_contract()
         return {"latest_output": _stage_latest()}
 
     if raw_output.exists() and not force_rerun:
@@ -669,8 +700,10 @@ def run_proseg_segmentation(
             quality_column_alias=(
                 "transcript_score" if dataset.platform.upper() == "MERSCOPE" else None
             ),
+            platform=dataset.platform,
         )
         remove_path(raw_output)
+        _ensure_contract()
         return {"latest_output": _stage_latest()}
 
     transforms = json.loads(transforms_path.read_text())
@@ -730,8 +763,10 @@ def run_proseg_segmentation(
         quality_column_alias=(
             "transcript_score" if dataset.platform.upper() == "MERSCOPE" else None
         ),
+        platform=dataset.platform,
     )
     remove_path(raw_out)
+    _ensure_contract()
     staged_out = _stage_latest()
     log_status(f"[{dataset.name}] Wrote latest output: {latest_out}")
     force_release(note=f"after {dataset.name} ProSeg refinement")
@@ -778,7 +813,6 @@ def run_segmentation_pipeline(
         if dataset.persistent_nuclei_mask_path
         else staged_nuclei_mask_path
     )
-
     if (
         persistent_latest_output.exists()
         and reusable_transcripts.exists()

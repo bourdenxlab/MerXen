@@ -366,7 +366,7 @@ def _parse_table_for_spatialdata(
     region_key = str(attrs.get("region_key", "region"))
     instance_key = attrs.get("instance_key")
     if not isinstance(instance_key, str) or instance_key not in out.obs.columns:
-        instance_key = "cell_id"
+        instance_key = "instance_id" if "instance_id" in out.obs.columns else "cell_id"
     if instance_key not in out.obs.columns:
         out.obs[instance_key] = out.obs_names.astype(str)
     parsed_region = region or _region_from_attrs(attrs) or str(table_key)

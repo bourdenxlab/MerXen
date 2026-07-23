@@ -120,7 +120,15 @@ def _shape_centroids(shapes: gpd.GeoDataFrame) -> pd.DataFrame:
     gdf = gdf[gdf.geometry.notna() & ~gdf.geometry.is_empty].copy()
     id_col = first_existing_col(
         gdf,
-        ["cell_id", "cell", "cells", "cell_ID", "region", "label_id"],
+        [
+            "instance_id",
+            "cell_id",
+            "cell",
+            "cells",
+            "cell_ID",
+            "region",
+            "label_id",
+        ],
     )
     ids = gdf.index.astype(str) if id_col is None else gdf[id_col].astype(str)
     cent_x, cent_y = _robust_centroid_xy(gdf)
@@ -195,7 +203,8 @@ def _align_table_to_centroids(table: ad.AnnData, centroids: pd.DataFrame) -> ad.
             f"common_n={len(common)}"
         )
 
-    adata.obs["cell_id"] = adata.obs_names.astype(str)
+    if "instance_id" not in adata.obs.columns and "cell_id" not in adata.obs.columns:
+        adata.obs["cell_id"] = adata.obs_names.astype(str)
     adata.obsm["spatial"] = coords
     genes = _table_gene_names(adata)
     adata.var_names = genes
@@ -204,7 +213,11 @@ def _align_table_to_centroids(table: ad.AnnData, centroids: pd.DataFrame) -> ad.
 
 
 def _table_cell_ids(table: ad.AnnData) -> pd.Index:
-    for col in ["cell_id", "cell", "cells", "cell_ID"]:
+    attrs = dict(table.uns.get("spatialdata_attrs", {}))
+    instance_key = attrs.get("instance_key")
+    if isinstance(instance_key, str) and instance_key in table.obs.columns:
+        return pd.Index(table.obs[instance_key].astype(str))
+    for col in ["instance_id", "cell_id", "cell", "cells", "cell_ID"]:
         if col in table.obs.columns:
             return pd.Index(table.obs[col].astype(str))
     return pd.Index(table.obs_names.astype(str))

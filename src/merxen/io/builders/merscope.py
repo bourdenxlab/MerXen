@@ -31,7 +31,10 @@ from merxen.io.image_source import (
     MERSCOPE_ZPROJ_IMAGE_NAME,
     build_merscope_z_projection,
 )
-from merxen.io.spatialdata_io import write_spatialdata_zarr
+from merxen.io.spatialdata_io import (
+    prepare_source_spatialdata_contract,
+    write_spatialdata_zarr,
+)
 from merxen.memory import force_release
 from merxen.path_utils import remove_path
 
@@ -151,6 +154,7 @@ def write_merscope_spatialdata(
     )
     sdata.images[MERSCOPE_ZPROJ_IMAGE_NAME] = projection.image
     try:
+        prepare_source_spatialdata_contract(sdata, platform="MERSCOPE")
         write_spatialdata_zarr(sdata, output_path, overwrite=True)
         _copy_merscope_sidecars(
             input_path=input_path,

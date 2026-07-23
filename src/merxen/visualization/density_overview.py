@@ -11,6 +11,7 @@ import pandas as pd
 from matplotlib import colors as mcolors
 from tqdm.auto import tqdm
 
+from merxen.io.spatialdata_schema import choose_primary_points_key
 from merxen.plotting import prepare_plot_output, save_figure
 
 MERSCOPE_TRANSCRIPT_COLOR = "#1f77b4"
@@ -610,10 +611,11 @@ def _centered_bbox(
 
 
 def _reference_points_key(sdata_obj: Any) -> str:
-    for key in sdata_obj.points:
-        if str(key).endswith("_aligned_nonrigid"):
-            return str(key)
-    return str(list(sdata_obj.points.keys())[0])
+    primary = choose_primary_points_key(sdata_obj)
+    if primary is None:
+        raise RuntimeError("No transcript points found in SpatialData object.")
+    aligned = f"{primary}_aligned_nonrigid"
+    return aligned if aligned in sdata_obj.points else primary
 
 
 def _first_existing_col(df_like: Any, candidates: list[str]) -> str | None:
