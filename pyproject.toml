@@ -14,9 +14,10 @@ dependencies = [
     "pandas>=2.0",
     "geopandas>=1.0",
     "anndata>=0.10.9,<0.13.0",
-    "pyarrow>=15.0.0",
-    "spatialdata>=0.8.0",
-    "spatialdata-io>=0.6",
+    "pyarrow>=15.0.0,<24",
+    "dask[dataframe]>=2025.1,<2027",
+    "spatialdata>=0.8.0,<0.9",
+    "spatialdata-io>=0.6,<0.7",
     "xarray>=2024.0",
     "cellpose>=3.0",
     "scikit-image>=0.22",
@@ -35,7 +36,7 @@ dependencies = [
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
     "click>=8.1",
-    "zarr>=2.16",
+    "zarr>=3.1,<4",
 ]
 
 [project.optional-dependencies]
