@@ -38,6 +38,10 @@ from merxen.segmentation.cellpose import (
 )
 from merxen.segmentation.mask_filter import filter_labeled_mask_by_area
 from merxen.segmentation.proseg import run_proseg_refinement
+from merxen.segmentation.proseg_hybrid import (
+    has_proseg_hybrid_refinement,
+    run_proseg_hybrid_refinement,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -667,7 +671,7 @@ def run_proseg_segmentation(
             stage_existing_output(latest_output, staged_latest_output)
         return staged_latest_output
 
-    def _ensure_contract() -> None:
+    def _ensure_hybrid() -> None:
         is_spatialdata_store = (latest_output / "zarr.json").exists() or (
             latest_output / ".zgroup"
         ).exists()
@@ -686,10 +690,25 @@ def run_proseg_segmentation(
         )
         if upgraded:
             _progress("spatialdata_schema_upgraded")
+        if not config.proseg_hybrid.enabled:
+            return
+        if not force_rerun and has_proseg_hybrid_refinement(
+            latest_output,
+            config.proseg_hybrid,
+        ):
+            return
+        _progress("proseg_hybrid_starting")
+        summary = run_proseg_hybrid_refinement(
+            latest_output,
+            cellpose_mask_path,
+            transforms_path,
+            config.proseg_hybrid,
+        )
+        _progress("proseg_hybrid_done", **summary)
 
     if latest_output.exists() and not force_rerun:
         log_status(f"[{dataset.name}] Reusing existing latest output: {latest_output}")
-        _ensure_contract()
+        _ensure_hybrid()
         return {"latest_output": _stage_latest()}
 
     if raw_output.exists() and not force_rerun:
@@ -703,7 +722,7 @@ def run_proseg_segmentation(
             platform=dataset.platform,
         )
         remove_path(raw_output)
-        _ensure_contract()
+        _ensure_hybrid()
         return {"latest_output": _stage_latest()}
 
     transforms = json.loads(transforms_path.read_text())
@@ -766,7 +785,7 @@ def run_proseg_segmentation(
         platform=dataset.platform,
     )
     remove_path(raw_out)
-    _ensure_contract()
+    _ensure_hybrid()
     staged_out = _stage_latest()
     log_status(f"[{dataset.name}] Wrote latest output: {latest_out}")
     force_release(note=f"after {dataset.name} ProSeg refinement")
@@ -787,6 +806,7 @@ def run_segmentation_pipeline(
     staged_transcripts_csv = out_dir / "transcripts_for_proseg.csv"
     staged_mask_path = out_dir / "cellpose_masks_tiled.npy"
     staged_cellprob_path = out_dir / "cellpose_cellprobs_tiled.npy"
+    staged_transforms_path = out_dir / "cellpose_transforms.json"
     staged_nuclei_mask_path = out_dir / "cellpose_nuclei_masks_tiled.npy"
     persistent_latest_output = (
         Path(dataset.persistent_latest_zarr_path)
@@ -813,14 +833,27 @@ def run_segmentation_pipeline(
         if dataset.persistent_nuclei_mask_path
         else staged_nuclei_mask_path
     )
+    hybrid_complete = not config.proseg_hybrid.enabled or has_proseg_hybrid_refinement(
+        persistent_latest_output,
+        config.proseg_hybrid,
+    )
+
     if (
         persistent_latest_output.exists()
         and reusable_transcripts.exists()
         and reusable_mask.exists()
         and reusable_cellprob.exists()
         and reusable_nuclei_mask.exists()
+        and (hybrid_complete or staged_transforms_path.exists())
         and not force_rerun
     ):
+        if not hybrid_complete:
+            run_proseg_hybrid_refinement(
+                persistent_latest_output,
+                reusable_mask,
+                staged_transforms_path,
+                config.proseg_hybrid,
+            )
         if persistent_latest_output != staged_latest_output:
             stage_existing_output(persistent_latest_output, staged_latest_output)
         transcripts = reusable_transcripts
