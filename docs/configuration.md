@@ -44,9 +44,12 @@ any of them with `--<name>` on the command line.
 | Param | Default | Description |
 |-------|---------|-------------|
 | `proseg_search_paths` | `/usr/bin/proseg`, `/usr/local/bin/proseg` | Ordered paths checked by `ENSURE_PROSEG` before segmentation. Entries may be executable paths or directories containing `proseg`; `command -v proseg` is checked after this list. |
-| `proseg_install_path` | `/usr/bin/proseg` | Destination used when ProSeg is missing and automatic install is enabled. If the directory is not writable, the bootstrap step requests `sudo`. |
+| `proseg_install_path` | `/usr/local/bin/proseg` | Destination used when ProSeg is missing and automatic install is enabled. If the directory is not writable, the bootstrap step requests `sudo`. |
 | `proseg_auto_install` | `true` | Install ProSeg automatically with Cargo when no configured search path contains an executable binary. |
 | `proseg_cargo_package` | `proseg` | Cargo package name installed by the bootstrap step. |
+| `proseg_version` | `3.2.0` | Required ProSeg version; other discovered binaries are ignored. |
+| `proseg_git_url` | `https://github.com/dcjones/proseg.git` | Source repository used for the pinned Cargo build. |
+| `proseg_git_rev` | `e7df1eace923ce4c6ec70b2c597c5d126aa3db88` | Source revision whose package version is 3.2.0. |
 
 ### General
 
@@ -55,12 +58,12 @@ any of them with `--<name>` on the command line.
 | `outdir` | `./results` | Output root. |
 | `analysis_mode` | `paired` | Fallback row mode: `paired`, `merscope`, or `xenium`. A non-empty samplesheet `analysis_mode` value overrides this per row. |
 | `enable_alignment` | `false` | Fallback row alignment switch. A non-empty samplesheet `enable_alignment` value overrides this per row; alignment only applies to paired rows. |
-| `analysis_segmentation` | `both` | Fallback downstream analysis branches after enrichment. Valid values: `both`, `reseg`, `original_seg`; comma-separated combinations are accepted. A non-empty samplesheet `analysis_segmentation` value overrides this per row. |
+| `analysis_segmentation` | `both` | Fallback downstream analysis branches after enrichment. Valid values: `both`, `reseg`, `original_seg`, `proseg_hybrid`; comma-separated combinations are accepted. `both` remains `reseg,original_seg`. A non-empty samplesheet value overrides this per row. |
 | `mask_image_quantification_enabled` | `true` | Insert the Cellpose-mask image quantification stage between enrichment and QC. A non-empty samplesheet `mask_image_quantification_enabled` value overrides this per row. |
 | `mecr_enabled` | `true` | Insert mutually exclusive co-expression rate analysis after QC. A non-empty samplesheet `mecr_enabled` value overrides this per row. |
 | `cortical_depth_enabled` | `false` | Insert the cortical-depth stage after clustering. Requires per-sample pial/tissue-edge annotations, with optional gray/white boundaries for depth pieces. A non-empty samplesheet `cortical_depth_enabled` value overrides this per row. |
 | `distance_from_object_enabled` | `false` | Insert registered polygon-edge distance analysis after cortical depth/clustering. A non-empty samplesheet value overrides this per row. |
-| `distance_from_object_segmentations` | `reseg, original_seg, proseg_mask` | Cell-table branches for object distance. A samplesheet value may override this per row. |
+| `distance_from_object_segmentations` | `proseg, original, cellpose` | Cell-table branches for object distance. Legacy `reseg`, `original_seg`, and `proseg_mask` values remain accepted aliases. A samplesheet value may override this per row. |
 | `force_spatialdata_build` | `false` | Rebuild SpatialData zarrs even if cached. |
 | `start_stage` | `build_spatialdata` | Fallback first stage. Skipped upstream stages are read from published outputs. A samplesheet `start_stage` value overrides this per row. |
 | `stop_stage` | `clustering_squidpy` | Fallback last stage. This includes `spatial_gene_analysis`, which runs between visualization and clustering. MapMyCells is available after clustering but opt-in because it requires reference files. A samplesheet `stop_stage` value overrides this per row. |
@@ -96,7 +99,7 @@ lock serialize both Cellpose process types.
 | `cellpose_model_type` | `cyto3` | Cellpose model preset. |
 | `cellpose_gpu` | `true` | Use GPU for inference. |
 | `cellpose_diameter` | `null` | Cell diameter (px). `null` → Cellpose auto-estimates. |
-| `cellpose_flow_threshold` | `0.8` | Cellpose flow threshold. |
+| `cellpose_flow_threshold` | `0.7` | Cellpose flow threshold. |
 | `cellpose_cellprob` | `-5.0` | Cellpose cell probability threshold. |
 | `cellpose_tile_overlap` | `0.15` | Cellpose model's internal fractional tile overlap. |
 | `cellpose_bsize` | `256` | Cellpose internal batch block size. |
@@ -146,7 +149,7 @@ lock serialize both Cellpose process types.
 | Param | Default | Description |
 |-------|---------|-------------|
 | `distance_from_object_enabled` | `false` | Run polygon-edge annotation and cohort pseudobulk analysis. |
-| `distance_from_object_segmentations` | `[reseg, original_seg, proseg_mask]` | Selected cell-table branches. |
+| `distance_from_object_segmentations` | `[proseg, original, cellpose]` | Selected cell-table branches. `proseg_geometry_assignment` and `proseg_hybrid` can be selected explicitly when their tables exist. |
 | `distance_from_object_object_types` | `null` | Optional object-type allow-list; `null` analyses every named type together. |
 | `distance_from_object_coordinate_unit_um` | `1.0` | Micrometres per registered coordinate unit. |
 | `distance_from_object_near_distance_um` | `50.0` | Exclusive upper boundary of `near`; polygon interiors are always near. |
@@ -162,8 +165,8 @@ lock serialize both Cellpose process types.
 
 Before `SEGMENT` runs, the `ENSURE_PROSEG` process checks
 `proseg_search_paths`, then `command -v proseg`. If no executable is found and
-`proseg_auto_install=true`, it runs `cargo install proseg` into a temporary
-root and copies the resulting binary to `proseg_install_path`. System-owned
+`proseg_auto_install=true`, it builds the pinned ProSeg 3.2.0 Git revision into
+a temporary root and copies the resulting binary to `proseg_install_path`. System-owned
 install paths trigger a `sudo` prompt.
 
 | Param | Default | Description |
@@ -172,10 +175,29 @@ install paths trigger a `sudo` prompt.
 | `proseg_segment_max_forks` | `2` | Maximum concurrent CPU-only ProSeg processes. |
 | `proseg_voxel_size` | `0.5` | Voxel size (µm). |
 | `proseg_burnin_voxel_size` | `1.0` | Burn-in voxel size (µm). |
-| `proseg_nuclear_reassignment_prob` | `0.25` | Nuclear reassignment probability. |
-| `proseg_diffusion_probability` | `0.25` | Diffusion probability. |
+| `proseg_nuclear_reassignment_prob` | `0.20` | Nuclear reassignment probability. |
+| `proseg_diffusion_probability` | `0.20` | Diffusion probability. |
 | `proseg_cell_compactness` | `0.04` | Cell compactness prior. |
 | `proseg_num_threads` | `32` | ProSeg thread count. |
+
+### ProSeg hybrid branch
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `proseg_hybrid_enabled` | `true` | Generate the separate overlap-aware hybrid shape/table branch. |
+| `proseg_hybrid_min_transcripts` | `10` | Minimum ProSeg-foreground transcript count, before and after outlier filtering, required for transcript-driven expansion. |
+| `proseg_hybrid_outlier_neighbors` | `2` | Nearest-neighbour rank used for robust bulk-component detection. |
+| `proseg_hybrid_outlier_mad_multiplier` | `2.0` | MAD multiplier defining the robust component link distance. Lower values reject small detached groups more harshly. |
+| `proseg_hybrid_minimum_external_group` | `3` | Minimum distant external group size allowed to drive an expansion. |
+| `proseg_hybrid_chain_radius_scale` | `2.0` | External-chain link radius as a multiple of the robust neighbour scale. A distant group must chain back to Cellpose. |
+| `proseg_hybrid_near_surface_radius_fraction` | `0.25` | Distance from the Cellpose surface, as a fraction of equivalent Cellpose radius, where retained external transcripts can be accepted individually. |
+| `proseg_hybrid_maximum_expansion_radius_fraction` | `1.0` | Hard expansion cap beyond the Cellpose surface, as a fraction of equivalent Cellpose radius. |
+| `proseg_hybrid_attachment_arc_width_scale` | `0.5` | Width multiplier for the local Cellpose boundary arc attached to each supported convex expansion. |
+| `proseg_hybrid_rounding_radius_fraction` | `0.15` | Outward rounding of each local convex expansion, as a fraction of equivalent Cellpose radius. |
+| `proseg_hybrid_smoothing_radius_um` | `10.0` | Fixed-radius morphological closing applied to the assembled mask. Only the added area is retained, so smoothing cannot shrink the mask. |
+| `proseg_hybrid_outward_rounding_um` | `0.2` | Fixed outward offset applied during final smoothing. |
+| `proseg_hybrid_smoothing_quad_segs` | `32` | Circular approximation resolution per quadrant for final smoothing and its cap. |
+| `proseg_hybrid_containment_tolerance_um` | `1.0e-5` | Numerical tolerance used by strict containment and cap checks. |
 | `default_merscope_voxel_layers` | `7` | Fallback when samplesheet column is empty. |
 | `default_xenium_voxel_layers` | `2` | Fallback when samplesheet column is empty. |
 

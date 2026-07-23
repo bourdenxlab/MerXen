@@ -36,13 +36,14 @@ The default is all three requested branches:
 
 | Config name | SpatialData table | Shape layer |
 |-------------|-------------------|-------------|
-| `reseg` | `table_MOSAIK_proseg` | `MOSAIK_proseg` |
-| `original_seg` | `table_original` | vendor cell boundaries |
-| `proseg_mask` | `table_MOSAIK_cellpose` | `MOSAIK_cellpose` |
+| `proseg` | `table_MOSAIK_proseg` | `MOSAIK_proseg` |
+| `original` | `table_original` | vendor cell boundaries |
+| `cellpose` | `table_MOSAIK_cellpose` | `MOSAIK_cellpose` |
 
-`proseg_mask` is the existing Cellpose mask-derived cell table used as the
-initial mask input to ProSeg; it is exposed under this analysis-specific name
-without changing the rest of MerXen's segmentation naming.
+The old distance-analysis names `reseg`, `original_seg`, and `proseg_mask`
+remain accepted aliases for `proseg`, `original`, and `cellpose`,
+respectively. `proseg_geometry_assignment` is a separate optional branch: it
+means geometric assignment to `MOSAIK_proseg`, not the Cellpose prior.
 
 ## Distance and proximity rules
 

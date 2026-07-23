@@ -48,7 +48,7 @@ configs against these.
   `VisualizationConfig`, `SpatialGeneAnalysisConfig`,
   `ClusteringSquidpyConfig`.
 - Sub-models: `CellposeConfig`, `TilingConfig`, `MaskFilterConfig`,
-  `ProsegConfig`, `MemoryConfig`, `DatasetConfig`,
+  `ProsegConfig`, `ProsegHybridConfig`, `MemoryConfig`, `DatasetConfig`,
   `MerscopeBuildConfig`, `XeniumBuildConfig`.
 - `PipelineConfig(BaseSettings)` — loads `MERXEN_*` env vars.
 - `load_config_from_json(path, cls)` — helper every CLI uses.
@@ -73,8 +73,20 @@ with Groovy.
 
 ### `io.spatialdata_io` — [spatialdata_io.py](../src/merxen/io/spatialdata_io.py)
 - `write_spatialdata_zarr(sdata, path, ...)`.
-- `convert_to_latest_zarr(raw_path, latest_path)` — schema-migrates ProSeg's
-  raw output to the SpatialData version the rest of the code reads.
+- `convert_to_latest_zarr(raw_path, latest_path, quality_column_alias=...)` —
+  schema-migrates ProSeg's raw output and can restore a platform-native
+  quality-column name.
+- `upgrade_spatialdata_contract(path, ...)` — atomically migrates a reusable
+  pre-schema latest store.
+- `prepare_source_spatialdata_contract(sdata, platform=...)` — normalizes
+  source-reader IDs while preserving vendor provenance.
+
+### `io.spatialdata_schema` — [spatialdata_schema.py](../src/merxen/io/spatialdata_schema.py)
+- `stamp_merxen_schema(...)` / `register_segmentation_branch(...)` — publish
+  the versioned points/assignment/shape/table registry.
+- `with_stable_transcript_ids(...)` — assign unique positive transcript row IDs.
+- `validate_merxen_schema(sdata, deep=False)` — check identifier and
+  referential integrity.
 
 ### `io.transcript_io` — [transcript_io.py](../src/merxen/io/transcript_io.py)
 - `to_pandas(df_like)` — best-effort dask / pandas / pyarrow → pandas.
@@ -106,6 +118,21 @@ with Groovy.
 ### `segmentation.proseg` — [proseg.py](../src/merxen/segmentation/proseg.py)
 - `run_proseg_refinement(...)` — subprocess-driven wrapper around the
   external ProSeg binary.
+
+### `segmentation.proseg_hybrid` — [proseg_hybrid.py](../src/merxen/segmentation/proseg_hybrid.py)
+
+- `select_bulk_transcripts(...)` — robust dominant transcript-component
+  selection with Cellpose-aware tie breaking.
+- `build_local_convex_expansion_geometry(...)` — capped local convex wedges
+  driven by supported ProSeg-foreground transcript chains.
+- `smooth_growth_only_geometry(...)` — fixed-micron boundary closing and
+  outward rounding that cannot remove existing mask area or exceed the cap.
+- `build_hybrid_cell_geometry(...)` — compose local-convex expansion and
+  growth-only smoothing, with Cellpose as the geometric lower bound.
+- `assign_transcripts_to_hybrid_masks(...)` — single-mask geometric and
+  overlap-only ProSeg assignment.
+- `run_proseg_hybrid_refinement(...)` — persist hybrid SpatialData polygons,
+  augmented points, and counts.
 
 ### `segmentation.mask_filter` / `segmentation.mask_geometry`
 - `filter_cell_by_regionprops(mask, config)`.
