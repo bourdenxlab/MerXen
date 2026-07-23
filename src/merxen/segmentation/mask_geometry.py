@@ -10,6 +10,7 @@ import numpy as np
 from scipy.ndimage import find_objects
 from shapely.affinity import scale
 from shapely.geometry import Polygon
+from shapely.geometry.base import BaseGeometry
 from skimage.measure import find_contours
 from tqdm.auto import tqdm
 
@@ -19,7 +20,7 @@ _POOL_SEG_MASKS: np.ndarray | None = None
 def _polygon_from_bbox_with_mask(
     seg_masks: np.ndarray,
     label_and_slice: tuple[int, tuple[slice, slice]],
-) -> Polygon | None:
+) -> BaseGeometry | None:
     """Extract one polygon for a labeled region using a tight bounding box."""
     label_id, slc = label_and_slice
     local_mask = seg_masks[slc] == label_id
@@ -35,16 +36,24 @@ def _polygon_from_bbox_with_mask(
     if not contours:
         return None
 
-    contour = max(contours, key=len)
-    contour[:, 0] += slc[0].start - 1
-    contour[:, 1] += slc[1].start - 1
+    contour_polygons: list[BaseGeometry] = []
+    for contour in contours:
+        contour[:, 0] += slc[0].start - 1
+        contour[:, 1] += slc[1].start - 1
+        if not np.array_equal(contour[0], contour[-1]):
+            contour = np.vstack([contour, contour[0]])
+        polygon = Polygon(contour[:, [1, 0]])
+        if polygon.is_valid and not polygon.is_empty:
+            contour_polygons.append(polygon)
+    if not contour_polygons:
+        return None
 
-    if not np.array_equal(contour[0], contour[-1]):
-        contour = np.vstack([contour, contour[0]])
-
-    poly = Polygon(contour[:, [1, 0]]).buffer(0)
-    if poly.is_valid and not poly.is_empty:
-        return poly
+    geometry = contour_polygons[0]
+    for polygon in contour_polygons[1:]:
+        geometry = geometry.symmetric_difference(polygon)
+    geometry = geometry.buffer(0)
+    if geometry.is_valid and not geometry.is_empty:
+        return geometry
     return None
 
 
@@ -56,7 +65,7 @@ def _pool_init(seg_masks: np.ndarray) -> None:
 
 def _polygon_from_bbox_pool(
     label_and_slice: tuple[int, tuple[slice, slice]],
-) -> Polygon | None:
+) -> BaseGeometry | None:
     """Multiprocessing wrapper for polygon extraction."""
     if _POOL_SEG_MASKS is None:
         return None
@@ -68,9 +77,9 @@ def _iter_polygons_serial(
     label_slices: list[tuple[int, tuple[slice, slice]]],
     *,
     show_progress: bool,
-) -> list[Polygon]:
+) -> list[BaseGeometry]:
     """Serial polygon extraction fallback."""
-    out: list[Polygon] = []
+    out: list[BaseGeometry] = []
     iterator: Iterable[tuple[int, tuple[slice, slice]]] = label_slices
     if show_progress:
         iterator = tqdm(label_slices, total=len(label_slices), desc="masks_to_polygons")
@@ -86,7 +95,7 @@ def masks_to_polygons(
     factor_rescale: float = 0.0,
     n_jobs: int | None = None,
     show_progress: bool = False,
-) -> list[Polygon]:
+) -> list[BaseGeometry]:
     """Convert labeled masks to polygons.
 
     Args:
@@ -100,6 +109,34 @@ def masks_to_polygons(
         List of valid polygons, one per connected component that could be
         converted.
     """
+    return [
+        polygon
+        for _, polygon in masks_to_labeled_polygons(
+            seg_masks,
+            factor_rescale=factor_rescale,
+            n_jobs=n_jobs,
+            show_progress=show_progress,
+        )
+    ]
+
+
+def masks_to_labeled_polygons(
+    seg_masks: np.ndarray,
+    factor_rescale: float = 0.0,
+    n_jobs: int | None = None,
+    show_progress: bool = False,
+) -> list[tuple[int, BaseGeometry]]:
+    """Convert a label image to polygons without losing label identity.
+
+    Args:
+        seg_masks: Two-dimensional labeled mask array.
+        factor_rescale: Optional isotropic polygon scaling factor.
+        n_jobs: Number of worker processes. ``None`` uses all CPUs.
+        show_progress: Whether to display progress bars.
+
+    Returns:
+        Pairs of original positive label ID and valid polygon.
+    """
     label_slices = [
         (label_id, slc)
         for label_id, slc in enumerate(find_objects(seg_masks), start=1)
@@ -110,7 +147,7 @@ def masks_to_polygons(
 
     n_jobs = max(1, os.cpu_count() or 1) if n_jobs is None else max(1, int(n_jobs))
     use_parallel = len(label_slices) >= 64 and n_jobs > 1
-    polygons: list[Polygon]
+    labeled_polygons: list[tuple[int, BaseGeometry]]
 
     if use_parallel:
         try:
@@ -125,28 +162,52 @@ def masks_to_polygons(
                         total=len(label_slices),
                         desc="masks_to_polygons",
                     )
-                polygons = [poly for poly in results if poly is not None]
+                labeled_polygons = [
+                    (label_id, polygon)
+                    for (label_id, _), polygon in zip(
+                        label_slices,
+                        results,
+                        strict=True,
+                    )
+                    if polygon is not None
+                ]
         except Exception:
-            polygons = _iter_polygons_serial(
-                seg_masks,
-                label_slices,
-                show_progress=show_progress,
-            )
+            labeled_polygons = []
+            for label_id, label_slice in label_slices:
+                polygon = _polygon_from_bbox_with_mask(
+                    seg_masks,
+                    (label_id, label_slice),
+                )
+                if polygon is not None:
+                    labeled_polygons.append((label_id, polygon))
     else:
-        polygons = _iter_polygons_serial(
-            seg_masks,
-            label_slices,
-            show_progress=show_progress,
-        )
+        iterator: Iterable[tuple[int, tuple[slice, slice]]] = label_slices
+        if show_progress:
+            iterator = tqdm(
+                label_slices,
+                total=len(label_slices),
+                desc="masks_to_polygons",
+            )
+        labeled_polygons = []
+        for label_id, label_slice in iterator:
+            polygon = _polygon_from_bbox_with_mask(
+                seg_masks,
+                (label_id, label_slice),
+            )
+            if polygon is not None:
+                labeled_polygons.append((label_id, polygon))
 
     if factor_rescale != 0:
-        polygons = [
-            scale(
-                poly,
-                xfact=float(factor_rescale),
-                yfact=float(factor_rescale),
-                origin=(0, 0),
+        labeled_polygons = [
+            (
+                label_id,
+                scale(
+                    polygon,
+                    xfact=float(factor_rescale),
+                    yfact=float(factor_rescale),
+                    origin=(0, 0),
+                ),
             )
-            for poly in polygons
+            for label_id, polygon in labeled_polygons
         ]
-    return polygons
+    return labeled_polygons
