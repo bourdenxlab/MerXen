@@ -17,6 +17,11 @@ import numpy as np
 import pandas as pd
 from shapely.geometry import box
 
+from merxen.io.spatialdata_schema import (
+    SpatialDataContractError,
+    canonical_shape_instance_series,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -106,30 +111,19 @@ def query_geometries_for_bounds(
 def label_ids_for_shapes(gdf: gpd.GeoDataFrame) -> tuple[pd.Series, Any]:
     """Return ``(id_series, dtype)`` giving each polygon its raster label id.
 
-    Ported from the viewer's ``_label_ids_for_shapes``: each polygon is labelled
-    with its own GeoDataFrame index value (the instance id). ``id_series`` is
-    indexed by ``gdf.index``. ``dtype`` is the smallest unsigned integer holding
-    every id (uint32, or uint64 for large ids). ID 0 is rejected because it
-    collides with transparent raster background.
+    Canonical shapes use their explicit ``instance_id``. Legacy ProSeg and
+    Cellpose shapes are normalized through the shared SpatialData identity
+    resolver instead of treating their unrelated zero-based RangeIndex as a
+    cell label. ``id_series`` retains ``gdf.index`` so spatially queried rows
+    select the correct labels. ID 0 remains reserved for raster background.
     """
-    index = pd.Series(np.asarray(gdf.index), index=gdf.index)
-    numeric = pd.to_numeric(index, errors="coerce")
-    is_integer_ids = (
-        len(numeric) > 0
-        and numeric.notna().all()
-        and (numeric >= 0).all()
-        and np.array_equal(numeric.to_numpy(), np.floor(numeric.to_numpy()))
-    )
-    if is_integer_ids:
-        if bool((numeric == 0).any()):
-            raise ValueError("Shape instance ID 0 is reserved for raster background")
-        ids = numeric.astype("int64")
-    else:
-        logger.warning(
-            "Shapes index is not a non-negative integer id; rasterizing with "
-            "positional codes. Cell-type colouring may not join for this mask."
+    try:
+        ids = canonical_shape_instance_series(
+            gdf,
+            field_name="viewer-cache shape",
         )
-        ids = pd.Series(pd.factorize(np.asarray(gdf.index))[0] + 1, index=gdf.index)
+    except SpatialDataContractError as exc:
+        raise ValueError(str(exc)) from exc
     max_id = int(ids.max()) if len(ids) else 0
     dtype = np.uint32 if max_id <= np.iinfo(np.uint32).max else np.uint64
     return ids.astype(dtype), dtype
