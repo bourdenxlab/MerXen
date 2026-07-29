@@ -6,6 +6,11 @@ venv_dir="${MERXEN_CI_VENV:-${repo_root}/.ci-venv}"
 install_mode="${MERXEN_CI_INSTALL_MODE:-auto}"
 run_tests="${MERXEN_CI_RUN_TESTS:-auto}"
 
+# Git exports repository-local variables while running hooks. Nested Git
+# operations (for example uv installing a Git dependency) must discover their
+# own repositories instead of inheriting the outer MerXen worktree.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+
 cd "${repo_root}"
 
 if ! command -v uv >/dev/null 2>&1; then
