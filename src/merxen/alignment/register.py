@@ -1,61 +1,29 @@
-"""Cross-section registration using Spateo plus MerXen transform helpers."""
+"""Dispatch DAPI-only VALIS registration or the explicit legacy Spateo path."""
 
 from __future__ import annotations
 
-import inspect
+import json
+import logging
+import random
 from collections.abc import Callable
-from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, cast
 
-import anndata as ad
 import numpy as np
-import pandas as pd
 
-from merxen.alignment.features import (
-    build_alignment_adata,
-    prepare_spateo_features,
-    shared_gene_subset,
+from merxen.alignment.bundle import ValisTransformBundle
+from merxen.alignment.frames import (
+    prepare_registration_frames,
+    resolve_dapi_frame,
 )
-from merxen.alignment.transforms import (
-    NonRigidTransform,
-    apply_affine_matrix,
-    fit_affine_matrix,
-    fit_nonrigid_transform,
-    transform_displacement_summary,
-)
-from merxen.config import AlignmentConfig, SpateoAlignmentConfig
+from merxen.alignment.models import TransformResult
+from merxen.alignment.orientation import estimate_pre_orientation
+from merxen.alignment.partial_overlap import refine_partial_overlap_rigid
+from merxen.alignment.transforms import apply_affine_matrix
+from merxen.alignment.valis_register import run_valis_registration
+from merxen.config import AlignmentConfig
 
-SPATEO_INSTALL_MESSAGE = (
-    "Spateo alignment requires the optional alignment dependencies. "
-    "For Nextflow, leave alignment_bootstrap_dependencies enabled or provide "
-    "an alignment_conda env where `merxen check-alignment-deps` passes. "
-    'For direct CLI use, run: pip install -e ".[alignment]" '
-    '&& pip install "anndata>=0.12.10"'
-)
-
-SpateoRunner = Callable[
-    [ad.AnnData, ad.AnnData, SpateoAlignmentConfig],
-    tuple[ad.AnnData, ad.AnnData],
-]
-
-
-@dataclass(frozen=True)
-class TransformResult:
-    """Container for registration outputs.
-
-    Attributes:
-        merscope_to_common: Transform object mapping MERSCOPE coordinates to a
-            shared reference space.
-        xenium_to_common: Transform object mapping Xenium coordinates to the
-            same shared reference space.
-        metadata: Additional implementation-specific information.
-    """
-
-    merscope_to_common: dict[str, Any]
-    xenium_to_common: dict[str, Any]
-    metadata: dict[str, Any]
-    coordinate_tables: dict[str, pd.DataFrame] | None = None
-    nonrigid_transform: NonRigidTransform | None = None
+logger = logging.getLogger(__name__)
 
 
 def register_pair(
@@ -63,394 +31,236 @@ def register_pair(
     xenium_sdata: Any,
     config: Any,
     *,
-    spateo_runner: SpateoRunner | None = None,
+    spateo_runner: Any = None,
+    valis_runner: Callable[..., Any] | None = None,
 ) -> TransformResult:
-    """Register paired MERSCOPE and Xenium sections to Xenium coordinate space."""
+    """Register a paired section with VALIS by default or legacy Spateo."""
     cfg = _coerce_alignment_config(config)
-    spateo_cfg = cfg.spateo
+    if cfg.backend == "legacy_spateo" or spateo_runner is not None:
+        from merxen.alignment.legacy_spateo import register_pair as legacy_register
 
-    fixed_raw = build_alignment_adata(
-        xenium_sdata,
-        platform="XENIUM",
-        include_image_features=spateo_cfg.include_image_features,
-    )
-    moving_raw = build_alignment_adata(
-        merscope_sdata,
-        platform="MERSCOPE",
-        include_image_features=spateo_cfg.include_image_features,
-    )
-    fixed_raw, moving_raw = shared_gene_subset(fixed_raw, moving_raw)
-
-    fixed_for_spateo = prepare_spateo_features(
-        fixed_raw,
-        normalize_total=spateo_cfg.normalize_total,
-        log1p=spateo_cfg.log1p,
-        use_hvg=spateo_cfg.use_hvg,
-        n_top_genes=spateo_cfg.n_top_genes,
-    )
-    moving_for_spateo = prepare_spateo_features(
-        moving_raw,
-        normalize_total=spateo_cfg.normalize_total,
-        log1p=spateo_cfg.log1p,
-        use_hvg=spateo_cfg.use_hvg,
-        n_top_genes=spateo_cfg.n_top_genes,
-    )
-    fixed_for_spateo, moving_for_spateo = shared_gene_subset(
-        fixed_for_spateo, moving_for_spateo
-    )
-    fixed_for_spateo = _sample_alignment_adata(
-        fixed_for_spateo,
-        max_cells=spateo_cfg.max_alignment_cells,
-        seed=spateo_cfg.alignment_seed,
-    )
-    moving_for_spateo = _sample_alignment_adata(
-        moving_for_spateo,
-        max_cells=spateo_cfg.max_alignment_cells,
-        seed=spateo_cfg.alignment_seed + 1,
-    )
-    if spateo_cfg.use_pca:
-        _add_joint_pca_features(
-            fixed_for_spateo,
-            moving_for_spateo,
-            n_pcs=spateo_cfg.n_pcs,
+        return cast(
+            TransformResult,
+            legacy_register(
+                merscope_sdata,
+                xenium_sdata,
+                cfg,
+                spateo_runner=spateo_runner,
+            ),
         )
 
-    fixed_aligned, moving_aligned, tuning_records = _run_spateo_candidates(
-        fixed_for_spateo,
-        moving_for_spateo,
-        spateo_cfg,
-        spateo_runner=spateo_runner,
-    )
+    resumed_result = _load_completed_valis_result(cfg)
+    if resumed_result is not None:
+        return resumed_result
+    _set_registration_seed(cfg.valis.random_seed)
 
-    moving_source = np.asarray(moving_aligned.obsm["spatial"], dtype=np.float64)
-    fixed_source = np.asarray(fixed_aligned.obsm["spatial"], dtype=np.float64)
-    moving_rigid = _obsm_or(moving_aligned, "align_spatial_rigid", "align_spatial")
-    moving_nonrigid = _obsm_or(
-        moving_aligned,
-        "align_spatial_nonrigid",
-        "align_spatial",
-        fallback=moving_rigid,
-    )
-    fixed_common = _obsm_or(fixed_aligned, "align_spatial", "spatial")
-
-    affine = fit_affine_matrix(moving_source, moving_rigid)
-    nonrigid = fit_nonrigid_transform(
-        moving_source,
-        moving_nonrigid,
-        affine_matrix=affine,
-        neighbors=spateo_cfg.rbf_neighbors,
-        smoothing=spateo_cfg.rbf_smoothing,
-        max_anchors=spateo_cfg.max_nonrigid_anchors,
-    )
-
-    coordinate_tables = {
-        "merscope": _coords_table(
-            moving_aligned.obs_names.astype(str),
-            raw=moving_source,
-            rigid=moving_rigid,
-            nonrigid=moving_nonrigid,
-        ),
-        "xenium": _coords_table(
-            fixed_aligned.obs_names.astype(str),
-            raw=fixed_source,
-            rigid=_obsm_or(fixed_aligned, "align_spatial_rigid", "spatial"),
-            nonrigid=fixed_common,
-        ),
+    platform_sdata = {
+        "MERSCOPE": merscope_sdata,
+        "XENIUM": xenium_sdata,
     }
-
-    moving_target = (
-        moving_nonrigid if spateo_cfg.selected_mode == "nonrigid" else moving_rigid
+    platform_image_config = {
+        "MERSCOPE": cfg.merscope_image,
+        "XENIUM": cfg.xenium_image,
+    }
+    fixed_dapi = resolve_dapi_frame(
+        platform_sdata[cfg.fixed_platform],
+        platform=cfg.fixed_platform,
+        config=platform_image_config[cfg.fixed_platform],
     )
-    metadata = {
-        "method": "spateo_morpho_align",
+    moving_dapi = resolve_dapi_frame(
+        platform_sdata[cfg.moving_platform],
+        platform=cfg.moving_platform,
+        config=platform_image_config[cfg.moving_platform],
+    )
+    registration_image_dir = cfg.output_dir / "registration_inputs"
+    fixed_frame, moving_frame = prepare_registration_frames(
+        fixed_dapi,
+        moving_dapi,
+        config=cfg.valis,
+        output_dir=registration_image_dir,
+    )
+    pre_orientation = estimate_pre_orientation(
+        fixed_frame.processed_image,
+        moving_frame.processed_image,
+        fixed_frame.tissue_mask,
+        moving_frame.tissue_mask,
+        config=cfg.valis.orientation,
+    )
+    pre_orientation = refine_partial_overlap_rigid(
+        fixed_frame.processed_image,
+        moving_frame.processed_image,
+        fixed_frame.tissue_mask,
+        moving_frame.tissue_mask,
+        initial=pre_orientation,
+        config=cfg.valis.partial_overlap,
+        pixel_size_um=fixed_frame.registration_pixel_size_um,
+        fixed_valid_mask=fixed_frame.valid_mask,
+        moving_valid_mask=moving_frame.valid_mask,
+        output_dir=cfg.output_dir / "qc" / "partial_overlap",
+    )
+    runner = run_valis_registration if valis_runner is None else valis_runner
+    valis_result = runner(
+        fixed_frame,
+        moving_frame,
+        pre_orientation,
+        config=cfg.valis,
+        output_dir=cfg.output_dir,
+    )
+
+    return _build_valis_transform_result(
+        cfg,
+        bundle=valis_result.bundle,
+        metadata=valis_result.metadata,
+        valid_domain_mask=valis_result.shared_tissue_mask,
+    )
+
+
+def _build_valis_transform_result(
+    cfg: AlignmentConfig,
+    *,
+    bundle: ValisTransformBundle,
+    metadata: dict[str, Any],
+    valid_domain_mask: np.ndarray,
+) -> TransformResult:
+    moving_transform = {
+        "type": "valis_dapi_transform_chain",
+        "selected_mode": (
+            "nonrigid" if bundle.selected_mode == "non_rigid" else "rigid"
+        ),
+        "rigid_affine_matrix": bundle.global_dataset_matrix.tolist(),
+        "transform_chain_path": str(cfg.output_dir / "transform_chain.json"),
+    }
+    identity = {
+        "type": "identity",
+        "affine_matrix": np.eye(3, dtype=float).tolist(),
+    }
+    if cfg.moving_platform == "MERSCOPE":
+        merscope_transform = moving_transform
+        xenium_transform = identity
+    else:
+        merscope_transform = identity
+        xenium_transform = moving_transform
+
+    complete_metadata = dict(metadata)
+    complete_metadata.update(
+        {
+            "pair_id": cfg.pair_id,
+            "fixed_platform": cfg.fixed_platform,
+            "moving_platform": cfg.moving_platform,
+            "coordinate_system_name": cfg.valis.coordinate_system_name,
+        }
+    )
+    return TransformResult(
+        merscope_to_common=merscope_transform,
+        xenium_to_common=xenium_transform,
+        metadata=complete_metadata,
+        valis_transform=bundle,
+        valid_domain_mask=valid_domain_mask,
+    )
+
+
+def _load_completed_valis_result(cfg: AlignmentConfig) -> TransformResult | None:
+    """Reload a complete compatible registration when direct-CLI resume is enabled."""
+    if not cfg.valis.resume:
+        return None
+    output_dir = Path(cfg.output_dir)
+    chain_path = output_dir / "transform_chain.json"
+    summary_path = output_dir / "registration_summary.json"
+    mask_path = output_dir / "shared_tissue_mask_registration.npy"
+    resume_manifest_path = output_dir / "resume_manifest.json"
+    if not all(
+        path.exists()
+        for path in (
+            chain_path,
+            summary_path,
+            mask_path,
+            resume_manifest_path,
+        )
+    ):
+        return None
+    try:
+        metadata = json.loads(summary_path.read_text())
+        resume_manifest = json.loads(resume_manifest_path.read_text())
+        expected_parameters = cfg.valis.model_dump(mode="json")
+        coordinate_frames = metadata.get("coordinate_frames", {})
+        compatible = (
+            metadata.get("backend") == "valis"
+            and metadata.get("parameters") == expected_parameters
+            and coordinate_frames.get("fixed_platform") == cfg.fixed_platform
+            and coordinate_frames.get("moving_platform") == cfg.moving_platform
+            and resume_manifest == _resume_manifest_payload(cfg)
+        )
+        if not compatible:
+            logger.info(
+                "Existing VALIS artifacts do not match the requested configuration; "
+                "starting a fresh registration"
+            )
+            return None
+        bundle = ValisTransformBundle.load(chain_path)
+        if bundle.selected_mode == "non_rigid" and bundle.forward_displacement is None:
+            logger.warning(
+                "Ignoring incomplete resumed VALIS transform without its forward field"
+            )
+            return None
+        valid_domain_mask = np.asarray(np.load(mask_path), dtype=np.uint8)
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        logger.warning("Could not resume existing VALIS artifacts: %s", exc)
+        return None
+
+    logger.info("Resuming completed VALIS registration from %s", output_dir)
+    return _build_valis_transform_result(
+        cfg,
+        bundle=bundle,
+        metadata=metadata,
+        valid_domain_mask=valid_domain_mask,
+    )
+
+
+def write_valis_resume_manifest(cfg: AlignmentConfig) -> Path:
+    """Record the exact inputs and configuration required for safe direct resume."""
+    manifest_path = Path(cfg.output_dir) / "resume_manifest.json"
+    manifest_path.write_text(json.dumps(_resume_manifest_payload(cfg), indent=2))
+    return manifest_path
+
+
+def _resume_manifest_payload(cfg: AlignmentConfig) -> dict[str, Any]:
+    return {
+        "version": 1,
+        "backend": cfg.backend,
         "pair_id": cfg.pair_id,
+        "merscope_zarr_path": str(Path(cfg.merscope_zarr_path).resolve()),
+        "xenium_zarr_path": str(Path(cfg.xenium_zarr_path).resolve()),
         "fixed_platform": cfg.fixed_platform,
         "moving_platform": cfg.moving_platform,
-        "selected_mode": spateo_cfg.selected_mode,
-        "n_alignment_cells": {
-            "xenium": int(fixed_aligned.n_obs),
-            "merscope": int(moving_aligned.n_obs),
-        },
-        "n_alignment_features": int(fixed_aligned.n_vars),
-        "spateo": spateo_cfg.model_dump(),
-        "tuning": tuning_records,
-        "displacement": {
-            "rigid": transform_displacement_summary(moving_source, moving_rigid),
-            "nonrigid": transform_displacement_summary(moving_source, moving_nonrigid),
-            "selected": transform_displacement_summary(moving_source, moving_target),
-        },
-    }
-
-    return TransformResult(
-        merscope_to_common={
-            "type": "affine_plus_rbf",
-            "selected_mode": spateo_cfg.selected_mode,
-            "rigid_affine_matrix": affine.tolist(),
-            "nonrigid_support_radius": nonrigid.support_radius,
-            "rbf_neighbors": nonrigid.neighbors,
-            "rbf_smoothing": nonrigid.smoothing,
-        },
-        xenium_to_common={
-            "type": "identity",
-            "affine_matrix": np.eye(3, dtype=float).tolist(),
-        },
-        metadata=metadata,
-        coordinate_tables=coordinate_tables,
-        nonrigid_transform=nonrigid,
-    )
-
-
-def run_spateo_alignment(
-    fixed: ad.AnnData,
-    moving: ad.AnnData,
-    config: SpateoAlignmentConfig,
-) -> tuple[ad.AnnData, ad.AnnData]:
-    """Run Spateo's morpho_align and return fixed/moving aligned AnnData."""
-    _apply_spateo_import_shims()
-    try:
-        import spateo as st
-        from spateo.alignment.morpho_alignment import Morpho_pairwise
-    except ImportError as exc:
-        raise RuntimeError(SPATEO_INSTALL_MESSAGE) from exc
-
-    device = _resolve_device(config.device)
-    rep_kwargs = (
-        {
-            "rep_layer": "X_pca",
-            "rep_field": "obsm",
-            "dissimilarity": "cos",
-        }
-        if config.use_pca and "X_pca" in fixed.obsm and "X_pca" in moving.obsm
-        else {}
-    )
-    aligned_result = st.align.morpho_align(
-        models=[fixed.copy(), moving.copy()],
-        spatial_key="spatial",
-        key_added="align_spatial",
-        mode=config.mode,
-        device=device,
-        dtype=config.dtype,
-        max_iter=config.max_iter,
-        verbose=True,
-        **rep_kwargs,
-        **_spateo_pairwise_kwargs(config, Morpho_pairwise),
-    )
-    aligned = (
-        aligned_result[0]
-        if isinstance(aligned_result, tuple) and len(aligned_result) > 0
-        else aligned_result
-    )
-    if len(aligned) != 2:
-        raise RuntimeError(
-            f"Expected two aligned slices from Spateo, got {len(aligned)}"
-        )
-    return aligned[0], aligned[1]
-
-
-def _spateo_pairwise_kwargs(
-    config: SpateoAlignmentConfig,
-    pairwise_cls: Any,
-) -> dict[str, Any]:
-    """Build Spateo kwargs supported by the installed pairwise API."""
-    supported = set(inspect.signature(pairwise_cls.__init__).parameters)
-    candidates: dict[str, Any] = {
-        "beta": config.beta,
-        "lambdaVF": config.lambda_vf,
-        "K": config.k,
-        "nonrigid_start_iter": config.nonrigid_start_iter,
-        "partial_robust_level": config.partial_robust_level,
-        "allow_flip": config.allow_flip,
-        "SVI_mode": config.SVI_mode,
-        "sparse_top_k": config.sparse_top_k,
-        "sparse_calculation_mode": config.sparse_calculation_mode,
-        "use_chunk": config.use_chunk,
-        "chunk_capacity": config.chunk_capacity,
-    }
-    if "n_sampling" in supported:
-        candidates["n_sampling"] = config.n_sampling
-    elif "batch_size" in supported:
-        candidates["batch_size"] = config.n_sampling
-    return {key: value for key, value in candidates.items() if key in supported}
-
-
-def _sample_alignment_adata(
-    adata: ad.AnnData,
-    *,
-    max_cells: int | None,
-    seed: int,
-) -> ad.AnnData:
-    """Deterministically subsample cells for Spateo's pairwise optimization."""
-    if max_cells is None or int(max_cells) <= 0 or adata.n_obs <= int(max_cells):
-        return adata.copy()
-    rng = np.random.default_rng(int(seed))
-    idx = np.sort(rng.choice(adata.n_obs, size=int(max_cells), replace=False))
-    return adata[idx].copy()
-
-
-def _add_joint_pca_features(
-    fixed: ad.AnnData,
-    moving: ad.AnnData,
-    *,
-    n_pcs: int,
-) -> None:
-    """Add joint PCA expression features matching the Spateo tutorial workflow."""
-    fixed_x = _dense_float_matrix(fixed.X)
-    moving_x = _dense_float_matrix(moving.X)
-    combo = np.vstack([fixed_x, moving_x]).astype(np.float32, copy=False)
-    if combo.shape[0] < 2 or combo.shape[1] == 0:
-        return
-    combo -= combo.mean(axis=0, keepdims=True)
-    n_comps = min(int(n_pcs), combo.shape[1], combo.shape[0] - 1)
-    if n_comps <= 0:
-        return
-    u, s, _ = np.linalg.svd(combo, full_matrices=False)
-    scores = (u[:, :n_comps] * s[:n_comps]).astype(np.float32, copy=False)
-    fixed.obsm["X_pca"] = scores[: fixed.n_obs].copy()
-    moving.obsm["X_pca"] = scores[fixed.n_obs :].copy()
-
-
-def _dense_float_matrix(matrix: Any) -> np.ndarray:
-    if hasattr(matrix, "toarray"):
-        matrix = matrix.toarray()
-    return np.asarray(matrix, dtype=np.float32)
-
-
-def _apply_spateo_import_shims() -> None:
-    """Patch narrow compatibility symbols Spateo imports at module import time.
-
-    Spateo 1.1.1 imports its broader segmentation/data I/O stack even when only
-    ``spateo.align`` is needed. Current MerXen dependencies keep modern
-    AnnData/Cellpose for SpatialData and segmentation, so we provide the legacy
-    names Spateo imports without downgrading those core packages.
-    """
-    try:
-        import anndata
-
-        if not hasattr(anndata, "read") and hasattr(anndata, "read_h5ad"):
-            anndata.read = anndata.read_h5ad
-    except Exception:  # noqa: BLE001
-        pass
-
-    try:
-        import cellpose.models as cellpose_models
-
-        if not hasattr(cellpose_models, "Cellpose") and hasattr(
-            cellpose_models, "CellposeModel"
-        ):
-            cellpose_models.Cellpose = cellpose_models.CellposeModel
-    except Exception:  # noqa: BLE001
-        pass
-
-
-def _run_spateo_candidates(
-    fixed: ad.AnnData,
-    moving: ad.AnnData,
-    config: SpateoAlignmentConfig,
-    *,
-    spateo_runner: SpateoRunner | None,
-) -> tuple[ad.AnnData, ad.AnnData, list[dict[str, Any]]]:
-    runner = run_spateo_alignment if spateo_runner is None else spateo_runner
-    candidates = _candidate_spateo_configs(config)
-    best_fixed: ad.AnnData | None = None
-    best_moving: ad.AnnData | None = None
-    best_score = -np.inf
-    records: list[dict[str, Any]] = []
-
-    for idx, candidate in enumerate(candidates):
-        aligned_fixed, aligned_moving = runner(fixed, moving, candidate)
-        score, metrics = _score_aligned_candidate(
-            aligned_fixed,
-            aligned_moving,
-            selected_mode=candidate.selected_mode,
-        )
-        record = {
-            "candidate": int(idx),
-            "score": float(score),
-            "params": _candidate_param_delta(config, candidate),
-            "metrics": metrics,
-        }
-        records.append(record)
-        if score > best_score:
-            best_score = float(score)
-            best_fixed = aligned_fixed
-            best_moving = aligned_moving
-
-    if best_fixed is None or best_moving is None:
-        raise RuntimeError("No Spateo alignment candidates were evaluated")
-    return best_fixed, best_moving, records
-
-
-def _candidate_spateo_configs(
-    config: SpateoAlignmentConfig,
-) -> list[SpateoAlignmentConfig]:
-    if not config.tune:
-        return [config]
-
-    grid = config.param_grid or [
-        {},
-        {"partial_robust_level": 25},
-        {"partial_robust_level": 75},
-        {"SVI_mode": True, "n_sampling": 20_000},
-    ]
-    base = config.model_dump()
-    return [SpateoAlignmentConfig.model_validate(base | params) for params in grid]
-
-
-def _score_aligned_candidate(
-    fixed: ad.AnnData,
-    moving: ad.AnnData,
-    *,
-    selected_mode: str,
-) -> tuple[float, dict[str, Any]]:
-    from merxen.alignment.qc import compute_grid_alignment_metrics
-
-    fixed_eval = fixed.copy()
-    moving_eval = moving.copy()
-    fixed_eval.obsm["spatial"] = _obsm_or(fixed, "align_spatial", "spatial")
-    moving_key = (
-        "align_spatial_nonrigid"
-        if selected_mode == "nonrigid"
-        else "align_spatial_rigid"
-    )
-    moving_eval.obsm["spatial"] = _obsm_or(
-        moving,
-        moving_key,
-        "align_spatial",
-        fallback=moving.obsm["spatial"],
-    )
-    metrics = compute_grid_alignment_metrics(fixed_eval, moving_eval)
-    score = (
-        _finite_or_zero(metrics.get("gene_grid_pearson"))
-        + _finite_or_zero(metrics.get("grid_cosine"))
-        + 0.1 * _finite_or_zero(metrics.get("grid_mutual_information"))
-        - 0.001 * _finite_or_zero(metrics.get("centroid_assd"))
-    )
-    return float(score), metrics
-
-
-def _candidate_param_delta(
-    base: SpateoAlignmentConfig,
-    candidate: SpateoAlignmentConfig,
-) -> dict[str, Any]:
-    base_dump = base.model_dump()
-    candidate_dump = candidate.model_dump()
-    return {
-        key: value
-        for key, value in candidate_dump.items()
-        if base_dump.get(key) != value or key in {"tune", "param_grid"}
+        "parameters": cfg.valis.model_dump(mode="json"),
     }
 
 
-def _finite_or_zero(value: Any) -> float:
+def _set_registration_seed(seed: int) -> None:
+    """Seed NumPy, OpenCV, Python, and PyTorch registration components."""
+    normalized_seed = int(seed)
+    random.seed(normalized_seed)
+    np.random.seed(normalized_seed)
     try:
-        val = float(value)
-    except (TypeError, ValueError):
-        return 0.0
-    return val if np.isfinite(val) else 0.0
+        import cv2
+
+        cv2.setRNGSeed(normalized_seed)
+    except (ImportError, AttributeError):
+        logger.debug("OpenCV RNG seeding is unavailable")
+    try:
+        import torch
+
+        torch.manual_seed(normalized_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(normalized_seed)
+    except ImportError:
+        logger.debug("PyTorch RNG seeding is unavailable")
 
 
 def transform_xy_for_result(result: TransformResult, coords: Any) -> np.ndarray:
-    """Transform MERSCOPE xy coordinates with the selected result transform."""
+    """Transform moving-platform dataset coordinates with the selected result."""
+    if result.valis_transform is not None:
+        return result.valis_transform.transform(coords, chunk_size=250_000)
     selected = result.merscope_to_common.get("selected_mode", "nonrigid")
     if selected == "nonrigid" and result.nonrigid_transform is not None:
         return result.nonrigid_transform.transform(coords)
@@ -469,58 +279,21 @@ def _coerce_alignment_config(config: Any) -> AlignmentConfig:
     )
 
 
-def _resolve_device(device: str) -> str:
-    normalized = str(device).strip().lower()
-    if normalized in {"", "auto"}:
-        try:
-            import torch
+# Backward-compatible imports intentionally point at the marked legacy module.
+from merxen.alignment.legacy_spateo import (  # noqa: E402
+    _apply_spateo_import_shims,
+    _resolve_device,
+    _spateo_pairwise_kwargs,
+    run_spateo_alignment,
+)
 
-            return "0" if torch.cuda.is_available() else "cpu"
-        except Exception:  # noqa: BLE001
-            return "cpu"
-    if normalized == "cpu":
-        return "cpu"
-    if normalized == "cuda":
-        return "0"
-    if normalized.startswith("cuda:"):
-        cuda_device = normalized.removeprefix("cuda:").strip()
-        return cuda_device or "0"
-    return str(device).strip()
-
-
-def _obsm_or(
-    adata: ad.AnnData,
-    preferred: str,
-    fallback_key: str,
-    *,
-    fallback: Any = None,
-) -> np.ndarray:
-    if preferred in adata.obsm:
-        return np.asarray(adata.obsm[preferred], dtype=np.float64)
-    if fallback_key in adata.obsm:
-        return np.asarray(adata.obsm[fallback_key], dtype=np.float64)
-    if fallback is not None:
-        return np.asarray(fallback, dtype=np.float64)
-    raise KeyError(
-        f"AnnData does not contain obsm['{preferred}'] or obsm['{fallback_key}']"
-    )
-
-
-def _coords_table(
-    cell_ids: Any,
-    *,
-    raw: np.ndarray,
-    rigid: np.ndarray,
-    nonrigid: np.ndarray,
-) -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "cell_id": list(cell_ids),
-            "raw_x": raw[:, 0],
-            "raw_y": raw[:, 1],
-            "rigid_x": rigid[:, 0],
-            "rigid_y": rigid[:, 1],
-            "nonrigid_x": nonrigid[:, 0],
-            "nonrigid_y": nonrigid[:, 1],
-        }
-    )
+__all__ = [
+    "TransformResult",
+    "_apply_spateo_import_shims",
+    "_resolve_device",
+    "_spateo_pairwise_kwargs",
+    "register_pair",
+    "run_spateo_alignment",
+    "transform_xy_for_result",
+    "write_valis_resume_manifest",
+]
