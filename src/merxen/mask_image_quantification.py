@@ -24,6 +24,7 @@ from merxen.io.spatialdata_schema import (
     SOURCE_CELL_ID_COLUMN,
 )
 from merxen.memory import force_release, log_status
+from merxen.viewer_cache.format import is_derived_cache_key
 
 logger = logging.getLogger(__name__)
 
@@ -67,22 +68,33 @@ def build_mask_image_quantification_table(
     if label_ids.size == 0:
         raise ValueError(f"[{dataset_name}] Cellpose mask contains no labels.")
 
-    if not getattr(sdata_obj, "images", None):
+    images = getattr(sdata_obj, "images", None)
+    if not images:
         raise RuntimeError(f"[{dataset_name}] No image elements found to quantify.")
 
+    image_keys = [
+        image_key for image_key in images if not is_derived_cache_key(str(image_key))
+    ]
+    if not image_keys:
+        raise RuntimeError(
+            f"[{dataset_name}] No source image elements found to quantify after "
+            "excluding private viewer-cache images."
+        )
+    skipped_cache_images = len(images) - len(image_keys)
     log_status(
-        f"[{dataset_name}] Quantifying {len(sdata_obj.images)} image element(s) "
-        f"over {label_ids.size:,} Cellpose masks"
+        f"[{dataset_name}] Quantifying {len(image_keys)} source image element(s) "
+        f"over {label_ids.size:,} Cellpose masks; skipped "
+        f"{skipped_cache_images} private viewer-cache image(s)"
     )
 
     matrix_parts: list[np.ndarray] = []
     var_frames: list[pd.DataFrame] = []
     image_summaries: list[dict[str, Any]] = []
 
-    for image_key in list(sdata_obj.images.keys()):
+    for image_key in image_keys:
         image_matrix, image_var, image_summary = _quantify_image_element(
             image_key=str(image_key),
-            image_obj=sdata_obj.images[image_key],
+            image_obj=images[image_key],
             mask=mask_arr,
             label_ids=label_ids,
             dataset_name=dataset_name,

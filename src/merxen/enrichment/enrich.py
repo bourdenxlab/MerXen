@@ -528,12 +528,14 @@ def _is_already_enriched(dst_sdata: Any, platform: str) -> bool:
     if platform.upper() == "MERSCOPE":
         req_shapes.add(MERSCOPE_OLD_SHAPE_NAME)
         req_images = {MERSCOPE_ZPROJ_IMAGE_NAME}
+        has_images = req_images.issubset(set(map(str, dst_sdata.images.keys())))
     else:
         req_shapes.update({XENIUM_OLD_CELL_SHAPE_NAME, XENIUM_OLD_NUCLEUS_SHAPE_NAME})
-        req_images = set()
+        # Viewer-cache label grids and image pyramids require the real Xenium
+        # morphology image. Derived cache images alone are not a valid source.
+        has_images = _has_non_derived_image(dst_sdata.images)
     has_shapes = req_shapes.issubset(set(map(str, dst_sdata.shapes.keys())))
     has_tables = req_tables.issubset(set(map(str, dst_sdata.tables.keys())))
-    has_images = req_images.issubset(set(map(str, dst_sdata.images.keys())))
     return has_shapes and has_tables and has_images
 
 
@@ -547,13 +549,18 @@ def _is_enriched_except_nuclei(dst_sdata: Any, platform: str) -> bool:
     if platform.upper() == "MERSCOPE":
         req_shapes.add(MERSCOPE_OLD_SHAPE_NAME)
         req_images = {MERSCOPE_ZPROJ_IMAGE_NAME}
+        has_images = req_images.issubset(set(map(str, dst_sdata.images.keys())))
     else:
         req_shapes.update({XENIUM_OLD_CELL_SHAPE_NAME, XENIUM_OLD_NUCLEUS_SHAPE_NAME})
-        req_images = set()
+        has_images = _has_non_derived_image(dst_sdata.images)
     has_shapes = req_shapes.issubset(set(map(str, dst_sdata.shapes.keys())))
     has_tables = req_tables.issubset(set(map(str, dst_sdata.tables.keys())))
-    has_images = req_images.issubset(set(map(str, dst_sdata.images.keys())))
     return has_shapes and has_tables and has_images
+
+
+def _has_non_derived_image(images: Any) -> bool:
+    """Return whether an image mapping contains a real source image."""
+    return any(not str(key).startswith("_napari_compare_") for key in images)
 
 
 def _remove_per_shape_assignment_tables(dst_sdata: Any) -> None:
