@@ -63,8 +63,9 @@ ${outdir}/
 single-platform mode, only the selected `<platform>/` directory is present and
 paired-only `alignment/`, `alignment_qc/`, and `comparison/` directories are
 not written.
-`reseg/`, `original_seg/`, and optional `proseg_hybrid/` are controlled by
-`--analysis_segmentation`; the default `both` writes the first two branches.
+`reseg/`, `original_seg/`, and `proseg_hybrid/` are controlled by
+`--analysis_segmentation`; the default `both` writes the first two branches and
+`all` writes all three.
 Upstream build, segmentation,
 enrichment, and latest SpatialData artifacts are shared.
 Every `.png` plot listed below is also written as a same-stem `.pdf`.
@@ -163,7 +164,12 @@ Path: `${outdir}/<pair_id>/<platform>/mask_image_quantification/`
 | `latest_input.zarr` | Staged symlink to `../latest/latest_spatialdata.zarr`, updated in place with `table_MOSAIK_cellpose_image_quantification`. |
 | `mask_image_quantification_out/*_mask_image_quantification.parquet` | Wide Cellpose cell × image-channel-stat matrix. |
 | `mask_image_quantification_out/*_mask_image_quantification_features.csv` | Feature metadata for image key, channel, and statistic. |
-| `mask_image_quantification_out/*_mask_image_quantification_summary.json` | Summary of quantified images, cells, features, and sidecar paths. |
+| `mask_image_quantification_out/*_mask_image_quantification_summary.json` | Summary of quantified images, cells, features, sidecar paths, and the identifier-based hybrid-cell join. |
+
+When the hybrid table exists, Cellpose measurements are joined to
+`table_MOSAIK_proseg_hybrid` by the preserved Cellpose `instance_id`. The
+hybrid expression matrix is unchanged; image features are stored in prefixed
+`obs` columns and `.obsm["cellpose_image_quantification"]`.
 
 ### Cortical Depth
 
@@ -235,6 +241,16 @@ Path: `${outdir}/<pair_id>/<platform>/<analysis_segmentation>/qc/`
 | `qc_out/<dataset>_geometry_metrics.csv` | Per-cell geometry (area, perimeter, eccentricity, ...). |
 | `qc_out/<dataset>_cell_metrics.csv` | Per-cell transcripts_per_cell, genes_per_cell. |
 | `qc_out/<dataset>_qc.pkl` | Pickle with summary + DataFrames for fast reload. |
+| `qc_out/<dataset>_hybrid_cell_diagnostics.csv` | Hybrid construction diagnostics plus per-cell Cellpose/ProSeg count and area changes. Hybrid branch only. |
+| `qc_out/<dataset>_hybrid_assignment_sources.csv` | Hybrid transcript assignment-provenance counts and percentages. Hybrid branch only. |
+| `qc_out/<dataset>_hybrid_fallback_reasons.csv` | Cellpose-fallback reason counts and percentages. Hybrid branch only. |
+| `qc_out/<dataset>_hybrid_gene_count_changes.csv` | Per-gene hybrid totals and changes relative to Cellpose and ProSeg. Hybrid branch only. |
+| `qc_out/<dataset>_hybrid_area_growth_map.png` | Spatial hybrid area-growth diagnostics. Hybrid branch only. |
+| `qc_out/<dataset>_hybrid_rejected_transcripts_map.png` | Spatial rejected-external-transcript diagnostics. Hybrid branch only. |
+
+For `proseg_hybrid`, QC additionally writes per-cell Cellpose/ProSeg count and
+area comparisons, assignment-provenance counts, gene-count changes, and spatial
+maps of area growth and rejected external transcripts.
 
 `<dataset>` is lowercased, e.g. `example01_merscope`.
 

@@ -58,7 +58,7 @@ any of them with `--<name>` on the command line.
 | `outdir` | `./results` | Output root. |
 | `analysis_mode` | `paired` | Fallback row mode: `paired`, `merscope`, or `xenium`. A non-empty samplesheet `analysis_mode` value overrides this per row. |
 | `enable_alignment` | `false` | Fallback row alignment switch. A non-empty samplesheet `enable_alignment` value overrides this per row; alignment only applies to paired rows. |
-| `analysis_segmentation` | `both` | Fallback downstream analysis branches after enrichment. Valid values: `both`, `reseg`, `original_seg`, `proseg_hybrid`; comma-separated combinations are accepted. `both` remains `reseg,original_seg`. A non-empty samplesheet value overrides this per row. |
+| `analysis_segmentation` | `both` | Fallback downstream analysis branches after enrichment. Valid values: `both`, `all`, `reseg`, `original_seg`, `proseg_hybrid`; comma-separated combinations are accepted. `both` remains `reseg,original_seg`, while `all` includes all three branches. A non-empty samplesheet value overrides this per row. |
 | `mask_image_quantification_enabled` | `true` | Insert the Cellpose-mask image quantification stage between enrichment and QC. A non-empty samplesheet `mask_image_quantification_enabled` value overrides this per row. |
 | `mecr_enabled` | `true` | Insert mutually exclusive co-expression rate analysis after QC. A non-empty samplesheet `mecr_enabled` value overrides this per row. |
 | `cortical_depth_enabled` | `false` | Insert the cortical-depth stage after clustering. Requires per-sample pial/tissue-edge annotations, with optional gray/white boundaries for depth pieces. A non-empty samplesheet `cortical_depth_enabled` value overrides this per row. |
@@ -124,6 +124,17 @@ lock serialize both Cellpose process types.
 |-------|---------|-------------|
 | `mask_image_quantification_enabled` | `true` | Run Cellpose-mask image quantification after enrichment by default. |
 | `mask_image_quantification_max_forks` | `2` | Maximum concurrent quantification processes. |
+
+### Viewer caches
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `viewer_cache_enabled` | `true` | Pre-build image pyramids and rasterized labels/outlines for ProSeg, ProSeg hybrid, Cellpose, and original segmentation shapes that exist in the store. |
+| `viewer_cache_downsample` | `4` | Downsampling factor for derived image and label pyramids. |
+| `viewer_cache_label_chunk_size` | `2048` | Label rasterization chunk edge length in pixels. |
+| `viewer_cache_contour_width` | `1` | Cached label-outline width. |
+| `viewer_cache_min_size` | `4096` | Minimum image dimension at which another pyramid level is generated. |
+| `viewer_cache_build_image_pyramid` | `true` | Also pre-build the viewer image pyramid. |
 
 ### Cortical depth
 

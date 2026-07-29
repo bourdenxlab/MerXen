@@ -18,7 +18,7 @@ required. A template lives at
 | `pair_id` | **yes** | Unique identifier for this row. Used as the top-level output directory name. |
 | `analysis_mode` | no | Row-level mode: `paired`, `merscope`, or `xenium`. Blank inherits `--analysis_mode`. |
 | `enable_alignment` | no | Row-level alignment switch: `true` or `false`. Blank inherits `--enable_alignment`; only paired rows can run alignment. |
-| `analysis_segmentation` | no | Row-level downstream branch set: `both`, `reseg`, `original_seg`, `proseg_hybrid`, or comma-separated combinations. `both` remains `reseg,original_seg`; blank inherits `--analysis_segmentation`. |
+| `analysis_segmentation` | no | Row-level downstream branch set: `both`, `all`, `reseg`, `original_seg`, `proseg_hybrid`, or comma-separated combinations. `both` remains `reseg,original_seg`; `all` adds `proseg_hybrid`; blank inherits `--analysis_segmentation`. |
 | `start_stage` | no | Row-level first stage. Blank inherits `--start_stage` unless `only_stage` applies. |
 | `stop_stage` | no | Row-level final stage. Blank inherits `--stop_stage` unless `only_stage` applies. |
 | `only_stage` | no | Row-level single-stage override. If set, it overrides that row's start/stop stage settings. |

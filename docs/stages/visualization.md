@@ -87,11 +87,13 @@ Each listed `.png` plot is also written as a same-stem `.pdf`.
   comparison stage; it recomputes them. This keeps stages independent but
   means large zarrs are opened twice per run.
 - The sanity overlay prefers `MERSCOPE_z_projection` and `morphology_focus`
-  image layers, uses `MOSAIK_proseg` as the assignment shape layer, and draws
-  ProSeg, Cellpose-SAM, and the platform's original segmentation. When MERSCOPE
-  aligned vectors are available, the crop is selected in aligned Xenium space
-  and then rendered in raw MERSCOPE image space so the image, transcripts, and
-  boundaries stay registered.
+  image layers and draws ProSeg, ProSeg hybrid, Cellpose-SAM, and the platform's
+  original segmentation. The active branch supplies the assignment layer.
+  Hybrid views use stored `hybrid_assignment` values and distinguish
+  `single_mask`, `proseg_overlap`, `ambiguous_overlap`, and `outside`
+  provenance. When MERSCOPE aligned vectors are available, the crop is selected
+  in aligned Xenium space and then rendered in raw MERSCOPE image space so the
+  image, transcripts, and boundaries stay registered.
 - Points coordinate columns are resolved with `first_existing_col` across
   `x`, `x_micron`, `x_location`, `global_x`, `x_global_px`, `observed_x`
   (and the corresponding `y_*`) for transcript plotting.

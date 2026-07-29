@@ -15,8 +15,16 @@ For the branch-specific shape/table pair selected by Nextflow:
   per cell, derived from the selected AnnData table when `table_key` is set.
 - **Summary statistics** — n cells, n transcripts total/assigned, percent
   assigned, medians for area, eccentricity, transcripts/cell, genes/cell.
+- **Hybrid diagnostics** — for `proseg_hybrid`, Cellpose/ProSeg count deltas,
+  area growth, rejected external transcripts, fallback rates, assignment-source
+  counts, per-gene count changes, and spatial diagnostic maps.
 
 ## Nextflow process
+
+[`VALIDATE_ANALYSIS_LAYER`](../../workflows/modules/qc.nf) first checks that the
+selected table and shape share the same cell identifiers. For
+`proseg_hybrid`, it also requires the registered assignment, background, and
+provenance columns before the QC/analysis fan-out is launched.
 
 [`QC`](../../workflows/modules/qc.nf) — one instance per dataset.
 
@@ -72,8 +80,15 @@ Written under `qc_out/` (published to
 | `<dataset>_geometry_metrics.csv` | One row per cell — all geometry columns. |
 | `<dataset>_cell_metrics.csv` | One row per cell — transcripts_per_cell, genes_per_cell, `dataset`. |
 | `<dataset>_qc.pkl` | Pickle with `summary`, `geometry_metrics`, `cell_metrics` for fast reload. |
+| `<dataset>_hybrid_cell_diagnostics.csv` | Per-hybrid-cell construction diagnostics and Cellpose/ProSeg count deltas. |
+| `<dataset>_hybrid_assignment_sources.csv` | Counts and percentages for every hybrid assignment provenance class. |
+| `<dataset>_hybrid_fallback_reasons.csv` | Cellpose-fallback reason counts and percentages of hybrid cells. |
+| `<dataset>_hybrid_gene_count_changes.csv` | Per-gene hybrid totals and changes relative to Cellpose and ProSeg. |
+| `<dataset>_hybrid_area_growth_map.png` | Spatial map of hybrid area growth relative to the Cellpose prior. |
+| `<dataset>_hybrid_rejected_transcripts_map.png` | Spatial map of capped or unsupported external transcripts. |
 
 The `<dataset>` stem is lowercased, e.g. `example01_merscope_qc_summary.csv`.
+Hybrid-only files are emitted only for the `proseg_hybrid` branch.
 
 ## Interpreting the summary
 

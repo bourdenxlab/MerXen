@@ -25,7 +25,7 @@ Common optional parameters:
 |------|-------------|
 | `--outdir` | Where all outputs are published. Defaults to `./results`. |
 | `--analysis_mode` | `paired` (default), `merscope`, or `xenium`. Controls which platform columns are required and which stages are active. |
-| `--analysis_segmentation` | `both` (default), `reseg`, `original_seg`, or `proseg_hybrid`. `both` still means only `reseg,original_seg`; select the new branch explicitly. |
+| `--analysis_segmentation` | `both` (default), `all`, `reseg`, `original_seg`, or `proseg_hybrid`. `both` remains `reseg,original_seg`; `all` expands to `reseg,original_seg,proseg_hybrid`. |
 | `--force_spatialdata_build` | Force rebuilding the SpatialData zarr even when a cached one exists. Defaults to `false`. |
 | `--enable_alignment` | Run optional Spateo alignment and alignment QC before comparison. Paired mode only. Defaults to `false`. |
 | `--mecr_enabled` | Run mutually exclusive co-expression rate analysis after QC. Defaults to `true`. |
@@ -130,10 +130,11 @@ downstream processes receive explicit table and shape keys for the selected
 branch. A row-level `analysis_segmentation` value can restrict branches for one
 sample while other rows continue to use the global default.
 
-The segmentation stage generates `proseg_hybrid` by default, but downstream
-analysis does not select it implicitly. To run the third branch alone, use
-`--analysis_segmentation proseg_hybrid`; comma-separated combinations such as
-`reseg,proseg_hybrid` are also accepted.
+The segmentation stage generates `proseg_hybrid` by default. The
+backwards-compatible `both` selection remains `reseg,original_seg`. Use
+`--analysis_segmentation all` for all three branches, select
+`proseg_hybrid` alone, or provide a comma-separated combination such as
+`reseg,proseg_hybrid`.
 
 ## Resuming a run
 

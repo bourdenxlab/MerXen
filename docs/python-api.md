@@ -155,6 +155,9 @@ with Groovy.
 ### `mask_image_quantification` — [mask_image_quantification.py](../src/merxen/mask_image_quantification.py)
 - `build_mask_image_quantification_table(...)` — exact image-channel stats
   over nonzero Cellpose mask labels.
+- `join_cellpose_image_quantification_to_hybrid(...)` — attach Cellpose image
+  features to hybrid cells by their shared identifier without quantifying
+  hybrid polygons.
 - `run_mask_image_quantification(config, *, force_rerun)` — stage entry point
   that writes the SpatialData table and sidecar outputs.
 

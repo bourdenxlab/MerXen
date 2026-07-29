@@ -43,3 +43,9 @@ enriched zarr as before.
 
 Rows are named `cellpose_<label_id>`. Feature names use
 `{image_key}__{channel}__{stat}`.
+
+When `table_MOSAIK_proseg_hybrid` exists, the stage joins these Cellpose-mask
+measurements onto hybrid cells by their shared `instance_id`. It does not
+re-quantify expanded hybrid polygons. The hybrid expression matrix remains
+unchanged; joined features are available as `cellpose_image__*` `obs` columns
+and in `.obsm["cellpose_image_quantification"]`.
