@@ -46,6 +46,40 @@ def fit_affine_matrix(source_xy: Any, target_xy: Any) -> np.ndarray:
     return matrix
 
 
+def fit_rigid_matrix(source_xy: Any, target_xy: Any) -> np.ndarray:
+    """Fit a proper 2D rotation and translation without scale or reflection."""
+    src = as_xy_array(source_xy)
+    dst = as_xy_array(target_xy)
+    if src.shape != dst.shape:
+        raise ValueError(f"Coordinate shape mismatch: {src.shape} vs {dst.shape}")
+    if len(src) < 2:
+        raise ValueError("At least two points are required for rigid alignment")
+
+    valid = np.isfinite(src).all(axis=1) & np.isfinite(dst).all(axis=1)
+    src = src[valid]
+    dst = dst[valid]
+    if len(src) < 2:
+        raise ValueError("At least two finite point pairs are required")
+
+    source_center = np.mean(src, axis=0)
+    target_center = np.mean(dst, axis=0)
+    covariance = (src - source_center).T @ (dst - target_center)
+    left, _, right_transpose = np.linalg.svd(covariance)
+    rotation = right_transpose.T @ left.T
+    if np.linalg.det(rotation) < 0:
+        right_transpose[-1, :] *= -1.0
+        rotation = right_transpose.T @ left.T
+    translation = target_center - rotation @ source_center
+    return np.array(
+        [
+            [rotation[0, 0], rotation[0, 1], translation[0]],
+            [rotation[1, 0], rotation[1, 1], translation[1]],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+
+
 def apply_affine_matrix(coords: Any, matrix: Any) -> np.ndarray:
     """Apply a 3x3 homogeneous affine matrix to xy coordinates."""
     xy = as_xy_array(coords)

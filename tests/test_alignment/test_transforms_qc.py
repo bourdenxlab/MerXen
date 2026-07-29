@@ -6,12 +6,14 @@ from pathlib import Path
 
 import anndata as ad
 import numpy as np
+import pytest
 
 from merxen.alignment.qc import compute_grid_alignment_metrics, plot_alignment_overlay
 from merxen.alignment.transforms import (
     apply_affine_matrix,
     fit_affine_matrix,
     fit_nonrigid_transform,
+    fit_rigid_matrix,
 )
 
 
@@ -22,6 +24,32 @@ def test_fit_affine_matrix_recovers_translation() -> None:
     matrix = fit_affine_matrix(src, dst)
 
     np.testing.assert_allclose(apply_affine_matrix(src, matrix), dst, atol=1e-8)
+
+
+def test_fit_rigid_matrix_recovers_rotation_translation_without_scale() -> None:
+    """Rigid fitting must not introduce scale or shear into metadata-scaled data."""
+    source = np.array(
+        [[0.0, 0.0], [100.0, 0.0], [0.0, 80.0], [100.0, 80.0], [37.0, 29.0]]
+    )
+    angle = np.deg2rad(17.0)
+    expected = np.array(
+        [
+            [np.cos(angle), -np.sin(angle), 13.0],
+            [np.sin(angle), np.cos(angle), -7.0],
+            [0.0, 0.0, 1.0],
+        ]
+    )
+    target = apply_affine_matrix(source, expected)
+
+    recovered = fit_rigid_matrix(source, target)
+
+    np.testing.assert_allclose(recovered, expected, atol=1e-12)
+    np.testing.assert_allclose(
+        np.linalg.svd(recovered[:2, :2], compute_uv=False),
+        [1.0, 1.0],
+        atol=1e-12,
+    )
+    assert np.linalg.det(recovered[:2, :2]) == pytest.approx(1.0)
 
 
 def test_fit_nonrigid_transform_keeps_affine_when_residuals_are_zero() -> None:
