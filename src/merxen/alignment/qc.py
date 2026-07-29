@@ -274,21 +274,24 @@ def morphology_supported_global_qc_passes(
     thresholds: AlignmentQCThresholds,
     trusted_coordinate_metadata: bool,
     reflection_selected: bool,
+    authoritative_preorientation_locked: bool = False,
 ) -> tuple[bool, list[str]]:
     """Accept cross-platform DAPI by strong morphology under strict safeguards.
 
     Adjacent-section MERSCOPE/Xenium DAPI can have little pixelwise mutual
     information and few exact cellular feature matches. This fallback is only
-    available when the physical frames came from authoritative metadata and an
-    explicitly searched reflection was selected. It requires substantially
-    stronger tissue agreement and a near-identity VALIS refinement.
+    available when the physical frames came from authoritative metadata and
+    either an explicitly searched reflection was selected or the independently
+    accepted pre-orientation was locked as the authoritative global transform.
+    It requires substantially stronger tissue agreement and a near-identity
+    VALIS refinement.
     """
     reasons: list[str] = []
     if not bool(thresholds.morphology_fallback_enabled):
         reasons.append("morphology_fallback_disabled")
     if not trusted_coordinate_metadata:
         reasons.append("untrusted_coordinate_metadata")
-    if not reflection_selected:
+    if not reflection_selected and not authoritative_preorientation_locked:
         reasons.append("reflection_not_selected")
     _minimum_check(
         image_metrics,

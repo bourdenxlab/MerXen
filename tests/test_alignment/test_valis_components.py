@@ -670,6 +670,57 @@ def test_morphology_supported_qc_accepts_reflected_cross_platform_dapi() -> None
     assert reasons == []
 
 
+def test_morphology_supported_qc_accepts_locked_nonreflected_preorientation() -> None:
+    """A locked morphology transform must not require an unnecessary reflection."""
+    image_metrics = {
+        "tissue_dice": 0.81,
+        "tissue_iou": 0.68,
+        "density_correlation": 0.49,
+        "fixed_overlap_fraction": 0.94,
+        "moving_overlap_fraction": 0.71,
+        "normalized_mutual_information": 0.001,
+        "feature_inliers": 0,
+        "feature_inlier_coverage": 0.0,
+    }
+    affine_metrics = affine_diagnostics(np.eye(3, dtype=np.float64))
+
+    passed, reasons = morphology_supported_global_qc_passes(
+        image_metrics,
+        affine_metrics,
+        preorientation_metrics={"tissue_dice": 0.813},
+        thresholds=AlignmentQCThresholds(),
+        trusted_coordinate_metadata=True,
+        reflection_selected=False,
+        authoritative_preorientation_locked=True,
+    )
+
+    assert passed is True
+    assert reasons == []
+
+
+def test_morphology_supported_qc_rejects_unlocked_nonreflected_fallback() -> None:
+    """Weak feature evidence still needs reflection or an authoritative lock."""
+    image_metrics = {
+        "tissue_dice": 0.81,
+        "tissue_iou": 0.68,
+        "density_correlation": 0.49,
+        "fixed_overlap_fraction": 0.94,
+        "moving_overlap_fraction": 0.71,
+    }
+
+    passed, reasons = morphology_supported_global_qc_passes(
+        image_metrics,
+        affine_diagnostics(np.eye(3, dtype=np.float64)),
+        preorientation_metrics={"tissue_dice": 0.813},
+        thresholds=AlignmentQCThresholds(),
+        trusted_coordinate_metadata=True,
+        reflection_selected=False,
+    )
+
+    assert passed is False
+    assert "reflection_not_selected" in reasons
+
+
 def test_morphology_supported_qc_rejects_unexpected_second_reflection() -> None:
     """The VALIS refinement may not introduce another hidden reflection."""
     image_metrics = {

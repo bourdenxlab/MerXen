@@ -496,6 +496,7 @@ def _evaluate_global_attempt(
         thresholds=config.qc,
         trusted_coordinate_metadata=trusted_coordinate_metadata,
         reflection_selected=reflection_selected,
+        authoritative_preorientation_locked=True,
     )
     if morphology_pass and rigid_pass:
         return True, [], "morphology_supported"
