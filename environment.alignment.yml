@@ -3,8 +3,13 @@ channels:
   - conda-forge
 dependencies:
   - python=3.12
+  - openjdk=11
+  - libvips>=8.11
+  - openslide
   - pip
   - pip:
-      - -e ".[dev]"
-      # Spateo and Dynamo are bootstrapped by ALIGN after this base env is active.
-      # They need a two-step install so AnnData can be restored for SpatialData.
+      - -r requirements.alignment.lock
+      - -e .
+      # VALIS itself is installed --no-deps by ALIGN after this locked stack is
+      # active because its NumPy<2 metadata conflicts with SpatialData 0.8.
+      # The legacy Spateo backend is likewise bootstrapped only when selected.
