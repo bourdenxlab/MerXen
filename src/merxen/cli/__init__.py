@@ -12,6 +12,9 @@ from merxen.cli.run_alignment import (
     alignment_qc_command,
     check_alignment_deps_command,
 )
+from merxen.cli.run_analysis_layer_validation import (
+    validate_analysis_layer_command,
+)
 from merxen.cli.run_build_spatialdata import build_spatialdata_command
 from merxen.cli.run_clustering_squidpy import clustering_squidpy_command
 from merxen.cli.run_comparison import compare_command
@@ -58,6 +61,7 @@ main.add_command(proseg_segment_command)
 main.add_command(enrich_command)
 main.add_command(build_viewer_caches_command)
 main.add_command(mask_image_quantification_command)
+main.add_command(validate_analysis_layer_command)
 main.add_command(qc_command)
 main.add_command(align_command)
 main.add_command(alignment_qc_command)

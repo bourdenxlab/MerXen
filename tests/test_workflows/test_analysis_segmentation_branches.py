@@ -27,6 +27,9 @@ def test_nextflow_exposes_analysis_segmentation_branches() -> None:
     ]:
         assert expected in main_text or expected in config_text
 
+    assert '"all": ["reseg", "original_seg", "proseg_hybrid"]' in main_text
+    assert "VALIDATE_ANALYSIS_LAYER" in main_text
+
 
 def test_downstream_modules_publish_under_segmentation_branch() -> None:
     """Branch-specific downstream modules should include segmentation in outputs."""
@@ -98,8 +101,8 @@ def test_mask_image_quantification_stage_is_wired_before_qc(
         "need_quantified_zarrs: runMaskImageQuantification",
         "MASK_IMAGE_QUANTIFICATION(",
         "downstream_zarrs_ch = enriched_downstream_zarrs_ch.mix(quantified_zarrs_ch)",
-        "qc_inputs_ch = analysis_ready_zarrs_ch",
-        "analysis_without_qc_ch = analysis_ready_zarrs_ch",
+        "analysis_layer_validation_inputs_ch = analysis_ready_zarrs_ch",
+        "analysis_without_qc_ch = analysis_layer_validation_results_ch",
         "merscope_zarr_ch = analysis_ready_zarrs_ch",
         "xenium_zarr_ch = analysis_ready_zarrs_ch",
     ]:
@@ -168,8 +171,8 @@ def test_compute_cortical_depth_stage_is_wired_after_clustering(
         "corticalDepthConfigForPlatform",
         "COMPUTE_CORTICAL_DEPTH(",
         "analysis_ready_zarrs_ch",
-        "qc_inputs_ch = analysis_ready_zarrs_ch",
-        "analysis_without_qc_ch = analysis_ready_zarrs_ch",
+        "analysis_layer_validation_inputs_ch = analysis_ready_zarrs_ch",
+        "analysis_without_qc_ch = analysis_layer_validation_results_ch",
         "merscope_zarr_ch = analysis_ready_zarrs_ch",
         "xenium_zarr_ch = analysis_ready_zarrs_ch",
     ]:

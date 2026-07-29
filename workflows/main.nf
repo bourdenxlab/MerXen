@@ -11,7 +11,7 @@ include {
     DISTANCE_FROM_OBJECT_ANNOTATE;
     DISTANCE_FROM_OBJECT_COHORT
 } from "./modules/distance_from_object"
-include { QC } from "./modules/qc"
+include { VALIDATE_ANALYSIS_LAYER; QC } from "./modules/qc"
 include { ALIGN; ALIGN_QC } from "./modules/alignment"
 include { COMPARE } from "./modules/comparison"
 include { VISUALIZE } from "./modules/visualization"
@@ -116,7 +116,7 @@ def normalizeAnalysisSegmentation(rawValue) {
     }
     def aliases = [
         "both": ["reseg", "original_seg"],
-        "all": ["reseg", "original_seg"],
+        "all": ["reseg", "original_seg", "proseg_hybrid"],
         "reseg": ["reseg"],
         "resegmented": ["reseg"],
         "proseg": ["reseg"],
@@ -144,7 +144,7 @@ def normalizeAnalysisSegmentation(rawValue) {
             if (!aliases.containsKey(key)) {
                 throw new IllegalArgumentException(
                     "Unknown analysis_segmentation '${value}'. Valid values: " +
-                    "both, reseg, original_seg, proseg_hybrid"
+                    "both, all, reseg, original_seg, proseg_hybrid"
                 )
             }
             aliases[key].each { segmentation ->
@@ -1207,6 +1207,7 @@ def rowSampleSettings(row, params) {
     )
     def runMapMyCells = stageInRange("mapmycells", startStage, stopStage, stageOrder)
     def needAnalysisZarrs =
+        runQc ||
         runAlign ||
         runAlignQc ||
         runMecr ||
@@ -2006,20 +2007,23 @@ workflow {
     // clustering -> cortical depth -> clustering.
     analysis_ready_zarrs_ch = downstream_zarrs_ch
 
-    qc_branch_gate_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
-        if (!settings.run_qc) {
+    analysis_layer_validation_gate_ch = sample_rows_ch.flatMap {
+        pairId, _row, settings ->
+        if (!settings.need_analysis_zarrs) {
             []
         } else {
-            settings.active_platforms.collect { platform ->
-                tuple("${pairId}|${platform}", settings.analysis_segmentations)
+            settings.active_platforms.collectMany { platform ->
+                settings.analysis_segmentations.collect { segmentation ->
+                    tuple("${pairId}|${platform}", segmentation, settings)
+                }
             }
         }
     }
 
-    qc_inputs_ch = analysis_ready_zarrs_ch
-        .join(qc_branch_gate_ch)
-        .flatMap { key, pairId, platform, enrichedLatestZarr, analysisSegmentations ->
-            analysisSegmentations.collect { segmentation ->
+    analysis_layer_validation_inputs_ch = analysis_ready_zarrs_ch
+        .join(analysis_layer_validation_gate_ch)
+        .map {
+            key, pairId, platform, enrichedLatestZarr, segmentation, settings ->
                 def layerKeys = analysisLayerKeys(platform, segmentation)
                 tuple(
                     "${key}|${segmentation}",
@@ -2029,8 +2033,32 @@ workflow {
                     enrichedLatestZarr,
                     layerKeys.table_key,
                     layerKeys.shape_key,
+                    settings,
                 )
-            }
+        }
+
+    analysis_layer_validation_results_ch = VALIDATE_ANALYSIS_LAYER(
+        analysis_layer_validation_inputs_ch
+    )
+
+    qc_inputs_ch = analysis_layer_validation_results_ch
+        .filter {
+            _key, _pairId, _platform, _segmentation, _latestZarr,
+            _tableKey, _shapeKey, settings, _validationJson ->
+                settings.run_qc
+        }
+        .map {
+            key, pairId, platform, segmentation, latestZarr,
+            tableKey, shapeKey, _settings, _validationJson ->
+                tuple(
+                    key,
+                    pairId,
+                    platform,
+                    segmentation,
+                    latestZarr,
+                    tableKey,
+                    shapeKey,
+                )
         }
 
     qc_results_ch = QC(qc_inputs_ch)
@@ -2076,32 +2104,24 @@ workflow {
                 )
         }
 
-    analysis_no_qc_gate_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
-        if (!(settings.need_analysis_zarrs && !settings.run_qc)) {
-            []
-        } else {
-            settings.active_platforms.collect { platform ->
-                tuple("${pairId}|${platform}", settings.analysis_segmentations, settings)
-            }
+    analysis_without_qc_ch = analysis_layer_validation_results_ch
+        .filter {
+            _key, _pairId, _platform, _segmentation, _latestZarr,
+            _tableKey, _shapeKey, settings, _validationJson ->
+                !settings.run_qc
         }
-    }
-
-    analysis_without_qc_ch = analysis_ready_zarrs_ch
-        .join(analysis_no_qc_gate_ch)
-        .flatMap {
-            _key, pairId, platform, enrichedLatestZarr, analysisSegmentations, settings ->
-                analysisSegmentations.collect { segmentation ->
-                    def layerKeys = analysisLayerKeys(platform, segmentation)
+        .map {
+            _key, pairId, platform, segmentation, latestZarr,
+            tableKey, shapeKey, settings, _validationJson ->
                     tuple(
                         pairId,
                         segmentation,
                         platform,
-                        enrichedLatestZarr,
-                        layerKeys.table_key,
-                        layerKeys.shape_key,
+                        latestZarr,
+                        tableKey,
+                        shapeKey,
                         settings,
                     )
-                }
         }
 
     analysis_dataset_zarrs_ch = analysis_from_qc_ch.mix(analysis_without_qc_ch)

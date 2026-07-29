@@ -1,3 +1,41 @@
+process VALIDATE_ANALYSIS_LAYER {
+    tag "${pair_id}:${platform}:${segmentation}"
+
+    input:
+    tuple val(key),
+        val(pair_id),
+        val(platform),
+        val(segmentation),
+        path(latest_zarr),
+        val(table_key),
+        val(shape_key),
+        val(settings)
+
+    output:
+    tuple val(key),
+        val(pair_id),
+        val(platform),
+        val(segmentation),
+        path(latest_zarr),
+        val(table_key),
+        val(shape_key),
+        val(settings),
+        path("analysis_layer_validation.json")
+
+    script:
+    """
+    set -euo pipefail
+    merxen validate-analysis-layer \
+        --zarr "${latest_zarr}" \
+        --platform "${platform}" \
+        --segmentation "${segmentation}" \
+        --table-key "${table_key}" \
+        --shape-key "${shape_key}" \
+        --output analysis_layer_validation.json
+    """
+}
+
+
 process QC {
     tag "${pair_id}:${platform}:${segmentation}"
 
