@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
@@ -166,6 +167,103 @@ def canonical_instance_series(
         )
     dtype = "UInt64" if allow_null else "uint64"
     return numeric.astype(dtype)
+
+
+def canonical_shape_instance_series(
+    shape_obj: Any,
+    *,
+    field_name: str = "shape",
+) -> pd.Series:
+    """Resolve positive instance IDs for canonical and legacy shape elements.
+
+    Canonical MerXen shapes carry an explicit ``instance_id`` column. Older
+    enriched stores can instead carry a zero-based ProSeg ``cell`` column or a
+    prefixed Cellpose source ID while retaining an unrelated RangeIndex. This
+    helper normalizes those legacy representations with the same deterministic
+    rules used by enrichment, while preserving the input row index so callers
+    can safely select labels after spatial subsetting.
+    """
+    row_index = shape_obj.index
+    columns = set(getattr(shape_obj, "columns", ()))
+    if INSTANCE_ID_COLUMN in columns:
+        canonical = canonical_instance_series(
+            shape_obj[INSTANCE_ID_COLUMN],
+            field_name=f"{field_name}.{INSTANCE_ID_COLUMN}",
+        )
+        result = pd.Series(
+            canonical.to_numpy(dtype=np.uint64),
+            index=row_index,
+            dtype="uint64",
+        )
+    else:
+        candidate = next(
+            (
+                column
+                for column in (
+                    "cellpose_label",
+                    SOURCE_CELL_ID_COLUMN,
+                    "cell_id",
+                    PROSEG_INTERNAL_ID_COLUMN,
+                    "cell",
+                    "cells",
+                    "cell_ID",
+                    "EntityID",
+                    "label_id",
+                    "region",
+                )
+                if column in columns
+            ),
+            None,
+        )
+        source = (
+            pd.Series(shape_obj[candidate].to_numpy(), index=row_index)
+            if candidate is not None
+            else pd.Series(np.asarray(row_index), index=row_index)
+        )
+        if bool(source.duplicated().any()):
+            raise SpatialDataContractError(
+                f"{field_name} contains duplicate source identifiers"
+            )
+
+        numeric = pd.to_numeric(source, errors="coerce")
+        integer_numeric = (
+            len(numeric) > 0
+            and numeric.notna().all()
+            and (numeric >= 0).all()
+            and np.array_equal(numeric.to_numpy(), np.floor(numeric.to_numpy()))
+        )
+        if integer_numeric:
+            if bool((numeric == 0).any()):
+                if candidate is None:
+                    raise SpatialDataContractError(
+                        f"{field_name} instance ID 0 is reserved for raster background"
+                    )
+                numeric = numeric + 1
+            result = numeric.astype("uint64")
+        else:
+            text = source.astype(str).str.strip()
+            prefixed = text.str.extract(
+                r"^(?:cellpose|nucleus)_([0-9]+)$",
+                flags=re.IGNORECASE,
+                expand=False,
+            )
+            parsed_prefixed = pd.to_numeric(prefixed, errors="coerce")
+            if parsed_prefixed.notna().all() and bool((parsed_prefixed > 0).all()):
+                result = parsed_prefixed.astype("uint64")
+                result.index = row_index
+            else:
+                ordered = {
+                    source_id: index + 1
+                    for index, source_id in enumerate(sorted(text.unique().tolist()))
+                }
+                result = text.map(ordered).astype("uint64")
+                result.index = row_index
+
+    if bool(result.duplicated().any()):
+        raise SpatialDataContractError(
+            f"{field_name} resolves to duplicate instance identifiers"
+        )
+    return result
 
 
 def with_stable_transcript_ids(

@@ -467,13 +467,43 @@ def prepare_source_spatialdata_contract(
             table_obj.obs,
             ["cell_id", "cell", "EntityID"],
         )
+    source_id_col = first_existing_col(
+        table_obj.obs,
+        [SOURCE_CELL_ID_COLUMN, "cell_id", "EntityID"],
+    )
+    if source_id_col is None:
+        source_id_col = old_instance_key
     source_ids = (
-        table_obj.obs[old_instance_key].astype(str)
-        if old_instance_key is not None
+        table_obj.obs[source_id_col].astype(str)
+        if source_id_col is not None
         else pd.Series(table_obj.obs_names.astype(str), index=table_obj.obs.index)
     )
-    mapping = _stable_source_instance_mapping(source_ids)
-    instance_ids = source_ids.map(mapping).astype("uint64")
+    if bool(source_ids.duplicated().any()):
+        raise ValueError("Source segmentation contains duplicate cell identifiers")
+
+    # Some readers expose both the instrument's opaque cell ID and a positive
+    # label value used by a raster segmentation. Xenium is one example:
+    # transcripts use ``cell_id``, while the table is linked to
+    # ``cell_labels``. Preserve those existing label values so the canonical
+    # instance IDs remain aligned with the raster, but key the transcript
+    # lookup by the opaque source IDs.
+    if old_instance_key is not None and old_instance_key != source_id_col:
+        instance_ids = canonical_instance_series(
+            table_obj.obs[old_instance_key],
+            field_name=str(old_instance_key),
+        )
+        if bool(instance_ids.duplicated().any()):
+            raise ValueError("Source segmentation contains duplicate instance labels")
+        mapping = dict(
+            zip(
+                source_ids.tolist(),
+                instance_ids.astype(np.uint64).tolist(),
+                strict=True,
+            )
+        )
+    else:
+        mapping = _stable_source_instance_mapping(source_ids)
+        instance_ids = source_ids.map(mapping).astype("uint64")
 
     region_key = str(attrs.get("region_key", "region"))
     regions = attrs.get("region")
@@ -484,6 +514,28 @@ def prepare_source_spatialdata_contract(
     else:
         region_names = [str(value) for value in regions]
 
+    # The Xenium reader associates its table with ``cell_labels`` when raster
+    # labels are requested, even when polygonal ``cell_boundaries`` are also
+    # available. MerXen segmentation branches are shape-backed, so select the
+    # corresponding cell shape and preserve the reader's label values as the
+    # canonical IDs shared by points, shapes, and the table.
+    if not any(region_name in sdata_obj.shapes for region_name in region_names):
+        preferred_shape_keys = [
+            "cell_boundaries",
+            "cell_circles",
+            *[
+                str(key)
+                for key in sdata_obj.shapes
+                if "cell" in str(key).lower() and "nucleus" not in str(key).lower()
+            ],
+        ]
+        shape_region = next(
+            (key for key in preferred_shape_keys if key in sdata_obj.shapes),
+            None,
+        )
+        if shape_region is not None:
+            region_names = [shape_region]
+
     for region_name in region_names:
         if region_name not in sdata_obj.shapes:
             continue
@@ -492,6 +544,7 @@ def prepare_source_spatialdata_contract(
             shape,
             [
                 SOURCE_CELL_ID_COLUMN,
+                str(source_id_col) if source_id_col is not None else "",
                 str(old_instance_key) if old_instance_key is not None else "",
                 "cell_id",
                 "EntityID",
@@ -529,14 +582,17 @@ def prepare_source_spatialdata_contract(
         )
 
     table = table_obj.copy()
+    if len(region_names) == 1:
+        table.obs[region_key] = pd.Categorical(np.repeat(region_names[0], table.n_obs))
     table.obs[SOURCE_CELL_ID_COLUMN] = source_ids.to_numpy(dtype=object)
     table.obs[INSTANCE_ID_COLUMN] = instance_ids.to_numpy(dtype=np.uint64)
-    if old_instance_key not in {
-        None,
-        SOURCE_CELL_ID_COLUMN,
-        INSTANCE_ID_COLUMN,
-    }:
-        del table.obs[old_instance_key]
+    for legacy_id_col in {old_instance_key, source_id_col}:
+        if legacy_id_col not in {
+            None,
+            SOURCE_CELL_ID_COLUMN,
+            INSTANCE_ID_COLUMN,
+        }:
+            del table.obs[legacy_id_col]
     table.obs_names = table.obs[INSTANCE_ID_COLUMN].astype(str).to_numpy()
     table.uns.pop("spatialdata_attrs", None)
     sdata_obj.tables[table_key] = TableModel.parse(
@@ -989,19 +1045,43 @@ def _canonicalize_original_region(
             table_obj.obs,
             [SOURCE_CELL_ID_COLUMN, "cell_id", "cell", "EntityID"],
         )
+    source_id_col = first_existing_col(
+        table_obj.obs,
+        [SOURCE_CELL_ID_COLUMN, "cell_id", "EntityID"],
+    )
+    if source_id_col is None:
+        source_id_col = old_instance_key
     table_source = (
-        table_obj.obs[old_instance_key].astype(str)
-        if old_instance_key is not None
+        table_obj.obs[source_id_col].astype(str)
+        if source_id_col is not None
         else pd.Series(table_obj.obs_names.astype(str), index=table_obj.obs.index)
     )
-    mapping = _stable_source_instance_mapping(table_source)
-    table_ids = table_source.map(mapping).astype("uint64")
+    if bool(table_source.duplicated().any()):
+        raise ValueError("table_original contains duplicate source cell identifiers")
+    if old_instance_key is not None and old_instance_key != source_id_col:
+        table_ids = canonical_instance_series(
+            table_obj.obs[old_instance_key],
+            field_name=str(old_instance_key),
+        )
+        if bool(table_ids.duplicated().any()):
+            raise ValueError("table_original contains duplicate instance labels")
+        mapping = dict(
+            zip(
+                table_source.tolist(),
+                table_ids.astype(np.uint64).tolist(),
+                strict=True,
+            )
+        )
+    else:
+        mapping = _stable_source_instance_mapping(table_source)
+        table_ids = table_source.map(mapping).astype("uint64")
 
     shape_obj = sdata_obj.shapes[shape_key]
     shape_source_col = first_existing_col(
         shape_obj,
         [
             SOURCE_CELL_ID_COLUMN,
+            str(source_id_col) if source_id_col is not None else "",
             str(old_instance_key) if old_instance_key is not None else "",
             "cell_id",
             "cell",
@@ -1040,12 +1120,13 @@ def _canonicalize_original_region(
     table = table_obj.copy()
     table.obs[SOURCE_CELL_ID_COLUMN] = table_source.to_numpy(dtype=object)
     table.obs[INSTANCE_ID_COLUMN] = table_ids.to_numpy(dtype=np.uint64)
-    if old_instance_key not in {
-        None,
-        SOURCE_CELL_ID_COLUMN,
-        INSTANCE_ID_COLUMN,
-    }:
-        del table.obs[old_instance_key]
+    for legacy_id_col in {old_instance_key, source_id_col}:
+        if legacy_id_col not in {
+            None,
+            SOURCE_CELL_ID_COLUMN,
+            INSTANCE_ID_COLUMN,
+        }:
+            del table.obs[legacy_id_col]
     table.obs_names = table.obs[INSTANCE_ID_COLUMN].astype(str).to_numpy()
     region_key = str(attrs.get("region_key", "region"))
     table.uns.pop("spatialdata_attrs", None)

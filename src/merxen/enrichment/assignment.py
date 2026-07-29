@@ -30,6 +30,7 @@ from merxen.io.spatialdata_schema import (
     PROSEG_ID_NAMESPACE,
     SOURCE_CELL_ID_COLUMN,
     canonical_instance_series,
+    canonical_shape_instance_series,
     choose_primary_points_key,
     register_segmentation_branch,
     stamp_merxen_schema,
@@ -83,12 +84,10 @@ def ensure_shape_has_cell_id(
     shp = sdata_obj.shapes[shape_key]
     if INSTANCE_ID_COLUMN in shp.columns:
         gdf = shp.copy()
-        instance_ids = canonical_instance_series(
-            gdf[INSTANCE_ID_COLUMN],
-            field_name=f"{shape_key}.{INSTANCE_ID_COLUMN}",
+        instance_ids = canonical_shape_instance_series(
+            gdf,
+            field_name=shape_key,
         )
-        if bool(instance_ids.duplicated().any()):
-            raise ValueError(f"[{shape_key}] Duplicate instance IDs")
         gdf[INSTANCE_ID_COLUMN] = instance_ids.to_numpy(dtype=np.uint64)
         gdf.index = pd.Index(
             gdf[INSTANCE_ID_COLUMN],
@@ -120,17 +119,10 @@ def ensure_shape_has_cell_id(
         raise ValueError(
             f"[{shape_key}] Duplicate source cell IDs cannot be normalized safely"
         )
-    numeric = pd.to_numeric(source_ids, errors="coerce")
-    if bool(numeric.notna().all()) and bool((numeric >= 0).all()):
-        if bool((numeric == 0).any()):
-            numeric = numeric + 1
-        instance_ids = numeric.astype("uint64")
-    else:
-        ordered = {
-            source_id: index + 1
-            for index, source_id in enumerate(sorted(source_ids.tolist()))
-        }
-        instance_ids = source_ids.map(ordered).astype("uint64")
+    instance_ids = canonical_shape_instance_series(
+        gdf,
+        field_name=shape_key,
+    )
     gdf[SOURCE_CELL_ID_COLUMN] = source_ids.to_numpy(dtype=object)
     gdf[INSTANCE_ID_COLUMN] = instance_ids.to_numpy(dtype=np.uint64)
     gdf.index = pd.Index(
