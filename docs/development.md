@@ -158,14 +158,22 @@ git push origin HEAD --tags
   uv pip compile pyproject.toml --extra dev -o requirements.lock
   ```
 
+  When the dedicated registration stack changes, regenerate its separate lock:
+
+  ```bash
+  uv pip compile pyproject.toml --extra dev --group alignment-runtime \
+    --python-platform linux -o requirements.alignment.lock
+  ```
+
 - **Never `pip install <pkg>` directly.** That leaves you out of sync with
   the lockfile and CI.
 - **Conda env (`environment.yml`)** is deliberately thin — Python 3.12, pip,
   and `-e ".[dev]"`. All Python dependencies come through `pyproject.toml`.
-- **Alignment env (`environment.alignment.yml`)** mirrors the base env for
-  Nextflow `ALIGN`. Spateo/Dynamo are bootstrapped inside that env at runtime
-  because their older AnnData metadata has to be followed by a modern AnnData
-  restore step.
+- **Alignment env (`environment.alignment.yml`)** installs
+  `requirements.alignment.lock` plus Java/libvips for Nextflow `ALIGN`.
+  VALIS 1.2 is installed exactly with `--no-deps` after the locked
+  NumPy-2-compatible runtime. The explicit legacy backend still bootstraps its
+  pinned Spateo/Dynamo packages at runtime.
 - **Clustering GPU env (`environment.clustering-gpu.yml`)** contains RAPIDS and
   its Dask pin. It receives H5AD inputs only; SpatialData reads and writes stay
   in the base environment.

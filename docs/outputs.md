@@ -294,14 +294,24 @@ Only present for paired rows whose effective `enable_alignment` value is `true`.
 
 | File | Contents |
 |------|----------|
-| `align_out/alignment_transform.json` | Spateo parameters, affine matrix, serialized RBF metadata, and displacement summary. |
-| `align_out/alignment_coords/*.csv` | Raw, rigid, and non-rigid alignment centroid tables. |
+| `align_out/alignment_transform.json` | Selected backend and mode, physical-coordinate transform, parameters, QC, and dependency versions. |
+| `align_out/transform_chain.json` | Explicit moving-physical → image → registration → fixed-physical matrix chain. |
+| `align_out/forward_displacement_field.npz` / `backward_displacement_field.npz` | Reloadable sampled non-rigid fields, when available. |
+| `align_out/registration_summary.json` / `.csv` | DAPI QC, selection status, thresholds, and attempt summaries. |
+| `align_out/resume_manifest.json` | Input paths, platform roles, and parameters used to validate direct-run resume. |
+| `align_out/shared_tissue_mask.npy` / `.tif` | Intersection of fixed and registered-moving tissue on the original fixed DAPI grid. |
+| `align_out/shared_tissue_mask_registration.npy` / `.tif` | Equivalent mask on the padded registration grid used for coordinate-domain annotation. |
+| `align_out/registration_inputs/` / `registration_images/` | Halo-suppressed DAPI images, acquired-support/tissue/validity masks, support-boundary metrics, the locked shared-tissue mask and feather, and stable VALIS inputs. |
+| `align_out/valis/` / `qc/` | Locked non-rigid VALIS artifacts plus partial-overlap candidates, seed-labelled physical objective plots and local score slice, overlays, checkerboards, feature, mask, displacement, and deformation diagnostics. |
+| `align_out/alignment_coords/` | Legacy coordinate diagnostics; retained as an empty contract directory for VALIS. |
 
-`ALIGN` updates the existing MERSCOPE latest zarr in place: raw vector elements
-remain untouched, rigid affine transforms are saved to `merxen_xenium`, and new
-`*_aligned_nonrigid` vector elements store materialized non-rigid coordinates.
-Xenium is not copied; downstream stages keep using the original Xenium latest
-zarr as the fixed reference.
+By default, `ALIGN` updates the existing MERSCOPE latest zarr in place. Raw
+vector elements remain untouched, the selected global affine is saved to
+`merxen_xenium`, and materialized selected VALIS coordinates use the existing
+`*_aligned_nonrigid` suffix for downstream compatibility. Their metadata says
+whether non-rigid or the global fallback was actually selected. Transformed
+points, shapes, and table centroids can carry an `in_shared_tissue_domain`
+flag. Xenium remains the fixed reference and is not copied.
 
 ### Alignment QC
 
@@ -311,9 +321,9 @@ Only present for paired rows whose effective `enable_alignment` value is `true`.
 
 | File | Contents |
 |------|----------|
-| `alignment_qc_out/<pair_id>_alignment_qc.json` | SABench-style grid metrics and centroid distance summary. |
+| `alignment_qc_out/<pair_id>_alignment_qc.json` | Collated DAPI overlap, similarity, feature, affine, and deformation QC. |
 | `alignment_qc_out/<pair_id>_alignment_qc_metrics.csv` | Single-row CSV with the same metrics. |
-| `alignment_qc_out/<pair_id>_alignment_overlay.png` | Xenium/MERSCOPE centroid overlay after alignment. |
+| `alignment_qc_out/<pair_id>_alignment_overlay.png` | Selected Xenium/MERSCOPE DAPI registration overlay. |
 
 ### Comparison
 

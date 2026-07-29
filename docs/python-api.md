@@ -23,7 +23,7 @@ merxen/
 ├── qc/                  # per-dataset and cross-platform metrics
 ├── visualization/       # plotting
 ├── analysis/            # Scanpy/Squidpy downstream analysis
-└── alignment/           # optional Spateo cross-section registration
+└── alignment/           # default VALIS DAPI + legacy Spateo registration
 ```
 
 The subpackage structure mirrors the Nextflow stage graph:
@@ -221,11 +221,19 @@ with large point tables and image pyramids.
 ## `merxen.alignment`
 
 - `TransformResult` dataclass.
-- `register_pair(merscope_sdata, xenium_sdata, config)` — builds paired
-  AnnData objects, runs Spateo alignment, and fits affine/RBF transforms.
+- `register_pair(merscope_sdata, xenium_sdata, config)` — dispatches to
+  DAPI-only VALIS registration by default or the explicit legacy Spateo
+  backend.
+- `ValisTransformBundle` — reloadable physical/pixel coordinate chain with
+  optional sampled non-rigid displacement fields.
+- `evaluate_aligned_partial_overlap_objective(...)` — evaluate the same robust
+  boundary/DAPI objective for already-aligned images, used to guard non-rigid
+  selection.
 - `run_alignment_pipeline(config)` — CLI/Nextflow entry point for `ALIGN`.
-- `run_alignment_qc(config)` — CLI/Nextflow entry point for `ALIGN_QC`.
-- `fit_affine_matrix`, `fit_nonrigid_transform` — reusable transform helpers.
+- `run_alignment_qc(config)` — DAPI QC collation for VALIS; legacy
+  expression-grid QC is dispatched only for legacy results.
+- `fit_affine_matrix`, `fit_nonrigid_transform` — reusable global and legacy
+  transform helpers.
 
 See [Section alignment](stages/alignment.md).
 

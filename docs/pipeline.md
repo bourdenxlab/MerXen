@@ -46,8 +46,8 @@ channels.
            │
            ▼
   ┌─────────────────┐
-  │ ALIGN           │   optional Spateo MERSCOPE→Xenium
-  │ ALIGN_QC        │   registration and QC
+  │ ALIGN           │   optional VALIS DAPI MERSCOPE→Xenium
+  │ ALIGN_QC        │   DAPI registration report collation
   └────────┬────────┘
            │
     ┌──────┴──────┐

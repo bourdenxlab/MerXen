@@ -199,15 +199,11 @@ merxen align --config align_config.json
 |--------|-------------|
 | `--config PATH` | JSON validated against `AlignmentConfig`. |
 
-This command requires the optional alignment dependencies:
-
-```bash
-pip install -e ".[alignment]"
-pip install "anndata>=0.12.10"
-```
-
-Nextflow handles this automatically for `ALIGN` through
-`environment.alignment.yml` and `merxen check-alignment-deps`.
+The default JSON backend is `valis`; set `backend` to `legacy_spateo` to run
+the former implementation. The recommended reproducible setup is
+`environment.alignment.yml`, which installs `requirements.alignment.lock` and
+the exact VALIS package. Validate either backend with
+`merxen check-alignment-deps --backend valis|legacy_spateo`.
 
 Details: [Section alignment](stages/alignment.md).
 
@@ -215,7 +211,9 @@ Details: [Section alignment](stages/alignment.md).
 
 ## `merxen alignment-qc`
 
-Compute SABench-style grid metrics and a centroid overlay for an aligned pair.
+Collate the selected backend's post-alignment QC. VALIS runs report DAPI
+morphology metrics and an image overlay; only the legacy backend uses the
+former expression-grid and centroid QC.
 
 ```bash
 merxen alignment-qc --config alignment_qc_config.json

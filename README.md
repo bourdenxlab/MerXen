@@ -9,7 +9,7 @@ MerXen takes spatial transcriptomics datasets and runs a standardised pipeline. 
 1. **SpatialData build** — Builds platform-specific SpatialData zarrs from raw MERSCOPE and Xenium output folders
 2. **Cell and nuclei segmentation** — A reusable DAPI-only Cellpose nuclei stage precedes GPU Cellpose-SAM cell segmentation, pinned ProSeg 3.2.0 refinement using Cellpose probability logits, and a default separate transcript-supported local-convex branch with growth-only boundary smoothing
 3. **Mask image quantification** — Quantifies all SpatialData image channels over final Cellpose masks
-4. **Section alignment** — Optionally registers paired adjacent sections to a Xenium reference coordinate system with Spateo
+4. **Section alignment** — Optionally registers paired adjacent sections from DAPI morphology with VALIS; the former Spateo method remains available as an explicit legacy backend
 5. **Analysis and visualisation** — QC metrics, reference-based mutually exclusive co-expression rate (MECR), paired gene-level comparison when both platforms are present, single-platform or paired visualisation, cell-level spatial autocorrelation, assignment-independent transcript-coordinate spatial patterns, first-pass Scanpy/Squidpy clustering, and optional local MapMyCells cell type assignment. By default, downstream analysis runs for both ProSeg-resegmented cells and original instrument segmentations; `proseg_hybrid` is available as an explicit third branch without redefining `reseg`.
 6. **Distance from object** — Optionally annotates cells by nearest registered polygon edge and runs grey-matter-only, paired near-vs-far PyDESeq2 for resegmented, original, and mask-derived cells.
 
@@ -42,16 +42,17 @@ MerXen/
 │   ├── visualization/          # Plotting
 │   ├── analysis/               # Scanpy/Squidpy downstream analyses
 │   ├── distance_from_object/   # Polygon-edge distance + paired pseudobulk DE
-│   └── alignment/              # Optional Spateo cross-section registration
+│   └── alignment/              # Default VALIS DAPI + legacy Spateo registration
 ├── tests/                      # pytest suite, mirrors src/merxen/
 ├── docs/                       # Project documentation (start at docs/index.md)
 ├── notebooks/                  # Exploratory notebooks only
 ├── pyproject.toml              # Dependencies, merxen entry point, tool config
 ├── environment.yml             # Conda env (Python 3.12 + pip)
-├── environment.alignment.yml   # Nextflow ALIGN env with Spateo bootstrap
+├── environment.alignment.yml   # Isolated Nextflow ALIGN environment
 ├── environment.clustering-gpu.yml # Isolated RAPIDS clustering environment
 ├── Dockerfile.clustering-gpu   # Isolated RAPIDS clustering image
 ├── requirements.lock           # Pinned dependency tree
+├── requirements.alignment.lock # Pinned VALIS-compatible alignment stack
 ├── .env.example                # Required environment variables template
 ├── Agents.md                   # Project standards (must-read for contributors)
 └── CLAUDE.md                   # Short overview + pointer to Agents.md
@@ -70,9 +71,9 @@ pre-commit install --hook-type pre-push
 ```
 
 Nextflow uses `environment.alignment.yml` for the optional `ALIGN` process.
-That process bootstraps Spateo in its own conda env and restores modern
-AnnData, so regular pipeline stages are not affected by Spateo's older
-dependency metadata.
+It installs the locked image-registration stack and exact `valis-wsi==1.2.0`
+package in isolation. Selecting `--alignment_backend legacy_spateo` instead
+uses the former pinned Spateo/Dynamo bootstrap.
 
 ## Required environment variables
 

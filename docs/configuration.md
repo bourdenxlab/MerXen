@@ -233,46 +233,117 @@ install paths trigger a `sudo` prompt.
 
 ### Alignment
 
-Alignment is optional because it requires Spateo and its heavier dependencies.
-When a paired row's effective `enable_alignment` value is `true`, Nextflow runs
-`ALIGN` in `environment.alignment.yml`. The process checks whether MerXen's
-shimmed Spateo import works; if it does not, it installs pinned Spateo/Dynamo
-Git refs inside the alignment env and then restores modern AnnData for
-SpatialData compatibility. Non-alignment stages keep using `environment.yml`.
+Alignment is optional and runs in the isolated `environment.alignment.yml`.
+The default `valis` backend registers DAPI morphology only; it does not use
+transcripts, expression, cell labels, or RNA-derived images. The former method
+is retained as the explicit `legacy_spateo` backend. Non-alignment stages keep
+using `environment.yml`.
 
 | Param | Default | Description |
 |-------|---------|-------------|
 | `enable_alignment` | `false` | Run `ALIGN` and `ALIGN_QC` between QC and comparison by default. A samplesheet `enable_alignment` value can override this per paired row. |
+| `alignment_backend` | `valis` | `valis` (DAPI-only default) or `legacy_spateo`. |
+| `alignment_fixed_platform` / `alignment_moving_platform` | `XENIUM` / `MERSCOPE` | Reference and transformed dataset. They must differ. |
 | `alignment_conda` | `environment.alignment.yml` | Conda env file or existing env path used only for `ALIGN`. |
-| `alignment_bootstrap_dependencies` | `true` | Install pinned Spateo/Dynamo requirements inside the `ALIGN` env when `merxen check-alignment-deps` fails. |
-| `alignment_dynamo_requirement` | Git pin for `dynamo-release` v1.5.3 | Requirement installed by the alignment bootstrap. |
-| `alignment_spateo_requirement` | Git pin for Spateo main commit `1bd8a35...` | Requirement installed by the alignment bootstrap; resolves to `spateo-release` 1.1.1. |
-| `alignment_anndata_requirement` | `anndata>=0.12.10` | Requirement installed after Spateo/Dynamo to restore SpatialData-compatible AnnData. |
-| `alignment_device` | `auto` | Spateo device; `auto` uses CUDA when available. |
-| `alignment_dtype` | `float32` | Spateo tensor precision; lower memory than float64. |
-| `alignment_selected_mode` | `nonrigid` | Coordinate set used by downstream alignment transforms. |
-| `alignment_spateo_mode` | `SN-S` | Spateo morpho-align mode. |
-| `alignment_max_iter` | `360` | Spateo optimization iterations. |
-| `alignment_nonrigid_start_iter` | `220` | Iteration where non-rigid refinement starts. |
-| `alignment_beta` | `0.005` | Spateo non-rigid kernel width. |
-| `alignment_lambda_vf` | `3000.0` | Spateo vector-field regularization. |
-| `alignment_k` | `15` | Spateo control-point count. |
-| `alignment_partial_robust_level` | `100` | Robustness level for partial overlap. |
-| `alignment_allow_flip` | `true` | Allow Spateo's coarse initialization to test a mirrored orientation. |
-| `alignment_svi_mode` | `false` | Use full pairwise matching on the sampled cells instead of SVI mini-batches. |
-| `alignment_n_sampling` | `1000` | SVI batch size. |
-| `alignment_sparse_top_k` | `512` | Sparse matching top-k used by Spateo. |
-| `alignment_chunk_capacity` | `1` | Spateo chunk capacity. |
-| `alignment_use_hvg` | `false` | Select highly variable genes before alignment. `false` uses the shared panel. |
-| `alignment_n_top_genes` | `100` | Number of HVGs used for alignment. |
-| `alignment_use_pca` | `true` | Run joint PCA on shared expression features before Spateo. |
-| `alignment_n_pcs` | `50` | Number of joint PCA components used for Spateo matching. |
-| `alignment_max_alignment_cells` | `35000` | Deterministic per-platform cell subsample used for Spateo optimization. |
-| `alignment_seed` | `21` | Seed for deterministic alignment subsampling. |
-| `alignment_max_nonrigid_anchors` | `5000` | Maximum RBF anchors for full-data transform application. |
-| `alignment_pytorch_cuda_alloc_conf` | `expandable_segments:True,max_split_size_mb:256` | PyTorch allocator setting exported by `ALIGN`. |
-| `alignment_max_forks` | `1` | Maximum concurrent `ALIGN` tasks. Raise only when multiple GPUs or sufficient VRAM are available. |
-| `alignment_qc_grid_rows` / `alignment_qc_grid_cols` | `10` / `10` | SABench-style QC grid dimensions. |
+| `alignment_bootstrap_dependencies` | `true` | Install the exact selected backend package when its dependency check fails. The locked transitive VALIS stack is already part of the conda environment. |
+| `alignment_valis_requirement` | `valis-wsi==1.2.0` | Exact package installed with `--no-deps` after the locked NumPy-2-compatible runtime. |
+| `alignment_device` | Dwight: `auto` | DISK/LightGlue device; automatically uses CUDA when available. Use `cpu` for an explicit CPU fallback. |
+| `alignment_max_forks` | Dwight: `1` | Maximum concurrent `ALIGN` tasks. Raise only with sufficient CPU/GPU memory. |
+| `alignment_pytorch_cuda_alloc_conf` | Dwight: `expandable_segments:True,max_split_size_mb:256` | PyTorch allocator setting exported by `ALIGN`. |
+
+#### VALIS DAPI input and preprocessing
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `alignment_merscope_image_key` / `alignment_xenium_image_key` | `MERSCOPE_z_projection` / `morphology_focus` | SpatialData image elements used for registration. |
+| `alignment_merscope_dapi_channel` / `alignment_xenium_dapi_channel` | `DAPI` / `DAPI` | Channel selected by name, not position. |
+| `alignment_merscope_pixel_size_um` / `alignment_xenium_pixel_size_um` | `null` / `null` | Optional physical-size overrides. Values are checked against inferred SpatialData transforms. |
+| `alignment_registration_pixel_size_um` | `null` | Shared isotropic registration pixel size. `null` chooses a resolution bounded by both native scales and the source-size limit. |
+| `alignment_registration_source_max_dim_px` | `3200` | Maximum source diagonal used to choose temporary registration resolution. |
+| `alignment_background_sigma_um` | `75.0` | Broad background-removal scale. |
+| `alignment_background_boundary_mode` | `mirror` | Boundary mode used by support-normalized Gaussian background and smoothing. |
+| `alignment_intensity_lower_percentile` / `alignment_intensity_upper_percentile` | `0.5` / `99.5` | Robust intensity clipping limits. |
+| `alignment_intensity_compression` | `asinh` | Monotonic `asinh` or `log1p` compression. |
+| `alignment_clahe_clip_limit` | `0.01` | Mild local contrast limit. |
+| `alignment_smoothing_sigma_um` | `3.0` | Nuclear-density smoothing scale. |
+| `alignment_edge_taper_um` | `150.0` | Cosine taper measured inward from the acquired MERSCOPE FOV footprint (or rectangular support on other inputs), applied only to temporary registration images and fields. |
+| `alignment_edge_exclusion_um` | `150.0` | Acquired-support margin excluded from tissue masks, feature detection, rigid scoring, and non-rigid estimation. |
+| `alignment_mask_smoothing_sigma_um` | `20.0` | Tissue-density mask smoothing scale. |
+| `alignment_mask_closing_radius_um` | `30.0` | Tissue-mask closing radius. |
+| `alignment_mask_min_area_um2` / `alignment_mask_hole_area_um2` | `25000.0` / `25000.0` | Minimum retained fragment area and maximum filled-hole area. |
+| `alignment_mask_dilation_um` | `10.0` | Edge dilation for robust partial-tissue support. |
+
+#### Orientation, VALIS, and transform output
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `alignment_orientation_max_dim_px` | `512` | Maximum image dimension for coarse orientation search. |
+| `alignment_orientation_coarse_step_degrees` / `alignment_orientation_refine_step_degrees` / `alignment_orientation_final_step_degrees` | `10.0` / `2.0` / `0.5` | Full-circle angular-search increments when SIFT/RANSAC support is insufficient. |
+| `alignment_allow_reflection` | `true` | Search reflected and non-reflected candidates for paired MERSCOPE/Xenium sections. |
+| `alignment_reflection_minimum_score_improvement` | `0.01` | Required reflected-candidate score advantage; prevents an effectively tied search from introducing a flip. |
+| `alignment_partial_overlap_enabled` | `true` | Run joint residual rotation/X/Y refinement before VALIS. |
+| `alignment_partial_overlap_max_dim_px` | `512` | Maximum dimension of the robust rigid-search canvas. |
+| `alignment_partial_overlap_angle_radius_degrees` / `alignment_partial_overlap_angle_step_degrees` | `10.0` / `1.0` | Coarse residual-angle search window and increment. |
+| `alignment_partial_overlap_max_translation_um` | `1500.0` | Maximum absolute residual translation per axis. |
+| `alignment_partial_overlap_retained_boundary_fraction` | `0.7` | Closest fraction retained independently in both directions of the trimmed boundary distance. |
+| `alignment_partial_overlap_boundary_distance_scale_um` | `150.0` | Physical scale converting robust boundary distance into an objective score. |
+| `alignment_partial_overlap_density_sigma_um` | `75.0` | DAPI-density smoothing for overlap-normalized internal-structure correlation. |
+| `alignment_partial_overlap_min_fixed_overlap_fraction` / `alignment_partial_overlap_min_moving_overlap_fraction` | `0.45` / `0.45` | Independent coverage constraints preventing a tiny coincidental match. |
+| `alignment_partial_overlap_candidates_to_refine` | `5` | Spatially distinct coarse candidates refined with bounded Powell optimization. |
+| `alignment_valis_num_features` | `7500` | DISK features supplied to LightGlue. |
+| `alignment_valis_max_processed_image_dim_px` | `1600` | VALIS global feature-registration image limit. |
+| `alignment_valis_max_non_rigid_registration_dim_px` | `3200` | VALIS non-rigid registration image limit. |
+| `alignment_valis_thumbnail_size` | `1024` | VALIS diagnostic thumbnail size. |
+| `alignment_valis_global_transform` | `rigid` | Deprecated compatibility/provenance field. The accepted MerXen partial-overlap transform is locked and VALIS global fitting is disabled. |
+| `alignment_seed` | `21` | Shared deterministic seed for VALIS/OpenCV/PyTorch and legacy subsampling. |
+| `alignment_valis_non_rigid_enabled` | `true` | Run conservative non-rigid refinement after global QC passes. |
+| `alignment_valis_non_rigid_backend` | `optical_flow` | Explicit `optical_flow` or `simple_elastix`; unavailable Elastix raises rather than silently changing algorithms. |
+| `alignment_valis_non_rigid_grid_spacing_ratio` | `0.08` | SimpleElastix grid spacing when that backend is selected. |
+| `alignment_valis_non_rigid_maximum_iterations` | `500` | SimpleElastix iteration limit. |
+| `alignment_valis_non_rigid_smoothing_sigma_ratio` | `0.02` | Optical-flow field smoothing ratio. |
+| `alignment_valis_field_sample_spacing_px` | `8` | Spacing for serialized forward/backward displacement fields. |
+| `alignment_coordinate_system_name` | `merxen_xenium` | Named fixed-platform SpatialData coordinate system. |
+| `alignment_transform_transcripts` / `alignment_transform_centroids` / `alignment_transform_polygons` | `true` / `true` / `true` | Materialize selected registered vectors and table centroid coordinates. |
+| `alignment_mark_shared_tissue_domain` | `true` | Annotate transformed points, shapes, and centroids with the valid shared-tissue domain. |
+| `alignment_resume` | `true` | Reuse a complete transform bundle when its stored VALIS parameters and platform roles match. Nextflow `-resume` remains the normal workflow-level cache. |
+
+#### VALIS QC selection
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `alignment_qc_minimum_global_dice` | `0.15` | Minimum global tissue-mask Dice. |
+| `alignment_qc_minimum_global_mutual_information` | `0.02` | Minimum global DAPI normalized mutual information. |
+| `alignment_qc_minimum_global_inliers` | `8` | Minimum registered DAPI feature inliers. |
+| `alignment_qc_minimum_inlier_coverage` | `0.05` | Minimum spatial coverage of feature support. |
+| `alignment_qc_non_rigid_minimum_nmi_improvement` | `0.0` | Minimum absolute DAPI NMI gain required to select non-rigid output. The default rejects NMI degradation; density, robust-score, Dice, drift, displacement, and Jacobian gates must also pass. |
+| `alignment_qc_non_rigid_maximum_p95_displacement_um` | `500.0` | Maximum accepted 95th-percentile displacement. |
+| `alignment_qc_non_rigid_maximum_coherent_rotation_degrees` | `0.25` | Maximum global rotation that may be encoded inside the nominally local displacement field. |
+| `alignment_qc_non_rigid_maximum_coherent_translation_um` | `25.0` | Maximum global translation that may be encoded inside the nominally local displacement field. |
+| `alignment_qc_non_rigid_maximum_density_correlation_degradation` | `0.0` | Maximum allowed loss of smoothed DAPI-density correlation relative to the locked transform. |
+| `alignment_qc_non_rigid_maximum_robust_score_degradation` | `0.002` | Maximum allowed loss of the partial-overlap robust objective. |
+| `alignment_qc_non_rigid_maximum_tissue_dice_degradation` | `0.01` | Maximum allowed loss of tissue-mask Dice. |
+
+Affine determinant/singular-value/shear gates and non-rigid Jacobian gates are
+also configurable in direct `AlignmentConfig` JSON. See
+[Section alignment](stages/alignment.md) for the complete transform and QC
+contract.
+
+#### Legacy Spateo parameters
+
+The following settings are read only when
+`alignment_backend=legacy_spateo`: `alignment_spateo_mode`,
+`alignment_dtype`, `alignment_selected_mode`, `alignment_max_iter`,
+`alignment_nonrigid_start_iter`, `alignment_beta`, `alignment_lambda_vf`,
+`alignment_k`, `alignment_partial_robust_level`, `alignment_allow_flip`,
+`alignment_svi_mode`, `alignment_n_sampling`, `alignment_sparse_top_k`,
+`alignment_sparse_calculation_mode`, `alignment_use_chunk`,
+`alignment_chunk_capacity`, `alignment_use_hvg`, `alignment_n_top_genes`,
+`alignment_use_pca`, `alignment_n_pcs`, `alignment_max_alignment_cells`,
+`alignment_rbf_neighbors`, `alignment_rbf_smoothing`, and
+`alignment_max_nonrigid_anchors`. Its bootstrap retains
+`alignment_dynamo_requirement`, `alignment_spateo_requirement`, and
+`alignment_anndata_requirement`. `alignment_qc_grid_rows` and
+`alignment_qc_grid_cols` are likewise legacy expression-QC settings.
 
 ### Squidpy clustering
 

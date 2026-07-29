@@ -43,7 +43,8 @@ Common optional parameters:
 | `--analysis_segmentation` | `both` (default), `all`, `reseg`, `original_seg`, or `proseg_hybrid`. `both` remains `reseg,original_seg`; `all` expands to `reseg,original_seg,proseg_hybrid`. |
 | `--force_spatialdata_build` | Force rebuilding the SpatialData zarr even when a cached one exists. Defaults to `false`. |
 | `--force_proseg_rerun` | Force rebuilding ProSeg bases from the current Cellpose/transcript inputs rather than reusing persistent latest zarrs. Defaults to `false`. |
-| `--enable_alignment` | Run optional Spateo alignment and alignment QC before comparison. Paired mode only. Defaults to `false`. |
+| `--enable_alignment` | Run optional DAPI-only VALIS alignment and alignment QC before comparison. Paired mode only. Defaults to `false`. |
+| `--alignment_backend` | Alignment implementation: `valis` (default) or explicit `legacy_spateo`. |
 | `--mecr_enabled` | Run mutually exclusive co-expression rate analysis after QC. Defaults to `true`. |
 | `--cortical_depth_enabled` | Run cortical-depth tissue/depth annotation after clustering. Requires boundary GeoJSON annotations. Defaults to `false`. |
 | `--distance_from_object_enabled` | Run registered polygon-edge distance annotation and paired near-vs-far pseudobulk analysis. Defaults to `false`. |
@@ -65,13 +66,15 @@ default in
 To use alignment for all paired rows by default, pass `--enable_alignment true`.
 To choose per row, add an `enable_alignment` column to the samplesheet and set
 paired rows to `true` or `false`; blank cells inherit `--enable_alignment`.
-Nextflow runs `ALIGN` in `environment.alignment.yml`, bootstraps Spateo/Dynamo
-from pinned Git refs if the shimmed import check fails, then restores modern
-AnnData for SpatialData compatibility. Other stages continue to use the regular
-`environment.yml`. GPU-heavy `CELLPOSE_SEGMENT` and `ALIGN` default to one task
-at a time. CPU-only `PROSEG_SEGMENT` runs independently on a normal CPU node
-after each Cellpose task. RAPIDS-backed `CLUSTERING_SQUIDPY` allows up to four
-queued local tasks,
+Nextflow runs `ALIGN` in `environment.alignment.yml`. The default backend
+validates the locked VALIS 1.2 image-registration stack and installs the exact
+VALIS package without re-resolving its older NumPy metadata when necessary.
+The former expression-based implementation remains available with
+`--alignment_backend legacy_spateo`, which activates its pinned Spateo/Dynamo
+bootstrap. Other stages continue to use the regular `environment.yml`.
+GPU-heavy `CELLPOSE_SEGMENT` and `ALIGN` default to one task at a time. CPU-only
+`PROSEG_SEGMENT` runs independently on a normal CPU node after each Cellpose
+task. RAPIDS-backed `CLUSTERING_SQUIDPY` allows up to four queued local tasks,
 but GPU execution is serialized by the shared workstation GPU lock when it is
 enabled.
 

@@ -1,138 +1,208 @@
 # Section alignment
 
-> **Status: implemented as an optional stage.** Enable globally with
-> `--analysis_mode paired --enable_alignment true`, or per paired samplesheet
-> row with `enable_alignment=true`, after installing Spateo.
+> **Status: optional stage; VALIS is the default backend.** Enable it globally
+> with `--analysis_mode paired --enable_alignment true`, or per paired
+> samplesheet row with `enable_alignment=true`.
 
 ## Intent
 
-Adjacent MERSCOPE and Xenium sections are physically offset and can deform
-during sample preparation. The alignment stage maps MERSCOPE xy coordinates
-into the Xenium coordinate system so spatial analyses can compare equivalent
-tissue regions across platforms.
+Adjacent MERSCOPE and Xenium sections can differ by arbitrary rotation,
+translation, modest scale, partial tissue, and local section deformation.
+`ALIGN` maps the moving dataset into the fixed dataset's physical coordinate
+system. Xenium is fixed and MERSCOPE is moving by default; both are
+configurable.
 
-## Method
+The default backend uses only DAPI morphology for registration and QC. It does
+not use transcripts, expression, cell types, RNA images, or cell
+correspondences.
 
-`ALIGN` builds paired AnnData objects from enriched SpatialData cell tables and
-cell-boundary centroids, then runs Spateo `morpho_align` with Xenium as the
-fixed/reference section and MERSCOPE as the moving section. The stage records
-both Spateo rigid and non-rigid coordinates.
+## Default VALIS method
 
-MERSCOPE outputs are transformed back into SpatialData with:
+The stage:
 
-- an affine matrix fitted from raw MERSCOPE centroids to Spateo rigid
-  coordinates;
-- a thin-plate/RBF residual displacement field fitted from raw MERSCOPE
-  centroids to Spateo non-rigid coordinates.
+1. Resolves each selected DAPI image, its pixel size, and its SpatialData
+   dataset-physical ↔ image-pixel affine. It fails rather than guessing when
+   these are ambiguous. Platform-specific matrix and pixel-size overrides are
+   available for external images.
+2. Selects DAPI by channel name and derives an acquired-support mask. Vizgen
+   MERSCOPE's exact-zero, FOV-shaped padding defines its irregular support;
+   Xenium and uncertain sparse inputs conservatively retain rectangular
+   support. Broad background and final smoothing use support-normalized
+   convolution, `G(image × support) / G(support)`, so unacquired zeros cannot
+   create a positive high-pass rim. Robust clipping, compression, and mild
+   CLAHE are followed by a 150 µm cosine taper measured inward from the actual
+   support boundary.
+3. Creates a downsampled tissue-density mask with automatic thresholding,
+   closing, hole filling, physical-area filtering, and edge dilation. Multiple
+   substantial fragments are retained. The registration validity mask erodes
+   acquired support by 150 µm, and tissue outside that safe domain is excluded
+   from features, rigid scoring, and QC.
+4. Resamples both images to a shared isotropic physical pixel size and places
+   them on a padded registration-only canvas. Source images and native
+   SpatialData elements are not resampled or overwritten.
+5. Estimates a moving-to-fixed rigid `T_pre` after metadata-based physical
+   resampling. SIFT/RANSAC is accepted only with adequate inliers, spatial
+   coverage, and tissue overlap, then its matches are refit with scale fixed
+   to one. Otherwise a configurable 0–360° search uses mask distance
+   correlation, Dice, and DAPI normalized mutual information. Reflections are
+   searched by default for paired MERSCOPE/Xenium sections, but the reflected
+   candidate must beat the non-reflected candidate by a configured margin.
+6. Jointly refines rotation and X/Y translation with a partial-overlap
+   objective. A trimmed symmetric tissue-boundary distance ignores the worst
+   unmatched boundary fraction, while overlap-normalized DAPI-density
+   correlation selects internal anatomical agreement. Independent fixed and
+   moving coverage gates prevent a tiny coincidental match. Scale and shear
+   remain disabled. Its objective diagnostic distinguishes zero, centroid, and
+   phase-correlation seeds, plots refined candidates in physical units, and
+   includes a true local X/Y score slice around the selected solution.
+7. Pre-warps only the temporary moving registration image with the refined
+   `T_pre`. This accepted MerXen transform is the complete authoritative global
+   alignment: VALIS receives the already-aligned image with `do_rigid=false`
+   and an identity-only transformer. A dense postcondition verifies that
+   VALIS's rigid point mapping remains identity before any field is accepted.
+8. Runs VALIS only as a local deformation engine. Both temporary inputs are
+   weighted by the feathered intersection of fixed/moving tissue and their
+   footprint-eroded validity masks. The reproducible default is VALIS
+   `OpticalFlowWarper`; `simple_elastix` remains an explicit alternative and
+   errors when Elastix is unavailable. DISK/LightGlue may still be used for
+   VALIS bookkeeping and QC, but cannot change the locked global frame.
+9. Samples forward and backward transformations through VALIS's point-warp
+   APIs, preserving its level, crop, and direction conventions. Displacements
+   taper smoothly to zero outside shared valid tissue. Raw internal VALIS field
+   arrays are never serialized directly.
+10. Selects non-rigid output only when NMI does not degrade and the independent
+    DAPI-density, tissue-Dice, and authoritative partial-overlap score gates
+    pass. P95 displacement, Jacobian, coherent Euclidean drift (default at most
+    0.25° and 25 µm), and topology gates must also pass. Otherwise the locked
+    partial-overlap transform is retained.
 
-The default downstream coordinate set is non-rigid. The rigid transform and
-alignment coordinate tables are retained for inspection.
+Micro-rigid and micro-non-rigid registration are not run. For two slides,
+`compose_non_rigid=false`.
 
-## Nextflow
+## Coordinate convention
 
-`ALIGN` runs after per-platform `QC` and before `COMPARE` for paired rows whose
-effective `enable_alignment` value is `true`.
-`ALIGN_QC` then computes post-alignment QC metrics and overlays. When
-alignment is disabled, `COMPARE` and `VISUALIZE` continue to receive the
-enriched zarrs directly. Alignment is not active in MERSCOPE-only or
-Xenium-only runs.
+All image points are `(x, y)` with a top-left origin; array shapes remain
+`(row, column)`. Matrices are forward 3×3 homogeneous xy matrices. The applied
+chain is:
 
-Key parameters live in `workflows/nextflow.config`:
-
-| Param | Default | Description |
-|-------|---------|-------------|
-| `enable_alignment` | `false` | Run `ALIGN` and `ALIGN_QC` by default; can be overridden by samplesheet row and only applies to paired rows. |
-| `alignment_device` | `auto` | Spateo device; `auto` chooses CUDA when available. |
-| `alignment_dtype` | `float32` | Spateo tensor precision; keeps GPU memory lower. |
-| `alignment_selected_mode` | `nonrigid` | Coordinate set used for transformed outputs. |
-| `alignment_max_iter` | `360` | Spateo optimization iterations. |
-| `alignment_nonrigid_start_iter` | `220` | Iteration where non-rigid refinement starts. |
-| `alignment_beta` | `0.005` | Spateo non-rigid kernel width. |
-| `alignment_lambda_vf` | `3000.0` | Spateo vector-field regularization. |
-| `alignment_k` | `15` | Spateo low-rank control points. |
-| `alignment_partial_robust_level` | `100` | Robustness level for partial overlap. |
-| `alignment_allow_flip` | `true` | Allow a mirrored coarse initialization before rigid/non-rigid refinement. |
-| `alignment_svi_mode` | `false` | Use full pairwise matching on the sampled cells instead of SVI mini-batches. |
-| `alignment_n_sampling` | `1000` | Stochastic variational batch size for GPU memory control. |
-| `alignment_sparse_top_k` | `512` | Sparse matching top-k used by Spateo. |
-| `alignment_chunk_capacity` | `1` | Spateo chunk capacity for lower peak memory. |
-| `alignment_use_hvg` | `false` | Use the full shared panel instead of HVGs. |
-| `alignment_n_top_genes` | `100` | HVG feature count used for alignment. |
-| `alignment_use_pca` | `true` | Run joint PCA on shared expression features before Spateo. |
-| `alignment_n_pcs` | `50` | Number of joint PCA components used for Spateo matching. |
-| `alignment_max_alignment_cells` | `35000` | Deterministic per-platform cell subsample used for Spateo optimization. |
-| `alignment_seed` | `21` | Seed for deterministic alignment subsampling. |
-| `alignment_max_nonrigid_anchors` | `5000` | Maximum RBF anchors used when applying non-rigid transforms. |
-| `alignment_max_forks` | `1` | Maximum concurrent `ALIGN` tasks. Raise only when multiple GPUs or sufficient VRAM are available. |
-| `alignment_qc_grid_rows` / `alignment_qc_grid_cols` | `10` / `10` | SABench-style QC grid. |
-
-These defaults come from the P7513 tuning notebook. They use the shared panel,
-joint PCA, mirrored initialization, no SVI, and a 35k-cell per-platform
-subsample so one non-rigid pass fits comfortably on a 24 GB GPU. Nextflow
-limits concurrent `ALIGN` tasks with `alignment_max_forks`; the default `1`
-keeps local single-GPU runs from overlapping Spateo jobs.
-
-## CLI
-
-```bash
-merxen align --config align_config.json
-merxen alignment-qc --config alignment_qc_config.json
+```text
+moving dataset µm
+  → moving original DAPI pixels
+  → moving registration pixels
+  → T_pre / pre-oriented pixels
+  → VALIS global + optional non-rigid warp
+  → fixed registration pixels
+  → fixed original DAPI pixels
+  → fixed dataset µm
 ```
 
-`AlignmentConfig` and `AlignmentQCConfig` in `src/merxen/config.py` are the
-Python contracts for these JSON files.
+`T_pre` is applied exactly once. VALIS point conversion uses explicit source
+and destination image shapes. The transform bundle stores the individual
+matrices plus sampled forward and backward non-rigid fields, and can be
+reloaded without the JVM.
 
-## Installation note
+Native SpatialData elements remain untouched. For compatibility with existing
+downstream branch selection, materialized selected VALIS vectors use the
+existing `*_aligned_nonrigid` suffix even when QC selected the global fallback.
+Their `merxen_alignment` metadata records the actual selected mode and backend.
+The native elements also receive the global affine in the configured named
+coordinate system (default `merxen_xenium`). Table centroids are preserved in
+`obsm["spatial"]` and added in `obsm["spatial_merxen_xenium"]`.
 
-Spateo 1.1.1 imports older AnnData/Cellpose symbols through its broader
-package import path. MerXen keeps modern SpatialData/AnnData/Cellpose for the
-rest of the pipeline and applies narrow runtime compatibility shims before
-loading `spateo.align`.
+Transformed points and shape centroids receive
+`in_shared_tissue_domain`. This marks the intersection of fixed tissue and
+registered moving tissue without discarding platform-only regions.
 
-Nextflow isolates this in `environment.alignment.yml`. `ALIGN` first runs
-`merxen check-alignment-deps`; when the shimmed import is unavailable, it
-installs pinned Spateo/Dynamo Git refs into the alignment env and then restores
-modern AnnData. This means future pipeline runs do not depend on manually
-patching a cached `work/conda` environment, and non-alignment stages do not
-inherit Spateo's dependency resolver choices.
+## Nextflow and configuration
 
-For direct CLI use outside Nextflow, the tested install sequence is:
+`ALIGN` runs after per-platform `QC` and before paired downstream stages.
+`ALIGN_QC` collates the already-computed DAPI QC report and selected overlay;
+it does not recompute expression metrics. When alignment is disabled,
+downstream stages receive the enriched native zarrs directly.
+
+Important defaults in `workflows/nextflow.config` include:
+
+| Parameter | Default | Meaning |
+|---|---:|---|
+| `alignment_backend` | `valis` | `valis` or explicit `legacy_spateo`. |
+| `alignment_fixed_platform` / `alignment_moving_platform` | `XENIUM` / `MERSCOPE` | Reference and transformed platforms. |
+| `alignment_*_image_key` | platform default | SpatialData DAPI image element. |
+| `alignment_*_pixel_size_um` | `null` | Optional validated physical-size override. |
+| `alignment_registration_source_max_dim_px` | `3200` | Bounds temporary padded registration images. |
+| `alignment_background_sigma_um` | `75` | Broad DAPI background scale. |
+| `alignment_background_boundary_mode` | `mirror` | Boundary mode used inside support-normalized Gaussian filtering. |
+| `alignment_edge_taper_um` / `alignment_edge_exclusion_um` | `150` / `150` | Taper registration intensities and exclude scoring inward from the actual acquired-support boundary. |
+| `alignment_smoothing_sigma_um` | `3` | Nuclear-density smoothing scale. |
+| `alignment_orientation_*_step_degrees` | `10`, `2`, `0.5` | Full-circle coarse and refinement increments. |
+| `alignment_allow_reflection` | `true` | Search both handednesses; a reflected solution is retained only when it beats the non-reflected orientation by the configured score margin. |
+| `alignment_reflection_minimum_score_improvement` | `0.01` | Minimum orientation-score improvement required to select a reflected candidate when both handednesses are valid. |
+| `alignment_partial_overlap_enabled` | `true` | Refine rigid rotation/translation using trimmed boundaries and DAPI density. |
+| `alignment_partial_overlap_angle_radius_degrees` / `alignment_partial_overlap_angle_step_degrees` | `10` / `1` | Residual rotation search around the coarse pre-orientation. |
+| `alignment_partial_overlap_max_translation_um` | `1500` | Bounded X/Y refinement range in physical units. |
+| `alignment_partial_overlap_retained_boundary_fraction` | `0.7` | Closest boundary fraction retained by the robust distance. |
+| `alignment_valis_num_features` | `7500` | DISK feature count. |
+| `alignment_valis_max_processed_image_dim_px` | `1600` | VALIS global feature image limit. |
+| `alignment_valis_max_non_rigid_registration_dim_px` | `3200` | VALIS non-rigid image limit. |
+| `alignment_valis_global_transform` | `rigid` | Deprecated configuration/provenance field retained for compatibility. VALIS global fitting is disabled; `T_pre` is locked. |
+| `alignment_seed` | `21` | Deterministic Python/NumPy/OpenCV/PyTorch seed. |
+| `alignment_valis_non_rigid_backend` | `optical_flow` | Explicit non-rigid backend. |
+| `alignment_coordinate_system_name` | `merxen_xenium` | Registered SpatialData coordinate system. |
+| `alignment_resume` | `true` | Reload a complete parameter-compatible transform bundle for direct reruns. |
+
+The Pydantic `ValisAlignmentConfig` exposes the full preprocessing, masking,
+orientation, feature, transform, non-rigid, output, resume, and QC thresholds.
+Direct CLI JSON additionally supports external DAPI paths and explicit 3×3
+`dataset_to_image_matrix` values.
+
+## Environment
+
+VALIS 1.2 declares NumPy `<2`, while SpatialData 0.8 requires NumPy 2. The
+dedicated alignment environment therefore installs the generated
+`requirements.alignment.lock` (including a NumPy-2-compatible OpenCV,
+PyTorch/Kornia, SimpleITK, Java, and libvips stack), then installs the exact
+`valis-wsi==1.2.0` package without re-resolving its old dependency metadata.
+MerXen applies narrow compatibility aliases for the two removed NumPy scalar
+names still referenced by VALIS. `merxen check-alignment-deps --backend valis`
+validates the resulting stack. The exact imported versions are recorded in
+every registration summary.
+
+The JVM is shut down in a `finally` block after every VALIS attempt.
+
+## Legacy Spateo backend
+
+The former expression/cell-centroid implementation remains available only via:
 
 ```bash
-pip install -e ".[alignment]"
-pip install "anndata>=0.12.10"
+nextflow run workflows/main.nf --enable_alignment true \
+  --alignment_backend legacy_spateo
 ```
 
-`pip check` may still report `dynamo-release`'s declared `anndata<0.11`
-constraint, but the alignment wrapper only uses Spateo's alignment API.
+Its code lives in `alignment/legacy_spateo.py`,
+`alignment/legacy_features.py`, and `alignment/legacy_qc.py`. The old Spateo
+parameters remain under `legacy_spateo` in CLI JSON and retain their existing
+Nextflow names. Compatibility wrappers preserve older Python imports, but this
+backend is not the default and its expression-based QC is never used for a
+VALIS run.
 
 ## Outputs
 
-Published under `${outdir}/<pair_id>/alignment/`:
+`${outdir}/<pair_id>/alignment/align_out/` contains:
 
-| File | Contents |
-|------|----------|
-| `align_out/alignment_transform.json` | Affine matrix, serialized RBF metadata, Spateo parameters, displacement summary. |
-| `align_out/alignment_coords/*.csv` | Raw, rigid, and non-rigid alignment centroids. |
+| Artifact | Contents |
+|---|---|
+| `alignment_transform.json` | Pipeline contract: selected transform, metadata, parameters, QC, and dependency versions. |
+| `transform_chain.json` | Explicit physical/pixel/registration frame chain and matrices. |
+| `forward_displacement_field.npz` / `backward_displacement_field.npz` | Sampled fields when non-rigid registration ran. |
+| `registration_summary.json` / `.csv` | Status (`non_rigid_pass`, `global_only`, or failure diagnostics) and stage-wise DAPI QC. |
+| `resume_manifest.json` | Exact input paths, platform roles, and VALIS parameters required before a completed bundle can be reused. |
+| `shared_tissue_mask.npy` / `.tif` | Valid cross-platform comparison domain on the original fixed DAPI pixel grid. |
+| `shared_tissue_mask_registration.npy` / `.tif` | The same domain on the padded registration grid used for point annotation. |
+| `registration_inputs/` | Processed DAPI images, tissue masks, outlines, edge-validity masks, and edge-artifact metrics. |
+| `registration_images/` | Stable fixed and pre-oriented TIFFs supplied to VALIS. |
+| `valis/` | VALIS registrar, summary, thumbnails, matches, overlaps, and deformation artifacts. |
+| `qc/partial_overlap/` | Before/after overlays, candidate contact sheet, robust-objective profile, and candidate metrics. |
+| `qc/` | Original, pre-oriented, global, non-rigid, checkerboard, mask, feature, displacement, Jacobian, and deformation-grid views. |
+| `alignment_coords/` | Legacy coordinate diagnostics; retained as an empty contract directory for VALIS. |
 
-`ALIGN` updates the existing MERSCOPE latest zarr in place. Raw elements are
-left untouched, rigid affine transforms are saved to the `merxen_xenium`
-coordinate system, and new `*_aligned_nonrigid` vector elements are added with
-materialized non-rigid coordinates. Xenium remains the fixed reference and is
-not copied.
-
-Published under `${outdir}/<pair_id>/alignment_qc/`:
-
-| File | Contents |
-|------|----------|
-| `alignment_qc_out/<pair_id>_alignment_qc.json` | SABench-style grid metrics and point-distance summary. |
-| `alignment_qc_out/<pair_id>_alignment_qc_metrics.csv` | Single-row CSV form of the same metrics. |
-| `alignment_qc_out/<pair_id>_alignment_overlay.png` | Xenium/MERSCOPE centroid overlay after alignment. |
-
-The alignment overlay PNG is also written as a same-stem PDF.
-
-## Notes
-
-The first implementation uses cell-level gene features and centroids. Image
-feature extraction is represented in the config and metadata, but is skipped
-unless the SpatialData image elements expose an unambiguous xy mapping.
+The separate `${outdir}/<pair_id>/alignment_qc/` directory contains a compact
+JSON/CSV copy of the selected DAPI QC and the downstream overlay PNG/PDF.
