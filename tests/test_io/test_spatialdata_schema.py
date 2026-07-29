@@ -11,7 +11,7 @@ import pytest
 import spatialdata as sd
 from scipy import sparse
 from shapely.geometry import box
-from spatialdata.models import PointsModel, ShapesModel, TableModel
+from spatialdata.models import Labels2DModel, PointsModel, ShapesModel, TableModel
 
 from merxen.io.spatialdata_io import (
     prepare_source_spatialdata_contract,
@@ -22,6 +22,7 @@ from merxen.io.spatialdata_schema import (
     MERXEN_SCHEMA_ATTR,
     MERXEN_SCHEMA_VERSION,
     PROSEG_INTERNAL_ID_COLUMN,
+    SOURCE_CELL_ID_COLUMN,
     SpatialDataContractError,
     canonical_instance_series,
     choose_primary_points_key,
@@ -166,6 +167,55 @@ def test_upgrade_is_a_noop_for_current_schema() -> None:
     assert not upgrade_spatialdata_contract_in_memory(sdata_obj)
 
 
+def test_upgrade_maps_legacy_xenium_source_ids_to_label_values() -> None:
+    """Legacy Xenium polygons use opaque IDs while their table uses label IDs."""
+    sdata_obj = _raw_proseg_spatialdata()
+    region = "xenium_cell_boundaries"
+    sdata_obj.shapes[region] = ShapesModel.parse(
+        gpd.GeoDataFrame(
+            {
+                "geometry": [box(0, 0, 1, 1), box(2, 0, 3, 1)],
+            },
+            geometry="geometry",
+            index=pd.Index(["cell-b", "cell-a"]),
+        )
+    )
+    obs = pd.DataFrame(
+        {
+            "cell_id": ["cell-b", "cell-a"],
+            "cell_labels": [7, 11],
+            "region": pd.Categorical([region, region]),
+        },
+        index=pd.Index(["cell-b", "cell-a"]),
+    )
+    sdata_obj.tables["table_original"] = TableModel.parse(
+        ad.AnnData(
+            X=sparse.csr_matrix([[1], [1]]),
+            obs=obs,
+            var=pd.DataFrame(index=pd.Index(["GeneA"], name="gene")),
+        ),
+        region=region,
+        region_key="region",
+        instance_key="cell_labels",
+    )
+
+    changed = upgrade_spatialdata_contract_in_memory(
+        sdata_obj,
+        platform="XENIUM",
+    )
+
+    assert changed
+    original_shape = sdata_obj.shapes[region]
+    assert original_shape[SOURCE_CELL_ID_COLUMN].tolist() == ["cell-b", "cell-a"]
+    assert original_shape[INSTANCE_ID_COLUMN].tolist() == [7, 11]
+    original_obs = sdata_obj.tables["table_original"].obs
+    assert original_obs[SOURCE_CELL_ID_COLUMN].tolist() == ["cell-b", "cell-a"]
+    assert original_obs[INSTANCE_ID_COLUMN].tolist() == [7, 11]
+    assert "cell_id" not in original_obs
+    assert "cell_labels" not in original_obs
+    validate_merxen_schema(sdata_obj, deep=True)
+
+
 def test_source_contract_preserves_opaque_ids_and_quality_scores() -> None:
     """Instrument IDs remain provenance while operational joins use integers."""
     region = "merscope_polygons"
@@ -233,4 +283,77 @@ def test_source_contract_preserves_opaque_ids_and_quality_scores() -> None:
     )
     assert sdata_obj.shapes[region][INSTANCE_ID_COLUMN].tolist() == [2, 1]
     assert sdata_obj.tables["table"].obs[INSTANCE_ID_COLUMN].tolist() == [2, 1]
+    validate_merxen_schema(sdata_obj, deep=True)
+
+
+def test_source_contract_maps_opaque_ids_to_existing_label_values() -> None:
+    """Reader label IDs remain aligned while transcript source IDs are remapped."""
+    region = "cell_labels"
+    points_df = pd.DataFrame(
+        {
+            "x": [0.5, 1.5, 2.5],
+            "y": [0.5, 0.5, 0.5],
+            "z": np.zeros(3, dtype=np.float32),
+            "gene": ["GeneA", "GeneA", "GeneA"],
+            "cell_id": ["cell-b", "cell-a", "UNASSIGNED"],
+        }
+    )
+    points = PointsModel.parse(
+        dd.from_pandas(points_df, npartitions=2),
+        coordinates={"x": "x", "y": "y", "z": "z"},
+        feature_key="gene",
+        instance_key="cell_id",
+    )
+    labels = Labels2DModel.parse(
+        np.asarray([[0, 7], [11, 0]], dtype=np.uint32),
+        dims=("y", "x"),
+    )
+    shapes = ShapesModel.parse(
+        gpd.GeoDataFrame(
+            {
+                "geometry": [box(0, 0, 1, 1), box(1, 0, 2, 1)],
+            },
+            geometry="geometry",
+            index=pd.Index(["cell-b", "cell-a"]),
+        )
+    )
+    obs = pd.DataFrame(
+        {
+            "cell_id": ["cell-b", "cell-a"],
+            "cell_labels": [7, 11],
+            "region": pd.Categorical([region, region]),
+        },
+        index=pd.Index(["0", "1"]),
+    )
+    table = TableModel.parse(
+        ad.AnnData(
+            X=sparse.csr_matrix([[1], [1]]),
+            obs=obs,
+            var=pd.DataFrame(index=pd.Index(["GeneA"], name="gene")),
+        ),
+        region=region,
+        region_key="region",
+        instance_key="cell_labels",
+    )
+    sdata_obj = sd.SpatialData(
+        points={"transcripts": points},
+        labels={region: labels},
+        shapes={"cell_boundaries": shapes},
+        tables={"table": table},
+    )
+
+    prepare_source_spatialdata_contract(sdata_obj, platform="XENIUM")
+
+    normalized_points = sdata_obj.points["transcripts"].compute()
+    assert normalized_points["original_assignment"].tolist() == [7, 11, pd.NA]
+    normalized_obs = sdata_obj.tables["table"].obs
+    assert normalized_obs[SOURCE_CELL_ID_COLUMN].tolist() == ["cell-b", "cell-a"]
+    assert normalized_obs[INSTANCE_ID_COLUMN].tolist() == [7, 11]
+    assert "cell_id" not in normalized_obs
+    assert "cell_labels" not in normalized_obs
+    assert normalized_obs["region"].astype(str).tolist() == [
+        "cell_boundaries",
+        "cell_boundaries",
+    ]
+    assert sdata_obj.shapes["cell_boundaries"][INSTANCE_ID_COLUMN].tolist() == [7, 11]
     validate_merxen_schema(sdata_obj, deep=True)

@@ -47,6 +47,50 @@ def test_label_ids_reject_reserved_zero() -> None:
         label_ids_for_shapes(gdf)
 
 
+def test_label_ids_normalize_legacy_zero_based_proseg_cells() -> None:
+    gdf = gpd.GeoDataFrame(
+        {
+            "cell": np.asarray([0, 1, 2], dtype=np.uint32),
+            "geometry": [_square(0, 0, 1), _square(2, 0, 1), _square(4, 0, 1)],
+        }
+    )
+
+    series, dtype = label_ids_for_shapes(gdf)
+
+    assert np.dtype(dtype) == np.uint32
+    assert series.index.tolist() == [0, 1, 2]
+    assert series.tolist() == [1, 2, 3]
+
+
+def test_label_ids_parse_legacy_cellpose_source_ids() -> None:
+    gdf = gpd.GeoDataFrame(
+        {
+            "cell_id": ["cellpose_42", "cellpose_9001"],
+            "geometry": [_square(0, 0, 1), _square(2, 0, 1)],
+        }
+    )
+
+    series, dtype = label_ids_for_shapes(gdf)
+
+    assert np.dtype(dtype) == np.uint32
+    assert series.index.tolist() == [0, 1]
+    assert series.tolist() == [42, 9001]
+
+
+def test_label_ids_prefer_canonical_column_over_range_index() -> None:
+    gdf = gpd.GeoDataFrame(
+        {
+            "instance_id": np.asarray([7, 12], dtype=np.uint64),
+            "geometry": [_square(0, 0, 1), _square(2, 0, 1)],
+        }
+    )
+
+    series, _ = label_ids_for_shapes(gdf)
+
+    assert series.index.tolist() == [0, 1]
+    assert series.tolist() == [7, 12]
+
+
 def test_label_ids_fall_back_to_codes_for_noninteger_index() -> None:
     gdf = gpd.GeoDataFrame(
         geometry=[_square(0, 0, 1), _square(2, 0, 1)],

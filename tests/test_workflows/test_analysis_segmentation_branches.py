@@ -119,6 +119,31 @@ def test_mask_image_quantification_stage_is_wired_before_qc() -> None:
         assert expected in module_text
 
 
+def test_mask_image_quantification_resume_reuses_published_inputs() -> None:
+    """A quantification-stage restart must not require segment or enrich work dirs."""
+    repo_root = Path(__file__).resolve().parents[2]
+    main_text = (repo_root / "workflows" / "main.nf").read_text()
+
+    enrich_resume = main_text[
+        main_text.index("enrich_published_results_ch =") : main_text.index(
+            "enrich_results_ch ="
+        )
+    ]
+    assert "settings.need_enriched_zarrs && !settings.run_enrich" in enrich_resume
+    assert '"latest/latest_spatialdata.zarr"' in enrich_resume
+    assert "def enrichOut = latestZarr" in enrich_resume
+    assert '"enrich/enrich_out"' not in enrich_resume
+
+    mask_resume = main_text[
+        main_text.index(
+            "mask_image_quantification_published_masks_ch ="
+        ) : main_text.index("mask_image_quantification_masks_ch =")
+    ]
+    assert "settings.run_mask_image_quantification" in mask_resume
+    assert "!settings.run_segment" in mask_resume
+    assert '"segmentation/cellpose_masks_tiled.npy"' in mask_resume
+
+
 def test_compute_cortical_depth_stage_is_wired_after_clustering() -> None:
     """Cortical depth should run after clustering when cluster labels are needed."""
     repo_root = Path(__file__).resolve().parents[2]
@@ -185,8 +210,15 @@ def test_segment_bootstraps_proseg_from_configured_paths() -> None:
         "chain_radius_scale: params.proseg_hybrid_chain_radius_scale",
         "smoothing_radius_um: params.proseg_hybrid_smoothing_radius_um",
         "outward_rounding_um: params.proseg_hybrid_outward_rounding_um",
+        "force_proseg_rerun = false",
+        "params.force_proseg_rerun",
+        "--force-rerun",
     ]:
-        assert expected in main_text
+        assert (
+            expected in main_text
+            or expected in config_text
+            or expected in segmentation_module_text
+        )
 
     for expected in [
         "proseg_search_paths",

@@ -23,6 +23,8 @@ from merxen.enrichment.enrich import (
     MOSAIK_CELLPOSE_SHAPE_NAME,
     MOSAIK_PROSEG_SHAPE_NAME,
     ORIGINAL_TABLE_NAME,
+    XENIUM_OLD_CELL_SHAPE_NAME,
+    XENIUM_OLD_NUCLEUS_SHAPE_NAME,
     _cellpose_gdf_from_mask,
     _is_already_enriched,
     _read_latest_zarr_for_enrichment,
@@ -120,6 +122,29 @@ def test_is_already_enriched_checks_platform_specific_merscope_layers() -> None:
     del sdata.images[MERSCOPE_ZPROJ_IMAGE_NAME]
 
     assert not _is_already_enriched(sdata, "MERSCOPE")
+
+
+def test_is_already_enriched_requires_real_xenium_image() -> None:
+    """A Xenium store without morphology cannot feed the viewer-cache stage."""
+    sdata = SimpleNamespace(
+        shapes={
+            MOSAIK_PROSEG_SHAPE_NAME: object(),
+            MOSAIK_CELLPOSE_SHAPE_NAME: object(),
+            CELLPOSE_NUCLEI_SHAPE_NAME: object(),
+            XENIUM_OLD_CELL_SHAPE_NAME: object(),
+            XENIUM_OLD_NUCLEUS_SHAPE_NAME: object(),
+        },
+        tables={ORIGINAL_TABLE_NAME: object()},
+        images={},
+    )
+
+    assert not _is_already_enriched(sdata, "XENIUM")
+
+    sdata.images["_napari_compare_imgpyr__morphology_focus__ds4"] = object()
+    assert not _is_already_enriched(sdata, "XENIUM")
+
+    sdata.images["morphology_focus"] = object()
+    assert _is_already_enriched(sdata, "XENIUM")
 
 
 def test_enrich_single_latest_writes_elements_in_place(

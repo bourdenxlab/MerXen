@@ -12,6 +12,7 @@ import xarray as xr
 
 from merxen.config import MaskImageQuantificationConfig
 from merxen.mask_image_quantification import (
+    IMAGE_QUANTIFICATION_STATS,
     MASK_IMAGE_QUANTIFICATION_TABLE_KEY,
     build_mask_image_quantification_table,
     run_mask_image_quantification,
@@ -125,6 +126,33 @@ def test_multiple_images_and_channels_are_wide_with_metadata() -> None:
     assert table.var.loc["morphology__RNA__iqr", "image_key"] == "morphology"
     assert table.var.loc["morphology__RNA__iqr", "channel"] == "RNA"
     assert table.var.loc["morphology__RNA__iqr", "statistic"] == "iqr"
+
+
+def test_private_viewer_pyramids_are_excluded_from_quantification() -> None:
+    """Generated viewer pyramids must not be compared with full-size masks."""
+    mask = np.array([[1, 2], [1, 2]], dtype=np.uint32)
+    source = _image(
+        np.arange(4, dtype=np.float64).reshape(2, 2, 1),
+        ["DAPI"],
+    )
+    viewer_pyramid = _image(
+        np.ones((1, 1, 1), dtype=np.float64),
+        ["DAPI"],
+    )
+    sdata = SimpleNamespace(
+        images={
+            "_napari_compare_imgpyr__morphology_focus__ds4": viewer_pyramid,
+            "morphology_focus": source,
+        }
+    )
+
+    result = build_mask_image_quantification_table(sdata, mask, "P7113_XENIUM")
+
+    assert result.table.n_vars == len(IMAGE_QUANTIFICATION_STATS)
+    assert result.table.var["image_key"].unique().tolist() == ["morphology_focus"]
+    assert [image["image_key"] for image in result.summary["images"]] == [
+        "morphology_focus"
+    ]
 
 
 def test_shape_mismatch_fails_fast() -> None:

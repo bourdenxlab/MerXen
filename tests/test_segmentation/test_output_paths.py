@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -9,7 +10,156 @@ import pandas as pd
 import pytest
 
 from merxen.config import SegmentationConfig
-from merxen.segmentation.pipeline import run_segmentation_pipeline
+from merxen.segmentation.pipeline import (
+    _labeled_mask_has_foreground,
+    run_cellpose_nuclei_segmentation,
+    run_cellpose_segmentation,
+    run_segmentation_pipeline,
+)
+
+
+@pytest.mark.parametrize(
+    ("mask", "expected"),
+    [
+        (np.zeros((12, 9), dtype=np.uint32), False),
+        (
+            np.pad(
+                np.ones((1, 1), dtype=np.uint32),
+                ((11, 0), (8, 0)),
+            ),
+            True,
+        ),
+    ],
+)
+def test_labeled_mask_has_foreground(
+    tmp_path: Path,
+    mask: np.ndarray,
+    expected: bool,
+) -> None:
+    """Persisted masks are reusable only when they contain a positive label."""
+    mask_path = tmp_path / "mask.npy"
+    np.save(mask_path, mask)
+
+    assert _labeled_mask_has_foreground(mask_path, chunk_mb=1) is expected
+
+
+def test_nuclei_segmentation_rebuilds_existing_empty_mask(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An interrupted, preallocated all-zero mask must not be reused."""
+    output_dir = tmp_path / "segment_out"
+    persistent_dir = tmp_path / "results" / "segmentation"
+    persistent_dir.mkdir(parents=True)
+    mask_path = persistent_dir / "cellpose_nuclei_masks_tiled.npy"
+    stats_path = persistent_dir / "cellpose_nuclei_stitching_stats.json"
+    np.save(mask_path, np.zeros((8, 8), dtype=np.uint32))
+    stats_path.write_text('{"write_stitching_stats": false}\n')
+
+    cfg = SegmentationConfig.model_validate(
+        {
+            "dataset": {
+                "name": "P1_MERSCOPE",
+                "platform": "MERSCOPE",
+                "data_path": str(tmp_path / "input.zarr"),
+                "channels": ["DAPI", "PolyT"],
+                "output_dir": str(output_dir),
+                "persistent_nuclei_mask_path": str(mask_path),
+                "persistent_nuclei_stitching_stats_path": str(stats_path),
+            },
+            "nuclei_mask_filter": {
+                "final_min_area_um2": None,
+                "final_max_area_um2": None,
+            },
+        }
+    )
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        "merxen.segmentation.pipeline._load_dataset_sdata",
+        lambda config: (object(), object(), 8, 8, np.eye(3), object()),
+    )
+
+    def fake_cellpose(
+        *,
+        output_mask_path: Path,
+        output_stitching_stats_path: Path,
+        **kwargs: object,
+    ) -> Path:
+        del kwargs
+        calls.append("run")
+        np.save(output_mask_path, np.ones((8, 8), dtype=np.uint32))
+        output_stitching_stats_path.write_text('{"final_labels": 1}\n')
+        return output_mask_path
+
+    monkeypatch.setattr(
+        "merxen.segmentation.pipeline.run_tiled_cellpose",
+        fake_cellpose,
+    )
+    monkeypatch.setattr(
+        "merxen.segmentation.pipeline.build_cellpose_affine_to_microns",
+        lambda *args, **kwargs: ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
+    )
+
+    outputs = run_cellpose_nuclei_segmentation(cfg)
+
+    assert calls == ["run"]
+    assert np.all(np.load(mask_path) == 1)
+    assert outputs["nuclei_mask_path"].is_symlink()
+
+
+def test_cellpose_segmentation_reuses_outputs_without_staged_transform(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A cache-miss wrapper should derive its small transform, not rerun Cellpose."""
+    output_dir = tmp_path / "work" / "segment_out"
+    persistent_dir = tmp_path / "results" / "segmentation"
+    persistent_dir.mkdir(parents=True)
+    mask_path = persistent_dir / "cellpose_masks_tiled.npy"
+    cellprob_path = persistent_dir / "cellpose_cellprobs_tiled.npy"
+    transcripts_path = persistent_dir / "transcripts_for_proseg.csv"
+    stats_path = persistent_dir / "cellpose_stitching_stats.json"
+    np.save(mask_path, np.ones((8, 8), dtype=np.uint32))
+    np.save(cellprob_path, np.ones((8, 8), dtype=np.float32))
+    transcripts_path.write_text("x_micron,y_micron,z_micron,feature_name,cell_id\n")
+
+    cfg = SegmentationConfig.model_validate(
+        {
+            "dataset": {
+                "name": "P1_XENIUM",
+                "platform": "XENIUM",
+                "data_path": str(tmp_path / "input.zarr"),
+                "channels": ["DAPI", "18S"],
+                "output_dir": str(output_dir),
+                "persistent_mask_path": str(mask_path),
+                "persistent_cellpose_cellprob_path": str(cellprob_path),
+                "persistent_transcripts_path": str(transcripts_path),
+                "persistent_cellpose_stitching_stats_path": str(stats_path),
+                "xenium_spec_path": str(tmp_path / "experiment.xenium"),
+            },
+        }
+    )
+    monkeypatch.setattr(
+        "merxen.segmentation.pipeline._load_xenium_transform_matrix",
+        lambda config: np.diag([4.0, 4.0, 1.0]),
+    )
+    monkeypatch.setattr(
+        "merxen.segmentation.pipeline._load_dataset_sdata",
+        lambda config: pytest.fail("completed Cellpose outputs must be reused"),
+    )
+
+    outputs = run_cellpose_segmentation(cfg)
+
+    assert outputs["cellpose_mask_path"].is_symlink()
+    assert outputs["cellpose_cellprob_path"].is_symlink()
+    assert outputs["transcripts_csv"].is_symlink()
+    assert outputs["stitching_stats_path"].is_symlink()
+    assert outputs["transforms_path"].exists()
+    assert json.loads(outputs["transforms_path"].read_text()) == {
+        "x_transform": [0.25, 0.0, 0.0],
+        "y_transform": [0.0, 0.25, 0.0],
+    }
 
 
 def test_run_segmentation_pipeline_stages_persistent_outputs(

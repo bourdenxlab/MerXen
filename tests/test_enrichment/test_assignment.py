@@ -16,6 +16,7 @@ from spatialdata.models import TableModel
 from merxen.enrichment.assignment import (
     clone_table_for_region,
     compute_table_from_points_for_shape,
+    ensure_shape_has_cell_id,
     run_per_shape_assignment_for_dataset,
 )
 
@@ -95,6 +96,43 @@ def test_compute_table_from_points_uses_positive_shape_ids() -> None:
     assert table.obs["instance_id"].tolist() == [1, 2]
     x_matrix = table.X.toarray() if hasattr(table.X, "toarray") else np.asarray(table.X)
     np.testing.assert_array_equal(np.asarray(x_matrix).ravel(), np.array([1, 1]))
+
+
+@pytest.mark.parametrize(
+    ("legacy_column", "legacy_ids", "expected_source_ids", "expected_instance_ids"),
+    [
+        ("cell", [0, 7], ["0", "7"], [1, 8]),
+        (
+            "cell_id",
+            ["cellpose_2", "cellpose_9"],
+            ["cellpose_2", "cellpose_9"],
+            [2, 9],
+        ),
+    ],
+)
+def test_ensure_shape_has_cell_id_normalizes_legacy_identifiers(
+    legacy_column: str,
+    legacy_ids: list[object],
+    expected_source_ids: list[str],
+    expected_instance_ids: list[int],
+) -> None:
+    """Legacy ProSeg and Cellpose IDs should become stable positive labels."""
+    shapes = gpd.GeoDataFrame(
+        {
+            legacy_column: legacy_ids,
+            "geometry": [box(0.0, 0.0, 1.0, 1.0), box(2.0, 0.0, 3.0, 1.0)],
+        },
+        geometry="geometry",
+    )
+    sdata = SimpleNamespace(shapes={"legacy_cells": shapes})
+
+    normalized, id_column = ensure_shape_has_cell_id(sdata, "legacy_cells")
+
+    assert id_column == "instance_id"
+    assert normalized["source_cell_id"].tolist() == expected_source_ids
+    assert normalized["instance_id"].tolist() == expected_instance_ids
+    assert normalized.index.tolist() == expected_instance_ids
+    assert normalized.index.name == "instance_id"
 
 
 def test_source_backed_clone_failure_does_not_use_spatial_join(

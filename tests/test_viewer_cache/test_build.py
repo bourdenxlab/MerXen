@@ -132,3 +132,31 @@ def test_build_is_idempotent(synthetic_store: Path) -> None:
     assert summary["masks"]["MOSAIK_proseg"]["label_pyramid"] == "skipped"
     assert summary["masks"]["MOSAIK_proseg"]["outline"] == "skipped"
     assert summary["image_pyramid"] == "skipped"
+
+
+def test_build_recovers_partial_existing_base_label(synthetic_store: Path) -> None:
+    """An interrupted base label can be safely replaced in the same store."""
+    params = ViewerCacheParams(
+        label_chunk_size=64, min_size=32, shape_keys=("MOSAIK_proseg",)
+    )
+    build_viewer_caches(
+        synthetic_store, "MERSCOPE", original_data_path=synthetic_store, params=params
+    )
+    label_group = zarr.open_group(
+        str(synthetic_store / "labels" / "MOSAIK_proseg_labels"),
+        mode="a",
+    )
+    label_group.attrs.pop(fmt.LABEL_CACHE_ATTR, None)
+
+    summary = build_viewer_caches(
+        synthetic_store, "MERSCOPE", original_data_path=synthetic_store, params=params
+    )
+
+    assert summary["masks"]["MOSAIK_proseg"]["mask"] == "built"
+    marker = _marker(
+        synthetic_store,
+        "labels",
+        "MOSAIK_proseg_labels",
+        fmt.LABEL_CACHE_ATTR,
+    )
+    assert marker["complete"] is True

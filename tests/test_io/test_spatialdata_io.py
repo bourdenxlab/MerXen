@@ -66,6 +66,45 @@ def test_convert_to_latest_retains_merscope_transcript_score_alias(
     assert points["qv"].tolist() == [0.91, 0.82]
 
 
+def test_convert_to_latest_preserves_non_spatialdata_sidecars(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Ordinary conversion should retain vendor metadata outside element roots."""
+    raw_path = tmp_path / "raw.zarr"
+    raw_path.mkdir()
+    transform_text = "1,0,0\n0,1,0\n"
+    (raw_path / "micron_to_mosaic_pixel_transform.csv").write_text(transform_text)
+    payload_dir = raw_path / "vendor_payload"
+    payload_dir.mkdir()
+    (payload_dir / "specs.json").write_text('{"pixel_size": 0.2125}\n')
+
+    sdata_obj = SimpleNamespace(points={})
+    monkeypatch.setattr(
+        "merxen.io.spatialdata_io.sd.read_zarr",
+        lambda _: sdata_obj,
+    )
+
+    def _write_zarr(_obj: object, path: Path, **_kwargs: object) -> None:
+        Path(path).mkdir(parents=True)
+
+    monkeypatch.setattr(
+        "merxen.io.spatialdata_io.write_spatialdata_zarr",
+        _write_zarr,
+    )
+
+    latest_path = tmp_path / "latest.zarr"
+    output = convert_to_latest_zarr(raw_path, latest_path)
+
+    assert output == latest_path
+    assert (
+        latest_path / "micron_to_mosaic_pixel_transform.csv"
+    ).read_text() == transform_text
+    assert (latest_path / "vendor_payload" / "specs.json").read_text() == (
+        '{"pixel_size": 0.2125}\n'
+    )
+
+
 def test_write_spatialdata_zarr_writes_blobs_dataset(tmp_path: Path) -> None:
     """Writing a multiscale SpatialData object should succeed without local shims."""
     out = tmp_path / "blobs.zarr"
