@@ -4,14 +4,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import anndata as ad
 import dask.dataframe as dd
 import geopandas as gpd
 import numpy as np
 import pandas as pd
 import spatialdata as sd
+from scipy import sparse
 from shapely.geometry import box
 from spatialdata import SpatialData
-from spatialdata.models import PointsModel, ShapesModel
+from spatialdata.models import PointsModel, ShapesModel, TableModel
 from spatialdata.transformations import Identity, get_transformation
 
 from merxen.alignment.pipeline import (
@@ -68,7 +70,29 @@ def test_write_moving_aligned_zarr_adds_transforms_and_nonrigid_elements(
         feature_key="gene",
         transformations={"global": Identity()},
     )
-    source = SpatialData(shapes={"cells": shapes}, points={"transcripts": points})
+    table = ad.AnnData(
+        X=sparse.csr_matrix(np.eye(3, dtype=np.float32)),
+        obs=pd.DataFrame(
+            {
+                "instance_id": np.asarray([1, 2, 3], dtype=np.uint64),
+                "region": pd.Categorical(["cells", "cells", "cells"]),
+            },
+            index=pd.Index(["1", "2", "3"], name="cell_index"),
+        ),
+        var=pd.DataFrame(index=pd.Index(["A", "B", "C"], name="gene")),
+    )
+    table.obsm["spatial"] = source_xy.copy()
+    parsed_table = TableModel.parse(
+        table,
+        region="cells",
+        region_key="region",
+        instance_key="instance_id",
+    )
+    source = SpatialData(
+        shapes={"cells": shapes},
+        points={"transcripts": points},
+        tables={"table": parsed_table},
+    )
     stamp_merxen_schema(source, primary_points_key="transcripts")
     register_segmentation_branch(
         source,
@@ -130,3 +154,7 @@ def test_write_moving_aligned_zarr_adds_transforms_and_nonrigid_elements(
     point_df = aligned.points["transcripts_aligned_nonrigid"].compute()
     np.testing.assert_allclose(point_df[["x", "y"]].to_numpy(), nonrigid_xy)
     np.testing.assert_allclose(point_df[["raw_x", "raw_y"]].to_numpy(), source_xy)
+    np.testing.assert_allclose(
+        aligned.tables["table"].obsm["spatial_merxen_xenium"],
+        nonrigid_xy,
+    )
