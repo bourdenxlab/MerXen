@@ -13,6 +13,21 @@ nextflow run workflows/main.nf \
     --outdir ./results
 ```
 
+With no `-profile` flag, Nextflow selects its reserved `standard` profile.
+MerXen maps `standard` to the `dwight` workstation configuration, so the basic
+command automatically receives Dwight's 72-CPU/640-GB local capacity,
+concurrency guards, GPU policy/locking, and local software and reference paths.
+`-profile dwight` is the explicit equivalent.
+
+Selecting any explicit profile suppresses the implicit `standard` profile. To
+combine Dwight with the Conda profile, use both names:
+
+```bash
+nextflow run workflows/main.nf -profile dwight,conda \
+    --samplesheet workflows/samplesheet.csv \
+    --outdir ./results
+```
+
 Required parameter:
 
 | Flag | Description |
@@ -27,6 +42,7 @@ Common optional parameters:
 | `--analysis_mode` | `paired` (default), `merscope`, or `xenium`. Controls which platform columns are required and which stages are active. |
 | `--analysis_segmentation` | `both` (default), `all`, `reseg`, `original_seg`, or `proseg_hybrid`. `both` remains `reseg,original_seg`; `all` expands to `reseg,original_seg,proseg_hybrid`. |
 | `--force_spatialdata_build` | Force rebuilding the SpatialData zarr even when a cached one exists. Defaults to `false`. |
+| `--force_proseg_rerun` | Force rebuilding ProSeg bases from the current Cellpose/transcript inputs rather than reusing persistent latest zarrs. Defaults to `false`. |
 | `--enable_alignment` | Run optional Spateo alignment and alignment QC before comparison. Paired mode only. Defaults to `false`. |
 | `--mecr_enabled` | Run mutually exclusive co-expression rate analysis after QC. Defaults to `true`. |
 | `--cortical_depth_enabled` | Run cortical-depth tissue/depth annotation after clustering. Requires boundary GeoJSON annotations. Defaults to `false`. |
@@ -174,9 +190,13 @@ fully clean.
 - `--force_spatialdata_build true` — ignore cached SpatialData zarrs and
   rebuild from raw exports. Requires raw-dir columns for the active
   platform(s) to be set in the samplesheet.
+- `--force_proseg_rerun true` — ignore persistent ProSeg latest zarrs and
+  rebuild them from the current Cellpose masks and transcript exports. With
+  `-resume`, completed upstream Nextflow tasks can remain cached.
 - `nextflow run ...` without `-resume` — blow away Nextflow's cache and
-  re-run every process. The `work/` directory will grow; clean it with
-  `rm -rf work/` when you're done.
+  re-run every Nextflow process. Stage-level persistent artifacts may still be
+  reused unless the corresponding force flag is set. The `work/` directory
+  will grow; clean it with `rm -rf work/` when you're done.
 
 ## Overriding parameters on the command line
 
@@ -235,6 +255,11 @@ Accepted stages are:
 `spatial_gene_analysis`, `clustering_squidpy`, `compute_cortical_depth`, and
 `mapmycells`.
 `mecr` is only active for rows whose effective `mecr_enabled` value is `true`.
+`spatial_gene_analysis` is only active for rows whose effective
+`spatial_gene_analysis_enabled` value is `true`; disabled rows continue from
+visualization directly to clustering. Its annotation-dependent transcript
+component can be disabled separately per row with
+`spatial_gene_analysis_transcript_analysis_enabled=false`.
 `compute_cortical_depth` is only active
 for rows whose effective `cortical_depth_enabled` value is `true`. Alignment
 stages are only active for rows whose effective `enable_alignment` value is
@@ -315,22 +340,25 @@ CSV/extended JSON outputs.
 
 ## Running on a cluster
 
-The default executor is local (`executor = 'local'` in
-[nextflow.config:36-40](../workflows/nextflow.config#L36-L40)) with a hard
-ceiling of 72 CPUs and 640 GB memory. To target an HPC scheduler, add a
-profile or edit the `executor` block — see the
+The default [Dwight profile](../workflows/conf/dwight.config) uses the local
+executor with 72 CPUs and 640 GB of schedulable memory. Portable task requests
+remain in [nextflow.config](../workflows/nextflow.config). To target an HPC
+scheduler, add a host profile or an external config — see the
 [Nextflow executor docs](https://www.nextflow.io/docs/latest/executor.html).
-Per-process CPU and memory requests are already declared in the `process {}`
-block and will carry over to most schedulers unchanged.
+An HPC profile must provide its own executor, host capacity/concurrency,
+software and reference paths, worker counts, and GPU policy. The per-process
+CPU and memory requests carry over to most schedulers unchanged.
 
 Use the existing Conda environment for a local workstation run:
 
 ```bash
-nextflow run workflows/main.nf -profile conda,local \
+nextflow run workflows/main.nf -profile dwight,conda \
     --samplesheet workflows/samplesheet.csv --outdir ./results
 ```
 
-For the configured Slurm/Apptainer cluster, use:
+The existing Slurm/Apptainer profiles describe the current scheduler and
+container mechanics, but they deliberately do not inherit Dwight. Supply the
+remaining site-specific host/reference settings before using:
 
 ```bash
 nextflow run workflows/main.nf -profile apptainer,gpu,azure_slurm_hpc \
@@ -341,5 +369,5 @@ Both segmentation processes use the existing `environment.yml` or main
 MerXen image. The `gpu` profile adds Apptainer `--nv` only to GPU processes.
 `CELLPOSE_SEGMENT` requests the `gpu` queue and one GPU, while
 `PROSEG_SEGMENT` requests the `htc` queue without GPU flags. Override those
-site-specific queue names in a local profile if your scheduler uses different
-partitions.
+site-specific queue names and provide the missing system settings in an HPC
+profile if your scheduler uses different partitions.

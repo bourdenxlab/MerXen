@@ -117,3 +117,6 @@ paired pseudobulk counts, sample metadata, PyDESeq2 CSV/Parquet results,
 PNG/PDF volcano plots, and a summary recording completed or skipped branches.
 Branches with fewer than `distance_from_object_min_pairs` complete blocks are
 reported as skipped rather than producing invalid statistics.
+The cohort branch list is the union of segmentations actually annotated for
+that platform, including row-level samplesheet overrides, rather than a second
+read of the global fallback parameter.

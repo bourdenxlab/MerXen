@@ -1,12 +1,16 @@
 # Configuration
 
-MerXen configuration lives in three places:
+MerXen configuration lives in four places:
 
-1. **Shell environment** — a `.env` file for absolute paths and machine limits.
-2. **Nextflow parameters** — defaults in
+1. **Shell environment** — a `.env` file for Python-side defaults.
+2. **Portable Nextflow parameters** — scientific and algorithmic defaults in
    [workflows/nextflow.config](../workflows/nextflow.config), overridable per
    run with `--<name>`.
-3. **Pydantic models** — [src/merxen/config.py](../src/merxen/config.py) — the
+3. **Execution profiles** — host capacity, local software/reference paths,
+   hardware choices, concurrency, and GPU locking. The default Dwight settings
+   live in
+   [workflows/conf/dwight.config](../workflows/conf/dwight.config).
+4. **Pydantic models** — [src/merxen/config.py](../src/merxen/config.py) — the
    authoritative schema every CLI command validates its JSON config against.
 
 ## Environment variables
@@ -30,8 +34,10 @@ in [config.py:202](../src/merxen/config.py#L202).
 
 ## Nextflow parameters
 
-Defaults in [workflows/nextflow.config](../workflows/nextflow.config). Override
-any of them with `--<name>` on the command line.
+Portable defaults live in
+[workflows/nextflow.config](../workflows/nextflow.config). Dwight-specific
+defaults are included automatically through Nextflow's reserved `standard`
+profile. Override either kind with `--<name>` on the command line.
 
 ### Required
 
@@ -43,8 +49,8 @@ any of them with `--<name>` on the command line.
 
 | Param | Default | Description |
 |-------|---------|-------------|
-| `proseg_search_paths` | `/usr/bin/proseg`, `/usr/local/bin/proseg` | Ordered paths checked by `ENSURE_PROSEG` before segmentation. Entries may be executable paths or directories containing `proseg`; `command -v proseg` is checked after this list. |
-| `proseg_install_path` | `/usr/local/bin/proseg` | Destination used when ProSeg is missing and automatic install is enabled. If the directory is not writable, the bootstrap step requests `sudo`. |
+| `proseg_search_paths` | Dwight: `/usr/bin/proseg`, `/usr/local/bin/proseg` | Ordered paths checked by `ENSURE_PROSEG` before segmentation. Entries may be executable paths or directories containing `proseg`; `command -v proseg` is checked after this list. |
+| `proseg_install_path` | Dwight: `/usr/local/bin/proseg` | Destination used when ProSeg is missing and automatic install is enabled. If the directory is not writable, the bootstrap step requests `sudo`. |
 | `proseg_auto_install` | `true` | Install ProSeg automatically with Cargo when no configured search path contains an executable binary. |
 | `proseg_cargo_package` | `proseg` | Cargo package name installed by the bootstrap step. |
 | `proseg_version` | `3.2.0` | Required ProSeg version; other discovered binaries are ignored. |
@@ -61,15 +67,18 @@ any of them with `--<name>` on the command line.
 | `analysis_segmentation` | `both` | Fallback downstream analysis branches after enrichment. Valid values: `both`, `all`, `reseg`, `original_seg`, `proseg_hybrid`; comma-separated combinations are accepted. `both` remains `reseg,original_seg`, while `all` includes all three branches. A non-empty samplesheet value overrides this per row. |
 | `mask_image_quantification_enabled` | `true` | Insert the Cellpose-mask image quantification stage between enrichment and QC. A non-empty samplesheet `mask_image_quantification_enabled` value overrides this per row. |
 | `mecr_enabled` | `true` | Insert mutually exclusive co-expression rate analysis after QC. A non-empty samplesheet `mecr_enabled` value overrides this per row. |
+| `spatial_gene_analysis_enabled` | `true` | Insert spatial gene analysis between visualization and clustering. A non-empty samplesheet value overrides this per row; disabled rows proceed directly from visualization to clustering. |
+| `spatial_gene_analysis_transcript_analysis_enabled` | `true` | Run the annotation-dependent transcript-pattern component inside spatial gene analysis. A non-empty samplesheet value overrides this per row; `false` retains cell-level autocorrelation without requiring tissue GeoJSON files. |
 | `cortical_depth_enabled` | `false` | Insert the cortical-depth stage after clustering. Requires per-sample pial/tissue-edge annotations, with optional gray/white boundaries for depth pieces. A non-empty samplesheet `cortical_depth_enabled` value overrides this per row. |
 | `distance_from_object_enabled` | `false` | Insert registered polygon-edge distance analysis after cortical depth/clustering. A non-empty samplesheet value overrides this per row. |
 | `distance_from_object_segmentations` | `proseg, original, cellpose` | Cell-table branches for object distance. Legacy `reseg`, `original_seg`, and `proseg_mask` values remain accepted aliases. A samplesheet value may override this per row. |
 | `force_spatialdata_build` | `false` | Rebuild SpatialData zarrs even if cached. |
+| `force_proseg_rerun` | `false` | Rebuild ProSeg bases from the current Cellpose/transcript inputs instead of reusing a persistent `latest_spatialdata.zarr`. Useful with `-resume` after upstream inputs were rebuilt. |
 | `start_stage` | `build_spatialdata` | Fallback first stage. Skipped upstream stages are read from published outputs. A samplesheet `start_stage` value overrides this per row. |
 | `stop_stage` | `clustering_squidpy` | Fallback last stage. This includes `spatial_gene_analysis`, which runs between visualization and clustering. MapMyCells is available after clustering but opt-in because it requires reference files. A samplesheet `stop_stage` value overrides this per row. |
 | `only_stage` | `null` | Fallback single-stage selector. A row-level `only_stage` overrides row start/stop values; row start/stop values suppress the global `only_stage` fallback for that row. |
-| `gpu_process_lock_enabled` | `true` | Serialize local GPU-heavy processes with a file lock so `CELLPOSE_SEGMENT`, GPU `ALIGN`, and GPU `CLUSTERING_SQUIDPY` do not compete for one workstation GPU. ProSeg does not take this lock. |
-| `gpu_process_lock_file` | `${projectDir}/.merxen_gpu.lock` | File used for the local GPU lock. Override only when coordinating multiple runs from the same machine. |
+| `gpu_process_lock_enabled` | Dwight: `true` | Serialize local GPU-heavy processes so `CELLPOSE_SEGMENT`, GPU `ALIGN`, and GPU `CLUSTERING_SQUIDPY` do not compete for one workstation GPU. ProSeg does not take this lock. |
+| `gpu_process_lock_file` | Dwight: `/tmp/merxen-dwight-gpu.lock` | One host-wide lock shared by tasks and concurrent launches on Dwight. |
 
 Stage names accepted by `start_stage`, `stop_stage`, and `only_stage` are:
 `build_spatialdata`, `segment_nuclei`, `segment`, `enrich`, `mask_image_quantification`,
@@ -82,6 +91,8 @@ available only when the effective `mask_image_quantification_enabled` value is
 `cortical_depth_enabled` value is `true`. `align` and `align_qc` are available
 only for rows whose effective `enable_alignment` value is `true`.
 `mecr` is available only when the effective `mecr_enabled` value is `true`.
+`spatial_gene_analysis` is available only when the effective
+`spatial_gene_analysis_enabled` value is `true`.
 `distance_from_object` is available only when the effective
 `distance_from_object_enabled` value is `true`.
 `align`, `align_qc`, and `compare` are available only when
@@ -91,13 +102,14 @@ only for rows whose effective `enable_alignment` value is `true`.
 
 `segment_nuclei` uses DAPI only, the Cellpose `nuclei` model, and the same
 inference/tiling settings as cell Cellpose. Both masks use the default final
-area filter of 5–400 µm². `cellpose_segment_max_forks = 1` and the shared GPU
-lock serialize both Cellpose process types.
+area filter of 5–400 µm². On Dwight,
+`cellpose_segment_max_forks = 1` and the shared GPU lock serialize both
+Cellpose process types.
 
 | Param | Default | Description |
 |-------|---------|-------------|
 | `cellpose_model_type` | `cyto3` | Cellpose model preset. |
-| `cellpose_gpu` | `true` | Use GPU for inference. |
+| `cellpose_gpu` | Dwight: `true` | Use GPU for inference. Other execution profiles choose their own hardware policy. |
 | `cellpose_diameter` | `null` | Cell diameter (px). `null` → Cellpose auto-estimates. |
 | `cellpose_flow_threshold` | `0.7` | Cellpose flow threshold. |
 | `cellpose_cellprob` | `-5.0` | Cellpose cell probability threshold. |
@@ -116,14 +128,14 @@ lock serialize both Cellpose process types.
 | `cellpose_final_min_area_um2` | `5.0` | Drop final Cellpose masks smaller than this area before ProSeg. |
 | `cellpose_final_max_area_um2` | `400.0` | Drop final Cellpose masks larger than this area before ProSeg. |
 | `cellpose_final_filter_chunk_mb` | `256` | Approximate row-chunk size for streaming the final mask filter. |
-| `cellpose_segment_max_forks` | `1` | Maximum concurrent GPU Cellpose processes. |
+| `cellpose_segment_max_forks` | Dwight: `1` | Maximum concurrent GPU Cellpose processes. |
 
 ### Mask image quantification
 
 | Param | Default | Description |
 |-------|---------|-------------|
 | `mask_image_quantification_enabled` | `true` | Run Cellpose-mask image quantification after enrichment by default. |
-| `mask_image_quantification_max_forks` | `2` | Maximum concurrent quantification processes. |
+| `mask_image_quantification_max_forks` | Dwight: `3` | Maximum concurrent quantification processes. |
 
 ### Viewer caches
 
@@ -135,6 +147,7 @@ lock serialize both Cellpose process types.
 | `viewer_cache_contour_width` | `1` | Cached label-outline width. |
 | `viewer_cache_min_size` | `4096` | Minimum image dimension at which another pyramid level is generated. |
 | `viewer_cache_build_image_pyramid` | `true` | Also pre-build the viewer image pyramid. |
+| `viewer_cache_max_forks` | Dwight: `9` | Maximum concurrent viewer-cache processes. The workstation profile pairs this with a 60 GB process reservation, capping the stage at 540 GB and 72 CPUs. |
 
 ### Cortical depth
 
@@ -153,7 +166,7 @@ lock serialize both Cellpose process types.
 | `cortical_depth_side_boundary_distance_um` | `25.0` | Distance from artificial side boundaries used to flag cells/streamlines. |
 | `cortical_depth_contour_levels` | `0.1..0.9` | Depth contours written to GeoJSON/QC overlays. |
 | `cortical_depth_write_spatialdata_table` | `true` | Replace selected SpatialData tables with cortical-depth columns added to `obs`. |
-| `cortical_depth_max_forks` | `2` | Maximum concurrent cortical-depth processes. |
+| `cortical_depth_max_forks` | Dwight: `3` | Maximum concurrent cortical-depth processes. |
 
 ### Distance from object
 
@@ -168,9 +181,9 @@ lock serialize both Cellpose process types.
 | `distance_from_object_max_distance_um` | `200.0` | Inclusive upper far boundary; larger distances are `beyond_max`. |
 | `distance_from_object_min_cells_per_pseudobulk` | `10` | Minimum eligible grey-matter cells in each pair/proximity pseudobulk. |
 | `distance_from_object_min_pairs` | `2` | Minimum complete tissue blocks with both near and far samples for PyDESeq2. |
-| `distance_from_object_n_cpus` | `8` | PyDESeq2 workers and cohort process CPUs. |
+| `distance_from_object_n_cpus` | Dwight: `8` | PyDESeq2 workers and cohort process CPUs. |
 | `distance_from_object_write_spatialdata_table` | `true` | Add distance columns to selected tables while preserving existing `obs`. |
-| `distance_from_object_max_forks` | `3` | Maximum concurrent per-platform annotation processes. |
+| `distance_from_object_max_forks` | Dwight: `3` | Maximum concurrent per-platform annotation processes. |
 
 ### ProSeg
 
@@ -183,13 +196,13 @@ install paths trigger a `sudo` prompt.
 | Param | Default | Description |
 |-------|---------|-------------|
 | `proseg_samples` | `1200` | MCMC samples. |
-| `proseg_segment_max_forks` | `2` | Maximum concurrent CPU-only ProSeg processes. |
+| `proseg_segment_max_forks` | Dwight: `2` | Maximum concurrent CPU-only ProSeg processes. |
 | `proseg_voxel_size` | `0.5` | Voxel size (µm). |
 | `proseg_burnin_voxel_size` | `1.0` | Burn-in voxel size (µm). |
 | `proseg_nuclear_reassignment_prob` | `0.20` | Nuclear reassignment probability. |
 | `proseg_diffusion_probability` | `0.20` | Diffusion probability. |
 | `proseg_cell_compactness` | `0.04` | Cell compactness prior. |
-| `proseg_num_threads` | `32` | ProSeg thread count. |
+| `proseg_num_threads` | Dwight: `32` | ProSeg thread count. |
 
 ### ProSeg hybrid branch
 
@@ -280,11 +293,11 @@ SpatialData compatibility. Non-alignment stages keep using `environment.yml`.
 | `clustering_squidpy_spatial_point_size` | `0.5` | Highlight point size for spatial cluster grid plots. |
 | `clustering_squidpy_spatial_scatter_point_size` | `2.0` | Point size for regular spatial scatter plots. |
 | `clustering_squidpy_figure_dpi` | `180` | DPI for PNG plots. |
-| `clustering_squidpy_use_gpu` | `true` | Use RAPIDS single-cell acceleration when available. |
+| `clustering_squidpy_use_gpu` | Dwight: `true` | Use RAPIDS single-cell acceleration when available. |
 | `clustering_squidpy_gpu_conda` | `environment.clustering-gpu.yml` | Dedicated RAPIDS environment used only by `CLUSTERING_SQUIDPY_COMPUTE`. |
 | `clustering_squidpy_gpu_container` | Site GPU image path | Dedicated RAPIDS image used only by `CLUSTERING_SQUIDPY_COMPUTE` with Apptainer. Build it from `Dockerfile.clustering-gpu` or override this path. |
-| `clustering_squidpy_max_forks` | `4` | Maximum concurrent Squidpy clustering tasks. GPU-backed tasks still share the local GPU lock when enabled. |
-| `clustering_squidpy_gpu_vram_monitor` | `true` | Run a lightweight `nvidia-smi` sampler around each `CLUSTERING_SQUIDPY_COMPUTE` task. |
+| `clustering_squidpy_max_forks` | Dwight: `4` | Maximum concurrent Squidpy clustering tasks. GPU-backed tasks still share the local GPU lock when enabled. |
+| `clustering_squidpy_gpu_vram_monitor` | Dwight: `true` | Run a lightweight `nvidia-smi` sampler around each `CLUSTERING_SQUIDPY_COMPUTE` task. |
 | `clustering_squidpy_gpu_vram_monitor_interval_seconds` | `2` | Sampling interval for the clustering GPU VRAM monitor. |
 | `clustering_squidpy_write_spatialdata_table` | `true` | Add or replace a final clustered AnnData table in each source `latest_spatialdata.zarr`. |
 | `clustering_squidpy_hierarchical_enabled` | `true` | Run broad atlas-guided annotation and per-branch subclustering. Set to `false` for the legacy one-shot Leiden workflow. |
@@ -297,7 +310,7 @@ SpatialData compatibility. Non-alignment stages keep using `environment.yml`.
 | `clustering_squidpy_broad_marker_lookup_path` | WHB marker JSON path | MapMyCells query marker lookup used for atlas-guided cluster annotation. |
 | `clustering_squidpy_broad_taxonomy_metadata_path` | WHB taxonomy CSV path | Allen `cluster_annotation_term.csv` used to map marker lookup IDs to atlas labels. |
 | `clustering_squidpy_broad_cluster_membership_path` | WHB membership CSV path | Allen membership metadata used for neuron neurotransmitter split labels. |
-| `clustering_squidpy_broad_reference_cache_dir` | `/media/mathieubo/SSD1/MerXen/mapmycells` | Cache searched for WHB taxonomy metadata and reference H5AD gene-symbol metadata. |
+| `clustering_squidpy_broad_reference_cache_dir` | Dwight: `/media/mathieubo/SSD1/MerXen/mapmycells` | Cache searched for WHB taxonomy metadata and reference H5AD gene-symbol metadata. Other host profiles must provide their own reference locations. |
 | `clustering_squidpy_broad_marker_level` | `CCN202210140_SUPC` | Atlas taxonomy level scored for broad annotations. |
 | `clustering_squidpy_broad_min_marker_overlap` | `3` | Minimum query-panel marker overlap required to score an atlas label. |
 | `clustering_squidpy_broad_max_markers_per_label` | `80` | Maximum resolved markers used per atlas label. |
@@ -318,7 +331,7 @@ SpatialData compatibility. Non-alignment stages keep using `environment.yml`.
 | `spatial_gene_analysis_top_n` | `10` | Number of highest and lowest genes retained for each metric ranking. |
 | `spatial_gene_analysis_spatial_point_size` | `2.0` | Point size for individual spatial gene expression plots. |
 | `spatial_gene_analysis_figure_dpi` | `180` | PNG output DPI. |
-| `spatial_gene_analysis_max_forks` | `4` | Maximum concurrent spatial gene analysis tasks. |
+| `spatial_gene_analysis_max_forks` | Dwight: `4` | Maximum concurrent spatial gene analysis tasks. |
 
 ### MECR
 
@@ -343,7 +356,7 @@ SpatialData compatibility. Non-alignment stages keep using `environment.yml`.
 | `mecr_barnyard_max_points` | `50000` | Deterministic maximum plotted cells per platform and barnyard pair; exact MECR still uses every cell. |
 | `mecr_barnyard_random_seed` | `0` | Seed for barnyard display-point downsampling. |
 | `mecr_barnyard_log1p` | `false` | Plot barnyard axes in natural count space by default. Set to `true` for `log1p`-transformed display coordinates. |
-| `mecr_max_forks` | `4` | Maximum concurrent branch-scoring tasks. The shared reference task always has one fork. |
+| `mecr_max_forks` | Dwight: `4` | Maximum concurrent branch-scoring tasks. The shared reference task always has one fork. |
 
 The reference task uses the union of genes in all selected spatial panels,
 runs once, and is shared across all samples and segmentation branches. See
@@ -358,7 +371,7 @@ runs once, and is shared across all samples and segmentation branches. See
 | `mapmycells_precomputed_stats_path` | WHB stats H5 path | HDF5 precomputed stats file for the whole-brain reference. Required when `reference_mode` includes `whole_brain`. |
 | `mapmycells_region_name` | `frontal_a44_a45_a46_a32_acc` | Short safe name used in region output directories and annotation prefixes. |
 | `mapmycells_region_labels` | `["Human A44-A45", "Human A46", "Human A32", "Human ACC"]` | Allen WHB `region_of_interest_label` values used to build the strict region reference. May be a Nextflow list, JSON list, or comma-separated string. |
-| `mapmycells_region_cache_dir` | `/media/mathieubo/SSD1/MerXen/mapmycells` | Durable cache for Allen WHB downloads and generated region reference files. |
+| `mapmycells_region_cache_dir` | Dwight: `/media/mathieubo/SSD1/MerXen/mapmycells` | Durable cache for Allen WHB downloads and generated region reference files. Other host profiles must provide their own location. |
 | `mapmycells_region_min_cells_per_leaf` | `10` | Drop region taxonomy leaf aliases with fewer cells than this before precomputing stats. |
 | `mapmycells_region_force_rebuild` | `false` | Rebuild the generated region reference even if matching cached files exist. |
 | `mapmycells_region_query_markers_n_per_utility` | `10` | Marker count target passed to Allen's `QueryMarkerRunner` for the region reference. |
@@ -366,7 +379,7 @@ runs once, and is shared across all samples and segmentation branches. See
 | `mapmycells_normalization` | `raw` | Query normalization passed to MapMyCells. |
 | `mapmycells_bootstrap_factor` | `0.9` | Marker downsampling factor for bootstrapping; default keeps the historical spatial-data setting. |
 | `mapmycells_bootstrap_iteration` | `100` | Number of bootstrap iterations. |
-| `mapmycells_n_processors` | `8` | Number of worker processes passed to MapMyCells. |
+| `mapmycells_n_processors` | Dwight: `8` | Number of worker processes passed to MapMyCells. |
 | `mapmycells_chunk_size` | `null` | Optional cells-per-worker chunk size. |
 | `mapmycells_rng_seed` | `null` | Optional mapper random seed. |
 | `mapmycells_max_gb` | `null` | Optional memory budget for H5AD conversion. |
@@ -381,24 +394,33 @@ runs once, and is shared across all samples and segmentation branches. See
 
 ### Resource limits
 
+The reserved `standard` profile includes
+[dwight.config](../workflows/conf/dwight.config), so running without
+`-profile` selects Dwight automatically. `-profile dwight` is the explicit
+equivalent. When combining the workstation settings with another profile, name
+both; for example, use `-profile dwight,conda`. Selecting only an explicit
+`conda`, `apptainer`, or HPC profile suppresses Nextflow's implicit `standard`
+profile and therefore does not inherit Dwight's host settings.
+
 | Param | Default | Description |
 |-------|---------|-------------|
-| `max_ram_gb` | `640` | System memory limit passed to `MemoryConfig`. |
-| `warn_ram_gb` | `600` | RAM warning threshold. |
-| `transcript_chunk_rows` | `1_000_000` | Points chunk size when streaming transcripts. |
+| `max_ram_gb` | Dwight: `640` | System memory limit passed to `MemoryConfig`. |
+| `warn_ram_gb` | Dwight: `600` | RAM warning threshold. |
+| `transcript_chunk_rows` | Dwight: `1_000_000` | Points chunk size when streaming transcripts. |
 
-The same values are enforced at the executor level:
+Dwight advertises 72 CPUs and 640 GB of usable capacity to the local executor:
 
 ```groovy
 executor {
-    name = "local"
     cpus = 72
     memory = "640 GB"
 }
 ```
 
-Per-process CPU/memory requests and default concurrency guards
-([nextflow.config](../workflows/nextflow.config)):
+Those values limit aggregate local scheduling; they are not default requests
+for every task. Portable per-process CPU/memory requests remain in
+[nextflow.config](../workflows/nextflow.config), while the following
+`maxForks` guards belong to the Dwight profile:
 
 | Process | CPUs | Memory | Max forks |
 |---------|-----:|-------:|-----------|
@@ -406,6 +428,7 @@ Per-process CPU/memory requests and default concurrency guards
 | `CELLPOSE_SEGMENT` | 12 | 212 GB | `cellpose_segment_max_forks` = 1 |
 | `PROSEG_SEGMENT` | 32 | 220 GB | `proseg_segment_max_forks` = 2 |
 | `ENRICH` | 8 | 300 GB | unbounded |
+| `VIEWER_CACHE` | 8 | 60 GB | `viewer_cache_max_forks` = 9 |
 | `QC` | 4 | 24 GB | unbounded |
 | `ALIGN` | 12 | 100 GB | `alignment_max_forks` = 1 |
 | `ALIGN_QC` | 4 | 32 GB | unbounded |
@@ -416,10 +439,14 @@ Per-process CPU/memory requests and default concurrency guards
 | `CLUSTERING_SQUIDPY` | 8 | 32 GB | `clustering_squidpy_max_forks` = 4 |
 | `MAPMYCELLS` | 8 | 160 GB | unbounded |
 
-On local single-GPU runs, `CELLPOSE_SEGMENT`, `ALIGN` when `alignment_device != "cpu"`,
-and `CLUSTERING_SQUIDPY` when `clustering_squidpy_use_gpu=true` also share
-`gpu_process_lock_file`. The lock is held for the full process shell, then
-released automatically when the task exits.
+On Dwight, `CELLPOSE_SEGMENT`, `ALIGN` when `alignment_device != "cpu"`, and
+`CLUSTERING_SQUIDPY` when `clustering_squidpy_use_gpu=true` also share the
+host-wide `gpu_process_lock_file`. The lock is held for the full process shell,
+then released automatically when the task exits.
+
+A future HPC profile should provide its own executor, capacity/concurrency,
+software paths, reference paths, worker counts, and GPU policy. The portable
+process requests and scientific defaults do not need to be duplicated.
 
 All processes use `errorStrategy = "ignore"` with
 `workflow.failOnIgnore = true`. A failed task therefore stops only branches that

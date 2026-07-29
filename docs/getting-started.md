@@ -15,9 +15,13 @@ This guide takes you from a fresh clone to a running pipeline.
   `/usr/local/bin/proseg` by default, then falls back to `command -v proseg`.
   A matching ProSeg 3.2.0 binary is required; if none exists, MerXen builds the
   pinned Git revision with Cargo before segmentation starts.
-- Ample RAM. Defaults target a **75-CPU / 600 GB** machine; segmentation alone
-  reserves 500 GB by default. See [Configuration](configuration.md#resource-limits)
-  to dial this down.
+- Ample RAM. With no `-profile` argument, Nextflow selects the `standard`
+  profile, which loads the Dwight workstation settings: a local executor
+  capacity of **72 CPUs / 640 GB**, conservative stage concurrency, one shared
+  GPU lock, and Dwight's local reference paths. Individual segmentation
+  processes request up to 220 GB. Other execution profiles must provide their
+  own host capacity, concurrency, GPU/device, and reference-path settings. See
+  [Configuration](configuration.md#resource-limits) to dial requests down.
 - GPU strongly recommended for the Cellpose-SAM step (CPU fallback works but is
   very slow on full sections).
 
@@ -56,7 +60,7 @@ Typically fill in:
 | Variable | Description |
 |----------|-------------|
 | `MERXEN_OUTPUT_ROOT` | Directory to write pipeline outputs into. |
-| `MERXEN_MAX_RAM_GB` | System RAM in GB the pipeline is allowed to use (default 600). |
+| `MERXEN_MAX_RAM_GB` | Python-side RAM guard in GB (default 600). This is separate from the Dwight profile's 640 GB Nextflow executor capacity. |
 | `MERXEN_PROSEG_INSTALL_PATH` | Optional Python-side default. Nextflow uses `proseg_install_path` from `workflows/nextflow.config`. |
 
 `.env` is git-ignored. See [Configuration](configuration.md) for the full list
@@ -93,6 +97,20 @@ nextflow run workflows/main.nf \
     --outdir ./results
 ```
 
+With no explicit profile, Nextflow selects `standard`, which is the default
+Dwight workstation configuration. To select both the same host settings and
+the repository's Conda environments explicitly, use:
+
+```bash
+nextflow run workflows/main.nf -profile dwight,conda \
+    --samplesheet workflows/samplesheet.csv \
+    --outdir ./results
+```
+
+Selecting any other profile does not also apply `standard`; that profile (or a
+site config combined with it) must define suitable executor capacity,
+concurrency limits, GPU handling, and local reference paths for its host.
+
 Outputs land in `./results/<pair_id>/...`. Nextflow also writes an HTML
 report, execution timeline, and trace TSV under `./results/nextflow/`.
 
@@ -115,8 +133,10 @@ is system-owned, the bootstrap step asks for `sudo` permission.
 **`Missing required parameter: --samplesheet`** — you invoked `nextflow run`
 without `--samplesheet`.
 
-**Out of memory** — lower the per-process memory requests in
-[workflows/nextflow.config](../workflows/nextflow.config) and set
-`MERXEN_MAX_RAM_GB` accordingly.
+**Out of memory** — lower the relevant process request or concurrency limit.
+For Dwight, the host limits live in
+[workflows/conf/dwight.config](../workflows/conf/dwight.config); on another
+host, set them in that host's profile or site config. Set
+`MERXEN_MAX_RAM_GB` consistently if the Python-side guard also needs changing.
 
 **Cellpose GPU errors** — set `--cellpose_gpu false` to force CPU mode.

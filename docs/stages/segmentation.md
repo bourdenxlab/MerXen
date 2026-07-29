@@ -33,13 +33,17 @@ subcellular transcript analysis.
 
 The module has three independently scheduled processes per dataset:
 
-| Process | Tool | Default resources | Scheduler route |
-|---------|------|-------------------|-----------------|
-| `CELLPOSE_NUCLEI_SEGMENT` | DAPI-only Cellpose `nuclei` model | 12 CPUs, 212 GB RAM, `cellpose_segment_max_forks = 1` | Same GPU queue and shared GPU lock as cell Cellpose |
-| `CELLPOSE_SEGMENT` | Cellpose-SAM | 12 CPUs, 212 GB RAM, `cellpose_segment_max_forks = 1` | GPU queue and one GPU when `cellpose_gpu=true`; local GPU lock on workstations |
-| `PROSEG_SEGMENT` | ProSeg | 32 CPUs, 220 GB RAM, `proseg_segment_max_forks = 2` | CPU/HTC queue; no GPU request, lock, or Apptainer `--nv` |
+| Process | Tool | Process request | Dwight profile behavior |
+|---------|------|-----------------|-------------------------|
+| `CELLPOSE_NUCLEI_SEGMENT` | DAPI-only Cellpose `nuclei` model | 12 CPUs, 212 GB RAM | `cellpose_segment_max_forks = 1`; shared workstation GPU lock when `cellpose_gpu=true` |
+| `CELLPOSE_SEGMENT` | Cellpose-SAM | 12 CPUs, 212 GB RAM | `cellpose_segment_max_forks = 1`; shared workstation GPU lock when `cellpose_gpu=true` |
+| `PROSEG_SEGMENT` | ProSeg | 32 CPUs, 220 GB RAM | `proseg_segment_max_forks = 2`; no GPU lock |
 
-The two Cellpose process types use the same file lock, so only one GPU job can
+The CPU and memory requests are pipeline process settings. The concurrency and
+GPU locking shown above come from the Dwight host profile, selected through
+`standard` when no `-profile` is given. Other profiles must provide their own
+host-appropriate concurrency, executor/queue, and GPU directives. On Dwight,
+the two Cellpose process types use the same file lock, so only one GPU job can
 run at a time even across samples. `segment_nuclei` is a separate selectable
 pipeline stage immediately before `segment`:
 
@@ -72,6 +76,13 @@ The durable latest zarr written by this stage lives at
 `${outdir}/${pair_id}/${platform}/latest/latest_spatialdata.zarr`. The
 `segment_out/proseg_base_latest.zarr` in the work dir is a staged symlink to
 that path.
+
+Persistent ProSeg bases are normally reused on a resumed run. Pass
+`--force_proseg_rerun true` to rebuild them from the current Cellpose masks,
+probability logits, transcript export, and transform metadata. When the
+pipeline is also launched with `-resume`, already completed Cellpose tasks
+remain eligible for the Nextflow cache: this flag forces `PROSEG_SEGMENT`, not
+either Cellpose process.
 
 ## Python entry points
 

@@ -109,7 +109,7 @@ only `VISUALIZE` is active, clustering waits for visualisation.
 | `spatial_scatter_point_size` | Point size for regular spatial scatter plots. |
 | `figure_dpi` | PNG output DPI. |
 | `use_gpu` | Use RAPIDS single-cell acceleration when available. |
-| `clustering_squidpy_max_forks` | Nextflow-side concurrency guard. Defaults to `4`; GPU-backed tasks still share the local GPU lock when enabled. |
+| `clustering_squidpy_max_forks` | Nextflow-side concurrency guard. The Dwight profile sets `4`; its GPU-backed tasks still share one workstation GPU lock. Other host profiles must choose their own limit and GPU policy. |
 | `clustering_squidpy_gpu_vram_monitor` | Nextflow wrapper flag that records `nvidia-smi` VRAM samples for each clustering task. Defaults to `true`. |
 | `clustering_squidpy_gpu_vram_monitor_interval_seconds` | Sampling interval for the VRAM monitor. Defaults to `2`. |
 | `write_spatialdata_table` | Add or replace the final clustered table in each sample's source `latest_spatialdata.zarr`. Defaults to `true`; set `--clustering_squidpy_write_spatialdata_table false` for H5AD-only output. |
@@ -124,7 +124,8 @@ only `VISUALIZE` is active, clustering waits for visualisation.
 
 When this stage is selected and hierarchical mode is enabled, workflow preflight
 requires the broad marker lookup and taxonomy metadata to exist before any tasks
-start.
+start. The Dwight profile supplies its local marker, taxonomy, membership, and
+reference-cache paths. Other profiles must provide paths to their own copies.
 
 ## Outputs
 
@@ -148,7 +149,19 @@ table contains the same final filtered cells, UMAP/spatial coordinates, counts
 layer, and clustering/cell-type columns as `<sample_id>_clustered.h5ad`.
 
 The compute process uses `environment.clustering-gpu.yml` under the Conda
-profile. Under the Apptainer profile, set
+profile. A run with no `-profile` selects `standard`, which loads Dwight's
+72-CPU/640-GB local-executor capacity, workstation concurrency limits, shared
+GPU lock, and local reference paths. The equivalent explicit Conda selection
+is:
+
+```bash
+nextflow run workflows/main.nf -profile dwight,conda \
+  --samplesheet workflows/samplesheet.example.csv
+```
+
+Selecting another profile does not inherit `standard`; provide equivalent
+host settings in that profile or a combined site config. Under the Apptainer
+profile, set
 `clustering_squidpy_gpu_container` to an image built from
 `Dockerfile.clustering-gpu`. SpatialData is intentionally absent from this
 environment; only H5AD files cross the process boundary.
@@ -163,6 +176,10 @@ nextflow run workflows/main.nf -profile apptainer,gpu \
   "file://$PWD/merxen-clustering-gpu.sif" \
   --samplesheet workflows/samplesheet.example.csv
 ```
+
+The `apptainer,gpu` command is a runtime example, not a complete host profile:
+combine it with a site config that defines executor capacity, concurrency,
+device routing, and reference paths.
 
 When `clustering_squidpy_gpu_vram_monitor` is enabled, the Nextflow wrapper also
 writes task-level GPU telemetry under `clustering_squidpy_out/gpu_vram/`:

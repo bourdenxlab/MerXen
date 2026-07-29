@@ -78,8 +78,18 @@ When `VISUALIZE` is active, this stage waits for visualization completion. In a
 default run through `clustering_squidpy`, clustering waits for
 `SPATIAL_GENE_ANALYSIS`.
 
-The default process request is 12 CPUs and 120 GB. Four samples may run at
-once, using at most 480/640 GB (75%) and 48/72 configured CPUs.
+Set `spatial_gene_analysis_enabled=false` on an individual samplesheet row to
+skip this entire stage while allowing that row to continue through clustering
+and MapMyCells. Set
+`spatial_gene_analysis_transcript_analysis_enabled=false` instead to retain the
+cell-level autocorrelation outputs but skip the annotation-dependent
+transcript-level analysis.
+
+The process requests 12 CPUs and 120 GB. Under the implicit `standard`
+(Dwight) profile, `spatial_gene_analysis_max_forks = 4`, so four samples may
+run at once, using at most 480/640 GB (75%) and 48/72 configured CPUs. Those
+capacity and concurrency values are Dwight host settings; another execution
+profile must supply limits appropriate to its own host.
 
 ## Tissue annotation requirement
 
@@ -90,6 +100,8 @@ The same platform-specific and shared samplesheet column aliases used by
 cortical depth are accepted. White-matter lines are not used as the outer
 tissue boundary; optional exclusion polygons are removed from the support.
 Preflight checks validate these paths before expensive analysis begins.
+They are not required when the row's effective
+`spatial_gene_analysis_transcript_analysis_enabled` value is `false`.
 
 ## Python entry points
 
