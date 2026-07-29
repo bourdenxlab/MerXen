@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 
@@ -73,7 +74,10 @@ def test_nextflow_uses_row_level_settings_and_continues_after_task_errors() -> N
     ]:
         assert expected in main_text
 
-    assert 'errorStrategy = "ignore"' in config_text
+    assert re.search(
+        r'(?m)^\s*errorStrategy\s*=\s*["\']ignore["\']\s*$',
+        config_text,
+    )
     assert "failOnIgnore = true" in config_text
 
 
