@@ -344,22 +344,53 @@ def _transform_points(points_obj: Any, result: TransformResult) -> Any:
     if x_col is None or y_col is None:
         return points_obj
 
+    raw_x_col = f"raw_{x_col}"
+    raw_y_col = f"raw_{y_col}"
+    mark_shared_domain = result.valid_domain_mask is not None and _valis_setting(
+        result,
+        "mark_shared_tissue_domain",
+        default=True,
+    )
+    output_columns = list(points_obj.columns)
+    for derived_column in (raw_x_col, raw_y_col):
+        if derived_column not in output_columns:
+            output_columns.append(derived_column)
+    if mark_shared_domain and "in_shared_tissue_domain" not in output_columns:
+        output_columns.append("in_shared_tissue_domain")
+
     def _part(part: pd.DataFrame) -> pd.DataFrame:
         out = part.copy()
+        # Initialize every derived column in one deterministic order before
+        # transforming rows. Calling this same function on Dask's empty
+        # ``_meta`` below keeps partition output and metadata structurally
+        # identical, including for empty or all-invalid partitions.
+        out[x_col] = pd.to_numeric(out[x_col], errors="coerce").astype("float64")
+        out[y_col] = pd.to_numeric(out[y_col], errors="coerce").astype("float64")
+        out[raw_x_col] = pd.Series(np.nan, index=out.index, dtype="float64")
+        out[raw_y_col] = pd.Series(np.nan, index=out.index, dtype="float64")
+        if mark_shared_domain:
+            out["in_shared_tissue_domain"] = pd.Series(
+                False,
+                index=out.index,
+                dtype="bool",
+            )
         xy = out[[x_col, y_col]].apply(pd.to_numeric, errors="coerce").to_numpy(float)
         valid = np.isfinite(xy).all(axis=1)
         if np.any(valid):
             aligned = transform_xy_for_result(result, xy[valid])
-            out.loc[valid, f"raw_{x_col}"] = xy[valid, 0]
-            out.loc[valid, f"raw_{y_col}"] = xy[valid, 1]
+            out.loc[valid, raw_x_col] = xy[valid, 0]
+            out.loc[valid, raw_y_col] = xy[valid, 1]
             out.loc[valid, x_col] = aligned[:, 0]
             out.loc[valid, y_col] = aligned[:, 1]
-        return out
+            if mark_shared_domain:
+                out.loc[valid, "in_shared_tissue_domain"] = _inside_valid_domain(
+                    result,
+                    aligned,
+                )
+        return out.reindex(columns=output_columns)
 
     if hasattr(points_obj, "map_partitions"):
-        meta = points_obj._meta.copy()
-        meta[f"raw_{x_col}"] = pd.Series(dtype="float64")
-        meta[f"raw_{y_col}"] = pd.Series(dtype="float64")
+        meta = _part(points_obj._meta.copy())
         return points_obj.map_partitions(_part, meta=meta)
     return _part(points_obj)
 

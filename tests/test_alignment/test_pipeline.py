@@ -16,8 +16,10 @@ from spatialdata import SpatialData
 from spatialdata.models import PointsModel, ShapesModel, TableModel
 from spatialdata.transformations import Identity, get_transformation
 
+from merxen.alignment.bundle import ValisTransformBundle
 from merxen.alignment.pipeline import (
     MERXEN_ALIGNMENT_ATTR,
+    _transform_points,
     _write_moving_alignment_to_zarr,
 )
 from merxen.alignment.register import TransformResult
@@ -158,3 +160,74 @@ def test_write_moving_aligned_zarr_adds_transforms_and_nonrigid_elements(
         aligned.tables["table"].obsm["spatial_merxen_xenium"],
         nonrigid_xy,
     )
+
+
+def test_transform_points_dask_metadata_matches_p7113_shared_domain_order() -> None:
+    """Derived transcript columns must match Dask metadata exactly."""
+    source = pd.DataFrame(
+        {
+            "transcript_id": np.asarray([1, 2, 3, 4], dtype=np.uint64),
+            "qv": np.asarray([40.0, 35.0, 30.0, 25.0], dtype=np.float32),
+            "x": np.asarray([1.0, 2.0, np.nan, np.nan], dtype=np.float32),
+            "y": np.asarray([3.0, 4.0, np.nan, np.nan], dtype=np.float32),
+            "z": np.zeros(4, dtype=np.float32),
+            "gene": pd.Categorical(["A", "B", "A", "B"]),
+            "assignment": pd.Series([1, 2, pd.NA, pd.NA], dtype="UInt64"),
+            "hybrid_assignment": pd.Series([1, 2, pd.NA, pd.NA], dtype="UInt64"),
+            "hybrid_assignment_source": pd.Categorical(
+                ["proseg", "cellpose", "background", "background"]
+            ),
+        }
+    )
+    points = dd.from_pandas(source, npartitions=2)
+    identity = np.eye(3, dtype=np.float64)
+    bundle = ValisTransformBundle(
+        moving_dataset_to_image=identity,
+        moving_image_to_registration=identity,
+        pre_matrix=identity,
+        global_matrix=np.array([[1.0, 0.0, 5.0], [0.0, 1.0, 6.0], [0.0, 0.0, 1.0]]),
+        fixed_image_to_registration=identity,
+        fixed_dataset_to_image=identity,
+        selected_mode="global",
+    )
+    result = TransformResult(
+        merscope_to_common={
+            "selected_mode": "global",
+            "rigid_affine_matrix": bundle.global_dataset_matrix.tolist(),
+        },
+        xenium_to_common={"type": "identity"},
+        metadata={
+            "backend": "valis",
+            "moving_platform": "MERSCOPE",
+            "parameters": {"mark_shared_tissue_domain": True},
+        },
+        valis_transform=bundle,
+        valid_domain_mask=np.ones((16, 16), dtype=np.uint8),
+    )
+
+    transformed = _transform_points(points, result)
+    expected_columns = [
+        *source.columns,
+        "raw_x",
+        "raw_y",
+        "in_shared_tissue_domain",
+    ]
+
+    assert list(transformed._meta.columns) == expected_columns
+    computed = transformed.compute()
+    assert list(computed.columns) == expected_columns
+    assert computed["x"].dtype == np.dtype("float64")
+    assert computed["y"].dtype == np.dtype("float64")
+    assert computed["raw_x"].dtype == np.dtype("float64")
+    assert computed["raw_y"].dtype == np.dtype("float64")
+    assert computed["in_shared_tissue_domain"].dtype == np.dtype("bool")
+    np.testing.assert_allclose(
+        computed.loc[[0, 1], ["x", "y"]].to_numpy(),
+        np.asarray([[6.0, 9.0], [7.0, 10.0]]),
+    )
+    np.testing.assert_allclose(
+        computed.loc[[0, 1], ["raw_x", "raw_y"]].to_numpy(),
+        np.asarray([[1.0, 3.0], [2.0, 4.0]]),
+    )
+    assert computed.loc[[0, 1], "in_shared_tissue_domain"].all()
+    assert not computed.loc[[2, 3], "in_shared_tissue_domain"].any()
