@@ -487,8 +487,8 @@ class DistanceFromObjectCohortConfig(BaseModel):
         return values
 
 
-class SpateoAlignmentConfig(BaseModel):
-    """Spateo registration parameters for paired-section alignment."""
+class LegacySpateoAlignmentConfig(BaseModel):
+    """Legacy Spateo registration parameters for paired-section alignment."""
 
     model_config = {"populate_by_name": True}
 
@@ -525,21 +525,297 @@ class SpateoAlignmentConfig(BaseModel):
     param_grid: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class AlignmentImageConfig(BaseModel):
+    """DAPI image and coordinate metadata for one alignment platform."""
+
+    image_key: str | None = None
+    image_path: Path | None = None
+    dapi_channel: str = "DAPI"
+    pixel_size_um: float | None = Field(default=None, gt=0.0)
+    dataset_to_image_matrix: list[list[float]] | None = None
+
+    @field_validator("dataset_to_image_matrix")
+    @classmethod
+    def _validate_dataset_to_image_matrix(
+        cls: type[AlignmentImageConfig],
+        value: list[list[float]] | None,
+    ) -> list[list[float]] | None:
+        if value is None:
+            return None
+        if len(value) != 3 or any(len(row) != 3 for row in value):
+            raise ValueError("dataset_to_image_matrix must be a 3x3 matrix")
+        return [[float(item) for item in row] for row in value]
+
+
+class DAPIProcessingConfig(BaseModel):
+    """Physical-unit DAPI preprocessing and tissue-mask parameters."""
+
+    background_sigma_um: float = Field(default=75.0, gt=0.0)
+    background_boundary_mode: Literal["mirror", "reflect", "nearest"] = "mirror"
+    lower_percentile: float = Field(default=0.5, ge=0.0, lt=100.0)
+    upper_percentile: float = Field(default=99.5, gt=0.0, le=100.0)
+    compression: Literal["log1p", "asinh"] = "asinh"
+    clahe_clip_limit: float = Field(default=0.01, gt=0.0)
+    smoothing_sigma_um: float = Field(default=3.0, ge=0.0)
+    edge_taper_um: float = Field(default=150.0, ge=0.0)
+    edge_exclusion_um: float = Field(default=150.0, ge=0.0)
+    mask_downsample: int = Field(default=4, ge=1)
+    mask_smoothing_sigma_um: float = Field(default=20.0, gt=0.0)
+    mask_closing_radius_um: float = Field(default=30.0, ge=0.0)
+    mask_min_area_um2: float = Field(default=25_000.0, ge=0.0)
+    mask_hole_area_um2: float = Field(default=25_000.0, ge=0.0)
+    mask_dilation_um: float = Field(default=10.0, ge=0.0)
+
+    @model_validator(mode="after")
+    def _validate_percentiles(self: DAPIProcessingConfig) -> DAPIProcessingConfig:
+        if self.lower_percentile >= self.upper_percentile:
+            raise ValueError("lower_percentile must be less than upper_percentile")
+        return self
+
+
+class OrientationSearchConfig(BaseModel):
+    """Coarse arbitrary-angle orientation estimation parameters."""
+
+    max_dimension_px: int = Field(default=512, ge=64)
+    sift_features: int = Field(default=7_500, ge=100)
+    ratio_threshold: float = Field(default=0.75, gt=0.0, lt=1.0)
+    ransac_threshold_px: float = Field(default=5.0, gt=0.0)
+    minimum_inliers: int = Field(default=12, ge=3)
+    minimum_inlier_coverage: float = Field(default=0.08, ge=0.0, le=1.0)
+    minimum_dice: float = Field(default=0.08, ge=0.0, le=1.0)
+    minimum_scale: float = Field(default=0.75, gt=0.0)
+    maximum_scale: float = Field(default=1.35, gt=0.0)
+    coarse_step_degrees: float = Field(default=10.0, gt=0.0, le=180.0)
+    refine_step_degrees: float = Field(default=2.0, gt=0.0, le=90.0)
+    final_step_degrees: float = Field(default=0.5, gt=0.0, le=45.0)
+    candidates_to_refine: int = Field(default=4, ge=1)
+    allow_reflection: bool = True
+    reflection_minimum_score_improvement: float = Field(default=0.01, ge=0.0)
+    overlap_weight: float = Field(default=0.6, ge=0.0)
+    mutual_information_weight: float = Field(default=0.4, ge=0.0)
+    feature_weight: float = Field(default=0.1, ge=0.0)
+
+    @model_validator(mode="after")
+    def _validate_scale_range(
+        self: OrientationSearchConfig,
+    ) -> OrientationSearchConfig:
+        if self.minimum_scale >= self.maximum_scale:
+            raise ValueError("minimum_scale must be less than maximum_scale")
+        return self
+
+
+class PartialOverlapRigidConfig(BaseModel):
+    """Partial-overlap-aware rigid refinement after coarse pre-orientation."""
+
+    enabled: bool = True
+    max_dimension_px: int = Field(default=512, ge=128)
+    angle_search_radius_degrees: float = Field(default=10.0, gt=0.0, le=45.0)
+    coarse_angle_step_degrees: float = Field(default=1.0, gt=0.0, le=10.0)
+    maximum_translation_um: float = Field(default=1_500.0, gt=0.0)
+    retained_boundary_fraction: float = Field(default=0.7, gt=0.0, le=1.0)
+    boundary_distance_scale_um: float = Field(default=150.0, gt=0.0)
+    density_sigma_um: float = Field(default=75.0, gt=0.0)
+    minimum_fixed_overlap_fraction: float = Field(
+        default=0.45,
+        ge=0.0,
+        le=1.0,
+    )
+    minimum_moving_overlap_fraction: float = Field(
+        default=0.45,
+        ge=0.0,
+        le=1.0,
+    )
+    boundary_weight: float = Field(default=0.65, ge=0.0)
+    density_weight: float = Field(default=0.35, ge=0.0)
+    overlap_penalty_weight: float = Field(default=2.0, ge=0.0)
+    candidates_to_refine: int = Field(default=5, ge=1, le=20)
+    optimizer_max_iterations: int = Field(default=80, ge=1)
+    minimum_score_improvement: float = Field(default=0.002, ge=0.0)
+    ambiguity_score_margin: float = Field(default=0.01, ge=0.0)
+
+    @model_validator(mode="after")
+    def _validate_objective_weights(
+        self: PartialOverlapRigidConfig,
+    ) -> PartialOverlapRigidConfig:
+        if self.boundary_weight + self.density_weight <= 0:
+            raise ValueError(
+                "At least one partial-overlap objective weight must be positive"
+            )
+        return self
+
+
+class ValisFeatureConfig(BaseModel):
+    """VALIS learned feature-detector and matcher parameters."""
+
+    detector: Literal["disk"] = "disk"
+    matcher: Literal["lightglue"] = "lightglue"
+    num_features: int = Field(default=7_500, ge=100)
+    device: str = "auto"
+    ransac_threshold_px: float = Field(default=5.0, gt=0.0)
+
+
+class ValisNonRigidConfig(BaseModel):
+    """Conservative optional VALIS non-rigid registration parameters."""
+
+    enabled: bool = True
+    backend: Literal["optical_flow", "simple_elastix"] = "optical_flow"
+    compose_non_rigid: bool = False
+    grid_spacing_ratio: float = Field(default=0.08, gt=0.0, le=0.5)
+    maximum_iterations: int = Field(default=500, ge=1)
+    smoothing_sigma_ratio: float = Field(default=0.02, ge=0.0, le=0.5)
+    field_sample_spacing_px: int = Field(default=8, ge=1)
+
+
+class AlignmentQCThresholds(BaseModel):
+    """Configurable global and non-rigid registration acceptance thresholds."""
+
+    minimum_global_dice: float = Field(default=0.15, ge=0.0, le=1.0)
+    minimum_global_mutual_information: float = Field(default=0.02, ge=0.0)
+    minimum_global_inliers: int = Field(default=8, ge=0)
+    minimum_inlier_coverage: float = Field(default=0.05, ge=0.0, le=1.0)
+    affine_minimum_determinant: float = Field(default=0.25, gt=0.0)
+    affine_maximum_determinant: float = Field(default=4.0, gt=0.0)
+    affine_minimum_singular_value: float = Field(default=0.5, gt=0.0)
+    affine_maximum_singular_value: float = Field(default=2.0, gt=0.0)
+    affine_maximum_shear: float = Field(default=0.5, ge=0.0)
+    rigid_maximum_determinant_deviation: float = Field(default=0.002, ge=0.0)
+    rigid_maximum_singular_value_deviation: float = Field(default=0.001, ge=0.0)
+    rigid_maximum_shear: float = Field(default=0.001, ge=0.0)
+    morphology_fallback_enabled: bool = True
+    morphology_minimum_global_dice: float = Field(default=0.65, ge=0.0, le=1.0)
+    morphology_minimum_global_iou: float = Field(default=0.5, ge=0.0, le=1.0)
+    morphology_minimum_density_correlation: float = Field(
+        default=0.15,
+        ge=-1.0,
+        le=1.0,
+    )
+    morphology_minimum_overlap_fraction: float = Field(
+        default=0.6,
+        ge=0.0,
+        le=1.0,
+    )
+    morphology_maximum_dice_degradation: float = Field(
+        default=0.05,
+        ge=0.0,
+        le=1.0,
+    )
+    morphology_affine_minimum_singular_value: float = Field(default=0.7, gt=0.0)
+    morphology_affine_maximum_singular_value: float = Field(default=1.4, gt=0.0)
+    morphology_affine_maximum_shear: float = Field(default=0.25, ge=0.0)
+    non_rigid_minimum_nmi_improvement: float = Field(default=0.0, ge=0.0)
+    non_rigid_maximum_p95_displacement_um: float = Field(default=500.0, gt=0.0)
+    non_rigid_maximum_coherent_rotation_degrees: float = Field(
+        default=0.25,
+        gt=0.0,
+    )
+    non_rigid_maximum_coherent_translation_um: float = Field(
+        default=25.0,
+        gt=0.0,
+    )
+    non_rigid_maximum_density_correlation_degradation: float = Field(
+        default=0.0,
+        ge=0.0,
+    )
+    non_rigid_maximum_robust_score_degradation: float = Field(
+        default=0.002,
+        ge=0.0,
+    )
+    non_rigid_maximum_tissue_dice_degradation: float = Field(
+        default=0.01,
+        ge=0.0,
+        le=1.0,
+    )
+    non_rigid_maximum_nonpositive_jacobian_fraction: float = Field(
+        default=0.001,
+        ge=0.0,
+        le=1.0,
+    )
+    non_rigid_minimum_jacobian: float = Field(default=0.2, gt=0.0)
+    non_rigid_maximum_jacobian: float = Field(default=5.0, gt=0.0)
+
+
+class ValisAlignmentConfig(BaseModel):
+    """VALIS 1.2 DAPI-only registration parameters."""
+
+    registration_pixel_size_um: float | None = Field(default=None, gt=0.0)
+    registration_source_max_dim_px: int = Field(default=3_200, ge=256)
+    canvas_padding_fraction: float = Field(default=0.15, ge=0.0, le=1.0)
+    max_processed_image_dim_px: int = Field(default=1_600, ge=128)
+    max_non_rigid_registration_dim_px: int = Field(default=3_200, ge=128)
+    thumbnail_size: int = Field(default=1_024, ge=64)
+    norm_method: Literal["img_stats", "histo_match", "none"] = "img_stats"
+    # Retained so existing JSON/resume manifests remain parseable. The VALIS
+    # backend now locks the accepted MerXen pretransform and does not execute a
+    # second global fit.
+    global_transform: Literal["rigid", "affine", "similarity"] = "rigid"
+    random_seed: int = 21
+    coordinate_system_name: str = "merxen_xenium"
+    transform_transcripts: bool = True
+    transform_centroids: bool = True
+    transform_polygons: bool = True
+    mark_shared_tissue_domain: bool = True
+    resume: bool = True
+    preprocessing: DAPIProcessingConfig = DAPIProcessingConfig()
+    orientation: OrientationSearchConfig = OrientationSearchConfig()
+    partial_overlap: PartialOverlapRigidConfig = PartialOverlapRigidConfig()
+    features: ValisFeatureConfig = ValisFeatureConfig()
+    non_rigid: ValisNonRigidConfig = ValisNonRigidConfig()
+    qc: AlignmentQCThresholds = AlignmentQCThresholds()
+
+
 class AlignmentConfig(BaseModel):
-    """Configuration for paired MERSCOPE-to-Xenium section alignment."""
+    """Configuration for paired DAPI alignment with a legacy Spateo option."""
 
     pair_id: str
     merscope_zarr_path: Path
     xenium_zarr_path: Path
     output_dir: Path
-    fixed_platform: Literal["XENIUM"] = "XENIUM"
-    moving_platform: Literal["MERSCOPE"] = "MERSCOPE"
+    backend: Literal["valis", "legacy_spateo"] = "valis"
+    fixed_platform: Literal["XENIUM", "MERSCOPE"] = "XENIUM"
+    moving_platform: Literal["XENIUM", "MERSCOPE"] = "MERSCOPE"
     write_aligned_zarrs: bool = True
-    spateo: SpateoAlignmentConfig = SpateoAlignmentConfig()
+    merscope_image: AlignmentImageConfig = AlignmentImageConfig()
+    xenium_image: AlignmentImageConfig = AlignmentImageConfig()
+    valis: ValisAlignmentConfig = ValisAlignmentConfig()
+    legacy_spateo: LegacySpateoAlignmentConfig = LegacySpateoAlignmentConfig()
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_legacy_spateo_key(cls: type[AlignmentConfig], value: Any) -> Any:
+        if (
+            isinstance(value, dict)
+            and "spateo" in value
+            and "legacy_spateo" not in value
+        ):
+            return dict(value) | {"legacy_spateo": value["spateo"]}
+        return value
+
+    @model_validator(mode="after")
+    def _validate_platform_pair(self: AlignmentConfig) -> AlignmentConfig:
+        if self.fixed_platform == self.moving_platform:
+            raise ValueError("fixed_platform and moving_platform must differ")
+        if self.backend == "legacy_spateo" and (
+            self.fixed_platform != "XENIUM" or self.moving_platform != "MERSCOPE"
+        ):
+            raise ValueError(
+                "legacy_spateo only supports fixed_platform='XENIUM' and "
+                "moving_platform='MERSCOPE'; use backend='valis' for "
+                "configurable platform roles"
+            )
+        return self
+
+    @property
+    def spateo(self: AlignmentConfig) -> LegacySpateoAlignmentConfig:
+        """Return legacy Spateo config for source compatibility."""
+        return self.legacy_spateo
+
+
+# Source-compatible name for callers that still construct the old config.
+SpateoAlignmentConfig = LegacySpateoAlignmentConfig
 
 
 class AlignmentQCConfig(BaseModel):
-    """Configuration for post-alignment QC metrics."""
+    """Configuration for post-alignment DAPI QC collation."""
 
     pair_id: str
     merscope_zarr_path: Path
