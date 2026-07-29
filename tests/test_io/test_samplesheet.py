@@ -135,9 +135,11 @@ def test_validate_samplesheet_uses_row_level_analysis_mode(
     csv_path = tmp_path / "mixed_mode.csv"
     csv_path.write_text(
         "pair_id,analysis_mode,enable_alignment,merscope_dir,xenium_dir,"
-        "analysis_segmentation,start_stage,stop_stage,only_stage\n"
-        f"P1,merscope,false,{merscope_dir},,reseg,segment,enrich,\n"
-        f"P2,xenium,true,,{xenium_dir},original_seg,,,qc\n"
+        "analysis_segmentation,spatial_gene_analysis_enabled,"
+        "spatial_gene_analysis_transcript_analysis_enabled,"
+        "start_stage,stop_stage,only_stage\n"
+        f"P1,merscope,false,{merscope_dir},,reseg,false,false,segment,enrich,\n"
+        f"P2,xenium,true,,{xenium_dir},original_seg,true,false,,,qc\n"
     )
 
     pairs = parse_samplesheet(csv_path)
@@ -145,11 +147,15 @@ def test_validate_samplesheet_uses_row_level_analysis_mode(
     assert pairs[0].analysis_mode == "merscope"
     assert pairs[0].enable_alignment is False
     assert pairs[0].analysis_segmentation == "reseg"
+    assert pairs[0].spatial_gene_analysis_enabled is False
+    assert pairs[0].spatial_gene_analysis_transcript_analysis_enabled is False
     assert pairs[0].start_stage == "segment"
     assert pairs[0].stop_stage == "enrich"
     assert pairs[1].analysis_mode == "xenium"
     assert pairs[1].enable_alignment is True
     assert pairs[1].analysis_segmentation == "original_seg"
+    assert pairs[1].spatial_gene_analysis_enabled is True
+    assert pairs[1].spatial_gene_analysis_transcript_analysis_enabled is False
     assert pairs[1].only_stage == "qc"
     validate_samplesheet(pairs)
 

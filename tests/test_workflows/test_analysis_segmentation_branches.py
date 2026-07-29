@@ -149,6 +149,26 @@ def test_mask_image_quantification_resume_reuses_published_inputs() -> None:
     assert '"segmentation/cellpose_masks_tiled.npy"' in mask_resume
 
 
+def test_distance_cohort_uses_annotated_row_level_segmentations() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    main_text = (repo_root / "workflows" / "main.nf").read_text()
+    module_text = (
+        repo_root / "workflows" / "modules" / "distance_from_object.nf"
+    ).read_text()
+
+    assert "annotatedSegmentations = segmentationLists" in main_text
+    assert "segmentations: annotatedSegmentations" in main_text
+    assert (
+        "params.distance_from_object_segmentations"
+        not in main_text[
+            main_text.index("distance_from_object_cohort_inputs_ch") : main_text.index(
+                "DISTANCE_FROM_OBJECT_COHORT("
+            )
+        ]
+    )
+    assert "val(distance_segmentations)" in module_text
+
+
 def test_compute_cortical_depth_stage_is_wired_after_clustering(
     combined_config_text: str,
 ) -> None:
@@ -287,17 +307,21 @@ def test_spatial_gene_analysis_stage_is_wired_after_visualization(
         'stages += ["spatial_gene_analysis"]',
         'stages += ["clustering_squidpy"]',
         'stages += ["mapmycells"]',
+        '"spatial_gene_analysis_enabled"',
+        '"spatial_gene_analysis_transcript_analysis_enabled"',
         "settings.run_spatial_gene_analysis",
         "spatial_gene_analysis_after_visualize_ch",
         "appendSpatialGeneTranscriptPreflightChecks",
         "spatialGeneSamplesJson",
         "spatial_gene_analysis_done_ch",
         "clustering_after_spatial_gene_analysis_ch",
+        "settings.spatial_gene_analysis_transcript_analysis_enabled",
         "SPATIAL_GENE_ANALYSIS(",
     ]:
         assert expected in main_text
 
     for expected in [
+        "spatial_gene_analysis_enabled = true",
         "spatial_gene_analysis_n_neighbors = 6",
         "spatial_gene_analysis_top_n = 10",
         "spatial_gene_analysis_max_forks = 4",
@@ -316,6 +340,8 @@ def test_spatial_gene_analysis_stage_is_wired_after_visualization(
         '"top_n"',
         '"signed_distance_edges_um"',
         '"paircorr_n_jobs"',
+        "val(transcript_analysis_enabled)",
+        '"transcript_analysis_enabled": ${transcript_analysis_enabled}',
     ]:
         assert expected in module_text
 
