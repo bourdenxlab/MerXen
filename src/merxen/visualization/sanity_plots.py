@@ -29,10 +29,12 @@ SANITY_CROP_SIZE_UM = 250.0
 SANITY_MAX_TRANSCRIPTS_PER_PANEL = 2_000_000
 SANITY_RANDOM_STATE = 42
 SANITY_ASSIGNMENT_SHAPE_KEY = "MOSAIK_proseg"
+SANITY_HYBRID_SHAPE_KEY = "MOSAIK_proseg_hybrid"
 SANITY_SCALE_BAR_UM = 100.0
 SANITY_CROP_LOCATION_SAMPLE_N = 2_000
 SANITY_SHAPE_STYLES: dict[str, tuple[str, str]] = {
     "MOSAIK_proseg": ("ProSeg", "#2ca02c"),
+    "MOSAIK_proseg_hybrid": ("ProSeg hybrid", "#17becf"),
     "MOSAIK_cellpose": ("Cellpose-SAM", "#9467bd"),
     "merscope_cell_boundaries": ("Original segmentation", "#ff7f0e"),
     "xenium_cell_boundaries": ("Original segmentation", "#ff7f0e"),
@@ -42,12 +44,20 @@ SANITY_SHAPE_DRAW_ORDER: tuple[str, ...] = (
     "xenium_cell_boundaries",
     "MOSAIK_cellpose",
     "MOSAIK_proseg",
+    "MOSAIK_proseg_hybrid",
 )
 SANITY_SHAPE_LEGEND_ORDER: tuple[str, ...] = (
+    "ProSeg hybrid",
     "ProSeg",
     "Cellpose-SAM",
     "Original segmentation",
 )
+SANITY_HYBRID_ASSIGNMENT_STYLES: dict[str, tuple[str, str]] = {
+    "single_mask": ("Hybrid single-mask tx", "#facc15"),
+    "proseg_overlap": ("Hybrid ProSeg-resolved overlap tx", "#22d3ee"),
+    "ambiguous_overlap": ("Hybrid ambiguous-overlap tx", "#d946ef"),
+    "outside": ("Hybrid outside tx", "#ef4444"),
+}
 
 
 @dataclass(frozen=True)
@@ -338,50 +348,98 @@ def plot_sanity_crop_panel(
 
     tx_handles = []
     if len(tx_crop) > 0:
-        unassigned = tx_crop[~tx_crop["assigned"]]
-        assigned = tx_crop[tx_crop["assigned"]]
-
-        if len(unassigned) > 0:
-            ax.scatter(
-                unassigned["x_um"],
-                unassigned["y_um"],
-                s=4,
-                c="#d62728",
-                alpha=0.50,
-                rasterized=True,
-            )
-            tx_handles.append(
-                Line2D(
-                    [0],
-                    [0],
-                    marker="o",
-                    linestyle="None",
-                    color="#d62728",
-                    label=f"Unassigned tx ({len(unassigned):,})",
-                    markersize=5,
+        if "assignment_source" in tx_crop.columns:
+            source_values = tx_crop["assignment_source"].astype(str)
+            known_sources = set(SANITY_HYBRID_ASSIGNMENT_STYLES)
+            for source, (label, color) in SANITY_HYBRID_ASSIGNMENT_STYLES.items():
+                subset = tx_crop[source_values == source]
+                if subset.empty:
+                    continue
+                ax.scatter(
+                    subset["x_um"],
+                    subset["y_um"],
+                    s=4,
+                    c=color,
+                    alpha=0.55,
+                    rasterized=True,
                 )
-            )
-
-        if len(assigned) > 0:
-            ax.scatter(
-                assigned["x_um"],
-                assigned["y_um"],
-                s=4,
-                c="yellow",
-                alpha=0.50,
-                rasterized=True,
-            )
-            tx_handles.append(
-                Line2D(
-                    [0],
-                    [0],
-                    marker="o",
-                    linestyle="None",
-                    color="yellow",
-                    label=f"Assigned tx ({len(assigned):,})",
-                    markersize=5,
+                tx_handles.append(
+                    Line2D(
+                        [0],
+                        [0],
+                        marker="o",
+                        linestyle="None",
+                        color=color,
+                        label=f"{label} ({len(subset):,})",
+                        markersize=5,
+                    )
                 )
-            )
+            unknown = tx_crop[~source_values.isin(known_sources)]
+            if not unknown.empty:
+                ax.scatter(
+                    unknown["x_um"],
+                    unknown["y_um"],
+                    s=4,
+                    c="#9ca3af",
+                    alpha=0.55,
+                    rasterized=True,
+                )
+                tx_handles.append(
+                    Line2D(
+                        [0],
+                        [0],
+                        marker="o",
+                        linestyle="None",
+                        color="#9ca3af",
+                        label=f"Hybrid unknown-source tx ({len(unknown):,})",
+                        markersize=5,
+                    )
+                )
+        else:
+            unassigned = tx_crop[~tx_crop["assigned"]]
+            assigned = tx_crop[tx_crop["assigned"]]
+
+            if len(unassigned) > 0:
+                ax.scatter(
+                    unassigned["x_um"],
+                    unassigned["y_um"],
+                    s=4,
+                    c="#d62728",
+                    alpha=0.50,
+                    rasterized=True,
+                )
+                tx_handles.append(
+                    Line2D(
+                        [0],
+                        [0],
+                        marker="o",
+                        linestyle="None",
+                        color="#d62728",
+                        label=f"Unassigned tx ({len(unassigned):,})",
+                        markersize=5,
+                    )
+                )
+
+            if len(assigned) > 0:
+                ax.scatter(
+                    assigned["x_um"],
+                    assigned["y_um"],
+                    s=4,
+                    c="yellow",
+                    alpha=0.50,
+                    rasterized=True,
+                )
+                tx_handles.append(
+                    Line2D(
+                        [0],
+                        [0],
+                        marker="o",
+                        linestyle="None",
+                        color="yellow",
+                        label=f"Assigned tx ({len(assigned):,})",
+                        markersize=5,
+                    )
+                )
 
     ax.set_xlim(x0, x1)
     ax.set_ylim(y0, y1)
@@ -1026,8 +1084,6 @@ def _crop_points(
         pts,
         ["y", "global_y", "y_location", "y_micron", "observed_y", "y_global_px"],
     )
-    assign_col = _first_existing_col(pts, ["assignment", "cell", "cell_id"])
-    background_col = _first_existing_col(pts, ["background"])
     if x_col is None or y_col is None:
         raise KeyError(f"Could not resolve x/y columns in points[{points_key}]")
     if (
@@ -1037,12 +1093,30 @@ def _crop_points(
     ):
         assignment_shape_key = f"{assignment_shape_key}_aligned_nonrigid"
 
+    is_hybrid_assignment = (
+        assignment_shape_key is not None
+        and _canonical_shape_key(assignment_shape_key) == SANITY_HYBRID_SHAPE_KEY
+    )
+    if is_hybrid_assignment:
+        assign_col = _first_existing_col(pts, ["hybrid_assignment"])
+        background_col = _first_existing_col(pts, ["hybrid_background"])
+        assignment_source_col = _first_existing_col(
+            pts,
+            ["hybrid_assignment_source"],
+        )
+    else:
+        assign_col = _first_existing_col(pts, ["assignment", "cell", "cell_id"])
+        background_col = _first_existing_col(pts, ["background"])
+        assignment_source_col = None
+
     x0, y0, x1, y1 = bbox
     cols = [x_col, y_col]
     if assign_col is not None:
         cols.append(assign_col)
     if background_col is not None and background_col not in cols:
         cols.append(background_col)
+    if assignment_source_col is not None:
+        cols.append(assignment_source_col)
 
     if hasattr(pts, "npartitions") and hasattr(pts, "partitions"):
         work = pts[cols]
@@ -1064,7 +1138,19 @@ def _crop_points(
 
     pdf = pdf.rename(columns={x_col: "x_um", y_col: "y_um"})
 
-    if assignment_shape_key is not None:
+    if is_hybrid_assignment and (
+        (assign_col is not None and assign_col in pdf.columns)
+        or (background_col is not None and background_col in pdf.columns)
+    ):
+        pdf["assigned"] = assignment_mask_from_points(
+            pdf,
+            assign_col=assign_col,
+            background_col=background_col or "hybrid_background",
+        ).values
+        if assignment_source_col is not None and assignment_source_col in pdf.columns:
+            pdf["assignment_source"] = pdf[assignment_source_col].astype(str)
+        assign_col = assign_col or background_col
+    elif assignment_shape_key is not None:
         if assignment_shape_key not in sdata_obj.shapes:
             raise KeyError(
                 f"assignment_shape_key='{assignment_shape_key}' not found in shapes. "

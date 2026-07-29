@@ -59,10 +59,20 @@ logger = logging.getLogger(__name__)
 
 #: Default segmentation shape keys to rasterize per platform. Only keys present
 #: in the store are built. Mirrors the viewer's mask targets: reseg (proseg),
-#: cellpose, and the original/instrument boundaries.
+#: proseg hybrid, cellpose, and the original/instrument boundaries.
 DEFAULT_SHAPE_KEYS: dict[str, tuple[str, ...]] = {
-    "MERSCOPE": ("MOSAIK_proseg", "MOSAIK_cellpose", "merscope_cell_boundaries"),
-    "XENIUM": ("MOSAIK_proseg", "MOSAIK_cellpose", "xenium_cell_boundaries"),
+    "MERSCOPE": (
+        "MOSAIK_proseg",
+        "MOSAIK_proseg_hybrid",
+        "MOSAIK_cellpose",
+        "merscope_cell_boundaries",
+    ),
+    "XENIUM": (
+        "MOSAIK_proseg",
+        "MOSAIK_proseg_hybrid",
+        "MOSAIK_cellpose",
+        "xenium_cell_boundaries",
+    ),
 }
 
 

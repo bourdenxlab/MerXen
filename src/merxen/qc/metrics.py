@@ -19,6 +19,12 @@ from merxen.io.transcript_io import (
     to_pandas,
 )
 from merxen.memory import force_release
+from merxen.qc.hybrid import (
+    HYBRID_SHAPE_KEY,
+    HYBRID_TABLE_KEY,
+    compute_hybrid_qc,
+    save_hybrid_qc,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -273,6 +279,18 @@ def compute_dataset_qc(
         ),
     }
 
+    hybrid_qc = None
+    if (
+        resolved_shape_key == HYBRID_SHAPE_KEY
+        and resolved_table_key == HYBRID_TABLE_KEY
+    ):
+        hybrid_qc = compute_hybrid_qc(
+            sdata,
+            dataset_name=dataset_name,
+            points_key=points_key,
+        )
+        summary.update(hybrid_qc["summary"])
+
     del sdata, gdf, shapes
     force_release(note=f"after QC {dataset_name}")
 
@@ -280,6 +298,7 @@ def compute_dataset_qc(
         "summary": summary,
         "geometry_metrics": geom_df,
         "cell_metrics": cell_metrics,
+        "hybrid_qc": hybrid_qc,
     }
 
 
@@ -312,9 +331,18 @@ def save_dataset_qc(
     with open(pickle_path, "wb") as f:
         pickle.dump(qc_result, f)
 
-    return {
+    paths = {
         "summary_csv": summary_path,
         "geometry_csv": geom_path,
         "cell_csv": cell_path,
         "pickle": pickle_path,
     }
+    if qc_result.get("hybrid_qc") is not None:
+        paths.update(
+            save_hybrid_qc(
+                qc_result["hybrid_qc"],
+                output_dir,
+                dataset_name,
+            )
+        )
+    return paths
