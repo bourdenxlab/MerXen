@@ -7,6 +7,7 @@ process DISTANCE_FROM_OBJECT_ANNOTATE {
     tuple val(key),
         val(pair_id),
         val(platform),
+        val(distance_segmentations),
         val(distance_config_json),
         path(latest_zarr),
         path(object_annotations)
@@ -15,6 +16,7 @@ process DISTANCE_FROM_OBJECT_ANNOTATE {
     tuple val(key),
         val(pair_id),
         val(platform),
+        val(distance_segmentations),
         path("latest_input.zarr"),
         path("distance_from_object_out")
 

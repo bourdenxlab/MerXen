@@ -2958,6 +2958,7 @@ workflow {
                     key,
                     pairId,
                     platform,
+                    distanceSegmentations,
                     groovy.json.JsonOutput.prettyPrint(
                         groovy.json.JsonOutput.toJson(distanceConfig)
                     ),
@@ -2971,18 +2972,22 @@ workflow {
     )
 
     distance_from_object_cohort_inputs_ch = distance_from_object_annotation_results_ch
-        .map { _key, _pairId, platform, _latestZarr, annotationOutputDir ->
-            tuple(platform, annotationOutputDir)
+        .map {
+            _key, _pairId, platform, distanceSegmentations,
+            _latestZarr, annotationOutputDir ->
+                tuple(platform, annotationOutputDir, distanceSegmentations)
         }
         .groupTuple()
-        .map { platform, annotationOutputDirs ->
+        .map { platform, annotationOutputDirs, segmentationLists ->
+            def annotatedSegmentations = segmentationLists
+                .flatten()
+                .collect { value -> value.toString() }
+                .unique()
             def cohortConfig = [
                 platform: platform,
                 annotation_output_dirs: ["pair_outputs"],
                 output_dir: "distance_from_object_cohort_out",
-                segmentations: normalizeDistanceFromObjectSegmentations(
-                    params.distance_from_object_segmentations
-                ),
+                segmentations: annotatedSegmentations,
                 min_pairs: params.distance_from_object_min_pairs,
                 n_cpus: params.distance_from_object_n_cpus,
             ]
