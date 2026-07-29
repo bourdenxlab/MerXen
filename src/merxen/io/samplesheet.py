@@ -38,6 +38,11 @@ class SamplePair:
         analysis_segmentation: Optional row-level downstream segmentation
             branch override. Blank or omitted values inherit the Nextflow
             parameter.
+        spatial_gene_analysis_enabled: Optional row-level switch for the
+            complete spatial-gene-analysis stage.
+        spatial_gene_analysis_transcript_analysis_enabled: Optional row-level
+            switch for the annotation-dependent transcript analysis within
+            spatial-gene analysis.
         start_stage: Optional row-level first stage.
         stop_stage: Optional row-level final stage.
         only_stage: Optional row-level single-stage override.
@@ -60,6 +65,8 @@ class SamplePair:
     analysis_mode: str | None = None
     enable_alignment: bool | None = None
     analysis_segmentation: str | None = None
+    spatial_gene_analysis_enabled: bool | None = None
+    spatial_gene_analysis_transcript_analysis_enabled: bool | None = None
     start_stage: str | None = None
     stop_stage: str | None = None
     only_stage: str | None = None
@@ -74,7 +81,8 @@ def parse_samplesheet(csv_path: Path) -> list[SamplePair]:
         xenium_dir, xenium_spatialdata_path, xenium_channels, xenium_min_qv,
         merscope_voxel_layers, xenium_voxel_layers, xenium_spec_path,
         analysis_mode, enable_alignment, analysis_segmentation, start_stage,
-        stop_stage, only_stage
+        stop_stage, only_stage, spatial_gene_analysis_enabled,
+        spatial_gene_analysis_transcript_analysis_enabled
 
     Backward-compatible aliases:
         merscope_zarr_path -> merscope_spatialdata_path
@@ -143,6 +151,12 @@ def parse_samplesheet(csv_path: Path) -> list[SamplePair]:
                 enable_alignment=_parse_optional_bool(row.get("enable_alignment")),
                 analysis_segmentation=_optional_string(
                     row.get("analysis_segmentation")
+                ),
+                spatial_gene_analysis_enabled=_parse_optional_bool(
+                    row.get("spatial_gene_analysis_enabled")
+                ),
+                spatial_gene_analysis_transcript_analysis_enabled=_parse_optional_bool(
+                    row.get("spatial_gene_analysis_transcript_analysis_enabled")
                 ),
                 start_stage=_optional_string(row.get("start_stage")),
                 stop_stage=_optional_string(row.get("stop_stage")),

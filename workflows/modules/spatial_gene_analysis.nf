@@ -6,7 +6,8 @@ process SPATIAL_GENE_ANALYSIS {
     input:
     tuple val(pair_id),
         val(segmentation),
-        val(samples_json)
+        val(samples_json),
+        val(transcript_analysis_enabled)
 
     output:
     tuple val(pair_id),
@@ -42,7 +43,7 @@ process SPATIAL_GENE_ANALYSIS {
   "top_n": ${params.spatial_gene_analysis_top_n},
   "spatial_point_size": ${params.spatial_gene_analysis_spatial_point_size},
   "figure_dpi": ${params.spatial_gene_analysis_figure_dpi},
-  "transcript_analysis_enabled": ${params.spatial_gene_analysis_transcript_analysis_enabled},
+  "transcript_analysis_enabled": ${transcript_analysis_enabled},
   "transcript_min_count": ${params.spatial_gene_analysis_transcript_min_count},
   "paircorr_min_count": ${params.spatial_gene_analysis_paircorr_min_count},
   "paircorr_max_transcripts_per_gene": ${params.spatial_gene_analysis_paircorr_max_transcripts_per_gene},

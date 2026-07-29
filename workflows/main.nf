@@ -611,6 +611,7 @@ def activeStageOrder(
     alignmentEnabled,
     pairedMode,
     maskImageQuantificationEnabled,
+    spatialGeneAnalysisEnabled,
     corticalDepthEnabled,
     distanceFromObjectEnabled,
     viewerCacheEnabled,
@@ -633,7 +634,11 @@ def activeStageOrder(
     if (pairedMode) {
         stages += ["compare"]
     }
-    stages += ["visualize", "spatial_gene_analysis", "clustering_squidpy"]
+    stages += ["visualize"]
+    if (spatialGeneAnalysisEnabled) {
+        stages += ["spatial_gene_analysis"]
+    }
+    stages += ["clustering_squidpy"]
     // compute_cortical_depth is sequenced AFTER clustering_squidpy so the per-cell
     // cluster annotations exist for its depth violin plots. It is a terminal
     // opt-in stage; see the default stop_stage handling in rowSampleSettings.
@@ -647,7 +652,13 @@ def activeStageOrder(
     return stages
 }
 
-def validateStage(stage, stages, paramName, alignmentEnabled) {
+def validateStage(
+    stage,
+    stages,
+    paramName,
+    alignmentEnabled,
+    spatialGeneAnalysisEnabled
+) {
     if (!stages.contains(stage)) {
         def hint = ""
         if (stage in ["align", "align_qc"] && !alignmentEnabled) {
@@ -661,6 +672,9 @@ def validateStage(stage, stages, paramName, alignmentEnabled) {
         }
         if (stage == "mecr") {
             hint = " Pass --mecr_enabled true to use MECR."
+        }
+        if (stage == "spatial_gene_analysis" && !spatialGeneAnalysisEnabled) {
+            hint = " Pass --spatial_gene_analysis_enabled true to use spatial gene analysis."
         }
         throw new IllegalArgumentException(
             "${paramName} '${stage}' is not active for this run.${hint} " +
@@ -911,13 +925,11 @@ def appendCorticalDepthPreflightChecks(errors, row, settings, _params) {
     }
 }
 
-def appendSpatialGeneTranscriptPreflightChecks(errors, row, settings, params) {
-    def transcriptAnalysisEnabled = boolOrDefault(
-        params.spatial_gene_analysis_transcript_analysis_enabled,
-        true,
-        "spatial_gene_analysis_transcript_analysis_enabled",
-    )
-    if (!settings.run_spatial_gene_analysis || !transcriptAnalysisEnabled) {
+def appendSpatialGeneTranscriptPreflightChecks(errors, row, settings, _params) {
+    if (
+        !settings.run_spatial_gene_analysis ||
+        !settings.spatial_gene_analysis_transcript_analysis_enabled
+    ) {
         return
     }
     settings.active_platforms.each { platform ->
@@ -1070,6 +1082,24 @@ def rowSampleSettings(row, params) {
         true,
         "viewer_cache_enabled for ${pairId}",
     )
+    def spatialGeneAnalysisEnabled = boolOrDefault(
+        rowFieldOrDefault(
+            row,
+            "spatial_gene_analysis_enabled",
+            params.spatial_gene_analysis_enabled,
+        ),
+        true,
+        "spatial_gene_analysis_enabled for ${pairId}",
+    )
+    def spatialGeneTranscriptAnalysisEnabled = boolOrDefault(
+        rowFieldOrDefault(
+            row,
+            "spatial_gene_analysis_transcript_analysis_enabled",
+            params.spatial_gene_analysis_transcript_analysis_enabled,
+        ),
+        true,
+        "spatial_gene_analysis_transcript_analysis_enabled for ${pairId}",
+    )
     def corticalDepthEnabled = boolOrDefault(
         rowFieldOrDefault(
             row,
@@ -1129,6 +1159,7 @@ def rowSampleSettings(row, params) {
         alignmentEnabled,
         pairedMode,
         maskImageQuantificationEnabled,
+        spatialGeneAnalysisEnabled,
         corticalDepthEnabled,
         distanceFromObjectEnabled,
         viewerCacheEnabled,
@@ -1136,8 +1167,20 @@ def rowSampleSettings(row, params) {
     )
     def startStage = normalizeStage(startStageRaw, startParamName)
     def stopStage = normalizeStage(stopStageRaw, stopParamName)
-    validateStage(startStage, stageOrder, startParamName, alignmentEnabled)
-    validateStage(stopStage, stageOrder, stopParamName, alignmentEnabled)
+    validateStage(
+        startStage,
+        stageOrder,
+        startParamName,
+        alignmentEnabled,
+        spatialGeneAnalysisEnabled,
+    )
+    validateStage(
+        stopStage,
+        stageOrder,
+        stopParamName,
+        alignmentEnabled,
+        spatialGeneAnalysisEnabled,
+    )
     // Opt-in terminal analyses extend the historical clustering stop default.
     // Explicit only_stage selections and non-default stop stages remain exact.
     if (!onlyStageRaw && stopStage == "clustering_squidpy") {
@@ -1237,6 +1280,10 @@ def rowSampleSettings(row, params) {
         paired_mode: pairedMode,
         analysis_segmentations: analysisSegmentations,
         distance_from_object_segmentations: distanceFromObjectSegmentations,
+        spatial_gene_analysis_enabled: spatialGeneAnalysisEnabled,
+        spatial_gene_analysis_transcript_analysis_enabled: (
+            spatialGeneAnalysisEnabled && spatialGeneTranscriptAnalysisEnabled
+        ),
         stage_order: stageOrder,
         start_stage: startStage,
         stop_stage: stopStage,
@@ -1328,6 +1375,9 @@ workflow {
         log.info(
             "Sample ${settings.pair_id}: analysis_mode=${settings.analysis_mode}; " +
             "enable_alignment=${settings.enable_alignment}; " +
+            "spatial_gene_analysis=${settings.run_spatial_gene_analysis}; " +
+            "spatial_gene_transcripts=" +
+            "${settings.spatial_gene_analysis_transcript_analysis_enabled}; " +
             "cortical_depth=${settings.run_compute_cortical_depth}; " +
             "distance_from_object=${settings.run_distance_from_object}; " +
             "active platforms=${settings.active_platforms.join(', ')}; " +
@@ -2551,20 +2601,42 @@ workflow {
         .filter { _pairId, _segmentation, _samplesJson, settings ->
             settings.run_spatial_gene_analysis && !settings.run_visualize
         }
-        .map { pairId, segmentation, samplesJson, _settings ->
-            tuple(pairId, segmentation, samplesJson)
+        .map { pairId, segmentation, samplesJson, settings ->
+            tuple(
+                pairId,
+                segmentation,
+                samplesJson,
+                settings.spatial_gene_analysis_transcript_analysis_enabled,
+            )
         }
 
     spatial_gene_analysis_after_visualize_ch = analysis_samples_ch
         .filter { _pairId, _segmentation, _samplesJson, settings ->
             settings.run_spatial_gene_analysis && settings.run_visualize
         }
-        .map { pairId, segmentation, samplesJson, _settings ->
-            tuple("${pairId}|${segmentation}", pairId, segmentation, samplesJson)
+        .map { pairId, segmentation, samplesJson, settings ->
+            tuple(
+                "${pairId}|${segmentation}",
+                pairId,
+                segmentation,
+                samplesJson,
+                settings.spatial_gene_analysis_transcript_analysis_enabled,
+            )
         }
         .join(visualize_done_ch)
-        .map { _branchKey, pairId, segmentation, samplesJson, _doneFlag ->
-            tuple(pairId, segmentation, samplesJson)
+        .map {
+            _branchKey,
+            pairId,
+            segmentation,
+            samplesJson,
+            transcriptAnalysisEnabled,
+            _doneFlag ->
+            tuple(
+                pairId,
+                segmentation,
+                samplesJson,
+                transcriptAnalysisEnabled,
+            )
         }
 
     spatial_gene_analysis_unannotated_inputs_ch =
@@ -2584,15 +2656,28 @@ workflow {
     }
 
     spatial_gene_analysis_inputs_ch = spatial_gene_analysis_unannotated_inputs_ch
-        .map { pairId, segmentation, samplesJson ->
-            tuple("${pairId}|${segmentation}", pairId, segmentation, samplesJson)
+        .map { pairId, segmentation, samplesJson, transcriptAnalysisEnabled ->
+            tuple(
+                "${pairId}|${segmentation}",
+                pairId,
+                segmentation,
+                samplesJson,
+                transcriptAnalysisEnabled,
+            )
         }
         .join(spatial_gene_annotation_rows_ch)
-        .map { _key, pairId, segmentation, samplesJson, row ->
+        .map {
+            _key,
+            pairId,
+            segmentation,
+            samplesJson,
+            transcriptAnalysisEnabled,
+            row ->
             tuple(
                 pairId,
                 segmentation,
                 spatialGeneSamplesJson(samplesJson, row),
+                transcriptAnalysisEnabled,
             )
         }
 
