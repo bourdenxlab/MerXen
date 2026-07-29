@@ -5,7 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def test_segmentation_routes_cellpose_to_gpu_and_proseg_to_cpu() -> None:
+def test_segmentation_routes_cellpose_to_gpu_and_proseg_to_cpu(
+    dwight_config_text: str,
+) -> None:
     """The segmentation subworkflow should expose independent scheduler jobs."""
     repo_root = Path(__file__).resolve().parents[2]
     config_text = (repo_root / "workflows" / "nextflow.config").read_text()
@@ -30,7 +32,8 @@ def test_segmentation_routes_cellpose_to_gpu_and_proseg_to_cpu() -> None:
     ].split('withName: "ENSURE_PROSEG"', maxsplit=1)[0]
 
     assert "--gpus-per-node=1" in cellpose_resources
-    assert "gpu_process_lock_enabled" in cellpose_resources
+    assert "gpu_process_lock_enabled" in dwight_config_text
+    assert 'withName: "CELLPOSE_SEGMENT"' in dwight_config_text
     assert "queue = 'htc'" in proseg_resources
     assert "gpus-per-node" not in proseg_resources
     assert "gpu_process_lock" not in proseg_resources

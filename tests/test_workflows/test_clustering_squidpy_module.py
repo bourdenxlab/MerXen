@@ -5,13 +5,15 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def test_clustering_squidpy_nextflow_json_includes_hierarchical_fields() -> None:
+def test_clustering_squidpy_nextflow_json_includes_hierarchical_fields(
+    combined_config_text: str,
+) -> None:
     """The generated stage JSON should expose hierarchical settings."""
     repo_root = Path(__file__).resolve().parents[2]
     module_text = (
         repo_root / "workflows" / "modules" / "clustering_squidpy.nf"
     ).read_text()
-    config_text = (repo_root / "workflows" / "nextflow.config").read_text()
+    config_text = combined_config_text
 
     for expected in [
         '"hierarchical_enabled"',
@@ -34,11 +36,13 @@ def test_clustering_squidpy_nextflow_json_includes_hierarchical_fields() -> None
         assert expected in module_text or expected in config_text
 
 
-def test_workflow_preflight_checks_reference_files_before_task_inputs() -> None:
+def test_workflow_preflight_checks_reference_files_before_task_inputs(
+    combined_config_text: str,
+) -> None:
     """Stage-aware preflight checks should guard reference-backed stages."""
     repo_root = Path(__file__).resolve().parents[2]
     main_text = (repo_root / "workflows" / "main.nf").read_text()
-    config_text = (repo_root / "workflows" / "nextflow.config").read_text()
+    config_text = combined_config_text
 
     for expected in [
         "runPreflightChecks(row, settings, params)",
@@ -59,10 +63,9 @@ def test_workflow_preflight_checks_reference_files_before_task_inputs() -> None:
         assert expected in main_text or expected in config_text
 
 
-def test_gpu_processes_share_local_lock() -> None:
+def test_gpu_processes_share_local_lock(combined_config_text: str) -> None:
     """GPU-heavy local processes should not overlap on one workstation GPU."""
-    repo_root = Path(__file__).resolve().parents[2]
-    config_text = (repo_root / "workflows" / "nextflow.config").read_text()
+    config_text = combined_config_text
 
     for expected in [
         "gpu_process_lock_enabled = true",
@@ -79,14 +82,16 @@ def test_gpu_processes_share_local_lock() -> None:
         assert expected in config_text
 
 
-def test_clustering_gpu_compute_is_isolated_from_spatialdata_io() -> None:
+def test_clustering_gpu_compute_is_isolated_from_spatialdata_io(
+    combined_config_text: str,
+) -> None:
     """Only prepare/finalize should touch SpatialData around GPU compute."""
     repo_root = Path(__file__).resolve().parents[2]
     module_text = (
         repo_root / "workflows" / "modules" / "clustering_squidpy.nf"
     ).read_text()
     main_text = (repo_root / "workflows" / "main.nf").read_text()
-    config_text = (repo_root / "workflows" / "nextflow.config").read_text()
+    config_text = combined_config_text
 
     for process_name in [
         "CLUSTERING_SQUIDPY_PREPARE",

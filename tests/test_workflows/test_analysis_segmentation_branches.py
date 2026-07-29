@@ -74,11 +74,13 @@ def test_nextflow_uses_row_level_settings_and_continues_after_task_errors() -> N
     assert "failOnIgnore = true" in config_text
 
 
-def test_mask_image_quantification_stage_is_wired_before_qc() -> None:
+def test_mask_image_quantification_stage_is_wired_before_qc(
+    combined_config_text: str,
+) -> None:
     """Image quantification should run after enrichment and feed downstream zarrs."""
     repo_root = Path(__file__).resolve().parents[2]
     main_text = (repo_root / "workflows" / "main.nf").read_text()
-    config_text = (repo_root / "workflows" / "nextflow.config").read_text()
+    config_text = combined_config_text
     module_text = (
         repo_root / "workflows" / "modules" / "mask_image_quantification.nf"
     ).read_text()
@@ -144,11 +146,13 @@ def test_mask_image_quantification_resume_reuses_published_inputs() -> None:
     assert '"segmentation/cellpose_masks_tiled.npy"' in mask_resume
 
 
-def test_compute_cortical_depth_stage_is_wired_after_clustering() -> None:
+def test_compute_cortical_depth_stage_is_wired_after_clustering(
+    combined_config_text: str,
+) -> None:
     """Cortical depth should run after clustering when cluster labels are needed."""
     repo_root = Path(__file__).resolve().parents[2]
     main_text = (repo_root / "workflows" / "main.nf").read_text()
-    config_text = (repo_root / "workflows" / "nextflow.config").read_text()
+    config_text = combined_config_text
     module_text = (
         repo_root / "workflows" / "modules" / "compute_cortical_depth.nf"
     ).read_text()
@@ -188,11 +192,13 @@ def test_compute_cortical_depth_stage_is_wired_after_clustering() -> None:
         assert expected in module_text
 
 
-def test_segment_bootstraps_proseg_from_configured_paths() -> None:
+def test_segment_bootstraps_proseg_from_configured_paths(
+    combined_config_text: str,
+) -> None:
     """The workflow should resolve ProSeg from config instead of a required flag."""
     repo_root = Path(__file__).resolve().parents[2]
     main_text = (repo_root / "workflows" / "main.nf").read_text()
-    config_text = (repo_root / "workflows" / "nextflow.config").read_text()
+    config_text = combined_config_text
     module_text = (
         repo_root / "workflows" / "modules" / "proseg_bootstrap.nf"
     ).read_text()
@@ -259,11 +265,13 @@ def test_segment_bootstraps_proseg_from_configured_paths() -> None:
         assert expected in segmentation_module_text
 
 
-def test_spatial_gene_analysis_stage_is_wired_after_visualization() -> None:
+def test_spatial_gene_analysis_stage_is_wired_after_visualization(
+    combined_config_text: str,
+) -> None:
     """Spatial gene analysis should run after visualization and before clustering."""
     repo_root = Path(__file__).resolve().parents[2]
     main_text = (repo_root / "workflows" / "main.nf").read_text()
-    config_text = (repo_root / "workflows" / "nextflow.config").read_text()
+    config_text = combined_config_text
     module_text = (
         repo_root / "workflows" / "modules" / "spatial_gene_analysis.nf"
     ).read_text()
@@ -307,11 +315,13 @@ def test_spatial_gene_analysis_stage_is_wired_after_visualization() -> None:
         assert expected in module_text
 
 
-def test_mecr_stage_is_default_enabled_and_uses_one_reference_task() -> None:
+def test_mecr_stage_is_default_enabled_and_uses_one_reference_task(
+    combined_config_text: str,
+) -> None:
     """MECR should score every analysis branch from one cached WHB marker table."""
     repo_root = Path(__file__).resolve().parents[2]
     main_text = (repo_root / "workflows" / "main.nf").read_text()
-    config_text = (repo_root / "workflows" / "nextflow.config").read_text()
+    config_text = combined_config_text
     module_text = (repo_root / "workflows" / "modules" / "mecr.nf").read_text()
 
     for expected in [
@@ -352,11 +362,13 @@ def test_mecr_stage_is_default_enabled_and_uses_one_reference_task() -> None:
         assert expected in module_text
 
 
-def test_nuclei_cellpose_is_an_independent_serialized_stage() -> None:
+def test_nuclei_cellpose_is_an_independent_serialized_stage(
+    combined_config_text: str,
+) -> None:
     """DAPI nuclei should be runnable alone and share the Cellpose GPU lock."""
     repo_root = Path(__file__).resolve().parents[2]
     main_text = (repo_root / "workflows" / "main.nf").read_text()
-    config_text = (repo_root / "workflows" / "nextflow.config").read_text()
+    config_text = combined_config_text
     module_text = (repo_root / "workflows" / "modules" / "segmentation.nf").read_text()
 
     for expected in [
