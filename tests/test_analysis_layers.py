@@ -92,6 +92,95 @@ def test_validate_analysis_layer_checks_complete_hybrid_registration(
     assert summary["segmentation"] == "proseg_hybrid"
 
 
+def test_validate_analysis_layer_accepts_legacy_zero_based_proseg_ids(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "latest.zarr"
+    store.mkdir()
+    table = ad.AnnData(
+        X=np.ones((2, 1), dtype=np.int64),
+        obs=pd.DataFrame(
+            {
+                "cell": np.asarray([0, 1], dtype=np.uint32),
+                "region": pd.Categorical(["MOSAIK_proseg"] * 2),
+            },
+            index=["0", "1"],
+        ),
+        var=pd.DataFrame(index=["GeneA"]),
+    )
+    table.uns["spatialdata_attrs"] = {"instance_key": "cell"}
+    shapes = gpd.GeoDataFrame(
+        {
+            "cell": np.asarray([0, 1], dtype=np.uint32),
+            "geometry": [box(0, 0, 1, 1), box(2, 0, 3, 1)],
+        }
+    )
+    monkeypatch.setattr(
+        "merxen.analysis_layers.sd.read_zarr",
+        lambda _: SimpleNamespace(
+            tables={"table_MOSAIK_proseg": table},
+            shapes={"MOSAIK_proseg": shapes},
+            points={},
+            attrs={},
+        ),
+    )
+
+    summary = validate_analysis_layer(
+        store,
+        platform="XENIUM",
+        segmentation="reseg",
+        table_key="table_MOSAIK_proseg",
+        shape_key="MOSAIK_proseg",
+    )
+
+    assert summary["n_cells"] == 2
+
+
+def test_validate_analysis_layer_rejects_legacy_id_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "latest.zarr"
+    store.mkdir()
+    table = ad.AnnData(
+        X=np.ones((2, 1), dtype=np.int64),
+        obs=pd.DataFrame(
+            {"cell": np.asarray([0, 1], dtype=np.uint32)},
+            index=["0", "1"],
+        ),
+        var=pd.DataFrame(index=["GeneA"]),
+    )
+    table.uns["spatialdata_attrs"] = {"instance_key": "cell"}
+    shapes = gpd.GeoDataFrame(
+        {
+            "cell": np.asarray([0, 2], dtype=np.uint32),
+            "geometry": [box(0, 0, 1, 1), box(2, 0, 3, 1)],
+        }
+    )
+    monkeypatch.setattr(
+        "merxen.analysis_layers.sd.read_zarr",
+        lambda _: SimpleNamespace(
+            tables={"table_MOSAIK_proseg": table},
+            shapes={"MOSAIK_proseg": shapes},
+            points={},
+            attrs={},
+        ),
+    )
+
+    with pytest.raises(
+        SpatialDataContractError,
+        match="table/shape identifier sets differ",
+    ):
+        validate_analysis_layer(
+            store,
+            platform="XENIUM",
+            segmentation="reseg",
+            table_key="table_MOSAIK_proseg",
+            shape_key="MOSAIK_proseg",
+        )
+
+
 def test_validate_analysis_layer_rejects_missing_hybrid_provenance(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -12,6 +12,7 @@ from merxen.io.spatialdata_schema import (
     MERXEN_SCHEMA_ATTR,
     SpatialDataContractError,
     canonical_instance_series,
+    canonical_shape_instance_series,
 )
 
 HYBRID_SEGMENTATION = "proseg_hybrid"
@@ -57,26 +58,22 @@ def validate_analysis_layer(
                 f"{segmentation}: table {table_key!r} lacks instance key "
                 f"{instance_key!r}"
             )
-        if INSTANCE_ID_COLUMN not in shapes.columns:
-            raise SpatialDataContractError(
-                f"{segmentation}: shape {shape_key!r} lacks {INSTANCE_ID_COLUMN!r}"
-            )
-
         table_ids = set(
             map(
                 int,
-                canonical_instance_series(
-                    table.obs[instance_key],
-                    field_name=f"{segmentation}.table.{instance_key}",
+                _canonical_table_instance_series(
+                    table,
+                    instance_key=instance_key,
+                    field_name=f"{segmentation}.table",
                 ),
             )
         )
         shape_ids = set(
             map(
                 int,
-                canonical_instance_series(
-                    shapes[INSTANCE_ID_COLUMN],
-                    field_name=f"{segmentation}.shape.{INSTANCE_ID_COLUMN}",
+                canonical_shape_instance_series(
+                    shapes,
+                    field_name=f"{segmentation}.shape",
                 ),
             )
         )
@@ -102,6 +99,30 @@ def validate_analysis_layer(
         }
     finally:
         del sdata_obj
+
+
+def _canonical_table_instance_series(
+    table: Any,
+    *,
+    instance_key: str,
+    field_name: str,
+) -> Any:
+    """Resolve canonical IDs from current and legacy table instance keys."""
+    if instance_key == INSTANCE_ID_COLUMN:
+        return canonical_instance_series(
+            table.obs[instance_key],
+            field_name=f"{field_name}.{instance_key}",
+        )
+
+    # Legacy ProSeg tables use zero-based ``cell`` IDs, while instrument
+    # segmentations may use prefixed or opaque source identifiers. Present the
+    # selected legacy key as a generic source-ID column so the same deterministic
+    # normalization used for legacy shapes is applied to both sides.
+    legacy_ids = table.obs[[instance_key]].rename(columns={instance_key: "cell_id"})
+    return canonical_shape_instance_series(
+        legacy_ids,
+        field_name=field_name,
+    )
 
 
 def _validate_hybrid_registration(
