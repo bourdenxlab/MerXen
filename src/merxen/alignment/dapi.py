@@ -109,7 +109,8 @@ def process_dapi_image(
     if arr.ndim != 2:
         raise ValueError(f"Expected a 2D DAPI image, got shape {arr.shape}")
     arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
-    support = _coerce_support_mask(acquired_support_mask, shape_rc=arr.shape)
+    shape_rc = (int(arr.shape[0]), int(arr.shape[1]))
+    support = _coerce_support_mask(acquired_support_mask, shape_rc=shape_rc)
 
     background_sigma_px = max(
         0.5,
@@ -165,7 +166,10 @@ def process_dapi_image(
     )
     taper_width_px = int(np.ceil(float(config.edge_taper_um) / float(pixel_size_um)))
     taper = cosine_support_taper(support, width_px=taper_width_px)
-    processed = np.rint(processed.astype(np.float32) * taper).astype(np.uint8)
+    processed = np.asarray(
+        np.rint(processed.astype(np.float32) * taper),
+        dtype=np.uint8,
+    )
     processed[~support] = 0
     return processed
 
@@ -310,7 +314,8 @@ def dapi_edge_artifact_metrics(
         "interior_p95": interior_p95,
         "edge_to_interior_p95_ratio": float(edge_p95 / denominator),
     }
-    support = _coerce_support_mask(acquired_support_mask, shape_rc=arr.shape)
+    shape_rc = (int(arr.shape[0]), int(arr.shape[1]))
+    support = _coerce_support_mask(acquired_support_mask, shape_rc=shape_rc)
     distance = _distance_inside_support(support)
     support_edge_values = arr[support & (distance <= width)]
     support_inner_values = arr[

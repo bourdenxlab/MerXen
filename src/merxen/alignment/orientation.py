@@ -447,25 +447,25 @@ def _select_orientation_candidate(
     """Select handedness conservatively and retain both candidates for QC."""
     best_by_reflection: dict[bool, OrientationResult] = {}
     for candidate in candidates:
-        reflected = bool(candidate.metrics.get("reflection", False))
-        current = best_by_reflection.get(reflected)
+        is_reflected = bool(candidate.metrics.get("reflection", False))
+        current = best_by_reflection.get(is_reflected)
         if current is None or candidate.score > current.score:
-            best_by_reflection[reflected] = candidate
+            best_by_reflection[is_reflected] = candidate
 
     non_reflected = best_by_reflection.get(False)
-    reflected = best_by_reflection.get(True)
-    if non_reflected is None and reflected is None:
+    reflected_candidate = best_by_reflection.get(True)
+    if non_reflected is None and reflected_candidate is None:
         raise RuntimeError("Orientation search produced no valid candidates")
     if non_reflected is None:
-        selected = reflected
+        selected = reflected_candidate
         reason = "only_reflected_candidate_valid"
-    elif reflected is None:
+    elif reflected_candidate is None:
         selected = non_reflected
         reason = "only_non_reflected_candidate_valid"
     else:
-        improvement = float(reflected.score - non_reflected.score)
+        improvement = float(reflected_candidate.score - non_reflected.score)
         if improvement >= float(config.reflection_minimum_score_improvement):
-            selected = reflected
+            selected = reflected_candidate
             reason = "reflected_candidate_exceeded_score_margin"
         else:
             selected = non_reflected
@@ -476,12 +476,12 @@ def _select_orientation_candidate(
     metrics["selection_reason"] = reason
     metrics["reflection_score_improvement"] = (
         float("nan")
-        if non_reflected is None or reflected is None
-        else float(reflected.score - non_reflected.score)
+        if non_reflected is None or reflected_candidate is None
+        else float(reflected_candidate.score - non_reflected.score)
     )
     metrics["candidate_comparison"] = {
         "non_reflected": _orientation_candidate_summary(non_reflected),
-        "reflected": _orientation_candidate_summary(reflected),
+        "reflected": _orientation_candidate_summary(reflected_candidate),
     }
     return OrientationResult(
         matrix=selected.matrix,

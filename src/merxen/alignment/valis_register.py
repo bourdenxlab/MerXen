@@ -669,10 +669,13 @@ def _shared_mask_processor_class(
             image = np.asarray(self.image)
             target_shape = image.shape[:2]
             if mask.shape != target_shape:
-                mask = cv2.resize(
-                    mask,
-                    (int(target_shape[1]), int(target_shape[0])),
-                    interpolation=cv2.INTER_NEAREST,
+                mask = np.asarray(
+                    cv2.resize(
+                        mask,
+                        (int(target_shape[1]), int(target_shape[0])),
+                        interpolation=cv2.INTER_NEAREST,
+                    ),
+                    dtype=np.uint8,
                 )
             return np.asarray((mask > 0).astype(np.uint8) * 255, dtype=np.uint8)
 
