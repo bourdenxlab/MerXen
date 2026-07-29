@@ -68,6 +68,7 @@ process PROSEG_SEGMENT {
     tuple val(key), val(pair_id), val(platform), path("segment_out/proseg_base_latest.zarr"), path(cellpose_mask), path(transcripts_csv), path(nuclei_mask)
 
     script:
+    def forceFlag = params.force_proseg_rerun ? "--force-rerun" : ""
     """
     set -euo pipefail
     export OMP_NUM_THREADS="${task.cpus}"
@@ -91,7 +92,8 @@ JSON
         --cellpose-cellprob "${cellpose_cellprob}" \
         --transcripts-csv "${transcripts_csv}" \
         --cellpose-transforms "${cellpose_transforms}" \
-        --proseg-binary "\$(cat "${proseg_path_file}")"
+        --proseg-binary "\$(cat "${proseg_path_file}")" \
+        ${forceFlag}
     """
 }
 
