@@ -20,7 +20,11 @@ from spatialdata.models import Image2DModel, ShapesModel
 from spatialdata.transformations import Identity
 
 from merxen.viewer_cache import format as fmt
-from merxen.viewer_cache.build import ViewerCacheParams, build_viewer_caches
+from merxen.viewer_cache.build import (
+    DEFAULT_SHAPE_KEYS,
+    ViewerCacheParams,
+    build_viewer_caches,
+)
 
 
 def _square(cx: float, cy: float, s: float) -> Polygon:
@@ -160,3 +164,8 @@ def test_build_recovers_partial_existing_base_label(synthetic_store: Path) -> No
         fmt.LABEL_CACHE_ATTR,
     )
     assert marker["complete"] is True
+
+
+def test_default_viewer_cache_targets_include_hybrid() -> None:
+    for platform in ("MERSCOPE", "XENIUM"):
+        assert "MOSAIK_proseg_hybrid" in DEFAULT_SHAPE_KEYS[platform]

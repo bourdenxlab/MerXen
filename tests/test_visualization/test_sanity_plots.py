@@ -13,6 +13,7 @@ import pandas as pd
 from shapely.geometry import box
 
 from merxen.visualization.sanity_plots import (
+    _crop_points,
     _prepare_overlay_image,
     plot_pair_sanity_crops,
     plot_sanity_crop_panel,
@@ -143,3 +144,43 @@ def test_sanity_crop_panel_uses_clean_labels_and_xenium_scale_bar() -> None:
         assert "#ff7f0e" in handle_colors
     finally:
         plt.close(fig)
+
+
+def test_hybrid_sanity_crop_uses_stored_assignment_and_provenance() -> None:
+    shapes = gpd.GeoDataFrame({"geometry": [box(0.0, 0.0, 10.0, 10.0)]})
+    points = pd.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0],
+            "y": [1.0, 2.0, 3.0],
+            "hybrid_assignment": pd.Series([1, pd.NA, pd.NA], dtype="UInt64"),
+            "hybrid_background": [False, True, True],
+            "hybrid_assignment_source": [
+                "single_mask",
+                "ambiguous_overlap",
+                "outside",
+            ],
+        }
+    )
+    sdata = SimpleNamespace(
+        shapes={"MOSAIK_proseg_hybrid": shapes},
+        points={"transcripts": points},
+        images={},
+    )
+
+    cropped, _, assignment_column = _crop_points(
+        sdata,
+        (0.0, 0.0, 10.0, 10.0),
+        max_points=None,
+        random_state=0,
+        assignment_shape_key="MOSAIK_proseg_hybrid",
+        prefer_aligned_points=False,
+        prefer_aligned_assignment=False,
+    )
+
+    assert cropped["assigned"].tolist() == [True, False, False]
+    assert cropped["assignment_source"].tolist() == [
+        "single_mask",
+        "ambiguous_overlap",
+        "outside",
+    ]
+    assert assignment_column == "hybrid_assignment"
