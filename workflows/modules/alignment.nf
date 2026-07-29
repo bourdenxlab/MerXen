@@ -12,8 +12,7 @@ process ALIGN {
     tuple val(pair_id),
         val(merscope_zarr_path),
         val(xenium_zarr_path),
-        path("align_out/alignment_transform.json"),
-        path("align_out/alignment_coords")
+        path("align_out")
 
     script:
     """
@@ -29,8 +28,13 @@ process ALIGN {
     export POLARS_MAX_THREADS="${task.cpus}"
     export DASK_NUM_WORKERS="${task.cpus}"
 
-    if ${params.alignment_bootstrap_dependencies}; then
-        if ! merxen check-alignment-deps >/dev/null 2>&1; then
+    if [[ "${params.alignment_backend}" == "valis" ]] && ${params.alignment_bootstrap_dependencies}; then
+        if ! merxen check-alignment-deps --backend valis >/dev/null 2>&1; then
+            python -m pip install --no-input --no-deps \\
+                "${params.alignment_valis_requirement}"
+        fi
+    elif [[ "${params.alignment_backend}" == "legacy_spateo" ]] && ${params.alignment_bootstrap_dependencies}; then
+        if ! merxen check-alignment-deps --backend legacy_spateo >/dev/null 2>&1; then
             python -m pip install --no-input \\
                 "${params.alignment_dynamo_requirement}" \\
                 "${params.alignment_spateo_requirement}"
@@ -39,7 +43,7 @@ process ALIGN {
         fi
     fi
 
-    merxen check-alignment-deps
+    merxen check-alignment-deps --backend "${params.alignment_backend}"
 
     cat > align_config.json <<JSON
 {
@@ -47,7 +51,98 @@ process ALIGN {
   "merscope_zarr_path": "${merscope_zarr_path}",
   "xenium_zarr_path": "${xenium_zarr_path}",
   "output_dir": "align_out",
-  "spateo": {
+  "backend": "${params.alignment_backend}",
+  "fixed_platform": "${params.alignment_fixed_platform}",
+  "moving_platform": "${params.alignment_moving_platform}",
+  "merscope_image": {
+    "image_key": "${params.alignment_merscope_image_key}",
+    "dapi_channel": "${params.alignment_merscope_dapi_channel}",
+    "pixel_size_um": ${params.alignment_merscope_pixel_size_um == null ? "null" : params.alignment_merscope_pixel_size_um}
+  },
+  "xenium_image": {
+    "image_key": "${params.alignment_xenium_image_key}",
+    "dapi_channel": "${params.alignment_xenium_dapi_channel}",
+    "pixel_size_um": ${params.alignment_xenium_pixel_size_um == null ? "null" : params.alignment_xenium_pixel_size_um}
+  },
+  "valis": {
+    "registration_pixel_size_um": ${params.alignment_registration_pixel_size_um == null ? "null" : params.alignment_registration_pixel_size_um},
+    "registration_source_max_dim_px": ${params.alignment_registration_source_max_dim_px},
+    "max_processed_image_dim_px": ${params.alignment_valis_max_processed_image_dim_px},
+    "max_non_rigid_registration_dim_px": ${params.alignment_valis_max_non_rigid_registration_dim_px},
+    "thumbnail_size": ${params.alignment_valis_thumbnail_size},
+    "global_transform": "${params.alignment_valis_global_transform}",
+    "random_seed": ${params.alignment_seed},
+    "coordinate_system_name": "${params.alignment_coordinate_system_name}",
+    "transform_transcripts": ${params.alignment_transform_transcripts},
+    "transform_centroids": ${params.alignment_transform_centroids},
+    "transform_polygons": ${params.alignment_transform_polygons},
+    "mark_shared_tissue_domain": ${params.alignment_mark_shared_tissue_domain},
+    "resume": ${params.alignment_resume},
+    "preprocessing": {
+      "background_sigma_um": ${params.alignment_background_sigma_um},
+      "background_boundary_mode": "${params.alignment_background_boundary_mode}",
+      "lower_percentile": ${params.alignment_intensity_lower_percentile},
+      "upper_percentile": ${params.alignment_intensity_upper_percentile},
+      "compression": "${params.alignment_intensity_compression}",
+      "clahe_clip_limit": ${params.alignment_clahe_clip_limit},
+      "smoothing_sigma_um": ${params.alignment_smoothing_sigma_um},
+      "edge_taper_um": ${params.alignment_edge_taper_um},
+      "edge_exclusion_um": ${params.alignment_edge_exclusion_um},
+      "mask_smoothing_sigma_um": ${params.alignment_mask_smoothing_sigma_um},
+      "mask_closing_radius_um": ${params.alignment_mask_closing_radius_um},
+      "mask_min_area_um2": ${params.alignment_mask_min_area_um2},
+      "mask_hole_area_um2": ${params.alignment_mask_hole_area_um2},
+      "mask_dilation_um": ${params.alignment_mask_dilation_um}
+    },
+    "orientation": {
+      "max_dimension_px": ${params.alignment_orientation_max_dim_px},
+      "coarse_step_degrees": ${params.alignment_orientation_coarse_step_degrees},
+      "refine_step_degrees": ${params.alignment_orientation_refine_step_degrees},
+      "final_step_degrees": ${params.alignment_orientation_final_step_degrees},
+      "allow_reflection": ${params.alignment_allow_reflection},
+      "reflection_minimum_score_improvement": ${params.alignment_reflection_minimum_score_improvement}
+    },
+    "partial_overlap": {
+      "enabled": ${params.alignment_partial_overlap_enabled},
+      "max_dimension_px": ${params.alignment_partial_overlap_max_dim_px},
+      "angle_search_radius_degrees": ${params.alignment_partial_overlap_angle_radius_degrees},
+      "coarse_angle_step_degrees": ${params.alignment_partial_overlap_angle_step_degrees},
+      "maximum_translation_um": ${params.alignment_partial_overlap_max_translation_um},
+      "retained_boundary_fraction": ${params.alignment_partial_overlap_retained_boundary_fraction},
+      "boundary_distance_scale_um": ${params.alignment_partial_overlap_boundary_distance_scale_um},
+      "density_sigma_um": ${params.alignment_partial_overlap_density_sigma_um},
+      "minimum_fixed_overlap_fraction": ${params.alignment_partial_overlap_min_fixed_overlap_fraction},
+      "minimum_moving_overlap_fraction": ${params.alignment_partial_overlap_min_moving_overlap_fraction},
+      "candidates_to_refine": ${params.alignment_partial_overlap_candidates_to_refine}
+    },
+    "features": {
+      "num_features": ${params.alignment_valis_num_features},
+      "device": "${params.alignment_device}"
+    },
+    "non_rigid": {
+      "enabled": ${params.alignment_valis_non_rigid_enabled},
+      "backend": "${params.alignment_valis_non_rigid_backend}",
+      "compose_non_rigid": false,
+      "grid_spacing_ratio": ${params.alignment_valis_non_rigid_grid_spacing_ratio},
+      "maximum_iterations": ${params.alignment_valis_non_rigid_maximum_iterations},
+      "smoothing_sigma_ratio": ${params.alignment_valis_non_rigid_smoothing_sigma_ratio},
+      "field_sample_spacing_px": ${params.alignment_valis_field_sample_spacing_px}
+    },
+    "qc": {
+      "minimum_global_dice": ${params.alignment_qc_minimum_global_dice},
+      "minimum_global_mutual_information": ${params.alignment_qc_minimum_global_mutual_information},
+      "minimum_global_inliers": ${params.alignment_qc_minimum_global_inliers},
+      "minimum_inlier_coverage": ${params.alignment_qc_minimum_inlier_coverage},
+      "non_rigid_minimum_nmi_improvement": ${params.alignment_qc_non_rigid_minimum_nmi_improvement},
+      "non_rigid_maximum_p95_displacement_um": ${params.alignment_qc_non_rigid_maximum_p95_displacement_um},
+      "non_rigid_maximum_coherent_rotation_degrees": ${params.alignment_qc_non_rigid_maximum_coherent_rotation_degrees},
+      "non_rigid_maximum_coherent_translation_um": ${params.alignment_qc_non_rigid_maximum_coherent_translation_um},
+      "non_rigid_maximum_density_correlation_degradation": ${params.alignment_qc_non_rigid_maximum_density_correlation_degradation},
+      "non_rigid_maximum_robust_score_degradation": ${params.alignment_qc_non_rigid_maximum_robust_score_degradation},
+      "non_rigid_maximum_tissue_dice_degradation": ${params.alignment_qc_non_rigid_maximum_tissue_dice_degradation}
+    }
+  },
+  "legacy_spateo": {
     "mode": "${params.alignment_spateo_mode}",
     "device": "${params.alignment_device}",
     "dtype": "${params.alignment_dtype}",
@@ -92,8 +187,7 @@ process ALIGN_QC {
     tuple val(pair_id),
         val(merscope_zarr),
         val(xenium_zarr),
-        path(transform_json),
-        path(coords_dir)
+        path(align_out)
 
     output:
     tuple val(pair_id), path("alignment_qc_out")
@@ -117,7 +211,7 @@ process ALIGN_QC {
   "pair_id": "${pair_id}",
   "merscope_zarr_path": "${merscope_zarr}",
   "xenium_zarr_path": "${xenium_zarr}",
-  "transform_json_path": "${transform_json}",
+  "transform_json_path": "${align_out}/alignment_transform.json",
   "output_dir": "alignment_qc_out",
   "grid_rows": ${params.alignment_qc_grid_rows},
   "grid_cols": ${params.alignment_qc_grid_cols}

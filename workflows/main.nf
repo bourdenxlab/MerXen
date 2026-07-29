@@ -2310,6 +2310,16 @@ workflow {
         }
 
     alignment_task_results_ch = ALIGN(align_inputs_ch)
+        .map { pairId, merscopePath, xeniumPath, alignOut ->
+            tuple(
+                pairId,
+                merscopePath,
+                xeniumPath,
+                alignOut.resolve("alignment_transform.json"),
+                alignOut.resolve("alignment_coords"),
+                alignOut,
+            )
+        }
 
     alignment_published_results_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
         if (!(settings.need_alignment_results && !settings.run_align)) {
@@ -2356,6 +2366,7 @@ workflow {
                     xeniumLatest.toRealPath().toString(),
                     transformJson,
                     coordsDir,
+                    transformJson.parent,
                 )
             ]
         }
@@ -2373,8 +2384,8 @@ workflow {
 
     align_qc_inputs_ch = alignment_results_ch
         .join(align_qc_gate_ch)
-        .map { pairId, merscopeLatest, xeniumLatest, transformJson, coordsDir, _runFlag ->
-            tuple(pairId, merscopeLatest, xeniumLatest, transformJson, coordsDir)
+        .map { pairId, merscopeLatest, xeniumLatest, _transformJson, _coordsDir, alignOut, _runFlag ->
+            tuple(pairId, merscopeLatest, xeniumLatest, alignOut)
         }
 
     alignment_qc_results_ch = ALIGN_QC(align_qc_inputs_ch)
@@ -2390,7 +2401,8 @@ workflow {
     alignment_done_no_qc_ch = alignment_results_ch
         .join(alignment_done_no_qc_gate_ch)
         .flatMap {
-            pairId, _merscopeLatest, _xeniumLatest, _transformJson, _coordsDir, analysisSegmentations ->
+            pairId, _merscopeLatest, _xeniumLatest, _transformJson, _coordsDir,
+            _alignOut, analysisSegmentations ->
                 analysisSegmentations.collect { segmentation ->
                     tuple("${pairId}|${segmentation}", true)
                 }

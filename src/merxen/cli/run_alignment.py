@@ -51,9 +51,15 @@ def alignment_qc_command(config_path: Path) -> None:
 
 
 @click.command(name="check-alignment-deps")
-def check_alignment_deps_command() -> None:
-    """Verify that optional Spateo alignment dependencies import."""
-    status = check_alignment_dependencies()
+@click.option(
+    "--backend",
+    type=click.Choice(["valis", "legacy_spateo"], case_sensitive=False),
+    default="valis",
+    show_default=True,
+)
+def check_alignment_deps_command(backend: str) -> None:
+    """Verify that the selected alignment backend dependencies import."""
+    status = check_alignment_dependencies(backend)
     if not status.ok:
         raise click.ClickException(status.message)
 
