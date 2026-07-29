@@ -1388,6 +1388,7 @@ def convert_to_latest_zarr(
             sdata.points[points_key] = points
 
     write_spatialdata_zarr(sdata, latest_path)
+    _copy_non_spatialdata_sidecars(raw_path, latest_path)
 
     del sdata
     force_release(note="after latest SpatialData write")
@@ -1439,6 +1440,8 @@ def upgrade_spatialdata_contract(
 
 def _copy_non_spatialdata_sidecars(source: Path, destination: Path) -> None:
     """Preserve transform/spec files and other non-element payloads on rewrite."""
+    if not source.exists():
+        return
     element_roots = {"images", "labels", "points", "shapes", "tables"}
     metadata_names = {"zarr.json", ".zattrs", ".zgroup", ".zmetadata"}
     for child in source.iterdir():

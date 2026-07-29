@@ -1654,8 +1654,7 @@ workflow {
     )
 
     segment_published_results_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
-        if (!((settings.run_enrich || settings.run_mask_image_quantification) &&
-              !settings.run_segment)) {
+        if (!(settings.run_enrich && !settings.run_segment)) {
             []
         } else {
             settings.active_platforms.collect { platform ->
@@ -1788,15 +1787,11 @@ workflow {
                     ),
                     "ENRICH latest zarr for ${pairId}:${platform}",
                 )
-                def enrichOut = requireExistingPath(
-                    publishedDatasetPath(
-                        params.outdir,
-                        pairId,
-                        platform,
-                        "enrichment/enrich_out",
-                    ),
-                    "ENRICH output directory for ${pairId}:${platform}",
-                )
+                // The published latest zarr is the only ENRICH artifact consumed
+                // downstream. Older completed runs may not retain enrich_out, so
+                // use the required latest zarr as the unused provenance placeholder
+                // instead of rejecting an otherwise valid downstream stage start.
+                def enrichOut = latestZarr
                 tuple(key, pairId, platform, latestZarr, enrichOut)
             }
         }
@@ -1914,11 +1909,40 @@ workflow {
             }
     }
 
-    mask_image_quantification_masks_ch = segment_results_ch.map {
+    mask_image_quantification_task_masks_ch = segment_task_results_ch.map {
         key, _pairId, _platform, _latestZarr, maskPath, _transcriptsCsv,
         _nucleiMaskPath ->
             tuple(key, maskPath)
     }
+
+    mask_image_quantification_published_masks_ch = sample_rows_ch.flatMap {
+        pairId, _row, settings ->
+            if (!(
+                settings.run_mask_image_quantification &&
+                !settings.run_segment
+            )) {
+                []
+            } else {
+                settings.active_platforms.collect { platform ->
+                    def key = "${pairId}|${platform}"
+                    def maskPath = requireExistingPath(
+                        publishedDatasetPath(
+                            params.outdir,
+                            pairId,
+                            platform,
+                            "segmentation/cellpose_masks_tiled.npy",
+                        ),
+                        "SEGMENT Cellpose mask for ${pairId}:${platform}",
+                    )
+                    tuple(key, maskPath)
+                }
+            }
+    }
+
+    mask_image_quantification_masks_ch =
+        mask_image_quantification_task_masks_ch.mix(
+            mask_image_quantification_published_masks_ch
+        )
 
     mask_image_quantification_inputs_ch = post_enrich_zarrs_ch
         .join(mask_image_quantification_masks_ch)

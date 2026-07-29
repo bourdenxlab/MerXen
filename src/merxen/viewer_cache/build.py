@@ -23,6 +23,7 @@ from spatialdata.models import Image2DModel, Labels2DModel
 from spatialdata.transformations import Affine, get_transformation
 
 from merxen.io.image_source import image_to_cyx
+from merxen.io.spatialdata_io import write_or_replace_element
 from merxen.memory import force_release, log_status
 from merxen.viewer_cache.format import (
     DERIVED_CACHE_ATTR,
@@ -319,8 +320,13 @@ def _rasterize_base_mask(
     empty = da.zeros(shape, chunks=chunks, dtype=id_dtype)
     label_da = xr.DataArray(empty, dims=("y", "x"))
     elem = Labels2DModel.parse(label_da, transformations={"global": spatialdata_affine})
-    sdata.labels[label_key] = elem
-    sdata.write_element(label_key, overwrite=(label_key in _on_disk_labels(zarr_path)))
+    write_or_replace_element(
+        sdata,
+        label_key,
+        "labels",
+        elem,
+        overwrite=True,
+    )
 
     label_arr = zarr.open_array(str(zarr_path / "labels" / label_key / "s0"), mode="r+")
     gdf = sdata.shapes[shape_key]
@@ -348,13 +354,6 @@ def _rasterize_base_mask(
                 label_arr[y0:y1, x0:x1] = tile
                 written += 1
     return int(len(gdf))
-
-
-def _on_disk_labels(zarr_path: Path) -> set[str]:
-    labels_dir = zarr_path / "labels"
-    if not labels_dir.exists():
-        return set()
-    return {p.name for p in labels_dir.iterdir() if p.is_dir()}
 
 
 def _build_label_pyramid(

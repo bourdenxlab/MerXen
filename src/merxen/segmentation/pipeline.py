@@ -46,6 +46,44 @@ from merxen.segmentation.proseg_hybrid import (
 logger = logging.getLogger(__name__)
 
 
+def _labeled_mask_has_foreground(
+    mask_path: str | Path,
+    *,
+    chunk_mb: int = 64,
+) -> bool:
+    """Return whether an on-disk labeled mask contains a positive label.
+
+    Cellpose writes its large masks directly into a memory-mapped ``.npy`` file.
+    If a task is interrupted after allocating that file, the path can exist while
+    still containing only the initial zeros.  Scan in bounded row chunks so those
+    incomplete artifacts are not mistaken for reusable completed outputs.
+    """
+    path = Path(mask_path)
+    try:
+        mask = np.load(path, mmap_mode="r")
+    except (OSError, ValueError) as exc:
+        logger.warning("Could not validate labeled mask %s: %s", path, exc)
+        return False
+
+    if mask.ndim != 2 or not np.issubdtype(mask.dtype, np.integer):
+        logger.warning(
+            "Labeled mask %s has invalid shape or dtype: shape=%s dtype=%s",
+            path,
+            mask.shape,
+            mask.dtype,
+        )
+        return False
+    if mask.size == 0:
+        return False
+
+    row_bytes = max(1, int(mask.shape[1]) * int(mask.dtype.itemsize))
+    rows_per_chunk = max(1, (max(1, int(chunk_mb)) * 1024**2) // row_bytes)
+    for y0 in range(0, int(mask.shape[0]), rows_per_chunk):
+        if np.any(mask[y0 : y0 + rows_per_chunk] > 0):
+            return True
+    return False
+
+
 def _pixel_area_um2_from_affine(
     x_transform: tuple[float, float, float],
     y_transform: tuple[float, float, float],
@@ -119,6 +157,40 @@ def _load_xenium_transform_matrix(config: SegmentationConfig) -> np.ndarray:
         "Could not determine Xenium transform. "
         "Set dataset.xenium_spec_path or dataset.transform_path."
     )
+
+
+def _write_cellpose_transforms(
+    config: SegmentationConfig,
+    transforms_path: str | Path,
+) -> Path:
+    """Derive and write the reusable mask-to-micron transform sidecar."""
+    platform = config.dataset.platform.upper()
+    if platform == "MERSCOPE":
+        matrix = _load_merscope_transform_matrix(config)
+    elif platform == "XENIUM":
+        matrix = _load_xenium_transform_matrix(config)
+    else:
+        raise ValueError(f"Unsupported platform: {config.dataset.platform}")
+
+    x_transform, y_transform = build_cellpose_affine_to_microns(
+        matrix,
+        scale_factor=1.0,
+        x0=0.0,
+        y0=0.0,
+    )
+    path = Path(transforms_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "x_transform": list(x_transform),
+                "y_transform": list(y_transform),
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    return path
 
 
 def _load_dataset_sdata(
@@ -319,33 +391,41 @@ def run_cellpose_segmentation(
             },
         )
 
-    if (
+    reusable_outputs_exist = (
         transcripts_csv.exists()
         and mask_path.exists()
         and cellprob_path.exists()
-        and transforms_path.exists()
         and not force_rerun
-    ):
-        log_status(f"[{dataset.name}] Reusing existing Cellpose outputs")
-        if not stitching_stats_path.exists():
-            stitching_stats_path.parent.mkdir(parents=True, exist_ok=True)
-            stitching_stats_path.write_text(
-                json.dumps({"write_stitching_stats": False}, indent=2) + "\n"
-            )
-        (
-            staged_transcripts,
-            staged_mask,
-            staged_cellprob,
-            staged_stats,
-            staged_transforms,
-        ) = _stage_outputs()
-        return {
-            "transcripts_csv": staged_transcripts,
-            "cellpose_mask_path": staged_mask,
-            "cellpose_cellprob_path": staged_cellprob,
-            "stitching_stats_path": staged_stats,
-            "transforms_path": staged_transforms,
-        }
+    )
+    if reusable_outputs_exist:
+        if _labeled_mask_has_foreground(mask_path):
+            if not transforms_path.exists():
+                _write_cellpose_transforms(config, transforms_path)
+            log_status(f"[{dataset.name}] Reusing existing Cellpose outputs")
+            if not stitching_stats_path.exists():
+                stitching_stats_path.parent.mkdir(parents=True, exist_ok=True)
+                stitching_stats_path.write_text(
+                    json.dumps({"write_stitching_stats": False}, indent=2) + "\n"
+                )
+            (
+                staged_transcripts,
+                staged_mask,
+                staged_cellprob,
+                staged_stats,
+                staged_transforms,
+            ) = _stage_outputs()
+            return {
+                "transcripts_csv": staged_transcripts,
+                "cellpose_mask_path": staged_mask,
+                "cellpose_cellprob_path": staged_cellprob,
+                "stitching_stats_path": staged_stats,
+                "transforms_path": staged_transforms,
+            }
+        logger.warning(
+            "[%s] Existing Cellpose mask has no positive labels; regenerating "
+            "it instead of reusing an incomplete artifact",
+            dataset.name,
+        )
 
     sdata, fetch_tile_fn, height, width, matrix, points_obj = _load_dataset_sdata(
         config
@@ -548,17 +628,23 @@ def run_cellpose_nuclei_segmentation(
         )
 
     if mask_path.exists() and not force_rerun:
-        log_status(f"[{dataset.name}] Reusing existing DAPI-only nuclei mask")
-        if not stats_path.exists():
-            stats_path.parent.mkdir(parents=True, exist_ok=True)
-            stats_path.write_text(
-                json.dumps({"write_stitching_stats": False}, indent=2) + "\n"
-            )
-        staged_mask, staged_stats = _stage_outputs()
-        return {
-            "nuclei_mask_path": staged_mask,
-            "nuclei_stitching_stats_path": staged_stats,
-        }
+        if _labeled_mask_has_foreground(mask_path):
+            log_status(f"[{dataset.name}] Reusing existing DAPI-only nuclei mask")
+            if not stats_path.exists():
+                stats_path.parent.mkdir(parents=True, exist_ok=True)
+                stats_path.write_text(
+                    json.dumps({"write_stitching_stats": False}, indent=2) + "\n"
+                )
+            staged_mask, staged_stats = _stage_outputs()
+            return {
+                "nuclei_mask_path": staged_mask,
+                "nuclei_stitching_stats_path": staged_stats,
+            }
+        logger.warning(
+            "[%s] Existing DAPI-only nuclei mask has no positive labels; "
+            "regenerating it instead of reusing an incomplete artifact",
+            dataset.name,
+        )
 
     nuclei_config = config.model_copy(deep=True)
     nuclei_config.dataset.channels = ["DAPI"]
@@ -609,6 +695,12 @@ def run_cellpose_nuclei_segmentation(
         log_status(
             f"[{dataset.name}] Nuclei area filter kept "
             f"{filter_stats['n_kept']:,}/{filter_stats['n_labels']:,} masks"
+        )
+
+    if not _labeled_mask_has_foreground(mask_path):
+        raise RuntimeError(
+            f"[{dataset.name}] DAPI-only Cellpose segmentation produced no "
+            "positive labels. Refusing to publish an empty nuclei mask."
         )
 
     if not stats_path.exists():
