@@ -839,7 +839,9 @@ def run_proseg_segmentation(
         z_col="z_micron",
         gene_col="feature_name",
         cell_id_col="cell_id",
-        transcript_id_col="transcript_id",
+        transcript_id_col=(
+            "transcript_id" if "transcript_id" in transcript_columns else None
+        ),
         qv_col="qv" if "qv" in transcript_columns else None,
         samples=int(proseg_params["samples"]),
         burnin_voxel_size=proseg_params.get("burnin_voxel_size"),

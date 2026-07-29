@@ -209,6 +209,7 @@ def test_run_segmentation_pipeline_stages_persistent_outputs(
     points_df = pd.DataFrame({"x": [1.0], "y": [2.0], "gene": ["Gad1"]})
     loaded_channels: list[list[str]] = []
     cellpose_calls: list[dict[str, object]] = []
+    proseg_calls: list[dict[str, object]] = []
 
     def fake_load(config: SegmentationConfig) -> tuple[object, ...]:
         loaded_channels.append(list(config.dataset.channels))
@@ -250,13 +251,16 @@ def test_run_segmentation_pipeline_stages_persistent_outputs(
             {"n_seeded": 1, "pct_seeded": 100.0},
         )[-1],
     )
+
+    def fake_proseg(*, output_path: Path, **kwargs: object) -> Path:
+        proseg_calls.append(kwargs)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.mkdir(parents=True, exist_ok=True)
+        return output_path
+
     monkeypatch.setattr(
         "merxen.segmentation.pipeline.run_proseg_refinement",
-        lambda *, output_path, **kwargs: (
-            output_path.parent.mkdir(parents=True, exist_ok=True),
-            output_path.mkdir(parents=True, exist_ok=True),
-            output_path,
-        )[-1],
+        fake_proseg,
     )
     monkeypatch.setattr(
         "merxen.segmentation.pipeline.convert_to_latest_zarr",
@@ -321,6 +325,8 @@ def test_run_segmentation_pipeline_stages_persistent_outputs(
     assert not (work_dir / "proseg_base_raw.zarr").exists()
     assert loaded_channels == [["DAPI", "PolyT"], ["DAPI"]]
     assert len(cellpose_calls) == 2
+    assert len(proseg_calls) == 1
+    assert proseg_calls[0]["transcript_id_col"] is None
     nuclei_call = next(
         call for call in cellpose_calls if str(call["dataset_name"]).endswith(":nuclei")
     )
