@@ -85,6 +85,48 @@ def test_prepare_mapmycells_query_handles_missing_gene_ids(tmp_path: Path) -> No
     assert out.var_names.name is None
 
 
+def test_prepare_mapmycells_query_restores_missing_ensembl_column(
+    tmp_path: Path,
+) -> None:
+    """Standalone MERSCOPE symbols should map to reference Ensembl IDs."""
+    input_h5ad = tmp_path / "merscope_clustered.h5ad"
+    adata = ad.AnnData(
+        X=np.ones((2, 3), dtype=np.float32),
+        obs=pd.DataFrame(index=["cell1", "cell2"]),
+        var=pd.DataFrame(
+            {"gene": ["GJA1", "APP", "UnmappedGene"]},
+            index=["GJA1", "APP", "UnmappedGene"],
+        ),
+    )
+    counts = np.array([[2, 0, 1], [0, 5, 2]], dtype=np.int64)
+    adata.layers["counts"] = counts
+    adata.write_h5ad(input_h5ad)
+
+    output_h5ad = prepare_mapmycells_query(
+        input_h5ad,
+        tmp_path / "query.h5ad",
+        query_layer="counts",
+        gene_id_column="ensembl_id",
+        gene_id_lookup={
+            "GJA1": "ENSG00000152661",
+            "APP": "ENSG00000142192",
+        },
+    )
+
+    out = ad.read_h5ad(output_h5ad)
+    np.testing.assert_array_equal(out.X, counts)
+    assert list(out.var_names) == [
+        "ENSG00000152661",
+        "ENSG00000142192",
+        "UnmappedGene",
+    ]
+    assert list(out.var["ensembl_id"]) == [
+        "ENSG00000152661",
+        "ENSG00000142192",
+        "",
+    ]
+
+
 def test_build_mapmycells_command_includes_bootstrap_factor(tmp_path: Path) -> None:
     """The local mapper command should expose spatial-friendly bootstrap tuning."""
     cfg = MapMyCellsConfig(

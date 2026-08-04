@@ -105,6 +105,7 @@ def prepare_mapmycells_query(
     *,
     query_layer: str | None = "counts",
     gene_id_column: str | None = None,
+    gene_id_lookup: dict[str, str] | None = None,
     obs_id_column: str | None = None,
 ) -> Path:
     """Write a MapMyCells-ready H5AD query file.
@@ -120,6 +121,8 @@ def prepare_mapmycells_query(
         query_layer: AnnData layer to copy into ``X``. Use ``None`` to keep the
             current ``X`` matrix.
         gene_id_column: Optional ``var`` column to use as gene identifiers.
+        gene_id_lookup: Optional symbol-to-identifier lookup used to reconstruct
+            a missing ``ensembl_id`` column in standalone MERSCOPE inputs.
         obs_id_column: Optional ``obs`` column to use as cell identifiers.
 
     Returns:
@@ -141,9 +144,11 @@ def prepare_mapmycells_query(
 
         if gene_id_column is not None:
             if gene_id_column not in adata.var.columns:
-                raise KeyError(
-                    f"Requested gene_id_column={gene_id_column!r} not found in "
-                    f"{input_h5ad}. Available var columns: {list(adata.var.columns)}"
+                _restore_missing_gene_id_column(
+                    adata,
+                    gene_id_column=gene_id_column,
+                    gene_id_lookup=gene_id_lookup,
+                    input_h5ad=input_h5ad,
                 )
             adata.var_names = _index_from_column_with_fallback(
                 adata.var,
@@ -177,6 +182,117 @@ def prepare_mapmycells_query(
     return output_h5ad
 
 
+def _restore_missing_gene_id_column(
+    adata: ad.AnnData,
+    *,
+    gene_id_column: str,
+    gene_id_lookup: dict[str, str] | None,
+    input_h5ad: Path,
+) -> None:
+    if gene_id_column != "ensembl_id" or not gene_id_lookup:
+        raise KeyError(
+            f"Requested gene_id_column={gene_id_column!r} not found in "
+            f"{input_h5ad}. Available var columns: {list(adata.var.columns)}"
+        )
+
+    symbols = (
+        adata.var["gene"].astype(str).to_numpy()
+        if "gene" in adata.var.columns
+        else adata.var_names.astype(str).to_numpy()
+    )
+    casefold_lookup = {
+        str(symbol).strip().casefold(): str(gene_id).strip()
+        for symbol, gene_id in gene_id_lookup.items()
+        if str(symbol).strip() and str(gene_id).strip()
+    }
+    gene_ids = [
+        casefold_lookup.get(str(symbol).strip().casefold(), "") for symbol in symbols
+    ]
+    n_mapped = sum(bool(gene_id) for gene_id in gene_ids)
+    if n_mapped == 0:
+        raise KeyError(
+            f"Requested gene_id_column={gene_id_column!r} not found in "
+            f"{input_h5ad}, and none of its {adata.n_vars} gene symbols matched "
+            "the configured reference gene metadata."
+        )
+
+    adata.var[gene_id_column] = pd.Series(
+        gene_ids,
+        index=adata.var_names,
+        dtype="object",
+    )
+    logger.info(
+        "Reconstructed %s for %d/%d features in standalone query %s.",
+        gene_id_column,
+        n_mapped,
+        adata.n_vars,
+        input_h5ad.name,
+    )
+
+
+def _load_reference_gene_id_lookup_if_needed(
+    config: MapMyCellsConfig,
+) -> dict[str, str]:
+    needs_lookup = False
+    for sample in config.samples:
+        if sample.gene_id_column != "ensembl_id" or not sample.anndata_path.exists():
+            continue
+        clustered = ad.read_h5ad(sample.anndata_path, backed="r")
+        try:
+            if "ensembl_id" not in clustered.var.columns:
+                needs_lookup = True
+                break
+        finally:
+            clustered.file.close()
+
+    if not needs_lookup:
+        return {}
+    return _load_reference_gene_id_lookup(config.region_cache_dir)
+
+
+def _load_reference_gene_id_lookup(cache_dir: Path | str) -> dict[str, str]:
+    paths = sorted(
+        Path(cache_dir).glob(
+            "abc_whb/expression_matrices/WHB-10Xv3/*/WHB-10Xv3-*-raw.h5ad"
+        )
+    )
+    if not paths:
+        logger.warning(
+            "No WHB reference gene metadata found below MapMyCells cache %s.",
+            cache_dir,
+        )
+        return {}
+
+    lookup: dict[str, str] = {}
+    for path in paths:
+        reference = ad.read_h5ad(path, backed="r")
+        try:
+            if "gene_symbol" not in reference.var.columns:
+                continue
+            for ensembl_id, symbol in zip(
+                reference.var_names.astype(str),
+                reference.var["gene_symbol"].astype(str).to_numpy(),
+                strict=True,
+            ):
+                ensembl = str(ensembl_id).strip()
+                gene_symbol = str(symbol).strip()
+                if (
+                    not ensembl.startswith("ENSG")
+                    or not gene_symbol
+                    or gene_symbol.lower() in {"nan", "none"}
+                ):
+                    continue
+                lookup.setdefault(gene_symbol, ensembl)
+        finally:
+            reference.file.close()
+
+    logger.info(
+        "Loaded %d symbol -> Ensembl ID mappings for standalone MapMyCells.",
+        len(lookup),
+    )
+    return lookup
+
+
 def run_mapmycells(config: MapMyCellsConfig) -> dict[str, dict[str, dict[str, Path]]]:
     """Run local MapMyCells assignment for every sample in a pair.
 
@@ -191,6 +307,7 @@ def run_mapmycells(config: MapMyCellsConfig) -> dict[str, dict[str, dict[str, Pa
 
     config.output_dir.mkdir(parents=True, exist_ok=True)
     references = _build_mapmycells_references(config)
+    gene_id_lookup = _load_reference_gene_id_lookup_if_needed(config)
     results: dict[str, dict[str, dict[str, Path]]] = {}
 
     for sample in config.samples:
@@ -209,6 +326,7 @@ def run_mapmycells(config: MapMyCellsConfig) -> dict[str, dict[str, dict[str, Pa
                 config,
                 sample=sample,
                 reference=reference,
+                gene_id_lookup=gene_id_lookup,
             )
         force_release(note=f"after MapMyCells {sample.sample_id}")
 
@@ -290,6 +408,7 @@ def _run_mapmycells_reference(
     *,
     sample: Any,
     reference: MapMyCellsReference,
+    gene_id_lookup: dict[str, str],
 ) -> dict[str, Path]:
     sample_dir = reference.output_dir / sample.platform.lower()
     sample_dir.mkdir(parents=True, exist_ok=True)
@@ -335,6 +454,7 @@ def _run_mapmycells_reference(
             query_h5ad,
             query_layer=sample.query_layer,
             gene_id_column=sample.gene_id_column,
+            gene_id_lookup=gene_id_lookup,
             obs_id_column=sample.obs_id_column,
         )
         command = build_mapmycells_command(
