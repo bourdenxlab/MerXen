@@ -860,7 +860,7 @@ def test_run_clustering_squidpy_skips_spatialdata_write_when_disabled(
 def test_run_gpu_clustering_uses_chunked_pca_for_sparse_input(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Sparse GPU PCA should avoid rapids-singlecell's fragile sparse helper."""
+    """Sparse GPU PCA should use a dtype consistent with cuML IncrementalPCA."""
     adata = ad.AnnData(
         X=sparse.csr_matrix(np.ones((20, 6), dtype=np.float32)),
         obs=pd.DataFrame(index=[f"cell{i}" for i in range(20)]),
@@ -868,8 +868,12 @@ def test_run_gpu_clustering_uses_chunked_pca_for_sparse_input(
     )
     calls: dict[str, object] = {}
 
+    def fake_to_gpu(data: ad.AnnData) -> None:
+        calls["to_gpu"] = data
+        calls["gpu_input_dtype"] = data.X.dtype
+
     fake_get = SimpleNamespace(
-        anndata_to_GPU=lambda data: calls.setdefault("to_gpu", data),
+        anndata_to_GPU=fake_to_gpu,
         anndata_to_CPU=lambda data: calls.setdefault("to_cpu", data),
     )
 
@@ -902,6 +906,7 @@ def test_run_gpu_clustering_uses_chunked_pca_for_sparse_input(
     assert gpu_used is True
     assert calls["to_gpu"] is adata
     assert calls["to_cpu"] is adata
+    assert calls["gpu_input_dtype"] == np.dtype(np.float64)
     assert calls["pca"] == {
         "n_comps": 3,
         "random_state": 7,

@@ -618,6 +618,13 @@ def _run_gpu_clustering(
         )
         return False
 
+    if max_pcs > 0 and _is_sparse_matrix(adata.X):
+        # cuML IncrementalPCA promotes a sparse float32 matrix to a float64
+        # fitted model, but its subsequent transform calls retain the float32
+        # chunk dtype and fail validation. Supplying float64 up front keeps fit
+        # and transform consistent. The raw counts layer remains untouched.
+        adata.X = adata.X.astype(np.float64, copy=False)
+
     rsc.get.anndata_to_GPU(adata)
     try:
         if max_pcs > 0:
