@@ -36,6 +36,24 @@ def test_nextflow_exposes_analysis_segmentation_branches() -> None:
     assert "VALIDATE_ANALYSIS_LAYER" in main_text
 
 
+def test_analysis_zarrs_fan_out_after_platform_settings_join() -> None:
+    """Each platform zarr should be duplicated once per selected segmentation."""
+    repo_root = Path(__file__).resolve().parents[2]
+    main_text = (repo_root / "workflows" / "main.nf").read_text()
+    fanout = main_text[
+        main_text.index("analysis_layer_validation_gate_ch =") : main_text.index(
+            "analysis_layer_validation_results_ch ="
+        )
+    ]
+
+    assert 'tuple("${pairId}|${platform}", settings)' in fanout
+    assert ".join(analysis_layer_validation_gate_ch)" in fanout
+    assert ".flatMap {" in fanout
+    assert "settings.analysis_segmentations.collect { segmentation ->" in fanout
+    assert '"${key}|${segmentation}",' in fanout
+    assert 'tuple("${pairId}|${platform}", segmentation, settings)' not in fanout
+
+
 def test_downstream_modules_publish_under_segmentation_branch() -> None:
     """Branch-specific downstream modules should include segmentation in outputs."""
     repo_root = Path(__file__).resolve().parents[2]

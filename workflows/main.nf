@@ -2067,18 +2067,17 @@ workflow {
         if (!settings.need_analysis_zarrs) {
             []
         } else {
-            settings.active_platforms.collectMany { platform ->
-                settings.analysis_segmentations.collect { segmentation ->
-                    tuple("${pairId}|${platform}", segmentation, settings)
-                }
+            settings.active_platforms.collect { platform ->
+                tuple("${pairId}|${platform}", settings)
             }
         }
     }
 
     analysis_layer_validation_inputs_ch = analysis_ready_zarrs_ch
         .join(analysis_layer_validation_gate_ch)
-        .map {
-            key, pairId, platform, enrichedLatestZarr, segmentation, settings ->
+        .flatMap {
+            key, pairId, platform, enrichedLatestZarr, settings ->
+            settings.analysis_segmentations.collect { segmentation ->
                 def layerKeys = analysisLayerKeys(platform, segmentation)
                 tuple(
                     "${key}|${segmentation}",
@@ -2090,6 +2089,7 @@ workflow {
                     layerKeys.shape_key,
                     settings,
                 )
+            }
         }
 
     analysis_layer_validation_results_ch = VALIDATE_ANALYSIS_LAYER(
