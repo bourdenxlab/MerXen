@@ -2645,10 +2645,28 @@ def collect_gene_id_lookup_for_samples(
             force_release(note=f"after collecting gene IDs {sample.sample_id}")
         combined = _merge_gene_id_lookups(combined, sample_lookup)
 
+    if not combined:
+        reference_aliases = _load_configured_marker_alias_lookup(config)
+        reference_gene_ids = {
+            symbol: gene_id
+            for symbol, gene_id in reference_aliases.items()
+            if str(gene_id).startswith("ENSG")
+        }
+        combined = _merge_gene_id_lookups(combined, reference_gene_ids)
+        if reference_gene_ids:
+            logger.info(
+                "Recovered %d gene symbol -> Ensembl ID mappings from reference "
+                "gene metadata.",
+                len(reference_gene_ids),
+            )
+
     if combined:
         logger.info("Collected %d gene symbol -> Ensembl ID mappings.", len(combined))
     else:
-        logger.warning("No Ensembl ID metadata found in clustering input zarrs.")
+        logger.warning(
+            "No Ensembl ID metadata found in clustering inputs or configured "
+            "reference gene metadata."
+        )
     return combined
 
 

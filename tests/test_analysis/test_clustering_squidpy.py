@@ -194,6 +194,29 @@ def test_adata_from_spatialdata_adds_ensembl_ids_from_original_table() -> None:
     }
 
 
+def test_collect_gene_ids_falls_back_to_reference_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Standalone MERSCOPE should recover Ensembl IDs without a Xenium table."""
+    config = SimpleNamespace(samples=[])
+    monkeypatch.setattr(
+        clustering_mod,
+        "_load_configured_marker_alias_lookup",
+        lambda _config: {
+            "GeneA": "ENSG000001",
+            "ENSG000001": "GeneA",
+            "GeneB": "ENSG000002",
+        },
+    )
+
+    lookup = clustering_mod.collect_gene_id_lookup_for_samples(config)
+
+    assert lookup == {
+        "GeneA": "ENSG000001",
+        "GeneB": "ENSG000002",
+    }
+
+
 def test_run_scanpy_clustering_adds_umap_and_leiden() -> None:
     """The gentle Scanpy workflow should produce expected clustering fields."""
     rng = np.random.default_rng(1)
