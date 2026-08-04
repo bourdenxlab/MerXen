@@ -116,11 +116,15 @@ def normalizeAnalysisSegmentation(rawValue) {
     }
     def aliases = [
         "both": ["reseg", "original_seg"],
-        "all": ["reseg", "original_seg", "proseg_hybrid"],
+        "all": ["reseg", "original_seg", "proseg_mask", "proseg_hybrid"],
         "reseg": ["reseg"],
         "resegmented": ["reseg"],
         "proseg": ["reseg"],
         "mosaik": ["reseg"],
+        "proseg_mask": ["proseg_mask"],
+        "cellpose": ["proseg_mask"],
+        "cellpose_mask": ["proseg_mask"],
+        "mask": ["proseg_mask"],
         "hybrid": ["proseg_hybrid"],
         "proseg_hybrid": ["proseg_hybrid"],
         "hybrid_seg": ["proseg_hybrid"],
@@ -144,7 +148,8 @@ def normalizeAnalysisSegmentation(rawValue) {
             if (!aliases.containsKey(key)) {
                 throw new IllegalArgumentException(
                     "Unknown analysis_segmentation '${value}'. Valid values: " +
-                    "both, all, reseg, original_seg, proseg_hybrid"
+                    "both, all, reseg, original_seg, proseg_mask, " +
+                    "cellpose, proseg_hybrid"
                 )
             }
             aliases[key].each { segmentation ->

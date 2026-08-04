@@ -28,7 +28,11 @@ def test_nextflow_exposes_analysis_segmentation_branches() -> None:
     ]:
         assert expected in main_text or expected in config_text
 
-    assert '"all": ["reseg", "original_seg", "proseg_hybrid"]' in main_text
+    assert (
+        '"all": ["reseg", "original_seg", "proseg_mask", "proseg_hybrid"]' in main_text
+    )
+    assert '"proseg_mask": ["proseg_mask"]' in main_text
+    assert '"cellpose": ["proseg_mask"]' in main_text
     assert "VALIDATE_ANALYSIS_LAYER" in main_text
 
 

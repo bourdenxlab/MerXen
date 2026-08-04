@@ -64,7 +64,7 @@ profile. Override either kind with `--<name>` on the command line.
 | `outdir` | `./results` | Output root. |
 | `analysis_mode` | `paired` | Fallback row mode: `paired`, `merscope`, or `xenium`. A non-empty samplesheet `analysis_mode` value overrides this per row. |
 | `enable_alignment` | `false` | Fallback row alignment switch. A non-empty samplesheet `enable_alignment` value overrides this per row; alignment only applies to paired rows. |
-| `analysis_segmentation` | `both` | Fallback downstream analysis branches after enrichment. Valid values: `both`, `all`, `reseg`, `original_seg`, `proseg_hybrid`; comma-separated combinations are accepted. `both` remains `reseg,original_seg`, while `all` includes all three branches. A non-empty samplesheet value overrides this per row. |
+| `analysis_segmentation` | `both` | Fallback downstream analysis branches after enrichment. Valid values: `both`, `all`, `reseg`, `original_seg`, `proseg_mask`/`cellpose`, `proseg_hybrid`; comma-separated combinations are accepted. `both` remains `reseg,original_seg`, while `all` includes all four branches. A non-empty samplesheet value overrides this per row. |
 | `mask_image_quantification_enabled` | `true` | Insert the Cellpose-mask image quantification stage between enrichment and QC. A non-empty samplesheet `mask_image_quantification_enabled` value overrides this per row. |
 | `mecr_enabled` | `true` | Insert mutually exclusive co-expression rate analysis after QC. A non-empty samplesheet `mecr_enabled` value overrides this per row. |
 | `spatial_gene_analysis_enabled` | `true` | Insert spatial gene analysis between visualization and clustering. A non-empty samplesheet value overrides this per row; disabled rows proceed directly from visualization to clustering. |
