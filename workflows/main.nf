@@ -23,6 +23,12 @@ include {
     CLUSTERING_SQUIDPY_FINALIZE
 } from "./modules/clustering_squidpy"
 include { MAPMYCELLS } from "./modules/mapmycells"
+include {
+    MENDER_PREPARE;
+    MENDER_COMPUTE;
+    MENDER_FINALIZE;
+    MENDER_IMPORT
+} from "./modules/mender"
 
 def parseChannels(rawValue, defaults) {
     if (rawValue == null) {
@@ -159,6 +165,53 @@ def normalizeAnalysisSegmentation(rawValue) {
             }
         }
     return selected ? selected : ["reseg", "original_seg"]
+}
+
+def normalizeMenderSegmentations(rawValue) {
+    def values = rawValue instanceof Collection
+        ? rawValue
+        : rawValue.toString().split(",")
+    def aliases = [
+        "all": ["reseg", "original_seg", "proseg_mask", "proseg_hybrid"],
+        "reseg": ["reseg"],
+        "resegmented": ["reseg"],
+        "proseg": ["reseg"],
+        "original": ["original_seg"],
+        "original_seg": ["original_seg"],
+        "instrument": ["original_seg"],
+        "proseg_mask": ["proseg_mask"],
+        "cellpose": ["proseg_mask"],
+        "mask": ["proseg_mask"],
+        "proseg_hybrid": ["proseg_hybrid"],
+        "hybrid": ["proseg_hybrid"],
+    ]
+    def selected = []
+    values.each { value ->
+        def key = value
+            .toString()
+            .trim()
+            .toLowerCase()
+            .replaceAll(/[^a-z0-9]+/, "_")
+            .replaceAll(/^_+|_+$/, "")
+        if (!key) {
+            return
+        }
+        if (!aliases.containsKey(key)) {
+            throw new IllegalArgumentException(
+                "Unknown mender segmentation '${value}'. Valid values: " +
+                "all, reseg, original_seg, proseg_mask, proseg_hybrid"
+            )
+        }
+        aliases[key].each { segmentation ->
+            if (!selected.contains(segmentation)) {
+                selected << segmentation
+            }
+        }
+    }
+    if (!selected) {
+        throw new IllegalArgumentException("mender_segmentations must not be empty")
+    }
+    return selected
 }
 
 def requirePlatformInput(row, pairId, platform) {
@@ -308,6 +361,16 @@ def analysisLayerKeys(platform, segmentation) {
         ]
     }
     throw new IllegalArgumentException("Unknown analysis segmentation: ${segmentation}")
+}
+
+def clusteredSpatialdataTableKey(sourceTableKey, segmentation) {
+    if (segmentation == "reseg" || sourceTableKey == "table_MOSAIK_proseg") {
+        return "table_MOSAIK_proseg_clustering_squidpy"
+    }
+    if (segmentation == "original_seg" || sourceTableKey == "table_original") {
+        return "table_original_clustering_squidpy"
+    }
+    return "${sourceTableKey}_clustering_squidpy"
 }
 
 def normalizeDistanceFromObjectSegmentations(rawValue) {
@@ -598,6 +661,8 @@ def normalizeStage(rawValue, paramName) {
         "celltype_mapping": "mapmycells",
         "map_my_cells": "mapmycells",
         "mapmycells": "mapmycells",
+        "mender": "mender",
+        "spatial_domains": "mender",
     ]
     if (!aliases.containsKey(key)) {
         throw new IllegalArgumentException(
@@ -606,7 +671,7 @@ def normalizeStage(rawValue, paramName) {
             "build_viewer_caches, mask_image_quantification, " +
             "compute_cortical_depth, distance_from_object, qc, align, align_qc, " +
             "compare, visualize, spatial_gene_analysis, mecr, " +
-            "clustering_squidpy, mapmycells"
+            "clustering_squidpy, mender, mapmycells"
         )
     }
     return aliases[key]
@@ -620,7 +685,8 @@ def activeStageOrder(
     corticalDepthEnabled,
     distanceFromObjectEnabled,
     viewerCacheEnabled,
-    mecrEnabled
+    mecrEnabled,
+    menderEnabled
 ) {
     def stages = ["build_spatialdata", "segment_nuclei", "segment", "enrich"]
     if (viewerCacheEnabled) {
@@ -654,6 +720,9 @@ def activeStageOrder(
         stages += ["distance_from_object"]
     }
     stages += ["mapmycells"]
+    if (menderEnabled) {
+        stages += ["mender"]
+    }
     return stages
 }
 
@@ -662,7 +731,8 @@ def validateStage(
     stages,
     paramName,
     alignmentEnabled,
-    spatialGeneAnalysisEnabled
+    spatialGeneAnalysisEnabled,
+    menderEnabled
 ) {
     if (!stages.contains(stage)) {
         def hint = ""
@@ -681,6 +751,9 @@ def validateStage(
         if (stage == "spatial_gene_analysis" && !spatialGeneAnalysisEnabled) {
             hint = " Pass --spatial_gene_analysis_enabled true to use spatial gene analysis."
         }
+        if (stage == "mender" && !menderEnabled) {
+            hint = " Pass --mender_enabled true to use MENDER."
+        }
         throw new IllegalArgumentException(
             "${paramName} '${stage}' is not active for this run.${hint} " +
             "Active stages: ${stages.join(', ')}"
@@ -694,6 +767,45 @@ def stageInRange(stage, startStage, stopStage, stages) {
         return false
     }
     return stageIdx >= stages.indexOf(startStage) && stageIdx <= stages.indexOf(stopStage)
+}
+
+def currentPairTerminalStage(settings) {
+    if (settings.mender_bypass_terminal_gate) {
+        return null
+    }
+    if (settings.run_mapmycells) {
+        return "mapmycells"
+    }
+    if (settings.run_distance_from_object) {
+        // DISTANCE_FROM_OBJECT_COHORT is intentionally outside this barrier.
+        return "distance_from_object_annotation"
+    }
+    if (settings.run_compute_cortical_depth) {
+        return "compute_cortical_depth"
+    }
+    if (settings.run_clustering_squidpy) {
+        return "clustering_squidpy"
+    }
+    return null
+}
+
+def currentPairTerminalExpectedCount(settings, terminalStage) {
+    if (terminalStage == "mapmycells") {
+        def extraClustering = settings.required_clustering_segmentations.findAll {
+            segmentation -> !settings.analysis_segmentations.contains(segmentation)
+        }
+        return settings.analysis_segmentations.size() + extraClustering.size()
+    }
+    if (terminalStage in [
+        "distance_from_object_annotation",
+        "compute_cortical_depth",
+    ]) {
+        return settings.active_platforms.size()
+    }
+    if (terminalStage == "clustering_squidpy") {
+        return settings.required_clustering_segmentations.size()
+    }
+    return 0
 }
 
 def requireExistingPath(rawPath, label) {
@@ -999,6 +1111,60 @@ def appendMecrPreflightChecks(errors, settings, params) {
     }
 }
 
+def appendMenderPreflightChecks(errors, settings, params) {
+    if (!(settings.run_mender && settings.mender_published_output_mode)) {
+        return
+    }
+    settings.mender_segmentations.each { segmentation ->
+        settings.active_platforms.each { platform ->
+            def sampleId = "${settings.pair_id}_${platform}"
+            def clusteredH5ad = normalizedPath(
+                publishedPairPath(
+                    params.outdir,
+                    settings.pair_id,
+                    "${segmentation}/clustering_squidpy/" +
+                    "clustering_squidpy_out/${platform.toLowerCase()}/" +
+                    "${sampleId}_clustered.h5ad",
+                )
+            )
+            if (!clusteredH5ad.toFile().isFile()) {
+                errors << (
+                    "Missing MENDER clustered H5AD for " +
+                    "${settings.pair_id}:${platform}:${segmentation}: ${clusteredH5ad}"
+                )
+            }
+            def latestZarr = normalizedPath(
+                publishedDatasetPath(
+                    params.outdir,
+                    settings.pair_id,
+                    platform,
+                    "latest/latest_spatialdata.zarr",
+                )
+            )
+            if (!latestZarr.toFile().isDirectory()) {
+                errors << (
+                    "Missing MENDER latest SpatialData Zarr for " +
+                    "${settings.pair_id}:${platform}:${segmentation}: ${latestZarr}"
+                )
+            } else {
+                def layerKeys = analysisLayerKeys(platform, segmentation)
+                def tableKey = clusteredSpatialdataTableKey(
+                    layerKeys.table_key,
+                    segmentation,
+                )
+                def tablePath = latestZarr.resolve("tables").resolve(tableKey)
+                if (!tablePath.toFile().exists()) {
+                    errors << (
+                        "Missing MENDER clustered SpatialData table '${tableKey}' " +
+                        "for ${settings.pair_id}:${platform}:${segmentation}: " +
+                        "${tablePath}"
+                    )
+                }
+            }
+        }
+    }
+}
+
 def runPreflightChecks(row, settings, params) {
     def errors = []
     appendClusteringSquidpyPreflightChecks(errors, settings, params)
@@ -1007,6 +1173,7 @@ def runPreflightChecks(row, settings, params) {
     appendSpatialGeneTranscriptPreflightChecks(errors, row, settings, params)
     appendDistanceFromObjectPreflightChecks(errors, row, settings, params)
     appendMecrPreflightChecks(errors, settings, params)
+    appendMenderPreflightChecks(errors, settings, params)
     if (errors) {
         throw new IllegalArgumentException(
             "Preflight checks failed for sample ${settings.pair_id} " +
@@ -1128,6 +1295,14 @@ def rowSampleSettings(row, params) {
         true,
         "mecr_enabled for ${pairId}",
     )
+    def menderEnabled = boolOrDefault(
+        rowFieldOrDefault(row, "mender_enabled", params.mender_enabled),
+        false,
+        "mender_enabled for ${pairId}",
+    )
+    def menderSegmentations = normalizeMenderSegmentations(
+        rowFieldOrDefault(row, "mender_segmentations", params.mender_segmentations)
+    )
     def distanceFromObjectSegmentations = normalizeDistanceFromObjectSegmentations(
         rowFieldOrDefault(
             row,
@@ -1169,6 +1344,7 @@ def rowSampleSettings(row, params) {
         distanceFromObjectEnabled,
         viewerCacheEnabled,
         mecrEnabled,
+        menderEnabled,
     )
     def startStage = normalizeStage(startStageRaw, startParamName)
     def stopStage = normalizeStage(stopStageRaw, stopParamName)
@@ -1178,6 +1354,7 @@ def rowSampleSettings(row, params) {
         startParamName,
         alignmentEnabled,
         spatialGeneAnalysisEnabled,
+        menderEnabled,
     )
     validateStage(
         stopStage,
@@ -1185,11 +1362,16 @@ def rowSampleSettings(row, params) {
         stopParamName,
         alignmentEnabled,
         spatialGeneAnalysisEnabled,
+        menderEnabled,
     )
     // Opt-in terminal analyses extend the historical clustering stop default.
     // Explicit only_stage selections and non-default stop stages remain exact.
+    def autoExtendedToMender = false
     if (!onlyStageRaw && stopStage == "clustering_squidpy") {
-        if (distanceFromObjectEnabled && stageOrder.contains("distance_from_object")) {
+        if (menderEnabled && stageOrder.contains("mender")) {
+            stopStage = "mender"
+            autoExtendedToMender = true
+        } else if (distanceFromObjectEnabled && stageOrder.contains("distance_from_object")) {
             stopStage = "distance_from_object"
         } else if (corticalDepthEnabled && stageOrder.contains("compute_cortical_depth")) {
             stopStage = "compute_cortical_depth"
@@ -1254,6 +1436,35 @@ def rowSampleSettings(row, params) {
         stageOrder,
     )
     def runMapMyCells = stageInRange("mapmycells", startStage, stopStage, stageOrder)
+    // Extending the historical clustering stop for MENDER must not implicitly
+    // activate MapMyCells, which otherwise lies between clustering and MENDER.
+    if (autoExtendedToMender) {
+        runMapMyCells = false
+    }
+    def runMender = stageInRange("mender", startStage, stopStage, stageOrder)
+    def requiredClusteringSegmentations = (
+        analysisSegmentations + (runMender ? menderSegmentations : [])
+    ).unique()
+    def analysisInputSegmentations = runClusteringSquidpy
+        ? requiredClusteringSegmentations
+        : analysisSegmentations
+    if (menderEnabled) {
+        validateMenderParams(params)
+    }
+    if (
+        runMender &&
+        runClusteringSquidpy &&
+        !boolOrDefault(
+            params.clustering_squidpy_hierarchical_enabled,
+            true,
+            "clustering_squidpy_hierarchical_enabled",
+        )
+    ) {
+        throw new IllegalArgumentException(
+            "MENDER clustering prerequisites require " +
+            "--clustering_squidpy_hierarchical_enabled true"
+        )
+    }
     def needAnalysisZarrs =
         runQc ||
         runAlign ||
@@ -1284,6 +1495,9 @@ def rowSampleSettings(row, params) {
         active_platforms: activePlatforms,
         paired_mode: pairedMode,
         analysis_segmentations: analysisSegmentations,
+        analysis_input_segmentations: analysisInputSegmentations,
+        required_clustering_segmentations: requiredClusteringSegmentations,
+        mender_segmentations: menderSegmentations,
         distance_from_object_segmentations: distanceFromObjectSegmentations,
         spatial_gene_analysis_enabled: spatialGeneAnalysisEnabled,
         spatial_gene_analysis_transcript_analysis_enabled: (
@@ -1293,7 +1507,8 @@ def rowSampleSettings(row, params) {
         start_stage: startStage,
         stop_stage: stopStage,
         selected_stages: stageOrder.findAll { stage ->
-            stageInRange(stage, startStage, stopStage, stageOrder)
+            stageInRange(stage, startStage, stopStage, stageOrder) &&
+                !(autoExtendedToMender && stage == "mapmycells")
         },
         run_build: runBuild,
         run_segment_nuclei: runSegmentNuclei,
@@ -1311,7 +1526,19 @@ def rowSampleSettings(row, params) {
         run_visualize: runVisualize,
         run_spatial_gene_analysis: runSpatialGeneAnalysis,
         run_clustering_squidpy: runClusteringSquidpy,
+        run_mender: runMender,
         run_mapmycells: runMapMyCells,
+        mender_published_output_mode: runMender && !runClusteringSquidpy,
+        mender_bypass_terminal_gate: (
+            runMender &&
+            (
+                (onlyStageRaw && startStage == "mender") ||
+                (!runMapMyCells &&
+                 !runDistanceFromObject &&
+                 !runComputeCorticalDepth &&
+                 !runClusteringSquidpy)
+            )
+        ),
         need_build_results: runSegmentNuclei || runSegment || runEnrich,
         need_enriched_zarrs: (
             runBuildViewerCaches ||
@@ -1366,6 +1593,47 @@ def validateMapMyCellsParams(params) {
     }
 }
 
+def validateMenderParams(params) {
+    def mode = params.mender_clustering_mode.toString().trim().toLowerCase()
+    if (!(mode in ["resolution", "target_k"])) {
+        throw new IllegalArgumentException(
+            "Invalid --mender_clustering_mode '${params.mender_clustering_mode}'. " +
+            "Use resolution or target_k."
+        )
+    }
+    if ((params.mender_radius_um as float) <= 0.0) {
+        throw new IllegalArgumentException("--mender_radius_um must be positive")
+    }
+    if ((params.mender_n_scales as int) <= 0) {
+        throw new IllegalArgumentException("--mender_n_scales must be positive")
+    }
+    if ((params.mender_leiden_resolution as float) <= 0.0) {
+        throw new IllegalArgumentException(
+            "--mender_leiden_resolution must be positive"
+        )
+    }
+    if (mode == "target_k" &&
+        (params.mender_target_k == null || (params.mender_target_k as int) < 2)) {
+        throw new IllegalArgumentException(
+            "--mender_target_k must be at least 2 in target_k mode"
+        )
+    }
+    if (!(params.mender_nn_mode.toString() in ["radius", "k", "ring"])) {
+        throw new IllegalArgumentException("Invalid --mender_nn_mode")
+    }
+    if (!(params.mender_count_rep.toString() in ["s", "a"])) {
+        throw new IllegalArgumentException("Invalid --mender_count_rep")
+    }
+    if (params.mender_missing_state_policy.toString() != "error") {
+        throw new IllegalArgumentException(
+            "Invalid --mender_missing_state_policy; only strict 'error' is supported"
+        )
+    }
+    if (!params.mender_cell_state_key?.toString()?.trim()) {
+        throw new IllegalArgumentException("--mender_cell_state_key must not be empty")
+    }
+}
+
 workflow {
     if (!params.samplesheet) {
         error "Missing required parameter: --samplesheet"
@@ -1389,6 +1657,10 @@ workflow {
             "analysis segmentations=${settings.analysis_segmentations.join(', ')}; " +
             "distance segmentations=" +
             "${settings.distance_from_object_segmentations.join(', ')}; " +
+            "mender=${settings.run_mender}; " +
+            "mender segmentations=${settings.mender_segmentations.join(', ')}; " +
+            "required clustering segmentations=" +
+            "${settings.required_clustering_segmentations.join(', ')}; " +
             "selected stages=${settings.selected_stages.join(' -> ')}"
         )
         tuple(settings.pair_id, row, settings)
@@ -2077,7 +2349,7 @@ workflow {
         .join(analysis_layer_validation_gate_ch)
         .flatMap {
             key, pairId, platform, enrichedLatestZarr, settings ->
-            settings.analysis_segmentations.collect { segmentation ->
+            settings.analysis_input_segmentations.collect { segmentation ->
                 def layerKeys = analysisLayerKeys(platform, segmentation)
                 tuple(
                     "${key}|${segmentation}",
@@ -2100,7 +2372,7 @@ workflow {
         .filter {
             _key, _pairId, _platform, _segmentation, _latestZarr,
             _tableKey, _shapeKey, settings, _validationJson ->
-                settings.run_qc
+                settings.run_qc && settings.analysis_segmentations.contains(_segmentation)
         }
         .map {
             key, pairId, platform, segmentation, latestZarr,
@@ -2123,7 +2395,7 @@ workflow {
             []
         } else {
             settings.active_platforms.collectMany { platform ->
-                settings.analysis_segmentations.collect { segmentation ->
+                settings.analysis_input_segmentations.collect { segmentation ->
                     tuple("${pairId}|${platform}|${segmentation}", settings)
                 }
             }
@@ -2163,7 +2435,8 @@ workflow {
         .filter {
             _key, _pairId, _platform, _segmentation, _latestZarr,
             _tableKey, _shapeKey, settings, _validationJson ->
-                !settings.run_qc
+                !settings.run_qc ||
+                    !settings.analysis_segmentations.contains(_segmentation)
         }
         .map {
             _key, pairId, platform, segmentation, latestZarr,
@@ -2185,7 +2458,8 @@ workflow {
         .filter {
             _pairId, _segmentation, _platform, _zarrPath, _tableKey, _shapeKey,
             settings ->
-                settings.run_mecr
+                settings.run_mecr &&
+                    settings.analysis_segmentations.contains(_segmentation)
         }
         .map {
             pairId, segmentation, platform, zarrPath, _tableKey, _shapeKey,
@@ -2399,7 +2673,7 @@ workflow {
         if (!(settings.need_alignment_downstream && !settings.run_align_qc)) {
             []
         } else {
-            [tuple(pairId, settings.analysis_segmentations)]
+            [tuple(pairId, settings.analysis_input_segmentations)]
         }
     }
 
@@ -2417,7 +2691,7 @@ workflow {
         if (!(settings.need_alignment_downstream && settings.run_align_qc)) {
             []
         } else {
-            [tuple(pairId, settings.analysis_segmentations)]
+            [tuple(pairId, settings.analysis_input_segmentations)]
         }
     }
 
@@ -2492,7 +2766,8 @@ workflow {
         .filter {
             _pairId, _segmentation, _merscopePath, _xeniumPath, _merscopeTableKey,
             _merscopeShapeKey, _xeniumTableKey, _xeniumShapeKey, settings ->
-                settings.run_compare
+                settings.run_compare &&
+                    settings.analysis_segmentations.contains(_segmentation)
         }
         .map {
             pairId, segmentation, merscopePath, xeniumPath, merscopeTableKey,
@@ -2587,16 +2862,18 @@ workflow {
         analysis_samples_from_aligned_pairs_ch.mix(analysis_samples_from_dataset_ch)
 
     visualize_without_compare_ch = analysis_samples_ch
-        .filter { _pairId, _segmentation, _samplesJson, settings ->
-            settings.run_visualize && !settings.run_compare
+        .filter { _pairId, segmentation, _samplesJson, settings ->
+            settings.analysis_segmentations.contains(segmentation) &&
+                settings.run_visualize && !settings.run_compare
         }
         .map { pairId, segmentation, samplesJson, _settings ->
             tuple(pairId, segmentation, samplesJson)
         }
 
     visualize_after_compare_ch = analysis_samples_ch
-        .filter { _pairId, _segmentation, _samplesJson, settings ->
-            settings.run_visualize && settings.run_compare
+        .filter { _pairId, segmentation, _samplesJson, settings ->
+            settings.analysis_segmentations.contains(segmentation) &&
+                settings.run_visualize && settings.run_compare
         }
         .map { pairId, segmentation, samplesJson, _settings ->
             tuple("${pairId}|${segmentation}", pairId, segmentation, samplesJson)
@@ -2615,8 +2892,9 @@ workflow {
     }
 
     spatial_gene_analysis_without_visualize_ch = analysis_samples_ch
-        .filter { _pairId, _segmentation, _samplesJson, settings ->
-            settings.run_spatial_gene_analysis && !settings.run_visualize
+        .filter { _pairId, segmentation, _samplesJson, settings ->
+            settings.analysis_segmentations.contains(segmentation) &&
+                settings.run_spatial_gene_analysis && !settings.run_visualize
         }
         .map { pairId, segmentation, samplesJson, settings ->
             tuple(
@@ -2628,8 +2906,9 @@ workflow {
         }
 
     spatial_gene_analysis_after_visualize_ch = analysis_samples_ch
-        .filter { _pairId, _segmentation, _samplesJson, settings ->
-            settings.run_spatial_gene_analysis && settings.run_visualize
+        .filter { _pairId, segmentation, _samplesJson, settings ->
+            settings.analysis_segmentations.contains(segmentation) &&
+                settings.run_spatial_gene_analysis && settings.run_visualize
         }
         .map { pairId, segmentation, samplesJson, settings ->
             tuple(
@@ -2708,18 +2987,21 @@ workflow {
     }
 
     clustering_without_dependencies_ch = analysis_samples_ch
-        .filter { _pairId, _segmentation, _samplesJson, settings ->
+        .filter { _pairId, segmentation, _samplesJson, settings ->
             settings.run_clustering_squidpy &&
-                !settings.run_visualize &&
-                !settings.run_spatial_gene_analysis
+                (
+                    !settings.analysis_segmentations.contains(segmentation) ||
+                    (!settings.run_visualize && !settings.run_spatial_gene_analysis)
+                )
         }
         .map { pairId, segmentation, samplesJson, _settings ->
             tuple(pairId, segmentation, samplesJson)
         }
 
     clustering_after_visualize_ch = analysis_samples_ch
-        .filter { _pairId, _segmentation, _samplesJson, settings ->
+        .filter { _pairId, segmentation, _samplesJson, settings ->
             settings.run_clustering_squidpy &&
+                settings.analysis_segmentations.contains(segmentation) &&
                 settings.run_visualize &&
                 !settings.run_spatial_gene_analysis
         }
@@ -2732,8 +3014,10 @@ workflow {
         }
 
     clustering_after_spatial_gene_analysis_ch = analysis_samples_ch
-        .filter { _pairId, _segmentation, _samplesJson, settings ->
-            settings.run_clustering_squidpy && settings.run_spatial_gene_analysis
+        .filter { _pairId, segmentation, _samplesJson, settings ->
+            settings.run_clustering_squidpy &&
+                settings.analysis_segmentations.contains(segmentation) &&
+                settings.run_spatial_gene_analysis
         }
         .map { pairId, segmentation, samplesJson, _settings ->
             tuple("${pairId}|${segmentation}", pairId, segmentation, samplesJson)
@@ -3070,5 +3354,309 @@ workflow {
 
     mapmycells_inputs_ch = mapmycells_from_clustering_ch.mix(mapmycells_published_ch)
 
-    MAPMYCELLS(mapmycells_inputs_ch)
+    mapmycells_results_ch = MAPMYCELLS(mapmycells_inputs_ch)
+
+    // Reusable per-pair barrier for independent terminal analyses. Each event
+    // is grouped with a known pair-specific cardinality, so no pair waits for
+    // another pair. Cohort summaries are intentionally outside the barrier.
+    // MENDER consumes this token without depending on other terminal analyses.
+    pair_terminal_specs_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
+        if (!settings.run_mender) {
+            []
+        } else {
+            def terminalStage = currentPairTerminalStage(settings)
+            if (terminalStage == null) {
+                []
+            } else {
+                [tuple(
+                    pairId,
+                    terminalStage,
+                    currentPairTerminalExpectedCount(settings, terminalStage),
+                )]
+            }
+        }
+    }
+
+    pair_terminal_immediate_ch = sample_rows_ch.flatMap {
+        pairId, _row, settings ->
+            if (settings.run_mender && currentPairTerminalStage(settings) == null) {
+                [tuple(pairId, true)]
+            } else {
+                []
+            }
+    }
+
+    mapmycells_terminal_events_ch = mapmycells_results_ch.map {
+        pairId, _segmentation, _mapmycellsOut ->
+            tuple(pairId, "mapmycells", true)
+    }
+    distance_terminal_events_ch = distance_from_object_annotation_results_ch.map {
+        _key, pairId, _platform, _distanceSegmentations,
+        _latestZarr, _annotationOutputDir ->
+            tuple(pairId, "distance_from_object_annotation", true)
+    }
+    cortical_terminal_events_ch = compute_cortical_depth_results_ch.map {
+        _key, pairId, _platform, _latestZarr, _corticalDepthOut ->
+            tuple(pairId, "compute_cortical_depth", true)
+    }
+    clustering_terminal_events_ch = clustering_results_ch.map {
+        pairId, _segmentation, _samplesJson, _clusteringOutDir ->
+            tuple(pairId, "clustering_squidpy", true)
+    }
+    mender_extra_clustering_gate_ch = sample_rows_ch.flatMap {
+        pairId, _row, settings ->
+            if (!(settings.run_mender &&
+                  settings.run_mapmycells &&
+                  settings.run_clustering_squidpy)) {
+                []
+            } else {
+                settings.required_clustering_segmentations
+                    .findAll { segmentation ->
+                        !settings.analysis_segmentations.contains(segmentation)
+                    }
+                    .collect { segmentation ->
+                        tuple("${pairId}|${segmentation}", pairId)
+                    }
+            }
+    }
+    mender_extra_clustering_terminal_events_ch = clustering_results_ch
+        .map { pairId, segmentation, _samplesJson, _clusteringOutDir ->
+            tuple("${pairId}|${segmentation}", pairId)
+        }
+        .join(mender_extra_clustering_gate_ch)
+        .map { _branchKey, pairId, _expectedPairId ->
+            tuple(pairId, "mapmycells", true)
+        }
+    pair_terminal_events_ch = mapmycells_terminal_events_ch
+        .mix(distance_terminal_events_ch)
+        .mix(cortical_terminal_events_ch)
+        .mix(clustering_terminal_events_ch)
+        .mix(mender_extra_clustering_terminal_events_ch)
+
+    pair_terminal_grouped_ch = pair_terminal_events_ch
+        .join(pair_terminal_specs_ch)
+        .filter { _pairId, eventStage, _done, expectedStage, _expectedCount ->
+            eventStage == expectedStage
+        }
+        .map { pairId, _eventStage, _done, _expectedStage, expectedCount ->
+            tuple(groupKey(pairId, expectedCount as int), true)
+        }
+        .groupTuple()
+        .map { pairKey, _doneFlags -> tuple(pairKey.getGroupTarget(), true) }
+
+    pair_terminal_token_ch = pair_terminal_immediate_ch.mix(
+        pair_terminal_grouped_ch
+    )
+
+    mender_current_clustering_gate_ch = sample_rows_ch.flatMap {
+        pairId, _row, settings ->
+            if (!(settings.run_mender && settings.run_clustering_squidpy)) {
+                []
+            } else {
+                settings.mender_segmentations.collect { segmentation ->
+                    tuple("${pairId}|${segmentation}", settings)
+                }
+            }
+    }
+
+    mender_current_artifacts_ch = clustering_results_ch
+        .map { pairId, segmentation, samplesJson, clusteringOutDir ->
+            tuple(
+                "${pairId}|${segmentation}",
+                pairId,
+                segmentation,
+                samplesJson,
+                clusteringOutDir,
+            )
+        }
+        .join(mender_current_clustering_gate_ch)
+        .flatMap {
+            _segmentationKey,
+            pairId,
+            segmentation,
+            samplesJson,
+            clusteringOutDir,
+            settings ->
+                def samples = new groovy.json.JsonSlurper().parseText(
+                    samplesJson.toString()
+                )
+                samples.collect { sample ->
+                    def platform = sample.platform.toString()
+                    def sampleId = sample.sample_id.toString()
+                    def clusteredH5ad = java.nio.file.Paths.get(
+                        clusteringOutDir.toString()
+                    ).resolve(platform.toLowerCase()).resolve(
+                        "${sampleId}_clustered.h5ad"
+                    )
+                    tuple(
+                        pairId,
+                        "${pairId}|${segmentation}|${platform}",
+                        segmentation,
+                        platform,
+                        sampleId,
+                        clusteredH5ad,
+                        java.nio.file.Paths.get(
+                            sample.zarr_path.toString()
+                        ).toRealPath().toString(),
+                        settings,
+                    )
+                }
+        }
+
+    mender_published_artifacts_ch = sample_rows_ch.flatMap {
+        pairId, _row, settings ->
+            if (!(settings.run_mender && settings.mender_published_output_mode)) {
+                []
+            } else {
+                settings.mender_segmentations.collectMany { segmentation ->
+                    settings.active_platforms.collect { platform ->
+                        def sampleId = "${pairId}_${platform}"
+                        def clusteredH5ad = normalizedPath(
+                            publishedPairPath(
+                                params.outdir,
+                                pairId,
+                                "${segmentation}/clustering_squidpy/" +
+                                "clustering_squidpy_out/" +
+                                "${platform.toLowerCase()}/" +
+                                "${sampleId}_clustered.h5ad",
+                            )
+                        )
+                        def latestZarr = normalizedPath(
+                            publishedDatasetPath(
+                                params.outdir,
+                                pairId,
+                                platform,
+                                "latest/latest_spatialdata.zarr",
+                            )
+                        ).toRealPath().toString()
+                        tuple(
+                            pairId,
+                            "${pairId}|${segmentation}|${platform}",
+                            segmentation,
+                            platform,
+                            sampleId,
+                            clusteredH5ad,
+                            latestZarr,
+                            settings,
+                        )
+                    }
+                }
+            }
+    }
+
+    mender_artifacts_ch = mender_current_artifacts_ch.mix(
+        mender_published_artifacts_ch
+    )
+
+    mender_inputs_ch = mender_artifacts_ch
+        .combine(pair_terminal_token_ch, by: 0)
+        .map {
+            pairId,
+            taskKey,
+            segmentation,
+            platform,
+            sampleId,
+            clusteredH5ad,
+            latestZarr,
+            _settings,
+            terminalToken ->
+                def layerKeys = analysisLayerKeys(platform, segmentation)
+                def clusteredTableKey = clusteredSpatialdataTableKey(
+                    layerKeys.table_key,
+                    segmentation,
+                )
+                tuple(
+                    taskKey,
+                    pairId,
+                    segmentation,
+                    platform,
+                    sampleId,
+                    latestZarr,
+                    clusteredTableKey,
+                    layerKeys.shape_key,
+                    clusteredH5ad.toAbsolutePath().toString(),
+                    clusteredH5ad,
+                    terminalToken,
+                )
+        }
+
+    mender_finalize_lookup_ch = mender_inputs_ch.map {
+        taskKey,
+        _pairId,
+        _segmentation,
+        _platform,
+        _sampleId,
+        _latestZarr,
+        _clusteredTableKey,
+        _nativeShapeKey,
+        _sourceH5adPath,
+        clusteredH5ad,
+        _terminalToken ->
+            tuple(taskKey, clusteredH5ad)
+    }
+
+    mender_prepared_ch = MENDER_PREPARE(mender_inputs_ch)
+    mender_computed_ch = MENDER_COMPUTE(mender_prepared_ch)
+    mender_finalize_inputs_ch = mender_computed_ch
+        .map {
+            taskKey,
+            pairId,
+            segmentation,
+            platform,
+            sampleId,
+            spatialdataPath,
+            sourceSpatialdataTable,
+            nativeShapeKey,
+            sourceH5adPath,
+            menderConfig,
+            preparedDir,
+            computedDir ->
+                tuple(
+                    taskKey,
+                    pairId,
+                    segmentation,
+                    platform,
+                    sampleId,
+                    spatialdataPath,
+                    sourceSpatialdataTable,
+                    nativeShapeKey,
+                    sourceH5adPath,
+                    menderConfig,
+                    preparedDir,
+                    computedDir,
+                )
+        }
+        .join(mender_finalize_lookup_ch)
+        .map {
+            taskKey,
+            pairId,
+            segmentation,
+            platform,
+            sampleId,
+            spatialdataPath,
+            sourceSpatialdataTable,
+            nativeShapeKey,
+            sourceH5adPath,
+            menderConfig,
+            preparedDir,
+            computedDir,
+            clusteredH5ad ->
+                tuple(
+                    taskKey,
+                    pairId,
+                    segmentation,
+                    platform,
+                    sampleId,
+                    spatialdataPath,
+                    sourceSpatialdataTable,
+                    nativeShapeKey,
+                    sourceH5adPath,
+                    menderConfig,
+                    preparedDir,
+                    computedDir,
+                    clusteredH5ad,
+                )
+        }
+    mender_finalized_ch = MENDER_FINALIZE(mender_finalize_inputs_ch)
+    MENDER_IMPORT(mender_finalized_ch)
 }
