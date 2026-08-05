@@ -429,6 +429,29 @@ Additional QC artifacts are written under
 | `branch_neurons/<sample_id>_neurons_split_*` | Neuron Excitatory/Inhibitory/Other annotation tables, heatmap, plots, and split H5AD. |
 | `branch_neurons/split_<label>/...` | Per-neuron-split subtype H5AD plus UMAP, spatial scatter, spatial grid, panel-gene dotplot, and dotplot summary tables. |
 
+### MENDER spatial domains
+
+Path: `${outdir}/<pair_id>/<segmentation>/mender/mender_out/<platform>/`
+
+| File | Contents |
+|------|----------|
+| `<sample_id>_mender_annotated.h5ad` | Original clustered H5AD plus categorical `obs["mender_domain"]` and `uns["merxen_mender"]`. |
+| `<sample_id>_mender_context.h5ad` | MENDER context representation and context embedding; this potentially large matrix is not imported into SpatialData. |
+| `<sample_id>_mender_cells.parquet` | Immutable cell IDs, native coordinates, input state, and MENDER domain. |
+| `input/input_manifest.json` | Source H5AD/table/native shape, state counts, coordinate range, and exact MENDER settings. |
+| `tables/domain_sizes.tsv` | Domain sizes, state entropy, dominant composition, and number of states present. |
+| `tables/state_by_domain.tsv` | Long cell-state-by-domain counts and within-domain fractions. |
+| `tables/scale_neighbour_summary.tsv` | Minimum, median, mean, and maximum neighbour counts at every scale. |
+| `plots/spatial_domains.{png,pdf}` | Native-coordinate domain map. |
+| `plots/context_umap.{png,pdf}` | MENDER context embedding colored by domain. |
+| `plots/state_domain_heatmap.{png,pdf}` | Cell-state composition heatmap by domain. |
+| `mender_manifest.json` | Standalone artifact and provenance manifest. |
+| `spatialdata_import_manifest.json` | Shared-lock SpatialData import record and domain counts. |
+
+Only `mender_domain` and `uns["merxen_mender"]` are added to the derived
+clustered SpatialData table. Existing clustering, GASTON, cortical-depth, and
+MapMyCells annotations are preserved.
+
 ### MapMyCells
 
 Path: `${outdir}/<pair_id>/<analysis_segmentation>/mapmycells/`

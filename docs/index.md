@@ -65,6 +65,7 @@ scientific logic living in the installable Python package `merxen`.
 | [environment.yml](../environment.yml) | Conda env (Python 3.12 + pip) |
 | [environment.alignment.yml](../environment.alignment.yml) | Conda env used by Nextflow `ALIGN` |
 | [environment.clustering-gpu.yml](../environment.clustering-gpu.yml) | RAPIDS env used only by clustering compute |
+| [environment.mender.yml](../environment.mender.yml) | Pinned CPU environment used only by MENDER compute |
 | [pyproject.toml](../pyproject.toml) | Dependencies, `merxen` entry point, tool config |
 | [.env.example](../.env.example) | Required environment variables |
 

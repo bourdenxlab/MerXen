@@ -153,6 +153,7 @@ For a samplesheet row with `pair_id=EXAMPLE01`:
 | 13a | `DISTANCE_FROM_OBJECT_ANNOTATE` × platform | `merxen distance-from-object` | durable zarr + registered object GeoJSON | table metadata, per-cell sidecars, and pair-level near/far pseudobulks, when enabled |
 | 13b | `DISTANCE_FROM_OBJECT_COHORT` × platform | `merxen distance-from-object-cohort` | all pair-level platform pseudobulks | paired PyDESeq2 results for each segmentation branch |
 | 14 | `MAPMYCELLS` × 1 | `merxen mapmycells` | clustered `.h5ad` files from `clustering_squidpy_out/` | `mapmycells_out/` (query `.h5ad`, CSV/JSON assignments, annotated `.h5ad`) |
+| 15 | `MENDER_PREPARE` → `MENDER_COMPUTE` → `MENDER_FINALIZE` → `MENDER_IMPORT` × platform/segmentation | internal isolated entry points | clustered H5AD + clustered SpatialData table + explicit native shape | standalone context/domain artifacts plus `mender_domain` in the clustered table, when enabled |
 
 In single-platform mode, platform-local steps run once per row, paired-only
 alignment and comparison are skipped, and visualization/spatial-gene/clustering

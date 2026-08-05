@@ -49,6 +49,8 @@ Common optional parameters:
 | `--cortical_depth_enabled` | Run cortical-depth tissue/depth annotation after clustering. Requires boundary GeoJSON annotations. Defaults to `false`. |
 | `--distance_from_object_enabled` | Run registered polygon-edge distance annotation and paired near-vs-far pseudobulk analysis. Defaults to `false`. |
 | `--distance_from_object_segmentations` | Object-distance branches; defaults to `proseg,original,cellpose`. The former names remain accepted aliases. |
+| `--mender_enabled` | Run independent CPU-only MENDER spatial-domain analysis. Defaults to `false`. |
+| `--mender_segmentations` | MENDER segmentation subset or `all`; defaults to `proseg_hybrid`. |
 | `--start_stage` / `--stop_stage` | Run a contiguous stage range. Defaults to the full pipeline. |
 | `--only_stage` | Convenience alias for setting `start_stage` and `stop_stage` to the same stage. |
 
@@ -56,6 +58,7 @@ The samplesheet may also include `analysis_mode`, `enable_alignment`,
 `analysis_segmentation`, `cortical_depth_enabled`,
 `mecr_enabled`,
 `distance_from_object_enabled`, `distance_from_object_segmentations`,
+`mender_enabled`, `mender_segmentations`,
 `start_stage`, `stop_stage`, and `only_stage` columns.
 Non-empty row values override these command-line settings for that row only;
 blank cells inherit the command-line/config value. Every other parameter has a
@@ -77,6 +80,13 @@ GPU-heavy `CELLPOSE_SEGMENT` and `ALIGN` default to one task at a time. CPU-only
 task. RAPIDS-backed `CLUSTERING_SQUIDPY` allows up to four queued local tasks,
 but GPU execution is serialized by the shared workstation GPU lock when it is
 enabled.
+
+MENDER defaults to `hierarchical_cluster`, native centroids, a 20 µm radius,
+five scales, central-cell exclusion, and fixed Leiden resolution 0.8. Enabling
+it extends the historical clustering stop to `mender` when no later explicit
+stop is selected; this automatic extension does not implicitly enable
+MapMyCells. Reuse published clustering with `--only_stage mender`; see
+[MENDER spatial domains](stages/mender.md).
 
 Before any task inputs are emitted, the workflow runs stage-aware preflight
 checks for reference files required by the selected stage range. For example,
