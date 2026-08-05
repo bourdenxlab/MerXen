@@ -1,0 +1,13 @@
+FROM condaforge/miniforge3:24.7.1-0
+
+COPY environment.mender.yml /tmp/environment.mender.yml
+RUN conda env create -f /tmp/environment.mender.yml && conda clean --all --yes
+
+WORKDIR /opt/merxen
+COPY src ./src
+
+ENV PATH=/opt/conda/envs/merxen-mender/bin:$PATH \
+    PYTHONPATH=/opt/merxen/src \
+    CUDA_VISIBLE_DEVICES=""
+
+CMD ["python"]
