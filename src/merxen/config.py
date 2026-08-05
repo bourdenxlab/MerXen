@@ -1042,6 +1042,51 @@ class ClusteringSquidpyConfig(BaseModel):
     min_branch_cells: int = Field(default=50, ge=1)
 
 
+class MenderConfig(BaseModel):
+    """Configuration for one independent MENDER acquisition."""
+
+    pair_id: str
+    sample_id: str
+    platform: Literal["MERSCOPE", "XENIUM"]
+    segmentation: str
+    source_h5ad: Path
+    source_h5ad_origin: Path | None = None
+    spatialdata_path: Path
+    source_spatialdata_table: str
+    native_shape_key: str
+    output_dir: Path
+    cell_state_key: str = "hierarchical_cluster"
+    missing_state_policy: Literal["error"] = "error"
+    nn_mode: Literal["radius", "k", "ring"] = "radius"
+    radius_um: float = Field(default=20.0, gt=0.0)
+    n_scales: int = Field(default=5, ge=1)
+    count_rep: Literal["s", "a"] = "s"
+    include_self: bool = False
+    clustering_mode: Literal["resolution", "target_k"] = "resolution"
+    leiden_resolution: float = Field(default=0.8, gt=0.0)
+    target_k: int | None = Field(default=None, ge=2)
+    random_seed: int = 666
+    run_umap: bool = True
+    write_spatialdata_table: bool = True
+    figure_dpi: int = Field(default=180, ge=72)
+
+    @field_validator("cell_state_key", "source_spatialdata_table", "native_shape_key")
+    @classmethod
+    def _validate_required_name(cls: type[MenderConfig], value: str) -> str:
+        cleaned = str(value).strip()
+        if not cleaned:
+            raise ValueError(
+                "MENDER column and SpatialData element names must not be empty"
+            )
+        return cleaned
+
+    @model_validator(mode="after")
+    def _validate_clustering_request(self: MenderConfig) -> MenderConfig:
+        if self.clustering_mode == "target_k" and self.target_k is None:
+            raise ValueError("target_k is required when clustering_mode='target_k'")
+        return self
+
+
 class SpatialGeneAnalysisSampleConfig(BaseModel):
     """One SpatialData sample for per-gene spatial autocorrelation."""
 
