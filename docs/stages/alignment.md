@@ -47,7 +47,14 @@ The stage:
    correlation, Dice, and DAPI normalized mutual information. Reflections are
    searched by default for paired MERSCOPE/Xenium sections, but the reflected
    candidate must beat the non-reflected candidate by a configured margin.
-6. Jointly refines rotation and X/Y translation with a partial-overlap
+6. Runs a final local orientation search on the selected handedness over
+   ±2.5° and ±500 µm in X/Y. A dense coarse score volume locates nearby 3D
+   maxima, and a finer grid tests whether each maximum persists away from the
+   search boundaries. The best local transform is retained. QC records whether
+   that coordinate is stable, whether another stable maximum exists nearby,
+   and whether another maximum lies within the configured competing-score
+   margin.
+7. Jointly refines rotation and X/Y translation with a partial-overlap
    objective. A trimmed symmetric tissue-boundary distance ignores the worst
    unmatched boundary fraction, while overlap-normalized DAPI-density
    correlation selects internal anatomical agreement. Independent fixed and
@@ -55,22 +62,22 @@ The stage:
    remain disabled. Its objective diagnostic distinguishes zero, centroid, and
    phase-correlation seeds, plots refined candidates in physical units, and
    includes a true local X/Y score slice around the selected solution.
-7. Pre-warps only the temporary moving registration image with the refined
+8. Pre-warps only the temporary moving registration image with the refined
    `T_pre`. This accepted MerXen transform is the complete authoritative global
    alignment: VALIS receives the already-aligned image with `do_rigid=false`
    and an identity-only transformer. A dense postcondition verifies that
    VALIS's rigid point mapping remains identity before any field is accepted.
-8. Runs VALIS only as a local deformation engine. Both temporary inputs are
+9. Runs VALIS only as a local deformation engine. Both temporary inputs are
    weighted by the feathered intersection of fixed/moving tissue and their
    footprint-eroded validity masks. The reproducible default is VALIS
    `OpticalFlowWarper`; `simple_elastix` remains an explicit alternative and
    errors when Elastix is unavailable. DISK/LightGlue may still be used for
    VALIS bookkeeping and QC, but cannot change the locked global frame.
-9. Samples forward and backward transformations through VALIS's point-warp
+10. Samples forward and backward transformations through VALIS's point-warp
    APIs, preserving its level, crop, and direction conventions. Displacements
    taper smoothly to zero outside shared valid tissue. Raw internal VALIS field
    arrays are never serialized directly.
-10. Selects non-rigid output only when NMI does not degrade and the independent
+11. Selects non-rigid output only when NMI does not degrade and the independent
     DAPI-density, tissue-Dice, and authoritative partial-overlap score gates
     pass. P95 displacement, Jacobian, coherent Euclidean drift (default at most
     0.25° and 25 µm), and topology gates must also pass. Otherwise the locked
@@ -134,8 +141,17 @@ Important defaults in `workflows/nextflow.config` include:
 | `alignment_edge_taper_um` / `alignment_edge_exclusion_um` | `150` / `150` | Taper registration intensities and exclude scoring inward from the actual acquired-support boundary. |
 | `alignment_smoothing_sigma_um` | `3` | Nuclear-density smoothing scale. |
 | `alignment_orientation_*_step_degrees` | `10`, `2`, `0.5` | Full-circle coarse and refinement increments. |
-| `alignment_allow_reflection` | `true` | Search both handednesses; a reflected solution is retained only when it beats the non-reflected orientation by the configured score margin. |
-| `alignment_reflection_minimum_score_improvement` | `0.01` | Minimum orientation-score improvement required to select a reflected candidate when both handednesses are valid. |
+| `alignment_allow_reflection` / `alignment_reflection_mode` | `true` / `auto` | Search independent handedness branches, or explicitly `force`/`forbid` reflection for a sample. |
+| `alignment_reflection_minimum_score_improvement` | `0.01` | Symmetric handedness confidence margin. Near ties proceed provisionally with an ambiguity flag. |
+| `alignment_orientation_translation_candidates_per_angle` | `3` | Translation initial conditions retained for every angle before joint refinement. |
+| `alignment_orientation_*_translation_radius_px` | `64`, `16`, `4` | Coarse, refined, and final translation neighborhoods on the low-resolution search canvas. |
+| `alignment_orientation_initial_angle_degrees` / `alignment_orientation_initial_translation_*_um` | `null` | Optional per-sample angle and physical-translation seeds. |
+| `alignment_orientation_local_fine_search_enabled` | `true` | Run the final local stability and competing-maximum search on the selected handedness. |
+| `alignment_orientation_local_fine_angle_radius_degrees` | `2.5` | Local angular radius around the selected orientation. |
+| `alignment_orientation_local_fine_translation_radius_um` | `500` | Local X/Y translation radius in full-scale physical coordinates. |
+| `alignment_orientation_local_fine_coarse_angle_step_degrees` / `alignment_orientation_local_fine_coarse_translation_step_um` | `0.5` / `100` | Initial deterministic 3D score-grid increments. |
+| `alignment_orientation_local_fine_refine_angle_step_degrees` / `alignment_orientation_local_fine_refine_translation_step_um` | `0.1` / `25` | Fine increments used to test persistence of local maxima. |
+| `alignment_orientation_local_fine_competing_score_margin` | `0.002` | Score distance within which another persistent maximum is flagged as competing. |
 | `alignment_partial_overlap_enabled` | `true` | Refine rigid rotation/translation using trimmed boundaries and DAPI density. |
 | `alignment_partial_overlap_angle_radius_degrees` / `alignment_partial_overlap_angle_step_degrees` | `10` / `1` | Residual rotation search around the coarse pre-orientation. |
 | `alignment_partial_overlap_max_translation_um` | `1500` | Bounded X/Y refinement range in physical units. |
@@ -153,6 +169,14 @@ The Pydantic `ValisAlignmentConfig` exposes the full preprocessing, masking,
 orientation, feature, transform, non-rigid, output, resume, and QC thresholds.
 Direct CLI JSON additionally supports external DAPI paths and explicit 3×3
 `dataset_to_image_matrix` values.
+
+The orientation QC directory records both handedness branches in
+`orientation_candidates.json`, side-by-side candidate overlays, and an
+angle/translation landscape. The final local pass additionally writes
+`orientation_local_fine_search.json`, a before/after overlay, and projected
+angle/X/Y score landscapes with persistent and boundary maxima marked.
+Candidate metadata uses explicit search-angle, matrix-angle, reflection-axis,
+and equivalent-flip fields.
 
 ## Environment
 

@@ -279,8 +279,18 @@ using `environment.yml`.
 |-------|---------|-------------|
 | `alignment_orientation_max_dim_px` | `512` | Maximum image dimension for coarse orientation search. |
 | `alignment_orientation_coarse_step_degrees` / `alignment_orientation_refine_step_degrees` / `alignment_orientation_final_step_degrees` | `10.0` / `2.0` / `0.5` | Full-circle angular-search increments when SIFT/RANSAC support is insufficient. |
-| `alignment_allow_reflection` | `true` | Search reflected and non-reflected candidates for paired MERSCOPE/Xenium sections. |
-| `alignment_reflection_minimum_score_improvement` | `0.01` | Required reflected-candidate score advantage; prevents an effectively tied search from introducing a flip. |
+| `alignment_allow_reflection` / `alignment_reflection_mode` | `true` / `auto` | Search independent reflected and non-reflected beams; `force` and `forbid` provide per-sample overrides. |
+| `alignment_reflection_minimum_score_improvement` | `0.01` | Symmetric handedness margin; closer scores are marked ambiguous while the higher score proceeds provisionally. |
+| `alignment_orientation_translation_candidates_per_angle` | `3` | Translation seeds retained per angle during joint search. |
+| `alignment_orientation_coarse_translation_radius_px` / `alignment_orientation_refine_translation_radius_px` / `alignment_orientation_final_translation_radius_px` | `64` / `16` / `4` | Translation neighborhoods on the orientation-search canvas. |
+| `alignment_orientation_min_fixed_overlap_fraction` / `alignment_orientation_min_moving_overlap_fraction` | `0.45` / `0.45` | Candidate eligibility coverage gates. |
+| `alignment_orientation_min_retained_moving_fraction` / `alignment_orientation_min_relative_dice` | `0.6` / `0.7` | Reject clipped or grossly inferior candidates before ranking. |
+| `alignment_orientation_initial_angle_degrees` / `alignment_orientation_initial_translation_x_um` / `alignment_orientation_initial_translation_y_um` | `null` | Optional per-sample joint-search seeds. |
+| `alignment_orientation_local_fine_search_enabled` | `true` | Refine and assess stability around the selected handedness. |
+| `alignment_orientation_local_fine_angle_radius_degrees` / `alignment_orientation_local_fine_translation_radius_um` | `2.5` / `500` | Final local search window in angle and full-scale physical X/Y translation. |
+| `alignment_orientation_local_fine_coarse_angle_step_degrees` / `alignment_orientation_local_fine_coarse_translation_step_um` | `0.5` / `100` | Coarse local 3D score-volume increments. |
+| `alignment_orientation_local_fine_refine_angle_step_degrees` / `alignment_orientation_local_fine_refine_translation_step_um` | `0.1` / `25` | Fine increments used to confirm persistent interior maxima. |
+| `alignment_orientation_local_fine_maxima_to_refine` / `alignment_orientation_local_fine_competing_score_margin` | `4` / `0.002` | Maximum local peaks tested and score margin used to flag a competing stable solution. |
 | `alignment_partial_overlap_enabled` | `true` | Run joint residual rotation/X/Y refinement before VALIS. |
 | `alignment_partial_overlap_max_dim_px` | `512` | Maximum dimension of the robust rigid-search canvas. |
 | `alignment_partial_overlap_angle_radius_degrees` / `alignment_partial_overlap_angle_step_degrees` | `10.0` / `1.0` | Coarse residual-angle search window and increment. |
