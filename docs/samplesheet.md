@@ -3,7 +3,7 @@
 The samplesheet is a CSV with one row per biological sample or adjacent-section
 pair. By default, rows inherit `--analysis_mode`, `--enable_alignment`,
 `--analysis_segmentation`, `--mecr_enabled`, spatial-gene-analysis settings,
-object-distance settings, `--start_stage`,
+object-distance settings, GASTON settings, `--start_stage`,
 `--stop_stage`, and `--only_stage`
 from the Nextflow command or config, but each row can override those settings
 with optional columns. In the default `analysis_mode=paired`, a row must contain
@@ -29,6 +29,28 @@ required. A template lives at
 | `cortical_depth_enabled` | no | Row-level cortical-depth switch. Blank inherits `--cortical_depth_enabled`. |
 | `distance_from_object_enabled` | no | Row-level polygon-distance switch. Blank inherits `--distance_from_object_enabled`. |
 | `distance_from_object_segmentations` | no | Comma-separated object-distance branches: `proseg`, `original`, and/or `cellpose`; optional `proseg_geometry_assignment` and `proseg_hybrid` are also accepted when present. Legacy names remain aliases. Blank uses the three defaults. |
+| `gaston_enabled` | no | Row-level GASTON switch. Blank inherits `--gaston_enabled`, which defaults to `false`. |
+| `gaston_segmentations` | no | Independent GASTON branch set: `reseg`, `original_seg`, `proseg_mask`, `proseg_hybrid`, a comma-separated subset, or `all`. Blank inherits the default `proseg_hybrid`; it never changes `analysis_segmentation`. |
+| `gaston_use_gpu` | no | Train GASTON on CUDA. Blank inherits the profile setting (true on Dwight). |
+| `gaston_n_restarts` | no | Restart count; seeds are `0..n-1`. |
+| `gaston_epochs` | no | Epochs per restart. |
+| `gaston_checkpoint_interval` | no | Training checkpoint interval. |
+| `gaston_hidden_spatial` | no | Comma-separated positive spatial-network hidden widths, for example `"20,20"`. |
+| `gaston_hidden_expression` | no | Comma-separated positive expression-network hidden widths. |
+| `gaston_optimizer` | no | Optimizer passed to GASTON; defaults to `adam`. |
+| `gaston_glmpca_dimensions` | no | GLM-PCA feature count. |
+| `gaston_glmpca_penalty` | no | GLM-PCA penalty. |
+| `gaston_glmpca_iterations` | no | Initial GLM-PCA iteration budget; whole acquisitions may continue to the 1,000-iteration convergence ceiling. |
+| `gaston_domain_mode` | no | `auto` or `fixed`. |
+| `gaston_num_domains` | no | Direct K override; required for fixed mode. |
+| `gaston_min_domains` | no | Automatic K search lower bound. |
+| `gaston_max_domains` | no | Automatic K search upper bound. |
+| `gaston_domain_buckets` | no | Bucket count for likelihood calculation. |
+| `gaston_auto_k_fallback` | no | Optional K used only when automatic knee detection returns no knee. |
+| `gaston_write_spatialdata_table` | no | Import owned GASTON columns into the clustered SpatialData table. |
+| `gaston_keep_seed_models` | no | Retain every seed model in published output. |
+| `gaston_keep_checkpoints` | no | Checkpoint publication policy: `none`, `best`, or `all`. |
+| `gaston_max_genes` | no | Maximum eligible non-control panel genes; defaults to `10000`. |
 | `merscope_dir` | required for MERSCOPE modes if no cache | Path to the raw MERSCOPE region export folder (contains `transcripts.parquet`, `cell_boundaries/`, `images/`, etc.). |
 | `merscope_spatialdata_path` | required for MERSCOPE modes if no raw dir | Path to an existing (or desired) reusable MERSCOPE SpatialData zarr. If it exists, the build step is **skipped** unless `--force_spatialdata_build true` is passed to Nextflow. |
 | `merscope_image_prefix` | no | Prefix used to match z-plane image keys when more than one run is present. |
@@ -139,6 +161,16 @@ BLOCK_01,xenium,true,"proseg,original,cellpose",distance_from_object,/path/to/BL
 For paired cohorts, `pair_id` must be the tissue-block identifier used for the
 near/far blocking factor. Give each block its own row and platform-specific
 object GeoJSON.
+
+GASTON-only example using previously published clustering outputs:
+
+```csv
+pair_id,analysis_mode,only_stage,gaston_enabled,gaston_segmentations,gaston_domain_mode,gaston_num_domains,xenium_spatialdata_path
+BLOCK_02,xenium,gaston,true,proseg_hybrid,fixed,6,/path/to/BLOCK_02_xenium.zarr
+```
+
+The workflow resolves the expected clustered H5AD from `--outdir` and verifies
+the clustered table in the latest zarr before launching any GASTON tasks.
 
 ## Full example
 

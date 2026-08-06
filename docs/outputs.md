@@ -453,6 +453,37 @@ Path: `${outdir}/<pair_id>/<analysis_segmentation>/mapmycells/`
 | `mapmycells_out/region_<region_name>/<platform>/<pair_id>_<platform>_mapmycells_*` | Region-specific MapMyCells outputs when `mapmycells_reference_mode` includes `region`; annotated H5AD columns use `mapmycells_region_<region_name>_`. |
 | `mapmycells_out/<pair_id>_mapmycells_manifest.json` | Per-pair manifest summarizing selected reference mode, whole-brain and region references, ROI labels, filtering counts, bootstrap settings, and output paths. |
 
+### GASTON spatial domains
+
+Path:
+`${outdir}/<pair_id>/<segmentation>/gaston/gaston_out/<platform>/`
+
+| File | Contents |
+|------|----------|
+| `<sample_id>_gaston_annotated.h5ad` | Clustered H5AD with `gaston_domain`, raw `gaston_isodepth`, selected seed, selected K, and provenance. |
+| `<sample_id>_gaston_cells.parquet` | Portable per-cell annotations keyed by immutable cell ID. |
+| `input/counts.npz` | Sparse raw count matrix after eligible control-feature removal. |
+| `input/coordinates.npy` | Native-shape centroids in clustered H5AD order. |
+| `input/cell_ids.tsv` | Ordered cell IDs. |
+| `input/gene_names.tsv` | Ordered retained genes. |
+| `input/input_manifest.json` | Native-coordinate declaration, shape/table/instance keys, dimensions, checksums, and connectivity diagnostic. |
+| `model/best_model.pt` | Finite minimum-loss restart. |
+| `model/model_selection.json` | Selected seed and K, configuration, and unanchored-isodepth notice. |
+| `model/seed_losses.tsv` | Ranked restart losses and status. |
+| `model/domain_likelihoods.tsv` | Likelihood curve over the configured K range. |
+| `model/gpu_vram/seed_<n>/` | Per-restart task and total-device VRAM samples/summary when monitoring is enabled; retained independently of model/checkpoint policy. |
+| `plots/isodepth.png`, `plots/isodepth.pdf` | Raw isodepth plot; direction is explicitly unanchored and arbitrary. |
+| `plots/domains.png`, `plots/domains.pdf` | Selected spatial domain labels. |
+| `plots/domain_likelihood.png`, `plots/domain_likelihood.pdf` | Automatic K diagnostic and selected K. |
+| `plots/training_losses.png`, `plots/training_losses.pdf` | Restart training losses. |
+| `spatialdata_import_manifest.json` | Locked clustered-table import result and owned columns. |
+
+When import is enabled, the corresponding existing clustered table receives
+the same four GASTON annotations. Native shapes and original segmentation
+tables are unchanged. Preparation, model selection, plots, and the portable
+cell table remain standalone artifacts even if the final SpatialData import
+fails.
+
 ## Nextflow reports
 
 Path: `${outdir}/nextflow/`

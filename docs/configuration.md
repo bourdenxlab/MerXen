@@ -72,6 +72,8 @@ profile. Override either kind with `--<name>` on the command line.
 | `cortical_depth_enabled` | `false` | Insert the cortical-depth stage after clustering. Requires per-sample pial/tissue-edge annotations, with optional gray/white boundaries for depth pieces. A non-empty samplesheet `cortical_depth_enabled` value overrides this per row. |
 | `distance_from_object_enabled` | `false` | Insert registered polygon-edge distance analysis after cortical depth/clustering. A non-empty samplesheet value overrides this per row. |
 | `distance_from_object_segmentations` | `proseg, original, cellpose` | Cell-table branches for object distance. Legacy `reseg`, `original_seg`, and `proseg_mask` values remain accepted aliases. A samplesheet value may override this per row. |
+| `gaston_enabled` | `false` | Run GASTON as an opt-in terminal stage. A non-empty samplesheet value overrides this per row. |
+| `gaston_segmentations` | `proseg_hybrid` | Independent GASTON branch selector: any segmentation, a comma-separated subset, or `all`. This does not change `analysis_segmentation`. |
 | `force_spatialdata_build` | `false` | Rebuild SpatialData zarrs even if cached. |
 | `force_proseg_rerun` | `false` | Rebuild ProSeg bases from the current Cellpose/transcript inputs instead of reusing a persistent `latest_spatialdata.zarr`. Useful with `-resume` after upstream inputs were rebuilt. |
 | `start_stage` | `build_spatialdata` | Fallback first stage. Skipped upstream stages are read from published outputs. A samplesheet `start_stage` value overrides this per row. |
@@ -84,7 +86,7 @@ Stage names accepted by `start_stage`, `stop_stage`, and `only_stage` are:
 `build_spatialdata`, `segment_nuclei`, `segment`, `enrich`, `mask_image_quantification`,
 `qc`, `mecr`, `align`, `align_qc`, `compare`, `visualize`,
 `spatial_gene_analysis`, `clustering_squidpy`, `compute_cortical_depth`,
-`distance_from_object`, and `mapmycells`.
+`distance_from_object`, `mapmycells`, and `gaston`.
 `mask_image_quantification` is
 available only when the effective `mask_image_quantification_enabled` value is
 `true`. `compute_cortical_depth` is available only when the effective
@@ -95,6 +97,9 @@ only for rows whose effective `enable_alignment` value is `true`.
 `spatial_gene_analysis_enabled` value is `true`.
 `distance_from_object` is available only when the effective
 `distance_from_object_enabled` value is `true`.
+`gaston` is available only when the effective `gaston_enabled` value is
+`true`. Enabling it extends the historical default stop from clustering to
+GASTON, but an explicitly supplied stop remains authoritative.
 `align`, `align_qc`, and `compare` are available only when
 `analysis_mode = paired`.
 
@@ -398,6 +403,49 @@ The following settings are read only when
 | `clustering_squidpy_broad_score_margin_threshold` | `0.0` | Minimum difference between best and runner-up atlas scores; lower margins become `Mixed/Unknown`. |
 | `clustering_squidpy_broad_unknown_label` | `Mixed/Unknown` | Label used when no atlas marker set scores confidently. |
 
+### GASTON spatial domains
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `gaston_enabled` | `false` | Enable the terminal GASTON stage. |
+| `gaston_segmentations` | `proseg_hybrid` | Independent segmentation list or `all`; row-overridable. |
+| `gaston_use_gpu` | Dwight: `true` | Train on CUDA. GLM-PCA and postprocessing remain CPU-only. |
+| `gaston_n_restarts` | `30` | Independent seeds, numbered `0..n-1`. |
+| `gaston_epochs` | `10000` | Neural-network epochs per restart. |
+| `gaston_checkpoint_interval` | `500` | Training checkpoint interval. |
+| `gaston_hidden_spatial` | `[20,20]` | Hidden widths for the spatial network. |
+| `gaston_hidden_expression` | `[20,20]` | Hidden widths for the expression network. |
+| `gaston_optimizer` | `adam` | GASTON optimizer. |
+| `gaston_glmpca_dimensions` | `20` | GLM-PCA feature count. |
+| `gaston_glmpca_penalty` | `1.0` | GLM-PCA penalty. |
+| `gaston_glmpca_iterations` | `30` | Initial GLM-PCA iteration budget. Whole-acquisition fits may continue to the library's 1,000-iteration convergence ceiling; failure at that ceiling is explicit. |
+| `gaston_domain_mode` | `auto` | Domain count selection mode: `auto` or `fixed`. |
+| `gaston_num_domains` | `null` | Direct K override; required when mode is `fixed`. |
+| `gaston_min_domains` | `2` | Automatic search lower bound. |
+| `gaston_max_domains` | `10` | Automatic search upper bound. |
+| `gaston_domain_buckets` | `150` | Buckets used for domain likelihood calculation. |
+| `gaston_auto_k_fallback` | `null` | Optional K used only when automatic knee detection finds no knee. Without it, the stage emits diagnostics and fails. |
+| `gaston_write_spatialdata_table` | `true` | Merge owned GASTON columns into the existing clustered SpatialData table. |
+| `gaston_keep_seed_models` | `false` | Publish every seed model instead of only the selected model. |
+| `gaston_keep_checkpoints` | `best` | Published checkpoint policy: `none`, `best`, or `all`. |
+| `gaston_max_genes` | `10000` | Maximum eligible non-control panel genes exported from raw counts. |
+| `gaston_conda` | `environment.gaston.yml` | Pinned GASTON/GLM-PCA environment used outside the base MerXen environment. |
+| `gaston_container` | Dwight site image | CUDA-enabled Apptainer image built from `Dockerfile.gaston`; override for another site. |
+
+The Conda environment pins CUDA 11.8 and MKL 2024.0.0 for PyTorch 2.0.1
+binary compatibility. Training tasks validate the shared Torch/GASTON runtime
+before entering the per-seed failure handler, preventing a broken environment
+from being cached as a completed restart.
+
+Domain-selection settings are hashed only by postprocessing. With `-resume`,
+changing `gaston_domain_mode` or `gaston_num_domains` reuses completed input
+preparation, GLM-PCA, and neural-network restarts.
+
+GASTON runs on whole acquisitions and uses native shape centroids rather than
+aligned coordinates or the clustered H5AD's spatial embedding. See
+[GASTON spatial domains](stages/gaston.md) for input and model-selection
+contracts.
+
 ### Spatial gene analysis
 
 | Param | Default | Description |
@@ -519,9 +567,15 @@ for every task. Portable per-process CPU/memory requests remain in
 | `MECR` | 4 | 48 GB | `mecr_max_forks` = 4 |
 | `CLUSTERING_SQUIDPY` | 8 | 32 GB | `clustering_squidpy_max_forks` = 4 |
 | `MAPMYCELLS` | 8 | 160 GB | unbounded |
+| `GASTON_PREPARE` | 4 | 64 GB | 2 |
+| `GASTON_GLM_PCA` | 16 | 160 GB | 2 |
+| `GASTON_TRAIN` | 4 | 48 GB | 1 |
+| `GASTON_POSTPROCESS` | 8 | 64 GB | 2 |
+| `GASTON_IMPORT` | 4 | 48 GB | 1 |
 
 On Dwight, `CELLPOSE_SEGMENT`, `ALIGN` when `alignment_device != "cpu"`, and
-`CLUSTERING_SQUIDPY` when `clustering_squidpy_use_gpu=true` also share the
+`CLUSTERING_SQUIDPY` when `clustering_squidpy_use_gpu=true`, and
+`GASTON_TRAIN` when `gaston_use_gpu=true` also share the
 host-wide `gpu_process_lock_file`. The lock is held for the full process shell,
 then released automatically when the task exits.
 
@@ -554,6 +608,7 @@ models is the ground truth for how stages are configured.
 | `MecrConfig` | `mecr` | [config.py](../src/merxen/config.py) |
 | `ClusteringSquidpyConfig` | `clustering-squidpy` | [config.py](../src/merxen/config.py) |
 | `MapMyCellsConfig` | `mapmycells` | [config.py](../src/merxen/config.py) |
+| `GastonConfig` | `gaston` | [config.py](../src/merxen/config.py) |
 
 Nested sub-models:
 

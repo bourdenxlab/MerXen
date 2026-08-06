@@ -49,6 +49,8 @@ Common optional parameters:
 | `--cortical_depth_enabled` | Run cortical-depth tissue/depth annotation after clustering. Requires boundary GeoJSON annotations. Defaults to `false`. |
 | `--distance_from_object_enabled` | Run registered polygon-edge distance annotation and paired near-vs-far pseudobulk analysis. Defaults to `false`. |
 | `--distance_from_object_segmentations` | Object-distance branches; defaults to `proseg,original,cellpose`. The former names remain accepted aliases. |
+| `--gaston_enabled` | Run terminal GASTON spatial-domain analysis. Defaults to `false`. |
+| `--gaston_segmentations` | Independent GASTON branches; defaults to `proseg_hybrid`, accepts comma-separated subsets or `all`. |
 | `--start_stage` / `--stop_stage` | Run a contiguous stage range. Defaults to the full pipeline. |
 | `--only_stage` | Convenience alias for setting `start_stage` and `stop_stage` to the same stage. |
 
@@ -56,6 +58,7 @@ The samplesheet may also include `analysis_mode`, `enable_alignment`,
 `analysis_segmentation`, `cortical_depth_enabled`,
 `mecr_enabled`,
 `distance_from_object_enabled`, `distance_from_object_segmentations`,
+`gaston_enabled`, `gaston_segmentations`, and the other `gaston_*` controls,
 `start_stage`, `stop_stage`, and `only_stage` columns.
 Non-empty row values override these command-line settings for that row only;
 blank cells inherit the command-line/config value. Every other parameter has a
@@ -76,7 +79,8 @@ GPU-heavy `CELLPOSE_SEGMENT` and `ALIGN` default to one task at a time. CPU-only
 `PROSEG_SEGMENT` runs independently on a normal CPU node after each Cellpose
 task. RAPIDS-backed `CLUSTERING_SQUIDPY` allows up to four queued local tasks,
 but GPU execution is serialized by the shared workstation GPU lock when it is
-enabled.
+enabled. `GASTON_TRAIN` uses the same host-wide lock on Dwight, scatters one
+task per restart, and has `maxForks=1`; GLM-PCA and postprocessing are CPU-only.
 
 Before any task inputs are emitted, the workflow runs stage-aware preflight
 checks for reference files required by the selected stage range. For example,
@@ -92,6 +96,9 @@ pieces.
 When `distance_from_object` is selected, preflight checks the registered object
 GeoJSON for every active platform. The stage itself verifies that every chosen
 table already has `cortical_depth_annotation`.
+For `--only_stage gaston`, preflight instead requires the exact previously
+published clustered H5AD and latest zarr clustered table for every selected
+platform/segmentation. It never silently reruns clustering.
 Missing references stop the run immediately with the selected stages and paths
 that need attention.
 
@@ -126,7 +133,9 @@ alone against a zarr annotated by an earlier invocation.
 Visualization writes single-dataset alternatives for
 paired plots, including gene-abundance, one-platform transcript overview, and
 one-platform sanity crop outputs. `mapmycells` remains available after
-clustering. Alignment and comparison are rejected for single-platform rows
+clustering. When enabled, `gaston` is the last active stage and can request
+additional clustering-only segmentations through its independent selector.
+Alignment and comparison are rejected for single-platform rows
 because they require both datasets.
 
 ## Analysis segmentation

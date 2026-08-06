@@ -30,11 +30,12 @@ The subpackage structure mirrors the Nextflow stage graph:
 `build → segment-nuclei → segment → enrich → mask-image-quantification → qc → align →
 alignment-qc → compare → visualize → spatial-gene-analysis →
 clustering-squidpy → compute-cortical-depth → distance-from-object →
-mapmycells`. Cortical depth is skipped unless `--cortical_depth_enabled true`
+mapmycells → gaston`. Cortical depth is skipped unless `--cortical_depth_enabled true`
 is set. Alignment is skipped unless
 `--enable_alignment true` is set, object distance is skipped unless
 `--distance_from_object_enabled true` is set, and MapMyCells is opt-in because
-it requires local reference files.
+it requires local reference files. GASTON is also opt-in and uses its own
+segmentation selector.
 
 ## `merxen.config`
 
@@ -46,7 +47,7 @@ configs against these.
   `DistanceFromObjectConfig`, `DistanceFromObjectCohortConfig`,
   `QCConfig`, `AlignmentConfig`, `AlignmentQCConfig`, `ComparisonConfig`,
   `VisualizationConfig`, `SpatialGeneAnalysisConfig`,
-  `ClusteringSquidpyConfig`.
+  `ClusteringSquidpyConfig`, `GastonConfig`.
 - Sub-models: `CellposeConfig`, `TilingConfig`, `MaskFilterConfig`,
   `ProsegConfig`, `ProsegHybridConfig`, `MemoryConfig`, `DatasetConfig`,
   `MerscopeBuildConfig`, `XeniumBuildConfig`.
@@ -80,6 +81,8 @@ with Groovy.
   pre-schema latest store.
 - `prepare_source_spatialdata_contract(sdata, platform=...)` — normalizes
   source-reader IDs while preserving vendor provenance.
+- `spatialdata_write_lock(path)` — exclusive store-adjacent lock shared by
+  annotation importers before re-reading and replacing a table.
 
 ### `io.spatialdata_schema` — [spatialdata_schema.py](../src/merxen/io/spatialdata_schema.py)
 - `stamp_merxen_schema(...)` / `register_segmentation_branch(...)` — publish
@@ -265,6 +268,23 @@ See [Section alignment](stages/alignment.md).
   RAPIDS compute never imports or writes SpatialData.
 
 See [Squidpy clustering](stages/clustering-squidpy.md).
+
+### `analysis.gaston`
+
+- `prepare_gaston_input(config)` — validate raw counts and export cell-ID
+  ordered native centroids plus a checksummed portable bundle.
+- `run_gaston_glmpca(config, input_dir, output_dir)` — CPU-only GLM-PCA with
+  explicit convergence and finite-value checks.
+- `run_gaston_training(config, input_dir, features_path, seed, output_dir)` —
+  one independently resumable CPU/CUDA neural-network restart.
+- `rank_seed_results(...)` / `select_num_domains(...)` — finite-loss model
+  selection and fixed, Kneedle, or explicit-fallback domain selection.
+- `postprocess_gaston(...)` — raw isodepth/domain annotations, portable cell
+  table, likelihood diagnostics, and plots.
+- `import_gaston_annotations(...)` — standalone H5AD writer and locked,
+  owned-column SpatialData table merge.
+
+See [GASTON spatial domains](stages/gaston.md).
 
 ### `analysis.spatial_gene_analysis`
 - `run_spatial_gene_analysis(config)` — full stage entry point for
