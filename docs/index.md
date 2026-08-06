@@ -9,6 +9,12 @@ analyses with the same downstream stages that do not require both platforms.
 The pipeline is orchestrated by [Nextflow](https://www.nextflow.io/), with all
 scientific logic living in the installable Python package `merxen`.
 
+![MerXen pipeline overview](images/merxen_metro_map.svg)
+
+The two platform lines run the same per-platform stages independently and
+converge at alignment; dashed stations are governed by a parameter. See
+[Metro map](metro-map.md) for what the diagram does and does not show.
+
 ## Who these docs are for
 
 - **Users** running the pipeline on their own data — start at
@@ -47,6 +53,7 @@ scientific logic living in the installable Python package `merxen`.
 
 ### Developer reference
 - [Pipeline architecture](pipeline.md) — stage graph and data flow.
+- [Metro map](metro-map.md) — regenerating the pipeline overview diagram.
 - [Python API overview](python-api.md) — subpackage map with key functions.
 - [CLI reference](cli.md) — every `merxen` subcommand.
 - [Development workflow](development.md) — testing, linting, contributing.

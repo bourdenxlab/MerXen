@@ -58,6 +58,13 @@ fi
 "${venv_dir}/bin/ruff" format --check .
 "${venv_dir}/bin/mypy" src/
 
+# The metro map source is validated when nf-metro is available. The pytest
+# suite guards the map/pipeline correspondence without it, so a venv built in
+# 'none' install mode simply skips this.
+if [[ -x "${venv_dir}/bin/nf-metro" ]]; then
+    "${venv_dir}/bin/nf-metro" validate assets/metro_map.mmd
+fi
+
 case "${run_tests}" in
     true | 1 | yes)
         if [[ -n "${MERXEN_CI_PYTEST_ARGS:-}" ]]; then
