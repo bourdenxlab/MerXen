@@ -85,6 +85,8 @@ def register_pair(
         fixed_frame.tissue_mask,
         moving_frame.tissue_mask,
         config=cfg.valis.orientation,
+        pixel_size_um=fixed_frame.registration_pixel_size_um,
+        output_dir=cfg.output_dir / "qc" / "orientation",
     )
     pre_orientation = refine_partial_overlap_rigid(
         fixed_frame.processed_image,

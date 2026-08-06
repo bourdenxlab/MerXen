@@ -590,7 +590,36 @@ class OrientationSearchConfig(BaseModel):
     final_step_degrees: float = Field(default=0.5, gt=0.0, le=45.0)
     candidates_to_refine: int = Field(default=4, ge=1)
     allow_reflection: bool = True
+    reflection_mode: Literal["auto", "force", "forbid"] = "auto"
     reflection_minimum_score_improvement: float = Field(default=0.01, ge=0.0)
+    translation_candidates_per_angle: int = Field(default=3, ge=1)
+    coarse_translation_radius_px: float = Field(default=64.0, ge=0.0)
+    refine_translation_radius_px: float = Field(default=16.0, ge=0.0)
+    final_translation_radius_px: float = Field(default=4.0, ge=0.0)
+    minimum_fixed_overlap_fraction: float = Field(default=0.45, ge=0.0, le=1.0)
+    minimum_moving_overlap_fraction: float = Field(default=0.45, ge=0.0, le=1.0)
+    minimum_retained_moving_fraction: float = Field(default=0.6, ge=0.0, le=1.0)
+    minimum_relative_dice: float = Field(default=0.7, ge=0.0, le=1.0)
+    initial_angle_degrees: float | None = None
+    initial_translation_x_um: float | None = None
+    initial_translation_y_um: float | None = None
+    local_fine_search_enabled: bool = True
+    local_fine_angle_radius_degrees: float = Field(default=2.5, gt=0.0, le=15.0)
+    local_fine_translation_radius_um: float = Field(default=500.0, gt=0.0)
+    local_fine_coarse_angle_step_degrees: float = Field(
+        default=0.5,
+        gt=0.0,
+        le=5.0,
+    )
+    local_fine_coarse_translation_step_um: float = Field(default=100.0, gt=0.0)
+    local_fine_refine_angle_step_degrees: float = Field(
+        default=0.1,
+        gt=0.0,
+        le=1.0,
+    )
+    local_fine_refine_translation_step_um: float = Field(default=25.0, gt=0.0)
+    local_fine_maxima_to_refine: int = Field(default=4, ge=1)
+    local_fine_competing_score_margin: float = Field(default=0.002, ge=0.0)
     overlap_weight: float = Field(default=0.6, ge=0.0)
     mutual_information_weight: float = Field(default=0.4, ge=0.0)
     feature_weight: float = Field(default=0.1, ge=0.0)
@@ -601,6 +630,30 @@ class OrientationSearchConfig(BaseModel):
     ) -> OrientationSearchConfig:
         if self.minimum_scale >= self.maximum_scale:
             raise ValueError("minimum_scale must be less than maximum_scale")
+        if (self.initial_translation_x_um is None) != (
+            self.initial_translation_y_um is None
+        ):
+            raise ValueError(
+                "initial_translation_x_um and initial_translation_y_um "
+                "must be set together"
+            )
+        if self.overlap_weight + self.mutual_information_weight <= 0:
+            raise ValueError("orientation Dice and NMI weights cannot both be zero")
+        if (
+            self.local_fine_refine_angle_step_degrees
+            > self.local_fine_coarse_angle_step_degrees
+        ):
+            raise ValueError(
+                "local fine refine angle step cannot exceed the coarse angle step"
+            )
+        if (
+            self.local_fine_refine_translation_step_um
+            > self.local_fine_coarse_translation_step_um
+        ):
+            raise ValueError(
+                "local fine refine translation step cannot exceed the coarse "
+                "translation step"
+            )
         return self
 
 
