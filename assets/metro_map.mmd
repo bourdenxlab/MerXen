@@ -128,6 +128,7 @@ graph LR
         distance_from_object_cohort[Cohort DE]
         mapmycells[MapMyCells]
         mapmycells_out[ ]
+        mender[MENDER domains]
 
         compute_cortical_depth -->|optional| distance_from_object_annotate
         distance_from_object_annotate -->|optional| distance_from_object_cohort
@@ -144,3 +145,4 @@ graph LR
     align_qc -->|paired| visualize
     clustering_squidpy -->|optional| compute_cortical_depth
     clustering_squidpy -->|optional| mapmycells
+    clustering_squidpy -->|optional| mender
