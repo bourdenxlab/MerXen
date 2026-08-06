@@ -164,3 +164,45 @@ def test_required_platforms_for_mode_rejects_unknown_mode() -> None:
     """Unknown analysis modes should fail with a clear validation error."""
     with pytest.raises(ValueError, match="Unknown analysis_mode"):
         required_platforms_for_mode("other")
+
+
+def test_parse_samplesheet_supports_gaston_row_overrides(tmp_path: Path) -> None:
+    """Every GASTON control can be supplied at samplesheet row scope."""
+    csv_path = tmp_path / "gaston.csv"
+    csv_path.write_text(
+        "pair_id,gaston_enabled,gaston_segmentations,gaston_use_gpu,"
+        "gaston_n_restarts,gaston_epochs,gaston_checkpoint_interval,"
+        "gaston_hidden_spatial,gaston_hidden_expression,gaston_optimizer,"
+        "gaston_glmpca_dimensions,gaston_glmpca_penalty,"
+        "gaston_glmpca_iterations,gaston_domain_mode,gaston_num_domains,"
+        "gaston_min_domains,gaston_max_domains,gaston_domain_buckets,"
+        "gaston_auto_k_fallback,gaston_write_spatialdata_table,"
+        "gaston_keep_seed_models,gaston_keep_checkpoints,gaston_max_genes\n"
+        'P1,true,"reseg,proseg_hybrid",false,2,20,5,"8,4","9,3",adam,'
+        "3,2.5,12,fixed,4,2,6,100,3,true,true,all,500\n"
+    )
+
+    pair = parse_samplesheet(csv_path)[0]
+
+    assert pair.gaston_enabled is True
+    assert pair.gaston_segmentations == "reseg,proseg_hybrid"
+    assert pair.gaston_use_gpu is False
+    assert pair.gaston_n_restarts == 2
+    assert pair.gaston_epochs == 20
+    assert pair.gaston_checkpoint_interval == 5
+    assert pair.gaston_hidden_spatial == [8, 4]
+    assert pair.gaston_hidden_expression == [9, 3]
+    assert pair.gaston_optimizer == "adam"
+    assert pair.gaston_glmpca_dimensions == 3
+    assert pair.gaston_glmpca_penalty == 2.5
+    assert pair.gaston_glmpca_iterations == 12
+    assert pair.gaston_domain_mode == "fixed"
+    assert pair.gaston_num_domains == 4
+    assert pair.gaston_min_domains == 2
+    assert pair.gaston_max_domains == 6
+    assert pair.gaston_domain_buckets == 100
+    assert pair.gaston_auto_k_fallback == 3
+    assert pair.gaston_write_spatialdata_table is True
+    assert pair.gaston_keep_seed_models is True
+    assert pair.gaston_keep_checkpoints == "all"
+    assert pair.gaston_max_genes == 500

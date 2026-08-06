@@ -46,6 +46,8 @@ class SamplePair:
         start_stage: Optional row-level first stage.
         stop_stage: Optional row-level final stage.
         only_stage: Optional row-level single-stage override.
+        gaston_enabled: Optional row-level GASTON stage switch.
+        gaston_segmentations: Optional independent GASTON segmentation selector.
     """
 
     pair_id: str
@@ -70,6 +72,28 @@ class SamplePair:
     start_stage: str | None = None
     stop_stage: str | None = None
     only_stage: str | None = None
+    gaston_enabled: bool | None = None
+    gaston_segmentations: str | None = None
+    gaston_use_gpu: bool | None = None
+    gaston_n_restarts: int | None = None
+    gaston_epochs: int | None = None
+    gaston_checkpoint_interval: int | None = None
+    gaston_hidden_spatial: list[int] | None = None
+    gaston_hidden_expression: list[int] | None = None
+    gaston_optimizer: str | None = None
+    gaston_glmpca_dimensions: int | None = None
+    gaston_glmpca_penalty: float | None = None
+    gaston_glmpca_iterations: int | None = None
+    gaston_domain_mode: str | None = None
+    gaston_num_domains: int | None = None
+    gaston_min_domains: int | None = None
+    gaston_max_domains: int | None = None
+    gaston_domain_buckets: int | None = None
+    gaston_auto_k_fallback: int | None = None
+    gaston_write_spatialdata_table: bool | None = None
+    gaston_keep_seed_models: bool | None = None
+    gaston_keep_checkpoints: str | None = None
+    gaston_max_genes: int | None = None
 
 
 def parse_samplesheet(csv_path: Path) -> list[SamplePair]:
@@ -83,6 +107,7 @@ def parse_samplesheet(csv_path: Path) -> list[SamplePair]:
         analysis_mode, enable_alignment, analysis_segmentation, start_stage,
         stop_stage, only_stage, spatial_gene_analysis_enabled,
         spatial_gene_analysis_transcript_analysis_enabled
+        and all optional gaston_* row overrides
 
     Backward-compatible aliases:
         merscope_zarr_path -> merscope_spatialdata_path
@@ -161,6 +186,50 @@ def parse_samplesheet(csv_path: Path) -> list[SamplePair]:
                 start_stage=_optional_string(row.get("start_stage")),
                 stop_stage=_optional_string(row.get("stop_stage")),
                 only_stage=_optional_string(row.get("only_stage")),
+                gaston_enabled=_parse_optional_bool(row.get("gaston_enabled")),
+                gaston_segmentations=_optional_string(row.get("gaston_segmentations")),
+                gaston_use_gpu=_parse_optional_bool(row.get("gaston_use_gpu")),
+                gaston_n_restarts=_parse_optional_int(row.get("gaston_n_restarts")),
+                gaston_epochs=_parse_optional_int(row.get("gaston_epochs")),
+                gaston_checkpoint_interval=_parse_optional_int(
+                    row.get("gaston_checkpoint_interval")
+                ),
+                gaston_hidden_spatial=_parse_optional_int_list(
+                    row.get("gaston_hidden_spatial")
+                ),
+                gaston_hidden_expression=_parse_optional_int_list(
+                    row.get("gaston_hidden_expression")
+                ),
+                gaston_optimizer=_optional_string(row.get("gaston_optimizer")),
+                gaston_glmpca_dimensions=_parse_optional_int(
+                    row.get("gaston_glmpca_dimensions")
+                ),
+                gaston_glmpca_penalty=_parse_optional_float(
+                    row.get("gaston_glmpca_penalty")
+                ),
+                gaston_glmpca_iterations=_parse_optional_int(
+                    row.get("gaston_glmpca_iterations")
+                ),
+                gaston_domain_mode=_optional_string(row.get("gaston_domain_mode")),
+                gaston_num_domains=_parse_optional_int(row.get("gaston_num_domains")),
+                gaston_min_domains=_parse_optional_int(row.get("gaston_min_domains")),
+                gaston_max_domains=_parse_optional_int(row.get("gaston_max_domains")),
+                gaston_domain_buckets=_parse_optional_int(
+                    row.get("gaston_domain_buckets")
+                ),
+                gaston_auto_k_fallback=_parse_optional_int(
+                    row.get("gaston_auto_k_fallback")
+                ),
+                gaston_write_spatialdata_table=_parse_optional_bool(
+                    row.get("gaston_write_spatialdata_table")
+                ),
+                gaston_keep_seed_models=_parse_optional_bool(
+                    row.get("gaston_keep_seed_models")
+                ),
+                gaston_keep_checkpoints=_optional_string(
+                    row.get("gaston_keep_checkpoints")
+                ),
+                gaston_max_genes=_parse_optional_int(row.get("gaston_max_genes")),
             )
             pairs.append(pair)
             logger.info("Parsed sample pair %d: %s", row_num - 1, pair.pair_id)
@@ -304,6 +373,31 @@ def _parse_int(value: str | None, *, default: int) -> int:
     if value is None or not value.strip():
         return default
     return int(value)
+
+
+def _parse_optional_int(value: str | None) -> int | None:
+    """Parse an optional integer from a CSV field."""
+    if value is None or not value.strip():
+        return None
+    return int(value)
+
+
+def _parse_optional_float(value: str | None) -> float | None:
+    """Parse an optional float from a CSV field."""
+    if value is None or not value.strip():
+        return None
+    return float(value)
+
+
+def _parse_optional_int_list(value: str | None) -> list[int] | None:
+    """Parse an optional comma-separated positive-integer list."""
+    if value is None or not value.strip():
+        return None
+    cleaned = value.strip().removeprefix("[").removesuffix("]")
+    parsed = [int(item.strip()) for item in cleaned.split(",") if item.strip()]
+    if not parsed or any(item <= 0 for item in parsed):
+        raise ValueError(f"Invalid positive-integer list: {value!r}")
+    return parsed
 
 
 def _parse_list(value: str | None, *, default: list[str]) -> list[str]:
