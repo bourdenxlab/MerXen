@@ -1042,6 +1042,74 @@ class ClusteringSquidpyConfig(BaseModel):
     min_branch_cells: int = Field(default=50, ge=1)
 
 
+class GastonConfig(BaseModel):
+    """Configuration for one sample/segmentation GASTON analysis."""
+
+    pair_id: str
+    sample_id: str
+    platform: Literal["MERSCOPE", "XENIUM"]
+    segmentation: Literal[
+        "reseg",
+        "original_seg",
+        "proseg_mask",
+        "proseg_hybrid",
+    ]
+    clustered_h5ad_path: Path
+    latest_zarr_path: Path
+    source_table_key: str
+    clustered_table_key: str
+    shape_key: str
+    output_dir: Path = Path("gaston_out")
+    use_gpu: bool = False
+    n_restarts: int = Field(default=30, ge=1)
+    epochs: int = Field(default=10_000, ge=1)
+    checkpoint_interval: int = Field(default=500, ge=1)
+    hidden_spatial: list[int] = Field(default_factory=lambda: [20, 20])
+    hidden_expression: list[int] = Field(default_factory=lambda: [20, 20])
+    optimizer: Literal["adam", "sgd", "adagrad"] = "adam"
+    glmpca_dimensions: int = Field(default=20, ge=1)
+    glmpca_penalty: float = Field(default=1.0, ge=0.0)
+    glmpca_iterations: int = Field(default=30, ge=1)
+    domain_mode: Literal["auto", "fixed"] = "auto"
+    num_domains: int | None = Field(default=None, ge=2)
+    min_domains: int = Field(default=2, ge=2)
+    max_domains: int = Field(default=10, ge=2)
+    domain_buckets: int = Field(default=150, ge=2)
+    auto_k_fallback: int | None = Field(default=None, ge=2)
+    write_spatialdata_table: bool = True
+    keep_seed_models: bool = False
+    keep_checkpoints: Literal["none", "best", "all"] = "best"
+    max_genes: int = Field(default=10_000, ge=1)
+    figure_dpi: int = Field(default=180, ge=72)
+
+    @field_validator("hidden_spatial", "hidden_expression")
+    @classmethod
+    def _validate_hidden_architecture(
+        cls: type[GastonConfig],
+        values: list[int],
+    ) -> list[int]:
+        architecture = [int(value) for value in values]
+        if not architecture or any(value <= 0 for value in architecture):
+            raise ValueError("GASTON hidden-layer architectures must be positive")
+        return architecture
+
+    @model_validator(mode="after")
+    def _validate_domain_selection(self: GastonConfig) -> GastonConfig:
+        if self.min_domains > self.max_domains:
+            raise ValueError("min_domains must be <= max_domains")
+        if self.domain_mode == "fixed" and self.num_domains is None:
+            raise ValueError("num_domains is required when domain_mode='fixed'")
+        for label, value in (
+            ("num_domains", self.num_domains),
+            ("auto_k_fallback", self.auto_k_fallback),
+        ):
+            if value is not None and not self.min_domains <= value <= self.max_domains:
+                raise ValueError(f"{label} must be between min_domains and max_domains")
+        if self.glmpca_dimensions > self.max_genes:
+            raise ValueError("glmpca_dimensions must not exceed max_genes")
+        return self
+
+
 class SpatialGeneAnalysisSampleConfig(BaseModel):
     """One SpatialData sample for per-gene spatial autocorrelation."""
 
