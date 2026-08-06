@@ -19,7 +19,7 @@ import time
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import anndata as ad
 import matplotlib
@@ -1169,7 +1169,10 @@ def _native_centroids_in_order(
         },
         index=shape_ids,
     )
-    coordinates = centroid_table.loc[cell_ids, ["x", "y"]].to_numpy(dtype=float)
+    coordinates = cast(
+        np.ndarray,
+        centroid_table.loc[cell_ids, ["x", "y"]].to_numpy(dtype=float),
+    )
     if coordinates.shape != (len(cell_ids), 2):
         raise RuntimeError("Native centroid join produced an unexpected shape")
     if not np.isfinite(coordinates).all():
@@ -1380,7 +1383,7 @@ def _numeric_summary(values: np.ndarray) -> dict[str, float]:
 
 
 def _jsonable_config(config: GastonConfig) -> dict[str, Any]:
-    return json.loads(config.model_dump_json())
+    return cast(dict[str, Any], json.loads(config.model_dump_json()))
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
