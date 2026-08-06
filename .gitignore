@@ -33,6 +33,9 @@ alignment_test/
 workflows/*.csv
 !workflows/samplesheet.example.csv
 
+# Run archives
+run_archives/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
