@@ -36,6 +36,12 @@ STATION_ALIASES = {
         "CLUSTERING_SQUIDPY_COMPUTE",
         "CLUSTERING_SQUIDPY_FINALIZE",
     },
+    "mender": {
+        "MENDER_PREPARE",
+        "MENDER_COMPUTE",
+        "MENDER_FINALIZE",
+        "MENDER_IMPORT",
+    },
 }
 
 # Decorative nodes: terminus icons and the segmentation branch that is a
