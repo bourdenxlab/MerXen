@@ -24,6 +24,12 @@ from merxen.alignment.dapi import (
 from merxen.alignment.frames import resolve_dapi_frame
 from merxen.alignment.orientation import (
     OrientationResult,
+    _best_distinct_by_handedness,
+    _distinct_local_peaks,
+    _local_maximum_indices,
+    _LocalFinePeak,
+    _requested_reflections,
+    _select_orientation_candidate,
     estimate_pre_orientation,
     warp_image,
 )
@@ -72,6 +78,8 @@ def test_alignment_config_defaults_to_valis_with_validated_reflection_search(
     assert config.valis.partial_overlap.enabled is True
     assert config.valis.orientation.allow_reflection is True
     assert config.valis.orientation.reflection_minimum_score_improvement == 0.01
+    assert config.valis.orientation.local_fine_angle_radius_degrees == 2.5
+    assert config.valis.orientation.local_fine_translation_radius_um == 500.0
 
 
 def test_dapi_preprocessing_selects_named_channel_and_returns_uint8() -> None:
@@ -337,6 +345,7 @@ def test_fallback_orientation_recovers_arbitrary_rotation(
         final_step_degrees=0.5,
         candidates_to_refine=3,
         minimum_dice=0.05,
+        local_fine_search_enabled=False,
     )
 
     result = estimate_pre_orientation(
@@ -351,7 +360,7 @@ def test_fallback_orientation_recovers_arbitrary_rotation(
     recovered = (homogeneous @ result.matrix.T)[:, :2]
     target = (homogeneous @ expected.T)[:, :2]
 
-    assert result.method == "angular_search"
+    assert result.method == "joint_angular_translation_search"
     assert result.metrics["reflection"] is False
     assert float(result.metrics["dice"]) > 0.95
     np.testing.assert_allclose(recovered, target, atol=2.0)
@@ -362,6 +371,222 @@ def test_reflection_search_is_enabled_by_default_with_a_score_margin() -> None:
     config = OrientationSearchConfig()
     assert config.allow_reflection is True
     assert config.reflection_minimum_score_improvement > 0.0
+
+
+def test_joint_search_retains_independent_handedness_beams() -> None:
+    """A strong branch must not consume the other handedness candidate beam."""
+    candidates = [
+        OrientationResult(
+            matrix=np.eye(3),
+            method="angular_search",
+            angle_degrees=float(index),
+            scale=1.0,
+            score=1.0 - index * 0.01,
+            metrics={
+                "reflection": reflected,
+                "translation_x_px": float(index),
+                "translation_y_px": 0.0,
+                "eligible": True,
+            },
+        )
+        for index, reflected in enumerate([False, False, False, True])
+    ]
+
+    retained = _best_distinct_by_handedness(
+        candidates,
+        count=2,
+        reflections=[False, True],
+    )
+
+    assert sum(not candidate.metrics["reflection"] for candidate in retained) == 2
+    assert sum(candidate.metrics["reflection"] for candidate in retained) == 1
+
+
+def test_handedness_near_tie_proceeds_with_provisional_ambiguity() -> None:
+    """A near tie must proceed with an explicit symmetric ambiguity flag."""
+    non_reflected = OrientationResult(
+        matrix=np.eye(3),
+        method="angular_search",
+        angle_degrees=0.0,
+        scale=1.0,
+        score=0.5,
+        metrics={"reflection": False},
+    )
+    reflected = OrientationResult(
+        matrix=np.diag([-1.0, 1.0, 1.0]),
+        method="angular_search",
+        angle_degrees=0.0,
+        scale=1.0,
+        score=0.505,
+        metrics={"reflection": True},
+    )
+
+    result = _select_orientation_candidate(
+        [non_reflected, reflected],
+        config=OrientationSearchConfig(reflection_minimum_score_improvement=0.01),
+    )
+
+    assert result.metrics["reflection"] is True
+    assert result.metrics["handedness_ambiguous"] is True
+    assert result.metrics["provisional_selection"] is True
+    assert result.metrics["selection_reason"] == (
+        "handedness_ambiguous_reflected_provisional"
+    )
+
+
+def test_ineligible_orientation_cannot_beat_an_eligible_candidate() -> None:
+    """Eligibility gates must exclude implausible candidates before ranking."""
+    eligible = OrientationResult(
+        matrix=np.eye(3),
+        method="angular_search",
+        angle_degrees=0.0,
+        scale=1.0,
+        score=0.4,
+        metrics={"reflection": False, "eligible": True},
+    )
+    ineligible = OrientationResult(
+        matrix=np.diag([-1.0, 1.0, 1.0]),
+        method="angular_search",
+        angle_degrees=0.0,
+        scale=1.0,
+        score=0.9,
+        metrics={
+            "reflection": True,
+            "eligible": False,
+            "eligibility_reasons": ["moving_tissue_clipped"],
+        },
+    )
+
+    result = _select_orientation_candidate(
+        [eligible, ineligible],
+        config=OrientationSearchConfig(),
+    )
+
+    assert result.metrics["reflection"] is False
+    assert result.metrics["eligibility_fallback"] is False
+    assert result.metrics["candidate_comparison"]["reflected"]["eligible"] is False
+
+
+def test_generic_adjacent_section_fixture_recovers_joint_reflected_transform(
+    tmp_path: Path,
+) -> None:
+    """Joint search must recover a reflected transform with section differences."""
+    fixture_path = (
+        Path(__file__).parents[1]
+        / "test_data/alignment/challenging_reflected_sections.npz"
+    )
+    with np.load(fixture_path) as fixture:
+        result = estimate_pre_orientation(
+            fixture["fixed"],
+            fixture["moving"],
+            fixture["fixed_mask"],
+            fixture["moving_mask"],
+            config=OrientationSearchConfig(
+                max_dimension_px=128,
+                minimum_inliers=1_000,
+                coarse_step_degrees=15.0,
+                refine_step_degrees=3.0,
+                final_step_degrees=1.0,
+                candidates_to_refine=3,
+                coarse_translation_radius_px=24.0,
+                refine_translation_radius_px=6.0,
+                final_translation_radius_px=2.0,
+                minimum_dice=0.1,
+                local_fine_angle_radius_degrees=2.0,
+                local_fine_translation_radius_um=16.0,
+                local_fine_coarse_translation_step_um=4.0,
+                local_fine_refine_translation_step_um=1.0,
+            ),
+            output_dir=tmp_path / "orientation_qc",
+        )
+        expected_matrix = fixture["expected_matrix"]
+
+    assert result.metrics["reflection"] is True
+    assert result.method == "joint_angular_translation_search"
+    np.testing.assert_allclose(result.matrix, expected_matrix, atol=1.2)
+    local_search = result.metrics["local_fine_search"]
+    assert local_search["enabled"] is True
+    assert isinstance(local_search["selected_coordinate_stable"], bool)
+    assert isinstance(local_search["has_nearby_stable_maximum"], bool)
+    assert (tmp_path / "orientation_qc/orientation_candidates.json").exists()
+    assert (tmp_path / "orientation_qc/orientation_candidate_overlays.png").exists()
+    assert (
+        tmp_path / "orientation_qc/orientation_angle_translation_landscape.png"
+    ).exists()
+    assert (tmp_path / "orientation_qc/orientation_local_fine_search.json").exists()
+    assert (tmp_path / "orientation_qc/orientation_local_fine_overlay.png").exists()
+    assert (tmp_path / "orientation_qc/orientation_local_fine_landscape.png").exists()
+
+
+def test_local_fine_search_detects_and_deduplicates_stable_maxima() -> None:
+    """Persistent 3D maxima must remain distinct unless refinement converges."""
+    volume = np.zeros((5, 5, 5), dtype=np.float64)
+    volume[1, 1, 1] = 0.8
+    volume[3, 3, 3] = 0.9
+
+    assert _local_maximum_indices(volume)[:2] == [(3, 3, 3), (1, 1, 1)]
+
+    first = _LocalFinePeak(
+        candidate=OrientationResult(
+            matrix=np.eye(3),
+            method="angular_search",
+            angle_degrees=10.0,
+            scale=1.0,
+            score=0.9,
+            metrics={"translation_x_px": 2.0, "translation_y_px": 3.0},
+        ),
+        coarse_index=(3, 3, 3),
+        coarse_score=0.9,
+        prominence=0.1,
+        coarse_interior=True,
+        refinement_interior=True,
+        refinement_iterations=1,
+    )
+    converged_duplicate = _LocalFinePeak(
+        candidate=OrientationResult(
+            matrix=np.eye(3),
+            method="angular_search",
+            angle_degrees=10.1,
+            scale=1.0,
+            score=0.89,
+            metrics={"translation_x_px": 2.2, "translation_y_px": 3.1},
+        ),
+        coarse_index=(2, 3, 3),
+        coarse_score=0.88,
+        prominence=0.05,
+        coarse_interior=True,
+        refinement_interior=True,
+        refinement_iterations=1,
+    )
+
+    retained = _distinct_local_peaks(
+        [first, converged_duplicate],
+        angle_tolerance_degrees=0.5,
+        translation_tolerance_px=1.0,
+    )
+
+    assert retained == [first]
+    assert retained[0].is_stable is True
+
+
+def test_orientation_manual_overrides_force_handedness_and_seed_translation() -> None:
+    """Manual overrides must constrain handedness and enter the joint seed pool."""
+    config = OrientationSearchConfig(
+        reflection_mode="force",
+        initial_angle_degrees=14.0,
+        initial_translation_x_um=18.0,
+        initial_translation_y_um=-11.0,
+    )
+
+    assert config.reflection_mode == "force"
+    assert config.initial_angle_degrees == 14.0
+    assert config.initial_translation_x_um == 18.0
+    assert _requested_reflections(config) == [True]
+    assert _requested_reflections(
+        OrientationSearchConfig(reflection_mode="forbid")
+    ) == [False]
+    with pytest.raises(ValueError, match="must be set together"):
+        OrientationSearchConfig(initial_translation_x_um=1.0)
 
 
 def test_fallback_orientation_selects_required_vertical_reflection() -> None:
@@ -386,6 +611,7 @@ def test_fallback_orientation_selects_required_vertical_reflection() -> None:
             refine_step_degrees=2.0,
             final_step_degrees=0.5,
             candidates_to_refine=4,
+            local_fine_search_enabled=False,
         ),
     )
 
