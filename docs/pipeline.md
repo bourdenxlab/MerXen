@@ -7,6 +7,12 @@ channels.
 
 ## Stage graph
 
+![MerXen pipeline overview](images/merxen_metro_map.svg)
+
+The metro map is the orientation view; it omits the segmentation fan-out,
+per-row multiplicity, and single-platform mode. See [Metro map](metro-map.md)
+for the full list of simplifications. The graph below is the precise version.
+
 ```
 ┌───────────────────────┐
 │ samplesheet.csv (row) │

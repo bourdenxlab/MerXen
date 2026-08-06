@@ -2,6 +2,8 @@
 
 Pre-processing, segmentation, and comparative analysis of MERSCOPE and Xenium spatial transcriptomics datasets, either as paired sections or as single-platform runs.
 
+![MerXen pipeline overview](docs/images/merxen_metro_map_animated.svg)
+
 ## What it does
 
 MerXen takes spatial transcriptomics datasets and runs a standardised pipeline. By default, each samplesheet row is treated as a paired experiment (one MERSCOPE, one Xenium per tissue section pair), but the same workflow can run MERSCOPE-only or Xenium-only analyses with `--analysis_mode merscope` / `--analysis_mode xenium` or row-level `analysis_mode` values in the samplesheet.
@@ -21,7 +23,7 @@ Full documentation lives in [docs/](docs/). Start with [docs/index.md](docs/inde
 
 - Usage: [Getting started](docs/getting-started.md) · [Samplesheet format](docs/samplesheet.md) · [Running the pipeline](docs/running-the-pipeline.md) · [Configuration](docs/configuration.md) · [Outputs](docs/outputs.md)
 - Pipeline stages: [SpatialData build](docs/stages/spatialdata-build.md) · [Segmentation](docs/stages/segmentation.md) · [Enrichment](docs/stages/enrichment.md) · [Mask image quantification](docs/stages/mask-image-quantification.md) · [Cortical depth](docs/stages/cortical-depth.md) · [QC](docs/stages/qc.md) · [MECR](docs/stages/mecr.md) · [Alignment](docs/stages/alignment.md) · [Comparison](docs/stages/comparison.md) · [Visualization](docs/stages/visualization.md) · [Spatial gene analysis](docs/stages/spatial-gene-analysis.md) · [Squidpy clustering](docs/stages/clustering-squidpy.md) · [Distance from object](docs/stages/distance-from-object.md) · [MapMyCells](docs/stages/mapmycells.md)
-- Developer reference: [Pipeline architecture](docs/pipeline.md) · [Python API](docs/python-api.md) · [CLI reference](docs/cli.md) · [Development workflow](docs/development.md)
+- Developer reference: [Pipeline architecture](docs/pipeline.md) · [Metro map](docs/metro-map.md) · [Python API](docs/python-api.md) · [CLI reference](docs/cli.md) · [Development workflow](docs/development.md)
 
 ## Repository layout
 
