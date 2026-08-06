@@ -1,0 +1,146 @@
+%%metro title: MerXen
+%%metro style: light
+%%metro legend: bl
+
+%% Explicit section placement. The trunk runs left to right along the top row,
+%% drops at QC, and doubles back right to left along the second row, so the
+%% figure stays narrow enough for the labels to read at README width rather
+%% than stretching into one very wide, very short strip. The MECR spur leaves
+%% QC to the right and runs top to bottom, tucked into column 2 beneath Section
+%% Alignment: that column is right-aligned (it holds an RL and a TB section),
+%% so Enrichment and QC, Alignment and MECR rates share a right edge. The spur
+%% enters MECR rates from the right, not the top: entering from above routes it
+%% straight through the Alignment box, which --validate --strict rejects as a
+%% pass-through with no station interaction.
+%%
+%% Both section titles are kept short on purpose. nf-metro draws a header above
+%% its box only when no route crosses that band; the band scales with
+%% --font-scale, so at 1.4 a title over ~14 characters here (~11 for MECR rates)
+%% overruns into the descending trunk and the header is pushed to the side or
+%% below. "Section alignment" and "Co-expression" were both over the limit.
+%%metro grid: ingest | 0,0
+%%metro grid: segmentation | 1,0
+%%metro grid: tables | 2,0
+%%metro grid: coexpression | 2,2
+%%metro grid: registration | 2,1
+%%metro grid: comparative | 1,1
+%%metro grid: annotation | 0,1
+
+%% Lines. Colours are drawn from Paul Tol's qualitative schemes and were picked
+%% by search, not by eye: every pair stays at least 35 CIE76 dE apart under
+%% normal vision and under simulated deuteranopia, protanopia and tritanopia,
+%% and every line stays >=35 dE from the section background. Re-run
+%% tests/test_workflows/test_metro_map.py after changing any of them. The
+%% toggleable line is dashed as well as coloured, so the map also parses in
+%% greyscale.
+%%metro line: merscope | MERSCOPE (Vizgen) | #882255
+%%metro line: xenium | Xenium (10x) | #33BBEE
+%%metro line: paired | Paired-section analysis | #332288
+%%metro line: optional | Toggleable stages | #EE7733 | dashed
+
+%% Termini. Cohort DE deliberately has no output icon: a fourth node in the
+%% Annotation row would make that section wider than Ingest and build, and
+%% nf-metro right-aligns sections within a grid column, so the two would no
+%% longer share a left edge.
+%%metro dir: merscope_in | MERSCOPE | raw export
+%%metro dir: xenium_in | Xenium | raw export
+%%metro file: mecr_out | CSV | mecr_out
+%%metro file: compare_out | CSV | compare_out
+%%metro file: mapmycells_out | H5AD | mapmycells_out
+
+graph LR
+    subgraph ingest [Ingest and build]
+        %%metro exit: right | merscope, xenium
+        merscope_in[ ]
+        xenium_in[ ]
+        build_spatialdata[SpatialData build]
+
+        merscope_in -->|merscope| build_spatialdata
+        xenium_in -->|xenium| build_spatialdata
+    end
+
+    subgraph segmentation [Segmentation]
+        %%metro entry: left | merscope, xenium
+        %%metro exit: right | merscope, xenium, optional
+        cellpose_nuclei_segment[Cellpose nuclei]
+        cellpose_segment[Cellpose-SAM cells]
+        proseg_segment[ProSeg refine]
+        proseg_hybrid[ProSeg hybrid]
+
+        cellpose_nuclei_segment -->|merscope,xenium| cellpose_segment
+        cellpose_segment -->|merscope,xenium| proseg_segment
+        proseg_segment -->|optional| proseg_hybrid
+    end
+
+    subgraph tables [Enrichment and QC]
+        %%metro entry: left | merscope, xenium, optional
+        %%metro exit: bottom | merscope, xenium
+        %%metro exit: right | optional
+        enrich[Enrich]
+        mask_image_quantification[Mask image quant.]
+        qc[QC]
+
+        enrich -->|merscope,xenium,optional| mask_image_quantification
+        mask_image_quantification -->|merscope,xenium,optional| qc
+    end
+
+    subgraph coexpression [MECR rates]
+        %%metro direction: TB
+        %%metro entry: right | optional
+        mecr_reference[MECR reference]
+        mecr[MECR]
+        mecr_out[ ]
+
+        mecr_reference -->|optional| mecr
+        mecr -->|optional| mecr_out
+    end
+
+    subgraph registration [Alignment]
+        %%metro direction: RL
+        %%metro entry: top | merscope, xenium
+        %%metro exit: left | paired
+        align[VALIS align]
+        align_qc[Alignment QC]
+
+        align -->|paired| align_qc
+    end
+
+    subgraph comparative [Comparative analysis]
+        %%metro direction: RL
+        %%metro entry: right | paired
+        %%metro exit: left | optional
+        compare[Compare]
+        compare_out[ ]
+        visualize[Visualize]
+        spatial_gene_analysis[Spatial genes]
+        clustering_squidpy[Clustering]
+
+        compare -->|paired| compare_out
+        visualize -->|paired| spatial_gene_analysis
+        spatial_gene_analysis -->|paired,optional| clustering_squidpy
+    end
+
+    subgraph annotation [Annotation and DE]
+        %%metro direction: RL
+        %%metro entry: right | optional
+        compute_cortical_depth[Cortical depth]
+        distance_from_object_annotate[Distance annotate]
+        distance_from_object_cohort[Cohort DE]
+        mapmycells[MapMyCells]
+        mapmycells_out[ ]
+
+        compute_cortical_depth -->|optional| distance_from_object_annotate
+        distance_from_object_annotate -->|optional| distance_from_object_cohort
+        mapmycells -->|optional| mapmycells_out
+    end
+
+    %% Inter-section edges
+    build_spatialdata -->|merscope,xenium| cellpose_nuclei_segment
+    proseg_segment -->|merscope,xenium| enrich
+    proseg_hybrid -->|optional| enrich
+    qc -->|optional| mecr_reference
+    qc -->|merscope,xenium| align
+    align_qc -->|paired| compare
+    align_qc -->|paired| visualize
+    clustering_squidpy -->|optional| compute_cortical_depth
+    clustering_squidpy -->|optional| mapmycells
