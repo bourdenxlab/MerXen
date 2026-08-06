@@ -7,7 +7,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import anndata as ad
@@ -411,10 +411,14 @@ def test_domain_selection_automatic_k_and_no_knee(
     likelihoods = pd.DataFrame(
         {"num_domains": [2, 3, 4], "negative_log_likelihood": [10.0, 6.0, 5.5]}
     )
+    fake_kneed = ModuleType("kneed")
     monkeypatch.setattr(
-        "kneed.KneeLocator",
+        fake_kneed,
+        "KneeLocator",
         lambda *_args, **_kwargs: SimpleNamespace(knee=3),
+        raising=False,
     )
+    monkeypatch.setitem(sys.modules, "kneed", fake_kneed)
     assert select_num_domains(
         likelihoods,
         domain_mode="auto",
@@ -423,7 +427,8 @@ def test_domain_selection_automatic_k_and_no_knee(
     ) == (3, "kneedle")
 
     monkeypatch.setattr(
-        "kneed.KneeLocator",
+        fake_kneed,
+        "KneeLocator",
         lambda *_args, **_kwargs: SimpleNamespace(knee=None),
     )
     assert select_num_domains(
