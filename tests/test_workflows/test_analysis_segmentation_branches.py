@@ -37,7 +37,7 @@ def test_nextflow_exposes_analysis_segmentation_branches() -> None:
 
 
 def test_analysis_zarrs_fan_out_after_platform_settings_join() -> None:
-    """Each platform zarr should be duplicated once per selected segmentation."""
+    """Each zarr should fan out over analysis and clustering-prerequisite branches."""
     repo_root = Path(__file__).resolve().parents[2]
     main_text = (repo_root / "workflows" / "main.nf").read_text()
     fanout = main_text[
@@ -49,7 +49,7 @@ def test_analysis_zarrs_fan_out_after_platform_settings_join() -> None:
     assert 'tuple("${pairId}|${platform}", settings)' in fanout
     assert ".join(analysis_layer_validation_gate_ch)" in fanout
     assert ".flatMap {" in fanout
-    assert "settings.analysis_segmentations.collect { segmentation ->" in fanout
+    assert "settings.analysis_input_segmentations.collect { segmentation ->" in fanout
     assert '"${key}|${segmentation}",' in fanout
     assert 'tuple("${pairId}|${platform}", segmentation, settings)' not in fanout
 

@@ -3,7 +3,7 @@
 The samplesheet is a CSV with one row per biological sample or adjacent-section
 pair. By default, rows inherit `--analysis_mode`, `--enable_alignment`,
 `--analysis_segmentation`, `--mecr_enabled`, spatial-gene-analysis settings,
-object-distance settings, `--start_stage`,
+object-distance settings, MENDER enablement/segmentations, `--start_stage`,
 `--stop_stage`, and `--only_stage`
 from the Nextflow command or config, but each row can override those settings
 with optional columns. In the default `analysis_mode=paired`, a row must contain
@@ -29,6 +29,8 @@ required. A template lives at
 | `cortical_depth_enabled` | no | Row-level cortical-depth switch. Blank inherits `--cortical_depth_enabled`. |
 | `distance_from_object_enabled` | no | Row-level polygon-distance switch. Blank inherits `--distance_from_object_enabled`. |
 | `distance_from_object_segmentations` | no | Comma-separated object-distance branches: `proseg`, `original`, and/or `cellpose`; optional `proseg_geometry_assignment` and `proseg_hybrid` are also accepted when present. Legacy names remain aliases. Blank uses the three defaults. |
+| `mender_enabled` | no | Row-level MENDER switch. Blank inherits `--mender_enabled`, which defaults to `false`. |
+| `mender_segmentations` | no | One MENDER branch, a comma-separated subset, or `all`. Blank inherits `--mender_segmentations`, which defaults to `proseg_hybrid`. |
 | `merscope_dir` | required for MERSCOPE modes if no cache | Path to the raw MERSCOPE region export folder (contains `transcripts.parquet`, `cell_boundaries/`, `images/`, etc.). |
 | `merscope_spatialdata_path` | required for MERSCOPE modes if no raw dir | Path to an existing (or desired) reusable MERSCOPE SpatialData zarr. If it exists, the build step is **skipped** unless `--force_spatialdata_build true` is passed to Nextflow. |
 | `merscope_image_prefix` | no | Prefix used to match z-plane image keys when more than one run is present. |

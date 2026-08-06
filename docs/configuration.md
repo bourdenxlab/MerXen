@@ -72,6 +72,8 @@ profile. Override either kind with `--<name>` on the command line.
 | `cortical_depth_enabled` | `false` | Insert the cortical-depth stage after clustering. Requires per-sample pial/tissue-edge annotations, with optional gray/white boundaries for depth pieces. A non-empty samplesheet `cortical_depth_enabled` value overrides this per row. |
 | `distance_from_object_enabled` | `false` | Insert registered polygon-edge distance analysis after cortical depth/clustering. A non-empty samplesheet value overrides this per row. |
 | `distance_from_object_segmentations` | `proseg, original, cellpose` | Cell-table branches for object distance. Legacy `reseg`, `original_seg`, and `proseg_mask` values remain accepted aliases. A samplesheet value may override this per row. |
+| `mender_enabled` | `false` | Enable independent per-platform/per-segmentation MENDER spatial-domain analysis. A non-empty samplesheet value may override this per row. |
+| `mender_segmentations` | `proseg_hybrid` | MENDER branches: any comma-separated subset of `reseg`, `original_seg`, `proseg_mask`, and `proseg_hybrid`, or `all`. A non-empty samplesheet value may override this per row. |
 | `force_spatialdata_build` | `false` | Rebuild SpatialData zarrs even if cached. |
 | `force_proseg_rerun` | `false` | Rebuild ProSeg bases from the current Cellpose/transcript inputs instead of reusing a persistent `latest_spatialdata.zarr`. Useful with `-resume` after upstream inputs were rebuilt. |
 | `start_stage` | `build_spatialdata` | Fallback first stage. Skipped upstream stages are read from published outputs. A samplesheet `start_stage` value overrides this per row. |
@@ -84,7 +86,7 @@ Stage names accepted by `start_stage`, `stop_stage`, and `only_stage` are:
 `build_spatialdata`, `segment_nuclei`, `segment`, `enrich`, `mask_image_quantification`,
 `qc`, `mecr`, `align`, `align_qc`, `compare`, `visualize`,
 `spatial_gene_analysis`, `clustering_squidpy`, `compute_cortical_depth`,
-`distance_from_object`, and `mapmycells`.
+`distance_from_object`, `mender`, and `mapmycells`.
 `mask_image_quantification` is
 available only when the effective `mask_image_quantification_enabled` value is
 `true`. `compute_cortical_depth` is available only when the effective
@@ -95,6 +97,7 @@ only for rows whose effective `enable_alignment` value is `true`.
 `spatial_gene_analysis_enabled` value is `true`.
 `distance_from_object` is available only when the effective
 `distance_from_object_enabled` value is `true`.
+`mender` is available only when the effective `mender_enabled` value is `true`.
 `align`, `align_qc`, and `compare` are available only when
 `analysis_mode = paired`.
 
@@ -397,6 +400,32 @@ The following settings are read only when
 | `clustering_squidpy_broad_max_markers_per_label` | `80` | Maximum resolved markers used per atlas label. |
 | `clustering_squidpy_broad_score_margin_threshold` | `0.0` | Minimum difference between best and runner-up atlas scores; lower margins become `Mixed/Unknown`. |
 | `clustering_squidpy_broad_unknown_label` | `Mixed/Unknown` | Label used when no atlas marker set scores confidently. |
+
+### MENDER spatial domains
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `mender_enabled` | `false` | Enable the terminal MENDER stage. |
+| `mender_segmentations` | `proseg_hybrid` | One segmentation, a comma-separated subset, or `all`. |
+| `mender_cell_state_key` | `hierarchical_cluster` | Required categorical cell-state column; ordinary Leiden is never used as a fallback. |
+| `mender_missing_state_policy` | `error` | Reject missing or empty cell states. |
+| `mender_nn_mode` | `radius` | MENDER neighbourhood mode. |
+| `mender_radius_um` | `20.0` | Radius increment in native micrometres for each scale. |
+| `mender_n_scales` | `5` | Number of spatial context scales. |
+| `mender_count_rep` | `s` | Per-scale (`s`) rather than accumulated (`a`) state frequencies. |
+| `mender_include_self` | `false` | Exclude the central cell so domains are driven by surrounding neighbourhood composition. |
+| `mender_clustering_mode` | `resolution` | `resolution` passes a negative Leiden resolution; `target_k` passes a positive domain target. |
+| `mender_leiden_resolution` | `0.8` | Fixed layer-focused resolution, passed to MENDER as `-0.8`. |
+| `mender_target_k` | `null` | Required integer of at least 2 only in target-K mode. |
+| `mender_random_seed` | `666` | MENDER tutorial seed. |
+| `mender_run_umap` | `true` | Generate the context embedding. |
+| `mender_write_spatialdata_table` | `true` | Import `mender_domain` into the derived clustered SpatialData table. |
+| `mender_conda` | `environment.mender.yml` | Old compatible CPU environment used only by compute. |
+| `mender_container` | Site MENDER SIF path | CPU-only image built from `Dockerfile.mender`; override for portable Apptainer runs. |
+| `mender_compute_max_forks` | Dwight: `2` | At 192 GB per compute task, at most 384 GB is reserved concurrently. |
+
+See [MENDER spatial domains](stages/mender.md) for the data contract, restart
+mode, output layout, and CPU container instructions.
 
 ### Spatial gene analysis
 

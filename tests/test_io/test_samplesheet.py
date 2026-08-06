@@ -160,6 +160,19 @@ def test_validate_samplesheet_uses_row_level_analysis_mode(
     validate_samplesheet(pairs)
 
 
+def test_parse_samplesheet_supports_mender_row_overrides(tmp_path: Path) -> None:
+    """MENDER enablement and segmentation selection can be set per row."""
+    csv_path = tmp_path / "mender.csv"
+    csv_path.write_text(
+        'pair_id,mender_enabled,mender_segmentations\nP1,true,"reseg,proseg_hybrid"\n'
+    )
+
+    pair = parse_samplesheet(csv_path)[0]
+
+    assert pair.mender_enabled is True
+    assert pair.mender_segmentations == "reseg,proseg_hybrid"
+
+
 def test_required_platforms_for_mode_rejects_unknown_mode() -> None:
     """Unknown analysis modes should fail with a clear validation error."""
     with pytest.raises(ValueError, match="Unknown analysis_mode"):

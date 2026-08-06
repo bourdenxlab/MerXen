@@ -52,7 +52,9 @@ MerXen/
 ├── environment.yml             # Conda env (Python 3.12 + pip)
 ├── environment.alignment.yml   # Isolated Nextflow ALIGN environment
 ├── environment.clustering-gpu.yml # Isolated RAPIDS clustering environment
+├── environment.mender.yml      # Isolated CPU-only MENDER environment
 ├── Dockerfile.clustering-gpu   # Isolated RAPIDS clustering image
+├── Dockerfile.mender           # CPU-only MENDER image
 ├── requirements.lock           # Pinned dependency tree
 ├── requirements.alignment.lock # Pinned VALIS-compatible alignment stack
 ├── .env.example                # Required environment variables template
@@ -76,6 +78,8 @@ Nextflow uses `environment.alignment.yml` for the optional `ALIGN` process.
 It installs the locked image-registration stack and exact `valis-wsi==1.2.0`
 package in isolation. Selecting `--alignment_backend legacy_spateo` instead
 uses the former pinned Spateo/Dynamo bootstrap.
+The opt-in MENDER compute process similarly uses `environment.mender.yml` so
+its AnnData 0.9/Scanpy 1.9 stack remains isolated from MerXen's base runtime.
 
 ## Required environment variables
 
@@ -103,7 +107,7 @@ A template samplesheet is provided at [workflows/samplesheet.example.csv](workfl
 cp workflows/samplesheet.example.csv workflows/samplesheet.csv
 ```
 
-The samplesheet points at raw platform folders with optional reusable SpatialData cache paths (`merscope_dir`, `merscope_spatialdata_path`, `xenium_dir`, `xenium_spatialdata_path`, plus per-platform channel, z-range, and voxel-layer settings). Optional row-level columns (`analysis_mode`, `enable_alignment`, `analysis_segmentation`, `mecr_enabled`, `cortical_depth_enabled`, `distance_from_object_enabled`, `distance_from_object_segmentations`, `start_stage`, `stop_stage`, `only_stage`) can override the run defaults per sample. Object-distance runs also provide registered object GeoJSON paths per platform. In single-platform rows, only the selected platform's source/cache columns are required. The full schema, validation rules, and worked examples are documented in [docs/samplesheet.md](docs/samplesheet.md). For Nextflow invocation options — analysis mode, resuming, stage-range runs, force rebuild, parameter overrides, cluster execution — see [docs/running-the-pipeline.md](docs/running-the-pipeline.md).
+The samplesheet points at raw platform folders with optional reusable SpatialData cache paths (`merscope_dir`, `merscope_spatialdata_path`, `xenium_dir`, `xenium_spatialdata_path`, plus per-platform channel, z-range, and voxel-layer settings). Optional row-level columns (`analysis_mode`, `enable_alignment`, `analysis_segmentation`, `mecr_enabled`, `cortical_depth_enabled`, `distance_from_object_enabled`, `distance_from_object_segmentations`, `mender_enabled`, `mender_segmentations`, `start_stage`, `stop_stage`, `only_stage`) can override the run defaults per sample. Object-distance runs also provide registered object GeoJSON paths per platform. In single-platform rows, only the selected platform's source/cache columns are required. The full schema, validation rules, and worked examples are documented in [docs/samplesheet.md](docs/samplesheet.md). For Nextflow invocation options — analysis mode, resuming, stage-range runs, force rebuild, parameter overrides, cluster execution — see [docs/running-the-pipeline.md](docs/running-the-pipeline.md).
 
 ## Running tests
 

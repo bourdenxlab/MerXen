@@ -43,6 +43,8 @@ class SamplePair:
         spatial_gene_analysis_transcript_analysis_enabled: Optional row-level
             switch for the annotation-dependent transcript analysis within
             spatial-gene analysis.
+        mender_enabled: Optional row-level MENDER stage switch.
+        mender_segmentations: Optional independent MENDER segmentation selector.
         start_stage: Optional row-level first stage.
         stop_stage: Optional row-level final stage.
         only_stage: Optional row-level single-stage override.
@@ -67,6 +69,8 @@ class SamplePair:
     analysis_segmentation: str | None = None
     spatial_gene_analysis_enabled: bool | None = None
     spatial_gene_analysis_transcript_analysis_enabled: bool | None = None
+    mender_enabled: bool | None = None
+    mender_segmentations: str | None = None
     start_stage: str | None = None
     stop_stage: str | None = None
     only_stage: str | None = None
@@ -82,7 +86,8 @@ def parse_samplesheet(csv_path: Path) -> list[SamplePair]:
         merscope_voxel_layers, xenium_voxel_layers, xenium_spec_path,
         analysis_mode, enable_alignment, analysis_segmentation, start_stage,
         stop_stage, only_stage, spatial_gene_analysis_enabled,
-        spatial_gene_analysis_transcript_analysis_enabled
+        spatial_gene_analysis_transcript_analysis_enabled, mender_enabled,
+        mender_segmentations
 
     Backward-compatible aliases:
         merscope_zarr_path -> merscope_spatialdata_path
@@ -158,6 +163,8 @@ def parse_samplesheet(csv_path: Path) -> list[SamplePair]:
                 spatial_gene_analysis_transcript_analysis_enabled=_parse_optional_bool(
                     row.get("spatial_gene_analysis_transcript_analysis_enabled")
                 ),
+                mender_enabled=_parse_optional_bool(row.get("mender_enabled")),
+                mender_segmentations=_optional_string(row.get("mender_segmentations")),
                 start_stage=_optional_string(row.get("start_stage")),
                 stop_stage=_optional_string(row.get("stop_stage")),
                 only_stage=_optional_string(row.get("only_stage")),
