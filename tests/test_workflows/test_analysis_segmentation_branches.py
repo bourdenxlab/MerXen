@@ -49,7 +49,7 @@ def test_analysis_zarrs_fan_out_after_platform_settings_join() -> None:
     assert 'tuple("${pairId}|${platform}", settings)' in fanout
     assert ".join(analysis_layer_validation_gate_ch)" in fanout
     assert ".flatMap {" in fanout
-    assert "settings.analysis_segmentations.collect { segmentation ->" in fanout
+    assert "settings.analysis_layer_segmentations.collect { segmentation ->" in fanout
     assert '"${key}|${segmentation}",' in fanout
     assert 'tuple("${pairId}|${platform}", segmentation, settings)' not in fanout
 

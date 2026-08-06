@@ -23,6 +23,13 @@ include {
     CLUSTERING_SQUIDPY_FINALIZE
 } from "./modules/clustering_squidpy"
 include { MAPMYCELLS } from "./modules/mapmycells"
+include {
+    GASTON_PREPARE;
+    GASTON_GLM_PCA;
+    GASTON_TRAIN;
+    GASTON_POSTPROCESS;
+    GASTON_IMPORT
+} from "./modules/gaston"
 
 def parseChannels(rawValue, defaults) {
     if (rawValue == null) {
@@ -159,6 +166,78 @@ def normalizeAnalysisSegmentation(rawValue) {
             }
         }
     return selected ? selected : ["reseg", "original_seg"]
+}
+
+def normalizeGastonSegmentations(rawValue) {
+    def raw = rawValue == null ? "proseg_hybrid" : rawValue.toString().trim()
+    if (!raw) {
+        raw = "proseg_hybrid"
+    }
+    def aliases = [
+        "all": ["reseg", "original_seg", "proseg_mask", "proseg_hybrid"],
+        "reseg": ["reseg"],
+        "resegmented": ["reseg"],
+        "proseg": ["reseg"],
+        "mosaik": ["reseg"],
+        "original": ["original_seg"],
+        "original_seg": ["original_seg"],
+        "original_segmentation": ["original_seg"],
+        "instrument": ["original_seg"],
+        "proseg_mask": ["proseg_mask"],
+        "cellpose": ["proseg_mask"],
+        "cellpose_mask": ["proseg_mask"],
+        "mask": ["proseg_mask"],
+        "hybrid": ["proseg_hybrid"],
+        "proseg_hybrid": ["proseg_hybrid"],
+        "hybrid_seg": ["proseg_hybrid"],
+    ]
+    def selected = []
+    raw.split(",")
+        .collect { value -> value.trim() }
+        .findAll { value -> value.length() > 0 }
+        .each { value ->
+            def key = value
+                .toLowerCase()
+                .replaceAll(/[^a-z0-9]+/, "_")
+                .replaceAll(/^_+|_+$/, "")
+            if (!aliases.containsKey(key)) {
+                throw new IllegalArgumentException(
+                    "Unknown gaston_segmentations '${value}'. Valid values: " +
+                    "all, reseg, original_seg, proseg_mask, proseg_hybrid"
+                )
+            }
+            aliases[key].each { segmentation ->
+                if (!selected.contains(segmentation)) {
+                    selected << segmentation
+                }
+            }
+        }
+    return selected ?: ["proseg_hybrid"]
+}
+
+def positiveIntegerListOrDefault(rawValue, defaultValue, label) {
+    def values = rawValue instanceof Collection
+        ? rawValue
+        : rawValue.toString().replaceAll(/^\[|\]$/, "").split(",")
+    def parsed = values
+        .collect { value -> value.toString().trim() }
+        .findAll { value -> value.length() > 0 }
+        .collect { value -> value as int }
+    if (!parsed) {
+        parsed = defaultValue.collect { value -> value as int }
+    }
+    if (parsed.any { value -> value <= 0 }) {
+        throw new IllegalArgumentException("${label} values must be positive")
+    }
+    return parsed
+}
+
+def nullableIntOrDefault(rawValue, defaultValue) {
+    if (rawValue == null || rawValue.toString().trim().isEmpty()) {
+        return defaultValue == null ? null : defaultValue as int
+    }
+    def raw = rawValue.toString().trim()
+    return raw.toLowerCase() == "null" ? null : raw as int
 }
 
 def requirePlatformInput(row, pairId, platform) {
@@ -308,6 +387,82 @@ def analysisLayerKeys(platform, segmentation) {
         ]
     }
     throw new IllegalArgumentException("Unknown analysis segmentation: ${segmentation}")
+}
+
+def clusteredAnalysisTableKey(platform, segmentation) {
+    def sourceTableKey = analysisLayerKeys(platform, segmentation).table_key
+    return "${sourceTableKey}_clustering_squidpy"
+}
+
+def gastonConfigJson(
+    pairId,
+    segmentation,
+    platform,
+    latestZarr,
+    settings
+) {
+    def layerKeys = analysisLayerKeys(platform, segmentation)
+    def gaston = settings.gaston
+    def config = [
+        pair_id: pairId,
+        sample_id: "${pairId}_${platform}",
+        platform: platform,
+        segmentation: segmentation,
+        clustered_h5ad_path: "clustered_input.h5ad",
+        latest_zarr_path: latestZarr.toString(),
+        source_table_key: layerKeys.table_key,
+        clustered_table_key: clusteredAnalysisTableKey(platform, segmentation),
+        shape_key: layerKeys.shape_key,
+        output_dir: "gaston_out",
+        use_gpu: gaston.use_gpu,
+        n_restarts: gaston.n_restarts,
+        epochs: gaston.epochs,
+        checkpoint_interval: gaston.checkpoint_interval,
+        hidden_spatial: gaston.hidden_spatial,
+        hidden_expression: gaston.hidden_expression,
+        optimizer: gaston.optimizer,
+        glmpca_dimensions: gaston.glmpca_dimensions,
+        glmpca_penalty: gaston.glmpca_penalty,
+        glmpca_iterations: gaston.glmpca_iterations,
+        domain_mode: gaston.domain_mode,
+        num_domains: gaston.num_domains,
+        min_domains: gaston.min_domains,
+        max_domains: gaston.max_domains,
+        domain_buckets: gaston.domain_buckets,
+        auto_k_fallback: gaston.auto_k_fallback,
+        write_spatialdata_table: gaston.write_spatialdata_table,
+        keep_seed_models: gaston.keep_seed_models,
+        keep_checkpoints: gaston.keep_checkpoints,
+        max_genes: gaston.max_genes,
+        figure_dpi: gaston.figure_dpi,
+    ]
+    return groovy.json.JsonOutput.prettyPrint(
+        groovy.json.JsonOutput.toJson(config)
+    )
+}
+
+def gastonTrainingConfigJson(
+    pairId,
+    segmentation,
+    platform,
+    latestZarr,
+    settings
+) {
+    // Domain selection is postprocessing-only. Keep these values stable in the
+    // configuration hashed by PREPARE, GLM-PCA, and TRAIN so changing K can
+    // reuse every completed restart.
+    def trainingSettings = new LinkedHashMap(settings)
+    def trainingGaston = new LinkedHashMap(settings.gaston)
+    trainingGaston.domain_mode = "auto"
+    trainingGaston.num_domains = null
+    trainingSettings.gaston = trainingGaston
+    return gastonConfigJson(
+        pairId,
+        segmentation,
+        platform,
+        latestZarr,
+        trainingSettings,
+    )
 }
 
 def normalizeDistanceFromObjectSegmentations(rawValue) {
@@ -598,6 +753,9 @@ def normalizeStage(rawValue, paramName) {
         "celltype_mapping": "mapmycells",
         "map_my_cells": "mapmycells",
         "mapmycells": "mapmycells",
+        "gaston": "gaston",
+        "topography": "gaston",
+        "topographic_domains": "gaston",
     ]
     if (!aliases.containsKey(key)) {
         throw new IllegalArgumentException(
@@ -606,7 +764,7 @@ def normalizeStage(rawValue, paramName) {
             "build_viewer_caches, mask_image_quantification, " +
             "compute_cortical_depth, distance_from_object, qc, align, align_qc, " +
             "compare, visualize, spatial_gene_analysis, mecr, " +
-            "clustering_squidpy, mapmycells"
+            "clustering_squidpy, mapmycells, gaston"
         )
     }
     return aliases[key]
@@ -620,7 +778,8 @@ def activeStageOrder(
     corticalDepthEnabled,
     distanceFromObjectEnabled,
     viewerCacheEnabled,
-    mecrEnabled
+    mecrEnabled,
+    gastonEnabled
 ) {
     def stages = ["build_spatialdata", "segment_nuclei", "segment", "enrich"]
     if (viewerCacheEnabled) {
@@ -654,6 +813,9 @@ def activeStageOrder(
         stages += ["distance_from_object"]
     }
     stages += ["mapmycells"]
+    if (gastonEnabled) {
+        stages += ["gaston"]
+    }
     return stages
 }
 
@@ -681,6 +843,9 @@ def validateStage(
         if (stage == "spatial_gene_analysis" && !spatialGeneAnalysisEnabled) {
             hint = " Pass --spatial_gene_analysis_enabled true to use spatial gene analysis."
         }
+        if (stage == "gaston") {
+            hint = " Pass --gaston_enabled true to use GASTON."
+        }
         throw new IllegalArgumentException(
             "${paramName} '${stage}' is not active for this run.${hint} " +
             "Active stages: ${stages.join(', ')}"
@@ -694,6 +859,45 @@ def stageInRange(stage, startStage, stopStage, stages) {
         return false
     }
     return stageIdx >= stages.indexOf(startStage) && stageIdx <= stages.indexOf(stopStage)
+}
+
+def currentPairTerminalStage(settings) {
+    if (settings.gaston_bypass_terminal_gate) {
+        return null
+    }
+    if (settings.run_mapmycells) {
+        return "mapmycells"
+    }
+    if (settings.run_distance_from_object) {
+        // DISTANCE_FROM_OBJECT_COHORT is intentionally outside this barrier.
+        return "distance_from_object_annotation"
+    }
+    if (settings.run_compute_cortical_depth) {
+        return "compute_cortical_depth"
+    }
+    if (settings.run_clustering_squidpy) {
+        return "clustering_squidpy"
+    }
+    return null
+}
+
+def currentPairTerminalExpectedCount(settings, terminalStage) {
+    def extraClustering = settings.required_clustering_segmentations.findAll {
+        segmentation -> !settings.analysis_segmentations.contains(segmentation)
+    }
+    if (terminalStage == "mapmycells") {
+        return settings.analysis_segmentations.size() + extraClustering.size()
+    }
+    if (terminalStage in [
+        "distance_from_object_annotation",
+        "compute_cortical_depth",
+    ]) {
+        return settings.active_platforms.size() + extraClustering.size()
+    }
+    if (terminalStage == "clustering_squidpy") {
+        return settings.required_clustering_segmentations.size()
+    }
+    return 0
 }
 
 def requireExistingPath(rawPath, label) {
@@ -999,6 +1203,56 @@ def appendMecrPreflightChecks(errors, settings, params) {
     }
 }
 
+def appendGastonPreflightChecks(errors, settings, params) {
+    if (!(settings.run_gaston && settings.gaston_published_output_mode)) {
+        return
+    }
+    settings.gaston_segmentations.each { segmentation ->
+        settings.active_platforms.each { platform ->
+            def sampleId = "${settings.pair_id}_${platform}"
+            def clusteredH5ad = normalizedPath(
+                publishedPairPath(
+                    params.outdir,
+                    settings.pair_id,
+                    "${segmentation}/clustering_squidpy/" +
+                    "clustering_squidpy_out/${platform.toLowerCase()}/" +
+                    "${sampleId}_clustered.h5ad",
+                )
+            )
+            if (!clusteredH5ad.toFile().isFile()) {
+                errors << (
+                    "Missing GASTON clustered H5AD for " +
+                    "${settings.pair_id}:${platform}:${segmentation}: ${clusteredH5ad}"
+                )
+            }
+            def latestZarr = normalizedPath(
+                publishedDatasetPath(
+                    params.outdir,
+                    settings.pair_id,
+                    platform,
+                    "latest/latest_spatialdata.zarr",
+                )
+            )
+            if (!latestZarr.toFile().isDirectory()) {
+                errors << (
+                    "Missing GASTON latest SpatialData Zarr for " +
+                    "${settings.pair_id}:${platform}:${segmentation}: ${latestZarr}"
+                )
+            } else {
+                def tableKey = clusteredAnalysisTableKey(platform, segmentation)
+                def tablePath = latestZarr.resolve("tables").resolve(tableKey)
+                if (!tablePath.toFile().exists()) {
+                    errors << (
+                        "Missing GASTON clustered SpatialData table '${tableKey}' " +
+                        "for ${settings.pair_id}:${platform}:${segmentation}: " +
+                        "${tablePath}"
+                    )
+                }
+            }
+        }
+    }
+}
+
 def runPreflightChecks(row, settings, params) {
     def errors = []
     appendClusteringSquidpyPreflightChecks(errors, settings, params)
@@ -1007,6 +1261,7 @@ def runPreflightChecks(row, settings, params) {
     appendSpatialGeneTranscriptPreflightChecks(errors, row, settings, params)
     appendDistanceFromObjectPreflightChecks(errors, row, settings, params)
     appendMecrPreflightChecks(errors, settings, params)
+    appendGastonPreflightChecks(errors, settings, params)
     if (errors) {
         throw new IllegalArgumentException(
             "Preflight checks failed for sample ${settings.pair_id} " +
@@ -1128,6 +1383,186 @@ def rowSampleSettings(row, params) {
         true,
         "mecr_enabled for ${pairId}",
     )
+    def gastonEnabled = boolOrDefault(
+        rowFieldOrDefault(row, "gaston_enabled", params.gaston_enabled),
+        false,
+        "gaston_enabled for ${pairId}",
+    )
+    def gastonSegmentations = normalizeGastonSegmentations(
+        rowFieldOrDefault(
+            row,
+            "gaston_segmentations",
+            params.gaston_segmentations,
+        )
+    )
+    def gastonDomainMode = rowFieldOrDefault(
+        row,
+        "gaston_domain_mode",
+        params.gaston_domain_mode,
+    ).toString().trim().toLowerCase()
+    if (!(gastonDomainMode in ["auto", "fixed"])) {
+        throw new IllegalArgumentException(
+            "Unknown gaston_domain_mode for ${pairId}: '${gastonDomainMode}'. " +
+            "Use auto or fixed."
+        )
+    }
+    def gastonKeepCheckpoints = rowFieldOrDefault(
+        row,
+        "gaston_keep_checkpoints",
+        params.gaston_keep_checkpoints,
+    ).toString().trim().toLowerCase()
+    if (!(gastonKeepCheckpoints in ["none", "best", "all"])) {
+        throw new IllegalArgumentException(
+            "Unknown gaston_keep_checkpoints for ${pairId}: " +
+            "'${gastonKeepCheckpoints}'. Use none, best, or all."
+        )
+    }
+    def gastonSettings = [
+        use_gpu: boolOrDefault(
+            rowFieldOrDefault(row, "gaston_use_gpu", params.gaston_use_gpu),
+            params.gaston_use_gpu,
+            "gaston_use_gpu for ${pairId}",
+        ),
+        n_restarts: intOrDefault(
+            rowFieldOrDefault(row, "gaston_n_restarts", params.gaston_n_restarts),
+            params.gaston_n_restarts,
+        ),
+        epochs: intOrDefault(
+            rowFieldOrDefault(row, "gaston_epochs", params.gaston_epochs),
+            params.gaston_epochs,
+        ),
+        checkpoint_interval: intOrDefault(
+            rowFieldOrDefault(
+                row,
+                "gaston_checkpoint_interval",
+                params.gaston_checkpoint_interval,
+            ),
+            params.gaston_checkpoint_interval,
+        ),
+        hidden_spatial: positiveIntegerListOrDefault(
+            rowFieldOrDefault(
+                row,
+                "gaston_hidden_spatial",
+                params.gaston_hidden_spatial,
+            ),
+            [20, 20],
+            "gaston_hidden_spatial for ${pairId}",
+        ),
+        hidden_expression: positiveIntegerListOrDefault(
+            rowFieldOrDefault(
+                row,
+                "gaston_hidden_expression",
+                params.gaston_hidden_expression,
+            ),
+            [20, 20],
+            "gaston_hidden_expression for ${pairId}",
+        ),
+        optimizer: rowFieldOrDefault(
+            row,
+            "gaston_optimizer",
+            params.gaston_optimizer,
+        ).toString().trim().toLowerCase(),
+        glmpca_dimensions: intOrDefault(
+            rowFieldOrDefault(
+                row,
+                "gaston_glmpca_dimensions",
+                params.gaston_glmpca_dimensions,
+            ),
+            params.gaston_glmpca_dimensions,
+        ),
+        glmpca_penalty: floatOrDefault(
+            rowFieldOrDefault(
+                row,
+                "gaston_glmpca_penalty",
+                params.gaston_glmpca_penalty,
+            ),
+            params.gaston_glmpca_penalty,
+        ),
+        glmpca_iterations: intOrDefault(
+            rowFieldOrDefault(
+                row,
+                "gaston_glmpca_iterations",
+                params.gaston_glmpca_iterations,
+            ),
+            params.gaston_glmpca_iterations,
+        ),
+        domain_mode: gastonDomainMode,
+        num_domains: nullableIntOrDefault(
+            chooseField(row, ["gaston_num_domains"]),
+            params.gaston_num_domains,
+        ),
+        min_domains: intOrDefault(
+            rowFieldOrDefault(
+                row,
+                "gaston_min_domains",
+                params.gaston_min_domains,
+            ),
+            params.gaston_min_domains,
+        ),
+        max_domains: intOrDefault(
+            rowFieldOrDefault(
+                row,
+                "gaston_max_domains",
+                params.gaston_max_domains,
+            ),
+            params.gaston_max_domains,
+        ),
+        domain_buckets: intOrDefault(
+            rowFieldOrDefault(
+                row,
+                "gaston_domain_buckets",
+                params.gaston_domain_buckets,
+            ),
+            params.gaston_domain_buckets,
+        ),
+        auto_k_fallback: nullableIntOrDefault(
+            chooseField(row, ["gaston_auto_k_fallback"]),
+            params.gaston_auto_k_fallback,
+        ),
+        write_spatialdata_table: boolOrDefault(
+            rowFieldOrDefault(
+                row,
+                "gaston_write_spatialdata_table",
+                params.gaston_write_spatialdata_table,
+            ),
+            params.gaston_write_spatialdata_table,
+            "gaston_write_spatialdata_table for ${pairId}",
+        ),
+        keep_seed_models: boolOrDefault(
+            rowFieldOrDefault(
+                row,
+                "gaston_keep_seed_models",
+                params.gaston_keep_seed_models,
+            ),
+            params.gaston_keep_seed_models,
+            "gaston_keep_seed_models for ${pairId}",
+        ),
+        keep_checkpoints: gastonKeepCheckpoints,
+        max_genes: intOrDefault(
+            rowFieldOrDefault(row, "gaston_max_genes", params.gaston_max_genes),
+            params.gaston_max_genes,
+        ),
+        figure_dpi: intOrDefault(
+            rowFieldOrDefault(
+                row,
+                "gaston_figure_dpi",
+                params.gaston_figure_dpi,
+            ),
+            params.gaston_figure_dpi,
+        ),
+    ]
+    if (!(gastonSettings.optimizer in ["adam", "sgd", "adagrad"])) {
+        throw new IllegalArgumentException(
+            "Unknown gaston_optimizer for ${pairId}: " +
+            "'${gastonSettings.optimizer}'. Use adam, sgd, or adagrad."
+        )
+    }
+    if (gastonDomainMode == "fixed" && gastonSettings.num_domains == null) {
+        throw new IllegalArgumentException(
+            "gaston_num_domains is required for ${pairId} when " +
+            "gaston_domain_mode=fixed"
+        )
+    }
     def distanceFromObjectSegmentations = normalizeDistanceFromObjectSegmentations(
         rowFieldOrDefault(
             row,
@@ -1169,6 +1604,7 @@ def rowSampleSettings(row, params) {
         distanceFromObjectEnabled,
         viewerCacheEnabled,
         mecrEnabled,
+        gastonEnabled,
     )
     def startStage = normalizeStage(startStageRaw, startParamName)
     def stopStage = normalizeStage(stopStageRaw, stopParamName)
@@ -1188,8 +1624,12 @@ def rowSampleSettings(row, params) {
     )
     // Opt-in terminal analyses extend the historical clustering stop default.
     // Explicit only_stage selections and non-default stop stages remain exact.
+    def autoExtendedToGaston = false
     if (!onlyStageRaw && stopStage == "clustering_squidpy") {
-        if (distanceFromObjectEnabled && stageOrder.contains("distance_from_object")) {
+        if (gastonEnabled && stageOrder.contains("gaston")) {
+            stopStage = "gaston"
+            autoExtendedToGaston = true
+        } else if (distanceFromObjectEnabled && stageOrder.contains("distance_from_object")) {
             stopStage = "distance_from_object"
         } else if (corticalDepthEnabled && stageOrder.contains("compute_cortical_depth")) {
             stopStage = "compute_cortical_depth"
@@ -1254,6 +1694,20 @@ def rowSampleSettings(row, params) {
         stageOrder,
     )
     def runMapMyCells = stageInRange("mapmycells", startStage, stopStage, stageOrder)
+    // The historical default ended at clustering. Extending it for opt-in
+    // GASTON must not implicitly activate the otherwise explicitly selected
+    // MapMyCells terminal stage that lies between clustering and GASTON.
+    if (autoExtendedToGaston) {
+        runMapMyCells = false
+    }
+    def runGaston = stageInRange("gaston", startStage, stopStage, stageOrder)
+    def requiredClusteringSegmentations = analysisSegmentations
+    if (runGaston && runClusteringSquidpy) {
+        requiredClusteringSegmentations = (
+            analysisSegmentations + gastonSegmentations
+        ).unique()
+    }
+    def analysisLayerSegmentations = requiredClusteringSegmentations
     def needAnalysisZarrs =
         runQc ||
         runAlign ||
@@ -1284,6 +1738,10 @@ def rowSampleSettings(row, params) {
         active_platforms: activePlatforms,
         paired_mode: pairedMode,
         analysis_segmentations: analysisSegmentations,
+        analysis_layer_segmentations: analysisLayerSegmentations,
+        required_clustering_segmentations: requiredClusteringSegmentations,
+        gaston_segmentations: gastonSegmentations,
+        gaston: gastonSettings,
         distance_from_object_segmentations: distanceFromObjectSegmentations,
         spatial_gene_analysis_enabled: spatialGeneAnalysisEnabled,
         spatial_gene_analysis_transcript_analysis_enabled: (
@@ -1293,7 +1751,8 @@ def rowSampleSettings(row, params) {
         start_stage: startStage,
         stop_stage: stopStage,
         selected_stages: stageOrder.findAll { stage ->
-            stageInRange(stage, startStage, stopStage, stageOrder)
+            stageInRange(stage, startStage, stopStage, stageOrder) &&
+                !(autoExtendedToGaston && stage == "mapmycells")
         },
         run_build: runBuild,
         run_segment_nuclei: runSegmentNuclei,
@@ -1312,6 +1771,18 @@ def rowSampleSettings(row, params) {
         run_spatial_gene_analysis: runSpatialGeneAnalysis,
         run_clustering_squidpy: runClusteringSquidpy,
         run_mapmycells: runMapMyCells,
+        run_gaston: runGaston,
+        gaston_published_output_mode: runGaston && !runClusteringSquidpy,
+        gaston_bypass_terminal_gate: (
+            runGaston &&
+            (
+                (onlyStageRaw && startStage == "gaston") ||
+                (!runMapMyCells &&
+                 !runDistanceFromObject &&
+                 !runComputeCorticalDepth &&
+                 !runClusteringSquidpy)
+            )
+        ),
         need_build_results: runSegmentNuclei || runSegment || runEnrich,
         need_enriched_zarrs: (
             runBuildViewerCaches ||
@@ -1389,6 +1860,7 @@ workflow {
             "analysis segmentations=${settings.analysis_segmentations.join(', ')}; " +
             "distance segmentations=" +
             "${settings.distance_from_object_segmentations.join(', ')}; " +
+            "GASTON segmentations=${settings.gaston_segmentations.join(', ')}; " +
             "selected stages=${settings.selected_stages.join(' -> ')}"
         )
         tuple(settings.pair_id, row, settings)
@@ -2077,7 +2549,7 @@ workflow {
         .join(analysis_layer_validation_gate_ch)
         .flatMap {
             key, pairId, platform, enrichedLatestZarr, settings ->
-            settings.analysis_segmentations.collect { segmentation ->
+            settings.analysis_layer_segmentations.collect { segmentation ->
                 def layerKeys = analysisLayerKeys(platform, segmentation)
                 tuple(
                     "${key}|${segmentation}",
@@ -2100,7 +2572,8 @@ workflow {
         .filter {
             _key, _pairId, _platform, _segmentation, _latestZarr,
             _tableKey, _shapeKey, settings, _validationJson ->
-                settings.run_qc
+                settings.run_qc &&
+                    settings.analysis_segmentations.contains(_segmentation)
         }
         .map {
             key, pairId, platform, segmentation, latestZarr,
@@ -2163,7 +2636,8 @@ workflow {
         .filter {
             _key, _pairId, _platform, _segmentation, _latestZarr,
             _tableKey, _shapeKey, settings, _validationJson ->
-                !settings.run_qc
+                !settings.run_qc ||
+                    !settings.analysis_segmentations.contains(_segmentation)
         }
         .map {
             _key, pairId, platform, segmentation, latestZarr,
@@ -2185,7 +2659,8 @@ workflow {
         .filter {
             _pairId, _segmentation, _platform, _zarrPath, _tableKey, _shapeKey,
             settings ->
-                settings.run_mecr
+                settings.run_mecr &&
+                    settings.analysis_segmentations.contains(_segmentation)
         }
         .map {
             pairId, segmentation, platform, zarrPath, _tableKey, _shapeKey,
@@ -2399,7 +2874,7 @@ workflow {
         if (!(settings.need_alignment_downstream && !settings.run_align_qc)) {
             []
         } else {
-            [tuple(pairId, settings.analysis_segmentations)]
+            [tuple(pairId, settings.analysis_layer_segmentations)]
         }
     }
 
@@ -2417,7 +2892,7 @@ workflow {
         if (!(settings.need_alignment_downstream && settings.run_align_qc)) {
             []
         } else {
-            [tuple(pairId, settings.analysis_segmentations)]
+            [tuple(pairId, settings.analysis_layer_segmentations)]
         }
     }
 
@@ -2493,6 +2968,7 @@ workflow {
             _pairId, _segmentation, _merscopePath, _xeniumPath, _merscopeTableKey,
             _merscopeShapeKey, _xeniumTableKey, _xeniumShapeKey, settings ->
                 settings.run_compare
+                    && settings.analysis_segmentations.contains(_segmentation)
         }
         .map {
             pairId, segmentation, merscopePath, xeniumPath, merscopeTableKey,
@@ -2588,7 +3064,9 @@ workflow {
 
     visualize_without_compare_ch = analysis_samples_ch
         .filter { _pairId, _segmentation, _samplesJson, settings ->
-            settings.run_visualize && !settings.run_compare
+            settings.run_visualize &&
+                settings.analysis_segmentations.contains(_segmentation) &&
+                !settings.run_compare
         }
         .map { pairId, segmentation, samplesJson, _settings ->
             tuple(pairId, segmentation, samplesJson)
@@ -2596,7 +3074,9 @@ workflow {
 
     visualize_after_compare_ch = analysis_samples_ch
         .filter { _pairId, _segmentation, _samplesJson, settings ->
-            settings.run_visualize && settings.run_compare
+            settings.run_visualize &&
+                settings.analysis_segmentations.contains(_segmentation) &&
+                settings.run_compare
         }
         .map { pairId, segmentation, samplesJson, _settings ->
             tuple("${pairId}|${segmentation}", pairId, segmentation, samplesJson)
@@ -2616,7 +3096,9 @@ workflow {
 
     spatial_gene_analysis_without_visualize_ch = analysis_samples_ch
         .filter { _pairId, _segmentation, _samplesJson, settings ->
-            settings.run_spatial_gene_analysis && !settings.run_visualize
+            settings.run_spatial_gene_analysis &&
+                settings.analysis_segmentations.contains(_segmentation) &&
+                !settings.run_visualize
         }
         .map { pairId, segmentation, samplesJson, settings ->
             tuple(
@@ -2629,7 +3111,9 @@ workflow {
 
     spatial_gene_analysis_after_visualize_ch = analysis_samples_ch
         .filter { _pairId, _segmentation, _samplesJson, settings ->
-            settings.run_spatial_gene_analysis && settings.run_visualize
+            settings.run_spatial_gene_analysis &&
+                settings.analysis_segmentations.contains(_segmentation) &&
+                settings.run_visualize
         }
         .map { pairId, segmentation, samplesJson, settings ->
             tuple(
@@ -2710,8 +3194,11 @@ workflow {
     clustering_without_dependencies_ch = analysis_samples_ch
         .filter { _pairId, _segmentation, _samplesJson, settings ->
             settings.run_clustering_squidpy &&
-                !settings.run_visualize &&
-                !settings.run_spatial_gene_analysis
+                (
+                    !settings.analysis_segmentations.contains(_segmentation) ||
+                    (!settings.run_visualize &&
+                     !settings.run_spatial_gene_analysis)
+                )
         }
         .map { pairId, segmentation, samplesJson, _settings ->
             tuple(pairId, segmentation, samplesJson)
@@ -2720,6 +3207,7 @@ workflow {
     clustering_after_visualize_ch = analysis_samples_ch
         .filter { _pairId, _segmentation, _samplesJson, settings ->
             settings.run_clustering_squidpy &&
+                settings.analysis_segmentations.contains(_segmentation) &&
                 settings.run_visualize &&
                 !settings.run_spatial_gene_analysis
         }
@@ -2733,7 +3221,9 @@ workflow {
 
     clustering_after_spatial_gene_analysis_ch = analysis_samples_ch
         .filter { _pairId, _segmentation, _samplesJson, settings ->
-            settings.run_clustering_squidpy && settings.run_spatial_gene_analysis
+            settings.run_clustering_squidpy &&
+                settings.analysis_segmentations.contains(_segmentation) &&
+                settings.run_spatial_gene_analysis
         }
         .map { pairId, segmentation, samplesJson, _settings ->
             tuple("${pairId}|${segmentation}", pairId, segmentation, samplesJson)
@@ -2756,12 +3246,27 @@ workflow {
     // subcluster_label annotations exist and its depth violin plots can be
     // produced. The distance-from-object branch consumes its tissue-region
     // annotation when both opt-in stages run in the same invocation.
+    clustering_completion_expectations_ch = sample_rows_ch.flatMap {
+        pairId, _row, settings ->
+            if (!(settings.run_clustering_squidpy &&
+                  (settings.run_compute_cortical_depth ||
+                   settings.run_distance_from_object))) {
+                []
+            } else {
+                [tuple(pairId, settings.required_clustering_segmentations.size())]
+            }
+    }
+
     clustering_done_per_pair_ch = clustering_results_ch
-        .map { pairId, segmentation, _samplesJson, _clusteringOutDir ->
-            tuple(pairId, segmentation)
+        .map { pairId, _segmentation, _samplesJson, _clusteringOutDir ->
+            tuple(pairId, true)
+        }
+        .join(clustering_completion_expectations_ch)
+        .map { pairId, _done, expectedCount ->
+            tuple(groupKey(pairId, expectedCount as int), true)
         }
         .groupTuple()
-        .map { pairId, _segmentations -> tuple(pairId, true) }
+        .map { pairKey, _doneFlags -> tuple(pairKey.getGroupTarget(), true) }
 
     compute_cortical_depth_after_clustering_gate_ch =
         sample_rows_ch.flatMap { pairId, row, settings ->
@@ -3070,5 +3575,393 @@ workflow {
 
     mapmycells_inputs_ch = mapmycells_from_clustering_ch.mix(mapmycells_published_ch)
 
-    MAPMYCELLS(mapmycells_inputs_ch)
+    mapmycells_results_ch = MAPMYCELLS(mapmycells_inputs_ch)
+
+    // Reusable per-pair barrier for independent terminal analyses. Each event is
+    // grouped with a known pair-specific cardinality, so a completed pair never
+    // waits for branches belonging to any other pair. Cohort summaries are not
+    // included. GASTON and future terminal analyses such as MENDER consume the
+    // token independently and can therefore overlap with each other.
+    pair_terminal_specs_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
+        def terminalStage = currentPairTerminalStage(settings)
+        if (terminalStage == null) {
+            []
+        } else {
+            [tuple(
+                pairId,
+                terminalStage,
+                currentPairTerminalExpectedCount(settings, terminalStage),
+            )]
+        }
+    }
+
+    pair_terminal_immediate_ch = sample_rows_ch.flatMap {
+        pairId, _row, settings ->
+            if (currentPairTerminalStage(settings) == null) {
+                [tuple(pairId, true)]
+            } else {
+                []
+            }
+    }
+
+    mapmycells_terminal_events_ch = mapmycells_results_ch.map {
+        pairId, _segmentation, _mapmycellsOut ->
+            tuple(pairId, "mapmycells", true)
+    }
+    distance_terminal_events_ch = distance_from_object_annotation_results_ch.map {
+        _key, pairId, _platform, _distanceSegmentations,
+        _latestZarr, _annotationOutputDir ->
+            tuple(pairId, "distance_from_object_annotation", true)
+    }
+    cortical_terminal_events_ch = compute_cortical_depth_results_ch.map {
+        _key, pairId, _platform, _latestZarr, _corticalDepthOut ->
+            tuple(pairId, "compute_cortical_depth", true)
+    }
+    clustering_terminal_events_ch = clustering_results_ch.map {
+        pairId, _segmentation, _samplesJson, _clusteringOutDir ->
+            tuple(pairId, "clustering_squidpy", true)
+    }
+    gaston_extra_clustering_gate_ch = sample_rows_ch.flatMap {
+        pairId, _row, settings ->
+            def terminalStage = currentPairTerminalStage(settings)
+            if (!(settings.run_gaston &&
+                  settings.run_clustering_squidpy &&
+                  terminalStage != null &&
+                  terminalStage != "clustering_squidpy")) {
+                []
+            } else {
+                settings.required_clustering_segmentations
+                    .findAll { segmentation ->
+                        !settings.analysis_segmentations.contains(segmentation)
+                    }
+                    .collect { segmentation ->
+                        tuple("${pairId}|${segmentation}", pairId, terminalStage)
+                    }
+            }
+    }
+    gaston_extra_clustering_terminal_events_ch = clustering_results_ch
+        .map { pairId, segmentation, _samplesJson, _clusteringOutDir ->
+            tuple("${pairId}|${segmentation}", pairId)
+        }
+        .join(gaston_extra_clustering_gate_ch)
+        .map { _branchKey, pairId, expectedPairId, terminalStage ->
+            if (pairId != expectedPairId) {
+                throw new IllegalStateException(
+                    "GASTON extra clustering pair mismatch: ${pairId} != ${expectedPairId}"
+                )
+            }
+            tuple(pairId, terminalStage, true)
+        }
+    pair_terminal_events_ch = mapmycells_terminal_events_ch
+        .mix(distance_terminal_events_ch)
+        .mix(cortical_terminal_events_ch)
+        .mix(clustering_terminal_events_ch)
+        .mix(gaston_extra_clustering_terminal_events_ch)
+
+    pair_terminal_grouped_ch = pair_terminal_events_ch
+        .join(pair_terminal_specs_ch)
+        .filter { _pairId, eventStage, _done, expectedStage, _expectedCount ->
+            eventStage == expectedStage
+        }
+        .map { pairId, _eventStage, _done, _expectedStage, expectedCount ->
+            tuple(groupKey(pairId, expectedCount as int), true)
+        }
+        .groupTuple()
+        .map { pairKey, _doneFlags -> tuple(pairKey.getGroupTarget(), true) }
+
+    pair_terminal_token_ch = pair_terminal_immediate_ch.mix(
+        pair_terminal_grouped_ch
+    )
+
+    gaston_current_clustering_gate_ch = sample_rows_ch.flatMap {
+        pairId, _row, settings ->
+            if (!(settings.run_gaston && settings.run_clustering_squidpy)) {
+                []
+            } else {
+                settings.gaston_segmentations.collect { segmentation ->
+                    tuple("${pairId}|${segmentation}", settings)
+                }
+            }
+    }
+
+    gaston_current_artifacts_ch = clustering_results_ch
+        .map { pairId, segmentation, samplesJson, clusteringOutDir ->
+            tuple(
+                "${pairId}|${segmentation}",
+                pairId,
+                segmentation,
+                samplesJson,
+                clusteringOutDir,
+            )
+        }
+        .join(gaston_current_clustering_gate_ch)
+        .flatMap {
+            _segmentationKey,
+            pairId,
+            segmentation,
+            samplesJson,
+            clusteringOutDir,
+            settings ->
+                def samples = new groovy.json.JsonSlurper().parseText(
+                    samplesJson.toString()
+                )
+                samples.collect { sample ->
+                    def platform = sample.platform.toString()
+                    def sampleId = sample.sample_id.toString()
+                    def h5adPath = java.nio.file.Paths.get(
+                        clusteringOutDir.toString()
+                    ).resolve(platform.toLowerCase()).resolve(
+                        "${sampleId}_clustered.h5ad"
+                    )
+                    tuple(
+                        pairId,
+                        "${pairId}|${platform}|${segmentation}",
+                        segmentation,
+                        platform,
+                        sampleId,
+                        h5adPath,
+                        java.nio.file.Paths.get(
+                            sample.zarr_path.toString()
+                        ).toRealPath().toString(),
+                        settings,
+                    )
+                }
+        }
+
+    gaston_published_artifacts_ch = sample_rows_ch.flatMap {
+        pairId, _row, settings ->
+            if (!(settings.run_gaston && settings.gaston_published_output_mode)) {
+                []
+            } else {
+                settings.gaston_segmentations.collectMany { segmentation ->
+                    settings.active_platforms.collect { platform ->
+                        def sampleId = "${pairId}_${platform}"
+                        def h5adPath = normalizedPath(
+                            publishedPairPath(
+                                params.outdir,
+                                pairId,
+                                "${segmentation}/clustering_squidpy/" +
+                                "clustering_squidpy_out/" +
+                                "${platform.toLowerCase()}/" +
+                                "${sampleId}_clustered.h5ad",
+                            )
+                        )
+                        def latestZarr = normalizedPath(
+                            publishedDatasetPath(
+                                params.outdir,
+                                pairId,
+                                platform,
+                                "latest/latest_spatialdata.zarr",
+                            )
+                        ).toRealPath().toString()
+                        tuple(
+                            pairId,
+                            "${pairId}|${platform}|${segmentation}",
+                            segmentation,
+                            platform,
+                            sampleId,
+                            h5adPath,
+                            latestZarr,
+                            settings,
+                        )
+                    }
+                }
+            }
+    }
+
+    gaston_artifacts_ch = gaston_current_artifacts_ch.mix(
+        gaston_published_artifacts_ch
+    )
+
+    gaston_postprocess_config_ch = gaston_artifacts_ch.map {
+        pairId,
+        branchKey,
+        segmentation,
+        platform,
+        _sampleId,
+        _clusteredH5ad,
+        latestZarr,
+        settings ->
+            tuple(
+                branchKey,
+                gastonConfigJson(
+                    pairId,
+                    segmentation,
+                    platform,
+                    latestZarr,
+                    settings,
+                ),
+            )
+    }
+
+    gaston_inputs_ch = gaston_artifacts_ch
+        .join(pair_terminal_token_ch)
+        .map {
+            pairId,
+            branchKey,
+            segmentation,
+            platform,
+            sampleId,
+            clusteredH5ad,
+            latestZarr,
+            settings,
+            terminalToken ->
+                tuple(
+                    branchKey,
+                    pairId,
+                    segmentation,
+                    platform,
+                    sampleId,
+                    gastonTrainingConfigJson(
+                        pairId,
+                        segmentation,
+                        platform,
+                        latestZarr,
+                        settings,
+                    ),
+                    clusteredH5ad,
+                    latestZarr,
+                    settings.gaston.n_restarts,
+                    settings.gaston.use_gpu,
+                    terminalToken,
+                )
+        }
+
+    gaston_import_lookup_ch = gaston_inputs_ch.map {
+        branchKey,
+        _pairId,
+        _segmentation,
+        _platform,
+        _sampleId,
+        _configJson,
+        clusteredH5ad,
+        latestZarr,
+        _nRestarts,
+        _useGpu,
+        _terminalToken ->
+            tuple(branchKey, clusteredH5ad, latestZarr)
+    }
+
+    gaston_prepared_ch = GASTON_PREPARE(gaston_inputs_ch)
+    gaston_glmpca_ch = GASTON_GLM_PCA(gaston_prepared_ch)
+
+    gaston_postprocess_metadata_ch = gaston_glmpca_ch
+        .join(gaston_postprocess_config_ch)
+        .map {
+            branchKey,
+            pairId,
+            segmentation,
+            platform,
+            sampleId,
+            _trainingConfig,
+            preparedDir,
+            glmpcaDir,
+            latestZarr,
+            _nRestarts,
+            _useGpu,
+            postprocessConfigJson ->
+                tuple(
+                    branchKey,
+                    pairId,
+                    segmentation,
+                    platform,
+                    sampleId,
+                    postprocessConfigJson,
+                    preparedDir,
+                    glmpcaDir,
+                    latestZarr,
+                )
+        }
+
+    gaston_train_inputs_ch = gaston_glmpca_ch.flatMap {
+        branchKey,
+        pairId,
+        segmentation,
+        platform,
+        sampleId,
+        gastonConfig,
+        preparedDir,
+        glmpcaDir,
+        latestZarr,
+        nRestarts,
+        useGpu ->
+            (0..<nRestarts).collect { seed ->
+                tuple(
+                    groupKey(branchKey, nRestarts as int),
+                    pairId,
+                    segmentation,
+                    platform,
+                    sampleId,
+                    gastonConfig,
+                    preparedDir,
+                    glmpcaDir,
+                    latestZarr,
+                    seed,
+                    useGpu,
+                )
+            }
+    }
+
+    gaston_seed_results_ch = GASTON_TRAIN(gaston_train_inputs_ch)
+    gaston_seed_groups_ch = gaston_seed_results_ch
+        .groupTuple()
+        .map { branchGroupKey, seedDirs ->
+            tuple(branchGroupKey.getGroupTarget(), seedDirs)
+        }
+
+    gaston_postprocess_inputs_ch = gaston_seed_groups_ch
+        .join(gaston_postprocess_metadata_ch)
+        .map {
+            branchKey,
+            seedDirs,
+            pairId,
+            segmentation,
+            platform,
+            sampleId,
+            postprocessConfigJson,
+            preparedDir,
+            glmpcaDir,
+            latestZarr ->
+                tuple(
+                    branchKey,
+                    pairId,
+                    segmentation,
+                    platform,
+                    sampleId,
+                    postprocessConfigJson,
+                    preparedDir,
+                    glmpcaDir,
+                    latestZarr,
+                    seedDirs,
+                )
+        }
+
+    gaston_standalone_ch = GASTON_POSTPROCESS(gaston_postprocess_inputs_ch)
+    gaston_import_inputs_ch = gaston_standalone_ch
+        .join(gaston_import_lookup_ch)
+        .map {
+            branchKey,
+            pairId,
+            segmentation,
+            platform,
+            sampleId,
+            gastonConfig,
+            standaloneDir,
+            _postprocessLatestZarr,
+            clusteredH5ad,
+            latestZarr ->
+                tuple(
+                    branchKey,
+                    pairId,
+                    segmentation,
+                    platform,
+                    sampleId,
+                    gastonConfig,
+                    standaloneDir,
+                    clusteredH5ad,
+                    latestZarr,
+                )
+        }
+
+    GASTON_IMPORT(gaston_import_inputs_ch)
 }
