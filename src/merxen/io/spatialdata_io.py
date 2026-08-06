@@ -4,11 +4,14 @@
 
 from __future__ import annotations
 
+import fcntl
 import logging
 import os
 import re
 import shutil
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -59,6 +62,37 @@ _ELEMENT_TYPE_ALIASES = {
     "table": "tables",
     "tables": "tables",
 }
+
+
+def spatialdata_write_lock_path(zarr_path: Path | str) -> Path:
+    """Return the shared, store-adjacent MerXen writer lock path."""
+    return Path(f"{Path(zarr_path)}.merxen-write.lock")
+
+
+@contextmanager
+def spatialdata_write_lock(zarr_path: Path | str) -> Iterator[Path]:
+    """Serialize all additive MerXen writes to one SpatialData store.
+
+    The lock deliberately lives beside the Zarr so it is visible to every
+    process and cluster node that can mutate the shared store. Callers must
+    acquire it before reading SpatialData and retain it until persistence is
+    complete, preventing a stale read/modify/write cycle from dropping columns
+    written by another terminal analysis.
+
+    Args:
+        zarr_path: SpatialData Zarr whose table or elements will be updated.
+
+    Yields:
+        The store-adjacent lock path while the exclusive lock is held.
+    """
+    lock_path = spatialdata_write_lock_path(zarr_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a", encoding="utf-8") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield lock_path
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def write_spatialdata_zarr(

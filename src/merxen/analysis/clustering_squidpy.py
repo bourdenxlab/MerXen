@@ -9,14 +9,11 @@ import os
 os.environ["MPLCONFIGDIR"] = "./tmp/mpl"
 os.environ["NUMBA_CACHE_DIR"] = "./tmp/numba"
 
-import fcntl
 import json
 import logging
 import re
 import sys
 import textwrap
-from collections.abc import Iterator
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -1418,9 +1415,12 @@ def write_clustered_spatialdata_table(
 
     import spatialdata as sd
 
-    from merxen.io.spatialdata_io import write_or_replace_element
+    from merxen.io.spatialdata_io import (
+        spatialdata_write_lock,
+        write_or_replace_element,
+    )
 
-    with _spatialdata_zarr_write_lock(zarr_path):
+    with spatialdata_write_lock(zarr_path):
         log_status(
             f"Writing clustered SpatialData table '{output_table_key}' to {zarr_path}"
         )
@@ -1438,19 +1438,6 @@ def write_clustered_spatialdata_table(
             force_release(note=f"after writing clustered table {output_table_key}")
 
     return zarr_path, output_table_key
-
-
-@contextmanager
-def _spatialdata_zarr_write_lock(zarr_path: Path | str) -> Iterator[None]:
-    """Serialize side-effectful writes to one SpatialData zarr path."""
-    lock_path = Path(f"{Path(zarr_path)}.clustering_squidpy.lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("w", encoding="utf-8") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def _region_as_string(value: Any) -> str | None:
