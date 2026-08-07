@@ -8,10 +8,13 @@ repos:
       - id: check-added-large-files
         args: ['--maxkb=500']
 
+  # Must match the pinned ruff in pyproject.toml and requirements.lock. This
+  # hook rewrites files on commit, so a mismatch against the version
+  # scripts/run_ci_checks.sh checks with on push makes commits unpushable.
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.4.4
+    rev: v0.15.10
     hooks:
-      - id: ruff
+      - id: ruff-check
         args: [--fix]
       - id: ruff-format
 

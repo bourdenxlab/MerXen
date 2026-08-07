@@ -162,9 +162,9 @@ def test_no_two_lines_share_a_colour(mmd_text: str) -> None:
     lines = _declared_lines(mmd_text)
     assert len(lines) >= 2, "expected at least two %%metro line: directives"
     for first, second in itertools.combinations(sorted(lines), 2):
-        assert (
-            lines[first].upper() != lines[second].upper()
-        ), f"lines {first!r} and {second!r} are both {lines[first]}"
+        assert lines[first].upper() != lines[second].upper(), (
+            f"lines {first!r} and {second!r} are both {lines[first]}"
+        )
 
 
 def test_rendered_svgs_are_current(mmd_text: str) -> None:

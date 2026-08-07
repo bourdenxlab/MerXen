@@ -43,8 +43,9 @@ dependencies = [
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
-    "ruff>=0.4",
-    "mypy>=1.0",
+    # Pinned exactly, not floored. These two gate CI
+    "ruff==0.15.10",
+    "mypy==1.20.1",
     "pre-commit>=3.0",
     "bump-my-version>=1.3",
     "nf-metro>=1.1,<1.2",
