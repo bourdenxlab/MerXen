@@ -23,6 +23,7 @@ from __future__ import annotations
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SOURCE = REPO_ROOT / "assets" / "metro_map.mmd"
@@ -60,6 +61,14 @@ LEGEND_LINE_HEIGHT = 40.0
 # accessibility argument leans on. Scale the pattern with the stroke instead.
 DASH_ON = 12.0
 DASH_OFF = 10.0
+
+# Grid column whose sections should share a left edge. nf-metro right-aligns
+# every section in a column that holds an RL or TB section, so column 0 —
+# "Ingest and build" on the top row and the wider "Annotation and DE" on the
+# return row — ends up flush right, and the wider box juts out to the left with
+# the bottom-left legend trailing after it. Aligning the left edges instead
+# reads as a deliberate margin. See _align_column_left_edges.
+LEFT_ALIGNED_COLUMN = 0
 
 # Shared render options.
 #
@@ -119,6 +128,59 @@ def apply_style_overrides() -> None:
     constants.STROKE_DASHARRAY["dashed"] = f"{DASH_ON:g},{DASH_OFF:g}"
 
 
+def align_column_left_edges(column: int = LEFT_ALIGNED_COLUMN) -> None:
+    """Make every section in ``column`` share the rightmost of their left edges.
+
+    nf-metro has no alignment directive: :func:`_compute_section_offsets`
+    right-aligns a column as soon as any section in it runs ``RL`` or ``TB``,
+    which is unavoidable here because the return row flows right to left. The
+    two sections in column 0 are different widths, so a shared right edge means
+    the wider one overhangs to the left.
+
+    ``_pack_cells`` is the last thing ``_compute_section_offsets`` does, and by
+    then every section's ``offset_x`` is final, so wrapping it gives a clean
+    hook to nudge the overhanging section back inwards. Moving the wider box
+    right — rather than pulling the narrower one left — spends slack that
+    already exists on the return row instead of opening a new gap on the top
+    row.
+    """
+    from nf_metro.layout import section_placement
+
+    if not hasattr(section_placement, "_pack_cells"):
+        raise AttributeError(
+            "nf_metro.layout.section_placement no longer defines _pack_cells; "
+            "the column-alignment patch in this script needs updating."
+        )
+
+    original = section_placement._pack_cells
+
+    def patched(
+        scoped: dict[str, Any],
+        packs: dict[tuple[int, int], list[str]],
+        col_offsets: dict[int, float],
+        col_widths: dict[int, float],
+        right_align_cols: set[int],
+        gap: float,
+    ) -> None:
+        original(scoped, packs, col_offsets, col_widths, right_align_cols, gap)
+        members = [
+            section
+            for section in scoped.values()
+            if section.grid_col == column and section.grid_col_span == 1
+        ]
+        if len(members) < 2:
+            return
+        # Align the *drawn* left edges, not the offsets. A section's box starts
+        # at offset_x + bbox_x, and bbox_x differs between these two: the
+        # terminus icons on "Ingest and build" push its bbox left to make room
+        # for them. Aligning the raw offsets leaves the boxes 8px apart.
+        left_edge = max(section.offset_x + section.bbox_x for section in members)
+        for section in members:
+            section.offset_x = left_edge - section.bbox_x
+
+    section_placement._pack_cells = patched
+
+
 def render(destination: Path, *extra: str) -> None:
     """Render the map to ``destination`` with the shared options plus ``extra``."""
     from nf_metro.cli import cli
@@ -150,6 +212,7 @@ def main() -> int:
     cli.main(args=["validate", str(SOURCE)], standalone_mode=False)
 
     apply_style_overrides()
+    align_column_left_edges()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     render(STATIC_SVG)

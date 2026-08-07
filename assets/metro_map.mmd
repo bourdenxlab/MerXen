@@ -1,4 +1,5 @@
-%%metro title: MerXen
+%% No %%metro title: the README and docs pages carry their own heading above
+%% the figure, and a "MerXen" title baked into the SVG duplicates it.
 %%metro style: light
 %%metro legend: bl
 
@@ -26,22 +27,22 @@
 %%metro grid: comparative | 1,1
 %%metro grid: annotation | 0,1
 
-%% Lines. Colours are drawn from Paul Tol's qualitative schemes and were picked
-%% by search, not by eye: every pair stays at least 35 CIE76 dE apart under
-%% normal vision and under simulated deuteranopia, protanopia and tritanopia,
-%% and every line stays >=35 dE from the section background. Re-run
-%% tests/test_workflows/test_metro_map.py after changing any of them. The
-%% toggleable line is dashed as well as coloured, so the map also parses in
-%% greyscale.
-%%metro line: merscope | MERSCOPE (Vizgen) | #882255
-%%metro line: xenium | Xenium (10x) | #33BBEE
-%%metro line: paired | Paired-section analysis | #332288
+%% Lines. These are the MerXen brand colours, taken from the title logo in
+%% assets/MerXen_title.svg: the MERSCOPE line matches the purple of "Mer", the
+%% Xenium line the teal of "Xen", and the paired line the blue midpoint of the
+%% logo's underline gradient, where the two halves meet. Keep them in step with
+%% src/merxen/palette.py — tests/test_workflows/test_metro_map.py fails if the
+%% two drift apart. The toggleable line is dashed as well as coloured, so the
+%% map still parses in greyscale.
+%%metro line: merscope | MERSCOPE (Vizgen) | #8350FF
+%%metro line: xenium | Xenium (10x) | #17BCAC
+%%metro line: paired | Paired-section analysis | #3980BE
 %%metro line: optional | Toggleable stages | #EE7733 | dashed
 
-%% Termini. Cohort DE deliberately has no output icon: a fourth node in the
-%% Annotation row would make that section wider than Ingest and build, and
-%% nf-metro right-aligns sections within a grid column, so the two would no
-%% longer share a left edge.
+%% Termini. Cohort DE has no output icon simply because it needs none; the
+%% section is free to be wider than Ingest and build, since the render script
+%% aligns the left edges of column 0 rather than letting nf-metro right-align
+%% them. See the Styling section of docs/metro-map.md.
 %%metro dir: merscope_in | MERSCOPE | raw export
 %%metro dir: xenium_in | Xenium | raw export
 %%metro file: mecr_out | CSV | mecr_out

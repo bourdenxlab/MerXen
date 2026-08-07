@@ -19,9 +19,9 @@ it plays inside a plain `<img>` on GitHub.
 
 | Line | Colour | Meaning |
 |------|--------|---------|
-| MERSCOPE (Vizgen) | `#882255` | The MERSCOPE section's own traversal of the per-platform stages |
-| Xenium (10x) | `#33BBEE` | The Xenium section's traversal of the same stages |
-| Paired-section analysis | `#332288` | The single merged track, from `ALIGN` onwards, that consumes both platforms |
+| MERSCOPE (Vizgen) | `#8350FF` | The MERSCOPE section's own traversal of the per-platform stages |
+| Xenium (10x) | `#17BCAC` | The Xenium section's traversal of the same stages |
+| Paired-section analysis | `#3980BE` | The single merged track, from `ALIGN` onwards, that consumes both platforms |
 | Toggleable stages | `#EE7733`, dashed | Stages that can be switched on or off per run or per samplesheet row |
 
 The two platform lines run through the same stations because both platforms
@@ -37,17 +37,27 @@ depth, distance-from-object and MapMyCells are dashed and default to off. See
 
 ### Colour choice
 
-The four colours are drawn from [Paul Tol's qualitative schemes](https://personal.sron.nl/~pault/)
-but were selected by search rather than by eye. Every pair stays at least 30
-CIE76 ΔE apart under normal vision *and* under simulated deuteranopia,
-protanopia and tritanopia, and every line stays at least 30 ΔE from the section
-background. The toggleable line is dashed as well as coloured, so the map still
-parses in greyscale.
+The lines use the MerXen brand palette defined in
+[src/merxen/palette.py](../src/merxen/palette.py), which is derived from the
+title logo: MERSCOPE is the purple of "Mer", Xenium the teal of "Xen", and the
+paired line the blue midpoint of the logo's underline gradient, where the two
+halves meet. The toggleable line's orange sits deliberately outside that range
+so it never reads as a platform.
 
-This is enforced, not just documented: `tests/test_workflows/test_metro_map.py`
-recomputes the separations from the `.mmd` source and fails if a colour change
-breaks them. An earlier palette that looked fine to normal vision collapsed to
-ΔE 4 under tritanopia, which is exactly the failure the test exists to catch.
+`tests/test_workflows/test_metro_map.py` checks the `.mmd` line colours against
+`merxen.palette` and fails if the two drift apart, so a rebrand is one edit
+rather than a hunt. Change the palette module, re-run
+`scripts/render_metro_map.py`, and commit the re-rendered SVGs.
+
+> [!NOTE]
+> This palette is chosen for brand consistency, not colour-vision
+> accessibility. The MERSCOPE purple and Xenium teal are not reliably separable
+> under simulated tritanopia (CIE76 ΔE ≈ 15) or deuteranopia (ΔE ≈ 20), and the
+> teal is close to the section background under protanopia. An earlier palette
+> guaranteed ≥30 ΔE under all three, and the test that enforced it was removed
+> along with it. The toggleable line keeps its dash pattern as a redundant,
+> colour-independent cue; the two platform lines have no such fallback, so the
+> map relies on its station labels to be read without colour.
 
 ## What the map simplifies
 
@@ -104,7 +114,7 @@ fails if:
   omission list,
 - a station names a process that no longer exists,
 - the omission or alias lists name processes that have been deleted,
-- a line colour breaks the contrast requirements above,
+- a line colour drifts from `merxen.palette`, or two lines share a colour,
 - a committed SVG is missing or was rendered from a different palette,
 - the rendered figure grows past 2000px wide or a 3:1 aspect ratio,
 - a station label wraps mid-word in the rendered SVG.
@@ -127,8 +137,9 @@ down until nothing is readable.
 
 Column 2 holds an `RL` section and a `TB` one, so it is right-aligned and
 Enrichment and QC, Alignment and MECR rates share a right edge to
-within a pixel. Ingest and build and Annotation and DE likewise share a left
-edge in column 0.
+within a pixel. Ingest and build and Annotation and DE share a left edge in
+column 0, but only because the render script forces it — see
+[Styling](#styling).
 
 `test_rendered_map_stays_compact` fails if the rendered SVG exceeds 2000px wide
 or a 3:1 aspect ratio, so the figure cannot quietly stretch back out.
@@ -146,13 +157,26 @@ delegates to nf-metro's own CLI. It overrides:
 | `LEGEND_SWATCH_WIDTH` | 24.0 | 56.0 | Longer swatches make the dash pattern legible |
 | `LEGEND_LINE_HEIGHT` | 24.0 | 40.0 | Not scaled by `--font-scale`, so 24.0 is tighter than the 26.6px type is tall |
 | `STROKE_DASHARRAY["dashed"]` | `8,4` | `12,10` | See below |
+| `_pack_cells` | right-aligns | left edges aligned | See below |
 
 The dash override is not cosmetic. nf-metro's `8,4` assumes the default 3.0
 stroke, and round line caps extend half the stroke width past each dash end. At
 5.5 the caps close the 4px gap completely and the toggleable line renders
-**solid**, silently destroying the colour-independent cue the palette's
-accessibility argument depends on. Any future change to `line_width` must
-re-check the dash.
+**solid**, silently destroying the only colour-independent cue on the map. Any
+future change to `line_width` must re-check the dash.
+
+The `_pack_cells` override fixes the column-0 alignment. nf-metro right-aligns
+every section in a column as soon as one of them runs `RL` or `TB`, which the
+return row forces here. Ingest and build and Annotation and DE are different
+widths, so a shared right edge left the wider Annotation box — and the
+bottom-left legend under it — jutting out to the left of everything else.
+`align_column_left_edges` wraps `_pack_cells`, the last thing
+`_compute_section_offsets` does, and rewrites the offsets so both boxes share
+their *drawn* left edge. It aligns `offset_x + bbox_x`, not `offset_x`: the
+terminus icons on Ingest and build push that section's bbox further left, and
+aligning the raw offsets leaves the boxes 8px apart. Annotation moves right to
+meet Ingest rather than the other way round, because the return row already has
+slack next to Comparative analysis while the top row does not.
 
 `station_radius` is deliberately left at its 6.0 default: enlarging it to match
 the heavier strokes widens each station enough to hyphenate `Spatial genes` and
@@ -181,10 +205,11 @@ way against nf-metro 1.1.0:
   available fix: box width is content-driven, and sections are right-aligned in
   their column rather than stretched to fill it.
 - Sections are **right-aligned** within a grid column whenever any section in
-  that column runs `RL` or `TB`. Ingest and build and Annotation and DE share
-  column 0, so they only share a left edge while they are the same width — which
-  is why Cohort DE has no output icon. A fourth node there widens the section
-  and breaks the alignment.
+  that column runs `RL` or `TB`. Column 0 is exempted by the `_pack_cells`
+  override described in [Styling](#styling), so Ingest and build and Annotation
+  and DE keep a shared left edge at any width. Every other column is still
+  right-aligned, and widening a section there moves its left edge, not its
+  right.
 - The gap between Comparative analysis and Annotation and DE is slack in column
   1, which is sized by Segmentation, the widest section. It can be moved
   elsewhere by re-columning but not removed without narrowing Segmentation.
