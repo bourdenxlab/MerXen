@@ -67,6 +67,7 @@ converge at alignment; dashed stations are governed by a parameter. See
 | [workflows/modules/](../workflows/modules/) | One `.nf` process per pipeline stage |
 | [src/merxen/](../src/merxen/) | Installable Python package |
 | [src/merxen/config.py](../src/merxen/config.py) | Pydantic config schemas |
+| [src/merxen/palette.py](../src/merxen/palette.py) | MerXen brand colours (figures, metro map, badges) |
 | [src/merxen/cli/](../src/merxen/cli/) | Click CLI entry points |
 | [tests/](../tests/) | pytest test suite, mirrors `src/merxen/` |
 | [environment.yml](../environment.yml) | Conda env (Python 3.12 + pip) |
