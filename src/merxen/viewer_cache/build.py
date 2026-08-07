@@ -29,7 +29,10 @@ from merxen.viewer_cache.format import (
     DERIVED_CACHE_ATTR,
     LABEL_CACHE_ATTR,
     LABEL_CACHE_VERSION,
+    OUTLINE_COVERAGE_MAX,
+    OUTLINE_PYRAMID_MODE,
     PYRAMID_MIN_SIZE,
+    PYRAMID_TILE,
     VIEWER_DERIVED_CACHE_VERSION,
     derived_image_pyramid_cache_key,
     derived_label_pyramid_cache_key,
@@ -425,15 +428,15 @@ def _build_outline(
     )
     if len(outline_levels) == 0:
         return "no-levels"
-    source = "synthetic" if len(outline_levels) > 1 else "single"
     tree = build_multiscale_tree(
         outline_levels, dims=("y", "x"), transform=transform, dtype=np.uint8
     )
     Labels2DModel.validate(tree)
     _write_derived(sdata, zarr_path, "labels", cache_key, tree)
-    source_shapes = [
-        [int(level.shape[0]), int(level.shape[1])] for level in outline_levels
-    ]
+    # The viewer records the shapes of the SOURCE label element's scale levels
+    # here, not the outline's. ``base_da`` is that source's finest level, which is
+    # the only one the coverage-mean pyramid reads.
+    source_shapes = [[int(base_da.shape[0]), int(base_da.shape[1])]]
     _stamp_marker(
         zarr_path,
         "labels",
@@ -442,9 +445,9 @@ def _build_outline(
         outline_marker(
             source_label_key=label_key,
             width=width,
-            source=source,
             levels=len(outline_levels),
             source_shapes=source_shapes,
+            min_size=params.min_size,
         ),
     )
     return "built"
@@ -516,7 +519,17 @@ def _derived_complete(
     if marker.get(source_field) != str(source_key):
         return False
     if kind == "label_outline":
-        return marker.get("width") == width
+        # Mirror every key the viewer's ``_derived_cache_complete`` compares. A
+        # marker missing any of these (or carrying a pre-coverage_mean_v1 outline)
+        # is treated as stale here so we rebuild it rather than leaving behind a
+        # cache the viewer will silently discard and regenerate itself.
+        return (
+            marker.get("width") == width
+            and marker.get("min_size") == params.min_size
+            and marker.get("tile_size") == PYRAMID_TILE
+            and marker.get("pyramid_mode") == OUTLINE_PYRAMID_MODE
+            and marker.get("value_max") == OUTLINE_COVERAGE_MAX
+        )
     return (
         marker.get("downsample") == params.downsample
         and marker.get("min_size") == params.min_size

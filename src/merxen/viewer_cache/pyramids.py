@@ -17,6 +17,7 @@ from spatialdata.models.pyramids_utils import dask_arrays_to_datatree
 from spatialdata.transformations import set_transformation
 
 from merxen.viewer_cache.format import (
+    OUTLINE_COVERAGE_MAX,
     PYRAMID_MAX_LEVELS,
     PYRAMID_MIN_SIZE,
     PYRAMID_TILE,
@@ -142,31 +143,20 @@ def lazy_outline_mask(label_data: Any, width: int) -> Any:
     )
 
 
-def _outline_width_for_level(
-    width: int, base_shape: tuple[int, ...], level_shape: tuple[int, ...]
-) -> int:
-    """Scale outline width down for coarser pyramid levels (viewer-verbatim)."""
-    if width <= 1:
-        return 1
-    y_factor = float(base_shape[0]) / max(1.0, float(level_shape[0]))
-    x_factor = float(base_shape[1]) / max(1.0, float(level_shape[1]))
-    scale_factor = max(1.0, y_factor, x_factor)
-    return max(1, int(np.ceil(float(width) / scale_factor)))
+def rechunk_raster_levels_for_display(levels: list[Any]) -> list[Any]:
+    """Bound 2D dask chunks so a small pan does not trigger large over-reads.
 
-
-def lazy_outline_pyramid_from_label_levels(
-    label_levels: list[Any], width: int
-) -> list[Any]:
-    """Build outline masks independently from existing/synthetic label levels."""
-    if len(label_levels) == 0:
-        return []
-    base_shape = tuple(int(axis) for axis in label_levels[0].shape)
-    outlines: list[Any] = []
-    for level in label_levels:
-        level_shape = tuple(int(axis) for axis in level.shape)
-        level_width = _outline_width_for_level(int(width), base_shape, level_shape)
-        outlines.append(lazy_outline_mask(level, width=level_width))
-    return outlines
+    Ported from the viewer's function of the same name. Outline levels would
+    otherwise inherit the source mask's chunks, which can be several thousand
+    pixels wide, so panning a little decompresses far more than the viewport
+    needs.
+    """
+    tiled: list[Any] = []
+    for level in levels:
+        arr = da.asarray(level)
+        chunks = tuple(min(PYRAMID_TILE, int(axis)) for axis in arr.shape)
+        tiled.append(arr.rechunk(chunks))
+    return tiled
 
 
 def lazy_outline_pyramid(
@@ -175,12 +165,32 @@ def lazy_outline_pyramid(
     min_size: int = PYRAMID_MIN_SIZE,
     max_levels: int = PYRAMID_MAX_LEVELS,
 ) -> list[Any]:
-    """Build a lazy multiscale uint8 outline pyramid from a 2D label image."""
+    """Build a coverage-preserving uint8 outline pyramid from a 2D label image.
+
+    This is the viewer's ``coverage_mean_v1`` algorithm: trace the outline ONCE
+    at full resolution, scale it to ``0..OUTLINE_COVERAGE_MAX``, then mean-coarsen
+    to build the coarse levels. Averaging the finest outline records the
+    fractional line coverage of each coarse pixel, so napari can switch multiscale
+    levels without a sub-pixel boundary becoming a fully opaque block.
+
+    The base level IS included here (unlike :func:`lazy_coarsened_pyramid`), so
+    the returned list is the complete pyramid the viewer expects on disk.
+    """
     width = max(1, int(width))
-    label_levels = lazy_label_pyramid(
-        label_data, min_size=min_size, max_levels=max_levels
+    base_outline = lazy_outline_mask(label_data, width=width)
+    data = da.asarray(base_outline).astype(np.uint8) * np.uint8(OUTLINE_COVERAGE_MAX)
+    levels: list[Any] = [data]
+    levels.extend(
+        lazy_coarsened_pyramid(
+            data,
+            step=2,
+            reducer=np.mean,
+            min_size=min_size,
+            max_levels=max(0, int(max_levels) - 1),
+            tile=PYRAMID_TILE,
+        )
     )
-    return lazy_outline_pyramid_from_label_levels(label_levels, width=width)
+    return rechunk_raster_levels_for_display(levels[: int(max_levels)])
 
 
 def build_multiscale_tree(

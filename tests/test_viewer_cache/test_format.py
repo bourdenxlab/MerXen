@@ -20,8 +20,23 @@ def test_prefixes_attrs_and_versions_are_pinned() -> None:
     assert fmt.LABEL_CACHE_ATTR == "napari_compare_label_cache"
     assert fmt.VIEWER_DERIVED_CACHE_VERSION == 2
     assert fmt.LABEL_CACHE_VERSION == 2
-    assert fmt.PYRAMID_MIN_SIZE == 4096
+    # Viewer: SYNTHETIC_IMAGE_PYRAMID_MIN_SIZE / LABEL_OUTLINE_PYRAMID_MIN_SIZE.
+    assert fmt.PYRAMID_MIN_SIZE == 1024
     assert fmt.PYRAMID_MAX_LEVELS == 10
+    # Viewer: RASTER_DISPLAY_TILE_SIZE / OUTLINE_COVERAGE_MAX.
+    assert fmt.PYRAMID_TILE == 1024
+    assert fmt.OUTLINE_COVERAGE_MAX == 255
+    assert fmt.OUTLINE_PYRAMID_MODE == "coverage_mean_v1"
+    assert fmt.OUTLINE_SOURCE == "coverage_mean"
+
+
+def test_config_default_min_size_tracks_the_format_constant() -> None:
+    """ViewerCacheConfig cannot import PYRAMID_MIN_SIZE (circular), so pin it here."""
+    from merxen.config import ViewerCacheConfig
+
+    assert ViewerCacheConfig.model_fields["min_size"].default == fmt.PYRAMID_MIN_SIZE, (
+        "config.py's literal min_size default drifted from PYRAMID_MIN_SIZE"
+    )
 
 
 def test_cache_keys_match_viewer_golden_values() -> None:
@@ -70,40 +85,99 @@ def test_marker_schemas_match_viewer() -> None:
         "chunks": [2048, 2048],
     }
     assert fmt.label_pyramid_marker(
-        source_label_key="MOSAIK_proseg_labels", downsample=4, min_size=4096, levels=2
+        source_label_key="MOSAIK_proseg_labels", downsample=4, min_size=1024, levels=2
     ) == {
         "version": 2,
         "complete": True,
         "kind": "label_pyramid",
         "source_label_key": "MOSAIK_proseg_labels",
         "downsample": 4,
-        "min_size": 4096,
+        "min_size": 1024,
         "levels": 2,
     }
     assert fmt.image_pyramid_marker(
-        source_image_key="MERSCOPE_z_projection", downsample=4, min_size=4096, levels=2
+        source_image_key="MERSCOPE_z_projection", downsample=4, min_size=1024, levels=2
     ) == {
         "version": 2,
         "complete": True,
         "kind": "image_pyramid",
         "source_image_key": "MERSCOPE_z_projection",
         "downsample": 4,
-        "min_size": 4096,
+        "min_size": 1024,
         "levels": 2,
     }
     assert fmt.outline_marker(
         source_label_key="MOSAIK_proseg_labels",
         width=1,
-        source="synthetic",
         levels=3,
-        source_shapes=[[160, 160], [80, 80], [40, 40]],
+        source_shapes=[[160, 160]],
     ) == {
         "version": 2,
         "complete": True,
         "kind": "label_outline",
         "source_label_key": "MOSAIK_proseg_labels",
         "width": 1,
-        "source": "synthetic",
+        "min_size": 1024,
+        "tile_size": 1024,
+        "pyramid_mode": "coverage_mean_v1",
+        "value_max": 255,
+        "source": "coverage_mean",
         "levels": 3,
-        "source_shapes": [[160, 160], [80, 80], [40, 40]],
+        "source_shapes": [[160, 160]],
     }
+
+
+def test_outline_marker_satisfies_viewer_expected_keys() -> None:
+    """The viewer discards a cache unless EVERY key in its ``expected`` dict matches.
+
+    Captured verbatim from ``_ensure_label_outline_cache`` in the viewer. A marker
+    that drops one of these (as the pre-coverage_mean_v1 marker did) makes the
+    viewer rebuild the pyramid it was handed, which is the whole failure this
+    module exists to prevent.
+    """
+    marker = fmt.outline_marker(
+        source_label_key="MOSAIK_proseg_labels",
+        width=1,
+        levels=8,
+        source_shapes=[[113164, 98317]],
+    )
+    expected = {
+        "kind": "label_outline",
+        "source_label_key": "MOSAIK_proseg_labels",
+        "width": 1,
+        "min_size": 1024,
+        "tile_size": 1024,
+        "pyramid_mode": "coverage_mean_v1",
+        "value_max": 255,
+    }
+    assert marker["version"] == fmt.VIEWER_DERIVED_CACHE_VERSION
+    assert marker["complete"] is True
+    for key, value in expected.items():
+        assert marker[key] == value, (
+            f"viewer compares {key!r}; marker would be rejected"
+        )
+
+
+def test_pyramid_markers_satisfy_viewer_expected_keys() -> None:
+    """Same guard for the image and label pyramid ``expected`` dicts."""
+    image = fmt.image_pyramid_marker(
+        source_image_key="MERSCOPE_z_projection", downsample=4, min_size=1024, levels=3
+    )
+    for key, value in {
+        "kind": "image_pyramid",
+        "source_image_key": "MERSCOPE_z_projection",
+        "downsample": 4,
+        "min_size": 1024,
+    }.items():
+        assert image[key] == value, f"viewer compares {key!r}; marker would be rejected"
+
+    label = fmt.label_pyramid_marker(
+        source_label_key="MOSAIK_proseg_labels", downsample=4, min_size=1024, levels=3
+    )
+    for key, value in {
+        "kind": "label_pyramid",
+        "source_label_key": "MOSAIK_proseg_labels",
+        "downsample": 4,
+        "min_size": 1024,
+    }.items():
+        assert label[key] == value, f"viewer compares {key!r}; marker would be rejected"

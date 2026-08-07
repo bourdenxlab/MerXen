@@ -309,7 +309,7 @@ class ViewerCacheConfig(BaseModel):
     downsample: int = Field(default=4, ge=2)
     label_chunk_size: int = Field(default=2048, gt=0)
     contour_width: int = Field(default=1, ge=0)
-    min_size: int = Field(default=4096, gt=0)
+    min_size: int = Field(default=1024, gt=0)
     shape_keys: list[str] | None = None
     build_image_pyramid: bool = True
 
