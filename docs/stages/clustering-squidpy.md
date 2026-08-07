@@ -148,7 +148,7 @@ replacing the derived clustered table for the active analysis segmentation. The
 table contains the same final filtered cells, UMAP/spatial coordinates, counts
 layer, and clustering/cell-type columns as `<sample_id>_clustered.h5ad`.
 
-The compute process uses `environment.clustering-gpu.yml` under the Conda
+The compute process uses `envs/environment.clustering-gpu.yml` under the Conda
 profile. A run with no `-profile` selects `standard`, which loads Dwight's
 72-CPU/640-GB local-executor capacity, workstation concurrency limits, shared
 GPU lock, and local reference paths. The equivalent explicit Conda selection
@@ -163,13 +163,13 @@ Selecting another profile does not inherit `standard`; provide equivalent
 host settings in that profile or a combined site config. Under the Apptainer
 profile, set
 `clustering_squidpy_gpu_container` to an image built from
-`Dockerfile.clustering-gpu`. SpatialData is intentionally absent from this
+`containers/Dockerfile.clustering-gpu`. SpatialData is intentionally absent from this
 environment; only H5AD files cross the process boundary.
 
 Build and select the dedicated image with, for example:
 
 ```bash
-docker build -f Dockerfile.clustering-gpu -t merxen-clustering-gpu .
+docker build -f containers/Dockerfile.clustering-gpu -t merxen-clustering-gpu .
 apptainer build merxen-clustering-gpu.sif docker-daemon://merxen-clustering-gpu
 nextflow run workflows/main.nf -profile apptainer,gpu \
   --clustering_squidpy_gpu_container \

@@ -102,7 +102,7 @@ def test_clustering_gpu_compute_is_isolated_from_spatialdata_io(
         assert process_name in main_text
 
     assert "clustering_squidpy_gpu_conda" in config_text
-    assert "environment.clustering-gpu.yml" in config_text
+    assert "envs/environment.clustering-gpu.yml" in config_text
     assert 'withName: "CLUSTERING_SQUIDPY_COMPUTE"' in config_text
     assert "clustering_prepared_ch = CLUSTERING_SQUIDPY_PREPARE" in main_text
     assert "clustering_computed_ch = CLUSTERING_SQUIDPY_COMPUTE" in main_text

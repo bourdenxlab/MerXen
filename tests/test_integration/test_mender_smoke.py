@@ -46,7 +46,7 @@ def test_real_mender_synthetic_grid_smoke(
     target_k: int | None,
 ) -> None:
     """Run the pinned MENDER package when this test uses its dedicated env."""
-    pytest.importorskip("MENDER", reason="run inside environment.mender.yml")
+    pytest.importorskip("MENDER", reason="run inside envs/environment.mender.yml")
     prepared = tmp_path / "prepared"
     prepared.mkdir()
     _portable_grid(prepared / "mender_input.parquet")

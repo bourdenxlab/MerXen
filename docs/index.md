@@ -70,10 +70,11 @@ converge at alignment; dashed stations are governed by a parameter. See
 | [src/merxen/palette.py](../src/merxen/palette.py) | MerXen brand colours (figures, metro map, badges) |
 | [src/merxen/cli/](../src/merxen/cli/) | Click CLI entry points |
 | [tests/](../tests/) | pytest test suite, mirrors `src/merxen/` |
-| [environment.yml](../environment.yml) | Conda env (Python 3.12 + pip) |
-| [environment.alignment.yml](../environment.alignment.yml) | Conda env used by Nextflow `ALIGN` |
-| [environment.clustering-gpu.yml](../environment.clustering-gpu.yml) | RAPIDS env used only by clustering compute |
-| [environment.mender.yml](../environment.mender.yml) | Pinned CPU environment used only by MENDER compute |
+| [envs/environment.yml](../envs/environment.yml) | Conda env (Python 3.12 + pip) |
+| [envs/environment.alignment.yml](../envs/environment.alignment.yml) | Conda env used by Nextflow `ALIGN` |
+| [envs/environment.clustering-gpu.yml](../envs/environment.clustering-gpu.yml) | RAPIDS env used only by clustering compute |
+| [envs/environment.mender.yml](../envs/environment.mender.yml) | Pinned CPU environment used only by MENDER compute |
+| [containers/](../containers/) | Dockerfiles for the base, clustering-GPU and MENDER images |
 | [pyproject.toml](../pyproject.toml) | Dependencies, `merxen` entry point, tool config |
 | [.env.example](../.env.example) | Required environment variables |
 

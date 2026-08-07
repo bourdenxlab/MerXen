@@ -31,7 +31,7 @@ This guide takes you from a fresh clone to a running pipeline.
 git clone <repo-url> MerXen
 cd MerXen
 
-conda env create -f environment.yml
+conda env create -f envs/environment.yml
 conda activate merxen
 ```
 

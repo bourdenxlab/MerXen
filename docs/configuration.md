@@ -236,18 +236,18 @@ install paths trigger a `sudo` prompt.
 
 ### Alignment
 
-Alignment is optional and runs in the isolated `environment.alignment.yml`.
+Alignment is optional and runs in the isolated `envs/environment.alignment.yml`.
 The default `valis` backend registers DAPI morphology only; it does not use
 transcripts, expression, cell labels, or RNA-derived images. The former method
 is retained as the explicit `legacy_spateo` backend. Non-alignment stages keep
-using `environment.yml`.
+using `envs/environment.yml`.
 
 | Param | Default | Description |
 |-------|---------|-------------|
 | `enable_alignment` | `false` | Run `ALIGN` and `ALIGN_QC` between QC and comparison by default. A samplesheet `enable_alignment` value can override this per paired row. |
 | `alignment_backend` | `valis` | `valis` (DAPI-only default) or `legacy_spateo`. |
 | `alignment_fixed_platform` / `alignment_moving_platform` | `XENIUM` / `MERSCOPE` | Reference and transformed dataset. They must differ. |
-| `alignment_conda` | `environment.alignment.yml` | Conda env file or existing env path used only for `ALIGN`. |
+| `alignment_conda` | `envs/environment.alignment.yml` | Conda env file or existing env path used only for `ALIGN`. |
 | `alignment_bootstrap_dependencies` | `true` | Install the exact selected backend package when its dependency check fails. The locked transitive VALIS stack is already part of the conda environment. |
 | `alignment_valis_requirement` | `valis-wsi==1.2.0` | Exact package installed with `--no-deps` after the locked NumPy-2-compatible runtime. |
 | `alignment_device` | Dwight: `auto` | DISK/LightGlue device; automatically uses CUDA when available. Use `cpu` for an explicit CPU fallback. |
@@ -378,8 +378,8 @@ The following settings are read only when
 | `clustering_squidpy_spatial_scatter_point_size` | `2.0` | Point size for regular spatial scatter plots. |
 | `clustering_squidpy_figure_dpi` | `180` | DPI for PNG plots. |
 | `clustering_squidpy_use_gpu` | Dwight: `true` | Use RAPIDS single-cell acceleration when available. |
-| `clustering_squidpy_gpu_conda` | `environment.clustering-gpu.yml` | Dedicated RAPIDS environment used only by `CLUSTERING_SQUIDPY_COMPUTE`. |
-| `clustering_squidpy_gpu_container` | Site GPU image path | Dedicated RAPIDS image used only by `CLUSTERING_SQUIDPY_COMPUTE` with Apptainer. Build it from `Dockerfile.clustering-gpu` or override this path. |
+| `clustering_squidpy_gpu_conda` | `envs/environment.clustering-gpu.yml` | Dedicated RAPIDS environment used only by `CLUSTERING_SQUIDPY_COMPUTE`. |
+| `clustering_squidpy_gpu_container` | Site GPU image path | Dedicated RAPIDS image used only by `CLUSTERING_SQUIDPY_COMPUTE` with Apptainer. Build it from `containers/Dockerfile.clustering-gpu` or override this path. |
 | `clustering_squidpy_max_forks` | Dwight: `4` | Maximum concurrent Squidpy clustering tasks. GPU-backed tasks still share the local GPU lock when enabled. |
 | `clustering_squidpy_gpu_vram_monitor` | Dwight: `true` | Run a lightweight `nvidia-smi` sampler around each `CLUSTERING_SQUIDPY_COMPUTE` task. |
 | `clustering_squidpy_gpu_vram_monitor_interval_seconds` | `2` | Sampling interval for the clustering GPU VRAM monitor. |
@@ -420,8 +420,8 @@ The following settings are read only when
 | `mender_random_seed` | `666` | MENDER tutorial seed. |
 | `mender_run_umap` | `true` | Generate the context embedding. |
 | `mender_write_spatialdata_table` | `true` | Import `mender_domain` into the derived clustered SpatialData table. |
-| `mender_conda` | `environment.mender.yml` | Old compatible CPU environment used only by compute. |
-| `mender_container` | Site MENDER SIF path | CPU-only image built from `Dockerfile.mender`; override for portable Apptainer runs. |
+| `mender_conda` | `envs/environment.mender.yml` | Old compatible CPU environment used only by compute. |
+| `mender_container` | Site MENDER SIF path | CPU-only image built from `containers/Dockerfile.mender`; override for portable Apptainer runs. |
 | `mender_compute_max_forks` | Dwight: `2` | At 192 GB per compute task, at most 384 GB is reserved concurrently. |
 
 See [MENDER spatial domains](stages/mender.md) for the data contract, restart

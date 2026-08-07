@@ -1,6 +1,6 @@
 FROM condaforge/miniforge3:24.7.1-0
 
-COPY environment.mender.yml /tmp/environment.mender.yml
+COPY envs/environment.mender.yml /tmp/environment.mender.yml
 RUN conda env create -f /tmp/environment.mender.yml && conda clean --all --yes
 
 WORKDIR /opt/merxen

@@ -105,13 +105,13 @@ corresponding derived clustered table in the published
 
 ## CPU environment and Apptainer
 
-Only `MENDER_COMPUTE` uses `environment.mender.yml`. The environment contains
+Only `MENDER_COMPUTE` uses `envs/environment.mender.yml`. The environment contains
 the old AnnData 0.9, Scanpy 1.9, and Squidpy 1.2-era stack; these packages are
 not added to MerXen's base project dependencies. Build a portable CPU image and
 override its path as needed:
 
 ```bash
-docker build -f Dockerfile.mender -t merxen-mender .
+docker build -f containers/Dockerfile.mender -t merxen-mender .
 apptainer build merxen-mender.sif docker-daemon://merxen-mender:latest
 
 nextflow run workflows/main.nf \

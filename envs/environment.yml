@@ -5,4 +5,6 @@ dependencies:
   - python=3.12
   - pip
   - pip:
-      - -e ".[dev]"
+      # Paths are relative to this file's directory: conda runs pip with its
+      # working directory set to the environment file's location.
+      - -e "../[dev]"
