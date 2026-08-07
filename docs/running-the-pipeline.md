@@ -69,12 +69,12 @@ default in
 To use alignment for all paired rows by default, pass `--enable_alignment true`.
 To choose per row, add an `enable_alignment` column to the samplesheet and set
 paired rows to `true` or `false`; blank cells inherit `--enable_alignment`.
-Nextflow runs `ALIGN` in `environment.alignment.yml`. The default backend
+Nextflow runs `ALIGN` in `envs/environment.alignment.yml`. The default backend
 validates the locked VALIS 1.2 image-registration stack and installs the exact
 VALIS package without re-resolving its older NumPy metadata when necessary.
 The former expression-based implementation remains available with
 `--alignment_backend legacy_spateo`, which activates its pinned Spateo/Dynamo
-bootstrap. Other stages continue to use the regular `environment.yml`.
+bootstrap. Other stages continue to use the regular `envs/environment.yml`.
 GPU-heavy `CELLPOSE_SEGMENT` and `ALIGN` default to one task at a time. CPU-only
 `PROSEG_SEGMENT` runs independently on a normal CPU node after each Cellpose
 task. RAPIDS-backed `CLUSTERING_SQUIDPY` allows up to four queued local tasks,
@@ -378,7 +378,7 @@ nextflow run workflows/main.nf -profile apptainer,gpu,azure_slurm_hpc \
     --samplesheet workflows/samplesheet.csv --outdir ./results
 ```
 
-Both segmentation processes use the existing `environment.yml` or main
+Both segmentation processes use the existing `envs/environment.yml` or main
 MerXen image. The `gpu` profile adds Apptainer `--nv` only to GPU processes.
 `CELLPOSE_SEGMENT` requests the `gpu` queue and one GPU, while
 `PROSEG_SEGMENT` requests the `htc` queue without GPU flags. Override those

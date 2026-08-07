@@ -51,7 +51,7 @@ git clone https://github.com/bourdenxlab/MerXen.git
 cd MerXen
 
 # 1. Environment (installs Python 3.12 and the merxen CLI)
-conda env create -f environment.yml
+conda env create -f envs/environment.yml
 conda activate merxen
 
 # 2. Environment variables
@@ -182,13 +182,13 @@ MerXen/
 ├── tests/                      # pytest suite, mirrors src/merxen/
 ├── docs/                       # Project documentation (start at docs/index.md)
 ├── notebooks/                  # Exploratory notebooks only
-├── environment*.yml            # Base env + isolated alignment / clustering-GPU / MENDER envs
-├── Dockerfile*                 # Isolated clustering-GPU and MENDER images
+├── envs/                       # Base env + isolated alignment / clustering-GPU / MENDER envs
+├── containers/                 # Base, clustering-GPU and MENDER image definitions
 ├── requirements*.lock          # Pinned dependency trees
 └── Agents.md                   # Project standards (must-read for contributors)
 ```
 
-Stages with conflicting dependency stacks run in their own environments: `environment.alignment.yml` pins the VALIS 1.2 image-registration stack for `ALIGN`, `environment.clustering-gpu.yml` provides RAPIDS, and `environment.mender.yml` isolates MENDER's AnnData 0.9 / Scanpy 1.9 requirement. Everything else uses `environment.yml`.
+Stages with conflicting dependency stacks run in their own environments: `envs/environment.alignment.yml` pins the VALIS 1.2 image-registration stack for `ALIGN`, `envs/environment.clustering-gpu.yml` provides RAPIDS, and `envs/environment.mender.yml` isolates MENDER's AnnData 0.9 / Scanpy 1.9 requirement. Everything else uses `envs/environment.yml`.
 
 </details>
 

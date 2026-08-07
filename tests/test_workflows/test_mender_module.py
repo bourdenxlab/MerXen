@@ -100,7 +100,7 @@ def test_mender_process_graph_is_isolated_and_cpu_only() -> None:
     assert "--nv" not in module_text
     assert "clusterOptions = ''" in config_text
     assert "mender_conda" in config_text
-    assert "environment.mender.yml" in config_text
+    assert "envs/environment.mender.yml" in config_text
     assert "mender_container" in config_text
     assert '"${params.outdir}/${pair_id}/${segmentation}/mender"' in module_text
     assert 'pattern: "mender_out/**"' in module_text
@@ -179,8 +179,8 @@ def test_mender_resources_fit_dwight_cpu_budget() -> None:
 
 def test_mender_environment_pins_repository_commit_and_old_stack() -> None:
     root = Path(__file__).resolve().parents[2]
-    environment_text = (root / "environment.mender.yml").read_text()
-    dockerfile_text = (root / "Dockerfile.mender").read_text()
+    environment_text = (root / "envs" / "environment.mender.yml").read_text()
+    dockerfile_text = (root / "containers" / "Dockerfile.mender").read_text()
     for expected in [
         "python=3.9",
         "anndata==0.9.1",
@@ -190,6 +190,6 @@ def test_mender_environment_pins_repository_commit_and_old_stack() -> None:
         "b29dc5ea352a2762cb7bf49d44ee661f0009f694",
     ]:
         assert expected in environment_text
-    assert "environment.mender.yml" in dockerfile_text
+    assert "envs/environment.mender.yml" in dockerfile_text
     assert 'CUDA_VISIBLE_DEVICES=""' in dockerfile_text
     assert "nvidia" not in dockerfile_text.lower()

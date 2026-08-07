@@ -167,14 +167,14 @@ git push origin HEAD --tags
 
 - **Never `pip install <pkg>` directly.** That leaves you out of sync with
   the lockfile and CI.
-- **Conda env (`environment.yml`)** is deliberately thin — Python 3.12, pip,
+- **Conda env (`envs/environment.yml`)** is deliberately thin — Python 3.12, pip,
   and `-e ".[dev]"`. All Python dependencies come through `pyproject.toml`.
-- **Alignment env (`environment.alignment.yml`)** installs
+- **Alignment env (`envs/environment.alignment.yml`)** installs
   `requirements.alignment.lock` plus Java/libvips for Nextflow `ALIGN`.
   VALIS 1.2 is installed exactly with `--no-deps` after the locked
   NumPy-2-compatible runtime. The explicit legacy backend still bootstraps its
   pinned Spateo/Dynamo packages at runtime.
-- **Clustering GPU env (`environment.clustering-gpu.yml`)** contains RAPIDS and
+- **Clustering GPU env (`envs/environment.clustering-gpu.yml`)** contains RAPIDS and
   its Dask pin. It receives H5AD inputs only; SpatialData reads and writes stay
   in the base environment.
 

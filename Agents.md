@@ -19,7 +19,9 @@ my_project/
 ├── notebooks/           # Exploratory only — no production logic here
 ├── docs/
 ├── pyproject.toml       # Single source of truth for dependencies and tool config
-├── environment.yml      # Conda env: python version, system-level deps, pip install
+├── envs/                # Conda envs: python version, system-level deps, pip install
+│   └── environment.yml
+├── containers/          # Dockerfiles for any images the project builds
 ├── requirements.lock    # Pinned dependency tree — generated, never hand-edited
 ├── .pre-commit-config.yaml
 ├── .env.example         # Template for environment variables (never commit .env)
@@ -33,6 +35,7 @@ Rules:
 - Tests mirror the package structure under `tests/`.
 - Notebooks are for exploration and communication. If logic in a notebook is needed in production, refactor it into `src/`.
 - Data files and model weights do not go in the repo. Use `.gitignore` to exclude them.
+- Conda environment files live in `envs/` and image definitions in `containers/`, so the root stays limited to files that tooling requires there. Lockfiles stay at the root because `uv`, CI, and `pip install -r` all assume that location.
 
 
 ## Dependency Management
@@ -58,7 +61,7 @@ dev = [
 ]
 ```
 
-### environment.yml
+### envs/environment.yml
 
 Keep this thin. Use it only for what conda handles better than pip: the Python version and system-level compiled dependencies. Defer everything else to pyproject.toml.
 
@@ -72,7 +75,8 @@ dependencies:
   # that pip can't install cleanly (GDAL, CUDA, etc.)
   - pip
   - pip:
-      - -e ".[dev]"
+      # Relative to this file's directory — conda runs pip from there.
+      - -e "../[dev]"
 ```
 
 Do not duplicate dependencies across environment.yml and pyproject.toml. If it can be installed via pip, it belongs in pyproject.toml.
@@ -193,7 +197,7 @@ def split_dataset(
 
 The README must cover:
 1. What the project does (one paragraph).
-2. How to set up the environment (`conda env create -f environment.yml`).
+2. How to set up the environment (`conda env create -f envs/environment.yml`).
 3. How to install pre-commit hooks (both commit and push types).
 4. How to run tests (`pytest`).
 5. How to run the main workflow / entry points.
