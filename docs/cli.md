@@ -201,7 +201,7 @@ merxen align --config align_config.json
 
 The default JSON backend is `valis`; set `backend` to `legacy_spateo` to run
 the former implementation. The recommended reproducible setup is
-`envs/environment.alignment.yml`, which installs `requirements.alignment.lock` and
+`envs/environment.alignment.yml`, which installs `requirements/requirements.alignment.lock` and
 the exact VALIS package. Validate either backend with
 `merxen check-alignment-deps --backend valis|legacy_spateo`.
 

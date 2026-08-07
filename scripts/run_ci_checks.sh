@@ -31,7 +31,7 @@ fi
 
 case "${install_mode}" in
     locked)
-        uv pip install --python "${venv_dir}/bin/python" -r requirements.lock
+        uv pip install --python "${venv_dir}/bin/python" -r requirements/requirements.lock
         uv pip install --python "${venv_dir}/bin/python" -e . --no-deps
         ;;
     local)

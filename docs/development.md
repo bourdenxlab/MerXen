@@ -71,7 +71,7 @@ and intend to fix it before the PR is reviewed.
 [.github/workflows/ci.yml](../.github/workflows/ci.yml) runs on every push
 to `main` and every PR:
 
-1. Install from `requirements.lock` with `uv`, then `pip install -e . --no-deps`.
+1. Install from `requirements/requirements.lock` with `uv`, then `pip install -e . --no-deps`.
 2. `ruff check .`
 3. `ruff format --check .`
 4. `mypy src/`
@@ -84,7 +84,7 @@ scripts/run_ci_checks.sh
 ```
 
 The script creates or reuses `.ci-venv`, installs from
-[requirements.lock](../requirements.lock) with `uv`, installs the package with
+[requirements/requirements.lock](../requirements/requirements.lock) with `uv`, installs the package with
 `--no-deps`, then runs the same lint, format, type-check, and test commands as
 GitHub Actions on Linux. On macOS, the script defaults to a local editable
 `.[dev]` install instead of the lockfile because the lockfile can include
@@ -96,7 +96,7 @@ somewhere else. Set `MERXEN_CI_INSTALL_MODE` to control dependency installation:
 | Mode | Behavior |
 |------|----------|
 | `auto` | Default. Uses `locked` on Linux and `local` on macOS. |
-| `locked` | Install exactly from `requirements.lock`, then `pip install -e . --no-deps`. Use this for Linux/server parity. |
+| `locked` | Install exactly from `requirements/requirements.lock`, then `pip install -e . --no-deps`. Use this for Linux/server parity. |
 | `local` | Install `pip install -e ".[dev]"` through `uv` without the lockfile. Use this for macOS edit/test/push workflows when CUDA wheels are unavailable. |
 | `none` | Do not install dependencies; reuse the existing `.ci-venv`. |
 
@@ -155,14 +155,14 @@ git push origin HEAD --tags
   regenerate the lockfile:
 
   ```bash
-  uv pip compile pyproject.toml --extra dev -o requirements.lock
+  uv pip compile pyproject.toml --extra dev -o requirements/requirements.lock
   ```
 
   When the dedicated registration stack changes, regenerate its separate lock:
 
   ```bash
   uv pip compile pyproject.toml --extra dev --group alignment-runtime \
-    --python-platform linux -o requirements.alignment.lock
+    --python-platform linux -o requirements/requirements.alignment.lock
   ```
 
 - **Never `pip install <pkg>` directly.** That leaves you out of sync with
@@ -170,7 +170,7 @@ git push origin HEAD --tags
 - **Conda env (`envs/environment.yml`)** is deliberately thin — Python 3.12, pip,
   and `-e ".[dev]"`. All Python dependencies come through `pyproject.toml`.
 - **Alignment env (`envs/environment.alignment.yml`)** installs
-  `requirements.alignment.lock` plus Java/libvips for Nextflow `ALIGN`.
+  `requirements/requirements.alignment.lock` plus Java/libvips for Nextflow `ALIGN`.
   VALIS 1.2 is installed exactly with `--no-deps` after the locked
   NumPy-2-compatible runtime. The explicit legacy backend still bootstraps its
   pinned Spateo/Dynamo packages at runtime.
@@ -181,7 +181,7 @@ git push origin HEAD --tags
 For reproducible installs (CI, onboarding):
 
 ```bash
-uv pip install -r requirements.lock
+uv pip install -r requirements/requirements.lock
 pip install -e . --no-deps
 ```
 

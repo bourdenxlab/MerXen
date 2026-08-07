@@ -60,12 +60,12 @@ def test_alignment_environment_uses_the_generated_runtime_lock() -> None:
     """The isolated stage environment must consume the VALIS runtime lock."""
     repo_root = Path(__file__).resolve().parents[2]
     environment_text = (repo_root / "envs" / "environment.alignment.yml").read_text()
-    lock_text = (repo_root / "requirements.alignment.lock").read_text()
+    lock_text = (repo_root / "requirements" / "requirements.alignment.lock").read_text()
     pyproject_text = (repo_root / "pyproject.toml").read_text()
     config_text = (repo_root / "workflows" / "nextflow.config").read_text()
     cell_type_mapper_commit = "d79f2a5a0780170be392da3ba0e7d0eb86a36238"
 
-    assert "-r ../requirements.alignment.lock" in environment_text
+    assert "-r ../requirements/requirements.alignment.lock" in environment_text
     assert "openjdk=11" in environment_text
     assert "libvips>=8.11" in environment_text
     assert "numpy==2.2.6" in lock_text

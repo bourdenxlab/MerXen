@@ -29,7 +29,7 @@ ruff format .
 mypy src/
 
 # Regenerate lockfile after changing dependencies
-uv pip compile pyproject.toml --extra dev -o requirements.lock
+uv pip compile pyproject.toml --extra dev -o requirements/requirements.lock
 ```
 
 ## Workflow

@@ -182,7 +182,7 @@ and equivalent-flip fields.
 
 VALIS 1.2 declares NumPy `<2`, while SpatialData 0.8 requires NumPy 2. The
 dedicated alignment environment therefore installs the generated
-`requirements.alignment.lock` (including a NumPy-2-compatible OpenCV,
+`requirements/requirements.alignment.lock` (including a NumPy-2-compatible OpenCV,
 PyTorch/Kornia, SimpleITK, Java, and libvips stack), then installs the exact
 `valis-wsi==1.2.0` package without re-resolving its old dependency metadata.
 MerXen applies narrow compatibility aliases for the two removed NumPy scalar

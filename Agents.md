@@ -22,7 +22,8 @@ my_project/
 ├── envs/                # Conda envs: python version, system-level deps, pip install
 │   └── environment.yml
 ├── containers/          # Dockerfiles for any images the project builds
-├── requirements.lock    # Pinned dependency tree — generated, never hand-edited
+├── requirements/        # Pinned dependency trees — generated, never hand-edited
+│   └── requirements.lock
 ├── .pre-commit-config.yaml
 ├── .env.example         # Template for environment variables (never commit .env)
 ├── .gitignore
@@ -86,13 +87,13 @@ Do not duplicate dependencies across environment.yml and pyproject.toml. If it c
 Generate a lockfile to pin the full resolved dependency tree:
 
 ```bash
-uv pip compile pyproject.toml --extra dev -o requirements.lock
+uv pip compile pyproject.toml --extra dev -o requirements/requirements.lock
 ```
 
-Commit `requirements.lock` to version control. Regenerate it when you add or update dependencies. For reproducible installs (CI, onboarding):
+Commit `requirements/requirements.lock` to version control. Regenerate it when you add or update dependencies. For reproducible installs (CI, onboarding):
 
 ```bash
-uv pip install -r requirements.lock
+uv pip install -r requirements/requirements.lock
 pip install -e . --no-deps
 ```
 
@@ -349,7 +350,7 @@ jobs:
         run: pip install uv
       - name: Install dependencies
         run: |
-          uv pip install --system -r requirements.lock
+          uv pip install --system -r requirements/requirements.lock
           uv pip install --system -e . --no-deps
       - name: Lint
         run: ruff check .
@@ -362,7 +363,7 @@ jobs:
 ```
 
 Notes:
-- CI uses `requirements.lock` for deterministic installs — not a fresh resolve.
+- CI uses `requirements/requirements.lock` for deterministic installs — not a fresh resolve.
 - CI uses pip/uv directly, not conda. Conda is a local development convenience; CI needs speed and reproducibility. If you need system-level libraries in CI, install them with `apt-get` in a prior step.
 - Set up branch protection: Settings → Branches → Add rule for `main` → check "Require status checks to pass before merging" and select the CI job.
 

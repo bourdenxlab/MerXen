@@ -10,7 +10,7 @@ dependencies:
   - pip:
       # Paths are relative to this file's directory: conda runs pip with its
       # working directory set to the environment file's location.
-      - -r ../requirements.alignment.lock
+      - -r ../requirements/requirements.alignment.lock
       - -e ../
       # VALIS itself is installed --no-deps by ALIGN after this locked stack is
       # active because its NumPy<2 metadata conflicts with SpatialData 0.8.
