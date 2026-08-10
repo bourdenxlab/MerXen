@@ -537,19 +537,17 @@ def _derived_complete(
 
 
 def _write_derived(
-    sdata: Any, zarr_path: Path, group: str, cache_key: str, tree: Any
+    sdata: Any, _zarr_path: Path, group: str, cache_key: str, tree: Any
 ) -> None:
-    """Replace + persist one derived element, tolerating an existing on-disk copy."""
-    container = sdata.images if group == "images" else sdata.labels
-    exists = cache_key in _on_disk_group(zarr_path, group)
-    if cache_key in container:
-        del container[cache_key]
-    container[cache_key] = tree
-    sdata.write_element(cache_key, overwrite=exists)
+    """Replace + persist one derived element, tolerating an existing on-disk copy.
 
-
-def _on_disk_group(zarr_path: Path, group: str) -> set[str]:
-    group_dir = zarr_path / group
-    if not group_dir.exists():
-        return set()
-    return {p.name for p in group_dir.iterdir() if p.is_dir()}
+    Routed through ``write_or_replace_element`` rather than a bare
+    ``sdata.write_element(overwrite=True)``. SpatialData refuses an in-place
+    overwrite when the target path is a subfolder of the store already backing the
+    object -- which is always true for these caches, since they live inside the
+    enriched zarr they are derived from. A bare write therefore only ever
+    succeeded on a FIRST build; refreshing an existing cache aborted the run with
+    "Cannot overwrite. The target path of the write operation is in use". The
+    helper recognises that refusal and retries via a recoverable element backup.
+    """
+    write_or_replace_element(sdata, cache_key, group, tree, overwrite=True)
