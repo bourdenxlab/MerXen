@@ -18,6 +18,12 @@ def test_alignment_workflow_defaults_to_valis_and_preserves_legacy_backend() -> 
         '"moving_platform"',
         '"merscope_image"',
         '"xenium_image"',
+        '"tissue_annotation_path"',
+        (
+            "path(merscope_tissue_annotation, stageAs: "
+            '"merscope_tissue_annotation.geojson")'
+        ),
+        'path(xenium_tissue_annotation, stageAs: "xenium_tissue_annotation.geojson")',
         '"valis"',
         '"legacy_spateo"',
         '"resume": ${params.alignment_resume}',
@@ -50,6 +56,10 @@ def test_alignment_workflow_defaults_to_valis_and_preserves_legacy_backend() -> 
     main_text = (repo_root / "workflows" / "main.nf").read_text()
     assert 'alignOut.resolve("alignment_transform.json")' in main_text
     assert 'alignOut.resolve("alignment_coords")' in main_text
+    assert "appendAlignmentAnnotationPreflightChecks" in main_text
+    assert "alignmentTissueAnnotationPath(row, platform)" in main_text
+    assert "settings.alignment_annotation_paths.MERSCOPE" in main_text
+    assert "settings.alignment_annotation_paths.XENIUM" in main_text
     assert "tuple(pairId, merscopeLatest, xeniumLatest, alignOut)" in main_text
     assert (
         '"transform_json_path": "${align_out}/alignment_transform.json"' in module_text

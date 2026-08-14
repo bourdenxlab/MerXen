@@ -6,7 +6,9 @@ process ALIGN {
     input:
     tuple val(pair_id),
         val(merscope_zarr_path),
-        val(xenium_zarr_path)
+        val(xenium_zarr_path),
+        path(merscope_tissue_annotation, stageAs: "merscope_tissue_annotation.geojson"),
+        path(xenium_tissue_annotation, stageAs: "xenium_tissue_annotation.geojson")
 
     output:
     tuple val(pair_id),
@@ -56,11 +58,13 @@ process ALIGN {
   "moving_platform": "${params.alignment_moving_platform}",
   "merscope_image": {
     "image_key": "${params.alignment_merscope_image_key}",
+    "tissue_annotation_path": ${params.alignment_backend == "valis" ? "\"${merscope_tissue_annotation}\"" : "null"},
     "dapi_channel": "${params.alignment_merscope_dapi_channel}",
     "pixel_size_um": ${params.alignment_merscope_pixel_size_um == null ? "null" : params.alignment_merscope_pixel_size_um}
   },
   "xenium_image": {
     "image_key": "${params.alignment_xenium_image_key}",
+    "tissue_annotation_path": ${params.alignment_backend == "valis" ? "\"${xenium_tissue_annotation}\"" : "null"},
     "dapi_channel": "${params.alignment_xenium_dapi_channel}",
     "pixel_size_um": ${params.alignment_xenium_pixel_size_um == null ? "null" : params.alignment_xenium_pixel_size_um}
   },

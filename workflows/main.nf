@@ -995,6 +995,15 @@ def corticalDepthAnnotationPath(row, platform, role) {
     return chooseField(row, candidatesByRole[role] ?: [])
 }
 
+def alignmentTissueAnnotationPath(row, platform) {
+    def prefix = platform.toString().toLowerCase()
+    return chooseField(row, [
+        "${prefix}_cortical_depth_annotation_geojson",
+        "${prefix}_cortical_depth_annotations_geojson",
+        "${prefix}_cortical_depth_annotation_path",
+    ])
+}
+
 def distanceFromObjectAnnotationPath(row, platform) {
     def prefix = platform.toString().toLowerCase()
     return chooseField(row, [
@@ -1039,6 +1048,23 @@ def appendCorticalDepthPreflightChecks(errors, row, settings, _params) {
                 )
             }
         }
+    }
+}
+
+def appendAlignmentAnnotationPreflightChecks(errors, row, settings, params) {
+    if (
+        !settings.run_align ||
+        params.alignment_backend.toString().trim().toLowerCase() != "valis"
+    ) {
+        return
+    }
+    ["MERSCOPE", "XENIUM"].each { platform ->
+        appendPreflightFileCheck(
+            errors,
+            alignmentTissueAnnotationPath(row, platform),
+            "ALIGN ${settings.pair_id}:${platform} combined pia/tissue-edge " +
+                "annotation GeoJSON",
+        )
     }
 }
 
@@ -1169,6 +1195,7 @@ def runPreflightChecks(row, settings, params) {
     def errors = []
     appendClusteringSquidpyPreflightChecks(errors, settings, params)
     appendMapMyCellsPreflightChecks(errors, settings, params)
+    appendAlignmentAnnotationPreflightChecks(errors, row, settings, params)
     appendCorticalDepthPreflightChecks(errors, row, settings, params)
     appendSpatialGeneTranscriptPreflightChecks(errors, row, settings, params)
     appendDistanceFromObjectPreflightChecks(errors, row, settings, params)
@@ -1499,6 +1526,14 @@ def rowSampleSettings(row, params) {
         required_clustering_segmentations: requiredClusteringSegmentations,
         mender_segmentations: menderSegmentations,
         distance_from_object_segmentations: distanceFromObjectSegmentations,
+        alignment_annotation_paths: [
+            MERSCOPE: optionalNormalizedPathString(
+                alignmentTissueAnnotationPath(row, "MERSCOPE")
+            ),
+            XENIUM: optionalNormalizedPathString(
+                alignmentTissueAnnotationPath(row, "XENIUM")
+            ),
+        ],
         spatial_gene_analysis_enabled: spatialGeneAnalysisEnabled,
         spatial_gene_analysis_transcript_analysis_enabled: (
             spatialGeneAnalysisEnabled && spatialGeneTranscriptAnalysisEnabled
@@ -2584,8 +2619,27 @@ workflow {
 
     align_inputs_ch = paired_zarrs_ch
         .filter { _pairId, _merscopePath, _xeniumPath, settings -> settings.run_align }
-        .map { pairId, merscopePath, xeniumPath, _settings ->
-            tuple(pairId, merscopePath, xeniumPath)
+        .map { pairId, merscopePath, xeniumPath, settings ->
+            def isValis = params.alignment_backend
+                .toString()
+                .trim()
+                .toLowerCase() == "valis"
+            def legacyPlaceholder = params.samplesheet
+            tuple(
+                pairId,
+                merscopePath,
+                xeniumPath,
+                file(
+                    isValis
+                        ? settings.alignment_annotation_paths.MERSCOPE
+                        : legacyPlaceholder
+                ),
+                file(
+                    isValis
+                        ? settings.alignment_annotation_paths.XENIUM
+                        : legacyPlaceholder
+                ),
+            )
         }
 
     alignment_task_results_ch = ALIGN(align_inputs_ch)
