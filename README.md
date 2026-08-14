@@ -103,7 +103,7 @@ See [Metro map](docs/metro-map.md) for what the diagram above does and does not 
 | `--outdir` | `./results` | Where all outputs are published. |
 | `--analysis_mode` | `paired` | `paired`, `merscope`, or `xenium`. Controls which columns are required and which stages are active. |
 | `--analysis_segmentation` | `both` | `both`, `all`, `reseg`, `original_seg`, `proseg_mask`, or `proseg_hybrid`. |
-| `--enable_alignment` | `false` | Run VALIS alignment and alignment QC before comparison. Paired mode only. |
+| `--enable_alignment` | `false` | Run VALIS alignment and alignment QC before comparison. Paired mode only; VALIS requires both platform-specific combined pia/tissue-edge annotation GeoJSON columns. |
 | `--alignment_backend` | `valis` | `valis`, or `legacy_spateo` for the former expression-based implementation. |
 | `--start_stage` / `--stop_stage` | `build_spatialdata` / `clustering_squidpy` | Run a contiguous stage range. |
 | `--only_stage` | — | Alias for setting `start_stage` and `stop_stage` to the same value. |

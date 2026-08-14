@@ -256,6 +256,15 @@ using `envs/environment.yml`.
 
 #### VALIS DAPI input and preprocessing
 
+VALIS alignment requires both platform-specific combined annotation files in
+the samplesheet: `merscope_cortical_depth_annotation_geojson` and
+`xenium_cortical_depth_annotation_geojson`. This requirement is independent of
+`cortical_depth_enabled`. Direct CLI JSON uses
+`merscope_image.tissue_annotation_path` and
+`xenium_image.tissue_annotation_path`. The annotation's pial pieces and single
+shared tissue edge define the anatomical mask; exclusions are subtracted, all
+other roles are ignored, and no mask morphology is performed.
+
 | Param | Default | Description |
 |-------|---------|-------------|
 | `alignment_merscope_image_key` / `alignment_xenium_image_key` | `MERSCOPE_z_projection` / `morphology_focus` | SpatialData image elements used for registration. |
@@ -270,11 +279,11 @@ using `envs/environment.yml`.
 | `alignment_clahe_clip_limit` | `0.01` | Mild local contrast limit. |
 | `alignment_smoothing_sigma_um` | `3.0` | Nuclear-density smoothing scale. |
 | `alignment_edge_taper_um` | `150.0` | Cosine taper measured inward from the acquired MERSCOPE FOV footprint (or rectangular support on other inputs), applied only to temporary registration images and fields. |
-| `alignment_edge_exclusion_um` | `150.0` | Acquired-support margin excluded from tissue masks, feature detection, rigid scoring, and non-rigid estimation. |
-| `alignment_mask_smoothing_sigma_um` | `20.0` | Tissue-density mask smoothing scale. |
-| `alignment_mask_closing_radius_um` | `30.0` | Tissue-mask closing radius. |
-| `alignment_mask_min_area_um2` / `alignment_mask_hole_area_um2` | `25000.0` / `25000.0` | Minimum retained fragment area and maximum filled-hole area. |
-| `alignment_mask_dilation_um` | `10.0` | Edge dilation for robust partial-tissue support. |
+| `alignment_edge_exclusion_um` | `150.0` | Acquired-support margin excluded from feature/intensity/non-rigid scoring. It does not erode the annotation-derived anatomical mask used for overlap and boundaries. |
+| `alignment_mask_smoothing_sigma_um` | `20.0` | Deprecated automatic-mask compatibility value; unused by production VALIS registration. |
+| `alignment_mask_closing_radius_um` | `30.0` | Deprecated automatic-mask compatibility value; unused by production VALIS registration. |
+| `alignment_mask_min_area_um2` / `alignment_mask_hole_area_um2` | `25000.0` / `25000.0` | Deprecated automatic-mask compatibility values; unused by production VALIS registration. |
+| `alignment_mask_dilation_um` | `10.0` | Deprecated automatic-mask compatibility value; the annotation-derived mask is not dilated. |
 
 #### Orientation, VALIS, and transform output
 
@@ -317,8 +326,8 @@ using `envs/environment.yml`.
 | `alignment_valis_field_sample_spacing_px` | `8` | Spacing for serialized forward/backward displacement fields. |
 | `alignment_coordinate_system_name` | `merxen_xenium` | Named fixed-platform SpatialData coordinate system. |
 | `alignment_transform_transcripts` / `alignment_transform_centroids` / `alignment_transform_polygons` | `true` / `true` / `true` | Materialize selected registered vectors and table centroid coordinates. |
-| `alignment_mark_shared_tissue_domain` | `true` | Annotate transformed points, shapes, and centroids with the valid shared-tissue domain. |
-| `alignment_resume` | `true` | Reuse a complete transform bundle when its stored VALIS parameters and platform roles match. Nextflow `-resume` remains the normal workflow-level cache. |
+| `alignment_mark_shared_tissue_domain` | `true` | Annotate transformed points, shapes, and centroids with the shared annotation-derived anatomical tissue domain. |
+| `alignment_resume` | `true` | Reuse a complete transform bundle when its stored VALIS parameters, platform roles, and annotation content hashes match. Nextflow `-resume` remains the normal workflow-level cache. |
 
 #### VALIS QC selection
 

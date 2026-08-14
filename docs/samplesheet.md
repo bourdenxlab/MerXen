@@ -54,6 +54,17 @@ Platform-specific columns are preferred; generic
 columns are accepted when one row uses a single active platform or the same
 annotation should be reused.
 
+The default VALIS alignment backend has a stricter, independent requirement:
+when a row runs `align`, both
+`merscope_cortical_depth_annotation_geojson` and
+`xenium_cortical_depth_annotation_geojson` must be present even if
+`cortical_depth_enabled=false`. Each combined file must contain one or more
+role-labelled pial lines and exactly one shared tissue-edge line. VALIS unions
+the pial/edge pieces, subtracts every exclusion polygon, and ignores WM,
+ribbon, and all other roles. It does not accept the separate-file aliases for
+this mask. The legacy Spateo backend retains its previous behavior and does
+not require these files.
+
 | Column pattern | Description |
 |----------------|-------------|
 | `<platform>_cortical_depth_annotation_geojson` | Combined GeoJSON with role-labelled pial, tissue-edge, optional WM, and optional mask features. `<platform>` is `merscope` or `xenium`. Generic alias: `cortical_depth_annotation_geojson`. |
@@ -103,14 +114,13 @@ workflow parses the CSV itself.
 
 ## Minimal example
 
-Paired mode:
+Paired mode with the default VALIS backend:
 
 ```csv
-pair_id,analysis_mode,enable_alignment,merscope_dir,xenium_dir
-EXAMPLE01,paired,true,/path/to/merscope/EXAMPLE01/region_R1,/path/to/xenium/EXAMPLE01
+pair_id,analysis_mode,enable_alignment,merscope_dir,xenium_dir,merscope_cortical_depth_annotation_geojson,xenium_cortical_depth_annotation_geojson
+EXAMPLE01,paired,true,/path/to/merscope/EXAMPLE01/region_R1,/path/to/xenium/EXAMPLE01,/path/to/EXAMPLE01_merscope.geojson,/path/to/EXAMPLE01_xenium.geojson
 ```
 
-This is enough to run the whole pipeline end-to-end with default parameters.
 All other columns fall back to defaults.
 
 Xenium-only mode:

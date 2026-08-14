@@ -32,11 +32,17 @@ The stage:
    create a positive high-pass rim. Robust clipping, compression, and mild
    CLAHE are followed by a 150 µm cosine taper measured inward from the actual
    support boundary.
-3. Creates a downsampled tissue-density mask with automatic thresholding,
-   closing, hole filling, physical-area filtering, and edge dilation. Multiple
-   substantial fragments are retained. The registration validity mask erodes
-   acquired support by 150 µm, and tissue outside that safe domain is excluded
-   from features, rigid scoring, and QC.
+3. Loads the platform-specific combined annotation GeoJSON from the existing
+   `merscope_cortical_depth_annotation_geojson` and
+   `xenium_cortical_depth_annotation_geojson` samplesheet columns. Every pial
+   piece is closed against the one shared tissue-edge line, the resulting
+   polygons are unioned, and all exclusion polygons are subtracted globally.
+   White-matter boundaries, ribbon polygons, and other annotation roles are
+   ignored. The geometry is mapped from dataset µm directly onto the
+   registration canvas and clipped only to acquired image support; no
+   thresholding, closing, hole filling, dilation, or erosion is applied.
+   Missing or invalid annotations fail the VALIS stage explicitly, even when
+   cortical-depth computation is disabled.
 4. Resamples both images to a shared isotropic physical pixel size and places
    them on a padded registration-only canvas. Source images and native
    SpatialData elements are not resampled or overwritten.
@@ -47,6 +53,11 @@ The stage:
    correlation, Dice, and DAPI normalized mutual information. Reflections are
    searched by default for paired MERSCOPE/Xenium sections, but the reflected
    candidate must beat the non-reflected candidate by a configured margin.
+   Full annotation masks drive Dice, coverage, and boundary terms. A separate
+   registration-validity mask erodes acquired support by 150 µm and restricts
+   only image-dependent operations such as SIFT, DAPI mutual information,
+   density correlation, and local deformation estimation. It never erodes the
+   hand-drawn anatomical boundary.
 6. Runs a final local orientation search on the selected handedness over
    ±2.5° and ±500 µm in X/Y. A dense coarse score volume locates nearby 3D
    maxima, and a finer grid tests whether each maximum persists away from the
@@ -135,6 +146,7 @@ Important defaults in `workflows/nextflow.config` include:
 | `alignment_fixed_platform` / `alignment_moving_platform` | `XENIUM` / `MERSCOPE` | Reference and transformed platforms. |
 | `alignment_*_image_key` | platform default | SpatialData DAPI image element. |
 | `alignment_*_pixel_size_um` | `null` | Optional validated physical-size override. |
+| samplesheet `<platform>_cortical_depth_annotation_geojson` | required for VALIS | Platform-specific combined pia/tissue-edge annotation used for the anatomical mask, regardless of whether cortical depth is enabled. |
 | `alignment_registration_source_max_dim_px` | `3200` | Bounds temporary padded registration images. |
 | `alignment_background_sigma_um` | `75` | Broad DAPI background scale. |
 | `alignment_background_boundary_mode` | `mirror` | Boundary mode used inside support-normalized Gaussian filtering. |
@@ -165,10 +177,13 @@ Important defaults in `workflows/nextflow.config` include:
 | `alignment_coordinate_system_name` | `merxen_xenium` | Registered SpatialData coordinate system. |
 | `alignment_resume` | `true` | Reload a complete parameter-compatible transform bundle for direct reruns. |
 
-The Pydantic `ValisAlignmentConfig` exposes the full preprocessing, masking,
+The Pydantic `ValisAlignmentConfig` exposes the full preprocessing,
 orientation, feature, transform, non-rigid, output, resume, and QC thresholds.
-Direct CLI JSON additionally supports external DAPI paths and explicit 3×3
-`dataset_to_image_matrix` values.
+The historical automatic-mask parameters remain parseable for compatibility
+but are not used by production VALIS registration. Direct CLI JSON must set
+`merscope_image.tissue_annotation_path` and
+`xenium_image.tissue_annotation_path`; it additionally supports external DAPI
+paths and explicit 3×3 `dataset_to_image_matrix` values.
 
 The orientation QC directory records both handedness branches in
 `orientation_candidates.json`, side-by-side candidate overlays, and an
@@ -218,10 +233,10 @@ VALIS run.
 | `transform_chain.json` | Explicit physical/pixel/registration frame chain and matrices. |
 | `forward_displacement_field.npz` / `backward_displacement_field.npz` | Sampled fields when non-rigid registration ran. |
 | `registration_summary.json` / `.csv` | Status (`non_rigid_pass`, `global_only`, or failure diagnostics) and stage-wise DAPI QC. |
-| `resume_manifest.json` | Exact input paths, platform roles, and VALIS parameters required before a completed bundle can be reused. |
-| `shared_tissue_mask.npy` / `.tif` | Valid cross-platform comparison domain on the original fixed DAPI pixel grid. |
+| `resume_manifest.json` | Exact input paths, annotation paths/content hashes, platform roles, and VALIS parameters required before a completed bundle can be reused. |
+| `shared_tissue_mask.npy` / `.tif` | Shared annotation-derived anatomical tissue domain on the original fixed DAPI pixel grid. |
 | `shared_tissue_mask_registration.npy` / `.tif` | The same domain on the padded registration grid used for point annotation. |
-| `registration_inputs/` | Processed DAPI images, tissue masks, outlines, edge-validity masks, and edge-artifact metrics. |
+| `registration_inputs/` | Processed DAPI images; annotation masks before/after support clipping; anatomical/scoring outlines and overlays; annotation provenance; edge-validity masks; and edge-artifact metrics. |
 | `registration_images/` | Stable fixed and pre-oriented TIFFs supplied to VALIS. |
 | `valis/` | VALIS registrar, summary, thumbnails, matches, overlaps, and deformation artifacts. |
 | `qc/partial_overlap/` | Before/after overlays, candidate contact sheet, robust-objective profile, and candidate metrics. |
