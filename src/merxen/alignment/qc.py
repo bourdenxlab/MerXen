@@ -93,6 +93,8 @@ def compute_dapi_metrics(
     fixed_mask: Any,
     moving_mask: Any,
     *,
+    fixed_valid_mask: Any | None = None,
+    moving_valid_mask: Any | None = None,
     moving_feature_xy: np.ndarray | None = None,
     fixed_feature_xy: np.ndarray | None = None,
 ) -> dict[str, float | int]:
@@ -101,14 +103,30 @@ def compute_dapi_metrics(
     moving = np.asarray(moving_image)
     fmask = np.asarray(fixed_mask) > 0
     mmask = np.asarray(moving_mask) > 0
+    fvalid = (
+        np.ones(fixed.shape, dtype=bool)
+        if fixed_valid_mask is None
+        else np.asarray(fixed_valid_mask) > 0
+    )
+    mvalid = (
+        np.ones(moving.shape, dtype=bool)
+        if moving_valid_mask is None
+        else np.asarray(moving_valid_mask) > 0
+    )
     if (
         fixed.shape != moving.shape
         or fixed.shape != fmask.shape
         or fixed.shape != mmask.shape
+        or fixed.shape != fvalid.shape
+        or fixed.shape != mvalid.shape
     ):
-        raise ValueError("DAPI QC images and masks must share one shape")
+        raise ValueError(
+            "DAPI QC images, tissue masks, and validity masks must share one shape"
+        )
     overlap = fmask & mmask
     union = fmask | mmask
+    fixed_score_mask = fmask & fvalid
+    moving_score_mask = mmask & mvalid
     metrics: dict[str, float | int] = {
         "tissue_dice": tissue_dice(fmask, mmask),
         "tissue_iou": (
@@ -117,14 +135,14 @@ def compute_dapi_metrics(
         "normalized_mutual_information": masked_normalized_mutual_information(
             fixed,
             moving,
-            fmask,
-            mmask,
+            fixed_score_mask,
+            moving_score_mask,
         ),
         "density_correlation": masked_density_correlation(
             fixed,
             moving,
-            fmask,
-            mmask,
+            fixed_score_mask,
+            moving_score_mask,
         ),
         "fixed_overlap_fraction": (
             float(overlap.sum() / fmask.sum()) if int(fmask.sum()) > 0 else float("nan")
@@ -164,7 +182,7 @@ def compute_dapi_metrics(
             ),
             "feature_inlier_coverage": _feature_coverage(
                 fixed_xy,
-                fixed_mask=fmask,
+                fixed_mask=fixed_score_mask,
             ),
         }
     )

@@ -56,17 +56,23 @@ def estimate_pre_orientation(
     fixed_mask: Any,
     moving_mask: Any,
     *,
+    fixed_valid_mask: Any | None = None,
+    moving_valid_mask: Any | None = None,
     config: OrientationSearchConfig,
     pixel_size_um: float = 1.0,
     output_dir: Path | None = None,
 ) -> OrientationResult:
     """Estimate unrestricted moving-to-fixed rotation, scale, and translation."""
-    fixed, moving, fmask, mmask, full_to_small = _orientation_inputs(
-        fixed_image,
-        moving_image,
-        fixed_mask,
-        moving_mask,
-        max_dimension=int(config.max_dimension_px),
+    fixed, moving, fmask, mmask, fscore, mscore, full_to_small = (
+        _orientation_input_domains(
+            fixed_image,
+            moving_image,
+            fixed_mask,
+            moving_mask,
+            fixed_valid_mask=fixed_valid_mask,
+            moving_valid_mask=moving_valid_mask,
+            max_dimension=int(config.max_dimension_px),
+        )
     )
     reflections = _requested_reflections(config)
     has_manual_seed = bool(
@@ -80,6 +86,8 @@ def estimate_pre_orientation(
             moving,
             fmask,
             mmask,
+            fixed_score_mask=fscore,
+            moving_score_mask=mscore,
             config=config,
         )
         if feature_result is not None:
@@ -97,11 +105,19 @@ def estimate_pre_orientation(
             output_shape_rc=fixed.shape,
             interpolation=cv2.INTER_NEAREST,
         )
+        reflected_score_mask = warp_image(
+            mscore,
+            reflection,
+            output_shape_rc=fixed.shape,
+            interpolation=cv2.INTER_NEAREST,
+        )
         reflected_result = _estimate_with_sift(
             fixed,
             reflected_moving,
             fmask,
             reflected_mask,
+            fixed_score_mask=fscore,
+            moving_score_mask=reflected_score_mask,
             config=config,
         )
         if reflected_result is not None:
@@ -120,6 +136,8 @@ def estimate_pre_orientation(
             moving=moving,
             fixed_mask=fmask,
             moving_mask=mmask,
+            fixed_score_mask=fscore,
+            moving_score_mask=mscore,
             config=config,
             reduction_scale=float(full_to_small[0, 0]),
             pixel_size_um=float(pixel_size_um),
@@ -143,6 +161,8 @@ def estimate_pre_orientation(
         moving,
         fmask,
         mmask,
+        fixed_score_mask=fscore,
+        moving_score_mask=mscore,
         config=config,
         reduction_scale=float(full_to_small[0, 0]),
         pixel_size_um=float(pixel_size_um),
@@ -253,16 +273,62 @@ def _orientation_inputs(
     *,
     max_dimension: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    fixed, moving, fmask, mmask, _, _, full_to_small = _orientation_input_domains(
+        fixed_image,
+        moving_image,
+        fixed_mask,
+        moving_mask,
+        fixed_valid_mask=None,
+        moving_valid_mask=None,
+        max_dimension=max_dimension,
+    )
+    return fixed, moving, fmask, mmask, full_to_small
+
+
+def _orientation_input_domains(
+    fixed_image: Any,
+    moving_image: Any,
+    fixed_mask: Any,
+    moving_mask: Any,
+    *,
+    fixed_valid_mask: Any | None,
+    moving_valid_mask: Any | None,
+    max_dimension: int,
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+]:
+    """Prepare full anatomical masks and validity-restricted scoring masks."""
     fixed = np.asarray(fixed_image, dtype=np.uint8)
     moving = np.asarray(moving_image, dtype=np.uint8)
     fmask = (np.asarray(fixed_mask) > 0).astype(np.uint8) * 255
     mmask = (np.asarray(moving_mask) > 0).astype(np.uint8) * 255
+    fvalid = (
+        np.ones(fixed.shape, dtype=np.uint8) * 255
+        if fixed_valid_mask is None
+        else (np.asarray(fixed_valid_mask) > 0).astype(np.uint8) * 255
+    )
+    mvalid = (
+        np.ones(moving.shape, dtype=np.uint8) * 255
+        if moving_valid_mask is None
+        else (np.asarray(moving_valid_mask) > 0).astype(np.uint8) * 255
+    )
     if (
         fixed.shape != moving.shape
         or fixed.shape != fmask.shape
         or fixed.shape != mmask.shape
+        or fixed.shape != fvalid.shape
+        or fixed.shape != mvalid.shape
     ):
-        raise ValueError("Orientation images and masks must share one canvas shape")
+        raise ValueError(
+            "Orientation images, tissue masks, and validity masks must share "
+            "one canvas shape"
+        )
 
     scale = min(1.0, float(max_dimension) / float(max(fixed.shape)))
     if scale < 1.0:
@@ -290,12 +356,22 @@ def _orientation_inputs(
         mmask = (
             resize(mmask, target, order=0, preserve_range=True, anti_aliasing=False) > 0
         ).astype(np.uint8) * 255
+        fvalid = (
+            resize(fvalid, target, order=0, preserve_range=True, anti_aliasing=False)
+            > 0
+        ).astype(np.uint8) * 255
+        mvalid = (
+            resize(mvalid, target, order=0, preserve_range=True, anti_aliasing=False)
+            > 0
+        ).astype(np.uint8) * 255
 
     full_to_small = np.array(
         [[scale, 0.0, 0.0], [0.0, scale, 0.0], [0.0, 0.0, 1.0]],
         dtype=np.float64,
     )
-    return fixed, moving, fmask, mmask, full_to_small
+    fscore = np.asarray(((fmask > 0) & (fvalid > 0)).astype(np.uint8) * 255)
+    mscore = np.asarray(((mmask > 0) & (mvalid > 0)).astype(np.uint8) * 255)
+    return fixed, moving, fmask, mmask, fscore, mscore, full_to_small
 
 
 def _estimate_with_sift(
@@ -304,13 +380,17 @@ def _estimate_with_sift(
     fixed_mask: np.ndarray,
     moving_mask: np.ndarray,
     *,
+    fixed_score_mask: np.ndarray | None = None,
+    moving_score_mask: np.ndarray | None = None,
     config: OrientationSearchConfig,
 ) -> OrientationResult | None:
+    fixed_score = fixed_mask if fixed_score_mask is None else fixed_score_mask
+    moving_score = moving_mask if moving_score_mask is None else moving_score_mask
     if not hasattr(cv2, "SIFT_create"):
         return None
     sift = cv2.SIFT_create(nfeatures=int(config.sift_features))
-    fixed_kp, fixed_desc = sift.detectAndCompute(fixed, fixed_mask)
-    moving_kp, moving_desc = sift.detectAndCompute(moving, moving_mask)
+    fixed_kp, fixed_desc = sift.detectAndCompute(fixed, fixed_score)
+    moving_kp, moving_desc = sift.detectAndCompute(moving, moving_score)
     if fixed_desc is None or moving_desc is None:
         return None
     if len(fixed_desc) < 3 or len(moving_desc) < 3:
@@ -361,8 +441,8 @@ def _estimate_with_sift(
     n_inliers = int(inliers.sum())
     scale = float(np.sqrt(abs(np.linalg.det(matrix[:2, :2]))))
     determinant = float(np.linalg.det(matrix[:2, :2]))
-    moving_coverage = _point_coverage(moving_xy[inliers], moving_mask)
-    fixed_coverage = _point_coverage(fixed_xy[inliers], fixed_mask)
+    moving_coverage = _point_coverage(moving_xy[inliers], moving_score)
+    fixed_coverage = _point_coverage(fixed_xy[inliers], fixed_score)
     coverage = min(moving_coverage, fixed_coverage)
     warped_mask = warp_image(
         moving_mask,
@@ -382,11 +462,17 @@ def _estimate_with_sift(
         return None
 
     warped_image = warp_image(moving, matrix, output_shape_rc=fixed.shape)
+    warped_score_mask = warp_image(
+        moving_score,
+        matrix,
+        output_shape_rc=fixed.shape,
+        interpolation=cv2.INTER_NEAREST,
+    )
     nmi = masked_normalized_mutual_information(
         fixed,
         warped_image,
-        fixed_mask,
-        warped_mask,
+        fixed_score,
+        warped_score_mask,
     )
     score = _combined_score(
         dice=dice,
@@ -422,6 +508,8 @@ def _fallback_angular_search(
     fixed_mask: np.ndarray,
     moving_mask: np.ndarray,
     *,
+    fixed_score_mask: np.ndarray | None = None,
+    moving_score_mask: np.ndarray | None = None,
     config: OrientationSearchConfig,
     reduction_scale: float = 1.0,
     pixel_size_um: float = 1.0,
@@ -449,6 +537,8 @@ def _fallback_angular_search(
             moving=moving,
             fixed_mask=fixed_mask,
             moving_mask=moving_mask,
+            fixed_score_mask=fixed_score_mask,
+            moving_score_mask=moving_score_mask,
             config=config,
             translation_center_xy=None,
             translation_radius_px=float(config.coarse_translation_radius_px),
@@ -483,6 +573,8 @@ def _fallback_angular_search(
                     moving=moving,
                     fixed_mask=fixed_mask,
                     moving_mask=moving_mask,
+                    fixed_score_mask=fixed_score_mask,
+                    moving_score_mask=moving_score_mask,
                     config=config,
                     translation_center_xy=(
                         float(candidate.metrics["translation_x_px"]),
@@ -520,6 +612,8 @@ def _fallback_angular_search(
                     moving=moving,
                     fixed_mask=fixed_mask,
                     moving_mask=moving_mask,
+                    fixed_score_mask=fixed_score_mask,
+                    moving_score_mask=moving_score_mask,
                     config=config,
                     translation_center_xy=(
                         float(candidate.metrics["translation_x_px"]),
@@ -578,6 +672,8 @@ def _fallback_angular_search(
         moving=moving,
         fixed_mask=fixed_mask,
         moving_mask=moving_mask,
+        fixed_score_mask=fixed_score_mask,
+        moving_score_mask=moving_score_mask,
         config=config,
         reduction_scale=reduction_scale,
         pixel_size_um=pixel_size_um,
@@ -632,6 +728,8 @@ def _score_angle_translation_candidates(
     moving: np.ndarray,
     fixed_mask: np.ndarray,
     moving_mask: np.ndarray,
+    fixed_score_mask: np.ndarray | None = None,
+    moving_score_mask: np.ndarray | None = None,
     config: OrientationSearchConfig,
     translation_center_xy: tuple[float, float] | None,
     translation_radius_px: float,
@@ -684,6 +782,8 @@ def _score_angle_translation_candidates(
             moving=moving,
             fixed_mask=fixed_mask,
             moving_mask=moving_mask,
+            fixed_score_mask=fixed_score_mask,
+            moving_score_mask=moving_score_mask,
             config=config,
             search_stage=search_stage,
             translation_seed_rank=rank,
@@ -932,6 +1032,8 @@ def _final_local_orientation_search(
     moving: np.ndarray,
     fixed_mask: np.ndarray,
     moving_mask: np.ndarray,
+    fixed_score_mask: np.ndarray | None = None,
+    moving_score_mask: np.ndarray | None = None,
     config: OrientationSearchConfig,
     reduction_scale: float,
     pixel_size_um: float,
@@ -983,6 +1085,8 @@ def _final_local_orientation_search(
         moving=moving,
         fixed_mask=fixed_mask,
         moving_mask=moving_mask,
+        fixed_score_mask=fixed_score_mask,
+        moving_score_mask=moving_score_mask,
         config=config,
         search_stage="local_fine_coarse",
     )
@@ -1059,6 +1163,8 @@ def _final_local_orientation_search(
                 moving=moving,
                 fixed_mask=fixed_mask,
                 moving_mask=moving_mask,
+                fixed_score_mask=fixed_score_mask,
+                moving_score_mask=moving_score_mask,
                 config=config,
                 search_stage="local_fine_refine",
             )
@@ -1308,6 +1414,8 @@ def _score_local_orientation_grid(
     moving: np.ndarray,
     fixed_mask: np.ndarray,
     moving_mask: np.ndarray,
+    fixed_score_mask: np.ndarray | None = None,
+    moving_score_mask: np.ndarray | None = None,
     config: OrientationSearchConfig,
     search_stage: str,
 ) -> tuple[list[OrientationResult], np.ndarray]:
@@ -1324,6 +1432,8 @@ def _score_local_orientation_grid(
             moving=moving,
             fixed_mask=fixed_mask,
             moving_mask=moving_mask,
+            fixed_score_mask=fixed_score_mask,
+            moving_score_mask=moving_score_mask,
             config=config,
             search_stage=search_stage,
             translation_seed_rank=1,
@@ -1837,6 +1947,8 @@ def _score_orientation_transform(
     moving: np.ndarray,
     fixed_mask: np.ndarray,
     moving_mask: np.ndarray,
+    fixed_score_mask: np.ndarray | None = None,
+    moving_score_mask: np.ndarray | None = None,
     config: OrientationSearchConfig,
     search_stage: str,
     translation_seed_rank: int,
@@ -1859,11 +1971,19 @@ def _score_orientation_transform(
     fixed_overlap_fraction = float(overlap.sum() / max(1, fixed_binary.sum()))
     moving_overlap_fraction = float(overlap.sum() / max(1, warped_binary.sum()))
     retained_moving_fraction = float(warped_binary.sum() / max(1, moving_binary.sum()))
+    fixed_score = fixed_mask if fixed_score_mask is None else fixed_score_mask
+    moving_score = moving_mask if moving_score_mask is None else moving_score_mask
+    warped_score = warp_image(
+        moving_score,
+        matrix,
+        output_shape_rc=fixed.shape,
+        interpolation=cv2.INTER_NEAREST,
+    )
     nmi = masked_normalized_mutual_information(
         fixed,
         warped_image,
-        fixed_mask,
-        warped_mask,
+        fixed_score,
+        warped_score,
     )
     score = _combined_score(
         dice=dice,

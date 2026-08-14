@@ -530,6 +530,7 @@ class AlignmentImageConfig(BaseModel):
 
     image_key: str | None = None
     image_path: Path | None = None
+    tissue_annotation_path: Path | None = None
     dapi_channel: str = "DAPI"
     pixel_size_um: float | None = Field(default=None, gt=0.0)
     dataset_to_image_matrix: list[list[float]] | None = None
@@ -548,7 +549,7 @@ class AlignmentImageConfig(BaseModel):
 
 
 class DAPIProcessingConfig(BaseModel):
-    """Physical-unit DAPI preprocessing and tissue-mask parameters."""
+    """Physical-unit DAPI preprocessing and legacy mask parameters."""
 
     background_sigma_um: float = Field(default=75.0, gt=0.0)
     background_boundary_mode: Literal["mirror", "reflect", "nearest"] = "mirror"

@@ -16,16 +16,12 @@ from scipy.spatial import cKDTree
 from scipy.stats import hypergeom
 from shapely import STRtree, contains_xy, points
 from shapely.geometry import MultiPolygon, Polygon
-from shapely.ops import unary_union
 from statsmodels.stats.multitest import multipletests
 
 from merxen.analysis.clustering_squidpy import CONTROL_TOKENS
 from merxen.config import SpatialGeneAnalysisConfig, SpatialGeneAnalysisSampleConfig
-from merxen.cortical_depth.boundaries import (
-    BoundaryAnnotations,
-    load_boundary_annotations,
-)
-from merxen.cortical_depth.ribbon import build_cortical_ribbon_polygon
+from merxen.cortical_depth.boundaries import load_boundary_annotations
+from merxen.cortical_depth.tissue import build_full_tissue_polygon
 from merxen.io.transcript_io import iter_points_chunks, resolve_col
 from merxen.memory import log_status
 
@@ -126,27 +122,11 @@ def build_analysis_tissue_polygon(
         ribbon_path=sample.ribbon_path,
         annotation_path=sample.annotation_path,
     )
-    polygons = []
-    for piece in annotations.pieces:
-        # The full tissue support is bounded by pia and tissue edge. WM is
-        # deliberately omitted here because it is an internal cortical boundary.
-        tissue_annotations = BoundaryAnnotations(
-            pial=piece.pial,
-            wm=None,
-            exclusions=piece.exclusions,
-            # Prefer pia+tissue-edge support even if a cortical ribbon polygon
-            # is also present in a combined annotation file.
-            ribbon=piece.ribbon if annotations.edge is None else None,
-        )
-        polygon, _ = build_cortical_ribbon_polygon(
-            tissue_annotations,
-            edge_line=annotations.edge,
-        )
-        polygons.append(polygon)
-    combined = unary_union(polygons)
-    if combined.is_empty or not isinstance(combined, Polygon | MultiPolygon):
-        raise ValueError("Pial/tissue-edge annotations did not form a tissue polygon.")
-    return combined
+    return build_full_tissue_polygon(
+        annotations,
+        require_tissue_edge=False,
+        allow_ribbon_fallback=True,
+    )
 
 
 def load_and_classify_transcripts(

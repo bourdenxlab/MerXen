@@ -111,8 +111,7 @@ def test_aligned_objective_helper_reuses_physical_identity_score() -> None:
         + 90.0 * np.exp(-((x - 63.0) ** 2 + (y - 49.0) ** 2) / 80.0),
         0.0,
     ).astype(np.uint8)
-    valid = np.ones_like(mask)
-    valid[:, :6] = False
+    valid = ((x - 49.0) ** 2 / 27.0**2 + (y - 38.0) ** 2 / 19.0**2) <= 1.0
 
     summary = evaluate_aligned_partial_overlap_objective(
         image,

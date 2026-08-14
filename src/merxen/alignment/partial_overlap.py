@@ -74,7 +74,10 @@ class _PartialOverlapObjective:
             sigma=sigma,
             mode="reflect",
         )
-        self.fixed_boundary = _mask_boundary(self.fixed_mask) & self.fixed_valid
+        # Tissue shape is an anatomical signal from the manual annotation and
+        # must retain the pial/acquisition-edge boundary. Validity is a separate
+        # image-quality domain used only for intensity-based scoring.
+        self.fixed_boundary = _mask_boundary(self.fixed_mask)
         self.fixed_boundary_distance = ndi.distance_transform_edt(~self.fixed_boundary)
         self.boundary_distance_scale_px = max(
             1.0,
@@ -134,8 +137,8 @@ class _PartialOverlapObjective:
             )
             > 0
         )
-        fixed_tissue = self.fixed_mask & self.fixed_valid
-        moving_tissue = moving_mask & moving_valid
+        fixed_tissue = self.fixed_mask
+        moving_tissue = moving_mask
         overlap = fixed_tissue & moving_tissue
         fixed_overlap = _safe_fraction(int(overlap.sum()), int(fixed_tissue.sum()))
         moving_overlap = _safe_fraction(
@@ -144,8 +147,8 @@ class _PartialOverlapObjective:
         )
 
         common_valid = self.fixed_valid & moving_valid
-        moving_boundary = _mask_boundary(moving_mask) & common_valid
-        fixed_boundary = self.fixed_boundary & common_valid
+        moving_boundary = _mask_boundary(moving_mask)
+        fixed_boundary = self.fixed_boundary
         moving_to_fixed = self.fixed_boundary_distance[moving_boundary]
         if np.any(moving_boundary):
             moving_boundary_distance = ndi.distance_transform_edt(~moving_boundary)

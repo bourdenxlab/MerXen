@@ -17,6 +17,7 @@ from spatialdata.transformations import Affine, Identity, set_transformation
 
 from merxen.alignment.register import (
     TransformResult,
+    load_required_valis_tissue_annotations,
     register_pair,
     transform_xy_for_result,
     write_valis_resume_manifest,
@@ -45,9 +46,13 @@ def run_alignment_pipeline(config: AlignmentConfig) -> dict[str, Path]:
     cfg = config
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
 
-    xenium_sdata = sd.read_zarr(cfg.xenium_zarr_path)
-    merscope_sdata = sd.read_zarr(cfg.merscope_zarr_path)
     try:
+        # Validate the small annotation inputs before opening either potentially
+        # large SpatialData store, so configuration failures are immediate and
+        # identify the platform-specific file that needs attention.
+        load_required_valis_tissue_annotations(cfg)
+        xenium_sdata = sd.read_zarr(cfg.xenium_zarr_path)
+        merscope_sdata = sd.read_zarr(cfg.merscope_zarr_path)
         result = register_pair(merscope_sdata, xenium_sdata, cfg)
     except Exception as exc:
         dependency_versions: dict[str, str] = {}

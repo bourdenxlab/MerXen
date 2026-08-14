@@ -19,6 +19,11 @@ from merxen.alignment.frames import (
 from merxen.alignment.models import TransformResult
 from merxen.alignment.orientation import estimate_pre_orientation
 from merxen.alignment.partial_overlap import refine_partial_overlap_rigid
+from merxen.alignment.tissue import (
+    AlignmentTissueAnnotation,
+    annotation_sha256,
+    load_alignment_tissue_annotation,
+)
 from merxen.alignment.transforms import apply_affine_matrix
 from merxen.alignment.valis_register import run_valis_registration
 from merxen.config import AlignmentConfig
@@ -49,6 +54,7 @@ def register_pair(
             ),
         )
 
+    tissue_annotations = load_required_valis_tissue_annotations(cfg)
     resumed_result = _load_completed_valis_result(cfg)
     if resumed_result is not None:
         return resumed_result
@@ -78,12 +84,16 @@ def register_pair(
         moving_dapi,
         config=cfg.valis,
         output_dir=registration_image_dir,
+        fixed_tissue_annotation=tissue_annotations[cfg.fixed_platform],
+        moving_tissue_annotation=tissue_annotations[cfg.moving_platform],
     )
     pre_orientation = estimate_pre_orientation(
         fixed_frame.processed_image,
         moving_frame.processed_image,
         fixed_frame.tissue_mask,
         moving_frame.tissue_mask,
+        fixed_valid_mask=fixed_frame.valid_mask,
+        moving_valid_mask=moving_frame.valid_mask,
         config=cfg.valis.orientation,
         pixel_size_um=fixed_frame.registration_pixel_size_um,
         output_dir=cfg.output_dir / "qc" / "orientation",
@@ -226,16 +236,57 @@ def write_valis_resume_manifest(cfg: AlignmentConfig) -> Path:
 
 
 def _resume_manifest_payload(cfg: AlignmentConfig) -> dict[str, Any]:
+    annotation_paths = {
+        "MERSCOPE": cfg.merscope_image.tissue_annotation_path,
+        "XENIUM": cfg.xenium_image.tissue_annotation_path,
+    }
+    annotations = {
+        platform: {
+            "path": str(Path(cast(Path, path)).expanduser().resolve()),
+            "sha256": annotation_sha256(cast(Path, path)),
+        }
+        for platform, path in annotation_paths.items()
+        if path is not None
+    }
     return {
-        "version": 1,
+        "version": 2,
         "backend": cfg.backend,
         "pair_id": cfg.pair_id,
         "merscope_zarr_path": str(Path(cfg.merscope_zarr_path).resolve()),
         "xenium_zarr_path": str(Path(cfg.xenium_zarr_path).resolve()),
         "fixed_platform": cfg.fixed_platform,
         "moving_platform": cfg.moving_platform,
+        "tissue_annotations": annotations,
         "parameters": cfg.valis.model_dump(mode="json"),
     }
+
+
+def load_required_valis_tissue_annotations(
+    cfg: AlignmentConfig,
+) -> dict[str, AlignmentTissueAnnotation]:
+    """Load both platform-specific annotations required by the VALIS backend."""
+    if cfg.backend != "valis":
+        return {}
+    image_configs = {
+        "MERSCOPE": cfg.merscope_image,
+        "XENIUM": cfg.xenium_image,
+    }
+    loaded: dict[str, AlignmentTissueAnnotation] = {}
+    for platform, image_config in image_configs.items():
+        path = image_config.tissue_annotation_path
+        if path is None:
+            raise ValueError(
+                f"VALIS alignment for pair {cfg.pair_id!r} requires the "
+                f"{platform} tissue annotation. Set "
+                f"{platform.lower()}_image.tissue_annotation_path to the "
+                "combined GeoJSON containing pial boundary piece(s) and "
+                "exactly one shared tissue-edge boundary."
+            )
+        loaded[platform] = load_alignment_tissue_annotation(
+            path,
+            platform=platform,
+        )
+    return loaded
 
 
 def _set_registration_seed(seed: int) -> None:
@@ -295,6 +346,7 @@ __all__ = [
     "_resolve_device",
     "_spateo_pairwise_kwargs",
     "register_pair",
+    "load_required_valis_tissue_annotations",
     "run_spateo_alignment",
     "transform_xy_for_result",
     "write_valis_resume_manifest",
