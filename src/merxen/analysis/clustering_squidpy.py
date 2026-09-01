@@ -36,6 +36,7 @@ from scipy import sparse
 from scipy.cluster.hierarchy import leaves_list, linkage
 
 from merxen.config import ClusteringSquidpyConfig
+from merxen.gene_ids import is_ensembl_gene_id
 from merxen.io.transcript_io import first_existing_col
 from merxen.memory import force_release, log_status
 from merxen.plotting import prepare_plot_output, save_figure
@@ -137,9 +138,13 @@ INHIBITORY_SUPERCLUSTER_TOKENS = (
     "interneuron",
     "chandelier",
     "medium spiny",
+    "gaba",
+    "glycinergic",
 )
 EXCITATORY_SUPERCLUSTER_TOKENS = (
     "excitatory",
+    "glutamatergic",
+    "vglut",
     "intratelencephalic",
     "corticothalamic",
     "near-projecting",
@@ -1594,34 +1599,87 @@ def _load_configured_marker_sets(
     annotation = config.broad_annotation
     marker_lookup_path = annotation.marker_lookup_path
     taxonomy_metadata_path = annotation.taxonomy_metadata_path
+    cluster_membership_path = annotation.cluster_membership_path
+    if marker_lookup_path is None and annotation.reference_cache_dir is not None:
+        marker_lookup_path = _find_cached_marker_lookup(
+            annotation.reference_cache_dir,
+            reference_atlas=annotation.reference_atlas,
+        )
     if taxonomy_metadata_path is None and annotation.reference_cache_dir is not None:
         taxonomy_metadata_path = _find_cached_taxonomy_metadata(
-            annotation.reference_cache_dir
+            annotation.reference_cache_dir,
+            reference_atlas=annotation.reference_atlas,
+        )
+    if cluster_membership_path is None and annotation.reference_cache_dir is not None:
+        cluster_membership_path = _find_cached_cluster_membership(
+            annotation.reference_cache_dir,
+            reference_atlas=annotation.reference_atlas,
         )
     if marker_lookup_path is None or taxonomy_metadata_path is None:
         raise ValueError(
-            "hierarchical clustering requires broad_annotation.marker_lookup_path "
-            "and broad_annotation.taxonomy_metadata_path or reference_cache_dir"
+            "hierarchical clustering requires atlas-compatible marker and taxonomy "
+            "metadata paths, or a reference_cache_dir containing those files "
+            f"for reference_atlas={annotation.reference_atlas!r}"
         )
+    marker_level = annotation.marker_level or (
+        "CCN20230722_CLAS"
+        if annotation.reference_atlas == "wmb"
+        else "CCN202210140_SUPC"
+    )
     marker_sets = load_atlas_marker_sets(
         marker_lookup_path,
         taxonomy_metadata_path,
-        marker_level=annotation.marker_level,
-        cluster_membership_path=annotation.cluster_membership_path,
+        marker_level=marker_level,
+        cluster_membership_path=cluster_membership_path,
     )
     if not marker_sets:
         raise ValueError(
             "No atlas marker sets were loaded from "
-            f"{marker_lookup_path} at marker_level={annotation.marker_level!r}"
+            f"{marker_lookup_path} at marker_level={marker_level!r}"
         )
     return marker_sets
 
 
-def _find_cached_taxonomy_metadata(cache_dir: Path | str) -> Path | None:
+def _find_cached_marker_lookup(
+    cache_dir: Path | str,
+    *,
+    reference_atlas: str,
+) -> Path | None:
+    filename = (
+        "query_markers.n10.20240221800.json"
+        if reference_atlas == "whb"
+        else "mouse_markers_230821.json"
+    )
+    candidates = sorted(Path(cache_dir).rglob(filename))
+    return candidates[-1] if candidates else None
+
+
+def _find_cached_taxonomy_metadata(
+    cache_dir: Path | str,
+    *,
+    reference_atlas: str,
+) -> Path | None:
+    taxonomy_dir = "WHB-taxonomy" if reference_atlas == "whb" else "WMB-taxonomy"
     candidates = sorted(
-        Path(cache_dir).glob(
-            "abc_whb/metadata/WHB-taxonomy/*/cluster_annotation_term.csv"
+        path
+        for path in Path(cache_dir).rglob("cluster_annotation_term.csv")
+        if taxonomy_dir in path.parts
+    )
+    return candidates[-1] if candidates else None
+
+
+def _find_cached_cluster_membership(
+    cache_dir: Path | str,
+    *,
+    reference_atlas: str,
+) -> Path | None:
+    taxonomy_dir = "WHB-taxonomy" if reference_atlas == "whb" else "WMB-taxonomy"
+    candidates = sorted(
+        path
+        for path in Path(cache_dir).rglob(
+            "cluster_to_cluster_annotation_membership.csv"
         )
+        if taxonomy_dir in path.parts
     )
     return candidates[-1] if candidates else None
 
@@ -1633,7 +1691,8 @@ def _load_configured_marker_alias_lookup(
     paths = list(annotation.reference_gene_metadata_paths)
     if not paths and annotation.reference_cache_dir is not None:
         paths = _find_cached_reference_gene_metadata_paths(
-            annotation.reference_cache_dir
+            annotation.reference_cache_dir,
+            reference_atlas=annotation.reference_atlas,
         )
     if not paths:
         return {}
@@ -1649,11 +1708,21 @@ def _load_configured_marker_alias_lookup(
     return lookup
 
 
-def _find_cached_reference_gene_metadata_paths(cache_dir: Path | str) -> list[Path]:
-    return sorted(
-        Path(cache_dir).glob(
-            "abc_whb/expression_matrices/WHB-10Xv3/*/WHB-10Xv3-*-raw.h5ad"
+def _find_cached_reference_gene_metadata_paths(
+    cache_dir: Path | str,
+    *,
+    reference_atlas: str,
+) -> list[Path]:
+    if reference_atlas == "whb":
+        return sorted(
+            path
+            for path in Path(cache_dir).rglob("WHB-10Xv3-*-raw.h5ad")
+            if "WHB-10Xv3" in path.parts
         )
+    return sorted(
+        path
+        for path in Path(cache_dir).rglob("*-raw.h5ad")
+        if any(part.startswith("WMB-10X") for part in path.parts)
     )
 
 
@@ -2637,7 +2706,7 @@ def collect_gene_id_lookup_for_samples(
         reference_gene_ids = {
             symbol: gene_id
             for symbol, gene_id in reference_aliases.items()
-            if str(gene_id).startswith("ENSG")
+            if is_ensembl_gene_id(gene_id)
         }
         combined = _merge_gene_id_lookups(combined, reference_gene_ids)
         if reference_gene_ids:
@@ -2658,7 +2727,7 @@ def collect_gene_id_lookup_for_samples(
 
 
 def collapse_atlas_label_to_broad_class(label_name: str) -> str:
-    """Collapse an Allen WHB supercluster label to MerXen's broad classes."""
+    """Collapse an Allen WHB or WMB label to MerXen's broad classes."""
     label = str(label_name).strip()
     if label in NON_NEURON_SUPERCLUSTER_CLASS_MAP:
         return NON_NEURON_SUPERCLUSTER_CLASS_MAP[label]
@@ -2667,16 +2736,38 @@ def collapse_atlas_label_to_broad_class(label_name: str) -> str:
     if label in NEURON_SUPERCLUSTER_LABELS:
         return NEURON_CLASS
     lower = label.lower()
+    if "astro-epen" in lower:
+        return "Astrocytes/Ependymal"
+    if "opc-oligo" in lower:
+        return "Oligodendrocyte lineage"
     neuron_tokens = (
         "neuron",
         "interneuron",
         "excitatory",
         "inhibitory",
+        "glutamatergic",
+        "gaba",
+        "glycinergic",
+        "dopaminergic",
+        "cholinergic",
+        "serotonergic",
+        "peptidergic",
         "intratelencephalic",
         "corticothalamic",
     )
     if any(token in lower for token in neuron_tokens):
         return NEURON_CLASS
+    non_neuron_tokens = (
+        (("oligodendrocyte precursor", "opc"), "Oligodendrocyte precursors"),
+        (("oligodendrocyte", "oligo"), "Oligodendrocytes"),
+        (("astrocyte", "astro"), "Astrocytes"),
+        (("microglia", "immune"), "Microglia"),
+        (("fibroblast", "fibro"), "Fibroblasts"),
+        (("vascular", "endothelial", "pericyte", "smooth muscle"), "Vascular cells"),
+    )
+    for tokens, broad_class in non_neuron_tokens:
+        if any(token in lower for token in tokens):
+            return broad_class
     return label
 
 
@@ -3291,7 +3382,7 @@ def _extract_gene_id_lookup_from_var(
     lookup: dict[str, str] = {}
     for idx, raw_gene_id in enumerate(gene_ids):
         gene_id = str(raw_gene_id).strip()
-        if not gene_id.startswith("ENSG"):
+        if not is_ensembl_gene_id(gene_id):
             continue
         for symbols in symbol_arrays:
             symbol = str(symbols[idx]).strip()
@@ -3312,7 +3403,7 @@ def _apply_ensembl_id_metadata(
         else None
     )
     if existing_values is not None and any(
-        str(value).startswith("ENSG") for value in existing_values
+        is_ensembl_gene_id(value) for value in existing_values
     ):
         adata.var[ENSEMBL_ID_COLUMN] = existing_values
         return

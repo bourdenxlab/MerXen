@@ -29,6 +29,7 @@ from matplotlib.lines import Line2D
 from scipy import sparse
 
 from merxen.config import MapMyCellsConfig
+from merxen.gene_ids import is_ensembl_gene_id
 from merxen.memory import force_release, log_status
 from merxen.plotting import prepare_plot_output, save_figure
 
@@ -140,6 +141,7 @@ def prepare_mapmycells_query(
     query_layer: str | None = "counts",
     gene_id_column: str | None = None,
     gene_id_lookup: dict[str, str] | None = None,
+    allow_gene_symbol_fallback: bool = False,
     obs_id_column: str | None = None,
 ) -> Path:
     """Write a MapMyCells-ready H5AD query file.
@@ -157,6 +159,9 @@ def prepare_mapmycells_query(
         gene_id_column: Optional ``var`` column to use as gene identifiers.
         gene_id_lookup: Optional symbol-to-identifier lookup used to reconstruct
             a missing ``ensembl_id`` column in standalone MERSCOPE inputs.
+        allow_gene_symbol_fallback: Keep gene symbols as ``var_names`` when the
+            requested ID column is absent. Use only when the mapper receives a
+            gene-mapping database capable of resolving those symbols.
         obs_id_column: Optional ``obs`` column to use as cell identifiers.
 
     Returns:
@@ -178,17 +183,27 @@ def prepare_mapmycells_query(
 
         if gene_id_column is not None:
             if gene_id_column not in adata.var.columns:
-                _restore_missing_gene_id_column(
-                    adata,
-                    gene_id_column=gene_id_column,
-                    gene_id_lookup=gene_id_lookup,
-                    input_h5ad=input_h5ad,
+                if allow_gene_symbol_fallback and not gene_id_lookup:
+                    logger.info(
+                        "Keeping gene symbols for %s; MapMyCells will resolve them "
+                        "through the configured gene-mapping database.",
+                        input_h5ad.name,
+                    )
+                else:
+                    _restore_missing_gene_id_column(
+                        adata,
+                        gene_id_column=gene_id_column,
+                        gene_id_lookup=gene_id_lookup,
+                        input_h5ad=input_h5ad,
+                    )
+            elif gene_id_column == "ensembl_id" and gene_id_lookup:
+                _supplement_ensembl_id_column(adata, gene_id_lookup)
+            if gene_id_column in adata.var.columns:
+                adata.var_names = _index_from_column_with_fallback(
+                    adata.var,
+                    column=gene_id_column,
+                    fallback=adata.var_names,
                 )
-            adata.var_names = _index_from_column_with_fallback(
-                adata.var,
-                column=gene_id_column,
-                fallback=adata.var_names,
-            )
 
         if obs_id_column is not None:
             if obs_id_column not in adata.obs.columns:
@@ -264,6 +279,41 @@ def _restore_missing_gene_id_column(
     )
 
 
+def _supplement_ensembl_id_column(
+    adata: ad.AnnData,
+    gene_id_lookup: dict[str, str],
+) -> None:
+    """Fill invalid or blank Ensembl IDs from species-matched gene metadata."""
+    symbols = (
+        adata.var["gene"].astype(str).to_numpy()
+        if "gene" in adata.var.columns
+        else adata.var_names.astype(str).to_numpy()
+    )
+    existing = adata.var["ensembl_id"].astype(str).to_numpy()
+    casefold_lookup = {
+        str(symbol).strip().casefold(): str(gene_id).strip()
+        for symbol, gene_id in gene_id_lookup.items()
+        if str(symbol).strip() and is_ensembl_gene_id(gene_id)
+    }
+    supplemented = [
+        gene_id
+        if is_ensembl_gene_id(gene_id)
+        else casefold_lookup.get(str(symbol).strip().casefold(), "")
+        for gene_id, symbol in zip(existing, symbols, strict=True)
+    ]
+    n_added = sum(
+        not is_ensembl_gene_id(before) and is_ensembl_gene_id(after)
+        for before, after in zip(existing, supplemented, strict=True)
+    )
+    if n_added:
+        adata.var["ensembl_id"] = pd.Series(
+            supplemented,
+            index=adata.var_names,
+            dtype="object",
+        )
+        logger.info("Recovered %d additional Ensembl gene IDs.", n_added)
+
+
 def _load_reference_gene_id_lookup_if_needed(
     config: MapMyCellsConfig,
 ) -> dict[str, str]:
@@ -273,7 +323,10 @@ def _load_reference_gene_id_lookup_if_needed(
             continue
         clustered = ad.read_h5ad(sample.anndata_path, backed="r")
         try:
-            if "ensembl_id" not in clustered.var.columns:
+            if "ensembl_id" not in clustered.var.columns or not all(
+                is_ensembl_gene_id(value)
+                for value in clustered.var["ensembl_id"].astype(str)
+            ):
                 needs_lookup = True
                 break
         finally:
@@ -281,18 +334,33 @@ def _load_reference_gene_id_lookup_if_needed(
 
     if not needs_lookup:
         return {}
-    return _load_reference_gene_id_lookup(config.region_cache_dir)
-
-
-def _load_reference_gene_id_lookup(cache_dir: Path | str) -> dict[str, str]:
-    paths = sorted(
-        Path(cache_dir).glob(
-            "abc_whb/expression_matrices/WHB-10Xv3/*/WHB-10Xv3-*-raw.h5ad"
-        )
+    return _load_reference_gene_id_lookup(
+        config.region_cache_dir,
+        reference_atlas=config.reference_atlas,
     )
+
+
+def _load_reference_gene_id_lookup(
+    cache_dir: Path | str,
+    *,
+    reference_atlas: str = "whb",
+) -> dict[str, str]:
+    if reference_atlas == "whb":
+        paths = sorted(
+            path
+            for path in Path(cache_dir).rglob("WHB-10Xv3-*-raw.h5ad")
+            if "WHB-10Xv3" in path.parts
+        )
+    else:
+        paths = sorted(
+            path
+            for path in Path(cache_dir).rglob("*-raw.h5ad")
+            if any(part.startswith("WMB-10X") for part in path.parts)
+        )
     if not paths:
         logger.warning(
-            "No WHB reference gene metadata found below MapMyCells cache %s.",
+            "No %s reference gene metadata found below MapMyCells cache %s.",
+            reference_atlas.upper(),
             cache_dir,
         )
         return {}
@@ -311,7 +379,7 @@ def _load_reference_gene_id_lookup(cache_dir: Path | str) -> dict[str, str]:
                 ensembl = str(ensembl_id).strip()
                 gene_symbol = str(symbol).strip()
                 if (
-                    not ensembl.startswith("ENSG")
+                    not is_ensembl_gene_id(ensembl)
                     or not gene_symbol
                     or gene_symbol.lower() in {"nan", "none"}
                 ):
@@ -342,6 +410,18 @@ def run_mapmycells(config: MapMyCellsConfig) -> dict[str, dict[str, dict[str, Pa
     config.output_dir.mkdir(parents=True, exist_ok=True)
     references = _build_mapmycells_references(config)
     gene_id_lookup = _load_reference_gene_id_lookup_if_needed(config)
+    if (
+        not config.plots_only
+        and config.reference_atlas == "wmb"
+        and _samples_need_gene_mapping_db(config, gene_id_lookup)
+    ):
+        if config.gene_mapping_db_path is None:
+            config.gene_mapping_db_path = _resolve_gene_mapping_db(config)
+        logger.info(
+            "Using the WMB gene-mapping database because one or more queries "
+            "contain gene symbols that could not be resolved to Ensembl IDs "
+            "from cached WMB metadata."
+        )
     results: dict[str, dict[str, dict[str, Path]]] = {}
 
     for sample in config.samples:
@@ -367,6 +447,39 @@ def run_mapmycells(config: MapMyCellsConfig) -> dict[str, dict[str, dict[str, Pa
     manifest_path = config.output_dir / f"{config.pair_id}_mapmycells_manifest.json"
     _write_results_manifest(manifest_path, config, references, results)
     return results
+
+
+def _samples_need_gene_mapping_db(
+    config: MapMyCellsConfig,
+    gene_id_lookup: dict[str, str],
+) -> bool:
+    casefold_lookup = {
+        str(symbol).strip().casefold(): str(gene_id).strip()
+        for symbol, gene_id in gene_id_lookup.items()
+        if str(symbol).strip() and is_ensembl_gene_id(gene_id)
+    }
+    for sample in config.samples:
+        if sample.gene_id_column is None or not sample.anndata_path.exists():
+            continue
+        clustered = ad.read_h5ad(sample.anndata_path, backed="r")
+        try:
+            if sample.gene_id_column not in clustered.var.columns:
+                return True
+            gene_ids = clustered.var[sample.gene_id_column].astype(str).to_numpy()
+            symbols = (
+                clustered.var["gene"].astype(str).to_numpy()
+                if "gene" in clustered.var.columns
+                else clustered.var_names.astype(str).to_numpy()
+            )
+            for gene_id, symbol in zip(gene_ids, symbols, strict=True):
+                if is_ensembl_gene_id(gene_id):
+                    continue
+                recovered = casefold_lookup.get(str(symbol).strip().casefold(), "")
+                if not is_ensembl_gene_id(recovered):
+                    return True
+        finally:
+            clustered.file.close()
+    return False
 
 
 def _build_mapmycells_references(config: MapMyCellsConfig) -> list[MapMyCellsReference]:
@@ -530,7 +643,7 @@ def _resolve_gene_mapping_db(config: MapMyCellsConfig) -> Path:
         return config.gene_mapping_db_path
     if not config.auto_download_references:
         raise ValueError(
-            "Human-to-WMB mapping requires gene_mapping_db_path when automatic "
+            "WMB gene-symbol mapping requires gene_mapping_db_path when automatic "
             "reference downloads are disabled."
         )
     output_path = (
@@ -600,6 +713,7 @@ def _run_mapmycells_reference(
             query_layer=sample.query_layer,
             gene_id_column=sample.gene_id_column,
             gene_id_lookup=gene_id_lookup,
+            allow_gene_symbol_fallback=config.gene_mapping_db_path is not None,
             obs_id_column=sample.obs_id_column,
         )
         command = build_mapmycells_command(

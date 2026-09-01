@@ -980,24 +980,29 @@ class ClusteringSquidpyRoundConfig(BaseModel):
 class ClusteringSquidpyAnnotationConfig(BaseModel):
     """Atlas marker options for hierarchical broad-cluster annotation."""
 
-    marker_lookup_path: Path | None = Path(
-        "/media/mathieubo/SSD1/MerXen/mapmycells/query_markers.n10.20240221800.json"
-    )
-    taxonomy_metadata_path: Path | None = Path(
-        "/media/mathieubo/SSD1/MerXen/mapmycells/abc_whb/metadata/"
-        "WHB-taxonomy/20240330/cluster_annotation_term.csv"
-    )
-    cluster_membership_path: Path | None = Path(
-        "/media/mathieubo/SSD1/MerXen/mapmycells/abc_whb/metadata/"
-        "WHB-taxonomy/20240330/cluster_to_cluster_annotation_membership.csv"
-    )
-    reference_cache_dir: Path | None = Path("/media/mathieubo/SSD1/MerXen/mapmycells")
+    reference_atlas: Literal["whb", "wmb"] = "whb"
+    marker_lookup_path: Path | None = None
+    taxonomy_metadata_path: Path | None = None
+    cluster_membership_path: Path | None = None
+    reference_cache_dir: Path | None = Path("./mapmycells_cache")
     reference_gene_metadata_paths: list[Path] = Field(default_factory=list)
-    marker_level: str = "CCN202210140_SUPC"
+    marker_level: str | None = None
     min_marker_overlap: int = Field(default=3, ge=1)
     max_markers_per_label: int | None = Field(default=80, ge=1)
     score_margin_threshold: float = Field(default=0.0, ge=0.0)
     unknown_label: str = "Mixed/Unknown"
+
+    @model_validator(mode="after")
+    def _set_atlas_defaults(
+        self: ClusteringSquidpyAnnotationConfig,
+    ) -> ClusteringSquidpyAnnotationConfig:
+        if self.marker_level is None:
+            self.marker_level = (
+                "CCN20230722_CLAS"
+                if self.reference_atlas == "wmb"
+                else "CCN202210140_SUPC"
+            )
+        return self
 
 
 class ClusteringSquidpyConfig(BaseModel):
@@ -1347,6 +1352,10 @@ class MapMyCellsConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_reference_inputs(self: MapMyCellsConfig) -> MapMyCellsConfig:
+        if self.query_species == "mouse" and self.reference_atlas != "wmb":
+            raise ValueError(
+                "mouse MapMyCells queries currently require the WMB reference atlas"
+            )
         if (
             not self.plots_only
             and self.reference_mode in {"whole_brain", "both"}

@@ -102,6 +102,44 @@ def normalizeAnalysisMode(rawValue) {
     return aliases[key]
 }
 
+def normalizeSpecies(rawValue) {
+    def raw = rawValue == null ? "human" : rawValue.toString().trim().toLowerCase()
+    def aliases = [
+        "human": "human",
+        "homo_sapiens": "human",
+        "homo sapiens": "human",
+        "mouse": "mouse",
+        "mus_musculus": "mouse",
+        "mus musculus": "mouse",
+    ]
+    if (!aliases.containsKey(raw)) {
+        throw new IllegalArgumentException(
+            "Unknown species '${rawValue}'. Valid values: human, mouse"
+        )
+    }
+    return aliases[raw]
+}
+
+def effectiveClusteringHierarchicalEnabled(params) {
+    def species = normalizeSpecies(params.species)
+    return boolOrDefault(
+        params.clustering_squidpy_hierarchical_enabled,
+        species == "human",
+        "clustering_squidpy_hierarchical_enabled",
+    )
+}
+
+def effectiveClusteringReferenceAtlas(params) {
+    if (params.clustering_squidpy_broad_reference_atlas != null &&
+        params.clustering_squidpy_broad_reference_atlas.toString().trim()) {
+        return params.clustering_squidpy_broad_reference_atlas
+            .toString()
+            .trim()
+            .toLowerCase()
+    }
+    return normalizeSpecies(params.species) == "mouse" ? "wmb" : "whb"
+}
+
 def activePlatformsForMode(analysisMode) {
     if (analysisMode == "paired") {
         return ["MERSCOPE", "XENIUM"]
@@ -746,7 +784,10 @@ def validateStage(
             hint = " Pass --distance_from_object_enabled true to use object distance."
         }
         if (stage == "mecr") {
-            hint = " Pass --mecr_enabled true to use MECR."
+            hint = (
+                " Pass --mecr_enabled true in a human run to use MECR; " +
+                "the WHB-based stage is unavailable for mouse data."
+            )
         }
         if (stage == "spatial_gene_analysis" && !spatialGeneAnalysisEnabled) {
             hint = " Pass --spatial_gene_analysis_enabled true to use spatial gene analysis."
@@ -843,62 +884,103 @@ def appendPreflightFileCheck(errors, rawPath, label) {
     }
 }
 
-def findCachedTaxonomyMetadataPath(rawCacheDir) {
+def findCachedAtlasFilePath(rawCacheDir, referenceAtlas, filename) {
     if (isBlankPath(rawCacheDir)) {
         return null
     }
     def root = normalizedPath(rawCacheDir)
-    def taxonomyRoot = root.resolve("abc_whb/metadata/WHB-taxonomy").toFile()
-    if (!taxonomyRoot.isDirectory()) {
+    if (!root.toFile().isDirectory()) {
         return null
     }
+    def taxonomyDir = referenceAtlas == "wmb" ? "WMB-taxonomy" : "WHB-taxonomy"
     def matches = []
-    taxonomyRoot.eachDir { versionDir ->
-        def candidate = versionDir.toPath().resolve("cluster_annotation_term.csv")
-        if (candidate.toFile().exists()) {
-            matches << candidate
+    root.toFile().eachFileRecurse { candidate ->
+        if (candidate.isFile() && candidate.name == filename) {
+            if (filename.endsWith(".json") || candidate.toPath().any { part ->
+                part.toString() == taxonomyDir
+            }) {
+                matches << candidate.toPath()
+            }
         }
     }
     return matches ? matches.sort { path -> path.toString() }[-1] : null
 }
 
 def appendClusteringSquidpyPreflightChecks(errors, settings, params) {
-    def hierarchicalEnabled = boolOrDefault(
-        params.clustering_squidpy_hierarchical_enabled,
-        true,
-        "clustering_squidpy_hierarchical_enabled",
-    )
+    def hierarchicalEnabled = effectiveClusteringHierarchicalEnabled(params)
     if (!(settings.run_clustering_squidpy && hierarchicalEnabled)) {
         return
     }
-    appendPreflightFileCheck(
-        errors,
-        params.clustering_squidpy_broad_marker_lookup_path,
-        "CLUSTERING_SQUIDPY broad marker lookup",
-    )
-    if (isBlankPath(params.clustering_squidpy_broad_taxonomy_metadata_path)) {
-        def cachedTaxonomy = findCachedTaxonomyMetadataPath(
-            params.clustering_squidpy_broad_reference_cache_dir,
+    def referenceAtlas = effectiveClusteringReferenceAtlas(params)
+    def expectedAtlas = settings.species == "mouse" ? "wmb" : "whb"
+    if (referenceAtlas != expectedAtlas) {
+        errors << (
+            "CLUSTERING_SQUIDPY species ${settings.species} requires " +
+            "--clustering_squidpy_broad_reference_atlas ${expectedAtlas}"
         )
-        if (cachedTaxonomy == null) {
+        return
+    }
+    def markerLookupPath = params.clustering_squidpy_broad_marker_lookup_path ?:
+        (referenceAtlas == "whb" ? params.clustering_squidpy_whb_marker_lookup_path : null)
+    def taxonomyMetadataPath = params.clustering_squidpy_broad_taxonomy_metadata_path ?:
+        (referenceAtlas == "whb" ? params.clustering_squidpy_whb_taxonomy_metadata_path : null)
+    def clusterMembershipPath = params.clustering_squidpy_broad_cluster_membership_path ?:
+        (referenceAtlas == "whb" ? params.clustering_squidpy_whb_cluster_membership_path : null)
+    def referenceCacheDir = isBlankPath(
+        params.clustering_squidpy_broad_reference_cache_dir
+    ) ? normalizedPath(params.outdir).resolve("mapmycells_cache") :
+        params.clustering_squidpy_broad_reference_cache_dir
+    if (isBlankPath(markerLookupPath)) {
+        def markerFilename = referenceAtlas == "wmb"
+            ? "mouse_markers_230821.json"
+            : "query_markers.n10.20240221800.json"
+        def cachedMarker = findCachedAtlasFilePath(
+            referenceCacheDir,
+            referenceAtlas,
+            markerFilename,
+        )
+        if (cachedMarker == null) {
             errors << (
-                "Missing CLUSTERING_SQUIDPY broad taxonomy metadata: " +
-                "set --clustering_squidpy_broad_taxonomy_metadata_path " +
-                "or provide a cache containing " +
-                "abc_whb/metadata/WHB-taxonomy/*/cluster_annotation_term.csv"
+                "Missing CLUSTERING_SQUIDPY ${referenceAtlas.toUpperCase()} " +
+                "broad marker lookup: set " +
+                "--clustering_squidpy_broad_marker_lookup_path or populate " +
+                "${referenceCacheDir} with ${markerFilename}"
             )
         }
     } else {
         appendPreflightFileCheck(
             errors,
-            params.clustering_squidpy_broad_taxonomy_metadata_path,
+            markerLookupPath,
+            "CLUSTERING_SQUIDPY broad marker lookup",
+        )
+    }
+    if (isBlankPath(taxonomyMetadataPath)) {
+        def cachedTaxonomy = findCachedAtlasFilePath(
+            referenceCacheDir,
+            referenceAtlas,
+            "cluster_annotation_term.csv",
+        )
+        if (cachedTaxonomy == null) {
+            errors << (
+                "Missing CLUSTERING_SQUIDPY ${referenceAtlas.toUpperCase()} " +
+                "broad taxonomy metadata: " +
+                "set --clustering_squidpy_broad_taxonomy_metadata_path " +
+                "or provide a cache containing " +
+                "${referenceAtlas == 'wmb' ? 'WMB-taxonomy' : 'WHB-taxonomy'}" +
+                "/**/cluster_annotation_term.csv"
+            )
+        }
+    } else {
+        appendPreflightFileCheck(
+            errors,
+            taxonomyMetadataPath,
             "CLUSTERING_SQUIDPY broad taxonomy metadata",
         )
     }
-    if (!isBlankPath(params.clustering_squidpy_broad_cluster_membership_path)) {
+    if (!isBlankPath(clusterMembershipPath)) {
         appendPreflightFileCheck(
             errors,
-            params.clustering_squidpy_broad_cluster_membership_path,
+            clusterMembershipPath,
             "CLUSTERING_SQUIDPY broad cluster membership metadata",
         )
     }
@@ -916,23 +998,30 @@ def appendMapMyCellsPreflightChecks(errors, settings, params) {
         return
     }
     def referenceMode = params.mapmycells_reference_mode == null
-        ? "both"
+        ? (settings.species == "mouse" ? "whole_brain" : "both")
         : params.mapmycells_reference_mode.toString().trim().toLowerCase()
+    def referenceAtlas = params.mapmycells_reference_atlas == null
+        ? (settings.species == "mouse" ? "wmb" : "whb")
+        : params.mapmycells_reference_atlas.toString().trim().toLowerCase()
+    def markerLookupPath = params.mapmycells_marker_lookup_path ?:
+        (referenceAtlas == "whb" ? params.mapmycells_whb_marker_lookup_path : null)
+    def precomputedStatsPath = params.mapmycells_precomputed_stats_path ?:
+        (referenceAtlas == "whb" ? params.mapmycells_whb_precomputed_stats_path : null)
     def autoDownloadReferences = params.mapmycells_auto_download_references == null
         ? true
         : params.mapmycells_auto_download_references.toString().trim().toLowerCase() == "true"
     if (referenceMode in ["whole_brain", "both"]) {
-        if (!autoDownloadReferences || params.mapmycells_marker_lookup_path) {
+        if (!autoDownloadReferences || markerLookupPath) {
             appendPreflightFileCheck(
                 errors,
-                params.mapmycells_marker_lookup_path,
+                markerLookupPath,
                 "MAPMYCELLS whole-brain marker lookup",
             )
         }
-        if (!autoDownloadReferences || params.mapmycells_precomputed_stats_path) {
+        if (!autoDownloadReferences || precomputedStatsPath) {
             appendPreflightFileCheck(
                 errors,
-                params.mapmycells_precomputed_stats_path,
+                precomputedStatsPath,
                 "MAPMYCELLS whole-brain precomputed stats",
             )
         }
@@ -1263,6 +1352,7 @@ def rowSampleSettings(row, params) {
         error "Found samplesheet row with missing pair_id: ${row}"
     }
 
+    def species = normalizeSpecies(params.species)
     def analysisMode = normalizeAnalysisMode(
         rowFieldOrDefault(row, "analysis_mode", params.analysis_mode)
     )
@@ -1333,9 +1423,15 @@ def rowSampleSettings(row, params) {
     )
     def mecrEnabled = boolOrDefault(
         rowFieldOrDefault(row, "mecr_enabled", params.mecr_enabled),
-        true,
+        species == "human",
         "mecr_enabled for ${pairId}",
     )
+    if (species == "mouse" && mecrEnabled) {
+        throw new IllegalArgumentException(
+            "MECR currently requires the Whole Human Brain reference and cannot " +
+            "be enabled for --species mouse"
+        )
+    }
     def menderEnabled = boolOrDefault(
         rowFieldOrDefault(row, "mender_enabled", params.mender_enabled),
         false,
@@ -1495,11 +1591,7 @@ def rowSampleSettings(row, params) {
     if (
         runMender &&
         runClusteringSquidpy &&
-        !boolOrDefault(
-            params.clustering_squidpy_hierarchical_enabled,
-            true,
-            "clustering_squidpy_hierarchical_enabled",
-        )
+        !effectiveClusteringHierarchicalEnabled(params)
     ) {
         throw new IllegalArgumentException(
             "MENDER clustering prerequisites require " +
@@ -1531,6 +1623,7 @@ def rowSampleSettings(row, params) {
 
     return [
         pair_id: pairId,
+        species: species,
         analysis_mode: analysisMode,
         enable_alignment: alignmentEnabled,
         active_platforms: activePlatforms,
@@ -1605,21 +1698,26 @@ def rowSampleSettings(row, params) {
 }
 
 def validateMapMyCellsParams(params) {
+    def pipelineSpecies = normalizeSpecies(params.species)
     def mapMyCellsReferenceMode = params.mapmycells_reference_mode == null
-        ? "both"
+        ? (pipelineSpecies == "mouse" ? "whole_brain" : "both")
         : params.mapmycells_reference_mode.toString().trim().toLowerCase()
     def mapMyCellsPlotsOnly = params.mapmycells_plots_only == null
         ? false
         : params.mapmycells_plots_only.toString().trim().toLowerCase() == "true"
     def mapMyCellsReferenceAtlas = params.mapmycells_reference_atlas == null
-        ? "whb"
+        ? (pipelineSpecies == "mouse" ? "wmb" : "whb")
         : params.mapmycells_reference_atlas.toString().trim().toLowerCase()
     def mapMyCellsQuerySpecies = params.mapmycells_query_species == null
-        ? "human"
+        ? pipelineSpecies
         : params.mapmycells_query_species.toString().trim().toLowerCase()
     def mapMyCellsAutoDownload = params.mapmycells_auto_download_references == null
         ? true
         : params.mapmycells_auto_download_references.toString().trim().toLowerCase() == "true"
+    def markerLookupPath = params.mapmycells_marker_lookup_path ?:
+        (mapMyCellsReferenceAtlas == "whb" ? params.mapmycells_whb_marker_lookup_path : null)
+    def precomputedStatsPath = params.mapmycells_precomputed_stats_path ?:
+        (mapMyCellsReferenceAtlas == "whb" ? params.mapmycells_whb_precomputed_stats_path : null)
     if (!(mapMyCellsReferenceMode in ["whole_brain", "region", "both"])) {
         throw new IllegalArgumentException(
             "Invalid MAPMYCELLS --mapmycells_reference_mode " +
@@ -1639,10 +1737,22 @@ def validateMapMyCellsParams(params) {
             "'${params.mapmycells_query_species}'. Valid values: human, mouse"
         )
     }
+    if (mapMyCellsQuerySpecies != pipelineSpecies) {
+        throw new IllegalArgumentException(
+            "MAPMYCELLS query species '${mapMyCellsQuerySpecies}' does not match " +
+            "pipeline --species ${pipelineSpecies}"
+        )
+    }
+    if (pipelineSpecies == "mouse" && mapMyCellsReferenceAtlas != "wmb") {
+        throw new IllegalArgumentException(
+            "Mouse MAPMYCELLS queries currently require " +
+            "--mapmycells_reference_atlas wmb"
+        )
+    }
     if (!mapMyCellsPlotsOnly &&
         mapMyCellsReferenceMode in ["whole_brain", "both"] &&
         !mapMyCellsAutoDownload &&
-        !params.mapmycells_marker_lookup_path) {
+        !markerLookupPath) {
         throw new IllegalArgumentException(
             "Missing required parameter for MAPMYCELLS: --mapmycells_marker_lookup_path"
         )
@@ -1650,7 +1760,7 @@ def validateMapMyCellsParams(params) {
     if (!mapMyCellsPlotsOnly &&
         mapMyCellsReferenceMode in ["whole_brain", "both"] &&
         !mapMyCellsAutoDownload &&
-        !params.mapmycells_precomputed_stats_path) {
+        !precomputedStatsPath) {
         throw new IllegalArgumentException(
             "Missing required parameter for MAPMYCELLS: --mapmycells_precomputed_stats_path"
         )
@@ -1667,6 +1777,7 @@ def validateMapMyCellsParams(params) {
     }
     if (!mapMyCellsPlotsOnly &&
         mapMyCellsReferenceMode in ["region", "both"] &&
+        pipelineSpecies == "mouse" &&
         !params.mapmycells_region_labels) {
         throw new IllegalArgumentException(
             "Missing required parameter for MAPMYCELLS region mode: " +

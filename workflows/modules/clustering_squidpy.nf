@@ -14,6 +14,17 @@ process CLUSTERING_SQUIDPY_PREPARE {
         path("clustering_prepare_out")
 
     script:
+    def rawPipelineSpecies = params.species == null ? "human" : params.species.toString().trim().toLowerCase()
+    def pipelineSpecies = rawPipelineSpecies in ["mouse", "mus_musculus", "mus musculus"] ? "mouse" : "human"
+    def hierarchicalEnabled = params.clustering_squidpy_hierarchical_enabled == null ? pipelineSpecies == "human" : params.clustering_squidpy_hierarchical_enabled.toString().trim().toLowerCase() == "true"
+    def referenceAtlas = params.clustering_squidpy_broad_reference_atlas == null ? (pipelineSpecies == "mouse" ? "wmb" : "whb") : params.clustering_squidpy_broad_reference_atlas.toString().trim().toLowerCase()
+    def markerLevel = params.clustering_squidpy_broad_marker_level == null ? (referenceAtlas == "wmb" ? "CCN20230722_CLAS" : "CCN202210140_SUPC") : params.clustering_squidpy_broad_marker_level.toString()
+    def defaultReferenceCacheDir = file(params.outdir).toAbsolutePath().resolve("mapmycells_cache").toString()
+    def referenceCacheDir = params.clustering_squidpy_broad_reference_cache_dir == null ? defaultReferenceCacheDir : params.clustering_squidpy_broad_reference_cache_dir.toString()
+    def referenceGeneMetadataPaths = params.clustering_squidpy_broad_reference_gene_metadata_paths ?: []
+    def markerLookupPath = params.clustering_squidpy_broad_marker_lookup_path ?: (referenceAtlas == "whb" ? params.clustering_squidpy_whb_marker_lookup_path : null)
+    def taxonomyMetadataPath = params.clustering_squidpy_broad_taxonomy_metadata_path ?: (referenceAtlas == "whb" ? params.clustering_squidpy_whb_taxonomy_metadata_path : null)
+    def clusterMembershipPath = params.clustering_squidpy_broad_cluster_membership_path ?: (referenceAtlas == "whb" ? params.clustering_squidpy_whb_cluster_membership_path : null)
     """
     set -euo pipefail
     export OMP_NUM_THREADS="${task.cpus}"
@@ -49,7 +60,7 @@ process CLUSTERING_SQUIDPY_PREPARE {
   "figure_dpi": ${params.clustering_squidpy_figure_dpi},
   "use_gpu": ${params.clustering_squidpy_use_gpu},
   "write_spatialdata_table": ${params.clustering_squidpy_write_spatialdata_table},
-  "hierarchical_enabled": ${params.clustering_squidpy_hierarchical_enabled},
+  "hierarchical_enabled": ${hierarchicalEnabled},
   "broad_round": {
     "leiden_resolution": ${params.clustering_squidpy_broad_leiden_resolution}
   },
@@ -65,11 +76,13 @@ process CLUSTERING_SQUIDPY_PREPARE {
   },
   "min_branch_cells": ${params.clustering_squidpy_min_branch_cells},
   "broad_annotation": {
-    "marker_lookup_path": ${params.clustering_squidpy_broad_marker_lookup_path ? groovy.json.JsonOutput.toJson(params.clustering_squidpy_broad_marker_lookup_path.toString()) : "null"},
-    "taxonomy_metadata_path": ${params.clustering_squidpy_broad_taxonomy_metadata_path ? groovy.json.JsonOutput.toJson(params.clustering_squidpy_broad_taxonomy_metadata_path.toString()) : "null"},
-    "cluster_membership_path": ${params.clustering_squidpy_broad_cluster_membership_path ? groovy.json.JsonOutput.toJson(params.clustering_squidpy_broad_cluster_membership_path.toString()) : "null"},
-    "reference_cache_dir": ${params.clustering_squidpy_broad_reference_cache_dir ? groovy.json.JsonOutput.toJson(params.clustering_squidpy_broad_reference_cache_dir.toString()) : "null"},
-    "marker_level": ${groovy.json.JsonOutput.toJson(params.clustering_squidpy_broad_marker_level.toString())},
+    "reference_atlas": ${groovy.json.JsonOutput.toJson(referenceAtlas)},
+    "marker_lookup_path": ${markerLookupPath ? groovy.json.JsonOutput.toJson(markerLookupPath.toString()) : "null"},
+    "taxonomy_metadata_path": ${taxonomyMetadataPath ? groovy.json.JsonOutput.toJson(taxonomyMetadataPath.toString()) : "null"},
+    "cluster_membership_path": ${clusterMembershipPath ? groovy.json.JsonOutput.toJson(clusterMembershipPath.toString()) : "null"},
+    "reference_cache_dir": ${groovy.json.JsonOutput.toJson(referenceCacheDir)},
+    "reference_gene_metadata_paths": ${groovy.json.JsonOutput.toJson(referenceGeneMetadataPaths)},
+    "marker_level": ${groovy.json.JsonOutput.toJson(markerLevel)},
     "min_marker_overlap": ${params.clustering_squidpy_broad_min_marker_overlap},
     "max_markers_per_label": ${params.clustering_squidpy_broad_max_markers_per_label},
     "score_margin_threshold": ${params.clustering_squidpy_broad_score_margin_threshold},
