@@ -326,6 +326,12 @@ need ProSeg because it reads published segmentation outputs.
 Starting at `mecr`, `compare`, `visualize`, `spatial_gene_analysis`, or
 `clustering_squidpy` with effective `enable_alignment=false` reads
 `${outdir}/${pair_id}/{merscope,xenium}/latest/latest_spatialdata.zarr`.
+An explicit `merscope_spatialdata_path` or `xenium_spatialdata_path` in the
+samplesheet overrides that published path when upstream enrichment is skipped.
+This supports downstream-only cross-pair runs, such as aligning an IF MERSCOPE
+section against the Xenium latest zarr from another pair ID; each explicit path
+must already be the fully enriched durable latest zarr required by the selected
+stage.
 In single-platform mode, starting at `mecr`, `visualize`, `spatial_gene_analysis`, or
 `clustering_squidpy` reads only
 `${outdir}/${pair_id}/<selected-platform>/latest/latest_spatialdata.zarr`.

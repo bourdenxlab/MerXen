@@ -32,14 +32,14 @@ required. A template lives at
 | `mender_enabled` | no | Row-level MENDER switch. Blank inherits `--mender_enabled`, which defaults to `false`. |
 | `mender_segmentations` | no | One MENDER branch, a comma-separated subset, or `all`. Blank inherits `--mender_segmentations`, which defaults to `proseg_hybrid`. |
 | `merscope_dir` | required for MERSCOPE modes if no cache | Path to the raw MERSCOPE region export folder (contains `transcripts.parquet`, `cell_boundaries/`, `images/`, etc.). |
-| `merscope_spatialdata_path` | required for MERSCOPE modes if no raw dir | Path to an existing (or desired) reusable MERSCOPE SpatialData zarr. If it exists, the build step is **skipped** unless `--force_spatialdata_build true` is passed to Nextflow. |
+| `merscope_spatialdata_path` | required for MERSCOPE modes if no raw dir | Path to an existing (or desired) reusable MERSCOPE SpatialData zarr. If it exists, the build step is **skipped** unless `--force_spatialdata_build true` is passed to Nextflow. For a downstream-only restart, an explicit path overrides `${outdir}/${pair_id}/merscope/latest/latest_spatialdata.zarr` and must point to the durable enriched latest zarr required by that stage. |
 | `merscope_image_prefix` | no | Prefix used to match z-plane image keys when more than one run is present. |
 | `merscope_z_range` | no | Inclusive z-layer range as `start-end`. Defaults to `0-6`. |
 | `merscope_transform_path` | no | Override path to the `micron_to_mosaic_pixel_transform.csv`. If not set, MerXen looks inside `merscope_dir`. |
 | `merscope_channels` | no | Comma-separated channel names for Cellpose. Defaults to `DAPI,PolyT`. |
 | `merscope_voxel_layers` | no | ProSeg voxel layer count for MERSCOPE. Defaults to `7` (from `nextflow.config`). |
 | `xenium_dir` | required for Xenium modes if no cache | Path to the raw Xenium export folder. |
-| `xenium_spatialdata_path` | required for Xenium modes if no raw dir | Path to an existing (or desired) reusable Xenium SpatialData zarr. Cached the same way as the MERSCOPE path. |
+| `xenium_spatialdata_path` | required for Xenium modes if no raw dir | Path to an existing (or desired) reusable Xenium SpatialData zarr. Cached and used as a downstream-only explicit override in the same way as the MERSCOPE path. |
 | `xenium_channels` | no | Comma-separated channel names for Cellpose. Defaults to `DAPI,18S`. |
 | `xenium_min_qv` | no | Minimum transcript quality value to retain. Defaults to `20`. |
 | `xenium_voxel_layers` | no | ProSeg voxel layer count for Xenium. Defaults to `2`. |
