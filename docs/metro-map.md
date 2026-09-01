@@ -31,7 +31,8 @@ being two datasets and starts being one comparison.
 
 "Toggleable" means the stage is governed by a parameter, **not** that it is off
 by default. `MECR` and the ProSeg hybrid branch are dashed but run in a default
-invocation (`mecr_enabled = true`, `proseg_hybrid_enabled = true`); cortical
+human invocation (`mecr_enabled = true`, `proseg_hybrid_enabled = true`). Mouse
+mode disables the WHB-only MECR branch; cortical
 depth, distance-from-object and MapMyCells are dashed and default to off. See
 [Configuration](configuration.md) for the switches.
 

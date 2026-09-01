@@ -3,7 +3,8 @@
 Runs local Allen Institute MapMyCells annotation on the per-platform AnnData
 objects produced by the Squidpy clustering stage. It supports the Allen Whole
 Human Brain (WHB) taxonomy and the Yao et al. 2023 Whole Mouse Brain (WMB)
-taxonomy, including human-to-mouse ortholog mapping. WHB remains the default.
+taxonomy, including human-to-mouse ortholog mapping. WHB is the human default;
+with `--species mouse`, WMB whole-brain mapping becomes the workflow default.
 
 ## What it does
 
@@ -35,13 +36,33 @@ The default `mapmycells_bootstrap_factor` is `0.9` because these data are
 spatial transcriptomics panels where the newer single-cell-oriented lower
 defaults can be less stable.
 
-For region mode, `mapmycells_region_labels` contains Allen WHB
-`region_of_interest_label` values. The default is
+For human region mode, `mapmycells_region_labels` contains Allen WHB
+`region_of_interest_label` values. The human default is
 `["Human A44-A45", "Human A46", "Human A32", "Human ACC"]`, but the
 implementation accepts a list, a JSON list, or a comma-separated string so this
 can be adjusted to different frontal region sets later.
 
 ## Whole Mouse Brain compatibility
+
+For a mouse dataset, the pipeline-level switch is sufficient for whole-brain
+mapping:
+
+```bash
+nextflow run workflows/main.nf \
+    --samplesheet workflows/samplesheet.csv \
+    --species mouse \
+    --outdir ./results \
+    --stop_stage mapmycells \
+    --mapmycells_region_cache_dir /durable/mapmycells-cache
+```
+
+This resolves to `reference_mode=whole_brain`, `reference_atlas=wmb`, and
+`query_species=mouse`. Mouse Ensembl IDs (`ENSMUSG…`) are retained from Xenium
+or reference metadata. For symbol-only MERSCOPE panels, MerXen uses cached WMB
+expression metadata where available; otherwise it downloads the gene-mapper
+database and lets MapMyCells resolve the symbols. The large gene database is
+therefore not normally needed when usable mouse Ensembl metadata already
+exists.
 
 Set `mapmycells_reference_atlas=wmb` to use the Yao et al. 2023 WMB taxonomy.
 For human MerXen queries, also keep `mapmycells_query_species=human`. MerXen then
@@ -72,11 +93,12 @@ For a mouse-region-specific WMB reference, select mouse
 ```bash
 nextflow run workflows/main.nf \
     --samplesheet workflows/samplesheet.csv \
+    --species mouse \
     --outdir ./results \
     --stop_stage mapmycells \
     --mapmycells_reference_mode region \
     --mapmycells_reference_atlas wmb \
-    --mapmycells_query_species human \
+    --mapmycells_query_species mouse \
     --mapmycells_region_name motor \
     --mapmycells_region_labels MOp \
     --mapmycells_region_cache_dir /durable/mapmycells-cache
@@ -119,8 +141,8 @@ Use `--only_stage mapmycells` to reuse an existing
 | `pair_id` | Pair identifier used in output paths. |
 | `output_dir` | Where `mapmycells_out/` is populated. |
 | `samples` | One or two sample configs: `sample_id`, `platform`, `anndata_path`, optional `query_layer`, optional `gene_id_column`, optional `obs_id_column`. |
-| `reference_mode` | `whole_brain`, `region`, or `both`; default is `both`. |
-| `reference_atlas` | `whb` or `wmb`; default is `whb`. |
+| `reference_mode` | `whole_brain`, `region`, or `both`; workflow default is `both` for human and `whole_brain` for mouse. |
+| `reference_atlas` | `whb` or `wmb`; the workflow selects WHB for human and WMB for mouse. |
 | `query_species` | `human` or `mouse`; controls whether WMB mapping needs cross-species gene mapping. |
 | `auto_download_references` | Download missing Allen stats, markers, and the WMB gene mapper into the durable cache. |
 | `marker_lookup_path` | Optional explicit whole-brain JSON marker lookup; otherwise downloaded when enabled. |

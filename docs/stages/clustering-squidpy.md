@@ -41,21 +41,26 @@ For each active platform in the run:
    `table_MOSAIK_proseg_clustering_squidpy`; `original_seg` writes
    `table_original_clustering_squidpy`.
 
-By default, the one-shot output path still writes `<sample_id>_clustered.h5ad`,
-but the clustering inside that file comes from an atlas-guided hierarchy:
+For human runs, the one-shot output path still writes
+`<sample_id>_clustered.h5ad`, but the clustering inside that file comes from an
+atlas-guided hierarchy. Mouse runs default to the species-agnostic one-shot
+Leiden workflow; WMB hierarchy can be enabled explicitly after configuring WMB
+reference assets.
 
 1. Run a broad low-resolution Leiden round into `obs["leiden_broad"]`.
-2. Score broad clusters against Allen WHB/MapMyCells marker sets, resolving
+2. Score broad clusters against matching Allen WHB or WMB MapMyCells marker sets, resolving
    markers by Ensembl ID first and gene symbol second. When the query has only
-   symbols, the stage auto-loads WHB reference H5AD `gene_symbol` metadata from
-   `reference_cache_dir` to bridge Ensembl marker IDs to panel symbols.
+   symbols, the stage auto-loads matching reference H5AD `gene_symbol` metadata
+   from `reference_cache_dir` to bridge Ensembl marker IDs to panel symbols.
 3. Write `obs["broad_atlas_label"]` and the collapsed `obs["broad_class"]`.
    The built-in broad classes are oligodendrocytes, OPCs, astrocytes, neurons,
-   microglia, fibroblasts, and vascular cells. Confident extra WHB labels such
-   as Ependymal or Choroid plexus are retained.
+   microglia, fibroblasts, and vascular cells. Confident extra atlas labels such
+   as Ependymal or Choroid plexus are retained. Combined WMB classes such as
+   `Astro-Epen` and `OPC-Oligo` remain explicitly combined rather than being
+   mislabeled as one constituent lineage.
 4. Recluster each broad class from `layers["counts"]`, so every branch is
    renormalized and recomputes PCA, neighbors, UMAP, and Leiden.
-5. Split neurons into `Excitatory`, `Inhibitory`, and `Other` with WHB
+5. Split neurons into `Excitatory`, `Inhibitory`, and `Other` with atlas
    neuronal marker groups, then subtype-cluster each split.
 6. Write per-round UMAP/spatial plots, annotation heatmaps, marker tables,
    branch H5ADs, and a manifest under `<sample_id>_hierarchical/`.
@@ -113,7 +118,7 @@ only `VISUALIZE` is active, clustering waits for visualisation.
 | `clustering_squidpy_gpu_vram_monitor` | Nextflow wrapper flag that records `nvidia-smi` VRAM samples for each clustering task. Defaults to `true`. |
 | `clustering_squidpy_gpu_vram_monitor_interval_seconds` | Sampling interval for the VRAM monitor. Defaults to `2`. |
 | `write_spatialdata_table` | Add or replace the final clustered table in each sample's source `latest_spatialdata.zarr`. Defaults to `true`; set `--clustering_squidpy_write_spatialdata_table false` for H5AD-only output. |
-| `hierarchical_enabled` | Run broad atlas annotation plus branch subclustering. Defaults to `true`; set `false` for the legacy one-shot Leiden workflow. |
+| `hierarchical_enabled` | Run broad atlas annotation plus branch subclustering. Workflow default is `true` for human and `false` for mouse. |
 | `broad_round` | Round-specific broad clustering settings. Default Leiden resolution `0.2`; unspecified fields inherit top-level filtering/PCA/UMAP settings. |
 | `subcluster_round` | Default non-neuron branch settings. Default Leiden resolution `0.5`. |
 | `subcluster_resolution_overrides` | Optional map from broad class or neuron split label to a Leiden resolution override. |
@@ -124,8 +129,20 @@ only `VISUALIZE` is active, clustering waits for visualisation.
 
 When this stage is selected and hierarchical mode is enabled, workflow preflight
 requires the broad marker lookup and taxonomy metadata to exist before any tasks
-start. The Dwight profile supplies its local marker, taxonomy, membership, and
-reference-cache paths. Other profiles must provide paths to their own copies.
+start. Human hierarchy uses WHB `CCN202210140_SUPC`; mouse hierarchy uses WMB
+`CCN20230722_CLAS`. The Dwight profile supplies WHB-specific fallback paths
+without overriding explicit WMB paths. Other profiles must provide paths or a
+cache containing the matching atlas assets.
+
+For example, enable mouse hierarchy with:
+
+```bash
+nextflow run workflows/main.nf \
+    --samplesheet workflows/samplesheet.csv \
+    --species mouse \
+    --clustering_squidpy_hierarchical_enabled true \
+    --clustering_squidpy_broad_reference_cache_dir /durable/mapmycells-cache
+```
 
 ## Outputs
 

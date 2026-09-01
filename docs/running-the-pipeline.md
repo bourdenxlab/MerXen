@@ -39,13 +39,14 @@ Common optional parameters:
 | Flag | Description |
 |------|-------------|
 | `--outdir` | Where all outputs are published. Defaults to `./results`. |
+| `--species` | `human` (default) or `mouse`. The value applies to the whole invocation. |
 | `--analysis_mode` | `paired` (default), `merscope`, or `xenium`. Controls which platform columns are required and which stages are active. |
 | `--analysis_segmentation` | `both` (default), `all`, `reseg`, `original_seg`, `proseg_mask`/`cellpose`, or `proseg_hybrid`. `both` remains `reseg,original_seg`; `all` expands to `reseg,original_seg,proseg_mask,proseg_hybrid`. |
 | `--force_spatialdata_build` | Force rebuilding the SpatialData zarr even when a cached one exists. Defaults to `false`. |
 | `--force_proseg_rerun` | Force rebuilding ProSeg bases from the current Cellpose/transcript inputs rather than reusing persistent latest zarrs. Defaults to `false`. |
 | `--enable_alignment` | Run optional DAPI-only VALIS alignment and alignment QC before comparison. Paired mode only. Defaults to `false`. |
 | `--alignment_backend` | Alignment implementation: `valis` (default) or explicit `legacy_spateo`. |
-| `--mecr_enabled` | Run mutually exclusive co-expression rate analysis after QC. Defaults to `true`. |
+| `--mecr_enabled` | Run WHB-based mutually exclusive co-expression rate analysis after QC. Defaults to `true` for human and `false` for mouse; it cannot be enabled in mouse mode. |
 | `--cortical_depth_enabled` | Run cortical-depth tissue/depth annotation after clustering. Requires boundary GeoJSON annotations. Defaults to `false`. |
 | `--distance_from_object_enabled` | Run registered polygon-edge distance annotation and paired near-vs-far pseudobulk analysis. Defaults to `false`. |
 | `--distance_from_object_segmentations` | Object-distance branches; defaults to `proseg,original,cellpose`. The former names remain accepted aliases. |
@@ -105,6 +106,25 @@ GeoJSON for every active platform. The stage itself verifies that every chosen
 table already has `cortical_depth_annotation`.
 Missing references stop the run immediately with the selected stages and paths
 that need attention.
+
+## Mouse datasets
+
+Run a mouse dataset by setting the invocation-wide species:
+
+```bash
+nextflow run workflows/main.nf \
+    --samplesheet workflows/samplesheet.csv \
+    --species mouse \
+    --outdir ./results
+```
+
+All ingest, segmentation, enrichment, image quantification, QC, alignment,
+comparison, visualization, spatial analysis, and one-shot clustering operations
+remain unchanged. Mouse mode disables the WHB-only MECR stage by default.
+Atlas-guided hierarchical clustering also defaults off because it needs local
+WMB marker/taxonomy assets; enable it explicitly after configuring those paths.
+If MapMyCells is selected, mouse mode defaults to a WMB whole-brain reference
+with `query_species=mouse`. One invocation must contain only one species.
 
 ## Analysis mode
 
@@ -343,9 +363,11 @@ that updated MERSCOPE zarr and keep using
 `${outdir}/${pair_id}/xenium/latest/latest_spatialdata.zarr` as the fixed
 reference.
 
-`mapmycells` is downstream of `clustering_squidpy`. By default it runs both the
-Allen WHB whole-brain reference and a configurable WHB region reference
-(`mapmycells_reference_mode=both`). Missing published whole-brain assets are
+`mapmycells` is downstream of `clustering_squidpy`. For human runs it defaults
+to both the Allen WHB whole-brain reference and a configurable WHB region
+reference (`mapmycells_reference_mode=both`). Mouse runs default to the WMB
+whole-brain reference; region mode is explicit because mouse ROI acronyms must
+be supplied. Missing published whole-brain assets are
 downloaded into `mapmycells_region_cache_dir`. Run through it with
 `--stop_stage mapmycells`, or rerun only that stage with `--only_stage
 mapmycells` after clustering outputs already exist. Region runs require

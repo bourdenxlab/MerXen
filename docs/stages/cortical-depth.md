@@ -1,7 +1,7 @@
 # Cortical Depth
 
-Computes 2D cortical-depth coordinates for human cortex Xenium/MERSCOPE
-sections from user-annotated pial, tissue-edge, and optional gray/white matter
+Computes 2D cortical-depth coordinates for cortical Xenium/MERSCOPE sections
+from user-annotated pial, tissue-edge, and optional gray/white matter
 boundaries.
 
 The stage solves a 2D Laplace equation inside a cortical ribbon, traces

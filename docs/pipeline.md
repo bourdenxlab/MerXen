@@ -101,9 +101,10 @@ Nextflow params unless those
 columns are set in the samplesheet. For rows with `analysis_mode=paired`, both
 platforms traverse `BUILD_SPATIALDATA → SEGMENT → ENRICH →
 MASK_IMAGE_QUANTIFICATION → QC` independently and
-are rejoined after QC. The default-enabled `MECR_REFERENCE` task prepares one
-panel-restricted marker set from the complete WHB reference, and `MECR` scores
-each selected segmentation branch. MECR does not require or block alignment.
+are rejoined after QC. In human runs, the default-enabled `MECR_REFERENCE` task
+prepares one panel-restricted marker set from the complete WHB reference, and
+`MECR` scores each selected segmentation branch. MECR does not require or block
+alignment.
 When the row's effective `cortical_depth_enabled` value is
 `true`, `COMPUTE_CORTICAL_DEPTH` runs as a terminal stage after
 `CLUSTERING_SQUIDPY` (consuming the clustering-updated zarr) so per-cell cluster

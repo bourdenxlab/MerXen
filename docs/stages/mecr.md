@@ -6,7 +6,9 @@ metric introduced by Hartman and Satija in
 [Comparative analysis of multiplexed in situ gene expression profiling technologies](https://doi.org/10.7554/eLife.96949.1).
 A lower value indicates greater molecular-assignment specificity; an elevated
 value can reflect off-target signal or overly permissive cell segmentation. The
-stage is enabled by default and runs after QC, independently of alignment.
+stage is enabled by default for human runs and runs after QC, independently of
+alignment. It is disabled for mouse runs because its reference and marker
+thresholds are WHB-specific.
 
 ## Method
 
@@ -90,7 +92,7 @@ column overrides the global switch per row.
 
 | Parameter | Default | Purpose |
 |-----------|---------|---------|
-| `mecr_enabled` | `true` | Enable the stage for a row. |
+| `mecr_enabled` | human: `true`; mouse: `false` | Enable the stage for a row. Mouse mode rejects `true` until a species-appropriate MECR reference is implemented. |
 | `mecr_neurons_h5ad_path` | WHB-10Xv3 neuron raw H5AD | Complete neuronal reference matrix. |
 | `mecr_nonneurons_h5ad_path` | WHB-10Xv3 non-neuron raw H5AD | Complete non-neuronal reference matrix. |
 | `mecr_cell_metadata_path` | WHB cell metadata CSV | Maps reference cell labels to cluster aliases. |

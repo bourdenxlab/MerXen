@@ -249,7 +249,7 @@ See [Section alignment](stages/alignment.md).
 - `run_scanpy_clustering(adata, ...)` — filter, normalize, log-transform,
   PCA, neighbors, UMAP, and Leiden clustering. It accepts `key_added` and
   `input_layer` for branch reclustering from raw counts.
-- `load_atlas_marker_sets`, `score_clusters_by_atlas_markers` — WHB marker
+- `load_atlas_marker_sets`, `score_clusters_by_atlas_markers` — WHB/WMB marker
   parsing and cluster-level atlas marker scoring used by hierarchical mode.
 - `plot_qc_histograms`, `plot_umap`, `plot_spatial_scatter` — PNG writers.
 - `save_qc_metrics`, `save_clustered_adata` — CSV and `.h5ad` outputs.
