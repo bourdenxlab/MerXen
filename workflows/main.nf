@@ -2135,19 +2135,30 @@ workflow {
 
     enrich_task_results_ch = ENRICH(enrich_inputs_ch)
 
-    enrich_published_results_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
+    enrich_published_results_ch = sample_rows_ch.flatMap { pairId, row, settings ->
         if (!(settings.need_enriched_zarrs && !settings.run_enrich)) {
             []
         } else {
             settings.active_platforms.collect { platform ->
                 def key = "${pairId}|${platform}"
-                def latestZarr = requireExistingPath(
-                    publishedDatasetPath(
+                def explicitLatestZarr = platform == "MERSCOPE"
+                    ? chooseField(row, [
+                        "merscope_spatialdata_path",
+                        "merscope_zarr_path",
+                    ])
+                    : chooseField(row, ["xenium_spatialdata_path"])
+                // Cross-pair restarts may intentionally combine durable latest
+                // zarrs that live under different source pair IDs.
+                def latestZarrPath = isBlankPath(explicitLatestZarr)
+                    ? publishedDatasetPath(
                         params.outdir,
                         pairId,
                         platform,
                         "latest/latest_spatialdata.zarr",
-                    ),
+                    )
+                    : explicitLatestZarr
+                def latestZarr = requireExistingPath(
+                    latestZarrPath,
                     "ENRICH latest zarr for ${pairId}:${platform}",
                 )
                 // The published latest zarr is the only ENRICH artifact consumed

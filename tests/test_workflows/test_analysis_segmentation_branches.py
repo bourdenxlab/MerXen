@@ -162,6 +162,9 @@ def test_mask_image_quantification_resume_reuses_published_inputs() -> None:
     ]
     assert "settings.need_enriched_zarrs && !settings.run_enrich" in enrich_resume
     assert '"latest/latest_spatialdata.zarr"' in enrich_resume
+    assert 'chooseField(row, ["xenium_spatialdata_path"])' in enrich_resume
+    assert '"merscope_spatialdata_path"' in enrich_resume
+    assert "isBlankPath(explicitLatestZarr)" in enrich_resume
     assert "def enrichOut = latestZarr" in enrich_resume
     assert '"enrich/enrich_out"' not in enrich_resume
 
