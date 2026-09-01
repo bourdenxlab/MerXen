@@ -399,7 +399,7 @@ def test_mecr_stage_is_default_enabled_and_uses_one_reference_task(
         assert expected in main_text
 
     for expected in [
-        "mecr_enabled = true",
+        "mecr_enabled = null",
         "mecr_marker_min_target_fraction = 0.25",
         "mecr_marker_max_other_fraction = 0.01",
         "mecr_barnyard_top_n_pairs = 6",

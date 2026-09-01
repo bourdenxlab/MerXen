@@ -131,6 +131,83 @@ def test_prepare_mapmycells_query_restores_missing_ensembl_column(
     ]
 
 
+def test_prepare_mouse_query_keeps_symbols_for_gene_mapper(tmp_path: Path) -> None:
+    """Mouse symbol-only panels can defer identifier resolution to MapMyCells."""
+    input_h5ad = tmp_path / "mouse_clustered.h5ad"
+    adata = ad.AnnData(
+        X=np.ones((2, 2), dtype=np.float32),
+        obs=pd.DataFrame(index=["cell1", "cell2"]),
+        var=pd.DataFrame(index=["Gnai3", "Pdgfra"]),
+    )
+    adata.layers["counts"] = np.ones((2, 2), dtype=np.int64)
+    adata.write_h5ad(input_h5ad)
+
+    output_h5ad = prepare_mapmycells_query(
+        input_h5ad,
+        tmp_path / "mouse_query.h5ad",
+        gene_id_column="ensembl_id",
+        allow_gene_symbol_fallback=True,
+    )
+
+    out = ad.read_h5ad(output_h5ad)
+    assert list(out.var_names) == ["Gnai3", "Pdgfra"]
+
+
+def test_prepare_mouse_query_supplements_partial_ensembl_ids(
+    tmp_path: Path,
+) -> None:
+    """Cached WMB metadata should fill gaps in a partial mouse ID column."""
+    input_h5ad = tmp_path / "mouse_partial_ids.h5ad"
+    adata = ad.AnnData(
+        X=np.ones((1, 2), dtype=np.float32),
+        obs=pd.DataFrame(index=["cell1"]),
+        var=pd.DataFrame(
+            {
+                "gene": ["Gnai3", "Pdgfra"],
+                "ensembl_id": ["ENSMUSG00000000001", ""],
+            },
+            index=["Gnai3", "Pdgfra"],
+        ),
+    )
+    adata.layers["counts"] = np.ones((1, 2), dtype=np.int64)
+    adata.write_h5ad(input_h5ad)
+
+    output_h5ad = prepare_mapmycells_query(
+        input_h5ad,
+        tmp_path / "mouse_query.h5ad",
+        gene_id_column="ensembl_id",
+        gene_id_lookup={"Pdgfra": "ENSMUSG00000006403"},
+    )
+
+    out = ad.read_h5ad(output_h5ad)
+    assert list(out.var_names) == [
+        "ENSMUSG00000000001",
+        "ENSMUSG00000006403",
+    ]
+
+
+def test_mouse_mapmycells_config_requires_wmb(tmp_path: Path) -> None:
+    """Mouse queries should fail early if paired with the human atlas."""
+    with pytest.raises(ValueError, match="require the WMB reference atlas"):
+        MapMyCellsConfig(
+            pair_id="PAIR1",
+            output_dir=tmp_path / "mapmycells_out",
+            samples=[],
+            reference_mode="whole_brain",
+            query_species="mouse",
+        )
+
+    cfg = MapMyCellsConfig(
+        pair_id="PAIR1",
+        output_dir=tmp_path / "mapmycells_out",
+        samples=[],
+        reference_mode="whole_brain",
+        reference_atlas="wmb",
+        query_species="mouse",
+    )
+    assert cfg.drop_level is None
+
+
 def test_build_mapmycells_command_includes_bootstrap_factor(tmp_path: Path) -> None:
     """The local mapper command should expose spatial-friendly bootstrap tuning."""
     cfg = MapMyCellsConfig(

@@ -626,6 +626,87 @@ def test_clustering_squidpy_config_defaults_enable_hierarchical_mode() -> None:
     assert cfg.spatial_point_size == 0.5
     assert cfg.spatial_scatter_point_size == 2.0
     assert cfg.write_spatialdata_table is True
+    assert cfg.broad_annotation.reference_atlas == "whb"
+    assert cfg.broad_annotation.marker_level == "CCN202210140_SUPC"
+
+
+def test_mouse_clustering_annotation_uses_wmb_defaults() -> None:
+    """Selecting WMB should not retain human paths or taxonomy levels."""
+    cfg = ClusteringSquidpyConfig.model_validate(
+        {
+            "pair_id": "pair1",
+            "output_dir": "/tmp/out",
+            "samples": [],
+            "broad_annotation": {"reference_atlas": "wmb"},
+        }
+    )
+
+    assert cfg.broad_annotation.marker_lookup_path is None
+    assert cfg.broad_annotation.taxonomy_metadata_path is None
+    assert cfg.broad_annotation.cluster_membership_path is None
+    assert cfg.broad_annotation.marker_level == "CCN20230722_CLAS"
+
+
+@pytest.mark.parametrize(
+    ("atlas_label", "expected"),
+    [
+        ("01 IT-ET Glutamatergic", "Neurons"),
+        ("06 CTX-CGE GABA", "Neurons"),
+        ("30 Astro-Epen", "Astrocytes/Ependymal"),
+        ("31 OPC-Oligo", "Oligodendrocyte lineage"),
+        ("33 Vascular", "Vascular cells"),
+        ("34 Immune", "Microglia"),
+    ],
+)
+def test_wmb_classes_collapse_to_merxen_broad_classes(
+    atlas_label: str,
+    expected: str,
+) -> None:
+    """WMB class names should feed the existing hierarchical branches."""
+    assert collapse_atlas_label_to_broad_class(atlas_label) == expected
+
+
+def test_extract_gene_ids_accepts_mouse_ensembl_ids() -> None:
+    """Mouse Ensembl IDs must survive clustering metadata extraction."""
+    var = pd.DataFrame(
+        {
+            "ensembl_id": ["ENSMUSG00000000001", "control", ""],
+            "gene": ["Gnai3", "Blank-1", "Missing"],
+        },
+        index=["Gnai3", "Blank-1", "Missing"],
+    )
+
+    lookup = clustering_mod._extract_gene_id_lookup_from_var(var, var.index)
+
+    assert lookup == {"Gnai3": "ENSMUSG00000000001"}
+
+
+def test_wmb_cache_discovery_stays_within_mouse_taxonomy(tmp_path: Path) -> None:
+    """WMB lookup discovery must not select nearby WHB cache artifacts."""
+    whb_dir = tmp_path / "abc_whb" / "metadata" / "WHB-taxonomy" / "20240330"
+    wmb_dir = tmp_path / "abc_atlas" / "metadata" / "WMB-taxonomy" / "20230630"
+    whb_dir.mkdir(parents=True)
+    wmb_dir.mkdir(parents=True)
+    (whb_dir / "cluster_annotation_term.csv").write_text("human\n")
+    wmb_taxonomy = wmb_dir / "cluster_annotation_term.csv"
+    wmb_taxonomy.write_text("mouse\n")
+    wmb_markers = tmp_path / "mouse_markers_230821.json"
+    wmb_markers.write_text("{}\n")
+
+    assert (
+        clustering_mod._find_cached_marker_lookup(
+            tmp_path,
+            reference_atlas="wmb",
+        )
+        == wmb_markers
+    )
+    assert (
+        clustering_mod._find_cached_taxonomy_metadata(
+            tmp_path,
+            reference_atlas="wmb",
+        )
+        == wmb_taxonomy
+    )
 
 
 def test_clustered_spatialdata_table_key_uses_segmentation_defaults() -> None:
