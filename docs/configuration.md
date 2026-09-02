@@ -67,7 +67,7 @@ profile. Override either kind with `--<name>` on the command line.
 | `enable_alignment` | `false` | Fallback row alignment switch. A non-empty samplesheet `enable_alignment` value overrides this per row; alignment only applies to paired rows. |
 | `analysis_segmentation` | `both` | Fallback downstream analysis branches after enrichment. Valid values: `both`, `all`, `reseg`, `original_seg`, `proseg_mask`/`cellpose`, `proseg_hybrid`; comma-separated combinations are accepted. `both` remains `reseg,original_seg`, while `all` includes all four branches. A non-empty samplesheet value overrides this per row. |
 | `mask_image_quantification_enabled` | `true` | Insert the Cellpose-mask image quantification stage between enrichment and QC. A non-empty samplesheet `mask_image_quantification_enabled` value overrides this per row. |
-| `mecr_enabled` | species-dependent | Insert WHB-based mutually exclusive co-expression rate analysis after QC. Defaults to `true` for human and `false` for mouse. Mouse runs reject an explicit `true`. |
+| `mecr_enabled` | species-dependent | Insert species-matched whole-brain mutually exclusive co-expression rate analysis after QC. Defaults to `true` for human and `false` for mouse; mouse may opt in to the complete WMB reference. |
 | `spatial_gene_analysis_enabled` | `true` | Insert spatial gene analysis between visualization and clustering. A non-empty samplesheet value overrides this per row; disabled rows proceed directly from visualization to clustering. |
 | `spatial_gene_analysis_transcript_analysis_enabled` | `true` | Run the annotation-dependent transcript-pattern component inside spatial gene analysis. A non-empty samplesheet value overrides this per row; `false` retains cell-level autocorrelation without requiring tissue GeoJSON files. |
 | `cortical_depth_enabled` | `false` | Insert the cortical-depth stage after clustering. Requires per-sample pial/tissue-edge annotations, with optional gray/white boundaries for depth pieces. A non-empty samplesheet `cortical_depth_enabled` value overrides this per row. |
@@ -394,7 +394,7 @@ The following settings are read only when
 | `clustering_squidpy_gpu_vram_monitor` | Dwight: `true` | Run a lightweight `nvidia-smi` sampler around each `CLUSTERING_SQUIDPY_COMPUTE` task. |
 | `clustering_squidpy_gpu_vram_monitor_interval_seconds` | `2` | Sampling interval for the clustering GPU VRAM monitor. |
 | `clustering_squidpy_write_spatialdata_table` | `true` | Add or replace a final clustered AnnData table in each source `latest_spatialdata.zarr`. |
-| `clustering_squidpy_hierarchical_enabled` | species-dependent | Run broad atlas-guided annotation and per-branch subclustering. Defaults to `true` for human and `false` for mouse; explicitly enable mouse hierarchy after providing WMB assets. |
+| `clustering_squidpy_hierarchical_enabled` | `true` | Run broad atlas-guided annotation and per-branch subclustering using the species-matched atlas. |
 | `clustering_squidpy_broad_leiden_resolution` | `0.2` | Low-resolution Leiden round used for broad atlas annotation. |
 | `clustering_squidpy_subcluster_leiden_resolution` | `0.5` | Default Leiden resolution for non-neuron broad-class branches. |
 | `clustering_squidpy_subcluster_resolution_overrides` | `[:]` | Optional Nextflow map from broad class or neuron split label to a custom branch Leiden resolution. |
@@ -406,6 +406,7 @@ The following settings are read only when
 | `clustering_squidpy_broad_taxonomy_metadata_path` | atlas/cache-dependent | Allen `cluster_annotation_term.csv` used to map marker lookup IDs to atlas labels. |
 | `clustering_squidpy_broad_cluster_membership_path` | atlas/cache-dependent | Allen membership metadata used for neuron neurotransmitter split labels. |
 | `clustering_squidpy_broad_reference_cache_dir` | `<outdir>/mapmycells_cache` | Cache searched for matching WHB/WMB taxonomy, markers, and reference H5AD gene-symbol metadata. The Dwight profile points this at its shared cache. |
+| `clustering_squidpy_broad_auto_download_reference` | `true` | Download missing compact WMB marker, taxonomy, membership, and gene metadata into the reference cache. WHB continues to use configured local inputs. |
 | `clustering_squidpy_broad_reference_gene_metadata_paths` | `[]` | Optional reference H5AD files used to bridge panel symbols to species-appropriate Ensembl IDs. |
 | `clustering_squidpy_broad_marker_level` | atlas-dependent | `CCN202210140_SUPC` for WHB or `CCN20230722_CLAS` for WMB. |
 | `clustering_squidpy_broad_min_marker_overlap` | `3` | Minimum query-panel marker overlap required to score an atlas label. |
@@ -459,15 +460,18 @@ mode, output layout, and CPU container instructions.
 
 | Param | Default | Description |
 |-------|---------|-------------|
-| `mecr_enabled` | human: `true`; mouse: `false` | Run WHB-based mutually exclusive co-expression rate analysis after QC. May be overridden per samplesheet row only for human data. |
-| `mecr_neurons_h5ad_path` | Complete WHB-10Xv3 neuron raw H5AD | Allen Whole Human Brain neuronal expression matrix. |
-| `mecr_nonneurons_h5ad_path` | Complete WHB-10Xv3 non-neuron raw H5AD | Allen Whole Human Brain non-neuronal expression matrix. |
-| `mecr_cell_metadata_path` | WHB-10Xv3 cell metadata CSV | Maps H5AD cell labels to cluster aliases. |
-| `mecr_taxonomy_metadata_path` | WHB taxonomy annotation CSV | Resolves taxonomy node labels. |
-| `mecr_cluster_membership_path` | WHB cluster-membership CSV | Maps cluster aliases to taxonomy nodes. |
-| `mecr_taxonomy_level` | `CCN202210140_SUPC` | WHB taxonomy level used before the existing broad-class collapse. |
+| `mecr_enabled` | human: `true`; mouse: `false` | Run species-matched whole-brain mutually exclusive co-expression rate analysis after QC. Mouse is opt-in because the complete WMB raw reference is about 151 GB. |
+| `mecr_reference_h5ad_paths` | `[]` | Optional complete list of raw reference H5AD shards. WMB auto-download populates all 10Xv2, 10Xv3, and 10X Multiome shards. |
+| `mecr_neurons_h5ad_path` | Complete WHB-10Xv3 neuron raw H5AD | Legacy WHB neuronal input used when the generic list is empty. |
+| `mecr_nonneurons_h5ad_path` | Complete WHB-10Xv3 non-neuron raw H5AD | Legacy WHB non-neuronal input used when the generic list is empty. |
+| `mecr_cell_metadata_path` | Atlas-dependent | Maps raw H5AD cell labels to cluster aliases. |
+| `mecr_taxonomy_metadata_path` | Atlas-dependent | Resolves taxonomy node labels. |
+| `mecr_cluster_membership_path` | Atlas-dependent | Maps cluster aliases to taxonomy nodes. |
+| `mecr_reference_cache_dir` | `<outdir>/mapmycells_cache` | Durable Allen reference cache. The Dwight profile uses `/media/mathieubo/SSD1/MerXen/mapmycells`. |
+| `mecr_auto_download_reference` | `true` | For mouse, download or reuse the complete WMB raw reference and metadata. Downloads are resumable and use four concurrent transfers. |
+| `mecr_taxonomy_level` | atlas-dependent | `CCN202210140_SUPC` for WHB or `CCN20230722_CLAS` for WMB. |
 | `mecr_gene_symbol_column` | `gene_symbol` | Reference `var` column containing gene symbols. |
-| `mecr_target_broad_classes` | Seven core classes | Neurons, oligodendrocytes, oligodendrocyte precursors, astrocytes, microglia, fibroblasts, and vascular cells. |
+| `mecr_target_broad_classes` | atlas-dependent | Seven WHB core classes or six WMB classes: neurons, Astro-Epen, OPC-Oligo, OEC, vascular, and immune/microglia. |
 | `mecr_marker_min_target_fraction` | `0.25` | A marker must be detected in strictly more than this fraction of its target class. |
 | `mecr_marker_max_other_fraction` | `0.01` | A marker must be detected in strictly less than this fraction of the remaining retained cells. |
 | `mecr_normalize_target_sum` | `10000.0` | Full-library per-cell normalization target before `log1p` and Wilcoxon. |

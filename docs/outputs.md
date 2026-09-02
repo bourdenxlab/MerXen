@@ -260,11 +260,11 @@ Shared reference path: `${outdir}/mecr_reference/mecr_reference_out/`
 
 | File | Contents |
 |------|----------|
-| `mecr_reference_panel_genes.csv` | Union of spatial-panel genes requested from the complete WHB reference. |
+| `mecr_reference_panel_genes.csv` | Union of spatial-panel genes requested from the complete species-matched whole-brain reference. |
 | `mecr_reference_gene_statistics.csv` | Per-gene, per-broad-class detection fractions and Python Wilcoxon statistics, including threshold and uniqueness flags. |
 | `mecr_reference_markers.csv` | Unique broad-class markers that pass the paper's strict detection thresholds. |
 | `mecr_reference_pairs.csv` | Reference intersection, union, and MECR for every eligible cross-class marker pair. |
-| `mecr_reference_distribution.png` | WHB reference pair-MECR histogram with descriptive mean and median lines; neither line is used for pair selection. |
+| `mecr_reference_distribution.png` | Whole-brain reference pair-MECR histogram with descriptive mean and median lines; neither line is used for pair selection. |
 | `mecr_reference_manifest.json` | Reference paths, normalization, thresholds, class/cell counts, Wilcoxon settings, and output paths. |
 
 Per-branch path: `${outdir}/<pair_id>/<analysis_segmentation>/mecr/mecr_out/`

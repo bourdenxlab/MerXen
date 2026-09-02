@@ -34,7 +34,7 @@ Commands:
   visualize          Generate visualization artifacts for a pair
   spatial-gene-analysis
                       Run cell and transcript-coordinate spatial gene analysis
-  mecr-reference     Discover MECR markers in the complete WHB reference
+  mecr-reference     Discover MECR markers in a complete whole-brain reference
   mecr               Score mutually exclusive co-expression rates
   clustering-squidpy Run Scanpy/Squidpy clustering analysis
   mapmycells         Run local MapMyCells cell type assignment
@@ -279,7 +279,7 @@ Details: [Spatial gene analysis](stages/spatial-gene-analysis.md).
 ## `merxen mecr-reference`
 
 Discover paper-standard mutually exclusive broad-class markers in the complete
-WHB-10Xv3 reference for the selected spatial panel.
+species-matched WHB or WMB reference for the selected spatial panel.
 
 ```bash
 merxen mecr-reference --config mecr_reference_config.json

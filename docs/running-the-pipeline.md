@@ -46,7 +46,7 @@ Common optional parameters:
 | `--force_proseg_rerun` | Force rebuilding ProSeg bases from the current Cellpose/transcript inputs rather than reusing persistent latest zarrs. Defaults to `false`. |
 | `--enable_alignment` | Run optional DAPI-only VALIS alignment and alignment QC before comparison. Paired mode only. Defaults to `false`. |
 | `--alignment_backend` | Alignment implementation: `valis` (default) or explicit `legacy_spateo`. |
-| `--mecr_enabled` | Run WHB-based mutually exclusive co-expression rate analysis after QC. Defaults to `true` for human and `false` for mouse; it cannot be enabled in mouse mode. |
+| `--mecr_enabled` | Run species-matched whole-brain mutually exclusive co-expression rate analysis after QC. Defaults to `true` for human and `false` for mouse because the complete WMB download is about 151 GB. |
 | `--cortical_depth_enabled` | Run cortical-depth tissue/depth annotation after clustering. Requires boundary GeoJSON annotations. Defaults to `false`. |
 | `--distance_from_object_enabled` | Run registered polygon-edge distance annotation and paired near-vs-far pseudobulk analysis. Defaults to `false`. |
 | `--distance_from_object_segmentations` | Object-distance branches; defaults to `proseg,original,cellpose`. The former names remain accepted aliases. |
@@ -91,12 +91,13 @@ MapMyCells. Reuse published clustering with `--only_stage mender`; see
 
 Before any task inputs are emitted, the workflow runs stage-aware preflight
 checks for reference files required by the selected stage range. For example,
-`mecr` checks both complete WHB raw H5AD files plus the cell and taxonomy
-metadata used to derive its seven broad classes,
-`clustering_squidpy` with hierarchical mode checks the broad marker lookup and
-Allen taxonomy paths, while `mapmycells` checks explicitly configured
-marker/stat/gene-mapper files. Automatically downloaded MapMyCells assets are
-validated during cached download instead.
+`mecr` checks explicitly configured raw H5AD and metadata paths; missing WMB
+inputs are allowed through preflight when automatic reference download is
+enabled and are validated against Allen's manifest during download.
+`clustering_squidpy` with hierarchical mode likewise checks explicit broad
+marker and taxonomy paths or provisions compact WMB assets, while `mapmycells`
+checks explicitly configured marker/stat/gene-mapper files. Automatically
+downloaded assets are validated during cached download instead.
 When `compute_cortical_depth` is selected, preflight checks pial/tissue-edge
 annotation GeoJSONs or a combined role-labelled annotation GeoJSON for every
 active platform. Gray/white boundaries are optional for pial-only mask/QC
@@ -119,12 +120,27 @@ nextflow run workflows/main.nf \
 ```
 
 All ingest, segmentation, enrichment, image quantification, QC, alignment,
-comparison, visualization, spatial analysis, and one-shot clustering operations
-remain unchanged. Mouse mode disables the WHB-only MECR stage by default.
-Atlas-guided hierarchical clustering also defaults off because it needs local
-WMB marker/taxonomy assets; enable it explicitly after configuring those paths.
-If MapMyCells is selected, mouse mode defaults to a WMB whole-brain reference
-with `query_species=mouse`. One invocation must contain only one species.
+comparison, visualization, and spatial analysis operations remain unchanged.
+Atlas-guided hierarchical clustering defaults on and automatically downloads
+the compact WMB marker, taxonomy, membership, and gene metadata into the
+configured reference cache. MECR remains opt-in for mouse because it downloads
+and streams the complete WMB 10Xv2, 10Xv3, and 10X Multiome raw reference
+(about 151 GB). If MapMyCells is selected, mouse mode defaults to a WMB
+whole-brain reference with `query_species=mouse`. One invocation must contain
+only one species.
+
+For a mouse run that enables MECR but temporarily skips all spatial-gene
+analysis while annotation GeoJSON files are unavailable:
+
+```bash
+nextflow run workflows/main.nf \
+    -profile dwight,conda \
+    --samplesheet workflows/samplesheet.csv \
+    --species mouse \
+    --mecr_enabled true \
+    --spatial_gene_analysis_enabled false \
+    --outdir ./results
+```
 
 ## Analysis mode
 

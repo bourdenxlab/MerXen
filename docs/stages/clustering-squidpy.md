@@ -118,7 +118,7 @@ only `VISUALIZE` is active, clustering waits for visualisation.
 | `clustering_squidpy_gpu_vram_monitor` | Nextflow wrapper flag that records `nvidia-smi` VRAM samples for each clustering task. Defaults to `true`. |
 | `clustering_squidpy_gpu_vram_monitor_interval_seconds` | Sampling interval for the VRAM monitor. Defaults to `2`. |
 | `write_spatialdata_table` | Add or replace the final clustered table in each sample's source `latest_spatialdata.zarr`. Defaults to `true`; set `--clustering_squidpy_write_spatialdata_table false` for H5AD-only output. |
-| `hierarchical_enabled` | Run broad atlas annotation plus branch subclustering. Workflow default is `true` for human and `false` for mouse. |
+| `hierarchical_enabled` | Run broad atlas annotation plus branch subclustering. Workflow default is `true` for both species. |
 | `broad_round` | Round-specific broad clustering settings. Default Leiden resolution `0.2`; unspecified fields inherit top-level filtering/PCA/UMAP settings. |
 | `subcluster_round` | Default non-neuron branch settings. Default Leiden resolution `0.5`. |
 | `subcluster_resolution_overrides` | Optional map from broad class or neuron split label to a Leiden resolution override. |
@@ -127,20 +127,23 @@ only `VISUALIZE` is active, clustering waits for visualisation.
 | `min_branch_cells` | Branches smaller than this are labeled but not reclustered. Default `50`. |
 | `broad_annotation` | Marker lookup, Allen taxonomy metadata/cache path, marker overlap limits, and ambiguity thresholds for atlas-guided cluster labels. |
 
-When this stage is selected and hierarchical mode is enabled, workflow preflight
-requires the broad marker lookup and taxonomy metadata to exist before any tasks
-start. Human hierarchy uses WHB `CCN202210140_SUPC`; mouse hierarchy uses WMB
-`CCN20230722_CLAS`. The Dwight profile supplies WHB-specific fallback paths
-without overriding explicit WMB paths. Other profiles must provide paths or a
-cache containing the matching atlas assets.
+When this stage is selected and hierarchical mode is enabled, human hierarchy
+uses WHB `CCN202210140_SUPC`; mouse hierarchy uses WMB
+`CCN20230722_CLAS`. Missing WMB marker, taxonomy, membership, and gene metadata
+are downloaded automatically into the durable cache. The published WMB marker
+lookup lacks direct class markers for five classes; MerXen recovers three from
+their subclass markers. Allen publishes no class or subclass markers for the
+two singleton classes `15 HY Gnrh1 Glut` and `25 Pineal Glut`, so they are
+reported and omitted from marker scoring. The other 32 WMB classes remain
+available. The Dwight profile supplies WHB-specific fallback paths without
+overriding WMB discovery.
 
-For example, enable mouse hierarchy with:
+For example, run mouse hierarchy with a durable cache:
 
 ```bash
 nextflow run workflows/main.nf \
     --samplesheet workflows/samplesheet.csv \
     --species mouse \
-    --clustering_squidpy_hierarchical_enabled true \
     --clustering_squidpy_broad_reference_cache_dir /durable/mapmycells-cache
 ```
 

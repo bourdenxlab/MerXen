@@ -85,7 +85,7 @@ Each stage is one Nextflow module and one `merxen` subcommand, sharing a Pydanti
 | [Mask image quantification](docs/stages/mask-image-quantification.md) | Quantifies every SpatialData image channel over the final Cellpose masks | always |
 | [Cortical depth](docs/stages/cortical-depth.md) | Laplace / equal-area cortical-depth coordinates from boundary annotations | off (`--cortical_depth_enabled`) |
 | [QC](docs/stages/qc.md) | Per-dataset geometry and transcript-assignment metrics | always |
-| [MECR](docs/stages/mecr.md) | Reference-based mutually exclusive co-expression rate against the WHB reference | human: on; mouse: unavailable |
+| [MECR](docs/stages/mecr.md) | Reference-based mutually exclusive co-expression rate against the species-matched whole-brain atlas | human: on; mouse: opt-in |
 | [Alignment](docs/stages/alignment.md) | VALIS DAPI registration of paired adjacent sections, plus alignment QC | off (`--enable_alignment`) |
 | [Comparison](docs/stages/comparison.md) | Cross-platform gene-level comparison | paired rows only |
 | [Visualization](docs/stages/visualization.md) | Single-platform or paired figure generation | always |
@@ -105,7 +105,7 @@ See [Metro map](docs/metro-map.md) for what the diagram above does and does not 
 |---|---|---|
 | `--samplesheet` | *required* | Path to your CSV. |
 | `--outdir` | `./results` | Where all outputs are published. |
-| `--species` | `human` | Dataset species: `human` or `mouse`. Mouse mode disables WHB-only MECR and selects WMB-aware downstream defaults. |
+| `--species` | `human` | Dataset species: `human` or `mouse`. Mouse mode selects WMB references for hierarchical clustering, MECR, and MapMyCells. |
 | `--analysis_mode` | `paired` | `paired`, `merscope`, or `xenium`. Controls which columns are required and which stages are active. |
 | `--analysis_segmentation` | `both` | `both`, `all`, `reseg`, `original_seg`, `proseg_mask`, or `proseg_hybrid`. |
 | `--enable_alignment` | `false` | Run VALIS alignment and alignment QC before comparison. Paired mode only; VALIS requires both platform-specific combined pia/tissue-edge annotation GeoJSON columns. |

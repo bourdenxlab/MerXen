@@ -23,7 +23,7 @@ required. A template lives at
 | `start_stage` | no | Row-level first stage. Blank inherits `--start_stage` unless `only_stage` applies. |
 | `stop_stage` | no | Row-level final stage. Blank inherits `--stop_stage` unless `only_stage` applies. |
 | `only_stage` | no | Row-level single-stage override. If set, it overrides that row's start/stop stage settings. |
-| `mecr_enabled` | no | Row-level MECR switch. Blank inherits its species-dependent default (`true` for human, `false` for mouse). Mouse mode cannot enable this WHB-only stage. |
+| `mecr_enabled` | no | Row-level MECR switch. Blank inherits its species-dependent default (`true` for human, `false` for mouse). Set `true` for mouse to use the complete WMB reference. |
 | `spatial_gene_analysis_enabled` | no | Row-level switch for the complete spatial-gene-analysis stage. Blank inherits `--spatial_gene_analysis_enabled`, which defaults to `true`. When `false`, clustering follows visualization directly. |
 | `spatial_gene_analysis_transcript_analysis_enabled` | no | Row-level switch for the annotation-dependent transcript analysis within spatial-gene analysis. Blank inherits `--spatial_gene_analysis_transcript_analysis_enabled`. Set this to `false` to retain cell-level autocorrelation without requiring tissue GeoJSON files. |
 | `cortical_depth_enabled` | no | Row-level cortical-depth switch. Blank inherits `--cortical_depth_enabled`. |
