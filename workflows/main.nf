@@ -121,10 +121,9 @@ def normalizeSpecies(rawValue) {
 }
 
 def effectiveClusteringHierarchicalEnabled(params) {
-    def species = normalizeSpecies(params.species)
     return boolOrDefault(
         params.clustering_squidpy_hierarchical_enabled,
-        species == "human",
+        true,
         "clustering_squidpy_hierarchical_enabled",
     )
 }
@@ -784,10 +783,7 @@ def validateStage(
             hint = " Pass --distance_from_object_enabled true to use object distance."
         }
         if (stage == "mecr") {
-            hint = (
-                " Pass --mecr_enabled true in a human run to use MECR; " +
-                "the WHB-based stage is unavailable for mouse data."
-            )
+            hint = " Pass --mecr_enabled true to use MECR."
         }
         if (stage == "spatial_gene_analysis" && !spatialGeneAnalysisEnabled) {
             hint = " Pass --spatial_gene_analysis_enabled true to use spatial gene analysis."
@@ -926,11 +922,17 @@ def appendClusteringSquidpyPreflightChecks(errors, settings, params) {
         (referenceAtlas == "whb" ? params.clustering_squidpy_whb_taxonomy_metadata_path : null)
     def clusterMembershipPath = params.clustering_squidpy_broad_cluster_membership_path ?:
         (referenceAtlas == "whb" ? params.clustering_squidpy_whb_cluster_membership_path : null)
+    def autoDownloadReference = boolOrDefault(
+        params.clustering_squidpy_broad_auto_download_reference,
+        true,
+        "clustering_squidpy_broad_auto_download_reference",
+    )
     def referenceCacheDir = isBlankPath(
         params.clustering_squidpy_broad_reference_cache_dir
     ) ? normalizedPath(params.outdir).resolve("mapmycells_cache") :
         params.clustering_squidpy_broad_reference_cache_dir
-    if (isBlankPath(markerLookupPath)) {
+    if (isBlankPath(markerLookupPath) &&
+        !(referenceAtlas == "wmb" && autoDownloadReference)) {
         def markerFilename = referenceAtlas == "wmb"
             ? "mouse_markers_230821.json"
             : "query_markers.n10.20240221800.json"
@@ -947,14 +949,15 @@ def appendClusteringSquidpyPreflightChecks(errors, settings, params) {
                 "${referenceCacheDir} with ${markerFilename}"
             )
         }
-    } else {
+    } else if (!isBlankPath(markerLookupPath)) {
         appendPreflightFileCheck(
             errors,
             markerLookupPath,
             "CLUSTERING_SQUIDPY broad marker lookup",
         )
     }
-    if (isBlankPath(taxonomyMetadataPath)) {
+    if (isBlankPath(taxonomyMetadataPath) &&
+        !(referenceAtlas == "wmb" && autoDownloadReference)) {
         def cachedTaxonomy = findCachedAtlasFilePath(
             referenceCacheDir,
             referenceAtlas,
@@ -970,7 +973,7 @@ def appendClusteringSquidpyPreflightChecks(errors, settings, params) {
                 "/**/cluster_annotation_term.csv"
             )
         }
-    } else {
+    } else if (!isBlankPath(taxonomyMetadataPath)) {
         appendPreflightFileCheck(
             errors,
             taxonomyMetadataPath,
@@ -1229,12 +1232,63 @@ def appendMecrPreflightChecks(errors, settings, params) {
     if (!settings.run_mecr) {
         return
     }
+    def referenceAtlas = settings.species == "mouse" ? "wmb" : "whb"
+    def autoDownloadReference = boolOrDefault(
+        params.mecr_auto_download_reference,
+        true,
+        "mecr_auto_download_reference",
+    )
+    def referenceH5adPaths = normalizeOptionalStringList(
+        params.mecr_reference_h5ad_paths
+    ) ?: []
+    def neuronsPath = params.mecr_neurons_h5ad_path ?:
+        (referenceAtlas == "whb" ? params.mecr_whb_neurons_h5ad_path : null)
+    def nonneuronsPath = params.mecr_nonneurons_h5ad_path ?:
+        (referenceAtlas == "whb" ? params.mecr_whb_nonneurons_h5ad_path : null)
+    def cellMetadataPath = params.mecr_cell_metadata_path ?:
+        (referenceAtlas == "whb" ? params.mecr_whb_cell_metadata_path : null)
+    def taxonomyMetadataPath = params.mecr_taxonomy_metadata_path ?:
+        (referenceAtlas == "whb" ? params.mecr_whb_taxonomy_metadata_path : null)
+    def clusterMembershipPath = params.mecr_cluster_membership_path ?:
+        (referenceAtlas == "whb" ? params.mecr_whb_cluster_membership_path : null)
+    if (referenceAtlas == "wmb" && autoDownloadReference) {
+        referenceH5adPaths.eachWithIndex { rawPath, index ->
+            appendPreflightFileCheck(
+                errors,
+                rawPath,
+                "MECR WMB raw H5AD ${index + 1}",
+            )
+        }
+        [
+            [cellMetadataPath, "WMB cell metadata"],
+            [taxonomyMetadataPath, "WMB taxonomy metadata"],
+            [clusterMembershipPath, "WMB cluster membership metadata"],
+        ].each { rawPath, label ->
+            if (!isBlankPath(rawPath)) {
+                appendPreflightFileCheck(errors, rawPath, "MECR ${label}")
+            }
+        }
+        return
+    }
+    referenceH5adPaths.eachWithIndex { rawPath, index ->
+        appendPreflightFileCheck(
+            errors,
+            rawPath,
+            "MECR ${referenceAtlas.toUpperCase()} raw H5AD ${index + 1}",
+        )
+    }
+    if (!referenceH5adPaths) {
+        [
+            [neuronsPath, "${referenceAtlas.toUpperCase()} neuron raw H5AD"],
+            [nonneuronsPath, "${referenceAtlas.toUpperCase()} non-neuron raw H5AD"],
+        ].each { rawPath, label ->
+            appendPreflightFileCheck(errors, rawPath, "MECR ${label}")
+        }
+    }
     [
-        [params.mecr_neurons_h5ad_path, "WHB neuron raw H5AD"],
-        [params.mecr_nonneurons_h5ad_path, "WHB non-neuron raw H5AD"],
-        [params.mecr_cell_metadata_path, "WHB cell metadata"],
-        [params.mecr_taxonomy_metadata_path, "WHB taxonomy metadata"],
-        [params.mecr_cluster_membership_path, "WHB cluster membership metadata"],
+        [cellMetadataPath, "${referenceAtlas.toUpperCase()} cell metadata"],
+        [taxonomyMetadataPath, "${referenceAtlas.toUpperCase()} taxonomy metadata"],
+        [clusterMembershipPath, "${referenceAtlas.toUpperCase()} cluster membership metadata"],
     ].each { rawPath, label ->
         appendPreflightFileCheck(errors, rawPath, "MECR ${label}")
     }
@@ -1426,12 +1480,6 @@ def rowSampleSettings(row, params) {
         species == "human",
         "mecr_enabled for ${pairId}",
     )
-    if (species == "mouse" && mecrEnabled) {
-        throw new IllegalArgumentException(
-            "MECR currently requires the Whole Human Brain reference and cannot " +
-            "be enabled for --species mouse"
-        )
-    }
     def menderEnabled = boolOrDefault(
         rowFieldOrDefault(row, "mender_enabled", params.mender_enabled),
         false,
@@ -2703,7 +2751,13 @@ workflow {
     mecr_reference_inputs_ch = mecr_samples_ch
         .map { _pairId, _segmentation, samplesJson -> samplesJson }
         .collect()
-        .map { samplesJsonValues -> mergeMecrSamplesJson(samplesJsonValues) }
+        .filter { samplesJsonValues -> !samplesJsonValues.isEmpty() }
+        .map { samplesJsonValues ->
+            def referenceAtlas = normalizeSpecies(params.species) == "mouse"
+                ? "wmb"
+                : "whb"
+            tuple(referenceAtlas, mergeMecrSamplesJson(samplesJsonValues))
+        }
     mecr_reference_results_ch = MECR_REFERENCE(mecr_reference_inputs_ch)
     mecr_inputs_ch = mecr_samples_ch
         .combine(mecr_reference_results_ch)

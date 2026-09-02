@@ -58,7 +58,7 @@ GENE_SYMBOL_COLUMN_CANDIDATES = (
     "feature",
     "name",
 )
-NEUROTRANSMITTER_LEVEL = "CCN202210140_NEUR"
+WHB_NEUROTRANSMITTER_LEVEL = "CCN202210140_NEUR"
 CONTROL_TOKENS = (
     "blank",
     "control",
@@ -144,6 +144,7 @@ INHIBITORY_SUPERCLUSTER_TOKENS = (
 EXCITATORY_SUPERCLUSTER_TOKENS = (
     "excitatory",
     "glutamatergic",
+    " glut",
     "vglut",
     "intratelencephalic",
     "corticothalamic",
@@ -1600,6 +1601,29 @@ def _load_configured_marker_sets(
     marker_lookup_path = annotation.marker_lookup_path
     taxonomy_metadata_path = annotation.taxonomy_metadata_path
     cluster_membership_path = annotation.cluster_membership_path
+    if (
+        annotation.reference_atlas == "wmb"
+        and annotation.auto_download_reference
+        and annotation.reference_cache_dir is not None
+        and (
+            marker_lookup_path is None
+            or taxonomy_metadata_path is None
+            or cluster_membership_path is None
+        )
+    ):
+        from merxen.analysis.mapmycells import ensure_wmb_clustering_reference_inputs
+
+        downloaded = ensure_wmb_clustering_reference_inputs(
+            annotation.reference_cache_dir
+        )
+        marker_lookup_path = marker_lookup_path or downloaded["marker_lookup"]
+        taxonomy_metadata_path = (
+            taxonomy_metadata_path or downloaded["cluster_annotation_term"]
+        )
+        cluster_membership_path = (
+            cluster_membership_path
+            or downloaded["cluster_to_cluster_annotation_membership"]
+        )
     if marker_lookup_path is None and annotation.reference_cache_dir is not None:
         marker_lookup_path = _find_cached_marker_lookup(
             annotation.reference_cache_dir,
@@ -1699,7 +1723,7 @@ def _load_configured_marker_alias_lookup(
 
     lookup: dict[str, str] = {}
     for path in paths:
-        lookup.update(_reference_gene_symbol_lookup_from_h5ad(path))
+        lookup.update(_reference_gene_symbol_lookup(path))
     if lookup:
         logger.info(
             "Loaded %d marker ID aliases from reference gene metadata.",
@@ -1719,11 +1743,61 @@ def _find_cached_reference_gene_metadata_paths(
             for path in Path(cache_dir).rglob("WHB-10Xv3-*-raw.h5ad")
             if "WHB-10Xv3" in path.parts
         )
-    return sorted(
+    csv_paths = sorted(
+        path for path in Path(cache_dir).rglob("gene.csv") if "WMB-10X" in path.parts
+    )
+    if csv_paths:
+        return csv_paths
+    h5ad_paths = sorted(
         path
         for path in Path(cache_dir).rglob("*-raw.h5ad")
         if any(part.startswith("WMB-10X") for part in path.parts)
     )
+    return h5ad_paths
+
+
+def _reference_gene_symbol_lookup(path: Path | str) -> dict[str, str]:
+    path = Path(path)
+    if path.suffix.lower() == ".csv":
+        return _reference_gene_symbol_lookup_from_csv(path)
+    return _reference_gene_symbol_lookup_from_h5ad(path)
+
+
+def _reference_gene_symbol_lookup_from_csv(path: Path | str) -> dict[str, str]:
+    metadata = pd.read_csv(path)
+    id_column = next(
+        (
+            column
+            for column in ("gene_identifier", "ensembl_id", "gene_id")
+            if column in metadata.columns
+        ),
+        None,
+    )
+    symbol_column = next(
+        (
+            column
+            for column in ("gene_symbol", "symbol", "gene")
+            if column in metadata.columns
+        ),
+        None,
+    )
+    if id_column is None or symbol_column is None:
+        logger.warning("Reference gene metadata lacks ID/symbol columns: %s", path)
+        return {}
+
+    lookup: dict[str, str] = {}
+    for ensembl_id, symbol in zip(
+        metadata[id_column].astype(str),
+        metadata[symbol_column].astype(str),
+        strict=True,
+    ):
+        ensembl = str(ensembl_id).strip()
+        gene_symbol = str(symbol).strip()
+        if not is_ensembl_gene_id(ensembl) or not gene_symbol:
+            continue
+        lookup.setdefault(_normalize_marker_id(ensembl), gene_symbol)
+        lookup.setdefault(_normalize_marker_id(gene_symbol), ensembl)
+    return lookup
 
 
 def _reference_gene_symbol_lookup_from_h5ad(path: Path | str) -> dict[str, str]:
@@ -2740,18 +2814,24 @@ def collapse_atlas_label_to_broad_class(label_name: str) -> str:
         return "Astrocytes/Ependymal"
     if "opc-oligo" in lower:
         return "Oligodendrocyte lineage"
+    if "oec" in lower:
+        return "OEC"
     neuron_tokens = (
         "neuron",
         "interneuron",
         "excitatory",
         "inhibitory",
         "glutamatergic",
+        " glut",
         "gaba",
         "glycinergic",
         "dopaminergic",
+        " dopa",
         "cholinergic",
         "serotonergic",
+        " sero",
         "peptidergic",
+        " gnrh",
         "intratelencephalic",
         "corticothalamic",
     )
@@ -2811,21 +2891,40 @@ def load_atlas_marker_sets(
         if cluster_membership_path is not None
         else {}
     )
-
-    marker_sets: list[AtlasMarkerSet] = []
-    for key, marker_ids in marker_lookup.items():
-        if "/" not in key or not isinstance(marker_ids, list):
-            continue
-        level, label_id = key.split("/", 1)
-        if level != marker_level or label_id not in label_to_name:
-            continue
-        label_name = label_to_name[label_id]
-        cleaned_markers = tuple(
+    markers_by_label = {
+        key.split("/", 1)[1]: tuple(
             str(marker).strip() for marker in marker_ids if str(marker).strip()
         )
+        for key, marker_ids in marker_lookup.items()
+        if key.startswith(f"{marker_level}/") and isinstance(marker_ids, list)
+    }
+    if cluster_membership_path is not None:
+        markers_by_label.update(
+            _missing_parent_marker_sets_from_descendants(
+                marker_lookup,
+                cluster_membership_path,
+                parent_level=marker_level,
+                missing_parent_labels=set(label_to_name).difference(markers_by_label),
+            )
+        )
+
+    missing_labels = set(label_to_name).difference(markers_by_label)
+    if missing_labels:
+        logger.warning(
+            "No published marker set was available for %d atlas labels at %s: %s",
+            len(missing_labels),
+            marker_level,
+            ", ".join(sorted(missing_labels)),
+        )
+
+    marker_sets: list[AtlasMarkerSet] = []
+    for label_id, label_name in label_to_name.items():
+        cleaned_markers = markers_by_label.get(label_id, ())
+        if not cleaned_markers:
+            continue
         marker_sets.append(
             AtlasMarkerSet(
-                level=level,
+                level=marker_level,
                 label_id=label_id,
                 label_name=label_name,
                 broad_class=collapse_atlas_label_to_broad_class(label_name),
@@ -2842,6 +2941,60 @@ def load_atlas_marker_sets(
             )
         )
     return marker_sets
+
+
+def _missing_parent_marker_sets_from_descendants(
+    marker_lookup: dict[str, Any],
+    cluster_membership_path: Path | str,
+    *,
+    parent_level: str,
+    missing_parent_labels: set[str],
+) -> dict[str, tuple[str, ...]]:
+    """Aggregate subclass markers for WMB classes lacking direct marker sets."""
+    if not missing_parent_labels or not parent_level.endswith("_CLAS"):
+        return {}
+    child_level = f"{parent_level.rsplit('_', maxsplit=1)[0]}_SUBC"
+    child_markers = {
+        key.split("/", 1)[1]: tuple(
+            str(marker).strip() for marker in marker_ids if str(marker).strip()
+        )
+        for key, marker_ids in marker_lookup.items()
+        if key.startswith(f"{child_level}/") and isinstance(marker_ids, list)
+    }
+    if not child_markers:
+        return {}
+
+    membership = pd.read_csv(
+        cluster_membership_path,
+        usecols=[
+            "cluster_annotation_term_label",
+            "cluster_annotation_term_set_label",
+            "cluster_alias",
+        ],
+        dtype={"cluster_alias": "string"},
+    )
+    parent_rows = membership.loc[
+        membership["cluster_annotation_term_set_label"].astype(str) == parent_level,
+        ["cluster_alias", "cluster_annotation_term_label"],
+    ].rename(columns={"cluster_annotation_term_label": "parent_label"})
+    child_rows = membership.loc[
+        membership["cluster_annotation_term_set_label"].astype(str) == child_level,
+        ["cluster_alias", "cluster_annotation_term_label"],
+    ].rename(columns={"cluster_annotation_term_label": "child_label"})
+    relationships = parent_rows.merge(child_rows, on="cluster_alias", how="inner")
+
+    aggregated: dict[str, tuple[str, ...]] = {}
+    for parent_label, group in relationships.groupby("parent_label", sort=False):
+        parent = str(parent_label)
+        if parent not in missing_parent_labels:
+            continue
+        markers: list[str] = []
+        for child_label in pd.unique(group["child_label"].astype(str)):
+            markers.extend(child_markers.get(str(child_label), ()))
+        unique_markers = tuple(dict.fromkeys(markers))
+        if unique_markers:
+            aggregated[parent] = unique_markers
+    return aggregated
 
 
 def _supercluster_neuron_split_lookup(
@@ -2874,8 +3027,12 @@ def _supercluster_neuron_split_lookup(
         term_set == supercluster_level,
         ["cluster_alias", "cluster_annotation_term_label"],
     ].rename(columns={"cluster_annotation_term_label": "supercluster_label"})
+    atlas_prefix = supercluster_level.rsplit("_", maxsplit=1)[0]
+    neurotransmitter_level = f"{atlas_prefix}_NEUR"
+    if neurotransmitter_level not in set(term_set):
+        neurotransmitter_level = WHB_NEUROTRANSMITTER_LEVEL
     neurotransmitter_rows = membership.loc[
-        term_set == NEUROTRANSMITTER_LEVEL,
+        term_set == neurotransmitter_level,
         ["cluster_alias", "cluster_annotation_term_name"],
     ].rename(columns={"cluster_annotation_term_name": "neurotransmitter"})
     joined = supercluster_rows.merge(
@@ -2905,7 +3062,7 @@ def _supercluster_neuron_split_lookup(
 def _neuron_split_for_neurotransmitter(value: str) -> str:
     label = str(value).upper()
     has_inhibitory = "GABA" in label or "GLY" in label
-    has_excitatory = "VGLUT" in label
+    has_excitatory = "GLUT" in label
     if has_inhibitory and not has_excitatory:
         return "Inhibitory"
     if has_excitatory and not has_inhibitory:

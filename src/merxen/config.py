@@ -985,6 +985,7 @@ class ClusteringSquidpyAnnotationConfig(BaseModel):
     taxonomy_metadata_path: Path | None = None
     cluster_membership_path: Path | None = None
     reference_cache_dir: Path | None = Path("./mapmycells_cache")
+    auto_download_reference: bool = False
     reference_gene_metadata_paths: list[Path] = Field(default_factory=list)
     marker_level: str | None = None
     min_marker_overlap: int = Field(default=3, ge=1)
@@ -1188,43 +1189,22 @@ class MecrSampleConfig(BaseModel):
 
 
 class MecrReferenceConfig(BaseModel):
-    """Configuration for paper-standard WHB MECR marker discovery."""
+    """Configuration for paper-standard whole-brain MECR marker discovery."""
 
     output_dir: Path
     samples: list[MecrSampleConfig]
-    neurons_h5ad_path: Path = Path(
-        "/media/mathieubo/SSD1/MerXen/mapmycells/abc_whb/"
-        "expression_matrices/WHB-10Xv3/20240330/WHB-10Xv3-Neurons-raw.h5ad"
-    )
-    nonneurons_h5ad_path: Path = Path(
-        "/media/mathieubo/SSD1/MerXen/mapmycells/abc_whb/"
-        "expression_matrices/WHB-10Xv3/20240330/WHB-10Xv3-Nonneurons-raw.h5ad"
-    )
-    cell_metadata_path: Path = Path(
-        "/media/mathieubo/SSD1/MerXen/mapmycells/abc_whb/metadata/"
-        "WHB-10Xv3/20241115/cell_metadata.csv"
-    )
-    taxonomy_metadata_path: Path = Path(
-        "/media/mathieubo/SSD1/MerXen/mapmycells/abc_whb/metadata/"
-        "WHB-taxonomy/20240330/cluster_annotation_term.csv"
-    )
-    cluster_membership_path: Path = Path(
-        "/media/mathieubo/SSD1/MerXen/mapmycells/abc_whb/metadata/"
-        "WHB-taxonomy/20240330/cluster_to_cluster_annotation_membership.csv"
-    )
-    taxonomy_level: str = "CCN202210140_SUPC"
+    reference_atlas: Literal["whb", "wmb"] = "whb"
+    reference_h5ad_paths: list[Path] = Field(default_factory=list)
+    neurons_h5ad_path: Path | None = None
+    nonneurons_h5ad_path: Path | None = None
+    cell_metadata_path: Path | None = None
+    taxonomy_metadata_path: Path | None = None
+    cluster_membership_path: Path | None = None
+    reference_cache_dir: Path = Path("./mapmycells_cache")
+    auto_download_reference: bool = False
+    taxonomy_level: str | None = None
     gene_symbol_column: str = "gene_symbol"
-    target_broad_classes: list[str] = Field(
-        default_factory=lambda: [
-            "Neurons",
-            "Oligodendrocytes",
-            "Oligodendrocyte precursors",
-            "Astrocytes",
-            "Microglia",
-            "Fibroblasts",
-            "Vascular cells",
-        ]
-    )
+    target_broad_classes: list[str] = Field(default_factory=list)
     marker_min_target_fraction: float = Field(default=0.25, ge=0.0, le=1.0)
     marker_max_other_fraction: float = Field(default=0.01, ge=0.0, le=1.0)
     normalize_target_sum: float = Field(default=10_000.0, gt=0.0)
@@ -1236,6 +1216,33 @@ class MecrReferenceConfig(BaseModel):
     def _validate_mecr_reference(self: MecrReferenceConfig) -> MecrReferenceConfig:
         if not self.samples:
             raise ValueError("MecrReferenceConfig requires at least one sample")
+        if self.taxonomy_level is None:
+            self.taxonomy_level = (
+                "CCN20230722_CLAS"
+                if self.reference_atlas == "wmb"
+                else "CCN202210140_SUPC"
+            )
+        if not self.target_broad_classes:
+            self.target_broad_classes = (
+                [
+                    "Neurons",
+                    "Astrocytes/Ependymal",
+                    "Oligodendrocyte lineage",
+                    "OEC",
+                    "Vascular cells",
+                    "Microglia",
+                ]
+                if self.reference_atlas == "wmb"
+                else [
+                    "Neurons",
+                    "Oligodendrocytes",
+                    "Oligodendrocyte precursors",
+                    "Astrocytes",
+                    "Microglia",
+                    "Fibroblasts",
+                    "Vascular cells",
+                ]
+            )
         if len(self.target_broad_classes) < 2:
             raise ValueError(
                 "MECR marker discovery requires at least two broad classes"

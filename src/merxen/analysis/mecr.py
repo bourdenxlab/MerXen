@@ -53,10 +53,10 @@ PLATFORM_COLORS = {"MERSCOPE": "#2878B5", "XENIUM": "#D95F02"}
 
 
 def run_mecr_reference(config: MecrReferenceConfig) -> dict[str, Path]:
-    """Discover mutually exclusive broad-class markers in the WHB reference.
+    """Discover mutually exclusive broad-class markers in a whole-brain reference.
 
     Args:
-        config: Validated WHB reference and marker-discovery configuration.
+        config: Validated reference and marker-discovery configuration.
 
     Returns:
         Paths to the marker table, full gene statistics, panel genes, and
@@ -69,10 +69,12 @@ def run_mecr_reference(config: MecrReferenceConfig) -> dict[str, Path]:
 
     panel_path = config.output_dir / MECR_REFERENCE_PANEL_NAME
     pd.DataFrame({"gene": panel_genes}).to_csv(panel_path, index=False)
+    reference_name = "WMB" if config.reference_atlas == "wmb" else "WHB"
     log_status(
-        f"Preparing WHB MECR reference for {len(panel_genes):,} spatial panel genes"
+        f"Preparing {reference_name} MECR reference for "
+        f"{len(panel_genes):,} spatial panel genes"
     )
-    reference = load_whb_panel_reference(config, panel_genes=panel_genes)
+    reference = load_atlas_panel_reference(config, panel_genes=panel_genes)
     try:
         statistics, markers = discover_reference_markers(
             reference,
@@ -105,9 +107,15 @@ def run_mecr_reference(config: MecrReferenceConfig) -> dict[str, Path]:
         manifest_path = config.output_dir / MECR_REFERENCE_MANIFEST_NAME
         manifest = {
             "method": "paper_standard_mecr",
-            "reference": "Allen Whole Human Brain WHB-10Xv3",
-            "neurons_h5ad_path": str(config.neurons_h5ad_path),
-            "nonneurons_h5ad_path": str(config.nonneurons_h5ad_path),
+            "reference": (
+                "Allen Whole Mouse Brain WMB-10X"
+                if config.reference_atlas == "wmb"
+                else "Allen Whole Human Brain WHB-10Xv3"
+            ),
+            "reference_atlas": config.reference_atlas,
+            "reference_h5ad_paths": [
+                str(path) for path in _mecr_reference_h5ad_paths(config)
+            ],
             "cell_metadata_path": str(config.cell_metadata_path),
             "taxonomy_metadata_path": str(config.taxonomy_metadata_path),
             "cluster_membership_path": str(config.cluster_membership_path),
@@ -132,6 +140,12 @@ def run_mecr_reference(config: MecrReferenceConfig) -> dict[str, Path]:
             "n_panel_genes": len(panel_genes),
             "n_reference_panel_genes": reference.n_vars,
             "n_reference_cells": reference.n_obs,
+            "n_raw_cells_without_taxonomy_metadata": int(
+                reference.uns.get("merxen_mecr_reference", {}).get(
+                    "n_raw_cells_without_taxonomy_metadata",
+                    0,
+                )
+            ),
             "reference_class_counts": class_counts,
             "n_unique_markers": len(markers),
             "n_reference_marker_pairs": len(reference_pairs),
@@ -146,7 +160,7 @@ def run_mecr_reference(config: MecrReferenceConfig) -> dict[str, Path]:
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
     finally:
         del reference
-        force_release(note="after WHB MECR reference preparation")
+        force_release(note=f"after {reference_name} MECR reference preparation")
 
     return {
         "markers_csv": markers_path,
@@ -304,22 +318,90 @@ def collect_spatial_panel_genes(samples: list[MecrSampleConfig]) -> list[str]:
     return sorted(genes.values(), key=str.casefold)
 
 
-def load_whb_panel_reference(
+def _mecr_reference_h5ad_paths(config: MecrReferenceConfig) -> list[Path]:
+    if config.reference_h5ad_paths:
+        return list(config.reference_h5ad_paths)
+    return [
+        path
+        for path in (config.neurons_h5ad_path, config.nonneurons_h5ad_path)
+        if path is not None
+    ]
+
+
+def _resolve_mecr_reference_inputs(config: MecrReferenceConfig) -> list[Path]:
+    h5ad_paths = _mecr_reference_h5ad_paths(config)
+    metadata_paths = (
+        config.cell_metadata_path,
+        config.taxonomy_metadata_path,
+        config.cluster_membership_path,
+    )
+    if (
+        config.reference_atlas == "wmb"
+        and config.auto_download_reference
+        and (not h5ad_paths or any(path is None for path in metadata_paths))
+    ):
+        from merxen.analysis.mapmycells import ensure_wmb_mecr_reference_inputs
+
+        downloaded = ensure_wmb_mecr_reference_inputs(config.reference_cache_dir)
+        if not h5ad_paths:
+            config.reference_h5ad_paths = sorted(
+                path
+                for key, path in downloaded.items()
+                if key.startswith("expression:")
+            )
+            h5ad_paths = list(config.reference_h5ad_paths)
+        config.cell_metadata_path = (
+            config.cell_metadata_path or downloaded["cell_metadata"]
+        )
+        config.taxonomy_metadata_path = (
+            config.taxonomy_metadata_path or downloaded["cluster_annotation_term"]
+        )
+        config.cluster_membership_path = (
+            config.cluster_membership_path
+            or downloaded["cluster_to_cluster_annotation_membership"]
+        )
+
+    if not h5ad_paths:
+        raise ValueError(
+            "MECR requires reference_h5ad_paths (or the legacy WHB neuron and "
+            "non-neuron paths). Enable auto_download_reference for WMB."
+        )
+    missing_h5ads = [path for path in h5ad_paths if not path.is_file()]
+    if missing_h5ads:
+        raise FileNotFoundError(
+            "Missing MECR reference H5AD files: "
+            + ", ".join(str(path) for path in missing_h5ads)
+        )
+    for label, path in (
+        ("cell metadata", config.cell_metadata_path),
+        ("taxonomy metadata", config.taxonomy_metadata_path),
+        ("cluster membership metadata", config.cluster_membership_path),
+    ):
+        if path is None or not path.is_file():
+            raise FileNotFoundError(f"Missing MECR {label}: {path}")
+    return h5ad_paths
+
+
+def load_atlas_panel_reference(
     config: MecrReferenceConfig,
     *,
     panel_genes: list[str],
 ) -> ad.AnnData:
-    """Load a panel-restricted, normalized WHB reference in bounded row chunks."""
-    class_by_cell = _load_whb_broad_classes(config)
+    """Load a panel-restricted whole-brain reference in bounded row chunks."""
+    reference_name = "WMB" if config.reference_atlas == "wmb" else "WHB"
+    h5ad_paths = _resolve_mecr_reference_inputs(config)
+    class_by_cell = _load_atlas_broad_classes(config)
     panel_lookup = {_normalize_gene(gene): str(gene) for gene in panel_genes}
     matrices: list[sparse.csr_matrix] = []
     labels: list[np.ndarray] = []
     resolved_gene_order: list[str] | None = None
     missing_metadata = 0
 
-    for h5ad_path in (config.neurons_h5ad_path, config.nonneurons_h5ad_path):
+    for h5ad_path in h5ad_paths:
         if not h5ad_path.exists():
-            raise FileNotFoundError(f"WHB reference H5AD does not exist: {h5ad_path}")
+            raise FileNotFoundError(
+                f"{reference_name} reference H5AD does not exist: {h5ad_path}"
+            )
         reference = ad.read_h5ad(h5ad_path, backed="r")
         try:
             if config.gene_symbol_column not in reference.var:
@@ -333,7 +415,7 @@ def load_whb_panel_reference(
                 resolved_gene_order = gene_order
             elif resolved_gene_order != gene_order:
                 raise ValueError(
-                    "WHB neuron/non-neuron references resolved different panels"
+                    f"{reference_name} reference shards resolved different panels"
                 )
 
             for start in range(0, reference.n_obs, config.reference_chunk_rows):
@@ -363,7 +445,8 @@ def load_whb_panel_reference(
                 matrices.append(panel)
                 labels.append(chunk_labels.to_numpy(dtype=str)[keep])
                 logger.info(
-                    "Loaded WHB MECR rows %s:%s from %s (%s retained)",
+                    "Loaded %s MECR rows %s:%s from %s (%s retained)",
+                    reference_name,
                     start,
                     stop,
                     h5ad_path.name,
@@ -372,19 +455,39 @@ def load_whb_panel_reference(
         finally:
             reference.file.close()
 
-    if missing_metadata:
+    if missing_metadata and config.reference_atlas == "whb":
         raise ValueError(
-            f"WHB cell metadata was missing for {missing_metadata:,} reference cells"
+            f"{reference_name} cell metadata was missing for "
+            f"{missing_metadata:,} reference cells"
+        )
+    if missing_metadata:
+        logger.warning(
+            "Skipped %d WMB raw reference cells absent from taxonomy metadata",
+            missing_metadata,
         )
     if not matrices or resolved_gene_order is None:
-        raise ValueError("No WHB cells or panel genes remained for MECR")
+        raise ValueError(f"No {reference_name} cells or panel genes remained for MECR")
     matrix = sparse.vstack(matrices, format="csr", dtype=np.float32)
     obs = pd.DataFrame(
         {"broad_class": pd.Categorical(np.concatenate(labels))},
         index=pd.RangeIndex(matrix.shape[0]).astype(str),
     )
     var = pd.DataFrame(index=pd.Index(resolved_gene_order, name=None))
-    return ad.AnnData(X=matrix, obs=obs, var=var)
+    result = ad.AnnData(X=matrix, obs=obs, var=var)
+    result.uns["merxen_mecr_reference"] = {
+        "reference_atlas": config.reference_atlas,
+        "n_raw_cells_without_taxonomy_metadata": int(missing_metadata),
+    }
+    return result
+
+
+def load_whb_panel_reference(
+    config: MecrReferenceConfig,
+    *,
+    panel_genes: list[str],
+) -> ad.AnnData:
+    """Backward-compatible alias for loading a configured MECR reference."""
+    return load_atlas_panel_reference(config, panel_genes=panel_genes)
 
 
 def discover_reference_markers(
@@ -629,7 +732,7 @@ def plot_reference_mecr_histogram(
     *,
     dpi: int = 180,
 ) -> Path:
-    """Plot the WHB MECR distribution for eligible cross-class marker pairs."""
+    """Plot the reference MECR distribution for eligible marker pairs."""
     output_path = prepare_plot_output(output_path)
     values = pd.to_numeric(pair_metrics.get("mecr"), errors="coerce")
     values = values[np.isfinite(values)]
@@ -656,10 +759,10 @@ def plot_reference_mecr_histogram(
             label=f"Median = {median_value:.4f}",
         )
         ax.legend(frameon=False)
-        ax.set_xlabel("WHB mutually exclusive co-expression rate")
+        ax.set_xlabel("Reference mutually exclusive co-expression rate")
         ax.set_ylabel("Gene-pair count")
         ax.grid(axis="y", color="#e5e5e5", linewidth=0.5)
-    ax.set_title("WHB reference MECR distribution")
+    ax.set_title("Whole-brain reference MECR distribution")
     fig.tight_layout()
     save_figure(fig, output_path, dpi=int(dpi), bbox_inches="tight")
     plt.close(fig)
@@ -1026,24 +1129,29 @@ def _safe_filename(value: str) -> str:
     return cleaned.strip("_") or "gene"
 
 
-def _load_whb_broad_classes(config: MecrReferenceConfig) -> pd.Series:
-    for path in (
+def _load_atlas_broad_classes(config: MecrReferenceConfig) -> pd.Series:
+    metadata_paths = (
         config.cell_metadata_path,
         config.taxonomy_metadata_path,
         config.cluster_membership_path,
-    ):
-        if not path.exists():
-            raise FileNotFoundError(f"WHB metadata file does not exist: {path}")
-    taxonomy = pd.read_csv(config.taxonomy_metadata_path)
+    )
+    if any(path is None for path in metadata_paths):
+        raise ValueError("MECR reference metadata paths have not been resolved")
+    cell_metadata_path, taxonomy_metadata_path, cluster_membership_path = (
+        path for path in metadata_paths if path is not None
+    )
+    taxonomy_level = config.taxonomy_level
+    if taxonomy_level is None:
+        raise ValueError("MECR taxonomy_level has not been resolved")
+    taxonomy = pd.read_csv(taxonomy_metadata_path)
     taxonomy = taxonomy[
-        taxonomy["cluster_annotation_term_set_label"].astype(str)
-        == config.taxonomy_level
+        taxonomy["cluster_annotation_term_set_label"].astype(str) == taxonomy_level
     ]
     label_to_name = dict(
         zip(taxonomy["label"].astype(str), taxonomy["name"].astype(str), strict=False)
     )
     membership = pd.read_csv(
-        config.cluster_membership_path,
+        cluster_membership_path,
         usecols=[
             "cluster_annotation_term_label",
             "cluster_annotation_term_set_label",
@@ -1052,8 +1160,7 @@ def _load_whb_broad_classes(config: MecrReferenceConfig) -> pd.Series:
         dtype={"cluster_alias": "string"},
     )
     membership = membership[
-        membership["cluster_annotation_term_set_label"].astype(str)
-        == config.taxonomy_level
+        membership["cluster_annotation_term_set_label"].astype(str) == taxonomy_level
     ].copy()
     membership["broad_class"] = (
         membership["cluster_annotation_term_label"]
@@ -1065,15 +1172,23 @@ def _load_whb_broad_classes(config: MecrReferenceConfig) -> pd.Series:
         "cluster_alias"
     )["broad_class"]
     cell_metadata = pd.read_csv(
-        config.cell_metadata_path,
+        cell_metadata_path,
         usecols=["cell_label", "cluster_alias"],
         dtype={"cell_label": "string", "cluster_alias": "string"},
     )
     cell_metadata["broad_class"] = cell_metadata["cluster_alias"].map(alias_to_class)
     if cell_metadata["broad_class"].isna().any():
         missing = int(cell_metadata["broad_class"].isna().sum())
-        raise ValueError(f"Could not map {missing:,} WHB cells to a broad class")
+        atlas_name = config.reference_atlas.upper()
+        raise ValueError(
+            f"Could not map {missing:,} {atlas_name} cells to a broad class"
+        )
     return cell_metadata.set_index("cell_label")["broad_class"]
+
+
+def _load_whb_broad_classes(config: MecrReferenceConfig) -> pd.Series:
+    """Backward-compatible alias for configured atlas class loading."""
+    return _load_atlas_broad_classes(config)
 
 
 def _reference_panel_selector(
@@ -1086,7 +1201,7 @@ def _reference_panel_selector(
         if token in panel_lookup:
             resolved.setdefault(token, []).append(index)
     if not resolved:
-        raise ValueError("No spatial panel genes matched WHB gene symbols")
+        raise ValueError("No spatial panel genes matched reference gene symbols")
     ordered_tokens = sorted(resolved, key=lambda token: panel_lookup[token].casefold())
     selected_indices: list[int] = []
     selector_rows: list[int] = []

@@ -23,7 +23,7 @@ from merxen.config import (
     help="Path to JSON config validated against MecrReferenceConfig.",
 )
 def mecr_reference_command(config_path: Path) -> None:
-    """Discover paper-standard mutually exclusive WHB marker genes."""
+    """Discover paper-standard whole-brain mutually exclusive marker genes."""
     config = load_config_from_json(config_path, MecrReferenceConfig)
     assert isinstance(config, MecrReferenceConfig)
     outputs = run_mecr_reference(config)

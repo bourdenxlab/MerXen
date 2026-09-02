@@ -16,7 +16,7 @@ process CLUSTERING_SQUIDPY_PREPARE {
     script:
     def rawPipelineSpecies = params.species == null ? "human" : params.species.toString().trim().toLowerCase()
     def pipelineSpecies = rawPipelineSpecies in ["mouse", "mus_musculus", "mus musculus"] ? "mouse" : "human"
-    def hierarchicalEnabled = params.clustering_squidpy_hierarchical_enabled == null ? pipelineSpecies == "human" : params.clustering_squidpy_hierarchical_enabled.toString().trim().toLowerCase() == "true"
+    def hierarchicalEnabled = params.clustering_squidpy_hierarchical_enabled == null ? true : params.clustering_squidpy_hierarchical_enabled.toString().trim().toLowerCase() == "true"
     def referenceAtlas = params.clustering_squidpy_broad_reference_atlas == null ? (pipelineSpecies == "mouse" ? "wmb" : "whb") : params.clustering_squidpy_broad_reference_atlas.toString().trim().toLowerCase()
     def markerLevel = params.clustering_squidpy_broad_marker_level == null ? (referenceAtlas == "wmb" ? "CCN20230722_CLAS" : "CCN202210140_SUPC") : params.clustering_squidpy_broad_marker_level.toString()
     def defaultReferenceCacheDir = file(params.outdir).toAbsolutePath().resolve("mapmycells_cache").toString()
@@ -81,6 +81,7 @@ process CLUSTERING_SQUIDPY_PREPARE {
     "taxonomy_metadata_path": ${taxonomyMetadataPath ? groovy.json.JsonOutput.toJson(taxonomyMetadataPath.toString()) : "null"},
     "cluster_membership_path": ${clusterMembershipPath ? groovy.json.JsonOutput.toJson(clusterMembershipPath.toString()) : "null"},
     "reference_cache_dir": ${groovy.json.JsonOutput.toJson(referenceCacheDir)},
+    "auto_download_reference": ${params.clustering_squidpy_broad_auto_download_reference},
     "reference_gene_metadata_paths": ${groovy.json.JsonOutput.toJson(referenceGeneMetadataPaths)},
     "marker_level": ${groovy.json.JsonOutput.toJson(markerLevel)},
     "min_marker_overlap": ${params.clustering_squidpy_broad_min_marker_overlap},

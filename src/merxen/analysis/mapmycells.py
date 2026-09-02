@@ -11,6 +11,7 @@ import subprocess
 import sys
 import textwrap
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -352,6 +353,20 @@ def _load_reference_gene_id_lookup(
             if "WHB-10Xv3" in path.parts
         )
     else:
+        gene_metadata_paths = sorted(
+            path
+            for path in Path(cache_dir).rglob("gene.csv")
+            if "WMB-10X" in path.parts
+        )
+        if gene_metadata_paths:
+            csv_lookup = _gene_id_lookup_from_csv(gene_metadata_paths[-1])
+            if csv_lookup:
+                logger.info(
+                    "Loaded %d symbol -> Ensembl ID mappings for standalone "
+                    "MapMyCells.",
+                    len(csv_lookup),
+                )
+                return csv_lookup
         paths = sorted(
             path
             for path in Path(cache_dir).rglob("*-raw.h5ad")
@@ -393,6 +408,38 @@ def _load_reference_gene_id_lookup(
         len(lookup),
     )
     return lookup
+
+
+def _gene_id_lookup_from_csv(path: Path | str) -> dict[str, str]:
+    metadata = pd.read_csv(path)
+    id_column = next(
+        (
+            column
+            for column in ("gene_identifier", "ensembl_id", "gene_id")
+            if column in metadata.columns
+        ),
+        None,
+    )
+    symbol_column = next(
+        (
+            column
+            for column in ("gene_symbol", "symbol", "gene")
+            if column in metadata.columns
+        ),
+        None,
+    )
+    if id_column is None or symbol_column is None:
+        logger.warning("Reference gene metadata lacks ID/symbol columns: %s", path)
+        return {}
+    return {
+        str(symbol).strip(): str(gene_id).strip()
+        for gene_id, symbol in zip(
+            metadata[id_column].astype(str),
+            metadata[symbol_column].astype(str),
+            strict=True,
+        )
+        if str(symbol).strip() and is_ensembl_gene_id(gene_id)
+    }
 
 
 def run_mapmycells(config: MapMyCellsConfig) -> dict[str, dict[str, dict[str, Path]]]:
@@ -2405,6 +2452,107 @@ def _ensure_wmb_reference_metadata_inputs(
             abc_cache_dir,
             force_download=force_download,
         )
+    return inputs
+
+
+def ensure_wmb_clustering_reference_inputs(
+    cache_dir: Path | str,
+) -> dict[str, Path]:
+    """Download or reuse the compact WMB inputs needed by clustering."""
+    manifest = _load_abc_manifest()
+    abc_cache_dir = Path(cache_dir) / "abc_atlas"
+    inputs: dict[str, Path] = {}
+
+    marker_name, marker_suffix = cast(
+        tuple[str, str],
+        FULL_REFERENCE_MANIFEST_KEYS["wmb"]["marker"],
+    )
+    marker_info = _manifest_file_info(
+        manifest,
+        WMB_DATASET_DIRECTORY,
+        "mapmycells",
+        marker_name,
+        "files",
+        marker_suffix,
+    )
+    inputs["marker_lookup"] = _ensure_manifest_file(marker_info, abc_cache_dir)
+
+    gene_info = _manifest_file_info(
+        manifest,
+        WMB_DATASET_DIRECTORY,
+        "metadata",
+        "gene",
+        "files",
+        "csv",
+    )
+    inputs["gene_metadata"] = _ensure_manifest_file(gene_info, abc_cache_dir)
+
+    for file_key in (
+        "cluster_annotation_term",
+        "cluster_to_cluster_annotation_membership",
+    ):
+        info = _manifest_file_info(
+            manifest,
+            WMB_TAXONOMY_DIRECTORY,
+            "metadata",
+            file_key,
+            "files",
+            "csv",
+        )
+        inputs[file_key] = _ensure_manifest_file(info, abc_cache_dir)
+    return inputs
+
+
+def ensure_wmb_mecr_reference_inputs(
+    cache_dir: Path | str,
+    *,
+    max_parallel_downloads: int = 4,
+) -> dict[str, Path]:
+    """Download or reuse the complete WMB 10x reference required by MECR."""
+    if max_parallel_downloads < 1:
+        raise ValueError("max_parallel_downloads must be at least 1")
+    manifest = _load_abc_manifest()
+    abc_cache_dir = Path(cache_dir) / "abc_atlas"
+    inputs = ensure_wmb_clustering_reference_inputs(cache_dir)
+
+    cell_metadata_info = _manifest_file_info(
+        manifest,
+        WMB_DATASET_DIRECTORY,
+        "metadata",
+        "cell_metadata",
+        "files",
+        "csv",
+    )
+    inputs["cell_metadata"] = _ensure_manifest_file(
+        cell_metadata_info,
+        abc_cache_dir,
+    )
+
+    expression_requests: list[tuple[str, dict[str, Any]]] = []
+    for directory in WMB_EXPRESSION_DIRECTORIES:
+        matrix_names = manifest["file_listing"][directory]["expression_matrices"]
+        for matrix_name in sorted(matrix_names):
+            info = _manifest_file_info(
+                manifest,
+                directory,
+                "expression_matrices",
+                matrix_name,
+                "raw",
+                "files",
+                "h5ad",
+            )
+            expression_requests.append((f"expression:{matrix_name}", info))
+
+    def ensure_expression_file(
+        request: tuple[str, dict[str, Any]],
+    ) -> tuple[str, Path]:
+        key, info = request
+        return key, _ensure_manifest_file(info, abc_cache_dir)
+
+    workers = min(max_parallel_downloads, len(expression_requests))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        for key, path in executor.map(ensure_expression_file, expression_requests):
+            inputs[key] = path
     return inputs
 
 
