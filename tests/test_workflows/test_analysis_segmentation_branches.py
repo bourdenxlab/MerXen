@@ -393,6 +393,7 @@ def test_mecr_stage_is_default_enabled_and_uses_one_reference_task(
         "mecr_reference_inputs_ch",
         "mergeMecrSamplesJson",
         ".collect()",
+        ".filter { samplesJsonValues -> !samplesJsonValues.isEmpty() }",
         "MECR_REFERENCE(mecr_reference_inputs_ch)",
         "MECR(mecr_inputs_ch)",
     ]:
@@ -400,6 +401,8 @@ def test_mecr_stage_is_default_enabled_and_uses_one_reference_task(
 
     for expected in [
         "mecr_enabled = null",
+        "mecr_reference_h5ad_paths = []",
+        "mecr_auto_download_reference = true",
         "mecr_marker_min_target_fraction = 0.25",
         "mecr_marker_max_other_fraction = 0.01",
         "mecr_barnyard_top_n_pairs = 6",
@@ -412,6 +415,9 @@ def test_mecr_stage_is_default_enabled_and_uses_one_reference_task(
 
     for expected in [
         "process MECR_REFERENCE",
+        '"reference_atlas"',
+        '"reference_h5ad_paths"',
+        '"auto_download_reference"',
         "process MECR",
         "merxen mecr-reference",
         "merxen mecr --config",

@@ -24,6 +24,7 @@ from merxen.analysis.mapmycells import (
     _write_region_cell_metadata,
     build_mapmycells_command,
     choose_mapmycells_assignment_column,
+    ensure_wmb_mecr_reference_inputs,
     prepare_mapmycells_query,
     prepare_region_mapmycells_reference,
     read_mapmycells_extended_qc,
@@ -472,6 +473,54 @@ def test_reference_download_resumes_partial_file(
     )
 
     assert result.read_bytes() == b"abcdef"
+
+
+def test_wmb_mecr_download_includes_every_expression_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Whole-brain MECR provisioning should fetch every WMB raw shard."""
+    manifest = {
+        "file_listing": {
+            "WMB-10Xv2": {"expression_matrices": {"v2_a": {}, "v2_b": {}}},
+            "WMB-10Xv3": {"expression_matrices": {"v3_a": {}}},
+            "WMB-10XMulti": {"expression_matrices": {"multi_a": {}}},
+        }
+    }
+    monkeypatch.setattr(
+        "merxen.analysis.mapmycells._load_abc_manifest",
+        lambda: manifest,
+    )
+
+    def fake_info(_manifest: object, *keys: str) -> dict[str, str]:
+        return {"token": "/".join(keys)}
+
+    def fake_ensure(info: dict[str, str], cache_dir: Path) -> Path:
+        name = info["token"].replace("/", "_")
+        return cache_dir / name
+
+    monkeypatch.setattr(
+        "merxen.analysis.mapmycells._manifest_file_info",
+        fake_info,
+    )
+    monkeypatch.setattr(
+        "merxen.analysis.mapmycells._ensure_manifest_file",
+        fake_ensure,
+    )
+
+    inputs = ensure_wmb_mecr_reference_inputs(
+        tmp_path / "cache",
+        max_parallel_downloads=2,
+    )
+
+    assert {
+        key.removeprefix("expression:")
+        for key in inputs
+        if key.startswith("expression:")
+    } == {"v2_a", "v2_b", "v3_a", "multi_a"}
+    assert "cell_metadata" in inputs
+    assert "marker_lookup" in inputs
+    assert "gene_metadata" in inputs
 
 
 def test_run_mapmycells_writes_annotated_h5ad(

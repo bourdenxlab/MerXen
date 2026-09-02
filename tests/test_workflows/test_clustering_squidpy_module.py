@@ -22,6 +22,7 @@ def test_clustering_squidpy_nextflow_json_includes_hierarchical_fields(
         '"neuron_split_round"',
         '"neuron_subcluster_round"',
         '"broad_annotation"',
+        '"auto_download_reference"',
         '"spatial_scatter_point_size"',
         '"write_spatialdata_table"',
         "clustering_squidpy_gpu_vram_monitor = true",
@@ -92,7 +93,7 @@ def test_mapmycells_nextflow_exposes_wmb_cross_species_settings(
 def test_workflow_exposes_species_aware_mouse_defaults(
     combined_config_text: str,
 ) -> None:
-    """Mouse mode should choose WMB and disable human-only stages by default."""
+    """Mouse mode should choose WMB and retain intentional stage defaults."""
     repo_root = Path(__file__).resolve().parents[2]
     module_text = (repo_root / "workflows/modules/mapmycells.nf").read_text()
     clustering_text = (
@@ -106,7 +107,9 @@ def test_workflow_exposes_species_aware_mouse_defaults(
         'pipelineSpecies == "mouse" ? "wmb" : "whb"',
         'pipelineSpecies == "mouse" ? "whole_brain" : "both"',
         'referenceAtlas == "wmb" ? "CCN20230722_CLAS"',
-        "MECR currently requires the Whole Human Brain reference",
+        'referenceAtlas = settings.species == "mouse" ? "wmb" : "whb"',
+        "mecr_auto_download_reference = true",
+        "clustering_squidpy_broad_auto_download_reference = true",
         "params.clustering_squidpy_whb_marker_lookup_path",
         "params.mapmycells_whb_marker_lookup_path",
     ]:

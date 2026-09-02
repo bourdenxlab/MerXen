@@ -402,6 +402,80 @@ def test_load_atlas_marker_sets_joins_taxonomy_and_collapses_labels(
     assert collapse_atlas_label_to_broad_class("Choroid plexus") == ("Choroid plexus")
 
 
+def test_wmb_marker_sets_fill_missing_classes_from_subclass_markers(
+    tmp_path: Path,
+) -> None:
+    """WMB classes omitted by the marker release should reuse child markers."""
+    marker_path = tmp_path / "mouse_markers.json"
+    marker_path.write_text(
+        """
+{
+  "CCN20230722_CLAS/class_glut": ["ENSMUSG1"],
+  "CCN20230722_SUBC/subclass_dopa": ["ENSMUSG2", "ENSMUSG3"],
+  "CCN20230722_SUBC/subclass_oec": ["ENSMUSG4"]
+}
+""".strip()
+    )
+    taxonomy_path = tmp_path / "cluster_annotation_term.csv"
+    pd.DataFrame(
+        {
+            "label": ["class_glut", "class_dopa", "class_oec"],
+            "name": ["01 IT-ET Glut", "21 MB Dopa", "32 OEC"],
+            "cluster_annotation_term_set_label": ["CCN20230722_CLAS"] * 3,
+        }
+    ).to_csv(taxonomy_path, index=False)
+    membership_path = tmp_path / "cluster_membership.csv"
+    pd.DataFrame(
+        {
+            "cluster_annotation_term_label": [
+                "class_glut",
+                "neur_glut",
+                "class_dopa",
+                "subclass_dopa",
+                "neur_dopa",
+                "class_oec",
+                "subclass_oec",
+                "neur_none",
+            ],
+            "cluster_annotation_term_set_label": [
+                "CCN20230722_CLAS",
+                "CCN20230722_NEUR",
+                "CCN20230722_CLAS",
+                "CCN20230722_SUBC",
+                "CCN20230722_NEUR",
+                "CCN20230722_CLAS",
+                "CCN20230722_SUBC",
+                "CCN20230722_NEUR",
+            ],
+            "cluster_alias": ["1", "1", "2", "2", "2", "3", "3", "3"],
+            "cluster_annotation_term_name": [
+                "01 IT-ET Glut",
+                "Glut",
+                "21 MB Dopa",
+                "Dopaminergic subclass",
+                "Dopa",
+                "32 OEC",
+                "OEC subclass",
+                "none",
+            ],
+        }
+    ).to_csv(membership_path, index=False)
+
+    marker_sets = load_atlas_marker_sets(
+        marker_path,
+        taxonomy_path,
+        marker_level="CCN20230722_CLAS",
+        cluster_membership_path=membership_path,
+    )
+
+    by_label = {marker_set.label_id: marker_set for marker_set in marker_sets}
+    assert by_label["class_dopa"].marker_ids == ("ENSMUSG2", "ENSMUSG3")
+    assert by_label["class_oec"].marker_ids == ("ENSMUSG4",)
+    assert by_label["class_glut"].neuron_split == "Excitatory"
+    assert by_label["class_dopa"].neuron_split == "Other"
+    assert by_label["class_oec"].broad_class == "OEC"
+
+
 def test_score_clusters_by_atlas_markers_resolves_ensembl_then_symbol() -> None:
     """Synthetic marker expression should recover known broad labels."""
     adata = ad.AnnData(
@@ -650,10 +724,15 @@ def test_mouse_clustering_annotation_uses_wmb_defaults() -> None:
 @pytest.mark.parametrize(
     ("atlas_label", "expected"),
     [
-        ("01 IT-ET Glutamatergic", "Neurons"),
+        ("01 IT-ET Glut", "Neurons"),
         ("06 CTX-CGE GABA", "Neurons"),
+        ("15 HY Gnrh1 Glut", "Neurons"),
+        ("21 MB Dopa", "Neurons"),
+        ("22 MB-HB Sero", "Neurons"),
+        ("25 Pineal Glut", "Neurons"),
         ("30 Astro-Epen", "Astrocytes/Ependymal"),
         ("31 OPC-Oligo", "Oligodendrocyte lineage"),
+        ("32 OEC", "OEC"),
         ("33 Vascular", "Vascular cells"),
         ("34 Immune", "Microglia"),
     ],
@@ -707,6 +786,43 @@ def test_wmb_cache_discovery_stays_within_mouse_taxonomy(tmp_path: Path) -> None
         )
         == wmb_taxonomy
     )
+
+
+def test_wmb_gene_csv_provides_marker_id_aliases(tmp_path: Path) -> None:
+    """The compact Allen gene table should resolve mouse Ensembl markers."""
+    gene_path = tmp_path / "gene.csv"
+    pd.DataFrame(
+        {
+            "gene_identifier": ["ENSMUSG00000000001", "not-an-ensembl-id"],
+            "gene_symbol": ["Gnai3", "Ignored"],
+        }
+    ).to_csv(gene_path, index=False)
+
+    lookup = clustering_mod._reference_gene_symbol_lookup(gene_path)
+
+    assert lookup["ENSMUSG00000000001"] == "Gnai3"
+    assert lookup["GNAI3"] == "ENSMUSG00000000001"
+    assert "IGNORED" not in lookup
+
+
+def test_wmb_gene_csv_avoids_opening_large_expression_shards(tmp_path: Path) -> None:
+    """Compact WMB gene metadata should take precedence over raw H5AD files."""
+    gene_dir = tmp_path / "abc_atlas" / "metadata" / "WMB-10X" / "release"
+    matrix_dir = (
+        tmp_path / "abc_atlas" / "expression_matrices" / "WMB-10Xv3" / "release"
+    )
+    gene_dir.mkdir(parents=True)
+    matrix_dir.mkdir(parents=True)
+    gene_path = gene_dir / "gene.csv"
+    gene_path.write_text("gene_identifier,gene_symbol\n")
+    (matrix_dir / "WMB-10Xv3-test-raw.h5ad").write_text("not opened")
+
+    paths = clustering_mod._find_cached_reference_gene_metadata_paths(
+        tmp_path,
+        reference_atlas="wmb",
+    )
+
+    assert paths == [gene_path]
 
 
 def test_clustered_spatialdata_table_key_uses_segmentation_defaults() -> None:
