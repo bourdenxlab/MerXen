@@ -153,9 +153,9 @@ def activePlatformsForMode(analysisMode) {
 }
 
 def normalizeAnalysisSegmentation(rawValue) {
-    def raw = rawValue == null ? "both" : rawValue.toString().trim()
+    def raw = rawValue == null ? "all" : rawValue.toString().trim()
     if (!raw) {
-        raw = "both"
+        raw = "all"
     }
     def aliases = [
         "both": ["reseg", "original_seg"],
@@ -201,7 +201,12 @@ def normalizeAnalysisSegmentation(rawValue) {
                 }
             }
         }
-    return selected ? selected : ["reseg", "original_seg"]
+    return selected ? selected : [
+        "reseg",
+        "original_seg",
+        "proseg_mask",
+        "proseg_hybrid",
+    ]
 }
 
 def normalizeMenderSegmentations(rawValue) {

@@ -64,8 +64,8 @@ single-platform mode, only the selected `<platform>/` directory is present and
 paired-only `alignment/`, `alignment_qc/`, and `comparison/` directories are
 not written.
 `reseg/`, `original_seg/`, `proseg_mask/`, and `proseg_hybrid/` are controlled
-by `--analysis_segmentation`; the default `both` writes the first two branches
-and `all` writes all four.
+by `--analysis_segmentation`; the default `all` writes all four branches, while
+an explicit `both` writes only `reseg` and `original_seg`.
 Upstream build, segmentation,
 enrichment, and latest SpatialData artifacts are shared.
 Every `.png` plot listed below is also written as a same-stem `.pdf`.

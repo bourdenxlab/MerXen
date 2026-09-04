@@ -13,7 +13,7 @@ def test_nextflow_exposes_analysis_segmentation_branches() -> None:
     config_text = (repo_root / "workflows" / "nextflow.config").read_text()
 
     for expected in [
-        'analysis_segmentation = "both"',
+        'analysis_segmentation = "all"',
         "normalizeAnalysisSegmentation",
         "rowSampleSettings",
         "settings.analysis_segmentations",
@@ -31,6 +31,8 @@ def test_nextflow_exposes_analysis_segmentation_branches() -> None:
     assert (
         '"all": ["reseg", "original_seg", "proseg_mask", "proseg_hybrid"]' in main_text
     )
+    assert 'rawValue == null ? "all"' in main_text
+    assert 'raw = "all"' in main_text
     assert '"proseg_mask": ["proseg_mask"]' in main_text
     assert '"cellpose": ["proseg_mask"]' in main_text
     assert "VALIDATE_ANALYSIS_LAYER" in main_text

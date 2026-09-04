@@ -95,7 +95,7 @@ Each stage is one Nextflow module and one `merxen` subcommand, sharing a Pydanti
 | [MapMyCells](docs/stages/mapmycells.md) | Local Allen Institute MapMyCells cell type assignment | off (past default `stop_stage`) |
 | [Distance from object](docs/stages/distance-from-object.md) | Nearest registered polygon-edge annotation and grey-matter paired near-vs-far PyDESeq2 | off (`--distance_from_object_enabled`) |
 
-Downstream analysis runs for both ProSeg-resegmented cells and the original instrument segmentations by default (`--analysis_segmentation both`); `all` adds the `proseg_mask` and `proseg_hybrid` branches.
+Downstream analysis runs for all four segmentation branches by default (`--analysis_segmentation all`): ProSeg-resegmented cells, original instrument segmentations, the Cellpose mask, and the ProSeg hybrid. Use `both` explicitly to restrict analysis to `reseg` and `original_seg`.
 
 See [Metro map](docs/metro-map.md) for what the diagram above does and does not show, and [Pipeline architecture](docs/pipeline.md) for the precise stage graph.
 
@@ -107,7 +107,7 @@ See [Metro map](docs/metro-map.md) for what the diagram above does and does not 
 | `--outdir` | `./results` | Where all outputs are published. |
 | `--species` | `human` | Dataset species: `human` or `mouse`. Mouse mode selects WMB references for hierarchical clustering, MECR, and MapMyCells. |
 | `--analysis_mode` | `paired` | `paired`, `merscope`, or `xenium`. Controls which columns are required and which stages are active. |
-| `--analysis_segmentation` | `both` | `both`, `all`, `reseg`, `original_seg`, `proseg_mask`, or `proseg_hybrid`. |
+| `--analysis_segmentation` | `all` | `all`, `both`, `reseg`, `original_seg`, `proseg_mask`, or `proseg_hybrid`. |
 | `--enable_alignment` | `false` | Run VALIS alignment and alignment QC before comparison. Paired mode only; VALIS requires both platform-specific combined pia/tissue-edge annotation GeoJSON columns. |
 | `--alignment_backend` | `valis` | `valis`, or `legacy_spateo` for the former expression-based implementation. |
 | `--start_stage` / `--stop_stage` | `build_spatialdata` / `clustering_squidpy` | Run a contiguous stage range. |

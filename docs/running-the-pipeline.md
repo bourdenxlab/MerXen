@@ -41,7 +41,7 @@ Common optional parameters:
 | `--outdir` | Where all outputs are published. Defaults to `./results`. |
 | `--species` | `human` (default) or `mouse`. The value applies to the whole invocation. |
 | `--analysis_mode` | `paired` (default), `merscope`, or `xenium`. Controls which platform columns are required and which stages are active. |
-| `--analysis_segmentation` | `both` (default), `all`, `reseg`, `original_seg`, `proseg_mask`/`cellpose`, or `proseg_hybrid`. `both` remains `reseg,original_seg`; `all` expands to `reseg,original_seg,proseg_mask,proseg_hybrid`. |
+| `--analysis_segmentation` | `all` (default), `both`, `reseg`, `original_seg`, `proseg_mask`/`cellpose`, or `proseg_hybrid`. `all` expands to `reseg,original_seg,proseg_mask,proseg_hybrid`; `both` restricts the run to `reseg,original_seg`. |
 | `--force_spatialdata_build` | Force rebuilding the SpatialData zarr even when a cached one exists. Defaults to `false`. |
 | `--force_proseg_rerun` | Force rebuilding ProSeg bases from the current Cellpose/transcript inputs rather than reusing persistent latest zarrs. Defaults to `false`. |
 | `--enable_alignment` | Run optional DAPI-only VALIS alignment and alignment QC before comparison. Paired mode only. Defaults to `false`. |
@@ -196,9 +196,9 @@ downstream processes receive explicit table and shape keys for the selected
 branch. A row-level `analysis_segmentation` value can restrict branches for one
 sample while other rows continue to use the global default.
 
-The segmentation stage generates `proseg_hybrid` by default. The
-backwards-compatible `both` selection remains `reseg,original_seg`. Use
-`--analysis_segmentation all` for all four branches, select `proseg_mask`
+The segmentation stage generates `proseg_hybrid` by default, and downstream
+analysis now selects all four branches by default. The backwards-compatible
+`both` selection remains `reseg,original_seg`. Select `proseg_mask`
 (`cellpose` is an alias) or `proseg_hybrid` alone, or provide a comma-separated
 combination such as `reseg,proseg_mask,proseg_hybrid`.
 
