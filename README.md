@@ -136,6 +136,11 @@ Other hosts must supply their own executor capacity, concurrency limits, GPU han
 
 Each row points at raw platform folders, with optional reusable SpatialData cache paths and per-platform channel, z-range, and voxel-layer settings. Row-level columns can override most run defaults for a single sample, and object-distance runs supply registered object GeoJSON paths per platform. In single-platform rows, only the selected platform's columns are required.
 
+For raw MERSCOPE data, set `merscope_z_range` explicitly from plane `1`
+(for example, `1-7`): plane `0` is the fiducial-bead layer and will contaminate
+the max projection. Xenium morphology images are already projected and are not
+affected by this setting.
+
 A template lives at [workflows/samplesheet.example.csv](workflows/samplesheet.example.csv). The full schema, validation rules, and worked examples are in [Samplesheet format](docs/samplesheet.md).
 
 ## Outputs

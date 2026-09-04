@@ -70,6 +70,9 @@ A paired row with `pair_id=EXAMPLE01` fans out to **two**
    [`write_spatialdata_zarr`](../../src/merxen/io/spatialdata_io.py#L17).
    MERSCOPE images are stored as a single `MERSCOPE_z_projection` max
    projection over the selected z range, not as one image element per z plane.
+   Plane `0` is the MERSCOPE fiducial-bead layer, so the selected range should
+   normally start at plane `1`. Xenium morphology images are already projected
+   by the platform and do not use this range.
 5. The resulting path is returned and flows into the next Nextflow channel.
 
 ## Caching behaviour
@@ -83,6 +86,12 @@ A paired row with `pair_id=EXAMPLE01` fans out to **two**
 
 ## Common pitfalls
 
+- **MERSCOPE plane 0 included in the projection.** Plane `0` contains fiducial
+  beads rather than the biological image stack. Including it in
+  `merscope_z_range` can dominate or distort the DAPI/PolyT max projection and
+  every image-derived downstream result. Set an explicit range beginning at
+  `1`, such as `1-7`. This does not apply to Xenium, whose morphology image is
+  already projected.
 - **MERSCOPE transform missing.** The builder expects
   `micron_to_mosaic_pixel_transform.csv` either inside the region folder or
   at `merscope_transform_path`. Without it, segmentation will also fail.
