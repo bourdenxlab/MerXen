@@ -980,24 +980,30 @@ class ClusteringSquidpyRoundConfig(BaseModel):
 class ClusteringSquidpyAnnotationConfig(BaseModel):
     """Atlas marker options for hierarchical broad-cluster annotation."""
 
-    marker_lookup_path: Path | None = Path(
-        "/media/mathieubo/SSD1/MerXen/mapmycells/query_markers.n10.20240221800.json"
-    )
-    taxonomy_metadata_path: Path | None = Path(
-        "/media/mathieubo/SSD1/MerXen/mapmycells/abc_whb/metadata/"
-        "WHB-taxonomy/20240330/cluster_annotation_term.csv"
-    )
-    cluster_membership_path: Path | None = Path(
-        "/media/mathieubo/SSD1/MerXen/mapmycells/abc_whb/metadata/"
-        "WHB-taxonomy/20240330/cluster_to_cluster_annotation_membership.csv"
-    )
-    reference_cache_dir: Path | None = Path("/media/mathieubo/SSD1/MerXen/mapmycells")
+    reference_atlas: Literal["whb", "wmb"] = "whb"
+    marker_lookup_path: Path | None = None
+    taxonomy_metadata_path: Path | None = None
+    cluster_membership_path: Path | None = None
+    reference_cache_dir: Path | None = Path("./mapmycells_cache")
+    auto_download_reference: bool = False
     reference_gene_metadata_paths: list[Path] = Field(default_factory=list)
-    marker_level: str = "CCN202210140_SUPC"
+    marker_level: str | None = None
     min_marker_overlap: int = Field(default=3, ge=1)
     max_markers_per_label: int | None = Field(default=80, ge=1)
     score_margin_threshold: float = Field(default=0.0, ge=0.0)
     unknown_label: str = "Mixed/Unknown"
+
+    @model_validator(mode="after")
+    def _set_atlas_defaults(
+        self: ClusteringSquidpyAnnotationConfig,
+    ) -> ClusteringSquidpyAnnotationConfig:
+        if self.marker_level is None:
+            self.marker_level = (
+                "CCN20230722_CLAS"
+                if self.reference_atlas == "wmb"
+                else "CCN202210140_SUPC"
+            )
+        return self
 
 
 class ClusteringSquidpyConfig(BaseModel):
@@ -1183,43 +1189,22 @@ class MecrSampleConfig(BaseModel):
 
 
 class MecrReferenceConfig(BaseModel):
-    """Configuration for paper-standard WHB MECR marker discovery."""
+    """Configuration for paper-standard whole-brain MECR marker discovery."""
 
     output_dir: Path
     samples: list[MecrSampleConfig]
-    neurons_h5ad_path: Path = Path(
-        "/media/mathieubo/SSD1/MerXen/mapmycells/abc_whb/"
-        "expression_matrices/WHB-10Xv3/20240330/WHB-10Xv3-Neurons-raw.h5ad"
-    )
-    nonneurons_h5ad_path: Path = Path(
-        "/media/mathieubo/SSD1/MerXen/mapmycells/abc_whb/"
-        "expression_matrices/WHB-10Xv3/20240330/WHB-10Xv3-Nonneurons-raw.h5ad"
-    )
-    cell_metadata_path: Path = Path(
-        "/media/mathieubo/SSD1/MerXen/mapmycells/abc_whb/metadata/"
-        "WHB-10Xv3/20241115/cell_metadata.csv"
-    )
-    taxonomy_metadata_path: Path = Path(
-        "/media/mathieubo/SSD1/MerXen/mapmycells/abc_whb/metadata/"
-        "WHB-taxonomy/20240330/cluster_annotation_term.csv"
-    )
-    cluster_membership_path: Path = Path(
-        "/media/mathieubo/SSD1/MerXen/mapmycells/abc_whb/metadata/"
-        "WHB-taxonomy/20240330/cluster_to_cluster_annotation_membership.csv"
-    )
-    taxonomy_level: str = "CCN202210140_SUPC"
+    reference_atlas: Literal["whb", "wmb"] = "whb"
+    reference_h5ad_paths: list[Path] = Field(default_factory=list)
+    neurons_h5ad_path: Path | None = None
+    nonneurons_h5ad_path: Path | None = None
+    cell_metadata_path: Path | None = None
+    taxonomy_metadata_path: Path | None = None
+    cluster_membership_path: Path | None = None
+    reference_cache_dir: Path = Path("./mapmycells_cache")
+    auto_download_reference: bool = False
+    taxonomy_level: str | None = None
     gene_symbol_column: str = "gene_symbol"
-    target_broad_classes: list[str] = Field(
-        default_factory=lambda: [
-            "Neurons",
-            "Oligodendrocytes",
-            "Oligodendrocyte precursors",
-            "Astrocytes",
-            "Microglia",
-            "Fibroblasts",
-            "Vascular cells",
-        ]
-    )
+    target_broad_classes: list[str] = Field(default_factory=list)
     marker_min_target_fraction: float = Field(default=0.25, ge=0.0, le=1.0)
     marker_max_other_fraction: float = Field(default=0.01, ge=0.0, le=1.0)
     normalize_target_sum: float = Field(default=10_000.0, gt=0.0)
@@ -1231,6 +1216,33 @@ class MecrReferenceConfig(BaseModel):
     def _validate_mecr_reference(self: MecrReferenceConfig) -> MecrReferenceConfig:
         if not self.samples:
             raise ValueError("MecrReferenceConfig requires at least one sample")
+        if self.taxonomy_level is None:
+            self.taxonomy_level = (
+                "CCN20230722_CLAS"
+                if self.reference_atlas == "wmb"
+                else "CCN202210140_SUPC"
+            )
+        if not self.target_broad_classes:
+            self.target_broad_classes = (
+                [
+                    "Neurons",
+                    "Astrocytes/Ependymal",
+                    "Oligodendrocyte lineage",
+                    "OEC",
+                    "Vascular cells",
+                    "Microglia",
+                ]
+                if self.reference_atlas == "wmb"
+                else [
+                    "Neurons",
+                    "Oligodendrocytes",
+                    "Oligodendrocyte precursors",
+                    "Astrocytes",
+                    "Microglia",
+                    "Fibroblasts",
+                    "Vascular cells",
+                ]
+            )
         if len(self.target_broad_classes) < 2:
             raise ValueError(
                 "MECR marker discovery requires at least two broad classes"
@@ -1281,8 +1293,12 @@ class MapMyCellsConfig(BaseModel):
     output_dir: Path
     samples: list[MapMyCellsSampleConfig]
     reference_mode: Literal["whole_brain", "region", "both"] = "both"
+    reference_atlas: Literal["whb", "wmb"] = "whb"
+    query_species: Literal["human", "mouse"] = "human"
+    auto_download_references: bool = True
     marker_lookup_path: Path | None = None
     precomputed_stats_path: Path | None = None
+    gene_mapping_db_path: Path | None = None
     region_name: str = "frontal_a44_a45_a46_a32_acc"
     region_labels: list[str] = Field(
         default_factory=lambda: [
@@ -1292,7 +1308,7 @@ class MapMyCellsConfig(BaseModel):
             "Human ACC",
         ]
     )
-    region_cache_dir: Path = Path("/media/mathieubo/SSD1/MerXen/mapmycells")
+    region_cache_dir: Path = Path("./mapmycells_cache")
     region_min_cells_per_leaf: int = Field(default=10, ge=1)
     region_force_rebuild: bool = False
     region_query_markers_n_per_utility: int = Field(default=10, ge=1)
@@ -1343,16 +1359,24 @@ class MapMyCellsConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_reference_inputs(self: MapMyCellsConfig) -> MapMyCellsConfig:
-        if not self.plots_only and self.reference_mode in {"whole_brain", "both"}:
+        if self.query_species == "mouse" and self.reference_atlas != "wmb":
+            raise ValueError(
+                "mouse MapMyCells queries currently require the WMB reference atlas"
+            )
+        if (
+            not self.plots_only
+            and self.reference_mode in {"whole_brain", "both"}
+            and not self.auto_download_references
+        ):
             if self.marker_lookup_path is None:
                 raise ValueError(
-                    "marker_lookup_path is required when reference_mode includes "
-                    "whole_brain"
+                    "marker_lookup_path is required when automatic reference "
+                    "downloads are disabled"
                 )
             if self.precomputed_stats_path is None:
                 raise ValueError(
-                    "precomputed_stats_path is required when reference_mode includes "
-                    "whole_brain"
+                    "precomputed_stats_path is required when automatic reference "
+                    "downloads are disabled"
                 )
         if (
             not self.plots_only
@@ -1363,6 +1387,33 @@ class MapMyCellsConfig(BaseModel):
                 "region_labels must contain at least one Allen WHB ROI label when "
                 "reference_mode includes region"
             )
+        if (
+            not self.plots_only
+            and self.reference_atlas == "wmb"
+            and self.query_species == "human"
+            and self.gene_mapping_db_path is None
+            and not self.auto_download_references
+        ):
+            raise ValueError(
+                "gene_mapping_db_path is required for human-to-WMB mapping when "
+                "automatic reference downloads are disabled"
+            )
+        if (
+            not self.plots_only
+            and self.reference_atlas == "wmb"
+            and self.reference_mode in {"region", "both"}
+            and any(label.lower().startswith("human ") for label in self.region_labels)
+        ):
+            raise ValueError(
+                "WMB region_labels must be mouse region_of_interest_acronym values, "
+                "not the default Human WHB labels"
+            )
+        if (
+            self.reference_atlas == "wmb"
+            and self.query_species == "human"
+            and self.drop_level is None
+        ):
+            self.drop_level = "CCN20230722_SUPT"
         return self
 
 

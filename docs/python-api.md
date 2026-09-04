@@ -249,7 +249,7 @@ See [Section alignment](stages/alignment.md).
 - `run_scanpy_clustering(adata, ...)` — filter, normalize, log-transform,
   PCA, neighbors, UMAP, and Leiden clustering. It accepts `key_added` and
   `input_layer` for branch reclustering from raw counts.
-- `load_atlas_marker_sets`, `score_clusters_by_atlas_markers` — WHB marker
+- `load_atlas_marker_sets`, `score_clusters_by_atlas_markers` — WHB/WMB marker
   parsing and cluster-level atlas marker scoring used by hierarchical mode.
 - `plot_qc_histograms`, `plot_umap`, `plot_spatial_scatter` — PNG writers.
 - `save_qc_metrics`, `save_clustered_adata` — CSV and `.h5ad` outputs.
@@ -283,10 +283,10 @@ See [Spatial gene analysis](stages/spatial-gene-analysis.md).
 
 ### `analysis.mecr`
 
-- `run_mecr_reference(config)` — stream the complete WHB neuron and non-neuron
-  references, discover panel-overlapping mutually exclusive broad-class
-  markers, and write audit tables.
-- `load_whb_panel_reference(config, panel_genes=...)` — join WHB taxonomy
+- `run_mecr_reference(config)` — stream a complete WHB or WMB reference,
+  discover panel-overlapping mutually exclusive broad-class markers, and write
+  audit tables.
+- `load_atlas_panel_reference(config, panel_genes=...)` — join atlas taxonomy
   metadata and build a sparse, panel-restricted normalized reference.
 - `discover_reference_markers(reference, ...)` — run Scanpy's Python Wilcoxon
   and apply the paper's strict detection and marker-uniqueness rules.
@@ -313,7 +313,10 @@ See [Mutually exclusive co-expression rate](stages/mecr.md).
 - `annotate_h5ad_with_mapmycells(input_h5ad, csv_path, output_h5ad)` — attach
   CSV assignment columns to `obs`.
 - `prepare_region_mapmycells_reference(config)` — build or reuse cached Allen
-  WHB ROI-specific precomputed stats and marker lookup files.
+  WHB- or WMB-ROI-specific precomputed stats and marker lookup files.
+- `ensure_wmb_clustering_reference_inputs`,
+  `ensure_wmb_mecr_reference_inputs` — resumable Allen WMB provisioning for
+  compact clustering assets or the complete raw MECR atlas.
 - `run_mapmycells(config)` — full stage entry point for `MAPMYCELLS`.
 
 See [MapMyCells](stages/mapmycells.md).

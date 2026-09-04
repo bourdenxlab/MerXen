@@ -22,6 +22,10 @@
 
 The MerXen pipeline was designed to enable standardised analysis of MERSCOPE and Xenium datasets collected from brain tissue sections. MerXen allows for either standalone analysis of data from either one of these two spatial transcriptomic platforms, or for direct comparative analysis.
 
+Human datasets are the default. Mouse datasets use the same pipeline with
+`--species mouse`; this selects mouse-safe stage defaults and the Allen Whole
+Mouse Brain reference where applicable.
+
 In the comparative analysis mode, pairs of adjacent brain tissue sections, one run on Vizgen **MERSCOPE** and the other on 10x Genomics **Xenium**, using the *same* gene panel are analysed together. MerXen re-derives cell boundaries from the raw imagery and transcripts on both platforms, brings the two sections into a common coordinate system, and runs an identical downstream analysis on each — so the differences measured are platform differences, not data processing difference from the pipelines provided by the two vendors.
 
 By default every samplesheet row is a paired experiment, but the same workflow runs single-platform with `--analysis_mode merscope` or `--analysis_mode xenium`. In either mode, multiple samples can be run at once with the same parameters, each undergoing segmentation, per-cell image quantification, QC, cell-type assignment and an array of optional downstream analysis stages.
@@ -81,7 +85,7 @@ Each stage is one Nextflow module and one `merxen` subcommand, sharing a Pydanti
 | [Mask image quantification](docs/stages/mask-image-quantification.md) | Quantifies every SpatialData image channel over the final Cellpose masks | always |
 | [Cortical depth](docs/stages/cortical-depth.md) | Laplace / equal-area cortical-depth coordinates from boundary annotations | off (`--cortical_depth_enabled`) |
 | [QC](docs/stages/qc.md) | Per-dataset geometry and transcript-assignment metrics | always |
-| [MECR](docs/stages/mecr.md) | Reference-based mutually exclusive co-expression rate against the WHB reference | on (`--mecr_enabled`) |
+| [MECR](docs/stages/mecr.md) | Reference-based mutually exclusive co-expression rate against the species-matched whole-brain atlas | human: on; mouse: opt-in |
 | [Alignment](docs/stages/alignment.md) | VALIS DAPI registration of paired adjacent sections, plus alignment QC | off (`--enable_alignment`) |
 | [Comparison](docs/stages/comparison.md) | Cross-platform gene-level comparison | paired rows only |
 | [Visualization](docs/stages/visualization.md) | Single-platform or paired figure generation | always |
@@ -91,7 +95,7 @@ Each stage is one Nextflow module and one `merxen` subcommand, sharing a Pydanti
 | [MapMyCells](docs/stages/mapmycells.md) | Local Allen Institute MapMyCells cell type assignment | off (past default `stop_stage`) |
 | [Distance from object](docs/stages/distance-from-object.md) | Nearest registered polygon-edge annotation and grey-matter paired near-vs-far PyDESeq2 | off (`--distance_from_object_enabled`) |
 
-Downstream analysis runs for both ProSeg-resegmented cells and the original instrument segmentations by default (`--analysis_segmentation both`); `all` adds the `proseg_mask` and `proseg_hybrid` branches.
+Downstream analysis runs for all four segmentation branches by default (`--analysis_segmentation all`): ProSeg-resegmented cells, original instrument segmentations, the Cellpose mask, and the ProSeg hybrid. Use `both` explicitly to restrict analysis to `reseg` and `original_seg`.
 
 See [Metro map](docs/metro-map.md) for what the diagram above does and does not show, and [Pipeline architecture](docs/pipeline.md) for the precise stage graph.
 
@@ -101,8 +105,9 @@ See [Metro map](docs/metro-map.md) for what the diagram above does and does not 
 |---|---|---|
 | `--samplesheet` | *required* | Path to your CSV. |
 | `--outdir` | `./results` | Where all outputs are published. |
+| `--species` | `human` | Dataset species: `human` or `mouse`. Mouse mode selects WMB references for hierarchical clustering, MECR, and MapMyCells. |
 | `--analysis_mode` | `paired` | `paired`, `merscope`, or `xenium`. Controls which columns are required and which stages are active. |
-| `--analysis_segmentation` | `both` | `both`, `all`, `reseg`, `original_seg`, `proseg_mask`, or `proseg_hybrid`. |
+| `--analysis_segmentation` | `all` | `all`, `both`, `reseg`, `original_seg`, `proseg_mask`, or `proseg_hybrid`. |
 | `--enable_alignment` | `false` | Run VALIS alignment and alignment QC before comparison. Paired mode only; VALIS requires both platform-specific combined pia/tissue-edge annotation GeoJSON columns. |
 | `--alignment_backend` | `valis` | `valis`, or `legacy_spateo` for the former expression-based implementation. |
 | `--start_stage` / `--stop_stage` | `build_spatialdata` / `clustering_squidpy` | Run a contiguous stage range. |
@@ -130,6 +135,11 @@ Other hosts must supply their own executor capacity, concurrency limits, GPU han
 ## Samplesheet
 
 Each row points at raw platform folders, with optional reusable SpatialData cache paths and per-platform channel, z-range, and voxel-layer settings. Row-level columns can override most run defaults for a single sample, and object-distance runs supply registered object GeoJSON paths per platform. In single-platform rows, only the selected platform's columns are required.
+
+For raw MERSCOPE data, set `merscope_z_range` explicitly from plane `1`
+(for example, `1-7`): plane `0` is the fiducial-bead layer and will contaminate
+the max projection. Xenium morphology images are already projected and are not
+affected by this setting.
 
 A template lives at [workflows/samplesheet.example.csv](workflows/samplesheet.example.csv). The full schema, validation rules, and worked examples are in [Samplesheet format](docs/samplesheet.md).
 

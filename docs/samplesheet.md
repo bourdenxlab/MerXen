@@ -12,6 +12,14 @@ one MERSCOPE and one Xenium dataset. In `analysis_mode=merscope` or
 required. A template lives at
 [workflows/samplesheet.example.csv](../workflows/samplesheet.example.csv).
 
+> [!WARNING]
+> Raw MERSCOPE plane `0` is the fiducial-bead layer and must normally be
+> excluded from the image max projection. Set `merscope_z_range` explicitly
+> with a start of `1` (for example, `1-7`) so bead signal does not contaminate
+> DAPI or PolyT projection intensities. This setting is MERSCOPE-specific;
+> Xenium morphology images are supplied pre-projected and do not use
+> `merscope_z_range`.
+
 ## Columns
 
 | Column | Required | Description |
@@ -19,11 +27,11 @@ required. A template lives at
 | `pair_id` | **yes** | Unique identifier for this row. Used as the top-level output directory name. |
 | `analysis_mode` | no | Row-level mode: `paired`, `merscope`, or `xenium`. Blank inherits `--analysis_mode`. |
 | `enable_alignment` | no | Row-level alignment switch: `true` or `false`. Blank inherits `--enable_alignment`; only paired rows can run alignment. |
-| `analysis_segmentation` | no | Row-level downstream branch set: `both`, `all`, `reseg`, `original_seg`, `proseg_mask`/`cellpose`, `proseg_hybrid`, or comma-separated combinations. `both` remains `reseg,original_seg`; `all` expands to all four branches; blank inherits `--analysis_segmentation`. |
+| `analysis_segmentation` | no | Row-level downstream branch set: `all`, `both`, `reseg`, `original_seg`, `proseg_mask`/`cellpose`, `proseg_hybrid`, or comma-separated combinations. `all` expands to all four branches and is the global default; `both` restricts analysis to `reseg,original_seg`; blank inherits `--analysis_segmentation`. |
 | `start_stage` | no | Row-level first stage. Blank inherits `--start_stage` unless `only_stage` applies. |
 | `stop_stage` | no | Row-level final stage. Blank inherits `--stop_stage` unless `only_stage` applies. |
 | `only_stage` | no | Row-level single-stage override. If set, it overrides that row's start/stop stage settings. |
-| `mecr_enabled` | no | Row-level MECR switch. Blank inherits `--mecr_enabled`, which defaults to `true`. |
+| `mecr_enabled` | no | Row-level MECR switch. Blank inherits its species-dependent default (`true` for human, `false` for mouse). Set `true` for mouse to use the complete WMB reference. |
 | `spatial_gene_analysis_enabled` | no | Row-level switch for the complete spatial-gene-analysis stage. Blank inherits `--spatial_gene_analysis_enabled`, which defaults to `true`. When `false`, clustering follows visualization directly. |
 | `spatial_gene_analysis_transcript_analysis_enabled` | no | Row-level switch for the annotation-dependent transcript analysis within spatial-gene analysis. Blank inherits `--spatial_gene_analysis_transcript_analysis_enabled`. Set this to `false` to retain cell-level autocorrelation without requiring tissue GeoJSON files. |
 | `cortical_depth_enabled` | no | Row-level cortical-depth switch. Blank inherits `--cortical_depth_enabled`. |
@@ -34,7 +42,7 @@ required. A template lives at
 | `merscope_dir` | required for MERSCOPE modes if no cache | Path to the raw MERSCOPE region export folder (contains `transcripts.parquet`, `cell_boundaries/`, `images/`, etc.). |
 | `merscope_spatialdata_path` | required for MERSCOPE modes if no raw dir | Path to an existing (or desired) reusable MERSCOPE SpatialData zarr. If it exists, the build step is **skipped** unless `--force_spatialdata_build true` is passed to Nextflow. For a downstream-only restart, an explicit path overrides `${outdir}/${pair_id}/merscope/latest/latest_spatialdata.zarr` and must point to the durable enriched latest zarr required by that stage. |
 | `merscope_image_prefix` | no | Prefix used to match z-plane image keys when more than one run is present. |
-| `merscope_z_range` | no | Inclusive z-layer range as `start-end`. Defaults to `0-6`. |
+| `merscope_z_range` | no | Inclusive raw-image z-layer range as `start-end`. Set it explicitly and normally start at `1` (for example, `1-7`) to exclude the MERSCOPE plane-0 fiducial beads. The historical fallback is `0-6`; do not rely on it for standard MERSCOPE exports. Xenium is pre-projected and ignores this field. |
 | `merscope_transform_path` | no | Override path to the `micron_to_mosaic_pixel_transform.csv`. If not set, MerXen looks inside `merscope_dir`. |
 | `merscope_channels` | no | Comma-separated channel names for Cellpose. Defaults to `DAPI,PolyT`. |
 | `merscope_voxel_layers` | no | ProSeg voxel layer count for MERSCOPE. Defaults to `7` (from `nextflow.config`). |
@@ -156,7 +164,7 @@ object GeoJSON.
 
 ```csv
 pair_id,analysis_mode,enable_alignment,analysis_segmentation,start_stage,stop_stage,only_stage,merscope_dir,merscope_spatialdata_path,merscope_image_prefix,merscope_z_range,merscope_transform_path,merscope_channels,xenium_dir,xenium_spatialdata_path,xenium_channels,xenium_min_qv,merscope_voxel_layers,xenium_voxel_layers,xenium_spec_path
-EXAMPLE01,paired,true,both,,,,/path/to/merscope/EXAMPLE01,/path/to/cache/EXAMPLE01_merscope.zarr,,0-6,,"DAPI,PolyT",/path/to/xenium/EXAMPLE01,/path/to/cache/EXAMPLE01_xenium.zarr,"DAPI,18S",20,7,2,
+EXAMPLE01,paired,true,both,,,,/path/to/merscope/EXAMPLE01,/path/to/cache/EXAMPLE01_merscope.zarr,,1-6,,"DAPI,PolyT",/path/to/xenium/EXAMPLE01,/path/to/cache/EXAMPLE01_xenium.zarr,"DAPI,18S",20,7,2,
 EXAMPLE02,merscope,false,reseg,segment_nuclei,enrich,,/path/to/merscope/EXAMPLE02,,,,,"DAPI,PolyT",,,,,7,,
 EXAMPLE03,xenium,false,original_seg,,,visualize,,,,,,,/path/to/xenium/EXAMPLE03,,"DAPI,18S",20,,2,
 ```

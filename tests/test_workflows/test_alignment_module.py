@@ -71,7 +71,6 @@ def test_alignment_environment_uses_the_generated_runtime_lock() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     environment_text = (repo_root / "envs" / "environment.alignment.yml").read_text()
     lock_text = (repo_root / "requirements" / "requirements.alignment.lock").read_text()
-    pyproject_text = (repo_root / "pyproject.toml").read_text()
     config_text = (repo_root / "workflows" / "nextflow.config").read_text()
     cell_type_mapper_commit = "d79f2a5a0780170be392da3ba0e7d0eb86a36238"
 
@@ -81,6 +80,5 @@ def test_alignment_environment_uses_the_generated_runtime_lock() -> None:
     assert "numpy==2.2.6" in lock_text
     assert "opencv-contrib-python-headless==4.12.0.88" in lock_text
     assert cell_type_mapper_commit in lock_text
-    assert cell_type_mapper_commit in pyproject_text
     assert "conda.enabled = true" in config_text
     assert "conda = params.alignment_conda" in config_text

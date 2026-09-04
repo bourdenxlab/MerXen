@@ -22,6 +22,7 @@ def test_clustering_squidpy_nextflow_json_includes_hierarchical_fields(
         '"neuron_split_round"',
         '"neuron_subcluster_round"',
         '"broad_annotation"',
+        '"auto_download_reference"',
         '"spatial_scatter_point_size"',
         '"write_spatialdata_table"',
         "clustering_squidpy_gpu_vram_monitor = true",
@@ -30,7 +31,7 @@ def test_clustering_squidpy_nextflow_json_includes_hierarchical_fields(
         "clustering_squidpy_max_forks = 4",
         "merxen.monitoring.gpu_vram",
         "clustering_compute_out/gpu_vram",
-        "clustering_squidpy_hierarchical_enabled = true",
+        "clustering_squidpy_hierarchical_enabled = null",
         "clustering_squidpy_spatial_scatter_point_size = 2.0",
     ]:
         assert expected in module_text or expected in config_text
@@ -61,6 +62,60 @@ def test_workflow_preflight_checks_reference_files_before_task_inputs(
         "proseg_segment_max_forks = 2",
     ]:
         assert expected in main_text or expected in config_text
+
+
+def test_mapmycells_nextflow_exposes_wmb_cross_species_settings(
+    combined_config_text: str,
+) -> None:
+    """Nextflow should pass atlas, species, download, and gene-mapper settings."""
+    repo_root = Path(__file__).resolve().parents[2]
+    module_text = (repo_root / "workflows/modules/mapmycells.nf").read_text()
+    main_text = (repo_root / "workflows/main.nf").read_text()
+    config_text = combined_config_text
+
+    for expected in [
+        '"reference_atlas"',
+        '"query_species"',
+        '"auto_download_references"',
+        '"gene_mapping_db_path"',
+        "mapmycells_reference_atlas = null",
+        "mapmycells_query_species = null",
+        "mapmycells_auto_download_references = true",
+        "mapmycells_gene_mapping_db_path = null",
+        'mapMyCellsReferenceAtlas in ["whb", "wmb"]',
+        'mapMyCellsQuerySpecies in ["human", "mouse"]',
+    ]:
+        assert (
+            expected in module_text or expected in main_text or expected in config_text
+        )
+
+
+def test_workflow_exposes_species_aware_mouse_defaults(
+    combined_config_text: str,
+) -> None:
+    """Mouse mode should choose WMB and retain intentional stage defaults."""
+    repo_root = Path(__file__).resolve().parents[2]
+    module_text = (repo_root / "workflows/modules/mapmycells.nf").read_text()
+    clustering_text = (
+        repo_root / "workflows/modules/clustering_squidpy.nf"
+    ).read_text()
+    main_text = (repo_root / "workflows/main.nf").read_text()
+
+    for expected in [
+        'species = "human"',
+        'species == "human"',
+        'pipelineSpecies == "mouse" ? "wmb" : "whb"',
+        'pipelineSpecies == "mouse" ? "whole_brain" : "both"',
+        'referenceAtlas == "wmb" ? "CCN20230722_CLAS"',
+        'referenceAtlas = settings.species == "mouse" ? "wmb" : "whb"',
+        "mecr_auto_download_reference = true",
+        "clustering_squidpy_broad_auto_download_reference = true",
+        "params.clustering_squidpy_whb_marker_lookup_path",
+        "params.mapmycells_whb_marker_lookup_path",
+    ]:
+        assert expected in "\n".join(
+            [combined_config_text, module_text, clustering_text, main_text]
+        )
 
 
 def test_gpu_processes_share_local_lock(combined_config_text: str) -> None:

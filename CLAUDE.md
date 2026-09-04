@@ -4,7 +4,7 @@ Read and follow all standards in `Agents.md` before doing any work in this repo.
 
 ## Project overview
 
-This project is used for pre-processing and then analysing spatial transcriptomic datasets. The datasets have been generated in pairs to enable direct comparison between two spatial transcriptomic platforms: 10x Genomic's Xenium and Vizgen's MERSCOPE. For each pair of adjacent tissue sections from human brain sections, one was processed with Xenium and the other with MERSCOPE. The exact same custom panel of 300 genes was used for each technology. Several pairs of tissue sections have been processed. This project takes the data output from each platform and performs the following, matching all steps of analysis after the initial pre-processing steps to co-erce the data into the same formats between platforms:
+This project is used for pre-processing and then analysing human or mouse spatial transcriptomic datasets. The datasets can be generated in pairs to enable direct comparison between two spatial transcriptomic platforms: 10x Genomics' Xenium and Vizgen's MERSCOPE. For each pair of adjacent brain sections, one is processed with Xenium and the other with MERSCOPE using the same custom gene panel. This project takes the data output from each platform and performs the following, matching all steps of analysis after the initial pre-processing steps to coerce the data into the same formats between platforms:
 
 - Performs cell segmentation from scratch using Cellpose-SAM image based segmentation, followed by ProSeg transcript based segmentation with the cellpose assignment as a prior.
 - Aligns each pair of adjacent tissue sections so that they share a common coordinate system

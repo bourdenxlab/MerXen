@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import re
@@ -10,6 +11,7 @@ import subprocess
 import sys
 import textwrap
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -28,15 +30,20 @@ from matplotlib.lines import Line2D
 from scipy import sparse
 
 from merxen.config import MapMyCellsConfig
+from merxen.gene_ids import is_ensembl_gene_id
 from merxen.memory import force_release, log_status
 from merxen.plotting import prepare_plot_output, save_figure
 
 logger = logging.getLogger(__name__)
 
 MAPMYCELLS_PREFIX = "mapmycells_"
+MAPMYCELLS_WMB_PREFIX = "mapmycells_wmb_"
 MAPMYCELLS_REGION_PREFIX_TEMPLATE = "mapmycells_region_{region_name}_"
+MAPMYCELLS_WMB_REGION_PREFIX_TEMPLATE = "mapmycells_wmb_region_{region_name}_"
 MAPMYCELLS_UNS_KEY = "merxen_mapmycells"
+MAPMYCELLS_WMB_UNS_KEY = "merxen_mapmycells_wmb"
 MAPMYCELLS_REGION_UNS_KEY_TEMPLATE = "merxen_mapmycells_region_{region_name}"
+MAPMYCELLS_WMB_REGION_UNS_KEY_TEMPLATE = "merxen_mapmycells_wmb_region_{region_name}"
 MAPMYCELLS_ASSIGNMENT_COLOR_SUFFIX_CANDIDATES = (
     "subcluster_name",
     "cluster_name",
@@ -74,6 +81,35 @@ WHB_EXPRESSION_MATRIX_NAMES = (
     "WHB-10Xv3-Neurons",
     "WHB-10Xv3-Nonneurons",
 )
+WMB_DATASET_DIRECTORY = "WMB-10X"
+WMB_TAXONOMY_DIRECTORY = "WMB-taxonomy"
+WMB_EXPRESSION_DIRECTORIES = ("WMB-10Xv2", "WMB-10Xv3", "WMB-10XMulti")
+WMB_HIERARCHY = [
+    "CCN20230722_CLAS",
+    "CCN20230722_SUBC",
+    "CCN20230722_SUPT",
+    "CCN20230722_CLUS",
+]
+WMB_REGION_COLUMN = "region_of_interest_acronym"
+WMB_FEATURE_MATRIX_COLUMN = "feature_matrix_label"
+MMC_GENE_MAPPER_URL = (
+    "https://allen-brain-cell-atlas.s3.us-west-2.amazonaws.com/"
+    "mapmycells/mmc-gene-mapper/20250630/mmc_gene_mapper.2025-08-04.db"
+)
+MMC_GENE_MAPPER_SIZE = 16_219_131_904
+
+FULL_REFERENCE_MANIFEST_KEYS = {
+    "whb": {
+        "directory": WHB_DATASET_DIRECTORY,
+        "marker": ("query_markers.n10.20240221800", "json"),
+        "stats": ("precomputed_stats.siletti.training", "h5"),
+    },
+    "wmb": {
+        "directory": WMB_DATASET_DIRECTORY,
+        "marker": ("mouse_markers_230821", "json"),
+        "stats": ("precomputed_stats_ABC_revision_230821", "h5"),
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -106,6 +142,7 @@ def prepare_mapmycells_query(
     query_layer: str | None = "counts",
     gene_id_column: str | None = None,
     gene_id_lookup: dict[str, str] | None = None,
+    allow_gene_symbol_fallback: bool = False,
     obs_id_column: str | None = None,
 ) -> Path:
     """Write a MapMyCells-ready H5AD query file.
@@ -123,6 +160,9 @@ def prepare_mapmycells_query(
         gene_id_column: Optional ``var`` column to use as gene identifiers.
         gene_id_lookup: Optional symbol-to-identifier lookup used to reconstruct
             a missing ``ensembl_id`` column in standalone MERSCOPE inputs.
+        allow_gene_symbol_fallback: Keep gene symbols as ``var_names`` when the
+            requested ID column is absent. Use only when the mapper receives a
+            gene-mapping database capable of resolving those symbols.
         obs_id_column: Optional ``obs`` column to use as cell identifiers.
 
     Returns:
@@ -144,17 +184,27 @@ def prepare_mapmycells_query(
 
         if gene_id_column is not None:
             if gene_id_column not in adata.var.columns:
-                _restore_missing_gene_id_column(
-                    adata,
-                    gene_id_column=gene_id_column,
-                    gene_id_lookup=gene_id_lookup,
-                    input_h5ad=input_h5ad,
+                if allow_gene_symbol_fallback and not gene_id_lookup:
+                    logger.info(
+                        "Keeping gene symbols for %s; MapMyCells will resolve them "
+                        "through the configured gene-mapping database.",
+                        input_h5ad.name,
+                    )
+                else:
+                    _restore_missing_gene_id_column(
+                        adata,
+                        gene_id_column=gene_id_column,
+                        gene_id_lookup=gene_id_lookup,
+                        input_h5ad=input_h5ad,
+                    )
+            elif gene_id_column == "ensembl_id" and gene_id_lookup:
+                _supplement_ensembl_id_column(adata, gene_id_lookup)
+            if gene_id_column in adata.var.columns:
+                adata.var_names = _index_from_column_with_fallback(
+                    adata.var,
+                    column=gene_id_column,
+                    fallback=adata.var_names,
                 )
-            adata.var_names = _index_from_column_with_fallback(
-                adata.var,
-                column=gene_id_column,
-                fallback=adata.var_names,
-            )
 
         if obs_id_column is not None:
             if obs_id_column not in adata.obs.columns:
@@ -230,6 +280,41 @@ def _restore_missing_gene_id_column(
     )
 
 
+def _supplement_ensembl_id_column(
+    adata: ad.AnnData,
+    gene_id_lookup: dict[str, str],
+) -> None:
+    """Fill invalid or blank Ensembl IDs from species-matched gene metadata."""
+    symbols = (
+        adata.var["gene"].astype(str).to_numpy()
+        if "gene" in adata.var.columns
+        else adata.var_names.astype(str).to_numpy()
+    )
+    existing = adata.var["ensembl_id"].astype(str).to_numpy()
+    casefold_lookup = {
+        str(symbol).strip().casefold(): str(gene_id).strip()
+        for symbol, gene_id in gene_id_lookup.items()
+        if str(symbol).strip() and is_ensembl_gene_id(gene_id)
+    }
+    supplemented = [
+        gene_id
+        if is_ensembl_gene_id(gene_id)
+        else casefold_lookup.get(str(symbol).strip().casefold(), "")
+        for gene_id, symbol in zip(existing, symbols, strict=True)
+    ]
+    n_added = sum(
+        not is_ensembl_gene_id(before) and is_ensembl_gene_id(after)
+        for before, after in zip(existing, supplemented, strict=True)
+    )
+    if n_added:
+        adata.var["ensembl_id"] = pd.Series(
+            supplemented,
+            index=adata.var_names,
+            dtype="object",
+        )
+        logger.info("Recovered %d additional Ensembl gene IDs.", n_added)
+
+
 def _load_reference_gene_id_lookup_if_needed(
     config: MapMyCellsConfig,
 ) -> dict[str, str]:
@@ -239,7 +324,10 @@ def _load_reference_gene_id_lookup_if_needed(
             continue
         clustered = ad.read_h5ad(sample.anndata_path, backed="r")
         try:
-            if "ensembl_id" not in clustered.var.columns:
+            if "ensembl_id" not in clustered.var.columns or not all(
+                is_ensembl_gene_id(value)
+                for value in clustered.var["ensembl_id"].astype(str)
+            ):
                 needs_lookup = True
                 break
         finally:
@@ -247,18 +335,47 @@ def _load_reference_gene_id_lookup_if_needed(
 
     if not needs_lookup:
         return {}
-    return _load_reference_gene_id_lookup(config.region_cache_dir)
-
-
-def _load_reference_gene_id_lookup(cache_dir: Path | str) -> dict[str, str]:
-    paths = sorted(
-        Path(cache_dir).glob(
-            "abc_whb/expression_matrices/WHB-10Xv3/*/WHB-10Xv3-*-raw.h5ad"
-        )
+    return _load_reference_gene_id_lookup(
+        config.region_cache_dir,
+        reference_atlas=config.reference_atlas,
     )
+
+
+def _load_reference_gene_id_lookup(
+    cache_dir: Path | str,
+    *,
+    reference_atlas: str = "whb",
+) -> dict[str, str]:
+    if reference_atlas == "whb":
+        paths = sorted(
+            path
+            for path in Path(cache_dir).rglob("WHB-10Xv3-*-raw.h5ad")
+            if "WHB-10Xv3" in path.parts
+        )
+    else:
+        gene_metadata_paths = sorted(
+            path
+            for path in Path(cache_dir).rglob("gene.csv")
+            if "WMB-10X" in path.parts
+        )
+        if gene_metadata_paths:
+            csv_lookup = _gene_id_lookup_from_csv(gene_metadata_paths[-1])
+            if csv_lookup:
+                logger.info(
+                    "Loaded %d symbol -> Ensembl ID mappings for standalone "
+                    "MapMyCells.",
+                    len(csv_lookup),
+                )
+                return csv_lookup
+        paths = sorted(
+            path
+            for path in Path(cache_dir).rglob("*-raw.h5ad")
+            if any(part.startswith("WMB-10X") for part in path.parts)
+        )
     if not paths:
         logger.warning(
-            "No WHB reference gene metadata found below MapMyCells cache %s.",
+            "No %s reference gene metadata found below MapMyCells cache %s.",
+            reference_atlas.upper(),
             cache_dir,
         )
         return {}
@@ -277,7 +394,7 @@ def _load_reference_gene_id_lookup(cache_dir: Path | str) -> dict[str, str]:
                 ensembl = str(ensembl_id).strip()
                 gene_symbol = str(symbol).strip()
                 if (
-                    not ensembl.startswith("ENSG")
+                    not is_ensembl_gene_id(ensembl)
                     or not gene_symbol
                     or gene_symbol.lower() in {"nan", "none"}
                 ):
@@ -291,6 +408,38 @@ def _load_reference_gene_id_lookup(cache_dir: Path | str) -> dict[str, str]:
         len(lookup),
     )
     return lookup
+
+
+def _gene_id_lookup_from_csv(path: Path | str) -> dict[str, str]:
+    metadata = pd.read_csv(path)
+    id_column = next(
+        (
+            column
+            for column in ("gene_identifier", "ensembl_id", "gene_id")
+            if column in metadata.columns
+        ),
+        None,
+    )
+    symbol_column = next(
+        (
+            column
+            for column in ("gene_symbol", "symbol", "gene")
+            if column in metadata.columns
+        ),
+        None,
+    )
+    if id_column is None or symbol_column is None:
+        logger.warning("Reference gene metadata lacks ID/symbol columns: %s", path)
+        return {}
+    return {
+        str(symbol).strip(): str(gene_id).strip()
+        for gene_id, symbol in zip(
+            metadata[id_column].astype(str),
+            metadata[symbol_column].astype(str),
+            strict=True,
+        )
+        if str(symbol).strip() and is_ensembl_gene_id(gene_id)
+    }
 
 
 def run_mapmycells(config: MapMyCellsConfig) -> dict[str, dict[str, dict[str, Path]]]:
@@ -308,6 +457,18 @@ def run_mapmycells(config: MapMyCellsConfig) -> dict[str, dict[str, dict[str, Pa
     config.output_dir.mkdir(parents=True, exist_ok=True)
     references = _build_mapmycells_references(config)
     gene_id_lookup = _load_reference_gene_id_lookup_if_needed(config)
+    if (
+        not config.plots_only
+        and config.reference_atlas == "wmb"
+        and _samples_need_gene_mapping_db(config, gene_id_lookup)
+    ):
+        if config.gene_mapping_db_path is None:
+            config.gene_mapping_db_path = _resolve_gene_mapping_db(config)
+        logger.info(
+            "Using the WMB gene-mapping database because one or more queries "
+            "contain gene symbols that could not be resolved to Ensembl IDs "
+            "from cached WMB metadata."
+        )
     results: dict[str, dict[str, dict[str, Path]]] = {}
 
     for sample in config.samples:
@@ -335,40 +496,101 @@ def run_mapmycells(config: MapMyCellsConfig) -> dict[str, dict[str, dict[str, Pa
     return results
 
 
+def _samples_need_gene_mapping_db(
+    config: MapMyCellsConfig,
+    gene_id_lookup: dict[str, str],
+) -> bool:
+    casefold_lookup = {
+        str(symbol).strip().casefold(): str(gene_id).strip()
+        for symbol, gene_id in gene_id_lookup.items()
+        if str(symbol).strip() and is_ensembl_gene_id(gene_id)
+    }
+    for sample in config.samples:
+        if sample.gene_id_column is None or not sample.anndata_path.exists():
+            continue
+        clustered = ad.read_h5ad(sample.anndata_path, backed="r")
+        try:
+            if sample.gene_id_column not in clustered.var.columns:
+                return True
+            gene_ids = clustered.var[sample.gene_id_column].astype(str).to_numpy()
+            symbols = (
+                clustered.var["gene"].astype(str).to_numpy()
+                if "gene" in clustered.var.columns
+                else clustered.var_names.astype(str).to_numpy()
+            )
+            for gene_id, symbol in zip(gene_ids, symbols, strict=True):
+                if is_ensembl_gene_id(gene_id):
+                    continue
+                recovered = casefold_lookup.get(str(symbol).strip().casefold(), "")
+                if not is_ensembl_gene_id(recovered):
+                    return True
+        finally:
+            clustered.file.close()
+    return False
+
+
 def _build_mapmycells_references(config: MapMyCellsConfig) -> list[MapMyCellsReference]:
     references: list[MapMyCellsReference] = []
+    if (
+        not config.plots_only
+        and config.reference_atlas == "wmb"
+        and config.query_species == "human"
+    ):
+        config.gene_mapping_db_path = _resolve_gene_mapping_db(config)
     if config.reference_mode in {"whole_brain", "both"}:
-        if not config.plots_only and (
-            config.marker_lookup_path is None or config.precomputed_stats_path is None
-        ):
-            raise ValueError(
-                "Whole-brain MapMyCells requested but marker/stat paths are missing."
-            )
-        marker_lookup_path = config.marker_lookup_path or Path("")
-        precomputed_stats_path = config.precomputed_stats_path or Path("")
-        if not config.plots_only:
-            _require_existing_file(marker_lookup_path, "MapMyCells marker lookup")
-            _require_existing_file(
-                precomputed_stats_path, "MapMyCells precomputed stats"
-            )
+        if config.plots_only:
+            marker_lookup_path = config.marker_lookup_path or Path("")
+            precomputed_stats_path = config.precomputed_stats_path or Path("")
+            reference_manifest = {
+                "reference_type": "whole_brain",
+                "reference_atlas": config.reference_atlas,
+                "plots_only": True,
+            }
+        else:
+            (
+                marker_lookup_path,
+                precomputed_stats_path,
+                reference_manifest,
+            ) = _resolve_full_reference_artifacts(config)
         references.append(
             MapMyCellsReference(
-                name="whole_brain",
-                output_dir=config.output_dir,
+                name="whole_brain" if config.reference_atlas == "whb" else "wmb",
+                output_dir=(
+                    config.output_dir
+                    if config.reference_atlas == "whb"
+                    else config.output_dir / "wmb"
+                ),
                 marker_lookup_path=marker_lookup_path,
                 precomputed_stats_path=precomputed_stats_path,
-                column_prefix=MAPMYCELLS_PREFIX,
-                uns_key=MAPMYCELLS_UNS_KEY,
-                manifest={
-                    "reference_type": "whole_brain",
-                    "marker_lookup_path": str(config.marker_lookup_path or ""),
-                    "precomputed_stats_path": str(config.precomputed_stats_path or ""),
-                    "plots_only": bool(config.plots_only),
-                },
+                column_prefix=(
+                    MAPMYCELLS_PREFIX
+                    if config.reference_atlas == "whb"
+                    else MAPMYCELLS_WMB_PREFIX
+                ),
+                uns_key=(
+                    MAPMYCELLS_UNS_KEY
+                    if config.reference_atlas == "whb"
+                    else MAPMYCELLS_WMB_UNS_KEY
+                ),
+                manifest=reference_manifest,
             )
         )
     if config.reference_mode in {"region", "both"}:
         region_name = _sanitize_token(config.region_name)
+        if config.reference_atlas == "whb":
+            reference_name = f"region_{region_name}"
+            column_prefix = MAPMYCELLS_REGION_PREFIX_TEMPLATE.format(
+                region_name=region_name
+            )
+            uns_key = MAPMYCELLS_REGION_UNS_KEY_TEMPLATE.format(region_name=region_name)
+        else:
+            reference_name = f"wmb_region_{region_name}"
+            column_prefix = MAPMYCELLS_WMB_REGION_PREFIX_TEMPLATE.format(
+                region_name=region_name
+            )
+            uns_key = MAPMYCELLS_WMB_REGION_UNS_KEY_TEMPLATE.format(
+                region_name=region_name
+            )
         if config.plots_only:
             region_artifacts = RegionReferenceArtifacts(
                 marker_lookup_path=Path(""),
@@ -387,20 +609,103 @@ def _build_mapmycells_references(config: MapMyCellsConfig) -> list[MapMyCellsRef
             region_artifacts = prepare_region_mapmycells_reference(config)
         references.append(
             MapMyCellsReference(
-                name=f"region_{region_name}",
-                output_dir=config.output_dir / f"region_{region_name}",
+                name=reference_name,
+                output_dir=config.output_dir / reference_name,
                 marker_lookup_path=region_artifacts.marker_lookup_path,
                 precomputed_stats_path=region_artifacts.precomputed_stats_path,
-                column_prefix=MAPMYCELLS_REGION_PREFIX_TEMPLATE.format(
-                    region_name=region_name
-                ),
-                uns_key=MAPMYCELLS_REGION_UNS_KEY_TEMPLATE.format(
-                    region_name=region_name
-                ),
+                column_prefix=column_prefix,
+                uns_key=uns_key,
                 manifest=region_artifacts.manifest,
             )
         )
     return references
+
+
+def _resolve_full_reference_artifacts(
+    config: MapMyCellsConfig,
+) -> tuple[Path, Path, dict[str, Any]]:
+    marker_path = config.marker_lookup_path
+    stats_path = config.precomputed_stats_path
+    if marker_path is not None:
+        _require_existing_file(marker_path, "MapMyCells marker lookup")
+    if stats_path is not None:
+        _require_existing_file(stats_path, "MapMyCells precomputed stats")
+
+    downloaded = False
+    if marker_path is None or stats_path is None:
+        if not config.auto_download_references:
+            raise ValueError(
+                "Whole-brain MapMyCells reference paths are missing and automatic "
+                "downloads are disabled."
+            )
+        manifest = _load_abc_manifest()
+        keys = FULL_REFERENCE_MANIFEST_KEYS[config.reference_atlas]
+        directory = str(keys["directory"])
+        cache_dir = config.region_cache_dir / "abc_atlas"
+        if marker_path is None:
+            marker_name, marker_suffix = cast(tuple[str, str], keys["marker"])
+            marker_info = _manifest_file_info(
+                manifest,
+                directory,
+                "mapmycells",
+                marker_name,
+                "files",
+                marker_suffix,
+            )
+            marker_path = _ensure_manifest_file(marker_info, cache_dir)
+            downloaded = True
+        if stats_path is None:
+            stats_name, stats_suffix = cast(tuple[str, str], keys["stats"])
+            stats_info = _manifest_file_info(
+                manifest,
+                directory,
+                "mapmycells",
+                stats_name,
+                "files",
+                stats_suffix,
+            )
+            stats_path = _ensure_manifest_file(stats_info, cache_dir)
+            downloaded = True
+
+    if marker_path is None or stats_path is None:
+        raise RuntimeError("Could not resolve the MapMyCells full reference artifacts.")
+    return (
+        marker_path,
+        stats_path,
+        {
+            "reference_type": "whole_brain",
+            "reference_atlas": config.reference_atlas,
+            "query_species": config.query_species,
+            "marker_lookup_path": str(marker_path),
+            "precomputed_stats_path": str(stats_path),
+            "gene_mapping_db_path": _path_as_str(config.gene_mapping_db_path),
+            "downloaded": downloaded,
+        },
+    )
+
+
+def _resolve_gene_mapping_db(config: MapMyCellsConfig) -> Path:
+    if config.gene_mapping_db_path is not None:
+        _require_existing_file(config.gene_mapping_db_path, "MapMyCells gene mapper DB")
+        return config.gene_mapping_db_path
+    if not config.auto_download_references:
+        raise ValueError(
+            "WMB gene-symbol mapping requires gene_mapping_db_path when automatic "
+            "reference downloads are disabled."
+        )
+    output_path = (
+        config.region_cache_dir
+        / "abc_atlas"
+        / "mapmycells"
+        / "mmc-gene-mapper"
+        / "20250630"
+        / "mmc_gene_mapper.2025-08-04.db"
+    )
+    return _ensure_url_file(
+        MMC_GENE_MAPPER_URL,
+        output_path,
+        expected_size=MMC_GENE_MAPPER_SIZE,
+    )
 
 
 def _run_mapmycells_reference(
@@ -455,6 +760,7 @@ def _run_mapmycells_reference(
             query_layer=sample.query_layer,
             gene_id_column=sample.gene_id_column,
             gene_id_lookup=gene_id_lookup,
+            allow_gene_symbol_fallback=config.gene_mapping_db_path is not None,
             obs_id_column=sample.obs_id_column,
         )
         command = build_mapmycells_command(
@@ -568,6 +874,8 @@ def build_mapmycells_command(
         command.extend(["--max_gb", str(config.max_gb)])
     if config.tmp_dir is not None:
         command.extend(["--tmp_dir", str(config.tmp_dir)])
+    if config.gene_mapping_db_path is not None:
+        command.extend(["--gene_mapping.db_path", str(config.gene_mapping_db_path)])
     if config.verbose_csv:
         command.extend(["--verbose_csv", _bool_arg(config.verbose_csv)])
     command.extend(config.extra_args)
@@ -1856,9 +2164,12 @@ def _wrapped_title(value: str, *, width: int = 34) -> str:
 def prepare_region_mapmycells_reference(
     config: MapMyCellsConfig,
 ) -> RegionReferenceArtifacts:
-    """Download/cache and generate a strict WHB ROI-specific MapMyCells reference."""
+    """Download/cache and generate a strict WHB or WMB ROI reference."""
     region_name = _sanitize_token(config.region_name)
-    reference_dir = config.region_cache_dir / "references" / f"region_{region_name}"
+    reference_prefix = "region" if config.reference_atlas == "whb" else "wmb_region"
+    reference_dir = (
+        config.region_cache_dir / "references" / f"{reference_prefix}_{region_name}"
+    )
     precompute_dir = reference_dir / "precompute"
     reference_marker_dir = reference_dir / "reference_markers"
     query_marker_dir = reference_dir / "query_markers"
@@ -1895,28 +2206,52 @@ def prepare_region_mapmycells_reference(
     for directory in (precompute_dir, reference_marker_dir, query_marker_dir):
         directory.mkdir(parents=True, exist_ok=True)
 
-    reference_inputs = _ensure_whb_reference_inputs(
-        config.region_cache_dir,
-        force_download=False,
-    )
+    if config.reference_atlas == "whb":
+        reference_inputs = _ensure_whb_reference_inputs(
+            config.region_cache_dir,
+            force_download=False,
+        )
+        region_column = "region_of_interest_label"
+        roi_map_path = reference_inputs["region_of_interest_structure_map"]
+        hierarchy = WHB_HIERARCHY
+    else:
+        reference_inputs = _ensure_wmb_reference_metadata_inputs(
+            config.region_cache_dir,
+            force_download=False,
+        )
+        region_column = WMB_REGION_COLUMN
+        roi_map_path = reference_inputs["region_of_interest_metadata"]
+        hierarchy = WMB_HIERARCHY
     filtered_summary = _write_region_cell_metadata(
         cell_metadata_path=reference_inputs["cell_metadata"],
         output_path=region_cell_metadata_path,
         region_labels=config.region_labels,
         min_cells_per_leaf=config.region_min_cells_per_leaf,
-        roi_map_path=reference_inputs["region_of_interest_structure_map"],
+        roi_map_path=roi_map_path,
+        region_column=region_column,
     )
+    if config.reference_atlas == "whb":
+        h5ad_path_list = [
+            reference_inputs["WHB-10Xv3-Neurons_raw"],
+            reference_inputs["WHB-10Xv3-Nonneurons_raw"],
+        ]
+    else:
+        matrix_labels = filtered_summary.get("feature_matrix_labels", [])
+        expression_inputs = _ensure_wmb_expression_inputs(
+            config.region_cache_dir,
+            matrix_labels=cast(list[str], matrix_labels),
+            force_download=False,
+        )
+        reference_inputs.update(expression_inputs)
+        h5ad_path_list = list(expression_inputs.values())
 
     scratch_dir = _reference_scratch_dir(config, reference_dir)
     scratch_dir.mkdir(parents=True, exist_ok=True)
     _run_precomputation_abc(
         {
             "output_path": str(precomputed_stats_path),
-            "hierarchy": WHB_HIERARCHY,
-            "h5ad_path_list": [
-                str(reference_inputs["WHB-10Xv3-Neurons_raw"]),
-                str(reference_inputs["WHB-10Xv3-Nonneurons_raw"]),
-            ],
+            "hierarchy": hierarchy,
+            "h5ad_path_list": [str(path) for path in h5ad_path_list],
             "cell_metadata_path": str(region_cell_metadata_path),
             "cluster_annotation_path": str(reference_inputs["cluster_annotation_term"]),
             "cluster_membership_path": str(
@@ -1996,9 +2331,14 @@ def _region_reference_config_payload(
         "region_query_markers_n_per_utility": (
             config.region_query_markers_n_per_utility
         ),
-        "hierarchy": WHB_HIERARCHY,
+        "reference_atlas": config.reference_atlas,
+        "query_species": config.query_species,
+        "hierarchy": (
+            WHB_HIERARCHY if config.reference_atlas == "whb" else WMB_HIERARCHY
+        ),
         "normalization": "raw",
         "manifest_url": WHB_MANIFEST_URL,
+        "drop_level": config.drop_level,
     }
 
 
@@ -2073,6 +2413,193 @@ def _ensure_whb_reference_inputs(
     return inputs
 
 
+def _ensure_wmb_reference_metadata_inputs(
+    cache_dir: Path,
+    *,
+    force_download: bool = False,
+) -> dict[str, Path]:
+    manifest = _load_abc_manifest()
+    abc_cache_dir = cache_dir / "abc_atlas"
+    inputs: dict[str, Path] = {}
+    for file_key in ("cell_metadata", "region_of_interest_metadata"):
+        info = _manifest_file_info(
+            manifest,
+            WMB_DATASET_DIRECTORY,
+            "metadata",
+            file_key,
+            "files",
+            "csv",
+        )
+        inputs[file_key] = _ensure_manifest_file(
+            info,
+            abc_cache_dir,
+            force_download=force_download,
+        )
+    for file_key in (
+        "cluster_annotation_term",
+        "cluster_to_cluster_annotation_membership",
+    ):
+        info = _manifest_file_info(
+            manifest,
+            WMB_TAXONOMY_DIRECTORY,
+            "metadata",
+            file_key,
+            "files",
+            "csv",
+        )
+        inputs[file_key] = _ensure_manifest_file(
+            info,
+            abc_cache_dir,
+            force_download=force_download,
+        )
+    return inputs
+
+
+def ensure_wmb_clustering_reference_inputs(
+    cache_dir: Path | str,
+) -> dict[str, Path]:
+    """Download or reuse the compact WMB inputs needed by clustering."""
+    manifest = _load_abc_manifest()
+    abc_cache_dir = Path(cache_dir) / "abc_atlas"
+    inputs: dict[str, Path] = {}
+
+    marker_name, marker_suffix = cast(
+        tuple[str, str],
+        FULL_REFERENCE_MANIFEST_KEYS["wmb"]["marker"],
+    )
+    marker_info = _manifest_file_info(
+        manifest,
+        WMB_DATASET_DIRECTORY,
+        "mapmycells",
+        marker_name,
+        "files",
+        marker_suffix,
+    )
+    inputs["marker_lookup"] = _ensure_manifest_file(marker_info, abc_cache_dir)
+
+    gene_info = _manifest_file_info(
+        manifest,
+        WMB_DATASET_DIRECTORY,
+        "metadata",
+        "gene",
+        "files",
+        "csv",
+    )
+    inputs["gene_metadata"] = _ensure_manifest_file(gene_info, abc_cache_dir)
+
+    for file_key in (
+        "cluster_annotation_term",
+        "cluster_to_cluster_annotation_membership",
+    ):
+        info = _manifest_file_info(
+            manifest,
+            WMB_TAXONOMY_DIRECTORY,
+            "metadata",
+            file_key,
+            "files",
+            "csv",
+        )
+        inputs[file_key] = _ensure_manifest_file(info, abc_cache_dir)
+    return inputs
+
+
+def ensure_wmb_mecr_reference_inputs(
+    cache_dir: Path | str,
+    *,
+    max_parallel_downloads: int = 4,
+) -> dict[str, Path]:
+    """Download or reuse the complete WMB 10x reference required by MECR."""
+    if max_parallel_downloads < 1:
+        raise ValueError("max_parallel_downloads must be at least 1")
+    manifest = _load_abc_manifest()
+    abc_cache_dir = Path(cache_dir) / "abc_atlas"
+    inputs = ensure_wmb_clustering_reference_inputs(cache_dir)
+
+    cell_metadata_info = _manifest_file_info(
+        manifest,
+        WMB_DATASET_DIRECTORY,
+        "metadata",
+        "cell_metadata",
+        "files",
+        "csv",
+    )
+    inputs["cell_metadata"] = _ensure_manifest_file(
+        cell_metadata_info,
+        abc_cache_dir,
+    )
+
+    expression_requests: list[tuple[str, dict[str, Any]]] = []
+    for directory in WMB_EXPRESSION_DIRECTORIES:
+        matrix_names = manifest["file_listing"][directory]["expression_matrices"]
+        for matrix_name in sorted(matrix_names):
+            info = _manifest_file_info(
+                manifest,
+                directory,
+                "expression_matrices",
+                matrix_name,
+                "raw",
+                "files",
+                "h5ad",
+            )
+            expression_requests.append((f"expression:{matrix_name}", info))
+
+    def ensure_expression_file(
+        request: tuple[str, dict[str, Any]],
+    ) -> tuple[str, Path]:
+        key, info = request
+        return key, _ensure_manifest_file(info, abc_cache_dir)
+
+    workers = min(max_parallel_downloads, len(expression_requests))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        for key, path in executor.map(ensure_expression_file, expression_requests):
+            inputs[key] = path
+    return inputs
+
+
+def _ensure_wmb_expression_inputs(
+    cache_dir: Path,
+    *,
+    matrix_labels: list[str],
+    force_download: bool = False,
+) -> dict[str, Path]:
+    if not matrix_labels:
+        raise ValueError(
+            "The filtered WMB metadata did not contain any feature_matrix_label "
+            "values, so expression matrices could not be selected."
+        )
+    manifest = _load_abc_manifest()
+    abc_cache_dir = cache_dir / "abc_atlas"
+    inputs: dict[str, Path] = {}
+    for matrix_label in sorted(set(matrix_labels)):
+        match: tuple[str, dict[str, Any]] | None = None
+        for directory in WMB_EXPRESSION_DIRECTORIES:
+            matrices = manifest["file_listing"][directory]["expression_matrices"]
+            if matrix_label in matrices:
+                match = (directory, dict(matrices[matrix_label]))
+                break
+        if match is None:
+            raise KeyError(
+                f"WMB feature_matrix_label {matrix_label!r} was not found in "
+                f"{WMB_EXPRESSION_DIRECTORIES!r}."
+            )
+        directory, _ = match
+        info = _manifest_file_info(
+            manifest,
+            directory,
+            "expression_matrices",
+            matrix_label,
+            "raw",
+            "files",
+            "h5ad",
+        )
+        inputs[f"{matrix_label}_raw"] = _ensure_manifest_file(
+            info,
+            abc_cache_dir,
+            force_download=force_download,
+        )
+    return inputs
+
+
 def _load_abc_manifest() -> dict[str, Any]:
     with urllib.request.urlopen(WHB_MANIFEST_URL) as response:
         manifest: object = json.loads(response.read().decode("utf-8"))
@@ -2092,7 +2619,7 @@ def _ensure_manifest_file(
     info: dict[str, Any],
     cache_dir: Path,
     *,
-    force_download: bool,
+    force_download: bool = False,
 ) -> Path:
     relative_path = Path(str(info["relative_path"]))
     output_path = cache_dir / relative_path
@@ -2104,26 +2631,67 @@ def _ensure_manifest_file(
     ):
         return output_path
 
+    return _ensure_url_file(
+        str(info["url"]),
+        output_path,
+        expected_size=expected_size,
+        force_download=force_download,
+    )
+
+
+def _ensure_url_file(
+    url: str,
+    output_path: Path,
+    *,
+    expected_size: int = 0,
+    force_download: bool = False,
+) -> Path:
+    if (
+        output_path.exists()
+        and not force_download
+        and _file_size_matches(output_path, expected_size)
+    ):
+        return output_path
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = output_path.with_name(f"{output_path.name}.tmp")
-    if tmp_path.exists():
-        tmp_path.unlink()
-    url = str(info["url"])
-    logger.info("Downloading Allen WHB reference file: %s", url)
-    with urllib.request.urlopen(url) as response, tmp_path.open("wb") as out:
-        while True:
-            chunk = response.read(1024 * 1024 * 16)
-            if not chunk:
-                break
-            out.write(chunk)
-    actual_size = tmp_path.stat().st_size
-    if expected_size and actual_size != expected_size:
-        tmp_path.unlink(missing_ok=True)
-        raise RuntimeError(
-            f"Downloaded {url} to {tmp_path}, but size was "
-            f"{actual_size} bytes; expected {expected_size} bytes."
+    lock_path = output_path.with_name(f"{output_path.name}.lock")
+    with lock_path.open("a+b") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        if (
+            output_path.exists()
+            and not force_download
+            and _file_size_matches(output_path, expected_size)
+        ):
+            return output_path
+        if force_download:
+            tmp_path.unlink(missing_ok=True)
+
+        offset = tmp_path.stat().st_size if tmp_path.exists() else 0
+        headers = {"Range": f"bytes={offset}-"} if offset else {}
+        request = urllib.request.Request(url, headers=headers)
+        logger.info(
+            "Downloading Allen reference file: %s (resume_offset=%d)", url, offset
         )
-    tmp_path.replace(output_path)
+        with urllib.request.urlopen(request) as response:
+            is_partial = getattr(response, "status", None) == 206
+            mode = "ab" if offset and is_partial else "wb"
+            with tmp_path.open(mode) as out:
+                while True:
+                    chunk = response.read(1024 * 1024 * 16)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+        actual_size = tmp_path.stat().st_size
+        if expected_size and actual_size != expected_size:
+            if actual_size > expected_size:
+                tmp_path.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"Downloaded {url} to {tmp_path}, but size was "
+                f"{actual_size} bytes; expected {expected_size} bytes. "
+                "The partial file was retained for a resumed download."
+            )
+        tmp_path.replace(output_path)
     return output_path
 
 
@@ -2138,13 +2706,14 @@ def _write_region_cell_metadata(
     region_labels: list[str],
     min_cells_per_leaf: int,
     roi_map_path: Path,
+    region_column: str = "region_of_interest_label",
 ) -> dict[str, Any]:
     if not region_labels:
         raise ValueError("At least one region label is required for region mapping.")
     cell_metadata = pd.read_csv(cell_metadata_path)
-    if "region_of_interest_label" not in cell_metadata.columns:
+    if region_column not in cell_metadata.columns:
         raise KeyError(
-            f"{cell_metadata_path} does not contain region_of_interest_label. "
+            f"{cell_metadata_path} does not contain {region_column}. "
             f"Available columns: {list(cell_metadata.columns)}"
         )
     if "cluster_alias" not in cell_metadata.columns:
@@ -2152,12 +2721,12 @@ def _write_region_cell_metadata(
             f"{cell_metadata_path} does not contain cluster_alias. "
             f"Available columns: {list(cell_metadata.columns)}"
         )
-    region_mask = cell_metadata["region_of_interest_label"].isin(region_labels)
+    region_mask = cell_metadata[region_column].isin(region_labels)
     region_cells = cell_metadata.loc[region_mask].copy()
     if region_cells.empty:
-        available = _available_roi_labels(roi_map_path)
+        available = _available_roi_labels(roi_map_path, region_column=region_column)
         raise ValueError(
-            "No WHB cells matched mapmycells_region_labels="
+            f"No {region_column} cells matched mapmycells_region_labels="
             f"{region_labels!r}. Available ROI labels include: {available[:20]}"
         )
 
@@ -2178,8 +2747,15 @@ def _write_region_cell_metadata(
     dropped_counts = leaf_counts[leaf_counts < min_cells_per_leaf]
     return {
         "requested_region_labels": list(region_labels),
+        "region_column": region_column,
         "matched_region_labels": sorted(
-            str(value) for value in region_cells["region_of_interest_label"].unique()
+            str(value) for value in region_cells[region_column].unique()
+        ),
+        "feature_matrix_labels": sorted(
+            str(value)
+            for value in filtered.get(WMB_FEATURE_MATRIX_COLUMN, pd.Series(dtype=str))
+            .dropna()
+            .unique()
         ),
         "n_cells_before_region_filter": int(len(cell_metadata)),
         "n_cells_after_region_filter": int(len(region_cells)),
@@ -2193,11 +2769,15 @@ def _write_region_cell_metadata(
     }
 
 
-def _available_roi_labels(roi_map_path: Path) -> list[str]:
+def _available_roi_labels(
+    roi_map_path: Path,
+    *,
+    region_column: str = "region_of_interest_label",
+) -> list[str]:
     roi_map = pd.read_csv(roi_map_path)
-    if "region_of_interest_label" not in roi_map.columns:
+    if region_column not in roi_map.columns:
         return []
-    return sorted(str(value) for value in roi_map["region_of_interest_label"].unique())
+    return sorted(str(value) for value in roi_map[region_column].unique())
 
 
 def _run_precomputation_abc(config: dict[str, Any]) -> None:
@@ -2446,8 +3026,12 @@ def _write_results_manifest(
     payload = {
         "pair_id": config.pair_id,
         "reference_mode": config.reference_mode,
+        "reference_atlas": config.reference_atlas,
+        "query_species": config.query_species,
+        "auto_download_references": config.auto_download_references,
         "marker_lookup_path": _path_as_str(config.marker_lookup_path),
         "precomputed_stats_path": _path_as_str(config.precomputed_stats_path),
+        "gene_mapping_db_path": _path_as_str(config.gene_mapping_db_path),
         "region_name": config.region_name,
         "region_labels": list(config.region_labels),
         "region_cache_dir": str(config.region_cache_dir),

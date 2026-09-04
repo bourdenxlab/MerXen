@@ -6,14 +6,17 @@ metric introduced by Hartman and Satija in
 [Comparative analysis of multiplexed in situ gene expression profiling technologies](https://doi.org/10.7554/eLife.96949.1).
 A lower value indicates greater molecular-assignment specificity; an elevated
 value can reflect off-target signal or overly permissive cell segmentation. The
-stage is enabled by default and runs after QC, independently of alignment.
+stage is enabled by default for human runs and runs after QC, independently of
+alignment. Mouse runs may opt in; they default off because the complete WMB
+reference download is about 151 GB.
 
 ## Method
 
-The stage uses the complete Allen Whole Human Brain 10x v3 reference. It joins
-the neuron and non-neuron raw H5AD cell labels to the same WHB taxonomy metadata
-and broad-class collapse used by the Squidpy clustering stage. The default
-classes are:
+The stage uses the species-matched complete Allen reference: Whole Human Brain
+10x v3 (WHB) for human or every raw Whole Mouse Brain 10Xv2, 10Xv3, and 10X
+Multiome shard (WMB) for mouse. It joins raw H5AD cell labels to atlas taxonomy
+metadata and the same broad-class collapse used by Squidpy clustering. The WHB
+default classes are:
 
 - Neurons
 - Oligodendrocytes
@@ -23,6 +26,10 @@ classes are:
 - Fibroblasts
 - Vascular cells
 
+The WMB defaults are neurons, Astrocytes/Ependymal, Oligodendrocyte lineage,
+OEC, Vascular cells, and Immune cells collapsed to the existing Microglia
+output class.
+
 Reference preparation is restricted to genes present in the spatial panel,
 but each reference cell is normalized using its full-library count before the
 panel is selected. Expression is normalized to 10,000 counts per cell and
@@ -31,6 +38,11 @@ rest. Following the paper, a gene is retained for a class only when it is
 detected in strictly more than 25% of that class and strictly less than 1% of
 the other retained cells. A gene that qualifies for more than one class is
 removed.
+
+The raw WMB matrices contain a small number of cells absent from the published
+taxonomy metadata. They cannot be assigned to a broad class, so mouse MECR
+skips them and records the count in `mecr_reference_manifest.json`; all
+taxonomy-annotated cells are retained.
 
 Every unordered pair of retained genes from different broad classes is then
 scored in each spatial cell-count table:
@@ -45,7 +57,7 @@ they remain in the audit table and are excluded from the aggregate mean.
 
 ## Plots
 
-Reference preparation writes a histogram of MECR across every eligible WHB
+Reference preparation writes a histogram of MECR across every eligible atlas
 marker pair, with mean and median lines for description only. Unlike the
 exploratory notebook, no reference-MECR cutoff is used to select pairs.
 
@@ -67,12 +79,18 @@ shown in the title is always calculated from every cell. Set
 
 ## Workflow behaviour
 
-`MECR_REFERENCE` runs once per workflow invocation and streams both complete
-WHB raw matrices in bounded row chunks. Its output is shared by every selected
-sample and segmentation branch. `MECR` then scores each branch separately for
-MERSCOPE and/or Xenium. Because the reference preparation is the expensive
-step, keep the Nextflow work directory and use `-resume` when rerunning the same
-panel and reference settings.
+`MECR_REFERENCE` runs once per workflow invocation and streams every configured
+raw matrix in bounded row chunks. Its output is shared by every selected sample
+and segmentation branch. `MECR` then scores each branch separately for
+MERSCOPE and/or Xenium. Missing WMB inputs are downloaded into the durable
+reference cache with four resumable concurrent transfers. Because reference
+preparation is the expensive step, keep the Nextflow work directory and use
+`-resume` when rerunning the same panel and reference settings.
+
+Enable WMB MECR explicitly with `--species mouse --mecr_enabled true`. The
+Dwight profile stores the reference under
+`/media/mathieubo/SSD1/MerXen/mapmycells/abc_atlas`; other profiles should set
+`--mecr_reference_cache_dir` to a location with at least 160 GB free.
 
 MECR can be disabled globally with:
 
@@ -90,12 +108,15 @@ column overrides the global switch per row.
 
 | Parameter | Default | Purpose |
 |-----------|---------|---------|
-| `mecr_enabled` | `true` | Enable the stage for a row. |
-| `mecr_neurons_h5ad_path` | WHB-10Xv3 neuron raw H5AD | Complete neuronal reference matrix. |
-| `mecr_nonneurons_h5ad_path` | WHB-10Xv3 non-neuron raw H5AD | Complete non-neuronal reference matrix. |
-| `mecr_cell_metadata_path` | WHB cell metadata CSV | Maps reference cell labels to cluster aliases. |
-| `mecr_taxonomy_metadata_path` | WHB taxonomy CSV | Resolves taxonomy labels. |
-| `mecr_cluster_membership_path` | WHB membership CSV | Maps cluster aliases to the selected taxonomy level. |
+| `mecr_enabled` | human: `true`; mouse: `false` | Enable the species-matched stage for a row. Mouse is opt-in due to reference size. |
+| `mecr_reference_h5ad_paths` | `[]` | Explicit complete raw reference shard list; auto-download fills this for WMB. |
+| `mecr_neurons_h5ad_path` | WHB-10Xv3 neuron raw H5AD | Legacy WHB neuronal reference matrix. |
+| `mecr_nonneurons_h5ad_path` | WHB-10Xv3 non-neuron raw H5AD | Legacy WHB non-neuronal reference matrix. |
+| `mecr_cell_metadata_path` | atlas-dependent | Maps reference cell labels to cluster aliases. |
+| `mecr_taxonomy_metadata_path` | atlas-dependent | Resolves taxonomy labels. |
+| `mecr_cluster_membership_path` | atlas-dependent | Maps cluster aliases to the selected taxonomy level. |
+| `mecr_reference_cache_dir` | `<outdir>/mapmycells_cache` | Durable cache for automatic WMB downloads. |
+| `mecr_auto_download_reference` | `true` | Download or reuse every complete WMB reference input for mouse. |
 | `mecr_marker_min_target_fraction` | `0.25` | Strict lower detection threshold in the target class. |
 | `mecr_marker_max_other_fraction` | `0.01` | Strict upper detection threshold outside the target class. |
 | `mecr_reference_chunk_rows` | `5000` | Number of reference cells read per chunk. |
