@@ -103,6 +103,16 @@ def write_merscope_spatialdata(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    from merxen.io.builders.vzg2 import resolve_vzg2_path, write_vzg2_spatialdata
+
+    if resolve_vzg2_path(input_path) is not None:
+        return write_vzg2_spatialdata(
+            input_path=input_path,
+            output_path=output_path,
+            build_config=build_config,
+            transform_path_override=transform_path_override,
+        )
+
     z_layers = (
         list(build_config.z_layers)
         if build_config.z_layers is not None

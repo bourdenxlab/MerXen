@@ -97,6 +97,40 @@ def test_build_spatialdata_artifact_dispatches_to_platform_writer(
     assert calls == [(raw_dir, output_path)]
 
 
+def test_build_spatialdata_artifact_accepts_direct_vzg2(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A direct .vzg2 file should be treated as a MERSCOPE source input."""
+    archive_path = tmp_path / "source.vzg2"
+    archive_path.touch()
+    output_path = tmp_path / "stage" / "source.zarr"
+    calls: list[Path] = []
+
+    fake_module = types.ModuleType("merxen.io.builders.merscope")
+
+    def _fake_write_merscope_spatialdata(**kwargs: object) -> Path:
+        source = Path(kwargs["input_path"])
+        destination = Path(kwargs["output_path"])
+        destination.mkdir(parents=True)
+        calls.append(source)
+        return destination
+
+    fake_module.write_merscope_spatialdata = _fake_write_merscope_spatialdata  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "merxen.io.builders.merscope", fake_module)
+    cfg = SpatialDataBuildConfig(
+        dataset_name="P1_MERSCOPE",
+        platform="MERSCOPE",
+        input_path=archive_path,
+        output_path=output_path,
+    )
+
+    result = build_spatialdata_artifact(cfg, force_rerun=True)
+
+    assert result == output_path
+    assert calls == [archive_path]
+
+
 def test_merscope_writer_builds_projection_without_reader_mosaics(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

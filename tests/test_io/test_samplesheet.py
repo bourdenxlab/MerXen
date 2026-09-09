@@ -105,6 +105,23 @@ def test_validate_samplesheet_allows_merscope_only_mode(tmp_path: Path) -> None:
     validate_samplesheet(pairs, analysis_mode="merscope")
 
 
+def test_validate_samplesheet_allows_direct_vzg2_for_merscope(
+    tmp_path: Path,
+) -> None:
+    """The existing merscope_dir column should accept a direct VZG2 file."""
+    archive_path = tmp_path / "sample.vzg2"
+    archive_path.touch()
+    csv_path = tmp_path / "vzg2.csv"
+    csv_path.write_text(
+        f"pair_id,analysis_mode,merscope_dir\nP1,merscope,{archive_path}\n"
+    )
+
+    pairs = parse_samplesheet(csv_path)
+
+    assert pairs[0].merscope_dir == archive_path
+    validate_samplesheet(pairs)
+
+
 def test_validate_samplesheet_allows_xenium_only_mode_with_blank_merscope_fields(
     tmp_path: Path,
 ) -> None:

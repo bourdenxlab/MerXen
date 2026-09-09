@@ -15,6 +15,7 @@ dependencies = [
     "geopandas>=1.0",
     "anndata>=0.10.9,<0.13.0",
     "pyarrow>=15.0.0,<24",
+    "imagecodecs>=2024.12.30",
     "dask[dataframe]>=2025.1,<2027",
     "spatialdata>=0.8.0,<0.9",
     "spatialdata-io>=0.6,<0.7",

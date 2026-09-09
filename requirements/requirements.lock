@@ -330,6 +330,7 @@ igraph==1.0.0
     #   python-igraph
 imagecodecs==2025.11.11
     # via
+    #   merxen (pyproject.toml)
     #   cellpose
     #   spatialdata-io
     #   squidpy
