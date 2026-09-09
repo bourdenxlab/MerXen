@@ -691,9 +691,23 @@ def _get_polygons(
 ) -> geopandas.GeoDataFrame:
     """Read the cell boundary parquet file and parse it into shapes."""
     geo_df = geopandas.read_parquet(boundaries_path)
-    geo_df = geo_df.rename_geometry("geometry")
+    if geo_df.geometry.name != "geometry":
+        geo_df = geo_df.rename_geometry("geometry")
     geo_df = geo_df[geo_df[MerscopeKeys.Z_INDEX] == 0]
-    geo_df = geo_df[geo_df.geometry.is_valid]
+    invalid = ~geo_df.geometry.is_valid
+    if bool(invalid.any()):
+        logger.warning(
+            "[MERSCOPE] Repairing %d self-intersecting canonical cell polygons",
+            int(invalid.sum()),
+        )
+        geo_df.loc[invalid, "geometry"] = geo_df.loc[invalid, "geometry"].buffer(0)
+    valid = geo_df.geometry.is_valid & ~geo_df.geometry.is_empty
+    if not bool(valid.all()):
+        logger.warning(
+            "[MERSCOPE] Dropping %d unrecoverable canonical cell polygons",
+            int((~valid).sum()),
+        )
+        geo_df = geo_df[valid]
     geo_df.geometry = geo_df.geometry.map(_to_multi_polygon)
     geo_df.index = geo_df[MerscopeKeys.METADATA_CELL_KEY].astype(str)
     return ShapesModel.parse(geo_df, transformations=transformations)
