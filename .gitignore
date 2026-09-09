@@ -22,6 +22,7 @@ dag-*.dot
 run_logs/
 results*
 results/
+/*results*
 
 # Scratch notebooks
 notebooks/scratch/
