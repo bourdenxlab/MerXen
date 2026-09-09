@@ -810,13 +810,13 @@ def _manifest_transform(manifest: dict[str, Any]) -> np.ndarray:
         raise ValueError(f"Invalid VZG2 micron bounding box: {bbox}")
     scale_x = width / (x_max - x_min)
     scale_y = height / (y_max - y_min)
-    # Canonical transcript and boundary coordinates use the mosaic-local micron
-    # origin. VZG2 bounding-box minima can include Vizualizer viewport padding;
-    # treating them as an affine origin shifts images and masks away from points.
+    # Pixel zero corresponds to the micron bounding-box minimum. Downstream mask
+    # conversion inverts this matrix, recovering (x_min, y_min) as the
+    # pixel-to-micron translation.
     return np.asarray(
         [
-            [scale_x, 0.0, 0.0],
-            [0.0, scale_y, 0.0],
+            [scale_x, 0.0, -scale_x * x_min],
+            [0.0, scale_y, -scale_y * y_min],
             [0.0, 0.0, 1.0],
         ],
         dtype=np.float64,
