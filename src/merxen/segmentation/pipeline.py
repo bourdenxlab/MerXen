@@ -219,9 +219,7 @@ def _load_dataset_sdata(
             def fetch_tile_fn(y0: int, y1: int, x0: int, x1: int) -> np.ndarray:
                 return fetch_tile(source, y0, y1, x0, x1)
 
-            points_key = choose_primary_points_key(sdata)
-            if points_key is None:
-                raise RuntimeError(f"[{dataset.name}] No transcript points found.")
+            points_key = _require_transcript_points(sdata, dataset.name)
             return (
                 sdata,
                 fetch_tile_fn,
@@ -256,9 +254,7 @@ def _load_dataset_sdata(
         def fetch_tile_fn(y0: int, y1: int, x0: int, x1: int) -> np.ndarray:
             return fetch_merscope_projected_tile(plane_sources, y0, y1, x0, x1)
 
-        points_key = choose_primary_points_key(sdata)
-        if points_key is None:
-            raise RuntimeError(f"[{dataset.name}] No transcript points found.")
+        points_key = _require_transcript_points(sdata, dataset.name)
         return sdata, fetch_tile_fn, height, width, matrix, sdata.points[points_key]
 
     if platform == "XENIUM":
@@ -296,12 +292,27 @@ def _load_dataset_sdata(
         def fetch_tile_fn(y0: int, y1: int, x0: int, x1: int) -> np.ndarray:
             return fetch_tile(source, y0, y1, x0, x1)
 
-        points_key = choose_primary_points_key(sdata)
-        if points_key is None:
-            raise RuntimeError(f"[{dataset.name}] No transcript points found.")
+        points_key = _require_transcript_points(sdata, dataset.name)
         return sdata, fetch_tile_fn, height, width, matrix, sdata.points[points_key]
 
     raise ValueError(f"Unsupported platform: {dataset.platform}")
+
+
+def _require_transcript_points(sdata: Any, dataset_name: str) -> str:
+    """Resolve transcript points with a specific VZG2 limitation message."""
+    points_key = choose_primary_points_key(sdata)
+    if points_key is not None:
+        return points_key
+    vzg2_metadata = getattr(sdata, "attrs", {}).get("merxen_vzg2")
+    if isinstance(vzg2_metadata, dict):
+        raise RuntimeError(
+            f"[{dataset_name}] This source was built from .vzg2 only. Vizgen does "
+            "not publish a decoder for its packed transcript coordinates, so "
+            "MerXen cannot run transcript-dependent resegmentation from this "
+            "archive alone. Supply detected_transcripts.csv or "
+            "detected_transcripts.parquet from the original MERSCOPE export."
+        )
+    raise RuntimeError(f"[{dataset_name}] No transcript points found.")
 
 
 def _write_progress(path: Path, data: dict) -> None:

@@ -12,7 +12,10 @@ import xarray as xr
 
 from merxen.config import SegmentationConfig
 from merxen.io.image_source import MERSCOPE_ZPROJ_IMAGE_NAME
-from merxen.segmentation.pipeline import _load_dataset_sdata
+from merxen.segmentation.pipeline import (
+    _load_dataset_sdata,
+    _require_transcript_points,
+)
 
 
 def _image(values: np.ndarray, channels: list[str]) -> xr.DataArray:
@@ -100,3 +103,14 @@ def test_load_merscope_falls_back_to_legacy_z_planes(
         tile,
         np.full((2, 2, 2), 7, dtype=np.float32),
     )
+
+
+def test_vzg2_without_transcript_points_has_specific_error() -> None:
+    """VZG2-only segmentation failures should explain the archive limitation."""
+    sdata = SimpleNamespace(
+        points={},
+        attrs={"merxen_vzg2": {"transcript_points_available": False}},
+    )
+
+    with pytest.raises(RuntimeError, match="built from .vzg2 only"):
+        _require_transcript_points(sdata, "P1_MERSCOPE")
