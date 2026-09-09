@@ -444,9 +444,8 @@ def read_merscope_spatialdata_local(
         transcript_path_parquet = path / MerscopeKeys.TRANSCRIPTS_FILE_PARQUET
         transcript_path_csv = path / MerscopeKeys.TRANSCRIPTS_FILE_CSV
         if transcript_path_parquet.exists():
-            table = pd.read_parquet(transcript_path_parquet, engine="pyarrow")
-            points[f"{dataset_id}_transcripts"] = _parse_transcript_table(
-                table,
+            points[f"{dataset_id}_transcripts"] = _get_parquet_points(
+                transcript_path_parquet,
                 transform,
             )
         elif transcript_path_csv.exists():
@@ -551,6 +550,15 @@ def _parse_transcript_table(
     npartitions = max(1, min(16, len(table) // 1_000_000 + 1))
     ddf = dd.from_pandas(table, npartitions=npartitions)
 
+    return _parse_transcript_ddf(ddf, transformations)
+
+
+def _parse_transcript_ddf(
+    ddf: dd.DataFrame,
+    transformations: dict[str, BaseTransformation],
+) -> dd.DataFrame:
+    """Parse an already-normalized lazy transcript table as spatial points."""
+
     parse_kwargs: dict[str, Any] = {
         "coordinates": {
             "x": MerscopeKeys.GLOBAL_X,
@@ -567,6 +575,48 @@ def _parse_transcript_table(
     transcripts = PointsModel.parse(ddf, **parse_kwargs)
     transcripts["gene"] = transcripts["gene"].astype("category")
     return cast(dd.DataFrame, transcripts)
+
+
+def _get_parquet_points(
+    transcript_path: Path,
+    transformations: dict[str, BaseTransformation],
+) -> dd.DataFrame:
+    """Read a large transcript Parquet lazily and parse it as spatial points."""
+    table = dd.read_parquet(
+        transcript_path,
+        engine="pyarrow",
+        split_row_groups=True,
+    )
+    index_columns = [
+        column
+        for column in table.columns
+        if not str(column).strip() or str(column).startswith("__index_level_")
+    ]
+    if index_columns:
+        table = table.drop(columns=index_columns)
+    if MerscopeKeys.GENE_KEY not in table.columns and "feature_name" in table.columns:
+        table = table.rename(columns={"feature_name": MerscopeKeys.GENE_KEY})
+
+    required = [
+        MerscopeKeys.GLOBAL_X,
+        MerscopeKeys.GLOBAL_Y,
+        MerscopeKeys.GLOBAL_Z,
+        MerscopeKeys.GENE_KEY,
+    ]
+    missing = [col for col in required if col not in table.columns]
+    if missing:
+        raise ValueError(f"Transcript table is missing required columns: {missing}")
+
+    dtype_map = {
+        MerscopeKeys.GLOBAL_X: "float64",
+        MerscopeKeys.GLOBAL_Y: "float64",
+        MerscopeKeys.GLOBAL_Z: "float64",
+        MerscopeKeys.GENE_KEY: "string",
+    }
+    if MerscopeKeys.CELL_ID in table.columns:
+        dtype_map[MerscopeKeys.CELL_ID] = "string"
+    table = table.astype(dtype_map).dropna(subset=required)
+    return _parse_transcript_ddf(table, transformations)
 
 
 def _rioxarray_load_merscope(
