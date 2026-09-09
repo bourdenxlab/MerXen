@@ -25,7 +25,7 @@ from merxen.io.builders.pipeline import build_spatialdata_artifact
     help="Rebuild the SpatialData object even when an existing zarr is available.",
 )
 def build_spatialdata_command(config_path: Path, force_rerun: bool) -> None:
-    """Build or reuse a SpatialData zarr from raw MERSCOPE or Xenium input."""
+    """Build or reuse SpatialData from MERSCOPE, VZG2, or Xenium input."""
     cfg = load_config_from_json(config_path, SpatialDataBuildConfig)
     assert isinstance(cfg, SpatialDataBuildConfig)
     output_path = build_spatialdata_artifact(cfg, force_rerun=force_rerun)

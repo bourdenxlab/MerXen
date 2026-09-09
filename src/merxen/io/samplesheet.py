@@ -16,7 +16,8 @@ class SamplePair:
 
     Attributes:
         pair_id: Unique identifier for this sample pair.
-        merscope_dir: Path to the raw MERSCOPE input folder.
+        merscope_dir: Path to the raw MERSCOPE input folder, a direct ``.vzg2``
+            archive, or a folder containing exactly one ``.vzg2`` archive.
         merscope_spatialdata_path: Optional path to a reusable built MERSCOPE
             SpatialData zarr.
         merscope_image_prefix: Prefix for matching z-plane image keys.

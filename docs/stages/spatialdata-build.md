@@ -1,8 +1,9 @@
 # Stage 1 — SpatialData build
 
-Converts platform-specific raw exports (MERSCOPE region folder, Xenium export
-folder) into a standard [SpatialData](https://spatialdata.scverse.org/) zarr
-archive. All downstream stages consume this zarr.
+Converts platform-specific raw exports (MERSCOPE region folder or `.vzg2`
+archive, Xenium export folder) into a standard
+[SpatialData](https://spatialdata.scverse.org/) zarr archive. All downstream
+stages consume this zarr.
 
 ## What it does
 
@@ -43,7 +44,7 @@ single-platform mode creates one task per samplesheet row.
 |-------|------|---------|
 | `dataset_name` | `str` | Identifier like `EXAMPLE01_MERSCOPE`. |
 | `platform` | `"MERSCOPE"` \| `"XENIUM"` | Dispatch key. |
-| `input_path` | `Path` | Raw folder **or** existing SpatialData zarr. |
+| `input_path` | `Path` | Raw folder, direct MERSCOPE `.vzg2`, **or** existing SpatialData zarr. |
 | `output_path` | `Path` | Destination inside the Nextflow work dir. |
 | `persistent_output_path` | `Path \| None` | Samplesheet-provided reusable zarr. |
 | `merscope_transform_path` | `Path \| None` | Override for the micron-to-mosaic transform CSV. |
@@ -72,7 +73,9 @@ A paired row with `pair_id=EXAMPLE01` fans out to **two**
    projection over the selected z range, not as one image element per z plane.
    Plane `0` is the MERSCOPE fiducial-bead layer, so the selected range should
    normally start at plane `1`. Xenium morphology images are already projected
-   by the platform and do not use this range.
+   by the platform and do not use this range. A `.vzg2` normally contains one
+   Vizualizer image plane; MerXen stores that plane under the same projection
+   key and records its source z-layer in the SpatialData attributes.
 5. The resulting path is returned and flows into the next Nextflow channel.
 
 ## Caching behaviour
@@ -86,6 +89,23 @@ A paired row with `pair_id=EXAMPLE01` fans out to **two**
 
 ## Common pitfalls
 
+- **VZG2-only builds have no transcript points.** MerXen can recover the
+  Vizualizer image, original LOD0 cell polygons, centroids, volumes, and the
+  cell-by-gene/blank matrices directly from `.vzg2`. Vizgen does not publish a
+  decoder for the packed transcript-coordinate tiles, and VZG2 also omits the
+  canonical detected-transcript table. MerXen therefore does not invent
+  coordinates. The build stage and cell-level original data are usable, but
+  `reseg`, ProSeg, transcript-density QC, and other point-dependent stages need
+  `detected_transcripts.csv` or `detected_transcripts.parquet` from the original
+  MERSCOPE export. Use `--only_stage build` when the archive is the only source.
+- **VZG2 plus canonical transcripts supports downstream stages.** If a region
+  folder contains exactly one `.vzg2` and a sibling `detected_transcripts.csv`
+  or `detected_transcripts.parquet`, but no mosaic TIFFs, MerXen combines the
+  compressed VZG2 image with those external transcript coordinates. This
+  layout supports Cellpose, ProSeg, enrichment, QC, and transcript analyses.
+- **VZG2 image z-layer selection.** `merscope_z_range` must include the layer
+  listed in the archive manifest. Most VZG2 files contain one mid-stack plane.
+  The default `0-6` includes the common layer `3`.
 - **MERSCOPE plane 0 included in the projection.** Plane `0` contains fiducial
   beads rather than the biological image stack. Including it in
   `merscope_z_range` can dominate or distort the DAPI/PolyT max projection and
@@ -100,3 +120,17 @@ A paired row with `pair_id=EXAMPLE01` fans out to **two**
 - **Partial builds.** If a build crashes half-way, delete the target zarr
   before rerunning — SpatialData does not currently distinguish a
   half-written zarr from a valid one.
+
+## VZG2 example
+
+Pass either the archive itself or a folder containing exactly one `.vzg2` in
+the existing `merscope_dir` column:
+
+```csv
+pair_id,analysis_mode,only_stage,merscope_dir,merscope_z_range
+MOUSE_VZG2,merscope,build,/srv/storage/mouse_vizgen_reference/sample.vzg2,0-6
+```
+
+If a folder also contains a canonical raw `images/` directory, MerXen prefers
+the canonical raw export. If a folder contains multiple `.vzg2` files, pass the
+intended archive path explicitly.

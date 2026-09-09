@@ -39,7 +39,7 @@ required. A template lives at
 | `distance_from_object_segmentations` | no | Comma-separated object-distance branches: `proseg`, `original`, and/or `cellpose`; optional `proseg_geometry_assignment` and `proseg_hybrid` are also accepted when present. Legacy names remain aliases. Blank uses the three defaults. |
 | `mender_enabled` | no | Row-level MENDER switch. Blank inherits `--mender_enabled`, which defaults to `false`. |
 | `mender_segmentations` | no | One MENDER branch, a comma-separated subset, or `all`. Blank inherits `--mender_segmentations`, which defaults to `proseg_hybrid`. |
-| `merscope_dir` | required for MERSCOPE modes if no cache | Path to the raw MERSCOPE region export folder (contains `transcripts.parquet`, `cell_boundaries/`, `images/`, etc.). |
+| `merscope_dir` | required for MERSCOPE modes if no cache | Path to the raw MERSCOPE region export folder, a direct `.vzg2` archive, or a folder containing exactly one `.vzg2`. Canonical raw folders retain transcript points. A VZG2-only build recovers the Vizualizer image, original cell polygons, centroids, volumes, and cell-by-gene table, but not packed transcript coordinates. |
 | `merscope_spatialdata_path` | required for MERSCOPE modes if no raw dir | Path to an existing (or desired) reusable MERSCOPE SpatialData zarr. If it exists, the build step is **skipped** unless `--force_spatialdata_build true` is passed to Nextflow. For a downstream-only restart, an explicit path overrides `${outdir}/${pair_id}/merscope/latest/latest_spatialdata.zarr` and must point to the durable enriched latest zarr required by that stage. |
 | `merscope_image_prefix` | no | Prefix used to match z-plane image keys when more than one run is present. |
 | `merscope_z_range` | no | Inclusive raw-image z-layer range as `start-end`. Set it explicitly and normally start at `1` (for example, `1-7`) to exclude the MERSCOPE plane-0 fiducial beads. The historical fallback is `0-6`; do not rely on it for standard MERSCOPE exports. Xenium is pre-projected and ignores this field. |
@@ -180,5 +180,13 @@ visualization stage, reading prior outputs from `--outdir`.
 - Leave a field empty (`,,`) to fall back to the Nextflow default.
 - Prefer absolute paths. Relative paths are resolved from the shell that ran
   `nextflow`, not from the work directory.
+- When `.vzg2` is the only MERSCOPE source, use `only_stage=build`. Vizgen does
+  not publish a decoder for VZG2 transcript-coordinate tiles, so
+  transcript-dependent segmentation and QC cannot run without the original
+  `detected_transcripts.csv` or `detected_transcripts.parquet`.
+- A partial region export containing one `.vzg2` plus a sibling
+  `detected_transcripts.csv` or `detected_transcripts.parquet` can run the full
+  pipeline even when the mosaic TIFFs are absent. MerXen reads the image from
+  VZG2 and the canonical transcript coordinates from the external table.
 - Keep one samplesheet per batch. Nextflow runs all rows in parallel up to the
   executor limit.
