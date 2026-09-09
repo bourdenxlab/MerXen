@@ -112,9 +112,11 @@ A paired row with `pair_id=EXAMPLE01` fans out to **two**
   every image-derived downstream result. Set an explicit range beginning at
   `1`, such as `1-7`. This does not apply to Xenium, whose morphology image is
   already projected.
-- **MERSCOPE transform missing.** The builder expects
+- **MERSCOPE transform missing.** Canonical raw exports need
   `micron_to_mosaic_pixel_transform.csv` either inside the region folder or
-  at `merscope_transform_path`. Without it, segmentation will also fail.
+  at `merscope_transform_path`. Direct VZG2 ingestion can derive the transform
+  from the manifest's mosaic dimensions and micron bounding box; an explicit
+  `merscope_transform_path` still takes precedence.
 - **Xenium spec ambiguity.** If the Xenium export contains a non-standard
   `specs.json` location, set `xenium_spec_path` in the samplesheet.
 - **Partial builds.** If a build crashes half-way, delete the target zarr

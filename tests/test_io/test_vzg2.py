@@ -67,8 +67,8 @@ def test_decode_vzg2_cell_tile_recovers_vpt_lod0_coordinates() -> None:
     np.testing.assert_array_equal(coordinates[0], points + np.array([20, 0]))
 
 
-def test_manifest_transform_does_not_apply_bbox_origin_as_translation() -> None:
-    """Vizualizer bbox padding must not offset canonical transcript coordinates."""
+def test_manifest_transform_maps_bbox_origin_to_mosaic_origin() -> None:
+    """The inverse transform should restore the manifest's micron origin."""
     transform = _manifest_transform(
         {
             "mosaic_width_pixels": 100,
@@ -81,12 +81,13 @@ def test_manifest_transform_does_not_apply_bbox_origin_as_translation() -> None:
         transform,
         np.array(
             [
-                [2.0, 0.0, 0.0],
-                [0.0, 2.0, 0.0],
+                [2.0, 0.0, 20.0],
+                [0.0, 2.0, 40.0],
                 [0.0, 0.0, 1.0],
             ]
         ),
     )
+    np.testing.assert_allclose(np.linalg.inv(transform)[:2, 2], [-10.0, -20.0])
 
 
 def test_read_vzg2_spatialdata_builds_recoverable_source(tmp_path: Path) -> None:
