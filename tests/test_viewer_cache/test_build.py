@@ -9,16 +9,23 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import dask.dataframe as dd
 import geopandas as gpd
 import numpy as np
+import pandas as pd
 import pytest
 import xarray as xr
 import zarr
 from shapely.geometry import Polygon
 from spatialdata import SpatialData, read_zarr
-from spatialdata.models import Image2DModel, ShapesModel
+from spatialdata.models import Image2DModel, PointsModel, ShapesModel
 from spatialdata.transformations import Identity
 
+from merxen.io.spatialdata_schema import (
+    PROSEG_ID_NAMESPACE,
+    register_segmentation_branch,
+    stamp_merxen_schema,
+)
 from merxen.viewer_cache import format as fmt
 from merxen.viewer_cache.build import (
     DEFAULT_SHAPE_KEYS,
@@ -49,9 +56,35 @@ def synthetic_store(tmp_path: Path) -> Path:
         index=[2, 94831, 7],  # non-contiguous integer instance ids
     )
     shapes = ShapesModel.parse(gdf)
+    points = PointsModel.parse(
+        dd.from_pandas(
+            pd.DataFrame(
+                {
+                    "x": [2.0, 7.0],
+                    "y": [2.0, 7.0],
+                    "gene": pd.Categorical(["A", "B"]),
+                    "transcript_id": np.asarray([1, 2], dtype=np.uint64),
+                }
+            ),
+            npartitions=1,
+        ),
+        coordinates={"x": "x", "y": "y"},
+        feature_key="gene",
+    )
     sd = SpatialData(
         images={"MERSCOPE_z_projection": image},
+        points={"transcripts": points},
         shapes={"MOSAIK_proseg": shapes},
+    )
+    stamp_merxen_schema(sd, primary_points_key="transcripts", platform="MERSCOPE")
+    register_segmentation_branch(
+        sd,
+        "proseg",
+        points_key="transcripts",
+        assignment_column=None,
+        shape_key="MOSAIK_proseg",
+        table_key=None,
+        id_namespace=PROSEG_ID_NAMESPACE,
     )
     sd.write(store)
     return store

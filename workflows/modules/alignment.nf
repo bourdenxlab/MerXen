@@ -203,6 +203,90 @@ JSON
     """
 }
 
+process MATERIALIZE_ALIGNMENT {
+    tag "${pair_id}"
+    cache false
+
+    publishDir { "${params.outdir}/${pair_id}/alignment_materialization" },
+        mode: "copy", overwrite: true,
+        saveAs: { filename -> filename == "materialization_summary.json" ? filename : null }
+
+    input:
+    tuple val(pair_id),
+        val(merscope_zarr_path),
+        val(xenium_zarr_path),
+        path(align_out)
+
+    output:
+    tuple val(pair_id),
+        val(merscope_zarr_path),
+        val(xenium_zarr_path),
+        path(align_out),
+        path("materialization_summary.json")
+
+    script:
+    """
+    set -euo pipefail
+    export OMP_NUM_THREADS="${task.cpus}"
+    export OPENBLAS_NUM_THREADS="${task.cpus}"
+    export MKL_NUM_THREADS="${task.cpus}"
+    export NUMEXPR_NUM_THREADS="${task.cpus}"
+
+    cat > materialization_config.json <<JSON
+    {
+      "pair_id": "${pair_id}",
+      "merscope_zarr_path": "${merscope_zarr_path}",
+      "xenium_zarr_path": "${xenium_zarr_path}",
+      "output_dir": "${align_out}",
+      "backend": "${params.alignment_backend}",
+      "fixed_platform": "${params.alignment_fixed_platform}",
+      "moving_platform": "${params.alignment_moving_platform}",
+      "merscope_image": {
+        "image_key": "${params.alignment_merscope_image_key}",
+        "dapi_channel": "${params.alignment_merscope_dapi_channel}",
+        "pixel_size_um": ${params.alignment_merscope_pixel_size_um == null ? "null" : params.alignment_merscope_pixel_size_um}
+      },
+      "xenium_image": {
+        "image_key": "${params.alignment_xenium_image_key}",
+        "dapi_channel": "${params.alignment_xenium_dapi_channel}",
+        "pixel_size_um": ${params.alignment_xenium_pixel_size_um == null ? "null" : params.alignment_xenium_pixel_size_um}
+      },
+      "valis": {
+        "coordinate_system_name": "${params.alignment_coordinate_system_name}"
+      },
+      "materialization": {
+        "enabled": ${params.alignment_materialization_enabled},
+        "materialize_vectors": ${params.alignment_materialize_vectors},
+        "materialize_labels": ${params.alignment_materialize_labels},
+        "materialize_image": ${params.alignment_materialize_image},
+        "source_image_key": "${params.alignment_materialization_source_image_key}",
+        "fixed_image_key": "${params.alignment_materialization_fixed_image_key}",
+        "output_image_key": "${params.alignment_materialization_output_image_key}",
+        "target_grid": "fixed_image_scale0",
+        "tile_size": ${params.alignment_materialization_tile_size},
+        "chunk_size": ${params.alignment_materialization_chunk_size},
+        "image_interpolation": "${params.alignment_materialization_image_interpolation}",
+        "image_fill_value": ${params.alignment_materialization_image_fill_value},
+        "label_pyramid_downsample": ${params.alignment_materialization_label_pyramid_downsample},
+        "image_pyramid_downsample": ${params.alignment_materialization_image_pyramid_downsample},
+        "pyramid_min_size": ${params.alignment_materialization_pyramid_min_size},
+        "outline_width": ${params.alignment_materialization_outline_width},
+        "force": ${params.alignment_materialization_force},
+        "reconcile": ${params.alignment_materialization_reconcile},
+        "legacy_inverse_spacing": ${params.alignment_legacy_inverse_spacing},
+        "legacy_inverse_iterations": ${params.alignment_legacy_inverse_iterations},
+        "legacy_inverse_tolerance_um": ${params.alignment_legacy_inverse_tolerance_um},
+        "roundtrip_sample_spacing": ${params.alignment_roundtrip_sample_spacing}
+      }
+    }
+    JSON
+
+    merxen materialize-alignment \
+        --config materialization_config.json \
+        --summary materialization_summary.json
+    """
+}
+
 process ALIGN_QC {
     tag "${pair_id}"
 

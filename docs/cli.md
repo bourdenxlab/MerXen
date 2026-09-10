@@ -29,6 +29,8 @@ Commands:
                       Run paired near-vs-far PyDESeq2 by platform
   qc                 Compute geometry and assignment QC metrics
   align              Align MERSCOPE into paired Xenium coordinates
+  materialize-alignment
+                      Reconcile aligned vectors, rasters, and image outputs
   alignment-qc       Compute post-alignment QC metrics
   compare            Run cross-platform gene-level comparison
   visualize          Generate visualization artifacts for a pair
@@ -206,6 +208,21 @@ the exact VALIS package. Validate either backend with
 `merxen check-alignment-deps --backend valis|legacy_spateo`.
 
 Details: [Section alignment](stages/alignment.md).
+
+---
+
+## `merxen materialize-alignment`
+
+Reconcile all enabled aligned artifacts from a saved or embedded transform.
+
+```bash
+merxen materialize-alignment --config align_config.json \
+  --summary materialization_summary.json
+```
+
+The command validates `AlignmentConfig.materialization`, writes JSON status to
+stdout and optionally to the machine-readable `--summary` path, and refuses
+stale or missing output when `reconcile=false` unless `force=true`.
 
 ---
 

@@ -199,12 +199,13 @@ def build_multiscale_tree(
     transform: Any,
     channels: list[Any] | None = None,
     dtype: Any = None,
+    coordinate_system: str = "global",
 ) -> Any:
     """Assemble levels into a SpatialData multiscale DataTree with a transform.
 
     Mirrors the viewer's ``_datatree_from_levels``: cast each level, build the
     tree with SpatialData's ``dask_arrays_to_datatree``, and stamp the same
-    ``global`` transform on every scale.
+    requested coordinate-system transform on every scale.
     """
     arrays = []
     for level in levels:
@@ -213,5 +214,5 @@ def build_multiscale_tree(
             arr = arr.astype(dtype)
         arrays.append(arr)
     tree = dask_arrays_to_datatree(arrays, dims=dims, channels=channels)
-    set_transformation(tree, {"global": transform}, set_all=True)
+    set_transformation(tree, {str(coordinate_system): transform}, set_all=True)
     return tree

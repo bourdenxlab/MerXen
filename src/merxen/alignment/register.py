@@ -214,6 +214,23 @@ def _load_completed_valis_result(cfg: AlignmentConfig) -> TransformResult | None
                 "Ignoring incomplete resumed VALIS transform without its forward field"
             )
             return None
+        raster_inverse_required = bool(
+            cfg.materialization.enabled
+            and (
+                cfg.materialization.materialize_labels
+                or cfg.materialization.materialize_image
+            )
+        )
+        if (
+            bundle.selected_mode == "non_rigid"
+            and raster_inverse_required
+            and bundle.backward_displacement is None
+        ):
+            logger.warning(
+                "Ignoring incomplete resumed VALIS transform without its backward "
+                "field required for raster materialization"
+            )
+            return None
         valid_domain_mask = np.asarray(np.load(mask_path), dtype=np.uint8)
     except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
         logger.warning("Could not resume existing VALIS artifacts: %s", exc)

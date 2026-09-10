@@ -110,6 +110,62 @@ class ValisTransformBundle:
             self.fixed_dataset_from_registration_matrix,
         )
 
+    def fixed_dataset_to_moving_dataset(
+        self: ValisTransformBundle,
+        xy: Any,
+    ) -> np.ndarray:
+        """Map fixed dataset-physical xy back to moving dataset-physical xy.
+
+        Raises:
+            ValueError: If a selected non-rigid transform has no backward field.
+        """
+        moving_image = self.fixed_dataset_to_moving_image(xy)
+        return apply_affine_matrix(
+            moving_image,
+            np.linalg.inv(np.asarray(self.moving_dataset_to_image, dtype=np.float64)),
+        )
+
+    def fixed_dataset_to_moving_image(
+        self: ValisTransformBundle,
+        xy: Any,
+    ) -> np.ndarray:
+        """Map fixed dataset-physical xy into original moving-image pixels."""
+        fixed_image = apply_affine_matrix(
+            xy,
+            np.asarray(self.fixed_dataset_to_image, dtype=np.float64),
+        )
+        return self.fixed_image_to_moving_image(fixed_image)
+
+    def fixed_image_to_moving_image(
+        self: ValisTransformBundle,
+        xy: Any,
+    ) -> np.ndarray:
+        """Map original fixed-image pixels into original moving-image pixels."""
+        fixed_registration = apply_affine_matrix(
+            xy,
+            np.asarray(self.fixed_image_to_registration, dtype=np.float64),
+        )
+        prewarped = apply_affine_matrix(
+            fixed_registration,
+            np.linalg.inv(np.asarray(self.global_matrix, dtype=np.float64)),
+        )
+        if self.selected_mode == "non_rigid":
+            if self.backward_displacement is None:
+                raise ValueError(
+                    "Non-rigid raster materialization requires a backward "
+                    "displacement field"
+                )
+            prewarped = prewarped + self.backward_displacement.sample(
+                fixed_registration
+            )
+        return apply_affine_matrix(
+            prewarped,
+            np.linalg.inv(
+                np.asarray(self.pre_matrix, dtype=np.float64)
+                @ np.asarray(self.moving_image_to_registration, dtype=np.float64)
+            ),
+        )
+
     @property
     def prewarped_from_moving_dataset_matrix(
         self: ValisTransformBundle,
@@ -235,6 +291,16 @@ class ValisTransformBundle:
         """Reload a transform bundle serialized by :meth:`save`."""
         metadata_path = Path(metadata_path)
         payload = json.loads(metadata_path.read_text())
+        return cls.from_metadata(payload, base_path=metadata_path.parent)
+
+    @classmethod
+    def from_metadata(
+        cls: type[ValisTransformBundle],
+        payload: dict[str, Any],
+        *,
+        base_path: Path,
+    ) -> ValisTransformBundle:
+        """Load bundle metadata whose field paths are relative to ``base_path``."""
         forward_path = payload.get("forward_displacement_path")
         backward_path = payload.get("backward_displacement_path")
         return cls(
@@ -260,12 +326,12 @@ class ValisTransformBundle:
             forward_displacement=(
                 None
                 if forward_path is None
-                else _load_field(_resolve_field_path(metadata_path, forward_path))
+                else _load_field(_resolve_field_path(Path(base_path), forward_path))
             ),
             backward_displacement=(
                 None
                 if backward_path is None
-                else _load_field(_resolve_field_path(metadata_path, backward_path))
+                else _load_field(_resolve_field_path(Path(base_path), backward_path))
             ),
         )
 
@@ -291,11 +357,8 @@ def _load_field(path: Path) -> DisplacementField:
         )
 
 
-def _resolve_field_path(metadata_path: Path, configured_path: str) -> Path:
+def _resolve_field_path(base_path: Path, configured_path: str) -> Path:
     path = Path(configured_path)
     if path.is_absolute():
         return path
-    candidate = metadata_path.parent / path
-    if candidate.exists():
-        return candidate
-    return path
+    return Path(base_path) / path

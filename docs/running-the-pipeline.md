@@ -372,10 +372,11 @@ stage.
 In single-platform mode, starting at `mecr`, `visualize`, `spatial_gene_analysis`, or
 `clustering_squidpy` reads only
 `${outdir}/${pair_id}/<selected-platform>/latest/latest_spatialdata.zarr`.
-With effective `enable_alignment=true`, `ALIGN` updates
+With effective `enable_alignment=true`, `ALIGN` computes and embeds the
+transform, then uncached `MATERIALIZE_ALIGNMENT` reconciles
 `${outdir}/${pair_id}/merscope/latest/latest_spatialdata.zarr` in place with
-alignment metadata and `*_aligned_nonrigid` vector elements. Later stages read
-that updated MERSCOPE zarr and keep using
+the versioned manifest, aligned vectors/tables, fixed-grid masks/caches, and
+the full warped image. Later stages read that updated MERSCOPE zarr and keep using
 `${outdir}/${pair_id}/xenium/latest/latest_spatialdata.zarr` as the fixed
 reference.
 
