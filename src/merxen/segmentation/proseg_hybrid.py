@@ -28,6 +28,7 @@ from shapely.ops import nearest_points, unary_union
 from spatialdata.models import PointsModel, ShapesModel, TableModel
 from spatialdata.transformations import get_transformation
 
+from merxen.alignment.manifest import invalidate_alignment_materialization
 from merxen.config import ProsegHybridConfig
 from merxen.io.spatialdata_io import (
     write_or_replace_element,
@@ -1257,6 +1258,10 @@ def run_proseg_hybrid_refinement(
         shape_key=PROSEG_HYBRID_SHAPE_NAME,
         table_key=PROSEG_HYBRID_TABLE_NAME,
         id_namespace=PROSEG_ID_NAMESPACE,
+    )
+    invalidate_alignment_materialization(
+        sdata_obj,
+        reason="ProSeg-hybrid points, shapes, and table replaced",
     )
     validate_merxen_schema(sdata_obj, deep=False)
     write_spatialdata_metadata(sdata_obj, write_attrs=True)

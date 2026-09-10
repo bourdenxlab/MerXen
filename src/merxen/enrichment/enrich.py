@@ -22,6 +22,7 @@ from spatialdata.models import ShapesModel
 from spatialdata_io import xenium as xenium_reader
 from tqdm.auto import tqdm
 
+from merxen.alignment.manifest import invalidate_alignment_materialization
 from merxen.config import EnrichmentConfig
 from merxen.enrichment.assignment import clone_table_for_region
 from merxen.io.image_source import (
@@ -29,11 +30,15 @@ from merxen.io.image_source import (
     build_merscope_z_projection,
     image_to_cyx,
 )
-from merxen.io.spatialdata_io import write_or_replace_element
+from merxen.io.spatialdata_io import (
+    write_or_replace_element,
+    write_spatialdata_metadata,
+)
 from merxen.io.spatialdata_schema import (
     INSTANCE_ID_COLUMN,
     SOURCE_CELL_ID_COLUMN,
 )
+from merxen.masks import register_missing_mask_branches
 from merxen.memory import force_release, log_status
 from merxen.path_utils import remove_path, stage_existing_output
 from merxen.segmentation.cellpose import build_cellpose_affine_to_microns
@@ -768,6 +773,12 @@ def enrich_single_latest(
             nuclei_shapes,
             overwrite=False,
         )
+        register_missing_mask_branches(dst)
+        invalidate_alignment_materialization(
+            dst,
+            reason="incremental Cellpose nucleus shapes added",
+        )
+        write_spatialdata_metadata(dst, write_attrs=True)
         del dst, nuclei_gdf
         force_release(note=f"after incremental nuclei enrichment ({dataset_name})")
         if latest_path != write_path:
@@ -959,6 +970,12 @@ def enrich_single_latest(
     else:
         raise ValueError(f"Unsupported platform: {config.platform}")
 
+    register_missing_mask_branches(dst)
+    invalidate_alignment_materialization(
+        dst,
+        reason="native enrichment points, shapes, tables, or images replaced",
+    )
+    write_spatialdata_metadata(dst, write_attrs=True)
     del dst, src, cp_gdf, nuclei_gdf
     force_release(note=f"after in-place enrichment ({dataset_name})")
 

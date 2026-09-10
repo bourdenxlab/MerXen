@@ -1332,45 +1332,6 @@ def upgrade_spatialdata_contract_in_memory(
                 id_namespace=ORIGINAL_ID_NAMESPACE,
                 legacy_aliases=("original_seg",),
             )
-        schema = dict(sdata_obj.attrs.get(MERXEN_SCHEMA_ATTR, {}))
-        native_branches = dict(schema.get("segmentations", {}))
-        suffix = "_aligned_nonrigid"
-        for branch, entry in native_branches.items():
-            if entry.get("coordinate_variant_of") is not None:
-                continue
-            aligned_points = f"{entry['points']}{suffix}"
-            aligned_shape = f"{entry['shape']}{suffix}"
-            if (
-                aligned_points not in sdata_obj.points
-                or aligned_shape not in sdata_obj.shapes
-            ):
-                continue
-            assignment_column = entry.get("assignment_column")
-            if (
-                assignment_column is not None
-                and assignment_column not in sdata_obj.points[aligned_points].columns
-            ):
-                continue
-            native_table = entry.get("table")
-            aligned_table = (
-                f"{native_table}{suffix}"
-                if native_table is not None
-                and f"{native_table}{suffix}" in sdata_obj.tables
-                else None
-            )
-            register_segmentation_branch(
-                sdata_obj,
-                f"{branch}{suffix}",
-                points_key=aligned_points,
-                assignment_column=assignment_column,
-                background_column=entry.get("background_column"),
-                assignment_source_column=entry.get("assignment_source_column"),
-                shape_key=aligned_shape,
-                table_key=aligned_table,
-                instance_key=str(entry.get("instance_key", INSTANCE_ID_COLUMN)),
-                id_namespace=str(entry.get("id_namespace", branch)),
-                coordinate_variant_of=str(branch),
-            )
     validate_merxen_schema(sdata_obj, deep=False)
     return True
 
