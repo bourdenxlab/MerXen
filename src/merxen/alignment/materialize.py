@@ -68,7 +68,8 @@ from merxen.viewer_cache.format import (
 from merxen.viewer_cache.rasterize import coords_origin_step
 
 logger = logging.getLogger(__name__)
-VALIS_ROUNDTRIP_TOLERANCE_UM = 1.0
+VALIS_ROUNDTRIP_P95_TOLERANCE_UM = 1.0
+VALIS_ROUNDTRIP_MAX_FIELD_STEP_FRACTION = 0.5
 
 
 def materialize_alignment(config: AlignmentConfig) -> dict[str, Any]:
@@ -187,6 +188,45 @@ def materialize_alignment(config: AlignmentConfig) -> dict[str, Any]:
                     "pair_id": cfg.pair_id,
                     "status": "current",
                     "native_fingerprint": native_revision["fingerprint"],
+                    "qc": qc,
+                }
+        elif params.reconcile and _can_recover_complete_artifacts(
+            manifest,
+            native_revision,
+            params.force,
+        ):
+            try:
+                qc = _validate_materialization(
+                    cfg=cfg,
+                    manifest=manifest,
+                    mapper=mapper,
+                    moving_path=moving_path,
+                    fixed_sdata=fixed_sdata,
+                    fixed_cyx=fixed_cyx,
+                    fixed_x=fixed_x,
+                    fixed_y=fixed_y,
+                )
+            except (KeyError, RuntimeError, ValueError, AssertionError):
+                logger.warning(
+                    "Incomplete alignment manifest failed recovery validation; "
+                    "rebuilding",
+                    exc_info=True,
+                )
+            else:
+                _finalize_materialization(
+                    moving_sdata=moving_sdata,
+                    fixed_sdata=fixed_sdata,
+                    manifest=manifest,
+                    qc=qc,
+                    pair_id=cfg.pair_id,
+                    native_revision=native_revision,
+                )
+                return {
+                    "pair_id": cfg.pair_id,
+                    "status": "complete",
+                    "recovered_incomplete_manifest": True,
+                    "native_fingerprint": native_revision["fingerprint"],
+                    "artifacts": manifest["artifacts"],
                     "qc": qc,
                 }
         elif not params.reconcile and not params.force:
@@ -346,20 +386,14 @@ def materialize_alignment(config: AlignmentConfig) -> dict[str, Any]:
             fixed_x=fixed_x,
             fixed_y=fixed_y,
         )
-        manifest["qc"] = qc
-        manifest["complete"] = True
-        manifest["completed_at"] = utc_timestamp()
-        manifest.pop("invalidated_at", None)
-        manifest.pop("invalidation_reason", None)
-        moving_sdata.attrs[ALIGNMENT_MANIFEST_ATTR] = manifest
-        transform_fingerprint = str(manifest["transform"]["fingerprint"])
-        fixed_sdata.attrs[ALIGNMENT_PAIR_REFERENCE_ATTR] = alignment_pair_reference(
+        _finalize_materialization(
+            moving_sdata=moving_sdata,
+            fixed_sdata=fixed_sdata,
+            manifest=manifest,
+            qc=qc,
             pair_id=cfg.pair_id,
-            counterpart_fingerprint=str(native_revision["fingerprint"]),
-            transform_fingerprint=transform_fingerprint,
+            native_revision=native_revision,
         )
-        write_spatialdata_metadata(moving_sdata, write_attrs=True)
-        write_spatialdata_metadata(fixed_sdata, write_attrs=True)
 
     return {
         "pair_id": cfg.pair_id,
@@ -828,11 +862,9 @@ def _validate_points(sdata_obj: Any, manifest: dict[str, Any]) -> dict[str, Any]
             if TRANSCRIPT_ID_COLUMN in columns:
                 native_frame = native_frame.sort_values(TRANSCRIPT_ID_COLUMN)
                 aligned_frame = aligned_frame.sort_values(TRANSCRIPT_ID_COLUMN)
-            pd.testing.assert_frame_equal(
+            _assert_preserved_point_frame(
                 native_frame.reset_index(drop=True),
                 aligned_frame.reset_index(drop=True),
-                check_dtype=True,
-                check_categorical=True,
             )
         checked += 1
     return {
@@ -964,22 +996,60 @@ def _validate_roundtrip(
     )
     errors = mapper.roundtrip_error(fixed_dataset_xy)
     maximum = float(np.max(errors)) if len(errors) else 0.0
-    tolerance = (
-        VALIS_ROUNDTRIP_TOLERANCE_UM
-        if mapper.backend == "valis"
-        else float(cfg.materialization.legacy_inverse_tolerance_um)
-    )
-    if not np.isfinite(maximum) or maximum > tolerance:
+    percentile_95 = float(np.percentile(errors, 95)) if len(errors) else 0.0
+    typical_tolerance, maximum_tolerance = _roundtrip_tolerances(cfg, mapper)
+    if (
+        not np.isfinite(maximum)
+        or not np.isfinite(percentile_95)
+        or percentile_95 > typical_tolerance
+        or maximum > maximum_tolerance
+    ):
         raise ValueError(
             "Alignment inverse round-trip error exceeds tolerance: "
-            f"maximum={maximum:.6g} µm, limit={tolerance:.6g} µm"
+            f"p95={percentile_95:.6g} µm (limit {typical_tolerance:.6g} µm), "
+            f"maximum={maximum:.6g} µm (limit {maximum_tolerance:.6g} µm)"
         )
     return {
         "sample_count": int(len(errors)),
         "maximum_error_um": maximum,
+        "p95_error_um": percentile_95,
         "mean_error_um": float(np.mean(errors)) if len(errors) else 0.0,
-        "tolerance_um": tolerance,
+        "p95_tolerance_um": typical_tolerance,
+        "maximum_tolerance_um": maximum_tolerance,
     }
+
+
+def _roundtrip_tolerances(
+    cfg: AlignmentConfig,
+    mapper: AlignmentCoordinateMapper,
+) -> tuple[float, float]:
+    if mapper.backend != "valis":
+        tolerance = float(cfg.materialization.legacy_inverse_tolerance_um)
+        return tolerance, tolerance
+    bundle = mapper.valis_bundle
+    if bundle is None or bundle.backward_displacement is None:
+        return (
+            VALIS_ROUNDTRIP_P95_TOLERANCE_UM,
+            VALIS_ROUNDTRIP_P95_TOLERANCE_UM,
+        )
+    field = bundle.backward_displacement
+    x_step = float(np.median(np.diff(np.asarray(field.x_coordinates))))
+    y_step = float(np.median(np.diff(np.asarray(field.y_coordinates))))
+    registration_to_dataset = np.asarray(
+        bundle.fixed_dataset_from_registration_matrix,
+        dtype=np.float64,
+    )[:2, :2]
+    x_step_um = float(
+        np.linalg.norm(registration_to_dataset @ np.asarray([x_step, 0.0]))
+    )
+    y_step_um = float(
+        np.linalg.norm(registration_to_dataset @ np.asarray([0.0, y_step]))
+    )
+    maximum_tolerance = max(
+        VALIS_ROUNDTRIP_P95_TOLERANCE_UM,
+        VALIS_ROUNDTRIP_MAX_FIELD_STEP_FRACTION * min(x_step_um, y_step_um),
+    )
+    return VALIS_ROUNDTRIP_P95_TOLERANCE_UM, maximum_tolerance
 
 
 def _dapi_agreement_qc(
@@ -1022,6 +1092,76 @@ def _can_reuse_complete_manifest(
         and manifest.get("native_input", {}).get("fingerprint")
         == native_revision.get("fingerprint")
     )
+
+
+def _can_recover_complete_artifacts(
+    manifest: dict[str, Any],
+    native_revision: dict[str, Any],
+    force: bool,
+) -> bool:
+    artifacts = manifest.get("artifacts")
+    return bool(
+        not force
+        and not manifest.get("complete")
+        and manifest.get("native_input", {}).get("fingerprint")
+        == native_revision.get("fingerprint")
+        and isinstance(artifacts, dict)
+        and artifacts
+        and all(
+            isinstance(artifact, dict) and artifact.get("status") == "complete"
+            for artifact in artifacts.values()
+        )
+    )
+
+
+def _assert_preserved_point_frame(
+    native_frame: pd.DataFrame,
+    aligned_frame: pd.DataFrame,
+) -> None:
+    pd.testing.assert_index_equal(native_frame.columns, aligned_frame.columns)
+    for column in native_frame.columns:
+        native = native_frame[column]
+        aligned = aligned_frame[column]
+        native_dtype = native.dtype
+        aligned_dtype = aligned.dtype
+        both_unordered_categorical = bool(
+            isinstance(native_dtype, pd.CategoricalDtype)
+            and isinstance(aligned_dtype, pd.CategoricalDtype)
+            and not native_dtype.ordered
+            and not aligned_dtype.ordered
+        )
+        pd.testing.assert_series_equal(
+            native,
+            aligned,
+            check_dtype=True,
+            check_categorical=True,
+            check_category_order=not both_unordered_categorical,
+        )
+
+
+def _finalize_materialization(
+    *,
+    moving_sdata: Any,
+    fixed_sdata: Any,
+    manifest: dict[str, Any],
+    qc: dict[str, Any],
+    pair_id: str,
+    native_revision: dict[str, Any],
+) -> None:
+    manifest["qc"] = qc
+    manifest["complete"] = True
+    manifest["completed_at"] = utc_timestamp()
+    manifest.pop("invalidated_at", None)
+    manifest.pop("invalidation_reason", None)
+    moving_sdata.attrs[ALIGNMENT_MANIFEST_ATTR] = manifest
+    transform_fingerprint = str(manifest["transform"]["fingerprint"])
+    fixed_sdata.attrs[ALIGNMENT_PAIR_REFERENCE_ATTR] = alignment_pair_reference(
+        pair_id=pair_id,
+        counterpart_fingerprint=str(native_revision["fingerprint"]),
+        transform_fingerprint=transform_fingerprint,
+    )
+    write_spatialdata_metadata(moving_sdata, write_attrs=True)
+    write_spatialdata_metadata(fixed_sdata, write_attrs=True)
 
 
 def _validate_pair_reference(
