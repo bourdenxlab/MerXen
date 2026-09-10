@@ -12,7 +12,7 @@ include {
     DISTANCE_FROM_OBJECT_COHORT
 } from "./modules/distance_from_object"
 include { VALIDATE_ANALYSIS_LAYER; QC } from "./modules/qc"
-include { ALIGN; ALIGN_QC } from "./modules/alignment"
+include { ALIGN; MATERIALIZE_ALIGNMENT; ALIGN_QC } from "./modules/alignment"
 include { COMPARE } from "./modules/comparison"
 include { VISUALIZE } from "./modules/visualization"
 include { SPATIAL_GENE_ANALYSIS } from "./modules/spatial_gene_analysis"
@@ -2870,8 +2870,9 @@ workflow {
             )
         }
 
-    alignment_task_results_ch = ALIGN(align_inputs_ch)
-        .map { pairId, merscopePath, xeniumPath, alignOut ->
+    alignment_registration_results_ch = ALIGN(align_inputs_ch)
+    alignment_task_results_ch = MATERIALIZE_ALIGNMENT(alignment_registration_results_ch)
+        .map { pairId, merscopePath, xeniumPath, alignOut, _materializationSummary ->
             tuple(
                 pairId,
                 merscopePath,

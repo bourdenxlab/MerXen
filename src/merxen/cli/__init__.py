@@ -11,6 +11,7 @@ from merxen.cli.run_alignment import (
     align_command,
     alignment_qc_command,
     check_alignment_deps_command,
+    materialize_alignment_command,
 )
 from merxen.cli.run_analysis_layer_validation import (
     validate_analysis_layer_command,
@@ -64,6 +65,7 @@ main.add_command(mask_image_quantification_command)
 main.add_command(validate_analysis_layer_command)
 main.add_command(qc_command)
 main.add_command(align_command)
+main.add_command(materialize_alignment_command)
 main.add_command(alignment_qc_command)
 main.add_command(check_alignment_deps_command)
 main.add_command(compare_command)
