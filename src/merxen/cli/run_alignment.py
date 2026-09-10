@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import click
 
 from merxen.alignment.dependencies import check_alignment_dependencies
+from merxen.alignment.materialize import materialize_alignment
 from merxen.alignment.pipeline import run_alignment_pipeline
 from merxen.alignment.qc import run_alignment_qc
 from merxen.config import AlignmentConfig, AlignmentQCConfig, load_config_from_json
@@ -29,6 +31,35 @@ def align_command(config_path: Path) -> None:
     click.echo("Alignment complete:")
     for key, value in paths.items():
         click.echo(f"- {key}: {value}")
+
+
+@click.command(name="materialize-alignment")
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    required=True,
+    help="Path to JSON config validated against AlignmentConfig.",
+)
+@click.option(
+    "--summary",
+    "summary_path",
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Optional path for a machine-readable JSON summary.",
+)
+def materialize_alignment_command(
+    config_path: Path,
+    summary_path: Path | None,
+) -> None:
+    """Reconcile aligned vectors and fixed-grid rasters from a saved transform."""
+    cfg = load_config_from_json(config_path, AlignmentConfig)
+    assert isinstance(cfg, AlignmentConfig)
+    summary = materialize_alignment(cfg)
+    encoded = json.dumps(summary, indent=2)
+    if summary_path is not None:
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        summary_path.write_text(f"{encoded}\n")
+    click.echo(encoded)
 
 
 @click.command(name="alignment-qc")

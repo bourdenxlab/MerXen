@@ -116,12 +116,14 @@ runs after cortical depth (when selected) or after clustering and consumes
 platform for `DISTANCE_FROM_OBJECT_COHORT`. If
 mask image quantification is disabled or skipped by a stage range, downstream
 stages consume the enriched zarr directly. If the row's effective
-`enable_alignment` value is `true`, `ALIGN` and `ALIGN_QC` run before
+`enable_alignment` value is `true`, `ALIGN`, `MATERIALIZE_ALIGNMENT`, and
+`ALIGN_QC` run before
 `COMPARE` / `VISUALIZE` / `SPATIAL_GENE_ANALYSIS` /
 `CLUSTERING_SQUIDPY`; otherwise the paired stages
 consume the quantified/enriched zarrs directly. In `analysis_mode=merscope` or
 `analysis_mode=xenium`, only the selected platform traverses those stages, and
-paired-only `ALIGN`, `ALIGN_QC`, and `COMPARE` are inactive for that row.
+paired-only `ALIGN`, `MATERIALIZE_ALIGNMENT`, `ALIGN_QC`, and `COMPARE` are
+inactive for that row.
 `MAPMYCELLS` consumes the AnnData files written by
 `CLUSTERING_SQUIDPY` and is opt-in because it requires local reference files.
 
@@ -150,8 +152,9 @@ For a samplesheet row with `pair_id=EXAMPLE01`:
 | 5 | `QC` × 2 | `merxen qc` | quantified/enriched zarr | `qc_out/` (metrics CSV, plots) |
 | 6a | `MECR_REFERENCE` × 1 | `merxen mecr-reference` | complete species-matched whole-brain reference + selected spatial panel | shared MECR marker/statistics tables |
 | 6b | `MECR` × 1 | `merxen mecr` | paired or single-platform count tables + shared markers | `mecr_out/` (pair rates, summaries, distribution plot) |
-| 6 | `ALIGN` × 1 | `merxen align` | both platforms' latest analysis-ready zarrs | in-place MERSCOPE aligned elements + transform metadata, when enabled |
-| 7 | `ALIGN_QC` × 1 | `merxen alignment-qc` | updated MERSCOPE zarr + original Xenium zarr | `alignment_qc_out/`, when enabled |
+| 6 | `ALIGN` × 1 | `merxen align` | both platforms' latest analysis-ready zarrs | portable transform bundle + incomplete alignment manifest, when enabled |
+| 6c | `MATERIALIZE_ALIGNMENT` × 1 | `merxen materialize-alignment` | both durable zarrs + transform bundle | reconciled MERSCOPE vectors, tables, labels, image, caches, and complete manifest |
+| 7 | `ALIGN_QC` × 1 | `merxen alignment-qc` | materialized MERSCOPE zarr + fixed Xenium zarr | `alignment_qc_out/`, when enabled |
 | 8 | `COMPARE` × 1 | `merxen compare` | updated MERSCOPE zarr if enabled; otherwise analysis-ready zarrs | `compare_out/` (gene comparison CSVs + metrics JSON) |
 | 9 | `VISUALIZE` × 1 | `merxen visualize` | updated MERSCOPE zarr if enabled; otherwise analysis-ready zarrs | `visualize_out/` (PNG plots) |
 | 10 | `SPATIAL_GENE_ANALYSIS` × 1 | `merxen spatial-gene-analysis` | same paired zarrs plus tissue annotations, after visualization in full runs | `spatial_gene_analysis_out/` (Moran/Geary plus signed-distance, nested pair-null, rankings, and diagnostic plots) |

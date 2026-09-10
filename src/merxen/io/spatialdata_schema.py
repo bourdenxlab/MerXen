@@ -362,12 +362,41 @@ def validate_merxen_schema(
             f"Primary points element {primary!r} does not exist"
         )
 
-    for branch, entry in dict(attrs.get("segmentations", {})).items():
+    registry = dict(attrs.get("segmentations", {}))
+    for branch, entry in registry.items():
         points_key = entry.get("points")
         assignment_col = entry.get("assignment_column")
         shape_key = entry.get("shape")
         table_key = entry.get("table")
         instance_key = entry.get("instance_key", INSTANCE_ID_COLUMN)
+        coordinate_variant_of = entry.get("coordinate_variant_of")
+
+        if coordinate_variant_of is not None:
+            if coordinate_variant_of not in registry:
+                raise SpatialDataContractError(
+                    f"{branch}: coordinate parent {coordinate_variant_of!r} "
+                    "does not exist"
+                )
+            parent = registry[coordinate_variant_of]
+            if parent.get("coordinate_variant_of") is not None:
+                raise SpatialDataContractError(
+                    f"{branch}: coordinate variants cannot inherit from variants"
+                )
+            if points_key == parent.get("points") or shape_key == parent.get("shape"):
+                raise SpatialDataContractError(
+                    f"{branch}: coordinate variant must use distinct points and shapes"
+                )
+            for semantic_key in (
+                "assignment_column",
+                "background_column",
+                "assignment_source_column",
+                "instance_key",
+                "id_namespace",
+            ):
+                if entry.get(semantic_key) != parent.get(semantic_key):
+                    raise SpatialDataContractError(
+                        f"{branch}: {semantic_key} differs from coordinate parent"
+                    )
 
         if points_key not in sdata_obj.points:
             raise SpatialDataContractError(
@@ -432,6 +461,22 @@ def validate_merxen_schema(
                     f"{branch}: shape and table identifier sets differ"
                 )
 
+            if coordinate_variant_of is not None:
+                parent_table_key = registry[coordinate_variant_of].get("table")
+                if (
+                    parent_table_key is not None
+                    and parent_table_key in sdata_obj.tables
+                ):
+                    parent_table = sdata_obj.tables[parent_table_key]
+                    if table.shape != parent_table.shape:
+                        raise SpatialDataContractError(
+                            f"{branch}: table shape differs from coordinate parent"
+                        )
+                    if deep and not _matrix_values_equal(table.X, parent_table.X):
+                        raise SpatialDataContractError(
+                            f"{branch}: count matrix differs from coordinate parent"
+                        )
+
         if not deep:
             continue
         transcript_ids = points[TRANSCRIPT_ID_COLUMN]
@@ -466,6 +511,16 @@ def validate_merxen_schema(
                 raise SpatialDataContractError(
                     f"{branch}: point assignments reference missing shapes"
                 )
+
+
+def _matrix_values_equal(left: Any, right: Any) -> bool:
+    """Return whether dense or sparse matrices contain exactly equal values."""
+    if left.shape != right.shape:
+        return False
+    difference = left != right
+    if hasattr(difference, "nnz"):
+        return int(difference.nnz) == 0
+    return bool(np.array_equal(np.asarray(left), np.asarray(right)))
 
 
 def is_canonical_unsigned_integer(values: Any) -> bool:
