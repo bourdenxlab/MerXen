@@ -468,9 +468,19 @@ def run_per_shape_assignment_for_dataset(
     if points_key is None:
         raise RuntimeError(f"[{dataset_name}] No primary transcript element found")
     points_obj = sdata_obj.points[points_key]
-    stamp_merxen_schema(sdata_obj, primary_points_key=points_key)
+    schema = stamp_merxen_schema(sdata_obj, primary_points_key=points_key)
     gene_list = build_gene_list_from_base_table(sdata_obj)
-    shape_keys = list(sdata_obj.shapes.keys())
+    coordinate_variant_shapes = {
+        str(entry.get("shape"))
+        for entry in dict(schema.get("segmentations", {})).values()
+        if isinstance(entry, dict) and entry.get("coordinate_variant_of") is not None
+    }
+    shape_keys = [
+        str(shape_key)
+        for shape_key in sdata_obj.shapes
+        if not str(shape_key).endswith("_aligned_nonrigid")
+        and str(shape_key) not in coordinate_variant_shapes
+    ]
     log_status(f"[{dataset_name}] Points key='{points_key}', shape layers={shape_keys}")
 
     summaries: list[dict[str, Any]] = []
