@@ -106,6 +106,9 @@ def test_dwight_gpu_processes_use_one_fixed_host_lock(
         )
         == 4
     )
+    assert dwight_config_text.count('exec 9<"\\${MERXEN_GPU_LOCK_FILE}"') == 4
+    assert 'exec 9>"\\${MERXEN_GPU_LOCK_FILE}"' not in dwight_config_text
+    assert dwight_config_text.count("set -o noclobber") == 4
     assert "${PWD}/.merxen_gpu.lock" not in combined_config_text
 
 
@@ -154,3 +157,4 @@ def test_default_standard_and_dwight_profiles_resolve_equivalently() -> None:
         ):
             script = process[f"withName:{process_name}"]["beforeScript"]
             assert f'MERXEN_GPU_LOCK_FILE="{lock_path}"' in script
+            assert 'exec 9<"${MERXEN_GPU_LOCK_FILE}"' in script
