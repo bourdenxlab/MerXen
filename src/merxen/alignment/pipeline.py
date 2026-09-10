@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import traceback
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any, cast
 
@@ -15,6 +16,11 @@ import spatialdata as sd
 from shapely.ops import transform as shapely_transform
 from spatialdata.transformations import Affine, Identity, set_transformation
 
+from merxen.alignment.manifest import (
+    ALIGNMENT_MANIFEST_ATTR,
+    NONRIGID_ELEMENT_SUFFIX,
+    initialize_alignment_manifest,
+)
 from merxen.alignment.register import (
     TransformResult,
     load_required_valis_tissue_annotations,
@@ -25,6 +31,7 @@ from merxen.alignment.register import (
 from merxen.alignment.transforms import apply_affine_matrix
 from merxen.config import AlignmentConfig
 from merxen.io.spatialdata_io import (
+    spatialdata_write_lock,
     write_or_replace_element,
     write_spatialdata_metadata,
 )
@@ -35,9 +42,8 @@ from merxen.io.spatialdata_schema import (
 )
 from merxen.io.transcript_io import first_existing_col
 
-MERXEN_ALIGNMENT_ATTR = "merxen_alignment"
+MERXEN_ALIGNMENT_ATTR = ALIGNMENT_MANIFEST_ATTR
 ALIGNMENT_COORDINATE_SYSTEM = "merxen_xenium"
-NONRIGID_ELEMENT_SUFFIX = "_aligned_nonrigid"
 logger = logging.getLogger(__name__)
 
 
@@ -107,12 +113,7 @@ def run_alignment_pipeline(config: AlignmentConfig) -> dict[str, Path]:
     _write_transform_json(result, transform_json)
 
     if cfg.write_aligned_zarrs:
-        moving_zarr_path = (
-            cfg.merscope_zarr_path
-            if cfg.moving_platform == "MERSCOPE"
-            else cfg.xenium_zarr_path
-        )
-        _write_moving_alignment_to_zarr(moving_zarr_path, result)
+        _initialize_alignment_contract(cfg, result)
     if cfg.backend == "valis":
         write_valis_resume_manifest(cfg)
 
@@ -132,6 +133,40 @@ def _write_transform_json(result: TransformResult, path: Path) -> None:
         "metadata": result.metadata,
     }
     path.write_text(json.dumps(_jsonable(payload), indent=2))
+
+
+def _initialize_alignment_contract(
+    config: AlignmentConfig,
+    result: TransformResult,
+) -> None:
+    """Persist a portable transform and incomplete v2 pair contract."""
+    moving_path = (
+        Path(config.merscope_zarr_path)
+        if config.moving_platform == "MERSCOPE"
+        else Path(config.xenium_zarr_path)
+    )
+    fixed_path = (
+        Path(config.xenium_zarr_path)
+        if config.fixed_platform == "XENIUM"
+        else Path(config.merscope_zarr_path)
+    )
+    with ExitStack() as stack:
+        for zarr_path in sorted(
+            {moving_path, fixed_path},
+            key=lambda item: str(item.resolve()),
+        ):
+            stack.enter_context(spatialdata_write_lock(zarr_path))
+        moving_sdata = sd.read_zarr(moving_path)
+        fixed_sdata = sd.read_zarr(fixed_path)
+        initialize_alignment_manifest(
+            config=config,
+            result=result,
+            moving_sdata=moving_sdata,
+            fixed_sdata=fixed_sdata,
+            moving_zarr_path=moving_path,
+        )
+        write_spatialdata_metadata(moving_sdata, write_attrs=True)
+        write_spatialdata_metadata(fixed_sdata, write_attrs=True)
 
 
 def _write_moving_alignment_to_zarr(
@@ -276,10 +311,18 @@ def _alignment_attrs_payload(result: TransformResult) -> dict[str, Any]:
 
 def _nonrigid_transform_payload(result: TransformResult) -> dict[str, Any] | None:
     if result.valis_transform is not None:
+        chain_path = result.metadata.get("transform_chain_path")
+        if chain_path is not None and Path(chain_path).exists():
+            transform_chain = json.loads(Path(chain_path).read_text())
+        else:
+            transform_chain = result.valis_transform.to_metadata()
         return {
             "type": "valis_sampled_displacement_field",
             "selected_mode": result.valis_transform.selected_mode,
-            "transform_chain": result.valis_transform.to_metadata(),
+            "transform_chain_path": (
+                None if chain_path is None else str(Path(chain_path).name)
+            ),
+            "transform_chain": transform_chain,
         }
     transform = result.nonrigid_transform
     if transform is None:
