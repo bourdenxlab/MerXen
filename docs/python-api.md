@@ -28,7 +28,7 @@ merxen/
 
 The subpackage structure mirrors the Nextflow stage graph:
 `build → segment-nuclei → segment → enrich → mask-image-quantification → qc → align →
-alignment-qc → compare → visualize → spatial-gene-analysis →
+materialize-alignment → alignment-qc → compare → visualize → spatial-gene-analysis →
 clustering-squidpy → compute-cortical-depth → distance-from-object →
 mapmycells`. Cortical depth is skipped unless `--cortical_depth_enabled true`
 is set. Alignment is skipped unless
@@ -230,6 +230,9 @@ with large point tables and image pyramids.
   boundary/DAPI objective for already-aligned images, used to guard non-rigid
   selection.
 - `run_alignment_pipeline(config)` — CLI/Nextflow entry point for `ALIGN`.
+- `materialize_alignment(config)` — idempotently reconcile aligned vectors,
+  tables, fixed-grid masks/caches, and the full warped image from a portable
+  transform bundle.
 - `run_alignment_qc(config)` — DAPI QC collation for VALIS; legacy
   expression-grid QC is dispatched only for legacy results.
 - `fit_affine_matrix`, `fit_nonrigid_transform` — reusable global and legacy

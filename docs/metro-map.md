@@ -71,8 +71,9 @@ everything below, stays in [Pipeline architecture](pipeline.md).
 - **Per-row multiplicity is not drawn.** Platform-local stations run once per
   platform per samplesheet row; the map shows one traversal.
 - **Single-platform mode is not drawn.** With `--analysis_mode merscope` or
-  `xenium`, one platform line is absent and the paired-only `ALIGN`, `ALIGN_QC`
-  and `COMPARE` stations do not run, while `VISUALIZE`, `SPATIAL_GENE_ANALYSIS`
+  `xenium`, one platform line is absent and the paired-only `ALIGN`,
+  `MATERIALIZE_ALIGNMENT`, `ALIGN_QC`, and `COMPARE` stations do not run, while
+  `VISUALIZE`, `SPATIAL_GENE_ANALYSIS`
   and `CLUSTERING_SQUIDPY` run with a one-sample config.
 - **Three processes have no station**, because they carry no scientific
   meaning for a reader: `ENSURE_PROSEG` (installs the ProSeg binary),

@@ -35,6 +35,7 @@ ${outdir}/
 │   │   └── original_seg/
 │   │       └── qc/
 │   ├── alignment/
+│   ├── alignment_materialization/
 │   ├── alignment_qc/
 │   ├── reseg/
 │   │   ├── mecr/
@@ -61,8 +62,8 @@ ${outdir}/
 
 `<pair_id>` comes straight from the `pair_id` column of the samplesheet. In
 single-platform mode, only the selected `<platform>/` directory is present and
-paired-only `alignment/`, `alignment_qc/`, and `comparison/` directories are
-not written.
+paired-only `alignment/`, `alignment_materialization/`, `alignment_qc/`, and
+`comparison/` directories are not written.
 `reseg/`, `original_seg/`, `proseg_mask/`, and `proseg_hybrid/` are controlled
 by `--analysis_segmentation`; the default `all` writes all four branches, while
 an explicit `both` writes only `reseg` and `original_seg`.
@@ -305,13 +306,21 @@ Only present for paired rows whose effective `enable_alignment` value is `true`.
 | `align_out/valis/` / `qc/` | Locked non-rigid VALIS artifacts plus partial-overlap candidates, seed-labelled physical objective plots and local score slice, overlays, checkerboards, feature, mask, displacement, and deformation diagnostics. |
 | `align_out/alignment_coords/` | Legacy coordinate diagnostics; retained as an empty contract directory for VALIS. |
 
-By default, `ALIGN` updates the existing MERSCOPE latest zarr in place. Raw
-vector elements remain untouched, the selected global affine is saved to
-`merxen_xenium`, and materialized selected VALIS coordinates use the existing
-`*_aligned_nonrigid` suffix for downstream compatibility. Their metadata says
-whether non-rigid or the global fallback was actually selected. Transformed
-points, shapes, and table centroids can carry an `in_shared_tissue_domain`
-flag. Xenium remains the fixed reference and is not copied.
+`alignment_materialization/materialization_summary.json` reports `complete` for
+a rebuild or `current` for a validated idempotent reuse. `ALIGN` only computes
+and embeds the transform; `MATERIALIZE_ALIGNMENT` updates the existing
+MERSCOPE latest Zarr in place. Native elements remain untouched. Derived points,
+shapes, and tables use `*_aligned_nonrigid`; labels use
+`<aligned_shape>_labels`; and the full multichannel image is
+`MERSCOPE_z_projection_aligned_nonrigid`. Pyramids and outlines use the normal
+viewer-cache naming convention in `merxen_xenium`.
+
+The MERSCOPE root `merxen_alignment` attribute is a version-2 manifest with
+fixed-grid geometry, transform/native fingerprints, mappings, dtype/channel
+metadata, artifact QC, and completion status. `_merxen_alignment/` holds a
+portable transform copy. The Xenium root contains a matching
+`merxen_alignment_pair_reference`; consumers should reject pair or transform
+fingerprint mismatches.
 
 ### Alignment QC
 
