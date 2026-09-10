@@ -817,6 +817,33 @@ class ValisAlignmentConfig(BaseModel):
     qc: AlignmentQCThresholds = AlignmentQCThresholds()
 
 
+class AlignmentMaterializationConfig(BaseModel):
+    """Controls reconciliation of aligned vectors and fixed-grid rasters."""
+
+    enabled: bool = True
+    materialize_vectors: bool = True
+    materialize_labels: bool = True
+    materialize_image: bool = True
+    source_image_key: str = "MERSCOPE_z_projection"
+    fixed_image_key: str = "morphology_focus"
+    output_image_key: str = "MERSCOPE_z_projection_aligned_nonrigid"
+    target_grid: Literal["fixed_image_scale0"] = "fixed_image_scale0"
+    tile_size: int = Field(default=1_024, ge=64)
+    chunk_size: int = Field(default=1_024, ge=64)
+    image_interpolation: Literal["bilinear"] = "bilinear"
+    image_fill_value: float = 0.0
+    label_pyramid_downsample: int = Field(default=4, ge=2)
+    image_pyramid_downsample: int = Field(default=4, ge=2)
+    pyramid_min_size: int = Field(default=1_024, ge=64)
+    outline_width: int = Field(default=1, ge=1)
+    force: bool = False
+    reconcile: bool = True
+    legacy_inverse_spacing: float = Field(default=16.0, gt=0.0)
+    legacy_inverse_iterations: int = Field(default=25, ge=1)
+    legacy_inverse_tolerance_um: float = Field(default=1.0, gt=0.0)
+    roundtrip_sample_spacing: int = Field(default=256, ge=1)
+
+
 class AlignmentConfig(BaseModel):
     """Configuration for paired DAPI alignment with a legacy Spateo option."""
 
@@ -832,6 +859,7 @@ class AlignmentConfig(BaseModel):
     xenium_image: AlignmentImageConfig = AlignmentImageConfig()
     valis: ValisAlignmentConfig = ValisAlignmentConfig()
     legacy_spateo: LegacySpateoAlignmentConfig = LegacySpateoAlignmentConfig()
+    materialization: AlignmentMaterializationConfig = AlignmentMaterializationConfig()
 
     @model_validator(mode="before")
     @classmethod
