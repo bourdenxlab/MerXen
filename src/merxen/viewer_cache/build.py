@@ -23,7 +23,11 @@ from spatialdata.models import Image2DModel, Labels2DModel
 from spatialdata.transformations import Affine, get_transformation
 
 from merxen.io.image_source import image_to_cyx
-from merxen.io.spatialdata_io import write_or_replace_element
+from merxen.io.spatialdata_io import (
+    write_or_replace_element,
+    write_spatialdata_metadata,
+)
+from merxen.masks import discover_masks, register_missing_mask_branches
 from merxen.memory import force_release, log_status
 from merxen.viewer_cache.format import (
     DERIVED_CACHE_ATTR,
@@ -60,21 +64,23 @@ from merxen.viewer_cache.transform import resolve_mask_affine
 
 logger = logging.getLogger(__name__)
 
-#: Default segmentation shape keys to rasterize per platform. Only keys present
-#: in the store are built. Mirrors the viewer's mask targets: reseg (proseg),
-#: proseg hybrid, cellpose, and the original/instrument boundaries.
+# Retained as a source-compatible discovery hint for callers that imported the
+# old constant. Runtime defaults now come exclusively from ``discover_masks``.
 DEFAULT_SHAPE_KEYS: dict[str, tuple[str, ...]] = {
     "MERSCOPE": (
         "MOSAIK_proseg",
         "MOSAIK_proseg_hybrid",
         "MOSAIK_cellpose",
+        "cellpose_nuclei",
         "merscope_cell_boundaries",
     ),
     "XENIUM": (
         "MOSAIK_proseg",
         "MOSAIK_proseg_hybrid",
         "MOSAIK_cellpose",
+        "cellpose_nuclei",
         "xenium_cell_boundaries",
+        "xenium_nucleus",
     ),
 }
 
@@ -115,7 +121,11 @@ def build_viewer_caches(
     )
 
     sdata = read_zarr(zarr_path)
-    image_key, base_cyx, channels, image_transform = _resolve_base_image(sdata)
+    if register_missing_mask_branches(sdata):
+        write_spatialdata_metadata(sdata, write_attrs=True)
+    image_key, base_cyx, channels, image_transform, image_cs = _resolve_base_image(
+        sdata
+    )
     height = int(base_cyx.sizes["y"])
     width = int(base_cyx.sizes["x"])
     x_coords = base_cyx.coords["x"].values if "x" in base_cyx.coords else None
@@ -130,7 +140,20 @@ def build_viewer_caches(
     chunk = int(params.label_chunk_size)
     chunks = (min(chunk, height), min(chunk, width))
 
-    shape_keys = params.shape_keys or DEFAULT_SHAPE_KEYS.get(platform, ())
+    registered_shape_keys = tuple(spec.shape_key for spec in discover_masks(sdata))
+    if params.shape_keys is None:
+        shape_keys = registered_shape_keys
+    else:
+        requested_shape_keys = set(map(str, params.shape_keys))
+        shape_keys = tuple(
+            key for key in registered_shape_keys if key in requested_shape_keys
+        )
+        ignored = requested_shape_keys - set(shape_keys)
+        if ignored:
+            logger.warning(
+                "Ignoring viewer-cache shapes that are not registered masks: %s",
+                sorted(ignored),
+            )
     existing_labels = {str(k) for k in sdata.labels}
     summary: dict[str, Any] = {"masks": {}, "image_pyramid": None}
 
@@ -151,11 +174,12 @@ def build_viewer_caches(
             spatialdata_affine=spatialdata_affine,
             inv_affine=inv_affine,
             params=params,
+            coordinate_system="global",
         )
         force_release(note=f"after viewer-cache build for {shape_key}")
 
     if params.build_image_pyramid:
-        summary["image_pyramid"] = _build_image_pyramid(
+        summary["image_pyramid"] = build_image_pyramid(
             sdata=sdata,
             zarr_path=zarr_path,
             image_key=image_key,
@@ -163,12 +187,13 @@ def build_viewer_caches(
             channels=channels,
             transform=image_transform,
             params=params,
+            coordinate_system=image_cs,
         )
 
     return summary
 
 
-def _resolve_base_image(sdata: Any) -> tuple[str, Any, list[str], Any]:
+def _resolve_base_image(sdata: Any) -> tuple[str, Any, list[str], Any, str]:
     """Return (key, (c,y,x) DataArray, channels, global transform) of the real image.
 
     Skips derived image caches so the label grid is never sized off a downsampled
@@ -185,10 +210,17 @@ def _resolve_base_image(sdata: Any) -> tuple[str, Any, list[str], Any]:
         )
     base_cyx = image_to_cyx(sdata.images[image_key])
     channels = _channel_labels(base_cyx)
-    transform = get_transformation(
-        sdata.images[image_key], to_coordinate_system="global"
+    transformations = get_transformation(sdata.images[image_key], get_all=True)
+    coordinate_system = (
+        "global" if "global" in transformations else sorted(transformations)[0]
     )
-    return image_key, base_cyx, channels, transform
+    return (
+        image_key,
+        base_cyx,
+        channels,
+        transformations[coordinate_system],
+        coordinate_system,
+    )
 
 
 def _channel_labels(image_cyx: Any) -> list[str]:
@@ -215,6 +247,51 @@ def _spatialdata_affine(napari_affine: np.ndarray) -> Affine:
         ],
         input_axes=("x", "y"),
         output_axes=("x", "y"),
+    )
+
+
+def build_mask_cache_on_grid(
+    *,
+    sdata: Any,
+    zarr_path: Path,
+    platform: str,
+    shape_key: str,
+    label_key: str,
+    shape: tuple[int, int],
+    chunks: tuple[int, int],
+    pixel_to_world_matrix: Any,
+    coordinate_system: str,
+    params: ViewerCacheParams,
+) -> dict[str, Any]:
+    """Rasterize a registered mask and its caches on an explicit image grid."""
+    matrix = np.asarray(pixel_to_world_matrix, dtype=np.float64)
+    if matrix.shape != (3, 3):
+        raise ValueError("pixel_to_world_matrix must be a 3x3 affine")
+    napari_affine = np.asarray(
+        [
+            [matrix[1, 1], matrix[1, 0], matrix[1, 2]],
+            [matrix[0, 1], matrix[0, 0], matrix[0, 2]],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+    return _build_mask_and_derived(
+        sdata=sdata,
+        zarr_path=Path(zarr_path),
+        platform=str(platform),
+        shape_key=str(shape_key),
+        label_key=str(label_key),
+        shape=shape,
+        chunks=chunks,
+        napari_affine=napari_affine,
+        spatialdata_affine=Affine(
+            matrix,
+            input_axes=("x", "y"),
+            output_axes=("x", "y"),
+        ),
+        inv_affine=np.linalg.inv(napari_affine),
+        params=params,
+        coordinate_system=str(coordinate_system),
     )
 
 
@@ -250,6 +327,7 @@ def _build_mask_and_derived(
     spatialdata_affine: Affine,
     inv_affine: np.ndarray,
     params: ViewerCacheParams,
+    coordinate_system: str,
 ) -> dict[str, Any]:
     """Rasterize one base mask then build its label pyramid + outline."""
     result: dict[str, Any] = {"label_key": label_key}
@@ -280,6 +358,7 @@ def _build_mask_and_derived(
             inv_affine=inv_affine,
             label_series=label_series,
             id_dtype=id_dtype,
+            coordinate_system=coordinate_system,
         )
         _stamp_marker(
             zarr_path,
@@ -302,6 +381,7 @@ def _build_mask_and_derived(
         base_da=base_da,
         transform=spatialdata_affine,
         params=params,
+        coordinate_system=coordinate_system,
     )
     result["outline"] = _build_outline(
         zarr_path=zarr_path,
@@ -310,6 +390,7 @@ def _build_mask_and_derived(
         base_da=base_da,
         transform=spatialdata_affine,
         params=params,
+        coordinate_system=coordinate_system,
     )
     return result
 
@@ -327,12 +408,16 @@ def _rasterize_base_mask(
     inv_affine: np.ndarray,
     label_series: Any,
     id_dtype: Any,
+    coordinate_system: str,
 ) -> int:
     """Write an empty label element, then fill its s0 array chunk-by-chunk."""
     height, width = shape
     empty = da.zeros(shape, chunks=chunks, dtype=id_dtype)
     label_da = xr.DataArray(empty, dims=("y", "x"))
-    elem = Labels2DModel.parse(label_da, transformations={"global": spatialdata_affine})
+    elem = Labels2DModel.parse(
+        label_da,
+        transformations={str(coordinate_system): spatialdata_affine},
+    )
     write_or_replace_element(
         sdata,
         label_key,
@@ -377,6 +462,7 @@ def _build_label_pyramid(
     base_da: Any,
     transform: Affine,
     params: ViewerCacheParams,
+    coordinate_system: str,
 ) -> str:
     cache_key = derived_label_pyramid_cache_key(label_key, params.downsample)
     if not params.force and _derived_complete(
@@ -389,7 +475,11 @@ def _build_label_pyramid(
     if len(levels) == 0:
         return "no-levels"
     tree = build_multiscale_tree(
-        levels, dims=("y", "x"), transform=transform, dtype=base_da.dtype
+        levels,
+        dims=("y", "x"),
+        transform=transform,
+        dtype=base_da.dtype,
+        coordinate_system=coordinate_system,
     )
     Labels2DModel.validate(tree)
     _write_derived(sdata, zarr_path, "labels", cache_key, tree)
@@ -416,6 +506,7 @@ def _build_outline(
     base_da: Any,
     transform: Affine,
     params: ViewerCacheParams,
+    coordinate_system: str,
 ) -> str:
     width = max(1, int(params.contour_width))
     cache_key = derived_outline_cache_key(label_key, width)
@@ -429,7 +520,11 @@ def _build_outline(
     if len(outline_levels) == 0:
         return "no-levels"
     tree = build_multiscale_tree(
-        outline_levels, dims=("y", "x"), transform=transform, dtype=np.uint8
+        outline_levels,
+        dims=("y", "x"),
+        transform=transform,
+        dtype=np.uint8,
+        coordinate_system=coordinate_system,
     )
     Labels2DModel.validate(tree)
     _write_derived(sdata, zarr_path, "labels", cache_key, tree)
@@ -453,7 +548,7 @@ def _build_outline(
     return "built"
 
 
-def _build_image_pyramid(
+def build_image_pyramid(
     *,
     sdata: Any,
     zarr_path: Path,
@@ -462,7 +557,9 @@ def _build_image_pyramid(
     channels: list[str],
     transform: Any,
     params: ViewerCacheParams,
+    coordinate_system: str = "global",
 ) -> str:
+    """Build or refresh the viewer-compatible pyramid for one image element."""
     cache_key = derived_image_pyramid_cache_key(image_key, params.downsample)
     if not params.force and _derived_complete(
         zarr_path, "images", cache_key, "image_pyramid", image_key, params
@@ -479,6 +576,7 @@ def _build_image_pyramid(
         transform=transform,
         channels=channels,
         dtype=base_cyx.dtype,
+        coordinate_system=coordinate_system,
     )
     Image2DModel.validate(tree)
     _write_derived(sdata, zarr_path, "images", cache_key, tree)
