@@ -50,6 +50,14 @@ def test_alignment_workflow_defaults_to_valis_and_preserves_legacy_backend() -> 
         "alignment_qc_non_rigid_minimum_nmi_improvement = 0.0",
         "alignment_qc_non_rigid_maximum_coherent_rotation_degrees = 0.25",
         "alignment_qc_non_rigid_maximum_coherent_translation_um = 25.0",
+        "process MATERIALIZE_ALIGNMENT",
+        "cache false",
+        "materialize-alignment",
+        "--summary materialization_summary.json",
+        "alignment_materialization_enabled = true",
+        "alignment_materialization_max_forks = 1",
+        'withName: "MATERIALIZE_ALIGNMENT"',
+        'memory = "120 GB"',
     ]:
         assert expected in module_text or expected in config_text
 
@@ -61,6 +69,7 @@ def test_alignment_workflow_defaults_to_valis_and_preserves_legacy_backend() -> 
     assert "settings.alignment_annotation_paths.MERSCOPE" in main_text
     assert "settings.alignment_annotation_paths.XENIUM" in main_text
     assert "tuple(pairId, merscopeLatest, xeniumLatest, alignOut)" in main_text
+    assert "MATERIALIZE_ALIGNMENT(alignment_registration_results_ch)" in main_text
     assert (
         '"transform_json_path": "${align_out}/alignment_transform.json"' in module_text
     )

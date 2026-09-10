@@ -15,6 +15,7 @@ from scipy import sparse
 from shapely.geometry import Point, box
 from spatialdata.models import PointsModel, ShapesModel, TableModel
 
+from merxen.alignment.manifest import ALIGNMENT_MANIFEST_ATTR
 from merxen.config import ProsegHybridConfig
 from merxen.io.spatialdata_io import write_spatialdata_zarr
 from merxen.segmentation.proseg_hybrid import (
@@ -269,14 +270,16 @@ def test_hybrid_refinement_roundtrips_spatialdata(
         instance_key="cell",
     )
     zarr_path = tmp_path / "proseg.zarr"
-    write_spatialdata_zarr(
-        sd.SpatialData(
-            points={"transcripts": points},
-            shapes={"cell_boundaries": source_shapes},
-            tables={"table": table},
-        ),
-        zarr_path,
+    source = sd.SpatialData(
+        points={"transcripts": points},
+        shapes={"cell_boundaries": source_shapes},
+        tables={"table": table},
     )
+    source.attrs[ALIGNMENT_MANIFEST_ATTR] = {
+        "complete": True,
+        "artifacts": {"points/old": {"status": "complete"}},
+    }
+    write_spatialdata_zarr(source, zarr_path)
 
     masks = np.zeros((16, 16), dtype=np.uint32)
     masks[1:6, 1:6] = 1
@@ -319,3 +322,8 @@ def test_hybrid_refinement_roundtrips_spatialdata(
     assert HYBRID_ASSIGNMENT_COLUMN in augmented.columns
     assert augmented[HYBRID_ASSIGNMENT_COLUMN].notna().all()
     assert "qv" in augmented.columns
+    assert result.attrs[ALIGNMENT_MANIFEST_ATTR]["complete"] is False
+    assert (
+        result.attrs[ALIGNMENT_MANIFEST_ATTR]["invalidation_reason"]
+        == "ProSeg-hybrid points, shapes, and table replaced"
+    )
