@@ -101,9 +101,11 @@ graph LR
         %%metro entry: top | merscope, xenium
         %%metro exit: left | paired
         align[VALIS align]
+        materialize_alignment[Materialize]
         align_qc[Alignment QC]
 
-        align -->|paired| align_qc
+        align -->|paired| materialize_alignment
+        materialize_alignment -->|paired| align_qc
     end
 
     subgraph comparative [Comparative analysis]

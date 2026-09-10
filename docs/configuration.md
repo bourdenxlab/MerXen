@@ -245,7 +245,7 @@ using `envs/environment.yml`.
 
 | Param | Default | Description |
 |-------|---------|-------------|
-| `enable_alignment` | `false` | Run `ALIGN` and `ALIGN_QC` between QC and comparison by default. A samplesheet `enable_alignment` value can override this per paired row. |
+| `enable_alignment` | `false` | Run registration, materialization, and `ALIGN_QC` between QC and comparison by default. A samplesheet `enable_alignment` value can override this per paired row. |
 | `alignment_backend` | `valis` | `valis` (DAPI-only default) or `legacy_spateo`. |
 | `alignment_fixed_platform` / `alignment_moving_platform` | `XENIUM` / `MERSCOPE` | Reference and transformed dataset. They must differ. |
 | `alignment_conda` | `envs/environment.alignment.yml` | Conda env file or existing env path used only for `ALIGN`. |
@@ -329,6 +329,29 @@ other roles are ignored, and no mask morphology is performed.
 | `alignment_transform_transcripts` / `alignment_transform_centroids` / `alignment_transform_polygons` | `true` / `true` / `true` | Materialize selected registered vectors and table centroid coordinates. |
 | `alignment_mark_shared_tissue_domain` | `true` | Annotate transformed points, shapes, and centroids with the shared annotation-derived anatomical tissue domain. |
 | `alignment_resume` | `true` | Reuse a complete transform bundle when its stored VALIS parameters, platform roles, and annotation content hashes match. Nextflow `-resume` remains the normal workflow-level cache. |
+
+#### Alignment materialization
+
+`MATERIALIZE_ALIGNMENT` runs its revision check even under Nextflow `-resume`.
+It uses the same isolated alignment environment but has a separate 12 CPU,
+120 GB process request.
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `alignment_materialization_enabled` | `true` | Enable the post-registration reconciliation stage. |
+| `alignment_materialize_vectors` / `alignment_materialize_labels` / `alignment_materialize_image` | `true` / `true` / `true` | Materialize aligned vectors/tables, registered mask rasters/caches, and the full image/pyramid. |
+| `alignment_materialization_source_image_key` | `MERSCOPE_z_projection` | Native multichannel MERSCOPE image to warp. |
+| `alignment_materialization_fixed_image_key` | `morphology_focus` | Xenium scale-0 image defining the output grid. |
+| `alignment_materialization_output_image_key` | `MERSCOPE_z_projection_aligned_nonrigid` | Aligned image element key. |
+| `alignment_materialization_tile_size` / `alignment_materialization_chunk_size` | `1024` / `1024` | Destination tile and output chunk edge lengths. Image chunks are `(1, chunk, chunk)`. |
+| `alignment_materialization_image_interpolation` / `alignment_materialization_image_fill_value` | `bilinear` / `0` | Image pull interpolation and value outside source support. |
+| `alignment_materialization_label_pyramid_downsample` / `alignment_materialization_image_pyramid_downsample` | `4` / `4` | Downsampling factors for derived pyramids. |
+| `alignment_materialization_pyramid_min_size` / `alignment_materialization_outline_width` | `1024` / `1` | Pyramid stopping size and label-outline width. |
+| `alignment_materialization_force` | `false` | Rebuild all enabled aligned outputs even when the manifest is current. |
+| `alignment_materialization_reconcile` | `true` | Repair stale, invalid, or missing outputs. When false, a non-current store raises instead. |
+| `alignment_legacy_inverse_spacing` / `alignment_legacy_inverse_iterations` / `alignment_legacy_inverse_tolerance_um` | `16` / `25` / `1` | Sample spacing, iteration cap, and maximum forward round-trip error for legacy RBF inversion. |
+| `alignment_roundtrip_sample_spacing` | `256` | Fixed-grid sampling stride for final inverse QC. |
+| `alignment_materialization_max_forks` | `1` | Dwight concurrency guard for the materializer. |
 
 #### VALIS QC selection
 
@@ -561,6 +584,7 @@ for every task. Portable per-process CPU/memory requests remain in
 | `VIEWER_CACHE` | 8 | 60 GB | `viewer_cache_max_forks` = 9 |
 | `QC` | 4 | 24 GB | unbounded |
 | `ALIGN` | 12 | 100 GB | `alignment_max_forks` = 1 |
+| `MATERIALIZE_ALIGNMENT` | 12 | 120 GB | `alignment_materialization_max_forks` = 1 |
 | `ALIGN_QC` | 4 | 32 GB | unbounded |
 | `COMPARE` | 4 | 32 GB | unbounded |
 | `VISUALIZE` | 4 | 32 GB | unbounded |

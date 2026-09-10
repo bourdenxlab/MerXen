@@ -86,7 +86,7 @@ Each stage is one Nextflow module and one `merxen` subcommand, sharing a Pydanti
 | [Cortical depth](docs/stages/cortical-depth.md) | Laplace / equal-area cortical-depth coordinates from boundary annotations | off (`--cortical_depth_enabled`) |
 | [QC](docs/stages/qc.md) | Per-dataset geometry and transcript-assignment metrics | always |
 | [MECR](docs/stages/mecr.md) | Reference-based mutually exclusive co-expression rate against the species-matched whole-brain atlas | human: on; mouse: opt-in |
-| [Alignment](docs/stages/alignment.md) | VALIS DAPI registration of paired adjacent sections, plus alignment QC | off (`--enable_alignment`) |
+| [Alignment](docs/stages/alignment.md) | VALIS DAPI registration, aligned-output materialization, and QC for paired adjacent sections | off (`--enable_alignment`) |
 | [Comparison](docs/stages/comparison.md) | Cross-platform gene-level comparison | paired rows only |
 | [Visualization](docs/stages/visualization.md) | Single-platform or paired figure generation | always |
 | [Spatial gene analysis](docs/stages/spatial-gene-analysis.md) | Cell-level spatial autocorrelation and assignment-independent transcript-coordinate patterns | always |
@@ -152,7 +152,9 @@ results/
 ├── <pair_id>/
 │   ├── merscope/              # spatialdata, segmentation, enrichment, …
 │   ├── xenium/                # …same stages, run independently
-│   ├── alignment/             # + alignment_qc/
+│   ├── alignment/             # registration bundle
+│   ├── alignment_materialization/ # reconciliation summary
+│   ├── alignment_qc/
 │   ├── reseg/                 # mecr, comparison, visualization, clustering, …
 │   └── original_seg/          # …the same analyses on instrument segmentations
 └── distance_from_object/      # Cohort-level paired DE
