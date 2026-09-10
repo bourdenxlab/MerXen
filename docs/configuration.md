@@ -596,7 +596,9 @@ for every task. Portable per-process CPU/memory requests remain in
 On Dwight, `CELLPOSE_SEGMENT`, `ALIGN` when `alignment_device != "cpu"`, and
 `CLUSTERING_SQUIDPY` when `clustering_squidpy_use_gpu=true` also share the
 host-wide `gpu_process_lock_file`. The lock is held for the full process shell,
-then released automatically when the task exits.
+then released automatically when the task exits. The file is created as a
+world-readable empty file and opened read-only before calling `flock`, so a
+lock created by one workstation user remains usable by other users.
 
 A future HPC profile should provide its own executor, capacity/concurrency,
 software paths, reference paths, worker counts, and GPU policy. The portable
