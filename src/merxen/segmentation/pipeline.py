@@ -518,13 +518,20 @@ def run_cellpose_segmentation(
     platform = dataset.platform.upper()
     qv_col = None
     min_qv = None
-    excluded_gene_pattern = None
+    # Control features (negative controls, blank / unassigned / deprecated
+    # codewords, genomic controls) are dropped on both platforms using the
+    # shared registry; Xenium's is_gene / codeword_category take precedence.
+    is_gene_col = resolve_col(points_obj, ["is_gene"], required=False)
+    codeword_category_col = (
+        None
+        if is_gene_col is not None
+        else resolve_col(points_obj, ["codeword_category"], required=False)
+    )
     if platform == "XENIUM":
         qv_col = resolve_col(
             points_obj, ["qv", "quality", "quality_value"], required=False
         )
         min_qv = dataset.min_qv
-        excluded_gene_pattern = r"^(Deprecated|NegControl|Unassigned|Intergenic)"
     elif platform == "MERSCOPE":
         qv_col = resolve_col(
             points_obj,
@@ -546,7 +553,9 @@ def run_cellpose_segmentation(
         gene_col=gene_col,
         qv_col=qv_col,
         min_qv=min_qv,
-        excluded_gene_pattern=excluded_gene_pattern,
+        control_platform=platform,
+        is_gene_col=is_gene_col,
+        codeword_category_col=codeword_category_col,
         chunk_rows=config.memory.transcript_chunk_rows,
         dataset_name=dataset.name,
         status_every_chunks=config.memory.transcript_status_every_chunks,
