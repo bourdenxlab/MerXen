@@ -64,12 +64,15 @@ process ANNOTATE_REFERENCE_PREP {
 
     // PREP writes bundles only through merxen's ReferenceStore (flock, build
     // in <store>/.tmp-<uuid>, atomic rename, never deletes), never through a
-    // storeDir: build_hash is known only inside the task (plan §3.1). Its
-    // inputs are small JSON files hashed by content, so a re-created but
-    // identical panel file keeps the task cached. Which pair's copy of a
-    // shared panel reaches PREP first can differ between runs; a re-run then
-    // finds the bundle in the store and takes seconds.
-    cache "deep"
+    // storeDir: build_hash is known only inside the task (plan §3.1). It is
+    // never cached: the task hash could not see the builder code or the
+    // content of the --source files (paths only), so -resume would hand MAP
+    // a stale bundle after a builder fix or a changed source. Re-running it
+    // costs seconds when the bundle exists (the store checks build_hash),
+    // and bundle_ref.json holds only the bundle's identity, so an unchanged
+    // bundle gives byte-identical output and MAP (cache "deep" on it, M3)
+    // stays cached. Same pattern as MATERIALIZE_ALIGNMENT.
+    cache false
 
     publishDir { "${params.outdir}/annotation_reference_prep/${bundle.reference_id}/${bundle.panel_tag}" }, mode: "copy", overwrite: true
 

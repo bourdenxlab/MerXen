@@ -53,6 +53,7 @@ PLANNED_ANNOTATION_PARAMS = frozenset(
         "annotation_wmb_metadata_dir",
         "annotation_wmb_mapping_stats_path",
         "annotation_wmb_selfmap_test_cells_path",
+        "annotation_wmb_marker_gene_universe_path",
         "annotation_wmb_max_cells_per_cluster",
         "annotation_merfish_ccf_metadata_path",
         "annotation_auto_download",

@@ -39,6 +39,7 @@ class AnnotationPreflight {
             "annotation_wmb_metadata_dir",
             "annotation_wmb_mapping_stats_path",
             "annotation_wmb_selfmap_test_cells_path",
+            "annotation_wmb_marker_gene_universe_path",
             "annotation_merfish_ccf_metadata_path",
         ],
     ].asImmutable()
@@ -85,6 +86,10 @@ class AnnotationPreflight {
         }
         (OPTIONAL_PATH_PARAMS.both + OPTIONAL_PATH_PARAMS[species]).each { paramName ->
             appendOptionalPathCheck(errors, params?.get(paramName), paramName, label)
+        }
+        if (usesClusteredTables(settings)) {
+            // Only rows with a clustered-table stage build reference bundles.
+            appendSelfmapTestCellCheck(errors, species, params, label)
         }
     }
 
@@ -163,12 +168,35 @@ class AnnotationPreflight {
                 ).toString()
             }
         }
+        appendSelfmapTestCellCheck(errors, species, params, label)
         appendStoreCheck(errors, AnnotationReferences.referenceStore(params), "annotation_reference_store", label)
         def large = AnnotationReferences.referenceStoreLarge(params)
         if (large) {
             appendStoreCheck(errors, large, "annotation_reference_store_large", label)
         }
         return errors
+    }
+
+    /**
+     * Require the self-map test cells of a wmb_panel build while resolvability
+     * is on: the marker training cells must exclude them, or the M3b
+     * resolvability test set would overlap them (plan §3.2, §8.3).
+     */
+    private static void appendSelfmapTestCellCheck(List errors, Object species, Map params, String label) {
+        if (species != "mouse" || !("wmb_panel" in AnnotationReferences.referenceIds(params, species))) {
+            return
+        }
+        if (!AnnotationReferences.isTrue(params?.get("annotation_resolvability"), true)) {
+            return
+        }
+        if (!AnnotationReferences.pathText(params?.get("annotation_wmb_selfmap_test_cells_path"))) {
+            errors << (
+                "${label}: wmb_panel needs annotation_wmb_selfmap_test_cells_path " +
+                "(the WMB self-map test cells, research/selfmap/truth.csv) while " +
+                "annotation_resolvability is true: the marker training cells must " +
+                "exclude them"
+            ).toString()
+        }
     }
 
     private static void appendChoiceChecks(List errors, Map params, String label) {
