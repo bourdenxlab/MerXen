@@ -572,6 +572,41 @@ def _consistency_problems(
         names = df[Columns.level(level, "name")].astype(object).to_numpy()[rows]
         if bool((names != final_name[rows]).any()):
             problems.append(f"ct_final_name differs from ct_{level}_name")
+    problems += _final_chain_problems(df, species, final_level)
+    return problems
+
+
+def _final_chain_problems(
+    df: pd.DataFrame, species: Species, final_level: np.ndarray
+) -> list[str]:
+    """Check ``ct_final_level`` against the statuses along the level chain.
+
+    ``ct_final_level`` is the deepest confident level (§4.1), and a level is
+    confident only when every applicable coarser level is (§4.2: otherwise
+    ``parent_unresolved``). So every applicable level coarser than the final
+    level must be confident, and no deeper level may be. ``not_applicable``
+    levels (``nt`` for non-neurons) are skipped.
+    """
+    problems = []
+    chain = FINAL_LEVELS[species]
+    final_rank = np.array(
+        [chain.index(level) if level in chain else -1 for level in final_level]
+    )
+    for rank, level in enumerate(chain[1:], start=1):
+        status = df[Columns.level(level, "status")].astype(str).to_numpy()
+        confident = status == CellStatus.CONFIDENT
+        applicable = status != CellStatus.NOT_APPLICABLE
+        coarser = rank < final_rank
+        if bool((coarser & applicable & ~confident).any()):
+            problems.append(
+                f"ct_final_level is deeper than {level!r} on cells not confident at "
+                f"{level!r} (a confident level needs confident parents)"
+            )
+        if bool(((rank > final_rank) & confident).any()):
+            problems.append(
+                f"ct_final_level is coarser than {level!r} on cells confident at "
+                f"{level!r} (the final level is the deepest confident level)"
+            )
     return problems
 
 
@@ -605,7 +640,8 @@ def validate_label_table(
     unique non-null ``cell_id``; ``flag_low_counts == ~in_table``;
     ``low_counts`` exactly outside the table; ``ct_<L>_validated`` only on
     confident cells; no names where the level was not attempted or does not
-    apply; ``ct_final_*`` consistent with the per-level statuses and names;
+    apply; ``ct_final_level`` the deepest confident level, with every
+    applicable coarser level confident, and ``ct_final_name`` its name;
     soft columns (if present) float32 in [0, 1]; and, when ``h5ad_index`` is
     given, that the ``in_table`` ids equal the clustered H5AD index (same ids,
     any order).
