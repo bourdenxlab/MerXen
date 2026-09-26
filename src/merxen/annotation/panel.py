@@ -1343,12 +1343,17 @@ class _H5adCounts:
         )
         self.node = node
         encoding = str(node.attrs.get("encoding-type", "array"))
-        if encoding in {"csr_matrix", "csc_matrix"}:
+        self.matrix: Any
+        if encoding == "csr_matrix":
             try:
                 from anndata.io import sparse_dataset
             except ImportError:  # anndata < 0.11
                 from anndata.experimental import sparse_dataset
-            self.matrix: Any = sparse_dataset(node)
+            self.matrix = sparse_dataset(node)
+        elif encoding == "csc_matrix":
+            # Row blocks of a backed CSC matrix would each read every column,
+            # so a CSC matrix is loaded once and converted.
+            self.matrix = _h5ad_read_elem(node).tocsr()
         else:
             self.matrix = node
         self.shape = tuple(int(value) for value in self.matrix.shape)
