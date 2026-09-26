@@ -18,11 +18,13 @@ from scipy import sparse
 from merxen.annotation.config import AnnotationConfig, AnnotationPanelConfig
 from merxen.annotation.panel import (
     PANEL_GENES_FILE,
+    PANEL_GENES_INTERSECTION_FILE,
     PANEL_GENES_SETC_FILE,
     PANEL_REPORT_FILE,
     REQUIRED_BUNDLES_FILE,
     AnnotationPanel,
     ControlRegistry,
+    CuratedSetcFamily,
     KnownPanelFamily,
     PanelFile,
     PanelSource,
@@ -31,10 +33,12 @@ from merxen.annotation.panel import (
     SharedTissueMask,
     compute_panel,
     compute_panel_hash,
+    curated_setc_family,
     declared_panel,
     intersection_panel,
     jaccard,
     load_annotation_panel,
+    load_curated_setc_families,
     load_fallback_table,
     load_shared_tissue_mask,
     pair_symbol_lookup,
@@ -626,10 +630,11 @@ def test_setc_drops_platform_deviant_genes(tmp_path: Path) -> None:
 
 
 def test_setc_centres_on_the_pair_median(tmp_path: Path) -> None:
-    # Xenium reads every gene 2x deeper; only the planted 32x gene deviates
-    # from the pair median by more than 2 log2 units.
-    factors = {gene: 2.0 for gene in range(N_SHARED)}
-    factors[5] = 32.0
+    # Xenium reads every set-a gene (the 60 shared genes and H2AFX) 8x deeper:
+    # log2 3, above the threshold of 2. Only the planted 256x gene deviates
+    # from the pair median by more than 2; without centring every gene would.
+    factors = {gene: 8.0 for gene in range(N_SHARED + 1)}
+    factors[5] = 256.0
     result = compute_panel(
         make_pair(tmp_path, xenium_factor=factors),
         "human",
@@ -638,8 +643,192 @@ def test_setc_centres_on_the_pair_median(tmp_path: Path) -> None:
         clustering_config=clustering_config(),
     )
     assert result.panels["setc"].panel.excluded_ids == ["ENSG00000000005"]
-    assert result.report["setc"]["pair_median_log2_ratio"] == pytest.approx(
-        np.log2(2.001 / 1.001), rel=1e-6
+    report = result.report["setc"]
+    assert report["basis"] == "label_free_rule"
+    assert report["pair_median_log2_ratio"] == pytest.approx(
+        np.log2(8.001 / 1.001), rel=1e-6
+    )
+    assert report["excluded"]["ENSG00000000005"] == pytest.approx(
+        np.log2(256.001 / 1.001) - np.log2(8.001 / 1.001), rel=1e-6
+    )
+    assert report["excluded"]["ENSG00000000005"] == pytest.approx(5.0, abs=0.01)
+
+
+def set_a_ids() -> list[str]:
+    """The synthetic pair's set a: 60 shared genes plus H2AFX."""
+    return sorted([*shared_ids(), H2AFX_ID])
+
+
+def curated_family(
+    excluded: list[str], set_a_hash: str | None = None
+) -> CuratedSetcFamily:
+    return CuratedSetcFamily(
+        family_id="test_family",
+        species="human",
+        set_a_panel_hashes=frozenset({set_a_hash or compute_panel_hash(set_a_ids())}),
+        excluded_ids=tuple(sorted(excluded)),
+        excluded_symbols={gene: gene for gene in excluded},
+        rule="curated for the test",
+        source="test",
+        assets_sha256={"test.csv": "0" * 64},
+    )
+
+
+def test_curated_set_c_is_the_family_list_not_the_label_free_rule(
+    tmp_path: Path,
+) -> None:
+    # Gene 0 deviates on this pair; the curated family lists genes 1 and 2
+    # (and one gene outside set a). Set c follows the list.
+    listed = ["ENSG00000000001", "ENSG00000000002", "ENSG12312312312"]
+    result = compute_panel(
+        make_pair(tmp_path, xenium_factor={0: 16.0}),
+        "human",
+        output_dir=tmp_path / "out",
+        config=human_config(tmp_path),
+        clustering_config=clustering_config(),
+        setc_families=[curated_family(listed)],
+    )
+    setc = result.panels["setc"].panel
+    assert setc.excluded_ids == ["ENSG00000000001", "ENSG00000000002"]
+    report = result.report["setc"]
+    assert report["basis"] == "curated_family_list"
+    assert report["curated_family"]["family_id"] == "test_family"
+    assert report["curated_family"]["listed_not_in_set_a"] == ["ENSG12312312312"]
+    # The label-free rule is kept as a cross-check only.
+    check = report["label_free_cross_check"]
+    assert check["n_excluded"] == 1
+    assert check["only_label_free"] == {"ENSG00000000000": "GENE0"}
+    assert set(check["only_curated"]) == {"ENSG00000000001", "ENSG00000000002"}
+
+
+def test_curated_set_c_is_one_panel_for_every_pair_of_the_family(
+    tmp_path: Path,
+) -> None:
+    listed = ["ENSG00000000003"]
+    hashes = set()
+    for index, factors in enumerate(({0: 16.0}, {7: 0.0, 8: 64.0}, None)):
+        result = compute_panel(
+            make_pair(tmp_path, xenium_factor=factors, name=f"pair{index}"),
+            "human",
+            output_dir=tmp_path / f"out{index}",
+            config=human_config(tmp_path),
+            clustering_config=clustering_config(),
+            setc_families=[curated_family(listed)],
+        )
+        hashes.add(result.panels["setc"].panel.panel_hash)
+    assert len(hashes) == 1
+
+
+def test_curated_set_c_needs_no_mask_but_the_fallback_does(tmp_path: Path) -> None:
+    prepared = make_pair(tmp_path, xenium_factor={0: 16.0})
+    config = human_config(tmp_path)
+    curated = compute_panel(
+        prepared,
+        "human",
+        output_dir=tmp_path / "curated",
+        config=config,
+        clustering_config=clustering_config(),
+        setc_families=[curated_family(["ENSG00000000001"])],
+        require_shared_mask=True,
+    )
+    assert curated.panels["setc"].panel.excluded_ids == ["ENSG00000000001"]
+    assert curated.report["setc"]["mask_applied"] is False
+    refused = compute_panel(
+        prepared,
+        "human",
+        output_dir=tmp_path / "fallback",
+        config=config,
+        clustering_config=clustering_config(),
+        setc_families=[],
+        require_shared_mask=True,
+    )
+    assert "setc" not in refused.panels
+    assert "needs the shared tissue mask" in refused.report["setc_skipped"]
+    assert [b.purpose for b in refused.required.bundles] == [
+        "annotation",
+        "annotation",
+    ]
+    assert not (tmp_path / "fallback" / PANEL_GENES_SETC_FILE).exists()
+
+
+def test_set_c_report_records_the_mask_checksums(tmp_path: Path) -> None:
+    mask = make_mask(tmp_path)
+    result = compute_panel(
+        make_pair(tmp_path),
+        "human",
+        output_dir=tmp_path / "out",
+        config=human_config(tmp_path),
+        clustering_config=clustering_config(),
+        shared_mask=mask,
+        setc_families=[],
+        require_shared_mask=True,
+    )
+    recorded = result.report["setc"]["mask"]
+    assert (
+        recorded["mask_sha256"]
+        == hashlib.sha256(
+            (tmp_path / "shared_tissue_mask.npy").read_bytes()
+        ).hexdigest()
+    )
+    assert (
+        recorded["summary_sha256"]
+        == hashlib.sha256(
+            (tmp_path / "registration_summary.json").read_bytes()
+        ).hexdigest()
+    )
+
+
+def test_packaged_curated_family_is_the_e5_list() -> None:
+    (family,) = load_curated_setc_families("human")
+    assert family.family_id == "human_seta_e5"
+    assert len(family.excluded_ids) == 32
+    assert family.set_a_panel_hashes == {
+        # E5 set a (296) and the post-M0e set a (297, H2AX = H2AFX).
+        "dcab8c6d189593959ca2ea3e3867a23a5f81cce4db72756bfab85cacce75fd50",
+        "6e5fd5fb86ef0c3eaccf2efa5b792c9515b087fdf9e9cb6a3978d53268253dc3",
+    }
+    symbols = set(family.excluded_symbols.values())
+    assert {"APOE", "SOX10", "OLIG2", "MAG", "PTPRC"} <= symbols
+    # Canonical markers the label-free rule drops stay in the E5 set c.
+    assert not {"P2RY12", "GAD2", "VIP", "SPI1", "TREM2"} & symbols
+    assert load_curated_setc_families("mouse") == []
+
+
+def test_curated_family_matches_by_panel_or_family_hash() -> None:
+    ids = set_a_ids()
+    panel = _declared_intersection(ids)
+    family = curated_family(["ENSG00000000001"])
+    assert curated_setc_family(panel, [family]) is family
+    other = _declared_intersection(ids[1:])
+    assert curated_setc_family(other, [family]) is None
+    inherited = other.model_copy(
+        update={
+            "panel_family": panel.panel_family.model_copy(  # type: ignore[union-attr]
+                update={
+                    "basis": "inherited",
+                    "reference_panel_hash": panel.panel_hash,
+                }
+            )
+        }
+    )
+    assert curated_setc_family(inherited, [family]) is family
+
+
+def _declared_intersection(ids: list[str]) -> AnnotationPanel:
+    return AnnotationPanel(
+        name="intersection",
+        kind="intersection",
+        species="human",
+        platforms=["MERSCOPE", "XENIUM"],
+        sample_ids=["S_M", "S_X"],
+        panel_mode="intersection",
+        panel_hash=compute_panel_hash(ids),
+        n_genes=len(ids),
+        ensembl_ids=ids,
+        symbols=list(ids),
+        panel_family=panel_family(
+            ids, species="human", platforms=["MERSCOPE", "XENIUM"]
+        ),
     )
 
 
@@ -876,6 +1065,61 @@ def test_set_c_equal_to_set_a_shares_its_bundle(tmp_path: Path) -> None:
         result.panels["intersection"].panel.panel_hash
     )
     assert result.required.n_required == 2
+    # One bundle, both uses recorded for MAP.
+    whb = result.required.bundles[0]
+    assert whb.reference_id == "whb_frontal_supc_clus"
+    assert [use.purpose for use in whb.uses] == ["annotation", "setc_sensitivity"]
+    assert whb.has_use("setc_sensitivity")
+    assert [use.panel_file for use in whb.uses] == [
+        PANEL_GENES_FILE,
+        PANEL_GENES_SETC_FILE,
+    ]
+
+
+def test_intersection_equal_to_a_platform_panel_keeps_its_use(tmp_path: Path) -> None:
+    # Xenium declares a subset of the MERSCOPE panel (Jaccard < 0.9): the
+    # intersection is the Xenium panel, one bundle serves both uses.
+    extra = {f"MEXTRA{i}": f"ENSG66600{i:06d}" for i in range(40)}
+    prepared = make_pair(tmp_path, merscope_extra_genes=extra, merscope_native_ids=True)
+    result = compute_panel(
+        prepared,
+        "human",
+        output_dir=tmp_path / "out",
+        config=human_config(tmp_path),
+        clustering_config=clustering_config(),
+        panel_files={"S_X": _xenium_subset_table(tmp_path)},
+    )
+    assert result.report["panel_mode"] == "per_platform"
+    xenium = result.panels["xenium"].panel
+    assert result.panels["intersection"].panel.panel_hash == xenium.panel_hash
+    whb = [
+        b
+        for b in result.required.bundles
+        if b.reference_id == "whb_frontal_supc_clus"
+        and b.panel_hash == xenium.panel_hash
+    ]
+    assert len(whb) == 1
+    assert [(use.purpose, use.panel_file) for use in whb[0].uses] == [
+        ("annotation", "panel_genes_xenium.json"),
+        ("intersection_xpanel", PANEL_GENES_INTERSECTION_FILE),
+    ]
+    assert result.required.n_required == 4
+    loaded = RequiredBundles.model_validate_json(
+        (tmp_path / "out" / REQUIRED_BUNDLES_FILE).read_text()
+    )
+    assert loaded == result.required
+
+
+def _xenium_subset_table(tmp_path: Path) -> Path:
+    """A Xenium gene table declaring only genes MERSCOPE also declares."""
+    path = tmp_path / "xenium_panel.csv"
+    pd.DataFrame(
+        {
+            "gene": [*shared_symbols(), "H2AFX"],
+            "ensembl_id": [*shared_ids(), H2AFX_ID],
+        }
+    ).to_csv(path, index=False)
+    return path
 
 
 def test_per_platform_pair_needs_five_bundles(tmp_path: Path) -> None:
@@ -1022,6 +1266,39 @@ def test_panel_from_gene_list(tmp_path: Path) -> None:
     assert (
         load_annotation_panel(tmp_path / "out" / PANEL_GENES_FILE).kind == "gene_list"
     )
+    assert result.report["setc"] is None
+
+
+def test_gene_list_of_a_curated_family_also_gets_its_set_c(tmp_path: Path) -> None:
+    # A prepare-only run of the seeded set a builds the set-c bundle too; it
+    # is the same panel (hash) a map_first pair of the family asks for.
+    path = tmp_path / "genes.csv"
+    pd.DataFrame({"ensembl_id": set_a_ids()}).to_csv(path, index=False)
+    family = curated_family(["ENSG00000000001", "ENSG00000000002"])
+    result = panel_from_gene_list(
+        path,
+        "human",
+        output_dir=tmp_path / "out",
+        segmentation="proseg_hybrid",
+        setc_families=[family],
+    )
+    assert [(b.reference_id, b.purpose) for b in result.required.bundles] == [
+        ("whb_frontal_supc_clus", "annotation"),
+        ("whb_frontal_supc_clus", "setc_sensitivity"),
+        ("seaad_mr_panel", "annotation"),
+    ]
+    setc = load_annotation_panel(tmp_path / "out" / PANEL_GENES_SETC_FILE)
+    pair = compute_panel(
+        make_pair(tmp_path, xenium_factor={0: 16.0}),
+        "human",
+        output_dir=tmp_path / "pair",
+        config=human_config(tmp_path),
+        clustering_config=clustering_config(),
+        setc_families=[family],
+    )
+    assert setc.panel_hash == pair.panels["setc"].panel.panel_hash
+    assert result.report["setc"]["basis"] == "curated_family_list"
+    assert result.report["setc"]["pseudobulk"] == {}
 
 
 def test_cli_annotation_panel(tmp_path: Path) -> None:

@@ -23,11 +23,17 @@ Aliases, overrides, the exact-case species test and trust states are M3b.
 
 Panel modes (plan §3.2, §8.5): two platform panels with Jaccard >= 0.9 form an
 ``intersection`` panel (human: set a), and same-panel human pairs also get set
-c = set a minus the genes whose label-free pseudobulk platform ratio deviates
+c. For the seeded set-a family (the 296-gene evidence panel and its post-M0e
+297-gene form) set c is set a minus the curated E5 list of 32 platform-deviant
+genes (``setc_exclusions_human.csv``), the set E5 validated; it is one
+family-level panel shared by every pair. Other families fall back to the
+label-free rule (a gene is dropped when its pseudobulk platform ratio deviates
 by more than 2 log2 units from the pair median, over table cells inside the
-shared tissue mask when one is available. Other pairs are ``per_platform``:
-each platform's own panel plus their intersection for cross-platform
-statistics. Unpaired samples use their own panel (``single_sample``).
+shared tissue mask), flagged ``label_free_rule`` in the report; the rule is
+also computed as a cross-check for the curated family whenever prepared data
+exist. Other pairs are ``per_platform``: each platform's own panel plus their
+intersection for cross-platform statistics. Unpaired samples use their own
+panel (``single_sample``).
 """
 
 from __future__ import annotations
@@ -60,7 +66,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-PANEL_SCHEMA_VERSION: Final = 1
+# 2: RequiredBundle.uses; set-c report basis and curated family.
+PANEL_SCHEMA_VERSION: Final = 2
+SETC_FAMILY_FILES: Final[dict[str, str]] = {"human": "setc_families_human.csv"}
+SETC_EXCLUSION_FILES: Final[dict[str, str]] = {"human": "setc_exclusions_human.csv"}
 PANEL_GENES_FILE: Final = "panel_genes.json"
 PANEL_GENES_SETC_FILE: Final = "panel_genes_setc.json"
 PANEL_GENES_INTERSECTION_FILE: Final = "panel_genes_intersection.json"
@@ -334,8 +343,11 @@ class AnnotationPanel(_PanelModel):
     def symbols_sha256(self) -> str:
         """Return the sha256 of the panel's ID-to-symbols table.
 
-        Part of ``build_hash`` (plan §8.4: the resolution table's sha256), so
-        a bundle whose panel stub carries other symbols is a new build.
+        Recorded in ``bundle.json`` (``built_from_panel``) and not part of
+        ``build_hash``: bundles are keyed by the resolved IDs, whose
+        resolution the panel hash already covers, and carry no symbols, so
+        panels with the same IDs but other symbols (MERSCOPE H2AX, Xenium
+        H2AFX; an ID-only gene list) share one bundle.
 
         Returns:
             sha256 of the canonical JSON ``{id: sorted distinct symbols}``.
@@ -382,20 +394,42 @@ def load_annotation_panel(path: Path | str) -> AnnotationPanel:
     return AnnotationPanel.model_validate_json(Path(path).read_text(encoding="utf-8"))
 
 
+class BundleUse(_PanelModel):
+    """One use of a required bundle (a purpose on a named panel).
+
+    Attributes:
+        purpose: Why the bundle is needed.
+        panel_name: Annotation panel name (``None`` if panel-independent).
+        panel_file: ``panel_genes*.json`` file name (``None`` if
+            panel-independent).
+    """
+
+    purpose: BundlePurpose
+    panel_name: str | None = None
+    panel_file: str | None = None
+
+
 class RequiredBundle(_PanelModel):
     """One (reference, panel) bundle a pair x segmentation needs.
+
+    Two uses can share one bundle, e.g. the intersection panel equal to a
+    platform panel of a ``per_platform`` pair, or set c equal to set a; the
+    bundle is listed once and ``uses`` names every purpose, so MAP selects
+    bundles by use. ``purpose``, ``panel_name`` and ``panel_file`` repeat the
+    first use.
 
     Attributes:
         reference_id: Store id.
         role: Reference role.
         species: Species.
-        purpose: Why the bundle is needed.
+        purpose: Why the bundle is needed (its first use).
         panel_name: Annotation panel name (``None`` if panel-independent).
         panel_hash: Panel hash (``None`` if panel-independent).
         panel_file: ``panel_genes*.json`` file name in the ANNOTATE_PANEL
             output directory (``None`` if panel-independent).
         n_panel_genes: Genes of that panel (``None`` if panel-independent);
             ``ANNOTATE_REFERENCE_PREP`` sizes its resources from it.
+        uses: Every use of the bundle, the first one included.
     """
 
     reference_id: str
@@ -406,6 +440,24 @@ class RequiredBundle(_PanelModel):
     panel_hash: str | None = None
     panel_file: str | None = None
     n_panel_genes: int | None = Field(default=None, ge=0)
+    uses: list[BundleUse] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _first_use(self: RequiredBundle) -> RequiredBundle:
+        first = BundleUse(
+            purpose=self.purpose,
+            panel_name=self.panel_name,
+            panel_file=self.panel_file,
+        )
+        if not self.uses:
+            self.uses = [first]
+        elif self.uses[0] != first:
+            raise ValueError("uses[0] must repeat purpose, panel_name and panel_file")
+        return self
+
+    def has_use(self, purpose: BundlePurpose) -> bool:
+        """Return whether the bundle serves a purpose."""
+        return any(use.purpose == purpose for use in self.uses)
 
     @property
     def key(self) -> tuple[str, str, str | None]:
@@ -1214,6 +1266,20 @@ class SharedTissueMask:
     fixed_platform: str
     summary_path: Path | None = None
 
+    def describe(self) -> dict[str, Any]:
+        """Return the mask files and their sha256, for ``panel_report.json``."""
+        return {
+            "mask_path": str(self.mask_path),
+            "mask_sha256": _file_sha256(self.mask_path),
+            "summary_path": None
+            if self.summary_path is None
+            else str(self.summary_path),
+            "summary_sha256": None
+            if self.summary_path is None
+            else _file_sha256(self.summary_path),
+            "fixed_platform": self.fixed_platform,
+        }
+
     def contains(self, xy: np.ndarray, *, block_rows: int = 2048) -> np.ndarray:
         """Return whether points fall inside the shared tissue.
 
@@ -1498,36 +1564,161 @@ def platform_pseudobulk(
     )
 
 
+@dataclass(frozen=True)
+class CuratedSetcFamily:
+    """A set-a family whose set c is a curated exclusion list (plan §3.2, D-A7).
+
+    Attributes:
+        family_id: Family id (``human_seta_e5``).
+        species: Species.
+        set_a_panel_hashes: Set-a panel hashes of the family (the 296-gene
+            evidence panel and its post-M0e 297-gene form).
+        excluded_ids: The curated platform-deviant gene IDs.
+        excluded_symbols: Their symbols, by ID.
+        rule: How the list was derived.
+        source: Where it comes from.
+        assets_sha256: sha256 of the family and exclusion asset files.
+    """
+
+    family_id: str
+    species: str
+    set_a_panel_hashes: frozenset[str]
+    excluded_ids: tuple[str, ...]
+    excluded_symbols: Mapping[str, str]
+    rule: str
+    source: str
+    assets_sha256: Mapping[str, str]
+
+    def describe(self) -> dict[str, Any]:
+        """Return the family as it is recorded in ``panel_report.json``."""
+        return {
+            "family_id": self.family_id,
+            "set_a_panel_hashes": sorted(self.set_a_panel_hashes),
+            "n_listed": len(self.excluded_ids),
+            "rule": self.rule,
+            "source": self.source,
+            "assets_sha256": dict(sorted(self.assets_sha256.items())),
+        }
+
+
+def load_curated_setc_families(species: str) -> list[CuratedSetcFamily]:
+    """Load the packaged curated set-c families of a species.
+
+    Args:
+        species: ``"human"`` or ``"mouse"`` (mouse has none: set c is a
+            human cross-platform sensitivity panel).
+
+    Returns:
+        The families.
+
+    Raises:
+        ValueError: If a family has no exclusions or an ID is not an
+            Ensembl ID of the species.
+    """
+    if species not in SETC_FAMILY_FILES:
+        return []
+    from merxen.annotation.vocab import asset_path, load_asset_table
+
+    family_file = SETC_FAMILY_FILES[species]
+    exclusion_file = SETC_EXCLUSION_FILES[species]
+    families = load_asset_table(family_file)
+    exclusions = load_asset_table(exclusion_file)
+    digests = {
+        name: _file_sha256(asset_path(name)) for name in (family_file, exclusion_file)
+    }
+    pattern = SPECIES_ID_PATTERNS[species]
+    result: list[CuratedSetcFamily] = []
+    for family_id, rows in families.groupby("family_id", sort=True):
+        listed = exclusions[exclusions["family_id"] == family_id]
+        if listed.empty:
+            raise ValueError(f"{exclusion_file}: family {family_id!r} lists no gene")
+        bad = [gene for gene in listed["ensembl_id"] if not pattern.match(gene)]
+        if bad:
+            raise ValueError(f"{exclusion_file}: not {species} Ensembl IDs: {bad}")
+        result.append(
+            CuratedSetcFamily(
+                family_id=str(family_id),
+                species=species,
+                set_a_panel_hashes=frozenset(rows["set_a_panel_hash"]),
+                excluded_ids=tuple(sorted(listed["ensembl_id"])),
+                excluded_symbols=dict(
+                    zip(listed["ensembl_id"], listed["gene_symbol"], strict=True)
+                ),
+                rule=str(rows["rule"].iloc[0]),
+                source=str(rows["source"].iloc[0]),
+                assets_sha256=digests,
+            )
+        )
+    return result
+
+
+def curated_setc_family(
+    set_a: AnnotationPanel, families: Sequence[CuratedSetcFamily]
+) -> CuratedSetcFamily | None:
+    """Return the curated set-c family of a set-a panel, if it has one.
+
+    A set a belongs to a family when its panel hash, or the reference hash of
+    the panel family it inherited (M3b), is one of the family's set-a hashes.
+
+    Args:
+        set_a: The set-a (intersection or gene-list) panel.
+        families: Curated families.
+
+    Returns:
+        The family, or ``None`` (set c then follows the label-free rule).
+    """
+    hashes = {set_a.panel_hash}
+    if set_a.panel_family is not None:
+        hashes.add(set_a.panel_family.reference_panel_hash)
+    for family in families:
+        if family.species == set_a.species and hashes & family.set_a_panel_hashes:
+            return family
+    return None
+
+
 class SetcReport(_PanelModel):
     """How set c was derived (``panel_report.json``; plan §3.2, D-A7).
 
     Attributes:
+        basis: ``curated_family_list`` (the seeded set-a family: the E5
+            exclusions) or ``label_free_rule`` (fallback for other families).
         rule: The rule applied.
-        max_abs_log2_deviation: Threshold on the centred log2 ratio.
+        curated_family: The curated family (``basis`` curated), else ``None``.
+        max_abs_log2_deviation: Threshold of the label-free rule.
         log2_pseudocount: Pseudocount added to both means.
-        pair_median_log2_ratio: Median ``log2(mean X / mean M)`` over set a.
+        pair_median_log2_ratio: Median ``log2(mean X / mean M)`` over set a
+            (``None`` without pseudobulk).
         mask_applied: Whether the shared tissue mask restricted the cells.
         mask_reason: Why the mask was not applied, when it was not.
-        pseudobulk: Cell counts per platform (means omitted).
+        mask: The mask files and their sha256, when a mask was given.
+        pseudobulk: Cell counts per platform (means omitted; empty without
+            prepared data).
         n_set_a: Set-a genes.
         n_setc: Set-c genes.
-        excluded: Centred log2 ratio of each excluded gene, by ID.
+        excluded: Centred log2 ratio of each excluded gene by ID (``None``
+            without pseudobulk).
         excluded_symbols: Symbol of each excluded gene, by ID.
         centred_log2_ratio: Centred log2 ratio of every set-a gene, by ID.
+        label_free_cross_check: For a curated set c with pseudobulk, what the
+            label-free rule would drop and how it compares; else ``None``.
     """
 
+    basis: Literal["curated_family_list", "label_free_rule"]
     rule: str
+    curated_family: dict[str, Any] | None = None
     max_abs_log2_deviation: float
     log2_pseudocount: float
-    pair_median_log2_ratio: float
+    pair_median_log2_ratio: float | None
     mask_applied: bool
     mask_reason: str | None = None
+    mask: dict[str, Any] | None = None
     pseudobulk: dict[str, dict[str, int | str | bool]]
     n_set_a: int
     n_setc: int
-    excluded: dict[str, float]
+    excluded: dict[str, float | None]
     excluded_symbols: dict[str, str]
     centred_log2_ratio: dict[str, float]
+    label_free_cross_check: dict[str, Any] | None = None
 
 
 SETC_RULE: Final = (
@@ -1535,40 +1726,14 @@ SETC_RULE: Final = (
     "label-free pseudobulk over table cells (inside the shared tissue mask "
     "when available)"
 )
+SETC_CURATED_RULE: Final = "set a minus the curated family exclusion list"
 
 
-def setc_panel(
-    set_a: AnnotationPanel,
+def _centred_ratios(
+    ids: Sequence[str],
     pseudobulk: Mapping[str, PlatformPseudobulk],
-    *,
-    max_abs_log2_deviation: float = 2.0,
-    log2_pseudocount: float = 1e-3,
-    mask_reason: str | None = None,
-    known_families: Sequence[KnownPanelFamily] = (),
-    family_min_jaccard: float = 0.95,
-) -> tuple[AnnotationPanel, SetcReport]:
-    """Return set c: set a minus the pair's platform-deviant genes.
-
-    Rule (plan §3.2, D-A7): ``r = log2((mean_X + c) / (mean_M + c))`` per set-a
-    gene from label-free pseudobulk over table cells; a gene is deviant when
-    ``|r - median(r)| > max_abs_log2_deviation``. The E5 list of 32 genes
-    (label-aware, in confident oligodendrocytes) is the expected result [M].
-
-    Args:
-        set_a: The intersection panel.
-        pseudobulk: Pseudobulk per platform (``"MERSCOPE"``, ``"XENIUM"``).
-        max_abs_log2_deviation: Threshold (2).
-        log2_pseudocount: ``c`` (1e-3, as the E5 ratios).
-        mask_reason: Why no mask was applied, for the report.
-        known_families: Families to inherit from.
-        family_min_jaccard: Family Jaccard threshold.
-
-    Returns:
-        The set-c panel and its report.
-
-    Raises:
-        ValueError: If a platform's pseudobulk is missing or empty.
-    """
+    log2_pseudocount: float,
+) -> tuple[np.ndarray, float]:
     for platform in ("MERSCOPE", "XENIUM"):
         if platform not in pseudobulk:
             raise ValueError(f"set c needs a {platform} pseudobulk")
@@ -1576,7 +1741,6 @@ def setc_panel(
             raise ValueError(f"set c: no {platform} table cells were used")
     xenium = pseudobulk["XENIUM"].mean_counts
     merscope = pseudobulk["MERSCOPE"].mean_counts
-    ids = list(set_a.ensembl_ids)
     ratios = np.array(
         [
             np.log2(
@@ -1588,10 +1752,85 @@ def setc_panel(
         dtype=np.float64,
     )
     median = float(np.median(ratios)) if len(ratios) else 0.0
-    centred = ratios - median
-    deviant = np.abs(centred) > max_abs_log2_deviation
-    kept = [gene_id for gene_id, drop in zip(ids, deviant, strict=True) if not drop]
-    excluded = [gene_id for gene_id, drop in zip(ids, deviant, strict=True) if drop]
+    return ratios - median, median
+
+
+def setc_panel(
+    set_a: AnnotationPanel,
+    pseudobulk: Mapping[str, PlatformPseudobulk] | None,
+    *,
+    curated: CuratedSetcFamily | None = None,
+    max_abs_log2_deviation: float = 2.0,
+    log2_pseudocount: float = 1e-3,
+    mask_reason: str | None = None,
+    mask: Mapping[str, Any] | None = None,
+    known_families: Sequence[KnownPanelFamily] = (),
+    family_min_jaccard: float = 0.95,
+) -> tuple[AnnotationPanel, SetcReport]:
+    """Return set c: set a minus the platform-deviant genes.
+
+    * ``curated`` given (the seeded set-a family): set a minus the curated
+      list, the E5 set c (32 genes excluded label-aware, in confident
+      oligodendrocytes, in >= 3 of 4 pairs). The panel is the same for every
+      pair of the family. With ``pseudobulk`` the label-free rule is computed
+      too, as a cross-check only.
+    * Otherwise the label-free rule (plan §3.2): ``r = log2((mean_X + c) /
+      (mean_M + c))`` per set-a gene from pseudobulk over table cells; a gene
+      is deviant when ``|r - median(r)| > max_abs_log2_deviation``. On the
+      E5 pairs this rule drops 44-73 genes, including canonical markers, so
+      it is a flagged fallback for families without a curated list.
+
+    Args:
+        set_a: The intersection (or gene-list) panel.
+        pseudobulk: Pseudobulk per platform (``"MERSCOPE"``, ``"XENIUM"``);
+            may be ``None`` only with ``curated``.
+        curated: The curated family of ``set_a``.
+        max_abs_log2_deviation: Label-free threshold (2).
+        log2_pseudocount: ``c`` (1e-3, as the E5 ratios).
+        mask_reason: Why no mask was applied, for the report.
+        mask: The mask's files and sha256, for the report.
+        known_families: Families to inherit from.
+        family_min_jaccard: Family Jaccard threshold.
+
+    Returns:
+        The set-c panel and its report.
+
+    Raises:
+        ValueError: If the label-free rule lacks a platform's pseudobulk or
+            a platform used no cells.
+    """
+    ids = list(set_a.ensembl_ids)
+    centred: np.ndarray | None = None
+    median: float | None = None
+    cross_check_error: str | None = None
+    if pseudobulk is not None:
+        try:
+            centred, median = _centred_ratios(ids, pseudobulk, log2_pseudocount)
+        except ValueError as error:
+            if curated is None:
+                raise
+            # The curated set c does not depend on the pseudobulk.
+            cross_check_error = str(error)
+            pseudobulk = None
+    elif curated is None:
+        raise ValueError("the label-free set-c rule needs a pseudobulk per platform")
+    label_free = (
+        None
+        if centred is None
+        else [
+            gene_id
+            for gene_id, value in zip(ids, centred, strict=True)
+            if abs(value) > max_abs_log2_deviation
+        ]
+    )
+    if curated is not None:
+        listed = set(curated.excluded_ids)
+        excluded = [gene_id for gene_id in ids if gene_id in listed]
+    else:
+        assert label_free is not None
+        excluded = label_free
+    excluded_set = set(excluded)
+    kept = [gene_id for gene_id in ids if gene_id not in excluded_set]
     symbol_of = dict(zip(set_a.ensembl_ids, set_a.symbols, strict=True))
     position = {gene_id: index for index, gene_id in enumerate(set_a.ensembl_ids)}
     panel = AnnotationPanel(
@@ -1620,14 +1859,54 @@ def setc_panel(
             min_jaccard=family_min_jaccard,
         ),
     )
+    ratio_of = (
+        {}
+        if centred is None
+        else {
+            gene_id: round(float(value), 6)
+            for gene_id, value in zip(ids, centred, strict=True)
+        }
+    )
+    cross_check: dict[str, Any] | None = (
+        None if cross_check_error is None else {"error": cross_check_error}
+    )
+    if curated is not None and label_free is not None:
+        label_free_set = set(label_free)
+        cross_check = {
+            "rule": SETC_RULE,
+            "n_excluded": len(label_free),
+            "n_in_curated_list": len(label_free_set & excluded_set),
+            "only_label_free": {
+                gene_id: symbol_of[gene_id]
+                for gene_id in label_free
+                if gene_id not in excluded_set
+            },
+            "only_curated": {
+                gene_id: symbol_of[gene_id]
+                for gene_id in excluded
+                if gene_id not in label_free_set
+            },
+        }
     report = SetcReport(
-        rule=SETC_RULE,
+        basis="curated_family_list" if curated is not None else "label_free_rule",
+        rule=SETC_CURATED_RULE if curated is not None else SETC_RULE,
+        curated_family=None
+        if curated is None
+        else {
+            **curated.describe(),
+            "n_listed_in_set_a": len(excluded),
+            "listed_not_in_set_a": sorted(set(curated.excluded_ids) - set(ids)),
+        },
         max_abs_log2_deviation=max_abs_log2_deviation,
         log2_pseudocount=log2_pseudocount,
-        pair_median_log2_ratio=round(median, 6),
-        mask_applied=all(item.mask_applied for item in pseudobulk.values()),
-        mask_reason=mask_reason,
-        pseudobulk={
+        pair_median_log2_ratio=None if median is None else round(median, 6),
+        mask_applied=pseudobulk is not None
+        and all(item.mask_applied for item in pseudobulk.values()),
+        mask_reason=mask_reason if pseudobulk is not None else "no prepared data",
+        mask=None if mask is None else dict(mask),
+        pseudobulk={}
+        if pseudobulk is None
+        else {
             platform: {
                 "sample_id": item.sample_id,
                 "n_objects": item.n_objects,
@@ -1639,16 +1918,10 @@ def setc_panel(
         },
         n_set_a=len(ids),
         n_setc=len(kept),
-        excluded={
-            gene_id: round(float(value), 6)
-            for gene_id, value, drop in zip(ids, centred, deviant, strict=True)
-            if drop
-        },
+        excluded={gene_id: ratio_of.get(gene_id) for gene_id in excluded},
         excluded_symbols={gene_id: symbol_of[gene_id] for gene_id in excluded},
-        centred_log2_ratio={
-            gene_id: round(float(value), 6)
-            for gene_id, value in zip(ids, centred, strict=True)
-        },
+        centred_log2_ratio=ratio_of,
+        label_free_cross_check=cross_check,
     )
     return panel, report
 
@@ -1706,7 +1979,8 @@ def required_bundles(
         refused_panels: Panel names that get no bundle.
 
     Returns:
-        Distinct bundles in a stable order.
+        Distinct bundles (one per key) in a stable order; a bundle serving
+        several purposes lists each in ``uses``.
     """
     refused = set(refused_panels)
     if panel_mode == "intersection":
@@ -1730,7 +2004,7 @@ def required_bundles(
         )
     )
     bundles: list[RequiredBundle] = []
-    seen: set[tuple[str, str, str | None]] = set()
+    by_key: dict[tuple[str, str, str | None], RequiredBundle] = {}
 
     def add(
         spec: AnnotationReferenceSpec, purpose: BundlePurpose, name: str | None
@@ -1748,9 +2022,13 @@ def required_bundles(
             panel_file=None if panel_file is None else panel_file.file_name,
             n_panel_genes=None if panel_file is None else panel_file.panel.n_genes,
         )
-        if bundle.key not in seen:
-            seen.add(bundle.key)
+        existing = by_key.get(bundle.key)
+        if existing is None:
+            by_key[bundle.key] = bundle
             bundles.append(bundle)
+        elif bundle.uses[0] not in existing.uses:
+            # One PREP bundle, several uses: keep every purpose for MAP.
+            existing.uses.append(bundle.uses[0])
 
     for spec in references:
         if spec.species != species:
@@ -1980,6 +2258,8 @@ def compute_panel(
     shared_mask: SharedTissueMask | None = None,
     min_counts: int | None = None,
     known_families: Sequence[KnownPanelFamily] = (),
+    setc_families: Sequence[CuratedSetcFamily] | None = None,
+    require_shared_mask: bool = False,
 ) -> PanelComputation:
     """Run ``ANNOTATE_PANEL`` for one pair x segmentation (plan §3.2).
 
@@ -2000,6 +2280,11 @@ def compute_panel(
         min_counts: Table-cell threshold (default: the clustering config's,
             then the annotation config's, then 10).
         known_families: Families to inherit from.
+        setc_families: Curated set-c families (default: the packaged ones).
+        require_shared_mask: Refuse a label-free set c whose pseudobulk
+            cannot use the shared tissue mask (pipeline runs of aligned
+            pairs: a whole-section or stale mask must never define set c).
+            A curated set c needs no mask.
 
     Returns:
         What was written.
@@ -2007,6 +2292,8 @@ def compute_panel(
     config = config or AnnotationConfig(species=species)
     if config.species != species:
         raise ValueError(f"annotation config is for {config.species}, not {species}")
+    if setc_families is None:
+        setc_families = load_curated_setc_families(species)
     panel_config = config.panel
     registry = ControlRegistry.from_config(panel_config)
     clustering = dict(clustering_config or {})
@@ -2099,26 +2386,42 @@ def compute_panel(
     setc_report: SetcReport | None = None
     setc_skipped: str | None = None
     if mode == "intersection" and species == "human":
+        curated = curated_setc_family(built["intersection"], setc_families)
         mask, mask_reason = _mask_for_samples(shared_mask, samples)
-        pseudobulk = {
-            sample.platform: platform_pseudobulk(
-                sample.h5ad_path,
-                declared=panel,
-                min_counts=min_counts,
-                registry=registry,
-                mask=mask,
+        if curated is None and mask is None and require_shared_mask:
+            setc_skipped = (
+                "label-free set c needs the shared tissue mask of this aligned "
+                f"pair ({mask_reason}); set a has no curated set-c family"
             )
-            for sample, panel in zip(samples, declared, strict=True)
-        }
-        built["setc"], setc_report = setc_panel(
-            built["intersection"],
-            pseudobulk,
-            max_abs_log2_deviation=panel_config.setc_max_abs_log2_deviation,
-            log2_pseudocount=panel_config.setc_log2_pseudocount,
-            mask_reason=mask_reason,
-            known_families=known_families,
-            family_min_jaccard=family_min_jaccard,
-        )
+            logger.warning("Set c refused: %s", setc_skipped)
+        else:
+            if curated is None:
+                logger.warning(
+                    "Set a %s has no curated set-c family; set c follows the "
+                    "label-free fallback rule (flagged label_free_rule)",
+                    built["intersection"].panel_hash[:16],
+                )
+            pseudobulk = {
+                sample.platform: platform_pseudobulk(
+                    sample.h5ad_path,
+                    declared=panel,
+                    min_counts=min_counts,
+                    registry=registry,
+                    mask=mask,
+                )
+                for sample, panel in zip(samples, declared, strict=True)
+            }
+            built["setc"], setc_report = setc_panel(
+                built["intersection"],
+                pseudobulk,
+                curated=curated,
+                max_abs_log2_deviation=panel_config.setc_max_abs_log2_deviation,
+                log2_pseudocount=panel_config.setc_log2_pseudocount,
+                mask_reason=mask_reason,
+                mask=None if shared_mask is None else shared_mask.describe(),
+                known_families=known_families,
+                family_min_jaccard=family_min_jaccard,
+            )
     elif mode == "intersection":
         setc_skipped = "set c is a human cross-platform sensitivity panel"
     refused: dict[str, str] = {}
@@ -2254,6 +2557,7 @@ def panel_from_gene_list(
     pair_id: str | None = None,
     segmentation: str | None = None,
     known_families: Sequence[KnownPanelFamily] = (),
+    setc_families: Sequence[CuratedSetcFamily] | None = None,
 ) -> PanelComputation:
     """Build the panel files from a gene list (``annotation_panel_genes_path``).
 
@@ -2270,6 +2574,8 @@ def panel_from_gene_list(
         pair_id: Pair id, for the record.
         segmentation: Segmentation, for the record.
         known_families: Families to inherit from.
+        setc_families: Curated set-c families (default: the packaged ones);
+            a human gene list of such a family also gets its set c.
 
     Returns:
         What was written.
@@ -2277,6 +2583,8 @@ def panel_from_gene_list(
     config = config or AnnotationConfig(species=species)
     panel_config = config.panel
     registry = ControlRegistry.from_config(panel_config)
+    if setc_families is None:
+        setc_families = load_curated_setc_families(species)
     raw = read_panel_file(path)
     fallback = load_fallback_table(panel_config.gene_id_fallback_csv, species)
     platform_value = platform.upper() if platform else None
@@ -2301,6 +2609,22 @@ def panel_from_gene_list(
         else {}
     )
     panel_file_map = {"gene_list": PanelFile(panel=panel, file_name=PANEL_GENES_FILE)}
+    # A gene list of the seeded set-a family also gets its curated set c, so a
+    # prepare-only run builds every bundle a map_first pair of the family
+    # needs (the label-free rule needs paired data and is not applied).
+    setc_report: SetcReport | None = None
+    curated = curated_setc_family(panel, setc_families) if species == "human" else None
+    if curated is not None:
+        setc, setc_report = setc_panel(
+            panel,
+            None,
+            curated=curated,
+            max_abs_log2_deviation=panel_config.setc_max_abs_log2_deviation,
+            log2_pseudocount=panel_config.setc_log2_pseudocount,
+            known_families=known_families,
+            family_min_jaccard=panel_config.family_min_jaccard,
+        )
+        panel_file_map["setc"] = PanelFile(panel=setc, file_name=PANEL_GENES_SETC_FILE)
     bundles = required_bundles(
         panel_file_map,
         references=config.references,
@@ -2337,22 +2661,25 @@ def panel_from_gene_list(
         "declared_panels": {"gene_list": _declared_report(declared)},
         "cross_platform_id_matches": [],
         "annotation_panels": {
-            "gene_list": {
-                "file": PANEL_GENES_FILE,
-                "kind": "gene_list",
-                "panel_hash": panel.panel_hash,
-                "n_genes": panel.n_genes,
-                "platforms": panel.platforms,
+            name: {
+                "file": item.file_name,
+                "kind": item.panel.kind,
+                "panel_hash": item.panel.panel_hash,
+                "n_genes": item.panel.n_genes,
+                "platforms": item.panel.platforms,
                 "panel_family": (
                     None
-                    if panel.panel_family is None
-                    else panel.panel_family.model_dump(mode="json")
+                    if item.panel.panel_family is None
+                    else item.panel.panel_family.model_dump(mode="json")
                 ),
                 "refused": refused.get("gene_list"),
             }
+            for name, item in panel_file_map.items()
         },
-        "setc": None,
-        "setc_skipped": "no paired prepared data",
+        "setc": None if setc_report is None else setc_report.model_dump(mode="json"),
+        "setc_skipped": None
+        if setc_report is not None
+        else "no paired prepared data and no curated set-c family",
         "n_required_bundles": required.n_required,
     }
     return _write_panel_outputs(Path(output_dir), report, panel_file_map, required)
