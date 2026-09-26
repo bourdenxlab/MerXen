@@ -13,7 +13,8 @@ into ``uns`` later without surprises:
 - no list holds a mapping (h5ad raises ``TypeError`` on lists of dicts);
 - floats are finite (JSON has no NaN).
 
-This module imports only the standard library and pydantic.
+This module imports only the standard library, numpy, pandas and pydantic
+(numpy and pandas through ``merxen.annotation.schema`` and ``vocab``).
 """
 
 from __future__ import annotations

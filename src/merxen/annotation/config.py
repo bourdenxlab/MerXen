@@ -14,7 +14,9 @@ the legacy pipeline is unchanged. ``resolve_clustering_mode`` and
 The clustering-mode types and ``AdaptiveSplitConfig`` are the fields that
 ``ClusteringSquidpyConfig`` and ``MenderConfig`` gain at hook H8.
 
-This module imports only the standard library and pydantic.
+This module imports only the standard library, numpy, pandas and pydantic
+(numpy and pandas through ``merxen.annotation.schema`` and ``vocab``), so the
+GPU clustering environment can load it.
 """
 
 from __future__ import annotations
