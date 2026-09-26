@@ -33,8 +33,11 @@ from what the inputs produce. The generator fails loudly when a taxonomy term
 has no curated mapping (or a mapping names a term the taxonomy lacks), so a new
 Allen release cannot silently change the vocabulary.
 
-Needs PyYAML, which the pinned environment already provides (dask and
-pre-commit depend on it).
+Needs PyYAML. It is not declared in ``pyproject.toml`` yet; the pinned
+environment gets it through dask and pre-commit, and it is to be declared at
+the next planned lockfile regeneration (regenerating the lock now would
+invalidate legacy ``-resume``; ``docs/development.md``). The import is
+deferred to ``build_all`` so a missing PyYAML fails with that explanation.
 """
 
 from __future__ import annotations
@@ -50,7 +53,6 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-import yaml  # type: ignore[import-untyped]
 
 from merxen.annotation.vocab import (
     BROAD_CLASS_ANY_COLUMN,
@@ -659,6 +661,30 @@ def render_notice(overrides: Mapping[str, Any], inputs: Sequence[InputFile]) -> 
     return "\n".join(lines)
 
 
+def load_overrides(path: Path) -> dict[str, Any]:
+    """Parse ``overrides.yaml``.
+
+    Args:
+        path: The overrides file.
+
+    Returns:
+        The parsed mapping.
+
+    Raises:
+        ModuleNotFoundError: If PyYAML is not installed.
+    """
+    try:
+        import yaml  # type: ignore[import-untyped]
+    except ModuleNotFoundError as error:
+        raise ModuleNotFoundError(
+            "build_vocab_tables needs PyYAML, which pyproject.toml does not "
+            "declare yet (the pinned environment gets it through dask and "
+            "pre-commit); install requirements/requirements.lock"
+        ) from error
+    loaded: dict[str, Any] = yaml.safe_load(path.read_text())
+    return loaded
+
+
 def build_all(
     *,
     whb_taxonomy_dir: Path,
@@ -677,7 +703,7 @@ def build_all(
     Returns:
         The generated files and the input identities.
     """
-    overrides = yaml.safe_load(overrides_path.read_text())
+    overrides = load_overrides(overrides_path)
     if overrides.get("schema_version") != 1:
         raise VocabBuildError("overrides.yaml: unsupported schema_version")
     whb, whb_inputs = build_whb(whb_taxonomy_dir, overrides["whb"])

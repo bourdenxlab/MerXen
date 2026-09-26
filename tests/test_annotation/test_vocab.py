@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import tomllib
 from fnmatch import fnmatch
 from pathlib import Path
@@ -9,7 +10,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
-import yaml  # type: ignore[import-untyped]
 
 from merxen.annotation import vocab
 from merxen.annotation.vocab import (
@@ -523,7 +523,22 @@ def test_asset_tables_are_fresh_copies() -> None:
         vocab.asset_path("missing.csv")
 
 
+# PyYAML reaches the pinned environment only through dask and pre-commit;
+# declaring it needs a lockfile regeneration, planned with the first milestone
+# that regenerates the lock anyway (it would invalidate legacy -resume now).
+PYYAML_GAP = (
+    "PyYAML is not declared in pyproject.toml; declare pyyaml in the dev extra "
+    "at the next lockfile regeneration"
+)
+
+
+def test_pyyaml_is_available_for_the_generator() -> None:
+    """Fail clearly if the transitive PyYAML disappears from the environment."""
+    assert importlib.util.find_spec("yaml") is not None, PYYAML_GAP
+
+
 def test_committed_tables_agree_with_overrides() -> None:
+    yaml = pytest.importorskip("yaml", reason=PYYAML_GAP)
     overrides = yaml.safe_load((vocab.ASSET_DIR / "overrides.yaml").read_text())
     whb = load_vocab("whb_supercluster")
     for name, mapping in overrides["whb"]["superclusters"].items():
