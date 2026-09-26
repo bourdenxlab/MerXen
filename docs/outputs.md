@@ -146,6 +146,7 @@ Path: `${outdir}/<pair_id>/<platform>/segmentation/`
 | `cellpose_nuclei_masks_tiled.npy` | DAPI-only Cellpose `nuclei` labels, retained independently of transcript assignment. |
 | `cellpose_nuclei_stitching_stats.json` | Equivalent stitching diagnostics for the nuclei mask. |
 | `transcripts_for_proseg.csv` | ProSeg input: per-transcript rows with seeded `cell_id`. Retained for debugging. |
+| `transcripts_for_proseg.transforms.json` | Pixel-to-micron affine that seeded `transcripts_for_proseg.csv`. A re-run refuses to reuse the CSV when it differs from the current transform. |
 
 ### Enrichment
 

@@ -49,7 +49,11 @@ fall inside the windows. Coordinates are compared in each element's intrinsic
 A warning is logged and written to the outputs; the task still succeeds.
 With `--qc_registration_strict true` a `warn` makes `merxen qc` exit non-zero
 after writing its outputs, so (with the default `errorStrategy = "ignore"`)
-downstream analysis of that branch is skipped.
+downstream analysis of that branch is skipped. Nextflow does not publish a
+failed task's outputs, and `publishDir` keeps whatever an earlier run left
+there, so read a failed check from the task's work dir. From the launch
+directory, `nextflow log <run_name> -f name,exit,workdir | grep '^QC'` lists
+the QC tasks; the result is `<workdir>/qc_out/*_registration_qc.json`.
 
 ## Nextflow process
 
