@@ -6,8 +6,9 @@ Reference-based cell-type annotation replaces the legacy marker scoring of
 (`docs/plans/robust-celltype-annotation-plan.md`); legacy runs are
 unchanged. This page covers what exists so far: declared panels
 (`merxen annotation-panel`), the reference bundles that
-`merxen annotation-reference-prep` builds into the reference store, and the
-two pipeline processes that run them (`--annotation_prepare_only`).
+`merxen annotation-reference-prep` builds into the reference store, the
+two pipeline processes that run them (`--annotation_prepare_only`), and the
+MAP step (`merxen annotate`), which maps samples onto the bundles.
 
 ## Reference bundles
 
@@ -174,6 +175,56 @@ bundles a same-panel pair on `proseg_hybrid` needs. Building from a pair's
 prepared H5ADs (`per_platform` panels, label-free set c) arrives with the
 `map_first` wiring (M5). The params are listed in
 [Configuration](../configuration.md#reference-based-annotation-in-development).
+
+## Mapping (`merxen annotate`)
+
+The MAP step (`merxen.annotation.pipeline.annotate_map`; plan §3.3) maps
+each sample of a pair × segmentation onto every bundle its
+`required_bundles.json` lists with a primary or secondary role: WHB and
+SEA-AD on the annotation panel, WHB on set c for the segmentations in
+`annotation_xplat_sensitivity_segmentations` (`proseg_hybrid` by default),
+and WHB on the intersection panel for `per_platform` pairs. The standalone
+command runs it on published clustered H5ADs (options in
+[CLI](../cli.md#merxen-annotate)); the pipeline process that runs it in
+`map_first` mode is still to come.
+
+Per sample:
+
+1. Load the counts (prepared `X`, or the published `layers["counts"]`),
+   remove control features with the shared registry (the same features
+   legacy `remove_control_features` removes on the current panels) and take
+   `total_counts` / `n_genes` from `select_table_cells`. Gene IDs resolve as
+   in `annotation-panel` (native ID, the pair's symbols, the fallback table).
+2. Map the table cells (`total_counts >= min_counts`; a published clustered
+   H5AD holds only table cells) on the panel's genes present in the dataset.
+   Missing panel genes are recorded; a missing marker gene restricts the
+   bundle's lookup (parents left without markers are auto-collapsed).
+3. Run MapMyCells (seed 0, bootstrap factor 0.5, 100 iterations, raw
+   normalisation, one BLAS thread per worker, `--drop_level
+   CCN20230722_SUPT` for WMB) and parse the extended JSON at once into the
+   tidy parquet; the JSON is deleted unless `annotation_keep_extended_json`.
+   Mouse maps unpruned for now: region inference and the pruned re-map are
+   M6.
+4. Write `map_manifest.json`: per sample the input identity, table-cell
+   counts, controls removed and, per run, the query fingerprint (sha256 of
+   the cell ids, their total counts and the query gene IDs), the bundle's
+   `build_hash` and lookup digest, the engine parameters, the ctm version and
+   commit, the settings the extended JSON recorded, wall time and peak RSS.
+
+| File | Content |
+|---|---|
+| `<platform>/<sid>_mmc_<run_id>.parquet` | One row per mapped cell × taxonomy level; `run_id` is the reference id, `+_setc` for set c, `+_xpanel` for the intersection run of a `per_platform` pair. Run metadata in the parquet schema (`merxen_mmc`). |
+| `<platform>/<sid>_ct_provisional.parquet` | One row per object: identity, `total_counts`, `n_genes`, `in_table`, **provisional** `ct_<level>_{name,raw,corr,runner_up,margin,status}` and `ct_final_*`, and the raw engine columns `mmc_<reference>_<level>_{label,name,bp,agg,corr}`. |
+| `map_manifest.json` | The run record above; `annotation-store prune` counts its `build_hash` values as references. |
+
+The provisional labels apply the raw thresholds only (WHB lineage / broad /
+NT 0.73 on the bootstrap probability summed over the assigned node's class,
+supercluster 0.69, SEA-AD subclass 0.55 below 60 counts and 0.45 from 60;
+WMB class 0.90, subclass 0.80), the hard floor (`min_counts`), sinks and
+frontal-cortex plausibility from the bundle vocabulary and the parent
+chain. They have no floors, resolvability, dataset gate, second vote or COP
+rule and are for inspection only; the RESOLVE step (M4) replaces them and
+writes `<sid>_celltype_labels.parquet`.
 
 ## Known limitations
 
