@@ -76,7 +76,9 @@ profile. Override either kind with `--<name>` on the command line.
 | `mender_enabled` | `false` | Enable independent per-platform/per-segmentation MENDER spatial-domain analysis. A non-empty samplesheet value may override this per row. |
 | `mender_segmentations` | `proseg_hybrid` | MENDER branches: any comma-separated subset of `reseg`, `original_seg`, `proseg_mask`, and `proseg_hybrid`, or `all`. A non-empty samplesheet value may override this per row. |
 | `force_spatialdata_build` | `false` | Rebuild SpatialData zarrs even if cached. |
+| `merscope_allow_transform_override_mismatch` | `false` | VZG2 builds fail when `merscope_transform_path` places the mosaic more than 1 µm away from the archive manifest. `true` keeps the override with a warning, for archives whose `bbox_microns` is known to be wrong. See [stages/spatialdata-build.md](stages/spatialdata-build.md). |
 | `force_proseg_rerun` | `false` | Rebuild ProSeg bases from the current Cellpose/transcript inputs instead of reusing a persistent `latest_spatialdata.zarr`. Useful with `-resume` after upstream inputs were rebuilt. |
+| `qc_registration_strict` | `false` | Fail the QC task (instead of only warning in its outputs) when the segmentation registration check flags cells that do not sit on their transcripts. See [stages/qc.md](stages/qc.md#registration-check). |
 | `start_stage` | `build_spatialdata` | Fallback first stage. Skipped upstream stages are read from published outputs. A samplesheet `start_stage` value overrides this per row. |
 | `stop_stage` | `clustering_squidpy` | Fallback last stage. This includes `spatial_gene_analysis`, which runs between visualization and clustering. MapMyCells is available after clustering but opt-in because its atlas downloads are large. A samplesheet `stop_stage` value overrides this per row. |
 | `only_stage` | `null` | Fallback single-stage selector. A row-level `only_stage` overrides row start/stop values; row start/stop values suppress the global `only_stage` fallback for that row. |
@@ -526,13 +528,13 @@ runs once, and is shared across all samples and segmentation branches. See
 | `mapmycells_region_labels` | species-dependent | Human defaults to the four frontal WHB labels. Mouse defaults empty and requires explicit WMB `region_of_interest_acronym` values for region mode. |
 | `mapmycells_region_cache_dir` | `<outdir>/mapmycells_cache` | Durable cache for Allen WHB/WMB downloads, the gene mapper, and generated region reference files. The Dwight profile overrides this with `/media/mathieubo/SSD1/MerXen/mapmycells`. |
 | `mapmycells_region_min_cells_per_leaf` | `10` | Drop region taxonomy leaf aliases with fewer cells than this before precomputing stats. |
-| `mapmycells_region_force_rebuild` | `false` | Rebuild the generated region reference even if matching cached files exist. |
+| `mapmycells_region_force_rebuild` | `false` | Build a new region reference directory even if a matching cached build exists. Earlier builds are never deleted; see [MapMyCells region reference cache](stages/mapmycells.md#region-reference-cache). |
 | `mapmycells_region_query_markers_n_per_utility` | `10` | Marker count target passed to Allen's `QueryMarkerRunner` for the region reference. |
 | `mapmycells_drop_level` | `null` | Optional taxonomy level to drop before mapping. |
 | `mapmycells_normalization` | `raw` | Query normalization passed to MapMyCells. |
 | `mapmycells_bootstrap_factor` | `0.9` | Marker downsampling factor for bootstrapping; default keeps the historical spatial-data setting. |
 | `mapmycells_bootstrap_iteration` | `100` | Number of bootstrap iterations. |
-| `mapmycells_n_processors` | Dwight: `8` | Number of worker processes passed to MapMyCells. |
+| `mapmycells_n_processors` | `4` (Dwight: `8`) | Number of worker processes passed to MapMyCells and to the region reference builders. |
 | `mapmycells_chunk_size` | `null` | Optional cells-per-worker chunk size. |
 | `mapmycells_rng_seed` | `null` | Optional mapper random seed. |
 | `mapmycells_max_gb` | `null` | Optional memory budget for H5AD conversion. |

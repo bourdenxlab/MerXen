@@ -23,7 +23,13 @@ For each platform in a pair:
    annotated with MapMyCells assignments in `obs` columns prefixed with
    `mapmycells_`. The H5AD also records MapMyCells metadata in
    `uns["merxen_mapmycells"]`, including the paths to the separate PNGs; the
-   plot images themselves are not embedded in the H5AD.
+   plot images themselves are not embedded in the H5AD. The extended JSON and
+   the mapper, stdout and stderr logs are not embedded either. `uns` records
+   their paths and SHA-256 digests (`extended_json_sha256`, `log_sha256`,
+   `stdout_log_sha256`, `stderr_log_sha256`) and keeps only the short command
+   JSON as `command_json_text`. Annotated H5ADs written before this change
+   still embed these files as `*_text` entries. For the P7513 MERSCOPE
+   section, the embedded extended JSON was about 258 MB of a 652 MB file.
 
 Set `--mapmycells_plots_only true` to regenerate the annotated H5AD and plots
 from an existing published `mapmycells_out/` directory without preparing a new
@@ -164,6 +170,73 @@ Region generation downloads WMB metadata and only the raw expression-matrix
 shards named by the selected cells' `feature_matrix_label` values. Individual
 shards can be several GB, so the cache must have substantial free space.
 
+## Region reference cache
+
+Generated region references are immutable once written: MerXen never
+modifies or deletes a completed build in the shared cache. Each build lives in
+its own directory
+under `<mapmycells_region_cache_dir>/references/`, named
+`<prefix>_<region_name>-<hash>`, where `<prefix>` is `region` (WHB) or
+`wmb_region` (WMB) and `<hash>` is the first 16 hex digits of the SHA-256 of
+the reference configuration: region name and labels,
+`region_min_cells_per_leaf`, `region_query_markers_n_per_utility`, atlas,
+query species, hierarchy, normalization, Allen manifest URL and `drop_level`.
+Each directory holds `precompute/precomputed_stats.h5`, `reference_markers/`,
+`query_markers/query_markers.n<N>.json`, `region_cell_metadata.csv` and
+`region_reference_manifest.json`, which records the full `config_hash`,
+`created_at` and the paths of the build.
+
+For each run, MerXen picks the reference in this order:
+
+1. The newest complete content-hashed build for the requested configuration.
+2. A legacy in-place reference, `references/<prefix>_<region_name>/`, written
+   by MerXen before content-hashed builds existed. It is adopted **read-only**
+   when its stats and query-marker files exist and its recorded `config`
+   matches the request. `reference_atlas` and `query_species`, which older
+   versions did not record, are compared as the values those versions always
+   used: `reference_atlas = "whb"` and `query_species = "human"`. Older
+   versions did apply `drop_level` without recording it in the manifest, so
+   an unrecorded `drop_level` is read from `metadata.config.drop_level` in
+   the legacy query-marker JSON, which `cell_type_mapper` writes. If that
+   field is missing or unreadable, the legacy reference is not adopted and a
+   new build is made next to it. The manifest is never
+   rewritten; the copy recorded in outputs has `cache_layout =
+   "legacy_in_place"` and the resolved on-disk paths, because legacy
+   manifests can hold stale absolute paths from before the cache was moved.
+3. Otherwise, a new build. It is assembled in a private
+   `references/.staging-*` directory and renamed into place only when
+   complete, so other tasks never see a partial build. The provenance that
+   `cell_type_mapper` writes inside its own outputs (for example
+   `metadata.config` in the query-marker JSON) therefore names the staging
+   path; `region_reference_manifest.json` names the final paths. If the build
+   raises an error, only that staging directory is removed. A task that is
+   terminated mid-build leaves its `.staging-*` directory (about 2.4 GB for
+   the frontal WHB reference) behind, because MerXen installs no signal
+   handler: this happens on `SIGTERM` from a Nextflow cancel or a Slurm
+   timeout, and on `SIGKILL` from the OOM killer. Such a directory is never
+   used. The next build of the same configuration removes it while holding
+   that configuration's lock; staging directories of other configurations
+   are left alone.
+
+A configuration change therefore selects a different directory. It never
+invalidates, overwrites or deletes an existing build. Builds of one
+configuration are serialised with a `references/.<prefix>_<region_name>-<hash>.lock`
+file lock, so concurrent `MAPMYCELLS` tasks wait for one build and then reuse
+it. The lock file is opened read-write, which an exclusive `flock` needs on
+NFS; MerXen falls back to a read-only descriptor only when the lock file
+belongs to another cache user and is not writable, which works on local
+filesystems but not on NFS. The lock, and therefore the staging clean-up,
+assumes that `flock` is coordinated across every host that shares the cache,
+as it is on a local disk used by one host and on NFS mounted without
+`local_lock=flock` or `local_lock=all`.
+
+`mapmycells_region_force_rebuild=true` always writes a new
+`<prefix>_<region_name>-<hash>-rebuild-<UTC timestamp>` directory, which later
+runs then prefer, and it leaves every earlier build intact. A task that waited
+for another task's rebuild of the same configuration reuses that build. Each
+build uses about 2.4 GB for the frontal WHB reference, and old builds are
+never pruned automatically. Force a rebuild on a single pair, then turn it off.
+
 ## Nextflow process
 
 [`MAPMYCELLS`](../../workflows/modules/mapmycells.nf) — one instance per
@@ -208,7 +281,7 @@ Use `--only_stage mapmycells` to reuse an existing
 | `region_name` / `region_labels` | Short output name and WHB ROI labels or WMB ROI acronyms used to build the strict region reference. |
 | `region_cache_dir` | Durable cache for Allen WHB/WMB downloads and generated region stats/marker files. |
 | `region_min_cells_per_leaf` | Minimum ROI cells required for a leaf `cluster_alias` to stay in the region taxonomy. |
-| `region_force_rebuild` | Rebuild generated region reference files even if the cache manifest matches. |
+| `region_force_rebuild` | Build a new region reference directory even if a matching one exists; earlier builds are kept (see [Region reference cache](#region-reference-cache)). |
 | `region_query_markers_n_per_utility` | Marker count target for region `QueryMarkerRunner`. |
 | `drop_level` | Optional taxonomy level to drop before mapping, such as the Whole Mouse Brain supertype level. |
 | `normalization` | Passed to `type_assignment.normalization`; `raw` means MapMyCells converts query counts internally. |
@@ -222,6 +295,16 @@ Use `--only_stage mapmycells` to reuse an existing
 When explicit reference paths are configured, workflow preflight validates them
 before any tasks start. Automatically downloaded files are checked against the
 sizes in Allen's manifest and partial downloads can resume.
+
+The Allen ABC manifest names a fixed release, so MerXen downloads it once per
+cache and keeps a copy at `<cache>/abc_manifests/releases/<release>/manifest.json`.
+Here `<cache>` is `mapmycells_region_cache_dir`,
+`clustering_squidpy_broad_reference_cache_dir` or `mecr_reference_cache_dir`;
+on Dwight all three are the same SSD1 directory. The MapMyCells, WMB
+clustering-reference and MECR download helpers read that copy. When every file
+they need is already cached with the size the manifest records, they use no
+network. To prepare an offline cache, download the manifest to that path once.
+If the copy is unreadable, it is downloaded again.
 
 ## Outputs
 
@@ -244,7 +327,7 @@ Written under `mapmycells_out/<platform>/`:
 | Supercluster QC | `<sample_id>_mapmycells_supercluster_assignment_qc.png` | Supercluster cell counts, confidence summaries, and low-confidence fractions. |
 | Cluster QC | `<sample_id>_mapmycells_cluster_assignment_qc.png` | Cluster cell counts, confidence summaries, and low-confidence fractions. |
 | Supercluster spatial grid | `<sample_id>_mapmycells_spatial_supercluster_grid.png` | Small-multiple spatial grid with each supercluster highlighted in red against all other cells in grey. |
-| Annotated AnnData | `<sample_id>_mapmycells_annotated.h5ad` | Clustered AnnData with MapMyCells assignments added to `obs` and mapper metadata in `uns["merxen_mapmycells"]`. |
+| Annotated AnnData | `<sample_id>_mapmycells_annotated.h5ad` | Clustered AnnData with MapMyCells assignments added to `obs` and mapper metadata in `uns["merxen_mapmycells"]` (paths and SHA-256 digests of the extended JSON and logs, not their contents). |
 
 Each listed `.png` plot is also written as a same-stem `.pdf`.
 
@@ -263,4 +346,10 @@ The stage also writes `<pair_id>_mapmycells_manifest.json` at the top of
 `mapmycells_out/`, including whole-brain and region reference paths, ROI labels,
 filtering counts, per-sample outputs, the gene-ID fallback table
 (`gene_id_fallback_csv`, or `gene_id_fallback_ignored` when it has no IDs of the
-query species) and the per-sample `gene_id_resolution` summaries.
+query species) and the per-sample `gene_id_resolution` summaries. It also
+records the installed `cell_type_mapper` distribution as
+`cell_type_mapper_version` and, for a git install, `cell_type_mapper_commit`.
+The mapper subprocess uses the same Python interpreter, so this is the version
+that mapped the cells. In plots-only mode it is the version that regenerated the
+plots. Each newly built region reference records the same two fields in its
+`region_reference_manifest.json`.

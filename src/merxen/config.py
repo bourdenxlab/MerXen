@@ -205,6 +205,9 @@ class MerscopeBuildConfig(BaseModel):
     z_layers: list[int] | None = None
     region_name: str | None = None
     slide_name: str | None = None
+    # VZG2 only: accept a merscope_transform_path that places the mosaic more
+    # than 1 um away from the archive manifest (e.g. a padded bbox_microns).
+    allow_transform_override_mismatch: bool = False
 
 
 class XeniumBuildConfig(BaseModel):
@@ -345,6 +348,10 @@ class QCConfig(BaseModel):
     output_dir: Path
     table_key: str | None = None
     shape_key: str | None = None
+    # Segmentation-to-transcript registration check (merxen.qc.registration).
+    registration_check: bool = True
+    registration_reference_shape_key: str | None = None
+    registration_strict: bool = False
 
 
 class CorticalDepthTableConfig(BaseModel):
