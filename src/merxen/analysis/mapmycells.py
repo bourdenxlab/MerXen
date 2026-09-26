@@ -2212,7 +2212,10 @@ def prepare_region_mapmycells_reference(
     3. otherwise a new content-hashed build.
 
     ``region_force_rebuild`` always writes a new build directory and leaves
-    every earlier build, including a legacy one, intact.
+    every earlier build, including a legacy one, intact. The only directories
+    ever removed are private staging directories: that of a failed build, and
+    those that dead builders of the same configuration left behind, which are
+    cleared while holding that configuration's build lock.
 
     Args:
         config: Validated MapMyCells stage configuration.
@@ -2261,6 +2264,7 @@ def prepare_region_mapmycells_reference(
     # Serialise builds of one configuration so that concurrent tasks wait for,
     # and then reuse, a single build instead of each writing their own.
     with _exclusive_file_lock(references_root / f".{build_stem}.lock"):
+        _discard_stale_region_reference_staging_dirs(references_root, build_stem)
         if config.region_force_rebuild:
             # A build that finished while this call waited for the lock is
             # already newer than the request, so it satisfies the rebuild.
@@ -2687,9 +2691,28 @@ def _read_region_reference_manifest(path: Path) -> dict[str, Any] | None:
     return cast(dict[str, Any], manifest)
 
 
+def _discard_stale_region_reference_staging_dirs(
+    references_root: Path,
+    build_stem: str,
+) -> None:
+    # Call only while holding the lock of this configuration. Its staging
+    # directories are created only under that lock, so any that remain belong
+    # to builders that died mid-build, for example on SIGTERM from a Nextflow
+    # cancel or a Slurm timeout, or on SIGKILL from the OOM killer.
+    staging_prefix = f"{REGION_REFERENCE_STAGING_PREFIX}{build_stem}-"
+    for path in sorted(references_root.iterdir()):
+        if (
+            path.name.startswith(staging_prefix)
+            and path.is_dir()
+            and not path.is_symlink()
+        ):
+            _discard_region_reference_staging_dir(path)
+
+
 def _discard_region_reference_staging_dir(staging_dir: Path) -> None:
-    # Only the private staging directory of the failed call is removed. It is
-    # never visible as a build, and completed builds are never deleted.
+    # Only private staging directories are removed: that of a failed call, or
+    # one a dead builder of the same configuration left behind. They are never
+    # visible as builds, and completed builds are never deleted.
     if not staging_dir.name.startswith(REGION_REFERENCE_STAGING_PREFIX):
         raise ValueError(f"Refusing to remove non-staging directory {staging_dir}")
     logger.warning("Removing incomplete region reference staging dir %s", staging_dir)
