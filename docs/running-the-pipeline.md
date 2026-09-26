@@ -224,6 +224,12 @@ change under `src/merxen/` leaves every hash unchanged. After a code fix,
 stages without `-resume`, and limit the run with the stage selectors described
 in [Running a subset of stages](#running-a-subset-of-stages).
 
+Under the `conda` profile each task's hash includes its conda env, so a change
+to an env file (for example the `requirements.lock` checksum in
+`envs/environment.yml` after a lockfile update) re-runs every task that uses
+that env, and everything downstream, even with `-resume`. See
+[Dependency management](development.md#dependency-management).
+
 ## Failure behavior
 
 Task failures use Nextflow's `ignore` error strategy with

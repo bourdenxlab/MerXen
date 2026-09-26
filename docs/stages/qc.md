@@ -18,6 +18,42 @@ For the branch-specific shape/table pair selected by Nextflow:
 - **Hybrid diagnostics** — for `proseg_hybrid`, Cellpose/ProSeg count deltas,
   area growth, rejected external transcripts, fallback rates, assignment-source
   counts, per-gene count changes, and spatial diagnostic maps.
+- **Registration check** — whether the branch's cells sit on their
+  transcripts (see below).
+
+## Registration check
+
+`segmentation_registration_check`
+([qc/registration.py](../../src/merxen/qc/registration.py)) catches a
+segmentation written to the wrong coordinates, such as the 2026-09-08 VZG2
+run whose Cellpose / ProSeg cells were offset by (+21.9, +111.8) µm. It runs
+for every branch and uses no labels:
+
+1. Eight 400 µm windows are centred on random cells of the branch.
+2. **Density:** mean transcripts within 4 µm of each centroid, divided by
+   the same count at 1000 uniform random points per window. On the stored
+   P1212 and P7513 (both platforms) and VZG2 `original_seg` layers it is
+   1.7–3.1; the misregistered VZG2 branches score 1.04–1.28.
+3. **Offset:** the centroid density map is cross-correlated with that of the
+   platform's own cells (`merscope_cell_boundaries` / `xenium_cell_boundaries`;
+   skipped for `original_seg` itself). The reported shift is platform minus
+   branch, median over windows with a clear peak (z ≥ 4), on a 2 µm grid.
+   It is 0 for every registered layer above and (-22, -112) µm for the VZG2
+   branches.
+
+The status is `warn` when the density ratio is below 1.5 or the shift is
+larger than 5 µm, and `skipped` when fewer than 50 centroids or no transcripts
+fall inside the windows. Coordinates are compared in each element's intrinsic
+(micron) frame, not a SpatialData coordinate system.
+
+A warning is logged and written to the outputs; the task still succeeds.
+With `--qc_registration_strict true` a `warn` makes `merxen qc` exit non-zero
+after writing its outputs, so (with the default `errorStrategy = "ignore"`)
+downstream analysis of that branch is skipped. Nextflow does not publish a
+failed task's outputs, and `publishDir` keeps whatever an earlier run left
+there, so read a failed check from the task's work dir. From the launch
+directory, `nextflow log <run_name> -f name,exit,workdir | grep '^QC'` lists
+the QC tasks; the result is `<workdir>/qc_out/*_registration_qc.json`.
 
 ## Nextflow process
 
@@ -53,6 +89,9 @@ provenance columns before the QC/analysis fan-out is launched.
 | `output_dir` | Where `qc_out/` is populated. |
 | `table_key` | Optional AnnData table used for transcript/cell and gene/cell metrics. |
 | `shape_key` | Optional shape layer used for geometry metrics. |
+| `registration_check` | Run the registration check (default `true`). |
+| `registration_reference_shape_key` | The platform's own cell shapes for the offset estimate. Nextflow passes `merscope_cell_boundaries` or `xenium_cell_boundaries`. |
+| `registration_strict` | Exit non-zero when the check warns. Nextflow passes `params.qc_registration_strict` (default `false`). |
 
 ## Walkthrough
 
@@ -80,6 +119,7 @@ Written under `qc_out/` (published to
 | `<dataset>_geometry_metrics.csv` | One row per cell — all geometry columns. |
 | `<dataset>_cell_metrics.csv` | One row per cell — transcripts_per_cell, genes_per_cell, `dataset`. |
 | `<dataset>_qc.pkl` | Pickle with `summary`, `geometry_metrics`, `cell_metrics` for fast reload. |
+| `<dataset>_registration_qc.json` | Registration check: status, reasons, density ratio, shift, thresholds and per-window diagnostics. |
 | `<dataset>_hybrid_cell_diagnostics.csv` | Per-hybrid-cell construction diagnostics and Cellpose/ProSeg count deltas. |
 | `<dataset>_hybrid_assignment_sources.csv` | Counts and percentages for every hybrid assignment provenance class. |
 | `<dataset>_hybrid_fallback_reasons.csv` | Cellpose-fallback reason counts and percentages of hybrid cells. |
@@ -99,6 +139,9 @@ Hybrid-only files are emitted only for the `proseg_hybrid` branch.
 | `median_eccentricity` | Close to 1 → cells look elongated/fragmented; usually a segmentation artefact. |
 | `median_area` | Wildly different between platforms → mosaic/pixel transform or `voxel_size` mismatch. |
 | `median_transcripts_per_cell` | Sudden drops between runs → transcript QV filter or panel mismatch. |
+| `registration_status` | `warn` → cells are not on their transcripts; check the mask-to-micron transform (`merscope_transform_path`, VZG2 manifest origin) before using the branch. |
+| `registration_density_ratio` | Near 1 → centroids sit on random tissue rather than cell bodies. |
+| `registration_shift_um` | Above 5 µm → systematic offset against the platform's cells; the per-window `shift_x_um` / `shift_y_um` give its direction. |
 
 ## Failure modes
 
