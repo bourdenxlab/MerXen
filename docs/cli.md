@@ -405,9 +405,13 @@ controls removed and why, merged duplicates, set c), one `panel_genes*.json`
 per annotation panel (`panel_genes.json` = set a or the sample's panel,
 `panel_genes_setc.json`, or `panel_genes_<platform>.json` +
 `panel_genes_intersection.json` for `per_platform` pairs) and
-`required_bundles.json`. `panel_hash` is the sha256 of the sorted resolved IDs
-of the declared panel, so cells, zero-count probes and `var` order never
-change it.
+`required_bundles.json` (each bundle's reference, role, purpose, panel file,
+`panel_hash` and `n_panel_genes`, and `n_required`). `panel_hash` is the
+sha256 of the sorted resolved IDs of the declared panel, so cells, zero-count
+probes and `var` order never change it. `--annotation-config` may name
+references by id only (`"references": ["whb_frontal_supc_clus", ...]`, or
+`{"reference_id": "wmb_panel", "max_cells_per_cluster": 50}`); their known
+taxonomy settings fill the rest.
 
 ## `merxen annotation-reference-prep`
 

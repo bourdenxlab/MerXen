@@ -394,6 +394,8 @@ class RequiredBundle(_PanelModel):
         panel_hash: Panel hash (``None`` if panel-independent).
         panel_file: ``panel_genes*.json`` file name in the ANNOTATE_PANEL
             output directory (``None`` if panel-independent).
+        n_panel_genes: Genes of that panel (``None`` if panel-independent);
+            ``ANNOTATE_REFERENCE_PREP`` sizes its resources from it.
     """
 
     reference_id: str
@@ -403,6 +405,7 @@ class RequiredBundle(_PanelModel):
     panel_name: str | None = None
     panel_hash: str | None = None
     panel_file: str | None = None
+    n_panel_genes: int | None = Field(default=None, ge=0)
 
     @property
     def key(self) -> tuple[str, str, str | None]:
@@ -1743,6 +1746,7 @@ def required_bundles(
             panel_name=name,
             panel_hash=None if panel_file is None else panel_file.panel.panel_hash,
             panel_file=None if panel_file is None else panel_file.file_name,
+            n_panel_genes=None if panel_file is None else panel_file.panel.n_genes,
         )
         if bundle.key not in seen:
             seen.add(bundle.key)
