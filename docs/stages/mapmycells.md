@@ -32,6 +32,52 @@ useful after changing plot code. Use it with `--only_stage mapmycells` and the
 same `--outdir`, `--mapmycells_reference_mode`, and `--mapmycells_region_name`
 used for the original run.
 
+### Gene identifiers
+
+MapMyCells matches query genes to the reference by Ensembl ID, so any feature
+left with only a symbol is ignored by the mapper. `prepare_mapmycells_query`
+resolves the `mapmycells_gene_id_column` (default `ensembl_id`) in this order:
+
+1. the ID already in the clustered `var` (vendor or Xenium-derived);
+2. the cached reference gene metadata found below `mapmycells_region_cache_dir`
+   (WHB raw H5AD `var` or WMB `gene.csv`), when present;
+3. the configured local fallback table `annotation_gene_id_fallback_csv`, for
+   features still lacking an ID.
+
+The fallback table is an Allen-style `gene.csv` (`gene_identifier` and
+`gene_symbol` columns; `ensembl_id` / `gene_id` and `symbol` / `gene` also
+work; `.tsv` is tab-separated) or a reference `.h5ad` whose `var` index holds
+the IDs. It is read locally and never downloaded. Only IDs with the query
+species' prefix (`ENSG` for human, `ENSMUSG` for mouse) are used, so a human
+table cannot assign IDs to a mouse query. A symbol is matched exactly first and
+then case-insensitively; it stays unresolved when the table gives it more than
+one ID or when its ID is already carried by another query feature. The fallback
+is not applied when the ID column is absent and the symbols are left for the
+WMB gene-mapping database, and it does not change the legacy clustering
+annotation, which keeps its own lookup.
+
+On Dwight no WHB `gene.csv` is cached, so the profile points the fallback at
+the `var` of `WHB-10Xv3-Nonneurons-raw.h5ad` on SSD1, which holds the same
+59,357-gene `gene_identifier` / `gene_symbol` table. With it, the human
+MERSCOPE panel genes LIF, LIFR, SQSTM1 and H2AX, whose IDs are blank in the
+MERSCOPE `var`, map to `ENSG00000128342`, `ENSG00000113594`,
+`ENSG00000161011` and `ENSG00000188486`. The last is the ID Xenium carries for
+H2AFX (the previous symbol of H2AX), so the pair shares 297 panel IDs instead
+of 296 (checked on P7513 `proseg_hybrid`). Set
+`--annotation_gene_id_fallback_csv null` to disable it.
+
+Every prepared query writes `<sample_id>_mapmycells_query_gene_ids.json`,
+listing the IDs recovered from the cached reference metadata
+(`resolved_by_reference_lookup`) and from the fallback table
+(`resolved_by_fallback`), and each unresolved feature with its reason
+(`no_fallback_table`, `not_in_fallback_table`, `ambiguous_in_fallback_table`,
+`fallback_id_already_in_query`). Unresolved features are also logged as a
+warning. The pair manifest repeats these per sample under
+`gene_id_resolution`. Its `recovered_gene_ids_in_other_samples` field lists,
+for every recovered gene, the other samples that carry the same ID and the
+symbol they use for it (for example `{"H2AX": {"P7513_XENIUM": "H2AFX"}}`);
+an empty mapping means the gene is specific to that platform's panel.
+
 The default `mapmycells_bootstrap_factor` is `0.9` because these data are
 spatial transcriptomics panels where the newer single-cell-oriented lower
 defaults can be less stable.
@@ -148,6 +194,7 @@ Use `--only_stage mapmycells` to reuse an existing
 | `marker_lookup_path` | Optional explicit whole-brain JSON marker lookup; otherwise downloaded when enabled. |
 | `precomputed_stats_path` | Optional explicit whole-brain HDF5 stats file; otherwise downloaded when enabled. |
 | `gene_mapping_db_path` | Optional `mmc_gene_mapper` SQLite database; required for human-to-WMB mapping when automatic downloads are disabled. |
+| `gene_id_fallback_csv` | Optional local gene table (Allen `gene.csv` layout or a reference `.h5ad` `var`) used only while preparing the query, for features still lacking an Ensembl ID; see [Gene identifiers](#gene-identifiers). |
 | `region_name` / `region_labels` | Short output name and WHB ROI labels or WMB ROI acronyms used to build the strict region reference. |
 | `region_cache_dir` | Durable cache for Allen WHB/WMB downloads and generated region stats/marker files. |
 | `region_min_cells_per_leaf` | Minimum ROI cells required for a leaf `cluster_alias` to stay in the region taxonomy. |
@@ -173,6 +220,7 @@ Written under `mapmycells_out/<platform>/`:
 | Kind | File | Contents |
 |------|------|----------|
 | Query AnnData | `<sample_id>_mapmycells_query.h5ad` | Mapper input with query counts in `X`. |
+| Query gene-ID report | `<sample_id>_mapmycells_query_gene_ids.json` | Where each query Ensembl ID came from, the IDs recovered by the reference lookup or the fallback table, and the unresolved features with their reasons. |
 | CSV | `<sample_id>_mapmycells.csv` | Per-cell taxonomy assignments and probabilities. |
 | Extended JSON | `<sample_id>_mapmycells_extended.json` | Full MapMyCells result, config, logs, marker genes, and taxonomy tree. |
 | Log | `<sample_id>_mapmycells.log` | Mapper log output. |
@@ -203,4 +251,5 @@ annotations.
 
 The stage also writes `<pair_id>_mapmycells_manifest.json` at the top of
 `mapmycells_out/`, including whole-brain and region reference paths, ROI labels,
-filtering counts, and per-sample outputs.
+filtering counts, per-sample outputs, the gene-ID fallback table
+(`gene_id_fallback_csv`) and the per-sample `gene_id_resolution` summaries.

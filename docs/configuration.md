@@ -544,6 +544,7 @@ runs once, and is shared across all samples and segmentation branches. See
 | `mapmycells_query_layer` | `counts` | AnnData layer copied into `X` before mapping. Use `null` to keep current `X`. |
 | `mapmycells_gene_id_column` | `ensembl_id` | `var` column used as query gene identifiers. Human `ENSG` and mouse `ENSMUSG` IDs are preserved; missing mouse IDs can be recovered from WMB metadata or the gene-mapper DB. |
 | `mapmycells_obs_id_column` | `null` | Optional `obs` column used as cell identifiers for the query H5AD. |
+| `annotation_gene_id_fallback_csv` | `null`; Dwight: WHB `WHB-10Xv3-Nonneurons-raw.h5ad` on SSD1 | Local symbol-to-Ensembl table (Allen `gene.csv` layout, or a reference `.h5ad` whose `var` index holds the IDs) used only when preparing the MapMyCells query, for features still lacking an ID after the `var` column and the cached reference metadata. Only IDs of the query species are used; nothing is downloaded. Preflight checks that the file exists. Recovered and unresolved genes are listed in `<sample_id>_mapmycells_query_gene_ids.json` and the pair manifest. Legacy clustering annotation is unaffected. Set to `null` to disable. |
 
 ### Resource limits
 
