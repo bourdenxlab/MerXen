@@ -16,6 +16,7 @@ from merxen.annotation.config import (
     MAP_FIRST_TABLE_KEY_SUFFIX,
     MOUSE_CCF_REGIONS,
     WIDE_DEPTH_GRID,
+    AdaptiveSplitConfig,
     AnnotationConfig,
     AnnotationFlagsConfig,
     AnnotationGate,
@@ -27,6 +28,7 @@ from merxen.annotation.config import (
     GatePStressRecipe,
     MouseGateConfig,
     MouseRegionConfig,
+    check_clustering_mode_settings,
     default_depth_grid,
     default_references,
     normalise_mouse_section_regions,
@@ -407,3 +409,32 @@ def test_json_round_trip_and_unknown_fields() -> None:
         AnnotationConfig(enable=True)  # type: ignore[call-arg]
     with pytest.raises(ValidationError, match="Extra inputs"):
         AnnotationThresholds(never_emit_levels=["cluster"])  # type: ignore[call-arg]
+
+
+def test_coupled_to_clustering() -> None:
+    coupled = AnnotationConfig().coupled_to_clustering(20)
+    assert coupled.min_counts == coupled.thresholds.hard_min_counts == 20
+    assert AnnotationConfig(min_counts=20).coupled_to_clustering(20).min_counts == 20
+    with pytest.raises(ValueError, match="must equal the clustering min_counts"):
+        AnnotationConfig(min_counts=20).coupled_to_clustering(10)
+
+
+def test_check_clustering_mode_settings() -> None:
+    def check(mode: str, leaf_source: str = "mapped", suffix: str = "") -> None:
+        check_clustering_mode_settings(
+            mode=mode,
+            leaf_source=leaf_source,
+            adaptive_split=AdaptiveSplitConfig(),
+            table_key_suffix=suffix,
+        )
+
+    check("legacy")
+    check("map_first", suffix="mapfirst")
+    with pytest.raises(ValueError, match="clustering mode must be one of"):
+        check("denovo")
+    with pytest.raises(ValueError, match="map_first runs only"):
+        check("legacy", suffix="x")
+    with pytest.raises(ValueError, match="needs an adaptive_split rule"):
+        check("map_first", leaf_source="denovo")
+    with pytest.raises(ValidationError, match="Extra inputs"):
+        AdaptiveSplitConfig(tau=0.9)  # type: ignore[call-arg]
