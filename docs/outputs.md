@@ -488,6 +488,24 @@ Path: `${outdir}/<pair_id>/<analysis_segmentation>/mapmycells/`
 | `mapmycells_out/region_<region_name>/<platform>/<pair_id>_<platform>_mapmycells_*` | Region-specific MapMyCells outputs when `mapmycells_reference_mode` includes `region`; annotated H5AD columns use `mapmycells_region_<region_name>_`. |
 | `mapmycells_out/<pair_id>_mapmycells_manifest.json` | Per-pair manifest summarizing selected reference mode, whole-brain and region references, ROI labels, filtering counts, bootstrap settings, output paths, the gene-ID fallback table used (`gene_id_fallback_csv`, or `gene_id_fallback_ignored` when it has no IDs of the query species), and the per-sample `gene_id_resolution` summaries. |
 
+### Annotation reference bundles (in development)
+
+Written only by `--annotation_prepare_only` runs (and, from milestone M5, by
+`map_first` runs); a default run writes neither directory. See
+[Reference-based annotation](stages/annotation.md#pipeline-processes).
+
+| Path | Contents |
+|------|----------|
+| `<pair_id>/<segmentation>/annotation_panel/annotation_panel_out/panel_report.json` | Gene-ID resolution by source, unresolved features, controls removed, panel mode, set c and panel families (`ANNOTATE_PANEL`). |
+| `<pair_id>/<segmentation>/annotation_panel/annotation_panel_out/panel_genes*.json` | One declared annotation panel per file: sorted Ensembl IDs, symbols, platforms, `panel_hash`. |
+| `<pair_id>/<segmentation>/annotation_panel/annotation_panel_out/required_bundles.json` | The (reference, panel) bundles this pair × segmentation needs, with `n_required`. |
+| `<pair_id>/<segmentation>/annotation_panel/annotation_panel_out/annotation_config.json` | The annotation config both commands read, as written from the pipeline params. |
+| `annotation_reference_prep/<reference_id>/<panel_hash or panel_independent>/bundle_ref.json` | The bundle `ANNOTATE_REFERENCE_PREP` got or built: `build_hash`, bundle `path` and store root (identical bytes on every re-run of an unchanged bundle; the task log says whether it was built or reused). |
+
+The bundles themselves live in the reference store
+(`annotation_reference_store`, default `${outdir}/annotation_references`),
+not under these directories, and are never deleted by the pipeline.
+
 ## Nextflow reports
 
 Path: `${outdir}/nextflow/`

@@ -245,6 +245,50 @@ def test_known_references_are_consistent() -> None:
         assert [spec.role for spec in specs].count("primary") == 1
 
 
+def test_reference_ids_expand_to_known_specs() -> None:
+    """The pipeline names references by id; the known spec fills the rest."""
+    config = AnnotationConfig.model_validate(
+        {
+            "species": "mouse",
+            "references": [
+                {"reference_id": "wmb_panel", "max_cells_per_cluster": 20},
+                "wmb_region_share",
+            ],
+        }
+    )
+    wmb, region = config.references
+    assert wmb == AnnotationReferenceSpec(
+        reference_id="wmb_panel",
+        max_cells_per_cluster=20,
+        **KNOWN_REFERENCES["wmb_panel"],
+    )
+    assert wmb.drop_level == "CCN20230722_SUPT"
+    assert region.role == "region_share"
+    human = AnnotationConfig.model_validate(
+        {"references": ["whb_frontal_supc_clus", "seaad_mr_panel"]}
+    )
+    assert human.references == default_references("human")
+    assert human.references[0].hierarchy == ["CCN202210140_SUPC", "CCN202210140_CLUS"]
+
+
+def test_reference_expansion_keeps_explicit_keys_and_rejects_unknown_ids() -> None:
+    with pytest.raises(ValidationError, match="role 'primary'"):
+        AnnotationConfig.model_validate(
+            {
+                "references": [
+                    {"reference_id": "whb_frontal_supc_clus", "role": "secondary"}
+                ]
+            }
+        )
+    with pytest.raises(ValidationError):
+        AnnotationConfig.model_validate({"references": ["not_a_reference"]})
+    # KNOWN_REFERENCES is never mutated by an expansion.
+    AnnotationConfig.model_validate(
+        {"references": [{"reference_id": "whb_frontal_supc_clus", "n_per_utility": 5}]}
+    )
+    assert "n_per_utility" not in KNOWN_REFERENCES["whb_frontal_supc_clus"]
+
+
 def test_depth_grids() -> None:
     assert default_depth_grid("human") == list(HUMAN_DEPTH_GRID)
     assert default_depth_grid("human", 815) == list(HUMAN_DEPTH_GRID)

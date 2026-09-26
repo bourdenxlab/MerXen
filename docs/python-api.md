@@ -337,6 +337,41 @@ See [Mutually exclusive co-expression rate](stages/mecr.md).
 
 See [MapMyCells](stages/mapmycells.md).
 
+## `merxen.annotation` (in development)
+
+Reference-based annotation (plan `docs/plans/robust-celltype-annotation-plan.md`).
+`schema`, `vocab` and `config` import only numpy, pandas and pydantic;
+`reference` imports `cell_type_mapper`, `h5py` and `anndata` lazily.
+
+### `annotation.store` — [store.py](../src/merxen/annotation/store.py)
+
+- `ReferenceStore.get_or_build(spec, panel)` — content-addressed bundles
+  (`<store>/<reference_id>/<build_hash>/`), built once under `flock` and
+  renamed atomically; `list()`, `prune(dry_run=True)` never delete.
+- `build_hash_payload`, `compute_build_hash`, `ANNOTATION_BUILDER_VERSION`.
+
+### `annotation.panel` — [panel.py](../src/merxen/annotation/panel.py)
+
+- `compute_panel(prepared_dir, species, platforms)`, `panel_from_gene_list` —
+  declared panels, set a / set c, `required_bundles.json`.
+
+### `annotation.reference` — [reference.py](../src/merxen/annotation/reference.py)
+
+- Builders registered with the store: `build_whb_frontal`, `build_seaad_mr`,
+  `build_wmb_panel`, `build_wmb_region_share`, `build_whb_whole_ctx`;
+  `builder_for(spec)`, `build_reference_bundle(store, spec, panel)`.
+- `prepare_reference_spec(spec, SourceOptions(...))` — expands source
+  directories and fills pinned SEA-AD files before `build_hash`;
+  `ensure_seaad_multiregion_inputs`, `ensure_pinned_file`.
+- `TaxonomyTreeView`, `mapping_tree`, `filter_lookup_to_tree`,
+  `validate_lookup` (auto-collapse of parents without markers) — lookup
+  handling without `cell_type_mapper`.
+- `read_precomputed_stats`, `reference_profiles_from_stats`,
+  `broad_class_detection`, `negative_gene_table`, `node_vocab_table`,
+  `write_panel_stub_h5ad`, `merfish_region`, `region_share_tables`.
+
+See [Reference-based annotation](stages/annotation.md).
+
 ## `merxen.memory`
 
 Process-wide RAM monitoring. Not user-facing but useful when writing
