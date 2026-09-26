@@ -1054,6 +1054,13 @@ class AnnotationConfig(_AnnotationModel):
 
     @model_validator(mode="after")
     def _apply_species_defaults(self: AnnotationConfig) -> AnnotationConfig:
+        # Pydantic keeps the sub-model instances a caller passes in, so the
+        # defaults go into copies: filling the caller's objects would leak one
+        # config's species defaults into the next config built from them.
+        self.thresholds = self.thresholds.model_copy(deep=True)
+        self.flags = self.flags.model_copy(deep=True)
+        self.real_qc = self.real_qc.model_copy(deep=True)
+        self.resolvability = self.resolvability.model_copy(deep=True)
         defaults = species_defaults(self.species)
         self._check_region(defaults)
         if not self.references:

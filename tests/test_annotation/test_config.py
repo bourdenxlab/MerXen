@@ -95,6 +95,39 @@ def test_species_defaults_agree_with_the_models() -> None:
         species_defaults("rat")  # type: ignore[arg-type]
 
 
+def test_species_defaults_do_not_leak_through_shared_sub_models() -> None:
+    """One set of sub-model objects serves a human and then a mouse config."""
+    thresholds = AnnotationThresholds()
+    flags = AnnotationFlagsConfig()
+    real_qc = AnnotationRealQcConfig()
+    resolvability = AnnotationResolvabilityConfig()
+    shared = {
+        "thresholds": thresholds,
+        "flags": flags,
+        "real_qc": real_qc,
+        "resolvability": resolvability,
+    }
+
+    human = AnnotationConfig(species="human", **shared)  # type: ignore[arg-type]
+    mouse = AnnotationConfig(species="mouse", min_counts=20, **shared)  # type: ignore[arg-type]
+
+    assert human.flags.microglial_spillover_enabled is False
+    assert mouse.flags.microglial_spillover_enabled is True
+    assert human.real_qc.marker_consistency_warn == 0.75
+    assert mouse.real_qc.marker_consistency_warn == 0.80
+    assert human.thresholds.max_leaf_level == "supercluster"
+    assert mouse.thresholds.max_leaf_level == "subclass"
+    assert mouse.thresholds.hard_min_counts == 20
+    assert human.resolvability.n_test_cells == 25_000
+    assert mouse.resolvability.n_test_cells == 11_913
+    # The caller's objects keep their unfilled values.
+    assert thresholds.max_leaf_level is None
+    assert "hard_min_counts" not in thresholds.model_fields_set
+    assert flags.microglial_spillover_enabled is None
+    assert real_qc.marker_consistency_warn is None
+    assert resolvability.n_test_cells is None
+
+
 def test_explicit_values_override_species_defaults() -> None:
     config = AnnotationConfig(
         species="human",
