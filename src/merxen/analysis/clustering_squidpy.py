@@ -721,21 +721,12 @@ def _leiden_provenance(
 def _gpu_leiden_n_iterations(adata: ad.AnnData, *, key_added: str) -> int:
     """Return the iteration cap rapids-singlecell applied to one Leiden run.
 
-    ``_run_gpu_clustering`` does not pass ``n_iterations``, so the library
-    default applies (100 in rapids-singlecell 0.15.2, against 2 on the CPU
-    path). The signature default is read first; the value the engine wrote to
-    ``uns[key_added]["params"]`` is the fallback.
+    rapids-singlecell writes the value it applied to
+    ``uns[key_added]["params"]["n_iterations"]``, so that record is read
+    first. The ``rsc.tl.leiden`` signature default (100 in rapids-singlecell
+    0.15.2, against 2 on the CPU path) is the fallback, because
+    ``_run_gpu_clustering`` does not pass ``n_iterations``.
     """
-    rsc = sys.modules.get("rapids_singlecell")
-    leiden = getattr(getattr(rsc, "tl", None), "leiden", None)
-    if leiden is not None:
-        try:
-            parameter = inspect.signature(leiden).parameters.get("n_iterations")
-        except (TypeError, ValueError):
-            parameter = None
-        if parameter is not None and type(parameter.default) is int:
-            return int(parameter.default)
-
     engine_record = adata.uns.get(key_added)
     engine_params = (
         engine_record.get("params") if isinstance(engine_record, dict) else None
@@ -745,6 +736,16 @@ def _gpu_leiden_n_iterations(adata: ad.AnnData, *, key_added: str) -> int:
     )
     if isinstance(recorded, int | np.integer) and not isinstance(recorded, bool):
         return int(recorded)
+
+    rsc = sys.modules.get("rapids_singlecell")
+    leiden = getattr(getattr(rsc, "tl", None), "leiden", None)
+    if leiden is not None:
+        try:
+            parameter = inspect.signature(leiden).parameters.get("n_iterations")
+        except (TypeError, ValueError):
+            parameter = None
+        if parameter is not None and type(parameter.default) is int:
+            return int(parameter.default)
     return UNKNOWN_LEIDEN_N_ITERATIONS
 
 
