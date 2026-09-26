@@ -2652,9 +2652,15 @@ def _discard_region_reference_staging_dir(staging_dir: Path) -> None:
 
 @contextmanager
 def _exclusive_file_lock(lock_path: Path) -> Iterator[None]:
-    # A read-only descriptor is enough for flock and still works when another
-    # cache user created the lock file without group write permission.
-    descriptor = os.open(lock_path, os.O_RDONLY | os.O_CREAT, 0o666)
+    # On NFS, Linux emulates flock() with a whole-file POSIX lock, and an
+    # exclusive POSIX lock needs a descriptor opened for writing, so open the
+    # lock file read-write. Fall back to read-only only when another cache
+    # user created it without write permission for us; that still works on
+    # local filesystems, where flock() ignores the open mode.
+    try:
+        descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o666)
+    except PermissionError:
+        descriptor = os.open(lock_path, os.O_RDONLY)
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX)
         yield
