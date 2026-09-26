@@ -44,10 +44,11 @@ Commands:
   annotation-reference-prep
                       Get or build one reference bundle and...
   annotation-store   Inspect the annotation reference store...
+  annotate           Map published or prepared samples with...
 ```
 
-The reference-based annotation commands (`annotation-*`, plan
-`docs/plans/robust-celltype-annotation-plan.md` §3.2) take explicit
+The reference-based annotation commands (`annotation-*` and `annotate`, plan
+`docs/plans/robust-celltype-annotation-plan.md` §3.2–§3.3) take explicit
 options instead of a single `--config`.
 
 Logging is configured in the root `main()` group and streams to stderr at
@@ -491,6 +492,50 @@ requires `--dry-run` and only lists the bundles no `bundle_ref.json`,
 `map_manifest.json`, `required_bundles.json` or `*_annotation_manifest.json`
 under the results root references, plus failed and dead temporary builds.
 Delete by hand after review (OD-D4).
+
+## `merxen annotate`
+
+The annotation MAP step (plan §3.3): MapMyCells per sample and required
+bundle, standalone on published clustered H5ADs or on a
+`CLUSTERING_SQUIDPY_PREPARE` directory. It never writes into the inputs'
+results tree.
+
+```bash
+merxen annotate --species human \
+  --from-clustered-h5ad results/P7513/proseg_hybrid/clustering_squidpy/clustering_squidpy_out/merscope/P7513_MERSCOPE_clustered.h5ad \
+  --from-clustered-h5ad results/P7513/proseg_hybrid/clustering_squidpy/clustering_squidpy_out/xenium/P7513_XENIUM_clustered.h5ad \
+  --store /media/mathieubo/SSD1/MerXen/annotation_references \
+  --gene-id-fallback-csv /path/to/WHB/gene.csv \
+  --out shadow/P7513/proseg_hybrid
+```
+
+| Option | Meaning |
+|---|---|
+| `--from-clustered-h5ad PATH` | A published `<sid>_clustered.h5ad` (table cells, raw counts in `layers["counts"]`); repeat once per platform. Pair, segmentation and platform come from the results path. |
+| `--prepared-dir DIR` | Instead: prepared H5ADs (counts in `X`, every segmented object; objects below `--min-counts` are not mapped). |
+| `--store DIR`, `--store-large DIR` | Reference store(s); the bundle of each required (reference, `panel_hash`) is the one complete bundle of the current builder version. |
+| `--bundle KEY=DIR`, `--bundle-ref PATH` | Use this bundle directory (`KEY` = reference id or run id, e.g. `whb_frontal_supc_clus_setc`) or this `bundle_ref.json` instead of the store lookup. |
+| `--panel-dir DIR` | `merxen annotation-panel` output; default: the panel is computed from the inputs into `<out>/panel`. |
+| `--references IDS` | Comma-separated reference ids to map (default: every primary and secondary bundle the panel requires). |
+| `--annotation-config PATH` | `AnnotationConfig` JSON (thresholds, `xplat_sensitivity_segmentations`, `ctm_version`, ...). |
+| `--min-counts N` | Table-cell threshold (the clustering `min_counts`, 10). |
+| `--n-processors N` | MapMyCells processes (default `$MERXEN_ANNOTATION_MAP_N_PROCESSORS` or 6). |
+| `--work-dir DIR` | Scratch for the query H5ADs and extended JSONs (default `<out>/.work`, removed). |
+| `--keep-extended-json`, `--reuse/--no-reuse`, `--reuse-from DIR` | Keep the gzipped extended JSON; reuse identical runs of a `map_manifest.json` (default: `--out`). |
+| `--gene-id-fallback-csv PATH` | Local symbol → Ensembl table (M0e), as for `annotation-panel`. |
+| `--platforms`, `--no-provisional` | Map only these platforms; skip the provisional labels. |
+
+MapMyCells runs as a subprocess of `merxen.analysis.mapmycells_entrypoint`
+with the validated configuration (bootstrap factor 0.5, 100 iterations,
+seed 0, raw normalisation, `cloud_safe` off, one BLAS / numba thread per
+worker, no GPU); the installed `cell_type_mapper` must be the configured
+version (1.7.2). Outputs under `--out`: `<platform>/<sid>_mmc_<run_id>.parquet`
+(one row per cell × taxonomy level: assignment, name, bootstrap and
+aggregate probability, `avg_correlation`, runner-ups 1–5 with probabilities
+and correlations, `directly_assigned`), `<platform>/<sid>_ct_provisional.parquet`
+and `map_manifest.json` ([Reference-based annotation](stages/annotation.md#mapping-merxen-annotate)).
+A run is reused when the manifest in `--reuse-from` has the same query
+fingerprint, bundle `build_hash`, engine parameters and ctm version.
 
 ---
 
