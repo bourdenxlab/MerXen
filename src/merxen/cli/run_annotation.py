@@ -677,11 +677,19 @@ def _bundle_overrides(values: tuple[str, ...]) -> dict[str, Path]:
     help="annotation_config.json (AnnotationConfig); default: species defaults.",
 )
 @click.option(
+    "--clustering-config",
+    "clustering_config_path",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    default=None,
+    help="clustering_squidpy_config.json of the prepared directory (pair id, "
+    "sample platforms, min_counts).",
+)
+@click.option(
     "--min-counts",
     type=click.IntRange(min=0),
-    default=10,
-    show_default=True,
-    help="Table-cell threshold (the clustering min_counts).",
+    default=None,
+    help="Table-cell threshold (the clustering min_counts; default: the "
+    "--clustering-config value, else 10).",
 )
 @click.option(
     "--n-processors",
@@ -727,6 +735,18 @@ def _bundle_overrides(values: tuple[str, ...]) -> dict[str, Path]:
     is_flag=True,
     help="Skip the provisional raw-threshold ct_* parquet.",
 )
+@click.option(
+    "--allow-refused-panel",
+    is_flag=True,
+    help="For a refused panel, write map_manifest.json without runs and exit "
+    "0 instead of failing (pipeline runs: RESOLVE writes statuses only).",
+)
+@click.option(
+    "--require-bundle-refs",
+    is_flag=True,
+    help="Map only the bundles given with --bundle-ref / --bundle: fail "
+    "instead of looking a missing one up in the store (pipeline runs).",
+)
 def annotate_command(
     clustered_h5ads: tuple[Path, ...],
     prepared_dir: Path | None,
@@ -741,7 +761,8 @@ def annotate_command(
     panel_dir: Path | None,
     output_dir: Path,
     annotation_config_path: Path | None,
-    min_counts: int,
+    clustering_config_path: Path | None,
+    min_counts: int | None,
     n_processors: int | None,
     work_dir: Path | None,
     keep_extended_json: bool | None,
@@ -750,6 +771,8 @@ def annotate_command(
     gene_id_fallback_csv: Path | None,
     platforms: str | None,
     no_provisional: bool,
+    allow_refused_panel: bool,
+    require_bundle_refs: bool,
 ) -> None:
     """Map published or prepared samples with MapMyCells (MAP step, plan §3.3).
 
@@ -777,6 +800,7 @@ def annotate_command(
                 panel_dir=panel_dir,
                 output_dir=output_dir,
                 annotation_config_path=annotation_config_path,
+                clustering_config_path=clustering_config_path,
                 min_counts=min_counts,
                 n_processors=n_processors,
                 work_dir=work_dir,
@@ -786,6 +810,8 @@ def annotate_command(
                 gene_id_fallback_csv=gene_id_fallback_csv,
                 platforms=platforms,
                 write_provisional=not no_provisional,
+                allow_refused_panel=allow_refused_panel,
+                require_bundle_refs=require_bundle_refs,
             )
     except (MapError, MmcEngineError) as error:
         raise click.ClickException(f"{type(error).__name__}: {error}") from error
@@ -806,7 +832,8 @@ def _annotate(
     panel_dir: Path | None,
     output_dir: Path,
     annotation_config_path: Path | None,
-    min_counts: int,
+    clustering_config_path: Path | None,
+    min_counts: int | None,
     n_processors: int | None,
     work_dir: Path | None,
     keep_extended_json: bool | None,
@@ -815,26 +842,55 @@ def _annotate(
     gene_id_fallback_csv: Path | None,
     platforms: str | None,
     write_provisional: bool,
+    allow_refused_panel: bool,
+    require_bundle_refs: bool,
 ) -> None:
     from merxen.annotation.mapmycells_engine import MmcBundle
-    from merxen.annotation.panel import compute_panel, prepared_samples
+    from merxen.annotation.panel import (
+        DEFAULT_MIN_COUNTS,
+        compute_panel,
+        prepared_samples,
+    )
     from merxen.annotation.pipeline import (
+        MAPPED_ROLES,
+        RUN_SUFFIXES,
         MapSample,
         annotate_map,
-        bundle_ref_bundle,
         check_output_outside_inputs,
         load_required,
         locate_bundle,
         map_bundles,
         published_layout,
+        write_refused_manifest,
         write_view_manifest,
     )
-    from merxen.annotation.store import ReferenceStore
+    from merxen.annotation.store import BundleRef, ReferenceStore
 
     if bool(clustered_h5ads) == (prepared_dir is not None):
         raise click.UsageError(
             "give --from-clustered-h5ad (one per platform) or --prepared-dir"
         )
+    clustering = _read_json(clustering_config_path) or {}
+    if clustering and prepared_dir is None:
+        raise click.UsageError("--clustering-config goes with --prepared-dir")
+    configured_min_counts = clustering.get("min_counts")
+    if configured_min_counts is not None:
+        if min_counts is not None and min_counts != int(configured_min_counts):
+            raise click.UsageError(
+                f"--min-counts {min_counts} differs from the clustering config's "
+                f"min_counts {configured_min_counts}: the table cells must be the "
+                "clustering run's"
+            )
+        min_counts = int(configured_min_counts)
+    if min_counts is None:
+        min_counts = DEFAULT_MIN_COUNTS
+    configured_pair = clustering.get("pair_id")
+    if pair_id and configured_pair and str(configured_pair) != pair_id:
+        raise click.UsageError(
+            f"--pair-id {pair_id} differs from the clustering config's pair_id "
+            f"{configured_pair}"
+        )
+    pair_id = pair_id or (str(configured_pair) if configured_pair else None)
     config = _load_annotation_config(annotation_config_path, species)
     updates: dict[str, Any] = {}
     if keep_extended_json is not None:
@@ -875,7 +931,7 @@ def _annotate(
             )
     else:
         assert prepared_dir is not None
-        for prepared in prepared_samples(prepared_dir):
+        for prepared in prepared_samples(prepared_dir, clustering_config=clustering):
             samples.append(
                 MapSample(
                     sample_id=prepared.sample_id,
@@ -899,7 +955,22 @@ def _annotate(
             segmentation=segmentation,
             min_counts=min_counts,
         )
-    required = load_required(panel_dir)
+    required = load_required(panel_dir, allow_refused=allow_refused_panel)
+    if required.status == "refused":
+        manifest = write_refused_manifest(
+            required,
+            config,
+            output_dir=output_dir,
+            pair_id=pair_id,
+            segmentation=segmentation,
+            n_processors=n_processors,
+        )
+        click.echo(
+            f"annotate: panel of {manifest.pair_id} {manifest.segmentation} "
+            f"refused, nothing mapped ({'; '.join(manifest.panel_reasons)}) "
+            f"-> {output_dir}"
+        )
+        return
     reference_ids = (
         [item.strip() for item in references.split(",") if item.strip()]
         if references
@@ -917,18 +988,21 @@ def _annotate(
         else None
     )
     overrides = _bundle_overrides(bundle_values)
-    from_refs = dict(bundle_ref_bundle(path) for path in bundle_ref_paths)
+    # Refs are read here but opened only for the bundles MAP maps: a
+    # pipeline task also stages the refs of unmapped roles (the mouse
+    # region shares, M6), which hold no mapping precompute.
+    from_refs: dict[tuple[str, str | None], BundleRef] = {}
+    for ref_path in bundle_ref_paths:
+        ref = BundleRef.model_validate_json(ref_path.read_text(encoding="utf-8"))
+        from_refs[(ref.reference_id, ref.panel_hash)] = ref
     bundles: dict[tuple[str, str | None], MmcBundle] = {}
     for item in required.bundles:
-        if item.role not in {"primary", "secondary", "sensitivity"}:
+        if item.role not in MAPPED_ROLES:
             continue
         if reference_ids is not None and item.reference_id not in reference_ids:
             continue
         key = (item.reference_id, item.panel_hash)
-        run_key = item.reference_id + {
-            "setc_sensitivity": "_setc",
-            "intersection_xpanel": "_xpanel",
-        }.get(item.purpose, "")
+        run_key = item.reference_id + RUN_SUFFIXES.get(item.purpose, "")
         if run_key in overrides or (
             item.purpose == "annotation" and item.reference_id in overrides
         ):
@@ -936,7 +1010,13 @@ def _annotate(
                 overrides.get(run_key) or overrides[item.reference_id]
             )
         elif key in from_refs:
-            bundles[key] = from_refs[key]
+            bundles[key] = MmcBundle.from_bundle_ref(from_refs[key])
+        elif require_bundle_refs:
+            raise click.UsageError(
+                f"no --bundle-ref for {item.reference_id} on panel "
+                f"{(item.panel_hash or 'panel-independent')[:16]} "
+                "(--require-bundle-refs)"
+            )
         elif reference_store is not None:
             bundles[key] = locate_bundle(
                 reference_store, item.reference_id, item.panel_hash

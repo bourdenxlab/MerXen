@@ -1004,3 +1004,198 @@ def test_cli_annotate_refuses_an_output_in_the_results_tree(tmp_path: Path) -> N
     assert result.exit_code != 0
     assert "never into the results tree" in result.output
     assert not (tmp_path / "results" / "PX" / "annotation").exists()
+
+
+def _prepared_dir(root: Path) -> tuple[Path, Path]:
+    """A CLUSTERING_SQUIDPY_PREPARE output and its clustering config."""
+    samples = _pair_samples(root / "clustering_prepare_out")
+    prepared = root / "clustering_prepare_out"
+    (prepared / "manifest.json").write_text(
+        json.dumps(
+            {
+                "samples": {
+                    sample.sample_id: str(sample.h5ad_path.relative_to(prepared))
+                    for sample in samples
+                }
+            }
+        )
+    )
+    config = root / "clustering_squidpy_config.json"
+    config.write_text(
+        json.dumps(
+            {
+                "pair_id": "PX",
+                "min_counts": 10,
+                "samples": [
+                    {"sample_id": sample.sample_id, "platform": sample.platform}
+                    for sample in samples
+                ],
+            }
+        )
+    )
+    return prepared, config
+
+
+def _bundle_refs(
+    root: Path, bundles: dict[tuple[str, str | None], MmcBundle]
+) -> list[Path]:
+    from merxen.annotation.store import BundleRef
+
+    paths = []
+    for index, ((reference_id, panel_hash), bundle) in enumerate(bundles.items()):
+        paths.append(
+            BundleRef(
+                reference_id=reference_id,
+                species="human",
+                role="primary" if reference_id.startswith("whb") else "secondary",
+                panel_hash=panel_hash,
+                build_hash=bundle.build_hash,
+                path=str(bundle.path),
+                store_root=str(bundle.path.parents[1]),
+            ).write(root / f"bundle_ref_{index + 1}.json")
+        )
+    return paths
+
+
+def _pipeline_arguments(
+    prepared: Path, config: Path, panel_dir: Path, refs: list[Path], output: Path
+) -> list[str]:
+    """The arguments CLUSTERING_SQUIDPY_ANNOTATE_MAP passes (annotation.nf)."""
+    return [
+        "annotate",
+        "--species",
+        "human",
+        "--prepared-dir",
+        str(prepared),
+        "--clustering-config",
+        str(config),
+        "--segmentation",
+        "proseg_hybrid",
+        "--panel-dir",
+        str(panel_dir),
+        *(item for ref in refs for item in ("--bundle-ref", str(ref))),
+        "--require-bundle-refs",
+        "--allow-refused-panel",
+        "--out",
+        str(output),
+        "--n-processors",
+        "2",
+    ]
+
+
+def test_cli_annotate_runs_the_pipeline_arguments(
+    tmp_path: Path, fake_mmc: FakeMmc
+) -> None:
+    """Prepared directory, clustering config and PREP's bundle refs only."""
+    from merxen.annotation.store import BundleRef
+
+    prepared, config = _prepared_dir(tmp_path / "inputs")
+    panel_dir, panel = _panel_dir(tmp_path / "panel")
+    refs = _bundle_refs(tmp_path / "refs", _human_bundles(fake_mmc, panel))
+    # A ref of an unmapped role (the mouse region shares, M6) is staged too;
+    # it has no mapping precompute and must never be opened.
+    refs.append(
+        BundleRef(
+            reference_id="wmb_region_share",
+            species="human",
+            role="region_share",
+            panel_hash=None,
+            build_hash="0" * 64,
+            path=str(tmp_path / "missing"),
+            store_root=str(tmp_path),
+        ).write(tmp_path / "refs" / "bundle_ref_9.json")
+    )
+    output = tmp_path / "annotation_map_out"
+
+    result = CliRunner().invoke(
+        cli_main, _pipeline_arguments(prepared, config, panel_dir, refs, output)
+    )
+
+    assert result.exit_code == 0, result.output
+    manifest = load_map_manifest(output / MAP_MANIFEST_NAME)
+    assert manifest.pair_id == "PX"
+    assert manifest.min_counts == 10
+    assert manifest.panel_status == "ok"
+    assert manifest.samples["PX_MERSCOPE"].source == "prepared"
+    assert set(manifest.samples["PX_XENIUM"].runs) == {
+        "whb_frontal_supc_clus",
+        "seaad_mr_panel",
+    }
+    assert (output / "xenium" / "PX_XENIUM_mmc_whb_frontal_supc_clus.parquet").is_file()
+
+
+def test_cli_annotate_require_bundle_refs_never_reads_the_store(
+    tmp_path: Path, fake_mmc: FakeMmc
+) -> None:
+    prepared, config = _prepared_dir(tmp_path / "inputs")
+    panel_dir, panel = _panel_dir(tmp_path / "panel")
+    bundles = _human_bundles(fake_mmc, panel)
+    whb_only = {
+        key: value for key, value in bundles.items() if key[0].startswith("whb")
+    }
+    refs = _bundle_refs(tmp_path / "refs", whb_only)
+    arguments = _pipeline_arguments(
+        prepared, config, panel_dir, refs, tmp_path / "out"
+    ) + ["--store", str(fake_mmc.root)]
+
+    result = CliRunner().invoke(cli_main, arguments)
+
+    # The store holds the SEA-AD bundle, but a pipeline task maps only what
+    # PREP resolved.
+    assert result.exit_code != 0
+    assert "no --bundle-ref for seaad_mr_panel" in result.output
+    assert fake_mmc.calls == []
+
+
+def test_cli_annotate_takes_min_counts_from_the_clustering_config(
+    tmp_path: Path,
+) -> None:
+    prepared, config = _prepared_dir(tmp_path / "inputs")
+    panel_dir, _ = _panel_dir(tmp_path / "panel")
+    arguments = _pipeline_arguments(prepared, config, panel_dir, [], tmp_path / "out")
+
+    result = CliRunner().invoke(cli_main, [*arguments, "--min-counts", "5"])
+
+    assert result.exit_code != 0
+    assert "differs from the clustering config's min_counts 10" in result.output
+
+
+def _refuse(panel_dir: Path) -> None:
+    path = panel_dir / REQUIRED_BUNDLES_FILE
+    required = RequiredBundles.model_validate_json(path.read_text())
+    refused = required.model_copy(
+        update={
+            "status": "refused",
+            "reasons": ["gene-ID resolution 0.40 < 0.95"],
+            "bundles": [],
+            "n_required": 0,
+        }
+    )
+    path.write_text(json.dumps(refused.model_dump(mode="json")))
+
+
+def test_cli_annotate_records_a_refused_panel_without_mapping(
+    tmp_path: Path, fake_mmc: FakeMmc
+) -> None:
+    prepared, config = _prepared_dir(tmp_path / "inputs")
+    panel_dir, _ = _panel_dir(tmp_path / "panel")
+    _refuse(panel_dir)
+    output = tmp_path / "annotation_map_out"
+
+    result = CliRunner().invoke(
+        cli_main, _pipeline_arguments(prepared, config, panel_dir, [], output)
+    )
+
+    assert result.exit_code == 0, result.output
+    manifest = load_map_manifest(output / MAP_MANIFEST_NAME)
+    assert manifest.panel_status == "refused"
+    assert manifest.panel_reasons == ["gene-ID resolution 0.40 < 0.95"]
+    assert manifest.samples == {}
+    assert manifest.min_counts == 10
+    assert fake_mmc.calls == []
+    # Without --allow-refused-panel (standalone use) a refused panel fails.
+    arguments = _pipeline_arguments(prepared, config, panel_dir, [], tmp_path / "x")
+    arguments.remove("--allow-refused-panel")
+    refused = CliRunner().invoke(cli_main, arguments)
+    assert refused.exit_code != 0
+    assert "was refused" in refused.output

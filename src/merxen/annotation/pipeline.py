@@ -794,6 +794,10 @@ class MapManifest(_MapModel):
         n_processors: Worker processes.
         min_counts: Table-cell threshold.
         mouse_region_step: Status of the mouse region step (M6).
+        panel_status: ``required_bundles.json`` status: ``"refused"`` when
+            no panel can be annotated, so nothing was mapped (RESOLVE writes
+            statuses only; plan §3.3 step 2).
+        panel_reasons: Why the panel was refused.
         provisional_rules: What the provisional labels apply.
         thresholds: The raw thresholds the provisional labels used.
         wall_time_s: Wall time of the MAP call.
@@ -811,6 +815,8 @@ class MapManifest(_MapModel):
     n_processors: int
     min_counts: int
     mouse_region_step: str | None = None
+    panel_status: Literal["ok", "refused"] = "ok"
+    panel_reasons: list[str] = Field(default_factory=list)
     provisional_rules: str = PROVISIONAL_RULES
     thresholds: dict[str, Any] = Field(default_factory=dict)
     wall_time_s: float | None = None
@@ -1781,28 +1787,95 @@ def write_view_manifest(samples: Sequence[MapSample], directory: Path) -> Path:
     return directory
 
 
-def load_required(panel_dir: Path | str) -> RequiredBundles:
+def load_required(
+    panel_dir: Path | str, *, allow_refused: bool = False
+) -> RequiredBundles:
     """Read ``required_bundles.json`` of an ``ANNOTATE_PANEL`` output.
 
     Args:
         panel_dir: The directory.
+        allow_refused: Return a refused panel instead of raising (pipeline
+            runs, which record the refusal with ``write_refused_manifest``).
 
     Returns:
         The required bundles.
 
     Raises:
-        MapError: If the directory has none, or the panel was refused.
+        MapError: If the directory has none, or the panel was refused and
+            ``allow_refused`` is false.
     """
     path = Path(panel_dir) / REQUIRED_BUNDLES_FILE
     if not path.is_file():
         raise MapError(f"{path} is missing (run merxen annotation-panel first)")
     required = RequiredBundles.model_validate_json(path.read_text(encoding="utf-8"))
-    if required.status != "ok":
+    if required.status != "ok" and not allow_refused:
         raise MapError(
             f"the panel of {required.pair_id} {required.segmentation} was refused: "
             + "; ".join(required.reasons)
         )
     return required
+
+
+def write_refused_manifest(
+    required: RequiredBundles,
+    config: AnnotationConfig,
+    *,
+    output_dir: Path | str,
+    pair_id: str | None,
+    segmentation: str | None,
+    n_processors: int | None = None,
+) -> MapManifest:
+    """Record a refused panel: ``map_manifest.json`` without any run.
+
+    A refused panel is a data-quality outcome, not an infrastructure error
+    (plan §3.1 failure semantics): MAP maps nothing and writes this manifest,
+    and RESOLVE (M4) writes statuses only.
+
+    Args:
+        required: The refused ``required_bundles.json``.
+        config: The annotation config, coupled to the clustering
+            ``min_counts``.
+        output_dir: ``annotation_out``.
+        pair_id: Pair id (default: the panel's).
+        segmentation: Segmentation (default: the panel's).
+        n_processors: MMC worker processes the task reserved.
+
+    Returns:
+        The written manifest.
+
+    Raises:
+        MapError: If the panel was not refused.
+    """
+    from merxen.annotation.mapmycells_engine import installed_ctm_version
+
+    if required.status != "refused":
+        raise MapError("write_refused_manifest needs a refused panel")
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    manifest = MapManifest(
+        pair_id=pair_id or required.pair_id,
+        segmentation=segmentation or required.segmentation,
+        species=config.species,
+        anatomical_region=config.anatomical_region,
+        created_at=datetime.now(UTC).isoformat(timespec="seconds"),
+        ctm_version=installed_ctm_version(),
+        ctm_commit=ctm_commit(),
+        n_processors=n_processors or default_n_processors(),
+        min_counts=config.require_min_counts(),
+        mouse_region_step=MOUSE_REGION_STEP if config.species == "mouse" else None,
+        panel_status="refused",
+        panel_reasons=list(required.reasons),
+        thresholds=config.thresholds.model_dump(mode="json"),
+        wall_time_s=0.0,
+    )
+    manifest.write(output / MAP_MANIFEST_NAME)
+    logger.warning(
+        "%s %s: panel refused, nothing mapped: %s",
+        manifest.pair_id,
+        manifest.segmentation,
+        "; ".join(required.reasons) or "no reason recorded",
+    )
+    return manifest
 
 
 def bundle_ref_bundle(ref_path: Path | str) -> tuple[tuple[str, str | None], MmcBundle]:
