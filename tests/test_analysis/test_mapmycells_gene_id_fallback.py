@@ -364,3 +364,127 @@ def test_run_mapmycells_fails_fast_on_missing_fallback_table(tmp_path: Path) -> 
 
     with pytest.raises(FileNotFoundError, match="gene-ID fallback table"):
         run_mapmycells(cfg)
+
+
+def test_prepare_query_does_not_apply_fallback_to_non_ensembl_id_column(
+    tmp_path: Path,
+    whb_gene_csv: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A symbol-valued ID column must not be partly rewritten to Ensembl IDs."""
+    symbols = ["APP", "H2AX", "NOTX"]
+    input_h5ad = _write_clustered(
+        tmp_path / "symbols.h5ad",
+        pd.DataFrame({"feature_name": symbols}, index=symbols),
+    )
+    report_path = tmp_path / "query_gene_ids.json"
+
+    with caplog.at_level("INFO", logger="merxen.analysis.mapmycells"):
+        output_h5ad = prepare_mapmycells_query(
+            input_h5ad,
+            tmp_path / "query.h5ad",
+            gene_id_column="feature_name",
+            gene_id_fallback=load_gene_id_fallback_table(whb_gene_csv),
+            gene_id_report_path=report_path,
+        )
+
+    assert list(ad.read_h5ad(output_h5ad).var_names) == symbols
+    report = json.loads(report_path.read_text())
+    assert report["gene_id_fallback_applied"] is False
+    assert report["ids_used_as_provided"] is True
+    assert "resolved_by_fallback" not in report
+    assert "no Ensembl ID" not in caplog.text
+    assert "is not 'ensembl_id'" in caplog.text
+
+
+def test_prepare_query_reports_symbols_left_for_gene_mapping_db(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """With a gene-mapping DB, unresolved symbols are handed on, not ignored."""
+    input_h5ad = _write_clustered(tmp_path / "merscope.h5ad", _merscope_var())
+    report_path = tmp_path / "query_gene_ids.json"
+
+    with caplog.at_level("WARNING", logger="merxen.analysis.mapmycells"):
+        output_h5ad = prepare_mapmycells_query(
+            input_h5ad,
+            tmp_path / "query.h5ad",
+            gene_id_column="ensembl_id",
+            allow_gene_symbol_fallback=True,
+            gene_id_report_path=report_path,
+        )
+
+    assert list(ad.read_h5ad(output_h5ad).var_names[2:]) == list(MERSCOPE_MISSING_IDS)
+    report = json.loads(report_path.read_text())
+    assert report["unresolved_handling"] == "left_as_symbols_for_gene_mapping_db"
+    assert report["unresolved"] == dict.fromkeys(
+        MERSCOPE_MISSING_IDS, "left_as_symbol_for_gene_mapping_db"
+    )
+    assert "left as symbols for the gene-mapping database" in caplog.text
+    assert "ignored by MapMyCells" not in caplog.text
+
+
+def test_run_mapmycells_ignores_fallback_table_without_query_species_ids(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A human-only table configured for a mouse run is dropped and recorded."""
+    human_gene_csv = tmp_path / "human_gene.csv"
+    pd.DataFrame(
+        {
+            "gene_identifier": list(MERSCOPE_MISSING_IDS.values()),
+            "gene_symbol": list(MERSCOPE_MISSING_IDS),
+        }
+    ).to_csv(human_gene_csv, index=False)
+    mouse_ids = ["ENSMUSG00000034394", "ENSMUSG00000020932"]
+    mouse_h5ad = _write_clustered(
+        tmp_path / "PAIR1_MERSCOPE_clustered.h5ad",
+        pd.DataFrame(
+            {"gene": ["Lif", "Gfap"], "ensembl_id": mouse_ids}, index=mouse_ids
+        ),
+    )
+    marker_lookup = tmp_path / "markers.json"
+    marker_lookup.write_text("{}\n")
+    precomputed_stats = tmp_path / "stats.h5"
+    precomputed_stats.write_bytes(b"stats")
+    monkeypatch.setattr(
+        "merxen.analysis.mapmycells._run_command", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        "merxen.analysis.mapmycells.annotate_h5ad_with_mapmycells",
+        lambda *args, **kwargs: None,
+    )
+    cfg = MapMyCellsConfig(
+        pair_id="PAIR1",
+        output_dir=tmp_path / "mapmycells_out",
+        samples=[
+            MapMyCellsSampleConfig(
+                sample_id="PAIR1_MERSCOPE",
+                platform="MERSCOPE",
+                anndata_path=mouse_h5ad,
+                gene_id_column="ensembl_id",
+            )
+        ],
+        reference_mode="whole_brain",
+        reference_atlas="wmb",
+        query_species="mouse",
+        marker_lookup_path=marker_lookup,
+        precomputed_stats_path=precomputed_stats,
+        region_cache_dir=tmp_path / "empty_cache",
+        gene_id_fallback_csv=human_gene_csv,
+    )
+
+    run_mapmycells(cfg)
+
+    manifest = json.loads(
+        (cfg.output_dir / "PAIR1_mapmycells_manifest.json").read_text()
+    )
+    assert manifest["gene_id_fallback_csv"] is None
+    assert manifest["gene_id_fallback_ignored"] == {
+        "path": str(human_gene_csv),
+        "reason": "no mouse Ensembl IDs",
+    }
+    sample = manifest["gene_id_resolution"]["PAIR1_MERSCOPE"]
+    assert sample["gene_id_fallback"] is None
+    assert sample["gene_id_fallback_applied"] is False
+    assert sample["n_unresolved"] == 0
