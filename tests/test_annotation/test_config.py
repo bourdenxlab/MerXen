@@ -449,7 +449,17 @@ def test_table_key_suffix_in_all_mode_and_flip_combinations(
 
 def test_explicit_table_key_suffix() -> None:
     assert resolve_table_key_suffix("mouse", "map_first", "trial2") == "trial2"
-    assert resolve_table_key_suffix("mouse", "map_first", "") == ""
+    # Before the flip an empty suffix would overwrite the legacy table (OD-A3).
+    with pytest.raises(ValueError, match="OD-A3"):
+        resolve_table_key_suffix("mouse", "map_first", "")
+    with pytest.raises(ValueError, match="OD-A3"):
+        resolve_table_key_suffix("mouse", "map_first", "  ")
+    flipped = frozenset({"mouse"})
+    assert (
+        resolve_table_key_suffix("mouse", "map_first", "", flipped_species=flipped)
+        == ""
+    )
+    assert resolve_table_key_suffix("mouse", "legacy", "") == ""
     assert resolve_table_key_suffix("mouse", "legacy", "trial2") == ""
     with pytest.raises(ValueError, match="lower-case token"):
         resolve_table_key_suffix("mouse", "map_first", "Trial/2")

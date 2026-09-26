@@ -256,6 +256,11 @@ def test_python_suffix_in_all_mode_flip_combinations(
     expected = "mapfirst" if mode == "map_first" and not flipped else ""
 
     assert resolve_table_key_suffix(species, mode, flipped_species=flips) == expected  # type: ignore[arg-type]
+    if mode == "map_first" and not flipped:
+        with pytest.raises(ValueError, match="OD-A3"):
+            resolve_table_key_suffix(species, mode, "", flipped_species=flips)  # type: ignore[arg-type]
+    else:
+        assert resolve_table_key_suffix(species, mode, "", flipped_species=flips) == ""  # type: ignore[arg-type]
 
 
 # --------------------------------------------------------------------------
@@ -550,6 +555,14 @@ def _build_cases(tmp_path: Path, defaults: dict[str, Any]) -> dict[str, dict[str
             "annotation_gene_id_overrides_csv": str(tmp_path / "missing.csv"),
         },
     }
+    cases["preflight|map_first|empty-suffix"] = {
+        "fn": "preflight",
+        "settings": {
+            **mouse_settings,
+            "clustering_squidpy_table_key_suffix": "",
+        },
+        "params": defaults,
+    }
     cases["preflight|map_first|mouse-regions"] = {
         "fn": "preflight",
         "settings": {
@@ -649,7 +662,18 @@ def test_groovy_mode_and_suffix_in_all_mode_flip_combinations(
     )
     explicit = "trial_2" if expected_mode == "map_first" else ""
     assert _value(groovy_results, f"tableKeySuffix|{name}|suffix=trial_2") == explicit
-    assert _value(groovy_results, f"tableKeySuffix|{name}|suffix=") == ""
+    empty = groovy_results[f"tableKeySuffix|{name}|suffix="]
+    if expected_mode == "map_first" and not flipped:
+        # An empty suffix would overwrite the legacy table (OD-A3).
+        assert "OD-A3" in empty["error"]
+        with pytest.raises(ValueError, match="OD-A3"):
+            resolve_table_key_suffix(species, python_mode, "", flipped_species=flips)  # type: ignore[arg-type]
+    else:
+        assert empty == {"value": ""}
+        assert (
+            resolve_table_key_suffix(species, python_mode, "", flipped_species=flips)  # type: ignore[arg-type]
+            == ""
+        )
     invalid = groovy_results[f"tableKeySuffix|{name}|suffix=Bad/Key"]
     if expected_mode == "map_first":
         assert "lower-case token" in invalid["error"]
@@ -829,6 +853,10 @@ def test_groovy_preflight(groovy_results: dict[str, dict[str, Any]]) -> None:
     ):
         assert expected in invalid
     assert "not available yet" not in invalid
+    empty_suffix = _value(groovy_results, "preflight|map_first|empty-suffix")
+    assert len(empty_suffix) == 1
+    assert "overwrite the legacy one" in empty_suffix[0]
+    assert "OD-A3" in empty_suffix[0]
     regions = _value(groovy_results, "preflight|map_first|mouse-regions")
     assert len(regions) == 1
     assert "Unknown mouse_section_regions 'Isocortex;Cortex'" in regions[0]
