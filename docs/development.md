@@ -156,7 +156,27 @@ git push origin HEAD --tags
 
   ```bash
   uv pip compile pyproject.toml --extra dev -o requirements/requirements.lock
+  python scripts/update_env_lock_hash.py
   ```
+
+  The second command refreshes the `# requirements.lock sha256:` header in
+  `envs/environment.yml`. Nextflow caches conda envs as
+  `work/conda/env-<hash of the env file's text>`, so without the header a
+  lockfile change would leave the cached env on the old dependency versions.
+  `tests/test_workflows/test_env_lock_sync.py` fails while the header is stale.
+
+  **A new header invalidates `-resume` under the `conda` profile.** Any change
+  to `envs/environment.yml`, the checksum included, gives the base env a new
+  `work/conda/env-*` path, and Nextflow includes each task's conda env in the
+  task hash. The first `-resume` under `-profile …,conda` after the change
+  therefore re-runs every task that uses the base env and everything
+  downstream of it: Cellpose, ProSeg, clustering, MapMyCells and the later
+  stages. The new env resolves the loose `pyproject.toml` ranges on the day it
+  is built, not the lock, so the re-run outputs can differ by more than the
+  intended dependency change. The checksum covers the lock's raw bytes, so a
+  regeneration that only rewrites `# via` comments has the same effect. Before
+  merging a lockfile change, snapshot the published outputs you need to keep
+  and plan a full rerun.
 
   When the dedicated registration stack changes, regenerate its separate lock:
 
@@ -169,6 +189,12 @@ git push origin HEAD --tags
   the lockfile and CI.
 - **Conda env (`envs/environment.yml`)** is deliberately thin — Python 3.12, pip,
   and `-e ".[dev]"`. All Python dependencies come through `pyproject.toml`.
+  It cannot install the lockfile, because pip rejects it (`ResolutionImpossible`:
+  `cell_type_mapper` declares `abc_atlas_access` as an unpinned git URL while the
+  lock pins a commit); its lockfile checksum header only forces Nextflow to
+  rebuild the env when the lock changes.
+- **Base image (`containers/Dockerfile`)** installs `requirements/requirements.lock`
+  with `uv`, then MerXen with `--no-deps`, like CI.
 - **Alignment env (`envs/environment.alignment.yml`)** installs
   `requirements/requirements.alignment.lock` plus Java/libvips for Nextflow `ALIGN`.
   VALIS 1.2 is installed exactly with `--no-deps` after the locked

@@ -30,6 +30,8 @@ mypy src/
 
 # Regenerate lockfile after changing dependencies
 uv pip compile pyproject.toml --extra dev -o requirements/requirements.lock
+# ...then refresh the lock checksum header in envs/environment.yml
+python scripts/update_env_lock_hash.py
 ```
 
 ## Workflow

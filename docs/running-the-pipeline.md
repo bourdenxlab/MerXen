@@ -217,6 +217,12 @@ nextflow run workflows/main.nf \
 
 Completed stages are skipped; only the failed stage and its downstreams re-run.
 
+Under the `conda` profile each task's hash includes its conda env, so a change
+to an env file (for example the `requirements.lock` checksum in
+`envs/environment.yml` after a lockfile update) re-runs every task that uses
+that env, and everything downstream, even with `-resume`. See
+[Dependency management](development.md#dependency-management).
+
 ## Failure behavior
 
 Task failures use Nextflow's `ignore` error strategy with
