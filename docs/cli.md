@@ -439,7 +439,7 @@ merxen annotation-reference-prep --reference-id whb_frontal_supc_clus \
 | `--scratch-dir PATH` | Parent of the build scratch directory (never inside a store). |
 | `--output PATH` | `bundle_ref.json` to write. |
 | `--download-dir PATH` | Cache of pinned reference downloads (default `<store>/.downloads`). |
-| `--auto-download / --no-auto-download` | Download missing pinned files (SEA-AD Multiregion; default off). |
+| `--auto-download / --no-auto-download` | Download missing pinned files (SEA-AD Multiregion, MERFISH-C57BL6J-638850-CCF cell metadata; default off). |
 | `--download-seed KEY=PATH` | A local copy of a pinned file (e.g. `precomputed_stats=...`), copied into the cache only when its sha256 matches. |
 | `--n-processors N`, `--max-gb N` | `cell_type_mapper` processes (default 8) and reference-marker memory bound (default 40 GB); not part of `build_hash`. |
 
@@ -451,7 +451,7 @@ expanded to the files a builder reads before `build_hash` is computed):
 | `whb_frontal_supc_clus` (also set c) | `region_precompute` (the region precompute, or its reference directory with `region_reference_manifest.json`), or for a rebuild `whb_metadata_dir` + `whb_h5ad_dir`; `seaad_precomputed_stats` (negative genes; from the download cache when absent) |
 | `seaad_mr_panel` | `seaad_precomputed_stats`, optional `seaad_metadata_dir` (taxonomy tables); pinned files come from the download cache when absent |
 | `wmb_panel` | `wmb_h5ad_dir` (WMB-10Xv3 `*-raw.h5ad`), `wmb_metadata_dir` (`cell_metadata.csv`, taxonomy tables), `wmb_mapping_stats` (Allen `precomputed_stats_ABC_revision_230821.h5`), optional `wmb_selfmap_test_cells`, `wmb_marker_gene_universe` |
-| `wmb_region_share` | `merfish_ccf_metadata` (`cell_metadata_with_parcellation_annotation.csv`) |
+| `wmb_region_share` | `merfish_ccf_metadata` (`cell_metadata_with_parcellation_annotation.csv`; from the download cache when absent, key `merfish_ccf_metadata`) |
 | `whb_whole_ctx_panel` (optional) | `whb_whole_precompute` |
 
 Each `cell_type_mapper` step runs in its own interpreter with one BLAS

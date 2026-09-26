@@ -584,6 +584,49 @@ def test_seaad_pins_match_the_allen_manifest_md5() -> None:
     }
 
 
+def test_merfish_pin_matches_the_region_share_release_checks() -> None:
+    pinned = reference.MERFISH_CCF_METADATA_PIN
+    assert pinned.md5 == reference.MERFISH_CCF_METADATA_MD5
+    assert pinned.size == reference.MERFISH_CCF_METADATA_SIZE
+    assert pinned.relative_path.endswith(
+        "MERFISH-C57BL6J-638850-CCF/20231215/views/"
+        "cell_metadata_with_parcellation_annotation.csv"
+    )
+    assert pinned.url.endswith(pinned.relative_path)
+
+
+def test_prepare_reference_spec_fetches_the_pinned_merfish_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec = AnnotationReferenceSpec(
+        reference_id="wmb_region_share", species="mouse", role="region_share"
+    )
+    with pytest.raises(ReferenceBuildError, match="merfish_ccf_metadata"):
+        prepare_reference_spec(spec)
+    content = b"cell_label,parcellation_division\n"
+    pinned = pinned_for(tmp_path, content)
+    monkeypatch.setattr(reference, "MERFISH_CCF_METADATA_PIN", pinned)
+    seed = tmp_path / "archived.csv"
+    seed.write_bytes(content)
+    cache = tmp_path / "cache"
+    with pytest.raises(PinnedFileError, match="downloads are off"):
+        prepare_reference_spec(spec, SourceOptions(download_dir=cache))
+    prepared = prepare_reference_spec(
+        spec, SourceOptions(download_dir=cache, seeds={pinned.key: seed})
+    )
+    target = cache / pinned.relative_path
+    assert prepared.sources["merfish_ccf_metadata"] == target
+    assert target.read_bytes() == content and not target.is_symlink()
+    # An explicit source wins over the cache.
+    explicit = spec.model_copy(update={"sources": {"merfish_ccf_metadata": seed}})
+    assert (
+        prepare_reference_spec(explicit, SourceOptions(download_dir=cache)).sources[
+            "merfish_ccf_metadata"
+        ]
+        == seed
+    )
+
+
 def whb_spec(**sources: Path) -> AnnotationReferenceSpec:
     return AnnotationReferenceSpec(
         reference_id="whb_frontal_supc_clus",

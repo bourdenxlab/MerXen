@@ -1957,6 +1957,21 @@ SEAAD_TAXONOMY_SOURCES: Final[dict[str, str]] = {
 }
 
 
+# MERFISH-C57BL6J-638850-CCF cell metadata with the CCF parcellation (ABC
+# metadata release 20231215; research/allen_references_mapmycells.md). The
+# sha256 was measured on the archived copy whose md5 matches the manifest.
+MERFISH_CCF_METADATA_PIN: Final = PinnedFile(
+    key="merfish_ccf_metadata",
+    url=f"{ABC_BUCKET_URL}/metadata/MERFISH-C57BL6J-638850-CCF/20231215/views/"
+    "cell_metadata_with_parcellation_annotation.csv",
+    relative_path="metadata/MERFISH-C57BL6J-638850-CCF/20231215/views/"
+    "cell_metadata_with_parcellation_annotation.csv",
+    size=MERFISH_CCF_METADATA_SIZE,
+    md5=MERFISH_CCF_METADATA_MD5,
+    sha256="1e3ae23cc3f8d3d5839cc8a222798ff812fc66f4bd3c0fc8fca0c0279329874e",
+)
+
+
 class PinnedFileError(ReferenceBuildError):
     """A pinned reference file is missing or does not match its checksum."""
 
@@ -2130,8 +2145,8 @@ class SourceOptions:
     """How ``prepare_reference_spec`` may complete a spec's sources.
 
     Attributes:
-        download_dir: Download cache (pinned SEA-AD files); ``None`` disables
-            the cache.
+        download_dir: Download cache (pinned SEA-AD and MERFISH files);
+            ``None`` disables the cache.
         auto_download: Allow downloads into the cache.
         seeds: Local copies of pinned files by key.
     """
@@ -2290,7 +2305,8 @@ def prepare_reference_spec(
     ``seaad_metadata_dir``, ``whb_h5ad_dir``) are expanded to files, a region
     reference directory given as ``region_precompute`` becomes its
     ``precompute/precomputed_stats.h5`` (+ ``region_reference_manifest.json``),
-    and missing SEA-AD files come from the pinned download cache.
+    and missing SEA-AD and MERFISH CCF files come from the pinned download
+    cache.
 
     Args:
         spec: The reference spec.
@@ -2343,6 +2359,13 @@ def prepare_reference_spec(
             reference_id,
         )
     elif reference_id == "wmb_region_share":
+        if SOURCE_MERFISH_CCF_METADATA not in sources and options.download_dir:
+            sources[SOURCE_MERFISH_CCF_METADATA] = ensure_pinned_file(
+                MERFISH_CCF_METADATA_PIN,
+                options.download_dir,
+                auto_download=options.auto_download,
+                seed=options.seeds.get(MERFISH_CCF_METADATA_PIN.key),
+            )
         _require(sources, [SOURCE_MERFISH_CCF_METADATA], reference_id)
     elif reference_id == "whb_whole_ctx_panel":
         _require(sources, [SOURCE_WHB_WHOLE_PRECOMPUTE], reference_id)
