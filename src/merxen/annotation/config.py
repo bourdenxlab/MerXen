@@ -300,8 +300,10 @@ class AnnotationThresholds(_AnnotationModel):
         max_leaf_level: Deepest leaf level (replaces ``never_emit_levels``);
             ``None`` selects the species default.
         allow_fine_levels: Emit the report-only fine level (OD-E4).
-        hard_min_counts: Hard floor; always equal to the clustering
-            ``min_counts`` (set by ``AnnotationConfig``).
+        hard_min_counts: Hard floor; always equal to
+            ``AnnotationConfig.min_counts``, which is the clustering
+            ``min_counts`` once coupled (``None`` until then; read it through
+            ``AnnotationConfig.require_min_counts``).
     """
 
     mode: Literal["raw", "simulation_calibrated"] = "raw"
@@ -326,7 +328,7 @@ class AnnotationThresholds(_AnnotationModel):
     floors_path: Path | None = None
     max_leaf_level: Literal["supercluster", "subclass"] | None = None
     allow_fine_levels: bool = False
-    hard_min_counts: int = Field(default=10, ge=0)
+    hard_min_counts: int | None = Field(default=None, ge=0)
 
     @field_validator(
         "whb_broad",
@@ -990,8 +992,11 @@ class AnnotationConfig(_AnnotationModel):
             validated (OD-C7). Mouse uses ``mouse_section_regions`` instead.
         mouse_section_regions: Default mouse regions: ``auto``, ``none`` or
             ``;``-separated CCF divisions (a samplesheet column overrides it).
-        min_counts: Table-cell threshold; must equal the clustering
-            ``min_counts`` (the hard floor is coupled to it).
+        min_counts: Table-cell threshold, equal to the clustering
+            ``min_counts``. ``None`` until the config is coupled to the
+            clustering run (``ClusteringSquidpyConfig.coupled_annotation_config``
+            or ``coupled_to_clustering``); ``require_min_counts`` refuses an
+            uncoupled config, so no step can fall back to a default silently.
         references: Reference specs; empty selects the species defaults.
         panel: Panel settings.
         resolvability: Resolvability and gate-P settings.
@@ -1016,7 +1021,7 @@ class AnnotationConfig(_AnnotationModel):
     species: Species = "human"
     anatomical_region: str | None = None
     mouse_section_regions: str = "auto"
-    min_counts: int = Field(default=10, ge=0)
+    min_counts: int | None = Field(default=None, ge=0)
     references: list[AnnotationReferenceSpec] = Field(default_factory=list)
     panel: AnnotationPanelConfig = Field(default_factory=AnnotationPanelConfig)
     resolvability: AnnotationResolvabilityConfig = Field(
@@ -1124,14 +1129,42 @@ class AnnotationConfig(_AnnotationModel):
             )
 
     def _couple_min_counts(self: AnnotationConfig) -> None:
-        explicit = "hard_min_counts" in self.thresholds.model_fields_set
-        if explicit and self.thresholds.hard_min_counts != self.min_counts:
+        hard_floor = self.thresholds.hard_min_counts
+        if hard_floor is not None and hard_floor != self.min_counts:
             raise ValueError(
-                f"thresholds.hard_min_counts ({self.thresholds.hard_min_counts}) "
-                f"must equal min_counts ({self.min_counts}): the table cells and "
-                "the hard floor share one threshold (plan §4.4)"
+                f"thresholds.hard_min_counts ({hard_floor}) must equal "
+                f"min_counts ({self.min_counts}): the table cells and the hard "
+                "floor share one threshold, the clustering min_counts (plan "
+                "§3.7, §4.4)"
             )
         self.thresholds.hard_min_counts = self.min_counts
+
+    @property
+    def is_coupled(self: AnnotationConfig) -> bool:
+        """Whether ``min_counts`` was taken from the clustering run."""
+        return self.min_counts is not None
+
+    def require_min_counts(self: AnnotationConfig) -> int:
+        """Return the table-cell threshold and hard floor of a coupled config.
+
+        Every step that selects table cells or applies the hard floor (MAP,
+        RESOLVE, the map_first hierarchy) reads the threshold here, so a
+        config that skipped the coupling fails instead of using a default.
+
+        Returns:
+            ``min_counts`` (equal to ``thresholds.hard_min_counts``).
+
+        Raises:
+            ValueError: If the config was not coupled to the clustering run.
+        """
+        if self.min_counts is None:
+            raise ValueError(
+                "the annotation config is not coupled to the clustering run's "
+                "min_counts; build it with "
+                "ClusteringSquidpyConfig.coupled_annotation_config() or "
+                "AnnotationConfig.coupled_to_clustering() (plan §3.7, §4.4)"
+            )
+        return self.min_counts
 
     def primary_reference(self) -> AnnotationReferenceSpec:
         """Return the primary reference spec.
@@ -1169,12 +1202,9 @@ class AnnotationConfig(_AnnotationModel):
             The coupled, validated copy.
 
         Raises:
-            ValueError: If ``min_counts`` was set explicitly to another value.
+            ValueError: If ``min_counts`` is already set to another value.
         """
-        if (
-            "min_counts" in self.model_fields_set
-            and self.min_counts != clustering_min_counts
-        ):
+        if self.min_counts is not None and self.min_counts != clustering_min_counts:
             raise ValueError(
                 f"annotation min_counts ({self.min_counts}) must equal the "
                 f"clustering min_counts ({clustering_min_counts}): table cells "
