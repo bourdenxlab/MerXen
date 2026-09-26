@@ -14,6 +14,7 @@ import pandas as pd
 import spatialdata as sd
 from spatialdata_io import xenium as xenium_reader
 
+from merxen._typing import AffineComponent
 from merxen.config import SegmentationConfig
 from merxen.io.image_source import (
     MERSCOPE_ZPROJ_IMAGE_NAME,
@@ -32,7 +33,9 @@ from merxen.io.transcript_io import resolve_col, write_proseg_csv_from_points
 from merxen.memory import force_release, log_status
 from merxen.path_utils import remove_path, stage_existing_output
 from merxen.segmentation.cellpose import (
+    assign_labels_from_masks,
     build_cellpose_affine_to_microns,
+    invert_mask_affine,
     run_tiled_cellpose,
     synchronize_cellpose_probability_logits,
 )
@@ -44,6 +47,13 @@ from merxen.segmentation.proseg_hybrid import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Reusing transcripts_for_proseg.csv: leading rows compared against the mask,
+# and the share of seeded rows that must reproduce their label (float32
+# coordinates flip only a few pixel-edge rows; a stale affine flips nearly all).
+_SEEDING_CHECK_ROWS = 200_000
+_SEEDING_MIN_INFORMATIVE_ROWS = 1_000
+_SEEDING_MIN_AGREEMENT = 0.9
 
 
 def _labeled_mask_has_foreground(
@@ -186,11 +196,10 @@ def _load_xenium_transform_matrix(config: SegmentationConfig) -> np.ndarray:
     )
 
 
-def _write_cellpose_transforms(
+def _derive_cellpose_transforms(
     config: SegmentationConfig,
-    transforms_path: str | Path,
-) -> Path:
-    """Derive and write the reusable mask-to-micron transform sidecar."""
+) -> tuple[AffineComponent, AffineComponent]:
+    """Derive the mask-to-micron affine from the configured transform."""
     platform = config.dataset.platform.upper()
     if platform == "MERSCOPE":
         matrix = _load_merscope_transform_matrix(config)
@@ -199,13 +208,21 @@ def _write_cellpose_transforms(
     else:
         raise ValueError(f"Unsupported platform: {config.dataset.platform}")
 
-    x_transform, y_transform = build_cellpose_affine_to_microns(
+    return build_cellpose_affine_to_microns(
         matrix,
         scale_factor=1.0,
         x0=0.0,
         y0=0.0,
     )
-    path = Path(transforms_path)
+
+
+def _write_transforms_json(
+    path: str | Path,
+    x_transform: AffineComponent,
+    y_transform: AffineComponent,
+) -> Path:
+    """Write a mask-to-micron affine as ``{"x_transform", "y_transform"}`` JSON."""
+    path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
@@ -218,6 +235,127 @@ def _write_cellpose_transforms(
         + "\n"
     )
     return path
+
+
+def _write_cellpose_transforms(
+    config: SegmentationConfig,
+    transforms_path: str | Path,
+) -> Path:
+    """Derive and write the reusable mask-to-micron transform sidecar."""
+    x_transform, y_transform = _derive_cellpose_transforms(config)
+    return _write_transforms_json(transforms_path, x_transform, y_transform)
+
+
+def _seeding_transforms_path(transcripts_csv: Path) -> Path:
+    """Return the sidecar recording which affine seeded a ProSeg transcript CSV."""
+    return transcripts_csv.with_suffix(".transforms.json")
+
+
+def _seeding_label_agreement(
+    transcripts_csv: Path,
+    mask_path: Path,
+    x_transform: AffineComponent,
+    y_transform: AffineComponent,
+    *,
+    n_rows: int = _SEEDING_CHECK_ROWS,
+) -> tuple[float, int]:
+    """Compare a CSV's stored seeds with the mask labels under an affine.
+
+    Seeds are the mask label at each transcript's micron coordinates, so a CSV
+    seeded with the same affine reproduces them (up to float32 rounding of the
+    coordinates at pixel edges) while a CSV seeded with a shifted affine does
+    not.
+
+    Args:
+        transcripts_csv: ProSeg transcript CSV with ``x_micron``, ``y_micron``
+            and ``cell_id`` columns.
+        mask_path: Labeled Cellpose mask (``.npy``) the CSV was seeded from.
+        x_transform: Mask-pixel-to-micron affine terms ``(a, b, tx)`` for x.
+        y_transform: Mask-pixel-to-micron affine terms ``(a, b, ty)`` for y.
+        n_rows: Number of leading CSV rows to compare.
+
+    Returns:
+        Tuple of the fraction of informative rows whose stored ``cell_id``
+        equals the looked-up label, and the number of informative rows (rows
+        where either label is non-zero).
+    """
+    rows = pd.read_csv(
+        transcripts_csv,
+        usecols=["x_micron", "y_micron", "cell_id"],
+        nrows=n_rows,
+    )
+    masks = np.load(mask_path, mmap_mode="r")
+    a_inv, b = invert_mask_affine(x_transform, y_transform)
+    expected = assign_labels_from_masks(
+        rows["x_micron"].to_numpy(np.float64),
+        rows["y_micron"].to_numpy(np.float64),
+        masks,
+        a_inv=a_inv,
+        b=b,
+    ).astype(np.int64)
+    stored = rows["cell_id"].to_numpy(np.int64)
+    informative = (stored != 0) | (expected != 0)
+    n_informative = int(np.count_nonzero(informative))
+    if n_informative == 0:
+        return 1.0, 0
+    agreement = float(np.mean(stored[informative] == expected[informative]))
+    return agreement, n_informative
+
+
+def _require_seeding_matches_transforms(
+    dataset_name: str,
+    transcripts_csv: Path,
+    mask_path: Path,
+    x_transform: AffineComponent,
+    y_transform: AffineComponent,
+) -> None:
+    """Fail when a reusable ProSeg CSV was seeded with a different mask affine.
+
+    The CSV's ``cell_id`` seeds are fixed when it is written. Reusing one after
+    the transform was corrected (as for the 2026-09-08 VZG2 outputs) would give
+    ProSeg seeds that are offset from their Cellpose cells. A CSV written by
+    this module records its affine in :func:`_seeding_transforms_path`; older
+    CSVs are checked against the mask directly and then get that record.
+    """
+    sidecar = _seeding_transforms_path(transcripts_csv)
+    if sidecar.exists():
+        recorded = json.loads(sidecar.read_text())
+        if np.allclose(
+            recorded["x_transform"], x_transform, rtol=1e-6, atol=1e-6
+        ) and np.allclose(recorded["y_transform"], y_transform, rtol=1e-6, atol=1e-6):
+            return
+        reason = (
+            f"{sidecar} records x_transform={recorded['x_transform']}, "
+            f"y_transform={recorded['y_transform']}"
+        )
+    else:
+        agreement, n_informative = _seeding_label_agreement(
+            transcripts_csv, mask_path, x_transform, y_transform
+        )
+        if n_informative < _SEEDING_MIN_INFORMATIVE_ROWS:
+            logger.warning(
+                "[%s] Could not verify that %s was seeded with the current "
+                "mask-to-micron transform (%d seeded rows checked); reusing it",
+                dataset_name,
+                transcripts_csv,
+                n_informative,
+            )
+            return
+        if agreement >= _SEEDING_MIN_AGREEMENT:
+            _write_transforms_json(sidecar, x_transform, y_transform)
+            return
+        reason = (
+            f"only {agreement:.1%} of {n_informative:,} checked rows carry the "
+            "mask label found at their coordinates"
+        )
+    raise ValueError(
+        f"[{dataset_name}] {transcripts_csv} was seeded with a different "
+        f"mask-to-micron transform than the current x_transform={list(x_transform)}, "
+        f"y_transform={list(y_transform)} ({reason}). Reusing it would offset the "
+        f"ProSeg seeds from their cells. Move it, {mask_path} and the Cellpose "
+        "probabilities aside (or run merxen cellpose-segment --force-rerun) so "
+        "Cellpose re-runs and re-seeds the transcripts."
+    )
 
 
 def _load_dataset_sdata(
@@ -437,8 +575,20 @@ def run_cellpose_segmentation(
     )
     if reusable_outputs_exist:
         if _labeled_mask_has_foreground(mask_path):
+            current_x_transform, current_y_transform = _derive_cellpose_transforms(
+                config
+            )
+            _require_seeding_matches_transforms(
+                dataset.name,
+                transcripts_csv,
+                mask_path,
+                current_x_transform,
+                current_y_transform,
+            )
             if not transforms_path.exists():
-                _write_cellpose_transforms(config, transforms_path)
+                _write_transforms_json(
+                    transforms_path, current_x_transform, current_y_transform
+                )
             log_status(f"[{dataset.name}] Reusing existing Cellpose outputs")
             if not stitching_stats_path.exists():
                 stitching_stats_path.parent.mkdir(parents=True, exist_ok=True)
@@ -560,6 +710,8 @@ def run_cellpose_segmentation(
         )
 
     transcripts_csv.parent.mkdir(parents=True, exist_ok=True)
+    # A record of an earlier seeding must not outlive the CSV it described.
+    _seeding_transforms_path(transcripts_csv).unlink(missing_ok=True)
     mask_mmap = np.load(mask_path, mmap_mode="r")
     prep_stats = write_proseg_csv_from_points(
         points_obj=points_obj,
@@ -586,15 +738,11 @@ def run_cellpose_segmentation(
         f"{prep_stats['n_seeded']:,} ({prep_stats['pct_seeded']:.2f}%)"
     )
 
-    transforms_path.write_text(
-        json.dumps(
-            {
-                "x_transform": list(x_transform),
-                "y_transform": list(y_transform),
-            },
-            indent=2,
-        )
-        + "\n"
+    _write_transforms_json(transforms_path, x_transform, y_transform)
+    # Recorded beside the (possibly persistent) CSV so a later reuse can tell
+    # which affine seeded it.
+    _write_transforms_json(
+        _seeding_transforms_path(transcripts_csv), x_transform, y_transform
     )
     if not stitching_stats_path.exists():
         stitching_stats_path.write_text(
