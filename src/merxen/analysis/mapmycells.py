@@ -115,11 +115,12 @@ REGION_REFERENCE_REBUILD_INFIX = "-rebuild-"
 REGION_REFERENCE_STAGING_PREFIX = ".staging-"
 # Region manifest config keys that older MerXen versions did not record, with
 # the value those versions always used. Only WHB human region references were
-# built before these keys existed.
+# built before these keys existed. drop_level is not listed: older versions
+# honoured it without recording it in the manifest, so a legacy reference's
+# drop_level is read from the cell_type_mapper metadata of its query markers.
 REGION_REFERENCE_LEGACY_CONFIG_DEFAULTS: dict[str, Any] = {
     "reference_atlas": "whb",
     "query_species": "human",
-    "drop_level": None,
 }
 
 FULL_REFERENCE_MANIFEST_KEYS = {
@@ -2203,8 +2204,11 @@ def prepare_region_mapmycells_reference(
     1. the newest complete content-hashed build for this configuration;
     2. a legacy in-place reference, ``references/<prefix>_<region>``, adopted
        read-only when its artefacts exist and its recorded configuration
-       matches (keys that older MerXen versions did not record are compared
-       as their historical defaults);
+       matches (the atlas and query species, which older MerXen versions did
+       not record, are compared as their historical defaults; an unrecorded
+       ``drop_level`` is read from the cell_type_mapper metadata of the
+       legacy query markers, and the reference is not adopted when that
+       metadata is missing);
     3. otherwise a new content-hashed build.
 
     ``region_force_rebuild`` always writes a new build directory and leaves
@@ -2577,6 +2581,17 @@ def _adopt_legacy_region_reference(
     if manifest is None:
         return None
     legacy_config = manifest.get("config")
+    if isinstance(legacy_config, dict) and "drop_level" not in legacy_config:
+        drop_level_found, drop_level = _read_query_marker_drop_level(marker_lookup_path)
+        if not drop_level_found:
+            logger.warning(
+                "Legacy MapMyCells region reference %s records no drop_level in "
+                "its manifest or query-marker metadata; it is left untouched and "
+                "a separate content-hashed reference is used instead.",
+                legacy_dir,
+            )
+            return None
+        legacy_config = {**legacy_config, "drop_level": drop_level}
     if not isinstance(legacy_config, dict) or not _legacy_region_config_matches(
         legacy_config, expected_config
     ):
@@ -2625,6 +2640,37 @@ def _legacy_region_config_matches(
         if recorded_value != expected_value:
             return False
     return True
+
+
+def _read_query_marker_drop_level(path: Path) -> tuple[bool, str | None]:
+    """Return the drop_level cell_type_mapper recorded for a query-marker file.
+
+    Older MerXen versions passed ``drop_level`` to cell_type_mapper without
+    recording it in the region manifest, but cell_type_mapper writes its full
+    configuration to ``metadata.config`` of the query-marker JSON.
+
+    Args:
+        path: Query-marker JSON written by ``cell_type_mapper``.
+
+    Returns:
+        ``(True, drop_level)`` with the recorded value, which may be ``None``,
+        or ``(False, None)`` when the file or the field cannot be read.
+    """
+    try:
+        marker_lookup: object = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.warning("Could not read MapMyCells query markers %s: %s", path, exc)
+        return (False, None)
+    metadata = (
+        marker_lookup.get("metadata") if isinstance(marker_lookup, dict) else None
+    )
+    ctm_config = metadata.get("config") if isinstance(metadata, dict) else None
+    if not isinstance(ctm_config, dict) or "drop_level" not in ctm_config:
+        return (False, None)
+    drop_level = ctm_config["drop_level"]
+    if drop_level is not None and not isinstance(drop_level, str):
+        return (False, None)
+    return (True, drop_level)
 
 
 def _read_region_reference_manifest(path: Path) -> dict[str, Any] | None:
