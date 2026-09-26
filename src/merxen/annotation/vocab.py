@@ -16,9 +16,9 @@ Species vocabularies stay separate. Human uses seven broad classes plus
 ``Oligodendrocyte lineage`` as the lineage-level fallback; mouse uses the six
 legacy WMB broad classes. Both use ``UNASSIGNED_LABEL``.
 
-This module imports only the standard library, numpy and pandas, because the
-GPU clustering environment imports it (it has neither ``cell_type_mapper`` nor
-SpatialData).
+This module imports only the standard library and pandas (with its numpy),
+because the GPU clustering environment imports it (it has neither
+``cell_type_mapper`` nor SpatialData).
 """
 
 from __future__ import annotations
@@ -30,7 +30,6 @@ from functools import cache
 from pathlib import Path
 from typing import Final, Literal, cast
 
-import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -85,6 +84,9 @@ HUMAN_LINEAGE_OF_BROAD_CLASS: Final[dict[str, str]] = {
     "Vascular cells": "Vascular cells",
     "Fibroblasts": "Fibroblasts",
 }
+# Lineages that ``broad_class`` falls back to when a cell is confident only at
+# lineage (§4.5); any other lineage gives ``UNASSIGNED_LABEL``.
+MAP_FIRST_LINEAGE_FALLBACKS: Final[tuple[str, ...]] = (OLIGODENDROCYTE_LINEAGE, NEURONS)
 # Labels map_first may write to the legacy ``broad_class`` column (§4.5): the
 # species broad classes, the lineage-level fallbacks and ``UNASSIGNED_LABEL``.
 MAP_FIRST_BROAD_LABELS: Final[dict[str, tuple[str, ...]]] = {
@@ -187,11 +189,20 @@ def _check_species(species: str) -> Species:
 
 
 def _is_missing(value: object) -> bool:
+    """Return whether a scalar is missing: None, any NaN or NA, or blank text.
+
+    Covers ``pd.NA`` (nullable string and categorical columns), numpy float
+    NaNs of any width and ``NaT`` as well as Python ``None`` / ``nan``.
+    """
     if value is None:
         return True
-    if isinstance(value, float) and np.isnan(value):
-        return True
-    return isinstance(value, str) and not value.strip()
+    if isinstance(value, str):
+        return not value.strip()
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        # Array-likes are not scalars and so not missing values.
+        return False
 
 
 def asset_path(filename: str) -> Path:
@@ -360,7 +371,10 @@ class VocabTable:
 
         Returns:
             A species broad class, ``Oligodendrocyte lineage`` (mouse) or
-            ``UNASSIGNED_LABEL`` for sinks and nodes outside the vocabulary.
+            ``UNASSIGNED_LABEL`` for sinks and nodes mapped to no broad class.
+
+        Raises:
+            KeyError: If the node is not in the table.
         """
         return self._value(name, "broad_class", supertype) or UNASSIGNED_LABEL
 
@@ -628,9 +642,10 @@ def broad_class_for_map_first(
     """Return the legacy ``broad_class`` value of one cell in map_first mode.
 
     Implements §4.5: the confident broad name when the final level is broad
-    or deeper; the confident lineage (``Oligodendrocyte lineage``,
-    ``Neurons``, or a single-class lineage, whose name is its broad class)
-    when the final level is lineage; ``UNASSIGNED_LABEL`` otherwise. The result
+    or deeper; when the final level is lineage, the lineage only if it is
+    ``Oligodendrocyte lineage`` or ``Neurons`` (the two lineage fallbacks
+    §4.5 allows; a single-class lineage whose broad level is not confident
+    gives ``UNASSIGNED_LABEL``); ``UNASSIGNED_LABEL`` otherwise. The result
     is never a sink or any label outside ``MAP_FIRST_BROAD_LABELS[species]``.
 
     Args:
@@ -654,7 +669,8 @@ def broad_class_for_map_first(
     if rank >= levels.index("broad"):
         return _map_first_label(broad_name, species)
     if final_level == "lineage":
-        return _map_first_label(lineage_name, species)
+        lineage = _map_first_label(lineage_name, species)
+        return lineage if lineage in MAP_FIRST_LINEAGE_FALLBACKS else UNASSIGNED_LABEL
     return UNASSIGNED_LABEL
 
 
