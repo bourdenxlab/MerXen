@@ -99,6 +99,13 @@ pair's prepared H5ADs (set c, `per_platform` panels) arrives with the
   nearest covered subclass or stay unresolved at subclass level. Each mouse
   bundle lists them in `bundle.json` (`uncovered_subclasses`,
   `uncovered_clusters`).
+- **A fifth subclass, `261 HB Calcb Chol`, is missing from the marker build**
+  because all 19 of its 10Xv3 cells are self-map test cells, which stay out
+  of the build so the test set is disjoint (as are 4 other clusters whose only
+  sampled cells are test cells). It is still in the mapping tree (Allen
+  means), is auto-collapsed in the lookup and is listed with the four above:
+  every `wmb_panel` bundle on ag7 and VZG2 reports 5 uncovered subclasses and
+  19 uncovered clusters.
 - Auto-collapsed parents are still assigned inside by `cell_type_mapper`
   (with their ancestors' markers); levels below them must not be emitted.
 
