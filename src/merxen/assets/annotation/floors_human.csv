@@ -1,0 +1,39 @@
+level,floor_class,platform,panel_family,min_counts,floor_source,inherited_from,note
+broad,Astro,MERSCOPE,human_set_a,10,real_e2,,
+broad,Astro,XENIUM,human_set_a,10,real_e2,,
+broad,Exc,MERSCOPE,human_set_a,10,real_e2,,
+broad,Exc,XENIUM,human_set_a,10,real_e2,,
+broad,OPC,MERSCOPE,human_set_a,10,real_e2,,
+broad,OPC,XENIUM,human_set_a,10,real_e2,,
+broad,Oligo,MERSCOPE,human_set_a,10,real_e2,,Xenium n = 5
+broad,Oligo,XENIUM,human_set_a,10,real_e2,MERSCOPE,Xenium n = 5
+broad,Vascular,MERSCOPE,human_set_a,10,real_e2,,
+broad,Vascular,XENIUM,human_set_a,10,real_e2,,
+broad,Fibroblast,MERSCOPE,human_set_a,10,real_e2,,E2 pooled fibroblasts with vascular cells; same floor as Vascular
+broad,Fibroblast,XENIUM,human_set_a,10,real_e2,,E2 pooled fibroblasts with vascular cells; same floor as Vascular
+broad,Immune,MERSCOPE,human_set_a,10,real_e2,,
+broad,Immune,XENIUM,human_set_a,15,real_e2,,
+broad,Inh,MERSCOPE,human_set_a,10,real_e2,,"Xenium n = 1,332"
+broad,Inh,XENIUM,human_set_a,30,real_e2,,"Xenium n = 1,332"
+broad,OtherNeuron,MERSCOPE,human_set_a,60,real_e2,XENIUM,MERSCOPE n = 15
+broad,OtherNeuron,XENIUM,human_set_a,60,real_e2,,MERSCOPE n = 15
+supercluster,Astro,MERSCOPE,human_set_a,10,real_e2,,
+supercluster,Astro,XENIUM,human_set_a,10,real_e2,,
+supercluster,Exc,MERSCOPE,human_set_a,10,real_e2,,
+supercluster,Exc,XENIUM,human_set_a,10,real_e2,,
+supercluster,Oligo,MERSCOPE,human_set_a,10,real_e2,,Xenium n = 5
+supercluster,Oligo,XENIUM,human_set_a,10,real_e2,MERSCOPE,Xenium n = 5
+supercluster,Immune,MERSCOPE,human_set_a,10,real_e2,,
+supercluster,Immune,XENIUM,human_set_a,15,real_e2,,
+supercluster,Inh,MERSCOPE,human_set_a,30,real_e2,,
+supercluster,Inh,XENIUM,human_set_a,10,real_e2,,
+supercluster,Vascular,MERSCOPE,human_set_a,10,real_e2,,
+supercluster,Vascular,XENIUM,human_set_a,30,real_e2,,
+supercluster,Fibroblast,MERSCOPE,human_set_a,10,real_e2,,E2 pooled fibroblasts with vascular cells; same floor as Vascular
+supercluster,Fibroblast,XENIUM,human_set_a,30,real_e2,,E2 pooled fibroblasts with vascular cells; same floor as Vascular
+supercluster,OPC,MERSCOPE,human_set_a,120,real_e2,,
+supercluster,OPC,XENIUM,human_set_a,120,real_e2,,
+supercluster,COP,MERSCOPE,human_set_a,120,real_e2,,
+supercluster,COP,XENIUM,human_set_a,120,real_e2,,
+supercluster,OtherNeuron,MERSCOPE,human_set_a,60,real_e2,XENIUM,MERSCOPE n = 15
+supercluster,OtherNeuron,XENIUM,human_set_a,60,real_e2,,MERSCOPE n = 15

@@ -90,7 +90,12 @@ merxen = "merxen.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-merxen = ["assets/fonts/*.ttf"]
+merxen = [
+    "assets/fonts/*.ttf",
+    "assets/annotation/*.csv",
+    "assets/annotation/*.yaml",
+    "assets/annotation/NOTICE",
+]
 
 [tool.bumpversion]
 current_version = "0.1.0"
