@@ -1008,7 +1008,7 @@ class ClusteringSquidpySampleConfig(BaseModel):
     segmentation: str | None = None
     table_key: str | None = None
     shape_key: str | None = None
-    # rca-hook:H8: per-row annotation columns; None inherits the global params.
+    # rca-site:H8: per-row annotation columns; None inherits the global params.
     anatomical_region: AnatomicalRegionValue = None
     mouse_section_regions: MouseSectionRegionsValue = None
 
@@ -1099,7 +1099,7 @@ class ClusteringSquidpyConfig(BaseModel):
         default_factory=ClusteringSquidpyAnnotationConfig
     )
     min_branch_cells: int = Field(default=50, ge=1)
-    # rca-hook:H8: map-first mode fields (plan §3.7); the defaults are legacy.
+    # rca-site:H8: map-first mode fields (plan §3.7); the defaults are legacy.
     mode: ClusteringMode = "legacy"
     labels_dir: Path | None = None
     leaf_source: LeafSource = "mapped"
@@ -1164,7 +1164,7 @@ class MenderConfig(BaseModel):
     run_umap: bool = True
     write_spatialdata_table: bool = True
     figure_dpi: int = Field(default=180, ge=72)
-    # rca-hook:H8: unassigned cells as a MENDER state (legacy) or not (§4.9).
+    # rca-site:H8: unassigned cells as a MENDER state (legacy) or not (§4.9).
     unassigned_state_policy: UnassignedStatePolicy = "state"
 
     @field_validator("cell_state_key", "source_spatialdata_table", "native_shape_key")

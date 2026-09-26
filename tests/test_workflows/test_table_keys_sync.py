@@ -7,8 +7,10 @@ every analysis branch and compare with the Python mapping. They also fail
 while any other workflow or Python code builds a ``*_clustering_squidpy`` key
 itself, so a new copy (such as the one ``feature/gaston`` adds) cannot drift.
 
-Hook H2 gives ``clusteredSpatialdataTableKey`` a ``suffix`` parameter; the
-suffixed Python cases below then gain their ``main.nf`` counterpart.
+Hook H2 gives ``clusteredSpatialdataTableKey`` a ``suffix`` parameter
+(``_<suffix>`` on every return path, nothing for a null or blank suffix), and
+its callers pass the row's ``clustering_squidpy_table_key_suffix`` (absent, so
+null, in legacy rows); the tests evaluate ``main.nf`` with and without one.
 """
 
 from __future__ import annotations
@@ -39,6 +41,16 @@ PACKAGE_ROOT = REPO_ROOT / "src" / "merxen"
 # ``merxen_clustering_squidpy`` (uns key) and ``run_clustering_squidpy`` do not
 # match.
 KEY_BUILDER_PATTERN = re.compile(r"(?:\btable_\w*|\}|[\"'])_clustering_squidpy")
+
+# The two statements of hook H2 that turn ``suffix`` into ``suffixFragment``,
+# which every return template ends with.
+SUFFIX_PREAMBLE = (
+    'def suffixToken = suffix == null ? "" : suffix.toString().trim()',
+    'def suffixFragment = suffixToken ? "_${suffixToken}" : ""',
+)
+# Suffixes the pipeline can pass: none, the pre-flip default and an explicit
+# token (surrounding spaces are trimmed on both sides).
+SUFFIX_CASES: tuple[str, ...] = ("", "mapfirst", " trial_2 ")
 
 # (source table key, segmentation) pairs outside the analysisLayerKeys
 # combinations: each return path is reached through the segmentation alone,
@@ -122,18 +134,31 @@ def _main_nf_analysis_layer_keys() -> dict[str, dict[str, AnalysisLayerKeys]]:
     return mapping
 
 
+def _suffix_fragment(suffix: str | None) -> str:
+    """Evaluate ``SUFFIX_PREAMBLE`` (Groovy truth: an empty string is false)."""
+    token = "" if suffix is None else suffix.strip()
+    return f"_{token}" if token else ""
+
+
 @dataclass(frozen=True)
 class _GroovyKeyFunction:
     """``clusteredSpatialdataTableKey`` parsed into ordered return rules."""
 
     params: list[str]
+    preamble: list[str]
     rules: list[tuple[list[tuple[str, str]], str]]
     default_template: str
 
-    def __call__(self, source_table_key: str, segmentation: str | None) -> str:
+    def __call__(
+        self,
+        source_table_key: str,
+        segmentation: str | None,
+        suffix: str | None = "",
+    ) -> str:
         variables = {
             "sourceTableKey": source_table_key,
             "segmentation": segmentation,
+            "suffixFragment": _suffix_fragment(suffix),
         }
         for clauses, template in self.rules:
             if any(variables[name] == value for name, value in clauses):
@@ -163,12 +188,17 @@ def _main_nf_clustered_table_key() -> _GroovyKeyFunction:
             assert parsed is not None, f"unparsed clause: {clause}"
             clauses.append((parsed.group(1), parsed.group(2)))
         rules.append((clauses, match.group("template")))
+    remainder = [
+        line.strip() for line in rule_pattern.sub("", body).splitlines() if line.strip()
+    ]
+    preamble = [line for line in remainder if line.startswith("def ")]
     default = re.fullmatch(
-        r'\s*return\s+"(?P<template>[^"]*)"\s*', rule_pattern.sub("", body)
+        r'return\s+"(?P<template>[^"]*)"', " ".join(remainder[len(preamble) :])
     )
     assert default is not None, "unparsed default return of the key function"
     return _GroovyKeyFunction(
         params=[part.strip() for part in params.split(",")],
+        preamble=preamble,
         rules=rules,
         default_template=default.group("template"),
     )
@@ -202,12 +232,17 @@ def test_main_nf_clustered_key_function_has_three_return_paths() -> None:
     """Reseg, original_seg and the default path are the only returns."""
     function = _main_nf_clustered_table_key()
 
-    assert function.params[:2] == ["sourceTableKey", "segmentation"]
+    assert function.params == ["sourceTableKey", "segmentation", 'suffix = ""']
+    assert function.preamble == list(SUFFIX_PREAMBLE)
     assert [clauses for clauses, _ in function.rules] == [
         [("segmentation", "reseg"), ("sourceTableKey", "table_MOSAIK_proseg")],
         [("segmentation", "original_seg"), ("sourceTableKey", "table_original")],
     ]
     assert function.default_template.startswith("${sourceTableKey}")
+    for template in [template for _, template in function.rules] + [
+        function.default_template
+    ]:
+        assert template.endswith("_clustering_squidpy${suffixFragment}"), template
 
 
 @pytest.mark.parametrize(("source_table_key", "segmentation"), KEY_CASES)
@@ -219,6 +254,49 @@ def test_clustered_table_key_matches_main_nf(
 
     assert clustered_table_key(source_table_key, segmentation) == main_nf_key
     assert clustered_table_key(source_table_key, segmentation, "") == main_nf_key
+
+
+@pytest.mark.parametrize("suffix", SUFFIX_CASES)
+@pytest.mark.parametrize(("source_table_key", "segmentation"), KEY_CASES)
+def test_suffixed_clustered_table_key_matches_main_nf(
+    source_table_key: str, segmentation: str | None, suffix: str
+) -> None:
+    """Hook H2: the suffixed Python key equals main.nf on every return path."""
+    main_nf_key = _main_nf_clustered_table_key()(source_table_key, segmentation, suffix)
+
+    assert clustered_table_key(source_table_key, segmentation, suffix) == main_nf_key
+
+
+@pytest.mark.parametrize(("source_table_key", "segmentation"), KEY_CASES)
+def test_main_nf_null_suffix_keeps_the_legacy_key(
+    source_table_key: str, segmentation: str | None
+) -> None:
+    """Legacy rows have no suffix setting, so main.nf gets null: no suffix."""
+    function = _main_nf_clustered_table_key()
+
+    assert function(source_table_key, segmentation, None) == clustered_table_key(
+        source_table_key, segmentation
+    )
+    assert function(source_table_key, segmentation, "  ") == function(
+        source_table_key, segmentation
+    )
+
+
+def test_main_nf_callers_pass_the_row_suffix() -> None:
+    """Every caller of the key function passes the row's table-key suffix."""
+    main_text = MAIN_NF.read_text()
+    calls = [
+        match
+        for match in re.finditer(r"clusteredSpatialdataTableKey\(([^)]*)\)", main_text)
+        if not main_text[: match.start()].endswith("def ")
+    ]
+
+    assert len(calls) >= 2
+    for call in calls:
+        code = re.sub(r"//[^\n]*", "", call.group(1))
+        arguments = [part.strip() for part in code.split(",") if part.strip()]
+        assert len(arguments) == 3, call.group(0)
+        assert arguments[2].startswith("settings.clustering_squidpy_table_key_suffix")
 
 
 @pytest.mark.parametrize(("source_table_key", "segmentation"), KEY_CASES)

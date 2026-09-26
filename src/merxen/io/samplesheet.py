@@ -82,7 +82,7 @@ class SamplePair:
     start_stage: str | None = None
     stop_stage: str | None = None
     only_stage: str | None = None
-    # rca-hook:H9: optional annotation columns (plan §3.7).
+    # rca-site:H9: optional annotation columns (plan §3.7).
     anatomical_region: str | None = None
     mouse_section_regions: str | None = None
 
@@ -180,7 +180,7 @@ def parse_samplesheet(csv_path: Path) -> list[SamplePair]:
                 stop_stage=_optional_string(row.get("stop_stage")),
                 only_stage=_optional_string(row.get("only_stage")),
             )
-            # rca-hook:H9: blank or absent annotation columns stay None.
+            # rca-site:H9: blank or absent annotation columns stay None.
             try:
                 annotation_columns = parse_optional_columns(row)
             except ValueError as exc:
