@@ -61,6 +61,10 @@ class AnnotationPreflight {
                 "run with the default legacy mode"
             ).toString()
         }
+        def suffix = AnnotationSettings.tableKeySuffix(settings)
+        if (!suffix && !(species in AnnotationDefaults.FLIPPED_SPECIES)) {
+            errors << "${label}: ${AnnotationDefaults.emptySuffixMessage(species)}".toString()
+        }
         CHOICES.each { paramName, allowed ->
             def value = params?.get(paramName)
             if (value != null && !(value.toString().trim().toLowerCase() in allowed)) {

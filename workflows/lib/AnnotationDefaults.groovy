@@ -126,14 +126,17 @@ class AnnotationDefaults {
      *
      * Legacy runs always write the unsuffixed key. A map_first run uses the
      * explicit suffix when set; a null suffix means "mapfirst" while the
-     * species has not flipped and "" after its flip.
+     * species has not flipped and "" after its flip. Before the flip an
+     * explicit empty suffix is refused, because the run would overwrite the
+     * legacy clustered table (OD-A3).
      *
      * @param params Pipeline params.
      * @param species Species name or alias.
      * @param flippedSpecies Species whose default is map_first.
      * @return The suffix token ("" for none).
-     * @throws IllegalArgumentException On an unknown mode or species, or a
-     *     suffix that is not a lower-case token.
+     * @throws IllegalArgumentException On an unknown mode or species, a
+     *     suffix that is not a lower-case token, or an empty suffix for a
+     *     map_first run of a species that has not flipped.
      */
     static String tableKeySuffix(
         Map params,
@@ -152,6 +155,9 @@ class AnnotationDefaults {
                     "clustering_squidpy_table_key_suffix '${explicit}' must be a " +
                     "lower-case token (letters, digits, underscores)"
                 )
+            }
+            if (!token && !(speciesName in flippedSpecies)) {
+                throw new IllegalArgumentException(emptySuffixMessage(speciesName))
             }
             return token
         }
@@ -190,6 +196,21 @@ class AnnotationDefaults {
             anatomical_region: null,
             references: DEFAULT_REFERENCES.mouse,
         ]
+    }
+
+    /**
+     * Explain why a map_first run of a species that has not flipped needs a suffix.
+     *
+     * @param species Normalized species name.
+     * @return The error message (cites OD-A3).
+     */
+    static String emptySuffixMessage(String species) {
+        return (
+            "an empty clustering_squidpy_table_key_suffix would make this map_first " +
+            "run write the unsuffixed clustered table and overwrite the legacy one: " +
+            "${species} has not flipped to map_first yet (OD-A3, plan §4.8). Leave " +
+            "the suffix unset ('${PRE_FLIP_TABLE_KEY_SUFFIX}') or name another token"
+        ).toString()
     }
 
     private static String checkedMode(Object rawValue, String paramName) {

@@ -1319,7 +1319,9 @@ def resolve_table_key_suffix(
 
     Legacy runs always write the unsuffixed key. A map_first run uses the
     explicit suffix when given, else ``"mapfirst"`` while the species has not
-    flipped, else ``""`` (plan §3.7, §4.8; OD-A3).
+    flipped, else ``""`` (plan §3.7, §4.8; OD-A3). Before the flip an explicit
+    empty suffix is refused: the run would write the unsuffixed key and
+    overwrite the legacy clustered table.
 
     Args:
         species: Run species.
@@ -1332,14 +1334,24 @@ def resolve_table_key_suffix(
         The suffix token (``""`` for none).
 
     Raises:
-        ValueError: On an unknown mode or a suffix that is not a lower-case
-            token.
+        ValueError: On an unknown mode, a suffix that is not a lower-case
+            token, or an empty suffix for a map_first run of a species that
+            has not flipped.
     """
     _check_species(species)
     if resolved_mode not in CLUSTERING_MODES:
         raise ValueError(f"unknown clustering mode {resolved_mode!r}")
     if resolved_mode == "legacy":
         return ""
-    if explicit_suffix is not None:
-        return validate_table_key_suffix(explicit_suffix)
-    return "" if species in flipped_species else MAP_FIRST_TABLE_KEY_SUFFIX
+    if explicit_suffix is None:
+        return "" if species in flipped_species else MAP_FIRST_TABLE_KEY_SUFFIX
+    suffix = validate_table_key_suffix(explicit_suffix)
+    if not suffix and species not in flipped_species:
+        raise ValueError(
+            "an empty clustering_squidpy_table_key_suffix would make this "
+            "map_first run write the unsuffixed clustered table and overwrite "
+            f"the legacy one: {species} has not flipped to map_first yet "
+            "(OD-A3, plan §4.8). Leave the suffix unset "
+            f"({MAP_FIRST_TABLE_KEY_SUFFIX!r}) or name another token"
+        )
+    return suffix
