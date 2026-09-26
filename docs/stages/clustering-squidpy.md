@@ -113,7 +113,7 @@ only `VISUALIZE` is active, clustering waits for visualisation.
 | `spatial_point_size` | Highlight point size for spatial cluster grid plots. |
 | `spatial_scatter_point_size` | Point size for regular spatial scatter plots. |
 | `figure_dpi` | PNG output DPI. |
-| `use_gpu` | Use RAPIDS single-cell acceleration when available. |
+| `use_gpu` | Use RAPIDS single-cell acceleration when available. CPU and GPU runs give different partitions; see [CPU and GPU engines](#cpu-and-gpu-engines). |
 | `clustering_squidpy_max_forks` | Nextflow-side concurrency guard. The Dwight profile sets `4`; its GPU-backed tasks still share one workstation GPU lock. Other host profiles must choose their own limit and GPU policy. |
 | `clustering_squidpy_gpu_vram_monitor` | Nextflow wrapper flag that records `nvidia-smi` VRAM samples for each clustering task. Defaults to `true`. |
 | `clustering_squidpy_gpu_vram_monitor_interval_seconds` | Sampling interval for the VRAM monitor. Defaults to `2`. |
@@ -223,6 +223,88 @@ With hierarchical mode enabled, additional artifacts are written under
 | Branch dotplot tables | `branch_<class>/tables/dotplot/...` | Per-subcluster mean expression and fraction-expressing summaries for panel genes. |
 | Neuron split | `branch_neurons/<sample_id>_neurons_split_*` | Excitatory/Inhibitory/Other annotation tables, split `.h5ad`, heatmap under `plots/annotation/`, and plots under `plots/*/`. |
 | Neuron subclusters | `branch_neurons/split_<label>/...` | Per-split neuron subtype `.h5ad`, UMAP, spatial plot, spatial grid, panel-gene dotplot, and dotplot tables. |
+
+## CPU and GPU engines
+
+`use_gpu` (`--clustering_squidpy_use_gpu`; `false` by default, `true` in the
+Dwight profile) switches every clustering round between two implementations.
+If `use_gpu` is true but `rapids_singlecell` cannot be imported, the round logs
+a warning and runs on the CPU path.
+
+| Step | CPU path (`scanpy-igraph`) | GPU path (`rapids_singlecell`) |
+|------|----------------------------|--------------------------------|
+| PCA | `sc.pp.pca` | `rsc.pp.pca`; sparse input is cast to float64 and fitted with chunked incremental PCA |
+| Neighbours | `sc.pp.neighbors`: exact kNN below 4,096 cells, approximate (pynndescent) above | `rsc.pp.neighbors`: exact brute-force kNN |
+| UMAP | `sc.tl.umap` (umap-learn) | `rsc.tl.umap` (cuML) |
+| Leiden | `sc.tl.leiden(flavor="igraph", n_iterations=2, directed=False)` | `rsc.tl.leiden` (cuGraph, float32 edge weights, library default `n_iterations=100` in rapids-singlecell 0.15.2) |
+
+Both paths pass the same `random_seed` to every step, but they do not produce
+the same partitions. On an identical stored neighbour graph, CPU and GPU Leiden
+at resolution 0.2 agreed only at ARI 0.57-0.91 across the seven datasets
+checked, and the number of clusters can differ (P1212 MERSCOPE: 2 on GPU, 3-4
+on CPU). Running the whole CPU path adds further differences from PCA and kNN.
+Compare, or rerun, clustering results only when the same engine produced them,
+and check the recorded engine before rerunning a published result on another
+host.
+
+### Recorded provenance
+
+Every Leiden round records its engine and effective settings as H5AD- and
+zarr-safe scalars and JSON strings (no `/` in keys, no lists of records). The
+fields are written to the clustered H5ADs and to the clustered SpatialData
+table.
+
+`uns["merxen_clustering_params_<key>"]`, where `<key>` is the round's `obs`
+cluster column, gains these fields next to the existing parameters
+(`leiden_resolution`, `random_seed`, `effective_neighbors`, `gpu_used`, ...):
+
+| Field | Meaning |
+|-------|---------|
+| `engine` | Leiden engine: `scanpy-igraph` or `rapids_singlecell`. |
+| `engine_versions` | JSON string of library versions, e.g. `{"igraph": "1.0.0", "scanpy": "1.12.1"}` or `{"cugraph": ..., "rapids_singlecell": "0.15.2", "scanpy": ...}`; `null` for a version that could not be read. |
+| `embedding_engine` | Library that ran PCA, neighbours, and UMAP: `scanpy` or `rapids_singlecell`. |
+| `leiden_flavor` | `igraph` (CPU) or `cugraph` (GPU). |
+| `leiden_n_iterations` | Leiden iteration cap applied: `2` on CPU; the rapids-singlecell default on GPU (`-1` if it could not be determined). |
+| `leiden_random_state` | Seed passed to Leiden (and to PCA, neighbours, and UMAP). |
+| `n_pcs_used` / `n_neighbors_used` | Principal components and neighbour count actually used after clipping to the data size. |
+| `gpu_requested` | Whether `use_gpu` was set; with `gpu_used` it shows a CPU fallback. |
+
+`uns["merxen_leiden_provenance"]` maps a round key to one JSON string holding
+the same information (`engine`, `engine_versions`, `embedding_engine`,
+`flavor`, `n_iterations`, `random_state`, `resolution`, `n_pcs_used`,
+`n_neighbors_used`, `gpu_requested`, `gpu_used`, `key_added`, and for branch
+rounds `branch` and `neuron_split`). In `<sample_id>_clustered.h5ad` it covers
+every round of the run:
+
+| Round key | Round |
+|-----------|-------|
+| `leiden` | One-shot clustering (hierarchy disabled). |
+| `leiden_broad` | Broad round. |
+| `leiden_subcluster_<class>` | Non-neuron branch, e.g. `leiden_subcluster_astrocytes`. |
+| `leiden_neuron_split` | Neuron Excitatory/Inhibitory/Other split. |
+| `leiden_neuron_subcluster_<split>` | Neuron subtype round, e.g. `leiden_neuron_subcluster_excitatory`. |
+
+`<class>` and `<split>` are the lower-case tokens used in the `branch_<class>/`
+and `split_<split>/` directory names. Branch H5ADs hold the rounds that
+produced them (for example `leiden_broad` and `leiden_subcluster`), and each
+clustered entry of the hierarchical manifest names its round in
+`leiden_provenance_key` (`split_leiden_provenance_key` for the neuron split).
+
+```python
+import json
+
+import anndata as ad
+
+adata = ad.read_h5ad("P7513_MERSCOPE_clustered.h5ad")
+for round_key, record in adata.uns["merxen_leiden_provenance"].items():
+    record = json.loads(record)
+    print(round_key, record["engine"], record["n_iterations"], record["resolution"])
+```
+
+Outputs written before these fields existed record only
+`uns["merxen_clustering_params_leiden_broad"]["gpu_used"]`; there,
+`uns["neighbors"]["params"]["method"]` is `"rapids"` for the GPU path and
+`"umap"` for the CPU path.
 
 ## Notebook
 
