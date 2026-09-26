@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import io
 import json
 import pickle
@@ -22,6 +23,7 @@ import merxen.analysis.mapmycells as mapmycells_module
 from merxen.analysis.mapmycells import (
     WHB_MANIFEST_URL,
     RegionReferenceArtifacts,
+    _cell_type_mapper_provenance,
     _ensure_url_file,
     _ensure_wmb_expression_inputs,
     _load_cached_abc_manifest,
@@ -856,7 +858,56 @@ def test_run_mapmycells_writes_annotated_h5ad(
         ].to_numpy(float),
         [0.88, 0.78],
     )
-    assert (cfg.output_dir / "PAIR1_mapmycells_manifest.json").exists()
+    results_manifest = json.loads(
+        (cfg.output_dir / "PAIR1_mapmycells_manifest.json").read_text()
+    )
+    assert results_manifest["cell_type_mapper_version"] == importlib.metadata.version(
+        "cell_type_mapper"
+    )
+    assert "cell_type_mapper_commit" in results_manifest
+
+
+def test_cell_type_mapper_provenance_reads_version_and_vcs_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The manifest records the installed mapper version and git commit."""
+
+    class FakeDistribution:
+        version = "9.8.7"
+
+        def read_text(self: FakeDistribution, filename: str) -> str | None:
+            assert filename == "direct_url.json"
+            return json.dumps(
+                {"url": "https://example.invalid", "vcs_info": {"commit_id": "abc123"}}
+            )
+
+    monkeypatch.setattr(
+        "merxen.analysis.mapmycells.importlib.metadata.distribution",
+        lambda name: FakeDistribution(),
+    )
+
+    assert _cell_type_mapper_provenance() == {
+        "cell_type_mapper_version": "9.8.7",
+        "cell_type_mapper_commit": "abc123",
+    }
+
+
+def test_cell_type_mapper_provenance_handles_missing_distribution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing mapper distribution is recorded as unknown, not an error."""
+
+    def missing(name: str) -> object:
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(
+        "merxen.analysis.mapmycells.importlib.metadata.distribution", missing
+    )
+
+    assert _cell_type_mapper_provenance() == {
+        "cell_type_mapper_version": None,
+        "cell_type_mapper_commit": None,
+    }
 
 
 def test_run_mapmycells_default_both_writes_region_outputs(
@@ -1341,6 +1392,9 @@ def test_prepare_region_reference_reuses_cache_and_force_rebuilds(
         "region_frontal_a44_a45_a46_a32_acc-" + first.manifest["config_hash"][:16]
     )
     assert first.manifest["cache_layout"] == "content_hashed"
+    assert first.manifest["cell_type_mapper_version"] == importlib.metadata.version(
+        "cell_type_mapper"
+    )
     assert first.manifest["precomputed_stats_path"] == str(
         first_dir / "precompute" / "precomputed_stats.h5"
     )

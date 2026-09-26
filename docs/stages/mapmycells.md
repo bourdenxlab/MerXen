@@ -271,4 +271,9 @@ annotations.
 
 The stage also writes `<pair_id>_mapmycells_manifest.json` at the top of
 `mapmycells_out/`, including whole-brain and region reference paths, ROI labels,
-filtering counts, and per-sample outputs.
+filtering counts, and per-sample outputs. It also records the installed
+`cell_type_mapper` distribution as `cell_type_mapper_version` and, for a git
+install, `cell_type_mapper_commit`. The mapper subprocess uses the same Python
+interpreter, so this is the version that mapped the cells. In plots-only mode
+it is the version that regenerated the plots. Each newly built region
+reference records the same two fields in its `region_reference_manifest.json`.
