@@ -9,7 +9,10 @@ lines marks each of them with ``rca-site:H<n>``; their number per file is
 pinned below too.
 
 H5 (the map_first wiring between PREPARE and COMPUTE) arrives with M5, so its
-marker must not exist yet.
+marker must not exist yet. H10 (M2) is the ``--annotation_prepare_only``
+entry: it builds reference bundles from the samplesheet rows before the
+preflight and empties the rows, so no pipeline stage runs; it needs neither
+H5 nor any PREPARE output.
 """
 
 from __future__ import annotations
@@ -36,6 +39,7 @@ EXPECTED_HOOKS: dict[str, tuple[str, ...]] = {
     "H7": ("workflows/nextflow.config", "workflows/conf/dwight.config"),
     "H8": ("src/merxen/config.py",),
     "H9": ("src/merxen/io/samplesheet.py",),
+    "H10": (MAIN_NF,),  # M2: --annotation_prepare_only entry.
 }
 # (file, hook) -> number of extra lines the hook touches, each with a site marker.
 EXPECTED_SITES: dict[tuple[str, str], int] = {
@@ -48,7 +52,8 @@ EXPECTED_SITES: dict[tuple[str, str], int] = {
 # Hook -> text that must follow its marker within HOOK_WINDOW lines.
 HOOK_CONTENT: dict[str, tuple[str, ...]] = {
     "H1": (
-        'include { annotationModuleStub } from "./modules/annotation"',
+        "include { ANNOTATION_PREPARE_ONLY } from "
+        '"./subworkflows/annotation_references"',
         'include { CLUSTERING_MAP_FIRST } from "./subworkflows/clustering_map_first"',
     ),
     "H2": (
@@ -66,6 +71,11 @@ HOOK_CONTENT: dict[str, tuple[str, ...]] = {
     "H6": (".onComplete {", "AnnotationSettings.completionSummary("),
     "H8": ("from merxen.annotation.config import",),
     "H9": ("parse_optional_columns",),
+    "H10": (
+        "if (AnnotationReferences.prepareOnly(params)) {",
+        "ANNOTATION_PREPARE_ONLY(sample_rows_raw_ch)",
+        "sample_rows_raw_ch = channel.empty()",
+    ),
 }
 HOOK_WINDOW = 12
 
@@ -143,6 +153,33 @@ def test_hook_marker_sits_on_its_change(hook: str) -> None:
 
     for expected in HOOK_CONTENT[hook]:
         assert expected in window, f"{hook}: {expected!r} not near its marker"
+
+
+def test_h10_runs_before_the_preflight_and_only_for_prepare_only_runs() -> None:
+    """H10 sits between the row settings and the preflight, behind its flag.
+
+    Emptying the rows there means a prepare-only run neither preflights nor
+    runs any pipeline stage, and the prepare-only workflow is called nowhere
+    else, so legacy and map_first runs never instantiate it.
+    """
+    main_text = (REPO_ROOT / MAIN_NF).read_text()
+    hook = main_text.index("rca-hook:H10")
+
+    assert main_text.index("sample_rows_raw_ch = samplesheet_ch.map") < hook
+    assert hook < main_text.index("preflight_done_ch = sample_rows_raw_ch")
+    assert main_text.count("ANNOTATION_PREPARE_ONLY(") == 1
+    guard = main_text.index("if (AnnotationReferences.prepareOnly(params)) {")
+    block_end = main_text.index("\n    }\n", guard)
+    assert guard < main_text.index("ANNOTATION_PREPARE_ONLY(") < block_end
+    assert guard < main_text.index("sample_rows_raw_ch = channel.empty()") < block_end
+    for name in (
+        "ANNOTATE_PANEL(",
+        "ANNOTATE_REFERENCE_PREP(",
+        "ANNOTATION_REFERENCES(",
+        "ANNOTATION_BUNDLES(",
+        "ANNOTATION_PREPARED_REFERENCES(",
+    ):
+        assert name not in main_text, name
 
 
 def test_h4_guards_the_legacy_clustering_checks() -> None:

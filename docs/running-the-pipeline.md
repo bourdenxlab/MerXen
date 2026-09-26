@@ -420,6 +420,16 @@ mapmycells`. The process copies the previously published
 directory, skips MapMyCells execution, and rewrites the plots from the existing
 CSV/extended JSON outputs.
 
+## Pre-building annotation references
+
+`--annotation_prepare_only true --annotation_panel_genes_path <genes>` builds
+the reference bundles of a declared panel into `annotation_reference_store`
+and runs no other stage; see
+[Reference-based annotation](stages/annotation.md#pre-building-references---annotation_prepare_only).
+On 8 CPUs a bundle takes about a minute (WHB or SEA-AD on the 296-gene human
+panel) to 40 minutes (WMB on a 500-gene mouse panel) and up to 2 GB of store
+space; later runs reuse it.
+
 ## Running on a cluster
 
 The default [Dwight profile](../workflows/conf/dwight.config) uses the local

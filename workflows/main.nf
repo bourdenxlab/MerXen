@@ -30,7 +30,7 @@ include {
     MENDER_IMPORT
 } from "./modules/mender"
 // rca-hook:H1: reference-based annotation (plan §2.4); nothing runs in legacy mode.
-include { annotationModuleStub } from "./modules/annotation"
+include { ANNOTATION_PREPARE_ONLY } from "./subworkflows/annotation_references"
 include { CLUSTERING_MAP_FIRST } from "./subworkflows/clustering_map_first"
 
 def parseChannels(rawValue, defaults) {
@@ -1946,6 +1946,13 @@ workflow {
             "selected stages=${settings.selected_stages.join(' -> ')}"
         )
         tuple(settings.pair_id, row, settings)
+    }
+
+    // rca-hook:H10: --annotation_prepare_only builds reference bundles (plan §3.2)
+    // and runs no pipeline stage; legacy and map_first runs skip this block.
+    if (AnnotationReferences.prepareOnly(params)) {
+        ANNOTATION_PREPARE_ONLY(sample_rows_raw_ch)
+        sample_rows_raw_ch = channel.empty()
     }
 
     preflight_done_ch = sample_rows_raw_ch

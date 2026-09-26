@@ -5,8 +5,9 @@ Reference-based cell-type annotation replaces the legacy marker scoring of
 `map_first` mode. It is being built milestone by milestone
 (`docs/plans/robust-celltype-annotation-plan.md`); legacy runs are
 unchanged. This page covers what exists so far: declared panels
-(`merxen annotation-panel`) and the reference bundles that
-`merxen annotation-reference-prep` builds into the reference store.
+(`merxen annotation-panel`), the reference bundles that
+`merxen annotation-reference-prep` builds into the reference store, and the
+two pipeline processes that run them (`--annotation_prepare_only`).
 
 ## Reference bundles
 
@@ -44,6 +45,50 @@ absent from the reference, root markers, root children separated).
 | `negative_genes.parquet` | Primary references: per broad class × panel gene, the detection fraction in each reference and whether the gene is negative (< 1% in every reference, not a curated state gene). |
 | `vocab_snapshot.csv` | Every mapping-tree node with its vocabulary broad class, NT and flags. |
 | `depth_grid.json` | The resolvability depth grid of the panel. |
+
+## Pipeline processes
+
+Two CPU processes in `workflows/modules/annotation.nf`, wired by
+`workflows/subworkflows/annotation_references.nf`; neither takes the GPU
+lock, and a default (legacy) run instantiates neither.
+
+| Process | Runs | Resources | What it does |
+|---|---|---|---|
+| `ANNOTATE_PANEL` | once per pair × segmentation | 1 CPU, 4 GB | `merxen annotation-panel` on the gene list (`--annotation_panel_genes_path`) or on the pair's prepared H5ADs; writes the declared panels and `required_bundles.json`. |
+| `ANNOTATE_REFERENCE_PREP` | once per unique (species, reference, `panel_hash`) across the run | 8 CPUs, 64 GB, 8 h; above 1,000 panel genes `annotation_prep_large_memory` and 24 h; one at a time on dwight | `merxen annotation-reference-prep`: gets the bundle from the store or builds it, and writes `bundle_ref.json`. Seconds when the bundle exists. |
+
+PREP has no `storeDir`: the store's own lock, temporary build directory and
+atomic rename keep concurrent launches safe, and its `build_hash` (sources,
+`cell_type_mapper` version, builder settings) is only known inside the task.
+Each pair × segmentation is then released with exactly the bundle refs its
+`required_bundles.json` lists (a same-panel human pair on `proseg_hybrid`
+needs three: WHB and SEA-AD on set a, WHB on set c; a `per_platform` pair
+five; a mouse section two), as soon as its last bundle is ready, so pairs
+with different panels never wait for each other. A pair whose panels are
+refused is released with no bundle; one whose PREP failed is dropped.
+
+### Pre-building references (`--annotation_prepare_only`)
+
+```bash
+nextflow run workflows/main.nf \
+    --samplesheet samplesheet.csv \
+    --annotation_prepare_only true \
+    --annotation_panel_genes_path set_a_genes.csv
+```
+
+The run builds the bundles of the declared panel in the gene list (any file
+`merxen annotation-panel --panel-genes-path` reads) for every samplesheet row
+and analysis segmentation, and runs no pipeline stage: rows are neither
+preflighted for their stages nor built, segmented or clustered. The species
+comes from `--species` and the references from
+`annotation_<species>_references`; SEA-AD and the MERFISH CCF metadata are
+fetched once into `<annotation_reference_store>/.downloads` (pinned URL,
+size and sha256; `annotation_auto_download`). Its own preflight checks the
+gene list, the references' source params, the region and that the stores are
+writable. A later `map_first` run reuses a bundle only when its declared
+panel resolves to the same IDs and symbols (`build_hash`). Building from a
+pair's prepared H5ADs (set c, `per_platform` panels) arrives with the
+`map_first` wiring (M5).
 
 ## Known limitations
 

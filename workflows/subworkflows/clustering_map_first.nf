@@ -3,9 +3,14 @@
  * (plan §3.1): CLUSTERING_SQUIDPY_ANNOTATE_MAP -> _ANNOTATE_RESOLVE ->
  * _COMPUTE_CPU, emitting the input shape of CLUSTERING_SQUIDPY_FINALIZE.
  *
- * Milestone M1 scaffolding: its only caller is hook H5 in main.nf, which M5
- * adds together with these processes, so nothing here runs. Wiring it earlier
- * fails at once instead of silently emitting nothing.
+ * MAP takes its reference bundles from ANNOTATION_PREPARED_REFERENCES
+ * (subworkflows/annotation_references.nf, M2): ANNOTATE_PANEL and
+ * ANNOTATE_REFERENCE_PREP on these prepared outputs, emitting MAP's input
+ * tuple once every bundle of the pair x segmentation is ready.
+ *
+ * Its only caller is hook H5 in main.nf, which M5 adds together with MAP
+ * (M3), RESOLVE (M4) and COMPUTE_CPU (M5), so nothing here runs. Wiring it
+ * earlier fails at once instead of silently emitting nothing.
  */
 
 workflow CLUSTERING_MAP_FIRST {
