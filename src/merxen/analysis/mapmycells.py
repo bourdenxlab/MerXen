@@ -154,10 +154,11 @@ def prepare_mapmycells_query(
     the query matrix in ``X``, so this helper copies the selected layer into
     ``X`` before writing a local query file.
 
-    Gene IDs are taken from ``gene_id_column``, then from ``gene_id_lookup``,
-    then from ``gene_id_fallback`` for features that still lack a valid
-    Ensembl ID. Features left without one keep their symbol as ``var_name``
-    and are ignored by MapMyCells; they are logged and listed in the report.
+    Gene IDs are taken from ``gene_id_column``, then, for ``ensembl_id`` only,
+    from ``gene_id_lookup`` and ``gene_id_fallback`` for features that still
+    lack a valid Ensembl ID. Features left without one keep their symbol as
+    ``var_name``: MapMyCells ignores them unless a gene-mapping database is
+    used. They are logged and listed in the report.
 
     Args:
         input_h5ad: Clustered AnnData from ``clustering_squidpy``.
@@ -173,7 +174,8 @@ def prepare_mapmycells_query(
         obs_id_column: Optional ``obs`` column to use as cell identifiers.
         gene_id_fallback: Optional local gene table, from
             :func:`load_gene_id_fallback_table`, used last to fill missing IDs
-            in ``gene_id_column``. It is not applied when the ID column is
+            when ``gene_id_column`` is ``ensembl_id``. It is not applied to
+            other columns, which may hold symbols, or when the ID column is
             absent and symbols are deferred to the gene-mapping database.
         gene_id_report_path: Optional JSON path for the gene-ID resolution
             report: IDs recovered by the reference lookup or the fallback
@@ -219,6 +221,7 @@ def prepare_mapmycells_query(
                 gene_id_column=gene_id_column,
                 input_id_is_valid=input_id_is_valid,
                 gene_id_fallback=gene_id_fallback,
+                symbols_left_for_gene_mapping_db=allow_gene_symbol_fallback,
                 input_h5ad=input_h5ad,
             )
             if gene_id_report_path is not None:
@@ -665,6 +668,7 @@ def _resolve_remaining_gene_ids(
     gene_id_column: str,
     input_id_is_valid: list[bool],
     gene_id_fallback: GeneIdFallbackTable | None,
+    symbols_left_for_gene_mapping_db: bool,
     input_h5ad: Path,
 ) -> dict[str, Any]:
     """Fill IDs the primary lookups missed and report where every ID came from."""
@@ -675,11 +679,26 @@ def _resolve_remaining_gene_ids(
         "gene_id_fallback": (
             None if gene_id_fallback is None else gene_id_fallback.describe()
         ),
+        "gene_id_fallback_applied": False,
     }
     if gene_id_column not in adata.var.columns:
         # Symbols are left for the gene-mapping database; mixing in fallback
         # IDs would give the mapper a query with two identifier types.
         report["deferred_to_gene_mapping_db"] = True
+        return report
+    if gene_id_column != "ensembl_id":
+        # Like the cached-reference lookup, the fallback only fills
+        # ``ensembl_id``. Another column may hold symbols for the gene-mapping
+        # database, and partly replacing them would mix identifier types.
+        if gene_id_fallback is not None:
+            logger.info(
+                "Not applying gene-ID fallback table %s to %s: "
+                "gene_id_column=%r is not 'ensembl_id'.",
+                gene_id_fallback.path,
+                input_h5ad.name,
+                gene_id_column,
+            )
+        report["ids_used_as_provided"] = True
         return report
 
     symbols = _query_gene_symbols(adata)
@@ -695,6 +714,12 @@ def _resolve_remaining_gene_ids(
         )
     final_ids = [str(value).strip() for value in adata.var[gene_id_column]]
 
+    # Without a fallback table, name what happens to the symbol instead.
+    default_reason = (
+        "left_as_symbol_for_gene_mapping_db"
+        if symbols_left_for_gene_mapping_db
+        else "no_fallback_table"
+    )
     resolved_by_reference_lookup: dict[str, str] = {}
     resolved_by_fallback: dict[str, str] = {}
     unresolved: dict[str, str] = {}
@@ -704,7 +729,7 @@ def _resolve_remaining_gene_ids(
             resolved_by_fallback[symbol] = final_ids[position]
         elif not primary_id_is_valid[position]:
             n_unresolved += 1
-            unresolved[symbol] = fallback_failures.get(position, "no_fallback_table")
+            unresolved[symbol] = fallback_failures.get(position, default_reason)
         elif not input_id_is_valid[position]:
             resolved_by_reference_lookup[symbol] = final_ids[position]
 
@@ -724,16 +749,26 @@ def _resolve_remaining_gene_ids(
             f"{symbol} ({reason})" for symbol, reason in sorted(unresolved.items())
         ]
         logger.warning(
-            "%d/%d features in %s have no Ensembl ID and will be ignored by "
-            "MapMyCells: %s%s",
+            "%d/%d features in %s have no Ensembl ID and %s: %s%s",
             n_unresolved,
             adata.n_vars,
             input_h5ad.name,
+            (
+                "are left as symbols for the gene-mapping database"
+                if symbols_left_for_gene_mapping_db
+                else "will be ignored by MapMyCells"
+            ),
             ", ".join(listed[:50]),
             f", ... and {len(listed) - 50} more" if len(listed) > 50 else "",
         )
     report.update(
         {
+            "gene_id_fallback_applied": gene_id_fallback is not None,
+            "unresolved_handling": (
+                "left_as_symbols_for_gene_mapping_db"
+                if symbols_left_for_gene_mapping_db
+                else "ignored_by_mapmycells"
+            ),
             "n_input_gene_ids": sum(input_id_is_valid),
             "n_resolved": adata.n_vars - n_unresolved,
             "n_unresolved": n_unresolved,
@@ -849,13 +884,8 @@ def run_mapmycells(config: MapMyCellsConfig) -> dict[str, dict[str, dict[str, Pa
 
     config.output_dir.mkdir(parents=True, exist_ok=True)
     # Loaded before the reference builds so a bad configured path fails fast.
-    gene_id_fallback = (
-        load_gene_id_fallback_table(
-            config.gene_id_fallback_csv,
-            query_species=config.query_species,
-        )
-        if config.gene_id_fallback_csv is not None and not config.plots_only
-        else None
+    gene_id_fallback, gene_id_fallback_ignored = _load_configured_gene_id_fallback(
+        config
     )
     references = _build_mapmycells_references(config)
     gene_id_lookup = _load_reference_gene_id_lookup_if_needed(config)
@@ -901,8 +931,42 @@ def run_mapmycells(config: MapMyCellsConfig) -> dict[str, dict[str, dict[str, Pa
         references,
         results,
         gene_id_resolution=summarize_gene_id_resolution(_read_gene_id_reports(results)),
+        gene_id_fallback_ignored=gene_id_fallback_ignored,
     )
     return results
+
+
+def _load_configured_gene_id_fallback(
+    config: MapMyCellsConfig,
+) -> tuple[GeneIdFallbackTable | None, dict[str, str] | None]:
+    """Load the configured fallback table, dropping one without species IDs.
+
+    Args:
+        config: MapMyCells stage configuration.
+
+    Returns:
+        The table to apply, or ``None``, and a manifest note when a configured
+        table was ignored because it holds no IDs of the query species (for
+        example the human WHB table set on Dwight for a mouse run).
+    """
+    if config.gene_id_fallback_csv is None or config.plots_only:
+        return None, None
+    table = load_gene_id_fallback_table(
+        config.gene_id_fallback_csv,
+        query_species=config.query_species,
+    )
+    if table.n_species_rows:
+        return table, None
+    logger.info(
+        "Ignoring gene-ID fallback table %s for pair %s: it has no %s IDs.",
+        table.path,
+        config.pair_id,
+        config.query_species,
+    )
+    return None, {
+        "path": str(table.path),
+        "reason": f"no {config.query_species} Ensembl IDs",
+    }
 
 
 def _read_gene_id_reports(
@@ -3455,6 +3519,7 @@ def _write_results_manifest(
     results: dict[str, dict[str, dict[str, Path]]],
     *,
     gene_id_resolution: dict[str, dict[str, Any]] | None = None,
+    gene_id_fallback_ignored: dict[str, str] | None = None,
 ) -> None:
     payload = {
         "pair_id": config.pair_id,
@@ -3465,7 +3530,12 @@ def _write_results_manifest(
         "marker_lookup_path": _path_as_str(config.marker_lookup_path),
         "precomputed_stats_path": _path_as_str(config.precomputed_stats_path),
         "gene_mapping_db_path": _path_as_str(config.gene_mapping_db_path),
-        "gene_id_fallback_csv": _path_as_str(config.gene_id_fallback_csv),
+        "gene_id_fallback_csv": (
+            None
+            if gene_id_fallback_ignored is not None
+            else _path_as_str(config.gene_id_fallback_csv)
+        ),
+        "gene_id_fallback_ignored": gene_id_fallback_ignored,
         "gene_id_resolution": gene_id_resolution or {},
         "region_name": config.region_name,
         "region_labels": list(config.region_labels),
