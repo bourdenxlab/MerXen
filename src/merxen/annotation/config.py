@@ -1271,6 +1271,10 @@ def resolve_clustering_mode(
 ) -> str:
     """Resolve the clustering mode of a run (mirrors ``resolveMode``).
 
+    As in Groovy, values are case-insensitive and stripped, and a blank value
+    counts as unset: a blank override falls through to the species param,
+    and a blank species param to the species default.
+
     Args:
         species: Run species.
         mode: ``clustering_squidpy_mode``, an override for both species.
@@ -1285,14 +1289,23 @@ def resolve_clustering_mode(
     """
     _check_species(species)
     per_species = mode_human if species == "human" else mode_mouse
-    chosen = mode if mode not in (None, "") else per_species
-    if chosen in (None, ""):
-        chosen = DEFAULT_CLUSTERING_MODE[species]
+    chosen = (
+        _mode_or_none(mode)
+        or _mode_or_none(per_species)
+        or DEFAULT_CLUSTERING_MODE[species]
+    )
     if chosen not in CLUSTERING_MODES:
         raise ValueError(
             f"clustering mode must be one of {CLUSTERING_MODES}, got {chosen!r}"
         )
-    return str(chosen)
+    return chosen
+
+
+def _mode_or_none(value: str | None) -> str | None:
+    """Normalise a mode param as Groovy ``blankToNull`` + ``checkedMode`` do."""
+    if value is None:
+        return None
+    return str(value).strip().lower() or None
 
 
 def resolve_table_key_suffix(

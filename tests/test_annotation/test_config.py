@@ -411,6 +411,13 @@ def test_mode_resolution(species: str) -> None:
     )
     assert resolve_clustering_mode(species, mode="map_first") == "map_first"  # type: ignore[arg-type]
     assert resolve_clustering_mode(species, mode="") == "legacy"  # type: ignore[arg-type]
+    # Case-insensitive and stripped; blanks count as unset (as in Groovy).
+    assert resolve_clustering_mode(species, mode=" MAP_FIRST ") == "map_first"  # type: ignore[arg-type]
+    assert resolve_clustering_mode(species, mode=" ", **per_species) == "map_first"  # type: ignore[arg-type]
+    blank_species = {f"mode_{species}": "  "}
+    assert resolve_clustering_mode(species, **blank_species) == "legacy"  # type: ignore[arg-type]
+    mixed_case = {f"mode_{species}": "Map_First"}
+    assert resolve_clustering_mode(species, **mixed_case) == "map_first"  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="clustering mode"):
         resolve_clustering_mode(species, mode="denovo")  # type: ignore[arg-type]
     other = "mouse" if species == "human" else "human"

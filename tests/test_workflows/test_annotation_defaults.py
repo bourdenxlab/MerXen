@@ -351,6 +351,31 @@ MODE_MATRIX = [
 ]
 
 
+# Mode parsing: label -> (params, species alias for Groovy, Python species).
+MODE_PARSING_CASES: dict[str, tuple[dict[str, Any], str, str]] = {
+    "bad-mode": ({"clustering_squidpy_mode": "map-first"}, "human", "human"),
+    "case-and-space": (
+        {"clustering_squidpy_mode_mouse": " MAP_FIRST "},
+        "Mus musculus",
+        "mouse",
+    ),
+    "blank-override": (
+        {"clustering_squidpy_mode": " ", "clustering_squidpy_mode_human": "map_first"},
+        "homo_sapiens",
+        "human",
+    ),
+    "mixed-case-override": (
+        {
+            "clustering_squidpy_mode": "Legacy",
+            "clustering_squidpy_mode_human": "map_first",
+        },
+        "human",
+        "human",
+    ),
+    "blank-species-param": ({"clustering_squidpy_mode_mouse": "  "}, "mouse", "mouse"),
+}
+
+
 def _case_name(species: str, flipped: bool, source: str, mode: str | None) -> str:
     return f"{species}|{'flipped' if flipped else 'unflipped'}|{source}|{mode}"
 
@@ -375,24 +400,12 @@ def _build_cases(tmp_path: Path, defaults: dict[str, Any]) -> dict[str, dict[str
                 "species": species,
                 "flipped": flips,
             }
-    cases["resolveMode|bad-mode"] = {
-        "fn": "resolveMode",
-        "params": {"clustering_squidpy_mode": "map-first"},
-        "species": "human",
-    }
-    cases["resolveMode|case-and-space"] = {
-        "fn": "resolveMode",
-        "params": {"clustering_squidpy_mode_mouse": " MAP_FIRST "},
-        "species": "Mus musculus",
-    }
-    cases["resolveMode|blank-override"] = {
-        "fn": "resolveMode",
-        "params": {
-            "clustering_squidpy_mode": " ",
-            "clustering_squidpy_mode_human": "map_first",
-        },
-        "species": "homo_sapiens",
-    }
+    for label, (params, species_alias, _species) in MODE_PARSING_CASES.items():
+        cases[f"resolveMode|{label}"] = {
+            "fn": "resolveMode",
+            "params": params,
+            "species": species_alias,
+        }
     cases["resolveMode|bad-species"] = {
         "fn": "resolveMode",
         "params": {},
@@ -644,6 +657,41 @@ def test_groovy_mode_and_suffix_in_all_mode_flip_combinations(
         assert invalid == {"value": ""}
 
 
+def _python_parsed_mode(label: str) -> dict[str, str]:
+    params, _alias, species = MODE_PARSING_CASES[label]
+    try:
+        return {
+            "value": resolve_clustering_mode(
+                species,  # type: ignore[arg-type]
+                mode=params.get("clustering_squidpy_mode"),
+                mode_human=params.get("clustering_squidpy_mode_human"),
+                mode_mouse=params.get("clustering_squidpy_mode_mouse"),
+            )
+        }
+    except ValueError as error:
+        return {"error": str(error)}
+
+
+@pytest.mark.parametrize(
+    ("label", "expected"),
+    [
+        ("bad-mode", None),
+        ("case-and-space", "map_first"),
+        ("blank-override", "map_first"),
+        ("mixed-case-override", "legacy"),
+        ("blank-species-param", "legacy"),
+    ],
+)
+def test_python_mode_parsing(label: str, expected: str | None) -> None:
+    """Python normalises modes as resolveMode does (see the Groovy test)."""
+    result = _python_parsed_mode(label)
+
+    if expected is None:
+        assert "clustering mode must be one of" in result["error"]
+    else:
+        assert result == {"value": expected}
+
+
 @needs_nextflow
 def test_groovy_mode_parsing(groovy_results: dict[str, dict[str, Any]]) -> None:
     """Modes are case-insensitive; blanks fall through; unknown values fail."""
@@ -654,6 +702,12 @@ def test_groovy_mode_parsing(groovy_results: dict[str, dict[str, Any]]) -> None:
     assert _value(groovy_results, "resolveMode|case-and-space") == "map_first"
     assert _value(groovy_results, "resolveMode|blank-override") == "map_first"
     assert "Unknown species" in groovy_results["resolveMode|bad-species"]["error"]
+    for label in MODE_PARSING_CASES:
+        groovy = groovy_results[f"resolveMode|{label}"]
+        python = _python_parsed_mode(label)
+        assert set(groovy) == set(python), (label, groovy, python)
+        if "value" in groovy:
+            assert groovy == python, label
 
 
 @needs_nextflow
