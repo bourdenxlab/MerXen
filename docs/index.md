@@ -50,6 +50,7 @@ converge at alignment; dashed stations are governed by a parameter. See
 - [Squidpy clustering](stages/clustering-squidpy.md)
 - [Distance from object](stages/distance-from-object.md)
 - [MapMyCells](stages/mapmycells.md)
+- [Reference-based annotation](stages/annotation.md) (in development)
 
 ### Developer reference
 - [Pipeline architecture](pipeline.md) — stage graph and data flow.
