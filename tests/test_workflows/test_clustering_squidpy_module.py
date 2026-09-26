@@ -90,6 +90,18 @@ def test_mapmycells_nextflow_exposes_wmb_cross_species_settings(
         )
 
 
+def test_mapmycells_n_processors_default_is_a_valid_integer(
+    dwight_config_text: str,
+) -> None:
+    """The base default must validate as an int outside the Dwight profile."""
+    repo_root = Path(__file__).resolve().parents[2]
+    base_text = (repo_root / "workflows/nextflow.config").read_text()
+
+    assert "mapmycells_n_processors = 4" in base_text
+    assert "mapmycells_n_processors = null" not in base_text
+    assert "mapmycells_n_processors = 8" in dwight_config_text
+
+
 def test_workflow_exposes_species_aware_mouse_defaults(
     combined_config_text: str,
 ) -> None:
