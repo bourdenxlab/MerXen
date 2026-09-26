@@ -639,6 +639,9 @@ def validate_label_table(
         dtype_problem = _dtype_problem(df[name], spec)
         if dtype_problem:
             problems.append(dtype_problem)
+            n_missing = int(df[name].isna().sum())
+            if n_missing and not spec.nullable:
+                problems.append(f"{name}: {n_missing} missing values")
             continue
         problems += _value_problems(df[name], spec)
     problems += _soft_problems(df)
@@ -689,7 +692,11 @@ def coerce_label_table_dtypes(
     """Cast a label table's columns to the contract dtypes (copy).
 
     Useful for writers that build columns with default dtypes; values are not
-    checked (run ``validate_label_table`` afterwards).
+    checked (run ``validate_label_table`` afterwards). Missing values survive
+    the cast, so validation still sees them: string columns cast only their
+    non-null values, and a non-nullable integer, float or bool column with
+    missing values is left uncast (a cast would fail or turn NaN into
+    ``True``), which ``validate_label_table`` then reports.
 
     Args:
         df: The label table.
@@ -706,16 +713,21 @@ def coerce_label_table_dtypes(
     for name, spec in specs.items():
         if name not in out.columns:
             continue
+        column = out[name]
+        has_missing = bool(column.isna().any())
         if spec.kind == "string":
-            out[name] = out[name].astype(str)
+            as_text = column.astype(object).map(str)
+            out[name] = as_text.where(column.notna(), None).astype(object)
         elif spec.kind == "category":
-            out[name] = out[name].astype("category")
+            out[name] = column.astype("category")
         elif spec.kind == "nullable_int32":
-            out[name] = out[name].astype(pd.Int32Dtype())
+            out[name] = column.astype(pd.Int32Dtype())
         elif spec.kind == "nullable_bool":
-            out[name] = out[name].astype(pd.BooleanDtype())
+            out[name] = column.astype(pd.BooleanDtype())
+        elif has_missing and not spec.nullable:
+            logger.debug("%s has missing values; left uncast for validation", name)
         else:
-            out[name] = out[name].astype(spec.kind)
+            out[name] = column.astype(spec.kind)
     for column in out.columns:
         if str(column).startswith(
             (Columns.SOFT_BROAD_PREFIX, Columns.SOFT_CLASS_PREFIX)

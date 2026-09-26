@@ -331,6 +331,47 @@ def test_coerce_label_table_dtypes_fixes_default_dtypes(
     validate_label_table(coerce_label_table_dtypes(loose, "mouse"), "mouse")
 
 
+def test_coercion_keeps_missing_values_for_validation(
+    make_label_table: TableFactory,
+) -> None:
+    """A null id or NaN flag is not cast into 'None' or True and passes unseen."""
+    table = make_label_table("human")
+    loose = table.astype({Columns.CELL_ID: object, Columns.EXCLUDE_HARD: object})
+    loose.loc[1, Columns.CELL_ID] = None
+    loose.loc[2, Columns.EXCLUDE_HARD] = np.nan
+    loose[Columns.IN_TABLE] = loose[Columns.IN_TABLE].astype(float)
+    loose.loc[3, Columns.IN_TABLE] = np.nan
+
+    coerced = coerce_label_table_dtypes(loose, "human")
+
+    assert coerced.loc[1, Columns.CELL_ID] is None
+    assert coerced[Columns.CELL_ID].tolist()[0] == "cell_0"
+    assert pd.isna(coerced.loc[2, Columns.EXCLUDE_HARD])
+    assert pd.isna(coerced.loc[3, Columns.IN_TABLE])
+    with pytest.raises(LabelTableError) as error:
+        validate_label_table(coerced, "human")
+    problems = "\n".join(error.value.problems)
+    assert "cell_id: 1 missing values" in problems
+    assert "exclude_hard: 1 missing values" in problems
+    assert "in_table: 1 missing values" in problems
+
+
+def test_coercion_casts_string_ids_without_touching_nulls(
+    make_label_table: TableFactory,
+) -> None:
+    table = make_label_table("mouse")
+    table[Columns.CELL_ID] = pd.array(
+        [*range(len(table) - 1), None], dtype="Int64"
+    ).astype(object)
+
+    coerced = coerce_label_table_dtypes(table, "mouse")
+
+    assert coerced[Columns.CELL_ID].tolist()[:-1] == [
+        str(index) for index in range(len(table) - 1)
+    ]
+    assert coerced[Columns.CELL_ID].iloc[-1] is None
+
+
 def test_error_message_is_truncated() -> None:
     error = LabelTableError([f"problem {index}" for index in range(25)])
     assert "and 5 more" in str(error)
