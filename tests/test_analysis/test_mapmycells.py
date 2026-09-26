@@ -19,14 +19,17 @@ import pytest
 
 import merxen.analysis.mapmycells as mapmycells_module
 from merxen.analysis.mapmycells import (
+    WHB_MANIFEST_URL,
     RegionReferenceArtifacts,
     _ensure_url_file,
     _ensure_wmb_expression_inputs,
+    _load_cached_abc_manifest,
     _resolve_full_reference_artifacts,
     _run_command,
     _write_region_cell_metadata,
     build_mapmycells_command,
     choose_mapmycells_assignment_column,
+    ensure_wmb_clustering_reference_inputs,
     ensure_wmb_mecr_reference_inputs,
     prepare_mapmycells_query,
     prepare_region_mapmycells_reference,
@@ -476,6 +479,116 @@ def test_reference_download_resumes_partial_file(
     )
 
     assert result.read_bytes() == b"abcdef"
+
+
+def _abc_file_entry(relative_path: str, payload: bytes) -> dict[str, object]:
+    return {
+        "relative_path": relative_path,
+        "url": f"https://example.invalid/{relative_path}",
+        "size": len(payload),
+    }
+
+
+def test_wmb_clustering_inputs_skip_network_with_cached_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cached files with recorded sizes need no network after one manifest fetch."""
+    marker = ("mapmycells/WMB-10X/20230830/mouse_markers_230821.json", b"{}\n")
+    gene = ("metadata/WMB-10X/20231215/gene.csv", b"gene_identifier\n")
+    term = (
+        "metadata/WMB-taxonomy/20231215/cluster_annotation_term.csv",
+        b"label\n",
+    )
+    membership = (
+        "metadata/WMB-taxonomy/20231215/cluster_to_cluster_annotation_membership.csv",
+        b"cluster_alias\n",
+    )
+    manifest = {
+        "file_listing": {
+            "WMB-10X": {
+                "mapmycells": {
+                    "mouse_markers_230821": {
+                        "files": {"json": _abc_file_entry(*marker)}
+                    }
+                },
+                "metadata": {"gene": {"files": {"csv": _abc_file_entry(*gene)}}},
+            },
+            "WMB-taxonomy": {
+                "metadata": {
+                    "cluster_annotation_term": {
+                        "files": {"csv": _abc_file_entry(*term)}
+                    },
+                    "cluster_to_cluster_annotation_membership": {
+                        "files": {"csv": _abc_file_entry(*membership)}
+                    },
+                }
+            },
+        }
+    }
+    cache_dir = tmp_path / "cache"
+    for relative_path, payload in (marker, gene, term, membership):
+        path = cache_dir / "abc_atlas" / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+
+    class ManifestResponse(io.BytesIO):
+        def __enter__(self: ManifestResponse) -> ManifestResponse:
+            return self
+
+        def __exit__(self: ManifestResponse, *args: object) -> None:
+            self.close()
+
+    requested_urls: list[str] = []
+
+    def fake_urlopen(request: object) -> ManifestResponse:
+        requested_urls.append(str(request))
+        return ManifestResponse(json.dumps(manifest).encode())
+
+    monkeypatch.setattr(
+        "merxen.analysis.mapmycells.urllib.request.urlopen", fake_urlopen
+    )
+
+    first = ensure_wmb_clustering_reference_inputs(cache_dir)
+
+    assert requested_urls == [WHB_MANIFEST_URL]
+    cached_manifest = (
+        cache_dir / "abc_manifests" / "releases" / "20250531" / "manifest.json"
+    )
+    assert json.loads(cached_manifest.read_text()) == manifest
+
+    def offline_urlopen(request: object) -> ManifestResponse:
+        raise AssertionError(f"unexpected network access: {request!r}")
+
+    monkeypatch.setattr(
+        "merxen.analysis.mapmycells.urllib.request.urlopen", offline_urlopen
+    )
+
+    second = ensure_wmb_clustering_reference_inputs(cache_dir)
+
+    assert second == first
+    assert first["marker_lookup"] == cache_dir / "abc_atlas" / marker[0]
+    assert first["gene_metadata"].read_bytes() == gene[1]
+
+
+def test_cached_abc_manifest_is_refetched_when_unreadable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A truncated local manifest copy is replaced by a fresh download."""
+    cached_manifest = (
+        tmp_path / "abc_manifests" / "releases" / "20250531" / "manifest.json"
+    )
+    cached_manifest.parent.mkdir(parents=True)
+    cached_manifest.write_text('{"file_listing": {')
+    fresh = {"file_listing": {"WHB-10Xv3": {}}}
+    monkeypatch.setattr("merxen.analysis.mapmycells._load_abc_manifest", lambda: fresh)
+
+    manifest = _load_cached_abc_manifest(tmp_path)
+
+    assert manifest == fresh
+    assert json.loads(cached_manifest.read_text()) == fresh
+    assert not list(cached_manifest.parent.glob("*.tmp"))
 
 
 def test_wmb_mecr_download_includes_every_expression_directory(

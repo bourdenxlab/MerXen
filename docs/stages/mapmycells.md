@@ -218,6 +218,16 @@ When explicit reference paths are configured, workflow preflight validates them
 before any tasks start. Automatically downloaded files are checked against the
 sizes in Allen's manifest and partial downloads can resume.
 
+The Allen ABC manifest names a fixed release, so MerXen downloads it once per
+cache and keeps a copy at `<cache>/abc_manifests/releases/<release>/manifest.json`.
+Here `<cache>` is `mapmycells_region_cache_dir`,
+`clustering_squidpy_broad_reference_cache_dir` or `mecr_reference_cache_dir`;
+on Dwight all three are the same SSD1 directory. The MapMyCells, WMB
+clustering-reference and MECR download helpers read that copy. When every file
+they need is already cached with the size the manifest records, they use no
+network. To prepare an offline cache, download the manifest to that path once.
+If the copy is unreadable, it is downloaded again.
+
 ## Outputs
 
 Written under `mapmycells_out/<platform>/`:

@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import textwrap
+import urllib.parse
 import urllib.request
 import uuid
 from collections.abc import Iterator
@@ -76,6 +77,7 @@ WHB_MANIFEST_URL = (
     "https://allen-brain-cell-atlas.s3.us-west-2.amazonaws.com/"
     "releases/20250531/manifest.json"
 )
+ABC_MANIFEST_CACHE_DIRECTORY = "abc_manifests"
 WHB_DATASET_DIRECTORY = "WHB-10Xv3"
 WHB_TAXONOMY_DIRECTORY = "WHB-taxonomy"
 WHB_HIERARCHY = [
@@ -658,7 +660,7 @@ def _resolve_full_reference_artifacts(
                 "Whole-brain MapMyCells reference paths are missing and automatic "
                 "downloads are disabled."
             )
-        manifest = _load_abc_manifest()
+        manifest = _load_cached_abc_manifest(config.region_cache_dir)
         keys = FULL_REFERENCE_MANIFEST_KEYS[config.reference_atlas]
         directory = str(keys["directory"])
         cache_dir = config.region_cache_dir / "abc_atlas"
@@ -2665,7 +2667,7 @@ def _ensure_whb_reference_inputs(
     *,
     force_download: bool = False,
 ) -> dict[str, Path]:
-    manifest = _load_abc_manifest()
+    manifest = _load_cached_abc_manifest(cache_dir)
     abc_cache_dir = cache_dir / "abc_whb"
     inputs: dict[str, Path] = {}
     for file_key in (
@@ -2730,7 +2732,7 @@ def _ensure_wmb_reference_metadata_inputs(
     *,
     force_download: bool = False,
 ) -> dict[str, Path]:
-    manifest = _load_abc_manifest()
+    manifest = _load_cached_abc_manifest(cache_dir)
     abc_cache_dir = cache_dir / "abc_atlas"
     inputs: dict[str, Path] = {}
     for file_key in ("cell_metadata", "region_of_interest_metadata"):
@@ -2771,7 +2773,7 @@ def ensure_wmb_clustering_reference_inputs(
     cache_dir: Path | str,
 ) -> dict[str, Path]:
     """Download or reuse the compact WMB inputs needed by clustering."""
-    manifest = _load_abc_manifest()
+    manifest = _load_cached_abc_manifest(Path(cache_dir))
     abc_cache_dir = Path(cache_dir) / "abc_atlas"
     inputs: dict[str, Path] = {}
 
@@ -2823,7 +2825,7 @@ def ensure_wmb_mecr_reference_inputs(
     """Download or reuse the complete WMB 10x reference required by MECR."""
     if max_parallel_downloads < 1:
         raise ValueError("max_parallel_downloads must be at least 1")
-    manifest = _load_abc_manifest()
+    manifest = _load_cached_abc_manifest(Path(cache_dir))
     abc_cache_dir = Path(cache_dir) / "abc_atlas"
     inputs = ensure_wmb_clustering_reference_inputs(cache_dir)
 
@@ -2879,7 +2881,7 @@ def _ensure_wmb_expression_inputs(
             "The filtered WMB metadata did not contain any feature_matrix_label "
             "values, so expression matrices could not be selected."
         )
-    manifest = _load_abc_manifest()
+    manifest = _load_cached_abc_manifest(cache_dir)
     abc_cache_dir = cache_dir / "abc_atlas"
     inputs: dict[str, Path] = {}
     for matrix_label in sorted(set(matrix_labels)):
@@ -2912,7 +2914,53 @@ def _ensure_wmb_expression_inputs(
     return inputs
 
 
+def _load_cached_abc_manifest(cache_dir: Path) -> dict[str, Any]:
+    """Return the pinned Allen ABC release manifest, downloading it at most once.
+
+    ``WHB_MANIFEST_URL`` names a fixed release, so a local copy under
+    ``<cache_dir>/abc_manifests/`` never goes stale. With that copy, the file
+    paths and sizes it records let callers reuse already-cached Allen files
+    without any network access.
+    """
+    local_path = _abc_manifest_cache_path(cache_dir)
+    if local_path.is_file():
+        try:
+            cached: object = json.loads(local_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "Ignoring unreadable cached ABC manifest %s: %s", local_path, exc
+            )
+        else:
+            if isinstance(cached, dict) and isinstance(
+                cached.get("file_listing"), dict
+            ):
+                logger.info("Using cached Allen ABC manifest %s", local_path)
+                return cast(dict[str, Any], cached)
+            logger.warning("Ignoring malformed cached ABC manifest %s", local_path)
+
+    manifest = _load_abc_manifest()
+    tmp_path = local_path.with_name(
+        f"{local_path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
+    )
+    try:
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+        tmp_path.replace(local_path)
+    except OSError as exc:
+        # A read-only shared cache must not stop the run; the next call will
+        # simply download the manifest again.
+        logger.warning("Could not cache Allen ABC manifest at %s: %s", local_path, exc)
+        tmp_path.unlink(missing_ok=True)
+    return manifest
+
+
+def _abc_manifest_cache_path(cache_dir: Path) -> Path:
+    release_path = urllib.parse.urlsplit(WHB_MANIFEST_URL).path.lstrip("/")
+    return cache_dir / ABC_MANIFEST_CACHE_DIRECTORY / release_path
+
+
 def _load_abc_manifest() -> dict[str, Any]:
+    logger.info("Downloading Allen ABC manifest: %s", WHB_MANIFEST_URL)
     with urllib.request.urlopen(WHB_MANIFEST_URL) as response:
         manifest: object = json.loads(response.read().decode("utf-8"))
     if not isinstance(manifest, dict):
