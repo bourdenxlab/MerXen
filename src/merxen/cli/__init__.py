@@ -17,6 +17,7 @@ from merxen.cli.run_analysis_layer_validation import (
     validate_analysis_layer_command,
 )
 from merxen.cli.run_annotation import (
+    annotate_command,
     annotation_panel_command,
     annotation_reference_prep_command,
     annotation_store_group,
@@ -86,3 +87,4 @@ main.add_command(mapmycells_command)
 main.add_command(annotation_panel_command)
 main.add_command(annotation_reference_prep_command)
 main.add_command(annotation_store_group)
+main.add_command(annotate_command)
