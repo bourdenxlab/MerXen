@@ -225,6 +225,7 @@ for attempt in range(MAX_RETRIES):
 - Commit directly to `main` by default for normal local work.
 - If changes are serious, risky, breaking, or span unrelated areas, ask whether they should go on a new branch before committing.
 - When using branches, branch from `main`, keep them short-lived, merge via pull request, and delete them after merge.
+- Exception: a long-lived integration branch is allowed only when a plan in `docs/plans/` names it; it follows the same PR, CI and commit-prefix rules and is deleted when the effort closes. Milestone branches may be cut from it and merged back into it by PR, and are deleted after merge.
 
 ### Commit messages
 
