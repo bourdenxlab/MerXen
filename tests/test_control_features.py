@@ -9,6 +9,7 @@ import pytest
 from merxen.analysis import clustering_squidpy
 from merxen.control_features import (
     CONTROL_TOKENS,
+    classify_control_transcripts,
     control_token_mask,
     control_transcript_mask,
     has_control_token,
@@ -95,25 +96,49 @@ def test_unknown_platform_checks_every_platform_pattern() -> None:
 def test_control_transcript_mask_prefers_xenium_is_gene() -> None:
     """``is_gene`` flags controls whose names the registry does not know."""
     names = ["GFAP", "Odd_1", "UnassignedCodeword_0003", "GFAP"]
-    is_gene = pd.Series([True, False, True, True])
+    is_gene = pd.Series([True, False, False, True])
 
     mask = control_transcript_mask(names, platform="XENIUM", is_gene=is_gene)
 
-    # An anchored name is dropped even when is_gene disagrees.
     assert mask.tolist() == [False, True, True, False]
+
+
+def test_feature_type_gene_overrides_control_name_and_is_reported() -> None:
+    """A gene feature type keeps a control-like name; the override is flagged."""
+    names = [
+        "antisense_PROKR2",
+        "Intergenic_Region_4",
+        "antisense_PROKR2",
+        "GFAP",
+        "BLANK_0006",
+    ]
+    is_gene = pd.Series([True, True, pd.NA, True, False], dtype="boolean")
+
+    flags = classify_control_transcripts(names, platform="XENIUM", is_gene=is_gene)
+
+    # Rows 0-1 are genes by feature type; row 2 has no type, so its name
+    # decides; row 4 is a control by type (and by name, so not an override).
+    assert flags.control.tolist() == [False, False, True, False, True]
+    assert flags.kept_by_feature_type.tolist() == [True, True, False, False, False]
+    assert (
+        control_transcript_mask(names, platform="XENIUM", is_gene=is_gene).tolist()
+        == flags.control.tolist()
+    )
 
 
 def test_control_transcript_mask_keeps_token_like_gene_with_feature_type() -> None:
     """A usable feature type overrides the substring fallback for real genes."""
     names = ["EGFP_control_reporter", "EGFP_control_reporter"]
 
-    typed = control_transcript_mask(
+    typed = classify_control_transcripts(
         names, platform="XENIUM", is_gene=np.array([True, True])
     )
-    untyped = control_transcript_mask(names, platform="XENIUM")
+    untyped = classify_control_transcripts(names, platform="XENIUM")
 
-    assert typed.tolist() == [False, False]
-    assert untyped.tolist() == [True, True]
+    assert typed.control.tolist() == [False, False]
+    assert typed.kept_by_feature_type.tolist() == [True, True]
+    assert untyped.control.tolist() == [True, True]
+    assert untyped.kept_by_feature_type.tolist() == [False, False]
 
 
 def test_control_transcript_mask_uses_codeword_category_without_is_gene() -> None:
@@ -143,9 +168,10 @@ def test_control_transcript_mask_merscope_blanks_and_missing_names() -> None:
     """MERSCOPE blanks are dropped; missing names are never controls."""
     names = np.array(["Gad1", "Blank-7", None, "Nkx6-1", "Blank-7"], dtype=object)
 
-    mask = control_transcript_mask(names, platform="MERSCOPE")
+    flags = classify_control_transcripts(names, platform="MERSCOPE")
 
-    assert mask.tolist() == [False, True, False, False, True]
+    assert flags.control.tolist() == [False, True, False, False, True]
+    assert not flags.kept_by_feature_type.any()
 
 
 def test_control_transcript_mask_accepts_string_booleans() -> None:

@@ -103,6 +103,34 @@ def test_xenium_proseg_input_drops_controls_by_is_gene_and_name(
     assert written["feature_name"].tolist() == ["GFAP", "SNAP25"]
 
 
+def test_xenium_proseg_input_uses_codeword_category_without_is_gene(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Without ``is_gene`` the pipeline passes ``codeword_category`` instead."""
+    names = ["GFAP", "NovelCtrl_1", "antisense_PROKR2", "BLANK_0006"]
+    points = pd.DataFrame(
+        {
+            "x": np.arange(len(names), dtype=float),
+            "y": np.ones(len(names)),
+            "feature_name": names,
+            "codeword_category": [
+                "predesigned_gene",
+                "novel_control_kind",
+                "custom_gene",
+                None,
+            ],
+            "qv": np.full(len(names), 30.0),
+        }
+    )
+
+    written = _run_with_points(monkeypatch, tmp_path, platform="XENIUM", points=points)
+
+    # A custom gene keeps its control-like name; the untyped BLANK_ row falls
+    # back to the name rules.
+    assert written["feature_name"].tolist() == ["GFAP", "antisense_PROKR2"]
+
+
 def test_merscope_proseg_input_drops_blank_codewords(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

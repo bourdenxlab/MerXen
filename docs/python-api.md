@@ -101,9 +101,11 @@ with Groovy.
 ### `merxen.control_features` — [control_features.py](../src/merxen/control_features.py)
 - `CONTROL_TOKENS` — case-insensitive control substrings shared by
   clustering and transcript analyses.
-- `control_transcript_mask(names, platform=..., is_gene=..., codeword_category=...)`
-  — flag control transcripts, preferring Xenium feature-type columns over
-  names.
+- `classify_control_transcripts(names, platform=..., is_gene=..., codeword_category=...)`
+  — flag control transcripts: a Xenium feature type decides where present,
+  name rules apply elsewhere. Also flags rows kept because their feature
+  type says gene although a control-name rule matches.
+- `control_transcript_mask(...)` — the control flags alone.
 - `matches_control_name_pattern(name, platform)` /
   `control_token_mask(values)` — the anchored and substring name rules.
 
