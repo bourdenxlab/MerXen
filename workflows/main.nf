@@ -3890,7 +3890,7 @@ workflow {
             sampleId,
             clusteredH5ad,
             latestZarr,
-            settings,
+            settings, // rca-site:H2: was _settings; binds the row suffix used below
             terminalToken ->
                 def layerKeys = analysisLayerKeys(platform, segmentation)
                 def clusteredTableKey = clusteredSpatialdataTableKey(
