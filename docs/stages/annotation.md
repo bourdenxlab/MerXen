@@ -246,6 +246,29 @@ chain. They have no floors, resolvability, dataset gate, second vote or COP
 rule and are for inspection only; the RESOLVE step (M4) replaces them and
 writes `<sid>_celltype_labels.parquet`.
 
+A published clustered H5AD of a small sample can have a `min_cells`-filtered
+`var` (P1212 and P5011 reseg MERSCOPE hold 299 and 268 of 300 features).
+A panel derived from that `var` gets a new `panel_hash` without a bundle.
+Build the declared panel with `merxen annotation-panel --panel-file
+<PLATFORM>=<declared panel file>` (for example the same section's unfiltered
+proseg_hybrid H5AD) and pass it with `--panel-dir`. MAP then maps the genes
+present and records the missing ones.
+
+## Shadow baselines (M3)
+
+`scripts/acceptance/shadow_baselines.py` scores `merxen annotate` outputs of
+published human datasets with `merxen.annotation.shadow` (plan §12 M3 item
+1). It computes soft / argmax / confident broad JSD MERSCOPE vs Xenium with
+spatial block-bootstrap CIs (500 µm tiles, 200 replicates; whole section and
+shared tissue mask), a shadow evaluation of the v1 human rules (§5.2 lineage,
+broad with the COP rule, supercluster; packaged floors; the dataset gate;
+second-vote variants, including E2's likelihood-typer rule), WHB–SEA-AD
+agreement, implausible and COP shares, the E1 marker referee and the M3 exit
+check against the pilot. The measured baselines and the pre-registered
+thresholds are in
+[docs/acceptance/annotation-v1-preregistration.md](../acceptance/annotation-v1-preregistration.md).
+Baselines may only tighten a threshold.
+
 ## Known limitations
 
 - **Four WMB subclasses have no 10Xv3 reference cell** (`157 RN Spp1 Glut`,
