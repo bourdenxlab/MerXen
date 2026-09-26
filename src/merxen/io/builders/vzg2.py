@@ -47,6 +47,9 @@ logger = logging.getLogger(__name__)
 _MANIFEST_PATH = "manifest.json"
 _CELL_POLYGON_BYTES = 136
 _CELL_POLYGON_VERTICES = 44
+# One micron is ~9 mosaic pixels; float32 rounding of Vizgen's own CSV stays
+# far below this, while a dropped bounding-box origin is tens of microns.
+_OVERRIDE_TOLERANCE_UM = 1.0
 
 
 @dataclass(frozen=True)
@@ -269,11 +272,13 @@ def read_vzg2_spatialdata(
     if not isinstance(manifest_raw, dict):
         raise ValueError("VZG2 manifest.json must contain a JSON object")
     manifest = manifest_raw
-    matrix = (
-        _manifest_transform(manifest)
-        if transform_matrix is None
-        else _validate_transform(transform_matrix)
-    )
+    if transform_matrix is None:
+        matrix = _manifest_transform(manifest)
+        transform_source = "manifest"
+    else:
+        matrix = _validate_transform(transform_matrix)
+        transform_source = "override"
+        _warn_if_override_disagrees_with_manifest(matrix, manifest)
 
     region_name = build_config.region_name or str(
         manifest.get("name") or archive.path.stem
@@ -332,6 +337,7 @@ def read_vzg2_spatialdata(
             "source_archive": str(archive.path),
             "archive_manifest_version": str(manifest.get("version", "")),
             "transform": matrix.astype(float).tolist(),
+            "transform_source": transform_source,
             "image": image_details,
             "transcript_points_available": transcript_source is not None,
             "transcript_source": (
@@ -834,6 +840,49 @@ def _load_transform_override(path: Path | None) -> np.ndarray | None:
     except ValueError:
         matrix = np.loadtxt(source, delimiter=",")
     return _validate_transform(matrix)
+
+
+def _warn_if_override_disagrees_with_manifest(
+    matrix: np.ndarray,
+    manifest: dict[str, Any],
+) -> float | None:
+    """Warn when an override transform places the mosaic away from the manifest.
+
+    The VZG2 image is always the archive's own mosaic, so its pixel-to-micron
+    relation is fixed by the manifest. A stale override (for example one with
+    the bounding-box origin dropped) silently misregisters every image-derived
+    segmentation against the transcripts, so the disagreement is logged.
+
+    Returns:
+        The largest pixel-to-micron displacement between the two transforms
+        over the mosaic corners, or ``None`` when the manifest has no usable
+        bounding box.
+    """
+    try:
+        expected = _manifest_transform(manifest)
+    except (KeyError, TypeError, ValueError):
+        return None
+    width = float(manifest["mosaic_width_pixels"])
+    height = float(manifest["mosaic_height_pixels"])
+    corners = np.array(
+        [[0.0, width, 0.0, width], [0.0, 0.0, height, height], [1.0, 1.0, 1.0, 1.0]]
+    )
+    displacement = (np.linalg.inv(matrix) @ corners) - (
+        np.linalg.inv(expected) @ corners
+    )
+    max_offset_um = float(np.abs(displacement[:2]).max())
+    if max_offset_um > _OVERRIDE_TOLERANCE_UM:
+        logger.warning(
+            "[MERSCOPE] merscope_transform_path disagrees with the VZG2 manifest "
+            "by up to %.2f um (override translation=%s px, manifest-derived "
+            "translation=%s px). Image-derived segmentations will be offset from "
+            "the transcripts unless the override is correct; the manifest-derived "
+            "transform is used when no override is given.",
+            max_offset_um,
+            np.round(matrix[:2, 2], 3).tolist(),
+            np.round(expected[:2, 2], 3).tolist(),
+        )
+    return max_offset_um
 
 
 def _validate_transform(matrix: np.ndarray) -> np.ndarray:
