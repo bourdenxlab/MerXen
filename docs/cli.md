@@ -395,18 +395,25 @@ merxen annotation-panel --prepared-dir clustering_prepare_out --species human \
 | `--clustering-config PATH` | `clustering_squidpy_config.json`: pair id, sample platforms, segmentation, `min_counts`. |
 | `--pair-id`, `--segmentation` | Override the clustering config's values. |
 | `--panel-file KEY=PATH` | Declared-panel file per sample id or platform: Xenium `gene_panel.json`, MERSCOPE codebook or a gene table. Without one, the unfiltered `var` of the prepared H5AD is the declared panel. |
-| `--shared-tissue-mask PATH`, `--registration-summary PATH` | The pair's `shared_tissue_mask.npy` and the `registration_summary.json` giving its frame; set c then uses table cells inside the mask. |
+| `--shared-tissue-mask PATH`, `--registration-summary PATH` | The pair's `shared_tissue_mask.npy` and the `registration_summary.json` giving its frame; a label-free set c then uses table cells inside the mask (their sha256 go into `panel_report.json`). |
+| `--require-shared-tissue-mask` | Refuse a label-free set c without a usable mask (pipeline runs of aligned pairs). The seeded set-a family's curated set c needs no mask. |
 | `--min-counts N` | Table-cell threshold (default: the clustering config's). |
 | `--gene-id-fallback-csv PATH` | Local gene table for the symbol -> Ensembl fallback (M0e); overrides the config. |
 | `--panel-mode auto\|intersection\|per_platform` | Override `annotation_panel_mode`. |
 
 Outputs: `panel_report.json` (resolution by source, unresolved features,
-controls removed and why, merged duplicates, set c), one `panel_genes*.json`
+controls removed and why, merged duplicates, set c with its basis: the
+curated family list or the label-free fallback rule), one `panel_genes*.json`
 per annotation panel (`panel_genes.json` = set a or the sample's panel,
 `panel_genes_setc.json`, or `panel_genes_<platform>.json` +
 `panel_genes_intersection.json` for `per_platform` pairs) and
 `required_bundles.json` (each bundle's reference, role, purpose, panel file,
-`panel_hash` and `n_panel_genes`, and `n_required`). `panel_hash` is the
+`panel_hash` and `n_panel_genes`, `uses` (every purpose and panel file one
+bundle serves, e.g. set c equal to set a) and `n_required`). Set c of the
+seeded set-a family is set a minus the curated E5 list
+(`setc_exclusions_human.csv`), also for a gene list of that family; other
+families use the label-free rule
+([Set c](stages/annotation.md#set-c)). `panel_hash` is the
 sha256 of the sorted resolved IDs of the declared panel, so cells, zero-count
 probes and `var` order never change it. `--annotation-config` may name
 references by id only (`"references": ["whb_frontal_supc_clus", ...]`, or
@@ -417,7 +424,11 @@ taxonomy settings fill the rest.
 
 `ANNOTATE_REFERENCE_PREP` for one (reference, panel): returns the bundle
 whose `build_hash` matches, building it once if needed, and writes
-`bundle_ref.json`.
+`bundle_ref.json` (the bundle's identity only: a re-run writes the same
+bytes; whether the bundle was built or reused is printed). Store, builder
+and input errors end the command with a one-line message and exit code 1. A
+build waiting for another build of the same reference logs what it waits
+for.
 
 ```bash
 merxen annotation-reference-prep --reference-id whb_frontal_supc_clus \
@@ -450,7 +461,7 @@ expanded to the files a builder reads before `build_hash` is computed):
 |---|---|
 | `whb_frontal_supc_clus` (also set c) | `region_precompute` (the region precompute, or its reference directory with `region_reference_manifest.json`), or for a rebuild `whb_metadata_dir` + `whb_h5ad_dir`; `seaad_precomputed_stats` (negative genes; from the download cache when absent) |
 | `seaad_mr_panel` | `seaad_precomputed_stats`, optional `seaad_metadata_dir` (taxonomy tables); pinned files come from the download cache when absent |
-| `wmb_panel` | `wmb_h5ad_dir` (WMB-10Xv3 `*-raw.h5ad`), `wmb_metadata_dir` (`cell_metadata.csv`, taxonomy tables), `wmb_mapping_stats` (Allen `precomputed_stats_ABC_revision_230821.h5`), optional `wmb_selfmap_test_cells`, `wmb_marker_gene_universe` |
+| `wmb_panel` | `wmb_h5ad_dir` (WMB-10Xv3 `*-raw.h5ad`; only those files are hashed), `wmb_metadata_dir` (`cell_metadata.csv`, taxonomy tables), `wmb_mapping_stats` (Allen `precomputed_stats_ABC_revision_230821.h5`), `wmb_selfmap_test_cells` (required while resolvability is enabled; a copy matching the pinned sha256 is seeded into `<download-dir>/local/wmb_selfmap/` and used from there), optional `wmb_marker_gene_universe` (default: the validated ag7 ∪ VZG2 union for panels inside it) |
 | `wmb_region_share` | `merfish_ccf_metadata` (`cell_metadata_with_parcellation_annotation.csv`; from the download cache when absent, key `merfish_ccf_metadata`) |
 | `whb_whole_ctx_panel` (optional) | `whb_whole_precompute` |
 
@@ -458,11 +469,14 @@ Each `cell_type_mapper` step runs in its own interpreter with one BLAS
 thread and no GPU; its input JSON, logs and peak RSS are kept under the
 bundle's `logs/` and in `bundle.json`.
 
-Store layout: `<store>/<reference_id>/<build_hash>/` (complete bundles),
-`<store>/.tmp-<uuid>/` (a build in progress or killed),
-`<store>/.failed-<uuid>/` (a build that raised, with `build_error.txt`).
-Sources are copied with a checksum, never symlinked, and nothing is ever
-deleted automatically.
+Store layout: `<store>/<reference_id>/<build_hash>/` (complete bundles,
+read-only: files 0444, directories 0555), `<store>/.tmp-<uuid>/` (a build in
+progress or killed), `<store>/.failed-<uuid>/` (a build that raised, with
+`build_error.txt`), `<store>/.downloads/` (verified pinned inputs) and
+`<store>/.source_digests/` (full source sha256 by file identity, so large
+sources are hashed once). Sources are copied with a checksum, never
+symlinked, and nothing is ever deleted automatically. Reuse checks every
+bundle file's size and the sha256 of files up to 64 MB.
 
 ## `merxen annotation-store`
 
@@ -471,7 +485,8 @@ merxen annotation-store list --store DIR [--store-large DIR] [--json]
 merxen annotation-store prune --store DIR --unreferenced-by RESULTS_ROOT --dry-run [--json]
 ```
 
-`list` shows bundles, temporary and failed builds with their size. `prune`
+`list` shows bundles, temporary and failed builds with their size; both
+commands refuse a store path that does not exist. `prune`
 requires `--dry-run` and only lists the bundles no `bundle_ref.json`,
 `map_manifest.json`, `required_bundles.json` or `*_annotation_manifest.json`
 under the results root references, plus failed and dead temporary builds.

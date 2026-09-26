@@ -500,7 +500,7 @@ Written only by `--annotation_prepare_only` runs (and, from milestone M5, by
 | `<pair_id>/<segmentation>/annotation_panel/annotation_panel_out/panel_genes*.json` | One declared annotation panel per file: sorted Ensembl IDs, symbols, platforms, `panel_hash`. |
 | `<pair_id>/<segmentation>/annotation_panel/annotation_panel_out/required_bundles.json` | The (reference, panel) bundles this pair × segmentation needs, with `n_required`. |
 | `<pair_id>/<segmentation>/annotation_panel/annotation_panel_out/annotation_config.json` | The annotation config both commands read, as written from the pipeline params. |
-| `annotation_reference_prep/<reference_id>/<panel_hash or panel_independent>/bundle_ref.json` | The bundle `ANNOTATE_REFERENCE_PREP` got or built: `build_hash`, bundle `path` and store root, `reused`. |
+| `annotation_reference_prep/<reference_id>/<panel_hash or panel_independent>/bundle_ref.json` | The bundle `ANNOTATE_REFERENCE_PREP` got or built: `build_hash`, bundle `path` and store root (identical bytes on every re-run of an unchanged bundle; the task log says whether it was built or reused). |
 
 The bundles themselves live in the reference store
 (`annotation_reference_store`, default `${outdir}/annotation_references`),
