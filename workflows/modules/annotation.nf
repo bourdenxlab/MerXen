@@ -1,13 +1,18 @@
 /*
- * Reference-based cell-type annotation processes (plan §3.1, §3.2, §11.4).
+ * Reference-based cell-type annotation processes (plan §3.1-§3.3, §11.4).
  *
  * ANNOTATE_PANEL resolves one pair x segmentation's declared panels and lists
  * the reference bundles it needs; ANNOTATE_REFERENCE_PREP gets or builds one
- * bundle per unique (species, reference_id, panel_hash). Both run on the CPU
- * in the main environment and take no GPU lock. ANNOTATION_REPORT arrives in
- * M7. workflows/subworkflows/annotation_references.nf wires them, only for
- * --annotation_prepare_only runs (hook H10) and map_first runs (through
- * CLUSTERING_MAP_FIRST, hook H5 in M5); legacy runs never call them.
+ * bundle per unique (species, reference_id, panel_hash);
+ * CLUSTERING_SQUIDPY_ANNOTATE_MAP maps each sample of a pair x segmentation
+ * onto its bundles with MapMyCells. All run on the CPU in the main
+ * environment and take no GPU lock. RESOLVE arrives in M4, COMPUTE_CPU in
+ * M5, ANNOTATION_REPORT in M7.
+ * workflows/subworkflows/annotation_references.nf wires PANEL and PREP, only
+ * for --annotation_prepare_only runs (hook H10) and map_first runs;
+ * workflows/subworkflows/clustering_map_first.nf wires MAP after them
+ * (CLUSTERING_ANNOTATE_MAP), and CLUSTERING_MAP_FIRST (hook H5, M5) is its
+ * only caller. Legacy runs never call any of them.
  *
  * Resources are in conf/annotation.config, host concurrency in
  * conf/dwight.annotation.config.
@@ -137,6 +142,119 @@ JSON
     """
     cat > bundle_ref.json <<'JSON'
 ${stubBundleRef}
+JSON
+    """
+}
+
+process CLUSTERING_SQUIDPY_ANNOTATE_MAP {
+    tag "${pair_id}:${segmentation}"
+
+    // PREP never caches and re-writes byte-identical bundle refs for an
+    // unchanged bundle in a new work directory, so only content hashing
+    // keeps an unchanged MAP cached (-resume). It hashes the prepared H5ADs
+    // too: seconds per pair, against about an hour of mapping.
+    cache "deep"
+
+    publishDir { "${params.outdir}/${pair_id}/${segmentation}/annotation_map" }, mode: "copy", overwrite: true
+
+    input:
+    // map_spec: AnnotationReferences.mapSpec(annotation_panel_out) (species,
+    // panel status, panel size); bundle_refs: the bundle_ref.json of every
+    // bundle the pair x segmentation's required_bundles.json lists, released
+    // by ANNOTATION_BUNDLES once the last one is ready (none for a refused
+    // panel).
+    tuple val(pair_id),
+        val(segmentation),
+        val(map_spec),
+        val(samples_json),
+        path(clustering_config, stageAs: "map_inputs/clustering_squidpy_config.json"),
+        path(prepared_dir, stageAs: "map_inputs/clustering_prepare_out"),
+        path(panel_dir, stageAs: "map_inputs/annotation_panel_out"),
+        path(bundle_refs, arity: "0..*", stageAs: "map_inputs/bundle_refs/bundle_ref_?.json")
+
+    output:
+    // annotation_map_out/<platform>/<sid>_mmc_<run_id>.parquet (tidy, per
+    // cell x level), <sid>_ct_provisional.parquet (raw-threshold labels,
+    // provisional until RESOLVE), map_manifest.json (query fingerprints,
+    // bundle hashes, engine parameters, ctm version, wall time), logs/.
+    tuple val(pair_id),
+        val(segmentation),
+        path("annotation_map_out")
+
+    script:
+    def annotationConfigJson = AnnotationReferences.annotationConfigJson(params, map_spec.species)
+    def mapArgs = AnnotationReferences.mapArguments(
+        pair_id,
+        segmentation,
+        map_spec,
+        bundle_refs as List,
+        task.cpus as int,
+    )
+    def reuseDir = AnnotationReferences.mapReuseDir(params, pair_id, segmentation)
+    def reuseDirArg = reuseDir ? AnnotationReferences.shellQuote(reuseDir) : "''"
+    """
+    set -euo pipefail
+    export PYTHONPATH="${projectDir}/../src:\${PYTHONPATH:-}"
+    export CUDA_VISIBLE_DEVICES=""
+    # cell_type_mapper parallelises over --n-processors worker processes
+    # (task.cpus); more BLAS threads per worker would oversubscribe them.
+    export OMP_NUM_THREADS=1
+    export OPENBLAS_NUM_THREADS=1
+    export MKL_NUM_THREADS=1
+    export NUMEXPR_NUM_THREADS=1
+    export NUMBA_NUM_THREADS=1
+
+    python - <<'PY'
+import importlib.metadata
+import sys
+
+expected = "${params.annotation_ctm_version}"
+found = importlib.metadata.version("cell_type_mapper")
+if found != expected:
+    sys.exit(
+        f"cell_type_mapper {found} is installed but annotation_ctm_version is "
+        f"{expected}; rebuild the environment from requirements/requirements.lock"
+    )
+PY
+
+    cat > annotation_config.json <<'JSON'
+${annotationConfigJson}
+JSON
+
+    # Published-output reuse (annotation_reuse_published): identical runs of
+    # the published manifest are copied instead of re-mapped.
+    reuse_dir=${reuseDirArg}
+    if [[ -n "\${reuse_dir}" && -f "\${reuse_dir}/${AnnotationReferences.MAP_MANIFEST_FILE}" ]]; then
+        set -- --reuse-from "\${reuse_dir}"
+    else
+        set --
+    fi
+
+    mkdir -p ${AnnotationReferences.MAP_SCRATCH_DIR}
+    merxen annotate \\
+        --annotation-config annotation_config.json \\
+        ${mapArgs} \\
+        "\$@" \\
+        --out annotation_map_out
+    rm -rf ${AnnotationReferences.MAP_SCRATCH_DIR}
+    cp annotation_config.json annotation_map_out/annotation_config.json
+    """
+
+    stub:
+    def stubManifest = AnnotationReferences.stubMapManifestJson(
+        pair_id,
+        segmentation,
+        map_spec,
+        bundle_refs as List,
+    )
+    def copyRefs = (bundle_refs as List).collect { ref ->
+        "cp ${ref} annotation_map_out/stub_bundle_refs/"
+    }.join("\n    ")
+    """
+    mkdir -p annotation_map_out/stub_bundle_refs
+    ${copyRefs}
+    cat > annotation_map_out/map_manifest.json <<'JSON'
+${stubManifest}
 JSON
     """
 }
