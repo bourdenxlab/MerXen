@@ -69,13 +69,22 @@ and intend to fix it before the PR is reviewed.
 ## Continuous integration
 
 [.github/workflows/ci.yml](../.github/workflows/ci.yml) runs on every push
-to `main` and every PR:
+to `main` and to the integration branch `feature/robust-celltype-annotation`
+([plan §2.2](plans/robust-celltype-annotation-plan.md)), and on every PR:
 
 1. Install from `requirements/requirements.lock` with `uv`, then `pip install -e . --no-deps`.
 2. `ruff check .`
 3. `ruff format --check .`
 4. `mypy src/`
-5. `pytest -m "not slow"`
+5. `nf-metro validate assets/metro_map.mmd`
+6. `pytest -m "not slow"`
+
+To lint the Nextflow code, point the linter at the pipeline's project
+directory so it loads the Groovy classes in `workflows/lib/`:
+
+```bash
+nextflow lint -project-dir workflows workflows/
+```
 
 Run the same gate locally before pushing:
 
