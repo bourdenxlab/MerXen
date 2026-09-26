@@ -40,3 +40,4 @@ python scripts/update_env_lock_hash.py
 - Run `pytest` before pushing. The pre-push hook enforces this.
 - Do not install packages with `pip install <package>`. Add to `pyproject.toml` and regenerate the lockfile.
 - Do not commit to `main` directly. Use a feature branch and open a PR.
+- Exception: the robust cell-type annotation effort (`docs/plans/robust-celltype-annotation-plan.md`) uses the long-lived integration branch `feature/robust-celltype-annotation`. Milestone branches `feature/rca-m<N>-<slug>` are cut from it and merged into it by PR. Keep it current by merging `main` into it; never rebase it. Only acceptance-gate PRs merge it into `main`. Data-integrity bugfixes still go to `main` first and are then merged into it.
