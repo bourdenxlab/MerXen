@@ -53,6 +53,7 @@ from merxen.cortical_depth.streamlines import (
 )
 from merxen.io.spatialdata_io import write_or_replace_element
 from merxen.memory import force_release, log_status
+from merxen.table_keys import clustered_table_key
 
 logger = logging.getLogger(__name__)
 
@@ -411,15 +412,10 @@ def _annotate_table(
 def _clustering_table_key(table_config: CorticalDepthTableConfig) -> str:
     """Return the clustering_squidpy table key for a segmentation branch.
 
-    Mirrors ``merxen.analysis.clustering_squidpy._clustered_spatialdata_table_key``.
+    Delegates to ``merxen.table_keys.clustered_table_key``, as the
+    clustering stage does when it writes the table.
     """
-    segmentation = str(table_config.segmentation).strip().lower()
-    source_key = str(table_config.table_key)
-    if segmentation == "reseg" or source_key == "table_MOSAIK_proseg":
-        return "table_MOSAIK_proseg_clustering_squidpy"
-    if segmentation == "original_seg" or source_key == "table_original":
-        return "table_original_clustering_squidpy"
-    return f"{source_key}_clustering_squidpy"
+    return clustered_table_key(table_config.table_key, table_config.segmentation)
 
 
 def _load_cluster_annotations(
