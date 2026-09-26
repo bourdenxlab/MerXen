@@ -245,3 +245,7 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Nextflow loads the pipeline's Groovy classes from workflows/lib; the Python
+# packaging rule lib/ above must not hide them.
+!/workflows/lib/

@@ -12,6 +12,20 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
+from merxen.annotation.config import (  # rca-hook:H8
+    AdaptiveSplitConfig,
+    AnnotationConfig,
+    ClusteringMode,
+    LeafSource,
+    TableKeySuffix,
+    UnassignedStatePolicy,
+    check_clustering_mode_settings,
+)
+from merxen.annotation.samplesheet_columns import (
+    AnatomicalRegionValue,
+    MouseSectionRegionsValue,
+)
+
 
 class CellposeConfig(BaseModel):
     """Parameters for Cellpose segmentation."""
@@ -994,6 +1008,9 @@ class ClusteringSquidpySampleConfig(BaseModel):
     segmentation: str | None = None
     table_key: str | None = None
     shape_key: str | None = None
+    # rca-site:H8: per-row annotation columns; None inherits the global params.
+    anatomical_region: AnatomicalRegionValue = None
+    mouse_section_regions: MouseSectionRegionsValue = None
 
 
 class ClusteringSquidpyRoundConfig(BaseModel):
@@ -1082,6 +1099,42 @@ class ClusteringSquidpyConfig(BaseModel):
         default_factory=ClusteringSquidpyAnnotationConfig
     )
     min_branch_cells: int = Field(default=50, ge=1)
+    # rca-site:H8: map-first mode fields (plan §3.7); the defaults are legacy.
+    mode: ClusteringMode = "legacy"
+    labels_dir: Path | None = None
+    leaf_source: LeafSource = "mapped"
+    adaptive_split: AdaptiveSplitConfig = Field(default_factory=AdaptiveSplitConfig)
+    qc_leiden_resolution: float = Field(default=0.5, gt=0.0)
+    table_key_suffix: TableKeySuffix = ""
+
+    @model_validator(mode="after")
+    def _check_mode_settings(
+        self: ClusteringSquidpyConfig,
+    ) -> ClusteringSquidpyConfig:
+        check_clustering_mode_settings(
+            mode=self.mode,
+            leaf_source=self.leaf_source,
+            adaptive_split=self.adaptive_split,
+            table_key_suffix=self.table_key_suffix,
+        )
+        return self
+
+    def coupled_annotation_config(
+        self: ClusteringSquidpyConfig, annotation: AnnotationConfig
+    ) -> AnnotationConfig:
+        """Return ``annotation`` coupled to this run's ``min_counts``.
+
+        Args:
+            annotation: The annotation configuration of the same run.
+
+        Returns:
+            A copy whose ``min_counts`` and ``thresholds.hard_min_counts``
+            equal ``min_counts`` (plan §3.7, §4.4).
+
+        Raises:
+            ValueError: If ``annotation`` sets another ``min_counts``.
+        """
+        return annotation.coupled_to_clustering(self.min_counts)
 
 
 class MenderConfig(BaseModel):
@@ -1111,6 +1164,8 @@ class MenderConfig(BaseModel):
     run_umap: bool = True
     write_spatialdata_table: bool = True
     figure_dpi: int = Field(default=180, ge=72)
+    # rca-site:H8: unassigned cells as a MENDER state (legacy) or not (§4.9).
+    unassigned_state_policy: UnassignedStatePolicy = "state"
 
     @field_validator("cell_state_key", "source_spatialdata_table", "native_shape_key")
     @classmethod

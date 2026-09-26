@@ -29,6 +29,9 @@ include {
     MENDER_FINALIZE;
     MENDER_IMPORT
 } from "./modules/mender"
+// rca-hook:H1: reference-based annotation (plan §2.4); nothing runs in legacy mode.
+include { annotationModuleStub } from "./modules/annotation"
+include { CLUSTERING_MAP_FIRST } from "./subworkflows/clustering_map_first"
 
 def parseChannels(rawValue, defaults) {
     if (rawValue == null) {
@@ -415,14 +418,18 @@ def analysisLayerKeys(platform, segmentation) {
     throw new IllegalArgumentException("Unknown analysis segmentation: ${segmentation}")
 }
 
-def clusteredSpatialdataTableKey(sourceTableKey, segmentation) {
+// rca-hook:H2: a map_first suffix (plan §4.8) is appended on every path; a null or
+// blank suffix (legacy rows) keeps the unsuffixed key.
+def clusteredSpatialdataTableKey(sourceTableKey, segmentation, suffix = "") {
+    def suffixToken = suffix == null ? "" : suffix.toString().trim()
+    def suffixFragment = suffixToken ? "_${suffixToken}" : ""
     if (segmentation == "reseg" || sourceTableKey == "table_MOSAIK_proseg") {
-        return "table_MOSAIK_proseg_clustering_squidpy"
+        return "table_MOSAIK_proseg_clustering_squidpy${suffixFragment}"
     }
     if (segmentation == "original_seg" || sourceTableKey == "table_original") {
-        return "table_original_clustering_squidpy"
+        return "table_original_clustering_squidpy${suffixFragment}"
     }
-    return "${sourceTableKey}_clustering_squidpy"
+    return "${sourceTableKey}_clustering_squidpy${suffixFragment}"
 }
 
 def normalizeDistanceFromObjectSegmentations(rawValue) {
@@ -918,6 +925,11 @@ def findCachedAtlasFilePath(rawCacheDir, referenceAtlas, filename) {
 }
 
 def appendClusteringSquidpyPreflightChecks(errors, settings, params) {
+    // rca-hook:H4: map_first checks (plan §3.7); the checks below are legacy-only.
+    AnnotationPreflight.append(errors, settings, params)
+    if (!AnnotationSettings.isLegacy(settings)) {
+        return
+    }
     def hierarchicalEnabled = effectiveClusteringHierarchicalEnabled(params)
     if (!(settings.run_clustering_squidpy && hierarchicalEnabled)) {
         return
@@ -1358,6 +1370,7 @@ def appendMenderPreflightChecks(errors, settings, params) {
                 def tableKey = clusteredSpatialdataTableKey(
                     layerKeys.table_key,
                     segmentation,
+                    settings.clustering_squidpy_table_key_suffix, // rca-site:H2
                 )
                 def tablePath = latestZarr.resolve("tables").resolve(tableKey)
                 if (!tablePath.toFile().exists()) {
@@ -1693,7 +1706,11 @@ def rowSampleSettings(row, params) {
         alignmentEnabled &&
         (runAlign || runAlignQc || needAlignmentDownstream)
 
-    return [
+    // rca-hook:H3: annotation settings and the map_first MAPMYCELLS rule (plan §3.1).
+    // Legacy rows get no key, so their settings and -resume hashes are unchanged.
+    def annotationSettings = AnnotationSettings.forRow(row, params, species)
+    runMapMyCells = AnnotationSettings.runMapMyCells(runMapMyCells, annotationSettings, stopStage)
+    return annotationSettings + [
         pair_id: pairId,
         species: species,
         analysis_mode: analysisMode,
@@ -1944,6 +1961,19 @@ workflow {
         .map { pairId, row, settings, _doneFlag ->
             tuple(pairId, row, settings)
         }
+
+    // rca-hook:H6: end-of-run annotation summary (plan §3.1); empty in legacy runs.
+    def annotationCompletionParams = params
+    def annotationCompletionWorkflow = workflow
+    annotationCompletionWorkflow.onComplete {
+        def annotationSummary = AnnotationSettings.completionSummary(
+            annotationCompletionParams,
+            [success: annotationCompletionWorkflow.success],
+        )
+        if (annotationSummary) {
+            log.info(annotationSummary)
+        }
+    }
 
     build_inputs_ch = sample_rows_ch.flatMap { pairId, row, settings ->
         if (!settings.run_build) {
@@ -3860,12 +3890,13 @@ workflow {
             sampleId,
             clusteredH5ad,
             latestZarr,
-            _settings,
+            settings, // rca-site:H2: was _settings; binds the row suffix used below
             terminalToken ->
                 def layerKeys = analysisLayerKeys(platform, segmentation)
                 def clusteredTableKey = clusteredSpatialdataTableKey(
                     layerKeys.table_key,
                     segmentation,
+                    settings.clustering_squidpy_table_key_suffix, // rca-site:H2
                 )
                 tuple(
                     taskKey,

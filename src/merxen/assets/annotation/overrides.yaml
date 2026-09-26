@@ -1,0 +1,238 @@
+# Curated inputs for scripts/annotation/build_vocab_tables.py.
+#
+# The generator reads the Allen taxonomy CSVs (term labels, names, order and
+# neurotransmitter annotations) and this file (MerXen's class mappings, sinks,
+# region plausibility, never-drop classes and v1 floors), and writes
+# whb_supercluster_vocab.csv, seaad_mr_subclass_vocab.csv, wmb_class_vocab.csv,
+# floors_human.csv, floors_mouse.csv and NOTICE in this directory. Edit this
+# file, re-run the generator and commit both; never edit the generated files.
+#
+# Plan references (docs/plans/robust-celltype-annotation-plan.md): §4.5 (broad
+# classes), §4.7 (tables), §5.4 (floors), §7.2 / §3.7 (never-drop classes).
+schema_version: 1
+
+whb:
+  taxonomy: WHB-taxonomy
+  release: "20240330"
+  ccn: CCN202210140
+  supercluster_term_set: CCN202210140_SUPC
+  neurotransmitter_term_set: CCN202210140_NEUR
+  # A neuronal node's NT is the class holding more than this share of its
+  # NT-annotated cells (cell-weighted over clusters); otherwise "Other".
+  nt_majority_min_share: 0.5
+  # Mixed-identity attractors (E1: 5-18% of cells go to them unpruned). Never
+  # confident; broad_class Mixed/Unknown so their probability mass is
+  # "unallocated" in soft composition (§5.5), as in E1's scheme.
+  sinks: [Splatter, Miscellaneous]
+  regions:
+    frontal_cortex:
+      # The 16 cortex-implausible superclusters pruned in E1 (ii)
+      # (exp/E1/e1lib.py DROP_IDS): hippocampal, amygdala, striatal,
+      # diencephalic, midbrain and hindbrain neurons, Bergmann glia, choroid
+      # plexus, ependymal cells and Splatter.
+      implausible_labels:
+        - CS202210140_475
+        - CS202210140_479
+        - CS202210140_480
+        - CS202210140_478
+        - CS202210140_481
+        - CS202210140_482
+        - CS202210140_490
+        - CS202210140_491
+        - CS202210140_492
+        - CS202210140_487
+        - CS202210140_488
+        - CS202210140_489
+        - CS202210140_493
+        - CS202210140_472
+        - CS202210140_471
+        - CS202210140_483
+  # broad_class / lineage per supercluster name. Neuronal superclusters are
+  # checked against the taxonomy: more than half of their cells must carry an
+  # NT annotation.
+  superclusters:
+    Upper-layer intratelencephalic: {broad_class: Neurons, lineage: Neurons}
+    Deep-layer intratelencephalic: {broad_class: Neurons, lineage: Neurons}
+    Deep-layer near-projecting: {broad_class: Neurons, lineage: Neurons}
+    Deep-layer corticothalamic and 6b: {broad_class: Neurons, lineage: Neurons}
+    MGE interneuron: {broad_class: Neurons, lineage: Neurons}
+    CGE interneuron: {broad_class: Neurons, lineage: Neurons}
+    LAMP5-LHX6 and Chandelier: {broad_class: Neurons, lineage: Neurons}
+    Miscellaneous:
+      broad_class: Mixed/Unknown
+      lineage: Neurons
+      reason: sink; mostly glutamatergic neurons of several regions mixed with immune cells
+    Hippocampal CA1-3: {broad_class: Neurons, lineage: Neurons}
+    Hippocampal CA4: {broad_class: Neurons, lineage: Neurons}
+    Hippocampal dentate gyrus: {broad_class: Neurons, lineage: Neurons}
+    Amygdala excitatory: {broad_class: Neurons, lineage: Neurons}
+    Medium spiny neuron: {broad_class: Neurons, lineage: Neurons}
+    Eccentric medium spiny neuron: {broad_class: Neurons, lineage: Neurons}
+    Splatter:
+      broad_class: Mixed/Unknown
+      lineage: Neurons
+      reason: sink; neurons of mixed NT, mostly midbrain, hypothalamus and pons
+    Mammillary body: {broad_class: Neurons, lineage: Neurons}
+    Thalamic excitatory: {broad_class: Neurons, lineage: Neurons}
+    Midbrain-derived inhibitory: {broad_class: Neurons, lineage: Neurons}
+    Upper rhombic lip: {broad_class: Neurons, lineage: Neurons}
+    Cerebellar inhibitory: {broad_class: Neurons, lineage: Neurons}
+    Lower rhombic lip: {broad_class: Neurons, lineage: Neurons}
+    Oligodendrocyte:
+      broad_class: Oligodendrocytes
+      lineage: Oligodendrocyte lineage
+    Committed oligodendrocyte precursor:
+      broad_class: Oligodendrocyte precursors
+      lineage: Oligodendrocyte lineage
+      reason: broad OPC only when the COP rule passes, else lineage (plan §5.2 rule 2)
+    Oligodendrocyte precursor:
+      broad_class: Oligodendrocyte precursors
+      lineage: Oligodendrocyte lineage
+    Astrocyte: {broad_class: Astrocytes, lineage: Astrocytes}
+    Ependymal:
+      broad_class: Mixed/Unknown
+      lineage: Mixed/Unknown
+      reason: not one of the seven human broad classes; region-implausible in cortex (§4.5)
+    Microglia: {broad_class: Microglia, lineage: Microglia}
+    Vascular: {broad_class: Vascular cells, lineage: Vascular cells}
+    Bergmann glia:
+      broad_class: Mixed/Unknown
+      lineage: Mixed/Unknown
+      reason: >-
+        cerebellar astrocytes, not one of the seven classes in E1's scheme (the
+        legacy collapse keeps it apart), so its mass stays unallocated as in the
+        E1 soft composition; region-implausible in cortex; a cerebellar region
+        (plan §8.9) may map it to Astrocytes
+    Fibroblast: {broad_class: Fibroblasts, lineage: Fibroblasts}
+    Choroid plexus:
+      broad_class: Mixed/Unknown
+      lineage: Mixed/Unknown
+      reason: epithelium, not one of the seven human broad classes; region-implausible in cortex
+
+seaad:
+  taxonomy: SEA-AD-Multiregion-taxonomy
+  release: "20260711"
+  ccn: CCN20260630
+  class_term_set: CCN20260630_LEVEL_0
+  subclass_term_set: CCN20260630_LEVEL_1
+  supertype_term_set: CCN20260630_LEVEL_2
+  # Subclasses of these classes are neurons; their NT follows the class name.
+  neuronal_classes: ["Neuronal: GABAergic", "Neuronal: Glutamatergic"]
+  # As E1's plausibility check (exp/E1/e1lib.py SEA_SINK, SEA_IMPLAUSIBLE).
+  sinks: [Ependymal]
+  regions:
+    frontal_cortex:
+      implausible_subclasses: [Sub-CA1, CA2-4, DG, EC IT]
+  # Non-neuronal subclasses (E1 seaad_broad).
+  subclasses:
+    Astrocyte: {broad_class: Astrocytes, lineage: Astrocytes}
+    Endothelial: {broad_class: Vascular cells, lineage: Vascular cells}
+    Ependymal:
+      broad_class: Mixed/Unknown
+      lineage: Mixed/Unknown
+      reason: sink; not one of the seven human broad classes
+    Immune:
+      broad_class: Microglia
+      lineage: Microglia
+      reason: SEA-AD Immune also holds PVM and monocytes (plan §5.1)
+    OPC: {broad_class: Oligodendrocyte precursors, lineage: Oligodendrocyte lineage}
+    Oligodendrocyte: {broad_class: Oligodendrocytes, lineage: Oligodendrocyte lineage}
+    VLMC & Perivascular:
+      broad_class: Mixed/Unknown
+      lineage: Mixed/Unknown
+      reason: mixes fibroblasts and mural cells; resolved by the supertype overrides
+  # Supertype-prefix overrides (plan §4.7); every supertype of the subclass
+  # must match exactly one prefix. The generator writes the union of a
+  # subclass's override broad classes to its base row's broad_class_any
+  # column ("Vascular cells;Fibroblasts" for VLMC & Perivascular): without a
+  # supertype, that subclass's probability counts toward both classes in the
+  # SEA-AD broad score, as E1's 'Vascular/Fibro' rule (exp/E1/e1lib.py
+  # load_mmc_seaad) did when the 0.68 threshold was set.
+  supertype_overrides:
+    VLMC & Perivascular:
+      VLMC: {broad_class: Fibroblasts, lineage: Fibroblasts}
+      Pericyte: {broad_class: Vascular cells, lineage: Vascular cells}
+      SMC: {broad_class: Vascular cells, lineage: Vascular cells}
+
+wmb:
+  taxonomy: WMB-taxonomy
+  release: "20231215"
+  ccn: CCN20230722
+  class_term_set: CCN20230722_CLAS
+  neurotransmitter_term_set: CCN20230722_NEUR
+  nt_majority_min_share: 0.5
+  # Legacy WMB broad classes (collapse_atlas_label_to_broad_class; MECR
+  # target_broad_classes). Every other class is neuronal (broad_class
+  # Neurons) and is checked against the taxonomy NT annotations.
+  non_neuronal_classes:
+    30 Astro-Epen: Astrocytes/Ependymal
+    31 OPC-Oligo: Oligodendrocyte lineage
+    32 OEC: OEC
+    33 Vascular: Vascular cells
+    34 Immune: Microglia
+  # Mouse region pruning never drops these classes (E7 NEVER_DROP; plan §3.7
+  # MouseRegionConfig.never_drop_classes; M6b may add more).
+  never_drop: [25 Pineal Glut, 30 Astro-Epen, 31 OPC-Oligo, 33 Vascular, 34 Immune]
+
+floors:
+  human:
+    # §5.4 v1 values for panels validated on real data: the precision-only
+    # column of review_robustness/floors_rederived.csv (E2 real self-thinning,
+    # exp/E2/floors.py) with the n >= 50 inheritance.
+    floor_source: real_e2
+    panel_families: [human_set_a]
+    rows:
+      - {level: broad, floor_class: Astro, MERSCOPE: 10, XENIUM: 10}
+      - {level: broad, floor_class: Exc, MERSCOPE: 10, XENIUM: 10}
+      - {level: broad, floor_class: OPC, MERSCOPE: 10, XENIUM: 10}
+      - level: broad
+        floor_class: Oligo
+        MERSCOPE: 10
+        XENIUM: 10
+        inherited: {XENIUM: MERSCOPE}
+        note: Xenium n = 5
+      - {level: broad, floor_class: Vascular, MERSCOPE: 10, XENIUM: 10}
+      - level: broad
+        floor_class: Fibroblast
+        MERSCOPE: 10
+        XENIUM: 10
+        note: E2 pooled fibroblasts with vascular cells; same floor as Vascular
+      - {level: broad, floor_class: Immune, MERSCOPE: 10, XENIUM: 15}
+      - {level: broad, floor_class: Inh, MERSCOPE: 10, XENIUM: 30, note: "Xenium n = 1,332"}
+      - level: broad
+        floor_class: OtherNeuron
+        MERSCOPE: 60
+        XENIUM: 60
+        inherited: {MERSCOPE: XENIUM}
+        note: MERSCOPE n = 15
+      - {level: supercluster, floor_class: Astro, MERSCOPE: 10, XENIUM: 10}
+      - {level: supercluster, floor_class: Exc, MERSCOPE: 10, XENIUM: 10}
+      - level: supercluster
+        floor_class: Oligo
+        MERSCOPE: 10
+        XENIUM: 10
+        inherited: {XENIUM: MERSCOPE}
+        note: Xenium n = 5
+      - {level: supercluster, floor_class: Immune, MERSCOPE: 10, XENIUM: 15}
+      - {level: supercluster, floor_class: Inh, MERSCOPE: 30, XENIUM: 10}
+      - {level: supercluster, floor_class: Vascular, MERSCOPE: 10, XENIUM: 30}
+      - level: supercluster
+        floor_class: Fibroblast
+        MERSCOPE: 10
+        XENIUM: 30
+        note: E2 pooled fibroblasts with vascular cells; same floor as Vascular
+      - {level: supercluster, floor_class: OPC, MERSCOPE: 120, XENIUM: 120}
+      - {level: supercluster, floor_class: COP, MERSCOPE: 120, XENIUM: 120}
+      - level: supercluster
+        floor_class: OtherNeuron
+        MERSCOPE: 60
+        XENIUM: 60
+        inherited: {MERSCOPE: XENIUM}
+        note: MERSCOPE n = 15
+  mouse:
+    # §5.4 mouse v1 (MERSCOPE) [L]: class 20 and subclass 50 for every WMB
+    # class; re-evaluated in M6.
+    floor_source: design_v1
+    panel_families: [mouse_ag7, mouse_vzg2]
+    platforms: [MERSCOPE]
+    min_counts: {class: 20, subclass: 50}
