@@ -108,6 +108,58 @@ Region generation downloads WMB metadata and only the raw expression-matrix
 shards named by the selected cells' `feature_matrix_label` values. Individual
 shards can be several GB, so the cache must have substantial free space.
 
+## Region reference cache
+
+Generated region references are immutable once written: MerXen never
+modifies or deletes a completed build in the shared cache. Each build lives in
+its own directory
+under `<mapmycells_region_cache_dir>/references/`, named
+`<prefix>_<region_name>-<hash>`, where `<prefix>` is `region` (WHB) or
+`wmb_region` (WMB) and `<hash>` is the first 16 hex digits of the SHA-256 of
+the reference configuration: region name and labels,
+`region_min_cells_per_leaf`, `region_query_markers_n_per_utility`, atlas,
+query species, hierarchy, normalization, Allen manifest URL and `drop_level`.
+Each directory holds `precompute/precomputed_stats.h5`, `reference_markers/`,
+`query_markers/query_markers.n<N>.json`, `region_cell_metadata.csv` and
+`region_reference_manifest.json`, which records the full `config_hash`,
+`created_at` and the paths of the build.
+
+For each run, MerXen picks the reference in this order:
+
+1. The newest complete content-hashed build for the requested configuration.
+2. A legacy in-place reference, `references/<prefix>_<region_name>/`, written
+   by MerXen before content-hashed builds existed. It is adopted **read-only**
+   when its stats and query-marker files exist and its recorded `config`
+   matches the request. Keys that older versions did not record are compared
+   as the values those versions always used: `reference_atlas = "whb"`,
+   `query_species = "human"`, `drop_level = null`. The manifest is never
+   rewritten; the copy recorded in outputs has `cache_layout =
+   "legacy_in_place"` and the resolved on-disk paths, because legacy
+   manifests can hold stale absolute paths from before the cache was moved.
+3. Otherwise, a new build. It is assembled in a private
+   `references/.staging-*` directory and renamed into place only when
+   complete, so other tasks never see a partial build. The provenance that
+   `cell_type_mapper` writes inside its own outputs (for example
+   `metadata.config` in the query-marker JSON) therefore names the staging
+   path; `region_reference_manifest.json` names the final paths. If the build
+   fails, only that staging directory is removed. A task killed outright (for
+   example with `SIGKILL`) can leave a `.staging-*` directory behind. Such a
+   directory is never used and can be deleted by hand when no build is
+   running.
+
+A configuration change therefore selects a different directory. It never
+invalidates, overwrites or deletes an existing build. Builds of one
+configuration are serialised with a `references/.<prefix>_<region_name>-<hash>.lock`
+file lock, so concurrent `MAPMYCELLS` tasks wait for one build and then reuse
+it.
+
+`mapmycells_region_force_rebuild=true` always writes a new
+`<prefix>_<region_name>-<hash>-rebuild-<UTC timestamp>` directory, which later
+runs then prefer, and it leaves every earlier build intact. A task that waited
+for another task's rebuild of the same configuration reuses that build. Each
+build uses about 2.4 GB for the frontal WHB reference, and old builds are
+never pruned automatically. Force a rebuild on a single pair, then turn it off.
+
 ## Nextflow process
 
 [`MAPMYCELLS`](../../workflows/modules/mapmycells.nf) — one instance per
@@ -151,7 +203,7 @@ Use `--only_stage mapmycells` to reuse an existing
 | `region_name` / `region_labels` | Short output name and WHB ROI labels or WMB ROI acronyms used to build the strict region reference. |
 | `region_cache_dir` | Durable cache for Allen WHB/WMB downloads and generated region stats/marker files. |
 | `region_min_cells_per_leaf` | Minimum ROI cells required for a leaf `cluster_alias` to stay in the region taxonomy. |
-| `region_force_rebuild` | Rebuild generated region reference files even if the cache manifest matches. |
+| `region_force_rebuild` | Build a new region reference directory even if a matching one exists; earlier builds are kept (see [Region reference cache](#region-reference-cache)). |
 | `region_query_markers_n_per_utility` | Marker count target for region `QueryMarkerRunner`. |
 | `drop_level` | Optional taxonomy level to drop before mapping, such as the Whole Mouse Brain supertype level. |
 | `normalization` | Passed to `type_assignment.normalization`; `raw` means MapMyCells converts query counts internally. |

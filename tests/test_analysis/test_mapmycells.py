@@ -7,6 +7,8 @@ import json
 import pickle
 import subprocess
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TextIO
 
@@ -15,6 +17,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import merxen.analysis.mapmycells as mapmycells_module
 from merxen.analysis.mapmycells import (
     RegionReferenceArtifacts,
     _ensure_url_file,
@@ -1050,19 +1053,20 @@ def test_region_cell_metadata_supports_wmb_acronyms(tmp_path: Path) -> None:
     assert summary["feature_matrix_labels"] == ["WMB-10Xv3-Isocortex-1"]
 
 
-def test_prepare_region_reference_reuses_cache_and_force_rebuilds(
+def _install_fake_whb_region_builders(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Region reference preparation should reuse matching cached artifacts."""
+) -> dict[str, int]:
+    """Replace Allen downloads and cell_type_mapper runners with tiny fakes."""
     input_dir = tmp_path / "inputs"
     input_dir.mkdir()
     cell_metadata_path = input_dir / "cell_metadata.csv"
+    # Enough cells in one leaf to pass the default min_cells_per_leaf of 10.
     pd.DataFrame(
         {
-            "cell_label": ["c1", "c2"],
-            "region_of_interest_label": ["Human A46", "Human A46"],
-            "cluster_alias": [1, 1],
+            "cell_label": [f"c{index}" for index in range(12)],
+            "region_of_interest_label": ["Human A46"] * 12,
+            "cluster_alias": [1] * 12,
         }
     ).to_csv(cell_metadata_path, index=False)
     roi_map_path = input_dir / "roi.csv"
@@ -1094,7 +1098,9 @@ def test_prepare_region_reference_reuses_cache_and_force_rebuilds(
 
     def fake_precompute(config: dict[str, object]) -> None:
         calls["precompute"] += 1
-        Path(str(config["output_path"])).write_bytes(b"stats")
+        Path(str(config["output_path"])).write_bytes(
+            f"stats-{calls['precompute']}".encode()
+        )
 
     def fake_reference(config: dict[str, object]) -> None:
         calls["reference"] += 1
@@ -1115,25 +1121,293 @@ def test_prepare_region_reference_reuses_cache_and_force_rebuilds(
         fake_reference,
     )
     monkeypatch.setattr("merxen.analysis.mapmycells._run_query_markers", fake_query)
+    return calls
 
-    cfg = MapMyCellsConfig(
-        pair_id="PAIR1",
-        output_dir=tmp_path / "mapmycells_out",
-        samples=[],
-        reference_mode="region",
-        region_cache_dir=tmp_path / "cache",
-        region_min_cells_per_leaf=2,
+
+def _region_config(tmp_path: Path, **updates: object) -> MapMyCellsConfig:
+    return MapMyCellsConfig.model_validate(
+        {
+            "pair_id": "PAIR1",
+            "output_dir": tmp_path / "mapmycells_out",
+            "samples": [],
+            "reference_mode": "region",
+            "region_cache_dir": tmp_path / "cache",
+            "region_min_cells_per_leaf": 2,
+            **updates,
+        }
     )
+
+
+def _write_legacy_region_reference(
+    reference_dir: Path,
+    legacy_config: dict[str, object],
+) -> dict[str, bytes]:
+    """Write a pre-M0b in-place region reference and return its file bytes."""
+    files = {
+        "precompute/precomputed_stats.h5": b"legacy stats",
+        "reference_markers/reference_markers.h5": b"legacy reference markers",
+        "query_markers/query_markers.n10.json": b'{"legacy": true}\n',
+        "region_cell_metadata.csv": b"cell_label\nc1\n",
+        "region_reference_manifest.json": (
+            json.dumps(
+                {
+                    "reference_type": "region",
+                    "config": legacy_config,
+                    "precomputed_stats_path": "/moved/disk/precomputed_stats.h5",
+                },
+                indent=2,
+            )
+            + "\n"
+        ).encode(),
+    }
+    for relative_path, payload in files.items():
+        path = reference_dir / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+    return files
+
+
+def _snapshot_tree(root: Path) -> dict[str, tuple[bytes, int]]:
+    return {
+        str(path.relative_to(root)): (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+LEGACY_FRONTAL_DIR_NAME = "region_frontal_a44_a45_a46_a32_acc"
+# The frontal WHB manifest on the shared SSD1 cache was written before
+# reference_atlas, query_species and drop_level were recorded.
+LEGACY_FRONTAL_CONFIG: dict[str, object] = {
+    "region_name": "frontal_a44_a45_a46_a32_acc",
+    "region_labels": ["Human A44-A45", "Human A46", "Human A32", "Human ACC"],
+    "region_min_cells_per_leaf": 10,
+    "region_query_markers_n_per_utility": 10,
+    "hierarchy": ["CCN202210140_SUPC", "CCN202210140_CLUS", "CCN202210140_SUBC"],
+    "normalization": "raw",
+    "manifest_url": (
+        "https://allen-brain-cell-atlas.s3.us-west-2.amazonaws.com/"
+        "releases/20250531/manifest.json"
+    ),
+}
+
+
+def test_prepare_region_reference_reuses_cache_and_force_rebuilds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A matching build is reused; force-rebuild adds a new build, never deletes."""
+    calls = _install_fake_whb_region_builders(tmp_path, monkeypatch)
+    cfg = _region_config(tmp_path)
 
     first = prepare_region_mapmycells_reference(cfg)
     second = prepare_region_mapmycells_reference(cfg)
 
     assert first.marker_lookup_path == second.marker_lookup_path
     assert calls == {"precompute": 1, "reference": 1, "query": 1}
+    first_dir = first.manifest_path.parent
+    assert first_dir.parent == tmp_path / "cache" / "references"
+    assert first_dir.name == (
+        "region_frontal_a44_a45_a46_a32_acc-" + first.manifest["config_hash"][:16]
+    )
+    assert first.manifest["cache_layout"] == "content_hashed"
+    assert first.manifest["precomputed_stats_path"] == str(
+        first_dir / "precompute" / "precomputed_stats.h5"
+    )
+    first_tree = _snapshot_tree(first_dir)
 
     force_cfg = cfg.model_copy(update={"region_force_rebuild": True})
-    prepare_region_mapmycells_reference(force_cfg)
+    rebuilt = prepare_region_mapmycells_reference(force_cfg)
+
     assert calls == {"precompute": 2, "reference": 2, "query": 2}
+    rebuilt_dir = rebuilt.manifest_path.parent
+    assert rebuilt_dir != first_dir
+    assert rebuilt_dir.name.startswith(f"{first_dir.name}-rebuild-")
+    assert rebuilt.precomputed_stats_path.read_bytes() == b"stats-2"
+    assert _snapshot_tree(first_dir) == first_tree
+    assert not list((tmp_path / "cache" / "references").glob(".staging-*"))
+
+    after_rebuild = prepare_region_mapmycells_reference(cfg)
+
+    assert after_rebuild.manifest_path == rebuilt.manifest_path
+    assert calls == {"precompute": 2, "reference": 2, "query": 2}
+
+
+def test_prepare_region_reference_adopts_legacy_manifest_read_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A legacy manifest missing newer keys is reused as-is and never rewritten."""
+    calls = _install_fake_whb_region_builders(tmp_path, monkeypatch)
+    legacy_dir = tmp_path / "cache" / "references" / LEGACY_FRONTAL_DIR_NAME
+    _write_legacy_region_reference(legacy_dir, LEGACY_FRONTAL_CONFIG)
+    legacy_tree = _snapshot_tree(legacy_dir)
+    cfg = _region_config(tmp_path, region_min_cells_per_leaf=10)
+
+    artifacts = prepare_region_mapmycells_reference(cfg)
+
+    assert calls == {"precompute": 0, "reference": 0, "query": 0}
+    assert artifacts.precomputed_stats_path == (
+        legacy_dir / "precompute" / "precomputed_stats.h5"
+    )
+    assert artifacts.marker_lookup_path == (
+        legacy_dir / "query_markers" / "query_markers.n10.json"
+    )
+    assert artifacts.manifest["cache_layout"] == "legacy_in_place"
+    assert artifacts.manifest["resolved_precomputed_stats_path"] == str(
+        artifacts.precomputed_stats_path
+    )
+    assert artifacts.manifest["config"] == LEGACY_FRONTAL_CONFIG
+    assert _snapshot_tree(legacy_dir) == legacy_tree
+    assert sorted(path.name for path in legacy_dir.parent.iterdir()) == [
+        "region_frontal_a44_a45_a46_a32_acc"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("legacy_update", "config_update"),
+    [
+        ({"region_min_cells_per_leaf": 5}, {}),
+        ({}, {"drop_level": "CCN202210140_SUBC"}),
+        ({"reference_atlas": "wmb"}, {}),
+    ],
+    ids=["recorded-key-differs", "missing-key-default-differs", "atlas-differs"],
+)
+def test_prepare_region_reference_mismatch_never_deletes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    legacy_update: dict[str, object],
+    config_update: dict[str, object],
+) -> None:
+    """A config mismatch builds a separate reference and deletes nothing."""
+    calls = _install_fake_whb_region_builders(tmp_path, monkeypatch)
+    references_root = tmp_path / "cache" / "references"
+    legacy_dir = references_root / LEGACY_FRONTAL_DIR_NAME
+    _write_legacy_region_reference(
+        legacy_dir, {**LEGACY_FRONTAL_CONFIG, **legacy_update}
+    )
+    other_build = references_root / f"{LEGACY_FRONTAL_DIR_NAME}-0123456789abcdef"
+    _write_legacy_region_reference(other_build, {"region_name": "other"})
+    before = _snapshot_tree(references_root)
+
+    def forbid_rmtree(*args: object, **kwargs: object) -> None:
+        raise AssertionError(f"shutil.rmtree must not run: {args!r}")
+
+    monkeypatch.setattr("merxen.analysis.mapmycells.shutil.rmtree", forbid_rmtree)
+    cfg = _region_config(tmp_path, region_min_cells_per_leaf=10, **config_update)
+
+    artifacts = prepare_region_mapmycells_reference(cfg)
+
+    assert calls == {"precompute": 1, "reference": 1, "query": 1}
+    new_dir = artifacts.manifest_path.parent
+    assert new_dir not in {legacy_dir, other_build}
+    assert new_dir.parent == references_root
+    after = _snapshot_tree(references_root)
+    assert {key: after[key] for key in before} == before
+
+    rebuilt = prepare_region_mapmycells_reference(
+        cfg.model_copy(update={"region_force_rebuild": True})
+    )
+
+    assert rebuilt.manifest_path.parent not in {new_dir, legacy_dir, other_build}
+    after_force = _snapshot_tree(references_root)
+    assert {key: after_force[key] for key in after} == after
+
+
+def test_prepare_region_reference_force_rebuild_keeps_legacy_reference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Force-rebuild next to a matching legacy reference writes a new directory."""
+    calls = _install_fake_whb_region_builders(tmp_path, monkeypatch)
+    legacy_dir = tmp_path / "cache" / "references" / LEGACY_FRONTAL_DIR_NAME
+    _write_legacy_region_reference(legacy_dir, LEGACY_FRONTAL_CONFIG)
+    legacy_tree = _snapshot_tree(legacy_dir)
+    cfg = _region_config(
+        tmp_path, region_min_cells_per_leaf=10, region_force_rebuild=True
+    )
+
+    artifacts = prepare_region_mapmycells_reference(cfg)
+
+    assert calls == {"precompute": 1, "reference": 1, "query": 1}
+    assert artifacts.manifest_path.parent != legacy_dir
+    assert artifacts.manifest["cache_layout"] == "content_hashed"
+    assert _snapshot_tree(legacy_dir) == legacy_tree
+
+
+def test_prepare_region_reference_failed_build_publishes_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed build leaves no partial build directory and keeps other builds."""
+    _install_fake_whb_region_builders(tmp_path, monkeypatch)
+    references_root = tmp_path / "cache" / "references"
+    legacy_dir = references_root / LEGACY_FRONTAL_DIR_NAME
+    _write_legacy_region_reference(
+        legacy_dir, {**LEGACY_FRONTAL_CONFIG, "region_min_cells_per_leaf": 5}
+    )
+    legacy_tree = _snapshot_tree(legacy_dir)
+
+    def failing_query(config: dict[str, object]) -> None:
+        raise RuntimeError("query markers failed")
+
+    monkeypatch.setattr("merxen.analysis.mapmycells._run_query_markers", failing_query)
+    cfg = _region_config(tmp_path, region_min_cells_per_leaf=10)
+
+    with pytest.raises(RuntimeError, match="query markers failed"):
+        prepare_region_mapmycells_reference(cfg)
+
+    assert sorted(path.name for path in references_root.iterdir() if path.is_dir()) == [
+        "region_frontal_a44_a45_a46_a32_acc"
+    ]
+    assert _snapshot_tree(legacy_dir) == legacy_tree
+
+
+def test_prepare_region_reference_force_reuses_build_finished_while_waiting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent force-rebuilds share the build that finished during the wait."""
+    calls = _install_fake_whb_region_builders(tmp_path, monkeypatch)
+    cfg = _region_config(tmp_path)
+    existing = prepare_region_mapmycells_reference(cfg)
+    assert calls["precompute"] == 1
+    real_lock = mapmycells_module._exclusive_file_lock
+    concurrent_result: list[RegionReferenceArtifacts] = []
+
+    @contextmanager
+    def lock_while_other_task_rebuilds(lock_path: Path) -> Iterator[None]:
+        # Simulate another task finishing its force-rebuild before this call
+        # acquires the lock.
+        if not concurrent_result:
+            concurrent_result.append(
+                mapmycells_module._build_region_reference(
+                    cfg,
+                    references_root=lock_path.parent,
+                    target_dir=mapmycells_module._new_region_reference_build_dir(
+                        lock_path.parent, existing.manifest_path.parent.name
+                    ),
+                    expected_config=existing.manifest["config"],
+                    config_hash=existing.manifest["config_hash"],
+                    query_marker_name=existing.marker_lookup_path.name,
+                )
+            )
+        with real_lock(lock_path):
+            yield
+
+    monkeypatch.setattr(
+        "merxen.analysis.mapmycells._exclusive_file_lock",
+        lock_while_other_task_rebuilds,
+    )
+
+    rebuilt = prepare_region_mapmycells_reference(
+        cfg.model_copy(update={"region_force_rebuild": True})
+    )
+
+    assert calls["precompute"] == 2
+    assert rebuilt.manifest_path == concurrent_result[0].manifest_path
+    assert rebuilt.manifest_path.parent != existing.manifest_path.parent
+    assert existing.precomputed_stats_path.read_bytes() == b"stats-1"
 
 
 def test_prepare_wmb_region_reference_selects_required_matrix_shards(

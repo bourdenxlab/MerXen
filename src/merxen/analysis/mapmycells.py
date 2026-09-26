@@ -3,16 +3,22 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
 import sys
 import textwrap
 import urllib.request
+import uuid
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -97,6 +103,20 @@ MMC_GENE_MAPPER_URL = (
     "mapmycells/mmc-gene-mapper/20250630/mmc_gene_mapper.2025-08-04.db"
 )
 MMC_GENE_MAPPER_SIZE = 16_219_131_904
+REGION_REFERENCE_MANIFEST_NAME = "region_reference_manifest.json"
+REGION_REFERENCE_CACHE_LAYOUT = "content_hashed"
+REGION_REFERENCE_LEGACY_LAYOUT = "legacy_in_place"
+REGION_REFERENCE_HASH_LENGTH = 16
+REGION_REFERENCE_REBUILD_INFIX = "-rebuild-"
+REGION_REFERENCE_STAGING_PREFIX = ".staging-"
+# Region manifest config keys that older MerXen versions did not record, with
+# the value those versions always used. Only WHB human region references were
+# built before these keys existed.
+REGION_REFERENCE_LEGACY_CONFIG_DEFAULTS: dict[str, Any] = {
+    "reference_atlas": "whb",
+    "query_species": "human",
+    "drop_level": None,
+}
 
 FULL_REFERENCE_MANIFEST_KEYS = {
     "whb": {
@@ -2164,45 +2184,159 @@ def _wrapped_title(value: str, *, width: int = 34) -> str:
 def prepare_region_mapmycells_reference(
     config: MapMyCellsConfig,
 ) -> RegionReferenceArtifacts:
-    """Download/cache and generate a strict WHB or WMB ROI reference."""
+    """Build or reuse a strict WHB or WMB ROI reference in the shared cache.
+
+    Generated references are immutable: no build in the shared cache is ever
+    modified or deleted. Each build lives in its own directory,
+    ``references/<prefix>_<region>-<hash>``, named after a SHA-256 of the
+    reference configuration (:func:`_region_reference_config_payload`), and is
+    assembled in a private staging directory that is renamed into place only
+    once complete. Lookup order:
+
+    1. the newest complete content-hashed build for this configuration;
+    2. a legacy in-place reference, ``references/<prefix>_<region>``, adopted
+       read-only when its artefacts exist and its recorded configuration
+       matches (keys that older MerXen versions did not record are compared
+       as their historical defaults);
+    3. otherwise a new content-hashed build.
+
+    ``region_force_rebuild`` always writes a new build directory and leaves
+    every earlier build, including a legacy one, intact.
+
+    Args:
+        config: Validated MapMyCells stage configuration.
+
+    Returns:
+        Paths to the marker lookup, precomputed stats and manifest of the
+        selected reference.
+    """
     region_name = _sanitize_token(config.region_name)
     reference_prefix = "region" if config.reference_atlas == "whb" else "wmb_region"
-    reference_dir = (
-        config.region_cache_dir / "references" / f"{reference_prefix}_{region_name}"
-    )
-    precompute_dir = reference_dir / "precompute"
-    reference_marker_dir = reference_dir / "reference_markers"
-    query_marker_dir = reference_dir / "query_markers"
-    manifest_path = reference_dir / "region_reference_manifest.json"
-    region_cell_metadata_path = reference_dir / "region_cell_metadata.csv"
-    precomputed_stats_path = precompute_dir / "precomputed_stats.h5"
-    query_marker_path = (
-        query_marker_dir
-        / f"query_markers.n{config.region_query_markers_n_per_utility}.json"
-    )
+    references_root = config.region_cache_dir / "references"
+    legacy_dir = references_root / f"{reference_prefix}_{region_name}"
     expected_config = _region_reference_config_payload(config, region_name)
+    config_hash = _region_reference_config_hash(expected_config)
+    build_stem = (
+        f"{reference_prefix}_{region_name}-{config_hash[:REGION_REFERENCE_HASH_LENGTH]}"
+    )
+    query_marker_name = (
+        f"query_markers.n{config.region_query_markers_n_per_utility}.json"
+    )
 
-    if (
-        not config.region_force_rebuild
-        and precomputed_stats_path.exists()
-        and query_marker_path.exists()
-        and manifest_path.exists()
-    ):
-        manifest = json.loads(manifest_path.read_text())
-        if manifest.get("config") == expected_config:
-            return RegionReferenceArtifacts(
-                marker_lookup_path=query_marker_path,
-                precomputed_stats_path=precomputed_stats_path,
-                manifest_path=manifest_path,
-                manifest=manifest,
+    def find_cached() -> RegionReferenceArtifacts | None:
+        cached = _newest_complete_region_build(
+            _region_reference_build_dirs(references_root, build_stem),
+            expected_config=expected_config,
+            config_hash=config_hash,
+            query_marker_name=query_marker_name,
+        )
+        if cached is not None:
+            return cached
+        return _adopt_legacy_region_reference(
+            legacy_dir,
+            expected_config=expected_config,
+            config_hash=config_hash,
+            query_marker_name=query_marker_name,
+        )
+
+    if not config.region_force_rebuild:
+        cached = find_cached()
+        if cached is not None:
+            return cached
+
+    references_root.mkdir(parents=True, exist_ok=True)
+    builds_before_lock = set(_region_reference_build_dirs(references_root, build_stem))
+    # MAPMYCELLS tasks for several pairs and segmentations share this cache.
+    # Serialise builds of one configuration so that concurrent tasks wait for,
+    # and then reuse, a single build instead of each writing their own.
+    with _exclusive_file_lock(references_root / f".{build_stem}.lock"):
+        if config.region_force_rebuild:
+            # A build that finished while this call waited for the lock is
+            # already newer than the request, so it satisfies the rebuild.
+            cached = _newest_complete_region_build(
+                [
+                    build_dir
+                    for build_dir in _region_reference_build_dirs(
+                        references_root, build_stem
+                    )
+                    if build_dir not in builds_before_lock
+                ],
+                expected_config=expected_config,
+                config_hash=config_hash,
+                query_marker_name=query_marker_name,
             )
+        else:
+            cached = find_cached()
+        if cached is not None:
+            return cached
+        return _build_region_reference(
+            config,
+            references_root=references_root,
+            target_dir=_new_region_reference_build_dir(references_root, build_stem),
+            expected_config=expected_config,
+            config_hash=config_hash,
+            query_marker_name=query_marker_name,
+        )
 
-    if config.region_force_rebuild and reference_dir.exists():
-        shutil.rmtree(reference_dir)
-    elif reference_dir.exists():
-        for stale_dir in (precompute_dir, reference_marker_dir, query_marker_dir):
-            if stale_dir.exists():
-                shutil.rmtree(stale_dir)
+
+def _build_region_reference(
+    config: MapMyCellsConfig,
+    *,
+    references_root: Path,
+    target_dir: Path,
+    expected_config: dict[str, Any],
+    config_hash: str,
+    query_marker_name: str,
+) -> RegionReferenceArtifacts:
+    staging_dir = references_root / (
+        f"{REGION_REFERENCE_STAGING_PREFIX}{target_dir.name}-"
+        f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    )
+    staging_dir.mkdir()
+    logger.info(
+        "Building MapMyCells region reference %s in staging directory %s",
+        target_dir,
+        staging_dir,
+    )
+    try:
+        manifest = _generate_region_reference(
+            config,
+            build_dir=staging_dir,
+            final_dir=target_dir,
+            expected_config=expected_config,
+            config_hash=config_hash,
+            query_marker_name=query_marker_name,
+        )
+        # rename(2) is atomic within one filesystem, so readers only ever see
+        # a missing or a complete build directory.
+        staging_dir.rename(target_dir)
+    except BaseException:
+        _discard_region_reference_staging_dir(staging_dir)
+        raise
+    logger.info("Wrote MapMyCells region reference %s", target_dir)
+    return RegionReferenceArtifacts(
+        marker_lookup_path=target_dir / "query_markers" / query_marker_name,
+        precomputed_stats_path=target_dir / "precompute" / "precomputed_stats.h5",
+        manifest_path=target_dir / REGION_REFERENCE_MANIFEST_NAME,
+        manifest=manifest,
+    )
+
+
+def _generate_region_reference(
+    config: MapMyCellsConfig,
+    *,
+    build_dir: Path,
+    final_dir: Path,
+    expected_config: dict[str, Any],
+    config_hash: str,
+    query_marker_name: str,
+) -> dict[str, Any]:
+    precompute_dir = build_dir / "precompute"
+    reference_marker_dir = build_dir / "reference_markers"
+    query_marker_dir = build_dir / "query_markers"
+    region_cell_metadata_path = build_dir / "region_cell_metadata.csv"
+    precomputed_stats_path = precompute_dir / "precomputed_stats.h5"
+    query_marker_path = query_marker_dir / query_marker_name
     for directory in (precompute_dir, reference_marker_dir, query_marker_dir):
         directory.mkdir(parents=True, exist_ok=True)
 
@@ -2245,7 +2379,7 @@ def prepare_region_mapmycells_reference(
         reference_inputs.update(expression_inputs)
         h5ad_path_list = list(expression_inputs.values())
 
-    scratch_dir = _reference_scratch_dir(config, reference_dir)
+    scratch_dir = _reference_scratch_dir(config, build_dir)
     scratch_dir.mkdir(parents=True, exist_ok=True)
     _run_precomputation_abc(
         {
@@ -2279,18 +2413,16 @@ def prepare_region_mapmycells_reference(
         reference_config["drop_level"] = config.drop_level
     _run_reference_markers(reference_config)
 
-    reference_marker_path_list = [
-        str(path) for path in sorted(reference_marker_dir.iterdir()) if path.is_file()
+    reference_marker_paths = [
+        path for path in sorted(reference_marker_dir.iterdir()) if path.is_file()
     ]
-    if not reference_marker_path_list:
+    if not reference_marker_paths:
         raise RuntimeError(
             f"No reference marker files were generated in {reference_marker_dir}"
         )
-    if query_marker_path.exists():
-        query_marker_path.unlink()
     query_config: dict[str, Any] = {
         "output_path": str(query_marker_path),
-        "reference_marker_path_list": reference_marker_path_list,
+        "reference_marker_path_list": [str(path) for path in reference_marker_paths],
         "n_processors": config.n_processors,
         "tmp_dir": str(scratch_dir),
         "n_per_utility": config.region_query_markers_n_per_utility,
@@ -2299,25 +2431,32 @@ def prepare_region_mapmycells_reference(
     if config.drop_level is not None:
         query_config["drop_level"] = config.drop_level
     _run_query_markers(query_config)
+    _require_existing_file(query_marker_path, "generated region query markers")
+
+    def final_path(path: Path) -> str:
+        return str(final_dir / path.relative_to(build_dir))
 
     manifest = {
         "reference_type": "region",
         "config": expected_config,
+        "config_hash": config_hash,
+        "cache_layout": REGION_REFERENCE_CACHE_LAYOUT,
+        "reference_dir": str(final_dir),
+        "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "manifest_url": WHB_MANIFEST_URL,
-        "region_cell_metadata_path": str(region_cell_metadata_path),
-        "precomputed_stats_path": str(precomputed_stats_path),
-        "reference_marker_path_list": reference_marker_path_list,
-        "marker_lookup_path": str(query_marker_path),
+        "region_cell_metadata_path": final_path(region_cell_metadata_path),
+        "precomputed_stats_path": final_path(precomputed_stats_path),
+        "reference_marker_path_list": [
+            final_path(path) for path in reference_marker_paths
+        ],
+        "marker_lookup_path": final_path(query_marker_path),
         "filtering_summary": filtered_summary,
         "input_paths": {key: str(value) for key, value in reference_inputs.items()},
     }
-    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
-    return RegionReferenceArtifacts(
-        marker_lookup_path=query_marker_path,
-        precomputed_stats_path=precomputed_stats_path,
-        manifest_path=manifest_path,
-        manifest=manifest,
+    (build_dir / REGION_REFERENCE_MANIFEST_NAME).write_text(
+        json.dumps(manifest, indent=2) + "\n"
     )
+    return manifest
 
 
 def _region_reference_config_payload(
@@ -2340,6 +2479,179 @@ def _region_reference_config_payload(
         "manifest_url": WHB_MANIFEST_URL,
         "drop_level": config.drop_level,
     }
+
+
+def _region_reference_config_hash(payload: dict[str, Any]) -> str:
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _region_reference_build_dirs(references_root: Path, build_stem: str) -> list[Path]:
+    """Return the builds of one configuration, oldest first."""
+    if not references_root.is_dir():
+        return []
+    rebuild_prefix = f"{build_stem}{REGION_REFERENCE_REBUILD_INFIX}"
+    return sorted(
+        path
+        for path in references_root.iterdir()
+        if path.is_dir()
+        and (path.name == build_stem or path.name.startswith(rebuild_prefix))
+    )
+
+
+def _new_region_reference_build_dir(references_root: Path, build_stem: str) -> Path:
+    canonical = references_root / build_stem
+    if not canonical.exists():
+        return canonical
+    # The UTC timestamp sorts rebuilds after the canonical build and after
+    # each other, so the newest build is always the last one by name.
+    while True:
+        timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+        candidate = references_root / (
+            f"{build_stem}{REGION_REFERENCE_REBUILD_INFIX}{timestamp}"
+        )
+        if not candidate.exists():
+            return candidate
+
+
+def _newest_complete_region_build(
+    build_dirs: list[Path],
+    *,
+    expected_config: dict[str, Any],
+    config_hash: str,
+    query_marker_name: str,
+) -> RegionReferenceArtifacts | None:
+    for build_dir in sorted(build_dirs, reverse=True):
+        manifest_path = build_dir / REGION_REFERENCE_MANIFEST_NAME
+        precomputed_stats_path = build_dir / "precompute" / "precomputed_stats.h5"
+        marker_lookup_path = build_dir / "query_markers" / query_marker_name
+        manifest = _read_region_reference_manifest(manifest_path)
+        if (
+            manifest is None
+            or manifest.get("config") != expected_config
+            or manifest.get("config_hash") != config_hash
+            or not precomputed_stats_path.is_file()
+            or not marker_lookup_path.is_file()
+        ):
+            logger.warning(
+                "Ignoring incomplete or mismatched MapMyCells region reference %s; "
+                "it is left in place.",
+                build_dir,
+            )
+            continue
+        return RegionReferenceArtifacts(
+            marker_lookup_path=marker_lookup_path,
+            precomputed_stats_path=precomputed_stats_path,
+            manifest_path=manifest_path,
+            manifest=manifest,
+        )
+    return None
+
+
+def _adopt_legacy_region_reference(
+    legacy_dir: Path,
+    *,
+    expected_config: dict[str, Any],
+    config_hash: str,
+    query_marker_name: str,
+) -> RegionReferenceArtifacts | None:
+    """Reuse a reference built in place by older MerXen versions, read-only."""
+    manifest_path = legacy_dir / REGION_REFERENCE_MANIFEST_NAME
+    precomputed_stats_path = legacy_dir / "precompute" / "precomputed_stats.h5"
+    marker_lookup_path = legacy_dir / "query_markers" / query_marker_name
+    if not (
+        manifest_path.is_file()
+        and precomputed_stats_path.is_file()
+        and marker_lookup_path.is_file()
+    ):
+        return None
+    manifest = _read_region_reference_manifest(manifest_path)
+    if manifest is None:
+        return None
+    legacy_config = manifest.get("config")
+    if not isinstance(legacy_config, dict) or not _legacy_region_config_matches(
+        legacy_config, expected_config
+    ):
+        logger.info(
+            "Legacy MapMyCells region reference %s does not match the requested "
+            "configuration; it is left untouched and a separate content-hashed "
+            "reference is used instead.",
+            legacy_dir,
+        )
+        return None
+    logger.info("Adopting legacy MapMyCells region reference read-only: %s", legacy_dir)
+    # The manifest file is never rewritten. The copy handed downstream records
+    # where the artefacts actually are, because legacy manifests can carry
+    # stale absolute paths from before the cache was moved.
+    adopted = dict(manifest)
+    adopted.update(
+        {
+            "cache_layout": REGION_REFERENCE_LEGACY_LAYOUT,
+            "config_hash": config_hash,
+            "reference_dir": str(legacy_dir),
+            "resolved_precomputed_stats_path": str(precomputed_stats_path),
+            "resolved_marker_lookup_path": str(marker_lookup_path),
+        }
+    )
+    return RegionReferenceArtifacts(
+        marker_lookup_path=marker_lookup_path,
+        precomputed_stats_path=precomputed_stats_path,
+        manifest_path=manifest_path,
+        manifest=adopted,
+    )
+
+
+def _legacy_region_config_matches(
+    legacy_config: dict[str, Any],
+    expected_config: dict[str, Any],
+) -> bool:
+    if set(legacy_config) - set(expected_config):
+        return False
+    for key, expected_value in expected_config.items():
+        if key in legacy_config:
+            recorded_value = legacy_config[key]
+        elif key in REGION_REFERENCE_LEGACY_CONFIG_DEFAULTS:
+            recorded_value = REGION_REFERENCE_LEGACY_CONFIG_DEFAULTS[key]
+        else:
+            return False
+        if recorded_value != expected_value:
+            return False
+    return True
+
+
+def _read_region_reference_manifest(path: Path) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    try:
+        manifest: object = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.warning("Could not read MapMyCells region manifest %s: %s", path, exc)
+        return None
+    if not isinstance(manifest, dict):
+        logger.warning("MapMyCells region manifest %s is not a JSON object", path)
+        return None
+    return cast(dict[str, Any], manifest)
+
+
+def _discard_region_reference_staging_dir(staging_dir: Path) -> None:
+    # Only the private staging directory of the failed call is removed. It is
+    # never visible as a build, and completed builds are never deleted.
+    if not staging_dir.name.startswith(REGION_REFERENCE_STAGING_PREFIX):
+        raise ValueError(f"Refusing to remove non-staging directory {staging_dir}")
+    logger.warning("Removing incomplete region reference staging dir %s", staging_dir)
+    shutil.rmtree(staging_dir, ignore_errors=True)
+
+
+@contextmanager
+def _exclusive_file_lock(lock_path: Path) -> Iterator[None]:
+    # A read-only descriptor is enough for flock and still works when another
+    # cache user created the lock file without group write permission.
+    descriptor = os.open(lock_path, os.O_RDONLY | os.O_CREAT, 0o666)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
 
 
 def _reference_scratch_dir(config: MapMyCellsConfig, reference_dir: Path) -> Path:
