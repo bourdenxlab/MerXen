@@ -157,7 +157,10 @@ A configuration change therefore selects a different directory. It never
 invalidates, overwrites or deletes an existing build. Builds of one
 configuration are serialised with a `references/.<prefix>_<region_name>-<hash>.lock`
 file lock, so concurrent `MAPMYCELLS` tasks wait for one build and then reuse
-it.
+it. The lock file is opened read-write, which an exclusive `flock` needs on
+NFS; MerXen falls back to a read-only descriptor only when the lock file
+belongs to another cache user and is not writable, which works on local
+filesystems but not on NFS.
 
 `mapmycells_region_force_rebuild=true` always writes a new
 `<prefix>_<region_name>-<hash>-rebuild-<UTC timestamp>` directory, which later

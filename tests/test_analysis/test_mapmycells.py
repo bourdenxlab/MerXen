@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import errno
+import fcntl
 import hashlib
 import importlib.metadata
 import io
 import json
+import os
 import pickle
 import subprocess
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TextIO
@@ -1592,6 +1595,66 @@ def test_prepare_region_reference_force_reuses_build_finished_while_waiting(
     assert rebuilt.manifest_path == concurrent_result[0].manifest_path
     assert rebuilt.manifest_path.parent != existing.manifest_path.parent
     assert existing.precomputed_stats_path.read_bytes() == b"stats-1"
+
+
+def _lock_is_held(lock_path: Path, real_open: Callable[..., int]) -> bool:
+    probe = real_open(lock_path, os.O_RDONLY)
+    try:
+        fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(probe)
+    return False
+
+
+def test_exclusive_file_lock_opens_lock_file_read_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NFS needs a writable descriptor for an exclusive flock, so open O_RDWR."""
+    lock_path = tmp_path / ".region_frontal-0123456789abcdef.lock"
+    real_open = os.open
+    access_modes: list[int] = []
+
+    def recording_open(path: object, flags: int, *args: object) -> int:
+        if Path(str(path)) == lock_path:
+            access_modes.append(flags & os.O_ACCMODE)
+        return real_open(path, flags, *args)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(mapmycells_module.os, "open", recording_open)
+
+    with mapmycells_module._exclusive_file_lock(lock_path):
+        assert _lock_is_held(lock_path, real_open)
+
+    assert access_modes == [os.O_RDWR]
+    assert not _lock_is_held(lock_path, real_open)
+
+
+def test_exclusive_file_lock_falls_back_to_read_only_without_write_permission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lock file another cache user owns read-only can still be locked."""
+    lock_path = tmp_path / ".region_frontal-0123456789abcdef.lock"
+    lock_path.touch()
+    real_open = os.open
+    access_modes: list[int] = []
+
+    def open_without_write_permission(path: object, flags: int, *args: object) -> int:
+        if Path(str(path)) == lock_path:
+            access_modes.append(flags & os.O_ACCMODE)
+            if flags & os.O_ACCMODE != os.O_RDONLY:
+                raise PermissionError(errno.EACCES, "Permission denied", str(path))
+        return real_open(path, flags, *args)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(mapmycells_module.os, "open", open_without_write_permission)
+
+    with mapmycells_module._exclusive_file_lock(lock_path):
+        assert _lock_is_held(lock_path, real_open)
+
+    assert access_modes == [os.O_RDWR, os.O_RDONLY]
+    assert not _lock_is_held(lock_path, real_open)
 
 
 def test_prepare_wmb_region_reference_selects_required_matrix_shards(
