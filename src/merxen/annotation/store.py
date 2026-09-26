@@ -14,21 +14,29 @@ Layout (one store root, plus an optional large-panel root, §8.7)::
 
 Rules (plan §3.2, R1, R20, OD-D4):
 
-* ``build_hash`` is the sha256 of a canonical JSON over everything that
-  changes a bundle's content: the store schema version,
+* ``build_hash`` is the sha256 of a canonical JSON over everything a
+  bundle's content depends on, and nothing else: the store schema version,
   ``ANNOTATION_BUILDER_VERSION`` (bumped only when builder logic changes,
-  never the git commit or package version), the reference id, role and
-  taxonomy, each source file's identity ``{path, size, mtime_ns,
-  sha256(first + last 64 MB)}``, the panel hash, hierarchy, nodes to drop,
-  drop level, marker and mapping settings, the large-panel prefilter, the
-  depth grid, the resolvability recipe and the ``cell_type_mapper`` version
-  and commit. The full sha256 of every source file is recorded in
-  ``bundle.json``.
+  never the git commit or package version; a test pins the builder code to
+  it), the builder's content parameters, the reference id, species, role
+  and taxonomy, each source file's identity ``{path, size, mtime_ns,
+  sha256(first + last 64 MB)}`` (a directory source lists only the files
+  its glob pattern selects), the panel hash (the resolved IDs; symbols only
+  label genes and are not part of it), hierarchy, nodes to drop, drop
+  level, marker settings, the large-panel prefilter, the depth grid and the
+  ``cell_type_mapper`` version and commit. Settings no builder reads (the
+  MAP bootstrap settings, the RESOLVE-time resolvability knobs) are
+  recorded in ``bundle.json`` but not hashed, so changing them never
+  rebuilds a bundle (plan §3.1: threshold changes re-run only RESOLVE).
+  The full sha256 of every source file is recorded in ``bundle.json``.
 * A bundle is built in ``<store>/.tmp-<uuid>/`` on the same filesystem and
   renamed to ``<store>/<reference_id>/<build_hash>/`` in one ``rename(2)``
   while holding ``fcntl.flock`` on ``<store>/<reference_id>/.lock``, so
   concurrent callers (processes or Nextflow launches) build once and readers
-  only ever see a missing or a complete bundle.
+  only ever see a missing or a complete bundle. Every file is fsynced before
+  the rename, and a finished bundle is read-only (files 0444, directories
+  0555). Reuse checks every file's size and the sha256 of every file up to
+  ``REUSE_SHA256_MAX_BYTES``.
 * Sources are copied into the bundle with a checksum, never symlinked; a
   bundle holding a symlink is refused.
 * Nothing is ever deleted. A build that raises is renamed to
@@ -44,6 +52,7 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import fnmatch
 import hashlib
 import importlib
 import importlib.metadata
@@ -64,7 +73,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from merxen.annotation.config import (
     LARGE_PANEL_GENES,
@@ -80,14 +89,35 @@ logger = logging.getLogger(__name__)
 
 # Bumped only when a builder's logic changes what a bundle contains, so every
 # bundle built by the old logic gets a new build_hash (plan §3.2, E-M7).
-ANNOTATION_BUILDER_VERSION: Final = 1
+# tests/test_annotation/test_builder_version_pin.py pins the builder code to
+# this value: changing the code fails that test until the version is bumped
+# (or the pin is updated with a stated reason for a no-content change).
+# 2: set c from the curated family list, state and negative genes by ID,
+# ID-only bundle tables, the validated WMB marker universe, the self-map
+# test-cell source, read-only bundles.
+ANNOTATION_BUILDER_VERSION: Final = 2
 # Version of the build-hash payload and of bundle.json.
-STORE_SCHEMA_VERSION: Final = 1
+# 2: no panel symbols, MAP bootstrap or resolvability settings in the payload.
+STORE_SCHEMA_VERSION: Final = 2
 # Simulation recipes of the resolvability self-map and their versions (§8.3).
+# They enter build_hash once a builder writes resolvability outputs (M3b).
 RESOLVABILITY_RECIPE_VERSIONS: Final[dict[str, int]] = {"R1_contam_HO": 1}
 
 HEAD_TAIL_BYTES: Final = 64 * 1024 * 1024
 _READ_CHUNK_BYTES: Final = 8 * 1024 * 1024
+# Reuse re-checks the full sha256 of bundle files up to this size (lookups,
+# parquet tables, JSON); larger files (precomputes) are checked by size.
+REUSE_SHA256_MAX_BYTES: Final = 64 * 1024 * 1024
+# Modes of a finished bundle: nobody may change it in place (R1).
+BUNDLE_FILE_MODE: Final = 0o444
+BUNDLE_DIR_MODE: Final = 0o555
+# Mode of the store's shared directories (<store>/<reference_id>, caches):
+# group-writable and setgid so every store user can build, never
+# world-writable.
+STORE_DIR_MODE: Final = 0o2775
+# Cache of full source sha256 values by file identity (bundle.json records
+# the full sha256 of every source; the WMB matrices alone are 89 GB).
+SOURCE_DIGEST_CACHE_DIR: Final = ".source_digests"
 BUNDLE_MANIFEST_NAME: Final = "bundle.json"
 BUNDLE_REF_NAME: Final = "bundle_ref.json"
 BUILD_MARKER_NAME: Final = ".building.json"
@@ -268,36 +298,49 @@ class SourceRecord:
         path: Absolute path (symlinks resolved).
         kind: ``"file"`` or ``"directory"``.
         files: Identities of the file, or of every file under the directory
-            in sorted relative-path order (hidden entries skipped).
+            that ``pattern`` selects, in sorted path order (hidden entries
+            skipped).
+        pattern: For a directory, the ``fnmatch`` pattern of the file names
+            the builder reads (``None``: every file). Lock and staging files
+            other tools write next to the inputs therefore never enter
+            ``build_hash``.
     """
 
     name: str
     path: str
     kind: Literal["file", "directory"]
     files: tuple[FileIdentity, ...]
+    pattern: str | None = None
 
     def hash_payload(self) -> dict[str, Any]:
         """Return the record as it enters ``build_hash``."""
-        return {
+        payload: dict[str, Any] = {
             "kind": self.kind,
             "path": self.path,
             "files": [identity.hash_payload() for identity in self.files],
         }
+        if self.pattern is not None:
+            payload["pattern"] = self.pattern
+        return payload
 
 
-def source_record(name: str, path: Path | str) -> SourceRecord:
+def source_record(
+    name: str, path: Path | str, *, pattern: str | None = None
+) -> SourceRecord:
     """Return the identity of a named source file or directory.
 
     Args:
         name: Source name.
         path: Existing file or directory.
+        pattern: For a directory, the ``fnmatch`` pattern of the file names
+            to include (``None``: every non-hidden file). Ignored for a file.
 
     Returns:
         The source record.
 
     Raises:
         FileNotFoundError: If ``path`` does not exist, or a directory holds no
-            file.
+            (matching) file.
     """
     resolved = Path(path).resolve()
     if resolved.is_file():
@@ -315,14 +358,23 @@ def source_record(name: str, path: Path | str) -> SourceRecord:
         for file_name in sorted(file_names):
             if file_name.startswith("."):
                 continue
+            if pattern is not None and not fnmatch.fnmatchcase(file_name, pattern):
+                continue
             file_path = Path(directory) / file_name
             if file_path.is_file():
                 files.append(file_identity(file_path))
     if not files:
-        raise FileNotFoundError(f"reference source directory {name}={path} is empty")
+        detail = f" matching {pattern!r}" if pattern is not None else ""
+        raise FileNotFoundError(
+            f"reference source directory {name}={path} holds no file{detail}"
+        )
     files.sort(key=lambda identity: identity.path)
     return SourceRecord(
-        name=name, path=str(resolved), kind="directory", files=tuple(files)
+        name=name,
+        path=str(resolved),
+        kind="directory",
+        files=tuple(files),
+        pattern=pattern,
     )
 
 
@@ -477,6 +529,9 @@ class BundleBuilder:
             spec's sources (directory expansion, pinned downloads) before
             ``build_hash`` is computed; ``annotation-reference-prep`` calls
             it. Not part of ``build_hash``.
+        source_patterns: ``fnmatch`` pattern of the file names the builder
+            reads from a directory source, by source name; the source's
+            identity (and ``build_hash``) covers only those files.
     """
 
     name: str
@@ -485,6 +540,7 @@ class BundleBuilder:
     params: Mapping[str, Any] = field(default_factory=dict)
     uses_panel: bool = True
     prepare_spec: Callable[..., AnnotationReferenceSpec] | None = None
+    source_patterns: Mapping[str, str] = field(default_factory=dict)
 
 
 BuilderFactory = Callable[
@@ -558,7 +614,9 @@ class BundleRef(_StoreModel):
         path: Bundle directory.
         store_root: Store root the bundle lives in.
         panel_trust: Trust state recorded by the builder (M3b), if any.
-        reused: Whether the bundle existed before this call.
+        reused: Whether the bundle existed before this call. Logged, never
+            written: ``bundle_ref.json`` depends only on the bundle, so a
+            PREP re-run writes the same bytes and MAP's cache holds.
     """
 
     reference_id: str
@@ -569,7 +627,7 @@ class BundleRef(_StoreModel):
     path: str
     store_root: str
     panel_trust: PanelTrust | None = None
-    reused: bool
+    reused: bool = Field(default=False, exclude=True)
 
     def write(self, path: Path | str) -> Path:
         """Write the reference as JSON.
@@ -613,13 +671,26 @@ def build_hash_payload(
 ) -> dict[str, Any]:
     """Return the build-hash payload of a request.
 
+    The payload holds what the bundle's content depends on and nothing else
+    (plan §3.2). Not in it, and recorded in ``bundle.json`` instead
+    (``recorded_settings``, ``built_from_panel``):
+
+    * the panel's symbols: bundles are keyed by resolved Ensembl IDs
+      (``panel_hash``), their tables carry IDs only and state genes are
+      matched by ID, so two panels with the same IDs share one bundle;
+    * the MAP bootstrap settings (``bootstrap_factor``,
+      ``bootstrap_iteration``, ``rng_seed``), which MAP reads from the spec;
+    * the resolvability settings: no M2 builder writes resolvability
+      outputs; M3b adds the self-map recipe to this payload (with an
+      ``ANNOTATION_BUILDER_VERSION`` bump) when its builder does, and
+      RESOLVE-time knobs (thresholds, trust, emission) never enter it.
+
     Args:
         spec: The reference spec.
         panel: The declared panel; ignored when the builder does not use one.
         builder: The builder (name, taxonomy, params, panel use).
         sources: Source records by name.
-        config: The annotation config; supplies the large-panel prefilter and
-            the resolvability recipe.
+        config: The annotation config; supplies the large-panel prefilter.
         ctm: ``cell_type_mapper`` provenance; defaults to ``ctm_provenance()``.
         large_panel_genes: Panels above this size use the prefilter.
 
@@ -643,11 +714,7 @@ def build_hash_payload(
                 f"{spec.reference_id!r} species {spec.species!r}"
             )
         n_panel_genes = panel.n_genes
-        panel_payload = {
-            "panel_hash": panel.panel_hash,
-            "n_genes": panel.n_genes,
-            "symbols_sha256": panel.symbols_sha256(),
-        }
+        panel_payload = {"panel_hash": panel.panel_hash, "n_genes": panel.n_genes}
     prefilter: dict[str, Any] | None = None
     if (
         config is not None
@@ -658,21 +725,6 @@ def build_hash_payload(
         prefilter = {
             "method": config.panel.large_panel_marker_prefilter,
             "cap": config.panel.large_panel_prefilter_cap,
-        }
-    resolvability: dict[str, Any] | None = None
-    if config is not None and spec.role == "primary" and config.resolvability.enabled:
-        recipe = config.resolvability.recipe
-        resolvability = {
-            "recipe": recipe,
-            "recipe_version": RESOLVABILITY_RECIPE_VERSIONS.get(recipe),
-            "settings": config.resolvability.model_dump(
-                mode="json",
-                exclude={
-                    name
-                    for name in type(config.resolvability).model_fields
-                    if name.startswith("gate_p_")
-                },
-            ),
         }
     return {
         "schema_version": STORE_SCHEMA_VERSION,
@@ -692,16 +744,43 @@ def build_hash_payload(
         "drop_level": spec.drop_level,
         "n_per_utility": spec.n_per_utility,
         "max_cells_per_cluster": spec.max_cells_per_cluster,
+        "large_panel_prefilter": prefilter,
+        "depth_grid": spec.resolved_depth_grid(n_panel_genes),
+        "ctm": dict(ctm if ctm is not None else ctm_provenance()),
+    }
+
+
+def recorded_settings(
+    spec: AnnotationReferenceSpec, config: AnnotationConfig | None
+) -> dict[str, Any]:
+    """Return the settings ``bundle.json`` records but ``build_hash`` omits.
+
+    Args:
+        spec: The reference spec.
+        config: The annotation config, if any.
+
+    Returns:
+        The MAP bootstrap settings and, for a primary reference, the
+        resolvability settings and recipe version, for provenance only.
+    """
+    settings: dict[str, Any] = {
         "mapping": {
             "bootstrap_factor": spec.bootstrap_factor,
             "bootstrap_iteration": spec.bootstrap_iteration,
             "rng_seed": spec.rng_seed,
         },
-        "large_panel_prefilter": prefilter,
-        "depth_grid": spec.resolved_depth_grid(n_panel_genes),
-        "resolvability": resolvability,
-        "ctm": dict(ctm if ctm is not None else ctm_provenance()),
+        "resolvability": None,
     }
+    if config is not None and spec.role == "primary":
+        recipe = config.resolvability.recipe
+        settings["resolvability"] = {
+            "recipe": recipe,
+            "recipe_version": RESOLVABILITY_RECIPE_VERSIONS.get(recipe),
+            "outputs_in_bundle": False,
+            "settings": config.resolvability.model_dump(mode="json"),
+        }
+    native: dict[str, Any] = _json_native(settings)
+    return native
 
 
 def compute_build_hash(payload: Mapping[str, Any]) -> str:
@@ -902,7 +981,7 @@ class ReferenceStore:
         # passes none and one that passes the defaults share one build_hash.
         config = config or AnnotationConfig(species=spec.species)
         sources = {
-            name: source_record(name, path)
+            name: source_record(name, path, pattern=builder.source_patterns.get(name))
             for name, path in sorted(spec.sources.items())
         }
         payload = build_hash_payload(
@@ -1014,8 +1093,11 @@ class ReferenceStore:
                 spec, effective_panel, final_dir, manifest, reused=True
             )
         reference_dir = root / spec.reference_id
-        reference_dir.mkdir(parents=True, exist_ok=True)
-        with _exclusive_lock(reference_dir / LOCK_FILE_NAME):
+        make_store_dir(reference_dir)
+        with _exclusive_lock(
+            reference_dir / LOCK_FILE_NAME,
+            waiting_for=f"another build of {spec.reference_id}",
+        ):
             manifest = self._read_complete_bundle(final_dir, request.build_hash)
             if manifest is not None:
                 logger.info("Reusing reference bundle %s (built meanwhile)", final_dir)
@@ -1100,17 +1182,41 @@ class ReferenceStore:
                 builder_output=builder_output,
                 started_at=started_at,
                 wall_time_s=time.monotonic() - start,
+                config=config,
+                digest_cache=root / SOURCE_DIGEST_CACHE_DIR,
             )
             manifest_path = work_dir / BUNDLE_MANIFEST_NAME
             with manifest_path.open("x", encoding="utf-8") as handle:
                 handle.write(json.dumps(manifest, indent=2, allow_nan=False) + "\n")
                 handle.flush()
                 os.fsync(handle.fileno())
-            _fsync_directory(work_dir)
+            # Every file was fsynced by _bundle_files; the directories too,
+            # so a power loss never leaves a complete-looking bundle holding
+            # empty files.
+            _fsync_tree(work_dir)
+            _make_read_only(work_dir, include_root=False)
             # rename(2) is atomic within one filesystem, and <root>/.tmp-* and
             # <root>/<reference_id>/ share it. The lock guarantees final_dir
             # was absent when checked; rename fails rather than merge if not.
-            os.rename(work_dir, final_dir)
+            try:
+                os.rename(work_dir, final_dir)
+            except OSError as error:
+                if error.errno not in (errno.EEXIST, errno.ENOTEMPTY):
+                    raise
+                existing = self._read_complete_bundle(final_dir, request.build_hash)
+                if existing is None:
+                    raise
+                # Another writer (outside the lock) finished the same bundle;
+                # keep this build for review and use the complete one.
+                _mark_failed(work_dir, root, build_id, error)
+                logger.warning(
+                    "Reference bundle %s appeared during the build; using it",
+                    final_dir,
+                )
+                return existing
+            # The top directory stays writable until it is renamed: moving a
+            # directory to a new parent rewrites its ".." entry.
+            os.chmod(final_dir, BUNDLE_DIR_MODE)
             _fsync_directory(final_dir.parent)
         except BaseException as error:
             _mark_failed(work_dir, root, build_id, error)
@@ -1150,8 +1256,16 @@ class ReferenceStore:
                 file_path = bundle_dir / str(record.get("path", ""))
                 if not file_path.is_file() or file_path.is_symlink():
                     problems.append(f"missing file {record.get('path')!r}")
-                elif file_path.stat().st_size != record.get("size"):
+                    continue
+                size = file_path.stat().st_size
+                if size != record.get("size"):
                     problems.append(f"size of {record.get('path')!r} changed")
+                elif (
+                    size <= REUSE_SHA256_MAX_BYTES
+                    and record.get("sha256")
+                    and file_sha256(file_path) != record["sha256"]
+                ):
+                    problems.append(f"content of {record.get('path')!r} changed")
         if problems:
             raise BundleIntegrityError(
                 f"reference bundle {bundle_dir} is not a valid complete bundle "
@@ -1280,25 +1394,103 @@ def _inside(directory: Path, relative: str | Path) -> Path:
     return candidate
 
 
+def make_store_dir(directory: Path) -> Path:
+    """Create a shared store directory (``<store>/<reference_id>``, caches).
+
+    New directories get ``STORE_DIR_MODE`` (group-writable, setgid, never
+    world-writable) whatever the umask or an inherited default ACL says;
+    existing ones are left as they are.
+
+    Args:
+        directory: The directory.
+
+    Returns:
+        The directory.
+    """
+    missing = [directory, *directory.parents]
+    missing = [path for path in missing if not path.exists()]
+    directory.mkdir(parents=True, exist_ok=True)
+    for path in missing:
+        try:
+            os.chmod(path, STORE_DIR_MODE)
+        except OSError as error:  # pragma: no cover - another user's directory
+            logger.warning("Could not set the mode of %s: %s", path, error)
+    return directory
+
+
 @contextmanager
-def _exclusive_lock(lock_path: Path) -> Iterator[None]:
+def _exclusive_lock(lock_path: Path, *, waiting_for: str = "") -> Iterator[None]:
     """Hold an exclusive ``flock`` on a lock file (created if needed, never removed).
 
     The lock is released by the kernel when the process dies, so a killed
-    builder never blocks the next one.
+    builder never blocks the next one. A caller that has to wait says so in
+    the log first: a WMB build holds the lock for about 40 minutes.
+
+    Args:
+        lock_path: The lock file.
+        waiting_for: What holds the lock, for the waiting message.
     """
     # On NFS, Linux emulates flock() with a POSIX lock, which needs a
     # descriptor opened for writing; fall back to read-only only when another
     # store user created the lock file without write permission for us.
     try:
-        descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o666)
+        descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o664)
     except PermissionError:
         descriptor = os.open(lock_path, os.O_RDONLY)
     try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            logger.info(
+                "Waiting for %s (held by %s)",
+                lock_path,
+                waiting_for or "another process",
+            )
+            started = time.monotonic()
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            logger.info(
+                "Acquired %s after %.0f s", lock_path, time.monotonic() - started
+            )
         yield
     finally:
         os.close(descriptor)
+
+
+def _fsync_tree(directory: Path) -> None:
+    """fsync every subdirectory of a tree, deepest first, then the tree itself."""
+    subdirectories = [
+        Path(base) / name
+        for base, dir_names, _files in os.walk(directory)
+        for name in dir_names
+    ]
+    for subdirectory in sorted(
+        subdirectories, key=lambda p: len(p.parts), reverse=True
+    ):
+        _fsync_directory(subdirectory)
+    _fsync_directory(directory)
+
+
+def _make_read_only(directory: Path, *, include_root: bool) -> None:
+    """Make every file of a bundle 0444 and every subdirectory 0555.
+
+    ``chmod`` also narrows an inherited ACL's mask, so named ACL entries lose
+    write access too.
+
+    Args:
+        directory: The bundle directory.
+        include_root: Also make ``directory`` itself 0555.
+    """
+    for base, dir_names, file_names in os.walk(directory):
+        for file_name in file_names:
+            path = Path(base) / file_name
+            if not path.is_symlink():
+                os.chmod(path, BUNDLE_FILE_MODE)
+        for name in dir_names:
+            path = Path(base) / name
+            if not path.is_symlink():
+                os.chmod(path, BUNDLE_DIR_MODE)
+    if include_root:
+        os.chmod(directory, BUNDLE_DIR_MODE)
 
 
 def _fsync_directory(directory: Path) -> None:
@@ -1372,10 +1564,64 @@ def _bundle_files(work_dir: Path) -> list[dict[str, Any]]:
                 {
                     "path": str(relative),
                     "size": file_path.stat().st_size,
-                    "sha256": file_sha256(file_path),
+                    "sha256": _sha256_and_fsync(file_path),
                 }
             )
     return records
+
+
+def _sha256_and_fsync(path: Path) -> str:
+    """Return a file's sha256 and flush it to disk (it is read whole anyway)."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(_READ_CHUNK_BYTES):
+            digest.update(chunk)
+        os.fsync(handle.fileno())
+    return digest.hexdigest()
+
+
+def cached_file_sha256(identity: FileIdentity, cache_dir: Path | None) -> str:
+    """Return the full sha256 of a source file, cached by its identity.
+
+    The cache holds one small JSON file per identity (path, size, mtime,
+    head/tail digest) under ``<store>/.source_digests``; entries are only
+    ever added. A cached digest is as trustworthy as ``build_hash`` itself,
+    which rests on the same identity.
+
+    Args:
+        identity: The file's identity.
+        cache_dir: The cache directory, or ``None`` to always hash.
+
+    Returns:
+        64 lower-case hex characters.
+    """
+    if cache_dir is None:
+        return file_sha256(identity.path)
+    key = sha256_hex(canonical_json(identity.hash_payload()))
+    entry = cache_dir / f"{key}.json"
+    cached = _read_manifest(entry)
+    if (
+        cached is not None
+        and cached.get("identity") == identity.hash_payload()
+        and isinstance(cached.get("sha256"), str)
+        and len(cached["sha256"]) == _SHA256_HEX_LENGTH
+    ):
+        return str(cached["sha256"])
+    digest = file_sha256(identity.path)
+    stat = Path(identity.path).stat()
+    if int(stat.st_size) != identity.size or int(stat.st_mtime_ns) != identity.mtime_ns:
+        return digest
+    try:
+        make_store_dir(cache_dir)
+        staging = cache_dir / f".{key}.{uuid.uuid4().hex[:8]}.tmp"
+        staging.write_text(
+            json.dumps({"identity": identity.hash_payload(), "sha256": digest}) + "\n"
+        )
+        os.chmod(staging, BUNDLE_FILE_MODE)
+        os.replace(staging, entry)
+    except OSError as error:
+        logger.warning("Could not cache the sha256 of %s: %s", identity.path, error)
+    return digest
 
 
 def _bundle_manifest(
@@ -1388,15 +1634,24 @@ def _bundle_manifest(
     builder_output: dict[str, Any],
     started_at: str,
     wall_time_s: float,
+    config: AnnotationConfig | None = None,
+    digest_cache: Path | None = None,
 ) -> dict[str, Any]:
     copied_by_source = {copied.source_path: copied.sha256 for copied in context.copied}
     sources: dict[str, Any] = {}
     for name, record in sorted(request.sources.items()):
         files = []
         for identity in record.files:
-            full = copied_by_source.get(identity.path) or file_sha256(identity.path)
+            full = copied_by_source.get(identity.path) or cached_file_sha256(
+                identity, digest_cache
+            )
             files.append({**identity.hash_payload(), "sha256": full})
-        sources[name] = {"kind": record.kind, "path": record.path, "files": files}
+        sources[name] = {
+            "kind": record.kind,
+            "path": record.path,
+            "pattern": record.pattern,
+            "files": files,
+        }
     panel_trust = builder_output.pop("panel_trust", None)
     return {
         "schema_version": STORE_SCHEMA_VERSION,
@@ -1411,13 +1666,21 @@ def _bundle_manifest(
         "taxonomy_id": builder.taxonomy_id,
         "panel": None
         if panel is None
+        else {"panel_hash": panel.panel_hash, "n_genes": panel.n_genes},
+        # Provenance only: later panels with the same IDs but other symbols,
+        # samples or names reuse this bundle.
+        "built_from_panel": None
+        if panel is None
         else {
-            "panel_hash": panel.panel_hash,
-            "n_genes": panel.n_genes,
             "name": panel.name,
             "kind": panel.kind,
             "platforms": list(panel.platforms),
+            "sample_ids": list(panel.sample_ids),
+            "parent_panel_hash": panel.parent_panel_hash,
+            "symbols_sha256": panel.symbols_sha256(),
+            "part_of_build_hash": False,
         },
+        "recorded_settings": recorded_settings(spec, config),
         "panel_trust": panel_trust,
         "sources": sources,
         "copied_sources": [
