@@ -9,12 +9,15 @@ import os
 os.environ["MPLCONFIGDIR"] = "./tmp/mpl"
 os.environ["NUMBA_CACHE_DIR"] = "./tmp/numba"
 
+import importlib.metadata
+import inspect
 import json
 import logging
 import re
 import sys
 import textwrap
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, cast
 
@@ -88,6 +91,23 @@ QC_COLUMNS = [
     "control_obsm_counts",
 ]
 HIERARCHICAL_UNS_KEY = "merxen_hierarchical_clustering"
+# Per-round Leiden provenance: ``{round_key: JSON string}``. Round keys are
+# ``obs`` cluster keys plus a ``_safe_token`` branch suffix, so they never
+# contain "/" and the mapping survives H5AD and zarr writes.
+LEIDEN_PROVENANCE_UNS_KEY = "merxen_leiden_provenance"
+# CPU and GPU Leiden are different implementations with different iteration
+# caps; on an identical graph they agree only at ARI 0.57-0.91, so every
+# partition records which engine produced it.
+CPU_LEIDEN_ENGINE = "scanpy-igraph"
+CPU_EMBEDDING_ENGINE = "scanpy"
+CPU_LEIDEN_FLAVOR = "igraph"
+CPU_LEIDEN_N_ITERATIONS = 2
+GPU_LEIDEN_ENGINE = "rapids_singlecell"
+GPU_EMBEDDING_ENGINE = "rapids_singlecell"
+GPU_LEIDEN_FLAVOR = "cugraph"
+UNKNOWN_LEIDEN_N_ITERATIONS = -1
+CPU_ENGINE_LIBRARIES = ("scanpy", "igraph")
+GPU_ENGINE_LIBRARIES = ("scanpy", "rapids_singlecell", "cugraph")
 BROAD_CLUSTER_KEY = "leiden_broad"
 BROAD_ATLAS_LABEL_KEY = "broad_atlas_label"
 BROAD_CLASS_KEY = "broad_class"
@@ -193,6 +213,76 @@ class AtlasMarkerSet:
     broad_class: str
     marker_ids: tuple[str, ...]
     neuron_split: str = ""
+
+
+@dataclass(frozen=True)
+class LeidenProvenance:
+    """Engine and effective settings that produced one Leiden partition.
+
+    Attributes:
+        engine: Leiden implementation, ``"scanpy-igraph"`` (CPU) or
+            ``"rapids_singlecell"`` (GPU, cuGraph).
+        engine_versions: Installed versions of the libraries behind the
+            engine, keyed by import name; ``None`` when a version is unknown.
+        embedding_engine: Library that computed PCA, neighbors, and UMAP.
+        flavor: Leiden backend, ``"igraph"`` or ``"cugraph"``.
+        n_iterations: Leiden iteration cap applied by the engine, or ``-1``
+            when it could not be determined.
+        random_state: Seed passed to PCA, neighbors, UMAP, and Leiden.
+        resolution: Leiden resolution.
+        n_pcs_used: Principal components computed and used for neighbors
+            (``0`` when PCA was skipped).
+        n_neighbors_used: Effective neighbor count after clipping to the
+            number of cells.
+        gpu_requested: Whether the caller asked for the GPU path.
+        gpu_used: Whether the GPU path ran.
+    """
+
+    engine: str
+    engine_versions: dict[str, str | None]
+    embedding_engine: str
+    flavor: str
+    n_iterations: int
+    random_state: int
+    resolution: float
+    n_pcs_used: int
+    n_neighbors_used: int
+    gpu_requested: bool
+    gpu_used: bool
+
+    def as_uns_params(self) -> dict[str, str | int | bool]:
+        """Return the provenance scalars added to ``merxen_clustering_params_*``.
+
+        ``leiden_resolution`` and ``gpu_used`` are omitted because that record
+        already holds them.
+
+        Returns:
+            H5AD/zarr-safe scalars keyed without "/", with library versions
+            encoded as a JSON string.
+        """
+        return {
+            "engine": self.engine,
+            "engine_versions": json.dumps(self.engine_versions, sort_keys=True),
+            "embedding_engine": self.embedding_engine,
+            "leiden_flavor": self.flavor,
+            "leiden_n_iterations": int(self.n_iterations),
+            "leiden_random_state": int(self.random_state),
+            "n_pcs_used": int(self.n_pcs_used),
+            "n_neighbors_used": int(self.n_neighbors_used),
+            "gpu_requested": bool(self.gpu_requested),
+        }
+
+    def to_json(self, **context: str) -> str:
+        """Serialize the provenance plus round context as one JSON string.
+
+        Args:
+            **context: Extra string fields describing the round, such as
+                ``key_added`` or ``branch``.
+
+        Returns:
+            A JSON object string with sorted keys.
+        """
+        return json.dumps({**asdict(self), **context}, sort_keys=True)
 
 
 @dataclass(frozen=True)
@@ -427,7 +517,11 @@ def run_scanpy_clustering(
             normalization, used when reclustering subsets from raw counts.
 
     Returns:
-        Clustered AnnData with Leiden labels in ``.obs[key_added]``.
+        Clustered AnnData with Leiden labels in ``.obs[key_added]``. The
+        effective settings, including the Leiden engine, flavor, iteration
+        cap, seed, and library versions, are recorded as scalars in
+        ``.uns["merxen_clustering_params_<key_added>"]`` and as a JSON string
+        in ``.uns["merxen_leiden_provenance"][key_added]``.
     """
     clustered = adata.copy()
     if input_layer is not None:
@@ -525,10 +619,33 @@ def run_scanpy_clustering(
             resolution=float(leiden_resolution),
             random_state=int(random_seed),
             key_added=key_added,
-            flavor="igraph",
-            n_iterations=2,
+            flavor=CPU_LEIDEN_FLAVOR,
+            n_iterations=CPU_LEIDEN_N_ITERATIONS,
             directed=False,
         )
+
+    provenance = _leiden_provenance(
+        clustered,
+        gpu_requested=bool(use_gpu),
+        gpu_used=gpu_used,
+        key_added=key_added,
+        leiden_resolution=float(leiden_resolution),
+        random_seed=int(random_seed),
+        n_pcs_used=max(int(max_pcs), 0),
+        n_neighbors_used=int(effective_neighbors),
+    )
+    logger.info(
+        "Leiden %s: engine=%s flavor=%s n_iterations=%d random_state=%d "
+        "resolution=%s n_pcs=%d n_neighbors=%d",
+        key_added,
+        provenance.engine,
+        provenance.flavor,
+        provenance.n_iterations,
+        provenance.random_state,
+        provenance.resolution,
+        provenance.n_pcs_used,
+        provenance.n_neighbors_used,
+    )
 
     params = {
         "drop_control_features": bool(drop_control_features),
@@ -547,12 +664,128 @@ def run_scanpy_clustering(
         "umap_spread": float(umap_spread),
         "random_seed": int(random_seed),
         "gpu_used": gpu_used,
+        **provenance.as_uns_params(),
     }
     params_key = f"merxen_clustering_params_{key_added}"
     clustered.uns[params_key] = params
     if key_added == "leiden":
         clustered.uns["merxen_clustering_params"] = params
+    clustered.uns[LEIDEN_PROVENANCE_UNS_KEY] = {
+        **dict(clustered.uns.get(LEIDEN_PROVENANCE_UNS_KEY, {})),
+        key_added: provenance.to_json(key_added=key_added),
+    }
     return clustered
+
+
+def _leiden_provenance(
+    adata: ad.AnnData,
+    *,
+    gpu_requested: bool,
+    gpu_used: bool,
+    key_added: str,
+    leiden_resolution: float,
+    random_seed: int,
+    n_pcs_used: int,
+    n_neighbors_used: int,
+) -> LeidenProvenance:
+    """Describe the engine and effective settings of one Leiden round."""
+    if gpu_used:
+        return LeidenProvenance(
+            engine=GPU_LEIDEN_ENGINE,
+            engine_versions=_library_versions(GPU_ENGINE_LIBRARIES),
+            embedding_engine=GPU_EMBEDDING_ENGINE,
+            flavor=GPU_LEIDEN_FLAVOR,
+            n_iterations=_gpu_leiden_n_iterations(adata, key_added=key_added),
+            random_state=int(random_seed),
+            resolution=float(leiden_resolution),
+            n_pcs_used=int(n_pcs_used),
+            n_neighbors_used=int(n_neighbors_used),
+            gpu_requested=bool(gpu_requested),
+            gpu_used=True,
+        )
+    return LeidenProvenance(
+        engine=CPU_LEIDEN_ENGINE,
+        engine_versions=_library_versions(CPU_ENGINE_LIBRARIES),
+        embedding_engine=CPU_EMBEDDING_ENGINE,
+        flavor=CPU_LEIDEN_FLAVOR,
+        n_iterations=CPU_LEIDEN_N_ITERATIONS,
+        random_state=int(random_seed),
+        resolution=float(leiden_resolution),
+        n_pcs_used=int(n_pcs_used),
+        n_neighbors_used=int(n_neighbors_used),
+        gpu_requested=bool(gpu_requested),
+        gpu_used=False,
+    )
+
+
+def _gpu_leiden_n_iterations(adata: ad.AnnData, *, key_added: str) -> int:
+    """Return the iteration cap rapids-singlecell applied to one Leiden run.
+
+    rapids-singlecell writes the value it applied to
+    ``uns[key_added]["params"]["n_iterations"]``, so that record is read
+    first. The ``rsc.tl.leiden`` signature default (100 in rapids-singlecell
+    0.15.2, against 2 on the CPU path) is the fallback, because
+    ``_run_gpu_clustering`` does not pass ``n_iterations``.
+    """
+    engine_record = adata.uns.get(key_added)
+    engine_params = (
+        engine_record.get("params") if isinstance(engine_record, dict) else None
+    )
+    recorded = (
+        engine_params.get("n_iterations") if isinstance(engine_params, dict) else None
+    )
+    if isinstance(recorded, int | np.integer) and not isinstance(recorded, bool):
+        return int(recorded)
+
+    rsc = sys.modules.get("rapids_singlecell")
+    leiden = getattr(getattr(rsc, "tl", None), "leiden", None)
+    if leiden is not None:
+        try:
+            parameter = inspect.signature(leiden).parameters.get("n_iterations")
+        except (TypeError, ValueError):
+            parameter = None
+        if parameter is not None and type(parameter.default) is int:
+            return int(parameter.default)
+    return UNKNOWN_LEIDEN_N_ITERATIONS
+
+
+def _library_versions(import_names: tuple[str, ...]) -> dict[str, str | None]:
+    """Return installed versions for the given import names."""
+    return {name: _library_version(name) for name in import_names}
+
+
+def _library_version(import_name: str) -> str | None:
+    """Return a library version without importing it.
+
+    Distribution metadata is preferred because some libraries (scanpy 1.12)
+    deprecate ``__version__``; an already-imported module's ``__version__`` is
+    the fallback for packages whose distribution metadata is unavailable.
+    Import names that differ from the distribution name (for example
+    ``rapids_singlecell`` from ``rapids-singlecell-cu12``) are resolved through
+    the installed-distribution map.
+    """
+    try:
+        return importlib.metadata.version(import_name)
+    except importlib.metadata.PackageNotFoundError:
+        pass
+    for distribution in _import_name_distributions().get(import_name, ()):
+        try:
+            return importlib.metadata.version(distribution)
+        except importlib.metadata.PackageNotFoundError:
+            continue
+    version = getattr(sys.modules.get(import_name), "__version__", None)
+    return None if version is None else str(version)
+
+
+@lru_cache(maxsize=1)
+def _import_name_distributions() -> dict[str, tuple[str, ...]]:
+    """Map top-level import names to their installed distribution names."""
+    return {
+        import_name: tuple(distributions)
+        for import_name, distributions in (
+            importlib.metadata.packages_distributions().items()
+        )
+    }
 
 
 def remove_control_features(adata: ad.AnnData) -> ad.AnnData:
@@ -1525,6 +1758,9 @@ def run_hierarchical_scanpy_clustering(
 
     _initialize_hierarchical_obs(clustered)
     branch_manifest: dict[str, Any] = {}
+    # Collected separately and attached after the loop so branch subsets,
+    # copied from ``clustered``, never inherit sibling branches' records.
+    branch_leiden_provenance: dict[str, str] = {}
     for broad_class in _ordered_obs_values(clustered, BROAD_CLASS_KEY):
         branch_mask = (
             clustered.obs[BROAD_CLASS_KEY].astype(str).to_numpy() == broad_class
@@ -1555,6 +1791,7 @@ def run_hierarchical_scanpy_clustering(
                 output_dir=output_dir / f"branch_{branch_token}",
                 sample_id=sample_id,
                 artifacts=artifacts,
+                leiden_provenance=branch_leiden_provenance,
             )
         else:
             branch_manifest[broad_class] = _run_leaf_branch_subclustering(
@@ -1565,6 +1802,7 @@ def run_hierarchical_scanpy_clustering(
                 output_dir=output_dir / f"branch_{branch_token}",
                 sample_id=sample_id,
                 artifacts=artifacts,
+                leiden_provenance=branch_leiden_provenance,
             )
 
     clustered.obs[SUBCLUSTER_LABEL_KEY] = clustered.obs[SUBCLUSTER_LABEL_KEY].astype(
@@ -1574,6 +1812,10 @@ def run_hierarchical_scanpy_clustering(
         HIERARCHICAL_CLUSTER_KEY
     ].astype("category")
     clustered.obs[NEURON_SPLIT_KEY] = clustered.obs[NEURON_SPLIT_KEY].astype("category")
+    clustered.uns[LEIDEN_PROVENANCE_UNS_KEY] = {
+        **dict(clustered.uns.get(LEIDEN_PROVENANCE_UNS_KEY, {})),
+        **branch_leiden_provenance,
+    }
     manifest_path = output_dir / f"{sample_id}_hierarchical_manifest.json"
     artifacts["hierarchical_manifest"] = manifest_path
     clustered.uns[HIERARCHICAL_UNS_KEY] = {
@@ -2119,6 +2361,7 @@ def _run_leaf_branch_subclustering(
     output_dir: Path,
     sample_id: str,
     artifacts: dict[str, Path],
+    leiden_provenance: dict[str, str],
 ) -> dict[str, Any]:
     branch = clustered[cell_ids, :].copy()
     resolution = config.subcluster_resolution_overrides.get(
@@ -2196,6 +2439,12 @@ def _run_leaf_branch_subclustering(
         broad_class=broad_class,
         cluster_key="leiden_subcluster",
     )
+    provenance_key = f"leiden_subcluster_{_safe_token(broad_class)}"
+    leiden_provenance[provenance_key] = _round_provenance_json(
+        branch,
+        key_added="leiden_subcluster",
+        branch=broad_class,
+    )
     return {
         "n_cells": len(cell_ids),
         "n_clustered_cells": int(branch.n_obs),
@@ -2203,6 +2452,7 @@ def _run_leaf_branch_subclustering(
         "clustered": True,
         "leiden_resolution": float(params.leiden_resolution),
         "n_subclusters": int(branch.obs["leiden_subcluster"].nunique()),
+        "leiden_provenance_key": provenance_key,
     }
 
 
@@ -2236,6 +2486,7 @@ def _run_neuron_hierarchy(
     output_dir: Path,
     sample_id: str,
     artifacts: dict[str, Path],
+    leiden_provenance: dict[str, str],
 ) -> dict[str, Any]:
     neuron_branch = clustered[cell_ids, :].copy()
     split_params = _effective_round_params(config, config.neuron_split_round)
@@ -2308,6 +2559,12 @@ def _run_neuron_hierarchy(
     )
     split_h5ad = save_clustered_adata(neuron_branch, output_dir / f"{prefix}.h5ad")
     artifacts[f"{prefix}_h5ad"] = split_h5ad
+    split_provenance_key = "leiden_neuron_split"
+    leiden_provenance[split_provenance_key] = _round_provenance_json(
+        neuron_branch,
+        key_added="leiden_neuron_split",
+        branch=NEURON_CLASS,
+    )
 
     split_manifest: dict[str, Any] = {}
     filtered_out_cells = _missing_cell_ids(cell_ids, neuron_branch)
@@ -2351,6 +2608,7 @@ def _run_neuron_hierarchy(
             output_dir=output_dir / f"split_{_safe_token(split_label)}",
             sample_id=sample_id,
             artifacts=artifacts,
+            leiden_provenance=leiden_provenance,
         )
     return {
         "n_cells": len(cell_ids),
@@ -2358,6 +2616,7 @@ def _run_neuron_hierarchy(
         "n_filtered_out_cells": len(filtered_out_cells),
         "clustered": True,
         "split_leiden_resolution": float(split_params.leiden_resolution),
+        "split_leiden_provenance_key": split_provenance_key,
         "splits": split_manifest,
     }
 
@@ -2421,6 +2680,7 @@ def _run_neuron_split_subclustering(
     output_dir: Path,
     sample_id: str,
     artifacts: dict[str, Path],
+    leiden_provenance: dict[str, str],
 ) -> dict[str, Any]:
     branch = neuron_branch[cell_ids, :].copy()
     resolution = config.subcluster_resolution_overrides.get(
@@ -2506,6 +2766,13 @@ def _run_neuron_split_subclustering(
         cluster_key="leiden_neuron_subcluster",
         neuron_split=split_label,
     )
+    provenance_key = f"leiden_neuron_subcluster_{_safe_token(split_label)}"
+    leiden_provenance[provenance_key] = _round_provenance_json(
+        branch,
+        key_added="leiden_neuron_subcluster",
+        branch=NEURON_CLASS,
+        neuron_split=split_label,
+    )
     return {
         "n_cells": len(cell_ids),
         "n_clustered_cells": int(branch.n_obs),
@@ -2513,7 +2780,15 @@ def _run_neuron_split_subclustering(
         "clustered": True,
         "leiden_resolution": float(params.leiden_resolution),
         "n_subclusters": int(branch.obs["leiden_neuron_subcluster"].nunique()),
+        "leiden_provenance_key": provenance_key,
     }
+
+
+def _round_provenance_json(adata: ad.AnnData, *, key_added: str, **context: str) -> str:
+    """Return one round's Leiden provenance JSON with branch context added."""
+    record = json.loads(str(adata.uns[LEIDEN_PROVENANCE_UNS_KEY][key_added]))
+    record.update(context)
+    return json.dumps(record, sort_keys=True)
 
 
 def _missing_cell_ids(input_cell_ids: list[str], adata: ad.AnnData) -> list[str]:
