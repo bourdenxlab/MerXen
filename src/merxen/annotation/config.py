@@ -422,6 +422,14 @@ class AnnotationPanelConfig(_AnnotationModel):
         large_panel_prefilter_cap: Gene cap of the prefilter.
         validated_panels_path: Validated families; ``None`` uses the packaged
             table (added in M3b).
+        setc_max_abs_log2_deviation: Set c drops a set-a gene whose pseudobulk
+            ``log2(mean X / mean M)`` lies further than this from the pair
+            median (plan §3.2).
+        setc_log2_pseudocount: Pseudocount added to both pseudobulk means
+            (per-cell mean counts) before the log2 ratio.
+        xplat_min_intersection_genes: A ``per_platform`` intersection panel
+            with fewer genes supports broad-level cross-platform statistics
+            only (plan §8.5).
     """
 
     panel_mode: Literal["auto", "intersection", "per_platform"] = "auto"
@@ -451,6 +459,9 @@ class AnnotationPanelConfig(_AnnotationModel):
     )
     large_panel_prefilter_cap: int = Field(default=2000, ge=1)
     validated_panels_path: Path | None = None
+    setc_max_abs_log2_deviation: float = Field(default=2.0, gt=0.0)
+    setc_log2_pseudocount: float = Field(default=1e-3, gt=0.0)
+    xplat_min_intersection_genes: int = Field(default=100, ge=1)
 
     @field_validator(
         "intersection_min_jaccard",
