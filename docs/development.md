@@ -180,6 +180,8 @@ git push origin HEAD --tags
   `cell_type_mapper` declares `abc_atlas_access` as an unpinned git URL while the
   lock pins a commit); its lockfile checksum header only forces Nextflow to
   rebuild the env when the lock changes.
+- **Base image (`containers/Dockerfile`)** installs `requirements/requirements.lock`
+  with `uv`, then MerXen with `--no-deps`, like CI.
 - **Alignment env (`envs/environment.alignment.yml`)** installs
   `requirements/requirements.alignment.lock` plus Java/libvips for Nextflow `ALIGN`.
   VALIS 1.2 is installed exactly with `--no-deps` after the locked

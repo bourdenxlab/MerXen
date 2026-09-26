@@ -1,4 +1,4 @@
-"""Keep the Nextflow conda env in step with the lockfile.
+"""Keep the Nextflow conda env and the base image in step with the lockfile.
 
 Nextflow reuses ``work/conda/env-<hash>`` for as long as the text of
 ``envs/environment.yml`` is unchanged. The file installs MerXen with a thin
@@ -19,6 +19,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ENV_PATH = REPO_ROOT / "envs" / "environment.yml"
 LOCK_PATH = REPO_ROOT / "requirements" / "requirements.lock"
+DOCKERFILE_PATH = REPO_ROOT / "containers" / "Dockerfile"
 SCRIPT_PATH = REPO_ROOT / "scripts" / "update_env_lock_hash.py"
 
 HEADER_PATTERN = re.compile(
@@ -57,6 +58,31 @@ def test_environment_yml_keeps_thin_editable_install() -> None:
 
     assert '- -e "../[dev]"' in env_text
     assert "-r ../requirements/requirements.lock" not in env_text
+
+
+def test_dockerfile_installs_lockfile_with_uv_then_package_without_deps() -> None:
+    run_lines = [
+        line.strip()
+        for line in DOCKERFILE_PATH.read_text().splitlines()
+        if line.strip().startswith("RUN ")
+    ]
+    lock_installs = [
+        index
+        for index, line in enumerate(run_lines)
+        if "uv pip install" in line and "-r requirements/requirements.lock" in line
+    ]
+    package_installs = [
+        index
+        for index, line in enumerate(run_lines)
+        if re.search(r"\bpip install\b.*\s\.$", line)
+    ]
+
+    assert len(lock_installs) == 1
+    assert len(package_installs) == 1
+    package_line = run_lines[package_installs[0]]
+    assert "uv pip install" in package_line
+    assert "--no-deps" in package_line, "the package must not re-resolve its deps"
+    assert lock_installs[0] < package_installs[0]
 
 
 def test_update_env_text_replaces_existing_header(
