@@ -62,7 +62,9 @@ def test_human_defaults() -> None:
     assert config.flags.microglial_spillover_enabled is False
     assert config.real_qc.marker_consistency_warn == 0.75
     assert config.resolvability.n_test_cells == 25_000
-    assert config.thresholds.hard_min_counts == config.min_counts == 10
+    # Not coupled to a clustering run yet: no threshold until coupling.
+    assert config.thresholds.hard_min_counts is config.min_counts is None
+    assert config.is_coupled is False
     assert config.ctm_version == "1.7.2"
     assert config.xplat_sensitivity == "geneset_c"
     assert config.mouse_section_regions == "auto"
@@ -153,14 +155,33 @@ def test_only_frontal_cortex_is_validated_for_human() -> None:
 def test_hard_min_counts_is_coupled_to_min_counts() -> None:
     config = AnnotationConfig(min_counts=15)
     assert config.thresholds.hard_min_counts == 15
+    assert config.require_min_counts() == 15
     with pytest.raises(ValidationError, match="must equal min_counts"):
         AnnotationConfig(
             min_counts=15, thresholds=AnnotationThresholds(hard_min_counts=10)
         )
+    # A hard floor without min_counts cannot stand in for the coupling.
+    with pytest.raises(ValidationError, match=r"must equal min_counts \(None\)"):
+        AnnotationConfig(thresholds=AnnotationThresholds(hard_min_counts=10))
     AnnotationConfig(min_counts=15, thresholds=AnnotationThresholds(hard_min_counts=15))
     coupled = config.with_min_counts(20)
     assert coupled.min_counts == coupled.thresholds.hard_min_counts == 20
     assert config.min_counts == 15
+
+
+def test_an_uncoupled_config_has_no_table_threshold() -> None:
+    """A config loaded without the coupling fails instead of using a default."""
+    loaded = AnnotationConfig.model_validate_json(AnnotationConfig().model_dump_json())
+
+    assert loaded.is_coupled is False
+    assert loaded.thresholds.hard_min_counts is None
+    with pytest.raises(ValueError, match="not coupled to the clustering run"):
+        loaded.require_min_counts()
+    coupled = loaded.coupled_to_clustering(12)
+    assert coupled.is_coupled is True
+    assert coupled.require_min_counts() == coupled.thresholds.hard_min_counts == 12
+    restored = AnnotationConfig.model_validate_json(coupled.model_dump_json())
+    assert restored.require_min_counts() == 12
 
 
 def test_max_leaf_level_stays_the_species_leaf() -> None:

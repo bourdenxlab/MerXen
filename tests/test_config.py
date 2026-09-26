@@ -219,19 +219,19 @@ def test_mender_unassigned_state_policy() -> None:
 def test_hard_min_counts_follows_the_clustering_min_counts() -> None:
     clustering = _clustering(min_counts=15)
 
-    coupled = clustering.coupled_annotation_config(AnnotationConfig())
+    uncoupled = AnnotationConfig()
+    coupled = clustering.coupled_annotation_config(uncoupled)
 
     assert coupled.min_counts == coupled.thresholds.hard_min_counts == 15
+    assert coupled.require_min_counts() == 15
+    with pytest.raises(ValueError, match="not coupled to the clustering run"):
+        uncoupled.require_min_counts()
     default_run = _clustering().coupled_annotation_config(AnnotationConfig())
     assert default_run.min_counts == default_run.thresholds.hard_min_counts == 10
     explicit_equal = AnnotationConfig(
         min_counts=15, thresholds=AnnotationThresholds(hard_min_counts=15)
     )
     assert clustering.coupled_annotation_config(explicit_equal).min_counts == 15
-    stale_floor = AnnotationConfig(thresholds=AnnotationThresholds(hard_min_counts=10))
-    assert clustering.coupled_annotation_config(stale_floor).thresholds == (
-        coupled.thresholds
-    )
 
 
 def test_hard_min_counts_coupling_rejects_a_different_threshold() -> None:
