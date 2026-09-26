@@ -169,6 +169,8 @@ def prepare_mapmycells_query(
     gene_id_lookup: dict[str, str] | None = None,
     allow_gene_symbol_fallback: bool = False,
     obs_id_column: str | None = None,
+    gene_id_fallback: GeneIdFallbackTable | None = None,
+    gene_id_report_path: Path | str | None = None,
 ) -> Path:
     """Write a MapMyCells-ready H5AD query file.
 
@@ -176,6 +178,12 @@ def prepare_mapmycells_query(
     ``X`` and preserves raw counts in ``layers["counts"]``. MapMyCells expects
     the query matrix in ``X``, so this helper copies the selected layer into
     ``X`` before writing a local query file.
+
+    Gene IDs are taken from ``gene_id_column``, then, for ``ensembl_id`` only,
+    from ``gene_id_lookup`` and ``gene_id_fallback`` for features that still
+    lack a valid Ensembl ID. Features left without one keep their symbol as
+    ``var_name``: MapMyCells ignores them unless a gene-mapping database is
+    used. They are logged and listed in the report.
 
     Args:
         input_h5ad: Clustered AnnData from ``clustering_squidpy``.
@@ -189,6 +197,14 @@ def prepare_mapmycells_query(
             requested ID column is absent. Use only when the mapper receives a
             gene-mapping database capable of resolving those symbols.
         obs_id_column: Optional ``obs`` column to use as cell identifiers.
+        gene_id_fallback: Optional local gene table, from
+            :func:`load_gene_id_fallback_table`, used last to fill missing IDs
+            when ``gene_id_column`` is ``ensembl_id``. It is not applied to
+            other columns, which may hold symbols, or when the ID column is
+            absent and symbols are deferred to the gene-mapping database.
+        gene_id_report_path: Optional JSON path for the gene-ID resolution
+            report: IDs recovered by the reference lookup or the fallback
+            table, and the features left unresolved with the reason.
 
     Returns:
         Path to the written query H5AD.
@@ -208,6 +224,7 @@ def prepare_mapmycells_query(
             adata.X = _copy_matrix(adata.layers[query_layer])
 
         if gene_id_column is not None:
+            input_id_is_valid = _valid_gene_id_flags(adata, gene_id_column)
             if gene_id_column not in adata.var.columns:
                 if allow_gene_symbol_fallback and not gene_id_lookup:
                     logger.info(
@@ -224,6 +241,18 @@ def prepare_mapmycells_query(
                     )
             elif gene_id_column == "ensembl_id" and gene_id_lookup:
                 _supplement_ensembl_id_column(adata, gene_id_lookup)
+            gene_id_report = _resolve_remaining_gene_ids(
+                adata,
+                gene_id_column=gene_id_column,
+                input_id_is_valid=input_id_is_valid,
+                gene_id_fallback=gene_id_fallback,
+                symbols_left_for_gene_mapping_db=allow_gene_symbol_fallback,
+                input_h5ad=input_h5ad,
+            )
+            if gene_id_report_path is not None:
+                report_path = Path(gene_id_report_path)
+                report_path.parent.mkdir(parents=True, exist_ok=True)
+                report_path.write_text(json.dumps(gene_id_report, indent=2) + "\n")
             if gene_id_column in adata.var.columns:
                 adata.var_names = _index_from_column_with_fallback(
                     adata.var,
@@ -467,6 +496,405 @@ def _gene_id_lookup_from_csv(path: Path | str) -> dict[str, str]:
     }
 
 
+_GENE_TABLE_ID_COLUMNS = ("gene_identifier", "ensembl_id", "gene_id")
+_GENE_TABLE_SYMBOL_COLUMNS = ("gene_symbol", "symbol", "gene")
+_SPECIES_GENE_ID_PATTERNS = {
+    "human": re.compile(r"^ENSG\d+$"),
+    "mouse": re.compile(r"^ENSMUSG\d+$"),
+}
+_MISSING_SYMBOL_TOKENS = frozenset({"", "nan", "none"})
+
+
+@dataclass(frozen=True)
+class GeneIdFallbackTable:
+    """Species-filtered symbol to Ensembl gene ID lookup from a local table.
+
+    Attributes:
+        path: Local gene table the lookup was read from.
+        query_species: Species whose Ensembl prefix the IDs were filtered to.
+        ids_by_symbol: Distinct unversioned IDs for each exact gene symbol.
+        ids_by_casefold_symbol: Distinct IDs for each case-folded symbol.
+        n_rows: Rows read from the table.
+        n_species_rows: Rows kept after the species and symbol filters.
+    """
+
+    path: Path
+    query_species: str
+    ids_by_symbol: dict[str, tuple[str, ...]]
+    ids_by_casefold_symbol: dict[str, tuple[str, ...]]
+    n_rows: int
+    n_species_rows: int
+
+    def candidate_ids(self, symbol: str) -> tuple[str, ...]:
+        """Return the table's IDs for a symbol, preferring an exact-case match.
+
+        Args:
+            symbol: Query gene symbol.
+
+        Returns:
+            Distinct candidate Ensembl IDs; empty when the symbol is absent.
+        """
+        cleaned = symbol.strip()
+        return self.ids_by_symbol.get(cleaned) or self.ids_by_casefold_symbol.get(
+            cleaned.casefold(), ()
+        )
+
+    def describe(self) -> dict[str, Any]:
+        """Return JSON-serializable provenance for reports and manifests.
+
+        Returns:
+            Path, species and row counts of the table.
+        """
+        return {
+            "path": str(self.path),
+            "query_species": self.query_species,
+            "n_rows": self.n_rows,
+            "n_species_rows": self.n_species_rows,
+        }
+
+
+def load_gene_id_fallback_table(
+    path: Path | str,
+    *,
+    query_species: str = "human",
+) -> GeneIdFallbackTable:
+    """Load a local symbol to Ensembl gene ID table for MapMyCells queries.
+
+    Reads an Allen-style ``gene.csv`` (``gene_identifier`` and ``gene_symbol``
+    columns; ``ensembl_id`` / ``gene_id`` and ``symbol`` / ``gene`` are also
+    accepted, and ``.tsv`` files are tab-separated) or the ``var`` table of a
+    reference ``.h5ad``, whose index holds the IDs unless it has an ID column.
+    Only IDs with the query species' Ensembl prefix are kept, so a human table
+    never assigns IDs to a mouse query. Version suffixes are removed. Nothing
+    is downloaded.
+
+    Args:
+        path: Local gene table.
+        query_species: ``human`` (``ENSG`` IDs) or ``mouse`` (``ENSMUSG``).
+
+    Returns:
+        The species-filtered lookup.
+
+    Raises:
+        FileNotFoundError: If ``path`` is not an existing file.
+        ValueError: If the species is unsupported or the table lacks an ID or
+            a symbol column.
+    """
+    table_path = Path(path)
+    _require_existing_file(table_path, "MapMyCells gene-ID fallback table")
+    id_pattern = _SPECIES_GENE_ID_PATTERNS.get(query_species)
+    if id_pattern is None:
+        raise ValueError(
+            f"Unsupported query_species={query_species!r} for the gene-ID "
+            f"fallback table; expected one of {sorted(_SPECIES_GENE_ID_PATTERNS)}."
+        )
+    gene_ids, symbols = _read_gene_table(table_path)
+    ids_by_symbol: dict[str, set[str]] = {}
+    n_species_rows = 0
+    for raw_gene_id, raw_symbol in zip(gene_ids, symbols, strict=True):
+        gene_id = re.sub(r"\.\d+$", "", raw_gene_id.strip())
+        symbol = raw_symbol.strip()
+        if symbol.lower() in _MISSING_SYMBOL_TOKENS or not id_pattern.fullmatch(
+            gene_id
+        ):
+            continue
+        n_species_rows += 1
+        ids_by_symbol.setdefault(symbol, set()).add(gene_id)
+    ids_by_casefold_symbol: dict[str, set[str]] = {}
+    for symbol, symbol_ids in ids_by_symbol.items():
+        ids_by_casefold_symbol.setdefault(symbol.casefold(), set()).update(symbol_ids)
+
+    if n_species_rows == 0:
+        logger.warning(
+            "Gene-ID fallback table %s has no %s Ensembl IDs; it will not "
+            "resolve any query genes.",
+            table_path,
+            query_species,
+        )
+    else:
+        logger.info(
+            "Loaded %d %s symbols from gene-ID fallback table %s.",
+            len(ids_by_symbol),
+            query_species,
+            table_path,
+        )
+    return GeneIdFallbackTable(
+        path=table_path,
+        query_species=query_species,
+        ids_by_symbol={
+            symbol: tuple(sorted(symbol_ids))
+            for symbol, symbol_ids in ids_by_symbol.items()
+        },
+        ids_by_casefold_symbol={
+            symbol: tuple(sorted(symbol_ids))
+            for symbol, symbol_ids in ids_by_casefold_symbol.items()
+        },
+        n_rows=len(gene_ids),
+        n_species_rows=n_species_rows,
+    )
+
+
+def _read_gene_table(path: Path) -> tuple[list[str], list[str]]:
+    index_ids: list[str] | None = None
+    if path.suffix.lower() == ".h5ad":
+        reference = ad.read_h5ad(path, backed="r")
+        try:
+            table = reference.var.copy()
+            index_ids = reference.var_names.astype(str).tolist()
+        finally:
+            reference.file.close()
+    else:
+        is_tsv = ".tsv" in (suffix.lower() for suffix in path.suffixes)
+        table = pd.read_csv(
+            path,
+            sep="\t" if is_tsv else ",",
+            dtype=str,
+            keep_default_na=False,
+        )
+    id_column = next(
+        (column for column in _GENE_TABLE_ID_COLUMNS if column in table.columns),
+        None,
+    )
+    symbol_column = next(
+        (column for column in _GENE_TABLE_SYMBOL_COLUMNS if column in table.columns),
+        None,
+    )
+    gene_ids = (
+        table[id_column].astype(str).tolist() if id_column is not None else index_ids
+    )
+    if symbol_column is None or gene_ids is None:
+        raise ValueError(
+            f"Gene-ID fallback table {path} needs an Ensembl ID column "
+            f"({', '.join(_GENE_TABLE_ID_COLUMNS)}) and a symbol column "
+            f"({', '.join(_GENE_TABLE_SYMBOL_COLUMNS)}); found "
+            f"{list(table.columns)}."
+        )
+    return gene_ids, table[symbol_column].astype(str).tolist()
+
+
+def _query_gene_symbols(adata: ad.AnnData) -> list[str]:
+    values = (
+        adata.var["gene"].astype(str)
+        if "gene" in adata.var.columns
+        else adata.var_names.astype(str)
+    )
+    return [str(value).strip() for value in values]
+
+
+def _valid_gene_id_flags(adata: ad.AnnData, gene_id_column: str) -> list[bool]:
+    if gene_id_column not in adata.var.columns:
+        return [False] * adata.n_vars
+    return [is_ensembl_gene_id(value) for value in adata.var[gene_id_column]]
+
+
+def _resolve_remaining_gene_ids(
+    adata: ad.AnnData,
+    *,
+    gene_id_column: str,
+    input_id_is_valid: list[bool],
+    gene_id_fallback: GeneIdFallbackTable | None,
+    symbols_left_for_gene_mapping_db: bool,
+    input_h5ad: Path,
+) -> dict[str, Any]:
+    """Fill IDs the primary lookups missed and report where every ID came from."""
+    report: dict[str, Any] = {
+        "input_h5ad": str(input_h5ad),
+        "gene_id_column": gene_id_column,
+        "n_features": adata.n_vars,
+        "gene_id_fallback": (
+            None if gene_id_fallback is None else gene_id_fallback.describe()
+        ),
+        "gene_id_fallback_applied": False,
+    }
+    if gene_id_column not in adata.var.columns:
+        # Symbols are left for the gene-mapping database; mixing in fallback
+        # IDs would give the mapper a query with two identifier types.
+        report["deferred_to_gene_mapping_db"] = True
+        return report
+    if gene_id_column != "ensembl_id":
+        # Like the cached-reference lookup, the fallback only fills
+        # ``ensembl_id``. Another column may hold symbols for the gene-mapping
+        # database, and partly replacing them would mix identifier types.
+        if gene_id_fallback is not None:
+            logger.info(
+                "Not applying gene-ID fallback table %s to %s: "
+                "gene_id_column=%r is not 'ensembl_id'.",
+                gene_id_fallback.path,
+                input_h5ad.name,
+                gene_id_column,
+            )
+        report["ids_used_as_provided"] = True
+        return report
+
+    symbols = _query_gene_symbols(adata)
+    primary_id_is_valid = _valid_gene_id_flags(adata, gene_id_column)
+    fallback_positions: set[int] = set()
+    fallback_failures: dict[int, str] = {}
+    if gene_id_fallback is not None:
+        fallback_positions, fallback_failures = _apply_gene_id_fallback(
+            adata,
+            gene_id_column=gene_id_column,
+            symbols=symbols,
+            gene_id_fallback=gene_id_fallback,
+        )
+    final_ids = [str(value).strip() for value in adata.var[gene_id_column]]
+
+    # Without a fallback table, name what happens to the symbol instead.
+    default_reason = (
+        "left_as_symbol_for_gene_mapping_db"
+        if symbols_left_for_gene_mapping_db
+        else "no_fallback_table"
+    )
+    resolved_by_reference_lookup: dict[str, str] = {}
+    resolved_by_fallback: dict[str, str] = {}
+    unresolved: dict[str, str] = {}
+    n_unresolved = 0
+    for position, symbol in enumerate(symbols):
+        if position in fallback_positions:
+            resolved_by_fallback[symbol] = final_ids[position]
+        elif not primary_id_is_valid[position]:
+            n_unresolved += 1
+            unresolved[symbol] = fallback_failures.get(position, default_reason)
+        elif not input_id_is_valid[position]:
+            resolved_by_reference_lookup[symbol] = final_ids[position]
+
+    if resolved_by_fallback:
+        logger.info(
+            "Resolved %d Ensembl IDs in %s from gene-ID fallback table %s: %s",
+            len(resolved_by_fallback),
+            input_h5ad.name,
+            gene_id_fallback.path if gene_id_fallback is not None else None,
+            ", ".join(
+                f"{symbol}={gene_id}"
+                for symbol, gene_id in sorted(resolved_by_fallback.items())
+            ),
+        )
+    if unresolved:
+        listed = [
+            f"{symbol} ({reason})" for symbol, reason in sorted(unresolved.items())
+        ]
+        logger.warning(
+            "%d/%d features in %s have no Ensembl ID and %s: %s%s",
+            n_unresolved,
+            adata.n_vars,
+            input_h5ad.name,
+            (
+                "are left as symbols for the gene-mapping database"
+                if symbols_left_for_gene_mapping_db
+                else "will be ignored by MapMyCells"
+            ),
+            ", ".join(listed[:50]),
+            f", ... and {len(listed) - 50} more" if len(listed) > 50 else "",
+        )
+    report.update(
+        {
+            "gene_id_fallback_applied": gene_id_fallback is not None,
+            "unresolved_handling": (
+                "left_as_symbols_for_gene_mapping_db"
+                if symbols_left_for_gene_mapping_db
+                else "ignored_by_mapmycells"
+            ),
+            "n_input_gene_ids": sum(input_id_is_valid),
+            "n_resolved": adata.n_vars - n_unresolved,
+            "n_unresolved": n_unresolved,
+            "resolved_by_reference_lookup": resolved_by_reference_lookup,
+            "resolved_by_fallback": resolved_by_fallback,
+            "unresolved": unresolved,
+            "gene_ids": {
+                symbol: gene_id if is_ensembl_gene_id(gene_id) else ""
+                for symbol, gene_id in zip(symbols, final_ids, strict=True)
+            },
+        }
+    )
+    return report
+
+
+def _apply_gene_id_fallback(
+    adata: ad.AnnData,
+    *,
+    gene_id_column: str,
+    symbols: list[str],
+    gene_id_fallback: GeneIdFallbackTable,
+) -> tuple[set[int], dict[int, str]]:
+    """Fill invalid IDs from the fallback table; return filled and failed rows."""
+    column = adata.var[gene_id_column].astype(object).copy()
+    current = [str(value).strip() for value in column]
+    used_ids = {
+        re.sub(r"\.\d+$", "", gene_id)
+        for gene_id in current
+        if is_ensembl_gene_id(gene_id)
+    }
+    resolved_positions: set[int] = set()
+    failures: dict[int, str] = {}
+    for position, (gene_id, symbol) in enumerate(zip(current, symbols, strict=True)):
+        if is_ensembl_gene_id(gene_id):
+            continue
+        candidates = gene_id_fallback.candidate_ids(symbol)
+        if not candidates:
+            failures[position] = "not_in_fallback_table"
+        elif len(candidates) > 1:
+            failures[position] = "ambiguous_in_fallback_table"
+        elif candidates[0] in used_ids:
+            # Another feature already carries this ID; a duplicate would be
+            # renamed by var_names_make_unique and then ignored by the mapper.
+            failures[position] = "fallback_id_already_in_query"
+        else:
+            column.iloc[position] = candidates[0]
+            used_ids.add(candidates[0])
+            resolved_positions.add(position)
+    if resolved_positions:
+        adata.var[gene_id_column] = pd.Series(
+            column.to_numpy(),
+            index=adata.var_names,
+            dtype="object",
+        )
+    return resolved_positions, failures
+
+
+def summarize_gene_id_resolution(
+    reports: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Summarize per-sample gene-ID reports and compare recovered IDs.
+
+    For every gene whose ID was recovered by the reference lookup or the
+    fallback table, records the other samples of the pair that carry the same
+    ID and the symbol they use for it (for example MERSCOPE ``H2AX`` and
+    Xenium ``H2AFX``); an empty mapping means no other sample has that ID.
+
+    Args:
+        reports: Gene-ID resolution reports written by
+            :func:`prepare_mapmycells_query`, keyed by sample ID.
+
+    Returns:
+        Per-sample summaries without the full ``gene_ids`` tables.
+    """
+    symbols_by_id = {
+        sample_id: {
+            gene_id: symbol
+            for symbol, gene_id in report.get("gene_ids", {}).items()
+            if gene_id
+        }
+        for sample_id, report in reports.items()
+    }
+    summaries: dict[str, dict[str, Any]] = {}
+    for sample_id, report in reports.items():
+        summary = {key: value for key, value in report.items() if key != "gene_ids"}
+        recovered = {
+            **report.get("resolved_by_reference_lookup", {}),
+            **report.get("resolved_by_fallback", {}),
+        }
+        summary["recovered_gene_ids_in_other_samples"] = {
+            symbol: {
+                other_sample_id: other_symbols[gene_id]
+                for other_sample_id, other_symbols in symbols_by_id.items()
+                if other_sample_id != sample_id and gene_id in other_symbols
+            }
+            for symbol, gene_id in sorted(recovered.items())
+        }
+        summaries[sample_id] = summary
+    return summaries
+
+
 def run_mapmycells(config: MapMyCellsConfig) -> dict[str, dict[str, dict[str, Path]]]:
     """Run local MapMyCells assignment for every sample in a pair.
 
@@ -480,6 +908,10 @@ def run_mapmycells(config: MapMyCellsConfig) -> dict[str, dict[str, dict[str, Pa
         config.tmp_dir.mkdir(parents=True, exist_ok=True)
 
     config.output_dir.mkdir(parents=True, exist_ok=True)
+    # Loaded before the reference builds so a bad configured path fails fast.
+    gene_id_fallback, gene_id_fallback_ignored = _load_configured_gene_id_fallback(
+        config
+    )
     references = _build_mapmycells_references(config)
     gene_id_lookup = _load_reference_gene_id_lookup_if_needed(config)
     if (
@@ -513,12 +945,68 @@ def run_mapmycells(config: MapMyCellsConfig) -> dict[str, dict[str, dict[str, Pa
                 sample=sample,
                 reference=reference,
                 gene_id_lookup=gene_id_lookup,
+                gene_id_fallback=gene_id_fallback,
             )
         force_release(note=f"after MapMyCells {sample.sample_id}")
 
     manifest_path = config.output_dir / f"{config.pair_id}_mapmycells_manifest.json"
-    _write_results_manifest(manifest_path, config, references, results)
+    _write_results_manifest(
+        manifest_path,
+        config,
+        references,
+        results,
+        gene_id_resolution=summarize_gene_id_resolution(_read_gene_id_reports(results)),
+        gene_id_fallback_ignored=gene_id_fallback_ignored,
+    )
     return results
+
+
+def _load_configured_gene_id_fallback(
+    config: MapMyCellsConfig,
+) -> tuple[GeneIdFallbackTable | None, dict[str, str] | None]:
+    """Load the configured fallback table, dropping one without species IDs.
+
+    Args:
+        config: MapMyCells stage configuration.
+
+    Returns:
+        The table to apply, or ``None``, and a manifest note when a configured
+        table was ignored because it holds no IDs of the query species (for
+        example the human WHB table set on Dwight for a mouse run).
+    """
+    if config.gene_id_fallback_csv is None or config.plots_only:
+        return None, None
+    table = load_gene_id_fallback_table(
+        config.gene_id_fallback_csv,
+        query_species=config.query_species,
+    )
+    if table.n_species_rows:
+        return table, None
+    logger.info(
+        "Ignoring gene-ID fallback table %s for pair %s: it has no %s IDs.",
+        table.path,
+        config.pair_id,
+        config.query_species,
+    )
+    return None, {
+        "path": str(table.path),
+        "reason": f"no {config.query_species} Ensembl IDs",
+    }
+
+
+def _read_gene_id_reports(
+    results: dict[str, dict[str, dict[str, Path]]],
+) -> dict[str, dict[str, Any]]:
+    # Every reference prepares the same query for a sample, so the first
+    # report found is representative.
+    reports: dict[str, dict[str, Any]] = {}
+    for sample_id, reference_results in results.items():
+        for outputs in reference_results.values():
+            report_path = outputs.get("query_gene_ids_json")
+            if report_path is not None and report_path.exists():
+                reports[sample_id] = json.loads(report_path.read_text())
+                break
+    return reports
 
 
 def _samples_need_gene_mapping_db(
@@ -739,11 +1227,15 @@ def _run_mapmycells_reference(
     sample: Any,
     reference: MapMyCellsReference,
     gene_id_lookup: dict[str, str],
+    gene_id_fallback: GeneIdFallbackTable | None = None,
 ) -> dict[str, Path]:
     sample_dir = reference.output_dir / sample.platform.lower()
     sample_dir.mkdir(parents=True, exist_ok=True)
 
     query_h5ad = sample_dir / f"{sample.sample_id}_mapmycells_query.h5ad"
+    query_gene_ids_json = (
+        sample_dir / f"{sample.sample_id}_mapmycells_query_gene_ids.json"
+    )
     extended_json = sample_dir / f"{sample.sample_id}_mapmycells_extended.json"
     csv_path = sample_dir / f"{sample.sample_id}_mapmycells.csv"
     log_path = sample_dir / f"{sample.sample_id}_mapmycells.log"
@@ -787,6 +1279,8 @@ def _run_mapmycells_reference(
             gene_id_lookup=gene_id_lookup,
             allow_gene_symbol_fallback=config.gene_mapping_db_path is not None,
             obs_id_column=sample.obs_id_column,
+            gene_id_fallback=gene_id_fallback,
+            gene_id_report_path=query_gene_ids_json,
         )
         command = build_mapmycells_command(
             config,
@@ -834,6 +1328,7 @@ def _run_mapmycells_reference(
         "spatial_plot": spatial_plot,
     }
     for key, path in {
+        "query_gene_ids_json": query_gene_ids_json,
         "umap_cluster_by_supercluster_dir": umap_cluster_by_supercluster_dir,
         "quality_scatter_plot": quality_scatter_plot,
         "supercluster_qc_plot": supercluster_qc_plot,
@@ -3473,6 +3968,9 @@ def _write_results_manifest(
     config: MapMyCellsConfig,
     references: list[MapMyCellsReference],
     results: dict[str, dict[str, dict[str, Path]]],
+    *,
+    gene_id_resolution: dict[str, dict[str, Any]] | None = None,
+    gene_id_fallback_ignored: dict[str, str] | None = None,
 ) -> None:
     payload = {
         "pair_id": config.pair_id,
@@ -3483,6 +3981,13 @@ def _write_results_manifest(
         "marker_lookup_path": _path_as_str(config.marker_lookup_path),
         "precomputed_stats_path": _path_as_str(config.precomputed_stats_path),
         "gene_mapping_db_path": _path_as_str(config.gene_mapping_db_path),
+        "gene_id_fallback_csv": (
+            None
+            if gene_id_fallback_ignored is not None
+            else _path_as_str(config.gene_id_fallback_csv)
+        ),
+        "gene_id_fallback_ignored": gene_id_fallback_ignored,
+        "gene_id_resolution": gene_id_resolution or {},
         "region_name": config.region_name,
         "region_labels": list(config.region_labels),
         "region_cache_dir": str(config.region_cache_dir),
