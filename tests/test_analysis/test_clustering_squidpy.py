@@ -327,7 +327,13 @@ def _poisson_adata(n_obs: int, n_vars: int, *, seed: int) -> ad.AnnData:
 
 
 def _fake_rapids_singlecell(calls: dict[str, object]) -> SimpleNamespace:
-    """Return a stand-in for rapids_singlecell with rsc 0.15.2 signatures."""
+    """Return a stand-in for rapids_singlecell that records its calls.
+
+    Each fake stores the keyword arguments it was actually called with in
+    ``calls``. ``tl.leiden`` writes ``uns[key_added]["params"]`` the way
+    rapids-singlecell 0.15.2 does, including the ``n_iterations`` it applied
+    (the library default of 100 unless the caller passed a value).
+    """
 
     def fake_pca(data: ad.AnnData, **kwargs: object) -> None:
         calls["pca"] = kwargs
@@ -337,27 +343,17 @@ def _fake_rapids_singlecell(calls: dict[str, object]) -> SimpleNamespace:
         calls["umap"] = kwargs
         data.obsm["X_umap"] = np.zeros((data.n_obs, 2), dtype=np.float32)
 
-    def fake_leiden(
-        data: ad.AnnData,
-        resolution: float = 1.0,
-        *,
-        random_state: int | None = 0,
-        key_added: str = "leiden",
-        n_iterations: int = 100,
-    ) -> None:
-        calls["leiden"] = {
-            "resolution": resolution,
-            "random_state": random_state,
-            "key_added": key_added,
-        }
+    def fake_leiden(data: ad.AnnData, **kwargs: object) -> None:
+        calls["leiden"] = dict(kwargs)
+        key_added = str(kwargs.get("key_added", "leiden"))
         data.obs[key_added] = pd.Categorical(
             ["0" if i % 2 == 0 else "1" for i in range(data.n_obs)]
         )
         data.uns[key_added] = {
             "params": {
-                "resolution": resolution,
-                "random_state": random_state,
-                "n_iterations": n_iterations,
+                "resolution": kwargs.get("resolution", 1.0),
+                "random_state": kwargs.get("random_state", 0),
+                "n_iterations": kwargs.get("n_iterations", 100),
             }
         }
 
@@ -475,6 +471,11 @@ def test_run_scanpy_clustering_records_gpu_leiden_provenance(
     assert params["embedding_engine"] == "rapids_singlecell"
     assert params["leiden_flavor"] == "cugraph"
     assert params["leiden_n_iterations"] == 100
+    # The recorded cap must agree with what rapids-singlecell says it ran.
+    assert (
+        params["leiden_n_iterations"]
+        == out.uns["leiden_broad"]["params"]["n_iterations"]
+    )
     assert params["leiden_random_state"] == 9
     versions = json.loads(params["engine_versions"])
     assert set(versions) == {"scanpy", "rapids_singlecell", "cugraph"}
@@ -486,17 +487,36 @@ def test_run_scanpy_clustering_records_gpu_leiden_provenance(
     assert record["resolution"] == 0.2
 
 
-def test_gpu_leiden_n_iterations_falls_back_to_engine_record(
+def test_gpu_leiden_n_iterations_prefers_engine_record(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Without an introspectable default, the engine's own record is used."""
+    """The engine's own record wins over the signature default."""
+
+    def leiden_with_default(data: ad.AnnData, *, n_iterations: int = 100) -> None:
+        return None
+
+    fake_rsc = SimpleNamespace(tl=SimpleNamespace(leiden=leiden_with_default))
+    monkeypatch.setitem(sys.modules, "rapids_singlecell", fake_rsc)
+    adata = _poisson_adata(4, 2, seed=0)
+
+    # No engine record: the signature default is used.
+    assert clustering_mod._gpu_leiden_n_iterations(adata, key_added="leiden") == 100
+    # An engine record with a non-default cap overrides the signature default.
+    adata.uns["leiden"] = {"params": {"n_iterations": np.int64(2)}}
+    assert clustering_mod._gpu_leiden_n_iterations(adata, key_added="leiden") == 2
+
+
+def test_gpu_leiden_n_iterations_unknown_without_record_or_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without a record or an introspectable default, the cap is ``-1``."""
     fake_rsc = SimpleNamespace(tl=SimpleNamespace(leiden=lambda data, **kwargs: None))
     monkeypatch.setitem(sys.modules, "rapids_singlecell", fake_rsc)
     adata = _poisson_adata(4, 2, seed=0)
 
     assert clustering_mod._gpu_leiden_n_iterations(adata, key_added="leiden") == -1
-    adata.uns["leiden"] = {"params": {"n_iterations": np.int64(50)}}
-    assert clustering_mod._gpu_leiden_n_iterations(adata, key_added="leiden") == 50
+    adata.uns["leiden"] = {"params": {"n_iterations": True}}
+    assert clustering_mod._gpu_leiden_n_iterations(adata, key_added="leiden") == -1
 
 
 def test_library_version_uses_loaded_module_without_metadata(
