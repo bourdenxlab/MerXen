@@ -532,7 +532,7 @@ runs once, and is shared across all samples and segmentation branches. See
 | `mapmycells_normalization` | `raw` | Query normalization passed to MapMyCells. |
 | `mapmycells_bootstrap_factor` | `0.9` | Marker downsampling factor for bootstrapping; default keeps the historical spatial-data setting. |
 | `mapmycells_bootstrap_iteration` | `100` | Number of bootstrap iterations. |
-| `mapmycells_n_processors` | Dwight: `8` | Number of worker processes passed to MapMyCells. |
+| `mapmycells_n_processors` | `4` (Dwight: `8`) | Number of worker processes passed to MapMyCells and to the region reference builders. |
 | `mapmycells_chunk_size` | `null` | Optional cells-per-worker chunk size. |
 | `mapmycells_rng_seed` | `null` | Optional mapper random seed. |
 | `mapmycells_max_gb` | `null` | Optional memory budget for H5AD conversion. |
