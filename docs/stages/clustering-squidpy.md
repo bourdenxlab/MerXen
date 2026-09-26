@@ -234,15 +234,18 @@ a warning and runs on the CPU path.
 | Step | CPU path (`scanpy-igraph`) | GPU path (`rapids_singlecell`) |
 |------|----------------------------|--------------------------------|
 | PCA | `sc.pp.pca` | `rsc.pp.pca`; sparse input is cast to float64 and fitted with chunked incremental PCA |
-| Neighbours | `sc.pp.neighbors`: exact kNN below 4,096 cells, approximate (pynndescent) above | `rsc.pp.neighbors`: exact brute-force kNN |
+| Neighbours | `sc.pp.neighbors`: exact brute-force kNN below 8,192 cells (euclidean metric), approximate pynndescent from 8,192 cells | `rsc.pp.neighbors`: exact brute-force kNN |
 | UMAP | `sc.tl.umap` (umap-learn) | `rsc.tl.umap` (cuML) |
 | Leiden | `sc.tl.leiden(flavor="igraph", n_iterations=2, directed=False)` | `rsc.tl.leiden` (cuGraph, float32 edge weights, library default `n_iterations=100` in rapids-singlecell 0.15.2) |
 
 Both paths pass the same `random_seed` to every step, but they do not produce
-the same partitions. On an identical stored neighbour graph, CPU and GPU Leiden
-at resolution 0.2 agreed only at ARI 0.57-0.91 across the seven datasets
-checked, and the number of clusters can differ (P1212 MERSCOPE: 2 on GPU, 3-4
-on CPU). Running the whole CPU path adds further differences from PCA and kNN.
+the same partitions. On the stored GPU broad-round neighbour graphs of seven
+datasets, CPU `leidenalg` (RBConfiguration, 2 iterations, seeds 0 and 1) at
+resolution 0.2 agreed with the stored GPU partitions only at ARI 0.57-0.91, and
+the number of clusters can differ (P1212 MERSCOPE: 2 on GPU, 3-4 on CPU). That
+comparison used `leidenalg`, not the pipeline's `scanpy-igraph` CPU path, which
+was not itself compared against the GPU path. Running the whole CPU path adds
+further differences from PCA and kNN.
 Compare, or rerun, clustering results only when the same engine produced them,
 and check the recorded engine before rerunning a published result on another
 host.
@@ -264,7 +267,7 @@ cluster column, gains these fields next to the existing parameters
 | `engine_versions` | JSON string of library versions, e.g. `{"igraph": "1.0.0", "scanpy": "1.12.1"}` or `{"cugraph": ..., "rapids_singlecell": "0.15.2", "scanpy": ...}`; `null` for a version that could not be read. |
 | `embedding_engine` | Library that ran PCA, neighbours, and UMAP: `scanpy` or `rapids_singlecell`. |
 | `leiden_flavor` | `igraph` (CPU) or `cugraph` (GPU). |
-| `leiden_n_iterations` | Leiden iteration cap applied: `2` on CPU; the rapids-singlecell default on GPU (`-1` if it could not be determined). |
+| `leiden_n_iterations` | Leiden iteration cap applied: `2` on CPU; on GPU the value rapids-singlecell recorded in `uns[<key>]["params"]`, else its signature default (`-1` if neither could be read). |
 | `leiden_random_state` | Seed passed to Leiden (and to PCA, neighbours, and UMAP). |
 | `n_pcs_used` / `n_neighbors_used` | Principal components and neighbour count actually used after clipping to the data size. |
 | `gpu_requested` | Whether `use_gpu` was set; with `gpu_used` it shows a CPU fallback. |
@@ -301,10 +304,16 @@ for round_key, record in adata.uns["merxen_leiden_provenance"].items():
     print(round_key, record["engine"], record["n_iterations"], record["resolution"])
 ```
 
-Outputs written before these fields existed record only
-`uns["merxen_clustering_params_leiden_broad"]["gpu_used"]`; there,
-`uns["neighbors"]["params"]["method"]` is `"rapids"` for the GPU path and
-`"umap"` for the CPU path.
+Outputs written before these fields existed still carry the engine's own
+record of each round in `uns["<round key>"]["params"]` (`n_iterations`,
+`random_state`, `resolution`; for example `leiden_broad` in P5011 MERSCOPE has
+100, 0, 0.2), plus `gpu_used` in `uns["merxen_clustering_params_<key>"]`
+(`merxen_clustering_params` and `merxen_clustering_params_leiden` for one-shot
+runs). `uns["neighbors"]["params"]["method"]` is `"rapids"` for the GPU path
+and `"umap"` for the CPU path. In those outputs `<sample_id>_clustered.h5ad`
+holds only the broad round's record; branch rounds are recorded under
+`leiden_subcluster`, `leiden_neuron_split`, and `leiden_neuron_subcluster` in
+the branch H5ADs.
 
 ## Notebook
 
