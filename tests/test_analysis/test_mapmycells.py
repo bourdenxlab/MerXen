@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import pickle
@@ -811,9 +812,25 @@ def test_run_mapmycells_writes_annotated_h5ad(
     assert "quality_scatter" in mapmycells_uns["plot_paths"]
     assert "umap_cluster_by_supercluster" in mapmycells_uns["plot_paths"]
     assert "spatial_supercluster_grid" in mapmycells_uns["plot_paths"]
-    assert "taxonomy_tree" in mapmycells_uns["extended_json_text"]
-    assert "mapper stdout" in mapmycells_uns["stdout_log_text"]
-    assert "mapper stderr" in mapmycells_uns["stderr_log_text"]
+    for text_key in (
+        "extended_json_text",
+        "log_text",
+        "stdout_log_text",
+        "stderr_log_text",
+    ):
+        assert text_key not in mapmycells_uns
+    for key, path in (
+        ("extended_json", whole_brain_results["extended_json"]),
+        ("log", whole_brain_results["log"]),
+        ("stdout_log", stdout_log),
+        ("stderr_log", stderr_log),
+    ):
+        assert mapmycells_uns[f"{key}_path"] == str(path)
+        assert (
+            mapmycells_uns[f"{key}_sha256"]
+            == hashlib.sha256(path.read_bytes()).hexdigest()
+        )
+    assert "--csv_result_path" in mapmycells_uns["command_json_text"]
     assert "mapper stdout" in stdout_log.read_text()
     assert "mapper stderr" in stderr_log.read_text()
     assert umap_plot.exists()
