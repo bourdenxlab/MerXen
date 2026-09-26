@@ -123,11 +123,44 @@ def test_vocab_broad_classes_match_the_legacy_collapse() -> None:
     whb = load_vocab("whb_supercluster")
     for name in whb.names:
         broad = whb.broad_class(name)
-        if broad in HUMAN_BROAD_CLASSES and name != "Bergmann glia":
+        if broad in HUMAN_BROAD_CLASSES:
             assert collapse_atlas_label_to_broad_class(name) == broad, name
     wmb = load_vocab("wmb_class")
     for name in wmb.names:
         assert collapse_atlas_label_to_broad_class(name) == wmb.broad_class(name)
+
+
+def test_nodes_outside_the_seven_classes_stay_unallocated() -> None:
+    """E1's scheme: glia outside the seven classes carry no broad class."""
+    whb = load_vocab("whb_supercluster")
+    for name in ("Bergmann glia", "Ependymal", "Choroid plexus"):
+        assert whb.broad_class(name) == UNASSIGNED_LABEL, name
+        assert whb.lineage(name) == UNASSIGNED_LABEL, name
+        assert whb.broad_classes_any(name) == (), name
+        assert not whb.is_region_plausible(name, "frontal_cortex"), name
+    assert whb.broad_classes_any("Astrocyte") == ("Astrocytes",)
+    assert whb.broad_classes_any("Splatter") == ()
+
+
+def test_seaad_broad_classes_any_keep_the_vlmc_mass() -> None:
+    """Without a supertype, VLMC & Perivascular counts for both classes (E1)."""
+    vlmc = "VLMC & Perivascular"
+    assert vocab.seaad_broad_classes_any(vlmc) == ("Vascular cells", "Fibroblasts")
+    assert vocab.seaad_broad_classes_any(vlmc, "VLMC_2-SEAAD") == ("Fibroblasts",)
+    assert vocab.seaad_broad_classes_any(vlmc, "Pericyte_1") == ("Vascular cells",)
+    assert vocab.seaad_broad_classes_any(vlmc, "SMC-SEAAD") == ("Vascular cells",)
+    assert vocab.seaad_broad_classes_any("Ependymal") == ()
+    assert vocab.seaad_broad_classes_any("Astrocyte") == ("Astrocytes",)
+    assert vocab.seaad_broad_classes_any("L2/3 IT") == ("Neurons",)
+    seaad = load_vocab("seaad_mr_subclass")
+    for name in seaad.names:
+        broad = seaad.broad_class(name)
+        expected = () if broad == UNASSIGNED_LABEL else (broad,)
+        if name != vlmc:
+            assert seaad.broad_classes_any(name) == expected, name
+    assert load_vocab("wmb_class").broad_classes_any("31 OPC-Oligo") == (
+        OLIGODENDROCYTE_LINEAGE,
+    )
 
 
 @pytest.mark.parametrize("table_id", ["whb_supercluster", "seaad_mr_subclass"])

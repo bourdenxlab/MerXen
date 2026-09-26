@@ -128,6 +128,11 @@ PRIMARY_VOCAB: Final[dict[str, VocabTableId]] = {
 }
 REGION_COLUMN_PREFIX: Final = "region_plausible_"
 SUPERTYPE_PREFIX_COLUMN: Final = "supertype_prefix"
+# SEA-AD: the broad classes a node's probability counts toward in the broad
+# score, ";"-separated; "VLMC & Perivascular" without a supertype counts toward
+# both Vascular cells and Fibroblasts, as E1's 'Vascular/Fibro' rule.
+BROAD_CLASS_ANY_COLUMN: Final = "broad_class_any"
+BROAD_CLASS_ANY_SEPARATOR: Final = ";"
 _BOOL_COLUMNS: Final[tuple[str, ...]] = ("sink", "never_drop")
 
 # Floor classes (§5.4). Human floors follow the E2 eight-class scheme: neurons
@@ -378,6 +383,37 @@ class VocabTable:
         """
         return self._value(name, "broad_class", supertype) or UNASSIGNED_LABEL
 
+    def broad_classes_any(
+        self, name: str, supertype: str | None = None
+    ) -> tuple[str, ...]:
+        """Return the broad classes a node's probability mass counts toward.
+
+        Coarse-level scores sum the probability of the assigned node and of
+        the runner-ups that count toward the same class (plan §4.1, E2).
+        SEA-AD "VLMC & Perivascular" without a supertype counts toward both
+        ``Vascular cells`` and ``Fibroblasts`` (E1's broad score); every
+        other node counts toward its broad class, or toward none when that
+        is ``UNASSIGNED_LABEL``.
+
+        Args:
+            name: Node name.
+            supertype: Optional supertype name for the supertype overrides.
+
+        Returns:
+            The broad classes, in ``BROAD_CLASSES`` order; empty for sinks
+            and nodes mapped to no broad class.
+
+        Raises:
+            KeyError: If the node is not in the table.
+        """
+        if BROAD_CLASS_ANY_COLUMN not in self.frame.columns:
+            broad = self.broad_class(name, supertype)
+            return () if broad == UNASSIGNED_LABEL else (broad,)
+        value = self._value(name, BROAD_CLASS_ANY_COLUMN, supertype)
+        if value is None:
+            return ()
+        return tuple(value.split(BROAD_CLASS_ANY_SEPARATOR))
+
     def lineage(self, name: str, supertype: str | None = None) -> str:
         """Return the lineage of a node (human tables only).
 
@@ -613,6 +649,24 @@ def seaad_broad_class(subclass: str, supertype: str | None = None) -> str:
         "VLMC & Perivascular" without a supertype).
     """
     return load_vocab("seaad_mr_subclass").broad_class(subclass, supertype)
+
+
+def seaad_broad_classes_any(
+    subclass: str, supertype: str | None = None
+) -> tuple[str, ...]:
+    """Return the broad classes a SEA-AD call counts toward in the broad score.
+
+    Args:
+        subclass: SEA-AD subclass name.
+        supertype: SEA-AD supertype name, or ``None`` when unknown (e.g. for a
+            runner-up subclass).
+
+    Returns:
+        ``("Vascular cells", "Fibroblasts")`` for "VLMC & Perivascular"
+        without a supertype; the single broad class of any other call; empty
+        for Ependymal.
+    """
+    return load_vocab("seaad_mr_subclass").broad_classes_any(subclass, supertype)
 
 
 def _map_first_label(candidate: object, species: Species) -> str:

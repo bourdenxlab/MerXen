@@ -8,7 +8,8 @@ hard-coded) and ``src/merxen/assets/annotation/overrides.yaml``, and writes:
   broad_class, lineage, nt, sink, region_plausible_frontal_cortex``);
 - ``seaad_mr_subclass_vocab.csv``: the 29 SEA-AD Multiregion subclasses plus
   supertype-prefix overrides (``label, subclass, supertype_prefix,
-  broad_class, lineage, nt, sink, region_plausible_frontal_cortex``);
+  broad_class, broad_class_any, lineage, nt, sink,
+  region_plausible_frontal_cortex``);
 - ``wmb_class_vocab.csv``: the 34 WMB classes (``label, class, broad_class,
   nt, never_drop``);
 - ``floors_human.csv``, ``floors_mouse.csv``: the §5.4 v1 count floors;
@@ -52,7 +53,10 @@ import pandas as pd
 import yaml  # type: ignore[import-untyped]
 
 from merxen.annotation.vocab import (
+    BROAD_CLASS_ANY_COLUMN,
+    BROAD_CLASS_ANY_SEPARATOR,
     BROAD_CLASSES,
+    HUMAN_BROAD_CLASSES,
     HUMAN_FLOOR_CLASSES,
     HUMAN_LINEAGE_OF_BROAD_CLASS,
     HUMAN_LINEAGES,
@@ -163,6 +167,24 @@ def _check_mapping(kind: str, name: str, broad: str, lineage: str | None) -> Non
         raise VocabBuildError(
             f"{kind} {name!r}: lineage {lineage!r} does not contain {broad!r}"
         )
+
+
+def _broad_class_any(broad: str, override_broads: Sequence[str]) -> str:
+    """Return a SEA-AD row's ``broad_class_any`` value.
+
+    A row whose broad class is one of the seven counts toward that class
+    only. A base row that the supertype overrides split counts toward every
+    class of its overrides (in the order of ``HUMAN_BROAD_CLASSES``), so its
+    probability mass is not lost when the supertype is unknown. Other rows
+    (sinks, ``Mixed/Unknown``) count toward no class.
+    """
+    if broad in HUMAN_BROAD_CLASSES:
+        return broad
+    if broad != UNASSIGNED_LABEL:
+        return ""
+    classes = set(override_broads) & set(HUMAN_BROAD_CLASSES)
+    ordered = [name for name in HUMAN_BROAD_CLASSES if name in classes]
+    return BROAD_CLASS_ANY_SEPARATOR.join(ordered)
 
 
 def majority_nt(
@@ -340,18 +362,21 @@ def build_seaad(
             lineage = curated[name]["lineage"]
             nt = ""
         _check_mapping("SEA-AD subclass", name, broad, lineage)
+        prefixes = overrides.get(name, {})
         base = {
             "label": str(term["label"]),
             "subclass": name,
             "supertype_prefix": "",
             "broad_class": broad,
+            BROAD_CLASS_ANY_COLUMN: _broad_class_any(
+                broad, [mapping["broad_class"] for mapping in prefixes.values()]
+            ),
             "lineage": lineage,
             "nt": nt,
             "sink": name in sinks,
             f"region_plausible_{REGION}": name not in implausible,
         }
         rows.append(base)
-        prefixes = overrides.get(name, {})
         if not prefixes:
             continue
         children = supertypes.loc[
@@ -377,6 +402,9 @@ def build_seaad(
                     **base,
                     "supertype_prefix": prefix,
                     "broad_class": mapping["broad_class"],
+                    BROAD_CLASS_ANY_COLUMN: _broad_class_any(
+                        mapping["broad_class"], []
+                    ),
                     "lineage": mapping["lineage"],
                 }
             )
@@ -585,6 +613,13 @@ def render_notice(overrides: Mapping[str, Any], inputs: Sequence[InputFile]) -> 
         "a neuronal node's NT-annotated cells (cell-weighted over clusters), else",
         "Other; non-neuronal nodes have no NT. Region plausibility for frontal",
         "cortex follows the 16 superclusters pruned in E1 (ii).",
+        "",
+        "Broad classes follow E1's seven-class scheme: nodes outside the seven",
+        "classes (WHB Splatter, Miscellaneous, Ependymal, Choroid plexus and",
+        "Bergmann glia; SEA-AD Ependymal) are Mixed/Unknown, so their mass stays",
+        "unallocated. SEA-AD broad_class_any lists the classes a node's probability",
+        "counts toward in the SEA-AD broad score: VLMC & Perivascular without a",
+        "supertype counts toward Vascular cells and Fibroblasts (E1 'Vascular/Fibro').",
         "",
         "Taxonomy inputs (ABC metadata path, bytes, sha256):",
         "",

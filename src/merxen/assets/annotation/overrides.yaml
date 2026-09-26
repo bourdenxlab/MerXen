@@ -96,9 +96,13 @@ whb:
     Microglia: {broad_class: Microglia, lineage: Microglia}
     Vascular: {broad_class: Vascular cells, lineage: Vascular cells}
     Bergmann glia:
-      broad_class: Astrocytes
-      lineage: Astrocytes
-      reason: cerebellar astrocytes; region-implausible in cortex
+      broad_class: Mixed/Unknown
+      lineage: Mixed/Unknown
+      reason: >-
+        cerebellar astrocytes, not one of the seven classes in E1's scheme (the
+        legacy collapse keeps it apart), so its mass stays unallocated as in the
+        E1 soft composition; region-implausible in cortex; a cerebellar region
+        (plan §8.9) may map it to Astrocytes
     Fibroblast: {broad_class: Fibroblasts, lineage: Fibroblasts}
     Choroid plexus:
       broad_class: Mixed/Unknown
@@ -138,7 +142,12 @@ seaad:
       lineage: Mixed/Unknown
       reason: mixes fibroblasts and mural cells; resolved by the supertype overrides
   # Supertype-prefix overrides (plan §4.7); every supertype of the subclass
-  # must match exactly one prefix.
+  # must match exactly one prefix. The generator writes the union of a
+  # subclass's override broad classes to its base row's broad_class_any
+  # column ("Vascular cells;Fibroblasts" for VLMC & Perivascular): without a
+  # supertype, that subclass's probability counts toward both classes in the
+  # SEA-AD broad score, as E1's 'Vascular/Fibro' rule (exp/E1/e1lib.py
+  # load_mmc_seaad) did when the 0.68 threshold was set.
   supertype_overrides:
     VLMC & Perivascular:
       VLMC: {broad_class: Fibroblasts, lineage: Fibroblasts}

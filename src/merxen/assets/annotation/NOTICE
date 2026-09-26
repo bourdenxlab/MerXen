@@ -23,6 +23,13 @@ a neuronal node's NT-annotated cells (cell-weighted over clusters), else
 Other; non-neuronal nodes have no NT. Region plausibility for frontal
 cortex follows the 16 superclusters pruned in E1 (ii).
 
+Broad classes follow E1's seven-class scheme: nodes outside the seven
+classes (WHB Splatter, Miscellaneous, Ependymal, Choroid plexus and
+Bergmann glia; SEA-AD Ependymal) are Mixed/Unknown, so their mass stays
+unallocated. SEA-AD broad_class_any lists the classes a node's probability
+counts toward in the SEA-AD broad score: VLMC & Perivascular without a
+supertype counts toward Vascular cells and Fibroblasts (E1 'Vascular/Fibro').
+
 Taxonomy inputs (ABC metadata path, bytes, sha256):
 
 - WHB terms: WHB-taxonomy/20240330/cluster_annotation_term.csv, 546616, 98e8a8d5e004154d3ed084311f7d2b3e40a5453e07ad7ac9364fcb3b8dcd3caf
