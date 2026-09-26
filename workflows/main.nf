@@ -291,6 +291,18 @@ def buildConfigForPlatform(row, pairId, platform) {
     def input = requirePlatformInput(row, pairId, platform)
     if (platform == "MERSCOPE") {
         def zRange = parseRange(row.merscope_z_range, 0, 6)
+        def merscopeOptions = [
+            z_layers: (zRange[0]..zRange[1]).collect { layer -> layer as int },
+        ]
+        // Only set when requested, so default build configs (and their task
+        // hashes) are unchanged.
+        if (boolOrDefault(
+            params.merscope_allow_transform_override_mismatch,
+            false,
+            "merscope_allow_transform_override_mismatch"
+        )) {
+            merscopeOptions.allow_transform_override_mismatch = true
+        }
         return [
             dataset_name: "${pairId}_MERSCOPE",
             platform: "MERSCOPE",
@@ -298,9 +310,7 @@ def buildConfigForPlatform(row, pairId, platform) {
             output_path: "spatialdata_out/source_spatialdata.zarr",
             persistent_output_path: input.spatialdataPath ?: null,
             merscope_transform_path: chooseField(row, ["merscope_transform_path"]) ?: null,
-            merscope: [
-                z_layers: (zRange[0]..zRange[1]).collect { layer -> layer as int },
-            ],
+            merscope: merscopeOptions,
             xenium: [:],
         ]
     }
