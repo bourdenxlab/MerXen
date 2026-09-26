@@ -468,6 +468,7 @@ Path: `${outdir}/<pair_id>/<analysis_segmentation>/mapmycells/`
 | File | Contents |
 |------|----------|
 | `mapmycells_out/<platform>/<pair_id>_<platform>_mapmycells_query.h5ad` | Local mapper query AnnData with selected counts copied into `X`. |
+| `mapmycells_out/<platform>/<pair_id>_<platform>_mapmycells_query_gene_ids.json` | Gene-ID resolution report: IDs recovered by the cached reference lookup or `annotation_gene_id_fallback_csv`, and the features left unresolved with their reasons. |
 | `mapmycells_out/<platform>/<pair_id>_<platform>_mapmycells.csv` | Per-cell MapMyCells assignments and confidence columns. |
 | `mapmycells_out/<platform>/<pair_id>_<platform>_mapmycells_extended.json` | Full MapMyCells JSON result, including config, log, marker genes, and taxonomy tree. |
 | `mapmycells_out/<platform>/<pair_id>_<platform>_mapmycells.log` | MapMyCells run log. |
@@ -483,7 +484,7 @@ Path: `${outdir}/<pair_id>/<analysis_segmentation>/mapmycells/`
 | `mapmycells_out/<platform>/<pair_id>_<platform>_mapmycells_spatial_supercluster_grid.png` | Small-multiple spatial grid with each supercluster highlighted in red against all other cells in grey. |
 | `mapmycells_out/<platform>/<pair_id>_<platform>_mapmycells_annotated.h5ad` | Clustered AnnData with assignment columns added to `obs` using the `mapmycells_` prefix and mapper metadata in `uns["merxen_mapmycells"]`; plot paths are recorded, but plot images are separate PNGs. |
 | `mapmycells_out/region_<region_name>/<platform>/<pair_id>_<platform>_mapmycells_*` | Region-specific MapMyCells outputs when `mapmycells_reference_mode` includes `region`; annotated H5AD columns use `mapmycells_region_<region_name>_`. |
-| `mapmycells_out/<pair_id>_mapmycells_manifest.json` | Per-pair manifest summarizing selected reference mode, whole-brain and region references, ROI labels, filtering counts, bootstrap settings, and output paths. |
+| `mapmycells_out/<pair_id>_mapmycells_manifest.json` | Per-pair manifest summarizing selected reference mode, whole-brain and region references, ROI labels, filtering counts, bootstrap settings, output paths, the gene-ID fallback table used (`gene_id_fallback_csv`, or `gene_id_fallback_ignored` when it has no IDs of the query species), and the per-sample `gene_id_resolution` summaries. |
 
 ## Nextflow reports
 
