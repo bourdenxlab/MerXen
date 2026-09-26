@@ -40,7 +40,15 @@ Commands:
   mecr               Score mutually exclusive co-expression rates
   clustering-squidpy Run Scanpy/Squidpy clustering analysis
   mapmycells         Run local MapMyCells cell type assignment
+  annotation-panel   Resolve the declared panels of a pair and...
+  annotation-reference-prep
+                      Get or build one reference bundle and...
+  annotation-store   Inspect the annotation reference store...
 ```
+
+The reference-based annotation commands (`annotation-*`, plan
+`docs/plans/robust-celltype-annotation-plan.md` §3.2) take explicit
+options instead of a single `--config`.
 
 Logging is configured in the root `main()` group and streams to stderr at
 `INFO` level.
@@ -358,6 +366,92 @@ merxen mapmycells --config mapmycells_config.json
 The active Python environment must include Allen's `cell_type_mapper` package.
 
 Details: [MapMyCells](stages/mapmycells.md).
+
+---
+
+## `merxen annotation-panel`
+
+`ANNOTATE_PANEL` for one pair x segmentation: reads each platform's
+**declared** panel, removes control features, resolves Ensembl IDs, picks
+the panel mode and writes the panel files and the bundles the pair needs.
+
+```bash
+merxen annotation-panel --prepared-dir clustering_prepare_out --species human \
+  --clustering-config clustering_squidpy_config.json \
+  --annotation-config annotation_config.json \
+  --shared-tissue-mask align_out/shared_tissue_mask.npy \
+  --registration-summary align_out/registration_summary.json \
+  --output-dir annotation_panel
+```
+
+| Option | Description |
+|--------|-------------|
+| `--prepared-dir PATH` | `CLUSTERING_SQUIDPY_PREPARE` output (`manifest.json` + `<platform>/<sid>_prepared.h5ad`). |
+| `--panel-genes-path PATH` | Instead of `--prepared-dir`: a gene list for prepare-only runs (`annotation_panel_genes_path`). |
+| `--species human\|mouse` | Run species. |
+| `--platforms LIST` | Comma-separated platforms to use (default: every prepared sample). |
+| `--output-dir PATH` | Where the panel files go. |
+| `--annotation-config PATH` | `AnnotationConfig` JSON (references, panel settings); default: species defaults. |
+| `--clustering-config PATH` | `clustering_squidpy_config.json`: pair id, sample platforms, segmentation, `min_counts`. |
+| `--pair-id`, `--segmentation` | Override the clustering config's values. |
+| `--panel-file KEY=PATH` | Declared-panel file per sample id or platform: Xenium `gene_panel.json`, MERSCOPE codebook or a gene table. Without one, the unfiltered `var` of the prepared H5AD is the declared panel. |
+| `--shared-tissue-mask PATH`, `--registration-summary PATH` | The pair's `shared_tissue_mask.npy` and the `registration_summary.json` giving its frame; set c then uses table cells inside the mask. |
+| `--min-counts N` | Table-cell threshold (default: the clustering config's). |
+| `--gene-id-fallback-csv PATH` | Local gene table for the symbol -> Ensembl fallback (M0e); overrides the config. |
+| `--panel-mode auto\|intersection\|per_platform` | Override `annotation_panel_mode`. |
+
+Outputs: `panel_report.json` (resolution by source, unresolved features,
+controls removed and why, merged duplicates, set c), one `panel_genes*.json`
+per annotation panel (`panel_genes.json` = set a or the sample's panel,
+`panel_genes_setc.json`, or `panel_genes_<platform>.json` +
+`panel_genes_intersection.json` for `per_platform` pairs) and
+`required_bundles.json`. `panel_hash` is the sha256 of the sorted resolved IDs
+of the declared panel, so cells, zero-count probes and `var` order never
+change it.
+
+## `merxen annotation-reference-prep`
+
+`ANNOTATE_REFERENCE_PREP` for one (reference, panel): returns the bundle
+whose `build_hash` matches, building it once if needed, and writes
+`bundle_ref.json`.
+
+```bash
+merxen annotation-reference-prep --reference-id whb_frontal_supc_clus \
+  --species human --panel-genes annotation_panel/panel_genes.json \
+  --store /media/mathieubo/SSD1/MerXen/annotation_references \
+  --store-large /srv/storage/MerXen/annotation_references \
+  --source precompute=/path/to/precomputed_stats.h5 --output bundle_ref.json
+```
+
+| Option | Description |
+|--------|-------------|
+| `--reference-id ID` | Reference from the annotation config or the known references (plan §3.2). |
+| `--species human\|mouse` | Run species. |
+| `--panel-genes PATH` | `panel_genes*.json` (omit for panel-independent references such as `wmb_region_share`). |
+| `--store PATH`, `--store-large PATH` | Store roots; panels above 1,000 genes go to the large store. |
+| `--annotation-config PATH` | `AnnotationConfig` JSON. |
+| `--source NAME=PATH` | Reference source files, added to the spec's sources. |
+| `--scratch-dir PATH` | Parent of the build scratch directory (never inside a store). |
+| `--output PATH` | `bundle_ref.json` to write. |
+
+Store layout: `<store>/<reference_id>/<build_hash>/` (complete bundles),
+`<store>/.tmp-<uuid>/` (a build in progress or killed),
+`<store>/.failed-<uuid>/` (a build that raised, with `build_error.txt`).
+Sources are copied with a checksum, never symlinked, and nothing is ever
+deleted automatically.
+
+## `merxen annotation-store`
+
+```bash
+merxen annotation-store list --store DIR [--store-large DIR] [--json]
+merxen annotation-store prune --store DIR --unreferenced-by RESULTS_ROOT --dry-run [--json]
+```
+
+`list` shows bundles, temporary and failed builds with their size. `prune`
+requires `--dry-run` and only lists the bundles no `bundle_ref.json`,
+`map_manifest.json`, `required_bundles.json` or `*_annotation_manifest.json`
+under the results root references, plus failed and dead temporary builds.
+Delete by hand after review (OD-D4).
 
 ---
 
