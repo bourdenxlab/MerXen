@@ -39,6 +39,7 @@ from scipy import sparse
 from scipy.cluster.hierarchy import leaves_list, linkage
 
 from merxen.config import ClusteringSquidpyConfig
+from merxen.control_features import CONTROL_TOKENS, control_token_mask
 from merxen.gene_ids import is_ensembl_gene_id
 from merxen.io.transcript_io import first_existing_col
 from merxen.memory import force_release, log_status
@@ -62,14 +63,6 @@ GENE_SYMBOL_COLUMN_CANDIDATES = (
     "name",
 )
 WHB_NEUROTRANSMITTER_LEVEL = "CCN202210140_NEUR"
-CONTROL_TOKENS = (
-    "blank",
-    "control",
-    "negative",
-    "negcontrol",
-    "unassigned",
-    "deprecated",
-)
 CONTROL_OUTPUT_COLUMNS = {
     "control_counts",
     "pct_control_counts",
@@ -4057,8 +4050,7 @@ def _control_feature_mask(adata: ad.AnnData) -> np.ndarray:
         if col in adata.var.columns:
             values.append(adata.var[col].astype(str))
     for series in values:
-        lower = series.astype(str).str.lower()
-        mask |= lower.apply(lambda x: any(t in x for t in CONTROL_TOKENS)).to_numpy()
+        mask |= control_token_mask(series)
     return mask
 
 
