@@ -8,12 +8,15 @@
   manual store maintenance; nothing is ever deleted (OD-D4).
 
 The annotation modules are imported inside the commands, so ``merxen``
-starts without loading them.
+starts without loading them. Store, builder and input errors end the command
+with a one-line message (``click.ClickException``), not a traceback.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -24,6 +27,17 @@ if TYPE_CHECKING:
     from merxen.annotation.vocab import Species
 
 _SPECIES = click.Choice(["human", "mouse"])
+
+
+@contextmanager
+def _clean_errors() -> Iterator[None]:
+    """Turn expected store, builder and input errors into one-line CLI errors."""
+    from merxen.annotation.store import StoreError
+
+    try:
+        yield
+    except (StoreError, ValueError, FileNotFoundError) as error:
+        raise click.ClickException(f"{type(error).__name__}: {error}") from error
 
 
 def _load_annotation_config(path: Path | None, species: str) -> AnnotationConfig:
@@ -131,6 +145,12 @@ def _read_json(path: Path | None) -> dict[str, Any] | None:
     default=None,
     help="Override annotation_panel_mode.",
 )
+@click.option(
+    "--require-shared-tissue-mask",
+    is_flag=True,
+    help="Refuse a label-free set c without the shared tissue mask (aligned "
+    "pairs in pipeline runs); a curated set c needs no mask.",
+)
 def annotation_panel_command(
     prepared_dir: Path | None,
     panel_genes_path: Path | None,
@@ -147,8 +167,49 @@ def annotation_panel_command(
     min_counts: int | None,
     gene_id_fallback_csv: Path | None,
     panel_mode: str | None,
+    require_shared_tissue_mask: bool,
 ) -> None:
     """Resolve the declared panels of a pair and list its required bundles."""
+    with _clean_errors():
+        _annotation_panel(
+            prepared_dir=prepared_dir,
+            panel_genes_path=panel_genes_path,
+            species=species,
+            platforms=platforms,
+            output_dir=output_dir,
+            annotation_config_path=annotation_config_path,
+            clustering_config_path=clustering_config_path,
+            pair_id=pair_id,
+            segmentation=segmentation,
+            panel_file_values=panel_file_values,
+            shared_tissue_mask=shared_tissue_mask,
+            registration_summary=registration_summary,
+            min_counts=min_counts,
+            gene_id_fallback_csv=gene_id_fallback_csv,
+            panel_mode=panel_mode,
+            require_shared_tissue_mask=require_shared_tissue_mask,
+        )
+
+
+def _annotation_panel(
+    *,
+    prepared_dir: Path | None,
+    panel_genes_path: Path | None,
+    species: str,
+    platforms: str | None,
+    output_dir: Path,
+    annotation_config_path: Path | None,
+    clustering_config_path: Path | None,
+    pair_id: str | None,
+    segmentation: str | None,
+    panel_file_values: tuple[str, ...],
+    shared_tissue_mask: Path | None,
+    registration_summary: Path | None,
+    min_counts: int | None,
+    gene_id_fallback_csv: Path | None,
+    panel_mode: str | None,
+    require_shared_tissue_mask: bool,
+) -> None:
     from merxen.annotation.panel import (
         compute_panel,
         load_shared_tissue_mask,
@@ -209,6 +270,7 @@ def annotation_panel_command(
             panel_files=_key_value_paths(panel_file_values, "--panel-file"),
             shared_mask=mask,
             min_counts=min_counts,
+            require_shared_mask=require_shared_tissue_mask,
         )
     click.echo(
         f"annotation-panel {result.required.status}: panel mode "
@@ -343,6 +405,42 @@ def annotation_reference_prep_command(
     max_gb: int | None,
 ) -> None:
     """Get or build one reference bundle and write its bundle_ref.json."""
+    with _clean_errors():
+        _annotation_reference_prep(
+            reference_id=reference_id,
+            species=species,
+            panel_genes=panel_genes,
+            store=store,
+            store_large=store_large,
+            annotation_config_path=annotation_config_path,
+            source_values=source_values,
+            scratch_dir=scratch_dir,
+            output=output,
+            download_dir=download_dir,
+            auto_download=auto_download,
+            download_seed_values=download_seed_values,
+            n_processors=n_processors,
+            max_gb=max_gb,
+        )
+
+
+def _annotation_reference_prep(
+    *,
+    reference_id: str,
+    species: str,
+    panel_genes: Path | None,
+    store: Path,
+    store_large: Path | None,
+    annotation_config_path: Path | None,
+    source_values: tuple[str, ...],
+    scratch_dir: Path | None,
+    output: Path,
+    download_dir: Path | None,
+    auto_download: bool,
+    download_seed_values: tuple[str, ...],
+    n_processors: int | None,
+    max_gb: int | None,
+) -> None:
     from merxen.annotation.panel import load_annotation_panel
     from merxen.annotation.store import ReferenceStore, resolve_builder
 
@@ -378,6 +476,8 @@ def annotation_reference_prep_command(
     bundle_ref = reference_store.get_or_build(
         spec, panel, builder=builder, config=config
     )
+    # bundle_ref.json holds only the bundle's identity, so a re-run writes the
+    # same bytes; whether it was reused is logged here instead.
     bundle_ref.write(output)
     click.echo(
         f"annotation-reference-prep: {'reused' if bundle_ref.reused else 'built'} "
@@ -402,10 +502,14 @@ def _format_size(size_bytes: int) -> str:
 
 @annotation_store_group.command(name="list")
 @click.option(
-    "--store", type=click.Path(path_type=Path, file_okay=False), required=True
+    "--store",
+    type=click.Path(path_type=Path, file_okay=False, exists=True),
+    required=True,
 )
 @click.option(
-    "--store-large", type=click.Path(path_type=Path, file_okay=False), default=None
+    "--store-large",
+    type=click.Path(path_type=Path, file_okay=False, exists=True),
+    default=None,
 )
 @click.option("--json", "as_json", is_flag=True, help="Print JSON.")
 def annotation_store_list_command(
@@ -440,10 +544,14 @@ def annotation_store_list_command(
 
 @annotation_store_group.command(name="prune")
 @click.option(
-    "--store", type=click.Path(path_type=Path, file_okay=False), required=True
+    "--store",
+    type=click.Path(path_type=Path, file_okay=False, exists=True),
+    required=True,
 )
 @click.option(
-    "--store-large", type=click.Path(path_type=Path, file_okay=False), default=None
+    "--store-large",
+    type=click.Path(path_type=Path, file_okay=False, exists=True),
+    default=None,
 )
 @click.option(
     "--unreferenced-by",
