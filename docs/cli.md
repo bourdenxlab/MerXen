@@ -518,12 +518,15 @@ merxen annotate --species human \
 | `--panel-dir DIR` | `merxen annotation-panel` output; default: the panel is computed from the inputs into `<out>/panel`. |
 | `--references IDS` | Comma-separated reference ids to map (default: every primary and secondary bundle the panel requires). |
 | `--annotation-config PATH` | `AnnotationConfig` JSON (thresholds, `xplat_sensitivity_segmentations`, `ctm_version`, ...). |
-| `--min-counts N` | Table-cell threshold (the clustering `min_counts`, 10). |
+| `--clustering-config PATH` | With `--prepared-dir`: the `clustering_squidpy_config.json` of the run (pair id, sample platforms and `min_counts`, which `--min-counts` may not contradict). |
+| `--min-counts N` | Table-cell threshold (the clustering `min_counts`; default: the clustering config's, else 10). |
 | `--n-processors N` | MapMyCells processes (default `$MERXEN_ANNOTATION_MAP_N_PROCESSORS` or 6). |
 | `--work-dir DIR` | Scratch for the query H5ADs and extended JSONs (default `<out>/.work`, removed). |
 | `--keep-extended-json`, `--reuse/--no-reuse`, `--reuse-from DIR` | Keep the gzipped extended JSON; reuse identical runs of a `map_manifest.json` (default: `--out`). |
 | `--gene-id-fallback-csv PATH` | Local symbol → Ensembl table (M0e), as for `annotation-panel`. |
 | `--platforms`, `--no-provisional` | Map only these platforms; skip the provisional labels. |
+| `--require-bundle-refs` | Map only the bundles given with `--bundle-ref` / `--bundle`; a missing one fails instead of being looked up in the store (what the pipeline task passes: it maps exactly the bundles `ANNOTATE_REFERENCE_PREP` resolved). Refs of roles MAP does not map (`wmb_region_share`) are accepted and not opened. |
+| `--allow-refused-panel` | For a refused panel (`required_bundles.json` status `refused`), write `map_manifest.json` with `panel_status: refused`, its reasons and no runs, and exit 0 (pipeline runs: RESOLVE then writes statuses only). Without it a refused panel is an error. |
 
 MapMyCells runs as a subprocess of `merxen.analysis.mapmycells_entrypoint`
 with the validated configuration (bootstrap factor 0.5, 100 iterations,
