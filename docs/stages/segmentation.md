@@ -228,38 +228,50 @@ MERSCOPE preset does not exclude (see step 5).
 
 `write_proseg_csv_from_points` drops control transcripts before ProSeg sees
 them, using the shared registry in
-[control_features.py](../../src/merxen/control_features.py). A transcript is
-dropped when any of these holds:
+[control_features.py](../../src/merxen/control_features.py). A transcript
+with a usable feature type is judged by that type alone; the name rules apply
+only to transcripts without one:
 
-1. **Feature type (Xenium, preferred).** `is_gene` is false, or, when
-   `is_gene` is missing, `codeword_category` is not `predesigned_gene` or
-   `custom_gene`. XOA ≥ 3.0 writes both columns to `transcripts.parquet` and
-   the source SpatialData keeps them. This catches every non-`Gene
-   Expression` feature type: negative control probe, negative control
-   codeword, genomic control (Xenium Prime 5K), unassigned codeword and
-   deprecated codeword.
-2. **Anchored name.** Xenium names starting with `NegControl`, `Unassigned`,
-   `Deprecated`, `Intergenic` (5K genomic controls are
-   `Intergenic_Region_*`), `GenomicControl`, `BLANK_` (unassigned codewords
-   before XOA renamed them) or `antisense_` (negative control probes in
-   pre-release data). MERSCOPE names matching `^Blank-\d+$`. A name match is
-   dropped even when the feature type says gene.
-3. **Substring fallback.** Only for rows without a usable feature type (all
-   MERSCOPE rows, and Xenium data from before XOA 3.0): names containing
+1. **Feature type (Xenium, preferred).** The transcript is dropped when
+   `is_gene` is false, or, where `is_gene` is missing, when
+   `codeword_category` is not `predesigned_gene` or `custom_gene`. XOA ≥ 3.0
+   writes both columns to `transcripts.parquet` and the source SpatialData
+   keeps them. This catches every non-`Gene Expression` feature type:
+   negative control probe, negative control codeword, genomic control
+   (Xenium Prime 5K), unassigned codeword and deprecated codeword. A
+   transcript whose feature type says gene is kept even when its name
+   matches a rule below.
+2. **Anchored name** (rows without a feature type: all MERSCOPE rows, and
+   Xenium data from before XOA 3.0). Xenium names starting with
+   `NegControl`, `Unassigned`, `Deprecated`, `Intergenic` (5K genomic
+   controls are `Intergenic_Region_*`), `GenomicControl`, `BLANK_`
+   (unassigned codewords before XOA renamed them) or `antisense_` (negative
+   control probes in pre-release data, which has no feature-type column).
+   MERSCOPE names matching `^Blank-\d+$`.
+3. **Substring fallback** (rows without a feature type): names containing
    `blank`, `control`, `negative`, `negcontrol`, `unassigned` or `deprecated`,
    case-insensitive. These are the tokens clustering already uses to remove
    control variables, so ProSeg and clustering drop the same features.
 
-The CSV writer logs how many control transcripts and features it dropped,
-and warns with their names when a control was recognised only by its feature
-type (the registry then needs the new name).
+Because the feature type decides, a custom-panel gene whose name starts with
+one of these prefixes (for example `antisense_`) stays in the ProSeg input
+on XOA ≥ 3.0 data. On data without a feature type the name rules still drop
+it; that is the price of recognising pre-release controls.
+
+The CSV writer logs how many control transcripts and features it dropped.
+It warns, with feature names:
+
+- when a control was recognised only by its feature type (the registry then
+  needs the new name);
+- when a feature was kept because its feature type says gene although its
+  name matches a control-name rule, with the number of transcripts involved.
+  Check whether the feature is a real gene or a registry rule is too broad.
 
 Until this change the filter was `^(Deprecated|NegControl|Unassigned|Intergenic)`
 on Xenium only. **It affects future segmentation runs only.** Existing
 `transcripts_for_proseg.csv` files, ProSeg outputs and downstream results are
-not rewritten, and a run that reuses persisted Cellpose outputs also reuses
-its old CSV; force the segmentation stage to rerun to apply the new filter.
-Measured on the current source SpatialData (read-only, 2026-09-26):
+not rewritten. Measured on the current source SpatialData (read-only,
+2026-09-26):
 
 | Dataset | Transcripts | Old filter removes | New filter removes |
 |---------|------------:|-------------------:|-------------------:|
@@ -269,14 +281,47 @@ Measured on the current source SpatialData (read-only, 2026-09-26):
 
 On the four human Xenium sections (P7513, P7113, P1212, P5011) the new
 filter removes exactly the old filter's transcripts: their only control
-types are negative control probes and codewords and unassigned codewords.
-The change matters for MERSCOPE, and for Xenium Prime 5K or custom panels
-with `BLANK_` / genomic-control features. The tables MerXen builds from the
+types are negative control probes and codewords and unassigned codewords,
+and no feature typed as a gene matches a control-name rule. The change
+matters for MERSCOPE, and for Xenium Prime 5K or custom panels with
+`BLANK_` / genomic-control features. The tables MerXen builds from the
 ProSeg output points (ProSeg, ProSeg hybrid, Cellpose mask, nuclei and
 boundary tables) follow the CSV: new MERSCOPE runs no longer carry the
-`Blank-*` variables, so their clustering `control_counts` /
-`pct_control_counts` are 0, as for Xenium already. Vizgen's own
+`Blank-*` variables. With no control variables and no other control source,
+their clustering `control_counts` / `pct_control_counts` are NaN, as for
+Xenium ProSeg tables already, so per-cell blank QC is unavailable on new
+MERSCOPE ProSeg-derived tables. No filter uses these columns. Vizgen's own
 `table_original` keeps its blank matrix in `obsm["blank"]`.
+
+### Applying the new filter to an existing dataset
+
+No pipeline flag rewrites `transcripts_for_proseg.csv`. `CELLPOSE_SEGMENT`
+reuses the persisted CSV, mask and probability logits whenever all three
+exist, and `--force_proseg_rerun` forces only `PROSEG_SEGMENT`, which reads
+that same CSV. On its own, `--force_proseg_rerun true` therefore rebuilds the
+ProSeg base from the old CSV, blanks included, without any warning. To apply
+the new filter to one `<pair_id>` / `<platform>` (lower case, as in the
+output tree):
+
+1. Move `${outdir}/<pair_id>/<platform>/segmentation/transcripts_for_proseg.csv`
+   aside, and keep it until the new run has been checked. Without it,
+   `CELLPOSE_SEGMENT` reruns Cellpose (on the GPU when enabled) and
+   overwrites the persistent `cellpose_masks_tiled.npy`,
+   `cellpose_cellprobs_tiled.npy` and `cellpose_stitching_stats.json` in the
+   same folder before writing the new CSV. Copy those elsewhere first if the
+   old mask must be kept. The nuclei mask is reused.
+2. Run the pipeline with `--force_proseg_rerun true` and without `-resume`.
+   Without the flag, `PROSEG_SEGMENT` reuses the persistent
+   `${outdir}/<pair_id>/<platform>/latest/latest_spatialdata.zarr` built from
+   the old CSV. With `-resume`, Nextflow may reuse the cached
+   `CELLPOSE_SEGMENT` task, because the Python change does not alter its task
+   hash. The flag applies to every ProSeg task in the run, so restrict the
+   samplesheet to the rows being refreshed (and, with `analysis_mode`, to the
+   platform).
+3. Later stages keep their own persistent outputs unless their force flags
+   are set (see
+   [Forcing a full rebuild](../running-the-pipeline.md#forcing-a-full-rebuild));
+   check that the outputs you rely on were rebuilt from the new latest zarr.
 
 ## Outputs
 
