@@ -18,8 +18,8 @@ from shapely import STRtree, contains_xy, points
 from shapely.geometry import MultiPolygon, Polygon
 from statsmodels.stats.multitest import multipletests
 
-from merxen.analysis.clustering_squidpy import CONTROL_TOKENS
 from merxen.config import SpatialGeneAnalysisConfig, SpatialGeneAnalysisSampleConfig
+from merxen.control_features import control_token_mask
 from merxen.cortical_depth.boundaries import load_boundary_annotations
 from merxen.cortical_depth.tissue import build_full_tissue_polygon
 from merxen.io.transcript_io import iter_points_chunks, resolve_col
@@ -186,10 +186,7 @@ def load_and_classify_transcripts(
         n_outside_tissue += int((finite & ~in_tissue).sum())
         valid = finite & in_tissue
         if drop_control_features:
-            lower = np.char.lower(genes.astype(str))
-            controls = np.zeros(len(genes), dtype=bool)
-            for token in CONTROL_TOKENS:
-                controls |= np.char.find(lower, token) >= 0
+            controls = control_token_mask(genes)
             n_controls_excluded += int((valid & controls).sum())
             valid &= ~controls
         if not valid.any():
