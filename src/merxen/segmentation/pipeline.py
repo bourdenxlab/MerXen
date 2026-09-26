@@ -98,21 +98,48 @@ def _pixel_area_um2_from_affine(
 def _load_merscope_transform_matrix(config: SegmentationConfig) -> np.ndarray:
     """Load the MERSCOPE micron-to-mosaic transform matrix."""
     dataset = config.dataset
+    built_path = Path(dataset.data_path) / "micron_to_mosaic_pixel_transform.csv"
     candidates: list[Path] = []
     if dataset.transform_path is not None:
         candidates.append(Path(dataset.transform_path))
-    candidates.append(Path(dataset.data_path) / "micron_to_mosaic_pixel_transform.csv")
+    candidates.append(built_path)
 
     for candidate in candidates:
         if not candidate.exists():
             continue
         matrix = np.loadtxt(candidate)
         if matrix.shape == (3, 3):
+            if candidate != built_path and built_path.exists():
+                _require_matching_build_transform(matrix, candidate, built_path)
             return matrix
     raise FileNotFoundError(
         "Could not determine MERSCOPE transform. "
         "Set dataset.transform_path or include "
         "'micron_to_mosaic_pixel_transform.csv' in the SpatialData zarr."
+    )
+
+
+def _require_matching_build_transform(
+    matrix: np.ndarray,
+    override_path: Path,
+    built_path: Path,
+) -> None:
+    """Fail when the override no longer matches the transform used at build time.
+
+    Points, shapes, and the enrichment stage use the transform recorded in the
+    SpatialData zarr. Converting masks with a different override (for example
+    after the CSV was corrected but the build was reused) would misregister
+    every Cellpose/ProSeg output against the transcripts.
+    """
+    built = np.loadtxt(built_path)
+    if built.shape == (3, 3) and np.allclose(matrix, built, rtol=1e-6, atol=1e-3):
+        return
+    raise ValueError(
+        f"MERSCOPE transform_path {override_path} differs from the transform the "
+        f"SpatialData zarr was built with ({built_path}). Rebuild the SpatialData "
+        "(for example with --force_spatialdata_build true) or point "
+        "merscope_transform_path at the transform used for the build. "
+        f"transform_path={matrix.tolist()}, built={built.tolist()}"
     )
 
 
