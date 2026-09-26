@@ -19,9 +19,12 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import pytest
-import yaml  # type: ignore[import-untyped]
 
 from merxen.annotation import vocab
+
+# The generator needs PyYAML, which pyproject.toml does not declare yet
+# (test_vocab.py's test_pyyaml_is_available_for_the_generator fails if it goes).
+yaml = pytest.importorskip("yaml", reason="PyYAML is not installed")
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "annotation" / "build_vocab_tables.py"
