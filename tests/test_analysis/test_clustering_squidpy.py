@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import warnings
 from pathlib import Path
@@ -19,6 +20,7 @@ from shapely.geometry import box
 
 import merxen.analysis.clustering_squidpy as clustering_mod
 from merxen.analysis.clustering_squidpy import (
+    LEIDEN_PROVENANCE_UNS_KEY,
     AtlasMarkerSet,
     _add_spatial_scale_bar,
     _clean_spatial_axis,
@@ -39,6 +41,7 @@ from merxen.analysis.clustering_squidpy import (
     prepare_clustering_squidpy,
     remove_control_features,
     run_clustering_squidpy,
+    run_hierarchical_scanpy_clustering,
     run_scanpy_clustering,
     score_clusters_by_atlas_markers,
     write_clustered_spatialdata_table,
@@ -310,6 +313,371 @@ def test_run_scanpy_clustering_preserves_ensembl_ids() -> None:
         "ENSG000002",
         "ENSG000003",
     ]
+
+
+def _poisson_adata(n_obs: int, n_vars: int, *, seed: int) -> ad.AnnData:
+    rng = np.random.default_rng(seed)
+    adata = ad.AnnData(
+        X=rng.poisson(lam=4, size=(n_obs, n_vars)).astype(np.float32),
+        obs=pd.DataFrame(index=[f"cell{i}" for i in range(n_obs)]),
+        var=pd.DataFrame(index=[f"Gene{i}" for i in range(n_vars)]),
+    )
+    adata.obsm["spatial"] = rng.normal(size=(n_obs, 2))
+    return adata
+
+
+def _fake_rapids_singlecell(calls: dict[str, object]) -> SimpleNamespace:
+    """Return a stand-in for rapids_singlecell with rsc 0.15.2 signatures."""
+
+    def fake_pca(data: ad.AnnData, **kwargs: object) -> None:
+        calls["pca"] = kwargs
+        data.obsm["X_pca"] = np.ones((data.n_obs, 3), dtype=np.float32)
+
+    def fake_umap(data: ad.AnnData, **kwargs: object) -> None:
+        calls["umap"] = kwargs
+        data.obsm["X_umap"] = np.zeros((data.n_obs, 2), dtype=np.float32)
+
+    def fake_leiden(
+        data: ad.AnnData,
+        resolution: float = 1.0,
+        *,
+        random_state: int | None = 0,
+        key_added: str = "leiden",
+        n_iterations: int = 100,
+    ) -> None:
+        calls["leiden"] = {
+            "resolution": resolution,
+            "random_state": random_state,
+            "key_added": key_added,
+        }
+        data.obs[key_added] = pd.Categorical(
+            ["0" if i % 2 == 0 else "1" for i in range(data.n_obs)]
+        )
+        data.uns[key_added] = {
+            "params": {
+                "resolution": resolution,
+                "random_state": random_state,
+                "n_iterations": n_iterations,
+            }
+        }
+
+    return SimpleNamespace(
+        __version__="0.15.2",
+        get=SimpleNamespace(
+            anndata_to_GPU=lambda data: None,
+            anndata_to_CPU=lambda data: None,
+        ),
+        pp=SimpleNamespace(
+            pca=fake_pca,
+            neighbors=lambda data, **kwargs: calls.setdefault("neighbors", kwargs),
+        ),
+        tl=SimpleNamespace(umap=fake_umap, leiden=fake_leiden),
+    )
+
+
+def test_run_scanpy_clustering_records_cpu_leiden_provenance() -> None:
+    """CPU clustering should record the igraph engine, iterations, and seed."""
+    out = run_scanpy_clustering(
+        _poisson_adata(20, 6, seed=3),
+        min_counts=1,
+        min_cells=1,
+        n_pcs=3,
+        n_neighbors=4,
+        leiden_resolution=0.7,
+        random_seed=5,
+        use_gpu=False,
+        key_added="leiden_broad",
+    )
+
+    params = out.uns["merxen_clustering_params_leiden_broad"]
+    assert params["engine"] == "scanpy-igraph"
+    assert params["embedding_engine"] == "scanpy"
+    assert params["leiden_flavor"] == "igraph"
+    assert params["leiden_n_iterations"] == 2
+    assert params["leiden_random_state"] == 5
+    assert params["leiden_resolution"] == 0.7
+    assert params["n_pcs_used"] == 3
+    assert params["n_neighbors_used"] == 4
+    assert params["gpu_requested"] is False
+    assert params["gpu_used"] is False
+    versions = json.loads(params["engine_versions"])
+    assert set(versions) == {"scanpy", "igraph"}
+    assert all(isinstance(version, str) for version in versions.values())
+    # The recorded settings must agree with what scanpy itself says it ran.
+    assert out.uns["leiden_broad"]["params"]["n_iterations"] == 2
+    assert out.uns["leiden_broad"]["params"]["random_state"] == 5
+
+    record = json.loads(out.uns[LEIDEN_PROVENANCE_UNS_KEY]["leiden_broad"])
+    assert record["engine"] == "scanpy-igraph"
+    assert record["flavor"] == "igraph"
+    assert record["n_iterations"] == 2
+    assert record["random_state"] == 5
+    assert record["resolution"] == 0.7
+    assert record["key_added"] == "leiden_broad"
+    assert record["engine_versions"] == versions
+
+
+def test_run_scanpy_clustering_records_cpu_fallback_when_gpu_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A GPU request without rapids-singlecell should record the CPU engine."""
+    monkeypatch.setitem(sys.modules, "rapids_singlecell", None)
+
+    out = run_scanpy_clustering(
+        _poisson_adata(20, 6, seed=4),
+        min_counts=1,
+        min_cells=1,
+        n_pcs=3,
+        n_neighbors=4,
+        use_gpu=True,
+    )
+
+    params = out.uns["merxen_clustering_params"]
+    assert params["gpu_requested"] is True
+    assert params["gpu_used"] is False
+    assert params["engine"] == "scanpy-igraph"
+    record = json.loads(out.uns[LEIDEN_PROVENANCE_UNS_KEY]["leiden"])
+    assert record["gpu_requested"] is True
+    assert record["engine"] == "scanpy-igraph"
+
+
+def test_run_scanpy_clustering_records_gpu_leiden_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GPU clustering should record rapids-singlecell and its default iterations."""
+    calls: dict[str, object] = {}
+    monkeypatch.setitem(
+        sys.modules, "rapids_singlecell", _fake_rapids_singlecell(calls)
+    )
+
+    out = run_scanpy_clustering(
+        _poisson_adata(20, 6, seed=6),
+        min_counts=1,
+        min_cells=1,
+        n_pcs=3,
+        n_neighbors=4,
+        leiden_resolution=0.2,
+        random_seed=9,
+        use_gpu=True,
+        key_added="leiden_broad",
+    )
+
+    # No behaviour change: the GPU Leiden call keeps the library defaults.
+    assert calls["leiden"] == {
+        "resolution": 0.2,
+        "random_state": 9,
+        "key_added": "leiden_broad",
+    }
+    params = out.uns["merxen_clustering_params_leiden_broad"]
+    assert params["gpu_used"] is True
+    assert params["gpu_requested"] is True
+    assert params["engine"] == "rapids_singlecell"
+    assert params["embedding_engine"] == "rapids_singlecell"
+    assert params["leiden_flavor"] == "cugraph"
+    assert params["leiden_n_iterations"] == 100
+    assert params["leiden_random_state"] == 9
+    versions = json.loads(params["engine_versions"])
+    assert set(versions) == {"scanpy", "rapids_singlecell", "cugraph"}
+    assert versions["rapids_singlecell"] is not None
+
+    record = json.loads(out.uns[LEIDEN_PROVENANCE_UNS_KEY]["leiden_broad"])
+    assert record["engine"] == "rapids_singlecell"
+    assert record["n_iterations"] == 100
+    assert record["resolution"] == 0.2
+
+
+def test_gpu_leiden_n_iterations_falls_back_to_engine_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without an introspectable default, the engine's own record is used."""
+    fake_rsc = SimpleNamespace(tl=SimpleNamespace(leiden=lambda data, **kwargs: None))
+    monkeypatch.setitem(sys.modules, "rapids_singlecell", fake_rsc)
+    adata = _poisson_adata(4, 2, seed=0)
+
+    assert clustering_mod._gpu_leiden_n_iterations(adata, key_added="leiden") == -1
+    adata.uns["leiden"] = {"params": {"n_iterations": np.int64(50)}}
+    assert clustering_mod._gpu_leiden_n_iterations(adata, key_added="leiden") == 50
+
+
+def test_library_version_uses_loaded_module_without_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Modules without distribution metadata fall back to ``__version__``."""
+    monkeypatch.setitem(
+        sys.modules,
+        "merxen_fake_engine_library",
+        SimpleNamespace(__version__="9.9.9"),
+    )
+
+    assert clustering_mod._library_version("merxen_fake_engine_library") == "9.9.9"
+    assert clustering_mod._library_version("merxen_missing_engine_library") is None
+
+
+def test_leiden_provenance_round_trips_through_h5ad_and_zarr(tmp_path: Path) -> None:
+    """Provenance fields should be H5AD/zarr-safe scalars and JSON strings."""
+    out = run_scanpy_clustering(
+        _poisson_adata(20, 6, seed=8),
+        min_counts=1,
+        min_cells=1,
+        n_pcs=3,
+        n_neighbors=4,
+        random_seed=2,
+        use_gpu=False,
+        key_added="leiden_broad",
+    )
+    provenance = dict(out.uns[LEIDEN_PROVENANCE_UNS_KEY])
+    assert all("/" not in key for key in provenance)
+    assert all(isinstance(value, str) for value in provenance.values())
+
+    out.write_h5ad(tmp_path / "clustered.h5ad")
+    out.write_zarr(tmp_path / "clustered.zarr")
+    for reloaded in (
+        ad.read_h5ad(tmp_path / "clustered.h5ad"),
+        ad.read_zarr(tmp_path / "clustered.zarr"),
+    ):
+        params = reloaded.uns["merxen_clustering_params_leiden_broad"]
+        assert params["engine"] == "scanpy-igraph"
+        assert params["leiden_flavor"] == "igraph"
+        assert int(params["leiden_n_iterations"]) == 2
+        assert int(params["leiden_random_state"]) == 2
+        assert json.loads(params["engine_versions"]) == json.loads(
+            out.uns["merxen_clustering_params_leiden_broad"]["engine_versions"]
+        )
+        reloaded_provenance = dict(reloaded.uns[LEIDEN_PROVENANCE_UNS_KEY])
+        assert {
+            key: json.loads(value) for key, value in reloaded_provenance.items()
+        } == {key: json.loads(value) for key, value in provenance.items()}
+
+
+def test_hierarchical_clustering_records_leiden_provenance_per_round(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Broad, branch, neuron-split, and neuron-subtype rounds keep provenance."""
+    rng = np.random.default_rng(42)
+    genes = [f"G{i}" for i in range(24)]
+    blocks = {
+        "astro": [0, 1, 2, 3],
+        "oligo": [4, 5, 6, 7],
+        "exc": [8, 9, 10, 11, 16, 17],
+        "inh": [12, 13, 14, 15, 16, 17],
+    }
+    rows = []
+    for gene_indices in blocks.values():
+        for _ in range(80):
+            lam = np.full(len(genes), 0.5)
+            lam[gene_indices] = 6.0
+            rows.append(rng.poisson(lam))
+    counts = np.asarray(rows, dtype=np.float32)
+    adata = ad.AnnData(
+        X=counts,
+        obs=pd.DataFrame(index=[f"cell{i}" for i in range(counts.shape[0])]),
+        var=pd.DataFrame({"gene": genes}, index=genes),
+    )
+    adata.obsm["spatial"] = rng.normal(size=(counts.shape[0], 2))
+
+    def _markers(name: str) -> tuple[str, ...]:
+        return tuple(genes[i] for i in blocks[name])
+
+    marker_sets = [
+        AtlasMarkerSet("lvl", "a", "Astrocyte", "Astrocytes", _markers("astro")),
+        AtlasMarkerSet(
+            "lvl", "o", "Oligodendrocyte", "Oligodendrocytes", _markers("oligo")
+        ),
+        AtlasMarkerSet(
+            "lvl",
+            "e",
+            "Upper-layer intratelencephalic",
+            "Neurons",
+            _markers("exc"),
+            neuron_split="Excitatory",
+        ),
+        AtlasMarkerSet(
+            "lvl",
+            "i",
+            "MGE interneuron",
+            "Neurons",
+            _markers("inh"),
+            neuron_split="Inhibitory",
+        ),
+    ]
+    monkeypatch.setattr(
+        clustering_mod, "_load_configured_marker_sets", lambda _config: marker_sets
+    )
+    monkeypatch.setattr(
+        clustering_mod, "_load_configured_marker_alias_lookup", lambda _config: {}
+    )
+    for name in (
+        "_save_round_plots",
+        "_save_branch_gene_dotplot",
+        "_write_annotation_artifacts",
+    ):
+        monkeypatch.setattr(clustering_mod, name, lambda *args, **kwargs: {})
+    cfg = ClusteringSquidpyConfig.model_validate(
+        {
+            "pair_id": "pair1",
+            "output_dir": tmp_path,
+            "samples": [],
+            "use_gpu": False,
+            "n_pcs": 10,
+            "n_neighbors": 10,
+            "random_seed": 3,
+        }
+    )
+
+    clustered, artifacts = run_hierarchical_scanpy_clustering(
+        adata, cfg, output_dir=tmp_path / "hier", sample_id="s1"
+    )
+
+    provenance = {
+        key: json.loads(value)
+        for key, value in clustered.uns[LEIDEN_PROVENANCE_UNS_KEY].items()
+    }
+    assert set(provenance) == {
+        "leiden_broad",
+        "leiden_subcluster_astrocytes",
+        "leiden_subcluster_oligodendrocytes",
+        "leiden_neuron_split",
+        "leiden_neuron_subcluster_excitatory",
+        "leiden_neuron_subcluster_inhibitory",
+    }
+    for record in provenance.values():
+        assert record["engine"] == "scanpy-igraph"
+        assert record["flavor"] == "igraph"
+        assert record["n_iterations"] == 2
+        assert record["random_state"] == 3
+    assert provenance["leiden_broad"]["resolution"] == 0.2
+    assert provenance["leiden_subcluster_astrocytes"]["branch"] == "Astrocytes"
+    assert provenance["leiden_subcluster_astrocytes"]["resolution"] == 0.5
+    assert provenance["leiden_neuron_split"]["resolution"] == 0.15
+    inhibitory = provenance["leiden_neuron_subcluster_inhibitory"]
+    assert inhibitory["neuron_split"] == "Inhibitory"
+    assert inhibitory["key_added"] == "leiden_neuron_subcluster"
+
+    manifest = clustered.uns["merxen_hierarchical_clustering"]["branch_manifest"]
+    assert manifest["Astrocytes"]["leiden_provenance_key"] == (
+        "leiden_subcluster_astrocytes"
+    )
+    neurons = manifest["Neurons"]
+    assert neurons["split_leiden_provenance_key"] == "leiden_neuron_split"
+    assert neurons["splits"]["Excitatory"]["leiden_provenance_key"] == (
+        "leiden_neuron_subcluster_excitatory"
+    )
+
+    clustered.write_h5ad(tmp_path / "s1_clustered.h5ad")
+    reloaded = ad.read_h5ad(tmp_path / "s1_clustered.h5ad")
+    assert {
+        key: json.loads(value)
+        for key, value in reloaded.uns[LEIDEN_PROVENANCE_UNS_KEY].items()
+    } == provenance
+    branch = ad.read_h5ad(artifacts["s1_astrocytes_subcluster_h5ad"])
+    assert set(branch.uns[LEIDEN_PROVENANCE_UNS_KEY]) == {
+        "leiden_broad",
+        "leiden_subcluster",
+    }
+    assert branch.uns["merxen_clustering_params_leiden_subcluster"]["engine"] == (
+        "scanpy-igraph"
+    )
 
 
 def test_remove_control_features_drops_blank_negative_and_unassigned() -> None:
