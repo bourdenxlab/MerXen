@@ -473,6 +473,10 @@ class BundleBuilder:
         params: Further content-affecting builder parameters (hashed).
         uses_panel: Whether the bundle depends on the panel; ``False`` for
             panel-independent references such as the mouse region shares.
+        prepare_spec: Optional ``(spec, options) -> spec`` that completes a
+            spec's sources (directory expansion, pinned downloads) before
+            ``build_hash`` is computed; ``annotation-reference-prep`` calls
+            it. Not part of ``build_hash``.
     """
 
     name: str
@@ -480,6 +484,7 @@ class BundleBuilder:
     taxonomy_id: str | None = None
     params: Mapping[str, Any] = field(default_factory=dict)
     uses_panel: bool = True
+    prepare_spec: Callable[..., AnnotationReferenceSpec] | None = None
 
 
 BuilderFactory = Callable[
