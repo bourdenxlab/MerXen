@@ -267,6 +267,36 @@ def default_references(species: Species) -> list[AnnotationReferenceSpec]:
     return specs
 
 
+def expand_known_references(value: Any) -> Any:
+    """Complete bare reference ids and partial specs of known references.
+
+    The pipeline writes ``annotation_config.json`` from its params and names
+    the references by id only (``annotation_<species>_references``), so the
+    taxonomy settings of a known reference (species, role, hierarchy,
+    ``drop_level``) come from ``KNOWN_REFERENCES`` in one place. A string
+    becomes that reference's known spec; a mapping keeps its own keys and
+    takes the missing ones from the known spec. Anything else, and every
+    unknown id, is returned unchanged for normal validation.
+
+    Args:
+        value: The raw ``references`` value of an ``AnnotationConfig``.
+
+    Returns:
+        The value with known ids expanded to spec mappings.
+    """
+    if not isinstance(value, list | tuple):
+        return value
+    expanded: list[Any] = []
+    for item in value:
+        if isinstance(item, str) and item in KNOWN_REFERENCES:
+            expanded.append({"reference_id": item, **KNOWN_REFERENCES[item]})
+        elif isinstance(item, dict) and item.get("reference_id") in KNOWN_REFERENCES:
+            expanded.append({**KNOWN_REFERENCES[item["reference_id"]], **item})
+        else:
+            expanded.append(item)
+    return expanded
+
+
 class AnnotationThresholds(_AnnotationModel):
     """Confidence thresholds, targets and emission limits (plan §3.7, §5.2).
 
@@ -1056,6 +1086,11 @@ class AnnotationConfig(_AnnotationModel):
     ctm_version: str = "1.7.2"
     reference_store: Path | None = None
     reference_store_large: Path | None = None
+
+    @field_validator("references", mode="before")
+    @classmethod
+    def _expand_known_references(cls: type[AnnotationConfig], value: Any) -> Any:
+        return expand_known_references(value)
 
     @field_validator("mouse_section_regions")
     @classmethod

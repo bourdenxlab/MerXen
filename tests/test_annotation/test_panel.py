@@ -830,6 +830,12 @@ def test_same_panel_human_pair_needs_set_a_and_set_c_bundles(tmp_path: Path) -> 
     assert required == result.required
     written = load_annotation_panel(tmp_path / "out" / PANEL_GENES_FILE)
     assert required.bundles[0].panel_hash == written.panel_hash
+    setc = load_annotation_panel(tmp_path / "out" / PANEL_GENES_SETC_FILE)
+    assert [b.n_panel_genes for b in required.bundles] == [
+        written.n_genes,
+        setc.n_genes,
+        written.n_genes,
+    ]
     report = json.loads((tmp_path / "out" / PANEL_REPORT_FILE).read_text())
     assert report["panel_mode"] == "intersection" and report["n_required_bundles"] == 3
 
