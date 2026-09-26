@@ -123,13 +123,17 @@ A paired row with `pair_id=EXAMPLE01` fans out to **two**
   Cellpose / ProSeg cell by minus the minimum; the 2026-09-08 VZG2 run was
   built from such a stale override and its `reseg`, `proseg_mask` and
   `proseg_hybrid` outputs are offset by (+21.9, +111.8) µm (`original_seg` is
-  unaffected). The builder now logs a warning when `merscope_transform_path`
-  disagrees with the manifest by more than 1 µm and records
+  unaffected). The build now fails when `merscope_transform_path` disagrees
+  with the manifest by more than 1 µm; for an archive whose `bbox_microns` is
+  known to be wrong, `--merscope_allow_transform_override_mismatch true`
+  keeps the override with a warning. The build records
   `attrs["merxen_vzg2"]["transform_source"]` (`override` or `manifest`).
   Segmentation refuses a `merscope_transform_path` that differs from the
   `micron_to_mosaic_pixel_transform.csv` stored in the built zarr, so a
-  corrected CSV requires a rebuild (`--force_spatialdata_build true`). The QC
-  registration check ([qc.md](qc.md)) flags any remaining offset.
+  corrected CSV requires a rebuild (`--force_spatialdata_build true`), and it
+  refuses to reuse a `transcripts_for_proseg.csv` seeded with another
+  transform ([segmentation.md](segmentation.md)). The QC registration check
+  ([qc.md](qc.md)) flags any remaining offset.
 - **Xenium spec ambiguity.** If the Xenium export contains a non-standard
   `specs.json` location, set `xenium_spec_path` in the samplesheet.
 - **Partial builds.** If a build crashes half-way, delete the target zarr
