@@ -42,14 +42,16 @@ class TableCellSelection:
         obs_names: Names of all input objects, in input order.
         total_counts: Counts per object summed over the input features, with
             the dtype numpy gives the row sum (as ``scanpy.pp.filter_cells``).
-        n_genes: Number of features with a positive count per object.
+        n_genes: Number of features with a positive count per object, or
+            ``None`` unless requested (``compute_n_genes``); legacy
+            clustering never reads it, so it skips the extra pass.
         is_table_cell: ``total_counts >= min_counts`` per object.
         min_counts: The threshold used.
     """
 
     obs_names: pd.Index
     total_counts: np.ndarray
-    n_genes: np.ndarray
+    n_genes: np.ndarray | None
     is_table_cell: np.ndarray
     min_counts: int
 
@@ -83,13 +85,19 @@ def row_sums(matrix: Any) -> np.ndarray:
     return np.asarray(matrix.sum(axis=1)).ravel()
 
 
-def select_table_cells(adata: ad.AnnData, min_counts: int) -> TableCellSelection:
+def select_table_cells(
+    adata: ad.AnnData, min_counts: int, *, compute_n_genes: bool = False
+) -> TableCellSelection:
     """Select the objects that become table cells.
 
     Args:
         adata: Objects x features, without control features; counts in ``X``.
         min_counts: Minimum total counts of a table cell
             (``ClusteringSquidpyConfig.min_counts``; 10 by default).
+        compute_n_genes: Also count the detected features per object (the
+            annotation steps need ``n_genes``). Off by default, so legacy
+            clustering does exactly the work ``scanpy.pp.filter_cells`` did
+            (no ``X > 0`` pass or temporary matrix).
 
     Returns:
         The selection; ``adata`` is not modified.
@@ -107,7 +115,7 @@ def select_table_cells(adata: ad.AnnData, min_counts: int) -> TableCellSelection
     return TableCellSelection(
         obs_names=adata.obs_names.copy(),
         total_counts=total_counts,
-        n_genes=row_sums(matrix > 0),
+        n_genes=row_sums(matrix > 0) if compute_n_genes else None,
         is_table_cell=np.asarray(total_counts >= threshold, dtype=bool),
         min_counts=threshold,
     )

@@ -188,9 +188,10 @@ def test_select_table_cells_reports_counts_and_genes() -> None:
     adata = ad.AnnData(X=matrix, obs=pd.DataFrame(index=["a", "b", "c", "d"]))
     before = adata.copy()
 
-    selection = select_table_cells(adata, 10)
+    selection = select_table_cells(adata, 10, compute_n_genes=True)
 
     np.testing.assert_array_equal(selection.total_counts, [10, 1, 0, 10])
+    assert selection.n_genes is not None
     np.testing.assert_array_equal(selection.n_genes, [2, 1, 0, 2])
     assert selection.n_genes.dtype == np.int64
     assert list(selection.table_cell_ids) == ["a", "d"]
@@ -199,6 +200,31 @@ def test_select_table_cells_reports_counts_and_genes() -> None:
     assert adata.obs_names.equals(before.obs_names)
     assert adata.obs.columns.empty
     np.testing.assert_array_equal(adata.X.toarray(), before.X.toarray())
+
+
+def test_legacy_selection_skips_the_detected_gene_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """By default no ``X > 0`` pass runs: legacy COMPUTE does filter_cells' work."""
+    from merxen.clustering import cellset
+
+    matrix = sparse.csr_matrix(np.array([[0, 3], [1, 0]], dtype=np.float32))
+    adata = ad.AnnData(X=matrix)
+    summed: list[object] = []
+    original = cellset.row_sums
+
+    def counting_row_sums(values: object) -> np.ndarray:
+        summed.append(values)
+        return original(values)
+
+    monkeypatch.setattr(cellset, "row_sums", counting_row_sums)
+
+    selection = select_table_cells(adata, 1)
+
+    assert selection.n_genes is None
+    assert len(summed) == 1
+    assert summed[0] is adata.X
+    np.testing.assert_array_equal(selection.total_counts, [3, 1])
 
 
 def test_select_table_cells_with_zero_threshold_keeps_everything() -> None:
