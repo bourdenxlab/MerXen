@@ -289,6 +289,56 @@ def test_final_level_must_be_confident_and_named(
     assert f"ct_final_name must be {UNASSIGNED_LABEL!r} when level is none" in problems
 
 
+def test_final_level_is_the_deepest_confident_level(
+    make_label_table: TableFactory,
+) -> None:
+    """A confident level deeper than ct_final_level is a violation (§4.1)."""
+    table = make_label_table("human")
+    # Astrocyte row: confident at supercluster, but the final level stays broad.
+    _set(table, 2, Columns.level("supercluster", "status"), CellStatus.CONFIDENT.value)
+
+    problems = _problems(table, "human")
+
+    assert any(
+        "coarser than 'supercluster' on cells confident at 'supercluster'" in problem
+        for problem in problems
+    )
+
+
+def test_final_level_needs_confident_parents(make_label_table: TableFactory) -> None:
+    """Every applicable level above ct_final_level must be confident (§4.2)."""
+    table = make_label_table("human")
+    # Neuron row: final supercluster, but broad is only low_confidence.
+    _set(table, 1, Columns.level("broad", "status"), CellStatus.LOW_CONFIDENCE.value)
+    _set(table, 1, Columns.level("broad", "validated"), False)
+
+    problems = _problems(table, "human")
+
+    assert any(
+        "deeper than 'broad' on cells not confident at 'broad'" in problem
+        for problem in problems
+    )
+
+
+def test_final_level_chain_skips_not_applicable_levels(
+    make_label_table: TableFactory,
+) -> None:
+    """nt is not_applicable for glia, so their final level may lie below it."""
+    table = make_label_table("human")
+    _set(table, 2, Columns.level("supercluster", "status"), CellStatus.CONFIDENT.value)
+    _set(table, 2, Columns.CT_FINAL_LEVEL, "supercluster")
+    _set(table, 2, Columns.CT_FINAL_NAME, "Astrocyte")
+    _set(table, 2, Columns.CT_LEAF, "Astrocyte")
+
+    validate_label_table(table, "human")
+    mouse = make_label_table("mouse")
+    _set(mouse, 1, Columns.level("class", "status"), CellStatus.BELOW_FLOOR.value)
+    _set(mouse, 1, Columns.level("class", "validated"), False)
+    assert any(
+        "deeper than 'class'" in problem for problem in _problems(mouse, "mouse")
+    )
+
+
 def test_fine_levels_are_detected_and_can_be_required(
     make_label_table: TableFactory,
 ) -> None:
