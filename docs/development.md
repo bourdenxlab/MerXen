@@ -259,6 +259,11 @@ The effort planned in
 [docs/plans/robust-celltype-annotation-plan.md](plans/robust-celltype-annotation-plan.md)
 has its own branch model and guards.
 
+The pre-registered acceptance thresholds and the measured M3 baselines are in
+[docs/acceptance/annotation-v1-preregistration.md](acceptance/annotation-v1-preregistration.md).
+Baselines may only tighten a threshold; loosening one needs the user's
+written approval in the gate PR.
+
 ### Integration branch
 
 Work lands on the long-lived integration branch
