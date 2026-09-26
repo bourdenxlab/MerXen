@@ -24,7 +24,8 @@ BASE_FILES = ("nextflow.config", "conf/dwight.config")
 ANNOTATION = "conf/annotation.config"
 DWIGHT_ANNOTATION = "conf/dwight.annotation.config"
 
-# The annotation-only params of plan §3.7, created in M1.
+# The annotation-only params of plan §3.7, created in M1, plus the wmb_panel
+# self-map test-cell source (M2; plan §3.2 excludes those cells).
 PLANNED_ANNOTATION_PARAMS = frozenset(
     {
         "clustering_squidpy_mode_human",
@@ -51,6 +52,7 @@ PLANNED_ANNOTATION_PARAMS = frozenset(
         "annotation_wmb_h5ad_dir",
         "annotation_wmb_metadata_dir",
         "annotation_wmb_mapping_stats_path",
+        "annotation_wmb_selfmap_test_cells_path",
         "annotation_wmb_max_cells_per_cluster",
         "annotation_merfish_ccf_metadata_path",
         "annotation_auto_download",

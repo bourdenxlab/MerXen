@@ -55,6 +55,8 @@ class AnnotationReferences {
             wmb_h5ad_dir: "annotation_wmb_h5ad_dir",
             wmb_metadata_dir: "annotation_wmb_metadata_dir",
             wmb_mapping_stats: "annotation_wmb_mapping_stats_path",
+            // Self-map test cells kept out of the marker build (plan §3.2).
+            wmb_selfmap_test_cells: "annotation_wmb_selfmap_test_cells_path",
         ].asImmutable(),
         wmb_region_share: [
             merfish_ccf_metadata: "annotation_merfish_ccf_metadata_path",
