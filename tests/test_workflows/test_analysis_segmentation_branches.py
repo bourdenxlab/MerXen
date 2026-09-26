@@ -68,6 +68,7 @@ def test_downstream_modules_publish_under_segmentation_branch() -> None:
         "spatial_gene_analysis.nf": "/${segmentation}/spatial_gene_analysis",
         "clustering_squidpy.nf": "/${segmentation}/clustering_squidpy",
         "mapmycells.nf": "/${segmentation}/mapmycells",
+        "annotation.nf": "/${segmentation}/annotation_map",
     }
     for filename, expected in expectations.items():
         assert expected in (module_dir / filename).read_text()

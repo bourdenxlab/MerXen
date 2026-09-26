@@ -10,11 +10,13 @@ import java.nio.file.Paths
  *
  * ANNOTATE_PANEL writes one pair x segmentation's declared panels and its
  * required_bundles.json; ANNOTATE_REFERENCE_PREP gets or builds one bundle
- * per unique (species, reference_id, panel_hash). This class holds what the
- * processes and workflows/subworkflows/annotation_references.nf share: the
- * annotation_config.json both commands read, the command arguments, the
- * bundle keys and the per pair x segmentation bookkeeping that lets MAP wait
- * for exactly the bundles its panels need.
+ * per unique (species, reference_id, panel_hash); CLUSTERING_SQUIDPY_ANNOTATE_MAP
+ * maps the pair x segmentation onto its bundles (plan §3.3). This class holds
+ * what the processes and workflows/subworkflows/annotation_references.nf and
+ * clustering_map_first.nf share: the annotation_config.json the commands
+ * read, the command arguments, the bundle keys and the per pair x
+ * segmentation bookkeeping that lets MAP wait for exactly the bundles its
+ * panels need.
  *
  * Nothing here runs in a legacy run: main.nf calls ANNOTATION_PREPARE_ONLY
  * only with --annotation_prepare_only, and CLUSTERING_MAP_FIRST (map_first)
@@ -32,6 +34,15 @@ class AnnotationReferences {
     static final String DEFAULT_STORE_DIR = "annotation_references"
     static final String PREPARED_SOURCE = "prepared"
     static final String GENE_LIST_SOURCE = "gene_list"
+
+    // CLUSTERING_SQUIDPY_ANNOTATE_MAP: output directory (published under
+    // <outdir>/<pair>/<seg>/annotation_map/), staged-input directory,
+    // task-local scratch and the manifest published-output reuse reads.
+    static final String MAP_PUBLISH_DIR = "annotation_map"
+    static final String MAP_OUTPUT_DIR = "annotation_map_out"
+    static final String MAP_INPUT_DIR = "map_inputs"
+    static final String MAP_SCRATCH_DIR = "map_scratch"
+    static final String MAP_MANIFEST_FILE = "map_manifest.json"
 
     // Share of the PREP memory given to cell_type_mapper's --max_gb (the
     // reference-marker step; 40 GB of the 64 GB reserve, as validated).
@@ -453,6 +464,118 @@ class AnnotationReferences {
             }
             byKey[key]
         }
+    }
+
+    /**
+     * Return what CLUSTERING_SQUIDPY_ANNOTATE_MAP needs to know before it runs.
+     *
+     * The process reads the species and the panel status in its script and
+     * the panel size in its memory directive (48 GB above 1,000 genes, plan
+     * §3.3), so they travel as a value next to the staged panel directory.
+     *
+     * @param panelDir ANNOTATE_PANEL output directory.
+     * @return [species, panel_status, reasons, n_required, n_panel_genes
+     *     (largest panel of a mapped bundle, 0 without one)].
+     */
+    static Map mapSpec(Object panelDir) {
+        def required = requiredBundles(panelDir)
+        def sizes = ((required.bundles ?: []) as List)
+            .findAll { Map item -> item.n_panel_genes != null }
+            .collect { Map item -> item.n_panel_genes as int }
+        return [
+            species: AnnotationDefaults.normalizeSpecies(required.species),
+            panel_status: (required.status ?: "ok").toString(),
+            reasons: ((required.reasons ?: []) as List).collect { reason -> reason.toString() },
+            n_required: (required.n_required ?: 0) as int,
+            n_panel_genes: sizes ? sizes.max() : 0,
+        ]
+    }
+
+    /**
+     * Return the merxen annotate arguments of one MAP task.
+     *
+     * The task maps only the bundles PREP resolved (--require-bundle-refs),
+     * takes min_counts and the sample platforms from the clustering config,
+     * and records a refused panel instead of failing (--allow-refused-panel;
+     * RESOLVE then writes statuses only).
+     *
+     * @param pairId Pair id.
+     * @param segmentation Segmentation.
+     * @param spec mapSpec result.
+     * @param bundleRefs Staged bundle_ref.json paths.
+     * @param cpus Task cpus (--n-processors: MapMyCells worker processes).
+     * @return Shell-quoted arguments (without --annotation-config,
+     *     --reuse-from and --out).
+     */
+    static String mapArguments(Object pairId, Object segmentation, Map spec, List bundleRefs, int cpus) {
+        def args = [
+            "--species", spec.species.toString(),
+            "--pair-id", pairId.toString(),
+            "--segmentation", segmentation.toString(),
+            "--prepared-dir", "${MAP_INPUT_DIR}/clustering_prepare_out".toString(),
+            "--clustering-config", "${MAP_INPUT_DIR}/clustering_squidpy_config.json".toString(),
+            "--panel-dir", "${MAP_INPUT_DIR}/${PANEL_OUTPUT_DIR}".toString(),
+            "--n-processors", cpus.toString(),
+            "--work-dir", MAP_SCRATCH_DIR,
+            "--require-bundle-refs",
+            "--allow-refused-panel",
+        ]
+        (bundleRefs ?: []).each { ref -> args += ["--bundle-ref", ref.toString()] }
+        return args.collect { arg -> shellQuote(arg) }.join(" ")
+    }
+
+    /**
+     * Return the published MAP directory whose identical runs a task reuses.
+     *
+     * dwight prunes work directories, so -resume alone cannot skip a MAP
+     * whose inputs are unchanged but whose task directory is gone; merxen
+     * annotate then copies each run whose query fingerprint, build_hash,
+     * engine parameters and ctm version match the published manifest
+     * (annotation_reuse_published, plan §3.1).
+     *
+     * @param params Pipeline params.
+     * @param pairId Pair id.
+     * @param segmentation Segmentation.
+     * @return The absolute published annotation_map_out directory, or null
+     *     when annotation_reuse_published is false.
+     */
+    static String mapReuseDir(Map params, Object pairId, Object segmentation) {
+        if (!isTrue(params?.get("annotation_reuse_published"), true)) {
+            return null
+        }
+        return absolute(
+            Paths.get(
+                (params?.get("outdir") ?: "results").toString(),
+                pairId.toString(),
+                segmentation.toString(),
+                MAP_PUBLISH_DIR,
+                MAP_OUTPUT_DIR,
+            ).toString()
+        )
+    }
+
+    /**
+     * Return the stub map_manifest.json of a MAP task (for -stub-run).
+     *
+     * @param pairId Pair id.
+     * @param segmentation Segmentation.
+     * @param spec mapSpec result.
+     * @param bundleRefs Staged bundle_ref.json paths (the stub copies them
+     *     next to the manifest, so a stub run shows what MAP received).
+     * @return The JSON text.
+     */
+    static String stubMapManifestJson(Object pairId, Object segmentation, Map spec, List bundleRefs) {
+        return JsonOutput.prettyPrint(JsonOutput.toJson([
+            stub: true,
+            pair_id: pairId.toString(),
+            segmentation: segmentation.toString(),
+            species: spec.species,
+            panel_status: spec.panel_status,
+            panel_reasons: spec.reasons,
+            n_required: spec.n_required,
+            bundle_refs: (bundleRefs ?: []).collect { ref -> ref.toString() },
+            samples: [:],
+        ]))
     }
 
     /** Return the stub bundle_ref.json of a bundle (for -stub-run). */

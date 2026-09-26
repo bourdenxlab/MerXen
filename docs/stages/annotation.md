@@ -8,7 +8,8 @@ unchanged. This page covers what exists so far: declared panels
 (`merxen annotation-panel`), the reference bundles that
 `merxen annotation-reference-prep` builds into the reference store, the
 two pipeline processes that run them (`--annotation_prepare_only`), and the
-MAP step (`merxen annotate`), which maps samples onto the bundles.
+MAP step (`merxen annotate` and its pipeline process
+`CLUSTERING_SQUIDPY_ANNOTATE_MAP`), which maps samples onto the bundles.
 
 ## Reference bundles
 
@@ -123,14 +124,16 @@ and hashes that copy, so moving the evidence archive never changes
 
 ## Pipeline processes
 
-Two CPU processes in `workflows/modules/annotation.nf`, wired by
-`workflows/subworkflows/annotation_references.nf`; neither takes the GPU
-lock, and a default (legacy) run instantiates neither.
+Three CPU processes in `workflows/modules/annotation.nf`, wired by
+`workflows/subworkflows/annotation_references.nf` (PANEL, PREP) and
+`workflows/subworkflows/clustering_map_first.nf` (MAP); none takes the GPU
+lock, and a default (legacy) run instantiates none of them.
 
 | Process | Runs | Resources | What it does |
 |---|---|---|---|
 | `ANNOTATE_PANEL` | once per pair × segmentation | 1 CPU, 4 GB | `merxen annotation-panel` on the gene list (`--annotation_panel_genes_path`) or on the pair's prepared H5ADs; writes the declared panels and `required_bundles.json`. |
 | `ANNOTATE_REFERENCE_PREP` | once per unique (species, reference, `panel_hash`) across the run | 8 CPUs, 64 GB, 8 h; above 1,000 panel genes `annotation_prep_large_memory` and 24 h; one at a time on dwight | `merxen annotation-reference-prep`: gets the bundle from the store or builds it, and writes `bundle_ref.json`. Seconds when the bundle exists. |
+| `CLUSTERING_SQUIDPY_ANNOTATE_MAP` | once per pair × segmentation, after its last required bundle (`map_first` only, from M5) | 6 CPUs, 24 GB (48 GB above 1,000 panel genes); `annotation_max_forks` (2) at a time on dwight | `merxen annotate` on the pair's prepared H5ADs with exactly the bundle refs PREP resolved: the MapMyCells runs, the tidy parquets, the provisional labels and `map_manifest.json`, published to `<outdir>/<pair>/<seg>/annotation_map/annotation_map_out/`. |
 
 PREP has no `storeDir`: the store's own lock, temporary build directory and
 atomic rename keep concurrent launches safe, and its `build_hash` (sources,
@@ -140,14 +143,30 @@ code or the content of its source files, so a cached task could hand MAP a
 stale bundle after a builder fix. A re-run takes seconds when the bundle
 exists, and `bundle_ref.json` holds only the bundle's identity (whether it
 was reused is logged), so an unchanged bundle gives byte-identical output
-and MAP's cache holds. Which pair's copy of a shared panel file reaches PREP
-first does not matter: the bundle depends only on the panel's IDs.
+and MAP's cache holds (MAP caches on file content, `cache "deep"`). Which
+pair's copy of a shared panel file reaches PREP first does not matter: the
+bundle depends only on the panel's IDs.
 Each pair × segmentation is then released with exactly the bundle refs its
 `required_bundles.json` lists (a same-panel human pair on `proseg_hybrid`
 needs three: WHB and SEA-AD on set a, WHB on set c; a `per_platform` pair
 five; a mouse section two), as soon as its last bundle is ready, so pairs
 with different panels never wait for each other. A pair whose panels are
 refused is released with no bundle; one whose PREP failed is dropped.
+
+MAP then runs with 6 MapMyCells worker processes (`--n-processors`
+`task.cpus`, one BLAS / numba thread each, `CUDA_VISIBLE_DEVICES` empty, this
+checkout's `src/` first on `PYTHONPATH`) after checking that the installed
+`cell_type_mapper` is `annotation_ctm_version`. Its table cells and
+`min_counts` come from the clustering config, so they are the clustering
+run's. A refused panel is not a task failure: MAP writes a `map_manifest.json`
+with `panel_status: refused` and its reasons, maps nothing, and RESOLVE (M4)
+will write statuses only. With `annotation_reuse_published` a run whose
+query fingerprint, `build_hash`, engine parameters and ctm version equal the
+published manifest's is copied from `annotation_map/annotation_map_out/`
+instead of re-mapped, because dwight prunes work directories. Until M5 wires
+`map_first` (hook H5, `CLUSTERING_MAP_FIRST`), the preflight refuses
+`map_first` runs, so MAP runs only in the workflow tests; the shadow
+evaluation uses the standalone command.
 
 ### Pre-building references (`--annotation_prepare_only`)
 
@@ -185,8 +204,9 @@ SEA-AD on the annotation panel, WHB on set c for the segmentations in
 `annotation_xplat_sensitivity_segmentations` (`proseg_hybrid` by default),
 and WHB on the intersection panel for `per_platform` pairs. The standalone
 command runs it on published clustered H5ADs (options in
-[CLI](../cli.md#merxen-annotate)); the pipeline process that runs it in
-`map_first` mode is still to come.
+[CLI](../cli.md#merxen-annotate)); `CLUSTERING_SQUIDPY_ANNOTATE_MAP` runs it
+on the prepared H5ADs of a `map_first` run (see
+[Pipeline processes](#pipeline-processes)).
 
 Per sample:
 
@@ -215,7 +235,7 @@ Per sample:
 |---|---|
 | `<platform>/<sid>_mmc_<run_id>.parquet` | One row per mapped cell × taxonomy level; `run_id` is the reference id, `+_setc` for set c, `+_xpanel` for the intersection run of a `per_platform` pair. Run metadata in the parquet schema (`merxen_mmc`). |
 | `<platform>/<sid>_ct_provisional.parquet` | One row per object: identity, `total_counts`, `n_genes`, `in_table`, **provisional** `ct_<level>_{name,raw,corr,runner_up,margin,status}` and `ct_final_*`, and the raw engine columns `mmc_<reference>_<level>_{label,name,bp,agg,corr}`. |
-| `map_manifest.json` | The run record above; `annotation-store prune` counts its `build_hash` values as references. |
+| `map_manifest.json` | The run record above, with `panel_status` (`ok`, or `refused` with `panel_reasons` and no runs); `annotation-store prune` counts its `build_hash` values as references. |
 
 The provisional labels apply the raw thresholds only (WHB lineage / broad /
 NT 0.73 on the bootstrap probability summed over the assigned node's class,
