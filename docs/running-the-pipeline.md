@@ -248,7 +248,10 @@ fully clean.
   platform(s) to be set in the samplesheet.
 - `--force_proseg_rerun true` — ignore persistent ProSeg latest zarrs and
   rebuild them from the current Cellpose masks and transcript exports. With
-  `-resume`, completed upstream Nextflow tasks can remain cached.
+  `-resume`, completed upstream Nextflow tasks can remain cached. It does not
+  rewrite the persisted `transcripts_for_proseg.csv`; to rebuild that CSV
+  (for example to apply the current control-feature filter), follow
+  [Applying the new filter to an existing dataset](stages/segmentation.md#applying-the-new-filter-to-an-existing-dataset).
 - `nextflow run ...` without `-resume` — blow away Nextflow's cache and
   re-run every Nextflow process. Stage-level persistent artifacts may still be
   reused unless the corresponding force flag is set. The `work/` directory
