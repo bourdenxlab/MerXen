@@ -1266,6 +1266,7 @@ def _host_free_config(tmp_path: Path, **params: str) -> Path:
         "annotation_wmb_h5ad_dir",
         "annotation_wmb_metadata_dir",
         "annotation_wmb_mapping_stats_path",
+        "annotation_wmb_selfmap_test_cells_path",
     ]
     lines = [f"    {name} = null" for name in host_params if name not in params]
     lines += [f'    {name} = "{value}"' for name, value in params.items()]
@@ -1443,6 +1444,8 @@ def test_prepare_only_runs_the_real_prep_script(tmp_path: Path) -> None:
     wmb_metadata.mkdir()
     mapping_stats = tmp_path / "precomputed_stats_ABC_revision_230821.h5"
     mapping_stats.write_bytes(b"stats")
+    test_cells = tmp_path / "truth.csv"
+    test_cells.write_text("cell_label\nAAAC-1\n")
     outdir = tmp_path / "results"
     store = tmp_path / "store"
     trace = tmp_path / "trace.tsv"
@@ -1452,6 +1455,7 @@ def test_prepare_only_runs_the_real_prep_script(tmp_path: Path) -> None:
         annotation_wmb_h5ad_dir=str(wmb_h5ad),
         annotation_wmb_metadata_dir=str(wmb_metadata),
         annotation_wmb_mapping_stats_path=str(mapping_stats),
+        annotation_wmb_selfmap_test_cells_path=str(test_cells),
     )
     completed = subprocess.run(
         [
@@ -1506,6 +1510,7 @@ def test_prepare_only_runs_the_real_prep_script(tmp_path: Path) -> None:
         f"wmb_h5ad_dir={wmb_h5ad}",
         f"wmb_mapping_stats={mapping_stats}",
         f"wmb_metadata_dir={wmb_metadata}",
+        f"wmb_selfmap_test_cells={test_cells}",
     ]
     region = argvs["wmb_region_share"]
     assert "--panel-genes" not in region and "--source" not in region

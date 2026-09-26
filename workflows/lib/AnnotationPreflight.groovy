@@ -38,6 +38,7 @@ class AnnotationPreflight {
             "annotation_wmb_h5ad_dir",
             "annotation_wmb_metadata_dir",
             "annotation_wmb_mapping_stats_path",
+            "annotation_wmb_selfmap_test_cells_path",
             "annotation_merfish_ccf_metadata_path",
         ],
     ].asImmutable()
