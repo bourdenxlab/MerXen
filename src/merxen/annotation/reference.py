@@ -70,6 +70,7 @@ from merxen.annotation.store import (
     BundleBuilder,
     StoreError,
     file_sha256,
+    make_store_dir,
     register_builder,
 )
 from merxen.annotation.vocab import (
@@ -77,7 +78,7 @@ from merxen.annotation.vocab import (
     UNASSIGNED_LABEL,
     VOCAB_FILES,
     Species,
-    load_state_genes,
+    load_state_gene_ids,
     load_vocab,
 )
 
@@ -178,11 +179,22 @@ WMB_MAPPING_STATS_MD5: Final = "d13b316a1755c459d75b8e45ff92ddfc"
 WMB_MAPPING_STATS_SIZE: Final = 1_376_366_584
 WMB_SAMPLING_SEED: Final = 1
 WMB_KNOWN_LIMITATION: Final = (
-    "WMB subclasses without any 10Xv3 cell (10X Multiome only) are not in the "
-    "marker precompute and are not filled in (user decision 2026-09-26, plan "
-    "§7.8): query cells of these types map to the nearest covered subclass or "
-    "stay unresolved at subclass level."
+    "WMB subclasses and clusters without any 10Xv3 marker-training cell (10X "
+    "Multiome only, or only self-map test cells) are not in the marker "
+    "precompute and are not filled in (user decision 2026-09-26, plan §7.8). "
+    "They stay in the mapping tree and the Allen means, and cell_type_mapper "
+    "can still assign them with their ancestors' markers (the validated runs "
+    "did, e.g. 157 RN Spp1 Glut); such labels have no marker support of "
+    "their own and are listed in marker_unsupported_nodes, which RESOLVE "
+    "reports as unresolved at that level."
 )
+# The validated WMB marker-precompute gene universe: the ag7 | VZG2 union of
+# research/selfmap/query_{ag7,vzg2}_full.h5ad (899 genes). raw-CPM
+# normalisation runs over the genes of the training h5ads, so the universe
+# changes the marker choice; a panel inside it uses it (and reproduces the
+# validated lookups exactly), any other panel uses its own genes.
+WMB_MARKER_UNIVERSE_FILE: Final = "wmb_marker_universe_ag7_vzg2.csv"
+WMB_UNIVERSE_VALIDATED: Final = "validated_ag7_vzg2_union"
 # MERFISH-C57BL6J-638850-CCF cell metadata (manifest 20231215 / 20260711).
 MERFISH_CCF_METADATA_MD5: Final = "51dda47ab139e91357bc09bc4e12c073"
 MERFISH_CCF_METADATA_SIZE: Final = 1_606_515_935
@@ -1037,6 +1049,78 @@ def validate_lookup(
     )
 
 
+MARKER_UNSUPPORTED_POLICY: Final = (
+    "cell_type_mapper can still assign these nodes: a parent without markers "
+    "of its own is patched with its ancestors' markers, so a label at one of "
+    "these nodes is not supported by markers from its own cells. RESOLVE "
+    "reports such a label as unresolved at that level (and keeps the parent "
+    "level); the nodes stay in the mapping tree, as in the validated runs."
+)
+
+
+def marker_unsupported_nodes(
+    tree: TaxonomyTreeView,
+    validation: LookupValidation,
+    uncovered: Mapping[str, Sequence[Mapping[str, str]]] | None = None,
+) -> dict[str, Any]:
+    """Return the mapping-tree nodes whose labels no marker supports (§3.2, R15).
+
+    Two kinds: nodes below an auto-collapsed parent (the parent had no
+    marker in the panel, so its children cannot be told apart) and, for the
+    mouse bundle, nodes without any marker-training cell (``uncovered``:
+    Multiome-only WMB subclasses and clusters). ``cell_type_mapper`` can
+    still emit both, with inherited markers; RESOLVE (M3) must report them
+    as unresolved at their level.
+
+    Args:
+        tree: The mapping tree.
+        validation: ``validate_lookup`` result on that tree.
+        uncovered: ``uncovered_nodes`` output, per level.
+
+    Returns:
+        The policy, the unsupported nodes as ``"<level>/<node>"`` keys, and
+        their reasons.
+    """
+    entries: dict[str, dict[str, Any]] = {}
+    for parent in validation.collapsed:
+        for level, node in tree.descendants(parent.level, parent.node):
+            entries.setdefault(
+                f"{level}/{node}",
+                {
+                    "level": level,
+                    "node": node,
+                    "name": tree.name(level, node),
+                    "reason": "below_collapsed_parent",
+                    "collapsed_parent": parent.key,
+                },
+            )
+    for level, nodes in (uncovered or {}).items():
+        for item in nodes:
+            key = f"{level}/{item['node']}"
+            entry = entries.setdefault(
+                key,
+                {
+                    "level": level,
+                    "node": item["node"],
+                    "name": item.get("name", ""),
+                    "reason": "no_marker_training_cell",
+                },
+            )
+            if entry["reason"] != "no_marker_training_cell":
+                entry["also"] = "no_marker_training_cell"
+    ordered = [entries[key] for key in sorted(entries)]
+    return {
+        "policy": MARKER_UNSUPPORTED_POLICY,
+        "n_nodes": len(ordered),
+        "n_nodes_per_level": {
+            level: sum(1 for entry in ordered if entry["level"] == level)
+            for level in tree.hierarchy
+        },
+        "nodes": [f"{entry['level']}/{entry['node']}" for entry in ordered],
+        "details": ordered,
+    }
+
+
 def root_children_with_markers(
     lookup: Mapping[str, Any],
     tree: TaxonomyTreeView,
@@ -1247,7 +1331,6 @@ def reference_profiles_from_stats(
     *,
     levels: Sequence[str],
     keep_nodes: Mapping[str, Iterable[str]] | None = None,
-    gene_symbols: Mapping[str, str] | None = None,
     names: TaxonomyTreeView | None = None,
 ) -> pd.DataFrame:
     """Return expected detection and expression per node x gene (``profiles.parquet``).
@@ -1264,19 +1347,19 @@ def reference_profiles_from_stats(
         levels: Levels to profile (levels of ``stats``' tree).
         keep_nodes: Per level, the nodes to keep (the mapping tree's nodes);
             ``None`` keeps all.
-        gene_symbols: Symbol per gene ID, for readability.
         names: Tree whose names label the nodes (default: ``stats.tree``).
 
     Returns:
         Long table with columns ``level, node, node_name, n_cells, gene_id,
-        gene_symbol, detection_fraction, mean_log2cpm, mean_cpm,
-        expected_fraction``.
+        detection_fraction, mean_log2cpm, mean_cpm, expected_fraction``.
+        Genes are Ensembl IDs only: a bundle is shared by every panel with
+        the same IDs, whatever symbols they declare, so symbols come from the
+        run's own panel file.
     """
     expected = lognormal_mean_cpm(stats)
     assert stats.gt0 is not None
     membership = _leaf_membership(stats, levels)
     name_tree = names or stats.tree
-    symbols = gene_symbols or {}
     frames: list[pd.DataFrame] = []
     n_genes = len(stats.genes)
     for level in levels:
@@ -1301,7 +1384,6 @@ def reference_profiles_from_stats(
                         "node_name": name_tree.name(level, node),
                         "n_cells": int(round(n_total)),
                         "gene_id": stats.genes,
-                        "gene_symbol": [symbols.get(gene, "") for gene in stats.genes],
                         "detection_fraction": detection,
                         "mean_log2cpm": mean_log,
                         "mean_cpm": mean_cpm,
@@ -1317,7 +1399,6 @@ def reference_profiles_from_stats(
                 "node_name",
                 "n_cells",
                 "gene_id",
-                "gene_symbol",
                 "detection_fraction",
                 "mean_log2cpm",
                 "mean_cpm",
@@ -1368,8 +1449,7 @@ def negative_gene_table(
     detection_by_reference: Mapping[str, tuple[pd.DataFrame, pd.Series]],
     *,
     genes: Sequence[str],
-    gene_symbols: Mapping[str, str],
-    state_genes: Iterable[str],
+    state_gene_ids: Iterable[str],
     max_fraction: float = 0.01,
 ) -> pd.DataFrame:
     """Return the negative genes per broad class (``negative_genes.parquet``, §5.6).
@@ -1378,22 +1458,23 @@ def negative_gene_table(
     ``max_fraction`` of that class's reference cells detect it in **every**
     reference (human: WHB frontal and SEA-AD Multiregion; mouse: the WMB
     panel precompute), and it is not a curated state gene. A gene missing
-    from a reference, or a class missing from one, is never negative.
+    from a reference, or a class missing from one, is never negative. State
+    genes are matched by Ensembl ID (``load_state_gene_ids``), so neither an
+    alias symbol nor an ID-only panel lets one through.
 
     Args:
         detection_by_reference: Per reference, ``broad_class_detection``
             output.
         genes: Panel gene IDs.
-        gene_symbols: Symbol per gene ID.
-        state_genes: Curated state-gene symbols (case-insensitive).
+        state_gene_ids: Ensembl IDs of the curated state genes.
         max_fraction: Detection fraction below which a gene is negative.
 
     Returns:
         One row per (broad class, gene): ``broad_class, gene_id,
-        gene_symbol, detection_<reference>, n_cells_<reference>,
-        is_state_gene, negative``.
+        detection_<reference>, n_cells_<reference>, is_state_gene,
+        negative``.
     """
-    states = {symbol.casefold() for symbol in state_genes}
+    states = {str(gene_id) for gene_id in state_gene_ids}
     references = sorted(detection_by_reference)
     classes = sorted(
         {
@@ -1405,12 +1486,7 @@ def negative_gene_table(
     records: list[dict[str, Any]] = []
     for broad in classes:
         for gene in genes:
-            symbol = gene_symbols.get(gene, "")
-            record: dict[str, Any] = {
-                "broad_class": broad,
-                "gene_id": gene,
-                "gene_symbol": symbol,
-            }
+            record: dict[str, Any] = {"broad_class": broad, "gene_id": gene}
             is_negative = True
             for reference in references:
                 frame, n_cells = detection_by_reference[reference]
@@ -1425,7 +1501,7 @@ def negative_gene_table(
                 )
                 if not (value == value and value < max_fraction):
                     is_negative = False
-            is_state = symbol.casefold() in states if symbol else False
+            is_state = gene in states
             record["is_state_gene"] = is_state
             record["negative"] = bool(is_negative and not is_state)
             records.append(record)
@@ -1972,6 +2048,21 @@ MERFISH_CCF_METADATA_PIN: Final = PinnedFile(
 )
 
 
+# The 11,913 WMB self-map test cells (<= 10 per supertype, 10Xv3;
+# research/selfmap/truth.csv). They are the resolvability test set (M3b) and
+# are kept out of the wmb_panel marker training cells. Local only (no URL):
+# a matching copy is seeded into <store>/.downloads, so bundles hash a
+# stable path, never the dated evidence archive.
+WMB_SELFMAP_TEST_CELLS_PIN: Final = PinnedFile(
+    key="wmb_selfmap_test_cells",
+    url="",
+    relative_path="local/wmb_selfmap/truth_20260925.csv",
+    size=1_856_009,
+    md5="c87c95a568e64d43c32d6d39dc4ebe98",
+    sha256="1b921d93cd0e17843221a3fbb74b94af1b0edefc7cf7971d76943ebc570b72b1",
+)
+
+
 class PinnedFileError(ReferenceBuildError):
     """A pinned reference file is missing or does not match its checksum."""
 
@@ -1987,7 +2078,7 @@ def _file_md5(path: Path) -> str:
 def _copy_verified(source: Path, target: Path, pinned: PinnedFile) -> None:
     """Copy a seed file into the download cache when its sha256 matches."""
     staging = target.with_name(f"{target.name}.{uuid.uuid4().hex[:8]}.seeding")
-    target.parent.mkdir(parents=True, exist_ok=True)
+    make_store_dir(target.parent)
     shutil.copyfile(source, staging)
     digest = file_sha256(staging)
     if digest != pinned.sha256:
@@ -1996,6 +2087,7 @@ def _copy_verified(source: Path, target: Path, pinned: PinnedFile) -> None:
             f"the partial copy is kept at {staging}"
         )
     os.replace(staging, target)
+    os.chmod(target, 0o444)
 
 
 @contextmanager
@@ -2003,8 +2095,12 @@ def _file_lock(lock_path: Path) -> Iterator[None]:
     """Hold an exclusive ``flock`` on a lock file (created if needed, never removed)."""
     import fcntl
 
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o666)
+    make_store_dir(lock_path.parent)
+    try:
+        descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o664)
+    except PermissionError:
+        # Another store user created the lock without write access for us.
+        descriptor = os.open(lock_path, os.O_RDONLY)
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX)
         yield
@@ -2078,6 +2174,11 @@ def ensure_pinned_file(
                 seed,
                 pinned.key,
             )
+        if not pinned.url:
+            raise PinnedFileError(
+                f"{pinned.key} is not in {download_dir} and has no download URL; "
+                "pass a local copy whose sha256 matches the pin"
+            )
         if not auto_download:
             raise PinnedFileError(
                 f"{pinned.key} is not in {download_dir} and downloads are off; pass "
@@ -2095,6 +2196,7 @@ def ensure_pinned_file(
                 f"{pinned.sha256}; it is kept at {staging} for review"
             )
         os.replace(staging, target)
+        os.chmod(target, 0o444)
     return target
 
 
@@ -2295,6 +2397,44 @@ def _complete_seaad_sources(
             sources.setdefault(name, ensured[key])
 
 
+def _complete_wmb_test_cells(sources: dict[str, Path], options: SourceOptions) -> None:
+    """Point the self-map test-cell source at its stable pinned copy.
+
+    A given list whose sha256 matches ``WMB_SELFMAP_TEST_CELLS_PIN`` seeds
+    ``<download_dir>/local/wmb_selfmap/`` and the bundle then reads (and
+    hashes) that copy, so moving the evidence archive never changes
+    ``build_hash``. Without a given list, a copy already in the cache is
+    used. Another list is used as given (``bundle.json`` then records that
+    it is not the validated test set).
+    """
+    pinned = WMB_SELFMAP_TEST_CELLS_PIN
+    given = sources.get(SOURCE_WMB_TEST_CELLS)
+    if options.download_dir is None:
+        return
+    cached = Path(options.download_dir) / pinned.relative_path
+    if given is None:
+        if _verified_cached(cached, pinned):
+            sources[SOURCE_WMB_TEST_CELLS] = cached
+        return
+    if not given.is_file():
+        raise ReferenceBuildError(
+            f"source {SOURCE_WMB_TEST_CELLS}={given} is not a file"
+        )
+    if given.resolve() == cached.resolve():
+        return
+    if given.stat().st_size == pinned.size and file_sha256(given) == pinned.sha256:
+        sources[SOURCE_WMB_TEST_CELLS] = ensure_pinned_file(
+            pinned, options.download_dir, seed=given
+        )
+        return
+    logger.warning(
+        "%s=%s is not the validated self-map test set (sha256 %s); it is used as given",
+        SOURCE_WMB_TEST_CELLS,
+        given,
+        pinned.sha256,
+    )
+
+
 def prepare_reference_spec(
     spec: AnnotationReferenceSpec, options: SourceOptions | None = None
 ) -> AnnotationReferenceSpec:
@@ -2358,6 +2498,7 @@ def prepare_reference_spec(
             [SOURCE_WMB_H5AD_DIR, *_WMB_METADATA_PATTERNS, SOURCE_WMB_MAPPING_STATS],
             reference_id,
         )
+        _complete_wmb_test_cells(sources, options)
     elif reference_id == "wmb_region_share":
         if SOURCE_MERFISH_CCF_METADATA not in sources and options.download_dir:
             sources[SOURCE_MERFISH_CCF_METADATA] = ensure_pinned_file(
@@ -2400,10 +2541,6 @@ def _source_path(context: BuildContext, name: str) -> Path:
     return Path(record.path)
 
 
-def _panel_symbols(panel: AnnotationPanel) -> dict[str, str]:
-    return dict(zip(panel.ensembl_ids, panel.symbols, strict=True))
-
-
 def _write_json(path: Path, payload: Any) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n")
@@ -2442,7 +2579,6 @@ def find_panel_markers(
     marker_precompute: Path,
     tree: TaxonomyTreeView,
     query_genes: Sequence[str],
-    gene_symbols: Mapping[str, str],
     drop_level: str | None,
     timer: _StepTimer,
     keep_reference_markers: bool = False,
@@ -2460,7 +2596,6 @@ def find_panel_markers(
         marker_precompute: Precompute the markers are found on.
         tree: The mapping tree (for ``validate_lookup``).
         query_genes: Panel genes present in the marker precompute.
-        gene_symbols: Symbol per gene ID.
         drop_level: ``--drop_level`` of both marker steps.
         timer: Step timer.
         keep_reference_markers: Keep the reference markers in the bundle.
@@ -2474,11 +2609,7 @@ def find_panel_markers(
         raise ReferenceBuildError(
             f"no panel gene of {context.spec.reference_id!r} is in the reference"
         )
-    stub = write_panel_stub_h5ad(
-        genes,
-        context.scratch_dir / PANEL_STUB_FILE,
-        gene_symbols=[gene_symbols.get(gene, "") for gene in genes],
-    )
+    stub = write_panel_stub_h5ad(genes, context.scratch_dir / PANEL_STUB_FILE)
     tmp_dir = context.scratch_dir / "ctm_tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     reference_dir = (
@@ -2567,7 +2698,6 @@ def panel_coverage(
         counts, the root children separated, markers per parent.
     """
     reference = set(reference_genes)
-    symbols = _panel_symbols(panel)
     absent = [gene for gene in panel.ensembl_ids if gene not in reference]
     summary = markers.validation.summary(weak_parent_markers)
     return {
@@ -2576,9 +2706,7 @@ def panel_coverage(
         "share_in_reference": round(len(markers.query_genes) / panel.n_genes, 6)
         if panel.n_genes
         else 0.0,
-        "absent_from_reference": [
-            {"gene_id": gene, "gene_symbol": symbols.get(gene, "")} for gene in absent
-        ],
+        "absent_from_reference": absent,
         "n_marker_genes": markers.validation.n_marker_genes,
         "root_markers": markers.validation.root_markers,
         "root_children": len(tree.children_of(None, None)),
@@ -2667,9 +2795,7 @@ def _profiles_and_negatives(
     write_negatives: bool,
 ) -> dict[str, Any]:
     """Write ``profiles.parquet`` (and ``negative_genes.parquet``)."""
-    panel = _panel_of(context)
     config = _config_of(context)
-    symbols = _panel_symbols(panel)
     output: dict[str, Any] = {}
     levels = [level for level in tree.hierarchy if level in stats.tree.hierarchy]
     if stats.has_detection:
@@ -2677,7 +2803,6 @@ def _profiles_and_negatives(
             stats,
             levels=levels,
             keep_nodes={level: tree.nodes(level) for level in levels},
-            gene_symbols=symbols,
             names=tree,
         )
         _write_parquet(profiles, context.work_dir / PROFILES_FILE)
@@ -2704,8 +2829,7 @@ def _profiles_and_negatives(
         negatives = negative_gene_table(
             detection,
             genes=stats.genes,
-            gene_symbols=symbols,
-            state_genes=load_state_genes(context.spec.species),
+            state_gene_ids=load_state_gene_ids(context.spec.species),
             max_fraction=config.flags.negative_gene_max_fraction,
         )
         _write_parquet(negatives, context.work_dir / NEGATIVE_GENES_FILE)
@@ -2998,7 +3122,6 @@ def build_whb_frontal(context: BuildContext) -> dict[str, Any]:
         marker_precompute=mapping_path,
         tree=tree,
         query_genes=query_genes,
-        gene_symbols=_panel_symbols(panel),
         drop_level=spec.drop_level,
         timer=timer,
         keep_reference_markers=panel.n_genes > config.panel.large_panel_genes,
@@ -3039,8 +3162,9 @@ def build_whb_frontal(context: BuildContext) -> dict[str, Any]:
         tree,
         weak_parent_markers=config.panel.weak_parent_markers,
     )
-    output["panel_kind"] = panel.kind
-    output["parent_panel_hash"] = panel.parent_panel_hash
+    output["marker_unsupported_nodes"] = marker_unsupported_nodes(
+        tree, markers.validation
+    )
     output.update(timer.to_json())
     return output
 
@@ -3106,7 +3230,6 @@ def build_seaad_mr(context: BuildContext) -> dict[str, Any]:
         marker_precompute=mapping_path,
         tree=tree,
         query_genes=query_genes,
-        gene_symbols=_panel_symbols(panel),
         drop_level=spec.drop_level,
         timer=timer,
         keep_reference_markers=panel.n_genes > config.panel.large_panel_genes,
@@ -3202,22 +3325,6 @@ def read_gene_list(path: Path | str) -> list[str]:
     else:
         values = [line.strip() for line in text.splitlines() if line.strip()]
     return list(dict.fromkeys(values))
-
-
-def available_wmb_matrices(h5ad_dir: Path) -> dict[str, Path]:
-    """Return the WMB expression matrices of a directory by feature-matrix label.
-
-    Args:
-        h5ad_dir: Directory of ``<label>-raw.h5ad`` files (WMB-10Xv3).
-
-    Returns:
-        Path per label, e.g. ``{"WMB-10Xv3-CB": .../WMB-10Xv3-CB-raw.h5ad}``.
-    """
-    return {
-        path.name[: -len(WMB_H5AD_SUFFIX)]: path
-        for path in sorted(h5ad_dir.glob(f"*{WMB_H5AD_SUFFIX}"))
-        if path.is_file()
-    }
 
 
 def sample_wmb_training_cells(
@@ -3382,30 +3489,95 @@ def extract_panel_training_h5ads(
     return written, kept, {"n_cells_missing_from_matrices": missing}
 
 
+def validated_wmb_marker_universe() -> list[str]:
+    """Return the validated WMB marker-precompute universe (899 genes).
+
+    Returns:
+        The ag7 | VZG2 union of the validated self-map queries, sorted.
+    """
+    from merxen.annotation.vocab import load_asset_table
+
+    return sorted(load_asset_table(WMB_MARKER_UNIVERSE_FILE)["ensembl_id"])
+
+
 def _wmb_gene_universe(
     context: BuildContext, panel: AnnotationPanel, matrices: Mapping[str, Path]
 ) -> tuple[list[str], dict[str, Any]]:
-    """Return the marker-precompute genes: the panel (plus an optional universe)."""
+    """Return the marker-precompute genes and how they were chosen.
+
+    An explicit ``wmb_marker_gene_universe`` source adds its genes to the
+    panel's. Otherwise a panel whose genes (those in the WMB matrices) all
+    lie in the validated ag7 | VZG2 union uses that union, which reproduces
+    the validated lookups exactly (plan §7.1, R28); any other panel uses its
+    own genes (a new family, validated by M3's shadow checks).
+    """
     import anndata as ad
 
     wanted = list(panel.ensembl_ids)
-    extra: list[str] = []
-    if SOURCE_WMB_GENE_UNIVERSE in context.sources:
-        extra = read_gene_list(_source_path(context, SOURCE_WMB_GENE_UNIVERSE))
     first = next(iter(matrices.values()))
     source = ad.read_h5ad(first, backed="r")
     try:
         reference_genes = set(source.var_names.astype(str))
     finally:
         source.file.close()
+    in_reference = {gene for gene in wanted if gene in reference_genes}
+    extra: list[str] = []
+    reason: str | None = None
+    if SOURCE_WMB_GENE_UNIVERSE in context.sources:
+        extra = read_gene_list(_source_path(context, SOURCE_WMB_GENE_UNIVERSE))
+        universe_source = SOURCE_WMB_GENE_UNIVERSE
+    else:
+        validated = validated_wmb_marker_universe()
+        if in_reference <= set(validated):
+            extra = validated
+            universe_source = WMB_UNIVERSE_VALIDATED
+        else:
+            universe_source = "panel"
+            reason = (
+                f"{len(in_reference - set(validated))} panel gene(s) lie outside the "
+                "validated ag7 | VZG2 universe"
+            )
+            logger.warning(
+                "wmb_panel: %s; the marker precompute uses the panel's own genes "
+                "(not the validated configuration)",
+                reason,
+            )
     universe = sorted({gene for gene in [*wanted, *extra] if gene in reference_genes})
     return universe, {
         "n_panel_genes": panel.n_genes,
         "n_extra_universe_genes": len(set(extra) - set(wanted)),
-        "universe_source": SOURCE_WMB_GENE_UNIVERSE if extra else "panel",
+        "universe_source": universe_source,
+        "validated_universe": universe_source == WMB_UNIVERSE_VALIDATED,
+        "validated_universe_asset": WMB_MARKER_UNIVERSE_FILE,
+        "not_validated_reason": reason,
         "n_genes": len(universe),
+        "universe_sha256": hashlib.sha256("\n".join(universe).encode()).hexdigest(),
         "panel_genes_absent": sorted(set(wanted) - reference_genes),
         "reference_genes": reference_genes,
+    }
+
+
+def _wmb_matrices(context: BuildContext) -> dict[str, Path]:
+    """Return the WMB matrices the source record lists (never a new glob).
+
+    The builder reads exactly the files whose identities ``build_hash``
+    covers, so a matrix added to the directory during a build is not used.
+    """
+    record = context.sources.get(SOURCE_WMB_H5AD_DIR)
+    if record is None:
+        raise ReferenceBuildError(f"wmb_panel has no source {SOURCE_WMB_H5AD_DIR!r}")
+    if record.kind == "file":
+        paths = [Path(identity.path) for identity in record.files]
+    else:
+        paths = [
+            Path(identity.path)
+            for identity in record.files
+            if Path(identity.path).name.endswith(WMB_H5AD_SUFFIX)
+        ]
+    return {
+        path.name[: -len(WMB_H5AD_SUFFIX)]: path
+        for path in sorted(paths)
+        if path.name.endswith(WMB_H5AD_SUFFIX)
     }
 
 
@@ -3439,15 +3611,18 @@ def build_wmb_panel(context: BuildContext) -> dict[str, Any]:
     Recipe (plan §3.2, §7.1; ``research/selfmap/build_marker_ref.py``,
     ``run_panel_markers.sh``, ``run_map2.sh``): (1) at most
     ``max_cells_per_cluster`` (50) cells per cluster from the local
-    WMB-10Xv3 h5ads, excluding the self-map test cells when a list is given,
-    restricted to the panel genes; (2) ``precompute_stats_abc`` -> the marker
-    precompute; (3) reference markers and (4) query markers on the panel with
-    the supertype level dropped and ``--n_processors`` / ``--max_gb``
-    explicit; (5) the Allen ``precomputed_stats_ABC_revision_230821.h5``
-    copied as the mapping precompute (sha256; md5 checked against the
-    release); (6) the lookup filtered to the mapping tree (SUPT absent).
-    Clusters and subclasses without any 10Xv3 cell are recorded
-    (``uncovered_clusters``, ``uncovered_subclasses``), never filled in.
+    WMB-10Xv3 h5ads, excluding the self-map test cells (required while
+    resolvability is enabled), restricted to the marker universe (the
+    validated ag7 | VZG2 union for panels inside it, else the panel's own
+    genes); (2) ``precompute_stats_abc`` -> the marker precompute; (3)
+    reference markers and (4) query markers on the panel with the supertype
+    level dropped and ``--n_processors`` / ``--max_gb`` explicit; (5) the
+    Allen ``precomputed_stats_ABC_revision_230821.h5`` copied as the mapping
+    precompute (sha256; md5 checked against the release); (6) the lookup
+    filtered to the mapping tree (SUPT absent). Clusters and subclasses
+    without any 10Xv3 marker-training cell are recorded
+    (``uncovered_clusters``, ``uncovered_subclasses``,
+    ``marker_unsupported_nodes``), never filled in.
 
     Args:
         context: The build context.
@@ -3462,14 +3637,38 @@ def build_wmb_panel(context: BuildContext) -> dict[str, Any]:
     output: dict[str, Any] = {"reference": "WMB (CCN20230722), 10Xv3 marker cells"}
     hierarchy = list(spec.hierarchy or WMB_HIERARCHY)
     drop_level = spec.drop_level
-    matrices = available_wmb_matrices(_source_path(context, SOURCE_WMB_H5AD_DIR))
+    matrices = _wmb_matrices(context)
     if not matrices:
         raise ReferenceBuildError(
             f"no *{WMB_H5AD_SUFFIX} under {_source_path(context, SOURCE_WMB_H5AD_DIR)}"
         )
     exclude: set[str] = set()
+    test_cells: dict[str, Any] = {"excluded": False, "source": None}
     if SOURCE_WMB_TEST_CELLS in context.sources:
-        exclude = read_cell_label_list(_source_path(context, SOURCE_WMB_TEST_CELLS))
+        test_record = context.sources[SOURCE_WMB_TEST_CELLS]
+        exclude = read_cell_label_list(Path(test_record.path))
+        digest = file_sha256(test_record.path)
+        test_cells = {
+            "excluded": True,
+            "source": test_record.path,
+            "sha256": digest,
+            "n_cells": len(exclude),
+            "matches_validated_test_set": digest == WMB_SELFMAP_TEST_CELLS_PIN.sha256,
+        }
+    elif config.resolvability.enabled:
+        # The resolvability self-map (M3b) tests on these cells; training on
+        # them would leak (plan §3.2, §8.3).
+        raise ReferenceBuildError(
+            "wmb_panel needs the self-map test cells (source "
+            f"{SOURCE_WMB_TEST_CELLS!r}, annotation_wmb_selfmap_test_cells_path) "
+            "while resolvability is enabled: the marker training cells must "
+            "exclude them"
+        )
+    else:
+        logger.warning(
+            "wmb_panel is built without excluding the self-map test cells "
+            "(resolvability disabled); the bundle records it"
+        )
     with timer.step("sample_training_cells"):
         sampled, sampling = sample_wmb_training_cells(
             _source_path(context, SOURCE_WMB_CELL_METADATA),
@@ -3550,7 +3749,6 @@ def build_wmb_panel(context: BuildContext) -> dict[str, Any]:
         marker_precompute=marker_path,
         tree=tree,
         query_genes=[gene for gene in panel.ensembl_ids if gene in universe_set],
-        gene_symbols=_panel_symbols(panel),
         drop_level=drop_level,
         timer=timer,
         keep_reference_markers=panel.n_genes > config.panel.large_panel_genes,
@@ -3561,7 +3759,21 @@ def build_wmb_panel(context: BuildContext) -> dict[str, Any]:
     output["uncovered_nodes_per_level"] = {
         level: len(entries) for level, entries in uncovered.items()
     }
+    output["marker_unsupported_nodes"] = marker_unsupported_nodes(
+        tree, markers.validation, uncovered
+    )
     output["known_limitations"] = [WMB_KNOWN_LIMITATION]
+    output["selfmap_test_cells_excluded"] = bool(test_cells["excluded"])
+    output["selfmap_test_cells"] = test_cells
+    output["validated_configuration"] = {
+        "mapping_release": md5 == WMB_MAPPING_STATS_MD5,
+        "marker_universe": bool(universe_summary["validated_universe"]),
+        "selfmap_test_cells": bool(test_cells.get("matches_validated_test_set")),
+        "max_cells_per_cluster": spec.max_cells_per_cluster == 50,
+    }
+    output["validated_configuration"]["all"] = all(
+        output["validated_configuration"].values()
+    )
     with timer.step("profiles_and_negative_genes"):
         stats = read_precomputed_stats(marker_path, markers.query_genes)
         output.update(
@@ -3888,7 +4100,6 @@ def build_whb_whole_ctx(context: BuildContext) -> dict[str, Any]:
         marker_precompute=source,
         tree=tree,
         query_genes=[gene for gene in panel.ensembl_ids if gene in reference_set],
-        gene_symbols=_panel_symbols(panel),
         drop_level=spec.drop_level,
         timer=timer,
         keep_reference_markers=False,
@@ -3931,10 +4142,19 @@ def build_whb_whole_ctx(context: BuildContext) -> dict[str, Any]:
 # Registration
 
 
+def _panel_marker_params(config: AnnotationConfig) -> dict[str, Any]:
+    """Config values every panel builder reads (weak parents, kept markers)."""
+    return {
+        "weak_parent_markers": config.panel.weak_parent_markers,
+        "large_panel_genes": config.panel.large_panel_genes,
+    }
+
+
 def _whb_params(
     spec: AnnotationReferenceSpec, config: AnnotationConfig
 ) -> dict[str, Any]:
     return {
+        **_panel_marker_params(config),
         "source_hierarchy": list(WHB_SOURCE_HIERARCHY),
         "roi_labels": list(WHB_FRONTAL_ROI_LABELS),
         "min_cells_per_leaf": WHB_FRONTAL_MIN_CELLS_PER_LEAF,
@@ -3948,6 +4168,7 @@ def _seaad_params(
     spec: AnnotationReferenceSpec, config: AnnotationConfig
 ) -> dict[str, Any]:
     return {
+        **_panel_marker_params(config),
         "pinned_sha256": SEAAD_STATS_PIN.sha256,
         "pinned_md5": SEAAD_STATS_PIN.md5,
         "profile_method": "B_condLN",
@@ -3958,11 +4179,19 @@ def _seaad_params(
 def _wmb_params(
     spec: AnnotationReferenceSpec, config: AnnotationConfig
 ) -> dict[str, Any]:
+    from merxen.annotation.vocab import asset_path
+
     return {
+        **_panel_marker_params(config),
         "library_method": WMB_LIBRARY_METHOD,
         "sampling_seed": WMB_SAMPLING_SEED,
         "marker_hierarchy": list(spec.hierarchy or WMB_HIERARCHY),
         "validated_mapping_md5": WMB_MAPPING_STATS_MD5,
+        "matrix_pattern": f"*{WMB_H5AD_SUFFIX}",
+        "marker_universe": {
+            WMB_MARKER_UNIVERSE_FILE: file_sha256(asset_path(WMB_MARKER_UNIVERSE_FILE))
+        },
+        "validated_test_cells_sha256": WMB_SELFMAP_TEST_CELLS_PIN.sha256,
         "negative_gene_max_fraction": config.flags.negative_gene_max_fraction,
         **_state_and_vocab_params("mouse", (WMB_TAXONOMY_ID,)),
     }
@@ -3983,6 +4212,7 @@ def _whole_ctx_params(
     spec: AnnotationReferenceSpec, config: AnnotationConfig
 ) -> dict[str, Any]:
     return {
+        **_panel_marker_params(config),
         "nodes_to_drop": list(spec.nodes_to_drop) or cortex_implausible_superclusters(),
         "max_genes": WHB_WHOLE_MAX_GENES,
         "profile_method": "B_condLN",
@@ -3997,6 +4227,7 @@ class _BuilderRecipe:
     taxonomy_id: str | None
     params: Any
     uses_panel: bool = True
+    source_patterns: Mapping[str, str] = field(default_factory=dict)
 
 
 BUILDER_RECIPES: Final[dict[str, _BuilderRecipe]] = {
@@ -4007,7 +4238,13 @@ BUILDER_RECIPES: Final[dict[str, _BuilderRecipe]] = {
         "seaad_mr_panel", build_seaad_mr, SEAAD_TAXONOMY_ID, _seaad_params
     ),
     "wmb_panel": _BuilderRecipe(
-        "wmb_panel", build_wmb_panel, WMB_TAXONOMY_ID, _wmb_params
+        "wmb_panel",
+        build_wmb_panel,
+        WMB_TAXONOMY_ID,
+        _wmb_params,
+        # Only the matrices enter build_hash: the shared ABC cache also holds
+        # the legacy downloader's .lock and .tmp files (mapmycells.py).
+        source_patterns={SOURCE_WMB_H5AD_DIR: f"*{WMB_H5AD_SUFFIX}"},
     ),
     "wmb_region_share": _BuilderRecipe(
         "wmb_region_share",
@@ -4049,6 +4286,7 @@ def builder_for(
         params=recipe.params(spec, config),
         uses_panel=recipe.uses_panel,
         prepare_spec=prepare_reference_spec,
+        source_patterns=dict(recipe.source_patterns),
     )
 
 

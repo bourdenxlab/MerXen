@@ -1,6 +1,6 @@
-gene_symbol,rationale,source
-Apoe,Astrocyte gene induced in disease-associated microglia and with age,plan §5.6 [L]
-Gfap,Reactive astrogliosis marker; rises with age and injury,plan §5.6 [L]
-C4b,Complement C4b; induced in aged astrocytes and oligodendrocytes,plan §5.6 [L]
-Serpina3n,Reactive-astrocyte gene induced by injury and inflammation,plan §5.6 [L]
-H2-K1,MHC class I; induced in aged or inflamed tissue across glia,plan §5.6 [L]
+gene_symbol,ensembl_id,rationale,source
+Apoe,ENSMUSG00000002985,Astrocyte gene induced in disease-associated microglia and with age,plan §5.6 [L]
+Gfap,ENSMUSG00000020932,Reactive astrogliosis marker; rises with age and injury,plan §5.6 [L]
+C4b,ENSMUSG00000073418,Complement C4b; induced in aged astrocytes and oligodendrocytes,plan §5.6 [L]
+Serpina3n,ENSMUSG00000021091,Reactive-astrocyte gene induced by injury and inflammation,plan §5.6 [L]
+H2-K1,ENSMUSG00000061232,MHC class I; induced in aged or inflamed tissue across glia,plan §5.6 [L]

@@ -49,6 +49,7 @@ from merxen.annotation.store import (
     ReferenceStore,
     resolve_builder,
 )
+from merxen.annotation.vocab import load_state_gene_ids, load_state_genes
 from merxen.cli import main as cli_main
 
 # --------------------------------------------------------------------------
@@ -390,9 +391,7 @@ def test_lognormal_mean_cpm_matches_the_validated_formula() -> None:
 
 def test_reference_profiles_aggregate_leaves_weighted_by_cells() -> None:
     stats = tiny_stats()
-    profiles = reference_profiles_from_stats(
-        stats, levels=["A", "B"], gene_symbols={"g0": "G0", "g1": "G1"}
-    )
+    profiles = reference_profiles_from_stats(stats, levels=["A", "B"])
     a1 = profiles[(profiles.level == "A") & (profiles.node == "a1")].set_index(
         "gene_id"
     )
@@ -403,7 +402,8 @@ def test_reference_profiles_aggregate_leaves_weighted_by_cells() -> None:
     assert a1.loc["g0", "detection_fraction"] == pytest.approx(4 / 6)
     assert a1.loc["g1", "mean_log2cpm"] == pytest.approx(2 / 6)
     assert a1["n_cells"].tolist() == [6, 6]
-    assert a1["gene_symbol"].tolist() == ["G0", "G1"]
+    # Bundles are keyed by IDs; symbols come from the run's panel.
+    assert "gene_symbol" not in profiles.columns
     for _key, node in profiles.groupby(["level", "node"]):
         assert node["expected_fraction"].sum() == pytest.approx(1.0)
     kept = reference_profiles_from_stats(stats, levels=["B"], keep_nodes={"B": ["b3"]})
@@ -423,8 +423,7 @@ def test_negative_genes_need_low_detection_in_every_reference() -> None:
             "ref_b": (second, pd.Series([50.0], index=["Astrocytes"])),
         },
         genes=genes,
-        gene_symbols={"g_state": "GFAP"},
-        state_genes=["Gfap"],
+        state_gene_ids=["g_state"],
         max_fraction=0.01,
     )
     astro = table[table.broad_class == "Astrocytes"].set_index("gene_id")
@@ -438,6 +437,31 @@ def test_negative_genes_need_low_detection_in_every_reference() -> None:
     neurons = table[table.broad_class == "Neurons"]
     assert not neurons["negative"].any()
     assert np.isnan(neurons["detection_ref_b"]).all()
+    assert "gene_symbol" not in table.columns
+
+
+def test_state_genes_are_matched_by_id_whatever_the_panel_symbols() -> None:
+    # CDKN1A (ENSG00000124762) declared under an alias, or by ID only.
+    ids = load_state_gene_ids("human")
+    assert ids["ENSG00000124762"] == "CDKN1A"
+    assert set(load_state_gene_ids("mouse").values()) == set(load_state_genes("mouse"))
+    genes = ["ENSG00000124762", "ENSG00000000001"]
+    frame = pd.DataFrame([[0.0, 0.0]], index=["Astrocytes"], columns=genes)
+    table = negative_gene_table(
+        {"ref": (frame, pd.Series([100.0], index=["Astrocytes"]))},
+        genes=genes,
+        state_gene_ids=ids,
+    ).set_index("gene_id")
+    assert table.loc["ENSG00000124762", "is_state_gene"]
+    assert not table.loc["ENSG00000124762", "negative"]
+    assert table.loc["ENSG00000000001", "negative"]
+
+
+def test_state_gene_assets_resolve_every_symbol_to_one_id() -> None:
+    for species, prefix in (("human", "ENSG"), ("mouse", "ENSMUSG")):
+        ids = load_state_gene_ids(species)
+        assert len(ids) == len(load_state_genes(species))
+        assert all(gene.startswith(prefix) for gene in ids)
 
 
 def test_broad_class_detection_and_leaf_classes_from_the_vocab(tmp_path: Path) -> None:
@@ -984,7 +1008,11 @@ def test_whb_frontal_builder_copies_truncates_and_validates(
     assert output["markers"]["root_markers"] == 4
     coverage = output["panel_coverage"]
     assert coverage["n_panel_genes"] == 11 and coverage["n_query_genes_used"] == 10
-    assert coverage["absent_from_reference"][0]["gene_id"] == ABSENT_GENE
+    assert coverage["absent_from_reference"] == [ABSENT_GENE]
+    assert output["marker_unsupported_nodes"]["nodes"] == [
+        f"{CLUS}/c4",
+        f"{CLUS}/c5",
+    ]
     # Reference markers stay in scratch; only their checksum is recorded.
     assert not (bundle_dir / reference.REFERENCE_MARKERS_DIR).exists()
     assert output["markers"]["reference_markers"][0]["kept"] is False
@@ -1035,12 +1063,43 @@ def test_whb_set_c_bundle_is_the_same_builder_on_the_set_c_panel(
     _store, bundle_c, fake = build_whb(tmp_path, monkeypatch, set_c, sources)
     assert bundle_a.build_hash != bundle_c.build_hash
     assert Path(bundle_a.path).parent == Path(bundle_c.path).parent
-    output = json.loads((Path(bundle_c.path) / BUNDLE_MANIFEST_NAME).read_text())[
-        "builder_output"
-    ]
-    assert output["panel_kind"] == "setc"
-    assert output["parent_panel_hash"] == set_a.panel_hash
+    manifest = json.loads((Path(bundle_c.path) / BUNDLE_MANIFEST_NAME).read_text())
+    assert manifest["built_from_panel"]["kind"] == "setc"
+    assert manifest["built_from_panel"]["parent_panel_hash"] == set_a.panel_hash
+    assert "panel_kind" not in manifest["builder_output"]
     assert fake.stub_genes == GENES[:8]
+
+
+def test_whb_bundle_is_shared_by_panels_that_differ_only_in_symbols(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    # A gene list (one symbol per ID, or IDs only) and a prepared pair panel
+    # (MERSCOPE H2AX, Xenium H2AFX) with the same IDs share one bundle.
+    sources = write_whb_sources(tmp_path)
+    prepared = make_panel(GENES)
+    gene_list = prepared.model_copy(
+        update={
+            "name": "gene_list",
+            "kind": "gene_list",
+            "symbols": list(prepared.ensembl_ids),
+            "sample_ids": [],
+        }
+    )
+    store, bundle, fake = build_whb(tmp_path, monkeypatch, prepared, sources)
+    config = AnnotationConfig(species="human")
+    again = store.get_or_build(
+        prepare_reference_spec(
+            whb_spec(
+                region_precompute=sources["region_dir"],
+                seaad_precomputed_stats=sources["seaad"],
+            )
+        ),
+        gene_list,
+        builder=builder_for(whb_spec(), config),
+        config=config,
+    )
+    assert again.reused and again.build_hash == bundle.build_hash
+    assert len(fake.calls["reference"]) == 1
 
 
 def test_whb_builder_refuses_a_precompute_that_disagrees_with_its_manifest(
@@ -1313,6 +1372,12 @@ def test_wmb_builder_samples_marker_cells_and_records_uncovered_nodes(
     assert universe["n_genes"] == 6 and universe["panel_genes_absent"] == [
         "ENSMUSG99999999999"
     ]
+    # Synthetic genes lie outside the validated ag7 | VZG2 universe.
+    assert universe["universe_source"] == "panel"
+    assert universe["validated_universe"] is False
+    assert output["selfmap_test_cells_excluded"] is True
+    assert output["selfmap_test_cells"]["matches_validated_test_set"] is False
+    assert output["validated_configuration"]["all"] is False
     # Both marker steps drop the supertype level.
     assert fake.calls["reference"][0]["drop_level"] == SUPT
     assert fake.calls["query"][0]["drop_level"] == SUPT
@@ -1332,6 +1397,20 @@ def test_wmb_builder_samples_marker_cells_and_records_uncovered_nodes(
         {"node": "CS20230722_SUBC_320", "name": "320 Multiome-only Gaba"}
     ]
     assert output["known_limitations"] == [reference.WMB_KNOWN_LIMITATION]
+    # Uncovered nodes and the leaves under collapsed parents have no marker
+    # support; ctm can still emit them, so RESOLVE gets the list.
+    unsupported = output["marker_unsupported_nodes"]
+    assert unsupported["nodes"] == [
+        f"{CLUS_W}/CS20230722_CLUS_0004",
+        f"{CLUS_W}/CS20230722_CLUS_0005",
+        f"{CLUS_W}/CS20230722_CLUS_0006",
+        f"{CLUS_W}/CS20230722_CLUS_0007",
+        f"{SUBC_W}/CS20230722_SUBC_320",
+    ]
+    reasons = {entry["node"]: entry for entry in unsupported["details"]}
+    assert reasons["CS20230722_SUBC_320"]["reason"] == "no_marker_training_cell"
+    assert reasons["CS20230722_CLUS_0004"]["reason"] == "below_collapsed_parent"
+    assert reasons["CS20230722_CLUS_0006"]["also"] == "no_marker_training_cell"
     filtered = json.loads(
         (bundle_dir / reference.QUERY_MARKERS_FILTERED_FILE).read_text()
     )
@@ -1396,6 +1475,164 @@ def test_wmb_sampling_reproduces_the_validated_recipe(tmp_path: Path) -> None:
         )
     assert sampled["cell_label"].tolist() == expected["cell_label"].tolist()
     assert summary["n_sampled_cells"] == len(expected)
+
+
+def test_wmb_panel_inside_the_validated_universe_uses_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    # ag7 (500) and VZG2 (815) lie inside the 899-gene union their validated
+    # lookups were built on; raw-CPM normalisation over the union reproduces
+    # them exactly (plan §7.1, R28).
+    import anndata as ad
+
+    sources = write_wmb_sources(tmp_path)
+    fake = FakeCtm(wmb_lookup).install(monkeypatch)
+    trained_genes: list[str] = []
+
+    def precompute(config: dict[str, Any]) -> None:
+        path = config["h5ad_path_list"][0]
+        trained_genes.extend(ad.read_h5ad(path, backed="r").var_names)
+        wmb_marker_precompute(config)
+
+    fake.precompute = precompute
+    monkeypatch.setattr(
+        reference, "validated_wmb_marker_universe", lambda: list(MOUSE_GENES)
+    )
+    spec = prepare_reference_spec(wmb_spec(sources))
+    panel = make_panel(MOUSE_GENES[:6], species="mouse")
+    bundle = ReferenceStore(tmp_path / "store").get_or_build(
+        spec, panel, builder=builder_for(spec)
+    )
+    output = json.loads((Path(bundle.path) / BUNDLE_MANIFEST_NAME).read_text())[
+        "builder_output"
+    ]
+    universe = output["marker_precompute"]["gene_universe"]
+    assert universe["universe_source"] == reference.WMB_UNIVERSE_VALIDATED
+    assert universe["n_genes"] == 8 and universe["n_extra_universe_genes"] == 2
+    assert trained_genes == sorted(MOUSE_GENES)
+    # Markers are still found on the panel genes only.
+    assert fake.stub_genes == MOUSE_GENES[:6]
+    assert output["validated_configuration"]["marker_universe"] is True
+
+
+def test_the_packaged_wmb_universe_is_the_validated_union() -> None:
+    universe = reference.validated_wmb_marker_universe()
+    assert len(universe) == 899 and universe == sorted(set(universe))
+    table = pd.read_csv(reference.ASSET_DIR / reference.WMB_MARKER_UNIVERSE_FILE)
+    assert int(table["in_ag7"].sum()) == 500 and int(table["in_vzg2"].sum()) == 815
+    assert all(gene.startswith("ENSMUSG") for gene in universe)
+
+
+def test_wmb_builder_requires_the_test_cells_while_resolvability_is_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    sources = write_wmb_sources(tmp_path)
+    fake = FakeCtm(wmb_lookup).install(monkeypatch)
+    fake.precompute = wmb_marker_precompute
+    base = wmb_spec(sources)
+    spec = prepare_reference_spec(
+        base.model_copy(
+            update={
+                "sources": {
+                    k: v
+                    for k, v in base.sources.items()
+                    if k != "wmb_selfmap_test_cells"
+                }
+            }
+        )
+    )
+    panel = make_panel(MOUSE_GENES[:6], species="mouse")
+    store = ReferenceStore(tmp_path / "store")
+    with pytest.raises(ReferenceBuildError, match="self-map test cells"):
+        store.get_or_build(spec, panel, builder=builder_for(spec))
+    assert fake.calls["precompute"] == []
+    config = AnnotationConfig(species="mouse")
+    config = config.model_copy(
+        update={
+            "resolvability": config.resolvability.model_copy(update={"enabled": False})
+        }
+    )
+    bundle = store.get_or_build(
+        spec, panel, builder=builder_for(spec, config), config=config
+    )
+    output = json.loads((Path(bundle.path) / BUNDLE_MANIFEST_NAME).read_text())[
+        "builder_output"
+    ]
+    assert output["selfmap_test_cells_excluded"] is False
+
+
+def test_wmb_matrices_ignore_lock_and_staging_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    sources = write_wmb_sources(tmp_path)
+    fake = FakeCtm(wmb_lookup).install(monkeypatch)
+    fake.precompute = wmb_marker_precompute
+    spec = prepare_reference_spec(wmb_spec(sources))
+    panel = make_panel(MOUSE_GENES[:6], species="mouse")
+    store = ReferenceStore(tmp_path / "store")
+    before = store.prepare_request(spec, panel, builder=builder_for(spec))
+    # What the legacy downloader leaves in the shared ABC cache.
+    (sources["h5ad_dir"] / "WMB-10Xv3-AAA-raw.h5ad.lock").write_bytes(b"")
+    (sources["h5ad_dir"] / "WMB-10Xv3-CCC-raw.h5ad.tmp").write_bytes(b"part")
+    after = store.prepare_request(spec, panel, builder=builder_for(spec))
+    assert after.build_hash == before.build_hash
+    names = [Path(f.path).name for f in after.sources["wmb_h5ad_dir"].files]
+    assert names == ["WMB-10Xv3-AAA-raw.h5ad", "WMB-10Xv3-BBB-raw.h5ad"]
+    bundle = store.get_or_build(spec, panel, builder=builder_for(spec))
+    output = json.loads((Path(bundle.path) / BUNDLE_MANIFEST_NAME).read_text())[
+        "builder_output"
+    ]
+    assert output["marker_precompute"]["sampling"]["matrices"] == [
+        "WMB-10Xv3-AAA",
+        "WMB-10Xv3-BBB",
+    ]
+
+
+def test_prepare_reference_spec_seeds_the_pinned_test_cells(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    sources = write_wmb_sources(tmp_path)
+    truth = sources["truth"]
+    pin = PinnedFile(
+        key="wmb_selfmap_test_cells",
+        url="",
+        relative_path="local/wmb_selfmap/truth.csv",
+        size=truth.stat().st_size,
+        md5="",
+        sha256=reference.file_sha256(truth),
+    )
+    monkeypatch.setattr(reference, "WMB_SELFMAP_TEST_CELLS_PIN", pin)
+    downloads = tmp_path / "store" / ".downloads"
+    options = SourceOptions(download_dir=downloads)
+    spec = prepare_reference_spec(wmb_spec(sources), options)
+    cached = downloads / "local" / "wmb_selfmap" / "truth.csv"
+    # The bundle hashes the stable cached copy, not the archive path.
+    assert spec.sources["wmb_selfmap_test_cells"] == cached
+    assert reference.file_sha256(cached) == pin.sha256
+    assert cached.stat().st_mode & 0o222 == 0
+    # Once seeded, the cache serves builds that name no list.
+    base = wmb_spec(sources)
+    without = base.model_copy(
+        update={
+            "sources": {
+                k: v for k, v in base.sources.items() if k != "wmb_selfmap_test_cells"
+            }
+        }
+    )
+    assert (
+        prepare_reference_spec(without, options).sources["wmb_selfmap_test_cells"]
+        == cached
+    )
+    # Another list is used as given, with a warning.
+    other = tmp_path / "other_truth.csv"
+    other.write_text("cell_label\nX\n")
+    changed = base.model_copy(
+        update={"sources": {**base.sources, "wmb_selfmap_test_cells": other}}
+    )
+    with caplog.at_level("WARNING"):
+        kept = prepare_reference_spec(changed, options)
+    assert kept.sources["wmb_selfmap_test_cells"] == other
+    assert "not the validated self-map test set" in caplog.text
 
 
 def test_wmb_builder_refuses_a_panel_without_wmb_genes(
@@ -1526,8 +1763,9 @@ def test_cli_builds_the_region_share_bundle_then_reuses_it(tmp_path: Path) -> No
     runner = CliRunner()
     first = runner.invoke(cli_main, args)
     assert first.exit_code == 0, first.output
+    assert "annotation-reference-prep: built" in first.output
     built = json.loads((tmp_path / "bundle_ref.json").read_text())
-    assert built["reused"] is False and built["panel_hash"] is None
+    assert built["panel_hash"] is None and "reused" not in built
     bundle_dir = Path(built["path"])
     manifest = json.loads((bundle_dir / BUNDLE_MANIFEST_NAME).read_text())
     output = manifest["builder_output"]
@@ -1544,7 +1782,8 @@ def test_cli_builds_the_region_share_bundle_then_reuses_it(tmp_path: Path) -> No
         assert (bundle_dir / name).is_file()
     second = runner.invoke(cli_main, args)
     assert second.exit_code == 0, second.output
-    assert json.loads((tmp_path / "bundle_ref.json").read_text())["reused"] is True
+    assert "annotation-reference-prep: reused" in second.output
+    assert json.loads((tmp_path / "bundle_ref.json").read_text()) == built
 
 
 def test_whole_ctx_builder_is_refused_above_1000_genes(
