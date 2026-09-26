@@ -199,6 +199,43 @@ def test_proseg_csv_warns_on_xenium_controls_known_only_by_category(
     }
     assert "NovelCtrl_0001" in caplog.text
     assert "Intergenic_Region_3" not in caplog.text
+    assert stats["kept_by_feature_type_counts"] == {}
+
+
+def test_proseg_csv_keeps_and_reports_genes_with_control_like_names(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A gene feature type overrides a control-name rule, with a warning."""
+    names = ["GFAP", "antisense_PROKR2", "antisense_PROKR2", "BLANK_0006"]
+    points = pd.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0],
+            "y": [1.0, 2.0, 3.0, 4.0],
+            "feature_name": pd.Categorical(names),
+            "is_gene": [True, True, True, False],
+        }
+    )
+    csv_path = tmp_path / "xenium.csv"
+
+    with caplog.at_level(logging.WARNING, logger="merxen.io.transcript_io"):
+        stats = _write_csv_for_platform(
+            points,
+            csv_path,
+            gene_col="feature_name",
+            platform="XENIUM",
+            is_gene_col="is_gene",
+        )
+
+    assert pd.read_csv(csv_path)["feature_name"].tolist() == [
+        "GFAP",
+        "antisense_PROKR2",
+        "antisense_PROKR2",
+    ]
+    assert stats["excluded_control_counts"] == {"BLANK_0006": 1}
+    assert stats["kept_by_feature_type_counts"] == {"antisense_PROKR2": 2}
+    assert "feature type says gene" in caplog.text
+    assert "antisense_PROKR2 (2)" in caplog.text
 
 
 def test_proseg_csv_excludes_merscope_blank_codewords(tmp_path: Path) -> None:

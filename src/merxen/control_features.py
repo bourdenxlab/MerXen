@@ -21,13 +21,22 @@ Sources for the names and categories below:
 * MERSCOPE (Vizgen): blank codewords are listed in the codebook next to the
   genes and appear in ``detected_transcripts`` as ``Blank-<N>``. MERSCOPE
   transcript tables carry no feature-type column.
+
+When a transcript has a usable feature type (``is_gene`` or
+``codeword_category``), that type alone decides whether it is a control; the
+name rules apply only to transcripts without one. So a name rule can never
+drop a feature the platform labels as a gene. This matters most for
+``antisense_``: it is kept as a name rule for pre-release Xenium data, which
+has no feature-type column, and a custom-panel gene with that prefix is kept
+on XOA >= 3.0 data. Rows where a name rule and a gene feature type disagree
+are reported by :func:`classify_control_transcripts` so callers can log them.
 """
 
 from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 import pandas as pd
@@ -49,9 +58,10 @@ XENIUM_GENE_CODEWORD_CATEGORIES: frozenset[str] = frozenset(
     {"predesigned_gene", "custom_gene"}
 )
 
-# Anchored, case-sensitive name rules. The Xenium rule keeps ProSeg's own
-# Xenium preset prefixes (``Deprecated|NegControl|Unassigned|Intergenic``) and
-# adds the other documented control names.
+# Anchored, case-sensitive name rules, used for transcripts without a feature
+# type. The Xenium rule keeps ProSeg's own Xenium preset prefixes
+# (``Deprecated|NegControl|Unassigned|Intergenic``) and adds the other
+# documented control names.
 XENIUM_CONTROL_NAME_PATTERN: re.Pattern[str] = re.compile(
     r"^(?:NegControl|Unassigned|Deprecated|Intergenic|GenomicControl|BLANK_"
     r"|antisense_)"
@@ -140,21 +150,33 @@ def _optional_bool(values: Any) -> tuple[np.ndarray, np.ndarray]:
     return is_true | is_false, is_true
 
 
-def control_transcript_mask(
+class ControlTranscriptFlags(NamedTuple):
+    """Per-transcript result of :func:`classify_control_transcripts`.
+
+    Attributes:
+        control: ``True`` for control transcripts.
+        kept_by_feature_type: ``True`` where a control-name rule matches but
+            the feature type says gene, so the transcript is kept.
+    """
+
+    control: np.ndarray
+    kept_by_feature_type: np.ndarray
+
+
+def classify_control_transcripts(
     feature_names: Sequence[Any] | np.ndarray | pd.Series,
     *,
     platform: str | None = None,
     is_gene: Sequence[Any] | np.ndarray | pd.Series | None = None,
     codeword_category: Sequence[Any] | np.ndarray | pd.Series | None = None,
-) -> np.ndarray:
+) -> ControlTranscriptFlags:
     """Flag control transcripts, preferring the platform's feature-type columns.
 
-    A transcript is a control when its name matches the platform's anchored
-    control-name pattern, or when its feature type says it is not a gene
-    (``is_gene`` false, else a ``codeword_category`` outside
-    :data:`XENIUM_GENE_CODEWORD_CATEGORIES`). Rows without a usable feature
-    type fall back to the :data:`CONTROL_TOKENS` substring rule. An anchored
-    name match is never kept, even if the feature type says gene.
+    A transcript with a usable feature type is a control when that type says
+    it is not a gene: ``is_gene`` false, else a ``codeword_category`` outside
+    :data:`XENIUM_GENE_CODEWORD_CATEGORIES`. A transcript without one is a
+    control when its name matches the platform's anchored control-name
+    pattern or contains one of :data:`CONTROL_TOKENS`.
 
     Args:
         feature_names: Per-transcript feature names.
@@ -164,7 +186,8 @@ def control_transcript_mask(
             ``codeword_category`` values, used where ``is_gene`` is missing.
 
     Returns:
-        Boolean array, ``True`` for control transcripts.
+        The control flags, plus the transcripts kept only because their
+        feature type overrode a matching control-name rule.
 
     Raises:
         ValueError: If a feature-type column differs in length from
@@ -174,19 +197,16 @@ def control_transcript_mask(
     n_rows = len(names)
     codes, uniques = pd.factorize(names)
     unique_names = [str(name) for name in uniques]
+    unique_name_rule = np.fromiter(
+        (
+            matches_control_name_pattern(name, platform) or has_control_token(name)
+            for name in unique_names
+        ),
+        dtype=bool,
+        count=len(unique_names),
+    )
     # A trailing False lets missing names (code -1) index a non-match.
-    anchored = np.fromiter(
-        (matches_control_name_pattern(name, platform) for name in unique_names),
-        dtype=bool,
-        count=len(unique_names),
-    )
-    token = np.fromiter(
-        (has_control_token(name) for name in unique_names),
-        dtype=bool,
-        count=len(unique_names),
-    )
-    anchored_rows = np.append(anchored, False)[codes]
-    token_rows = np.append(token, False)[codes]
+    name_rows = np.append(unique_name_rule, False)[codes]
 
     has_type = np.zeros(n_rows, dtype=bool)
     type_is_control = np.zeros(n_rows, dtype=bool)
@@ -210,9 +230,43 @@ def control_transcript_mask(
         type_is_control[use] = ~is_gene_category[use]
         has_type |= use
 
-    return np.asarray(
-        anchored_rows | np.where(has_type, type_is_control, token_rows), dtype=bool
+    return ControlTranscriptFlags(
+        control=np.asarray(np.where(has_type, type_is_control, name_rows), dtype=bool),
+        kept_by_feature_type=np.asarray(
+            has_type & ~type_is_control & name_rows, dtype=bool
+        ),
     )
+
+
+def control_transcript_mask(
+    feature_names: Sequence[Any] | np.ndarray | pd.Series,
+    *,
+    platform: str | None = None,
+    is_gene: Sequence[Any] | np.ndarray | pd.Series | None = None,
+    codeword_category: Sequence[Any] | np.ndarray | pd.Series | None = None,
+) -> np.ndarray:
+    """Return the control flags of :func:`classify_control_transcripts`.
+
+    Args:
+        feature_names: Per-transcript feature names.
+        platform: ``"XENIUM"`` or ``"MERSCOPE"``; selects the name patterns.
+        is_gene: Optional per-transcript Xenium ``is_gene`` values.
+        codeword_category: Optional per-transcript Xenium
+            ``codeword_category`` values, used where ``is_gene`` is missing.
+
+    Returns:
+        Boolean array, ``True`` for control transcripts.
+
+    Raises:
+        ValueError: If a feature-type column differs in length from
+            ``feature_names``.
+    """
+    return classify_control_transcripts(
+        feature_names,
+        platform=platform,
+        is_gene=is_gene,
+        codeword_category=codeword_category,
+    ).control
 
 
 def is_registered_control_name(name: str, platform: str | None = None) -> bool:
