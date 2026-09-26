@@ -1853,3 +1853,71 @@ def test_ctm_steps_run_in_a_fresh_single_threaded_interpreter(tmp_path: Path) ->
     assert (tmp_path / "ok.stdout.log").read_text().strip() == "1"
     with pytest.raises(ReferenceBuildError, match="exit code 3"):
         reference.run_python_step("bad", ["-c", script, "3"], log_dir=tmp_path)
+
+
+def test_whb_builder_rebuilds_the_region_precompute_without_a_copy_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    sources = write_whb_sources(tmp_path)
+    metadata = tmp_path / "abc_whb" / "metadata"
+    (metadata / "WHB-10Xv3" / "v").mkdir(parents=True)
+    (metadata / "WHB-taxonomy" / "v").mkdir(parents=True)
+    labels = [*reference.WHB_FRONTAL_ROI_LABELS, "Human MoAN"]
+    cells = pd.DataFrame(
+        {
+            "cell_label": [f"cell{index}" for index in range(60)],
+            "region_of_interest_label": [labels[index % 5] for index in range(60)],
+            # alias 1 has 12 frontal cells, alias 2 only 9 (dropped).
+            "cluster_alias": [
+                1 if index < 15 else 2 if index < 26 else 3 for index in range(60)
+            ],
+        }
+    )
+    cells.to_csv(metadata / "WHB-10Xv3" / "v" / "cell_metadata.csv", index=False)
+    pd.DataFrame({"region_of_interest_label": labels}).to_csv(
+        metadata / "WHB-10Xv3" / "v" / "region_of_interest_structure_map.csv",
+        index=False,
+    )
+    for name in ("cluster_annotation_term", "cluster_to_cluster_annotation_membership"):
+        (metadata / "WHB-taxonomy" / "v" / f"{name}.csv").write_text("label\n")
+    h5ads = tmp_path / "abc_whb" / "expression"
+    h5ads.mkdir()
+    for name in ("WHB-10Xv3-Neurons-raw.h5ad", "WHB-10Xv3-Nonneurons-raw.h5ad"):
+        (h5ads / name).write_bytes(b"h5ad")
+    fake = FakeCtm(whb_truncated_lookup).install(monkeypatch)
+
+    def rebuilt(config: dict[str, Any]) -> None:
+        region_cells = pd.read_csv(config["cell_metadata_path"])
+        assert set(region_cells["region_of_interest_label"]) <= set(
+            reference.WHB_FRONTAL_ROI_LABELS
+        )
+        assert set(region_cells["cluster_alias"]) == {1, 3}
+        write_precompute(
+            Path(config["output_path"]), WHB_TREE, GENES, n_cells=WHB_N_CELLS
+        )
+
+    fake.precompute = rebuilt
+    spec = prepare_reference_spec(
+        whb_spec(
+            whb_metadata_dir=metadata,
+            whb_h5ad_dir=h5ads,
+            seaad_precomputed_stats=sources["seaad"],
+        )
+    )
+    bundle = ReferenceStore(tmp_path / "store").get_or_build(
+        spec, make_panel(GENES), builder=builder_for(spec)
+    )
+    output = json.loads((Path(bundle.path) / BUNDLE_MANIFEST_NAME).read_text())[
+        "builder_output"
+    ]
+    (precompute,) = fake.calls["precompute"]
+    assert precompute["hierarchy"] == list(reference.WHB_SOURCE_HIERARCHY)
+    assert precompute["do_pruning"] is True and precompute["normalization"] == "raw"
+    assert [Path(path).name for path in precompute["h5ad_path_list"]] == [
+        "WHB-10Xv3-Neurons-raw.h5ad",
+        "WHB-10Xv3-Nonneurons-raw.h5ad",
+    ]
+    source = output["source_precompute"]
+    assert source["mode"] == "rebuilt"
+    assert source["filtering_summary"]["dropped_leaf_aliases"] == {"2": 9}
+    assert source["verification"]["n_leaves"] == 7
