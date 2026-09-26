@@ -528,13 +528,13 @@ runs once, and is shared across all samples and segmentation branches. See
 | `mapmycells_region_labels` | species-dependent | Human defaults to the four frontal WHB labels. Mouse defaults empty and requires explicit WMB `region_of_interest_acronym` values for region mode. |
 | `mapmycells_region_cache_dir` | `<outdir>/mapmycells_cache` | Durable cache for Allen WHB/WMB downloads, the gene mapper, and generated region reference files. The Dwight profile overrides this with `/media/mathieubo/SSD1/MerXen/mapmycells`. |
 | `mapmycells_region_min_cells_per_leaf` | `10` | Drop region taxonomy leaf aliases with fewer cells than this before precomputing stats. |
-| `mapmycells_region_force_rebuild` | `false` | Rebuild the generated region reference even if matching cached files exist. |
+| `mapmycells_region_force_rebuild` | `false` | Build a new region reference directory even if a matching cached build exists. Earlier builds are never deleted; see [MapMyCells region reference cache](stages/mapmycells.md#region-reference-cache). |
 | `mapmycells_region_query_markers_n_per_utility` | `10` | Marker count target passed to Allen's `QueryMarkerRunner` for the region reference. |
 | `mapmycells_drop_level` | `null` | Optional taxonomy level to drop before mapping. |
 | `mapmycells_normalization` | `raw` | Query normalization passed to MapMyCells. |
 | `mapmycells_bootstrap_factor` | `0.9` | Marker downsampling factor for bootstrapping; default keeps the historical spatial-data setting. |
 | `mapmycells_bootstrap_iteration` | `100` | Number of bootstrap iterations. |
-| `mapmycells_n_processors` | Dwight: `8` | Number of worker processes passed to MapMyCells. |
+| `mapmycells_n_processors` | `4` (Dwight: `8`) | Number of worker processes passed to MapMyCells and to the region reference builders. |
 | `mapmycells_chunk_size` | `null` | Optional cells-per-worker chunk size. |
 | `mapmycells_rng_seed` | `null` | Optional mapper random seed. |
 | `mapmycells_max_gb` | `null` | Optional memory budget for H5AD conversion. |
