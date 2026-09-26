@@ -23,7 +23,13 @@ For each platform in a pair:
    annotated with MapMyCells assignments in `obs` columns prefixed with
    `mapmycells_`. The H5AD also records MapMyCells metadata in
    `uns["merxen_mapmycells"]`, including the paths to the separate PNGs; the
-   plot images themselves are not embedded in the H5AD.
+   plot images themselves are not embedded in the H5AD. The extended JSON and
+   the mapper, stdout and stderr logs are not embedded either. `uns` records
+   their paths and SHA-256 digests (`extended_json_sha256`, `log_sha256`,
+   `stdout_log_sha256`, `stderr_log_sha256`) and keeps only the short command
+   JSON as `command_json_text`. Annotated H5ADs written before this change
+   still embed these files as `*_text` entries. For the P7513 MERSCOPE
+   section, the embedded extended JSON was about 258 MB of a 652 MB file.
 
 Set `--mapmycells_plots_only true` to regenerate the annotated H5AD and plots
 from an existing published `mapmycells_out/` directory without preparing a new
@@ -248,7 +254,7 @@ Written under `mapmycells_out/<platform>/`:
 | Supercluster QC | `<sample_id>_mapmycells_supercluster_assignment_qc.png` | Supercluster cell counts, confidence summaries, and low-confidence fractions. |
 | Cluster QC | `<sample_id>_mapmycells_cluster_assignment_qc.png` | Cluster cell counts, confidence summaries, and low-confidence fractions. |
 | Supercluster spatial grid | `<sample_id>_mapmycells_spatial_supercluster_grid.png` | Small-multiple spatial grid with each supercluster highlighted in red against all other cells in grey. |
-| Annotated AnnData | `<sample_id>_mapmycells_annotated.h5ad` | Clustered AnnData with MapMyCells assignments added to `obs` and mapper metadata in `uns["merxen_mapmycells"]`. |
+| Annotated AnnData | `<sample_id>_mapmycells_annotated.h5ad` | Clustered AnnData with MapMyCells assignments added to `obs` and mapper metadata in `uns["merxen_mapmycells"]` (paths and SHA-256 digests of the extended JSON and logs, not their contents). |
 
 Each listed `.png` plot is also written as a same-stem `.pdf`.
 

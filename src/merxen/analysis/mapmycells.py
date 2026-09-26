@@ -1027,16 +1027,19 @@ def annotate_h5ad_with_mapmycells(
             "n_assignments": int(len(assignments)),
             "n_obs": int(adata.n_obs),
             "n_matched_obs": matched,
+            # The extended JSON (hundreds of MB for a full section) and the
+            # mapper logs stay as files next to this H5AD; only their paths
+            # and digests are recorded here.
             "extended_json_path": _path_as_str(extended_json_path),
-            "extended_json_text": _read_text_if_present(extended_json_path),
+            "extended_json_sha256": _sha256_if_present(extended_json_path),
             "command_json_path": _path_as_str(command_path),
             "command_json_text": _read_text_if_present(command_path),
             "log_path": _path_as_str(log_path),
-            "log_text": _read_text_if_present(log_path),
+            "log_sha256": _sha256_if_present(log_path),
             "stdout_log_path": _path_as_str(stdout_path),
-            "stdout_log_text": _read_text_if_present(stdout_path),
+            "stdout_log_sha256": _sha256_if_present(stdout_path),
             "stderr_log_path": _path_as_str(stderr_path),
-            "stderr_log_text": _read_text_if_present(stderr_path),
+            "stderr_log_sha256": _sha256_if_present(stderr_path),
             "reference_metadata": reference_metadata or {},
         }
         adata.write_h5ad(output_h5ad)
@@ -3287,6 +3290,16 @@ def _read_text_if_present(path: Path | str | None) -> str:
     if not resolved.exists():
         return ""
     return resolved.read_text(encoding="utf-8", errors="replace")
+
+
+def _sha256_if_present(path: Path | str | None) -> str | None:
+    if path is None:
+        return None
+    resolved = Path(path)
+    if not resolved.is_file():
+        return None
+    with resolved.open("rb") as handle:
+        return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
 def _read_comment_header(path: Path | str) -> list[str]:
