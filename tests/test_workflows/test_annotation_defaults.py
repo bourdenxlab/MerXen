@@ -540,6 +540,11 @@ def _build_cases(tmp_path: Path, defaults: dict[str, Any]) -> dict[str, dict[str
         "settings": mouse_settings,
         "params": defaults,
     }
+    cases["preflight|map_first|mouse-no-test-cells"] = {
+        "fn": "preflight",
+        "settings": {**mouse_settings, "run_clustering_squidpy": True},
+        "params": defaults,
+    }
     cases["preflight|map_first|invalid"] = {
         "fn": "preflight",
         "settings": {
@@ -843,6 +848,11 @@ def test_groovy_preflight(groovy_results: dict[str, dict[str, Any]]) -> None:
     assert len(clustering) == 1
     assert "map_first is not available yet for P1" in clustering[0]
     assert _value(groovy_results, "preflight|map_first|no-clustered-stage") == []
+    # A mouse row that would build wmb_panel needs the self-map test cells
+    # while resolvability is on (the default).
+    mouse = "\n".join(_value(groovy_results, "preflight|map_first|mouse-no-test-cells"))
+    assert "map_first is not available yet for M1" in mouse
+    assert "wmb_panel needs annotation_wmb_selfmap_test_cells_path" in mouse
     invalid = "\n".join(_value(groovy_results, "preflight|map_first|invalid"))
     for expected in (
         "Unknown annotation_panel_mode 'bogus'",

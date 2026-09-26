@@ -548,6 +548,39 @@ runs once, and is shared across all samples and segmentation branches. See
 | `mapmycells_obs_id_column` | `null` | Optional `obs` column used as cell identifiers for the query H5AD. |
 | `annotation_gene_id_fallback_csv` | `null`; Dwight: WHB `WHB-10Xv3-Nonneurons-raw.h5ad` on SSD1 | Local symbol-to-Ensembl table (Allen `gene.csv` layout, or a reference `.h5ad` whose `var` index holds the IDs) used only when preparing the MapMyCells query, for features still lacking an ID after the `var` column and the cached reference metadata. Applied only when `mapmycells_gene_id_column` is `ensembl_id`, and only IDs of the query species are used (a table with none, such as the human Dwight default in a mouse run, is skipped and recorded as `gene_id_fallback_ignored`); nothing is downloaded. Preflight checks that the file exists. Recovered and unresolved genes are listed in `<sample_id>_mapmycells_query_gene_ids.json` and the pair manifest. Legacy clustering annotation is unaffected. Set to `null` to disable. |
 
+### Reference-based annotation (in development)
+
+These params drive the reference-bundle processes of the new annotation
+([Reference-based annotation](stages/annotation.md)). They are read only by
+`--annotation_prepare_only` runs and, once wired (M5), by `map_first` runs;
+legacy runs ignore them. Defaults are in `workflows/conf/annotation.config`,
+the dwight values in `workflows/conf/dwight.annotation.config`.
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `annotation_prepare_only` | `false` | Build the reference bundles of `annotation_panel_genes_path` for every row and segmentation, and run no pipeline stage. |
+| `annotation_panel_genes_path` | `null` | Declared panel of a prepare-only run (any gene list `merxen annotation-panel --panel-genes-path` reads). A human gene list of the seeded set-a family also gets its curated set c. |
+| `annotation_human_references`, `annotation_mouse_references` | `whb_frontal_supc_clus,seaad_mr_panel`; `wmb_panel,wmb_region_share` | Reference ids per species. |
+| `annotation_reference_store` | `null` (`<outdir>/annotation_references`); Dwight: `/media/mathieubo/SSD1/MerXen/annotation_references` | Store root. Bundles are added, never modified or deleted; finished bundles are read-only. |
+| `annotation_reference_store_large` | `null`; Dwight: `/srv/storage/MerXen/annotation_references` | Store of bundles on panels above 1,000 genes. |
+| `annotation_prep_large_memory` | `null` | `ANNOTATE_REFERENCE_PREP` memory for panels above 1,000 genes (else 64 GB). |
+| `annotation_auto_download` | `true` | Fetch missing pinned files (SEA-AD Multiregion, the MERFISH CCF metadata) into `<annotation_reference_store>/.downloads`, verified by size and sha256. |
+| `annotation_ctm_version` | `1.7.2` | `cell_type_mapper` version PREP requires. |
+| `annotation_resolvability` | `true` | Resolvability self-map (M3b). While true, `wmb_panel` needs `annotation_wmb_selfmap_test_cells_path`. Not part of `build_hash`. |
+| `annotation_xplat_sensitivity`, `annotation_xplat_sensitivity_segmentations` | `geneset_c`; `proseg_hybrid` | Whether same-panel human pairs get a set-c bundle, and on which segmentations. |
+| `annotation_panel_mode` | `auto` | `auto` (intersection when the two platform panels have Jaccard ≥ 0.9, else `per_platform`), `intersection` or `per_platform`. |
+| `annotation_whb_region_precompute_source` | `null`; Dwight: the SSD1 frontal region reference | WHB frontal region precompute (directory or `precomputed_stats.h5`), copied into each WHB bundle. |
+| `annotation_whb_h5ad_dir`, `annotation_whb_metadata_dir` | `null`; Dwight: the SSD1 ABC WHB cache | Inputs to rebuild the region precompute when no source precompute is given. |
+| `annotation_seaad_precomputed_stats_path`, `annotation_seaad_metadata_dir` | `null` | Local SEA-AD Multiregion files; unset, they come from the pinned download cache. |
+| `annotation_wmb_h5ad_dir` | `null`; Dwight: the SSD1 WMB-10Xv3 matrices | Directory of `WMB-10Xv3-*-raw.h5ad`; only those files enter `build_hash`. |
+| `annotation_wmb_metadata_dir` | `null`; Dwight: the SSD1 ABC metadata | WMB-10X cell metadata and the WMB taxonomy tables. |
+| `annotation_wmb_mapping_stats_path` | `null`; Dwight: the Allen `precomputed_stats_ABC_revision_230821.h5` | Allen WMB means, copied as the mapping precompute. |
+| `annotation_wmb_selfmap_test_cells_path` | `null`; Dwight: `research/selfmap/truth.csv` of the evidence archive | The 11,913 self-map test cells kept out of the marker training cells. A copy matching the pinned sha256 is seeded into `<store>/.downloads/local/wmb_selfmap/`, and bundles hash that copy. Required while `annotation_resolvability` is true. |
+| `annotation_wmb_marker_gene_universe_path` | `null` | Override of the `wmb_panel` marker gene universe. Unset, a panel inside the validated ag7 ∪ VZG2 union (899 genes) uses that union and any other panel its own genes. |
+| `annotation_wmb_max_cells_per_cluster` | `50` | Marker training cells per WMB cluster. |
+| `annotation_merfish_ccf_metadata_path` | `null` | Local MERFISH-C57BL6J-638850-CCF cell metadata; unset, it comes from the pinned download cache. |
+| `annotation_prep_max_forks` | Dwight: `1` | Concurrent `ANNOTATE_REFERENCE_PREP` tasks. |
+
 ### Resource limits
 
 The reserved `standard` profile includes

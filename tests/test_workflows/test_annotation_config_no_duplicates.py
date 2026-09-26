@@ -24,7 +24,8 @@ BASE_FILES = ("nextflow.config", "conf/dwight.config")
 ANNOTATION = "conf/annotation.config"
 DWIGHT_ANNOTATION = "conf/dwight.annotation.config"
 
-# The annotation-only params of plan §3.7, created in M1.
+# The annotation-only params of plan §3.7, created in M1, plus the wmb_panel
+# self-map test-cell source (M2; plan §3.2 excludes those cells).
 PLANNED_ANNOTATION_PARAMS = frozenset(
     {
         "clustering_squidpy_mode_human",
@@ -51,6 +52,8 @@ PLANNED_ANNOTATION_PARAMS = frozenset(
         "annotation_wmb_h5ad_dir",
         "annotation_wmb_metadata_dir",
         "annotation_wmb_mapping_stats_path",
+        "annotation_wmb_selfmap_test_cells_path",
+        "annotation_wmb_marker_gene_universe_path",
         "annotation_wmb_max_cells_per_cluster",
         "annotation_merfish_ccf_metadata_path",
         "annotation_auto_download",
@@ -144,8 +147,33 @@ def test_annotation_configs_are_included_once_at_hook_h7() -> None:
     assert re.search(r"(?m)^includeConfig 'conf/annotation\.config'$", base_text)
     assert dwight_text.count("includeConfig 'dwight.annotation.config'") == 1
     assert "includeConfig" not in (WORKFLOWS / ANNOTATION).read_text()
-    assert "process {" not in (WORKFLOWS / ANNOTATION).read_text()
-    assert "process {" not in (WORKFLOWS / DWIGHT_ANNOTATION).read_text()
+    assert "includeConfig" not in (WORKFLOWS / DWIGHT_ANNOTATION).read_text()
+
+
+# Processes whose resources the annotation configs may set (M2; MAP, RESOLVE,
+# COMPUTE_CPU and REPORT join as they arrive).
+ANNOTATION_PROCESSES = frozenset({"ANNOTATE_PANEL", "ANNOTATE_REFERENCE_PREP"})
+
+
+@pytest.mark.parametrize("annotation_file", [ANNOTATION, DWIGHT_ANNOTATION])
+def test_annotation_configs_set_only_annotation_process_resources(
+    annotation_file: str,
+) -> None:
+    """The process blocks of the annotation configs select annotation processes.
+
+    A selector for a legacy process there would change legacy resources, and
+    one for a process that does not exist would warn in every run.
+    """
+    text = (WORKFLOWS / annotation_file).read_text()
+    selectors = re.findall(r'withName:\s*"([^"]+)"', text)
+
+    assert text.count("process {") == 1
+    assert selectors
+    assert set(selectors) <= ANNOTATION_PROCESSES
+    assert not re.search(r"^\s*process\.", text, re.MULTILINE)
+    module = (WORKFLOWS / "modules" / "annotation.nf").read_text()
+    for name in selectors:
+        assert f"process {name} {{" in module
 
 
 def _resolved_params(profile: str | None) -> dict[str, Any]:

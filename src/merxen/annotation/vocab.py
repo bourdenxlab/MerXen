@@ -845,6 +845,48 @@ def load_state_genes(species: Species) -> tuple[str, ...]:
     return tuple(frame["gene_symbol"].tolist())
 
 
+STATE_GENE_ID_PREFIXES: Final[dict[str, str]] = {"human": "ENSG", "mouse": "ENSMUSG"}
+
+
+def load_state_gene_ids(species: Species) -> dict[str, str]:
+    """Return the curated state genes by Ensembl ID (§5.6).
+
+    Bundles match state genes by ID, never by symbol, so a panel that
+    declares an alias symbol (or only IDs) still excludes them from the
+    negative-gene lists. The IDs were resolved once from the WHB-10Xv3
+    ``var`` (human) and the WMB-10X ``gene.csv`` 20241115 (mouse).
+
+    Args:
+        species: ``"human"`` or ``"mouse"``.
+
+    Returns:
+        Symbol by Ensembl ID, in file order.
+
+    Raises:
+        ValueError: If a row lacks an ID, an ID has another species' prefix
+            or an ID repeats.
+    """
+    checked = _check_species(species)
+    filename = STATE_GENE_FILES[checked]
+    frame = load_asset_table(filename)
+    if "ensembl_id" not in frame.columns:
+        raise ValueError(f"{filename}: no ensembl_id column")
+    prefix = STATE_GENE_ID_PREFIXES[checked]
+    genes: dict[str, str] = {}
+    for gene_id, symbol in zip(frame["ensembl_id"], frame["gene_symbol"], strict=True):
+        text = str(gene_id).strip()
+        if not text:
+            raise ValueError(f"{filename}: state gene {symbol!r} has no ensembl_id")
+        if not text.startswith(prefix) or not text[len(prefix) :].isdigit():
+            raise ValueError(
+                f"{filename}: {symbol!r} has ID {text!r}, not a {checked} Ensembl ID"
+            )
+        if text in genes:
+            raise ValueError(f"{filename}: ID {text} repeats")
+        genes[text] = str(symbol)
+    return genes
+
+
 def load_heldout_markers(species: Species) -> pd.DataFrame:
     """Load the independent held-out marker list of a species (§5.8).
 
