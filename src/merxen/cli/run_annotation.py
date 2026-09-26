@@ -296,6 +296,36 @@ def _reference_spec(
     required=True,
     help="bundle_ref.json to write.",
 )
+@click.option(
+    "--download-dir",
+    type=click.Path(path_type=Path, file_okay=False),
+    default=None,
+    help="Cache of pinned reference downloads (default: <store>/.downloads).",
+)
+@click.option(
+    "--auto-download/--no-auto-download",
+    default=False,
+    show_default=True,
+    help="Download missing pinned reference files (annotation_auto_download).",
+)
+@click.option(
+    "--download-seed",
+    "download_seed_values",
+    multiple=True,
+    help="KEY=PATH local copy of a pinned file (used only if its sha256 matches).",
+)
+@click.option(
+    "--n-processors",
+    type=click.IntRange(min=1),
+    default=None,
+    help="Processes of the cell_type_mapper steps (default 8 or the CPU count).",
+)
+@click.option(
+    "--max-gb",
+    type=click.IntRange(min=1),
+    default=None,
+    help="Memory bound of the reference-marker step in GB (default 40).",
+)
 def annotation_reference_prep_command(
     reference_id: str,
     species: str,
@@ -306,6 +336,11 @@ def annotation_reference_prep_command(
     source_values: tuple[str, ...],
     scratch_dir: Path | None,
     output: Path,
+    download_dir: Path | None,
+    auto_download: bool,
+    download_seed_values: tuple[str, ...],
+    n_processors: int | None,
+    max_gb: int | None,
 ) -> None:
     """Get or build one reference bundle and write its bundle_ref.json."""
     from merxen.annotation.panel import load_annotation_panel
@@ -325,6 +360,21 @@ def annotation_reference_prep_command(
         scratch_root=scratch_dir,
     )
     builder = resolve_builder(spec, config)
+    if builder.prepare_spec is not None:
+        from merxen.annotation.reference import SourceOptions
+
+        spec = builder.prepare_spec(
+            spec,
+            SourceOptions(
+                download_dir=download_dir or store / ".downloads",
+                auto_download=auto_download,
+                seeds=_key_value_paths(download_seed_values, "--download-seed"),
+            ),
+        )
+    if n_processors is not None or max_gb is not None:
+        from merxen.annotation.reference import set_prep_resources
+
+        set_prep_resources(n_processors=n_processors, max_gb=max_gb)
     bundle_ref = reference_store.get_or_build(
         spec, panel, builder=builder, config=config
     )
