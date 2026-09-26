@@ -11,6 +11,7 @@ authoritative reference.
 ```
 merxen/
 ├── config.py            # Pydantic configs (pipeline contract)
+├── control_features.py  # registry of platform control features
 ├── memory.py            # RAM monitoring helpers
 ├── _typing.py           # shared small types
 ├── cli/                 # Click entry points (one per stage)
@@ -94,7 +95,19 @@ with Groovy.
 - `iter_points_chunks(points_obj, ...)` — chunked iterator over a points
   table, with memory checks.
 - `write_proseg_csv_from_points(...)` — seed transcripts with cell IDs and
-  emit a ProSeg-friendly CSV.
+  emit a ProSeg-friendly CSV; with `control_platform` it drops control
+  features using `merxen.control_features`.
+
+### `merxen.control_features` — [control_features.py](../src/merxen/control_features.py)
+- `CONTROL_TOKENS` — case-insensitive control substrings shared by
+  clustering and transcript analyses.
+- `classify_control_transcripts(names, platform=..., is_gene=..., codeword_category=...)`
+  — flag control transcripts: a Xenium feature type decides where present,
+  name rules apply elsewhere. Also flags rows kept because their feature
+  type says gene although a control-name rule matches.
+- `control_transcript_mask(...)` — the control flags alone.
+- `matches_control_name_pattern(name, platform)` /
+  `control_token_mask(values)` — the anchored and substring name rules.
 
 ### `io.image_source` — [image_source.py](../src/merxen/io/image_source.py)
 - `build_image_source(image, as_float32)` — lazy image reader.
