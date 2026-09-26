@@ -23,14 +23,14 @@ a neuronal node's NT-annotated cells (cell-weighted over clusters), else
 Other; non-neuronal nodes have no NT. Region plausibility for frontal
 cortex follows the 16 superclusters pruned in E1 (ii).
 
-Taxonomy inputs (file, bytes, sha256):
+Taxonomy inputs (ABC metadata path, bytes, sha256):
 
-- WHB terms: cluster_annotation_term.csv, 546616, 98e8a8d5e004154d3ed084311f7d2b3e40a5453e07ad7ac9364fcb3b8dcd3caf
-- WHB cluster membership: cluster_to_cluster_annotation_membership.csv, 1018425, 06b45a467e4c5c2d5d50a2bc3a24d59ad5e3f711dc8241c9296ebc1da81d1f3b
-- WHB clusters: cluster.csv, 84820, c76549049633c7c3595be311a882c546f750b6fb9a36978318eb3022215523af
-- SEA-AD Multiregion terms: SEA-AD-Multiregion-taxonomy__20260711__cluster_annotation_term.csv, 32259, 3ccc7c52285eaf64e716e6dc5b71dce1ddfddb4b069f7e48ed036350f0c42c04
-- WMB terms: cluster_annotation_term.csv, 861405, a14df2b81d9b557f53bc550e2e7143ed25f6fc2f2ebffd20071ae95bd04d6f76
-- WMB cluster membership: cluster_to_cluster_annotation_membership.csv, 2208190, b06ca6c3ee8d9d5c2f87e92e8a50536c28845678fde63a04e8847c8a4040da83
+- WHB terms: WHB-taxonomy/20240330/cluster_annotation_term.csv, 546616, 98e8a8d5e004154d3ed084311f7d2b3e40a5453e07ad7ac9364fcb3b8dcd3caf
+- WHB cluster membership: WHB-taxonomy/20240330/cluster_to_cluster_annotation_membership.csv, 1018425, 06b45a467e4c5c2d5d50a2bc3a24d59ad5e3f711dc8241c9296ebc1da81d1f3b
+- WHB clusters: WHB-taxonomy/20240330/cluster.csv, 84820, c76549049633c7c3595be311a882c546f750b6fb9a36978318eb3022215523af
+- SEA-AD Multiregion terms: SEA-AD-Multiregion-taxonomy/20260711/cluster_annotation_term.csv, 32259, 3ccc7c52285eaf64e716e6dc5b71dce1ddfddb4b069f7e48ed036350f0c42c04
+- WMB terms: WMB-taxonomy/20231215/cluster_annotation_term.csv, 861405, a14df2b81d9b557f53bc550e2e7143ed25f6fc2f2ebffd20071ae95bd04d6f76
+- WMB cluster membership: WMB-taxonomy/20231215/cluster_to_cluster_annotation_membership.csv, 2208190, b06ca6c3ee8d9d5c2f87e92e8a50536c28845678fde63a04e8847c8a4040da83
 
 Curated by hand (reviewed in PRs, each row with a rationale):
 

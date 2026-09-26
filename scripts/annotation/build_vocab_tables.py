@@ -22,7 +22,10 @@ Usage::
         --wmb-taxonomy-dir <wmb_abc>/metadata/WMB-taxonomy/20231215
 
 where ``<seaad_terms_csv>`` is the ABC
-``metadata/SEA-AD-Multiregion-taxonomy/20260711/cluster_annotation_term.csv``.
+``metadata/SEA-AD-Multiregion-taxonomy/20260711/cluster_annotation_term.csv``
+(a local copy may have another name). The NOTICE records each input by its
+ABC path, size and sha256, never by its local path or name, so ``--check``
+depends only on the content of the inputs.
 
 ``--check`` writes nothing and exits non-zero when a committed file differs
 from what the inputs produce. The generator fails loudly when a taxonomy term
@@ -70,6 +73,8 @@ WHB_MEMBERSHIP_FILE = "cluster_to_cluster_annotation_membership.csv"
 WHB_CLUSTER_FILE = "cluster.csv"
 WMB_TERM_FILE = "cluster_annotation_term.csv"
 WMB_MEMBERSHIP_FILE = "cluster_to_cluster_annotation_membership.csv"
+# ABC file name of the SEA-AD terms; a local copy may be named otherwise.
+SEAAD_TERM_FILE = "cluster_annotation_term.csv"
 WHB_COUNT = 31
 SEAAD_SUBCLASS_COUNT = 29
 WMB_CLASS_COUNT = 34
@@ -85,7 +90,10 @@ class InputFile:
 
     Attributes:
         role: What the file provides, e.g. ``"WHB terms"``.
-        name: File name (no directory, so no local path is committed).
+        name: The file's ABC path below ``metadata/``
+            (``<taxonomy>/<release>/<file>``), taken from ``overrides.yaml``
+            and not from the local path, so the NOTICE depends only on the
+            file's content.
         size: Size in bytes.
         sha256: Hex sha256 of the file.
     """
@@ -109,9 +117,12 @@ class BuildResult:
     inputs: tuple[InputFile, ...]
 
 
-def _identify(path: Path, role: str) -> InputFile:
+def _identify(
+    path: Path, role: str, spec: Mapping[str, Any], abc_file_name: str
+) -> InputFile:
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    return InputFile(role, path.name, path.stat().st_size, digest)
+    name = f"{spec['taxonomy']}/{spec['release']}/{abc_file_name}"
+    return InputFile(role, name, path.stat().st_size, digest)
 
 
 def _require(path: Path) -> Path:
@@ -271,9 +282,9 @@ def build_whb(
     for column in ("sink", f"region_plausible_{REGION}"):
         frame[column] = _bool_text(frame[column])
     inputs = [
-        _identify(term_path, "WHB terms"),
-        _identify(membership_path, "WHB cluster membership"),
-        _identify(cluster_path, "WHB clusters"),
+        _identify(term_path, "WHB terms", spec, WHB_TERM_FILE),
+        _identify(membership_path, "WHB cluster membership", spec, WHB_MEMBERSHIP_FILE),
+        _identify(cluster_path, "WHB clusters", spec, WHB_CLUSTER_FILE),
     ]
     return frame, inputs
 
@@ -372,7 +383,9 @@ def build_seaad(
     frame = pd.DataFrame(rows)
     for column in ("sink", f"region_plausible_{REGION}"):
         frame[column] = _bool_text(frame[column])
-    return frame, [_identify(term_csv, "SEA-AD Multiregion terms")]
+    return frame, [
+        _identify(term_csv, "SEA-AD Multiregion terms", spec, SEAAD_TERM_FILE)
+    ]
 
 
 def build_wmb(
@@ -458,8 +471,8 @@ def build_wmb(
     frame = pd.DataFrame(rows)
     frame["never_drop"] = _bool_text(frame["never_drop"])
     inputs = [
-        _identify(term_path, "WMB terms"),
-        _identify(membership_path, "WMB cluster membership"),
+        _identify(term_path, "WMB terms", spec, WMB_TERM_FILE),
+        _identify(membership_path, "WMB cluster membership", spec, WMB_MEMBERSHIP_FILE),
     ]
     return frame, inputs
 
@@ -573,7 +586,7 @@ def render_notice(overrides: Mapping[str, Any], inputs: Sequence[InputFile]) -> 
         "Other; non-neuronal nodes have no NT. Region plausibility for frontal",
         "cortex follows the 16 superclusters pruned in E1 (ii).",
         "",
-        "Taxonomy inputs (file, bytes, sha256):",
+        "Taxonomy inputs (ABC metadata path, bytes, sha256):",
         "",
     ]
     lines += [
