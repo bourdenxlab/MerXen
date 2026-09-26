@@ -1334,6 +1334,10 @@ class MapMyCellsConfig(BaseModel):
     marker_lookup_path: Path | None = None
     precomputed_stats_path: Path | None = None
     gene_mapping_db_path: Path | None = None
+    # Local gene table (Allen gene.csv layout or a reference .h5ad var) used
+    # only when building the MapMyCells query, for features whose Ensembl ID
+    # is still missing after the vendor and cached-reference lookups.
+    gene_id_fallback_csv: Path | None = None
     region_name: str = "frontal_a44_a45_a46_a32_acc"
     region_labels: list[str] = Field(
         default_factory=lambda: [

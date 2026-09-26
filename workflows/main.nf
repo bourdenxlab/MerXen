@@ -1051,6 +1051,15 @@ def appendMapMyCellsPreflightChecks(errors, settings, params) {
             "MAPMYCELLS gene mapping database",
         )
     }
+    def geneIdFallbackPath = params.annotation_gene_id_fallback_csv
+    if (!isBlankPath(geneIdFallbackPath) &&
+        geneIdFallbackPath.toString().trim().toLowerCase() != "false") {
+        appendPreflightFileCheck(
+            errors,
+            geneIdFallbackPath,
+            "MAPMYCELLS gene-ID fallback table (annotation_gene_id_fallback_csv)",
+        )
+    }
 }
 
 def optionalNormalizedPathString(rawPath) {
