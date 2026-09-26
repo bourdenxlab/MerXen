@@ -217,6 +217,13 @@ nextflow run workflows/main.nf \
 
 Completed stages are skipped; only the failed stage and its downstreams re-run.
 
+A task's hash covers its inputs, script text and environment definition, not
+the MerXen Python source. The Conda env installs MerXen in editable mode, so a
+change under `src/merxen/` leaves every hash unchanged. After a code fix,
+`-resume` reuses the cached tasks and their old outputs. Re-run the affected
+stages without `-resume`, and limit the run with the stage selectors described
+in [Running a subset of stages](#running-a-subset-of-stages).
+
 ## Failure behavior
 
 Task failures use Nextflow's `ignore` error strategy with
