@@ -113,6 +113,8 @@ def _write_paired_visualizations(
             dataset_name=dataset_name,
             table_key=sample.table_key,
             shape_key=sample.shape_key,
+            # The QC stage already ran the registration check for this layer.
+            registration_check=False,
         )
         qc_by_dataset[dataset_name] = qc
         qc_records.append(
@@ -206,6 +208,8 @@ def _write_single_visualizations(
         dataset_name=dataset_name,
         table_key=sample.table_key,
         shape_key=sample.shape_key,
+        # The QC stage already ran the registration check for this layer.
+        registration_check=False,
     )
     geom_plot = cfg.output_dir / f"{sample_id}_geometry_hist.png"
     cell_plot = cfg.output_dir / f"{sample_id}_cell_violin.png"
