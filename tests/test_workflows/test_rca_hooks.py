@@ -39,7 +39,9 @@ EXPECTED_HOOKS: dict[str, tuple[str, ...]] = {
 }
 # (file, hook) -> number of extra lines the hook touches, each with a site marker.
 EXPECTED_SITES: dict[tuple[str, str], int] = {
-    (MAIN_NF, "H2"): 2,  # the MENDER preflight and MENDER input key lookups
+    # The MENDER preflight and MENDER input key lookups, and the MENDER input
+    # closure parameter they need (renamed from ``_settings``).
+    (MAIN_NF, "H2"): 3,
     ("src/merxen/config.py", "H8"): 3,  # sample config, clustering config, MENDER
     ("src/merxen/io/samplesheet.py", "H9"): 2,  # SamplePair fields, row parsing
 }
@@ -168,14 +170,39 @@ def test_h7_includes_follow_their_markers() -> None:
         assert include in _marker_window(relative, "H7")
 
 
+H2_SUFFIX_ARGUMENT = "settings.clustering_squidpy_table_key_suffix,"
+H2_CLOSURE_BINDING = re.compile(r"^\s*settings, // rca-site:H2\b")
+
+
 def test_h2_sites_pass_the_row_suffix() -> None:
-    """Each H2 site passes the row's table-key suffix to the key function."""
+    """Each H2 site passes the row suffix to the key function or binds it."""
     lines = (REPO_ROOT / MAIN_NF).read_text().splitlines()
     site_lines = [line for line in lines if "rca-site:H2" in line]
 
-    assert site_lines
-    for line in site_lines:
-        assert "settings.clustering_squidpy_table_key_suffix" in line
+    suffix_lines = [line for line in site_lines if H2_SUFFIX_ARGUMENT in line]
+    binding_lines = [line for line in site_lines if H2_CLOSURE_BINDING.match(line)]
+    assert len(suffix_lines) == 2
+    assert len(binding_lines) == 1
+    assert len(site_lines) == len(suffix_lines) + len(binding_lines)
+
+
+def test_mender_input_closure_binds_the_row_settings() -> None:
+    """The MENDER input closure names ``settings``, which its H2 site reads.
+
+    A rebase that restored the old ``_settings`` name would leave the key
+    lookup reading an undefined variable at run time.
+    """
+    main_text = (REPO_ROOT / MAIN_NF).read_text()
+    start = main_text.index("mender_inputs_ch = mender_artifacts_ch")
+    closure = main_text[start : main_text.index("->", start)]
+    body = main_text[start : main_text.index("tuple(", start)]
+
+    parameters = [
+        part.split("//")[0].strip() for part in closure.split("{", 1)[1].split("\n")
+    ]
+    assert "settings," in parameters
+    assert "_settings," not in parameters
+    assert H2_SUFFIX_ARGUMENT in body
 
 
 def test_lib_classes_used_by_the_hooks_exist() -> None:

@@ -51,11 +51,6 @@ class SamplePair:
         start_stage: Optional row-level first stage.
         stop_stage: Optional row-level final stage.
         only_stage: Optional row-level single-stage override.
-        anatomical_region: Optional human region token (e.g.
-            ``frontal_cortex``); blank inherits ``annotation_human_region``.
-        mouse_section_regions: Optional mouse regions (``auto``, ``none`` or
-            ``;``-separated CCF divisions); blank inherits
-            ``annotation_mouse_section_regions``.
     """
 
     pair_id: str
@@ -82,7 +77,7 @@ class SamplePair:
     start_stage: str | None = None
     stop_stage: str | None = None
     only_stage: str | None = None
-    # rca-site:H9: optional annotation columns (plan §3.7).
+    # rca-site:H9: optional annotation columns (plan §3.7); None inherits the param.
     anatomical_region: str | None = None
     mouse_section_regions: str | None = None
 
@@ -98,7 +93,7 @@ def parse_samplesheet(csv_path: Path) -> list[SamplePair]:
         analysis_mode, enable_alignment, analysis_segmentation, start_stage,
         stop_stage, only_stage, spatial_gene_analysis_enabled,
         spatial_gene_analysis_transcript_analysis_enabled, mender_enabled,
-        mender_segmentations, anatomical_region, mouse_section_regions
+        mender_segmentations
 
     Backward-compatible aliases:
         merscope_zarr_path -> merscope_spatialdata_path
