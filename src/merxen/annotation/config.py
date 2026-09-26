@@ -11,6 +11,8 @@ Defaults are inert: annotation is disabled and the clustering mode of both
 species stays ``legacy`` until that species' flip (M8 human, M9 mouse), so
 the legacy pipeline is unchanged. ``resolve_clustering_mode`` and
 ``resolve_table_key_suffix`` mirror ``workflows/lib/AnnotationDefaults.groovy``.
+The clustering-mode types and ``AdaptiveSplitConfig`` are the fields that
+``ClusteringSquidpyConfig`` and ``MenderConfig`` gain at hook H8.
 
 This module imports only the standard library and pydantic.
 """
@@ -19,15 +21,33 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any, Final, Literal
+from typing import Annotated, Any, Final, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 from merxen.annotation.schema import ReferenceRole
 from merxen.annotation.vocab import SPECIES, Species
+from merxen.table_keys import validate_table_key_suffix
 
 ClusteringMode = Literal["legacy", "map_first"]
 CLUSTERING_MODES: Final[tuple[str, ...]] = ("legacy", "map_first")
+# Leaves of the map_first hierarchy: confident reference nodes (v1) or, from
+# v1.1 (M11), the opt-in de novo split inside confident superclusters (§6.4).
+LeafSource = Literal["mapped", "denovo"]
+# MENDER treatment of unassigned cells (§4.9): legacy keeps them as a state;
+# map_first runs exclude them from the neighbourhood features (OD-B4).
+UnassignedStatePolicy = Literal["state", "exclude_from_features"]
+LEGACY_UNASSIGNED_STATE_POLICY: Final = "state"
+MAP_FIRST_UNASSIGNED_STATE_POLICY: Final = "exclude_from_features"
+# A clustered table-key suffix: "" or one lower-case token (§4.8).
+TableKeySuffix = Annotated[str, AfterValidator(validate_table_key_suffix)]
 # Default clustering mode per species. Only the flip PRs (M8 human, M9 mouse)
 # change these, together with ``FLIPPED_SPECIES``.
 DEFAULT_CLUSTERING_MODE: Final[dict[str, str]] = {"human": "legacy", "mouse": "legacy"}
@@ -35,7 +55,6 @@ FLIPPED_SPECIES: Final[frozenset[str]] = frozenset()
 # Table-key suffix of a map_first run of a species that has not flipped yet, so
 # the legacy clustered table is never overwritten (OD-A3, plan §4.8).
 MAP_FIRST_TABLE_KEY_SUFFIX: Final = "mapfirst"
-_TABLE_KEY_SUFFIX_PATTERN: Final = re.compile(r"^[a-z0-9_]*$")
 
 # Human anatomical regions with validated references and vocab columns
 # (OD-C7: frontal cortex only; a new region needs §8.9's work first).
@@ -1129,6 +1148,82 @@ class AnnotationConfig(_AnnotationModel):
         data["thresholds"].pop("hard_min_counts", None)
         return AnnotationConfig.model_validate(data)
 
+    def coupled_to_clustering(self, clustering_min_counts: int) -> AnnotationConfig:
+        """Return a copy that uses the clustering run's table-cell threshold.
+
+        The table cells and the hard floor share one threshold (plan §3.7,
+        §4.4), so ``min_counts`` and ``thresholds.hard_min_counts`` both
+        become ``clustering_min_counts``.
+
+        Args:
+            clustering_min_counts: ``ClusteringSquidpyConfig.min_counts``.
+
+        Returns:
+            The coupled, validated copy.
+
+        Raises:
+            ValueError: If ``min_counts`` was set explicitly to another value.
+        """
+        if (
+            "min_counts" in self.model_fields_set
+            and self.min_counts != clustering_min_counts
+        ):
+            raise ValueError(
+                f"annotation min_counts ({self.min_counts}) must equal the "
+                f"clustering min_counts ({clustering_min_counts}): table cells "
+                "and the hard floor share one threshold (plan §4.4)"
+            )
+        return self.with_min_counts(clustering_min_counts)
+
+
+class AdaptiveSplitConfig(_AnnotationModel):
+    """Within-supercluster de novo split of map_first leaves (plan §6.4).
+
+    The opt-in rule ``count_split_merge`` arrives with v1.1 (M11); until then
+    the only rule is ``none`` and the leaves are confident reference nodes.
+
+    Attributes:
+        rule: Split rule (``none``: no split).
+    """
+
+    rule: Literal["none"] = "none"
+
+
+def check_clustering_mode_settings(
+    *,
+    mode: str,
+    leaf_source: str,
+    adaptive_split: AdaptiveSplitConfig,
+    table_key_suffix: str,
+) -> None:
+    """Check the clustering-mode fields of ``ClusteringSquidpyConfig`` together.
+
+    Args:
+        mode: ``legacy`` or ``map_first``.
+        leaf_source: ``mapped`` or ``denovo``.
+        adaptive_split: The de novo split settings.
+        table_key_suffix: Clustered table-key suffix (``""`` for none).
+
+    Raises:
+        ValueError: On an unknown mode, a legacy run with a table-key suffix
+            (legacy runs always write the unsuffixed table; plan §4.8), or
+            de novo leaves without a split rule.
+    """
+    if mode not in CLUSTERING_MODES:
+        raise ValueError(
+            f"clustering mode must be one of {CLUSTERING_MODES}, got {mode!r}"
+        )
+    if mode == "legacy" and table_key_suffix:
+        raise ValueError(
+            f"table_key_suffix {table_key_suffix!r} is for map_first runs only; "
+            "legacy runs write the unsuffixed clustered table (plan §4.8)"
+        )
+    if leaf_source == "denovo" and adaptive_split.rule == "none":
+        raise ValueError(
+            "leaf_source 'denovo' needs an adaptive_split rule; the de novo "
+            "split is opt-in from v1.1 (M11, plan §6.4)"
+        )
+
 
 def resolve_clustering_mode(
     species: Species,
@@ -1196,11 +1291,5 @@ def resolve_table_key_suffix(
     if resolved_mode == "legacy":
         return ""
     if explicit_suffix is not None:
-        suffix = str(explicit_suffix).strip()
-        if not _TABLE_KEY_SUFFIX_PATTERN.fullmatch(suffix):
-            raise ValueError(
-                f"table key suffix {suffix!r} must be a lower-case token "
-                "(letters, digits, underscores)"
-            )
-        return suffix
+        return validate_table_key_suffix(explicit_suffix)
     return "" if species in flipped_species else MAP_FIRST_TABLE_KEY_SUFFIX

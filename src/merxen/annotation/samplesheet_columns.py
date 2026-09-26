@@ -8,7 +8,9 @@ Two optional per-row columns override the global annotation params:
 
 Blank or missing values inherit the global param, so existing samplesheets
 parse unchanged. ``merxen.io.samplesheet`` calls ``parse_optional_columns``
-at hook H9. Species-specific checks (only ``frontal_cortex`` for human) run in
+at hook H9, and ``ClusteringSquidpySampleConfig`` types the per-row values
+with ``AnatomicalRegionValue`` and ``MouseSectionRegionsValue`` (hook H8).
+Species-specific checks (only ``frontal_cortex`` for human) run in
 ``AnnotationConfig``, which knows the run species.
 
 This module imports only the standard library and pydantic.
@@ -19,7 +21,9 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
-from typing import Final
+from typing import Annotated, Any, Final
+
+from pydantic import BeforeValidator
 
 from merxen.annotation.config import normalise_mouse_section_regions
 
@@ -94,6 +98,24 @@ def parse_mouse_section_regions(value: str | None) -> str | None:
     if value is None or not str(value).strip():
         return None
     return normalise_mouse_section_regions(str(value))
+
+
+def _parse_anatomical_region_value(value: Any) -> str | None:
+    return None if value is None else parse_anatomical_region(str(value))
+
+
+def _parse_mouse_section_regions_value(value: Any) -> str | None:
+    return None if value is None else parse_mouse_section_regions(str(value))
+
+
+# Pydantic field types for the per-row values carried in ``samples_json``:
+# blank means "inherit the global param" (``None``), others are normalised.
+AnatomicalRegionValue = Annotated[
+    str | None, BeforeValidator(_parse_anatomical_region_value)
+]
+MouseSectionRegionsValue = Annotated[
+    str | None, BeforeValidator(_parse_mouse_section_regions_value)
+]
 
 
 def parse_optional_columns(
