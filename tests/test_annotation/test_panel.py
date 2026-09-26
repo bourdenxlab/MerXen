@@ -747,6 +747,35 @@ def test_platform_pseudobulk_excludes_controls_from_the_totals(
     assert none.n_table_cells == 0
 
 
+@pytest.mark.parametrize("layout", ["csc", "dense", "counts_layer"])
+def test_platform_pseudobulk_reads_other_count_layouts(
+    tmp_path: Path, layout: str
+) -> None:
+    counts = np.ones((30, 4))
+    counts[:, 1] = 3.0
+    names = ["GENE0", "GENE1", "GENE2", "Blank-1"]
+    var = pd.DataFrame({"gene": names, "ensembl_id": [*shared_ids(3), ""]}, index=names)
+    matrix: Any = sparse.csc_matrix(counts) if layout == "csc" else counts
+    adata = ad.AnnData(X=matrix, var=var)
+    if layout == "counts_layer":
+        adata.layers["counts"] = sparse.csr_matrix(counts)
+        adata.X = np.zeros_like(counts)
+    path = tmp_path / "sample.h5ad"
+    adata.write_h5ad(path)
+    declared = declared_panel(
+        raw_panel_from_var(var, source=PanelSource(kind="h5ad_var")),
+        species="human",
+        platform="XENIUM",
+    )
+    result = platform_pseudobulk(path, declared=declared, min_counts=5, block_rows=8)
+    assert result.n_table_cells == 30
+    assert result.mean_counts == {
+        "ENSG00000000000": 1.0,
+        "ENSG00000000001": 3.0,
+        "ENSG00000000002": 1.0,
+    }
+
+
 def test_setc_panel_requires_both_platforms() -> None:
     ids = shared_ids(3)
     set_a = AnnotationPanel(
