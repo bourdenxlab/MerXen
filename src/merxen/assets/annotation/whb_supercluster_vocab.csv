@@ -1,0 +1,32 @@
+label,name,broad_class,lineage,nt,sink,region_plausible_frontal_cortex
+CS202210140_476,Upper-layer intratelencephalic,Neurons,Neurons,Excitatory,false,true
+CS202210140_477,Deep-layer intratelencephalic,Neurons,Neurons,Excitatory,false,true
+CS202210140_473,Deep-layer near-projecting,Neurons,Neurons,Excitatory,false,true
+CS202210140_474,Deep-layer corticothalamic and 6b,Neurons,Neurons,Excitatory,false,true
+CS202210140_484,MGE interneuron,Neurons,Neurons,Inhibitory,false,true
+CS202210140_486,CGE interneuron,Neurons,Neurons,Inhibitory,false,true
+CS202210140_485,LAMP5-LHX6 and Chandelier,Neurons,Neurons,Inhibitory,false,true
+CS202210140_463,Miscellaneous,Mixed/Unknown,Neurons,Excitatory,true,true
+CS202210140_475,Hippocampal CA1-3,Neurons,Neurons,Excitatory,false,false
+CS202210140_479,Hippocampal CA4,Neurons,Neurons,Excitatory,false,false
+CS202210140_480,Hippocampal dentate gyrus,Neurons,Neurons,Excitatory,false,false
+CS202210140_478,Amygdala excitatory,Neurons,Neurons,Excitatory,false,false
+CS202210140_481,Medium spiny neuron,Neurons,Neurons,Inhibitory,false,false
+CS202210140_482,Eccentric medium spiny neuron,Neurons,Neurons,Inhibitory,false,false
+CS202210140_483,Splatter,Mixed/Unknown,Neurons,Other,true,false
+CS202210140_490,Mammillary body,Neurons,Neurons,Excitatory,false,false
+CS202210140_491,Thalamic excitatory,Neurons,Neurons,Excitatory,false,false
+CS202210140_492,Midbrain-derived inhibitory,Neurons,Neurons,Inhibitory,false,false
+CS202210140_487,Upper rhombic lip,Neurons,Neurons,Excitatory,false,false
+CS202210140_488,Cerebellar inhibitory,Neurons,Neurons,Inhibitory,false,false
+CS202210140_489,Lower rhombic lip,Neurons,Neurons,Excitatory,false,false
+CS202210140_469,Oligodendrocyte,Oligodendrocytes,Oligodendrocyte lineage,,false,true
+CS202210140_468,Committed oligodendrocyte precursor,Oligodendrocyte precursors,Oligodendrocyte lineage,,false,true
+CS202210140_467,Oligodendrocyte precursor,Oligodendrocyte precursors,Oligodendrocyte lineage,,false,true
+CS202210140_470,Astrocyte,Astrocytes,Astrocytes,,false,true
+CS202210140_471,Ependymal,Mixed/Unknown,Mixed/Unknown,,false,false
+CS202210140_464,Microglia,Microglia,Microglia,,false,true
+CS202210140_465,Vascular,Vascular cells,Vascular cells,,false,true
+CS202210140_493,Bergmann glia,Astrocytes,Astrocytes,,false,false
+CS202210140_466,Fibroblast,Fibroblasts,Fibroblasts,,false,true
+CS202210140_472,Choroid plexus,Mixed/Unknown,Mixed/Unknown,,false,false

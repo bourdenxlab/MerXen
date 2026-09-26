@@ -1,0 +1,11 @@
+gene_symbol,rationale,source
+CTSD,Lysosomal cathepsin D; induced in disease-associated microglia and reactive astrocytes,plan §4.7 seed [L]
+SERPINA3,Reactive-astrocyte gene raised in AD cortex; marks the SERPINA3/DNER astrocyte state (E4),plan §4.7 seed [L]
+SOX2,Transcription factor kept in adult astrocytes and glial progenitors and raised in reactive glia,plan §4.7 seed [L]
+CDKN1A,p21; DNA-damage and senescence response induced across cell types in aged or diseased tissue,plan §4.7 seed [L]
+APOE,Astrocyte gene also induced in disease-associated microglia and stressed neurons; level depends on state and genotype,plan §4.7 seed [L]
+GFAP,Reactive astrogliosis marker; rises with age and disease and near white matter,plan §4.7 seed [L]
+CD44,Marks fibrous and reactive astrocytes and activated microglia; raised in AD,plan §4.7 seed [L]
+C3,Complement C3; induced in reactive astrocytes and microglia in neurodegeneration,plan §4.7 seed [L]
+HSPA1A,Heat-shock protein 70; stress and tissue-handling response in any cell type,plan §4.7 seed [L]
+HSP90AA1,Heat-shock protein 90; stress-inducible chaperone expressed across cell types,plan §4.7 seed [L]

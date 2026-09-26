@@ -1,0 +1,17 @@
+marker_class,gene_symbol,avoid_platforms,note
+Exc,SLC17A7,,
+Exc,SATB2,,
+Inh,GAD1,,
+Inh,GAD2,MERSCOPE,poorly detected on MERSCOPE (P7513 report F4)
+Astro,AQP4,,
+Astro,GJA1,,
+Oligo,MOBP,,
+Oligo,PLP1,,
+OPC,PDGFRA,,
+OPC,VCAN,,
+Immune,CSF1R,,
+Immune,P2RY12,MERSCOPE,poorly detected on MERSCOPE (P7513 report F4)
+Vascular,CLDN5,,
+Vascular,FLT1,,
+Fibroblast,DCN,,
+Fibroblast,LUM,,
