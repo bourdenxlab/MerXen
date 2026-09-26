@@ -5,6 +5,11 @@
 # lockfile change forces a rebuild. Refresh it after regenerating the lockfile:
 #   python scripts/update_env_lock_hash.py
 # (tests/test_workflows/test_env_lock_sync.py fails while it is stale).
+# Any change to this file, the checksum included, moves the env to a new
+# work/conda/env-* path. Nextflow hashes each task's conda env, so the next
+# -resume under -profile ...,conda re-runs every task that uses this env and
+# everything downstream, in an env resolved from pyproject.toml on the day it
+# is built (not from the lock). Snapshot published outputs before merging.
 name: merxen
 channels:
   - conda-forge
