@@ -117,6 +117,19 @@ A paired row with `pair_id=EXAMPLE01` fans out to **two**
   at `merscope_transform_path`. Direct VZG2 ingestion can derive the transform
   from the manifest's mosaic dimensions and micron bounding box; an explicit
   `merscope_transform_path` still takes precedence.
+- **VZG2 transform origin.** Mosaic pixel 0 is the manifest's `bbox_microns`
+  minimum, which can be negative (the Vizgen MsBrain VZG2 region starts at
+  (-21.86, -111.78) µm). A transform without that translation shifts every
+  Cellpose / ProSeg cell by minus the minimum; the 2026-09-08 VZG2 run was
+  built from such a stale override and its `reseg`, `proseg_mask` and
+  `proseg_hybrid` outputs are offset by (+21.9, +111.8) µm (`original_seg` is
+  unaffected). The builder now logs a warning when `merscope_transform_path`
+  disagrees with the manifest by more than 1 µm and records
+  `attrs["merxen_vzg2"]["transform_source"]` (`override` or `manifest`).
+  Segmentation refuses a `merscope_transform_path` that differs from the
+  `micron_to_mosaic_pixel_transform.csv` stored in the built zarr, so a
+  corrected CSV requires a rebuild (`--force_spatialdata_build true`). The QC
+  registration check ([qc.md](qc.md)) flags any remaining offset.
 - **Xenium spec ambiguity.** If the Xenium export contains a non-standard
   `specs.json` location, set `xenium_spec_path` in the samplesheet.
 - **Partial builds.** If a build crashes half-way, delete the target zarr

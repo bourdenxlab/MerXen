@@ -242,6 +242,7 @@ Path: `${outdir}/<pair_id>/<platform>/<analysis_segmentation>/qc/`
 | `qc_out/<dataset>_geometry_metrics.csv` | Per-cell geometry (area, perimeter, eccentricity, ...). |
 | `qc_out/<dataset>_cell_metrics.csv` | Per-cell transcripts_per_cell, genes_per_cell. |
 | `qc_out/<dataset>_qc.pkl` | Pickle with summary + DataFrames for fast reload. |
+| `qc_out/<dataset>_registration_qc.json` | Segmentation-to-transcript registration check (status, density ratio, offset against the platform's cells). See [stages/qc.md](stages/qc.md#registration-check). |
 | `qc_out/<dataset>_hybrid_cell_diagnostics.csv` | Hybrid construction diagnostics plus per-cell Cellpose/ProSeg count and area changes. Hybrid branch only. |
 | `qc_out/<dataset>_hybrid_assignment_sources.csv` | Hybrid transcript assignment-provenance counts and percentages. Hybrid branch only. |
 | `qc_out/<dataset>_hybrid_fallback_reasons.csv` | Cellpose-fallback reason counts and percentages. Hybrid branch only. |
