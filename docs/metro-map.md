@@ -34,7 +34,11 @@ by default. `MECR` and the ProSeg hybrid branch are dashed but run in a default
 human invocation (`mecr_enabled = true`, `proseg_hybrid_enabled = true`). Mouse
 mode leaves the large WMB-backed MECR branch disabled unless opted in; cortical
 depth, distance-from-object and MapMyCells are dashed and default to off. See
-[Configuration](configuration.md) for the switches.
+[Configuration](configuration.md) for the switches. `Gene panel`
+(`ANNOTATE_PANEL`) and `Reference prep` (`ANNOTATE_REFERENCE_PREP`) are the
+first steps of reference-based annotation: they run only with
+`--annotation_prepare_only` or in the `map_first` clustering mode (see
+[Reference-based annotation](stages/annotation.md)), never in a default run.
 
 ### Colour choice
 

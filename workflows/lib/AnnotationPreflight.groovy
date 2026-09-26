@@ -3,6 +3,8 @@
  *
  * appendClusteringSquidpyPreflightChecks in main.nf calls append for every
  * row before its legacy-only checks. A legacy row gets no check from here.
+ * ANNOTATION_PREPARE_ONLY (hook H10) calls prepareOnlyErrors once per
+ * --annotation_prepare_only run instead: such a run preflights no row.
  */
 class AnnotationPreflight {
 
@@ -65,18 +67,8 @@ class AnnotationPreflight {
         if (!suffix && !(species in AnnotationDefaults.FLIPPED_SPECIES)) {
             errors << "${label}: ${AnnotationDefaults.emptySuffixMessage(species)}".toString()
         }
-        CHOICES.each { paramName, allowed ->
-            def value = params?.get(paramName)
-            if (value != null && !(value.toString().trim().toLowerCase() in allowed)) {
-                errors << (
-                    "Unknown ${paramName} '${value}' for ${label}; " +
-                    "expected one of ${allowed.join(', ')}"
-                ).toString()
-            }
-        }
-        if (!params?.get("annotation_ctm_version")?.toString()?.trim()) {
-            errors << "annotation_ctm_version must name the cell_type_mapper version for ${label}".toString()
-        }
+        appendChoiceChecks(errors, params, label)
+        appendCtmVersionCheck(errors, params, label)
         appendReferenceChecks(errors, species, params, label)
         if (species == "human") {
             def region = settings.get("annotation_anatomical_region")
@@ -92,6 +84,119 @@ class AnnotationPreflight {
         }
         (OPTIONAL_PATH_PARAMS.both + OPTIONAL_PATH_PARAMS[species]).each { paramName ->
             appendOptionalPathCheck(errors, params?.get(paramName), paramName, label)
+        }
+    }
+
+    /**
+     * Return the errors of a --annotation_prepare_only run (plan §3.2).
+     *
+     * A prepare-only run builds the reference bundles of its declared panel
+     * and runs no pipeline stage, so only the params it reads are checked:
+     * the gene list (the declared panel until M5 wires the prepared H5ADs),
+     * the species' references and their source params, the reference store
+     * and the settings annotation_config.json takes.
+     *
+     * @param params Pipeline params.
+     * @return Error messages (empty when the run can start).
+     */
+    static List<String> prepareOnlyErrors(Map params) {
+        def errors = []
+        def species
+        try {
+            species = AnnotationDefaults.normalizeSpecies(params?.get("species"))
+        } catch (IllegalArgumentException error) {
+            return [error.message]
+        }
+        def label = "annotation_prepare_only (${species})".toString()
+        def geneList = AnnotationReferences.pathText(params?.get("annotation_panel_genes_path"))
+        if (!geneList) {
+            errors << (
+                "${label} needs --annotation_panel_genes_path (the declared panel). " +
+                "Building bundles from a pair's prepared H5ADs arrives with the " +
+                "map_first wiring (milestone M5 of docs/plans/robust-celltype-annotation-plan.md)"
+            ).toString()
+        }
+        appendChoiceChecks(errors, params, label)
+        appendCtmVersionCheck(errors, params, label)
+        appendReferenceChecks(errors, species, params, label)
+        def references = AnnotationReferences.referenceIds(params, species)
+        def withoutSources = references.findAll { referenceId ->
+            referenceId in AnnotationDefaults.KNOWN_REFERENCES[species] &&
+                !AnnotationReferences.SOURCE_PARAMS.containsKey(referenceId)
+        }
+        if (withoutSources) {
+            errors << (
+                "${label}: ${withoutSources.join(', ')} have no pipeline source params " +
+                "yet; build them with merxen annotation-reference-prep --source NAME=PATH, " +
+                "or leave them out of annotation_${species}_references"
+            ).toString()
+        }
+        references.findAll { referenceId ->
+            AnnotationReferences.REQUIRED_SOURCE_PARAMS.containsKey(referenceId)
+        }.each { referenceId ->
+            def alternatives = AnnotationReferences.REQUIRED_SOURCE_PARAMS[referenceId]
+            def satisfied = alternatives.any { names ->
+                names.every { name -> AnnotationReferences.pathText(params?.get(name)) }
+            }
+            if (!satisfied) {
+                errors << (
+                    "${label}: ${referenceId} needs " +
+                    alternatives.collect { names -> names.join(' + ') }.join(' or ')
+                ).toString()
+            }
+        }
+        def sourceParams = references.collectMany { referenceId ->
+            (AnnotationReferences.SOURCE_PARAMS[referenceId] ?: [:]).values() as List
+        }.unique()
+        (sourceParams + OPTIONAL_PATH_PARAMS.both).unique().each { paramName ->
+            appendOptionalPathCheck(errors, params?.get(paramName), paramName, label)
+        }
+        if (species == "human") {
+            def region = params?.get("annotation_human_region")
+            def token = region == null ? null : region.toString().trim().toLowerCase().replaceAll(/[\s\-]+/, "_")
+            if (!(token in AnnotationDefaults.VALIDATED_HUMAN_REGIONS)) {
+                errors << (
+                    "Human annotation_human_region '${region}' for ${label} has no validated " +
+                    "references; only ${AnnotationDefaults.VALIDATED_HUMAN_REGIONS.join(', ')} " +
+                    "is supported (OD-C7)"
+                ).toString()
+            }
+        }
+        appendStoreCheck(errors, AnnotationReferences.referenceStore(params), "annotation_reference_store", label)
+        def large = AnnotationReferences.referenceStoreLarge(params)
+        if (large) {
+            appendStoreCheck(errors, large, "annotation_reference_store_large", label)
+        }
+        return errors
+    }
+
+    private static void appendChoiceChecks(List errors, Map params, String label) {
+        CHOICES.each { paramName, allowed ->
+            def value = params?.get(paramName)
+            if (value != null && !(value.toString().trim().toLowerCase() in allowed)) {
+                errors << (
+                    "Unknown ${paramName} '${value}' for ${label}; " +
+                    "expected one of ${allowed.join(', ')}"
+                ).toString()
+            }
+        }
+    }
+
+    private static void appendCtmVersionCheck(List errors, Map params, String label) {
+        if (!params?.get("annotation_ctm_version")?.toString()?.trim()) {
+            errors << "annotation_ctm_version must name the cell_type_mapper version for ${label}".toString()
+        }
+    }
+
+    // The store is created on first use: its nearest existing ancestor must
+    // be a writable directory.
+    private static void appendStoreCheck(List errors, String root, String paramName, String label) {
+        def path = java.nio.file.Paths.get(root).toAbsolutePath().normalize()
+        while (path != null && !java.nio.file.Files.exists(path)) {
+            path = path.parent
+        }
+        if (path == null || !java.nio.file.Files.isDirectory(path) || !java.nio.file.Files.isWritable(path)) {
+            errors << "${paramName} ${root} is not writable for ${label} (nearest existing: ${path})".toString()
         }
     }
 
