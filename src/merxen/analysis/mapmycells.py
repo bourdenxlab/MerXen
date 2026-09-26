@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import importlib.metadata
 import json
 import logging
 import os
@@ -78,6 +79,7 @@ WHB_MANIFEST_URL = (
     "releases/20250531/manifest.json"
 )
 ABC_MANIFEST_CACHE_DIRECTORY = "abc_manifests"
+CELL_TYPE_MAPPER_DISTRIBUTION = "cell_type_mapper"
 WHB_DATASET_DIRECTORY = "WHB-10Xv3"
 WHB_TAXONOMY_DIRECTORY = "WHB-taxonomy"
 WHB_HIERARCHY = [
@@ -2448,6 +2450,7 @@ def _generate_region_reference(
         "cache_layout": REGION_REFERENCE_CACHE_LAYOUT,
         "reference_dir": str(final_dir),
         "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        **_cell_type_mapper_provenance(),
         "manifest_url": WHB_MANIFEST_URL,
         "region_cell_metadata_path": final_path(region_cell_metadata_path),
         "precomputed_stats_path": final_path(precomputed_stats_path),
@@ -3416,6 +3419,7 @@ def _write_results_manifest(
         "bootstrap_iteration": config.bootstrap_iteration,
         "plots_only": bool(config.plots_only),
         "n_processors": config.n_processors,
+        **_cell_type_mapper_provenance(),
         "references": {reference.name: reference.manifest for reference in references},
         "samples": {
             sample_id: {
@@ -3426,6 +3430,32 @@ def _write_results_manifest(
         },
     }
     path.write_text(json.dumps(payload, indent=2) + "\n")
+
+
+def _cell_type_mapper_provenance() -> dict[str, str | None]:
+    """Return the installed ``cell_type_mapper`` version and VCS commit.
+
+    The mapper subprocess runs with ``sys.executable``, so the distribution
+    installed in this interpreter is the one that produces the mapping.
+    """
+    try:
+        distribution = importlib.metadata.distribution(CELL_TYPE_MAPPER_DISTRIBUTION)
+    except importlib.metadata.PackageNotFoundError:
+        return {"cell_type_mapper_version": None, "cell_type_mapper_commit": None}
+    commit: str | None = None
+    direct_url_text = distribution.read_text("direct_url.json")
+    if direct_url_text:
+        try:
+            direct_url: object = json.loads(direct_url_text)
+        except ValueError:
+            direct_url = None
+        vcs_info = direct_url.get("vcs_info") if isinstance(direct_url, dict) else None
+        if isinstance(vcs_info, dict) and vcs_info.get("commit_id"):
+            commit = str(vcs_info["commit_id"])
+    return {
+        "cell_type_mapper_version": distribution.version,
+        "cell_type_mapper_commit": commit,
+    }
 
 
 def _bool_arg(value: bool) -> str:
