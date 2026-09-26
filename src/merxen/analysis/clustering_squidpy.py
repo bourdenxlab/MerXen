@@ -38,6 +38,7 @@ from matplotlib.lines import Line2D
 from scipy import sparse
 from scipy.cluster.hierarchy import leaves_list, linkage
 
+from merxen.clustering.cellset import restrict_to_table_cells, select_table_cells
 from merxen.config import ClusteringSquidpyConfig
 from merxen.control_features import CONTROL_TOKENS, control_token_mask
 from merxen.gene_ids import is_ensembl_gene_id
@@ -536,7 +537,9 @@ def run_scanpy_clustering(
             enabled=False,
         )
 
-    sc.pp.filter_cells(clustered, min_counts=int(min_counts))
+    # The shared helper keeps the clustered cells equal to the annotation's
+    # table cells (plan §4.4); it records obs["n_counts"] as filter_cells did.
+    restrict_to_table_cells(clustered, select_table_cells(clustered, min_counts))
     sc.pp.filter_genes(clustered, min_cells=int(min_cells))
     if clustered.n_obs < 3 or clustered.n_vars < 2:
         raise ValueError(
