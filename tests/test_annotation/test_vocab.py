@@ -6,6 +6,7 @@ import tomllib
 from fnmatch import fnmatch
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 import yaml  # type: ignore[import-untyped]
@@ -251,10 +252,24 @@ def test_unknown_nodes_and_tables_raise() -> None:
         (None, None),
         (float("nan"), None),
         ("  ", None),
+        (pd.NA, None),
+        (np.float32("nan"), None),
+        (np.float64("nan"), None),
     ],
 )
 def test_classify_neurotransmitter(term: str | None, expected: str | None) -> None:
     assert classify_neurotransmitter(term) == expected
+
+
+def test_classify_neurotransmitter_over_nullable_columns() -> None:
+    """Unannotated entries of nullable columns stay unannotated, not 'Other'."""
+    for dtype in ("string", "category", object):
+        values = pd.Series(["GABA", None, "VGLUT1"], dtype=dtype)
+        assert [classify_neurotransmitter(value) for value in values] == [
+            "Inhibitory",
+            None,
+            "Excitatory",
+        ]
 
 
 @pytest.mark.parametrize("species", ["human", "mouse"])
@@ -310,6 +325,17 @@ def test_broad_class_for_map_first_follows_plan_rules() -> None:
         broad_class_for_map_first("lineage", None, "Neurons", species="human")
         == "Neurons"
     )
+    # §4.5 allows only the two lineage fallbacks: a single-class lineage whose
+    # broad level is not confident gives Mixed/Unknown.
+    for lineage in ("Astrocytes", "Microglia", "Vascular cells", "Fibroblasts"):
+        assert (
+            broad_class_for_map_first("lineage", None, lineage, species="human")
+            == UNASSIGNED_LABEL
+        ), lineage
+        assert (
+            broad_class_for_map_first("lineage", lineage, lineage, species="human")
+            == UNASSIGNED_LABEL
+        ), lineage
     assert (
         broad_class_for_map_first("none", "Astrocytes", "Astrocytes", species="human")
         == UNASSIGNED_LABEL
