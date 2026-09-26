@@ -205,6 +205,9 @@ class MerscopeBuildConfig(BaseModel):
     z_layers: list[int] | None = None
     region_name: str | None = None
     slide_name: str | None = None
+    # VZG2 only: accept a merscope_transform_path that places the mosaic more
+    # than 1 um away from the archive manifest (e.g. a padded bbox_microns).
+    allow_transform_override_mismatch: bool = False
 
 
 class XeniumBuildConfig(BaseModel):

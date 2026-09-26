@@ -360,6 +360,7 @@ def _build_vzg2_region(
     bbox_microns: list[float],
     centres_um: np.ndarray,
     override: np.ndarray | None,
+    allow_override_mismatch: bool = False,
 ) -> tuple[Path, Path | None]:
     source_dir = tmp_path / "region_R1"
     source_dir.mkdir()
@@ -379,7 +380,10 @@ def _build_vzg2_region(
     write_vzg2_spatialdata(
         input_path=source_dir,
         output_path=zarr_path,
-        build_config=MerscopeBuildConfig(z_layers=[3]),
+        build_config=MerscopeBuildConfig(
+            z_layers=[3],
+            allow_transform_override_mismatch=allow_override_mismatch,
+        ),
         transform_path_override=override_path,
     )
     return zarr_path, override_path
@@ -444,11 +448,27 @@ def test_vzg2_negative_bbox_mask_centroids_land_on_transcripts(
     assert pd.Series(labels).groupby(owner).first().is_unique
 
 
-def test_vzg2_stale_zero_translation_override_warns_and_reproduces_offset(
+def test_vzg2_stale_zero_translation_override_fails_the_build(
+    tmp_path: Path,
+) -> None:
+    """The stale override of the 2026-09-08 build drops the bbox origin."""
+    with pytest.raises(
+        ValueError, match="disagrees with the VZG2 manifest by up to 25.60 um"
+    ):
+        _build_vzg2_region(
+            tmp_path,
+            bbox_microns=_NEGATIVE_BBOX,
+            centres_um=_CELL_CENTRES_UM,
+            override=np.diag([_PX_PER_UM, _PX_PER_UM, 1.0]),
+        )
+    assert not (tmp_path / "source.zarr").exists()
+
+
+def test_vzg2_stale_override_opt_out_warns_and_reproduces_offset(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The stale override of the 2026-09-08 build drops the bbox origin."""
+    """With the opt-out the override wins, so its offset reaches the cells."""
     stale = np.diag([_PX_PER_UM, _PX_PER_UM, 1.0])
     with caplog.at_level(logging.WARNING, logger="merxen.io.builders.vzg2"):
         zarr_path, override_path = _build_vzg2_region(
@@ -456,6 +476,7 @@ def test_vzg2_stale_zero_translation_override_warns_and_reproduces_offset(
             bbox_microns=_NEGATIVE_BBOX,
             centres_um=_CELL_CENTRES_UM,
             override=stale,
+            allow_override_mismatch=True,
         )
     assert "disagrees with the VZG2 manifest by up to 25.60 um" in caplog.text
 

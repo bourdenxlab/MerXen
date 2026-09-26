@@ -278,7 +278,11 @@ def read_vzg2_spatialdata(
     else:
         matrix = _validate_transform(transform_matrix)
         transform_source = "override"
-        _warn_if_override_disagrees_with_manifest(matrix, manifest)
+        _check_override_against_manifest(
+            matrix,
+            manifest,
+            allow_mismatch=build_config.allow_transform_override_mismatch,
+        )
 
     region_name = build_config.region_name or str(
         manifest.get("name") or archive.path.stem
@@ -842,21 +846,35 @@ def _load_transform_override(path: Path | None) -> np.ndarray | None:
     return _validate_transform(matrix)
 
 
-def _warn_if_override_disagrees_with_manifest(
+def _check_override_against_manifest(
     matrix: np.ndarray,
     manifest: dict[str, Any],
+    *,
+    allow_mismatch: bool = False,
 ) -> float | None:
-    """Warn when an override transform places the mosaic away from the manifest.
+    """Reject an override transform that places the mosaic away from the manifest.
 
     The VZG2 image is always the archive's own mosaic, so its pixel-to-micron
     relation is fixed by the manifest. A stale override (for example one with
-    the bounding-box origin dropped) silently misregisters every image-derived
-    segmentation against the transcripts, so the disagreement is logged.
+    the bounding-box origin dropped, as in the 2026-09-08 VZG2 build) would
+    misregister every image-derived segmentation against the transcripts, and
+    the segmentation stage cannot tell because the stale matrix is what the
+    zarr records.
+
+    Args:
+        matrix: The override micron-to-mosaic-pixel transform.
+        manifest: The archive's ``manifest.json`` contents.
+        allow_mismatch: Log a warning instead of raising, for archives whose
+            ``bbox_microns`` is known not to describe the mosaic.
 
     Returns:
         The largest pixel-to-micron displacement between the two transforms
         over the mosaic corners, or ``None`` when the manifest has no usable
         bounding box.
+
+    Raises:
+        ValueError: If the displacement exceeds 1 um and ``allow_mismatch`` is
+            false.
     """
     try:
         expected = _manifest_transform(manifest)
@@ -871,17 +889,27 @@ def _warn_if_override_disagrees_with_manifest(
         np.linalg.inv(expected) @ corners
     )
     max_offset_um = float(np.abs(displacement[:2]).max())
-    if max_offset_um > _OVERRIDE_TOLERANCE_UM:
-        logger.warning(
-            "[MERSCOPE] merscope_transform_path disagrees with the VZG2 manifest "
-            "by up to %.2f um (override translation=%s px, manifest-derived "
-            "translation=%s px). Image-derived segmentations will be offset from "
-            "the transcripts unless the override is correct; the manifest-derived "
-            "transform is used when no override is given.",
-            max_offset_um,
-            np.round(matrix[:2, 2], 3).tolist(),
-            np.round(expected[:2, 2], 3).tolist(),
+    if max_offset_um <= _OVERRIDE_TOLERANCE_UM:
+        return max_offset_um
+    message = (
+        "[MERSCOPE] merscope_transform_path disagrees with the VZG2 manifest by "
+        f"up to {max_offset_um:.2f} um (override translation="
+        f"{np.round(matrix[:2, 2], 3).tolist()} px, manifest-derived translation="
+        f"{np.round(expected[:2, 2], 3).tolist()} px). Image-derived "
+        "segmentations would be offset from the transcripts."
+    )
+    if not allow_mismatch:
+        raise ValueError(
+            f"{message} Fix or drop merscope_transform_path (the manifest-derived "
+            "transform is used without it), or set "
+            "merscope.allow_transform_override_mismatch (Nextflow: "
+            "--merscope_allow_transform_override_mismatch true) if the manifest "
+            "bounding box is known to be wrong."
         )
+    logger.warning(
+        "%s Using the override because allow_transform_override_mismatch is set.",
+        message,
+    )
     return max_offset_um
 
 
