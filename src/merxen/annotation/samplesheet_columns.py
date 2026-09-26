@@ -13,7 +13,8 @@ with ``AnatomicalRegionValue`` and ``MouseSectionRegionsValue`` (hook H8).
 Species-specific checks (only ``frontal_cortex`` for human) run in
 ``AnnotationConfig``, which knows the run species.
 
-This module imports only the standard library and pydantic.
+This module imports only the standard library, numpy, pandas and pydantic
+(numpy and pandas through ``merxen.annotation.config``).
 """
 
 from __future__ import annotations
