@@ -7,6 +7,7 @@ single, robust implementations.
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,10 @@ import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
+from merxen.control_features import (
+    control_transcript_mask,
+    is_registered_control_name,
+)
 from merxen.memory import enforce_memory_limit, log_status
 
 logger = logging.getLogger(__name__)
@@ -185,6 +190,9 @@ def write_proseg_csv_from_points(
     qv_col: str | None = None,
     min_qv: float | None = None,
     excluded_gene_pattern: str | None = None,
+    control_platform: str | None = None,
+    is_gene_col: str | None = None,
+    codeword_category_col: str | None = None,
     chunk_rows: int = 1_000_000,
     dataset_name: str = "DATASET",
     status_every_chunks: int = 5,
@@ -211,6 +219,14 @@ def write_proseg_csv_from_points(
         min_qv: Minimum QV threshold (requires qv_col).
         excluded_gene_pattern: Optional regular expression matched against the
             start of feature names. Matching transcripts are omitted.
+        control_platform: Platform (``"XENIUM"`` or ``"MERSCOPE"``) whose
+            control features are omitted using
+            :func:`merxen.control_features.control_transcript_mask`. ``None``
+            keeps control features.
+        is_gene_col: Optional Xenium ``is_gene`` column; preferred over name
+            rules when ``control_platform`` is set.
+        codeword_category_col: Optional Xenium ``codeword_category`` column,
+            used where ``is_gene`` is unavailable.
         chunk_rows: Rows per processing chunk.
         dataset_name: Name for log messages.
         status_every_chunks: Log status every N chunks.
@@ -219,7 +235,9 @@ def write_proseg_csv_from_points(
         warn_ram_gb: Soft memory warning threshold in GB.
 
     Returns:
-        Dict with csv_path, n_input, n_written, n_seeded, pct_seeded.
+        Dict with csv_path, n_input, n_written, n_seeded, pct_seeded,
+        n_excluded_genes (all transcripts dropped by feature filters),
+        n_excluded_controls and excluded_control_counts (per control feature).
     """
     # Import here to avoid circular dependency
     from merxen.segmentation.cellpose import (
@@ -238,11 +256,17 @@ def write_proseg_csv_from_points(
         cols.append(z_col)
     if qv_col is not None and qv_col not in cols:
         cols.append(qv_col)
+    if control_platform is not None:
+        for feature_type_col in (is_gene_col, codeword_category_col):
+            if feature_type_col is not None and feature_type_col not in cols:
+                cols.append(feature_type_col)
 
     n_input = 0
     n_written = 0
     n_seeded = 0
     n_excluded_genes = 0
+    n_excluded_controls = 0
+    excluded_control_counts: Counter[str] = Counter()
     next_transcript_id = 0
     header_written = False
 
@@ -283,6 +307,30 @@ def write_proseg_csv_from_points(
             excluded_values = excluded.to_numpy(dtype=bool)
             n_excluded_genes += int(np.count_nonzero(valid & excluded_values))
             valid &= ~excluded_values
+
+        if control_platform is not None:
+            controls = control_transcript_mask(
+                gene_vals,
+                platform=control_platform,
+                is_gene=None if is_gene_col is None else chunk[is_gene_col],
+                codeword_category=(
+                    None
+                    if codeword_category_col is None
+                    else chunk[codeword_category_col]
+                ),
+            )
+            dropped = valid & controls
+            n_dropped = int(np.count_nonzero(dropped))
+            if n_dropped:
+                names, counts = np.unique(
+                    gene_vals[dropped].astype(str), return_counts=True
+                )
+                excluded_control_counts.update(
+                    dict(zip(names.tolist(), counts.tolist(), strict=True))
+                )
+            n_excluded_controls += n_dropped
+            n_excluded_genes += n_dropped
+            valid &= ~controls
 
         qv_vals: np.ndarray | None = None
         if qv_col is not None and min_qv is not None:
@@ -358,6 +406,13 @@ def write_proseg_csv_from_points(
         f"[{dataset_name}] ProSeg CSV complete: {n_written:,} rows written, "
         f"{n_seeded:,} seeded ({pct_seeded:.2f}%), input={n_input:,}"
     )
+    if control_platform is not None:
+        _log_excluded_controls(
+            dataset_name,
+            control_platform,
+            n_excluded_controls,
+            excluded_control_counts,
+        )
 
     return {
         "csv_path": csv_path,
@@ -366,4 +421,34 @@ def write_proseg_csv_from_points(
         "n_seeded": int(n_seeded),
         "pct_seeded": float(pct_seeded),
         "n_excluded_genes": int(n_excluded_genes),
+        "n_excluded_controls": int(n_excluded_controls),
+        "excluded_control_counts": dict(excluded_control_counts),
     }
+
+
+def _log_excluded_controls(
+    dataset_name: str,
+    platform: str,
+    n_excluded: int,
+    counts: Counter[str],
+) -> None:
+    """Log the control features dropped from a ProSeg CSV.
+
+    Controls recognised only through a feature-type column are named in a
+    warning: the registry in :mod:`merxen.control_features` lacks their names.
+    """
+    log_status(
+        f"[{dataset_name}] Excluded {n_excluded:,} control transcripts "
+        f"({len(counts):,} features) from the ProSeg CSV"
+    )
+    unregistered = sorted(
+        name for name in counts if not is_registered_control_name(name, platform)
+    )
+    if unregistered:
+        logger.warning(
+            "[%s] %d control features were recognised only by their feature "
+            "type; add their names to merxen.control_features: %s",
+            dataset_name,
+            len(unregistered),
+            ", ".join(unregistered[:20]),
+        )
