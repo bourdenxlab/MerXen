@@ -322,6 +322,15 @@ def test_run_segmentation_pipeline_stages_persistent_outputs(
         == Path(cfg.dataset.persistent_nuclei_stitching_stats_path).resolve()
     )
 
+    # The persistent CSV records the affine that seeded it.
+    seeding_sidecar = (
+        persistent_root / "segmentation" / "transcripts_for_proseg.transforms.json"
+    )
+    assert json.loads(seeding_sidecar.read_text()) == {
+        "x_transform": [1.0, 0.0, 0.0],
+        "y_transform": [0.0, 1.0, 0.0],
+    }
+
     assert not (work_dir / "proseg_base_raw.zarr").exists()
     assert loaded_channels == [["DAPI", "PolyT"], ["DAPI"]]
     assert len(cellpose_calls) == 2

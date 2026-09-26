@@ -84,6 +84,18 @@ pipeline is also launched with `-resume`, already completed Cellpose tasks
 remain eligible for the Nextflow cache: this flag forces `PROSEG_SEGMENT`, not
 either Cellpose process.
 
+Persistent Cellpose outputs (masks, probabilities and
+`transcripts_for_proseg.csv`) are reused when a Cellpose task re-runs. The
+CSV's `cell_id` seeds are fixed by the mask-to-micron affine it was written
+with, so reuse first checks it against the affine derived from the current
+transform. `transcripts_for_proseg.transforms.json`, written beside the CSV,
+records that affine; for an older CSV without it, the first 200,000 rows must
+reproduce their stored label from the mask (at least 90% of seeded rows), and
+the record is then written. A mismatch fails the task: move the CSV, masks and
+probabilities aside so Cellpose re-runs and re-seeds. The check rejects the
+stored 2026-09-08 VZG2 CSV under the corrected transform (0% agreement) and
+accepts P1212, P5011, P7113 and P7513 on both platforms (100%).
+
 ## Python entry points
 
 | Function | File |
@@ -232,6 +244,7 @@ passed as ProSeg's quality column without adding a score threshold.
 | `cellpose_stitching_stats.json` | Tile stitching diagnostics: accepted labels, duplicates, conflicts, edge-touching labels, and thresholds. |
 | `cellpose_nuclei_stitching_stats.json` | Equivalent tile-stitching diagnostics for nuclei. |
 | `transcripts_for_proseg.csv` | The transcript CSV fed into ProSeg. Retained for debugging. |
+| `transcripts_for_proseg.transforms.json` | Pixel-to-micron affine that seeded the CSV; checked before the CSV is reused. |
 | `cellpose_transforms.json` | Pixel-to-micron affine terms used by the ProSeg process. |
 
 The durable zarr contains `MOSAIK_proseg_hybrid` SpatialData/GeoParquet
