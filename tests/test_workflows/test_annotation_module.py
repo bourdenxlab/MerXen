@@ -365,7 +365,12 @@ def _prepared_pair(
 
 
 def _publish_shared_tissue_mask(outdir: Path, pair_id: str) -> None:
-    """A published align_out mask whose left half (all cells) is tissue."""
+    """A published align_out mask whose left half (all cells) is tissue.
+
+    ANNOTATION_PREPARED_REFERENCES must ignore it: a published mask looked up
+    at channel time races with ALIGN and may be stale (M5 wires the ALIGN
+    output channel instead).
+    """
     align_out = outdir / pair_id / "alignment" / "align_out"
     align_out.mkdir(parents=True)
     mask = np.zeros((20, 20), dtype=np.uint8)
@@ -449,8 +454,16 @@ def _write_fixture_panels(root: Path) -> list[dict[str, str]]:
             panel_file = None
             if tag is not None:
                 panel_file = f"panel_genes_{tag}.json"
+                # Pairs sharing a panel hash write different panel files
+                # (sample ids, per-platform symbols such as H2AX / H2AFX).
                 (panel_dir / panel_file).write_text(
-                    json.dumps({"panel_hash": _hash(tag)})
+                    json.dumps(
+                        {
+                            "panel_hash": _hash(tag),
+                            "sample_ids": [f"{pair_id}_MERSCOPE"],
+                            "symbols": [f"SYMBOL_{pair_id}"],
+                        }
+                    )
                 )
             entries.append(
                 {
@@ -717,6 +730,17 @@ def _cases(root: Path, params: dict[str, Any]) -> dict[str, dict[str, Any]]:
             "prepared": "clustering_prepare_out",
             "masks": ["shared_tissue_mask.npy", "registration_summary.json"],
         },
+        "panel_args_prepared_require_mask": {
+            "fn": "panelArguments",
+            "spec": {
+                "source": "prepared",
+                "clustering_config": "clustering_squidpy_config.json",
+                "prepared_dir": "clustering_prepare_out",
+                "require_shared_tissue_mask": True,
+            },
+            "pair_id": "P1",
+            "segmentation": "proseg_hybrid",
+        },
         "panel_args_prepared": {
             "fn": "panelArguments",
             "spec": {
@@ -788,6 +812,27 @@ def _cases(root: Path, params: dict[str, Any]) -> dict[str, dict[str, Any]]:
         "preflight_mouse": {
             "fn": "prepareOnlyErrors",
             "params": {**ready, "species": "mouse"},
+        },
+        "preflight_mouse_no_test_cells": {
+            "fn": "prepareOnlyErrors",
+            "params": {
+                **ready,
+                "species": "mouse",
+                "annotation_wmb_h5ad_dir": str(region),
+                "annotation_wmb_metadata_dir": str(region),
+                "annotation_wmb_mapping_stats_path": str(gene_list),
+            },
+        },
+        "preflight_mouse_resolvability_off": {
+            "fn": "prepareOnlyErrors",
+            "params": {
+                **ready,
+                "species": "mouse",
+                "annotation_wmb_h5ad_dir": str(region),
+                "annotation_wmb_metadata_dir": str(region),
+                "annotation_wmb_mapping_stats_path": str(gene_list),
+                "annotation_resolvability": False,
+            },
         },
         "preflight_readonly_store": {
             "fn": "prepareOnlyErrors",
@@ -990,6 +1035,10 @@ def test_prep_runs_once_per_unique_species_reference_and_panel(
     tags = Counter(tuple(row["tag"].split(":")) for row in rows)
     assert set(tags) == expected_keys
     assert all(count == 1 for count in tags.values()), tags
+    # F1, F2 and F7 stage different panel files for set a "a" (other sample
+    # ids and symbols): still one PREP task, whose bundle all three share.
+    shared = f"whb_frontal_supc_clus:{_hash('a')[:12]}"
+    assert tags[tuple(shared.split(":"))] == 1
     # 20 bundle needs across 9 branches, 13 distinct bundles.
     assert sum(len(bundles) for bundles in FIXTURE_BRANCHES.values()) == 20
     assert len(rows) == len(expected_keys) == 13
@@ -1017,6 +1066,11 @@ def test_each_branch_is_released_with_exactly_its_required_bundles(
         assert _refs(released[branch]["refs"]) == bundles, branch
     # groupKey sizes: set c 3, reseg 2, per_platform 5, mouse 2, refused 0.
     assert len(released[("F1", "proseg_hybrid")]["refs"]) == 3
+    # Branches differing only in their panel files' symbols get one ref.
+    assert (
+        released[("F1", "proseg_hybrid")]["refs"][0]
+        == released[("F2", "proseg_hybrid")]["refs"][0]
+    )
     assert len(released[("F3", "proseg_hybrid")]["refs"]) == 5
     assert released[("F4", "proseg_hybrid")]["refs"] == []
 
@@ -1046,7 +1100,13 @@ def test_prep_resources_follow_the_panel_size(harness: dict[str, Any]) -> None:
 def test_prepared_references_emit_map_inputs_after_their_bundles(
     harness: dict[str, Any],
 ) -> None:
-    """Real ANNOTATE_PANEL on prepared H5ADs: set c (3) and per_platform (5)."""
+    """Real ANNOTATE_PANEL on prepared H5ADs: same-panel (2) and per_platform (5).
+
+    PSAME's synthetic set a has no curated set-c family, so its label-free
+    set c needs the shared tissue mask, which M2 never takes from a published
+    file (M5 wires ALIGN): set c is refused although PSAME has a published
+    mask. The set-c groupKey path is covered by the fixture panels.
+    """
     released = {
         (row["pair_id"], row["segmentation"]): row for row in harness["prepared"]
     }
@@ -1071,7 +1131,6 @@ def test_prepared_references_emit_map_inputs_after_their_bundles(
         assert json.loads(row["samples_json"])[0]["segmentation"] == branch[1]
     assert purposes[("PSAME", "proseg_hybrid")] == [
         ("whb_frontal_supc_clus", "annotation"),
-        ("whb_frontal_supc_clus", "setc_sensitivity"),
         ("seaad_mr_panel", "annotation"),
     ]
     assert purposes[("PSAME", "reseg")] == [
@@ -1085,12 +1144,13 @@ def test_prepared_references_emit_map_inputs_after_their_bundles(
             / "panel_report.json"
         ).read_text()
     )
-    assert report["setc"]["mask_applied"] is True
+    assert report["setc"] is None
+    assert "needs the shared tissue mask" in report["setc_skipped"]
     # The per_platform intersection is PSAME's set a: one WHB bundle serves both.
     rows = _prep_rows(harness, "ANNOTATION_PREPARED_REFERENCES")
     tags = Counter(row["tag"] for row in rows)
     assert all(count == 1 for count in tags.values())
-    assert len(rows) == 7
+    assert len(rows) == 6
 
 
 @needs_nextflow
@@ -1158,9 +1218,12 @@ def test_panel_arguments(harness: dict[str, Any]) -> None:
         "--shared-tissue-mask panel_inputs/shared_tissue_mask.npy "
         "--registration-summary panel_inputs/registration_summary.json"
     )
-    assert (
-        _value(harness, "prepared_spec")["shared_tissue_mask"]
-        == "shared_tissue_mask.npy"
+    spec = _value(harness, "prepared_spec")
+    assert spec["shared_tissue_mask"] == "shared_tissue_mask.npy"
+    assert spec["require_shared_tissue_mask"] is True
+    assert _value(harness, "panel_args_prepared_require_mask").endswith(
+        "--clustering-config panel_inputs/clustering_squidpy_config.json "
+        "--require-shared-tissue-mask"
     )
     assert "Unknown annotation panel source" in _error(harness, "panel_args_unknown")
 
@@ -1211,6 +1274,9 @@ def test_prepare_only_preflight(harness: dict[str, Any]) -> None:
     mouse = " | ".join(_value(harness, "preflight_mouse"))
     assert "wmb_panel needs annotation_wmb_h5ad_dir" in mouse
     assert "wmb_region_share" not in mouse  # the MERFISH metadata is downloaded
+    (no_test_cells,) = _value(harness, "preflight_mouse_no_test_cells")
+    assert "wmb_panel needs annotation_wmb_selfmap_test_cells_path" in no_test_cells
+    assert _value(harness, "preflight_mouse_resolvability_off") == []
     (readonly,) = _value(harness, "preflight_readonly_store")
     assert "is not writable" in readonly
     (region,) = _value(harness, "preflight_region")
@@ -1248,6 +1314,10 @@ def test_bundle_bookkeeping_helpers(harness: dict[str, Any]) -> None:
 
 # --------------------------------------------------------------------------
 # main.nf --annotation_prepare_only
+#
+# Each of these launches main.nf (about 10-22 s of Nextflow start-up each), so
+# they are marked slow and stay out of the pre-push suite; the session
+# harness above covers the channel logic, arguments and preflight fast.
 
 
 def _host_free_config(tmp_path: Path, **params: str) -> Path:
@@ -1275,6 +1345,7 @@ def _host_free_config(tmp_path: Path, **params: str) -> Path:
     return config
 
 
+@pytest.mark.slow
 @needs_nextflow
 def test_prepare_only_stub_run_builds_bundles_and_runs_no_stage(tmp_path: Path) -> None:
     """Two paired rows x two segmentations: 4 panels, 2 bundles, nothing else."""
@@ -1407,6 +1478,7 @@ BundleRef(
 """
 
 
+@pytest.mark.slow
 @needs_nextflow
 def test_prepare_only_runs_the_real_prep_script(tmp_path: Path) -> None:
     """Without -stub-run: the PREP script checks ctm and passes its arguments.
@@ -1523,6 +1595,7 @@ def test_prepare_only_runs_the_real_prep_script(tmp_path: Path) -> None:
     assert not store.exists()
 
 
+@pytest.mark.slow
 @needs_nextflow
 def test_prepare_only_refuses_a_run_without_a_gene_list(tmp_path: Path) -> None:
     assert NEXTFLOW is not None

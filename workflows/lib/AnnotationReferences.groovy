@@ -55,8 +55,13 @@ class AnnotationReferences {
             wmb_h5ad_dir: "annotation_wmb_h5ad_dir",
             wmb_metadata_dir: "annotation_wmb_metadata_dir",
             wmb_mapping_stats: "annotation_wmb_mapping_stats_path",
-            // Self-map test cells kept out of the marker build (plan §3.2).
+            // Self-map test cells kept out of the marker build (plan §3.2);
+            // a copy matching the pinned sha256 is seeded into
+            // <store>/.downloads and hashed there.
             wmb_selfmap_test_cells: "annotation_wmb_selfmap_test_cells_path",
+            // Optional override of the marker universe; by default a panel
+            // inside the validated ag7 | VZG2 union uses it (plan §7.1).
+            wmb_marker_gene_universe: "annotation_wmb_marker_gene_universe_path",
         ].asImmutable(),
         wmb_region_share: [
             merfish_ccf_metadata: "annotation_merfish_ccf_metadata_path",
@@ -219,48 +224,37 @@ class AnnotationReferences {
     /**
      * Return the ANNOTATE_PANEL spec of a prepared directory (map_first runs).
      *
+     * The shared tissue mask comes only from the pair's ALIGN output channel
+     * (wired in M5), never from a published file looked up at channel time:
+     * that lookup would race with ALIGN in the same run and could find a
+     * stale mask. The seeded set-a family's curated set c needs no mask; a
+     * label-free set c (other families) is refused without one when
+     * requireMask is set.
+     *
      * @param clusteringConfigName Staged clustering_squidpy_config.json name.
      * @param preparedDirName Staged CLUSTERING_SQUIDPY_PREPARE output name.
      * @param maskNames Staged [shared_tissue_mask.npy, registration_summary.json]
-     *     names, or an empty list (set c then uses the whole section).
+     *     names from ALIGN, or an empty list.
+     * @param requireMask Refuse a label-free set c without the mask.
      * @return The panel spec map.
      */
     static Map preparedPanelSpec(
         String clusteringConfigName,
         String preparedDirName,
-        List maskNames = []
+        List maskNames = [],
+        boolean requireMask = true
     ) {
         def spec = [
             source: PREPARED_SOURCE,
             clustering_config: clusteringConfigName,
             prepared_dir: preparedDirName,
+            require_shared_tissue_mask: requireMask,
         ]
         if (maskNames && maskNames.size() == 2) {
             spec.shared_tissue_mask = maskNames[0].toString()
             spec.registration_summary = maskNames[1].toString()
         }
         return spec
-    }
-
-    /**
-     * Return the published shared tissue mask of a pair, if both files exist.
-     *
-     * @param params Pipeline params.
-     * @param pairId Pair id.
-     * @return [mask, registration summary] paths, or an empty list.
-     */
-    static List<Path> publishedSharedTissueMask(Map params, Object pairId) {
-        def alignOut = Paths.get(
-            (params?.get("outdir") ?: "results").toString(),
-            pairId.toString(),
-            "alignment",
-            "align_out",
-        ).toAbsolutePath().normalize()
-        def files = [
-            alignOut.resolve("shared_tissue_mask.npy"),
-            alignOut.resolve("registration_summary.json"),
-        ]
-        return files.every { path -> Files.isRegularFile(path) } ? files : []
     }
 
     /**
@@ -289,6 +283,9 @@ class AnnotationReferences {
                     "--shared-tissue-mask", staged(spec.shared_tissue_mask),
                     "--registration-summary", staged(spec.registration_summary),
                 ]
+            }
+            if (spec.require_shared_tissue_mask) {
+                args += ["--require-shared-tissue-mask"]
             }
             (spec.panel_files ?: [:]).each { key, name ->
                 args += ["--panel-file", "${key}=${staged(name)}".toString()]
@@ -396,9 +393,11 @@ class AnnotationReferences {
      * @param required requiredBundles(panelDir).
      * @return [bundle, panel files] per bundle, where bundle is the map PREP
      *     reads (key, species, reference_id, role, panel_hash, panel_tag,
-     *     n_panel_genes; all fixed by the key, so the task hash does not
-     *     depend on which pair asked) and panel files holds the bundle's
-     *     panel_genes*.json (empty for panel-independent references).
+     *     n_panel_genes; all fixed by the key) and panel files holds the
+     *     bundle's panel_genes*.json (empty for panel-independent
+     *     references). Pairs sharing a key stage different copies of the
+     *     panel file (sample ids, symbols); the bundle depends only on the
+     *     key's IDs, so any copy builds the same bundle.
      */
     static List prepRequests(Object panelDir, Map required) {
         def directory = asPath(panelDir)
@@ -468,7 +467,6 @@ class AnnotationReferences {
             path: Paths.get(store, bundle.reference_id.toString(), "stub-${bundle.panel_tag}").toString(),
             store_root: store,
             panel_trust: null,
-            reused: false,
         ]))
     }
 

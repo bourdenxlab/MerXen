@@ -33,8 +33,11 @@ workflow ANNOTATION_BUNDLES {
         tuple(pairId, segmentation, panelDir, AnnotationReferences.requiredBundles(panelDir))
     }
 
-    // One PREP task per unique bundle key, whichever pair asks first; the
-    // panel file of an identical panel_hash is identical in every pair.
+    // One PREP task per unique bundle key, whichever pair asks first. The
+    // pairs' panel files of one key differ (sample ids, per-platform symbols
+    // such as MERSCOPE H2AX vs Xenium H2AFX), but the bundle and its
+    // build_hash depend only on the key's resolved IDs, so the choice never
+    // changes which bundle is built.
     prep_inputs_ch = required_ch
         .flatMap { _pairId, _segmentation, panelDir, required ->
             AnnotationReferences.prepRequests(panelDir, required)
@@ -88,9 +91,9 @@ workflow ANNOTATION_BUNDLES {
     // tuple(bundle key, bundle_ref.json): one per PREP task.
     bundle_refs = bundle_refs_ch
     // tuple(pair_id, segmentation, annotation_panel_out, [bundle_ref.json, ...])
-    // in required_bundles.json order: MAP's bundle input (plan §3.3). A PREP
-    // re-run rewrites an equivalent bundle_ref.json ("reused" true), so MAP
-    // should key its cache on each ref's build_hash and path, not the file.
+    // in required_bundles.json order: MAP's bundle input (plan §3.3). PREP
+    // always re-runs (cache false) and writes byte-identical refs for an
+    // unchanged bundle, so MAP can cache "deep" on the files.
     bundles = bundles_ch
 }
 
@@ -158,20 +161,22 @@ workflow ANNOTATION_PREPARED_REFERENCES {
     prepared_ch
 
     main:
-    // Set c is computed inside the pair's shared tissue mask when its
-    // alignment outputs are published, else over the whole section (plan §3.2).
+    // Set c of the seeded set-a family is its curated list (no mask needed).
+    // A label-free set c (other families) needs the pair's shared tissue
+    // mask, which M5 passes from the ALIGN output channel; until then it is
+    // refused rather than computed over the whole section or from a
+    // published mask looked up while ALIGN may still be running (plan §3.2).
     panel_inputs_ch = prepared_ch.map { pairId, segmentation, _samplesJson, clusteringConfig, preparedDir ->
-        def maskFiles = AnnotationReferences.publishedSharedTissueMask(params, pairId)
-            .collect { path -> file(path.toString()) }
         tuple(
             pairId,
             segmentation,
             AnnotationReferences.preparedPanelSpec(
                 clusteringConfig.name,
                 preparedDir.name,
-                maskFiles.collect { path -> path.name },
+                [],
+                true,
             ),
-            [clusteringConfig, preparedDir] + maskFiles,
+            [clusteringConfig, preparedDir],
         )
     }
     references = ANNOTATION_REFERENCES(panel_inputs_ch)
