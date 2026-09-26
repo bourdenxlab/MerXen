@@ -1,7 +1,9 @@
 name: CI
 on:
   push:
-    branches: [main]
+    # feature/robust-celltype-annotation: the integration branch of
+    # docs/plans/robust-celltype-annotation-plan.md (§2.2), gated like main.
+    branches: [main, feature/robust-celltype-annotation]
   pull_request:
 
 jobs:
@@ -24,5 +26,8 @@ jobs:
         run: ruff format --check .
       - name: Type check
         run: mypy src/
+      # nf-metro comes from the dev extra in the lockfile, as in the pre-push venv.
+      - name: Metro map
+        run: nf-metro validate assets/metro_map.mmd
       - name: Tests
         run: pytest -m "not slow"

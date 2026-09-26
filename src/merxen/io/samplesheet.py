@@ -7,6 +7,8 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from merxen.annotation.samplesheet_columns import parse_optional_columns  # rca-hook:H9
+
 logger = logging.getLogger(__name__)
 
 
@@ -75,6 +77,9 @@ class SamplePair:
     start_stage: str | None = None
     stop_stage: str | None = None
     only_stage: str | None = None
+    # rca-site:H9: optional annotation columns (plan §3.7); None inherits the param.
+    anatomical_region: str | None = None
+    mouse_section_regions: str | None = None
 
 
 def parse_samplesheet(csv_path: Path) -> list[SamplePair]:
@@ -170,6 +175,15 @@ def parse_samplesheet(csv_path: Path) -> list[SamplePair]:
                 stop_stage=_optional_string(row.get("stop_stage")),
                 only_stage=_optional_string(row.get("only_stage")),
             )
+            # rca-site:H9: blank or absent annotation columns stay None.
+            try:
+                annotation_columns = parse_optional_columns(row)
+            except ValueError as exc:
+                raise ValueError(
+                    f"[{pair.pair_id}] samplesheet row {row_num}: {exc}"
+                ) from exc
+            pair.anatomical_region = annotation_columns.anatomical_region
+            pair.mouse_section_regions = annotation_columns.mouse_section_regions
             pairs.append(pair)
             logger.info("Parsed sample pair %d: %s", row_num - 1, pair.pair_id)
 

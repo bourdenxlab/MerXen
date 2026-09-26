@@ -38,12 +38,14 @@ from matplotlib.lines import Line2D
 from scipy import sparse
 from scipy.cluster.hierarchy import leaves_list, linkage
 
+from merxen.clustering.cellset import restrict_to_table_cells, select_table_cells
 from merxen.config import ClusteringSquidpyConfig
 from merxen.control_features import CONTROL_TOKENS, control_token_mask
 from merxen.gene_ids import is_ensembl_gene_id
 from merxen.io.transcript_io import first_existing_col
 from merxen.memory import force_release, log_status
 from merxen.plotting import prepare_plot_output, save_figure
+from merxen.table_keys import clustered_table_key
 
 logger = logging.getLogger(__name__)
 
@@ -535,7 +537,9 @@ def run_scanpy_clustering(
             enabled=False,
         )
 
-    sc.pp.filter_cells(clustered, min_counts=int(min_counts))
+    # The shared helper keeps the clustered cells equal to the annotation's
+    # table cells (plan §4.4); it records obs["n_counts"] as filter_cells did.
+    restrict_to_table_cells(clustered, select_table_cells(clustered, min_counts))
     sc.pp.filter_genes(clustered, min_cells=int(min_cells))
     if clustered.n_obs < 3 or clustered.n_vars < 2:
         raise ValueError(
@@ -1542,14 +1546,12 @@ def _clustered_spatialdata_table_key(
     source_table_key: str,
     segmentation: str | None,
 ) -> str:
-    """Return the derived SpatialData table key for a clustered AnnData table."""
-    segmentation_key = "" if segmentation is None else str(segmentation).strip().lower()
-    source_key = str(source_table_key)
-    if segmentation_key == "reseg" or source_key == "table_MOSAIK_proseg":
-        return "table_MOSAIK_proseg_clustering_squidpy"
-    if segmentation_key == "original_seg" or source_key == "table_original":
-        return "table_original_clustering_squidpy"
-    return f"{source_key}_clustering_squidpy"
+    """Return the derived SpatialData table key for a clustered AnnData table.
+
+    Delegates to ``merxen.table_keys.clustered_table_key``, which mirrors
+    ``clusteredSpatialdataTableKey`` in ``workflows/main.nf``.
+    """
+    return clustered_table_key(source_table_key, segmentation)
 
 
 def build_clustered_spatialdata_table(

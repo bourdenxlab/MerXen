@@ -29,10 +29,21 @@ Tests live under [tests/](../tests/) and mirror the source layout:
 | `src/merxen/qc/` | `tests/test_qc/` |
 | `src/merxen/visualization/` | `tests/test_visualization/` |
 | `src/merxen/alignment/` | `tests/test_alignment/` |
+| `src/merxen/annotation/` | `tests/test_annotation/` |
+| `src/merxen/clustering/` | `tests/test_clustering/` |
 
 Shared fixtures live in [tests/conftest.py](../tests/conftest.py). Mark
 anything that needs a large dataset or a real Cellpose model with
 `@pytest.mark.slow`.
+
+Slow tests that need local data read its location from environment variables
+and skip when they are unset (the annotation ones are also in
+[.env.example](../.env.example)):
+
+| Variable | Test |
+|----------|------|
+| `MERXEN_MENDER_CONTAINER` | MENDER container smoke test |
+| `MERXEN_WHB_TAXONOMY_DIR`, `MERXEN_SEAAD_TERM_CSV`, `MERXEN_WMB_TAXONOMY_DIR` | the committed annotation vocab tables match the real Allen taxonomy CSVs (`build_vocab_tables.py --check`) |
 
 ## Linting, formatting, typing
 
@@ -69,13 +80,30 @@ and intend to fix it before the PR is reviewed.
 ## Continuous integration
 
 [.github/workflows/ci.yml](../.github/workflows/ci.yml) runs on every push
-to `main` and every PR:
+to `main` and to the integration branch `feature/robust-celltype-annotation`
+([plan §2.2](plans/robust-celltype-annotation-plan.md)), and on every PR:
 
 1. Install from `requirements/requirements.lock` with `uv`, then `pip install -e . --no-deps`.
 2. `ruff check .`
 3. `ruff format --check .`
 4. `mypy src/`
-5. `pytest -m "not slow"`
+5. `nf-metro validate assets/metro_map.mmd`
+6. `pytest -m "not slow"`
+
+To lint the Nextflow code, point the linter at the pipeline's project
+directory so it loads the Groovy classes in `workflows/lib/`:
+
+```bash
+nextflow lint -project-dir workflows workflows/
+```
+
+Without `-project-dir`, run from the repository root, the linter looks for
+`lib/` in the current directory and reports every `workflows/lib` class that
+`main.nf` uses (`AnnotationSettings`, `AnnotationPreflight`) as "not defined".
+Those are not real errors. [tests/test_workflows/test_nextflow_lint.py](../tests/test_workflows/test_nextflow_lint.py)
+runs the command above and fails on any error (warnings pass); it is skipped
+when `nextflow` is not installed. `scripts/run_ci_checks.sh` runs it too when
+Nextflow is on the `PATH`.
 
 Run the same gate locally before pushing:
 
@@ -187,6 +215,12 @@ git push origin HEAD --tags
 
 - **Never `pip install <pkg>` directly.** That leaves you out of sync with
   the lockfile and CI.
+- **Known gap:** `scripts/annotation/build_vocab_tables.py` and its tests use
+  PyYAML, which `pyproject.toml` does not declare yet; it comes with dask and
+  pre-commit. Declare `pyyaml` in the `dev` extra (with `scikit-learn`, plan
+  §3.8) in the first change that regenerates the lock anyway, since a new lock
+  invalidates `-resume` (above). Until then
+  `test_pyyaml_is_available_for_the_generator` fails if PyYAML disappears.
 - **Conda env (`envs/environment.yml`)** is deliberately thin — Python 3.12, pip,
   and `-e ".[dev]"`. All Python dependencies come through `pyproject.toml`.
   It cannot install the lockfile, because pip rejects it (`ResolutionImpossible`:
@@ -218,6 +252,75 @@ pip install -e . --no-deps
   [Agents.md](../Agents.md#commit-messages): `[feature]`, `[bugfix]`,
   `[refactor]`, `[style]`, `[test]`, `[docs]`, `[chore]`, `[minor]`.
 - Delete feature branches after merge.
+
+## Robust cell-type annotation work
+
+The effort planned in
+[docs/plans/robust-celltype-annotation-plan.md](plans/robust-celltype-annotation-plan.md)
+has its own branch model and guards.
+
+### Integration branch
+
+Work lands on the long-lived integration branch
+`feature/robust-celltype-annotation` (plan §2.2). Each milestone is a branch
+`feature/rca-m<N>-<slug>` cut from its head and merged back by PR; merge the
+integration head into the milestone branch before its PR. The integration
+branch is kept current by merging `main` into it, never by rebasing it, and
+only the acceptance-gate PRs merge it into `main`. Data-integrity fixes go to
+`main` first. Until a species flips, no milestone may change legacy results.
+
+### Hook points shared with `feature/gaston`
+
+`workflows/main.nf`, `workflows/nextflow.config`, `workflows/conf/dwight.config`,
+`src/merxen/config.py` and `src/merxen/io/samplesheet.py` are also edited by
+`feature/gaston`, so annotation changes touch them only at the hook points of
+plan §2.4 (H1–H9):
+
+- each hook carries one marker, `// rca-hook:H<n>` in Nextflow and
+  `# rca-hook:H<n>` in Python, exactly once per file;
+- every other line a hook changes carries `rca-site:H<n>`;
+- [tests/test_workflows/test_rca_hooks.py](../tests/test_workflows/test_rca_hooks.py)
+  pins the markers, the number of site lines per file (`EXPECTED_SITES`) and
+  the code next to each marker, so a rebase or merge cannot silently drop a
+  hook. When a hook legitimately grows, add the site marker and update
+  `EXPECTED_SITES` in the same commit.
+
+New behaviour goes into new files (`workflows/lib/Annotation*.groovy`,
+`workflows/conf/annotation.config`, `src/merxen/annotation/`). Plan §2.4 lists
+the GASTON conflict hotspots and gives the rebase guide for the GASTON author.
+
+### Legacy clustering pin
+
+[tests/test_workflows/test_legacy_script_pin.py](../tests/test_workflows/test_legacy_script_pin.py)
+pins the sha256 of the legacy `CLUSTERING_SQUIDPY_PREPARE` / `COMPUTE` /
+`FINALIZE` script text, their `main.nf` wiring and the param defaults they
+read. Nextflow's `-resume` key covers the script text, so a change there
+re-runs every legacy clustering task and may change legacy results. To change
+it on purpose, put the change and the new digests in their own commit whose
+message gives the reason and the expected effect on legacy runs.
+`python tests/test_workflows/test_legacy_script_pin.py` prints the current
+digests.
+
+### Annotation vocabulary tables
+
+The vocab and floor tables under `src/merxen/assets/annotation/` are generated;
+never edit them by hand. Edit `overrides.yaml`, then regenerate from the Allen
+taxonomy CSVs and commit the inputs and outputs together:
+
+```bash
+python scripts/annotation/build_vocab_tables.py \
+    --whb-taxonomy-dir <abc>/metadata/WHB-taxonomy/20240330 \
+    --seaad-term-csv <abc>/metadata/SEA-AD-Multiregion-taxonomy/20260711/cluster_annotation_term.csv \
+    --wmb-taxonomy-dir <abc>/metadata/WMB-taxonomy/20231215
+```
+
+`--check` writes nothing and exits 1 when a committed file is stale. The
+generator fails when a taxonomy term has no curated mapping, so a new Allen
+release cannot change the vocabulary silently. The `NOTICE` records each
+input by its ABC path, size and sha256, so a local copy may have any name.
+`tests/test_annotation/test_build_vocab_tables.py` rebuilds a synthetic
+taxonomy from the committed tables; its slow test checks them against the
+real CSVs (variables above).
 
 ## Adding a new pipeline stage
 
