@@ -370,6 +370,21 @@ Reference-based annotation (plan `docs/plans/robust-celltype-annotation-plan.md`
   `broad_class_detection`, `negative_gene_table`, `node_vocab_table`,
   `write_panel_stub_h5ad`, `merfish_region`, `region_share_tables`.
 
+### `annotation.shadow` — [shadow.py](../src/merxen/annotation/shadow.py)
+
+M3 shadow evaluation (plan §5.2–§5.5, §14):
+
+- Compositions: `soft_broad_matrix`, `soft_matrix_from_provisional`,
+  `one_hot_broad_matrix`, `argmax_broad_names`, `composition_shares`,
+  `jensen_shannon_distance`.
+- Spatial CIs: `tile_codes`, `tile_sums`, `block_bootstrap_jsd`.
+- SEA-AD 7-class calls: `seaad_broad_calls`.
+- Shadow v1 human rules: `evaluate_human_rules` (with `HumanRuleInputs`,
+  `rule_inputs_from_provisional`, `FloorLookup`, `SECOND_VOTE_VARIANTS`) and
+  `dataset_gate`.
+- `label_agreement`, `marker_class_scores`, `marker_referee` (the E1
+  referee).
+
 See [Reference-based annotation](stages/annotation.md).
 
 ## `merxen.memory`
