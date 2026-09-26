@@ -65,6 +65,14 @@ if [[ -x "${venv_dir}/bin/nf-metro" ]]; then
     "${venv_dir}/bin/nf-metro" validate assets/metro_map.mmd
 fi
 
+# Nextflow lint, when Nextflow is installed. -project-dir makes the linter
+# load the Groovy classes in workflows/lib; without it, run from the repo
+# root, every lib class main.nf uses reads as "not defined". Warnings pass,
+# errors fail (tests/test_workflows/test_nextflow_lint.py checks the same).
+if command -v nextflow >/dev/null 2>&1; then
+    NXF_DISABLE_CHECK_LATEST=true nextflow lint -project-dir workflows -o concise workflows/
+fi
+
 case "${run_tests}" in
     true | 1 | yes)
         if [[ -n "${MERXEN_CI_PYTEST_ARGS:-}" ]]; then
