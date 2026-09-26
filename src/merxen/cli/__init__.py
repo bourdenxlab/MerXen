@@ -16,6 +16,11 @@ from merxen.cli.run_alignment import (
 from merxen.cli.run_analysis_layer_validation import (
     validate_analysis_layer_command,
 )
+from merxen.cli.run_annotation import (
+    annotation_panel_command,
+    annotation_reference_prep_command,
+    annotation_store_group,
+)
 from merxen.cli.run_build_spatialdata import build_spatialdata_command
 from merxen.cli.run_clustering_squidpy import clustering_squidpy_command
 from merxen.cli.run_comparison import compare_command
@@ -78,3 +83,6 @@ main.add_command(mecr_reference_command)
 main.add_command(mecr_command)
 main.add_command(clustering_squidpy_command)
 main.add_command(mapmycells_command)
+main.add_command(annotation_panel_command)
+main.add_command(annotation_reference_prep_command)
+main.add_command(annotation_store_group)

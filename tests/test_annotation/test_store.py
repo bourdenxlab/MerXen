@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from click.testing import CliRunner
 
 from merxen.annotation import store as store_module
 from merxen.annotation.config import (
@@ -39,6 +40,7 @@ from merxen.annotation.store import (
     resolve_builder,
     source_record,
 )
+from merxen.cli import main as cli_main
 
 REPO_SRC = Path(__file__).resolve().parents[2] / "src"
 FAKE_CTM = {"version": "1.7.2", "commit": "824caef975618afdadf31172fe2d57e61e657b92"}
@@ -747,6 +749,118 @@ def test_list_reports_bundle_details(
     assert entry.n_panel_genes == 60
     assert entry.size_bytes > 0
     assert json.dumps(entry.to_json())
+
+
+# --------------------------------------------------------------------------
+# CLI
+
+
+@pytest.fixture
+def registered_test_builder(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(
+        store_module._BUILDER_FACTORIES,
+        "whb_frontal_supc_clus",
+        lambda spec, config: copying_builder(),
+    )
+
+
+def test_cli_reference_prep_builds_then_reuses(
+    registered_test_builder: None, tmp_path: Path, source_file: Path
+) -> None:
+    panel_path = make_panel().write(tmp_path / "panel_genes.json")
+    args = [
+        "annotation-reference-prep",
+        "--reference-id",
+        "whb_frontal_supc_clus",
+        "--species",
+        "human",
+        "--panel-genes",
+        str(panel_path),
+        "--store",
+        str(tmp_path / "store"),
+        "--source",
+        f"precompute={source_file}",
+        "--scratch-dir",
+        str(tmp_path / "scratch"),
+        "--output",
+        str(tmp_path / "bundle_ref.json"),
+    ]
+    runner = CliRunner()
+    first = runner.invoke(cli_main, args)
+    assert first.exit_code == 0, first.output
+    built = json.loads((tmp_path / "bundle_ref.json").read_text())
+    assert built["reused"] is False and built["reference_id"] == "whb_frontal_supc_clus"
+    second = runner.invoke(cli_main, args)
+    assert second.exit_code == 0, second.output
+    reused = json.loads((tmp_path / "bundle_ref.json").read_text())
+    assert reused["reused"] is True and reused["build_hash"] == built["build_hash"]
+
+    listed = runner.invoke(
+        cli_main, ["annotation-store", "list", "--store", str(tmp_path / "store")]
+    )
+    assert listed.exit_code == 0 and built["build_hash"][:16] in listed.output
+    listed_json = runner.invoke(
+        cli_main,
+        ["annotation-store", "list", "--store", str(tmp_path / "store"), "--json"],
+    )
+    assert json.loads(listed_json.output)[0]["build_hash"] == built["build_hash"]
+
+
+def test_cli_prune_requires_dry_run(
+    registered_test_builder: None, tmp_path: Path, spec: AnnotationReferenceSpec
+) -> None:
+    store = ReferenceStore(tmp_path / "store")
+    store.get_or_build(spec, make_panel(), builder=copying_builder())
+    results = tmp_path / "results"
+    results.mkdir()
+    before = snapshot(store.root)
+    runner = CliRunner()
+    refused = runner.invoke(
+        cli_main,
+        [
+            "annotation-store",
+            "prune",
+            "--store",
+            str(store.root),
+            "--unreferenced-by",
+            str(results),
+        ],
+    )
+    assert refused.exit_code != 0 and "--dry-run" in refused.output
+    listed = runner.invoke(
+        cli_main,
+        [
+            "annotation-store",
+            "prune",
+            "--store",
+            str(store.root),
+            "--unreferenced-by",
+            str(results),
+            "--dry-run",
+        ],
+    )
+    assert listed.exit_code == 0, listed.output
+    assert "1 candidate(s)" in listed.output and "nothing deleted" in listed.output
+    assert snapshot(store.root) == before
+
+
+def test_cli_reference_prep_rejects_unknown_references(tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        cli_main,
+        [
+            "annotation-reference-prep",
+            "--reference-id",
+            "not_a_reference",
+            "--species",
+            "human",
+            "--store",
+            str(tmp_path / "store"),
+            "--output",
+            str(tmp_path / "bundle_ref.json"),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "unknown reference" in result.output
 
 
 # --------------------------------------------------------------------------

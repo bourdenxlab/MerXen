@@ -12,6 +12,7 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 import pytest
+from click.testing import CliRunner
 from scipy import sparse
 
 from merxen.annotation.config import AnnotationConfig, AnnotationPanelConfig
@@ -46,6 +47,7 @@ from merxen.annotation.panel import (
     resolve_panel_mode,
     setc_panel,
 )
+from merxen.cli import main as cli_main
 
 N_SHARED = 60
 H2AFX_ID = "ENSG77700000001"
@@ -985,6 +987,55 @@ def test_panel_from_gene_list(tmp_path: Path) -> None:
     assert (
         load_annotation_panel(tmp_path / "out" / PANEL_GENES_FILE).kind == "gene_list"
     )
+
+
+def test_cli_annotation_panel(tmp_path: Path) -> None:
+    prepared = make_pair(tmp_path, xenium_factor={0: 16.0})
+    config_path = tmp_path / "annotation_config.json"
+    config_path.write_text(human_config(tmp_path).model_dump_json())
+    clustering_path = tmp_path / "clustering_squidpy_config.json"
+    clustering_path.write_text(json.dumps(clustering_config()))
+    make_mask(tmp_path)
+    result = CliRunner().invoke(
+        cli_main,
+        [
+            "annotation-panel",
+            "--prepared-dir",
+            str(prepared),
+            "--species",
+            "human",
+            "--platforms",
+            "MERSCOPE,XENIUM",
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--annotation-config",
+            str(config_path),
+            "--clustering-config",
+            str(clustering_path),
+            "--shared-tissue-mask",
+            str(tmp_path / "shared_tissue_mask.npy"),
+            "--registration-summary",
+            str(tmp_path / "registration_summary.json"),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "3 required bundle(s)" in result.output
+    required = json.loads((tmp_path / "out" / REQUIRED_BUNDLES_FILE).read_text())
+    assert (
+        required["pair_id"] == "P0001" and required["segmentation"] == "proseg_hybrid"
+    )
+    report = json.loads((tmp_path / "out" / PANEL_REPORT_FILE).read_text())
+    assert report["setc"]["mask_applied"] is True
+    assert report["min_counts_source"] == "clustering_config"
+
+
+def test_cli_annotation_panel_needs_one_input(tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        cli_main,
+        ["annotation-panel", "--species", "human", "--output-dir", str(tmp_path)],
+    )
+    assert result.exit_code != 0
+    assert "exactly one of" in result.output
 
 
 def test_intersection_panel_prefers_xenium_symbols() -> None:
