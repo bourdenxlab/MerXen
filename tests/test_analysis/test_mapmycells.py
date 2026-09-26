@@ -1667,6 +1667,76 @@ def test_prepare_region_reference_force_reuses_build_finished_while_waiting(
     assert existing.precomputed_stats_path.read_bytes() == b"stats-1"
 
 
+def _plant_staging_dir(references_root: Path, name: str) -> Path:
+    staging_dir = references_root / name
+    (staging_dir / "precompute").mkdir(parents=True)
+    (staging_dir / "precompute" / "precomputed_stats.h5").write_bytes(b"partial")
+    return staging_dir
+
+
+def test_prepare_region_reference_removes_stale_staging_of_same_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Staging dirs of dead builders of this configuration are cleaned up.
+
+    Completed builds, legacy references and other configurations' staging
+    directories are left untouched.
+    """
+    calls = _install_fake_whb_region_builders(tmp_path, monkeypatch)
+    references_root = tmp_path / "cache" / "references"
+    legacy_dir = references_root / LEGACY_FRONTAL_DIR_NAME
+    _write_legacy_region_reference(
+        legacy_dir, {**LEGACY_FRONTAL_CONFIG, "region_min_cells_per_leaf": 5}
+    )
+    legacy_tree = _snapshot_tree(legacy_dir)
+    cfg = _region_config(tmp_path, region_min_cells_per_leaf=10)
+    expected_config = mapmycells_module._region_reference_config_payload(
+        cfg, "frontal_a44_a45_a46_a32_acc"
+    )
+    config_hash = mapmycells_module._region_reference_config_hash(expected_config)
+    build_stem = f"{LEGACY_FRONTAL_DIR_NAME}-{config_hash[:16]}"
+    stale_first = _plant_staging_dir(
+        references_root, f".staging-{build_stem}-4242-deadbeef"
+    )
+    other_config_staging = _plant_staging_dir(
+        references_root, f".staging-{LEGACY_FRONTAL_DIR_NAME}-0123456789abcdef-7-cafe"
+    )
+
+    first = prepare_region_mapmycells_reference(cfg)
+
+    assert calls["precompute"] == 1
+    assert first.manifest_path.parent == references_root / build_stem
+    assert not stale_first.exists()
+    assert other_config_staging.is_dir()
+    first_tree = _snapshot_tree(first.manifest_path.parent)
+    stale_rebuild = _plant_staging_dir(
+        references_root,
+        f".staging-{build_stem}-rebuild-20260926T000000000000Z-4343-feedface",
+    )
+
+    rebuilt = prepare_region_mapmycells_reference(
+        cfg.model_copy(update={"region_force_rebuild": True})
+    )
+
+    assert calls["precompute"] == 2
+    assert rebuilt.manifest_path.parent.name.startswith(f"{build_stem}-rebuild-")
+    assert not stale_rebuild.exists()
+    assert other_config_staging.is_dir()
+    assert _snapshot_tree(first.manifest_path.parent) == first_tree
+    assert _snapshot_tree(legacy_dir) == legacy_tree
+    assert sorted(
+        path.name for path in references_root.iterdir() if path.is_dir()
+    ) == sorted(
+        [
+            other_config_staging.name,
+            LEGACY_FRONTAL_DIR_NAME,
+            build_stem,
+            rebuilt.manifest_path.parent.name,
+        ]
+    )
+
+
 def _lock_is_held(lock_path: Path, real_open: Callable[..., int]) -> bool:
     probe = real_open(lock_path, os.O_RDONLY)
     try:

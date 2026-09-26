@@ -153,10 +153,14 @@ For each run, MerXen picks the reference in this order:
    `cell_type_mapper` writes inside its own outputs (for example
    `metadata.config` in the query-marker JSON) therefore names the staging
    path; `region_reference_manifest.json` names the final paths. If the build
-   fails, only that staging directory is removed. A task killed outright (for
-   example with `SIGKILL`) can leave a `.staging-*` directory behind. Such a
-   directory is never used and can be deleted by hand when no build is
-   running.
+   raises an error, only that staging directory is removed. A task that is
+   terminated mid-build leaves its `.staging-*` directory (about 2.4 GB for
+   the frontal WHB reference) behind, because MerXen installs no signal
+   handler: this happens on `SIGTERM` from a Nextflow cancel or a Slurm
+   timeout, and on `SIGKILL` from the OOM killer. Such a directory is never
+   used. The next build of the same configuration removes it while holding
+   that configuration's lock; staging directories of other configurations
+   are left alone.
 
 A configuration change therefore selects a different directory. It never
 invalidates, overwrites or deletes an existing build. Builds of one
@@ -165,7 +169,10 @@ file lock, so concurrent `MAPMYCELLS` tasks wait for one build and then reuse
 it. The lock file is opened read-write, which an exclusive `flock` needs on
 NFS; MerXen falls back to a read-only descriptor only when the lock file
 belongs to another cache user and is not writable, which works on local
-filesystems but not on NFS.
+filesystems but not on NFS. The lock, and therefore the staging clean-up,
+assumes that `flock` is coordinated across every host that shares the cache,
+as it is on a local disk used by one host and on NFS mounted without
+`local_lock=flock` or `local_lock=all`.
 
 `mapmycells_region_force_rebuild=true` always writes a new
 `<prefix>_<region_name>-<hash>-rebuild-<UTC timestamp>` directory, which later
