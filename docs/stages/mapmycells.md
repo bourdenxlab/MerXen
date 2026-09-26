@@ -136,9 +136,14 @@ For each run, MerXen picks the reference in this order:
 2. A legacy in-place reference, `references/<prefix>_<region_name>/`, written
    by MerXen before content-hashed builds existed. It is adopted **read-only**
    when its stats and query-marker files exist and its recorded `config`
-   matches the request. Keys that older versions did not record are compared
-   as the values those versions always used: `reference_atlas = "whb"`,
-   `query_species = "human"`, `drop_level = null`. The manifest is never
+   matches the request. `reference_atlas` and `query_species`, which older
+   versions did not record, are compared as the values those versions always
+   used: `reference_atlas = "whb"` and `query_species = "human"`. Older
+   versions did apply `drop_level` without recording it in the manifest, so
+   an unrecorded `drop_level` is read from `metadata.config.drop_level` in
+   the legacy query-marker JSON, which `cell_type_mapper` writes. If that
+   field is missing or unreadable, the legacy reference is not adopted and a
+   new build is made next to it. The manifest is never
    rewritten; the copy recorded in outputs has `cache_layout =
    "legacy_in_place"` and the resolved on-disk paths, because legacy
    manifests can hold stale absolute paths from before the cache was moved.

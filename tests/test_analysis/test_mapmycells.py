@@ -1322,15 +1322,33 @@ def _region_config(tmp_path: Path, **updates: object) -> MapMyCellsConfig:
     )
 
 
+_CTM_METADATA_DEFAULT: dict[str, object] = {"config": {"drop_level": None}}
+
+
 def _write_legacy_region_reference(
     reference_dir: Path,
     legacy_config: dict[str, object],
+    *,
+    query_marker_metadata: dict[str, object] | None = _CTM_METADATA_DEFAULT,
 ) -> dict[str, bytes]:
-    """Write a pre-M0b in-place region reference and return its file bytes."""
+    """Write a pre-M0b in-place region reference and return its file bytes.
+
+    ``query_marker_metadata`` mimics the ``metadata`` block cell_type_mapper
+    writes into query-marker JSON; ``None`` omits it.
+    """
+    query_markers: dict[str, object] = {"legacy": True}
+    if query_marker_metadata is not None:
+        query_markers["metadata"] = {
+            **query_marker_metadata,
+            "module": "cell_type_mapper/cli/query_markers.py",
+            "version": "1.5.5",
+        }
     files = {
         "precompute/precomputed_stats.h5": b"legacy stats",
         "reference_markers/reference_markers.h5": b"legacy reference markers",
-        "query_markers/query_markers.n10.json": b'{"legacy": true}\n',
+        "query_markers/query_markers.n10.json": (
+            json.dumps(query_markers) + "\n"
+        ).encode(),
         "region_cell_metadata.csv": b"cell_label\nc1\n",
         "region_reference_manifest.json": (
             json.dumps(
@@ -1458,7 +1476,7 @@ def test_prepare_region_reference_adopts_legacy_manifest_read_only(
         ({}, {"drop_level": "CCN202210140_SUBC"}),
         ({"reference_atlas": "wmb"}, {}),
     ],
-    ids=["recorded-key-differs", "missing-key-default-differs", "atlas-differs"],
+    ids=["recorded-key-differs", "unrecorded-drop-level-differs", "atlas-differs"],
 )
 def test_prepare_region_reference_mismatch_never_deletes(
     tmp_path: Path,
@@ -1499,6 +1517,58 @@ def test_prepare_region_reference_mismatch_never_deletes(
     assert rebuilt.manifest_path.parent not in {new_dir, legacy_dir, other_build}
     after_force = _snapshot_tree(references_root)
     assert {key: after_force[key] for key in after} == after
+
+
+@pytest.mark.parametrize(
+    ("query_marker_metadata", "requested_drop_level", "adopted"),
+    [
+        ({"config": {"drop_level": "CCN202210140_SUBC"}}, None, False),
+        ({"config": {"drop_level": "CCN202210140_SUBC"}}, "CCN202210140_SUBC", True),
+        ({"config": {"drop_level": None}}, "CCN202210140_SUBC", False),
+        ({"config": {"n_per_utility": 10}}, None, False),
+        (None, None, False),
+    ],
+    ids=[
+        "built-with-drop-level-requested-none",
+        "built-with-drop-level-requested-same",
+        "built-without-drop-level-requested-one",
+        "ctm-config-lacks-drop-level",
+        "no-ctm-metadata",
+    ],
+)
+def test_prepare_region_reference_reads_unrecorded_legacy_drop_level(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    query_marker_metadata: dict[str, object] | None,
+    requested_drop_level: str | None,
+    adopted: bool,
+) -> None:
+    """A legacy drop_level comes from ctm's query-marker metadata, not a default."""
+    calls = _install_fake_whb_region_builders(tmp_path, monkeypatch)
+    references_root = tmp_path / "cache" / "references"
+    legacy_dir = references_root / LEGACY_FRONTAL_DIR_NAME
+    _write_legacy_region_reference(
+        legacy_dir,
+        LEGACY_FRONTAL_CONFIG,
+        query_marker_metadata=query_marker_metadata,
+    )
+    legacy_tree = _snapshot_tree(legacy_dir)
+    cfg = _region_config(
+        tmp_path, region_min_cells_per_leaf=10, drop_level=requested_drop_level
+    )
+
+    artifacts = prepare_region_mapmycells_reference(cfg)
+
+    if adopted:
+        assert calls == {"precompute": 0, "reference": 0, "query": 0}
+        assert artifacts.manifest_path.parent == legacy_dir
+        assert artifacts.manifest["cache_layout"] == "legacy_in_place"
+    else:
+        assert calls == {"precompute": 1, "reference": 1, "query": 1}
+        assert artifacts.manifest_path.parent != legacy_dir
+        assert artifacts.manifest["cache_layout"] == "content_hashed"
+        assert artifacts.manifest["config"]["drop_level"] == requested_drop_level
+    assert _snapshot_tree(legacy_dir) == legacy_tree
 
 
 def test_prepare_region_reference_force_rebuild_keeps_legacy_reference(
