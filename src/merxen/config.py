@@ -345,6 +345,10 @@ class QCConfig(BaseModel):
     output_dir: Path
     table_key: str | None = None
     shape_key: str | None = None
+    # Segmentation-to-transcript registration check (merxen.qc.registration).
+    registration_check: bool = True
+    registration_reference_shape_key: str | None = None
+    registration_strict: bool = False
 
 
 class CorticalDepthTableConfig(BaseModel):
