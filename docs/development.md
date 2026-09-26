@@ -165,6 +165,19 @@ git push origin HEAD --tags
   lockfile change would leave the cached env on the old dependency versions.
   `tests/test_workflows/test_env_lock_sync.py` fails while the header is stale.
 
+  **A new header invalidates `-resume` under the `conda` profile.** Any change
+  to `envs/environment.yml`, the checksum included, gives the base env a new
+  `work/conda/env-*` path, and Nextflow includes each task's conda env in the
+  task hash. The first `-resume` under `-profile …,conda` after the change
+  therefore re-runs every task that uses the base env and everything
+  downstream of it: Cellpose, ProSeg, clustering, MapMyCells and the later
+  stages. The new env resolves the loose `pyproject.toml` ranges on the day it
+  is built, not the lock, so the re-run outputs can differ by more than the
+  intended dependency change. The checksum covers the lock's raw bytes, so a
+  regeneration that only rewrites `# via` comments has the same effect. Before
+  merging a lockfile change, snapshot the published outputs you need to keep
+  and plan a full rerun.
+
   When the dedicated registration stack changes, regenerate its separate lock:
 
   ```bash
