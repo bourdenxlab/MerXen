@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import os
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -213,6 +214,59 @@ def test_generator_reproduces_the_committed_tables(
     assert "WHB-taxonomy 20240330" in notice
     assert "/media/" not in notice and "/srv/" not in notice
     assert len(result.inputs) == 6
+
+
+def test_notice_depends_on_input_content_not_local_names(
+    generator: ModuleType, taxonomy: dict[str, Path], tmp_path: Path
+) -> None:
+    """A renamed local copy of an input gives the same NOTICE (ABC paths)."""
+    renamed = tmp_path / "SEA-AD-Multiregion-taxonomy__20260711__terms.csv"
+    renamed.write_bytes(taxonomy["seaad_term_csv"].read_bytes())
+    overrides = vocab.ASSET_DIR / "overrides.yaml"
+
+    original = generator.build_all(overrides_path=overrides, **taxonomy)
+    moved = generator.build_all(
+        overrides_path=overrides, **{**taxonomy, "seaad_term_csv": renamed}
+    )
+
+    assert moved.files["NOTICE"] == original.files["NOTICE"]
+    names = [item.name for item in original.inputs]
+    assert names == [
+        "WHB-taxonomy/20240330/cluster_annotation_term.csv",
+        "WHB-taxonomy/20240330/cluster_to_cluster_annotation_membership.csv",
+        "WHB-taxonomy/20240330/cluster.csv",
+        "SEA-AD-Multiregion-taxonomy/20260711/cluster_annotation_term.csv",
+        "WMB-taxonomy/20231215/cluster_annotation_term.csv",
+        "WMB-taxonomy/20231215/cluster_to_cluster_annotation_membership.csv",
+    ]
+    for name in names:
+        assert name in original.files["NOTICE"]
+
+
+# Real Allen taxonomy inputs for the slow check of the committed tables.
+REAL_TAXONOMY_ENV = {
+    "--whb-taxonomy-dir": "MERXEN_WHB_TAXONOMY_DIR",
+    "--seaad-term-csv": "MERXEN_SEAAD_TERM_CSV",
+    "--wmb-taxonomy-dir": "MERXEN_WMB_TAXONOMY_DIR",
+}
+
+
+@pytest.mark.slow
+def test_committed_tables_match_the_real_allen_taxonomies(
+    generator: ModuleType,
+) -> None:
+    """``--check`` against the real Allen CSVs named by the environment."""
+    paths = {flag: os.environ.get(name) for flag, name in REAL_TAXONOMY_ENV.items()}
+    if not all(paths.values()) or not all(
+        Path(str(path)).exists() for path in paths.values()
+    ):
+        pytest.skip(
+            "set " + ", ".join(REAL_TAXONOMY_ENV.values()) + " to the Allen "
+            "taxonomy inputs to check the committed tables against them"
+        )
+    argv = [part for flag, path in paths.items() for part in (flag, str(path))]
+
+    assert generator.main([*argv, "--check"]) == 0
 
 
 def test_committed_notice_names_every_generated_table() -> None:
