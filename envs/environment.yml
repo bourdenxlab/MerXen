@@ -1,3 +1,10 @@
+# requirements.lock sha256: d84e58252d081913f610eb3b58041a8d12c08a5cef75608ebc6677bcb8c1b919
+# Nextflow caches this env as work/conda/env-<hash of this file's text>. The
+# thin editable install below does not change when only the lockfile does, so
+# the checksum above ties the text to requirements/requirements.lock and a
+# lockfile change forces a rebuild. Refresh it after regenerating the lockfile:
+#   python scripts/update_env_lock_hash.py
+# (tests/test_workflows/test_env_lock_sync.py fails while it is stale).
 name: merxen
 channels:
   - conda-forge
@@ -7,4 +14,8 @@ dependencies:
   - pip:
       # Paths are relative to this file's directory: conda runs pip with its
       # working directory set to the environment file's location.
+      # pip cannot install requirements/requirements.lock (it rejects the
+      # lock's pinned abc_atlas_access commit against cell_type_mapper's
+      # unpinned git URL), so this env resolves from pyproject.toml; CI and
+      # containers/Dockerfile install the lock exactly with uv.
       - -e "../[dev]"
