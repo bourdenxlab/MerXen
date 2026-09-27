@@ -497,8 +497,11 @@ Delete by hand after review (OD-D4).
 
 The annotation MAP step (plan §3.3): MapMyCells per sample and required
 bundle, standalone on published clustered H5ADs or on a
-`CLUSTERING_SQUIDPY_PREPARE` directory. It never writes into the inputs'
-results tree.
+`CLUSTERING_SQUIDPY_PREPARE` directory. It never writes (`--out` or
+`--work-dir`) into the inputs' results tree: not below an input's directory,
+not below the results root of a published clustered H5AD or of any input
+under a `<root>/<pair>/<seg>/clustering_squidpy/` layout, and not below a
+`--results-root`.
 
 ```bash
 merxen annotate --species human \
@@ -521,7 +524,8 @@ merxen annotate --species human \
 | `--clustering-config PATH` | With `--prepared-dir`: the `clustering_squidpy_config.json` of the run (pair id, sample platforms and `min_counts`, which `--min-counts` may not contradict). |
 | `--min-counts N` | Table-cell threshold (the clustering `min_counts`; default: the clustering config's, else 10). |
 | `--n-processors N` | MapMyCells processes (default `$MERXEN_ANNOTATION_MAP_N_PROCESSORS` or 6). |
-| `--work-dir DIR` | Scratch for the query H5ADs and extended JSONs (default `<out>/.work`, removed). |
+| `--work-dir DIR` | Scratch for the query H5ADs, restricted lookups and extended JSONs (default `<out>/.work`, removed); refused inside a results tree, as `--out`. |
+| `--results-root DIR` | A results tree `--out` and `--work-dir` must stay out of (repeatable), on top of the inputs' own. |
 | `--keep-extended-json`, `--reuse/--no-reuse`, `--reuse-from DIR` | Keep the gzipped extended JSON; reuse identical runs of a `map_manifest.json` (default: `--out`). |
 | `--gene-id-fallback-csv PATH` | Local symbol → Ensembl table (M0e), as for `annotation-panel`. |
 | `--platforms`, `--no-provisional` | Map only these platforms; skip the provisional labels. |
@@ -538,7 +542,14 @@ aggregate probability, `avg_correlation`, runner-ups 1–5 with probabilities
 and correlations, `directly_assigned`), `<platform>/<sid>_ct_provisional.parquet`
 and `map_manifest.json` ([Reference-based annotation](stages/annotation.md#mapping-merxen-annotate)).
 A run is reused when the manifest in `--reuse-from` has the same query
-fingerprint, bundle `build_hash`, engine parameters and ctm version.
+fingerprint, bundle `build_hash`, engine parameters, ctm version, tidy
+schema version and (restricted) lookup, and, with `--keep-extended-json`,
+kept its extended JSON (which is copied). A manifest that cannot be read
+(the `-stub-run` one, another layout or schema version) disables reuse
+with a warning. Each use of a required bundle is a run: a `per_platform`
+pair maps each platform on its own panel plus the intersection (`_xpanel`),
+and two uses on the same gene set are mapped once and recorded under both
+run ids.
 
 ---
 

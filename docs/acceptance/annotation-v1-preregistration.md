@@ -2,14 +2,14 @@
 
 - **Effort:** robust cell-type annotation (`robust-celltype-annotation`), milestone M3 (plan §12 "M3", items 1–7 of the shadow programme; items 2–7 are in §11).
 - **Plan:** `docs/plans/robust-celltype-annotation-plan.md` rev3; the thresholds in §9 below are its §14, copied verbatim (plan file sha256 `14804ff24dcd46ab7d649775bb25aba1b3bac08d533ddd93d457a87f68895024`, last changed in `06a04a1`).
-- **Measured:** 2026-09-27, branch `feature/rca-m3-mmc-engine` (MAP engine `2f346b9`, `96f2834`; shadow metrics `b4a71fe`; baseline script `ed373e5`; items 2–7: LL (vii) `89266ff`, shadow metrics `0afc4d6`, scripts `a6b3839`).
+- **Measured:** 2026-09-27, branch `feature/rca-m3-mmc-engine` (MAP engine `2f346b9`, `96f2834`; shadow metrics `b4a71fe`; baseline script `ed373e5`; items 2–7: LL (vii) `89266ff`, shadow metrics `0afc4d6`, scripts `a6b3839`). **Re-measured after the M3 review** with `2a3f183`, `92d9cd9` and `29d1660`: one tile grid resampled jointly for both sections (H1 CIs), E2's SEA-AD probability definitions, a float32 tolerance on every threshold test, the H4 COP-rule option and both OD-B8 readings. The launcher log of every rerun records the git commit and the script's sha256 (`$A/shadow/<item>/PROGRESS.txt`). The pre-review outputs are in `$A/shadow/superseded_20260927_pre_review/`.
 - **Evidence root** (`$A`): `/srv/storage/MerXen/annotation_dev/evidence_20260926`. The item-1 baselines are in `$A/shadow/baselines/metrics/*.csv` (§10 lists the files); items 2–7 are in `$A/shadow/{e8,x1,heldout,flags,ll,glial_jsd}/` (§11), summarised in `$A/shadow/SHADOW_SUMMARY.txt`.
 
 ## 1. Rules
 
 1. **The thresholds are fixed by this document.** They are the plan's §14 values, copied verbatim in §9. No threshold is changed here.
 2. **Baselines may only tighten a threshold.** A measured baseline can justify a stricter threshold, decided in the M3 PR. Loosening a threshold needs the user's written approval in the gate PR. That includes redefining a metric so that it becomes easier to pass, or dropping a dataset, a class or a criterion. This applies to gate H (M8), gate M (M9) and gate P.
-3. **Held-out validation sets are reported separately and are not used for tuning:** the donors P7113 and P5011 (§4) and the second segmentation, reseg (§5; H17 is scored on P7513 and P1212 reseg; P7113 and P5011 reseg are reported for information). The development datasets are P7513 and P1212 on proseg_hybrid (§3). Held-out results never select a rule variant, threshold or floor. The pre-registered selection rules (MO10's variant at M6b, gate P's evaluation rules) are the only exceptions.
+3. **Held-out validation sets are reported separately and are not used for tuning:** the donors P7113 and P5011 (§4) and the second segmentation, reseg (§5; H17 is scored on P7513 and P1212 reseg; P7113 and P5011 reseg are reported for information). The development datasets are P7513 and P1212 on proseg_hybrid (§3). Held-out results never select a rule variant, threshold or floor. The pre-registered selection rules (MO10's variant at M6b, gate P's evaluation rules) are the only exceptions. **Nothing in M3 was tuned on the donors, but E2 was:** the raw thresholds, the packaged floors, the SEA-AD subclass thresholds and the donors' own H1 and H7 thresholds were derived with P7113 and P5011 data (§4, first table). H1 and H7 on the donors therefore test consistency with their own E2 measurement, not out-of-sample performance.
 4. **Metric definitions are the ones in §2.** RESOLVE (M4) and the acceptance scripts (M8) must compute the gate metrics the same way or document the difference in the gate PR. A difference that makes a criterion easier to pass counts as a loosening (rule 2).
 
 ## 2. What was measured, and how
@@ -20,7 +20,7 @@
 - The bundles were builder v2: WHB frontal set a `b70dc181` (panel `6e5fd5fb`, 297 genes, post-M0e), WHB frontal set c `f20d11b0` (panel `77bd80ed`, 265 genes, curated E5 family; proseg_hybrid only) and SEA-AD Multiregion `3973770c` (set a).
 - **Declared panel for reseg.** The published reseg MERSCOPE `var` of P1212 (299 features) and P5011 (268) is `min_cells`-filtered. A panel derived from it would get a new hash that no bundle has. Plan §3.2 requires the declared panel instead. Those two pairs were therefore re-run through `merxen annotation-panel --panel-file <PLAT>=<same section's proseg_hybrid clustered H5AD>`: that file's unfiltered 300-feature `var` is the declared panel. The re-run gave set a `6e5fd5fb`, and `merxen annotate --panel-dir` then mapped the genes present. P1212 reseg MERSCOPE lacks 1 of the 297 genes. P5011 reseg MERSCOPE lacks 32 of 297 (10.8%). Both were mapped with a restricted lookup (M3 behaviour; §7 item 4).
 
-**Shadow v1 rules** (`merxen.annotation.shadow.evaluate_human_rules`). RESOLVE is M4, so the confident statuses come from a shadow evaluation of plan §5.2 rules 1, 2 and 4 and the §5.4 gate. It uses the raw v1 thresholds (WHB broad / lineage 0.73, supercluster 0.69, SEA-AD broad 0.68) and the packaged set-a floors (`floors_human.csv`). There are three rules:
+**Shadow v1 rules** (`merxen.annotation.shadow.evaluate_human_rules`). RESOLVE is M4, so the confident statuses come from a shadow evaluation of plan §5.2 rules 1, 2 and 4 and the §5.4 gate. It uses the raw v1 thresholds (WHB broad / lineage 0.73, supercluster 0.69, SEA-AD broad 0.68) and the packaged set-a floors (`floors_human.csv`). Probabilities are stored as float32 (tidy parquet, `ct_*_raw`), so every threshold test allows 1e-6 below the threshold (`schema.meets_threshold`); without it a bootstrap probability of exactly 0.69 fails 0.69 (0.7–1.3% of table cells sit exactly at the supercluster threshold). There are three rules:
 - **Lineage** needs aggregated bp >= 0.73, a plausible node (an implausible node keeps its lineage when SEA-AD agrees at lineage) and the second vote.
 - **Broad** needs a confident lineage, aggregated bp >= 0.73, counts >= the class × platform broad floor, and the SEA-AD rule. Below 60 counts SEA-AD must agree at the 7-class level. From 60 counts SEA-AD must not confidently disagree. The COP rule applies: a COP call is broad OPC only with >= 120 counts and supercluster bp >= 0.69, or with a confident SEA-AD OPC call.
 - **Supercluster** needs a confident broad, gate level `full`, bp >= 0.69 and counts >= the supercluster floor.
@@ -31,19 +31,20 @@ The rules have no resolvability (M3b) and no flags. M4's exit requires RESOLVE's
 
 | Criterion | Operational definition (code) |
 |---|---|
-| H1 | Soft broad composition: per table cell, the bootstrap probability of the assigned WHB supercluster and of its 5 runner-ups, aggregated to the 7 broad classes through `whb_supercluster_vocab.csv`. Sinks and nodes outside the 7 classes, plus the residual 1 − Σ, are "unallocated" (`soft_matrix_from_provisional`). The composition is the sum over cells. The JSD is the base-2 Jensen-Shannon **distance** (as `scipy.spatial.distance.jensenshannon` and E1 `real_jsd.csv`) of the renormalised 7-class vectors, MERSCOPE vs Xenium. The 95% CI is a spatial block bootstrap: 500 µm square tiles, 200 replicates, each section's tiles resampled independently with replacement, seed 0, percentile interval (`tile_codes`, `tile_sums`, `block_bootstrap_jsd`). It is reported on the whole section and inside the shared tissue mask. Also reported: argmax (broad class of the assigned supercluster), confident-only (the v1 shadow confident broad label), the soft composition over cells with >= 30 counts, and set c. |
+| H1 | Soft broad composition: per table cell, the bootstrap probability of the assigned WHB supercluster and of its 5 runner-ups, aggregated to the 7 broad classes through `whb_supercluster_vocab.csv`. Sinks and nodes outside the 7 classes, plus the residual 1 − Σ, are "unallocated" (`soft_matrix_from_provisional`). The composition is the sum over cells. The JSD is the base-2 Jensen-Shannon **distance** (as `scipy.spatial.distance.jensenshannon` and E1 `real_jsd.csv`) of the renormalised 7-class vectors, MERSCOPE vs Xenium. The 95% CI is a spatial block bootstrap over **matched tile locations**: both sections are tiled on one grid of 500 µm squares in the shared Xenium frame (the MERSCOPE `*_aligned_nonrigid` coordinates; inside `shared_tissue_mask` for the mask variant), and each of 200 replicates draws the tile locations (non-empty in either section) with replacement and applies the same multinomial weights to both sections (seed 0, percentile interval; `shared_tile_codes`, `tile_sums`, `block_bootstrap_jsd(resampling="joint")`). Paired differences of two labellings reuse the same draw for both labellings (`paired_block_bootstrap_jsd_difference`). The interval therefore reflects which tissue is sampled, not anatomy mismatched between the adjacent sections. Resampling each section's tiles independently is reported as a sensitivity only (`ci_*_independent` in `jsd.csv`; it was the pre-review method and widens the P7513 interval from [0.116, 0.143] to [0.095, 0.166]). It is reported on the whole section and inside the shared tissue mask. Also reported: argmax (broad class of the assigned supercluster), confident-only (the v1 shadow confident broad label), the soft composition over cells with >= 30 counts, and set c. |
+| SEA-AD probabilities | E2's definitions (`exp/E2/build_tables.py`), on which the v1 SEA-AD thresholds were derived. **Broad** (`seaad_broad_calls(class_level=…)`; the 0.68 `seaad_broad` threshold): the label is the assigned subclass's broad class (vocab; "VLMC & Perivascular" split by the assigned supertype); neurons take the SEA-AD class-level bootstrap probability, every other class takes class bp × (subclass bp + same-class runner-up subclass bp), a split subclass also × its same-class supertype mass. **Subclass** (the 0.55 / 0.45 thresholds, split at `second_vote_below_counts` = 60): the subclass `aggregate_probability` (class bp × subclass bp). **Soft SEA-AD composition** (§11.6): class bp × the subclass-level soft mass. E1's definition (subclass mass alone) is kept for comparison only; it calls 6–19 points more table cells SEA-AD-confident (≥ 0.68; proseg_hybrid) and changes the v1 broad coverage by ≤ 0.04 points. |
 | H2 | Share of table cells whose assigned WHB supercluster is a sink (Miscellaneous, Splatter) or not region-plausible for frontal cortex (vocab), whatever its bp. This is `flag_implausible` with `implausible` status taking precedence over `low_confidence`. |
 | H3 | Share of table cells with >= 20 counts where WHB's 7-class label (broad class of the assigned supercluster) equals SEA-AD's (subclass → broad class through `seaad_mr_subclass_vocab.csv`, "VLMC & Perivascular" split by supertype). As in E1, two labels outside the 7 classes agree; the strict variant, where they disagree, is in `sample_metrics.csv` and differs by < 0.001 on every dataset. |
 | H5 | Confident COP supercluster share and confident broad OPC share of table cells (v1 shadow rules). The COP-derived OPC share is the share of confident broad OPC cells whose WHB call is COP. |
 | H7 | Confident broad coverage of table cells under the v1 shadow rules. Coverage of segmented objects is also reported. |
 | H8 | Gate on table cells: A = share with >= 30 counts; `broad_only` if A < 0.30; `failed` if confident broad coverage of table cells < 0.25; warning if coverage of segmented objects < 0.15 (`dataset_gate`). |
 | H10 | E1 marker referee (`exp/E1/09_marker_referee.py`; `marker_class_scores`, `marker_referee`). For each disputed cell, where both labels are among the 7 classes and they differ, the label whose canonical panel markers (E1's list) hold the larger fraction of the cell's counts wins. "New" is the v1 shadow confident broad label, so cells that are not confident have no new label. "Legacy" is the published `obs["broad_class"]`. |
-| H4 | Held-out-gene enrichment (§5.8; `scripts/acceptance/heldout_genes.py`). Markers: `heldout_markers_human.csv` in `rank` order (rank 1 = the plan's list, rank 2 = canonical alternates for markers the panel lacks), only if on the panel, never SST, GAD2 and P2RY12 not on MERSCOPE; 2–3 per broad class (Neurons pool the excitatory and inhibitory markers); a class with < 2 is skipped and counts as not passing. They are removed from the query and the lookup, and WHB alone is re-mapped with the production engine configuration. Per class and platform, over **all table cells** labelled with one of the 7 classes by the re-map's argmax: fold = held-out counts per count in the cells assigned the class ÷ the same in cells assigned another class (pooled); AUROC of the per-cell held-out fraction, assigned vs other. A class passes with fold ≥ 3 and AUROC ≥ 0.70. The WHB-only confident variant and the production labels are reported beside it and are not the metric. |
+| H4 | Held-out-gene enrichment (§5.8; `scripts/acceptance/heldout_genes.py`). Markers: `heldout_markers_human.csv` in `rank` order (rank 1 = the plan's list, rank 2 = canonical alternates for markers the panel lacks), only if on the panel, never SST, GAD2 and P2RY12 not on MERSCOPE; 2–3 per broad class (Neurons pool the excitatory and inhibitory markers); a class with < 2 is skipped and counts as not passing. They are removed from the query and the lookup, and WHB alone is re-mapped with the production engine configuration. Per class and platform, over all table cells of the re-map labelled with one of the 7 classes: fold = held-out counts per count in the cells assigned the class ÷ the same in cells assigned another class (pooled); AUROC of the per-cell held-out fraction, assigned vs other. A class passes with fold ≥ 3 and AUROC ≥ 0.70. **"The assigned class" is not defined by plan §5.8 and is an open choice for the user** (§11.3): (a) the re-map's argmax (the M3 working metric); (b) the argmax with the §5.2 COP rule applied (COP calls that fail it stay at lineage and leave the OPC class; with or without the SEA-AD rescue); (c) the WHB-only confident calls. The production labels are reported for comparison (circular). |
 | H16 | Realised rates per flag × class × platform over confident broad calls (`scripts/acceptance/shadow_flags.py`, prototype of §5.6). Contamination: counts on the assigned class's negative genes (bundle `negative_genes.parquet`) / total counts; null = beta-binomial MLE on the class's confident cells in its top depth quartile (≥ 30 cells, else no flag and the stratum is uninformative); flag at upper-tail p < 0.01 with ≥ 3 negative counts. Diffuse: distinct query genes > q95 of 200 multinomial draws from the class profile at the cell's query depth. Strata above 15% are marked uninformative (H16); §4.3's 30% for the diffuse flag is reported beside it. |
 | OD-B13 | On E2's 30k native cells per dataset (`$A/exp/E2/out/cells_native.csv.gz`, the only cells with likelihood-typer calls; all 30k shared with the table), the confident broad coverage is computed with the same production WHB and SEA-AD calls under five variants: (a) v1 without the below-60 rule; (b) v1; (c) v1 with the likelihood typer instead of SEA-AD as the below-60 vote; (d) E2's LL rule alone (`exp/E2/final_coverage.py`: LL must agree below 60 counts, neurons merged, fibroblasts pooled with vascular cells; no SEA-AD role); (e) no second method. The below-60 SEA-AD cost is (a) − (b). The trigger (> 0.08 on any dataset moves LL before M8) is scored on (c) − (b) and on (d) − (b). |
 | M3 exit | Production vs the E1 (iii) pilot (`$A/research/pilot/{whb_region,seaad_mr}`, P7513 and P1212 30k subsets). The comparison covers the WHB supercluster assignment on cells with production bp >= 0.8 (target >= 0.98) and the SEA-AD subclass assignment on all shared cells (target >= 0.945 − 0.02 = 0.925). P7113 and P5011 are compared with E2's runs of the pilot configuration (`$A/exp/E2/mmc/{WHBF,SEAAD}__<sid>_sub30k.json`), for information. |
 
-**Code.** Metrics: `src/merxen/annotation/shadow.py` (tests: `tests/test_annotation/test_shadow.py`). Driver: `scripts/acceptance/shadow_baselines.py --runs-root $A/shadow/baselines/runs --results-root /srv/storage/MerXen/results --evidence-root $A --out $A/shadow/baselines/metrics` (75 s, 4 GB).
+**Code.** Metrics: `src/merxen/annotation/shadow.py` (tests: `tests/test_annotation/test_shadow.py`). Driver: `scripts/acceptance/shadow_baselines.py --runs-root $A/shadow/baselines/runs --results-root /srv/storage/MerXen/results --evidence-root $A --out $A/shadow/baselines/metrics` (86 s, 3.5 GB; the shadow scripts take the gene-ID fallback tables from `--gene-id-fallback-csv` or `$MERXEN_GENE_ID_FALLBACK_CSV`).
 
 ## 3. Development baselines: P7513 and P1212, proseg_hybrid
 
@@ -51,27 +52,27 @@ These are the rows that the §9 human flip rule scores for H1–H3, H5, H7–H10
 
 | Pair | H1 threshold | Soft, whole section [95% CI] | Soft, shared mask [95% CI] | Argmax, whole | Confident, whole | Soft, cells >= 30 counts | Set c soft / argmax | Unallocated soft mass M / X |
 |---|---|---|---|---|---|---|---|---|
-| P7513 | <= 0.17 | 0.129 [0.095, 0.166] | 0.128 [0.093, 0.174] | 0.130 [0.097, 0.166] | 0.145 [0.100, 0.189] | 0.211 | 0.121 / 0.121 | 0.017 / 0.017 |
-| P1212 | <= 0.17 | 0.133 [0.122, 0.154] | 0.154 [0.136, 0.183] | 0.149 [0.136, 0.174] | 0.206 [0.187, 0.232] | 0.183 | 0.109 / 0.117 | 0.019 / 0.020 |
+| P7513 | <= 0.17 | 0.129 [0.116, 0.143] | 0.128 [0.121, 0.134] | 0.130 [0.118, 0.143] | 0.145 [0.130, 0.163] | 0.211 | 0.121 / 0.121 | 0.017 / 0.017 |
+| P1212 | <= 0.17 | 0.133 [0.126, 0.142] | 0.154 [0.148, 0.160] | 0.149 [0.138, 0.161] | 0.206 [0.196, 0.220] | 0.183 | 0.109 / 0.117 | 0.019 / 0.020 |
 
 | Sample | Table cells | Median counts | A (share >= 30 counts) | Gate level | Warning | Confident broad, table cells [H7 threshold] | Confident broad, segmented objects | Lineage | Supercluster | Implausible calls (H2 <= 1%) | WHB-SEA 7-class, >= 20 counts [H3 threshold] |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| P7513_MERSCOPE | 164,370 | 71 | 0.759 | full | no | 0.704 [>= 0.62] | 0.546 | 0.744 | 0.617 | 0.60% | 0.926 [>= 0.90] |
-| P7513_XENIUM | 132,489 | 43 | 0.641 | full | no | 0.597 [>= 0.44] | 0.471 | 0.639 | 0.517 | 0.35% | 0.917 [>= 0.90] |
-| P1212_MERSCOPE | 102,886 | 17 | 0.234 | broad_only | no | 0.438 [>= 0.34] | 0.152 | 0.597 | 0.000 | 0.30% | 0.825 [>= 0.80] |
-| P1212_XENIUM | 157,676 | 25 | 0.426 | full | no | 0.511 [>= 0.29] | 0.332 | 0.587 | 0.446 | 0.36% | 0.908 [>= 0.80] |
+| P7513_MERSCOPE | 164,370 | 71 | 0.759 | full | no | 0.704 [>= 0.62] | 0.546 | 0.745 | 0.620 | 0.60% | 0.926 [>= 0.90] |
+| P7513_XENIUM | 132,489 | 43 | 0.641 | full | no | 0.597 [>= 0.44] | 0.471 | 0.640 | 0.519 | 0.35% | 0.917 [>= 0.90] |
+| P1212_MERSCOPE | 102,886 | 17 | 0.234 | broad_only | no | 0.438 [>= 0.34] | 0.152 | 0.598 | 0.000 | 0.30% | 0.825 [>= 0.80] |
+| P1212_XENIUM | 157,676 | 25 | 0.426 | full | no | 0.510 [>= 0.29] | 0.332 | 0.589 | 0.446 | 0.36% | 0.908 [>= 0.80] |
 
 | Sample | COP argmax calls | Confident COP supercluster (H5 <= 2%) | Confident broad OPC (H5 <= 10%) | COP-derived share of confident OPC | COP suppressed (`flag_cop_suppressed`) | New vs legacy referee: disputes (share); new / legacy / tie (H10 >= 0.70) | WHB vs SEA-AD referee: disputes (share); WHB / SEA-AD / tie |
 |---|---|---|---|---|---|---|---|
-| P7513_MERSCOPE | 4.14% | 0.27% | 2.36% | 0.628 | 0.80% | 51,022 (0.310); 0.988 / 0.006 / 0.007 | 17,683 (0.108); 0.395 / 0.339 / 0.267 |
-| P7513_XENIUM | 2.80% | 0.11% | 1.56% | 0.635 | 0.47% | 20,680 (0.156); 0.980 / 0.007 / 0.013 | 13,667 (0.103); 0.466 / 0.370 / 0.164 |
-| P1212_MERSCOPE | 8.90% | 0.00% | 1.48% | 0.829 | 3.39% | 43,545 (0.423); 0.961 / 0.006 / 0.033 | 22,384 (0.218); 0.298 / 0.314 / 0.388 |
-| P1212_XENIUM | 4.18% | 0.02% | 1.21% | 0.710 | 0.98% | 24,674 (0.156); 0.977 / 0.008 / 0.015 | 19,822 (0.126); 0.369 / 0.365 / 0.266 |
+| P7513_MERSCOPE | 4.14% | 0.28% | 2.32% | 0.620 | 0.86% | 50,969 (0.310); 0.989 / 0.005 / 0.006 | 17,683 (0.108); 0.395 / 0.339 / 0.267 |
+| P7513_XENIUM | 2.80% | 0.12% | 1.51% | 0.623 | 0.54% | 20,677 (0.156); 0.980 / 0.007 / 0.012 | 13,667 (0.103); 0.466 / 0.370 / 0.164 |
+| P1212_MERSCOPE | 8.90% | 0.00% | 1.43% | 0.823 | 3.50% | 43,548 (0.423); 0.961 / 0.006 / 0.032 | 22,384 (0.218); 0.298 / 0.314 / 0.388 |
+| P1212_XENIUM | 4.18% | 0.02% | 1.14% | 0.691 | 1.08% | 24,576 (0.156); 0.978 / 0.008 / 0.014 | 19,822 (0.126); 0.369 / 0.365 / 0.266 |
 
-- **H1.** The soft JSD is 0.129 (P7513) and 0.133 (P1212), against a threshold of 0.17. The plan's basis (E2 `cells_native`) was 0.139 / 0.129. The argmax JSD is 0.130 / 0.149, against E1 `real_jsd.csv` (iii) 0.132 / 0.143. The P7513 interval is wide (0.095–0.166) because the broad composition varies between 500 µm tiles, but its upper bound is below the threshold. Confident-only compositions are further apart (0.145 / 0.206; the draft floors gave 0.236 / 0.285), which is why H1 is soft (D-C5).
+- **H1.** The soft JSD is 0.129 (P7513) and 0.133 (P1212), against a threshold of 0.17. The plan's basis (E2 `cells_native`) was 0.139 / 0.129. The argmax JSD is 0.130 / 0.149, against E1 `real_jsd.csv` (iii) 0.132 / 0.143. With matched tiles the intervals are 0.116–0.143 and 0.126–0.142. The pre-review intervals (0.095–0.166 and 0.122–0.154) resampled each section's tiles independently, which mismatches anatomy between the adjacent sections (extra white matter on one side, extra grey matter on the other); their width was that artefact, not tile heterogeneity (§2). Confident-only compositions are further apart (0.145 / 0.206; the draft floors gave 0.236 / 0.285), which is why H1 is soft (D-C5).
 - **H2.** The implausible share is 0.30–0.60%, within the 1% threshold (E1 (iii): 0.3–0.6%). The calls go to Amygdala excitatory (region-implausible), Miscellaneous and Splatter (`implausible_top_nodes`).
 - **H3.** Agreement is 0.926 / 0.917 / 0.825 / 0.908 (E1: 0.932 / 0.917 / 0.826 / 0.904).
-- **H5.** Confident COP supercluster calls are at most 0.27% and confident broad OPC calls at most 2.4%. COP-derived calls make up 63–83% of confident OPC (plan: 62–86%).
+- **H5.** Confident COP supercluster calls are at most 0.28% and confident broad OPC calls at most 2.3%. COP-derived calls make up 62–82% of confident OPC (plan: 62–86%).
 - **H7.** Coverage clears its threshold by 0.08 to 0.22.
 - **H8.** P1212_MERSCOPE is `broad_only` (A = 0.234). Its coverage of segmented objects, 0.152, is only 0.002 above the warning threshold (§7 item 3). Every other development sample is `full`.
 - **H10.** Markers side with the new label in 96–99% of new-vs-legacy disputes. In WHB-vs-SEA-AD disputes the referee is close to a tie (E1: "roughly a tie").
@@ -81,10 +82,10 @@ Second vote on E2's 30k native cells (coverage of those cells; `second_vote_cost
 
 | Sample | Shared cells (share < 60 counts) | No second method | v1 without the below-60 rule | v1 (SEA-AD below 60) | v1 with LL below 60 | E2 LL rule alone | Below-60 SEA-AD cost | Below-60 LL cost | LL minus SEA-AD (trigger if > +0.08) |
 |---|---|---|---|---|---|---|---|---|---|
-| P7513_MERSCOPE | 30,000 (0.44) | 0.698 | 0.710 | 0.704 | 0.690 | 0.678 | 0.006 | 0.020 | -0.014 |
+| P7513_MERSCOPE | 30,000 (0.44) | 0.698 | 0.710 | 0.704 | 0.690 | 0.679 | 0.006 | 0.020 | -0.014 |
 | P7513_XENIUM | 30,000 (0.61) | 0.597 | 0.606 | 0.603 | 0.551 | 0.543 | 0.003 | 0.054 | -0.052 |
 | P1212_MERSCOPE | 30,000 (0.92) | 0.436 | 0.447 | 0.438 | 0.394 | 0.383 | 0.009 | 0.053 | -0.044 |
-| P1212_XENIUM | 30,000 (0.83) | 0.500 | 0.509 | 0.506 | 0.451 | 0.443 | 0.003 | 0.058 | -0.055 |
+| P1212_XENIUM | 30,000 (0.83) | 0.500 | 0.508 | 0.505 | 0.451 | 0.443 | 0.003 | 0.058 | -0.055 |
 
 M3 exit check against the E1 (iii) pilot (`exit_checks.csv`):
 
@@ -99,40 +100,50 @@ Both exit criteria hold on all four samples: the WHB supercluster agreement is 1
 
 ## 4. Held-out donors: P7113 and P5011, proseg_hybrid (reported separately)
 
-The flip rule scores H1–H3, H7, H8 and H12 on these datasets. E2 used thinned high-count cells of P7113 (both platforms) and P5011 Xenium in its calibration experiments (`exp/E2/common.py` `CALIB`), which is the evidence behind the v1 raw thresholds. Nothing in M3 was tuned on them.
+The flip rule scores H1–H3, H7, H8 and H12 on these datasets. Nothing in M3 was tuned on them, but E2, the evidence behind v1, used their data for these parameters and thresholds:
+
+| Parameter or threshold | Derived with P7113 / P5011 data | Source |
+|---|---|---|
+| Raw thresholds (WHB broad / lineage 0.73, supercluster 0.69, SEA-AD broad 0.68) | Thinned high-count cells of P7113 M, P7113 X and P5011 X (`CALIB`, pooled with P7513 M / X and P1212 X) | `exp/E2/thresholds2.py` (`R2_pool = calib_real(T.ds.isin(CALIB))`), `exp/E2/common.py` |
+| SEA-AD subclass thresholds (0.55 below 60 counts, 0.45 from 60) | The same `CALIB` pool | `exp/E2/thresholds2.py` R2 pooled |
+| Packaged floors (`floors_human.csv`, broad and supercluster per class × platform) | The same `CALIB` datasets | `exp/E2/floors.py` (`T.ds.isin(CALIB)`) |
+| H1 thresholds P7113 ≤ 0.17, P5011 ≤ 0.31 | Each donor's own E2 soft JSD (0.136 / 0.279) + 0.03 | Plan §14 H1 basis; E2 `cells_native` |
+| H7 thresholds P7113 M ≥ 0.67, X ≥ 0.39; P5011 M ≥ 0.30, X ≥ 0.40 | Each dataset's own E2 LL-rule coverage − 0.10 | Plan §14 H7 basis; `exp/E2/out/final_coverage_and_gate.csv` |
+
+So H1 and H7 on P7113 and P5011 test whether production reproduces the donors' own E2 measurement, not out-of-sample performance, and every rule on them runs with thresholds and floors partly fitted to their cells. What remains genuinely held out: the reseg segmentation (H17, §5; never used by E2) and, on the donors, H2, H3, H8 and H12, whose thresholds are generic (H2 1%, H3 0.80, H8 mechanical, H12 label-independent anatomy) rather than derived from the donors' values.
 
 | Pair | H1 threshold | Soft, whole section [95% CI] | Soft, shared mask [95% CI] | Argmax, whole | Confident, whole | Soft, cells >= 30 counts | Set c soft / argmax | Unallocated soft mass M / X |
 |---|---|---|---|---|---|---|---|---|
-| P7113 | <= 0.17 | 0.126 [0.092, 0.171] | 0.107 [0.075, 0.148] | 0.110 [0.074, 0.158] | 0.156 [0.111, 0.200] | 0.326 | 0.110 / 0.096 | 0.016 / 0.017 |
-| P5011 | <= 0.31 | 0.227 [0.210, 0.243] | 0.235 [0.216, 0.254] | 0.253 [0.234, 0.272] | 0.324 [0.301, 0.343] | 0.243 | 0.161 / 0.183 | 0.038 / 0.030 |
+| P7113 | <= 0.17 | 0.126 [0.112, 0.143] | 0.107 [0.099, 0.117] | 0.110 [0.096, 0.126] | 0.156 [0.142, 0.167] | 0.326 | 0.110 / 0.096 | 0.016 / 0.017 |
+| P5011 | <= 0.31 | 0.227 [0.212, 0.242] | 0.235 [0.218, 0.250] | 0.253 [0.237, 0.269] | 0.324 [0.307, 0.340] | 0.243 | 0.161 / 0.183 | 0.038 / 0.030 |
 
 | Sample | Table cells | Median counts | A (share >= 30 counts) | Gate level | Warning | Confident broad, table cells [H7 threshold] | Confident broad, segmented objects | Lineage | Supercluster | Implausible calls (H2 <= 1%) | WHB-SEA 7-class, >= 20 counts [H3 threshold] |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| P7113_MERSCOPE | 96,168 | 46 | 0.667 | full | no | 0.756 [>= 0.67] | 0.371 | 0.794 | 0.677 | 0.77% | 0.948 [>= 0.80] |
-| P7113_XENIUM | 163,381 | 32 | 0.541 | full | no | 0.648 [>= 0.39] | 0.496 | 0.707 | 0.563 | 0.59% | 0.929 [>= 0.80] |
-| P5011_MERSCOPE | 58,565 | 16 | 0.129 | broad_only | yes | 0.460 [>= 0.30] | 0.106 | 0.556 | 0.000 | 1.02% | 0.828 [>= 0.80] |
-| P5011_XENIUM | 114,294 | 28 | 0.472 | full | no | 0.557 [>= 0.40] | 0.318 | 0.632 | 0.369 | 0.91% | 0.921 [>= 0.80] |
+| P7113_MERSCOPE | 96,168 | 46 | 0.667 | full | no | 0.756 [>= 0.67] | 0.371 | 0.795 | 0.678 | 0.77% | 0.948 [>= 0.80] |
+| P7113_XENIUM | 163,381 | 32 | 0.541 | full | no | 0.648 [>= 0.39] | 0.496 | 0.708 | 0.564 | 0.59% | 0.929 [>= 0.80] |
+| P5011_MERSCOPE | 58,565 | 16 | 0.129 | broad_only | yes | 0.459 [>= 0.30] | 0.105 | 0.558 | 0.000 | 1.02% | 0.828 [>= 0.80] |
+| P5011_XENIUM | 114,294 | 28 | 0.472 | full | no | 0.556 [>= 0.40] | 0.318 | 0.634 | 0.373 | 0.91% | 0.921 [>= 0.80] |
 
 | Sample | COP argmax calls | Confident COP supercluster (H5 <= 2%) | Confident broad OPC (H5 <= 10%) | COP-derived share of confident OPC | COP suppressed (`flag_cop_suppressed`) | New vs legacy referee: disputes (share); new / legacy / tie (H10 >= 0.70) | WHB vs SEA-AD referee: disputes (share); WHB / SEA-AD / tie |
 |---|---|---|---|---|---|---|---|
-| P7113_MERSCOPE | 3.28% | 0.12% | 2.25% | 0.681 | 0.44% | 42,113 (0.438); 0.991 / 0.004 / 0.005 | 8,085 (0.084); 0.327 / 0.345 / 0.328 |
-| P7113_XENIUM | 3.51% | 0.10% | 1.97% | 0.648 | 0.64% | 13,522 (0.083); 0.896 / 0.044 / 0.059 | 14,908 (0.091); 0.410 / 0.376 / 0.214 |
-| P5011_MERSCOPE | 8.75% | 0.00% | 3.02% | 0.730 | 1.57% | 11,618 (0.198); 0.938 / 0.016 / 0.045 | 13,004 (0.222); 0.315 / 0.324 / 0.361 |
-| P5011_XENIUM | 3.73% | 0.03% | 2.15% | 0.638 | 0.46% | 10,352 (0.091); 0.925 / 0.038 / 0.036 | 12,509 (0.109); 0.406 / 0.360 / 0.234 |
+| P7113_MERSCOPE | 3.28% | 0.13% | 2.24% | 0.679 | 0.46% | 42,102 (0.438); 0.991 / 0.004 / 0.005 | 8,085 (0.084); 0.327 / 0.345 / 0.328 |
+| P7113_XENIUM | 3.51% | 0.10% | 1.91% | 0.638 | 0.71% | 13,448 (0.082); 0.897 / 0.044 / 0.059 | 14,908 (0.091); 0.410 / 0.376 / 0.214 |
+| P5011_MERSCOPE | 8.75% | 0.00% | 2.92% | 0.722 | 1.70% | 11,565 (0.197); 0.940 / 0.016 / 0.044 | 13,004 (0.222); 0.315 / 0.324 / 0.361 |
+| P5011_XENIUM | 3.73% | 0.03% | 2.06% | 0.620 | 0.58% | 10,249 (0.090); 0.926 / 0.038 / 0.035 | 12,509 (0.109); 0.406 / 0.360 / 0.234 |
 
-- **H1.** P7113 is 0.126 (CI 0.092–0.171; threshold 0.17) and P5011 is 0.227 (0.210–0.243; threshold 0.31). The plan's basis was 0.136 / 0.279.
+- **H1.** P7113 is 0.126 (CI 0.112–0.143; threshold 0.17) and P5011 is 0.227 (0.212–0.242; threshold 0.31). The plan's basis was 0.136 / 0.279 (the donors' own E2 values, table above). The pre-review independent-resampling upper bound for P7113 (0.171) crossed 0.17 purely as an artefact of mismatched anatomy.
 - **H2.** P7113 is at 0.77% / 0.59%. **P5011_MERSCOPE is at 1.02%, above the 1% threshold** (§7 item 1); P5011_XENIUM is at 0.91%.
 - **H3.** Agreement is 0.948 / 0.929 / 0.828 / 0.921, all at or above 0.80.
 - **H7.** Every sample clears its threshold, by 0.09 to 0.26.
-- **H8.** P5011_MERSCOPE is `broad_only` (A = 0.129) with the warning flag (coverage of segmented objects 0.106), as §5.4 expects. P7113 and P5011_XENIUM are `full`.
+- **H8.** P5011_MERSCOPE is `broad_only` (A = 0.129) with the warning flag (coverage of segmented objects 0.105), as §5.4 expects. P7113 and P5011_XENIUM are `full`.
 - **OD-B13.** The trigger is not met.
 
 | Sample | Shared cells (share < 60 counts) | No second method | v1 without the below-60 rule | v1 (SEA-AD below 60) | v1 with LL below 60 | E2 LL rule alone | Below-60 SEA-AD cost | Below-60 LL cost | LL minus SEA-AD (trigger if > +0.08) |
 |---|---|---|---|---|---|---|---|---|---|
-| P7113_MERSCOPE | 30,000 (0.61) | 0.747 | 0.761 | 0.757 | 0.741 | 0.727 | 0.005 | 0.020 | -0.015 |
-| P7113_XENIUM | 30,000 (0.71) | 0.637 | 0.648 | 0.646 | 0.572 | 0.561 | 0.002 | 0.076 | -0.074 |
-| P5011_MERSCOPE | 30,000 (0.99) | 0.442 | 0.464 | 0.454 | 0.427 | 0.405 | 0.010 | 0.037 | -0.027 |
-| P5011_XENIUM | 30,000 (0.77) | 0.543 | 0.556 | 0.552 | 0.535 | 0.522 | 0.004 | 0.021 | -0.016 |
+| P7113_MERSCOPE | 30,000 (0.61) | 0.747 | 0.762 | 0.757 | 0.742 | 0.727 | 0.005 | 0.020 | -0.015 |
+| P7113_XENIUM | 30,000 (0.71) | 0.637 | 0.648 | 0.646 | 0.572 | 0.561 | 0.002 | 0.076 | -0.073 |
+| P5011_MERSCOPE | 30,000 (0.99) | 0.442 | 0.464 | 0.454 | 0.427 | 0.406 | 0.010 | 0.037 | -0.027 |
+| P5011_XENIUM | 30,000 (0.77) | 0.543 | 0.556 | 0.551 | 0.535 | 0.523 | 0.004 | 0.021 | -0.016 |
 
 The same MAP compared with E2's runs of the pilot configuration (for information; the formal exit check is §3):
 
@@ -149,32 +160,32 @@ H17 is scored on P7513 and P1212 reseg: the H1 thresholds + 0.02, H2 and H9. The
 
 | Pair | H1 threshold | Soft, whole section [95% CI] | Soft, shared mask [95% CI] | Argmax, whole | Confident, whole | Soft, cells >= 30 counts | Set c soft / argmax | Unallocated soft mass M / X |
 |---|---|---|---|---|---|---|---|---|
-| P7513 | <= 0.19 | 0.127 [0.088, 0.171] | 0.125 [0.088, 0.173] | 0.129 [0.091, 0.173] | 0.127 [0.092, 0.171] | 0.259 | – | 0.008 / 0.009 |
-| P1212 | <= 0.19 | 0.125 [0.105, 0.155] | 0.163 [0.146, 0.188] | 0.140 [0.109, 0.180] | 0.199 [0.179, 0.225] | 0.312 | – | 0.010 / 0.012 |
-| P7113 | <= 0.19 | 0.177 [0.136, 0.217] | 0.160 [0.125, 0.204] | 0.177 [0.134, 0.218] | 0.188 [0.150, 0.233] | 0.444 | – | 0.007 / 0.011 |
-| P5011 | <= 0.33 | 0.320 [0.301, 0.340] | 0.323 [0.303, 0.353] | 0.337 [0.318, 0.357] | 0.342 [0.318, 0.366] | 0.294 | – | 0.033 / 0.017 |
+| P7513 | <= 0.19 | 0.127 [0.114, 0.142] | 0.125 [0.118, 0.132] | 0.129 [0.115, 0.143] | 0.128 [0.116, 0.143] | 0.259 | – | 0.008 / 0.009 |
+| P1212 | <= 0.19 | 0.125 [0.110, 0.146] | 0.163 [0.152, 0.179] | 0.140 [0.113, 0.173] | 0.199 [0.182, 0.223] | 0.312 | – | 0.010 / 0.012 |
+| P7113 | <= 0.19 | 0.177 [0.163, 0.191] | 0.160 [0.151, 0.170] | 0.177 [0.163, 0.192] | 0.188 [0.175, 0.203] | 0.444 | – | 0.007 / 0.011 |
+| P5011 | <= 0.33 | 0.320 [0.303, 0.342] | 0.323 [0.301, 0.345] | 0.337 [0.319, 0.360] | 0.342 [0.324, 0.363] | 0.294 | – | 0.033 / 0.017 |
 
 | Sample | Table cells | Median counts | A (share >= 30 counts) | Gate level | Warning | Confident broad, table cells [H7 threshold] | Confident broad, segmented objects | Lineage | Supercluster | Implausible calls (H2 <= 1%) | WHB-SEA 7-class, >= 20 counts [H3 threshold] |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| P7513_MERSCOPE | 137,129 | 71 | 0.784 | full | no | 0.887 | 0.574 | 0.905 | 0.770 | 0.71% | 0.976 |
-| P7513_XENIUM | 97,363 | 41 | 0.626 | full | no | 0.836 | 0.485 | 0.874 | 0.703 | 0.45% | 0.973 |
+| P7513_MERSCOPE | 137,129 | 71 | 0.784 | full | no | 0.887 | 0.574 | 0.905 | 0.773 | 0.71% | 0.976 |
+| P7513_XENIUM | 97,363 | 41 | 0.626 | full | no | 0.836 | 0.485 | 0.874 | 0.705 | 0.45% | 0.973 |
 | P1212_MERSCOPE | 35,894 | 17 | 0.256 | broad_only | yes | 0.718 | 0.087 | 0.763 | 0.000 | 1.04% | 0.874 |
-| P1212_XENIUM | 85,349 | 23 | 0.376 | full | no | 0.779 | 0.274 | 0.857 | 0.643 | 0.77% | 0.962 |
-| P7113_MERSCOPE | 80,827 | 39 | 0.618 | full | no | 0.883 | 0.364 | 0.902 | 0.793 | 1.13% | 0.980 |
-| P7113_XENIUM | 117,078 | 30 | 0.512 | full | no | 0.839 | 0.460 | 0.889 | 0.708 | 0.88% | 0.971 |
-| P5011_MERSCOPE | 11,845 | 13 | 0.039 | broad_only | yes | 0.850 | 0.039 | 0.908 | 0.000 | 2.44% | 0.953 |
-| P5011_XENIUM | 63,037 | 25 | 0.423 | full | no | 0.792 | 0.250 | 0.883 | 0.499 | 1.35% | 0.981 |
+| P1212_XENIUM | 85,349 | 23 | 0.376 | full | no | 0.778 | 0.274 | 0.857 | 0.645 | 0.77% | 0.962 |
+| P7113_MERSCOPE | 80,827 | 39 | 0.618 | full | no | 0.883 | 0.364 | 0.902 | 0.794 | 1.13% | 0.980 |
+| P7113_XENIUM | 117,078 | 30 | 0.512 | full | no | 0.839 | 0.460 | 0.889 | 0.710 | 0.88% | 0.971 |
+| P5011_MERSCOPE | 11,845 | 13 | 0.039 | broad_only | yes | 0.850 | 0.039 | 0.909 | 0.000 | 2.44% | 0.953 |
+| P5011_XENIUM | 63,037 | 25 | 0.423 | full | no | 0.792 | 0.249 | 0.884 | 0.504 | 1.35% | 0.981 |
 
 | Sample | COP argmax calls | Confident COP supercluster (H5 <= 2%) | Confident broad OPC (H5 <= 10%) | COP-derived share of confident OPC | COP suppressed (`flag_cop_suppressed`) | New vs legacy referee: disputes (share); new / legacy / tie (H10 >= 0.70) | WHB vs SEA-AD referee: disputes (share); WHB / SEA-AD / tie |
 |---|---|---|---|---|---|---|---|
-| P7513_MERSCOPE | 1.74% | 0.21% | 2.69% | 0.513 | 0.17% | 51,239 (0.374); 0.993 / 0.003 / 0.004 | 4,043 (0.029); 0.312 / 0.450 / 0.238 |
-| P7513_XENIUM | 1.79% | 0.11% | 1.84% | 0.662 | 0.21% | 22,079 (0.227); 0.985 / 0.007 / 0.008 | 3,297 (0.034); 0.314 / 0.420 / 0.266 |
-| P1212_MERSCOPE | 2.35% | 0.00% | 2.69% | 0.713 | 0.24% | 13,581 (0.378); 0.973 / 0.002 / 0.025 | 3,714 (0.103); 0.110 / 0.338 / 0.552 |
-| P1212_XENIUM | 1.47% | 0.01% | 1.24% | 0.535 | 0.32% | 8,659 (0.101); 0.921 / 0.022 / 0.058 | 3,478 (0.041); 0.268 / 0.434 / 0.298 |
-| P7113_MERSCOPE | 1.55% | 0.07% | 2.59% | 0.523 | 0.05% | 41,795 (0.517); 0.996 / 0.001 / 0.003 | 2,825 (0.035); 0.138 / 0.482 / 0.379 |
-| P7113_XENIUM | 1.77% | 0.07% | 2.64% | 0.538 | 0.08% | 11,731 (0.100); 0.917 / 0.021 / 0.062 | 3,595 (0.031); 0.328 / 0.393 / 0.279 |
-| P5011_MERSCOPE | 6.48% | 0.00% | 9.09% | 0.644 | 0.17% | 3,454 (0.292); 0.992 / 0.000 / 0.008 | 367 (0.031); 0.117 / 0.428 / 0.455 |
-| P5011_XENIUM | 2.46% | 0.01% | 3.93% | 0.575 | 0.04% | 7,313 (0.116); 0.982 / 0.005 / 0.013 | 1,749 (0.028); 0.268 / 0.535 / 0.197 |
+| P7513_MERSCOPE | 1.74% | 0.23% | 2.68% | 0.510 | 0.18% | 51,224 (0.374); 0.993 / 0.003 / 0.004 | 4,043 (0.029); 0.312 / 0.450 / 0.238 |
+| P7513_XENIUM | 1.79% | 0.11% | 1.81% | 0.657 | 0.24% | 22,078 (0.227); 0.985 / 0.007 / 0.008 | 3,297 (0.034); 0.314 / 0.420 / 0.266 |
+| P1212_MERSCOPE | 2.35% | 0.00% | 2.65% | 0.709 | 0.28% | 13,568 (0.378); 0.973 / 0.002 / 0.025 | 3,714 (0.103); 0.110 / 0.338 / 0.552 |
+| P1212_XENIUM | 1.47% | 0.01% | 1.21% | 0.518 | 0.37% | 8,655 (0.101); 0.921 / 0.022 / 0.057 | 3,478 (0.041); 0.268 / 0.434 / 0.298 |
+| P7113_MERSCOPE | 1.55% | 0.07% | 2.59% | 0.522 | 0.06% | 41,797 (0.517); 0.996 / 0.001 / 0.003 | 2,825 (0.035); 0.138 / 0.482 / 0.379 |
+| P7113_XENIUM | 1.77% | 0.07% | 2.63% | 0.537 | 0.09% | 11,723 (0.100); 0.918 / 0.021 / 0.061 | 3,595 (0.031); 0.328 / 0.393 / 0.279 |
+| P5011_MERSCOPE | 6.48% | 0.00% | 9.06% | 0.643 | 0.20% | 3,454 (0.292); 0.992 / 0.000 / 0.008 | 367 (0.031); 0.117 / 0.428 / 0.455 |
+| P5011_XENIUM | 2.46% | 0.01% | 3.89% | 0.570 | 0.09% | 7,287 (0.116); 0.982 / 0.005 / 0.013 | 1,749 (0.028); 0.268 / 0.535 / 0.197 |
 
 - **H17 / H1 + 0.02.** P7513 is 0.127 and P1212 is 0.125, both against 0.19. For information, P7113 is 0.177 (0.19 would apply) and P5011 is 0.320 (0.33).
 - **H17 / H2.** P7513 is at 0.71% / 0.45%. **P1212_MERSCOPE reseg is at 1.04%, above 1%** (§7 item 1); P1212_XENIUM is at 0.77%. For information, P7113 MERSCOPE is at 1.13% and P5011 at 2.44% / 1.35%.
@@ -204,19 +215,21 @@ H17 is scored on P7513 and P1212 reseg: the H1 thresholds + 0.02, H2 and H9. The
 1. **H2 fails at baseline on two scored datasets.** P5011_MERSCOPE proseg_hybrid is at 1.02% (held-out donor; the flip rule scores H2 on P5011), and P1212_MERSCOPE reseg is at 1.04% (H17 includes H2). For information, P7113_MERSCOPE reseg is at 1.13% and P5011 reseg at 2.44% / 1.35%. The calls are mostly Amygdala excitatory (region-implausible for frontal cortex in the vocab) and Miscellaneous.
    - Counting only implausible calls whose lineage probability passes 0.73 would give 0.57% and 0.93%. That changes the metric definition in the passing direction, so it is a loosening and needs the user's written approval (§1 rule 2).
    - Nothing is changed here. The gate PR needs a fix, for example in RESOLVE's status precedence (M4) or the vocab's plausibility of Amygdala excitatory, or a written, user-approved exception.
-2. **OD-B13 is not triggered.** On all eight datasets the below-60 SEA-AD rule removes 0.2–1.0 points of confident broad coverage (v1 without the rule minus v1). Using the likelihood typer as the below-60 vote instead would remove 1.4–7.4 points more (`ll_minus_sea` −0.014 to −0.074). E2's LL rule alone, with no SEA-AD role, keeps 2.6–8.5 points less than v1. The LL part of M10 therefore stays in v1.1, to be recorded in the M3 PR. The LL (vii) value test (M3 item 6, OD-B8) confirms this on every table cell (§11.5).
+2. **OD-B13 is not triggered.** On all eight datasets the below-60 SEA-AD rule removes 0.2–1.0 points of confident broad coverage (v1 without the rule minus v1). Using the likelihood typer as the below-60 vote instead would remove 1.4–7.3 points more (`ll_minus_sea` −0.014 to −0.073). E2's LL rule alone, with no SEA-AD role, keeps 2.5–8.5 points less than v1. The LL part of M10 therefore stays in v1.1, to be recorded in the M3 PR. The LL value test (M3 item 6; the LL (vii) recipe on the WHB-frontal bundle profiles) confirms this on every table cell (§11.5).
 3. **H8 margin.** P1212_MERSCOPE's coverage of segmented objects (0.152) is 0.002 above the 0.15 warning threshold, and §5.4 expects no warning there. RESOLVE's coverage may move by up to ±0.05 (M4 exit), so P1212_MERSCOPE may acquire the warning flag. The warning never changes the gate level.
 4. **P5011 reseg MERSCOPE lacks 10.8% of the panel.** The published `var` of 11,845 cells is `min_cells`-filtered to 268 features. M3 maps the present genes with a restricted lookup; plan §3.3 / §8.1 route more than 5% missing genes to a panel family of its own with a full PREP (M3b). Its reseg baselines are provisional until M3b re-measures them. P1212 reseg MERSCOPE lacks 1 gene (0.34%), within the 1% that a restricted lookup covers.
 5. **Standalone runs on `min_cells`-filtered outputs.** `merxen annotate --from-clustered-h5ad` derives the panel from the published `var`. When a small sample lost a gene, the derived panel gets a new hash and the store has no bundle for it (P1212 and P5011 reseg failed this way). The declared panel has to be supplied through `merxen annotation-panel --panel-file` and `--panel-dir`. Adding `--panel-file` to `merxen annotate` is an open follow-up.
 6. **Candidate tightenings** (not applied; for decision in the M3 PR):
    - **H1** (basis "soft + 0.03", now measured on production): P7513 ≤ 0.16, P7113 ≤ 0.16, P5011 ≤ 0.26 (P1212 stays at 0.17).
    - **H3:** P7113 ≥ 0.90 (baseline 0.948 / 0.929).
-   - **H5:** confident COP supercluster ≤ 1% (maximum baseline 0.27%) and confident broad OPC ≤ 5% (3.0%).
+   - **H5:** confident COP supercluster ≤ 1% (maximum baseline 0.28%) and confident broad OPC ≤ 5% (2.9%).
    - **H7** (basis "E2 LL-rule coverage − 0.10"; now the SEA-rule baseline − 0.10 where that is stricter): P7513 X ≥ 0.50, P1212 X ≥ 0.41, P7113 X ≥ 0.55, P5011 M ≥ 0.36, P5011 X ≥ 0.46.
    - **H10:** ≥ 0.85 (minimum baseline on the flip-rule datasets 0.961).
 
    Resolvability (M3b) and RESOLVE (M4) can still lower coverage, so tightening H7 before M4 risks a failure that belongs to M3b.
-7. **H4 fails at baseline on P1212 and P7113_MERSCOPE** (§11.3): 2/7 and 5/7 classes on P1212 MERSCOPE / Xenium, 5/7 on P7113 MERSCOPE, against ≥ 6 of 7. Fold ≥ 3 holds everywhere; the AUROC fails, for OPC on every sample (the argmax OPC class holds the COP calls). Scoring H4 on confident calls would pass all but P1212_MERSCOPE (4/7), but it changes the metric in the passing direction, a loosening that needs the user's written approval (§1 rule 2). The gate PR needs a fix or a written, user-approved exception.
+7. **H4's "assigned class" is an open choice for the user** (§11.3). Under the M3 working metric (a), the re-map's argmax over all table cells, H4 fails at baseline on P1212 (2/7 and 5/7 on MERSCOPE / Xenium) and P7113_MERSCOPE (5/7), against ≥ 6 of 7; fold ≥ 3 holds everywhere and the AUROC fails, for OPC on every sample, because the argmax OPC class holds the COP calls the v1 COP rule never emits as OPC. With the COP rule applied (b) only P1212 fails (2/7, 5/7); with its SEA-AD rescue (b′) or on WHB-only confident calls (c) only P1212_MERSCOPE fails (2/7 and 4/7). The user picks the definition in the M3 PR; a P1212_MERSCOPE failure under any option needs a fix or a written, user-approved exception at gate H.
+8. **OD-B8 goes to the user with both readings** (§11.5): as the v1.1 below-60 vote LL cannot pass by construction (coverage gain ≤ the below-60 SEA-AD cost, at most 1.0 point); as a tie-breaker it moves referee outcomes by +6 to +14 points, a circular measure. The typer is the LL (vii) recipe on the WHB-frontal bundle profiles; scoring (vii) proper needs `ll_whb_ctx_profiles` built first.
+9. **The provisional labels of the shadow MAP runs predate the review fixes.** `<sid>_ct_provisional.parquet` and `provisional_summary` in `$A/shadow/{baselines,e8,stageA}/runs` were written before the float32 tolerance and the SEA-AD subclass `aggregate_probability`; their `ct_*_status` can differ at cells exactly at a threshold (0.7–1.3% of table cells at supercluster bp 0.69, about 1% at WMB class bp 0.90). No number in this document reads those statuses: every rule above is re-evaluated from the raw engine columns by the shadow scripts.
 
 ## 8. Not measured in this stage
 
@@ -315,7 +328,7 @@ All paths are under `$A/shadow/baselines/`.
 | File | Content |
 |---|---|
 | `metrics/sample_metrics.csv` | Per sample × segmentation: gate (A, level, warning, reasons), coverage per second-vote variant (lineage / broad / supercluster, table and segmented), implausible share and top nodes, COP shares, WHB–SEA agreement (E1 and strict) |
-| `metrics/jsd.csv` | Per pair × segmentation × kind (soft, argmax, confident, soft_ge30, setc_soft, setc_argmax) × region (whole_section, shared_mask): JSD, 95% CI, tiles, cells, unallocated mass |
+| `metrics/jsd.csv` | Per pair × segmentation × kind (soft, argmax, confident, soft_ge30, setc_soft, setc_argmax) × region (whole_section, shared_mask): JSD, 95% CI over matched tiles (`resampling` = joint), the independent-resampling sensitivity (`ci_*_independent`), tile locations, tiles per section, cells, unallocated mass |
 | `metrics/compositions.csv` | The compositions behind `jsd.csv`, per platform (shares incl. unallocated, and renormalised 7-class shares) |
 | `metrics/referee.csv` | E1 marker referee: WHB vs SEA-AD, new (v1 shadow) vs legacy, WHB argmax vs legacy, new vs SEA-AD |
 | `metrics/second_vote_cost.csv` | OD-B13: coverage under the five second-vote variants on E2's 30k native cells, costs, trigger, E2's published LL-rule coverage |
@@ -326,53 +339,59 @@ All paths are under `$A/shadow/baselines/`.
 
 ## 11. Shadow programme items 2–7 (M3 stage C2)
 
-Measured 2026-09-27 with the same MAP configuration as §2 (no engine change). Reports: `$A/shadow/<item>/REPORT.txt`; summary: `$A/shadow/SHADOW_SUMMARY.txt`. Code: `merxen.annotation.likelihood` (LL (vii)), `merxen.annotation.shadow` (additions below), `scripts/acceptance/{shadow_e8,shadow_x1,heldout_genes,shadow_flags,shadow_ll,shadow_glial_jsd}.py`. P7113, P5011 and reseg stay held out: they are reported, and nothing below was selected on them.
+Measured 2026-09-27 with the same MAP configuration as §2 (no engine change); re-measured after the M3 review with matched-tile CIs, E2's SEA-AD definitions and the float32 threshold tolerance (header). Reports: `$A/shadow/<item>/REPORT.txt`; summary: `$A/shadow/SHADOW_SUMMARY.txt`. Code: `merxen.annotation.likelihood` (LL (vii)), `merxen.annotation.shadow` (additions below), `scripts/acceptance/{shadow_e8,shadow_x1,heldout_genes,shadow_flags,shadow_ll,shadow_glial_jsd}.py`. P7113, P5011 and reseg stay held out: they are reported, and nothing below was selected on them.
 
 ### 11.1 E8 segmentation comparison (OD-B6, OD-B7)
 
-P1212 on all four segmentations (both platforms) and ag7 on all four (MERSCOPE, WMB ag7 bundle `d2e3f496`). Confident cells per mm² use the median tissue area of the section's segmentations (100 µm bins with ≥ 3 table cells). Foreign fraction = counts on the assigned class's negative genes / total counts.
+P1212 on all four segmentations (both platforms) and ag7 on all four (MERSCOPE, WMB ag7 bundle `d2e3f496`). Confident cells per mm² use the median tissue area of the section's segmentations (100 µm bins with ≥ 3 table cells). Foreign fraction = counts on the assigned class's negative genes / total counts. Mouse class confidence counts a class bp of exactly 0.90 (float32 tolerance, §2), which adds about 1% of cells to every segmentation.
 
 | Sample | Metric | original_seg | proseg_mask | proseg_hybrid | reseg |
 |---|---|---|---|---|---|
-| P1212_MERSCOPE | Confident broad per mm² (ratio vs proseg_hybrid) | 654 (1.06) | 610 (0.99) | 616 (1.00) | 352 (0.57) |
-| P1212_XENIUM | Confident broad per mm² (ratio) | 1,049 (0.95) | 1,092 (0.99) | 1,100 (1.00) | 908 (0.83) |
-| P1212 | Soft broad JSD, MERSCOPE vs Xenium [95% CI] | 0.153 [0.144, 0.174] | 0.130 [0.118, 0.152] | 0.133 [0.122, 0.154] | 0.125 [0.105, 0.155] |
-| P1212_MERSCOPE / _XENIUM | Foreign (negative-gene) fraction of confident cells | 0.022 / 0.023 | 0.019 / 0.022 | 0.019 / 0.021 | 0.005 / 0.012 |
-| ag7 | Confident class / subclass per mm² (ratio) | 2,058 / 1,655 (1.11 / 1.05) | 1,854 / 1,567 (1.00 / 0.99) | 1,859 / 1,576 (1.00 / 1.00) | 2,071 / 1,776 (1.11 / 1.13) |
-| ag7 | Foreign fraction; confident microglia | 0.0137; 123 | 0.0132; 229 | 0.0127; 275 | 0.0099; 1,096 |
+| P1212_MERSCOPE | Confident broad per mm² (ratio vs proseg_hybrid) | 654 (1.06) | 609 (0.99) | 616 (1.00) | 352 (0.57) |
+| P1212_XENIUM | Confident broad per mm² (ratio) | 1,048 (0.95) | 1,091 (0.99) | 1,099 (1.00) | 908 (0.83) |
+| P1212 | Soft broad JSD, MERSCOPE vs Xenium [95% CI, matched tiles] | 0.153 [0.146, 0.161] | 0.130 [0.123, 0.140] | 0.133 [0.126, 0.142] | 0.125 [0.110, 0.146] |
+| P1212_MERSCOPE / _XENIUM | Foreign (negative-gene) fraction of confident cells | 0.022 / 0.022 | 0.019 / 0.022 | 0.019 / 0.021 | 0.005 / 0.012 |
+| ag7 | Confident class / subclass per mm² (ratio) | 2,094 / 1,677 (1.11 / 1.05) | 1,877 / 1,584 (1.00 / 0.99) | 1,883 / 1,593 (1.00 / 1.00) | 2,086 / 1,786 (1.11 / 1.12) |
+| ag7 | Foreign fraction; confident microglia | 0.0137; 136 | 0.0132; 255 | 0.0128; 294 | 0.0100; 1,114 |
 
 - **OD-B6: the switch criterion is not met.** No segmentation has ≥ 25% more confident broad cells per mm² on P1212_MERSCOPE (best: original_seg, +6%), and all four leave it `broad_only` (A 0.21–0.26). The adopted policy (proseg_hybrid, broad level only) stands.
-- **OD-B7, recommendation for the user:** per dataset. Human: keep proseg_hybrid (proseg_mask is equivalent; reseg has purer cells and a lower platform JSD but 17–43% fewer confident cells per mm²; original_seg has the highest platform JSD). Mouse ag7: reseg (most confident cells, lowest foreign fraction, four times the confident microglia). VZG2 is re-checked after the M0a re-run.
+- **OD-B7, recommendation for the user:** per dataset. Human: keep proseg_hybrid (proseg_mask is equivalent; reseg has purer cells and a lower platform JSD but 17–43% fewer confident cells per mm²; original_seg has the highest platform JSD). Mouse ag7: reseg (most confident subclass cells, class cells equal to original_seg, lowest foreign fraction, almost four times the confident microglia). VZG2 is re-checked after the M0a re-run.
 
 ### 11.2 X1 platform rescaling (OD-B9)
 
-Per-gene factors against the reference pseudobulk of each dataset's cells with WHB bp ≥ 0.8, median-centred and capped at ±2 log2, then a WHB set-a re-map. The pass rule was fixed in `scripts/acceptance/shadow_x1.py` before the runs: on both development pairs the soft JSD must fall below set a's with the paired 95% CI of the difference below 0, the referee must side with X1 in more X1-vs-set-a disputes than with set a, and H4 must pass in no fewer classes.
+Per-gene factors against the reference pseudobulk of each dataset's cells with WHB bp ≥ 0.8, median-centred and capped at ±2 log2, then a WHB set-a re-map. The C2 run (2026-09-27 01:06–01:12) scored X1 on a pass rule with a referee condition; that rule was written into `scripts/acceptance/shadow_x1.py` but committed after the run, and the logs recorded no script hash, so it cannot be shown to have been fixed before the runs. It is not used here. The decision below rests on effect size; the review rerun's launcher log records the script's sha256.
 
-| Pair | Soft JSD set a / set c / X1 | X1 − set a [paired 95% CI] | Referee X1-vs-set-a disputes, X1 / set a wins (MERSCOPE; Xenium) |
-|---|---|---|---|
-| P7513 | 0.129 / 0.121 / 0.128 | −0.001 [−0.002, −0.001] | 0.37 / 0.40; 0.24 / 0.63 |
-| P1212 | 0.133 / 0.109 / 0.126 | −0.007 [−0.008, −0.005] | 0.25 / 0.40; 0.21 / 0.58 |
-| P7113 (held out) | 0.126 / 0.110 / 0.126 | 0.000 [−0.000, 0.001] | 0.33 / 0.39; 0.27 / 0.54 |
-| P5011 (held out) | 0.227 / 0.161 / 0.217 | −0.010 [−0.010, −0.009] | 0.37 / 0.33; 0.28 / 0.53 |
+| Pair | Soft JSD set a / set c / X1 | X1 − set a [paired 95% CI] | Set c − set a [paired 95% CI] | Referee X1-vs-set-a disputes, X1 / set a wins (MERSCOPE; Xenium) | Referee set-c-vs-set-a disputes, set c / set a wins (MERSCOPE; Xenium) |
+|---|---|---|---|---|---|
+| P7513 | 0.129 / 0.121 / 0.128 | −0.001 [−0.002, −0.001] | −0.008 [−0.010, −0.006] | 0.37 / 0.40; 0.24 / 0.63 | 0.30 / 0.49; 0.23 / 0.65 |
+| P1212 | 0.133 / 0.109 / 0.126 | −0.007 [−0.008, −0.006] | −0.024 [−0.035, −0.016] | 0.25 / 0.40; 0.21 / 0.58 | 0.20 / 0.53; 0.23 / 0.57 |
+| P7113 (held out) | 0.126 / 0.110 / 0.126 | 0.000 [−0.000, 0.001] | −0.016 [−0.018, −0.014] | 0.33 / 0.38; 0.26 / 0.54 | 0.28 / 0.49; 0.26 / 0.58 |
+| P5011 (held out) | 0.227 / 0.161 / 0.217 | −0.010 [−0.010, −0.009] | −0.066 [−0.069, −0.062] | 0.37 / 0.33; 0.28 / 0.53 | 0.28 / 0.44; 0.26 / 0.55 |
 
-**Decision: X1 fails** (the referee condition, on all four development samples); H4 is unchanged (§11.3). `annotation_xplat_sensitivity` stays `geneset_c`; X1 is not adopted in v1 (plan §17 keeps per-platform rescaling as a v2 candidate). The factors have a spread of 2.4–3.0 log2 and 36–50% of genes hit the cap, because they mostly measure reference (snRNA-seq) vs in-situ efficiency; their Xenium-minus-MERSCOPE difference correlates 0.80–0.92 with the measured cross-platform ratios (`research/xplat`).
+(Paired CIs over matched tiles, §2; the independent-resampling sensitivity is in `x1_jsd_differences.csv`.)
+
+**Decision: X1 is not adopted** (OD-B9). On the development pairs its soft-JSD gain over set a is at most 0.007 (0.001 and 0.007), 18% and 29% of set c's gain (0.008 and 0.024), and H4 is unchanged (§11.3). The E1 referee is **not neutral** for rescaled labellings: it scores raw panel counts, so it favours labellings mapped from unrescaled counts. It sides with set a against set c as well (set c wins 0.20–0.30 of their disputes, set a 0.44–0.65), yet set c is the mandatory sensitivity, so the referee outcome is reported but not used as a criterion. `annotation_xplat_sensitivity` stays `geneset_c`; plan §17 keeps per-platform rescaling as a v2 candidate. The factors have a spread of 2.4–3.0 log2 and 36–50% of genes hit the cap, because they mostly measure reference (snRNA-seq) vs in-situ efficiency; their Xenium-minus-MERSCOPE difference correlates 0.80–0.92 with the measured cross-platform ratios (`research/xplat`).
 
 ### 11.3 H4 held-out-gene baseline
 
-Metric as §2. Markers on set a: Neurons SLC17A7, GAD1 and SLC17A6 (MERSCOPE) or GAD2 (Xenium); Astrocytes AQP4, GJA1; Oligodendrocytes MOBP, MOG, OPALIN; OPC PDGFRA, VCAN; Microglia CX3CR1, GPR34 (+ P2RY12 on Xenium); Vascular FLT1, PECAM1, ABCC9; Fibroblasts DCN, FBLN1, COL12A1 (`$A/shadow/heldout/heldout_markers.csv`). The asset's rank-2 alternates were added in M3 because set a lacks SATB2, PLP1, CSF1R, CLDN5 and LUM.
+Metric as §2, with the "assigned class" left to the user (options (a)–(c) below). Markers on set a: Neurons SLC17A7, GAD1 and SLC17A6 (MERSCOPE) or GAD2 (Xenium); Astrocytes AQP4, GJA1; Oligodendrocytes MOBP, MOG, OPALIN; OPC PDGFRA, VCAN; Microglia CX3CR1, GPR34 (+ P2RY12 on Xenium); Vascular FLT1, PECAM1, ABCC9; Fibroblasts DCN, FBLN1, COL12A1 (`$A/shadow/heldout/heldout_markers.csv`). The asset's rank-2 alternates were added in M3 because set a lacks SATB2, PLP1, CSF1R, CLDN5 and LUM.
 
-| Sample | Classes passing (H4 needs ≥ 6 of 7) | Failing classes | WHB-only confident variant (not the metric) |
-|---|---|---|---|
-| P7513_MERSCOPE | 6 | OPC | 7 |
-| P7513_XENIUM | 6 | OPC | 7 |
-| P1212_MERSCOPE | 2 | Neurons, Oligodendrocytes, OPC, Microglia, Vascular | 4 |
-| P1212_XENIUM | 5 | OPC, Microglia | 7 |
-| P7113_MERSCOPE | 5 | OPC, Microglia | 6 |
-| P7113_XENIUM | 6 | OPC | 7 |
-| P5011_MERSCOPE (not scored by H4) | 0 | all | 4 |
-| P5011_XENIUM (not scored by H4) | 5 | OPC, Microglia | 7 |
+| Sample | (a) argmax, all table cells (M3 working metric) | (b) argmax with the COP rule | (b′) (b) with the SEA-AD OPC rescue | (c) WHB-only confident | Classes failing under (a) |
+|---|---|---|---|---|---|
+| P7513_MERSCOPE | 6 | 7 | 7 | 7 | OPC |
+| P7513_XENIUM | 6 | 6 | 7 | 7 | OPC |
+| P1212_MERSCOPE | 2 | 2 | 2 | 4 | Neurons, Oligodendrocytes, OPC, Microglia, Vascular |
+| P1212_XENIUM | 5 | 5 | 6 | 7 | OPC, Microglia |
+| P7113_MERSCOPE | 5 | 6 | 6 | 6 | OPC, Microglia |
+| P7113_XENIUM | 6 | 6 | 7 | 7 | OPC |
+| P5011_MERSCOPE (not scored by H4) | 0 | 2 | 2 | 4 | all |
+| P5011_XENIUM (not scored by H4) | 5 | 5 | 6 | 7 | OPC, Microglia |
 
-Fold is ≥ 3 in every class and sample; the AUROC decides. OPC's AUROC is 0.54–0.67 on every sample, because the argmax OPC class holds the COP calls. H4 fails at baseline on P1212 (both platforms) and P7113_MERSCOPE (§7 item 7). Set c scores one class fewer (AQP4 is a set-c exclusion) and passes one class fewer on six of the eight samples.
+Classes passing of 7 (H4 needs ≥ 6 on P7513, P1212 and P7113, per platform; `$A/shadow/heldout/heldout_h4.csv`). Fold is ≥ 3 in every class and sample under every option; the AUROC decides.
+
+- **Why OPC fails under (a).** The argmax OPC class holds every COP argmax call, which the v1 COP rule never emits as broad OPC (§5.2). OPC's AUROC is 0.54–0.66 under (a) on every sample; it is 0.60–0.89 under (b), 0.68–0.88 under (b′) and 0.70–0.95 under (c). Under (a) OPC fails by construction, so "≥ 6 of 7" becomes "all six other classes must pass".
+- **"The assigned class" is an open choice for the user**, to be settled in the M3 PR before the definition is frozen; plan §5.8 does not define it, and M3 did not pre-register a reading. The options: (a) the argmax (strictest; P1212 both platforms and P7113_MERSCOPE fail); (b) the argmax with the §5.2 COP rule applied, COP calls that fail it staying at lineage and leaving the OPC class (P1212 both platforms fail); (b′) the same with the rule's SEA-AD confident-OPC rescue, whose SEA-AD calls saw the held-out genes (P1212_MERSCOPE fails); (c) WHB-only confident calls (P1212_MERSCOPE fails). Every option but (a) scores fewer cells than all table cells, so whichever the user picks is recorded as a definition in §2 before gate H, not as a loosening decided after the fact.
+- Set c scores one class fewer (AQP4 is a set-c exclusion) and passes one class fewer on six of the eight samples under (a).
 
 ### 11.4 H16 prototype: realised flag rates
 
@@ -380,34 +399,48 @@ Confident cells, proseg_hybrid (`$A/shadow/flags/flag_rates.csv`). **Contaminati
 
 ### 11.5 LL value test (OD-B8) and the OD-B13 trigger
 
-LL (vii) (E1 `14_ll_contam.py`, ported onto the WHB set-a bundle's 122 cluster profiles) typed every table cell of the 16 samples, once with factors capped at ±2 log2 (M10) and once uncapped (E1).
+**The typer is the LL (vii) recipe on WHB-frontal bundle profiles**, not E1 (vii) itself: E1 `14_ll_contam.py` (`LLmix_wbctx+platform`) ported onto the WHB set-a bundle's 122 cluster profiles (17 superclusters, sinks included), where E1 used a 204-cluster whole-WHB cortex reference (plan §3.2 `ll_whb_ctx_profiles`). It typed every table cell of the 16 samples, once with factors capped at ±2 log2 (M10) and once uncapped (E1). Its agreement with E1 (vii) on E1's four 30k pilot subsets (`$A/shadow/ll/ll_vs_e1_vii.csv`):
 
-| Sample (proseg_hybrid, capped) | Coverage v1 → v1.1 (SEA-AD or LL below 60) | H10 v1 → v1.1 | Marker plausibility v1 → v1.1 | E2 LL rule − v1 | LL as the below-60 vote − v1 |
-|---|---|---|---|---|---|
-| P7513_MERSCOPE | 0.704 → 0.707 | 0.988 → 0.986 | 0.935 → 0.935 | −0.031 | −0.020 |
-| P7513_XENIUM | 0.597 → 0.598 | 0.980 → 0.979 | 0.907 → 0.907 | −0.047 | −0.039 |
-| P1212_MERSCOPE | 0.438 → 0.444 | 0.961 → 0.958 | 0.939 → 0.937 | −0.055 | −0.043 |
-| P1212_XENIUM | 0.511 → 0.512 | 0.977 → 0.976 | 0.925 → 0.924 | −0.087 | −0.079 |
-| P7113_MERSCOPE | 0.756 → 0.758 | 0.991 → 0.990 | 0.954 → 0.954 | −0.037 | −0.023 |
-| P7113_XENIUM | 0.648 → 0.650 | 0.897 → 0.894 | 0.936 → 0.935 | −0.063 | −0.052 |
-| P5011_MERSCOPE | 0.460 → 0.466 | 0.939 → 0.936 | 0.939 → 0.937 | −0.057 | −0.035 |
-| P5011_XENIUM | 0.557 → 0.559 | 0.925 → 0.923 | 0.924 → 0.924 | −0.048 | −0.035 |
+| Pilot subset | Broad agreement, uncapped / capped | Supercluster agreement, uncapped / capped |
+|---|---|---|
+| P7513_MERSCOPE | 0.834 / 0.828 | 0.822 / 0.797 |
+| P7513_XENIUM | 0.773 / 0.752 | 0.759 / 0.734 |
+| P1212_MERSCOPE | 0.746 / 0.727 | 0.721 / 0.688 |
+| P1212_XENIUM | 0.753 / 0.717 | 0.732 / 0.692 |
 
-- **OD-B8: not met.** In v1.1, LL only adds confident cells below 60 counts and never renames one. It raises coverage by at most 0.6 points (the rule needs > 5). It lowers the referee outcomes it can move (H10 and marker plausibility) by 0.04–0.3 points (the rule needs +2). The uncapped factors give the same result. By the pre-registered rule, LL does not join v1.1. `likelihood.py` remains for M10 if the rule is revisited.
-- **OD-B13: not triggered.** The below-60 SEA-AD rule removes 0.2–0.9 points. The LL rules keep 0.6–8.7 points *less* coverage than the SEA-AD rule on every dataset. The LL part of M10 stays after M8.
-- For information: in WHB-vs-LL disputes the referee is split, with WHB winning 0.36–0.60 of them and LL 0.22–0.45. Using LL as a tie-breaker for WHB-vs-SEA-AD disputes would side with the markers 6–14 points more often than WHB alone. That is not a v1.1 behaviour (WHB names every class, OD-B2), and it is circular, because LL and the referee read the same marker counts.
+On the same cells the port's broad call agrees with WHB's argmax about as often as E1 (vii)'s does (0.71–0.82 uncapped, 0.65–0.82 capped, vs 0.68–0.81 for E1 (vii)), so the OD-B13 direction below does not depend on the port. Scoring OD-B8 on (vii) proper would need a rerun on `ll_whb_ctx_profiles`, which the store does not hold yet (§7, open question).
+
+**OD-B8 has no pre-registered operationalisation.** The plan asks whether LL moves referee outcomes by > 2 points or coverage by > 5 points; how LL would be used is not stated. Two readings are reported; neither was fixed in advance (the first was chosen in `scripts/acceptance/shadow_ll.py` at M3 C2). OD-B8 goes to the user in the M3 PR with both.
+
+| Sample (proseg_hybrid, capped) | (1) Coverage v1 → v1.1 (SEA-AD or LL below 60) | Bound: v1 without the below-60 rule − v1 | H10 v1 → v1.1 (ceiling gain) | Marker plausibility v1 → v1.1 | (2) LL as tie-breaker: referee gain | E2 LL rule − v1 | LL as the below-60 vote − v1 |
+|---|---|---|---|---|---|---|---|
+| P7513_MERSCOPE | 0.704 → 0.707 | 0.005 | 0.989 → 0.987 (+0.000) | 0.936 → 0.935 | +0.096 | −0.030 | −0.020 |
+| P7513_XENIUM | 0.597 → 0.598 | 0.002 | 0.980 → 0.979 (+0.000) | 0.907 → 0.907 | +0.125 | −0.047 | −0.039 |
+| P1212_MERSCOPE | 0.438 → 0.443 | 0.009 | 0.961 → 0.959 (+0.001) | 0.940 → 0.937 | +0.061 | −0.054 | −0.043 |
+| P1212_XENIUM | 0.510 → 0.512 | 0.003 | 0.978 → 0.977 (+0.000) | 0.925 → 0.925 | +0.077 | −0.086 | −0.079 |
+| P7113_MERSCOPE | 0.756 → 0.759 | 0.005 | 0.991 → 0.990 (+0.000) | 0.954 → 0.954 | +0.141 | −0.037 | −0.023 |
+| P7113_XENIUM | 0.648 → 0.650 | 0.002 | 0.897 → 0.895 (+0.002) | 0.936 → 0.935 | +0.093 | −0.063 | −0.052 |
+| P5011_MERSCOPE | 0.459 → 0.466 | 0.009 | 0.940 → 0.937 (+0.002) | 0.940 → 0.937 | +0.112 | −0.056 | −0.035 |
+| P5011_XENIUM | 0.556 → 0.559 | 0.004 | 0.926 → 0.924 (+0.002) | 0.924 → 0.924 | +0.097 | −0.047 | −0.035 |
+
+- **Reading (1), LL as the v1.1 below-60 vote: not met, and uninformative.** v1.1's confident cells (SEA-AD or LL agreeing below 60 counts) are a subset of "v1 without the below-60 rule" (the same ≥ 60 veto and rescues; checked on every sample, `v11_within_bound`). So the coverage gain is bounded by the below-60 SEA-AD cost, 0.2–0.9 points here and at most 1.0 on any dataset, far below 5; measured +0.1 to +0.6. H10 is at 0.90–0.99 with 10,000–51,000 disputes and v1.1 adds 204–561 cells, so even if every added cell were a won dispute H10 would rise by at most 0.2 points (`h10_ceiling_gain`), below 2. The test cannot pass by construction; its outcome says nothing about LL. The uncapped factors give the same.
+- **Reading (2), LL as tie-breaker of WHB-vs-SEA-AD disputes: exceeds 2 points, but circular.** With LL deciding the disputes, markers side with the chosen label 6.1–12.5 points more often than with WHB alone on the development datasets (6.1–14.1 on all, capped; 7.7–14.5 uncapped). LL and the referee read the same marker counts, so this favours LL by construction, and it is not a v1.1 behaviour (WHB names every class, OD-B2).
+- **For the user (M3 PR):** keep LL out of v1.1 (reading 1; `likelihood.py` stays for M10), or adopt it as a tie-breaker (reading 2) with a non-circular check first (held-out genes, §5.8), or score OD-B8 on (vii) proper once `ll_whb_ctx_profiles` is built.
+- **OD-B13: not triggered.** The below-60 SEA-AD rule removes 0.2–0.9 points. The LL rules keep 0.6–8.6 points *less* coverage than the SEA-AD rule on every dataset (reseg included, both factor variants). The LL part of M10 stays after M8.
+- For information: in WHB-vs-LL disputes (proseg_hybrid, capped) the referee is split, with WHB winning 0.36–0.60 of them and LL 0.22–0.45.
 
 ### 11.6 WHB vs SEA-AD glial JSD (information, OD-B2 decided)
 
-Glial (astrocytes, oligodendrocytes, OPC, microglia) soft JSD, MERSCOPE vs Xenium, WHB − SEA-AD with a paired block-bootstrap CI: P7513 −0.027 [−0.031, −0.024], P1212 −0.036 [−0.049, −0.011], P7113 −0.020 [−0.022, −0.018], P5011 −0.052 [−0.055, −0.048]. WHB's glial composition agrees better across platforms on every pair. At 7 classes WHB is better on P7513 and P1212 and slightly worse on P5011 (+0.011). No decision is asked for.
+Glial (astrocytes, oligodendrocytes, OPC, microglia) soft JSD, MERSCOPE vs Xenium, WHB − SEA-AD with a paired block-bootstrap CI (matched tiles, one draw for both sections and both references; §2), SEA-AD's soft composition on E2's class × subclass mass (§2): P7513 −0.025 [−0.027, −0.023], P1212 −0.038 [−0.047, −0.029], P7113 −0.021 [−0.023, −0.019], P5011 −0.061 [−0.064, −0.057]. WHB's glial composition agrees better across platforms on every pair. At 7 classes (soft) WHB is also better on every pair (−0.013, −0.032, −0.005, −0.016); before the review SEA-AD's soft mass lacked the class-level factor, which made its composition harder than WHB's root-level one and gave P5011 +0.011. The argmax 7-class difference on P5011 stays +0.031 [0.026, 0.037]. No decision is asked for.
 
 ### 11.7 Files
 
 | Directory under `$A/shadow/` | Content |
 |---|---|
 | `e8/` | `runs/` (P1212 original_seg and proseg_mask, ag7 original_seg, proseg_mask and reseg MAP outputs), `metrics/e8_{human,human_jsd,mouse}.csv`, `REPORT.txt` |
-| `x1/` | `x1_{factors,jsd,jsd_differences,referee,samples,compositions}.csv`, `runs/` (rescaled WHB re-maps), `REPORT.txt` |
-| `heldout/` | `heldout_{markers,enrichment,h4}.csv`, `runs/` (held-out WHB re-maps for set a, set c and X1), `REPORT.txt` |
+| `x1/` | `x1_{factors,jsd,jsd_differences,referee,samples,compositions}.csv` (joint CIs and the independent sensitivity), `runs/` (rescaled WHB re-maps), `REPORT.txt` |
+| `heldout/` | `heldout_{markers,enrichment,h4}.csv` (label sets `heldout_argmax`, `heldout_argmax_cop_rule`, `heldout_argmax_cop_rule_seaad`, `heldout_whb_confident`, `production_argmax`), `runs/` (held-out WHB re-maps for set a, set c and X1), `REPORT.txt` |
 | `flags/` | `flag_{rates,nulls,scores,depth}.csv`, `REPORT.txt` |
-| `ll/` | `ll_{sample_metrics,referee,factors,decision}.csv`, `calls/` (LL (vii) calls per sample and factor variant), `REPORT.txt` |
+| `ll/` | `ll_{sample_metrics,referee,factors,decision}.csv`, `ll_vs_e1_vii.csv` (the port vs E1 (vii) on the pilot subsets), `calls/` (LL calls per sample and factor variant), `REPORT.txt` |
 | `glial_jsd/` | `glial_jsd.csv`, `glial_compositions.csv`, `REPORT.txt` |
+| `superseded_20260927_pre_review/` | The pre-review CSVs and reports of every item (independent tile resampling, E1's SEA-AD definition, no float32 tolerance) and the pre-review `x1/runs`, `heldout/runs` |
