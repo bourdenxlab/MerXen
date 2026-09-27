@@ -14,28 +14,52 @@ from merxen.annotation.config import AnnotationGate
 from merxen.annotation.shadow import (
     COMPOSITION_COLUMNS,
     E1_REFEREE_MARKERS,
+    GLIAL_COLUMNS,
+    OPC,
     SECOND_VOTES,
     UNALLOCATED,
     FloorLookup,
     HumanRuleInputs,
     argmax_broad_names,
+    auroc,
+    beta_binomial_upper_tail,
     block_bootstrap_jsd,
     broad_class_index,
+    class_profiles,
     composition_shares,
+    contamination_flags,
     dataset_gate,
+    depth_grid,
+    distinct_gene_quantiles,
     evaluate_human_rules,
+    expected_genes_quantile,
+    fit_beta_binomial,
+    foreign_marker_fraction,
+    heldout_enrichment,
     jensen_shannon_distance,
     label_agreement,
     marker_class_scores,
     marker_referee,
+    mouse_confidence,
+    negative_counts,
+    negative_gene_mask,
+    occupied_area_mm2,
     one_hot_broad_matrix,
+    paired_block_bootstrap_jsd_difference,
+    profile_matrix,
+    realised_rates,
+    reference_pseudobulk_log2_factors,
+    rescale_counts,
     rule_inputs_from_provisional,
     seaad_broad_calls,
+    seaad_soft_broad_matrix,
+    select_heldout_markers,
     soft_broad_matrix,
     soft_matrix_from_provisional,
     tile_codes,
     tile_sums,
     whb_broad_of,
+    whb_labels_from_tidy,
 )
 from merxen.annotation.vocab import HUMAN_BROAD_CLASSES, UNASSIGNED_LABEL
 
@@ -365,6 +389,7 @@ def test_rules_second_vote_variants() -> None:
         "seaad": [True, False, False, True, True],
         "ll_below60": [True, True, True, True, True],
         "seaad_ll_below60": [True, True, False, True, True],
+        "seaad_or_ll": [True, True, False, True, True],
     }
     assert set(expected) == set(SECOND_VOTES)
     for vote, flags in expected.items():
@@ -597,3 +622,426 @@ def test_soft_and_argmax_from_provisional() -> None:
         "Neurons",
         UNASSIGNED_LABEL,
     ]
+
+
+# --------------------------------------------------------------------------
+# M3 stage C2: LL vote, SEA-AD soft composition, paired JSD, held-out genes,
+# X1 factors, flags and E8 helpers
+
+
+def test_rules_seaad_or_ll_vote_with_the_seven_class_scheme() -> None:
+    rows = [
+        _cell(40, *ASTRO, sea="Microglia", ll="Astrocytes"),  # LL rescues below 60
+        _cell(40, *ASTRO, sea="Microglia", ll="Microglia"),  # neither agrees
+        _cell(40, *ASTRO, sea="Astrocytes", ll=None),  # SEA agrees
+        _cell(40, *INH, sea="Astrocytes", ll="Neurons"),  # LL agrees at 7 classes
+    ]
+    base = _inputs(rows)
+    inputs = HumanRuleInputs(
+        **{**base.__dict__, "ll_scheme": "broad7"}  # type: ignore[arg-type]
+    )
+    v11 = evaluate_human_rules(inputs, platform="MERSCOPE", second_vote="seaad_or_ll")
+    assert list(v11.broad_confident) == [True, False, True, True]
+    v1 = evaluate_human_rules(inputs, platform="MERSCOPE", second_vote="seaad")
+    assert list(v1.broad_confident) == [False, False, True, False]
+    ll_only = evaluate_human_rules(
+        inputs, platform="MERSCOPE", second_vote="ll_below60"
+    )
+    assert list(ll_only.broad_confident) == [True, False, False, True]
+    with pytest.raises(ValueError, match="likelihood"):
+        evaluate_human_rules(
+            HumanRuleInputs(**{**base.__dict__, "ll_broad": None}),  # type: ignore[arg-type]
+            platform="MERSCOPE",
+            second_vote="seaad_or_ll",
+        )
+
+
+def test_rule_inputs_from_provisional_carry_the_ll_scheme() -> None:
+    labels = _provisional()
+    inputs = rule_inputs_from_provisional(
+        labels, ll_broad=pd.Series(["Astrocytes"], index=["a"]), ll_scheme="broad7"
+    )
+    assert inputs.ll_scheme == "broad7"
+
+
+def test_jensen_shannon_distance_on_a_class_subset() -> None:
+    p = np.array([0.5, 0.2, 0.3, 0, 0, 0, 0, 0.1])
+    q = np.array([0.1, 0.2, 0.3, 0, 0, 0, 0, 0.0])
+    assert jensen_shannon_distance(p, q, columns=[1, 2]) == pytest.approx(0.0)
+    assert jensen_shannon_distance(p, q) > 0
+    assert math.isnan(jensen_shannon_distance(p, q, columns=[3, 4]))
+
+
+def test_seaad_soft_broad_matrix_splits_vlmc_by_supertype() -> None:
+    subclass = _level(
+        ["Astrocyte", "VLMC & Perivascular", "L2/3 IT"],
+        [0.6, 0.8, 0.5],
+        [
+            [("Oligodendrocyte", 0.3)],
+            [("Endothelial", 0.1)],
+            [("VLMC & Perivascular", 0.2), ("Astrocyte", 0.1)],
+        ],
+    )
+    supertype = _level(
+        ["Astro_2", "Pericyte_1", "L2/3 IT_1"],
+        [0.9, 0.75, 0.4],
+        [[], [("VLMC_1", 0.25)], []],
+    )
+    matrix = seaad_soft_broad_matrix(subclass, supertype)
+    column = {name: index for index, name in enumerate(COMPOSITION_COLUMNS)}
+    assert np.allclose(matrix.sum(axis=1), 1.0)
+    assert matrix[0, column["Astrocytes"]] == pytest.approx(0.6)
+    assert matrix[0, column["Oligodendrocytes"]] == pytest.approx(0.3)
+    # The assigned VLMC & Perivascular mass splits 0.75 / 0.25 by supertype.
+    assert matrix[1, column["Vascular cells"]] == pytest.approx(0.8 * 0.75 + 0.1)
+    assert matrix[1, column["Fibroblasts"]] == pytest.approx(0.8 * 0.25)
+    # As a runner-up it is unallocated.
+    assert matrix[2, column["Neurons"]] == pytest.approx(0.5)
+    assert matrix[2, column[UNALLOCATED]] == pytest.approx(0.4)
+    no_supertype = seaad_soft_broad_matrix(subclass)
+    assert no_supertype[1, column[UNALLOCATED]] == pytest.approx(0.9)
+
+
+def test_paired_bootstrap_difference_is_zero_for_identical_labellings() -> None:
+    rng = np.random.default_rng(0)
+    tiles_a = rng.random((12, 8))
+    tiles_b = rng.random((10, 8))
+    same = paired_block_bootstrap_jsd_difference(
+        tiles_a, tiles_b, tiles_a, tiles_b, n_reps=50
+    )
+    assert same.difference == 0.0
+    assert same.ci_low == same.ci_high == 0.0
+    shifted = tiles_b.copy()
+    shifted[:, 0] += 5.0
+    worse = paired_block_bootstrap_jsd_difference(
+        tiles_a, shifted, tiles_a, tiles_b, n_reps=50
+    )
+    assert worse.difference > 0
+    assert worse.ci_low > 0
+    assert worse.share_positive == 1.0
+    assert worse.first_ci[0] <= worse.first_jsd <= worse.first_ci[1]
+    glia = paired_block_bootstrap_jsd_difference(
+        tiles_a, shifted, tiles_a, tiles_b, columns=GLIAL_COLUMNS, n_reps=20
+    )
+    assert glia.difference == pytest.approx(0.0)
+    with pytest.raises(ValueError, match="same tiles"):
+        paired_block_bootstrap_jsd_difference(tiles_a, tiles_b, tiles_a[:3], tiles_b)
+    with pytest.raises(ValueError, match="non-empty"):
+        paired_block_bootstrap_jsd_difference(
+            np.zeros((2, 8)), tiles_b, np.zeros((2, 8)), tiles_b
+        )
+
+
+def test_block_bootstrap_jsd_on_a_class_subset() -> None:
+    tiles = np.ones((4, 8))
+    result = block_bootstrap_jsd(tiles, tiles * 2, columns=[0, 1], n_reps=10)
+    assert result.jsd == pytest.approx(0.0)
+
+
+HELDOUT_TABLE = pd.DataFrame(
+    {
+        "marker_class": ["Exc", "Inh", "Inh", "Astro", "Astro", "Immune", "Immune"]
+        + ["Immune", "Oligo", "Oligo", "Exc"],
+        "gene_symbol": ["SLC17A7", "GAD1", "GAD2", "AQP4", "GJA1", "CSF1R"]
+        + ["P2RY12", "CX3CR1", "MOBP", "PLP1", "SLC17A6"],
+        "avoid_platforms": ["", "", "MERSCOPE", "", "", "", "MERSCOPE", "", "", ""]
+        + [""],
+        "rank": [1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 2],
+    }
+)
+
+
+def test_select_heldout_markers_by_rank_panel_and_platform() -> None:
+    panel = ["SLC17A7", "GAD1", "GAD2", "AQP4", "GJA1", "P2RY12", "CX3CR1"]
+    panel += ["MOBP", "SLC17A6"]
+    merscope = select_heldout_markers(HELDOUT_TABLE, panel, "MERSCOPE")
+    assert merscope.markers["Neurons"] == ("SLC17A7", "GAD1", "SLC17A6")
+    assert merscope.avoided["Neurons"] == ("GAD2",)
+    assert "Microglia" in merscope.skipped  # only CX3CR1 on MERSCOPE
+    assert merscope.not_on_panel["Microglia"] == ("CSF1R",)
+    assert "Oligodendrocytes" in merscope.skipped  # PLP1 missing
+    xenium = select_heldout_markers(HELDOUT_TABLE, panel, "XENIUM", max_markers=2)
+    assert xenium.markers["Neurons"] == ("SLC17A7", "GAD1")
+    assert xenium.markers["Microglia"] == ("P2RY12", "CX3CR1")
+    assert xenium.all_markers[:2] == ("SLC17A7", "GAD1")
+    assert "Fibroblasts" in xenium.skipped
+
+
+def test_auroc_matches_the_rank_definition() -> None:
+    assert auroc(np.array([0.1, 0.2, 0.8, 0.9]), np.array([0, 0, 1, 1])) == 1.0
+    assert auroc(np.array([1.0, 1.0]), np.array([0, 1])) == 0.5
+    assert auroc(np.array([0.3, 0.1, 0.2]), np.array([1, 0, 1])) == pytest.approx(1.0)
+    assert auroc(np.array([0.3, 0.1, 0.2]), np.array([0, 1, 0])) == pytest.approx(0.0)
+    assert math.isnan(auroc(np.array([1.0]), np.array([1])))
+
+
+def test_heldout_enrichment_scores_assigned_vs_other_cells() -> None:
+    counts = pd.DataFrame(
+        {"AQP4": [5, 4, 0, 0, 1, 0], "GJA1": [3, 0, 0, 1, 0, 0]},
+    )
+    totals = np.array([20, 20, 20, 20, 20, 20])
+    labels = ["Astrocytes", "Astrocytes", "Neurons", "Neurons", "Neurons", None]
+    [result] = heldout_enrichment(
+        counts, totals, labels, {"Astrocytes": ("AQP4", "GJA1")}
+    )
+    assert result.n_assigned == 2 and result.n_other == 3
+    assert result.rate_assigned == pytest.approx(12 / 40)
+    assert result.rate_other == pytest.approx(2 / 60)
+    assert result.fold == pytest.approx(9.0)
+    assert result.detection_assigned == 1.0
+    assert result.detection_other == pytest.approx(2 / 3)
+    assert result.auroc == pytest.approx(1.0)
+    assert result.passes
+    [confident] = heldout_enrichment(
+        counts,
+        totals,
+        labels,
+        {"Astrocytes": ("AQP4",)},
+        include=np.array([True, False, True, True, True, True]),
+        min_fold=100.0,
+    )
+    assert confident.n_assigned == 1 and not confident.passes
+
+
+PROFILE_GENES = ["G1", "G2", "G3"]
+
+
+def _profile_table() -> pd.DataFrame:
+    rows = []
+    for node, name, n_cells, values in (
+        ("N1", "Astrocyte", 10, [80.0, 10.0, 10.0]),
+        ("N2", "Oligodendrocyte", 30, [10.0, 80.0, 10.0]),
+        ("N3", "Microglia", 5, [10.0, 10.0, 80.0]),
+    ):
+        for gene, value in zip(PROFILE_GENES, values, strict=True):
+            rows.append(
+                {
+                    "level": "SUPC",
+                    "node": node,
+                    "node_name": name,
+                    "n_cells": n_cells,
+                    "gene_id": gene,
+                    "mean_cpm": value,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def test_profile_matrix_renormalises_over_the_query_genes() -> None:
+    matrix = profile_matrix(_profile_table(), "SUPC", ["G1", "G2", "G_NEW"])
+    assert list(matrix.index) == ["Astrocyte", "Microglia", "Oligodendrocyte"]
+    assert matrix.loc["Astrocyte"].tolist() == pytest.approx([80 / 90, 10 / 90, 0.0])
+    with pytest.raises(ValueError, match="no rows"):
+        profile_matrix(_profile_table(), "CLUS", PROFILE_GENES)
+
+
+def test_reference_pseudobulk_factors_recover_a_platform_effect() -> None:
+    rng = np.random.default_rng(3)
+    genes = [f"G{index}" for index in range(40)]
+    profiles = pd.DataFrame(
+        rng.dirichlet(np.full(40, 2.0), size=3),
+        index=["Astrocyte", "Microglia", "Oligodendrocyte"],
+        columns=genes,
+    )
+    efficiency = np.ones(40)
+    efficiency[5] = 4.0
+    rows, labels = [], []
+    for name in profiles.index:
+        expected = profiles.loc[name].to_numpy() * efficiency
+        rows.append(rng.multinomial(2000, expected / expected.sum(), size=100))
+        labels += [name] * 100
+    counts = sparse.csr_matrix(np.vstack(rows))
+    capped, uncapped = reference_pseudobulk_log2_factors(
+        counts, np.array(labels, dtype=object), profiles, cap_log2=1.0
+    )
+    assert np.median(uncapped) == pytest.approx(0.0)
+    assert uncapped[5] == pytest.approx(2.0, abs=0.25)
+    assert np.delete(np.abs(uncapped), 5).max() < 0.3
+    assert capped[5] == pytest.approx(1.0)
+    include = np.zeros(len(labels), dtype=bool)
+    with pytest.raises(ValueError, match="no labelled cell"):
+        reference_pseudobulk_log2_factors(counts, labels, profiles, include=include)
+    with pytest.raises(ValueError, match="one column per"):
+        reference_pseudobulk_log2_factors(counts[:, :2], labels, profiles)
+
+
+def test_rescale_counts_divides_by_the_factor_and_rounds() -> None:
+    counts = sparse.csr_matrix(np.array([[4, 1, 0], [2, 3, 5]]))
+    scaled = rescale_counts(counts, np.array([1.0, 0.0, -1.0]), scale=10.0)
+    assert scaled.dtype == np.int32
+    assert scaled.toarray().tolist() == [[20, 10, 0], [10, 30, 100]]
+    with pytest.raises(ValueError, match="one log2 factor"):
+        rescale_counts(counts, np.zeros(2))
+
+
+def test_negative_counts_use_the_assigned_class_genes() -> None:
+    negatives = pd.DataFrame(
+        {
+            "broad_class": ["Astrocytes", "Astrocytes", "Neurons", "Neurons"],
+            "gene_id": ["G2", "G3", "G1", "G_OTHER"],
+            "negative": [True, False, True, True],
+        }
+    )
+    mask = negative_gene_mask(negatives, PROFILE_GENES, ["Neurons", "Astrocytes"])
+    assert mask.tolist() == [[True, False, False], [False, True, False]]
+    counts = sparse.csr_matrix(np.array([[1, 2, 3], [4, 5, 6], [7, 8, 9]]))
+    values = negative_counts(
+        counts, ["Astrocytes", "Neurons", None], mask, ["Neurons", "Astrocytes"]
+    )
+    assert values[:2].tolist() == [2.0, 4.0]
+    assert math.isnan(values[2])
+
+
+def test_fit_beta_binomial_recovers_the_null_rate() -> None:
+    rng = np.random.default_rng(4)
+    trials = rng.integers(50, 300, size=2000)
+    rates = rng.beta(2.0, 98.0, size=trials.size)
+    successes = rng.binomial(trials, rates)
+    fit = fit_beta_binomial(successes, trials)
+    assert fit.alpha / (fit.alpha + fit.beta) == pytest.approx(0.02, abs=0.003)
+    assert fit.n_cells == 2000
+    tail = beta_binomial_upper_tail(
+        np.array([0, 3, 30]), np.array([100, 100, 100]), fit
+    )
+    assert tail[0] == pytest.approx(1.0)
+    assert tail[0] > tail[1] > tail[2]
+    with pytest.raises(ValueError, match="needs cells"):
+        fit_beta_binomial(np.array([]), np.array([]))
+
+
+def test_contamination_flags_find_cells_above_the_deep_null() -> None:
+    rng = np.random.default_rng(5)
+    n = 400
+    totals = rng.integers(40, 400, size=n).astype(float)
+    negative = rng.binomial(totals.astype(int), 0.01).astype(float)
+    negative[:10] = totals[:10] * 0.3  # heavily contaminated
+    labels = np.array(["Neurons"] * (n - 20) + ["Microglia"] * 20, dtype=object)
+    confident = np.ones(n, dtype=bool)
+    flags = contamination_flags(
+        negative, totals, labels, confident, ["Neurons", "Microglia"]
+    )
+    assert flags.flag[:10].all()
+    assert flags.flag[10 : n - 20].mean() < 0.05
+    assert flags.fits["Neurons"] is not None
+    assert flags.fits["Microglia"] is None  # 5 null cells < 30
+    assert np.isnan(flags.p_value[n - 20 :]).all()
+    assert not flags.flag[n - 20 :].any()
+    assert flags.score[0] == pytest.approx(0.3)
+
+
+def test_class_profiles_weight_nodes_by_their_cells() -> None:
+    table = _profile_table()
+    profiles = class_profiles(
+        table,
+        "SUPC",
+        PROFILE_GENES,
+        {"Astrocyte": "Glia", "Oligodendrocyte": "Glia", "Microglia": "Immune"},
+        ["Glia", "Immune", "Absent"],
+    )
+    assert set(profiles) == {"Glia", "Immune"}
+    expected = (np.array([80, 10, 10]) * 10 + np.array([10, 80, 10]) * 30) / 40
+    assert profiles["Glia"] == pytest.approx(expected / expected.sum())
+
+
+def test_depth_grid_and_distinct_gene_quantiles() -> None:
+    grid = depth_grid(1000, n_points=10)
+    assert grid[0] == 1 and grid[-1] == 1000
+    assert (np.diff(grid) > 0).all()
+    uniform = np.full(50, 1 / 50)
+    q = distinct_gene_quantiles(uniform, np.array([1, 5, 2000]), n_simulations=50)
+    assert q[0] == 1.0
+    assert q[1] <= 5.0
+    assert q[2] == 50.0
+
+
+def test_expected_genes_quantile_interpolates_per_class() -> None:
+    profiles = {"A": np.full(20, 1 / 20), "B": np.array([0.9] + [0.1 / 19] * 19)}
+    depth = np.array([10.0, 10.0, 10.0])
+    values = expected_genes_quantile(
+        depth, ["A", "B", "C"], profiles, n_simulations=100
+    )
+    assert values[0] > values[1]
+    assert math.isnan(values[2])
+    assert len(expected_genes_quantile(np.array([]), [], profiles)) == 0
+
+
+def test_realised_rates_mark_uninformative_strata() -> None:
+    frame = realised_rates(
+        np.array([True, False, True, True, False]),
+        ["A", "A", "B", "B", None],
+        ["A", "B", "C"],
+        max_informative=0.6,
+    )
+    rows = frame.set_index("class")
+    assert rows.loc["A", "rate"] == 0.5 and rows.loc["A", "informative"]
+    assert rows.loc["B", "rate"] == 1.0 and not rows.loc["B", "informative"]
+    assert rows.loc["C", "n_cells"] == 0 and not rows.loc["C", "informative"]
+
+
+def test_occupied_area_counts_bins_with_enough_cells() -> None:
+    xy = np.array([[10, 10], [20, 20], [30, 30], [150, 10], [np.nan, 1.0]])
+    assert occupied_area_mm2(xy, bin_um=100.0, min_cells=3) == pytest.approx(0.01)
+    assert occupied_area_mm2(xy, bin_um=100.0, min_cells=1) == pytest.approx(0.02)
+    assert occupied_area_mm2(np.zeros((0, 2))) == 0.0
+    with pytest.raises(ValueError, match="bin_um"):
+        occupied_area_mm2(xy, bin_um=0)
+
+
+def test_foreign_marker_fraction_excludes_the_own_class() -> None:
+    scores = np.array([[0.2, 0.1, 0.0], [0.0, 0.3, 0.1]])
+    values = foreign_marker_fraction(scores, ["A", None], classes=("A", "B", "C"))
+    assert values[0] == pytest.approx(0.1)
+    assert math.isnan(values[1])
+
+
+def test_mouse_confidence_applies_the_d_m4_thresholds() -> None:
+    labels = pd.DataFrame(
+        {
+            "total_counts": [100, 30, 15, 100],
+            "mmc_wmb_class_bp": [0.95, 0.95, 0.99, 0.8],
+            "mmc_wmb_subclass_bp": [0.85, 0.9, 0.9, 0.9],
+        }
+    )
+    result = mouse_confidence(labels)
+    assert result.class_confident.tolist() == [True, True, False, False]
+    assert result.subclass_confident.tolist() == [True, False, False, False]
+
+
+def test_whb_labels_from_tidy_aggregate_like_the_provisional_table() -> None:
+    vocab = pd.DataFrame(
+        {
+            "level": ["SUPC"] * 3,
+            "node": ["S_AST", "S_OLI", "S_OPC"],
+            "node_name": ["Astrocyte", "Oligodendrocyte", "OPC"],
+            "broad_class": ["Astrocytes", "Oligodendrocytes", OPC],
+            "lineage": ["Astrocytes", "Oligodendrocyte lineage"] * 1
+            + ["Oligodendrocyte lineage"],
+        }
+    )
+    tidy = pd.DataFrame(
+        {
+            "cell_id": ["a", "b"],
+            "level": ["SUPC", "SUPC"],
+            "level_name": ["supercluster", "supercluster"],
+            "assignment": ["S_OLI", "S_AST"],
+            "name": ["Oligodendrocyte", "Astrocyte"],
+            "bp": [0.5, 0.9],
+            "runner_up_1_assignment": ["S_OPC", None],
+            "runner_up_1_name": ["OPC", None],
+            "runner_up_1_probability": [0.4, np.nan],
+        }
+    )
+    for rank in range(2, 6):
+        for field in ("assignment", "name"):
+            tidy[f"runner_up_{rank}_{field}"] = None
+        tidy[f"runner_up_{rank}_probability"] = np.nan
+    labels = whb_labels_from_tidy(
+        tidy, vocab, pd.Series([50.0, 70.0], index=["a", "b"]), level="SUPC"
+    )
+    assert labels.loc["a", "ct_lineage_name"] == "Oligodendrocyte lineage"
+    assert labels.loc["a", "ct_lineage_raw"] == pytest.approx(0.9)
+    assert labels.loc["a", "ct_broad_raw"] == pytest.approx(0.5)
+    assert labels.loc["b", "total_counts"] == 70.0
+    assert labels.loc["a", "mmc_whb_supercluster_runner_up_1_name"] == "OPC"
+    soft = soft_matrix_from_provisional(labels)
+    assert soft.shape == (2, len(COMPOSITION_COLUMNS))

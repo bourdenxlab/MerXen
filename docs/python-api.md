@@ -384,8 +384,30 @@ M3 shadow evaluation (plan §5.2–§5.5, §14):
   `dataset_gate`.
 - `label_agreement`, `marker_class_scores`, `marker_referee` (the E1
   referee).
+- Shadow items 2–7: `seaad_soft_broad_matrix`,
+  `paired_block_bootstrap_jsd_difference` (paired CIs of JSD differences;
+  `GLIAL_COLUMNS`); held-out genes `select_heldout_markers`,
+  `heldout_enrichment`, `auroc`; X1 `profile_matrix`,
+  `reference_pseudobulk_log2_factors`, `rescale_counts`; flag prototypes
+  `negative_gene_mask`, `negative_counts`, `fit_beta_binomial`,
+  `beta_binomial_upper_tail`, `contamination_flags`, `class_profiles`,
+  `depth_grid`, `distinct_gene_quantiles`, `expected_genes_quantile`,
+  `realised_rates`; E8 `occupied_area_mm2`, `foreign_marker_fraction`,
+  `mouse_confidence`; variant re-maps `published_queries`,
+  `map_query_variant`, `whb_labels_from_tidy`. The `seaad_or_ll` second vote
+  is the v1.1 degraded-mode row (§5.3); `HumanRuleInputs.ll_scheme` selects
+  E2's or the 7-class LL comparison.
 
 See [Reference-based annotation](stages/annotation.md).
+
+### `annotation.likelihood` — [likelihood.py](../src/merxen/annotation/likelihood.py)
+
+The LL (vii) count-likelihood typer (E1 `14_ll_contam.py`) on a bundle's
+`profiles.parquet`: `reference_from_profiles` (leaf profiles, prior,
+contaminant class profiles), `platform_log2_factors` (EM factors, optional
+±2 log2 cap), `mixture_posterior` (spill-over mixture), `summarize_posterior`
+(supercluster / broad / lineage) and `run_ll_vii`. Used by the M3 LL value
+test; not part of v1 (OD-B8).
 
 ## `merxen.memory`
 
