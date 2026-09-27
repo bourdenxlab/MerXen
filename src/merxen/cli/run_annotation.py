@@ -6,6 +6,9 @@
   (reference, panel): ``ReferenceStore.get_or_build`` and ``bundle_ref.json``.
 * ``merxen annotation-store list`` and ``prune --unreferenced-by … --dry-run``:
   manual store maintenance; nothing is ever deleted (OD-D4).
+* ``merxen annotate``: the MAP step (``annotation.pipeline.annotate_map``) on
+  prepared H5ADs or, standalone, on published ``*_clustered.h5ad`` files
+  (table cells, ``layers["counts"]``), writing only to ``--out``.
 
 The annotation modules are imported inside the commands, so ``merxen``
 starts without loading them. Store, builder and input errors end the command
@@ -595,3 +598,480 @@ def annotation_store_prune_command(
             f"candidate\t{entry.kind}\t{entry.reference_id or '-'}\t"
             f"{_format_size(entry.size_bytes)}\t{entry.path}"
         )
+
+
+def _bundle_overrides(values: tuple[str, ...]) -> dict[str, Path]:
+    """Parse ``--bundle KEY=DIR`` (``KEY`` = reference id or run id)."""
+    return _key_value_paths(values, "--bundle")
+
+
+@click.command(name="annotate")
+@click.option(
+    "--from-clustered-h5ad",
+    "clustered_h5ads",
+    multiple=True,
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    help="Published <sid>_clustered.h5ad (table cells, layers['counts']); "
+    "repeat once per platform of the pair.",
+)
+@click.option(
+    "--prepared-dir",
+    type=click.Path(path_type=Path, exists=True, file_okay=False),
+    default=None,
+    help="CLUSTERING_SQUIDPY_PREPARE output (manifest.json + prepared H5ADs).",
+)
+@click.option("--species", type=_SPECIES, required=True)
+@click.option("--pair-id", default=None, help="Default: from the results path.")
+@click.option("--segmentation", default=None, help="Default: from the results path.")
+@click.option(
+    "--store",
+    type=click.Path(path_type=Path, file_okay=False, exists=True),
+    default=None,
+    help="Reference store (default: the annotation config's reference_store).",
+)
+@click.option(
+    "--store-large",
+    type=click.Path(path_type=Path, file_okay=False, exists=True),
+    default=None,
+    help="Store for panels above 1,000 genes.",
+)
+@click.option(
+    "--references",
+    default=None,
+    help="Comma-separated reference ids to map (default: every primary and "
+    "secondary reference the panel requires).",
+)
+@click.option(
+    "--bundle",
+    "bundle_values",
+    multiple=True,
+    help="REFERENCE_ID=BUNDLE_DIR (or RUN_ID=BUNDLE_DIR, e.g. "
+    "whb_frontal_supc_clus_setc=...) instead of the store lookup.",
+)
+@click.option(
+    "--bundle-ref",
+    "bundle_ref_paths",
+    multiple=True,
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    help="bundle_ref.json from annotation-reference-prep (repeatable).",
+)
+@click.option(
+    "--panel-dir",
+    type=click.Path(path_type=Path, exists=True, file_okay=False),
+    default=None,
+    help="annotation-panel output (panel_genes*.json, required_bundles.json); "
+    "default: computed from the inputs into <out>/panel.",
+)
+@click.option(
+    "--out",
+    "output_dir",
+    type=click.Path(path_type=Path, file_okay=False),
+    required=True,
+    help="Output directory (never inside a results tree).",
+)
+@click.option(
+    "--annotation-config",
+    "annotation_config_path",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    default=None,
+    help="annotation_config.json (AnnotationConfig); default: species defaults.",
+)
+@click.option(
+    "--clustering-config",
+    "clustering_config_path",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    default=None,
+    help="clustering_squidpy_config.json of the prepared directory (pair id, "
+    "sample platforms, min_counts).",
+)
+@click.option(
+    "--min-counts",
+    type=click.IntRange(min=0),
+    default=None,
+    help="Table-cell threshold (the clustering min_counts; default: the "
+    "--clustering-config value, else 10).",
+)
+@click.option(
+    "--n-processors",
+    type=click.IntRange(min=1),
+    default=None,
+    help="MapMyCells processes (default: $MERXEN_ANNOTATION_MAP_N_PROCESSORS or 6).",
+)
+@click.option(
+    "--work-dir",
+    type=click.Path(path_type=Path, file_okay=False),
+    default=None,
+    help="Scratch for queries and extended JSONs (default: <out>/.work).",
+)
+@click.option(
+    "--keep-extended-json/--no-keep-extended-json",
+    default=None,
+    help="Keep the gzipped extended JSON (default: the config's).",
+)
+@click.option(
+    "--reuse/--no-reuse",
+    default=None,
+    help="Reuse identical published runs (default: the config's reuse_published).",
+)
+@click.option(
+    "--reuse-from",
+    type=click.Path(path_type=Path, exists=True, file_okay=False),
+    default=None,
+    help="Directory of a published map_manifest.json (default: --out).",
+)
+@click.option(
+    "--gene-id-fallback-csv",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    default=None,
+    help="Local gene table for symbol -> Ensembl fallback (M0e).",
+)
+@click.option(
+    "--platforms",
+    default=None,
+    help="Comma-separated platforms to map (default: all inputs).",
+)
+@click.option(
+    "--no-provisional",
+    is_flag=True,
+    help="Skip the provisional raw-threshold ct_* parquet.",
+)
+@click.option(
+    "--allow-refused-panel",
+    is_flag=True,
+    help="For a refused panel, write map_manifest.json without runs and exit "
+    "0 instead of failing (pipeline runs: RESOLVE writes statuses only).",
+)
+@click.option(
+    "--require-bundle-refs",
+    is_flag=True,
+    help="Map only the bundles given with --bundle-ref / --bundle: fail "
+    "instead of looking a missing one up in the store (pipeline runs).",
+)
+@click.option(
+    "--results-root",
+    "results_roots",
+    multiple=True,
+    type=click.Path(path_type=Path, file_okay=False),
+    help="A results tree --out and --work-dir must stay out of (repeatable; "
+    "the inputs' own results trees are always protected).",
+)
+def annotate_command(
+    clustered_h5ads: tuple[Path, ...],
+    prepared_dir: Path | None,
+    species: str,
+    pair_id: str | None,
+    segmentation: str | None,
+    store: Path | None,
+    store_large: Path | None,
+    references: str | None,
+    bundle_values: tuple[str, ...],
+    bundle_ref_paths: tuple[Path, ...],
+    panel_dir: Path | None,
+    output_dir: Path,
+    annotation_config_path: Path | None,
+    clustering_config_path: Path | None,
+    min_counts: int | None,
+    n_processors: int | None,
+    work_dir: Path | None,
+    keep_extended_json: bool | None,
+    reuse: bool | None,
+    reuse_from: Path | None,
+    gene_id_fallback_csv: Path | None,
+    platforms: str | None,
+    no_provisional: bool,
+    allow_refused_panel: bool,
+    require_bundle_refs: bool,
+    results_roots: tuple[Path, ...],
+) -> None:
+    """Map published or prepared samples with MapMyCells (MAP step, plan §3.3).
+
+    Writes <out>/<platform>/<sid>_mmc_<run_id>.parquet (tidy per cell x
+    level), <sid>_ct_provisional.parquet (raw-threshold labels, provisional
+    until RESOLVE) and map_manifest.json; never writes into the inputs'
+    results tree.
+    """
+    from merxen.annotation.mapmycells_engine import MmcEngineError
+    from merxen.annotation.pipeline import MapError
+
+    try:
+        with _clean_errors():
+            _annotate(
+                clustered_h5ads=clustered_h5ads,
+                prepared_dir=prepared_dir,
+                species=species,
+                pair_id=pair_id,
+                segmentation=segmentation,
+                store=store,
+                store_large=store_large,
+                references=references,
+                bundle_values=bundle_values,
+                bundle_ref_paths=bundle_ref_paths,
+                panel_dir=panel_dir,
+                output_dir=output_dir,
+                annotation_config_path=annotation_config_path,
+                clustering_config_path=clustering_config_path,
+                min_counts=min_counts,
+                n_processors=n_processors,
+                work_dir=work_dir,
+                keep_extended_json=keep_extended_json,
+                reuse=reuse,
+                reuse_from=reuse_from,
+                gene_id_fallback_csv=gene_id_fallback_csv,
+                platforms=platforms,
+                write_provisional=not no_provisional,
+                allow_refused_panel=allow_refused_panel,
+                require_bundle_refs=require_bundle_refs,
+                results_roots=results_roots,
+            )
+    except (MapError, MmcEngineError) as error:
+        raise click.ClickException(f"{type(error).__name__}: {error}") from error
+
+
+def _annotate(
+    *,
+    clustered_h5ads: tuple[Path, ...],
+    prepared_dir: Path | None,
+    species: str,
+    pair_id: str | None,
+    segmentation: str | None,
+    store: Path | None,
+    store_large: Path | None,
+    references: str | None,
+    bundle_values: tuple[str, ...],
+    bundle_ref_paths: tuple[Path, ...],
+    panel_dir: Path | None,
+    output_dir: Path,
+    annotation_config_path: Path | None,
+    clustering_config_path: Path | None,
+    min_counts: int | None,
+    n_processors: int | None,
+    work_dir: Path | None,
+    keep_extended_json: bool | None,
+    reuse: bool | None,
+    reuse_from: Path | None,
+    gene_id_fallback_csv: Path | None,
+    platforms: str | None,
+    write_provisional: bool,
+    allow_refused_panel: bool,
+    require_bundle_refs: bool,
+    results_roots: tuple[Path, ...] = (),
+) -> None:
+    from merxen.annotation.mapmycells_engine import MmcBundle
+    from merxen.annotation.panel import (
+        DEFAULT_MIN_COUNTS,
+        compute_panel,
+        prepared_samples,
+    )
+    from merxen.annotation.pipeline import (
+        MAPPED_ROLES,
+        RUN_SUFFIXES,
+        MapSample,
+        annotate_map,
+        check_output_outside_inputs,
+        load_required,
+        locate_bundle,
+        map_bundles,
+        published_layout,
+        refused_platforms,
+        write_refused_manifest,
+        write_view_manifest,
+    )
+    from merxen.annotation.store import BundleRef, ReferenceStore
+
+    if bool(clustered_h5ads) == (prepared_dir is not None):
+        raise click.UsageError(
+            "give --from-clustered-h5ad (one per platform) or --prepared-dir"
+        )
+    clustering = _read_json(clustering_config_path) or {}
+    if clustering and prepared_dir is None:
+        raise click.UsageError("--clustering-config goes with --prepared-dir")
+    configured_min_counts = clustering.get("min_counts")
+    if configured_min_counts is not None:
+        if min_counts is not None and min_counts != int(configured_min_counts):
+            raise click.UsageError(
+                f"--min-counts {min_counts} differs from the clustering config's "
+                f"min_counts {configured_min_counts}: the table cells must be the "
+                "clustering run's"
+            )
+        min_counts = int(configured_min_counts)
+    if min_counts is None:
+        min_counts = DEFAULT_MIN_COUNTS
+    configured_pair = clustering.get("pair_id")
+    if pair_id and configured_pair and str(configured_pair) != pair_id:
+        raise click.UsageError(
+            f"--pair-id {pair_id} differs from the clustering config's pair_id "
+            f"{configured_pair}"
+        )
+    pair_id = pair_id or (str(configured_pair) if configured_pair else None)
+    config = _load_annotation_config(annotation_config_path, species)
+    updates: dict[str, Any] = {}
+    if keep_extended_json is not None:
+        updates["keep_extended_json"] = keep_extended_json
+    if reuse is not None:
+        updates["reuse_published"] = reuse
+    if gene_id_fallback_csv is not None:
+        updates["panel"] = config.panel.model_copy(
+            update={"gene_id_fallback_csv": gene_id_fallback_csv}
+        )
+    if updates:
+        config = config.model_copy(update=updates)
+    config = config.coupled_to_clustering(min_counts)
+    wanted_platforms = (
+        {item.strip().upper() for item in platforms.split(",") if item.strip()}
+        if platforms
+        else None
+    )
+
+    samples: list[MapSample] = []
+    if clustered_h5ads:
+        for path in clustered_h5ads:
+            layout = published_layout(path)
+            if layout.platform is None:
+                raise click.BadParameter(
+                    f"cannot tell the platform of {path}",
+                    param_hint="--from-clustered-h5ad",
+                )
+            pair_id = pair_id or layout.pair_id
+            segmentation = segmentation or layout.segmentation
+            samples.append(
+                MapSample(
+                    sample_id=layout.sample_id,
+                    platform=layout.platform,
+                    h5ad_path=path.resolve(),
+                    source="clustered",
+                )
+            )
+    else:
+        assert prepared_dir is not None
+        for prepared in prepared_samples(prepared_dir, clustering_config=clustering):
+            samples.append(
+                MapSample(
+                    sample_id=prepared.sample_id,
+                    platform=prepared.platform,
+                    h5ad_path=prepared.h5ad_path.resolve(),
+                    source="prepared",
+                )
+            )
+    inputs = [sample.h5ad_path for sample in samples]
+    check_output_outside_inputs(output_dir, inputs, protected_roots=results_roots)
+    if work_dir is not None:
+        check_output_outside_inputs(
+            work_dir, inputs, protected_roots=results_roots, what="work dir"
+        )
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if panel_dir is None:
+        panel_dir = output_dir / "panel"
+        view = write_view_manifest(samples, panel_dir / "inputs")
+        compute_panel(
+            view,
+            cast("Species", species),
+            output_dir=panel_dir,
+            config=config,
+            pair_id=pair_id,
+            segmentation=segmentation,
+            min_counts=min_counts,
+        )
+    required = load_required(panel_dir, allow_refused=allow_refused_panel)
+    if required.status == "refused":
+        manifest = write_refused_manifest(
+            required,
+            config,
+            output_dir=output_dir,
+            pair_id=pair_id,
+            segmentation=segmentation,
+            n_processors=n_processors,
+        )
+        click.echo(
+            f"annotate: panel of {manifest.pair_id} {manifest.segmentation} "
+            f"refused, nothing mapped ({'; '.join(manifest.panel_reasons)}) "
+            f"-> {output_dir}"
+        )
+        return
+    reference_ids = (
+        [item.strip() for item in references.split(",") if item.strip()]
+        if references
+        else None
+    )
+
+    store_root = store or config.reference_store
+    reference_store = (
+        ReferenceStore(
+            store_root,
+            large_root=store_large or config.reference_store_large,
+            large_panel_genes=config.panel.large_panel_genes,
+        )
+        if store_root is not None
+        else None
+    )
+    overrides = _bundle_overrides(bundle_values)
+    # Refs are read here but opened only for the bundles MAP maps: a
+    # pipeline task also stages the refs of unmapped roles (the mouse
+    # region shares, M6), which hold no mapping precompute.
+    from_refs: dict[tuple[str, str | None], BundleRef] = {}
+    for ref_path in bundle_ref_paths:
+        ref = BundleRef.model_validate_json(ref_path.read_text(encoding="utf-8"))
+        from_refs[(ref.reference_id, ref.panel_hash)] = ref
+    bundles: dict[tuple[str, str | None], MmcBundle] = {}
+    for item in required.bundles:
+        if item.role not in MAPPED_ROLES:
+            continue
+        if reference_ids is not None and item.reference_id not in reference_ids:
+            continue
+        key = (item.reference_id, item.panel_hash)
+        # --bundle keys: a run id (reference id + _setc / _xpanel) or, for an
+        # annotation use, the bare reference id.
+        override_keys = [
+            item.reference_id + RUN_SUFFIXES[use.purpose]
+            for use in item.uses
+            if use.purpose in RUN_SUFFIXES
+        ]
+        override = next((overrides[k] for k in override_keys if k in overrides), None)
+        if override is not None:
+            bundles[key] = MmcBundle.from_dir(override)
+        elif key in from_refs:
+            bundles[key] = MmcBundle.from_bundle_ref(from_refs[key])
+        elif require_bundle_refs:
+            raise click.UsageError(
+                f"no --bundle-ref for {item.reference_id} on panel "
+                f"{(item.panel_hash or 'panel-independent')[:16]} "
+                "(--require-bundle-refs)"
+            )
+        elif reference_store is not None:
+            bundles[key] = locate_bundle(
+                reference_store, item.reference_id, item.panel_hash
+            )
+        else:
+            raise click.UsageError(
+                f"no bundle for {item.reference_id}: give --store, --bundle or "
+                "--bundle-ref"
+            )
+    runs = map_bundles(required, panel_dir, bundles, config, references=reference_ids)
+    if not runs:
+        raise click.UsageError("no reference to map (check --references)")
+    if wanted_platforms is not None:
+        samples = [sample for sample in samples if sample.platform in wanted_platforms]
+    manifest = annotate_map(
+        samples,
+        runs,
+        config,
+        output_dir=output_dir,
+        pair_id=pair_id,
+        segmentation=segmentation,
+        n_processors=n_processors,
+        work_dir=work_dir,
+        reuse_from=reuse_from or output_dir,
+        write_provisional=write_provisional,
+        refused_platforms=refused_platforms(required),
+    )
+    click.echo(
+        f"annotate: {len(manifest.samples)} sample(s), "
+        f"{sum(len(s.runs) for s in manifest.samples.values())} run(s) in "
+        f"{manifest.wall_time_s:.0f} s -> {output_dir}"
+    )
+    for sample_id, record in manifest.samples.items():
+        for run_id, run in record.runs.items():
+            click.echo(
+                f"- {sample_id} {run_id}: {run.n_cells} cells x {run.n_query_genes} "
+                f"genes, {'reused' if run.reused else f'{run.wall_s:.0f} s'}"
+            )

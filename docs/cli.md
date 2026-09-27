@@ -44,10 +44,11 @@ Commands:
   annotation-reference-prep
                       Get or build one reference bundle and...
   annotation-store   Inspect the annotation reference store...
+  annotate           Map published or prepared samples with...
 ```
 
-The reference-based annotation commands (`annotation-*`, plan
-`docs/plans/robust-celltype-annotation-plan.md` §3.2) take explicit
+The reference-based annotation commands (`annotation-*` and `annotate`, plan
+`docs/plans/robust-celltype-annotation-plan.md` §3.2–§3.3) take explicit
 options instead of a single `--config`.
 
 Logging is configured in the root `main()` group and streams to stderr at
@@ -491,6 +492,64 @@ requires `--dry-run` and only lists the bundles no `bundle_ref.json`,
 `map_manifest.json`, `required_bundles.json` or `*_annotation_manifest.json`
 under the results root references, plus failed and dead temporary builds.
 Delete by hand after review (OD-D4).
+
+## `merxen annotate`
+
+The annotation MAP step (plan §3.3): MapMyCells per sample and required
+bundle, standalone on published clustered H5ADs or on a
+`CLUSTERING_SQUIDPY_PREPARE` directory. It never writes (`--out` or
+`--work-dir`) into the inputs' results tree: not below an input's directory,
+not below the results root of a published clustered H5AD or of any input
+under a `<root>/<pair>/<seg>/clustering_squidpy/` layout, and not below a
+`--results-root`.
+
+```bash
+merxen annotate --species human \
+  --from-clustered-h5ad results/P7513/proseg_hybrid/clustering_squidpy/clustering_squidpy_out/merscope/P7513_MERSCOPE_clustered.h5ad \
+  --from-clustered-h5ad results/P7513/proseg_hybrid/clustering_squidpy/clustering_squidpy_out/xenium/P7513_XENIUM_clustered.h5ad \
+  --store /media/mathieubo/SSD1/MerXen/annotation_references \
+  --gene-id-fallback-csv /path/to/WHB/gene.csv \
+  --out shadow/P7513/proseg_hybrid
+```
+
+| Option | Meaning |
+|---|---|
+| `--from-clustered-h5ad PATH` | A published `<sid>_clustered.h5ad` (table cells, raw counts in `layers["counts"]`); repeat once per platform. Pair, segmentation and platform come from the results path. |
+| `--prepared-dir DIR` | Instead: prepared H5ADs (counts in `X`, every segmented object; objects below `--min-counts` are not mapped). |
+| `--store DIR`, `--store-large DIR` | Reference store(s); the bundle of each required (reference, `panel_hash`) is the one complete bundle of the current builder version. |
+| `--bundle KEY=DIR`, `--bundle-ref PATH` | Use this bundle directory (`KEY` = reference id or run id, e.g. `whb_frontal_supc_clus_setc`) or this `bundle_ref.json` instead of the store lookup. |
+| `--panel-dir DIR` | `merxen annotation-panel` output; default: the panel is computed from the inputs into `<out>/panel`. |
+| `--references IDS` | Comma-separated reference ids to map (default: every primary and secondary bundle the panel requires). |
+| `--annotation-config PATH` | `AnnotationConfig` JSON (thresholds, `xplat_sensitivity_segmentations`, `ctm_version`, ...). |
+| `--clustering-config PATH` | With `--prepared-dir`: the `clustering_squidpy_config.json` of the run (pair id, sample platforms and `min_counts`, which `--min-counts` may not contradict). |
+| `--min-counts N` | Table-cell threshold (the clustering `min_counts`; default: the clustering config's, else 10). |
+| `--n-processors N` | MapMyCells processes (default `$MERXEN_ANNOTATION_MAP_N_PROCESSORS` or 6). |
+| `--work-dir DIR` | Scratch for the query H5ADs, restricted lookups and extended JSONs (default `<out>/.work`, removed); refused inside a results tree, as `--out`. |
+| `--results-root DIR` | A results tree `--out` and `--work-dir` must stay out of (repeatable), on top of the inputs' own. |
+| `--keep-extended-json`, `--reuse/--no-reuse`, `--reuse-from DIR` | Keep the gzipped extended JSON; reuse identical runs of a `map_manifest.json` (default: `--out`). |
+| `--gene-id-fallback-csv PATH` | Local symbol → Ensembl table (M0e), as for `annotation-panel`. |
+| `--platforms`, `--no-provisional` | Map only these platforms; skip the provisional labels. |
+| `--require-bundle-refs` | Map only the bundles given with `--bundle-ref` / `--bundle`; a missing one fails instead of being looked up in the store (what the pipeline task passes: it maps exactly the bundles `ANNOTATE_REFERENCE_PREP` resolved). Refs of roles MAP does not map (`wmb_region_share`) are accepted and not opened. |
+| `--allow-refused-panel` | For a refused panel (`required_bundles.json` status `refused`), write `map_manifest.json` with `panel_status: refused`, its reasons and no runs, and exit 0 (pipeline runs: RESOLVE then writes statuses only). Without it a refused panel is an error. |
+
+MapMyCells runs as a subprocess of `merxen.analysis.mapmycells_entrypoint`
+with the validated configuration (bootstrap factor 0.5, 100 iterations,
+seed 0, raw normalisation, `cloud_safe` off, one BLAS / numba thread per
+worker, no GPU); the installed `cell_type_mapper` must be the configured
+version (1.7.2). Outputs under `--out`: `<platform>/<sid>_mmc_<run_id>.parquet`
+(one row per cell × taxonomy level: assignment, name, bootstrap and
+aggregate probability, `avg_correlation`, runner-ups 1–5 with probabilities
+and correlations, `directly_assigned`), `<platform>/<sid>_ct_provisional.parquet`
+and `map_manifest.json` ([Reference-based annotation](stages/annotation.md#mapping-merxen-annotate)).
+A run is reused when the manifest in `--reuse-from` has the same query
+fingerprint, bundle `build_hash`, engine parameters, ctm version, tidy
+schema version and (restricted) lookup, and, with `--keep-extended-json`,
+kept its extended JSON (which is copied). A manifest that cannot be read
+(the `-stub-run` one, another layout or schema version) disables reuse
+with a warning. Each use of a required bundle is a run: a `per_platform`
+pair maps each platform on its own panel plus the intersection (`_xpanel`),
+and two uses on the same gene set are mapped once and recorded under both
+run ids.
 
 ---
 
