@@ -357,3 +357,20 @@ def test_simulation_writes_its_report_for_a_bundle_without_a_self_map(
     )
     assert again["references"]["whb_frontal_supc_clus"]["reused"] is True
     assert np.isfinite(again["resources"]["wall_s"])
+
+
+def test_judged_levels_leave_out_report_only_fine_levels() -> None:
+    frame = pd.DataFrame(
+        {
+            "level": ["class", "subclass", "supertype", "nt"],
+            "status": ["emitted", "emitted", "emitted", "not_resolvable"],
+        }
+    )
+    assert simulate.judged_levels(frame, fine_levels={"supertype"}) == [
+        "class",
+        "subclass",
+    ]
+    assert simulate.judged_levels(
+        frame, fine_levels={"supertype"}, allow_fine_levels=True
+    ) == ["class", "subclass", "supertype"]
+    assert simulate.fine_levels_of(Path("/nonexistent")) == set()
