@@ -161,9 +161,13 @@ checkout's `src/` first on `PYTHONPATH`) after checking that the installed
 run's. A refused panel is not a task failure: MAP writes a `map_manifest.json`
 with `panel_status: refused` and its reasons, maps nothing, and RESOLVE (M4)
 will write statuses only. With `annotation_reuse_published` a run whose
-query fingerprint, `build_hash`, engine parameters and ctm version equal the
-published manifest's is copied from `annotation_map/annotation_map_out/`
-instead of re-mapped, because dwight prunes work directories. Until M5 wires
+query fingerprint, `build_hash`, engine parameters, ctm version, tidy schema
+version and (restricted) lookup equal the published manifest's is copied
+from `annotation_map/annotation_map_out/` instead of re-mapped, because
+dwight prunes work directories; with `annotation_keep_extended_json` the
+published run must have kept its JSON too. A published manifest that cannot
+be read (the `-stub-run` manifest, an older or newer layout) only disables
+reuse, with a warning. Until M5 wires
 `map_first` (hook H5, `CLUSTERING_MAP_FIRST`), the preflight refuses
 `map_first` runs, so MAP runs only in the workflow tests; the shadow
 evaluation uses the standalone command.
@@ -198,11 +202,19 @@ prepared H5ADs (`per_platform` panels, label-free set c) arrives with the
 ## Mapping (`merxen annotate`)
 
 The MAP step (`merxen.annotation.pipeline.annotate_map`; plan §3.3) maps
-each sample of a pair × segmentation onto every bundle its
+each sample of a pair × segmentation onto every use of a bundle its
 `required_bundles.json` lists with a primary or secondary role: WHB and
-SEA-AD on the annotation panel, WHB on set c for the segmentations in
-`annotation_xplat_sensitivity_segmentations` (`proseg_hybrid` by default),
-and WHB on the intersection panel for `per_platform` pairs. The standalone
+SEA-AD on the sample's annotation panel, WHB on set c for the segmentations
+in `annotation_xplat_sensitivity_segmentations` (`proseg_hybrid` by
+default), and WHB on the intersection panel for `per_platform` pairs. A
+bundle is listed once per (reference, panel hash) with every purpose in
+`uses`; `map_bundles` makes one run per use, on that use's panel file (whose
+platforms decide which samples it maps) and with that purpose's run id. When
+two uses share a gene set (a small MERSCOPE panel inside a Xenium panel
+makes the intersection equal the MERSCOPE panel; set c can equal set a) the
+query is mapped once and recorded under both run ids (`same_mapping_as`). A
+sample that no run applies to fails the task, unless its own platform panel
+was refused (`panel_status: refused` for that sample). The standalone
 command runs it on published clustered H5ADs (options in
 [CLI](../cli.md#merxen-annotate)); `CLUSTERING_SQUIDPY_ANNOTATE_MAP` runs it
 on the prepared H5ADs of a `map_first` run (see
@@ -239,8 +251,10 @@ Per sample:
 
 The provisional labels apply the raw thresholds only (WHB lineage / broad /
 NT 0.73 on the bootstrap probability summed over the assigned node's class,
-supercluster 0.69, SEA-AD subclass 0.55 below 60 counts and 0.45 from 60;
-WMB class 0.90, subclass 0.80), the hard floor (`min_counts`), sinks and
+supercluster 0.69, SEA-AD subclass 0.55 below `second_vote_below_counts`
+(60) and 0.45 from it on the subclass `aggregate_probability`, E2's
+definition; WMB class 0.90, subclass 0.80; probabilities are stored as
+float32, so a threshold test allows 1e-6 below the threshold), the hard floor (`min_counts`), sinks and
 frontal-cortex plausibility from the bundle vocabulary and the parent
 chain. They have no floors, resolvability, dataset gate, second vote or COP
 rule and are for inspection only; the RESOLVE step (M4) replaces them and

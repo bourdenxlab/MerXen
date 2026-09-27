@@ -152,7 +152,7 @@ process CLUSTERING_SQUIDPY_ANNOTATE_MAP {
     // PREP never caches and re-writes byte-identical bundle refs for an
     // unchanged bundle in a new work directory, so only content hashing
     // keeps an unchanged MAP cached (-resume). It hashes the prepared H5ADs
-    // too: seconds per pair, against about an hour of mapping.
+    // too: seconds per pair, against 3-5 min of mapping (M3 shadow runs).
     cache "deep"
 
     publishDir { "${params.outdir}/${pair_id}/${segmentation}/annotation_map" }, mode: "copy", overwrite: true
