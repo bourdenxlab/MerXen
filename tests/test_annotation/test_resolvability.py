@@ -1114,6 +1114,33 @@ def test_select_test_cells_caps_strata_and_keeps_rare_types() -> None:
     assert counts["rare"] == 12
     assert counts.sum() <= 1212
     assert counts["big"] == counts["mid"] == 600
+    assert res.stratum_cap(obs["type"].value_counts(), 1000, 1212) == 600
+
+
+def test_top_up_fills_thin_strata_to_the_cap_within_the_room() -> None:
+    # Extra candidates top up each stratum to the test set's cap (5) given
+    # what the held-out donor already holds; "full" is at the cap already.
+    candidates = pd.DataFrame(
+        {"type": ["thin"] * 10 + ["none"] * 2 + ["new"] * 4 + ["full"] * 3},
+        index=[f"x{index}" for index in range(19)],
+    )
+    have = {"thin": 3, "none": 0, "full": 5}
+    chosen = res.top_up_test_cells(
+        candidates, stratum="type", have=have, cap=5, room=None, seed=0
+    )
+    counts = candidates.loc[chosen, "type"].value_counts().to_dict()
+    assert counts == {"thin": 2, "none": 2, "new": 4}
+    # With room for 5 more cells the cap is lowered (water filling) to 3:
+    # thin 3 + 0, none 0 + 2, new 0 + 3.
+    fitted = res.top_up_test_cells(
+        candidates, stratum="type", have=have, cap=5, room=5, seed=0
+    )
+    counts = candidates.loc[fitted, "type"].value_counts().to_dict()
+    assert counts == {"none": 2, "new": 3}
+    again = res.top_up_test_cells(
+        candidates, stratum="type", have=have, cap=5, room=5, seed=0
+    )
+    assert list(again) == list(fitted)
 
 
 # --------------------------------------------------------------------------

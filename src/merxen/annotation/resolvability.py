@@ -98,9 +98,10 @@ logger = logging.getLogger(__name__)
 # composition weights per depth bin, rare types pooled at broad-class level,
 # trimmed; Kish n and the largest weight share per decision; the WHB COP
 # rule on the broad level; per-platform packaged floors in the summary.
-# 3 (H18 follow-up, user decision 2026-09-27): pooled deep bins (the gate-P
+# 3 (H18 follow-up, user decisions 2026-09-27): pooled deep bins (the gate-P
 # pooling with n_min = min_confident_n replaces the D_max inheritance;
-# insufficient_calls) and the point precision joins the Wilson rule.
+# insufficient_calls), the point precision joins the Wilson rule, and the
+# human held-out test set gains other-region non-neuronal cells.
 RESOLVABILITY_VERSION: Final = 3
 SUMMARY_SCHEMA_VERSION: Final = 1
 RESOLVABILITY_FILE: Final = "resolvability.parquet"
@@ -738,10 +739,7 @@ def select_test_cells(
     """
     frame = obs if eligible is None else obs[np.asarray(eligible, dtype=bool)]
     sizes = frame.groupby(stratum, observed=True).size()
-    cap = int(max_per_stratum)
-    if n_max is not None:
-        while cap > 0 and int(np.minimum(sizes, cap).sum()) > n_max:
-            cap -= 1
+    cap = stratum_cap(sizes, max_per_stratum, n_max)
     rng = np.random.default_rng(int(seed))
     chosen: list[str] = []
     for _, group in frame.groupby(stratum, observed=True, sort=True):
@@ -752,6 +750,81 @@ def select_test_cells(
         chosen.extend(str(value) for value in group.index[np.sort(picked)])
     keep = set(chosen)
     return pd.Index([str(value) for value in obs.index if str(value) in keep])
+
+
+def stratum_cap(
+    sizes: pd.Series | Mapping[str, int], max_per_stratum: int, n_max: int | None
+) -> int:
+    """Return the per-stratum cap of ``select_test_cells`` (water filling).
+
+    Args:
+        sizes: Candidate cells per stratum.
+        max_per_stratum: Largest share of one stratum (1,000).
+        n_max: Largest total, or ``None``.
+
+    Returns:
+        ``max_per_stratum``, lowered until the capped strata fit ``n_max``.
+    """
+    values = np.asarray(list(dict(sizes).values()), dtype=np.int64)
+    cap = int(max_per_stratum)
+    if n_max is not None:
+        while cap > 0 and int(np.minimum(values, cap).sum()) > n_max:
+            cap -= 1
+    return cap
+
+
+def top_up_test_cells(
+    candidates: pd.DataFrame,
+    *,
+    stratum: str,
+    have: Mapping[str, int],
+    cap: int,
+    room: int | None,
+    seed: int,
+) -> pd.Index:
+    """Top strata of a test set up to a cap from extra candidates (§8.3 step 1).
+
+    The human held-out donor holds few cells of the thin non-neuronal
+    superclusters (e.g. 23 Vascular and 5 Fibroblast on set a), so they are
+    topped up from cells of other dissections (user decision 2026-09-27; E2
+    drew non-neuronal test cells from neocortex outside the frontal set),
+    capped per stratum like the rest: a stratum holding ``have`` test cells
+    gains at most ``cap - have``. When the top-up would exceed ``room``, the
+    cap of the topped-up strata is lowered (water filling) until it fits.
+
+    Args:
+        candidates: Extra candidate cells (index = cell id).
+        stratum: Column to stratify on (human supercluster).
+        have: Test cells each stratum already holds.
+        cap: The per-stratum cap of the test set (``stratum_cap``).
+        room: Cells the test set may still take, or ``None``.
+        seed: Sampling seed.
+
+    Returns:
+        Selected candidate ids, in ``candidates`` order.
+    """
+    available = candidates.groupby(stratum, observed=True).size()
+
+    def taken(limit: int) -> dict[str, int]:
+        return {
+            str(name): min(int(count), max(0, limit - int(have.get(str(name), 0))))
+            for name, count in available.items()
+        }
+
+    limit = int(cap)
+    if room is not None:
+        while limit > 0 and sum(taken(limit).values()) > max(0, int(room)):
+            limit -= 1
+    takes = taken(limit)
+    rng = np.random.default_rng(int(seed))
+    chosen: set[str] = set()
+    for name, group in candidates.groupby(stratum, observed=True, sort=True):
+        take = takes.get(str(name), 0)
+        if take <= 0:
+            continue
+        picked = rng.choice(len(group), size=take, replace=False)
+        chosen.update(str(value) for value in group.index[np.sort(picked)])
+    return pd.Index([str(value) for value in candidates.index if str(value) in chosen])
 
 
 def write_test_cells(test: HeldOutCells, directory: Path) -> dict[str, Any]:
