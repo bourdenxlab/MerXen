@@ -95,7 +95,10 @@ logger = logging.getLogger(__name__)
 # 2: set c from the curated family list, state and negative genes by ID,
 # ID-only bundle tables, the validated WMB marker universe, the self-map
 # test-cell source, read-only bundles.
-ANNOTATION_BUILDER_VERSION: Final = 2
+# 3: the resolvability self-map (M3b): the whb_frontal_supc_clus_ho and
+# wmb_selfmap_testset test-set builders, and resolvability tables, summary
+# and trust constraint in the primary and secondary bundles.
+ANNOTATION_BUILDER_VERSION: Final = 3
 # Version of the build-hash payload and of bundle.json.
 # 2: no panel symbols, MAP bootstrap or resolvability settings in the payload.
 STORE_SCHEMA_VERSION: Final = 2
@@ -441,6 +444,8 @@ class BuildContext:
         sources: Source records by name.
         config: The annotation config, when the caller has one.
         copied: Files copied with ``copy_source`` so far.
+        store: The store building the bundle; builders get the bundles they
+            depend on (the resolvability test sets) through it.
     """
 
     spec: AnnotationReferenceSpec
@@ -452,6 +457,7 @@ class BuildContext:
     sources: dict[str, SourceRecord]
     config: AnnotationConfig | None = None
     copied: list[CopiedFile] = field(default_factory=list)
+    store: ReferenceStore | None = None
 
     def copy_source(self, source: str | Path, bundle_path: str | Path) -> CopiedFile:
         """Copy a source file into the bundle and verify its checksum.
@@ -680,10 +686,10 @@ def build_hash_payload(
       matched by ID, so two panels with the same IDs share one bundle;
     * the MAP bootstrap settings (``bootstrap_factor``,
       ``bootstrap_iteration``, ``rng_seed``), which MAP reads from the spec;
-    * the resolvability settings: no M2 builder writes resolvability
-      outputs; M3b adds the self-map recipe to this payload (with an
-      ``ANNOTATION_BUILDER_VERSION`` bump) when its builder does, and
-      RESOLVE-time knobs (thresholds, trust, emission) never enter it.
+    * the RESOLVE-time resolvability knobs (targets, margins, the Wilson,
+      coverage and confident-call minimums, trust): the self-map recipe and
+      its test set enter ``builder_params`` (M3b, builder version 3), and
+      the decisions are re-derived from the cached tables at RESOLVE.
 
     Args:
         spec: The reference spec.
@@ -760,8 +766,10 @@ def recorded_settings(
         config: The annotation config, if any.
 
     Returns:
-        The MAP bootstrap settings and, for a primary reference, the
-        resolvability settings and recipe version, for provenance only.
+        The MAP bootstrap settings and, for a primary or secondary
+        reference, the resolvability settings and recipe version, for
+        provenance only (the self-map recipe itself is hashed through the
+        builder parameters).
     """
     settings: dict[str, Any] = {
         "mapping": {
@@ -771,12 +779,12 @@ def recorded_settings(
         },
         "resolvability": None,
     }
-    if config is not None and spec.role == "primary":
+    if config is not None and spec.role in ("primary", "secondary"):
         recipe = config.resolvability.recipe
         settings["resolvability"] = {
             "recipe": recipe,
             "recipe_version": RESOLVABILITY_RECIPE_VERSIONS.get(recipe),
-            "outputs_in_bundle": False,
+            "outputs_in_bundle": bool(config.resolvability.enabled),
             "settings": config.resolvability.model_dump(mode="json"),
         }
     native: dict[str, Any] = _json_native(settings)
@@ -1170,6 +1178,7 @@ class ReferenceStore:
                 scratch_dir=scratch_dir,
                 sources=request.sources,
                 config=config,
+                store=self,
             )
             builder_output = dict(builder.build(context) or {})
             _check_sources_unchanged(request.sources)

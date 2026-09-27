@@ -40,11 +40,14 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
+    3: "955ee8e9dc0641aaa394ebf82bc5d58dc27f8e0389e48f60838d144b614165ca",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
     "2: first pin (set c from the curated family list, ID-only bundle tables, "
     "validated WMB universe, self-map test-cell source, read-only bundles)",
+    "3: the resolvability self-map (held-out WHB and WMB test-set builders, "
+    "self-map tables in primary and secondary bundles); resolvability.py pinned",
 )
 
 
@@ -69,8 +72,16 @@ def _dump(node: ast.AST) -> str:
 
 
 def builder_code_fingerprint() -> str:
-    """Return the sha256 of the builder-relevant code, docstrings stripped."""
-    parts = [_dump(ast.parse((SRC / "reference.py").read_text()))]
+    """Return the sha256 of the builder-relevant code, docstrings stripped.
+
+    ``resolvability.py`` writes the self-map tables into primary and
+    secondary bundles (M3b), so it is covered too; a change there that
+    alters those tables also bumps ``RESOLVABILITY_VERSION`` (hashed).
+    """
+    parts = [
+        _dump(ast.parse((SRC / "reference.py").read_text())),
+        _dump(ast.parse((SRC / "resolvability.py").read_text())),
+    ]
     store_tree = ast.parse((SRC / "store.py").read_text())
     by_name = {
         node.name: node
