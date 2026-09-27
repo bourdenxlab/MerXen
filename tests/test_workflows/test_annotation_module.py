@@ -1594,6 +1594,10 @@ def test_prepare_only_stub_run_builds_bundles_and_runs_no_stage(tmp_path: Path) 
         tmp_path,
         annotation_reference_store=str(store),
         annotation_whb_region_precompute_source=str(region),
+        # The held-out self-map sources the preflight requires while
+        # annotation_resolvability is true (stand-in directories).
+        annotation_whb_h5ad_dir=str(region),
+        annotation_whb_metadata_dir=str(region),
     )
     completed = subprocess.run(
         [
