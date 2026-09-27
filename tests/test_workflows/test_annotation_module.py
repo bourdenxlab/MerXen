@@ -781,6 +781,8 @@ def _cases(root: Path, params: dict[str, Any]) -> dict[str, dict[str, Any]]:
                 "annotation_human_references": "whb_frontal_supc_clus",
                 "annotation_panel_mode": "per_platform",
                 "annotation_gene_id_fallback_csv": str(gene_list),
+                "annotation_human_gene_table": str(gene_list),
+                "annotation_mouse_gene_table": str(gene_list),
                 "annotation_xplat_sensitivity_segmentations": "proseg_hybrid,reseg",
                 "annotation_resolvability": False,
             },
@@ -1306,6 +1308,7 @@ def test_annotation_config_json_validates_in_python(
     else:
         assert config.anatomical_region == "frontal_cortex"
         assert config.panel.gene_id_fallback_csv is None
+        assert config.panel.gene_tables == {}
 
 
 @needs_nextflow
@@ -1316,6 +1319,9 @@ def test_annotation_config_json_follows_the_params(harness: dict[str, Any]) -> N
     ]
     assert config.panel.panel_mode == "per_platform"
     assert config.panel.gene_id_fallback_csv is not None
+    # Both species' gene tables reach the exact-case species test (plan §8.4).
+    assert set(config.panel.gene_tables) == {"human", "mouse"}
+    assert all(path.is_absolute() for path in config.panel.gene_tables.values())
     assert config.xplat_sensitivity_segmentations == ["proseg_hybrid", "reseg"]
     assert config.resolvability.enabled is False
 

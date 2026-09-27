@@ -187,6 +187,16 @@ class AnnotationReferences {
                 panel[field] = absolute(path)
             }
         }
+        def geneTables = [:]
+        ["human", "mouse"].each { tableSpecies ->
+            def path = pathText(params?.get("annotation_${tableSpecies}_gene_table".toString()))
+            if (path) {
+                geneTables[tableSpecies] = absolute(path)
+            }
+        }
+        if (geneTables) {
+            panel.gene_tables = geneTables
+        }
         def config = [
             enabled: true,
             species: speciesName,
