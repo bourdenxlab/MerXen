@@ -490,8 +490,9 @@ Path: `${outdir}/<pair_id>/<analysis_segmentation>/mapmycells/`
 
 ### Annotation reference bundles (in development)
 
-Written only by `--annotation_prepare_only` runs (and, from milestone M5, by
-`map_first` runs); a default run writes neither directory. See
+Written only by `--annotation_prepare_only` runs (panel and bundles) and by
+`map_first` runs (which stay refused until milestone M5 wires them); a
+default run writes none of these directories. See
 [Reference-based annotation](stages/annotation.md#pipeline-processes).
 
 | Path | Contents |
@@ -501,6 +502,11 @@ Written only by `--annotation_prepare_only` runs (and, from milestone M5, by
 | `<pair_id>/<segmentation>/annotation_panel/annotation_panel_out/required_bundles.json` | The (reference, panel) bundles this pair × segmentation needs, with `n_required`. |
 | `<pair_id>/<segmentation>/annotation_panel/annotation_panel_out/annotation_config.json` | The annotation config both commands read, as written from the pipeline params. |
 | `annotation_reference_prep/<reference_id>/<panel_hash or panel_independent>/bundle_ref.json` | The bundle `ANNOTATE_REFERENCE_PREP` got or built: `build_hash`, bundle `path` and store root (identical bytes on every re-run of an unchanged bundle; the task log says whether it was built or reused). |
+| `<pair_id>/<segmentation>/annotation_map/annotation_map_out/<platform>/<sid>_mmc_<run_id>.parquet` | `CLUSTERING_SQUIDPY_ANNOTATE_MAP` (`map_first` only): one row per mapped table cell × taxonomy level of one MapMyCells run (assignment, name, bootstrap and aggregate probability, correlation, five runner-ups); `run_id` is the reference id, `+_setc` for set c, `+_xpanel` for a `per_platform` pair's intersection run. Run metadata (`build_hash`, query fingerprint, engine parameters, ctm version, tidy schema version) in the parquet schema. |
+| `<pair_id>/<segmentation>/annotation_map/annotation_map_out/<platform>/<sid>_ct_provisional.parquet` | One row per segmented object: identity, `total_counts`, `n_genes`, `in_table`, **provisional** raw-threshold `ct_<level>_*` and `ct_final_*` labels, and the raw engine columns `mmc_<reference>_<level>_*`. Marked provisional in the name and the parquet metadata; never feeds the clustered H5AD (RESOLVE, M4, replaces it). |
+| `<pair_id>/<segmentation>/annotation_map/annotation_map_out/<platform>/<sid>_mmc_<run_id>.extended.json.gz` | The extended MapMyCells JSON, only with `annotation_keep_extended_json`. |
+| `<pair_id>/<segmentation>/annotation_map/annotation_map_out/map_manifest.json` | Per sample and run: input identity, table cells, controls removed, query fingerprint, bundle `build_hash` and lookup digests, engine parameters, ctm version and commit, wall time, peak RSS, reuse provenance (`reused`, `reused_from`, `same_mapping_as`); `panel_status` (`refused` with `panel_reasons` and no runs). The reuse source of the next run (`annotation_reuse_published`). |
+| `<pair_id>/<segmentation>/annotation_map/annotation_map_out/logs/`, `annotation_config.json` | Mapper stdout / stderr / ctm logs per run; the annotation config the task read. |
 
 The bundles themselves live in the reference store
 (`annotation_reference_store`, default `${outdir}/annotation_references`),

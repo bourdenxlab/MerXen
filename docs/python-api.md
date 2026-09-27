@@ -370,6 +370,52 @@ Reference-based annotation (plan `docs/plans/robust-celltype-annotation-plan.md`
   `broad_class_detection`, `negative_gene_table`, `node_vocab_table`,
   `write_panel_stub_h5ad`, `merfish_region`, `region_share_tables`.
 
+### `annotation.mapmycells_engine` — [mapmycells_engine.py](../src/merxen/annotation/mapmycells_engine.py)
+
+The MapMyCells engine of the MAP step (plan §3.3); `cell_type_mapper` runs
+in a subprocess (`merxen.analysis.mapmycells_entrypoint`) and is never
+imported here.
+
+- `MmcEngineParams` — bootstrap factor 0.5, 100 iterations, seed 0, raw
+  normalisation, `n_processors`; `reuse_key()` is the reuse identity;
+  `from_reference_spec(spec, n_processors=...)`.
+- `MmcBundle` — a complete store bundle (`from_dir`, `from_bundle_ref`):
+  precompute, tree, lookup, levels, `drop_level`, vocab snapshot.
+- `run_mmc(query_h5ad, bundle, params, output_parquet=..., work_dir=...,
+  expected_ctm_version=...)` — one mapping with one BLAS / numba thread per
+  worker and no GPU; checks the recorded settings, writes the tidy parquet
+  and deletes the extended JSON (or keeps it gzipped).
+- `check_ctm_version`, `installed_ctm_version`, `ctm_commit`,
+  `mmc_environment`, `build_mmc_command`.
+- `query_fingerprint(cell_ids, total_counts, gene_ids)` — the reuse key of a
+  query; `write_query_h5ad`; `restrict_lookup` (a lookup restricted to the
+  genes a dataset has, parents without markers auto-collapsed).
+- `parse_extended_json_tidy`, `write_tidy_parquet`, `read_tidy_parquet`,
+  `level_frame`, `TIDY_SCHEMA_VERSION` — the tidy per cell × level table;
+  `aggregate_parent_probability` (lineage / broad / NT mass over the
+  assigned node's class).
+
+### `annotation.pipeline` — [pipeline.py](../src/merxen/annotation/pipeline.py)
+
+`annotate_map` and its inputs (`merxen annotate`, `CLUSTERING_SQUIDPY_ANNOTATE_MAP`):
+
+- `annotate_map(samples, runs, config, output_dir=..., reuse_from=...)` —
+  maps every sample on the runs that apply to its platform, writes the tidy
+  parquets, the provisional `ct_*` parquet and `map_manifest.json`
+  (`MapManifest`, `MapSampleRecord`, `MapRunRecord`); reuses identical
+  published runs; maps a query shared by two runs once.
+- `map_bundles(required, panel_dir, bundles, config)` — one `MapBundle` per
+  use of a required bundle (annotation, `_setc`, `_xpanel`).
+- `load_samples`, `build_sample_query` (`SampleQuery`), `read_h5ad_counts`;
+  `locate_bundle(store, reference_id, panel_hash)`, `bundle_ref_bundle`.
+- `provisional_labels`, `engine_columns`, `write_provisional_parquet` — the
+  raw-threshold labels (provisional until RESOLVE).
+- `load_map_manifest`, `load_published_manifest` (reuse source; an
+  unreadable manifest returns `None`), `load_required`,
+  `write_refused_manifest`, `refused_platforms`.
+- `published_layout`, `results_root_of`, `check_output_outside_inputs` —
+  the standalone command never writes into a results tree.
+
 ### `annotation.shadow` — [shadow.py](../src/merxen/annotation/shadow.py)
 
 M3 shadow evaluation (plan §5.2–§5.5, §14):
@@ -377,8 +423,12 @@ M3 shadow evaluation (plan §5.2–§5.5, §14):
 - Compositions: `soft_broad_matrix`, `soft_matrix_from_provisional`,
   `one_hot_broad_matrix`, `argmax_broad_names`, `composition_shares`,
   `jensen_shannon_distance`.
-- Spatial CIs: `tile_codes`, `tile_sums`, `block_bootstrap_jsd`.
-- SEA-AD 7-class calls: `seaad_broad_calls`.
+- Spatial CIs: `tile_codes`, `shared_tile_codes` (one grid over two
+  co-registered sections), `tile_sums`, `block_bootstrap_jsd`
+  (`resampling="joint"`, the registered method: one draw of tile locations
+  for both sections; `"independent"` as a sensitivity).
+- SEA-AD 7-class calls: `seaad_broad_calls` (E2's definition with
+  `class_level`: class bp for neurons, class bp × subclass mass otherwise).
 - Shadow v1 human rules: `evaluate_human_rules` (with `HumanRuleInputs`,
   `rule_inputs_from_provisional`, `FloorLookup`, `SECOND_VOTE_VARIANTS`) and
   `dataset_gate`.
@@ -394,7 +444,8 @@ M3 shadow evaluation (plan §5.2–§5.5, §14):
   `depth_grid`, `distinct_gene_quantiles`, `expected_genes_quantile`,
   `realised_rates`; E8 `occupied_area_mm2`, `foreign_marker_fraction`,
   `mouse_confidence`; variant re-maps `published_queries`,
-  `map_query_variant`, `whb_labels_from_tidy`. The `seaad_or_ll` second vote
+  `map_query_variant` (reuses a parquet only when its metadata records the
+  same variant, `variant_sha256`), `whb_labels_from_tidy`. The `seaad_or_ll` second vote
   is the v1.1 degraded-mode row (§5.3); `HumanRuleInputs.ll_scheme` selects
   E2's or the 7-class LL comparison.
 
