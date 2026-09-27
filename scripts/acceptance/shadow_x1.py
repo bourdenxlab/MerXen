@@ -49,7 +49,6 @@ from merxen.annotation.pipeline import load_map_manifest
 from merxen.annotation.shadow import (
     X1_LABEL_MIN_BP,
     argmax_broad_names,
-    block_bootstrap_jsd,
     composition_shares,
     evaluate_human_rules,
     map_query_variant,
@@ -61,8 +60,6 @@ from merxen.annotation.shadow import (
     reference_pseudobulk_log2_factors,
     rule_inputs_from_provisional,
     soft_matrix_from_provisional,
-    tile_codes,
-    tile_sums,
     whb_labels_from_tidy,
 )
 
@@ -72,7 +69,9 @@ from shadow_baselines import (  # noqa: E402
     PAIRS,
     PLATFORMS,
     Sample,
+    SectionTiles,
     _clustered_path,
+    add_fallback_arguments,
     load_sample,
 )
 
@@ -83,10 +82,6 @@ SET_A_RUN = "whb_frontal_supc_clus"
 SET_C_RUN = "whb_frontal_supc_clus_setc"
 LABELLINGS = ("set_a", "set_c", "x1")
 KINDS = ("soft", "argmax", "confident")
-FALLBACK = (
-    "/media/mathieubo/SSD1/MerXen/mapmycells/abc_whb/expression_matrices/"
-    "WHB-10Xv3/20240330/WHB-10Xv3-Nonneurons-raw.h5ad"
-)
 
 
 def labelling_matrices(
@@ -119,7 +114,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--pairs", default=",".join(PAIRS))
     parser.add_argument("--n-processors", type=int, default=6)
     parser.add_argument("--n-bootstrap", type=int, default=200)
-    parser.add_argument("--gene-id-fallback-csv", default=FALLBACK)
+    add_fallback_arguments(parser)
     args = parser.parse_args(argv)
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
@@ -226,11 +221,7 @@ def main(argv: list[str] | None = None) -> int:
                 matrices[name], argmaxes[name], coverage[name] = labelling_matrices(
                     labels, sample, n_segmented.get(key)
                 )
-            per_platform[platform] = {
-                "sample": sample,
-                "matrices": matrices,
-                "codes": tile_codes(sample.xy),
-            }
+            per_platform[platform] = {"sample": sample, "matrices": matrices}
             row: dict[str, Any] = {
                 "pair": pair,
                 "sample_id": sample_id,
@@ -281,33 +272,58 @@ def main(argv: list[str] | None = None) -> int:
                     }
                 )
         merscope, xenium = per_platform["MERSCOPE"], per_platform["XENIUM"]
+        grid = SectionTiles.of(
+            merscope["sample"],
+            xenium["sample"],
+            np.ones(len(merscope["sample"].labels), bool),
+            np.ones(len(xenium["sample"].labels), bool),
+        )
         tiles = {
-            (name, kind): (
-                tile_sums(merscope["matrices"][name][kind], merscope["codes"]),
-                tile_sums(xenium["matrices"][name][kind], xenium["codes"]),
+            (name, kind): grid.sums(
+                merscope["matrices"][name][kind], xenium["matrices"][name][kind]
             )
             for name in LABELLINGS
             for kind in KINDS
         }
-        for (name, kind), (tiles_m, tiles_x) in tiles.items():
-            result = block_bootstrap_jsd(tiles_m, tiles_x, n_reps=args.n_bootstrap)
-            jsd_rows.append(
-                {
-                    "pair": pair,
-                    "labelling": name,
-                    "kind": kind,
-                    "held_out": pair in HELD_OUT_PAIRS,
-                    "jsd": result.jsd,
-                    "ci_low": result.ci_low,
-                    "ci_high": result.ci_high,
-                }
-            )
+        for name in LABELLINGS:
+            for kind in KINDS:
+                result, independent = grid.bootstrap(
+                    merscope["matrices"][name][kind],
+                    xenium["matrices"][name][kind],
+                    n_reps=args.n_bootstrap,
+                )
+                jsd_rows.append(
+                    {
+                        "pair": pair,
+                        "labelling": name,
+                        "kind": kind,
+                        "held_out": pair in HELD_OUT_PAIRS,
+                        "jsd": result.jsd,
+                        "ci_low": result.ci_low,
+                        "ci_high": result.ci_high,
+                        "resampling": result.resampling,
+                        "ci_low_independent": independent.ci_low,
+                        "ci_high_independent": independent.ci_high,
+                    }
+                )
         for kind in KINDS:
             for first, second in (("x1", "set_a"), ("x1", "set_c"), ("set_c", "set_a")):
                 a_m, a_x = tiles[(first, kind)]
                 b_m, b_x = tiles[(second, kind)]
-                diff = paired_block_bootstrap_jsd_difference(
-                    a_m, a_x, b_m, b_x, n_reps=args.n_bootstrap
+                independent_diff = paired_block_bootstrap_jsd_difference(
+                    a_m,
+                    a_x,
+                    b_m,
+                    b_x,
+                    n_reps=args.n_bootstrap,
+                    resampling="independent",
+                )
+                diff = (
+                    paired_block_bootstrap_jsd_difference(
+                        a_m, a_x, b_m, b_x, n_reps=args.n_bootstrap
+                    )
+                    if grid.joint
+                    else independent_diff
                 )
                 diff_rows.append(
                     {
@@ -322,6 +338,9 @@ def main(argv: list[str] | None = None) -> int:
                         "ci_low": diff.ci_low,
                         "ci_high": diff.ci_high,
                         "share_positive": diff.share_positive,
+                        "resampling": diff.resampling,
+                        "ci_low_independent": independent_diff.ci_low,
+                        "ci_high_independent": independent_diff.ci_high,
                     }
                 )
         logger.info("%s done", pair)

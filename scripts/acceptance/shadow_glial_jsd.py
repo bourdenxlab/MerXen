@@ -6,11 +6,15 @@ second vote) is decided, and changing the naming reference would need a new
 decision. For each human pair and segmentation, the MERSCOPE-vs-Xenium JSD
 of the glial composition (astrocytes, oligodendrocytes, OPC, microglia,
 renormalised) and of the seven broad classes is computed with WHB's soft
-composition (§5.5) and with SEA-AD's (subclass bootstrap probabilities plus
-runner-ups through the SEA-AD vocab; ``seaad_soft_broad_matrix``), and with
-both argmax labellings. The difference WHB - SEA-AD gets a paired spatial
-block-bootstrap CI (the same tile draws for both references, 200
-replicates). Writes ``glial_jsd.csv`` and ``glial_compositions.csv``.
+composition (§5.5) and with SEA-AD's (class bootstrap probability x the
+subclass bootstrap probabilities plus runner-ups through the SEA-AD vocab,
+E2's root-level definition; ``seaad_soft_broad_matrix``), and with both
+argmax labellings. The difference WHB - SEA-AD gets a paired spatial
+block-bootstrap CI: the two sections share one 500 µm tile grid in the
+Xenium frame, and each replicate applies one draw of tile locations to both
+sections and both references (200 replicates); the independent per-section
+resampling is reported as a sensitivity. Writes ``glial_jsd.csv`` and
+``glial_compositions.csv``.
 """
 
 from __future__ import annotations
@@ -34,12 +38,16 @@ from merxen.annotation.shadow import (
     paired_block_bootstrap_jsd_difference,
     seaad_soft_broad_matrix,
     soft_matrix_from_provisional,
-    tile_codes,
-    tile_sums,
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from shadow_baselines import HELD_OUT_PAIRS, PAIRS, PLATFORMS, load_sample  # noqa: E402
+from shadow_baselines import (  # noqa: E402
+    HELD_OUT_PAIRS,
+    PAIRS,
+    PLATFORMS,
+    SectionTiles,
+    load_sample,
+)
 
 logger = logging.getLogger("shadow_glial_jsd")
 
@@ -66,11 +74,13 @@ def main(argv: list[str] | None = None) -> int:
             run_dir = args.runs_root / pair / seg
             if not (run_dir / "map_manifest.json").is_file():
                 continue
-            tiles: dict[tuple[str, str, str], np.ndarray] = {}
+            per_platform: dict[str, dict[tuple[str, str], np.ndarray]] = {}
+            samples = {}
             for platform in PLATFORMS:
                 sample = load_sample(
                     run_dir, args.results_root, pair, seg, platform, None
                 )
+                samples[platform] = sample
                 tidy, _ = read_tidy_parquet(
                     run_dir
                     / platform.lower()
@@ -78,9 +88,12 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 subclass = level_frame(tidy, "subclass").reindex(sample.labels.index)
                 supertype = level_frame(tidy, "supertype").reindex(sample.labels.index)
+                class_level = level_frame(tidy, "class").reindex(sample.labels.index)
                 matrices = {
                     ("WHB", "soft"): soft_matrix_from_provisional(sample.labels),
-                    ("SEA-AD", "soft"): seaad_soft_broad_matrix(subclass, supertype),
+                    ("SEA-AD", "soft"): seaad_soft_broad_matrix(
+                        subclass, supertype, class_level=class_level
+                    ),
                     ("WHB", "argmax"): one_hot_broad_matrix(
                         argmax_broad_names(sample.labels)
                     ),
@@ -88,9 +101,8 @@ def main(argv: list[str] | None = None) -> int:
                         sample.sea["broad"].to_numpy(object)
                     ),
                 }
-                codes = tile_codes(sample.xy)
+                per_platform[platform] = matrices
                 for (reference, kind), matrix in matrices.items():
-                    tiles[(reference, kind, platform)] = tile_sums(matrix, codes)
                     shares = composition_shares(matrix)
                     glial_total = sum(shares[cls] for cls in GLIAL_CLASSES)
                     comp_rows.append(
@@ -107,15 +119,40 @@ def main(argv: list[str] | None = None) -> int:
                             },
                         }
                     )
+            merscope, xenium = samples["MERSCOPE"], samples["XENIUM"]
+            grid = SectionTiles.of(
+                merscope,
+                xenium,
+                np.ones(len(merscope.labels), bool),
+                np.ones(len(xenium.labels), bool),
+            )
+            tiles: dict[tuple[str, str, str], np.ndarray] = {}
+            for key in per_platform["MERSCOPE"]:
+                tiles_m, tiles_x = grid.sums(
+                    per_platform["MERSCOPE"][key], per_platform["XENIUM"][key]
+                )
+                tiles[(*key, "MERSCOPE")] = tiles_m
+                tiles[(*key, "XENIUM")] = tiles_x
             for kind in ("soft", "argmax"):
                 for scope, columns in SCOPES.items():
-                    result = paired_block_bootstrap_jsd_difference(
+                    quads = (
                         tiles[("WHB", kind, "MERSCOPE")],
                         tiles[("WHB", kind, "XENIUM")],
                         tiles[("SEA-AD", kind, "MERSCOPE")],
                         tiles[("SEA-AD", kind, "XENIUM")],
+                    )
+                    independent = paired_block_bootstrap_jsd_difference(
+                        *quads,
                         columns=columns,
                         n_reps=args.n_bootstrap,
+                        resampling="independent",
+                    )
+                    result = (
+                        paired_block_bootstrap_jsd_difference(
+                            *quads, columns=columns, n_reps=args.n_bootstrap
+                        )
+                        if grid.joint
+                        else independent
                     )
                     rows.append(
                         {
@@ -135,6 +172,9 @@ def main(argv: list[str] | None = None) -> int:
                             "difference_ci_low": result.ci_low,
                             "difference_ci_high": result.ci_high,
                             "share_replicates_whb_higher": result.share_positive,
+                            "resampling": result.resampling,
+                            "difference_ci_low_independent": independent.ci_low,
+                            "difference_ci_high_independent": independent.ci_high,
                         }
                     )
             logger.info("%s %s done", pair, seg)

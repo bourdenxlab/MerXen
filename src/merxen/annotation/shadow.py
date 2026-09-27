@@ -12,7 +12,8 @@ human datasets and writes the baselines that
   confident-only broad compositions; the Jensen-Shannon distance (base 2,
   as ``scipy.spatial.distance.jensenshannon`` and E1 ``real_jsd.csv``) of
   the renormalised 7-class vectors; spatial block-bootstrap CIs over square
-  tiles.
+  tiles of one grid shared by the co-registered sections, resampled jointly
+  (the same tile-location weights for both sections).
 - **Human rules** (§5.2 rules 1, 2 and 4; §5.4): a shadow evaluation of the
   v1 lineage, broad and supercluster rules on raw thresholds with the
   packaged floors, the COP rule, the implausible fallback, a choice of second
@@ -20,9 +21,11 @@ human datasets and writes the baselines that
   likelihood-typer rule) and the dataset gate. It has no resolvability
   (M3b) and no flags; RESOLVE (M4) replaces it, and M4's exit compares its
   coverage with these baselines.
-- **SEA-AD broad calls** (E1 ``e1lib.load_mmc_seaad``): the 7-class label
-  from the vocab ("VLMC & Perivascular" split by supertype) and the
-  aggregated broad probability.
+- **SEA-AD broad calls**: the 7-class label from the vocab ("VLMC &
+  Perivascular" split by supertype) and the aggregated broad probability,
+  on E2's definition (class bp for neurons, class bp x subclass mass
+  otherwise; the v1 ``seaad_broad`` threshold's basis) or E1's
+  (``e1lib.load_mmc_seaad``, subclass mass only).
 - **Marker referee** (E1 ``09_marker_referee.py``): for cells where two
   labellings disagree on two of the seven classes, the label whose canonical
   panel markers hold the larger fraction of the cell's counts wins.
@@ -41,6 +44,7 @@ import numpy as np
 import pandas as pd
 
 from merxen.annotation.config import AnnotationGate, AnnotationThresholds
+from merxen.annotation.schema import meets_threshold
 from merxen.annotation.vocab import (
     COP_SUPERCLUSTER,
     HUMAN_BROAD_CLASSES,
@@ -383,12 +387,46 @@ def tile_codes(xy: np.ndarray, tile_um: float = TILE_UM) -> np.ndarray:
     return codes
 
 
-def tile_sums(matrix: np.ndarray, codes: np.ndarray) -> np.ndarray:
+def shared_tile_codes(
+    xy_a: np.ndarray, xy_b: np.ndarray, tile_um: float = TILE_UM
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Tile two co-registered sections on one grid (plan §5.5).
+
+    Both sections must be in one frame (the MERSCOPE ``*_aligned_nonrigid``
+    coordinates are in the Xenium frame of ``registration_summary.json``), so
+    tile ``t`` of section A and tile ``t`` of section B cover the same
+    tissue, and a bootstrap can resample tile locations for both at once
+    (``block_bootstrap_jsd(resampling="joint")``).
+
+    Args:
+        xy_a: ``(n_a, 2)`` coordinates of section A in µm.
+        xy_b: ``(n_b, 2)`` coordinates of section B, same frame.
+        tile_um: Tile edge.
+
+    Returns:
+        ``(codes_a, codes_b, n_tiles)``: tile ids on the shared grid
+        (``-1`` for non-finite coordinates) and the number of tiles.
+    """
+    points_a = np.asarray(xy_a, dtype=np.float64)
+    points_b = np.asarray(xy_b, dtype=np.float64)
+    if points_a.ndim != 2 or points_b.ndim != 2:
+        raise ValueError("xy must be (n, 2) arrays")
+    codes = tile_codes(np.vstack([points_a, points_b]), tile_um)
+    n_tiles = int(codes.max()) + 1 if len(codes) and codes.max() >= 0 else 0
+    return codes[: len(points_a)], codes[len(points_a) :], n_tiles
+
+
+def tile_sums(
+    matrix: np.ndarray, codes: np.ndarray, n_tiles: int | None = None
+) -> np.ndarray:
     """Sum per-cell composition rows by tile.
 
     Args:
         matrix: ``(n, k)`` per-cell rows.
         codes: Tile id per cell (``tile_codes``); ``-1`` cells are dropped.
+        n_tiles: Rows of the result (``shared_tile_codes``: the shared grid's
+            tile count, so both sections' tables have the same rows);
+            default: the largest id + 1.
 
     Returns:
         ``(n_tiles, k)`` sums.
@@ -396,13 +434,17 @@ def tile_sums(matrix: np.ndarray, codes: np.ndarray) -> np.ndarray:
     codes = np.asarray(codes, dtype=np.int64)
     values = np.asarray(matrix, dtype=np.float64)
     keep = codes >= 0
-    n_tiles = int(codes[keep].max()) + 1 if keep.any() else 0
+    if n_tiles is None:
+        n_tiles = int(codes[keep].max()) + 1 if keep.any() else 0
     sums = np.zeros((n_tiles, values.shape[1]), dtype=np.float64)
     for column in range(values.shape[1]):
         sums[:, column] = np.bincount(
             codes[keep], weights=values[keep, column], minlength=n_tiles
         )
     return sums
+
+
+Resampling = Literal["joint", "independent"]
 
 
 @dataclass(frozen=True)
@@ -417,6 +459,10 @@ class BootstrapJsd:
         n_tiles_a: Non-empty tiles of the first section.
         n_tiles_b: Non-empty tiles of the second section.
         replicates: Replicate distances.
+        resampling: ``joint`` (one draw of shared tile locations for both
+            sections) or ``independent`` (each section's tiles on its own).
+        n_locations: Tile locations resampled (``joint``: tiles non-empty in
+            either section; ``independent``: ``n_tiles_a + n_tiles_b``).
     """
 
     jsd: float
@@ -426,6 +472,14 @@ class BootstrapJsd:
     n_tiles_a: int
     n_tiles_b: int
     replicates: np.ndarray
+    resampling: Resampling = "joint"
+    n_locations: int = 0
+
+
+def _bootstrap_weights(
+    rng: np.random.Generator, n_items: int, n_reps: int
+) -> np.ndarray:
+    return rng.multinomial(n_items, np.full(n_items, 1 / n_items), n_reps)
 
 
 def block_bootstrap_jsd(
@@ -435,42 +489,66 @@ def block_bootstrap_jsd(
     n_reps: int = N_BOOTSTRAP,
     seed: int = BOOTSTRAP_SEED,
     columns: Sequence[int] | None = None,
+    resampling: Resampling = "joint",
 ) -> BootstrapJsd:
-    """Bootstrap the JSD of two sections by resampling each one's tiles.
+    """Bootstrap the JSD of two sections by resampling 500 µm tiles (§5.5).
 
-    Each replicate draws, independently per section, as many tiles as the
-    section has, with replacement, and recomputes both compositions from the
-    drawn tiles' sums (plan §5.5).
+    - ``joint`` (the registered H1 method): the two sections are tiled on one
+      grid in the shared frame (``shared_tile_codes``), so row ``t`` of both
+      tables is the same tissue. Each replicate draws the tile locations
+      (non-empty in either section) with replacement and applies the same
+      multinomial weights to both sections, so anatomy stays matched
+      between them.
+    - ``independent`` (a sensitivity, or sections without a shared frame):
+      each section's non-empty tiles are drawn on their own; this mismatches
+      anatomy between adjacent sections and widens the interval.
 
     Args:
         tiles_a: ``(n_tiles, k)`` tile sums of the first section.
-        tiles_b: ``(n_tiles, k)`` tile sums of the second section.
+        tiles_b: ``(n_tiles, k)`` tile sums of the second section (same
+            rows as ``tiles_a`` for ``joint``).
         n_reps: Replicates (200 in the plan).
         seed: RNG seed.
         columns: Classes compared (``jensen_shannon_distance``).
+        resampling: ``joint`` or ``independent``.
 
     Returns:
         Point estimate, percentile CI and replicates.
 
     Raises:
-        ValueError: If a section has no tile.
+        ValueError: If a section has no tile, or ``joint`` tables differ in
+            rows.
     """
     first = np.asarray(tiles_a, dtype=np.float64)
     second = np.asarray(tiles_b, dtype=np.float64)
-    first = first[first.sum(axis=1) > 0]
-    second = second[second.sum(axis=1) > 0]
-    if len(first) == 0 or len(second) == 0:
+    nonempty_a = first.sum(axis=1) > 0
+    nonempty_b = second.sum(axis=1) > 0
+    if not nonempty_a.any() or not nonempty_b.any():
         raise ValueError("each section needs at least one non-empty tile")
     point = jensen_shannon_distance(
         first.sum(axis=0), second.sum(axis=0), columns=columns
     )
     rng = np.random.default_rng(seed)
-    weights_a = rng.multinomial(len(first), np.full(len(first), 1 / len(first)), n_reps)
-    weights_b = rng.multinomial(
-        len(second), np.full(len(second), 1 / len(second)), n_reps
-    )
+    if resampling == "joint":
+        if first.shape[0] != second.shape[0]:
+            raise ValueError(
+                "joint resampling needs both sections on one tile grid "
+                "(shared_tile_codes)"
+            )
+        keep = nonempty_a | nonempty_b
+        first, second = first[keep], second[keep]
+        weights = _bootstrap_weights(rng, len(first), n_reps)
+        replicate_a, replicate_b = weights @ first, weights @ second
+        n_locations = len(first)
+    elif resampling == "independent":
+        first, second = first[nonempty_a], second[nonempty_b]
+        replicate_a = _bootstrap_weights(rng, len(first), n_reps) @ first
+        replicate_b = _bootstrap_weights(rng, len(second), n_reps) @ second
+        n_locations = len(first) + len(second)
+    else:
+        raise ValueError(f"unknown resampling {resampling!r}")
     replicates = np.asarray(
-        jensen_shannon_distance(weights_a @ first, weights_b @ second, columns=columns),
+        jensen_shannon_distance(replicate_a, replicate_b, columns=columns),
         dtype=np.float64,
     ).reshape(-1)
     low, high = np.nanpercentile(replicates, [2.5, 97.5])
@@ -479,9 +557,11 @@ def block_bootstrap_jsd(
         ci_low=float(low),
         ci_high=float(high),
         n_reps=int(n_reps),
-        n_tiles_a=len(first),
-        n_tiles_b=len(second),
+        n_tiles_a=int(nonempty_a.sum()),
+        n_tiles_b=int(nonempty_b.sum()),
         replicates=replicates,
+        resampling=resampling,
+        n_locations=int(n_locations),
     )
 
 
@@ -503,21 +583,31 @@ def seaad_broad_calls(
     subclass: pd.DataFrame,
     supertype: pd.DataFrame | None = None,
     *,
+    class_level: pd.DataFrame | None = None,
     vocab: VocabTable | None = None,
     n_runners_up: int = 5,
 ) -> pd.DataFrame:
     """Return SEA-AD's 7-class label and aggregated broad probability per cell.
 
     The label is the assigned subclass's broad class (vocab; "VLMC &
-    Perivascular" split by the assigned supertype). The probability sums the
-    bootstrap probability of the assigned subclass and of the runner-up
-    subclasses that count toward the same class (``broad_classes_any``); for
-    a split subclass it is multiplied by the supertype-level mass of the
-    supertypes that give the same class (E1 ``load_mmc_seaad``).
+    Perivascular" split by the assigned supertype). The subclass-level mass
+    sums the bootstrap probability of the assigned subclass and of the
+    runner-up subclasses that count toward the same class
+    (``broad_classes_any``); for a split subclass it is multiplied by the
+    supertype-level mass of the supertypes that give the same class.
+
+    - **E2 definition** (``class_level`` given; the v1 ``seaad_broad``
+      threshold 0.68 was derived on it, ``exp/E2/build_tables.py``): neurons
+      take the SEA-AD class-level bootstrap probability; every other class
+      takes class bp x the subclass-level mass.
+    - **E1 definition** (``class_level=None``; E1 ``load_mmc_seaad``): the
+      subclass-level mass alone, with no class-level factor.
 
     Args:
         subclass: SEA-AD subclass level of a tidy table (``level_frame``).
         supertype: The supertype level (any index order; aligned by cell).
+        class_level: The class level (aligned by cell); selects the E2
+            definition.
         vocab: The SEA-AD vocab (default: packaged).
         n_runners_up: Runner-ups to aggregate.
 
@@ -614,6 +704,11 @@ def seaad_broad_calls(
             )
             mass += np.where(same_class, runner_bp, 0.0)
         raw = np.where(is_split, raw * np.minimum(mass, 1.0), raw)
+    if class_level is not None:
+        class_bp = np.nan_to_num(
+            class_level.reindex(subclass.index)["bp"].to_numpy(np.float64), nan=0.0
+        )
+        raw = np.where(broad == "Neurons", class_bp, class_bp * np.minimum(raw, 1.0))
     in_classes = np.isin(broad, np.asarray(HUMAN_BROAD_CLASSES, dtype=object))
     raw = np.where(in_classes, np.minimum(raw, 1.0), 0.0)
     return pd.DataFrame(
@@ -1038,7 +1133,7 @@ def evaluate_human_rules(
         sea_raw = np.nan_to_num(
             np.asarray(inputs.sea_broad_raw, dtype=np.float64), nan=0.0
         )
-        sea_confident = (sea_raw >= settings.seaad_broad) & sea_in_classes
+        sea_confident = meets_threshold(sea_raw, settings.seaad_broad) & sea_in_classes
         sea_agree_lineage = _equal(
             _mapped(sea_broad, HUMAN_LINEAGE_OF_BROAD_CLASS), lineage
         )
@@ -1071,7 +1166,7 @@ def evaluate_human_rules(
     has_lineage = _in(lineage, HUMAN_LINEAGES)
     lineage_confident = (
         has_lineage
-        & (lineage_raw >= settings.whb_broad)
+        & meets_threshold(lineage_raw, settings.whb_broad)
         & (counts >= hard_floor)
         & (~implausible | rescued)
         & vote_lineage
@@ -1081,14 +1176,15 @@ def evaluate_human_rules(
         lineage_confident
         & ~implausible
         & _in(broad, HUMAN_BROAD_CLASSES)
-        & (broad_raw >= settings.whb_broad)
+        & meets_threshold(broad_raw, settings.whb_broad)
         & (counts >= broad_floor)
         & vote_broad
     )
     supercluster_floor = floor_lookup.per_cell("supercluster", platform, supercluster)
     is_cop = supercluster == COP_SUPERCLUSTER
     cop_passes = (
-        (counts >= supercluster_floor) & (supercluster_bp >= settings.whb_supercluster)
+        (counts >= supercluster_floor)
+        & meets_threshold(supercluster_bp, settings.whb_supercluster)
     ) | sea_confident_opc
     cop_suppressed = lineage_confident & is_cop & ~cop_passes
     broad_confident = broad_candidate & ~(is_cop & ~cop_passes)
@@ -1096,7 +1192,7 @@ def evaluate_human_rules(
     supercluster_confident = (
         broad_confident
         & (verdict.level == "full")
-        & (supercluster_bp >= settings.whb_supercluster)
+        & meets_threshold(supercluster_bp, settings.whb_supercluster)
         & (counts >= supercluster_floor)
     )
     broad_name = _keep_where(broad_confident, broad)
@@ -1390,6 +1486,7 @@ def seaad_soft_broad_matrix(
     subclass: pd.DataFrame,
     supertype: pd.DataFrame | None = None,
     *,
+    class_level: pd.DataFrame | None = None,
     vocab: VocabTable | None = None,
     n_runners_up: int = 5,
 ) -> np.ndarray:
@@ -1399,11 +1496,16 @@ def seaad_soft_broad_matrix(
     aggregated to the seven broad classes through the SEA-AD vocab. A
     subclass whose class depends on the supertype ("VLMC & Perivascular")
     splits its mass by the supertype level's probabilities when it is the
-    assigned subclass; as a runner-up its mass is ``unallocated``.
+    assigned subclass; as a runner-up its mass is ``unallocated``. With
+    ``class_level`` the subclass-level mass is multiplied by the assigned
+    class's bootstrap probability (class x subclass mass, the root-level
+    mass as WHB's soft composition and E2's SEA-AD broad probability; the
+    class-level residual is ``unallocated``).
 
     Args:
         subclass: SEA-AD subclass level of a tidy table (``level_frame``).
         supertype: The supertype level (aligned by cell).
+        class_level: The class level (aligned by cell).
         vocab: The SEA-AD vocab (default: packaged).
         n_runners_up: Runner-ups to aggregate.
 
@@ -1476,6 +1578,17 @@ def seaad_soft_broad_matrix(
     if over.any():
         matrix[over, :unallocated] /= total[over, None]
         total = np.minimum(total, 1.0)
+    if class_level is not None:
+        class_bp = np.clip(
+            np.nan_to_num(
+                class_level.reindex(subclass.index)["bp"].to_numpy(np.float64),
+                nan=0.0,
+            ),
+            0.0,
+            1.0,
+        )
+        matrix[:, :unallocated] *= class_bp[:, None]
+        total = matrix[:, :unallocated].sum(axis=1)
     matrix[:, unallocated] = 1.0 - total
     return matrix
 
@@ -1494,6 +1607,7 @@ class BootstrapJsdDifference:
         second_ci: Percentile CI of the second JSD.
         share_positive: Share of replicates with a positive difference.
         n_reps: Replicates.
+        resampling: ``joint`` or ``independent`` (``block_bootstrap_jsd``).
     """
 
     first_jsd: float
@@ -1505,6 +1619,7 @@ class BootstrapJsdDifference:
     second_ci: tuple[float, float]
     share_positive: float
     n_reps: int
+    resampling: Resampling = "joint"
 
 
 def paired_block_bootstrap_jsd_difference(
@@ -1516,12 +1631,16 @@ def paired_block_bootstrap_jsd_difference(
     columns: Sequence[int] | None = None,
     n_reps: int = N_BOOTSTRAP,
     seed: int = BOOTSTRAP_SEED,
+    resampling: Resampling = "joint",
 ) -> BootstrapJsdDifference:
     """Bootstrap the JSD difference of two labellings of the same sections.
 
-    Tiles are resampled once per replicate and section, and the same draw
-    is applied to both labellings (a paired bootstrap), so the interval is
-    that of the difference, not of two independent estimates.
+    One draw per replicate is applied to both labellings (a paired
+    bootstrap), so the interval is that of the difference, not of two
+    independent estimates. With ``joint`` resampling (the registered method)
+    the draw is over shared tile locations and the same weights apply to
+    both sections as well (``block_bootstrap_jsd``); with ``independent``
+    each section's tiles are drawn on their own (sensitivity).
 
     Args:
         first_a: Tile sums of section A under the first labelling.
@@ -1532,6 +1651,8 @@ def paired_block_bootstrap_jsd_difference(
         columns: Classes compared (``jensen_shannon_distance``).
         n_reps: Replicates.
         seed: RNG seed.
+        resampling: ``joint`` (all four tables on one grid) or
+            ``independent``.
 
     Returns:
         The point estimates and the paired percentile CI.
@@ -1540,18 +1661,16 @@ def paired_block_bootstrap_jsd_difference(
         ValueError: If the paired tile tables differ in shape or a section
             has no tile.
     """
-    arrays = [np.asarray(item, dtype=np.float64) for item in (first_a, first_b)]
-    first_a, first_b = arrays
-    second_a = np.asarray(second_a, dtype=np.float64)
-    second_b = np.asarray(second_b, dtype=np.float64)
+    first_a, first_b, second_a, second_b = (
+        np.asarray(item, dtype=np.float64)
+        for item in (first_a, first_b, second_a, second_b)
+    )
     if first_a.shape[0] != second_a.shape[0] or first_b.shape[0] != second_b.shape[0]:
         raise ValueError("paired tile tables must have the same tiles")
-    keep_a = (first_a.sum(axis=1) > 0) | (second_a.sum(axis=1) > 0)
-    keep_b = (first_b.sum(axis=1) > 0) | (second_b.sum(axis=1) > 0)
-    if not keep_a.any() or not keep_b.any():
+    nonempty_a = (first_a.sum(axis=1) > 0) | (second_a.sum(axis=1) > 0)
+    nonempty_b = (first_b.sum(axis=1) > 0) | (second_b.sum(axis=1) > 0)
+    if not nonempty_a.any() or not nonempty_b.any():
         raise ValueError("each section needs at least one non-empty tile")
-    first_a, second_a = first_a[keep_a], second_a[keep_a]
-    first_b, second_b = first_b[keep_b], second_b[keep_b]
     point_first = float(
         jensen_shannon_distance(first_a.sum(0), first_b.sum(0), columns=columns)
     )
@@ -1559,9 +1678,24 @@ def paired_block_bootstrap_jsd_difference(
         jensen_shannon_distance(second_a.sum(0), second_b.sum(0), columns=columns)
     )
     rng = np.random.default_rng(seed)
-    n_a, n_b = len(first_a), len(first_b)
-    weights_a = rng.multinomial(n_a, np.full(n_a, 1 / n_a), n_reps)
-    weights_b = rng.multinomial(n_b, np.full(n_b, 1 / n_b), n_reps)
+    if resampling == "joint":
+        if first_a.shape[0] != first_b.shape[0]:
+            raise ValueError(
+                "joint resampling needs both sections on one tile grid "
+                "(shared_tile_codes)"
+            )
+        keep = nonempty_a | nonempty_b
+        weights = _bootstrap_weights(rng, int(keep.sum()), n_reps)
+        weights_a = weights_b = weights
+        first_a, second_a = first_a[keep], second_a[keep]
+        first_b, second_b = first_b[keep], second_b[keep]
+    elif resampling == "independent":
+        first_a, second_a = first_a[nonempty_a], second_a[nonempty_a]
+        first_b, second_b = first_b[nonempty_b], second_b[nonempty_b]
+        weights_a = _bootstrap_weights(rng, len(first_a), n_reps)
+        weights_b = _bootstrap_weights(rng, len(first_b), n_reps)
+    else:
+        raise ValueError(f"unknown resampling {resampling!r}")
     reps_first = np.asarray(
         jensen_shannon_distance(
             weights_a @ first_a, weights_b @ first_b, columns=columns
@@ -1588,6 +1722,7 @@ def paired_block_bootstrap_jsd_difference(
         second_ci=(float(second_low), float(second_high)),
         share_positive=float(np.mean(differences > 0)),
         n_reps=int(n_reps),
+        resampling=resampling,
     )
 
 
@@ -2467,16 +2602,12 @@ def mouse_confidence(
         The flags (region pruning, M6, is not applied).
     """
     counts = labels["total_counts"].to_numpy(np.float64)
-    class_ok = (
-        np.nan_to_num(labels["mmc_wmb_class_bp"].to_numpy(np.float64), nan=0.0)
-        >= class_bp
-    ) & (counts >= class_min_counts)
+    class_ok = meets_threshold(labels["mmc_wmb_class_bp"], class_bp) & (
+        counts >= class_min_counts
+    )
     subclass_ok = (
         class_ok
-        & (
-            np.nan_to_num(labels["mmc_wmb_subclass_bp"].to_numpy(np.float64), nan=0.0)
-            >= subclass_bp
-        )
+        & meets_threshold(labels["mmc_wmb_subclass_bp"], subclass_bp)
         & (counts >= subclass_min_counts)
     )
     return MouseConfidence(class_confident=class_ok, subclass_confident=subclass_ok)
@@ -2540,6 +2671,37 @@ def published_queries(
     return {item.sample.platform: build_sample_query(item, panel) for item in loaded}
 
 
+def variant_sha256(
+    cell_ids: Sequence[object], gene_ids: Sequence[str], counts: sparse.spmatrix
+) -> str:
+    """Return the sha256 of a variant query (cells, genes and every value).
+
+    Unlike ``query_fingerprint`` (per-cell totals), it changes with any
+    per-gene value, so two rescalings of one query differ.
+
+    Args:
+        cell_ids: Query cell ids.
+        gene_ids: Query gene IDs.
+        counts: Cells x genes (sparse or dense).
+
+    Returns:
+        Hex digest.
+    """
+    import hashlib
+
+    from scipy import sparse as sp
+
+    matrix = sp.csr_matrix(counts, dtype=np.float64)
+    matrix.sort_indices()
+    digest = hashlib.sha256()
+    digest.update("\x1f".join(str(cell) for cell in cell_ids).encode("utf-8"))
+    digest.update(b"\x1e")
+    digest.update("\x1f".join(str(gene) for gene in gene_ids).encode("utf-8"))
+    for part in (matrix.indptr, matrix.indices, matrix.data):
+        digest.update(np.ascontiguousarray(part).tobytes())
+    return digest.hexdigest()
+
+
 def map_query_variant(
     query: SampleQuery,
     bundle: MmcBundle,
@@ -2561,17 +2723,23 @@ def map_query_variant(
     MAP's configuration (bootstrap 0.5 x 100, seed 0, raw normalisation,
     BLAS threads 1).
 
+    An existing parquet is reused only when its metadata records the same
+    variant query (``variant_sha256``), dropped genes, rescaling, bundle
+    ``build_hash``, engine parameters, ctm version and ``run_metadata``.
+
     Args:
         query: The production query (``published_queries``).
         bundle: The reference bundle.
         output_parquet: The tidy parquet to write.
-        work_dir: Scratch directory.
+        work_dir: Scratch directory (its query and lookup files are removed,
+            also on failure).
         drop_gene_ids: Gene IDs removed from query and lookup.
         log2_factors: Gene ID to log2 factor (missing genes: 0).
         n_processors: MapMyCells processes.
         expected_ctm_version: ctm version (default: the configured one).
         run_metadata: Extra parquet metadata.
-        reuse: Keep an existing parquet instead of re-mapping.
+        reuse: Keep an existing parquet of the same variant instead of
+            re-mapping.
 
     Returns:
         The tidy parquet.
@@ -2582,15 +2750,13 @@ def map_query_variant(
     from merxen.annotation.config import AnnotationConfig
     from merxen.annotation.mapmycells_engine import (
         MmcEngineParams,
+        read_tidy_parquet,
         restrict_lookup,
         run_mmc,
         write_query_h5ad,
     )
 
     output = Path(output_parquet)
-    if reuse and output.is_file():
-        logger.info("reusing %s", output)
-        return output
     dropped = {str(gene) for gene in drop_gene_ids}
     keep = [i for i, gene in enumerate(query.gene_ids) if gene not in dropped]
     if not keep:
@@ -2600,28 +2766,51 @@ def map_query_variant(
     if log2_factors is not None:
         factors = np.array([float(log2_factors.get(gene, 0.0)) for gene in genes])
         counts = rescale_counts(counts, factors)
+    version = expected_ctm_version or AnnotationConfig(species="human").ctm_version
+    params = MmcEngineParams(n_processors=n_processors)
+    metadata = {
+        "variant_sha256": variant_sha256(query.cell_ids, genes, counts),
+        "variant_dropped_genes": sorted(dropped & set(query.gene_ids)),
+        "variant_rescaled": log2_factors is not None,
+        **dict(run_metadata or {}),
+    }
+    expected = {
+        **metadata,
+        "build_hash": bundle.build_hash,
+        "engine_params": params.reuse_key(),
+        "ctm_version": version,
+    }
+    if reuse and output.is_file():
+        _, recorded = read_tidy_parquet(output)
+        differing = sorted(
+            key for key, value in expected.items() if recorded.get(key) != value
+        )
+        if not differing:
+            logger.info("reusing %s", output)
+            return output
+        logger.info(
+            "%s: not reused (%s differ); re-mapping", output, ", ".join(differing)
+        )
     scratch = Path(work_dir)
     scratch.mkdir(parents=True, exist_ok=True)
-    query_path = write_query_h5ad(
-        counts, query.cell_ids, genes, scratch / f"{output.stem}.query.h5ad"
-    )
-    restricted = restrict_lookup(bundle, genes, scratch / f"{output.stem}.lookup.json")
-    version = expected_ctm_version or AnnotationConfig(species="human").ctm_version
-    run_mmc(
-        query_path,
-        bundle,
-        MmcEngineParams(n_processors=n_processors),
-        output_parquet=output,
-        work_dir=scratch,
-        expected_ctm_version=version,
-        lookup_path=restricted.path,
-        run_metadata={
-            "variant_dropped_genes": sorted(dropped & set(query.gene_ids)),
-            "variant_rescaled": log2_factors is not None,
-            **dict(run_metadata or {}),
-        },
-    )
-    query_path.unlink(missing_ok=True)
+    query_path = scratch / f"{output.stem}.query.h5ad"
+    lookup_path = scratch / f"{output.stem}.lookup.json"
+    try:
+        write_query_h5ad(counts, query.cell_ids, genes, query_path)
+        restricted = restrict_lookup(bundle, genes, lookup_path)
+        run_mmc(
+            query_path,
+            bundle,
+            params,
+            output_parquet=output,
+            work_dir=scratch,
+            expected_ctm_version=version,
+            lookup_path=restricted.path,
+            run_metadata=metadata,
+        )
+    finally:
+        query_path.unlink(missing_ok=True)
+        lookup_path.unlink(missing_ok=True)
     return output
 
 

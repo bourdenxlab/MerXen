@@ -45,7 +45,6 @@ from merxen.annotation.pipeline import load_map_manifest
 from merxen.annotation.shadow import (
     AGREEMENT_MIN_COUNTS,
     argmax_broad_names,
-    block_bootstrap_jsd,
     foreign_marker_fraction,
     jensen_shannon_distance,
     label_agreement,
@@ -56,27 +55,23 @@ from merxen.annotation.shadow import (
     one_hot_broad_matrix,
     published_queries,
     soft_matrix_from_provisional,
-    tile_codes,
-    tile_sums,
 )
 from merxen.annotation.vocab import HUMAN_BROAD_CLASSES, MOUSE_BROAD_CLASSES
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from shadow_baselines import PLATFORMS, _clustered_path, load_sample  # noqa: E402
+from shadow_baselines import (  # noqa: E402
+    PLATFORMS,
+    SectionTiles,
+    _clustered_path,
+    add_fallback_arguments,
+    load_sample,
+)
 
 logger = logging.getLogger("shadow_e8")
 
 SEGMENTATIONS = ("original_seg", "proseg_mask", "proseg_hybrid", "reseg")
 REFERENCE_SEG = "proseg_hybrid"
 OD_B6_RATIO = 1.25
-HUMAN_FALLBACK = (
-    "/media/mathieubo/SSD1/MerXen/mapmycells/abc_whb/expression_matrices/"
-    "WHB-10Xv3/20240330/WHB-10Xv3-Nonneurons-raw.h5ad"
-)
-MOUSE_FALLBACK = (
-    "/media/mathieubo/SSD1/MerXen/mapmycells/abc_atlas/metadata/WMB-10X/20241115/"
-    "gene.csv"
-)
 
 
 def _parse_runs(values: list[str]) -> dict[str, Path]:
@@ -128,10 +123,10 @@ def human_rows(
             {p: _clustered_path(args.results_root, pair, seg, p) for p in PLATFORMS},
             panel,
             species="human",
-            gene_id_fallback_csv=HUMAN_FALLBACK,
+            gene_id_fallback_csv=args.gene_id_fallback_csv,
         )
         matrices: dict[str, dict[str, np.ndarray]] = {}
-        codes: dict[str, np.ndarray] = {}
+        samples_by_platform: dict[str, Any] = {}
         for platform in PLATFORMS:
             key = (pair, seg, platform)
             sample = load_sample(
@@ -216,11 +211,17 @@ def human_rows(
                     v1.broad_name, include=v1.broad_confident
                 ),
             }
-            codes[platform] = tile_codes(sample.xy)
+            samples_by_platform[platform] = sample
+        grid = SectionTiles.of(
+            samples_by_platform["MERSCOPE"],
+            samples_by_platform["XENIUM"],
+            np.ones(len(samples_by_platform["MERSCOPE"].labels), bool),
+            np.ones(len(samples_by_platform["XENIUM"].labels), bool),
+        )
         for kind in ("soft", "argmax", "confident"):
-            result = block_bootstrap_jsd(
-                tile_sums(matrices["MERSCOPE"][kind], codes["MERSCOPE"]),
-                tile_sums(matrices["XENIUM"][kind], codes["XENIUM"]),
+            result, independent = grid.bootstrap(
+                matrices["MERSCOPE"][kind],
+                matrices["XENIUM"][kind],
                 n_reps=args.n_bootstrap,
             )
             jsd_rows.append(
@@ -231,6 +232,9 @@ def human_rows(
                     "jsd": result.jsd,
                     "ci_low": result.ci_low,
                     "ci_high": result.ci_high,
+                    "resampling": result.resampling,
+                    "ci_low_independent": independent.ci_low,
+                    "ci_high_independent": independent.ci_high,
                 }
             )
         logger.info("%s %s done", pair, seg)
@@ -284,7 +288,7 @@ def mouse_rows(args: argparse.Namespace, runs: dict[str, Path]) -> list[dict[str
             {"MERSCOPE": clustered},
             panel,
             species="mouse",
-            gene_id_fallback_csv=MOUSE_FALLBACK,
+            gene_id_fallback_csv=args.mouse_gene_id_fallback_csv,
         )["MERSCOPE"]
         labels = pd.read_parquet(
             run_dir / "merscope" / f"{sample_id}_ct_provisional.parquet"
@@ -386,6 +390,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--evidence-root", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--n-bootstrap", type=int, default=200)
+    add_fallback_arguments(parser, human=True, mouse=True)
     args = parser.parse_args(argv)
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
