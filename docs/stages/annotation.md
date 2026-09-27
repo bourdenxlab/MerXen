@@ -24,7 +24,7 @@ modified or deleted automatically (see [CLI reference](../cli.md#merxen-annotati
 | `wmb_panel` | mouse primary | Samples at most `annotation_wmb_max_cells_per_cluster` (50) cells per cluster from the local WMB-10Xv3 h5ads (seed 1; the self-map test cells excluded, see below), restricted to the marker gene universe (see below); builds the marker precompute; finds panel markers with the supertype level dropped; copies the Allen `precomputed_stats_ABC_revision_230821.h5` (md5 `d13b316a1755c459d75b8e45ff92ddfc`) as the mapping precompute. |
 | `wmb_region_share` | mouse, panel-independent | Class and subclass × CCF-division shares of the ABC MERFISH-C57BL6J-638850-CCF cells (OB = MOB, AOB, olfactory nerve layer and OLF-unassigned anterior of AP 2.5 mm, split from OLF), each node's home division, per-section compositions and AP composition windows (each section with its neighbours) for every section. |
 | `whb_whole_ctx_panel` | human, optional | Whole-WHB panel markers with the 16 cortex-implausible superclusters dropped and the lookup filtered to the pruned tree; refused above 1,000 genes. |
-| `whb_frontal_supc_clus_ho` | human, resolvability (M3b) | The frontal WHB cells restricted to the panel, without the held-out donor (`annotation_calibration_holdout_donor`, `auto` = the donor with the fewest frontal cells, H19.30.002); clusters with ≥ 5 training cells; a supercluster → cluster → subcluster precompute of the training cells truncated to supercluster → cluster, with panel markers. The held-out donor's cells (≤ 1,000 per supercluster, all cells of rare ones, ≤ `n_test_cells`) are the test set (`test_cells.h5ad`, native panel counts and truth). E2's HO recipe. |
+| `whb_frontal_supc_clus_ho` | human, resolvability (M3b) | The frontal WHB cells restricted to the panel, without the held-out donor (`annotation_calibration_holdout_donor`, `auto` = the donor with the fewest frontal cells, H19.30.002); clusters with ≥ 5 training cells; a supercluster → cluster → subcluster precompute of the training cells truncated to supercluster → cluster, with panel markers. The held-out donor's cells (≤ 1,000 per supercluster, all cells of rare ones, ≤ `n_test_cells`) are the test set (`test_cells.h5ad`, native panel counts and truth). E2's HO recipe. Every non-neuronal supercluster is topped up to the same cap with WHB non-neuronal nuclei of E2's 14 neocortical dissections outside the frontal ROIs (user decision 2026-09-27, see the self-map below); `test_source` marks each test cell `holdout_donor` or `other_region`. |
 | `wmb_selfmap_testset` | mouse, resolvability (M3b) | The 11,913 self-map test cells plus up to 30 cells per supertype of the non-neuronal classes (Astro-Epen, OPC-Oligo, Vascular, Immune) that the `wmb_panel` marker build did not use (its sample is recomputed with the same rule), restricted to the panel (`test_cells.h5ad`). |
 
 Every bundle records in `bundle.json` the full sha256 of each source, the
@@ -128,7 +128,23 @@ builders run the self-map of plan §8.3 on their panel
    store (built once per panel and shared), WMB `wmb_selfmap_testset`. WHB
    maps the held-out cells onto the held-out bundle, never onto itself
    (its precompute contains the test donor); SEA-AD and WMB map onto the
-   bundle being built.
+   bundle being built. *Other-region non-neuronal cells (user decision
+   2026-09-27):* the held-out donor holds few cells of the thin
+   non-neuronal superclusters (set a: Vascular 23, Fibroblast 5, COP 20),
+   so every non-neuronal supercluster (vocab broad class other than
+   Neurons and Mixed/Unknown) is topped up to the per-supercluster cap
+   with WHB-10Xv3 non-neuronal nuclei of E2's 14 neocortical dissections
+   outside the frontal ROIs (`reference.HO_OTHER_REGION_ROI_LABELS`: MTG,
+   STG, M1C, A43, A40, V1C, V2, A19, S1C, A1C, A5-A7, ITG, A38, A13; E2
+   `research/insilico/01b_extract_nonneurons.py`), any donor and cluster
+   as in E2. The WHB cell metadata (`annotation_whb_metadata_dir`) is a
+   test-set source. Candidates among the frontal reference cells (training,
+   marker and held-out donor cells) are dropped and the draw is checked
+   disjoint from them; `bundle.json` (`test_set.other_region`) records the
+   dissections, seed, cap, candidates and drawn cells per supercluster,
+   broad class, dissection and donor, and the drawn cells of clusters the
+   training reference lacks (their cluster truth cannot be called; the
+   cluster level is report-only).
 2. **Simulation.** Every test cell whose native panel counts reach a grid
    depth `D` is thinned binomially to `D` (human panels up to 1,000 genes
    `[10, 15, 30, 60, 120, 250]`; mouse and larger panels
@@ -158,15 +174,35 @@ builders run the self-map of plan §8.3 on their panel
    threshold `t*` is the lowest bp ≥ the v1 raw threshold at which it
    reaches the target (capped at 0.99), so thresholds only ever rise. The
    other half checks it: a bin is emitted with ≥ 50 confident calls, a
-   Wilson 95% lower bound of their precision ≥ target − 0.02 and coverage
-   ≥ 0.2. The `validated` regime applies the pre-registered default, which
-   is fitted on no test cell, so it checks the same rule on every call of
-   the bin (both halves); its fit-half `t*` is only reported.
-6. **`D_max` and extrapolation.** `D_max(c)` is the deepest grid depth with
-   ≥ 50 test cells of class `c`; deeper bins inherit its decision and are
-   marked `resolvability_extrapolated`. A class without such a bin is never
-   emitted (no pooling across classes). Everything not emitted is
-   `not_resolvable`; the report-only fine levels are emitted only with
+   Wilson 95% lower bound of their precision (on the Kish n) ≥ target −
+   0.02, a point precision ≥ target (added 2026-09-27, one rule with the
+   gate-P evaluation rules) and coverage ≥ 0.2. The `validated` regime
+   applies the pre-registered default, which is fitted on no test cell, so
+   it checks the same rule on every call of the bin (both halves); its
+   fit-half `t*` is only reported.
+6. **Pooled deep bins and extrapolation** (user decision 2026-09-27,
+   replacing the `D_max` inheritance). Only cells whose native counts reach
+   a depth are thinned to it, so deep bins run short of calls. A bin with
+   fewer than 50 confident calls on its check set takes the verdict of the
+   deep-end pool: from the deepest grid bin, bins are pooled into a "≥ d"
+   set, each test cell counted once at its deepest bin (taken over all its
+   calls at the level, before any class or confidence filter, so a
+   confident shallow row never stands in for an unconfident deep one),
+   until the set holds 50 confident calls (or a fitted regime's isotonic
+   fit shows no threshold reaches the target); its shallowest bin is
+   `D_P`. The set is tested with the same rule (its own fit and `t*`, the
+   target of `D_P`, the Wilson bound on the Kish n), and its verdict goes to
+   every bin deeper than `D_P`, marked `pooled` and
+   `resolvability_extrapolated`. `D_P` keeps its own verdict when it holds
+   50 calls itself and is withdrawn when the pool fails (reason
+   `pool_<reason>`): a pooled pass never overrides a bin's own failure. A
+   class that never reaches 50 confident calls even with every bin pooled
+   is `not_resolvable` (`insufficient_calls`) wherever it is not judged on
+   its own; a class without `D_max(c)` (the deepest grid depth with ≥ 50
+   test cells of class `c`) is never emitted (`too_few_test_cells`; no
+   pooling across classes). `gate_p_tested_sets` uses the same pooling
+   with `n_min` 200. Everything not emitted is `not_resolvable`; the
+   report-only fine levels are emitted only with
    `annotation_allow_fine_levels` and a seed-1 re-map that changes ≤ 2% of
    their confident labels (`level_emission`).
 7. **Regimes.** `validated` (real-data-validated families: base targets,
@@ -250,6 +286,28 @@ from `D_max`; stage C, version 1: 59–82% and 59–83%); ag7 proseg_hybrid:
 class 97%, subclass 98% (version 1: 86%, 85%). The H18 exceptions are
 listed under Known limitations.
 
+**Resolvability version 3** (the user's H18 decisions of 2026-09-27: pooled
+deep bins with the point precision in the rule, other-region non-neuronal
+human test cells; `m3b/followup/H18_FOLLOWUP.txt` in the evidence
+archive) gives every self-map bundle a new build hash. Rebuilt at 8
+processes: set a WHB 4.3 min (its new held-out test set 2.6 min, of which
+the other-region draw 7 s), SEA-AD 2.1 min, set c WHB 4.1 min, ag7 37.1 min
+(20.2 GB) and VZG2 45.1 min (27.1 GB). The set a test set holds 11,987
+cells: the donor's 9,032 plus 2,955 other-region nuclei (Microglia 757,
+Vascular 655, OPC 503, Fibroblast 433, COP 264, Astro 210, Oligo 133; none
+among the 125,481 frontal cells; 694 of clusters the held-out training
+reference lacks), so Vascular, Fibroblast and COP have 678, 438 and 284
+test cells (were 23, 5, 20). The mouse cells tables are unchanged (same
+test set and markers). Set a (PREP) now emits broad Vascular at 10–250 and
+Fibroblast at 15–250 counts. Reweighted to the eight human datasets, broad
+is resolvable for 67–97% of table cells and supercluster for 81–95%, 0–7%
+of table cells in pooled (extrapolated) bins; ag7 proseg_hybrid class 97%,
+subclass 98% (2% pooled). RESOLVE reweights each pooled set as one set to
+the dataset's cells at `>= D_P` (`pooled_composition_weights`): with the
+per-bin weights, a deep bin where a dataset lacks a type let one row carry
+a whole set (ag7: 69 calls, Kish n 1). Reweighted decisions take 1.5–1.8 s
+per human dataset and 3.2–3.6 s on ag7.
+
 ### Bundle files
 
 | File | Content |
@@ -266,8 +324,8 @@ listed under Known limitations.
 | `depth_grid.json` | The resolvability depth grid of the panel. |
 | `resolvability.parquet` | Primary and secondary bundles (resolvability on): one long table, `kind` per row type: `bin` (per recipe × level × class × depth: calls, precision and coverage at the default threshold, the local threshold), `curve` (precision and coverage at thresholds 0.50–0.99), `isotonic` (fit-half knots), `node` (per-node precision, recall, F1), `confusion` (truth × call within the called class), `decision` (the three regimes below), `gene_efficiency`. |
 | `resolvability_cells.parquet` | One row per simulated cell × level × recipe: parent class, depth, split half, call, bp, `avg_correlation`, truth, truth class, truth leaf, correct. RESOLVE reweights these to each dataset's composition. |
-| `resolvability_summary.json` | Recipes, levels, settings, test-set counts, `D_max` per level and class, emission per regime, level, class and depth (status, threshold, `t*`, extrapolated, reason), floors, validated thresholds the local rule would raise, the trust constraint, fine-level seed stability, runtimes and mapping runs. |
-| `test_cells.h5ad`, `test_cells.parquet` | Resolvability test-set bundles: native panel counts of the test cells and their truth per level (`truth__<level>`), composition key and spill group. |
+| `resolvability_summary.json` | Recipes, levels, settings, test-set counts, `D_max` per level and class, emission per regime, level, class and depth (status, threshold, `t*`, extrapolated, pooled, reason), the pooled deep sets per regime, level and class (`D_P`, the bins taking their verdict, statistics, `t*`, status), floors, validated thresholds the local rule would raise (own bins; pooled sets carry `would_raise`), the trust constraint, fine-level seed stability, runtimes and mapping runs. |
+| `test_cells.h5ad`, `test_cells.parquet` | Resolvability test-set bundles: native panel counts of the test cells and their truth per level (`truth__<level>`), composition key and spill group; human: donor, dissection and `test_source`. |
 
 ### Declared panels, gene IDs and controls (M3b)
 
@@ -632,36 +690,38 @@ H4 and H16 baselines) are in §11 of the pre-registration document.
   it. Before this was fixed the pipeline built ag7 and VZG2 on their own
   genes too, and their lookups differed from the validated ones in 301 and
   142 of 368 parents (median Jaccard 0.979 and 0.992).
-- **H18 does not pass as written on the validated panels** (M3b self-map,
-  resolvability version 2; a decision for the gate PRs;
-  `m3b/review_fix/REVIEW_FIX_REPORT.txt`). The emission rule needs ≥ 50
-  confident calls in a bin, while `D_max` needs only ≥ 50 test cells of the
-  class, so a deep bin can stay undecided and the bins beyond `D_max`
-  inherit that. Set a (PREP, unweighted): broad Astro is now emitted at
-  15–250 counts, but broad and supercluster Oligo are not emitted at 120
-  and 250 (42 confident calls at 120, all correct), and broad OPC not at 15
-  (precision .864); reweighted to the eight shadow datasets broad OPC is
-  also missed at 30 on four of them (Oligo and neuron cells with spill
-  called OPC outweigh the OPC cells). Mouse (PREP): class and subclass pass
-  for 29 / 29 classes with ≥ 50 test cells on VZG2, and for 29 / 29 and
-  28 / 29 on ag7 (Immune subclass at 100 counts: precision .885).
-  Reweighted to ag7 proseg_hybrid, three classes that make up ≤ 0.06% of
-  its cells (`05 OB-IMN GABA`, `08 CNU-MGE GABA`, `17 MH-LH Glut`) are not
-  emitted at the median depth, as composition reweighting intends for
-  classes the dataset hardly has. Human Vascular and Fibroblast (23 and 5
-  test cells in the held-out donor) are never emitted. Validated
-  thresholds the local rule would raise are listed per (level, class,
-  depth) in `resolvability_summary.json`
-  (`validated_thresholds_would_raise`).
-- **The H7 coverage proxy misses on two datasets under the §8.3 rule.**
-  The confident broad share of table cells after reweighting (validated
+- **H18 does not pass as written on the validated panels** (resolvability
+  version 3, after the user's decisions of 2026-09-27; a decision for the
+  gate PRs; `m3b/followup/H18_FOLLOWUP.txt`). Pooling deep bins alone
+  (decision 1, old test set) leaves one exception on set a (PREP): broad
+  OPC at 15 counts, also on all eight reweighted datasets. With the
+  other-region cells (decision 2) set a PREP fails broad Astro at 120 (101
+  calls, precision .931, Wilson .864 < .88) and broad and supercluster
+  Oligo at 120 (the wrong calls are other-region COP cells called
+  Oligodendrocyte); reweighted, broad OPC 15 and broad Oligo 120 fail on
+  all eight datasets, supercluster Oligo 120 on seven, broad Oligo also at
+  15–60 on three, broad Fibroblast 15 on two Xenium datasets and broad and
+  supercluster Immune 60 on P5011 MERSCOPE. COP supercluster is never
+  emitted (Oligodendrocyte cells called COP). Mouse: VZG2 passes for every
+  class with ≥ 50 test cells; ag7 fails the Immune subclass at 100 counts
+  (precision .885) and, reweighted, one to three classes (three to six
+  subclasses) that its datasets hardly contain. Validated thresholds the local rule would raise: set a 34
+  (PREP), SEA-AD 15, set c 14, ag7 156, VZG2 196, each listed in
+  `resolvability_summary.json` (`validated_thresholds_would_raise`, and
+  `would_raise` on each pooled set).
+- **The H7 coverage proxy misses on P7513 MERSCOPE under version 3.** The
+  confident broad share of table cells after reweighting (validated
   regime; it ignores the SEA-AD vote, the COP rule on real cells and the
-  floors, so the real H7 values will be lower) is, stage C (v1) → v2:
-  P7513 MERSCOPE .495 → .532 (H7 asks ≥ .62), P7113 MERSCOPE .646 → .666
-  (≥ .67), P1212 MERSCOPE .288 → .410 (≥ .34; stage C missed it too),
-  P5011 Xenium .495 → .528 (≥ .40). Inheriting beyond `D_max` from the
-  deepest decided bin instead (not the plan's rule; it emits more labels
-  and needs approval in the H18 PR) gives .638, .713, .410 and .528.
+  floors, so the real H7 values will be lower) is, version 2 → decision 1
+  alone → version 3: P7513 MERSCOPE .532 → .638 → .576 (H7 asks ≥ .62),
+  P7113 MERSCOPE .666 → .713 → .692 (≥ .67), P1212 MERSCOPE .410 → .410 →
+  .436 (≥ .34), P5011 MERSCOPE .435 → .435 → .311 (≥ .30); the Xenium
+  datasets pass throughout. The version-3 losses are broad Oligo bins: the
+  other-region COP cells are called Oligodendrocyte, and they weigh more
+  where a dataset's own calls hold much COP (4–13% per depth bin on P7513
+  and P5011 MERSCOPE). Without the other-region cells of clusters the
+  held-out training reference lacks (a sensitivity, not the rule) P7513
+  MERSCOPE reaches .611 and P5011 MERSCOPE .445.
 - **Set c of families without a curated list** uses the label-free rule,
   which drops far more genes than E5's validated set c (44-73 per pair on the
   E5 pairs); treat such set-c results as provisional.
