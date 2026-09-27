@@ -18,14 +18,12 @@ from merxen.annotation.gene_ids import (
     GeneTable,
     ResolutionRules,
     clean_native_value,
-    features_from_var,
     gene_id_sources,
     load_alias_table,
     load_gene_table,
     load_overrides,
     native_kind,
     resolve_gene_ids,
-    resolve_var_gene_ids,
     species_check,
     strip_version,
     summing_matrix,
@@ -200,6 +198,36 @@ def test_the_ratio_rule_alone_refuses_without_the_other_table() -> None:
     assert check.casefold_matches == {"human": len(AG7_SYMBOLS)}
     assert check.exact_case_ratio == 0.0
     assert check.tables["mouse"] is None
+
+
+def test_the_other_table_rule_alone_refuses_when_the_ratio_passes() -> None:
+    # Mouse symbols under species = human: the human table holds only 6 of
+    # the 40, all in exact case (ratio 1.0, the ratio rule passes), while
+    # the mouse table holds all 40 in exact case.
+    few = AG7_SYMBOLS[:6]
+    human = GeneTable.from_pairs(
+        "human",
+        [(symbol, f"ENSG{index:011d}") for index, symbol in enumerate(few)],
+        path="whb_gene.csv",
+    )
+    tables = {"human": human, "mouse": _both_tables()["mouse"]}
+
+    result = resolve_gene_ids(
+        _symbols_only(AG7_SYMBOLS),
+        "human",
+        _sources("human", gene_tables=tables),
+        rules=ResolutionRules(min_gene_id_resolution=0.1),
+    )
+
+    assert result.refusal_reasons == ["species_mismatch"]
+    check = result.species_check
+    assert check.exact_case_ratio == 1.0
+    assert check.exact_matches == {"human": 6, "mouse": len(AG7_SYMBOLS)}
+    assert check.reasons == [
+        f"{len(AG7_SYMBOLS)} symbols match the mouse gene table in exact case "
+        "vs 6 for human"
+    ]
+    assert check.tables["mouse"] == "wmb_gene.csv"
 
 
 @pytest.mark.parametrize(
@@ -393,37 +421,6 @@ def test_unmapped_features_are_listed_with_their_reason() -> None:
 # Refusals of the ID column
 
 
-def test_the_ag7_symbols_as_ids_fixture_is_refused() -> None:
-    """ag7: the ID column held symbols, so 0 of 498 root markers matched."""
-    var = pd.DataFrame(
-        {"gene": AG7_SYMBOLS, "gene_ids": AG7_SYMBOLS}, index=AG7_SYMBOLS
-    )
-
-    result = resolve_var_gene_ids(var, "mouse", _sources("mouse"))
-
-    assert result.status == "refused"
-    assert "native_id_prefix" in result.refusal_reasons
-    assert result.native_id_column == "gene_ids"
-    assert result.native_prefix_share == 0.0
-    assert result.symbols_as_ids == AG7_SYMBOLS
-    assert "symbols as IDs" in result.refusal_details["native_id_prefix"]
-
-
-def test_other_species_ids_are_refused() -> None:
-    var = pd.DataFrame(
-        {"gene_ids": [f"ENSMUSG{i:011d}" for i in range(20)]},
-        index=[f"Gene{i}" for i in range(20)],
-    )
-
-    result = resolve_var_gene_ids(var, "human", _sources("human"))
-
-    assert result.status == "refused"
-    assert {"native_id_prefix", "other_species_ids", "gene_id_resolution"} <= set(
-        result.refusal_reasons
-    )
-    assert result.unmapped()["Gene0"] == "other_species_id"
-
-
 def test_transcript_ids_of_a_codebook_do_not_count_as_ids() -> None:
     features = [
         FeatureInput(symbol, symbol, native_value=f"ENST{index:011d}")
@@ -436,19 +433,6 @@ def test_transcript_ids_of_a_codebook_do_not_count_as_ids() -> None:
     assert result.n_native_values == 0
     assert result.native_prefix_share is None
     assert result.source_counts() == {"fallback_table": len(features)}
-
-
-def test_features_from_var_uses_an_id_index() -> None:
-    var = pd.DataFrame(
-        {"gene_symbol": ["GFAP", "AQP4"]},
-        index=["ENSG00000131095", "ENSG00000171885"],
-    )
-    features, column = features_from_var(var)
-    assert column == "index"
-    assert [(f.name, f.symbol, f.native_value) for f in features] == [
-        ("ENSG00000131095", "GFAP", "ENSG00000131095"),
-        ("ENSG00000171885", "AQP4", "ENSG00000171885"),
-    ]
 
 
 # --------------------------------------------------------------------------

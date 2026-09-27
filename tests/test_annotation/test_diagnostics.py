@@ -272,16 +272,23 @@ def test_packaged_families_are_what_the_set_a_and_mouse_panels_inherit() -> None
         genes.ensembl_ids, species="human", platforms=pair, known_families=known
     )
     assert (listed.family_id, listed.basis) == ("human_set_a", "listed")
-    # A Xenium-only panel with the same genes never inherits the pair family.
-    assert (
-        panel_family(
-            genes.ensembl_ids,
-            species="human",
-            platforms=["XENIUM"],
-            known_families=known,
-        ).basis
-        == "own"
+    assert listed.matched_platforms == pair
+    # One platform of the pair run on its own (per_platform) keeps the
+    # family validated on both platforms (OD-E7 asks for the same platform).
+    alone = panel_family(
+        genes.ensembl_ids, species="human", platforms=["XENIUM"], known_families=known
     )
+    assert (alone.family_id, alone.basis) == ("human_set_a", "listed")
+    assert alone.matched_platforms == ["XENIUM"]
+    # The review case: set a plus one gene (NRP1-like) on Xenium alone
+    # inherits set a (P5011 Xenium, per_platform).
+    extra = sorted({*genes.ensembl_ids, "ENSG00000099250"})
+    plus_one = panel_family(
+        extra, species="human", platforms=["XENIUM"], known_families=known
+    )
+    assert (plus_one.family_id, plus_one.basis) == ("human_set_a", "inherited")
+    assert plus_one.jaccard == pytest.approx(297 / 298, abs=1e-6)
+    assert plus_one.matched_platforms == ["XENIUM"]
     non_root = sorted(set(genes.ensembl_ids) - genes.root_markers)
     near = sorted(set(genes.ensembl_ids) - set(non_root[:5]))
     inherited = panel_family(
@@ -305,6 +312,15 @@ def test_packaged_families_are_what_the_set_a_and_mouse_panels_inherit() -> None
         ).family_id
         == "mouse_vzg2"
     )
+    # A Xenium panel resembling VZG2 (a MERSCOPE-only family) never inherits.
+    xenium_vzg2 = panel_family(
+        vzg2,
+        species="mouse",
+        platforms=["XENIUM"],
+        known_families=table.known_families("mouse"),
+    )
+    assert xenium_vzg2.basis == "own"
+    assert xenium_vzg2.matched_platforms == []
 
 
 def test_load_validated_panels_from_a_path(tmp_path: Path) -> None:
