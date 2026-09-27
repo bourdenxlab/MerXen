@@ -89,12 +89,15 @@ from merxen.gene_ids import is_ensembl_gene_id
 
 if TYPE_CHECKING:
     from merxen.analysis.mapmycells import GeneIdFallbackTable
+    from merxen.annotation.diagnostics import ValidatedPanelTable
 
 logger = logging.getLogger(__name__)
 
 # 2: RequiredBundle.uses; set-c report basis and curated family.
 # 3: gene-ID resolver fields (status, species check, resolution table sha256).
-PANEL_SCHEMA_VERSION: Final = 3
+# 4: families from validated_panels.csv (basis "listed"), the report's
+#    validated_panels record and per-panel family_validation.
+PANEL_SCHEMA_VERSION: Final = 4
 SETC_FAMILY_FILES: Final[dict[str, str]] = {"human": "setc_families_human.csv"}
 SETC_EXCLUSION_FILES: Final[dict[str, str]] = {"human": "setc_exclusions_human.csv"}
 PANEL_GENES_FILE: Final = "panel_genes.json"
@@ -188,21 +191,23 @@ class PanelSource(_PanelModel):
 
 
 class PanelFamily(_PanelModel):
-    """The family a panel belongs to (plan §8.1; trust inheritance is M3b).
+    """The family a panel belongs to (plan §8.1, OD-E7).
 
     Attributes:
-        family_id: Family id; the panel's own id unless it inherited one.
-        basis: ``"own"``, ``"inherited"`` (same species and platforms,
-            Jaccard >= ``family_min_jaccard``, all root markers present) or
-            ``"subset"`` (a subset panel of a dataset missing panel genes,
-            which keeps its parent's family; ``subset_panel``).
+        family_id: Family id; the panel's own id unless it has a listed one.
+        basis: ``"own"``, ``"listed"`` (its hash is a row of
+            ``validated_panels.csv`` for the same species and platforms),
+            ``"inherited"`` (same species and platforms, Jaccard >=
+            ``family_min_jaccard`` with a listed panel, all its root markers
+            present) or ``"subset"`` (a subset panel of a dataset missing
+            panel genes, which keeps its parent's family; ``subset_panel``).
         reference_panel_hash: Hash of the family's panel.
         jaccard: Jaccard of this panel with the family's panel (for a
             subset, with its parent panel).
     """
 
     family_id: str
-    basis: Literal["own", "inherited", "subset"]
+    basis: Literal["own", "listed", "inherited", "subset"]
     reference_panel_hash: str
     jaccard: float
 
@@ -1301,7 +1306,9 @@ def declared_panel(
 
 @dataclass(frozen=True)
 class KnownPanelFamily:
-    """A family record trust can be inherited from (``validated_panels.csv``, M3b).
+    """A family record trust can be inherited from (``validated_panels.csv``).
+
+    ``diagnostics.ValidatedPanelTable.known_families`` builds one per row.
 
     Attributes:
         family_id: Family id.
@@ -1345,17 +1352,19 @@ def panel_family(
 ) -> PanelFamily:
     """Return the family a panel belongs to (plan §8.1, OD-E7).
 
-    A panel inherits a known family when it has the same species and
-    platforms, Jaccard >= ``min_jaccard`` with the family panel and contains
-    all its root markers; the most similar such family wins. Otherwise the
-    panel is its own family, ``<species>_<platforms>_<hash prefix>``.
+    A panel whose hash is a known family's row (same species and platforms)
+    is ``listed`` in it. Otherwise it inherits a known family when it has the
+    same species and platforms, Jaccard >= ``min_jaccard`` with the family
+    panel and contains all its root markers; the most similar such family
+    wins. Otherwise the panel is its own family,
+    ``<species>_<platforms>_<hash prefix>``.
 
     Args:
         ensembl_ids: The panel's IDs.
         species: Species.
         platforms: Platforms the panel serves.
-        known_families: Families to inherit from (none until M3b ships
-            ``validated_panels.csv``).
+        known_families: Families to inherit from
+            (``diagnostics.load_validated_panels().known_families()``).
         min_jaccard: ``family_min_jaccard``.
 
     Returns:
@@ -1364,10 +1373,21 @@ def panel_family(
     ids = set(ensembl_ids)
     own_hash = compute_panel_hash(sorted(ids))
     platform_set = frozenset(platform.upper() for platform in platforms)
+    candidates = [
+        family
+        for family in known_families
+        if family.species == species and family.platforms == platform_set
+    ]
+    listed = next((f for f in candidates if f.panel_hash == own_hash), None)
+    if listed is not None:
+        return PanelFamily(
+            family_id=listed.family_id,
+            basis="listed",
+            reference_panel_hash=own_hash,
+            jaccard=1.0,
+        )
     best: tuple[float, KnownPanelFamily] | None = None
-    for family in known_families:
-        if family.species != species or family.platforms != platform_set:
-            continue
+    for family in candidates:
         if not family.root_markers <= ids:
             continue
         score = jaccard(ids, family.ensembl_ids)
@@ -2908,9 +2928,10 @@ def compute_panel(
     panel_files: Mapping[str, Path] | None = None,
     shared_mask: SharedTissueMask | None = None,
     min_counts: int | None = None,
-    known_families: Sequence[KnownPanelFamily] = (),
+    known_families: Sequence[KnownPanelFamily] | None = None,
     setc_families: Sequence[CuratedSetcFamily] | None = None,
     require_shared_mask: bool = False,
+    validated: ValidatedPanelTable | None = None,
 ) -> PanelComputation:
     """Run ``ANNOTATE_PANEL`` for one pair x segmentation (plan §3.2).
 
@@ -2930,12 +2951,16 @@ def compute_panel(
         shared_mask: The pair's shared tissue mask, for set c.
         min_counts: Table-cell threshold (default: the clustering config's,
             then the annotation config's, then 10).
-        known_families: Families to inherit from.
+        known_families: Families to inherit from (default: the rows of the
+            validated table).
         setc_families: Curated set-c families (default: the packaged ones).
         require_shared_mask: Refuse a label-free set c whose pseudobulk
             cannot use the shared tissue mask (pipeline runs of aligned
             pairs: a whole-section or stale mask must never define set c).
             A curated set c needs no mask.
+        validated: The validated families (default:
+            ``AnnotationPanelConfig.validated_panels_path``, else the packaged
+            ``validated_panels.csv``).
 
     Returns:
         What was written.
@@ -2945,6 +2970,9 @@ def compute_panel(
         raise ValueError(f"annotation config is for {config.species}, not {species}")
     if setc_families is None:
         setc_families = load_curated_setc_families(species)
+    validated, known_families = _validated_families(
+        config, species, validated, known_families
+    )
     panel_config = config.panel
     registry = ControlRegistry.from_config(panel_config)
     clustering = dict(clustering_config or {})
@@ -3143,9 +3171,11 @@ def compute_panel(
                     else item.panel.panel_family.model_dump(mode="json")
                 ),
                 "refused": refused.get(name),
+                "family_validation": _family_validation(item.panel, validated),
             }
             for name, item in panel_file_map.items()
         },
+        "validated_panels": validated.describe(),
         "intersection_only_in": _only_in(declared) if len(declared) == 2 else {},
         "xplat_broad_only": (
             mode == "per_platform"
@@ -3157,6 +3187,31 @@ def compute_panel(
         "n_required_bundles": required.n_required,
     }
     return _write_panel_outputs(Path(output_dir), report, panel_file_map, required)
+
+
+def _validated_families(
+    config: AnnotationConfig,
+    species: Species,
+    validated: ValidatedPanelTable | None,
+    known_families: Sequence[KnownPanelFamily] | None,
+) -> tuple[ValidatedPanelTable, Sequence[KnownPanelFamily]]:
+    """The validated table and the families a run's panels may inherit."""
+    from merxen.annotation.diagnostics import load_validated_panels
+
+    if validated is None:
+        validated = load_validated_panels(config.panel.validated_panels_path)
+    if known_families is None:
+        known_families = validated.known_families(species)
+    return validated, known_families
+
+
+def _family_validation(
+    panel: AnnotationPanel, validated: ValidatedPanelTable
+) -> dict[str, Any]:
+    """``family_validation_preview`` of one annotation panel (report item 1)."""
+    from merxen.annotation.diagnostics import family_validation_preview
+
+    return family_validation_preview(panel.panel_family, panel.species, validated)
 
 
 def _fallback_record(sources: GeneIdSources) -> dict[str, Any] | None:
@@ -3221,8 +3276,9 @@ def panel_from_gene_list(
     config: AnnotationConfig | None = None,
     pair_id: str | None = None,
     segmentation: str | None = None,
-    known_families: Sequence[KnownPanelFamily] = (),
+    known_families: Sequence[KnownPanelFamily] | None = None,
     setc_families: Sequence[CuratedSetcFamily] | None = None,
+    validated: ValidatedPanelTable | None = None,
 ) -> PanelComputation:
     """Build the panel files from a gene list (``annotation_panel_genes_path``).
 
@@ -3238,14 +3294,20 @@ def panel_from_gene_list(
         config: Annotation config; ``None`` uses the species defaults.
         pair_id: Pair id, for the record.
         segmentation: Segmentation, for the record.
-        known_families: Families to inherit from.
+        known_families: Families to inherit from (default: the rows of the
+            validated table).
         setc_families: Curated set-c families (default: the packaged ones);
             a human gene list of such a family also gets its set c.
+        validated: The validated families (default: the configured or
+            packaged ``validated_panels.csv``).
 
     Returns:
         What was written.
     """
     config = config or AnnotationConfig(species=species)
+    validated, known_families = _validated_families(
+        config, species, validated, known_families
+    )
     panel_config = config.panel
     registry = ControlRegistry.from_config(panel_config)
     if setc_families is None:
@@ -3344,9 +3406,11 @@ def panel_from_gene_list(
                     else item.panel.panel_family.model_dump(mode="json")
                 ),
                 "refused": refused.get("gene_list"),
+                "family_validation": _family_validation(item.panel, validated),
             }
             for name, item in panel_file_map.items()
         },
+        "validated_panels": validated.describe(),
         "setc": None if setc_report is None else setc_report.model_dump(mode="json"),
         "setc_skipped": None
         if setc_report is not None
