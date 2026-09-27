@@ -17,8 +17,10 @@ shared tissue mask), all read-only, and writes to ``--out``:
   share, COP shares, WHB-SEA 7-class agreement (>= 20 counts);
 - ``jsd.csv`` / ``compositions.csv``: soft, argmax, confident and >= 30-count
   soft broad compositions per platform and their MERSCOPE-vs-Xenium JSD with
-  95% spatial block-bootstrap CIs, whole section and inside the shared mask
-  (plus the set-c soft / argmax JSD where a set-c run exists);
+  95% spatial block-bootstrap CIs (500 µm tiles of one grid in the shared
+  Xenium frame, resampled jointly; the independent per-section resampling
+  as a sensitivity), whole section and inside the shared mask (plus the
+  set-c soft / argmax JSD where a set-c run exists);
 - ``referee.csv``: the E1 canonical-marker referee on WHB-vs-SEA and
   new-vs-legacy broad disputes;
 - ``second_vote_cost.csv``: on the E2 30k native cells (``--e2-native``), the
@@ -41,6 +43,7 @@ import argparse
 import json
 import logging
 import math
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,6 +65,7 @@ from merxen.annotation.shadow import (
     N_BOOTSTRAP,
     OPC,
     TILE_UM,
+    BootstrapJsd,
     HumanRuleResult,
     argmax_broad_names,
     block_bootstrap_jsd,
@@ -73,6 +77,7 @@ from merxen.annotation.shadow import (
     one_hot_broad_matrix,
     rule_inputs_from_provisional,
     seaad_broad_calls,
+    shared_tile_codes,
     soft_matrix_from_provisional,
     tile_codes,
     tile_sums,
@@ -80,6 +85,38 @@ from merxen.annotation.shadow import (
 from merxen.annotation.vocab import COP_SUPERCLUSTER, HUMAN_BROAD_CLASSES
 
 logger = logging.getLogger("shadow_baselines")
+
+# The gene-ID fallback tables the shadow runs used (M0e); host paths never
+# live in the scripts (Agents.md): give them as options or environment.
+HUMAN_FALLBACK_ENV = "MERXEN_GENE_ID_FALLBACK_CSV"
+MOUSE_FALLBACK_ENV = "MERXEN_MOUSE_GENE_ID_FALLBACK_CSV"
+
+
+def add_fallback_arguments(
+    parser: argparse.ArgumentParser, *, human: bool = True, mouse: bool = False
+) -> None:
+    """Add ``--gene-id-fallback-csv`` / ``--mouse-gene-id-fallback-csv``.
+
+    Their defaults come from ``$MERXEN_GENE_ID_FALLBACK_CSV`` and
+    ``$MERXEN_MOUSE_GENE_ID_FALLBACK_CSV`` (``.env.example``); without either
+    the option is required, so a variant query never silently resolves
+    fewer genes than the MAP run it is compared with.
+    """
+    for wanted, option, env, what in (
+        (human, "--gene-id-fallback-csv", HUMAN_FALLBACK_ENV, "human"),
+        (mouse, "--mouse-gene-id-fallback-csv", MOUSE_FALLBACK_ENV, "mouse"),
+    ):
+        if not wanted:
+            continue
+        default = os.environ.get(env) or None
+        parser.add_argument(
+            option,
+            type=Path,
+            default=default,
+            required=default is None,
+            help=f"{what} gene-ID fallback table of the MAP runs (default: ${env})",
+        )
+
 
 PLATFORMS = ("MERSCOPE", "XENIUM")
 PAIRS = ("P7513", "P1212", "P7113", "P5011")
@@ -105,6 +142,82 @@ class Sample:
     scores: np.ndarray
     aligned_frame: bool
     rules: dict[str, HumanRuleResult]
+
+
+@dataclass(frozen=True)
+class SectionTiles:
+    """The 500 µm tiles of a MERSCOPE / Xenium pair (plan §5.5).
+
+    When the MERSCOPE coordinates are in the Xenium frame (``aligned_frame``)
+    both sections share one grid and the bootstrap resamples tile locations
+    jointly (the registered H1 method); otherwise each section has its own
+    grid and only independent resampling is possible.
+    """
+
+    codes_m: np.ndarray
+    codes_x: np.ndarray
+    n_tiles: int | None
+    joint: bool
+
+    @classmethod
+    def of(
+        cls,
+        merscope: Sample,
+        xenium: Sample,
+        keep_m: np.ndarray,
+        keep_x: np.ndarray,
+        tile_um: float = TILE_UM,
+    ) -> SectionTiles:
+        """Tile the kept cells of both sections."""
+        if merscope.aligned_frame and xenium.aligned_frame:
+            codes_m, codes_x, n_tiles = shared_tile_codes(
+                merscope.xy[keep_m], xenium.xy[keep_x], tile_um
+            )
+            return cls(codes_m, codes_x, n_tiles, True)
+        logger.warning(
+            "%s / %s: no shared frame; independent tile resampling only",
+            merscope.sample_id,
+            xenium.sample_id,
+        )
+        return cls(
+            tile_codes(merscope.xy[keep_m], tile_um),
+            tile_codes(xenium.xy[keep_x], tile_um),
+            None,
+            False,
+        )
+
+    def sums(self, matrix_m: np.ndarray, matrix_x: np.ndarray) -> tuple[Any, Any]:
+        """Return both sections' tile sums (one grid when joint)."""
+        return (
+            tile_sums(matrix_m, self.codes_m, self.n_tiles),
+            tile_sums(matrix_x, self.codes_x, self.n_tiles),
+        )
+
+    def bootstrap(
+        self,
+        matrix_m: np.ndarray,
+        matrix_x: np.ndarray,
+        *,
+        n_reps: int = N_BOOTSTRAP,
+        seed: int = 0,
+        columns: Any = None,
+    ) -> tuple[BootstrapJsd, BootstrapJsd]:
+        """Return the registered (joint) and the independent-sensitivity JSD."""
+        tiles_m, tiles_x = self.sums(matrix_m, matrix_x)
+        independent = block_bootstrap_jsd(
+            tiles_m,
+            tiles_x,
+            n_reps=n_reps,
+            seed=seed,
+            columns=columns,
+            resampling="independent",
+        )
+        if not self.joint:
+            return independent, independent
+        joint = block_bootstrap_jsd(
+            tiles_m, tiles_x, n_reps=n_reps, seed=seed, columns=columns
+        )
+        return joint, independent
 
 
 def _clustered_path(results: Path, pair: str, seg: str, platform: str) -> Path:
@@ -149,8 +262,11 @@ def load_sample(
     labels = pd.read_parquet(folder / f"{sample_id}_ct_provisional.parquet")
     labels = labels[labels["in_table"].to_numpy(bool)].set_index("cell_id")
     tidy, _ = read_tidy_parquet(folder / f"{sample_id}_mmc_seaad_mr_panel.parquet")
+    # E2's definition, the basis of the v1 SEA-AD thresholds (plan §4.1).
     sea = seaad_broad_calls(
-        level_frame(tidy, "subclass"), level_frame(tidy, "supertype")
+        level_frame(tidy, "subclass"),
+        level_frame(tidy, "supertype"),
+        class_level=level_frame(tidy, "class"),
     )
     path = _clustered_path(results, pair, seg, platform)
     obs_names, var, counts, _ = read_h5ad_counts(path, "clustered")
@@ -305,17 +421,13 @@ def pair_jsd(
     for region, selection in regions.items():
         assert selection is not None
         keep_m, keep_x = selection
-        codes_m = tile_codes(merscope.xy[keep_m], tile_um)
-        codes_x = tile_codes(xenium.xy[keep_x], tile_um)
+        grid = SectionTiles.of(merscope, xenium, keep_m, keep_x, tile_um)
         for kind in kinds_m:
             if kind not in kinds_x:
                 continue
             matrix_m, matrix_x = kinds_m[kind][keep_m], kinds_x[kind][keep_x]
-            result = block_bootstrap_jsd(
-                tile_sums(matrix_m, codes_m),
-                tile_sums(matrix_x, codes_x),
-                n_reps=n_reps,
-                seed=seed,
+            result, sensitivity = grid.bootstrap(
+                matrix_m, matrix_x, n_reps=n_reps, seed=seed
             )
             shares_m, shares_x = (
                 composition_shares(matrix_m),
@@ -331,8 +443,12 @@ def pair_jsd(
                     "jsd": result.jsd,
                     "ci_low": result.ci_low,
                     "ci_high": result.ci_high,
+                    "resampling": result.resampling,
+                    "ci_low_independent": sensitivity.ci_low,
+                    "ci_high_independent": sensitivity.ci_high,
                     "n_reps": result.n_reps,
                     "tile_um": tile_um,
+                    "n_tile_locations": result.n_locations,
                     "n_tiles_merscope": result.n_tiles_a,
                     "n_tiles_xenium": result.n_tiles_b,
                     "n_cells_merscope": int(keep_m.sum()),

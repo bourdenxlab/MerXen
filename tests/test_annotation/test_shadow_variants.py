@@ -64,8 +64,10 @@ def test_map_query_variant_drops_and_rescales_genes(
     assert metadata["n_query_genes"] == len(GENE_IDS) - 1
     command = fake_mmc.calls[-1]["command"]
     assert "--query_markers.serialized_lookup" in command
-    lookup = Path(command[command.index("--query_markers.serialized_lookup") + 1])
-    assert GENE_IDS[0] not in lookup.read_text()
+    assert GENE_IDS[0] not in fake_mmc.calls[-1]["lookup"]["None"]
+    assert GENE_IDS[1] in fake_mmc.calls[-1]["lookup"]["None"]
+    # The restricted lookup and the query are scratch, removed after mapping.
+    assert not list((tmp_path / "work").glob("variant.*"))
     vocab = pd.read_csv(whb.vocab_snapshot, dtype=str, keep_default_na=False)
     total = pd.Series(query.total_counts, index=pd.Index(query.cell_ids))
     labels = whb_labels_from_tidy(tidy, vocab, total, level=whb.levels[0])
@@ -73,10 +75,29 @@ def test_map_query_variant_drops_and_rescales_genes(
     assert labels.loc["M1", "mmc_whb_supercluster_name"] == "Astrocyte"
     assert labels.loc["M7", "ct_broad_name"] == "Oligodendrocytes"
     assert np.isfinite(labels["total_counts"]).all()
-    reused = map_query_variant(
-        query, whb, output, work_dir=tmp_path / "work", drop_gene_ids=GENE_IDS
-    )
+    assert metadata["variant_sha256"]
+    n_calls = len(fake_mmc.calls)
+    arguments = {
+        "work_dir": tmp_path / "work",
+        "drop_gene_ids": [GENE_IDS[0]],
+        "log2_factors": {GENE_IDS[1]: 1.0},
+        "n_processors": 2,
+        "run_metadata": {"note": "test"},
+    }
+    reused = map_query_variant(query, whb, output, **arguments)
     assert reused == output
+    assert len(fake_mmc.calls) == n_calls
+    # Another variant under the same path (other factors, other held-out
+    # genes, other metadata) is re-mapped, never taken by its path alone.
+    for change in (
+        {"log2_factors": {GENE_IDS[1]: 0.5}},
+        {"drop_gene_ids": [GENE_IDS[1]]},
+        {"run_metadata": {"note": "other"}},
+    ):
+        map_query_variant(query, whb, output, **{**arguments, **change})
+        n_calls += 1
+        assert len(fake_mmc.calls) == n_calls
+    assert not list((tmp_path / "work").glob("*.query.h5ad"))
     with pytest.raises(ValueError, match="every query gene"):
         map_query_variant(
             query,
@@ -85,3 +106,31 @@ def test_map_query_variant_drops_and_rescales_genes(
             work_dir=tmp_path / "work",
             drop_gene_ids=GENE_IDS,
         )
+
+
+def test_map_query_variant_removes_its_scratch_when_the_mapper_fails(
+    tmp_path: Path, fake_mmc: FakeMmc
+) -> None:
+    from merxen.annotation.mapmycells_engine import MmcEngineError
+
+    samples = _pair_samples(tmp_path / "published", source="clustered")
+    panel = _panel(GENE_IDS)
+    whb = _human_bundles(fake_mmc, panel)[("whb_frontal_supc_clus", panel.panel_hash)]
+    query = published_queries(
+        {sample.platform: sample.h5ad_path for sample in samples},
+        panel,
+        species="human",
+    )["XENIUM"]
+    fake_mmc.fail_with = 2
+
+    with pytest.raises(MmcEngineError):
+        map_query_variant(
+            query,
+            whb,
+            tmp_path / "out" / "failed.parquet",
+            work_dir=tmp_path / "work",
+            drop_gene_ids=[GENE_IDS[0]],
+        )
+
+    assert not list((tmp_path / "work").glob("failed.*"))
+    assert not (tmp_path / "out" / "failed.parquet").exists()

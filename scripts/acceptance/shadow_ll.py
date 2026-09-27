@@ -71,6 +71,7 @@ from shadow_baselines import (  # noqa: E402
     PLATFORMS,
     Sample,
     _clustered_path,
+    add_fallback_arguments,
     load_sample,
 )
 
@@ -91,10 +92,6 @@ DEVELOPMENT = ("P7513", "P1212")
 OD_B8_COVERAGE = 0.05
 OD_B8_REFEREE = 0.02
 OD_B13_TRIGGER = 0.08
-FALLBACK = (
-    "/media/mathieubo/SSD1/MerXen/mapmycells/abc_whb/expression_matrices/"
-    "WHB-10Xv3/20240330/WHB-10Xv3-Nonneurons-raw.h5ad"
-)
 
 
 class ReferenceCache:
@@ -317,7 +314,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--pairs", default=",".join(PAIRS))
     parser.add_argument("--segmentations", default="proseg_hybrid,reseg")
-    parser.add_argument("--gene-id-fallback-csv", default=FALLBACK)
+    add_fallback_arguments(parser)
     args = parser.parse_args(argv)
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"

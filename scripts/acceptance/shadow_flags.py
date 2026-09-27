@@ -63,19 +63,12 @@ from shadow_baselines import (  # noqa: E402
     PAIRS,
     PLATFORMS,
     _clustered_path,
+    add_fallback_arguments,
     load_sample,
 )
 
 logger = logging.getLogger("shadow_flags")
 
-HUMAN_FALLBACK = (
-    "/media/mathieubo/SSD1/MerXen/mapmycells/abc_whb/expression_matrices/"
-    "WHB-10Xv3/20240330/WHB-10Xv3-Nonneurons-raw.h5ad"
-)
-MOUSE_FALLBACK = (
-    "/media/mathieubo/SSD1/MerXen/mapmycells/abc_atlas/metadata/WMB-10X/20241115/"
-    "gene.csv"
-)
 H16_MAX_INFORMATIVE = 0.15
 DEPTH_BINS = (10, 30, 60, 120, 250, 500, 1_000_000)
 
@@ -246,7 +239,7 @@ def human_inputs(
         {p: _clustered_path(args.results_root, pair, seg, p) for p in PLATFORMS},
         panel,
         species="human",
-        gene_id_fallback_csv=HUMAN_FALLBACK,
+        gene_id_fallback_csv=args.gene_id_fallback_csv,
     )
     output = []
     for platform in PLATFORMS:
@@ -293,7 +286,9 @@ def human_inputs(
     return output
 
 
-def mouse_inputs(run_dir: Path, clustered: Path, seg: str) -> FlagInputs:
+def mouse_inputs(
+    run_dir: Path, clustered: Path, seg: str, mouse_fallback: Path | None
+) -> FlagInputs:
     """Flag inputs of one mouse section x segmentation."""
     manifest = load_map_manifest(run_dir / "map_manifest.json")
     panel = AnnotationPanel.model_validate_json(
@@ -303,7 +298,7 @@ def mouse_inputs(run_dir: Path, clustered: Path, seg: str) -> FlagInputs:
         {"MERSCOPE": clustered},
         panel,
         species="mouse",
-        gene_id_fallback_csv=MOUSE_FALLBACK,
+        gene_id_fallback_csv=mouse_fallback,
     )["MERSCOPE"]
     sample_id = next(iter(manifest.samples))
     labels = pd.read_parquet(
@@ -356,6 +351,7 @@ def main(argv: list[str] | None = None) -> int:
         help="a mouse MAP output and its published clustered H5AD",
     )
     parser.add_argument("--seed", type=int, default=0)
+    add_fallback_arguments(parser, human=True, mouse=True)
     args = parser.parse_args(argv)
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
@@ -380,7 +376,14 @@ def main(argv: list[str] | None = None) -> int:
                 logger.info("%s %s done", inputs.dataset, seg)
     for item in args.mouse:
         seg, run_dir, clustered = item.split("=", 2)
-        work.append(mouse_inputs(Path(run_dir), Path(clustered), seg))
+        work.append(
+            mouse_inputs(
+                Path(run_dir),
+                Path(clustered),
+                seg,
+                args.mouse_gene_id_fallback_csv,
+            )
+        )
         for table, frame in zip(tables, score(work[-1], seed=args.seed), strict=True):
             table.append(frame)
         logger.info("%s %s done", work[-1].dataset, seg)

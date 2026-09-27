@@ -10,7 +10,7 @@ import pytest
 from scipy import sparse
 from scipy.spatial.distance import jensenshannon
 
-from merxen.annotation.config import AnnotationGate
+from merxen.annotation.config import AnnotationGate, AnnotationThresholds
 from merxen.annotation.shadow import (
     COMPOSITION_COLUMNS,
     E1_REFEREE_MARKERS,
@@ -54,6 +54,7 @@ from merxen.annotation.shadow import (
     seaad_broad_calls,
     seaad_soft_broad_matrix,
     select_heldout_markers,
+    shared_tile_codes,
     soft_broad_matrix,
     soft_matrix_from_provisional,
     tile_codes,
@@ -203,15 +204,96 @@ def test_block_bootstrap_jsd_is_reproducible_and_brackets_the_estimate() -> None
     rng = np.random.default_rng(0)
     first = _section(rng, 40, np.array([0.4, 0.2, 0.2, 0.05, 0.05, 0.05, 0.05, 0]))
     second = _section(rng, 30, np.array([0.3, 0.3, 0.2, 0.05, 0.05, 0.05, 0.05, 0]))
-    result = block_bootstrap_jsd(first, second, n_reps=200, seed=1)
-    again = block_bootstrap_jsd(first, second, n_reps=200, seed=1)
+    result = block_bootstrap_jsd(
+        first, second, n_reps=200, seed=1, resampling="independent"
+    )
+    again = block_bootstrap_jsd(
+        first, second, n_reps=200, seed=1, resampling="independent"
+    )
     np.testing.assert_array_equal(result.replicates, again.replicates)
     assert result.n_reps == 200
     assert (result.n_tiles_a, result.n_tiles_b) == (40, 30)
+    assert result.resampling == "independent"
+    assert result.n_locations == 70
     assert result.ci_low <= result.jsd <= result.ci_high
     assert result.jsd == pytest.approx(
         jensen_shannon_distance(first.sum(axis=0), second.sum(axis=0))
     )
+    with pytest.raises(ValueError, match="one tile grid"):
+        block_bootstrap_jsd(first, second)
+
+
+def test_independent_resampling_draws_each_section_on_its_own() -> None:
+    rng = np.random.default_rng(3)
+    first = _section(rng, 6, np.full(8, 1 / 8))
+    second = _section(rng, 6, np.full(8, 1 / 8))
+    result = block_bootstrap_jsd(
+        first, second, n_reps=5, seed=7, resampling="independent"
+    )
+    draws = np.random.default_rng(7)
+    weights_a = draws.multinomial(6, np.full(6, 1 / 6), 5)
+    weights_b = draws.multinomial(6, np.full(6, 1 / 6), 5)
+    assert not np.array_equal(weights_a, weights_b)
+    expected = jensen_shannon_distance(weights_a @ first, weights_b @ second)
+    np.testing.assert_allclose(result.replicates, expected)
+    percentiles = np.nanpercentile(expected, [2.5, 97.5])
+    assert (result.ci_low, result.ci_high) == pytest.approx(tuple(percentiles))
+
+
+def test_joint_resampling_applies_one_draw_to_both_sections() -> None:
+    rng = np.random.default_rng(4)
+    first = _section(rng, 7, np.full(8, 1 / 8))
+    second = _section(rng, 7, np.full(8, 1 / 8))
+    # Tile 2 is empty in both sections and is not a location; tile 5 holds
+    # tissue in one section only and is still a location.
+    first[2] = 0.0
+    second[2] = 0.0
+    second[5] = 0.0
+    result = block_bootstrap_jsd(first, second, n_reps=6, seed=11)
+    kept = [0, 1, 3, 4, 5, 6]
+    weights = np.random.default_rng(11).multinomial(6, np.full(6, 1 / 6), 6)
+    expected = jensen_shannon_distance(weights @ first[kept], weights @ second[kept])
+    np.testing.assert_allclose(result.replicates, expected)
+    assert result.resampling == "joint"
+    assert result.n_locations == 6
+    assert (result.n_tiles_a, result.n_tiles_b) == (6, 5)
+
+
+def test_joint_resampling_keeps_matched_anatomy_matched() -> None:
+    # Two adjacent sections with the same tile-to-tile composition gradient
+    # (grey to white matter) and a small constant platform shift: resampling
+    # the tile locations jointly keeps the interval near the platform
+    # difference; independent resampling adds the anatomy mismatch.
+    rng = np.random.default_rng(5)
+    n_tiles = 60
+    white = np.linspace(0.05, 0.9, n_tiles)
+    rows_a, rows_b = [], []
+    for share in white:
+        base = np.array([1 - share, share, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        shifted = base + np.array([0.03, -0.03, 0, 0, 0, 0, 0, 0])
+        rows_a.append(rng.multinomial(400, base / base.sum()))
+        rows_b.append(rng.multinomial(400, np.clip(shifted, 0, None) / shifted.sum()))
+    first, second = np.array(rows_a, float), np.array(rows_b, float)
+    joint = block_bootstrap_jsd(first, second, n_reps=200, seed=0)
+    independent = block_bootstrap_jsd(
+        first, second, n_reps=200, seed=0, resampling="independent"
+    )
+    assert joint.jsd == independent.jsd
+    assert (joint.ci_high - joint.ci_low) < 0.5 * (
+        independent.ci_high - independent.ci_low
+    )
+
+
+def test_shared_tile_codes_put_both_sections_on_one_grid() -> None:
+    xy_a = np.array([[10.0, 10.0], [600.0, 10.0], [np.nan, 0.0]])
+    xy_b = np.array([[20.0, 30.0], [1200.0, 10.0]])
+    codes_a, codes_b, n_tiles = shared_tile_codes(xy_a, xy_b, 500.0)
+    assert n_tiles == 3
+    assert codes_a[0] == codes_b[0]
+    assert codes_a[2] == -1
+    assert len({codes_a[1], codes_b[1], codes_a[0]}) == 3
+    sums = tile_sums(np.ones((2, 8)), codes_b, n_tiles)
+    assert sums.shape == (3, 8)
 
 
 def test_block_bootstrap_jsd_needs_tiles_in_both_sections() -> None:
@@ -282,6 +364,57 @@ def test_seaad_broad_calls_aggregate_runner_ups_and_split_vlmc() -> None:
     assert raw[4] == pytest.approx(0.8)
 
 
+def test_seaad_broad_calls_on_the_e2_definition() -> None:
+    # E2 (exp/E2/build_tables.py): neurons take the class-level bp; other
+    # classes take class bp x the subclass-level mass.
+    subclass = _level(
+        ["Astrocyte", "L2/3 IT", "VLMC & Perivascular"],
+        [0.6, 0.5, 0.7],
+        [[("Oligodendrocyte", 0.3)], [("L4 IT", 0.3)], [("Endothelial", 0.2)]],
+    )
+    supertype = _level(
+        ["Astro_2", "L2/3 IT_1", "VLMC_1"], [0.9, 0.4, 0.6], [[], [], []]
+    )
+    classes = _level(
+        [
+            "Non-neuronal and Non-neural",
+            "Neuronal: Glutamatergic",
+            "Non-neuronal and Non-neural",
+        ],
+        [0.8, 0.9, 0.5],
+        [[], [], []],
+    ).iloc[::-1]
+
+    e1 = seaad_broad_calls(subclass, supertype)
+    e2 = seaad_broad_calls(subclass, supertype, class_level=classes)
+
+    assert list(e2["broad"]) == list(e1["broad"])
+    raw = e2["broad_raw"].to_numpy()
+    assert raw[0] == pytest.approx(0.8 * 0.6)
+    assert raw[1] == pytest.approx(0.9)
+    assert e1["broad_raw"].iloc[1] == pytest.approx(0.8)
+    # A split subclass keeps its supertype factor under the class factor.
+    assert raw[2] == pytest.approx(0.5 * 0.7 * 0.6)
+
+
+def test_seaad_soft_broad_matrix_scales_by_the_class_probability() -> None:
+    subclass = _level(
+        ["Astrocyte", "L2/3 IT"], [0.6, 0.7], [[("Oligodendrocyte", 0.3)], []]
+    )
+    classes = _level(
+        ["Non-neuronal and Non-neural", "Neuronal: Glutamatergic"], [0.5, 0.8], [[], []]
+    )
+    column = {name: index for index, name in enumerate(COMPOSITION_COLUMNS)}
+
+    matrix = seaad_soft_broad_matrix(subclass, class_level=classes)
+
+    assert np.allclose(matrix.sum(axis=1), 1.0)
+    assert matrix[0, column["Astrocytes"]] == pytest.approx(0.5 * 0.6)
+    assert matrix[0, column["Oligodendrocytes"]] == pytest.approx(0.5 * 0.3)
+    assert matrix[0, column[UNALLOCATED]] == pytest.approx(1 - 0.5 * 0.9)
+    assert matrix[1, column["Neurons"]] == pytest.approx(0.8 * 0.7)
+
+
 def test_seaad_broad_calls_without_supertypes_leave_vlmc_unassigned() -> None:
     subclass = _level(["VLMC & Perivascular"], [0.9], [[]])
     calls = seaad_broad_calls(subclass)
@@ -327,9 +460,9 @@ def _inputs(rows: list[dict[str, object]]) -> HumanRuleInputs:
         whb_supercluster=column("super"),
         whb_supercluster_bp=column("super_bp").astype(float),
         whb_lineage=column("lineage"),
-        whb_lineage_raw=column("raw").astype(float),
+        whb_lineage_raw=column("lineage_raw").astype(float),
         whb_broad=column("broad"),
-        whb_broad_raw=column("raw").astype(float),
+        whb_broad_raw=column("broad_raw").astype(float),
         sea_broad=column("sea"),
         sea_broad_raw=column("sea_raw").astype(float),
         ll_broad=column("ll"),
@@ -343,6 +476,8 @@ def _cell(
     broad: str,
     *,
     raw: float = 0.95,
+    lineage_raw: float | None = None,
+    broad_raw: float | None = None,
     super_bp: float = 0.9,
     sea: str | None = None,
     sea_raw: float = 0.9,
@@ -354,7 +489,8 @@ def _cell(
         "super_bp": super_bp,
         "lineage": lineage,
         "broad": broad,
-        "raw": raw,
+        "lineage_raw": raw if lineage_raw is None else lineage_raw,
+        "broad_raw": raw if broad_raw is None else broad_raw,
         "sea": sea if sea is not None else broad,
         "sea_raw": sea_raw,
         "ll": ll,
@@ -458,6 +594,93 @@ def test_rules_thresholds_and_hard_floor() -> None:
     assert list(result.broad_confident) == [False, True, False, True]
     assert list(result.supercluster_confident) == [False, True, False, False]
     assert list(result.final_level()) == ["none", "supercluster", "none", "broad"]
+
+
+def test_rules_read_each_level_at_its_own_threshold() -> None:
+    rows = [
+        # Lineage .90 but broad .71: broad misses .73 (not .69).
+        _cell(100, *ASTRO, lineage_raw=0.9, broad_raw=0.71),
+        # Supercluster .71 passes its own .69 (not .73).
+        _cell(100, *ASTRO, super_bp=0.71),
+        # Probabilities exactly at the threshold, stored as float32 (the tidy
+        # parquet and ct_*_raw), still pass.
+        _cell(
+            100,
+            *ASTRO,
+            lineage_raw=float(np.float32(0.73)),
+            broad_raw=float(np.float32(0.73)),
+            super_bp=float(np.float32(0.69)),
+        ),
+        # Lineage .72 fails although broad passes.
+        _cell(100, *ASTRO, lineage_raw=0.72, broad_raw=0.95),
+    ]
+    result = evaluate_human_rules(_inputs(rows), platform="MERSCOPE")
+    assert list(result.lineage_confident) == [True, True, True, False]
+    assert list(result.broad_confident) == [False, True, True, False]
+    assert list(result.supercluster_confident) == [False, True, True, False]
+
+
+def test_rules_cop_needs_its_supercluster_probability_even_with_depth() -> None:
+    rows = [
+        # >= 120 counts but supercluster bp .6: stays at lineage.
+        _cell(150, *COP, super_bp=0.6, sea="Oligodendrocyte precursors", sea_raw=0.5),
+        # SEA-AD's confident OPC call rescues it.
+        _cell(150, *COP, super_bp=0.6, sea="Oligodendrocyte precursors", sea_raw=0.8),
+    ]
+    result = evaluate_human_rules(_inputs(rows), platform="MERSCOPE")
+    assert list(result.cop_suppressed) == [True, False]
+    assert list(result.broad_confident) == [False, True]
+
+
+def test_rules_seaad_vetoes_only_from_its_seven_classes() -> None:
+    rows = [
+        # SEA-AD Mixed/Unknown at .9 from 60 counts is no confident
+        # disagreement.
+        _cell(100, *ASTRO, sea=UNASSIGNED_LABEL, sea_raw=0.9),
+        # A confident SEA-AD Microglia call is.
+        _cell(100, *ASTRO, sea="Microglia", sea_raw=0.9),
+        # SEA-AD broad exactly at .68 (float32) is confident.
+        _cell(100, *ASTRO, sea="Microglia", sea_raw=float(np.float32(0.68))),
+    ]
+    result = evaluate_human_rules(_inputs(rows), platform="MERSCOPE")
+    assert list(result.broad_confident) == [True, False, False]
+
+
+def test_rules_second_vote_split_is_at_exactly_60_counts() -> None:
+    rows = [
+        # 59 counts: SEA-AD must agree.
+        _cell(59, *ASTRO, sea="Microglia", sea_raw=0.3),
+        # 60 counts: SEA-AD must only not confidently disagree.
+        _cell(60, *ASTRO, sea="Microglia", sea_raw=0.3),
+    ]
+    result = evaluate_human_rules(_inputs(rows), platform="MERSCOPE")
+    assert list(result.broad_confident) == [False, True]
+    moved = evaluate_human_rules(
+        _inputs(rows),
+        platform="MERSCOPE",
+        thresholds=AnnotationThresholds(second_vote_below_counts=61),
+    )
+    assert list(moved.broad_confident) == [False, False]
+
+
+def test_dataset_gate_boundaries_are_inclusive() -> None:
+    # Coverage exactly 0.25 is not failed; A exactly 0.30 is full; coverage
+    # of segmented objects exactly 0.15 raises no warning.
+    counts = np.array([30, 30, 30] + [10] * 7)
+    confident = np.array([True] * 3 + [False] * 7)
+    exact = dataset_gate(counts, confident, n_segmented=20)
+    assert exact.frac_ge30 == pytest.approx(0.30)
+    assert exact.level == "full"
+    assert not exact.warning
+    quarter = dataset_gate(np.array([100] * 4), np.array([True, False, False, False]))
+    assert quarter.broad_coverage_table == 0.25
+    assert quarter.level == "full"
+    below = dataset_gate(
+        np.array([100] * 5), np.array([True, False, False, False, False])
+    )
+    assert below.level == "failed"
+    warned = dataset_gate(counts, confident, n_segmented=21)
+    assert warned.warning
 
 
 def test_rules_need_the_second_method() -> None:
@@ -705,12 +928,13 @@ def test_seaad_soft_broad_matrix_splits_vlmc_by_supertype() -> None:
 def test_paired_bootstrap_difference_is_zero_for_identical_labellings() -> None:
     rng = np.random.default_rng(0)
     tiles_a = rng.random((12, 8))
-    tiles_b = rng.random((10, 8))
+    tiles_b = rng.random((12, 8))
     same = paired_block_bootstrap_jsd_difference(
         tiles_a, tiles_b, tiles_a, tiles_b, n_reps=50
     )
     assert same.difference == 0.0
     assert same.ci_low == same.ci_high == 0.0
+    assert same.resampling == "joint"
     shifted = tiles_b.copy()
     shifted[:, 0] += 5.0
     worse = paired_block_bootstrap_jsd_difference(
@@ -728,8 +952,27 @@ def test_paired_bootstrap_difference_is_zero_for_identical_labellings() -> None:
         paired_block_bootstrap_jsd_difference(tiles_a, tiles_b, tiles_a[:3], tiles_b)
     with pytest.raises(ValueError, match="non-empty"):
         paired_block_bootstrap_jsd_difference(
-            np.zeros((2, 8)), tiles_b, np.zeros((2, 8)), tiles_b
+            np.zeros((2, 8)), tiles_b[:2], np.zeros((2, 8)), tiles_b[:2]
         )
+    with pytest.raises(ValueError, match="one tile grid"):
+        paired_block_bootstrap_jsd_difference(
+            tiles_a, tiles_b[:10], tiles_a, tiles_b[:10]
+        )
+    independent = paired_block_bootstrap_jsd_difference(
+        tiles_a, tiles_b[:10], tiles_a, tiles_b[:10], resampling="independent"
+    )
+    assert independent.difference == 0.0
+
+
+def test_paired_bootstrap_difference_reuses_one_draw_for_everything() -> None:
+    rng = np.random.default_rng(8)
+    tiles = [rng.random((5, 8)) for _ in range(4)]
+    result = paired_block_bootstrap_jsd_difference(*tiles, n_reps=4, seed=2)
+    weights = np.random.default_rng(2).multinomial(5, np.full(5, 0.2), 4)
+    first = jensen_shannon_distance(weights @ tiles[0], weights @ tiles[1])
+    second = jensen_shannon_distance(weights @ tiles[2], weights @ tiles[3])
+    low, high = np.nanpercentile(first - second, [2.5, 97.5])
+    assert (result.ci_low, result.ci_high) == pytest.approx((low, high))
 
 
 def test_block_bootstrap_jsd_on_a_class_subset() -> None:
@@ -801,6 +1044,17 @@ def test_heldout_enrichment_scores_assigned_vs_other_cells() -> None:
         min_fold=100.0,
     )
     assert confident.n_assigned == 1 and not confident.passes
+    # Fold >= 3 but AUROC < 0.70 (most assigned cells lack the marker).
+    sparse_counts = pd.DataFrame({"AQP4": [30, 0, 0, 0, 0, 0, 0, 1]})
+    [weak] = heldout_enrichment(
+        sparse_counts,
+        np.full(8, 20),
+        ["Astrocytes"] * 4 + ["Neurons"] * 4,
+        {"Astrocytes": ("AQP4",)},
+    )
+    assert weak.fold >= 3
+    assert weak.auroc < 0.70
+    assert not weak.passes
 
 
 PROFILE_GENES = ["G1", "G2", "G3"]

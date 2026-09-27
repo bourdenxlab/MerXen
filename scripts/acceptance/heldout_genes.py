@@ -63,6 +63,7 @@ from shadow_baselines import (  # noqa: E402
     PAIRS,
     PLATFORMS,
     _clustered_path,
+    add_fallback_arguments,
 )
 
 logger = logging.getLogger("heldout_genes")
@@ -82,10 +83,6 @@ PREFIXES = {"set_a": "mmc_whb", "set_c": "mmc_whb_setc", "x1": "mmc_whb"}
 WHB_SUPC = "CCN202210140_SUPC"
 H4_PAIRS = ("P7513", "P1212", "P7113")
 H4_MIN_CLASSES = 6
-FALLBACK = (
-    "/media/mathieubo/SSD1/MerXen/mapmycells/abc_whb/expression_matrices/"
-    "WHB-10Xv3/20240330/WHB-10Xv3-Nonneurons-raw.h5ad"
-)
 
 
 def marker_ids(
@@ -308,7 +305,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--pairs", default=",".join(PAIRS))
     parser.add_argument("--variants", default=",".join(VARIANTS))
     parser.add_argument("--n-processors", type=int, default=6)
-    parser.add_argument("--gene-id-fallback-csv", default=FALLBACK)
+    add_fallback_arguments(parser)
     parser.add_argument("--tag", default="", help="suffix of the output CSVs")
     args = parser.parse_args(argv)
     logging.basicConfig(
