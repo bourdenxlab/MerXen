@@ -19,10 +19,20 @@ Variants (``--variants``): ``set_a`` (the §5.8 baseline, WHB set a bundle),
 ``set_c`` (the set-c panel and bundle) and ``x1`` (set a with the X1 platform
 rescaling: per-gene reference-pseudobulk factors, capped at +/- 2 log2,
 estimated from the held-out set-a re-map's cells with bp >= 0.8). Labels are
-scored three ways: the held-out re-map's argmax broad class on all table
-cells (the H4 metric), its WHB-only confident broad calls (v1 thresholds and
-floors, no second method: SEA-AD saw the held-out genes), and the production
-labels (circular, for comparison).
+scored on all table cells of the held-out re-map, in the options the user
+chooses H4's "assigned class" from (plan §5.8 does not define it; M3 PR):
+
+- (a) ``heldout_argmax``: the argmax broad class (the M3 working metric);
+- (b) ``heldout_argmax_cop_rule``: the argmax with the §5.2 COP rule applied
+  (a COP call is broad OPC only with >= the COP supercluster floor and
+  supercluster bp >= 0.69; otherwise it stays at lineage and is left out of
+  the classes); ``heldout_argmax_cop_rule_seaad`` adds the rule's SEA-AD
+  confident-OPC rescue from the production SEA-AD calls (which saw the
+  held-out genes);
+- (c) ``heldout_whb_confident``: the WHB-only confident broad calls (v1
+  thresholds and floors, no second method: SEA-AD saw the held-out genes);
+
+and ``production_argmax`` (circular, for comparison).
 
 Writes ``heldout_markers.csv``, ``heldout_enrichment.csv``, ``heldout_h4.csv``
 and ``runs/<pair>/<sid>_<variant>.parquet`` to ``--out``.
@@ -39,12 +49,20 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from merxen.annotation.mapmycells_engine import MmcBundle, read_tidy_parquet
+from merxen.annotation.config import AnnotationThresholds
+from merxen.annotation.mapmycells_engine import (
+    MmcBundle,
+    level_frame,
+    read_tidy_parquet,
+)
 from merxen.annotation.panel import AnnotationPanel
 from merxen.annotation.pipeline import SampleQuery, load_map_manifest
+from merxen.annotation.schema import meets_threshold
 from merxen.annotation.shadow import (
+    OPC,
     X1_LABEL_MIN_BP,
     argmax_broad_names,
+    cop_rule_broad_names,
     evaluate_human_rules,
     heldout_enrichment,
     map_query_variant,
@@ -52,6 +70,7 @@ from merxen.annotation.shadow import (
     published_queries,
     reference_pseudobulk_log2_factors,
     rule_inputs_from_provisional,
+    seaad_broad_calls,
     select_heldout_markers,
     whb_labels_from_tidy,
 )
@@ -219,6 +238,21 @@ def run_pair(
             cells = labels.index
             counts = marker_count_frame(query, ids, cells)
             argmax = argmax_broad_names(labels)
+            sea_tidy, _ = read_tidy_parquet(
+                run_dir / platform.lower() / f"{sample_id}_mmc_seaad_mr_panel.parquet"
+            )
+            sea = seaad_broad_calls(
+                level_frame(sea_tidy, "subclass"),
+                level_frame(sea_tidy, "supertype"),
+                class_level=level_frame(sea_tidy, "class"),
+            ).reindex(cells)
+            sea_confident_opc = (sea["broad"].to_numpy(object) == OPC) & (
+                meets_threshold(sea["broad_raw"], AnnotationThresholds().seaad_broad)
+            )
+            cop_rule = {
+                "heldout_argmax_cop_rule": None,
+                "heldout_argmax_cop_rule_seaad": sea_confident_opc,
+            }
             whb_only = evaluate_human_rules(
                 rule_inputs_from_provisional(labels),
                 platform=platform,
@@ -242,6 +276,20 @@ def run_pair(
             markers = selection.markers
             primary = heldout_enrichment(counts, total_counts, argmax, markers)
             rows += enrichment_rows(primary, base, "heldout_argmax")
+            for label_set, rescue in cop_rule.items():
+                cop_labels = cop_rule_broad_names(
+                    argmax,
+                    labels["mmc_whb_supercluster_name"].to_numpy(object),
+                    labels["mmc_whb_supercluster_bp"].to_numpy(np.float64),
+                    total_counts,
+                    platform=platform,
+                    sea_confident_opc=rescue,
+                )
+                rows += enrichment_rows(
+                    heldout_enrichment(counts, total_counts, cop_labels, markers),
+                    base,
+                    label_set,
+                )
             rows += enrichment_rows(
                 heldout_enrichment(
                     counts,
