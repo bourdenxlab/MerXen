@@ -746,7 +746,8 @@ def _bundle_overrides(values: tuple[str, ...]) -> dict[str, Path]:
     "--require-bundle-refs",
     is_flag=True,
     help="Map only the bundles given with --bundle-ref / --bundle: fail "
-    "instead of looking a missing one up in the store (pipeline runs).",
+    "instead of looking a missing one up in the store, and only record a "
+    "needed subset bundle as requested (pipeline runs).",
 )
 @click.option(
     "--results-root",
@@ -1065,9 +1066,12 @@ def _annotate(
         reuse_from=reuse_from or output_dir,
         write_provisional=write_provisional,
         refused_platforms=refused_platforms(required),
+        # A pipeline task (--require-bundle-refs) maps only the bundles PREP
+        # resolved and Nextflow staged: a subset bundle it lacks stays a
+        # recorded request, never a store lookup behind -resume's back.
         find_subset_bundle=(
             store_subset_bundle_finder(reference_store)
-            if reference_store is not None
+            if reference_store is not None and not require_bundle_refs
             else None
         ),
     )

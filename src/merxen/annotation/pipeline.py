@@ -69,7 +69,11 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
 
 from merxen.annotation.config import AnnotationConfig, AnnotationReferenceSpec
-from merxen.annotation.gene_ids import ResolutionRules, gene_id_sources
+from merxen.annotation.gene_ids import (
+    ResolutionRules,
+    gene_id_sources,
+    summing_matrix,
+)
 from merxen.annotation.mapmycells_engine import (
     EXTENDED_JSON_GZ_SUFFIX,
     TIDY_SCHEMA_VERSION,
@@ -167,6 +171,18 @@ SubsetBundleFinder = Callable[[str, str], MmcBundle | None]
 
 class MapError(RuntimeError):
     """The MAP step cannot run on its inputs."""
+
+
+class AmbiguousSubsetBundleError(MapError):
+    """The store holds several current-builder bundles on one subset panel.
+
+    Attributes:
+        candidates: The bundle directories.
+    """
+
+    def __init__(self, message: str, candidates: Sequence[str]) -> None:
+        super().__init__(message)
+        self.candidates = list(candidates)
 
 
 # --------------------------------------------------------------------------
@@ -388,6 +404,34 @@ def _current_bundles(
     return candidates
 
 
+def _resolvability_version(entry: StoreEntry) -> int | None:
+    """The resolvability version a bundle's self-map tables were written with."""
+    manifest = json.loads((entry.path / BUNDLE_MANIFEST_NAME).read_text("utf-8"))
+    record = (manifest.get("builder_output") or {}).get("resolvability") or {}
+    value = record.get("resolvability_version") if isinstance(record, dict) else None
+    return value if isinstance(value, int) else None
+
+
+def _prefer_current_resolvability(candidates: list[StoreEntry]) -> list[StoreEntry]:
+    """Among several bundles, keep those with the current self-map tables.
+
+    A ``RESOLVABILITY_VERSION`` bump gives rebuilt bundles a new
+    ``build_hash`` next to the old ones on the same panel; a standalone run
+    then takes the current tables. Bundles without a self-map, or several
+    current ones, stay ambiguous.
+    """
+    if len(candidates) <= 1:
+        return candidates
+    from merxen.annotation.resolvability import RESOLVABILITY_VERSION
+
+    current = [
+        entry
+        for entry in candidates
+        if _resolvability_version(entry) == RESOLVABILITY_VERSION
+    ]
+    return current or candidates
+
+
 def locate_bundle(
     store: ReferenceStore, reference_id: str, panel_hash: str | None
 ) -> MmcBundle:
@@ -395,7 +439,8 @@ def locate_bundle(
 
     Standalone runs do not know the source files PREP hashed, so the bundle
     is found by ``(reference_id, panel_hash)`` among the complete bundles
-    built by the current builder and store schema versions.
+    built by the current builder and store schema versions; of several, the
+    one whose self-map tables have the current ``RESOLVABILITY_VERSION``.
 
     Args:
         store: The reference store.
@@ -408,7 +453,9 @@ def locate_bundle(
     Raises:
         MapError: If there is none, or several (pass the bundle explicitly).
     """
-    candidates = _current_bundles(store, reference_id, panel_hash)
+    candidates = _prefer_current_resolvability(
+        _current_bundles(store, reference_id, panel_hash)
+    )
     if not candidates:
         raise MapError(
             f"the store has no builder-v{ANNOTATION_BUILDER_VERSION} bundle of "
@@ -688,27 +735,18 @@ def build_sample_query(loaded: LoadedSample, panel: AnnotationPanel) -> SampleQu
     Raises:
         MapError: If no panel gene is present.
     """
-    from scipy import sparse
-
-    columns: dict[str, list[int]] = {}
-    for position, gene_id in enumerate(loaded.feature_ids):
-        if gene_id:
-            columns.setdefault(gene_id, []).append(position)
-    present = [gene_id for gene_id in panel.ensembl_ids if gene_id in columns]
-    missing = [gene_id for gene_id in panel.ensembl_ids if gene_id not in columns]
+    in_data = {gene_id for gene_id in loaded.feature_ids if gene_id}
+    present = [gene_id for gene_id in panel.ensembl_ids if gene_id in in_data]
+    missing = [gene_id for gene_id in panel.ensembl_ids if gene_id not in in_data]
     if not present:
         raise MapError(
             f"{loaded.sample.sample_id}: none of the {panel.n_genes} panel genes "
             f"of {panel.name} is in the dataset"
         )
-    rows, cols = [], []
-    for column, gene_id in enumerate(present):
-        for position in columns[gene_id]:
-            rows.append(position)
-            cols.append(column)
-    selector = sparse.csr_matrix(
-        (np.ones(len(rows), dtype=loaded.counts.dtype), (rows, cols)),
-        shape=(len(loaded.feature_ids), len(present)),
+    # One column per present panel gene, the sum of every feature resolving
+    # to it (e.g. H2AX and H2AFX; plan §8.4).
+    selector = summing_matrix(
+        list(loaded.feature_ids), present, dtype=loaded.counts.dtype
     )
     table = np.flatnonzero(loaded.in_table)
     query = (loaded.counts[table] @ selector).tocsr()
@@ -739,23 +777,28 @@ class SubsetBundleRecord(_MapModel):
         trigger: ``panel.subset_bundle_trigger`` on the bundle's panel and
             the sample's genes.
         status: ``used`` (the store had the subset bundle and the run mapped
-            with it) or ``requested`` (the run mapped with the parent bundle,
+            with it), ``requested`` (the run mapped with the parent bundle,
             its lookup restricted to the genes present; build the subset
-            panel with ``merxen annotation-reference-prep --panel-genes``).
+            panel with ``merxen annotation-reference-prep --panel-genes``;
+            always so in a pipeline task, whose bundles come from PREP) or
+            ``ambiguous`` (the store holds several subset bundles; mapped
+            as ``requested``).
         subset_panel_file: The subset panel, relative to the manifest.
         subset_panel_hash: Its ``panel_hash``.
         parent_panel_hash: The bundle panel it was cut from.
         parent_build_hash: The parent bundle.
         subset_build_hash: The subset bundle mapped with (``used``).
+        candidates: The store's subset bundles (``ambiguous``).
     """
 
     trigger: SubsetBundleTrigger
-    status: Literal["used", "requested"]
+    status: Literal["used", "requested", "ambiguous"]
     subset_panel_file: str
     subset_panel_hash: str
     parent_panel_hash: str
     parent_build_hash: str
     subset_build_hash: str | None = None
+    candidates: list[str] = Field(default_factory=list)
 
 
 class MapRunRecord(_MapModel):
@@ -1846,24 +1889,36 @@ def _subset_bundle_for(
         )
     )
     subset.write(path)
-    found = (
-        find_subset_bundle(run.reference_id, subset.panel_hash)
-        if find_subset_bundle is not None
-        else None
-    )
+    found: MmcBundle | None = None
+    candidates: list[str] = []
+    if find_subset_bundle is not None:
+        try:
+            found = find_subset_bundle(run.reference_id, subset.panel_hash)
+        except AmbiguousSubsetBundleError as error:
+            candidates = error.candidates
+            logger.warning(
+                "%s %s: %s; mapping with the parent bundle",
+                loaded.sample.sample_id,
+                run.run_id,
+                error,
+            )
     if found is not None and found.panel_hash != subset.panel_hash:
         raise MapError(
             f"subset bundle {found.path} is for panel {str(found.panel_hash)[:16]}, "
             f"not {subset.panel_hash[:16]}"
         )
+    status: Literal["used", "requested", "ambiguous"] = (
+        "used" if found is not None else "ambiguous" if candidates else "requested"
+    )
     record = SubsetBundleRecord(
         trigger=trigger,
-        status="used" if found is not None else "requested",
+        status=status,
         subset_panel_file=_relative(path, output),
         subset_panel_hash=subset.panel_hash,
         parent_panel_hash=run.panel.panel_hash,
         parent_build_hash=run.bundle.build_hash,
         subset_build_hash=None if found is None else found.build_hash,
+        candidates=candidates,
     )
     reasons = ", ".join(trigger.reasons) or trigger.action
     if found is None:
@@ -1895,23 +1950,55 @@ def _subset_bundle_for(
 
 
 def store_subset_bundle_finder(store: ReferenceStore) -> SubsetBundleFinder:
-    """Return a finder of subset bundles in a store (``locate_bundle``).
+    """Return a finder of subset bundles in a store (standalone MAP only).
+
+    A pipeline MAP task never uses it (``--require-bundle-refs``): its
+    bundles come from PREP as bundle refs that Nextflow stages and tracks.
 
     Args:
         store: The reference store.
 
     Returns:
-        ``(reference_id, panel_hash) -> MmcBundle | None``; ``None`` when the
-        store has no current-builder bundle on that panel (several are an
-        error, as for ``locate_bundle``).
+        ``(reference_id, panel_hash) -> MmcBundle | None``: the store's one
+        current-builder bundle on that panel, opened through its store entry
+        like a bundle ref (``MmcBundle.from_bundle_ref``: the directory's
+        build hash must match its ``bundle.json``), or ``None`` without one;
+        several raise ``AmbiguousSubsetBundleError``, which MAP records as
+        ``ambiguous`` instead of failing.
     """
 
     def find(reference_id: str, panel_hash: str) -> MmcBundle | None:
-        if not _current_bundles(store, reference_id, panel_hash):
+        candidates = _prefer_current_resolvability(
+            _current_bundles(store, reference_id, panel_hash)
+        )
+        if not candidates:
             return None
-        return locate_bundle(store, reference_id, panel_hash)
+        if len(candidates) > 1:
+            raise AmbiguousSubsetBundleError(
+                f"{len(candidates)} subset bundles of {reference_id} on panel "
+                f"{panel_hash[:16]}: "
+                + ", ".join(str(entry.path) for entry in candidates),
+                [str(entry.path) for entry in candidates],
+            )
+        return _bundle_from_entry(candidates[0])
 
     return find
+
+
+def _bundle_from_entry(entry: StoreEntry) -> MmcBundle:
+    """Open a store entry as a bundle ref would (build hash checked)."""
+    manifest = json.loads((entry.path / BUNDLE_MANIFEST_NAME).read_text("utf-8"))
+    ref = BundleRef(
+        reference_id=str(manifest.get("reference_id", entry.reference_id)),
+        species=str(manifest.get("species", "")),
+        role=manifest.get("role", "primary"),
+        panel_hash=entry.panel_hash,
+        # The directory name is the content address: bundle.json must agree.
+        build_hash=entry.path.name,
+        path=str(entry.path),
+        store_root=str(entry.store_root),
+    )
+    return MmcBundle.from_bundle_ref(ref)
 
 
 def _reused_run(
