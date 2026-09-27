@@ -105,61 +105,74 @@ def _children(level: str, parent: str | None) -> list[str]:
 def bootstrap_mapper(
     query: res.SimulatedQuery, tag: str, seed: int, *, iterations: int = 20
 ) -> pd.DataFrame:
-    """Map hierarchically by marker counts with a gene bootstrap (bf 0.5)."""
+    """Map hierarchically by marker counts with a gene bootstrap (bf 0.5).
+
+    Vectorised: each iteration draws one 5-gene subset per child and scores
+    every cell of the parent with a matrix sum (a per-cell loop made the
+    module fixture take ~17 s).
+    """
     rng = np.random.default_rng(seed + 11)
     counts = query.counts.toarray()
-    records = []
-    for row, cell_id in enumerate(query.obs.index):
-        parent: str | None = None
-        for level in LEVELS:
-            children = _children(level, parent)
-            wins = np.zeros(len(children))
+    n_cells = counts.shape[0]
+    cell_ids = query.obs.index.astype(str).to_numpy()
+    parents = np.full(n_cells, "", dtype=object)
+    records: list[dict[str, object]] = []
+    for level in LEVELS:
+        assigned = np.empty(n_cells, dtype=object)
+        for parent in sorted({str(value) for value in parents}):
+            rows = np.flatnonzero(parents == parent)
+            children = _children(level, parent or None)
+            wins = np.zeros((len(rows), len(children)))
             for _ in range(iterations):
                 if level == "L3":
                     # No cluster markers: the bootstrap is a coin flip.
-                    scores = rng.random(len(children))
+                    scores = rng.random((len(rows), len(children)))
                 else:
-                    scores = np.array(
+                    scores = np.column_stack(
                         [
                             counts[
-                                row, rng.choice(MARKERS[child], 5, replace=False)
-                            ].sum()
-                            + rng.random() * 1e-3
+                                np.ix_(
+                                    rows, rng.choice(MARKERS[child], 5, replace=False)
+                                )
+                            ].sum(axis=1)
                             for child in children
                         ]
-                    )
-                wins[int(np.argmax(scores))] += 1
+                    ) + 1e-3 * rng.random((len(rows), len(children)))
+                wins[np.arange(len(rows)), np.argmax(scores, axis=1)] += 1
             probability = wins / iterations
-            order = np.argsort(-probability, kind="mergesort")
-            best = children[order[0]]
-            record = {
-                "cell_id": cell_id,
-                "level": level,
-                "level_name": level.lower(),
-                "assignment": best,
-                "name": best,
-                "bp": float(probability[order[0]]),
-                "aggregate_probability": float(probability[order[0]]),
-                "avg_correlation": 0.5,
-                "directly_assigned": True,
-                "n_runners_up": len(children) - 1,
-            }
-            for rank in range(1, N_RUNNERS_UP + 1):
-                if rank < len(children):
-                    other = children[order[rank]]
-                    record[runner_up_column(rank, "assignment")] = other
-                    record[runner_up_column(rank, "name")] = other
-                    record[runner_up_column(rank, "probability")] = float(
-                        probability[order[rank]]
-                    )
-                    record[runner_up_column(rank, "correlation")] = 0.1
-                else:
-                    for field_name in ("assignment", "name"):
-                        record[runner_up_column(rank, field_name)] = None
-                    for field_name in ("probability", "correlation"):
-                        record[runner_up_column(rank, field_name)] = math.nan
-            records.append(record)
-            parent = best
+            order = np.argsort(-probability, axis=1, kind="mergesort")
+            for position, row in enumerate(rows):
+                ranked = order[position]
+                best = children[ranked[0]]
+                assigned[row] = best
+                record: dict[str, object] = {
+                    "cell_id": cell_ids[row],
+                    "level": level,
+                    "level_name": level.lower(),
+                    "assignment": best,
+                    "name": best,
+                    "bp": float(probability[position, ranked[0]]),
+                    "aggregate_probability": float(probability[position, ranked[0]]),
+                    "avg_correlation": 0.5,
+                    "directly_assigned": True,
+                    "n_runners_up": len(children) - 1,
+                }
+                for rank in range(1, N_RUNNERS_UP + 1):
+                    if rank < len(children):
+                        other = children[ranked[rank]]
+                        record[runner_up_column(rank, "assignment")] = other
+                        record[runner_up_column(rank, "name")] = other
+                        record[runner_up_column(rank, "probability")] = float(
+                            probability[position, ranked[rank]]
+                        )
+                        record[runner_up_column(rank, "correlation")] = 0.1
+                    else:
+                        for field_name in ("assignment", "name"):
+                            record[runner_up_column(rank, field_name)] = None
+                        for field_name in ("probability", "correlation"):
+                            record[runner_up_column(rank, field_name)] = math.nan
+                records.append(record)
+        parents = assigned
     return pd.DataFrame.from_records(records)
 
 
@@ -322,6 +335,10 @@ def test_thresholds_are_chosen_on_one_half_and_checked_on_the_other() -> None:
     assert trust["t_star"] == pytest.approx(0.70)
     assert trust["status"] == res.STATUS_NOT_RESOLVABLE
     assert trust["reason"] == "wilson_bound_below_target"
+    # t* is checked on the check half only, and fitted on the fit half only.
+    assert trust["check_set"] == "check_half"
+    assert trust["n_called"] == int((half == 1).sum())
+    assert trust["n_fit"] == int((half == 0).sum())
     # Without split halves the fit sees the check half too (85% correct at
     # every bp), so no local threshold reaches the target.
     pooled = res.decide(
@@ -383,6 +400,79 @@ def test_validated_regime_keeps_the_default_and_reports_a_raise() -> None:
     assert validated["threshold"] == pytest.approx(0.70)
     assert validated["would_raise"]
     assert validated["t_star"] > 0.75
+    # The default is fitted on no test cell: every call of the bin checks it.
+    assert validated["check_set"] == "all"
+    assert validated["n_called"] == 6000
+    assert validated["n_confident"] == int((bp >= 0.70).sum())
+    assert validated["precision"] == pytest.approx(correct.mean())
+    trust = decisions[decisions["regime"] == "trust"].iloc[0]
+    assert trust["n_called"] == 3000
+
+
+def test_validated_regime_checks_the_default_on_both_halves() -> None:
+    # 90 calls, all correct: 45 per half is below min_confident_n (and the
+    # fit minimum), but the default needs no fit, so all 90 check it.
+    bp = np.full(90, 0.95)
+    correct = np.ones(90, dtype=bool)
+    decisions = res.decide(bin_cells(bp, correct), [BROAD], [30], settings())
+    by_regime = decisions.set_index("regime")
+    assert by_regime.loc["validated", "status"] == res.STATUS_EMITTED
+    assert by_regime.loc["validated", "n_confident"] == 90
+    assert by_regime.loc["validated", "wilson_lb"] == pytest.approx(
+        res.wilson_lower_bound(1.0, 90)
+    )
+    assert by_regime.loc["trust", "status"] == res.STATUS_NOT_RESOLVABLE
+    assert by_regime.loc["trust", "reason"] == "too_few_fit_cells"
+    # Without split halves every regime checks all calls.
+    pooled = res.decide(
+        bin_cells(bp, correct), [BROAD], [30], settings(split_halves=False)
+    ).set_index("regime")
+    assert set(pooled["check_set"]) == {"all"}
+
+
+def test_emission_needs_the_minimum_coverage() -> None:
+    # 100 precise confident calls, but 900 calls below the default: coverage
+    # 0.1 < 0.2, so the bin is not emitted although precision passes.
+    bp = np.concatenate([np.full(900, 0.5), np.full(100, 0.95)])
+    correct = np.ones(1000, dtype=bool)
+    decisions = res.decide(bin_cells(bp, correct), [BROAD], [30], settings())
+    validated = decisions[decisions["regime"] == "validated"].iloc[0]
+    assert validated["n_confident"] == 100
+    assert validated["coverage"] == pytest.approx(0.1)
+    assert validated["wilson_lb"] >= 0.88
+    assert validated["reason"] == "coverage_below_minimum"
+    assert validated["status"] == res.STATUS_NOT_RESOLVABLE
+    relaxed = res.decide(
+        bin_cells(bp, correct), [BROAD], [30], settings(min_coverage=0.05)
+    )
+    assert (
+        relaxed[relaxed["regime"] == "validated"].iloc[0]["status"]
+        == res.STATUS_EMITTED
+    )
+
+
+def test_wilson_bound_uses_the_kish_effective_n() -> None:
+    # 60 correct confident calls pass the Wilson bound on the raw n, but five
+    # of them carry most of the weight: on the Kish n (11.7) they fail.
+    bp = np.full(60, 0.95)
+    correct = np.ones(60, dtype=bool)
+    weights = np.ones(60)
+    weights[:5] = 20.0
+    cells = bin_cells(bp, correct)
+    raw = res.decide(cells, [BROAD], [30], settings()).set_index("regime")
+    assert raw.loc["validated", "status"] == res.STATUS_EMITTED
+    weighted = res.decide(cells, [BROAD], [30], settings(), weights=weights).set_index(
+        "regime"
+    )
+    row = weighted.loc["validated"]
+    assert row["n_confident"] == 60
+    assert row["n_effective"] == pytest.approx(res.kish_effective_n(weights))
+    assert row["n_effective"] == pytest.approx(155.0**2 / 2055.0)
+    assert row["wilson_lb"] == pytest.approx(
+        res.wilson_lower_bound(1.0, row["n_effective"])
+    )
+    assert row["reason"] == "wilson_bound_below_target"
+    assert row["max_weight_share"] == pytest.approx(20.0 / 155.0)
 
 
 # --------------------------------------------------------------------------
@@ -457,8 +547,14 @@ def test_floors_follow_the_max_rule() -> None:
     ).set_index(["regime", "class"])
     assert floors.loc[("provisional", "Deep"), "known_floor"] == 30
     assert floors.loc[("provisional", "Deep"), "floor"] == 30
-    assert floors.loc[("validated", "Deep"), "floor"] == 30
-    assert floors.loc[("validated", "Deep"), "floor_source"] == "real_e2"
+    # Validated panels keep the packaged floor of each platform, not the max.
+    assert pd.isna(floors.loc[("validated", "Deep"), "floor"])
+    assert floors.loc[("validated", "Deep"), "floor_source"] == "packaged"
+    assert [
+        (row["platform"], row["min_counts"])
+        for row in floors.loc[("validated", "Deep"), "packaged"]
+    ] == [("MERSCOPE", 15), ("XENIUM", 30)]
+    assert floors.loc[("provisional", "Deep"), "packaged"] == []
     assert floors.loc[("provisional", "Rare"), "floor_source"] == "not_resolvable"
     # A simulated floor above the known one wins.
     shifted = decisions.copy()
@@ -470,6 +566,44 @@ def test_floors_follow_the_max_rule() -> None:
     ).set_index(["regime", "class"])
     assert floors.loc[("provisional", "Shallow"), "simulated_floor"] == 30
     assert floors.loc[("provisional", "Shallow"), "floor"] == 30
+
+
+def test_validated_summary_floors_are_the_packaged_per_platform_values() -> None:
+    from merxen.annotation.vocab import load_floor_table
+
+    rng = np.random.default_rng(13)
+    frames = [
+        bin_cells(
+            np.round(0.8 + 0.2 * rng.random(400), 3),
+            rng.random(400) < 0.995,
+            cls="Inh",
+            depth=depth,
+        )
+        for depth in (10, 30)
+    ]
+    decisions = res.decide(
+        pd.concat(frames, ignore_index=True), [BROAD], [10, 30], settings()
+    )
+    table = load_floor_table("human")
+    floors = res.combined_floors(
+        decisions, [BROAD], settings(), floor_table=table, species="human"
+    )
+    validated = floors[(floors["regime"] == "validated") & (floors["class"] == "Inh")]
+    packaged = {
+        row["platform"]: row["min_counts"] for row in validated.iloc[0]["packaged"]
+    }
+    expected = table[(table["level"] == "broad") & (table["floor_class"] == "Inh")]
+    assert packaged == dict(
+        zip(expected["platform"], expected["min_counts"].astype(int), strict=True)
+    )
+    assert packaged == {"MERSCOPE": 10, "XENIUM": 30}
+    assert validated.iloc[0]["floor_source"] == "packaged"
+    # The provisional (max-rule) floor stays the maximum over platforms.
+    provisional = floors[
+        (floors["regime"] == "provisional") & (floors["class"] == "Inh")
+    ].iloc[0]
+    assert provisional["known_floor"] == 30
+    assert provisional["floor"] == 30
 
 
 def test_mouse_subclass_floor_is_at_least_60_while_provisional() -> None:
@@ -507,12 +641,212 @@ def test_reweighting_to_a_dataset_composition_changes_emission() -> None:
     cells = pd.concat([own, foreign], ignore_index=True)
     unweighted = res.decide(cells, [BROAD], [30], settings())
     assert unweighted[unweighted["regime"] == "trust"].iloc[0]["status"] == "emitted"
+    untrimmed = res.composition_weights(
+        cells, {"Own": 0.4, "Foreign": 0.6}, trim_factor=0
+    )
+    assert untrimmed[: len(own)] == pytest.approx(0.4 / (2000 / 2100))
+    assert untrimmed[len(own) :] == pytest.approx(0.6 / (100 / 2100))
+    # Trimmed at 10 x the median (0.42 -> 4.2), renormalised to mean 1.
     weights = res.composition_weights(cells, {"Own": 0.4, "Foreign": 0.6})
-    assert weights[: len(own)].mean() == pytest.approx(0.4 / (2000 / 2100))
+    assert weights.mean() == pytest.approx(1.0)
+    assert weights[: len(own)] == pytest.approx(0.7)
+    assert weights[len(own) :] == pytest.approx(7.0)
     weighted = res.decide(cells, [BROAD], [30], settings(), weights=weights)
-    row = weighted[weighted["regime"] == "trust"].iloc[0]
+    trust = weighted[weighted["regime"] == "trust"].iloc[0]
+    assert trust["status"] == res.STATUS_NOT_RESOLVABLE
+    assert trust["reason"] == "no_local_threshold"
+    row = weighted[weighted["regime"] == "validated"].iloc[0]
     assert row["status"] == res.STATUS_NOT_RESOLVABLE
-    assert row["n_effective"] < row["n_confident"] + 1e-9
+    check = cells["bp"].to_numpy() >= row["threshold"] - 1e-9
+    assert row["n_confident"] == int(check.sum()) == 2100
+    assert row["precision"] == pytest.approx(2000 * 0.7 / 2100)
+    assert row["n_effective"] == pytest.approx(res.kish_effective_n(weights[check]))
+    assert row["n_effective"] < row["n_confident"] - 1
+
+
+def test_a_rare_type_heavy_in_the_composition_cannot_carry_a_bin() -> None:
+    # 100 calls of class X: 98 of a common type, 2 of a rare one whose class
+    # has no other type, and the dataset puts half its mass on the rare
+    # type. Untrimmed, each rare cell would carry 25% of the bin.
+    common = bin_cells(np.full(98, 0.95), np.ones(98, bool), leaf=np.full(98, "Own"))
+    rare = bin_cells(np.full(2, 0.95), np.zeros(2, bool), leaf=np.full(2, "Rare"))
+    rare["cell_id"] = ["R0", "R1"]
+    rare["truth_parent"] = "Y"
+    cells = pd.concat([common, rare], ignore_index=True)
+    composition = {"Own": 0.5, "Rare": 0.5}
+    raw = res.composition_weights(cells, composition, trim_factor=0)
+    assert raw[-1] / raw.sum() == pytest.approx(0.25)
+    weights = res.composition_weights(cells, composition)
+    assert weights.max() / weights.sum() <= 0.20
+    decisions = res.decide(cells, [BROAD], [30], settings(), weights=weights)
+    validated = decisions[decisions["regime"] == "validated"].iloc[0]
+    assert validated["max_weight_share"] <= 0.20
+    assert validated["n_effective"] < validated["n_confident"]
+
+
+def test_rare_types_take_their_broad_class_weight() -> None:
+    # Class A: a common type (60 cells) and a rare one (5 cells) that the
+    # dataset composition inflates; class B: one common type.
+    frames = {
+        "A1": (60, "A"),
+        "A2": (5, "A"),
+        "B1": (35, "B"),
+    }
+    parts = []
+    for leaf, (n, cls) in frames.items():
+        part = bin_cells(np.full(n, 0.95), np.ones(n, bool), leaf=np.full(n, leaf))
+        part["cell_id"] = [f"{leaf}_{index}" for index in range(n)]
+        part["truth_parent"] = cls
+        parts.append(part)
+    cells = pd.concat(parts, ignore_index=True)
+    assert res.leaf_class_map(cells) == {"A1": "A", "A2": "A", "B1": "B"}
+    composition = {"A1": 0.3, "A2": 0.4, "B1": 0.3}
+    weights = res.composition_weights(cells, composition, trim_factor=0)
+    leaf = cells[res.TRUTH_LEAF_COLUMN].to_numpy()
+    # A2 is weighted like A's common type A1, not by its own q / p (8.0).
+    assert weights[leaf == "A2"] == pytest.approx(weights[leaf == "A1"][0])
+    ratio = weights[leaf == "A1"][0] / weights[leaf == "B1"][0]
+    assert ratio == pytest.approx((0.3 / 0.60) / (0.3 / 0.35))
+    # With a per-type minimum of 1 the rare type keeps its own weight.
+    own = res.composition_weights(cells, composition, trim_factor=0, min_type_cells=1)
+    assert own[leaf == "A2"][0] / own[leaf == "A1"][0] == pytest.approx(
+        (0.4 / 0.05) / (0.3 / 0.60)
+    )
+
+
+def test_composition_follows_the_dataset_cells_of_each_depth_bin() -> None:
+    composition = res.DatasetComposition.from_cells(
+        ["Own", "Foreign", "Own", "Foreign", "Own", None],
+        [1.0, 1.0, 0.5, 0.5, 2.0, 1.0],
+        [12, 14, 40, 45, 5, 40],
+        [10, 30],
+        min_bin_mass=1.5,
+    )
+    assert composition.overall == {"Own": 3.5, "Foreign": 1.5}
+    assert composition.by_depth[10] == {"Own": 1.0, "Foreign": 1.0}
+    assert composition.bin_mass == {10: 2.0, 30: 1.0}
+    assert composition.at(10) == {"Own": 1.0, "Foreign": 1.0}
+    # Bin 30 holds too little mass: the overall composition applies there.
+    assert composition.at(30) == composition.overall
+    rng = np.random.default_rng(14)
+    frames = []
+    for depth in (10, 30):
+        own = bin_cells(
+            np.full(200, 0.9), np.ones(200, bool), depth=depth, leaf=np.full(200, "Own")
+        )
+        foreign = bin_cells(
+            np.full(50, 0.9),
+            np.zeros(50, bool),
+            depth=depth,
+            leaf=np.full(50, "Foreign"),
+        )
+        foreign["cell_id"] = [f"F{depth}_{index}" for index in range(50)]
+        foreign["truth_parent"] = "Z"
+        frames += [own, foreign]
+    cells = pd.concat(frames, ignore_index=True)
+    per_bin = res.DatasetComposition(
+        overall={"Own": 1.0, "Foreign": 1.0},
+        by_depth={10: {"Own": 0.9, "Foreign": 0.1}, 30: {"Own": 0.2, "Foreign": 0.8}},
+        bin_mass={10: 100.0, 30: 100.0},
+    )
+    weights = res.composition_weights(cells, per_bin, trim_factor=0)
+    depth = cells["depth"].to_numpy()
+    leaf = cells[res.TRUTH_LEAF_COLUMN].to_numpy()
+    shallow = (
+        weights[(depth == 10) & (leaf == "Foreign")].sum() / weights[depth == 10].sum()
+    )
+    deep = (
+        weights[(depth == 30) & (leaf == "Foreign")].sum() / weights[depth == 30].sum()
+    )
+    assert shallow == pytest.approx(0.1)
+    assert deep == pytest.approx(0.8)
+    assert rng is not None
+
+
+def test_whb_cop_rule_suppresses_cop_broad_calls_below_the_floor() -> None:
+    thresholds = AnnotationThresholds()
+    rows = []
+    for depth, sbp in ((30, 0.95), (120, 0.95), (120, 0.5), (250, 0.9)):
+        for level, parent, bp in (
+            ("supercluster", "COP", sbp),
+            ("broad", "OPC", 0.99),
+        ):
+            rows.append(
+                {
+                    "recipe": res.DECISION_RECIPE,
+                    "seed": 0,
+                    "level": level,
+                    "sim_id": f"c{depth}_{sbp}|D{depth}",
+                    "cell_id": f"c{depth}_{sbp}",
+                    "depth": depth,
+                    "half": 0,
+                    "parent": parent,
+                    "call": "x",
+                    "bp": bp,
+                    "corr": 0.5,
+                    "truth": "x",
+                    "truth_parent": parent,
+                    res.TRUTH_LEAF_COLUMN: "T",
+                    "correct": True,
+                    "total_counts": float(depth),
+                }
+            )
+    # An OPC supercluster call is never touched.
+    rows.append(dict(rows[0], parent="OPC", sim_id="o|D30", cell_id="o"))
+    rows.append(dict(rows[1], sim_id="o|D30", cell_id="o"))
+    cells = pd.DataFrame(rows)
+    rule = res.whb_cop_rule(thresholds)
+    out = rule(cells)
+    broad = out[out["level"] == "broad"].set_index("sim_id")["parent"]
+    assert broad["c30_0.95|D30"] is None  # below the 120-count COP floor
+    assert broad["c120_0.95|D120"] == "OPC"
+    assert broad["c120_0.5|D120"] is None  # supercluster bp below 0.69
+    assert broad["c250_0.9|D250"] == "OPC"
+    assert broad["o|D30"] == "OPC"
+    # bp, supercluster rows and the input are unchanged.
+    assert out["bp"].tolist() == cells["bp"].tolist()
+    assert (
+        out[out["level"] == "supercluster"]["parent"].tolist()
+        == cells[cells["level"] == "supercluster"]["parent"].tolist()
+    )
+    assert cells[cells["level"] == "broad"]["parent"].eq("OPC").all()
+    assert res.whb_cop_rule(thresholds, min_depth=10)(cells)[
+        lambda frame: frame["level"] == "broad"
+    ]["parent"].tolist() == ["OPC", "OPC", None, "OPC", "OPC"]
+
+
+def test_a_planted_cop_sink_no_longer_fails_broad_opc() -> None:
+    # Broad OPC calls: 300 correct OPC-supercluster calls and 150 COP-assigned
+    # calls that are mostly wrong at 30 counts (a COP sink). Production
+    # keeps COP calls below 120 counts at lineage, so the rule removes them
+    # from the level (neither confident nor in the coverage) and broad OPC
+    # passes.
+    rng = np.random.default_rng(15)
+    n_opc, n_cop = 300, 150
+    broad = bin_cells(
+        np.full(n_opc + n_cop, 0.95),
+        np.concatenate([np.ones(n_opc, bool), rng.random(n_cop) < 0.2]),
+        cls="OPC",
+    )
+    supercluster = broad.copy()
+    supercluster["level"] = "supercluster"
+    supercluster["parent"] = ["OPC"] * n_opc + ["COP"] * n_cop
+    cells = pd.concat([broad, supercluster], ignore_index=True)
+    before = res.decide(cells, [BROAD], [30], settings())
+    assert before[before["regime"] == "validated"].iloc[0]["status"] == (
+        res.STATUS_NOT_RESOLVABLE
+    )
+    after = res.decide(
+        res.whb_cop_rule(AnnotationThresholds())(cells), [BROAD], [30], settings()
+    )
+    validated = after[after["regime"] == "validated"].iloc[0]
+    assert validated["status"] == res.STATUS_EMITTED
+    assert validated["n_confident"] == n_opc
+    assert validated["n_called"] == n_opc
+    assert validated["coverage"] == pytest.approx(1.0)
+    # The class keeps its test cells (D_max is unchanged).
+    unchanged = before[before["regime"] == "validated"].iloc[0]["n_test"]
+    assert validated["n_test"] == unchanged
 
 
 def test_trust_constraint_refuses_an_unresolvable_broad_level() -> None:
@@ -600,8 +934,50 @@ def test_planted_non_resolvable_level_is_not_emitted(
         (decisions["level"] == "cluster") & (decisions["regime"] == "trust")
     ]
     assert set(cluster["status"]) == {res.STATUS_NOT_RESOLVABLE}
+    # Twin clusters never reach the target: the fit finds no local
+    # threshold, or only one a few lucky high-bp calls reach; at the default
+    # the precision is a coin flip.
+    assert set(cluster["reason"]) <= {"no_local_threshold", "too_few_confident_calls"}
+    assert (cluster["n_confident"].fillna(0) < 50).all()
+    validated = decisions[
+        (decisions["level"] == "cluster") & (decisions["regime"] == "validated")
+    ]
+    assert set(validated["reason"]) == {"wilson_bound_below_target"}
+    assert (validated["precision"] < 0.6).all()
     assert synthetic_run.trust.state == "broad_only"
     assert synthetic_run.trust.leaf_classes == ["A", "B"]
+
+
+def test_run_resolvability_applies_cells_rules_and_logs_progress(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def silence_class(cells: pd.DataFrame) -> pd.DataFrame:
+        frame = cells.copy()
+        frame.loc[frame["level"] == "class", "bp"] = 0.0
+        return frame
+
+    with caplog.at_level("INFO", logger=res.__name__):
+        result = res.run_resolvability(
+            make_test_cells(30),
+            specs=synthetic_specs(),
+            depths=GRID,
+            recipes=recipes()[:1],
+            map_fn=bootstrap_mapper,
+            settings=settings(min_cells_per_bin=20, min_confident_n=20),
+            species="human",
+            cells_rules=[silence_class],
+        )
+    assert (result.cells[result.cells["level"] == "class"]["bp"] == 0).all()
+    decisions = result.decisions
+    assert set(decisions[decisions["level"] == "class"]["status"]) == {
+        res.STATUS_NOT_RESOLVABLE
+    }
+    assert result.trust.state == "refused"
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert f"resolvability {res.DECISION_RECIPE}: simulated" in messages
+    assert f"resolvability {res.DECISION_RECIPE}: mapped" in messages
+    assert "resolvability trust decisions" in messages
+    assert "resolvability trust constraint: refused" in messages
 
 
 def test_self_map_files_round_trip(
@@ -640,6 +1016,34 @@ def test_self_map_files_round_trip(
     # RESOLVE reweights to a dataset composition over the truth leaves.
     weighted = tables.decisions(composition={"A1": 1.0, "A2": 1.0, "B1": 1.0})
     assert (weighted["level"] == "class").any()
+    per_bin = tables.decisions(
+        composition=res.DatasetComposition(
+            overall={"A1": 1.0, "B1": 1.0},
+            by_depth={100: {"A1": 1.0}},
+            bin_mass={100: 500.0},
+        )
+    )
+    deep_b = per_bin[
+        (per_bin["depth"] == 100)
+        & (per_bin["level"] == "class")
+        & (per_bin["class"] == "B")
+        & (per_bin["regime"] == "validated")
+    ].iloc[0]
+    # At 100 counts the dataset holds only A1, so B calls carry no weight
+    # there; the overall composition (A1 and B1) still emits B at 100.
+    assert deep_b["status"] == res.STATUS_NOT_RESOLVABLE
+    overall = tables.decisions(composition={"A1": 1.0, "B1": 1.0})
+    assert (
+        overall[
+            (overall["depth"] == 100)
+            & (overall["level"] == "class")
+            & (overall["class"] == "B")
+            & (overall["regime"] == "validated")
+        ].iloc[0]["status"]
+        == res.STATUS_EMITTED
+    )
+    assert tables.settings.weight_trim_factor == pytest.approx(10.0)
+    assert summary["floors"]["validated"]["class"]["A"]["source"] == "hard_floor"
     assert res.load_resolvability(tmp_path / "missing") is None
 
 
