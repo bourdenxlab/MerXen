@@ -83,12 +83,19 @@ from merxen.annotation.config import (
     AnnotationConfig,
     AnnotationReferenceSpec,
 )
+from merxen.annotation.prefilter import (
+    MARKER_PREFILTER_FILE,
+    PrefilterResult,
+    PrefilterSettings,
+    SiblingSet,
+    per_parent_topk_union,
+    settings_from_config,
+)
 from merxen.annotation.store import (
     BuildContext,
     BundleBuilder,
     StoreError,
     file_sha256,
-    large_panel_refusal,
     make_store_dir,
     register_builder,
 )
@@ -338,6 +345,18 @@ WMB_TESTSET_SOURCES: Final[tuple[str, ...]] = (
 # Marker settings (plan §3.2 recipes, §8.7).
 DEFAULT_PREP_N_PROCESSORS: Final = 8
 DEFAULT_PREP_MAX_GB: Final = 40
+# Nextflow passes --max-gb = floor(task.memory x PREP_MAX_GB_FRACTION)
+# (workflows/lib/AnnotationReferences.groovy; string-tested), so a PREP task's
+# memory reserve is max_gb / PREP_MAX_GB_FRACTION.
+PREP_MAX_GB_FRACTION: Final = 0.625
+# Peak memory of the WMB query-marker step, the binding PREP step (plan
+# §8.7), as a linear function of the marker candidate genes: fitted on the
+# evidence runs at 16 processes (ag7 500 genes 20.2 GB, VZG2 815 genes 27.1
+# GB, research/selfmap/panel_ref/querymarkers_*.log). Used only to refuse a
+# large WMB panel built without the prefilter when the prediction exceeds the
+# PREP memory reserve (the prefilter is mandatory above it, OD-E8).
+WMB_QUERY_MARKER_PEAK_GB_INTERCEPT: Final = 9.25
+WMB_QUERY_MARKER_PEAK_GB_PER_GENE: Final = 0.0219
 ROOT_BROAD_MIN_MARKERS: Final = 10
 PREP_N_PROCESSORS_ENV: Final = "MERXEN_ANNOTATION_PREP_N_PROCESSORS"
 PREP_MAX_GB_ENV: Final = "MERXEN_ANNOTATION_PREP_MAX_GB"
@@ -1876,7 +1895,10 @@ def run_python_step(step: str, argv: Sequence[str], *, log_dir: Path) -> dict[st
     included), as ``/usr/bin/time`` reports it, which is how the evidence
     logs measured it (e.g. WMB query markers 20-27 GB). Without GNU time it
     comes from ``wait4``, which also counts the parent's memory at fork
-    (``peak_rss_source = "wait4"``).
+    (``peak_rss_source = "wait4"``). The step's whole process tree is also
+    sampled (``ProcessTreeSampler``): ``peak_tree_rss_gb`` and
+    ``peak_tree_pss_gb`` are the peaks of the summed RSS and PSS of all its
+    processes, which a memory reserve must cover (plan §8.7).
 
     Args:
         step: Step name (log file stem).
@@ -1885,7 +1907,8 @@ def run_python_step(step: str, argv: Sequence[str], *, log_dir: Path) -> dict[st
 
     Returns:
         ``{"step", "returncode", "wall_s", "peak_rss_gb", "peak_rss_source",
-        "stdout_log", "stderr_log"}``.
+        "peak_tree_rss_gb", "peak_tree_pss_gb", "peak_tree_processes",
+        "tree_samples", "tree_sample_interval_s", "stdout_log", "stderr_log"}``.
 
     Raises:
         ReferenceBuildError: If the step exits non-zero.
@@ -1901,12 +1924,18 @@ def run_python_step(step: str, argv: Sequence[str], *, log_dir: Path) -> dict[st
     use_time = _gnu_time_available()
     if use_time:
         command = [str(GNU_TIME), "-f", "%M %e", "-o", str(rusage_path), *command]
+    from merxen.annotation.memory import ProcessTreeSampler
+
     start = time.monotonic()
     with stdout_path.open("w") as stdout, stderr_path.open("w") as stderr:
         process = subprocess.Popen(
             command, stdout=stdout, stderr=stderr, env=ctm_environment()
         )
-        _pid, status, usage = os.wait4(process.pid, 0)
+        sampler = ProcessTreeSampler(process.pid).start()
+        try:
+            _pid, status, usage = os.wait4(process.pid, 0)
+        finally:
+            tree = sampler.stop()
         process.returncode = os.waitstatus_to_exitcode(status)
     peak_kb = float(usage.ru_maxrss)
     source = "wait4"
@@ -1923,6 +1952,8 @@ def run_python_step(step: str, argv: Sequence[str], *, log_dir: Path) -> dict[st
         "wall_s": round(time.monotonic() - start, 3),
         "peak_rss_gb": round(peak_kb / 1024**2, 3),
         "peak_rss_source": source,
+        # Summed over the step's processes (ctm workers included), sampled.
+        **tree.to_json(),
         "stdout_log": stdout_path.name,
         "stderr_log": stderr_path.name,
     }
@@ -2028,10 +2059,16 @@ class _StepTimer:
         peaks = [
             float(step.get("peak_rss_gb", 0.0)) for step in self.ctm_steps.values()
         ]
+        tree_peaks = [
+            float(step["peak_tree_pss_gb"])
+            for step in self.ctm_steps.values()
+            if step.get("peak_tree_pss_gb") is not None
+        ]
         return {
             "timings_s": dict(self.seconds),
             "ctm_steps": dict(self.ctm_steps),
             "ctm_peak_rss_gb": max(peaks) if peaks else None,
+            "ctm_peak_tree_pss_gb": max(tree_peaks) if tree_peaks else None,
         }
 
 
@@ -2695,10 +2732,6 @@ def _panel_of(context: BuildContext) -> AnnotationPanel:
         raise ReferenceBuildError(
             f"reference {context.spec.reference_id!r} needs a panel to build"
         )
-    # Defence in depth: ReferenceStore.get_or_build refuses these first.
-    refusal = large_panel_refusal(context.panel, _config_of(context))
-    if refusal is not None:
-        raise ReferenceBuildError(f"{context.spec.reference_id}: {refusal}")
     return context.panel
 
 
@@ -2738,6 +2771,9 @@ class PanelMarkers:
         filtered_lookup_sha256: Digest of ``query_markers.filtered.json``.
         reference_markers: Files of the reference-marker step: sha256, size,
             and whether they are kept in the bundle.
+        prefilter: The large-panel prefilter record (``PrefilterResult.summary``)
+            when it ran, else ``None``.
+        n_candidate_genes: Genes marker discovery chose from (the panel stub).
     """
 
     query_genes: list[str]
@@ -2745,6 +2781,181 @@ class PanelMarkers:
     raw_lookup_sha256: str
     filtered_lookup_sha256: str
     reference_markers: list[dict[str, Any]]
+    prefilter: dict[str, Any] | None = None
+    n_candidate_genes: int = 0
+
+
+def sibling_sets(tree: TaxonomyTreeView, leaves: Sequence[str]) -> list[SiblingSet]:
+    """Return every parent of a marker tree with its children's leaf rows.
+
+    Args:
+        tree: The tree marker discovery runs on (``--drop_level`` applied).
+        leaves: Precompute leaf labels in row order.
+
+    Returns:
+        One ``SiblingSet`` per parent, top-down; leaves absent from the
+        precompute are skipped.
+    """
+    row_of = {str(leaf): row for row, leaf in enumerate(leaves)}
+    ancestors = tree.ancestors_of_leaves()
+    rows_by_node: dict[str, dict[str, list[int]]] = {}
+    for ancestor_level, mapping in ancestors.items():
+        nodes: dict[str, list[int]] = {}
+        for leaf, ancestor in mapping.items():
+            if leaf in row_of:
+                nodes.setdefault(ancestor, []).append(row_of[leaf])
+        rows_by_node[ancestor_level] = nodes
+    result: list[SiblingSet] = []
+    for level, node in tree.parents():
+        child_level = tree.child_level(level)
+        children = tuple(str(child) for child in tree.children_of(level, node))
+        by_child = rows_by_node.get(child_level, {})
+        kept: list[tuple[str, tuple[int, ...]]] = []
+        for child in children:
+            if child_level == tree.leaf_level:
+                rows = [row_of[child]] if child in row_of else []
+            else:
+                rows = by_child.get(child, [])
+            if rows:
+                kept.append((child, tuple(sorted(rows))))
+        result.append(
+            SiblingSet(
+                key=lookup_key(level, node),
+                children=tuple(child for child, _rows in kept),
+                leaf_rows=tuple(r for _child, r in kept),
+            )
+        )
+    return result
+
+
+def compute_marker_prefilter(
+    marker_precompute: Path | str,
+    genes: Sequence[str],
+    *,
+    drop_level: str | None,
+    settings: PrefilterSettings,
+) -> PrefilterResult:
+    """Run the per-parent prefilter on a marker precompute (plan §8.7).
+
+    Args:
+        marker_precompute: The precompute marker discovery runs on.
+        genes: Panel genes present in it (the unfiltered candidates).
+        drop_level: ``--drop_level`` of the marker steps.
+        settings: Cap and markers per pair.
+
+    Returns:
+        The candidate genes.
+    """
+    stats = read_precomputed_stats(marker_precompute, genes)
+    tree = stats.tree
+    if drop_level is not None and drop_level in tree.hierarchy:
+        tree = tree.drop_level(drop_level)
+    return per_parent_topk_union(
+        stats.genes,
+        stats.n_cells,
+        stats.sum,
+        stats.gt0,
+        sibling_sets(tree, stats.leaves),
+        settings,
+    )
+
+
+def marker_prefilter_settings(
+    panel: AnnotationPanel, config: AnnotationConfig, n_per_utility: int
+) -> PrefilterSettings | None:
+    """Return the prefilter settings of a marker build, or ``None`` when off.
+
+    The same condition as ``build_hash_payload``: panels above
+    ``large_panel_genes`` unless ``large_panel_marker_prefilter`` is
+    ``"none"``.
+    """
+    if (
+        panel.n_genes <= config.panel.large_panel_genes
+        or config.panel.large_panel_marker_prefilter == "none"
+    ):
+        return None
+    return settings_from_config(config.panel.large_panel_prefilter_cap, n_per_utility)
+
+
+def run_marker_steps(
+    *,
+    marker_precompute: Path,
+    candidates: Sequence[str],
+    drop_level: str | None,
+    n_per_utility: int,
+    scratch_dir: Path,
+    reference_dir: Path,
+    raw_lookup_path: Path,
+    timer: _StepTimer,
+    step_prefix: str = "",
+) -> list[Path]:
+    """Run ``reference_markers`` and ``query_markers`` on candidate genes.
+
+    Both steps read the candidates from a zero-cell panel stub, with
+    ``--n_processors`` and ``--max_gb`` explicit (``prep_resources``) and the
+    same ``--drop_level``; ``annotation-panel-simulate`` reuses this for the
+    unfiltered lookup of a prefiltered panel (plan §8.7).
+
+    Args:
+        marker_precompute: Precompute the markers are found on.
+        candidates: Candidate genes (the panel, or the prefiltered set).
+        drop_level: ``--drop_level`` of both steps.
+        n_per_utility: ``--n_per_utility`` of the query markers.
+        scratch_dir: Scratch for the stub and ctm's temporary files.
+        reference_dir: Where the reference markers go.
+        raw_lookup_path: The query-marker lookup to write.
+        timer: Step timer (records both ctm steps).
+        step_prefix: Prefix of the step names (e.g. ``"unfiltered_"``).
+
+    Returns:
+        The reference-marker files.
+
+    Raises:
+        ReferenceBuildError: If a step writes nothing.
+    """
+    resources = prep_resources()
+    stub = write_panel_stub_h5ad(
+        candidates, scratch_dir / f"{step_prefix}{PANEL_STUB_FILE}"
+    )
+    tmp_dir = scratch_dir / f"{step_prefix}ctm_tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    reference_dir.mkdir(parents=True, exist_ok=True)
+    reference_config: dict[str, Any] = {
+        "precomputed_path_list": [str(marker_precompute)],
+        "output_dir": str(reference_dir),
+        "query_path": str(stub),
+        "n_processors": resources.n_processors,
+        "max_gb": resources.max_gb,
+        "tmp_dir": str(tmp_dir),
+        "clobber": True,
+    }
+    if drop_level is not None:
+        reference_config["drop_level"] = drop_level
+    timer.ctm(
+        f"{step_prefix}reference_markers", _run_ctm_reference_markers, reference_config
+    )
+    reference_paths = sorted(
+        path
+        for path in reference_dir.iterdir()
+        if path.is_file() and path.suffix == ".h5"
+    )
+    if not reference_paths:
+        raise ReferenceBuildError(f"reference_markers wrote nothing in {reference_dir}")
+    query_config: dict[str, Any] = {
+        "output_path": str(raw_lookup_path),
+        "reference_marker_path_list": [str(path) for path in reference_paths],
+        "query_path": str(stub),
+        "n_per_utility": n_per_utility,
+        "n_processors": resources.n_processors,
+        "tmp_dir": str(tmp_dir),
+        "search_for_stats_file": False,
+    }
+    if drop_level is not None:
+        query_config["drop_level"] = drop_level
+    timer.ctm(f"{step_prefix}query_markers", _run_ctm_query_markers, query_config)
+    if not raw_lookup_path.is_file():
+        raise ReferenceBuildError(f"query_markers wrote no lookup at {raw_lookup_path}")
+    return reference_paths
 
 
 def find_panel_markers(
@@ -2761,9 +2972,13 @@ def find_panel_markers(
 
     ``reference_markers --query_path <panel stub>`` then ``query_markers
     --n_per_utility <spec.n_per_utility>`` (plan §3.2 recipes), with
-    ``--n_processors`` and ``--max_gb`` explicit. Reference markers live in
-    scratch (their sha256 is recorded) unless ``keep_reference_markers``
-    (panels above 1,000 genes keep them, §8.7).
+    ``--n_processors`` and ``--max_gb`` explicit (``run_marker_steps``).
+    Panels above ``large_panel_genes`` first run the per-parent prefilter
+    (``marker_prefilter.json``; plan §8.7) unless it is ``"none"``: the stub
+    then holds its candidate genes. Reference markers live in scratch and are
+    deleted once the query markers exist (their sha256 is recorded) unless
+    ``keep_reference_markers`` (panels above 1,000 genes keep them in the
+    bundle, §8.7).
 
     Args:
         context: The build context.
@@ -2777,55 +2992,40 @@ def find_panel_markers(
     Returns:
         The markers and their diagnostics.
     """
-    resources = prep_resources()
     genes = sorted(set(query_genes))
     if not genes:
         raise ReferenceBuildError(
             f"no panel gene of {context.spec.reference_id!r} is in the reference"
         )
-    stub = write_panel_stub_h5ad(genes, context.scratch_dir / PANEL_STUB_FILE)
-    tmp_dir = context.scratch_dir / "ctm_tmp"
-    tmp_dir.mkdir(parents=True, exist_ok=True)
+    candidates = genes
+    prefilter_record: dict[str, Any] | None = None
+    settings = marker_prefilter_settings(
+        _panel_of(context), _config_of(context), context.spec.n_per_utility
+    )
+    if settings is not None:
+        with timer.step("marker_prefilter"):
+            prefilter = compute_marker_prefilter(
+                marker_precompute, genes, drop_level=drop_level, settings=settings
+            )
+        _write_json(context.work_dir / MARKER_PREFILTER_FILE, prefilter.to_json())
+        prefilter_record = prefilter.summary()
+        candidates = prefilter.genes
     reference_dir = (
         context.work_dir / REFERENCE_MARKERS_DIR
         if keep_reference_markers
         else context.scratch_dir / REFERENCE_MARKERS_DIR
     )
-    reference_dir.mkdir(parents=True, exist_ok=True)
-    reference_config: dict[str, Any] = {
-        "precomputed_path_list": [str(marker_precompute)],
-        "output_dir": str(reference_dir),
-        "query_path": str(stub),
-        "n_processors": resources.n_processors,
-        "max_gb": resources.max_gb,
-        "tmp_dir": str(tmp_dir),
-        "clobber": True,
-    }
-    if drop_level is not None:
-        reference_config["drop_level"] = drop_level
-    timer.ctm("reference_markers", _run_ctm_reference_markers, reference_config)
-    reference_paths = sorted(
-        path
-        for path in reference_dir.iterdir()
-        if path.is_file() and path.suffix == ".h5"
-    )
-    if not reference_paths:
-        raise ReferenceBuildError(f"reference_markers wrote nothing in {reference_dir}")
     raw_path = context.work_dir / QUERY_MARKERS_FILE
-    query_config: dict[str, Any] = {
-        "output_path": str(raw_path),
-        "reference_marker_path_list": [str(path) for path in reference_paths],
-        "query_path": str(stub),
-        "n_per_utility": context.spec.n_per_utility,
-        "n_processors": resources.n_processors,
-        "tmp_dir": str(tmp_dir),
-        "search_for_stats_file": False,
-    }
-    if drop_level is not None:
-        query_config["drop_level"] = drop_level
-    timer.ctm("query_markers", _run_ctm_query_markers, query_config)
-    if not raw_path.is_file():
-        raise ReferenceBuildError(f"query_markers wrote no lookup at {raw_path}")
+    reference_paths = run_marker_steps(
+        marker_precompute=marker_precompute,
+        candidates=candidates,
+        drop_level=drop_level,
+        n_per_utility=context.spec.n_per_utility,
+        scratch_dir=context.scratch_dir,
+        reference_dir=reference_dir,
+        raw_lookup_path=raw_path,
+        timer=timer,
+    )
     raw = read_lookup(raw_path)
     validation = validate_lookup(raw, tree, genes)
     _write_json(context.work_dir / QUERY_MARKERS_FILTERED_FILE, validation.lookup)
@@ -2838,12 +3038,20 @@ def find_panel_markers(
         }
         for path in reference_paths
     ]
+    if not keep_reference_markers:
+        # Panels up to large_panel_genes: the reference markers are deleted
+        # once the query markers exist (sha256 kept; rebuilt in < 1 h if
+        # needed, plan §3.2), before the long self-map.
+        for path in reference_paths:
+            path.unlink(missing_ok=True)
     return PanelMarkers(
         query_genes=genes,
         validation=validation,
         raw_lookup_sha256=lookup_sha256(raw),
         filtered_lookup_sha256=lookup_sha256(validation.lookup),
         reference_markers=records,
+        prefilter=prefilter_record,
+        n_candidate_genes=len(candidates),
     )
 
 
@@ -2910,7 +3118,8 @@ def _markers_output(
         "raw_lookup_sha256": markers.raw_lookup_sha256,
         "n_panel_genes": len(markers.query_genes),
         "reference_markers": markers.reference_markers,
-        "prefilter": None,
+        "prefilter": markers.prefilter,
+        "n_candidate_genes": markers.n_candidate_genes,
         **{key: value for key, value in summary.items() if key != "collapsed"},
         "collapsed": summary["collapsed"],
         "tree_node_counts": tree.node_counts(),
@@ -5285,10 +5494,28 @@ def _work_bundle(
     )
 
 
-def _mmc_map_function(
-    context: BuildContext, engine: Any, runs: list[dict[str, Any]]
+def mmc_map_function(
+    engine: Any,
+    *,
+    spec: AnnotationReferenceSpec,
+    config: AnnotationConfig,
+    scratch_dir: Path,
+    log_dir: Path,
+    runs: list[dict[str, Any]],
 ) -> Any:
-    """Return the self-map's ``map_fn``: MapMyCells with the production settings."""
+    """Return a self-map ``map_fn``: MapMyCells with the production settings.
+
+    Args:
+        engine: The ``MmcBundle`` the simulated cells are mapped onto.
+        spec: The reference spec (bootstrap settings, seed).
+        config: The annotation config (ctm version).
+        scratch_dir: Scratch for queries, restricted lookups and MMC output.
+        log_dir: Where MMC's logs go.
+        runs: Receives one record per mapping run (wall time, peak RSS).
+
+    Returns:
+        ``(query, tag, seed) -> MMC tidy table``.
+    """
     from merxen.annotation.mapmycells_engine import (
         MmcEngineParams,
         read_tidy_parquet,
@@ -5297,9 +5524,7 @@ def _mmc_map_function(
         write_query_h5ad,
     )
 
-    config = _config_of(context)
-    spec = context.spec
-    scratch = context.scratch_dir / "resolvability"
+    scratch = scratch_dir
     scratch.mkdir(parents=True, exist_ok=True)
 
     def map_query(query: Any, tag: str, seed: int) -> pd.DataFrame:
@@ -5324,7 +5549,7 @@ def _mmc_map_function(
             work_dir=scratch / "mmc",
             expected_ctm_version=config.ctm_version,
             lookup_path=restricted.path,
-            log_dir=context.work_dir / CTM_LOG_DIR / "resolvability",
+            log_dir=log_dir,
         )
         tidy, _ = read_tidy_parquet(result.parquet)
         runs.append(
@@ -5345,6 +5570,66 @@ def _mmc_map_function(
         return tidy
 
     return map_query
+
+
+def _mmc_map_function(
+    context: BuildContext, engine: Any, runs: list[dict[str, Any]]
+) -> Any:
+    """Return the PREP self-map's ``map_fn`` (``mmc_map_function``)."""
+    return mmc_map_function(
+        engine,
+        spec=context.spec,
+        config=_config_of(context),
+        scratch_dir=context.scratch_dir / "resolvability",
+        log_dir=context.work_dir / CTM_LOG_DIR / "resolvability",
+        runs=runs,
+    )
+
+
+def self_map_rule_settings(config: AnnotationConfig) -> Any:
+    """Return the resolvability rule settings of a config (PREP's self-map)."""
+    from merxen.annotation import resolvability as res
+
+    return res.RuleSettings.from_config(
+        config.resolvability,
+        config.thresholds,
+        trust_max_depth=config.panel.trust_max_depth,
+        broad_only_min_class_share=config.panel.broad_only_min_class_share,
+        hard_floor=config.thresholds.hard_min_counts or config.min_counts or 10,
+    )
+
+
+def level_specs_for(
+    reference_id: str, engine: Any, config: AnnotationConfig
+) -> list[Any]:
+    """Return the self-map level specs of a primary or secondary reference.
+
+    Args:
+        reference_id: ``whb_frontal_supc_clus``, ``seaad_mr_panel`` or
+            ``wmb_panel``.
+        engine: The ``MmcBundle`` mapped onto.
+        config: The annotation config.
+
+    Returns:
+        The level specs.
+
+    Raises:
+        ReferenceBuildError: For a reference without a self-map.
+    """
+    from merxen.annotation import resolvability as res
+
+    if reference_id == "whb_frontal_supc_clus":
+        return _whb_specs(engine, config)
+    if reference_id == "seaad_mr_panel":
+        return res.seaad_level_specs(config.thresholds)
+    if reference_id == "wmb_panel":
+        return _wmb_specs(engine, config)
+    raise ReferenceBuildError(f"{reference_id} has no resolvability self-map")
+
+
+def cells_rules_for(reference_id: str, config: AnnotationConfig) -> list[Any]:
+    """Return the production rules the self-map applies to its cells table."""
+    return _whb_cells_rules(config) if reference_id == "whb_frontal_supc_clus" else []
 
 
 def _resolvability_enabled(context: BuildContext) -> bool:
@@ -5400,13 +5685,7 @@ def _run_self_map(
     mapped_engine = engine if engine is not None else MmcBundle.from_dir(test_ref.path)
     runs: list[dict[str, Any]] = []
     grid = context.spec.resolved_depth_grid(panel.n_genes)
-    settings = res.RuleSettings.from_config(
-        config.resolvability,
-        config.thresholds,
-        trust_max_depth=config.panel.trust_max_depth,
-        broad_only_min_class_share=config.panel.broad_only_min_class_share,
-        hard_floor=config.thresholds.hard_min_counts or config.min_counts or 10,
-    )
+    settings = self_map_rule_settings(config)
     with timer.step("resolvability_self_map"):
         result = res.run_resolvability(
             test,
@@ -5647,6 +5926,60 @@ def _whole_ctx_params(
     }
 
 
+def predicted_wmb_query_marker_peak_gb(n_candidate_genes: int) -> float:
+    """Return the predicted WMB query-marker peak (GB) for some candidate genes.
+
+    Args:
+        n_candidate_genes: Genes marker discovery chooses from.
+
+    Returns:
+        ``WMB_QUERY_MARKER_PEAK_GB_INTERCEPT + PER_GENE x n`` (plan §8.7).
+    """
+    return (
+        WMB_QUERY_MARKER_PEAK_GB_INTERCEPT
+        + WMB_QUERY_MARKER_PEAK_GB_PER_GENE * n_candidate_genes
+    )
+
+
+def prep_memory_reserve_gb() -> float:
+    """Return the PREP task's memory reserve (``max_gb / PREP_MAX_GB_FRACTION``)."""
+    return prep_resources().max_gb / PREP_MAX_GB_FRACTION
+
+
+def _wmb_large_panel_refusal(
+    panel: AnnotationPanel, config: AnnotationConfig
+) -> str | None:
+    """Refuse a large WMB panel without the prefilter above the memory reserve."""
+    if (
+        panel.n_genes <= config.panel.large_panel_genes
+        or config.panel.large_panel_marker_prefilter != "none"
+    ):
+        return None
+    predicted = predicted_wmb_query_marker_peak_gb(panel.n_genes)
+    reserve = prep_memory_reserve_gb()
+    if predicted <= reserve:
+        return None
+    return (
+        f"panel {panel.name} has {panel.n_genes} genes and "
+        "large_panel_marker_prefilter is 'none': the predicted WMB query-marker "
+        f"peak ({predicted:.0f} GB) exceeds the PREP memory reserve "
+        f"({reserve:.0f} GB = --max-gb {prep_resources().max_gb} / "
+        f"{PREP_MAX_GB_FRACTION}); the prefilter is mandatory above the reserve "
+        "(plan §8.7, OD-E8): use per_parent_topk_union or raise "
+        "annotation_prep_large_memory"
+    )
+
+
+def _whole_ctx_refusal(panel: AnnotationPanel, config: AnnotationConfig) -> str | None:
+    """Refuse the whole-WHB bundle above 1,000 genes (plan §3.2, §8.7)."""
+    if panel.n_genes <= WHB_WHOLE_MAX_GENES:
+        return None
+    return (
+        f"whb_whole_ctx_panel is refused above {WHB_WHOLE_MAX_GENES} genes (panel "
+        f"{panel.name} has {panel.n_genes}; about 75 h extrapolated, plan §8.7)"
+    )
+
+
 @dataclass(frozen=True)
 class _BuilderRecipe:
     name: str
@@ -5655,6 +5988,8 @@ class _BuilderRecipe:
     params: Any
     uses_panel: bool = True
     source_patterns: Mapping[str, str] = field(default_factory=dict)
+    finds_markers: bool = True
+    refuse: Any = None
 
 
 BUILDER_RECIPES: Final[dict[str, _BuilderRecipe]] = {
@@ -5672,6 +6007,7 @@ BUILDER_RECIPES: Final[dict[str, _BuilderRecipe]] = {
         # Only the matrices enter build_hash: the shared ABC cache also holds
         # the legacy downloader's .lock and .tmp files (mapmycells.py).
         source_patterns={SOURCE_WMB_H5AD_DIR: f"*{WMB_H5AD_SUFFIX}"},
+        refuse=_wmb_large_panel_refusal,
     ),
     "wmb_region_share": _BuilderRecipe(
         "wmb_region_share",
@@ -5679,9 +6015,14 @@ BUILDER_RECIPES: Final[dict[str, _BuilderRecipe]] = {
         WMB_TAXONOMY_ID,
         _region_share_params,
         uses_panel=False,
+        finds_markers=False,
     ),
     "whb_whole_ctx_panel": _BuilderRecipe(
-        "whb_whole_ctx_panel", build_whb_whole_ctx, WHB_TAXONOMY_ID, _whole_ctx_params
+        "whb_whole_ctx_panel",
+        build_whb_whole_ctx,
+        WHB_TAXONOMY_ID,
+        _whole_ctx_params,
+        refuse=_whole_ctx_refusal,
     ),
     HO_REFERENCE_ID: _BuilderRecipe(
         HO_REFERENCE_ID, build_whb_frontal_ho, WHB_TAXONOMY_ID, _ho_params
@@ -5692,6 +6033,7 @@ BUILDER_RECIPES: Final[dict[str, _BuilderRecipe]] = {
         WMB_TAXONOMY_ID,
         _wmb_testset_params,
         source_patterns={SOURCE_WMB_H5AD_DIR: f"*{WMB_H5AD_SUFFIX}"},
+        finds_markers=False,
     ),
 }
 
@@ -5724,6 +6066,8 @@ def builder_for(
         uses_panel=recipe.uses_panel,
         prepare_spec=prepare_reference_spec,
         source_patterns=dict(recipe.source_patterns),
+        finds_markers=recipe.finds_markers,
+        refuse=recipe.refuse,
     )
 
 

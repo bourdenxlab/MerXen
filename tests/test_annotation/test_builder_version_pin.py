@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "dddbadb928ea1027dfeffd1b6a04feb24e612a3a5ff51a4abfd9c597d77459d2",
+    3: "5af14b5c1895670193a022ddeafced33fb958a587601d3d54596d1f447f9117b",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -73,6 +73,16 @@ PIN_HISTORY = (
     "(ResolvabilityTables.decisions, pooled_composition_weights, "
     "DatasetComposition.at_least); PREP's decisions are unweighted, so the "
     "bundle files are unchanged",
+    "3: large-panel support (M3b stage D): the per-parent marker prefilter "
+    "(prefilter.py, pinned from here on) runs only above large_panel_genes, "
+    "where builds were refused before, and its method, version and settings "
+    "enter build_hash; the builder refusals move to BundleBuilder.refuse; "
+    "reference markers of panels up to 1,000 genes are deleted right after "
+    "the query markers instead of with the build scratch (same files); ctm "
+    "steps also record process-tree peaks and bundle.json the candidate-gene "
+    "count (metrics only); the self-map mapper and marker steps are shared "
+    "with annotation-panel-simulate. No bundle of a panel up to 1,000 genes "
+    "changes content or build_hash",
 )
 
 
@@ -102,10 +112,13 @@ def builder_code_fingerprint() -> str:
     ``resolvability.py`` writes the self-map tables into primary and
     secondary bundles (M3b), so it is covered too; a change there that
     alters those tables also bumps ``RESOLVABILITY_VERSION`` (hashed).
+    ``prefilter.py`` chooses the marker candidates of large panels (M3b
+    stage D); its version and settings are hashed.
     """
     parts = [
         _dump(ast.parse((SRC / "reference.py").read_text())),
         _dump(ast.parse((SRC / "resolvability.py").read_text())),
+        _dump(ast.parse((SRC / "prefilter.py").read_text())),
     ]
     store_tree = ast.parse((SRC / "store.py").read_text())
     by_name = {

@@ -461,15 +461,22 @@ def _annotation_reference_prep(
         scratch_root=scratch_dir,
     )
     builder = resolve_builder(spec, config)
+    # The resources come first: a builder's memory check follows --max-gb.
+    if n_processors is not None or max_gb is not None:
+        from merxen.annotation.reference import set_prep_resources
+
+        set_prep_resources(n_processors=n_processors, max_gb=max_gb)
     if builder.uses_panel:
         from merxen.annotation.store import (
             LargePanelRefusedError,
             large_panel_refusal,
         )
 
-        # Refused before any source is downloaded or hashed and before any
+        # A builder's refusal (whole-WHB above 1,000 genes; a large WMB
+        # panel without the prefilter above the memory reserve, plan §8.7)
+        # comes before any source is downloaded or hashed and before any
         # build directory exists.
-        refusal = large_panel_refusal(panel, config)
+        refusal = large_panel_refusal(panel, config, builder)
         if refusal is not None:
             raise LargePanelRefusedError(f"{reference_id}: {refusal}")
     if builder.prepare_spec is not None:
@@ -484,10 +491,6 @@ def _annotation_reference_prep(
                 resolvability=config.resolvability.enabled,
             ),
         )
-    if n_processors is not None or max_gb is not None:
-        from merxen.annotation.reference import set_prep_resources
-
-        set_prep_resources(n_processors=n_processors, max_gb=max_gb)
     bundle_ref = reference_store.get_or_build(
         spec, panel, builder=builder, config=config
     )

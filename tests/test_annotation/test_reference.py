@@ -47,7 +47,6 @@ from merxen.annotation.reference import (
 )
 from merxen.annotation.store import (
     BUNDLE_MANIFEST_NAME,
-    BuildContext,
     LargePanelRefusedError,
     ReferenceStore,
     large_panel_refusal,
@@ -1832,69 +1831,228 @@ def test_whole_ctx_builder_is_refused_above_1000_genes(
     )
     panel = make_panel([f"ENSG{index:011d}" for index in range(1001)])
     store = ReferenceStore(tmp_path / "store")
-    with pytest.raises(LargePanelRefusedError, match="above large_panel_genes"):
+    with pytest.raises(LargePanelRefusedError, match="refused above 1000 genes"):
         store.get_or_build(
             prepare_reference_spec(spec), panel, builder=builder_for(spec)
         )
     # Refused before a build directory exists.
     assert store.list() == []
-    # A builder called directly refuses too.
-    with pytest.raises(ReferenceBuildError, match="above large_panel_genes"):
-        reference._panel_of(
-            BuildContext(
-                spec=spec,
-                panel=panel,
-                build_hash="0" * 64,
-                work_dir=tmp_path / "work",
-                final_dir=tmp_path / "final",
-                scratch_dir=tmp_path / "scratch",
-                sources={},
-                config=AnnotationConfig(species="human"),
-            )
-        )
 
 
-def test_large_panel_builds_are_refused_until_stage_d() -> None:
-    config = AnnotationConfig(species="human")
-    small = make_panel([f"ENSG{index:011d}" for index in range(1000)])
-    large = make_panel([f"ENSG{index:011d}" for index in range(1001)])
-    assert large_panel_refusal(None, config) is None
-    assert large_panel_refusal(small, config) is None
-    reason = large_panel_refusal(large, config)
-    assert reason is not None and "1001 genes" in reason and "OD-E8" in reason
-    # The limit follows the config.
-    tight = config.model_copy(
-        update={"panel": config.panel.model_copy(update={"large_panel_genes": 999})}
+def large_config(
+    species: str = "human",
+    *,
+    limit: int = 5,
+    cap: int = 6,
+    prefilter: str | None = None,
+) -> AnnotationConfig:
+    """A config whose "large" panels start above ``limit`` genes (no self-map)."""
+    config = without_resolvability(species)
+    update: dict[str, Any] = {
+        "large_panel_genes": limit,
+        "large_panel_prefilter_cap": cap,
+    }
+    if prefilter is not None:
+        update["large_panel_marker_prefilter"] = prefilter
+    return config.model_copy(update={"panel": config.panel.model_copy(update=update)})
+
+
+def test_large_panels_build_and_the_prefilter_is_mandatory_above_the_reserve(
+    small_resources: Any,
+) -> None:
+    config = AnnotationConfig(species="mouse")
+    large = make_panel(
+        [f"ENSMUSG{index:011d}" for index in range(5006)], species="mouse"
     )
-    assert large_panel_refusal(small, tight) is not None
+    wmb = builder_for(
+        AnnotationReferenceSpec(
+            reference_id="wmb_panel", species="mouse", role="primary"
+        ),
+        config,
+    )
+    # Large panels build (M3b stage D): no refusal with the default prefilter.
+    assert large_panel_refusal(large, config, wmb) is None
+    assert large_panel_refusal(None, config, wmb) is None
+    # Without the prefilter the predicted query-marker peak (~119 GB at
+    # 5,006 genes) exceeds a 3 / 0.625 = 4.8 GB reserve: refused (OD-E8).
+    none = large_config("mouse", limit=1000, cap=2000, prefilter="none")
+    reason = large_panel_refusal(large, none, wmb)
+    assert reason is not None and "mandatory" in reason and "OD-E8" in reason
+    predicted = reference.predicted_wmb_query_marker_peak_gb(5006)
+    assert 100 < predicted < 130
+    reference.set_prep_resources(
+        max_gb=int(predicted * reference.PREP_MAX_GB_FRACTION) + 1
+    )
+    assert large_panel_refusal(large, none, wmb) is None
+    # Small panels never need the prefilter.
+    small = make_panel(
+        [f"ENSMUSG{index:011d}" for index in range(815)], species="mouse"
+    )
+    assert large_panel_refusal(small, none, wmb) is None
+    # The whole-WHB bundle stays refused above 1,000 genes.
+    whole = builder_for(
+        AnnotationReferenceSpec(
+            reference_id="whb_whole_ctx_panel", species="human", role="sensitivity"
+        )
+    )
+    human = make_panel([f"ENSG{index:011d}" for index in range(1001)])
+    assert "refused above 1000" in (large_panel_refusal(human, None, whole) or "")
+    assert large_panel_refusal(make_panel(GENES), None, whole) is None
 
 
-def test_cli_refuses_a_large_panel_before_building(tmp_path: Path) -> None:
-    panel = make_panel([f"ENSG{index:011d}" for index in range(1001)])
+def test_cli_refuses_a_large_wmb_panel_without_the_prefilter_before_building(
+    tmp_path: Path,
+) -> None:
+    panel = make_panel(
+        [f"ENSMUSG{index:011d}" for index in range(5006)], species="mouse"
+    )
     panel_file = tmp_path / "panel_genes.json"
     panel.write(panel_file)
+    config_file = tmp_path / "annotation_config.json"
+    config_file.write_text(
+        large_config("mouse", limit=1000, cap=2000, prefilter="none").model_dump_json()
+    )
     store = tmp_path / "store"
     result = CliRunner().invoke(
         cli_main,
         [
             "annotation-reference-prep",
             "--reference-id",
-            "whb_frontal_supc_clus",
+            "wmb_panel",
             "--species",
-            "human",
+            "mouse",
             "--panel-genes",
             str(panel_file),
             "--store",
             str(store),
+            "--annotation-config",
+            str(config_file),
+            "--max-gb",
+            "40",
             "--output",
             str(tmp_path / "bundle_ref.json"),
         ],
     )
     assert result.exit_code != 0
-    assert "above large_panel_genes (1000)" in result.output
+    assert "prefilter is mandatory above the reserve" in result.output
     assert not (tmp_path / "bundle_ref.json").exists()
     # Nothing was hashed or built: no bundle, temporary or failed directory.
     assert not store.exists() or not any(store.rglob("*.json"))
+
+
+def test_large_whb_panel_is_prefiltered_kept_and_stored_in_the_large_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    fake = FakeCtm(whb_truncated_lookup).install(monkeypatch)
+    sources = write_whb_sources(tmp_path)
+    panel = make_panel([*GENES, ABSENT_GENE])
+    config = large_config("human", limit=5, cap=6)
+    spec = prepare_reference_spec(
+        whb_spec(
+            region_precompute=sources["region_dir"],
+            seaad_precomputed_stats=sources["seaad"],
+        )
+    )
+    (tmp_path / "scratch").mkdir()
+    store = ReferenceStore(
+        tmp_path / "ssd",
+        large_root=tmp_path / "large",
+        large_panel_genes=5,
+        scratch_root=tmp_path / "scratch",
+    )
+    bundle = store.get_or_build(
+        spec, panel, builder=builder_for(spec, config), config=config
+    )
+    bundle_dir = Path(bundle.path)
+    assert bundle_dir.is_relative_to(tmp_path / "large")
+    manifest = json.loads((bundle_dir / BUNDLE_MANIFEST_NAME).read_text())
+    output = manifest["builder_output"]
+    # Marker discovery ran on the prefiltered candidates only.
+    record = json.loads((bundle_dir / reference.MARKER_PREFILTER_FILE).read_text())
+    assert record["method"] == "per_parent_topk_union" and record["version"] == 1
+    assert len(fake.stub_genes) == record["n_genes"] <= 6
+    assert sorted(fake.stub_genes) == record["genes"] and set(record["genes"]) < set(
+        GENES
+    )
+    assert record["n_input_genes"] == 10 and record["applied"] is True
+    assert output["markers"]["prefilter"]["genes_sha256"] == record["genes_sha256"]
+    assert output["markers"]["n_candidate_genes"] == record["n_genes"]
+    assert "marker_prefilter" in output["timings_s"]
+    # Profiles still cover every panel gene in the reference.
+    assert output["panel_coverage"]["n_query_genes_used"] == 10
+    # The family's reference markers are kept in the large bundle.
+    kept = bundle_dir / reference.REFERENCE_MARKERS_DIR / "reference_markers.h5"
+    assert kept.is_file()
+    assert output["markers"]["reference_markers"][0]["kept"] is True
+    # The prefilter (method, version, settings) is in build_hash.
+    prefilter = manifest["build_hash_payload"]["large_panel_prefilter"]
+    assert prefilter["method"] == "per_parent_topk_union"
+    assert prefilter["settings"]["cap"] == 6
+    assert prefilter["settings"]["markers_per_pair"] == 30
+
+
+def test_small_panel_reference_markers_are_deleted_once_query_markers_exist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    sources = write_whb_sources(tmp_path)
+    seen: dict[str, bool] = {}
+    fake = FakeCtm(whb_truncated_lookup)
+    original_query = fake.query_markers
+
+    def query_markers(config: dict[str, Any], **kwargs: Any) -> None:
+        # The reference markers exist while the query markers are found ...
+        seen["during_query"] = all(
+            Path(path).is_file() for path in config["reference_marker_path_list"]
+        )
+        seen["paths"] = config["reference_marker_path_list"]
+        original_query(config, **kwargs)
+
+    fake.query_markers = query_markers  # type: ignore[method-assign]
+    fake.install(monkeypatch)
+    spec = prepare_reference_spec(
+        whb_spec(
+            region_precompute=sources["region_dir"],
+            seaad_precomputed_stats=sources["seaad"],
+        )
+    )
+    (tmp_path / "scratch").mkdir()
+    store = ReferenceStore(tmp_path / "store", scratch_root=tmp_path / "scratch")
+    config = without_resolvability("human")
+    bundle = store.get_or_build(
+        spec, make_panel(GENES), builder=builder_for(spec, config), config=config
+    )
+    output = json.loads((Path(bundle.path) / BUNDLE_MANIFEST_NAME).read_text())[
+        "builder_output"
+    ]
+    # ... and are gone right after (<= 1,000 genes), their sha256 recorded.
+    assert seen["during_query"] is True
+    assert not any(Path(path).exists() for path in seen["paths"])
+    record = output["markers"]["reference_markers"][0]
+    assert record["kept"] is False and len(record["sha256"]) == 64
+    assert output["markers"]["prefilter"] is None
+    assert not (Path(bundle.path) / reference.MARKER_PREFILTER_FILE).exists()
+
+
+def test_sibling_sets_follow_the_marker_tree_with_the_dropped_level() -> None:
+    tree = TaxonomyTreeView.from_tree_dict(
+        {
+            "hierarchy": ["CLAS", "SUBC", "SUPT", "CLUS"],
+            "CLAS": {"a": ["a1", "a2"], "b": ["b1"]},
+            "SUBC": {"a1": ["t1"], "a2": ["t2", "t3"], "b1": ["t4"]},
+            "SUPT": {"t1": ["c1", "c2"], "t2": ["c3"], "t3": ["c4"], "t4": ["c5"]},
+            "CLUS": {f"c{index}": [] for index in range(1, 6)},
+        }
+    ).drop_level("SUPT")
+    leaves = ["c5", "c4", "c3", "c2", "c1"]
+    sets = {item.key: item for item in reference.sibling_sets(tree, leaves)}
+    assert list(sets) == ["None", "CLAS/a", "CLAS/b", "SUBC/a1", "SUBC/a2", "SUBC/b1"]
+    root = sets["None"]
+    assert root.children == ("a", "b")
+    # Rows follow the precompute's row order (c1 is row 4).
+    assert root.leaf_rows == ((1, 2, 3, 4), (0,))
+    assert sets["SUBC/a1"].children == ("c1", "c2")
+    assert sets["SUBC/a1"].leaf_rows == ((4,), (3,))
+    assert sets["CLAS/b"].children == ("b1",)
 
 
 def test_cortex_implausible_superclusters_are_the_16_pruned_in_e1() -> None:

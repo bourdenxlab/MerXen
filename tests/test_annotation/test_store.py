@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import signal
@@ -416,8 +417,8 @@ def test_map_and_resolve_settings_never_change_build_hash(
     assert compute_build_hash(payload_for(spec, panel, config=config)) == base
 
 
-def test_build_hash_covers_the_prefilter_of_large_panels_only_once_applied(
-    spec: AnnotationReferenceSpec, monkeypatch: pytest.MonkeyPatch
+def test_build_hash_covers_the_prefilter_of_large_marker_builds(
+    spec: AnnotationReferenceSpec,
 ) -> None:
     small, large = make_panel(60), make_panel(1500)
     config = AnnotationConfig(species="human")
@@ -428,22 +429,39 @@ def test_build_hash_covers_the_prefilter_of_large_panels_only_once_applied(
             )
         }
     )
-    # No builder applies the prefilter yet: no payload records it.
-    assert not store_module.MARKER_PREFILTER_APPLIED
+    # Panels up to large_panel_genes never record a prefilter.
     assert payload_for(spec, small, config=config)["large_panel_prefilter"] is None
-    assert payload_for(spec, large, config=config)["large_panel_prefilter"] is None
-    assert compute_build_hash(
-        payload_for(spec, large, config=config)
-    ) == compute_build_hash(payload_for(spec, large, config=no_filter))
-    monkeypatch.setattr(store_module, "MARKER_PREFILTER_APPLIED", True)
-    assert payload_for(spec, small, config=config)["large_panel_prefilter"] is None
-    assert payload_for(spec, large, config=config)["large_panel_prefilter"] == {
+    # Large panels record the method, version and settings (M3b stage D).
+    prefilter = payload_for(spec, large, config=config)["large_panel_prefilter"]
+    assert prefilter == {
         "method": "per_parent_topk_union",
-        "cap": 2000,
+        "version": 1,
+        "settings": {
+            "cap": 2000,
+            "markers_per_pair": spec.n_per_utility,
+            "min_log2_fold": 0.8,
+            "min_high_detection": 0.1,
+            "min_detection_contrast": 0.1,
+            "full_high_detection": 0.5,
+            "full_detection_contrast": 0.7,
+        },
     }
+    assert payload_for(spec, large, config=no_filter)["large_panel_prefilter"] is None
     assert compute_build_hash(
         payload_for(spec, large, config=config)
     ) != compute_build_hash(payload_for(spec, large, config=no_filter))
+    capped = config.model_copy(
+        update={
+            "panel": config.panel.model_copy(update={"large_panel_prefilter_cap": 1500})
+        }
+    )
+    assert compute_build_hash(
+        payload_for(spec, large, config=config)
+    ) != compute_build_hash(payload_for(spec, large, config=capped))
+    # A builder that finds no markers (a test set) never records it.
+    test_set = dataclasses.replace(copying_builder(), finds_markers=False)
+    record = payload_for(spec, large, builder=test_set, config=config)
+    assert record["large_panel_prefilter"] is None
     # Large panels use the wide depth grid.
     assert payload_for(spec, large)["depth_grid"][-1] == 2000
 

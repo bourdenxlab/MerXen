@@ -102,16 +102,14 @@ ANNOTATION_BUILDER_VERSION: Final = 3
 # Version of the build-hash payload and of bundle.json.
 # 2: no panel symbols, MAP bootstrap or resolvability settings in the payload.
 STORE_SCHEMA_VERSION: Final = 2
-# Large panels (> large_panel_genes, e.g. Xenium 5K) need the per-parent
-# marker prefilter, the large store and a measured PREP memory reserve
-# (plan §8.7, OD-E8; M3b stage D). None of them exists yet, so every
-# panel-dependent build above the limit is refused: a 5K build would get the
-# 64 GB default and the main store, and its query-marker step alone is
-# estimated at 120-170 GB without the prefilter.
-LARGE_PANEL_BUILDS_SUPPORTED: Final = False
-# Whether the builders apply the large-panel marker prefilter (plan §8.7).
-# Not yet: build_hash_payload records a prefilter only when this is true.
-MARKER_PREFILTER_APPLIED: Final = False
+# Large panels (> large_panel_genes, e.g. Xenium 5K; plan §8.7, M3b stage
+# D): the marker builders apply the per-parent prefilter
+# (merxen.annotation.prefilter) unless large_panel_marker_prefilter is
+# "none", bundles go to the large store (ReferenceStore.large_root) with
+# their reference markers kept, and PREP gets the measured memory reserve
+# (annotation_prep_large_memory, OD-E8). The prefilter's method, version and
+# settings enter build_hash (build_hash_payload) of every builder that finds
+# markers.
 # Simulation recipes of the resolvability self-map and their versions (§8.3).
 # They enter build_hash once a builder writes resolvability outputs (M3b).
 RESOLVABILITY_RECIPE_VERSIONS: Final[dict[str, int]] = {"R1_contam_HO": 1}
@@ -166,7 +164,7 @@ class UnknownBuilderError(StoreError):
 
 
 class LargePanelRefusedError(StoreError):
-    """A panel-dependent bundle of a large panel cannot be built yet (§8.7)."""
+    """A builder refuses a panel it cannot build safely (§3.2, §8.7, OD-E8)."""
 
 
 class PruneRefusedError(StoreError):
@@ -552,6 +550,12 @@ class BundleBuilder:
         source_patterns: ``fnmatch`` pattern of the file names the builder
             reads from a directory source, by source name; the source's
             identity (and ``build_hash``) covers only those files.
+        finds_markers: Whether the builder runs marker discovery, so the
+            large-panel prefilter (plan §8.7) enters its ``build_hash``; the
+            test-set builders do not.
+        refuse: Optional ``(panel, config) -> reason | None``: why the
+            builder refuses a panel (``large_panel_refusal``). Not part of
+            ``build_hash``.
     """
 
     name: str
@@ -561,6 +565,8 @@ class BundleBuilder:
     uses_panel: bool = True
     prepare_spec: Callable[..., AnnotationReferenceSpec] | None = None
     source_patterns: Mapping[str, str] = field(default_factory=dict)
+    finds_markers: bool = True
+    refuse: Callable[[AnnotationPanel, AnnotationConfig], str | None] | None = None
 
 
 BuilderFactory = Callable[
@@ -711,7 +717,7 @@ def build_hash_payload(
         builder: The builder (name, taxonomy, params, panel use).
         sources: Source records by name.
         config: The annotation config; supplies the large-panel prefilter
-            (recorded only once ``MARKER_PREFILTER_APPLIED``).
+            (method, version and settings; builders that find markers only).
         ctm: ``cell_type_mapper`` provenance; defaults to ``ctm_provenance()``.
         large_panel_genes: Panels above this size use the prefilter.
 
@@ -737,20 +743,18 @@ def build_hash_payload(
         n_panel_genes = panel.n_genes
         panel_payload = {"panel_hash": panel.panel_hash, "n_genes": panel.n_genes}
     prefilter: dict[str, Any] | None = None
-    # The prefilter enters the hash only once a builder applies it (M3b
-    # stage D); until then large-panel builds are refused
-    # (``large_panel_refusal``), so no bundle records a prefilter it never ran.
     if (
-        MARKER_PREFILTER_APPLIED
+        builder.finds_markers
         and config is not None
         and n_panel_genes is not None
         and n_panel_genes > large_panel_genes
         and config.panel.large_panel_marker_prefilter != "none"
     ):
-        prefilter = {
-            "method": config.panel.large_panel_marker_prefilter,
-            "cap": config.panel.large_panel_prefilter_cap,
-        }
+        from merxen.annotation.prefilter import prefilter_payload
+
+        prefilter = prefilter_payload(
+            config.panel.large_panel_prefilter_cap, spec.n_per_utility
+        )
     return {
         "schema_version": STORE_SCHEMA_VERSION,
         "builder_version": ANNOTATION_BUILDER_VERSION,
@@ -776,28 +780,31 @@ def build_hash_payload(
 
 
 def large_panel_refusal(
-    panel: AnnotationPanel | None, config: AnnotationConfig | None
+    panel: AnnotationPanel | None,
+    config: AnnotationConfig | None,
+    builder: BundleBuilder | None = None,
 ) -> str | None:
-    """Return why a panel-dependent build of a panel is refused (``None``: it runs).
+    """Return why a panel-dependent build is refused (``None``: it runs).
+
+    Large panels are built (plan §8.7, M3b stage D); a builder refuses what
+    it cannot build safely through ``BundleBuilder.refuse`` (the whole-WHB
+    bundle above 1,000 genes, §3.2; a large WMB panel without the prefilter
+    whose predicted query-marker peak exceeds the PREP memory reserve, so the
+    prefilter is mandatory above the reserve, OD-E8). It runs before any
+    source is downloaded or hashed and before any build directory exists.
 
     Args:
         panel: The declared panel (``None``: a panel-independent build).
-        config: The annotation config (``panel.large_panel_genes``; default
-            ``LARGE_PANEL_GENES``).
+        config: The annotation config; ``None`` uses the panel's species
+            defaults.
+        builder: The builder; ``None`` refuses nothing.
 
     Returns:
-        The reason, for panels above ``large_panel_genes`` while
-        ``LARGE_PANEL_BUILDS_SUPPORTED`` is false.
+        The reason, or ``None``.
     """
-    limit = config.panel.large_panel_genes if config is not None else LARGE_PANEL_GENES
-    if LARGE_PANEL_BUILDS_SUPPORTED or panel is None or panel.n_genes <= limit:
+    if panel is None or builder is None or builder.refuse is None:
         return None
-    return (
-        f"panel {panel.name} has {panel.n_genes} genes, above large_panel_genes "
-        f"({limit}): large-panel bundle builds are refused until the marker "
-        "prefilter, the large reference store and the measured PREP memory "
-        "reserve exist (plan §8.7, OD-E8)"
-    )
+    return builder.refuse(panel, config or AnnotationConfig(species=panel.species))
 
 
 def recorded_settings(
@@ -1129,12 +1136,14 @@ class ReferenceStore:
                 valid bundle (it is never replaced or deleted), or the build
                 wrote a symlink or a source changed during the build.
             UnknownBuilderError: If no builder is registered.
-            LargePanelRefusedError: If a panel-dependent build has more
-                than ``large_panel_genes`` genes (``large_panel_refusal``).
+            LargePanelRefusedError: If the builder refuses the panel
+                (``large_panel_refusal``).
         """
         config = config or AnnotationConfig(species=spec.species)
         builder = builder or resolve_builder(spec, config)
-        refusal = large_panel_refusal(panel if builder.uses_panel else None, config)
+        refusal = large_panel_refusal(
+            panel if builder.uses_panel else None, config, builder
+        )
         if refusal is not None:
             raise LargePanelRefusedError(f"{spec.reference_id}: {refusal}")
         request = self.prepare_request(spec, panel, builder=builder, config=config)
