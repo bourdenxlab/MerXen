@@ -472,6 +472,40 @@ def test_run_mmc_refuses_a_mapping_with_other_recorded_settings(
         )
 
 
+def test_run_mmc_refuses_a_mapping_that_recorded_another_drop_level(
+    fake_mmc: FakeMmc, tmp_path: Path
+) -> None:
+    fake_mmc.record_drop_level = "X"
+
+    with pytest.raises(MmcEngineError, match="drop_level"):
+        run_mmc(
+            _query(tmp_path),
+            _bundle(fake_mmc),
+            MmcEngineParams(),
+            output_parquet=tmp_path / "o.parquet",
+            work_dir=tmp_path / "work",
+            expected_ctm_version="1.7.2",
+        )
+    assert not (tmp_path / "o.parquet").exists()
+
+
+def test_the_fake_mapper_leaves_subprocess_run_alone(
+    fake_mmc: FakeMmc, tmp_path: Path
+) -> None:
+    import subprocess
+    import sys
+
+    completed = subprocess.run(
+        [sys.executable, "-c", "print('real')"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.stdout.strip() == "real"
+    assert fake_mmc.calls == []
+
+
 def test_mmc_bundle_from_dir_refuses_incomplete_or_changed_bundles(
     fake_mmc: FakeMmc,
 ) -> None:

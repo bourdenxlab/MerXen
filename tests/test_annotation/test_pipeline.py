@@ -1199,3 +1199,993 @@ def test_cli_annotate_records_a_refused_panel_without_mapping(
     refused = CliRunner().invoke(cli_main, arguments)
     assert refused.exit_code != 0
     assert "was refused" in refused.output
+
+
+# --------------------------------------------------------------------------
+# Runs per bundle use (per_platform pairs, merged uses)
+
+
+def _platform_panel(ids: list[str], name: str, mode: str = "per_platform") -> Any:
+    from merxen.annotation.panel import PanelFile
+
+    ids = sorted(ids)
+    platform = name.upper()
+    panel = AnnotationPanel(
+        name=name,
+        kind="platform" if name != "intersection" else "intersection",
+        species="human",
+        platforms=[platform] if name != "intersection" else ["MERSCOPE", "XENIUM"],
+        sample_ids=[f"PX_{platform}"] if name != "intersection" else ["PX_MERSCOPE"],
+        panel_mode=mode,  # type: ignore[arg-type]
+        panel_hash=compute_panel_hash(ids),
+        n_genes=len(ids),
+        ensembl_ids=ids,
+        symbols=[SYMBOLS[GENE_IDS.index(gene_id)] for gene_id in ids],
+    )
+    file_name = (
+        f"panel_genes_{name}.json" if mode == "per_platform" else PANEL_GENES_FILE
+    )
+    return PanelFile(panel=panel, file_name=file_name)
+
+
+def _per_platform_setup(
+    tmp_path: Path,
+    fake_mmc: FakeMmc,
+    merscope_ids: list[str],
+    xenium_ids: list[str],
+) -> tuple[list[MapSample], list[Any], AnnotationConfig, RequiredBundles]:
+    """A per_platform pair through the real required_bundles and map_bundles."""
+    from merxen.annotation.panel import required_bundles
+
+    shared = sorted(set(merscope_ids) & set(xenium_ids))
+    panels = {
+        "merscope": _platform_panel(merscope_ids, "merscope"),
+        "xenium": _platform_panel(xenium_ids, "xenium"),
+        "intersection": _platform_panel(shared, "intersection"),
+    }
+    panel_dir = tmp_path / "panel"
+    panel_dir.mkdir()
+    for item in panels.values():
+        item.panel.write(panel_dir / item.file_name)
+    config = _config()
+    bundle_list = required_bundles(
+        panels,
+        references=config.references,
+        species="human",
+        panel_mode="per_platform",
+        segmentation="proseg_hybrid",
+    )
+    required = RequiredBundles(
+        pair_id="PX",
+        segmentation="proseg_hybrid",
+        species="human",
+        panel_mode="per_platform",
+        status="ok",
+        bundles=bundle_list,
+        n_required=len(bundle_list),
+    )
+    bundles: dict[tuple[str, str | None], MmcBundle] = {}
+    for item in required.bundles:
+        nodes = WHB_NODES if item.reference_id.startswith("whb") else SEA_NODES
+        levels = WHB_LEVELS if item.reference_id.startswith("whb") else SEA_LEVELS
+        bundles[(item.reference_id, item.panel_hash)] = MmcBundle.from_dir(
+            fake_mmc.bundle(
+                item.reference_id,
+                role=item.role,
+                species="human",
+                panel_hash=str(item.panel_hash),
+                n_genes=int(item.n_panel_genes or 0),
+                levels=levels,
+                nodes=nodes,
+            )
+        )
+    runs = map_bundles(required, panel_dir, bundles, config)
+    return _pair_samples(tmp_path / "prepared"), runs, config, required
+
+
+def _runs_by_platform(runs: list[Any]) -> dict[str, set[str]]:
+    return {
+        platform: {run.run_id for run in runs if run.applies_to(platform)}
+        for platform in ("MERSCOPE", "XENIUM")
+    }
+
+
+ALL_RUNS = {
+    "whb_frontal_supc_clus",
+    "whb_frontal_supc_clus_xpanel",
+    "seaad_mr_panel",
+}
+
+
+def test_per_platform_pair_maps_each_platform_panel_and_the_intersection(
+    tmp_path: Path, fake_mmc: FakeMmc
+) -> None:
+    merscope_ids = [GENE_IDS[index] for index in (0, 1, 2, 3, 5)]
+    xenium_ids = [GENE_IDS[index] for index in (0, 1, 2, 4, 5)]
+    samples, runs, config, _ = _per_platform_setup(
+        tmp_path, fake_mmc, merscope_ids, xenium_ids
+    )
+
+    assert _runs_by_platform(runs) == {"MERSCOPE": ALL_RUNS, "XENIUM": ALL_RUNS}
+    manifest = annotate_map(
+        samples,
+        runs,
+        config,
+        output_dir=tmp_path / "out",
+        pair_id="PX",
+        segmentation="s",
+    )
+
+    for sample_id, own_ids in (
+        ("PX_MERSCOPE", merscope_ids),
+        ("PX_XENIUM", xenium_ids),
+    ):
+        record = manifest.samples[sample_id]
+        assert set(record.runs) == ALL_RUNS
+        own = record.runs["whb_frontal_supc_clus"]
+        xpanel = record.runs["whb_frontal_supc_clus_xpanel"]
+        assert own.purposes == ["annotation"]
+        assert own.panel_hash == compute_panel_hash(sorted(own_ids))
+        assert xpanel.purposes == ["intersection_xpanel"]
+        assert xpanel.n_query_genes == 4
+        assert xpanel.same_mapping_as is None
+        labels = pd.read_parquet(tmp_path / "out" / str(record.provisional_labels))
+        assert "mmc_whb_xpanel_supercluster_bp" in labels.columns
+    # Six distinct mappings: two samples x (own WHB, intersection WHB, SEA-AD).
+    assert len(fake_mmc.calls) == 6
+
+
+def test_intersection_equal_to_the_merscope_panel_still_maps_xenium_on_it(
+    tmp_path: Path, fake_mmc: FakeMmc
+) -> None:
+    # A small MERSCOPE panel inside a larger Xenium panel (§8.5): the
+    # intersection has the MERSCOPE panel's hash, so required_bundles merges
+    # the two uses into one bundle.
+    merscope_ids = GENE_IDS[:5]
+    samples, runs, config, required = _per_platform_setup(
+        tmp_path, fake_mmc, merscope_ids, GENE_IDS
+    )
+    whb_items = [
+        item for item in required.bundles if item.reference_id.startswith("whb")
+    ]
+    merged = next(item for item in whb_items if len(item.uses) == 2)
+    assert [use.purpose for use in merged.uses] == [
+        "annotation",
+        "intersection_xpanel",
+    ]
+
+    assert _runs_by_platform(runs) == {"MERSCOPE": ALL_RUNS, "XENIUM": ALL_RUNS}
+    manifest = annotate_map(
+        samples,
+        runs,
+        config,
+        output_dir=tmp_path / "out",
+        pair_id="PX",
+        segmentation="s",
+    )
+
+    xenium = manifest.samples["PX_XENIUM"].runs
+    assert set(xenium) == ALL_RUNS
+    assert xenium["whb_frontal_supc_clus_xpanel"].n_query_genes == 5
+    assert xenium["whb_frontal_supc_clus"].n_query_genes == 6
+    merscope = manifest.samples["PX_MERSCOPE"].runs
+    assert set(merscope) == ALL_RUNS
+    # The MERSCOPE sample's own panel is the intersection: one mapping,
+    # recorded under both run ids.
+    alias = merscope["whb_frontal_supc_clus_xpanel"]
+    assert alias.same_mapping_as == "whb_frontal_supc_clus"
+    assert alias.purposes == ["intersection_xpanel"]
+    assert (
+        alias.query_fingerprint == merscope["whb_frontal_supc_clus"].query_fingerprint
+    )
+    tidy, metadata = read_tidy_parquet(tmp_path / "out" / alias.parquet)
+    assert metadata["run_id"] == "whb_frontal_supc_clus_xpanel"
+    assert metadata["purposes"] == ["intersection_xpanel"]
+    assert len(fake_mmc.calls) == 5
+
+
+def test_identical_platform_panels_map_both_samples(
+    tmp_path: Path, fake_mmc: FakeMmc
+) -> None:
+    samples, runs, config, required = _per_platform_setup(
+        tmp_path, fake_mmc, GENE_IDS, GENE_IDS
+    )
+    assert len(required.bundles) == 2
+
+    assert _runs_by_platform(runs) == {"MERSCOPE": ALL_RUNS, "XENIUM": ALL_RUNS}
+    manifest = annotate_map(
+        samples,
+        runs,
+        config,
+        output_dir=tmp_path / "out",
+        pair_id="PX",
+        segmentation="s",
+    )
+
+    for record in manifest.samples.values():
+        assert set(record.runs) == ALL_RUNS
+        assert record.provisional_summary["broad"] > 0
+    assert len(fake_mmc.calls) == 4
+
+
+def test_setc_equal_to_set_a_records_the_setc_run(
+    tmp_path: Path, fake_mmc: FakeMmc
+) -> None:
+    from merxen.annotation.panel import PanelFile, required_bundles
+
+    panel = _panel(GENE_IDS)
+    setc = _panel(GENE_IDS, name="setc")
+    panels = {
+        "intersection": PanelFile(panel=panel, file_name=PANEL_GENES_FILE),
+        "setc": PanelFile(panel=setc, file_name=PANEL_GENES_SETC_FILE),
+    }
+    panel_dir = tmp_path / "panel"
+    panel_dir.mkdir()
+    panel.write(panel_dir / PANEL_GENES_FILE)
+    setc.write(panel_dir / PANEL_GENES_SETC_FILE)
+    config = _config()
+    bundle_list = required_bundles(
+        panels,
+        references=config.references,
+        species="human",
+        panel_mode="intersection",
+        segmentation="proseg_hybrid",
+    )
+    required = RequiredBundles(
+        pair_id="PX",
+        segmentation="proseg_hybrid",
+        species="human",
+        panel_mode="intersection",
+        status="ok",
+        bundles=bundle_list,
+        n_required=len(bundle_list),
+    )
+    assert len(required.bundles) == 2
+    runs = map_bundles(required, panel_dir, _human_bundles(fake_mmc, panel), config)
+
+    manifest = annotate_map(
+        _pair_samples(tmp_path / "prepared"),
+        runs,
+        config,
+        output_dir=tmp_path / "out",
+        pair_id="PX",
+        segmentation="proseg_hybrid",
+    )
+
+    record = manifest.samples["PX_MERSCOPE"]
+    assert set(record.runs) == {
+        "whb_frontal_supc_clus",
+        "whb_frontal_supc_clus_setc",
+        "seaad_mr_panel",
+    }
+    assert record.runs["whb_frontal_supc_clus_setc"].purposes == ["setc_sensitivity"]
+    labels = pd.read_parquet(tmp_path / "out" / str(record.provisional_labels))
+    assert "mmc_whb_setc_supercluster_bp" in labels.columns
+    assert len(fake_mmc.calls) == 4
+
+
+def test_a_sample_without_any_run_is_an_error_unless_its_panel_was_refused(
+    tmp_path: Path, fake_mmc: FakeMmc
+) -> None:
+    samples, runs, config, _ = _per_platform_setup(
+        tmp_path,
+        fake_mmc,
+        [GENE_IDS[index] for index in (0, 1, 2, 3, 5)],
+        [GENE_IDS[index] for index in (0, 1, 2, 4, 5)],
+    )
+    merscope_only = [run for run in runs if run.panel.platforms == ["MERSCOPE"]]
+
+    with pytest.raises(MapError, match="no MMC run applies to platform XENIUM"):
+        annotate_map(
+            samples,
+            merscope_only,
+            config,
+            output_dir=tmp_path / "out",
+            pair_id="PX",
+            segmentation="s",
+        )
+    manifest = annotate_map(
+        samples,
+        merscope_only,
+        config,
+        output_dir=tmp_path / "out2",
+        pair_id="PX",
+        segmentation="s",
+        refused_platforms=["XENIUM"],
+    )
+    assert manifest.samples["PX_XENIUM"].panel_status == "refused"
+    assert manifest.samples["PX_XENIUM"].runs == {}
+    assert set(manifest.samples["PX_MERSCOPE"].runs) == {
+        "whb_frontal_supc_clus",
+        "seaad_mr_panel",
+    }
+
+
+def test_refused_platforms_reads_the_panel_reasons() -> None:
+    from merxen.annotation.pipeline import refused_platforms
+
+    required = RequiredBundles(
+        pair_id="PX",
+        segmentation="s",
+        species="human",
+        panel_mode="per_platform",
+        status="ok",
+        reasons=["xenium: 12 resolved genes < min_mapped_genes 50"],
+        bundles=[],
+        n_required=0,
+    )
+    assert refused_platforms(required) == ["XENIUM"]
+    assert (
+        refused_platforms(required.model_copy(update={"panel_mode": "intersection"}))
+        == []
+    )
+
+
+def test_map_bundles_refuses_a_bundle_built_for_another_panel(
+    tmp_path: Path, fake_mmc: FakeMmc
+) -> None:
+    panel_dir, panel = _panel_dir(tmp_path / "panel")
+    other = _panel(GENE_IDS[:4])
+    bundles = _human_bundles(fake_mmc, other)
+    required = RequiredBundles.model_validate_json(
+        (panel_dir / REQUIRED_BUNDLES_FILE).read_text()
+    )
+    keyed = {
+        (reference_id, panel.panel_hash): bundle
+        for (reference_id, _), bundle in bundles.items()
+    }
+
+    with pytest.raises(MapError, match="is for panel"):
+        map_bundles(required, panel_dir, keyed, _config())
+
+
+def test_map_bundles_refuses_a_panel_file_with_another_hash(
+    tmp_path: Path, fake_mmc: FakeMmc
+) -> None:
+    panel_dir, panel = _panel_dir(tmp_path / "panel")
+    bundles = _human_bundles(fake_mmc, panel)
+    required = RequiredBundles.model_validate_json(
+        (panel_dir / REQUIRED_BUNDLES_FILE).read_text()
+    )
+    _panel(GENE_IDS[:4]).write(panel_dir / PANEL_GENES_FILE)
+
+    with pytest.raises(MapError, match="has panel hash"):
+        map_bundles(required, panel_dir, bundles, _config())
+
+
+# --------------------------------------------------------------------------
+# Published-output reuse: the key and a manifest that cannot serve it
+
+
+def _published_once(
+    tmp_path: Path, fake_mmc: FakeMmc, **config_updates: Any
+) -> tuple[list[MapSample], list[Any], AnnotationConfig, Path, int]:
+    samples, runs, config = _setup(tmp_path, fake_mmc)
+    if config_updates:
+        config = config.model_copy(update=config_updates)
+    output = tmp_path / "published"
+    annotate_map(
+        samples, runs, config, output_dir=output, pair_id="PX", segmentation="s"
+    )
+    return samples, runs, config, output, len(fake_mmc.calls)
+
+
+def test_reuse_needs_the_same_bundle_build(tmp_path: Path, fake_mmc: FakeMmc) -> None:
+    import dataclasses
+
+    samples, runs, config, published, n_calls = _published_once(tmp_path, fake_mmc)
+    rebuilt_dir = fake_mmc.bundle(
+        "whb_frontal_supc_clus",
+        role="primary",
+        species="human",
+        panel_hash=runs[0].panel.panel_hash,
+        n_genes=runs[0].panel.n_genes,
+        levels=WHB_LEVELS,
+        nodes=WHB_NODES,
+        build_hash="b" * 64,
+    )
+    rebuilt = [
+        dataclasses.replace(run, bundle=MmcBundle.from_dir(rebuilt_dir))
+        if run.reference_id == "whb_frontal_supc_clus"
+        else run
+        for run in runs
+    ]
+
+    manifest = annotate_map(
+        samples,
+        rebuilt,
+        config,
+        output_dir=tmp_path / "rerun",
+        pair_id="PX",
+        segmentation="s",
+        reuse_from=published,
+    )
+
+    assert len(fake_mmc.calls) == n_calls + 2
+    for record in manifest.samples.values():
+        assert not record.runs["whb_frontal_supc_clus"].reused
+        assert record.runs["whb_frontal_supc_clus"].build_hash == "b" * 64
+        assert record.runs["seaad_mr_panel"].reused
+
+
+def test_reuse_needs_the_same_ctm_version(
+    tmp_path: Path, fake_mmc: FakeMmc, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    samples, runs, _, published, n_calls = _published_once(tmp_path, fake_mmc)
+    fake_mmc.install(monkeypatch, "1.8.0")
+
+    manifest = annotate_map(
+        samples,
+        runs,
+        _config(ctm_version="1.8.0"),
+        output_dir=tmp_path / "rerun",
+        pair_id="PX",
+        segmentation="s",
+        reuse_from=published,
+    )
+
+    assert len(fake_mmc.calls) == n_calls + 4
+    assert not any(
+        run.reused
+        for record in manifest.samples.values()
+        for run in record.runs.values()
+    )
+
+
+def _edit_manifest(path: Path, edit: Any) -> None:
+    payload = json.loads(path.read_text())
+    edit(payload)
+    path.write_text(json.dumps(payload))
+
+
+def test_reuse_needs_the_tidy_schema_version_and_the_same_lookup(
+    tmp_path: Path, fake_mmc: FakeMmc
+) -> None:
+    samples, runs, config, published, n_calls = _published_once(tmp_path, fake_mmc)
+
+    def edit(payload: dict[str, Any]) -> None:
+        runs_m = payload["samples"]["PX_MERSCOPE"]["runs"]
+        # A manifest written before the tidy schema version was recorded.
+        runs_m["whb_frontal_supc_clus"].pop("tidy_schema_version")
+        # A mapping made with another (restricted) lookup.
+        runs_m["seaad_mr_panel"]["lookup_sha256"] = "0" * 64
+
+    _edit_manifest(published / MAP_MANIFEST_NAME, edit)
+
+    manifest = annotate_map(
+        samples,
+        runs,
+        config,
+        output_dir=tmp_path / "rerun",
+        pair_id="PX",
+        segmentation="s",
+        reuse_from=published,
+    )
+
+    assert len(fake_mmc.calls) == n_calls + 2
+    merscope = manifest.samples["PX_MERSCOPE"].runs
+    assert not merscope["whb_frontal_supc_clus"].reused
+    assert not merscope["seaad_mr_panel"].reused
+    assert merscope["whb_frontal_supc_clus"].tidy_schema_version == 1
+    assert all(run.reused for run in manifest.samples["PX_XENIUM"].runs.values())
+
+
+def test_reuse_copies_a_kept_extended_json_or_maps_again(
+    tmp_path: Path, fake_mmc: FakeMmc
+) -> None:
+    samples, runs, config, published, n_calls = _published_once(tmp_path, fake_mmc)
+    keep = config.model_copy(update={"keep_extended_json": True})
+
+    # The published runs kept no JSON: keeping it now means mapping again.
+    kept = annotate_map(
+        samples,
+        runs,
+        keep,
+        output_dir=tmp_path / "kept",
+        pair_id="PX",
+        segmentation="s",
+        reuse_from=published,
+    )
+    assert len(fake_mmc.calls) == n_calls + 4
+    n_calls = len(fake_mmc.calls)
+
+    again = annotate_map(
+        samples,
+        runs,
+        keep,
+        output_dir=tmp_path / "again",
+        pair_id="PX",
+        segmentation="s",
+        reuse_from=tmp_path / "kept",
+    )
+    assert len(fake_mmc.calls) == n_calls
+    for record in again.samples.values():
+        for run in record.runs.values():
+            assert run.reused
+            assert run.extended_json is not None
+            assert (tmp_path / "again" / run.extended_json).is_file()
+    # Without keep_extended_json a reused record names no JSON it lacks.
+    plain = annotate_map(
+        samples,
+        runs,
+        config,
+        output_dir=tmp_path / "plain",
+        pair_id="PX",
+        segmentation="s",
+        reuse_from=tmp_path / "kept",
+    )
+    assert all(
+        run.reused and run.extended_json is None
+        for record in plain.samples.values()
+        for run in record.runs.values()
+    )
+    assert kept.samples["PX_XENIUM"].runs["seaad_mr_panel"].extended_json
+
+
+@pytest.mark.parametrize("kind", ["stub", "schema", "garbage"])
+def test_an_unusable_published_manifest_only_disables_reuse(
+    tmp_path: Path, fake_mmc: FakeMmc, caplog: pytest.LogCaptureFixture, kind: str
+) -> None:
+    samples, runs, config, published, n_calls = _published_once(tmp_path, fake_mmc)
+    path = published / MAP_MANIFEST_NAME
+    if kind == "stub":
+        # What stubMapManifestJson writes on -stub-run (AnnotationReferences).
+        path.write_text(
+            json.dumps(
+                {
+                    "stub": True,
+                    "pair_id": "PX",
+                    "segmentation": "s",
+                    "species": "human",
+                    "panel_status": "ok",
+                    "panel_reasons": [],
+                    "n_required": 2,
+                    "bundle_refs": ["map_inputs/bundle_refs/bundle_ref_1.json"],
+                    "samples": {},
+                }
+            )
+        )
+    elif kind == "schema":
+        _edit_manifest(path, lambda payload: payload.update(schema_version=99))
+    else:
+        path.write_text("{not json")
+
+    with caplog.at_level("WARNING"):
+        manifest = annotate_map(
+            samples,
+            runs,
+            config,
+            output_dir=tmp_path / "rerun",
+            pair_id="PX",
+            segmentation="s",
+            reuse_from=published,
+        )
+
+    assert len(fake_mmc.calls) == n_calls + 4
+    assert set(manifest.samples) == {"PX_MERSCOPE", "PX_XENIUM"}
+    assert "reuse disabled" in caplog.text
+
+
+def test_cli_annotate_refuses_a_work_dir_in_the_results_tree(tmp_path: Path) -> None:
+    inputs = _published_pair(tmp_path / "results")
+    work = tmp_path / "results" / "PX" / "scratch"
+
+    result = CliRunner().invoke(
+        cli_main,
+        [
+            "annotate",
+            "--species",
+            "human",
+            *(item for path in inputs for item in ("--from-clustered-h5ad", str(path))),
+            "--out",
+            str(tmp_path / "shadow"),
+            "--work-dir",
+            str(work),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "work dir" in result.output
+    assert "never into the results tree" in result.output
+    assert not work.exists()
+
+
+def test_output_guard_covers_prepared_inputs_and_named_results_roots(
+    tmp_path: Path,
+) -> None:
+    prepared = (
+        tmp_path
+        / "results/P1/proseg_hybrid/clustering_squidpy/clustering_prepare_out"
+        / "merscope/P1_MERSCOPE_prepared.h5ad"
+    )
+    with pytest.raises(MapError, match="results tree"):
+        check_output_outside_inputs(tmp_path / "results" / "P2" / "x", [prepared])
+    loose = tmp_path / "staging" / "P1_MERSCOPE_prepared.h5ad"
+    check_output_outside_inputs(tmp_path / "results" / "x", [loose])
+    with pytest.raises(MapError, match="protected results root"):
+        check_output_outside_inputs(
+            tmp_path / "results" / "x",
+            [loose],
+            protected_roots=[tmp_path / "results"],
+        )
+
+
+# --------------------------------------------------------------------------
+# Provisional labels: which threshold, which parent, which probability
+
+
+T_IDS = [f"ENSG{index:011d}" for index in range(101, 111)]
+T_SYMBOLS = [f"T{index}" for index in range(10)]
+T_WHB_NODES = [
+    FakeNode(
+        "TW_EXC",
+        "Upper-layer intratelencephalic",
+        T_IDS[0],
+        {"broad_class": "Neurons", "lineage": "Neurons", "nt": "Excitatory"},
+    ),
+    FakeNode(
+        "TW_INH",
+        "MGE interneuron",
+        T_IDS[1],
+        {"broad_class": "Neurons", "lineage": "Neurons", "nt": "Inhibitory"},
+    ),
+    FakeNode(
+        "TW_OLI",
+        "Oligodendrocyte",
+        T_IDS[2],
+        {"broad_class": "Oligodendrocytes", "lineage": "Oligodendrocyte lineage"},
+    ),
+    FakeNode(
+        "TW_OPC",
+        "Oligodendrocyte precursor",
+        T_IDS[3],
+        {
+            "broad_class": "Oligodendrocyte precursors",
+            "lineage": "Oligodendrocyte lineage",
+        },
+    ),
+    FakeNode(
+        "TW_AST",
+        "Astrocyte",
+        T_IDS[4],
+        {"broad_class": "Astrocytes", "lineage": "Astrocytes"},
+    ),
+    FakeNode(
+        "TW_SPL",
+        "Splatter",
+        T_IDS[9],
+        {"broad_class": "Mixed/Unknown", "lineage": "Neurons", "sink": "True"},
+    ),
+]
+# SEA-AD reads its own markers, so its probabilities are set apart from WHB's.
+T_SEA_NODES = [
+    FakeNode("TS_L23", "L2/3 IT", T_IDS[5], {"broad_class": "Neurons"}),
+    FakeNode("TS_AST", "Astrocyte", T_IDS[6], {"broad_class": "Astrocytes"}),
+    FakeNode(
+        "TS_OLI", "Oligodendrocyte", T_IDS[7], {"broad_class": "Oligodendrocytes"}
+    ),
+]
+# Counts on T0..T9 (T8 is filler: no node's marker). SEA-AD's subclass level
+# (depth 1 in the fake) has bp = p ** 2 and aggregate_probability = p ** 3.
+T_CELLS: dict[str, list[int]] = {
+    # WHB EXC .70 / INH .30: lineage and broad 1.0; NT .70 < .73; the
+    # supercluster .70 passes its own .69 (not the broad .73).
+    "super70": [70, 30, 0, 0, 0, 10, 0, 0, 0, 0],
+    # OLI .71 / OPC .29: lineage 1.0 but broad .71 < .73 (not .69).
+    "broad71": [0, 0, 71, 29, 0, 0, 0, 10, 0, 0],
+    # A supercluster bp of exactly .69, stored as float32, still passes.
+    "super69": [69, 31, 0, 0, 0, 10, 0, 0, 0, 0],
+    # SEA-AD p .89: subclass bp .79, aggregate .7031 (E2: aggregate).
+    # Below 60 counts the .55 threshold applies; the aggregate passes.
+    "sea_below60": [20, 0, 0, 0, 0, 25, 3, 0, 0, 0],
+    # SEA-AD p .80: subclass bp .64, aggregate .512: below 60 counts it fails
+    # .55 on the aggregate (the bp .64 would pass).
+    "sea_agg_fails": [20, 0, 0, 0, 0, 24, 6, 0, 0, 0],
+    # The same SEA-AD call from 60 counts passes .45.
+    "sea_from60": [40, 0, 0, 0, 0, 24, 6, 0, 0, 0],
+    # Exactly 60 counts is "from 60".
+    "sea_exactly60": [30, 0, 0, 0, 0, 24, 6, 0, 0, 0],
+    # WHB lineage .60: broad parent_unresolved, so SEA-AD (p 1.0) is too.
+    "sea_parent": [60, 0, 0, 0, 40, 10, 0, 0, 0, 0],
+    # A neuron with a confident lineage (EXC + the Splatter sink's lineage)
+    # but broad .70: NT and supercluster are parent_unresolved.
+    "nt_parent": [70, 0, 0, 0, 0, 10, 0, 0, 0, 30],
+}
+T_STATUS = {
+    "super70": ["confident", "confident", "low_confidence", "confident", "confident"],
+    "broad71": [
+        "confident",
+        "low_confidence",
+        "not_applicable",
+        "parent_unresolved",
+        "parent_unresolved",
+    ],
+    "super69": ["confident", "confident", "low_confidence", "confident", "confident"],
+    "sea_below60": ["confident"] * 5,
+    "sea_agg_fails": ["confident"] * 4 + ["low_confidence"],
+    "sea_from60": ["confident"] * 5,
+    "sea_exactly60": ["confident"] * 5,
+    "sea_parent": [
+        "low_confidence",
+        "parent_unresolved",
+        "parent_unresolved",
+        "parent_unresolved",
+        "parent_unresolved",
+    ],
+    "nt_parent": [
+        "confident",
+        "low_confidence",
+        "parent_unresolved",
+        "parent_unresolved",
+        "parent_unresolved",
+    ],
+}
+HUMAN_STATUS_COLUMNS = [
+    "ct_lineage_status",
+    "ct_broad_status",
+    "ct_nt_status",
+    "ct_supercluster_status",
+    "ct_seaad_subclass_status",
+]
+
+
+def _threshold_matrix_labels(
+    tmp_path: Path, fake_mmc: FakeMmc, config: AnnotationConfig
+) -> pd.DataFrame:
+    counts = np.array(list(T_CELLS.values()))
+    path = _write_h5ad(
+        tmp_path / "PT_XENIUM.h5ad",
+        counts,
+        platform="XENIUM",
+        var_names=T_SYMBOLS,
+        ensembl_ids=T_IDS,
+        source="prepared",
+    )
+    ids = sorted(T_IDS)
+    panel = AnnotationPanel(
+        name="intersection",
+        kind="intersection",
+        species="human",
+        platforms=["MERSCOPE", "XENIUM"],
+        sample_ids=["PT_XENIUM"],
+        panel_mode="intersection",
+        panel_hash=compute_panel_hash(ids),
+        n_genes=len(ids),
+        ensembl_ids=ids,
+        symbols=[T_SYMBOLS[T_IDS.index(gene_id)] for gene_id in ids],
+    )
+    panel_dir = tmp_path / "panel"
+    panel.write(panel_dir / PANEL_GENES_FILE)
+    required = RequiredBundles(
+        pair_id="PT",
+        segmentation="s",
+        species="human",
+        panel_mode="intersection",
+        status="ok",
+        bundles=[
+            RequiredBundle(
+                reference_id=reference_id,
+                role=role,
+                species="human",
+                purpose="annotation",
+                panel_name="intersection",
+                panel_hash=panel.panel_hash,
+                panel_file=PANEL_GENES_FILE,
+                n_panel_genes=panel.n_genes,
+            )
+            for reference_id, role in (
+                ("whb_frontal_supc_clus", "primary"),
+                ("seaad_mr_panel", "secondary"),
+            )
+        ],
+        n_required=2,
+    )
+    bundles = {
+        (reference_id, panel.panel_hash): MmcBundle.from_dir(
+            fake_mmc.bundle(
+                reference_id,
+                role=role,
+                species="human",
+                panel_hash=panel.panel_hash,
+                n_genes=panel.n_genes,
+                levels=levels,
+                nodes=nodes,
+            )
+        )
+        for reference_id, role, levels, nodes in (
+            ("whb_frontal_supc_clus", "primary", WHB_LEVELS, T_WHB_NODES),
+            ("seaad_mr_panel", "secondary", SEA_LEVELS, T_SEA_NODES),
+        )
+    }
+    runs = map_bundles(required, panel_dir, bundles, config)
+    manifest = annotate_map(
+        [MapSample("PT_XENIUM", "XENIUM", path, "prepared")],
+        runs,
+        config,
+        output_dir=tmp_path / "out",
+        pair_id="PT",
+        segmentation="s",
+    )
+    labels = pd.read_parquet(
+        tmp_path / "out" / str(manifest.samples["PT_XENIUM"].provisional_labels)
+    )
+    labels.index = pd.Index(list(T_CELLS))
+    return labels
+
+
+@pytest.mark.parametrize("cell", list(T_CELLS))
+def test_provisional_statuses_pin_each_threshold_and_parent(
+    tmp_path: Path, fake_mmc: FakeMmc, cell: str
+) -> None:
+    labels = _threshold_matrix_labels(tmp_path, fake_mmc, _config())
+
+    statuses = labels.loc[cell, HUMAN_STATUS_COLUMNS].astype(str).tolist()
+
+    assert statuses == T_STATUS[cell]
+
+
+def test_provisional_seaad_subclass_reads_the_subclass_level_aggregate(
+    tmp_path: Path, fake_mmc: FakeMmc
+) -> None:
+    labels = _threshold_matrix_labels(tmp_path, fake_mmc, _config())
+
+    # The subclass level, not the class level (names differ by level).
+    assert labels.loc["sea_below60", "ct_seaad_subclass_name"] == "L2/3 IT 1"
+    assert labels.loc["sea_below60", "ct_seaad_subclass_raw"] == pytest.approx(
+        0.89 * 0.79, abs=1e-4
+    )
+    assert labels.loc["super69", "ct_supercluster_raw"] == pytest.approx(0.69)
+    assert labels.loc["super70", "ct_final_level"] == "supercluster"
+    assert labels.loc["nt_parent", "ct_final_level"] == "lineage"
+
+
+def test_provisional_seaad_split_follows_second_vote_below_counts(
+    tmp_path: Path, fake_mmc: FakeMmc
+) -> None:
+    from merxen.annotation.config import AnnotationThresholds
+
+    config = _config(thresholds=AnnotationThresholds(second_vote_below_counts=40))
+
+    labels = _threshold_matrix_labels(tmp_path, fake_mmc, config)
+
+    # 50 counts is "from" a split at 40: the .45 threshold passes .512.
+    assert labels.loc["sea_agg_fails", "total_counts"] == 50
+    assert labels.loc["sea_agg_fails", "ct_seaad_subclass_status"] == "confident"
+
+
+M_IDS = [f"ENSMUSG{index:011d}" for index in range(1, 5)]
+M_NODES = [
+    FakeNode(
+        "CL_01",
+        "01 IT-ET Glut",
+        M_IDS[0],
+        {"broad_class": "Neurons", "nt": "Excitatory"},
+    ),
+    FakeNode(
+        "CL_06",
+        "06 CTX-CGE GABA",
+        M_IDS[1],
+        {"broad_class": "Neurons", "nt": "Inhibitory"},
+    ),
+    FakeNode(
+        "CL_30", "30 Astro-Epen", M_IDS[2], {"broad_class": "Astrocytes/Ependymal"}
+    ),
+]
+# Class bp p, subclass bp p ** 2 (the fake's depth 1).
+M_CELLS: dict[str, list[int]] = {
+    # Class .92 passes .90; subclass .85 passes .80 (not .90).
+    "subclass85": [92, 0, 8, 0],
+    # A class bp of exactly .90, stored as float32, passes.
+    "class90": [90, 0, 10, 0],
+    # Class .85 < .90 with broad 1.0 (both neurons): NT and subclass are
+    # parent_unresolved (their parent is the class).
+    "class85": [85, 15, 0, 0],
+    # Broad .60: the class is parent_unresolved, not low_confidence.
+    "broad60": [60, 0, 40, 0],
+}
+M_STATUS = {
+    "subclass85": ["confident", "confident", "confident", "confident"],
+    "class90": ["confident", "confident", "confident", "confident"],
+    "class85": [
+        "confident",
+        "low_confidence",
+        "parent_unresolved",
+        "parent_unresolved",
+    ],
+    "broad60": [
+        "low_confidence",
+        "parent_unresolved",
+        "parent_unresolved",
+        "parent_unresolved",
+    ],
+}
+
+
+@pytest.mark.parametrize("cell", list(M_CELLS))
+def test_mouse_provisional_statuses_pin_each_threshold_and_parent(
+    tmp_path: Path, fake_mmc: FakeMmc, cell: str
+) -> None:
+    levels = [
+        "CCN20230722_CLAS",
+        "CCN20230722_SUBC",
+        "CCN20230722_SUPT",
+        "CCN20230722_CLUS",
+    ]
+    ids = sorted(M_IDS)
+    panel = AnnotationPanel(
+        name="sample",
+        kind="single_sample",
+        species="mouse",
+        platforms=["MERSCOPE"],
+        sample_ids=["MT_MERSCOPE"],
+        panel_mode="single_sample",
+        panel_hash=compute_panel_hash(ids),
+        n_genes=len(ids),
+        ensembl_ids=ids,
+        symbols=["Slc17a7", "Gad1", "Aqp4", "Other"],
+    )
+    panel_dir = tmp_path / "panel"
+    panel.write(panel_dir / PANEL_GENES_FILE)
+    required = RequiredBundles(
+        pair_id="MT",
+        segmentation="s",
+        species="mouse",
+        panel_mode="single_sample",
+        status="ok",
+        bundles=[
+            RequiredBundle(
+                reference_id="wmb_panel",
+                role="primary",
+                species="mouse",
+                purpose="annotation",
+                panel_name="sample",
+                panel_hash=panel.panel_hash,
+                panel_file=PANEL_GENES_FILE,
+                n_panel_genes=panel.n_genes,
+            )
+        ],
+        n_required=1,
+    )
+    bundle = MmcBundle.from_dir(
+        fake_mmc.bundle(
+            "wmb_panel",
+            role="primary",
+            species="mouse",
+            panel_hash=panel.panel_hash,
+            n_genes=panel.n_genes,
+            levels=levels,
+            nodes=M_NODES,
+            drop_level="CCN20230722_SUPT",
+        )
+    )
+    config = AnnotationConfig(species="mouse").coupled_to_clustering(10)
+    runs = map_bundles(
+        required, panel_dir, {("wmb_panel", panel.panel_hash): bundle}, config
+    )
+    path = _write_h5ad(
+        tmp_path / "MT_MERSCOPE.h5ad",
+        np.array(list(M_CELLS.values())),
+        platform="MERSCOPE",
+        var_names=["Slc17a7", "Gad1", "Aqp4", "Other"],
+        ensembl_ids=M_IDS,
+        source="prepared",
+    )
+    manifest = annotate_map(
+        [MapSample("MT_MERSCOPE", "MERSCOPE", path, "prepared")],
+        runs,
+        config,
+        output_dir=tmp_path / "out",
+        pair_id="MT",
+        segmentation="s",
+    )
+    labels = pd.read_parquet(
+        tmp_path / "out" / str(manifest.samples["MT_MERSCOPE"].provisional_labels)
+    )
+    labels.index = pd.Index(list(M_CELLS))
+
+    statuses = labels.loc[
+        cell,
+        ["ct_broad_status", "ct_class_status", "ct_nt_status", "ct_subclass_status"],
+    ].astype(str)
+
+    assert statuses.tolist() == M_STATUS[cell]
