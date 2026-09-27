@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "955ee8e9dc0641aaa394ebf82bc5d58dc27f8e0389e48f60838d144b614165ca",
+    3: "5aa589a9e5e7b92e0b8dae93095e820185a3bada359f0d683e3809415a41fe7c",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -48,6 +48,8 @@ PIN_HISTORY = (
     "validated WMB universe, self-map test-cell source, read-only bundles)",
     "3: the resolvability self-map (held-out WHB and WMB test-set builders, "
     "self-map tables in primary and secondary bundles); resolvability.py pinned",
+    "3: level_emission and composition docs in resolvability.py (RESOLVE-side "
+    "helpers; the bundle files are unchanged)",
 )
 
 
