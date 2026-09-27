@@ -17,16 +17,21 @@ command runs the same code on published ``*_clustered.h5ad`` files:
    restricts the lookup (``validate_lookup`` with auto-collapse) and is
    recorded as ``n_missing_panel_genes``. Subset bundles for > 1% missing
    genes are M3b.
-3. **MMC per bundle** (``mapmycells_engine.run_mmc``): every required
-   primary / secondary bundle, plus the human set-c run on the segmentations
-   ``annotation_xplat_sensitivity_segmentations`` names and, for
-   ``per_platform`` pairs, the intersection-panel run. The mouse region
-   inference and pruned re-map are M6: mouse maps unpruned here.
+3. **MMC per bundle use** (``mapmycells_engine.run_mmc``): every use of a
+   required primary / secondary bundle (``RequiredBundle.uses``) is a run on
+   that use's panel file: the annotation panel of each platform, the human
+   set-c run on the segmentations ``annotation_xplat_sensitivity_segmentations``
+   names and, for ``per_platform`` pairs, the intersection-panel run
+   (``_xpanel``). Two uses on the same gene set are mapped once and recorded
+   under both run ids. The mouse region inference and pruned re-map are M6:
+   mouse maps unpruned here.
 4. **Write** ``<plat>/<sid>_mmc_<run_id>.parquet`` (tidy, per cell x level)
    and ``map_manifest.json`` (query fingerprint, bundle hashes, engine
    parameters, ctm version, wall time). With ``annotation_reuse_published``
    a run is skipped when a published manifest has the same query
-   fingerprint, ``build_hash``, engine parameters and ctm version.
+   fingerprint, ``build_hash``, engine parameters, ctm version, tidy schema
+   version and (restricted) lookup; an unreadable published manifest only
+   disables reuse.
 5. **Provisional labels** ``<plat>/<sid>_ct_provisional.parquet``: ``ct_*``
    columns from the raw thresholds alone (hard floor = ``min_counts``, sinks
    and region plausibility from the bundle vocabulary, the parent chain),
@@ -56,8 +61,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from merxen.annotation.config import AnnotationConfig, AnnotationReferenceSpec
 from merxen.annotation.mapmycells_engine import (
+    EXTENDED_JSON_GZ_SUFFIX,
+    TIDY_SCHEMA_VERSION,
     MmcBundle,
     MmcEngineParams,
+    RestrictedLookup,
     aggregate_parent_probability,
     check_ctm_version,
     ctm_commit,
@@ -68,6 +76,7 @@ from merxen.annotation.mapmycells_engine import (
     run_mmc,
     runner_up_column,
     write_query_h5ad,
+    write_tidy_parquet,
 )
 from merxen.annotation.panel import (
     REQUIRED_BUNDLES_FILE,
@@ -84,7 +93,7 @@ from merxen.annotation.panel import (
     pair_symbol_lookup,
     raw_panel_from_var,
 )
-from merxen.annotation.schema import CellStatus, Columns
+from merxen.annotation.schema import CellStatus, Columns, meets_threshold
 from merxen.annotation.store import (
     ANNOTATION_BUILDER_VERSION,
     BUNDLE_MANIFEST_NAME,
@@ -133,7 +142,6 @@ ENGINE_PREFIXES: Final[dict[str, str]] = {
 }
 N_PROCESSORS_ENV: Final = "MERXEN_ANNOTATION_MAP_N_PROCESSORS"
 DEFAULT_N_PROCESSORS: Final = 6
-SECOND_VOTE_COUNTS: Final = 60
 MOUSE_REGION_STEP: Final = "not_run: mouse region inference and pruned re-map are M6"
 
 SampleSource = Literal["prepared", "clustered"]
@@ -174,7 +182,8 @@ class MapBundle:
             set-c and cross-platform runs.
         reference_id: Store id.
         role: Reference role.
-        purposes: Every use the run serves (``RequiredBundle.uses``).
+        purposes: The use this run serves (one ``RequiredBundle.uses``
+            purpose; ``map_bundles`` makes one run per use).
         panel_name: Annotation panel name.
         panel: The annotation panel (its genes restrict the query).
         bundle: The bundle.
@@ -232,6 +241,12 @@ def reference_spec_for(
     return AnnotationReferenceSpec(reference_id=reference_id, **known)
 
 
+def _platform_sets_overlap(first: AnnotationPanel, second: AnnotationPanel) -> bool:
+    if not first.platforms or not second.platforms:
+        return True
+    return bool(set(first.platforms) & set(second.platforms))
+
+
 def map_bundles(
     required: RequiredBundles,
     panel_dir: Path | str,
@@ -240,7 +255,17 @@ def map_bundles(
     *,
     references: Sequence[str] | None = None,
 ) -> list[MapBundle]:
-    """Return the MMC runs of a pair x segmentation.
+    """Return the MMC runs of a pair x segmentation, one per bundle use.
+
+    ``required_bundles.json`` lists a bundle once per ``(reference,
+    panel_hash)`` and names every purpose in ``uses`` (panel.py
+    ``RequiredBundle``). MAP selects runs by use: each use with a mapped
+    purpose (``RUN_SUFFIXES``) becomes its own run, on that use's panel file
+    (whose platforms decide which samples it maps) and with that purpose's
+    run id. Two uses of one bundle on the same gene set (the intersection
+    panel equal to a platform panel of a ``per_platform`` pair, set c equal
+    to set a) therefore give two run ids; ``annotate_map`` maps their query
+    once and records it under both.
 
     Args:
         required: ``required_bundles.json`` of the pair x segmentation.
@@ -250,18 +275,27 @@ def map_bundles(
         references: Map only these reference ids (default: every mapped role).
 
     Returns:
-        One run per required bundle with a mapped role, primary first.
+        One run per mapped use of a required bundle, primary first.
 
     Raises:
-        MapError: If a required bundle is missing, or its build is for
-            another panel.
+        MapError: If a required bundle is missing, its build is for another
+            panel, a use's panel file has another hash, or two runs would
+            write one run id for the same platform.
     """
     wanted = set(references) if references is not None else None
     runs: list[MapBundle] = []
+    panels: dict[str, AnnotationPanel] = {}
     for item in required.bundles:
-        if item.role not in MAPPED_ROLES or item.panel_file is None:
+        if item.role not in MAPPED_ROLES:
             continue
         if wanted is not None and item.reference_id not in wanted:
+            continue
+        uses = [
+            use
+            for use in item.uses
+            if use.purpose in RUN_SUFFIXES and use.panel_file is not None
+        ]
+        if not uses:
             continue
         bundle = bundles.get((item.reference_id, item.panel_hash))
         if bundle is None:
@@ -275,20 +309,40 @@ def map_bundles(
                 f"bundle {bundle.path} is for panel {str(bundle.panel_hash)[:16]}, "
                 f"not {str(item.panel_hash)[:16]}"
             )
-        panel = load_annotation_panel(Path(panel_dir) / item.panel_file)
-        purposes = tuple(use.purpose for use in item.uses)
-        runs.append(
-            MapBundle(
-                run_id=item.reference_id + RUN_SUFFIXES.get(purposes[0], ""),
+        spec = reference_spec_for(config, item.reference_id)
+        for use in uses:
+            assert use.panel_file is not None
+            if use.panel_file not in panels:
+                panels[use.panel_file] = load_annotation_panel(
+                    Path(panel_dir) / use.panel_file
+                )
+            panel = panels[use.panel_file]
+            if panel.panel_hash != item.panel_hash:
+                raise MapError(
+                    f"{use.panel_file} has panel hash {panel.panel_hash[:16]}, but "
+                    f"required_bundles.json lists {str(item.panel_hash)[:16]} for "
+                    f"{item.reference_id} ({use.purpose})"
+                )
+            run = MapBundle(
+                run_id=item.reference_id + RUN_SUFFIXES[use.purpose],
                 reference_id=item.reference_id,
                 role=item.role,
-                purposes=purposes,
-                panel_name=item.panel_name,
+                purposes=(use.purpose,),
+                panel_name=use.panel_name,
                 panel=panel,
                 bundle=bundle,
-                spec=reference_spec_for(config, item.reference_id),
+                spec=spec,
             )
-        )
+            for other in runs:
+                if other.run_id == run.run_id and _platform_sets_overlap(
+                    other.panel, run.panel
+                ):
+                    raise MapError(
+                        f"two uses of {item.reference_id} give run id "
+                        f"{run.run_id} for the same platform ({other.panel_name}, "
+                        f"{run.panel_name})"
+                    )
+            runs.append(run)
     runs.sort(key=lambda run: (run.role != "primary", run.role, run.run_id))
     return runs
 
@@ -698,9 +752,14 @@ class MapRunRecord(_MapModel):
         peak_rss_gb: Mapper peak RSS, when measured.
         parquet: Tidy parquet, relative to the manifest's directory.
         parquet_sha256: Its sha256.
+        tidy_schema_version: ``TIDY_SCHEMA_VERSION`` of the parquet (reuse
+            key; ``None`` in manifests written before it was recorded, which
+            are never reused).
         extended_json: Kept gzipped extended JSON (relative), if any.
         reused: Whether this run was taken from a published manifest.
         reused_from: The published parquet it came from.
+        same_mapping_as: Run id of this sample whose mapping this run shares
+            (two uses of one bundle on the same query are mapped once).
     """
 
     run_id: str
@@ -730,9 +789,11 @@ class MapRunRecord(_MapModel):
     peak_rss_gb: float | None = None
     parquet: str
     parquet_sha256: str
+    tidy_schema_version: int | None = None
     extended_json: str | None = None
     reused: bool = False
     reused_from: str | None = None
+    same_mapping_as: str | None = None
 
 
 class MapSampleRecord(_MapModel):
@@ -754,6 +815,9 @@ class MapSampleRecord(_MapModel):
         n_features: Non-control features.
         n_resolved_features: Features with an Ensembl ID.
         controls_removed: Control features removed, per reason.
+        panel_status: ``"refused"`` when the sample's own panel was refused
+            (a ``per_platform`` pair can refuse one platform's panel), so it
+            has no run.
         runs: MMC runs by run id.
         provisional_labels: Provisional ``ct_*`` parquet (relative), if any.
         provisional_summary: Confident share of table cells per level.
@@ -774,6 +838,7 @@ class MapSampleRecord(_MapModel):
     n_features: int
     n_resolved_features: int
     controls_removed: dict[str, int] = Field(default_factory=dict)
+    panel_status: Literal["ok", "refused"] = "ok"
     runs: dict[str, MapRunRecord] = Field(default_factory=dict)
     provisional_labels: str | None = None
     provisional_summary: dict[str, float] = Field(default_factory=dict)
@@ -854,6 +919,51 @@ def load_map_manifest(path: Path | str) -> MapManifest:
     return MapManifest.model_validate_json(Path(path).read_text(encoding="utf-8"))
 
 
+def load_published_manifest(directory: Path | str) -> MapManifest | None:
+    """Read a published ``map_manifest.json`` for reuse, or ``None``.
+
+    Reuse is an optimisation, so a manifest that cannot serve it never fails
+    the task: a missing, unreadable or invalid file (the ``-stub-run``
+    manifest, an older or newer layout) or another
+    ``MAP_MANIFEST_SCHEMA_VERSION`` disables reuse with a warning.
+
+    Args:
+        directory: The published ``annotation_map_out`` directory.
+
+    Returns:
+        The manifest, or ``None`` when it cannot be reused.
+    """
+    path = Path(directory) / MAP_MANIFEST_NAME
+    if not path.is_file():
+        return None
+    try:
+        manifest = load_map_manifest(path)
+    except (ValueError, OSError) as error:
+        first_line = str(error).splitlines()[0] if str(error) else type(error).__name__
+        logger.warning(
+            "published manifest %s unreadable, reuse disabled (%s)", path, first_line
+        )
+        return None
+    if manifest.schema_version != MAP_MANIFEST_SCHEMA_VERSION:
+        logger.warning(
+            "published manifest %s has schema version %s, not %s; reuse disabled",
+            path,
+            manifest.schema_version,
+            MAP_MANIFEST_SCHEMA_VERSION,
+        )
+        return None
+    return manifest
+
+
+@dataclass(frozen=True)
+class _Reusable:
+    """A published run identical to the one requested."""
+
+    parquet: Path
+    record: MapRunRecord
+    extended_json: Path | None
+
+
 def _reusable_parquet(
     published: MapManifest | None,
     published_dir: Path | None,
@@ -864,8 +974,16 @@ def _reusable_parquet(
     build_hash: str,
     engine_params: Mapping[str, Any],
     ctm_version: str | None,
-) -> tuple[Path, MapRunRecord] | None:
-    """Return the published parquet of an identical run, if any."""
+    lookup_sha256: str | None,
+    keep_extended_json: bool,
+) -> _Reusable | None:
+    """Return the published parquet of an identical run, if any.
+
+    Identical means the same query fingerprint, ``build_hash``, engine
+    parameters, ctm version, tidy schema version and lookup (marker-content
+    sha256 of the restricted lookup), with an unchanged parquet; when the
+    extended JSON is to be kept, the published run must have kept it.
+    """
     if published is None or published_dir is None:
         return None
     sample = published.samples.get(sample_id)
@@ -881,6 +999,19 @@ def _reusable_parquet(
         reasons.append("engine parameters")
     if record.ctm_version != ctm_version:
         reasons.append("ctm version")
+    if record.tidy_schema_version != TIDY_SCHEMA_VERSION:
+        reasons.append("tidy schema version")
+    if record.lookup_sha256 != lookup_sha256:
+        reasons.append("lookup")
+    extended: Path | None = None
+    if keep_extended_json:
+        extended = (
+            published_dir / record.extended_json
+            if record.extended_json is not None
+            else None
+        )
+        if extended is None or not extended.is_file():
+            reasons.append("kept extended JSON")
     path = published_dir / record.parquet
     if not reasons and (
         not path.is_file() or file_sha256(path) != record.parquet_sha256
@@ -894,7 +1025,7 @@ def _reusable_parquet(
             ", ".join(reasons),
         )
         return None
-    return path, record
+    return _Reusable(parquet=path, record=record, extended_json=extended)
 
 
 # --------------------------------------------------------------------------
@@ -1015,21 +1146,28 @@ def _level_values(
     parent_confident: np.ndarray | None,
     implausible: np.ndarray | None = None,
     applicable: np.ndarray | None = None,
+    probability: Literal["bp", "aggregate_probability"] = "bp",
 ) -> _LevelColumns:
     """Fill one level from a tidy level frame (rows = mapped cells).
 
     ``group_of`` aggregates the level to a coarser class (lineage, broad, NT);
-    without it the level is the node itself.
+    without it the level is the node itself, scored on ``probability`` (the
+    bootstrap probability, or ctm's ``aggregate_probability``: the product
+    down the hierarchy, E2's SEA-AD subclass definition).
     """
     values = _LevelColumns.empty(n_objects)
     if group_of is None:
         names = frame["name"].astype(object).to_numpy()
-        raw = frame["bp"].to_numpy(np.float64)
+        raw = frame[probability].to_numpy(np.float64)
         runner = frame[runner_up_column(1, "name")].astype(object).to_numpy()
         runner_probability = frame[runner_up_column(1, "probability")].to_numpy(
             np.float64
         )
-        margin = raw - np.nan_to_num(runner_probability, nan=0.0)
+        # Runner-ups carry bootstrap probabilities only, so the margin is
+        # always on the bootstrap probability.
+        margin = frame["bp"].to_numpy(np.float64) - np.nan_to_num(
+            runner_probability, nan=0.0
+        )
     else:
         aggregated = aggregate_parent_probability(frame, group_of)
         names = aggregated.classes
@@ -1043,7 +1181,7 @@ def _level_values(
         else np.full(len(frame), float(threshold))
     )
     status = np.where(
-        np.nan_to_num(raw, nan=-1.0) >= threshold_values,
+        meets_threshold(raw, threshold_values),
         CellStatus.CONFIDENT.value,
         CellStatus.LOW_CONFIDENCE.value,
     ).astype(object)
@@ -1086,8 +1224,9 @@ def provisional_labels(
     probabilities over the assigned node's class (E1 / E2); lineage is
     ``implausible`` for sinks and region-implausible superclusters; broad,
     NT and supercluster need a confident parent; ``seaad_subclass`` applies
-    SEA-AD's raw thresholds (0.55 below 60 counts, 0.45 from 60) under a
-    confident WHB broad. Mouse: broad and NT aggregate the WMB class level,
+    SEA-AD's raw thresholds (0.55 below ``second_vote_below_counts``, 0.45
+    from it) to the subclass ``aggregate_probability`` (E2's definition)
+    under a confident WHB broad. Mouse: broad and NT aggregate the WMB class level,
     class and subclass use their bootstrap probabilities. Objects below
     ``min_counts`` are ``low_counts``. See ``PROVISIONAL_RULES`` for what is
     not applied.
@@ -1218,11 +1357,13 @@ def provisional_labels(
                 sea_positions = position_of.get_indexer(sea.index)
                 counts = loaded.total_counts[sea_positions]
                 sea_threshold = np.where(
-                    counts < SECOND_VOTE_COUNTS,
+                    counts < thresholds.second_vote_below_counts,
                     thresholds.seaad_subclass_below60,
                     thresholds.seaad_subclass_from60,
                 )
                 broad_ok = broad.status[sea_positions] == CellStatus.CONFIDENT.value
+                # E2 derived 0.55 / 0.45 on the subclass aggregate_probability
+                # (class bp x subclass bp; exp/E2/build_tables.py sea_subclass_p).
                 levels["seaad_subclass"] = _level_values(
                     sea,
                     sea_positions,
@@ -1230,6 +1371,7 @@ def provisional_labels(
                     group_of=None,
                     threshold=sea_threshold,
                     parent_confident=broad_ok,
+                    probability="aggregate_probability",
                 )
         else:
             broad = _level_values(
@@ -1382,6 +1524,7 @@ def annotate_map(
     work_dir: Path | str | None = None,
     reuse_from: Path | str | None = None,
     write_provisional: bool = True,
+    refused_platforms: Iterable[str] = (),
 ) -> MapManifest:
     """Run the MAP step for the samples of one pair x segmentation.
 
@@ -1390,7 +1533,7 @@ def annotate_map(
         runs: The MMC runs (``map_bundles``).
         config: The annotation config, coupled to the clustering
             ``min_counts`` (``require_min_counts``).
-        output_dir: ``annotation_out`` (``<plat>/`` parquets and
+        output_dir: ``annotation_map_out`` (``<plat>/`` parquets and
             ``map_manifest.json``).
         pair_id: Pair id.
         segmentation: Segmentation.
@@ -1399,8 +1542,12 @@ def annotate_map(
             ``<output_dir>/.work``, removed at the end).
         reuse_from: Directory of a published ``map_manifest.json`` whose
             identical runs are reused (``annotation_reuse_published``);
-            ``None`` disables reuse.
+            ``None`` disables reuse, and an unreadable manifest disables it
+            with a warning (``load_published_manifest``).
         write_provisional: Write the provisional ``ct_*`` parquet.
+        refused_platforms: Platforms whose own panel was refused
+            (``refused_platforms``); their samples are recorded without runs.
+            Any other sample that no run applies to is an error.
 
     Returns:
         The manifest (also written to ``<output_dir>/map_manifest.json``).
@@ -1421,11 +1568,10 @@ def annotate_map(
     scratch.mkdir(parents=True, exist_ok=True)
     published: MapManifest | None = None
     published_dir: Path | None = None
-    if reuse_from is not None:
-        candidate = Path(reuse_from) / MAP_MANIFEST_NAME
-        if candidate.is_file():
-            published = load_map_manifest(candidate)
-            published_dir = Path(reuse_from)
+    if reuse_from is not None and config.reuse_published:
+        published = load_published_manifest(reuse_from)
+        published_dir = Path(reuse_from) if published is not None else None
+    refused = {platform.upper() for platform in refused_platforms}
     manifest = MapManifest(
         pair_id=pair_id,
         segmentation=segmentation,
@@ -1455,6 +1601,7 @@ def annotate_map(
                 pair_id=pair_id,
                 segmentation=segmentation,
                 write_provisional=write_provisional,
+                panel_refused=loaded.sample.platform.upper() in refused,
             )
             manifest.samples[loaded.sample.sample_id] = record
             # Written after every sample, so an interrupted run keeps the
@@ -1483,7 +1630,18 @@ def _map_sample(
     pair_id: str | None,
     segmentation: str | None,
     write_provisional: bool,
+    panel_refused: bool = False,
 ) -> MapSampleRecord:
+    """Map one sample onto every run that applies to its platform.
+
+    Runs on one bundle with the same query (two uses of one gene set) are
+    mapped once; the later run ids get a copy of the tidy table
+    (``same_mapping_as``).
+
+    Raises:
+        MapError: If no run applies to the sample and its panel was not
+            refused.
+    """
     sample = loaded.sample
     sample_dir = output / sample.platform.lower()
     sample_dir.mkdir(parents=True, exist_ok=True)
@@ -1507,54 +1665,76 @@ def _map_sample(
             reason: len(names)
             for reason, names in loaded.declared.controls_removed.items()
         },
+        panel_status="refused" if panel_refused else "ok",
     )
+    applicable = [run for run in runs if run.applies_to(sample.platform)]
+    if not applicable:
+        if panel_refused:
+            logger.warning(
+                "%s: the %s panel was refused; the sample is not mapped",
+                sample.sample_id,
+                sample.platform,
+            )
+            return record
+        raise MapError(
+            f"{sample.sample_id}: no MMC run applies to platform "
+            f"{sample.platform} (runs: "
+            + ", ".join(f"{run.run_id} on {run.panel_name}" for run in runs)
+            + ")"
+        )
     tidies: list[tuple[MapBundle, pd.DataFrame]] = []
-    for run in runs:
-        if not run.applies_to(sample.platform):
-            continue
+    mapped: dict[tuple[str, str], tuple[str, Path, MapRunRecord]] = {}
+    for run in applicable:
         params = MmcEngineParams.from_reference_spec(run.spec, n_processors=processes)
         query = build_sample_query(loaded, run.panel)
         parquet = sample_dir / MMC_PARQUET_TEMPLATE.format(
             sample_id=sample.sample_id, run_id=run.run_id
         )
-        reusable = (
-            _reusable_parquet(
-                published,
-                published_dir,
-                sample_id=sample.sample_id,
-                run_id=run.run_id,
-                fingerprint=query.fingerprint,
-                build_hash=run.bundle.build_hash,
-                engine_params=params.reuse_key(),
-                ctm_version=installed,
-            )
-            if config.reuse_published
-            else None
-        )
-        if reusable is not None:
-            source_path, old = reusable
-            if source_path.resolve() != parquet.resolve():
-                shutil.copy2(source_path, parquet)
-            logger.info("%s %s: reused %s", sample.sample_id, run.run_id, source_path)
-            run_record = old.model_copy(
-                update={
-                    "parquet": _relative(parquet, output),
-                    "reused": True,
-                    "reused_from": str(source_path.resolve()),
-                    "bundle_path": str(run.bundle.path),
-                }
-            )
-        else:
-            run_record = _run_one(
-                loaded,
-                run,
-                query,
-                params,
-                config,
-                parquet=parquet,
-                output=output,
-                scratch=scratch / f"{sample.sample_id}_{run.run_id}",
-            )
+        key = (run.bundle.build_hash, query.fingerprint)
+        run_scratch = scratch / f"{sample.sample_id}_{run.run_id}"
+        try:
+            earlier = mapped.get(key)
+            if earlier is not None:
+                run_record = _same_mapping(run, earlier, parquet=parquet, output=output)
+            else:
+                restricted = restrict_lookup(
+                    run.bundle, query.gene_ids, run_scratch / "lookup.restricted.json"
+                )
+                reusable = (
+                    _reusable_parquet(
+                        published,
+                        published_dir,
+                        sample_id=sample.sample_id,
+                        run_id=run.run_id,
+                        fingerprint=query.fingerprint,
+                        build_hash=run.bundle.build_hash,
+                        engine_params=params.reuse_key(),
+                        ctm_version=installed,
+                        lookup_sha256=restricted.lookup_sha256,
+                        keep_extended_json=config.keep_extended_json,
+                    )
+                    if config.reuse_published
+                    else None
+                )
+                if reusable is not None:
+                    run_record = _reused_run(
+                        run, reusable, parquet=parquet, output=output, config=config
+                    )
+                else:
+                    run_record = _run_one(
+                        loaded,
+                        run,
+                        query,
+                        params,
+                        config,
+                        restricted=restricted,
+                        parquet=parquet,
+                        output=output,
+                        scratch=run_scratch,
+                    )
+        finally:
+            shutil.rmtree(run_scratch, ignore_errors=True)
+        mapped.setdefault(key, (run.run_id, parquet, run_record))
         record.runs[run.run_id] = run_record
         tidy, _ = read_tidy_parquet(parquet)
         tidies.append((run, tidy))
@@ -1579,6 +1759,68 @@ def _map_sample(
     return record
 
 
+def _reused_run(
+    run: MapBundle,
+    reusable: _Reusable,
+    *,
+    parquet: Path,
+    output: Path,
+    config: AnnotationConfig,
+) -> MapRunRecord:
+    """Copy an identical published run (parquet and, if kept, extended JSON)."""
+    if reusable.parquet.resolve() != parquet.resolve():
+        shutil.copy2(reusable.parquet, parquet)
+    extended: str | None = None
+    if config.keep_extended_json and reusable.extended_json is not None:
+        target = parquet.with_name(
+            parquet.name.removesuffix(".parquet") + EXTENDED_JSON_GZ_SUFFIX
+        )
+        if reusable.extended_json.resolve() != target.resolve():
+            shutil.copy2(reusable.extended_json, target)
+        extended = _relative(target, output)
+    logger.info("%s: reused %s", run.run_id, reusable.parquet)
+    return reusable.record.model_copy(
+        update={
+            "parquet": _relative(parquet, output),
+            "reused": True,
+            "reused_from": str(reusable.parquet.resolve()),
+            "bundle_path": str(run.bundle.path),
+            "extended_json": extended,
+            "same_mapping_as": None,
+        }
+    )
+
+
+def _same_mapping(
+    run: MapBundle,
+    earlier: tuple[str, Path, MapRunRecord],
+    *,
+    parquet: Path,
+    output: Path,
+) -> MapRunRecord:
+    """Record a run whose bundle and query equal an earlier run of the sample."""
+    earlier_id, earlier_parquet, earlier_record = earlier
+    tidy, metadata = read_tidy_parquet(earlier_parquet)
+    metadata.pop("tidy_schema_version", None)
+    metadata.update({"run_id": run.run_id, "purposes": list(run.purposes)})
+    write_tidy_parquet(tidy, parquet, metadata)
+    logger.info(
+        "%s: same bundle and query as %s; its mapping is recorded under both",
+        run.run_id,
+        earlier_id,
+    )
+    return earlier_record.model_copy(
+        update={
+            "run_id": run.run_id,
+            "purposes": list(run.purposes),
+            "panel_name": run.panel_name,
+            "parquet": _relative(parquet, output),
+            "parquet_sha256": file_sha256(parquet),
+            "same_mapping_as": earlier_id,
+        }
+    )
+
+
 def _run_one(
     loaded: LoadedSample,
     run: MapBundle,
@@ -1586,49 +1828,44 @@ def _run_one(
     params: MmcEngineParams,
     config: AnnotationConfig,
     *,
+    restricted: RestrictedLookup,
     parquet: Path,
     output: Path,
     scratch: Path,
 ) -> MapRunRecord:
     scratch.mkdir(parents=True, exist_ok=True)
-    try:
-        query_path = write_query_h5ad(
-            query.counts,
-            query.cell_ids,
-            query.gene_ids,
-            scratch / "query.h5ad",
+    query_path = write_query_h5ad(
+        query.counts,
+        query.cell_ids,
+        query.gene_ids,
+        scratch / "query.h5ad",
+    )
+    if query.missing_gene_ids:
+        logger.warning(
+            "%s %s: %d of %d panel genes absent from the dataset: %s",
+            loaded.sample.sample_id,
+            run.run_id,
+            len(query.missing_gene_ids),
+            run.panel.n_genes,
+            ", ".join(query.missing_gene_ids[:10]),
         )
-        restricted = restrict_lookup(
-            run.bundle, query.gene_ids, scratch / "lookup.restricted.json"
-        )
-        if query.missing_gene_ids:
-            logger.warning(
-                "%s %s: %d of %d panel genes absent from the dataset: %s",
-                loaded.sample.sample_id,
-                run.run_id,
-                len(query.missing_gene_ids),
-                run.panel.n_genes,
-                ", ".join(query.missing_gene_ids[:10]),
-            )
-        result = run_mmc(
-            query_path,
-            run.bundle,
-            params,
-            output_parquet=parquet,
-            work_dir=scratch,
-            expected_ctm_version=config.ctm_version,
-            lookup_path=restricted.path,
-            keep_extended_json=config.keep_extended_json,
-            log_dir=output / "logs",
-            run_metadata={
-                "run_id": run.run_id,
-                "sample_id": loaded.sample.sample_id,
-                "query_fingerprint": query.fingerprint,
-                "purposes": list(run.purposes),
-            },
-        )
-    finally:
-        shutil.rmtree(scratch, ignore_errors=True)
+    result = run_mmc(
+        query_path,
+        run.bundle,
+        params,
+        output_parquet=parquet,
+        work_dir=scratch,
+        expected_ctm_version=config.ctm_version,
+        lookup_path=restricted.path,
+        keep_extended_json=config.keep_extended_json,
+        log_dir=output / "logs",
+        run_metadata={
+            "run_id": run.run_id,
+            "sample_id": loaded.sample.sample_id,
+            "query_fingerprint": query.fingerprint,
+            "purposes": list(run.purposes),
+        },
+    )
     collapsed = (
         [parent.key for parent in restricted.validation.collapsed]
         if restricted.validation is not None
@@ -1662,6 +1899,7 @@ def _run_one(
         peak_rss_gb=result.peak_rss_gb,
         parquet=_relative(parquet, output),
         parquet_sha256=file_sha256(parquet),
+        tidy_schema_version=TIDY_SCHEMA_VERSION,
         extended_json=(
             _relative(result.extended_json, output)
             if result.extended_json is not None
@@ -1735,33 +1973,69 @@ def published_layout(path: Path | str) -> PublishedLayout:
     )
 
 
-def check_output_outside_inputs(output_dir: Path | str, inputs: Iterable[Path]) -> None:
+def results_root_of(path: Path | str) -> Path | None:
+    """Return the results root that holds a file, if it sits in a results tree.
+
+    A published clustered H5AD gives its ``<root>`` directly
+    (``published_layout``). Any other file (a prepared H5AD, a view manifest
+    target) is placed by its nearest ``clustering_squidpy`` ancestor:
+    ``<root>/<pair>/<seg>/clustering_squidpy/...``.
+
+    Args:
+        path: An input file.
+
+    Returns:
+        ``<root>``, or ``None`` outside a results tree.
+    """
+    layout = published_layout(path)
+    if layout.results_root is not None:
+        return layout.results_root
+    resolved = Path(path).resolve()
+    for ancestor in resolved.parents:
+        if ancestor.name == "clustering_squidpy" and len(ancestor.parents) > 2:
+            return ancestor.parents[2]
+    return None
+
+
+def check_output_outside_inputs(
+    output_dir: Path | str,
+    inputs: Iterable[Path],
+    *,
+    protected_roots: Iterable[Path | str] = (),
+    what: str = "output",
+) -> None:
     """Refuse an output directory inside a results tree or an input's folder.
 
     The standalone ``merxen annotate`` never writes into published results
-    (R3): not below the results root of a published clustered H5AD, and not
-    in any input's directory.
+    (R3): not below the results root of an input (``results_root_of``), not
+    below a ``protected_roots`` directory (``--results-root``), and not in
+    any input's directory.
 
     Args:
-        output_dir: The requested output directory.
+        output_dir: The requested directory (``--out`` or ``--work-dir``).
         inputs: Input files.
+        protected_roots: Further directories to stay out of.
+        what: The directory's role, for the message.
 
     Raises:
-        MapError: If the output lies inside a protected directory.
+        MapError: If the directory lies inside a protected directory.
     """
     target = Path(output_dir).resolve()
+    guarded: list[tuple[Path, str]] = [
+        (Path(root).resolve(), "a protected results root") for root in protected_roots
+    ]
     for path in inputs:
-        layout = published_layout(path)
-        protected = [Path(path).resolve().parent]
-        if layout.results_root is not None:
-            protected.append(layout.results_root)
-        for directory in protected:
-            if target == directory or directory in target.parents:
-                raise MapError(
-                    f"output {target} lies inside {directory}, which holds "
-                    f"published inputs ({path}); write annotation outputs "
-                    "elsewhere (never into the results tree)"
-                )
+        guarded.append((Path(path).resolve().parent, f"published inputs ({path})"))
+        root = results_root_of(path)
+        if root is not None:
+            guarded.append((root, f"the results tree of {path}"))
+    for directory, reason in guarded:
+        if target == directory or directory in target.parents:
+            raise MapError(
+                f"{what} {target} lies inside {directory}, which holds "
+                f"{reason}; write annotation outputs elsewhere (never into the "
+                "results tree)"
+            )
 
 
 def write_view_manifest(samples: Sequence[MapSample], directory: Path) -> Path:
@@ -1816,6 +2090,24 @@ def load_required(
     return required
 
 
+def refused_platforms(required: RequiredBundles) -> list[str]:
+    """Return the platforms whose own ``per_platform`` panel was refused.
+
+    ``compute_panel`` records each refused panel as ``"<name>: <reason>"``;
+    a ``per_platform`` pair names its platform panels after the platform.
+
+    Args:
+        required: ``required_bundles.json`` of the pair x segmentation.
+
+    Returns:
+        Upper-case platform names (empty for other panel modes).
+    """
+    if required.panel_mode != "per_platform":
+        return []
+    names = {reason.split(":", 1)[0].strip().upper() for reason in required.reasons}
+    return sorted(names & {"MERSCOPE", "XENIUM"})
+
+
 def write_refused_manifest(
     required: RequiredBundles,
     config: AnnotationConfig,
@@ -1835,7 +2127,7 @@ def write_refused_manifest(
         required: The refused ``required_bundles.json``.
         config: The annotation config, coupled to the clustering
             ``min_counts``.
-        output_dir: ``annotation_out``.
+        output_dir: ``annotation_map_out``.
         pair_id: Pair id (default: the panel's).
         segmentation: Segmentation (default: the panel's).
         n_processors: MMC worker processes the task reserved.

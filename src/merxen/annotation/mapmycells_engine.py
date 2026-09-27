@@ -47,7 +47,7 @@ import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal, TextIO
 
 import numpy as np
 import pandas as pd
@@ -1216,6 +1216,41 @@ def _read_peak_rss_gb(rusage_path: Path) -> float | None:
         return None
 
 
+def _launch_mapper(
+    command: Sequence[str],
+    *,
+    check: bool,
+    stdout: TextIO,
+    stderr: TextIO,
+    env: Mapping[str, str],
+    text: bool,
+) -> subprocess.CompletedProcess[str]:
+    """Start the mapper subprocess (the one place ``run_mmc`` shells out).
+
+    Tests replace this function, not ``subprocess.run``, so other callers of
+    ``subprocess.run`` in the same process are unaffected.
+
+    Args:
+        command: The launched command.
+        check: ``subprocess.run``'s ``check``.
+        stdout: Stdout stream.
+        stderr: Stderr stream.
+        env: The environment (``mmc_environment``).
+        text: ``subprocess.run``'s ``text``.
+
+    Returns:
+        The completed process.
+    """
+    return subprocess.run(
+        list(command),
+        check=check,
+        stdout=stdout,
+        stderr=stderr,
+        env=dict(env),
+        text=text,
+    )
+
+
 def run_mmc(
     query_h5ad: Path | str,
     bundle: MmcBundle,
@@ -1300,7 +1335,7 @@ def run_mmc(
         with stdout_log.open("w") as stdout, stderr_log.open("w") as stderr:
             stdout.write("$ " + " ".join(command) + "\n\n")
             stdout.flush()
-            completed = subprocess.run(
+            completed = _launch_mapper(
                 launched,
                 check=False,
                 stdout=stdout,

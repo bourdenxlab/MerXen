@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TextIO
@@ -261,16 +261,19 @@ class FakeMmc:
     """Build fake bundles and stand in for the mapper subprocess.
 
     The fake mapper assigns each query cell to the first-level node whose
-    marker gene has the most counts; its bootstrap probability is that
+    marker gene has the most counts; its bootstrap probability ``p`` is that
     marker's share of the marker counts (rounded to 0.01), the other nodes
     are the runner-ups, and every deeper level repeats the node's single
-    child with the same probability.
+    child (named ``"<name> <depth>"``) with bootstrap probability
+    ``p ** (depth + 1)`` and the product of those as its aggregate
+    probability.
     """
 
     root: Path
     calls: list[dict[str, Any]] = field(default_factory=list)
     fail_with: int | None = None
     record_seed: int | None = None
+    record_drop_level: str | None = None
 
     def bundle(
         self,
@@ -381,21 +384,23 @@ class FakeMmc:
         monkeypatch.setattr(
             mapmycells_engine, "installed_ctm_version", lambda: ctm_version
         )
-        monkeypatch.setattr(mapmycells_engine.subprocess, "run", self.run)
+        monkeypatch.setattr(mapmycells_engine, "_launch_mapper", self.run)
 
     def run(
         self,
-        command: list[str],
+        command: Sequence[str],
+        *,
         check: bool,
         stdout: TextIO,
         stderr: TextIO,
-        env: dict[str, str],
+        env: Mapping[str, str],
         text: bool,
     ) -> subprocess.CompletedProcess[str]:
-        """The fake ``subprocess.run`` of the mapper."""
+        """The fake ``mapmycells_engine._launch_mapper``."""
         import anndata as ad
 
         assert check is False and text is True
+        command = list(command)
 
         def option(name: str) -> str | None:
             return command[command.index(name) + 1] if name in command else None
@@ -412,6 +417,7 @@ class FakeMmc:
         lookup = json.loads(
             Path(str(option("--query_markers.serialized_lookup"))).read_text()
         )
+        self.calls[-1]["lookup"] = lookup
         levels = list(tree["hierarchy"])
         drop_level = option("--drop_level")
         counts = np.asarray(query.X.toarray())
@@ -435,17 +441,25 @@ class FakeMmc:
             }
             best = ranked[0]
             result: dict[str, Any] = {"cell_id": str(cell_id)}
+            aggregate = 1.0
             for depth, level in enumerate(levels):
                 suffix = "" if depth == 0 else f"_{depth}"
                 runners = [label for label in ranked[1:] if probability[label] > 0]
+                # Deeper levels are less certain (bp ** (depth + 1)) and the
+                # aggregate probability is the product down the hierarchy, as
+                # ctm's, so bp and aggregate_probability differ below the root.
+                bp = round(probability[best] ** (depth + 1), 2)
+                aggregate = round(aggregate * bp, 4)
                 result[level] = {
                     "assignment": best + suffix,
-                    "bootstrapping_probability": probability[best],
-                    "aggregate_probability": probability[best],
+                    "bootstrapping_probability": bp,
+                    "aggregate_probability": aggregate,
                     "avg_correlation": 0.5,
                     "runner_up_assignment": [label + suffix for label in runners],
                     "runner_up_correlation": [0.1 for _ in runners],
-                    "runner_up_probability": [probability[label] for label in runners],
+                    "runner_up_probability": [
+                        round(probability[label] ** (depth + 1), 2) for label in runners
+                    ],
                     "directly_assigned": level != drop_level,
                 }
             results.append(result)
@@ -475,7 +489,11 @@ class FakeMmc:
                     "normalization": option("--type_assignment.normalization"),
                     "chunk_size": 10000,
                 },
-                "drop_level": drop_level,
+                "drop_level": (
+                    self.record_drop_level
+                    if self.record_drop_level is not None
+                    else drop_level
+                ),
             },
             "metadata": {"version": "1.7.2"},
             "n_unmapped_genes": 0,

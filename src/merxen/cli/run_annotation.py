@@ -747,6 +747,14 @@ def _bundle_overrides(values: tuple[str, ...]) -> dict[str, Path]:
     help="Map only the bundles given with --bundle-ref / --bundle: fail "
     "instead of looking a missing one up in the store (pipeline runs).",
 )
+@click.option(
+    "--results-root",
+    "results_roots",
+    multiple=True,
+    type=click.Path(path_type=Path, file_okay=False),
+    help="A results tree --out and --work-dir must stay out of (repeatable; "
+    "the inputs' own results trees are always protected).",
+)
 def annotate_command(
     clustered_h5ads: tuple[Path, ...],
     prepared_dir: Path | None,
@@ -773,6 +781,7 @@ def annotate_command(
     no_provisional: bool,
     allow_refused_panel: bool,
     require_bundle_refs: bool,
+    results_roots: tuple[Path, ...],
 ) -> None:
     """Map published or prepared samples with MapMyCells (MAP step, plan §3.3).
 
@@ -812,6 +821,7 @@ def annotate_command(
                 write_provisional=not no_provisional,
                 allow_refused_panel=allow_refused_panel,
                 require_bundle_refs=require_bundle_refs,
+                results_roots=results_roots,
             )
     except (MapError, MmcEngineError) as error:
         raise click.ClickException(f"{type(error).__name__}: {error}") from error
@@ -844,6 +854,7 @@ def _annotate(
     write_provisional: bool,
     allow_refused_panel: bool,
     require_bundle_refs: bool,
+    results_roots: tuple[Path, ...] = (),
 ) -> None:
     from merxen.annotation.mapmycells_engine import MmcBundle
     from merxen.annotation.panel import (
@@ -861,6 +872,7 @@ def _annotate(
         locate_bundle,
         map_bundles,
         published_layout,
+        refused_platforms,
         write_refused_manifest,
         write_view_manifest,
     )
@@ -940,7 +952,12 @@ def _annotate(
                     source="prepared",
                 )
             )
-    check_output_outside_inputs(output_dir, [sample.h5ad_path for sample in samples])
+    inputs = [sample.h5ad_path for sample in samples]
+    check_output_outside_inputs(output_dir, inputs, protected_roots=results_roots)
+    if work_dir is not None:
+        check_output_outside_inputs(
+            work_dir, inputs, protected_roots=results_roots, what="work dir"
+        )
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if panel_dir is None:
@@ -1002,13 +1019,16 @@ def _annotate(
         if reference_ids is not None and item.reference_id not in reference_ids:
             continue
         key = (item.reference_id, item.panel_hash)
-        run_key = item.reference_id + RUN_SUFFIXES.get(item.purpose, "")
-        if run_key in overrides or (
-            item.purpose == "annotation" and item.reference_id in overrides
-        ):
-            bundles[key] = MmcBundle.from_dir(
-                overrides.get(run_key) or overrides[item.reference_id]
-            )
+        # --bundle keys: a run id (reference id + _setc / _xpanel) or, for an
+        # annotation use, the bare reference id.
+        override_keys = [
+            item.reference_id + RUN_SUFFIXES[use.purpose]
+            for use in item.uses
+            if use.purpose in RUN_SUFFIXES
+        ]
+        override = next((overrides[k] for k in override_keys if k in overrides), None)
+        if override is not None:
+            bundles[key] = MmcBundle.from_dir(override)
         elif key in from_refs:
             bundles[key] = MmcBundle.from_bundle_ref(from_refs[key])
         elif require_bundle_refs:
@@ -1042,6 +1062,7 @@ def _annotate(
         work_dir=work_dir,
         reuse_from=reuse_from or output_dir,
         write_provisional=write_provisional,
+        refused_platforms=refused_platforms(required),
     )
     click.echo(
         f"annotate: {len(manifest.samples)} sample(s), "
