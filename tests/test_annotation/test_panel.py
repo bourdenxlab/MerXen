@@ -17,6 +17,7 @@ from scipy import sparse
 
 from merxen.annotation.config import AnnotationConfig, AnnotationPanelConfig
 from merxen.annotation.panel import (
+    LOOKUP_ROOT_KEY,
     PANEL_GENES_FILE,
     PANEL_GENES_INTERSECTION_FILE,
     PANEL_GENES_SETC_FILE,
@@ -55,6 +56,9 @@ from merxen.annotation.panel import (
     required_bundles,
     resolve_panel_mode,
     setc_panel,
+    subset_bundle_trigger,
+    subset_panel,
+    subset_trigger_for_config,
 )
 from merxen.cli import main as cli_main
 
@@ -435,6 +439,94 @@ def test_a_mouse_panel_under_species_human_refuses_every_panel(
     assert result.required.n_required == 0
     report = json.loads((tmp_path / "out" / PANEL_REPORT_FILE).read_text())
     assert report["gene_id_sources"]["gene_tables"]["mouse"]["n_symbols"] == 60
+
+
+# --------------------------------------------------------------------------
+# Subset bundles (plan §3.3 step 1, §8.1)
+
+
+def _lookup(ids: list[str]) -> dict[str, Any]:
+    """A two-parent lookup: 10 root markers, a parent with 6 markers."""
+    return {
+        "metadata": {"n_markers": 16},
+        "None": ids[:10],
+        "SUPC/S1": ids[10:16],
+        "SUPC/S2": [],
+    }
+
+
+def test_subset_bundle_trigger() -> None:
+    ids = shared_ids(200)
+    lookup = _lookup(ids)
+    everything = subset_bundle_trigger(ids, ids, lookup)
+    assert everything.action == "none" and not everything.needs_subset
+    # One non-marker gene missing (0.5% <= 1%): the restricted lookup suffices.
+    one = subset_bundle_trigger(ids, ids[:-1], lookup)
+    assert one.action == "none" and one.n_missing == 1
+    # One root marker missing (0.5%): a subset bundle in the parent's family.
+    root = subset_bundle_trigger(ids, ids[1:], lookup)
+    assert root.action == "subset"
+    assert root.reasons == ["root_marker_missing"]
+    assert root.missing_root_markers == [ids[0]]
+    assert root.subset_panel_hash == compute_panel_hash(ids[1:])
+    # A parent left with 4 markers (< 5).
+    weak = subset_bundle_trigger(ids, [g for g in ids if g not in ids[10:12]], lookup)
+    assert weak.reasons == ["weak_parent"]
+    assert weak.weak_parents == {"SUPC/S1": 4}
+    # 3% missing: subset; 6% missing: its own family (full PREP).
+    assert subset_bundle_trigger(ids, ids[:194], lookup).reasons == ["missing_frac"]
+    assert subset_bundle_trigger(ids, ids[:194], lookup).action == "subset"
+    own = subset_bundle_trigger(ids, ids[:188], lookup)
+    assert own.action == "own_family" and own.missing_frac == pytest.approx(0.06)
+    # Without a lookup only the missing share is tested.
+    assert subset_bundle_trigger(ids, ids[1:]).action == "none"
+    with pytest.raises(ValueError, match="own_family_missing_frac"):
+        subset_bundle_trigger(
+            ids, ids, own_family_missing_frac=0.01, subset_bundle_missing_frac=0.02
+        )
+    config = AnnotationPanelConfig(subset_bundle_missing_frac=0.001)
+    assert subset_trigger_for_config(ids, ids[:-1], lookup, config).action == "subset"
+
+
+def test_subset_panel_keeps_the_family_unless_it_is_its_own() -> None:
+    ids = shared_ids(200)
+    parent = AnnotationPanel(
+        name="xenium",
+        kind="platform",
+        species="human",
+        platforms=["XENIUM"],
+        sample_ids=["S_X"],
+        panel_mode="per_platform",
+        panel_hash=compute_panel_hash(ids),
+        n_genes=200,
+        ensembl_ids=ids,
+        symbols=shared_symbols(200),
+        symbols_by_platform={"XENIUM": shared_symbols(200)},
+        declared_panel_hashes={"xenium": compute_panel_hash(ids)},
+        panel_family=panel_family(ids, species="human", platforms=["XENIUM"]),
+    )
+    present = ids[1:]
+    trigger = subset_bundle_trigger(ids, present, _lookup(ids))
+
+    subset = subset_panel(parent, present, trigger)
+
+    assert subset.kind == "subset" and subset.name == "xenium_subset"
+    assert subset.panel_hash == trigger.subset_panel_hash
+    assert subset.parent_panel_hash == parent.panel_hash
+    assert subset.excluded_ids == [ids[0]]
+    assert subset.symbols == shared_symbols(200)[1:]
+    assert subset.symbols_by_platform["XENIUM"] == shared_symbols(200)[1:]
+    assert parent.panel_family is not None and subset.panel_family is not None
+    assert subset.panel_family.basis == "subset"
+    assert subset.panel_family.family_id == parent.panel_family.family_id
+    assert subset.panel_family.jaccard == pytest.approx(199 / 200)
+    own = subset_panel(parent, ids[:180], subset_bundle_trigger(ids, ids[:180]))
+    assert own.panel_family is not None and own.panel_family.basis == "own"
+    assert own.panel_family.family_id != parent.panel_family.family_id
+    # The file round-trips (MAP writes it for annotation-reference-prep).
+    with pytest.raises(ValueError, match="does not ask"):
+        subset_panel(parent, ids, subset_bundle_trigger(ids, ids))
+    assert LOOKUP_ROOT_KEY == "None"
 
 
 # --------------------------------------------------------------------------

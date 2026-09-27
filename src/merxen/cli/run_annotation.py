@@ -874,6 +874,7 @@ def _annotate(
         map_bundles,
         published_layout,
         refused_platforms,
+        store_subset_bundle_finder,
         write_refused_manifest,
         write_view_manifest,
     )
@@ -1064,6 +1065,11 @@ def _annotate(
         reuse_from=reuse_from or output_dir,
         write_provisional=write_provisional,
         refused_platforms=refused_platforms(required),
+        find_subset_bundle=(
+            store_subset_bundle_finder(reference_store)
+            if reference_store is not None
+            else None
+        ),
     )
     click.echo(
         f"annotate: {len(manifest.samples)} sample(s), "
