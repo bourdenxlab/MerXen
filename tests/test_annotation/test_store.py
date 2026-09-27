@@ -416,8 +416,8 @@ def test_map_and_resolve_settings_never_change_build_hash(
     assert compute_build_hash(payload_for(spec, panel, config=config)) == base
 
 
-def test_build_hash_covers_the_prefilter_of_large_panels_only(
-    spec: AnnotationReferenceSpec,
+def test_build_hash_covers_the_prefilter_of_large_panels_only_once_applied(
+    spec: AnnotationReferenceSpec, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     small, large = make_panel(60), make_panel(1500)
     config = AnnotationConfig(species="human")
@@ -428,6 +428,14 @@ def test_build_hash_covers_the_prefilter_of_large_panels_only(
             )
         }
     )
+    # No builder applies the prefilter yet: no payload records it.
+    assert not store_module.MARKER_PREFILTER_APPLIED
+    assert payload_for(spec, small, config=config)["large_panel_prefilter"] is None
+    assert payload_for(spec, large, config=config)["large_panel_prefilter"] is None
+    assert compute_build_hash(
+        payload_for(spec, large, config=config)
+    ) == compute_build_hash(payload_for(spec, large, config=no_filter))
+    monkeypatch.setattr(store_module, "MARKER_PREFILTER_APPLIED", True)
     assert payload_for(spec, small, config=config)["large_panel_prefilter"] is None
     assert payload_for(spec, large, config=config)["large_panel_prefilter"] == {
         "method": "per_parent_topk_union",

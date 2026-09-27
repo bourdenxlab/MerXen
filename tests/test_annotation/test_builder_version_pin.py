@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "671c42c25ce1bc644c46eb5f54779fffbe4267d31f23af4391368581ff939184",
+    3: "3e18f32d7826da714c3bbddd3499234c3bd74a7c1876af98b53e5d6b35f2d219",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -55,6 +55,10 @@ PIN_HISTORY = (
     "table, per-platform packaged floors); it enters build_hash through the "
     "resolvability builder params, so every self-map bundle gets a new hash "
     "without a builder bump",
+    "3: large-panel builds refused and the prefilter kept out of the payload "
+    "until a builder applies it (no payload of a buildable panel changes); "
+    "the held-out test-set sources checked before the marker steps (same "
+    "bundles, earlier failure)",
 )
 
 
