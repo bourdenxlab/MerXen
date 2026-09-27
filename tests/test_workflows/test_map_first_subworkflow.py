@@ -59,7 +59,7 @@ needs_nextflow = pytest.mark.skipif(NEXTFLOW is None, reason="nextflow is unavai
 MAP = "CLUSTERING_SQUIDPY_ANNOTATE_MAP"
 PREP = "ANNOTATE_REFERENCE_PREP"
 PANEL = "ANNOTATE_PANEL"
-SLOW_PREP_SECONDS = 15
+SLOW_PREP_SECONDS = 4
 
 
 def _hash(tag: str) -> str:
