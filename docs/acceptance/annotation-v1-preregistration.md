@@ -1,9 +1,9 @@
 # Annotation v1 pre-registration: acceptance thresholds and M3 baselines
 
-- **Effort:** robust cell-type annotation (`robust-celltype-annotation`), milestone M3 (plan §12 "M3", item 1 of the shadow programme).
+- **Effort:** robust cell-type annotation (`robust-celltype-annotation`), milestone M3 (plan §12 "M3", items 1–7 of the shadow programme; items 2–7 are in §11).
 - **Plan:** `docs/plans/robust-celltype-annotation-plan.md` rev3; the thresholds in §9 below are its §14, copied verbatim (plan file sha256 `14804ff24dcd46ab7d649775bb25aba1b3bac08d533ddd93d457a87f68895024`, last changed in `06a04a1`).
-- **Measured:** 2026-09-27, branch `feature/rca-m3-mmc-engine` (MAP engine `2f346b9`, `96f2834`; shadow metrics `b4a71fe`; baseline script `ed373e5`).
-- **Evidence root** (`$A`): `/srv/storage/MerXen/annotation_dev/evidence_20260926`. Every baseline below is in `$A/shadow/baselines/metrics/*.csv`; §10 lists the files.
+- **Measured:** 2026-09-27, branch `feature/rca-m3-mmc-engine` (MAP engine `2f346b9`, `96f2834`; shadow metrics `b4a71fe`; baseline script `ed373e5`; items 2–7: LL (vii) `89266ff`, shadow metrics `0afc4d6`, scripts `a6b3839`).
+- **Evidence root** (`$A`): `/srv/storage/MerXen/annotation_dev/evidence_20260926`. The item-1 baselines are in `$A/shadow/baselines/metrics/*.csv` (§10 lists the files); items 2–7 are in `$A/shadow/{e8,x1,heldout,flags,ll,glial_jsd}/` (§11), summarised in `$A/shadow/SHADOW_SUMMARY.txt`.
 
 ## 1. Rules
 
@@ -38,6 +38,8 @@ The rules have no resolvability (M3b) and no flags. M4's exit requires RESOLVE's
 | H7 | Confident broad coverage of table cells under the v1 shadow rules. Coverage of segmented objects is also reported. |
 | H8 | Gate on table cells: A = share with >= 30 counts; `broad_only` if A < 0.30; `failed` if confident broad coverage of table cells < 0.25; warning if coverage of segmented objects < 0.15 (`dataset_gate`). |
 | H10 | E1 marker referee (`exp/E1/09_marker_referee.py`; `marker_class_scores`, `marker_referee`). For each disputed cell, where both labels are among the 7 classes and they differ, the label whose canonical panel markers (E1's list) hold the larger fraction of the cell's counts wins. "New" is the v1 shadow confident broad label, so cells that are not confident have no new label. "Legacy" is the published `obs["broad_class"]`. |
+| H4 | Held-out-gene enrichment (§5.8; `scripts/acceptance/heldout_genes.py`). Markers: `heldout_markers_human.csv` in `rank` order (rank 1 = the plan's list, rank 2 = canonical alternates for markers the panel lacks), only if on the panel, never SST, GAD2 and P2RY12 not on MERSCOPE; 2–3 per broad class (Neurons pool the excitatory and inhibitory markers); a class with < 2 is skipped and counts as not passing. They are removed from the query and the lookup, and WHB alone is re-mapped with the production engine configuration. Per class and platform, over **all table cells** labelled with one of the 7 classes by the re-map's argmax: fold = held-out counts per count in the cells assigned the class ÷ the same in cells assigned another class (pooled); AUROC of the per-cell held-out fraction, assigned vs other. A class passes with fold ≥ 3 and AUROC ≥ 0.70. The WHB-only confident variant and the production labels are reported beside it and are not the metric. |
+| H16 | Realised rates per flag × class × platform over confident broad calls (`scripts/acceptance/shadow_flags.py`, prototype of §5.6). Contamination: counts on the assigned class's negative genes (bundle `negative_genes.parquet`) / total counts; null = beta-binomial MLE on the class's confident cells in its top depth quartile (≥ 30 cells, else no flag and the stratum is uninformative); flag at upper-tail p < 0.01 with ≥ 3 negative counts. Diffuse: distinct query genes > q95 of 200 multinomial draws from the class profile at the cell's query depth. Strata above 15% are marked uninformative (H16); §4.3's 30% for the diffuse flag is reported beside it. |
 | OD-B13 | On E2's 30k native cells per dataset (`$A/exp/E2/out/cells_native.csv.gz`, the only cells with likelihood-typer calls; all 30k shared with the table), the confident broad coverage is computed with the same production WHB and SEA-AD calls under five variants: (a) v1 without the below-60 rule; (b) v1; (c) v1 with the likelihood typer instead of SEA-AD as the below-60 vote; (d) E2's LL rule alone (`exp/E2/final_coverage.py`: LL must agree below 60 counts, neurons merged, fibroblasts pooled with vascular cells; no SEA-AD role); (e) no second method. The below-60 SEA-AD cost is (a) − (b). The trigger (> 0.08 on any dataset moves LL before M8) is scored on (c) − (b) and on (d) − (b). |
 | M3 exit | Production vs the E1 (iii) pilot (`$A/research/pilot/{whb_region,seaad_mr}`, P7513 and P1212 30k subsets). The comparison covers the WHB supercluster assignment on cells with production bp >= 0.8 (target >= 0.98) and the SEA-AD subclass assignment on all shared cells (target >= 0.945 − 0.02 = 0.925). P7113 and P5011 are compared with E2's runs of the pilot configuration (`$A/exp/E2/mmc/{WHBF,SEAAD}__<sid>_sub30k.json`), for information. |
 
@@ -202,7 +204,7 @@ H17 is scored on P7513 and P1212 reseg: the H1 thresholds + 0.02, H2 and H9. The
 1. **H2 fails at baseline on two scored datasets.** P5011_MERSCOPE proseg_hybrid is at 1.02% (held-out donor; the flip rule scores H2 on P5011), and P1212_MERSCOPE reseg is at 1.04% (H17 includes H2). For information, P7113_MERSCOPE reseg is at 1.13% and P5011 reseg at 2.44% / 1.35%. The calls are mostly Amygdala excitatory (region-implausible for frontal cortex in the vocab) and Miscellaneous.
    - Counting only implausible calls whose lineage probability passes 0.73 would give 0.57% and 0.93%. That changes the metric definition in the passing direction, so it is a loosening and needs the user's written approval (§1 rule 2).
    - Nothing is changed here. The gate PR needs a fix, for example in RESOLVE's status precedence (M4) or the vocab's plausibility of Amygdala excitatory, or a written, user-approved exception.
-2. **OD-B13 is not triggered.** On all eight datasets the below-60 SEA-AD rule removes 0.2–1.0 points of confident broad coverage (v1 without the rule minus v1). Using the likelihood typer as the below-60 vote instead would remove 1.4–7.4 points more (`ll_minus_sea` −0.014 to −0.074). E2's LL rule alone, with no SEA-AD role, keeps 2.6–8.5 points less than v1. The LL part of M10 therefore stays in v1.1, to be recorded in the M3 PR. The separate LL value test (M3 item 6, OD-B8) is not part of this stage.
+2. **OD-B13 is not triggered.** On all eight datasets the below-60 SEA-AD rule removes 0.2–1.0 points of confident broad coverage (v1 without the rule minus v1). Using the likelihood typer as the below-60 vote instead would remove 1.4–7.4 points more (`ll_minus_sea` −0.014 to −0.074). E2's LL rule alone, with no SEA-AD role, keeps 2.6–8.5 points less than v1. The LL part of M10 therefore stays in v1.1, to be recorded in the M3 PR. The LL (vii) value test (M3 item 6, OD-B8) confirms this on every table cell (§11.5).
 3. **H8 margin.** P1212_MERSCOPE's coverage of segmented objects (0.152) is 0.002 above the 0.15 warning threshold, and §5.4 expects no warning there. RESOLVE's coverage may move by up to ±0.05 (M4 exit), so P1212_MERSCOPE may acquire the warning flag. The warning never changes the gate level.
 4. **P5011 reseg MERSCOPE lacks 10.8% of the panel.** The published `var` of 11,845 cells is `min_cells`-filtered to 268 features. M3 maps the present genes with a restricted lookup; plan §3.3 / §8.1 route more than 5% missing genes to a panel family of its own with a full PREP (M3b). Its reseg baselines are provisional until M3b re-measures them. P1212 reseg MERSCOPE lacks 1 gene (0.34%), within the 1% that a restricted lookup covers.
 5. **Standalone runs on `min_cells`-filtered outputs.** `merxen annotate --from-clustered-h5ad` derives the panel from the published `var`. When a small sample lost a gene, the derived panel gets a new hash and the store has no bundle for it (P1212 and P5011 reseg failed this way). The declared panel has to be supplied through `merxen annotation-panel --panel-file` and `--panel-dir`. Adding `--panel-file` to `merxen annotate` is an open follow-up.
@@ -214,21 +216,21 @@ H17 is scored on P7513 and P1212 reseg: the H1 thresholds + 0.02, H2 and H9. The
    - **H10:** ≥ 0.85 (minimum baseline on the flip-rule datasets 0.961).
 
    Resolvability (M3b) and RESOLVE (M4) can still lower coverage, so tightening H7 before M4 risks a failure that belongs to M3b.
+7. **H4 fails at baseline on P1212 and P7113_MERSCOPE** (§11.3): 2/7 and 5/7 classes on P1212 MERSCOPE / Xenium, 5/7 on P7113 MERSCOPE, against ≥ 6 of 7. Fold ≥ 3 holds everywhere; the AUROC fails, for OPC on every sample (the argmax OPC class holds the COP calls). Scoring H4 on confident calls would pass all but P1212_MERSCOPE (4/7), but it changes the metric in the passing direction, a loosening that needs the user's written approval (§1 rule 2). The gate PR needs a fix or a written, user-approved exception.
 
 ## 8. Not measured in this stage
 
 | Criterion | Where it is measured |
 |---|---|
-| H4 held-out-gene enrichment | M3 shadow item 4 (`scripts/acceptance/heldout_genes.py`) |
 | H6 simulation precision of the v1 thresholds | the archived E2 HO simulation, scored at M8; H18 recomputes it in production |
 | H9 canonical-marker plausibility (also part of H17) | M8 acceptance script |
 | H12 cortical depth, H13 contracts, H15 reproducibility | M5 / M7 / M8 |
-| H16 realised flag rates | M3 shadow item 5, M4 |
+| H16 realised flag rates (production flags) | M4 (the M3 prototype is §11.4) |
 | H18 resolvability regression | M3b (production PREP) |
 | MO1–MO11 (mouse) | M6, M6b, M9 |
 | NP1–NP9 (gate P) | M13 |
 
-M3 shadow items 2–7 (E8 segmentation comparison, X1 rescaling, held-out genes, flag rates, the LL value test and the glial JSD difference) are later stages of M3.
+M3 shadow items 2–7 (E8 segmentation comparison, X1 rescaling, held-out genes, flag rates, the LL value test and the glial JSD difference) are reported in §11.
 
 ## 9. Registered thresholds (plan rev3 §14, verbatim)
 
@@ -321,3 +323,91 @@ All paths are under `$A/shadow/baselines/`.
 | `metrics/runtime.csv` | MAP wall time, processor-seconds per 1k cells, peak RSS, missing panel genes per run |
 | `runs/<pair>/<seg>/` | `merxen annotate` outputs: `map_manifest.json`, `panel/`, `<plat>/<sid>_mmc_<run>.parquet`, `<plat>/<sid>_ct_provisional.parquet`, `logs/`; for P1212 / P5011 reseg also `panel_varderived/` (the refused var-derived panel) and `inputs_view/` |
 | `logs/`, `PROGRESS.txt` | Run logs with `/usr/bin/time` wall and max RSS; `metrics.log` |
+
+## 11. Shadow programme items 2–7 (M3 stage C2)
+
+Measured 2026-09-27 with the same MAP configuration as §2 (no engine change). Reports: `$A/shadow/<item>/REPORT.txt`; summary: `$A/shadow/SHADOW_SUMMARY.txt`. Code: `merxen.annotation.likelihood` (LL (vii)), `merxen.annotation.shadow` (additions below), `scripts/acceptance/{shadow_e8,shadow_x1,heldout_genes,shadow_flags,shadow_ll,shadow_glial_jsd}.py`. P7113, P5011 and reseg stay held out: they are reported, and nothing below was selected on them.
+
+### 11.1 E8 segmentation comparison (OD-B6, OD-B7)
+
+P1212 on all four segmentations (both platforms) and ag7 on all four (MERSCOPE, WMB ag7 bundle `d2e3f496`). Confident cells per mm² use the median tissue area of the section's segmentations (100 µm bins with ≥ 3 table cells). Foreign fraction = counts on the assigned class's negative genes / total counts.
+
+| Sample | Metric | original_seg | proseg_mask | proseg_hybrid | reseg |
+|---|---|---|---|---|---|
+| P1212_MERSCOPE | Confident broad per mm² (ratio vs proseg_hybrid) | 654 (1.06) | 610 (0.99) | 616 (1.00) | 352 (0.57) |
+| P1212_XENIUM | Confident broad per mm² (ratio) | 1,049 (0.95) | 1,092 (0.99) | 1,100 (1.00) | 908 (0.83) |
+| P1212 | Soft broad JSD, MERSCOPE vs Xenium [95% CI] | 0.153 [0.144, 0.174] | 0.130 [0.118, 0.152] | 0.133 [0.122, 0.154] | 0.125 [0.105, 0.155] |
+| P1212_MERSCOPE / _XENIUM | Foreign (negative-gene) fraction of confident cells | 0.022 / 0.023 | 0.019 / 0.022 | 0.019 / 0.021 | 0.005 / 0.012 |
+| ag7 | Confident class / subclass per mm² (ratio) | 2,058 / 1,655 (1.11 / 1.05) | 1,854 / 1,567 (1.00 / 0.99) | 1,859 / 1,576 (1.00 / 1.00) | 2,071 / 1,776 (1.11 / 1.13) |
+| ag7 | Foreign fraction; confident microglia | 0.0137; 123 | 0.0132; 229 | 0.0127; 275 | 0.0099; 1,096 |
+
+- **OD-B6: the switch criterion is not met.** No segmentation has ≥ 25% more confident broad cells per mm² on P1212_MERSCOPE (best: original_seg, +6%), and all four leave it `broad_only` (A 0.21–0.26). The adopted policy (proseg_hybrid, broad level only) stands.
+- **OD-B7, recommendation for the user:** per dataset. Human: keep proseg_hybrid (proseg_mask is equivalent; reseg has purer cells and a lower platform JSD but 17–43% fewer confident cells per mm²; original_seg has the highest platform JSD). Mouse ag7: reseg (most confident cells, lowest foreign fraction, four times the confident microglia). VZG2 is re-checked after the M0a re-run.
+
+### 11.2 X1 platform rescaling (OD-B9)
+
+Per-gene factors against the reference pseudobulk of each dataset's cells with WHB bp ≥ 0.8, median-centred and capped at ±2 log2, then a WHB set-a re-map. The pass rule was fixed in `scripts/acceptance/shadow_x1.py` before the runs: on both development pairs the soft JSD must fall below set a's with the paired 95% CI of the difference below 0, the referee must side with X1 in more X1-vs-set-a disputes than with set a, and H4 must pass in no fewer classes.
+
+| Pair | Soft JSD set a / set c / X1 | X1 − set a [paired 95% CI] | Referee X1-vs-set-a disputes, X1 / set a wins (MERSCOPE; Xenium) |
+|---|---|---|---|
+| P7513 | 0.129 / 0.121 / 0.128 | −0.001 [−0.002, −0.001] | 0.37 / 0.40; 0.24 / 0.63 |
+| P1212 | 0.133 / 0.109 / 0.126 | −0.007 [−0.008, −0.005] | 0.25 / 0.40; 0.21 / 0.58 |
+| P7113 (held out) | 0.126 / 0.110 / 0.126 | 0.000 [−0.000, 0.001] | 0.33 / 0.39; 0.27 / 0.54 |
+| P5011 (held out) | 0.227 / 0.161 / 0.217 | −0.010 [−0.010, −0.009] | 0.37 / 0.33; 0.28 / 0.53 |
+
+**Decision: X1 fails** (the referee condition, on all four development samples); H4 is unchanged (§11.3). `annotation_xplat_sensitivity` stays `geneset_c`; X1 is not adopted in v1 (plan §17 keeps per-platform rescaling as a v2 candidate). The factors have a spread of 2.4–3.0 log2 and 36–50% of genes hit the cap, because they mostly measure reference (snRNA-seq) vs in-situ efficiency; their Xenium-minus-MERSCOPE difference correlates 0.80–0.92 with the measured cross-platform ratios (`research/xplat`).
+
+### 11.3 H4 held-out-gene baseline
+
+Metric as §2. Markers on set a: Neurons SLC17A7, GAD1 and SLC17A6 (MERSCOPE) or GAD2 (Xenium); Astrocytes AQP4, GJA1; Oligodendrocytes MOBP, MOG, OPALIN; OPC PDGFRA, VCAN; Microglia CX3CR1, GPR34 (+ P2RY12 on Xenium); Vascular FLT1, PECAM1, ABCC9; Fibroblasts DCN, FBLN1, COL12A1 (`$A/shadow/heldout/heldout_markers.csv`). The asset's rank-2 alternates were added in M3 because set a lacks SATB2, PLP1, CSF1R, CLDN5 and LUM.
+
+| Sample | Classes passing (H4 needs ≥ 6 of 7) | Failing classes | WHB-only confident variant (not the metric) |
+|---|---|---|---|
+| P7513_MERSCOPE | 6 | OPC | 7 |
+| P7513_XENIUM | 6 | OPC | 7 |
+| P1212_MERSCOPE | 2 | Neurons, Oligodendrocytes, OPC, Microglia, Vascular | 4 |
+| P1212_XENIUM | 5 | OPC, Microglia | 7 |
+| P7113_MERSCOPE | 5 | OPC, Microglia | 6 |
+| P7113_XENIUM | 6 | OPC | 7 |
+| P5011_MERSCOPE (not scored by H4) | 0 | all | 4 |
+| P5011_XENIUM (not scored by H4) | 5 | OPC, Microglia | 7 |
+
+Fold is ≥ 3 in every class and sample; the AUROC decides. OPC's AUROC is 0.54–0.67 on every sample, because the argmax OPC class holds the COP calls. H4 fails at baseline on P1212 (both platforms) and P7113_MERSCOPE (§7 item 7). Set c scores one class fewer (AQP4 is a set-c exclusion) and passes one class fewer on six of the eight samples.
+
+### 11.4 H16 prototype: realised flag rates
+
+Confident cells, proseg_hybrid (`$A/shadow/flags/flag_rates.csv`). **Contamination:** 0.0–3.9% in every human class × platform stratum, 0.7–1.8% on ag7. Every stratum is informative except P5011_MERSCOPE fibroblasts, which have too few cells for a null. **Diffuse:** 0–44%. Ten of the 56 human strata exceed 15% and five exceed 30%: P7513_XENIUM oligodendrocytes 35% and microglia 44%; P7113_XENIUM oligodendrocytes 33%, microglia 35% and fibroblasts 30%. On ag7 the oligodendrocyte lineage is at 42%. These strata are marked uninformative. reseg is at ≤ 3.5% (contamination) and ≤ 4.4% (diffuse). Production flags are M4. H16's 15% and §4.3's 30% for the diffuse flag should be reconciled there.
+
+### 11.5 LL value test (OD-B8) and the OD-B13 trigger
+
+LL (vii) (E1 `14_ll_contam.py`, ported onto the WHB set-a bundle's 122 cluster profiles) typed every table cell of the 16 samples, once with factors capped at ±2 log2 (M10) and once uncapped (E1).
+
+| Sample (proseg_hybrid, capped) | Coverage v1 → v1.1 (SEA-AD or LL below 60) | H10 v1 → v1.1 | Marker plausibility v1 → v1.1 | E2 LL rule − v1 | LL as the below-60 vote − v1 |
+|---|---|---|---|---|---|
+| P7513_MERSCOPE | 0.704 → 0.707 | 0.988 → 0.986 | 0.935 → 0.935 | −0.031 | −0.020 |
+| P7513_XENIUM | 0.597 → 0.598 | 0.980 → 0.979 | 0.907 → 0.907 | −0.047 | −0.039 |
+| P1212_MERSCOPE | 0.438 → 0.444 | 0.961 → 0.958 | 0.939 → 0.937 | −0.055 | −0.043 |
+| P1212_XENIUM | 0.511 → 0.512 | 0.977 → 0.976 | 0.925 → 0.924 | −0.087 | −0.079 |
+| P7113_MERSCOPE | 0.756 → 0.758 | 0.991 → 0.990 | 0.954 → 0.954 | −0.037 | −0.023 |
+| P7113_XENIUM | 0.648 → 0.650 | 0.897 → 0.894 | 0.936 → 0.935 | −0.063 | −0.052 |
+| P5011_MERSCOPE | 0.460 → 0.466 | 0.939 → 0.936 | 0.939 → 0.937 | −0.057 | −0.035 |
+| P5011_XENIUM | 0.557 → 0.559 | 0.925 → 0.923 | 0.924 → 0.924 | −0.048 | −0.035 |
+
+- **OD-B8: not met.** In v1.1, LL only adds confident cells below 60 counts and never renames one. It raises coverage by at most 0.6 points (the rule needs > 5). It lowers the referee outcomes it can move (H10 and marker plausibility) by 0.04–0.3 points (the rule needs +2). The uncapped factors give the same result. By the pre-registered rule, LL does not join v1.1. `likelihood.py` remains for M10 if the rule is revisited.
+- **OD-B13: not triggered.** The below-60 SEA-AD rule removes 0.2–0.9 points. The LL rules keep 0.6–8.7 points *less* coverage than the SEA-AD rule on every dataset. The LL part of M10 stays after M8.
+- For information: in WHB-vs-LL disputes the referee is split, with WHB winning 0.36–0.60 of them and LL 0.22–0.45. Using LL as a tie-breaker for WHB-vs-SEA-AD disputes would side with the markers 6–14 points more often than WHB alone. That is not a v1.1 behaviour (WHB names every class, OD-B2), and it is circular, because LL and the referee read the same marker counts.
+
+### 11.6 WHB vs SEA-AD glial JSD (information, OD-B2 decided)
+
+Glial (astrocytes, oligodendrocytes, OPC, microglia) soft JSD, MERSCOPE vs Xenium, WHB − SEA-AD with a paired block-bootstrap CI: P7513 −0.027 [−0.031, −0.024], P1212 −0.036 [−0.049, −0.011], P7113 −0.020 [−0.022, −0.018], P5011 −0.052 [−0.055, −0.048]. WHB's glial composition agrees better across platforms on every pair. At 7 classes WHB is better on P7513 and P1212 and slightly worse on P5011 (+0.011). No decision is asked for.
+
+### 11.7 Files
+
+| Directory under `$A/shadow/` | Content |
+|---|---|
+| `e8/` | `runs/` (P1212 original_seg and proseg_mask, ag7 original_seg, proseg_mask and reseg MAP outputs), `metrics/e8_{human,human_jsd,mouse}.csv`, `REPORT.txt` |
+| `x1/` | `x1_{factors,jsd,jsd_differences,referee,samples,compositions}.csv`, `runs/` (rescaled WHB re-maps), `REPORT.txt` |
+| `heldout/` | `heldout_{markers,enrichment,h4}.csv`, `runs/` (held-out WHB re-maps for set a, set c and X1), `REPORT.txt` |
+| `flags/` | `flag_{rates,nulls,scores,depth}.csv`, `REPORT.txt` |
+| `ll/` | `ll_{sample_metrics,referee,factors,decision}.csv`, `calls/` (LL (vii) calls per sample and factor variant), `REPORT.txt` |
+| `glial_jsd/` | `glial_jsd.csv`, `glial_compositions.csv`, `REPORT.txt` |
