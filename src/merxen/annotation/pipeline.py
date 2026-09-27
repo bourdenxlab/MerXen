@@ -10,8 +10,10 @@ command runs the same code on published ``*_clustered.h5ad`` files:
    (``annotation.panel.ControlRegistry``, identical to
    ``remove_control_features`` on the current panels); take ``total_counts``
    and ``n_genes`` from ``merxen.clustering.cellset.select_table_cells``;
-   resolve gene IDs as ``ANNOTATE_PANEL`` does (native ID, pair lookup,
-   configured fallback table).
+   resolve gene IDs as ``ANNOTATE_PANEL`` does (``annotation.gene_ids``:
+   native ID, pair lookup, the local gene table, aliases, overrides). A
+   published clustered H5AD declares the features of its control-filter
+   record, so ``min_cells`` filtering never changes its declared panel.
 2. **Map table cells only** (``total_counts >= min_counts``), restricted to
    each bundle's panel genes present in the dataset; a missing marker gene
    restricts the lookup (``validate_lookup`` with auto-collapse) and is
@@ -60,6 +62,7 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
 
 from merxen.annotation.config import AnnotationConfig, AnnotationReferenceSpec
+from merxen.annotation.gene_ids import ResolutionRules, gene_id_sources
 from merxen.annotation.mapmycells_engine import (
     EXTENDED_JSON_GZ_SUFFIX,
     TIDY_SCHEMA_VERSION,
@@ -80,18 +83,16 @@ from merxen.annotation.mapmycells_engine import (
 )
 from merxen.annotation.panel import (
     REQUIRED_BUNDLES_FILE,
-    SPECIES_ID_PATTERNS,
     AnnotationPanel,
     ControlRegistry,
     DeclaredPanel,
-    PanelSource,
     RawPanel,
     RequiredBundles,
     declared_panel,
+    feature_columns,
     load_annotation_panel,
-    load_fallback_table,
     pair_symbol_lookup,
-    raw_panel_from_var,
+    raw_panel_from_h5ad,
 )
 from merxen.annotation.schema import CellStatus, Columns, meets_threshold
 from merxen.annotation.store import (
@@ -514,9 +515,7 @@ def read_h5ad_counts(
 
 
 def _raw_panel(var: pd.DataFrame, path: Path) -> RawPanel:
-    return raw_panel_from_var(
-        var, source=PanelSource(kind="prepared_h5ad_var", path=str(path))
-    )
+    return raw_panel_from_h5ad(path, var=var)
 
 
 def load_samples(
@@ -528,8 +527,8 @@ def load_samples(
     """Load the samples of a pair x segmentation for mapping (step 1).
 
     Controls are removed with the shared registry and gene IDs resolved as in
-    ``ANNOTATE_PANEL`` (native ID, the pair's symbol lookup, the configured
-    fallback table), so the query genes are the panel's IDs.
+    ``ANNOTATE_PANEL`` (``annotation.gene_ids``), so the query genes are the
+    panel's IDs and each feature gets its declared decision.
 
     Args:
         samples: The samples.
@@ -543,7 +542,6 @@ def load_samples(
 
     registry = ControlRegistry.from_config(config.panel)
     species: Species = config.species
-    pattern = SPECIES_ID_PATTERNS[species]
     reads = []
     for sample in samples:
         obs_names, var, counts, instance_ids = read_h5ad_counts(
@@ -552,43 +550,31 @@ def load_samples(
         reads.append((sample, obs_names, var, counts, instance_ids))
     raws = [_raw_panel(var, sample.h5ad_path) for sample, _, var, _, _ in reads]
     lookup = pair_symbol_lookup(raws, species)
-    fallback = load_fallback_table(config.panel.gene_id_fallback_csv, species)
+    sources = gene_id_sources(config.panel, species, pair_lookup=lookup)
+    rules = ResolutionRules.from_config(config.panel)
     loaded: list[LoadedSample] = []
     for (sample, obs_names, var, counts, instance_ids), raw in zip(
         reads, raws, strict=True
     ):
-        if len(raw.features) != len(var):
-            raise MapError(f"{sample.h5ad_path}: var has unnamed features")
         declared = declared_panel(
             raw,
             species=species,
             platform=sample.platform,
             sample_id=sample.sample_id,
             registry=registry,
-            pair_lookup=lookup,
-            fallback=fallback,
+            sources=sources,
+            rules=rules,
         )
-        keep: list[int] = []
-        names: list[str] = []
-        ids: list[str] = []
-        for position, row in enumerate(raw.features.itertuples(index=False)):
-            reason = registry.control_reason(
-                str(row.name),
-                platform=sample.platform,
-                feature_type=str(row.feature_type),
-                has_native_id=bool(row.native_id),
+        try:
+            is_gene, column_ids = feature_columns(
+                var, declared=declared, platform=sample.platform, registry=registry
             )
-            if reason is not None:
-                continue
-            native = str(row.native_id)
-            gene_id = (
-                native
-                if native and pattern.fullmatch(native)
-                else declared.symbol_to_id.get(str(row.symbol), "")
-            )
-            keep.append(position)
-            names.append(str(row.name))
-            ids.append(gene_id)
+        except ValueError as error:
+            raise MapError(f"{sample.h5ad_path}: {error}") from error
+        keep = [int(position) for position in np.flatnonzero(is_gene)]
+        var_names = [str(name) for name in var.index]
+        names = [var_names[position] for position in keep]
+        ids = [column_ids[position] for position in keep]
         gene_counts = counts[:, keep].tocsr()
         selection = select_table_cells(
             ad.AnnData(X=gene_counts, obs=pd.DataFrame(index=obs_names)),

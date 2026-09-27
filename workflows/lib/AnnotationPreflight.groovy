@@ -26,6 +26,8 @@ class AnnotationPreflight {
             "annotation_gene_alias_table",
             "annotation_gene_id_overrides_csv",
             "annotation_panel_genes_path",
+            "annotation_human_gene_table",
+            "annotation_mouse_gene_table",
         ],
         human: [
             "annotation_whb_region_precompute_source",

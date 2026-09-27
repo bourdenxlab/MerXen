@@ -435,7 +435,12 @@ class AnnotationPanelConfig(_AnnotationModel):
         broad_only_min_class_share: Share of broad classes (with enough test
             cells) whose leaf level must be resolvable, else ``broad_only``.
         gene_id_fallback_csv: Local reference ``gene.csv`` for symbol
-            fallback (M0e).
+            fallback (M0e); the run species' table when ``gene_tables`` has
+            none.
+        gene_tables: Local gene tables by species (WHB / WMB ``gene.csv`` or
+            a reference ``.h5ad`` ``var``; no network): the run species'
+            table is the symbol fallback and release-drift reference, and
+            both species' tables feed the exact-case species test (§8.4).
         gene_alias_table: Optional local alias table (no network).
         gene_id_overrides_csv: Curated symbol-to-ID overrides.
         control_feature_types_keep: Feature types kept as genes.
@@ -473,6 +478,7 @@ class AnnotationPanelConfig(_AnnotationModel):
     trust_max_depth: int = Field(default=250, ge=1)
     broad_only_min_class_share: float = 0.5
     gene_id_fallback_csv: Path | None = None
+    gene_tables: dict[Species, Path] = Field(default_factory=dict)
     gene_alias_table: Path | None = None
     gene_id_overrides_csv: Path | None = None
     control_feature_types_keep: list[str] = Field(
