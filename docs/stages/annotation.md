@@ -6,8 +6,10 @@ Reference-based cell-type annotation replaces the legacy marker scoring of
 (`docs/plans/robust-celltype-annotation-plan.md`); legacy runs are
 unchanged. This page covers what exists so far: declared panels
 (`merxen annotation-panel`), the reference bundles that
-`merxen annotation-reference-prep` builds into the reference store, and the
-two pipeline processes that run them (`--annotation_prepare_only`).
+`merxen annotation-reference-prep` builds into the reference store, the
+two pipeline processes that run them (`--annotation_prepare_only`), and the
+MAP step (`merxen annotate` and its pipeline process
+`CLUSTERING_SQUIDPY_ANNOTATE_MAP`), which maps samples onto the bundles.
 
 ## Reference bundles
 
@@ -122,14 +124,16 @@ and hashes that copy, so moving the evidence archive never changes
 
 ## Pipeline processes
 
-Two CPU processes in `workflows/modules/annotation.nf`, wired by
-`workflows/subworkflows/annotation_references.nf`; neither takes the GPU
-lock, and a default (legacy) run instantiates neither.
+Three CPU processes in `workflows/modules/annotation.nf`, wired by
+`workflows/subworkflows/annotation_references.nf` (PANEL, PREP) and
+`workflows/subworkflows/clustering_map_first.nf` (MAP); none takes the GPU
+lock, and a default (legacy) run instantiates none of them.
 
 | Process | Runs | Resources | What it does |
 |---|---|---|---|
 | `ANNOTATE_PANEL` | once per pair × segmentation | 1 CPU, 4 GB | `merxen annotation-panel` on the gene list (`--annotation_panel_genes_path`) or on the pair's prepared H5ADs; writes the declared panels and `required_bundles.json`. |
 | `ANNOTATE_REFERENCE_PREP` | once per unique (species, reference, `panel_hash`) across the run | 8 CPUs, 64 GB, 8 h; above 1,000 panel genes `annotation_prep_large_memory` and 24 h; one at a time on dwight | `merxen annotation-reference-prep`: gets the bundle from the store or builds it, and writes `bundle_ref.json`. Seconds when the bundle exists. |
+| `CLUSTERING_SQUIDPY_ANNOTATE_MAP` | once per pair × segmentation, after its last required bundle (`map_first` only, from M5) | 6 CPUs, 24 GB (48 GB above 1,000 panel genes); `annotation_max_forks` (2) at a time on dwight | `merxen annotate` on the pair's prepared H5ADs with exactly the bundle refs PREP resolved: the MapMyCells runs, the tidy parquets, the provisional labels and `map_manifest.json`, published to `<outdir>/<pair>/<seg>/annotation_map/annotation_map_out/`. |
 
 PREP has no `storeDir`: the store's own lock, temporary build directory and
 atomic rename keep concurrent launches safe, and its `build_hash` (sources,
@@ -139,14 +143,34 @@ code or the content of its source files, so a cached task could hand MAP a
 stale bundle after a builder fix. A re-run takes seconds when the bundle
 exists, and `bundle_ref.json` holds only the bundle's identity (whether it
 was reused is logged), so an unchanged bundle gives byte-identical output
-and MAP's cache holds. Which pair's copy of a shared panel file reaches PREP
-first does not matter: the bundle depends only on the panel's IDs.
+and MAP's cache holds (MAP caches on file content, `cache "deep"`). Which
+pair's copy of a shared panel file reaches PREP first does not matter: the
+bundle depends only on the panel's IDs.
 Each pair × segmentation is then released with exactly the bundle refs its
 `required_bundles.json` lists (a same-panel human pair on `proseg_hybrid`
 needs three: WHB and SEA-AD on set a, WHB on set c; a `per_platform` pair
 five; a mouse section two), as soon as its last bundle is ready, so pairs
 with different panels never wait for each other. A pair whose panels are
 refused is released with no bundle; one whose PREP failed is dropped.
+
+MAP then runs with 6 MapMyCells worker processes (`--n-processors`
+`task.cpus`, one BLAS / numba thread each, `CUDA_VISIBLE_DEVICES` empty, this
+checkout's `src/` first on `PYTHONPATH`) after checking that the installed
+`cell_type_mapper` is `annotation_ctm_version`. Its table cells and
+`min_counts` come from the clustering config, so they are the clustering
+run's. A refused panel is not a task failure: MAP writes a `map_manifest.json`
+with `panel_status: refused` and its reasons, maps nothing, and RESOLVE (M4)
+will write statuses only. With `annotation_reuse_published` a run whose
+query fingerprint, `build_hash`, engine parameters, ctm version, tidy schema
+version and (restricted) lookup equal the published manifest's is copied
+from `annotation_map/annotation_map_out/` instead of re-mapped, because
+dwight prunes work directories; with `annotation_keep_extended_json` the
+published run must have kept its JSON too. A published manifest that cannot
+be read (the `-stub-run` manifest, an older or newer layout) only disables
+reuse, with a warning. Until M5 wires
+`map_first` (hook H5, `CLUSTERING_MAP_FIRST`), the preflight refuses
+`map_first` runs, so MAP runs only in the workflow tests; the shadow
+evaluation uses the standalone command.
 
 ### Pre-building references (`--annotation_prepare_only`)
 
@@ -174,6 +198,105 @@ bundles a same-panel pair on `proseg_hybrid` needs. Building from a pair's
 prepared H5ADs (`per_platform` panels, label-free set c) arrives with the
 `map_first` wiring (M5). The params are listed in
 [Configuration](../configuration.md#reference-based-annotation-in-development).
+
+## Mapping (`merxen annotate`)
+
+The MAP step (`merxen.annotation.pipeline.annotate_map`; plan §3.3) maps
+each sample of a pair × segmentation onto every use of a bundle its
+`required_bundles.json` lists with a primary or secondary role: WHB and
+SEA-AD on the sample's annotation panel, WHB on set c for the segmentations
+in `annotation_xplat_sensitivity_segmentations` (`proseg_hybrid` by
+default), and WHB on the intersection panel for `per_platform` pairs. A
+bundle is listed once per (reference, panel hash) with every purpose in
+`uses`; `map_bundles` makes one run per use, on that use's panel file (whose
+platforms decide which samples it maps) and with that purpose's run id. When
+two uses share a gene set (a small MERSCOPE panel inside a Xenium panel
+makes the intersection equal the MERSCOPE panel; set c can equal set a) the
+query is mapped once and recorded under both run ids (`same_mapping_as`). A
+sample that no run applies to fails the task, unless its own platform panel
+was refused (`panel_status: refused` for that sample). The standalone
+command runs it on published clustered H5ADs (options in
+[CLI](../cli.md#merxen-annotate)); `CLUSTERING_SQUIDPY_ANNOTATE_MAP` runs it
+on the prepared H5ADs of a `map_first` run (see
+[Pipeline processes](#pipeline-processes)).
+
+Per sample:
+
+1. Load the counts (prepared `X`, or the published `layers["counts"]`),
+   remove control features with the shared registry (the same features
+   legacy `remove_control_features` removes on the current panels) and take
+   `total_counts` / `n_genes` from `select_table_cells`. Gene IDs resolve as
+   in `annotation-panel` (native ID, the pair's symbols, the fallback table).
+2. Map the table cells (`total_counts >= min_counts`; a published clustered
+   H5AD holds only table cells) on the panel's genes present in the dataset.
+   Missing panel genes are recorded; a missing marker gene restricts the
+   bundle's lookup (parents left without markers are auto-collapsed).
+3. Run MapMyCells (seed 0, bootstrap factor 0.5, 100 iterations, raw
+   normalisation, one BLAS thread per worker, `--drop_level
+   CCN20230722_SUPT` for WMB) and parse the extended JSON at once into the
+   tidy parquet; the JSON is deleted unless `annotation_keep_extended_json`.
+   Mouse maps unpruned for now: region inference and the pruned re-map are
+   M6.
+4. Write `map_manifest.json`: per sample the input identity, table-cell
+   counts, controls removed and, per run, the query fingerprint (sha256 of
+   the cell ids, their total counts and the query gene IDs), the bundle's
+   `build_hash` and lookup digest, the engine parameters, the ctm version and
+   commit, the settings the extended JSON recorded, wall time and peak RSS.
+
+| File | Content |
+|---|---|
+| `<platform>/<sid>_mmc_<run_id>.parquet` | One row per mapped cell × taxonomy level; `run_id` is the reference id, `+_setc` for set c, `+_xpanel` for the intersection run of a `per_platform` pair. Run metadata in the parquet schema (`merxen_mmc`). |
+| `<platform>/<sid>_ct_provisional.parquet` | One row per object: identity, `total_counts`, `n_genes`, `in_table`, **provisional** `ct_<level>_{name,raw,corr,runner_up,margin,status}` and `ct_final_*`, and the raw engine columns `mmc_<reference>_<level>_{label,name,bp,agg,corr}`. |
+| `map_manifest.json` | The run record above, with `panel_status` (`ok`, or `refused` with `panel_reasons` and no runs); `annotation-store prune` counts its `build_hash` values as references. |
+
+The provisional labels apply the raw thresholds only (WHB lineage / broad /
+NT 0.73 on the bootstrap probability summed over the assigned node's class,
+supercluster 0.69, SEA-AD subclass 0.55 below `second_vote_below_counts`
+(60) and 0.45 from it on the subclass `aggregate_probability`, E2's
+definition; WMB class 0.90, subclass 0.80; probabilities are stored as
+float32, so a threshold test allows 1e-6 below the threshold), the hard floor (`min_counts`), sinks and
+frontal-cortex plausibility from the bundle vocabulary and the parent
+chain. They have no floors, resolvability, dataset gate, second vote or COP
+rule and are for inspection only; the RESOLVE step (M4) replaces them and
+writes `<sid>_celltype_labels.parquet`.
+
+A published clustered H5AD of a small sample can have a `min_cells`-filtered
+`var` (P1212 and P5011 reseg MERSCOPE hold 299 and 268 of 300 features).
+A panel derived from that `var` gets a new `panel_hash` without a bundle.
+Build the declared panel with `merxen annotation-panel --panel-file
+<PLATFORM>=<declared panel file>` (for example the same section's unfiltered
+proseg_hybrid H5AD) and pass it with `--panel-dir`. MAP then maps the genes
+present and records the missing ones.
+
+## Shadow baselines (M3)
+
+`scripts/acceptance/shadow_baselines.py` scores `merxen annotate` outputs of
+published human datasets with `merxen.annotation.shadow` (plan §12 M3 item
+1). It computes soft / argmax / confident broad JSD MERSCOPE vs Xenium with
+spatial block-bootstrap CIs (500 µm tiles, 200 replicates; whole section and
+shared tissue mask), a shadow evaluation of the v1 human rules (§5.2 lineage,
+broad with the COP rule, supercluster; packaged floors; the dataset gate;
+second-vote variants, including E2's likelihood-typer rule), WHB–SEA-AD
+agreement, implausible and COP shares, the E1 marker referee and the M3 exit
+check against the pilot. The measured baselines and the pre-registered
+thresholds are in
+[docs/acceptance/annotation-v1-preregistration.md](../acceptance/annotation-v1-preregistration.md).
+Baselines may only tighten a threshold.
+
+The other shadow items (plan §12 M3 items 2–7) have their own scripts, each
+reading the `merxen annotate` outputs and the published inputs read-only:
+
+| Script | Item | What it does |
+|---|---|---|
+| `scripts/acceptance/shadow_e8.py` | 2, E8 | Confident cells per mm², foreign-marker fraction and platform JSD for the four segmentations of a human pair and a mouse section (OD-B6, OD-B7) |
+| `scripts/acceptance/shadow_x1.py` | 3, X1 | Reference-pseudobulk per-gene factors (±2 log2 cap), a rescaled WHB re-map, JSD with paired CIs and the referee vs set a and set c |
+| `scripts/acceptance/heldout_genes.py` | 4, H4 | Held-out markers removed from query and lookup, a WHB-only re-map, fold enrichment and AUROC per class and platform (variants set a, set c, X1) |
+| `scripts/acceptance/shadow_flags.py` | 5, H16 | Prototype contamination (dataset-empirical beta-binomial null) and diffuse-profile (multinomial q95) flags; realised rates per class × platform |
+| `scripts/acceptance/shadow_ll.py` | 6, OD-B8 / OD-B13 | LL (vii) on every table cell; coverage and referee outcomes with and without the LL vote |
+| `scripts/acceptance/shadow_glial_jsd.py` | 7 | WHB vs SEA-AD glial JSD with a paired block-bootstrap CI |
+
+The results and the decisions they feed (X1, OD-B6 / OD-B7, OD-B8, OD-B13, the
+H4 and H16 baselines) are in §11 of the pre-registration document.
 
 ## Known limitations
 

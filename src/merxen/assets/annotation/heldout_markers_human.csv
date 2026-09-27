@@ -1,17 +1,26 @@
-marker_class,gene_symbol,avoid_platforms,note
-Exc,SLC17A7,,
-Exc,SATB2,,
-Inh,GAD1,,
-Inh,GAD2,MERSCOPE,poorly detected on MERSCOPE (P7513 report F4)
-Astro,AQP4,,
-Astro,GJA1,,
-Oligo,MOBP,,
-Oligo,PLP1,,
-OPC,PDGFRA,,
-OPC,VCAN,,
-Immune,CSF1R,,
-Immune,P2RY12,MERSCOPE,poorly detected on MERSCOPE (P7513 report F4)
-Vascular,CLDN5,,
-Vascular,FLT1,,
-Fibroblast,DCN,,
-Fibroblast,LUM,,
+marker_class,gene_symbol,avoid_platforms,rank,note
+Exc,SLC17A7,,1,
+Exc,SATB2,,1,
+Inh,GAD1,,1,
+Inh,GAD2,MERSCOPE,1,poorly detected on MERSCOPE (P7513 report F4)
+Astro,AQP4,,1,
+Astro,GJA1,,1,
+Oligo,MOBP,,1,
+Oligo,PLP1,,1,
+OPC,PDGFRA,,1,
+OPC,VCAN,,1,
+Immune,CSF1R,,1,
+Immune,P2RY12,MERSCOPE,1,poorly detected on MERSCOPE (P7513 report F4)
+Vascular,CLDN5,,1,
+Vascular,FLT1,,1,
+Fibroblast,DCN,,1,
+Fibroblast,LUM,,1,
+Exc,SLC17A6,,2,canonical alternate (M3 panel check: set a lacks SATB2)
+Oligo,MOG,,2,canonical alternate (M3 panel check: set a lacks PLP1)
+Oligo,OPALIN,,2,canonical alternate (M3 panel check: set a lacks PLP1)
+Immune,CX3CR1,,2,canonical alternate (M3 panel check: set a lacks CSF1R)
+Immune,GPR34,,2,canonical alternate (M3 panel check: set a lacks CSF1R)
+Vascular,PECAM1,,2,canonical alternate (M3 panel check: set a lacks CLDN5)
+Vascular,ABCC9,,2,canonical alternate (M3 panel check: set a lacks CLDN5)
+Fibroblast,FBLN1,,2,canonical alternate (M3 panel check: set a lacks LUM)
+Fibroblast,COL12A1,,2,canonical alternate (M3 panel check: set a lacks LUM)

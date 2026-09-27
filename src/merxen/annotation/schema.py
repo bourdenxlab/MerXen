@@ -36,6 +36,29 @@ logger = logging.getLogger(__name__)
 LABEL_TABLE_VERSION: Final = 1
 LABEL_TABLE_SUFFIX: Final = "_celltype_labels.parquet"
 PLATFORMS: Final[tuple[str, ...]] = ("MERSCOPE", "XENIUM")
+# Probabilities are stored as float32 (tidy MMC parquet, ``ct_*_raw``), so a
+# bootstrap probability of exactly 0.69, 0.45 or 0.90 reads back just below
+# its threshold. Threshold tests allow this much below the threshold, far
+# less than the 1 / bootstrap_iteration grid step.
+PROBABILITY_TOLERANCE: Final = 1e-6
+
+
+def meets_threshold(
+    values: np.ndarray | pd.Series | float, threshold: np.ndarray | float
+) -> np.ndarray:
+    """Return ``values >= threshold``, tolerant of float32 storage.
+
+    Args:
+        values: Probabilities (NaN never meets a threshold).
+        threshold: A threshold, or one per value.
+
+    Returns:
+        Boolean array (``PROBABILITY_TOLERANCE`` below the threshold passes).
+    """
+    array = np.asarray(values, dtype=np.float64)
+    limit = np.asarray(threshold, dtype=np.float64) - PROBABILITY_TOLERANCE
+    with np.errstate(invalid="ignore"):
+        return np.asarray(np.nan_to_num(array, nan=-np.inf) >= limit)
 
 
 class CellStatus(StrEnum):

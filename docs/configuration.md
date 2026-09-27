@@ -550,10 +550,10 @@ runs once, and is shared across all samples and segmentation branches. See
 
 ### Reference-based annotation (in development)
 
-These params drive the reference-bundle processes of the new annotation
-([Reference-based annotation](stages/annotation.md)). They are read only by
-`--annotation_prepare_only` runs and, once wired (M5), by `map_first` runs;
-legacy runs ignore them. Defaults are in `workflows/conf/annotation.config`,
+These params drive the reference-bundle and mapping processes of the new
+annotation ([Reference-based annotation](stages/annotation.md)). They are read
+only by `--annotation_prepare_only` runs and, once wired (M5), by `map_first`
+runs; legacy runs ignore them. Defaults are in `workflows/conf/annotation.config`,
 the dwight values in `workflows/conf/dwight.annotation.config`.
 
 | Param | Default | Description |
@@ -565,7 +565,7 @@ the dwight values in `workflows/conf/dwight.annotation.config`.
 | `annotation_reference_store_large` | `null`; Dwight: `/srv/storage/MerXen/annotation_references` | Store of bundles on panels above 1,000 genes. |
 | `annotation_prep_large_memory` | `null` | `ANNOTATE_REFERENCE_PREP` memory for panels above 1,000 genes (else 64 GB). |
 | `annotation_auto_download` | `true` | Fetch missing pinned files (SEA-AD Multiregion, the MERFISH CCF metadata) into `<annotation_reference_store>/.downloads`, verified by size and sha256. |
-| `annotation_ctm_version` | `1.7.2` | `cell_type_mapper` version PREP requires. |
+| `annotation_ctm_version` | `1.7.2` | `cell_type_mapper` version PREP and MAP require (each task checks it before running). |
 | `annotation_resolvability` | `true` | Resolvability self-map (M3b). While true, `wmb_panel` needs `annotation_wmb_selfmap_test_cells_path`. Not part of `build_hash`. |
 | `annotation_xplat_sensitivity`, `annotation_xplat_sensitivity_segmentations` | `geneset_c`; `proseg_hybrid` | Whether same-panel human pairs get a set-c bundle, and on which segmentations. |
 | `annotation_panel_mode` | `auto` | `auto` (intersection when the two platform panels have Jaccard ≥ 0.9, else `per_platform`), `intersection` or `per_platform`. |
@@ -580,6 +580,9 @@ the dwight values in `workflows/conf/dwight.annotation.config`.
 | `annotation_wmb_max_cells_per_cluster` | `50` | Marker training cells per WMB cluster. |
 | `annotation_merfish_ccf_metadata_path` | `null` | Local MERFISH-C57BL6J-638850-CCF cell metadata; unset, it comes from the pinned download cache. |
 | `annotation_prep_max_forks` | Dwight: `1` | Concurrent `ANNOTATE_REFERENCE_PREP` tasks. |
+| `annotation_max_forks` | `2` (applied on Dwight) | Concurrent `CLUSTERING_SQUIDPY_ANNOTATE_MAP` tasks (6 CPUs and 24 GB each, 48 GB above 1,000 panel genes). |
+| `annotation_reuse_published` | `true` | MAP copies a run from the published `<pair>/<seg>/annotation_map/annotation_map_out/map_manifest.json` instead of re-mapping when its query fingerprint, `build_hash`, engine parameters and ctm version are unchanged (Dwight prunes work directories, so `-resume` alone cannot). |
+| `annotation_keep_extended_json` | `false` | Keep each MapMyCells extended JSON, gzipped, next to its tidy parquet (by default it is parsed and deleted). |
 
 ### Resource limits
 

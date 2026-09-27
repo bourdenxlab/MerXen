@@ -1,9 +1,11 @@
-"""ANNOTATE_PANEL, ANNOTATE_REFERENCE_PREP and their wiring (plan §3.1, §3.2, §13.2).
+"""The annotation processes and their wiring (plan §3.1-§3.3, §13.2).
 
 String tests pin the process contract: no ``storeDir`` (the Python
 ``ReferenceStore`` owns the store), CPU-only resources without a GPU lock,
-PREP sized by panel size, one PREP at a time on dwight, and ``main.nf``
-calling the annotation workflows only behind hook H10.
+PREP sized by panel size, one PREP and two MAPs at a time on dwight, MAP's
+ctm check, content cache and publish path, and ``main.nf`` calling the
+annotation workflows only behind hook H10. The MAP channel logic is tested
+in ``test_map_first_subworkflow.py``.
 
 When ``nextflow`` is installed, small runs execute the real workflow code
 (``-stub-run``: PREP writes a stub ``bundle_ref.json``; ANNOTATE_PANEL has no
@@ -44,6 +46,7 @@ import pytest
 from scipy import sparse
 
 from merxen.annotation import panel as panel_module
+from merxen.annotation import pipeline as pipeline_module
 from merxen.annotation import reference as reference_module
 from merxen.annotation.config import (
     DEFAULT_REFERENCE_IDS,
@@ -65,8 +68,13 @@ LIB_DIR = WORKFLOWS / "lib"
 REFERENCES_SOURCE = (LIB_DIR / "AnnotationReferences.groovy").read_text()
 NEXTFLOW = shutil.which("nextflow")
 needs_nextflow = pytest.mark.skipif(NEXTFLOW is None, reason="nextflow is unavailable")
-PROCESSES = ("ANNOTATE_PANEL", "ANNOTATE_REFERENCE_PREP")
+PROCESSES = (
+    "ANNOTATE_PANEL",
+    "ANNOTATE_REFERENCE_PREP",
+    "CLUSTERING_SQUIDPY_ANNOTATE_MAP",
+)
 PREP = "ANNOTATE_REFERENCE_PREP"
+MAP = "CLUSTERING_SQUIDPY_ANNOTATE_MAP"
 
 
 def _process_block(text: str, name: str) -> str:
@@ -90,7 +98,7 @@ def _with_name_block(config_text: str, name: str) -> str:
 # Process contract (string tests)
 
 
-def test_annotation_module_defines_panel_and_prep() -> None:
+def test_annotation_module_defines_panel_prep_and_map() -> None:
     text = MODULE.read_text()
     assert re.findall(r"^process (\w+) \{", text, re.M) == list(PROCESSES)
     assert "merxen annotation-panel" in _process_block(text, "ANNOTATE_PANEL")
@@ -99,6 +107,9 @@ def test_annotation_module_defines_panel_and_prep() -> None:
     assert "stub:" in prep
     # ANNOTATE_PANEL is seconds long and task-local: -stub-run runs it for real.
     assert "stub:" not in _process_block(text, "ANNOTATE_PANEL")
+    map_block = _process_block(text, MAP)
+    assert "merxen annotate \\\\" in map_block
+    assert "stub:" in map_block
 
 
 def test_no_store_dir_anywhere_in_the_annotation_workflows() -> None:
@@ -139,10 +150,57 @@ def test_annotation_processes_run_on_the_cpu_with_current_code(name: str) -> Non
         assert token not in code.replace("CUDA_VISIBLE_DEVICES", ""), token
 
 
-def test_prep_checks_the_cell_type_mapper_version() -> None:
-    prep = _process_block(MODULE.read_text(), PREP)
-    assert 'importlib.metadata.version("cell_type_mapper")' in prep
-    assert 'expected = "${params.annotation_ctm_version}"' in prep
+@pytest.mark.parametrize("name", [PREP, MAP])
+def test_prep_and_map_check_the_cell_type_mapper_version(name: str) -> None:
+    block = _process_block(MODULE.read_text(), name)
+    script = block[block.index("script:") : block.index("stub:")]
+    assert 'importlib.metadata.version("cell_type_mapper")' in script
+    assert 'expected = "${params.annotation_ctm_version}"' in script
+    # The check runs before the command.
+    assert script.index("cell_type_mapper") < script.index("merxen annotat")
+
+
+def test_map_caches_on_content_and_publishes_under_the_segmentation() -> None:
+    """PREP re-writes identical refs in new work dirs: MAP must hash content."""
+    block = _process_block(MODULE.read_text(), MAP)
+    assert 'cache "deep"' in block
+    assert (
+        'publishDir { "${params.outdir}/${pair_id}/${segmentation}/annotation_map" }, '
+        'mode: "copy", overwrite: true'
+    ) in block
+    assert 'path("annotation_map_out")' in block
+    assert (
+        'path(bundle_refs, arity: "0..*", '
+        'stageAs: "map_inputs/bundle_refs/bundle_ref_?.json")'
+    ) in block
+    for name, staged in (
+        ("clustering_config", "clustering_squidpy_config.json"),
+        ("prepared_dir", "clustering_prepare_out"),
+        ("panel_dir", "annotation_panel_out"),
+    ):
+        assert f'path({name}, stageAs: "map_inputs/{staged}")' in block
+    assert "task.cpus as int" in block
+    assert "--out annotation_map_out" in block
+    assert "rm -rf ${AnnotationReferences.MAP_SCRATCH_DIR}" in block
+
+
+def test_map_resources_follow_the_plan() -> None:
+    """MAP: 6 cpus, 24 GB, 48 GB above 1,000 panel genes (plan §3.3)."""
+    block = _with_name_block(ANNOTATION_CONFIG.read_text(), MAP)
+    assert re.search(r"cpus = 6\n", block)
+    assert (
+        f"memory = {{ (map_spec.n_panel_genes ?: 0) > {LARGE_PANEL_GENES} "
+        '? "48 GB" : "24 GB" }'
+    ) in block
+    assert "maxForks" not in block
+
+
+def test_dwight_runs_two_maps_at_a_time() -> None:
+    text = DWIGHT_ANNOTATION_CONFIG.read_text()
+    block = _with_name_block(text, MAP)
+    assert "maxForks = params.annotation_max_forks" in block
+    assert re.search(r"annotation_max_forks = 2\b", text)
+    assert re.search(r"annotation_max_forks = 2\b", ANNOTATION_CONFIG.read_text())
 
 
 def test_no_gpu_lock_or_gpu_queue_on_the_annotation_processes() -> None:
@@ -198,6 +256,9 @@ def test_main_nf_calls_only_the_prepare_only_entry() -> None:
         "ANNOTATE_REFERENCE_PREP(",
         "ANNOTATION_REFERENCES(",
         "ANNOTATION_PREPARED_REFERENCES(",
+        "CLUSTERING_SQUIDPY_ANNOTATE_MAP(",
+        "CLUSTERING_ANNOTATE_MAP(",
+        "CLUSTERING_MAP_FIRST(",
     ):
         assert name not in main_text
     # CLUSTERING_MAP_FIRST still refuses to run until M5.
@@ -265,6 +326,7 @@ def test_groovy_file_names_match_python() -> None:
     assert constant("REQUIRED_BUNDLES_FILE") == panel_module.REQUIRED_BUNDLES_FILE
     assert constant("PANEL_INDEPENDENT") == "panel_independent"
     assert constant("GENE_LIST_SOURCE") == "gene_list"
+    assert constant("MAP_MANIFEST_FILE") == pipeline_module.MAP_MANIFEST_NAME
 
 
 # --------------------------------------------------------------------------
@@ -561,6 +623,16 @@ class AnnotationModuleHarness {
                     .collect { request ->
                         [bundle: request[0], files: request[1]*.toString()]
                     }
+            case "mapSpec":
+                return AnnotationReferences.mapSpec(c.panel_dir)
+            case "mapArguments":
+                return AnnotationReferences.mapArguments(
+                    c.pair_id, c.segmentation, c.spec, c.refs, c.cpus as int
+                )
+            case "mapReuseDir":
+                return AnnotationReferences.mapReuseDir(
+                    c.params, c.pair_id, c.segmentation
+                )
         }
         throw new IllegalStateException("unknown case function ${c.fn}")
     }
@@ -871,6 +943,49 @@ def _cases(root: Path, params: dict[str, Any]) -> dict[str, dict[str, Any]]:
         "prep_requests": {
             "fn": "prepRequests",
             "panel_dir": str(root / "fixture_panels" / "F5_original_seg"),
+        },
+        "map_spec_per_platform": {
+            "fn": "mapSpec",
+            "panel_dir": str(root / "fixture_panels" / "F3_proseg_hybrid"),
+        },
+        "map_spec_mouse": {
+            "fn": "mapSpec",
+            "panel_dir": str(root / "fixture_panels" / "F5_original_seg"),
+        },
+        "map_spec_refused": {
+            "fn": "mapSpec",
+            "panel_dir": str(root / "fixture_panels" / "F4_proseg_hybrid"),
+        },
+        "map_arguments": {
+            "fn": "mapArguments",
+            "pair_id": "P7513",
+            "segmentation": "proseg_hybrid",
+            "spec": {"species": "human"},
+            "refs": [
+                "map_inputs/bundle_refs/bundle_ref_1.json",
+                "map_inputs/bundle_refs/bundle_ref_2.json",
+            ],
+            "cpus": 6,
+        },
+        "map_arguments_refused": {
+            "fn": "mapArguments",
+            "pair_id": "P1",
+            "segmentation": "reseg",
+            "spec": {"species": "human"},
+            "refs": [],
+            "cpus": 6,
+        },
+        "map_reuse_dir": {
+            "fn": "mapReuseDir",
+            "params": {"outdir": "rel_results"},
+            "pair_id": "P1",
+            "segmentation": "reseg",
+        },
+        "map_reuse_dir_off": {
+            "fn": "mapReuseDir",
+            "params": {"outdir": "rel_results", "annotation_reuse_published": False},
+            "pair_id": "P1",
+            "segmentation": "reseg",
         },
         "prepare_only_default": {"fn": "prepareOnly", "params": params},
         "prepare_only_string": {
@@ -1248,6 +1363,70 @@ def test_prep_arguments(harness: dict[str, Any]) -> None:
     region = _value(harness, "prep_args_region_share").split()
     assert "--no-auto-download" in region
     assert "--panel-genes" not in region and "--source" not in region
+
+
+@needs_nextflow
+def test_map_spec_reads_species_status_and_panel_size(harness: dict[str, Any]) -> None:
+    assert _value(harness, "map_spec_per_platform") == {
+        "species": "human",
+        "panel_status": "ok",
+        "reasons": [],
+        "n_required": 5,
+        "n_panel_genes": 500,
+    }
+    mouse = _value(harness, "map_spec_mouse")
+    assert mouse["species"] == "mouse" and mouse["n_required"] == 2
+    assert mouse["n_panel_genes"] == 500
+    refused = _value(harness, "map_spec_refused")
+    assert refused["panel_status"] == "refused"
+    assert refused["n_required"] == 0 and refused["n_panel_genes"] == 0
+
+
+@needs_nextflow
+def test_map_arguments(harness: dict[str, Any]) -> None:
+    """MAP maps exactly PREP's refs, on the clustering run's table cells."""
+    args = _value(harness, "map_arguments").split(" ")
+    assert args[: args.index("--n-processors")] == [
+        "--species",
+        "human",
+        "--pair-id",
+        "P7513",
+        "--segmentation",
+        "proseg_hybrid",
+        "--prepared-dir",
+        "map_inputs/clustering_prepare_out",
+        "--clustering-config",
+        "map_inputs/clustering_squidpy_config.json",
+        "--panel-dir",
+        "map_inputs/annotation_panel_out",
+    ]
+    assert args[args.index("--n-processors") + 1] == "6"
+    assert args[args.index("--work-dir") + 1] == "map_scratch"
+    assert "--require-bundle-refs" in args and "--allow-refused-panel" in args
+    refs = [args[i + 1] for i, arg in enumerate(args) if arg == "--bundle-ref"]
+    assert refs == [
+        "map_inputs/bundle_refs/bundle_ref_1.json",
+        "map_inputs/bundle_refs/bundle_ref_2.json",
+    ]
+    # The standalone-only options are never passed by the pipeline.
+    for option in ("--store", "--bundle ", "--from-clustered-h5ad", "--min-counts"):
+        assert option not in _value(harness, "map_arguments") + " "
+    refused = _value(harness, "map_arguments_refused")
+    assert "--bundle-ref" not in refused and "--allow-refused-panel" in refused
+
+
+@needs_nextflow
+def test_map_reuse_dir_is_the_published_map_output(harness: dict[str, Any]) -> None:
+    reuse = Path(_value(harness, "map_reuse_dir"))
+    assert reuse.is_absolute()
+    assert reuse.parts[-5:] == (
+        "rel_results",
+        "P1",
+        "reseg",
+        "annotation_map",
+        "annotation_map_out",
+    )
+    assert _value(harness, "map_reuse_dir_off") is None
 
 
 @needs_nextflow

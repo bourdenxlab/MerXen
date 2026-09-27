@@ -150,9 +150,11 @@ def test_annotation_configs_are_included_once_at_hook_h7() -> None:
     assert "includeConfig" not in (WORKFLOWS / DWIGHT_ANNOTATION).read_text()
 
 
-# Processes whose resources the annotation configs may set (M2; MAP, RESOLVE,
-# COMPUTE_CPU and REPORT join as they arrive).
-ANNOTATION_PROCESSES = frozenset({"ANNOTATE_PANEL", "ANNOTATE_REFERENCE_PREP"})
+# Processes whose resources the annotation configs may set (M2, MAP in M3;
+# RESOLVE, COMPUTE_CPU and REPORT join as they arrive).
+ANNOTATION_PROCESSES = frozenset(
+    {"ANNOTATE_PANEL", "ANNOTATE_REFERENCE_PREP", "CLUSTERING_SQUIDPY_ANNOTATE_MAP"}
+)
 
 
 @pytest.mark.parametrize("annotation_file", [ANNOTATION, DWIGHT_ANNOTATION])
