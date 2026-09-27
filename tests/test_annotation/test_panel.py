@@ -47,6 +47,7 @@ from merxen.annotation.panel import (
     pair_symbol_lookup,
     panel_family,
     panel_from_gene_list,
+    platform_panel,
     platform_pseudobulk,
     raw_panel_from_h5ad,
     raw_panel_from_var,
@@ -996,6 +997,28 @@ def test_panel_family_inheritance() -> None:
         ).basis
         == "own"
     )
+    # A family validated on both platforms covers either platform alone,
+    # never a panel without platforms (a gene list).
+    pair_family = KnownPanelFamily(
+        family_id="human_pair",
+        species="human",
+        platforms=frozenset({"MERSCOPE", "XENIUM"}),
+        panel_hash=family.panel_hash,
+        ensembl_ids=family.ensembl_ids,
+        root_markers=family.root_markers,
+    )
+    for platforms in (["XENIUM"], ["MERSCOPE"], ["MERSCOPE", "XENIUM"]):
+        member = panel_family(
+            ids, species="human", platforms=platforms, known_families=[pair_family]
+        )
+        assert (member.family_id, member.basis) == ("human_pair", "inherited")
+        assert member.matched_platforms == sorted(platforms)
+    assert (
+        panel_family(
+            ids, species="human", platforms=[], known_families=[pair_family]
+        ).basis
+        == "own"
+    )
     assert (
         panel_family(
             ids, species="mouse", platforms=["XENIUM"], known_families=[family]
@@ -1808,3 +1831,123 @@ def test_intersection_panel_prefers_xenium_symbols() -> None:
     panel = intersection_panel([merscope, xenium], panel_mode="intersection")
     assert panel.platforms == ["MERSCOPE", "XENIUM"]
     assert set(panel.declared_panel_hashes) == {"merscope", "xenium"}
+
+
+# --------------------------------------------------------------------------
+# Gene-ID refusals through the one var parser (ANNOTATE_PANEL and MAP)
+
+
+def _ag7_var() -> pd.DataFrame:
+    from .test_gene_ids import AG7_SYMBOLS
+
+    return pd.DataFrame(
+        {"gene": AG7_SYMBOLS, "gene_ids": AG7_SYMBOLS}, index=AG7_SYMBOLS
+    )
+
+
+def _declared_from_var(var: pd.DataFrame, species: str) -> Any:
+    from .test_gene_ids import _sources
+
+    return declared_panel(
+        raw_panel_from_var(var, source=PanelSource(kind="h5ad_var")),
+        species=species,  # type: ignore[arg-type]
+        platform="MERSCOPE",
+        sources=_sources(species),
+    )
+
+
+def test_the_ag7_symbols_as_ids_fixture_is_refused() -> None:
+    """ag7: the ID column held symbols, so 0 of 498 root markers matched."""
+    from .test_gene_ids import AG7_SYMBOLS
+
+    declared = _declared_from_var(_ag7_var(), "mouse")
+
+    assert declared.status == "refused"
+    assert "native_id_prefix" in declared.refusal_reasons
+    assert declared.resolution is not None
+    assert declared.resolution.native_id_column == "gene_ids"
+    assert declared.resolution.native_prefix_share == 0.0
+    assert declared.resolution.symbols_as_ids == AG7_SYMBOLS
+    assert "symbols as IDs" in declared.resolution.refusal_details["native_id_prefix"]
+
+
+def test_the_ag7_fixture_is_refused_from_a_prepared_h5ad(tmp_path: Path) -> None:
+    from .test_gene_ids import _sources
+
+    var = _ag7_var()
+    path = tmp_path / "ag7_prepared.h5ad"
+    ad.AnnData(
+        X=sparse.csr_matrix((2, len(var)), dtype=np.float32),
+        obs=pd.DataFrame(index=["c0", "c1"]),
+        var=var,
+    ).write_h5ad(path)
+
+    declared = declared_panel(
+        raw_panel_from_h5ad(path),
+        species="mouse",
+        platform="MERSCOPE",
+        sources=_sources("mouse"),
+    )
+
+    assert declared.status == "refused"
+    assert "native_id_prefix" in declared.refusal_reasons
+
+
+def test_other_species_ids_are_refused() -> None:
+    var = pd.DataFrame(
+        {"gene_ids": [f"ENSMUSG{i:011d}" for i in range(20)]},
+        index=[f"Gene{i}" for i in range(20)],
+    )
+
+    declared = _declared_from_var(var, "human")
+
+    assert declared.status == "refused"
+    assert {"native_id_prefix", "other_species_ids", "gene_id_resolution"} <= set(
+        declared.refusal_reasons
+    )
+    assert declared.unresolved["Gene0"] == "other_species_id"
+
+
+def test_an_ensembl_id_index_is_the_native_id_column() -> None:
+    var = pd.DataFrame(
+        {"gene_symbol": ["GFAP", "AQP4"]},
+        index=["ENSG00000131095", "ENSG00000171885"],
+    )
+    raw = raw_panel_from_var(var, source=PanelSource(kind="h5ad_var"))
+    assert raw.native_id_column == "index"
+    assert raw.features[["name", "symbol", "native_value"]].values.tolist() == [
+        ["GFAP", "GFAP", "ENSG00000131095"],
+        ["AQP4", "AQP4", "ENSG00000171885"],
+    ]
+
+
+def test_annotation_panels_record_each_declared_resolution() -> None:
+    from merxen.annotation.panel import declared_resolution
+
+    from .test_gene_ids import AG7_SYMBOLS, _sources
+
+    var = pd.DataFrame({"gene": AG7_SYMBOLS}, index=AG7_SYMBOLS)
+    merscope = declared_panel(
+        raw_panel_from_var(var, source=PanelSource(kind="h5ad_var")),
+        species="mouse",
+        platform="MERSCOPE",
+        sources=_sources("mouse"),
+    )
+    assert merscope.status == "ok" and merscope.resolution is not None
+    record = declared_resolution(merscope)
+    assert record.resolution_table_sha256 == merscope.resolution.table_sha256()
+    assert record.gene_tables == {"human": "whb_gene.csv", "mouse": "wmb_gene.csv"}
+    single = platform_panel(
+        merscope, kind="platform", name="merscope", panel_mode="per_platform"
+    )
+    assert single.declared_resolutions == {"merscope": record}
+    # The JSON round-trips, and subset panels keep their parent's records.
+    assert (
+        AnnotationPanel.model_validate_json(single.model_dump_json())
+        .declared_resolutions["merscope"]
+        .resolution_table_sha256
+        == record.resolution_table_sha256
+    )
+    ids = single.ensembl_ids
+    subset = subset_panel(single, ids[1:], subset_bundle_trigger(ids, ids[1:]))
+    assert subset.declared_resolutions == single.declared_resolutions

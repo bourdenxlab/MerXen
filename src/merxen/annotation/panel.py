@@ -204,12 +204,35 @@ class PanelFamily(_PanelModel):
         reference_panel_hash: Hash of the family's panel.
         jaccard: Jaccard of this panel with the family's panel (for a
             subset, with its parent panel).
+        matched_platforms: The panel's platforms the family was validated
+            on (``listed`` / ``inherited``; empty for its own family).
     """
 
     family_id: str
     basis: Literal["own", "listed", "inherited", "subset"]
     reference_panel_hash: str
     jaccard: float
+    matched_platforms: list[str] = Field(default_factory=list)
+
+
+class DeclaredResolution(_PanelModel):
+    """Identity of one declared panel's gene-ID resolution (plan §8.4).
+
+    Recorded in the annotation panel and in ``bundle.json``
+    (``built_from_panel``) as provenance: bundles stay keyed by the
+    resolved IDs (``panel_hash``), so two resolutions that give the same
+    IDs share one bundle and the table checksum is not part of
+    ``build_hash`` (a deviation from plan §8.4, M3b review).
+
+    Attributes:
+        resolution_table_sha256: ``GeneIdResolution.table_sha256`` (``None``
+            for panels resolved before M3b).
+        gene_tables: The local gene table the resolver consulted, per
+            species (``None``: not available).
+    """
+
+    resolution_table_sha256: str | None = None
+    gene_tables: dict[str, str | None] = Field(default_factory=dict)
 
 
 class DeclaredPanel(_PanelModel):
@@ -356,6 +379,9 @@ class AnnotationPanel(_PanelModel):
         excluded_ids: For set c, the set-a IDs it drops; for a subset panel,
             the parent's genes the dataset lacks.
         panel_family: The panel's family.
+        declared_resolutions: Gene-ID resolution identity of each declared
+            panel behind it, keyed like ``declared_panel_hashes``
+            (provenance, not part of ``panel_hash`` or ``build_hash``).
     """
 
     schema_version: int = PANEL_SCHEMA_VERSION
@@ -374,6 +400,7 @@ class AnnotationPanel(_PanelModel):
     parent_panel_hash: str | None = None
     excluded_ids: list[str] = Field(default_factory=list)
     panel_family: PanelFamily | None = None
+    declared_resolutions: dict[str, DeclaredResolution] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _check_consistency(self: AnnotationPanel) -> AnnotationPanel:
@@ -1352,12 +1379,17 @@ def panel_family(
 ) -> PanelFamily:
     """Return the family a panel belongs to (plan §8.1, OD-E7).
 
-    A panel whose hash is a known family's row (same species and platforms)
-    is ``listed`` in it. Otherwise it inherits a known family when it has the
-    same species and platforms, Jaccard >= ``min_jaccard`` with the family
-    panel and contains all its root markers; the most similar such family
-    wins. Otherwise the panel is its own family,
-    ``<species>_<platforms>_<hash prefix>``.
+    A family is a candidate when it has the panel's species and was
+    validated on every platform the panel serves (the panel's platforms are
+    a subset of the family's): a Xenium-only run of a panel validated on
+    MERSCOPE and Xenium (``per_platform`` mode) keeps its family, while a
+    Xenium panel never matches a MERSCOPE-only family. A panel whose hash
+    is a candidate's row is ``listed`` in it. Otherwise it inherits a
+    candidate when Jaccard >= ``min_jaccard`` with the family panel and it
+    contains all its root markers; the most similar such family wins.
+    Otherwise the panel is its own family,
+    ``<species>_<platforms>_<hash prefix>``. A panel without platforms (a
+    gene list) never matches a family.
 
     Args:
         ensembl_ids: The panel's IDs.
@@ -1373,10 +1405,13 @@ def panel_family(
     ids = set(ensembl_ids)
     own_hash = compute_panel_hash(sorted(ids))
     platform_set = frozenset(platform.upper() for platform in platforms)
+    matched = sorted(platform_set)
     candidates = [
         family
         for family in known_families
-        if family.species == species and family.platforms == platform_set
+        if family.species == species
+        and platform_set
+        and platform_set <= family.platforms
     ]
     listed = next((f for f in candidates if f.panel_hash == own_hash), None)
     if listed is not None:
@@ -1385,6 +1420,7 @@ def panel_family(
             basis="listed",
             reference_panel_hash=own_hash,
             jaccard=1.0,
+            matched_platforms=matched,
         )
     best: tuple[float, KnownPanelFamily] | None = None
     for family in candidates:
@@ -1399,6 +1435,7 @@ def panel_family(
             basis="inherited",
             reference_panel_hash=best[1].panel_hash,
             jaccard=round(best[0], 6),
+            matched_platforms=matched,
         )
     platform_token = "_".join(sorted(p.lower() for p in platform_set)) or "any"
     return PanelFamily(
@@ -1447,6 +1484,24 @@ def _platform_name(panel: DeclaredPanel) -> str:
     return (panel.platform or panel.sample_id or "sample").lower()
 
 
+def declared_resolution(panel: DeclaredPanel) -> DeclaredResolution:
+    """Return the resolution identity of a declared panel (provenance).
+
+    Args:
+        panel: The declared panel.
+
+    Returns:
+        Its resolution table sha256 and the gene tables consulted.
+    """
+    resolution = panel.resolution
+    if resolution is None:
+        return DeclaredResolution()
+    return DeclaredResolution(
+        resolution_table_sha256=resolution.table_sha256(),
+        gene_tables=dict(resolution.species_check.tables),
+    )
+
+
 def platform_panel(
     panel: DeclaredPanel,
     *,
@@ -1485,6 +1540,7 @@ def platform_panel(
             {panel.platform: list(panel.symbols)} if panel.platform else {}
         ),
         declared_panel_hashes={_platform_name(panel): panel.panel_hash},
+        declared_resolutions={_platform_name(panel): declared_resolution(panel)},
         panel_family=panel_family(
             panel.ensembl_ids,
             species=panel.species,
@@ -1552,6 +1608,9 @@ def intersection_panel(
         },
         declared_panel_hashes={
             _platform_name(panel): panel.panel_hash for panel in panels
+        },
+        declared_resolutions={
+            _platform_name(panel): declared_resolution(panel) for panel in panels
         },
         panel_family=panel_family(
             shared,
@@ -1805,6 +1864,7 @@ def subset_panel(
             for platform, symbols in panel.symbols_by_platform.items()
         },
         declared_panel_hashes=dict(panel.declared_panel_hashes),
+        declared_resolutions=dict(panel.declared_resolutions),
         parent_panel_hash=panel.panel_hash,
         excluded_ids=excluded,
         panel_family=family,
@@ -2450,6 +2510,7 @@ def setc_panel(
             for platform, symbols in set_a.symbols_by_platform.items()
         },
         declared_panel_hashes=dict(set_a.declared_panel_hashes),
+        declared_resolutions=dict(set_a.declared_resolutions),
         parent_panel_hash=set_a.panel_hash,
         excluded_ids=excluded,
         panel_family=panel_family(

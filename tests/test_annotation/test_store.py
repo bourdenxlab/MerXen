@@ -1206,6 +1206,42 @@ def test_bundle_json_records_what_build_hash_leaves_out(
     built_from = manifest["built_from_panel"]
     assert built_from["part_of_build_hash"] is False
     assert built_from["symbols_sha256"] == make_panel().symbols_sha256()
+    assert built_from["declared_resolutions"] == {}
+
+
+def test_the_resolution_table_is_recorded_but_not_hashed(
+    spec: AnnotationReferenceSpec, tmp_path: Path
+) -> None:
+    from merxen.annotation.panel import DeclaredResolution
+
+    def resolved(sha: str) -> AnnotationPanel:
+        return make_panel().model_copy(
+            update={
+                "declared_panel_hashes": {"xenium": "x" * 64},
+                "declared_resolutions": {
+                    "xenium": DeclaredResolution(
+                        resolution_table_sha256=sha,
+                        gene_tables={"human": "whb_gene.csv", "mouse": None},
+                    )
+                },
+            }
+        )
+
+    store = ReferenceStore(tmp_path / "store")
+    first = store.get_or_build(spec, resolved("a" * 64), builder=copying_builder())
+    # Another resolution of the same IDs is the same bundle (plan §8.4
+    # deviation: bundles are keyed by the resolved IDs).
+    second = store.get_or_build(spec, resolved("b" * 64), builder=copying_builder())
+    assert second.build_hash == first.build_hash and second.reused
+    manifest = json.loads((Path(first.path) / BUNDLE_MANIFEST_NAME).read_text())
+    built_from = manifest["built_from_panel"]
+    assert built_from["declared_panel_hashes"] == {"xenium": "x" * 64}
+    assert built_from["declared_resolutions"] == {
+        "xenium": {
+            "resolution_table_sha256": "a" * 64,
+            "gene_tables": {"human": "whb_gene.csv", "mouse": None},
+        }
+    }
 
 
 # --------------------------------------------------------------------------

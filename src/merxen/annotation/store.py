@@ -1687,6 +1687,13 @@ def _bundle_manifest(
             "sample_ids": list(panel.sample_ids),
             "parent_panel_hash": panel.parent_panel_hash,
             "symbols_sha256": panel.symbols_sha256(),
+            # The declared panels' gene-ID resolution (plan §8.4): which
+            # table resolved the IDs, recorded, never hashed.
+            "declared_panel_hashes": dict(panel.declared_panel_hashes),
+            "declared_resolutions": {
+                name: record.model_dump(mode="json")
+                for name, record in sorted(panel.declared_resolutions.items())
+            },
             "part_of_build_hash": False,
         },
         "recorded_settings": recorded_settings(spec, config),
