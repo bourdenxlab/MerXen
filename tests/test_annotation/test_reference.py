@@ -1860,35 +1860,47 @@ def large_config(
 def test_large_panels_build_and_the_prefilter_is_mandatory_above_the_reserve(
     small_resources: Any,
 ) -> None:
+    # Default since the M3b 5K measurement: no prefilter.
     config = AnnotationConfig(species="mouse")
-    large = make_panel(
-        [f"ENSMUSG{index:011d}" for index in range(5006)], species="mouse"
-    )
+    assert config.panel.large_panel_marker_prefilter == "none"
     wmb = builder_for(
         AnnotationReferenceSpec(
             reference_id="wmb_panel", species="mouse", role="primary"
         ),
         config,
     )
-    # Large panels build (M3b stage D): no refusal with the default prefilter.
-    assert large_panel_refusal(large, config, wmb) is None
-    assert large_panel_refusal(None, config, wmb) is None
-    # Without the prefilter the predicted query-marker peak (~119 GB at
-    # 5,006 genes) exceeds a 3 / 0.625 = 4.8 GB reserve: refused (OD-E8).
-    none = large_config("mouse", limit=1000, cap=2000, prefilter="none")
-    reason = large_panel_refusal(large, none, wmb)
-    assert reason is not None and "mandatory" in reason and "OD-E8" in reason
-    predicted = reference.predicted_wmb_query_marker_peak_gb(5006)
-    assert 100 < predicted < 130
-    reference.set_prep_resources(
-        max_gb=int(predicted * reference.PREP_MAX_GB_FRACTION) + 1
+    five_k = make_panel(
+        [f"ENSMUSG{index:011d}" for index in range(5006)], species="mouse"
     )
-    assert large_panel_refusal(large, none, wmb) is None
+    huge = make_panel(
+        [f"ENSMUSG{index:011d}" for index in range(20000)], species="mouse"
+    )
+    # The measured envelope: the largest measured peak up to 5,006 genes,
+    # scaled beyond.
+    assert reference.predicted_wmb_query_marker_peak_gb(815) == pytest.approx(37.7)
+    assert reference.predicted_wmb_query_marker_peak_gb(5006) == pytest.approx(37.7)
+    assert reference.predicted_wmb_query_marker_peak_gb(10012) == pytest.approx(75.4)
+    # A 3 GB --max-gb gives a 4.8 GB reserve: the unfiltered 5K panel is
+    # refused, the prefilter is then mandatory (OD-E8).
+    reason = large_panel_refusal(five_k, config, wmb)
+    assert reason is not None and "mandatory" in reason and "OD-E8" in reason
+    prefiltered = large_config(
+        "mouse", limit=1000, cap=2000, prefilter="per_parent_topk_union"
+    )
+    assert large_panel_refusal(five_k, prefiltered, wmb) is None
+    # The standard reserve (--max-gb 40 = 64 GB) holds the measured 5K peak.
+    reference.set_prep_resources(max_gb=40)
+    assert large_panel_refusal(five_k, config, wmb) is None
+    assert large_panel_refusal(None, config, wmb) is None
+    # Beyond the measured range the scaled envelope can exceed it.
+    assert large_panel_refusal(huge, config, wmb) is not None
+    assert large_panel_refusal(huge, prefiltered, wmb) is None
     # Small panels never need the prefilter.
+    reference.set_prep_resources(max_gb=3)
     small = make_panel(
         [f"ENSMUSG{index:011d}" for index in range(815)], species="mouse"
     )
-    assert large_panel_refusal(small, none, wmb) is None
+    assert large_panel_refusal(small, config, wmb) is None
     # The whole-WHB bundle stays refused above 1,000 genes.
     whole = builder_for(
         AnnotationReferenceSpec(
@@ -1904,14 +1916,12 @@ def test_cli_refuses_a_large_wmb_panel_without_the_prefilter_before_building(
     tmp_path: Path,
 ) -> None:
     panel = make_panel(
-        [f"ENSMUSG{index:011d}" for index in range(5006)], species="mouse"
+        [f"ENSMUSG{index:011d}" for index in range(20000)], species="mouse"
     )
     panel_file = tmp_path / "panel_genes.json"
     panel.write(panel_file)
     config_file = tmp_path / "annotation_config.json"
-    config_file.write_text(
-        large_config("mouse", limit=1000, cap=2000, prefilter="none").model_dump_json()
-    )
+    config_file.write_text(AnnotationConfig(species="mouse").model_dump_json())
     store = tmp_path / "store"
     result = CliRunner().invoke(
         cli_main,
@@ -1946,7 +1956,7 @@ def test_large_whb_panel_is_prefiltered_kept_and_stored_in_the_large_store(
     fake = FakeCtm(whb_truncated_lookup).install(monkeypatch)
     sources = write_whb_sources(tmp_path)
     panel = make_panel([*GENES, ABSENT_GENE])
-    config = large_config("human", limit=5, cap=6)
+    config = large_config("human", limit=5, cap=6, prefilter="per_parent_topk_union")
     spec = prepare_reference_spec(
         whb_spec(
             region_precompute=sources["region_dir"],
@@ -3393,3 +3403,35 @@ def test_tiny_real_wmb_bundle_self_maps_through_real_mapmycells(
             / summary["test_set_bundle"]["build_hash"]
         ).obs
     )
+
+
+def test_large_panels_build_unfiltered_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    fake = FakeCtm(whb_truncated_lookup).install(monkeypatch)
+    sources = write_whb_sources(tmp_path)
+    config = large_config("human", limit=5, cap=6)
+    spec = prepare_reference_spec(
+        whb_spec(
+            region_precompute=sources["region_dir"],
+            seaad_precomputed_stats=sources["seaad"],
+        )
+    )
+    (tmp_path / "scratch").mkdir()
+    store = ReferenceStore(
+        tmp_path / "ssd",
+        large_root=tmp_path / "large",
+        large_panel_genes=5,
+        scratch_root=tmp_path / "scratch",
+    )
+    bundle = store.get_or_build(
+        spec, make_panel(GENES), builder=builder_for(spec, config), config=config
+    )
+    bundle_dir = Path(bundle.path)
+    # Every panel gene is a candidate; the reference markers are kept.
+    assert fake.stub_genes == GENES
+    assert not (bundle_dir / reference.MARKER_PREFILTER_FILE).exists()
+    assert (bundle_dir / reference.REFERENCE_MARKERS_DIR).is_dir()
+    manifest = json.loads((bundle_dir / BUNDLE_MANIFEST_NAME).read_text())
+    assert manifest["build_hash_payload"]["large_panel_prefilter"] is None
+    assert manifest["builder_output"]["markers"]["n_candidate_genes"] == 10

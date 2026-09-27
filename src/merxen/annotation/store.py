@@ -103,13 +103,12 @@ ANNOTATION_BUILDER_VERSION: Final = 3
 # 2: no panel symbols, MAP bootstrap or resolvability settings in the payload.
 STORE_SCHEMA_VERSION: Final = 2
 # Large panels (> large_panel_genes, e.g. Xenium 5K; plan §8.7, M3b stage
-# D): the marker builders apply the per-parent prefilter
-# (merxen.annotation.prefilter) unless large_panel_marker_prefilter is
-# "none", bundles go to the large store (ReferenceStore.large_root) with
-# their reference markers kept, and PREP gets the measured memory reserve
-# (annotation_prep_large_memory, OD-E8). The prefilter's method, version and
-# settings enter build_hash (build_hash_payload) of every builder that finds
-# markers.
+# D): bundles go to the large store (ReferenceStore.large_root) with their
+# reference markers kept, and PREP gets the measured memory reserve
+# (annotation_prep_large_memory, OD-E8). The per-parent marker prefilter
+# (merxen.annotation.prefilter) is opt-in (large_panel_marker_prefilter);
+# when on, its method, version and settings enter build_hash
+# (build_hash_payload) of every builder that finds markers.
 # Simulation recipes of the resolvability self-map and their versions (§8.3).
 # They enter build_hash once a builder writes resolvability outputs (M3b).
 RESOLVABILITY_RECIPE_VERSIONS: Final[dict[str, int]] = {"R1_contam_HO": 1}

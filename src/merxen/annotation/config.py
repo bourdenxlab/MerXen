@@ -453,7 +453,14 @@ class AnnotationPanelConfig(_AnnotationModel):
         own_family_missing_frac: Missing-gene share that makes the subset its
             own family.
         large_panel_genes: Panels above this size use the large-panel guards.
-        large_panel_marker_prefilter: Marker prefilter for large panels.
+        large_panel_marker_prefilter: Marker prefilter for large panels;
+            ``"none"`` by default since the M3b 5K measurement: at 5,006
+            genes the unfiltered WMB marker steps fit the PREP reserve
+            (query markers 21.3 GB, largest process, 8 processes) and the
+            per-parent prefilter (v1) failed its §8.7 validation (subclass
+            agreement 0.920-0.949 in 13 of 34 classes). It stays available
+            and becomes mandatory when a large WMB panel's predicted
+            query-marker peak exceeds the reserve (plan §8.7, OD-E8).
         large_panel_prefilter_cap: Gene cap of the prefilter.
         validated_panels_path: Validated families; ``None`` uses the packaged
             table (added in M3b).
@@ -490,9 +497,7 @@ class AnnotationPanelConfig(_AnnotationModel):
     subset_bundle_missing_frac: float = 0.01
     own_family_missing_frac: float = 0.05
     large_panel_genes: int = Field(default=LARGE_PANEL_GENES, ge=1)
-    large_panel_marker_prefilter: Literal["per_parent_topk_union", "none"] = (
-        "per_parent_topk_union"
-    )
+    large_panel_marker_prefilter: Literal["per_parent_topk_union", "none"] = "none"
     large_panel_prefilter_cap: int = Field(default=2000, ge=1)
     validated_panels_path: Path | None = None
     setc_max_abs_log2_deviation: float = Field(default=2.0, gt=0.0)

@@ -40,6 +40,14 @@ prefiltered and the unfiltered lookup and requires agreement >= 0.95 per
 emitted level and class with >= 50 confident calls, and no parent below 5
 markers (plan §8.7, NP9).
 
+Opt-in since the M3b 5K measurement (``large_panel_marker_prefilter``
+default ``"none"``): on the Xenium Prime 5K Mouse panel (5,006 genes, WMB)
+version 1 kept class-level calls (agreement >= 0.994 per class) but not
+subclass calls (0.920-0.949 in 13 of 34 classes), and it saved neither
+memory nor time (query markers 37.7 GB prefiltered vs 21.3 GB unfiltered,
+reference markers 47 min either way). It remains for panels whose
+unfiltered marker steps would not fit the PREP reserve.
+
 This module is pure numpy / scipy, so the bundle builders (``reference.py``)
 and the simulation (``simulate.py``) share it without import cycles.
 """
