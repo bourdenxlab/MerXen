@@ -16,14 +16,17 @@ depth bin):
 * **emission**: a bin is emitted when ``t*`` exists and the check half holds
   at least ``min_confident_n`` confident calls with a Wilson 95% lower bound
   of their precision at least ``target - wilson_margin`` and coverage at
-  least ``min_coverage``. Bins deeper than ``D_max(c)`` (the deepest grid
-  value with ``min_cells_per_bin`` test cells of class ``c``; only cells whose
-  native panel counts reach a depth are thinned to it) inherit the decision
-  of ``D_max(c)`` and are marked extrapolated; a class without such a bin is
-  never emitted (no pooling across classes). Everything not emitted is
-  ``not_resolvable``;
+  least ``min_coverage``. The ``validated`` regime applies the
+  pre-registered default, fitted on no test cell, so it checks the same
+  rule on every call of the bin (both halves; M3b review). Bins deeper
+  than ``D_max(c)`` (the deepest grid value with ``min_cells_per_bin`` test
+  cells of class ``c``; only cells whose native panel counts reach a depth
+  are thinned to it) inherit the decision of ``D_max(c)`` and are marked
+  extrapolated; a class without such a bin is never emitted (no pooling
+  across classes). Everything not emitted is ``not_resolvable``;
 * **floors**: the smallest emitted depth, combined with the known floors by
-  the max rule for panels without real-data validation (§5.4);
+  the max rule for panels without real-data validation (§5.4); validated
+  panels keep the packaged per-platform floors;
 * **trust constraints**: ``refused`` when broad fails the local rule (base
   target) at every depth up to ``trust_max_depth``; ``broad_only`` when the
   leaf level is resolvable for fewer than half of the classes with enough
@@ -41,9 +44,13 @@ PREP writes ``resolvability.parquet`` (bins, precision-coverage curves,
 isotonic knots, per-node F1, confusion, decisions), ``resolvability_cells
 .parquet`` (per simulated cell x level: parent class, depth, truth, call, bp,
 half) and ``resolvability_summary.json`` into the bundle. RESOLVE refits the
-decisions with the simulated cells reweighted to each dataset's composition
-(``composition_weights``, ``decide``): PREP's unweighted tables set only the
-panel's trust constraints.
+decisions with the simulated cells of each depth bin reweighted to the
+dataset's composition in that bin (``DatasetComposition``,
+``composition_weights``: rare types pooled at broad-class level, weights
+trimmed; ``decide``): PREP's unweighted tables set only the panel's trust
+constraints. Production rules that decide confidence outside the level's own
+bp (the WHB COP rule, ``whb_cells_rules``) are applied to the cells table
+before the decisions.
 
 This module needs numpy, pandas and scipy only; MapMyCells runs through the
 ``map_fn`` a builder passes to ``run_resolvability``.
@@ -57,7 +64,7 @@ import math
 import time
 import zlib
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Literal
 
@@ -81,7 +88,11 @@ logger = logging.getLogger(__name__)
 
 # Bumped when the simulation, tabulation or decision logic changes what the
 # resolvability files contain (it enters build_hash with the recipe).
-RESOLVABILITY_VERSION: Final = 1
+# 2 (M3b review): the validated regime checks the default on both halves;
+# composition weights per depth bin, rare types pooled at broad-class level,
+# trimmed; Kish n and the largest weight share per decision; the WHB COP
+# rule on the broad level; per-platform packaged floors in the summary.
+RESOLVABILITY_VERSION: Final = 2
 SUMMARY_SCHEMA_VERSION: Final = 1
 RESOLVABILITY_FILE: Final = "resolvability.parquet"
 RESOLVABILITY_CELLS_FILE: Final = "resolvability_cells.parquet"
@@ -1424,6 +1435,87 @@ def level_cells(
     return pd.concat(parts, ignore_index=True)
 
 
+CellsRule = Callable[[pd.DataFrame], pd.DataFrame]
+COP_CLASS: Final = "COP"
+
+
+def whb_cop_rule(
+    thresholds: AnnotationThresholds,
+    *,
+    min_depth: int | None = None,
+    level: str = "broad",
+    source_level: str = "supercluster",
+) -> CellsRule:
+    """Return the §5.2 COP rule for the WHB broad level of a cells table.
+
+    Production gives a WHB COP (committed oligodendrocyte precursor) call
+    broad OPC only with at least the COP supercluster floor (120 counts) and
+    supercluster bp >= ``whb_supercluster``; otherwise the cell stays at
+    lineage (``flag_cop_suppressed``). The self-map applies the same rule,
+    so broad OPC is not charged for COP errors production suppresses (M3b
+    review): a broad call whose supercluster call is COP and fails the rule
+    is excluded from the level (``parent`` set to ``None``), as calls to
+    sinks and region-implausible superclusters are, because production
+    never gives it a broad label whatever its bp; it counts neither as a
+    confident call nor in the coverage. A simulated cell stands for the
+    production cells of its depth bin, so the bin (``depth``) is compared
+    with the floor. SEA-AD's confident-OPC rescue is not applied (the WHB
+    self-map has no SEA-AD call), so broad OPC is measured conservatively.
+
+    Args:
+        thresholds: Thresholds (``whb_supercluster``).
+        min_depth: The COP count floor (default: the packaged human
+            supercluster COP floor, the maximum over platforms).
+        level: The level the rule suppresses.
+        source_level: The level holding the supercluster calls.
+
+    Returns:
+        ``cells -> cells`` (a copy when anything changes).
+    """
+    if min_depth is None:
+        from merxen.annotation.vocab import load_floor_table
+
+        min_depth = known_floor(
+            load_floor_table("human"), "supercluster", COP_CLASS, hard_floor=0
+        )
+    floor = int(min_depth)
+    keys = ["recipe", "seed", "sim_id"]
+
+    def apply(cells: pd.DataFrame) -> pd.DataFrame:
+        levels = cells["level"].astype(str)
+        source = cells[
+            (levels == source_level) & (cells["parent"].astype(str) == COP_CLASS)
+        ]
+        if source.empty or not (levels == level).any():
+            return cells
+        passes = (source["depth"].to_numpy(np.int64) >= floor) & meets_threshold(
+            np.nan_to_num(source["bp"].to_numpy(np.float64), nan=-1.0),
+            thresholds.whb_supercluster,
+        )
+        failed = source.loc[~passes, keys].astype(str)
+        if failed.empty:
+            return cells
+        suppressed = pd.MultiIndex.from_frame(failed)
+        target = cells[keys].astype(str)
+        hit = (levels == level).to_numpy() & pd.MultiIndex.from_frame(target).isin(
+            suppressed
+        )
+        if not hit.any():
+            return cells
+        frame = cells.copy()
+        parents = frame["parent"].astype(object).to_numpy(copy=True)
+        parents[hit] = None
+        frame["parent"] = parents
+        return frame
+
+    return apply
+
+
+def whb_cells_rules(thresholds: AnnotationThresholds) -> list[CellsRule]:
+    """Return the production rules the WHB self-map applies to its cells table."""
+    return [whb_cop_rule(thresholds)]
+
+
 def _clean_label(value: object) -> str | None:
     if value is None or (isinstance(value, float) and math.isnan(value)):
         return None
@@ -1480,6 +1572,10 @@ class RuleSettings:
         broad_only_min_class_share: Share of classes whose leaf must be
             resolvable at some depth, else ``broad_only``.
         hard_floor: The hard count floor (``min_counts``).
+        weight_min_type_cells: Test cells a truth type needs in a depth bin
+            to be reweighted on its own (``composition_weights``).
+        weight_trim_factor: Composition weights are capped at this multiple
+            of their bin's median.
     """
 
     min_cells_per_bin: int = 50
@@ -1496,6 +1592,8 @@ class RuleSettings:
     trust_max_depth: int = 250
     broad_only_min_class_share: float = 0.5
     hard_floor: int = 10
+    weight_min_type_cells: int = 20
+    weight_trim_factor: float = 10.0
 
     @classmethod
     def from_config(
@@ -1534,6 +1632,8 @@ class RuleSettings:
             trust_max_depth=trust_max_depth,
             broad_only_min_class_share=broad_only_min_class_share,
             hard_floor=hard_floor,
+            weight_min_type_cells=resolvability.weight_min_type_cells,
+            weight_trim_factor=resolvability.weight_trim_factor,
         )
 
     def target(self, regime: Regime, base_target: float, depth: int) -> float:
@@ -1564,7 +1664,20 @@ class RuleSettings:
 
 @dataclass(frozen=True)
 class CheckStats:
-    """The check-half statistics of one threshold in one bin."""
+    """The checked statistics of one threshold in one bin.
+
+    Attributes:
+        threshold: The threshold (``None``: nothing is confident).
+        n_called: Calls checked.
+        n_confident: Calls at or above the threshold.
+        n_effective: Kish effective n of the confident calls' weights (the n
+            of the Wilson bound).
+        precision: Weighted precision of the confident calls.
+        wilson_lb: Wilson 95% lower bound of that precision.
+        coverage: Weighted share of the checked calls that are confident.
+        max_weight_share: The largest single confident call's share of the
+            confident weight (1 / n_confident when unweighted).
+    """
 
     threshold: float | None
     n_called: int
@@ -1573,6 +1686,7 @@ class CheckStats:
     precision: float
     wilson_lb: float
     coverage: float
+    max_weight_share: float = math.nan
 
 
 def check_threshold(
@@ -1611,6 +1725,7 @@ def check_threshold(
         precision=precision,
         wilson_lb=wilson_lower_bound(precision, n_effective),
         coverage=total / called_total if called_total > 0 else 0.0,
+        max_weight_share=float(accepted_weights.max()) / total,
     )
 
 
@@ -1683,10 +1798,13 @@ def decide(
 
     For each bin with ``depth <= D_max(class)``: the isotonic fit on the fit
     half, the local thresholds for the base and provisional targets, and the
-    check-half statistics at the applied threshold (``validated``: the
-    default; ``provisional`` / ``trust``: ``t*``). Deeper bins inherit the
-    ``D_max`` bin's decision (``extrapolated``); classes without ``D_max``
-    are never emitted.
+    statistics at the applied threshold (``validated``: the default, checked
+    on every call of the bin; ``provisional`` / ``trust``: ``t*``, checked on
+    the check half). Deeper bins inherit the ``D_max`` bin's decision
+    (``extrapolated``); classes without ``D_max`` are never emitted. Weighted
+    rows (RESOLVE) enter the precision with their weight and the Wilson
+    bound with the Kish effective n; ``max_weight_share`` records the
+    largest single call's share of a bin's confident weight.
 
     Args:
         cells: The cells table (``level_cells`` rows).
@@ -1700,8 +1818,8 @@ def decide(
     Returns:
         One row per (regime, level, class, depth): ``status`` (``emitted`` or
         ``not_resolvable``), ``threshold`` (applied), ``t_star``,
-        ``would_raise``, statistics, ``target``, ``d_max``, ``extrapolated``,
-        ``reason``.
+        ``would_raise``, ``check_set`` (``all`` or ``check_half``),
+        statistics, ``target``, ``d_max``, ``extrapolated``, ``reason``.
     """
     row_weights = (
         np.ones(len(cells), dtype=np.float64)
@@ -1797,10 +1915,12 @@ def decide(
         "target",
         "default_threshold",
         "n_test",
+        "check_set",
         "n_called",
         "n_fit",
         "n_confident",
         "n_effective",
+        "max_weight_share",
         "precision",
         "wilson_lb",
         "coverage",
@@ -1814,7 +1934,9 @@ def decide(
     table = pd.DataFrame.from_records(records)
     for column in columns:
         if column not in table.columns:
-            table[column] = np.nan if column not in {"status", "reason"} else None
+            table[column] = (
+                np.nan if column not in {"status", "reason", "check_set"} else None
+            )
     table = table[columns]
     table["extrapolated"] = _bool_column(table["extrapolated"])
     table["would_raise"] = _bool_column(table["would_raise"])
@@ -1840,7 +1962,15 @@ def _bin_decisions(
     settings: RuleSettings,
     base: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Decide one (level, class, depth) bin under every regime."""
+    """Decide one (level, class, depth) bin under every regime.
+
+    ``provisional`` and ``trust`` fit ``t*`` on the fit half and check it on
+    the other half (out of sample). ``validated`` applies the pre-registered
+    default, which is not fitted on these cells, so it is checked on every
+    call of the bin (both halves): halving it would only cost power
+    (M3b review). Its fit-half ``t*`` is reported (``would_raise``), never
+    applied.
+    """
     if group is None or len(group) == 0:
         return [
             {
@@ -1872,9 +2002,7 @@ def _bin_decisions(
     check_bp = bp[check_mask]
     check_correct = correct[check_mask]
     check_weights = weights[check_mask]
-    at_default = check_threshold(
-        check_bp, check_correct, check_weights, meta.default_threshold
-    )
+    at_default = check_threshold(bp, correct, weights, meta.default_threshold)
     g_default = (
         float(fit.predict(meta.default_threshold)) if fit is not None else math.nan
     )
@@ -1890,9 +2018,11 @@ def _bin_decisions(
         if regime == "validated":
             applied: float | None = meta.default_threshold
             stats = at_default
+            check_set = "all"
         else:
             applied = t_star
             stats = check_threshold(check_bp, check_correct, check_weights, t_star)
+            check_set = "check_half" if settings.split_halves else "all"
         reason = _rule_pass(stats, target, settings)
         if fit is None and regime != "validated":
             reason = "too_few_fit_cells"
@@ -1906,10 +2036,12 @@ def _bin_decisions(
                 "would_raise": bool(
                     t_star is None or t_star > meta.default_threshold + _TOLERANCE
                 ),
+                "check_set": check_set,
                 "n_called": stats.n_called,
                 "n_fit": int(fit_mask.sum()),
                 "n_confident": stats.n_confident,
                 "n_effective": stats.n_effective,
+                "max_weight_share": stats.max_weight_share,
                 "precision": stats.precision,
                 "wilson_lb": stats.wilson_lb,
                 "coverage": stats.coverage,
@@ -2070,45 +2202,227 @@ def level_emission(
     return table
 
 
+@dataclass(frozen=True)
+class DatasetComposition:
+    """A dataset's soft composition over truth types, overall and per depth bin.
+
+    RESOLVE reweights the simulated cells of each depth bin to the dataset's
+    cells in the same bin (``composition_weights``): low-count cells are
+    often called into a few sink-like types (e.g. COP), so one dataset-wide
+    composition would over-weight those types at every depth (M3b review).
+
+    Attributes:
+        overall: Share (any scale) per truth type over all table cells.
+        by_depth: Share per truth type of the cells in each depth bin.
+        bin_mass: Total mass (cells) per depth bin.
+        min_bin_mass: Bins with less mass use ``overall``.
+    """
+
+    overall: Mapping[str, float]
+    by_depth: Mapping[int, Mapping[str, float]] = field(default_factory=dict)
+    bin_mass: Mapping[int, float] = field(default_factory=dict)
+    min_bin_mass: float = 50.0
+
+    def at(self, depth: int) -> Mapping[str, float]:
+        """Return the composition the simulated cells of a depth bin follow.
+
+        Args:
+            depth: Grid depth.
+
+        Returns:
+            The bin's composition, or ``overall`` when the bin holds fewer
+            than ``min_bin_mass`` cells.
+        """
+        mass = float(self.bin_mass.get(int(depth), 0.0))
+        shares = self.by_depth.get(int(depth))
+        if shares is None or mass < self.min_bin_mass - _TOLERANCE:
+            return self.overall
+        return shares
+
+    @classmethod
+    def from_cells(
+        cls,
+        types: Sequence[object],
+        mass: np.ndarray | Sequence[float],
+        counts: np.ndarray | Sequence[float],
+        grid: Sequence[int],
+        *,
+        min_bin_mass: float = 50.0,
+    ) -> DatasetComposition:
+        """Sum soft type mass over a dataset's cells, overall and per depth bin.
+
+        Args:
+            types: Truth type of each contribution (one cell may contribute
+                several: its assigned node and runner-ups, §5.5).
+            mass: The contribution (e.g. bootstrap probability).
+            counts: The contributing cell's total counts.
+            grid: The bundle's depth grid.
+            min_bin_mass: ``DatasetComposition.min_bin_mass``.
+
+        Returns:
+            The composition (``bin_mass`` counts cells as their total mass).
+        """
+        labels = np.asarray([_clean_label(value) for value in types], dtype=object)
+        values = np.nan_to_num(np.asarray(mass, dtype=np.float64), nan=0.0)
+        bins = depth_bin(counts, grid)
+        keep = np.array([label is not None for label in labels]) & (values > 0)
+        frame = pd.DataFrame(
+            {"type": labels[keep], "mass": values[keep], "bin": bins[keep]}
+        )
+        overall = {
+            str(name): float(value)
+            for name, value in frame.groupby("type")["mass"].sum().items()
+        }
+        by_depth: dict[int, dict[str, float]] = {}
+        bin_mass: dict[int, float] = {}
+        inside = frame[np.isfinite(frame["bin"].to_numpy(np.float64))]
+        for value, rows in inside.groupby("bin"):
+            depth = int(value)
+            by_depth[depth] = {
+                str(name): float(total)
+                for name, total in rows.groupby("type")["mass"].sum().items()
+            }
+            bin_mass[depth] = float(rows["mass"].sum())
+        return cls(
+            overall=overall,
+            by_depth=by_depth,
+            bin_mass=bin_mass,
+            min_bin_mass=min_bin_mass,
+        )
+
+
+BROAD_LEVEL: Final = "broad"
+
+
+def leaf_class_map(
+    cells: pd.DataFrame, *, key: str = TRUTH_LEAF_COLUMN
+) -> dict[str, str]:
+    """Return each truth type's broad class (the pooling unit of rare types).
+
+    Read from the ``broad`` level's truth classes (human: E2 floor classes,
+    COP inside OPC; mouse: WMB classes), else from any level's.
+
+    Args:
+        cells: The cells table.
+        key: Column holding the truth type.
+
+    Returns:
+        Broad class per truth type (types without one are left out).
+    """
+    frame = cells[cells["truth_parent"].notna()]
+    broad = frame[frame["level"].astype(str) == BROAD_LEVEL]
+    source = broad if len(broad) else frame
+    pairs = source[[key, "truth_parent"]].astype(str).drop_duplicates(key)
+    return dict(zip(pairs[key], pairs["truth_parent"], strict=True))
+
+
 def composition_weights(
     cells: pd.DataFrame,
-    composition: Mapping[str, float],
+    composition: Mapping[str, float] | DatasetComposition,
     *,
     key: str = TRUTH_LEAF_COLUMN,
+    class_of: Mapping[str, str] | None = None,
+    min_type_cells: int = 20,
+    trim_factor: float = 10.0,
 ) -> np.ndarray:
     """Return per-row weights that reweight the test cells to a composition.
 
     Within each (recipe, seed, level, depth) the test cells' truth types are
-    reweighted to the dataset's composition (§8.3 composition reweighting,
-    §5.5): ``w = q(type) / p_depth(type)``. Types absent from the
-    composition get weight 0; composition mass on types without test cells
-    at a depth cannot be represented and is dropped there.
+    reweighted to the dataset's composition of that depth bin (§8.3
+    composition reweighting, §5.5), written down in the M3b review:
+
+    1. ``q``: the dataset's composition in the bin (``DatasetComposition.at``;
+       a plain mapping is used for every bin);
+    2. a type with at least ``min_type_cells`` test cells in the bin gets
+       ``w = q(type) / p(type)`` (``p``: its share of the bin's test cells);
+    3. a rarer type is weighted at its broad class's level, so a handful of
+       test cells cannot stand for a large composition share on their own:
+       it takes the weight of the class's common types,
+       ``sum q / sum p`` over them, or, when the class has no common type
+       in the bin, ``q(class) / p(class)`` over its types present;
+    4. weights above ``trim_factor`` x the bin's median positive weight are
+       capped, and the bin is renormalised to a mean weight of 1.
+
+    Types absent from the composition get weight 0; composition mass on
+    types without test cells in a bin cannot be represented and is dropped
+    there. Decisions record the Kish n and the largest single call's weight
+    share of each bin (``decide``).
 
     Args:
         cells: The cells table.
         composition: Dataset share per truth type, keyed like ``truth_leaf``
             (human: WHB supercluster labels, e.g. ``CS202210140_476``;
-            mouse: WMB subclass labels); any scale.
+            mouse: WMB subclass labels), any scale; a
+            ``DatasetComposition`` gives one per depth bin.
         key: Column holding the truth type.
+        class_of: Broad class per truth type (default ``leaf_class_map``).
+        min_type_cells: Test cells a type needs in a bin to be weighted on
+            its own.
+        trim_factor: Cap on a weight, in bin medians (``<= 0``: no trim).
 
     Returns:
         Weights aligned with ``cells``.
+
+    Raises:
+        ResolvabilityError: If the composition has no positive share.
     """
-    total = float(sum(max(float(value), 0.0) for value in composition.values()))
-    if total <= 0:
+    per_depth = (
+        composition
+        if isinstance(composition, DatasetComposition)
+        else DatasetComposition(overall=dict(composition))
+    )
+    if not sum(max(float(value), 0.0) for value in per_depth.overall.values()) > 0:
         raise ResolvabilityError("the composition has no positive share")
-    share = {
-        str(name): max(float(value), 0.0) / total for name, value in composition.items()
-    }
+    classes = dict(class_of) if class_of is not None else leaf_class_map(cells, key=key)
     types = cells[key].astype(str).to_numpy()
     weights = np.zeros(len(cells), dtype=np.float64)
     group_keys = ["recipe", "seed", "level", "depth"]
-    for _, index in cells.groupby(group_keys, observed=True).indices.items():
+    for group_key, index in cells.groupby(group_keys, observed=True).indices.items():
+        share = _normalised(per_depth.at(int(group_key[3])))
         group_types = types[index]
         present, counts = np.unique(group_types, return_counts=True)
-        p = dict(zip(present, counts / counts.sum(), strict=True))
-        weights[index] = [share.get(value, 0.0) / p[value] for value in group_types]
+        test_share = dict(zip(present, counts / counts.sum(), strict=True))
+        n_cells = dict(zip(present, counts, strict=True))
+        # Per broad class: (q, p) of its common types and of all its types.
+        common: dict[str, list[float]] = {}
+        pooled: dict[str, list[float]] = {}
+        for name in present:
+            unit = classes.get(str(name), str(name))
+            q_p = (share.get(str(name), 0.0), float(test_share[name]))
+            totals = pooled.setdefault(unit, [0.0, 0.0])
+            totals[0] += q_p[0]
+            totals[1] += q_p[1]
+            if n_cells[name] >= min_type_cells:
+                totals = common.setdefault(unit, [0.0, 0.0])
+                totals[0] += q_p[0]
+                totals[1] += q_p[1]
+        type_weight: dict[str, float] = {}
+        for name in present:
+            if n_cells[name] >= min_type_cells:
+                type_weight[name] = share.get(str(name), 0.0) / test_share[name]
+                continue
+            unit = classes.get(str(name), str(name))
+            q_class, p_class = common.get(unit, pooled[unit])
+            type_weight[name] = q_class / p_class if p_class > 0 else 0.0
+        values = np.array([type_weight[name] for name in group_types])
+        positive = values[values > 0]
+        if trim_factor > 0 and len(positive):
+            values = np.minimum(values, trim_factor * float(np.median(positive)))
+        total = float(values.sum())
+        if total > 0:
+            values = values * (len(values) / total)
+        weights[index] = values
     return weights
+
+
+def _normalised(composition: Mapping[str, float]) -> dict[str, float]:
+    """Return a composition scaled to sum 1 (negative shares count as 0)."""
+    total = float(sum(max(float(value), 0.0) for value in composition.values()))
+    if total <= 0:
+        return {}
+    return {
+        str(name): max(float(value), 0.0) / total for name, value in composition.items()
+    }
 
 
 def simulated_floors(
@@ -2159,6 +2473,37 @@ def known_floor(
     return max(hard_floor, int(rows["min_counts"].max()))
 
 
+def packaged_floors(
+    floor_table: pd.DataFrame | None, floor_level: str | None, cls: str
+) -> list[dict[str, Any]]:
+    """Return a class's packaged floors, one per (platform, panel family).
+
+    Args:
+        floor_table: The packaged floors (``load_floor_table``), or ``None``.
+        floor_level: The floor table's level (``None``: none).
+        cls: Floor class.
+
+    Returns:
+        ``platform``, ``panel_family``, ``min_counts`` and ``floor_source``
+        per row, sorted.
+    """
+    if floor_table is None or floor_level is None:
+        return []
+    rows = floor_table[
+        (floor_table["level"] == floor_level) & (floor_table["floor_class"] == cls)
+    ]
+    records = [
+        {
+            "platform": str(row["platform"]),
+            "panel_family": str(row["panel_family"]),
+            "min_counts": int(row["min_counts"]),
+            "floor_source": str(row.get("floor_source", "packaged")),
+        }
+        for _, row in rows.iterrows()
+    ]
+    return sorted(records, key=lambda item: (item["platform"], item["panel_family"]))
+
+
 def combined_floors(
     decisions: pd.DataFrame,
     levels: Sequence[LevelMeta],
@@ -2169,11 +2514,16 @@ def combined_floors(
 ) -> pd.DataFrame:
     """Return the floors per regime: known, simulated and the one applied.
 
-    ``validated``: the packaged (real-data) floors, simulated reported beside
-    them. ``provisional``: max(known, simulated) (§5.4 unknown-panel rule),
-    and at least ``provisional_mouse_subclass_floor`` for the mouse subclass
-    level. A level never emitted for a class has no floor (``None``): it is
-    ``not_resolvable`` there anyway.
+    ``validated``: the packaged (real-data) floors apply per (level, class,
+    platform, panel family) straight from ``floors_<species>.csv``
+    (``floor_source`` ``packaged``, ``floor`` left empty, the per-platform
+    rows in ``packaged``), the simulated floor reported beside them; a
+    level without a packaged table falls back to the hard floor.
+    ``provisional``: max(known, simulated) (§5.4 unknown-panel rule; known
+    = the maximum over platforms and panels), and at least
+    ``provisional_mouse_subclass_floor`` for the mouse subclass level. A
+    level never emitted for a class has no provisional floor (``None``): it
+    is ``not_resolvable`` there anyway.
 
     Args:
         decisions: ``decide`` output.
@@ -2184,7 +2534,7 @@ def combined_floors(
 
     Returns:
         ``regime``, ``level``, ``class``, ``known_floor``, ``simulated_floor``,
-        ``floor``, ``floor_source``.
+        ``floor``, ``floor_source``, ``packaged``.
     """
     meta_of = {meta.level: meta for meta in levels}
     records = []
@@ -2197,9 +2547,13 @@ def combined_floors(
             known = known_floor(
                 floor_table, meta.floor_level, cls, hard_floor=settings.hard_floor
             )
+            packaged = packaged_floors(floor_table, meta.floor_level, cls)
             if regime == "validated":
-                floor: int | None = known
-                source = "real_e2" if meta.floor_level is not None else "hard_floor"
+                floor: int | None
+                if packaged:
+                    floor, source = None, "packaged"
+                else:
+                    floor, source = settings.hard_floor, "hard_floor"
             elif value is None:
                 floor, source = None, "not_resolvable"
             else:
@@ -2216,6 +2570,7 @@ def combined_floors(
                     "simulated_floor": value,
                     "floor": floor,
                     "floor_source": source,
+                    "packaged": packaged if regime == "validated" else [],
                 }
             )
     return pd.DataFrame.from_records(
@@ -2228,6 +2583,7 @@ def combined_floors(
             "simulated_floor",
             "floor",
             "floor_source",
+            "packaged",
         ],
     )
 
@@ -2771,6 +3127,7 @@ def run_resolvability(
     floor_table: pd.DataFrame | None = None,
     fine_seed_check: bool = False,
     provenance: Mapping[str, Any] | None = None,
+    cells_rules: Sequence[CellsRule] = (),
 ) -> ResolvabilityResult:
     """Run the self-map: simulate, map, tabulate, decide (§8.3).
 
@@ -2787,6 +3144,8 @@ def run_resolvability(
         fine_seed_check: Re-map the decision recipe with seed 1 and record
             the fine levels' seed stability (``allow_fine_levels``).
         provenance: Extra summary fields (engine, test set, bundle ids).
+        cells_rules: Production rules applied to each recipe's cells table
+            before the decisions (WHB: ``whb_cells_rules``, the COP rule).
 
     Returns:
         The result.
@@ -2797,15 +3156,41 @@ def run_resolvability(
     timings: dict[str, float] = {}
     frames: list[pd.DataFrame] = []
     queries: dict[str, SimulatedQuery] = {}
+
+    def tabulate_calls(
+        tidy: pd.DataFrame,
+        query: SimulatedQuery,
+        level_specs: Sequence[LevelSpec],
+        seed: int,
+    ) -> pd.DataFrame:
+        frame = level_cells(tidy, query, test, level_specs, seed=seed)
+        for rule in cells_rules:
+            frame = rule(frame)
+        return frame
+
     for recipe in recipes:
         step = time.monotonic()
         query = thin_and_contaminate(test, depths, recipe)
         queries[recipe.name] = query
         timings[f"simulate_{recipe.name}"] = round(time.monotonic() - step, 3)
+        logger.info(
+            "resolvability %s: simulated %d cells from %d test cells in %.1f s "
+            "(per depth: %s)",
+            recipe.name,
+            len(query.obs),
+            len(test.obs),
+            timings[f"simulate_{recipe.name}"],
+            ", ".join(f"{d}: {n}" for d, n in sorted(query.n_by_depth.items())),
+        )
         step = time.monotonic()
         tidy = map_fn(query, recipe.name, 0)
         timings[f"map_{recipe.name}"] = round(time.monotonic() - step, 3)
-        frames.append(level_cells(tidy, query, test, specs, seed=0))
+        logger.info(
+            "resolvability %s: mapped in %.1f s",
+            recipe.name,
+            timings[f"map_{recipe.name}"],
+        )
+        frames.append(tabulate_calls(tidy, query, specs, 0))
     decision_recipe = recipes[0]
     fine_levels = [spec.meta.level for spec in specs if spec.meta.role == "fine"]
     stability: dict[str, float] = {}
@@ -2814,15 +3199,26 @@ def run_resolvability(
     step = time.monotonic()
     decisions = decide(cells, levels, depths, settings, recipe=decision_recipe.name)
     timings["decide"] = round(time.monotonic() - step, 3)
+    for regime in REGIMES:
+        frame = decisions[decisions["regime"] == regime]
+        logger.info(
+            "resolvability %s decisions in %.1f s: %s",
+            regime,
+            timings["decide"],
+            "; ".join(
+                f"{level} {int((rows['status'] == STATUS_EMITTED).sum())} emitted / "
+                f"{int((rows['status'] != STATUS_EMITTED).sum())} not_resolvable"
+                for level, rows in frame.groupby("level", sort=False)
+            ),
+        )
     if fine_seed_check and fine_levels:
         step = time.monotonic()
         tidy = map_fn(queries[decision_recipe.name], f"{decision_recipe.name}_seed1", 1)
-        second = level_cells(
+        second = tabulate_calls(
             tidy,
             queries[decision_recipe.name],
-            test,
             [spec for spec in specs if spec.meta.role == "fine"],
-            seed=1,
+            1,
         )
         timings["map_seed1"] = round(time.monotonic() - step, 3)
         first = cells[(cells["recipe"] == decision_recipe.name) & (cells["seed"] == 0)]
@@ -2833,6 +3229,11 @@ def run_resolvability(
         decisions, levels, settings, floor_table=floor_table, species=species
     )
     trust = trust_constraint(decisions, levels, settings)
+    logger.info(
+        "resolvability trust constraint: %s%s",
+        trust.state or "none",
+        f" ({'; '.join(trust.reasons)})" if trust.reasons else "",
+    )
     efficiency = gene_efficiency(
         len(test.genes), decision_recipe.gene_efficiency_sigma, decision_recipe.seed
     )
@@ -2944,14 +3345,18 @@ def build_summary(
     for record in floors.to_dict("records"):
         simulated = _optional_float(record["simulated_floor"])
         floor = _optional_float(record["floor"])
-        floors_json.setdefault(str(record["regime"]), {}).setdefault(
-            str(record["level"]), {}
-        )[str(record["class"])] = {
+        entry: dict[str, Any] = {
             "known": int(record["known_floor"]),
             "simulated": None if simulated is None else int(simulated),
             "floor": None if floor is None else int(floor),
             "source": record["floor_source"],
         }
+        packaged = record.get("packaged")
+        if isinstance(packaged, list) and packaged:
+            entry["packaged"] = [dict(item) for item in packaged]
+        floors_json.setdefault(str(record["regime"]), {}).setdefault(
+            str(record["level"]), {}
+        )[str(record["class"])] = entry
     return {
         "schema_version": SUMMARY_SCHEMA_VERSION,
         "resolvability_version": RESOLVABILITY_VERSION,
@@ -3027,29 +3432,37 @@ class ResolvabilityTables:
     def decisions(
         self,
         *,
-        composition: Mapping[str, float] | None = None,
+        composition: Mapping[str, float] | DatasetComposition | None = None,
         settings: RuleSettings | None = None,
     ) -> pd.DataFrame:
         """Return decisions, reweighted to a dataset's composition when given.
 
         Args:
             composition: Dataset share per truth type (human supercluster,
-                mouse subclass), or ``None`` for PREP's unweighted decisions.
+                mouse subclass), per depth bin (``DatasetComposition``, what
+                RESOLVE passes) or one for every bin; ``None`` for PREP's
+                unweighted decisions.
             settings: Rule settings (default: the bundle's).
 
         Returns:
             ``decide`` output.
         """
+        rule = settings or self.settings
         weights = (
             None
             if composition is None
-            else composition_weights(self.cells, composition)
+            else composition_weights(
+                self.cells,
+                composition,
+                min_type_cells=rule.weight_min_type_cells,
+                trim_factor=rule.weight_trim_factor,
+            )
         )
         return decide(
             self.cells,
             self.levels,
             self.depth_grid,
-            settings or self.settings,
+            rule,
             weights=weights,
             recipe=str(self.summary["decision_recipe"]),
         )

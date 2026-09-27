@@ -3311,6 +3311,7 @@ def build_whb_frontal(context: BuildContext) -> dict[str, Any]:
                 engine=None,
                 specs_for=lambda engine: _whb_specs(engine, config),
                 timer=timer,
+                cells_rules=_whb_cells_rules(config),
             )
         )
     output.update(timer.to_json())
@@ -5076,6 +5077,7 @@ def _run_self_map(
     engine: Any | None,
     specs_for: Any,
     timer: _StepTimer,
+    cells_rules: Sequence[Any] = (),
 ) -> dict[str, Any]:
     """Run the resolvability self-map of a bundle and write its tables (§8.3).
 
@@ -5087,6 +5089,8 @@ def _run_self_map(
             the held-out WHB reference).
         specs_for: ``engine -> level specs``.
         timer: Step timer.
+        cells_rules: Production rules applied to the cells table before the
+            decisions (``resolvability.whb_cells_rules``).
 
     Returns:
         Builder output: ``resolvability`` (compact record) and, when
@@ -5128,6 +5132,7 @@ def _run_self_map(
             species=context.spec.species,
             floor_table=load_floor_table(context.spec.species),
             fine_seed_check=bool(config.thresholds.allow_fine_levels),
+            cells_rules=cells_rules,
             provenance={
                 "reference_id": context.spec.reference_id,
                 "engine": {
@@ -5171,6 +5176,12 @@ def _whb_specs(engine: Any, config: AnnotationConfig) -> list[Any]:
         config.thresholds,
         region=config.anatomical_region or WHB_WHOLE_CORTEX_REGION,
     )
+
+
+def _whb_cells_rules(config: AnnotationConfig) -> list[Any]:
+    from merxen.annotation import resolvability as res
+
+    return res.whb_cells_rules(config.thresholds)
 
 
 def _wmb_specs(engine: Any, config: AnnotationConfig) -> list[Any]:
