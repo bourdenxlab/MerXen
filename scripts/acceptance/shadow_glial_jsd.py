@@ -1,0 +1,149 @@
+#!/usr/bin/env python
+"""WHB vs SEA-AD glial JSD difference (plan §12 M3 item 7, §5.1; OD-B2 decided).
+
+For information only: OD-B2 (WHB frontal names every class; SEA-AD is the
+second vote) is decided, and changing the naming reference would need a new
+decision. For each human pair and segmentation, the MERSCOPE-vs-Xenium JSD
+of the glial composition (astrocytes, oligodendrocytes, OPC, microglia,
+renormalised) and of the seven broad classes is computed with WHB's soft
+composition (§5.5) and with SEA-AD's (subclass bootstrap probabilities plus
+runner-ups through the SEA-AD vocab; ``seaad_soft_broad_matrix``), and with
+both argmax labellings. The difference WHB - SEA-AD gets a paired spatial
+block-bootstrap CI (the same tile draws for both references, 200
+replicates). Writes ``glial_jsd.csv`` and ``glial_compositions.csv``.
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import sys
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+from merxen.annotation.mapmycells_engine import level_frame, read_tidy_parquet
+from merxen.annotation.shadow import (
+    GLIAL_CLASSES,
+    GLIAL_COLUMNS,
+    argmax_broad_names,
+    composition_shares,
+    one_hot_broad_matrix,
+    paired_block_bootstrap_jsd_difference,
+    seaad_soft_broad_matrix,
+    soft_matrix_from_provisional,
+    tile_codes,
+    tile_sums,
+)
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from shadow_baselines import HELD_OUT_PAIRS, PAIRS, PLATFORMS, load_sample  # noqa: E402
+
+logger = logging.getLogger("shadow_glial_jsd")
+
+SCOPES = {"glia": GLIAL_COLUMNS, "broad7": None}
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Compute the WHB and SEA-AD platform JSDs and their paired difference."""
+    parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    parser.add_argument("--runs-root", type=Path, required=True)
+    parser.add_argument("--results-root", type=Path, required=True)
+    parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--pairs", default=",".join(PAIRS))
+    parser.add_argument("--segmentations", default="proseg_hybrid,reseg")
+    parser.add_argument("--n-bootstrap", type=int, default=200)
+    args = parser.parse_args(argv)
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
+    )
+    rows: list[dict[str, Any]] = []
+    comp_rows: list[dict[str, Any]] = []
+    for seg in [s for s in args.segmentations.split(",") if s]:
+        for pair in [p for p in args.pairs.split(",") if p]:
+            run_dir = args.runs_root / pair / seg
+            if not (run_dir / "map_manifest.json").is_file():
+                continue
+            tiles: dict[tuple[str, str, str], np.ndarray] = {}
+            for platform in PLATFORMS:
+                sample = load_sample(
+                    run_dir, args.results_root, pair, seg, platform, None
+                )
+                tidy, _ = read_tidy_parquet(
+                    run_dir
+                    / platform.lower()
+                    / f"{sample.sample_id}_mmc_seaad_mr_panel.parquet"
+                )
+                subclass = level_frame(tidy, "subclass").reindex(sample.labels.index)
+                supertype = level_frame(tidy, "supertype").reindex(sample.labels.index)
+                matrices = {
+                    ("WHB", "soft"): soft_matrix_from_provisional(sample.labels),
+                    ("SEA-AD", "soft"): seaad_soft_broad_matrix(subclass, supertype),
+                    ("WHB", "argmax"): one_hot_broad_matrix(
+                        argmax_broad_names(sample.labels)
+                    ),
+                    ("SEA-AD", "argmax"): one_hot_broad_matrix(
+                        sample.sea["broad"].to_numpy(object)
+                    ),
+                }
+                codes = tile_codes(sample.xy)
+                for (reference, kind), matrix in matrices.items():
+                    tiles[(reference, kind, platform)] = tile_sums(matrix, codes)
+                    shares = composition_shares(matrix)
+                    glial_total = sum(shares[cls] for cls in GLIAL_CLASSES)
+                    comp_rows.append(
+                        {
+                            "pair": pair,
+                            "segmentation": seg,
+                            "platform": platform,
+                            "reference": reference,
+                            "kind": kind,
+                            **{f"share_{k}": v for k, v in shares.items()},
+                            **{
+                                f"glial_share_{cls}": shares[cls] / glial_total
+                                for cls in GLIAL_CLASSES
+                            },
+                        }
+                    )
+            for kind in ("soft", "argmax"):
+                for scope, columns in SCOPES.items():
+                    result = paired_block_bootstrap_jsd_difference(
+                        tiles[("WHB", kind, "MERSCOPE")],
+                        tiles[("WHB", kind, "XENIUM")],
+                        tiles[("SEA-AD", kind, "MERSCOPE")],
+                        tiles[("SEA-AD", kind, "XENIUM")],
+                        columns=columns,
+                        n_reps=args.n_bootstrap,
+                    )
+                    rows.append(
+                        {
+                            "pair": pair,
+                            "segmentation": seg,
+                            "held_out": pair in HELD_OUT_PAIRS
+                            or seg != "proseg_hybrid",
+                            "kind": kind,
+                            "scope": scope,
+                            "jsd_whb": result.first_jsd,
+                            "jsd_whb_ci_low": result.first_ci[0],
+                            "jsd_whb_ci_high": result.first_ci[1],
+                            "jsd_seaad": result.second_jsd,
+                            "jsd_seaad_ci_low": result.second_ci[0],
+                            "jsd_seaad_ci_high": result.second_ci[1],
+                            "difference_whb_minus_seaad": result.difference,
+                            "difference_ci_low": result.ci_low,
+                            "difference_ci_high": result.ci_high,
+                            "share_replicates_whb_higher": result.share_positive,
+                        }
+                    )
+            logger.info("%s %s done", pair, seg)
+    args.out.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows).to_csv(args.out / "glial_jsd.csv", index=False)
+    pd.DataFrame(comp_rows).to_csv(args.out / "glial_compositions.csv", index=False)
+    logger.info("wrote %s", args.out)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

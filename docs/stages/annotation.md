@@ -269,6 +269,21 @@ thresholds are in
 [docs/acceptance/annotation-v1-preregistration.md](../acceptance/annotation-v1-preregistration.md).
 Baselines may only tighten a threshold.
 
+The other shadow items (plan §12 M3 items 2–7) have their own scripts, each
+reading the `merxen annotate` outputs and the published inputs read-only:
+
+| Script | Item | What it does |
+|---|---|---|
+| `scripts/acceptance/shadow_e8.py` | 2, E8 | Confident cells per mm², foreign-marker fraction and platform JSD for the four segmentations of a human pair and a mouse section (OD-B6, OD-B7) |
+| `scripts/acceptance/shadow_x1.py` | 3, X1 | Reference-pseudobulk per-gene factors (±2 log2 cap), a rescaled WHB re-map, JSD with paired CIs and the referee vs set a and set c |
+| `scripts/acceptance/heldout_genes.py` | 4, H4 | Held-out markers removed from query and lookup, a WHB-only re-map, fold enrichment and AUROC per class and platform (variants set a, set c, X1) |
+| `scripts/acceptance/shadow_flags.py` | 5, H16 | Prototype contamination (dataset-empirical beta-binomial null) and diffuse-profile (multinomial q95) flags; realised rates per class × platform |
+| `scripts/acceptance/shadow_ll.py` | 6, OD-B8 / OD-B13 | LL (vii) on every table cell; coverage and referee outcomes with and without the LL vote |
+| `scripts/acceptance/shadow_glial_jsd.py` | 7 | WHB vs SEA-AD glial JSD with a paired block-bootstrap CI |
+
+The results and the decisions they feed (X1, OD-B6 / OD-B7, OD-B8, OD-B13, the
+H4 and H16 baselines) are in §11 of the pre-registration document.
+
 ## Known limitations
 
 - **Four WMB subclasses have no 10Xv3 reference cell** (`157 RN Spp1 Glut`,
