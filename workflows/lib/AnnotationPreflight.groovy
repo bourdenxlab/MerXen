@@ -181,7 +181,8 @@ class AnnotationPreflight {
 
     // Params the human held-out test set (whb_frontal_supc_clus_ho) reads:
     // the region directory (region_cell_metadata.csv), the raw WHB h5ads and
-    // the WHB taxonomy tables (cluster annotation and membership).
+    // the WHB metadata directory (the taxonomy tables and the WHB cell
+    // metadata, which holds the other-region non-neuronal test cells).
     static final List<String> HUMAN_SELFMAP_SOURCE_PARAMS = [
         "annotation_whb_region_precompute_source",
         "annotation_whb_h5ad_dir",

@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "aa28ead8457b28bf6e268f0184c234dd3a619f265b69ee3f7d6a8395fb7ed10f",
+    3: "1cd5a58eec7b0d6df02eb47a5ee87bf7d1831b8569b3d514084c399f6a5906ad",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -63,6 +63,12 @@ PIN_HISTORY = (
     "pooled deep bins with the point precision in the rule); the version "
     "enters every self-map bundle's build_hash through the resolvability "
     "builder params, so those bundles get new hashes without a builder bump",
+    "3: the human held-out test set topped up with other-region non-neuronal "
+    "WHB cells (user decision 2026-09-27); the new content enters the "
+    "whb_frontal_supc_clus_ho build_hash through its hashed other_region "
+    "params and the WHB cell metadata source, and every self-map bundle's "
+    "through the test-set params and RESOLVABILITY_VERSION 3; the mouse "
+    "test-set and all other bundles are unchanged",
 )
 
 

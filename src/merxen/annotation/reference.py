@@ -94,6 +94,7 @@ from merxen.annotation.store import (
 )
 from merxen.annotation.vocab import (
     ASSET_DIR,
+    NEURONS,
     UNASSIGNED_LABEL,
     VOCAB_FILES,
     Species,
@@ -279,6 +280,36 @@ HO_MIN_TRAINING_CELLS_PER_CLUSTER: Final = 5
 HO_MAX_TEST_CELLS_PER_SUPERCLUSTER: Final = 1000
 HO_DEFAULT_TEST_CELLS: Final = 25_000
 TEST_SET_SEED: Final = 0
+# Other-region non-neuronal test cells (user decision 2026-09-27; E2
+# research/insilico/01b_extract_nonneurons.py): the held-out donor holds few
+# cells of the thin non-neuronal superclusters (set a: Vascular 23,
+# Fibroblast 5, COP 20), so every non-neuronal supercluster of the test set
+# is topped up to the per-supercluster cap with WHB non-neuronal nuclei from
+# E2's 14 neocortical dissections outside the frontal reference ROIs. Their
+# cells are in no frontal reference, training or marker set (checked).
+HO_OTHER_REGION_VERSION: Final = 1
+HO_OTHER_REGION_ROI_LABELS: Final[tuple[str, ...]] = (
+    "Human MTG",
+    "Human STG",
+    "Human M1C",
+    "Human A43",
+    "Human A40",
+    "Human V1C",
+    "Human V2",
+    "Human A19",
+    "Human S1C",
+    "Human A1C",
+    "Human A5-A7",
+    "Human ITG",
+    "Human A38",
+    "Human A13",
+)
+HO_OTHER_REGION_MATRIX: Final = "WHB-10Xv3-Nonneurons"
+HO_OTHER_REGION_SEED: Final = 1
+# Test-cell provenance column of the human test set.
+TEST_SOURCE_COLUMN: Final = "test_source"
+TEST_SOURCE_DONOR: Final = "holdout_donor"
+TEST_SOURCE_OTHER_REGION: Final = "other_region"
 WMB_TESTSET_EXTRA_SEED: Final = 2
 # The non-neuronal WMB classes whose supertypes get extra test cells (§3.2:
 # Astro-Epen, OPC-Oligo, Vascular, Immune).
@@ -290,6 +321,7 @@ WMB_NONNEURONAL_TEST_CLASSES: Final[tuple[str, ...]] = (
 )
 HO_SOURCES: Final[tuple[str, ...]] = (
     SOURCE_WHB_REGION_CELL_METADATA,
+    SOURCE_WHB_CELL_METADATA,
     SOURCE_WHB_NEURONS_H5AD,
     SOURCE_WHB_NONNEURONS_H5AD,
     SOURCE_WHB_CLUSTER_ANNOTATION,
@@ -2462,14 +2494,15 @@ def _complete_seaad_sources(
             sources.setdefault(name, ensured[key])
 
 
+# The WHB cell metadata is always read: it holds the other-region
+# non-neuronal test cells (and, without the region cell metadata, rebuilds
+# the frontal cells with the ROI map).
 _HO_METADATA_PATTERNS: Final[tuple[str, ...]] = (
+    SOURCE_WHB_CELL_METADATA,
     SOURCE_WHB_CLUSTER_ANNOTATION,
     SOURCE_WHB_CLUSTER_MEMBERSHIP,
 )
-_HO_REBUILD_METADATA_PATTERNS: Final[tuple[str, ...]] = (
-    SOURCE_WHB_CELL_METADATA,
-    SOURCE_WHB_ROI_MAP,
-)
+_HO_REBUILD_METADATA_PATTERNS: Final[tuple[str, ...]] = (SOURCE_WHB_ROI_MAP,)
 
 
 def _region_cell_metadata_of(directory: Path | None) -> Path | None:
@@ -2487,7 +2520,8 @@ def _complete_holdout_sources(sources: dict[str, Path]) -> None:
 
     The test set needs the frontal cells' donors and clusters (the region
     cell metadata, else the WHB cell metadata and ROI map to rebuild it),
-    the taxonomy tables and the two raw WHB h5ads (plan §3.2).
+    the WHB cell metadata (other-region non-neuronal cells), the taxonomy
+    tables and the two raw WHB h5ads (plan §3.2, §8.3).
     """
     metadata_names = list(_HO_METADATA_PATTERNS)
     if SOURCE_WHB_REGION_CELL_METADATA not in sources:
@@ -4505,6 +4539,44 @@ def _ho_region_metadata(context: BuildContext) -> pd.DataFrame:
     )
 
 
+def _other_region_metadata(context: BuildContext, labels: pd.DataFrame) -> pd.DataFrame:
+    """Return the WHB cells of the other-region dissections, with WHB levels.
+
+    Reads the WHB cell metadata (only the columns the draw needs) and keeps
+    the non-neuronal nuclei of ``HO_OTHER_REGION_ROI_LABELS``.
+
+    Args:
+        context: The build context (``whb_cell_metadata`` source).
+        labels: WHB level labels per cluster alias (``membership_labels``).
+
+    Returns:
+        ``cell_label``, ``feature_matrix_label``, ``donor_label``,
+        ``cluster_alias``, ``region_of_interest_label`` and the WHB levels.
+    """
+    path = _source_path(context, SOURCE_WHB_CELL_METADATA)
+    frame = pd.read_csv(
+        path,
+        usecols=[
+            "cell_label",
+            "feature_matrix_label",
+            "donor_label",
+            "cluster_alias",
+            "region_of_interest_label",
+        ],
+        dtype={
+            "cell_label": str,
+            "feature_matrix_label": str,
+            "donor_label": str,
+            "region_of_interest_label": str,
+        },
+    )
+    frame = frame[
+        frame["region_of_interest_label"].isin(list(HO_OTHER_REGION_ROI_LABELS))
+        & (frame["feature_matrix_label"] == HO_OTHER_REGION_MATRIX)
+    ]
+    return frame.join(labels, on="cluster_alias")
+
+
 def _matrix_genes(path: Path) -> list[str]:
     import anndata as ad
 
@@ -4559,6 +4631,146 @@ def _spill_groups(truth_labels: Iterable[str], taxonomy_id: str) -> list[str]:
     return groups
 
 
+def nonneuronal_superclusters(labels: Iterable[str]) -> list[str]:
+    """Return the WHB superclusters of a non-neuronal vocab broad class.
+
+    Neurons and the ``Mixed/Unknown`` superclusters (Miscellaneous,
+    Splatter, Ependymal, Bergmann glia, Choroid plexus) are left out.
+
+    Args:
+        labels: WHB supercluster labels (``CS202210140_*``).
+
+    Returns:
+        The non-neuronal labels, sorted.
+    """
+    table = load_vocab("whb_supercluster")
+    label_to_name = table.label_to_name()
+    kept = []
+    for label in {str(value) for value in labels}:
+        name = label_to_name.get(label)
+        if name is None or name not in table:
+            continue
+        if table.broad_class(name) not in {NEURONS, UNASSIGNED_LABEL}:
+            kept.append(label)
+    return sorted(kept)
+
+
+def other_region_test_cells(
+    cell_metadata: pd.DataFrame,
+    *,
+    reference_cells: Iterable[str],
+    training_superclusters: Iterable[str],
+    training_clusters: Iterable[str],
+    have: Mapping[str, int],
+    cap: int,
+    room: int | None,
+    roi_labels: Sequence[str] = HO_OTHER_REGION_ROI_LABELS,
+    feature_matrix: str = HO_OTHER_REGION_MATRIX,
+    seed: int = HO_OTHER_REGION_SEED,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Draw other-region non-neuronal test cells for the human test set.
+
+    User decision 2026-09-27 (H18 follow-up; E2
+    ``research/insilico/01b_extract_nonneurons.py``): WHB non-neuronal
+    nuclei (``feature_matrix``) from neocortical dissections outside the
+    frontal reference (``roi_labels``), of the non-neuronal superclusters
+    (``nonneuronal_superclusters``) the held-out training reference holds,
+    top every non-neuronal supercluster of the test set up to the
+    per-supercluster cap (``res.top_up_test_cells``). As in E2 (and as for
+    the held-out donor's own cells), their clusters are not restricted: the
+    drawn cells of clusters absent from the training reference are counted
+    (their cluster truth cannot be called; the cluster level is report-only).
+    Candidates among ``reference_cells`` (every frontal region cell: the
+    training, marker and held-out donor cells) are dropped and counted; the
+    draw is checked disjoint from them.
+
+    Args:
+        cell_metadata: WHB cell metadata joined with the WHB levels
+            (``cell_label``, ``feature_matrix_label``, ``donor_label``,
+            ``cluster_alias``, ``region_of_interest_label`` and the
+            supercluster, cluster and subcluster labels).
+        reference_cells: Cell labels of the frontal reference cells.
+        training_superclusters: Supercluster labels of the held-out training
+            reference (a drawn cell's supercluster must be one).
+        training_clusters: Cluster labels of the held-out training reference
+            (recorded only).
+        have: Held-out donor test cells per supercluster.
+        cap: The test set's per-supercluster cap.
+        room: Test cells the set may still take (``n_test_cells`` - donor).
+        roi_labels: Dissections to draw from.
+        feature_matrix: WHB feature matrix of the candidates.
+        seed: Sampling seed.
+
+    Returns:
+        ``(rows, record)``: the drawn cells (``cell_metadata`` columns) and
+        what ``bundle.json`` records (dissections, counts per supercluster,
+        broad class, dissection and donor, exclusions, disjointness).
+
+    Raises:
+        ReferenceBuildError: If a drawn cell is a reference cell.
+    """
+    from merxen.annotation import resolvability as res
+
+    reference = {str(label) for label in reference_cells}
+    frame = cell_metadata[
+        cell_metadata["region_of_interest_label"].astype(str).isin(list(roi_labels))
+        & (cell_metadata["feature_matrix_label"].astype(str) == feature_matrix)
+    ]
+    frame = frame.dropna(subset=list(WHB_SOURCE_HIERARCHY))
+    mappable = {str(label) for label in training_superclusters}
+    eligible = set(nonneuronal_superclusters(frame[WHB_SUPC].astype(str))) & mappable
+    frame = frame[frame[WHB_SUPC].astype(str).isin(eligible)]
+    n_in_rois = int(len(frame))
+    is_reference = frame["cell_label"].astype(str).isin(reference)
+    n_reference = int(is_reference.sum())
+    frame = frame[~is_reference]
+    frame = frame.drop_duplicates("cell_label").set_index("cell_label", drop=False)
+    frame.index = frame.index.astype(str)
+    chosen = res.top_up_test_cells(
+        frame, stratum=WHB_SUPC, have=have, cap=cap, room=room, seed=seed
+    )
+    rows = frame.loc[chosen].reset_index(drop=True)
+    overlap = sorted(set(rows["cell_label"].astype(str)) & reference)
+    if overlap:  # pragma: no cover - guarded by the filter above
+        raise ReferenceBuildError(
+            f"other-region test cells overlap the reference cells: {overlap[:5]}"
+        )
+    supc = rows[WHB_SUPC].astype(str)
+    groups = _spill_groups(supc, WHB_TAXONOMY_ID)
+    unseen = ~rows[WHB_CLUS].astype(str).isin({str(c) for c in training_clusters})
+
+    def counts(values: Iterable[str]) -> dict[str, int]:
+        series = pd.Series(list(values), dtype=object)
+        return {str(k): int(v) for k, v in series.value_counts().sort_index().items()}
+
+    available = frame[WHB_SUPC].astype(str).value_counts()
+    record = {
+        "version": HO_OTHER_REGION_VERSION,
+        "source": "WHB cell metadata (other dissections, non-neuronal nuclei)",
+        "roi_labels": list(roi_labels),
+        "feature_matrix": feature_matrix,
+        "seed": int(seed),
+        "cap_per_supercluster": int(cap),
+        "eligible_superclusters": sorted(eligible),
+        "n_candidates_in_rois": n_in_rois,
+        "n_excluded_reference_cells": n_reference,
+        "n_candidates": int(len(frame)),
+        "candidates_per_supercluster": {
+            str(k): int(v) for k, v in available.sort_index().items()
+        },
+        "n_cells": int(len(rows)),
+        "per_supercluster": counts(supc),
+        "per_broad_class": counts(groups),
+        "per_region": counts(rows["region_of_interest_label"].astype(str)),
+        "per_donor": counts(rows["donor_label"].astype(str)),
+        "n_cluster_not_in_training": int(unseen.sum()),
+        "cluster_not_in_training_per_supercluster": counts(supc[unseen.to_numpy()]),
+        "disjoint_from_reference_cells": not overlap,
+        "n_reference_cells_checked": len(reference),
+    }
+    return rows, record
+
+
 def build_whb_frontal_ho(context: BuildContext) -> dict[str, Any]:
     """Build the ``whb_frontal_supc_clus_ho`` bundle (human, resolvability).
 
@@ -4572,7 +4784,12 @@ def build_whb_frontal_ho(context: BuildContext) -> dict[str, Any]:
     is the mapping precompute, with panel markers (``n_per_utility``); the
     held-out donor's cells, at most 1,000 per supercluster (all cells of
     rare ones) and at most ``n_test_cells``, are the test set
-    (``test_cells.h5ad`` with native panel counts and their truth).
+    (``test_cells.h5ad`` with native panel counts and their truth), and
+    every non-neuronal supercluster is topped up to that cap with WHB
+    non-neuronal nuclei of neocortical dissections outside the frontal ROIs
+    (``other_region_test_cells``; user decision 2026-09-27), recorded in
+    ``bundle.json`` (``test_set.other_region``) and per cell
+    (``test_source``).
 
     Args:
         context: The build context.
@@ -4591,6 +4808,7 @@ def build_whb_frontal_ho(context: BuildContext) -> dict[str, Any]:
     }
     with timer.step("region_cells"):
         metadata = _ho_region_metadata(context)
+        frontal_cells = set(metadata["cell_label"].astype(str))
         labels = membership_labels(
             _source_path(context, SOURCE_WHB_CLUSTER_MEMBERSHIP), WHB_SOURCE_HIERARCHY
         )
@@ -4617,6 +4835,36 @@ def build_whb_frontal_ho(context: BuildContext) -> dict[str, Any]:
         seed=TEST_SET_SEED,
     )
     test_rows = pool.loc[chosen].reset_index(drop=True)
+    test_rows[TEST_SOURCE_COLUMN] = TEST_SOURCE_DONOR
+    cap = res.stratum_cap(
+        pool.groupby(WHB_SUPC, observed=True).size(),
+        HO_MAX_TEST_CELLS_PER_SUPERCLUSTER,
+        n_test,
+    )
+    with timer.step("other_region_cells"):
+        other_rows, other_record = other_region_test_cells(
+            _other_region_metadata(context, labels),
+            reference_cells=frontal_cells | set(training["cell_label"].astype(str)),
+            training_superclusters=training[WHB_SUPC].astype(str).unique(),
+            training_clusters=[str(value) for value in kept_clusters],
+            have={
+                str(key): int(value)
+                for key, value in test_rows[WHB_SUPC].astype(str).value_counts().items()
+            },
+            cap=cap,
+            room=max(0, int(n_test) - len(test_rows)),
+        )
+    logger.info(
+        "%s: %d held-out donor test cells + %d other-region non-neuronal cells (%s)",
+        HO_REFERENCE_ID,
+        len(test_rows),
+        len(other_rows),
+        ", ".join(f"{k}: {v}" for k, v in other_record["per_broad_class"].items()),
+    )
+    other_rows[TEST_SOURCE_COLUMN] = TEST_SOURCE_OTHER_REGION
+    test_rows = pd.concat(
+        [test_rows, other_rows[list(test_rows.columns)]], ignore_index=True
+    )
     matrices = {
         "WHB-10Xv3-Neurons": _source_path(context, SOURCE_WHB_NEURONS_H5AD),
         "WHB-10Xv3-Nonneurons": _source_path(context, SOURCE_WHB_NONNEURONS_H5AD),
@@ -4726,6 +4974,7 @@ def build_whb_frontal_ho(context: BuildContext) -> dict[str, Any]:
             "region_of_interest_label": test_rows["region_of_interest_label"]
             .astype(str)
             .to_numpy(),
+            TEST_SOURCE_COLUMN: test_rows[TEST_SOURCE_COLUMN].astype(str).to_numpy(),
         },
         index=pd.Index(test_rows["cell_label"].astype(str).to_numpy(), name="cell_id"),
     )
@@ -4740,6 +4989,12 @@ def build_whb_frontal_ho(context: BuildContext) -> dict[str, Any]:
         "n_pool_cells": int(len(pool)),
         "n_test_cells_requested": int(n_test),
         "max_per_supercluster": HO_MAX_TEST_CELLS_PER_SUPERCLUSTER,
+        "cap_per_supercluster": int(cap),
+        "per_source": {
+            str(key): int(value)
+            for key, value in test_rows[TEST_SOURCE_COLUMN].value_counts().items()
+        },
+        "other_region": other_record,
         "seed": TEST_SET_SEED,
         "per_supercluster": {
             str(key): int(value)
@@ -5279,6 +5534,12 @@ def _ho_params(
         "min_cells_per_leaf": WHB_FRONTAL_MIN_CELLS_PER_LEAF,
         "seed": TEST_SET_SEED,
         "vocab_assets": vocab_asset_sha256(WHB_TAXONOMY_ID),
+        "other_region": {
+            "version": HO_OTHER_REGION_VERSION,
+            "roi_labels": list(HO_OTHER_REGION_ROI_LABELS),
+            "feature_matrix": HO_OTHER_REGION_MATRIX,
+            "seed": HO_OTHER_REGION_SEED,
+        },
     }
 
 

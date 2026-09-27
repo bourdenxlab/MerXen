@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -2336,8 +2336,27 @@ SEA_MARKERS = {
 }
 
 
+# Other-region WHB cells of the fixture (``HO_OTHER_REGION``): drawn only
+# when non-neuronal (of a training supercluster) and of an E2 dissection;
+# clusters are not restricted (c5 has no training cluster).
+HO_OTHER_REGION = (
+    # (label prefix, n, cluster alias, matrix, dissection, donor)
+    ("mtg_astro", 4, 4, "WHB-10Xv3-Nonneurons", "Human MTG", "H_big"),
+    ("v1c_micro", 3, 6, "WHB-10Xv3-Nonneurons", "Human V1C", "H_other"),
+    ("mtg_c5", 2, 7, "WHB-10Xv3-Nonneurons", "Human MTG", "H_big"),  # cluster c5
+    ("mtg_neuron", 2, 1, "WHB-10Xv3-Nonneurons", "Human MTG", "H_big"),  # neuron
+    ("mtg_neuron_matrix", 2, 4, "WHB-10Xv3-Neurons", "Human MTG", "H_big"),
+    ("a25_astro", 2, 4, "WHB-10Xv3-Nonneurons", "Human A25", "H_big"),  # not E2
+)
+
+
 def write_ho_sources(tmp_path: Path) -> dict[str, Path]:
-    """Frontal-like WHB cells of three donors, raw h5ads and taxonomy tables."""
+    """Frontal-like WHB cells of three donors, raw h5ads and taxonomy tables.
+
+    The WHB cell metadata holds the frontal cells and the other-region
+    cells of ``HO_OTHER_REGION`` (whose counts come from a separate seed, so
+    the frontal cells' counts do not depend on them).
+    """
     import anndata as ad
     import scipy.sparse as sp
 
@@ -2370,6 +2389,22 @@ def write_ho_sources(tmp_path: Path) -> dict[str, Path]:
     meta.to_csv(region / reference.REGION_CELL_METADATA_FILE, index=False)
     metadata = tmp_path / "whb_metadata"
     metadata.mkdir()
+    other = pd.DataFrame(
+        [
+            {
+                "cell_label": f"{prefix}-{index}",
+                "feature_matrix_label": matrix,
+                "donor_label": donor,
+                "cluster_alias": alias,
+                "region_of_interest_label": roi,
+            }
+            for prefix, n_cells, alias, matrix, roi, donor in HO_OTHER_REGION
+            for index in range(n_cells)
+        ]
+    )
+    pd.concat([meta, other], ignore_index=True).assign(
+        anatomical_division_label="Cerebral cortex"
+    ).to_csv(metadata / "cell_metadata.csv", index=False)
     members = []
     for alias in range(1, 8):
         subcluster = f"s{alias}"
@@ -2395,16 +2430,27 @@ def write_ho_sources(tmp_path: Path) -> dict[str, Path]:
     h5ad_dir = tmp_path / "WHB-10Xv3"
     h5ad_dir.mkdir()
     genes = [*GENES, "ENSG00000000999"]
-    for matrix, group in meta.groupby("feature_matrix_label"):
+    other_rng = np.random.default_rng(4)
+
+    def cell_counts(aliases: Iterable[int], generator: np.random.Generator) -> list:
         counts = []
-        for alias in group["cluster_alias"]:
-            base = rng.poisson(12.0, len(genes)).astype(float)
+        for alias in aliases:
+            base = generator.poisson(12.0, len(genes)).astype(float)
             supercluster = CLUS_TO_SUPC[SUBC_TO_CLUS[f"s{alias}"]]
             base[MARKER_OF_SUPC[supercluster]] += 150
-            counts.append(base * rng.uniform(0.5, 2.0))
+            counts.append(base * generator.uniform(0.5, 2.0))
+        return counts
+
+    for matrix, group in meta.groupby("feature_matrix_label"):
+        extra = other[other["feature_matrix_label"] == matrix]
+        counts = cell_counts(group["cluster_alias"], rng) + cell_counts(
+            extra["cluster_alias"], other_rng
+        )
         ad.AnnData(
             X=sp.csr_matrix(np.round(np.asarray(counts)).astype(np.float32)),
-            obs=pd.DataFrame(index=group["cell_label"].to_numpy()),
+            obs=pd.DataFrame(
+                index=[*group["cell_label"].to_numpy(), *extra["cell_label"].to_numpy()]
+            ),
             var=pd.DataFrame(index=genes),
         ).write_h5ad(h5ad_dir / f"{matrix}-raw.h5ad")
     return {"region_dir": region, "metadata": metadata, "h5ad_dir": h5ad_dir}
@@ -2560,6 +2606,7 @@ def test_holdout_bundle_trains_without_the_donor_and_keeps_its_cells_as_tests(
     )
     assert set(spec.sources) == {
         "whb_region_cell_metadata",
+        "whb_cell_metadata",
         "whb_neurons_h5ad",
         "whb_nonneurons_h5ad",
         "whb_cluster_annotation_term",
@@ -2594,7 +2641,10 @@ def test_holdout_bundle_trains_without_the_donor_and_keeps_its_cells_as_tests(
     per_supercluster = test.obs[f"{res.TRUTH_PREFIX}{SUPC}"].value_counts()
     assert len(test.obs) <= 20 and test_set["n_test_cells_requested"] == 20
     assert set(per_supercluster) == {6}
+    # The cap (6) is reached by the donor: no other-region top-up.
     assert set(test.obs["donor_label"]) == {"H_small"}
+    assert set(test.obs[reference.TEST_SOURCE_COLUMN]) == {"holdout_donor"}
+    assert test_set["other_region"]["n_cells"] == 0
     assert set(test.obs[f"{res.TRUTH_PREFIX}{SUPC}"]) == {UL_IT, ASTRO, MICRO}
     assert test.genes == GENES  # panel genes present in WHB
     assert set(test.obs[res.SPILL_GROUP_COLUMN]) == {
@@ -2615,6 +2665,126 @@ def test_holdout_bundle_trains_without_the_donor_and_keeps_its_cells_as_tests(
     mmc = MmcBundle.from_dir(bundle_dir)
     assert mmc.levels == (SUPC, CLUS)
     assert (bundle_dir / res.TEST_CELLS_OBS_FILE).is_file()
+
+
+def test_holdout_test_set_tops_up_nonneuronal_superclusters_from_other_regions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    sources = write_ho_sources(tmp_path)
+    fake = FakeCtm(ho_lookup).install(monkeypatch)
+    trained: list[pd.DataFrame] = []
+
+    def recording_precompute(config: dict[str, Any]) -> None:
+        trained.append(pd.read_csv(config["cell_metadata_path"]))
+        ho_precompute(config)
+
+    fake.precompute = recording_precompute
+    spec = prepare_reference_spec(
+        AnnotationReferenceSpec(
+            reference_id=reference.HO_REFERENCE_ID,
+            species="human",
+            role="resolvability",
+            hierarchy=[SUPC, CLUS],
+            sources=ho_spec_sources(sources),
+        )
+    )
+    config = AnnotationConfig(species="human", resolvability={"n_test_cells": 1000})
+    bundle = ReferenceStore(tmp_path / "store").get_or_build(
+        spec, make_panel(GENES), builder=builder_for(spec, config), config=config
+    )
+    bundle_dir = Path(bundle.path)
+    test_set = json.loads((bundle_dir / BUNDLE_MANIFEST_NAME).read_text())[
+        "builder_output"
+    ]["test_set"]
+    test = res.load_test_cells(bundle_dir)
+    source = test.obs[reference.TEST_SOURCE_COLUMN]
+    other = test.obs[source == reference.TEST_SOURCE_OTHER_REGION]
+    # Every held-out donor cell (cap 1,000) plus the eligible other-region
+    # cells: non-neuronal nuclei of E2 dissections (any cluster, as E2).
+    assert (source == reference.TEST_SOURCE_DONOR).sum() == HO_DONORS["H_small"]
+    assert sorted({label.rsplit("-", 1)[0] for label in other.index}) == [
+        "mtg_astro",
+        "mtg_c5",
+        "v1c_micro",
+    ]
+    assert len(other) == 9
+    assert set(other["region_of_interest_label"]) <= set(
+        reference.HO_OTHER_REGION_ROI_LABELS
+    )
+    # Disjoint from every reference cell: the frontal cells (training and
+    # held-out donor) and the training cells the precompute was built from.
+    frontal = pd.read_csv(sources["region_dir"] / reference.REGION_CELL_METADATA_FILE)
+    (training,) = trained
+    assert not set(other.index) & set(frontal["cell_label"])
+    assert not set(other.index) & set(training["cell_label"])
+    # Recorded in the bundle: dissections, counts per class, exclusions.
+    record = test_set["other_region"]
+    assert record["roi_labels"] == list(reference.HO_OTHER_REGION_ROI_LABELS)
+    assert record["feature_matrix"] == "WHB-10Xv3-Nonneurons"
+    assert record["n_cells"] == 9
+    assert record["per_supercluster"] == {MICRO: 5, ASTRO: 4}
+    assert record["per_broad_class"] == {"Astrocytes": 4, "Microglia": 5}
+    assert record["per_region"] == {"Human MTG": 6, "Human V1C": 3}
+    assert record["per_donor"] == {"H_big": 6, "H_other": 3}
+    assert record["n_cluster_not_in_training"] == 2
+    assert record["cluster_not_in_training_per_supercluster"] == {MICRO: 2}
+    assert record["n_excluded_reference_cells"] == 0
+    assert record["disjoint_from_reference_cells"] is True
+    assert set(record["eligible_superclusters"]) == {ASTRO, MICRO}
+    assert test_set["per_source"] == {"holdout_donor": 30, "other_region": 9}
+    assert test_set["per_supercluster"][ASTRO] == 8 + 4
+    # Their counts are the raw WHB counts of the panel genes.
+    import anndata as ad
+
+    raw = ad.read_h5ad(sources["h5ad_dir"] / "WHB-10Xv3-Nonneurons-raw.h5ad")
+    label = other.index[0]
+    np.testing.assert_allclose(
+        test.counts[list(test.obs.index).index(label)].toarray().ravel(),
+        raw[label, GENES].X.toarray().ravel(),
+    )
+
+
+def test_other_region_draw_never_takes_a_reference_cell() -> None:
+    labels = pd.DataFrame(
+        {SUPC: [ASTRO, MICRO], CLUS: ["c3", "c4"], SUBC: ["s4", "s6"]},
+        index=pd.Index([4, 6], name="cluster_alias"),
+    )
+    metadata = pd.DataFrame(
+        {
+            "cell_label": [f"o-{index}" for index in range(8)],
+            "feature_matrix_label": "WHB-10Xv3-Nonneurons",
+            "donor_label": "H_x",
+            "cluster_alias": [4, 4, 4, 4, 6, 6, 6, 6],
+            "region_of_interest_label": "Human MTG",
+        }
+    ).join(labels, on="cluster_alias")
+    # A candidate listed as a reference cell (a planted overlap) is dropped.
+    rows, record = reference.other_region_test_cells(
+        metadata,
+        reference_cells={"o-0", "frontal-1"},
+        training_superclusters=[ASTRO, MICRO, UL_IT],
+        training_clusters=["c3", "c4"],
+        have={ASTRO: 1},
+        cap=3,
+        room=None,
+    )
+    assert "o-0" not in set(rows["cell_label"])
+    assert record["n_excluded_reference_cells"] == 1
+    assert record["disjoint_from_reference_cells"] is True
+    # Capped per supercluster like the donor cells: Astro 1 + 2, Micro 0 + 3.
+    assert record["per_supercluster"] == {MICRO: 3, ASTRO: 2}
+    assert record["candidates_per_supercluster"] == {MICRO: 4, ASTRO: 3}
+    # Reproducible draw.
+    again, _ = reference.other_region_test_cells(
+        metadata,
+        reference_cells={"o-0"},
+        training_superclusters=[ASTRO, MICRO, UL_IT],
+        training_clusters=["c3", "c4"],
+        have={ASTRO: 1},
+        cap=3,
+        room=None,
+    )
+    assert again["cell_label"].tolist() == rows["cell_label"].tolist()
 
 
 def whb_resolvability_setup(
