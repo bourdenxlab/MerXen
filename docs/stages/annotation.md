@@ -24,6 +24,8 @@ modified or deleted automatically (see [CLI reference](../cli.md#merxen-annotati
 | `wmb_panel` | mouse primary | Samples at most `annotation_wmb_max_cells_per_cluster` (50) cells per cluster from the local WMB-10Xv3 h5ads (seed 1; the self-map test cells excluded, see below), restricted to the marker gene universe (see below); builds the marker precompute; finds panel markers with the supertype level dropped; copies the Allen `precomputed_stats_ABC_revision_230821.h5` (md5 `d13b316a1755c459d75b8e45ff92ddfc`) as the mapping precompute. |
 | `wmb_region_share` | mouse, panel-independent | Class and subclass × CCF-division shares of the ABC MERFISH-C57BL6J-638850-CCF cells (OB = MOB, AOB, olfactory nerve layer and OLF-unassigned anterior of AP 2.5 mm, split from OLF), each node's home division, per-section compositions and AP composition windows (each section with its neighbours) for every section. |
 | `whb_whole_ctx_panel` | human, optional | Whole-WHB panel markers with the 16 cortex-implausible superclusters dropped and the lookup filtered to the pruned tree; refused above 1,000 genes. |
+| `whb_frontal_supc_clus_ho` | human, resolvability (M3b) | The frontal WHB cells restricted to the panel, without the held-out donor (`annotation_calibration_holdout_donor`, `auto` = the donor with the fewest frontal cells, H19.30.002); clusters with ≥ 5 training cells; a supercluster → cluster → subcluster precompute of the training cells truncated to supercluster → cluster, with panel markers. The held-out donor's cells (≤ 1,000 per supercluster, all cells of rare ones, ≤ `n_test_cells`) are the test set (`test_cells.h5ad`, native panel counts and truth). E2's HO recipe. |
+| `wmb_selfmap_testset` | mouse, resolvability (M3b) | The 11,913 self-map test cells plus up to 30 cells per supertype of the non-neuronal classes (Astro-Epen, OPC-Oligo, Vascular, Immune) that the `wmb_panel` marker build did not use (its sample is recomputed with the same rule), restricted to the panel (`test_cells.h5ad`). |
 
 Every bundle records in `bundle.json` the full sha256 of each source, the
 copied files, the `cell_type_mapper` steps (input JSON, logs, wall time and
@@ -52,13 +54,22 @@ downloader leaves in the shared ABC cache never count), the `panel_hash`,
 hierarchy, nodes to drop, drop level, `n_per_utility`, the large-panel
 prefilter, the depth grid and the `cell_type_mapper` version and commit.
 
+With resolvability on (builder version 3), the builder parameters of the
+primary and secondary bundles also hold what the self-map output depends on:
+the recipe and its version, sigma and spill, the test set (its builder,
+held-out donor, `n_test_cells`, caps and seeds), the self-map bootstrap
+settings and the resolvability code version; the test set's source files are
+among the bundle's own sources.
+
 Not in it, and recorded in `bundle.json` instead: the panel's symbols
 (bundles hold Ensembl IDs only and match state genes by ID, so a gene list
 and a prepared pair panel with the same IDs share one bundle, whatever
 symbols they declare; `built_from_panel` names the panel that first built
-it), the MAP bootstrap settings, and the resolvability settings
-(`recorded_settings`; no M2 bundle holds resolvability output, and threshold,
-trust and flag changes re-run only RESOLVE).
+it), the MAP bootstrap settings, and the RESOLVE-time resolvability
+settings (targets and margins, the Wilson, confident-call and coverage
+minimums, trust; `recorded_settings`): RESOLVE re-derives the decisions from
+the cached self-map cells, so threshold, trust and flag changes re-run only
+RESOLVE.
 
 Finished bundles are read-only (files 0444, directories 0555); reuse checks
 every file's size and the sha256 of every file up to 64 MB, so an in-place
@@ -107,6 +118,89 @@ is seeded into `<store>/.downloads/local/wmb_selfmap/` and the bundle reads
 and hashes that copy, so moving the evidence archive never changes
 `build_hash`. `bundle.json` records `selfmap_test_cells_excluded`.
 
+### Resolvability self-map (M3b)
+
+With `annotation_resolvability` true (the default) the WHB, SEA-AD and WMB
+builders run the self-map of plan §8.3 on their panel
+(`merxen.annotation.resolvability`), after their own content:
+
+1. **Test cells.** WHB and SEA-AD get `whb_frontal_supc_clus_ho` from the
+   store (built once per panel and shared), WMB `wmb_selfmap_testset`. WHB
+   maps the held-out cells onto the held-out bundle, never onto itself
+   (its precompute contains the test donor); SEA-AD and WMB map onto the
+   bundle being built.
+2. **Simulation.** Every test cell whose native panel counts reach a grid
+   depth `D` is thinned binomially to `D` (human panels up to 1,000 genes
+   `[10, 15, 30, 60, 120, 250]`; mouse and larger panels
+   `[10, 20, 50, 100, 250, 500, 1000, 2000]`); cells never go up. Recipe
+   `R1_contam_HO` (E2): per-gene efficiency LogNormal(0, 0.8) (one draw per
+   self-map, median 1) inside the thinning, plus 25% of `D` thinned from a
+   random cell of another broad class; truth stays the host's. A clean
+   (thinning-only) run is the upper bound. Seed 0.
+3. **Mapping** with the production configuration (bootstrap factor 0.5, 100
+   iterations, seed 0, raw normalisation, the bundle's lookup).
+4. **Levels.** WHB: lineage, broad, NT (group probabilities summed over
+   same-group runner-ups), supercluster and the report-only cluster; SEA-AD:
+   its 7-class call (E2 definition) against the WHB truth; WMB: broad, class,
+   NT, subclass and the report-only supertype (cluster calls aggregated to
+   their supertype). Calls are keyed by the called node's class: the E2
+   floor classes for human (neurons by NT, COP apart at supercluster level),
+   WMB class names for mouse. Calls to sinks and region-implausible WHB
+   superclusters are excluded (never confident in production).
+5. **Local threshold rule** (E2 verdict 3; never the set-level rule): per
+   (level, class, depth bin) an isotonic map of correctness on bp is fitted
+   on one split half of the test cells (`crc32(cell id) mod 2`); the
+   threshold `t*` is the lowest bp ≥ the v1 raw threshold at which it
+   reaches the target (capped at 0.99), so thresholds only ever rise. The
+   other half checks it: a bin is emitted with ≥ 50 confident calls, a
+   Wilson 95% lower bound of their precision ≥ target − 0.02 and coverage
+   ≥ 0.2.
+6. **`D_max` and extrapolation.** `D_max(c)` is the deepest grid depth with
+   ≥ 50 test cells of class `c`; deeper bins inherit its decision and are
+   marked `resolvability_extrapolated`. A class without such a bin is never
+   emitted (no pooling across classes). Everything not emitted is
+   `not_resolvable`; the report-only fine levels are emitted only with
+   `annotation_allow_fine_levels` and a seed-1 re-map that changes ≤ 2% of
+   their confident labels (`level_emission`).
+7. **Regimes.** `validated` (real-data-validated families: base targets,
+   the pre-registered default applied, local thresholds that would raise
+   it listed for H18), `provisional` (other panels and simulation-validated
+   families: targets + 0.05, + 0.10 below 60 counts, capped at 0.97; `t*`
+   applied) and `trust` (base targets with the local rule).
+8. **Floors** are the smallest emitted depth; for panels without real-data
+   validation the applied floor is max(known floor, simulated floor), and
+   at least 60 for the mouse subclass level.
+9. **Trust constraint:** `refused` when the broad level is emitted for no
+   class at any depth ≤ 250 (`trust` regime), `broad_only` when the leaf
+   level is emitted for fewer than half of the classes with `D_max` at
+   every such depth. The constraint becomes the bundle's `panel_trust`;
+   otherwise the panel diagnostics and `validated_panels.csv` decide
+   between `provisional` and `validated`.
+
+PREP's decisions are unweighted and set only the trust constraint. RESOLVE
+(M4) re-derives them with the simulated cells reweighted to each dataset's
+composition (`ResolvabilityTables.decisions(composition=...)`,
+`composition_weights`), with Wilson bounds on the Kish effective n.
+
+**Measured on the validated panels** (M3b, 8 processes on the shared host;
+`m3b/resolvability/` in the evidence archive):
+
+| Bundle | Test cells | PREP wall (peak RSS) | Resolvability part | Trust |
+|---|---|---|---|---|
+| set a WHB (297 genes) | 9,032 of the held-out donor's 32,606 (≤ 1,000 per supercluster; 2,425 reach 250 counts) | 14.1 min (2.8 GB) | held-out bundle 10.4 min (3.6 min extraction, 6 min source checksums) + self-map 1.9 min | `validated` |
+| set a SEA-AD | the same (held-out bundle reused) | 6.4 min (3.0 GB) | self-map 2.7 min | `validated` |
+| ag7 WMB (500) | 13,059 (11,913 + 1,146 non-neuronal; 61% reach 1,000 counts, 17% 2,000) | 63.7 min (20.2 GB, query markers) | test set 1.1 min + self-map 11.8 min | `validated` |
+| VZG2 WMB (815) | 13,059 (70% reach 1,000 counts, 27% 2,000) | 65.0 min (27.1 GB, query markers) | test set 0.8 min + self-map 14.5 min | `validated` |
+
+All within the §8.3 budget (human ~35, mouse ~25 min) and the PREP limits
+(≤ 2.5 h human, ≤ 2 h and ≤ 40 GB mouse); none of the four bundles gets a
+resolvability constraint. Re-deriving the decisions reweighted to a
+dataset's composition takes 2–4 s. Applied to the M3 shadow MAP runs of the
+eight human datasets (reweighted, validated regime), broad is emitted for
+59–82% of table cells and supercluster for 59–83% (0–13% of them in bins
+inherited from `D_max`); ag7 proseg_hybrid: class 86%, subclass 85%.
+The H18 exceptions are listed under Known limitations.
+
 ### Bundle files
 
 | File | Content |
@@ -121,6 +215,119 @@ and hashes that copy, so moving the evidence archive never changes
 | `negative_genes.parquet` | Primary references: per broad class × panel gene (Ensembl ID), the detection fraction in each reference and whether the gene is negative (< 1% in every reference, not a curated state gene; state genes matched by ID). |
 | `vocab_snapshot.csv` | Every mapping-tree node with its vocabulary broad class, NT and flags. |
 | `depth_grid.json` | The resolvability depth grid of the panel. |
+| `resolvability.parquet` | Primary and secondary bundles (resolvability on): one long table, `kind` per row type: `bin` (per recipe × level × class × depth: calls, precision and coverage at the default threshold, the local threshold), `curve` (precision and coverage at thresholds 0.50–0.99), `isotonic` (fit-half knots), `node` (per-node precision, recall, F1), `confusion` (truth × call within the called class), `decision` (the three regimes below), `gene_efficiency`. |
+| `resolvability_cells.parquet` | One row per simulated cell × level × recipe: parent class, depth, split half, call, bp, `avg_correlation`, truth, truth class, truth leaf, correct. RESOLVE reweights these to each dataset's composition. |
+| `resolvability_summary.json` | Recipes, levels, settings, test-set counts, `D_max` per level and class, emission per regime, level, class and depth (status, threshold, `t*`, extrapolated, reason), floors, validated thresholds the local rule would raise, the trust constraint, fine-level seed stability, runtimes and mapping runs. |
+| `test_cells.h5ad`, `test_cells.parquet` | Resolvability test-set bundles: native panel counts of the test cells and their truth per level (`truth__<level>`), composition key and spill group. |
+
+### Declared panels, gene IDs and controls (M3b)
+
+`merxen annotation-panel` (and MAP) read each platform's **declared** panel:
+a vendor panel file (Xenium `gene_panel.json`, a MERSCOPE codebook, a gene
+table) or the unfiltered `var` of the prepared H5AD. A published clustered
+H5AD declares the features its control filter recorded
+(`uns["merxen_clustering_squidpy"]["control_feature_filter"]`: kept and
+removed), not the `min_cells`-filtered `var`, so zero-count probes and
+`min_cells` filtering never change `panel_hash` (measured: the P7513 /
+P1212 and ag7 declared hashes equal the M3 shadow ones).
+
+**Controls** (`annotation.panel.ControlRegistry`, on the shared registry
+`merxen.control_features`): a feature type decides alone when the source has
+one (`feature_types`, the type a Xenium `codeword_category` or `is_gene`
+implies, a `gene_panel.json` descriptor); only `Gene Expression` is a gene.
+Without a type, the documented anchored names are controls (MERSCOPE
+`Blank-N`; Xenium `NegControlProbe_`, `NegControlCodeword_`,
+`UnassignedCodeword_`, `DeprecatedCodeword_`, `Intergenic_Region_`,
+`GenomicControl`, `BLANK_`, `antisense_`), then the `CONTROL_TOKENS`
+substring rule, which never removes a feature carrying a native Ensembl ID
+or resolving to a gene of the reference gene table. On the current panels
+the registry removes exactly what legacy `remove_control_features` removes.
+
+**Gene IDs** (`annotation.gene_ids`; first hit wins, the source is
+recorded): the native Ensembl ID of the `var` column (`ensembl_id`,
+`gene_ids`, `gene_id`, `feature_id`; version suffix stripped; a native ID
+missing from the local table whose symbol the table knows takes the
+table's ID, `symbol_fallback`), the pair's other platform (same symbol),
+the run species' local gene table (`annotation_<species>_gene_table`, else
+`annotation_gene_id_fallback_csv`; exact case first, then a unique
+case-insensitive match), an optional alias table (single-target aliases
+only) and the curated overrides (`gene_id_overrides_<species>.csv`, each
+with a reason). Features resolving to one ID are merged and summed at MAP;
+unresolved ones (reporter genes, isoform probes such as the Xenium MAPT 3R
+/ 4R probes, genes a table lacks) are listed in `panel_report.json`.
+
+**Refusals.** The declared panel is refused, and gets no bundle, when:
+- the exact-case species test fails (`species_mismatch`): the panel symbols
+  match the other species' table in exact case more often than the run
+  species' table, or fewer than half of the run species' case-insensitive
+  matches are exact (HGNC symbols are upper case, MGI symbols are not). On
+  the current panels: ag7 and VZG2 run as human are refused although the
+  case-insensitive fallback would map 487 / 500 and 788 / 815 of their
+  symbols to human IDs; the P7513 human panel run as mouse is refused;
+- fewer than 95% of the non-control features resolve (`gene_id_resolution`);
+- fewer than 95% of the native ID values are Ensembl gene IDs of the run
+  species (`native_id_prefix`; symbols stored as IDs, the ag7 failure that
+  found 0 of 498 root markers, are listed as `symbols_as_ids`), or more
+  than 5% carry another species' prefix (`other_species_ids`). Ensembl
+  transcript IDs (MERSCOPE codebooks, isoform probes) do not count.
+
+`panel_report.json` records per declared panel the status and reasons, the
+species test (exact and case-insensitive matches per species), the source
+of every resolved feature, merged duplicates, unmapped features, release
+drift and the sha256 of the resolution table.
+
+### Panel families, diagnostics and trust states (M3b)
+
+**Validated families** are packaged in `assets/annotation/`:
+`validated_panels.csv` (one row per validated panel hash: family, species,
+platforms, gene count, `validated_max_level`, `validation_basis`
+`real_data` | `simulation`, evidence, date, approving PR),
+`validated_panel_genes.csv` (each row's resolved IDs and root markers) and
+`validated_panel_levels.csv` (per (level, class) records of
+simulation-validated families: status `validated` | `failed:NP<k>` |
+`not_evaluable`, `validated_min_depth`, `tested_max_depth`; header-only until
+the first gate-P PR, M13). The seeded families are all `real_data`:
+`human_set_a` (the E5 296-gene set a, its post-M0e 297-gene form and their
+curated set c, 264 / 265 genes; validated up to `supercluster`),
+`mouse_ag7` (500) and `mouse_vzg2` (815; up to `subclass`).
+`panel.validated_panels_path` in `annotation_config.json`
+(`AnnotationPanelConfig`) points to another directory with the same files.
+
+**Families** (`panel.panel_family`, OD-E7): a panel whose hash is a row of
+the table for the same species and platforms is `listed` in its family; one
+with Jaccard ≥ 0.95 to a row that contains all that row's root markers
+`inherits` it; a subset panel keeps its parent's family; anything else is
+its own family. A Xenium panel never inherits a MERSCOPE family.
+`panel_report.json` records the tables' sha256 (`validated_panels`) and, per
+annotation panel, `family_validation` (listed or not, basis and the trust
+it is expected to get before PREP's checks).
+
+**Diagnostics** (`annotation.diagnostics.panel_diagnostics`): gene-ID
+resolution per declared panel (features in, controls removed by type,
+genes by ID source, unmapped features, merged duplicates, species test)
+and, per bundle, the panel coverage PREP recorded in `bundle.json`
+(panel genes absent from the reference, root markers, root children with
+≥ 10 markers, markers per parent, weak parents, auto-collapsed parents and
+the leaves they hide) and the resolvability trust constraint.
+
+**Trust states** (`annotation.diagnostics.trust_state`, per reference and
+panel, first match wins; decided from the cached bundle tables, outside
+`build_hash`, so promoting a family rebuilds nothing):
+
+| State | Rule | Effect |
+|---|---|---|
+| `refused` | a declared panel refused by the gene-ID resolver; < 50 panel genes in the reference; < 10 root markers; broad unresolvable at every depth ≤ 250 | reference not mapped; primary: gate `failed` (`panel_refused`), every cell `not_attempted_gate` and `exclude_hard`; secondary: degraded mode `single_method` |
+| `broad_only` | leaf resolvable for fewer than half of the classes with enough test cells at every depth ≤ 250; or the bundle of an unlisted panel has no self-map (fail-safe) | leaf and finer levels `not_attempted_gate`, `subcluster_status = not_resolvable_panel`, gate capped at `broad_only` |
+| `validated` | family listed in `validated_panels.csv` | `real_data`: validated thresholds and packaged floors up to `validated_max_level`, `ct_<L>_validated` on every confident label there; `simulation`: emission exactly as provisional, `ct_<L>_validated` where (level, class) is validated at the cell's depth, gate warning only when > 10% of confident labels lie outside the validated region |
+| `provisional` | anything else | provisional margins, local thresholds, max-rule floors (`unknown_panel`), banner and gate warning flag (never a lower gate level) |
+
+Refused, broad-only and provisional panels show a report banner; validated
+families never do. Measured on the current panels (`m3b/diagnostics/`
+in the evidence archive): set a (WHB and SEA-AD bundles) and set c, ag7 and
+VZG2 are `validated` (`real_data`); their bundles without a self-map carry
+the note `resolvability_not_run` (H18 cannot be checked on them); the
+P5011 per-platform panels (268 / 298 genes) preview as `provisional`; ag7
+symbols run as human are `refused` (`gene_ids:species_mismatch`).
 
 ## Pipeline processes
 
@@ -226,11 +433,22 @@ Per sample:
    remove control features with the shared registry (the same features
    legacy `remove_control_features` removes on the current panels) and take
    `total_counts` / `n_genes` from `select_table_cells`. Gene IDs resolve as
-   in `annotation-panel` (native ID, the pair's symbols, the fallback table).
+   in `annotation-panel` (the resolver above; each feature keeps its
+   declared decision).
 2. Map the table cells (`total_counts >= min_counts`; a published clustered
    H5AD holds only table cells) on the panel's genes present in the dataset.
    Missing panel genes are recorded; a missing marker gene restricts the
-   bundle's lookup (parents left without markers are auto-collapsed).
+   bundle's lookup (parents left without markers are auto-collapsed). A
+   **subset bundle** is needed when a missing gene is a root marker, a
+   parent is left with fewer than 5 markers (`weak_parent_markers`) or more
+   than 1% of the panel is missing (`subset_bundle_missing_frac`); above 5%
+   (`own_family_missing_frac`) the subset is its own panel family, otherwise
+   it keeps the parent's. MAP then writes the subset panel
+   (`subset_panels/<sid>_<run_id>.panel_genes.json`) and maps with the
+   store's bundle on it if one exists (`merxen annotate` looks in the
+   store); otherwise it maps with the restricted lookup and records the
+   request (`subset_bundle` in the run record). Build the requested bundle
+   with `merxen annotation-reference-prep --panel-genes <subset panel>`.
 3. Run MapMyCells (seed 0, bootstrap factor 0.5, 100 iterations, raw
    normalisation, one BLAS thread per worker, `--drop_level
    CCN20230722_SUPT` for WMB) and parse the extended JSON at once into the
@@ -247,7 +465,8 @@ Per sample:
 |---|---|
 | `<platform>/<sid>_mmc_<run_id>.parquet` | One row per mapped cell × taxonomy level; `run_id` is the reference id, `+_setc` for set c, `+_xpanel` for the intersection run of a `per_platform` pair. Run metadata in the parquet schema (`merxen_mmc`). |
 | `<platform>/<sid>_ct_provisional.parquet` | One row per object: identity, `total_counts`, `n_genes`, `in_table`, **provisional** `ct_<level>_{name,raw,corr,runner_up,margin,status}` and `ct_final_*`, and the raw engine columns `mmc_<reference>_<level>_{label,name,bp,agg,corr}`. |
-| `map_manifest.json` | The run record above, with `panel_status` (`ok`, or `refused` with `panel_reasons` and no runs); `annotation-store prune` counts its `build_hash` values as references. |
+| `map_manifest.json` | The run record above, with `panel_status` (`ok`, or `refused` with `panel_reasons` and no runs) and, per run that needs one, `subset_bundle` (trigger, `used` or `requested`, subset and parent hashes); `annotation-store prune` counts its `build_hash` values as references. |
+| `subset_panels/<sid>_<run_id>.panel_genes.json` | The subset panel of a run whose dataset lacks enough panel genes (`kind` `subset`, `parent_panel_hash`, `excluded_ids`). |
 
 The provisional labels apply the raw thresholds only (WHB lineage / broad /
 NT 0.73 on the bootstrap probability summed over the assigned node's class,
@@ -262,11 +481,13 @@ writes `<sid>_celltype_labels.parquet`.
 
 A published clustered H5AD of a small sample can have a `min_cells`-filtered
 `var` (P1212 and P5011 reseg MERSCOPE hold 299 and 268 of 300 features).
-A panel derived from that `var` gets a new `panel_hash` without a bundle.
-Build the declared panel with `merxen annotation-panel --panel-file
-<PLATFORM>=<declared panel file>` (for example the same section's unfiltered
-proseg_hybrid H5AD) and pass it with `--panel-dir`. MAP then maps the genes
-present and records the missing ones.
+Its declared panel is the control-filter record, so it keeps the prepared
+panel's hash and bundles; the filtered-out features have no native ID there
+and resolve by symbol (pair lookup, local gene table). MAP maps the genes
+present and records the missing ones (a subset bundle when they matter).
+A clustered H5AD without the record (written before M1) declares its `var`;
+give it the declared panel with `merxen annotation-panel --panel-file
+<PLATFORM>=<declared panel file>` and `--panel-dir`.
 
 ## Shadow baselines (M3)
 
@@ -327,6 +548,32 @@ H4 and H16 baselines) are in §11 of the pre-registration document.
   it. Before this was fixed the pipeline built ag7 and VZG2 on their own
   genes too, and their lookups differed from the validated ones in 301 and
   142 of 368 parents (median Jaccard 0.979 and 0.992).
+- **H18 does not pass as written on the validated panels** (M3b self-map;
+  a decision for the gate PRs). The §8.3 rule needs ≥ 50 confident calls in
+  the check half of a bin, while `D_max` needs only ≥ 50 test cells of the
+  class, so a class with fewer than about 100–150 test cells at a depth can
+  never be emitted there, and the bins beyond `D_max` inherit that
+  undecided bin. Set a: broad and supercluster Oligo are not emitted at 120
+  and 250 counts (25 confident check-half calls at 120, all correct), and
+  broad OPC, reweighted to any of the eight shadow datasets, is not emitted
+  at 15–60 counts (Oligo and neuron cells with spill called OPC; the local
+  rule would raise 0.73 to 0.85–0.94).
+  Mouse (≤ 10 test cells per supertype): `21 MB Dopa` and `22 MB-HB Sero`
+  (and on ag7 `28 CB GABA`) are never emitted at class or subclass level,
+  and the glial classes stop below their `D_max` (Immune class up to 50
+  counts on ag7, 100 on VZG2), so the mouse H18 rule holds for 22 / 29
+  (ag7) and 21 / 29 (VZG2) classes with ≥ 50 test cells. Validated thresholds the local rule would raise are listed per
+  (level, class, depth) in `resolvability_summary.json`
+  (`validated_thresholds_would_raise`). Human Vascular and Fibroblast cells
+  (23 and 5 test cells in the held-out donor) are never emitted. On the M3
+  shadow datasets the emission table lowers the confident broad share of
+  table cells by 8–22 points against the raw thresholds alone (P7513
+  MERSCOPE .711 → .495; H7 asks ≥ .62), mostly Oligo cells at ≥ 120
+  counts and Vascular / Fibroblast cells.
+- **The validated-regime floor source in `resolvability_summary.json`** is
+  labelled `real_e2` for every species; the packaged mouse floors are
+  `design_v1`. RESOLVE takes the source from the trust decision
+  (`TrustDecision.floor_source`), not from the summary.
 - **Set c of families without a curated list** uses the label-free rule,
   which drops far more genes than E5's validated set c (44-73 per pair on the
   E5 pairs); treat such set-c results as provisional.
