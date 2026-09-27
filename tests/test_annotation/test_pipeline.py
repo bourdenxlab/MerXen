@@ -17,6 +17,7 @@ from merxen.annotation.config import AnnotationConfig
 from merxen.annotation.mapmycells_engine import (
     MMC_SINGLE_THREAD_ENV,
     MmcBundle,
+    MmcEngineError,
     level_frame,
     query_fingerprint,
     read_tidy_parquet,
@@ -46,6 +47,7 @@ from merxen.annotation.pipeline import (
     locate_bundle,
     map_bundles,
     published_layout,
+    store_subset_bundle_finder,
 )
 from merxen.annotation.store import ReferenceStore
 from merxen.cli import main as cli_main
@@ -669,6 +671,33 @@ def test_build_sample_query_restricts_to_the_panel_and_lists_missing_genes(
     )
 
 
+def test_build_sample_query_sums_features_resolving_to_one_panel_gene(
+    tmp_path: Path,
+) -> None:
+    # A second feature (an alias probe, like H2AX / H2AFX) resolves to the
+    # first panel gene: its counts are added to that gene's column.
+    duplicate = np.array([[4], [3], [0]])
+    counts = np.hstack([XENIUM_COUNTS[:, :6], duplicate, XENIUM_COUNTS[:, 6:]])
+    path = _write_h5ad(
+        tmp_path / "xenium" / "PX_XENIUM_prepared.h5ad",
+        counts,
+        platform="XENIUM",
+        var_names=[*SYMBOLS, "GEXC_ALT", "NegControlProbe_00001"],
+        ensembl_ids=[*GENE_IDS, GENE_IDS[0], "NegControlProbe_00001"],
+        source="prepared",
+    )
+    sample = MapSample("PX_XENIUM", "XENIUM", path, "prepared")  # type: ignore[arg-type]
+    (loaded,) = load_samples([sample], _config(), min_counts=10)
+    assert loaded.feature_ids.count(GENE_IDS[0]) == 2
+
+    query = build_sample_query(loaded, _panel(GENE_IDS))
+
+    assert query.gene_ids == GENE_IDS
+    dense = query.counts.toarray()
+    np.testing.assert_array_equal(dense[:, 0], XENIUM_COUNTS[:, 0] + duplicate[:, 0])
+    np.testing.assert_array_equal(dense[:, 1:], XENIUM_COUNTS[:, 1:6])
+
+
 def test_a_missing_marker_gene_restricts_the_lookup(
     tmp_path: Path, fake_mmc: FakeMmc
 ) -> None:
@@ -779,6 +808,85 @@ def test_a_subset_bundle_in_the_store_is_mapped_with(
         "whb_frontal_supc_clus",
         "seaad_mr_panel",
     }
+
+
+def _drop_ghip_from_xenium(h5ad_path: Path) -> list[str]:
+    """Rewrite the Xenium sample without GHIP; return the genes present."""
+    keep = [index for index in range(7) if index != 4]
+    _write_h5ad(
+        h5ad_path,
+        XENIUM_COUNTS[:, keep],
+        platform="XENIUM",
+        var_names=[[*SYMBOLS, "NegControlProbe_00001"][index] for index in keep],
+        ensembl_ids=[[*GENE_IDS, "NegControlProbe_00001"][index] for index in keep],
+        source="prepared",
+    )
+    return [g for g in GENE_IDS if g != GENE_IDS[4]]
+
+
+def _whb_subset_bundle(
+    fake_mmc: FakeMmc, present: list[str], *, build_hash: str | None = None
+) -> Path:
+    return fake_mmc.bundle(
+        "whb_frontal_supc_clus",
+        role="primary",
+        species="human",
+        panel_hash=compute_panel_hash(present),
+        n_genes=len(present),
+        levels=WHB_LEVELS,
+        nodes=[node for node in WHB_NODES if node.marker != GENE_IDS[4]],
+        build_hash=build_hash,
+    )
+
+
+def test_several_subset_bundles_in_the_store_are_recorded_as_ambiguous(
+    tmp_path: Path, fake_mmc: FakeMmc
+) -> None:
+    samples, runs, config = _setup(tmp_path, fake_mmc)
+    present = _drop_ghip_from_xenium(samples[1].h5ad_path)
+    for build_hash in ("a" * 64, "b" * 64):
+        _whb_subset_bundle(fake_mmc, present, build_hash=build_hash)
+
+    manifest = annotate_map(
+        samples[1:],
+        runs,
+        config,
+        output_dir=tmp_path / "out",
+        pair_id="PX",
+        segmentation="s",
+        find_subset_bundle=store_subset_bundle_finder(ReferenceStore(fake_mmc.root)),
+    )
+
+    whb = manifest.samples["PX_XENIUM"].runs["whb_frontal_supc_clus"]
+    assert whb.subset_bundle is not None
+    assert whb.subset_bundle.status == "ambiguous"
+    assert len(whb.subset_bundle.candidates) == 2
+    assert whb.subset_bundle.subset_build_hash is None
+    # Mapped with the parent bundle and the restricted lookup, as requested.
+    assert whb.build_hash == runs[0].bundle.build_hash
+    assert whb.lookup_restricted
+
+
+def test_the_store_subset_finder_opens_a_bundle_like_a_bundle_ref(
+    tmp_path: Path, fake_mmc: FakeMmc
+) -> None:
+    present = [g for g in GENE_IDS if g != GENE_IDS[4]]
+    bundle_dir = _whb_subset_bundle(fake_mmc, present)
+    finder = store_subset_bundle_finder(ReferenceStore(fake_mmc.root))
+    found = finder("whb_frontal_supc_clus", compute_panel_hash(present))
+    assert found is not None and found.path == bundle_dir
+    assert finder("whb_frontal_supc_clus", compute_panel_hash(GENE_IDS[:2])) is None
+    # A changed marker lookup fails the bundle's integrity check.
+    lookup = bundle_dir / "query_markers.filtered.json"
+    lookup.write_text(lookup.read_text().replace("]", ', "ENSG00000000042"]', 1))
+    with pytest.raises(MmcEngineError, match="not intact"):
+        finder("whb_frontal_supc_clus", compute_panel_hash(present))
+    # A bundle.json that disagrees with its content address is never used.
+    manifest_path = bundle_dir / "bundle.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["build_hash"] = "c" * 64
+    manifest_path.write_text(json.dumps(manifest))
+    assert finder("whb_frontal_supc_clus", compute_panel_hash(present)) is None
 
 
 def test_map_bundles_needs_every_required_bundle(
@@ -969,6 +1077,50 @@ def test_locate_bundle_picks_the_current_builder_bundle(
     with pytest.raises(MapError, match="no builder-v"):
         locate_bundle(store, "seaad_mr_panel", panel.panel_hash)
     fake_mmc.bundle("whb_frontal_supc_clus", build_hash="f" * 64, **common)
+    with pytest.raises(MapError, match="2 bundles"):
+        locate_bundle(store, "whb_frontal_supc_clus", panel.panel_hash)
+
+
+def test_locate_bundle_prefers_the_current_resolvability_version(
+    tmp_path: Path, fake_mmc: FakeMmc
+) -> None:
+    from merxen.annotation.resolvability import RESOLVABILITY_VERSION
+
+    panel = _panel(GENE_IDS)
+    common: dict[str, Any] = {
+        "role": "primary",
+        "species": "human",
+        "panel_hash": panel.panel_hash,
+        "n_genes": panel.n_genes,
+        "levels": WHB_LEVELS,
+        "nodes": WHB_NODES,
+    }
+
+    def with_version(path: Path, version: int) -> Path:
+        manifest_path = path / "bundle.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["builder_output"]["resolvability"] = {"resolvability_version": version}
+        manifest_path.write_text(json.dumps(manifest))
+        return path
+
+    with_version(
+        fake_mmc.bundle("whb_frontal_supc_clus", build_hash="a" * 64, **common),
+        RESOLVABILITY_VERSION - 1,
+    )
+    current = with_version(
+        fake_mmc.bundle("whb_frontal_supc_clus", build_hash="b" * 64, **common),
+        RESOLVABILITY_VERSION,
+    )
+    store = ReferenceStore(fake_mmc.root)
+    # A rebuild after a RESOLVABILITY_VERSION bump sits next to the old
+    # bundle on the same panel: standalone runs take the current tables.
+    assert (
+        locate_bundle(store, "whb_frontal_supc_clus", panel.panel_hash).path == current
+    )
+    with_version(
+        fake_mmc.bundle("whb_frontal_supc_clus", build_hash="c" * 64, **common),
+        RESOLVABILITY_VERSION,
+    )
     with pytest.raises(MapError, match="2 bundles"):
         locate_bundle(store, "whb_frontal_supc_clus", panel.panel_hash)
 
@@ -1226,6 +1378,48 @@ def test_cli_annotate_require_bundle_refs_never_reads_the_store(
     assert result.exit_code != 0
     assert "no --bundle-ref for seaad_mr_panel" in result.output
     assert fake_mmc.calls == []
+
+
+def test_cli_annotate_require_bundle_refs_only_requests_a_subset_bundle(
+    tmp_path: Path, fake_mmc: FakeMmc
+) -> None:
+    prepared, config = _prepared_dir(tmp_path / "inputs")
+    xenium = json.loads((prepared / "manifest.json").read_text())["samples"][
+        "PX_XENIUM"
+    ]
+    present = _drop_ghip_from_xenium(prepared / xenium)
+    panel_dir, panel = _panel_dir(tmp_path / "panel")
+    bundles = _human_bundles(fake_mmc, panel)
+    refs = _bundle_refs(tmp_path / "refs", bundles)
+    subset_dir = _whb_subset_bundle(fake_mmc, present)
+    pipeline = _pipeline_arguments(
+        prepared, config, panel_dir, refs, tmp_path / "pipeline"
+    ) + ["--store", str(fake_mmc.root)]
+
+    result = CliRunner().invoke(cli_main, pipeline)
+
+    # The store holds the subset bundle, but a pipeline task never looks it
+    # up: PREP did not stage it and -resume would not track it.
+    assert result.exit_code == 0, result.output
+    manifest = load_map_manifest(tmp_path / "pipeline" / MAP_MANIFEST_NAME)
+    whb = manifest.samples["PX_XENIUM"].runs["whb_frontal_supc_clus"]
+    assert whb.subset_bundle is not None
+    assert whb.subset_bundle.status == "requested"
+    assert (
+        whb.build_hash
+        == bundles[("whb_frontal_supc_clus", panel.panel_hash)].build_hash
+    )
+    # A standalone run with the same store maps with the subset bundle.
+    standalone = [item for item in pipeline if item != "--require-bundle-refs"]
+    standalone[standalone.index(str(tmp_path / "pipeline"))] = str(
+        tmp_path / "standalone"
+    )
+    result = CliRunner().invoke(cli_main, standalone)
+    assert result.exit_code == 0, result.output
+    manifest = load_map_manifest(tmp_path / "standalone" / MAP_MANIFEST_NAME)
+    whb = manifest.samples["PX_XENIUM"].runs["whb_frontal_supc_clus"]
+    assert whb.subset_bundle is not None and whb.subset_bundle.status == "used"
+    assert whb.build_hash == MmcBundle.from_dir(subset_dir).build_hash
 
 
 def test_cli_annotate_takes_min_counts_from_the_clustering_config(
