@@ -102,6 +102,16 @@ ANNOTATION_BUILDER_VERSION: Final = 3
 # Version of the build-hash payload and of bundle.json.
 # 2: no panel symbols, MAP bootstrap or resolvability settings in the payload.
 STORE_SCHEMA_VERSION: Final = 2
+# Large panels (> large_panel_genes, e.g. Xenium 5K) need the per-parent
+# marker prefilter, the large store and a measured PREP memory reserve
+# (plan §8.7, OD-E8; M3b stage D). None of them exists yet, so every
+# panel-dependent build above the limit is refused: a 5K build would get the
+# 64 GB default and the main store, and its query-marker step alone is
+# estimated at 120-170 GB without the prefilter.
+LARGE_PANEL_BUILDS_SUPPORTED: Final = False
+# Whether the builders apply the large-panel marker prefilter (plan §8.7).
+# Not yet: build_hash_payload records a prefilter only when this is true.
+MARKER_PREFILTER_APPLIED: Final = False
 # Simulation recipes of the resolvability self-map and their versions (§8.3).
 # They enter build_hash once a builder writes resolvability outputs (M3b).
 RESOLVABILITY_RECIPE_VERSIONS: Final[dict[str, int]] = {"R1_contam_HO": 1}
@@ -153,6 +163,10 @@ class BundleIntegrityError(StoreError):
 
 class UnknownBuilderError(StoreError):
     """No bundle builder is registered for a reference id."""
+
+
+class LargePanelRefusedError(StoreError):
+    """A panel-dependent bundle of a large panel cannot be built yet (§8.7)."""
 
 
 class PruneRefusedError(StoreError):
@@ -696,7 +710,8 @@ def build_hash_payload(
         panel: The declared panel; ignored when the builder does not use one.
         builder: The builder (name, taxonomy, params, panel use).
         sources: Source records by name.
-        config: The annotation config; supplies the large-panel prefilter.
+        config: The annotation config; supplies the large-panel prefilter
+            (recorded only once ``MARKER_PREFILTER_APPLIED``).
         ctm: ``cell_type_mapper`` provenance; defaults to ``ctm_provenance()``.
         large_panel_genes: Panels above this size use the prefilter.
 
@@ -722,8 +737,12 @@ def build_hash_payload(
         n_panel_genes = panel.n_genes
         panel_payload = {"panel_hash": panel.panel_hash, "n_genes": panel.n_genes}
     prefilter: dict[str, Any] | None = None
+    # The prefilter enters the hash only once a builder applies it (M3b
+    # stage D); until then large-panel builds are refused
+    # (``large_panel_refusal``), so no bundle records a prefilter it never ran.
     if (
-        config is not None
+        MARKER_PREFILTER_APPLIED
+        and config is not None
         and n_panel_genes is not None
         and n_panel_genes > large_panel_genes
         and config.panel.large_panel_marker_prefilter != "none"
@@ -754,6 +773,31 @@ def build_hash_payload(
         "depth_grid": spec.resolved_depth_grid(n_panel_genes),
         "ctm": dict(ctm if ctm is not None else ctm_provenance()),
     }
+
+
+def large_panel_refusal(
+    panel: AnnotationPanel | None, config: AnnotationConfig | None
+) -> str | None:
+    """Return why a panel-dependent build of a panel is refused (``None``: it runs).
+
+    Args:
+        panel: The declared panel (``None``: a panel-independent build).
+        config: The annotation config (``panel.large_panel_genes``; default
+            ``LARGE_PANEL_GENES``).
+
+    Returns:
+        The reason, for panels above ``large_panel_genes`` while
+        ``LARGE_PANEL_BUILDS_SUPPORTED`` is false.
+    """
+    limit = config.panel.large_panel_genes if config is not None else LARGE_PANEL_GENES
+    if LARGE_PANEL_BUILDS_SUPPORTED or panel is None or panel.n_genes <= limit:
+        return None
+    return (
+        f"panel {panel.name} has {panel.n_genes} genes, above large_panel_genes "
+        f"({limit}): large-panel bundle builds are refused until the marker "
+        "prefilter, the large reference store and the measured PREP memory "
+        "reserve exist (plan §8.7, OD-E8)"
+    )
 
 
 def recorded_settings(
@@ -1085,9 +1129,14 @@ class ReferenceStore:
                 valid bundle (it is never replaced or deleted), or the build
                 wrote a symlink or a source changed during the build.
             UnknownBuilderError: If no builder is registered.
+            LargePanelRefusedError: If a panel-dependent build has more
+                than ``large_panel_genes`` genes (``large_panel_refusal``).
         """
         config = config or AnnotationConfig(species=spec.species)
         builder = builder or resolve_builder(spec, config)
+        refusal = large_panel_refusal(panel if builder.uses_panel else None, config)
+        if refusal is not None:
+            raise LargePanelRefusedError(f"{spec.reference_id}: {refusal}")
         request = self.prepare_request(spec, panel, builder=builder, config=config)
         effective_panel = panel if builder.uses_panel else None
         root = self.root_for(effective_panel)

@@ -47,7 +47,10 @@ from merxen.annotation.reference import (
 )
 from merxen.annotation.store import (
     BUNDLE_MANIFEST_NAME,
+    BuildContext,
+    LargePanelRefusedError,
     ReferenceStore,
+    large_panel_refusal,
     resolve_builder,
 )
 from merxen.annotation.vocab import load_state_gene_ids, load_state_genes
@@ -1828,10 +1831,70 @@ def test_whole_ctx_builder_is_refused_above_1000_genes(
         sources={"whb_whole_precompute": stats},
     )
     panel = make_panel([f"ENSG{index:011d}" for index in range(1001)])
-    with pytest.raises(ReferenceBuildError, match="refused above 1000"):
-        ReferenceStore(tmp_path / "store").get_or_build(
+    store = ReferenceStore(tmp_path / "store")
+    with pytest.raises(LargePanelRefusedError, match="above large_panel_genes"):
+        store.get_or_build(
             prepare_reference_spec(spec), panel, builder=builder_for(spec)
         )
+    # Refused before a build directory exists.
+    assert store.list() == []
+    # A builder called directly refuses too.
+    with pytest.raises(ReferenceBuildError, match="above large_panel_genes"):
+        reference._panel_of(
+            BuildContext(
+                spec=spec,
+                panel=panel,
+                build_hash="0" * 64,
+                work_dir=tmp_path / "work",
+                final_dir=tmp_path / "final",
+                scratch_dir=tmp_path / "scratch",
+                sources={},
+                config=AnnotationConfig(species="human"),
+            )
+        )
+
+
+def test_large_panel_builds_are_refused_until_stage_d() -> None:
+    config = AnnotationConfig(species="human")
+    small = make_panel([f"ENSG{index:011d}" for index in range(1000)])
+    large = make_panel([f"ENSG{index:011d}" for index in range(1001)])
+    assert large_panel_refusal(None, config) is None
+    assert large_panel_refusal(small, config) is None
+    reason = large_panel_refusal(large, config)
+    assert reason is not None and "1001 genes" in reason and "OD-E8" in reason
+    # The limit follows the config.
+    tight = config.model_copy(
+        update={"panel": config.panel.model_copy(update={"large_panel_genes": 999})}
+    )
+    assert large_panel_refusal(small, tight) is not None
+
+
+def test_cli_refuses_a_large_panel_before_building(tmp_path: Path) -> None:
+    panel = make_panel([f"ENSG{index:011d}" for index in range(1001)])
+    panel_file = tmp_path / "panel_genes.json"
+    panel.write(panel_file)
+    store = tmp_path / "store"
+    result = CliRunner().invoke(
+        cli_main,
+        [
+            "annotation-reference-prep",
+            "--reference-id",
+            "whb_frontal_supc_clus",
+            "--species",
+            "human",
+            "--panel-genes",
+            str(panel_file),
+            "--store",
+            str(store),
+            "--output",
+            str(tmp_path / "bundle_ref.json"),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "above large_panel_genes (1000)" in result.output
+    assert not (tmp_path / "bundle_ref.json").exists()
+    # Nothing was hashed or built: no bundle, temporary or failed directory.
+    assert not store.exists() or not any(store.rglob("*.json"))
 
 
 def test_cortex_implausible_superclusters_are_the_16_pruned_in_e1() -> None:
@@ -2674,7 +2737,7 @@ def test_resolvability_needs_the_test_set_sources(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
 ) -> None:
     sources = write_whb_sources(tmp_path)
-    FakeCtm(whb_truncated_lookup).install(monkeypatch)
+    ctm = FakeCtm(whb_truncated_lookup).install(monkeypatch)
     spec = prepare_reference_spec(
         whb_spec(
             region_precompute=sources["region_dir"],
@@ -2686,6 +2749,9 @@ def test_resolvability_needs_the_test_set_sources(
         ReferenceStore(tmp_path / "store").get_or_build(
             spec, make_panel(GENES), builder=builder_for(spec, config), config=config
         )
+    # It fails before the marker steps, not after them.
+    assert ctm.calls["reference"] == [] and ctm.calls["query"] == []
+    assert ctm.calls["truncate"] == []
 
 
 def test_prepare_keeps_the_held_out_sources_only_while_resolvability_is_on(

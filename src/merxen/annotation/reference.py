@@ -88,6 +88,7 @@ from merxen.annotation.store import (
     BundleBuilder,
     StoreError,
     file_sha256,
+    large_panel_refusal,
     make_store_dir,
     register_builder,
 )
@@ -2660,6 +2661,10 @@ def _panel_of(context: BuildContext) -> AnnotationPanel:
         raise ReferenceBuildError(
             f"reference {context.spec.reference_id!r} needs a panel to build"
         )
+    # Defence in depth: ReferenceStore.get_or_build refuses these first.
+    refusal = large_panel_refusal(context.panel, _config_of(context))
+    if refusal is not None:
+        raise ReferenceBuildError(f"{context.spec.reference_id}: {refusal}")
     return context.panel
 
 
@@ -3200,6 +3205,7 @@ def build_whb_frontal(context: BuildContext) -> dict[str, Any]:
     spec = context.spec
     panel = _panel_of(context)
     config = _config_of(context)
+    _check_self_map_sources(context, HO_REFERENCE_ID, HO_SOURCES)
     timer = _StepTimer(context.work_dir / CTM_LOG_DIR)
     source_path = context.work_dir / SOURCE_PRECOMPUTE_FILE
     output: dict[str, Any] = {
@@ -3340,6 +3346,7 @@ def build_seaad_mr(context: BuildContext) -> dict[str, Any]:
     spec = context.spec
     panel = _panel_of(context)
     config = _config_of(context)
+    _check_self_map_sources(context, HO_REFERENCE_ID, HO_SOURCES)
     timer = _StepTimer(context.work_dir / CTM_LOG_DIR)
     output: dict[str, Any] = {"reference": "SEA-AD Multiregion (CCN20260630)"}
     with timer.step("copy_precompute"):
@@ -4901,17 +4908,17 @@ def build_wmb_selfmap_testset(context: BuildContext) -> dict[str, Any]:
     }
 
 
-def _test_set_spec(
+def _test_set_sources(
     context: BuildContext, reference_id: str, names: Sequence[str]
-) -> AnnotationReferenceSpec:
-    """Return the spec of a primary bundle's resolvability test set.
+) -> dict[str, Path]:
+    """Return the test-set source paths of a self-map, or fail if one is missing.
 
-    The test set is built from the primary spec's own source files (so the
-    primary ``build_hash`` covers it) and the WHB (human) or WMB (mouse)
-    reference settings, so the WHB and SEA-AD self-maps share one held-out
-    bundle.
+    Builders call it before their marker steps, so a missing held-out source
+    fails the build in seconds rather than after them (M3b review).
+
+    Raises:
+        ReferenceBuildError: If a test-set source is missing.
     """
-    config = _config_of(context)
     available = {
         name: Path(context.sources[name].path)
         for name in names
@@ -4932,10 +4939,8 @@ def _test_set_spec(
             for name in names
             if name != SOURCE_WHB_REGION_CELL_METADATA and name not in available
         ]
-        template_id = "whb_frontal_supc_clus"
     else:
         missing = [name for name in names if name not in available]
-        template_id = "wmb_panel"
     if missing:
         raise ReferenceBuildError(
             f"{context.spec.reference_id}: the resolvability self-map (enabled) "
@@ -4944,6 +4949,32 @@ def _test_set_spec(
             "annotation_whb_metadata_dir, annotation_whb_region_precompute_source) "
             "or the WMB sources, or disable annotation resolvability"
         )
+    return available
+
+
+def _check_self_map_sources(
+    context: BuildContext, reference_id: str, names: Sequence[str]
+) -> None:
+    """Fail fast when resolvability is on and a test-set source is missing."""
+    if _resolvability_enabled(context):
+        _test_set_sources(context, reference_id, names)
+
+
+def _test_set_spec(
+    context: BuildContext, reference_id: str, names: Sequence[str]
+) -> AnnotationReferenceSpec:
+    """Return the spec of a primary bundle's resolvability test set.
+
+    The test set is built from the primary spec's own source files (so the
+    primary ``build_hash`` covers it) and the WHB (human) or WMB (mouse)
+    reference settings, so the WHB and SEA-AD self-maps share one held-out
+    bundle.
+    """
+    config = _config_of(context)
+    available = _test_set_sources(context, reference_id, names)
+    template_id = (
+        "whb_frontal_supc_clus" if reference_id == HO_REFERENCE_ID else "wmb_panel"
+    )
     template = next(
         (item for item in config.references if item.reference_id == template_id),
         None,

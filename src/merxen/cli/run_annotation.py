@@ -461,6 +461,17 @@ def _annotation_reference_prep(
         scratch_root=scratch_dir,
     )
     builder = resolve_builder(spec, config)
+    if builder.uses_panel:
+        from merxen.annotation.store import (
+            LargePanelRefusedError,
+            large_panel_refusal,
+        )
+
+        # Refused before any source is downloaded or hashed and before any
+        # build directory exists.
+        refusal = large_panel_refusal(panel, config)
+        if refusal is not None:
+            raise LargePanelRefusedError(f"{reference_id}: {refusal}")
     if builder.prepare_spec is not None:
         from merxen.annotation.reference import SourceOptions
 
