@@ -389,15 +389,107 @@ provenance only: bundles are keyed by the resolved IDs, so two resolutions
 that give the same IDs share one bundle (plan §8.4 puts the resolution
 sha256 into `build_hash`; M3b records it instead, a deviation).
 
-**Large panels** (more than `large_panel_genes`, 1,000; e.g. the Xenium 5K
-panels) are refused for every panel-dependent bundle until the marker
-prefilter, the large store and a measured PREP memory reserve exist (plan
-§8.7, OD-E8): `annotation-reference-prep` and `ReferenceStore.get_or_build`
-raise `LargePanelRefusedError` before any source is downloaded or hashed,
-and `build_hash` records a prefilter only once a builder applies it. When
-the 5K memory measurement is run, the task's peak should be read from its
-cgroup (`systemd-run --scope`, `memory.peak`), not `/usr/bin/time`, before
-PREP memory is set to that peak + 30%.
+### Large panels (M3b)
+
+Panels above `large_panel_genes` (1,000; e.g. the Xenium Prime 5K panels)
+are built like any other (plan §8.7), with these differences:
+
+- **Large store, kept reference markers.** Bundles go to
+  `annotation_reference_store_large` (dwight:
+  `/srv/storage/MerXen/annotation_references_large`) and keep the family's
+  reference markers (`reference_markers/`), so a dataset missing some panel
+  genes needs only a query-marker step (plan §8.7, D-G7). Bundles of panels
+  up to 1,000 genes delete their reference markers as soon as the query
+  markers exist (sha256 kept in `bundle.json`).
+- **Resources.** PREP gets `annotation_prep_large_memory` (64 GB, from the
+  5K measurement below) and 24 h, MAP 48 GB (plan §3.3). The whole-WHB
+  optional bundle stays refused above 1,000 genes.
+- **Wide depth grid** `[10, 20, 50, 100, 250, 500, 1000, 2000]` for either
+  species.
+
+**The 5K memory measurement** (M3b, OD-E8; Xenium Prime 5K Mouse, 5,006
+genes, all in WMB; `wmb_panel`, 14.06 M taxon pairs, `--n_processors 8`,
+`--max_gb 40`, run alone in a memory-capped scope; evidence
+`m3b/simulate/xenium_prime_5k_mouse/`):
+
+| Step | Unfiltered (5,006 genes; default) | Prefiltered (1,992 candidates) |
+|---|---|---|
+| Reference markers | 2,845 s; largest process 5.8 GB, process tree PSS 20.9 GB; h5 14.2 GB | 2,844 s; 4.9 GB, 27.6 GB; h5 12.3 GB |
+| Query markers | 1,290 s; largest process 21.3 GB, tree PSS 20.5 GB | 1,241 s; 37.7 GB, 37.4 GB |
+
+Neither time nor memory grows with the genes up to 5,006 (the evidence runs
+gave 20.2 / 25.8 GB at 500 / 815 genes), so the plan's ~120–170 GB estimate
+does not hold, and PREP for large panels keeps the standard 64 GB (the peak
+37.7 GB + 30% = 49 GB). The production (unfiltered) 5K bundle took 92 min
+(reference markers 2,731 s, process-tree PSS 27.2 GB; query markers 1,156 s,
+21.3 GB; self-map 23 min on 103,297 simulated cells, MapMyCells about 430 s
+per recipe for 103k cells × 5,006 genes at 8 processes, peak RSS 3.3 GB) and
+holds 16.2 GB, 13.2 GB of it reference markers; its decisions equal those of
+the measurement's unfiltered mapping in all 1,360 bins.
+
+**Per-parent marker prefilter** (`merxen.annotation.prefilter`;
+`large_panel_marker_prefilter = "per_parent_topk_union"`, cap
+`large_panel_prefilter_cap` 2,000), **opt-in** since the measurement: it
+saves neither memory nor time at 5K, and version 1 failed its validation
+(the same simulated cells mapped with both lookups agree >= 0.994 per class
+at broad, class and NT, but 0.920–0.949 at subclass in 13 of 34 classes,
+below the required 0.95). When on, marker discovery runs on at most 2,000
+candidate genes chosen per parent of the marker tree (after `--drop_level`),
+never by a global variance ranking, which would drop the markers of rare
+leaves: every pair of siblings scores each gene by its log2 fold scaled by
+cell_type_mapper's penetrance terms (detection of the higher sibling against
+0.5, detection contrast against 0.7; minimums 0.8 / 0.1 / 0.1) and keeps its
+60 best genes as candidates; each parent orders its genes by max-min greedy
+pair coverage (the gene serving the most of the pairs with the fewest chosen
+candidates first, up to 30 per pair, the `n_per_utility`), and `k` is the
+largest per-parent top-k whose union fits the cap (k = 69 on the 5K mouse
+panel). The candidate set (`marker_prefilter.json`: `k`, genes, sha256,
+per-parent counts) is the panel stub of `reference_markers` and
+`query_markers`; profiles and negative genes still use every panel gene;
+method, version and settings enter `build_hash` of every builder that finds
+markers. Without it, a large `wmb_panel` whose predicted query-marker peak
+(the measured 37.7 GB envelope up to 5,006 genes, scaled with the genes
+beyond) exceeds the PREP reserve (`--max-gb` / 0.625) is refused before
+anything is built: the prefilter is mandatory above the reserve (OD-E8).
+
+### Panel simulation (`annotation-panel-simulate`, M3b)
+
+The design aid of plan §8.8 predicts what a panel resolves before any of its
+data exist (a vendor panel, a custom panel before ordering). It resolves the
+gene list as a declared panel, builds the species' self-map references
+(human `whb_frontal_supc_clus` and `seaad_mr_panel`, mouse `wmb_panel`)
+through the store with the production configuration — the bundles a
+pipeline PREP would use, reused when they exist — and reads the predicted
+emission per (level, class, depth bin) from their resolvability decisions in
+the panel's regime (`provisional` with its margins unless the panel is of a
+real-data-validated family), with the trust state, weak and collapsed
+parents, runtime, peak memory and disk ([CLI](../cli.md#merxen-annotation-panel-simulate)).
+For prefiltered panels it also maps the same simulated cells with the
+unfiltered lookup and compares the calls per (level, class) (agreement
+>= 0.95 at bp >= 0.8 for every class with >= 50 unfiltered confident calls
+at an emitted level; the prefilter may leave no parent below 5 markers that
+the unfiltered lookup keeps above it). The pinned public 10x panel lists
+come from `merxen annotation-panel-fetch`. `--gate-p` is the M13 hook for
+the gate-P programme; it is refused until M13 registers it.
+
+**Measured on the four public 10x panels** (M3b, 8 processes on the shared
+host, the production configuration; `m3b/simulate/` in the evidence
+archive; classes emitted per depth bin in the `provisional` regime, of 8
+broad / 9 supercluster human and 34 mouse classes, with enough test cells
+for 8 / 9 / 24 of them):
+
+| Panel | Genes | Primary level: classes emitted per depth | Wall (from scratch) | Peak (largest process) | Disk |
+|---|---|---|---|---|---|
+| Xenium Human Brain v1 | 266 | broad 5 / 6 / 7 at 10 / 30 / 60+; supercluster 4 / 7 at 10 / 30+ | 6.6 min (WHB + SEA-AD) | 2.9 GB | 1.9 + 0.4 GB |
+| Xenium Prime 5K Human | 5,001 | broad 0 / 2 / 6 / 7 / 8 at 10 / 20 / 50 / 100 / 250; supercluster 7 at 100–250, 8 at 500 | 10.1 min | 2.9 GB | 1.9 + 0.5 GB |
+| Xenium Mouse Brain v1 | 248 | class 3 / 12 / 21 at 50 / 100 / 250+; subclass 4 / 19 / 21 | 26 min | 8.3 GB | 1.4 GB |
+| Xenium Prime 5K Mouse | 5,006 | class 5 / 16 / 24 at 100 / 250 / 500+; subclass 3 / 18 / 23 | 92 min | 21.3 GB (tree PSS 27.2 GB) | 16.2 GB (13.2 GB reference markers) |
+
+A 5K pan-tissue panel needs more counts than a brain panel for the same
+classes (mouse class at 100 counts: 5 of 24 classes vs 12 for the 248-gene
+brain panel and 24 for VZG2), because its counts spread over many genes that
+do not separate brain types. All four panels are `provisional` (own
+families).
 
 ### Panel families, diagnostics and trust states (M3b)
 
