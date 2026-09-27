@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "1cd5a58eec7b0d6df02eb47a5ee87bf7d1831b8569b3d514084c399f6a5906ad",
+    3: "dddbadb928ea1027dfeffd1b6a04feb24e612a3a5ff51a4abfd9c597d77459d2",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -69,6 +69,10 @@ PIN_HISTORY = (
     "params and the WHB cell metadata source, and every self-map bundle's "
     "through the test-set params and RESOLVABILITY_VERSION 3; the mouse "
     "test-set and all other bundles are unchanged",
+    "3: pooled deep sets reweighted as one set in RESOLVE "
+    "(ResolvabilityTables.decisions, pooled_composition_weights, "
+    "DatasetComposition.at_least); PREP's decisions are unweighted, so the "
+    "bundle files are unchanged",
 )
 
 

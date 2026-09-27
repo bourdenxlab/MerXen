@@ -964,6 +964,72 @@ def test_composition_follows_the_dataset_cells_of_each_depth_bin() -> None:
     assert rng is not None
 
 
+def test_a_pooled_set_is_reweighted_as_one_set() -> None:
+    # 40 test cells of type A reach 100 counts (bin 100 short of calls), 60
+    # stay at 10; the dataset has no A cell at 100 counts. Per-bin weights
+    # give the pooled rows at 100 weight 0 (Kish n 60); reweighting the
+    # ">= 10" set as one set to the dataset's cells at >= 10 counts keeps
+    # all 100 test cells (Kish n 100).
+    cells = pd.concat(
+        [
+            tracked_cells(
+                [
+                    ("deep", 40, {10: (0.95, True), 100: (0.95, True)}),
+                    ("shallow", 60, {10: (0.95, True)}),
+                ]
+            ),
+            tracked_cells(
+                [("other", 100, {10: (0.95, True), 100: (0.95, True)})], cls="Y"
+            ),
+        ],
+        ignore_index=True,
+    )
+    cells[res.TRUTH_LEAF_COLUMN] = np.where(cells["parent"] == "X", "A", "B")
+    composition = res.DatasetComposition(
+        overall={"A": 1.0, "B": 1.0},
+        by_depth={10: {"A": 900.0, "B": 100.0}, 100: {"B": 1000.0}},
+        bin_mass={10: 1000.0, 100: 1000.0},
+    )
+    assert res._normalised(composition.at_least(10)) == pytest.approx(
+        {"A": 0.45, "B": 0.55}
+    )
+    assert composition.at_least(1000) == composition.overall
+    class_of = {"A": "X", "B": "Y"}
+    weights = res.composition_weights(cells, composition, class_of=class_of)
+    grid = (10, 100)
+    per_bin = res.decide(cells, [BROAD], grid, settings(), weights=weights)
+    pooled = res.decide(
+        cells,
+        [BROAD],
+        grid,
+        settings(),
+        weights=weights,
+        pool_weights=res.pooled_composition_weights(composition, class_of=class_of),
+    )
+    for frame, kish in ((per_bin, 60.0), (pooled, 100.0)):
+        row = frame[
+            (frame["regime"] == "validated")
+            & (frame["class"] == "X")
+            & (frame["depth"] == 100)
+        ].iloc[0]
+        assert row["pooled"] and row["pool_min_depth"] == 10
+        assert row["n_effective"] == pytest.approx(kish)
+    # RESOLVE's entry point reweights pooled sets as one set.
+    tables = res.ResolvabilityTables(
+        summary={"depth_grid": list(grid), "decision_recipe": res.DECISION_RECIPE},
+        cells=cells,
+        levels=[BROAD],
+        settings=settings(),
+    )
+    resolved = tables.decisions(composition=composition)
+    row = resolved[
+        (resolved["regime"] == "validated")
+        & (resolved["class"] == "X")
+        & (resolved["depth"] == 100)
+    ].iloc[0]
+    assert row["n_effective"] == pytest.approx(100.0)
+
+
 def test_whb_cop_rule_suppresses_cop_broad_calls_below_the_floor() -> None:
     thresholds = AnnotationThresholds()
     rows = []

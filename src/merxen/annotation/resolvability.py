@@ -1969,6 +1969,7 @@ def decide(
     settings: RuleSettings,
     *,
     weights: np.ndarray | None = None,
+    pool_weights: PoolWeights | None = None,
     recipe: str = DECISION_RECIPE,
     seed: int = 0,
 ) -> pd.DataFrame:
@@ -1999,6 +2000,9 @@ def decide(
     classes). Weighted rows (RESOLVE) enter the precision with their weight
     and the Wilson bound with the Kish effective n; ``max_weight_share``
     records the largest single call's share of a set's confident weight.
+    A pooled set is reweighted as one set when ``pool_weights`` is given
+    (``pooled_composition_weights``; RESOLVE), else its rows keep their
+    per-bin weights.
 
     Args:
         cells: The cells table (``level_cells`` rows).
@@ -2006,6 +2010,7 @@ def decide(
         depths: The depth grid.
         settings: Rule settings.
         weights: Optional per-row weights (composition reweighting, RESOLVE).
+        pool_weights: Optional weights of pooled deep sets (RESOLVE).
         recipe: Recipe the decisions use.
         seed: Mapping seed the decisions use.
 
@@ -2047,14 +2052,7 @@ def decide(
                 [called["parent"].astype(str), "depth"], observed=True
             )
         }
-        deepest = deepest_rows(level_rows)
-        deepest = deepest[deepest["parent"].notna()]
-        deepest_of = {
-            str(cls): group
-            for cls, group in deepest.groupby(
-                deepest["parent"].astype(str), observed=True
-            )
-        }
+        pools = _LevelPools(deepest_rows(level_rows), pool_weights)
         classes = sorted(
             {str(cls) for cls in called["parent"].dropna().astype(str)}
             | {cls for (level, cls) in dmax if level == meta.level}
@@ -2067,7 +2065,7 @@ def decide(
                     grid,
                     settings,
                     groups=groups,
-                    deepest=deepest_of.get(cls),
+                    pools=pools,
                     class_dmax=dmax.get((meta.level, cls)),
                     n_test_index=n_test_index,
                 )
@@ -2116,6 +2114,31 @@ def decide(
     return table
 
 
+class _LevelPools:
+    """The pooled ">= d" sets of one level (``decide``): each test cell once.
+
+    Holds the level's deepest rows (every call, ``deepest_rows``) and, when
+    ``pool_weights`` is given, reweights each ">= d" set as one set (cached
+    per ``d``); a class's pooled set is its called rows there.
+    """
+
+    def __init__(self, deepest: pd.DataFrame, pool_weights: PoolWeights | None) -> None:
+        self.deepest = deepest
+        self.pool_weights = pool_weights
+        self._by_depth: dict[int, pd.DataFrame] = {}
+
+    def rows(self, cls: str, depth: int) -> pd.DataFrame:
+        """Return the pooled ">= depth" rows called ``cls``."""
+        if depth not in self._by_depth:
+            subset = self.deepest[self.deepest["depth"].to_numpy(np.int64) >= depth]
+            if self.pool_weights is not None:
+                subset = subset.copy()
+                subset["_weight"] = self.pool_weights(subset, depth)
+            self._by_depth[depth] = subset[subset["parent"].notna().to_numpy()]
+        subset = self._by_depth[depth]
+        return subset[(subset["parent"].astype(str) == cls).to_numpy()]
+
+
 def _class_decisions(
     meta: LevelMeta,
     cls: str,
@@ -2123,7 +2146,7 @@ def _class_decisions(
     settings: RuleSettings,
     *,
     groups: Mapping[tuple[str, int], pd.DataFrame],
-    deepest: pd.DataFrame | None,
+    pools: _LevelPools,
     class_dmax: int | None,
     n_test_index: Mapping[tuple[str, str, int], int],
 ) -> list[dict[str, Any]]:
@@ -2161,20 +2184,17 @@ def _class_decisions(
                 groups.get((cls, depth)), meta, depth, settings, base(depth)
             )
         }
-    pools: dict[int, dict[str, dict[str, Any]]] = {}
+    pooled: dict[int, dict[str, dict[str, Any]]] = {}
 
     def pooled_at(depth: int) -> dict[str, dict[str, Any]]:
-        if depth not in pools:
-            subset = (
-                None
-                if deepest is None
-                else deepest[deepest["depth"].to_numpy(np.int64) >= depth]
-            )
-            pools[depth] = {
+        if depth not in pooled:
+            pooled[depth] = {
                 record["regime"]: record
-                for record in _bin_decisions(subset, meta, depth, settings, base(depth))
+                for record in _bin_decisions(
+                    pools.rows(cls, depth), meta, depth, settings, base(depth)
+                )
             }
-        return pools[depth]
+        return pooled[depth]
 
     records: list[dict[str, Any]] = []
     for regime in REGIMES:
@@ -2522,6 +2542,33 @@ class DatasetComposition:
             return self.overall
         return shares
 
+    def at_least(self, depth: int) -> Mapping[str, float]:
+        """Return the composition a pooled ">= depth" set follows.
+
+        The dataset's cells of every bin at or above ``depth``: each bin's
+        composition normalised and weighted by its mass (a pooled deep set
+        stands for those cells; ``decide``).
+
+        Args:
+            depth: The pool's shallowest bin (``D_P``).
+
+        Returns:
+            The pooled composition, or ``overall`` when those bins hold fewer
+            than ``min_bin_mass`` cells.
+        """
+        total: dict[str, float] = {}
+        mass = 0.0
+        for bin_depth, shares in self.by_depth.items():
+            if int(bin_depth) < int(depth):
+                continue
+            bin_mass = float(self.bin_mass.get(int(bin_depth), 0.0))
+            mass += bin_mass
+            for name, value in _normalised(shares).items():
+                total[name] = total.get(name, 0.0) + value * bin_mass
+        if not total or mass < self.min_bin_mass - _TOLERANCE:
+            return self.overall
+        return total
+
     @classmethod
     def from_cells(
         cls,
@@ -2696,6 +2743,63 @@ def composition_weights(
             values = values * (len(values) / total)
         weights[index] = values
     return weights
+
+
+PoolWeights = Callable[[pd.DataFrame, int], np.ndarray]
+
+
+def pooled_composition_weights(
+    composition: Mapping[str, float] | DatasetComposition,
+    *,
+    key: str = TRUTH_LEAF_COLUMN,
+    class_of: Mapping[str, str] | None = None,
+    min_type_cells: int = 20,
+    trim_factor: float = 10.0,
+) -> PoolWeights:
+    """Return the weights of pooled deep sets (``decide``, RESOLVE).
+
+    A ">= D_P" set holds each test cell once, at its deepest bin, so its
+    rows come from several depth bins whose weights ``composition_weights``
+    normalised separately; mixing them lets a deep bin where the dataset
+    (almost) lacks a type carry a whole set (on ag7, 69 confident calls of
+    one class had a Kish n of 1). The set is therefore reweighted as one set
+    (gate-P evaluation rules, §14: "reweighted sets") to the dataset's cells
+    at depths ``>= D_P`` (``DatasetComposition.at_least``), with the same
+    rare-type pooling and trimming as a single bin.
+
+    Args:
+        composition: The dataset composition (per depth bin, or one).
+        key: Column holding the truth type.
+        class_of: Broad class per truth type (computed on the whole cells
+            table, so a level without broad rows keeps the broad classes).
+        min_type_cells: ``composition_weights`` ``min_type_cells``.
+        trim_factor: ``composition_weights`` ``trim_factor``.
+
+    Returns:
+        ``(rows, D_P) -> weights``: ``rows`` are a level's deepest rows at
+        depths ``>= D_P`` (every class, one recipe and seed).
+    """
+
+    def weigh(rows: pd.DataFrame, depth: int) -> np.ndarray:
+        if rows.empty:
+            return np.zeros(0, dtype=np.float64)
+        target = (
+            composition.at_least(depth)
+            if isinstance(composition, DatasetComposition)
+            else composition
+        )
+        frame = rows.copy()
+        frame["depth"] = int(depth)
+        return composition_weights(
+            frame,
+            target,
+            key=key,
+            class_of=class_of,
+            min_type_cells=min_type_cells,
+            trim_factor=trim_factor,
+        )
+
+    return weigh
 
 
 def _normalised(composition: Mapping[str, float]) -> dict[str, float]:
@@ -3775,15 +3879,21 @@ class ResolvabilityTables:
             ``decide`` output.
         """
         rule = settings or self.settings
-        weights = (
-            None
-            if composition is None
-            else composition_weights(
+        if composition is None:
+            return decide(
                 self.cells,
-                composition,
-                min_type_cells=rule.weight_min_type_cells,
-                trim_factor=rule.weight_trim_factor,
+                self.levels,
+                self.depth_grid,
+                rule,
+                recipe=str(self.summary["decision_recipe"]),
             )
+        class_of = leaf_class_map(self.cells)
+        weights = composition_weights(
+            self.cells,
+            composition,
+            class_of=class_of,
+            min_type_cells=rule.weight_min_type_cells,
+            trim_factor=rule.weight_trim_factor,
         )
         return decide(
             self.cells,
@@ -3791,6 +3901,12 @@ class ResolvabilityTables:
             self.depth_grid,
             rule,
             weights=weights,
+            pool_weights=pooled_composition_weights(
+                composition,
+                class_of=class_of,
+                min_type_cells=rule.weight_min_type_cells,
+                trim_factor=rule.weight_trim_factor,
+            ),
             recipe=str(self.summary["decision_recipe"]),
         )
 
