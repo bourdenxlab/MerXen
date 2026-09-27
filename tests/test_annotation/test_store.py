@@ -1199,7 +1199,10 @@ def test_bundle_json_records_what_build_hash_leaves_out(
     assert "mapping" not in payload and "resolvability" not in payload
     recorded = manifest["recorded_settings"]
     assert recorded["mapping"]["rng_seed"] == spec.rng_seed
-    assert recorded["resolvability"]["outputs_in_bundle"] is False
+    # The default config enables the self-map, whose recipe is hashed through
+    # the builder parameters; its RESOLVE-time settings are recorded only.
+    assert recorded["resolvability"]["outputs_in_bundle"] is True
+    assert recorded["resolvability"]["recipe"] == "R1_contam_HO"
     built_from = manifest["built_from_panel"]
     assert built_from["part_of_build_hash"] is False
     assert built_from["symbols_sha256"] == make_panel().symbols_sha256()

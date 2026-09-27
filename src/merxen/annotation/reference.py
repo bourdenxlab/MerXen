@@ -34,6 +34,24 @@ Builders (registered with the store on import):
   cortex-implausible superclusters dropped and the lookup filtered to the
   pruned tree (``research/insilico/06_wb_panel_markers.py``,
   ``exp/E1/06_filter_ctx_lookup.py``); refused above 1,000 genes.
+* ``whb_frontal_supc_clus_ho`` (human, resolvability; M3b): the frontal WHB
+  reference without the held-out donor (``auto``: the donor with the fewest
+  frontal cells, H19.30.002), panel-restricted, with its panel markers, and
+  that donor's cells (stratified by supercluster) as the self-map test set
+  (``exp/E2/make_ho_ref.py``, ``run_all.sh``, ``research/insilico/01_extract.py``).
+* ``wmb_selfmap_testset`` (mouse, resolvability; M3b): the 11,913 self-map
+  test cells (``research/selfmap/truth.csv``) plus up to 30 cells per
+  non-neuronal supertype that the ``wmb_panel`` marker build did not use,
+  panel-restricted.
+
+With resolvability enabled, the primary and secondary builders then run the
+self-map (``merxen.annotation.resolvability``) on their test set, which they
+get from the store: WHB maps the held-out cells onto the held-out bundle,
+SEA-AD maps the same cells onto itself (7-class, via the vocab), WMB maps its
+test cells onto itself; each writes ``resolvability.parquet``,
+``resolvability_cells.parquet`` and ``resolvability_summary.json``, and a
+resolvability trust constraint (``refused`` / ``broad_only``) becomes the
+bundle's ``panel_trust``.
 
 ``cell_type_mapper``, ``h5py`` and ``anndata`` are imported lazily, inside the
 functions that need them.
@@ -83,6 +101,8 @@ from merxen.annotation.vocab import (
 )
 
 if TYPE_CHECKING:
+    from scipy import sparse
+
     from merxen.annotation.panel import AnnotationPanel
     from merxen.annotation.store import BundleRef, ReferenceStore
 
@@ -139,6 +159,13 @@ SOURCE_WMB_TEST_CELLS: Final = "wmb_selfmap_test_cells"
 SOURCE_WMB_GENE_UNIVERSE: Final = "wmb_marker_gene_universe"
 SOURCE_MERFISH_CCF_METADATA: Final = "merfish_ccf_metadata"
 SOURCE_WHB_WHOLE_PRECOMPUTE: Final = "whb_whole_precompute"
+# Resolvability test sets (M3b). The frontal region cell metadata (donor,
+# cluster alias) comes from the region reference directory
+# (``region_cell_metadata.csv``); SEA-AD names that directory
+# ``whb_region_dir`` because it does not use the WHB precompute itself.
+SOURCE_WHB_REGION_CELL_METADATA: Final = "whb_region_cell_metadata"
+SOURCE_WHB_REGION_DIR: Final = "whb_region_dir"
+REGION_CELL_METADATA_FILE: Final = "region_cell_metadata.csv"
 
 # WHB (Siletti) taxonomy CCN202210140 and the frontal region (plan §3.2).
 WHB_TAXONOMY_ID: Final = "CCN202210140"
@@ -241,6 +268,39 @@ MERFISH_COLUMNS: Final[tuple[str, ...]] = (
 # Whole-WHB optional bundle: panels above this size are refused (§3.2).
 WHB_WHOLE_MAX_GENES: Final = LARGE_PANEL_GENES
 WHB_WHOLE_CORTEX_REGION: Final = "frontal_cortex"
+
+# Resolvability test sets (plan §3.2 builders, §8.3; M3b).
+HO_REFERENCE_ID: Final = "whb_frontal_supc_clus_ho"
+WMB_TESTSET_REFERENCE_ID: Final = "wmb_selfmap_testset"
+# E2 make_ho_ref.py: clusters with at least 5 training-donor cells.
+HO_MIN_TRAINING_CELLS_PER_CLUSTER: Final = 5
+# §8.3 step 1: <= 1,000 test cells per supercluster, all cells of rare ones.
+HO_MAX_TEST_CELLS_PER_SUPERCLUSTER: Final = 1000
+HO_DEFAULT_TEST_CELLS: Final = 25_000
+TEST_SET_SEED: Final = 0
+WMB_TESTSET_EXTRA_SEED: Final = 2
+# The non-neuronal WMB classes whose supertypes get extra test cells (§3.2:
+# Astro-Epen, OPC-Oligo, Vascular, Immune).
+WMB_NONNEURONAL_TEST_CLASSES: Final[tuple[str, ...]] = (
+    "CS20230722_CLAS_30",
+    "CS20230722_CLAS_31",
+    "CS20230722_CLAS_33",
+    "CS20230722_CLAS_34",
+)
+HO_SOURCES: Final[tuple[str, ...]] = (
+    SOURCE_WHB_REGION_CELL_METADATA,
+    SOURCE_WHB_NEURONS_H5AD,
+    SOURCE_WHB_NONNEURONS_H5AD,
+    SOURCE_WHB_CLUSTER_ANNOTATION,
+    SOURCE_WHB_CLUSTER_MEMBERSHIP,
+)
+WMB_TESTSET_SOURCES: Final[tuple[str, ...]] = (
+    SOURCE_WMB_TEST_CELLS,
+    SOURCE_WMB_CELL_METADATA,
+    SOURCE_WMB_CLUSTER_ANNOTATION,
+    SOURCE_WMB_CLUSTER_MEMBERSHIP,
+    SOURCE_WMB_H5AD_DIR,
+)
 
 # Marker settings (plan §3.2 recipes, §8.7).
 DEFAULT_PREP_N_PROCESSORS: Final = 8
@@ -2251,11 +2311,15 @@ class SourceOptions:
             ``None`` disables the cache.
         auto_download: Allow downloads into the cache.
         seeds: Local copies of pinned files by key.
+        resolvability: Keep (and expand) the resolvability test-set sources
+            of the primary and secondary references
+            (``AnnotationResolvabilityConfig.enabled``).
     """
 
     download_dir: Path | None = None
     auto_download: bool = False
     seeds: Mapping[str, Path] = field(default_factory=dict)
+    resolvability: bool = True
 
 
 def _find_one(root: Path, patterns: Sequence[str], what: str) -> Path:
@@ -2397,6 +2461,44 @@ def _complete_seaad_sources(
             sources.setdefault(name, ensured[key])
 
 
+_HO_METADATA_PATTERNS: Final[tuple[str, ...]] = (
+    SOURCE_WHB_CLUSTER_ANNOTATION,
+    SOURCE_WHB_CLUSTER_MEMBERSHIP,
+)
+_HO_REBUILD_METADATA_PATTERNS: Final[tuple[str, ...]] = (
+    SOURCE_WHB_CELL_METADATA,
+    SOURCE_WHB_ROI_MAP,
+)
+
+
+def _region_cell_metadata_of(directory: Path | None) -> Path | None:
+    """Return a region reference directory's ``region_cell_metadata.csv``."""
+    if directory is None:
+        return None
+    if directory.is_file():
+        return directory if directory.name == REGION_CELL_METADATA_FILE else None
+    candidate = directory / REGION_CELL_METADATA_FILE
+    return candidate if candidate.is_file() else None
+
+
+def _complete_holdout_sources(sources: dict[str, Path]) -> None:
+    """Expand the WHB directories into the held-out test set's source files.
+
+    The test set needs the frontal cells' donors and clusters (the region
+    cell metadata, else the WHB cell metadata and ROI map to rebuild it),
+    the taxonomy tables and the two raw WHB h5ads (plan §3.2).
+    """
+    metadata_names = list(_HO_METADATA_PATTERNS)
+    if SOURCE_WHB_REGION_CELL_METADATA not in sources:
+        metadata_names.extend(_HO_REBUILD_METADATA_PATTERNS)
+    _expand_directory(
+        sources,
+        SOURCE_WHB_METADATA_DIR,
+        {name: _WHB_METADATA_PATTERNS[name] for name in metadata_names},
+    )
+    _expand_directory(sources, SOURCE_WHB_H5AD_DIR, _WHB_H5AD_PATTERNS)
+
+
 def _complete_wmb_test_cells(sources: dict[str, Path], options: SourceOptions) -> None:
     """Point the self-map test-cell source at its stable pinned copy.
 
@@ -2472,10 +2574,17 @@ def prepare_reference_spec(
             manifest = region / "region_reference_manifest.json"
             if manifest.is_file():
                 sources.setdefault(SOURCE_REGION_MANIFEST, manifest)
+            region_metadata = _region_cell_metadata_of(region)
+            if options.resolvability and region_metadata is not None:
+                sources.setdefault(SOURCE_WHB_REGION_CELL_METADATA, region_metadata)
         if SOURCE_REGION_PRECOMPUTE in sources:
-            # Rebuild inputs are ignored when the precompute is given.
-            for name in (SOURCE_WHB_METADATA_DIR, SOURCE_WHB_H5AD_DIR):
-                sources.pop(name, None)
+            if options.resolvability:
+                # The held-out test set reads the raw h5ads and taxonomy.
+                _complete_holdout_sources(sources)
+            else:
+                # Rebuild inputs are ignored when the precompute is given.
+                for name in (SOURCE_WHB_METADATA_DIR, SOURCE_WHB_H5AD_DIR):
+                    sources.pop(name, None)
         else:
             _expand_directory(sources, SOURCE_WHB_METADATA_DIR, _WHB_METADATA_PATTERNS)
             _expand_directory(sources, SOURCE_WHB_H5AD_DIR, _WHB_H5AD_PATTERNS)
@@ -2491,6 +2600,32 @@ def prepare_reference_spec(
         _complete_seaad_sources(
             sources, options, include_taxonomy=True, reference_id=reference_id
         )
+        region_dir = sources.pop(SOURCE_WHB_REGION_DIR, None)
+        if options.resolvability:
+            region_metadata = _region_cell_metadata_of(region_dir)
+            if region_metadata is not None:
+                sources.setdefault(SOURCE_WHB_REGION_CELL_METADATA, region_metadata)
+            _complete_holdout_sources(sources)
+        else:
+            for name in (
+                SOURCE_WHB_H5AD_DIR,
+                SOURCE_WHB_METADATA_DIR,
+                SOURCE_WHB_REGION_CELL_METADATA,
+            ):
+                sources.pop(name, None)
+    elif reference_id == HO_REFERENCE_ID:
+        region_dir = sources.pop(SOURCE_WHB_REGION_DIR, None) or sources.pop(
+            SOURCE_REGION_PRECOMPUTE, None
+        )
+        region_metadata = _region_cell_metadata_of(region_dir)
+        if region_metadata is not None:
+            sources.setdefault(SOURCE_WHB_REGION_CELL_METADATA, region_metadata)
+        _complete_holdout_sources(sources)
+    elif reference_id == WMB_TESTSET_REFERENCE_ID:
+        _expand_directory(sources, SOURCE_WMB_METADATA_DIR, _WMB_METADATA_PATTERNS)
+        _require(sources, [SOURCE_WMB_H5AD_DIR, *_WMB_METADATA_PATTERNS], reference_id)
+        _complete_wmb_test_cells(sources, options)
+        _require(sources, [SOURCE_WMB_TEST_CELLS], reference_id)
     elif reference_id == "wmb_panel":
         _expand_directory(sources, SOURCE_WMB_METADATA_DIR, _WMB_METADATA_PATTERNS)
         _require(
@@ -3165,6 +3300,19 @@ def build_whb_frontal(context: BuildContext) -> dict[str, Any]:
     output["marker_unsupported_nodes"] = marker_unsupported_nodes(
         tree, markers.validation
     )
+    if _resolvability_enabled(context):
+        # The self-map maps held-out cells onto the held-out bundle, never
+        # onto this one, whose precompute contains the test donor (§5.7).
+        output.update(
+            _run_self_map(
+                context,
+                test_reference_id=HO_REFERENCE_ID,
+                test_sources=HO_SOURCES,
+                engine=None,
+                specs_for=lambda engine: _whb_specs(engine, config),
+                timer=timer,
+            )
+        )
     output.update(timer.to_json())
     return output
 
@@ -3258,6 +3406,26 @@ def build_seaad_mr(context: BuildContext) -> dict[str, Any]:
         tree,
         weak_parent_markers=config.panel.weak_parent_markers,
     )
+    if _resolvability_enabled(context):
+        from merxen.annotation import resolvability as res
+
+        # SEA-AD's 7-class precision on the WHB held-out cells (§8.3 step 1),
+        # mapped onto this bundle; SEA-AD holds no WHB donor.
+        output.update(
+            _run_self_map(
+                context,
+                test_reference_id=HO_REFERENCE_ID,
+                test_sources=HO_SOURCES,
+                engine=_work_bundle(
+                    context,
+                    taxonomy_id=SEAAD_TAXONOMY_ID,
+                    tree=tree,
+                    lookup_sha256_value=markers.filtered_lookup_sha256,
+                ),
+                specs_for=lambda engine: res.seaad_level_specs(config.thresholds),
+                timer=timer,
+            )
+        )
     output.update(timer.to_json())
     return output
 
@@ -3808,6 +3976,24 @@ def build_wmb_panel(context: BuildContext) -> dict[str, Any]:
         tree,
         weak_parent_markers=config.panel.weak_parent_markers,
     )
+    if _resolvability_enabled(context):
+        # The test cells are outside the marker build and inside the Allen
+        # means (~12k of 4M cells; negligible leakage, §8.3 step 1).
+        output.update(
+            _run_self_map(
+                context,
+                test_reference_id=WMB_TESTSET_REFERENCE_ID,
+                test_sources=WMB_TESTSET_SOURCES,
+                engine=_work_bundle(
+                    context,
+                    taxonomy_id=WMB_TAXONOMY_ID,
+                    tree=tree,
+                    lookup_sha256_value=markers.filtered_lookup_sha256,
+                ),
+                specs_for=lambda engine: _wmb_specs(engine, config),
+                timer=timer,
+            )
+        )
     output.update(timer.to_json())
     return output
 
@@ -4139,6 +4325,941 @@ def build_whb_whole_ctx(context: BuildContext) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------
+# Resolvability test sets and the self-map (plan §3.2, §8.3; M3b)
+
+
+def membership_labels(
+    membership_path: Path | str, term_sets: Sequence[str]
+) -> pd.DataFrame:
+    """Return each cluster alias's term label per taxonomy level.
+
+    Args:
+        membership_path: Allen ``cluster_to_cluster_annotation_membership.csv``.
+        term_sets: Term-set labels (levels), e.g. ``CCN202210140_SUPC``.
+
+    Returns:
+        Indexed by ``cluster_alias`` (int), one column per term set.
+    """
+    frame = pd.read_csv(
+        membership_path,
+        usecols=[
+            "cluster_alias",
+            "cluster_annotation_term_set_label",
+            "cluster_annotation_term_label",
+        ],
+    )
+    frame = frame[frame["cluster_annotation_term_set_label"].isin(list(term_sets))]
+    pivot = frame.pivot_table(
+        index="cluster_alias",
+        columns="cluster_annotation_term_set_label",
+        values="cluster_annotation_term_label",
+        aggfunc="first",
+    )
+    missing = [level for level in term_sets if level not in pivot.columns]
+    if missing:
+        raise ReferenceBuildError(f"{membership_path} has no terms at {missing}")
+    pivot.index = pivot.index.astype(int)
+    return pivot[list(term_sets)]
+
+
+def holdout_donor(donors: pd.Series, requested: str) -> str:
+    """Return the held-out donor (``auto``: the donor with the fewest cells).
+
+    Rev3 correction (§3.2): the default H19.30.002 has the *fewest* frontal
+    WHB cells (32,606 of 125,481), as in the E2 pilot.
+
+    Args:
+        donors: Donor label per candidate cell.
+        requested: ``annotation_calibration_holdout_donor``.
+
+    Returns:
+        The donor.
+
+    Raises:
+        ReferenceBuildError: If a named donor has no cell.
+    """
+    counts = donors.astype(str).value_counts()
+    if counts.empty:
+        raise ReferenceBuildError("no donor among the frontal WHB cells")
+    if requested == "auto":
+        smallest = int(counts.min())
+        return sorted(str(donor) for donor, n in counts.items() if n == smallest)[0]
+    if requested not in counts.index:
+        raise ReferenceBuildError(
+            f"held-out donor {requested!r} has no frontal WHB cell "
+            f"(donors: {sorted(counts.index)})"
+        )
+    return requested
+
+
+def read_panel_counts(
+    matrices: Mapping[str, Path],
+    cells: pd.DataFrame,
+    genes: Sequence[str],
+    *,
+    block_rows: int = 5000,
+) -> sparse.csr_matrix:
+    """Read the panel-restricted raw counts of some cells, in their order.
+
+    Args:
+        matrices: h5ad path per feature-matrix label.
+        cells: ``cell_label`` and ``feature_matrix_label`` per cell.
+        genes: Gene IDs kept (must be in every matrix), in this order.
+        block_rows: Rows read per block from the backed matrices.
+
+    Returns:
+        Cells x genes counts (CSR, float64), in ``cells`` order.
+
+    Raises:
+        ReferenceBuildError: If a matrix is missing, lacks a gene or a cell.
+    """
+    import anndata as ad
+    import scipy.sparse as sp
+
+    labels = cells["cell_label"].astype(str).to_numpy()
+    blocks: list[sp.csr_matrix] = []
+    order: list[np.ndarray] = []
+    for matrix_label, group in cells.groupby("feature_matrix_label", sort=True):
+        path = matrices.get(str(matrix_label))
+        if path is None:
+            raise ReferenceBuildError(f"no expression matrix for {matrix_label!r}")
+        source = ad.read_h5ad(path, backed="r")
+        try:
+            positions = source.obs_names.get_indexer(group["cell_label"].astype(str))
+            if (positions < 0).any():
+                absent = group["cell_label"].astype(str).to_numpy()[positions < 0]
+                raise ReferenceBuildError(
+                    f"{path} lacks {int((positions < 0).sum())} cells, e.g. "
+                    f"{list(absent[:5])}"
+                )
+            gene_index = source.var_names.get_indexer(list(genes))
+            if (gene_index < 0).any():
+                absent_genes = [
+                    gene for gene, idx in zip(genes, gene_index, strict=True) if idx < 0
+                ]
+                raise ReferenceBuildError(
+                    f"{path} lacks panel genes {absent_genes[:10]}"
+                )
+            sort = np.argsort(positions, kind="stable")
+            sorted_positions = positions[sort]
+            parts = [
+                sp.csr_matrix(source.X[sorted_positions[start : start + block_rows]])[
+                    :, gene_index
+                ]
+                for start in range(0, len(sorted_positions), block_rows)
+            ]
+        finally:
+            source.file.close()
+        blocks.append(sp.vstack(parts).tocsr().astype(np.float64))
+        rows = np.flatnonzero(
+            cells["feature_matrix_label"].astype(str).to_numpy() == str(matrix_label)
+        )
+        order.append(rows[sort])
+        logger.info("Read %d cells x %d genes from %s", len(group), len(genes), path)
+    if not blocks:
+        return sp.csr_matrix((0, len(genes)), dtype=np.float64)
+    stacked = sp.vstack(blocks).tocsr()
+    positions_in_input = np.concatenate(order)
+    inverse = np.empty_like(positions_in_input)
+    inverse[positions_in_input] = np.arange(len(positions_in_input))
+    result = stacked[inverse]
+    if len(labels) != result.shape[0]:  # pragma: no cover - defensive
+        raise ReferenceBuildError("panel count extraction lost cells")
+    return result.tocsr()
+
+
+def _ho_region_metadata(context: BuildContext) -> pd.DataFrame:
+    """Return the frontal WHB cells (donor, cluster alias) of the test set."""
+    columns = ["cell_label", "feature_matrix_label", "donor_label", "cluster_alias"]
+    if SOURCE_WHB_REGION_CELL_METADATA in context.sources:
+        path = _source_path(context, SOURCE_WHB_REGION_CELL_METADATA)
+        return pd.read_csv(path, usecols=columns + ["region_of_interest_label"])
+    if (
+        SOURCE_WHB_CELL_METADATA in context.sources
+        and SOURCE_WHB_ROI_MAP in context.sources
+    ):
+        from merxen.analysis.mapmycells import _write_region_cell_metadata
+
+        path = context.scratch_dir / REGION_CELL_METADATA_FILE
+        _write_region_cell_metadata(
+            cell_metadata_path=_source_path(context, SOURCE_WHB_CELL_METADATA),
+            output_path=path,
+            region_labels=list(WHB_FRONTAL_ROI_LABELS),
+            min_cells_per_leaf=WHB_FRONTAL_MIN_CELLS_PER_LEAF,
+            roi_map_path=_source_path(context, SOURCE_WHB_ROI_MAP),
+            region_column="region_of_interest_label",
+        )
+        return pd.read_csv(path, usecols=columns + ["region_of_interest_label"])
+    raise ReferenceBuildError(
+        f"{HO_REFERENCE_ID} needs {SOURCE_WHB_REGION_CELL_METADATA!r} (the region "
+        f"reference directory's {REGION_CELL_METADATA_FILE}) or "
+        f"{SOURCE_WHB_CELL_METADATA!r} + {SOURCE_WHB_ROI_MAP!r}"
+    )
+
+
+def _matrix_genes(path: Path) -> list[str]:
+    import anndata as ad
+
+    source = ad.read_h5ad(path, backed="r")
+    try:
+        return [str(gene) for gene in source.var_names]
+    finally:
+        source.file.close()
+
+
+def _write_training_h5ads(
+    counts: sparse.csr_matrix,
+    cells: pd.DataFrame,
+    genes: Sequence[str],
+    directory: Path,
+) -> list[Path]:
+    """Write one panel-restricted training h5ad per feature matrix."""
+    import anndata as ad
+
+    directory.mkdir(parents=True, exist_ok=True)
+    written = []
+    matrix_labels = cells["feature_matrix_label"].astype(str).to_numpy()
+    for label in sorted(set(matrix_labels)):
+        rows = np.flatnonzero(matrix_labels == label)
+        adata = ad.AnnData(
+            X=counts[rows].astype(np.float32),
+            obs=pd.DataFrame(index=cells["cell_label"].astype(str).to_numpy()[rows]),
+            var=pd.DataFrame(index=list(genes)),
+        )
+        path = directory / f"{label}-panel-raw.h5ad"
+        adata.write_h5ad(path)
+        written.append(path)
+    return written
+
+
+def _spill_groups(truth_labels: Iterable[str], taxonomy_id: str) -> list[str]:
+    """Return the vocab broad class of truth nodes (spill groups)."""
+    from merxen.annotation.vocab import load_vocab
+
+    table = load_vocab(
+        "whb_supercluster" if taxonomy_id == WHB_TAXONOMY_ID else "wmb_class"
+    )
+    label_to_name = table.label_to_name()
+    groups = []
+    for label in truth_labels:
+        name = label_to_name.get(str(label))
+        groups.append(
+            table.broad_class(name)
+            if name is not None and name in table
+            else UNASSIGNED_LABEL
+        )
+    return groups
+
+
+def build_whb_frontal_ho(context: BuildContext) -> dict[str, Any]:
+    """Build the ``whb_frontal_supc_clus_ho`` bundle (human, resolvability).
+
+    Recipe (plan §3.2, §8.3; ``exp/E2/make_ho_ref.py``, ``run_all.sh``,
+    ``research/insilico/01_extract.py``): the frontal WHB cells (A44-A45,
+    A46, A32, ACC) restricted to the panel; the held-out donor (``auto``:
+    the one with the fewest frontal cells, H19.30.002) is removed from the
+    training cells, which keep clusters with at least 5 cells; a
+    supercluster -> cluster -> subcluster precompute of the training cells
+    (raw normalisation, as the pilot) truncated to supercluster -> cluster
+    is the mapping precompute, with panel markers (``n_per_utility``); the
+    held-out donor's cells, at most 1,000 per supercluster (all cells of
+    rare ones) and at most ``n_test_cells``, are the test set
+    (``test_cells.h5ad`` with native panel counts and their truth).
+
+    Args:
+        context: The build context.
+
+    Returns:
+        ``bundle.json`` builder output.
+    """
+    from merxen.annotation import resolvability as res
+
+    spec = context.spec
+    panel = _panel_of(context)
+    config = _config_of(context)
+    timer = _StepTimer(context.work_dir / CTM_LOG_DIR)
+    output: dict[str, Any] = {
+        "reference": "WHB frontal region without the held-out donor (E2 HO recipe)"
+    }
+    with timer.step("region_cells"):
+        metadata = _ho_region_metadata(context)
+        labels = membership_labels(
+            _source_path(context, SOURCE_WHB_CLUSTER_MEMBERSHIP), WHB_SOURCE_HIERARCHY
+        )
+        metadata = metadata.join(labels, on="cluster_alias")
+        metadata = metadata.dropna(subset=list(WHB_SOURCE_HIERARCHY))
+    donor = holdout_donor(metadata["donor_label"], config.resolvability.holdout_donor)
+    donor_counts = {
+        str(key): int(value)
+        for key, value in metadata["donor_label"].astype(str).value_counts().items()
+    }
+    is_test_donor = metadata["donor_label"].astype(str) == donor
+    training = metadata[~is_test_donor]
+    per_cluster = training[WHB_CLUS].value_counts()
+    kept_clusters = per_cluster[per_cluster >= HO_MIN_TRAINING_CELLS_PER_CLUSTER].index
+    dropped_clusters = sorted(set(per_cluster.index) - set(kept_clusters))
+    training = training[training[WHB_CLUS].isin(kept_clusters)]
+    pool = metadata[is_test_donor].set_index("cell_label", drop=False)
+    n_test = config.resolvability.n_test_cells or HO_DEFAULT_TEST_CELLS
+    chosen = res.select_test_cells(
+        pool,
+        stratum=WHB_SUPC,
+        max_per_stratum=HO_MAX_TEST_CELLS_PER_SUPERCLUSTER,
+        n_max=n_test,
+        seed=TEST_SET_SEED,
+    )
+    test_rows = pool.loc[chosen].reset_index(drop=True)
+    matrices = {
+        "WHB-10Xv3-Neurons": _source_path(context, SOURCE_WHB_NEURONS_H5AD),
+        "WHB-10Xv3-Nonneurons": _source_path(context, SOURCE_WHB_NONNEURONS_H5AD),
+    }
+    reference_genes = set(_matrix_genes(matrices["WHB-10Xv3-Neurons"]))
+    genes = sorted(gene for gene in panel.ensembl_ids if gene in reference_genes)
+    if not genes:
+        raise ReferenceBuildError(
+            f"no panel gene of {spec.reference_id!r} is in the WHB matrices "
+            f"({panel.n_genes} panel genes; species or gene-ID mismatch?)"
+        )
+    cells = pd.concat([training.reset_index(drop=True), test_rows], ignore_index=True)
+    with timer.step("extract_panel_counts"):
+        counts = read_panel_counts(matrices, cells, genes)
+    n_training = len(training)
+    training_counts = counts[:n_training]
+    test_counts = counts[n_training:]
+    h5ads = _write_training_h5ads(
+        training_counts,
+        cells.iloc[:n_training],
+        genes,
+        context.scratch_dir / "training_h5ad",
+    )
+    cell_metadata = context.scratch_dir / "training_cell_metadata.csv"
+    cells.iloc[:n_training][["cell_label", "cluster_alias"]].to_csv(
+        cell_metadata, index=False
+    )
+    source_path = context.scratch_dir / SOURCE_PRECOMPUTE_FILE
+    tmp_dir = context.scratch_dir / "ctm_tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    timer.ctm(
+        "precompute_training",
+        _run_ctm_precompute_abc,
+        {
+            "output_path": str(source_path),
+            "hierarchy": list(WHB_SOURCE_HIERARCHY),
+            "h5ad_path_list": [str(path) for path in h5ads],
+            "cell_metadata_path": str(cell_metadata),
+            "cluster_annotation_path": str(
+                _source_path(context, SOURCE_WHB_CLUSTER_ANNOTATION)
+            ),
+            "cluster_membership_path": str(
+                _source_path(context, SOURCE_WHB_CLUSTER_MEMBERSHIP)
+            ),
+            "n_processors": prep_resources().n_processors,
+            "split_by_dataset": False,
+            "do_pruning": True,
+            "tmp_dir": str(tmp_dir),
+            "clobber": True,
+            "normalization": "raw",
+        },
+    )
+    hierarchy = list(spec.hierarchy or WHB_FRONTAL_HIERARCHY)
+    mapping_path = context.work_dir / MAPPING_PRECOMPUTE_FILE
+    timer.ctm(
+        "truncate_taxonomy",
+        _run_ctm_truncate,
+        {
+            "input_path": str(source_path),
+            "output_path": str(mapping_path),
+            "new_hierarchy": hierarchy,
+        },
+    )
+    tree = mapping_tree(
+        TaxonomyTreeView.from_precompute(mapping_path),
+        drop_level=spec.drop_level,
+        nodes_to_drop=spec.nodes_to_drop,
+    )
+    markers = find_panel_markers(
+        context,
+        marker_precompute=mapping_path,
+        tree=tree,
+        query_genes=genes,
+        drop_level=spec.drop_level,
+        timer=timer,
+        keep_reference_markers=panel.n_genes > config.panel.large_panel_genes,
+    )
+    output.update(_write_common_files(context, tree, WHB_TAXONOMY_ID))
+    output.update(_tree_output(tree, spec))
+    output["mapping_precompute"] = {
+        "file": MAPPING_PRECOMPUTE_FILE,
+        "hierarchy": hierarchy,
+        "sha256": file_sha256(mapping_path),
+        "n_training_cells": int(n_training),
+    }
+    output["markers"] = _markers_output(context, markers, tree, config)
+    output["collapsed_parents"] = output["markers"]["collapsed_parents"]
+    output["panel_coverage"] = panel_coverage(
+        panel,
+        reference_genes,
+        markers,
+        tree,
+        weak_parent_markers=config.panel.weak_parent_markers,
+    )
+    truth_supc = test_rows[WHB_SUPC].astype(str).to_numpy()
+    obs = pd.DataFrame(
+        {
+            f"{res.TRUTH_PREFIX}{WHB_SUPC}": truth_supc,
+            f"{res.TRUTH_PREFIX}{WHB_CLUS}": test_rows[WHB_CLUS].astype(str).to_numpy(),
+            f"{res.TRUTH_PREFIX}{WHB_SUBC}": test_rows[WHB_SUBC].astype(str).to_numpy(),
+            res.TRUTH_LEAF_COLUMN: truth_supc,
+            res.SPILL_GROUP_COLUMN: _spill_groups(truth_supc, WHB_TAXONOMY_ID),
+            "donor_label": test_rows["donor_label"].astype(str).to_numpy(),
+            "feature_matrix_label": test_rows["feature_matrix_label"]
+            .astype(str)
+            .to_numpy(),
+            "region_of_interest_label": test_rows["region_of_interest_label"]
+            .astype(str)
+            .to_numpy(),
+        },
+        index=pd.Index(test_rows["cell_label"].astype(str).to_numpy(), name="cell_id"),
+    )
+    test = res.HeldOutCells(counts=test_counts, genes=list(genes), obs=obs)
+    written = res.write_test_cells(test, context.work_dir)
+    native = test.native_counts
+    output["test_set"] = {
+        **written,
+        "holdout_donor": donor,
+        "holdout_donor_requested": config.resolvability.holdout_donor,
+        "donor_cells": donor_counts,
+        "n_pool_cells": int(len(pool)),
+        "n_test_cells_requested": int(n_test),
+        "max_per_supercluster": HO_MAX_TEST_CELLS_PER_SUPERCLUSTER,
+        "seed": TEST_SET_SEED,
+        "per_supercluster": {
+            str(key): int(value)
+            for key, value in pd.Series(truth_supc).value_counts().sort_index().items()
+        },
+        "n_training_cells": int(n_training),
+        "n_training_clusters": int(len(kept_clusters)),
+        "training_clusters_dropped": [str(value) for value in dropped_clusters],
+        "min_training_cells_per_cluster": HO_MIN_TRAINING_CELLS_PER_CLUSTER,
+        "native_counts_median": float(np.median(native)) if len(native) else None,
+    }
+    output.update(timer.to_json())
+    return output
+
+
+def build_wmb_selfmap_testset(context: BuildContext) -> dict[str, Any]:
+    """Build the ``wmb_selfmap_testset`` bundle (mouse, resolvability).
+
+    Recipe (plan §3.2, §8.3; ``research/selfmap/build_queries.py``): the
+    11,913 self-map test cells (<= 10 WMB-10Xv3 cells per supertype;
+    ``truth.csv``), plus up to ``mouse_nonneuronal_extra_per_supertype``
+    (30) cells per supertype of the non-neuronal classes (Astro-Epen,
+    OPC-Oligo, Vascular, Immune) drawn from 10Xv3 cells the ``wmb_panel``
+    marker build did not use (its training sample is recomputed with the
+    same rule, so that build is unchanged), restricted to the panel with
+    native counts and truth at class, subclass, supertype and cluster.
+
+    Args:
+        context: The build context.
+
+    Returns:
+        ``bundle.json`` builder output.
+    """
+    from merxen.annotation import resolvability as res
+
+    spec = context.spec
+    panel = _panel_of(context)
+    config = _config_of(context)
+    timer = _StepTimer(context.work_dir / CTM_LOG_DIR)
+    matrices = _wmb_matrices(context)
+    if not matrices:
+        raise ReferenceBuildError(
+            f"no *{WMB_H5AD_SUFFIX} under {_source_path(context, SOURCE_WMB_H5AD_DIR)}"
+        )
+    base = read_cell_label_list(_source_path(context, SOURCE_WMB_TEST_CELLS))
+    base_digest = file_sha256(_source_path(context, SOURCE_WMB_TEST_CELLS))
+    with timer.step("training_sample"):
+        sampled, sampling = sample_wmb_training_cells(
+            _source_path(context, SOURCE_WMB_CELL_METADATA),
+            matrices,
+            max_cells_per_cluster=spec.max_cells_per_cluster,
+            exclude_cells=base,
+        )
+    with timer.step("candidate_cells"):
+        meta = pd.read_csv(
+            _source_path(context, SOURCE_WMB_CELL_METADATA),
+            usecols=[
+                "cell_label",
+                "feature_matrix_label",
+                "library_method",
+                "cluster_alias",
+            ],
+            dtype={"cluster_alias": "Int64"},
+        )
+        meta = meta[meta["library_method"] == WMB_LIBRARY_METHOD].dropna(
+            subset=["cluster_alias"]
+        )
+        meta = meta[meta["feature_matrix_label"].isin(set(matrices))]
+        meta["cluster_alias"] = meta["cluster_alias"].astype(int)
+        labels = membership_labels(
+            _source_path(context, SOURCE_WMB_CLUSTER_MEMBERSHIP), WMB_HIERARCHY
+        )
+        meta = meta.join(labels, on="cluster_alias").dropna(subset=list(WMB_HIERARCHY))
+    base_rows = meta[meta["cell_label"].isin(base)].copy()
+    if (
+        config.resolvability.n_test_cells
+        and len(base_rows) > config.resolvability.n_test_cells
+    ):
+        chosen = res.select_test_cells(
+            base_rows.set_index("cell_label", drop=False),
+            stratum=WMB_SUPT,
+            max_per_stratum=len(base_rows),
+            n_max=config.resolvability.n_test_cells,
+            seed=TEST_SET_SEED,
+        )
+        base_rows = base_rows[base_rows["cell_label"].isin(set(chosen))]
+    base_rows["test_source"] = "selfmap_truth"
+    used = set(base) | set(sampled["cell_label"].astype(str))
+    pool = meta[
+        ~meta["cell_label"].isin(used)
+        & meta[WMB_CLAS].isin(list(WMB_NONNEURONAL_TEST_CLASSES))
+    ]
+    extra_per_supertype = config.resolvability.mouse_nonneuronal_extra_per_supertype
+    parts = [
+        group.sample(
+            n=min(len(group), extra_per_supertype), random_state=WMB_TESTSET_EXTRA_SEED
+        )
+        for _, group in pool.groupby(WMB_SUPT, sort=True)
+        if extra_per_supertype > 0
+    ]
+    extra = pd.concat(parts) if parts else pool.iloc[0:0]
+    extra = extra.assign(test_source="nonneuronal_extra")
+    cells = pd.concat([base_rows, extra], ignore_index=True)
+    reference_genes = set(_matrix_genes(next(iter(matrices.values()))))
+    genes = sorted(gene for gene in panel.ensembl_ids if gene in reference_genes)
+    if not genes:
+        raise ReferenceBuildError(
+            f"no panel gene of {spec.reference_id!r} is in the WMB matrices "
+            f"({panel.n_genes} panel genes; species or gene-ID mismatch?)"
+        )
+    with timer.step("extract_panel_counts"):
+        counts = read_panel_counts(matrices, cells, genes)
+    truth_class = cells[WMB_CLAS].astype(str).to_numpy()
+    obs = pd.DataFrame(
+        {
+            **{
+                f"{res.TRUTH_PREFIX}{level}": cells[level].astype(str).to_numpy()
+                for level in WMB_HIERARCHY
+            },
+            res.TRUTH_LEAF_COLUMN: cells[WMB_SUBC].astype(str).to_numpy(),
+            res.SPILL_GROUP_COLUMN: _spill_groups(truth_class, WMB_TAXONOMY_ID),
+            "test_source": cells["test_source"].astype(str).to_numpy(),
+            "feature_matrix_label": cells["feature_matrix_label"]
+            .astype(str)
+            .to_numpy(),
+        },
+        index=pd.Index(cells["cell_label"].astype(str).to_numpy(), name="cell_id"),
+    )
+    test = res.HeldOutCells(counts=counts, genes=list(genes), obs=obs)
+    written = res.write_test_cells(test, context.work_dir)
+    _write_json(
+        context.work_dir / DEPTH_GRID_FILE,
+        {
+            "depth_grid": spec.resolved_depth_grid(panel.n_genes),
+            "source": "spec" if spec.depth_grid is not None else "default",
+            "species": spec.species,
+            "n_panel_genes": panel.n_genes,
+        },
+    )
+    native = test.native_counts
+    per_class = pd.Series(truth_class).value_counts().sort_index()
+    return {
+        "reference": "WMB self-map test cells (10Xv3), panel-restricted",
+        "test_set": {
+            **written,
+            "n_selfmap_truth_cells": int((obs["test_source"] == "selfmap_truth").sum()),
+            "n_selfmap_list": len(base),
+            "selfmap_list_sha256": base_digest,
+            "matches_validated_test_set": base_digest
+            == WMB_SELFMAP_TEST_CELLS_PIN.sha256,
+            "n_nonneuronal_extra": int(len(extra)),
+            "nonneuronal_classes": list(WMB_NONNEURONAL_TEST_CLASSES),
+            "extra_per_supertype": int(extra_per_supertype),
+            "extra_seed": WMB_TESTSET_EXTRA_SEED,
+            "marker_training_sample": {
+                "n_cells": int(sampling["n_sampled_cells"]),
+                "disjoint": bool(
+                    not set(obs.index) & set(sampled["cell_label"].astype(str))
+                ),
+            },
+            "per_class": {str(key): int(value) for key, value in per_class.items()},
+            "native_counts_median": float(np.median(native)) if len(native) else None,
+        },
+        "depth_grid": spec.resolved_depth_grid(panel.n_genes),
+        **timer.to_json(),
+    }
+
+
+def _test_set_spec(
+    context: BuildContext, reference_id: str, names: Sequence[str]
+) -> AnnotationReferenceSpec:
+    """Return the spec of a primary bundle's resolvability test set.
+
+    The test set is built from the primary spec's own source files (so the
+    primary ``build_hash`` covers it) and the WHB (human) or WMB (mouse)
+    reference settings, so the WHB and SEA-AD self-maps share one held-out
+    bundle.
+    """
+    config = _config_of(context)
+    available = {
+        name: Path(context.sources[name].path)
+        for name in names
+        if name in context.sources
+    }
+    if reference_id == HO_REFERENCE_ID:
+        has_metadata = SOURCE_WHB_REGION_CELL_METADATA in available or (
+            SOURCE_WHB_CELL_METADATA in context.sources
+            and SOURCE_WHB_ROI_MAP in context.sources
+        )
+        missing = [] if has_metadata else [SOURCE_WHB_REGION_CELL_METADATA]
+        if SOURCE_WHB_REGION_CELL_METADATA not in available:
+            for name in (SOURCE_WHB_CELL_METADATA, SOURCE_WHB_ROI_MAP):
+                if name in context.sources:
+                    available[name] = Path(context.sources[name].path)
+        missing += [
+            name
+            for name in names
+            if name != SOURCE_WHB_REGION_CELL_METADATA and name not in available
+        ]
+        template_id = "whb_frontal_supc_clus"
+    else:
+        missing = [name for name in names if name not in available]
+        template_id = "wmb_panel"
+    if missing:
+        raise ReferenceBuildError(
+            f"{context.spec.reference_id}: the resolvability self-map (enabled) "
+            f"needs the test-set source(s) {missing} for {reference_id}; pass the "
+            "WHB h5ad and metadata directories (annotation_whb_h5ad_dir, "
+            "annotation_whb_metadata_dir, annotation_whb_region_precompute_source) "
+            "or the WMB sources, or disable annotation resolvability"
+        )
+    template = next(
+        (item for item in config.references if item.reference_id == template_id),
+        None,
+    )
+    if template is None or context.spec.reference_id == template_id:
+        template = context.spec
+    known = KNOWN_REFERENCES[reference_id]
+    return AnnotationReferenceSpec(
+        reference_id=reference_id,
+        species=known["species"],
+        role=known["role"],
+        sources=dict(sorted(available.items())),
+        hierarchy=list(known.get("hierarchy", [])),
+        n_per_utility=template.n_per_utility,
+        max_cells_per_cluster=template.max_cells_per_cluster,
+        bootstrap_factor=template.bootstrap_factor,
+        bootstrap_iteration=template.bootstrap_iteration,
+        rng_seed=template.rng_seed,
+        depth_grid=template.depth_grid,
+    )
+
+
+def _work_bundle(
+    context: BuildContext,
+    *,
+    taxonomy_id: str,
+    tree: TaxonomyTreeView,
+    lookup_sha256_value: str,
+) -> Any:
+    """Return an ``MmcBundle`` view of the bundle being built (self-mapping)."""
+    from merxen.annotation.mapmycells_engine import MmcBundle
+    from merxen.annotation.store import ANNOTATION_BUILDER_VERSION
+
+    panel = _panel_of(context)
+    return MmcBundle(
+        reference_id=context.spec.reference_id,
+        role=context.spec.role,
+        species=context.spec.species,
+        build_hash=context.build_hash,
+        path=context.work_dir,
+        panel_hash=panel.panel_hash,
+        n_panel_genes=panel.n_genes,
+        taxonomy_id=taxonomy_id,
+        levels=tuple(tree.hierarchy),
+        drop_level=context.spec.drop_level,
+        mapping_precompute=context.work_dir / MAPPING_PRECOMPUTE_FILE,
+        lookup=context.work_dir / QUERY_MARKERS_FILTERED_FILE,
+        lookup_sha256=lookup_sha256_value,
+        mapping_tree=context.work_dir / MAPPING_TREE_FILE,
+        vocab_snapshot=context.work_dir / VOCAB_SNAPSHOT_FILE,
+        builder_version=ANNOTATION_BUILDER_VERSION,
+        manifest={},
+    )
+
+
+def _mmc_map_function(
+    context: BuildContext, engine: Any, runs: list[dict[str, Any]]
+) -> Any:
+    """Return the self-map's ``map_fn``: MapMyCells with the production settings."""
+    from merxen.annotation.mapmycells_engine import (
+        MmcEngineParams,
+        read_tidy_parquet,
+        restrict_lookup,
+        run_mmc,
+        write_query_h5ad,
+    )
+
+    config = _config_of(context)
+    spec = context.spec
+    scratch = context.scratch_dir / "resolvability"
+    scratch.mkdir(parents=True, exist_ok=True)
+
+    def map_query(query: Any, tag: str, seed: int) -> pd.DataFrame:
+        name = f"{engine.reference_id}__{tag}"
+        query_path = write_query_h5ad(
+            query.counts, list(query.obs.index), query.genes, scratch / f"{name}.h5ad"
+        )
+        restricted = restrict_lookup(
+            engine, query.genes, scratch / f"{name}.lookup.json"
+        )
+        params = MmcEngineParams(
+            bootstrap_factor=spec.bootstrap_factor,
+            bootstrap_iteration=spec.bootstrap_iteration,
+            rng_seed=spec.rng_seed + int(seed),
+            n_processors=prep_resources().n_processors,
+        )
+        result = run_mmc(
+            query_path,
+            engine,
+            params,
+            output_parquet=scratch / f"{name}.parquet",
+            work_dir=scratch / "mmc",
+            expected_ctm_version=config.ctm_version,
+            lookup_path=restricted.path,
+            log_dir=context.work_dir / CTM_LOG_DIR / "resolvability",
+        )
+        tidy, _ = read_tidy_parquet(result.parquet)
+        runs.append(
+            {
+                "tag": tag,
+                "engine": engine.reference_id,
+                "engine_build_hash": engine.build_hash,
+                "n_cells": result.n_cells,
+                "n_query_genes": result.n_query_genes,
+                "wall_s": result.wall_s,
+                "peak_rss_gb": result.peak_rss_gb,
+                "n_processors": params.n_processors,
+                "rng_seed": params.rng_seed,
+            }
+        )
+        query_path.unlink(missing_ok=True)
+        result.parquet.unlink(missing_ok=True)
+        return tidy
+
+    return map_query
+
+
+def _resolvability_enabled(context: BuildContext) -> bool:
+    config = _config_of(context)
+    return bool(config.resolvability.enabled) and context.spec.role in (
+        "primary",
+        "secondary",
+    )
+
+
+def _run_self_map(
+    context: BuildContext,
+    *,
+    test_reference_id: str,
+    test_sources: Sequence[str],
+    engine: Any | None,
+    specs_for: Any,
+    timer: _StepTimer,
+) -> dict[str, Any]:
+    """Run the resolvability self-map of a bundle and write its tables (§8.3).
+
+    Args:
+        context: The build context of the primary or secondary bundle.
+        test_reference_id: The test-set reference (held-out WHB, WMB set).
+        test_sources: Source names the test set is built from.
+        engine: The bundle to map onto (``None``: the test-set bundle, i.e.
+            the held-out WHB reference).
+        specs_for: ``engine -> level specs``.
+        timer: Step timer.
+
+    Returns:
+        Builder output: ``resolvability`` (compact record) and, when
+        resolvability forces one, ``panel_trust``.
+    """
+    from merxen.annotation import resolvability as res
+    from merxen.annotation.mapmycells_engine import MmcBundle
+    from merxen.annotation.vocab import load_floor_table
+
+    if context.store is None:
+        raise ReferenceBuildError(
+            f"{context.spec.reference_id}: the resolvability self-map needs the "
+            "reference store (build through ReferenceStore.get_or_build)"
+        )
+    config = _config_of(context)
+    panel = _panel_of(context)
+    test_spec = _test_set_spec(context, test_reference_id, test_sources)
+    with timer.step("resolvability_test_set"):
+        test_ref = context.store.get_or_build(test_spec, panel, config=config)
+    test = res.load_test_cells(Path(test_ref.path))
+    mapped_engine = engine if engine is not None else MmcBundle.from_dir(test_ref.path)
+    runs: list[dict[str, Any]] = []
+    grid = context.spec.resolved_depth_grid(panel.n_genes)
+    settings = res.RuleSettings.from_config(
+        config.resolvability,
+        config.thresholds,
+        trust_max_depth=config.panel.trust_max_depth,
+        broad_only_min_class_share=config.panel.broad_only_min_class_share,
+        hard_floor=config.thresholds.hard_min_counts or config.min_counts or 10,
+    )
+    with timer.step("resolvability_self_map"):
+        result = res.run_resolvability(
+            test,
+            specs=specs_for(mapped_engine),
+            depths=grid,
+            recipes=res.simulation_recipes(config.resolvability, seed=TEST_SET_SEED),
+            map_fn=_mmc_map_function(context, mapped_engine, runs),
+            settings=settings,
+            species=context.spec.species,
+            floor_table=load_floor_table(context.spec.species),
+            fine_seed_check=bool(config.thresholds.allow_fine_levels),
+            provenance={
+                "reference_id": context.spec.reference_id,
+                "engine": {
+                    "reference_id": mapped_engine.reference_id,
+                    "build_hash": mapped_engine.build_hash,
+                    "self": engine is not None,
+                },
+                "test_set_bundle": {
+                    "reference_id": test_ref.reference_id,
+                    "build_hash": test_ref.build_hash,
+                    "path": test_ref.path,
+                },
+                "mapping_runs": runs,
+                "decisions_note": (
+                    "decision settings are recorded, not hashed; RESOLVE "
+                    "re-derives the decisions from resolvability_cells.parquet "
+                    "reweighted to each dataset's composition"
+                ),
+            },
+        )
+        result.write(context.work_dir)
+    output: dict[str, Any] = {"resolvability": result.bundle_output()}
+    output["resolvability"]["test_set_bundle"] = {
+        "reference_id": test_ref.reference_id,
+        "build_hash": test_ref.build_hash,
+    }
+    output["resolvability"]["mapping_runs"] = runs
+    if result.trust.state is not None:
+        output["panel_trust"] = result.trust.state
+    return output
+
+
+def _whb_specs(engine: Any, config: AnnotationConfig) -> list[Any]:
+    from merxen.annotation import resolvability as res
+
+    vocab = engine.vocab()
+    if vocab is None:
+        raise ReferenceBuildError(f"{engine.path} has no vocab snapshot")
+    return res.whb_level_specs(
+        vocab,
+        config.thresholds,
+        region=config.anatomical_region or WHB_WHOLE_CORTEX_REGION,
+    )
+
+
+def _wmb_specs(engine: Any, config: AnnotationConfig) -> list[Any]:
+    from merxen.annotation import resolvability as res
+
+    vocab = engine.vocab()
+    if vocab is None:
+        raise ReferenceBuildError(f"{engine.path} has no vocab snapshot")
+    full = TaxonomyTreeView.from_precompute(engine.mapping_precompute)
+    supertype_of: dict[str, str] = {}
+    if WMB_SUPT in full.hierarchy:
+        for supertype in full.nodes(WMB_SUPT):
+            for cluster in full.children_of(WMB_SUPT, supertype):
+                supertype_of[str(cluster)] = str(supertype)
+    return res.wmb_level_specs(
+        vocab, config.thresholds, supertype_of_cluster=supertype_of or None
+    )
+
+
+def _resolvability_params(
+    spec: AnnotationReferenceSpec, config: AnnotationConfig, test_reference_id: str
+) -> dict[str, Any]:
+    """Return what the self-map output depends on (hashed; plan §3.2)."""
+    from merxen.annotation import resolvability as res
+
+    if not config.resolvability.enabled or spec.role not in ("primary", "secondary"):
+        return {"enabled": False}
+    test_params: dict[str, Any]
+    if test_reference_id == HO_REFERENCE_ID:
+        test_params = _ho_params(spec, config)
+    else:
+        test_params = _wmb_testset_params(spec, config)
+    return {
+        "enabled": True,
+        "resolvability_version": res.RESOLVABILITY_VERSION,
+        "recipes": [
+            recipe.to_json()
+            for recipe in res.simulation_recipes(
+                config.resolvability, seed=TEST_SET_SEED
+            )
+        ],
+        "test_set": {"reference_id": test_reference_id, **test_params},
+        "self_map_mapping": {
+            "bootstrap_factor": spec.bootstrap_factor,
+            "bootstrap_iteration": spec.bootstrap_iteration,
+            "rng_seed": spec.rng_seed,
+        },
+        "fine_seed_check": bool(config.thresholds.allow_fine_levels),
+        "anatomical_region": config.anatomical_region,
+    }
+
+
+def _ho_params(
+    spec: AnnotationReferenceSpec, config: AnnotationConfig
+) -> dict[str, Any]:
+    return {
+        **_panel_marker_params(config),
+        "holdout_donor": config.resolvability.holdout_donor,
+        "n_test_cells": config.resolvability.n_test_cells or HO_DEFAULT_TEST_CELLS,
+        "max_test_cells_per_supercluster": HO_MAX_TEST_CELLS_PER_SUPERCLUSTER,
+        "min_training_cells_per_cluster": HO_MIN_TRAINING_CELLS_PER_CLUSTER,
+        "source_hierarchy": list(WHB_SOURCE_HIERARCHY),
+        "roi_labels": list(WHB_FRONTAL_ROI_LABELS),
+        "min_cells_per_leaf": WHB_FRONTAL_MIN_CELLS_PER_LEAF,
+        "seed": TEST_SET_SEED,
+        "vocab_assets": vocab_asset_sha256(WHB_TAXONOMY_ID),
+    }
+
+
+def _wmb_testset_params(
+    spec: AnnotationReferenceSpec, config: AnnotationConfig
+) -> dict[str, Any]:
+    return {
+        "library_method": WMB_LIBRARY_METHOD,
+        "sampling_seed": WMB_SAMPLING_SEED,
+        "max_cells_per_cluster": spec.max_cells_per_cluster,
+        "n_test_cells": config.resolvability.n_test_cells,
+        "nonneuronal_classes": list(WMB_NONNEURONAL_TEST_CLASSES),
+        "extra_per_supertype": (
+            config.resolvability.mouse_nonneuronal_extra_per_supertype
+        ),
+        "extra_seed": WMB_TESTSET_EXTRA_SEED,
+        "seed": TEST_SET_SEED,
+        "matrix_pattern": f"*{WMB_H5AD_SUFFIX}",
+        "vocab_assets": vocab_asset_sha256(WMB_TAXONOMY_ID),
+    }
+
+
+# --------------------------------------------------------------------------
 # Registration
 
 
@@ -4161,6 +5282,7 @@ def _whb_params(
         "negative_gene_max_fraction": config.flags.negative_gene_max_fraction,
         "negative_gene_references": ["whb_frontal", "seaad_mr"],
         **_state_and_vocab_params("human", (WHB_TAXONOMY_ID, SEAAD_TAXONOMY_ID)),
+        "resolvability": _resolvability_params(spec, config, HO_REFERENCE_ID),
     }
 
 
@@ -4173,6 +5295,7 @@ def _seaad_params(
         "pinned_md5": SEAAD_STATS_PIN.md5,
         "profile_method": "B_condLN",
         "vocab_assets": vocab_asset_sha256(SEAAD_TAXONOMY_ID),
+        "resolvability": _resolvability_params(spec, config, HO_REFERENCE_ID),
     }
 
 
@@ -4194,6 +5317,7 @@ def _wmb_params(
         "validated_test_cells_sha256": WMB_SELFMAP_TEST_CELLS_PIN.sha256,
         "negative_gene_max_fraction": config.flags.negative_gene_max_fraction,
         **_state_and_vocab_params("mouse", (WMB_TAXONOMY_ID,)),
+        "resolvability": _resolvability_params(spec, config, WMB_TESTSET_REFERENCE_ID),
     }
 
 
@@ -4255,6 +5379,16 @@ BUILDER_RECIPES: Final[dict[str, _BuilderRecipe]] = {
     ),
     "whb_whole_ctx_panel": _BuilderRecipe(
         "whb_whole_ctx_panel", build_whb_whole_ctx, WHB_TAXONOMY_ID, _whole_ctx_params
+    ),
+    HO_REFERENCE_ID: _BuilderRecipe(
+        HO_REFERENCE_ID, build_whb_frontal_ho, WHB_TAXONOMY_ID, _ho_params
+    ),
+    WMB_TESTSET_REFERENCE_ID: _BuilderRecipe(
+        WMB_TESTSET_REFERENCE_ID,
+        build_wmb_selfmap_testset,
+        WMB_TAXONOMY_ID,
+        _wmb_testset_params,
+        source_patterns={SOURCE_WMB_H5AD_DIR: f"*{WMB_H5AD_SUFFIX}"},
     ),
 }
 

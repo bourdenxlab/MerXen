@@ -470,6 +470,7 @@ def _annotation_reference_prep(
                 download_dir=download_dir or store / ".downloads",
                 auto_download=auto_download,
                 seeds=_key_value_paths(download_seed_values, "--download-seed"),
+                resolvability=config.resolvability.enabled,
             ),
         )
     if n_processors is not None or max_gb is not None:

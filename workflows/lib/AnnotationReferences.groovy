@@ -61,6 +61,13 @@ class AnnotationReferences {
         seaad_mr_panel: [
             seaad_precomputed_stats: "annotation_seaad_precomputed_stats_path",
             seaad_metadata_dir: "annotation_seaad_metadata_dir",
+            // The resolvability self-map (M3b) maps the WHB held-out donor's
+            // cells onto SEA-AD too, so it needs the held-out test set's
+            // sources: the region directory (region_cell_metadata.csv), the
+            // raw WHB h5ads and the WHB taxonomy tables.
+            whb_region_dir: "annotation_whb_region_precompute_source",
+            whb_h5ad_dir: "annotation_whb_h5ad_dir",
+            whb_metadata_dir: "annotation_whb_metadata_dir",
         ].asImmutable(),
         wmb_panel: [
             wmb_h5ad_dir: "annotation_wmb_h5ad_dir",
