@@ -445,7 +445,7 @@ merxen annotation-reference-prep --reference-id whb_frontal_supc_clus \
 | `--reference-id ID` | Reference from the annotation config or the known references (plan §3.2). |
 | `--species human\|mouse` | Run species. |
 | `--panel-genes PATH` | `panel_genes*.json` (omit for panel-independent references such as `wmb_region_share`). |
-| `--store PATH`, `--store-large PATH` | Store roots; panels above 1,000 genes go to the large store. |
+| `--store PATH`, `--store-large PATH` | Store roots; panels above 1,000 genes go to the large store. Such panels are refused for now (`LargePanelRefusedError`, before any source is downloaded or hashed): the marker prefilter and the measured PREP memory do not exist yet (plan §8.7, OD-E8). |
 | `--annotation-config PATH` | `AnnotationConfig` JSON. |
 | `--source NAME=PATH` | Reference source files, added to the spec's sources. |
 | `--scratch-dir PATH` | Parent of the build scratch directory (never inside a store). |
@@ -531,7 +531,7 @@ merxen annotate --species human \
 | `--keep-extended-json`, `--reuse/--no-reuse`, `--reuse-from DIR` | Keep the gzipped extended JSON; reuse identical runs of a `map_manifest.json` (default: `--out`). |
 | `--gene-id-fallback-csv PATH` | Local symbol → Ensembl table (M0e), as for `annotation-panel`. |
 | `--platforms`, `--no-provisional` | Map only these platforms; skip the provisional labels. |
-| `--require-bundle-refs` | Map only the bundles given with `--bundle-ref` / `--bundle`; a missing one fails instead of being looked up in the store (what the pipeline task passes: it maps exactly the bundles `ANNOTATE_REFERENCE_PREP` resolved). Refs of roles MAP does not map (`wmb_region_share`) are accepted and not opened. |
+| `--require-bundle-refs` | Map only the bundles given with `--bundle-ref` / `--bundle`; a missing one fails instead of being looked up in the store (what the pipeline task passes: it maps exactly the bundles `ANNOTATE_REFERENCE_PREP` resolved). A needed subset bundle is then only recorded as `requested`, never looked up in `--store`. Refs of roles MAP does not map (`wmb_region_share`) are accepted and not opened. |
 | `--allow-refused-panel` | For a refused panel (`required_bundles.json` status `refused`), write `map_manifest.json` with `panel_status: refused`, its reasons and no runs, and exit 0 (pipeline runs: RESOLVE then writes statuses only). Without it a refused panel is an error. |
 
 MapMyCells runs as a subprocess of `merxen.analysis.mapmycells_entrypoint`
