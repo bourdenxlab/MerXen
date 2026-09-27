@@ -28,6 +28,7 @@ from merxen.annotation.shadow import (
     class_profiles,
     composition_shares,
     contamination_flags,
+    cop_rule_broad_names,
     dataset_gate,
     depth_grid,
     distinct_gene_quantiles,
@@ -1055,6 +1056,21 @@ def test_heldout_enrichment_scores_assigned_vs_other_cells() -> None:
     assert weak.fold >= 3
     assert weak.auroc < 0.70
     assert not weak.passes
+
+
+def test_cop_rule_broad_names_moves_failing_cop_calls_to_lineage() -> None:
+    cop = "Committed oligodendrocyte precursor"
+    labels = cop_rule_broad_names(
+        np.array([OPC, OPC, OPC, OPC, "Astrocytes"], dtype=object),
+        np.array(
+            [cop, cop, cop, "Oligodendrocyte precursor", "Astrocyte"], dtype=object
+        ),
+        np.array([0.9, 0.6, 0.6, 0.5, 0.5]),
+        np.array([150, 150, 50, 20, 20]),
+        platform="MERSCOPE",
+        sea_confident_opc=np.array([False, False, True, False, False]),
+    )
+    assert list(labels) == [OPC, None, OPC, OPC, "Astrocytes"]
 
 
 PROFILE_GENES = ["G1", "G2", "G3"]

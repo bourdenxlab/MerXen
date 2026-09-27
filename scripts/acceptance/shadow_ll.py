@@ -2,30 +2,39 @@
 """M3 LL value test and OD-B13 trigger (plan §12 M3 item 6, §5.2, §5.3).
 
 Types every table cell of the human MAP outputs (``<runs-root>/<pair>/<seg>/``)
-with the likelihood typer LL (vii) (``merxen.annotation.likelihood``: the
-spill-over mixture model with per-gene platform factors, on the WHB frontal
-bundle's cluster profiles), then scores:
+with LL (vii)'s recipe (``merxen.annotation.likelihood``: E1
+``14_ll_contam.py``'s spill-over mixture model with per-gene platform
+factors) on the **WHB frontal bundle's cluster profiles** (122 clusters under
+17 superclusters, sinks included), not on E1's 204-cluster whole-WHB cortex
+reference (plan §3.2 ``ll_whb_ctx_profiles``). Its fidelity to E1 (vii) is
+measured on E1's 30k pilot subsets (``ll_vs_e1_vii.csv``).
 
-- **OD-B8 (does LL join v1.1?)**: confident broad coverage under the v1.1
-  rule (below 60 counts SEA-AD **or** LL agrees) minus v1 (SEA-AD must
-  agree), and the marker-referee outcomes of the confident labels with and
-  without LL: new-vs-legacy disputes (H10) and the canonical-marker
-  plausibility of confident labels. LL joins v1.1 if, on a development
-  dataset, coverage rises by > 0.05 or one of these referee outcomes
-  improves by > 0.02. In v1.1 LL only adds confident cells below 60 counts
-  (§5.3) and never renames one, so these are the outcomes it can move.
-  For information: WHB-vs-LL disputes (E1's referee) and WHB-vs-SEA-AD
-  disputes resolved with LL as a tie-breaker (not a v1.1 behaviour; LL and
-  the referee read the same marker counts, so it favours LL by
-  construction).
+- **OD-B8 (does LL join v1.1?)**. The plan asks whether LL moves referee
+  outcomes by > 2 points or coverage by > 5 points; it does not say how LL
+  would be used. Two readings are scored, neither pre-registered (the first
+  was chosen in this script at M3 C2):
+
+  1. *v1.1 below-60 vote* (§5.3: below 60 counts SEA-AD **or** LL agrees):
+     coverage v1.1 - v1, and H10 / canonical-marker plausibility of the
+     confident labels. v1.1's confident cells are a subset of "v1 without
+     the below-60 rule" (the same >= 60 veto and rescues), so its coverage
+     gain is bounded by the below-60 SEA-AD cost (``od_b8_coverage_bound``;
+     0.2-1.0 points at M3), far below 5, and H10 can move by at most
+     ``h10_ceiling_gain`` (every added cell a won dispute). This reading
+     cannot pass by construction and says little about LL itself.
+  2. *LL as tie-breaker* of WHB-vs-SEA-AD disputes: markers side with the
+     label LL picks vs WHB alone (``tiebreak_delta``). Circular: LL and the
+     referee read the same marker counts.
+
 - **OD-B13 (promote LL before M8?)**: coverage the below-60 SEA-AD rule
   removes vs the LL rules (E2's rule with LL (vii) alone, and v1 with LL as
   the below-60 vote); trigger > 0.08 on any dataset.
 
 Both factor variants are run: capped at +/- 2 log2 (the M10 specification)
 and uncapped (E1's (vii)). Writes ``ll_sample_metrics.csv``,
-``ll_referee.csv``, ``ll_factors.csv``, ``ll_decision.csv`` and per-sample
-calls ``calls/<pair>_<seg>_<sid>_<variant>.parquet`` to ``--out``.
+``ll_referee.csv``, ``ll_factors.csv``, ``ll_decision.csv``,
+``ll_vs_e1_vii.csv`` and per-sample calls
+``calls/<pair>_<seg>_<sid>_<variant>.parquet`` to ``--out``.
 
 Usage::
 
@@ -221,6 +230,15 @@ def score_sample(
         row[f"supercluster_cov_{rule}"] = float(result.supercluster_confident.mean())
     row["od_b8_coverage_gain"] = row["broad_cov_seaad_or_ll"] - row["broad_cov_seaad"]
     row["cost_sea_below60"] = row["broad_cov_seaad_from60"] - row["broad_cov_seaad"]
+    # v1.1 confident cells are a subset of v1 without the below-60 rule.
+    row["od_b8_coverage_bound"] = row["cost_sea_below60"]
+    row["v11_within_bound"] = bool(
+        (
+            results["seaad_or_ll"].broad_confident
+            & ~results["seaad_from60"].broad_confident
+        ).sum()
+        == 0
+    )
     row["ll_vote_minus_sea"] = (
         row["broad_cov_seaad_ll_below60"] - row["broad_cov_seaad"]
     )
@@ -240,6 +258,15 @@ def score_sample(
         )
     gained = v11.broad_confident & ~v1.broad_confident
     row["n_gained_v11"] = int(gained.sum())
+    # H10 ceiling: every added cell a dispute the new label wins.
+    disputes = row["h10_disputes_v1"]
+    wins = row["h10_new_wins_v1"] * disputes
+    row["h10_ceiling_gain"] = (
+        (wins + row["n_gained_v11"]) / (disputes + row["n_gained_v11"])
+        - row["h10_new_wins_v1"]
+        if disputes
+        else math.nan
+    )
     row["plausibility_gained_v11"] = _plausibility(sample, v11.broad_name, gained)
     row["h10_delta"] = row["h10_new_wins_v1.1"] - row["h10_new_wins_v1"]
     row["plausibility_delta"] = row["plausibility_v1.1"] - row["plausibility_v1"]
@@ -268,7 +295,11 @@ def score_sample(
 
 
 def decision_rows(metrics: pd.DataFrame) -> list[dict[str, Any]]:
-    """The OD-B8 and OD-B13 verdicts from the per-sample metrics."""
+    """The OD-B8 readings and the OD-B13 verdict from the per-sample metrics.
+
+    OD-B8 is reported under both readings (module docstring); neither was
+    pre-registered, so the rows are inputs for the user's decision.
+    """
     rows = []
     base = metrics[metrics["segmentation"] == "proseg_hybrid"]
     for variant, frame in base.groupby("variant"):
@@ -278,17 +309,33 @@ def decision_rows(metrics: pd.DataFrame) -> list[dict[str, Any]]:
         rows.append(
             {
                 "variant": variant,
-                "decision": "OD-B8",
+                "decision": "OD-B8 (v1.1 below-60 vote)",
                 "max_coverage_gain_dev": float(coverage_gain),
                 "max_referee_gain_dev": float(referee_gain),
                 "max_coverage_gain_all": float(frame["od_b8_coverage_gain"].max()),
                 "max_referee_gain_all": float(
                     frame[["h10_delta", "plausibility_delta"]].max(axis=None)
                 ),
-                "max_tiebreak_delta_info": float(frame["tiebreak_delta"].max()),
+                "max_coverage_bound_all": float(frame["od_b8_coverage_bound"].max()),
+                "max_h10_ceiling_gain_all": float(frame["h10_ceiling_gain"].max()),
+                "v11_within_bound_all": bool(frame["v11_within_bound"].all()),
                 "passes": bool(
                     coverage_gain > OD_B8_COVERAGE or referee_gain > OD_B8_REFEREE
                 ),
+                "note": "cannot pass by construction: coverage gain <= below-60 "
+                "SEA-AD cost",
+            }
+        )
+        rows.append(
+            {
+                "variant": variant,
+                "decision": "OD-B8 (LL as tie-breaker)",
+                "max_referee_gain_dev": float(dev["tiebreak_delta"].max()),
+                "min_referee_gain_dev": float(dev["tiebreak_delta"].min()),
+                "max_referee_gain_all": float(frame["tiebreak_delta"].max()),
+                "min_referee_gain_all": float(frame["tiebreak_delta"].min()),
+                "passes": bool(dev["tiebreak_delta"].max() > OD_B8_REFEREE),
+                "note": "circular: LL and the referee read the same marker counts",
             }
         )
         rows.append(
@@ -301,6 +348,49 @@ def decision_rows(metrics: pd.DataFrame) -> list[dict[str, Any]]:
                 "passes": bool(frame["od_b13_trigger"].any()),
             }
         )
+    return rows
+
+
+def e1_fidelity_rows(
+    calls_dir: Path, preds_dir: Path, *, seg: str = "proseg_hybrid"
+) -> list[dict[str, Any]]:
+    """Agreement of the port with E1 (vii) on E1's 30k pilot subsets.
+
+    E1's ``LLmix_wbctx+platform`` predictions (uncapped factors, the
+    204-cluster whole-WHB cortex reference) against the port's calls on the
+    same cells, at broad class and supercluster.
+    """
+    rows = []
+    for path in sorted(preds_dir.glob("LLmix_wbctx+platform__*.pred.csv")):
+        sample_id = path.name.split("__", 1)[1].removesuffix(".pred.csv")
+        pair = sample_id.split("_")[0]
+        e1 = pd.read_csv(path, index_col=0)
+        e1.index = e1.index.astype(str)
+        for variant in VARIANTS:
+            calls_path = calls_dir / f"{pair}_{seg}_{sample_id}_{variant}.parquet"
+            if not calls_path.is_file():
+                continue
+            calls = pd.read_parquet(calls_path)
+            calls.index = calls.index.astype(str)
+            shared = e1.index.intersection(calls.index)
+            port, ref = calls.loc[shared], e1.loc[shared]
+            broad_port = port["ll_broad_name"].astype(str).to_numpy()
+            broad_e1 = ref["pred_broad"].astype(str).to_numpy()
+            super_port = port["ll_supercluster_name"].astype(str).to_numpy()
+            super_e1 = ref["pred_supercluster"].astype(str).to_numpy()
+            rows.append(
+                {
+                    "sample_id": sample_id,
+                    "variant": variant,
+                    "e1_variant": "LLmix_wbctx+platform (uncapped)",
+                    "n_e1": len(e1),
+                    "n_shared": len(shared),
+                    "broad_agreement": float((broad_port == broad_e1).mean()),
+                    "supercluster_agreement": float((super_port == super_e1).mean()),
+                    "e1_superclusters": int(pd.Series(super_e1).nunique()),
+                    "port_superclusters": int(pd.Series(super_port).nunique()),
+                }
+            )
     return rows
 
 
@@ -415,6 +505,10 @@ def main(argv: list[str] | None = None) -> int:
     pd.DataFrame(factor_rows).to_csv(args.out / "ll_factors.csv", index=False)
     pd.DataFrame(decision_rows(metrics)).to_csv(
         args.out / "ll_decision.csv", index=False
+    )
+    preds_dir = args.evidence_root / "exp" / "E1" / "preds" / "real"
+    pd.DataFrame(e1_fidelity_rows(args.out / "calls", preds_dir)).to_csv(
+        args.out / "ll_vs_e1_vii.csv", index=False
     )
     logger.info("wrote %s", args.out)
     return 0

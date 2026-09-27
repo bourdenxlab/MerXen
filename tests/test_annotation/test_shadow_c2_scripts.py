@@ -130,7 +130,13 @@ def test_ll_score_sample_and_decision(scripts: dict[str, ModuleType]) -> None:
     decisions = {
         item["decision"]: item for item in scripts["shadow_ll"].decision_rows(metrics)
     }
-    assert decisions["OD-B8"]["passes"]  # a 10-point coverage gain
+    vote = decisions["OD-B8 (v1.1 below-60 vote)"]
+    assert vote["passes"]  # a 10-point coverage gain
+    # The v1.1 gain never exceeds the below-60 SEA-AD cost.
+    assert row["v11_within_bound"]
+    assert vote["max_coverage_bound_all"] == pytest.approx(0.1)
+    assert vote["max_coverage_gain_all"] <= vote["max_coverage_bound_all"]
+    assert "OD-B8 (LL as tie-breaker)" in decisions
     assert decisions["OD-B13"]["max_cost_sea_below60"] == pytest.approx(0.1)
 
 
@@ -161,3 +167,32 @@ def test_x1_labelling_matrices_have_the_three_kinds(
     assert set(matrices) == {"soft", "argmax", "confident"}
     assert len(argmax) == 40
     assert coverage == pytest.approx(36 / 40)
+
+
+def test_ll_fidelity_rows_compare_the_port_with_e1_vii(
+    scripts: dict[str, ModuleType], tmp_path: Path
+) -> None:
+    preds = tmp_path / "preds"
+    calls = tmp_path / "calls"
+    preds.mkdir()
+    calls.mkdir()
+    pd.DataFrame(
+        {
+            "pred_broad": ["Neurons", "Astrocytes", "Microglia"],
+            "pred_supercluster": ["MGE interneuron", "Astrocyte", "Microglia"],
+        },
+        index=pd.Index([1, 2, 3]),
+    ).to_csv(preds / "LLmix_wbctx+platform__P7513_XENIUM.pred.csv")
+    pd.DataFrame(
+        {
+            "ll_broad_name": ["Neurons", "Astrocytes", "Astrocytes"],
+            "ll_supercluster_name": ["CGE interneuron", "Astrocyte", "Astrocyte"],
+        },
+        index=pd.Index(["1", "2", "3"], name="cell_id"),
+    ).to_parquet(calls / "P7513_proseg_hybrid_P7513_XENIUM_capped.parquet")
+
+    [row] = scripts["shadow_ll"].e1_fidelity_rows(calls, preds)
+
+    assert row["n_shared"] == 3
+    assert row["broad_agreement"] == pytest.approx(2 / 3)
+    assert row["supercluster_agreement"] == pytest.approx(1 / 3)

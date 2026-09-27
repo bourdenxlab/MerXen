@@ -20,11 +20,15 @@ set c (production sensitivity run) and X1 on:
 - the factors themselves (spread, share capped, agreement across pairs).
 
 The held-out-gene comparison (H4 with X1) is ``heldout_genes.py --variants
-set_a,set_c,x1``. **X1 passes** (becomes the ``geneset_c+rescale``
-sensitivity, OD-B9) only if, on both development pairs (P7513, P1212), its
-soft JSD is below set a's with the paired 95% CI of the difference below 0,
-the referee sides with X1 in more X1-vs-set-a disputes than with set a, and
-it passes H4 in no fewer classes than set a on any development sample.
+set_a,set_c,x1``. The OD-B9 decision is made on effect size: the soft JSD
+difference X1 - set a on the development pairs (P7513, P1212) with its
+paired 95% CI, compared with set c's gain over set a (the mandatory
+sensitivity), and H4 with X1 vs set a. The E1 referee is reported but is not
+neutral here: it scores raw panel counts, so it favours labellings mapped
+from unrescaled counts (set c, which is mandatory, loses its disputes with
+set a too). This rule was set after the runs (the M3 C2 run was scored on a
+referee condition); future pre-registered rules record the script's sha256
+in the launcher log.
 
 Writes ``x1_factors.csv``, ``x1_jsd.csv``, ``x1_jsd_differences.csv``,
 ``x1_referee.csv``, ``x1_samples.csv``, ``x1_compositions.csv`` and

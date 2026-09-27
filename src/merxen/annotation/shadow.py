@@ -1845,6 +1845,51 @@ def select_heldout_markers(
     )
 
 
+def cop_rule_broad_names(
+    broad_names: Sequence[object] | np.ndarray,
+    supercluster: Sequence[object] | np.ndarray,
+    supercluster_bp: np.ndarray,
+    total_counts: np.ndarray,
+    *,
+    platform: str,
+    sea_confident_opc: np.ndarray | None = None,
+    thresholds: AnnotationThresholds | None = None,
+    floors: FloorLookup | None = None,
+) -> np.ndarray:
+    """Apply the §5.2 COP rule to a broad labelling (H4 option (b)).
+
+    A WHB COP call is broad OPC only with >= the COP supercluster floor and
+    supercluster bp >= ``whb_supercluster``, or when SEA-AD confidently calls
+    OPC (``sea_confident_opc``); otherwise it stays at lineage and leaves the
+    seven classes (``None``), as ``evaluate_human_rules`` suppresses it.
+
+    Args:
+        broad_names: Broad class per cell (e.g. the argmax labelling).
+        supercluster: Assigned WHB supercluster per cell.
+        supercluster_bp: Its bootstrap probability.
+        total_counts: Counts per cell.
+        platform: ``MERSCOPE`` or ``XENIUM`` (floors).
+        sea_confident_opc: SEA-AD's confident OPC calls (the rescue), if any.
+        thresholds: Thresholds (default: v1).
+        floors: Floors (default: the packaged set-a floors).
+
+    Returns:
+        The labelling with suppressed COP calls set to ``None``.
+    """
+    settings = thresholds or AnnotationThresholds()
+    floor_lookup = floors or FloorLookup.packaged()
+    names = _object_array(supercluster)
+    labels = _object_array(broad_names).copy()
+    counts = np.asarray(total_counts, dtype=np.float64)
+    passes = (counts >= floor_lookup.per_cell("supercluster", platform, names)) & (
+        meets_threshold(supercluster_bp, settings.whb_supercluster)
+    )
+    if sea_confident_opc is not None:
+        passes |= np.asarray(sea_confident_opc, dtype=bool)
+    labels[(names == COP_SUPERCLUSTER) & ~passes] = None
+    return labels
+
+
 def auroc(scores: np.ndarray, positive: np.ndarray) -> float:
     """Return the area under the ROC curve (Mann-Whitney, average ranks).
 
