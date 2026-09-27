@@ -548,6 +548,49 @@ def compare_calls(
     return pd.DataFrame(records, columns=list(PREFILTER_COLUMNS))
 
 
+def fine_levels_of(bundle_dir: Path) -> set[str]:
+    """Return the report-only fine levels of a bundle's self-map (role ``fine``)."""
+    from merxen.annotation.resolvability import RESOLVABILITY_SUMMARY_FILE
+
+    path = bundle_dir / RESOLVABILITY_SUMMARY_FILE
+    if not path.is_file():
+        return set()
+    summary = json.loads(path.read_text(encoding="utf-8"))
+    return {
+        str(item.get("level"))
+        for item in summary.get("levels") or []
+        if item.get("role") == "fine"
+    }
+
+
+def judged_levels(
+    predicted: pd.DataFrame,
+    *,
+    fine_levels: set[str],
+    allow_fine_levels: bool = False,
+) -> list[str]:
+    """Return the levels a prefilter comparison judges (§8.7: emitted levels).
+
+    A level is judged when the panel emits it for some class and depth; the
+    report-only fine levels (WHB cluster, WMB supertype; OD-E4) only when
+    ``allow_fine_levels`` turns them on. The others are reported, not judged.
+
+    Args:
+        predicted: ``predicted_levels`` output.
+        fine_levels: The bundle's fine levels.
+        allow_fine_levels: ``thresholds.allow_fine_levels``.
+
+    Returns:
+        Sorted level names.
+    """
+    emitted = {
+        str(level) for level in predicted[predicted["status"] == "emitted"]["level"]
+    }
+    if not allow_fine_levels:
+        emitted -= set(fine_levels)
+    return sorted(emitted)
+
+
 def prefilter_verdict(
     comparison: pd.DataFrame,
     *,
@@ -917,11 +960,10 @@ def simulate_reference(
     if should_compare and decisions.empty:
         record["prefilter_comparison"] = {"status": "skipped", "reason": "no self-map"}
     elif should_compare:
-        emitted_levels = sorted(
-            {
-                str(level)
-                for level in predicted[predicted["status"] == "emitted"]["level"]
-            }
+        emitted_levels = judged_levels(
+            predicted,
+            fine_levels=fine_levels_of(bundle_dir),
+            allow_fine_levels=bool(config.thresholds.allow_fine_levels),
         )
         comparison, verdict, extra_rows = compare_prefilter(
             reference_id=reference_id,
