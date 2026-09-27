@@ -37,7 +37,9 @@ from merxen.annotation.schema import (
 )
 from merxen.annotation.vocab import Species
 
-PROVENANCE_SCHEMA_VERSION: Final = 1
+# 2: panel diagnostics and trust fields (M3b): family basis, trust reasons,
+# banner, validated-table digests, root markers and weak / collapsed parents.
+PROVENANCE_SCHEMA_VERSION: Final = 2
 PROVENANCE_UNS_KEY: Final = "merxen_annotation_json"
 ANNOTATION_MANIFEST_SUFFIX: Final = "_annotation_manifest.json"
 SAFE_KEY_PATTERN: Final = re.compile(r"^[A-Za-z0-9_.\-]+$")
@@ -129,6 +131,12 @@ class MarkerProvenance(_ProvenanceModel):
         markers_per_parent_min: Fewest markers of any parent.
         markers_per_parent_median: Median markers per parent.
         prefilter: Large-panel marker prefilter (``None`` when off).
+        root_markers: Markers of the taxonomy root (§8.2).
+        root_children_separated: Root children with at least 10 markers
+            (how many broad classes the root separates).
+        n_weak_parents: Parents with fewer than ``weak_parent_markers``.
+        n_collapsed_parents: Parents auto-collapsed for lack of markers.
+        n_hidden_leaves: Leaves hidden by the collapsed parents.
     """
 
     lookup_sha256: str | None = None
@@ -137,6 +145,11 @@ class MarkerProvenance(_ProvenanceModel):
     markers_per_parent_min: int | None = None
     markers_per_parent_median: float | None = None
     prefilter: str | None = None
+    root_markers: int | None = None
+    root_children_separated: int | None = None
+    n_weak_parents: int | None = None
+    n_collapsed_parents: int | None = None
+    n_hidden_leaves: int | None = None
 
 
 class ReferenceProvenance(_ProvenanceModel):
@@ -157,6 +170,9 @@ class ReferenceProvenance(_ProvenanceModel):
         n_query_genes_used: Panel genes present in this reference.
         markers: Marker lookup provenance.
         panel_trust: Trust state of this reference on the panel (§8.2).
+        trust_reasons: Reason tokens of that state
+            (``diagnostics.TrustDecision.reason_codes``).
+        n_panel_genes_absent: Panel genes the reference lacks.
     """
 
     reference_id: str
@@ -173,6 +189,8 @@ class ReferenceProvenance(_ProvenanceModel):
     n_query_genes_used: int | None = None
     markers: MarkerProvenance | None = None
     panel_trust: PanelTrust | None = None
+    trust_reasons: list[str] = []
+    n_panel_genes_absent: int | None = None
 
     @field_validator("reference_id")
     @classmethod
@@ -204,13 +222,21 @@ class PanelProvenance(_ProvenanceModel):
     Attributes:
         panel_hash: sha256 of the sorted resolved IDs of the declared panel.
         panel_family: Family id (``validated_panels.csv``), if any.
+        family_basis: How the panel got its family: ``own``, ``listed``
+            (its hash is a row of ``validated_panels.csv``), ``inherited``
+            (same species and platforms, Jaccard >= 0.95, all root markers)
+            or ``subset`` (a subset panel of a dataset missing genes).
         panel_mode: Resolved panel mode of the pair.
         panel_trust: Trust state (``refused`` … ``validated``).
+        trust_reasons: Reason tokens of the trust state.
+        banner: Whether the report shows a trust banner (refused, broad-only
+            and provisional panels; never a validated family).
         validation_basis: ``real_data`` or ``simulation`` for validated
             families; ``None`` otherwise.
         validated_max_level: The family's headline validated level.
+        validated_panels_sha256: Digest of ``validated_panels.csv``.
         validated_panel_levels_sha256: Digest of ``validated_panel_levels.csv``
-            (simulation-validated families).
+            (per-(level, class) records of simulation-validated families).
         validated_share: Share of confident labels inside the validated
             region, per level.
         real_data_qc: Real-data QC outcomes and downgrades.
@@ -224,10 +250,14 @@ class PanelProvenance(_ProvenanceModel):
 
     panel_hash: str | None = None
     panel_family: str | None = None
+    family_basis: Literal["own", "listed", "inherited", "subset"] | None = None
     panel_mode: PanelMode | None = None
     panel_trust: PanelTrust | None = None
+    trust_reasons: list[str] = []
+    banner: bool | None = None
     validation_basis: ValidationBasis | None = None
     validated_max_level: str | None = None
+    validated_panels_sha256: str | None = None
     validated_panel_levels_sha256: str | None = None
     validated_share: dict[str, float] = {}
     real_data_qc: RealQcProvenance | None = None
@@ -242,6 +272,14 @@ class PanelProvenance(_ProvenanceModel):
     def _check_basis(self: PanelProvenance) -> PanelProvenance:
         if self.validation_basis is not None and self.panel_trust != "validated":
             raise ValueError("validation_basis is set only for validated panels")
+        if (
+            self.banner is not None
+            and self.panel_trust is not None
+            and self.banner != (self.panel_trust != "validated")
+        ):
+            raise ValueError(
+                "banner is shown exactly for refused, broad_only and provisional panels"
+            )
         return self
 
 
