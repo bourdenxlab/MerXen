@@ -22,6 +22,10 @@ from merxen.cli.run_annotation import (
     annotation_reference_prep_command,
     annotation_store_group,
 )
+from merxen.cli.run_annotation_panels import (
+    annotation_panel_fetch_command,
+    annotation_panel_simulate_command,
+)
 from merxen.cli.run_build_spatialdata import build_spatialdata_command
 from merxen.cli.run_clustering_squidpy import clustering_squidpy_command
 from merxen.cli.run_comparison import compare_command
@@ -87,4 +91,6 @@ main.add_command(mapmycells_command)
 main.add_command(annotation_panel_command)
 main.add_command(annotation_reference_prep_command)
 main.add_command(annotation_store_group)
+main.add_command(annotation_panel_fetch_command)
+main.add_command(annotation_panel_simulate_command)
 main.add_command(annotate_command)
