@@ -2054,7 +2054,8 @@ def level_emission(
             }
         )
     table = cell_emission(decisions, regime, level, parents, counts, grid)
-    reasons = np.where(table["emitted"].to_numpy(), None, REASON_NOT_RESOLVABLE)
+    # An object array: None where emitted (numpy's stubs reject None here).
+    reasons = np.where(table["emitted"].to_numpy(), None, REASON_NOT_RESOLVABLE)  # type: ignore[call-overload]
     if meta.role == "fine":
         stability = (fine_seed_stability or {}).get(level)
         blocked: str | None = None
