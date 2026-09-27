@@ -292,7 +292,8 @@ class ResolvabilityProvenance(_ProvenanceModel):
         sha256: Digest of ``resolvability.parquet``.
         emitted_depth_bins: Emitted depth bins per level and safe class token.
         d_max: Deepest grid depth with enough test cells, per class token.
-        extrapolated_share: Share of the class's cells deeper than ``d_max``.
+        extrapolated_share: Share of the class's cells whose (class, depth) verdict
+            comes from a pooled deep set (``resolvability_extrapolated``).
         reweighted_to_composition: Whether RESOLVE reweighted the tables to
             the dataset's soft composition.
         resolvability_inherited: Whether a subset bundle inherited its

@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "3e18f32d7826da714c3bbddd3499234c3bd74a7c1876af98b53e5d6b35f2d219",
+    3: "aa28ead8457b28bf6e268f0184c234dd3a619f265b69ee3f7d6a8395fb7ed10f",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -59,6 +59,10 @@ PIN_HISTORY = (
     "until a builder applies it (no payload of a buildable panel changes); "
     "the held-out test-set sources checked before the marker steps (same "
     "bundles, earlier failure)",
+    "3: RESOLVABILITY_VERSION 3 (H18 follow-up, user decision 2026-09-27: "
+    "pooled deep bins with the point precision in the rule); the version "
+    "enters every self-map bundle's build_hash through the resolvability "
+    "builder params, so those bundles get new hashes without a builder bump",
 )
 
 
