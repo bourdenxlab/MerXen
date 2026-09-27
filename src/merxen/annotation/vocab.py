@@ -798,10 +798,29 @@ def floor_class_for(name: str, *, species: Species, level: str = "broad") -> str
         return name
     if level == "supercluster" and name == COP_SUPERCLUSTER:
         return "COP"
-    broad = vocab.broad_class(name)
-    if broad == NEURONS:
-        return _HUMAN_NEURON_FLOOR_CLASS.get(vocab.nt(name) or NT_OTHER, "OtherNeuron")
-    return _HUMAN_GLIA_FLOOR_CLASS.get(broad)
+    return human_floor_class(vocab.broad_class(name), vocab.nt(name))
+
+
+def human_floor_class(broad_class: str | None, nt: str | None) -> str | None:
+    """Return the human floor class of a broad class and NT class (§5.4).
+
+    The E2 classes: neurons by NT (``Exc``, ``Inh``, ``OtherNeuron``), glia
+    by broad class. ``floor_class_for`` adds ``COP`` at supercluster level;
+    this form also serves engines keyed by other vocabularies (SEA-AD).
+
+    Args:
+        broad_class: A human broad class (``UNASSIGNED_LABEL`` or ``None``
+            give ``None``).
+        nt: The NT class of a neuron (``None`` counts as ``Other``).
+
+    Returns:
+        The floor class, or ``None`` outside the seven broad classes.
+    """
+    if broad_class == NEURONS:
+        return _HUMAN_NEURON_FLOOR_CLASS.get(nt or NT_OTHER, "OtherNeuron")
+    if broad_class is None:
+        return None
+    return _HUMAN_GLIA_FLOOR_CLASS.get(broad_class)
 
 
 def load_floor_table(species: Species) -> pd.DataFrame:
