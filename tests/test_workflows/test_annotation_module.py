@@ -246,6 +246,19 @@ def test_dwight_runs_one_prep_at_a_time() -> None:
         'annotation_reference_store = "/media/mathieubo/SSD1/MerXen/'
         'annotation_references"' in text
     )
+    # Panels above 1,000 genes go to their own store on /srv/storage (§8.7).
+    assert (
+        'annotation_reference_store_large = "/srv/storage/MerXen/'
+        'annotation_references_large"' in text
+    )
+
+
+def test_prep_max_gb_fraction_matches_the_python_reserve() -> None:
+    """--max-gb = task.memory x fraction; Python reads the reserve back (§8.7)."""
+    groovy = (WORKFLOWS / "lib" / "AnnotationReferences.groovy").read_text()
+    match = re.search(r"PREP_MAX_GB_FRACTION = ([0-9.]+)", groovy)
+    assert match is not None
+    assert float(match.group(1)) == reference_module.PREP_MAX_GB_FRACTION
 
 
 def test_main_nf_calls_only_the_prepare_only_entry() -> None:
