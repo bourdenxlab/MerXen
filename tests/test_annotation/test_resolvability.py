@@ -709,3 +709,71 @@ def test_rule_settings_follow_the_config() -> None:
     assert rule.target("provisional", 0.9, 30) == pytest.approx(0.96)
     assert rule.target("provisional", 0.85, 60) == pytest.approx(0.90)
     assert rule.target("validated", 0.85, 30) == pytest.approx(0.85)
+
+
+def test_fine_levels_need_the_opt_in_and_seed_stability() -> None:
+    fine = res.LevelMeta("cluster", "CLUS", "fine", 0.69, 0.85, "supercluster")
+    rng = np.random.default_rng(12)
+    cells = bin_cells(
+        np.round(0.8 + 0.2 * rng.random(600), 3),
+        rng.random(600) < 0.995,
+        level="cluster",
+    )
+    decisions = res.decide(cells, [fine], [30], settings())
+    assert (decisions["status"] == res.STATUS_EMITTED).any()
+    kwargs = {"regime": "trust", "fine_seed_stability": {"cluster": 0.01}}
+    off = res.level_emission(decisions, [fine], "cluster", ["X"], [40], [30], **kwargs)
+    assert not off["emitted"].iloc[0]
+    assert off["reason"].iloc[0] == res.REASON_FINE_NOT_ENABLED
+    on = res.level_emission(
+        decisions,
+        [fine],
+        "cluster",
+        ["X"],
+        [40],
+        [30],
+        allow_fine_levels=True,
+        **kwargs,
+    )
+    assert on["emitted"].iloc[0] and on["reason"].iloc[0] is None
+    unstable = res.level_emission(
+        decisions,
+        [fine],
+        "cluster",
+        ["X"],
+        [40],
+        [30],
+        regime="trust",
+        allow_fine_levels=True,
+        fine_seed_stability={"cluster": 0.05},
+    )
+    assert unstable["reason"].iloc[0] == res.REASON_FINE_SEED_UNSTABLE
+    # Non-fine levels follow the table alone; untabulated levels are refused.
+    broad = res.level_emission(
+        res.decide(
+            bin_cells(np.full(400, 0.95), np.ones(400, bool)), [BROAD], [30], settings()
+        ),
+        [BROAD],
+        "broad",
+        ["X", "Y"],
+        [40, 40],
+        [30],
+        regime="trust",
+    )
+    assert broad["emitted"].tolist() == [True, False]
+    assert broad["reason"].tolist() == [None, res.REASON_NOT_RESOLVABLE]
+    missing = res.level_emission(
+        decisions, [fine], "nt", ["X"], [40], [30], regime="trust"
+    )
+    assert missing["reason"].iloc[0] == res.REASON_NOT_TABULATED
+
+
+def test_seed_stability_counts_changed_confident_labels() -> None:
+    fine = res.LevelMeta("cluster", "CLUS", "fine", 0.69, 0.85, "supercluster")
+    cells = bin_cells(np.full(400, 0.95), np.ones(400, bool), level="cluster")
+    decisions = res.decide(cells, [fine], [30], settings())
+    other = cells.copy()
+    other.loc[other.index[:8], "call"] = "moved"
+    assert res.seed_stability(cells, other, decisions, "cluster") == pytest.approx(
+        8 / 400
+    )

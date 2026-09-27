@@ -1995,6 +1995,80 @@ def cell_emission(
     )
 
 
+REASON_FINE_NOT_ENABLED: Final = "fine_level_not_enabled"
+REASON_FINE_SEED_UNSTABLE: Final = "fine_level_seed_unstable"
+REASON_NOT_TABULATED: Final = "level_not_tabulated"
+REASON_NOT_RESOLVABLE: Final = "not_resolvable_for_class_and_depth"
+
+
+def level_emission(
+    decisions: pd.DataFrame,
+    levels: Sequence[LevelMeta],
+    level: str,
+    parents: Sequence[str | None],
+    counts: np.ndarray | Sequence[float],
+    grid: Sequence[int],
+    *,
+    regime: Regime,
+    allow_fine_levels: bool = False,
+    fine_seed_stability: Mapping[str, float] | None = None,
+    seed_stability_max_change: float = 0.02,
+) -> pd.DataFrame:
+    """Return which cells a level may emit: resolvability replaces ``never_emit``.
+
+    Nothing about emission is hard-coded (plan §8.1): a level is emitted for a
+    cell only where the bundle's resolvability table emits it for the
+    cell's class at its depth bin (``cell_emission``). The report-only fine
+    levels (WHB cluster, WMB supertype; OD-E4) additionally need
+    ``allow_fine_levels`` and a seed-1 re-simulation that changes at most
+    ``seed_stability_max_change`` of their confident labels; otherwise they
+    are ``not_resolvable`` with the reason recorded (§4.2).
+
+    Args:
+        decisions: ``decide`` output (RESOLVE: reweighted to the dataset).
+        levels: The bundle's level metadata (``ResolvabilityTables.levels``).
+        level: The level.
+        parents: Each cell's class key at the level (its called class).
+        counts: Each cell's total counts.
+        grid: The bundle's depth grid.
+        regime: ``validated`` (real-data-validated family) or
+            ``provisional`` (any other panel, simulation-validated families).
+        allow_fine_levels: ``AnnotationThresholds.allow_fine_levels``.
+        fine_seed_stability: ``resolvability_summary.json``
+            ``fine_level_seed_stability`` (changed share per fine level).
+        seed_stability_max_change: ``seed_stability_max_change`` (0.02).
+
+    Returns:
+        ``cell_emission`` columns plus ``reason`` (``None`` where emitted).
+    """
+    meta = next((item for item in levels if item.level == level), None)
+    n_cells = len(parents)
+    if meta is None:
+        return pd.DataFrame(
+            {
+                "depth_bin": depth_bin(counts, grid),
+                "emitted": np.zeros(n_cells, dtype=bool),
+                "threshold": np.full(n_cells, np.nan),
+                "resolvability_extrapolated": np.zeros(n_cells, dtype=bool),
+                "reason": REASON_NOT_TABULATED,
+            }
+        )
+    table = cell_emission(decisions, regime, level, parents, counts, grid)
+    reasons = np.where(table["emitted"].to_numpy(), None, REASON_NOT_RESOLVABLE)
+    if meta.role == "fine":
+        stability = (fine_seed_stability or {}).get(level)
+        blocked: str | None = None
+        if not allow_fine_levels:
+            blocked = REASON_FINE_NOT_ENABLED
+        elif stability is None or stability > seed_stability_max_change + _TOLERANCE:
+            blocked = REASON_FINE_SEED_UNSTABLE
+        if blocked is not None:
+            table["emitted"] = False
+            reasons = np.full(n_cells, blocked, dtype=object)
+    table["reason"] = reasons
+    return table
+
+
 def composition_weights(
     cells: pd.DataFrame,
     composition: Mapping[str, float],
@@ -2011,7 +2085,9 @@ def composition_weights(
 
     Args:
         cells: The cells table.
-        composition: Dataset share per truth type (any scale).
+        composition: Dataset share per truth type, keyed like ``truth_leaf``
+            (human: WHB supercluster labels, e.g. ``CS202210140_476``;
+            mouse: WMB subclass labels); any scale.
         key: Column holding the truth type.
 
     Returns:
