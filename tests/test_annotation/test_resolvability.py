@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import numpy as np
@@ -365,14 +366,19 @@ def test_wilson_bound_and_confident_count_gate_emission() -> None:
     assert by_regime.loc["provisional", "target"] == pytest.approx(0.97)
     assert by_regime.loc["provisional", "status"] == res.STATUS_NOT_RESOLVABLE
     assert by_regime.loc["provisional", "reason"] == "wilson_bound_below_target"
+    # The bin is the class's only one, so pooling cannot add calls: the class
+    # never reaches min_confident_n (insufficient_calls; the bin's own
+    # reason is kept beside it).
     few = res.decide(
         bin_cells(bp, correct), [BROAD], [30], settings(min_confident_n=70)
     ).set_index("regime")
-    assert few.loc["trust", "reason"] == "too_few_confident_calls"
+    assert few.loc["trust", "reason"] == res.REASON_INSUFFICIENT_CALLS
+    assert few.loc["trust", "own_reason"] == "too_few_confident_calls"
     unfit = res.decide(
         bin_cells(bp[:80], correct[:80]), [BROAD], [30], settings()
     ).set_index("regime")
-    assert unfit.loc["trust", "reason"] == "too_few_fit_cells"
+    assert unfit.loc["trust", "reason"] == res.REASON_INSUFFICIENT_CALLS
+    assert unfit.loc["trust", "own_reason"] == "too_few_fit_cells"
 
 
 def test_local_thresholds_are_raise_only() -> None:
@@ -422,7 +428,8 @@ def test_validated_regime_checks_the_default_on_both_halves() -> None:
         res.wilson_lower_bound(1.0, 90)
     )
     assert by_regime.loc["trust", "status"] == res.STATUS_NOT_RESOLVABLE
-    assert by_regime.loc["trust", "reason"] == "too_few_fit_cells"
+    assert by_regime.loc["trust", "reason"] == res.REASON_INSUFFICIENT_CALLS
+    assert by_regime.loc["trust", "own_reason"] == "too_few_fit_cells"
     # Without split halves every regime checks all calls.
     pooled = res.decide(
         bin_cells(bp, correct), [BROAD], [30], settings(split_halves=False)
@@ -492,14 +499,21 @@ def deep_and_shallow_cells() -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 
-def test_dmax_inheritance_marks_deeper_bins_extrapolated() -> None:
+def test_bins_beyond_the_deepest_calls_take_the_pooled_verdict() -> None:
     decisions = res.decide(deep_and_shallow_cells(), [BROAD], GRID, settings())
     trust = decisions[decisions["regime"] == "trust"].set_index(["class", "depth"])
     assert trust.loc[("Shallow", 30), "d_max"] == 30
+    # No Shallow cell reaches 100 counts: the deep-end pool reaches down to
+    # 30, whose own test (400 calls) keeps its verdict; 100 takes the pool's.
     assert trust.loc[("Shallow", 100), "extrapolated"]
-    assert trust.loc[("Shallow", 100), "inherited_from"] == 30
+    assert trust.loc[("Shallow", 100), "pooled"]
+    assert trust.loc[("Shallow", 100), "pool_min_depth"] == 30
     assert trust.loc[("Shallow", 100), "status"] == res.STATUS_EMITTED
+    assert trust.loc[("Shallow", 100), "own_reason"] == "no_calls"
+    assert not trust.loc[("Shallow", 30), "extrapolated"]
+    assert not trust.loc[("Shallow", 30), "pooled"]
     assert not trust.loc[("Deep", 100), "extrapolated"]
+    assert pd.isna(trust.loc[("Deep", 100), "pool_min_depth"])
     per_cell = res.cell_emission(
         decisions,
         "trust",
@@ -529,6 +543,193 @@ def test_classes_without_enough_test_cells_are_not_resolvable() -> None:
     assert not per_cell["emitted"].iloc[0]
     floors = res.simulated_floors(decisions, "trust")
     assert floors[("broad", "Rare")] is None
+
+
+# --------------------------------------------------------------------------
+# Pooled deep bins (user decision 2026-09-27; one rule with gate P, §14)
+
+POOL_GRID = (10, 30, 60, 100)
+
+
+def tracked_cells(
+    groups: Sequence[tuple[str, int, Mapping[int, tuple[float, np.ndarray | bool]]]],
+    *,
+    cls: str = "X",
+    level: str = "broad",
+) -> pd.DataFrame:
+    """Cells simulated at several depths under one id (as the self-map does).
+
+    Each group is ``(name, n_cells, {depth: (bp, correct)})``: its cells have
+    a row at every listed depth, like test cells whose native counts reach
+    the deepest of them.
+    """
+    frames = []
+    for name, n_cells, depths in groups:
+        cell_ids = [f"{name}_{index}" for index in range(n_cells)]
+        for depth, (bp, correct) in depths.items():
+            flags = np.broadcast_to(np.asarray(correct, dtype=bool), (n_cells,))
+            frames.append(
+                pd.DataFrame(
+                    {
+                        "recipe": res.DECISION_RECIPE,
+                        "seed": 0,
+                        "level": level,
+                        "sim_id": [f"{cell}|D{depth}" for cell in cell_ids],
+                        "cell_id": cell_ids,
+                        "depth": depth,
+                        "half": np.arange(n_cells) % 2,
+                        "parent": cls,
+                        "call": np.where(flags, "right", "wrong"),
+                        "bp": bp,
+                        "corr": 0.5,
+                        "truth": "right",
+                        "truth_parent": cls,
+                        res.TRUTH_LEAF_COLUMN: "T",
+                        "correct": flags,
+                        "total_counts": float(depth),
+                    }
+                )
+            )
+    return pd.concat(frames, ignore_index=True)
+
+
+def pooled_reference(deep_correct: np.ndarray | bool = True) -> pd.DataFrame:
+    """A class whose 60 and 100 bins hold 45 calls each (< 50), 30 holds 85.
+
+    ``deep``: 45 cells reaching 100 counts; ``mid``: 40 cells reaching 30;
+    ``low``: 200 cells at 10 only. ``deep_correct`` sets the deep cells'
+    correctness at 60 and 100 (their calls at 10 and 30 are right).
+    """
+    good = (0.95, True)
+    deep = (0.95, deep_correct)
+    return tracked_cells(
+        [
+            ("deep", 45, {10: good, 30: good, 60: deep, 100: deep}),
+            ("mid", 40, {10: good, 30: good}),
+            ("low", 200, {10: good}),
+        ]
+    )
+
+
+def test_deep_bins_short_of_calls_are_emitted_extrapolated_when_the_pool_passes() -> (
+    None
+):
+    cells = pooled_reference()
+    decisions = res.decide(cells, [BROAD], POOL_GRID, settings())
+    validated = decisions[decisions["regime"] == "validated"].set_index("depth")
+    # 60 and 100 hold 45 confident calls each: neither is judged on its own.
+    for depth in (60, 100):
+        row = validated.loc[depth]
+        assert row["own_n_confident"] == 45
+        assert row["own_reason"] == "too_few_confident_calls"
+        # The pool reaches down to 30: each test cell once, at its deepest
+        # bin (45 deep cells at 100 + 40 mid cells at 30), all precise.
+        assert row["status"] == res.STATUS_EMITTED
+        assert row["pooled"] and row["extrapolated"]
+        assert row["pool_min_depth"] == 30
+        assert row["n_confident"] == 85
+        assert row["wilson_lb"] == pytest.approx(res.wilson_lower_bound(1.0, 85))
+    # D_P = 30 holds 85 calls itself: its own verdict, not extrapolated.
+    assert validated.loc[30, "status"] == res.STATUS_EMITTED
+    assert not validated.loc[30, "extrapolated"] and not validated.loc[30, "pooled"]
+    assert not validated.loc[10, "pooled"]
+    sets = res.pooled_sets(decisions, "validated")["broad"]["X"]
+    assert sets["min_depth"] == 30 and sets["depths"] == [60, 100]
+    assert sets["n_confident"] == 85 and sets["status"] == res.STATUS_EMITTED
+    # Fitted regimes check only one half, so their pool reaches down to 10.
+    trust = decisions[decisions["regime"] == "trust"].set_index("depth")
+    assert trust.loc[100, "pool_min_depth"] == 10
+    assert trust.loc[30, "pooled"] and trust.loc[30, "extrapolated"]
+    # RESOLVE: cells of the pooled bins are emitted and flagged.
+    per_cell = res.cell_emission(
+        decisions, "validated", "broad", ["X", "X", "X"], [150, 70, 40], POOL_GRID
+    )
+    assert per_cell["emitted"].tolist() == [True, True, True]
+    assert per_cell["resolvability_extrapolated"].tolist() == [True, True, False]
+
+
+def test_deep_bins_short_of_calls_are_not_emitted_when_the_pool_fails() -> None:
+    # 20 of the 45 deep cells are called wrongly at 60 and 100: the pool
+    # (25 + 40 right of 85) fails the Wilson rule.
+    wrong = np.arange(45) >= 20
+    decisions = res.decide(pooled_reference(wrong), [BROAD], POOL_GRID, settings())
+    validated = decisions[decisions["regime"] == "validated"].set_index("depth")
+    for depth in (60, 100):
+        row = validated.loc[depth]
+        assert row["status"] == res.STATUS_NOT_RESOLVABLE
+        assert row["reason"] == "wilson_bound_below_target"
+        assert row["pooled"] and row["extrapolated"]
+        assert row["precision"] == pytest.approx(65 / 85)
+    # 30 passes on its own (85 right calls) but completes the failing pool:
+    # a pooled failure withdraws it, a pooled pass could not have rescued it.
+    assert validated.loc[30, "own_status"] == res.STATUS_EMITTED
+    assert validated.loc[30, "status"] == res.STATUS_NOT_RESOLVABLE
+    assert validated.loc[30, "reason"] == "pool_wilson_bound_below_target"
+    # Bins shallower than D_P keep their own verdict.
+    assert validated.loc[10, "status"] == res.STATUS_EMITTED
+    floors = res.simulated_floors(decisions, "validated")
+    assert floors[("broad", "X")] == 10
+
+
+def test_a_class_short_of_calls_even_fully_pooled_is_insufficient() -> None:
+    # 80 test cells reach 30 counts (D_max = 30), only 30 confident calls.
+    cells = tracked_cells(
+        [
+            ("unsure", 50, {10: (0.5, True), 30: (0.5, True)}),
+            ("sure", 30, {10: (0.95, True), 30: (0.95, True)}),
+        ]
+    )
+    decisions = res.decide(cells, [BROAD], (10, 30), settings())
+    assert set(decisions["d_max"].dropna()) == {30}
+    assert set(decisions["status"]) == {res.STATUS_NOT_RESOLVABLE}
+    assert set(decisions["reason"]) == {res.REASON_INSUFFICIENT_CALLS}
+    validated = decisions[decisions["regime"] == "validated"]
+    assert set(validated["own_reason"]) == {"too_few_confident_calls"}
+    assert not validated["extrapolated"].any()
+
+
+def test_the_pool_counts_each_cell_once_at_its_deepest_bin() -> None:
+    # 60 cells are confident at 10 but not at their deepest bin (100); 30
+    # are confident at both. Bin 10 is judged on its own (90 calls); the
+    # pool of 100 and 10 holds each cell once, at 100: 30 confident calls,
+    # so a shallower confident row never rescues an unconfident deep one.
+    cells = tracked_cells(
+        [
+            ("drift", 60, {10: (0.95, True), 100: (0.5, True)}),
+            ("steady", 30, {10: (0.95, True), 100: (0.95, True)}),
+        ]
+    )
+    decisions = res.decide(cells, [BROAD], (10, 100), settings())
+    validated = decisions[decisions["regime"] == "validated"].set_index("depth")
+    assert validated.loc[10, "status"] == res.STATUS_EMITTED
+    assert validated.loc[100, "reason"] == res.REASON_INSUFFICIENT_CALLS
+    deepest = res.deepest_rows(cells)
+    assert len(deepest) == 90 and set(deepest["depth"]) == {100}
+
+
+def test_the_point_precision_joins_the_wilson_rule() -> None:
+    # 20,000 confident calls at 89.5%: the Wilson bound (0.891) passes
+    # 0.90 - 0.02, the point precision does not reach 0.90.
+    n = 20_000
+    correct = np.arange(n) < int(0.895 * n)
+    decisions = res.decide(
+        bin_cells(np.full(n, 0.95), correct), [BROAD], [30], settings()
+    )
+    validated = decisions[decisions["regime"] == "validated"].iloc[0]
+    assert validated["wilson_lb"] >= 0.88
+    assert validated["precision"] == pytest.approx(0.895)
+    assert validated["status"] == res.STATUS_NOT_RESOLVABLE
+    assert validated["reason"] == res.REASON_POINT
+    passing = res.decide(
+        bin_cells(np.full(n, 0.95), np.arange(n) < int(0.905 * n)),
+        [BROAD],
+        [30],
+        settings(),
+    )
+    assert (
+        passing[passing["regime"] == "validated"].iloc[0]["status"]
+        == res.STATUS_EMITTED
+    )
 
 
 def test_floors_follow_the_max_rule() -> None:
@@ -1078,7 +1279,9 @@ def test_gate_p_tested_sets_pool_deep_bins_and_count_each_cell_once() -> None:
     pooled = tested[0]
     assert pooled.pooled and pooled.depths == (30, 100)
     assert pooled.n_confident == 120
-    assert tested[1].depths == (10,) and tested[1].n_confident == 300
+    # D_P (30) holds enough calls, so its own test is a tested set too.
+    assert [item.depths for item in tested[1:]] == [(30,), (10,)]
+    assert tested[1].n_confident == 120 and tested[2].n_confident == 300
     none = res.gate_p_tested_sets(
         cells, decisions, min_confident_n=10_000, regime="trust"
     )

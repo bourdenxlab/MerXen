@@ -577,7 +577,8 @@ class AnnotationResolvabilityConfig(_AnnotationModel):
             E2 verdict 3).
         threshold_cap: Cap on local thresholds.
         min_cells_per_bin: Test cells a (class, depth) bin needs.
-        min_confident_n: Confident calls an emitted bin needs.
+        min_confident_n: Confident calls a tested set needs (a depth bin, else
+            the pooled deep set of §8.3; user decision 2026-09-27).
         wilson_margin: Wilson lower bound may sit this far below the target.
         split_halves: Choose thresholds on one half, check on the other.
         reweight_to_composition: Reweight to the dataset composition in

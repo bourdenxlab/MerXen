@@ -13,17 +13,23 @@ depth bin):
   The set-level rule ("lowest threshold whose accepted set reaches the
   target") is never used; ``set_level_threshold`` exists only so tests and
   reports can show where it fails;
-* **emission**: a bin is emitted when ``t*`` exists and the check half holds
-  at least ``min_confident_n`` confident calls with a Wilson 95% lower bound
-  of their precision at least ``target - wilson_margin`` and coverage at
-  least ``min_coverage``. The ``validated`` regime applies the
+* **emission**: a tested set (a bin, or a pooled deep set) is emitted when
+  ``t*`` exists and the check half holds at least ``min_confident_n``
+  confident calls with a Wilson 95% lower bound of their precision (on the
+  Kish n) at least ``target - wilson_margin``, a point precision at least
+  ``target`` and coverage at least ``min_coverage`` (one rule with the
+  gate-P evaluation rules, §14). The ``validated`` regime applies the
   pre-registered default, fitted on no test cell, so it checks the same
-  rule on every call of the bin (both halves; M3b review). Bins deeper
-  than ``D_max(c)`` (the deepest grid value with ``min_cells_per_bin`` test
-  cells of class ``c``; only cells whose native panel counts reach a depth
-  are thinned to it) inherit the decision of ``D_max(c)`` and are marked
-  extrapolated; a class without such a bin is never emitted (no pooling
-  across classes). Everything not emitted is ``not_resolvable``;
+  rule on every call of the bin (both halves; M3b review). Only cells whose
+  native panel counts reach a depth are thinned to it, so deep bins run
+  short of calls: a bin with fewer than ``min_confident_n`` confident calls
+  takes the verdict of the deep-end pool (user decision 2026-09-27; bins
+  pooled from the deep end, each test cell once at its deepest bin, until
+  the set holds ``min_confident_n`` calls; ``decide``) and is marked
+  extrapolated; a class that never reaches them is ``insufficient_calls``,
+  and a class without ``D_max(c)`` (no grid value with
+  ``min_cells_per_bin`` test cells of class ``c``) is never emitted (no
+  pooling across classes). Everything not emitted is ``not_resolvable``;
 * **floors**: the smallest emitted depth, combined with the known floors by
   the max rule for panels without real-data validation (§5.4); validated
   panels keep the packaged per-platform floors;
@@ -92,7 +98,10 @@ logger = logging.getLogger(__name__)
 # composition weights per depth bin, rare types pooled at broad-class level,
 # trimmed; Kish n and the largest weight share per decision; the WHB COP
 # rule on the broad level; per-platform packaged floors in the summary.
-RESOLVABILITY_VERSION: Final = 2
+# 3 (H18 follow-up, user decision 2026-09-27): pooled deep bins (the gate-P
+# pooling with n_min = min_confident_n replaces the D_max inheritance;
+# insufficient_calls) and the point precision joins the Wilson rule.
+RESOLVABILITY_VERSION: Final = 3
 SUMMARY_SCHEMA_VERSION: Final = 1
 RESOLVABILITY_FILE: Final = "resolvability.parquet"
 RESOLVABILITY_CELLS_FILE: Final = "resolvability_cells.parquet"
@@ -1557,7 +1566,8 @@ class RuleSettings:
 
     Attributes:
         min_cells_per_bin: Test cells of a class a depth bin needs (D_max).
-        min_confident_n: Confident calls an emitted bin needs (check half).
+        min_confident_n: Confident calls a tested set needs (a bin, else the
+            pooled deep set it takes the verdict of; check half).
         wilson_margin: The Wilson bound may sit this far below the target.
         min_coverage: Coverage an emitted bin needs.
         threshold_cap: Largest local threshold.
@@ -1729,16 +1739,41 @@ def check_threshold(
     )
 
 
+REASON_NO_LOCAL_THRESHOLD: Final = "no_local_threshold"
+REASON_TOO_FEW_CONFIDENT: Final = "too_few_confident_calls"
+REASON_WILSON: Final = "wilson_bound_below_target"
+REASON_POINT: Final = "point_precision_below_target"
+REASON_COVERAGE: Final = "coverage_below_minimum"
+REASON_TOO_FEW_TEST_CELLS: Final = "too_few_test_cells"
+# A class whose calls never reach min_confident_n, even with every depth bin
+# pooled (user decision 2026-09-27, H18 follow-up).
+REASON_INSUFFICIENT_CALLS: Final = "insufficient_calls"
+# Prefix of the reason of a bin whose own test passed but whose deep pool
+# (the ">= D_P" set it completes) failed.
+POOL_REASON_PREFIX: Final = "pool_"
+
+
 def _rule_pass(stats: CheckStats, target: float, settings: RuleSettings) -> str | None:
-    """Return why a checked threshold fails the emission rule (``None``: passes)."""
+    """Return why a tested set fails the emission rule (``None``: passes).
+
+    One rule for single bins and pooled deep sets, as the gate-P evaluation
+    rules (§14; user decision 2026-09-27): a threshold, at least
+    ``min_confident_n`` confident calls, the Wilson lower bound (on the Kish
+    effective n) at least ``target - wilson_margin``, the point precision at
+    least ``target`` and the coverage at least ``min_coverage``. The Wilson
+    test comes first, so ``point_precision_below_target`` marks exactly the
+    sets the point estimate alone rejects.
+    """
     if stats.threshold is None:
-        return "no_local_threshold"
+        return REASON_NO_LOCAL_THRESHOLD
     if stats.n_confident < settings.min_confident_n:
-        return "too_few_confident_calls"
+        return REASON_TOO_FEW_CONFIDENT
     if not stats.wilson_lb >= target - settings.wilson_margin - _TOLERANCE:
-        return "wilson_bound_below_target"
+        return REASON_WILSON
+    if not stats.precision >= target - _TOLERANCE:
+        return REASON_POINT
     if stats.coverage < settings.min_coverage - _TOLERANCE:
-        return "coverage_below_minimum"
+        return REASON_COVERAGE
     return None
 
 
@@ -1784,6 +1819,76 @@ def d_max_table(
     return result
 
 
+def deepest_rows(rows: pd.DataFrame) -> pd.DataFrame:
+    """Return each test cell's deepest simulated row (one row per ``cell_id``).
+
+    A test cell is simulated at every grid depth its native counts reach, so
+    a ">= d" set of deep bins holds each test cell once, at its deepest bin
+    (§14 gate-P evaluation rules, §8.3 pooled deep bins). The deepest row is
+    taken over every row of a level, whatever the call, before any class or
+    confidence filter: a cell called into another class (or a sink) at its
+    deepest bin is not a call of the class there, and a cell unconfident at
+    its deepest bin is not rescued by a confident shallower row.
+
+    Args:
+        rows: Cells-table rows of one level (one recipe and seed).
+
+    Returns:
+        One row per test cell, in depth order.
+    """
+    if rows.empty:
+        return rows
+    order = np.argsort(rows["depth"].to_numpy(np.int64), kind="mergesort")
+    ordered = rows.iloc[order]
+    return ordered[~ordered["cell_id"].astype(str).duplicated(keep="last").to_numpy()]
+
+
+def _judged(record: Mapping[str, Any], settings: RuleSettings) -> bool:
+    """Whether a tested set holds enough calls for the rule to decide it.
+
+    Enough confident calls (``min_confident_n``), or a fitted regime whose
+    isotonic fit exists and never reaches the target on at least
+    ``min_confident_n`` checked calls (``no_local_threshold``: more calls
+    would not change the verdict).
+    """
+    n_confident = record.get("n_confident")
+    if (
+        n_confident is not None
+        and not pd.isna(n_confident)
+        and int(n_confident) >= settings.min_confident_n
+    ):
+        return True
+    n_called = record.get("n_called")
+    return (
+        record.get("reason") == REASON_NO_LOCAL_THRESHOLD
+        and n_called is not None
+        and not pd.isna(n_called)
+        and int(n_called) >= settings.min_confident_n
+    )
+
+
+def _pool_min_depth(
+    own: Mapping[int, Mapping[str, dict[str, Any]]],
+    pooled_at: Callable[[int], Mapping[str, dict[str, Any]]],
+    regime: Regime,
+    grid: Sequence[int],
+    settings: RuleSettings,
+) -> tuple[int | None, bool]:
+    """Return ``(D_P, insufficient)`` of one (regime, level, class).
+
+    ``D_P`` is ``None`` when the deepest grid bin is judged on its own (no
+    pool); otherwise bins are pooled from the deep end until the ">= d" set
+    is judged, and ``D_P`` is its shallowest bin. ``insufficient`` is true
+    when even the set of every bin is not judged.
+    """
+    if _judged(own[grid[-1]][regime], settings):
+        return None, False
+    for depth in reversed(grid):
+        if _judged(pooled_at(depth)[regime], settings):
+            return depth, False
+    return None, True
+
+
 def decide(
     cells: pd.DataFrame,
     levels: Sequence[LevelMeta],
@@ -1794,17 +1899,33 @@ def decide(
     recipe: str = DECISION_RECIPE,
     seed: int = 0,
 ) -> pd.DataFrame:
-    """Return the per (regime, level, class, depth) decisions with D_max inheritance.
+    """Return the per (regime, level, class, depth) decisions with pooled deep bins.
 
-    For each bin with ``depth <= D_max(class)``: the isotonic fit on the fit
-    half, the local thresholds for the base and provisional targets, and the
-    statistics at the applied threshold (``validated``: the default, checked
-    on every call of the bin; ``provisional`` / ``trust``: ``t*``, checked on
-    the check half). Deeper bins inherit the ``D_max`` bin's decision
-    (``extrapolated``); classes without ``D_max`` are never emitted. Weighted
-    rows (RESOLVE) enter the precision with their weight and the Wilson
-    bound with the Kish effective n; ``max_weight_share`` records the
-    largest single call's share of a bin's confident weight.
+    Every bin is tested on its own: the isotonic fit on the fit half, the
+    local thresholds for the base and provisional targets, and the rule
+    (``_rule_pass``) at the applied threshold (``validated``: the default,
+    checked on every call of the bin; ``provisional`` / ``trust``: ``t*``,
+    checked on the check half). A bin with at least ``min_confident_n``
+    confident calls keeps its own verdict (``_judged``).
+
+    Pooled deep bins (user decision 2026-09-27; the gate-P evaluation rules
+    of §14 with ``n_min = min_confident_n``): when the deepest bin is not
+    judged on its own, bins are pooled from the deep end into a ">= d" set,
+    each test cell counted once at its deepest bin (``deepest_rows``), until
+    the set is judged; its shallowest bin is ``D_P``. The set is tested with
+    the same rule (its own fit and ``t*``, the target of ``D_P``, the Wilson
+    bound on the Kish n). Its verdict is carried to every bin deeper than
+    ``D_P``, which are marked ``extrapolated`` and ``pooled``; ``D_P``
+    itself keeps its own verdict when it is judged on its own and is then
+    emitted only if the set passes too (a pooled pass never overrides a
+    bin's own failure), else it takes the set's verdict and is marked too.
+    A class whose calls are not judged even with every bin pooled is
+    ``not_resolvable`` (``insufficient_calls``) in every bin not judged on
+    its own. Classes without ``D_max`` (no bin with ``min_cells_per_bin``
+    test cells) are never emitted (``too_few_test_cells``; no pooling across
+    classes). Weighted rows (RESOLVE) enter the precision with their weight
+    and the Wilson bound with the Kish effective n; ``max_weight_share``
+    records the largest single call's share of a set's confident weight.
 
     Args:
         cells: The cells table (``level_cells`` rows).
@@ -1819,7 +1940,10 @@ def decide(
         One row per (regime, level, class, depth): ``status`` (``emitted`` or
         ``not_resolvable``), ``threshold`` (applied), ``t_star``,
         ``would_raise``, ``check_set`` (``all`` or ``check_half``),
-        statistics, ``target``, ``d_max``, ``extrapolated``, ``reason``.
+        statistics (of the pooled set for pooled bins), ``target``,
+        ``d_max``, ``extrapolated``, ``pooled``, ``pool_min_depth``
+        (``D_P``), ``own_status`` / ``own_reason`` / ``own_n_confident`` (the
+        bin's own test), ``reason``.
     """
     row_weights = (
         np.ones(len(cells), dtype=np.float64)
@@ -1850,59 +1974,31 @@ def decide(
                 [called["parent"].astype(str), "depth"], observed=True
             )
         }
+        deepest = deepest_rows(level_rows)
+        deepest = deepest[deepest["parent"].notna()]
+        deepest_of = {
+            str(cls): group
+            for cls, group in deepest.groupby(
+                deepest["parent"].astype(str), observed=True
+            )
+        }
         classes = sorted(
             {str(cls) for cls in called["parent"].dropna().astype(str)}
             | {cls for (level, cls) in dmax if level == meta.level}
         )
         for cls in classes:
-            class_dmax = dmax.get((meta.level, cls))
-            direct: dict[tuple[Regime, int], dict[str, Any]] = {}
-            for depth in grid:
-                group = groups.get((cls, depth))
-                base = {
-                    "level": meta.level,
-                    "class": cls,
-                    "depth": depth,
-                    "n_test": n_test_index.get((meta.level, cls, depth), 0),
-                    "d_max": class_dmax,
-                    "default_threshold": meta.default_threshold,
-                }
-                if class_dmax is None or depth > class_dmax:
-                    continue
-                bin_records = _bin_decisions(group, meta, depth, settings, base)
-                for record in bin_records:
-                    direct[(record["regime"], depth)] = record
-            for depth in grid:
-                for regime in REGIMES:
-                    if class_dmax is None:
-                        records.append(
-                            {
-                                "regime": regime,
-                                "level": meta.level,
-                                "class": cls,
-                                "depth": depth,
-                                "n_test": n_test_index.get((meta.level, cls, depth), 0),
-                                "d_max": None,
-                                "default_threshold": meta.default_threshold,
-                                "target": settings.target(
-                                    regime, meta.base_target, depth
-                                ),
-                                "status": STATUS_NOT_RESOLVABLE,
-                                "extrapolated": False,
-                                "reason": "too_few_test_cells",
-                            }
-                        )
-                    elif depth <= class_dmax:
-                        records.append(direct[(regime, depth)])
-                    else:
-                        inherited = dict(direct[(regime, class_dmax)])
-                        inherited.update(
-                            depth=depth,
-                            n_test=n_test_index.get((meta.level, cls, depth), 0),
-                            extrapolated=True,
-                            inherited_from=class_dmax,
-                        )
-                        records.append(inherited)
+            records.extend(
+                _class_decisions(
+                    meta,
+                    cls,
+                    grid,
+                    settings,
+                    groups=groups,
+                    deepest=deepest_of.get(cls),
+                    class_dmax=dmax.get((meta.level, cls)),
+                    n_test_index=n_test_index,
+                )
+            )
     columns = [
         "regime",
         "level",
@@ -1928,19 +2024,133 @@ def decide(
         "precision_at_default",
         "d_max",
         "extrapolated",
-        "inherited_from",
+        "pooled",
+        "pool_min_depth",
+        "own_status",
+        "own_reason",
+        "own_n_confident",
         "reason",
     ]
     table = pd.DataFrame.from_records(records)
+    text_columns = {"status", "reason", "check_set", "own_status", "own_reason"}
     for column in columns:
         if column not in table.columns:
-            table[column] = (
-                np.nan if column not in {"status", "reason", "check_set"} else None
-            )
+            table[column] = np.nan if column not in text_columns else None
     table = table[columns]
     table["extrapolated"] = _bool_column(table["extrapolated"])
     table["would_raise"] = _bool_column(table["would_raise"])
+    table["pooled"] = _bool_column(table["pooled"])
     return table
+
+
+def _class_decisions(
+    meta: LevelMeta,
+    cls: str,
+    grid: Sequence[int],
+    settings: RuleSettings,
+    *,
+    groups: Mapping[tuple[str, int], pd.DataFrame],
+    deepest: pd.DataFrame | None,
+    class_dmax: int | None,
+    n_test_index: Mapping[tuple[str, str, int], int],
+) -> list[dict[str, Any]]:
+    """Decide every (regime, depth) bin of one (level, class) (``decide``)."""
+
+    def base(depth: int) -> dict[str, Any]:
+        return {
+            "level": meta.level,
+            "class": cls,
+            "depth": depth,
+            "n_test": n_test_index.get((meta.level, cls, depth), 0),
+            "d_max": class_dmax,
+            "default_threshold": meta.default_threshold,
+        }
+
+    if class_dmax is None:
+        return [
+            {
+                **base(depth),
+                "regime": regime,
+                "target": settings.target(regime, meta.base_target, depth),
+                "status": STATUS_NOT_RESOLVABLE,
+                "extrapolated": False,
+                "pooled": False,
+                "reason": REASON_TOO_FEW_TEST_CELLS,
+            }
+            for depth in grid
+            for regime in REGIMES
+        ]
+    own: dict[int, dict[str, dict[str, Any]]] = {}
+    for depth in grid:
+        own[depth] = {
+            record["regime"]: record
+            for record in _bin_decisions(
+                groups.get((cls, depth)), meta, depth, settings, base(depth)
+            )
+        }
+    pools: dict[int, dict[str, dict[str, Any]]] = {}
+
+    def pooled_at(depth: int) -> dict[str, dict[str, Any]]:
+        if depth not in pools:
+            subset = (
+                None
+                if deepest is None
+                else deepest[deepest["depth"].to_numpy(np.int64) >= depth]
+            )
+            pools[depth] = {
+                record["regime"]: record
+                for record in _bin_decisions(subset, meta, depth, settings, base(depth))
+            }
+        return pools[depth]
+
+    records: list[dict[str, Any]] = []
+    for regime in REGIMES:
+        pool_min, insufficient = _pool_min_depth(own, pooled_at, regime, grid, settings)
+        for depth in grid:
+            mine = own[depth][regime]
+            own_fields = {
+                "own_status": mine["status"],
+                "own_reason": mine["reason"],
+                "own_n_confident": mine.get("n_confident"),
+                "pool_min_depth": pool_min,
+            }
+            judged = _judged(mine, settings)
+            if insufficient and not judged:
+                records.append(
+                    {
+                        **mine,
+                        **own_fields,
+                        "status": STATUS_NOT_RESOLVABLE,
+                        "reason": REASON_INSUFFICIENT_CALLS,
+                        "pooled": False,
+                    }
+                )
+            elif pool_min is None or depth < pool_min:
+                records.append({**mine, **own_fields, "pooled": False})
+            elif depth == pool_min and judged:
+                verdict = pooled_at(pool_min)[regime]
+                record = {**mine, **own_fields, "pooled": False}
+                if mine["status"] == STATUS_EMITTED and (
+                    verdict["status"] != STATUS_EMITTED
+                ):
+                    record.update(
+                        status=STATUS_NOT_RESOLVABLE,
+                        reason=f"{POOL_REASON_PREFIX}{verdict['reason']}",
+                    )
+                records.append(record)
+            else:
+                verdict = pooled_at(pool_min)[regime]
+                records.append(
+                    {
+                        **verdict,
+                        **own_fields,
+                        "depth": depth,
+                        "n_test": mine["n_test"],
+                        "extrapolated": True,
+                        "pooled": True,
+                    }
+                )
+    return records
 
 
 def _bool_column(values: pd.Series) -> pd.Series:
@@ -2727,6 +2937,8 @@ TABLE_COLUMNS: Final[tuple[str, ...]] = (
     "default_threshold",
     "d_max",
     "extrapolated",
+    "pooled",
+    "pool_min_depth",
     "status",
     "reason",
     "x",
@@ -2895,11 +3107,13 @@ def resolvability_table(
         "n_correct",
         "n_confident",
         "d_max",
+        "pool_min_depth",
     ):
         combined[column] = pd.to_numeric(combined[column], errors="coerce").astype(
             "Int64"
         )
     combined["extrapolated"] = combined["extrapolated"].astype("boolean")
+    combined["pooled"] = combined["pooled"].astype("boolean")
     return combined
 
 
@@ -3077,6 +3291,44 @@ def emitted_summary(
         result.setdefault(str(level), {})[str(cls)] = sorted(
             int(depth) for depth in group[group["status"] == STATUS_EMITTED]["depth"]
         )
+    return result
+
+
+def pooled_sets(decisions: pd.DataFrame, regime: Regime) -> dict[str, dict[str, Any]]:
+    """Return the pooled deep sets per level and class (reports, bundle summary).
+
+    Args:
+        decisions: ``decide`` output.
+        regime: The regime.
+
+    Returns:
+        ``{level: {class: record}}`` for the (level, class) pairs with a pool:
+        ``min_depth`` (``D_P``), ``depths`` (the bins taking its verdict),
+        the set's statistics, threshold, ``t_star``, ``would_raise``,
+        ``target``, ``status`` and ``reason``.
+    """
+    frame = decisions[(decisions["regime"] == regime) & decisions["pooled"]]
+    result: dict[str, dict[str, Any]] = {}
+    for (level, cls), group in frame.groupby(["level", "class"], observed=True):
+        first = group.sort_values("depth").iloc[0]
+        result.setdefault(str(level), {})[str(cls)] = {
+            "min_depth": None
+            if pd.isna(first["pool_min_depth"])
+            else int(first["pool_min_depth"]),
+            "depths": sorted(int(depth) for depth in group["depth"]),
+            "n_called": _optional_float(first["n_called"]),
+            "n_confident": _optional_float(first["n_confident"]),
+            "n_effective": _optional_float(first["n_effective"]),
+            "precision": _optional_float(first["precision"]),
+            "wilson_lb": _optional_float(first["wilson_lb"]),
+            "coverage": _optional_float(first["coverage"]),
+            "threshold": _optional_float(first["threshold"]),
+            "t_star": _optional_float(first["t_star"]),
+            "would_raise": bool(first["would_raise"]),
+            "target": _optional_float(first["target"]),
+            "status": str(first["status"]),
+            "reason": _clean_label(first["reason"]),
+        }
     return result
 
 
@@ -3326,6 +3578,7 @@ def build_summary(
                 "threshold": _optional_float(record["threshold"]),
                 "t_star": _optional_float(record["t_star"]),
                 "extrapolated": bool(record["extrapolated"]),
+                "pooled": bool(record["pooled"]),
                 "reason": record["reason"],
             }
         emission[regime] = per_level
@@ -3386,6 +3639,7 @@ def build_summary(
         "d_max": d_max,
         "emission": emission,
         "emitted": {regime: emitted_summary(decisions, regime) for regime in REGIMES},
+        "pooled_sets": {regime: pooled_sets(decisions, regime) for regime in REGIMES},
         "floors": floors_json,
         "validated_thresholds_would_raise": [
             {
@@ -3599,10 +3853,14 @@ def gate_p_tested_sets(
 ) -> dict[tuple[str, str], list[GatePTestedSet] | None]:
     """Return the gate-P tested sets per (level, class) (``None``: not evaluable).
 
-    From the deep end, bins are pooled into a ">= d" set (each test cell
-    counted once, at its deepest bin in the set) until it holds
-    ``min_confident_n`` confident calls; its shallowest bin is ``D_P``.
-    Shallower bins are tested on their own when they hold enough calls.
+    The pooling ``decide`` applies with ``min_confident_n`` (one rule for
+    resolvability and gate P, §14; user decision 2026-09-27): a bin holding
+    ``min_confident_n`` confident calls is tested on its own; when the
+    deepest bin does not, bins are pooled from the deep end into a ">= d"
+    set (each test cell counted once, at its deepest bin, ``deepest_rows``)
+    until it holds ``min_confident_n`` confident calls; its shallowest bin
+    is ``D_P``, whose own test (when it holds enough calls) is a tested set
+    too. Confidence uses the frozen threshold of each call's bin.
 
     Args:
         cells: Pooled held-out cells (frozen-threshold replicates).
@@ -3611,81 +3869,85 @@ def gate_p_tested_sets(
         regime: Regime of the thresholds.
 
     Returns:
-        Tested sets per (level, class), deepest first; ``None`` when the
-        class has fewer than ``min_confident_n`` confident calls in total.
+        Tested sets per (level, class), the pooled set first, then the bins
+        tested on their own, deepest first; ``None`` when even the set of
+        every bin has fewer than ``min_confident_n`` confident calls.
     """
     lookup = emission_lookup(decisions, regime)
-    frame = cells[cells["parent"].notna()].copy()
-    thresholds = [
-        lookup.get((str(level), str(cls), int(depth)))
-        for level, cls, depth in zip(
-            frame["level"].astype(str),
-            frame["parent"].astype(str),
-            frame["depth"],
-            strict=True,
-        )
-    ]
-    confident = np.array(
+    frame = cells.copy()
+    thresholds = np.array(
         [
-            entry is not None
-            and entry[0] == STATUS_EMITTED
-            and entry[1] is not None
-            and bp >= entry[1] - 1e-9
-            for entry, bp in zip(
-                thresholds, frame["bp"].to_numpy(np.float64), strict=True
+            _frozen_threshold(lookup.get((str(level), str(cls), int(depth))))
+            if cls is not None and not pd.isna(cls)
+            else math.nan
+            for level, cls, depth in zip(
+                frame["level"].astype(str),
+                frame["parent"].astype(object),
+                frame["depth"],
+                strict=True,
             )
         ],
-        dtype=bool,
+        dtype=np.float64,
     )
-    frame = frame[confident]
+    bp = frame["bp"].to_numpy(np.float64)
+    frame["_confident"] = np.isfinite(thresholds) & (
+        np.nan_to_num(bp, nan=-1.0) >= thresholds - 1e-9
+    )
     result: dict[tuple[str, str], list[GatePTestedSet] | None] = {}
-    for (level, cls), group in frame.groupby(
-        [frame["level"].astype(str), frame["parent"].astype(str)], observed=True
-    ):
-        depths = sorted({int(depth) for depth in group["depth"]}, reverse=True)
-        sets: list[GatePTestedSet] = []
-        pooled: list[int] = []
-        remaining = list(depths)
-        while remaining:
-            pooled.append(remaining.pop(0))
-            subset = group[group["depth"].isin(pooled)]
-            deepest = subset.sort_values("depth", ascending=False).drop_duplicates(
-                "cell_id"
-            )
-            if len(deepest) >= min_confident_n:
-                precision = float(deepest["correct"].mean())
-                sets.append(
-                    GatePTestedSet(
-                        level=str(level),
-                        cls=str(cls),
-                        depths=tuple(sorted(pooled)),
-                        pooled=len(pooled) > 1,
-                        n_confident=int(len(deepest)),
-                        precision=precision,
-                        wilson_lb=wilson_lower_bound(precision, len(deepest)),
-                    )
-                )
-                break
-        if not sets:
-            result[(str(level), str(cls))] = None
-            continue
-        for depth in remaining:
-            subset = group[group["depth"] == depth]
-            if len(subset) >= min_confident_n:
-                precision = float(subset["correct"].mean())
-                sets.append(
-                    GatePTestedSet(
-                        level=str(level),
-                        cls=str(cls),
-                        depths=(depth,),
-                        pooled=False,
-                        n_confident=int(len(subset)),
-                        precision=precision,
-                        wilson_lb=wilson_lower_bound(precision, len(subset)),
-                    )
-                )
-        result[(str(level), str(cls))] = sets
+    for level, level_rows in frame.groupby(frame["level"].astype(str), observed=True):
+        deepest = deepest_rows(level_rows)
+        called = level_rows[level_rows["parent"].notna()]
+        for cls, group in called.groupby(called["parent"].astype(str), observed=True):
+            key = (str(level), str(cls))
+            confident = group[group["_confident"].to_numpy(bool)]
+            own = confident.groupby("depth").size()
+            grid = sorted({int(depth) for depth in group["depth"]}, reverse=True)
+            class_deepest = deepest[
+                (deepest["parent"].astype(object) == cls).to_numpy()
+                & deepest["_confident"].to_numpy(bool)
+            ]
+            sets: list[GatePTestedSet] = []
+            pool_min: int | None = None
+            if int(own.get(grid[0], 0)) < min_confident_n:
+                for depth in grid:
+                    pooled = class_deepest[class_deepest["depth"] >= depth]
+                    if len(pooled) >= min_confident_n:
+                        pool_min = depth
+                        members = sorted(d for d in grid if d >= depth)
+                        sets.append(_tested_set(key, pooled, members))
+                        break
+                if pool_min is None:
+                    result[key] = None
+                    continue
+            for depth in grid:
+                if int(own.get(depth, 0)) >= min_confident_n:
+                    subset = confident[confident["depth"] == depth]
+                    sets.append(_tested_set(key, subset, [depth]))
+            result[key] = sets or None
     return result
+
+
+def _frozen_threshold(entry: tuple[str, float | None, bool] | None) -> float:
+    """The frozen threshold of an emitted bin (``nan``: nothing is confident)."""
+    if entry is None or entry[0] != STATUS_EMITTED or entry[1] is None:
+        return math.nan
+    return float(entry[1])
+
+
+def _tested_set(
+    key: tuple[str, str], rows: pd.DataFrame, depths: Sequence[int]
+) -> GatePTestedSet:
+    """A tested set of confident rows (unweighted precision and Wilson bound)."""
+    precision = float(rows["correct"].to_numpy(bool).mean())
+    return GatePTestedSet(
+        level=key[0],
+        cls=key[1],
+        depths=tuple(int(depth) for depth in depths),
+        pooled=len(depths) > 1,
+        n_confident=int(len(rows)),
+        precision=precision,
+        wilson_lb=wilson_lower_bound(precision, len(rows)),
+    )
 
 
 def gate_p_class_set(
