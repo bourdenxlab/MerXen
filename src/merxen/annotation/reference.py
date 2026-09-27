@@ -350,13 +350,18 @@ DEFAULT_PREP_MAX_GB: Final = 40
 # memory reserve is max_gb / PREP_MAX_GB_FRACTION.
 PREP_MAX_GB_FRACTION: Final = 0.625
 # Peak memory of the WMB query-marker step, the binding PREP step (plan
-# §8.7), as a linear function of the marker candidate genes: fitted on the
-# evidence runs at 16 processes (ag7 500 genes 20.2 GB, VZG2 815 genes 27.1
-# GB, research/selfmap/panel_ref/querymarkers_*.log). Used only to refuse a
-# large WMB panel built without the prefilter when the prediction exceeds the
-# PREP memory reserve (the prefilter is mandatory above it, OD-E8).
-WMB_QUERY_MARKER_PEAK_GB_INTERCEPT: Final = 9.25
-WMB_QUERY_MARKER_PEAK_GB_PER_GENE: Final = 0.0219
+# §8.7), measured at 8 processes (largest process, /usr/bin/time; M3b stage
+# D, evidence m3b/simulate/): VZG2 815 genes 25.8 GB, the Xenium Prime 5K
+# Mouse panel prefiltered to 1,992 candidates 37.7 GB and unfiltered (5,006
+# genes) 21.3 GB (ag7, 500 genes: 20.2 GB at 16 processes). The peak does
+# not grow with the candidate genes up to 5,006 (the plan's ~22 MB per gene
+# extrapolation is refuted), so within the measured range the prediction is
+# the largest measured peak; beyond it (untested) that peak is scaled with
+# the candidate genes. Used only to refuse a large WMB panel built without
+# the prefilter when the prediction exceeds the PREP reserve (the prefilter
+# is mandatory above it, OD-E8).
+WMB_QUERY_MARKER_PEAK_GB_MEASURED: Final = 37.7
+WMB_QUERY_MARKER_MEASURED_MAX_GENES: Final = 5006
 ROOT_BROAD_MIN_MARKERS: Final = 10
 PREP_N_PROCESSORS_ENV: Final = "MERXEN_ANNOTATION_PREP_N_PROCESSORS"
 PREP_MAX_GB_ENV: Final = "MERXEN_ANNOTATION_PREP_MAX_GB"
@@ -5933,12 +5938,11 @@ def predicted_wmb_query_marker_peak_gb(n_candidate_genes: int) -> float:
         n_candidate_genes: Genes marker discovery chooses from.
 
     Returns:
-        ``WMB_QUERY_MARKER_PEAK_GB_INTERCEPT + PER_GENE x n`` (plan §8.7).
+        The largest measured peak up to ``WMB_QUERY_MARKER_MEASURED_MAX_GENES``
+        candidates, scaled with the candidates beyond (plan §8.7).
     """
-    return (
-        WMB_QUERY_MARKER_PEAK_GB_INTERCEPT
-        + WMB_QUERY_MARKER_PEAK_GB_PER_GENE * n_candidate_genes
-    )
+    scale = max(1.0, n_candidate_genes / WMB_QUERY_MARKER_MEASURED_MAX_GENES)
+    return WMB_QUERY_MARKER_PEAK_GB_MEASURED * scale
 
 
 def prep_memory_reserve_gb() -> float:

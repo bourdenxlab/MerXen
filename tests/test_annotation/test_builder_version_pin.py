@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "5af14b5c1895670193a022ddeafced33fb958a587601d3d54596d1f447f9117b",
+    3: "fe8491d72f869b6a5aa56a8b1939de5bd21c3f6d82f27f7683309367ab0b8227",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -83,6 +83,8 @@ PIN_HISTORY = (
     "count (metrics only); the self-map mapper and marker steps are shared "
     "with annotation-panel-simulate. No bundle of a panel up to 1,000 genes "
     "changes content or build_hash",
+    "3: the WMB query-marker memory model of the no-prefilter refusal is the "
+    "measured M3b 5K envelope (refusals only; no bundle content changes)",
 )
 
 

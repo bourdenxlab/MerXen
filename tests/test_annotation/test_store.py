@@ -421,11 +421,13 @@ def test_build_hash_covers_the_prefilter_of_large_marker_builds(
     spec: AnnotationReferenceSpec,
 ) -> None:
     small, large = make_panel(60), make_panel(1500)
-    config = AnnotationConfig(species="human")
-    no_filter = config.model_copy(
+    # The prefilter is opt-in since the M3b 5K measurement.
+    no_filter = AnnotationConfig(species="human")
+    assert no_filter.panel.large_panel_marker_prefilter == "none"
+    config = no_filter.model_copy(
         update={
-            "panel": config.panel.model_copy(
-                update={"large_panel_marker_prefilter": "none"}
+            "panel": no_filter.panel.model_copy(
+                update={"large_panel_marker_prefilter": "per_parent_topk_union"}
             )
         }
     )
@@ -462,8 +464,9 @@ def test_build_hash_covers_the_prefilter_of_large_marker_builds(
     test_set = dataclasses.replace(copying_builder(), finds_markers=False)
     record = payload_for(spec, large, builder=test_set, config=config)
     assert record["large_panel_prefilter"] is None
-    # Large panels use the wide depth grid.
+    # Large panels use the wide depth grid; the default records no prefilter.
     assert payload_for(spec, large)["depth_grid"][-1] == 2000
+    assert payload_for(spec, large)["large_panel_prefilter"] is None
 
 
 def test_build_hash_payload_rejects_missing_or_foreign_panels(
