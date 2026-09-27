@@ -129,7 +129,9 @@ DEFAULT_MIN_COUNTS: Final = 10
 
 # Kept for the M2 name: the resolver's sources (plan §8.4).
 ResolutionSource = GeneIdSource
-PanelKind = Literal["intersection", "setc", "platform", "single_sample", "gene_list"]
+PanelKind = Literal[
+    "intersection", "setc", "platform", "single_sample", "gene_list", "subset"
+]
 PanelSourceKind = Literal[
     "xenium_gene_panel_json",
     "merscope_codebook",
@@ -190,14 +192,17 @@ class PanelFamily(_PanelModel):
 
     Attributes:
         family_id: Family id; the panel's own id unless it inherited one.
-        basis: ``"own"`` or ``"inherited"`` (same species and platforms,
-            Jaccard >= ``family_min_jaccard``, all root markers present).
+        basis: ``"own"``, ``"inherited"`` (same species and platforms,
+            Jaccard >= ``family_min_jaccard``, all root markers present) or
+            ``"subset"`` (a subset panel of a dataset missing panel genes,
+            which keeps its parent's family; ``subset_panel``).
         reference_panel_hash: Hash of the family's panel.
-        jaccard: Jaccard of this panel with the family's panel.
+        jaccard: Jaccard of this panel with the family's panel (for a
+            subset, with its parent panel).
     """
 
     family_id: str
-    basis: Literal["own", "inherited"]
+    basis: Literal["own", "inherited", "subset"]
     reference_panel_hash: str
     jaccard: float
 
@@ -329,7 +334,7 @@ class AnnotationPanel(_PanelModel):
     Attributes:
         schema_version: ``PANEL_SCHEMA_VERSION``.
         name: ``"intersection"``, ``"setc"``, ``"merscope"``, ``"xenium"``,
-            ``"sample"`` or ``"gene_list"``.
+            ``"sample"``, ``"gene_list"`` or ``<parent>_subset``.
         kind: Panel kind.
         species: Species.
         platforms: Platforms whose data the panel serves (sorted).
@@ -341,8 +346,10 @@ class AnnotationPanel(_PanelModel):
         symbols: One symbol per ID (Xenium's where both platforms declare it).
         symbols_by_platform: Each platform's symbol per ID (``""`` if absent).
         declared_panel_hashes: Declared-panel hash per platform or sample.
-        parent_panel_hash: For set c, the hash of set a.
-        excluded_ids: For set c, the set-a IDs it drops.
+        parent_panel_hash: For set c, the hash of set a; for a subset panel,
+            the hash of the panel it was cut from.
+        excluded_ids: For set c, the set-a IDs it drops; for a subset panel,
+            the parent's genes the dataset lacks.
         panel_family: The panel's family.
     """
 
@@ -1533,6 +1540,254 @@ def intersection_panel(
             known_families=known_families,
             min_jaccard=family_min_jaccard,
         ),
+    )
+
+
+# --------------------------------------------------------------------------
+# Subset bundles (plan §3.3 step 1, §8.1, §8.7)
+
+# MapMyCells lookup keys (``merxen.annotation.reference``): the root parent
+# and the non-marker entries.
+LOOKUP_ROOT_KEY: Final = "None"
+LOOKUP_NON_PARENT_KEYS: Final[frozenset[str]] = frozenset({"metadata", "log"})
+SUBSET_PANEL_SUFFIX: Final = "_subset"
+
+SubsetAction = Literal["none", "subset", "own_family"]
+SubsetReason = Literal["root_marker_missing", "weak_parent", "missing_frac"]
+
+
+class SubsetBundleTrigger(_PanelModel):
+    """Whether a dataset that lacks panel genes needs a subset bundle.
+
+    MAP restricts a bundle's lookup to the genes a dataset has
+    (``validate_lookup`` with auto-collapse). That is enough while few
+    markers are lost; a **subset bundle** (markers found on the genes the
+    dataset has) is needed when a missing gene is a root marker, a parent is
+    left with fewer than ``weak_parent_markers`` markers, or more than
+    ``subset_bundle_missing_frac`` of the panel is missing. Above
+    ``own_family_missing_frac`` the subset is its own panel family with a
+    full PREP (own resolvability and trust); otherwise it keeps the parent's
+    family (plan §3.3, §8.1).
+
+    Attributes:
+        action: ``none``, ``subset`` or ``own_family``.
+        reasons: Why a subset bundle is needed (empty for ``none``).
+        n_panel_genes: Genes of the bundle's panel.
+        n_missing: Panel genes the dataset lacks.
+        missing_frac: ``n_missing / n_panel_genes``.
+        missing_gene_ids: Their IDs (sorted).
+        missing_root_markers: Root markers of the lookup among them.
+        weak_parents: Parents that lost markers and keep fewer than
+            ``weak_parent_markers`` (lookup key -> markers left).
+        subset_bundle_missing_frac: The configured trigger share.
+        own_family_missing_frac: The configured own-family share.
+        weak_parent_markers: The configured weak-parent limit.
+        subset_panel_hash: ``panel_hash`` of the genes the dataset has
+            (``None`` for ``none``).
+    """
+
+    action: SubsetAction
+    reasons: list[SubsetReason] = Field(default_factory=list)
+    n_panel_genes: int
+    n_missing: int
+    missing_frac: float
+    missing_gene_ids: list[str] = Field(default_factory=list)
+    missing_root_markers: list[str] = Field(default_factory=list)
+    weak_parents: dict[str, int] = Field(default_factory=dict)
+    subset_bundle_missing_frac: float
+    own_family_missing_frac: float
+    weak_parent_markers: int
+    subset_panel_hash: str | None = None
+
+    @property
+    def needs_subset(self) -> bool:
+        """Return whether a subset bundle is needed."""
+        return self.action != "none"
+
+
+def subset_bundle_trigger(
+    panel_ids: Iterable[str],
+    present_ids: Iterable[str],
+    lookup: Mapping[str, Any] | None = None,
+    *,
+    weak_parent_markers: int = 5,
+    subset_bundle_missing_frac: float = 0.01,
+    own_family_missing_frac: float = 0.05,
+) -> SubsetBundleTrigger:
+    """Decide whether a dataset's missing panel genes need a subset bundle.
+
+    Args:
+        panel_ids: The bundle panel's IDs.
+        present_ids: IDs the dataset has (its resolved non-control features).
+        lookup: The bundle's marker lookup (``query_markers.filtered.json``;
+            parent key -> marker IDs). Without it only the missing share is
+            tested.
+        weak_parent_markers: A parent that loses markers and keeps fewer
+            triggers a subset bundle.
+        subset_bundle_missing_frac: A larger missing share triggers one.
+        own_family_missing_frac: A larger missing share makes the subset its
+            own family (full PREP).
+
+    Returns:
+        The decision.
+
+    Raises:
+        ValueError: If the panel is empty or the shares are not ordered.
+    """
+    panel = sorted(set(panel_ids))
+    if not panel:
+        raise ValueError("the panel has no genes")
+    if own_family_missing_frac <= subset_bundle_missing_frac:
+        raise ValueError(
+            "own_family_missing_frac must exceed subset_bundle_missing_frac"
+        )
+    present = set(present_ids)
+    missing = [gene_id for gene_id in panel if gene_id not in present]
+    missing_set = set(missing)
+    fraction = len(missing) / len(panel)
+    root_lost: list[str] = []
+    weak: dict[str, int] = {}
+    if lookup is not None and missing:
+        for key, markers in lookup.items():
+            if key in LOOKUP_NON_PARENT_KEYS or not isinstance(markers, list):
+                continue
+            genes = [str(gene) for gene in markers]
+            lost = [gene for gene in genes if gene in missing_set]
+            if not lost:
+                continue
+            if key == LOOKUP_ROOT_KEY:
+                root_lost = sorted(set(lost))
+            left = len(genes) - len(lost)
+            if left < weak_parent_markers:
+                weak[key] = left
+    reasons: list[SubsetReason] = []
+    if root_lost:
+        reasons.append("root_marker_missing")
+    if weak:
+        reasons.append("weak_parent")
+    if fraction > subset_bundle_missing_frac:
+        reasons.append("missing_frac")
+    action: SubsetAction = "none"
+    if fraction > own_family_missing_frac:
+        action = "own_family"
+    elif reasons:
+        action = "subset"
+    subset_hash = (
+        compute_panel_hash([gene_id for gene_id in panel if gene_id in present])
+        if action != "none" and len(missing) < len(panel)
+        else None
+    )
+    return SubsetBundleTrigger(
+        action=action,
+        reasons=reasons,
+        n_panel_genes=len(panel),
+        n_missing=len(missing),
+        missing_frac=round(fraction, 6),
+        missing_gene_ids=missing,
+        missing_root_markers=root_lost,
+        weak_parents=dict(sorted(weak.items())),
+        subset_bundle_missing_frac=subset_bundle_missing_frac,
+        own_family_missing_frac=own_family_missing_frac,
+        weak_parent_markers=weak_parent_markers,
+        subset_panel_hash=subset_hash,
+    )
+
+
+def subset_trigger_for_config(
+    panel_ids: Iterable[str],
+    present_ids: Iterable[str],
+    lookup: Mapping[str, Any] | None,
+    config: AnnotationPanelConfig,
+) -> SubsetBundleTrigger:
+    """Return ``subset_bundle_trigger`` with the panel config's thresholds.
+
+    Args:
+        panel_ids: The bundle panel's IDs.
+        present_ids: IDs the dataset has.
+        lookup: The bundle's marker lookup.
+        config: Panel settings (``weak_parent_markers``,
+            ``subset_bundle_missing_frac``, ``own_family_missing_frac``).
+
+    Returns:
+        The decision.
+    """
+    return subset_bundle_trigger(
+        panel_ids,
+        present_ids,
+        lookup,
+        weak_parent_markers=config.weak_parent_markers,
+        subset_bundle_missing_frac=config.subset_bundle_missing_frac,
+        own_family_missing_frac=config.own_family_missing_frac,
+    )
+
+
+def subset_panel(
+    panel: AnnotationPanel,
+    present_ids: Iterable[str],
+    trigger: SubsetBundleTrigger,
+    *,
+    name: str | None = None,
+) -> AnnotationPanel:
+    """Return the subset panel of a bundle panel on the genes a dataset has.
+
+    The subset keeps its parent's family (``basis = "subset"``, trust and
+    floors of the family; plan §8.1) unless the trigger says
+    ``own_family``, which gives it a family of its own (full PREP with its
+    own resolvability and trust). Its ``panel_hash`` keys the subset bundle
+    (``merxen annotation-reference-prep --panel-genes`` builds it; MAP maps
+    with it once the store has it).
+
+    Args:
+        panel: The bundle's annotation panel.
+        present_ids: IDs the dataset has.
+        trigger: ``subset_bundle_trigger`` for the panel and the dataset.
+        name: Panel name (default ``<parent name>_subset``).
+
+    Returns:
+        The subset panel (``kind = "subset"``, ``parent_panel_hash`` the
+        parent's hash, ``excluded_ids`` the missing genes).
+
+    Raises:
+        ValueError: If the trigger does not ask for a subset or no panel
+            gene is present.
+    """
+    if not trigger.needs_subset:
+        raise ValueError("the trigger does not ask for a subset bundle")
+    present = set(present_ids)
+    positions = [i for i, gene_id in enumerate(panel.ensembl_ids) if gene_id in present]
+    if not positions:
+        raise ValueError(f"no gene of panel {panel.name} is present")
+    ids = [panel.ensembl_ids[i] for i in positions]
+    excluded = [gene_id for gene_id in panel.ensembl_ids if gene_id not in present]
+    parent_family = panel.panel_family
+    if trigger.action == "subset" and parent_family is not None:
+        family = PanelFamily(
+            family_id=parent_family.family_id,
+            basis="subset",
+            reference_panel_hash=parent_family.reference_panel_hash,
+            jaccard=round(len(ids) / panel.n_genes, 6),
+        )
+    else:
+        family = panel_family(ids, species=panel.species, platforms=panel.platforms)
+    return AnnotationPanel(
+        name=name or f"{panel.name}{SUBSET_PANEL_SUFFIX}",
+        kind="subset",
+        species=panel.species,
+        platforms=list(panel.platforms),
+        sample_ids=list(panel.sample_ids),
+        panel_mode=panel.panel_mode,
+        panel_hash=compute_panel_hash(ids),
+        n_genes=len(ids),
+        ensembl_ids=ids,
+        symbols=[panel.symbols[i] for i in positions],
+        symbols_by_platform={
+            platform: [symbols[i] for i in positions]
+            for platform, symbols in panel.symbols_by_platform.items()
+        },
+        declared_panel_hashes=dict(panel.declared_panel_hashes),
+        parent_panel_hash=panel.panel_hash,
+        excluded_ids=excluded,
+        panel_family=family,
     )
 
 

@@ -17,8 +17,15 @@ command runs the same code on published ``*_clustered.h5ad`` files:
 2. **Map table cells only** (``total_counts >= min_counts``), restricted to
    each bundle's panel genes present in the dataset; a missing marker gene
    restricts the lookup (``validate_lookup`` with auto-collapse) and is
-   recorded as ``n_missing_panel_genes``. Subset bundles for > 1% missing
-   genes are M3b.
+   recorded as ``n_missing_panel_genes``. When a missing gene is a root
+   marker, a parent is left with fewer than ``weak_parent_markers`` markers
+   or more than ``subset_bundle_missing_frac`` of the panel is missing
+   (``panel.subset_bundle_trigger``), the run needs a **subset bundle**: MAP
+   writes the subset panel (``subset_panels/<sid>_<run_id>.panel_genes.json``,
+   the parent's family, or its own above ``own_family_missing_frac``) and
+   maps with the store's bundle on it when one exists; otherwise it maps
+   with the restricted lookup and records the request
+   (``MapRunRecord.subset_bundle``) for ``annotation-reference-prep``.
 3. **MMC per bundle use** (``mapmycells_engine.run_mmc``): every use of a
    required primary / secondary bundle (``RequiredBundle.uses``) is a run on
    that use's panel file: the annotation panel of each platform, the human
@@ -51,8 +58,8 @@ import logging
 import os
 import shutil
 import time
-from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Literal
@@ -88,12 +95,16 @@ from merxen.annotation.panel import (
     DeclaredPanel,
     RawPanel,
     RequiredBundles,
+    SubsetBundleTrigger,
     declared_panel,
     feature_columns,
     load_annotation_panel,
     pair_symbol_lookup,
     raw_panel_from_h5ad,
+    subset_panel,
+    subset_trigger_for_config,
 )
+from merxen.annotation.reference import read_lookup
 from merxen.annotation.schema import CellStatus, Columns, meets_threshold
 from merxen.annotation.store import (
     ANNOTATION_BUILDER_VERSION,
@@ -101,6 +112,7 @@ from merxen.annotation.store import (
     STORE_SCHEMA_VERSION,
     BundleRef,
     ReferenceStore,
+    StoreEntry,
     file_sha256,
 )
 from merxen.annotation.vocab import (
@@ -145,7 +157,12 @@ N_PROCESSORS_ENV: Final = "MERXEN_ANNOTATION_MAP_N_PROCESSORS"
 DEFAULT_N_PROCESSORS: Final = 6
 MOUSE_REGION_STEP: Final = "not_run: mouse region inference and pruned re-map are M6"
 
+SUBSET_PANELS_DIR: Final = "subset_panels"
+SUBSET_PANEL_TEMPLATE: Final = "{sample_id}_{run_id}.panel_genes.json"
+
 SampleSource = Literal["prepared", "clustered"]
+# (reference_id, subset panel_hash) -> the store's subset bundle, if built.
+SubsetBundleFinder = Callable[[str, str], MmcBundle | None]
 
 
 class MapError(RuntimeError):
@@ -348,6 +365,29 @@ def map_bundles(
     return runs
 
 
+def _current_bundles(
+    store: ReferenceStore, reference_id: str, panel_hash: str | None
+) -> list[StoreEntry]:
+    """Complete current-builder bundles of a reference on a panel (store entries)."""
+    candidates = []
+    for entry in store.list():
+        if (
+            entry.kind != "bundle"
+            or entry.reference_id != reference_id
+            or entry.panel_hash != panel_hash
+        ):
+            continue
+        manifest = json.loads(
+            (entry.path / BUNDLE_MANIFEST_NAME).read_text(encoding="utf-8")
+        )
+        if (
+            manifest.get("builder_version") == ANNOTATION_BUILDER_VERSION
+            and manifest.get("schema_version") == STORE_SCHEMA_VERSION
+        ):
+            candidates.append(entry)
+    return candidates
+
+
 def locate_bundle(
     store: ReferenceStore, reference_id: str, panel_hash: str | None
 ) -> MmcBundle:
@@ -368,22 +408,7 @@ def locate_bundle(
     Raises:
         MapError: If there is none, or several (pass the bundle explicitly).
     """
-    candidates = []
-    for entry in store.list():
-        if (
-            entry.kind != "bundle"
-            or entry.reference_id != reference_id
-            or entry.panel_hash != panel_hash
-        ):
-            continue
-        manifest = json.loads(
-            (entry.path / BUNDLE_MANIFEST_NAME).read_text(encoding="utf-8")
-        )
-        if (
-            manifest.get("builder_version") == ANNOTATION_BUILDER_VERSION
-            and manifest.get("schema_version") == STORE_SCHEMA_VERSION
-        ):
-            candidates.append(entry)
+    candidates = _current_bundles(store, reference_id, panel_hash)
     if not candidates:
         raise MapError(
             f"the store has no builder-v{ANNOTATION_BUILDER_VERSION} bundle of "
@@ -707,6 +732,32 @@ class _MapModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class SubsetBundleRecord(_MapModel):
+    """A run's subset-bundle decision (plan §3.3 step 1).
+
+    Attributes:
+        trigger: ``panel.subset_bundle_trigger`` on the bundle's panel and
+            the sample's genes.
+        status: ``used`` (the store had the subset bundle and the run mapped
+            with it) or ``requested`` (the run mapped with the parent bundle,
+            its lookup restricted to the genes present; build the subset
+            panel with ``merxen annotation-reference-prep --panel-genes``).
+        subset_panel_file: The subset panel, relative to the manifest.
+        subset_panel_hash: Its ``panel_hash``.
+        parent_panel_hash: The bundle panel it was cut from.
+        parent_build_hash: The parent bundle.
+        subset_build_hash: The subset bundle mapped with (``used``).
+    """
+
+    trigger: SubsetBundleTrigger
+    status: Literal["used", "requested"]
+    subset_panel_file: str
+    subset_panel_hash: str
+    parent_panel_hash: str
+    parent_build_hash: str
+    subset_build_hash: str | None = None
+
+
 class MapRunRecord(_MapModel):
     """One MMC run of one sample in ``map_manifest.json``.
 
@@ -746,6 +797,8 @@ class MapRunRecord(_MapModel):
         reused_from: The published parquet it came from.
         same_mapping_as: Run id of this sample whose mapping this run shares
             (two uses of one bundle on the same query are mapped once).
+        subset_bundle: The subset-bundle decision when the sample lacks
+            enough panel genes (``None`` when no subset bundle is needed).
     """
 
     run_id: str
@@ -780,6 +833,7 @@ class MapRunRecord(_MapModel):
     reused: bool = False
     reused_from: str | None = None
     same_mapping_as: str | None = None
+    subset_bundle: SubsetBundleRecord | None = None
 
 
 class MapSampleRecord(_MapModel):
@@ -1511,6 +1565,7 @@ def annotate_map(
     reuse_from: Path | str | None = None,
     write_provisional: bool = True,
     refused_platforms: Iterable[str] = (),
+    find_subset_bundle: SubsetBundleFinder | None = None,
 ) -> MapManifest:
     """Run the MAP step for the samples of one pair x segmentation.
 
@@ -1534,6 +1589,9 @@ def annotate_map(
         refused_platforms: Platforms whose own panel was refused
             (``refused_platforms``); their samples are recorded without runs.
             Any other sample that no run applies to is an error.
+        find_subset_bundle: Returns the store's bundle of a reference on a
+            subset panel hash, or ``None`` (``store_subset_bundle_finder``);
+            without it every needed subset bundle is only requested.
 
     Returns:
         The manifest (also written to ``<output_dir>/map_manifest.json``).
@@ -1588,6 +1646,7 @@ def annotate_map(
                 segmentation=segmentation,
                 write_provisional=write_provisional,
                 panel_refused=loaded.sample.platform.upper() in refused,
+                find_subset_bundle=find_subset_bundle,
             )
             manifest.samples[loaded.sample.sample_id] = record
             # Written after every sample, so an interrupted run keeps the
@@ -1617,6 +1676,7 @@ def _map_sample(
     segmentation: str | None,
     write_provisional: bool,
     panel_refused: bool = False,
+    find_subset_bundle: SubsetBundleFinder | None = None,
 ) -> MapSampleRecord:
     """Map one sample onto every run that applies to its platform.
 
@@ -1670,7 +1730,14 @@ def _map_sample(
         )
     tidies: list[tuple[MapBundle, pd.DataFrame]] = []
     mapped: dict[tuple[str, str], tuple[str, Path, MapRunRecord]] = {}
-    for run in applicable:
+    for planned in applicable:
+        run, subset_record = _subset_bundle_for(
+            loaded,
+            planned,
+            config,
+            output=output,
+            find_subset_bundle=find_subset_bundle,
+        )
         params = MmcEngineParams.from_reference_spec(run.spec, n_processors=processes)
         query = build_sample_query(loaded, run.panel)
         parquet = sample_dir / MMC_PARQUET_TEMPLATE.format(
@@ -1720,6 +1787,8 @@ def _map_sample(
                     )
         finally:
             shutil.rmtree(run_scratch, ignore_errors=True)
+        if subset_record is not None or run_record.subset_bundle is not None:
+            run_record = run_record.model_copy(update={"subset_bundle": subset_record})
         mapped.setdefault(key, (run.run_id, parquet, run_record))
         record.runs[run.run_id] = run_record
         tidy, _ = read_tidy_parquet(parquet)
@@ -1743,6 +1812,106 @@ def _map_sample(
         record.provisional_labels = _relative(path, output)
         record.provisional_summary = _confident_shares(labels)
     return record
+
+
+def _subset_bundle_for(
+    loaded: LoadedSample,
+    run: MapBundle,
+    config: AnnotationConfig,
+    *,
+    output: Path,
+    find_subset_bundle: SubsetBundleFinder | None,
+) -> tuple[MapBundle, SubsetBundleRecord | None]:
+    """Apply the subset-bundle trigger to one run of one sample (§3.3 step 1).
+
+    Returns:
+        The run to map (on the store's subset bundle and the subset panel
+        when one exists, else unchanged) and the decision record (``None``
+        when no subset bundle is needed).
+    """
+    present = {gene_id for gene_id in loaded.feature_ids if gene_id}
+    if set(run.panel.ensembl_ids) <= present:
+        return run, None
+    trigger = subset_trigger_for_config(
+        run.panel.ensembl_ids, present, read_lookup(run.bundle.lookup), config.panel
+    )
+    if not trigger.needs_subset or trigger.subset_panel_hash is None:
+        return run, None
+    subset = subset_panel(run.panel, present, trigger)
+    path = (
+        output
+        / SUBSET_PANELS_DIR
+        / SUBSET_PANEL_TEMPLATE.format(
+            sample_id=loaded.sample.sample_id, run_id=run.run_id
+        )
+    )
+    subset.write(path)
+    found = (
+        find_subset_bundle(run.reference_id, subset.panel_hash)
+        if find_subset_bundle is not None
+        else None
+    )
+    if found is not None and found.panel_hash != subset.panel_hash:
+        raise MapError(
+            f"subset bundle {found.path} is for panel {str(found.panel_hash)[:16]}, "
+            f"not {subset.panel_hash[:16]}"
+        )
+    record = SubsetBundleRecord(
+        trigger=trigger,
+        status="used" if found is not None else "requested",
+        subset_panel_file=_relative(path, output),
+        subset_panel_hash=subset.panel_hash,
+        parent_panel_hash=run.panel.panel_hash,
+        parent_build_hash=run.bundle.build_hash,
+        subset_build_hash=None if found is None else found.build_hash,
+    )
+    reasons = ", ".join(trigger.reasons) or trigger.action
+    if found is None:
+        logger.warning(
+            "%s %s: %d of %d panel genes missing (%s): subset bundle %s needed "
+            "(%s); mapping with the parent bundle. Build it with merxen "
+            "annotation-reference-prep --reference-id %s --panel-genes %s",
+            loaded.sample.sample_id,
+            run.run_id,
+            trigger.n_missing,
+            trigger.n_panel_genes,
+            reasons,
+            subset.panel_hash[:16],
+            trigger.action,
+            run.reference_id,
+            path,
+        )
+        return run, record
+    logger.info(
+        "%s %s: %d of %d panel genes missing (%s); mapping with subset bundle %s",
+        loaded.sample.sample_id,
+        run.run_id,
+        trigger.n_missing,
+        trigger.n_panel_genes,
+        reasons,
+        found.path,
+    )
+    return replace(run, bundle=found, panel=subset, panel_name=subset.name), record
+
+
+def store_subset_bundle_finder(store: ReferenceStore) -> SubsetBundleFinder:
+    """Return a finder of subset bundles in a store (``locate_bundle``).
+
+    Args:
+        store: The reference store.
+
+    Returns:
+        ``(reference_id, panel_hash) -> MmcBundle | None``; ``None`` when the
+        store has no current-builder bundle on that panel (several are an
+        error, as for ``locate_bundle``).
+    """
+
+    def find(reference_id: str, panel_hash: str) -> MmcBundle | None:
+        if not _current_bundles(store, reference_id, panel_hash):
+            return None
+        return locate_bundle(store, reference_id, panel_hash)
+
+    return find
 
 
 def _reused_run(

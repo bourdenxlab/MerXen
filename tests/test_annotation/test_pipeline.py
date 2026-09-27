@@ -29,6 +29,7 @@ from merxen.annotation.panel import (
     RequiredBundle,
     RequiredBundles,
     compute_panel_hash,
+    load_annotation_panel,
 )
 from merxen.annotation.pipeline import (
     MAP_MANIFEST_NAME,
@@ -698,6 +699,86 @@ def test_a_missing_marker_gene_restricts_the_lookup(
     assert run.lookup_restricted
     assert run.lookup_sha256 != run.bundle_lookup_sha256
     assert run.n_query_genes == 5
+    # GHIP is a root marker and 1 of 6 genes is 17% > 5%: a subset bundle of
+    # its own family is requested; without it the restricted lookup is used.
+    subset = run.subset_bundle
+    assert subset is not None and subset.status == "requested"
+    assert subset.trigger.action == "own_family"
+    assert subset.trigger.reasons == [
+        "root_marker_missing",
+        "weak_parent",
+        "missing_frac",
+    ]
+    assert subset.trigger.weak_parents == {"None": 4}  # 5 root markers - 1
+    assert subset.subset_panel_hash == compute_panel_hash(
+        [g for g in GENE_IDS if g != GENE_IDS[4]]
+    )
+    assert subset.parent_build_hash == runs[0].bundle.build_hash
+    panel = load_annotation_panel(tmp_path / "out" / subset.subset_panel_file)
+    assert panel.kind == "subset" and panel.excluded_ids == [GENE_IDS[4]]
+    assert panel.panel_hash == subset.subset_panel_hash
+
+
+def test_a_subset_bundle_in_the_store_is_mapped_with(
+    tmp_path: Path, fake_mmc: FakeMmc
+) -> None:
+    samples, runs, config = _setup(tmp_path, fake_mmc)
+    keep = [index for index in range(7) if index != 4]
+    _write_h5ad(
+        samples[1].h5ad_path,
+        XENIUM_COUNTS[:, keep],
+        platform="XENIUM",
+        var_names=[[*SYMBOLS, "NegControlProbe_00001"][index] for index in keep],
+        ensembl_ids=[[*GENE_IDS, "NegControlProbe_00001"][index] for index in keep],
+        source="prepared",
+    )
+    present = [g for g in GENE_IDS if g != GENE_IDS[4]]
+    subset_dir = fake_mmc.bundle(
+        "whb_frontal_supc_clus",
+        role="primary",
+        species="human",
+        panel_hash=compute_panel_hash(present),
+        n_genes=len(present),
+        levels=WHB_LEVELS,
+        nodes=[node for node in WHB_NODES if node.marker != GENE_IDS[4]],
+    )
+    subset_bundle = MmcBundle.from_dir(subset_dir)
+    asked: list[tuple[str, str]] = []
+
+    def finder(reference_id: str, panel_hash: str) -> MmcBundle | None:
+        asked.append((reference_id, panel_hash))
+        return subset_bundle if reference_id == "whb_frontal_supc_clus" else None
+
+    manifest = annotate_map(
+        samples[1:],
+        runs,
+        config,
+        output_dir=tmp_path / "out",
+        pair_id="PX",
+        segmentation="s",
+        find_subset_bundle=finder,
+    )
+
+    records = manifest.samples["PX_XENIUM"].runs
+    whb = records["whb_frontal_supc_clus"]
+    assert whb.subset_bundle is not None and whb.subset_bundle.status == "used"
+    assert whb.build_hash == subset_bundle.build_hash
+    assert whb.subset_bundle.subset_build_hash == subset_bundle.build_hash
+    assert whb.subset_bundle.parent_build_hash == runs[0].bundle.build_hash
+    assert whb.panel_hash == compute_panel_hash(present)
+    assert whb.panel_name == "intersection_subset"
+    assert not whb.lookup_restricted and whb.n_missing_panel_genes == 0
+    # SEA-AD has no subset bundle: requested, mapped with the parent bundle
+    # (GHIP is none of its markers, so its lookup is not even restricted).
+    seaad = records["seaad_mr_panel"]
+    assert seaad.subset_bundle is not None
+    assert seaad.subset_bundle.status == "requested"
+    assert seaad.subset_bundle.trigger.reasons == ["missing_frac"]
+    assert seaad.n_missing_panel_genes == 1 and not seaad.lookup_restricted
+    assert {reference for reference, _ in asked} == {
+        "whb_frontal_supc_clus",
+        "seaad_mr_panel",
+    }
 
 
 def test_map_bundles_needs_every_required_bundle(
