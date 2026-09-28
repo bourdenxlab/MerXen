@@ -797,3 +797,90 @@ def test_water_fill_splits_evenly_with_leftovers_in_name_order() -> None:
     assert res.water_fill({"b": 5, "a": 5, "c": 1}, 6) == {"a": 3, "b": 2, "c": 1}
     assert res.water_fill({"a": 2}, 5) == {"a": 2}
     assert res.water_fill({"a": 2, "b": 2}, 0) == {"a": 0, "b": 0}
+
+
+def test_a_judged_deep_bin_is_withdrawn_when_its_ensemble_pool_fails() -> None:
+    # 100 and 250 precise; 20 cells at 500 all wrong: the ">= 250" pool fails,
+    # so 250 (judged on its own, emitted) is withdrawn and 500 not emitted.
+    frames = []
+    for member in ("a", "b"):
+        frames.append(member_rows(member, np.full(300, 0.95), pattern(300, 0.99)))
+        frames.append(
+            member_rows(member, np.full(120, 0.95), np.ones(120, bool), depth=250)
+        )
+        frames.append(
+            member_rows(member, np.full(20, 0.95), np.zeros(20, bool), depth=500)
+        )
+    result = decide(
+        frames,
+        ["a", "b"],
+        depths=(100, 250, 500),
+        ensemble=res.EnsembleSettings(monotone_depth=False),
+    )
+    judged = row(result, depth=250)
+    assert judged["own_status"] == res.STATUS_EMITTED
+    assert judged["status"] == res.STATUS_NOT_RESOLVABLE
+    assert str(judged["reason"]).startswith(res.POOL_REASON_PREFIX)
+    deep = row(result, depth=500)
+    assert bool(deep["pooled"]) and deep["status"] == res.STATUS_NOT_RESOLVABLE
+    assert row(result, depth=100)["status"] == res.STATUS_EMITTED
+
+
+def test_the_saturated_rule_applies_to_each_member_too() -> None:
+    frames = [as_cells(saturated_bin(800, 0.92), name) for name in ("a", "b")]
+    result = decide(frames, ["a", "b"], depths=(2000,))
+    members = result.member_decisions
+    provisional = members[members["regime"] == "provisional"]
+    assert provisional["saturated_bp"].astype(bool).all()
+    assert set(provisional["status"]) == {res.STATUS_EMITTED}
+    assert row(result, regime="provisional", depth=2000)["ensemble_rule"] == (
+        res.RULE_UNANIMOUS
+    )
+
+
+def test_bins_shallower_than_the_shallowest_emitted_one_are_never_filled() -> None:
+    # 100 fails only the Wilson bound (120 cells at 0.925), 250 and 500 are
+    # emitted: the fill only looks deeper than 250.
+    frames = []
+    for member in ("a", "b"):
+        frames.append(member_rows(member, np.full(120, 0.95), pattern(120, 0.925)))
+        for depth in (250, 500):
+            frames.append(
+                member_rows(member, np.full(300, 0.95), pattern(300, 0.99), depth=depth)
+            )
+    result = decide(frames, ["a", "b"], depths=(100, 250, 500), neuronal={"X": True})
+    shallow = row(result, depth=100)
+    assert shallow["status"] == res.STATUS_NOT_RESOLVABLE
+    assert not bool(shallow["monotone_filled"])
+    assert row(result, depth=250)["status"] == res.STATUS_EMITTED
+
+
+def test_water_fill_never_takes_more_than_a_stratum_holds() -> None:
+    take = res.water_fill({"a": 1, "b": 5, "c": 5}, 6)
+    assert take == {"a": 1, "b": 3, "c": 2}
+
+
+def test_a_deep_coverage_failure_is_not_filled() -> None:
+    # 500: 800 cells, 15% at bp 0.95 (all correct), the rest below the
+    # default: judged on its own, it fails only the coverage; never filled.
+    n = 800
+    confident = (np.arange(n) // 2) % 20 < 3
+    frames = []
+    for member in ("a", "b"):
+        for depth in (100, 250):
+            frames.append(
+                member_rows(member, np.full(300, 0.95), pattern(300, 0.99), depth=depth)
+            )
+        frames.append(
+            member_rows(
+                member,
+                np.where(confident, 0.95, 0.5),
+                np.ones(n, bool),
+                depth=500,
+            )
+        )
+    result = decide(frames, ["a", "b"], depths=(100, 250, 500), neuronal={"X": True})
+    deep = row(result, depth=500)
+    assert deep["ensemble_reason"] == "ensemble_coverage_below_minimum"
+    assert deep["status"] == res.STATUS_NOT_RESOLVABLE
+    assert not bool(deep["monotone_filled"])

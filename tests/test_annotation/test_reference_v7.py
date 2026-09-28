@@ -358,3 +358,80 @@ def test_the_mouse_top_up_never_takes_training_or_test_cells(
     per_class = test.obs[f"{res.TRUTH_PREFIX}{CLAS}"].value_counts()
     for cls, item in record["per_class"].items():
         assert per_class[cls] == item["after"] <= 60
+
+
+def test_the_mouse_top_up_draws_only_training_clusters_within_the_cap() -> None:
+    clas, subc = reference.WMB_CLAS, reference.WMB_SUBC
+    meta = pd.DataFrame(
+        {
+            "cell_label": [
+                f"c{alias}-{index}" for alias in (1, 2, 3) for index in range(40)
+            ],
+            "cluster_alias": [alias for alias in (1, 2, 3) for _ in range(40)],
+            clas: "K1",
+            subc: [
+                "S1" if alias < 3 else "S2" for alias in (1, 2, 3) for _ in range(40)
+            ],
+            "feature_matrix_label": "WMB-10Xv3-AAA",
+            "library_method": "10Xv3",
+        }
+    )
+    # Training: 10 cells of cluster 1, 3 of cluster 2 (< 5: not a training
+    # cluster), 6 of cluster 3; test cells: 5 of cluster 1.
+    sampled = pd.concat(
+        [
+            meta[meta.cluster_alias == 1].iloc[:10],
+            meta[meta.cluster_alias == 2].iloc[:3],
+            meta[meta.cluster_alias == 3].iloc[:6],
+        ]
+    )
+    cells = meta[meta.cluster_alias == 1].iloc[10:15].assign(test_source="selfmap")
+    rule = reference.top_up_rule("mouse", AnnotationConfig(species="mouse"))
+    assert rule is not None
+    rule = {**rule, "target": 30, "max_cluster_frac": 0.25}
+    topped, record = reference.wmb_class_top_up(
+        cells, meta, sampled, set(cells["cell_label"]), rule
+    )
+    added = topped[topped["test_source"] == reference.TOP_UP_SOURCE]
+    assert set(added["cluster_alias"]) <= {1, 3}  # never cluster 2
+    assert added.groupby("cluster_alias").size().max() <= 10  # 25% of 40
+    assert not set(added["cell_label"]) & set(sampled["cell_label"])
+    assert not set(added["cell_label"]) & set(cells["cell_label"])
+    assert record["per_class"]["K1"]["before"] == 5
+    assert record["per_class"]["K1"]["after"] == 5 + len(added) == 25
+    assert record["per_class"]["K1"]["ran_out"] is True
+    assert record["n_excluded_cluster_not_in_training"] == 37
+
+
+def test_the_human_top_up_takes_the_held_out_donor_first() -> None:
+    from .test_reference import ASTRO
+
+    def cells(prefix: str, n: int, source: str) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "cell_label": [f"{prefix}-{index}" for index in range(n)],
+                SUPC: ASTRO,
+                CLUS: "c3",
+                "donor_label": "H_small",
+                reference.TEST_SOURCE_COLUMN: source,
+            }
+        )
+
+    test_rows = cells("held", 8, "holdout_donor")
+    donor = cells("donor", 10, "pool").drop(columns=[reference.TEST_SOURCE_COLUMN])
+    other = cells("other", 10, "pool").drop(columns=[reference.TEST_SOURCE_COLUMN])
+    rule = reference.top_up_rule("human", AnnotationConfig(species="human"))
+    assert rule is not None
+    rows, record = reference.whb_class_top_up(
+        test_rows,
+        donor_pool=pd.concat(
+            [donor, test_rows.drop(columns=[reference.TEST_SOURCE_COLUMN])]
+        ),
+        other_candidates=other,
+        rule={**rule, "target": 14},
+    )
+    added = rows.iloc[len(test_rows) :]
+    assert len(added) == 6
+    assert set(added[reference.TEST_SOURCE_COLUMN]) == {reference.TOP_UP_SOURCE}
+    assert all(label.startswith("donor-") for label in added["cell_label"])
+    assert record["per_pool"] == {"holdout_donor": 6}
