@@ -259,6 +259,8 @@ class DeclaredPanel(_PanelModel):
         unresolved: Reason per non-control feature without an ID (by symbol).
         merged_duplicates: Features merged into one ID (ID -> symbols).
         other_species_ids: Native IDs with another species' prefix.
+        declared_ids_incomplete: Declared genes whose native ID the source
+            lacked (``RawPanel.ids_incomplete``), resolved by symbol.
         resolution: The gene-ID resolver's full result (``None`` only for
             panels built before M3b).
     """
@@ -279,6 +281,7 @@ class DeclaredPanel(_PanelModel):
     unresolved: dict[str, str]
     merged_duplicates: dict[str, list[str]] = Field(default_factory=dict)
     other_species_ids: list[str] = Field(default_factory=list)
+    declared_ids_incomplete: list[str] = Field(default_factory=list)
     resolution: GeneIdResolution | None = None
 
     @property
@@ -759,11 +762,17 @@ class RawPanel:
             transcript ID; ``""`` otherwise), in source order.
         source: Where it was read from.
         native_id_column: The column the native values came from.
+        ids_incomplete: Declared genes of a native-ID source whose native ID
+            is unknown (a clustered H5AD's ``min_cells``-dropped features
+            without a declared ID source; ``raw_panel_from_h5ad``): they are
+            resolved by symbol, so the panel hash may differ from the
+            prepared H5AD's.
     """
 
     features: pd.DataFrame
     source: PanelSource
     native_id_column: str | None = None
+    ids_incomplete: tuple[str, ...] = ()
 
 
 def _raw_from_columns(
@@ -1102,24 +1111,49 @@ def _name_tuple(values: Any) -> tuple[str, ...]:
     )
 
 
+def declared_native_ids(path: Path | str) -> dict[str, str]:
+    """Return feature name -> native Ensembl gene ID of a vendor panel file.
+
+    Args:
+        path: Any ``read_panel_file`` format (e.g. a Xenium
+            ``gene_panel.json``).
+
+    Returns:
+        The features with an Ensembl gene ID.
+    """
+    features = read_panel_file(path).features
+    return {
+        str(name): str(gene_id)
+        for name, gene_id in zip(features["name"], features["native_id"], strict=True)
+        if gene_id
+    }
+
+
 def raw_panel_from_h5ad(
     path: Path | str,
     *,
     var: pd.DataFrame | None = None,
     kind: PanelSourceKind = "prepared_h5ad_var",
+    declared_ids: Mapping[str, str] | None = None,
 ) -> RawPanel:
     """Return the declared features of an H5AD (plan §8.1, R39).
 
     A prepared H5AD declares its unfiltered ``var``. A published clustered
     H5AD declares what its control filter saw (the kept and the removed
     features of ``ControlFilterRecord``), so ``min_cells`` filtering never
-    changes its panel hash; the features ``min_cells`` dropped carry no
-    native ID and are resolved by symbol.
+    changes its panel hash. The features ``min_cells`` dropped are no
+    longer in ``var``: their native IDs come from ``declared_ids`` (e.g. the
+    platform's ``gene_panel.json``, ``declared_native_ids``), else they are
+    resolved by symbol. On a native-ID platform (Xenium) a symbol can give
+    another ID than the native one (GGT1, H2AFX), so such features are
+    logged and listed in ``RawPanel.ids_incomplete`` (M3b review 2).
 
     Args:
         path: The H5AD.
         var: Its ``var`` if already read.
         kind: Source kind of a file without a control-filter record.
+        declared_ids: Feature name -> native ID for features absent from
+            ``var``.
 
     Returns:
         The raw panel.
@@ -1142,6 +1176,23 @@ def raw_panel_from_h5ad(
     extra = pd.DataFrame({column: [""] * len(missing) for column in base.features})
     extra["name"] = missing
     extra["symbol"] = missing
+    known = {
+        str(name): clean_native_value(value)
+        for name, value in (declared_ids or {}).items()
+    }
+    values = [known.get(name, "") for name in missing]
+    extra["native_value"] = values
+    extra["native_id"] = [
+        value if is_ensembl_gene_id(value) else "" for value in values
+    ]
+    incomplete: tuple[str, ...] = ()
+    if base.native_id_column is not None:
+        retained = set(record.retained)
+        incomplete = tuple(
+            name
+            for name, value in zip(missing, values, strict=True)
+            if name in retained and not value
+        )
     if missing:
         logger.info(
             "%s: %d declared feature(s) absent from the min_cells-filtered var "
@@ -1150,10 +1201,21 @@ def raw_panel_from_h5ad(
             len(missing),
             ", ".join(missing[:5]),
         )
+    if incomplete:
+        logger.warning(
+            "%s: %d declared gene(s) dropped by min_cells have no native ID here "
+            "(e.g. %s) and are resolved by symbol, so the panel hash may differ "
+            "from the prepared H5AD's; pass the platform's panel file "
+            "(gene_panel.json) to keep their native IDs",
+            path,
+            len(incomplete),
+            ", ".join(incomplete[:5]),
+        )
     return RawPanel(
         features=pd.concat([base.features, extra], ignore_index=True),
         source=PanelSource(kind="clustered_h5ad_declared", path=str(path)),
         native_id_column=base.native_id_column,
+        ids_incomplete=incomplete,
     )
 
 
@@ -1333,6 +1395,7 @@ def declared_panel(
             if len(symbols) > 1
         },
         other_species_ids=sorted(set(other_species)),
+        declared_ids_incomplete=list(raw.ids_incomplete),
         resolution=resolution,
     )
     if panel.unresolved:
@@ -2920,6 +2983,7 @@ def _declared_report(panel: DeclaredPanel) -> dict[str, Any]:
         "unresolved": panel.unresolved,
         "merged_duplicates": panel.merged_duplicates,
         "other_species_ids": panel.other_species_ids,
+        "declared_ids_incomplete": panel.declared_ids_incomplete,
         "species_check": (
             None
             if resolution is None
@@ -3021,6 +3085,7 @@ def compute_panel(
     segmentation: str | None = None,
     clustering_config: Mapping[str, Any] | None = None,
     panel_files: Mapping[str, Path] | None = None,
+    declared_id_files: Mapping[str, Path] | None = None,
     shared_mask: SharedTissueMask | None = None,
     min_counts: int | None = None,
     known_families: Sequence[KnownPanelFamily] | None = None,
@@ -3043,6 +3108,10 @@ def compute_panel(
         panel_files: Declared-panel files keyed by sample id or platform
             (vendor panel file, codebook or source table); samples without
             one use the prepared H5AD's unfiltered ``var``.
+        declared_id_files: Platform panel files keyed by sample id or
+            platform whose native IDs complete the declared features a
+            clustered H5AD's ``min_cells`` filter dropped
+            (``raw_panel_from_h5ad``; e.g. the Xenium ``gene_panel.json``).
         shared_mask: The pair's shared tissue mask, for set c.
         min_counts: Table-cell threshold (default: the clustering config's,
             then the annotation config's, then 10).
@@ -3095,13 +3164,18 @@ def compute_panel(
     if min_counts is None:
         min_counts, min_counts_source = DEFAULT_MIN_COUNTS, "default"
     files = dict(panel_files or {})
+    id_files = dict(declared_id_files or {})
     raws: list[tuple[PreparedSample, RawPanel]] = []
     for sample in samples:
         panel_path = files.get(sample.sample_id) or files.get(sample.platform)
+        id_path = id_files.get(sample.sample_id) or id_files.get(sample.platform)
         if panel_path is not None:
             raw = read_panel_file(panel_path)
         else:
-            raw = raw_panel_from_h5ad(sample.h5ad_path)
+            raw = raw_panel_from_h5ad(
+                sample.h5ad_path,
+                declared_ids=None if id_path is None else declared_native_ids(id_path),
+            )
         raws.append((sample, raw))
     lookup = pair_symbol_lookup([raw for _, raw in raws], species)
     sources = gene_id_sources(panel_config, species, pair_lookup=lookup)

@@ -59,7 +59,7 @@ import os
 import shutil
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Literal
@@ -100,6 +100,7 @@ from merxen.annotation.panel import (
     RawPanel,
     RequiredBundles,
     SubsetBundleTrigger,
+    declared_native_ids,
     declared_panel,
     feature_columns,
     load_annotation_panel,
@@ -199,12 +200,17 @@ class MapSample:
         h5ad_path: Prepared or published clustered H5AD.
         source: ``"prepared"`` (counts in ``X``, every segmented object) or
             ``"clustered"`` (``layers["counts"]``, table cells only).
+        declared_ids_file: A platform panel file (e.g. the Xenium
+            ``gene_panel.json``) giving the native IDs of the declared
+            features a clustered H5AD's ``min_cells`` filter dropped
+            (``raw_panel_from_h5ad``).
     """
 
     sample_id: str
     platform: str
     h5ad_path: Path
     source: SampleSource
+    declared_ids_file: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -495,6 +501,9 @@ class LoadedSample:
         min_counts: Table-cell threshold.
         n_below_min_in_clustered: Published table cells below ``min_counts``
             (clustered inputs only: their genes were ``min_cells``-filtered).
+        undetected_declared_ids: Declared panel genes absent from ``var``
+            (a clustered H5AD's ``min_cells`` filter dropped them): present
+            in the panel with zero counts, never missing (M3b review 2).
     """
 
     sample: MapSample
@@ -509,6 +518,7 @@ class LoadedSample:
     in_table: np.ndarray
     min_counts: int
     n_below_min_in_clustered: int = 0
+    undetected_declared_ids: tuple[str, ...] = ()
 
     @property
     def n_objects(self) -> int:
@@ -586,8 +596,13 @@ def read_h5ad_counts(
     return obs_names, var, counts, instance_ids
 
 
-def _raw_panel(var: pd.DataFrame, path: Path) -> RawPanel:
-    return raw_panel_from_h5ad(path, var=var)
+def _raw_panel(var: pd.DataFrame, sample: MapSample) -> RawPanel:
+    declared_ids = (
+        declared_native_ids(sample.declared_ids_file)
+        if sample.declared_ids_file is not None
+        else None
+    )
+    return raw_panel_from_h5ad(sample.h5ad_path, var=var, declared_ids=declared_ids)
 
 
 def load_samples(
@@ -620,7 +635,7 @@ def load_samples(
             sample.h5ad_path, sample.source
         )
         reads.append((sample, obs_names, var, counts, instance_ids))
-    raws = [_raw_panel(var, sample.h5ad_path) for sample, _, var, _, _ in reads]
+    raws = [_raw_panel(var, sample) for sample, _, var, _, _ in reads]
     lookup = pair_symbol_lookup(raws, species)
     sources = gene_id_sources(config.panel, species, pair_lookup=lookup)
     rules = ResolutionRules.from_config(config.panel)
@@ -647,6 +662,15 @@ def load_samples(
         var_names = [str(name) for name in var.index]
         names = [var_names[position] for position in keep]
         ids = [column_ids[position] for position in keep]
+        undetected = tuple(sorted(set(declared.ensembl_ids) - set(ids)))
+        if undetected:
+            logger.info(
+                "%s: %d declared panel gene(s) absent from var (dropped by "
+                "min_cells) are mapped with zero counts: %s",
+                sample.sample_id,
+                len(undetected),
+                ", ".join(undetected[:10]),
+            )
         gene_counts = counts[:, keep].tocsr()
         selection = select_table_cells(
             ad.AnnData(X=gene_counts, obs=pd.DataFrame(index=obs_names)),
@@ -693,6 +717,7 @@ def load_samples(
                 in_table=in_table,
                 min_counts=int(min_counts),
                 n_below_min_in_clustered=n_below,
+                undetected_declared_ids=undetected,
             )
         )
     return loaded
@@ -709,6 +734,8 @@ class SampleQuery:
         gene_ids: Query gene IDs (panel order).
         missing_gene_ids: Panel genes the dataset lacks.
         fingerprint: ``query_fingerprint`` of the query.
+        undetected_gene_ids: Query genes with zero counts because a
+            clustered H5AD's ``min_cells`` filter dropped them.
     """
 
     counts: sparse.csr_matrix
@@ -717,13 +744,18 @@ class SampleQuery:
     gene_ids: list[str]
     missing_gene_ids: list[str]
     fingerprint: str
+    undetected_gene_ids: list[str] = field(default_factory=list)
 
 
 def build_sample_query(loaded: LoadedSample, panel: AnnotationPanel) -> SampleQuery:
     """Restrict a sample's table cells to a panel's genes (step 2).
 
     Features that resolve to one ID are summed; panel genes absent from the
-    dataset are listed.
+    dataset are listed. Declared genes a clustered H5AD's ``min_cells``
+    filter dropped (``LoadedSample.undetected_declared_ids``) are query
+    genes with zero counts, as the prepared H5AD would give them almost
+    everywhere, so they neither restrict the lookup nor trigger a subset
+    bundle.
 
     Args:
         loaded: The loaded sample.
@@ -735,9 +767,11 @@ def build_sample_query(loaded: LoadedSample, panel: AnnotationPanel) -> SampleQu
     Raises:
         MapError: If no panel gene is present.
     """
-    in_data = {gene_id for gene_id in loaded.feature_ids if gene_id}
+    detected = {gene_id for gene_id in loaded.feature_ids if gene_id}
+    in_data = detected | set(loaded.undetected_declared_ids)
     present = [gene_id for gene_id in panel.ensembl_ids if gene_id in in_data]
     missing = [gene_id for gene_id in panel.ensembl_ids if gene_id not in in_data]
+    undetected = [gene_id for gene_id in present if gene_id not in detected]
     if not present:
         raise MapError(
             f"{loaded.sample.sample_id}: none of the {panel.n_genes} panel genes "
@@ -759,6 +793,7 @@ def build_sample_query(loaded: LoadedSample, panel: AnnotationPanel) -> SampleQu
         gene_ids=present,
         missing_gene_ids=missing,
         fingerprint=query_fingerprint(cell_ids, total_counts, present),
+        undetected_gene_ids=undetected,
     )
 
 
@@ -824,6 +859,9 @@ class MapRunRecord(_MapModel):
         n_query_genes: Query genes.
         n_missing_panel_genes: Panel genes absent from the dataset.
         missing_panel_genes: Their IDs.
+        undetected_declared_genes: Panel genes of the declared panel that a
+            clustered H5AD's ``min_cells`` filter dropped, mapped with zero
+            counts (not missing).
         engine_params: ``MmcEngineParams`` (reuse key).
         ctm_version: ctm version of the mapping.
         ctm_commit: ctm commit, when known.
@@ -863,6 +901,7 @@ class MapRunRecord(_MapModel):
     n_query_genes: int
     n_missing_panel_genes: int
     missing_panel_genes: list[str] = Field(default_factory=list)
+    undetected_declared_genes: list[str] = Field(default_factory=list)
     engine_params: dict[str, Any]
     ctm_version: str | None
     ctm_commit: str | None = None
@@ -1872,7 +1911,11 @@ def _subset_bundle_for(
         when one exists, else unchanged) and the decision record (``None``
         when no subset bundle is needed).
     """
-    present = {gene_id for gene_id in loaded.feature_ids if gene_id}
+    # Declared genes dropped by min_cells are present with zero counts
+    # (build_sample_query), as on the prepared H5AD.
+    present = {gene_id for gene_id in loaded.feature_ids if gene_id} | set(
+        loaded.undetected_declared_ids
+    )
     if set(run.panel.ensembl_ids) <= present:
         return run, None
     trigger = subset_trigger_for_config(
@@ -2133,6 +2176,7 @@ def _run_one(
         n_query_genes=result.n_query_genes,
         n_missing_panel_genes=len(query.missing_gene_ids),
         missing_panel_genes=query.missing_gene_ids,
+        undetected_declared_genes=query.undetected_gene_ids,
         engine_params=params.reuse_key(),
         ctm_version=result.ctm_version,
         ctm_commit=result.ctm_commit,

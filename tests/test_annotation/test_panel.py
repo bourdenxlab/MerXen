@@ -35,6 +35,7 @@ from merxen.annotation.panel import (
     compute_panel,
     compute_panel_hash,
     curated_setc_family,
+    declared_native_ids,
     declared_panel,
     feature_type_from_codeword_category,
     feature_types_of,
@@ -384,6 +385,62 @@ def test_min_cells_filtering_does_not_change_the_declared_panel_hash(
         fallback=fallback,
     )
     assert filtered.panel_hash != declared_hash(prepared)
+
+
+def test_a_clustered_xenium_table_takes_dropped_native_ids_from_its_panel_file(
+    tmp_path: Path,
+) -> None:
+    # H2AFX is dropped by min_cells; the local table lacks that symbol (as
+    # symbol-only resolution misses or changes GGT1, CGB3, H2AFX on the 5K
+    # panel): resolved by symbol, the clustered table declares another panel.
+    symbols = [*shared_symbols(), "H2AFX", "NegControlProbe_00001"]
+    counts = np.ones((10, len(symbols)))
+    counts[2:, N_SHARED] = 0
+    prepared = write_h5ad(
+        tmp_path / "X_prepared.h5ad",
+        counts=counts,
+        var_names=symbols,
+        platform="XENIUM",
+        ensembl_ids=[*shared_ids(), H2AFX_ID, ""],
+    )
+    clustered = _clustered_like_legacy(
+        prepared, tmp_path / "X_clustered.h5ad", min_cells=5
+    )
+    assert "H2AFX" not in set(read_h5ad_var(clustered).index)
+    table = tmp_path / "gene.csv"
+    pd.DataFrame(
+        {"gene_symbol": shared_symbols(), "gene_identifier": shared_ids()}
+    ).to_csv(table, index=False)
+    fallback = load_fallback_table(table, "human")
+
+    def declared(raw: Any) -> Any:
+        return declared_panel(
+            raw, species="human", platform="XENIUM", fallback=fallback
+        )
+
+    reference = declared(raw_panel_from_h5ad(prepared))
+    assert H2AFX_ID in reference.ensembl_ids
+    bare = raw_panel_from_h5ad(clustered)
+    assert bare.ids_incomplete == ("H2AFX",)
+    incomplete = declared(bare)
+    assert incomplete.panel_hash != reference.panel_hash
+    assert incomplete.declared_ids_incomplete == ["H2AFX"]
+    # The platform's gene_panel.json gives the dropped feature its native ID.
+    targets = [
+        {"type": {"data": {"id": gene_id, "name": name}, "descriptor": "gene"}}
+        for name, gene_id in zip(
+            [*shared_symbols(), "H2AFX"], [*shared_ids(), H2AFX_ID], strict=True
+        )
+    ]
+    panel_json = tmp_path / "gene_panel.json"
+    panel_json.write_text(json.dumps({"payload": {"targets": targets}}))
+    ids = declared_native_ids(panel_json)
+    assert ids["H2AFX"] == H2AFX_ID
+    fixed = raw_panel_from_h5ad(clustered, declared_ids=ids)
+    assert fixed.ids_incomplete == ()
+    complete = declared(fixed)
+    assert complete.panel_hash == reference.panel_hash
+    assert complete.declared_ids_incomplete == []
 
 
 def test_a_mouse_panel_under_species_human_refuses_every_panel(
