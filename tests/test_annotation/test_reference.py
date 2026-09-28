@@ -2906,14 +2906,14 @@ def test_holdout_test_set_tops_up_nonneuronal_superclusters_from_other_regions(
     source = test.obs[reference.TEST_SOURCE_COLUMN]
     other = test.obs[source == reference.TEST_SOURCE_OTHER_REGION]
     # Every held-out donor cell (cap 1,000) plus the eligible other-region
-    # cells: non-neuronal nuclei of E2 dissections (any cluster, as E2).
+    # cells: non-neuronal nuclei of E2 dissections of clusters the held-out
+    # training reference holds (the planted cluster c5 is never drawn).
     assert (source == reference.TEST_SOURCE_DONOR).sum() == HO_DONORS["H_small"]
     assert sorted({label.rsplit("-", 1)[0] for label in other.index}) == [
         "mtg_astro",
-        "mtg_c5",
         "v1c_micro",
     ]
-    assert len(other) == 9
+    assert len(other) == 7
     assert set(other["region_of_interest_label"]) <= set(
         reference.HO_OTHER_REGION_ROI_LABELS
     )
@@ -2927,17 +2927,26 @@ def test_holdout_test_set_tops_up_nonneuronal_superclusters_from_other_regions(
     record = test_set["other_region"]
     assert record["roi_labels"] == list(reference.HO_OTHER_REGION_ROI_LABELS)
     assert record["feature_matrix"] == "WHB-10Xv3-Nonneurons"
-    assert record["n_cells"] == 9
-    assert record["per_supercluster"] == {MICRO: 5, ASTRO: 4}
-    assert record["per_broad_class"] == {"Astrocytes": 4, "Microglia": 5}
-    assert record["per_region"] == {"Human MTG": 6, "Human V1C": 3}
-    assert record["per_donor"] == {"H_big": 6, "H_other": 3}
-    assert record["n_cluster_not_in_training"] == 2
-    assert record["cluster_not_in_training_per_supercluster"] == {MICRO: 2}
+    assert record["version"] == reference.HO_OTHER_REGION_VERSION == 2
+    assert record["n_cells"] == 7
+    assert record["per_supercluster"] == {MICRO: 3, ASTRO: 4}
+    assert record["per_broad_class"] == {"Astrocytes": 4, "Microglia": 3}
+    assert record["per_region"] == {"Human MTG": 4, "Human V1C": 3}
+    assert record["per_donor"] == {"H_big": 4, "H_other": 3}
+    # The cluster rule and what it left out are recorded.
+    assert record["cluster_rule"] == reference.HO_OTHER_REGION_RULE
+    assert record["min_training_cells_per_cluster"] == (
+        reference.HO_MIN_TRAINING_CELLS_PER_CLUSTER
+    )
+    assert record["n_training_clusters"] == test_set["n_training_clusters"]
+    assert record["n_excluded_cluster_not_in_training"] == 2
+    assert record["n_excluded_clusters"] == 1
+    assert record["excluded_cluster_not_in_training_per_supercluster"] == {MICRO: 2}
+    assert record["n_cluster_not_in_training"] == 0
     assert record["n_excluded_reference_cells"] == 0
     assert record["disjoint_from_reference_cells"] is True
     assert set(record["eligible_superclusters"]) == {ASTRO, MICRO}
-    assert test_set["per_source"] == {"holdout_donor": 30, "other_region": 9}
+    assert test_set["per_source"] == {"holdout_donor": 30, "other_region": 7}
     assert test_set["per_supercluster"][ASTRO] == 8 + 4
     # Their counts are the raw WHB counts of the panel genes.
     import anndata as ad
@@ -3041,6 +3050,7 @@ def test_other_region_draw_never_takes_a_reference_cell() -> None:
         cap=3,
         room=None,
     )
+    assert record["n_excluded_cluster_not_in_training"] == 0
     assert "o-0" not in set(rows["cell_label"])
     assert record["n_excluded_reference_cells"] == 1
     assert record["disjoint_from_reference_cells"] is True
@@ -3058,6 +3068,63 @@ def test_other_region_draw_never_takes_a_reference_cell() -> None:
         room=None,
     )
     assert again["cell_label"].tolist() == rows["cell_label"].tolist()
+
+
+def test_other_region_draw_takes_only_clusters_of_the_training_reference() -> None:
+    # User decision 2026-09-27 (HO_OTHER_REGION_VERSION 2): a candidate of a
+    # cluster the held-out training reference lacks is never drawn, even with
+    # room to spare, and is counted.
+    labels = pd.DataFrame(
+        {
+            SUPC: [ASTRO, MICRO, MICRO],
+            CLUS: ["c3", "c4", "c_unseen"],
+            SUBC: ["s4", "s6", "s7"],
+        },
+        index=pd.Index([4, 6, 9], name="cluster_alias"),
+    )
+    metadata = pd.DataFrame(
+        {
+            "cell_label": [f"o-{index}" for index in range(7)] + ["planted"],
+            "feature_matrix_label": "WHB-10Xv3-Nonneurons",
+            "donor_label": "H_x",
+            "cluster_alias": [4, 4, 4, 6, 6, 9, 9, 9],
+            "region_of_interest_label": "Human MTG",
+        }
+    ).join(labels, on="cluster_alias")
+    for seed in range(5):
+        rows, record = reference.other_region_test_cells(
+            metadata,
+            reference_cells=set(),
+            training_superclusters=[ASTRO, MICRO],
+            training_clusters=["c3", "c4"],
+            have={},
+            cap=10,
+            room=None,
+            seed=seed,
+        )
+        drawn = set(rows["cell_label"])
+        assert "planted" not in drawn and not drawn & {"o-5", "o-6"}
+        assert drawn == {"o-0", "o-1", "o-2", "o-3", "o-4"}
+    assert record["n_excluded_cluster_not_in_training"] == 3
+    assert record["n_excluded_clusters"] == 1
+    assert record["excluded_cluster_not_in_training_per_supercluster"] == {MICRO: 3}
+    assert record["n_cluster_not_in_training"] == 0
+    assert record["candidates_per_supercluster"] == {MICRO: 2, ASTRO: 3}
+    assert record["n_training_clusters"] == 2
+    assert record["cluster_rule"] == reference.HO_OTHER_REGION_RULE
+    # A supercluster whose candidates are all of unseen clusters gains none.
+    rows, record = reference.other_region_test_cells(
+        metadata,
+        reference_cells=set(),
+        training_superclusters=[ASTRO, MICRO],
+        training_clusters=["c3"],
+        have={},
+        cap=10,
+        room=None,
+    )
+    assert set(rows[SUPC]) == {ASTRO}
+    assert record["n_excluded_cluster_not_in_training"] == 5
+    assert record["excluded_cluster_not_in_training_per_supercluster"] == {MICRO: 5}
 
 
 def whb_resolvability_setup(
@@ -3174,6 +3241,31 @@ def test_self_map_settings_that_change_its_output_change_the_build_hash(
     assert spill["resolvability"] != base["resolvability"]
     assert knob["resolvability"] == base["resolvability"]  # a RESOLVE-time knob
     assert off["resolvability"] == {"enabled": False}
+    # The simulation logic and the other-region rule are hashed by version.
+    hashed = base["resolvability"]
+    assert hashed["resolvability_version"] == res.RESOLVABILITY_VERSION
+    assert hashed["test_set"]["other_region"]["version"] == (
+        reference.HO_OTHER_REGION_VERSION
+    )
+
+
+def test_other_region_rule_version_changes_the_held_out_hashes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = AnnotationConfig(species="human")
+    spec = whb_spec(region_precompute=tmp_path)
+    ho_spec = AnnotationReferenceSpec(
+        reference_id=reference.HO_REFERENCE_ID,
+        species="human",
+        role="resolvability",
+        hierarchy=[SUPC, CLUS],
+    )
+    before = (builder_for(spec, config).params, builder_for(ho_spec, config).params)
+    monkeypatch.setattr(reference, "HO_OTHER_REGION_VERSION", 1)
+    after = (builder_for(spec, config).params, builder_for(ho_spec, config).params)
+    # The primary's self-map and the held-out test-set bundle both change.
+    assert after[0]["resolvability"] != before[0]["resolvability"]
+    assert after[1] != before[1]
 
 
 def test_resolvability_needs_the_test_set_sources(

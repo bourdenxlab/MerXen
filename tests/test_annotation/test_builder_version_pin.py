@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "187330d921d0cbe277bea19cc9bd36e384bea5c0b8d5c597634f29bf128294d6",
+    3: "8c2cf954a45458c2f360cd8d3ceaa0078434eebea1067c9899edda51018dca15",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -99,6 +99,11 @@ PIN_HISTORY = (
     "3: the no-prefilter refusal keeps the OD-E8 +30% margin on the predicted "
     "WMB query-marker peak and names the pipeline's option (refusals only; "
     "no bundle content changes)",
+    "3: the human held-out test set's other-region top-up draws only from "
+    "clusters of the held-out training reference (user decision 2026-09-27); "
+    "HO_OTHER_REGION_VERSION 2 enters the whb_frontal_supc_clus_ho build_hash "
+    "through its hashed other_region params, and every human self-map "
+    "bundle's through its test-set params; the mouse bundles are unchanged",
 )
 
 

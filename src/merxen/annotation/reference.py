@@ -295,7 +295,17 @@ TEST_SET_SEED: Final = 0
 # is topped up to the per-supercluster cap with WHB non-neuronal nuclei from
 # E2's 14 neocortical dissections outside the frontal reference ROIs. Their
 # cells are in no frontal reference, training or marker set (checked).
-HO_OTHER_REGION_VERSION: Final = 1
+# 2 (user decision 2026-09-27, implemented 2026-09-28): the top-up draws only
+# from clusters of the held-out training reference (the kept training
+# clusters, >= HO_MIN_TRAINING_CELLS_PER_CLUSTER cells): in version 1, 694 of
+# the 2,955 drawn set a cells were of clusters the training reference lacks,
+# whose cluster truth no call can name.
+HO_OTHER_REGION_VERSION: Final = 2
+HO_OTHER_REGION_RULE: Final = (
+    "other-region candidates of clusters absent from the held-out training "
+    "reference (clusters with fewer than min_training_cells_per_cluster "
+    "training cells) are not drawn"
+)
 HO_OTHER_REGION_ROI_LABELS: Final[tuple[str, ...]] = (
     "Human MTG",
     "Human STG",
@@ -4942,13 +4952,16 @@ def other_region_test_cells(
     frontal reference (``roi_labels``), of the non-neuronal superclusters
     (``nonneuronal_superclusters``) the held-out training reference holds,
     top every non-neuronal supercluster of the test set up to the
-    per-supercluster cap (``res.top_up_test_cells``). As in E2 (and as for
-    the held-out donor's own cells), their clusters are not restricted: the
-    drawn cells of clusters absent from the training reference are counted
-    (their cluster truth cannot be called; the cluster level is report-only).
-    Candidates among ``reference_cells`` (every frontal region cell: the
-    training, marker and held-out donor cells) are dropped and counted; the
-    draw is checked disjoint from them.
+    per-supercluster cap (``res.top_up_test_cells``). Only candidates of
+    clusters the held-out training reference holds (``training_clusters``:
+    the kept training clusters, at least ``HO_MIN_TRAINING_CELLS_PER_CLUSTER``
+    cells) are drawn (``HO_OTHER_REGION_VERSION`` 2, user decision
+    2026-09-27): a cell of a cluster the reference lacks has a cluster truth
+    no call can name. The candidates left out are counted per supercluster
+    and the draw is checked to hold none. Candidates among
+    ``reference_cells`` (every frontal region cell: the training, marker and
+    held-out donor cells) are dropped and counted; the draw is checked
+    disjoint from them.
 
     Args:
         cell_metadata: WHB cell metadata joined with the WHB levels
@@ -4959,7 +4972,7 @@ def other_region_test_cells(
         training_superclusters: Supercluster labels of the held-out training
             reference (a drawn cell's supercluster must be one).
         training_clusters: Cluster labels of the held-out training reference
-            (recorded only).
+            (a drawn cell's cluster must be one).
         have: Held-out donor test cells per supercluster.
         cap: The test set's per-supercluster cap.
         room: Test cells the set may still take (``n_test_cells`` - donor).
@@ -4970,10 +4983,12 @@ def other_region_test_cells(
     Returns:
         ``(rows, record)``: the drawn cells (``cell_metadata`` columns) and
         what ``bundle.json`` records (dissections, counts per supercluster,
-        broad class, dissection and donor, exclusions, disjointness).
+        broad class, dissection and donor, the cluster rule and its
+        exclusions, the reference-cell exclusions, disjointness).
 
     Raises:
-        ReferenceBuildError: If a drawn cell is a reference cell.
+        ReferenceBuildError: If a drawn cell is a reference cell or of a
+            cluster the training reference lacks.
     """
     from merxen.annotation import resolvability as res
 
@@ -4990,6 +5005,10 @@ def other_region_test_cells(
     is_reference = frame["cell_label"].astype(str).isin(reference)
     n_reference = int(is_reference.sum())
     frame = frame[~is_reference]
+    kept_clusters = {str(label) for label in training_clusters}
+    is_unseen = ~frame[WHB_CLUS].astype(str).isin(kept_clusters)
+    unseen_candidates = frame[is_unseen]
+    frame = frame[~is_unseen]
     frame = frame.drop_duplicates("cell_label").set_index("cell_label", drop=False)
     frame.index = frame.index.astype(str)
     chosen = res.top_up_test_cells(
@@ -5001,9 +5020,14 @@ def other_region_test_cells(
         raise ReferenceBuildError(
             f"other-region test cells overlap the reference cells: {overlap[:5]}"
         )
+    unseen = ~rows[WHB_CLUS].astype(str).isin(kept_clusters)
+    if unseen.any():  # pragma: no cover - guarded by the filter above
+        raise ReferenceBuildError(
+            "other-region test cells of clusters the held-out training reference "
+            f"lacks: {sorted(set(rows[WHB_CLUS][unseen].astype(str)))[:5]}"
+        )
     supc = rows[WHB_SUPC].astype(str)
     groups = _spill_groups(supc, WHB_TAXONOMY_ID)
-    unseen = ~rows[WHB_CLUS].astype(str).isin({str(c) for c in training_clusters})
 
     def counts(values: Iterable[str]) -> dict[str, int]:
         series = pd.Series(list(values), dtype=object)
@@ -5020,6 +5044,14 @@ def other_region_test_cells(
         "eligible_superclusters": sorted(eligible),
         "n_candidates_in_rois": n_in_rois,
         "n_excluded_reference_cells": n_reference,
+        "cluster_rule": HO_OTHER_REGION_RULE,
+        "min_training_cells_per_cluster": HO_MIN_TRAINING_CELLS_PER_CLUSTER,
+        "n_training_clusters": len(kept_clusters),
+        "n_excluded_cluster_not_in_training": int(len(unseen_candidates)),
+        "n_excluded_clusters": int(unseen_candidates[WHB_CLUS].astype(str).nunique()),
+        "excluded_cluster_not_in_training_per_supercluster": counts(
+            unseen_candidates[WHB_SUPC].astype(str)
+        ),
         "n_candidates": int(len(frame)),
         "candidates_per_supercluster": {
             str(k): int(v) for k, v in available.sort_index().items()
@@ -5030,7 +5062,6 @@ def other_region_test_cells(
         "per_region": counts(rows["region_of_interest_label"].astype(str)),
         "per_donor": counts(rows["donor_label"].astype(str)),
         "n_cluster_not_in_training": int(unseen.sum()),
-        "cluster_not_in_training_per_supercluster": counts(supc[unseen.to_numpy()]),
         "disjoint_from_reference_cells": not overlap,
         "n_reference_cells_checked": len(reference),
     }
@@ -5055,10 +5086,11 @@ def build_whb_frontal_ho(context: BuildContext) -> dict[str, Any]:
     ``n_test_cells``, are the test set
     (``test_cells.h5ad`` with native panel counts and their truth), and
     every non-neuronal supercluster is topped up to that cap with WHB
-    non-neuronal nuclei of neocortical dissections outside the frontal ROIs
-    (``other_region_test_cells``; user decision 2026-09-27), recorded in
-    ``bundle.json`` (``test_set.other_region``) and per cell
-    (``test_source``).
+    non-neuronal nuclei of neocortical dissections outside the frontal ROIs,
+    only of clusters the training reference keeps
+    (``other_region_test_cells``; user decisions 2026-09-27), recorded in
+    ``bundle.json`` (``test_set.other_region``: the rule, what it left out)
+    and per cell (``test_source``).
 
     Args:
         context: The build context.
