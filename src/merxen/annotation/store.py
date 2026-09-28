@@ -95,10 +95,20 @@ logger = logging.getLogger(__name__)
 # 2: set c from the curated family list, state and negative genes by ID,
 # ID-only bundle tables, the validated WMB marker universe, the self-map
 # test-cell source, read-only bundles.
-ANNOTATION_BUILDER_VERSION: Final = 2
+# 3: the resolvability self-map (M3b): the whb_frontal_supc_clus_ho and
+# wmb_selfmap_testset test-set builders, and resolvability tables, summary
+# and trust constraint in the primary and secondary bundles.
+ANNOTATION_BUILDER_VERSION: Final = 3
 # Version of the build-hash payload and of bundle.json.
 # 2: no panel symbols, MAP bootstrap or resolvability settings in the payload.
 STORE_SCHEMA_VERSION: Final = 2
+# Large panels (> large_panel_genes, e.g. Xenium 5K; plan §8.7, M3b stage
+# D): bundles go to the large store (ReferenceStore.large_root) with their
+# reference markers kept, and PREP gets the measured memory reserve
+# (annotation_prep_large_memory, OD-E8). The per-parent marker prefilter
+# (merxen.annotation.prefilter) is opt-in (large_panel_marker_prefilter);
+# when on, its method, version and settings enter build_hash
+# (build_hash_payload) of every builder that finds markers.
 # Simulation recipes of the resolvability self-map and their versions (§8.3).
 # They enter build_hash once a builder writes resolvability outputs (M3b).
 RESOLVABILITY_RECIPE_VERSIONS: Final[dict[str, int]] = {"R1_contam_HO": 1}
@@ -150,6 +160,10 @@ class BundleIntegrityError(StoreError):
 
 class UnknownBuilderError(StoreError):
     """No bundle builder is registered for a reference id."""
+
+
+class LargePanelRefusedError(StoreError):
+    """A builder refuses a panel it cannot build safely (§3.2, §8.7, OD-E8)."""
 
 
 class PruneRefusedError(StoreError):
@@ -441,6 +455,8 @@ class BuildContext:
         sources: Source records by name.
         config: The annotation config, when the caller has one.
         copied: Files copied with ``copy_source`` so far.
+        store: The store building the bundle; builders get the bundles they
+            depend on (the resolvability test sets) through it.
     """
 
     spec: AnnotationReferenceSpec
@@ -452,6 +468,7 @@ class BuildContext:
     sources: dict[str, SourceRecord]
     config: AnnotationConfig | None = None
     copied: list[CopiedFile] = field(default_factory=list)
+    store: ReferenceStore | None = None
 
     def copy_source(self, source: str | Path, bundle_path: str | Path) -> CopiedFile:
         """Copy a source file into the bundle and verify its checksum.
@@ -532,6 +549,12 @@ class BundleBuilder:
         source_patterns: ``fnmatch`` pattern of the file names the builder
             reads from a directory source, by source name; the source's
             identity (and ``build_hash``) covers only those files.
+        finds_markers: Whether the builder runs marker discovery, so the
+            large-panel prefilter (plan §8.7) enters its ``build_hash``; the
+            test-set builders do not.
+        refuse: Optional ``(panel, config) -> reason | None``: why the
+            builder refuses a panel (``large_panel_refusal``). Not part of
+            ``build_hash``.
     """
 
     name: str
@@ -541,6 +564,8 @@ class BundleBuilder:
     uses_panel: bool = True
     prepare_spec: Callable[..., AnnotationReferenceSpec] | None = None
     source_patterns: Mapping[str, str] = field(default_factory=dict)
+    finds_markers: bool = True
+    refuse: Callable[[AnnotationPanel, AnnotationConfig], str | None] | None = None
 
 
 BuilderFactory = Callable[
@@ -680,17 +705,18 @@ def build_hash_payload(
       matched by ID, so two panels with the same IDs share one bundle;
     * the MAP bootstrap settings (``bootstrap_factor``,
       ``bootstrap_iteration``, ``rng_seed``), which MAP reads from the spec;
-    * the resolvability settings: no M2 builder writes resolvability
-      outputs; M3b adds the self-map recipe to this payload (with an
-      ``ANNOTATION_BUILDER_VERSION`` bump) when its builder does, and
-      RESOLVE-time knobs (thresholds, trust, emission) never enter it.
+    * the RESOLVE-time resolvability knobs (targets, margins, the Wilson,
+      coverage and confident-call minimums, trust): the self-map recipe and
+      its test set enter ``builder_params`` (M3b, builder version 3), and
+      the decisions are re-derived from the cached tables at RESOLVE.
 
     Args:
         spec: The reference spec.
         panel: The declared panel; ignored when the builder does not use one.
         builder: The builder (name, taxonomy, params, panel use).
         sources: Source records by name.
-        config: The annotation config; supplies the large-panel prefilter.
+        config: The annotation config; supplies the large-panel prefilter
+            (method, version and settings; builders that find markers only).
         ctm: ``cell_type_mapper`` provenance; defaults to ``ctm_provenance()``.
         large_panel_genes: Panels above this size use the prefilter.
 
@@ -717,15 +743,17 @@ def build_hash_payload(
         panel_payload = {"panel_hash": panel.panel_hash, "n_genes": panel.n_genes}
     prefilter: dict[str, Any] | None = None
     if (
-        config is not None
+        builder.finds_markers
+        and config is not None
         and n_panel_genes is not None
         and n_panel_genes > large_panel_genes
         and config.panel.large_panel_marker_prefilter != "none"
     ):
-        prefilter = {
-            "method": config.panel.large_panel_marker_prefilter,
-            "cap": config.panel.large_panel_prefilter_cap,
-        }
+        from merxen.annotation.prefilter import prefilter_payload
+
+        prefilter = prefilter_payload(
+            config.panel.large_panel_prefilter_cap, spec.n_per_utility
+        )
     return {
         "schema_version": STORE_SCHEMA_VERSION,
         "builder_version": ANNOTATION_BUILDER_VERSION,
@@ -750,6 +778,34 @@ def build_hash_payload(
     }
 
 
+def large_panel_refusal(
+    panel: AnnotationPanel | None,
+    config: AnnotationConfig | None,
+    builder: BundleBuilder | None = None,
+) -> str | None:
+    """Return why a panel-dependent build is refused (``None``: it runs).
+
+    Large panels are built (plan §8.7, M3b stage D); a builder refuses what
+    it cannot build safely through ``BundleBuilder.refuse`` (the whole-WHB
+    bundle above 1,000 genes, §3.2; a large WMB panel without the prefilter
+    whose predicted query-marker peak exceeds the PREP memory reserve, so the
+    prefilter is mandatory above the reserve, OD-E8). It runs before any
+    source is downloaded or hashed and before any build directory exists.
+
+    Args:
+        panel: The declared panel (``None``: a panel-independent build).
+        config: The annotation config; ``None`` uses the panel's species
+            defaults.
+        builder: The builder; ``None`` refuses nothing.
+
+    Returns:
+        The reason, or ``None``.
+    """
+    if panel is None or builder is None or builder.refuse is None:
+        return None
+    return builder.refuse(panel, config or AnnotationConfig(species=panel.species))
+
+
 def recorded_settings(
     spec: AnnotationReferenceSpec, config: AnnotationConfig | None
 ) -> dict[str, Any]:
@@ -760,8 +816,10 @@ def recorded_settings(
         config: The annotation config, if any.
 
     Returns:
-        The MAP bootstrap settings and, for a primary reference, the
-        resolvability settings and recipe version, for provenance only.
+        The MAP bootstrap settings and, for a primary or secondary
+        reference, the resolvability settings and recipe version, for
+        provenance only (the self-map recipe itself is hashed through the
+        builder parameters).
     """
     settings: dict[str, Any] = {
         "mapping": {
@@ -771,12 +829,12 @@ def recorded_settings(
         },
         "resolvability": None,
     }
-    if config is not None and spec.role == "primary":
+    if config is not None and spec.role in ("primary", "secondary"):
         recipe = config.resolvability.recipe
         settings["resolvability"] = {
             "recipe": recipe,
             "recipe_version": RESOLVABILITY_RECIPE_VERSIONS.get(recipe),
-            "outputs_in_bundle": False,
+            "outputs_in_bundle": bool(config.resolvability.enabled),
             "settings": config.resolvability.model_dump(mode="json"),
         }
     native: dict[str, Any] = _json_native(settings)
@@ -1077,9 +1135,16 @@ class ReferenceStore:
                 valid bundle (it is never replaced or deleted), or the build
                 wrote a symlink or a source changed during the build.
             UnknownBuilderError: If no builder is registered.
+            LargePanelRefusedError: If the builder refuses the panel
+                (``large_panel_refusal``).
         """
         config = config or AnnotationConfig(species=spec.species)
         builder = builder or resolve_builder(spec, config)
+        refusal = large_panel_refusal(
+            panel if builder.uses_panel else None, config, builder
+        )
+        if refusal is not None:
+            raise LargePanelRefusedError(f"{spec.reference_id}: {refusal}")
         request = self.prepare_request(spec, panel, builder=builder, config=config)
         effective_panel = panel if builder.uses_panel else None
         root = self.root_for(effective_panel)
@@ -1170,6 +1235,7 @@ class ReferenceStore:
                 scratch_dir=scratch_dir,
                 sources=request.sources,
                 config=config,
+                store=self,
             )
             builder_output = dict(builder.build(context) or {})
             _check_sources_unchanged(request.sources)
@@ -1678,6 +1744,13 @@ def _bundle_manifest(
             "sample_ids": list(panel.sample_ids),
             "parent_panel_hash": panel.parent_panel_hash,
             "symbols_sha256": panel.symbols_sha256(),
+            # The declared panels' gene-ID resolution (plan §8.4): which
+            # table resolved the IDs, recorded, never hashed.
+            "declared_panel_hashes": dict(panel.declared_panel_hashes),
+            "declared_resolutions": {
+                name: record.model_dump(mode="json")
+                for name, record in sorted(panel.declared_resolutions.items())
+            },
             "part_of_build_hash": False,
         },
         "recorded_settings": recorded_settings(spec, config),

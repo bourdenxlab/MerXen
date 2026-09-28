@@ -18,7 +18,7 @@ with a one-line message (``click.ClickException``), not a traceback.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -461,6 +461,24 @@ def _annotation_reference_prep(
         scratch_root=scratch_dir,
     )
     builder = resolve_builder(spec, config)
+    # The resources come first: a builder's memory check follows --max-gb.
+    if n_processors is not None or max_gb is not None:
+        from merxen.annotation.reference import set_prep_resources
+
+        set_prep_resources(n_processors=n_processors, max_gb=max_gb)
+    if builder.uses_panel:
+        from merxen.annotation.store import (
+            LargePanelRefusedError,
+            large_panel_refusal,
+        )
+
+        # A builder's refusal (whole-WHB above 1,000 genes; a large WMB
+        # panel without the prefilter above the memory reserve, plan §8.7)
+        # comes before any source is downloaded or hashed and before any
+        # build directory exists.
+        refusal = large_panel_refusal(panel, config, builder)
+        if refusal is not None:
+            raise LargePanelRefusedError(f"{reference_id}: {refusal}")
     if builder.prepare_spec is not None:
         from merxen.annotation.reference import SourceOptions
 
@@ -470,12 +488,9 @@ def _annotation_reference_prep(
                 download_dir=download_dir or store / ".downloads",
                 auto_download=auto_download,
                 seeds=_key_value_paths(download_seed_values, "--download-seed"),
+                resolvability=config.resolvability.enabled,
             ),
         )
-    if n_processors is not None or max_gb is not None:
-        from merxen.annotation.reference import set_prep_resources
-
-        set_prep_resources(n_processors=n_processors, max_gb=max_gb)
     bundle_ref = reference_store.get_or_build(
         spec, panel, builder=builder, config=config
     )
@@ -742,10 +757,20 @@ def _bundle_overrides(values: tuple[str, ...]) -> dict[str, Path]:
     "0 instead of failing (pipeline runs: RESOLVE writes statuses only).",
 )
 @click.option(
+    "--declared-ids-file",
+    "declared_ids_values",
+    multiple=True,
+    help="KEY=PATH platform panel file per sample id or platform (e.g. the "
+    "Xenium gene_panel.json) whose native gene IDs complete the declared "
+    "features a clustered H5AD's min_cells filter dropped, so its panel hash "
+    "is the prepared H5AD's.",
+)
+@click.option(
     "--require-bundle-refs",
     is_flag=True,
     help="Map only the bundles given with --bundle-ref / --bundle: fail "
-    "instead of looking a missing one up in the store (pipeline runs).",
+    "instead of looking a missing one up in the store, and only record a "
+    "needed subset bundle as requested (pipeline runs).",
 )
 @click.option(
     "--results-root",
@@ -780,6 +805,7 @@ def annotate_command(
     platforms: str | None,
     no_provisional: bool,
     allow_refused_panel: bool,
+    declared_ids_values: tuple[str, ...],
     require_bundle_refs: bool,
     results_roots: tuple[Path, ...],
 ) -> None:
@@ -822,6 +848,9 @@ def annotate_command(
                 allow_refused_panel=allow_refused_panel,
                 require_bundle_refs=require_bundle_refs,
                 results_roots=results_roots,
+                declared_id_files=_key_value_paths(
+                    declared_ids_values, "--declared-ids-file"
+                ),
             )
     except (MapError, MmcEngineError) as error:
         raise click.ClickException(f"{type(error).__name__}: {error}") from error
@@ -855,6 +884,7 @@ def _annotate(
     allow_refused_panel: bool,
     require_bundle_refs: bool,
     results_roots: tuple[Path, ...] = (),
+    declared_id_files: Mapping[str, Path] | None = None,
 ) -> None:
     from merxen.annotation.mapmycells_engine import MmcBundle
     from merxen.annotation.panel import (
@@ -873,6 +903,7 @@ def _annotate(
         map_bundles,
         published_layout,
         refused_platforms,
+        store_subset_bundle_finder,
         write_refused_manifest,
         write_view_manifest,
     )
@@ -922,6 +953,7 @@ def _annotate(
         else None
     )
 
+    id_files = dict(declared_id_files or {})
     samples: list[MapSample] = []
     if clustered_h5ads:
         for path in clustered_h5ads:
@@ -933,12 +965,14 @@ def _annotate(
                 )
             pair_id = pair_id or layout.pair_id
             segmentation = segmentation or layout.segmentation
+            id_file = id_files.get(layout.sample_id) or id_files.get(layout.platform)
             samples.append(
                 MapSample(
                     sample_id=layout.sample_id,
                     platform=layout.platform,
                     h5ad_path=path.resolve(),
                     source="clustered",
+                    declared_ids_file=None if id_file is None else id_file.resolve(),
                 )
             )
     else:
@@ -971,6 +1005,7 @@ def _annotate(
             pair_id=pair_id,
             segmentation=segmentation,
             min_counts=min_counts,
+            declared_id_files=id_files,
         )
     required = load_required(panel_dir, allow_refused=allow_refused_panel)
     if required.status == "refused":
@@ -1039,7 +1074,7 @@ def _annotate(
             )
         elif reference_store is not None:
             bundles[key] = locate_bundle(
-                reference_store, item.reference_id, item.panel_hash
+                reference_store, item.reference_id, item.panel_hash, config=config
             )
         else:
             raise click.UsageError(
@@ -1063,6 +1098,14 @@ def _annotate(
         reuse_from=reuse_from or output_dir,
         write_provisional=write_provisional,
         refused_platforms=refused_platforms(required),
+        # A pipeline task (--require-bundle-refs) maps only the bundles PREP
+        # resolved and Nextflow staged: a subset bundle it lacks stays a
+        # recorded request, never a store lookup behind -resume's back.
+        find_subset_bundle=(
+            store_subset_bundle_finder(reference_store, config)
+            if reference_store is not None and not require_bundle_refs
+            else None
+        ),
     )
     click.echo(
         f"annotate: {len(manifest.samples)} sample(s), "

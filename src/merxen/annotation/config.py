@@ -435,7 +435,12 @@ class AnnotationPanelConfig(_AnnotationModel):
         broad_only_min_class_share: Share of broad classes (with enough test
             cells) whose leaf level must be resolvable, else ``broad_only``.
         gene_id_fallback_csv: Local reference ``gene.csv`` for symbol
-            fallback (M0e).
+            fallback (M0e); the run species' table when ``gene_tables`` has
+            none.
+        gene_tables: Local gene tables by species (WHB / WMB ``gene.csv`` or
+            a reference ``.h5ad`` ``var``; no network): the run species'
+            table is the symbol fallback and release-drift reference, and
+            both species' tables feed the exact-case species test (§8.4).
         gene_alias_table: Optional local alias table (no network).
         gene_id_overrides_csv: Curated symbol-to-ID overrides.
         control_feature_types_keep: Feature types kept as genes.
@@ -448,7 +453,14 @@ class AnnotationPanelConfig(_AnnotationModel):
         own_family_missing_frac: Missing-gene share that makes the subset its
             own family.
         large_panel_genes: Panels above this size use the large-panel guards.
-        large_panel_marker_prefilter: Marker prefilter for large panels.
+        large_panel_marker_prefilter: Marker prefilter for large panels;
+            ``"none"`` by default since the M3b 5K measurement: at 5,006
+            genes the unfiltered WMB marker steps fit the PREP reserve
+            (query markers 21.3 GB, largest process, 8 processes) and the
+            per-parent prefilter (v1) failed its §8.7 validation (subclass
+            agreement 0.920-0.949 in 13 of 34 classes). It stays available
+            and becomes mandatory when a large WMB panel's predicted
+            query-marker peak exceeds the reserve (plan §8.7, OD-E8).
         large_panel_prefilter_cap: Gene cap of the prefilter.
         validated_panels_path: Validated families; ``None`` uses the packaged
             table (added in M3b).
@@ -473,6 +485,7 @@ class AnnotationPanelConfig(_AnnotationModel):
     trust_max_depth: int = Field(default=250, ge=1)
     broad_only_min_class_share: float = 0.5
     gene_id_fallback_csv: Path | None = None
+    gene_tables: dict[Species, Path] = Field(default_factory=dict)
     gene_alias_table: Path | None = None
     gene_id_overrides_csv: Path | None = None
     control_feature_types_keep: list[str] = Field(
@@ -484,9 +497,7 @@ class AnnotationPanelConfig(_AnnotationModel):
     subset_bundle_missing_frac: float = 0.01
     own_family_missing_frac: float = 0.05
     large_panel_genes: int = Field(default=LARGE_PANEL_GENES, ge=1)
-    large_panel_marker_prefilter: Literal["per_parent_topk_union", "none"] = (
-        "per_parent_topk_union"
-    )
+    large_panel_marker_prefilter: Literal["per_parent_topk_union", "none"] = "none"
     large_panel_prefilter_cap: int = Field(default=2000, ge=1)
     validated_panels_path: Path | None = None
     setc_max_abs_log2_deviation: float = Field(default=2.0, gt=0.0)
@@ -571,11 +582,21 @@ class AnnotationResolvabilityConfig(_AnnotationModel):
             E2 verdict 3).
         threshold_cap: Cap on local thresholds.
         min_cells_per_bin: Test cells a (class, depth) bin needs.
-        min_confident_n: Confident calls an emitted bin needs.
+        min_confident_n: Confident calls a tested set needs (a depth bin, else
+            the pooled deep set of §8.3; user decision 2026-09-27).
         wilson_margin: Wilson lower bound may sit this far below the target.
         split_halves: Choose thresholds on one half, check on the other.
         reweight_to_composition: Reweight to the dataset composition in
             RESOLVE.
+        weight_min_type_cells: Test cells a truth type needs in a depth bin
+            to be reweighted on its own; rarer types take their broad
+            class's weight (§8.3 composition reweighting, M3b review).
+        weight_trim_factor: Composition weights of each tested set (a
+            (level, class, depth) bin's calls or a pooled deep set) are
+            capped at this multiple of the set's median positive weight
+            (``0``: no cap; resolvability version 4, M3b review 2).
+        composition_min_bin_cells: Depth bins with fewer dataset cells are
+            reweighted to the dataset's overall composition.
         min_coverage: Coverage an emitted bin needs.
         seed_stability_max_change: Seed-1 change allowed for fine levels.
         gate_p_seeds: Gate-P seeds.
@@ -605,6 +626,9 @@ class AnnotationResolvabilityConfig(_AnnotationModel):
     wilson_margin: float = 0.02
     split_halves: bool = True
     reweight_to_composition: bool = True
+    weight_min_type_cells: int = Field(default=20, ge=1)
+    weight_trim_factor: float = Field(default=10.0, ge=0.0)
+    composition_min_bin_cells: int = Field(default=50, ge=0)
     min_coverage: float = 0.2
     seed_stability_max_change: float = 0.02
     gate_p_seeds: list[int] = Field(default_factory=lambda: [0, 1])

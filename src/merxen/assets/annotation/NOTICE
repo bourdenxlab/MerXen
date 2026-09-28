@@ -60,6 +60,22 @@ Curated by hand (reviewed in PRs, each row with a rationale):
   CLDN5 and LUM); SST deliberately absent; GAD2 and P2RY12 avoided on
   MERSCOPE. Mouse: the E3 VZG2 held-out microglial
   genes; class-level markers are still to be added (plan §5.8 step 4).
+- gene_id_overrides_human.csv, gene_id_overrides_mouse.csv: curated
+  symbol -> Ensembl gene ID rows of the gene-ID resolver (plan §8.4),
+  each with its reason: the M0e MERSCOPE genes (H2AX, LIF, LIFR, SQSTM1;
+  IDs from the WHB-10Xv3 var) and the MGI rename H2afx -> H2ax.
+- validated_panels.csv, validated_panel_genes.csv and
+  validated_panel_levels.csv: the validated panel families (plan §4.7,
+  §8.2). Seeded real-data families (plan rev3, approved in PR #22):
+  human_set_a (E5 set a, 296 genes, its post-M0e 297-gene form and their
+  curated set c, 264 / 265 genes), mouse_ag7 (500 genes) and mouse_vzg2
+  (815 genes). Gene lists from exp/E5/genes_{a,c}.csv and the M3 / M3b
+  panel_genes.json files, each re-hashed to its panel_hash; root markers
+  from the root key of the production primary bundles' query markers
+  (root_marker_source; the 296- and 264-gene rows take those of their
+  post-M0e sibling). validated_panel_levels.csv holds the per-(level,
+  class) records of simulation-validated families only, added by gate-P
+  PRs (M13).
 
 Licences
 --------

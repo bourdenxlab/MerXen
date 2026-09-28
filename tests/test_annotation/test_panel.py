@@ -17,6 +17,7 @@ from scipy import sparse
 
 from merxen.annotation.config import AnnotationConfig, AnnotationPanelConfig
 from merxen.annotation.panel import (
+    LOOKUP_ROOT_KEY,
     PANEL_GENES_FILE,
     PANEL_GENES_INTERSECTION_FILE,
     PANEL_GENES_SETC_FILE,
@@ -34,7 +35,10 @@ from merxen.annotation.panel import (
     compute_panel,
     compute_panel_hash,
     curated_setc_family,
+    declared_native_ids,
     declared_panel,
+    feature_type_from_codeword_category,
+    feature_types_of,
     intersection_panel,
     jaccard,
     load_annotation_panel,
@@ -44,12 +48,19 @@ from merxen.annotation.panel import (
     pair_symbol_lookup,
     panel_family,
     panel_from_gene_list,
+    platform_panel,
     platform_pseudobulk,
+    raw_panel_from_h5ad,
     raw_panel_from_var,
+    read_control_filter_record,
+    read_h5ad_var,
     read_panel_file,
     required_bundles,
     resolve_panel_mode,
     setc_panel,
+    subset_bundle_trigger,
+    subset_panel,
+    subset_trigger_for_config,
 )
 from merxen.cli import main as cli_main
 
@@ -311,6 +322,271 @@ def test_panel_hash_ignores_cells_zero_counts_and_var_order(tmp_path: Path) -> N
     )
 
 
+def _clustered_like_legacy(prepared: Path, clustered: Path, min_cells: int) -> Path:
+    """Write what legacy clustering publishes: controls removed, then min_cells."""
+    from merxen.analysis.clustering_squidpy import remove_control_features
+
+    adata = remove_control_features(ad.read_h5ad(prepared))
+    detected = np.asarray((adata.X > 0).sum(axis=0)).ravel()
+    adata = adata[:, detected >= min_cells].copy()
+    adata.layers["counts"] = adata.X.copy()
+    adata.write_h5ad(clustered)
+    return clustered
+
+
+@pytest.mark.parametrize("platform", ["XENIUM", "MERSCOPE"])
+def test_min_cells_filtering_does_not_change_the_declared_panel_hash(
+    tmp_path: Path, platform: str
+) -> None:
+    symbols = [*shared_symbols(), "Blank-1", "Blank-2"]
+    counts = np.ones((10, len(symbols)))
+    counts[:, 7] = 0  # a zero-count probe
+    counts[2:, 8] = 0  # detected in 2 cells only: dropped by min_cells=5
+    prepared = write_h5ad(
+        tmp_path / f"{platform}_prepared.h5ad",
+        counts=counts,
+        var_names=symbols,
+        platform=platform,
+        ensembl_ids=[*shared_ids(), "", ""] if platform == "XENIUM" else None,
+    )
+    clustered = _clustered_like_legacy(
+        prepared, tmp_path / f"{platform}_clustered.h5ad", min_cells=5
+    )
+    table = tmp_path / "gene.csv"
+    pd.DataFrame(
+        {"gene_symbol": shared_symbols(), "gene_identifier": shared_ids()}
+    ).to_csv(table, index=False)
+    fallback = load_fallback_table(table, "human")
+
+    def declared_hash(path: Path) -> str:
+        return declared_panel(
+            raw_panel_from_h5ad(path),
+            species="human",
+            platform=platform,
+            fallback=fallback,
+        ).panel_hash
+
+    assert read_h5ad_var(clustered).shape[0] == N_SHARED - 2
+    assert declared_hash(clustered) == declared_hash(prepared)
+    assert declared_hash(prepared) == compute_panel_hash(shared_ids())
+    raw = raw_panel_from_h5ad(clustered)
+    assert raw.source.kind == "clustered_h5ad_declared"
+    assert {"Blank-1", "Blank-2"} <= set(raw.features["name"])
+    record = read_control_filter_record(clustered)
+    assert record is not None and record.removed == ("Blank-1", "Blank-2")
+    assert len(record.retained) == N_SHARED
+    # The filtered var alone would declare another panel.
+    filtered = declared_panel(
+        raw_panel_from_var(
+            read_h5ad_var(clustered), source=PanelSource(kind="h5ad_var")
+        ),
+        species="human",
+        platform=platform,
+        fallback=fallback,
+    )
+    assert filtered.panel_hash != declared_hash(prepared)
+
+
+def test_a_clustered_xenium_table_takes_dropped_native_ids_from_its_panel_file(
+    tmp_path: Path,
+) -> None:
+    # H2AFX is dropped by min_cells; the local table lacks that symbol (as
+    # symbol-only resolution misses or changes GGT1, CGB3, H2AFX on the 5K
+    # panel): resolved by symbol, the clustered table declares another panel.
+    symbols = [*shared_symbols(), "H2AFX", "NegControlProbe_00001"]
+    counts = np.ones((10, len(symbols)))
+    counts[2:, N_SHARED] = 0
+    prepared = write_h5ad(
+        tmp_path / "X_prepared.h5ad",
+        counts=counts,
+        var_names=symbols,
+        platform="XENIUM",
+        ensembl_ids=[*shared_ids(), H2AFX_ID, ""],
+    )
+    clustered = _clustered_like_legacy(
+        prepared, tmp_path / "X_clustered.h5ad", min_cells=5
+    )
+    assert "H2AFX" not in set(read_h5ad_var(clustered).index)
+    table = tmp_path / "gene.csv"
+    pd.DataFrame(
+        {"gene_symbol": shared_symbols(), "gene_identifier": shared_ids()}
+    ).to_csv(table, index=False)
+    fallback = load_fallback_table(table, "human")
+
+    def declared(raw: Any) -> Any:
+        return declared_panel(
+            raw, species="human", platform="XENIUM", fallback=fallback
+        )
+
+    reference = declared(raw_panel_from_h5ad(prepared))
+    assert H2AFX_ID in reference.ensembl_ids
+    bare = raw_panel_from_h5ad(clustered)
+    assert bare.ids_incomplete == ("H2AFX",)
+    incomplete = declared(bare)
+    assert incomplete.panel_hash != reference.panel_hash
+    assert incomplete.declared_ids_incomplete == ["H2AFX"]
+    # The platform's gene_panel.json gives the dropped feature its native ID.
+    targets = [
+        {"type": {"data": {"id": gene_id, "name": name}, "descriptor": "gene"}}
+        for name, gene_id in zip(
+            [*shared_symbols(), "H2AFX"], [*shared_ids(), H2AFX_ID], strict=True
+        )
+    ]
+    panel_json = tmp_path / "gene_panel.json"
+    panel_json.write_text(json.dumps({"payload": {"targets": targets}}))
+    ids = declared_native_ids(panel_json)
+    assert ids["H2AFX"] == H2AFX_ID
+    fixed = raw_panel_from_h5ad(clustered, declared_ids=ids)
+    assert fixed.ids_incomplete == ()
+    complete = declared(fixed)
+    assert complete.panel_hash == reference.panel_hash
+    assert complete.declared_ids_incomplete == []
+
+
+def test_a_mouse_panel_under_species_human_refuses_every_panel(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "prepared"
+    symbols = [f"Gene{i}" for i in range(60)]
+    write_h5ad(
+        root / "merscope" / "S_M_prepared.h5ad",
+        counts=np.ones((20, 60)),
+        var_names=symbols,
+        platform="MERSCOPE",
+    )
+    (root / "manifest.json").write_text(
+        json.dumps({"samples": {"S_M": "merscope/S_M_prepared.h5ad"}})
+    )
+    human = tmp_path / "whb_gene.csv"
+    pd.DataFrame(
+        {"gene_symbol": [s.upper() for s in symbols], "gene_identifier": shared_ids()}
+    ).to_csv(human, index=False)
+    mouse = tmp_path / "wmb_gene.csv"
+    pd.DataFrame(
+        {
+            "gene_symbol": symbols,
+            "gene_identifier": [f"ENSMUSG{i:011d}" for i in range(60)],
+        }
+    ).to_csv(mouse, index=False)
+    config = AnnotationConfig(
+        species="human",
+        panel=AnnotationPanelConfig(gene_tables={"human": human, "mouse": mouse}),
+    )
+
+    result = compute_panel(
+        root,
+        "human",
+        output_dir=tmp_path / "out",
+        config=config,
+        clustering_config={
+            "pair_id": "M1",
+            "min_counts": 10,
+            "samples": [
+                {"sample_id": "S_M", "platform": "MERSCOPE", "segmentation": "s"}
+            ],
+        },
+    )
+
+    declared = result.report["declared_panels"]["S_M"]
+    assert declared["status"] == "refused"
+    assert declared["refusal_reasons"] == ["species_mismatch"]
+    assert declared["species_check"]["exact_matches"] == {"human": 0, "mouse": 60}
+    # The case-insensitive fallback resolved all 60 to human IDs.
+    assert declared["n_genes"] == 60
+    assert result.required.status == "refused"
+    assert result.required.n_required == 0
+    report = json.loads((tmp_path / "out" / PANEL_REPORT_FILE).read_text())
+    assert report["gene_id_sources"]["gene_tables"]["mouse"]["n_symbols"] == 60
+
+
+# --------------------------------------------------------------------------
+# Subset bundles (plan §3.3 step 1, §8.1)
+
+
+def _lookup(ids: list[str]) -> dict[str, Any]:
+    """A two-parent lookup: 10 root markers, a parent with 6 markers."""
+    return {
+        "metadata": {"n_markers": 16},
+        "None": ids[:10],
+        "SUPC/S1": ids[10:16],
+        "SUPC/S2": [],
+    }
+
+
+def test_subset_bundle_trigger() -> None:
+    ids = shared_ids(200)
+    lookup = _lookup(ids)
+    everything = subset_bundle_trigger(ids, ids, lookup)
+    assert everything.action == "none" and not everything.needs_subset
+    # One non-marker gene missing (0.5% <= 1%): the restricted lookup suffices.
+    one = subset_bundle_trigger(ids, ids[:-1], lookup)
+    assert one.action == "none" and one.n_missing == 1
+    # One root marker missing (0.5%): a subset bundle in the parent's family.
+    root = subset_bundle_trigger(ids, ids[1:], lookup)
+    assert root.action == "subset"
+    assert root.reasons == ["root_marker_missing"]
+    assert root.missing_root_markers == [ids[0]]
+    assert root.subset_panel_hash == compute_panel_hash(ids[1:])
+    # A parent left with 4 markers (< 5).
+    weak = subset_bundle_trigger(ids, [g for g in ids if g not in ids[10:12]], lookup)
+    assert weak.reasons == ["weak_parent"]
+    assert weak.weak_parents == {"SUPC/S1": 4}
+    # 3% missing: subset; 6% missing: its own family (full PREP).
+    assert subset_bundle_trigger(ids, ids[:194], lookup).reasons == ["missing_frac"]
+    assert subset_bundle_trigger(ids, ids[:194], lookup).action == "subset"
+    own = subset_bundle_trigger(ids, ids[:188], lookup)
+    assert own.action == "own_family" and own.missing_frac == pytest.approx(0.06)
+    # Without a lookup only the missing share is tested.
+    assert subset_bundle_trigger(ids, ids[1:]).action == "none"
+    with pytest.raises(ValueError, match="own_family_missing_frac"):
+        subset_bundle_trigger(
+            ids, ids, own_family_missing_frac=0.01, subset_bundle_missing_frac=0.02
+        )
+    config = AnnotationPanelConfig(subset_bundle_missing_frac=0.001)
+    assert subset_trigger_for_config(ids, ids[:-1], lookup, config).action == "subset"
+
+
+def test_subset_panel_keeps_the_family_unless_it_is_its_own() -> None:
+    ids = shared_ids(200)
+    parent = AnnotationPanel(
+        name="xenium",
+        kind="platform",
+        species="human",
+        platforms=["XENIUM"],
+        sample_ids=["S_X"],
+        panel_mode="per_platform",
+        panel_hash=compute_panel_hash(ids),
+        n_genes=200,
+        ensembl_ids=ids,
+        symbols=shared_symbols(200),
+        symbols_by_platform={"XENIUM": shared_symbols(200)},
+        declared_panel_hashes={"xenium": compute_panel_hash(ids)},
+        panel_family=panel_family(ids, species="human", platforms=["XENIUM"]),
+    )
+    present = ids[1:]
+    trigger = subset_bundle_trigger(ids, present, _lookup(ids))
+
+    subset = subset_panel(parent, present, trigger)
+
+    assert subset.kind == "subset" and subset.name == "xenium_subset"
+    assert subset.panel_hash == trigger.subset_panel_hash
+    assert subset.parent_panel_hash == parent.panel_hash
+    assert subset.excluded_ids == [ids[0]]
+    assert subset.symbols == shared_symbols(200)[1:]
+    assert subset.symbols_by_platform["XENIUM"] == shared_symbols(200)[1:]
+    assert parent.panel_family is not None and subset.panel_family is not None
+    assert subset.panel_family.basis == "subset"
+    assert subset.panel_family.family_id == parent.panel_family.family_id
+    assert subset.panel_family.jaccard == pytest.approx(199 / 200)
+    own = subset_panel(parent, ids[:180], subset_bundle_trigger(ids, ids[:180]))
+    assert own.panel_family is not None and own.panel_family.basis == "own"
+    assert own.panel_family.family_id != parent.panel_family.family_id
+    # The file round-trips (MAP writes it for annotation-reference-prep).
+    with pytest.raises(ValueError, match="does not ask"):
+        subset_panel(parent, ids, subset_bundle_trigger(ids, ids))
+    assert LOOKUP_ROOT_KEY == "None"
+
+
 # --------------------------------------------------------------------------
 # Controls and ID resolution
 
@@ -356,6 +632,218 @@ def test_control_registry_name_rules() -> None:
     assert registry.control_reason("GFAP", platform="MERSCOPE") is None
 
 
+# Xenium Prime 5K-like control features, one family per documented type
+# (merxen.control_features; 10x feature types and codeword categories).
+XENIUM_CONTROLS = {
+    "NegControlProbe_{:05d}": ("Negative Control Probe", "negative_control_probe"),
+    "NegControlCodeword_{:04d}": (
+        "Negative Control Codeword",
+        "negative_control_codeword",
+    ),
+    "Intergenic_Region_{}": ("Genomic Control", "genomic_control_probe"),
+    "UnassignedCodeword_{:04d}": ("Unassigned Codeword", "unassigned_codeword"),
+    "DeprecatedCodeword_{:04d}": ("Deprecated Codeword", "deprecated_codeword"),
+    "BLANK_{:04d}": ("Blank Codeword", "blank_codeword"),
+}
+
+
+def xenium_5k_var(
+    *, feature_types: bool, codeword_category: bool, n_genes: int = 5000
+) -> tuple[pd.DataFrame, list[str]]:
+    """A Xenium 5K-like ``var``: genes plus 10 features of every control type."""
+    names = [f"GENE{i}" for i in range(n_genes)]
+    ids = shared_ids(n_genes)
+    types = ["Gene Expression"] * n_genes
+    categories = ["predesigned_gene"] * (n_genes - 2) + ["custom_gene"] * 2
+    controls: list[str] = []
+    for template, (kind, category) in XENIUM_CONTROLS.items():
+        for index in range(10):
+            name = template.format(index + 1)
+            controls.append(name)
+            names.append(name)
+            # spatialdata-io keeps the control's name as its gene_ids value.
+            ids.append(name)
+            types.append(kind)
+            categories.append(category)
+    var = pd.DataFrame({"gene_ids": ids}, index=pd.Index(names, dtype=str))
+    if feature_types:
+        var["feature_types"] = types
+    if codeword_category:
+        var["codeword_category"] = categories
+    return var, controls
+
+
+@pytest.mark.parametrize(
+    ("feature_types", "codeword_category"),
+    [(True, False), (False, True), (True, True), (False, False)],
+    ids=["feature_types", "codeword_category", "both", "names_only"],
+)
+def test_a_xenium_5k_var_keeps_only_gene_expression(
+    feature_types: bool, codeword_category: bool
+) -> None:
+    var, controls = xenium_5k_var(
+        feature_types=feature_types, codeword_category=codeword_category
+    )
+
+    panel = declared_panel(
+        raw_panel_from_var(var, source=PanelSource(kind="h5ad_var")),
+        species="human",
+        platform="XENIUM",
+    )
+
+    assert panel.n_genes == 5000
+    assert panel.status == "ok"
+    removed = sorted(
+        name for names in panel.controls_removed.values() for name in names
+    )
+    assert removed == sorted(controls)
+    if feature_types or codeword_category:
+        # The feature type decides: one reason per documented type.
+        assert all(
+            reason.startswith("feature_type_") for reason in panel.controls_removed
+        )
+        assert len(panel.controls_removed) == len(XENIUM_CONTROLS)
+    else:
+        assert set(panel.controls_removed) == {"name_pattern"}
+
+
+def test_feature_types_from_codeword_category_and_is_gene() -> None:
+    assert feature_type_from_codeword_category("predesigned_gene") == "Gene Expression"
+    assert feature_type_from_codeword_category("custom_gene") == "Gene Expression"
+    assert (
+        feature_type_from_codeword_category("negative_control_probe")
+        == "negative_control_probe"
+    )
+    assert feature_type_from_codeword_category(None) == ""
+    table = pd.DataFrame(
+        {
+            "is_gene": [True, False, None],
+            "codeword_category": ["", "", "custom_gene"],
+        }
+    )
+    assert feature_types_of(table) == [
+        "Gene Expression",
+        "not is_gene",
+        "Gene Expression",
+    ]
+    assert feature_types_of(pd.DataFrame({"gene": ["A"]})) is None
+    registry = ControlRegistry()
+    # A custom gene named like a pre-release negative control probe is kept
+    # when its category says gene; without a type the name rule removes it.
+    assert (
+        registry.control_reason(
+            "antisense_CUSTOM1",
+            platform="XENIUM",
+            feature_type=feature_type_from_codeword_category("custom_gene"),
+        )
+        is None
+    )
+    assert registry.control_reason("antisense_CUSTOM1", platform="XENIUM") == (
+        "name_pattern"
+    )
+
+
+def test_merscope_blank_12_is_removed_and_a_real_gene_with_a_token_is_kept(
+    tmp_path: Path,
+) -> None:
+    # BLANKET1 stands for a real gene whose symbol contains a control token
+    # (no WHB or WMB symbol does today): the reference gene table keeps it.
+    symbols = [*shared_symbols(), "BLANKET1", "Blank-12", "Blank-3"]
+    var = pd.DataFrame({"gene": symbols}, index=symbols)
+    table = tmp_path / "gene.csv"
+    pd.DataFrame(
+        {
+            "gene_symbol": [*shared_symbols(), "BLANKET1"],
+            "gene_identifier": [*shared_ids(), "ENSG44400000001"],
+        }
+    ).to_csv(table, index=False)
+    raw = raw_panel_from_var(var, source=PanelSource(kind="h5ad_var"))
+
+    with_table = declared_panel(
+        raw,
+        species="human",
+        platform="MERSCOPE",
+        fallback=load_fallback_table(table, "human"),
+    )
+    without_table = declared_panel(raw, species="human", platform="MERSCOPE")
+
+    assert with_table.controls_removed == {"name_pattern": ["Blank-12", "Blank-3"]}
+    assert with_table.kept_despite_control_token == ["BLANKET1"]
+    assert with_table.feature_ids["BLANKET1"] == "ENSG44400000001"
+    assert with_table.n_genes == N_SHARED + 1
+    # Without a reference gene or a native ID the substring rule removes it.
+    assert without_table.controls_removed["control_token"] == ["BLANKET1"]
+    # An anchored match is never kept, even with a native ID.
+    registry = ControlRegistry()
+    assert (
+        registry.control_reason(
+            "Blank-12", platform="MERSCOPE", has_native_id=True, is_reference_gene=True
+        )
+        == "name_pattern"
+    )
+
+
+def _legacy_removed(var: pd.DataFrame) -> list[str]:
+    from merxen.analysis.clustering_squidpy import remove_control_features
+
+    adata = ad.AnnData(
+        X=sparse.csr_matrix((2, len(var)), dtype=np.float32), var=var.copy()
+    )
+    record = remove_control_features(adata).uns["merxen_clustering_squidpy"]
+    return sorted(record["control_feature_filter"]["removed_control_features"])
+
+
+def _current_panel_var(kind: str) -> tuple[pd.DataFrame, str, str]:
+    """``var`` layouts of the current panels (P7513 / P1212, ag7, VZG2)."""
+    if kind == "merscope_human":
+        names = [*shared_symbols(), "H2AX"] + [f"Blank-{i}" for i in range(50)]
+        return pd.DataFrame({"gene": names}, index=names), "MERSCOPE", "human"
+    if kind == "merscope_human_with_ids":
+        names = [*shared_symbols(), "H2AX"] + [f"Blank-{i}" for i in range(50)]
+        ids = [*shared_ids(), ""] + [""] * 50
+        var = pd.DataFrame({"gene": names, "ensembl_id": ids}, index=names)
+        return var, "MERSCOPE", "human"
+    if kind == "merscope_mouse":
+        names = [f"Gene{i}" for i in range(60)] + [f"Blank-{i}" for i in range(20)]
+        return pd.DataFrame({"gene": names}, index=names), "MERSCOPE", "mouse"
+    if kind == "xenium_proseg":
+        # ProSeg input drops Xenium control transcripts (M0): genes only.
+        var = pd.DataFrame(
+            {"gene": shared_symbols(), "ensembl_id": shared_ids()},
+            index=shared_symbols(),
+        )
+        return var, "XENIUM", "human"
+    # xenium_source: the XOA cell-feature matrix of a Xenium v1 panel.
+    var, _ = xenium_5k_var(feature_types=True, codeword_category=False, n_genes=60)
+    var = var[~var.index.str.startswith(("Intergenic", "BLANK"))]
+    return var, "XENIUM", "human"
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "merscope_human",
+        "merscope_human_with_ids",
+        "merscope_mouse",
+        "xenium_proseg",
+        "xenium_source",
+    ],
+)
+def test_registry_equals_remove_control_features_on_current_panels(kind: str) -> None:
+    var, platform, species = _current_panel_var(kind)
+
+    panel = declared_panel(
+        raw_panel_from_var(var, source=PanelSource(kind="h5ad_var")),
+        species=species,  # type: ignore[arg-type]
+        platform=platform,
+    )
+
+    removed = sorted(
+        name for names in panel.controls_removed.values() for name in names
+    )
+    assert removed == _legacy_removed(var)
+
+
 def test_declared_panel_resolution_order(tmp_path: Path) -> None:
     var = pd.DataFrame(
         {
@@ -386,8 +874,13 @@ def test_declared_panel_resolution_order(tmp_path: Path) -> None:
     assert panel.controls_removed == {"name_pattern": ["Blank-1"]}
     assert panel.n_non_control == 6
     assert panel.resolution_share == pytest.approx(4 / 6)
+    assert panel.status == "refused"  # 4 / 6 < 95% resolved (plan §8.2)
+    assert panel.refusal_reasons == ["gene_id_resolution"]
     no_table = declared_panel(raw, species="human", platform="MERSCOPE")
-    assert no_table.unresolved["H2AX"] == "no_fallback_table"
+    assert no_table.unresolved["GENE1"] == "no_fallback_table"
+    # Without a table the packaged curated override still resolves H2AX (M0e).
+    assert no_table.feature_ids["H2AX"] == "ENSG00000188486"
+    assert no_table.id_sources["ENSG00000188486"] == "override"
 
 
 def test_declared_panel_merges_duplicates_and_flags_other_species() -> None:
@@ -459,6 +952,108 @@ def test_read_merscope_codebook(tmp_path: Path) -> None:
     )
     assert panel.n_genes == 2
     assert panel.controls_removed == {"name_pattern": ["Blank-0"]}
+
+
+def _codebook_rows(symbols: list[str], ids: list[str], n_bits: int = 25) -> list[str]:
+    """Codebook data rows in the VA00282 layout: one trailing comma each."""
+    rows = []
+    for index, (symbol, value) in enumerate(zip(symbols, ids, strict=True)):
+        bits = ["0"] * n_bits
+        bits[index % n_bits] = "1"
+        rows.append(",".join([symbol, value, "merfish", *bits]) + ",")
+    return rows
+
+
+def test_codebook_rows_with_a_trailing_comma_keep_their_columns(
+    tmp_path: Path,
+) -> None:
+    # The ag7 codebook (VA00282): a 28-field header, 29-field rows ending in
+    # ",". Read with the first column as the index, "name" held the
+    # transcript IDs and the panel was refused with 0 of 500 genes.
+    from merxen.annotation.gene_ids import GeneIdSources, GeneTable
+    from merxen.annotation.vocab import asset_path
+
+    genes = pd.read_csv(asset_path("validated_panel_genes.csv"))
+    genes = genes[genes["panel_id"] == "mouse_ag7_500"]
+    listed = pd.read_csv(asset_path("validated_panels.csv"))
+    expected_hash = listed.set_index("panel_id").loc["mouse_ag7_500", "panel_hash"]
+    symbols = genes["gene_symbol"].astype(str).tolist()
+    transcripts = [f"ENSMUST{index:011d}" for index in range(len(symbols))]
+    header = "name,id,barcodeType," + ",".join(f"V{i:04d}T8B1" for i in range(1, 26))
+    blanks = [f"Blank-{index}" for index in range(1, 4)]
+    lines = [
+        header,
+        *_codebook_rows(symbols, transcripts),
+        *_codebook_rows(blanks, blanks),
+    ]
+    assert len(header.split(",")) == 28 and len(lines[1].split(",")) == 29
+    path = tmp_path / "codebook_0_MERSCOPEPanNeuroCellTypePanel500_VA00282.csv"
+    path.write_text("\n".join(lines) + "\n")
+    raw = read_panel_file(path)
+    assert raw.features["name"].tolist()[:3] == symbols[:3]
+    assert raw.features["recorded_id"].tolist()[:3] == transcripts[:3]
+    table = GeneTable.from_pairs(
+        "mouse", zip(genes["gene_symbol"], genes["ensembl_id"], strict=True)
+    )
+    panel = declared_panel(
+        raw,
+        species="mouse",
+        platform="MERSCOPE",
+        sources=GeneIdSources(species="mouse", gene_tables={"mouse": table}),
+    )
+    assert panel.status == "ok"
+    assert panel.n_genes == 500
+    assert panel.panel_hash == expected_hash
+    assert panel.controls_removed == {"name_pattern": blanks}
+
+
+def test_codebook_ids_that_are_not_gene_ids_are_never_counted(tmp_path: Path) -> None:
+    # A custom transgene's UUID (Interstasis B2P2143: MAPThuman, next to 300
+    # Ensembl-transcript genes) and RefSeq accessions are transcript
+    # identifiers: recorded, not native gene IDs, so they cannot refuse the
+    # panel through the native-ID prefix rule (it was "0.000 of 1").
+    uuid = "6e61e6e7-0687-49bd-9896-57fd3207cc14"
+    symbols = [f"GENE{index}" for index in range(30)]
+    ids = [
+        f"ENST{index:011d}" if index % 2 else f"NM_{index:06d}.1" for index in range(30)
+    ]
+    path = tmp_path / "codebook_0_custom.csv"
+    path.write_text(
+        "\n".join(
+            [
+                "# chemistryVersion: Merfish 2.0",
+                "name,id,barcodeType," + ",".join(f"V{i:04d}" for i in range(25)),
+                *_codebook_rows(symbols, ids),
+                *_codebook_rows(["MAPThuman", "Blank-0"], [uuid, "Blank-0"]),
+            ]
+        )
+        + "\n"
+    )
+    raw = read_panel_file(path)
+    assert raw.native_id_column is None
+    assert set(raw.features["native_value"]) == {""}
+    assert raw.features["recorded_id"].tolist() == [*ids, uuid, "Blank-0"]
+    panel = declared_panel(
+        raw,
+        species="human",
+        platform="MERSCOPE",
+        pair_lookup={
+            symbol: f"ENSG{index:011d}" for index, symbol in enumerate(symbols)
+        },
+    )
+    assert panel.status == "ok"
+    assert panel.resolution is not None
+    assert panel.resolution.n_native_values == 0
+    assert panel.n_genes == 30
+    assert set(panel.unresolved) == {"MAPThuman"}
+    # An id that is an Ensembl gene ID is still used natively.
+    gene_ids = tmp_path / "codebook_0_gene_ids.csv"
+    gene_ids.write_text(
+        "name,id,barcodeType,V0001\nGENE0,ENSG00000000010.2,merfish,1\n"
+    )
+    raw = read_panel_file(gene_ids)
+    assert raw.native_id_column == "id"
+    assert raw.features["native_id"].tolist() == ["ENSG00000000010"]
 
 
 def test_read_gene_table(tmp_path: Path) -> None:
@@ -543,10 +1138,49 @@ def test_panel_family_inheritance() -> None:
         ids, species="human", platforms=["XENIUM"], known_families=[family]
     )
     assert inherited.basis == "inherited" and inherited.family_id == "human_set_a"
-    # Another platform, a missing root marker or a low Jaccard never inherits.
+    # Another platform (a Xenium panel never inherits a MERSCOPE family, and
+    # vice versa), another species, a missing root marker or a low Jaccard
+    # never inherits.
     assert (
         panel_family(
             ids, species="human", platforms=["MERSCOPE"], known_families=[family]
+        ).basis
+        == "own"
+    )
+    assert (
+        panel_family(
+            ids,
+            species="human",
+            platforms=["MERSCOPE", "XENIUM"],
+            known_families=[family],
+        ).basis
+        == "own"
+    )
+    # A family validated on both platforms covers either platform alone,
+    # never a panel without platforms (a gene list).
+    pair_family = KnownPanelFamily(
+        family_id="human_pair",
+        species="human",
+        platforms=frozenset({"MERSCOPE", "XENIUM"}),
+        panel_hash=family.panel_hash,
+        ensembl_ids=family.ensembl_ids,
+        root_markers=family.root_markers,
+    )
+    for platforms in (["XENIUM"], ["MERSCOPE"], ["MERSCOPE", "XENIUM"]):
+        member = panel_family(
+            ids, species="human", platforms=platforms, known_families=[pair_family]
+        )
+        assert (member.family_id, member.basis) == ("human_pair", "inherited")
+        assert member.matched_platforms == sorted(platforms)
+    assert (
+        panel_family(
+            ids, species="human", platforms=[], known_families=[pair_family]
+        ).basis
+        == "own"
+    )
+    assert (
+        panel_family(
+            ids, species="mouse", platforms=["XENIUM"], known_families=[family]
         ).basis
         == "own"
     )
@@ -567,6 +1201,63 @@ def test_panel_family_inheritance() -> None:
 
 # --------------------------------------------------------------------------
 # Set a and set c
+
+
+def test_auto_mode_keeps_the_valid_platform_when_one_panel_is_refused(
+    tmp_path: Path,
+) -> None:
+    # MERSCOPE writes its symbols into the ID column (native_id_prefix): it
+    # is refused although its symbols resolve through the pair, so the
+    # pair's Jaccard stays about 1. Auto mode must not refuse the pair
+    # through the intersection: Xenium keeps its own panel and bundles.
+    root = make_pair(tmp_path)
+    merscope_genes = [
+        *shared_symbols(),
+        "H2AX",
+        *MERSCOPE_ONLY,
+        *[f"Blank-{index}" for index in range(5)],
+    ]
+    write_h5ad(
+        root / "merscope" / "S_M_prepared.h5ad",
+        counts=np.ones((200, len(merscope_genes))),
+        var_names=merscope_genes,
+        ensembl_ids=merscope_genes,
+        platform="MERSCOPE",
+        spatial=np.full((200, 2), 2.0),
+    )
+    declared = [
+        declared_panel(
+            raw_panel_from_h5ad(root / sub / f"{sample}_prepared.h5ad"),
+            species="human",
+            platform=platform,
+            pair_lookup=dict(zip(shared_symbols(), shared_ids(), strict=True)),
+        )
+        for sub, sample, platform in (
+            ("merscope", "S_M", "MERSCOPE"),
+            ("xenium", "S_X", "XENIUM"),
+        )
+    ]
+    assert [panel.status for panel in declared] == ["refused", "ok"]
+    mode, score = resolve_panel_mode(declared)
+    assert mode == "per_platform" and score is not None and score >= 0.9
+    assert resolve_panel_mode(declared, requested="intersection")[0] == "intersection"
+    result = compute_panel(
+        root,
+        "human",
+        output_dir=tmp_path / "out",
+        config=human_config(tmp_path),
+        clustering_config=clustering_config(),
+    )
+    assert result.report["panel_mode"] == "per_platform"
+    assert result.report["refused_platforms"] == ["merscope"]
+    assert result.required.status == "ok"
+    refused = {
+        name: item["refused"]
+        for name, item in result.report["annotation_panels"].items()
+    }
+    assert refused["xenium"] is None
+    assert refused["merscope"] and refused["intersection"]
+    assert {bundle.panel_name for bundle in result.required.bundles} == {"xenium"}
 
 
 def test_intersection_is_set_a_including_h2ax(tmp_path: Path) -> None:
@@ -1356,3 +2047,123 @@ def test_intersection_panel_prefers_xenium_symbols() -> None:
     panel = intersection_panel([merscope, xenium], panel_mode="intersection")
     assert panel.platforms == ["MERSCOPE", "XENIUM"]
     assert set(panel.declared_panel_hashes) == {"merscope", "xenium"}
+
+
+# --------------------------------------------------------------------------
+# Gene-ID refusals through the one var parser (ANNOTATE_PANEL and MAP)
+
+
+def _ag7_var() -> pd.DataFrame:
+    from .test_gene_ids import AG7_SYMBOLS
+
+    return pd.DataFrame(
+        {"gene": AG7_SYMBOLS, "gene_ids": AG7_SYMBOLS}, index=AG7_SYMBOLS
+    )
+
+
+def _declared_from_var(var: pd.DataFrame, species: str) -> Any:
+    from .test_gene_ids import _sources
+
+    return declared_panel(
+        raw_panel_from_var(var, source=PanelSource(kind="h5ad_var")),
+        species=species,  # type: ignore[arg-type]
+        platform="MERSCOPE",
+        sources=_sources(species),
+    )
+
+
+def test_the_ag7_symbols_as_ids_fixture_is_refused() -> None:
+    """ag7: the ID column held symbols, so 0 of 498 root markers matched."""
+    from .test_gene_ids import AG7_SYMBOLS
+
+    declared = _declared_from_var(_ag7_var(), "mouse")
+
+    assert declared.status == "refused"
+    assert "native_id_prefix" in declared.refusal_reasons
+    assert declared.resolution is not None
+    assert declared.resolution.native_id_column == "gene_ids"
+    assert declared.resolution.native_prefix_share == 0.0
+    assert declared.resolution.symbols_as_ids == AG7_SYMBOLS
+    assert "symbols as IDs" in declared.resolution.refusal_details["native_id_prefix"]
+
+
+def test_the_ag7_fixture_is_refused_from_a_prepared_h5ad(tmp_path: Path) -> None:
+    from .test_gene_ids import _sources
+
+    var = _ag7_var()
+    path = tmp_path / "ag7_prepared.h5ad"
+    ad.AnnData(
+        X=sparse.csr_matrix((2, len(var)), dtype=np.float32),
+        obs=pd.DataFrame(index=["c0", "c1"]),
+        var=var,
+    ).write_h5ad(path)
+
+    declared = declared_panel(
+        raw_panel_from_h5ad(path),
+        species="mouse",
+        platform="MERSCOPE",
+        sources=_sources("mouse"),
+    )
+
+    assert declared.status == "refused"
+    assert "native_id_prefix" in declared.refusal_reasons
+
+
+def test_other_species_ids_are_refused() -> None:
+    var = pd.DataFrame(
+        {"gene_ids": [f"ENSMUSG{i:011d}" for i in range(20)]},
+        index=[f"Gene{i}" for i in range(20)],
+    )
+
+    declared = _declared_from_var(var, "human")
+
+    assert declared.status == "refused"
+    assert {"native_id_prefix", "other_species_ids", "gene_id_resolution"} <= set(
+        declared.refusal_reasons
+    )
+    assert declared.unresolved["Gene0"] == "other_species_id"
+
+
+def test_an_ensembl_id_index_is_the_native_id_column() -> None:
+    var = pd.DataFrame(
+        {"gene_symbol": ["GFAP", "AQP4"]},
+        index=["ENSG00000131095", "ENSG00000171885"],
+    )
+    raw = raw_panel_from_var(var, source=PanelSource(kind="h5ad_var"))
+    assert raw.native_id_column == "index"
+    assert raw.features[["name", "symbol", "native_value"]].values.tolist() == [
+        ["GFAP", "GFAP", "ENSG00000131095"],
+        ["AQP4", "AQP4", "ENSG00000171885"],
+    ]
+
+
+def test_annotation_panels_record_each_declared_resolution() -> None:
+    from merxen.annotation.panel import declared_resolution
+
+    from .test_gene_ids import AG7_SYMBOLS, _sources
+
+    var = pd.DataFrame({"gene": AG7_SYMBOLS}, index=AG7_SYMBOLS)
+    merscope = declared_panel(
+        raw_panel_from_var(var, source=PanelSource(kind="h5ad_var")),
+        species="mouse",
+        platform="MERSCOPE",
+        sources=_sources("mouse"),
+    )
+    assert merscope.status == "ok" and merscope.resolution is not None
+    record = declared_resolution(merscope)
+    assert record.resolution_table_sha256 == merscope.resolution.table_sha256()
+    assert record.gene_tables == {"human": "whb_gene.csv", "mouse": "wmb_gene.csv"}
+    single = platform_panel(
+        merscope, kind="platform", name="merscope", panel_mode="per_platform"
+    )
+    assert single.declared_resolutions == {"merscope": record}
+    # The JSON round-trips, and subset panels keep their parent's records.
+    assert (
+        AnnotationPanel.model_validate_json(single.model_dump_json())
+        .declared_resolutions["merscope"]
+        .resolution_table_sha256
+        == record.resolution_table_sha256
+    )
+    ids = single.ensembl_ids
+    subset = subset_panel(single, ids[1:], subset_bundle_trigger(ids, ids[1:]))
+    assert subset.declared_resolutions == single.declared_resolutions

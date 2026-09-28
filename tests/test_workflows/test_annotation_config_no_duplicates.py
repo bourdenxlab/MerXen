@@ -25,7 +25,8 @@ ANNOTATION = "conf/annotation.config"
 DWIGHT_ANNOTATION = "conf/dwight.annotation.config"
 
 # The annotation-only params of plan §3.7, created in M1, plus the wmb_panel
-# self-map test-cell source (M2; plan §3.2 excludes those cells).
+# self-map test-cell source (M2; plan §3.2 excludes those cells) and the two
+# species' gene tables of the exact-case species test (M3b; plan §8.4).
 PLANNED_ANNOTATION_PARAMS = frozenset(
     {
         "clustering_squidpy_mode_human",
@@ -43,6 +44,8 @@ PLANNED_ANNOTATION_PARAMS = frozenset(
         "annotation_whb_metadata_dir",
         "annotation_gene_alias_table",
         "annotation_gene_id_overrides_csv",
+        "annotation_human_gene_table",
+        "annotation_mouse_gene_table",
         "annotation_panel_mode",
         "annotation_resolvability",
         "annotation_prep_large_memory",

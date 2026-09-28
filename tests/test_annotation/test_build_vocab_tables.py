@@ -274,7 +274,13 @@ def test_committed_tables_match_the_real_allen_taxonomies(
 
 def test_committed_notice_names_every_generated_table() -> None:
     notice = (vocab.ASSET_DIR / "NOTICE").read_text()
-    for name in (*GENERATED, "state_genes_human.csv", "heldout_markers_human.csv"):
+    for name in (
+        *GENERATED,
+        "state_genes_human.csv",
+        "heldout_markers_human.csv",
+        "gene_id_overrides_human.csv",
+        "gene_id_overrides_mouse.csv",
+    ):
         assert name in notice
     assert "Allen Institute Software License" in notice
 
