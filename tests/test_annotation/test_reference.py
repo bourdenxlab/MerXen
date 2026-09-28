@@ -2814,6 +2814,12 @@ def test_holdout_bundle_trains_without_the_donor_and_keeps_its_cells_as_tests(
     assert set(test.obs[reference.TEST_SOURCE_COLUMN]) == {"holdout_donor"}
     assert test_set["other_region"]["n_cells"] == 0
     assert set(test.obs[f"{res.TRUTH_PREFIX}{SUPC}"]) == {UL_IT, ASTRO, MICRO}
+    # Every truth supercluster here can be named by a call: none left out.
+    exclusion = test_set["truth_exclusion"]
+    assert exclusion["version"] == reference.HO_TRUTH_EXCLUSION_VERSION
+    assert exclusion["region"] == "frontal_cortex"
+    assert exclusion["excluded_superclusters"] == {}
+    assert exclusion["n_pool_cells_before"] == test_set["n_pool_cells"]
     assert test.genes == GENES  # panel genes present in WHB
     assert set(test.obs[res.SPILL_GROUP_COLUMN]) == {
         "Neurons",
@@ -2910,6 +2916,73 @@ def test_holdout_test_set_tops_up_nonneuronal_superclusters_from_other_regions(
         test.counts[list(test.obs.index).index(label)].toarray().ravel(),
         raw[label, GENES].X.toarray().ravel(),
     )
+
+
+def test_held_out_truths_no_call_can_name_are_excluded() -> None:
+    # E2 (02_make_queries.py) kept neither the sinks and Mixed/Unknown
+    # superclusters nor Amygdala excitatory (implausible in frontal cortex).
+    labels = [
+        "CS202210140_463",  # Miscellaneous (sink, Mixed/Unknown)
+        "CS202210140_483",  # Splatter (sink, Mixed/Unknown)
+        "CS202210140_478",  # Amygdala excitatory
+        "CS202210140_471",  # Ependymal (Mixed/Unknown, not a sink)
+        UL_IT,
+        ASTRO,
+        "CS202210140_468",  # COP: a floor class (OPC), plausible
+    ]
+    assert reference.ho_truth_exclusions(labels, "frontal_cortex") == {
+        "CS202210140_463": reference.HO_EXCLUDED_SINK,
+        "CS202210140_471": reference.HO_EXCLUDED_NO_FLOOR_CLASS,
+        "CS202210140_478": reference.HO_EXCLUDED_REGION_IMPLAUSIBLE,
+        "CS202210140_483": reference.HO_EXCLUDED_SINK,
+    }
+    assert reference.ho_truth_exclusions(["CS000_unknown"], "frontal_cortex") == {
+        "CS000_unknown": reference.HO_EXCLUDED_NO_FLOOR_CLASS
+    }
+
+
+def test_holdout_test_set_leaves_out_excluded_truth_superclusters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    sources = write_ho_sources(tmp_path)
+    FakeCtm(ho_lookup).install(monkeypatch).precompute = ho_precompute
+    seen: list[tuple[set[str], str]] = []
+
+    def microglia_as_sink(labels: Iterable[str], region: str) -> dict[str, str]:
+        seen.append(({str(label) for label in labels}, region))
+        return {MICRO: reference.HO_EXCLUDED_SINK}
+
+    monkeypatch.setattr(reference, "ho_truth_exclusions", microglia_as_sink)
+    spec = prepare_reference_spec(
+        AnnotationReferenceSpec(
+            reference_id=reference.HO_REFERENCE_ID,
+            species="human",
+            role="resolvability",
+            hierarchy=[SUPC, CLUS],
+            sources=ho_spec_sources(sources),
+        )
+    )
+    config = AnnotationConfig(species="human", resolvability={"n_test_cells": 1000})
+    bundle = ReferenceStore(tmp_path / "store").get_or_build(
+        spec, make_panel(GENES), builder=builder_for(spec, config), config=config
+    )
+    bundle_dir = Path(bundle.path)
+    test_set = json.loads((bundle_dir / BUNDLE_MANIFEST_NAME).read_text())[
+        "builder_output"
+    ]["test_set"]
+    test = res.load_test_cells(bundle_dir)
+    donor = test.obs[test.obs[reference.TEST_SOURCE_COLUMN] == "holdout_donor"]
+    # The pool's truths are checked; the excluded ones never become tests.
+    assert seen == [({UL_IT, ASTRO, MICRO}, "frontal_cortex")]
+    assert MICRO not in set(donor[f"{res.TRUTH_PREFIX}{SUPC}"])
+    exclusion = test_set["truth_exclusion"]
+    n_micro = exclusion["excluded_superclusters"][MICRO]["n_pool_cells"]
+    assert n_micro > 0
+    assert exclusion["excluded_superclusters"][MICRO]["reason"] == "sink"
+    assert exclusion["excluded_superclusters"][MICRO]["name"] == "Microglia"
+    assert exclusion["n_excluded_pool_cells"] == n_micro
+    assert test_set["n_pool_cells"] == exclusion["n_pool_cells_before"] - n_micro
+    assert len(donor) == HO_DONORS["H_small"] - n_micro
 
 
 def test_other_region_draw_never_takes_a_reference_cell() -> None:
