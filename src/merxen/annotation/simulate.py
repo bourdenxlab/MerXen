@@ -611,28 +611,33 @@ def prefilter_verdict(
         min_parent_markers: Markers every parent needs (5).
 
     Returns:
-        ``passes`` (every judged class of an emitted level agrees and the
-        prefilter leaves no parent below the minimum that the unfiltered
-        lookup keeps above it), the failing and unevaluable classes, the
-        parents made weak by the prefilter, and ``no_parent_below_minimum``
-        (the strict reading: no parent below the minimum at all).
+        ``passes``: the pre-registered rule (plan §8.7, NP9): every judged
+        class of an emitted level agrees and no parent of the prefiltered
+        lookup is below ``min_parent_markers`` markers
+        (``no_parent_below_minimum``); ``no_parent_made_weak`` reports the
+        relaxed reading (only parents the unfiltered lookup keeps above the
+        minimum count), which is not the criterion (changing it needs the
+        user's approval, §14); the failing and unevaluable classes and the
+        parents made weak by the prefilter.
     """
     judged = comparison[comparison["emitted_level"].astype(bool)]
     failing = judged[judged["status"] == "fail"]
     new_weak = sorted(set(prefiltered_weak_parents) - set(unfiltered_weak_parents))
-    # The prefilter must not leave a parent below the minimum; a parent the
-    # panel already leaves weak without it is a panel property (reported,
-    # and handled by the trust state and auto-collapse, §8.2), not a
-    # prefilter failure.
-    parents_ok = not new_weak
-    strict_parents_ok = (
+    # Pre-registered (§8.7, NP9): no parent below the minimum at all. A parent
+    # the panel already leaves weak without the prefilter fails it too; the
+    # relaxed reading (no parent made weak by the prefilter) is reported only
+    # (M3b review 2).
+    relaxed_parents_ok = not new_weak
+    strict_parents_ok = not prefiltered_weak_parents and (
         prefiltered_min_markers is None or prefiltered_min_markers >= min_parent_markers
     )
     return {
-        "passes": bool(failing.empty and parents_ok),
+        "passes": bool(failing.empty and strict_parents_ok),
         "agreement_passes": bool(failing.empty),
-        "parents_pass": bool(parents_ok),
+        "parents_pass": bool(strict_parents_ok),
         "no_parent_below_minimum": bool(strict_parents_ok),
+        "no_parent_made_weak": bool(relaxed_parents_ok),
+        "passes_relaxed_parent_reading": bool(failing.empty and relaxed_parents_ok),
         "n_judged": int((judged["status"] != "not_evaluable").sum()),
         "n_pass": int((judged["status"] == "pass").sum()),
         "n_fail": int(len(failing)),

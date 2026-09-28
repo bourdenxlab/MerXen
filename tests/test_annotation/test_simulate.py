@@ -129,7 +129,7 @@ def test_compare_calls_uses_the_decision_recipe_at_seed_0() -> None:
     assert comparison["status"].tolist() == ["pass"]
 
 
-def test_prefilter_verdict_fails_only_parents_the_prefilter_made_weak() -> None:
+def test_prefilter_verdict_follows_the_pre_registered_parent_rule() -> None:
     prefiltered, unfiltered = paired_cells(60, agree=60)
     comparison = compare_calls(
         prefiltered,
@@ -138,7 +138,9 @@ def test_prefilter_verdict_fails_only_parents_the_prefilter_made_weak() -> None:
         emitted_levels=["broad"],
         recipe="R1_contam_HO",
     )
-    # A parent the panel already leaves weak is a panel property.
+    # NP9 / §8.7: no parent below 5 markers, whether or not the panel
+    # already leaves it weak without the prefilter; the relaxed reading
+    # ("no parent made weak by the prefilter") is only reported.
     panel_weak = prefilter_verdict(
         comparison,
         prefiltered_min_markers=1,
@@ -146,7 +148,17 @@ def test_prefilter_verdict_fails_only_parents_the_prefilter_made_weak() -> None:
         prefiltered_weak_parents=["CLAS/a"],
         unfiltered_weak_parents=["CLAS/a"],
     )
-    assert panel_weak["passes"] and not panel_weak["no_parent_below_minimum"]
+    assert not panel_weak["passes"] and not panel_weak["no_parent_below_minimum"]
+    assert panel_weak["agreement_passes"] and panel_weak["no_parent_made_weak"]
+    assert panel_weak["passes_relaxed_parent_reading"]
+    strong = prefilter_verdict(
+        comparison,
+        prefiltered_min_markers=26,
+        unfiltered_min_markers=30,
+        prefiltered_weak_parents=[],
+        unfiltered_weak_parents=[],
+    )
+    assert strong["passes"] and strong["no_parent_below_minimum"]
     made_weak = prefilter_verdict(
         comparison,
         prefiltered_min_markers=3,
@@ -155,6 +167,7 @@ def test_prefilter_verdict_fails_only_parents_the_prefilter_made_weak() -> None:
         unfiltered_weak_parents=[],
     )
     assert not made_weak["passes"] and made_weak["agreement_passes"]
+    assert not made_weak["no_parent_made_weak"]
     assert made_weak["parents_weak_only_with_prefilter"] == ["CLAS/b"]
 
 
