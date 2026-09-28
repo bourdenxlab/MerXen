@@ -140,6 +140,26 @@ def test_native_kinds() -> None:
     assert native_kind("ENST00000262410", "human") == "non_gene"
     assert native_kind("ENST00000262410_MAPT3R_exon9", "human") == "non_gene"
     assert native_kind("Gfap", "mouse") == "non_id"
+    # Ensembl gene IDs in another case are still the run species' IDs.
+    assert native_kind("ensg00000141510", "human") == "run"
+    assert native_kind("Ensg00000141510", "human") == "run"
+    assert native_kind("ensmusg00000020932", "human") == "other_species"
+
+
+def test_lower_case_native_ids_resolve_natively() -> None:
+    assert clean_native_value("ensg00000141510.3") == "ENSG00000141510"
+    assert clean_native_value("Ensg00000141510") == "ENSG00000141510"
+    assert clean_native_value("Gfap") == "Gfap"
+    table = GeneTable.from_pairs("human", [("TP53", "ENSG00000141510")])
+    result = resolve_gene_ids(
+        [FeatureInput("TP53", "TP53", native_value="ensg00000141510")],
+        "human",
+        GeneIdSources(species="human", gene_tables={"human": table}),
+    )
+    assert result.status == "ok"
+    assert result.ids_by_name() == {"TP53": "ENSG00000141510"}
+    assert result.features[0].source == "native"
+    assert result.other_species_share == 0.0
 
 
 def test_release_drift_takes_the_reference_id() -> None:
@@ -368,6 +388,59 @@ def test_single_target_aliases_only(tmp_path: Path) -> None:
     assert result.ids_by_name() == {"SNAP-25": "ENSMUSG00000027273"}
     assert result.unmapped() == {"Shared": "ambiguous_alias"}
     assert result.features[0].detail == "alias of Snap25"
+
+
+def test_a_current_symbol_resolves_through_its_previous_symbol(
+    tmp_path: Path,
+) -> None:
+    # The gene table predates the H2AFX -> H2AX rename (the M0e case the
+    # override CSV patched); the HGNC row carries the current symbol's ID.
+    hgnc = tmp_path / "hgnc.tsv"
+    pd.DataFrame(
+        {
+            "symbol": ["H2AX", "OTHER"],
+            "alias_symbol": ["", ""],
+            "prev_symbol": ["H2AFX", "OLDOTHER"],
+            "ensembl_gene_id": ["ENSG00000188486", ""],
+        }
+    ).to_csv(hgnc, sep="\t", index=False)
+    aliases = load_alias_table(hgnc, "human")
+    old_table = GeneTable.from_pairs(
+        "human", [("H2AFX", "ENSG00000188486"), ("OLDOTHER", "ENSG00000000077")]
+    )
+    sources = GeneIdSources(
+        species="human", gene_tables={"human": old_table}, aliases=aliases
+    )
+    result = resolve_gene_ids(_symbols_only(["H2AX", "OTHER"]), "human", sources)
+    assert result.ids_by_name() == {
+        "H2AX": "ENSG00000188486",
+        # No ID on its row: the gene table's ID of its previous symbol.
+        "OTHER": "ENSG00000000077",
+    }
+    assert {f.name: f.source for f in result.features} == {
+        "H2AX": "alias",
+        "OTHER": "alias",
+    }
+    assert result.features[0].detail == "approved symbol of H2AFX"
+    # The row's own ID resolves without any gene table, too.
+    alone = GeneIdSources(species="human", aliases=aliases)
+    assert aliases.resolve("H2AX", None) == (
+        "ENSG00000188486",
+        "approved symbol of H2AFX",
+        "",
+    )
+    assert resolve_gene_ids(_symbols_only(["H2AX"]), "human", alone).ids_by_name() == {
+        "H2AX": "ENSG00000188486"
+    }
+    # The single-target rule holds: a previous symbol that the gene table
+    # gives another ID makes the current symbol ambiguous.
+    clash = GeneTable.from_pairs("human", [("H2AFX", "ENSG00000000099")])
+    ambiguous = GeneIdSources(
+        species="human", gene_tables={"human": clash}, aliases=aliases
+    )
+    assert resolve_gene_ids(_symbols_only(["H2AX"]), "human", ambiguous).unmapped() == {
+        "H2AX": "ambiguous_alias"
+    }
 
 
 def test_overrides_need_a_reason_and_the_run_species(tmp_path: Path) -> None:
