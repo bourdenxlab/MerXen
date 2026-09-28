@@ -2064,32 +2064,28 @@ def profile_matrix(
     return wide.div(totals.where(totals > 0, 1.0), axis=0)
 
 
-def reference_pseudobulk_log2_factors(
+def reference_pseudobulk_totals(
     counts: sparse.spmatrix | np.ndarray,
     labels: Sequence[object] | np.ndarray,
     profiles: pd.DataFrame,
     *,
     include: np.ndarray | None = None,
-    cap_log2: float | None = X1_CAP_LOG2,
-    pseudocount: float = 1.0,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Estimate per-gene platform factors against a reference pseudobulk (X1).
+    """Return the observed and reference-expected gene totals of labelled cells.
 
-    For the labelled cells the observed gene totals are compared with the
-    reference expectation ``sum_c n_c * p_{label(c), g}`` (``n_c`` the cell's
-    counts on the query genes, ``p`` the label's expected fraction); the
-    log2 ratio is centred on its median and capped.
+    The expectation is ``sum_c n_c * p_{label(c), g}`` (``n_c`` the cell's
+    counts on the query genes, ``p`` the label's expected fraction), the
+    basis of ``reference_pseudobulk_log2_factors`` (X1) and of the real-data
+    factor re-measure (``real_qc.factor_remeasure``, plan §8.8).
 
     Args:
         counts: Cells x query genes.
         labels: Reference node (``profiles`` index) per cell.
         profiles: ``profile_matrix`` output over the query genes.
         include: Cells used (e.g. bp >= 0.8); unlabelled cells are left out.
-        cap_log2: Cap on the centred log2 factor; ``None`` for none.
-        pseudocount: Added to observed and expected totals.
 
     Returns:
-        ``(log2_factors, uncapped)``, one per query gene.
+        ``(observed, expected)`` totals, one per query gene.
 
     Raises:
         ValueError: If the profiles do not have one column per gene or no
@@ -2115,6 +2111,44 @@ def reference_pseudobulk_log2_factors(
     observed = np.asarray(subset.sum(axis=0)).ravel()
     weight = np.bincount(rows[usable], weights=depth, minlength=len(profiles))
     expected = weight @ profiles.to_numpy(np.float64)
+    return observed, expected
+
+
+def reference_pseudobulk_log2_factors(
+    counts: sparse.spmatrix | np.ndarray,
+    labels: Sequence[object] | np.ndarray,
+    profiles: pd.DataFrame,
+    *,
+    include: np.ndarray | None = None,
+    cap_log2: float | None = X1_CAP_LOG2,
+    pseudocount: float = 1.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Estimate per-gene platform factors against a reference pseudobulk (X1).
+
+    For the labelled cells the observed gene totals are compared with the
+    reference expectation ``sum_c n_c * p_{label(c), g}`` (``n_c`` the cell's
+    counts on the query genes, ``p`` the label's expected fraction;
+    ``reference_pseudobulk_totals``); the log2 ratio is centred on its
+    median and capped.
+
+    Args:
+        counts: Cells x query genes.
+        labels: Reference node (``profiles`` index) per cell.
+        profiles: ``profile_matrix`` output over the query genes.
+        include: Cells used (e.g. bp >= 0.8); unlabelled cells are left out.
+        cap_log2: Cap on the centred log2 factor; ``None`` for none.
+        pseudocount: Added to observed and expected totals.
+
+    Returns:
+        ``(log2_factors, uncapped)``, one per query gene.
+
+    Raises:
+        ValueError: If the profiles do not have one column per gene or no
+            cell is usable.
+    """
+    observed, expected = reference_pseudobulk_totals(
+        counts, labels, profiles, include=include
+    )
     uncapped = np.log2((observed + pseudocount) / (expected + pseudocount))
     uncapped -= np.median(uncapped)
     capped = uncapped if cap_log2 is None else np.clip(uncapped, -cap_log2, cap_log2)

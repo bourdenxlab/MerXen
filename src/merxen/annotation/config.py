@@ -840,6 +840,19 @@ class AnnotationRealQcConfig(_AnnotationModel):
         prefilter_spotcheck_min_agreement: 5K prefilter spot-check agreement.
         seeded_families_warn_only_until_gate: The seeded real-data families
             only warn until their species gate has merged.
+        coverage_warn_margin: M3c (user decision 4): warn per (level, called
+            class) when the real confident share is below the class-depth
+            prediction at the dataset's own per-class depth by more than
+            this (``real_qc.coverage_vs_simulation``; never an offset).
+        coverage_min_cells: Dataset cells a (level, class) needs for that
+            warning.
+        factor_remeasure_min_r: M3c: warn when the first in-house dataset's
+            re-measured per-gene factors correlate below this with the
+            stored factor table on the informative genes
+            (``real_qc.factor_remeasure``).
+        nonneuronal_high_depth_counts: M3c (§8.3 v7.9): total counts from
+            which a non-neuronal cell of a ``nonneuronal_high_depth`` bin is
+            flagged (report-only).
     """
 
     marker_consistency_warn: float | None = None
@@ -849,12 +862,18 @@ class AnnotationRealQcConfig(_AnnotationModel):
     genes_per_count_gap_warn: float = Field(default=0.45, ge=0.0)
     prefilter_spotcheck_min_agreement: float = 0.95
     seeded_families_warn_only_until_gate: bool = True
+    coverage_warn_margin: float = 0.10
+    coverage_min_cells: int = Field(default=200, ge=1)
+    factor_remeasure_min_r: float = 0.9
+    nonneuronal_high_depth_counts: int = Field(default=1000, ge=1)
 
     @field_validator(
         "marker_consistency_broad_only",
         "paired_broad_jsd_warn",
         "uninformative_strata_warn_frac",
         "prefilter_spotcheck_min_agreement",
+        "coverage_warn_margin",
+        "factor_remeasure_min_r",
     )
     @classmethod
     def _check_share(
