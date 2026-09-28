@@ -210,6 +210,30 @@ def _git_commit() -> str | None:
     "members, e.g. R1_contam_HO@0,R1_contam_HO@1,R1_contam_HO@2,R3_measured_HO@0).",
 )
 @click.option(
+    "--resolvability-version",
+    "resolvability_version",
+    type=click.Choice(["auto", "7"]),
+    default="auto",
+    show_default=True,
+    help="7: also compute the resolvability version-7 decisions of a version-6 "
+    "family (set a, ag7, VZG2, the pinned P5011 family) as a diagnostic under "
+    "<out-dir>/<reference>/v7_diagnostic: never written to the store, never "
+    "applied (plan §8.3 v7.1). Version-7 families build version 7 anyway.",
+)
+@click.option(
+    "--v7-fresh-seeds",
+    default=None,
+    help="Comma-separated R1 seeds of a fresh version-7 ensemble B (e.g. 3,4,5) "
+    "whose emitted-triple churn against ensemble A is reported (diagnostic).",
+)
+@click.option(
+    "--v7-fresh-r3-seed",
+    type=click.IntRange(min=0),
+    default=1,
+    show_default=True,
+    help="R3 seed of the fresh ensemble B (where a measured table exists).",
+)
+@click.option(
     "--gate-p",
     is_flag=True,
     default=False,
@@ -255,6 +279,9 @@ def _annotation_panel_simulate(
     real_composition: Path | None,
     profile_members: str | None,
     gate_p: bool,
+    resolvability_version: str = "auto",
+    v7_fresh_seeds: str | None = None,
+    v7_fresh_r3_seed: int = 1,
 ) -> None:
     from merxen.annotation.reference import SourceOptions, set_prep_resources
     from merxen.annotation.simulate import (
@@ -356,6 +383,11 @@ def _annotation_panel_simulate(
         if not profile_members
         else [item.strip() for item in profile_members.split(",") if item.strip()],
         gate_p=gate_p,
+        v7_diagnostic=resolvability_version == "7",
+        v7_fresh_seeds=None
+        if not v7_fresh_seeds
+        else [int(item) for item in v7_fresh_seeds.split(",") if item.strip()],
+        v7_fresh_r3_seed=v7_fresh_r3_seed,
         provenance={
             "public_panel": public_record,
             "code_commit": _git_commit(),

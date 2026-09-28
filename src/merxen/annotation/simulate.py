@@ -768,6 +768,9 @@ def simulate_reference(
     real_composition: pd.DataFrame | None = None,
     profile_members: Sequence[str] | None = None,
     chemistry: Any | None = None,
+    v7_diagnostic: bool = False,
+    v7_fresh_seeds: Sequence[int] | None = None,
+    v7_fresh_r3_seed: int = 1,
 ) -> ReferenceSimulation:
     """Build one reference on a panel and predict what it resolves.
 
@@ -793,6 +796,11 @@ def simulate_reference(
         profile_members: Profile-mode members to run (default: the family's
             emission members).
         chemistry: The panel's ``sim_inputs.ChemistryResolution``.
+        v7_diagnostic: For a version-6 bundle, compute the version-7
+            decisions beside it (``run_v7_diagnostic``; never applied).
+        v7_fresh_seeds: R1 seeds of a fresh ensemble B whose churn against
+            the bundle's (or the diagnostic's) ensemble is reported.
+        v7_fresh_r3_seed: R3 seed of ensemble B.
 
     Returns:
         The simulation of the reference.
@@ -950,6 +958,28 @@ def simulate_reference(
                     if decisions.empty
                     else f"{spec.role} reference (profile mode maps the primary)",
                 }
+    diagnostic_resources: list[dict[str, Any]] = []
+    stored_version = (resolvability or {}).get("resolvability_version")
+    wants_diagnostic = bool(v7_fresh_seeds) or (v7_diagnostic and stored_version != 7)
+    if wants_diagnostic and spec.role in ("primary", "secondary"):
+        if decisions.empty:
+            record["v7_diagnostic"] = {"status": "not_run", "reason": "no self-map"}
+        else:
+            record["v7_diagnostic"], diagnostic_resources = run_v7_diagnostic(
+                reference_id=reference_id,
+                spec=spec,
+                panel=panel,
+                config=config,
+                bundle_dir=bundle_dir,
+                test_set_dir=test_set_dir,
+                resolvability=resolvability,
+                chemistry=chemistry,
+                out_dir=out_dir,
+                scratch_dir=scratch_dir / reference_id / "v7_diagnostic",
+                store_roots=store.roots,
+                fresh_seeds=v7_fresh_seeds,
+                fresh_r3_seed=v7_fresh_r3_seed,
+            )
     if chemistry is not None:
         record["panel_card_notes"] = panel_card_notes(
             str(panel.species), str(chemistry.chemistry)
@@ -1012,6 +1042,7 @@ def simulate_reference(
         }
     )
     resources += profile_resources
+    resources += diagnostic_resources
     comparison = pd.DataFrame(columns=list(PREFILTER_COLUMNS))
     engine_prefiltered = _engine_prefilter(bundle_dir, test_set_dir, resolvability)
     should_compare = prefilter_compare == "always" or (
@@ -1076,7 +1107,7 @@ def _engine_dir(
     """Return the bundle the self-map mapped onto (itself, or the HO bundle)."""
     from merxen.annotation.resolvability import load_resolvability
 
-    tables = load_resolvability(bundle_dir)
+    tables = load_resolvability(bundle_dir, allow_version_7=True)
     engine = (tables.summary.get("engine") if tables is not None else None) or {}
     if engine.get("self", True) or test_set_dir is None:
         return bundle_dir
@@ -1308,6 +1339,9 @@ def run_panel_simulation(
     profile_members: Sequence[str] | None = None,
     gate_p: bool = False,
     provenance: Mapping[str, Any] | None = None,
+    v7_diagnostic: bool = False,
+    v7_fresh_seeds: Sequence[int] | None = None,
+    v7_fresh_r3_seed: int = 1,
 ) -> dict[str, Any]:
     """Simulate a candidate panel end to end and write its report.
 
@@ -1337,6 +1371,10 @@ def run_panel_simulation(
             emission members).
         gate_p: Run the registered gate-P programme (M13) afterwards.
         provenance: Extra report fields (inputs, code version).
+        v7_diagnostic: ``--resolvability-version 7``: version-7 decisions of
+            the version-6 families as a diagnostic (``run_v7_diagnostic``).
+        v7_fresh_seeds: R1 seeds of a fresh ensemble B (churn, §14 (iii)).
+        v7_fresh_r3_seed: R3 seed of ensemble B.
 
     Returns:
         The report (also written to ``simulate_report.json``).
@@ -1443,6 +1481,9 @@ def run_panel_simulation(
             "large_panel_prefilter_cap": config.panel.large_panel_prefilter_cap,
             "resolvability": config.resolvability.model_dump(mode="json"),
             "gate_p": gate_p,
+            "v7_diagnostic": v7_diagnostic,
+            "v7_fresh_seeds": None if not v7_fresh_seeds else list(v7_fresh_seeds),
+            "v7_fresh_r3_seed": v7_fresh_r3_seed,
         },
         "provenance": dict(provenance or {}),
         "references": {},
@@ -1477,6 +1518,9 @@ def run_panel_simulation(
                 real_composition=composition,
                 profile_members=profile_members,
                 chemistry=chemistry,
+                v7_diagnostic=v7_diagnostic,
+                v7_fresh_seeds=v7_fresh_seeds,
+                v7_fresh_r3_seed=v7_fresh_r3_seed,
             )
             report["references"][simulation.reference_id] = simulation.record
             predicted_frames.append(simulation.predicted)
@@ -2830,4 +2874,225 @@ def render_profile_lines(record: Mapping[str, Any]) -> list[str]:
             )
     elif mode:
         lines.append(f"     profile mode: {mode.get('status')} ({mode.get('reason')})")
+    return lines
+
+
+# --------------------------------------------------------------------------
+# Resolvability version 7 as a diagnostic (M3c; plan §8.3 v7.1, §12 M3c (10);
+# pre-registration §14 (iii) and (vii))
+
+V7_DIAGNOSTIC_DIR: Final = "v7_diagnostic"
+V7_DIAGNOSTIC_JSON: Final = "v7_diagnostic.json"
+V7_DIAGNOSTIC_TXT: Final = "V7_DIAGNOSTIC.txt"
+
+
+def _inside(path: Path, roots: Sequence[Path]) -> bool:
+    resolved = path.resolve()
+    for root in roots:
+        base = Path(root).resolve()
+        if resolved == base or base in resolved.parents:
+            return True
+    return False
+
+
+def run_v7_diagnostic(
+    *,
+    reference_id: str,
+    spec: AnnotationReferenceSpec,
+    panel: AnnotationPanel,
+    config: AnnotationConfig,
+    bundle_dir: Path,
+    test_set_dir: Path | None,
+    resolvability: Mapping[str, Any],
+    chemistry: Any | None,
+    out_dir: Path,
+    scratch_dir: Path,
+    store_roots: Sequence[Path] = (),
+    fresh_seeds: Sequence[int] | None = None,
+    fresh_r3_seed: int = 1,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Compute version-7 decisions beside a bundle, never applying them.
+
+    For a version-6 family (set a, ag7, VZG2, the P5011 pin) the
+    ensemble A (R1 x ``ensemble_r1_seeds``, plus R3 where a measured table of
+    the species x chemistry exists) is simulated on the bundle's own test
+    set (not topped up) and engine, decided by ``ensemble_decide`` and
+    compared with the bundle's stored version-6 decisions (emitted triples
+    lost and gained per level and regime). With ``fresh_seeds`` a fresh
+    ensemble B (R1 at those seeds, R3 at ``fresh_r3_seed``) is run too and
+    the churn A vs B reported; for a version-7 bundle A is the bundle's own
+    ensemble. Everything is written under ``out_dir/v7_diagnostic`` (never
+    the store); the bundle is only read.
+
+    Returns:
+        The report record and resource rows.
+
+    Raises:
+        SimulationError: If the test set is missing, the output lies inside
+            a store, or the bundle has no self-map.
+    """
+    from merxen.annotation import reference as ref
+    from merxen.annotation import resolvability as res
+    from merxen.annotation import sim_inputs as si
+    from merxen.annotation.mapmycells_engine import MmcBundle
+    from merxen.annotation.vocab import load_floor_table
+
+    target = out_dir / V7_DIAGNOSTIC_DIR
+    if _inside(target, store_roots):
+        raise SimulationError(
+            f"the version-7 diagnostic writes to {target}, inside a reference "
+            "store; it is never written to the store"
+        )
+    if test_set_dir is None or not test_set_dir.is_dir():
+        raise SimulationError(f"{reference_id}: the self-map test set is missing")
+    tables = res.load_resolvability(bundle_dir, allow_version_7=True)
+    if tables is None:
+        raise SimulationError(f"{reference_id}: the bundle has no self-map")
+    started = time.monotonic()
+    target.mkdir(parents=True, exist_ok=True)
+    stored_version = tables.version
+    stored = decision_rows(bundle_dir)
+    engine = MmcBundle.from_dir(_engine_dir(bundle_dir, test_set_dir, resolvability))
+    specs = ref.level_specs_for(reference_id, engine, config)
+    rules = ref.cells_rules_for(reference_id, config)
+    test = res.load_test_cells(test_set_dir)
+    species = spec.species
+    chemistry_name = "unknown" if chemistry is None else str(chemistry.chemistry)
+    reference = ref.V7_MEMBER_TABLE_REFERENCE.get(reference_id)
+    member_table = (
+        None
+        if reference is None
+        else si.member_table_for(species, chemistry_name, reference)
+    )
+    grid = (
+        tables.depth_grid
+        if stored_version == res.RESOLVABILITY_VERSION_V7
+        else res.v7_depth_grid(species, panel.n_genes, spec.depth_grid)
+    )
+    ensemble = res.EnsembleSettings.from_config(config.resolvability)
+    settings = ref.self_map_rule_settings(config)
+    runs: list[dict[str, Any]] = []
+    map_fn = ref.mmc_map_function(
+        engine,
+        spec=spec,
+        config=config,
+        scratch_dir=scratch_dir / "mapping",
+        log_dir=target / "logs",
+        runs=runs,
+    )
+
+    def emission(seeds: Sequence[int], r3_seed: int) -> list[Any]:
+        return [
+            member
+            for member in res.ensemble_members(
+                config.resolvability,
+                species=species,
+                chemistry=chemistry_name,
+                member_table=member_table,
+                r1_seeds=tuple(int(seed) for seed in seeds),
+                r3_seed=int(r3_seed),
+                table_rule=config.resolvability.r3_table_rule,
+            )
+            if member.role == "emission"
+        ]
+
+    def run(members: Sequence[Any], name: str) -> Any:
+        result = res.run_resolvability_v7(
+            test,
+            specs=specs,
+            depths=grid,
+            members=members,
+            map_fn=map_fn,
+            settings=settings,
+            ensemble=ensemble,
+            species=species,
+            floor_table=load_floor_table(species),
+            cells_rules=rules,
+            provenance={
+                "diagnostic": True,
+                "applied": False,
+                "bundle": str(bundle_dir),
+                "bundle_resolvability_version": stored_version,
+                "diagnostic_ensemble": name,
+            },
+        )
+        result.write(target / name)
+        return result
+
+    record: dict[str, Any] = {
+        "status": "run",
+        "applied": False,
+        "note": "diagnostic only: written to an output directory, never to the "
+        "store, never applied",
+        "bundle": str(bundle_dir),
+        "bundle_resolvability_version": stored_version,
+        "depth_grid": list(grid),
+        "test_cells": int(len(test.obs)),
+        "top_up": "not applied (the bundle's own test set)"
+        if stored_version != res.RESOLVABILITY_VERSION_V7
+        else "the bundle's topped-up test set",
+    }
+    first: pd.DataFrame
+    if stored_version == res.RESOLVABILITY_VERSION_V7:
+        first = stored
+        record["ensemble_a"] = {"source": "bundle"}
+    else:
+        members_a = emission(config.resolvability.ensemble_r1_seeds, 0)
+        result_a = run(members_a, "ensemble_A")
+        first = result_a.decisions
+        record["ensemble_a"] = {
+            "members": [member.name for member in members_a],
+            "ensemble": result_a.summary["ensemble"],
+            "files": str(target / "ensemble_A"),
+        }
+        record["version_6_vs_7"] = res.v7_diagnostic_comparison(stored, first)
+    if fresh_seeds:
+        members_b = emission(fresh_seeds, fresh_r3_seed)
+        result_b = run(members_b, "ensemble_B")
+        record["ensemble_b"] = {
+            "members": [member.name for member in members_b],
+            "ensemble": result_b.summary["ensemble"],
+            "files": str(target / "ensemble_B"),
+        }
+        record["fresh_draw_churn"] = res.v7_diagnostic_comparison(
+            first, result_b.decisions
+        )
+    record["mapping_runs"] = runs
+    record["wall_s"] = round(time.monotonic() - started, 1)
+    (target / V7_DIAGNOSTIC_JSON).write_text(
+        json.dumps(_json_native(record), indent=2) + "\n", encoding="utf-8"
+    )
+    (target / V7_DIAGNOSTIC_TXT).write_text(
+        "\n".join(render_v7_diagnostic(reference_id, record)) + "\n", encoding="utf-8"
+    )
+    return record, _mapping_rows(reference_id, "v7_diagnostic", runs)
+
+
+def render_v7_diagnostic(reference_id: str, record: Mapping[str, Any]) -> list[str]:
+    """Return the text lines of a version-7 diagnostic."""
+    lines = [
+        f"Version-7 diagnostic of {reference_id} (bundle version "
+        f"{record.get('bundle_resolvability_version')}; not applied)",
+        f"  grid {record.get('depth_grid')}; {record.get('test_cells')} test cells; "
+        f"top-up: {record.get('top_up')}",
+    ]
+    for key, title in (
+        ("version_6_vs_7", "version 6 (stored) vs version 7 (ensemble A)"),
+        ("fresh_draw_churn", "ensemble A vs fresh ensemble B"),
+    ):
+        comparison = record.get(key)
+        if not comparison:
+            continue
+        lines.append(f"  {title}:")
+        for regime, stats in comparison.items():
+            lines.append(
+                f"    {regime}: {stats['n_first']} vs {stats['n_second']} emitted "
+                f"triples, lost {stats['lost']}, gained {stats['gained']}, churn "
+                f"{stats['churn']:.3f}"
+            )
+            for level, item in stats["per_level"].items():
+                lines.append(
+                    f"      {level}: lost {item['lost']}, gained {item['gained']}, "
+                    f"churn {item['churn']:.3f}"
+                )
     return lines

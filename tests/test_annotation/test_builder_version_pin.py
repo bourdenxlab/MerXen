@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "948ef2dca283c7b33e9234f643771c738803f8d7d6896ae4860fb56aa70ffa3e",
+    3: "a5b7a955cceca1fbcdc13a2bc935700926fde63a155815589fa75537093a70a2",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -122,6 +122,13 @@ PIN_HISTORY = (
     "selection); additive: no builder calls it yet, the version-6 path and "
     "every version-6 build_hash are byte-identical "
     "(test_resolvability_v6_golden), so no bundle changes",
+    "3: resolvability version 7 wired into PREP per family (M3c stage C: the "
+    "ensemble decisions, saturated-bp rule, monotone fill, class-depth table, "
+    "test-set class top-up, BundleBuilder.panel_params); a version-7 family's "
+    "build_hash gains its version-7 inputs through panel_params (so its "
+    "bundles are new build directories), a version-6 family's payload and "
+    "every version-6 output are byte-identical (test_resolvability_v6_golden), "
+    "so no existing bundle changes",
 )
 
 

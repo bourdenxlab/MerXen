@@ -275,6 +275,9 @@ def test_version_selection_truth_table() -> None:
         # pinned family (OD-E20) and a panel hash named by a pin
         ("human_merscope_ed7bc6bed989", None): 6,
         ("human_merscope_other", str(pins["panel_hash"].iloc[0])): 6,
+        # a listed panel hash whose family is not known (build-hash payloads)
+        (None, "6e5fd5fb86ef0c3eaccf2efa5b792c9515b087fdf9e9cb6a3978d53268253dc3"): 6,
+        (None, "f4c291864ba1c91153a3df00429da13abc4ed1d39592d5ee80c23090040b4013"): 6,
         # every other family: version 7
         ("mouse_xenium_4bc22b961aca", None): 7,
         ("human_xenium_93ecc58ed5c4", None): 7,

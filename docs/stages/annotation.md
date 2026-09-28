@@ -668,6 +668,71 @@ cross-tissue stress recipe for human Prime only) and the lung FFPE depth
 scenario. No asset raises a trust state, no depth profile crosses species,
 and version 6 (set a, ag7, VZG2, P5011 MERSCOPE) is byte-identical.
 
+**Resolvability version 7 in PREP (M3c, decision side).** The version is
+chosen per panel family: 6 for the families of `validated_panels.csv` (set a
+with set c, ag7, VZG2; by the family after trust inheritance or the listed
+panel hash) and the pins of `resolvability_v6_pins.csv` (P5011 MERSCOPE);
+7 for every other family (Xenium Prime 5K mouse and human, custom and unknown
+panels, the M13 custom MERSCOPE panel). `annotation.resolvability.version`
+(`auto`) may force 6; forcing 7 on a version-6 family is refused. A
+version-6 family's `build_hash` and outputs are unchanged; a version-7
+family's `build_hash` holds its members, assets (sha256), chemistry, grid and
+top-up rule, so its bundles are new build directories. A version-7 self-map:
+
+- tops the test set up before mapping: every class of the leaf's parent level
+  (mouse WMB class; human supercluster-level class, COP apart) with fewer
+  than 200 test cells gains cells where its pool allows, stratified by leaf
+  type, lowest keyed draw first. Mouse pool: 10Xv3 cells neither
+  marker-training nor test cells, only of clusters with at least 5
+  marker-training cells, at most 5% of a cluster's cells. Human pools: the
+  held-out donor's other cells, then (non-neuronal classes) other-region
+  cells of training clusters; never another frontal donor. `bundle.json`
+  (`test_set.class_top_up`) records each class's cells before and after,
+  what each pool held and gave and whether it ran out;
+- simulates and maps each member in turn (`R1_contam_HO@0`, `@1`, `@2`;
+  `R3_measured_HO@0` for Xenium Prime 5K mouse; `clean@0` reported;
+  `R1_xtissue_lung_stress@0` reported for human Prime), 13 grid values
+  above 1,000 genes;
+- decides each member by the version-6 rule plus the saturated-bp rule (a
+  set without a local threshold whose fit-half calls are more than 90% at
+  bp = 1 is judged at the 0.99 cap), then the ensemble: a bin is emitted when
+  the union of the members' calls passes the §8.3 rule at its own threshold
+  with each test cell counted once (E1), and every member emits it or the
+  member precisions lie within max(0.03, 3.5 SE) with at least 10 calls each
+  (E2); bins short of calls take the ensemble's deep pool;
+- fills a bin deeper than the shallowest emitted one when its measured point
+  precision and coverage pass (only the power conditions are waived), never
+  for non-neuronal classes at 1,000 counts or more (those bins are marked
+  `nonneuronal_high_depth`); floors and trust come from the decisions before
+  the fill;
+- writes `resolvability_cells.parquet` (with `member`), `resolvability.parquet`
+  (per-member rows, `member_decision` and the ensemble's `decision` rows with
+  the rule, member statuses, spread and limit, saturated and filled flags),
+  `resolvability_summary.json` (`resolvability_version` 7, members, `ensemble`
+  statistics incl. the member spread and agreement, `emitted_before_fill`,
+  the top-up, assets and chemistry, `profile_prediction`) and
+  `resolvability_class_depth.parquet`.
+
+`resolvability_class_depth.parquet` is the table RESOLVE will consume (M4
+follow-up): one row per (regime, level, class, depth bin) with `status`,
+`threshold` and `threshold_source` (`default`, `resolvability_local`,
+`saturated_cap`, `monotone_inherited`), `ensemble_rule`, `pooled`,
+`extrapolated`, `monotone_filled`, `nonneuronal_high_depth`, `neuronal`,
+`n_test`, `n_confident` (distinct test cells), the ensemble `precision` and
+`coverage` there (a filled bin: its fill measurement; a pooled bin: its
+pool's), the member minimum and maximum of precision and coverage, and, when
+the family's species x chemistry has a depth profile (the public 5K mouse
+section), `profile_source`, `profile_share` s_c(d) and
+`predicted_coverage_term` s_c(d) cov(L, c, d) on emitted bins. A dataset's
+predicted coverage of (L, c) is the sum of `profile_share` x `coverage` over
+emitted bins with its own s_c(d) (its cells called c), its resolvable share
+the sum of s_c(d). `load_resolvability` refuses a version-7 bundle unless its
+caller declares support (`allow_version_7=True`), so M4's RESOLVE refuses it
+loudly until its follow-up (plan §12 M3c). The version-7 decisions of the
+version-6 families are computed only as a diagnostic
+(`annotation-panel-simulate --resolvability-version 7`, never written to the
+store, never applied).
+
 ### Panel families, diagnostics and trust states (M3b)
 
 **Validated families** are packaged in `assets/annotation/`:

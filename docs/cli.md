@@ -610,6 +610,8 @@ Outputs in `--out-dir`: `simulate_report.json`, `SIMULATE_REPORT.txt`,
 | `--depth-profile PATH`, `--depth-profile-asset ID` | The per-class (or pooled) depth profile of the headline; see step 3. |
 | `--profile-mode/--no-profile-mode`, `--profile-members LIST`, `--real-composition PATH` | Profile mode (default on with a profile), its members and the real composition its cells are weighted to; see step 3. |
 | `--expected-depth N` | Secondary line: the classes emitted at one median depth. |
+| `--resolvability-version auto\|7` | `7`: for a version-6 family (set a, ag7, VZG2, the pinned P5011 family) also compute the resolvability version-7 decisions (ensemble R1 x 3, plus R3 where a measured table exists) on the bundle's test set as a diagnostic: `<reference>/v7_diagnostic/` holds each ensemble's tables, `v7_diagnostic.json` and `V7_DIAGNOSTIC.txt` (version 6 vs 7 emitted triples lost and gained per level and regime). Never written to the store, never applied; the bundle and its emitted decisions are unchanged. Version-7 families build version 7 anyway (plan §8.3 v7.1). |
+| `--v7-fresh-seeds LIST`, `--v7-fresh-r3-seed N` | A fresh version-7 ensemble B (R1 at these seeds, e.g. `3,4,5`; R3 at `N`, default 1) mapped beside ensemble A (the bundle's, or the diagnostic's); its emitted-triple churn is reported (pre-registration §14 (iii), (vii)). Diagnostic only. |
 | `--gate-p` | The gate-P programme (NP1–NP9: leave-one-donor-out HO bundles, the second mouse test draw, seeds 0 / 1, stress recipes; plan §8.8, §14). M13 registers it (`merxen.annotation.simulate.register_gate_p_hook`, from `scripts/acceptance/new_panel.py`); until then the option is refused before any compute. |
 
 ## `merxen annotate`

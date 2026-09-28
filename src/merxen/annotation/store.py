@@ -562,6 +562,12 @@ class BundleBuilder:
         refuse: Optional ``(panel, config) -> reason | None``: why the
             builder refuses a panel (``large_panel_refusal``). Not part of
             ``build_hash``.
+        panel_params: Optional ``panel -> params | None``: parameters that
+            depend on the panel's family (M3c: the resolvability version-7
+            inputs of a family outside ``validated_panels.csv``, plan §8.3
+            v7.1). They update ``params`` in ``build_hash``; ``None`` or an
+            empty result (every version-6 family) leaves the payload
+            unchanged.
     """
 
     name: str
@@ -573,6 +579,23 @@ class BundleBuilder:
     source_patterns: Mapping[str, str] = field(default_factory=dict)
     finds_markers: bool = True
     refuse: Callable[[AnnotationPanel, AnnotationConfig], str | None] | None = None
+    panel_params: Callable[[AnnotationPanel], Mapping[str, Any] | None] | None = None
+
+    def params_for(self, panel: AnnotationPanel | None) -> dict[str, Any]:
+        """Return the hashed builder parameters for a panel.
+
+        Args:
+            panel: The declared panel (``None``: panel-independent).
+
+        Returns:
+            ``params`` updated by ``panel_params(panel)`` when it gives any.
+        """
+        params = dict(self.params)
+        if self.panel_params is not None and panel is not None and self.uses_panel:
+            extra = self.panel_params(panel)
+            if extra:
+                params.update(extra)
+        return params
 
 
 BuilderFactory = Callable[
@@ -765,7 +788,7 @@ def build_hash_payload(
         "schema_version": STORE_SCHEMA_VERSION,
         "builder_version": ANNOTATION_BUILDER_VERSION,
         "builder": builder.name,
-        "builder_params": _json_native(dict(builder.params)),
+        "builder_params": _json_native(builder.params_for(panel)),
         "reference_id": spec.reference_id,
         "species": spec.species,
         "role": spec.role,
