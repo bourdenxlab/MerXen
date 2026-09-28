@@ -558,8 +558,10 @@ merxen annotation-panel-simulate --public-panel xenium_prime_5k_mouse \
    maps the same simulated cells (decision recipe, seed 0) with it and
    compares per (level, class): agreement >= 0.95 at bp >= 0.8 for every
    class with >= 50 unfiltered confident calls of an emitted level, and no
-   parent left below 5 markers by the prefilter (NP9). This is also the
-   unfiltered marker memory measurement (OD-E8).
+   parent of the prefiltered lookup below 5 markers (NP9, the pre-registered
+   rule; the relaxed reading, no parent made weak by the prefilter, is
+   reported as `no_parent_made_weak`). This is also the unfiltered marker
+   memory measurement (OD-E8).
 5. Records wall time per step, peak RSS (largest process, as `/usr/bin/time`
    reports it, and the summed PSS of each step's process tree) and disk
    (bundle, kept reference markers, test set).
@@ -606,7 +608,7 @@ merxen annotate --species human \
 |---|---|
 | `--from-clustered-h5ad PATH` | A published `<sid>_clustered.h5ad` (table cells, raw counts in `layers["counts"]`); repeat once per platform. Pair, segmentation and platform come from the results path. |
 | `--prepared-dir DIR` | Instead: prepared H5ADs (counts in `X`, every segmented object; objects below `--min-counts` are not mapped). |
-| `--store DIR`, `--store-large DIR` | Reference store(s); the bundle of each required (reference, `panel_hash`) is the one complete bundle of the current builder version. |
+| `--store DIR`, `--store-large DIR` | Reference store(s); the bundle of each required (reference, `panel_hash`) is the one complete bundle of the current builder version built with the large-panel prefilter `--annotation-config` asks for (none by default); of several, the one with the current resolvability version. |
 | `--bundle KEY=DIR`, `--bundle-ref PATH` | Use this bundle directory (`KEY` = reference id or run id, e.g. `whb_frontal_supc_clus_setc`) or this `bundle_ref.json` instead of the store lookup. |
 | `--panel-dir DIR` | `merxen annotation-panel` output; default: the panel is computed from the inputs into `<out>/panel`. |
 | `--references IDS` | Comma-separated reference ids to map (default: every primary and secondary bundle the panel requires). |
@@ -618,6 +620,7 @@ merxen annotate --species human \
 | `--results-root DIR` | A results tree `--out` and `--work-dir` must stay out of (repeatable), on top of the inputs' own. |
 | `--keep-extended-json`, `--reuse/--no-reuse`, `--reuse-from DIR` | Keep the gzipped extended JSON; reuse identical runs of a `map_manifest.json` (default: `--out`). |
 | `--gene-id-fallback-csv PATH` | Local symbol → Ensembl table (M0e), as for `annotation-panel`. |
+| `--declared-ids-file KEY=PATH` | Per sample id or platform, a panel file (e.g. the Xenium `gene_panel.json`) whose native gene IDs complete the declared features a clustered H5AD's `min_cells` filter dropped from `var`, so its declared panel hash is the prepared H5AD's; without it those features are resolved by symbol and listed as `declared_ids_incomplete`. |
 | `--platforms`, `--no-provisional` | Map only these platforms; skip the provisional labels. |
 | `--require-bundle-refs` | Map only the bundles given with `--bundle-ref` / `--bundle`; a missing one fails instead of being looked up in the store (what the pipeline task passes: it maps exactly the bundles `ANNOTATE_REFERENCE_PREP` resolved). A needed subset bundle is then only recorded as `requested`, never looked up in `--store`. Refs of roles MAP does not map (`wmb_region_share`) are accepted and not opened. |
 | `--allow-refused-panel` | For a refused panel (`required_bundles.json` status `refused`), write `map_manifest.json` with `panel_status: refused`, its reasons and no runs, and exit 0 (pipeline runs: RESOLVE then writes statuses only). Without it a refused panel is an error. |

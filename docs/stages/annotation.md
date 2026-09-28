@@ -144,7 +144,15 @@ builders run the self-map of plan §8.3 on their panel
    dissections, seed, cap, candidates and drawn cells per supercluster,
    broad class, dissection and donor, and the drawn cells of clusters the
    training reference lacks (their cluster truth cannot be called; the
-   cluster level is report-only).
+   cluster level is report-only). *Truths no call can name (M3b review 2,
+   as E2 `research/insilico/02_make_queries.py`):* held-out donor cells
+   whose truth supercluster is a sink, has no floor class (Mixed/Unknown:
+   Miscellaneous 227 and Splatter 22 cells of H19.30.002, which have no
+   broad or supercluster truth, so every call of them was scored wrong) or
+   is implausible in the region (Amygdala excitatory, 6 cells: calls to it
+   are excluded) are left out before the draw
+   (`reference.ho_truth_exclusions`; `test_set.truth_exclusion` in
+   `bundle.json`).
 2. **Simulation.** Every test cell whose native panel counts reach a grid
    depth `D` is thinned binomially to `D` (human panels up to 1,000 genes
    `[10, 15, 30, 60, 120, 250]`; mouse and larger panels
@@ -191,11 +199,15 @@ builders run the self-map of plan §8.3 on their panel
    until the set holds 50 confident calls (or a fitted regime's isotonic
    fit shows no threshold reaches the target); its shallowest bin is
    `D_P`. The set is tested with the same rule (its own fit and `t*`, the
-   target of `D_P`, the Wilson bound on the Kish n), and its verdict goes to
-   every bin deeper than `D_P`, marked `pooled` and
-   `resolvability_extrapolated`. `D_P` keeps its own verdict when it holds
-   50 calls itself and is withdrawn when the pool fails (reason
-   `pool_<reason>`): a pooled pass never overrides a bin's own failure. A
+   target of `D_P`, the Wilson bound on the Kish n). Every bin at or above
+   `D_P` that holds 50 confident calls itself keeps its own verdict and is
+   withdrawn when the pool fails (reason `pool_<reason>`): a pooled pass
+   never overrides a bin's own failure (M3b review 2; before, only `D_P`
+   did). The bins that are not judged on their own take the pool's verdict
+   and are marked `pooled`; those deeper than `D_P` are also marked
+   `resolvability_extrapolated`. Only calls with a positive weight count
+   towards the 50 (RESOLVE: a bin of calls of types the dataset lacks is
+   not judged on its own). A
    class that never reaches 50 confident calls even with every bin pooled
    is `not_resolvable` (`insufficient_calls`) wherever it is not judged on
    its own; a class without `D_max(c)` (the deepest grid depth with ≥ 50
@@ -242,8 +254,16 @@ review):
   its broad class's common types (`sum q / sum p` over them; the class's
   pooled weight when it has no common type), so a handful of test cells
   cannot stand for a large composition share.
-- **Trimmed.** Weights above `weight_trim_factor` (10) times the bin's
-  median positive weight are capped, and the bin is renormalised to mean 1.
+- **Trimmed per tested set** (resolvability version 4, M3b review 2).
+  Within each tested set (a (level, class, depth) bin's calls, or a
+  pooled deep set) weights above `weight_trim_factor` (10) times the set's
+  median positive weight are capped before the fit and the checks
+  (`RuleSettings.weight_trim_scope = "judged_set"`). Versions 2-3 capped
+  at 10 times the median of the whole depth bin, which its commonest test
+  types (neurons) set: in deep bins every glial type hit the same cap and
+  reweighting did nothing inside a called glial class (P7513 MERSCOPE
+  broad Oligo at 120: COP and Oligodendrocyte both weighed 6.45). Bundles
+  of those versions keep the per-bin trim when re-derived.
 - **Recorded.** Every decision carries the Kish effective n (the n of the
   Wilson bound) and the largest single call's share of the confident
   weight (`max_weight_share`).
@@ -324,7 +344,7 @@ per human dataset and 3.2–3.6 s on ag7.
 | `depth_grid.json` | The resolvability depth grid of the panel. |
 | `resolvability.parquet` | Primary and secondary bundles (resolvability on): one long table, `kind` per row type: `bin` (per recipe × level × class × depth: calls, precision and coverage at the default threshold, the local threshold), `curve` (precision and coverage at thresholds 0.50–0.99), `isotonic` (fit-half knots), `node` (per-node precision, recall, F1), `confusion` (truth × call within the called class), `decision` (the three regimes below), `gene_efficiency`. |
 | `resolvability_cells.parquet` | One row per simulated cell × level × recipe: parent class, depth, split half, call, bp, `avg_correlation`, truth, truth class, truth leaf, correct. RESOLVE reweights these to each dataset's composition. |
-| `resolvability_summary.json` | Recipes, levels, settings, test-set counts, `D_max` per level and class, emission per regime, level, class and depth (status, threshold, `t*`, extrapolated, pooled, reason), the pooled deep sets per regime, level and class (`D_P`, the bins taking their verdict, statistics, `t*`, status), floors, validated thresholds the local rule would raise (own bins; pooled sets carry `would_raise`), the trust constraint, fine-level seed stability, runtimes and mapping runs. |
+| `resolvability_summary.json` | Recipes, levels, settings, test-set counts, `D_max` per level and class, emission per regime, level, class and depth (status, threshold, `t*`, extrapolated, pooled, reason), the pooled deep sets per regime, level and class (`D_P`, the bins taking their verdict, statistics, `t*`, status), floors, validated thresholds the local rule would raise (own bins whose fit half holds 50 calls; pooled sets carry `would_raise`), the validated bins whose fit half holds fewer (`validated_thresholds_not_evaluable`: `t*` unknown, never counted as a raise), the trust constraint, fine-level seed stability, runtimes and mapping runs. |
 | `test_cells.h5ad`, `test_cells.parquet` | Resolvability test-set bundles: native panel counts of the test cells and their truth per level (`truth__<level>`), composition key and spill group; human: donor, dissection and `test_source`. |
 
 ### Declared panels, gene IDs and controls (M3b)
@@ -336,7 +356,24 @@ H5AD declares the features its control filter recorded
 (`uns["merxen_clustering_squidpy"]["control_feature_filter"]`: kept and
 removed), not the `min_cells`-filtered `var`, so zero-count probes and
 `min_cells` filtering never change `panel_hash` (measured: the P7513 /
-P1212 and ag7 declared hashes equal the M3 shadow ones).
+P1212 and ag7 declared hashes equal the M3 shadow ones). The features
+`min_cells` dropped are no longer in `var`: on a native-ID platform their
+IDs come from the platform's panel file (`merxen annotate
+--declared-ids-file XENIUM=gene_panel.json`; a symbol can give another ID,
+e.g. GGT1 or H2AFX on the 5K panel), else they are resolved by symbol,
+logged and listed as `declared_ids_incomplete` in `panel_report.json`. MAP
+maps them as query genes with zero counts (`undetected_declared_genes` in
+the run record), as the prepared H5AD would give them almost everywhere,
+so they never count as missing panel genes or trigger a subset bundle (M3b
+review 2; P5011 reseg MERSCOPE: 32 of 300 declared genes dropped, which
+had requested an own-family subset bundle).
+
+A MERSCOPE codebook is read as Vizgen writes it: data rows may end with a
+trailing comma (the ag7 codebook VA00282), and its `id` column holds
+transcript identifiers (Ensembl transcripts, RefSeq accessions, a UUID for
+a custom transgene) that are recorded (`recorded_id`) but never native gene
+IDs and never counted by the prefix rules below; only an `id` that is an
+Ensembl gene ID is used natively.
 
 **Controls** (`annotation.panel.ControlRegistry`, on the shared registry
 `merxen.control_features`): a feature type decides alone when the source has
@@ -359,7 +396,11 @@ the run species' local gene table (`annotation_<species>_gene_table`, else
 `annotation_gene_id_fallback_csv`; exact case first, then a unique
 case-insensitive match), an optional alias table (single-target aliases
 only) and the curated overrides (`gene_id_overrides_<species>.csv`, each
-with a reason). Features resolving to one ID are merged and summed at MAP;
+with a reason). The alias table resolves a panel symbol both as an alias
+or previous symbol and as a current approved symbol whose gene table still
+lists a previous one (H2AX / H2AFX: the HGNC row's own ID, or the table's
+ID of its previous symbol); a symbol pointing to two IDs stays unresolved.
+Ensembl gene IDs are upper-cased (`ensg00000141510` is a human ID). Features resolving to one ID are merged and summed at MAP;
 unresolved ones (reporter genes, isoform probes such as the Xenium MAPT 3R
 / 4R probes, genes a table lacks) are listed in `panel_report.json`.
 
@@ -449,8 +490,16 @@ per-parent counts) is the panel stub of `reference_markers` and
 method, version and settings enter `build_hash` of every builder that finds
 markers. Without it, a large `wmb_panel` whose predicted query-marker peak
 (the measured 37.7 GB envelope up to 5,006 genes, scaled with the genes
-beyond) exceeds the PREP reserve (`--max-gb` / 0.625) is refused before
-anything is built: the prefilter is mandatory above the reserve (OD-E8).
+beyond) plus the OD-E8 margin of 30% exceeds the PREP reserve (`--max-gb` /
+0.625) is refused before anything is built (with the 64 GB reserve: panels
+above about 6,500 genes): the prefilter is mandatory above the reserve
+(OD-E8). No pipeline parameter switches the prefilter on: pipeline runs
+raise `annotation_prep_large_memory`, and the prefilter is set only through
+`--annotation-config` of the standalone `annotation-reference-prep` and
+`annotation-panel-simulate`. The store may then hold a bundle with and one
+without the prefilter on the same panel; a standalone store lookup
+(`merxen annotate --store`, the subset-bundle finder) takes the one whose
+`build_hash_payload.large_panel_prefilter` matches the run's config.
 
 ### Panel simulation (`annotation-panel-simulate`, M3b)
 
@@ -467,8 +516,11 @@ parents, runtime, peak memory and disk ([CLI](../cli.md#merxen-annotation-panel-
 For prefiltered panels it also maps the same simulated cells with the
 unfiltered lookup and compares the calls per (level, class) (agreement
 >= 0.95 at bp >= 0.8 for every class with >= 50 unfiltered confident calls
-at an emitted level; the prefilter may leave no parent below 5 markers that
-the unfiltered lookup keeps above it). The pinned public 10x panel lists
+at an emitted level, and no parent of the prefiltered lookup below 5
+markers: the pre-registered rule of plan §8.7 / NP9, whatever the
+unfiltered lookup gives; the relaxed reading "no parent made weak by the
+prefilter" is reported as `no_parent_made_weak`, not applied). The pinned
+public 10x panel lists
 come from `merxen annotation-panel-fetch`. `--gate-p` is the M13 hook for
 the gate-P programme; it is refused until M13 registers it.
 
@@ -682,7 +734,9 @@ Per sample:
    and records the request (`subset_bundle` in the run record). Build the
    requested bundle with `merxen annotation-reference-prep --panel-genes
    <subset panel>`. Of several builder-v3 bundles on one panel, a
-   standalone run takes the one with the current `RESOLVABILITY_VERSION`.
+   standalone run takes the one built with the large-panel prefilter its
+   config asks for and, of those, the one with the current
+   `RESOLVABILITY_VERSION`.
 3. Run MapMyCells (seed 0, bootstrap factor 0.5, 100 iterations, raw
    normalisation, one BLAS thread per worker, `--drop_level
    CCN20230722_SUPT` for WMB) and parse the extended JSON at once into the
