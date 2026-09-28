@@ -1113,22 +1113,50 @@ def h4_summary(enrichment: pd.DataFrame) -> list[dict[str, Any]]:
     return rows
 
 
+# The headline H4 label set: plan §5.8 asks for labels no method made with the
+# held-out genes, so the headline is the WHB-only re-resolve of the held-out
+# re-map; the SEA-AD-voted sets saw the held-out genes (partly circular).
+H4_HEADLINE_SET = "m4_resolve_heldout_whb_only"
+H4_CIRCULAR_SETS: dict[str, str] = {
+    "m4_resolve_heldout": "partly circular (SEA saw held-out genes)",
+    "m4_production_confident": "circular (every method saw held-out genes)",
+}
+
+
 def h4_table_rows(summary: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Return the H4 criteria-table rows (one per label set, no diagnostics)."""
-    return [
-        criterion_row(
-            f"H4[{row['label_set']}]",
-            str(row["pair"]),
-            "proseg_hybrid",
-            f"{row['pair']}_{row['platform']}",
-            float(row["n_pass"]),
-            float(H4_MIN_CLASSES),
-            ">=",
-            note=f"classes passing of {row['n_scored']}; failing: {row['failing']}",
-        )
-        for row in summary
-        if not row.get("diagnostic", False)
-    ]
+    """Return the H4 criteria-table rows (one per label set, no diagnostics).
+
+    Every label set gets an ``H4[<set>]`` row; the non-circular headline set
+    (``H4_HEADLINE_SET``) also gives the plain ``H4`` row, and the sets whose
+    SEA-AD votes saw the held-out genes are labelled circular in the note.
+    """
+    rows = []
+    for row in summary:
+        if row.get("diagnostic", False):
+            continue
+        label_set = str(row["label_set"])
+        note = f"classes passing of {row['n_scored']}; failing: {row['failing']}"
+        caveat = H4_CIRCULAR_SETS.get(label_set)
+        if caveat is not None:
+            note = f"{caveat}; {note}"
+        names = [f"H4[{label_set}]"]
+        if label_set == H4_HEADLINE_SET:
+            names.insert(0, "H4")
+            note = f"headline (non-circular: no method saw the held-out genes); {note}"
+        for name in names:
+            rows.append(
+                criterion_row(
+                    name,
+                    str(row["pair"]),
+                    "proseg_hybrid",
+                    f"{row['pair']}_{row['platform']}",
+                    float(row["n_pass"]),
+                    float(H4_MIN_CLASSES),
+                    ">=",
+                    note=note,
+                )
+            )
+    return rows
 
 
 # ---------------------------------------------------------------------------
