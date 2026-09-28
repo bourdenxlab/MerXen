@@ -138,7 +138,11 @@ def _counts(cells: pd.DataFrame, seed: int) -> np.ndarray:
 
 
 def _write_prepared(
-    path: Path, cells: pd.DataFrame, counts: np.ndarray, platform: str
+    path: Path,
+    cells: pd.DataFrame,
+    counts: np.ndarray,
+    platform: str,
+    source: str = "prepared",
 ) -> Path:
     control = "Blank-0001" if platform == "MERSCOPE" else "NegControlProbe_00001"
     var = pd.DataFrame(index=pd.Index([*SYMBOLS, control], dtype=str))
@@ -147,7 +151,12 @@ def _write_prepared(
         var["ensembl_id"] = [*GENE_IDS, control]
     obs = pd.DataFrame(index=pd.Index(cells["cell_id"].astype(str)))
     obs["instance_id"] = np.arange(len(cells), dtype=np.int64) + 1000
-    adata = ad.AnnData(X=sparse.csr_matrix(counts), obs=obs, var=var)
+    matrix = sparse.csr_matrix(counts)
+    if source == "clustered":
+        adata = ad.AnnData(X=matrix.astype(np.float32), obs=obs, var=var)
+        adata.layers["counts"] = matrix
+    else:
+        adata = ad.AnnData(X=matrix, obs=obs, var=var)
     adata.obsm["spatial"] = cells[["x", "y"]].to_numpy(np.float64)
     adata.uns["spatialdata_attrs"] = {
         "instance_key": "instance_id",
@@ -376,7 +385,9 @@ def _run_record(
     )
 
 
-def _setup(root: Path, fake_mmc: FakeMmc, *, coverage: bool = False) -> Setup:
+def _setup(
+    root: Path, fake_mmc: FakeMmc, *, coverage: bool = False, source: str = "prepared"
+) -> Setup:
     config = _config()
     panel_dir, panel = _panel_dir(root / "map" / "panel")
     bundles = {
@@ -395,12 +406,13 @@ def _setup(root: Path, fake_mmc: FakeMmc, *, coverage: bool = False) -> Setup:
         counts = _counts(cells, seed + 10)
         sample_id = f"PX_{platform}"
         path = _write_prepared(
-            root / "prepared" / platform.lower() / f"{sample_id}_prepared.h5ad",
+            root / source / platform.lower() / f"{sample_id}_{source}.h5ad",
             cells,
             counts,
             platform,
+            source,
         )
-        samples.append(MapSample(sample_id, platform, path, "prepared"))
+        samples.append(MapSample(sample_id, platform, path, source))  # type: ignore[arg-type]
         calls[platform] = cells
     loaded = load_samples(samples, config, min_counts=10)
     records: dict[str, MapSampleRecord] = {}
@@ -426,7 +438,7 @@ def _setup(root: Path, fake_mmc: FakeMmc, *, coverage: bool = False) -> Setup:
         records[item.sample.sample_id] = MapSampleRecord(
             sample_id=item.sample.sample_id,
             platform=platform,
-            source="prepared",
+            source=item.sample.source,
             h5ad_path=str(item.sample.h5ad_path),
             sample_fingerprint=item.sample_fingerprint(),
             n_objects=item.n_objects,
@@ -962,3 +974,32 @@ def test_current_family_rederives_a_listed_family_from_an_old_panel_file() -> No
     assert refreshed.panel_family.family_id == "human_set_a"
     assert refreshed.panel_family.basis == "listed"
     assert pl.current_family(refreshed, _config()) is refreshed
+
+
+def test_published_clustered_inputs_keep_table_cells_below_min_counts(
+    tmp_path: Path, fake_mmc: FakeMmc, make_trust: MakeTrust
+) -> None:
+    setup = _setup(tmp_path, fake_mmc, source="clustered")
+    result = _resolve(setup, make_trust)
+    for sample in result.samples.values():
+        labels = sample.labels
+        assert labels[Columns.IN_TABLE].all()  # the published table
+        shallow = labels[Columns.TOTAL_COUNTS] < 10
+        assert shallow.any()
+        status = labels.loc[shallow, Columns.level("lineage", "status")].astype(str)
+        assert set(status) == {CellStatus.BELOW_FLOOR.value}
+        assert not labels[Columns.FLAG_LOW_COUNTS].any()
+
+
+def test_inhibitory_neurons_get_their_branch(make_trust: MakeTrust) -> None:
+    from merxen.annotation import consensus as cs
+
+    from .test_consensus import EXC, INH, Cell, Setup, calls_of
+
+    calls = calls_of([Cell(EXC, counts=300), Cell(INH, counts=300)])
+    result = cs.resolve_human(
+        calls, Setup(trust=make_trust("validated_real")).settings()
+    )
+    branch, leaf = pl.human_branch_columns(result)
+    assert branch.tolist() == ["Neurons/Excitatory", "Neurons/Inhibitory"]
+    assert leaf.tolist() == [EXC, INH]
