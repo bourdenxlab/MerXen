@@ -369,3 +369,11 @@ def test_spill_donors_reach_the_spill_amount() -> None:
     groups = test.obs[res.SPILL_GROUP_COLUMN]
     shallow = set(native[(native < amount) & (groups == "B")].index)
     assert shallow and not shallow & set(partners)
+
+
+def test_recipe_versions_agree_between_store_and_resolvability() -> None:
+    from merxen.annotation.store import RESOLVABILITY_RECIPE_VERSIONS
+
+    for name, version in RESOLVABILITY_RECIPE_VERSIONS.items():
+        assert res.RECIPE_VERSIONS[name] == version
+    assert RESOLVABILITY_RECIPE_VERSIONS[res.R3_RECIPE] == 1

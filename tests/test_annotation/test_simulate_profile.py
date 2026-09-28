@@ -192,7 +192,7 @@ def test_profile_cells_follow_the_raw_rule_and_the_bundle_decisions() -> None:
     assert table["cov_class_prov"].tolist() == [True, False, False, False, False]
     assert table["cov_subclass_prov"].tolist() == [True, False, False, False, False]
     assert set(table["truth_leaf"]) == {"001 Sub"}
-    metrics = simulate.profile_metrics(table, "mouse")
+    metrics = simulate.profile_metrics(table)
     prediction = simulate.per_class_predictions(table, None, metrics)
     overall = prediction.set_index("class").loc["ALL"]
     assert overall["cov_class_rule73"] == 1.0

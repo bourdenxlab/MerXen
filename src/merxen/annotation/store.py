@@ -111,7 +111,14 @@ STORE_SCHEMA_VERSION: Final = 2
 # (build_hash_payload) of every builder that finds markers.
 # Simulation recipes of the resolvability self-map and their versions (§8.3).
 # They enter build_hash once a builder writes resolvability outputs (M3b).
-RESOLVABILITY_RECIPE_VERSIONS: Final[dict[str, int]] = {"R1_contam_HO": 1}
+# Version 7 (M3c) adds the measured-efficiency member and the cross-tissue
+# human stress recipe; a version-7 build_hash holds each member's recipe and
+# table sha256 (resolvability.v7_simulation_payload).
+RESOLVABILITY_RECIPE_VERSIONS: Final[dict[str, int]] = {
+    "R1_contam_HO": 1,
+    "R3_measured_HO": 1,
+    "R1_xtissue_lung_stress": 1,
+}
 
 HEAD_TAIL_BYTES: Final = 64 * 1024 * 1024
 _READ_CHUNK_BYTES: Final = 8 * 1024 * 1024

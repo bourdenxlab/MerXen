@@ -2311,7 +2311,7 @@ def _weighted_mean(values: np.ndarray, weights: np.ndarray) -> float | None:
     return float(np.sum(values[ok] * weights[ok]) / np.sum(weights[ok]))
 
 
-def profile_metrics(table: pd.DataFrame, species: str) -> list[str]:
+def profile_metrics(table: pd.DataFrame) -> list[str]:
     """Return the coverage and precision metrics a profile table carries."""
     coverage = [column for column in table.columns if column.startswith("cov_")]
     precision = []
@@ -2713,9 +2713,7 @@ def run_profile_mode(
             if real_share is not None and not table.empty
             else None
         )
-        prediction = per_class_predictions(
-            table, weights, profile_metrics(table, species)
-        )
+        prediction = per_class_predictions(table, weights, profile_metrics(table))
         predictions[member.name] = prediction
         member_records[member.name] = {
             "recipe": member.recipe.to_json(),
