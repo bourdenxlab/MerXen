@@ -585,8 +585,35 @@ the dwight values in `workflows/conf/dwight.annotation.config`.
 | `annotation_max_forks` | `2` (applied on Dwight) | Concurrent `CLUSTERING_SQUIDPY_ANNOTATE_MAP` tasks (6 CPUs and 24 GB each, 48 GB above 1,000 panel genes). |
 | `annotation_resolve_max_forks` | Dwight: `4` | Concurrent `CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE` tasks (2 CPUs and 16 GB each, 32 GB above 1,000 panel genes; about a minute per pair × segmentation). |
 | `annotation_allow_single_method` | `false` | Human degraded mode: in the WHB-only mode (no usable SEA-AD run), let WHB decide alone below 60 counts, recorded in the provenance (otherwise those cells get status `single_method`; plan §5.3). Only RESOLVE reads it, so changing it re-runs `CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE` alone under `-resume`, never MAP. |
+| `annotation_allow_fine_levels` | `false` | Report-only fine levels (OD-E4): the WHB cluster (human) or WMB supertype (mouse) columns `ct_cluster_*` / `ct_supertype_*` in the label table, emitted only where resolvability validates them; never a hierarchy leaf. PREP's fine-level seed check reads it too, so it is in the shared annotation config. |
+| `annotation_human_region` | `frontal_cortex` | Human anatomical region (also the samplesheet column `anatomical_region`): which WHB superclusters are region-plausible (`flag_implausible`, H2). Only `frontal_cortex` is validated; any other value is refused (plan §8.9, OD-C7). |
+| `annotation_human_microglia_flag` | `false` | Human microglial spill-over flag (OD-C5: off; RESOLVE writes `flag_microglial_spillover` as null with the reason in the provenance). Not wired yet. |
+| `annotation_mouse_section_regions`, `annotation_mouse_lkloc` | `auto`; `false` | Mouse region inference (also the samplesheet column `mouse_section_regions`) and the optional mouse glial second opinion (report only); mouse RESOLVE is M6. |
+| `annotation_calibration_holdout_donor` | `auto` | The held-out WHB donor of the resolvability test set (`auto` = H19.30.002); v1.1 calibration uses it too. |
+| `annotation_report_enabled`, `annotation_report_max_forks` | `true`; Dwight: `2` | `ANNOTATION_REPORT` (M7). |
+| `annotation_mode_mapmycells_stage` | `legacy` | The legacy `mapmycells` stage in `map_first` runs; the flip PRs set `skip`. |
 | `annotation_reuse_published` | `true` | MAP copies a run from the published `<pair>/<seg>/annotation_map/annotation_map_out/map_manifest.json` instead of re-mapping when its query fingerprint, `build_hash`, engine parameters and ctm version are unchanged (Dwight prunes work directories, so `-resume` alone cannot). |
 | `annotation_keep_extended_json` | `false` | Keep each MapMyCells extended JSON, gzipped, next to its tidy parquet (by default it is parsed and deleted). |
+
+**RESOLVE rule settings have no pipeline params.** The thresholds, targets,
+floors, dataset gate and flag settings RESOLVE applies are the
+pre-registered defaults of `merxen.annotation.config` (plan §3.7, §14);
+changing one is a rule change that needs its own PR (and, for a criterion's
+threshold, the loosening rule of the pre-registration). The standalone
+commands take them from `--annotation-config`; the pipeline writes the
+defaults into each task's `annotation_config.json`, and the RESOLVE rules
+fingerprint re-runs RESOLVE when the packaged tables or the code change.
+
+| Model | Setting | Default | Meaning |
+|---|---|---|---|
+| `AnnotationThresholds` | `whb_broad`, `whb_supercluster`, `seaad_broad` | 0.73, 0.69, 0.68 | Raw bootstrap-probability thresholds (lineage and NT use `whb_broad`); raised (never lowered) to a bundle's recorded default or, outside real-data-validated families, to the resolvability table's local threshold. |
+| | `seaad_subclass_below60`, `seaad_subclass_from60`, `second_vote_below_counts` | 0.55, 0.45, 60 | SEA-AD subclass thresholds, and the depth below which SEA-AD must agree (from 60 counts it may only veto). |
+| | `target_*`, `provisional_target_margin`, `provisional_target_margin_below60`, `provisional_target_cap` | 0.90 (lineage, broad, NT, class), 0.85 (supercluster, subclass); 0.05, 0.10, 0.97 | Resolvability precision targets, and the margins of provisional and simulation-validated families. |
+| | `floors_path`, `allow_fine_levels`, `max_leaf_level` | packaged `floors_<species>.csv`; `false`; human `supercluster`, mouse `subclass` | Class × platform count floors (unknown panels take the maximum over platforms), the report-only fine levels, the deepest emitted level. |
+| `AnnotationGate` | `depth_counts`, `min_frac_ge30`, `min_table_broad_coverage`, `warn_segmented_broad_coverage`, `warn_unvalidated_share` | 30, 0.30, 0.25, 0.15, 0.10 | Dataset gate: `broad_only` when fewer than 30% of table cells reach 30 counts, `failed` below 25% confident broad coverage of table cells; a warning (never a lower level) below 15% coverage of segmented objects or, for simulation-validated families, above 10% confident calls outside the validated region. |
+| `AnnotationFlagsConfig` | `contamination_alpha`, `contamination_min_neg_counts`, `contamination_null_depth_quantile`, `contamination_min_null_cells`, `negative_gene_max_fraction` | 0.01, 3, 0.75, 30, 0.01 | Contamination flag: beta-binomial null fitted per class × platform on the confident cells in the top depth quartile (at least 30), flag at p < 0.01 with at least 3 negative counts; negative genes detected in < 1% of the class's cells in both references. |
+| | `flag_rate_uninformative_above`, `diffuse_quantile`, `diffuse_n_simulations`, `diffuse_rate_uninformative_above` | 0.15, 0.95, 200, 0.30 | Realised-rate switches (a contamination stratum above 15%, a diffuse stratum above 30% is uninformative and its flag null; H16 marks every stratum above 15%), and the diffuse flag's multinomial q95. |
+| | `ood_robust_z`, `ood_min_cells` | -3.0, 30 | OOD flag: robust z of `avg_correlation` within class × platform × depth bin (strata of at least 30 cells). |
 
 ### Resource limits
 

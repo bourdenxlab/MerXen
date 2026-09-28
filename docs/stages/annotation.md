@@ -960,6 +960,49 @@ Per sample:
    (`not_attempted_gate`, gate `failed`, `exclude_hard`); mouse RESOLVE is
    M6.
 
+### Human rules v1 (`consensus.resolve_human`, §5.2)
+
+Raw bootstrap probabilities (float32-tolerant: a stored 0.69 meets 0.69) are
+compared with the v1 thresholds, raised where a bundle or, outside
+real-data-validated families, a local resolvability threshold asks for more.
+
+| Level | Confident when |
+|---|---|
+| Lineage | WHB lineage-summed probability >= 0.73, the node is plausible (not a sink, plausible for the region), counts >= the floor, resolvability emits it, and the second vote passes: below 60 counts SEA-AD agrees at lineage; from 60 SEA-AD does not confidently (>= 0.68) call another lineage. An implausible node keeps its lineage when SEA-AD agrees at lineage. |
+| Broad | Confident lineage, broad-summed probability >= 0.73, the class × platform broad floor, resolvability, and the same vote at the seven-class level. **COP rule:** a WHB "Committed oligodendrocyte precursor" call is broad OPC only with >= 120 counts and supercluster probability >= 0.69, or when SEA-AD confidently calls OPC; otherwise it stays at lineage (`Oligodendrocyte lineage/unresolved` branch) with `flag_cop_suppressed`. |
+| NT | Neurons only (others `not_applicable`): confident broad, the Exc / Inh probability, the broad floor, resolvability; no second vote. |
+| Supercluster | Confident parent (NT for neurons, else broad), gate `full` (a warning does not block), probability >= 0.69, the supercluster floor (COP 120), resolvability. |
+| SEA-AD subclass | Secondary name, never in `ct_final`: gate `full`, confident WHB broad that SEA-AD's class agrees with, the supercluster floor of the class, SEA-AD's threshold (0.55 below 60 counts, 0.45 from 60), the leaf's resolvability. |
+
+The final label is the deepest confident level along lineage → broad → NT →
+supercluster (`Mixed/Unknown` when none). When several checks fail the
+status is the first of `low_counts` > `not_attempted_gate` >
+`not_applicable` > `implausible` > `parent_unresolved` > `below_floor` >
+`not_resolvable` > `low_confidence` > (COP rule) > `single_method` /
+`method_disagree` ([statuses](../outputs.md#label-table-schema-sid_celltype_labelsparquet)).
+
+**Degraded modes** (§5.3; `consensus.DEGRADED_MODES`, one truth table):
+
+| Mode | When | Below 60 counts | Maximum tier |
+|---|---|---|---|
+| `whb_sea` | v1 default | SEA-AD must agree; from 60 it may veto | 2 |
+| `whb_only` | SEA-AD failed, disabled or refused for the panel | `single_method` (not confident), unless `annotation_allow_single_method` (WHB decides alone, recorded) | 1 |
+| `primary_missing` | WHB failed or refused | statuses only (`not_attempted_gate`) | 0 |
+| `whb_sea_ll`, `whb_ll` | table rows only: the likelihood-typer vote is not enabled in v1 or v1.1 (OD-B8, decided 2026-09-27) | – | – |
+
+**Dataset gate** (§5.4): `broad_only` when fewer than 30% of table cells
+reach 30 counts (A < 0.30), `failed` when confident broad coverage of table
+cells is below 0.25, otherwise `full`; a warning flag (never a lower level)
+when confident broad coverage of segmented objects is below 0.15, or when a
+simulation-validated family has more than 10% of its confident calls
+outside the validated region. A provisional panel warns and shows the
+banner. **Flags are report-only**: `discovery_caution` marks cells for
+downstream sensitivity analyses (OD-B5: keep, covariate, with / without),
+and no flag changes a status. The realised rates per flag × class ×
+platform are in the resolve summary (`flags.strata`: `rate` over the
+stratum's confident broad calls, `rate_all` over its table cells,
+`informative` for the §4.3 switch, `informative_h16` for H16's 15% mark).
+
 ## Shadow baselines (M3)
 
 `scripts/acceptance/shadow_baselines.py` scores `merxen annotate` outputs of
@@ -986,6 +1029,8 @@ reading the `merxen annotate` outputs and the published inputs read-only:
 | `scripts/acceptance/shadow_flags.py` | 5, H16 | Prototype contamination (dataset-empirical beta-binomial null) and diffuse-profile (multinomial q95) flags; realised rates per class × platform |
 | `scripts/acceptance/shadow_ll.py` | 6, OD-B8 / OD-B13 | LL (vii) on every table cell; coverage and referee outcomes with and without the LL vote |
 | `scripts/acceptance/shadow_glial_jsd.py` | 7 | WHB vs SEA-AD glial JSD with a paired block-bootstrap CI |
+| `scripts/acceptance/resolve_criteria.py` | M4 | The human criteria (H1–H5, H7–H10, H16, H17) re-measured on `merxen annotate-resolve` label tables, with the pre-registered thresholds and the flip rule; H4 on the held-out re-maps, including RESOLVE itself run with the held-out WHB call |
+| `scripts/acceptance/marker_pseudo_labels.py` | M4, H9 | Ports of the marker pseudo-label methods of the P7513 (§C) and P1212 (§4) dataset reports, for H9 and H17 |
 
 The results and the decisions they feed (X1, OD-B6 / OD-B7, OD-B8, OD-B13, the
 H4 and H16 baselines) are in §11 of the pre-registration document.
@@ -1083,6 +1128,26 @@ H4 and H16 baselines) are in §11 of the pre-registration document.
   on 0-5 with seeds 1 and 2; F = 18.1, p = .01). How the gate should treat
   this spread (the pre-registered seed-0 draw, several draws, or the worst
   of them) is open for the user; no verdict is recorded as a pass meanwhile.
+- **RESOLVE's resolvability exceptions remove confident oligodendrocyte-lineage
+  labels on the shallow MERSCOPE sections** (M4 shadow run, 2026-09-28;
+  `m4/STAGE_D_REPORT.txt`, `m4/CRITERIA_AFTER_M4.txt`). Without the
+  resolvability tables RESOLVE reproduces the M3 shadow coverage exactly;
+  with the version-6 tables reweighted to each dataset, broad
+  Oligodendrocytes are not emitted at 10-60 counts on P5011 MERSCOPE (no
+  confident broad Oligodendrocytes at all, against 14.8% of table cells
+  without the tables) and at 10 counts on P1212 MERSCOPE (15.8% vs 24.0%),
+  and broad OPC at 10-15 counts on every dataset. The cells keep their
+  confident lineage (branch `Oligodendrocyte lineage/unresolved`) and the
+  soft compositions (`soft_broad_*`, H1) are unaffected, but confident-only
+  compositions of these sections undercount the oligodendrocyte lineage.
+  Confident broad coverage falls by .093 (P1212 MERSCOPE) and .171 (P5011
+  MERSCOPE) against M3, H7 fails on P5011 MERSCOPE (.288 < .30) and P1212
+  MERSCOPE gets the gate warning (.120 of segmented objects). In the set a
+  self-map the wrong broad Oligodendrocyte calls are COP test cells called
+  Oligodendrocyte; scoring those as correct at the broad level (a candidate
+  fix for the M8 gate PR, measured but not adopted) restores every broad
+  Oligodendrocyte label (P1212 / P5011 MERSCOPE broad coverage .427 / .436).
+  A decision for the gate PR (OD-B14).
 - **Set c of families without a curated list** uses the label-free rule,
   which drops far more genes than E5's validated set c (44-73 per pair on the
   E5 pairs); treat such set-c results as provisional.
