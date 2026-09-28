@@ -463,18 +463,41 @@ def _prefer_current_resolvability(candidates: list[StoreEntry]) -> list[StoreEnt
     A ``RESOLVABILITY_VERSION`` bump gives rebuilt bundles a new
     ``build_hash`` next to the old ones on the same panel; a standalone run
     then takes the current tables. Bundles without a self-map, or several
-    current ones, stay ambiguous.
+    current ones, stay ambiguous. When no candidate has the current tables
+    (a panel not rebuilt since the bump), the older ones are kept and a
+    warning names their versions: their self-map tables are stale until the
+    panel is rebuilt (a pipeline run's PREP rebuilds them).
     """
-    if len(candidates) <= 1:
-        return candidates
     from merxen.annotation.resolvability import RESOLVABILITY_VERSION
 
+    versions = [_resolvability_version(entry) for entry in candidates]
     current = [
         entry
-        for entry in candidates
-        if _resolvability_version(entry) == RESOLVABILITY_VERSION
+        for entry, version in zip(candidates, versions, strict=True)
+        if version == RESOLVABILITY_VERSION
     ]
-    return current or candidates
+    if current:
+        return current if len(candidates) > 1 else candidates
+    stale = [
+        (entry, version)
+        for entry, version in zip(candidates, versions, strict=True)
+        if version is not None
+    ]
+    if stale:
+        logger.warning(
+            "no bundle of %s on panel %s has the current self-map tables "
+            "(resolvability version %d); %s: their resolvability tables are "
+            "stale until the panel is rebuilt with merxen "
+            "annotation-reference-prep",
+            candidates[0].reference_id,
+            str(candidates[0].panel_hash or "-")[:16],
+            RESOLVABILITY_VERSION,
+            ", ".join(
+                f"{entry.path.name[:16]} has version {version}"
+                for entry, version in stale
+            ),
+        )
+    return candidates
 
 
 def locate_bundle(

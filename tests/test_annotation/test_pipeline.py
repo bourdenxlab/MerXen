@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -1187,6 +1188,55 @@ def test_locate_bundle_prefers_the_current_resolvability_version(
     )
     with pytest.raises(MapError, match="2 bundles"):
         locate_bundle(store, "whb_frontal_supc_clus", panel.panel_hash)
+
+
+def test_locate_bundle_warns_when_only_stale_self_map_tables_exist(
+    tmp_path: Path, fake_mmc: FakeMmc, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A panel not rebuilt since a RESOLVABILITY_VERSION bump (the M3b large
+    # store) keeps its older bundle: standalone runs still find it, and the
+    # log names its stale version (M3b review 3).
+    from merxen.annotation.resolvability import RESOLVABILITY_VERSION
+
+    panel = _panel(GENE_IDS)
+    common: dict[str, Any] = {
+        "role": "primary",
+        "species": "human",
+        "panel_hash": panel.panel_hash,
+        "n_genes": panel.n_genes,
+        "levels": WHB_LEVELS,
+        "nodes": WHB_NODES,
+    }
+    path = fake_mmc.bundle("whb_frontal_supc_clus", build_hash="a" * 64, **common)
+    manifest = json.loads((path / "bundle.json").read_text())
+    manifest["builder_output"]["resolvability"] = {
+        "resolvability_version": RESOLVABILITY_VERSION - 2
+    }
+    (path / "bundle.json").write_text(json.dumps(manifest))
+    store = ReferenceStore(fake_mmc.root)
+    with caplog.at_level(logging.WARNING, logger="merxen.annotation.pipeline"):
+        found = locate_bundle(store, "whb_frontal_supc_clus", panel.panel_hash)
+        finder = store_subset_bundle_finder(store)
+        subset = finder("whb_frontal_supc_clus", panel.panel_hash)
+    assert found.path == path
+    assert subset is not None and subset.path == path
+    stale = [record for record in caplog.records if "stale" in record.getMessage()]
+    assert len(stale) == 2
+    assert f"has version {RESOLVABILITY_VERSION - 2}" in stale[0].getMessage()
+    assert f"resolvability version {RESOLVABILITY_VERSION})" in stale[0].getMessage()
+    # A current bundle, or one without a self-map, logs nothing.
+    caplog.clear()
+    manifest["builder_output"]["resolvability"] = {}
+    (path / "bundle.json").write_text(json.dumps(manifest))
+    with caplog.at_level(logging.WARNING, logger="merxen.annotation.pipeline"):
+        locate_bundle(store, "whb_frontal_supc_clus", panel.panel_hash)
+    manifest["builder_output"]["resolvability"] = {
+        "resolvability_version": RESOLVABILITY_VERSION
+    }
+    (path / "bundle.json").write_text(json.dumps(manifest))
+    with caplog.at_level(logging.WARNING, logger="merxen.annotation.pipeline"):
+        locate_bundle(store, "whb_frontal_supc_clus", panel.panel_hash)
+    assert not [record for record in caplog.records if "stale" in record.getMessage()]
 
 
 def test_locate_bundle_takes_the_bundle_of_the_configured_prefilter(
