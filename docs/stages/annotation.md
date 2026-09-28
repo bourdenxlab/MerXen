@@ -328,6 +328,16 @@ per-bin weights, a deep bin where a dataset lacks a type let one row carry
 a whole set (ag7: 69 calls, Kish n 1). Reweighted decisions take 1.5–1.8 s
 per human dataset and 3.2–3.6 s on ag7.
 
+**Resolvability version 4** (M3b review 2, 2026-09-28;
+`m3b/review2/REVIEW2_H18.txt`) gives every self-map bundle a new build
+hash again. Rebuilt at 8 processes: set a WHB 4.2 min (held-out test set
+included), SEA-AD 2.1, set c WHB 4.1, ag7 36.7 min (20.2 GB) and VZG2
+44.7 min (27.1 GB). The set a test set holds 11,732 cells (the donor's
+8,777 without Miscellaneous 227, Splatter 22 and Amygdala excitatory 6,
+plus the same 2,955 other-region nuclei); the mouse cells tables are
+identical to version 3. Every stored summary equals the decisions RESOLVE
+re-derives from the stored cells (0 differing bins in the five bundles).
+
 ### Bundle files
 
 | File | Content |
@@ -525,17 +535,23 @@ come from `merxen annotation-panel-fetch`. `--gate-p` is the M13 hook for
 the gate-P programme; it is refused until M13 registers it.
 
 **Measured on the four public 10x panels** (M3b, 8 processes on the shared
-host, the production configuration; `m3b/simulate/` in the evidence
-archive; classes emitted per depth bin in the `provisional` regime, of 8
+host, the production configuration, resolvability version 4;
+`m3b/review2/simulate/` in the evidence archive, `m3b/simulate/` for
+version 3; classes emitted per depth bin in the `provisional` regime, of 8
 broad / 9 supercluster human and 34 mouse classes, with enough test cells
 for 8 / 9 / 24 of them):
 
 | Panel | Genes | Primary level: classes emitted per depth | Wall (from scratch) | Peak (largest process) | Disk |
 |---|---|---|---|---|---|
-| Xenium Human Brain v1 | 266 | broad 5 / 6 / 7 at 10 / 30 / 60+; supercluster 4 / 7 at 10 / 30+ | 6.6 min (WHB + SEA-AD) | 2.9 GB | 1.9 + 0.4 GB |
-| Xenium Prime 5K Human | 5,001 | broad 0 / 2 / 6 / 7 / 8 at 10 / 20 / 50 / 100 / 250; supercluster 7 at 100–250, 8 at 500 | 10.1 min | 2.9 GB | 1.9 + 0.5 GB |
-| Xenium Mouse Brain v1 | 248 | class 3 / 12 / 21 at 50 / 100 / 250+; subclass 4 / 19 / 21 | 26 min | 8.3 GB | 1.4 GB |
-| Xenium Prime 5K Mouse | 5,006 | class 5 / 16 / 24 at 100 / 250 / 500+; subclass 3 / 18 / 23 | 92 min | 21.3 GB (tree PSS 27.2 GB) | 16.2 GB (13.2 GB reference markers) |
+| Xenium Human Brain v1 | 266 | broad 6 / 5 / 7 at 10 / 15 / 30+; supercluster 5 / 5 / 7 / 8 at 10 / 15 / 30 / 60+ | 6.0 min (WHB + SEA-AD) | 2.9 GB | 1.9 + 0.4 GB |
+| Xenium Prime 5K Human | 5,001 | broad 0 / 3 / 7 / 7 / 8 at 10 / 20 / 50 / 100 / 250–500, 7 above; supercluster 1 / 6 / 7 / 8 at 20 / 50 / 100 / 250–500 | 8.3 min | 2.9 GB | 1.9 + 0.5 GB |
+| Xenium Mouse Brain v1 | 248 | class 3 / 12 / 21 at 50 / 100 / 250+; subclass 4 / 19 / 21 | 25 min | 8.3 GB | 1.4 GB |
+| Xenium Prime 5K Mouse | 5,006 | class 5 / 16 / 24 at 100 / 250 / 500+; subclass 3 / 18 / 23 | 90 min | 21.3 GB (tree PSS 22.9 GB) | 16.2 GB (13.2 GB reference markers) |
+
+Version 4 left the held-out Miscellaneous / Splatter cells out of the human
+test set: their calls to Exc had been scored wrong, so the 5K human WHB
+broad Exc was emitted only from 250 counts and SEA-AD broad Exc never (now
+from 20 and 50); the mouse panels do not change (same test set).
 
 A 5K pan-tissue panel needs more counts than a brain panel for the same
 classes (mouse class at 100 counts: 5 of 24 classes vs 12 for the 248-gene
@@ -837,37 +853,46 @@ H4 and H16 baselines) are in §11 of the pre-registration document.
   genes too, and their lookups differed from the validated ones in 301 and
   142 of 368 parents (median Jaccard 0.979 and 0.992).
 - **H18 does not pass as written on the validated panels** (resolvability
-  version 3, after the user's decisions of 2026-09-27; a decision for the
-  gate PRs; `m3b/followup/H18_FOLLOWUP.txt`). Pooling deep bins alone
-  (decision 1, old test set) leaves one exception on set a (PREP): broad
-  OPC at 15 counts, also on all eight reweighted datasets. With the
-  other-region cells (decision 2) set a PREP fails broad Astro at 120 (101
-  calls, precision .931, Wilson .864 < .88) and broad and supercluster
-  Oligo at 120 (the wrong calls are other-region COP cells called
-  Oligodendrocyte); reweighted, broad OPC 15 and broad Oligo 120 fail on
-  all eight datasets, supercluster Oligo 120 on seven, broad Oligo also at
-  15–60 on three, broad Fibroblast 15 on two Xenium datasets and broad and
-  supercluster Immune 60 on P5011 MERSCOPE. COP supercluster is never
-  emitted (Oligodendrocyte cells called COP). Mouse: VZG2 passes for every
-  class with ≥ 50 test cells; ag7 fails the Immune subclass at 100 counts
-  (precision .885) and, reweighted, one to three classes (three to six
-  subclasses) that its datasets hardly contain. Validated thresholds the local rule would raise: set a 34
-  (PREP), SEA-AD 15, set c 14, ag7 156, VZG2 196, each listed in
-  `resolvability_summary.json` (`validated_thresholds_would_raise`, and
-  `would_raise` on each pooled set).
-- **The H7 coverage proxy misses on P7513 MERSCOPE under version 3.** The
+  version 4, M3b review 2; a decision for the gate PRs;
+  `m3b/review2/REVIEW2_H18.txt`). Set a (PREP) fails broad Astro and broad
+  and supercluster Oligo at 120 counts (86-111 calls, precision .85-.88;
+  the wrong Oligo calls are other-region COP cells called
+  Oligodendrocyte, the wrong Astro calls held-out-donor neurons with
+  spill) and, in the version-4 draw, supercluster Astro at 120.
+  Reweighted to the eight human datasets 25 (level, class) pairs fail
+  (version 3: 27): broad OPC at 15 on four datasets, broad Oligo on seven
+  (at 120 on P7513, P1212 and P7113 Xenium and P1212 MERSCOPE, at 15 on
+  P7513 MERSCOPE, at 15-120 on both P5011), supercluster Oligo on six, broad
+  Fibroblast at 15 on four, broad and supercluster Immune at 60 on P1212
+  and P5011 MERSCOPE. The version-3 Oligo 120 failures of the two
+  MERSCOPE datasets were an artifact of trimming weights against the whole
+  depth bin (every glial type got the same capped weight); trimmed within
+  the tested set they pass. The truth exclusion alone changes no set a
+  verdict; the rebuilt bundles redraw the thinning and contamination of
+  every cell, which moves 0-7 of 85 validated broad / supercluster bins per
+  dataset. COP supercluster is never emitted (Oligodendrocyte cells called
+  COP). Mouse: VZG2 passes for every class with ≥ 50 test cells; ag7 fails
+  the Immune subclass at 100 counts (precision .885) and, reweighted, only
+  05 OB-IMN GABA at 250 on proseg_hybrid and reseg (version 3: one to
+  three classes and three to six subclasses, mostly artifacts of counting
+  zero-weight calls and of pooled verdicts overriding judged bins).
+  Validated thresholds the local rule would raise, counting only bins
+  whose fit half holds 50 calls (at D ≥ 15 broad, 30 supercluster, 20
+  class, 50 subclass): set a 20 (PREP; 15-23 reweighted), SEA-AD 10, set
+  c 13, ag7 40, VZG2 68; 2, 0, 2, 94 and 104 bins have no fit and are
+  listed as `validated_thresholds_not_evaluable` (version 3 counted them
+  as raises: 34, 15, 14, 156, 196).
+- **The H7 coverage proxy misses on P5011 MERSCOPE under version 4.** The
   confident broad share of table cells after reweighting (validated
   regime; it ignores the SEA-AD vote, the COP rule on real cells and the
-  floors, so the real H7 values will be lower) is, version 2 → decision 1
-  alone → version 3: P7513 MERSCOPE .532 → .638 → .576 (H7 asks ≥ .62),
-  P7113 MERSCOPE .666 → .713 → .692 (≥ .67), P1212 MERSCOPE .410 → .410 →
-  .436 (≥ .34), P5011 MERSCOPE .435 → .435 → .311 (≥ .30); the Xenium
-  datasets pass throughout. The version-3 losses are broad Oligo bins: the
-  other-region COP cells are called Oligodendrocyte, and they weigh more
-  where a dataset's own calls hold much COP (4–13% per depth bin on P7513
-  and P5011 MERSCOPE). Without the other-region cells of clusters the
-  held-out training reference lacks (a sensitivity, not the rule) P7513
-  MERSCOPE reaches .611 and P5011 MERSCOPE .445.
+  floors, so the real H7 values will be lower) is, version 3 → version-4
+  rules on the version-3 cells → version 4 (rebuilt): P7513 MERSCOPE .576
+  → .683 → .683 (H7 asks ≥ .62), P7113 MERSCOPE .692 → .739 → .739 (≥ .67),
+  P1212 MERSCOPE .436 → .436 → .354 (≥ .34), P5011 MERSCOPE .311 → .311 →
+  .297 (≥ .30); the Xenium datasets pass throughout. The version-4 drops
+  on P1212 and P5011 MERSCOPE come from the new simulation draw (broad
+  Oligo and Fibroblast at 10-30 counts, which hold many of these
+  low-count datasets' cells), not from the rules or the truth exclusion.
 - **Set c of families without a curated list** uses the label-free rule,
   which drops far more genes than E5's validated set c (44-73 per pair on the
   E5 pairs); treat such set-c results as provisional.
