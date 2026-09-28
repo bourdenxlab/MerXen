@@ -221,9 +221,8 @@ def test_depth_profile_shares_and_resolvable_share() -> None:
 
 def test_reference_sources_match_the_nextflow_source_params() -> None:
     groovy = (REPO / "workflows" / "lib" / "AnnotationReferences.groovy").read_text()
-    block = groovy[
-        groovy.index("SOURCE_PARAMS = [") : groovy.index("].asImmutable()\n\n")
-    ]
+    start = groovy.index("SOURCE_PARAMS = [")
+    block = groovy[start : groovy.index("].asImmutable()\n\n", start)]
     parsed: dict[str, dict[str, str]] = {}
     current = None
     for line in block.splitlines():

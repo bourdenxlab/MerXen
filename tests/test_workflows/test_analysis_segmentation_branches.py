@@ -61,17 +61,18 @@ def test_downstream_modules_publish_under_segmentation_branch() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     module_dir = repo_root / "workflows" / "modules"
 
-    expectations = {
-        "qc.nf": "/${segmentation}/qc",
-        "comparison.nf": "/${segmentation}/comparison",
-        "visualization.nf": "/${segmentation}/visualization",
-        "spatial_gene_analysis.nf": "/${segmentation}/spatial_gene_analysis",
-        "clustering_squidpy.nf": "/${segmentation}/clustering_squidpy",
-        "mapmycells.nf": "/${segmentation}/mapmycells",
-        "annotation.nf": "/${segmentation}/annotation_map",
-    }
-    for filename, expected in expectations.items():
-        assert expected in (module_dir / filename).read_text()
+    expectations = [
+        ("qc.nf", "/${segmentation}/qc"),
+        ("comparison.nf", "/${segmentation}/comparison"),
+        ("visualization.nf", "/${segmentation}/visualization"),
+        ("spatial_gene_analysis.nf", "/${segmentation}/spatial_gene_analysis"),
+        ("clustering_squidpy.nf", "/${segmentation}/clustering_squidpy"),
+        ("mapmycells.nf", "/${segmentation}/mapmycells"),
+        ("annotation.nf", "/${segmentation}/annotation_map"),
+        ("annotation.nf", "/${segmentation}/annotation_resolve"),
+    ]
+    for filename, expected in expectations:
+        assert expected in (module_dir / filename).read_text(), (filename, expected)
 
 
 def test_nextflow_uses_row_level_settings_and_continues_after_task_errors() -> None:
