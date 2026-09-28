@@ -7613,6 +7613,124 @@ def build_summary_v7(
     return summary
 
 
+TRUST_GUARD_VERSION: Final = 1
+_TRUST_SEVERITY: Final[dict[str | None, int]] = {"refused": 0, "broad_only": 1, None: 2}
+
+
+def member_uses_assets(member: EnsembleMember) -> bool:
+    """Whether a member's efficiency comes from a simulation-input asset.
+
+    ``R3_measured_HO`` (a ``member`` factor table) and the stress recipe
+    ``R1_xtissue_lung_stress`` (a ``stress`` ratio table) do; the R1 and
+    clean recipes (a keyed LogNormal draw, or none) do not.
+    """
+    return member.recipe.efficiency_table is not None
+
+
+def lower_trust_constraint(
+    first: TrustConstraint, second: TrustConstraint
+) -> TrustConstraint:
+    """Return the more severe of two trust constraints (refused < broad_only < none).
+
+    Ties keep ``first`` (its reasons and statistics).
+    """
+    if _TRUST_SEVERITY[second.state] < _TRUST_SEVERITY[first.state]:
+        return second
+    return first
+
+
+def asset_free_trust(
+    cells: pd.DataFrame,
+    levels: Sequence[LevelMeta],
+    depths: Sequence[int],
+    settings: RuleSettings,
+    ensemble: EnsembleSettings,
+    *,
+    members: Sequence[EnsembleMember],
+    neuronal: Mapping[str, bool | None],
+    trust: TrustConstraint,
+) -> tuple[TrustConstraint, dict[str, Any]]:
+    """Guard the trust constraint against simulation-input assets (v7; §14 (v)).
+
+    Simulation inputs never promote trust (OD-E1 as amended, user decision 1).
+    When an emission member uses an asset (``R3_measured_HO``), the ensemble
+    of the asset-free emission members (the R1 draws) is decided on the same
+    cells and the trust constraint is the more severe of the two, so that for
+    every set of assets the trust state is at most its state without any
+    asset: an asset can lower the constraint (as real data can), never raise
+    it. Emission and floors keep the full ensemble.
+
+    Args:
+        cells: The cells table of every member.
+        levels: Level metadata.
+        depths: The depth grid.
+        settings: Rule settings.
+        ensemble: Ensemble settings.
+        members: Every member.
+        neuronal: Class lineage.
+        trust: The full ensemble's trust constraint.
+
+    Returns:
+        ``(guarded constraint, summary record)``.
+    """
+    emission = [member for member in members if member.role == "emission"]
+    with_assets = [member.name for member in emission if member_uses_assets(member)]
+    free = [member.name for member in emission if not member_uses_assets(member)]
+    record: dict[str, Any] = {
+        "version": TRUST_GUARD_VERSION,
+        "rule": (
+            "the more severe of the full ensemble's constraint and the "
+            "asset-free emission members' ensemble constraint"
+        ),
+        "asset_members": with_assets,
+        "asset_free_members": free,
+        "ensemble_state": trust.state,
+        "applied": False,
+        "asset_free_state": trust.state,
+        "state": trust.state,
+    }
+    if not with_assets:
+        record["note"] = "no emission member uses a simulation-input asset"
+        return trust, record
+    if not free:
+        # Every emission member uses an asset: nothing is free of them, so
+        # the family keeps no resolvability-based trust beyond broad-only.
+        guarded = TrustConstraint(
+            state="broad_only",
+            reasons=["every emission member uses a simulation-input asset"],
+            broad_emitted_bins=trust.broad_emitted_bins,
+            leaf_share_by_depth=dict(trust.leaf_share_by_depth),
+            leaf_classes=list(trust.leaf_classes),
+        )
+        guarded = lower_trust_constraint(trust, guarded)
+        record.update(
+            {"applied": True, "asset_free_state": None, "state": guarded.state}
+        )
+        return guarded, record
+    rows = cells[cells[MEMBER_COLUMN].astype(str).isin(free)]
+    decided = ensemble_decide(
+        rows,
+        levels,
+        depths,
+        settings,
+        ensemble,
+        members=free,
+        reported=[],
+        neuronal=neuronal,
+    )
+    free_trust = trust_constraint(decided.unfilled(), levels, settings)
+    guarded = lower_trust_constraint(trust, free_trust)
+    record.update(
+        {
+            "applied": True,
+            "asset_free_state": free_trust.state,
+            "asset_free_reasons": list(free_trust.reasons),
+            "state": guarded.state,
+        }
+    )
+    return guarded, record
+
+
 def trust_and_floors(
     result: EnsembleDecisions,
     levels: Sequence[LevelMeta],
@@ -7762,6 +7880,18 @@ def run_resolvability_v7(
     trust, floors = trust_and_floors(
         result, levels, settings, floor_table=floor_table, species=species
     )
+    step = time.monotonic()
+    trust, trust_guard = asset_free_trust(
+        cells[cells["seed"] == 0] if "seed" in cells.columns else cells,
+        levels,
+        depths,
+        settings,
+        ensemble,
+        members=members,
+        neuronal=lineage,
+        trust=trust,
+    )
+    timings["trust_guard"] = round(time.monotonic() - step, 3)
     logger.info(
         "resolvability v7 trust constraint: %s%s",
         trust.state or "none",
@@ -7797,6 +7927,7 @@ def run_resolvability_v7(
         runtime={**timings, "total": round(time.monotonic() - started, 3)},
         provenance=provenance or {},
     )
+    summary["trust_asset_guard"] = trust_guard
     for regime, stats in summary["ensemble"]["regimes"].items():
         logger.info(
             "resolvability v7 %s: %d of %d bins emitted (%d unanimous, %d by the "

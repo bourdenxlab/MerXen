@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "a5b7a955cceca1fbcdc13a2bc935700926fde63a155815589fa75537093a70a2",
+    3: "d2940376efd23307b0459644f4403c430be7aa6f84d5f850529c7c0d9198bae4",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -129,6 +129,15 @@ PIN_HISTORY = (
     "bundles are new build directories), a version-6 family's payload and "
     "every version-6 output are byte-identical (test_resolvability_v6_golden), "
     "so no existing bundle changes",
+    "3: the version-7 trust constraint guarded against simulation-input assets "
+    "(M3c stage D, pre-registration §14 (v): the more severe of the full "
+    "ensemble's and the asset-free members' constraint; the summary records "
+    "trust_asset_guard); it changes the trust of version-7 bundles with an "
+    "asset member only, none of which existed in any store (the 5K mouse "
+    "build was stopped before its self-map for this change); other version-7 "
+    "bundles gain only that summary record; the version-6 path is "
+    "byte-identical (test_resolvability_v6_golden), so no existing bundle "
+    "changes",
 )
 
 

@@ -884,3 +884,136 @@ def test_a_deep_coverage_failure_is_not_filled() -> None:
     assert deep["ensemble_reason"] == "ensemble_coverage_below_minimum"
     assert deep["status"] == res.STATUS_NOT_RESOLVABLE
     assert not bool(deep["monotone_filled"])
+
+
+# --------------------------------------------------------------------------
+# Simulation-input assets never raise the trust constraint (pre-registration
+# §14 (v); OD-E1 as amended: inputs, never trust evidence)
+
+
+def _member(name: str, seed: int, *, asset: bool) -> res.EnsembleMember:
+    recipe = res.SimulationRecipe(
+        name=name,
+        version=1,
+        gene_efficiency_sigma=None if asset else 0.8,
+        spill_fraction=0.25,
+        seed=seed,
+        efficiency_source="measured" if asset else "lognormal",
+        efficiency_table="efficiency__test" if asset else None,
+        efficiency_table_sha256="0" * 64 if asset else None,
+    )
+    return res.EnsembleMember(recipe=recipe, role="emission")
+
+
+def _trust_cells(leaf_share: dict[str, float], n: int = 3000) -> pd.DataFrame:
+    """Rows of each member: the broad level passes, the leaf level at ``share``."""
+    frames = []
+    for member, share in leaf_share.items():
+        frames.append(member_rows(member, np.full(n, 0.95), pattern(n, 0.99)))
+        frames.append(
+            member_rows(member, np.full(n, 0.95), pattern(n, share), level="leaf")
+        )
+    return pd.concat(frames, ignore_index=True)
+
+
+def _severity(state: str | None) -> int:
+    return {"refused": 0, "broad_only": 1, None: 2}[state]
+
+
+TRUST_LEVELS: tuple[res.LevelMeta, ...] = (BROAD, LEAF)
+TRUST_DEPTHS: tuple[int, ...] = (100,)
+TRUST_NEURONAL: dict[str, bool | None] = {"X": True}
+
+
+def _guarded_trust(
+    cells: pd.DataFrame, chosen: Sequence[res.EnsembleMember]
+) -> tuple[res.TrustConstraint, res.TrustConstraint, dict[str, object]]:
+    """Return (guarded, unguarded) trust of an ensemble of ``chosen`` members."""
+    settings = res.RuleSettings()
+    ensemble = res.EnsembleSettings()
+    names = [member.name for member in chosen]
+    rows = cells[cells[res.MEMBER_COLUMN].isin(names)]
+    decided = res.ensemble_decide(
+        rows,
+        TRUST_LEVELS,
+        TRUST_DEPTHS,
+        settings,
+        ensemble,
+        members=names,
+        neuronal=TRUST_NEURONAL,
+    )
+    full = res.trust_constraint(decided.unfilled(), TRUST_LEVELS, settings)
+    guarded, record = res.asset_free_trust(
+        rows,
+        TRUST_LEVELS,
+        TRUST_DEPTHS,
+        settings,
+        ensemble,
+        members=chosen,
+        neuronal=TRUST_NEURONAL,
+        trust=full,
+    )
+    return guarded, full, record
+
+
+def test_simulation_input_assets_never_raise_the_trust_constraint() -> None:
+    free = [_member("R1_contam_HO", seed, asset=False) for seed in (0, 1)]
+    assets = [_member("R3_measured_HO", seed, asset=True) for seed in (0, 1)]
+    raised_without_guard = 0
+    # The R1 draws miss the leaf target (0.895 < 0.90): broad_only without
+    # assets. An asset member at 0.92 lifts the pooled set to 0.903 within the
+    # spread limit, which would raise the constraint without the guard.
+    for asset_share in (0.80, 0.895, 0.92, 1.0):
+        shares = {member.name: 0.895 for member in free}
+        shares.update({member.name: asset_share for member in assets})
+        cells = _trust_cells(shares)
+        base, _, _ = _guarded_trust(cells, free)
+        assert base.state == "broad_only"
+        states = set()
+        # Adding one asset member, either, both, in any order.
+        for subset in ([assets[0]], [assets[1]], assets, assets[::-1]):
+            for order in (free + subset, subset + free):
+                guarded, full, record = _guarded_trust(cells, order)
+                assert _severity(guarded.state) <= _severity(base.state)
+                assert record["applied"]
+                assert record["asset_free_state"] == base.state
+                if _severity(full.state) > _severity(base.state):
+                    raised_without_guard += 1
+                if len(subset) == 2:
+                    states.add(guarded.state)
+        # Permuting the assets (and the members) never changes the state.
+        assert len(states) == 1
+    # The guard is exercised: without it an asset would have raised it.
+    assert raised_without_guard > 0
+
+
+def test_the_trust_guard_is_a_no_op_without_asset_members() -> None:
+    trust = res.TrustConstraint(
+        state="broad_only",
+        reasons=["r"],
+        broad_emitted_bins=1,
+        leaf_share_by_depth={100: 0.0},
+        leaf_classes=["X"],
+    )
+    free = [_member("R1_contam_HO", seed, asset=False) for seed in (0, 1, 2)]
+    guarded, record = res.asset_free_trust(
+        pd.DataFrame(),
+        [BROAD, LEAF],
+        (100,),
+        res.RuleSettings(),
+        res.EnsembleSettings(),
+        members=free,
+        neuronal={},
+        trust=trust,
+    )
+    assert guarded is trust and not record["applied"]
+    assert record["asset_members"] == []
+    assert res.lower_trust_constraint(trust, trust) is trust
+
+
+def test_version_7_summary_records_the_trust_guard(
+    v7_run: res.ResolvabilityResultV7,
+) -> None:
+    guard = v7_run.summary["trust_asset_guard"]
+    assert guard["asset_members"] == [] and guard["applied"] is False
+    assert guard["state"] == v7_run.trust.state
