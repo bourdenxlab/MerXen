@@ -298,8 +298,11 @@ class ResolvabilityProvenance(_ProvenanceModel):
             comes from a pooled deep set (``resolvability_extrapolated``).
         reweighted_to_composition: Whether RESOLVE reweighted the tables to
             the dataset's soft composition.
-        resolvability_inherited: Whether a subset bundle inherited its
-            family's tables.
+        resolvability_inherited: Whether the tables applied are inherited
+            (plan §3.3): a subset bundle built with its family's tables, or a
+            run that mapped with the parent bundle on a restricted lookup.
+        inherited_reason: ``subset_bundle`` or ``restricted_lookup`` when
+            inherited.
         resolvable_share: Share of table cells resolvable per level.
     """
 
@@ -311,6 +314,7 @@ class ResolvabilityProvenance(_ProvenanceModel):
     extrapolated_share: dict[str, float] = {}
     reweighted_to_composition: bool | None = None
     resolvability_inherited: bool = False
+    inherited_reason: Literal["subset_bundle", "restricted_lookup"] | None = None
     resolvable_share: dict[str, float] = {}
 
 
@@ -387,6 +391,10 @@ class DatasetGateProvenance(_ProvenanceModel):
         level: ``full``, ``broad_only`` or ``failed``.
         warning: Whether the warning flag is set.
         reasons: Reasons for the level and the warning.
+        n_segmented: The segmented objects the warning's coverage is over.
+        n_segmented_source: ``given`` (``--n-segmented``) or ``objects``
+            (the objects of the input: every segmented object of a prepared
+            H5AD, the table cells of a published clustered one).
     """
 
     frac_ge30: float | None = None
@@ -395,6 +403,8 @@ class DatasetGateProvenance(_ProvenanceModel):
     level: GateLevel | None = None
     warning: bool = False
     reasons: list[str] = []
+    n_segmented: int | None = None
+    n_segmented_source: Literal["given", "objects"] | None = None
 
 
 class ConsensusProvenance(_ProvenanceModel):
@@ -408,8 +418,10 @@ class ConsensusProvenance(_ProvenanceModel):
         single_method_override: WHB decided alone below 60 counts
             (``annotation_allow_single_method``).
         likelihood_vote: Whether the LL typer voted (always false, OD-B8).
-        tier_counts: Table cells per ``ct_consensus_tier`` value.
-        cop_suppressed: Cells whose COP call stayed at lineage.
+        tier_counts: Table cells per ``ct_consensus_tier`` value (``"-1"``:
+            no informative method; ``"0"``: confident disagreement).
+        cop_suppressed: Table cells with ``flag_cop_suppressed`` (a WHB COP
+            call on a confident lineage whose COP rule failed).
     """
 
     degraded_mode: str

@@ -117,7 +117,10 @@ workflow CLUSTERING_ANNOTATE {
             [],
         )
     }
-    resolve_out_ch = CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE(resolve_inputs_ch)
+    CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE(resolve_inputs_ch)
+    // The deterministic annotation_resolve_out only; the run record stays
+    // out of every downstream input.
+    resolve_out_ch = CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE.out.resolved
 
     labels_ch = mapped.maps
         .map { pairId, segmentation, samplesJson, clusteringConfig, preparedDir, panelDir, bundleRefs, mapDir ->

@@ -2349,13 +2349,30 @@ def published_layout(path: Path | str) -> PublishedLayout:
     )
 
 
+# Per pair x segmentation publish directories of a results tree
+# (``<root>/<pair>/<seg>/<name>/...``): the clustering outputs and the
+# annotation steps' (plan §3.2-§3.6).
+RESULTS_STEP_DIRS: Final[frozenset[str]] = frozenset(
+    {
+        "clustering_squidpy",
+        "annotation_panel",
+        "annotation_map",
+        "annotation_resolve",
+        "annotation_report",
+    }
+)
+
+
 def results_root_of(path: Path | str) -> Path | None:
     """Return the results root that holds a file, if it sits in a results tree.
 
     A published clustered H5AD gives its ``<root>`` directly
     (``published_layout``). Any other file (a prepared H5AD, a view manifest
-    target) is placed by its nearest ``clustering_squidpy`` ancestor:
-    ``<root>/<pair>/<seg>/clustering_squidpy/...``.
+    target, a published MAP manifest or panel file) is placed by its nearest
+    step ancestor (``RESULTS_STEP_DIRS``):
+    ``<root>/<pair>/<seg>/clustering_squidpy/...`` or
+    ``<root>/<pair>/<seg>/annotation_map/annotation_map_out/...`` (and
+    ``annotation_panel``, ``annotation_resolve``, ``annotation_report``).
 
     Args:
         path: An input file.
@@ -2368,7 +2385,7 @@ def results_root_of(path: Path | str) -> Path | None:
         return layout.results_root
     resolved = Path(path).resolve()
     for ancestor in resolved.parents:
-        if ancestor.name == "clustering_squidpy" and len(ancestor.parents) > 2:
+        if ancestor.name in RESULTS_STEP_DIRS and len(ancestor.parents) > 2:
             return ancestor.parents[2]
     return None
 
@@ -2566,10 +2583,24 @@ def bundle_ref_bundle(ref_path: Path | str) -> tuple[tuple[str, str | None], Mmc
 # annotate_resolve (CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE, plan §3.4; M4)
 
 RESOLVE_SUMMARY_SUFFIX: Final = "_resolve_summary.json"
-RESOLVE_SUMMARY_SCHEMA_VERSION: Final = 1
+# The run record (created_at, wall time, absolute input paths) is kept out of
+# the summary so annotation_resolve_out is byte-deterministic for M5's
+# deep-cached COMPUTE_CPU (review of M4).
+RESOLVE_RUN_SUFFIX: Final = "_resolve_run.json"
+RESOLVE_SUMMARY_SCHEMA_VERSION: Final = 2
 LABELS_METADATA_KEY: Final = b"merxen_annotation"
 RESOLVE_STEP: Final = "annotate_resolve"
 MISSING_INSTANCE_ID: Final = -1
+# Plan §8.5: cross-platform statistics of a per_platform pair come from the
+# WHB runs on the intersection panel, and only at broad level (flagged) when
+# the intersection has fewer genes or is broad-only by resolvability.
+XPANEL_PURPOSE: Final = "intersection_xpanel"
+XPANEL_MIN_GENES: Final = 100
+# Composition kinds of a per_platform pair's cross-platform JSD: RESOLVE does
+# not resolve the intersection run, and the own-panel confident labels rest
+# on different gene sets, so the confident-only kind is left out.
+XPANEL_KINDS: Final[tuple[str, ...]] = ("soft", "soft_ge30", "argmax")
+RESTRICTED_LOOKUP_REASON: Final = "restricted_lookup:parent_resolvability"
 
 
 class ResolveError(RuntimeError):
@@ -2579,6 +2610,11 @@ class ResolveError(RuntimeError):
 def resolve_summary_filename(pair_id: str | None) -> str:
     """Return ``<pair>_resolve_summary.json`` (without a pair: no prefix)."""
     return f"{pair_id}{RESOLVE_SUMMARY_SUFFIX}" if pair_id else "resolve_summary.json"
+
+
+def resolve_run_filename(pair_id: str | None) -> str:
+    """Return ``<pair>_resolve_run.json`` (without a pair: no prefix)."""
+    return f"{pair_id}{RESOLVE_RUN_SUFFIX}" if pair_id else "resolve_run.json"
 
 
 @dataclass(frozen=True)
@@ -2842,6 +2878,39 @@ def _aggregated_scores(
     )
 
 
+def aggregate_margin(frame: pd.DataFrame) -> np.ndarray:
+    """Return the margin of a level's ``aggregate_probability`` to its runner-up.
+
+    MMC's ``aggregate_probability`` is the product of the bootstrap
+    probabilities along the assigned path, and a level's runner-ups are
+    children of the same parent, so the runner-up's aggregate probability is
+    its bootstrap probability times the parent's aggregate
+    (``aggregate_probability / bp``). The margin is therefore
+    ``aggregate * (bp - runner_up_bp) / bp``: on the same scale as the raw
+    column (§4.1: "raw margin") and never above it.
+
+    Args:
+        frame: One level of a tidy MMC table.
+
+    Returns:
+        The margins (NaN where the level has no call or ``bp`` is 0).
+    """
+    bp = pd.to_numeric(frame["bp"], errors="coerce").to_numpy(np.float64)
+    aggregate = pd.to_numeric(frame["aggregate_probability"], errors="coerce").to_numpy(
+        np.float64
+    )
+    runner = np.nan_to_num(
+        pd.to_numeric(
+            frame[runner_up_column(1, "probability")], errors="coerce"
+        ).to_numpy(np.float64),
+        nan=0.0,
+    )
+    with np.errstate(divide="ignore", invalid="ignore"):
+        parent = np.where(bp > 0, aggregate / bp, np.nan)
+    margin: np.ndarray = np.clip(aggregate - runner * parent, 0.0, None)
+    return margin
+
+
 def _masked_objects(mask: np.ndarray, values: Any) -> np.ndarray:
     """Return ``values`` as objects with ``None`` where ``mask`` is false."""
     output = np.asarray(values, dtype=object).copy()
@@ -3002,13 +3071,7 @@ def human_calls_from_runs(
                 subclass["aggregate_probability"].to_numpy(np.float64),
                 corr=subclass["avg_correlation"].to_numpy(np.float64),
                 runner_up=subclass[runner_up_column(1, "name")].astype(object),
-                margin=subclass["bp"].to_numpy(np.float64)
-                - np.nan_to_num(
-                    pd.to_numeric(
-                        subclass[runner_up_column(1, "probability")], errors="coerce"
-                    ).to_numpy(np.float64),
-                    nan=0.0,
-                ),
+                margin=aggregate_margin(subclass),
             ),
         )
     calls = HumanCalls(
@@ -3314,7 +3377,13 @@ class SampleResolution:
         labels: The label table (§4.1).
         provenance: ``AnnotationProvenance`` (§4.6).
         summary: The sample's resolve-summary record.
-        section: Its composition rows (pair JSD).
+        section: Its composition rows on its own annotation run (the
+            per-sample composition; not comparable across platforms for a
+            ``per_platform`` pair).
+        xpanel_section: Its composition rows on the intersection-panel run
+            (``per_platform`` pairs: the pair JSD, §8.5).
+        cross_platform: Which run feeds its cross-platform statistics and at
+            which level (``cross_platform_record``).
         labels_path: Where the table was written.
         manifest_path: Where the provenance was written.
     """
@@ -3325,6 +3394,8 @@ class SampleResolution:
     provenance: AnnotationProvenance
     summary: dict[str, Any]
     section: SectionComposition | None = None
+    xpanel_section: SectionComposition | None = None
+    cross_platform: dict[str, Any] = field(default_factory=dict)
     labels_path: Path | None = None
     manifest_path: Path | None = None
 
@@ -3380,6 +3451,7 @@ def _resolvability_provenance(
     bundle: MmcBundle,
     *,
     reweighted: bool,
+    restricted_lookup: bool = False,
 ) -> ResolvabilityProvenance:
     from merxen.annotation.provenance import ResolvabilityProvenance
     from merxen.annotation.resolvability import RESOLVABILITY_FILE
@@ -3390,9 +3462,24 @@ def _resolvability_provenance(
         share = item.summary(table)["emitted_share"]
         if share is not None:
             resolvable[safe_token(level)] = round(float(share), 6)
+    # Inherited (§3.3): a subset bundle built with its family's tables, or a
+    # restricted lookup on the parent bundle (whose full-panel tables apply).
+    from_bundle = bool(
+        (bundle.manifest.get("builder_output") or {}).get(
+            "resolvability_inherited", False
+        )
+    )
+    inherited_reason: Literal["subset_bundle", "restricted_lookup"] | None = (
+        "restricted_lookup"
+        if restricted_lookup
+        else ("subset_bundle" if from_bundle else None)
+    )
     if tables is None:
         return ResolvabilityProvenance(
-            reweighted_to_composition=False, resolvable_share=resolvable
+            reweighted_to_composition=False,
+            resolvable_share=resolvable,
+            resolvability_inherited=inherited_reason is not None,
+            inherited_reason=inherited_reason,
         )
     summary = tables.summary
     recipes = {item.get("name"): item for item in summary.get("recipes", [])}
@@ -3423,11 +3510,8 @@ def _resolvability_provenance(
         d_max=d_max,
         extrapolated_share=extrapolated,
         reweighted_to_composition=reweighted,
-        resolvability_inherited=bool(
-            (bundle.manifest.get("builder_output") or {}).get(
-                "resolvability_inherited", False
-            )
-        ),
+        resolvability_inherited=inherited_reason is not None,
+        inherited_reason=inherited_reason,
         resolvable_share=resolvable,
     )
 
@@ -3497,6 +3581,185 @@ def _assigned_broad(names: np.ndarray) -> np.ndarray:
         if broad in classes:
             output[index] = broad
     return output
+
+
+def restricted_lookup_of(run: ResolveRun | None) -> dict[str, Any] | None:
+    """Return why a run's resolvability is its parent bundle's, if it is (§3.3).
+
+    A run that mapped a sample lacking panel genes with the parent bundle on
+    a restricted lookup (``lookup_restricted``, or a subset bundle
+    ``requested`` / ``ambiguous``, always so in a pipeline task) is resolved
+    with the parent bundle's full-panel resolvability tables and trust:
+    that resolvability is inherited (plan §3.3).
+
+    Args:
+        run: The primary annotation run.
+
+    Returns:
+        ``None`` for a run on its own bundle's full lookup, else the record
+        (``lookup_restricted``, ``subset_bundle_status``,
+        ``n_missing_panel_genes``, ``collapsed_parents``).
+    """
+    if run is None:
+        return None
+    record = run.record
+    subset = record.subset_bundle
+    parent_mapping = subset is not None and subset.status in {"requested", "ambiguous"}
+    if not (record.lookup_restricted or parent_mapping):
+        return None
+    return {
+        "lookup_restricted": bool(record.lookup_restricted),
+        "subset_bundle_status": None if subset is None else subset.status,
+        "n_missing_panel_genes": int(record.n_missing_panel_genes),
+        "collapsed_parents": list(record.collapsed_parents),
+    }
+
+
+def _with_restricted_lookup_reason(trust: TrustDecision) -> TrustDecision:
+    """Add the restricted-lookup reason to a trust decision (state unchanged)."""
+    from merxen.annotation.diagnostics import TrustReason
+
+    if RESTRICTED_LOOKUP_REASON in trust.reason_codes:
+        return trust
+    reason = TrustReason(
+        code=RESTRICTED_LOOKUP_REASON,
+        detail=(
+            "mapped with the parent bundle on a restricted lookup: resolvability "
+            "and trust are the parent panel's (inherited, plan §3.3)"
+        ),
+    )
+    return trust.model_copy(update={"reasons": (*trust.reasons, reason)})
+
+
+def run_table_leaf(run: ResolveRun, loaded: LoadedSample) -> pd.DataFrame:
+    """Return a run's leaf level on the table cells (tidy rows, by cell id).
+
+    Args:
+        run: A WHB run.
+        loaded: The sample.
+
+    Returns:
+        The leaf rows reindexed on the table-cell ids (NaN rows: unmapped).
+
+    Raises:
+        ResolveError: If the run names cells absent from the sample.
+    """
+    obs = pd.Index(loaded.obs_names.astype(str))
+    leaf = level_frame(run.tidy, run.leaf_level)
+    leaf.index = leaf.index.astype(str)
+    unknown = leaf.index.difference(obs)
+    if len(unknown):
+        raise ResolveError(
+            f"{loaded.sample.sample_id}: run {run.run_id} names {len(unknown)} "
+            f"cells absent from the sample, e.g. {list(unknown[:3])}"
+        )
+    return leaf.reindex(obs[np.flatnonzero(loaded.in_table)])
+
+
+def cross_platform_record(
+    panel_mode: str | None,
+    primary: ResolveRun | None,
+    xpanel: ResolveRun | None,
+    *,
+    primary_trust: TrustDecision | None,
+    xpanel_trust: TrustDecision | None,
+    xpanel_panel: AnnotationPanel | None = None,
+) -> dict[str, Any]:
+    """Return which run feeds a sample's cross-platform statistics (§5.5, §8.5).
+
+    Same-panel pairs compare the annotation runs (they are on the
+    intersection panel). ``per_platform`` pairs compare the WHB runs on the
+    intersection panel (``_xpanel``); with fewer than ``XPANEL_MIN_GENES``
+    intersection genes, or an intersection that is broad-only by
+    resolvability (trust ``broad_only`` / ``refused``, or unknown), the
+    cross-platform statistics are broad-level only and flagged; without an
+    intersection run there are none.
+
+    Args:
+        panel_mode: The pair's resolved panel mode.
+        primary: The primary annotation run.
+        xpanel: The primary run on the intersection panel, if mapped.
+        primary_trust: The primary annotation run's trust.
+        xpanel_trust: The intersection run's trust, if known.
+        xpanel_panel: The intersection panel, if its file is known.
+
+    Returns:
+        ``panel_mode``, ``jsd_run``, ``jsd_purpose``, ``n_intersection_genes``,
+        ``intersection_trust``, ``statistics_level`` (``full``,
+        ``broad_only`` or ``none``), ``flag`` and ``reasons``.
+    """
+    if panel_mode != "per_platform":
+        return {
+            "panel_mode": panel_mode,
+            "jsd_run": None if primary is None else primary.run_id,
+            "jsd_purpose": "annotation",
+            "n_intersection_genes": (
+                None if primary is None else primary.record.n_panel_genes
+            ),
+            "intersection_trust": None
+            if primary_trust is None
+            else primary_trust.state,
+            "statistics_level": "full" if primary is not None else "none",
+            "flag": False,
+            "reasons": [],
+        }
+    if xpanel is None:
+        return {
+            "panel_mode": panel_mode,
+            "jsd_run": None,
+            "jsd_purpose": XPANEL_PURPOSE,
+            "n_intersection_genes": None,
+            "intersection_trust": None,
+            "statistics_level": "none",
+            "flag": True,
+            "reasons": ["no_intersection_run"],
+        }
+    n_genes = (
+        xpanel_panel.n_genes
+        if xpanel_panel is not None
+        else xpanel.record.n_panel_genes
+    )
+    reasons: list[str] = []
+    if n_genes is None or n_genes < XPANEL_MIN_GENES:
+        reasons.append(f"intersection_genes:{n_genes}<{XPANEL_MIN_GENES}")
+    state = None if xpanel_trust is None else xpanel_trust.state
+    if state is None:
+        reasons.append("intersection_trust:unknown")
+    elif state in {"broad_only", "refused"}:
+        reasons.append(f"intersection_trust:{state}")
+    return {
+        "panel_mode": panel_mode,
+        "jsd_run": xpanel.run_id,
+        "jsd_purpose": XPANEL_PURPOSE,
+        "n_intersection_genes": n_genes,
+        "intersection_trust": state,
+        "statistics_level": "broad_only" if reasons else "full",
+        "flag": bool(reasons),
+        "reasons": reasons,
+    }
+
+
+def _xpanel_trust(
+    xpanel: ResolveRun,
+    panel: AnnotationPanel | None,
+    config: AnnotationConfig,
+    *,
+    panel_report: Mapping[str, Any] | None,
+    overrides: Mapping[str, TrustDecision],
+) -> TrustDecision | None:
+    """Return the intersection run's trust (a run-id override, else §8.2)."""
+    override = overrides.get(xpanel.run_id)
+    if override is not None:
+        return override
+    try:
+        return trust_for_run(xpanel, panel, config, panel_report=panel_report)
+    except (ResolveError, ValueError) as error:
+        logger.warning(
+            "run %s: no trust decision for the intersection panel (%s)",
+            xpanel.run_id,
+            error,
+        )
+        return None
 
 
 def resolve_human_sample(
@@ -3600,6 +3863,21 @@ def resolve_human_sample(
         )
     elif overrides.get("seaad_mr_panel") is not None:
         secondary_trust = overrides["seaad_mr_panel"]
+    # A restricted lookup on the parent bundle: its resolvability and trust
+    # are the parent panel's (inherited, §3.3).
+    restricted = restricted_lookup_of(primary)
+    if restricted is not None and trust is not None:
+        logger.warning(
+            "%s: run %s mapped with the parent bundle on a restricted lookup "
+            "(%d panel genes missing; subset bundle %s): resolvability and trust "
+            "are the parent panel's",
+            sample_id,
+            None if primary is None else primary.run_id,
+            restricted["n_missing_panel_genes"],
+            restricted["subset_bundle_status"],
+        )
+        trust = _with_restricted_lookup_reason(trust)
+    n_segmented_used = n_segmented if n_segmented is not None else n_objects
 
     inputs = human_calls_from_runs(
         loaded,
@@ -3649,7 +3927,7 @@ def resolve_human_sample(
         floors=floors,
         trust=trust,
         secondary_trust=secondary_trust,
-        n_segmented=n_segmented if n_segmented is not None else n_objects,
+        n_segmented=n_segmented_used,
     )
     if loaded.sample.source == "clustered":
         settings = replace(settings, allow_table_below_min_counts=True)
@@ -3756,6 +4034,66 @@ def resolve_human_sample(
     )
     shares = section_shares(section)["whole_section"]
 
+    # Cross-platform composition (§5.5, §8.5): a per_platform pair compares
+    # the WHB runs on the intersection panel, never the own-panel runs.
+    xpanel = (
+        _run_for(runs, "primary", XPANEL_PURPOSE)
+        if panel_mode == "per_platform"
+        else None
+    )
+    xpanel_panel = None if xpanel is None else panels.get(str(xpanel.record.panel_hash))
+    xpanel_trust = (
+        None
+        if xpanel is None
+        else _xpanel_trust(
+            xpanel,
+            xpanel_panel,
+            config,
+            panel_report=panel_report,
+            overrides=overrides,
+        )
+    )
+    cross_platform = cross_platform_record(
+        panel_mode,
+        primary,
+        xpanel,
+        primary_trust=trust,
+        xpanel_trust=xpanel_trust,
+        xpanel_panel=xpanel_panel,
+    )
+    xpanel_section = None
+    xpanel_shares = None
+    if xpanel is not None:
+        xpanel_leaf = run_table_leaf(xpanel, loaded)
+        xpanel_mapped = xpanel_leaf["assignment"].notna().to_numpy()
+        xpanel_assigned = _assigned_broad(
+            _masked_objects(xpanel_mapped, xpanel_leaf["name"].astype(object))
+        )
+        xpanel_section = section_composition(
+            sample_id,
+            platform,
+            soft_broad_from_level(xpanel_leaf),
+            total_counts=counts[table_rows],
+            argmax_broad=np.where(
+                xpanel_assigned == None,  # noqa: E711
+                UNASSIGNED_LABEL,
+                xpanel_assigned,
+            ),
+            confident_broad=np.full(len(table_rows), None, dtype=object),
+            confident=np.zeros(len(table_rows), dtype=bool),
+            xy=None if xy is None else np.asarray(xy)[table_rows],
+            aligned_frame=aligned_frame,
+        )
+        xpanel_shares = section_shares(xpanel_section, kinds=XPANEL_KINDS)[
+            "whole_section"
+        ]
+    elif panel_mode == "per_platform":
+        logger.warning(
+            "%s: a per_platform pair without an intersection-panel run: no "
+            "cross-platform composition (plan §8.5)",
+            sample_id,
+        )
+
     # The label table (§4.1).
     branch, leaf = human_branch_columns(resolution)
     primary_panel_hash = (
@@ -3840,7 +4178,12 @@ def resolve_human_sample(
     resolvability = {}
     if primary is not None:
         resolvability[primary.record.reference_id] = _resolvability_provenance(
-            tables, emission, resolution, primary.bundle, reweighted=reweight
+            tables,
+            emission,
+            resolution,
+            primary.bundle,
+            reweighted=reweight,
+            restricted_lookup=restricted is not None,
         )
     from merxen.annotation.diagnostics import (
         panel_diagnostics,
@@ -3929,6 +4272,8 @@ def resolve_human_sample(
             level=gate.level,
             warning=gate.warning,
             reasons=list(gate.reasons),
+            n_segmented=n_segmented_used,
+            n_segmented_source="given" if n_segmented is not None else "objects",
         ),
         consensus=ConsensusProvenance(
             degraded_mode=resolution.mode.name,
@@ -3961,7 +4306,9 @@ def resolve_human_sample(
         "platform": platform,
         "n_objects": n_objects,
         "n_table": int(table.sum()),
-        "n_segmented": n_segmented,
+        # The gate's segmented-object denominator actually used (§5.4).
+        "n_segmented": n_segmented_used,
+        "n_segmented_source": "given" if n_segmented is not None else "objects",
         "trust": None if trust is None else trust.to_json(),
         "secondary_trust": (
             None if secondary_trust is None else secondary_trust.to_json()
@@ -3978,9 +4325,18 @@ def resolve_human_sample(
             for run in runs.values()
         },
         "reweighted_to_composition": reweight,
+        "restricted_lookup": restricted,
+        "resolvability_inherited": any(
+            item.resolvability_inherited for item in resolvability.values()
+        ),
         "resolution": summary,
         "flags": flag_set.summary(),
+        # The sample's own-panel composition (its label table's soft_broad_*):
+        # a per_platform pair compares xpanel_composition across platforms.
+        "composition_run": None if primary is None else primary.run_id,
         "composition": shares,
+        "cross_platform": cross_platform,
+        "xpanel_composition": xpanel_shares,
     }
     return SampleResolution(
         sample_id=sample_id,
@@ -3989,6 +4345,8 @@ def resolve_human_sample(
         provenance=provenance,
         summary=sample_summary,
         section=section,
+        xpanel_section=xpanel_section,
+        cross_platform=cross_platform,
     )
 
 
@@ -4086,13 +4444,18 @@ class ResolveResult:
 
     Attributes:
         samples: Sample id to its resolution.
-        summary: The ``<pair>_resolve_summary.json`` content.
+        summary: The ``<pair>_resolve_summary.json`` content (deterministic).
         summary_path: Where it was written.
+        run: The run record (``created_at``, ``wall_time_s``, absolute input
+            and output paths, the summary's sha256).
+        run_path: Where it was written.
     """
 
     samples: dict[str, SampleResolution]
     summary: dict[str, Any]
     summary_path: Path
+    run: dict[str, Any] = field(default_factory=dict)
+    run_path: Path | None = None
 
 
 def annotate_resolve(
@@ -4113,6 +4476,7 @@ def annotate_resolve(
     n_bootstrap: int = 200,
     seed: int = 0,
     validate: bool = True,
+    run_record_path: Path | str | None = None,
 ) -> ResolveResult:
     """Run the RESOLVE step for one pair x segmentation (plan §3.4).
 
@@ -4125,7 +4489,11 @@ def annotate_resolve(
     ``<plat>/<sid>_annotation_manifest.json`` (§4.6), and the pair's
     ``<pair>_resolve_summary.json`` (gate levels and warnings, trust,
     realised flag rates, coverage, resolvable share per level, compositions
-    and the pair JSD with block-bootstrap CIs).
+    and the pair JSD with block-bootstrap CIs; a ``per_platform`` pair's JSD
+    compares the intersection-panel runs, §8.5). Everything under
+    ``output_dir`` is deterministic for given inputs; the clock, the wall
+    time and absolute paths go to the run record ``<pair>_resolve_run.json``
+    (``run_record_path``; default: in ``output_dir``).
 
     Args:
         map_dir: ``annotation_map_out`` (``map_manifest.json`` + parquets).
@@ -4153,6 +4521,9 @@ def annotate_resolve(
         n_bootstrap: Block-bootstrap replicates.
         seed: Bootstrap and diffuse-simulation seed.
         validate: Validate every label table.
+        run_record_path: Where the run record goes (a pipeline task keeps it
+            out of ``annotation_resolve_out``); default
+            ``<output_dir>/<pair>_resolve_run.json``.
 
     Returns:
         The result.
@@ -4162,6 +4533,7 @@ def annotate_resolve(
         NotImplementedError: For mouse (M6).
     """
     from merxen.annotation.composition import (
+        COMPOSITION_KINDS,
         pair_jsd,
         section_shares,
         shared_mask_regions,
@@ -4306,13 +4678,59 @@ def annotate_resolve(
             len(result.labels),
         )
 
-    # Pair composition statistics (§5.5; H1).
+    # Pair composition statistics (§5.5; H1): a per_platform pair compares
+    # the intersection-panel runs (§8.5).
     pair: dict[str, Any] = {"jsd": [], "mask_note": None}
     by_platform = {item.platform: item for item in results.values()}
+    per_platform = panel_mode == "per_platform"
+    kinds: tuple[str, ...] = XPANEL_KINDS if per_platform else COMPOSITION_KINDS
     if {"MERSCOPE", "XENIUM"} <= set(by_platform):
-        first = by_platform["MERSCOPE"].section
-        second = by_platform["XENIUM"].section
-        assert first is not None and second is not None
+        pair_samples = (by_platform["MERSCOPE"], by_platform["XENIUM"])
+        cross = [item.cross_platform for item in pair_samples]
+        levels = {record.get("statistics_level") for record in cross}
+        cross_platform = {
+            "panel_mode": panel_mode,
+            "jsd_run": sorted({str(record.get("jsd_run")) for record in cross}),
+            "jsd_purpose": XPANEL_PURPOSE if per_platform else "annotation",
+            "kinds": list(kinds),
+            "omitted_kinds": (
+                {
+                    "confident": (
+                        "the own-panel confident labels rest on different gene "
+                        "sets and RESOLVE does not resolve the intersection run"
+                    )
+                }
+                if per_platform
+                else {}
+            ),
+            "n_intersection_genes": {
+                item.platform: item.cross_platform.get("n_intersection_genes")
+                for item in pair_samples
+            },
+            "statistics_level": (
+                "none"
+                if "none" in levels
+                else ("broad_only" if "broad_only" in levels else "full")
+            ),
+            "flag": any(bool(record.get("flag")) for record in cross),
+            "reasons": sorted(
+                {
+                    str(reason)
+                    for record in cross
+                    for reason in record.get("reasons", [])
+                }
+            ),
+        }
+        pair = {"jsd": [], "mask_note": None, "cross_platform": cross_platform}
+        if per_platform:
+            first = by_platform["MERSCOPE"].xpanel_section
+            second = by_platform["XENIUM"].xpanel_section
+        else:
+            first = by_platform["MERSCOPE"].section
+            second = by_platform["XENIUM"].section
+    else:
+        first = second = None
+    if first is not None and second is not None:
         align: Path | None = None
         if alignment_dir is not None:
             align = Path(alignment_dir)
@@ -4325,24 +4743,42 @@ def annotate_resolve(
                 align = default_alignment_dir(source_path, manifest.pair_id)
         mask = load_pair_mask(align)
         records_jsd, note = pair_jsd(
-            first, second, mask=mask, tile_um=tile_um, n_reps=n_bootstrap, seed=seed
+            first,
+            second,
+            mask=mask,
+            kinds=kinds,
+            tile_um=tile_um,
+            n_reps=n_bootstrap,
+            seed=seed,
         )
         regions, _ = shared_mask_regions(first, second, mask)
         compositions = {
             section.platform: section_shares(
                 section,
                 regions={name: keep[index] for name, keep in regions.items()},
+                kinds=kinds,
             )
             for index, section in enumerate((first, second))
         }
-        pair = {
-            "jsd": [item.to_json() for item in records_jsd],
-            "mask_note": note,
-            "alignment_dir": None if align is None else str(align),
-            "tile_um": tile_um,
-            "n_bootstrap": n_bootstrap,
-            "compositions": compositions,
-        }
+        pair.update(
+            {
+                "jsd": [item.to_json() for item in records_jsd],
+                "mask_note": note,
+                "alignment_dir": None if align is None else str(align),
+                "tile_um": tile_um,
+                "n_bootstrap": n_bootstrap,
+                "compositions": compositions,
+            }
+        )
+    elif "cross_platform" in pair:
+        pair["mask_note"] = (
+            "no intersection-panel run on both platforms: no cross-platform "
+            "composition (plan §8.5)"
+        )
+    map_manifest_path = root / MAP_MANIFEST_NAME
+    # Deterministic content only (no clock, no wall time, no absolute input
+    # path): annotation_resolve_out is what M5's deep-cached COMPUTE_CPU
+    # stages. Those go to the run record.
     summary = _json_safe(
         {
             "schema_version": RESOLVE_SUMMARY_SCHEMA_VERSION,
@@ -4350,18 +4786,39 @@ def annotate_resolve(
             "pair_id": manifest.pair_id,
             "segmentation": manifest.segmentation,
             "species": manifest.species,
-            "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
-            "map_manifest": str((root / MAP_MANIFEST_NAME).resolve()),
+            "map_manifest_sha256": file_sha256(map_manifest_path),
             "panel_status": manifest.panel_status,
             "panel_mode": panel_mode,
             "thresholds": config.thresholds.model_dump(mode="json"),
             "flags_config": config.flags.model_dump(mode="json"),
             "samples": {key: value.summary for key, value in results.items()},
             "pair": pair,
-            "wall_time_s": round(time.monotonic() - start, 3),
         }
     )
     summary_path = _write_json(
         summary, output / resolve_summary_filename(manifest.pair_id)
     )
-    return ResolveResult(samples=results, summary=summary, summary_path=summary_path)
+    run = {
+        "step": RESOLVE_STEP,
+        "pair_id": manifest.pair_id,
+        "segmentation": manifest.segmentation,
+        "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "wall_time_s": round(time.monotonic() - start, 3),
+        "map_manifest": str(map_manifest_path.resolve()),
+        "output_dir": str(output.resolve()),
+        "summary": summary_path.name,
+        "summary_sha256": file_sha256(summary_path),
+    }
+    run_path = _write_json(
+        run,
+        Path(run_record_path)
+        if run_record_path is not None
+        else output / resolve_run_filename(manifest.pair_id),
+    )
+    return ResolveResult(
+        samples=results,
+        summary=summary,
+        summary_path=summary_path,
+        run=run,
+        run_path=run_path,
+    )

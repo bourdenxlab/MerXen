@@ -482,3 +482,22 @@ def test_diffuse_flags_only_more_genes_than_the_quantile(
         max_informative=1.0,
     )
     assert result.raw_flag.tolist() == [False, False, True]
+
+
+def test_the_contamination_null_keeps_cells_tied_at_the_depth_cut() -> None:
+    """The null holds confident cells at or above the top-quartile depth (§5.6).
+
+    Integer counts tie at the 0.75 quantile: 10 cells at 100, 25 at 150 and
+    5 at 200 put the cut at 150, and the 30 cells at or above it are fitted.
+    """
+    total = np.array([100.0] * 10 + [150.0] * 25 + [200.0] * 5)
+    rng = np.random.default_rng(3)
+    negative = rng.binomial(total.astype(int), 0.01).astype(np.float64)
+    labels = np.array(["Neurons"] * len(total), dtype=object)
+    confident = np.ones(len(total), dtype=bool)
+    assert np.quantile(total, 0.75) == 150.0
+    result = fl.contamination_flags(
+        negative, total, labels, confident, ("Neurons",), min_null_cells=5
+    )
+    fit = result.fits["Neurons"]
+    assert fit is not None and fit.n_cells == 30

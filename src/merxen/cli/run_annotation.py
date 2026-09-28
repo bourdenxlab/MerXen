@@ -1266,6 +1266,15 @@ def _n_segmented(values: tuple[str, ...]) -> dict[str, int]:
     type=click.Path(path_type=Path, file_okay=False),
     help="A results tree --out must stay out of (repeatable).",
 )
+@click.option(
+    "--run-record",
+    "run_record_path",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=None,
+    help="Where the run record (created_at, wall time, absolute paths) goes; "
+    "default: <out>/<pair>_resolve_run.json. Pipeline tasks keep it out of --out, "
+    "whose content is then deterministic.",
+)
 def annotate_resolve_command(
     map_dir: Path,
     output_dir: Path,
@@ -1289,12 +1298,15 @@ def annotate_resolve_command(
     tile_um: float,
     seed: int,
     results_roots: tuple[Path, ...],
+    run_record_path: Path | None,
 ) -> None:
     """Resolve MAP outputs into label tables (RESOLVE step, plan §3.4).
 
     Writes <out>/<platform>/<sid>_celltype_labels.parquet (§4.1),
-    <sid>_annotation_manifest.json (§4.6) and <pair>_resolve_summary.json;
-    never writes into the inputs' results tree or the MAP output.
+    <sid>_annotation_manifest.json (§4.6), <pair>_resolve_summary.json and
+    the run record; never writes into a results tree (the inputs', a
+    published annotation output's, --results-root) or the MAP and panel
+    outputs.
     """
     from merxen.annotation.mapmycells_engine import MmcEngineError
     from merxen.annotation.pipeline import MapError, ResolveError
@@ -1324,6 +1336,7 @@ def annotate_resolve_command(
                 tile_um=tile_um,
                 seed=seed,
                 results_roots=results_roots,
+                run_record_path=run_record_path,
             )
     except (MapError, MmcEngineError, ResolveError, NotImplementedError) as error:
         raise click.ClickException(f"{type(error).__name__}: {error}") from error
@@ -1353,8 +1366,9 @@ def _annotate_resolve(
     tile_um: float,
     seed: int,
     results_roots: tuple[Path, ...],
+    run_record_path: Path | None = None,
 ) -> None:
-    from merxen.annotation.panel import prepared_samples
+    from merxen.annotation.panel import REQUIRED_BUNDLES_FILE, prepared_samples
     from merxen.annotation.pipeline import (
         MAP_MANIFEST_NAME,
         BundleFinder,
@@ -1429,11 +1443,19 @@ def _annotate_resolve(
         ]
     inputs = [Path(record.h5ad_path) for record in manifest.samples.values()]
     inputs += [sample.h5ad_path for sample in samples or ()]
-    check_output_outside_inputs(
-        output_dir,
-        [*inputs, map_dir / MAP_MANIFEST_NAME],
-        protected_roots=results_roots,
-    )
+    # The MAP output and the panel directory (a published annotation_map_out /
+    # annotation_panel_out places its results tree, results_root_of) are
+    # inputs too: never write into them or their results tree.
+    guarded = [*inputs, map_dir / MAP_MANIFEST_NAME]
+    guarded.append((panel_dir or map_dir / "panel") / REQUIRED_BUNDLES_FILE)
+    check_output_outside_inputs(output_dir, guarded, protected_roots=results_roots)
+    if run_record_path is not None:
+        check_output_outside_inputs(
+            run_record_path.parent,
+            guarded,
+            protected_roots=results_roots,
+            what="run record directory",
+        )
     finder: BundleFinder | None = None
     if bundle_ref_paths or require_bundle_refs:
         finder = staged_bundle_finder(
@@ -1469,10 +1491,11 @@ def _annotate_resolve(
         tile_um=tile_um,
         n_bootstrap=n_bootstrap,
         seed=seed,
+        run_record_path=run_record_path,
     )
     click.echo(
         f"annotate-resolve: {len(result.samples)} sample(s) in "
-        f"{result.summary['wall_time_s']:.0f} s -> {result.summary_path}"
+        f"{result.run['wall_time_s']:.0f} s -> {result.summary_path}"
     )
     for sample_id, sample in result.samples.items():
         gate = sample.summary["resolution"]["gate"]
