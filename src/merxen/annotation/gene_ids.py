@@ -185,10 +185,14 @@ def clean_native_value(value: Any) -> str:
 
     Returns:
         The unversioned value, or ``""`` for missing values and the
-        placeholders ``-1`` / ``NA``.
+        placeholders ``-1`` / ``NA``. Ensembl gene IDs are upper-cased
+        (upper case by definition; ``ensg00000141510`` is a human ID, not
+        another species', M3b review 2).
     """
     text = strip_version(clean_text(value))
-    return "" if text.lower() in _MISSING_NATIVE_TOKENS else text
+    if text.lower() in _MISSING_NATIVE_TOKENS:
+        return ""
+    return text.upper() if is_ensembl_gene_id(text) else text
 
 
 def other_species(species: str) -> Species:
@@ -223,10 +227,14 @@ def native_kind(value: str, species: str) -> NativeKind:
     """
     if not value:
         return "none"
-    if SPECIES_ID_PATTERNS[species].fullmatch(value):
-        return "run"
     if is_ensembl_gene_id(value):
-        return "other_species"
+        # Ensembl gene IDs are upper case; a lower-case one is still an ID
+        # of its prefix's species (``clean_native_value`` normalises too).
+        return (
+            "run"
+            if SPECIES_ID_PATTERNS[species].fullmatch(value.strip().upper())
+            else "other_species"
+        )
     if ENSEMBL_NON_GENE_PATTERN.match(value):
         return "non_gene"
     return "non_id"
@@ -407,35 +415,49 @@ class AliasTable:
         symbols_by_alias: Approved symbols per case-folded alias.
         ids_by_alias: Ensembl IDs per case-folded alias, when the table has
             an ID column.
+        ids_by_symbol: Ensembl IDs per case-folded approved symbol, when the
+            table has an ID column.
+        aliases_by_symbol: Previous and alias symbols per case-folded
+            approved symbol (the reverse map: a current symbol whose gene
+            table still lists a previous one, e.g. H2AX / H2AFX).
     """
 
     species: Species
     path: str | None
     symbols_by_alias: Mapping[str, frozenset[str]]
     ids_by_alias: Mapping[str, frozenset[str]] = field(default_factory=dict)
+    ids_by_symbol: Mapping[str, frozenset[str]] = field(default_factory=dict)
+    aliases_by_symbol: Mapping[str, frozenset[str]] = field(default_factory=dict)
 
     def resolve(
         self, symbol: str, table: GeneTable | None
     ) -> tuple[str | None, str, str]:
         """Resolve a symbol through its aliases.
 
-        Only a single-target alias resolves: every approved symbol and ID
-        the alias points to must give one Ensembl ID of the species.
+        Both directions count: the symbol as an alias or previous symbol
+        (its approved symbols and their IDs), and the symbol as an approved
+        symbol (the row's own ID, and the IDs the gene table gives its
+        previous and alias symbols: the table may predate the rename). Only
+        a single-target symbol resolves: everything it points to must give
+        one Ensembl ID of the species.
 
         Args:
             symbol: The panel symbol.
-            table: The run species' gene table, which turns approved
-                symbols into IDs.
+            table: The run species' gene table, which turns approved,
+                previous and alias symbols into IDs.
 
         Returns:
-            ``(gene_id, approved_symbol, "")``, or ``(None, "", reason)``
+            ``(gene_id, detail, "")`` (``alias of <approved>``, or
+            ``approved symbol of <previous>``), or ``(None, "", reason)``
             with reason ``not_an_alias`` or ``ambiguous_alias``.
         """
         key = symbol.casefold()
         approved = self.symbols_by_alias.get(key, frozenset())
         ids = set(self.ids_by_alias.get(key, frozenset()))
+        ids.update(self.ids_by_symbol.get(key, frozenset()))
+        previous = self.aliases_by_symbol.get(key, frozenset())
         if table is not None:
-            for name in approved:
+            for name in approved | previous:
                 ids.update(table.candidates(name))
         pattern = SPECIES_ID_PATTERNS[self.species]
         ids = {gene_id for gene_id in ids if pattern.fullmatch(gene_id)}
@@ -443,7 +465,13 @@ class AliasTable:
             return None, "", "not_an_alias"
         if len(ids) > 1:
             return None, "", "ambiguous_alias"
-        return next(iter(ids)), ",".join(sorted(approved)), ""
+        if approved:
+            detail = f"alias of {','.join(sorted(approved))}"
+        elif previous:
+            detail = f"approved symbol of {','.join(sorted(previous))}"
+        else:
+            detail = "approved symbol"
+        return next(iter(ids)), detail, ""
 
 
 def load_alias_table(path: Path | str, species: Species) -> AliasTable:
@@ -486,21 +514,32 @@ def load_alias_table(path: Path | str, species: Species) -> AliasTable:
         )
     symbols: dict[str, set[str]] = {}
     ids: dict[str, set[str]] = {}
+    own_ids: dict[str, set[str]] = {}
+    reverse: dict[str, set[str]] = {}
     for record in frame.to_dict(orient="records"):
         target = clean_text(record.get(symbol_column, "")) if symbol_column else ""
         target_id = strip_version(record.get(id_column, "")) if id_column else ""
+        if target and target_id:
+            own_ids.setdefault(target.casefold(), set()).add(target_id)
         for column in alias_columns:
             for alias in _split_list(clean_text(record.get(column, ""))):
                 key = alias.casefold()
                 if target:
                     symbols.setdefault(key, set()).add(target)
+                    reverse.setdefault(target.casefold(), set()).add(alias)
                 if target_id:
                     ids.setdefault(key, set()).add(target_id)
+
+    def frozen(mapping: dict[str, set[str]]) -> dict[str, frozenset[str]]:
+        return {key: frozenset(value) for key, value in mapping.items()}
+
     return AliasTable(
         species=species,
         path=str(file_path),
-        symbols_by_alias={key: frozenset(value) for key, value in symbols.items()},
-        ids_by_alias={key: frozenset(value) for key, value in ids.items()},
+        symbols_by_alias=frozen(symbols),
+        ids_by_alias=frozen(ids),
+        ids_by_symbol=frozen(own_ids),
+        aliases_by_symbol=frozen(reverse),
     )
 
 
@@ -1002,9 +1041,9 @@ def _symbol_chain(
         if gene_id is not None:
             return gene_id, "fallback_table", "", ""
     if sources.aliases is not None:
-        gene_id, approved, alias_failure = sources.aliases.resolve(symbol, table)
+        gene_id, detail, alias_failure = sources.aliases.resolve(symbol, table)
         if gene_id is not None:
-            return gene_id, "alias", "", f"alias of {approved}" if approved else ""
+            return gene_id, "alias", "", detail
         if alias_failure == "ambiguous_alias" and failure == "not_in_fallback_table":
             failure = alias_failure
     override = _override_for(sources.overrides, symbol)
