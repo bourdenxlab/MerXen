@@ -1312,6 +1312,10 @@ process.executor = "local"
     summary = json.loads((output / "PX_resolve_summary.json").read_text())
     assert set(summary["samples"]) == {"PX_MERSCOPE", "PX_XENIUM"}
     assert summary["pair"]["alignment_dir"] is None
+    # The run record is published beside annotation_resolve_out, never in it.
+    run = json.loads((output.parent / "annotation_resolve_run.json").read_text())
+    assert run["summary_sha256"] == file_sha256(output / "PX_resolve_summary.json")
+    assert "created_at" not in summary and not list(output.glob("*_resolve_run.json"))
     config = AnnotationConfig.model_validate_json(
         (output / "annotation_config.json").read_text()
     )
@@ -1799,3 +1803,33 @@ def test_results_root_of_knows_the_annotation_publish_layout(tmp_path: Path) -> 
                 / "map_manifest.json",
             ],
         )
+
+
+@pytest.mark.parametrize(
+    ("lookup_restricted", "status", "inherited"),
+    [
+        (False, None, False),
+        (True, None, True),
+        (False, "requested", True),
+        (False, "ambiguous", True),
+        (False, "used", False),
+        (True, "used", True),
+    ],
+)
+def test_restricted_lookup_of_reads_the_lookup_and_the_subset_status(
+    lookup_restricted: bool, status: str | None, inherited: bool
+) -> None:
+    from types import SimpleNamespace
+
+    record = SimpleNamespace(
+        lookup_restricted=lookup_restricted,
+        subset_bundle=None if status is None else SimpleNamespace(status=status),
+        n_missing_panel_genes=2,
+        collapsed_parents=["P"],
+    )
+    found = pl.restricted_lookup_of(SimpleNamespace(record=record))  # type: ignore[arg-type]
+    assert (found is not None) is inherited
+    if found is not None:
+        assert found["subset_bundle_status"] == status
+        assert found["n_missing_panel_genes"] == 2
+    assert pl.restricted_lookup_of(None) is None
