@@ -374,6 +374,10 @@ PREP_MAX_GB_FRACTION: Final = 0.625
 # is mandatory above it, OD-E8).
 WMB_QUERY_MARKER_PEAK_GB_MEASURED: Final = 37.7
 WMB_QUERY_MARKER_MEASURED_MAX_GENES: Final = 5006
+# Margin on a predicted PREP peak (OD-E8, plan §8.7: the reserve is sized as
+# the measured peak + 30%, 37.7 x 1.3 = 49 GB -> 64 GB). A build is refused
+# when the prediction times this margin exceeds the reserve.
+PREP_MEMORY_MARGIN: Final = 1.3
 ROOT_BROAD_MIN_MARKERS: Final = 10
 PREP_N_PROCESSORS_ENV: Final = "MERXEN_ANNOTATION_PREP_N_PROCESSORS"
 PREP_MAX_GB_ENV: Final = "MERXEN_ANNOTATION_PREP_MAX_GB"
@@ -6054,16 +6058,20 @@ def _wmb_large_panel_refusal(
         return None
     predicted = predicted_wmb_query_marker_peak_gb(panel.n_genes)
     reserve = prep_memory_reserve_gb()
-    if predicted <= reserve:
+    needed = predicted * PREP_MEMORY_MARGIN
+    if needed <= reserve:
         return None
     return (
         f"panel {panel.name} has {panel.n_genes} genes and "
         "large_panel_marker_prefilter is 'none': the predicted WMB query-marker "
-        f"peak ({predicted:.0f} GB) exceeds the PREP memory reserve "
+        f"peak ({predicted:.0f} GB) + {PREP_MEMORY_MARGIN - 1:.0%} "
+        f"({needed:.0f} GB) exceeds the PREP memory reserve "
         f"({reserve:.0f} GB = --max-gb {prep_resources().max_gb} / "
         f"{PREP_MAX_GB_FRACTION}); the prefilter is mandatory above the reserve "
-        "(plan §8.7, OD-E8): use per_parent_topk_union or raise "
-        "annotation_prep_large_memory"
+        "(plan §8.7, OD-E8): in the pipeline raise annotation_prep_large_memory; "
+        "the prefilter (large_panel_marker_prefilter = per_parent_topk_union) "
+        "can be set only through --annotation-config of the standalone "
+        "annotation-reference-prep / annotation-panel-simulate commands"
     )
 
 

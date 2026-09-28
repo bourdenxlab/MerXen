@@ -1895,6 +1895,21 @@ def test_large_panels_build_and_the_prefilter_is_mandatory_above_the_reserve(
     # Beyond the measured range the scaled envelope can exceed it.
     assert large_panel_refusal(huge, config, wmb) is not None
     assert large_panel_refusal(huge, prefiltered, wmb) is None
+    # The refusal keeps the OD-E8 margin (+30%): a panel whose predicted peak
+    # fits the 64 GB reserve but not with the margin is refused.
+    assert pytest.approx(1.3) == reference.PREP_MEMORY_MARGIN
+    margin_panel = make_panel(
+        [f"ENSMUSG{index:011d}" for index in range(7000)], species="mouse"
+    )
+    predicted = reference.predicted_wmb_query_marker_peak_gb(7000)
+    assert predicted < reference.prep_memory_reserve_gb() < predicted * 1.3
+    reason = large_panel_refusal(margin_panel, config, wmb)
+    assert reason is not None and "+ 30%" in reason
+    assert "annotation_prep_large_memory" in reason and "--annotation-config" in reason
+    fits = make_panel(
+        [f"ENSMUSG{index:011d}" for index in range(6500)], species="mouse"
+    )
+    assert large_panel_refusal(fits, config, wmb) is None
     # Small panels never need the prefilter.
     reference.set_prep_resources(max_gb=3)
     small = make_panel(

@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "9393d6cfe5c55e1bfc35116aec489acff6132b4ea0f15487608a46ea70a3a411",
+    3: "187330d921d0cbe277bea19cc9bd36e384bea5c0b8d5c597634f29bf128294d6",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -96,6 +96,9 @@ PIN_HISTORY = (
     "exclusion's version and region enter the whb_frontal_supc_clus_ho "
     "build_hash through its hashed params, and every human self-map bundle's "
     "through its test-set params",
+    "3: the no-prefilter refusal keeps the OD-E8 +30% margin on the predicted "
+    "WMB query-marker peak and names the pipeline's option (refusals only; "
+    "no bundle content changes)",
 )
 
 
