@@ -470,6 +470,11 @@ class HumanResolveSettings:
         n_segmented: Segmented objects (gate warning denominator); ``None``
             uses the number of objects given (the label table covers every
             segmented object).
+        allow_table_below_min_counts: Accept table cells below
+            ``min_counts``: a published clustered H5AD's table cells can sum
+            lower on its ``min_cells``-filtered genes (MAP's
+            ``n_below_min_in_clustered``); they stay table cells and are
+            ``below_floor`` at every level.
     """
 
     platform: str
@@ -485,6 +490,7 @@ class HumanResolveSettings:
     allow_fine_levels: bool = False
     use_likelihood_vote: bool = False
     n_segmented: int | None = None
+    allow_table_below_min_counts: bool = False
 
     @classmethod
     def from_config(
@@ -1123,8 +1129,16 @@ def resolve_human(calls: HumanCalls, settings: HumanResolveSettings) -> HumanRes
     thresholds = settings.thresholds
     counts = np.asarray(calls.total_counts, dtype=np.float64)
     table = np.asarray(calls.in_table, dtype=bool)
-    if bool((table & (counts < settings.min_counts)).any()):
-        raise ValueError("in_table objects must reach min_counts")
+    below_min = table & (counts < settings.min_counts)
+    if bool(below_min.any()):
+        if not settings.allow_table_below_min_counts:
+            raise ValueError("in_table objects must reach min_counts")
+        logger.warning(
+            "%d table cell(s) below min_counts %d (a min_cells-filtered published "
+            "table): below_floor at every level",
+            int(below_min.sum()),
+            settings.min_counts,
+        )
     primary_refused = settings.trust is not None and settings.trust.state == "refused"
     sea_refused = (
         settings.secondary_trust is not None
