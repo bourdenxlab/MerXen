@@ -952,3 +952,30 @@ def test_consensus_tier_counts_agreeing_informative_methods() -> None:
         0,
     ]
     assert cs.consensus_tier([], [], max_tier=2).tolist() == []
+
+
+def test_published_table_cells_below_min_counts_are_below_floor(
+    make_trust: MakeTrust,
+) -> None:
+    import dataclasses
+
+    cells = [Cell(EXC, counts=200), Cell(EXC, counts=6), Cell(ASTRO, counts=3)]
+    calls = calls_of(cells)
+    # A min_cells-filtered published table: every object is a table cell.
+    published = dataclasses.replace(calls, in_table=np.ones(3, dtype=bool))
+    settings = Setup(trust=make_trust("validated_real")).settings()
+    with pytest.raises(ValueError, match="min_counts"):
+        cs.resolve_human(published, settings)
+    allowed = dataclasses.replace(settings, allow_table_below_min_counts=True)
+    result = cs.resolve_human(published, allowed)
+    for level in ("lineage", "broad", "supercluster"):
+        status = result.status(level)
+        assert status[0] == CellStatus.CONFIDENT.value
+        assert status[1] in (
+            CellStatus.BELOW_FLOOR.value,
+            CellStatus.PARENT_UNRESOLVED.value,
+        )
+    assert result.status("lineage")[1] == CellStatus.BELOW_FLOOR.value
+    assert result.status("lineage")[2] == CellStatus.BELOW_FLOOR.value
+    assert result.in_table.all()
+    assert not result.flags[Columns.FLAG_LOW_COUNTS].any()

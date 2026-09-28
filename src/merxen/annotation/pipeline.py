@@ -3585,6 +3585,8 @@ def resolve_human_sample(
         secondary_trust=secondary_trust,
         n_segmented=n_segmented if n_segmented is not None else n_objects,
     )
+    if loaded.sample.source == "clustered":
+        settings = replace(settings, allow_table_below_min_counts=True)
     resolution = cs.resolve_human(inputs.calls, settings)
 
     # Flags (§4.3, §5.6).
