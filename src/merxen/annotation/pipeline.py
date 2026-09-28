@@ -109,8 +109,15 @@ from merxen.annotation.panel import (
     subset_panel,
     subset_trigger_for_config,
 )
+from merxen.annotation.provenance import annotation_manifest_filename
 from merxen.annotation.reference import read_lookup
-from merxen.annotation.schema import CellStatus, Columns, meets_threshold
+from merxen.annotation.schema import (
+    CellStatus,
+    Columns,
+    label_table_filename,
+    meets_threshold,
+    safe_token,
+)
 from merxen.annotation.store import (
     ANNOTATION_BUILDER_VERSION,
     BUNDLE_MANIFEST_NAME,
@@ -129,6 +136,17 @@ from merxen.clustering.cellset import select_table_cells
 
 if TYPE_CHECKING:
     from scipy import sparse
+
+    from merxen.annotation.composition import SectionComposition
+    from merxen.annotation.consensus import HumanCalls, HumanResolution
+    from merxen.annotation.diagnostics import TrustDecision
+    from merxen.annotation.provenance import (
+        AnnotationProvenance,
+        ReferenceProvenance,
+        ResolvabilityProvenance,
+    )
+    from merxen.annotation.resolvability import ResolvabilityTables
+    from merxen.annotation.thresholds import EmissionPlan
 
 logger = logging.getLogger(__name__)
 
@@ -2542,3 +2560,1735 @@ def bundle_ref_bundle(ref_path: Path | str) -> tuple[tuple[str, str | None], Mmc
     """
     ref = BundleRef.model_validate_json(Path(ref_path).read_text(encoding="utf-8"))
     return (ref.reference_id, ref.panel_hash), MmcBundle.from_bundle_ref(ref)
+
+
+# --------------------------------------------------------------------------
+# annotate_resolve (CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE, plan §3.4; M4)
+
+RESOLVE_SUMMARY_SUFFIX: Final = "_resolve_summary.json"
+RESOLVE_SUMMARY_SCHEMA_VERSION: Final = 1
+LABELS_METADATA_KEY: Final = b"merxen_annotation"
+RESOLVE_STEP: Final = "annotate_resolve"
+MISSING_INSTANCE_ID: Final = -1
+
+
+class ResolveError(RuntimeError):
+    """RESOLVE cannot run on its inputs (an infrastructure error)."""
+
+
+def resolve_summary_filename(pair_id: str | None) -> str:
+    """Return ``<pair>_resolve_summary.json`` (without a pair: no prefix)."""
+    return f"{pair_id}{RESOLVE_SUMMARY_SUFFIX}" if pair_id else "resolve_summary.json"
+
+
+@dataclass(frozen=True)
+class ResolveRun:
+    """One MAP run as RESOLVE reads it: its record, bundle and tidy table.
+
+    Attributes:
+        record: The run in ``map_manifest.json``.
+        bundle: The bundle RESOLVE reads (the run's, or an override).
+        tidy: The run's tidy MMC table.
+        overridden: Whether the bundle is not the one the run mapped with.
+        same_lookup: Whether the bundle's marker lookup equals the one the
+            run mapped with (an override with another lookup is refused).
+    """
+
+    record: MapRunRecord
+    bundle: MmcBundle
+    tidy: pd.DataFrame
+    overridden: bool = False
+    same_lookup: bool = True
+
+    @property
+    def run_id(self) -> str:
+        """Return the run id."""
+        return self.record.run_id
+
+    @property
+    def prefix(self) -> str:
+        """Return the raw engine column prefix (``mmc_whb``, ``mmc_whb_setc``)."""
+        base = ENGINE_PREFIXES.get(self.record.reference_id, self.record.reference_id)
+        purpose = self.record.purposes[0] if self.record.purposes else "annotation"
+        return f"mmc_{base}{RUN_SUFFIXES.get(purpose, '')}"
+
+    @property
+    def leaf_level(self) -> str:
+        """Return the bundle's first mapping level (WHB supercluster)."""
+        return self.bundle.levels[0]
+
+    @property
+    def leaf_level_name(self) -> str:
+        """Return the tidy table's token of the leaf level (``supercluster``)."""
+        rows = self.tidy[self.tidy["level"].astype(str) == self.leaf_level]
+        if len(rows):
+            return str(rows["level_name"].astype(str).iloc[0])
+        return self.leaf_level
+
+
+# (reference_id, panel_hash) -> the bundle directory RESOLVE should read, or
+# None to keep the run's (``current_store_bundles``).
+BundleFinder = Callable[[str, str | None], Path | None]
+
+
+def current_store_bundles(store: ReferenceStore) -> BundleFinder:
+    """Return a finder of the store's current bundle per (reference, panel).
+
+    RESOLVE on published MAP outputs can read the store's current bundles
+    (current builder, current resolvability tables; ``locate_bundle``) instead
+    of the ones the runs mapped with, when their marker lookups are the same.
+
+    Args:
+        store: The reference store.
+
+    Returns:
+        The finder.
+    """
+
+    def find(reference_id: str, panel_hash: str | None) -> Path | None:
+        return locate_bundle(store, reference_id, panel_hash).path
+
+    return find
+
+
+def _resolve_bundle(
+    record: MapRunRecord,
+    overrides: Mapping[str, Path],
+    finder: BundleFinder | None,
+) -> tuple[MmcBundle, bool]:
+    path = overrides.get(record.run_id) or overrides.get(record.reference_id)
+    if path is None and finder is not None:
+        path = finder(record.reference_id, record.panel_hash)
+    if path is None:
+        return MmcBundle.from_dir(record.bundle_path), False
+    bundle = MmcBundle.from_dir(path)
+    if bundle.reference_id != record.reference_id:
+        raise ResolveError(
+            f"bundle {path} is a {bundle.reference_id} bundle, not "
+            f"{record.reference_id} (run {record.run_id})"
+        )
+    if record.panel_hash is not None and bundle.panel_hash != record.panel_hash:
+        raise ResolveError(
+            f"bundle {path} was built on panel {str(bundle.panel_hash)[:16]}, but run "
+            f"{record.run_id} mapped panel {record.panel_hash[:16]}"
+        )
+    return bundle, Path(path).resolve() != Path(record.bundle_path).resolve()
+
+
+def load_resolve_runs(
+    map_dir: Path | str,
+    sample: MapSampleRecord,
+    *,
+    bundle_overrides: Mapping[str, Path] | None = None,
+    bundle_finder: BundleFinder | None = None,
+    check_sha256: bool = True,
+) -> dict[str, ResolveRun]:
+    """Read one sample's MAP runs: tidy parquets and the bundles to resolve with.
+
+    Args:
+        map_dir: The directory holding ``map_manifest.json``.
+        sample: The sample's manifest record.
+        bundle_overrides: Run id or reference id to a bundle directory.
+        bundle_finder: Picks a bundle per (reference, panel) when no override
+            names the run (``current_store_bundles``).
+        check_sha256: Check each parquet against its recorded sha256.
+
+    Returns:
+        Run id to run.
+
+    Raises:
+        ResolveError: If a parquet changed, or an override's reference, panel
+            or marker lookup differs from what the run mapped with.
+    """
+    root = Path(map_dir)
+    overrides = dict(bundle_overrides or {})
+    runs: dict[str, ResolveRun] = {}
+    for run_id, record in sample.runs.items():
+        parquet = root / record.parquet
+        if check_sha256 and file_sha256(parquet) != record.parquet_sha256:
+            raise ResolveError(
+                f"{parquet} differs from the sha256 map_manifest.json recorded"
+            )
+        tidy, _ = read_tidy_parquet(parquet)
+        bundle, overridden = _resolve_bundle(record, overrides, bundle_finder)
+        same_lookup = bundle.lookup_sha256 == (
+            record.lookup_sha256 or record.bundle_lookup_sha256
+        )
+        if overridden and not same_lookup and not record.lookup_restricted:
+            raise ResolveError(
+                f"run {run_id} mapped with lookup "
+                f"{str(record.lookup_sha256)[:16]}, but bundle {bundle.path} has "
+                f"lookup {str(bundle.lookup_sha256)[:16]}: its tables do not "
+                "describe that mapping"
+            )
+        if overridden:
+            logger.info(
+                "%s %s: resolving with bundle %s (mapped with %s)",
+                sample.sample_id,
+                run_id,
+                bundle.build_hash[:16],
+                record.build_hash[:16],
+            )
+        runs[run_id] = ResolveRun(
+            record=record,
+            bundle=bundle,
+            tidy=tidy,
+            overridden=overridden,
+            same_lookup=same_lookup,
+        )
+    return runs
+
+
+def _run_for(
+    runs: Mapping[str, ResolveRun], role: str, purpose: str = "annotation"
+) -> ResolveRun | None:
+    return next(
+        (
+            run
+            for run in runs.values()
+            if run.record.role == role and purpose in run.record.purposes
+        ),
+        None,
+    )
+
+
+def _level_or_empty(
+    tidy: pd.DataFrame, level: str, index: pd.Index
+) -> pd.DataFrame | None:
+    names = set(tidy["level"].astype(str)) | set(tidy["level_name"].astype(str))
+    if level not in names:
+        return None
+    return level_frame(tidy, level).reindex(index)
+
+
+def _aggregated_scores(
+    frame: pd.DataFrame, group_of: Mapping[str, str | None]
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    aggregated = aggregate_parent_probability(frame, group_of)
+    margin = aggregated.probability - np.nan_to_num(
+        aggregated.runner_up_probability, nan=0.0
+    )
+    return (
+        aggregated.classes,
+        aggregated.probability,
+        aggregated.runner_up_class,
+        margin,
+    )
+
+
+def _masked_objects(mask: np.ndarray, values: Any) -> np.ndarray:
+    """Return ``values`` as objects with ``None`` where ``mask`` is false."""
+    output = np.asarray(values, dtype=object).copy()
+    output[~np.asarray(mask, dtype=bool)] = None
+    return output
+
+
+@dataclass(frozen=True)
+class HumanCallInputs:
+    """The per-object calls of one human sample, with the leaf frame.
+
+    Attributes:
+        calls: ``consensus.HumanCalls`` (every object).
+        leaf: The primary leaf level of the table cells (tidy rows,
+            indexed by table-cell id), or ``None`` without a primary run.
+        table_rows: Object position of each table cell.
+    """
+
+    calls: HumanCalls
+    leaf: pd.DataFrame | None
+    table_rows: np.ndarray
+
+
+def human_calls_from_runs(
+    loaded: LoadedSample,
+    primary: ResolveRun | None,
+    secondary: ResolveRun | None,
+    *,
+    allow_fine_levels: bool = False,
+) -> HumanCallInputs:
+    """Build ``resolve_human``'s inputs from the MAP tidy tables (§5.2).
+
+    WHB: the supercluster call with its bootstrap probability,
+    ``avg_correlation``, best runner-up and margin; lineage, broad and NT
+    aggregate the supercluster bootstrap probabilities over the bundle's
+    vocab snapshot (E1 / E2, as MAP's provisional labels); the WHB cluster
+    only with ``allow_fine_levels``. SEA-AD: E2's 7-class label and broad
+    probability (``shadow.seaad_broad_calls`` with the class level) and the
+    subclass ``aggregate_probability``. Objects the runs did not map
+    (outside the table) have no call.
+
+    Args:
+        loaded: The sample's counts (every object).
+        primary: The WHB annotation run.
+        secondary: The SEA-AD annotation run.
+        allow_fine_levels: Also read the WHB cluster level.
+
+    Returns:
+        The calls.
+    """
+    from merxen.annotation.consensus import (
+        HumanCalls,
+        LevelCall,
+        LevelScores,
+        SeaCalls,
+        WhbCalls,
+    )
+    from merxen.annotation.shadow import seaad_broad_calls
+
+    obs = pd.Index(loaded.obs_names.astype(str))
+    table_rows = np.flatnonzero(loaded.in_table)
+    whb: WhbCalls | None = None
+    leaf_table: pd.DataFrame | None = None
+    if primary is not None:
+        vocab = primary.bundle.vocab()
+        leaf_level = primary.leaf_level
+        leaf = level_frame(primary.tidy, leaf_level)
+        leaf.index = leaf.index.astype(str)
+        unknown = leaf.index.difference(obs)
+        if len(unknown):
+            raise ResolveError(
+                f"{loaded.sample.sample_id}: run {primary.run_id} names "
+                f"{len(unknown)} cells absent from the sample, e.g. {list(unknown[:3])}"
+            )
+        frame = leaf.reindex(obs)
+        leaf_table = leaf.reindex(obs[table_rows])
+        mapped = frame["assignment"].notna().to_numpy()
+        lineage_of = _vocab_lookup(vocab, leaf_level, "lineage")
+        broad_of = _vocab_lookup(vocab, leaf_level, "broad_class")
+        nt_of = _vocab_lookup(vocab, leaf_level, "nt")
+        nt_groups = {
+            node: (nt if broad_of.get(node) == NEURONS else None)
+            for node, nt in nt_of.items()
+        }
+        runner_probability = pd.to_numeric(
+            frame[runner_up_column(1, "probability")], errors="coerce"
+        ).to_numpy(np.float64)
+        names = frame["name"].astype(object).to_numpy()
+        names = _masked_objects(mapped, names)
+        supercluster = LevelCall.of(
+            names,
+            frame["bp"].to_numpy(np.float64),
+            corr=frame["avg_correlation"].to_numpy(np.float64),
+            runner_up=frame[runner_up_column(1, "name")].astype(object).to_numpy(),
+            margin=frame["bp"].to_numpy(np.float64)
+            - np.nan_to_num(runner_probability, nan=0.0),
+        )
+        corr = frame["avg_correlation"].to_numpy(np.float64)
+        scores = {}
+        for key, groups in (
+            ("lineage", lineage_of),
+            ("broad", broad_of),
+            ("nt", nt_groups),
+        ):
+            _classes, raw, runner, margin = _aggregated_scores(frame, groups)
+            raw = np.where(mapped, raw, np.nan)
+            scores[key] = LevelScores.of(
+                raw, corr=corr, runner_up=runner, margin=margin
+            )
+        cluster: LevelCall | None = None
+        if allow_fine_levels and len(primary.bundle.levels) > 1:
+            fine = _level_or_empty(primary.tidy, primary.bundle.levels[1], obs)
+            if fine is not None:
+                fine_runner = pd.to_numeric(
+                    fine[runner_up_column(1, "probability")], errors="coerce"
+                ).to_numpy(np.float64)
+                cluster = LevelCall.of(
+                    fine["name"].astype(object).to_numpy(),
+                    fine["bp"].to_numpy(np.float64),
+                    corr=fine["avg_correlation"].to_numpy(np.float64),
+                    runner_up=fine[runner_up_column(1, "name")].astype(object),
+                    margin=fine["bp"].to_numpy(np.float64)
+                    - np.nan_to_num(fine_runner, nan=0.0),
+                )
+        whb = WhbCalls(
+            supercluster=supercluster,
+            lineage=scores["lineage"],
+            broad=scores["broad"],
+            nt=scores["nt"],
+            cluster=cluster,
+        )
+    sea: SeaCalls | None = None
+    if secondary is not None:
+        tidy = secondary.tidy
+        levels = secondary.bundle.levels
+        class_level = _level_or_empty(tidy, levels[0], obs) if levels else None
+        subclass = _level_or_empty(tidy, "subclass", obs)
+        if subclass is None and len(levels) > 1:
+            subclass = _level_or_empty(tidy, levels[1], obs)
+        supertype = _level_or_empty(tidy, "supertype", obs)
+        if supertype is None and len(levels) > 2:
+            supertype = _level_or_empty(tidy, levels[2], obs)
+        if subclass is None:
+            raise ResolveError(
+                f"{loaded.sample.sample_id}: run {secondary.run_id} has no subclass "
+                "level"
+            )
+        broad = seaad_broad_calls(subclass, supertype, class_level=class_level)
+        mapped_sea = subclass["assignment"].notna().to_numpy()
+        broad_names = _masked_objects(mapped_sea, broad["broad"].astype(object))
+        sea = SeaCalls(
+            broad=LevelCall.of(
+                broad_names,
+                np.where(mapped_sea, broad["broad_raw"].to_numpy(np.float64), np.nan),
+            ),
+            subclass=LevelCall.of(
+                _masked_objects(mapped_sea, subclass["name"].astype(object)),
+                subclass["aggregate_probability"].to_numpy(np.float64),
+                corr=subclass["avg_correlation"].to_numpy(np.float64),
+                runner_up=subclass[runner_up_column(1, "name")].astype(object),
+                margin=subclass["bp"].to_numpy(np.float64)
+                - np.nan_to_num(
+                    pd.to_numeric(
+                        subclass[runner_up_column(1, "probability")], errors="coerce"
+                    ).to_numpy(np.float64),
+                    nan=0.0,
+                ),
+            ),
+        )
+    calls = HumanCalls(
+        total_counts=np.asarray(loaded.total_counts, dtype=np.int64),
+        in_table=np.asarray(loaded.in_table, dtype=bool),
+        whb=whb,
+        sea=sea,
+    )
+    return HumanCallInputs(calls=calls, leaf=leaf_table, table_rows=table_rows)
+
+
+def _panel_files(panel_dir: Path | None) -> dict[str, Path]:
+    """Map panel hash to its ``panel_genes*.json`` in an ANNOTATE_PANEL output."""
+    if panel_dir is None or not panel_dir.is_dir():
+        return {}
+    files: dict[str, Path] = {}
+    for path in sorted(panel_dir.glob("panel_genes*.json")):
+        try:
+            panel = load_annotation_panel(path)
+        except (ValueError, OSError) as error:
+            logger.warning("skipping unreadable panel file %s: %s", path, error)
+            continue
+        files.setdefault(panel.panel_hash, path)
+    return files
+
+
+def current_family(panel: AnnotationPanel, config: AnnotationConfig) -> AnnotationPanel:
+    """Return the panel with its family re-derived from the validated tables.
+
+    RESOLVE decides trust with the current ``validated_panels.csv`` (§8.2),
+    so a panel file written before its family was listed (e.g. an M3 shadow
+    run) gets the family ``ANNOTATE_PANEL`` would give it now
+    (``panel.panel_family``). Subset panels keep their parent's family.
+
+    Args:
+        panel: The annotation panel.
+        config: The annotation config (validated tables, ``family_min_jaccard``).
+
+    Returns:
+        The panel, with an updated family when it differs (logged).
+    """
+    from merxen.annotation.diagnostics import load_validated_panels
+    from merxen.annotation.panel import panel_family
+
+    if panel.panel_family is not None and panel.panel_family.basis == "subset":
+        return panel
+    validated = load_validated_panels(config.panel.validated_panels_path)
+    family = panel_family(
+        panel.ensembl_ids,
+        species=panel.species,
+        platforms=panel.platforms,
+        known_families=validated.known_families(panel.species),
+        min_jaccard=config.panel.family_min_jaccard,
+    )
+    if family == panel.panel_family:
+        return panel
+    logger.warning(
+        "panel %s (%s): family %s re-derived as %s (%s) from the current "
+        "validated panels",
+        panel.name,
+        panel.panel_hash[:16],
+        None if panel.panel_family is None else panel.panel_family.family_id,
+        family.family_id,
+        family.basis,
+    )
+    return panel.model_copy(update={"panel_family": family})
+
+
+def trust_for_run(
+    run: ResolveRun,
+    panel: AnnotationPanel | None,
+    config: AnnotationConfig,
+    *,
+    panel_report: Mapping[str, Any] | None = None,
+) -> TrustDecision:
+    """Return the trust decision of one run's (reference, panel) (§8.2).
+
+    The same decision PREP and ``annotation-panel-simulate`` take:
+    ``diagnostics.panel_diagnostics`` of the annotation panel with the
+    bundle's ``bundle.json``, then ``trust_for_panel``.
+
+    Args:
+        run: The run (its bundle's manifest).
+        panel: The run's annotation panel (``panel_genes*.json``).
+        config: The annotation config (trust rules, validated panels).
+        panel_report: ``panel_report.json`` content (gene-ID diagnostics).
+
+    Returns:
+        The decision.
+
+    Raises:
+        ResolveError: If the panel is unknown.
+    """
+    from merxen.annotation.diagnostics import (
+        TrustRules,
+        load_validated_panels,
+        panel_diagnostics,
+        trust_for_panel,
+    )
+
+    if panel is None:
+        raise ResolveError(
+            f"run {run.run_id}: no panel_genes*.json with panel hash "
+            f"{str(run.record.panel_hash)[:16]} (pass --panel-dir)"
+        )
+    diagnostics = panel_diagnostics(
+        panel, panel_report=panel_report, bundles=[run.bundle.manifest]
+    )
+    return trust_for_panel(
+        diagnostics,
+        reference_id=run.record.reference_id,
+        role=run.record.role,  # type: ignore[arg-type]
+        validated=load_validated_panels(config.panel.validated_panels_path),
+        rules=TrustRules.from_config(config),
+    )
+
+
+def refused_trust(
+    reference_id: str, species: Species, panel_hash: str, reasons: Sequence[str]
+) -> TrustDecision:
+    """Return a refused primary trust decision (MAP skipped a refused panel).
+
+    Args:
+        reference_id: The primary reference.
+        species: Species.
+        panel_hash: The sample's declared panel hash.
+        reasons: The panel's refusal reasons.
+
+    Returns:
+        The decision (state ``refused``).
+    """
+    from merxen.annotation.diagnostics import TrustDecision, TrustReason
+
+    return TrustDecision(
+        reference_id=reference_id,
+        role="primary",
+        species=species,
+        panel_hash=panel_hash,
+        state="refused",
+        reasons=tuple(
+            TrustReason(code="panel_refused", detail=str(reason))
+            for reason in (reasons or ["the panel was refused before mapping"])
+        ),
+    )
+
+
+def refused_sample_record(loaded: LoadedSample, fingerprint: str) -> MapSampleRecord:
+    """Return the manifest record of a sample MAP skipped (refused panel).
+
+    Args:
+        loaded: The sample's counts.
+        fingerprint: ``loaded.sample_fingerprint()``.
+
+    Returns:
+        A record without runs and with ``panel_status="refused"``.
+    """
+    return MapSampleRecord(
+        sample_id=loaded.sample.sample_id,
+        platform=loaded.sample.platform,
+        source=loaded.sample.source,
+        h5ad_path=str(loaded.sample.h5ad_path),
+        sample_fingerprint=fingerprint,
+        n_objects=loaded.n_objects,
+        n_table_cells=loaded.n_table_cells,
+        min_counts=loaded.min_counts,
+        declared_panel_hash=loaded.declared.panel_hash,
+        n_features=len(loaded.feature_names),
+        n_resolved_features=sum(1 for gene_id in loaded.feature_ids if gene_id),
+        panel_status="refused",
+    )
+
+
+def read_spatial(path: Path | str) -> tuple[np.ndarray | None, str | None]:
+    """Read ``obsm['spatial']`` and the shape key of an H5AD (composition CIs).
+
+    Args:
+        path: A prepared or clustered H5AD.
+
+    Returns:
+        ``(xy, shape_key)``: ``(n, 2)`` coordinates in µm (``None`` when the
+        file has none) and ``uns['merxen_clustering_squidpy']['shape_key']``
+        (``*_aligned_nonrigid`` for MERSCOPE coordinates in the Xenium frame).
+    """
+    import h5py
+
+    with h5py.File(path, "r") as handle:
+        xy = None
+        if "obsm" in handle and "spatial" in handle["obsm"]:
+            xy = np.asarray(handle["obsm"]["spatial"][()], dtype=np.float64)[:, :2]
+        key = "uns/merxen_clustering_squidpy/shape_key"
+        shape_key = None
+        if key in handle:
+            value = _read_elem(handle[key])
+            shape_key = value.decode() if isinstance(value, bytes) else str(value)
+    return xy, shape_key
+
+
+def in_fixed_frame(platform: str, shape_key: str | None) -> bool:
+    """Whether a section's coordinates are in the pair's fixed (Xenium) frame."""
+    return str(platform).upper() == "XENIUM" or "_aligned" in str(shape_key or "")
+
+
+def default_alignment_dir(h5ad_path: Path | str, pair_id: str | None) -> Path | None:
+    """Return ``<results>/<pair>/alignment/align_out`` of an input, if it exists.
+
+    Args:
+        h5ad_path: An input H5AD in a results tree.
+        pair_id: The pair.
+
+    Returns:
+        The directory, or ``None``.
+    """
+    root = results_root_of(h5ad_path)
+    if root is None or not pair_id:
+        return None
+    candidate = root / pair_id / "alignment" / "align_out"
+    return candidate if candidate.is_dir() else None
+
+
+def load_pair_mask(alignment_dir: Path | None) -> Any | None:
+    """Load the pair's shared tissue mask from an ``align_out`` directory.
+
+    Args:
+        alignment_dir: ``align_out`` (``shared_tissue_mask.npy`` and
+            ``registration_summary.json``), or ``None``.
+
+    Returns:
+        ``panel.SharedTissueMask``, or ``None`` when absent or unreadable.
+    """
+    from merxen.annotation.panel import load_shared_tissue_mask
+
+    if alignment_dir is None:
+        return None
+    mask_path = alignment_dir / "shared_tissue_mask.npy"
+    summary_path = alignment_dir / "registration_summary.json"
+    if not mask_path.is_file() or not summary_path.is_file():
+        return None
+    try:
+        return load_shared_tissue_mask(mask_path, summary_path)
+    except (ValueError, OSError) as error:
+        logger.warning("shared tissue mask in %s not used: %s", alignment_dir, error)
+        return None
+
+
+def human_branch_columns(
+    resolution: HumanResolution,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return ``ct_branch`` and ``ct_leaf`` of a human resolution (§4.1).
+
+    The branch is the map_first broad label (``vocab.broad_class_for_map_first``:
+    the confident broad class, else the ``Oligodendrocyte lineage`` / ``Neurons``
+    lineage fallback, else ``Mixed/Unknown``), with neurons split by a
+    confident NT (``Neurons/Excitatory`` / ``Neurons/Inhibitory``, else
+    ``Neurons/unresolved``) and the lineage fallback as
+    ``Oligodendrocyte lineage/unresolved``. The leaf is the confident WHB
+    supercluster, else ``unresolved``.
+
+    Args:
+        resolution: ``resolve_human`` output.
+
+    Returns:
+        ``(branch, leaf)`` per object.
+    """
+    from merxen.annotation.schema import CellStatus
+    from merxen.annotation.vocab import (
+        NT_EXCITATORY,
+        NT_INHIBITORY,
+        OLIGODENDROCYTE_LINEAGE,
+        UNRESOLVED_LABEL,
+        broad_classes_for_map_first,
+    )
+
+    labels = broad_classes_for_map_first(
+        resolution.final_level,
+        resolution.levels["broad"].name,
+        resolution.levels["lineage"].name,
+        species="human",
+    ).astype(str)
+    nt = resolution.levels["nt"]
+    nt_confident = nt.status == CellStatus.CONFIDENT.value
+    branch = np.asarray(labels.to_numpy(), dtype=object).copy()
+    neurons = branch == NEURONS
+    excitatory = neurons & nt_confident & (nt.name == NT_EXCITATORY)
+    inhibitory = neurons & nt_confident & (nt.name == NT_INHIBITORY)
+    branch[neurons] = "Neurons/unresolved"
+    branch[excitatory] = "Neurons/Excitatory"
+    branch[inhibitory] = "Neurons/Inhibitory"
+    branch[branch == OLIGODENDROCYTE_LINEAGE] = (
+        f"{OLIGODENDROCYTE_LINEAGE}/{UNRESOLVED_LABEL}"
+    )
+    supercluster = resolution.levels["supercluster"]
+    leaf = np.where(supercluster.confident, supercluster.name, UNRESOLVED_LABEL)
+    return branch, np.asarray(leaf, dtype=object)
+
+
+@dataclass
+class SampleResolution:
+    """RESOLVE's result for one sample.
+
+    Attributes:
+        sample_id: Sample id.
+        platform: Platform.
+        labels: The label table (§4.1).
+        provenance: ``AnnotationProvenance`` (§4.6).
+        summary: The sample's resolve-summary record.
+        section: Its composition rows (pair JSD).
+        labels_path: Where the table was written.
+        manifest_path: Where the provenance was written.
+    """
+
+    sample_id: str
+    platform: str
+    labels: pd.DataFrame
+    provenance: AnnotationProvenance
+    summary: dict[str, Any]
+    section: SectionComposition | None = None
+    labels_path: Path | None = None
+    manifest_path: Path | None = None
+
+
+def _round_share(value: float | None) -> float | None:
+    if value is None or not np.isfinite(value):
+        return None
+    return round(float(value), 6)
+
+
+def _floats_only(record: Mapping[str, Any]) -> dict[str, float]:
+    return {
+        str(key): float(value)
+        for key, value in record.items()
+        if isinstance(value, int | float)
+        and not isinstance(value, bool)
+        and np.isfinite(value)
+    }
+
+
+def _threshold_values(config: AnnotationConfig) -> dict[str, float]:
+    return _floats_only(config.thresholds.model_dump(mode="json"))
+
+
+def _emitted_bins(
+    emission: EmissionPlan, levels: Sequence[str]
+) -> dict[str, dict[str, list[int]]]:
+    decisions = emission.decisions
+    if decisions is None:
+        return {}
+    output: dict[str, dict[str, list[int]]] = {}
+    for level in levels:
+        table_level = emission.table_level(level)
+        regime = emission.regime(table_level)
+        rows = decisions[
+            (decisions["level"].astype(str) == table_level)
+            & (decisions["regime"].astype(str) == regime)
+            & (decisions["status"].astype(str) == "emitted")
+        ]
+        per_class: dict[str, list[int]] = {}
+        for cls, group in rows.groupby(rows["class"].astype(str)):
+            per_class[safe_token(str(cls))] = sorted(
+                int(depth) for depth in group["depth"]
+            )
+        output[safe_token(level)] = per_class
+    return output
+
+
+def _resolvability_provenance(
+    tables: ResolvabilityTables | None,
+    emission: EmissionPlan,
+    resolution: HumanResolution,
+    bundle: MmcBundle,
+    *,
+    reweighted: bool,
+) -> ResolvabilityProvenance:
+    from merxen.annotation.provenance import ResolvabilityProvenance
+    from merxen.annotation.resolvability import RESOLVABILITY_FILE
+
+    table = resolution.in_table
+    resolvable: dict[str, float] = {}
+    for level, item in resolution.emissions.items():
+        share = item.summary(table)["emitted_share"]
+        if share is not None:
+            resolvable[safe_token(level)] = round(float(share), 6)
+    if tables is None:
+        return ResolvabilityProvenance(
+            reweighted_to_composition=False, resolvable_share=resolvable
+        )
+    summary = tables.summary
+    recipes = {item.get("name"): item for item in summary.get("recipes", [])}
+    decision_recipe = str(summary.get("decision_recipe"))
+    version = (recipes.get(decision_recipe) or {}).get("version")
+    files = {
+        str(item.get("path")): item.get("sha256")
+        for item in bundle.manifest.get("files", []) or []
+    }
+    d_max: dict[str, int] = {}
+    for cls, depth in (summary.get("d_max") or {}).get("broad", {}).items():
+        if depth is not None:
+            d_max[safe_token(str(cls))] = int(depth)
+    broad = resolution.levels["broad"]
+    extrapolated: dict[str, float] = {}
+    keys = np.asarray(broad.class_key, dtype=object)
+    for cls in sorted({str(key) for key in keys[table] if key is not None}):
+        members = table & (keys == cls)
+        if members.any():
+            extrapolated[safe_token(cls)] = round(
+                float(resolution.resolvability_extrapolated[members].mean()), 6
+            )
+    return ResolvabilityProvenance(
+        recipe=decision_recipe,
+        recipe_version=None if version is None else int(version),
+        sha256=files.get(RESOLVABILITY_FILE),
+        emitted_depth_bins=_emitted_bins(emission, list(resolution.emissions)),
+        d_max=d_max,
+        extrapolated_share=extrapolated,
+        reweighted_to_composition=reweighted,
+        resolvability_inherited=bool(
+            (bundle.manifest.get("builder_output") or {}).get(
+                "resolvability_inherited", False
+            )
+        ),
+        resolvable_share=resolvable,
+    )
+
+
+def _reference_provenance(
+    run: ResolveRun, trust: TrustDecision | None
+) -> ReferenceProvenance:
+    from merxen.annotation.diagnostics import CoverageDiagnostics
+    from merxen.annotation.provenance import MarkerProvenance, ReferenceProvenance
+
+    manifest = run.bundle.manifest
+    output = manifest.get("builder_output") or {}
+    markers_record = output.get("markers") or {}
+    try:
+        coverage = CoverageDiagnostics.from_bundle_manifest(manifest)
+        markers = coverage.marker_provenance(
+            lookup_sha256=run.bundle.lookup_sha256,
+            n_per_utility=markers_record.get("n_per_utility"),
+        )
+        n_used: int | None = coverage.n_query_genes_used
+        absent: int | None = len(coverage.absent_from_reference)
+    except ValueError:
+        markers = MarkerProvenance(lookup_sha256=run.bundle.lookup_sha256)
+        n_used, absent = run.record.n_query_genes, None
+    return ReferenceProvenance(
+        reference_id=run.record.reference_id,
+        role=run.record.role,  # type: ignore[arg-type]
+        taxonomy_id=run.bundle.taxonomy_id,
+        levels=list(run.bundle.levels),
+        collapsed_parents=list(run.record.collapsed_parents),
+        drop_level=run.bundle.drop_level,
+        bundle_path=str(run.bundle.path),
+        build_hash=run.bundle.build_hash,
+        n_query_genes_used=n_used,
+        markers=markers,
+        panel_trust=None if trust is None else trust.state,
+        trust_reasons=[] if trust is None else trust.reason_codes,
+        n_panel_genes_absent=absent,
+    )
+
+
+def _composition_provenance(
+    shares: Mapping[str, Mapping[str, Any]],
+) -> dict[str, dict[str, float]]:
+    return {
+        safe_token(kind): {
+            key: float(value)
+            for key, value in record.items()
+            if key.startswith("share") and value is not None
+        }
+        for kind, record in shares.items()
+    }
+
+
+def _assigned_broad(names: np.ndarray) -> np.ndarray:
+    """The WHB vocab broad class of each supercluster name (sinks: ``None``)."""
+    from merxen.annotation.composition import whb_broad_of
+    from merxen.annotation.vocab import HUMAN_BROAD_CLASSES
+
+    broad_of = whb_broad_of()
+    classes = set(HUMAN_BROAD_CLASSES)
+    output = np.full(len(names), None, dtype=object)
+    for index, name in enumerate(names):
+        if name is None:
+            continue
+        broad = broad_of.get(str(name))
+        if broad in classes:
+            output[index] = broad
+    return output
+
+
+def resolve_human_sample(
+    loaded: LoadedSample,
+    record: MapSampleRecord,
+    runs: Mapping[str, ResolveRun],
+    config: AnnotationConfig,
+    *,
+    manifest: MapManifest,
+    panels: Mapping[str, AnnotationPanel],
+    panel_report: Mapping[str, Any] | None = None,
+    n_segmented: int | None = None,
+    trust_overrides: Mapping[str, TrustDecision] | None = None,
+    xy: np.ndarray | None = None,
+    aligned_frame: bool = False,
+    panel_mode: str | None = None,
+    validate: bool = True,
+    seed: int = 0,
+) -> SampleResolution:
+    """Resolve one human sample (plan §3.4; §4.1, §4.3, §4.6, §5.2-§5.6, §8.2-§8.3).
+
+    Args:
+        loaded: The sample's counts (every object, control-free).
+        record: Its ``map_manifest.json`` record.
+        runs: Its MAP runs (``load_resolve_runs``).
+        config: The annotation config (coupled to ``min_counts``).
+        manifest: The pair's MAP manifest.
+        panels: Panel hash to annotation panel.
+        panel_report: ``panel_report.json`` content.
+        n_segmented: Segmented objects (the gate warning's denominator);
+            default: the objects of the input.
+        trust_overrides: Trust decision per reference id instead of the
+            diagnostics (tests, replays).
+        xy: Coordinates of every object (composition CIs).
+        aligned_frame: Whether ``xy`` is in the pair's fixed frame.
+        panel_mode: The pair's resolved panel mode.
+        validate: Check the table with ``schema.validate_label_table``.
+        seed: Seed of the diffuse-flag simulation.
+
+    Returns:
+        The sample's resolution.
+
+    Raises:
+        ResolveError: If the inputs do not fit together.
+    """
+    from merxen.annotation import consensus as cs
+    from merxen.annotation import flags as fl
+    from merxen.annotation.composition import (
+        dataset_type_composition,
+        section_composition,
+        section_shares,
+        soft_broad_columns,
+        soft_broad_from_level,
+    )
+    from merxen.annotation.provenance import (
+        AnnotationProvenance,
+        ConsensusProvenance,
+        DatasetGateProvenance,
+        EngineProvenance,
+        ThresholdProvenance,
+    )
+    from merxen.annotation.resolvability import load_resolvability
+    from merxen.annotation.schema import (
+        coerce_label_table_dtypes,
+        validate_label_table,
+    )
+    from merxen.annotation.thresholds import EmissionPlan, FloorPlan
+    from merxen.annotation.vocab import HUMAN_BROAD_CLASSES, load_state_gene_ids
+
+    species: Species = "human"
+    sample_id = loaded.sample.sample_id
+    platform = loaded.sample.platform.upper()
+    min_counts = config.require_min_counts()
+    overrides = dict(trust_overrides or {})
+    primary = _run_for(runs, "primary")
+    secondary = _run_for(runs, "secondary")
+    n_objects = loaded.n_objects
+    table = np.asarray(loaded.in_table, dtype=bool)
+
+    # Trust decisions (§8.2).
+    primary_id = config.primary_reference().reference_id
+    trust: TrustDecision | None
+    secondary_trust: TrustDecision | None = None
+    if primary is None:
+        trust = overrides.get(primary_id) or refused_trust(
+            primary_id,
+            species,
+            record.declared_panel_hash,
+            manifest.panel_reasons
+            or [f"sample panel status {record.panel_status}: no primary run"],
+        )
+    else:
+        panel = panels.get(str(primary.record.panel_hash))
+        trust = overrides.get(primary.record.reference_id) or trust_for_run(
+            primary, panel, config, panel_report=panel_report
+        )
+    if secondary is not None:
+        panel = panels.get(str(secondary.record.panel_hash))
+        secondary_trust = overrides.get(secondary.record.reference_id) or trust_for_run(
+            secondary, panel, config, panel_report=panel_report
+        )
+    elif overrides.get("seaad_mr_panel") is not None:
+        secondary_trust = overrides["seaad_mr_panel"]
+
+    inputs = human_calls_from_runs(
+        loaded,
+        primary,
+        secondary,
+        allow_fine_levels=config.thresholds.allow_fine_levels,
+    )
+    counts = np.asarray(loaded.total_counts, dtype=np.float64)
+
+    # Emission reweighted to the dataset's soft composition (§8.3).
+    tables = None if primary is None else load_resolvability(primary.bundle.path)
+    composition = None
+    reweight = bool(
+        tables is not None
+        and config.resolvability.reweight_to_composition
+        and inputs.leaf is not None
+        and len(inputs.leaf)
+    )
+    if reweight:
+        assert tables is not None and inputs.leaf is not None
+        composition = dataset_type_composition(
+            inputs.leaf,
+            counts[inputs.table_rows],
+            tables.depth_grid,
+            min_bin_mass=float(config.resolvability.composition_min_bin_cells),
+        )
+    emission = EmissionPlan.from_tables(
+        tables,
+        species=species,
+        thresholds=config.thresholds,
+        trust=trust,
+        composition=composition,
+        seed_stability_max_change=config.resolvability.seed_stability_max_change,
+    )
+    floors = FloorPlan.build(
+        species=species,
+        platform=platform,
+        hard_floor=min_counts,
+        trust=trust,
+        thresholds=config.thresholds,
+        emission=emission,
+    )
+    settings = cs.HumanResolveSettings.from_config(
+        config,
+        platform=platform,
+        emission=emission,
+        floors=floors,
+        trust=trust,
+        secondary_trust=secondary_trust,
+        n_segmented=n_segmented if n_segmented is not None else n_objects,
+    )
+    resolution = cs.resolve_human(inputs.calls, settings)
+
+    # Flags (§4.3, §5.6).
+    whb = inputs.calls.whb
+    names = (
+        whb.supercluster.name
+        if whb is not None
+        else np.full(n_objects, None, dtype=object)
+    )
+    assigned = _assigned_broad(names)
+    query_counts = None
+    query_rows = None
+    gene_ids: tuple[str, ...] = ()
+    negatives = None
+    profiles_by_class = None
+    if primary is not None:
+        panel = panels.get(str(primary.record.panel_hash))
+        if panel is not None:
+            query = build_sample_query(loaded, panel)
+            query_counts = query.counts
+            query_rows = np.flatnonzero(table)
+            gene_ids = tuple(query.gene_ids)
+        else:
+            logger.warning(
+                "%s: no panel file for %s; contamination and diffuse flags are null",
+                sample_id,
+                str(primary.record.panel_hash)[:16],
+            )
+        bundle_dir = primary.bundle.path
+        negatives_path = bundle_dir / "negative_genes.parquet"
+        profiles_path = bundle_dir / "profiles.parquet"
+        if gene_ids and negatives_path.is_file():
+            negatives = fl.NegativeGeneSet.from_table(
+                pd.read_parquet(negatives_path),
+                gene_ids,
+                classes=HUMAN_BROAD_CLASSES,
+                state_gene_ids=load_state_gene_ids(species),
+                max_fraction=config.flags.negative_gene_max_fraction,
+            )
+        if gene_ids and profiles_path.is_file():
+            from merxen.annotation.composition import whb_broad_of
+
+            profiles_by_class = fl.profiles_for_classes(
+                pd.read_parquet(profiles_path),
+                level=primary.leaf_level,
+                gene_ids=gene_ids,
+                node_class=whb_broad_of(),
+                classes=HUMAN_BROAD_CLASSES,
+            )
+    flag_set = fl.compute_flags(
+        fl.FlagInputs(
+            species=species,
+            platform=platform,
+            total_counts=counts,
+            in_table=table,
+            assigned_class=assigned,
+            confident=resolution.levels["broad"].confident,
+            method_disagree=resolution.flags[Columns.FLAG_METHOD_DISAGREE],
+            corr=(
+                whb.supercluster.scores.corr
+                if whb is not None and whb.supercluster.scores.corr is not None
+                else np.full(n_objects, np.nan)
+            ),
+            depth_bin=resolution.depth_bin,
+            exclude_hard=resolution.flags[Columns.EXCLUDE_HARD],
+            query_counts=query_counts,
+            query_rows=query_rows,
+            gene_ids=gene_ids,
+            negatives=negatives,
+            profiles_by_class=profiles_by_class,
+        ),
+        config.flags,
+        class_names=HUMAN_BROAD_CLASSES,
+        seed=seed,
+    )
+
+    # Soft composition (§5.5).
+    soft_rows = (
+        soft_broad_from_level(inputs.leaf)
+        if inputs.leaf is not None
+        else np.tile(
+            np.eye(len(HUMAN_BROAD_CLASSES) + 1)[-1], (len(inputs.table_rows), 1)
+        )
+    )
+    table_rows = inputs.table_rows
+    broad = resolution.levels["broad"]
+    section = section_composition(
+        sample_id,
+        platform,
+        soft_rows,
+        total_counts=counts[table_rows],
+        argmax_broad=np.where(
+            assigned[table_rows] == None,  # noqa: E711
+            UNASSIGNED_LABEL,
+            assigned[table_rows],
+        ),
+        confident_broad=broad.name[table_rows],
+        confident=broad.confident[table_rows],
+        xy=None if xy is None else np.asarray(xy)[table_rows],
+        aligned_frame=aligned_frame,
+    )
+    shares = section_shares(section)["whole_section"]
+
+    # The label table (§4.1).
+    branch, leaf = human_branch_columns(resolution)
+    primary_panel_hash = (
+        primary.record.panel_hash
+        if primary is not None and primary.record.panel_hash
+        else record.declared_panel_hash
+    )
+    n_missing = primary.record.n_missing_panel_genes if primary is not None else 0
+    instance_ids = (
+        np.asarray(loaded.instance_ids, dtype=np.int64)
+        if loaded.instance_ids is not None
+        else np.full(n_objects, MISSING_INSTANCE_ID, dtype=np.int64)
+    )
+    if loaded.instance_ids is None:
+        logger.warning(
+            "%s: the input has no instance ids; instance_id is %d",
+            sample_id,
+            MISSING_INSTANCE_ID,
+        )
+    n_genes = np.asarray(loaded.n_genes, dtype=np.float64)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        genes_per_count = np.where(counts > 0, n_genes / counts, np.nan)
+    data: dict[str, Any] = {
+        Columns.CELL_ID: loaded.obs_names.astype(str),
+        Columns.INSTANCE_ID: instance_ids,
+        Columns.PAIR_ID: [manifest.pair_id or ""] * n_objects,
+        Columns.SAMPLE_ID: [sample_id] * n_objects,
+        Columns.PLATFORM: [platform] * n_objects,
+        Columns.SEGMENTATION: [manifest.segmentation or ""] * n_objects,
+        Columns.SPECIES: [species] * n_objects,
+        Columns.ANATOMICAL_REGION: [config.anatomical_region] * n_objects,
+        Columns.PANEL_HASH: [primary_panel_hash] * n_objects,
+        Columns.TOTAL_COUNTS: counts.astype(np.int32),
+        Columns.N_GENES: n_genes.astype(np.int32),
+        Columns.GENES_PER_COUNT: np.clip(genes_per_count, 0.0, 1.0).astype(np.float32),
+        Columns.IN_TABLE: table,
+        Columns.N_MISSING_PANEL_GENES: np.full(n_objects, n_missing, dtype=np.int32),
+        **resolution.to_columns(),
+        Columns.CT_BRANCH: branch,
+        Columns.CT_LEAF: leaf,
+        Columns.CT_MENDER_STATE: branch,
+        **flag_set.columns,
+        **soft_broad_columns(soft_rows, table_rows, n_objects),
+    }
+    frame = pd.DataFrame(data, index=pd.RangeIndex(n_objects))
+    engine_frames = []
+    for run in runs.values():
+        engine = engine_columns(
+            run.tidy,
+            run.prefix,
+            pd.Index(loaded.obs_names.astype(str)),
+            runner_up_levels=(
+                [run.leaf_level_name] if run.record.role == "primary" else []
+            ),
+        )
+        engine_frames.append(engine.reset_index(drop=True))
+    if engine_frames:
+        frame = pd.concat([frame, *engine_frames], axis=1)
+    frame = coerce_label_table_dtypes(
+        frame, species, include_fine_levels=config.thresholds.allow_fine_levels
+    )
+    if validate:
+        validate_label_table(
+            frame,
+            species,
+            h5ad_index=(
+                loaded.obs_names.astype(str)
+                if loaded.sample.source == "clustered"
+                else None
+            ),
+            include_fine_levels=config.thresholds.allow_fine_levels,
+        )
+
+    # Provenance (§4.6).
+    summary = resolution.summary()
+    references: dict[str, ReferenceProvenance] = {}
+    for item in (primary, secondary):
+        if item is None:
+            continue
+        item_trust = trust if item is primary else secondary_trust
+        references[item.record.reference_id] = _reference_provenance(item, item_trust)
+    resolvability = {}
+    if primary is not None:
+        resolvability[primary.record.reference_id] = _resolvability_provenance(
+            tables, emission, resolution, primary.bundle, reweighted=reweight
+        )
+    from merxen.annotation.diagnostics import (
+        panel_diagnostics,
+        panel_provenance,
+    )
+
+    panel_prov = None
+    if primary is not None and trust is not None:
+        primary_panel = panels.get(str(primary.record.panel_hash))
+        diagnostics = None
+        if primary_panel is not None:
+            try:
+                diagnostics = panel_diagnostics(
+                    primary_panel,
+                    panel_report=panel_report,
+                    bundles=[primary.bundle.manifest],
+                )
+            except ValueError as error:
+                logger.warning("%s: no panel diagnostics (%s)", sample_id, error)
+        if diagnostics is not None:
+            panel_prov = panel_provenance(
+                trust,
+                diagnostics,
+                panel_mode=panel_mode,  # type: ignore[arg-type]
+                validated_share={
+                    level: float(value["validated_share"])
+                    for level, value in summary["levels"].items()
+                    if value["validated_share"] is not None
+                },
+                n_missing_panel_genes=n_missing,
+            )
+    if panel_prov is None and trust is not None:
+        from merxen.annotation.provenance import PanelProvenance
+
+        panel_prov = PanelProvenance(
+            panel_hash=record.declared_panel_hash,
+            panel_trust=trust.state,
+            trust_reasons=trust.reason_codes,
+            banner=trust.banner,
+            n_missing_panel_genes=n_missing,
+        )
+    engine_record = primary.record if primary is not None else None
+    params = engine_record.engine_params if engine_record is not None else {}
+    sources = sorted(
+        {
+            emission.threshold_source(level)
+            for level in ("lineage", "broad", "nt", "supercluster")
+        }
+    )
+    floor_sources = sorted(
+        {floors.policy(level) for level in ("broad", "supercluster")}
+    )
+    gate = resolution.gate
+    tiers, tier_counts = np.unique(
+        resolution.consensus_tier[table].astype(int), return_counts=True
+    )
+    provenance = AnnotationProvenance(
+        species=species,
+        anatomical_region=config.anatomical_region,
+        merxen_version=_merxen_version(),
+        panel=panel_prov,
+        references=references,
+        engine=EngineProvenance(
+            ctm_version=None if engine_record is None else engine_record.ctm_version,
+            ctm_commit=None if engine_record is None else engine_record.ctm_commit,
+            bootstrap_factor=params.get("bootstrap_factor"),
+            bootstrap_iteration=params.get("bootstrap_iteration"),
+            rng_seed=params.get("rng_seed"),
+            n_processors=params.get("n_processors"),
+            wall_time_s=None if engine_record is None else engine_record.wall_s,
+        ),
+        resolvability=resolvability,
+        thresholds=ThresholdProvenance(
+            mode=config.thresholds.mode,
+            values=_threshold_values(config),
+            threshold_source=";".join(sources),
+            floors_sha256=floors.table.sha256,
+            floor_source=";".join(str(item) for item in floor_sources),
+            calibration="none",
+        ),
+        flags=flag_set.provenance(),
+        gate=DatasetGateProvenance(
+            frac_ge30=_round_share(gate.frac_ge30),
+            table_broad_coverage=_round_share(gate.broad_coverage_table),
+            segmented_broad_coverage=_round_share(gate.broad_coverage_segmented),
+            level=gate.level,
+            warning=gate.warning,
+            reasons=list(gate.reasons),
+        ),
+        consensus=ConsensusProvenance(
+            degraded_mode=resolution.mode.name,
+            methods=sorted(resolution.mode.methods),
+            max_tier=resolution.mode.max_tier,
+            single_method_override=resolution.single_method_override,
+            likelihood_vote=False,
+            tier_counts={
+                str(int(tier)): int(count)
+                for tier, count in zip(tiers, tier_counts, strict=True)
+            },
+            cop_suppressed=int(
+                resolution.flags[Columns.FLAG_COP_SUPPRESSED][table].sum()
+            ),
+        ),
+        composition=_composition_provenance(shares),
+        confident_fraction_table={
+            level: round(float(value["confident_share_table"]), 6)
+            for level, value in summary["levels"].items()
+            if value["confident_share_table"] is not None
+        },
+        confident_fraction_segmented={
+            level: round(float(value["confident_share_segmented"]), 6)
+            for level, value in summary["levels"].items()
+            if value["confident_share_segmented"] is not None
+        },
+    )
+    sample_summary = {
+        "sample_id": sample_id,
+        "platform": platform,
+        "n_objects": n_objects,
+        "n_table": int(table.sum()),
+        "n_segmented": n_segmented,
+        "trust": None if trust is None else trust.to_json(),
+        "secondary_trust": (
+            None if secondary_trust is None else secondary_trust.to_json()
+        ),
+        "banner": None if trust is None else trust.banner,
+        "bundles": {
+            run.run_id: {
+                "reference_id": run.record.reference_id,
+                "mapped_build_hash": run.record.build_hash,
+                "resolved_build_hash": run.bundle.build_hash,
+                "overridden": run.overridden,
+                "same_lookup": run.same_lookup,
+            }
+            for run in runs.values()
+        },
+        "reweighted_to_composition": reweight,
+        "resolution": summary,
+        "flags": flag_set.summary(),
+        "composition": shares,
+    }
+    return SampleResolution(
+        sample_id=sample_id,
+        platform=platform,
+        labels=frame,
+        provenance=provenance,
+        summary=sample_summary,
+        section=section,
+    )
+
+
+def _merxen_version() -> str | None:
+    try:
+        from merxen import __version__
+
+        return str(__version__)
+    except ImportError:  # pragma: no cover - the package always has it
+        return None
+
+
+def write_label_table(
+    labels: pd.DataFrame, path: Path | str, provenance_json: str
+) -> Path:
+    """Write ``<sid>_celltype_labels.parquet`` atomically, provenance in the schema.
+
+    Args:
+        labels: The label table.
+        path: Output file.
+        provenance_json: ``AnnotationProvenance.to_uns_json()``.
+
+    Returns:
+        The written path.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    output = Path(path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    table = pa.Table.from_pandas(labels, preserve_index=False)
+    metadata = dict(table.schema.metadata or {})
+    metadata[LABELS_METADATA_KEY] = provenance_json.encode("utf-8")
+    table = table.replace_schema_metadata(metadata)
+    temporary = output.with_name(output.name + ".partial")
+    pq.write_table(table, temporary)
+    temporary.replace(output)
+    return output
+
+
+def read_label_table(
+    path: Path | str,
+) -> tuple[pd.DataFrame, AnnotationProvenance | None]:
+    """Read a label table and the provenance stored in its schema.
+
+    Args:
+        path: ``<sid>_celltype_labels.parquet``.
+
+    Returns:
+        ``(labels, provenance)`` (``None`` without stored provenance).
+    """
+    import pyarrow.parquet as pq
+
+    from merxen.annotation.provenance import AnnotationProvenance
+
+    table = pq.read_table(path)
+    metadata = table.schema.metadata or {}
+    raw = metadata.get(LABELS_METADATA_KEY)
+    provenance = (
+        None if raw is None else AnnotationProvenance.from_uns_json(raw.decode("utf-8"))
+    )
+    return table.to_pandas(), provenance
+
+
+def _write_json(payload: Mapping[str, Any], path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".partial")
+    temporary.write_text(
+        json.dumps(payload, indent=2, sort_keys=True, allow_nan=False, default=str)
+        + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+    return path
+
+
+def _json_safe(value: Any) -> Any:
+    """Replace non-finite floats by ``None`` (JSON has no NaN)."""
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, float | np.floating):
+        return float(value) if np.isfinite(value) else None
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.bool_):
+        return bool(value)
+    return value
+
+
+@dataclass
+class ResolveResult:
+    """What ``annotate_resolve`` wrote for one pair x segmentation.
+
+    Attributes:
+        samples: Sample id to its resolution.
+        summary: The ``<pair>_resolve_summary.json`` content.
+        summary_path: Where it was written.
+    """
+
+    samples: dict[str, SampleResolution]
+    summary: dict[str, Any]
+    summary_path: Path
+
+
+def annotate_resolve(
+    map_dir: Path | str,
+    config: AnnotationConfig,
+    *,
+    output_dir: Path | str,
+    panel_dir: Path | str | None = None,
+    samples: Sequence[MapSample] | None = None,
+    bundle_overrides: Mapping[str, Path] | None = None,
+    bundle_finder: BundleFinder | None = None,
+    n_segmented: Mapping[str, int] | None = None,
+    alignment_dir: Path | str | None = None,
+    trust_overrides: Mapping[str, TrustDecision] | None = None,
+    platforms: Sequence[str] | None = None,
+    tile_um: float = 500.0,
+    n_bootstrap: int = 200,
+    seed: int = 0,
+    validate: bool = True,
+) -> ResolveResult:
+    """Run the RESOLVE step for one pair x segmentation (plan §3.4).
+
+    Reads ``map_manifest.json`` and its tidy MMC parquets, the bundles
+    (profiles, negative genes, resolvability tables, trust) and the samples'
+    counts; applies resolvability-gated emission reweighted to each dataset's
+    soft composition with its local thresholds, the floors, the dataset gate,
+    the degraded-mode consensus and the flags; and writes, per sample,
+    ``<plat>/<sid>_celltype_labels.parquet`` (§4.1, validated) and
+    ``<plat>/<sid>_annotation_manifest.json`` (§4.6), and the pair's
+    ``<pair>_resolve_summary.json`` (gate levels and warnings, trust,
+    realised flag rates, coverage, resolvable share per level, compositions
+    and the pair JSD with block-bootstrap CIs).
+
+    Args:
+        map_dir: ``annotation_map_out`` (``map_manifest.json`` + parquets).
+        config: The annotation config, coupled to the clustering
+            ``min_counts``.
+        output_dir: Where the outputs go.
+        panel_dir: ``ANNOTATE_PANEL`` output (default: ``<map_dir>/panel``).
+        samples: Where the counts come from (default: the manifest's inputs).
+        bundle_overrides: Run id or reference id to a bundle directory.
+        bundle_finder: Picks a bundle per (reference, panel) when no override
+            names the run (``current_store_bundles``).
+        n_segmented: Segmented objects per sample id (default: the objects
+            of the input; a published clustered H5AD holds table cells only,
+            so the segmented-object gate warning then uses table cells).
+        alignment_dir: ``align_out`` of the pair (shared tissue mask; default:
+            ``<results>/<pair>/alignment/align_out`` when the inputs sit in a
+            results tree).
+        trust_overrides: Trust decision per reference id.
+        platforms: Resolve only these platforms.
+        tile_um: Block-bootstrap tile edge.
+        n_bootstrap: Block-bootstrap replicates.
+        seed: Bootstrap and diffuse-simulation seed.
+        validate: Validate every label table.
+
+    Returns:
+        The result.
+
+    Raises:
+        ResolveError: If the inputs do not fit together.
+        NotImplementedError: For mouse (M6).
+    """
+    from merxen.annotation.composition import (
+        pair_jsd,
+        section_shares,
+        shared_mask_regions,
+    )
+
+    start = time.monotonic()
+    root = Path(map_dir)
+    manifest = load_map_manifest(root / MAP_MANIFEST_NAME)
+    if manifest.species != config.species:
+        raise ResolveError(
+            f"{root / MAP_MANIFEST_NAME} is a {manifest.species} run, the config "
+            f"{config.species}"
+        )
+    if config.species != "human":
+        raise NotImplementedError("mouse RESOLVE rules are M6 (plan §12)")
+    min_counts = config.require_min_counts()
+    if manifest.min_counts != min_counts:
+        raise ResolveError(
+            f"MAP used min_counts {manifest.min_counts}, the config {min_counts}"
+        )
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    panel_root = Path(panel_dir) if panel_dir is not None else root / "panel"
+    panels = {
+        panel_hash: current_family(load_annotation_panel(path), config)
+        for panel_hash, path in _panel_files(panel_root).items()
+    }
+    report_path = panel_root / "panel_report.json"
+    panel_report = (
+        json.loads(report_path.read_text(encoding="utf-8"))
+        if report_path.is_file()
+        else None
+    )
+    required_path = panel_root / REQUIRED_BUNDLES_FILE
+    panel_mode = None
+    if required_path.is_file():
+        panel_mode = RequiredBundles.model_validate_json(
+            required_path.read_text(encoding="utf-8")
+        ).panel_mode
+    wanted = {platform.upper() for platform in platforms} if platforms else None
+    given = {sample.sample_id: sample for sample in samples or ()}
+    records: list[MapSampleRecord | None] = [
+        item
+        for item in manifest.samples.values()
+        if wanted is None or item.platform.upper() in wanted
+    ]
+    if records:
+        inputs = [
+            given.get(item.sample_id)
+            or MapSample(
+                sample_id=item.sample_id,
+                platform=item.platform,
+                h5ad_path=Path(item.h5ad_path),
+                source=item.source,
+            )
+            for item in records
+            if item is not None
+        ]
+    elif manifest.panel_status == "refused" and given:
+        # A refused panel: MAP mapped nothing and recorded no sample, so
+        # RESOLVE writes statuses only for the given inputs (§3.1).
+        inputs = [
+            sample
+            for sample in given.values()
+            if wanted is None or sample.platform.upper() in wanted
+        ]
+        records = [None] * len(inputs)
+    else:
+        raise ResolveError(
+            f"{root / MAP_MANIFEST_NAME} has no sample to resolve"
+            + (" (a refused panel needs the prepared inputs)" if not given else "")
+        )
+    loaded_samples = load_samples(inputs, config, min_counts=min_counts)
+    segmented = dict(n_segmented or {})
+    results: dict[str, SampleResolution] = {}
+    for loaded, maybe_record in zip(loaded_samples, records, strict=True):
+        fingerprint = loaded.sample_fingerprint()
+        if maybe_record is None:
+            record = refused_sample_record(loaded, fingerprint)
+        else:
+            record = maybe_record
+            if fingerprint != record.sample_fingerprint:
+                raise ResolveError(
+                    f"{record.sample_id}: the counts of {loaded.sample.h5ad_path} "
+                    "differ from the ones MAP mapped (sample fingerprint)"
+                )
+        runs = load_resolve_runs(
+            root,
+            record,
+            bundle_overrides=bundle_overrides,
+            bundle_finder=bundle_finder,
+        )
+        xy, shape_key = read_spatial(loaded.sample.h5ad_path)
+        if xy is not None and len(xy) != loaded.n_objects:
+            logger.warning(
+                "%s: obsm['spatial'] does not fit the objects; no coordinates",
+                record.sample_id,
+            )
+            xy = None
+        n_objects_segmented = segmented.get(record.sample_id)
+        if n_objects_segmented is None and loaded.sample.source == "clustered":
+            logger.warning(
+                "%s: a clustered H5AD holds table cells only; the segmented-object "
+                "gate warning uses them unless n_segmented is given",
+                record.sample_id,
+            )
+        result = resolve_human_sample(
+            loaded,
+            record,
+            runs,
+            config,
+            manifest=manifest,
+            panels=panels,
+            panel_report=panel_report,
+            n_segmented=n_objects_segmented,
+            trust_overrides=trust_overrides,
+            xy=xy,
+            aligned_frame=in_fixed_frame(record.platform, shape_key),
+            panel_mode=panel_mode,
+            validate=validate,
+            seed=seed,
+        )
+        folder = output / record.platform.lower()
+        provenance_json = result.provenance.to_uns_json()
+        result.labels_path = write_label_table(
+            result.labels,
+            folder / label_table_filename(record.sample_id),
+            provenance_json,
+        )
+        result.manifest_path = _write_json(
+            json.loads(provenance_json),
+            folder / annotation_manifest_filename(record.sample_id),
+        )
+        result.summary["labels"] = _relative(result.labels_path, output)
+        result.summary["labels_sha256"] = file_sha256(result.labels_path)
+        result.summary["annotation_manifest"] = _relative(result.manifest_path, output)
+        results[record.sample_id] = result
+        logger.info(
+            "%s: wrote %s (%d objects)",
+            record.sample_id,
+            result.labels_path,
+            len(result.labels),
+        )
+
+    # Pair composition statistics (§5.5; H1).
+    pair: dict[str, Any] = {"jsd": [], "mask_note": None}
+    by_platform = {item.platform: item for item in results.values()}
+    if {"MERSCOPE", "XENIUM"} <= set(by_platform):
+        first = by_platform["MERSCOPE"].section
+        second = by_platform["XENIUM"].section
+        assert first is not None and second is not None
+        align: Path | None = None
+        if alignment_dir is not None:
+            align = Path(alignment_dir)
+        else:
+            source_path = next(
+                (item.h5ad_path for item in inputs if item.platform == "MERSCOPE"),
+                None,
+            )
+            if source_path is not None:
+                align = default_alignment_dir(source_path, manifest.pair_id)
+        mask = load_pair_mask(align)
+        records_jsd, note = pair_jsd(
+            first, second, mask=mask, tile_um=tile_um, n_reps=n_bootstrap, seed=seed
+        )
+        regions, _ = shared_mask_regions(first, second, mask)
+        compositions = {
+            section.platform: section_shares(
+                section,
+                regions={name: keep[index] for name, keep in regions.items()},
+            )
+            for index, section in enumerate((first, second))
+        }
+        pair = {
+            "jsd": [item.to_json() for item in records_jsd],
+            "mask_note": note,
+            "alignment_dir": None if align is None else str(align),
+            "tile_um": tile_um,
+            "n_bootstrap": n_bootstrap,
+            "compositions": compositions,
+        }
+    summary = _json_safe(
+        {
+            "schema_version": RESOLVE_SUMMARY_SCHEMA_VERSION,
+            "step": RESOLVE_STEP,
+            "pair_id": manifest.pair_id,
+            "segmentation": manifest.segmentation,
+            "species": manifest.species,
+            "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
+            "map_manifest": str((root / MAP_MANIFEST_NAME).resolve()),
+            "panel_status": manifest.panel_status,
+            "panel_mode": panel_mode,
+            "thresholds": config.thresholds.model_dump(mode="json"),
+            "flags_config": config.flags.model_dump(mode="json"),
+            "samples": {key: value.summary for key, value in results.items()},
+            "pair": pair,
+            "wall_time_s": round(time.monotonic() - start, 3),
+        }
+    )
+    summary_path = _write_json(
+        summary, output / resolve_summary_filename(manifest.pair_id)
+    )
+    return ResolveResult(samples=results, summary=summary, summary_path=summary_path)

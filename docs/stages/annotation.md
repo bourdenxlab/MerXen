@@ -874,6 +874,64 @@ A clustered H5AD without the record (written before M1) declares its `var`;
 give it the declared panel with `merxen annotation-panel --panel-file
 <PLATFORM>=<declared panel file>` and `--panel-dir`.
 
+## Resolving (`merxen annotate-resolve`, M4)
+
+The RESOLVE step (`merxen.annotation.pipeline.annotate_resolve`; plan §3.4)
+turns a MAP output into one label table per sample (§4.1). The standalone
+command runs it on published MAP outputs (options in
+[CLI](../cli.md#merxen-annotate-resolve)); the `CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE`
+process will run it inside `CLUSTERING_MAP_FIRST` (legacy runs never do).
+Per sample:
+
+1. **Inputs.** The counts are reloaded as MAP loaded them and must have the
+   sample fingerprint MAP recorded; every tidy parquet must have its
+   recorded sha256. A run is resolved with the bundle it mapped with, or
+   with an override / the store's current bundle of the same reference and
+   panel whose marker lookup is the one the run mapped with. The panel's
+   family is re-derived from the current `validated_panels.csv`, and each
+   reference's trust state is decided as PREP decides it
+   (`diagnostics.panel_diagnostics` + `trust_for_panel`).
+2. **Calls.** WHB: the supercluster call with its bootstrap probability,
+   `avg_correlation`, best runner-up and margin; lineage, broad and NT sum
+   the supercluster bootstrap probabilities over the assigned node's class
+   (the bundle's vocab snapshot); SEA-AD: E2's 7-class label and broad
+   probability and the subclass `aggregate_probability`.
+3. **Emission.** The primary bundle's resolvability tables are re-decided
+   with the simulated cells reweighted to the dataset's soft composition
+   per depth bin (the assigned supercluster's bootstrap probability plus
+   its runner-ups', on node labels; §8.3), giving per (level, class, depth
+   bin) whether a level is emitted and, outside real-data-validated
+   families, the local threshold (raise-only). Then the floors, the dataset
+   gate (level + warning flag; a provisional panel warns and shows a banner
+   but never lowers the level) and the degraded-mode consensus
+   (`consensus.resolve_human`, §5.2–§5.4).
+4. **Flags** (`merxen.annotation.flags`, §4.3, §5.6): contamination on the
+   assigned class's negative genes (negative in both WHB frontal and SEA-AD
+   Multiregion, minus the state genes) against a beta-binomial fitted to
+   the class's deep confident cells in this dataset (p < 0.01 with >= 3
+   negative counts); the diffuse profile against the q95 of 200
+   multinomial draws from the class profile; the robust z of
+   `avg_correlation` within class × platform × depth bin (< -3). Realised
+   rates are recorded per class × platform over the confident broad calls;
+   a contamination stratum above 15% or a diffuse stratum above 30% is
+   uninformative and its flag is null (H16's 15% marking is reported beside
+   the diffuse rate). The microglial spill-over flag is off for human
+   (OD-C5). `discovery_caution` is any of contaminated, diffuse, OOD or
+   method disagreement.
+5. **Composition** (`merxen.annotation.composition`, §5.5): the soft broad
+   vector of every table cell (`soft_broad_*`, summing to 1 with
+   `soft_broad_unallocated`), the section's soft, depth-stratified (>= 30
+   counts), confident-only and argmax compositions, and for the pair the
+   base-2 JSD of the renormalised seven-class vectors with a 95% spatial
+   block-bootstrap CI (500 µm tiles, 200 replicates, joint resampling on
+   the shared frame), whole section and inside the shared tissue mask.
+6. **Outputs.** `<platform>/<sid>_celltype_labels.parquet` (validated;
+   provenance in the parquet schema), `<platform>/<sid>_annotation_manifest.json`
+   (`AnnotationProvenance`, the JSON `uns["merxen_annotation_json"]` holds)
+   and `<pair>_resolve_summary.json`. A refused panel gives statuses only
+   (`not_attempted_gate`, gate `failed`, `exclude_hard`); mouse RESOLVE is
+   M6.
+
 ## Shadow baselines (M3)
 
 `scripts/acceptance/shadow_baselines.py` scores `merxen annotate` outputs of
