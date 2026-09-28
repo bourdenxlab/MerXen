@@ -1,13 +1,19 @@
 """Per-parent marker prefilter for large panels (plan §8.7; M3b stage D).
 
-Above ``large_panel_genes`` (1,000; e.g. Xenium Prime 5K) cell_type_mapper's
-marker steps grow with the number of candidate genes: the WMB reference-marker
-file is linear in genes (5.9 / 9.4 GB at 500 / 815 genes) and the
-query-marker step loads and copies it (peak RSS 20 / 27 GB at 500 / 815
-genes). The prefilter restricts marker discovery to a candidate set of at most
-``cap`` (2,000) genes, chosen **per parent** (sibling set), never by a global
-between-leaf variance ranking, which would drop genes that mark only a few of
-the WMB leaves (rare types).
+Opt-in (``large_panel_marker_prefilter``, default ``"none"``). The M3b 5K
+measurement (Xenium Prime 5K Mouse on WMB, 5,006 genes, 8 processes) showed
+that the unfiltered WMB marker steps fit the 64 GB PREP reserve and that the
+prefilter saves neither time nor memory there: reference markers 47 min
+either way (a 14.2 GB file unfiltered), query markers peaking at 21.3 GB
+unfiltered against 37.7 GB prefiltered. The pre-measurement premise that
+the marker steps grow with the candidate genes (reference-marker files of
+5.9 / 9.4 GB at 500 / 815 genes) did not hold up to 5,006 genes. The
+prefilter is kept only for panels whose predicted query-marker peak
+(``reference.predicted_wmb_query_marker_peak_gb``, with the OD-E8 margin)
+exceeds the PREP reserve, where it is mandatory; it restricts marker
+discovery to a candidate set of at most ``cap`` (2,000) genes, chosen **per
+parent** (sibling set), never by a global between-leaf variance ranking,
+which would drop genes that mark only a few of the WMB leaves (rare types).
 
 Method (``PREFILTER_VERSION`` 1):
 
@@ -40,13 +46,9 @@ prefiltered and the unfiltered lookup and requires agreement >= 0.95 per
 emitted level and class with >= 50 confident calls, and no parent below 5
 markers (plan §8.7, NP9).
 
-Opt-in since the M3b 5K measurement (``large_panel_marker_prefilter``
-default ``"none"``): on the Xenium Prime 5K Mouse panel (5,006 genes, WMB)
-version 1 kept class-level calls (agreement >= 0.994 per class) but not
-subclass calls (0.920-0.949 in 13 of 34 classes), and it saved neither
-memory nor time (query markers 37.7 GB prefiltered vs 21.3 GB unfiltered,
-reference markers 47 min either way). It remains for panels whose
-unfiltered marker steps would not fit the PREP reserve.
+On the Xenium Prime 5K Mouse panel version 1 kept class-level calls
+(agreement >= 0.994 per class) but not subclass calls (0.920-0.949 in 13 of
+34 classes), so it fails that validation there.
 
 This module is pure numpy / scipy, so the bundle builders (``reference.py``)
 and the simulation (``simulate.py``) share it without import cycles.
