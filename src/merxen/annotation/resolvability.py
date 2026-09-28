@@ -26,7 +26,9 @@ depth bin):
   takes the verdict of the deep-end pool (user decision 2026-09-27; bins
   pooled from the deep end, each test cell once at its deepest bin, until
   the set holds ``min_confident_n`` calls; ``decide``) and is marked
-  extrapolated; a class that never reaches them is ``insufficient_calls``,
+  extrapolated when it lies deeper than the pool's shallowest bin ``D_P``,
+  while a bin judged on its own keeps its own verdict (withdrawn when the
+  pool fails); a class that never reaches them is ``insufficient_calls``,
   and a class without ``D_max(c)`` (no grid value with
   ``min_cells_per_bin`` test cells of class ``c``) is never emitted (no
   pooling across classes). Everything not emitted is ``not_resolvable``;
@@ -52,8 +54,9 @@ isotonic knots, per-node F1, confusion, decisions), ``resolvability_cells
 half) and ``resolvability_summary.json`` into the bundle. RESOLVE refits the
 decisions with the simulated cells of each depth bin reweighted to the
 dataset's composition in that bin (``DatasetComposition``,
-``composition_weights``: rare types pooled at broad-class level, weights
-trimmed; ``decide``): PREP's unweighted tables set only the panel's trust
+``composition_weights``: rare types pooled at broad-class level; ``decide``
+trims the weights within each judged set): PREP's unweighted tables set only
+the panel's trust
 constraints. Production rules that decide confidence outside the level's own
 bp (the WHB COP rule, ``whb_cells_rules``) are applied to the cells table
 before the decisions.
@@ -102,7 +105,16 @@ logger = logging.getLogger(__name__)
 # pooling with n_min = min_confident_n replaces the D_max inheritance;
 # insufficient_calls), the point precision joins the Wilson rule, and the
 # human held-out test set gains other-region non-neuronal cells.
-RESOLVABILITY_VERSION: Final = 3
+# 4 (M3b review 2, 2026-09-28): composition weights trimmed within each
+# judged set (``RuleSettings.weight_trim_scope``), not against the median of
+# the whole depth bin; only positive-weight calls count towards
+# ``min_confident_n``; every bin judged on its own at or above ``D_P`` keeps
+# its own verdict (withdrawn when the pool fails) and only unjudged bins take
+# the pooled one; ``would_raise`` only where a fit exists
+# (``would_raise_evaluable``); PREP decides on the stored (float32) cells;
+# the human held-out test set drops truth superclusters no production call
+# can name (sinks, no floor class, region-implausible; E2).
+RESOLVABILITY_VERSION: Final = 4
 SUMMARY_SCHEMA_VERSION: Final = 1
 RESOLVABILITY_FILE: Final = "resolvability.parquet"
 RESOLVABILITY_CELLS_FILE: Final = "resolvability_cells.parquet"
@@ -1629,8 +1641,73 @@ def coerce_cells(cells: pd.DataFrame) -> pd.DataFrame:
     return frame
 
 
+LABEL_COLUMNS: Final[tuple[str, ...]] = (
+    "recipe",
+    "level",
+    "parent",
+    "call",
+    "truth",
+    "truth_parent",
+)
+
+
+def restore_labels(cells: pd.DataFrame) -> pd.DataFrame:
+    """Return a stored cells table with object label columns (``None`` if missing).
+
+    Args:
+        cells: ``coerce_cells`` output, e.g. read from
+            ``resolvability_cells.parquet``.
+
+    Returns:
+        The table with its label columns as objects (in place and returned).
+    """
+    for column in LABEL_COLUMNS:
+        cells[column] = cells[column].astype(object).where(cells[column].notna(), None)
+    return cells
+
+
+def as_stored(cells: pd.DataFrame) -> pd.DataFrame:
+    """Return a cells table exactly as RESOLVE reads it back from the bundle.
+
+    PREP decides on this, so its summary and RESOLVE's re-derived decisions
+    see identical inputs (float32 ``bp``: the isotonic ties and knots follow
+    the stored values; M3b review 2).
+
+    Args:
+        cells: ``level_cells`` rows (possibly concatenated).
+
+    Returns:
+        ``restore_labels(coerce_cells(cells))``.
+    """
+    return restore_labels(coerce_cells(cells))
+
+
 # --------------------------------------------------------------------------
 # Decisions
+
+
+WeightTrimScope = Literal["judged_set", "bin"]
+WEIGHT_TRIM_SCOPES: Final[tuple[WeightTrimScope, ...]] = ("judged_set", "bin")
+# The trimming unit of bundles whose summary settings predate the field
+# (resolvability versions 2-3).
+LEGACY_WEIGHT_TRIM_SCOPE: Final[WeightTrimScope] = "bin"
+
+
+def trim_weights(weights: np.ndarray, factor: float) -> np.ndarray:
+    """Cap weights at ``factor`` x their median positive weight.
+
+    Args:
+        weights: Non-negative weights of one trimming unit.
+        factor: The cap in medians (``<= 0``: no trim).
+
+    Returns:
+        The capped weights (a copy; unchanged when there is nothing to cap).
+    """
+    values = np.asarray(weights, dtype=np.float64)
+    positive = values[values > 0]
+    if factor <= 0 or not len(positive):
+        return values.copy()
+    return np.minimum(values, factor * float(np.median(positive)))
 
 
 @dataclass(frozen=True)
@@ -1658,7 +1735,17 @@ class RuleSettings:
         weight_min_type_cells: Test cells a truth type needs in a depth bin
             to be reweighted on its own (``composition_weights``).
         weight_trim_factor: Composition weights are capped at this multiple
-            of their bin's median.
+            of the median positive weight of their trimming unit
+            (``weight_trim_scope``).
+        weight_trim_scope: The trimming unit: ``judged_set`` (resolvability
+            version 4, M3b review 2: each tested set, i.e. a (level, class,
+            depth) bin's calls or a pooled deep set, trimmed by ``decide``)
+            or ``bin`` (versions 2-3: every row of a (recipe, seed, level,
+            depth) bin, trimmed by ``composition_weights``; kept to re-derive
+            older bundles). Trimming against the whole bin let the common
+            types of the bin (neurons) set the cap of every rarer type, so
+            deep glial types all hit the same cap and reweighting did nothing
+            inside a called glial class.
     """
 
     min_cells_per_bin: int = 50
@@ -1677,6 +1764,27 @@ class RuleSettings:
     hard_floor: int = 10
     weight_min_type_cells: int = 20
     weight_trim_factor: float = 10.0
+    weight_trim_scope: WeightTrimScope = "judged_set"
+
+    def __post_init__(self) -> None:
+        """Check the trimming unit."""
+        if self.weight_trim_scope not in WEIGHT_TRIM_SCOPES:
+            raise ResolvabilityError(
+                f"weight_trim_scope must be one of {WEIGHT_TRIM_SCOPES}, "
+                f"got {self.weight_trim_scope!r}"
+            )
+
+    @property
+    def bin_trim_factor(self) -> float:
+        """The ``composition_weights`` trim factor (0 unless trimming per bin)."""
+        return self.weight_trim_factor if self.weight_trim_scope == "bin" else 0.0
+
+    @property
+    def set_trim_factor(self) -> float:
+        """The per-tested-set trim factor ``decide`` applies (0: none)."""
+        return (
+            self.weight_trim_factor if self.weight_trim_scope == "judged_set" else 0.0
+        )
 
     @classmethod
     def from_config(
@@ -1751,8 +1859,11 @@ class CheckStats:
 
     Attributes:
         threshold: The threshold (``None``: nothing is confident).
-        n_called: Calls checked.
-        n_confident: Calls at or above the threshold.
+        n_called: Calls checked (with a positive weight).
+        n_confident: Calls at or above the threshold (with a positive weight:
+            a zero-weight call is of a type the dataset lacks and adds
+            nothing to the precision, so it cannot count towards
+            ``min_confident_n`` either; M3b review 2).
         n_effective: Kish effective n of the confident calls' weights (the n
             of the Wilson bound).
         precision: Weighted precision of the confident calls.
@@ -1787,15 +1898,17 @@ def check_threshold(
         threshold: The threshold (``None``: nothing is confident).
 
     Returns:
-        The statistics (Wilson bound on the Kish effective n).
+        The statistics (Wilson bound on the Kish effective n; calls counted
+        only with a positive weight, as the isotonic fit uses them).
     """
-    n_called = int(len(bp))
+    positive = np.asarray(weights, dtype=np.float64) > 0
+    n_called = int(positive.sum())
     if threshold is None or n_called == 0:
         return CheckStats(threshold, n_called, 0, 0.0, math.nan, math.nan, 0.0)
-    accepted = meets_threshold(bp, threshold)
+    accepted = meets_threshold(bp, threshold) & positive
     accepted_weights = weights[accepted]
     total = float(accepted_weights.sum())
-    called_total = float(weights.sum())
+    called_total = float(weights[positive].sum())
     if total <= 0:
         return CheckStats(threshold, n_called, 0, 0.0, math.nan, math.nan, 0.0)
     precision = float((accepted_weights * correct[accepted]).sum()) / total
@@ -1922,7 +2035,11 @@ def _judged(record: Mapping[str, Any], settings: RuleSettings) -> bool:
     Enough confident calls (``min_confident_n``), or a fitted regime whose
     isotonic fit exists and never reaches the target on at least
     ``min_confident_n`` checked calls (``no_local_threshold``: more calls
-    would not change the verdict).
+    would not change the verdict). Only calls with a positive weight count
+    (``check_threshold``): a set of zero-weight calls (types the dataset
+    lacks) is not judged and takes the pooled verdict. There is no fallback
+    to the unweighted verdict: a set without weight has no dataset cell
+    behind it, so its verdict reaches no cell.
     """
     n_confident = record.get("n_confident")
     if (
@@ -1988,21 +2105,29 @@ def decide(
     each test cell counted once at its deepest bin (``deepest_rows``), until
     the set is judged; its shallowest bin is ``D_P``. The set is tested with
     the same rule (its own fit and ``t*``, the target of ``D_P``, the Wilson
-    bound on the Kish n). Its verdict is carried to every bin deeper than
-    ``D_P``, which are marked ``extrapolated`` and ``pooled``; ``D_P``
-    itself keeps its own verdict when it is judged on its own and is then
-    emitted only if the set passes too (a pooled pass never overrides a
-    bin's own failure), else it takes the set's verdict and is marked too.
-    A class whose calls are not judged even with every bin pooled is
-    ``not_resolvable`` (``insufficient_calls``) in every bin not judged on
-    its own. Classes without ``D_max`` (no bin with ``min_cells_per_bin``
-    test cells) are never emitted (``too_few_test_cells``; no pooling across
-    classes). Weighted rows (RESOLVE) enter the precision with their weight
-    and the Wilson bound with the Kish effective n; ``max_weight_share``
-    records the largest single call's share of a set's confident weight.
-    A pooled set is reweighted as one set when ``pool_weights`` is given
-    (``pooled_composition_weights``; RESOLVE), else its rows keep their
-    per-bin weights.
+    bound on the Kish n). Every bin at or above ``D_P`` that is judged on
+    its own keeps its own verdict and is emitted only if the set passes too
+    (a pooled pass never overrides a bin's own failure, a pooled failure
+    withdraws its pass: ``pool_<reason>``); every bin at or above ``D_P``
+    that is not judged on its own takes the set's verdict and is marked
+    ``pooled``, and ``extrapolated`` when it lies deeper than ``D_P`` (M3b
+    review 2; §8.3, §14). A class whose calls are not judged even with
+    every bin pooled is ``not_resolvable`` (``insufficient_calls``) in every
+    bin not judged on its own. Classes without ``D_max`` (no bin with
+    ``min_cells_per_bin`` test cells) are never emitted
+    (``too_few_test_cells``; no pooling across classes).
+
+    Weighted rows (RESOLVE) enter the precision with their weight and the
+    Wilson bound with the Kish effective n; only positive-weight calls count
+    towards ``min_confident_n``; ``max_weight_share`` records the largest
+    single call's share of a set's confident weight. With
+    ``weight_trim_scope`` ``judged_set`` each tested set's weights are
+    capped at ``weight_trim_factor`` x its median positive weight before the
+    fit and the checks. A pooled set is reweighted as one set when
+    ``pool_weights`` is given (``pooled_composition_weights``; RESOLVE),
+    else its rows keep their per-bin weights. ``would_raise`` is set only
+    where the fit half holds ``min_cells_per_bin`` calls
+    (``would_raise_evaluable``).
 
     Args:
         cells: The cells table (``level_cells`` rows).
@@ -2017,7 +2142,8 @@ def decide(
     Returns:
         One row per (regime, level, class, depth): ``status`` (``emitted`` or
         ``not_resolvable``), ``threshold`` (applied), ``t_star``,
-        ``would_raise``, ``check_set`` (``all`` or ``check_half``),
+        ``would_raise``, ``would_raise_evaluable``, ``check_set`` (``all`` or
+        ``check_half``),
         statistics (of the pooled set for pooled bins), ``target``,
         ``d_max``, ``extrapolated``, ``pooled``, ``pool_min_depth``
         (``D_P``), ``own_status`` / ``own_reason`` / ``own_n_confident`` (the
@@ -2079,6 +2205,7 @@ def decide(
         "threshold",
         "t_star",
         "would_raise",
+        "would_raise_evaluable",
         "target",
         "default_threshold",
         "n_test",
@@ -2110,6 +2237,7 @@ def decide(
     table = table[columns]
     table["extrapolated"] = _bool_column(table["extrapolated"])
     table["would_raise"] = _bool_column(table["would_raise"])
+    table["would_raise_evaluable"] = _bool_column(table["would_raise_evaluable"])
     table["pooled"] = _bool_column(table["pooled"])
     return table
 
@@ -2220,7 +2348,10 @@ def _class_decisions(
                 )
             elif pool_min is None or depth < pool_min:
                 records.append({**mine, **own_fields, "pooled": False})
-            elif depth == pool_min and judged:
+            elif judged:
+                # Judged on its own at or above D_P: its own verdict, withdrawn
+                # when the pool it belongs to fails (a pooled pass never
+                # overrides its own failure; M3b review 2).
                 verdict = pooled_at(pool_min)[regime]
                 record = {**mine, **own_fields, "pooled": False}
                 if mine["status"] == STATUS_EMITTED and (
@@ -2232,6 +2363,8 @@ def _class_decisions(
                     )
                 records.append(record)
             else:
+                # Not judged on its own: the pool's verdict; only bins deeper
+                # than D_P are extrapolated (§14).
                 verdict = pooled_at(pool_min)[regime]
                 records.append(
                     {
@@ -2239,7 +2372,7 @@ def _class_decisions(
                         **own_fields,
                         "depth": depth,
                         "n_test": mine["n_test"],
-                        "extrapolated": True,
+                        "extrapolated": depth > pool_min,
                         "pooled": True,
                     }
                 )
@@ -2290,7 +2423,9 @@ def _bin_decisions(
         ]
     bp = group["bp"].to_numpy(np.float64)
     correct = group["correct"].to_numpy(bool).astype(np.float64)
-    weights = group["_weight"].to_numpy(np.float64)
+    weights = trim_weights(
+        group["_weight"].to_numpy(np.float64), settings.set_trim_factor
+    )
     half = group["half"].to_numpy(np.int8)
     if settings.split_halves:
         fit_mask = half == 0
@@ -2336,9 +2471,13 @@ def _bin_decisions(
                 "target": target,
                 "threshold": applied,
                 "t_star": t_star,
+                # Without a fit (fewer than min_cells_per_bin fit-half calls)
+                # t* is unknown, not "above the default" (M3b review 2).
                 "would_raise": bool(
-                    t_star is None or t_star > meta.default_threshold + _TOLERANCE
+                    fit is not None
+                    and (t_star is None or t_star > meta.default_threshold + _TOLERANCE)
                 ),
+                "would_raise_evaluable": fit is not None,
                 "check_set": check_set,
                 "n_called": stats.n_called,
                 "n_fit": int(fit_mask.sum()),
@@ -2653,7 +2792,7 @@ def composition_weights(
     key: str = TRUTH_LEAF_COLUMN,
     class_of: Mapping[str, str] | None = None,
     min_type_cells: int = 20,
-    trim_factor: float = 10.0,
+    trim_factor: float = 0.0,
 ) -> np.ndarray:
     """Return per-row weights that reweight the test cells to a composition.
 
@@ -2670,8 +2809,13 @@ def composition_weights(
        it takes the weight of the class's common types,
        ``sum q / sum p`` over them, or, when the class has no common type
        in the bin, ``q(class) / p(class)`` over its types present;
-    4. weights above ``trim_factor`` x the bin's median positive weight are
-       capped, and the bin is renormalised to a mean weight of 1.
+    4. only when ``trim_factor > 0`` (``weight_trim_scope`` ``bin``,
+       resolvability versions 2-3): weights above ``trim_factor`` x the
+       bin's median positive weight are capped; from version 4 ``decide``
+       trims within each judged set instead (``RuleSettings``), because the
+       bin's median is set by its most common test types (neurons) and gave
+       every deep glial type the same cap (M3b review 2);
+    5. the bin is renormalised to a mean weight of 1.
 
     Types absent from the composition get weight 0; composition mass on
     types without test cells in a bin cannot be represented and is dropped
@@ -2688,7 +2832,8 @@ def composition_weights(
         class_of: Broad class per truth type (default ``leaf_class_map``).
         min_type_cells: Test cells a type needs in a bin to be weighted on
             its own.
-        trim_factor: Cap on a weight, in bin medians (``<= 0``: no trim).
+        trim_factor: Cap on a weight, in bin medians (``<= 0``, the default:
+            no trim here; ``RuleSettings.bin_trim_factor``).
 
     Returns:
         Weights aligned with ``cells``.
@@ -2734,10 +2879,9 @@ def composition_weights(
             unit = classes.get(str(name), str(name))
             q_class, p_class = common.get(unit, pooled[unit])
             type_weight[name] = q_class / p_class if p_class > 0 else 0.0
-        values = np.array([type_weight[name] for name in group_types])
-        positive = values[values > 0]
-        if trim_factor > 0 and len(positive):
-            values = np.minimum(values, trim_factor * float(np.median(positive)))
+        values = trim_weights(
+            np.array([type_weight[name] for name in group_types]), trim_factor
+        )
         total = float(values.sum())
         if total > 0:
             values = values * (len(values) / total)
@@ -2754,7 +2898,7 @@ def pooled_composition_weights(
     key: str = TRUTH_LEAF_COLUMN,
     class_of: Mapping[str, str] | None = None,
     min_type_cells: int = 20,
-    trim_factor: float = 10.0,
+    trim_factor: float = 0.0,
 ) -> PoolWeights:
     """Return the weights of pooled deep sets (``decide``, RESOLVE).
 
@@ -2765,7 +2909,8 @@ def pooled_composition_weights(
     one class had a Kish n of 1). The set is therefore reweighted as one set
     (gate-P evaluation rules, §14: "reweighted sets") to the dataset's cells
     at depths ``>= D_P`` (``DatasetComposition.at_least``), with the same
-    rare-type pooling and trimming as a single bin.
+    rare-type pooling (and bin trimming, ``trim_factor``) as a single bin;
+    ``decide`` trims each class's pooled set like any judged set.
 
     Args:
         composition: The dataset composition (per depth bin, or one).
@@ -3502,6 +3647,7 @@ def pooled_sets(decisions: pd.DataFrame, regime: Regime) -> dict[str, dict[str, 
             "threshold": _optional_float(first["threshold"]),
             "t_star": _optional_float(first["t_star"]),
             "would_raise": bool(first["would_raise"]),
+            "would_raise_evaluable": bool(first["would_raise_evaluable"]),
             "target": _optional_float(first["target"]),
             "status": str(first["status"]),
             "reason": _clean_label(first["reason"]),
@@ -3623,7 +3769,9 @@ def run_resolvability(
     decision_recipe = recipes[0]
     fine_levels = [spec.meta.level for spec in specs if spec.meta.role == "fine"]
     stability: dict[str, float] = {}
-    cells = pd.concat(frames, ignore_index=True)
+    # Decide on the cells as the bundle stores them (float32 bp), so the
+    # summary equals what RESOLVE re-derives from the stored table.
+    cells = as_stored(pd.concat(frames, ignore_index=True))
     levels = [spec.meta for spec in specs]
     step = time.monotonic()
     decisions = decide(cells, levels, depths, settings, recipe=decision_recipe.name)
@@ -3650,10 +3798,11 @@ def run_resolvability(
             1,
         )
         timings["map_seed1"] = round(time.monotonic() - step, 3)
+        second = as_stored(second)
         first = cells[(cells["recipe"] == decision_recipe.name) & (cells["seed"] == 0)]
         for level in fine_levels:
             stability[level] = seed_stability(first, second, decisions, level)
-        cells = pd.concat([cells, second], ignore_index=True)
+        cells = as_stored(pd.concat([cells, second], ignore_index=True))
     floors = combined_floors(
         decisions, levels, settings, floor_table=floor_table, species=species
     )
@@ -3702,6 +3851,38 @@ def run_resolvability(
         trust=trust,
         summary=summary,
     )
+
+
+def would_raise_bins(
+    decisions: pd.DataFrame, settings: RuleSettings
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return the validated bins whose local rule would raise the default.
+
+    Only a bin's own test counts (not ``pooled``). A bin whose fit half holds
+    fewer than ``min_cells_per_bin`` calls has no isotonic fit, so its ``t*``
+    is unknown: it is listed as not evaluable, never as a raise (M3b review
+    2: most earlier "would raise" bins were such bins).
+
+    Args:
+        decisions: ``decide`` output.
+        settings: Rule settings (``min_cells_per_bin``).
+
+    Returns:
+        ``(raised, not_evaluable)``: the evaluable bins with ``would_raise``,
+        and the bins with some fit-half calls but no fit.
+    """
+    own = decisions[
+        (decisions["regime"] == "validated")
+        & ~_bool_column(decisions["pooled"])
+        & ~_bool_column(decisions["extrapolated"])
+    ]
+    n_fit = own["n_fit"].fillna(0)
+    evaluable = _bool_column(own["would_raise_evaluable"]) & (
+        n_fit >= settings.min_cells_per_bin
+    )
+    raised = own[evaluable & _bool_column(own["would_raise"])]
+    not_evaluable = own[~evaluable & (n_fit > 0)]
+    return raised, not_evaluable
 
 
 def build_summary(
@@ -3765,12 +3946,7 @@ def build_summary(
         d_max.setdefault(str(record["level"]), {})[str(record["class"])] = (
             None if value is None else int(value)
         )
-    raised = decisions[
-        (decisions["regime"] == "validated")
-        & (~decisions["extrapolated"])
-        & _bool_column(decisions["would_raise"])
-        & (decisions["n_fit"].fillna(0) > 0)
-    ]
+    raised, unevaluable = would_raise_bins(decisions, settings)
     floors_json: dict[str, Any] = {}
     for record in floors.to_dict("records"):
         simulated = _optional_float(record["simulated_floor"])
@@ -3827,6 +4003,16 @@ def build_summary(
                 "t_star": _optional_float(record["t_star"]),
             }
             for record in raised.to_dict("records")
+        ],
+        "validated_thresholds_not_evaluable": [
+            {
+                "level": str(record["level"]),
+                "class": str(record["class"]),
+                "depth": int(record["depth"]),
+                "n_fit": int(record["n_fit"]),
+                "status": str(record["status"]),
+            }
+            for record in unevaluable.to_dict("records")
         ],
         "fine_level_seed_stability": dict(stability),
         "trust": trust.to_json(),
@@ -3893,7 +4079,7 @@ class ResolvabilityTables:
             composition,
             class_of=class_of,
             min_type_cells=rule.weight_min_type_cells,
-            trim_factor=rule.weight_trim_factor,
+            trim_factor=rule.bin_trim_factor,
         )
         return decide(
             self.cells,
@@ -3905,7 +4091,7 @@ class ResolvabilityTables:
                 composition,
                 class_of=class_of,
                 min_type_cells=rule.weight_min_type_cells,
-                trim_factor=rule.weight_trim_factor,
+                trim_factor=rule.bin_trim_factor,
             ),
             recipe=str(self.summary["decision_recipe"]),
         )
@@ -3925,13 +4111,13 @@ def load_resolvability(directory: Path | str) -> ResolvabilityTables | None:
     if not summary_path.is_file():
         return None
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    cells = pd.read_parquet(root / RESOLVABILITY_CELLS_FILE)
-    for column in ("recipe", "level", "parent", "call", "truth", "truth_parent"):
-        cells[column] = cells[column].astype(object).where(cells[column].notna(), None)
+    cells = restore_labels(pd.read_parquet(root / RESOLVABILITY_CELLS_FILE))
     fields = RuleSettings.__dataclass_fields__
-    settings = RuleSettings(
-        **{key: value for key, value in summary["settings"].items() if key in fields}
-    )
+    stored = {key: value for key, value in summary["settings"].items() if key in fields}
+    # Bundles of resolvability versions 2-3 trimmed composition weights per
+    # depth bin and did not record the unit.
+    stored.setdefault("weight_trim_scope", LEGACY_WEIGHT_TRIM_SCOPE)
+    settings = RuleSettings(**stored)
     return ResolvabilityTables(
         summary=summary,
         cells=cells,
@@ -3944,12 +4130,67 @@ def load_resolvability(directory: Path | str) -> ResolvabilityTables | None:
 # Gate-P machinery (M13 scores NP3-NP7 with these; §14 evaluation rules)
 
 
+def replicate_rows(
+    cells: pd.DataFrame, *, recipe: str | None, seed: int | None
+) -> pd.DataFrame:
+    """Return one replicate's rows: a cells table restricted to a recipe and seed.
+
+    A bundle's cells table holds several recipes (``R1_contam_HO`` and
+    ``clean``) and, with the fine-level check, two seeds of the same
+    simulated cells; pooling or counting them together would mix recipes
+    and count test cells twice (M3b review 2). The rows are filtered on
+    ``recipe`` and ``seed`` when given, and each (level, cell, depth) must
+    then occur once (pooled donors with distinct cell ids are fine).
+
+    Args:
+        cells: A cells table.
+        recipe: The recipe to keep (``None``: all).
+        seed: The mapping seed to keep (``None``: all).
+
+    Returns:
+        The rows.
+
+    Raises:
+        ResolvabilityError: If a (level, cell_id, depth) occurs more than
+            once after the filters (pass ``recipe`` / ``seed``).
+    """
+    frame = cells
+    if recipe is not None:
+        frame = frame[(frame["recipe"].astype(str) == recipe).to_numpy()]
+    if seed is not None:
+        frame = frame[(frame["seed"].to_numpy() == seed)]
+    key = pd.DataFrame(
+        {
+            "level": frame["level"].astype(str).to_numpy(),
+            "cell_id": frame["cell_id"].astype(str).to_numpy(),
+            "depth": frame["depth"].to_numpy(np.int64),
+        }
+    )
+    duplicated = key.duplicated()
+    if bool(duplicated.any()):
+        mixed = sorted(
+            {
+                f"{recipe_value}/seed {seed_value}"
+                for recipe_value, seed_value in zip(
+                    frame["recipe"].astype(str), frame["seed"], strict=True
+                )
+            }
+        )
+        raise ResolvabilityError(
+            f"{int(duplicated.sum())} (level, cell, depth) rows occur more than "
+            f"once ({', '.join(mixed)}): pass recipe= and seed= to select one "
+            "replicate"
+        )
+    return frame
+
+
 def frozen_threshold_eval(
     cells: pd.DataFrame,
     decisions: pd.DataFrame,
     *,
     regime: Regime = "provisional",
     recipe: str | None = None,
+    seed: int | None = None,
 ) -> pd.DataFrame:
     """Apply frozen thresholds to replicate cells, per (level, class, depth).
 
@@ -3958,15 +4199,18 @@ def frozen_threshold_eval(
         decisions: Frozen ``decide`` output of the base run.
         regime: Regime whose thresholds are frozen.
         recipe: Restrict the replicate rows to one recipe.
+        seed: Restrict the replicate rows to one mapping seed.
 
     Returns:
         ``level``, ``class``, ``depth``, ``threshold``, ``n_called``,
         ``n_confident``, ``precision``, ``wilson_lb``, ``coverage``.
+
+    Raises:
+        ResolvabilityError: If the rows mix replicates (``replicate_rows``).
     """
     lookup = emission_lookup(decisions, regime)
-    frame = cells[cells["parent"].notna()]
-    if recipe is not None:
-        frame = frame[frame["recipe"].astype(str) == recipe]
+    frame = replicate_rows(cells, recipe=recipe, seed=seed)
+    frame = frame[frame["parent"].notna()]
     records = []
     for (level, cls, depth), group in frame.groupby(
         [frame["level"].astype(str), frame["parent"].astype(str), "depth"],
@@ -4039,6 +4283,8 @@ def gate_p_tested_sets(
     *,
     min_confident_n: int = 200,
     regime: Regime = "provisional",
+    recipe: str | None = DECISION_RECIPE,
+    seed: int | None = 0,
 ) -> dict[tuple[str, str], list[GatePTestedSet] | None]:
     """Return the gate-P tested sets per (level, class) (``None``: not evaluable).
 
@@ -4056,14 +4302,20 @@ def gate_p_tested_sets(
         decisions: Frozen decisions.
         min_confident_n: ``gate_p_min_confident_n`` (200).
         regime: Regime of the thresholds.
+        recipe: The recipe of the tested rows (``None``: the table must hold
+            one; ``replicate_rows``).
+        seed: The mapping seed of the tested rows (``None``: likewise).
 
     Returns:
         Tested sets per (level, class), the pooled set first, then the bins
         tested on their own, deepest first; ``None`` when even the set of
         every bin has fewer than ``min_confident_n`` confident calls.
+
+    Raises:
+        ResolvabilityError: If the rows mix replicates (``replicate_rows``).
     """
     lookup = emission_lookup(decisions, regime)
-    frame = cells.copy()
+    frame = replicate_rows(cells, recipe=recipe, seed=seed).copy()
     thresholds = np.array(
         [
             _frozen_threshold(lookup.get((str(level), str(cls), int(depth))))

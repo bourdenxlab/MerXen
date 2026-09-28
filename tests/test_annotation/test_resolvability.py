@@ -468,7 +468,8 @@ def test_wilson_bound_uses_the_kish_effective_n() -> None:
     cells = bin_cells(bp, correct)
     raw = res.decide(cells, [BROAD], [30], settings()).set_index("regime")
     assert raw.loc["validated", "status"] == res.STATUS_EMITTED
-    weighted = res.decide(cells, [BROAD], [30], settings(), weights=weights).set_index(
+    untrimmed = settings(weight_trim_factor=0.0)
+    weighted = res.decide(cells, [BROAD], [30], untrimmed, weights=weights).set_index(
         "regime"
     )
     row = weighted.loc["validated"]
@@ -480,6 +481,13 @@ def test_wilson_bound_uses_the_kish_effective_n() -> None:
     )
     assert row["reason"] == "wilson_bound_below_target"
     assert row["max_weight_share"] == pytest.approx(20.0 / 155.0)
+    # The default trims the set's weights at 10 x its median (1): the five
+    # heavy calls weigh 10, the Kish n is 105^2 / 555 and still fails.
+    trimmed = res.decide(cells, [BROAD], [30], settings(), weights=weights)
+    row = trimmed.set_index("regime").loc["validated"]
+    assert row["n_effective"] == pytest.approx(105.0**2 / 555.0)
+    assert row["max_weight_share"] == pytest.approx(10.0 / 105.0)
+    assert row["reason"] == "wilson_bound_below_target"
 
 
 # --------------------------------------------------------------------------
@@ -732,6 +740,185 @@ def test_the_point_precision_joins_the_wilson_rule() -> None:
     )
 
 
+GOOD = (0.95, True)
+
+
+def test_a_judged_bin_deeper_than_d_p_keeps_its_own_failure() -> None:
+    # 60 "drift" cells are confident but wrong at 60 counts and unconfident
+    # at 100: bin 60 fails on 90 calls of its own, bin 100 (30 calls) is not
+    # judged and the pool reaches down to 30, where it passes. The pooled
+    # pass must not override bin 60's own failure (M3b review 2).
+    cells = tracked_cells(
+        [
+            ("drift", 60, {10: GOOD, 30: GOOD, 60: (0.95, False), 100: (0.5, True)}),
+            ("steady", 30, {10: GOOD, 30: GOOD, 60: GOOD, 100: GOOD}),
+            ("low", 200, {10: GOOD, 30: GOOD}),
+        ]
+    )
+    decisions = res.decide(cells, [BROAD], POOL_GRID, settings())
+    validated = decisions[decisions["regime"] == "validated"].set_index("depth")
+    assert validated.loc[100, "pool_min_depth"] == 30
+    sixty = validated.loc[60]
+    assert sixty["own_n_confident"] == 90
+    assert sixty["status"] == res.STATUS_NOT_RESOLVABLE
+    assert sixty["reason"] == res.REASON_WILSON
+    assert not sixty["pooled"] and not sixty["extrapolated"]
+    assert sixty["precision"] == pytest.approx(30 / 90)
+    deep = validated.loc[100]
+    assert deep["status"] == res.STATUS_EMITTED
+    assert deep["pooled"] and deep["extrapolated"]
+    assert validated.loc[30, "status"] == res.STATUS_EMITTED
+    assert not validated.loc[30, "pooled"]
+
+
+def test_a_judged_bin_deeper_than_d_p_is_withdrawn_when_the_pool_fails() -> None:
+    # Bin 60 passes on its own (90 right calls); the pool of >= 30 fails
+    # (30 wrong confident calls at 100 of 230): bin 60 is withdrawn like D_P.
+    cells = tracked_cells(
+        [
+            ("drift", 60, {10: GOOD, 30: GOOD, 60: GOOD, 100: (0.5, True)}),
+            ("steady", 30, {10: GOOD, 30: GOOD, 60: GOOD, 100: (0.95, False)}),
+            ("low", 200, {10: GOOD, 30: GOOD}),
+        ]
+    )
+    decisions = res.decide(cells, [BROAD], POOL_GRID, settings())
+    validated = decisions[decisions["regime"] == "validated"].set_index("depth")
+    assert validated.loc[100, "pool_min_depth"] == 30
+    for depth in (30, 60):
+        row = validated.loc[depth]
+        assert row["own_status"] == res.STATUS_EMITTED
+        assert row["status"] == res.STATUS_NOT_RESOLVABLE
+        assert row["reason"] == f"{res.POOL_REASON_PREFIX}{res.REASON_WILSON}"
+        assert not row["pooled"] and not row["extrapolated"]
+    assert validated.loc[100, "status"] == res.STATUS_NOT_RESOLVABLE
+    assert validated.loc[100, "pooled"] and validated.loc[100, "extrapolated"]
+    assert validated.loc[10, "status"] == res.STATUS_EMITTED
+
+
+def test_an_unjudged_d_p_is_pooled_but_not_extrapolated() -> None:
+    # 30 "deep" cells are unconfident at 60 and confident at 100; 30 "mid"
+    # cells reach 60. Neither 100 (30 calls) nor 60 (30 confident calls) is
+    # judged; the >= 60 pool (each cell at its deepest bin: 60 calls) is.
+    cells = tracked_cells(
+        [
+            ("deep", 30, {10: GOOD, 30: GOOD, 60: (0.5, True), 100: GOOD}),
+            ("mid", 30, {10: GOOD, 30: GOOD, 60: GOOD}),
+            ("low", 200, {10: GOOD, 30: GOOD}),
+        ]
+    )
+    decisions = res.decide(cells, [BROAD], POOL_GRID, settings())
+    validated = decisions[decisions["regime"] == "validated"].set_index("depth")
+    assert validated.loc[60, "pool_min_depth"] == 60
+    assert validated.loc[60, "own_n_confident"] == 30
+    assert validated.loc[60, "pooled"] and not validated.loc[60, "extrapolated"]
+    assert validated.loc[60, "n_confident"] == 60
+    assert validated.loc[100, "pooled"] and validated.loc[100, "extrapolated"]
+    assert set(validated.loc[[60, 100], "status"]) == {res.STATUS_EMITTED}
+    per_cell = res.cell_emission(
+        decisions, "validated", "broad", ["X", "X"], [70, 150], POOL_GRID
+    )
+    assert per_cell["resolvability_extrapolated"].tolist() == [False, True]
+
+
+def test_only_positive_weight_calls_count_towards_min_confident_n() -> None:
+    # Bin 30: 60 confident calls, 55 of types the dataset lacks (weight 0).
+    # They add nothing to the precision, so the bin holds 5 calls: it is not
+    # judged on its own and takes the verdict of the >= 10 pool.
+    cells = tracked_cells(
+        [
+            ("absent", 55, {10: GOOD, 30: (0.95, False)}),
+            ("present", 5, {10: GOOD, 30: GOOD}),
+            ("low", 200, {10: GOOD}),
+        ]
+    )
+    weights = np.where(
+        (cells["depth"] == 30) & cells["cell_id"].str.startswith("absent"), 0.0, 1.0
+    )
+    stats = res.check_threshold(
+        np.full(60, 0.95), np.ones(60), np.r_[np.zeros(55), np.ones(5)], 0.7
+    )
+    assert (stats.n_called, stats.n_confident) == (5, 5)
+    decisions = res.decide(cells, [BROAD], (10, 30), settings(), weights=weights)
+    validated = decisions[decisions["regime"] == "validated"].set_index("depth")
+    row = validated.loc[30]
+    assert row["own_n_confident"] == 5
+    assert row["own_reason"] == res.REASON_TOO_FEW_CONFIDENT
+    assert row["pooled"] and row["extrapolated"] and row["pool_min_depth"] == 10
+    assert row["status"] == res.STATUS_EMITTED
+    # Unweighted, the 60 calls are judged on their own and fail.
+    unweighted = res.decide(cells, [BROAD], (10, 30), settings())
+    own = unweighted[unweighted["regime"] == "validated"].set_index("depth").loc[30]
+    assert own["n_confident"] == 60 and own["status"] == res.STATUS_NOT_RESOLVABLE
+    assert not own["pooled"]
+
+
+def test_would_raise_needs_an_isotonic_fit() -> None:
+    rng = np.random.default_rng(21)
+    # 70 calls: 35 in the fit half (< min_cells_per_bin), no fit, t* unknown.
+    small = bin_cells(np.full(70, 0.95), np.ones(70, bool), cls="Small")
+    # 800 calls with an error band just above the default: the fit raises.
+    bp = np.round(0.70 + 0.30 * rng.random(800), 3)
+    correct = np.where(bp < 0.8, rng.random(800) < 0.5, True)
+    large = bin_cells(bp, correct, cls="Large")
+    large["cell_id"] = [f"L{index}" for index in range(800)]
+    decisions = res.decide(
+        pd.concat([small, large], ignore_index=True), [BROAD], [30], settings()
+    )
+    validated = decisions[decisions["regime"] == "validated"].set_index("class")
+    assert validated.loc["Small", "n_fit"] == 35
+    assert not validated.loc["Small", "would_raise"]
+    assert not validated.loc["Small", "would_raise_evaluable"]
+    assert validated.loc["Large", "would_raise"]
+    assert validated.loc["Large", "would_raise_evaluable"]
+    raised, unevaluable = res.would_raise_bins(decisions, settings())
+    assert raised["class"].tolist() == ["Large"]
+    assert unevaluable["class"].tolist() == ["Small"]
+
+
+def glia_bin() -> pd.DataFrame:
+    """A deep bin: 1,000 neuron calls, 120 calls of glial class G.
+
+    60 G calls are right (type G1), 60 wrong (type G2, of class H).
+    """
+    neurons = bin_cells(
+        np.full(1000, 0.95), np.ones(1000, bool), cls="N", leaf=np.full(1000, "N")
+    )
+    right = bin_cells(np.full(60, 0.95), np.ones(60, bool), cls="G", leaf="G1")
+    wrong = bin_cells(np.full(60, 0.95), np.zeros(60, bool), cls="G", leaf="G2")
+    right["cell_id"] = [f"G1_{index}" for index in range(60)]
+    wrong["cell_id"] = [f"G2_{index}" for index in range(60)]
+    wrong["truth_parent"] = "H"
+    return pd.concat([neurons, right, wrong], ignore_index=True)
+
+
+def test_weights_are_trimmed_within_the_judged_set() -> None:
+    # The dataset's glia are mostly G1. Trimmed against the whole bin, whose
+    # median is set by the 1,000 neuron calls, G1 and G2 hit the same cap
+    # and the G precision stays near the unweighted 0.5 (M3b review 2);
+    # trimmed within the called-G set, the composition ratio survives.
+    cells = glia_bin()
+    composition = {"N": 0.3, "G1": 0.65, "G2": 0.05}
+    p_n, p_g = 1000 / 1120, 60 / 1120
+    w_n, w_g1, w_g2 = 0.3 / p_n, 0.65 / p_g, 0.05 / p_g
+
+    def g_row(scope: str) -> pd.Series:
+        tables = res.ResolvabilityTables(
+            summary={"depth_grid": [30], "decision_recipe": res.DECISION_RECIPE},
+            cells=cells,
+            levels=[BROAD],
+            settings=settings(weight_trim_scope=scope),
+        )
+        frame = tables.decisions(composition=composition)
+        return frame[(frame["regime"] == "validated") & (frame["class"] == "G")].iloc[0]
+
+    cap = 10 * w_n
+    assert g_row("bin")["precision"] == pytest.approx(cap / (cap + w_g2))
+    assert g_row("judged_set")["precision"] == pytest.approx(w_g1 / (w_g1 + w_g2))
+    assert g_row("judged_set")["precision"] > 0.9
+    with pytest.raises(res.ResolvabilityError, match="weight_trim_scope"):
+        settings(weight_trim_scope="class")
+
+
 def test_floors_follow_the_max_rule() -> None:
     decisions = res.decide(deep_and_shallow_cells(), [BROAD], GRID, settings())
     table = pd.DataFrame(
@@ -842,16 +1029,20 @@ def test_reweighting_to_a_dataset_composition_changes_emission() -> None:
     cells = pd.concat([own, foreign], ignore_index=True)
     unweighted = res.decide(cells, [BROAD], [30], settings())
     assert unweighted[unweighted["regime"] == "trust"].iloc[0]["status"] == "emitted"
-    untrimmed = res.composition_weights(
-        cells, {"Own": 0.4, "Foreign": 0.6}, trim_factor=0
-    )
-    assert untrimmed[: len(own)] == pytest.approx(0.4 / (2000 / 2100))
-    assert untrimmed[len(own) :] == pytest.approx(0.6 / (100 / 2100))
-    # Trimmed at 10 x the median (0.42 -> 4.2), renormalised to mean 1.
     weights = res.composition_weights(cells, {"Own": 0.4, "Foreign": 0.6})
-    assert weights.mean() == pytest.approx(1.0)
-    assert weights[: len(own)] == pytest.approx(0.7)
-    assert weights[len(own) :] == pytest.approx(7.0)
+    assert weights[: len(own)] == pytest.approx(0.4 / (2000 / 2100))
+    assert weights[len(own) :] == pytest.approx(0.6 / (100 / 2100))
+    # Bundles up to resolvability version 3 trimmed per bin: at 10 x the
+    # bin's median (0.42 -> 4.2), renormalised to mean 1.
+    legacy = res.composition_weights(
+        cells, {"Own": 0.4, "Foreign": 0.6}, trim_factor=10
+    )
+    assert legacy.mean() == pytest.approx(1.0)
+    assert legacy[: len(own)] == pytest.approx(0.7)
+    assert legacy[len(own) :] == pytest.approx(7.0)
+    # Version 4 trims within the judged set (here every call of the bin):
+    # the same cap relative to the set's median.
+    trimmed = res.trim_weights(weights, 10.0)
     weighted = res.decide(cells, [BROAD], [30], settings(), weights=weights)
     trust = weighted[weighted["regime"] == "trust"].iloc[0]
     assert trust["status"] == res.STATUS_NOT_RESOLVABLE
@@ -861,7 +1052,7 @@ def test_reweighting_to_a_dataset_composition_changes_emission() -> None:
     check = cells["bp"].to_numpy() >= row["threshold"] - 1e-9
     assert row["n_confident"] == int(check.sum()) == 2100
     assert row["precision"] == pytest.approx(2000 * 0.7 / 2100)
-    assert row["n_effective"] == pytest.approx(res.kish_effective_n(weights[check]))
+    assert row["n_effective"] == pytest.approx(res.kish_effective_n(trimmed[check]))
     assert row["n_effective"] < row["n_confident"] - 1
 
 
@@ -875,11 +1066,10 @@ def test_a_rare_type_heavy_in_the_composition_cannot_carry_a_bin() -> None:
     rare["truth_parent"] = "Y"
     cells = pd.concat([common, rare], ignore_index=True)
     composition = {"Own": 0.5, "Rare": 0.5}
-    raw = res.composition_weights(cells, composition, trim_factor=0)
+    raw = res.composition_weights(cells, composition)
     assert raw[-1] / raw.sum() == pytest.approx(0.25)
-    weights = res.composition_weights(cells, composition)
-    assert weights.max() / weights.sum() <= 0.20
-    decisions = res.decide(cells, [BROAD], [30], settings(), weights=weights)
+    assert res.trim_weights(raw, 10.0).max() / res.trim_weights(raw, 10.0).sum() <= 0.2
+    decisions = res.decide(cells, [BROAD], [30], settings(), weights=raw)
     validated = decisions[decisions["regime"] == "validated"].iloc[0]
     assert validated["max_weight_share"] <= 0.20
     assert validated["n_effective"] < validated["n_confident"]
@@ -1337,8 +1527,36 @@ def test_self_map_files_round_trip(
         == res.STATUS_EMITTED
     )
     assert tables.settings.weight_trim_factor == pytest.approx(10.0)
+    assert tables.settings.weight_trim_scope == "judged_set"
     assert summary["floors"]["validated"]["class"]["A"]["source"] == "hard_floor"
     assert res.load_resolvability(tmp_path / "missing") is None
+    # PREP decides on the cells as stored (float32 bp): the stored summary
+    # is exactly what RESOLVE re-derives from the stored table.
+    for regime, per_level in summary["emission"].items():
+        rows = again[again["regime"] == regime]
+        for record in rows.to_dict("records"):
+            stored = per_level[record["level"]][record["class"]][
+                str(int(record["depth"]))
+            ]
+            assert stored["status"] == record["status"]
+            assert stored["threshold"] == res._optional_float(record["threshold"])
+            assert stored["t_star"] == res._optional_float(record["t_star"])
+            assert stored["pooled"] == bool(record["pooled"])
+            assert stored["extrapolated"] == bool(record["extrapolated"])
+    assert synthetic_run.cells["bp"].dtype == np.float32
+    # A bundle of resolvability version 3 did not record the trimming unit:
+    # it trimmed per bin.
+    legacy = dict(summary)
+    legacy["settings"] = {
+        key: value
+        for key, value in summary["settings"].items()
+        if key != "weight_trim_scope"
+    }
+    (tmp_path / res.RESOLVABILITY_SUMMARY_FILE).write_text(json.dumps(legacy))
+    old = res.load_resolvability(tmp_path)
+    assert old is not None and old.settings.weight_trim_scope == "bin"
+    assert old.settings.bin_trim_factor == pytest.approx(10.0)
+    assert old.settings.set_trim_factor == 0.0
 
 
 def test_clean_recipe_is_an_upper_bound(synthetic_run: res.ResolvabilityResult) -> None:
@@ -1379,6 +1597,33 @@ def test_gate_p_tested_sets_pool_deep_bins_and_count_each_cell_once() -> None:
         cells, decisions, min_confident_n=10_000, regime="trust"
     )
     assert none[("broad", "X")] is None
+
+
+def test_gate_p_machinery_keeps_one_replicate() -> None:
+    cells = bin_cells(np.full(300, 0.95), np.ones(300, bool), depth=10)
+    clean = cells.copy()
+    clean["recipe"] = res.CLEAN_RECIPE
+    clean["correct"] = False
+    seed1 = cells.copy()
+    seed1["seed"] = 1
+    both = pd.concat([cells, clean, seed1], ignore_index=True)
+    decisions = res.decide(cells, [BROAD], [10], settings())
+    # The decision recipe and seed 0 are tested by default: the clean rows
+    # (all wrong) and the seed-1 copies neither mix in nor double the count.
+    sets = res.gate_p_tested_sets(both, decisions, min_confident_n=100, regime="trust")
+    tested = sets[("broad", "X")]
+    assert tested is not None
+    assert [(item.depths, item.n_confident) for item in tested] == [((10,), 300)]
+    assert tested[0].precision == pytest.approx(1.0)
+    with pytest.raises(res.ResolvabilityError, match="more than once"):
+        res.gate_p_tested_sets(both, decisions, recipe=None, seed=None)
+    with pytest.raises(res.ResolvabilityError, match="pass recipe"):
+        res.frozen_threshold_eval(both, decisions, regime="trust")
+    frozen = res.frozen_threshold_eval(
+        both, decisions, regime="trust", recipe=res.CLEAN_RECIPE, seed=0
+    )
+    assert frozen.iloc[0]["n_called"] == 300
+    assert frozen.iloc[0]["precision"] == pytest.approx(0.0)
 
 
 def test_gate_p_class_set_and_frozen_thresholds() -> None:
