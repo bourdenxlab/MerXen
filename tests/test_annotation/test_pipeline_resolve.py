@@ -10,6 +10,10 @@ same loader RESOLVE uses. Bundles are the fake MAP bundles
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -1192,3 +1196,127 @@ def test_inhibitory_neurons_get_their_branch(make_trust: MakeTrust) -> None:
     branch, leaf = pl.human_branch_columns(result)
     assert branch.tolist() == ["Neurons/Excitatory", "Neurons/Inhibitory"]
     assert leaf.tolist() == [EXC, INH]
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+WORKFLOWS = REPO_ROOT / "workflows"
+NEXTFLOW = shutil.which("nextflow")
+
+PROCESS_HARNESS = """
+include { CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE } from '__MODULE__'
+
+workflow {
+    def panelDir = file(params.panel_dir)
+    def spec = AnnotationReferences.resolveSpec(params, panelDir, params.source_root)
+    def inputs = channel.of(
+        tuple(
+            "PX",
+            "proseg_hybrid",
+            spec,
+            "[]",
+            file(params.clustering_config),
+            file(params.prepared_dir),
+            panelDir,
+            params.bundle_refs.split(",").collect { ref -> file(ref) },
+            file(params.map_dir),
+            [],
+        )
+    )
+    CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE(inputs)
+}
+"""
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(NEXTFLOW is None, reason="nextflow is unavailable")
+def test_the_resolve_process_resolves_a_synthetic_map_output(
+    tmp_path: Path, fake_mmc: FakeMmc
+) -> None:
+    """CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE's real script, end to end (plan §3.4).
+
+    The process runs the real ``merxen annotate-resolve`` on a synthetic MAP
+    output with the arguments the pipeline renders: staged prepared H5ADs,
+    clustering config, panel, MAP output and bundle refs.
+    """
+    assert NEXTFLOW is not None
+    setup = _setup(tmp_path / "inputs", fake_mmc, coverage=True)
+    prepared = _prepared_manifest(setup)
+    clustering = tmp_path / "clustering_squidpy_config.json"
+    clustering.write_text(
+        json.dumps(
+            {
+                "pair_id": "PX",
+                "min_counts": 10,
+                "samples": [
+                    {"sample_id": sample.sample_id, "platform": sample.platform}
+                    for sample in setup.samples
+                ],
+            }
+        )
+    )
+    refs = [
+        _bundle_ref(bundle, tmp_path / "refs" / f"bundle_ref_{index}.json")
+        for index, bundle in enumerate(setup.bundles.values(), start=1)
+    ]
+    harness = tmp_path / "harness"
+    (harness / "lib").mkdir(parents=True)
+    for source in (WORKFLOWS / "lib").glob("*.groovy"):
+        shutil.copy(source, harness / "lib" / source.name)
+    (harness / "main.nf").write_text(
+        PROCESS_HARNESS.replace("__MODULE__", str(WORKFLOWS / "modules/annotation.nf"))
+    )
+    outdir = tmp_path / "results"
+    (harness / "nextflow.config").write_text(
+        f"""
+includeConfig '{WORKFLOWS / "conf" / "annotation.config"}'
+params {{
+    species = "human"
+    outdir = "{outdir}"
+    source_root = "{REPO_ROOT / "src"}"
+    panel_dir = "{setup.panel_dir}"
+    clustering_config = "{clustering}"
+    prepared_dir = "{prepared}"
+    map_dir = "{setup.map_dir}"
+    bundle_refs = "{",".join(str(ref) for ref in refs)}"
+}}
+process.executor = "local"
+"""
+    )
+    env = {**os.environ, "NXF_DISABLE_CHECK_LATEST": "true", "NXF_ANSI_LOG": "false"}
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(REPO_ROOT / "src"), *filter(None, [os.environ.get("PYTHONPATH")])]
+    )
+    env["PATH"] = os.pathsep.join([str(Path(sys.executable).parent), env["PATH"]])
+
+    completed = subprocess.run(
+        [NEXTFLOW, "-log", str(tmp_path / "nextflow.log"), "run", "main.nf"],
+        cwd=harness,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=600,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    output = outdir / "PX/proseg_hybrid/annotation_resolve/annotation_resolve_out"
+    summary = json.loads((output / "PX_resolve_summary.json").read_text())
+    assert set(summary["samples"]) == {"PX_MERSCOPE", "PX_XENIUM"}
+    assert summary["pair"]["alignment_dir"] is None
+    config = AnnotationConfig.model_validate_json(
+        (output / "annotation_config.json").read_text()
+    )
+    assert config.allow_single_method is False
+    for sample in setup.samples:
+        labels, provenance = read_label_table(
+            output
+            / sample.platform.lower()
+            / f"{sample.sample_id}_celltype_labels.parquet"
+        )
+        validate_label_table(labels, "human")
+        assert provenance is not None
+        references = provenance.references
+        # Resolved with the staged refs' bundles, the ones MAP mapped with.
+        assert references["whb_frontal_supc_clus"].build_hash == (
+            setup.bundles["whb_frontal_supc_clus"].build_hash
+        )

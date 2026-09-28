@@ -550,10 +550,10 @@ runs once, and is shared across all samples and segmentation branches. See
 
 ### Reference-based annotation (in development)
 
-These params drive the reference-bundle and mapping processes of the new
-annotation ([Reference-based annotation](stages/annotation.md)). They are read
-only by `--annotation_prepare_only` runs and, once wired (M5), by `map_first`
-runs; legacy runs ignore them. Defaults are in `workflows/conf/annotation.config`,
+These params drive the reference-bundle, mapping and resolving processes of
+the new annotation ([Reference-based annotation](stages/annotation.md)). They
+are read only by `--annotation_prepare_only` runs and, once wired (M5), by
+`map_first` runs; legacy runs ignore them. Defaults are in `workflows/conf/annotation.config`,
 the dwight values in `workflows/conf/dwight.annotation.config`.
 
 | Param | Default | Description |
@@ -583,6 +583,8 @@ the dwight values in `workflows/conf/dwight.annotation.config`.
 | `annotation_merfish_ccf_metadata_path` | `null` | Local MERFISH-C57BL6J-638850-CCF cell metadata; unset, it comes from the pinned download cache. |
 | `annotation_prep_max_forks` | Dwight: `1` | Concurrent `ANNOTATE_REFERENCE_PREP` tasks. |
 | `annotation_max_forks` | `2` (applied on Dwight) | Concurrent `CLUSTERING_SQUIDPY_ANNOTATE_MAP` tasks (6 CPUs and 24 GB each, 48 GB above 1,000 panel genes). |
+| `annotation_resolve_max_forks` | Dwight: `4` | Concurrent `CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE` tasks (2 CPUs and 16 GB each, 32 GB above 1,000 panel genes; about a minute per pair × segmentation). |
+| `annotation_allow_single_method` | `false` | Human degraded mode: in the WHB-only mode (no usable SEA-AD run), let WHB decide alone below 60 counts, recorded in the provenance (otherwise those cells get status `single_method`; plan §5.3). Only RESOLVE reads it, so changing it re-runs `CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE` alone under `-resume`, never MAP. |
 | `annotation_reuse_published` | `true` | MAP copies a run from the published `<pair>/<seg>/annotation_map/annotation_map_out/map_manifest.json` instead of re-mapping when its query fingerprint, `build_hash`, engine parameters and ctm version are unchanged (Dwight prunes work directories, so `-resume` alone cannot). |
 | `annotation_keep_extended_json` | `false` | Keep each MapMyCells extended JSON, gzipped, next to its tidy parquet (by default it is parsed and deleted). |
 

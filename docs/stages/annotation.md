@@ -703,16 +703,18 @@ expects); ag7 symbols run as human are `refused`
 
 ## Pipeline processes
 
-Three CPU processes in `workflows/modules/annotation.nf`, wired by
+Four CPU processes in `workflows/modules/annotation.nf`, wired by
 `workflows/subworkflows/annotation_references.nf` (PANEL, PREP) and
-`workflows/subworkflows/clustering_map_first.nf` (MAP); none takes the GPU
-lock, and a default (legacy) run instantiates none of them.
+`workflows/subworkflows/clustering_map_first.nf` (MAP in
+`CLUSTERING_ANNOTATE_MAP`, RESOLVE after it in `CLUSTERING_ANNOTATE`); none
+takes the GPU lock, and a default (legacy) run instantiates none of them.
 
 | Process | Runs | Resources | What it does |
 |---|---|---|---|
 | `ANNOTATE_PANEL` | once per pair × segmentation | 1 CPU, 4 GB | `merxen annotation-panel` on the gene list (`--annotation_panel_genes_path`) or on the pair's prepared H5ADs; writes the declared panels and `required_bundles.json`. |
 | `ANNOTATE_REFERENCE_PREP` | once per unique (species, reference, `panel_hash`) across the run | 8 CPUs, 64 GB, 8 h; above 1,000 panel genes `annotation_prep_large_memory` and 24 h; one at a time on dwight | `merxen annotation-reference-prep`: gets the bundle from the store or builds it, and writes `bundle_ref.json`. Seconds when the bundle exists. |
 | `CLUSTERING_SQUIDPY_ANNOTATE_MAP` | once per pair × segmentation, after its last required bundle (`map_first` only, from M5) | 6 CPUs, 24 GB (48 GB above 1,000 panel genes); `annotation_max_forks` (2) at a time on dwight | `merxen annotate` on the pair's prepared H5ADs with exactly the bundle refs PREP resolved: the MapMyCells runs, the tidy parquets, the provisional labels and `map_manifest.json`, published to `<outdir>/<pair>/<seg>/annotation_map/annotation_map_out/`. |
+| `CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE` | once per pair × segmentation, after its own MAP (`map_first` only, from M5) | 2 CPUs, 16 GB (32 GB above 1,000 panel genes); `annotation_resolve_max_forks` (4) at a time on dwight | `merxen annotate-resolve` on the MAP output, the prepared H5ADs, the panel and the same bundle refs: the label tables, annotation manifests and `<pair>_resolve_summary.json`, published to `<outdir>/<pair>/<seg>/annotation_resolve/annotation_resolve_out/` (see [Resolving](#resolving-merxen-annotate-resolve-m4)). 36-63 s per human pair × segmentation in the M4 shadow runs. |
 
 PREP has no `storeDir`: the store's own lock, temporary build directory and
 atomic rename keep concurrent launches safe, and its `build_hash` (sources,
@@ -738,8 +740,8 @@ checkout's `src/` first on `PYTHONPATH`) after checking that the installed
 `cell_type_mapper` is `annotation_ctm_version`. Its table cells and
 `min_counts` come from the clustering config, so they are the clustering
 run's. A refused panel is not a task failure: MAP writes a `map_manifest.json`
-with `panel_status: refused` and its reasons, maps nothing, and RESOLVE (M4)
-will write statuses only. With `annotation_reuse_published` a run whose
+with `panel_status: refused` and its reasons, maps nothing, and RESOLVE
+then writes statuses only. With `annotation_reuse_published` a run whose
 query fingerprint, `build_hash`, engine parameters, ctm version, tidy schema
 version and (restricted) lookup equal the published manifest's is copied
 from `annotation_map/annotation_map_out/` instead of re-mapped, because
@@ -750,6 +752,30 @@ reuse, with a warning. Until M5 wires
 `map_first` (hook H5, `CLUSTERING_MAP_FIRST`), the preflight refuses
 `map_first` runs, so MAP runs only in the workflow tests; the shadow
 evaluation uses the standalone command.
+
+RESOLVE starts for a pair × segmentation as soon as its own MAP has
+finished. It stages the MAP output, the prepared H5ADs and clustering config
+MAP read, the panel directory and MAP's bundle refs, and resolves every run
+with exactly the bundle its staged ref names (`--require-bundle-refs`: a ref
+whose `build_hash` differs from the one the run mapped with fails the task
+as a stale MAP output; the store is never searched). The shared tissue mask
+of the pair JSD comes only from ALIGN's output channel, which M5 wires (as
+for `ANNOTATE_PANEL`); until then RESOLVE reports the whole-section JSD and
+never looks for a published `align_out` that ALIGN may still be writing
+(`--no-alignment-lookup`). A mouse MAP output fails the task with a clean
+error until M6 adds the mouse rules. RESOLVE caches on content (`cache
+"deep"`), as MAP does, and its task hash also sees the annotation config it
+writes and a fingerprint of the RESOLVE rules: the sha256 of the files under
+`src/merxen/annotation/`, `src/merxen/assets/annotation/` (floors,
+vocabularies, validated panels, state genes), `src/merxen/clustering/` and
+`src/merxen/cli/run_annotation.py` of the running checkout (`__pycache__`
+skipped; `AnnotationReferences.RESOLVE_RULE_SOURCES`). So after a threshold,
+floor, trust, flag or degraded-mode change (`annotation_allow_single_method`,
+the only RESOLVE-only param; PANEL, PREP and MAP never see it), `-resume`
+re-runs every RESOLVE, a minute each, and keeps MAP cached: MAP's task
+inputs and its published-output reuse key hold none of these settings. Any
+edit under those source directories re-runs RESOLVE, and so everything that
+reads its tables.
 
 ### Pre-building references (`--annotation_prepare_only`)
 
@@ -880,7 +906,9 @@ The RESOLVE step (`merxen.annotation.pipeline.annotate_resolve`; plan §3.4)
 turns a MAP output into one label table per sample (§4.1). The standalone
 command runs it on published MAP outputs (options in
 [CLI](../cli.md#merxen-annotate-resolve)); the `CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE`
-process will run it inside `CLUSTERING_MAP_FIRST` (legacy runs never do).
+process runs it after each MAP in `CLUSTERING_ANNOTATE`, which
+`CLUSTERING_MAP_FIRST` calls from M5 (legacy runs never do; see
+[Pipeline processes](#pipeline-processes)).
 Per sample:
 
 1. **Inputs.** The counts are reloaded as MAP loaded them and must have the
