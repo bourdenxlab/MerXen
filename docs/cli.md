@@ -45,15 +45,16 @@ Commands:
                       Get or build one reference bundle and...
   annotation-store   Inspect the annotation reference store...
   annotate           Map published or prepared samples with...
+  annotate-resolve   Resolve MAP outputs into label tables...
   annotation-panel-fetch
                       Fetch pinned public panel gene lists (URL, size and...
   annotation-panel-simulate
                       Simulate a candidate panel: predicted levels, trust,...
 ```
 
-The reference-based annotation commands (`annotation-*` and `annotate`, plan
-`docs/plans/robust-celltype-annotation-plan.md` §3.2–§3.3) take explicit
-options instead of a single `--config`.
+The reference-based annotation commands (`annotation-*`, `annotate` and
+`annotate-resolve`, plan `docs/plans/robust-celltype-annotation-plan.md`
+§3.2–§3.4) take explicit options instead of a single `--config`.
 
 Logging is configured in the root `main()` group and streams to stderr at
 `INFO` level.
@@ -645,6 +646,46 @@ and two uses on the same gene set are mapped once and recorded under both
 run ids.
 
 ---
+
+
+## `merxen annotate-resolve`
+
+The annotation RESOLVE step (plan §3.4; M4): turns a MAP output
+(`map_manifest.json` and its tidy parquets) into the per-cell label tables,
+standalone on published MAP outputs. It reads each sample's counts from the
+manifest's inputs (or `--prepared-dir`), checks them against the sample
+fingerprint MAP recorded, applies resolvability-gated emission reweighted to
+the dataset's soft composition, the floors, the dataset gate, the
+degraded-mode consensus and the flags, and writes under `--out` (never into
+the inputs' results tree or the MAP output):
+
+| File | Content |
+|---|---|
+| `<platform>/<sid>_celltype_labels.parquet` | The §4.1 label table (every object; validated with `schema.validate_label_table`); the provenance JSON is also in the parquet schema (`merxen_annotation`). |
+| `<platform>/<sid>_annotation_manifest.json` | `AnnotationProvenance` (§4.6): the JSON string `uns["merxen_annotation_json"]` holds. |
+| `<pair>_resolve_summary.json` | Per sample: trust (and banner), degraded mode, gate level and warning with reasons, confident and resolvable share per level, emission, COP control, realised flag rates per class × platform (H16) and the compositions; per pair: the JSD of every composition kind, whole section and shared tissue mask, with its 95% block-bootstrap CI. |
+
+```bash
+merxen annotate-resolve \
+  --map-dir shadow/P7513/proseg_hybrid \
+  --current-bundles --store /media/mathieubo/SSD1/MerXen/annotation_references \
+  --gene-id-fallback-csv /path/to/WHB/gene.csv \
+  --n-segmented P7513_MERSCOPE=211744 --n-segmented P7513_XENIUM=167738 \
+  --out resolve/P7513/proseg_hybrid
+```
+
+| Option | Meaning |
+|---|---|
+| `--map-dir DIR` | The MAP output (`map_manifest.json`, `<platform>/<sid>_mmc_<run_id>.parquet`); every parquet must still have the sha256 the manifest recorded. |
+| `--panel-dir DIR` | `annotation-panel` output (default `<map-dir>/panel`): the panel files (trust diagnostics, the flags' query genes), `panel_report.json` and `required_bundles.json`. Each panel's family is re-derived from the current `validated_panels.csv`. |
+| `--bundle KEY=DIR` | Resolve a run (`KEY` = run id or reference id) with this bundle; it must be of the run's reference and panel and have the marker lookup the run mapped with. |
+| `--current-bundles --store DIR [--store-large DIR]` | Resolve every run with the store's current bundle of its reference and panel (current builder, current resolvability tables), under the same checks. |
+| `--prepared-dir DIR` | Read the counts from these prepared H5ADs instead of the manifest's inputs (a refused panel, whose manifest lists no sample, needs it). |
+| `--gene-id-fallback-csv PATH` | The gene-ID fallback table MAP used (otherwise the counts do not fingerprint the same). |
+| `--n-segmented SID=N` | Segmented objects of a sample: the denominator of the segmented-object gate warning (a published clustered H5AD holds table cells only). |
+| `--alignment-dir DIR` | The pair's `align_out` (shared tissue mask); default `<results>/<pair>/alignment/align_out` of the inputs' results tree, when present. |
+| `--annotation-config PATH`, `--species` | `AnnotationConfig` JSON; the species defaults to the manifest's (mouse RESOLVE is M6). |
+| `--platforms`, `--n-bootstrap`, `--tile-um`, `--seed`, `--results-root` | Resolve only these platforms; block-bootstrap replicates (200), tile edge (500 µm) and seed (0); a results tree `--out` must stay out of. |
 
 ## Writing a standalone config
 
