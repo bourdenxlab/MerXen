@@ -167,20 +167,28 @@ builders run the self-map of plan §8.3 on their panel
    gene, shared by every cell and depth, median 1) inside the thinning,
    plus 25% of `D` thinned from a random cell of another broad class; truth
    stays the host's. A clean (thinning-only) run is the upper bound. Seed
-   0. *Keyed draws (resolvability version 5, 2026-09-28):* every draw is
-   keyed by what it simulates, not taken from one stream over all test
-   cells: a simulated cell's thinning and its spill's thinning come from a
-   generator seeded by a stable hash (BLAKE2b) of the seed, the recipe name
-   and version, the cell id and `D` (`resolvability.cell_draw_key`); the
-   spill partner is the eligible cell with the highest rendezvous score of
-   the host's and the candidate's keys (`rendezvous_choice`, uniform over
-   the eligible cells); each gene's efficiency is keyed by the seed and the
-   gene id. So adding, removing or reordering test cells leaves every other
-   simulated cell unchanged, except a host whose partner left or was
-   outranked by an added cell (its spill only). Up to version 4 one stream
-   drew every cell, and the review-2 rebuild (a few test cells fewer)
-   redrew all of them, moving 0-7 of 85 validated broad / supercluster
-   bins per human dataset.
+   0. *Keyed draws (resolvability version 5, 2026-09-28):* every per-cell
+   draw is keyed by what it simulates, not taken from one stream over all
+   test cells: a simulated cell's thinning and its spill's thinning come
+   from a generator seeded by a stable hash (BLAKE2b) of the seed, the
+   recipe name and version, the cell id and `D`
+   (`resolvability.cell_draw_key`), and the spill partner is the eligible
+   cell with the highest rendezvous score of the host's and the
+   candidate's keys (`rendezvous_choice`, uniform over the eligible cells).
+   The gene efficiency is the pre-registered draw of versions 1-4: one
+   generator seeded by `[seed, 0x6566]` over the panel's gene order
+   (`resolvability.gene_efficiency`), which depends on the seed and the
+   panel only, never on the test cells. So adding, removing or reordering
+   test cells leaves every other simulated cell unchanged, except a host
+   whose partner left or was outranked by an added cell (its spill only).
+   Up to version 4 one stream drew every cell, and the review-2 rebuild (a
+   few test cells fewer) redrew all of them, moving 0-7 of 85 validated
+   broad / supercluster bins per human dataset. *Version 6 (M3b review 3,
+   2026-09-28):* version 5 had also keyed each gene's efficiency by the
+   gene id. Neither requested change needed that, and it replaced the
+   pre-registered seed-0 efficiency realisation with an unrelated one
+   (correlation of the log efficiencies -0.06 on set a); version 6
+   restores the pre-registered draw and keeps the per-cell keys.
 3. **Mapping** with the production configuration (bootstrap factor 0.5, 100
    iterations, seed 0, raw normalisation, the bundle's lookup).
 4. **Levels.** WHB: lineage, broad, NT (group probabilities summed over
@@ -359,9 +367,10 @@ identical to version 3. Every stored summary equals the decisions RESOLVE
 re-derives from the stored cells (0 differing bins in the five bundles).
 
 **Resolvability version 5** (M3b final follow-up, 2026-09-28;
-`m3b/final_followup/FINAL_FOLLOWUP.txt`): the keyed per-cell draws and the
-training-cluster rule for the other-region cells give every self-map
-bundle a new build hash. Rebuilt at 8 processes: set a WHB 4.3 min
+`m3b/final_followup/FINAL_FOLLOWUP.txt`; superseded by version 6): the
+keyed per-cell draws, the gene efficiency keyed per gene id (undone in
+version 6) and the training-cluster rule for the other-region cells give
+every self-map bundle a new build hash. Rebuilt at 8 processes: set a WHB 4.3 min
 (held-out test set 2.5 min), SEA-AD 2.2, set c WHB 4.2, ag7 36.9 min
 (20.2 GB) and VZG2 45.1 min (27.1 GB). The keyed simulation takes 7-9 s
 per human and 11-12 s per mouse recipe (one generator per simulated cell;
@@ -372,9 +381,10 @@ Fibroblast and COP have 412, 144 and 152 test cells (version 4: 678, 438,
 284) and Fibroblast's `D_max` is 60. Every stored summary equals the
 re-derived decisions. Simulating the version-4 and version-5 test sets
 with the same code, the 44,427 simulated cells of their 9,654 shared test
-cells are identical with the clean recipe; with `R1_contam_HO` every one
-that differs has a new spill partner (19,630; the host thinning is
-identical). Partners change that often because the other-region top-up
+cells are identical with the clean recipe; with `R1_contam_HO` 19,545
+differ, every one with a new spill partner (19,630 changed partner; 85 of
+them give identical counts), and the host thinning is identical for all.
+Partners change that often because the other-region top-up
 redrew 1,386 of its cells when its candidate pool changed: the test-cell
 selection is still one draw per supercluster. MapMyCells also draws its
 bootstrap per chunk of query cells, so a changed query moves the
@@ -383,6 +393,25 @@ in another order changed 67% of the bp values, 5% of the broad
 confident-at-0.73 flags and 0.02% of the confident broad labels, and 0-2
 of the 83 validated broad / supercluster bins per dataset (a full redraw,
 seeds 1 and 2: 0-7).
+
+**Resolvability version 6** (M3b review 3, 2026-09-28;
+`m3b/final_followup/review3/H18_V6.txt`, summarised in
+`m3b/final_followup/FINAL_FOLLOWUP.txt` §12): the gene efficiency is the
+pre-registered version-4 draw again, with the per-cell keys and the
+training-cluster rule of version 5, so version 6 is the outcome of the two
+requested changes alone. Rebuilt at 8 processes on a loaded host: set a
+WHB 2.9 min (the version-5 held-out test set reused), SEA-AD 4.9, set c
+WHB 2.4, ag7 43.5 min (20.2 GB) and VZG2 69.4 min (27.1 GB). Every stored
+efficiency vector equals the pre-registered formula and the version-4
+bundle's; every stored summary equals the re-derived decisions; the set a
+decision rows equal the final follow-up's offline "e4" simulation (version-5
+per-cell keys with the version-4 efficiency) and an offline re-map of the
+stored simulation, call for call. Simulating the version-4 and version-6
+test sets with version 6, the clean recipe leaves the 44,427 shared
+simulated cells identical; with `R1_contam_HO` 19,552 differ, every one
+with a new spill partner (19,630 changed partner; 78 of them, all at 10-15
+counts, give identical counts, 60 with an empty spill from both partners),
+and the host thinning is identical for all.
 
 ### Bundle files
 
@@ -597,7 +626,10 @@ for 8 / 9 / 24 of them):
 Version 4 left the held-out Miscellaneous / Splatter cells out of the human
 test set: their calls to Exc had been scored wrong, so the 5K human WHB
 broad Exc was emitted only from 250 counts and SEA-AD broad Exc never (now
-from 20 and 50); the mouse panels do not change (same test set).
+from 20 and 50); the mouse panels do not change (same test set). These
+four panels' bundles (the 5K ones in the large store) were not rebuilt for
+resolvability versions 5 and 6, so they keep version-4 self-map tables
+until they are; a standalone MAP on them logs that its tables are stale.
 
 A 5K pan-tissue panel needs more counts than a brain panel for the same
 classes (mouse class at 100 counts: 5 of 24 classes vs 12 for the 248-gene
@@ -798,7 +830,10 @@ Per sample:
    <subset panel>`. Of several builder-v3 bundles on one panel, a
    standalone run takes the one built with the large-panel prefilter its
    config asks for and, of those, the one with the current
-   `RESOLVABILITY_VERSION`.
+   `RESOLVABILITY_VERSION`. When none has the current version (a panel not
+   rebuilt since the last bump), it takes the older bundle and logs a
+   warning naming its resolvability version: its self-map tables are stale
+   until the panel is rebuilt (a pipeline run's PREP rebuilds it).
 3. Run MapMyCells (seed 0, bootstrap factor 0.5, 100 iterations, raw
    normalisation, one BLAS thread per worker, `--drop_level
    CCN20230722_SUPT` for WMB) and parse the extended JSON at once into the
@@ -899,45 +934,69 @@ H4 and H16 baselines) are in §11 of the pre-registration document.
   genes too, and their lookups differed from the validated ones in 301 and
   142 of 368 parents (median Jaccard 0.979 and 0.992).
 - **H18 does not pass as written on the validated panels** (resolvability
-  version 5, M3b final follow-up, 2026-09-28; a decision for the gate PRs;
-  `m3b/final_followup/FINAL_FOLLOWUP.txt`). Set a (PREP) now emits broad and
-  supercluster for every class H18 expects (version 4 failed broad Astro
-  and broad and supercluster Oligo at 120 counts, and supercluster Astro at
-  120), but only in this draw: re-simulated with seeds 1 and 2, or with the
-  version-4 gene-efficiency vector, broad Oligo at 120 fails in all three
-  and broad Fibroblast at 15 and supercluster Oligo at 120 in one (144
-  Fibroblast test cells now, `D_max` 60).
-  Reweighted to the eight human datasets 15 (level, class) pairs fail
-  (version 4: 25; 14-23 over the four draws): broad Oligo on seven datasets
-  (at 15 to 120 counts; the wrong confident weight is other-region COP
-  cells of training clusters called Oligodendrocyte, 3-26% of the called
-  set), supercluster Oligo on five, broad Fibroblast at 15 on P1212 and
-  P5011 Xenium (other-region Vascular cells called Fibroblast) and broad
-  Immune at 30 on P5011 MERSCOPE (held-out-donor astrocytes with spill).
-  Broad OPC at 15 (version 4: four datasets) passes everywhere, but fails
-  on all eight again with the version-4 gene-efficiency vector: it followed
-  that single per-gene draw, which every simulated cell shares, not the
-  rules or the test cells. COP supercluster is never emitted. Mouse: VZG2
-  passes; ag7 PREP passes (the Immune subclass at 100 fails in one of three
-  draws); reweighted, ag7 fails 05 OB-IMN GABA and / or 09 CNU-LGE GABA at
-  250 counts on every segmentation (1-2 classes; Kish n 23-62 or fewer
-  than 50 positive-weight calls; version 4: 1 / 1 / 0 / 0, the other draws
-  0-2). Validated thresholds the local rule would raise (fit half ≥ 50
-  calls, at D ≥ 15 broad, 30 supercluster, 20 class, 50 subclass): set a
-  12 (PREP; 13-25 reweighted), SEA-AD 10, set c 7, ag7 39, VZG2 57; 2, 1,
-  0, 98 and 104 bins have no fit (`validated_thresholds_not_evaluable`).
-- **The H7 coverage proxy passes on every human dataset under version 5,
-  within a draw spread.** The confident broad share of table cells after
-  reweighting (validated regime; it ignores the SEA-AD vote, the COP rule
-  on real cells and the floors, so the real H7 values will be lower) is,
-  version 4 → 5: P7513 MERSCOPE .683 → .687 (H7 asks ≥ .62), P7113
-  MERSCOPE .739 → .762 (≥ .67), P1212 MERSCOPE .354 → .446 (≥ .34), P5011
-  MERSCOPE .297 → .380 (≥ .30); Xenium P7513 .593, P7113 .652, P1212 .530,
-  P5011 .568 (≥ .44 / .39 / .29 / .40). Over the four draws P5011
-  MERSCOPE ranges .298-.403 and P1212 MERSCOPE .354-.446: with the
-  version-4 gene-efficiency vector P5011 MERSCOPE is .298 again, so the
-  version-4 miss was that realisation, not the per-cell draws or the test
-  set (the training-cluster rule alone leaves it at .297).
+  version 6, M3b review 3, 2026-09-28; a decision for the gate PRs;
+  `m3b/final_followup/FINAL_FOLLOWUP.txt` §12,
+  `m3b/final_followup/review3/H18_V6.txt`, `EXCEPTIONS_V6.txt`). Version 6
+  is the outcome of the two requested changes (other-region cells only of
+  training clusters, per-cell keyed draws) with the pre-registered
+  seed-0 efficiency. Set a (PREP) fails broad Oligo at 120 counts (79
+  calls, precision .911, Wilson bound .828 < .88; 8.9% of the confident
+  weight is other-region COP cells called Oligodendrocyte); version 4
+  failed broad Astro and broad and supercluster Oligo at 120, and
+  supercluster Astro at 120. Reweighted to the eight human datasets 23
+  (level, class) pairs fail (version 4: 25): broad OPC on all eight (at 15
+  counts: precision .83-.90, held-out-donor neurons and Oligodendrocytes
+  called OPC; at 120 on five: precision .90-.94 but Kish n 88-90, so the
+  Wilson bound misses), broad Oligo on seven (at 120 counts on five, at 15
+  on P7513 MERSCOPE, at 15-120 on both P5011) and supercluster Oligo on six
+  (at 120 on four, at 30-120 on both P5011; other-region COP cells of
+  training clusters called Oligodendrocyte hold 9-26% of the called set's
+  confident weight), and broad and supercluster Immune at 60
+  on P5011 MERSCOPE (held-out-donor deep-layer IT neurons called Immune,
+  7-10%). COP supercluster is never emitted. Mouse: VZG2 passes; ag7 PREP
+  fails the Immune subclass at 100 (113 calls, precision .894, Wilson .824
+  < .83; as in version 4; it passes with seeds 1 and 2); reweighted, ag7
+  fails 05 OB-IMN GABA (at most 3 positive-weight confident calls at 250
+  counts on proseg_hybrid and reseg; Kish n 34-82 on original_seg and
+  proseg_mask) and the 09 CNU-LGE GABA subclass (precision .92, Kish n
+  58-64): 1 / 2, 1 / 1, 0 / 1, 0 / 2 classes / subclasses on proseg_hybrid,
+  reseg, original_seg, proseg_mask (version 4: 1 / 1, 1 / 1, 0 / 0, 0 / 0).
+  Validated thresholds the local rule would raise (fit half ≥ 50 calls, at
+  D ≥ 15 broad, 30 supercluster, 20 class, 50 subclass): set a 19 (PREP;
+  12-23 reweighted), SEA-AD 8, set c 6, ag7 39, VZG2 68; 0, 0, 5, 94 and
+  104 bins have no fit (`validated_thresholds_not_evaluable`).
+- **The H7 coverage proxy misses on P5011 MERSCOPE under version 6.** The
+  confident broad share of table cells after reweighting (validated
+  regime; it ignores the SEA-AD vote, the COP rule on real cells and the
+  floors, so the real H7 values will be lower) is, version 4 → 6: P7513
+  MERSCOPE .683 → .683 (H7 asks ≥ .62), P7113 MERSCOPE .739 → .739 (≥
+  .67), P1212 MERSCOPE .354 → .354 (≥ .34), P5011 MERSCOPE .297 → .298
+  (≥ .30: fails); Xenium P7513 .610 → .605, P7113 .662 → .656, P1212 .528
+  → .523, P5011 .546 → .557 (≥ .44 / .39 / .29 / .40). Version 5's pass
+  (P5011 MERSCOPE .380) came from its unrequested redraw of the gene
+  efficiency, not from the two changes.
+- **The H18 / H7 verdicts depend on the simulation draw** (version 6,
+  `m3b/final_followup/review3/FACTORIAL_ANALYSIS.txt`). A 3 × 3 grid on
+  set a crossed the per-cell seed (thinning, spill, partner) with the
+  efficiency seed (one realisation per cell, mapped at seed 0; the
+  additive model's residual holds the interaction and the mapping noise).
+  Across it P5011 MERSCOPE's H7 proxy spans .297-.431 (below .30 in 2 of 9
+  cells, both with the seed-0 efficiency), P1212 MERSCOPE .320-.444 (below
+  .34 in 1), the others stay ≥ .028 above target; the reweighted H18
+  failures number 12-26 and set a PREP's 2-8 (both floor sets). Changing
+  only the efficiency seed moves on average 6.3 of the 83 validated broad /
+  supercluster bins per dataset (1-14), only the per-cell seed 4.4 (0-9),
+  both 6.5; mapping the same simulated cells in another order (the
+  MapMyCells per-chunk bootstrap) 1.4 (0-2), and that alone moves P1212
+  MERSCOPE's proxy from .354 to .433 and adds 4 set a PREP failures. For
+  the H7 proxy and the H18 counts neither factor is significant in this
+  grid (F(2, 4) < 6.94, except P1212 Xenium's H7 proxy: efficiency, range
+  .007), and the residual is the largest component for most metrics; only
+  broad OPC at 15 clearly follows the efficiency draw (it fails on all
+  eight datasets with the seed-0 efficiency under every per-cell seed and
+  on 0-5 with seeds 1 and 2; F = 18.1, p = .01). How the gate should treat
+  this spread (the pre-registered seed-0 draw, several draws, or the worst
+  of them) is open for the user; no verdict is recorded as a pass meanwhile.
 - **Set c of families without a curated list** uses the label-free rule,
   which drops far more genes than E5's validated set c (44-73 per pair on the
   E5 pairs); treat such set-c results as provisional.
