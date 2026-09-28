@@ -822,6 +822,9 @@ class AnnotationFlagsConfig(_AnnotationModel):
         contamination_min_neg_counts: Negative counts a flagged cell needs.
         contamination_null_depth_quantile: Cells above this depth quantile of
             their class fit the null.
+        contamination_min_null_cells: Deep confident cells a (class,
+            platform) stratum needs to fit the null; with fewer the stratum
+            has no null and its flag is null (M3 prototype, 30).
         negative_gene_max_fraction: A gene is negative for a class when
             detected in fewer of its reference cells.
         flag_rate_uninformative_above: Contamination strata above this
@@ -831,6 +834,8 @@ class AnnotationFlagsConfig(_AnnotationModel):
         diffuse_rate_uninformative_above: Diffuse strata above this rate are
             uninformative.
         ood_robust_z: Robust z below which a cell is out of distribution.
+        ood_min_cells: Cells a class x platform x depth-bin stratum needs for
+            a robust z (fewer: ``ood_z`` null).
         microglial_spillover_enabled: ``None`` selects the species default
             (mouse on, human off; OD-C5).
         microglia_stat_min: Spill-over statistic threshold (E3 TAU).
@@ -848,12 +853,14 @@ class AnnotationFlagsConfig(_AnnotationModel):
     contamination_alpha: float = 0.01
     contamination_min_neg_counts: int = Field(default=3, ge=0)
     contamination_null_depth_quantile: float = 0.75
+    contamination_min_null_cells: int = Field(default=30, ge=1)
     negative_gene_max_fraction: float = 0.01
     flag_rate_uninformative_above: float = 0.15
     diffuse_quantile: float = 0.95
     diffuse_n_simulations: int = Field(default=200, ge=1)
     diffuse_rate_uninformative_above: float = 0.30
     ood_robust_z: float = Field(default=-3.0, lt=0.0)
+    ood_min_cells: int = Field(default=30, ge=2)
     microglial_spillover_enabled: bool | None = None
     microglia_stat_min: float = 10.0
     microglia_weight_min: float = 0.05
