@@ -175,14 +175,16 @@ def test_restricted_rule_measures_informative_present_genes_only(
 def _synthetic_table() -> pd.DataFrame:
     return pd.DataFrame(
         {
-            "tier": ["informative", "informative", "informative", "weak"],
-            "log2_factor": [5.0, -7.0, 0.5, -3.0],
-            "expected_counts": [5000.0, 5000.0, 999.0, 500.0],
-            "observed_counts": [9000, 10, 400, 3],
-            "top_class": ["A", "A", "A", "B"],
-            "top_class_section_share": [0.2, 0.004999, 0.3, 0.5],
+            "tier": ["informative", "informative", "informative", "weak", "weak"],
+            "log2_factor": [5.0, -7.0, 0.5, -3.0, -2.0],
+            "expected_counts": [5000.0, 5000.0, 999.0, 500.0, 5000.0],
+            "observed_counts": [9000, 10, 400, 3, 1200],
+            "top_class": ["A", "A", "A", "B", "B"],
+            "top_class_section_share": [0.2, 0.004999, 0.3, 0.5, 0.5],
         },
-        index=pd.Index(["G_cap", "G_rare_top", "G_low_expected", "G_weak"]),
+        index=pd.Index(
+            ["G_cap", "G_rare_top", "G_low_expected", "G_weak", "G_weak_deep"]
+        ),
     )
 
 
@@ -195,6 +197,7 @@ def test_restricted_rule_caps_at_three_log2_and_needs_both_minimums() -> None:
         "G_rare_top": "resampled",
         "G_low_expected": "resampled",
         "G_weak": "resampled",
+        "G_weak_deep": "resampled",
     }
     z = si.keyed_normal(3, si.STREAM_MEASURED_RESIDUAL, "G_cap")
     assert result.log2_raw[0] == pytest.approx(3.0 + 0.20 * z, abs=1e-12)

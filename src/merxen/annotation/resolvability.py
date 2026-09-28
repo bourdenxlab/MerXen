@@ -140,7 +140,16 @@ TEST_CELLS_OBS_FILE: Final = "test_cells.parquet"
 
 DECISION_RECIPE: Final = "R1_contam_HO"
 CLEAN_RECIPE: Final = "clean"
-RECIPE_VERSIONS: Final[dict[str, int]] = {DECISION_RECIPE: 1, CLEAN_RECIPE: 1}
+# Version-7 recipes (M3c, plan §8.3 v7.3-v7.4): the measured-efficiency member
+# and the cross-tissue human stress recipe; version 6 uses only the two above.
+R3_RECIPE: Final = "R3_measured_HO"
+LUNG_STRESS_RECIPE: Final = "R1_xtissue_lung_stress"
+RECIPE_VERSIONS: Final[dict[str, int]] = {
+    DECISION_RECIPE: 1,
+    CLEAN_RECIPE: 1,
+    R3_RECIPE: 1,
+    LUNG_STRESS_RECIPE: 1,
+}
 # Keyed simulation draws (version 5; ``draw_key``): the streams of one
 # simulated cell (its thinning, its spill partner and the spill's thinning).
 DRAW_KEY_BYTES: Final = 16
@@ -434,15 +443,27 @@ def depth_bin(counts: np.ndarray | Sequence[float], grid: Sequence[int]) -> np.n
 
 @dataclass(frozen=True)
 class SimulationRecipe:
-    """One simulation recipe of the self-map (§8.3 step 3).
+    """One simulation recipe of the self-map (§8.3 step 3; v7.3-v7.4).
 
     Attributes:
-        name: ``R1_contam_HO`` (decisions) or ``clean`` (upper bound).
+        name: ``R1_contam_HO`` (decisions) or ``clean`` (upper bound);
+            version 7 adds ``R3_measured_HO`` and ``R1_xtissue_lung_stress``.
         version: Recipe version.
         gene_efficiency_sigma: Sigma of the per-gene LogNormal(0, sigma)
             efficiency (median-normalised); ``None`` for none.
         spill_fraction: Foreign-class spill as a fraction of the depth.
         seed: Simulation seed.
+        efficiency_source: ``lognormal`` (versions 1-6 and the R1 members),
+            ``measured`` (R3: a ``member`` factor table) or
+            ``xtissue_stress`` (the R1 draw times a ``stress`` ratio table).
+        efficiency_table: The table's simulation-input asset id
+            (``merxen.annotation.sim_inputs``), for ``measured`` and
+            ``xtissue_stress``.
+        efficiency_table_sha256: That asset's sha256 (it enters a version-7
+            ``build_hash``; the recipe refuses another table).
+        table_rule: R3 table rule (``restricted``; ``all_measured`` for the
+            D3 regression only).
+        residual_sd_log2: R3 residual SD of measured genes (0.20 log2).
     """
 
     name: str
@@ -450,16 +471,42 @@ class SimulationRecipe:
     gene_efficiency_sigma: float | None
     spill_fraction: float
     seed: int
+    efficiency_source: str = "lognormal"
+    efficiency_table: str | None = None
+    efficiency_table_sha256: str | None = None
+    table_rule: str | None = None
+    residual_sd_log2: float | None = None
+
+    @property
+    def member(self) -> str:
+        """The ensemble member name, ``<name>@<seed>`` (e.g. ``R1_contam_HO@1``)."""
+        return f"{self.name}@{int(self.seed)}"
 
     def to_json(self) -> dict[str, Any]:
-        """Return the recipe as JSON-native values."""
-        return {
+        """Return the recipe as JSON-native values.
+
+        A ``lognormal`` recipe keeps the five keys of versions 1-6, so its
+        record (and every ``build_hash`` holding it) is unchanged; the
+        version-7 efficiency fields are added only for other sources.
+        """
+        record: dict[str, Any] = {
             "name": self.name,
             "version": self.version,
             "gene_efficiency_sigma": self.gene_efficiency_sigma,
             "spill_fraction": self.spill_fraction,
             "seed": self.seed,
         }
+        if self.efficiency_source != "lognormal":
+            record.update(
+                {
+                    "efficiency_source": self.efficiency_source,
+                    "efficiency_table": self.efficiency_table,
+                    "efficiency_table_sha256": self.efficiency_table_sha256,
+                    "table_rule": self.table_rule,
+                    "residual_sd_log2": self.residual_sd_log2,
+                }
+            )
+        return record
 
 
 def simulation_recipes(
@@ -4589,3 +4636,759 @@ def gate_p_class_set(
     total = int(counts.sum())
     share = float(counts[counts.index.isin(members)].sum()) / total if total else 0.0
     return members, share, share >= min_share - _TOLERANCE
+
+
+# --------------------------------------------------------------------------
+# Resolvability version 7: families, members and simulation (M3c; §8.3 v7)
+#
+# Version 7 is additive: nothing above changes, so version 6 stays
+# byte-identical for the families of ``validated_panels.csv`` (and the pins of
+# ``resolvability_v6_pins.csv``), whose decisions are pre-registered for gates
+# H and M (the M3c scope decision; pre-registration §14 (i)). Version 7 (every
+# other family) simulates each ensemble member with exact-total thinning, on
+# TOTAL counts: a grid value D is the simulated cell's total, host D / (1 + s)
+# plus spill s D / (1 + s), because real cells are binned by their totals.
+
+RESOLVABILITY_VERSION_V6: Final = 6
+RESOLVABILITY_VERSION_V7: Final = 7
+RESOLVABILITY_VERSIONS: Final[tuple[int, ...]] = (6, 7)
+V6_PINS_FILE: Final = "resolvability_v6_pins.csv"
+EFFICIENCY_SOURCES: Final[tuple[str, ...]] = ("lognormal", "measured", "xtissue_stress")
+# Exact-total thinning (v7.2): at most 30 fixed-point steps, stopping per row
+# at |ratio - 1| < 1e-6.
+THIN_MAX_ITER: Final = 30
+THIN_TOLERANCE: Final = 1e-6
+# Panels above 1,000 genes (v7.2): 13 values, neighbours <= 1.67x apart above
+# 100 counts, 3,000 reaching the real 5K q95 (3,330).
+V7_LARGE_PANEL_GRID: Final[tuple[int, ...]] = (
+    10,
+    20,
+    50,
+    100,
+    150,
+    250,
+    350,
+    500,
+    700,
+    1000,
+    1400,
+    2000,
+    3000,
+)
+V7_LARGE_PANEL_GENES: Final = 1000
+# Ensemble members (v7.3; fixed by pre-registration §14.3, only tightenable).
+V7_R1_SEEDS: Final[tuple[int, ...]] = (0, 1, 2)
+V7_R3_SEED: Final = 0
+V7_STRESS_SEED: Final = 0
+MemberRole = Literal["emission", "reported", "stress"]
+MEMBER_ROLES: Final[tuple[str, ...]] = ("emission", "reported", "stress")
+
+
+def load_v6_pins(path: Path | str | None = None) -> pd.DataFrame:
+    """Return the families pinned to resolvability version 6 (OD-E20).
+
+    Args:
+        path: The pins CSV (default: the packaged
+            ``assets/annotation/resolvability_v6_pins.csv``).
+
+    Returns:
+        ``family_id, panel_hash, species, reason, date`` rows.
+
+    Raises:
+        ResolvabilityError: If a column is missing or a row lacks a reason.
+    """
+    from merxen.annotation.vocab import ASSET_DIR
+
+    location = Path(path) if path is not None else ASSET_DIR / V6_PINS_FILE
+    table = pd.read_csv(location, dtype=str, keep_default_na=False)
+    required = ("family_id", "panel_hash", "species", "reason", "date")
+    missing = [column for column in required if column not in table.columns]
+    if missing:
+        raise ResolvabilityError(f"{location.name}: columns {missing} are missing")
+    if (table["reason"].str.strip() == "").any():
+        raise ResolvabilityError(f"{location.name}: every pin needs its reason")
+    return table
+
+
+def v6_family_ids(
+    validated: Any | None = None, pins: pd.DataFrame | None = None
+) -> set[str]:
+    """Return the families that keep resolvability version 6 (v7.1).
+
+    The real-data families of ``validated_panels.csv`` (the families whose
+    decisions are pre-registered for gates H and M: human_set_a with its set
+    c, mouse_ag7, mouse_vzg2) and the families of ``resolvability_v6_pins
+    .csv``. A family validated later by simulation (gate P, M13) was
+    validated on version 7 and stays there.
+
+    Args:
+        validated: A ``diagnostics.ValidatedPanelTable`` (default: the
+            packaged tables).
+        pins: ``load_v6_pins`` output (default: the packaged pins).
+
+    Returns:
+        Family ids.
+    """
+    from merxen.annotation.diagnostics import load_validated_panels
+
+    table = validated if validated is not None else load_validated_panels()
+    families = {
+        str(record.family_id)
+        for record in table.records
+        if str(getattr(record, "validation_basis", "real_data")) == "real_data"
+    }
+    pinned = pins if pins is not None else load_v6_pins()
+    return families | {str(value) for value in pinned["family_id"]}
+
+
+def resolvability_version_for(
+    family_id: str | None,
+    panel_hash: str | None = None,
+    *,
+    validated: Any | None = None,
+    pins: pd.DataFrame | None = None,
+) -> int:
+    """Return the resolvability version of a panel family (plan §8.3 v7.1).
+
+    Args:
+        family_id: The panel's family after trust inheritance
+            (``AnnotationPanel.panel_family.family_id``); a listed or
+            inherited panel carries its validated family's id.
+        panel_hash: The panel hash (a pin may name it).
+        validated: A ``ValidatedPanelTable`` (default: packaged).
+        pins: ``load_v6_pins`` output (default: packaged).
+
+    Returns:
+        6 for the real-data families of ``validated_panels.csv`` and the
+        pinned families (or pinned panel hashes), else 7.
+    """
+    pinned = pins if pins is not None else load_v6_pins()
+    if family_id is not None and family_id in v6_family_ids(validated, pinned):
+        return RESOLVABILITY_VERSION_V6
+    if panel_hash is not None and panel_hash in set(pinned["panel_hash"]):
+        return RESOLVABILITY_VERSION_V6
+    return RESOLVABILITY_VERSION_V7
+
+
+def v7_depth_grid(
+    species: str, n_panel_genes: int | None, explicit: Sequence[int] | None = None
+) -> list[int]:
+    """Return a version-7 family's depth grid (v7.2).
+
+    Args:
+        species: ``human`` or ``mouse``.
+        n_panel_genes: Declared panel size.
+        explicit: An explicit grid (``AnnotationReferenceSpec.depth_grid``).
+
+    Returns:
+        The explicit grid; above 1,000 genes the 13-value grid; otherwise
+        the version-6 grid of the species and size.
+    """
+    from merxen.annotation.config import default_depth_grid
+
+    if explicit is not None:
+        return [int(value) for value in explicit]
+    if n_panel_genes is not None and n_panel_genes > V7_LARGE_PANEL_GENES:
+        return list(V7_LARGE_PANEL_GRID)
+    return default_depth_grid(species, n_panel_genes)  # type: ignore[arg-type]
+
+
+@dataclass(frozen=True)
+class EnsembleMember:
+    """One member of a version-7 draw ensemble (v7.3): a recipe and a seed.
+
+    Attributes:
+        recipe: The simulation recipe (its ``seed`` is the member seed).
+        role: ``emission`` (decides emission), ``reported`` (``clean``: the
+            upper bound) or ``stress`` (reported only; gate P's NP6).
+    """
+
+    recipe: SimulationRecipe
+    role: MemberRole
+
+    @property
+    def name(self) -> str:
+        """``<recipe>@<seed>``."""
+        return self.recipe.member
+
+    def to_json(self) -> dict[str, Any]:
+        """Return the member as JSON-native values (hashed for version 7)."""
+        return {"member": self.name, "role": self.role, "recipe": self.recipe.to_json()}
+
+
+def member_recipe(
+    name: str,
+    seed: int,
+    config: AnnotationResolvabilityConfig,
+    *,
+    table: Any | None = None,
+    table_rule: str = "restricted",
+    residual_sd_log2: float | None = None,
+) -> SimulationRecipe:
+    """Return the recipe of one version-7 member.
+
+    Args:
+        name: ``R1_contam_HO``, ``clean``, ``R3_measured_HO`` or
+            ``R1_xtissue_lung_stress``.
+        seed: The member seed (efficiency and per-cell keys).
+        config: Resolvability settings (sigma, spill fraction).
+        table: The ``sim_inputs.SimInputAsset`` of an R3 (``member``) or
+            stress (``stress``) recipe.
+        table_rule: R3 table rule.
+        residual_sd_log2: R3 residual SD (default 0.20 log2).
+
+    Returns:
+        The recipe.
+
+    Raises:
+        ResolvabilityError: For an unknown recipe or a missing table.
+    """
+    from merxen.annotation import sim_inputs as si
+
+    if name not in RECIPE_VERSIONS:
+        raise ResolvabilityError(f"unknown simulation recipe {name!r}")
+    version = RECIPE_VERSIONS[name]
+    if name == CLEAN_RECIPE:
+        return SimulationRecipe(CLEAN_RECIPE, version, None, 0.0, int(seed))
+    if name == DECISION_RECIPE:
+        return SimulationRecipe(
+            DECISION_RECIPE,
+            version,
+            config.gene_efficiency_sigma,
+            config.spill_fraction,
+            int(seed),
+        )
+    if table is None:
+        raise ResolvabilityError(f"recipe {name} needs its simulation-input table")
+    if name == R3_RECIPE:
+        if table.role != "member":
+            raise ResolvabilityError(f"{name} needs a member table, not {table.role}")
+        if table_rule not in si.TABLE_RULES:
+            raise ResolvabilityError(f"unknown R3 table rule {table_rule!r}")
+        return SimulationRecipe(
+            R3_RECIPE,
+            version,
+            None,
+            config.spill_fraction,
+            int(seed),
+            efficiency_source="measured",
+            efficiency_table=table.asset_id,
+            efficiency_table_sha256=table.sha256,
+            table_rule=table_rule,
+            residual_sd_log2=si.R3_RESIDUAL_SD_LOG2
+            if residual_sd_log2 is None
+            else float(residual_sd_log2),
+        )
+    if table.role != "stress":
+        raise ResolvabilityError(f"{name} needs a stress table, not {table.role}")
+    return SimulationRecipe(
+        LUNG_STRESS_RECIPE,
+        version,
+        config.gene_efficiency_sigma,
+        config.spill_fraction,
+        int(seed),
+        efficiency_source="xtissue_stress",
+        efficiency_table=table.asset_id,
+        efficiency_table_sha256=table.sha256,
+    )
+
+
+def ensemble_members(
+    config: AnnotationResolvabilityConfig,
+    *,
+    species: str,
+    chemistry: str,
+    member_table: Any | None = None,
+    stress_table: Any | None = None,
+    r1_seeds: Sequence[int] = V7_R1_SEEDS,
+    r3_seed: int = V7_R3_SEED,
+    table_rule: str = "restricted",
+) -> list[EnsembleMember]:
+    """Return a version-7 family's members (plan §8.3 v7.3 table).
+
+    Emission: ``R1_contam_HO@0``, ``@1``, ``@2`` plus ``R3_measured_HO@0``
+    when the family's species x chemistry has a measured ``member`` table
+    (Xenium Prime 5K mouse); reported: ``clean@0``; stress (human Prime
+    families with the lung ratio table): ``R1_xtissue_lung_stress@0``. R3 is
+    one member, never the base (user decision 3); ``R1@0`` is the
+    pre-registered realisation. The version-6 families' diagnostic uses the
+    same rule (no table: R1 x 3).
+
+    Args:
+        config: Resolvability settings.
+        species: The family's species.
+        chemistry: ``sim_inputs.resolve_chemistry`` result.
+        member_table: The family's ``member`` asset (``None``: no R3).
+        stress_table: The human lung ``stress`` asset (``None``: no stress).
+        r1_seeds: R1 member seeds.
+        r3_seed: R3 member seed.
+        table_rule: R3 table rule.
+
+    Returns:
+        Members: emission first (R1 seeds, then R3), then reported, then
+        stress.
+    """
+    members = [
+        EnsembleMember(member_recipe(DECISION_RECIPE, seed, config), "emission")
+        for seed in r1_seeds
+    ]
+    if member_table is not None:
+        if member_table.species != species:
+            raise ResolvabilityError(
+                f"{member_table.asset_id} is a {member_table.species} table; "
+                f"factors never cross species ({species})"
+            )
+        members.append(
+            EnsembleMember(
+                member_recipe(
+                    R3_RECIPE,
+                    r3_seed,
+                    config,
+                    table=member_table,
+                    table_rule=table_rule,
+                ),
+                "emission",
+            )
+        )
+    members.append(EnsembleMember(member_recipe(CLEAN_RECIPE, 0, config), "reported"))
+    if (
+        stress_table is not None
+        and species == "human"
+        and chemistry == "xenium_prime"
+        and stress_table.species == "human"
+    ):
+        members.append(
+            EnsembleMember(
+                member_recipe(
+                    LUNG_STRESS_RECIPE, V7_STRESS_SEED, config, table=stress_table
+                ),
+                "stress",
+            )
+        )
+    return members
+
+
+def member_efficiency(
+    recipe: SimulationRecipe,
+    genes: Sequence[str],
+    *,
+    registry: Mapping[str, Any] | None = None,
+) -> np.ndarray:
+    """Return a member's per-gene efficiency on a panel (test-cell columns).
+
+    ``lognormal``: ``gene_efficiency`` (the pre-registered draw of the seed);
+    ``measured``: ``sim_inputs.r3_efficiency`` on the recipe's table and
+    rule; ``xtissue_stress``: the lognormal draw of the seed times the lung
+    ratio (``sim_inputs.xtissue_stress_efficiency``).
+
+    Raises:
+        ResolvabilityError: For an unknown source, or a table whose sha256
+            differs from the recipe's.
+    """
+    from merxen.annotation import sim_inputs as si
+
+    names = [str(gene) for gene in genes]
+    if recipe.efficiency_source == "lognormal":
+        return gene_efficiency(len(names), recipe.gene_efficiency_sigma, recipe.seed)
+    if recipe.efficiency_source not in EFFICIENCY_SOURCES:
+        raise ResolvabilityError(
+            f"unknown efficiency source {recipe.efficiency_source!r}"
+        )
+    asset = si.get_asset(str(recipe.efficiency_table), registry)
+    if recipe.efficiency_table_sha256 not in (None, asset.sha256):
+        raise ResolvabilityError(
+            f"{recipe.member}: table {asset.asset_id} has sha256 {asset.sha256[:16]}, "
+            f"the recipe was built on {str(recipe.efficiency_table_sha256)[:16]}"
+        )
+    if recipe.efficiency_source == "measured":
+        result = si.r3_efficiency(
+            names,
+            si.efficiency_table(asset),
+            rule=str(recipe.table_rule or "restricted"),
+            seed=int(recipe.seed),
+            asset_id=asset.asset_id,
+            residual_sd_log2=float(
+                si.R3_RESIDUAL_SD_LOG2
+                if recipe.residual_sd_log2 is None
+                else recipe.residual_sd_log2
+            ),
+        )
+        return result.efficiency
+    base = gene_efficiency(len(names), recipe.gene_efficiency_sigma, recipe.seed)
+    efficiency, _measured = si.xtissue_stress_efficiency(
+        names, base, si.ratio_table(asset), seed=int(recipe.seed)
+    )
+    return efficiency
+
+
+def _exact_probabilities(
+    work: sparse.csr_matrix,
+    targets: np.ndarray | Sequence[float],
+    efficiency: np.ndarray,
+    *,
+    max_iter: int,
+    tolerance: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return each entry's row and keep probability ``min(1, s_row e_g)``.
+
+    The row scale ``s`` solves ``sum_g x_g min(1, s e_g) = min(target,
+    native)`` by fixed-point iteration (``s <- s * goal / expected``), each
+    row stopping once ``|ratio - 1| < tolerance`` or after ``max_iter``
+    steps; a row whose target reaches its native counts keeps every count.
+    """
+    n_rows = work.shape[0]
+    rows = np.repeat(np.arange(n_rows), np.diff(work.indptr))
+    counts = work.data
+    gene_eff = np.asarray(efficiency, dtype=np.float64)[work.indices]
+    native = np.bincount(rows, weights=counts, minlength=n_rows)
+    goal = np.minimum(np.asarray(targets, dtype=np.float64), native)
+    weighted = np.bincount(rows, weights=counts * gene_eff, minlength=n_rows)
+    scale = goal / np.maximum(weighted, 1e-12)
+    keep_all = goal >= native
+    active = ~keep_all & (goal > 0)
+    for _ in range(int(max_iter)):
+        if not active.any():
+            break
+        expected = np.bincount(
+            rows,
+            weights=counts * np.minimum(1.0, scale[rows] * gene_eff),
+            minlength=n_rows,
+        )
+        ratio = np.where(expected > 0, goal / np.maximum(expected, 1e-12), 1.0)
+        active &= ~(np.abs(ratio - 1.0) < tolerance)
+        scale = np.where(active, scale * ratio, scale)
+    # The fixed point contracts by the clipped share of the goal per step, so a
+    # row whose efficient genes carry most of its target may not converge in
+    # max_iter steps; solve its piecewise-linear equation exactly instead.
+    for row in np.flatnonzero(active):
+        start, stop = int(work.indptr[row]), int(work.indptr[row + 1])
+        scale[row] = _exact_row_scale(
+            counts[start:stop], gene_eff[start:stop], float(goal[row])
+        )
+    probability = np.clip(scale[rows] * gene_eff, 0.0, 1.0)
+    probability[keep_all[rows]] = 1.0
+    return rows, probability
+
+
+def _exact_row_scale(counts: np.ndarray, efficiency: np.ndarray, goal: float) -> float:
+    """Return ``s`` with ``sum_g x_g min(1, s e_g) = goal`` (0 < goal < sum x).
+
+    ``E(s)`` is piecewise linear and increasing: at ``s``, the genes with
+    ``s e_g >= 1`` keep every count. The breakpoints ``1 / e_g`` are sorted,
+    ``E`` is evaluated at each and the root is interpolated on its segment.
+    """
+    breakpoints = 1.0 / efficiency
+    order = np.argsort(breakpoints, kind="stable")
+    x = counts[order]
+    e = efficiency[order]
+    b = breakpoints[order]
+    total_weight = float(np.sum(x * e))
+    clipped = np.cumsum(x)
+    unclipped_weight = total_weight - np.cumsum(x * e)
+    at_breakpoint = clipped + b * np.maximum(unclipped_weight, 0.0)
+    k = int(np.searchsorted(at_breakpoint, goal, side="left"))
+    if k >= len(x):
+        return float(b[-1])
+    fixed = float(clipped[k - 1]) if k > 0 else 0.0
+    weight = total_weight - (float(np.sum(x[:k] * e[:k])) if k > 0 else 0.0)
+    return (goal - fixed) / max(weight, 1e-300)
+
+
+def _exact_work(matrix: sparse.csr_matrix) -> sparse.csr_matrix:
+    from scipy import sparse as sp
+
+    work = sp.csr_matrix(matrix, dtype=np.float64, copy=True)
+    work.sum_duplicates()
+    work.eliminate_zeros()
+    return work
+
+
+def thin_rows_exact(
+    matrix: sparse.csr_matrix,
+    targets: np.ndarray | Sequence[float],
+    efficiency: np.ndarray,
+    keys: Sequence[int],
+    *,
+    max_iter: int = THIN_MAX_ITER,
+    tolerance: float = THIN_TOLERANCE,
+) -> sparse.csr_matrix:
+    """Thin each row binomially to an exact expected total (v7.2).
+
+    The row scale ``s`` solves ``sum_g x_g min(1, s e_g) = min(target,
+    native)`` by fixed-point iteration (``s <- s * goal / expected``, at most
+    ``max_iter`` steps, each row stopping once ``|ratio - 1| < tolerance``);
+    then ``Binomial(x_g, min(1, s e_g))`` from the row's own generator seeded
+    by its key, over its entries in gene order. Version 6's ``_thin_rows``
+    uses the unclipped scale and falls 3-8% short once efficient genes clip
+    at ``p = 1`` (``5k_real/sim/REPORT.txt`` §1). A row whose target reaches
+    its native counts keeps every count. A row's result depends on nothing
+    but the row, its target and its key; counts are never raised.
+
+    Args:
+        matrix: Rows x genes counts.
+        targets: Expected total per row.
+        efficiency: Per-gene efficiency (the matrix's columns).
+        keys: One ``draw_key`` per row.
+        max_iter: Fixed-point steps.
+        tolerance: Relative stopping tolerance.
+
+    Returns:
+        The thinned counts (CSR, float64).
+
+    Raises:
+        ResolvabilityError: If the keys do not match the rows.
+    """
+    from scipy import sparse as sp
+
+    work = _exact_work(matrix)
+    if len(keys) != work.shape[0]:
+        raise ResolvabilityError(
+            f"thinning: {len(keys)} draw keys for {work.shape[0]} rows"
+        )
+    _rows, probability = _exact_probabilities(
+        work, targets, efficiency, max_iter=max_iter, tolerance=tolerance
+    )
+    counts = work.data.astype(np.int64)
+    thinned = np.zeros(len(counts), dtype=np.int64)
+    indptr = work.indptr
+    for row, key in enumerate(keys):
+        start, stop = int(indptr[row]), int(indptr[row + 1])
+        if stop > start:
+            thinned[start:stop] = np.random.default_rng(int(key)).binomial(
+                counts[start:stop], probability[start:stop]
+            )
+    result = sp.csr_matrix(
+        (thinned.astype(np.float64), work.indices.copy(), work.indptr.copy()),
+        shape=work.shape,
+    )
+    result.eliminate_zeros()
+    return result
+
+
+def expected_thinned_totals(
+    matrix: sparse.csr_matrix,
+    targets: np.ndarray | Sequence[float],
+    efficiency: np.ndarray,
+    *,
+    max_iter: int = THIN_MAX_ITER,
+    tolerance: float = THIN_TOLERANCE,
+) -> np.ndarray:
+    """Return the expected totals ``thin_rows_exact`` draws (no sampling).
+
+    Args:
+        matrix: Rows x genes counts.
+        targets: Expected total per row.
+        efficiency: Per-gene efficiency.
+        max_iter: Fixed-point steps.
+        tolerance: Relative stopping tolerance.
+
+    Returns:
+        ``sum_g x_g p_g`` per row.
+    """
+    work = _exact_work(matrix)
+    rows, probability = _exact_probabilities(
+        work, targets, efficiency, max_iter=max_iter, tolerance=tolerance
+    )
+    return np.bincount(rows, weights=work.data * probability, minlength=work.shape[0])
+
+
+def host_target(depth: float, spill_fraction: float) -> float:
+    """Return the host share of a version-7 grid total: ``D / (1 + s)``."""
+    return float(depth) / (1.0 + float(spill_fraction))
+
+
+def thin_and_contaminate_v7(
+    test: HeldOutCells,
+    depths: Sequence[int],
+    recipe: SimulationRecipe,
+    *,
+    efficiency: np.ndarray | None = None,
+    registry: Mapping[str, Any] | None = None,
+) -> SimulatedQuery:
+    """Simulate test cells on a version-7 grid of TOTAL counts (v7.2).
+
+    For grid value ``D`` and spill fraction ``s``: the host target is ``h =
+    D / (1 + s)`` and the spill ``s h`` (``s = 0.25``: 0.8 D + 0.2 D); hosts
+    are the test cells whose native counts reach ``h`` (``clean``: ``D``);
+    the spill partner is the rendezvous choice among the cells of another
+    spill group whose native counts reach ``s h`` (version 5's keys: the
+    recipe's seed, name and version, the host cell id and ``D``); host and
+    spill are thinned with ``thin_rows_exact``. A simulated cell's bin is
+    ``D``; its realised total is recorded (``total_counts``). Version 6's
+    ``thin_and_contaminate`` is unchanged.
+
+    Args:
+        test: Test cells (unique cell ids).
+        depths: The version-7 grid.
+        recipe: The member's recipe.
+        efficiency: Per-gene efficiency (default: ``member_efficiency``).
+        registry: Simulation-input registry for table recipes.
+
+    Returns:
+        The simulated query (obs adds ``host_target`` and ``member``).
+
+    Raises:
+        ResolvabilityError: If the cell ids are not unique, or a spill recipe
+            has cells of a single group.
+    """
+    from scipy import sparse as sp
+
+    if not test.obs.index.is_unique:
+        raise ResolvabilityError(
+            "test cell ids must be unique (they key the simulation draws)"
+        )
+    gene_eff = (
+        member_efficiency(recipe, test.genes, registry=registry)
+        if efficiency is None
+        else np.asarray(efficiency, dtype=np.float64)
+    )
+    if len(gene_eff) != len(test.genes):
+        raise ResolvabilityError(
+            f"{recipe.member}: {len(gene_eff)} efficiencies for {len(test.genes)} genes"
+        )
+    native = test.native_counts
+    groups = test.obs[SPILL_GROUP_COLUMN].astype(str).to_numpy()
+    cell_ids = test.obs.index.astype(str).to_numpy()
+    counts = sp.csr_matrix(test.counts)
+    candidate_keys = np.array(
+        [_key64(draw_key(DRAW_STREAM_CANDIDATE, cell_id)) for cell_id in cell_ids],
+        dtype=np.uint64,
+    )
+    spill_fraction = float(recipe.spill_fraction)
+    blocks: list[sp.csr_matrix] = []
+    frames: list[pd.DataFrame] = []
+    n_by_depth: dict[int, int] = {}
+    for depth in sorted(int(value) for value in depths):
+        target = host_target(depth, spill_fraction)
+        hosts = np.flatnonzero(native >= target)
+        n_by_depth[depth] = int(len(hosts))
+        if len(hosts) == 0:
+            continue
+        host_ids = [str(cell_id) for cell_id in cell_ids[hosts]]
+        host_counts = thin_rows_exact(
+            counts[hosts],
+            np.full(len(hosts), target),
+            gene_eff,
+            [
+                cell_draw_key(recipe, cell_id, depth, DRAW_STREAM_THIN)
+                for cell_id in host_ids
+            ],
+        )
+        partner_ids = np.full(len(hosts), "", dtype=object)
+        spill = sp.csr_matrix(host_counts.shape, dtype=np.float64)
+        if spill_fraction > 0:
+            amount = spill_fraction * target
+            donors = np.flatnonzero(native >= amount)
+            partners = np.empty(len(hosts), dtype=np.int64)
+            host_keys = np.array(
+                [
+                    _key64(cell_draw_key(recipe, cell_id, depth, DRAW_STREAM_PARTNER))
+                    for cell_id in host_ids
+                ],
+                dtype=np.uint64,
+            )
+            for group in np.unique(groups[hosts]):
+                is_host = groups[hosts] == group
+                candidates = donors[groups[donors] != group]
+                if len(candidates) == 0:
+                    raise ResolvabilityError(
+                        f"no spill donor outside group {group!r} at depth {depth}"
+                    )
+                partners[is_host] = candidates[
+                    rendezvous_choice(host_keys[is_host], candidate_keys[candidates])
+                ]
+            spill = thin_rows_exact(
+                counts[partners],
+                np.full(len(hosts), amount),
+                gene_eff,
+                [
+                    cell_draw_key(recipe, cell_id, depth, DRAW_STREAM_SPILL)
+                    for cell_id in host_ids
+                ],
+            )
+            partner_ids = cell_ids[partners].astype(object)
+        simulated = (host_counts + spill).tocsr()
+        blocks.append(simulated)
+        frames.append(
+            pd.DataFrame(
+                {
+                    "cell_id": cell_ids[hosts],
+                    "depth": np.full(len(hosts), depth, dtype=np.int32),
+                    "partner_id": partner_ids,
+                    "host_counts": np.asarray(host_counts.sum(axis=1)).ravel(),
+                    "spill_counts": np.asarray(spill.sum(axis=1)).ravel(),
+                    "total_counts": np.asarray(simulated.sum(axis=1)).ravel(),
+                    "host_target": np.full(len(hosts), target),
+                    "member": recipe.member,
+                },
+                index=[simulated_id(cell_id, depth) for cell_id in cell_ids[hosts]],
+            )
+        )
+    columns = [
+        "cell_id",
+        "depth",
+        "partner_id",
+        "host_counts",
+        "spill_counts",
+        "total_counts",
+        "host_target",
+        "member",
+    ]
+    if blocks:
+        matrix = sp.vstack(blocks).tocsr()
+        obs = pd.concat(frames)
+    else:
+        matrix = sp.csr_matrix((0, len(test.genes)), dtype=np.float64)
+        obs = pd.DataFrame(columns=columns)
+    return SimulatedQuery(
+        recipe=recipe,
+        counts=matrix,
+        genes=list(test.genes),
+        obs=obs,
+        n_by_depth=n_by_depth,
+    )
+
+
+def v7_simulation_payload(
+    *,
+    members: Sequence[EnsembleMember],
+    assets: Iterable[Any],
+    chemistry: Mapping[str, Any] | str,
+    depth_grid: Sequence[int],
+    top_up: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return what a version-7 self-map's ``build_hash`` holds (v7.1).
+
+    Every version-7 input: the version, the members (recipes with their
+    table sha256), every simulation-input asset used (id, version, sha256),
+    the chemistry, the grid, the top-up rule and the simulation
+    conventions. A version-6 bundle's payload never holds it, so version-6
+    ``build_hash`` values are unchanged (pre-registration §14 (i)).
+
+    Args:
+        members: The ensemble members.
+        assets: The ``SimInputAsset`` objects used (tables, profile, lists).
+        chemistry: ``ChemistryResolution.to_json()`` or the chemistry name.
+        depth_grid: The version-7 grid.
+        top_up: The test-set top-up rule (v7.6), when it applies.
+
+    Returns:
+        JSON-native payload.
+    """
+    from merxen.annotation import sim_inputs as si
+
+    return {
+        "resolvability_version": RESOLVABILITY_VERSION_V7,
+        "members": [member.to_json() for member in members],
+        "assets": si.asset_hashes(assets),
+        "chemistry": dict(chemistry) if isinstance(chemistry, Mapping) else chemistry,
+        "depth_grid": [int(value) for value in depth_grid],
+        "top_up": None if top_up is None else dict(top_up),
+        "conventions": {
+            "thinning": "exact_total",
+            "thin_max_iter": THIN_MAX_ITER,
+            "thin_tolerance": THIN_TOLERANCE,
+            "grid_values": "total_counts",
+            "host_target": "D / (1 + spill_fraction)",
+        },
+    }

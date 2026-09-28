@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "a712532a2708305f3f569d9f441ec570e961a4437898610cfcd14eb53a48caea",
+    3: "948ef2dca283c7b33e9234f643771c738803f8d7d6896ae4860fb56aa70ffa3e",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -116,6 +116,12 @@ PIN_HISTORY = (
     "build_hash through the resolvability builder params, so those bundles "
     "get new hashes without a builder bump; the test-set bundles are "
     "unchanged",
+    "3: resolvability version 7 simulation added (M3c stage B: exact-total "
+    "thinning, the totals grid, ensemble members, the R3 and lung-stress "
+    "efficiencies from sim_inputs.py (pinned from here on), version "
+    "selection); additive: no builder calls it yet, the version-6 path and "
+    "every version-6 build_hash are byte-identical "
+    "(test_resolvability_v6_golden), so no bundle changes",
 )
 
 
@@ -146,12 +152,16 @@ def builder_code_fingerprint() -> str:
     secondary bundles (M3b), so it is covered too; a change there that
     alters those tables also bumps ``RESOLVABILITY_VERSION`` (hashed).
     ``prefilter.py`` chooses the marker candidates of large panels (M3b
-    stage D); its version and settings are hashed.
+    stage D); its version and settings are hashed. ``sim_inputs.py`` (M3c)
+    turns the simulation-input assets into version-7 member efficiencies and
+    depth profiles; the assets' sha256 enter a version-7 ``build_hash``, the
+    code is covered here.
     """
     parts = [
         _dump(ast.parse((SRC / "reference.py").read_text())),
         _dump(ast.parse((SRC / "resolvability.py").read_text())),
         _dump(ast.parse((SRC / "prefilter.py").read_text())),
+        _dump(ast.parse((SRC / "sim_inputs.py").read_text())),
     ]
     store_tree = ast.parse((SRC / "store.py").read_text())
     by_name = {
