@@ -2034,6 +2034,20 @@ def test_small_panel_reference_markers_are_deleted_once_query_markers_exist(
 
     fake.query_markers = query_markers  # type: ignore[method-assign]
     fake.install(monkeypatch)
+    original_find = reference.find_panel_markers
+    right_after: dict[str, Any] = {}
+
+    def find_panel_markers(*args: Any, **kwargs: Any) -> Any:
+        markers = original_find(*args, **kwargs)
+        # Checked as find_panel_markers returns, before the long self-map
+        # and before the store removes the build's scratch directory.
+        paths = [Path(path) for path in seen["paths"]]
+        right_after["gone"] = [not path.exists() for path in paths]
+        right_after["scratch_exists"] = all(path.parent.is_dir() for path in paths)
+        right_after["kept"] = [item.get("kept") for item in markers.reference_markers]
+        return markers
+
+    monkeypatch.setattr(reference, "find_panel_markers", find_panel_markers)
     spec = prepare_reference_spec(
         whb_spec(
             region_precompute=sources["region_dir"],
@@ -2051,6 +2065,9 @@ def test_small_panel_reference_markers_are_deleted_once_query_markers_exist(
     ]
     # ... and are gone right after (<= 1,000 genes), their sha256 recorded.
     assert seen["during_query"] is True
+    assert right_after["gone"] and all(right_after["gone"])
+    assert right_after["scratch_exists"] is True
+    assert right_after["kept"] == [False] * len(right_after["gone"])
     assert not any(Path(path).exists() for path in seen["paths"])
     record = output["markers"]["reference_markers"][0]
     assert record["kept"] is False and len(record["sha256"]) == 64

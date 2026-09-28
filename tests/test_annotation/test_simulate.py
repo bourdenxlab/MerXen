@@ -387,3 +387,206 @@ def test_judged_levels_leave_out_report_only_fine_levels() -> None:
         frame, fine_levels={"supertype"}, allow_fine_levels=True
     ) == ["class", "subclass", "supertype"]
     assert simulate.fine_levels_of(Path("/nonexistent")) == set()
+
+
+# --------------------------------------------------------------------------
+# The self-map branch and the prefilter comparison (M3b review 2)
+
+
+@pytest.fixture
+def small_resources() -> Any:
+    """PREP resources of 2 processes and 3 GB (as test_reference's fixture)."""
+    from merxen.annotation import reference
+
+    previous = reference._PREP_RESOURCES
+    reference.set_prep_resources(n_processors=2, max_gb=3)
+    yield
+    reference._PREP_RESOURCES = previous
+
+
+def _large_whb_simulation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[AnnotationConfig, ReferenceStore, AnnotationReferenceSpec, Path, list[str]]:
+    """A WHB primary with a self-map on a synthetic large panel (> 5 genes).
+
+    Returns the config, the store, the unprepared spec, the gene list and
+    the tags the unfiltered (prefilter comparison) mapper was called with.
+    """
+    from merxen.annotation import reference
+
+    from .test_reference import (
+        GENES,
+        MARKER_OF_SUPC,
+        install_self_map,
+        marker_mapper,
+        whb_resolvability_setup,
+        whb_spec,
+    )
+
+    sources, ho, _ = whb_resolvability_setup(tmp_path, monkeypatch)
+    markers = {node: GENES[index] for node, index in MARKER_OF_SUPC.items()}
+    install_self_map(monkeypatch, markers)
+    mapper = marker_mapper(markers)
+    unfiltered_calls: list[str] = []
+
+    def unfiltered_map_function(engine: Any, *, runs: list[Any], **_: Any) -> Any:
+        def map_query(query: Any, tag: str, seed: int) -> pd.DataFrame:
+            unfiltered_calls.append(tag)
+            runs.append({"tag": tag, "engine": engine.reference_id, "wall_s": 0.0})
+            return mapper(engine, query)
+
+        return map_query
+
+    # compare_prefilter maps with reference.mmc_map_function (MapMyCells).
+    monkeypatch.setattr(reference, "mmc_map_function", unfiltered_map_function)
+    config = AnnotationConfig(
+        species="human",
+        resolvability={"min_cells_per_bin": 5, "min_confident_n": 5},
+        panel={
+            "large_panel_genes": 5,
+            "large_panel_prefilter_cap": 6,
+            "large_panel_marker_prefilter": "per_parent_topk_union",
+            "min_mapped_genes": 5,
+        },
+    )
+    spec = whb_spec(
+        region_precompute=sources["region_dir"],
+        seaad_precomputed_stats=sources["seaad"],
+        whb_h5ad_dir=ho["h5ad_dir"],
+        whb_metadata_dir=ho["metadata"],
+        whb_region_cell_metadata=ho["region_dir"] / reference.REGION_CELL_METADATA_FILE,
+    )
+    (tmp_path / "scratch").mkdir()
+    store = ReferenceStore(
+        tmp_path / "ssd",
+        large_root=tmp_path / "large",
+        large_panel_genes=5,
+        scratch_root=tmp_path / "scratch",
+    )
+    gene_list = tmp_path / "genes.csv"
+    gene_list.write_text(
+        "gene_symbol,gene_id\n"
+        + "\n".join(f"G{index},{gene}" for index, gene in enumerate(GENES))
+        + "\n"
+    )
+    return config, store, spec, gene_list, unfiltered_calls
+
+
+def test_simulation_predicts_levels_and_compares_the_prefilter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    from merxen.annotation.reference import builder_for, prepare_reference_spec
+
+    config, store, spec, gene_list, unfiltered_calls = _large_whb_simulation(
+        tmp_path, monkeypatch
+    )
+    build = ReferenceBuild(
+        spec=prepare_reference_spec(spec), builder=builder_for(spec, config)
+    )
+    depth_profile = tmp_path / "depths.csv"
+    depth_profile.write_text("total_counts\n" + "\n".join(["40"] * 8 + ["300"] * 2))
+    report = run_panel_simulation(
+        gene_list=gene_list,
+        species="human",
+        name="large_whb",
+        config=config,
+        store=store,
+        builds=lambda panel: [build],
+        out_dir=tmp_path / "out",
+        scratch_dir=tmp_path / "sim_scratch",
+        platform="XENIUM",
+        expected_depth=40,
+        depth_profile=depth_profile,
+    )
+    assert report["status"] == "done", report["panel"]
+    assert report["panel"]["large_panel"]
+    record = report["references"]["whb_frontal_supc_clus"]
+    assert record["status"] == "built"
+    assert Path(record["bundle_dir"]).is_relative_to(tmp_path / "large")
+    # Predicted levels come from the bundle's own self-map decisions.
+    out = tmp_path / "out"
+    predicted = pd.read_csv(out / simulate.PREDICTED_CSV)
+    assert not predicted.empty
+    assert set(predicted["reference_id"]) == {"whb_frontal_supc_clus"}
+    assert {"lineage", "broad"} <= set(predicted["level"])
+    assert record["test_set"]["n_test_cells"] > 0
+    assert record["expected_depth"]["depth_bin"] == 30
+    assert record["depth_profile"]["n_cells"] == 10
+    assert sum(record["depth_profile"]["bin_shares"].values()) == pytest.approx(1.0)
+    # The self-map engine's markers were prefiltered: the comparison ran and
+    # re-mapped the decision recipe with the unfiltered lookup.
+    comparison = record["prefilter_comparison"]
+    assert comparison["status"] == "run", comparison
+    assert comparison["emission_bins_compared"] > 0
+    assert comparison["n_unfiltered_candidate_genes"] == 10
+    assert comparison["prefilter"]["method"] == "per_parent_topk_union"
+    assert unfiltered_calls == ["R1_contam_HO"]
+    assert {"passes", "no_parent_below_minimum", "no_parent_made_weak"} <= set(
+        comparison
+    )
+    assert (out / "whb_frontal_supc_clus" / "predicted_levels_unfiltered.csv").is_file()
+    prefilter_rows = pd.read_csv(out / simulate.PREFILTER_CSV)
+    assert set(prefilter_rows["level"]) <= set(predicted["level"])
+    resources = pd.read_csv(out / simulate.RESOURCES_CSV)
+    assert "prefilter_comparison" in set(resources["phase"])
+    assert "prefilter comparison:" in (out / simulate.REPORT_TXT).read_text()
+
+
+def test_cli_simulate_runs_a_gene_list_end_to_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    from merxen.cli import run_annotation_panels
+
+    config, _, spec, gene_list, unfiltered_calls = _large_whb_simulation(
+        tmp_path, monkeypatch
+    )
+    asked: list[str] = []
+
+    def reference_spec(_config: Any, reference_id: str, _sources: Any) -> Any:
+        asked.append(reference_id)
+        return spec
+
+    # The fixture's sources (a synthetic WHB); the CLI prepares the spec.
+    monkeypatch.setattr(run_annotation_panels, "_reference_spec", reference_spec)
+    config_file = tmp_path / "annotation_config.json"
+    config_file.write_text(config.model_dump_json())
+    result = CliRunner().invoke(
+        cli_main,
+        [
+            "annotation-panel-simulate",
+            "--gene-list",
+            str(gene_list),
+            "--species",
+            "human",
+            "--name",
+            "large_whb",
+            "--references",
+            "whb_frontal_supc_clus",
+            "--store",
+            str(tmp_path / "ssd"),
+            "--store-large",
+            str(tmp_path / "large"),
+            "--annotation-config",
+            str(config_file),
+            "--scratch-dir",
+            str(tmp_path / "cli_scratch"),
+            "--out-dir",
+            str(tmp_path / "cli_out"),
+            "--n-processors",
+            "2",
+            "--max-gb",
+            "3",
+            "--expected-depth",
+            "40",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert asked == ["whb_frontal_supc_clus"]
+    report = json.loads((tmp_path / "cli_out" / simulate.REPORT_JSON).read_text())
+    assert report["name"] == "large_whb" and report["status"] == "done"
+    record = report["references"]["whb_frontal_supc_clus"]
+    assert record["status"] == "built"
+    assert record["prefilter_comparison"]["status"] == "run"
+    assert unfiltered_calls == ["R1_contam_HO"]
+    assert report["provenance"]["references"] == ["whb_frontal_supc_clus"]
+    assert (tmp_path / "cli_out" / simulate.REPORT_TXT).is_file()
