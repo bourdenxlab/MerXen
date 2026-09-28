@@ -232,7 +232,7 @@ def native_kind(value: str, species: str) -> NativeKind:
         # of its prefix's species (``clean_native_value`` normalises too).
         return (
             "run"
-            if SPECIES_ID_PATTERNS[species].fullmatch(value.strip().upper())
+            if SPECIES_ID_PATTERNS[species].fullmatch(strip_version(value).upper())
             else "other_species"
         )
     if ENSEMBL_NON_GENE_PATTERN.match(value):

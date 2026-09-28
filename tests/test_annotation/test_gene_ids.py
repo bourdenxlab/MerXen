@@ -144,6 +144,7 @@ def test_native_kinds() -> None:
     assert native_kind("ensg00000141510", "human") == "run"
     assert native_kind("Ensg00000141510", "human") == "run"
     assert native_kind("ensmusg00000020932", "human") == "other_species"
+    assert native_kind("ENSG00000141510.7", "human") == "run"
 
 
 def test_lower_case_native_ids_resolve_natively() -> None:
