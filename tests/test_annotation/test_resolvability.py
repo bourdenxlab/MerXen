@@ -1542,20 +1542,38 @@ def test_rendezvous_partner_choice_is_uniform_and_stable() -> None:
         res.rendezvous_choice(hosts, np.array([], dtype=np.uint64))
 
 
-def test_gene_efficiency_is_keyed_by_gene_id() -> None:
-    genes = [f"ENSG{index:011d}" for index in range(201)]
-    full = res.gene_efficiency(genes, 0.8, 0)
+def test_gene_efficiency_is_the_pre_registered_draw() -> None:
+    # Resolvability version 6: the pre-registered (version 1-4) draw, one
+    # generator seeded by [seed, 0x6566] over the panel's gene order. The
+    # first values are those stored in the version-4 set a WHB bundle
+    # (d46aa309, 297 genes, seed 0).
+    full = res.gene_efficiency(297, 0.8, 0)
+    assert np.allclose(full[:3], [0.2727960777, 0.5819298935, 2.0298606441])
+    rng = np.random.default_rng([0, 0x6566])
+    expected = np.exp(rng.normal(0.0, 0.8, 297))
+    assert np.array_equal(full, expected / np.median(expected))
     assert np.median(full) == pytest.approx(1.0)
-    # A gene's draw does not depend on the other genes or their order (up to
-    # the median normalisation of the panel).
-    part = res.gene_efficiency(genes[::3], 0.8, 0)
-    ratio = part / full[::3]
-    assert np.allclose(ratio, ratio[0])
-    assert np.allclose(res.gene_efficiency(genes[::-1], 0.8, 0)[::-1], full)
     # Another sigma scales the same normals (a stress recipe is comparable).
-    assert np.allclose(np.log(res.gene_efficiency(genes, 1.0, 0)), 1.25 * np.log(full))
-    assert not np.allclose(res.gene_efficiency(genes, 0.8, 1), full)
-    assert np.array_equal(res.gene_efficiency(genes, None, 0), np.ones(201))
+    assert np.allclose(np.log(res.gene_efficiency(297, 1.0, 0)), 1.25 * np.log(full))
+    assert not np.allclose(res.gene_efficiency(297, 0.8, 1), full)
+    assert np.array_equal(res.gene_efficiency(297, None, 0), np.ones(297))
+    assert len(res.gene_efficiency(0, 0.8, 0)) == 0
+
+
+def test_the_gene_efficiency_does_not_depend_on_the_test_cells() -> None:
+    # The thinning applies the one panel-wide efficiency whatever the test
+    # cells: a cell's thinning probabilities, hence its draw, are the same in
+    # a subset of the test cells (unless its spill partner changed).
+    test = make_test_cells(20)
+    recipe, _ = recipes()
+    ids = [str(cell) for cell in test.obs.index]
+    full = simulated_by_id(res.thin_and_contaminate(test, GRID, recipe))
+    subset = simulated_by_id(
+        res.thin_and_contaminate(cells_subset(test, ids[::2]), GRID, recipe)
+    )
+    shared = [sim_id for sim_id in subset if subset[sim_id][1] == full[sim_id][1]]
+    assert shared
+    assert all(np.array_equal(subset[sim_id][0], full[sim_id][0]) for sim_id in shared)
 
 
 def test_select_test_cells_caps_strata_and_keeps_rare_types() -> None:
