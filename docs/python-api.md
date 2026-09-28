@@ -416,6 +416,22 @@ imported here.
 - `published_layout`, `results_root_of`, `check_output_outside_inputs` —
   the standalone command never writes into a results tree.
 
+`annotate_resolve` and its inputs (`merxen annotate-resolve`,
+`CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE`):
+
+- `annotate_resolve(map_dir, config, output_dir=..., samples=...,
+  bundle_finder=..., alignment_dir=..., lookup_alignment=True)` — per
+  sample the label table, the annotation manifest and the pair's
+  `<pair>_resolve_summary.json` (`ResolveResult`, `SampleResolution`).
+- `load_resolve_runs` (`ResolveRun`) — the tidy parquets (sha256 checked)
+  and the bundle of each run; `current_store_bundles(store)` (the store's
+  current bundle per reference and panel) and
+  `staged_bundle_finder(ref_paths, manifest, require=...)` (the bundles of
+  staged `bundle_ref.json` files; with `require`, every run must have one of
+  the build it mapped with) pick the bundles.
+- `human_calls_from_runs`, `resolve_human_sample`, `human_branch_columns`,
+  `write_label_table`, `read_label_table`.
+
 ### `annotation.shadow` — [shadow.py](../src/merxen/annotation/shadow.py)
 
 M3 shadow evaluation (plan §5.2–§5.5, §14):

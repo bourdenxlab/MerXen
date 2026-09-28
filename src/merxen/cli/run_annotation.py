@@ -1198,10 +1198,32 @@ def _n_segmented(values: tuple[str, ...]) -> dict[str, int]:
     "the run mapped with.",
 )
 @click.option(
+    "--bundle-ref",
+    "bundle_ref_paths",
+    multiple=True,
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    help="A bundle_ref.json PREP resolved (repeatable): each run is resolved with "
+    "the bundle of its reference and panel.",
+)
+@click.option(
+    "--require-bundle-refs",
+    is_flag=True,
+    help="Every run must have a --bundle-ref with the build_hash it mapped with "
+    "(pipeline tasks: no store lookup, no override).",
+)
+@click.option(
     "--prepared-dir",
     type=click.Path(path_type=Path, exists=True, file_okay=False),
     default=None,
     help="Read the counts from these prepared H5ADs instead of the manifest's inputs.",
+)
+@click.option(
+    "--clustering-config",
+    "clustering_config_path",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    default=None,
+    help="With --prepared-dir: the clustering_squidpy_config.json MAP read (sample "
+    "platforms); its min_counts and pair_id must be the MAP manifest's.",
 )
 @click.option(
     "--gene-id-fallback-csv",
@@ -1222,6 +1244,12 @@ def _n_segmented(values: tuple[str, ...]) -> dict[str, int]:
     default=None,
     help="The pair's align_out (shared tissue mask); default: from the inputs' "
     "results tree.",
+)
+@click.option(
+    "--no-alignment-lookup",
+    is_flag=True,
+    help="Never look up the inputs' published align_out: the shared tissue mask "
+    "comes only from --alignment-dir (pipeline tasks).",
 )
 @click.option(
     "--platforms",
@@ -1248,10 +1276,14 @@ def annotate_resolve_command(
     store: Path | None,
     store_large: Path | None,
     current_bundles: bool,
+    bundle_ref_paths: tuple[Path, ...],
+    require_bundle_refs: bool,
     prepared_dir: Path | None,
+    clustering_config_path: Path | None,
     gene_id_fallback_csv: Path | None,
     n_segmented_values: tuple[str, ...],
     alignment_dir: Path | None,
+    no_alignment_lookup: bool,
     platforms: str | None,
     n_bootstrap: int,
     tile_um: float,
@@ -1279,17 +1311,21 @@ def annotate_resolve_command(
                 store=store,
                 store_large=store_large,
                 current_bundles=current_bundles,
+                bundle_ref_paths=bundle_ref_paths,
+                require_bundle_refs=require_bundle_refs,
                 prepared_dir=prepared_dir,
+                clustering_config_path=clustering_config_path,
                 gene_id_fallback_csv=gene_id_fallback_csv,
                 n_segmented=_n_segmented(n_segmented_values),
                 alignment_dir=alignment_dir,
+                lookup_alignment=not no_alignment_lookup,
                 platforms=platforms,
                 n_bootstrap=n_bootstrap,
                 tile_um=tile_um,
                 seed=seed,
                 results_roots=results_roots,
             )
-    except (MapError, MmcEngineError, ResolveError) as error:
+    except (MapError, MmcEngineError, ResolveError, NotImplementedError) as error:
         raise click.ClickException(f"{type(error).__name__}: {error}") from error
 
 
@@ -1304,10 +1340,14 @@ def _annotate_resolve(
     store: Path | None,
     store_large: Path | None,
     current_bundles: bool,
+    bundle_ref_paths: tuple[Path, ...],
+    require_bundle_refs: bool,
     prepared_dir: Path | None,
+    clustering_config_path: Path | None,
     gene_id_fallback_csv: Path | None,
     n_segmented: Mapping[str, int],
     alignment_dir: Path | None,
+    lookup_alignment: bool,
     platforms: str | None,
     n_bootstrap: int,
     tile_um: float,
@@ -1317,14 +1357,24 @@ def _annotate_resolve(
     from merxen.annotation.panel import prepared_samples
     from merxen.annotation.pipeline import (
         MAP_MANIFEST_NAME,
+        BundleFinder,
         MapSample,
+        ResolveError,
         annotate_resolve,
         check_output_outside_inputs,
         current_store_bundles,
         load_map_manifest,
+        staged_bundle_finder,
     )
     from merxen.annotation.store import ReferenceStore
 
+    if require_bundle_refs and (bundle_values or current_bundles):
+        raise click.UsageError(
+            "--require-bundle-refs resolves with the staged refs only: drop "
+            "--bundle and --current-bundles"
+        )
+    if bundle_ref_paths and current_bundles:
+        raise click.UsageError("give --bundle-ref or --current-bundles, not both")
     manifest = load_map_manifest(map_dir / MAP_MANIFEST_NAME)
     run_species = species or manifest.species
     if run_species != manifest.species:
@@ -1332,6 +1382,29 @@ def _annotate_resolve(
             f"--species {run_species} differs from the MAP manifest's "
             f"{manifest.species}",
             param_hint="--species",
+        )
+    clustering = _read_json(clustering_config_path) or {}
+    if clustering_config_path is not None and prepared_dir is None:
+        raise click.UsageError("--clustering-config goes with --prepared-dir")
+    configured_min_counts = clustering.get("min_counts")
+    if (
+        configured_min_counts is not None
+        and int(configured_min_counts) != manifest.min_counts
+    ):
+        raise ResolveError(
+            f"the clustering config's min_counts {configured_min_counts} differs "
+            f"from the {manifest.min_counts} MAP mapped with: the table cells "
+            "must be the clustering run's"
+        )
+    configured_pair = clustering.get("pair_id")
+    if (
+        configured_pair
+        and manifest.pair_id
+        and str(configured_pair) != manifest.pair_id
+    ):
+        raise ResolveError(
+            f"the clustering config is pair {configured_pair}, the MAP output "
+            f"pair {manifest.pair_id}"
         )
     config = _load_annotation_config(annotation_config_path, run_species)
     if gene_id_fallback_csv is not None:
@@ -1352,7 +1425,7 @@ def _annotate_resolve(
                 h5ad_path=item.h5ad_path.resolve(),
                 source="prepared",
             )
-            for item in prepared_samples(prepared_dir)
+            for item in prepared_samples(prepared_dir, clustering_config=clustering)
         ]
     inputs = [Path(record.h5ad_path) for record in manifest.samples.values()]
     inputs += [sample.h5ad_path for sample in samples or ()]
@@ -1361,8 +1434,12 @@ def _annotate_resolve(
         [*inputs, map_dir / MAP_MANIFEST_NAME],
         protected_roots=results_roots,
     )
-    finder = None
-    if current_bundles:
+    finder: BundleFinder | None = None
+    if bundle_ref_paths or require_bundle_refs:
+        finder = staged_bundle_finder(
+            bundle_ref_paths, manifest, require=require_bundle_refs
+        )
+    elif current_bundles:
         store_root = store or config.reference_store
         if store_root is None:
             raise click.UsageError("--current-bundles needs --store")
@@ -1383,6 +1460,7 @@ def _annotate_resolve(
         bundle_finder=finder,
         n_segmented=n_segmented,
         alignment_dir=alignment_dir,
+        lookup_alignment=lookup_alignment,
         platforms=(
             [item.strip() for item in platforms.split(",") if item.strip()]
             if platforms
