@@ -105,6 +105,7 @@ from merxen.annotation.vocab import (
     UNASSIGNED_LABEL,
     VOCAB_FILES,
     Species,
+    human_floor_class,
     load_state_gene_ids,
     load_vocab,
 )
@@ -313,6 +314,17 @@ HO_OTHER_REGION_ROI_LABELS: Final[tuple[str, ...]] = (
 )
 HO_OTHER_REGION_MATRIX: Final = "WHB-10Xv3-Nonneurons"
 HO_OTHER_REGION_SEED: Final = 1
+# Held-out donor cells whose truth supercluster no production call can name
+# are not test cells (M3b review 2; E2 research/insilico/02_make_queries.py
+# kept only Neurons-class superclusters other than Amygdala excitatory): the
+# sinks and Mixed/Unknown superclusters (Miscellaneous, Splatter) have no
+# broad or supercluster truth, so every call of them was scored wrong, and
+# calls to region-implausible superclusters (Amygdala excitatory in frontal
+# cortex) are excluded, so their supercluster truth could never be called.
+HO_TRUTH_EXCLUSION_VERSION: Final = 1
+HO_EXCLUDED_SINK: Final = "sink"
+HO_EXCLUDED_NO_FLOOR_CLASS: Final = "no_floor_class"
+HO_EXCLUDED_REGION_IMPLAUSIBLE: Final = "region_implausible"
 # Test-cell provenance column of the human test set.
 TEST_SOURCE_COLUMN: Final = "test_source"
 TEST_SOURCE_DONOR: Final = "holdout_donor"
@@ -4869,6 +4881,42 @@ def nonneuronal_superclusters(labels: Iterable[str]) -> list[str]:
     return sorted(kept)
 
 
+def ho_truth_exclusions(labels: Iterable[str], region: str) -> dict[str, str]:
+    """Return the WHB superclusters that cannot be held-out test truths.
+
+    A test cell's truth must be nameable by a production call at every
+    level it is scored at (``resolvability.whb_level_specs``): superclusters
+    that are sinks, have no floor class (the ``Mixed/Unknown`` broad class:
+    no broad or supercluster truth) or are implausible in ``region`` (calls
+    to them are excluded) are left out (``HO_TRUTH_EXCLUSION_VERSION``).
+
+    Args:
+        labels: WHB supercluster labels (``CS202210140_*``) of the pool.
+        region: The anatomical region token (``frontal_cortex``).
+
+    Returns:
+        Excluded label -> reason (``sink``, ``no_floor_class`` or
+        ``region_implausible``, the first that applies).
+    """
+    table = load_vocab("whb_supercluster")
+    label_to_name = table.label_to_name()
+    excluded: dict[str, str] = {}
+    for label in sorted({str(value) for value in labels}):
+        name = label_to_name.get(label)
+        if name is None or name not in table:
+            excluded[label] = HO_EXCLUDED_NO_FLOOR_CLASS
+            continue
+        broad = table.broad_class(name)
+        group = broad if broad not in (None, UNASSIGNED_LABEL) else None
+        if table.is_sink(name):
+            excluded[label] = HO_EXCLUDED_SINK
+        elif human_floor_class(group, table.nt(name)) is None:
+            excluded[label] = HO_EXCLUDED_NO_FLOOR_CLASS
+        elif not table.is_region_plausible(name, region):
+            excluded[label] = HO_EXCLUDED_REGION_IMPLAUSIBLE
+    return excluded
+
+
 def other_region_test_cells(
     cell_metadata: pd.DataFrame,
     *,
@@ -4996,8 +5044,11 @@ def build_whb_frontal_ho(context: BuildContext) -> dict[str, Any]:
     supercluster -> cluster -> subcluster precompute of the training cells
     (raw normalisation, as the pilot) truncated to supercluster -> cluster
     is the mapping precompute, with panel markers (``n_per_utility``); the
-    held-out donor's cells, at most 1,000 per supercluster (all cells of
-    rare ones) and at most ``n_test_cells``, are the test set
+    held-out donor's cells of superclusters a production call can name
+    (``ho_truth_exclusions``: no sinks, no ``Mixed/Unknown``, no
+    region-implausible ones; E2; recorded in ``test_set.truth_exclusion``),
+    at most 1,000 per supercluster (all cells of rare ones) and at most
+    ``n_test_cells``, are the test set
     (``test_cells.h5ad`` with native panel counts and their truth), and
     every non-neuronal supercluster is topped up to that cap with WHB
     non-neuronal nuclei of neocortical dissections outside the frontal ROIs
@@ -5040,6 +5091,43 @@ def build_whb_frontal_ho(context: BuildContext) -> dict[str, Any]:
     dropped_clusters = sorted(set(per_cluster.index) - set(kept_clusters))
     training = training[training[WHB_CLUS].isin(kept_clusters)]
     pool = metadata[is_test_donor].set_index("cell_label", drop=False)
+    region = config.anatomical_region or WHB_WHOLE_CORTEX_REGION
+    exclusions = ho_truth_exclusions(pool[WHB_SUPC].astype(str), region)
+    is_excluded = pool[WHB_SUPC].astype(str).isin(list(exclusions)).to_numpy()
+    excluded_counts = pool[is_excluded][WHB_SUPC].astype(str).value_counts()
+    n_pool_before = int(len(pool))
+    pool = pool[~is_excluded]
+    label_to_name = load_vocab("whb_supercluster").label_to_name()
+    truth_exclusion = {
+        "version": HO_TRUTH_EXCLUSION_VERSION,
+        "rule": "held-out donor cells whose truth supercluster is a sink, has no "
+        "floor class (Mixed/Unknown) or is implausible in the region are not "
+        "test cells",
+        "region": region,
+        "n_pool_cells_before": n_pool_before,
+        "n_excluded_pool_cells": int(is_excluded.sum()),
+        "excluded_superclusters": {
+            label: {
+                "name": label_to_name.get(label),
+                "reason": exclusions[label],
+                "n_pool_cells": int(excluded_counts.get(label, 0)),
+            }
+            for label in sorted(exclusions)
+        },
+    }
+    logger.info(
+        "%s: %d of %d held-out donor cells left out (truth superclusters no call "
+        "can name: %s)",
+        HO_REFERENCE_ID,
+        int(is_excluded.sum()),
+        n_pool_before,
+        ", ".join(
+            f"{label_to_name.get(label, label)} {int(excluded_counts.get(label, 0))} "
+            f"({reason})"
+            for label, reason in sorted(exclusions.items())
+        )
+        or "none",
+    )
     n_test = config.resolvability.n_test_cells or HO_DEFAULT_TEST_CELLS
     chosen = res.select_test_cells(
         pool,
@@ -5209,6 +5297,7 @@ def build_whb_frontal_ho(context: BuildContext) -> dict[str, Any]:
             for key, value in test_rows[TEST_SOURCE_COLUMN].value_counts().items()
         },
         "other_region": other_record,
+        "truth_exclusion": truth_exclusion,
         "seed": TEST_SET_SEED,
         "per_supercluster": {
             str(key): int(value)
@@ -5818,6 +5907,10 @@ def _ho_params(
         "min_cells_per_leaf": WHB_FRONTAL_MIN_CELLS_PER_LEAF,
         "seed": TEST_SET_SEED,
         "vocab_assets": vocab_asset_sha256(WHB_TAXONOMY_ID),
+        "truth_exclusion": {
+            "version": HO_TRUTH_EXCLUSION_VERSION,
+            "region": config.anatomical_region or WHB_WHOLE_CORTEX_REGION,
+        },
         "other_region": {
             "version": HO_OTHER_REGION_VERSION,
             "roi_labels": list(HO_OTHER_REGION_ROI_LABELS),

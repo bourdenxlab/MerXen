@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "d778297a923f376e773213ca8548232956a9c6f2b412353a2cc8dcda845db8b1",
+    3: "9393d6cfe5c55e1bfc35116aec489acff6132b4ea0f15487608a46ea70a3a411",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -91,6 +91,11 @@ PIN_HISTORY = (
     "cells, gate-P sets of one replicate); the version enters every self-map "
     "bundle's build_hash through the resolvability builder params, so those "
     "bundles get new hashes without a builder bump",
+    "3: the human held-out test set leaves out truth superclusters no call "
+    "can name (sinks, no floor class, region-implausible; M3b review 2); the "
+    "exclusion's version and region enter the whb_frontal_supc_clus_ho "
+    "build_hash through its hashed params, and every human self-map bundle's "
+    "through its test-set params",
 )
 
 
