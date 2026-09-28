@@ -1189,6 +1189,71 @@ def test_locate_bundle_prefers_the_current_resolvability_version(
         locate_bundle(store, "whb_frontal_supc_clus", panel.panel_hash)
 
 
+def test_locate_bundle_takes_the_bundle_of_the_configured_prefilter(
+    tmp_path: Path, fake_mmc: FakeMmc
+) -> None:
+    # A 5K panel's store holds a bundle built with the per-parent prefilter
+    # and one without it: the run config decides which one a standalone run
+    # maps with (M3b review 2); without a config both stay ambiguous.
+    from merxen.annotation.prefilter import prefilter_payload
+
+    panel = _panel(GENE_IDS)
+    common: dict[str, Any] = {
+        "role": "primary",
+        "species": "mouse",
+        "panel_hash": panel.panel_hash,
+        "n_genes": 5006,
+        "levels": WHB_LEVELS,
+        "nodes": WHB_NODES,
+    }
+
+    def with_prefilter(path: Path, prefilter: dict[str, Any] | None) -> Path:
+        manifest_path = path / "bundle.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["build_hash_payload"] = {
+            "panel": {"panel_hash": panel.panel_hash, "n_genes": 5006},
+            "large_panel_prefilter": prefilter,
+        }
+        manifest_path.write_text(json.dumps(manifest))
+        return path
+
+    plain = with_prefilter(
+        fake_mmc.bundle("wmb_panel", build_hash="a" * 64, **common), None
+    )
+    filtered = with_prefilter(
+        fake_mmc.bundle("wmb_panel", build_hash="b" * 64, **common),
+        prefilter_payload(2000, 30),
+    )
+    store = ReferenceStore(fake_mmc.root)
+    default = AnnotationConfig(species="mouse")
+    assert (
+        locate_bundle(store, "wmb_panel", panel.panel_hash, config=default).path
+        == plain
+    )
+    opted_in = AnnotationConfig(
+        species="mouse",
+        panel={"large_panel_marker_prefilter": "per_parent_topk_union"},
+    )
+    assert (
+        locate_bundle(store, "wmb_panel", panel.panel_hash, config=opted_in).path
+        == filtered
+    )
+    other_cap = AnnotationConfig(
+        species="mouse",
+        panel={
+            "large_panel_marker_prefilter": "per_parent_topk_union",
+            "large_panel_prefilter_cap": 1500,
+        },
+    )
+    with pytest.raises(MapError, match="no builder-v"):
+        locate_bundle(store, "wmb_panel", panel.panel_hash, config=other_cap)
+    with pytest.raises(MapError, match="2 bundles"):
+        locate_bundle(store, "wmb_panel", panel.panel_hash)
+    finder = store_subset_bundle_finder(store, default)
+    found = finder("wmb_panel", panel.panel_hash)
+    assert found is not None and found.path == plain
+
+
 def _published_pair(root: Path) -> list[Path]:
     paths = []
     for platform, counts, names, ids in (
