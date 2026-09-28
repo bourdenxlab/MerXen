@@ -671,6 +671,70 @@ def test_build_sample_query_restricts_to_the_panel_and_lists_missing_genes(
     )
 
 
+def test_declared_genes_min_cells_dropped_are_mapped_with_zero_counts(
+    tmp_path: Path,
+) -> None:
+    # A published clustered MERSCOPE table: its control-filter record lists
+    # GOTHER, which min_cells dropped from var. Counting it missing made the
+    # clustered path request an own-family subset bundle where the prepared
+    # path (which still has the gene) requests none (M3b review 2).
+    from types import SimpleNamespace
+
+    from merxen.annotation.pipeline import _subset_bundle_for
+
+    xenium, merscope = (
+        _write_h5ad(
+            tmp_path / platform.lower() / f"PX_{platform}_clustered.h5ad",
+            counts,
+            platform=platform,
+            var_names=names,
+            ensembl_ids=ids,
+            source="clustered",
+        )
+        for platform, counts, names, ids in (
+            (
+                "XENIUM",
+                XENIUM_COUNTS,
+                [*SYMBOLS, "NegControlProbe_00001"],
+                [*GENE_IDS, ""],
+            ),
+            ("MERSCOPE", MERSCOPE_COUNTS[:, :5], SYMBOLS[:5], None),
+        )
+    )
+    adata = ad.read_h5ad(merscope)
+    adata.uns["merxen_clustering_squidpy"] = {
+        "control_feature_filter": {
+            "retained_features": list(SYMBOLS),
+            "removed_control_features": ["Blank-0001"],
+        }
+    }
+    adata.write_h5ad(merscope)
+    samples = [
+        MapSample("PX_MERSCOPE", "MERSCOPE", merscope, "clustered"),  # type: ignore[arg-type]
+        MapSample("PX_XENIUM", "XENIUM", xenium, "clustered"),  # type: ignore[arg-type]
+    ]
+    loaded, _ = load_samples(samples, _config(), min_counts=10)
+    assert loaded.declared.ensembl_ids == sorted(GENE_IDS)
+    assert "GOTHER" not in loaded.feature_names
+    assert loaded.undetected_declared_ids == (GENE_IDS[5],)
+
+    query = build_sample_query(loaded, _panel(GENE_IDS))
+
+    assert query.gene_ids == GENE_IDS
+    assert query.missing_gene_ids == []
+    assert query.undetected_gene_ids == [GENE_IDS[5]]
+    assert query.counts.toarray()[:, 5].sum() == 0
+    # The panel is complete: no subset bundle is requested.
+    run = SimpleNamespace(panel=_panel(GENE_IDS))
+    assert _subset_bundle_for(
+        loaded,
+        run,  # type: ignore[arg-type]
+        _config(),
+        output=tmp_path / "out",
+        find_subset_bundle=None,
+    ) == (run, None)
+
+
 def test_build_sample_query_sums_features_resolving_to_one_panel_gene(
     tmp_path: Path,
 ) -> None:

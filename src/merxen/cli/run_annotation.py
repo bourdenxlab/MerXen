@@ -18,7 +18,7 @@ with a one-line message (``click.ClickException``), not a traceback.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -757,6 +757,15 @@ def _bundle_overrides(values: tuple[str, ...]) -> dict[str, Path]:
     "0 instead of failing (pipeline runs: RESOLVE writes statuses only).",
 )
 @click.option(
+    "--declared-ids-file",
+    "declared_ids_values",
+    multiple=True,
+    help="KEY=PATH platform panel file per sample id or platform (e.g. the "
+    "Xenium gene_panel.json) whose native gene IDs complete the declared "
+    "features a clustered H5AD's min_cells filter dropped, so its panel hash "
+    "is the prepared H5AD's.",
+)
+@click.option(
     "--require-bundle-refs",
     is_flag=True,
     help="Map only the bundles given with --bundle-ref / --bundle: fail "
@@ -796,6 +805,7 @@ def annotate_command(
     platforms: str | None,
     no_provisional: bool,
     allow_refused_panel: bool,
+    declared_ids_values: tuple[str, ...],
     require_bundle_refs: bool,
     results_roots: tuple[Path, ...],
 ) -> None:
@@ -838,6 +848,9 @@ def annotate_command(
                 allow_refused_panel=allow_refused_panel,
                 require_bundle_refs=require_bundle_refs,
                 results_roots=results_roots,
+                declared_id_files=_key_value_paths(
+                    declared_ids_values, "--declared-ids-file"
+                ),
             )
     except (MapError, MmcEngineError) as error:
         raise click.ClickException(f"{type(error).__name__}: {error}") from error
@@ -871,6 +884,7 @@ def _annotate(
     allow_refused_panel: bool,
     require_bundle_refs: bool,
     results_roots: tuple[Path, ...] = (),
+    declared_id_files: Mapping[str, Path] | None = None,
 ) -> None:
     from merxen.annotation.mapmycells_engine import MmcBundle
     from merxen.annotation.panel import (
@@ -939,6 +953,7 @@ def _annotate(
         else None
     )
 
+    id_files = dict(declared_id_files or {})
     samples: list[MapSample] = []
     if clustered_h5ads:
         for path in clustered_h5ads:
@@ -950,12 +965,14 @@ def _annotate(
                 )
             pair_id = pair_id or layout.pair_id
             segmentation = segmentation or layout.segmentation
+            id_file = id_files.get(layout.sample_id) or id_files.get(layout.platform)
             samples.append(
                 MapSample(
                     sample_id=layout.sample_id,
                     platform=layout.platform,
                     h5ad_path=path.resolve(),
                     source="clustered",
+                    declared_ids_file=None if id_file is None else id_file.resolve(),
                 )
             )
     else:
@@ -988,6 +1005,7 @@ def _annotate(
             pair_id=pair_id,
             segmentation=segmentation,
             min_counts=min_counts,
+            declared_id_files=id_files,
         )
     required = load_required(panel_dir, allow_refused=allow_refused_panel)
     if required.status == "refused":
