@@ -104,9 +104,27 @@ def test_fetch_verifies_writes_a_gene_table_and_reuses_the_copy(
     manifest = json.loads(fetched.manifest_path.read_text())
     assert manifest["url"] == item.url and manifest["sha256"] == item.sha256
     assert manifest["n_genes"] == 5
-    # A verified copy is reused without downloading.
+    assert manifest["downloaded"] is True
+    first = manifest["first_retrieved_at"]
+    assert first is not None and manifest["last_verified_at"] == first
+    # A verified copy is reused without downloading; the manifest keeps the
+    # first retrieval and records the new check.
+    (tmp_path / f"{item.key}.manifest.json").write_text(
+        json.dumps({**manifest, "last_verified_at": "2000-01-01T00:00:00+00:00"})
+    )
     again = fetch_public_panel(item.key, tmp_path, downloader=downloader)
     assert not again.downloaded and calls == [item.url]
+    kept = json.loads(again.manifest_path.read_text())
+    assert kept["downloaded"] is True and kept["first_retrieved_at"] == first
+    assert kept["last_verified_at"] != "2000-01-01T00:00:00+00:00"
+    # A copy found without an earlier manifest has no known retrieval time.
+    again.manifest_path.unlink()
+    orphan = json.loads(
+        fetch_public_panel(
+            item.key, tmp_path, downloader=downloader
+        ).manifest_path.read_text()
+    )
+    assert orphan["downloaded"] is False and orphan["first_retrieved_at"] is None
 
 
 def test_fetch_refuses_a_changed_vendor_file(
