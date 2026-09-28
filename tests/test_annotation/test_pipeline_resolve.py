@@ -951,10 +951,17 @@ def _prepared_manifest(setup: Setup) -> Path:
 
 
 def test_cli_annotate_resolve_runs_as_the_pipeline_task(
-    tmp_path: Path, fake_mmc: FakeMmc
+    tmp_path: Path, fake_mmc: FakeMmc, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The arguments CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE passes (plan §3.4)."""
     setup = _setup(tmp_path, fake_mmc, coverage=True)
+    looked_up: list[Path] = []
+
+    def lookup(h5ad_path: Path, pair_id: str | None) -> Path | None:
+        looked_up.append(Path(h5ad_path))
+        return None
+
+    monkeypatch.setattr(pl, "default_alignment_dir", lookup)
     prepared = _prepared_manifest(setup)
     clustering = tmp_path / "clustering_squidpy_config.json"
     samples = [
@@ -992,6 +999,8 @@ def test_cli_annotate_resolve_runs_as_the_pipeline_task(
     summary = json.loads((output / "PX_resolve_summary.json").read_text())
     assert set(summary["samples"]) == {"PX_MERSCOPE", "PX_XENIUM"}
     assert summary["pair"]["alignment_dir"] is None
+    # --no-alignment-lookup: no published align_out is ever looked up.
+    assert looked_up == []
     for sample in setup.samples:
         assert (
             output
