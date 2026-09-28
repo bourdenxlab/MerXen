@@ -591,8 +591,10 @@ class AnnotationResolvabilityConfig(_AnnotationModel):
         weight_min_type_cells: Test cells a truth type needs in a depth bin
             to be reweighted on its own; rarer types take their broad
             class's weight (§8.3 composition reweighting, M3b review).
-        weight_trim_factor: Composition weights are capped at this multiple
-            of their depth bin's median weight (``0``: no cap).
+        weight_trim_factor: Composition weights of each tested set (a
+            (level, class, depth) bin's calls or a pooled deep set) are
+            capped at this multiple of the set's median positive weight
+            (``0``: no cap; resolvability version 4, M3b review 2).
         composition_min_bin_cells: Depth bins with fewer dataset cells are
             reweighted to the dataset's overall composition.
         min_coverage: Coverage an emitted bin needs.

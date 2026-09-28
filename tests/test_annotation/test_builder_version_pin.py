@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "fe8491d72f869b6a5aa56a8b1939de5bd21c3f6d82f27f7683309367ab0b8227",
+    3: "d778297a923f376e773213ca8548232956a9c6f2b412353a2cc8dcda845db8b1",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -85,6 +85,12 @@ PIN_HISTORY = (
     "changes content or build_hash",
     "3: the WMB query-marker memory model of the no-prefilter refusal is the "
     "measured M3b 5K envelope (refusals only; no bundle content changes)",
+    "3: RESOLVABILITY_VERSION 4 (M3b review 2: weights trimmed per judged set, "
+    "positive-weight calls only, judged bins at or above D_P keep their own "
+    "verdict, would_raise only with a fit, PREP decides on the stored float32 "
+    "cells, gate-P sets of one replicate); the version enters every self-map "
+    "bundle's build_hash through the resolvability builder params, so those "
+    "bundles get new hashes without a builder bump",
 )
 
 
