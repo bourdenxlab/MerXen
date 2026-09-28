@@ -520,7 +520,8 @@ def test_simulation_predicts_levels_and_compares_the_prefilter(
     assert comparison["emission_bins_compared"] > 0
     assert comparison["n_unfiltered_candidate_genes"] == 10
     assert comparison["prefilter"]["method"] == "per_parent_topk_union"
-    assert unfiltered_calls == ["R1_contam_HO"]
+    # A version-7 family: its first R1 member, compared member to member.
+    assert unfiltered_calls == ["R1_contam_HO_seed0"]
     assert {"passes", "no_parent_below_minimum", "no_parent_made_weak"} <= set(
         comparison
     )
@@ -587,6 +588,7 @@ def test_cli_simulate_runs_a_gene_list_end_to_end(
     record = report["references"]["whb_frontal_supc_clus"]
     assert record["status"] == "built"
     assert record["prefilter_comparison"]["status"] == "run"
-    assert unfiltered_calls == ["R1_contam_HO"]
+    # A version-7 family: its first R1 member, compared member to member.
+    assert unfiltered_calls == ["R1_contam_HO_seed0"]
     assert report["provenance"]["references"] == ["whb_frontal_supc_clus"]
     assert (tmp_path / "cli_out" / simulate.REPORT_TXT).is_file()

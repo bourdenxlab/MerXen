@@ -125,3 +125,35 @@ def test_the_diagnostic_refuses_to_write_inside_a_store(tmp_path: Path) -> None:
             scratch_dir=tmp_path / "scratch",
             store_roots=[tmp_path / "store"],
         )
+
+
+def test_the_prefilter_comparison_keeps_the_version_6_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    small_resources: Any,  # noqa: F811
+) -> None:
+    from merxen.annotation.reference import builder_for, prepare_reference_spec
+
+    config, store, spec, gene_list, unfiltered_calls = _large_whb_simulation(
+        tmp_path, monkeypatch
+    )
+    config = config.model_copy(
+        update={"resolvability": config.resolvability.model_copy(update={"version": 6})}
+    )
+    build = ReferenceBuild(
+        spec=prepare_reference_spec(spec), builder=builder_for(spec, config)
+    )
+    report = run_panel_simulation(
+        gene_list=gene_list,
+        species="human",
+        name="whb_v6",
+        config=config,
+        store=store,
+        builds=lambda panel: [build],
+        out_dir=tmp_path / "out",
+        scratch_dir=tmp_path / "scratch_sim",
+        platform="XENIUM",
+    )
+    record = report["references"]["whb_frontal_supc_clus"]
+    assert record["prefilter_comparison"]["status"] == "run"
+    assert unfiltered_calls == ["R1_contam_HO"]

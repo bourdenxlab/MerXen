@@ -460,6 +460,7 @@ def compare_calls(
     confident_bp: float = PREFILTER_CONFIDENT_BP,
     min_class_n: int = PREFILTER_MIN_CLASS_N,
     min_agreement: float = PREFILTER_MIN_AGREEMENT,
+    member: str | None = None,
 ) -> pd.DataFrame:
     """Compare the prefiltered and unfiltered calls per (level, class).
 
@@ -478,6 +479,8 @@ def compare_calls(
         confident_bp: Confidence threshold.
         min_class_n: Confident calls a class needs to be judged.
         min_agreement: Required agreement.
+        member: For version-7 cells, the ensemble member compared
+            (``R1_contam_HO@0``; the R1 members share recipe and seed).
 
     Returns:
         ``PREFILTER_COLUMNS`` rows.
@@ -486,6 +489,8 @@ def compare_calls(
 
     def select(frame: pd.DataFrame) -> pd.DataFrame:
         rows = frame[(frame["recipe"] == recipe) & (frame["seed"] == 0)]
+        if member is not None and "member" in rows.columns:
+            rows = rows[rows["member"].astype(str) == member]
         return rows[columns].copy()
 
     left = select(prefiltered)
@@ -1204,35 +1209,77 @@ def compare_prefilter(
     runs: list[dict[str, Any]] = []
     grid = spec.resolved_depth_grid(panel.n_genes)
     recipes = res.simulation_recipes(config.resolvability, seed=ref.TEST_SET_SEED)[:1]
-    started = time.monotonic()
-    result = res.run_resolvability(
-        test,
-        specs=ref.level_specs_for(reference_id, unfiltered_engine, config),
-        depths=grid,
-        recipes=recipes,
-        map_fn=ref.mmc_map_function(
-            unfiltered_engine,
-            spec=spec,
-            config=config,
-            scratch_dir=scratch_dir / "mapping",
-            log_dir=out_dir / "logs" / "unfiltered_mapping",
-            runs=runs,
-        ),
-        settings=ref.self_map_rule_settings(config),
-        species=spec.species,
-        floor_table=load_floor_table(spec.species),
-        cells_rules=ref.cells_rules_for(reference_id, config),
+    map_fn = ref.mmc_map_function(
+        unfiltered_engine,
+        spec=spec,
+        config=config,
+        scratch_dir=scratch_dir / "mapping",
+        log_dir=out_dir / "logs" / "unfiltered_mapping",
+        runs=runs,
     )
+    specs = ref.level_specs_for(reference_id, unfiltered_engine, config)
+    rules = ref.cells_rules_for(reference_id, config)
+    stored = res.load_resolvability(bundle_dir, allow_version_7=True)
+    member: str | None = None
+    started = time.monotonic()
+    if stored is not None and stored.version == res.RESOLVABILITY_VERSION_V7:
+        # Version 7: re-simulate the first R1 member with its conventions on
+        # the bundle's grid, compared member to member.
+        first = res.EnsembleMember(
+            res.member_recipe(res.DECISION_RECIPE, 0, config.resolvability),
+            "emission",
+        )
+        member = first.name
+        unfiltered_cells = res.simulate_members(
+            test,
+            specs=specs,
+            depths=stored.depth_grid,
+            members=[first],
+            map_fn=map_fn,
+            cells_rules=rules,
+        ).cells
+        unfiltered_decisions = res.decide(
+            unfiltered_cells,
+            stored.levels,
+            stored.depth_grid,
+            stored.settings,
+            saturated_bp_share=res.EnsembleSettings.from_json(
+                stored.summary.get("ensemble_settings")
+            ).saturated_bp_share,
+        )
+    else:
+        result = res.run_resolvability(
+            test,
+            specs=specs,
+            depths=grid,
+            recipes=recipes,
+            map_fn=map_fn,
+            settings=ref.self_map_rule_settings(config),
+            species=spec.species,
+            floor_table=load_floor_table(spec.species),
+            cells_rules=rules,
+        )
+        unfiltered_cells, unfiltered_decisions = result.cells, result.decisions
     mapping_wall = time.monotonic() - started
     prefiltered_cells = pd.read_parquet(bundle_dir / res.RESOLVABILITY_CELLS_FILE)
     comparison = compare_calls(
         prefiltered_cells,
-        result.cells,
+        unfiltered_cells,
         reference_id=reference_id,
         emitted_levels=emitted_levels,
         recipe=recipes[0].name,
+        member=member,
     )
-    unfiltered_predicted = predicted_levels(result.decisions, reference_id, regime)
+    if member is not None:
+        # The member's own decisions on both lookups (the ensemble needs
+        # every member).
+        table = pd.read_parquet(bundle_dir / res.RESOLVABILITY_FILE)
+        own = table[
+            (table["kind"].astype(str) == "member_decision")
+            & (table["member"].astype(str) == member)
+        ]
+        predicted = predicted_levels(own, reference_id, regime)
+    unfiltered_predicted = predicted_levels(unfiltered_decisions, reference_id, regime)
     unfiltered_predicted.to_csv(
         out_dir / "predicted_levels_unfiltered.csv", index=False
     )
