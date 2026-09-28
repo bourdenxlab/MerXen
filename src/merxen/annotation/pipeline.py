@@ -387,10 +387,48 @@ def map_bundles(
     return runs
 
 
+def _prefilter_matches(manifest: Mapping[str, Any], config: AnnotationConfig) -> bool:
+    """Whether a bundle's large-panel prefilter is the one a run config asks for.
+
+    A large panel may have two bundles, built with and without the per-parent
+    marker prefilter (its method, version and settings enter
+    ``build_hash_payload["large_panel_prefilter"]``; ``None`` without it).
+    The run config asks for none when ``large_panel_marker_prefilter`` is
+    ``none`` or the panel has at most ``large_panel_genes`` genes, else for
+    its method and cap (M3b review 2).
+    """
+    payload = manifest.get("build_hash_payload") or {}
+    prefilter = payload.get("large_panel_prefilter")
+    panel = payload.get("panel") or {}
+    n_genes = panel.get("n_genes") if isinstance(panel, Mapping) else None
+    wanted = (
+        config.panel.large_panel_marker_prefilter != "none"
+        and isinstance(n_genes, int)
+        and n_genes > config.panel.large_panel_genes
+    )
+    if not wanted:
+        return prefilter is None
+    if not isinstance(prefilter, Mapping):
+        return False
+    settings = prefilter.get("settings") or {}
+    return bool(
+        prefilter.get("method") == config.panel.large_panel_marker_prefilter
+        and isinstance(settings, Mapping)
+        and settings.get("cap") == config.panel.large_panel_prefilter_cap
+    )
+
+
 def _current_bundles(
-    store: ReferenceStore, reference_id: str, panel_hash: str | None
+    store: ReferenceStore,
+    reference_id: str,
+    panel_hash: str | None,
+    config: AnnotationConfig | None = None,
 ) -> list[StoreEntry]:
-    """Complete current-builder bundles of a reference on a panel (store entries)."""
+    """Complete current-builder bundles of a reference on a panel (store entries).
+
+    With ``config``, only bundles built with the large-panel prefilter the
+    config asks for (``_prefilter_matches``).
+    """
     candidates = []
     for entry in store.list():
         if (
@@ -405,6 +443,7 @@ def _current_bundles(
         if (
             manifest.get("builder_version") == ANNOTATION_BUILDER_VERSION
             and manifest.get("schema_version") == STORE_SCHEMA_VERSION
+            and (config is None or _prefilter_matches(manifest, config))
         ):
             candidates.append(entry)
     return candidates
@@ -439,19 +478,26 @@ def _prefer_current_resolvability(candidates: list[StoreEntry]) -> list[StoreEnt
 
 
 def locate_bundle(
-    store: ReferenceStore, reference_id: str, panel_hash: str | None
+    store: ReferenceStore,
+    reference_id: str,
+    panel_hash: str | None,
+    *,
+    config: AnnotationConfig | None = None,
 ) -> MmcBundle:
     """Find the current-builder bundle of a reference on a panel in a store.
 
     Standalone runs do not know the source files PREP hashed, so the bundle
     is found by ``(reference_id, panel_hash)`` among the complete bundles
-    built by the current builder and store schema versions; of several, the
-    one whose self-map tables have the current ``RESOLVABILITY_VERSION``.
+    built by the current builder and store schema versions (and, with
+    ``config``, with the large-panel prefilter it asks for: a 5K panel has a
+    bundle with and one without it); of several, the one whose self-map
+    tables have the current ``RESOLVABILITY_VERSION``.
 
     Args:
         store: The reference store.
         reference_id: Store id.
         panel_hash: Declared-panel hash.
+        config: The run's annotation config (large-panel prefilter).
 
     Returns:
         The bundle.
@@ -460,7 +506,7 @@ def locate_bundle(
         MapError: If there is none, or several (pass the bundle explicitly).
     """
     candidates = _prefer_current_resolvability(
-        _current_bundles(store, reference_id, panel_hash)
+        _current_bundles(store, reference_id, panel_hash, config)
     )
     if not candidates:
         raise MapError(
@@ -1992,7 +2038,9 @@ def _subset_bundle_for(
     return replace(run, bundle=found, panel=subset, panel_name=subset.name), record
 
 
-def store_subset_bundle_finder(store: ReferenceStore) -> SubsetBundleFinder:
+def store_subset_bundle_finder(
+    store: ReferenceStore, config: AnnotationConfig | None = None
+) -> SubsetBundleFinder:
     """Return a finder of subset bundles in a store (standalone MAP only).
 
     A pipeline MAP task never uses it (``--require-bundle-refs``): its
@@ -2000,6 +2048,7 @@ def store_subset_bundle_finder(store: ReferenceStore) -> SubsetBundleFinder:
 
     Args:
         store: The reference store.
+        config: The run's annotation config (large-panel prefilter).
 
     Returns:
         ``(reference_id, panel_hash) -> MmcBundle | None``: the store's one
@@ -2012,7 +2061,7 @@ def store_subset_bundle_finder(store: ReferenceStore) -> SubsetBundleFinder:
 
     def find(reference_id: str, panel_hash: str) -> MmcBundle | None:
         candidates = _prefer_current_resolvability(
-            _current_bundles(store, reference_id, panel_hash)
+            _current_bundles(store, reference_id, panel_hash, config)
         )
         if not candidates:
             return None

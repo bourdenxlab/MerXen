@@ -1074,7 +1074,7 @@ def _annotate(
             )
         elif reference_store is not None:
             bundles[key] = locate_bundle(
-                reference_store, item.reference_id, item.panel_hash
+                reference_store, item.reference_id, item.panel_hash, config=config
             )
         else:
             raise click.UsageError(
@@ -1102,7 +1102,7 @@ def _annotate(
         # resolved and Nextflow staged: a subset bundle it lacks stays a
         # recorded request, never a store lookup behind -resume's back.
         find_subset_bundle=(
-            store_subset_bundle_finder(reference_store)
+            store_subset_bundle_finder(reference_store, config)
             if reference_store is not None and not require_bundle_refs
             else None
         ),
