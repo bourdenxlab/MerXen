@@ -2651,6 +2651,72 @@ def current_store_bundles(store: ReferenceStore) -> BundleFinder:
     return find
 
 
+def staged_bundle_finder(
+    ref_paths: Sequence[Path | str],
+    manifest: MapManifest,
+    *,
+    require: bool = False,
+) -> BundleFinder:
+    """Return a finder of the bundles that PREP's ``bundle_ref.json`` files name.
+
+    A pipeline RESOLVE task (``CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE``) resolves
+    each run with the bundle ref Nextflow staged for its (reference, panel),
+    the one MAP mapped with, and never looks in the store: a bundle the task
+    did not stage is invisible to ``-resume`` (as MAP's
+    ``--require-bundle-refs``).
+
+    Args:
+        ref_paths: ``bundle_ref.json`` files.
+        manifest: The MAP manifest whose runs they must cover.
+        require: Every run must have a ref with the ``build_hash`` it mapped
+            with; without it a run no ref names keeps its own bundle and a
+            ref of another build acts as an override (whose marker lookup
+            ``load_resolve_runs`` still checks).
+
+    Returns:
+        The finder.
+
+    Raises:
+        ResolveError: If two refs name one (reference, panel) with different
+            builds or, with ``require``, a run has no ref or was mapped with
+            another build than its ref's (a stale MAP output).
+    """
+    refs: dict[tuple[str, str | None], BundleRef] = {}
+    for path in ref_paths:
+        ref = BundleRef.model_validate_json(Path(path).read_text(encoding="utf-8"))
+        key = (ref.reference_id, ref.panel_hash)
+        known = refs.get(key)
+        if known is not None and known.build_hash != ref.build_hash:
+            raise ResolveError(
+                f"two bundle refs name {ref.reference_id} on panel "
+                f"{str(ref.panel_hash)[:16]} with different builds "
+                f"({known.build_hash[:16]}, {ref.build_hash[:16]})"
+            )
+        refs[key] = ref
+    if require:
+        for sample in manifest.samples.values():
+            for run in sample.runs.values():
+                staged = refs.get((run.reference_id, run.panel_hash))
+                if staged is None:
+                    raise ResolveError(
+                        f"{sample.sample_id} run {run.run_id} mapped "
+                        f"{run.reference_id} on panel {str(run.panel_hash)[:16]}, "
+                        "but no bundle ref names that bundle"
+                    )
+                if staged.build_hash != run.build_hash:
+                    raise ResolveError(
+                        f"{sample.sample_id} run {run.run_id} was mapped with "
+                        f"bundle {run.build_hash[:16]}, but the staged bundle ref "
+                        f"is {staged.build_hash[:16]}: the MAP output is stale"
+                    )
+
+    def find(reference_id: str, panel_hash: str | None) -> Path | None:
+        found = refs.get((reference_id, panel_hash))
+        return None if found is None else Path(found.path)
+
+    return find
+
+
 def _resolve_bundle(
     record: MapRunRecord,
     overrides: Mapping[str, Path],
@@ -4040,6 +4106,7 @@ def annotate_resolve(
     bundle_finder: BundleFinder | None = None,
     n_segmented: Mapping[str, int] | None = None,
     alignment_dir: Path | str | None = None,
+    lookup_alignment: bool = True,
     trust_overrides: Mapping[str, TrustDecision] | None = None,
     platforms: Sequence[str] | None = None,
     tile_um: float = 500.0,
@@ -4076,6 +4143,10 @@ def annotate_resolve(
         alignment_dir: ``align_out`` of the pair (shared tissue mask; default:
             ``<results>/<pair>/alignment/align_out`` when the inputs sit in a
             results tree).
+        lookup_alignment: Look up that default when ``alignment_dir`` is not
+            given. A pipeline task passes ``False``: its mask comes only from
+            ALIGN's channel, never from a published file ALIGN may still be
+            rewriting (as ``ANNOTATE_PANEL``, plan §3.2).
         trust_overrides: Trust decision per reference id.
         platforms: Resolve only these platforms.
         tile_um: Block-bootstrap tile edge.
@@ -4245,7 +4316,7 @@ def annotate_resolve(
         align: Path | None = None
         if alignment_dir is not None:
             align = Path(alignment_dir)
-        else:
+        elif lookup_alignment:
             source_path = next(
                 (item.h5ad_path for item in inputs if item.platform == "MERSCOPE"),
                 None,

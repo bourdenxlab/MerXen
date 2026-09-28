@@ -652,7 +652,10 @@ run ids.
 
 The annotation RESOLVE step (plan §3.4; M4): turns a MAP output
 (`map_manifest.json` and its tidy parquets) into the per-cell label tables,
-standalone on published MAP outputs. It reads each sample's counts from the
+standalone on published MAP outputs or as the `CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE`
+pipeline task (which passes `--prepared-dir`, `--clustering-config`,
+`--bundle-ref` per staged ref, `--require-bundle-refs` and
+`--no-alignment-lookup`). It reads each sample's counts from the
 manifest's inputs (or `--prepared-dir`), checks them against the sample
 fingerprint MAP recorded, applies resolvability-gated emission reweighted to
 the dataset's soft composition, the floors, the dataset gate, the
@@ -680,11 +683,15 @@ merxen annotate-resolve \
 | `--panel-dir DIR` | `annotation-panel` output (default `<map-dir>/panel`): the panel files (trust diagnostics, the flags' query genes), `panel_report.json` and `required_bundles.json`. Each panel's family is re-derived from the current `validated_panels.csv`. |
 | `--bundle KEY=DIR` | Resolve a run (`KEY` = run id or reference id) with this bundle; it must be of the run's reference and panel and have the marker lookup the run mapped with. |
 | `--current-bundles --store DIR [--store-large DIR]` | Resolve every run with the store's current bundle of its reference and panel (current builder, current resolvability tables), under the same checks. |
+| `--bundle-ref PATH` | A `bundle_ref.json` of `annotation-reference-prep` (repeatable): each run is resolved with the bundle of the ref of its reference and panel; a run no ref names keeps its own bundle, and a ref of another build is an override under the same checks. |
+| `--require-bundle-refs` | Every run must have a `--bundle-ref` with the `build_hash` it mapped with (else the MAP output is stale and the command fails): no store lookup and no override (`--bundle`, `--current-bundles` are refused), as a pipeline task. |
 | `--prepared-dir DIR` | Read the counts from these prepared H5ADs instead of the manifest's inputs (a refused panel, whose manifest lists no sample, needs it). |
+| `--clustering-config PATH` | With `--prepared-dir`: the `clustering_squidpy_config.json` MAP read. Its sample platforms are used as MAP used them, and its `min_counts` and `pair_id` must be the MAP manifest's. |
 | `--gene-id-fallback-csv PATH` | The gene-ID fallback table MAP used (otherwise the counts do not fingerprint the same). |
 | `--n-segmented SID=N` | Segmented objects of a sample: the denominator of the segmented-object gate warning (a published clustered H5AD holds table cells only). |
 | `--alignment-dir DIR` | The pair's `align_out` (shared tissue mask); default `<results>/<pair>/alignment/align_out` of the inputs' results tree, when present. |
-| `--annotation-config PATH`, `--species` | `AnnotationConfig` JSON; the species defaults to the manifest's (mouse RESOLVE is M6). |
+| `--no-alignment-lookup` | Never take that default: the mask comes only from `--alignment-dir` (a pipeline task gets it from ALIGN's channel, never from a published file ALIGN may still be writing). |
+| `--annotation-config PATH`, `--species` | `AnnotationConfig` JSON; the species defaults to the manifest's (mouse RESOLVE is M6: a mouse MAP output fails with a clean error). |
 | `--platforms`, `--n-bootstrap`, `--tile-um`, `--seed`, `--results-root` | Resolve only these platforms; block-bootstrap replicates (200), tile edge (500 µm) and seed (0); a results tree `--out` must stay out of. |
 
 ## Writing a standalone config

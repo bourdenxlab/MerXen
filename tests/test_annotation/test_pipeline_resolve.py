@@ -52,7 +52,7 @@ from merxen.annotation.schema import (
     soft_columns,
     validate_label_table,
 )
-from merxen.annotation.store import file_sha256
+from merxen.annotation.store import BundleRef, file_sha256
 from merxen.cli import main as cli_main
 
 from .conftest import FakeMmc
@@ -866,6 +866,195 @@ def test_a_bundle_override_must_describe_the_same_mapping(
         _resolve(
             setup, make_trust, "g", bundle_overrides={"whb_frontal_supc_clus": sea}
         )
+
+
+def _bundle_ref(bundle: MmcBundle, path: Path, **updates: Any) -> Path:
+    fields: dict[str, Any] = {
+        "reference_id": bundle.reference_id,
+        "species": bundle.species,
+        "role": bundle.role,
+        "panel_hash": bundle.panel_hash,
+        "build_hash": bundle.build_hash,
+        "path": str(bundle.path),
+        "store_root": str(bundle.path.parent.parent),
+    }
+    return BundleRef(**{**fields, **updates}).write(path)
+
+
+def test_staged_bundle_refs_resolve_with_the_bundles_map_used(
+    tmp_path: Path, fake_mmc: FakeMmc, make_trust: MakeTrust
+) -> None:
+    """A pipeline task resolves with exactly its staged refs (no store lookup)."""
+    setup = _setup(tmp_path, fake_mmc)
+    manifest = pl.load_map_manifest(setup.map_dir / MAP_MANIFEST_NAME)
+    refs = [
+        _bundle_ref(bundle, tmp_path / "refs" / f"{name}.json")
+        for name, bundle in setup.bundles.items()
+    ]
+    finder = pl.staged_bundle_finder(refs, manifest, require=True)
+    assert finder("whb_frontal_supc_clus", setup.panel.panel_hash) == (
+        setup.bundles["whb_frontal_supc_clus"].path
+    )
+    assert finder("whb_frontal_supc_clus", "0" * 64) is None
+    result = _resolve(setup, make_trust, "staged", bundle_finder=finder)
+    for sample in result.samples.values():
+        references = sample.provenance.references
+        assert references["whb_frontal_supc_clus"].build_hash == (
+            setup.bundles["whb_frontal_supc_clus"].build_hash
+        )
+
+    # A run without a staged ref, a stale MAP output, conflicting refs.
+    with pytest.raises(ResolveError, match="no bundle ref names"):
+        pl.staged_bundle_finder(refs[:1], manifest, require=True)
+    assert pl.staged_bundle_finder(refs[:1], manifest)("seaad_mr_panel", None) is None
+    stale = _bundle_ref(
+        setup.bundles["seaad_mr_panel"], tmp_path / "stale.json", build_hash="e" * 64
+    )
+    with pytest.raises(ResolveError, match="MAP output is stale"):
+        pl.staged_bundle_finder([refs[0], stale], manifest, require=True)
+    with pytest.raises(ResolveError, match="different builds"):
+        pl.staged_bundle_finder([*refs, stale], manifest)
+
+
+def test_resolve_never_looks_up_a_published_mask_when_told_not_to(
+    tmp_path: Path,
+    fake_mmc: FakeMmc,
+    make_trust: MakeTrust,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    setup = _setup(tmp_path, fake_mmc)
+    looked_up: list[Path] = []
+
+    def lookup(h5ad_path: Path, pair_id: str | None) -> Path | None:
+        looked_up.append(Path(h5ad_path))
+        return None
+
+    monkeypatch.setattr(pl, "default_alignment_dir", lookup)
+    _resolve(setup, make_trust, "no_lookup", lookup_alignment=False, n_bootstrap=5)
+    assert looked_up == []
+    _resolve(setup, make_trust, "lookup", n_bootstrap=5)
+    assert len(looked_up) == 1
+
+
+def _prepared_manifest(setup: Setup) -> Path:
+    prepared = setup.root / "prepared"
+    entries = {
+        sample.sample_id: str(sample.h5ad_path.relative_to(prepared))
+        for sample in setup.samples
+    }
+    (prepared / "manifest.json").write_text(json.dumps({"samples": entries}))
+    return prepared
+
+
+def test_cli_annotate_resolve_runs_as_the_pipeline_task(
+    tmp_path: Path, fake_mmc: FakeMmc
+) -> None:
+    """The arguments CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE passes (plan §3.4)."""
+    setup = _setup(tmp_path, fake_mmc, coverage=True)
+    prepared = _prepared_manifest(setup)
+    clustering = tmp_path / "clustering_squidpy_config.json"
+    samples = [
+        {"sample_id": sample.sample_id, "platform": sample.platform}
+        for sample in setup.samples
+    ]
+    clustering.write_text(
+        json.dumps({"pair_id": "PX", "min_counts": 10, "samples": samples})
+    )
+    refs = [
+        _bundle_ref(bundle, tmp_path / "refs" / f"bundle_ref_{index}.json")
+        for index, bundle in enumerate(setup.bundles.values(), start=1)
+    ]
+    base = [
+        "annotate-resolve",
+        "--map-dir",
+        str(setup.map_dir),
+        "--panel-dir",
+        str(setup.panel_dir),
+        "--prepared-dir",
+        str(prepared),
+        "--clustering-config",
+        str(clustering),
+        "--require-bundle-refs",
+        "--no-alignment-lookup",
+        "--n-bootstrap",
+        "5",
+    ]
+    ref_args = [item for ref in refs for item in ("--bundle-ref", str(ref))]
+    output = tmp_path / "task_out"
+
+    result = CliRunner().invoke(cli_main, [*base, *ref_args, "--out", str(output)])
+
+    assert result.exit_code == 0, result.output
+    summary = json.loads((output / "PX_resolve_summary.json").read_text())
+    assert set(summary["samples"]) == {"PX_MERSCOPE", "PX_XENIUM"}
+    assert summary["pair"]["alignment_dir"] is None
+    for sample in setup.samples:
+        assert (
+            output
+            / sample.platform.lower()
+            / f"{sample.sample_id}_celltype_labels.parquet"
+        ).is_file()
+
+    missing = CliRunner().invoke(
+        cli_main, [*base, "--bundle-ref", str(refs[0]), "--out", str(tmp_path / "m")]
+    )
+    assert missing.exit_code != 0
+    assert "no bundle ref names" in missing.output
+    clustering.write_text(json.dumps({"pair_id": "PX", "min_counts": 20}))
+    other = CliRunner().invoke(
+        cli_main, [*base, *ref_args, "--out", str(tmp_path / "o")]
+    )
+    assert other.exit_code != 0
+    assert "min_counts 20" in other.output
+    clustering.write_text(json.dumps({"pair_id": "PY", "min_counts": 10}))
+    other_pair = CliRunner().invoke(
+        cli_main, [*base, *ref_args, "--out", str(tmp_path / "p")]
+    )
+    assert other_pair.exit_code != 0
+    assert "pair PY" in other_pair.output
+    for extra in (["--current-bundles"], ["--bundle", f"seaad_mr_panel={refs[1]}"]):
+        conflict = CliRunner().invoke(
+            cli_main, [*base, *ref_args, *extra, "--out", str(tmp_path / "c")]
+        )
+        assert conflict.exit_code != 0
+        assert "--require-bundle-refs" in conflict.output
+    alone = CliRunner().invoke(
+        cli_main,
+        [
+            "annotate-resolve",
+            "--map-dir",
+            str(setup.map_dir),
+            "--clustering-config",
+            str(clustering),
+            "--out",
+            str(tmp_path / "a"),
+        ],
+    )
+    assert alone.exit_code != 0
+    assert "--clustering-config goes with --prepared-dir" in alone.output
+
+
+def test_cli_annotate_resolve_refuses_mouse_cleanly(
+    tmp_path: Path, fake_mmc: FakeMmc
+) -> None:
+    setup = _setup(tmp_path, fake_mmc)
+    manifest = pl.load_map_manifest(setup.map_dir / MAP_MANIFEST_NAME)
+    manifest.model_copy(update={"species": "mouse"}).write(
+        setup.map_dir / MAP_MANIFEST_NAME
+    )
+    result = CliRunner().invoke(
+        cli_main,
+        [
+            "annotate-resolve",
+            "--map-dir",
+            str(setup.map_dir),
+            "--out",
+            str(tmp_path / "mouse"),
+        ],
+    )
+    assert result.exit_code == 1
+    assert "NotImplementedError: mouse RESOLVE rules are M6" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
 
 
 def test_cli_annotate_resolve_runs_on_map_outputs(
