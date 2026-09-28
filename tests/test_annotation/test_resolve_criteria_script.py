@@ -437,6 +437,7 @@ def test_h2_breakdown_splits_the_implausible_calls_by_node(
         for row in criteria.h2_breakdown(dataclasses.replace(sample, labels=labels))
     }
     assert rows["all"]["n"] == 3
+    assert rows["all"]["lineage_confident_share"] == pytest.approx(2 / 3)
     assert rows["all"]["share_table"] == pytest.approx(3 / 8)
     amygdala = rows["Amygdala excitatory"]
     assert amygdala["kind"] == "region_implausible"
@@ -601,8 +602,8 @@ def test_h4_summary_counts_classes_passing(criteria: ModuleType) -> None:
             "fold": [5.0] * 21,
             "auroc": [0.8] * 6 + [0.6] + [0.6] * 7 + [0.8] * 7,
             "passes": [True] * 6 + [False] + [False] * 7 + [True] * 7,
-            # c6 of P7513 fails at its ceiling (0.1 + 0.5 * 0.9 * 1.0 = 0.55).
-            "detection_assigned": [0.9] * 6 + [0.1] + [0.9] * 7 + [0.9] * 7,
+            # c6 of P7513 fails at its ceiling (0.2 + 0.5 * 0.8 * 1.0 = 0.6).
+            "detection_assigned": [0.9] * 6 + [0.2] + [0.9] * 7 + [0.9] * 7,
             "detection_other": [0.1] * 6 + [0.0] + [0.1] * 7 + [0.1] * 7,
         }
     )
