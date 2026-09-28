@@ -66,6 +66,7 @@ This module needs numpy, pandas and scipy only; MapMyCells runs through the
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -113,7 +114,15 @@ logger = logging.getLogger(__name__)
 # (``would_raise_evaluable``); PREP decides on the stored (float32) cells;
 # the human held-out test set drops truth superclusters no production call
 # can name (sinks, no floor class, region-implausible; E2).
-RESOLVABILITY_VERSION: Final = 4
+# 5 (M3b final follow-up, 2026-09-28): every simulation draw is keyed by
+# what it simulates (``draw_key``: the seed, the recipe name and version,
+# the cell id, the depth; the gene id for the gene efficiency) instead of
+# one stream over all test cells, and the spill partner is chosen by
+# rendezvous hashing, so adding or removing test cells no longer redraws
+# every other cell (review 2: the redraw moved 0-7 validated bins per
+# dataset); the human held-out test set's other-region cells come only from
+# clusters of the held-out training reference (user decision 2026-09-27).
+RESOLVABILITY_VERSION: Final = 5
 SUMMARY_SCHEMA_VERSION: Final = 1
 RESOLVABILITY_FILE: Final = "resolvability.parquet"
 RESOLVABILITY_CELLS_FILE: Final = "resolvability_cells.parquet"
@@ -124,6 +133,17 @@ TEST_CELLS_OBS_FILE: Final = "test_cells.parquet"
 DECISION_RECIPE: Final = "R1_contam_HO"
 CLEAN_RECIPE: Final = "clean"
 RECIPE_VERSIONS: Final[dict[str, int]] = {DECISION_RECIPE: 1, CLEAN_RECIPE: 1}
+# Keyed simulation draws (version 5; ``draw_key``): the streams of one
+# simulated cell (its thinning, its spill partner and the spill's thinning)
+# and of one gene (its efficiency).
+DRAW_KEY_BYTES: Final = 16
+DRAW_STREAM_THIN: Final = "thin"
+DRAW_STREAM_PARTNER: Final = "partner"
+DRAW_STREAM_SPILL: Final = "spill"
+DRAW_STREAM_CANDIDATE: Final = "candidate"
+DRAW_STREAM_GENE_EFFICIENCY: Final = "gene_efficiency"
+# Host x candidate scores per block of the rendezvous partner choice.
+_RENDEZVOUS_BLOCK_SCORES: Final = 1 << 22
 
 # Test-cell columns (``test_cells.parquet`` / ``test_cells.h5ad`` obs).
 TRUTH_PREFIX: Final = "truth__"
@@ -464,22 +484,119 @@ def simulation_recipes(
     ]
 
 
-def gene_efficiency(n_genes: int, sigma: float | None, seed: int) -> np.ndarray:
-    """Return per-gene detection efficiencies, LogNormal(0, sigma) / median.
+def draw_key(*parts: object) -> int:
+    """Return the stable 128-bit key of a simulation draw (BLAKE2b of ``parts``).
+
+    The key depends only on the text of ``parts`` (never on Python's hash
+    seed, the platform or the other test cells), so a draw keyed by what it
+    simulates is the same in every build that simulates it.
 
     Args:
-        n_genes: Genes.
-        sigma: LogNormal sigma (``None``: all ones).
-        seed: Seed (one draw per self-map, fixed across depths and cells, as
-            E2's ``gene_efficiency.npy``).
+        parts: What identifies the draw (seed, recipe name and version, cell
+            or gene id, depth, stream).
 
     Returns:
-        Efficiencies with median 1.
+        A non-negative integer below ``2**128`` (a ``numpy`` seed).
     """
-    if sigma is None or n_genes == 0:
-        return np.ones(n_genes, dtype=np.float64)
-    rng = np.random.default_rng([int(seed), 0x6566])
-    values = np.exp(rng.normal(0.0, float(sigma), n_genes))
+    text = "\x1f".join(str(part) for part in parts)
+    digest = hashlib.blake2b(text.encode("utf-8"), digest_size=DRAW_KEY_BYTES)
+    return int.from_bytes(digest.digest(), "big")
+
+
+def cell_draw_key(
+    recipe: SimulationRecipe, cell_id: str, depth: int, stream: str
+) -> int:
+    """Return the key of one stream of one simulated cell (version 5).
+
+    Args:
+        recipe: The recipe (its seed, name and version enter the key).
+        cell_id: The test cell.
+        depth: The grid value the cell is thinned to.
+        stream: ``thin``, ``partner`` or ``spill``.
+
+    Returns:
+        The ``draw_key``.
+    """
+    return draw_key(
+        int(recipe.seed), recipe.name, int(recipe.version), cell_id, int(depth), stream
+    )
+
+
+def _key64(key: int) -> np.uint64:
+    return np.uint64(key & 0xFFFFFFFFFFFFFFFF)
+
+
+def _mix64(values: np.ndarray) -> np.ndarray:
+    """Return the splitmix64 finaliser of uint64 values (vectorised)."""
+    with np.errstate(over="ignore"):
+        mixed = values + np.uint64(0x9E3779B97F4A7C15)
+        mixed = (mixed ^ (mixed >> np.uint64(30))) * np.uint64(0xBF58476D1CE4E5B9)
+        mixed = (mixed ^ (mixed >> np.uint64(27))) * np.uint64(0x94D049BB133111EB)
+        return np.asarray(mixed ^ (mixed >> np.uint64(31)), dtype=np.uint64)
+
+
+def rendezvous_choice(host_keys: np.ndarray, candidate_keys: np.ndarray) -> np.ndarray:
+    """Choose one candidate per host by rendezvous (highest-random-weight) hashing.
+
+    Each (host, candidate) pair gets a pseudo-random score from the two
+    keys alone and a host takes the candidate with the highest score, so
+    the choice is uniform over the candidates and does not depend on their
+    order; removing a candidate changes only the hosts that had chosen it,
+    and adding one changes only the hosts it outranks.
+
+    Args:
+        host_keys: One uint64 key per host.
+        candidate_keys: One uint64 key per candidate (at least one).
+
+    Returns:
+        Per host, the position of the chosen candidate in ``candidate_keys``.
+
+    Raises:
+        ResolvabilityError: If there is no candidate.
+    """
+    hosts = np.asarray(host_keys, dtype=np.uint64)
+    candidates = np.asarray(candidate_keys, dtype=np.uint64)
+    if len(candidates) == 0:
+        raise ResolvabilityError("rendezvous_choice needs at least one candidate")
+    chosen = np.empty(len(hosts), dtype=np.int64)
+    block = max(1, _RENDEZVOUS_BLOCK_SCORES // len(candidates))
+    mixed_candidates = _mix64(candidates)
+    for start in range(0, len(hosts), block):
+        scores = _mix64(hosts[start : start + block, None] ^ mixed_candidates[None, :])
+        chosen[start : start + block] = np.argmax(scores, axis=1)
+    return chosen
+
+
+def gene_efficiency(genes: Sequence[str], sigma: float | None, seed: int) -> np.ndarray:
+    """Return per-gene detection efficiencies, LogNormal(0, sigma) / median.
+
+    One draw per gene, fixed across depths, cells and recipes, as E2's
+    ``gene_efficiency.npy``: it models a platform's per-gene detection bias,
+    which every cell shares. Each gene's standard normal is keyed by the seed
+    and the gene id (version 5; ``draw_key``), so it does not depend on the
+    other panel genes, and a recipe with another sigma (a gate-P stress
+    recipe) scales the same normals.
+
+    Args:
+        genes: Gene ids (the test cells' columns).
+        sigma: LogNormal sigma (``None``: all ones).
+        seed: The simulation seed.
+
+    Returns:
+        Efficiencies with median 1, in ``genes`` order.
+    """
+    if sigma is None or len(genes) == 0:
+        return np.ones(len(genes), dtype=np.float64)
+    normals = np.array(
+        [
+            np.random.default_rng(
+                draw_key(int(seed), DRAW_STREAM_GENE_EFFICIENCY, str(gene))
+            ).standard_normal()
+            for gene in genes
+        ],
+        dtype=np.float64,
+    )
+    values = np.exp(float(sigma) * normals)
     return np.asarray(values / np.median(values), dtype=np.float64)
 
 
@@ -487,16 +604,24 @@ def _thin_rows(
     matrix: sparse.csr_matrix,
     targets: np.ndarray,
     efficiency: np.ndarray,
-    rng: np.random.Generator,
+    keys: Sequence[int],
 ) -> sparse.csr_matrix:
     """Thin each row binomially to an expected total (E2 ``thin``).
 
     ``p_g = min(1, D * e_g / sum_g(x_g * e_g))`` per row, then
-    ``Binomial(x_g, p_g)``; rows are never raised.
+    ``Binomial(x_g, p_g)``; rows are never raised. Row ``i`` is drawn from
+    its own generator seeded by ``keys[i]`` over its entries in gene order,
+    so its result depends on nothing but the row, its target and its key.
     """
     from scipy import sparse as sp
 
     work = sp.csr_matrix(matrix, dtype=np.float64, copy=True)
+    work.sum_duplicates()
+    work.eliminate_zeros()
+    if len(keys) != work.shape[0]:
+        raise ResolvabilityError(
+            f"thinning: {len(keys)} draw keys for {work.shape[0]} rows"
+        )
     rows = np.repeat(np.arange(work.shape[0]), np.diff(work.indptr))
     weighted = np.asarray(
         work.multiply(efficiency[None, :]).sum(axis=1), dtype=np.float64
@@ -504,7 +629,14 @@ def _thin_rows(
     scale = np.asarray(targets, dtype=np.float64) / np.maximum(weighted, 1e-12)
     probability = np.clip(scale[rows] * efficiency[work.indices], 0.0, 1.0)
     counts = work.data.astype(np.int64)
-    thinned = rng.binomial(counts, probability)
+    thinned = np.zeros(len(counts), dtype=np.int64)
+    indptr = work.indptr
+    for row, key in enumerate(keys):
+        start, stop = int(indptr[row]), int(indptr[row + 1])
+        if stop > start:
+            thinned[start:stop] = np.random.default_rng(int(key)).binomial(
+                counts[start:stop], probability[start:stop]
+            )
     result = sp.csr_matrix(
         (thinned.astype(np.float64), work.indices.copy(), work.indptr.copy()),
         shape=work.shape,
@@ -631,8 +763,18 @@ def thin_and_contaminate(
     random cell of another spill group (broad class) whose native counts
     reach that amount; truth stays the host cell's. ``clean`` thins only.
 
+    Every draw is keyed by what it simulates (resolvability version 5;
+    ``cell_draw_key``: the recipe's seed, name and version, the host cell id
+    and ``D``): the host's thinning and the spill's thinning each come from
+    the host's own generator, and the spill partner is the eligible cell
+    with the highest rendezvous score (``rendezvous_choice``; uniform over
+    the eligible cells). A simulated cell therefore does not depend on the
+    other test cells or their order: removing or adding test cells changes
+    it only when its partner is removed or an added eligible cell outranks
+    that partner (``clean``: never).
+
     Args:
-        test: Test cells.
+        test: Test cells (unique cell ids).
         depths: Depth grid.
         recipe: Recipe.
 
@@ -640,18 +782,24 @@ def thin_and_contaminate(
         The simulated query.
 
     Raises:
-        ResolvabilityError: If a spill recipe has cells of a single group.
+        ResolvabilityError: If the cell ids are not unique, or a spill recipe
+            has cells of a single group.
     """
     from scipy import sparse as sp
 
-    efficiency = gene_efficiency(
-        len(test.genes), recipe.gene_efficiency_sigma, recipe.seed
-    )
-    rng = np.random.default_rng([int(recipe.seed), zlib.crc32(recipe.name.encode())])
+    if not test.obs.index.is_unique:
+        raise ResolvabilityError(
+            "test cell ids must be unique (they key the simulation draws)"
+        )
+    efficiency = gene_efficiency(test.genes, recipe.gene_efficiency_sigma, recipe.seed)
     native = test.native_counts
     groups = test.obs[SPILL_GROUP_COLUMN].astype(str).to_numpy()
     cell_ids = test.obs.index.astype(str).to_numpy()
     counts = sp.csr_matrix(test.counts)
+    candidate_keys = np.array(
+        [_key64(draw_key(DRAW_STREAM_CANDIDATE, cell_id)) for cell_id in cell_ids],
+        dtype=np.uint64,
+    )
     blocks: list[sp.csr_matrix] = []
     frames: list[pd.DataFrame] = []
     n_by_depth: dict[int, int] = {}
@@ -660,8 +808,15 @@ def thin_and_contaminate(
         n_by_depth[depth] = int(len(hosts))
         if len(hosts) == 0:
             continue
+        host_ids = [str(cell_id) for cell_id in cell_ids[hosts]]
         host_counts = _thin_rows(
-            counts[hosts], np.full(len(hosts), float(depth)), efficiency, rng
+            counts[hosts],
+            np.full(len(hosts), float(depth)),
+            efficiency,
+            [
+                cell_draw_key(recipe, cell_id, depth, DRAW_STREAM_THIN)
+                for cell_id in host_ids
+            ],
         )
         partner_ids = np.full(len(hosts), "", dtype=object)
         spill = sp.csr_matrix(host_counts.shape, dtype=np.float64)
@@ -669,6 +824,13 @@ def thin_and_contaminate(
             amount = recipe.spill_fraction * depth
             donors = np.flatnonzero(native >= amount)
             partners = np.empty(len(hosts), dtype=np.int64)
+            host_keys = np.array(
+                [
+                    _key64(cell_draw_key(recipe, cell_id, depth, DRAW_STREAM_PARTNER))
+                    for cell_id in host_ids
+                ],
+                dtype=np.uint64,
+            )
             for group in np.unique(groups[hosts]):
                 is_host = groups[hosts] == group
                 candidates = donors[groups[donors] != group]
@@ -677,10 +839,16 @@ def thin_and_contaminate(
                         f"no spill donor outside group {group!r} at depth {depth}"
                     )
                 partners[is_host] = candidates[
-                    rng.integers(0, len(candidates), int(is_host.sum()))
+                    rendezvous_choice(host_keys[is_host], candidate_keys[candidates])
                 ]
             spill = _thin_rows(
-                counts[partners], np.full(len(hosts), amount), efficiency, rng
+                counts[partners],
+                np.full(len(hosts), amount),
+                efficiency,
+                [
+                    cell_draw_key(recipe, cell_id, depth, DRAW_STREAM_SPILL)
+                    for cell_id in host_ids
+                ],
             )
             partner_ids = cell_ids[partners].astype(object)
         simulated = (host_counts + spill).tocsr()
@@ -3812,7 +3980,7 @@ def run_resolvability(
         f" ({'; '.join(trust.reasons)})" if trust.reasons else "",
     )
     efficiency = gene_efficiency(
-        len(test.genes), decision_recipe.gene_efficiency_sigma, decision_recipe.seed
+        test.genes, decision_recipe.gene_efficiency_sigma, decision_recipe.seed
     )
     extra = [
         pd.DataFrame(

@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "8c2cf954a45458c2f360cd8d3ceaa0078434eebea1067c9899edda51018dca15",
+    3: "a1b2412f5dacb25e20302288df73f046c069b76ab4263ebdef6b517ffe00a09e",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -104,6 +104,12 @@ PIN_HISTORY = (
     "HO_OTHER_REGION_VERSION 2 enters the whb_frontal_supc_clus_ho build_hash "
     "through its hashed other_region params, and every human self-map "
     "bundle's through its test-set params; the mouse bundles are unchanged",
+    "3: RESOLVABILITY_VERSION 5 (M3b final follow-up: every simulation draw "
+    "keyed by the seed, recipe name and version, cell id and depth, the "
+    "gene efficiency by the gene id, the spill partner by rendezvous "
+    "hashing); the version enters every self-map bundle's build_hash through "
+    "the resolvability builder params, so those bundles get new hashes "
+    "without a builder bump; the test-set bundles are unchanged",
 )
 
 

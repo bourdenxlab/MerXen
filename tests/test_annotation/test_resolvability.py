@@ -1353,6 +1353,211 @@ def test_thinning_uses_only_cells_that_reach_the_depth() -> None:
     assert (again.counts != query.counts).nnz == 0
 
 
+def cells_subset(test: res.HeldOutCells, cell_ids: Sequence[str]) -> res.HeldOutCells:
+    """The test cells ``cell_ids``, in that order."""
+    position = {str(cell): index for index, cell in enumerate(test.obs.index)}
+    rows = [position[str(cell)] for cell in cell_ids]
+    return res.HeldOutCells(
+        counts=sparse.csr_matrix(test.counts[rows]),
+        genes=list(test.genes),
+        obs=test.obs.iloc[rows].copy(),
+    )
+
+
+def renamed(test: res.HeldOutCells, prefix: str) -> res.HeldOutCells:
+    obs = test.obs.copy()
+    obs.index = [f"{prefix}{cell}" for cell in obs.index]
+    return res.HeldOutCells(counts=test.counts, genes=list(test.genes), obs=obs)
+
+
+def combined(first: res.HeldOutCells, second: res.HeldOutCells) -> res.HeldOutCells:
+    return res.HeldOutCells(
+        counts=sparse.vstack([first.counts, second.counts]).tocsr(),
+        genes=list(first.genes),
+        obs=pd.concat([first.obs, second.obs]),
+    )
+
+
+def simulated_by_id(
+    query: res.SimulatedQuery,
+) -> dict[str, tuple[np.ndarray, str, float]]:
+    """Simulated id -> (counts, spill partner, host counts)."""
+    dense = query.counts.toarray()
+    return {
+        str(sim_id): (dense[index], str(partner), float(host))
+        for index, (sim_id, partner, host) in enumerate(
+            zip(
+                query.obs.index,
+                query.obs["partner_id"],
+                query.obs["host_counts"],
+                strict=True,
+            )
+        )
+    }
+
+
+def test_a_simulated_cell_does_not_depend_on_the_other_test_cells() -> None:
+    # Resolvability version 5: every draw is keyed by the cell id, the depth,
+    # the recipe and the seed, so rebuilding a test set with other cells (or
+    # another order) redraws only the cells whose spill partner changed.
+    test = make_test_cells(20)
+    recipe, clean = recipes()
+    ids = [str(cell) for cell in test.obs.index]
+    full = simulated_by_id(res.thin_and_contaminate(test, GRID, recipe))
+    full_clean = simulated_by_id(res.thin_and_contaminate(test, GRID, clean))
+    # Another order: every simulated cell is identical.
+    order = [ids[index] for index in np.random.default_rng(1).permutation(len(ids))]
+    for recipe_used, expected in ((recipe, full), (clean, full_clean)):
+        again = simulated_by_id(
+            res.thin_and_contaminate(cells_subset(test, order), GRID, recipe_used)
+        )
+        assert again.keys() == expected.keys()
+        for sim_id, (row, partner, _) in expected.items():
+            assert np.array_equal(again[sim_id][0], row)
+            assert again[sim_id][1] == partner
+    # Cells removed: every kept cell whose partners are kept is identical;
+    # one whose partner was removed keeps its host thinning and takes a new
+    # partner among the kept cells.
+    core = {ids[index] for index in range(0, len(ids), 3)}
+    partners = {
+        partner
+        for sim_id, (_, partner, _) in full.items()
+        if sim_id.split("|")[0] in core
+    }
+    kept = [cell for cell in ids if cell in core or cell in partners]
+    assert len(kept) < len(ids)
+    fewer = simulated_by_id(
+        res.thin_and_contaminate(cells_subset(test, kept), GRID, recipe)
+    )
+    for sim_id, (row, partner, host) in fewer.items():
+        if sim_id.split("|")[0] in core:
+            assert np.array_equal(row, full[sim_id][0])
+            assert partner == full[sim_id][1]
+        assert host == full[sim_id][2]
+        assert partner in kept
+    moved = [sim_id for sim_id, value in fewer.items() if value[1] != full[sim_id][1]]
+    assert moved and all(full[sim_id][1] not in kept for sim_id in moved)
+    # Without spill (clean) any subset leaves every kept cell unchanged.
+    half = ids[::2]
+    fewer_clean = simulated_by_id(
+        res.thin_and_contaminate(cells_subset(test, half), GRID, clean)
+    )
+    assert fewer_clean and all(
+        np.array_equal(row, full_clean[sim_id][0])
+        for sim_id, (row, _, _) in fewer_clean.items()
+    )
+    # Cells added: an original cell changes only when an added cell became its
+    # partner (it outranks the old one), and then only its spill.
+    extra = renamed(make_test_cells(20, seed=5), "new_")
+    more = simulated_by_id(
+        res.thin_and_contaminate(combined(test, extra), GRID, recipe)
+    )
+    changed = 0
+    for sim_id, (row, partner, host) in full.items():
+        after_row, after_partner, after_host = more[sim_id]
+        assert after_host == host
+        if after_partner == partner:
+            assert np.array_equal(after_row, row)
+        else:
+            assert after_partner.startswith("new_")
+            changed += 1
+    # About half the hosts see an added cell outrank their partner (the
+    # candidate pool doubles); never all of them.
+    assert 0 < changed < len(full)
+
+
+def test_identical_cells_get_independent_draws() -> None:
+    # Copies of one cell under other ids: the draws are keyed per cell, so
+    # they differ, are uncorrelated and have the binomial mean.
+    base = make_test_cells(1)
+    n_copies = 400
+    counts = sparse.vstack([base.counts[0]] * n_copies).tocsr()
+    obs = pd.concat([base.obs.iloc[[0]]] * n_copies)
+    obs.index = [f"copy_{index}" for index in range(n_copies)]
+    copies = res.HeldOutCells(counts=counts, genes=list(base.genes), obs=obs)
+    _, clean = recipes()
+    depth = 30
+    query = res.thin_and_contaminate(copies, [depth], clean)
+    dense = query.counts.toarray()
+    assert len({tuple(row) for row in dense}) > 0.95 * n_copies
+    native = np.asarray(base.counts[0].todense()).ravel()
+    expected = native * depth / native.sum()
+    assert np.allclose(dense.mean(axis=0), expected, atol=0.35)
+    centred = dense - dense.mean(axis=0)
+    correlation = np.corrcoef(centred[0::2].ravel(), centred[1::2].ravel())[0, 1]
+    assert abs(correlation) < 0.05
+    # Another seed or recipe version is another draw of the same cells.
+    reseeded = res.thin_and_contaminate(
+        copies, [depth], res.SimulationRecipe(**{**clean.to_json(), "seed": 1})
+    )
+    assert (reseeded.counts != query.counts).nnz > 0
+    bumped = res.thin_and_contaminate(
+        copies, [depth], res.SimulationRecipe(**{**clean.to_json(), "version": 2})
+    )
+    assert (bumped.counts != query.counts).nnz > 0
+    # A row's stored gene order does not change its draw.
+    row = sparse.csr_matrix(base.counts[0])
+    order = np.argsort(-row.indices)
+    unsorted = sparse.csr_matrix(
+        (row.data[order], row.indices[order], row.indptr), shape=row.shape
+    )
+    assert not unsorted.has_sorted_indices
+    one = res.HeldOutCells(
+        counts=unsorted, genes=list(base.genes), obs=base.obs.iloc[[0]].copy()
+    )
+    sorted_query = res.thin_and_contaminate(
+        cells_subset(base, [str(base.obs.index[0])]), [depth], clean
+    )
+    unsorted_query = res.thin_and_contaminate(one, [depth], clean)
+    assert (unsorted_query.counts != sorted_query.counts).nnz == 0
+    with pytest.raises(res.ResolvabilityError, match="unique"):
+        res.thin_and_contaminate(combined(base, base), [depth], clean)
+
+
+def key64(*parts: object) -> np.uint64:
+    return np.uint64(res.draw_key(*parts) & 0xFFFFFFFFFFFFFFFF)
+
+
+def test_rendezvous_partner_choice_is_uniform_and_stable() -> None:
+    hosts = np.array([key64("host", index) for index in range(20_000)])
+    candidates = np.array([key64("candidate", index) for index in range(10)])
+    chosen = res.rendezvous_choice(hosts, candidates)
+    counts = np.bincount(chosen, minlength=10)
+    # Uniform: 2,000 each, sd 42.
+    assert counts.min() > 1_800 and counts.max() < 2_200
+    # The candidates' order does not matter.
+    order = np.random.default_rng(0).permutation(10)
+    assert np.array_equal(
+        order[res.rendezvous_choice(hosts, candidates[order])], chosen
+    )
+    # Removing a candidate moves only the hosts that had chosen it.
+    kept = np.array([index for index in range(10) if index != 3])
+    after = kept[res.rendezvous_choice(hosts, candidates[kept])]
+    assert np.array_equal(after != chosen, chosen == 3)
+    # Adding one moves only the hosts it outranks (to it), about 1 in 11.
+    added = res.rendezvous_choice(hosts, np.append(candidates, key64("candidate", 10)))
+    assert np.array_equal(added != chosen, added == 10)
+    assert 1_600 < int((added == 10).sum()) < 2_050
+    with pytest.raises(res.ResolvabilityError, match="candidate"):
+        res.rendezvous_choice(hosts, np.array([], dtype=np.uint64))
+
+
+def test_gene_efficiency_is_keyed_by_gene_id() -> None:
+    genes = [f"ENSG{index:011d}" for index in range(201)]
+    full = res.gene_efficiency(genes, 0.8, 0)
+    assert np.median(full) == pytest.approx(1.0)
+    # A gene's draw does not depend on the other genes or their order (up to
+    # the median normalisation of the panel).
+    part = res.gene_efficiency(genes[::3], 0.8, 0)
+    ratio = part / full[::3]
+    assert np.allclose(ratio, ratio[0])
+    assert np.allclose(res.gene_efficiency(genes[::-1], 0.8, 0)[::-1], full)
+    # Another sigma scales the same normals (a stress recipe is comparable).
+    assert np.allclose(np.log(res.gene_efficiency(genes, 1.0, 0)), 1.25 * np.log(full))
+    assert not np.allclose(res.gene_efficiency(genes, 0.8, 1), full)
+    assert np.array_equal(res.gene_efficiency(genes, None, 0), np.ones(201))
+
+
 def test_select_test_cells_caps_strata_and_keeps_rare_types() -> None:
     obs = pd.DataFrame(
         {"type": ["big"] * 3000 + ["mid"] * 700 + ["rare"] * 12},
