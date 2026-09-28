@@ -56,10 +56,9 @@ decisions with the simulated cells of each depth bin reweighted to the
 dataset's composition in that bin (``DatasetComposition``,
 ``composition_weights``: rare types pooled at broad-class level; ``decide``
 trims the weights within each judged set): PREP's unweighted tables set only
-the panel's trust
-constraints. Production rules that decide confidence outside the level's own
-bp (the WHB COP rule, ``whb_cells_rules``) are applied to the cells table
-before the decisions.
+the panel's trust constraints. Production rules that decide confidence
+outside the level's own bp (the WHB COP rule, ``whb_cells_rules``) are
+applied to the cells table before the decisions.
 
 This module needs numpy, pandas and scipy only; MapMyCells runs through the
 ``map_fn`` a builder passes to ``run_resolvability``.
