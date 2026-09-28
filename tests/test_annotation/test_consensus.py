@@ -693,6 +693,25 @@ def test_a_broad_only_gate_blocks_only_the_leaf_levels(make_trust: MakeTrust) ->
     assert statuses(capped)["supercluster"] == "not_attempted_gate"
 
 
+def test_the_segmented_share_uses_the_gate_denominator() -> None:
+    cells = [
+        Cell(EXC, counts=200),
+        Cell(EXC, counts=5),
+        Cell(EXC, counts=11, broad_raw=0.1),
+    ]
+    given = resolve(cells, Setup(n_segmented=400), fillers=20)
+    levels = given.summary()["levels"]
+    n_broad = int(given.levels["broad"].confident.sum())
+    assert n_broad == 21
+    assert levels["broad"]["confident_share_segmented"] == pytest.approx(n_broad / 400)
+    assert levels["broad"]["confident_share_segmented"] == pytest.approx(
+        given.gate.broad_coverage_segmented
+    )
+    assert levels["broad"]["confident_share_table"] == pytest.approx(n_broad / 22)
+    unknown = resolve(cells, fillers=20).summary()["levels"]["broad"]
+    assert unknown["confident_share_segmented"] == pytest.approx(n_broad / 23)
+
+
 def test_a_failed_gate_attempts_nothing() -> None:
     weak = [Cell(EXC, counts=100, broad_raw=0.5) for _ in range(90)]
     result = resolve(weak, fillers=10)

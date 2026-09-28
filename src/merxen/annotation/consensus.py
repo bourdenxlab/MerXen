@@ -678,6 +678,12 @@ class HumanResolution:
         table = self.in_table
         n_table = int(table.sum())
         n_objects = len(table)
+        # The gate's denominator (§4.4 / §5.4): the segmented objects when the
+        # caller gave them (published clustered inputs hold only table
+        # cells), else every object of the label table.
+        n_segmented = (
+            self.gate.n_segmented if self.gate.n_segmented is not None else n_objects
+        )
         per_level: dict[str, Any] = {}
         for level, result in self.levels.items():
             confident = result.confident
@@ -687,7 +693,7 @@ class HumanResolution:
                     float(confident[table].mean()) if n_table else None
                 ),
                 "confident_share_segmented": (
-                    float(confident.sum() / n_objects) if n_objects else None
+                    float(confident.sum() / n_segmented) if n_segmented else None
                 ),
                 "validated_share": (
                     float(result.validated[confident].mean())
