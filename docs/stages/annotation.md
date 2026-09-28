@@ -952,11 +952,27 @@ Per sample:
    counts), confident-only and argmax compositions, and for the pair the
    base-2 JSD of the renormalised seven-class vectors with a 95% spatial
    block-bootstrap CI (500 µm tiles, 200 replicates, joint resampling on
-   the shared frame), whole section and inside the shared tissue mask.
+   the shared frame), whole section and inside the shared tissue mask. A
+   `per_platform` pair's JSD and pair compositions come from the WHB runs
+   on the intersection panel (`_xpanel`, §8.5; soft, soft ≥ 30 and argmax:
+   the own-panel confident labels rest on different gene sets), recorded as
+   `cross_platform.jsd_run`; with fewer than 100 intersection genes or a
+   broad-only intersection (by resolvability) the cross-platform statistics
+   are `broad_only`, flagged with reasons, for M5 / M7. The per-sample
+   compositions and `soft_broad_*` stay on the own panel and are never
+   compared across platforms.
 6. **Outputs.** `<platform>/<sid>_celltype_labels.parquet` (validated;
    provenance in the parquet schema), `<platform>/<sid>_annotation_manifest.json`
    (`AnnotationProvenance`, the JSON `uns["merxen_annotation_json"]` holds)
-   and `<pair>_resolve_summary.json`. A refused panel gives statuses only
+   and `<pair>_resolve_summary.json`, all deterministic for given inputs
+   (the label parquets hold no clock); the run record
+   (`annotation_resolve_run.json`: clock, wall time, absolute paths) is
+   published beside `annotation_resolve_out`, so M5's deep-cached
+   COMPUTE_CPU staging that directory re-runs only when a label changes. A
+   run that mapped with the parent bundle on a restricted lookup (a sample
+   lacking panel genes; §3.3) is resolved with the parent's resolvability
+   and trust, recorded as `resolvability_inherited` (`restricted_lookup`)
+   with a trust reason. A refused panel gives statuses only
    (`not_attempted_gate`, gate `failed`, `exclude_hard`); mouse RESOLVE is
    M6.
 
@@ -969,9 +985,9 @@ real-data-validated families, a local resolvability threshold asks for more.
 | Level | Confident when |
 |---|---|
 | Lineage | WHB lineage-summed probability >= 0.73, the node is plausible (not a sink, plausible for the region), counts >= the floor, resolvability emits it, and the second vote passes: below 60 counts SEA-AD agrees at lineage; from 60 SEA-AD does not confidently (>= 0.68) call another lineage. An implausible node keeps its lineage when SEA-AD agrees at lineage. |
-| Broad | Confident lineage, broad-summed probability >= 0.73, the class × platform broad floor, resolvability, and the same vote at the seven-class level. **COP rule:** a WHB "Committed oligodendrocyte precursor" call is broad OPC only with >= 120 counts and supercluster probability >= 0.69, or when SEA-AD confidently calls OPC; otherwise it stays at lineage (`Oligodendrocyte lineage/unresolved` branch) with `flag_cop_suppressed`. |
+| Broad | Confident lineage, broad-summed probability >= 0.73, the class × platform broad floor, resolvability, and the same vote at the seven-class level. **COP rule:** a WHB "Committed oligodendrocyte precursor" call is broad OPC only with >= 120 counts and supercluster probability >= 0.69, or when SEA-AD confidently calls OPC; otherwise it stays at lineage (`Oligodendrocyte lineage/unresolved` branch). `flag_cop_suppressed` marks every COP call on a confident lineage whose COP rule fails, whichever broad check decides its status (§4.3). |
 | NT | Neurons only (others `not_applicable`): confident broad, the Exc / Inh probability, the broad floor, resolvability; no second vote. |
-| Supercluster | Confident parent (NT for neurons, else broad), gate `full` (a warning does not block), probability >= 0.69, the supercluster floor (COP 120), resolvability. |
+| Supercluster | Confident parent (NT for neurons, else broad), gate `full` (a warning does not block), probability >= 0.69, the supercluster floor (COP 120), resolvability. Requiring a confident NT for neurons is a recorded M4 deviation from plan §5.2 rule 4 (broad only; pre-registration §15): the final label is the deepest level of a contiguous confident chain. |
 | SEA-AD subclass | Secondary name, never in `ct_final`: gate `full`, confident WHB broad that SEA-AD's class agrees with, the supercluster floor of the class, SEA-AD's threshold (0.55 below 60 counts, 0.45 from 60), the leaf's resolvability. |
 
 The final label is the deepest confident level along lineage → broad → NT →
@@ -979,7 +995,10 @@ supercluster (`Mixed/Unknown` when none). When several checks fail the
 status is the first of `low_counts` > `not_attempted_gate` >
 `not_applicable` > `implausible` > `parent_unresolved` > `below_floor` >
 `not_resolvable` > `low_confidence` > (COP rule) > `single_method` /
-`method_disagree` ([statuses](../outputs.md#label-table-schema-sid_celltype_labelsparquet)).
+`method_disagree` ([statuses](../outputs.md#label-table-schema-sid_celltype_labelsparquet));
+the SEA-AD subclass follows the same order, its SEA-AD agreement being its
+`method_disagree`. `ct_consensus_tier` counts the agreeing informative
+methods: 0 is a confident disagreement only, -1 no informative method.
 
 **Degraded modes** (§5.3; `consensus.DEGRADED_MODES`, one truth table):
 

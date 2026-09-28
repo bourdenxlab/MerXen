@@ -296,6 +296,8 @@ elif command in ("annotate", "annotate-resolve"):
         out.mkdir(parents=True)
         name = "map_manifest.json" if command == "annotate" else "fake_summary.json"
         (out / name).write_text(json.dumps({"fake": True}))
+        if "--run-record" in args:
+            Path(value("--run-record")).write_text(json.dumps({"fake": True}))
         sys.exit(0)
 os.execv(REAL, [REAL, *args])
 """
@@ -956,6 +958,9 @@ def test_resolve_is_connected_after_map() -> None:
         in body
     )
     assert "CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE(resolve_inputs_ch)" in body
+    # Only the deterministic annotation_resolve_out flows downstream.
+    assert "resolve_out_ch = CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE.out.resolved" in body
+    assert "run_record" not in body
     assert body.index("CLUSTERING_ANNOTATE_MAP(") < body.index(
         "CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE("
     )
@@ -1127,6 +1132,7 @@ def test_map_runs_the_real_script_with_the_pipeline_arguments(tmp_path: Path) ->
             ("--prepared-dir", "resolve_inputs/clustering_prepare_out"),
             ("--clustering-config", "resolve_inputs/clustering_squidpy_config.json"),
             ("--out", "annotation_resolve_out"),
+            ("--run-record", "annotation_resolve_run.json"),
         ):
             assert argv[argv.index(option) + 1] == staged, (branch, option)
         assert "--require-bundle-refs" in argv and "--no-alignment-lookup" in argv

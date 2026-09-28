@@ -1329,3 +1329,473 @@ process.executor = "local"
         assert references["whb_frontal_supc_clus"].build_hash == (
             setup.bundles["whb_frontal_supc_clus"].build_hash
         )
+
+
+# --------------------------------------------------------------------------
+# Review of M4: per_platform pairs, restricted lookups, the gate denominator,
+# the SEA-AD subclass margin, the flag basis, determinism and the CLI guard.
+
+
+def _set_panel_mode(setup: Setup, panel_mode: str) -> None:
+    path = setup.panel_dir / "required_bundles.json"
+    required = json.loads(path.read_text())
+    required["panel_mode"] = panel_mode
+    path.write_text(json.dumps(required))
+
+
+def _add_xpanel_runs(setup: Setup, label: str = "CS_AST") -> None:
+    """Add a WHB intersection-panel run per sample that calls every cell ``label``."""
+    manifest = pl.load_map_manifest(setup.map_dir / MAP_MANIFEST_NAME)
+    bundle = setup.bundles["whb_frontal_supc_clus"]
+    samples = {}
+    for sample_id, record in manifest.samples.items():
+        primary = record.runs["whb_frontal_supc_clus"]
+        table_ids = set(
+            pd.read_parquet(setup.map_dir / primary.parquet)["cell_id"].astype(str)
+        )
+        frame = setup.calls[record.platform]
+        cells = frame[frame["cell_id"].isin(table_ids)].reset_index(drop=True)
+        cells = cells.assign(label=label, bp=0.95)
+        run_id = "whb_frontal_supc_clus_xpanel"
+        parquet = (
+            setup.map_dir
+            / record.platform.lower()
+            / f"{sample_id}_mmc_{run_id}.parquet"
+        )
+        write_tidy_parquet(_whb_tidy(cells), parquet, {"synthetic": True})
+        xpanel = _run_record(
+            run_id, bundle, setup.panel, parquet, setup.map_dir, len(cells)
+        ).model_copy(update={"purposes": ["intersection_xpanel"]})
+        samples[sample_id] = record.model_copy(
+            update={"runs": {**record.runs, run_id: xpanel}}
+        )
+    manifest.model_copy(update={"samples": samples}).write(
+        setup.map_dir / MAP_MANIFEST_NAME
+    )
+
+
+def test_a_per_platform_pair_compares_the_intersection_runs(
+    tmp_path: Path, fake_mmc: FakeMmc, make_trust: MakeTrust
+) -> None:
+    """Plan §5.5 / §8.5: the pair JSD and compositions come from ``_xpanel``."""
+    setup = _setup(tmp_path, fake_mmc, coverage=True)
+    shared = _resolve(setup, make_trust, "shared")
+    _add_xpanel_runs(setup)
+    _set_panel_mode(setup, "per_platform")
+    result = _resolve(setup, make_trust, "per_platform")
+
+    pair = result.summary["pair"]
+    cross = pair["cross_platform"]
+    assert cross["panel_mode"] == "per_platform"
+    assert cross["jsd_run"] == ["whb_frontal_supc_clus_xpanel"]
+    assert cross["jsd_purpose"] == "intersection_xpanel"
+    assert cross["kinds"] == ["soft", "soft_ge30", "argmax"]
+    assert "confident" in cross["omitted_kinds"]
+    # Six intersection genes (< 100) and a fail-safe broad-only intersection
+    # (outside the validated families, no self-map): broad-level only.
+    assert cross["statistics_level"] == "broad_only" and cross["flag"] is True
+    assert "intersection_genes:6<100" in cross["reasons"]
+    assert "intersection_trust:broad_only" in cross["reasons"]
+    assert {item["kind"] for item in pair["jsd"]} == {"soft", "soft_ge30", "argmax"}
+    # Every intersection call is an astrocyte on both platforms: JSD 0, while
+    # the own-panel runs (a same-panel pair) differ.
+    soft = next(
+        item
+        for item in pair["jsd"]
+        if item["kind"] == "soft" and item["region"] == "whole_section"
+    )
+    assert soft["jsd"] == pytest.approx(0.0, abs=1e-6)
+    shared_soft = next(
+        item
+        for item in shared.summary["pair"]["jsd"]
+        if item["kind"] == "soft" and item["region"] == "whole_section"
+    )
+    assert shared_soft["jsd"] > 0.01
+    assert shared.summary["pair"]["cross_platform"]["jsd_run"] == [
+        "whb_frontal_supc_clus"
+    ]
+    # (bp 0.95, the runner-up an excitatory node at 0.05)
+    for platform, composition in pair["compositions"].items():
+        assert set(composition["whole_section"]) == {"soft", "soft_ge30", "argmax"}
+        assert composition["whole_section"]["soft"]["share7_astrocytes"] == (
+            pytest.approx(0.95)
+        ), platform
+    for sample in result.samples.values():
+        summary = sample.summary
+        # The per-sample composition stays on the own-panel run.
+        assert summary["composition_run"] == "whb_frontal_supc_clus"
+        assert summary["composition"]["soft"]["share7_astrocytes"] < 0.6
+        assert summary["xpanel_composition"]["soft"]["share7_astrocytes"] == (
+            pytest.approx(0.95)
+        )
+        assert summary["cross_platform"]["jsd_run"] == "whb_frontal_supc_clus_xpanel"
+    # A validated intersection with fewer than 100 genes is still broad-only.
+    overrides = {
+        **_trusts(make_trust),
+        "whb_frontal_supc_clus_xpanel": make_trust("validated_real"),
+    }
+    validated = _resolve(setup, make_trust, "validated", trust_overrides=overrides)
+    reasons = validated.summary["pair"]["cross_platform"]["reasons"]
+    assert reasons == ["intersection_genes:6<100"]
+
+
+def test_a_per_platform_pair_without_intersection_runs_has_no_jsd(
+    tmp_path: Path, fake_mmc: FakeMmc, make_trust: MakeTrust
+) -> None:
+    setup = _setup(tmp_path, fake_mmc)
+    _set_panel_mode(setup, "per_platform")
+    result = _resolve(setup, make_trust)
+    pair = result.summary["pair"]
+    assert pair["jsd"] == []
+    assert "§8.5" in pair["mask_note"]
+    cross = pair["cross_platform"]
+    assert cross["statistics_level"] == "none" and cross["flag"] is True
+    assert cross["reasons"] == ["no_intersection_run"]
+
+
+def test_cross_platform_record_follows_section_8_5() -> None:
+    from types import SimpleNamespace
+
+    def run(run_id: str, n_genes: int) -> Any:
+        return SimpleNamespace(
+            run_id=run_id, record=SimpleNamespace(n_panel_genes=n_genes)
+        )
+
+    def trust(state: str) -> Any:
+        return SimpleNamespace(state=state)
+
+    primary = run("whb", 300)
+    xpanel = run("whb_xpanel", 150)
+    full = pl.cross_platform_record(
+        "per_platform",
+        primary,
+        xpanel,
+        primary_trust=trust("validated"),
+        xpanel_trust=trust("provisional"),
+    )
+    assert (full["statistics_level"], full["flag"], full["reasons"]) == (
+        "full",
+        False,
+        [],
+    )
+    assert full["jsd_run"] == "whb_xpanel"
+    small = pl.cross_platform_record(
+        "per_platform",
+        primary,
+        run("whb_xpanel", 99),
+        primary_trust=None,
+        xpanel_trust=trust("validated"),
+    )
+    assert small["statistics_level"] == "broad_only"
+    assert small["reasons"] == ["intersection_genes:99<100"]
+    broad_only = pl.cross_platform_record(
+        "per_platform",
+        primary,
+        run("whb_xpanel", 100),
+        primary_trust=None,
+        xpanel_trust=trust("broad_only"),
+    )
+    assert broad_only["reasons"] == ["intersection_trust:broad_only"]
+    unknown = pl.cross_platform_record(
+        "per_platform", primary, xpanel, primary_trust=None, xpanel_trust=None
+    )
+    assert unknown["reasons"] == ["intersection_trust:unknown"]
+    same_panel = pl.cross_platform_record(
+        "intersection",
+        primary,
+        None,
+        primary_trust=trust("validated"),
+        xpanel_trust=None,
+    )
+    assert same_panel["jsd_run"] == "whb" and same_panel["statistics_level"] == "full"
+
+
+def test_a_restricted_lookup_inherits_the_parent_resolvability(
+    tmp_path: Path, fake_mmc: FakeMmc, make_trust: MakeTrust, caplog: Any
+) -> None:
+    """Plan §3.3: a parent-bundle mapping on a restricted lookup is inherited."""
+    from merxen.annotation.panel import SubsetBundleTrigger
+
+    setup = _setup(tmp_path, fake_mmc)
+    manifest = pl.load_map_manifest(setup.map_dir / MAP_MANIFEST_NAME)
+    trigger = SubsetBundleTrigger(
+        action="subset",
+        reasons=["root_marker_missing"],
+        n_panel_genes=6,
+        n_missing=1,
+        missing_frac=1 / 6,
+        missing_gene_ids=[GENE_IDS[5]],
+        subset_bundle_missing_frac=0.01,
+        own_family_missing_frac=0.5,
+        weak_parent_markers=5,
+        subset_panel_hash="e" * 64,
+    )
+    bundle = setup.bundles["whb_frontal_supc_clus"]
+    record = pl.SubsetBundleRecord(
+        trigger=trigger,
+        status="requested",
+        subset_panel_file="subset_panels/PX_MERSCOPE_whb.panel_genes.json",
+        subset_panel_hash="e" * 64,
+        parent_panel_hash=setup.panel.panel_hash,
+        parent_build_hash=bundle.build_hash,
+    )
+    merscope = manifest.samples["PX_MERSCOPE"]
+    restricted = merscope.runs["whb_frontal_supc_clus"].model_copy(
+        update={
+            "lookup_restricted": True,
+            "subset_bundle": record,
+            "n_missing_panel_genes": 1,
+        }
+    )
+    samples = dict(manifest.samples)
+    samples["PX_MERSCOPE"] = merscope.model_copy(
+        update={"runs": {**merscope.runs, "whb_frontal_supc_clus": restricted}}
+    )
+    manifest.model_copy(update={"samples": samples}).write(
+        setup.map_dir / MAP_MANIFEST_NAME
+    )
+    with caplog.at_level("WARNING", logger="merxen.annotation.pipeline"):
+        result = _resolve(setup, make_trust)
+    assert any("restricted lookup" in message for message in caplog.messages)
+    sample = result.samples["PX_MERSCOPE"]
+    prov = sample.provenance.resolvability["whb_frontal_supc_clus"]
+    assert prov.resolvability_inherited is True
+    assert prov.inherited_reason == "restricted_lookup"
+    assert sample.provenance.panel is not None
+    assert pl.RESTRICTED_LOOKUP_REASON in sample.provenance.panel.trust_reasons
+    assert sample.summary["resolvability_inherited"] is True
+    assert sample.summary["restricted_lookup"] == {
+        "lookup_restricted": True,
+        "subset_bundle_status": "requested",
+        "n_missing_panel_genes": 1,
+        "collapsed_parents": [],
+    }
+    # The trust state itself is unchanged (a reason, not a downgrade).
+    assert sample.summary["trust"]["state"] == "validated"
+    other = result.samples["PX_XENIUM"]
+    assert other.summary["restricted_lookup"] is None
+    assert not other.provenance.resolvability[
+        "whb_frontal_supc_clus"
+    ].resolvability_inherited
+
+
+def test_the_summary_records_the_gate_denominator_used(
+    tmp_path: Path, fake_mmc: FakeMmc, make_trust: MakeTrust
+) -> None:
+    setup = _setup(tmp_path, fake_mmc)
+    result = _resolve(setup, make_trust, n_segmented={"PX_MERSCOPE": 400})
+    merscope = result.samples["PX_MERSCOPE"]
+    xenium = result.samples["PX_XENIUM"]
+    assert merscope.summary["n_segmented"] == 400
+    assert merscope.summary["n_segmented_source"] == "given"
+    # Without --n-segmented the gate uses the objects of the input.
+    assert xenium.summary["n_segmented"] == PLATFORM_CELLS["XENIUM"]
+    assert xenium.summary["n_segmented_source"] == "objects"
+    for sample, expected in ((merscope, 400), (xenium, PLATFORM_CELLS["XENIUM"])):
+        assert sample.provenance.gate is not None
+        assert sample.provenance.gate.n_segmented == expected
+        assert sample.summary["resolution"]["gate"]["n_segmented"] == expected
+
+
+def test_the_sea_subclass_margin_is_on_the_raw_scale(
+    tmp_path: Path, fake_mmc: FakeMmc, make_trust: MakeTrust
+) -> None:
+    """ct_seaad_subclass_margin is the aggregate probability's margin (§4.1)."""
+    setup = _setup(tmp_path, fake_mmc)
+    labels = _resolve(setup, make_trust).samples["PX_MERSCOPE"].labels
+    raw = labels[Columns.level("seaad_subclass", "raw")].to_numpy(np.float64)
+    margin = labels[Columns.level("seaad_subclass", "margin")].to_numpy(np.float64)
+    defined = np.isfinite(raw) & np.isfinite(margin)
+    assert defined.any()
+    assert (margin[defined] <= raw[defined] + 1e-6).all()
+    # No runner-up here: the margin equals the aggregate probability.
+    np.testing.assert_allclose(margin[defined], raw[defined], rtol=1e-6)
+    frame = pd.DataFrame(
+        {
+            "bp": [0.8, 0.5, 0.0],
+            "aggregate_probability": [0.4, 0.45, 0.0],
+            "runner_up_1_probability": [0.2, np.nan, 0.0],
+        }
+    )
+    np.testing.assert_allclose(
+        pl.aggregate_margin(frame)[:2], [0.4 * 0.6 / 0.8, 0.45], rtol=1e-9
+    )
+    assert np.isnan(pl.aggregate_margin(frame)[2])
+
+
+def test_the_contamination_basis_is_the_confident_broad_calls(
+    tmp_path: Path,
+    fake_mmc: FakeMmc,
+    make_trust: MakeTrust,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The null and realised rates rest on broad-confident cells (§5.6)."""
+    from merxen.annotation import flags as fl
+
+    captured: list[Any] = []
+    original = fl.compute_flags
+
+    def spy(inputs: Any, *args: Any, **kwargs: Any) -> Any:
+        captured.append(inputs)
+        return original(inputs, *args, **kwargs)
+
+    monkeypatch.setattr(fl, "compute_flags", spy)
+    setup = _setup(tmp_path, fake_mmc)
+    result = _resolve(setup, make_trust)
+    assert len(captured) == 2
+    for inputs, sample in zip(captured, result.samples.values(), strict=True):
+        labels = sample.labels
+        broad = labels[Columns.level("broad", "status")].astype(str).to_numpy()
+        lineage = labels[Columns.level("lineage", "status")].astype(str).to_numpy()
+        broad_confident = broad == "confident"
+        np.testing.assert_array_equal(inputs.confident, broad_confident)
+        # The fixture has lineage-confident cells that are not broad-confident
+        # (sinks rescued by SEA-AD at lineage), so the basis matters.
+        assert ((lineage == "confident") & ~broad_confident).any()
+        neurons = (
+            broad_confident
+            & (labels[Columns.level("broad", "name")].astype(str) == "Neurons")
+            & labels[Columns.NEG_COUNTS].notna().to_numpy()
+        )
+        stratum = next(
+            item
+            for item in sample.summary["flags"]["strata"]
+            if item["flag"] == "contaminated" and item["class"] == "Neurons"
+        )
+        assert stratum["n_basis"] == int(neurons.sum())
+
+
+def test_the_resolve_output_is_deterministic(
+    tmp_path: Path, fake_mmc: FakeMmc, make_trust: MakeTrust
+) -> None:
+    """annotation_resolve_out holds no clock, wall time or absolute input path."""
+    setup = _setup(tmp_path, fake_mmc)
+    first = _resolve(setup, make_trust, "a", run_record_path=tmp_path / "run_a.json")
+    second = _resolve(setup, make_trust, "b", run_record_path=tmp_path / "run_b.json")
+    files_a = sorted(
+        path.relative_to(tmp_path / "a") for path in (tmp_path / "a").rglob("*")
+    )
+    files_b = sorted(
+        path.relative_to(tmp_path / "b") for path in (tmp_path / "b").rglob("*")
+    )
+    assert files_a == files_b and files_a
+    for relative in files_a:
+        path = tmp_path / "a" / relative
+        if path.is_file():
+            assert path.read_bytes() == (tmp_path / "b" / relative).read_bytes(), (
+                relative
+            )
+    for key in ("created_at", "wall_time_s", "map_manifest"):
+        assert key not in first.summary
+        assert key in first.run
+    assert first.run_path == tmp_path / "run_a.json"
+    assert second.run["summary_sha256"] == file_sha256(second.summary_path)
+    assert first.summary["map_manifest_sha256"] == file_sha256(
+        setup.map_dir / MAP_MANIFEST_NAME
+    )
+    default = _resolve(setup, make_trust, "c")
+    assert default.run_path == tmp_path / "c" / "PX_resolve_run.json"
+
+
+def test_cli_annotate_resolve_never_writes_into_published_annotation_outputs(
+    tmp_path: Path, fake_mmc: FakeMmc
+) -> None:
+    """A published MAP / panel output places its results tree (the R3 guard)."""
+    setup = _setup(tmp_path, fake_mmc, coverage=True)
+    prepared = _prepared_manifest(setup)
+    clustering = tmp_path / "clustering_squidpy_config.json"
+    samples = [
+        {"sample_id": sample.sample_id, "platform": sample.platform}
+        for sample in setup.samples
+    ]
+    clustering.write_text(
+        json.dumps({"pair_id": "PX", "min_counts": 10, "samples": samples})
+    )
+    branch = tmp_path / "results" / "PX" / "proseg_hybrid"
+    published_map = branch / "annotation_map" / "annotation_map_out"
+    published_panel = branch / "annotation_panel" / "annotation_panel_out"
+    shutil.copytree(setup.map_dir, published_map)
+    shutil.copytree(setup.panel_dir, published_panel)
+    base = [
+        "annotate-resolve",
+        "--map-dir",
+        str(published_map),
+        "--panel-dir",
+        str(published_panel),
+        "--prepared-dir",
+        str(prepared),
+        "--clustering-config",
+        str(clustering),
+        "--n-bootstrap",
+        "5",
+    ]
+    for target in (
+        branch / "annotation_resolve" / "annotation_resolve_out",
+        published_panel,
+        tmp_path / "results" / "PY" / "reseg" / "annotation_resolve" / "x",
+    ):
+        refused = CliRunner().invoke(cli_main, [*base, "--out", str(target)])
+        assert refused.exit_code != 0, target
+        assert "never into the results tree" in refused.output
+        assert not (target / "PX_resolve_summary.json").exists()
+    # A panel directory published elsewhere guards its own tree too.
+    other = tmp_path / "other" / "PX" / "proseg_hybrid" / "annotation_panel" / "p"
+    shutil.copytree(setup.panel_dir, other)
+    inside = CliRunner().invoke(
+        cli_main,
+        [
+            "annotate-resolve",
+            "--map-dir",
+            str(setup.map_dir),
+            "--panel-dir",
+            str(other),
+            "--out",
+            str(tmp_path / "other" / "PX" / "reseg" / "annotation_resolve" / "o"),
+        ],
+    )
+    assert inside.exit_code != 0
+    assert "never into the results tree" in inside.output
+    ok = CliRunner().invoke(cli_main, [*base, "--out", str(tmp_path / "outside")])
+    assert ok.exit_code == 0, ok.output
+    run_inside = CliRunner().invoke(
+        cli_main,
+        [
+            *base,
+            "--out",
+            str(tmp_path / "outside2"),
+            "--run-record",
+            str(published_map / "run.json"),
+        ],
+    )
+    assert run_inside.exit_code != 0
+    assert "run record directory" in run_inside.output
+
+
+def test_results_root_of_knows_the_annotation_publish_layout(tmp_path: Path) -> None:
+    root = tmp_path / "results"
+    for step, name in (
+        ("annotation_map", "annotation_map_out/map_manifest.json"),
+        ("annotation_panel", "annotation_panel_out/required_bundles.json"),
+        ("annotation_resolve", "annotation_resolve_out/PX_resolve_summary.json"),
+        ("annotation_report", "annotation_report_out/report.html"),
+        ("clustering_squidpy", "clustering_squidpy_prepare/x.h5ad"),
+    ):
+        path = root / "PX" / "proseg_hybrid" / step / name
+        assert pl.results_root_of(path) == root.resolve(), step
+    assert (
+        pl.results_root_of(tmp_path / "work" / "ab" / "annotation_map_out" / "m")
+        is None
+    )
+    with pytest.raises(pl.MapError, match="never into the results tree"):
+        pl.check_output_outside_inputs(
+            root / "P1" / "proseg_hybrid" / "annotation_resolve" / "out",
+            [
+                tmp_path / "work" / "map_inputs" / "P1_MERSCOPE.h5ad",
+                root
+                / "P1"
+                / "proseg_hybrid"
+                / "annotation_map"
+                / "annotation_map_out"
+                / "map_manifest.json",
+            ],
+        )

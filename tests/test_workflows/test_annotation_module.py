@@ -199,7 +199,10 @@ def test_resolve_caches_on_content_and_publishes_under_the_segmentation() -> Non
         'publishDir { "${params.outdir}/${pair_id}/${segmentation}/'
         'annotation_resolve" }, mode: "copy", overwrite: true'
     ) in block
-    assert 'path("annotation_resolve_out")' in block
+    assert 'path("annotation_resolve_out"), emit: resolved' in block
+    # The run record (clock, wall time, absolute paths) is a separate output,
+    # so annotation_resolve_out is deterministic for M5's deep cache.
+    assert 'path("annotation_resolve_run.json"), emit: run_record' in block
     assert "val(resolve_spec)" in block
     for name, staged in (
         ("clustering_config", "clustering_squidpy_config.json"),
@@ -218,6 +221,9 @@ def test_resolve_caches_on_content_and_publishes_under_the_segmentation() -> Non
     script = block[block.index("script:") : block.index("stub:")]
     assert "AnnotationReferences.resolveConfigJson(resolve_spec)" in script
     assert "--out annotation_resolve_out" in script
+    assert "--run-record annotation_resolve_run.json" in script
+    stub = block[block.index("stub:") :]
+    assert "annotation_resolve_run.json" in stub
     # RESOLVE needs no cell_type_mapper and never maps.
     assert "cell_type_mapper" not in script
     assert "--n-processors" not in script

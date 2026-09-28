@@ -298,10 +298,14 @@ process CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE {
     // §4.1), <platform>/<sid>_annotation_manifest.json (§4.6),
     // <pair>_resolve_summary.json (gate levels and warnings, trust, realised
     // flag rates, coverage, resolvable share per level, compositions and the
-    // pair JSD) and the annotation_config.json it resolved with.
+    // pair JSD) and the annotation_config.json it resolved with: all
+    // deterministic for given inputs, so a deep-cached COMPUTE_CPU (M5)
+    // staging it re-runs only when a label changes. The run record (clock,
+    // wall time, absolute paths) is published beside it and staged nowhere.
     tuple val(pair_id),
         val(segmentation),
-        path("annotation_resolve_out")
+        path("annotation_resolve_out"), emit: resolved
+    path("annotation_resolve_run.json"), emit: run_record
 
     script:
     def annotationConfigJson = AnnotationReferences.resolveConfigJson(resolve_spec)
@@ -329,7 +333,8 @@ JSON
     merxen annotate-resolve \\
         --annotation-config annotation_config.json \\
         ${resolveArgs} \\
-        --out annotation_resolve_out
+        --out annotation_resolve_out \\
+        --run-record annotation_resolve_run.json
     cp annotation_config.json annotation_resolve_out/annotation_config.json
     """
 
@@ -356,5 +361,6 @@ JSON
 ${annotationConfigJson}
 JSON
     cp resolve_inputs/annotation_map_out/${AnnotationReferences.MAP_MANIFEST_FILE} annotation_resolve_out/stub_map_manifest.json
+    echo '{"stub": true}' > annotation_resolve_run.json
     """
 }
