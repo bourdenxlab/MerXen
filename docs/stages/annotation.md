@@ -136,15 +136,21 @@ builders run the self-map of plan §8.3 on their panel
    with WHB-10Xv3 non-neuronal nuclei of E2's 14 neocortical dissections
    outside the frontal ROIs (`reference.HO_OTHER_REGION_ROI_LABELS`: MTG,
    STG, M1C, A43, A40, V1C, V2, A19, S1C, A1C, A5-A7, ITG, A38, A13; E2
-   `research/insilico/01b_extract_nonneurons.py`), any donor and cluster
-   as in E2. The WHB cell metadata (`annotation_whb_metadata_dir`) is a
-   test-set source. Candidates among the frontal reference cells (training,
-   marker and held-out donor cells) are dropped and the draw is checked
-   disjoint from them; `bundle.json` (`test_set.other_region`) records the
-   dissections, seed, cap, candidates and drawn cells per supercluster,
-   broad class, dissection and donor, and the drawn cells of clusters the
-   training reference lacks (their cluster truth cannot be called; the
-   cluster level is report-only). *Truths no call can name (M3b review 2,
+   `research/insilico/01b_extract_nonneurons.py`), any donor, but only of
+   clusters the held-out training reference keeps (≥ 5 training cells;
+   user decision 2026-09-27, `HO_OTHER_REGION_VERSION` 2 since
+   2026-09-28: version 1 drew them from any cluster as E2 did, and 694 of
+   the 2,955 set a cells were of clusters the reference lacks, whose
+   cluster truth no call can name). The WHB cell metadata
+   (`annotation_whb_metadata_dir`) is a test-set source. Candidates among
+   the frontal reference cells (training, marker and held-out donor cells)
+   are dropped and the draw is checked disjoint from them; `bundle.json`
+   (`test_set.other_region`) records the dissections, seed, cap,
+   candidates and drawn cells per supercluster, broad class, dissection and
+   donor, the cluster rule (`cluster_rule`), the candidates it left out
+   (`n_excluded_cluster_not_in_training`, per supercluster and number of
+   clusters) and a check that no drawn cell is of an absent cluster
+   (`n_cluster_not_in_training` 0). *Truths no call can name (M3b review 2,
    as E2 `research/insilico/02_make_queries.py`):* held-out donor cells
    whose truth supercluster is a sink, has no floor class (Mixed/Unknown:
    Miscellaneous 227 and Splatter 22 cells of H19.30.002, which have no
@@ -158,9 +164,23 @@ builders run the self-map of plan §8.3 on their panel
    `[10, 15, 30, 60, 120, 250]`; mouse and larger panels
    `[10, 20, 50, 100, 250, 500, 1000, 2000]`); cells never go up. Recipe
    `R1_contam_HO` (E2): per-gene efficiency LogNormal(0, 0.8) (one draw per
-   self-map, median 1) inside the thinning, plus 25% of `D` thinned from a
-   random cell of another broad class; truth stays the host's. A clean
-   (thinning-only) run is the upper bound. Seed 0.
+   gene, shared by every cell and depth, median 1) inside the thinning,
+   plus 25% of `D` thinned from a random cell of another broad class; truth
+   stays the host's. A clean (thinning-only) run is the upper bound. Seed
+   0. *Keyed draws (resolvability version 5, 2026-09-28):* every draw is
+   keyed by what it simulates, not taken from one stream over all test
+   cells: a simulated cell's thinning and its spill's thinning come from a
+   generator seeded by a stable hash (BLAKE2b) of the seed, the recipe name
+   and version, the cell id and `D` (`resolvability.cell_draw_key`); the
+   spill partner is the eligible cell with the highest rendezvous score of
+   the host's and the candidate's keys (`rendezvous_choice`, uniform over
+   the eligible cells); each gene's efficiency is keyed by the seed and the
+   gene id. So adding, removing or reordering test cells leaves every other
+   simulated cell unchanged, except a host whose partner left or was
+   outranked by an added cell (its spill only). Up to version 4 one stream
+   drew every cell, and the review-2 rebuild (a few test cells fewer)
+   redrew all of them, moving 0-7 of 85 validated broad / supercluster
+   bins per human dataset.
 3. **Mapping** with the production configuration (bootstrap factor 0.5, 100
    iterations, seed 0, raw normalisation, the bundle's lookup).
 4. **Levels.** WHB: lineage, broad, NT (group probabilities summed over
@@ -337,6 +357,32 @@ included), SEA-AD 2.1, set c WHB 4.1, ag7 36.7 min (20.2 GB) and VZG2
 plus the same 2,955 other-region nuclei); the mouse cells tables are
 identical to version 3. Every stored summary equals the decisions RESOLVE
 re-derives from the stored cells (0 differing bins in the five bundles).
+
+**Resolvability version 5** (M3b final follow-up, 2026-09-28;
+`m3b/final_followup/FINAL_FOLLOWUP.txt`): the keyed per-cell draws and the
+training-cluster rule for the other-region cells give every self-map
+bundle a new build hash. Rebuilt at 8 processes: set a WHB 4.3 min
+(held-out test set 2.5 min), SEA-AD 2.2, set c WHB 4.2, ag7 36.9 min
+(20.2 GB) and VZG2 45.1 min (27.1 GB). The keyed simulation takes 7-9 s
+per human and 11-12 s per mouse recipe (one generator per simulated cell;
+version 4: 0.2-2.5 s). The set a test set holds 11,040 cells: the donor's
+8,777 plus 2,263 other-region nuclei; the rule left out 852 candidates of
+27 clusters the held-out training reference lacks, so Vascular,
+Fibroblast and COP have 412, 144 and 152 test cells (version 4: 678, 438,
+284) and Fibroblast's `D_max` is 60. Every stored summary equals the
+re-derived decisions. Simulating the version-4 and version-5 test sets
+with the same code, the 44,427 simulated cells of their 9,654 shared test
+cells are identical with the clean recipe; with `R1_contam_HO` every one
+that differs has a new spill partner (19,630; the host thinning is
+identical). Partners change that often because the other-region top-up
+redrew 1,386 of its cells when its candidate pool changed: the test-cell
+selection is still one draw per supercluster. MapMyCells also draws its
+bootstrap per chunk of query cells, so a changed query moves the
+bootstrap probabilities of other cells: mapping the same simulated cells
+in another order changed 67% of the bp values, 5% of the broad
+confident-at-0.73 flags and 0.02% of the confident broad labels, and 0-2
+of the 83 validated broad / supercluster bins per dataset (a full redraw,
+seeds 1 and 2: 0-7).
 
 ### Bundle files
 
@@ -853,46 +899,45 @@ H4 and H16 baselines) are in §11 of the pre-registration document.
   genes too, and their lookups differed from the validated ones in 301 and
   142 of 368 parents (median Jaccard 0.979 and 0.992).
 - **H18 does not pass as written on the validated panels** (resolvability
-  version 4, M3b review 2; a decision for the gate PRs;
-  `m3b/review2/REVIEW2_H18.txt`). Set a (PREP) fails broad Astro and broad
-  and supercluster Oligo at 120 counts (86-111 calls, precision .85-.88;
-  the wrong Oligo calls are other-region COP cells called
-  Oligodendrocyte, the wrong Astro calls held-out-donor neurons with
-  spill) and, in the version-4 draw, supercluster Astro at 120.
-  Reweighted to the eight human datasets 25 (level, class) pairs fail
-  (version 3: 27): broad OPC at 15 on four datasets, broad Oligo on seven
-  (at 120 on P7513, P1212 and P7113 Xenium and P1212 MERSCOPE, at 15 on
-  P7513 MERSCOPE, at 15-120 on both P5011), supercluster Oligo on six, broad
-  Fibroblast at 15 on four, broad and supercluster Immune at 60 on P1212
-  and P5011 MERSCOPE. The version-3 Oligo 120 failures of the two
-  MERSCOPE datasets were an artifact of trimming weights against the whole
-  depth bin (every glial type got the same capped weight); trimmed within
-  the tested set they pass. The truth exclusion alone changes no set a
-  verdict; the rebuilt bundles redraw the thinning and contamination of
-  every cell, which moves 0-7 of 85 validated broad / supercluster bins per
-  dataset. COP supercluster is never emitted (Oligodendrocyte cells called
-  COP). Mouse: VZG2 passes for every class with ≥ 50 test cells; ag7 fails
-  the Immune subclass at 100 counts (precision .885) and, reweighted, only
-  05 OB-IMN GABA at 250 on proseg_hybrid and reseg (version 3: one to
-  three classes and three to six subclasses, mostly artifacts of counting
-  zero-weight calls and of pooled verdicts overriding judged bins).
-  Validated thresholds the local rule would raise, counting only bins
-  whose fit half holds 50 calls (at D ≥ 15 broad, 30 supercluster, 20
-  class, 50 subclass): set a 20 (PREP; 15-23 reweighted), SEA-AD 10, set
-  c 13, ag7 40, VZG2 68; 2, 0, 2, 94 and 104 bins have no fit and are
-  listed as `validated_thresholds_not_evaluable` (version 3 counted them
-  as raises: 34, 15, 14, 156, 196).
-- **The H7 coverage proxy misses on P5011 MERSCOPE under version 4.** The
-  confident broad share of table cells after reweighting (validated
-  regime; it ignores the SEA-AD vote, the COP rule on real cells and the
-  floors, so the real H7 values will be lower) is, version 3 → version-4
-  rules on the version-3 cells → version 4 (rebuilt): P7513 MERSCOPE .576
-  → .683 → .683 (H7 asks ≥ .62), P7113 MERSCOPE .692 → .739 → .739 (≥ .67),
-  P1212 MERSCOPE .436 → .436 → .354 (≥ .34), P5011 MERSCOPE .311 → .311 →
-  .297 (≥ .30); the Xenium datasets pass throughout. The version-4 drops
-  on P1212 and P5011 MERSCOPE come from the new simulation draw (broad
-  Oligo and Fibroblast at 10-30 counts, which hold many of these
-  low-count datasets' cells), not from the rules or the truth exclusion.
+  version 5, M3b final follow-up, 2026-09-28; a decision for the gate PRs;
+  `m3b/final_followup/FINAL_FOLLOWUP.txt`). Set a (PREP) now emits broad and
+  supercluster for every class H18 expects (version 4 failed broad Astro
+  and broad and supercluster Oligo at 120 counts, and supercluster Astro at
+  120), but only in this draw: re-simulated with seeds 1 and 2, or with the
+  version-4 gene-efficiency vector, broad Oligo at 120 fails in all three
+  and broad Fibroblast at 15 and supercluster Oligo at 120 in one (144
+  Fibroblast test cells now, `D_max` 60).
+  Reweighted to the eight human datasets 15 (level, class) pairs fail
+  (version 4: 25; 14-23 over the four draws): broad Oligo on seven datasets
+  (at 15 to 120 counts; the wrong confident weight is other-region COP
+  cells of training clusters called Oligodendrocyte, 3-26% of the called
+  set), supercluster Oligo on five, broad Fibroblast at 15 on P1212 and
+  P5011 Xenium (other-region Vascular cells called Fibroblast) and broad
+  Immune at 30 on P5011 MERSCOPE (held-out-donor astrocytes with spill).
+  Broad OPC at 15 (version 4: four datasets) passes everywhere, but fails
+  on all eight again with the version-4 gene-efficiency vector: it followed
+  that single per-gene draw, which every simulated cell shares, not the
+  rules or the test cells. COP supercluster is never emitted. Mouse: VZG2
+  passes; ag7 PREP passes (the Immune subclass at 100 fails in one of three
+  draws); reweighted, ag7 fails 05 OB-IMN GABA and / or 09 CNU-LGE GABA at
+  250 counts on every segmentation (1-2 classes; Kish n 23-62 or fewer
+  than 50 positive-weight calls; version 4: 1 / 1 / 0 / 0, the other draws
+  0-2). Validated thresholds the local rule would raise (fit half ≥ 50
+  calls, at D ≥ 15 broad, 30 supercluster, 20 class, 50 subclass): set a
+  12 (PREP; 13-25 reweighted), SEA-AD 10, set c 7, ag7 39, VZG2 57; 2, 1,
+  0, 98 and 104 bins have no fit (`validated_thresholds_not_evaluable`).
+- **The H7 coverage proxy passes on every human dataset under version 5,
+  within a draw spread.** The confident broad share of table cells after
+  reweighting (validated regime; it ignores the SEA-AD vote, the COP rule
+  on real cells and the floors, so the real H7 values will be lower) is,
+  version 4 → 5: P7513 MERSCOPE .683 → .687 (H7 asks ≥ .62), P7113
+  MERSCOPE .739 → .762 (≥ .67), P1212 MERSCOPE .354 → .446 (≥ .34), P5011
+  MERSCOPE .297 → .380 (≥ .30); Xenium P7513 .593, P7113 .652, P1212 .530,
+  P5011 .568 (≥ .44 / .39 / .29 / .40). Over the four draws P5011
+  MERSCOPE ranges .298-.403 and P1212 MERSCOPE .354-.446: with the
+  version-4 gene-efficiency vector P5011 MERSCOPE is .298 again, so the
+  version-4 miss was that realisation, not the per-cell draws or the test
+  set (the training-cluster rule alone leaves it at .297).
 - **Set c of families without a curated list** uses the label-free rule,
   which drops far more genes than E5's validated set c (44-73 per pair on the
   E5 pairs); treat such set-c results as provisional.
