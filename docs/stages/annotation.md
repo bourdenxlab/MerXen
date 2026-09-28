@@ -644,8 +644,29 @@ vendor cells, median 1,089 counts; 250 counts is its 6.7th percentile) the
 M3b headline at 250 counts under-predicted real coverage by .13 (class) to
 .22 (subclass under the bundle's provisional decisions) and neurons by up to
 .52, while it over-predicted glia. Read the per-bin table against the
-panel's real per-class depth. Plan milestone M3c (planned) replaces the
-headline with per-class depth profiles (resolvability version 7, plan §8.3).
+panel's real per-class depth. Plan milestone M3c replaces the headline
+with per-class depth profiles (resolvability version 7, plan §8.3).
+
+**Per-class depth and simulation inputs (M3c, simulation side).** The
+headline of `annotation-panel-simulate` is now the per-class depth profile
+(`--depth-profile` per-class or pooled CSV, or `--depth-profile-asset`):
+per (level, class), the profile's share of the class's cells in emitted
+bins and the predicted coverage over them, and, in profile mode, cells
+simulated at the profile's per-class TOTAL depth for each ensemble member,
+mapped and tabulated per called class (member mean and range). The
+expected median depth stays as a secondary line. Profile mode reproduces
+phase 1's D3 draws exactly (same simulated cells, hosts, partners and
+totals drawn; 98.6% of realised totals identical, the rest from the exact
+thinning). Public vendor data enter only as simulation inputs with
+provenance (`assets/annotation/sim_inputs/`, OD-E1 amended): the Prime 5K
+mouse factor table against WMB 10Xv3 (the `R3_measured_HO` member; its
+measured factor only for informative genes whose top class holds >= 0.5% of
+the section, every other gene a keyed resample of the measured
+distribution), the public section's per-class depth profile ("XOA 3.0
+vendor segmentation, public 10x section"), the lung 5K / v1 ratios (a
+cross-tissue stress recipe for human Prime only) and the lung FFPE depth
+scenario. No asset raises a trust state, no depth profile crosses species,
+and version 6 (set a, ag7, VZG2, P5011 MERSCOPE) is byte-identical.
 
 ### Panel families, diagnostics and trust states (M3b)
 

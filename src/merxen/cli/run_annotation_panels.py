@@ -178,7 +178,36 @@ def _git_commit() -> str | None:
     "--depth-profile",
     type=click.Path(path_type=Path, exists=True, dir_okay=False),
     default=None,
-    help="CSV of per-cell panel counts (column depth or total_counts).",
+    help="CSV of per-cell total counts (column total_counts or depth), per class "
+    "with a class column (the phase-1 depth_profile.csv format) or pooled; the "
+    "report's headline (plan §8.3 v7.5).",
+)
+@click.option(
+    "--depth-profile-asset",
+    default=None,
+    help="A registered simulation-input depth profile instead of a CSV, e.g. "
+    "depth__xenium_prime__mouse_brain_ff (public 5K section) or "
+    "depth__xenium_prime__human_lung_ffpe (lung FFPE scenario).",
+)
+@click.option(
+    "--profile-mode/--no-profile-mode",
+    default=True,
+    show_default=True,
+    help="With a depth profile: also map cells simulated at the profile's "
+    "per-class depth for each emission member (primary reference).",
+)
+@click.option(
+    "--real-composition",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    default=None,
+    help="CSV of real called class, subclass, n_cells to weigh profile-mode "
+    "cells to (mouse).",
+)
+@click.option(
+    "--profile-members",
+    default=None,
+    help="Comma-separated profile-mode members (default: the family's emission "
+    "members, e.g. R1_contam_HO@0,R1_contam_HO@1,R1_contam_HO@2,R3_measured_HO@0).",
 )
 @click.option(
     "--gate-p",
@@ -221,6 +250,10 @@ def _annotation_panel_simulate(
     prefilter_compare: str,
     expected_depth: int | None,
     depth_profile: Path | None,
+    depth_profile_asset: str | None,
+    profile_mode: bool,
+    real_composition: Path | None,
+    profile_members: str | None,
     gate_p: bool,
 ) -> None:
     from merxen.annotation.reference import SourceOptions, set_prep_resources
@@ -315,6 +348,13 @@ def _annotation_panel_simulate(
         prefilter_compare=cast("Any", prefilter_compare),
         expected_depth=expected_depth,
         depth_profile=depth_profile,
+        depth_profile_asset=depth_profile_asset,
+        profile_mode=profile_mode
+        and (depth_profile is not None or depth_profile_asset is not None),
+        real_composition=real_composition,
+        profile_members=None
+        if not profile_members
+        else [item.strip() for item in profile_members.split(",") if item.strip()],
         gate_p=gate_p,
         provenance={
             "public_panel": public_record,

@@ -763,7 +763,11 @@ def simulate_reference(
     scratch_dir: Path,
     prefilter_compare: PrefilterCompare = "auto",
     expected_depth: int | None = None,
-    depth_profile: Sequence[float] | None = None,
+    depth_profile: Sequence[float] | Any | None = None,
+    profile_mode: bool = False,
+    real_composition: pd.DataFrame | None = None,
+    profile_members: Sequence[str] | None = None,
+    chemistry: Any | None = None,
 ) -> ReferenceSimulation:
     """Build one reference on a panel and predict what it resolves.
 
@@ -778,8 +782,17 @@ def simulate_reference(
         scratch_dir: Scratch for the unfiltered markers and mappings.
         prefilter_compare: ``auto`` (when the markers were prefiltered),
             ``always`` or ``off``.
-        expected_depth: Median panel counts of the planned data, if known.
-        depth_profile: Per-cell panel counts of a planned dataset, if known.
+        expected_depth: Median panel counts of the planned data, if known
+            (a secondary line; the depth profile is the headline, M3c).
+        depth_profile: A ``sim_inputs.DepthProfile`` (per-class or pooled
+            totals) or per-cell panel counts of a planned dataset, if known.
+        profile_mode: Also map simulated cells drawn at the profile's
+            per-class depth (plan §8.3 v7.5; primary references only).
+        real_composition: Real called (class, subclass) cell counts to weigh
+            profile-mode cells to (mouse).
+        profile_members: Profile-mode members to run (default: the family's
+            emission members).
+        chemistry: The panel's ``sim_inputs.ChemistryResolution``.
 
     Returns:
         The simulation of the reference.
@@ -893,13 +906,54 @@ def simulate_reference(
             "depth_bin": expected_bin,
             "emitted_classes": at_depth,
         }
+    profile_resources: list[dict[str, Any]] = []
     if depth_profile is not None and output.get("depth_grid"):
-        shares = depth_profile_weights(depth_profile, output["depth_grid"])
+        grid = [int(value) for value in output["depth_grid"]]
+        profile: Any = depth_profile if hasattr(depth_profile, "by_class") else None
+        totals: Any = profile.totals if profile is not None else depth_profile
+        shares = depth_profile_weights(totals, grid)
         record["depth_profile"] = {
-            "n_cells": len(depth_profile),
+            "n_cells": len(totals),
             "bin_shares": shares,
             "resolvable_share": resolvable_share(predicted, shares),
         }
+        if profile is not None:
+            record["depth_profile"]["profile"] = profile.to_json()
+            class_depth = class_depth_predictions(predicted, profile, grid)
+            record["class_depth"] = {
+                "regime": regime,
+                "headline": class_depth_headline(class_depth, profile),
+                "file": CLASS_DEPTH_CSV,
+            }
+            if not class_depth.empty:
+                class_depth.insert(0, "reference_id", reference_id)
+                class_depth.to_csv(out_dir / CLASS_DEPTH_CSV, index=False)
+            if profile_mode and spec.role == "primary" and not decisions.empty:
+                record["profile_mode"], profile_resources = run_profile_mode(
+                    reference_id=reference_id,
+                    spec=spec,
+                    config=config,
+                    bundle_dir=bundle_dir,
+                    test_set_dir=test_set_dir,
+                    resolvability=resolvability,
+                    profile=profile,
+                    chemistry=chemistry,
+                    out_dir=out_dir,
+                    scratch_dir=scratch_dir / reference_id / "profile_mode",
+                    real_composition=real_composition,
+                    members=profile_members,
+                )
+            elif profile_mode:
+                record["profile_mode"] = {
+                    "status": "not_run",
+                    "reason": "no self-map decisions"
+                    if decisions.empty
+                    else f"{spec.role} reference (profile mode maps the primary)",
+                }
+    if chemistry is not None:
+        record["panel_card_notes"] = panel_card_notes(
+            str(panel.species), str(chemistry.chemistry)
+        )
     # Resources and disk.
     reference_markers_bytes = sum(
         int(item.get("size", 0))
@@ -957,6 +1011,7 @@ def simulate_reference(
             "disk_gb": disk["bundle_gb"],
         }
     )
+    resources += profile_resources
     comparison = pd.DataFrame(columns=list(PREFILTER_COLUMNS))
     engine_prefiltered = _engine_prefilter(bundle_dir, test_set_dir, resolvability)
     should_compare = prefilter_compare == "always" or (
@@ -1247,6 +1302,10 @@ def run_panel_simulation(
     prefilter_compare: PrefilterCompare = "auto",
     expected_depth: int | None = None,
     depth_profile: Path | None = None,
+    depth_profile_asset: str | None = None,
+    profile_mode: bool = False,
+    real_composition: Path | None = None,
+    profile_members: Sequence[str] | None = None,
     gate_p: bool = False,
     provenance: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -1263,8 +1322,19 @@ def run_panel_simulation(
         scratch_dir: Scratch (unfiltered markers, mappings).
         platform: The panel's platform, if known.
         prefilter_compare: See ``simulate_reference``.
-        expected_depth: Median panel counts of the planned data.
-        depth_profile: CSV of per-cell panel counts of a planned dataset.
+        expected_depth: Median panel counts of the planned data (reported as
+            a secondary line).
+        depth_profile: CSV of per-cell panel counts of a planned dataset:
+            per-class (a ``class`` column, the ``5k_real/mouse5k/
+            depth_profile.csv`` format) or pooled.
+        depth_profile_asset: A registered ``profile`` or ``scenario``
+            simulation-input asset instead of a CSV (``sim_inputs``).
+        profile_mode: Map simulated cells drawn at the profile's per-class
+            depth (plan §8.3 v7.5); needs a depth profile.
+        real_composition: CSV of real called (class, subclass, n_cells) to
+            weigh profile-mode cells to (mouse).
+        profile_members: Profile-mode members (default: the family's
+            emission members).
         gate_p: Run the registered gate-P programme (M13) afterwards.
         provenance: Extra report fields (inputs, code version).
 
@@ -1274,17 +1344,31 @@ def run_panel_simulation(
     Raises:
         GatePUnavailableError: If ``gate_p`` and no programme is registered
             (checked before any compute).
+        SimulationError: If the depth profile is of another species or both
+            a CSV and an asset are given (before any compute).
     """
+    from merxen.annotation import sim_inputs as si
     from merxen.annotation.memory import ProcessTreeSampler
     from merxen.annotation.panel import panel_from_gene_list
 
     hook = require_gate_p_hook() if gate_p else None
+    profile = load_simulation_profile(
+        depth_profile, depth_profile_asset, species=species
+    )
+    if profile_mode and profile is None:
+        raise SimulationError(
+            "profile mode needs --depth-profile or --depth-profile-asset"
+        )
+    composition = (
+        read_real_composition(real_composition)
+        if real_composition is not None
+        else None
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
     scratch_dir.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     started_at = datetime.now(UTC).isoformat(timespec="seconds")
     sampler = ProcessTreeSampler().start()
-    profile = read_depth_profile(depth_profile) if depth_profile is not None else None
     computation = panel_from_gene_list(
         gene_list,
         species,  # type: ignore[arg-type]
@@ -1294,6 +1378,12 @@ def run_panel_simulation(
     )
     panel = computation.panels["gene_list"].panel
     declared = (computation.report.get("declared_panels") or {}).get("gene_list") or {}
+    chemistry = si.resolve_chemistry(
+        panel.ensembl_ids,
+        species=species,
+        platform=platform,
+        declared=str(getattr(config.panel, "panel_chemistry", "auto")),
+    )
     report: dict[str, Any] = {
         "schema_version": SIMULATE_SCHEMA_VERSION,
         "name": name,
@@ -1334,11 +1424,20 @@ def run_panel_simulation(
             "panel_files": {
                 key: str(value) for key, value in computation.paths.items()
             },
+            "chemistry": chemistry.to_json(),
         },
         "settings": {
             "prefilter_compare": prefilter_compare,
             "expected_depth": expected_depth,
             "depth_profile": None if depth_profile is None else str(depth_profile),
+            "depth_profile_asset": depth_profile_asset,
+            "profile_mode": profile_mode,
+            "real_composition": None
+            if real_composition is None
+            else str(real_composition),
+            "profile_members": None
+            if profile_members is None
+            else list(profile_members),
             "large_panel_genes": config.panel.large_panel_genes,
             "large_panel_marker_prefilter": config.panel.large_panel_marker_prefilter,
             "large_panel_prefilter_cap": config.panel.large_panel_prefilter_cap,
@@ -1374,6 +1473,10 @@ def run_panel_simulation(
                 prefilter_compare=prefilter_compare,
                 expected_depth=expected_depth,
                 depth_profile=profile,
+                profile_mode=profile_mode,
+                real_composition=composition,
+                profile_members=profile_members,
+                chemistry=chemistry,
             )
             report["references"][simulation.reference_id] = simulation.record
             predicted_frames.append(simulation.predicted)
@@ -1559,16 +1662,20 @@ def render_text(report: Mapping[str, Any]) -> str:
                 if reasons and not depths:
                     text += f"; not emitted: {reasons}"
                 lines.append(text)
+        lines += render_profile_lines(record)
         if record.get("expected_depth"):
             item = record["expected_depth"]
             lines.append(
-                f"   at the expected median depth {item.get('median_counts')} (bin "
-                f"{item.get('depth_bin')}): "
+                "   secondary (one depth for every cell; read the per-bin table "
+                "against the panel's per-class depth): at the expected median depth "
+                f"{item.get('median_counts')} (bin {item.get('depth_bin')}): "
                 + "; ".join(
                     f"{level} {len(classes)} classes"
                     for level, classes in (item.get("emitted_classes") or {}).items()
                 )
             )
+        for note in record.get("panel_card_notes") or []:
+            lines.append(f"   note: {note}")
         comparison = record.get("prefilter_comparison") or {}
         if comparison.get("status") == "run":
             verdict = "PASS" if comparison.get("passes") else "FAIL"
@@ -1615,3 +1722,1114 @@ def render_text(report: Mapping[str, Any]) -> str:
     if report.get("gate_p") is not None:
         lines.append(f"gate P: {json.dumps(_json_native(report['gate_p']))[:2000]}")
     return "\n".join(lines) + "\n"
+
+
+# --------------------------------------------------------------------------
+# Profile mode and per-class depth (resolvability version 7, plan §8.3 v7.5;
+# M3c). Phase 1 found one expected depth the largest error of the M3b
+# headline (-.13 to -.22 coverage on the public 5K section): real cells carry
+# a per-class depth (glia about a third of neuronal depth), so predictions
+# use the per-class profile and the "expected median depth" line is kept
+# only as a secondary line.
+
+# Profile mode (phase 1's D-recipes, ``5k_real/sim/scripts/simlib.py``
+# ``simulate_totals``): per truth class c, M_c = min(max(2 n_c, 2000), 8 n_c)
+# simulated cells.
+PROFILE_MIN_SIMS: Final = 2000
+PROFILE_SIMS_PER_CELL: Final = 2
+PROFILE_MAX_SIMS_PER_CELL: Final = 8
+PROFILE_SPILL_FRACTION: Final = 0.25
+# Rows thinned per block (exact thinning is per row, so blocks never change a
+# simulated cell; they bound the memory of 50k-cell profile queries).
+PROFILE_THIN_BLOCK_ROWS: Final = 20_000
+# The raw rules profile mode reports (plan §7.3 mouse; §5.2 human defaults).
+MOUSE_CLASS_RULE_BP: Final = 0.9
+MOUSE_CLASS_RULE_MIN_COUNTS: Final = 20
+MOUSE_SUBCLASS_RULE_BP: Final = 0.8
+MOUSE_SUBCLASS_RULE_MIN_COUNTS: Final = 50
+HUMAN_RAW_MIN_COUNTS: Final = 20
+# Composition weights (phase 1's ``analyse.py`` ``comp_weights``): class
+# weight x within-class subclass weight, trimmed at 10x the class median.
+COMPOSITION_TRIM: Final = 10.0
+PROFILE_PREDICTIONS_CSV: Final = "profile_predictions.csv"
+CLASS_DEPTH_CSV: Final = "profile_class_depth.csv"
+PROFILE_CELLS_FILE: Final = "profile_cells.parquet"
+# Panel-card notes of the Xenium Prime 5K families (user decision 4, plan
+# §8.10); they state limits, never change a prediction.
+GLIAL_UPPER_BOUND_NOTE: Final = (
+    "Simulated glial coverage is an upper bound: -.06 to -.18 on "
+    "vendor-segmented 5K cells"
+)
+PRECISION_UNMEASURED_NOTE: Final = "Precision is unmeasured on real data"
+MOUSE_PROFILE_LEVELS: Final[tuple[str, ...]] = ("broad", "class", "nt", "subclass")
+
+
+def profile_sims_per_class(n_cells: int) -> int:
+    """Return the simulated cells of a truth class with ``n_cells`` test cells."""
+    return int(
+        min(
+            max(PROFILE_SIMS_PER_CELL * n_cells, PROFILE_MIN_SIMS),
+            PROFILE_MAX_SIMS_PER_CELL * n_cells,
+        )
+    )
+
+
+def choose_profile_partners(
+    native: np.ndarray,
+    groups: np.ndarray,
+    host_groups: np.ndarray,
+    amounts: np.ndarray,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Draw each host's spill partner uniformly among eligible cells.
+
+    Phase 1's ``_choose_partners``: per host spill group (sorted), a uniform
+    draw among the cells of another group whose native counts reach the
+    spill amount, from one generator.
+
+    Raises:
+        SimulationError: If a host has no eligible partner.
+    """
+    partners = np.empty(len(amounts), dtype=np.int64)
+    for group in np.unique(host_groups):
+        is_host = np.flatnonzero(host_groups == group)
+        candidates = np.flatnonzero(groups != group)
+        order = candidates[np.argsort(-native[candidates], kind="stable")]
+        descending = native[order]
+        reach = np.searchsorted(-descending, -amounts[is_host], side="right")
+        if (reach == 0).any():
+            raise SimulationError(f"no spill donor for group {group}")
+        pick = np.floor(rng.random(len(is_host)) * reach).astype(np.int64)
+        partners[is_host] = order[pick]
+    return partners
+
+
+def _thin_blocks(
+    counts: Any,
+    rows: np.ndarray,
+    targets: np.ndarray,
+    efficiency: np.ndarray,
+    keys: Sequence[int],
+    block_rows: int,
+) -> Any:
+    from scipy import sparse as sp
+
+    from merxen.annotation.resolvability import thin_rows_exact
+
+    parts = []
+    for start in range(0, len(rows), max(1, int(block_rows))):
+        stop = min(len(rows), start + int(block_rows))
+        parts.append(
+            thin_rows_exact(
+                counts[rows[start:stop]],
+                targets[start:stop],
+                efficiency,
+                list(keys[start:stop]),
+            )
+        )
+    if not parts:
+        return sp.csr_matrix((0, counts.shape[1]), dtype=np.float64)
+    return sp.vstack(parts).tocsr()
+
+
+def simulate_on_profile(
+    test: Any,
+    profile: Any,
+    truth_class: np.ndarray,
+    recipe: Any,
+    grid: Sequence[int],
+    *,
+    efficiency: np.ndarray | None = None,
+    key_name: str | None = None,
+    spill_fraction: float | None = None,
+    sims_per_class: Callable[[int], int] = profile_sims_per_class,
+    block_rows: int = PROFILE_THIN_BLOCK_ROWS,
+) -> Any:
+    """Simulate test cells at real per-class TOTAL depths (profile mode, v7.5).
+
+    The port of phase 1's D-recipe (``simlib.simulate_totals``, profile
+    branch), with its draw structure: per truth class ``c`` (sorted), ``M_c``
+    totals are drawn from ``c``'s profile (``DepthProfile.sample``; the pooled
+    neuronal or non-neuronal profile below 100 cells) with the generator of
+    ``draw_key(seed, name, "depth", c)``; each total's host is drawn
+    uniformly among ``c``'s test cells whose native counts reach ``total /
+    (1 + s)`` (the class's deepest cell, marked truncated, when none does);
+    the host is thinned to ``total / (1 + s)`` and ``s`` times that is spilled
+    from a uniform partner of another spill group whose native counts reach
+    it (one generator, ``draw_key(seed, name, "partner")``); both with exact
+    thinning keyed per simulated cell (``draw_key(seed, name, version,
+    sim_id, stream)``). A simulated cell's bin is the grid value at or below
+    its realised total. Profile mode never enters emission.
+
+    Args:
+        test: ``HeldOutCells``.
+        profile: ``sim_inputs.DepthProfile``.
+        truth_class: Truth class per test cell (mouse WMB class, human broad
+            class), in the test cells' order.
+        recipe: The member's ``SimulationRecipe`` (seed, name, version, spill).
+        grid: The bundle's depth grid (for the bins).
+        efficiency: Per-gene efficiency (default: ``member_efficiency``).
+        key_name: The name in the draw keys (default: the recipe's; the D3
+            regression passes ``R3_measured_realdepth``).
+        spill_fraction: Spill fraction (default: the recipe's, else 0.25).
+        sims_per_class: ``n_c -> M_c``.
+        block_rows: Rows thinned per block.
+
+    Returns:
+        A ``SimulatedQuery`` (obs: ``cell_id``, ``depth`` (bin), ``partner_id``,
+        ``host_counts``, ``spill_counts``, ``total_counts``, ``target_total``,
+        ``host_depth``, ``rep``, ``truncated``, ``truth_class_sampled``,
+        ``native_counts``, ``profile_source``, ``member``).
+
+    Raises:
+        SimulationError: If the truth classes do not match the test cells.
+    """
+    from merxen.annotation import resolvability as res
+
+    classes = np.asarray([str(value) for value in truth_class], dtype=object)
+    if len(classes) != len(test.obs):
+        raise SimulationError(
+            f"profile mode: {len(classes)} truth classes for {len(test.obs)} test cells"
+        )
+    name = str(key_name or recipe.name)
+    seed = int(recipe.seed)
+    spill = float(
+        spill_fraction
+        if spill_fraction is not None
+        else (
+            recipe.spill_fraction if recipe.spill_fraction else PROFILE_SPILL_FRACTION
+        )
+    )
+    gene_eff = (
+        res.member_efficiency(recipe, test.genes)
+        if efficiency is None
+        else np.asarray(efficiency, dtype=np.float64)
+    )
+    native = test.native_counts
+    groups = test.obs[res.SPILL_GROUP_COLUMN].astype(str).to_numpy()
+    cell_ids = test.obs.index.astype(str).to_numpy()
+    from scipy import sparse as sp
+
+    counts = sp.csr_matrix(test.counts)
+    host_parts: list[np.ndarray] = []
+    total_parts: list[np.ndarray] = []
+    rep_parts: list[np.ndarray] = []
+    trunc_parts: list[np.ndarray] = []
+    source_parts: list[np.ndarray] = []
+    for cls in sorted(set(classes.tolist())):
+        members = np.flatnonzero(classes == cls)
+        n_sims = int(sims_per_class(len(members)))
+        rng = np.random.default_rng(res.draw_key(seed, name, "depth", cls))
+        totals = profile.sample(cls, n_sims, rng).astype(np.float64)
+        hosts_depth = totals / (1.0 + spill)
+        order = members[np.argsort(-native[members], kind="stable")]
+        descending = native[order]
+        reach = np.searchsorted(-descending, -hosts_depth, side="right")
+        truncated = reach == 0
+        reach = np.maximum(reach, 1)
+        picked = order[np.floor(rng.random(n_sims) * reach).astype(np.int64)]
+        hosts_depth = np.where(truncated, native[picked], hosts_depth)
+        totals = np.where(truncated, hosts_depth * (1.0 + spill), totals)
+        host_parts.append(picked)
+        total_parts.append(totals)
+        rep_parts.append(np.arange(n_sims))
+        trunc_parts.append(truncated)
+        source_parts.append(np.full(n_sims, profile.used.get(cls, ""), dtype=object))
+    hosts = np.concatenate(host_parts) if host_parts else np.zeros(0, dtype=np.int64)
+    target_total = np.concatenate(total_parts) if total_parts else np.zeros(0)
+    reps = np.concatenate(rep_parts) if rep_parts else np.zeros(0, dtype=np.int64)
+    truncated_all = (
+        np.concatenate(trunc_parts) if trunc_parts else np.zeros(0, dtype=bool)
+    )
+    sources = (
+        np.concatenate(source_parts) if source_parts else np.zeros(0, dtype=object)
+    )
+    host_depth = target_total / (1.0 + spill)
+    sim_ids = np.array(
+        [
+            f"{cell_ids[host]}|{name}|{int(rep)}"
+            for host, rep in zip(hosts, reps, strict=True)
+        ],
+        dtype=object,
+    )
+    version = int(recipe.version)
+    thin_keys = [res.draw_key(seed, name, version, sim, "thin") for sim in sim_ids]
+    host_counts = _thin_blocks(
+        counts, hosts, host_depth, gene_eff, thin_keys, block_rows
+    )
+    rng = np.random.default_rng(res.draw_key(seed, name, "partner"))
+    amounts = spill * host_depth
+    partners = (
+        choose_profile_partners(native, groups, groups[hosts], amounts, rng)
+        if len(hosts)
+        else np.zeros(0, dtype=np.int64)
+    )
+    spill_keys = [res.draw_key(seed, name, version, sim, "spill") for sim in sim_ids]
+    spill_counts = _thin_blocks(
+        counts, partners, amounts, gene_eff, spill_keys, block_rows
+    )
+    simulated = (host_counts + spill_counts).tocsr()
+    total = np.asarray(simulated.sum(axis=1)).ravel()
+    bins = res.depth_bin(total, list(grid))
+    obs = pd.DataFrame(
+        {
+            "cell_id": cell_ids[hosts],
+            "depth": np.nan_to_num(bins, nan=0).astype(np.int32),
+            "partner_id": cell_ids[partners].astype(object),
+            "host_counts": np.asarray(host_counts.sum(axis=1)).ravel(),
+            "spill_counts": np.asarray(spill_counts.sum(axis=1)).ravel(),
+            "total_counts": total,
+            "target_total": target_total,
+            "host_depth": host_depth,
+            "rep": reps,
+            "truncated": truncated_all,
+            "truth_class_sampled": classes[hosts],
+            "native_counts": native[hosts],
+            "profile_source": sources,
+            "member": recipe.member,
+        },
+        index=pd.Index(sim_ids, name="sim_id"),
+    )
+    return res.SimulatedQuery(
+        recipe=recipe, counts=simulated, genes=list(test.genes), obs=obs, n_by_depth={}
+    )
+
+
+def profile_truth_classes(
+    test: Any, specs: Sequence[Any], species: str, vocab: pd.DataFrame | None
+) -> np.ndarray:
+    """Return the truth class of each test cell that profile mode samples by.
+
+    Mouse: the WMB class name of ``truth__CCN20230722_CLAS``; human: the
+    broad level's truth parent (``Exc``, ``Inh``, ``Astro``, ...), as phase 1.
+    """
+    from merxen.annotation import resolvability as res
+
+    if species == "mouse":
+        names = _node_names(vocab)
+        values = test.obs[f"{res.TRUTH_PREFIX}{res.WMB_CLAS}"].astype(str)
+        return np.array([names.get(value, value) for value in values], dtype=object)
+    broad = next((spec for spec in specs if spec.meta.level == "broad"), None)
+    if broad is None:
+        raise SimulationError("profile mode needs the broad level's truth")
+    truth = broad.truth(test)
+    return np.asarray(truth["truth_parent"].astype(object).to_numpy(), dtype=object)
+
+
+def _node_names(vocab: pd.DataFrame | None) -> dict[str, str]:
+    if vocab is None:
+        return {}
+    frame = vocab.reset_index(drop=True)
+    return dict(
+        zip(frame["node"].astype(str), frame["node_name"].astype(str), strict=True)
+    )
+
+
+def _subclass_class_map(vocab: pd.DataFrame | None) -> dict[str, str]:
+    from merxen.annotation import resolvability as res
+
+    if vocab is None:
+        return {}
+    frame = vocab.reset_index(drop=True)
+    rows = frame[frame["level"].astype(str) == res.WMB_SUBC]
+    return dict(
+        zip(rows["node_name"].astype(str), rows["key_name"].astype(str), strict=True)
+    )
+
+
+def emission_frame(
+    summary: Mapping[str, Any], regime: str = "provisional"
+) -> pd.DataFrame:
+    """Return a bundle's emitted bins: level, class, bin, threshold, floor.
+
+    From ``resolvability_summary.json`` (``emission`` and ``floors`` of the
+    regime), as phase 1's ``analyse.py`` read it.
+    """
+    rows = []
+    emission = (summary.get("emission") or {}).get(regime) or {}
+    floors = (summary.get("floors") or {}).get(regime) or {}
+    for level, classes in emission.items():
+        for cls, bins in classes.items():
+            floor = ((floors.get(level) or {}).get(cls) or {}).get("floor")
+            for depth, record in bins.items():
+                if not record or record.get("status") != "emitted":
+                    continue
+                threshold = record.get("threshold")
+                if threshold is None:
+                    threshold = record.get("t_star")
+                if threshold is None:
+                    continue
+                rows.append(
+                    {
+                        "level": str(level),
+                        "cls": str(cls),
+                        "bin": float(depth),
+                        "thr": float(threshold),
+                        "floor": 0.0 if floor is None else float(floor),
+                    }
+                )
+    return pd.DataFrame(rows, columns=["level", "cls", "bin", "thr", "floor"])
+
+
+def provisional_ok(
+    level: str,
+    cls: np.ndarray,
+    bins: np.ndarray,
+    bp: np.ndarray,
+    counts: np.ndarray,
+    emitted: pd.DataFrame,
+) -> np.ndarray:
+    """Return which cells a bundle's decisions emit at a level.
+
+    A cell is emitted when its (level, called class, bin of its total counts)
+    is an emitted bin, its bp reaches the bin's applied threshold and its
+    counts reach the class's floor.
+    """
+    rows = emitted[emitted["level"] == level]
+    key = pd.MultiIndex.from_arrays(
+        [rows["cls"].astype(str), rows["bin"].astype(float)]
+    )
+    threshold = pd.Series(rows["thr"].to_numpy(dtype=np.float64), index=key)
+    floor = pd.Series(rows["floor"].to_numpy(dtype=np.float64), index=key)
+    query = pd.MultiIndex.from_arrays(
+        [pd.Series(cls).astype(str), pd.Series(bins).astype(float)]
+    )
+    applied = threshold.reindex(query).to_numpy(dtype=np.float64)
+    floors = floor.reindex(query).to_numpy(dtype=np.float64)
+    ok = (
+        ~np.isnan(applied)
+        & (bp >= np.nan_to_num(applied, nan=9.0))
+        & (counts >= np.nan_to_num(floors, nan=np.inf))
+    )
+    return np.asarray(ok, dtype=bool)
+
+
+def profile_cell_table(
+    cells: pd.DataFrame,
+    *,
+    species: str,
+    summary: Mapping[str, Any],
+    names: Mapping[str, str],
+    regime: str = "provisional",
+) -> pd.DataFrame:
+    """Return one row per simulated cell: calls, bp, truth and coverage flags.
+
+    Mouse: ``cov_class_rule73`` (class bp >= 0.9, >= 20 counts),
+    ``cov_subclass_rule73`` (and subclass bp >= 0.8, >= 50 counts), and
+    ``cov_<level>_prov`` under the bundle's decisions (subclass also needs
+    >= ``provisional_mouse_subclass_floor`` counts and the class); grouped
+    by the called class. Human: ``cov_<level>_raw`` (bp >= the level's
+    default, >= 20 counts) and ``cov_<level>_prov``, supercluster within
+    broad; grouped by the called broad class.
+
+    Args:
+        cells: ``level_cells`` rows of one member (cells rules applied).
+        species: ``human`` or ``mouse``.
+        summary: The bundle's ``resolvability_summary.json``.
+        names: Node -> name (the engine's vocab).
+        regime: The decisions' regime.
+
+    Returns:
+        The table, indexed by ``sim_id``.
+    """
+    from merxen.annotation import resolvability as res
+
+    if cells.empty:
+        return pd.DataFrame()
+    wide = cells.pivot(
+        index="sim_id", columns="level", values=["parent", "call", "bp", "correct"]
+    )
+    first_level = str(cells["level"].iloc[0])
+    first = cells[cells["level"] == first_level].set_index("sim_id")
+    table = pd.DataFrame(index=wide.index)
+    table["total_counts"] = first["total_counts"].reindex(table.index).astype(float)
+    table["truth_leaf"] = (
+        first[res.TRUTH_LEAF_COLUMN]
+        .reindex(table.index)
+        .astype(str)
+        .map(lambda value: names.get(value, value))
+    )
+    counts = table["total_counts"].to_numpy(np.float64)
+    grid = [int(value) for value in summary.get("depth_grid") or []]
+    bins = res.depth_bin(counts, grid)
+    emitted = emission_frame(summary, regime)
+    levels = [
+        str(item["level"])
+        for item in summary.get("levels") or []
+        if item.get("role") != "fine" and item.get("level") in wide["bp"].columns
+    ]
+    defaults = {
+        str(item["level"]): float(item["default_threshold"])
+        for item in summary.get("levels") or []
+    }
+    if species == "mouse":
+        table["cls_call"] = wide[("parent", "class")].astype(object)
+        table["truth_cls"] = (
+            cells[cells["level"] == "class"]
+            .set_index("sim_id")["truth_parent"]
+            .reindex(table.index)
+            .astype(str)
+        )
+        for level in levels:
+            table[f"{level}_bp"] = wide[("bp", level)].astype(float)
+            table[f"{level}_correct"] = wide[("correct", level)].astype(bool)
+        class_bp = table["class_bp"].to_numpy(np.float64)
+        table["cov_class_rule73"] = (class_bp >= MOUSE_CLASS_RULE_BP) & (
+            counts >= MOUSE_CLASS_RULE_MIN_COUNTS
+        )
+        if "subclass" in levels:
+            table["cov_subclass_rule73"] = (
+                table["cov_class_rule73"].to_numpy(bool)
+                & (table["subclass_bp"].to_numpy(np.float64) >= MOUSE_SUBCLASS_RULE_BP)
+                & (counts >= MOUSE_SUBCLASS_RULE_MIN_COUNTS)
+            )
+        called = table["cls_call"].astype(str).to_numpy()
+        subclass_floor = float(
+            (summary.get("settings") or {}).get("provisional_mouse_subclass_floor", 60)
+        )
+        flags: dict[str, np.ndarray] = {}
+        for level in [item for item in MOUSE_PROFILE_LEVELS if item in levels]:
+            ok = provisional_ok(
+                level,
+                called,
+                bins,
+                table[f"{level}_bp"].to_numpy(np.float64),
+                counts,
+                emitted,
+            )
+            if level == "subclass":
+                ok = ok & (counts >= subclass_floor) & flags.get("class", ok)
+            flags[level] = ok
+            table[f"cov_{level}_prov"] = ok
+        return table
+    broad_parent = wide[("parent", "broad")] if "broad" in levels else None
+    table["cls_call"] = (
+        broad_parent.astype(object) if broad_parent is not None else None
+    )
+    table["truth_cls"] = (
+        cells[cells["level"] == "broad"]
+        .set_index("sim_id")["truth_parent"]
+        .reindex(table.index)
+        .astype(str)
+        if "broad" in levels
+        else ""
+    )
+    for level in levels:
+        parent = wide[("parent", level)].astype(object).to_numpy()
+        bp = wide[("bp", level)].astype(float).to_numpy()
+        table[f"{level}_correct"] = wide[("correct", level)].astype(bool).to_numpy()
+        present = pd.notna(parent)
+        table[f"cov_{level}_raw"] = (
+            (bp >= defaults.get(level, 1.0))
+            & (counts >= HUMAN_RAW_MIN_COUNTS)
+            & present
+        )
+        table[f"cov_{level}_prov"] = (
+            provisional_ok(
+                level,
+                np.array([str(value) for value in parent]),
+                bins,
+                bp,
+                counts,
+                emitted,
+            )
+            & present
+        )
+    if "supercluster" in levels and "broad" in levels:
+        table["cov_supercluster_raw"] &= table["cov_broad_raw"]
+        table["cov_supercluster_prov"] &= table["cov_broad_prov"]
+    return table
+
+
+def composition_weights_to_real(
+    truth_sub: pd.Series,
+    real_share: pd.Series,
+    class_of: Mapping[str, str],
+    *,
+    trim: float = COMPOSITION_TRIM,
+) -> np.ndarray:
+    """Return simulated-cell weights to a real called composition.
+
+    Phase 1's ``comp_weights``: ``w = [p_real(class) / p_sim(class)] x
+    [p_real(sub | class) / p_sim(sub | class)]``, the within-class factor
+    trimmed at ``trim`` x its class's median positive value and rescaled to
+    mean 1 within the class; subclasses absent from the real data get
+    weight 0.
+
+    Args:
+        truth_sub: Truth subclass name per simulated cell.
+        real_share: Real called share per subclass name.
+        class_of: Subclass name -> class name.
+        trim: Trim factor.
+
+    Returns:
+        Weights per simulated cell.
+    """
+    weights = np.zeros(len(truth_sub))
+    subs = truth_sub.astype(str).to_numpy()
+    classes = np.array([class_of.get(value, "?") for value in subs], dtype=object)
+    real_class = pd.Series(
+        [class_of.get(value, "?") for value in real_share.index], index=real_share.index
+    )
+    p_real_class = real_share.groupby(real_class).sum()
+    p_sim_class = pd.Series(classes).value_counts(normalize=True)
+    for cls in np.unique(classes):
+        selected = classes == cls
+        sub = pd.Series(subs[selected])
+        simulated_share = sub.value_counts(normalize=True)
+        real = real_share[real_class == cls]
+        if real.sum() <= 0:
+            continue
+        real = real / real.sum()
+        within = (
+            real.reindex(sub.to_numpy()).fillna(0.0).to_numpy()
+            / simulated_share.reindex(sub.to_numpy()).to_numpy()
+        )
+        positive = within[within > 0]
+        if len(positive):
+            within = np.minimum(within, trim * np.median(positive))
+            within = within / within.mean() if within.mean() > 0 else within
+        weights[selected] = (
+            within * float(p_real_class.get(cls, 0.0)) / float(p_sim_class[cls])
+        )
+    return weights
+
+
+def _kish(weights: np.ndarray) -> float:
+    positive = weights[weights > 0]
+    if not len(positive):
+        return 0.0
+    return float(positive.sum() ** 2 / np.sum(positive**2))
+
+
+def _weighted_mean(values: np.ndarray, weights: np.ndarray) -> float | None:
+    values = np.asarray(values, dtype=np.float64)
+    weights = np.asarray(weights, dtype=np.float64)
+    ok = np.isfinite(values) & (weights > 0)
+    if not ok.any():
+        return None
+    return float(np.sum(values[ok] * weights[ok]) / np.sum(weights[ok]))
+
+
+def profile_metrics(table: pd.DataFrame, species: str) -> list[str]:
+    """Return the coverage and precision metrics a profile table carries."""
+    coverage = [column for column in table.columns if column.startswith("cov_")]
+    precision = []
+    for column in coverage:
+        level = column[len("cov_") :].rsplit("_", 1)[0]
+        if f"{level}_correct" in table.columns:
+            precision.append("prec_" + column[len("cov_") :])
+    return coverage + precision
+
+
+def per_class_predictions(
+    table: pd.DataFrame,
+    weights: np.ndarray | None,
+    metrics: Sequence[str],
+    *,
+    group: str = "cls_call",
+) -> pd.DataFrame:
+    """Return weighted coverage and precision per called class and ALL.
+
+    Phase 1's ``analyse.py`` ``per_class``: coverage is the weighted share of
+    simulated cells covered; precision the weighted share of covered cells
+    whose call is correct.
+    """
+    if weights is None:
+        weights = np.ones(len(table))
+    series = pd.Series(np.asarray(weights, dtype=np.float64), index=table.index)
+    rows = []
+    groups = [
+        (str(cls), frame)
+        for cls, frame in table.groupby(group, sort=True, observed=True)
+    ]
+    for cls, frame in [*groups, ("ALL", table)]:
+        values = series.loc[frame.index].to_numpy()
+        record: dict[str, Any] = {
+            "class": cls,
+            "n": int(len(frame)),
+            "w": float(values.sum()),
+            "kish_n": _kish(values),
+        }
+        for metric in metrics:
+            if metric.startswith("prec_"):
+                name = metric[len("prec_") :]
+                level = name.rsplit("_", 1)[0]
+                covered = frame[f"cov_{name}"].to_numpy(bool)
+                record[metric] = _weighted_mean(
+                    frame[f"{level}_correct"].to_numpy(np.float64)[covered],
+                    values[covered],
+                )
+            else:
+                record[metric] = _weighted_mean(
+                    frame[metric].to_numpy(np.float64), values
+                )
+        rows.append(
+            {key: (np.nan if value is None else value) for key, value in record.items()}
+        )
+    return pd.DataFrame(rows)
+
+
+def member_mean(predictions: Mapping[str, pd.DataFrame]) -> pd.DataFrame:
+    """Return the mean over members of each per-class prediction."""
+    frames = [frame.assign(member=name) for name, frame in predictions.items()]
+    if not frames:
+        return pd.DataFrame()
+    stacked = pd.concat(frames, ignore_index=True)
+    numeric = [
+        column
+        for column in stacked.columns
+        if column not in ("class", "member")
+        and pd.api.types.is_numeric_dtype(stacked[column])
+    ]
+    mean = stacked.groupby("class", sort=True)[numeric].mean().reset_index()
+    mean["member"] = "member_mean"
+    return mean
+
+
+def class_depth_predictions(
+    predicted: pd.DataFrame, profile: Any, grid: Sequence[int]
+) -> pd.DataFrame:
+    """Return the per-class depth predictor of plan §8.3 v7.5 (no mapping).
+
+    For each (level L, class c): the profile's share ``s_c(d)`` of class-c
+    cells per bin (its own totals, or the pool it falls back to), the
+    resolvable share ``sum_d s_c(d)`` over emitted bins and the predicted
+    coverage ``sum_d s_c(d) cov(L, c, d)``, ``cov`` the decision's coverage
+    at its applied threshold. RESOLVE computes the same sums with each
+    dataset's own ``s_c(d)`` (M4 follow-up).
+
+    Args:
+        predicted: ``predicted_levels`` rows of one reference and regime.
+        profile: ``sim_inputs.DepthProfile``.
+        grid: The bundle's depth grid.
+
+    Returns:
+        ``level, class, profile_source, n_profile_cells, profile_median,
+        share_below_grid, resolvable_share, predicted_coverage,
+        n_emitted_bins`` rows.
+    """
+    from merxen.annotation.resolvability import depth_bin
+
+    if predicted.empty:
+        return pd.DataFrame()
+    rows = []
+    cache: dict[str, dict[int, float]] = {}
+    for (level, cls), group in predicted.groupby(
+        ["level", "class"], sort=True, observed=True
+    ):
+        source = profile.source(str(cls))
+        if source not in cache:
+            values = profile.values(source)
+            bins = depth_bin(values, list(grid))
+            shares = {0: float(np.mean(np.isnan(bins)))}
+            for depth in grid:
+                shares[int(depth)] = float(np.mean(bins == float(depth)))
+            cache[source] = shares
+        shares = cache[source]
+        emitted = group[group["status"] == "emitted"]
+        coverage = {
+            int(row["depth"]): float(row["coverage"])
+            if row.get("coverage") is not None and np.isfinite(float(row["coverage"]))
+            else 0.0
+            for _index, row in emitted.iterrows()
+        }
+        values = profile.values(source)
+        rows.append(
+            {
+                "level": str(level),
+                "class": str(cls),
+                "profile_source": source,
+                "n_profile_cells": int(len(values)),
+                "profile_median": float(np.median(values)) if len(values) else None,
+                "share_below_grid": shares.get(0, 0.0),
+                "resolvable_share": float(
+                    sum(shares.get(depth, 0.0) for depth in coverage)
+                ),
+                "predicted_coverage": float(
+                    sum(
+                        shares.get(depth, 0.0) * value
+                        for depth, value in coverage.items()
+                    )
+                ),
+                "n_emitted_bins": int(len(coverage)),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def class_depth_headline(
+    class_depth: pd.DataFrame, profile: Any
+) -> dict[str, dict[str, float | None]]:
+    """Return, per level, the profile-composition-weighted predictor.
+
+    Weights are the profile's own class shares (classes with their own
+    totals); classes the profile lacks do not enter.
+    """
+    result: dict[str, dict[str, float | None]] = {}
+    if class_depth.empty:
+        return result
+    n_total = sum(len(values) for values in profile.by_class.values())
+    for level, rows in class_depth.groupby("level", sort=True):
+        weights = np.array(
+            [
+                len(profile.by_class.get(str(cls), ())) / n_total if n_total else 0.0
+                for cls in rows["class"]
+            ]
+        )
+        mass = float(weights.sum())
+        result[str(level)] = {
+            "profile_share_covered": round(mass, 4),
+            "resolvable_share": None
+            if mass <= 0
+            else round(float(np.sum(weights * rows["resolvable_share"]) / mass), 4),
+            "predicted_coverage": None
+            if mass <= 0
+            else round(float(np.sum(weights * rows["predicted_coverage"]) / mass), 4),
+        }
+    return result
+
+
+def panel_card_notes(species: str, chemistry: str) -> list[str]:
+    """Return the panel-card notes of a family (user decision 4, §8.10).
+
+    Xenium Prime 5K families carry the glial upper bound and the unmeasured
+    precision; human Prime adds that glial coverage is expected below
+    simulation by analogy with mouse.
+    """
+    if chemistry != "xenium_prime":
+        return []
+    notes = [GLIAL_UPPER_BOUND_NOTE, PRECISION_UNMEASURED_NOTE]
+    if species == "human":
+        notes.append(
+            "Human 5K: glial coverage is expected below simulation by analogy "
+            "with mouse; the lung 5K / v1 ratios are a cross-tissue stress "
+            "member only"
+        )
+    return notes
+
+
+MEMBER_TABLE_REFERENCE: Final[dict[str, str]] = {"wmb_panel": "wmb_10xv3"}
+
+
+def load_simulation_profile(
+    path: Path | None, asset_id: str | None, *, species: str
+) -> Any | None:
+    """Return the depth profile of a simulation (CSV or registered asset).
+
+    No per-class depth crosses species (plan §8.3 v7.5): an asset of another
+    species is refused, and so is a per-class CSV none of whose classes is a
+    class of the panel's species.
+
+    Args:
+        path: A per-class or pooled CSV (``sim_inputs.read_depth_profile_table``).
+        asset_id: A ``profile`` or ``scenario`` asset id.
+        species: The panel's species.
+
+    Returns:
+        The ``sim_inputs.DepthProfile``, or ``None`` without either.
+
+    Raises:
+        SimulationError: If both are given or the profile is of another
+            species.
+    """
+    from merxen.annotation import sim_inputs as si
+
+    if path is not None and asset_id is not None:
+        raise SimulationError("give --depth-profile or --depth-profile-asset, not both")
+    if asset_id is not None:
+        asset = si.get_asset(asset_id)
+        if asset.role not in ("profile", "scenario"):
+            raise SimulationError(f"{asset_id} is a {asset.role} asset, not a profile")
+        if asset.species != species:
+            raise SimulationError(
+                f"{asset_id} is a {asset.species} depth profile; no depth profile "
+                f"crosses species ({species} panel)"
+            )
+        return si.profile_from_asset(asset)
+    if path is None:
+        return None
+    try:
+        profile = si.read_depth_profile_table(path, species=species)
+    except si.SimInputError as error:
+        raise SimulationError(str(error)) from error
+    if not profile.pooled and all(
+        si.is_neuronal_class(name, species) is None for name in profile.by_class
+    ):
+        raise SimulationError(
+            f"{path}: none of its classes is a {species} class (a depth profile "
+            "never crosses species; give a pooled profile without a class column)"
+        )
+    return profile
+
+
+def read_real_composition(path: Path | str) -> pd.DataFrame:
+    """Read a real called composition: ``class``, ``subclass``, ``n_cells``.
+
+    Raises:
+        SimulationError: If a column is missing.
+    """
+    table = pd.read_csv(path)
+    missing = [
+        column for column in ("class", "subclass", "n_cells") if column not in table
+    ]
+    if missing:
+        raise SimulationError(f"{path}: columns {missing} are missing")
+    return table
+
+
+def _headline_rows(frame: pd.DataFrame) -> dict[str, Any]:
+    if frame.empty:
+        return {}
+    row = frame[frame["class"] == "ALL"]
+    if row.empty:
+        return {}
+    record = row.iloc[0].to_dict()
+    return {
+        key: (
+            None
+            if value is None or (isinstance(value, float) and math.isnan(value))
+            else value
+        )
+        for key, value in record.items()
+        if key not in ("class", "member")
+    }
+
+
+def run_profile_mode(
+    *,
+    reference_id: str,
+    spec: AnnotationReferenceSpec,
+    config: AnnotationConfig,
+    bundle_dir: Path,
+    test_set_dir: Path | None,
+    resolvability: Mapping[str, Any],
+    profile: Any,
+    chemistry: Any | None,
+    out_dir: Path,
+    scratch_dir: Path,
+    real_composition: pd.DataFrame | None = None,
+    members: Sequence[str] | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Simulate, map and tabulate the profile-mode cells of each member.
+
+    Each emission member of the family (``R1_contam_HO@0``, ``@1``, ``@2``
+    and ``R3_measured_HO@0`` where a measured table exists; plan §8.3 v7.3)
+    draws its cells with ``simulate_on_profile`` and is mapped with the
+    production configuration onto the self-map engine; its per-class
+    predictions (the raw rule and the bundle's provisional decisions) are
+    weighted to the real called composition when one is given, and the
+    member mean is reported beside each member. Profile mode never enters
+    emission.
+
+    Returns:
+        The report record and resource rows.
+
+    Raises:
+        SimulationError: If the test set is missing or a member is unknown.
+    """
+    from merxen.annotation import reference as ref
+    from merxen.annotation import resolvability as res
+    from merxen.annotation import sim_inputs as si
+    from merxen.annotation.mapmycells_engine import MmcBundle
+
+    if test_set_dir is None or not test_set_dir.is_dir():
+        raise SimulationError(
+            f"{reference_id}: the self-map test set bundle is missing"
+        )
+    started = time.monotonic()
+    species = spec.species
+    engine_dir = _engine_dir(bundle_dir, test_set_dir, resolvability)
+    engine = MmcBundle.from_dir(engine_dir)
+    vocab = engine.vocab()
+    specs = ref.level_specs_for(reference_id, engine, config)
+    rules = ref.cells_rules_for(reference_id, config)
+    test = res.load_test_cells(test_set_dir)
+    summary = json.loads(
+        (bundle_dir / res.RESOLVABILITY_SUMMARY_FILE).read_text(encoding="utf-8")
+    )
+    grid = [int(value) for value in summary.get("depth_grid") or []]
+    truth = profile_truth_classes(test, specs, species, vocab)
+    chemistry_name = "unknown" if chemistry is None else str(chemistry.chemistry)
+    reference = MEMBER_TABLE_REFERENCE.get(reference_id)
+    member_table = (
+        None
+        if reference is None
+        else si.member_table_for(species, chemistry_name, reference)
+    )
+    ensemble = [
+        item
+        for item in res.ensemble_members(
+            config.resolvability,
+            species=species,
+            chemistry=chemistry_name,
+            member_table=member_table,
+        )
+        if item.role == "emission"
+    ]
+    if members:
+        known = {item.name: item for item in ensemble}
+        unknown = sorted(set(members) - set(known))
+        if unknown:
+            raise SimulationError(
+                f"profile members {unknown} are not emission members of this family "
+                f"({sorted(known)})"
+            )
+        ensemble = [known[name] for name in members]
+    names = _node_names(vocab)
+    class_of = _subclass_class_map(vocab)
+    real_share = None
+    if real_composition is not None and species == "mouse":
+        counts = real_composition.groupby("subclass")["n_cells"].sum()
+        real_share = counts / counts.sum()
+    runs: list[dict[str, Any]] = []
+    map_fn = ref.mmc_map_function(
+        engine,
+        spec=spec,
+        config=config,
+        scratch_dir=scratch_dir / "mapping",
+        log_dir=out_dir / "logs" / "profile_mapping",
+        runs=runs,
+    )
+    predictions: dict[str, pd.DataFrame] = {}
+    member_records: dict[str, Any] = {}
+    cell_frames: list[pd.DataFrame] = []
+    resources: list[dict[str, Any]] = []
+    for member in ensemble:
+        step = time.monotonic()
+        efficiency = res.member_efficiency(member.recipe, test.genes)
+        query = simulate_on_profile(
+            test, profile, truth, member.recipe, grid, efficiency=efficiency
+        )
+        simulated_s = time.monotonic() - step
+        tidy = map_fn(query, f"profile_{member.name}", 0)
+        cells = res.level_cells(tidy, query, test, specs, seed=0)
+        for rule in rules:
+            cells = rule(cells)
+        cells = res.as_stored(cells)
+        table = profile_cell_table(cells, species=species, summary=summary, names=names)
+        weights = (
+            composition_weights_to_real(table["truth_leaf"], real_share, class_of)
+            if real_share is not None and not table.empty
+            else None
+        )
+        prediction = per_class_predictions(
+            table, weights, profile_metrics(table, species)
+        )
+        predictions[member.name] = prediction
+        member_records[member.name] = {
+            "recipe": member.recipe.to_json(),
+            "n_simulated": int(len(query.obs)),
+            "truncated_share": float(query.obs["truncated"].mean())
+            if len(query.obs)
+            else None,
+            "simulate_s": round(simulated_s, 1),
+            "wall_s": round(time.monotonic() - step, 1),
+            "all": _headline_rows(prediction),
+        }
+        cell_frames.append(cells.assign(member=member.name))
+        resources.append(
+            {
+                "reference_id": reference_id,
+                "phase": "profile_mode",
+                "step": f"simulate_{member.name}",
+                "wall_s": round(simulated_s, 1),
+                "peak_rss_gb": None,
+                "peak_tree_rss_gb": None,
+                "peak_tree_pss_gb": None,
+                "n_processors": None,
+                "disk_gb": None,
+            }
+        )
+    resources += _mapping_rows(reference_id, "profile_mode", runs)
+    mean = member_mean(predictions)
+    rows = [frame.assign(member=name) for name, frame in predictions.items()]
+    if not mean.empty:
+        rows.append(mean)
+    table_out = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+    if not table_out.empty:
+        table_out.insert(0, "reference_id", reference_id)
+        table_out.to_csv(out_dir / PROFILE_PREDICTIONS_CSV, index=False)
+    if cell_frames:
+        pd.concat(cell_frames, ignore_index=True).to_parquet(
+            out_dir / PROFILE_CELLS_FILE, index=False
+        )
+    spread: dict[str, Any] = {}
+    for metric in (column for column in mean.columns if column.startswith("cov_")):
+        values = [
+            record["all"].get(metric)
+            for record in member_records.values()
+            if record["all"].get(metric) is not None
+        ]
+        if values:
+            spread[metric] = {"min": min(values), "max": max(values)}
+    record = {
+        "status": "run",
+        "members": list(predictions),
+        "profile": profile.to_json(),
+        "weighted_to_real_composition": real_share is not None,
+        "member_records": member_records,
+        "member_mean_all": _headline_rows(mean),
+        "member_spread_all": spread,
+        "files": {
+            "predictions": PROFILE_PREDICTIONS_CSV,
+            "cells": PROFILE_CELLS_FILE,
+        },
+        "mapping_runs": runs,
+        "wall_s": round(time.monotonic() - started, 1),
+        "note": "profile mode is a prediction only; it never enters emission",
+    }
+    return record, resources
+
+
+def _fmt(value: Any) -> str:
+    if value is None or (isinstance(value, float) and not math.isfinite(value)):
+        return "-"
+    return f"{float(value):.3f}"
+
+
+def render_profile_lines(record: Mapping[str, Any]) -> list[str]:
+    """Return the profile headline lines of one reference (plan §8.3 v7.5)."""
+    lines: list[str] = []
+    profile = (record.get("depth_profile") or {}).get("profile")
+    if profile:
+        lines.append(
+            f"   under the depth profile {profile.get('label')} "
+            f"({profile.get('n_cells')} cells"
+            + (f", asset {profile.get('asset')}" if profile.get("asset") else "")
+            + ("; pooled" if profile.get("pooled") else "; per class")
+            + "):"
+        )
+    class_depth = record.get("class_depth") or {}
+    for level, item in (class_depth.get("headline") or {}).items():
+        lines.append(
+            f"     {level}: resolvable share {_fmt(item.get('resolvable_share'))}, "
+            f"predicted coverage {_fmt(item.get('predicted_coverage'))} "
+            f"(decisions x per-class depth shares, {class_depth.get('regime')} regime; "
+            f"{_fmt(item.get('profile_share_covered'))} of profile cells in "
+            "tabulated classes)"
+        )
+    mode = record.get("profile_mode") or {}
+    if mode.get("status") == "run":
+        mean = mode.get("member_mean_all") or {}
+        spread = mode.get("member_spread_all") or {}
+        weighted = (
+            "weighted to the real composition"
+            if mode.get("weighted_to_real_composition")
+            else "unweighted"
+        )
+        lines.append(
+            f"     profile mode ({', '.join(mode.get('members') or [])}; {weighted}; "
+            "member mean, member min-max):"
+        )
+        for metric, value in mean.items():
+            if not str(metric).startswith("cov_"):
+                continue
+            band = spread.get(metric) or {}
+            lines.append(
+                f"       {metric}: {_fmt(value)} "
+                f"({_fmt(band.get('min'))}-{_fmt(band.get('max'))})"
+            )
+    elif mode:
+        lines.append(f"     profile mode: {mode.get('status')} ({mode.get('reason')})")
+    return lines
