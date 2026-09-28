@@ -570,6 +570,8 @@ def test_assets_are_packaged_and_small() -> None:
         "state_genes_human.csv",
         "heldout_markers_human.csv",
         "overrides.yaml",
+        "gene_id_overrides_human.csv",
+        "gene_id_overrides_mouse.csv",
         "NOTICE",
     }
     for path in assets:

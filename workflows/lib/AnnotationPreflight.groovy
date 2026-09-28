@@ -26,6 +26,8 @@ class AnnotationPreflight {
             "annotation_gene_alias_table",
             "annotation_gene_id_overrides_csv",
             "annotation_panel_genes_path",
+            "annotation_human_gene_table",
+            "annotation_mouse_gene_table",
         ],
         human: [
             "annotation_whb_region_precompute_source",
@@ -177,16 +179,50 @@ class AnnotationPreflight {
         return errors
     }
 
+    // Params the human held-out test set (whb_frontal_supc_clus_ho) reads:
+    // the region directory (region_cell_metadata.csv), the raw WHB h5ads and
+    // the WHB metadata directory (the taxonomy tables and the WHB cell
+    // metadata, which holds the other-region non-neuronal test cells).
+    static final List<String> HUMAN_SELFMAP_SOURCE_PARAMS = [
+        "annotation_whb_region_precompute_source",
+        "annotation_whb_h5ad_dir",
+        "annotation_whb_metadata_dir",
+    ].asImmutable()
+
+    // Human references whose PREP runs the WHB held-out self-map.
+    static final List<String> HUMAN_SELFMAP_REFERENCES = [
+        "whb_frontal_supc_clus",
+        "seaad_mr_panel",
+    ].asImmutable()
+
     /**
-     * Require the self-map test cells of a wmb_panel build while resolvability
-     * is on: the marker training cells must exclude them, or the M3b
-     * resolvability test set would overlap them (plan §3.2, §8.3).
+     * Require the self-map sources while resolvability is on. Mouse: the
+     * self-map test cells of a wmb_panel build, which the marker training
+     * cells must exclude (plan §3.2, §8.3). Human: the WHB held-out donor's
+     * sources of the whb_frontal_supc_clus and seaad_mr_panel self-maps,
+     * which PREP would otherwise miss only after its marker steps.
      */
     private static void appendSelfmapTestCellCheck(List errors, Object species, Map params, String label) {
-        if (species != "mouse" || !("wmb_panel" in AnnotationReferences.referenceIds(params, species))) {
+        if (!AnnotationReferences.isTrue(params?.get("annotation_resolvability"), true)) {
             return
         }
-        if (!AnnotationReferences.isTrue(params?.get("annotation_resolvability"), true)) {
+        if (species == "human") {
+            def selfMapped = AnnotationReferences.referenceIds(params, species).findAll { referenceId ->
+                referenceId in HUMAN_SELFMAP_REFERENCES
+            }
+            def missing = HUMAN_SELFMAP_SOURCE_PARAMS.findAll { paramName ->
+                !AnnotationReferences.pathText(params?.get(paramName))
+            }
+            if (selfMapped && missing) {
+                errors << (
+                    "${label}: ${selfMapped.join(', ')} need ${missing.join(', ')} " +
+                    "(the WHB held-out donor's cells for the resolvability self-map) " +
+                    "while annotation_resolvability is true"
+                ).toString()
+            }
+            return
+        }
+        if (species != "mouse" || !("wmb_panel" in AnnotationReferences.referenceIds(params, species))) {
             return
         }
         if (!AnnotationReferences.pathText(params?.get("annotation_wmb_selfmap_test_cells_path"))) {

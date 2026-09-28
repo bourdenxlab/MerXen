@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +15,7 @@ import pytest
 from click.testing import CliRunner
 
 from merxen.annotation import reference
+from merxen.annotation import resolvability as res
 from merxen.annotation.config import AnnotationConfig, AnnotationReferenceSpec
 from merxen.annotation.panel import AnnotationPanel, compute_panel_hash
 from merxen.annotation.reference import (
@@ -46,7 +47,9 @@ from merxen.annotation.reference import (
 )
 from merxen.annotation.store import (
     BUNDLE_MANIFEST_NAME,
+    LargePanelRefusedError,
     ReferenceStore,
+    large_panel_refusal,
     resolve_builder,
 )
 from merxen.annotation.vocab import load_state_gene_ids, load_state_genes
@@ -877,6 +880,11 @@ def small_resources() -> Any:
     reference._PREP_RESOURCES = previous
 
 
+def without_resolvability(species: str) -> AnnotationConfig:
+    """A config whose builds skip the resolvability self-map (tested apart)."""
+    return AnnotationConfig(species=species, resolvability={"enabled": False})
+
+
 WHB_N_CELLS = {"s1": 10, "s2": 12, "s3": 8, "s4": 20, "s5": 5, "s6": 7, "s7": 9}
 
 
@@ -956,7 +964,7 @@ def build_whb(
     )
     store = ReferenceStore(tmp_path / "store", scratch_root=tmp_path / "scratch")
     (tmp_path / "scratch").mkdir(exist_ok=True)
-    config = AnnotationConfig(species="human")
+    config = without_resolvability("human")
     bundle = store.get_or_build(
         spec, panel, builder=builder_for(spec, config), config=config
     )
@@ -1035,7 +1043,7 @@ def test_whb_frontal_builder_copies_truncates_and_validates(
     assert tree["hierarchy"] == [SUPC, CLUS]
     assert set(output["timings_s"]) >= {"truncate_taxonomy", "reference_markers"}
     # A second call reuses the bundle without running ctm again.
-    config = AnnotationConfig(species="human")
+    config = without_resolvability("human")
     again = store.get_or_build(
         prepare_reference_spec(
             whb_spec(
@@ -1086,7 +1094,7 @@ def test_whb_bundle_is_shared_by_panels_that_differ_only_in_symbols(
         }
     )
     store, bundle, fake = build_whb(tmp_path, monkeypatch, prepared, sources)
-    config = AnnotationConfig(species="human")
+    config = without_resolvability("human")
     again = store.get_or_build(
         prepare_reference_spec(
             whb_spec(
@@ -1153,7 +1161,12 @@ def test_seaad_builder_copies_the_precompute_and_taxonomy_tables(
     assert set(reference.SEAAD_TAXONOMY_SOURCES.values()) <= set(spec.sources)
     store = ReferenceStore(tmp_path / "store")
     panel = make_panel(GENES[:6])
-    bundle = store.get_or_build(spec, panel, builder=builder_for(spec))
+    bundle = store.get_or_build(
+        spec,
+        panel,
+        builder=builder_for(spec, without_resolvability("human")),
+        config=without_resolvability("human"),
+    )
     bundle_dir = Path(bundle.path)
     output = json.loads((bundle_dir / BUNDLE_MANIFEST_NAME).read_text())[
         "builder_output"
@@ -1346,7 +1359,12 @@ def test_wmb_builder_samples_marker_cells_and_records_uncovered_nodes(
     assert spec.sources["wmb_cell_metadata"].name == "cell_metadata.csv"
     panel = make_panel([*MOUSE_GENES[:6], "ENSMUSG99999999999"], species="mouse")
     store = ReferenceStore(tmp_path / "store")
-    bundle = store.get_or_build(spec, panel, builder=builder_for(spec))
+    bundle = store.get_or_build(
+        spec,
+        panel,
+        builder=builder_for(spec, without_resolvability("mouse")),
+        config=without_resolvability("mouse"),
+    )
     bundle_dir = Path(bundle.path)
     output = json.loads((bundle_dir / BUNDLE_MANIFEST_NAME).read_text())[
         "builder_output"
@@ -1501,7 +1519,10 @@ def test_wmb_panel_inside_the_validated_universe_uses_it(
     spec = prepare_reference_spec(wmb_spec(sources))
     panel = make_panel(MOUSE_GENES[:6], species="mouse")
     bundle = ReferenceStore(tmp_path / "store").get_or_build(
-        spec, panel, builder=builder_for(spec)
+        spec,
+        panel,
+        builder=builder_for(spec, without_resolvability("mouse")),
+        config=without_resolvability("mouse"),
     )
     output = json.loads((Path(bundle.path) / BUNDLE_MANIFEST_NAME).read_text())[
         "builder_output"
@@ -1570,15 +1591,24 @@ def test_wmb_matrices_ignore_lock_and_staging_files(
     spec = prepare_reference_spec(wmb_spec(sources))
     panel = make_panel(MOUSE_GENES[:6], species="mouse")
     store = ReferenceStore(tmp_path / "store")
-    before = store.prepare_request(spec, panel, builder=builder_for(spec))
+    before = store.prepare_request(
+        spec, panel, builder=builder_for(spec, without_resolvability("mouse"))
+    )
     # What the legacy downloader leaves in the shared ABC cache.
     (sources["h5ad_dir"] / "WMB-10Xv3-AAA-raw.h5ad.lock").write_bytes(b"")
     (sources["h5ad_dir"] / "WMB-10Xv3-CCC-raw.h5ad.tmp").write_bytes(b"part")
-    after = store.prepare_request(spec, panel, builder=builder_for(spec))
+    after = store.prepare_request(
+        spec, panel, builder=builder_for(spec, without_resolvability("mouse"))
+    )
     assert after.build_hash == before.build_hash
     names = [Path(f.path).name for f in after.sources["wmb_h5ad_dir"].files]
     assert names == ["WMB-10Xv3-AAA-raw.h5ad", "WMB-10Xv3-BBB-raw.h5ad"]
-    bundle = store.get_or_build(spec, panel, builder=builder_for(spec))
+    bundle = store.get_or_build(
+        spec,
+        panel,
+        builder=builder_for(spec, without_resolvability("mouse")),
+        config=without_resolvability("mouse"),
+    )
     output = json.loads((Path(bundle.path) / BUNDLE_MANIFEST_NAME).read_text())[
         "builder_output"
     ]
@@ -1800,10 +1830,271 @@ def test_whole_ctx_builder_is_refused_above_1000_genes(
         sources={"whb_whole_precompute": stats},
     )
     panel = make_panel([f"ENSG{index:011d}" for index in range(1001)])
-    with pytest.raises(ReferenceBuildError, match="refused above 1000"):
-        ReferenceStore(tmp_path / "store").get_or_build(
+    store = ReferenceStore(tmp_path / "store")
+    with pytest.raises(LargePanelRefusedError, match="refused above 1000 genes"):
+        store.get_or_build(
             prepare_reference_spec(spec), panel, builder=builder_for(spec)
         )
+    # Refused before a build directory exists.
+    assert store.list() == []
+
+
+def large_config(
+    species: str = "human",
+    *,
+    limit: int = 5,
+    cap: int = 6,
+    prefilter: str | None = None,
+) -> AnnotationConfig:
+    """A config whose "large" panels start above ``limit`` genes (no self-map)."""
+    config = without_resolvability(species)
+    update: dict[str, Any] = {
+        "large_panel_genes": limit,
+        "large_panel_prefilter_cap": cap,
+    }
+    if prefilter is not None:
+        update["large_panel_marker_prefilter"] = prefilter
+    return config.model_copy(update={"panel": config.panel.model_copy(update=update)})
+
+
+def test_large_panels_build_and_the_prefilter_is_mandatory_above_the_reserve(
+    small_resources: Any,
+) -> None:
+    # Default since the M3b 5K measurement: no prefilter.
+    config = AnnotationConfig(species="mouse")
+    assert config.panel.large_panel_marker_prefilter == "none"
+    wmb = builder_for(
+        AnnotationReferenceSpec(
+            reference_id="wmb_panel", species="mouse", role="primary"
+        ),
+        config,
+    )
+    five_k = make_panel(
+        [f"ENSMUSG{index:011d}" for index in range(5006)], species="mouse"
+    )
+    huge = make_panel(
+        [f"ENSMUSG{index:011d}" for index in range(20000)], species="mouse"
+    )
+    # The measured envelope: the largest measured peak up to 5,006 genes,
+    # scaled beyond.
+    assert reference.predicted_wmb_query_marker_peak_gb(815) == pytest.approx(37.7)
+    assert reference.predicted_wmb_query_marker_peak_gb(5006) == pytest.approx(37.7)
+    assert reference.predicted_wmb_query_marker_peak_gb(10012) == pytest.approx(75.4)
+    # A 3 GB --max-gb gives a 4.8 GB reserve: the unfiltered 5K panel is
+    # refused, the prefilter is then mandatory (OD-E8).
+    reason = large_panel_refusal(five_k, config, wmb)
+    assert reason is not None and "mandatory" in reason and "OD-E8" in reason
+    prefiltered = large_config(
+        "mouse", limit=1000, cap=2000, prefilter="per_parent_topk_union"
+    )
+    assert large_panel_refusal(five_k, prefiltered, wmb) is None
+    # The standard reserve (--max-gb 40 = 64 GB) holds the measured 5K peak.
+    reference.set_prep_resources(max_gb=40)
+    assert large_panel_refusal(five_k, config, wmb) is None
+    assert large_panel_refusal(None, config, wmb) is None
+    # Beyond the measured range the scaled envelope can exceed it.
+    assert large_panel_refusal(huge, config, wmb) is not None
+    assert large_panel_refusal(huge, prefiltered, wmb) is None
+    # The refusal keeps the OD-E8 margin (+30%): a panel whose predicted peak
+    # fits the 64 GB reserve but not with the margin is refused.
+    assert pytest.approx(1.3) == reference.PREP_MEMORY_MARGIN
+    margin_panel = make_panel(
+        [f"ENSMUSG{index:011d}" for index in range(7000)], species="mouse"
+    )
+    predicted = reference.predicted_wmb_query_marker_peak_gb(7000)
+    assert predicted < reference.prep_memory_reserve_gb() < predicted * 1.3
+    reason = large_panel_refusal(margin_panel, config, wmb)
+    assert reason is not None and "+ 30%" in reason
+    assert "annotation_prep_large_memory" in reason and "--annotation-config" in reason
+    fits = make_panel(
+        [f"ENSMUSG{index:011d}" for index in range(6500)], species="mouse"
+    )
+    assert large_panel_refusal(fits, config, wmb) is None
+    # Small panels never need the prefilter.
+    reference.set_prep_resources(max_gb=3)
+    small = make_panel(
+        [f"ENSMUSG{index:011d}" for index in range(815)], species="mouse"
+    )
+    assert large_panel_refusal(small, config, wmb) is None
+    # The whole-WHB bundle stays refused above 1,000 genes.
+    whole = builder_for(
+        AnnotationReferenceSpec(
+            reference_id="whb_whole_ctx_panel", species="human", role="sensitivity"
+        )
+    )
+    human = make_panel([f"ENSG{index:011d}" for index in range(1001)])
+    assert "refused above 1000" in (large_panel_refusal(human, None, whole) or "")
+    assert large_panel_refusal(make_panel(GENES), None, whole) is None
+
+
+def test_cli_refuses_a_large_wmb_panel_without_the_prefilter_before_building(
+    tmp_path: Path,
+) -> None:
+    panel = make_panel(
+        [f"ENSMUSG{index:011d}" for index in range(20000)], species="mouse"
+    )
+    panel_file = tmp_path / "panel_genes.json"
+    panel.write(panel_file)
+    config_file = tmp_path / "annotation_config.json"
+    config_file.write_text(AnnotationConfig(species="mouse").model_dump_json())
+    store = tmp_path / "store"
+    result = CliRunner().invoke(
+        cli_main,
+        [
+            "annotation-reference-prep",
+            "--reference-id",
+            "wmb_panel",
+            "--species",
+            "mouse",
+            "--panel-genes",
+            str(panel_file),
+            "--store",
+            str(store),
+            "--annotation-config",
+            str(config_file),
+            "--max-gb",
+            "40",
+            "--output",
+            str(tmp_path / "bundle_ref.json"),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "prefilter is mandatory above the reserve" in result.output
+    assert not (tmp_path / "bundle_ref.json").exists()
+    # Nothing was hashed or built: no bundle, temporary or failed directory.
+    assert not store.exists() or not any(store.rglob("*.json"))
+
+
+def test_large_whb_panel_is_prefiltered_kept_and_stored_in_the_large_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    fake = FakeCtm(whb_truncated_lookup).install(monkeypatch)
+    sources = write_whb_sources(tmp_path)
+    panel = make_panel([*GENES, ABSENT_GENE])
+    config = large_config("human", limit=5, cap=6, prefilter="per_parent_topk_union")
+    spec = prepare_reference_spec(
+        whb_spec(
+            region_precompute=sources["region_dir"],
+            seaad_precomputed_stats=sources["seaad"],
+        )
+    )
+    (tmp_path / "scratch").mkdir()
+    store = ReferenceStore(
+        tmp_path / "ssd",
+        large_root=tmp_path / "large",
+        large_panel_genes=5,
+        scratch_root=tmp_path / "scratch",
+    )
+    bundle = store.get_or_build(
+        spec, panel, builder=builder_for(spec, config), config=config
+    )
+    bundle_dir = Path(bundle.path)
+    assert bundle_dir.is_relative_to(tmp_path / "large")
+    manifest = json.loads((bundle_dir / BUNDLE_MANIFEST_NAME).read_text())
+    output = manifest["builder_output"]
+    # Marker discovery ran on the prefiltered candidates only.
+    record = json.loads((bundle_dir / reference.MARKER_PREFILTER_FILE).read_text())
+    assert record["method"] == "per_parent_topk_union" and record["version"] == 1
+    assert len(fake.stub_genes) == record["n_genes"] <= 6
+    assert sorted(fake.stub_genes) == record["genes"] and set(record["genes"]) < set(
+        GENES
+    )
+    assert record["n_input_genes"] == 10 and record["applied"] is True
+    assert output["markers"]["prefilter"]["genes_sha256"] == record["genes_sha256"]
+    assert output["markers"]["n_candidate_genes"] == record["n_genes"]
+    assert "marker_prefilter" in output["timings_s"]
+    # Profiles still cover every panel gene in the reference.
+    assert output["panel_coverage"]["n_query_genes_used"] == 10
+    # The family's reference markers are kept in the large bundle.
+    kept = bundle_dir / reference.REFERENCE_MARKERS_DIR / "reference_markers.h5"
+    assert kept.is_file()
+    assert output["markers"]["reference_markers"][0]["kept"] is True
+    # The prefilter (method, version, settings) is in build_hash.
+    prefilter = manifest["build_hash_payload"]["large_panel_prefilter"]
+    assert prefilter["method"] == "per_parent_topk_union"
+    assert prefilter["settings"]["cap"] == 6
+    assert prefilter["settings"]["markers_per_pair"] == 30
+
+
+def test_small_panel_reference_markers_are_deleted_once_query_markers_exist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    sources = write_whb_sources(tmp_path)
+    seen: dict[str, bool] = {}
+    fake = FakeCtm(whb_truncated_lookup)
+    original_query = fake.query_markers
+
+    def query_markers(config: dict[str, Any], **kwargs: Any) -> None:
+        # The reference markers exist while the query markers are found ...
+        seen["during_query"] = all(
+            Path(path).is_file() for path in config["reference_marker_path_list"]
+        )
+        seen["paths"] = config["reference_marker_path_list"]
+        original_query(config, **kwargs)
+
+    fake.query_markers = query_markers  # type: ignore[method-assign]
+    fake.install(monkeypatch)
+    original_find = reference.find_panel_markers
+    right_after: dict[str, Any] = {}
+
+    def find_panel_markers(*args: Any, **kwargs: Any) -> Any:
+        markers = original_find(*args, **kwargs)
+        # Checked as find_panel_markers returns, before the long self-map
+        # and before the store removes the build's scratch directory.
+        paths = [Path(path) for path in seen["paths"]]
+        right_after["gone"] = [not path.exists() for path in paths]
+        right_after["scratch_exists"] = all(path.parent.is_dir() for path in paths)
+        right_after["kept"] = [item.get("kept") for item in markers.reference_markers]
+        return markers
+
+    monkeypatch.setattr(reference, "find_panel_markers", find_panel_markers)
+    spec = prepare_reference_spec(
+        whb_spec(
+            region_precompute=sources["region_dir"],
+            seaad_precomputed_stats=sources["seaad"],
+        )
+    )
+    (tmp_path / "scratch").mkdir()
+    store = ReferenceStore(tmp_path / "store", scratch_root=tmp_path / "scratch")
+    config = without_resolvability("human")
+    bundle = store.get_or_build(
+        spec, make_panel(GENES), builder=builder_for(spec, config), config=config
+    )
+    output = json.loads((Path(bundle.path) / BUNDLE_MANIFEST_NAME).read_text())[
+        "builder_output"
+    ]
+    # ... and are gone right after (<= 1,000 genes), their sha256 recorded.
+    assert seen["during_query"] is True
+    assert right_after["gone"] and all(right_after["gone"])
+    assert right_after["scratch_exists"] is True
+    assert right_after["kept"] == [False] * len(right_after["gone"])
+    assert not any(Path(path).exists() for path in seen["paths"])
+    record = output["markers"]["reference_markers"][0]
+    assert record["kept"] is False and len(record["sha256"]) == 64
+    assert output["markers"]["prefilter"] is None
+    assert not (Path(bundle.path) / reference.MARKER_PREFILTER_FILE).exists()
+
+
+def test_sibling_sets_follow_the_marker_tree_with_the_dropped_level() -> None:
+    tree = TaxonomyTreeView.from_tree_dict(
+        {
+            "hierarchy": ["CLAS", "SUBC", "SUPT", "CLUS"],
+            "CLAS": {"a": ["a1", "a2"], "b": ["b1"]},
+            "SUBC": {"a1": ["t1"], "a2": ["t2", "t3"], "b1": ["t4"]},
+            "SUPT": {"t1": ["c1", "c2"], "t2": ["c3"], "t3": ["c4"], "t4": ["c5"]},
+            "CLUS": {f"c{index}": [] for index in range(1, 6)},
+        }
+    ).drop_level("SUPT")
+    leaves = ["c5", "c4", "c3", "c2", "c1"]
+    sets = {item.key: item for item in reference.sibling_sets(tree, leaves)}
+    assert list(sets) == ["None", "CLAS/a", "CLAS/b", "SUBC/a1", "SUBC/a2", "SUBC/b1"]
+    root = sets["None"]
+    assert root.children == ("a", "b")
+    # Rows follow the precompute's row order (c1 is row 4).
+    assert root.leaf_rows == ((1, 2, 3, 4), (0,))
+    assert sets["SUBC/a1"].children == ("c1", "c2")
+    assert sets["SUBC/a1"].leaf_rows == ((4,), (3,))
+    assert sets["CLAS/b"].children == ("b1",)
 
 
 def test_cortex_implausible_superclusters_are_the_16_pruned_in_e1() -> None:
@@ -1929,6 +2220,32 @@ def write_abc_taxonomy(directory: Path) -> tuple[Path, Path]:
 
 def write_real_wmb_sources(tmp_path: Path) -> dict[str, Path]:
     """~200 WMB-like 10Xv3 cells in 9 clusters with planted markers."""
+    sources = write_real_wmb_inputs(tmp_path)
+    mapping = tmp_path / "allen" / "precomputed_stats_ABC_revision_230821.h5"
+    mapping.parent.mkdir()
+    reference._run_ctm_precompute_abc(
+        {
+            "output_path": str(mapping),
+            "hierarchy": [CLAS, SUBC_W, SUPT, CLUS_W],
+            "h5ad_path_list": [
+                str(path) for path in sorted(sources["h5ad_dir"].glob("*.h5ad"))
+            ],
+            "cell_metadata_path": str(sources["metadata"] / "cell_metadata.csv"),
+            "cluster_annotation_path": str(sources["term"]),
+            "cluster_membership_path": str(sources["membership"]),
+            "n_processors": 2,
+            "tmp_dir": str(tmp_path),
+            "clobber": True,
+            "normalization": "raw",
+            "do_pruning": True,
+        },
+        log_dir=tmp_path / "mapping_logs",
+    )
+    return {**sources, "mapping": mapping}
+
+
+def write_real_wmb_inputs(tmp_path: Path) -> dict[str, Path]:
+    """The h5ads, metadata, ABC taxonomy and self-map list of the tiny WMB set."""
     import anndata as ad
     import scipy.sparse as sp
 
@@ -1987,29 +2304,12 @@ def write_real_wmb_sources(tmp_path: Path) -> dict[str, Path]:
     meta.loc[meta.cluster_alias == 9, ["cell_label"]].set_index("cell_label").assign(
         subclass="x"
     ).to_csv(truth)
-    mapping = tmp_path / "allen" / "precomputed_stats_ABC_revision_230821.h5"
-    mapping.parent.mkdir()
-    reference._run_ctm_precompute_abc(
-        {
-            "output_path": str(mapping),
-            "hierarchy": [CLAS, SUBC_W, SUPT, CLUS_W],
-            "h5ad_path_list": [str(path) for path in sorted(h5ad_dir.glob("*.h5ad"))],
-            "cell_metadata_path": str(metadata / "cell_metadata.csv"),
-            "cluster_annotation_path": str(term_path),
-            "cluster_membership_path": str(member_path),
-            "n_processors": 2,
-            "tmp_dir": str(tmp_path),
-            "clobber": True,
-            "normalization": "raw",
-            "do_pruning": True,
-        },
-        log_dir=tmp_path / "mapping_logs",
-    )
     return {
         "h5ad_dir": h5ad_dir,
         "metadata": metadata,
         "truth": truth,
-        "mapping": mapping,
+        "term": term_path,
+        "membership": member_path,
         "genes": Path(json.dumps(genes)),
     }
 
@@ -2039,7 +2339,12 @@ def test_tiny_real_wmb_bundle_through_the_real_ctm_runners(
     panel = make_panel(genes[:30], species="mouse")
     store = ReferenceStore(tmp_path / "store", scratch_root=tmp_path / "scratch")
     (tmp_path / "scratch").mkdir()
-    bundle = store.get_or_build(spec, panel, builder=builder_for(spec))
+    bundle = store.get_or_build(
+        spec,
+        panel,
+        builder=builder_for(spec, without_resolvability("mouse")),
+        config=without_resolvability("mouse"),
+    )
     bundle_dir = Path(bundle.path)
     output = json.loads((bundle_dir / BUNDLE_MANIFEST_NAME).read_text())[
         "builder_output"
@@ -2187,7 +2492,10 @@ def test_whb_builder_rebuilds_the_region_precompute_without_a_copy_source(
         )
     )
     bundle = ReferenceStore(tmp_path / "store").get_or_build(
-        spec, make_panel(GENES), builder=builder_for(spec)
+        spec,
+        make_panel(GENES),
+        builder=builder_for(spec, without_resolvability("human")),
+        config=without_resolvability("human"),
     )
     output = json.loads((Path(bundle.path) / BUNDLE_MANIFEST_NAME).read_text())[
         "builder_output"
@@ -2203,3 +2511,1124 @@ def test_whb_builder_rebuilds_the_region_precompute_without_a_copy_source(
     assert source["mode"] == "rebuilt"
     assert source["filtering_summary"]["dropped_leaf_aliases"] == {"2": 9}
     assert source["verification"]["n_leaves"] == 7
+
+
+# --------------------------------------------------------------------------
+# Resolvability test sets and the self-map (M3b; plan §3.2, §8.3)
+
+HO_DONORS = {"H_big": 60, "H_mid": 45, "H_small": 30}
+SUBC_TO_CLUS = {
+    "s1": "c1",
+    "s2": "c1",
+    "s3": "c2",
+    "s4": "c3",
+    "s5": "c3",
+    "s6": "c4",
+    "s7": "c5",
+}
+CLUS_TO_SUPC = {"c1": UL_IT, "c2": UL_IT, "c3": ASTRO, "c4": MICRO, "c5": MICRO}
+MARKER_OF_SUPC = {UL_IT: 0, ASTRO: 1, MICRO: 2}
+SEA_MARKERS = {
+    "CS20260630_CLAS_002": 0,
+    "CS20260630_CLAS_003": 1,
+    "CS20260630_SCLA_023": 1,
+    "CS20260630_SCLA_029": 2,
+}
+
+
+# Other-region WHB cells of the fixture (``HO_OTHER_REGION``): drawn only
+# when non-neuronal (of a training supercluster) and of an E2 dissection;
+# clusters are not restricted (c5 has no training cluster).
+HO_OTHER_REGION = (
+    # (label prefix, n, cluster alias, matrix, dissection, donor)
+    ("mtg_astro", 4, 4, "WHB-10Xv3-Nonneurons", "Human MTG", "H_big"),
+    ("v1c_micro", 3, 6, "WHB-10Xv3-Nonneurons", "Human V1C", "H_other"),
+    ("mtg_c5", 2, 7, "WHB-10Xv3-Nonneurons", "Human MTG", "H_big"),  # cluster c5
+    ("mtg_neuron", 2, 1, "WHB-10Xv3-Nonneurons", "Human MTG", "H_big"),  # neuron
+    ("mtg_neuron_matrix", 2, 4, "WHB-10Xv3-Neurons", "Human MTG", "H_big"),
+    ("a25_astro", 2, 4, "WHB-10Xv3-Nonneurons", "Human A25", "H_big"),  # not E2
+)
+
+
+def write_ho_sources(tmp_path: Path) -> dict[str, Path]:
+    """Frontal-like WHB cells of three donors, raw h5ads and taxonomy tables.
+
+    The WHB cell metadata holds the frontal cells and the other-region
+    cells of ``HO_OTHER_REGION`` (whose counts come from a separate seed, so
+    the frontal cells' counts do not depend on them).
+    """
+    import anndata as ad
+    import scipy.sparse as sp
+
+    rng = np.random.default_rng(3)
+    rows = []
+    for donor, n_cells in HO_DONORS.items():
+        for index in range(n_cells):
+            # s7 (cluster c5) has only three training-donor cells: dropped.
+            if donor == "H_small":
+                alias = 1 + index % 7
+            elif donor == "H_big" and index < 3:
+                alias = 7
+            else:
+                alias = 1 + index % 6
+            supercluster = CLUS_TO_SUPC[SUBC_TO_CLUS[f"s{alias}"]]
+            rows.append(
+                {
+                    "cell_label": f"{donor}-{index}",
+                    "feature_matrix_label": "WHB-10Xv3-Neurons"
+                    if supercluster == UL_IT
+                    else "WHB-10Xv3-Nonneurons",
+                    "donor_label": donor,
+                    "cluster_alias": alias,
+                    "region_of_interest_label": "Human A46",
+                }
+            )
+    meta = pd.DataFrame(rows)
+    region = tmp_path / "region_ho"
+    region.mkdir()
+    meta.to_csv(region / reference.REGION_CELL_METADATA_FILE, index=False)
+    metadata = tmp_path / "whb_metadata"
+    metadata.mkdir()
+    other = pd.DataFrame(
+        [
+            {
+                "cell_label": f"{prefix}-{index}",
+                "feature_matrix_label": matrix,
+                "donor_label": donor,
+                "cluster_alias": alias,
+                "region_of_interest_label": roi,
+            }
+            for prefix, n_cells, alias, matrix, roi, donor in HO_OTHER_REGION
+            for index in range(n_cells)
+        ]
+    )
+    pd.concat([meta, other], ignore_index=True).assign(
+        anatomical_division_label="Cerebral cortex"
+    ).to_csv(metadata / "cell_metadata.csv", index=False)
+    members = []
+    for alias in range(1, 8):
+        subcluster = f"s{alias}"
+        cluster = SUBC_TO_CLUS[subcluster]
+        for label, level in (
+            (subcluster, SUBC),
+            (cluster, CLUS),
+            (CLUS_TO_SUPC[cluster], SUPC),
+        ):
+            members.append(
+                {
+                    "cluster_annotation_term_label": label,
+                    "cluster_annotation_term_set_label": level,
+                    "cluster_alias": alias,
+                    "cluster_annotation_term_name": label,
+                    "cluster_annotation_term_set_name": level,
+                }
+            )
+    pd.DataFrame(members).to_csv(
+        metadata / "cluster_to_cluster_annotation_membership.csv", index=False
+    )
+    (metadata / "cluster_annotation_term.csv").write_text("label,name\n")
+    h5ad_dir = tmp_path / "WHB-10Xv3"
+    h5ad_dir.mkdir()
+    genes = [*GENES, "ENSG00000000999"]
+    other_rng = np.random.default_rng(4)
+
+    def cell_counts(aliases: Iterable[int], generator: np.random.Generator) -> list:
+        counts = []
+        for alias in aliases:
+            base = generator.poisson(12.0, len(genes)).astype(float)
+            supercluster = CLUS_TO_SUPC[SUBC_TO_CLUS[f"s{alias}"]]
+            base[MARKER_OF_SUPC[supercluster]] += 150
+            counts.append(base * generator.uniform(0.5, 2.0))
+        return counts
+
+    for matrix, group in meta.groupby("feature_matrix_label"):
+        extra = other[other["feature_matrix_label"] == matrix]
+        counts = cell_counts(group["cluster_alias"], rng) + cell_counts(
+            extra["cluster_alias"], other_rng
+        )
+        ad.AnnData(
+            X=sp.csr_matrix(np.round(np.asarray(counts)).astype(np.float32)),
+            obs=pd.DataFrame(
+                index=[*group["cell_label"].to_numpy(), *extra["cell_label"].to_numpy()]
+            ),
+            var=pd.DataFrame(index=genes),
+        ).write_h5ad(h5ad_dir / f"{matrix}-raw.h5ad")
+    return {"region_dir": region, "metadata": metadata, "h5ad_dir": h5ad_dir}
+
+
+def ho_precompute(config: dict[str, Any]) -> None:
+    import anndata as ad
+
+    cells = pd.read_csv(config["cell_metadata_path"])
+    genes = list(ad.read_h5ad(config["h5ad_path_list"][0], backed="r").var_names)
+    counts = cells["cluster_alias"].map(lambda alias: f"s{alias}").value_counts()
+    write_precompute(
+        Path(config["output_path"]),
+        subtree(WHB_TREE, set(counts.index)),
+        genes,
+        n_cells=counts.to_dict(),
+    )
+
+
+def ho_lookup(stub: list[str]) -> dict[str, Any]:
+    return {
+        "None": stub[:3],
+        f"{SUPC}/{UL_IT}": stub[3:5],
+        f"{SUPC}/{ASTRO}": [],
+        f"{SUPC}/{MICRO}": stub[5:6],
+    }
+
+
+def marker_mapper(markers: Mapping[str, str]) -> Callable[..., pd.DataFrame]:
+    """A hierarchical marker-count mapper standing in for MapMyCells."""
+    from merxen.annotation.mapmycells_engine import N_RUNNERS_UP, runner_up_column
+
+    def map_onto(engine: Any, query: Any) -> pd.DataFrame:
+        tree = engine.tree()
+        genes = list(query.genes)
+        counts = query.counts.toarray()
+        records = []
+        for row, cell_id in enumerate(query.obs.index):
+            parent: str | None = None
+            for depth, level in enumerate(tree.hierarchy):
+                children = list(
+                    tree.nodes(level)
+                    if depth == 0
+                    else tree.children_of(tree.hierarchy[depth - 1], parent)
+                )
+                scores = np.array(
+                    [
+                        counts[row, genes.index(markers[child])] + 1.0
+                        if child in markers and markers[child] in genes
+                        else 1.0
+                        for child in children
+                    ]
+                )
+                share = scores / scores.sum()
+                order = np.argsort(-share, kind="mergesort")
+                best = children[order[0]]
+                record: dict[str, Any] = {
+                    "cell_id": cell_id,
+                    "level": level,
+                    "level_name": level.lower(),
+                    "assignment": best,
+                    "name": tree.name(level, best),
+                    "bp": round(float(share[order[0]]), 2),
+                    "aggregate_probability": round(float(share[order[0]]), 2),
+                    "avg_correlation": 0.5,
+                    "directly_assigned": True,
+                    "n_runners_up": len(children) - 1,
+                }
+                for rank in range(1, N_RUNNERS_UP + 1):
+                    if rank < len(children):
+                        other = children[order[rank]]
+                        record[runner_up_column(rank, "assignment")] = other
+                        record[runner_up_column(rank, "name")] = tree.name(level, other)
+                        record[runner_up_column(rank, "probability")] = round(
+                            float(share[order[rank]]), 2
+                        )
+                        record[runner_up_column(rank, "correlation")] = 0.1
+                    else:
+                        record[runner_up_column(rank, "assignment")] = None
+                        record[runner_up_column(rank, "name")] = None
+                        record[runner_up_column(rank, "probability")] = np.nan
+                        record[runner_up_column(rank, "correlation")] = np.nan
+                records.append(record)
+                parent = best
+        return pd.DataFrame.from_records(records)
+
+    return map_onto
+
+
+def install_self_map(
+    monkeypatch: pytest.MonkeyPatch, markers: Mapping[str, str]
+) -> list[dict[str, Any]]:
+    """Replace the self-map's MapMyCells runs by ``marker_mapper``."""
+    calls: list[dict[str, Any]] = []
+    mapper = marker_mapper(markers)
+
+    def factory(context: Any, engine: Any, runs: list[dict[str, Any]]) -> Any:
+        def map_query(query: Any, tag: str, seed: int) -> pd.DataFrame:
+            calls.append(
+                {
+                    "engine": engine.reference_id,
+                    "engine_path": str(engine.path),
+                    "tag": tag,
+                    "seed": seed,
+                    "n_cells": len(query.obs),
+                }
+            )
+            runs.append({"tag": tag, "engine": engine.reference_id, "wall_s": 0.0})
+            return mapper(engine, query)
+
+        return map_query
+
+    monkeypatch.setattr(reference, "_mmc_map_function", factory)
+    return calls
+
+
+def ho_spec_sources(sources: Mapping[str, Path]) -> dict[str, Path]:
+    return {
+        "whb_region_dir": sources["region_dir"],
+        "whb_h5ad_dir": sources["h5ad_dir"],
+        "whb_metadata_dir": sources["metadata"],
+    }
+
+
+def test_holdout_donor_auto_is_the_donor_with_the_fewest_cells() -> None:
+    donors = pd.Series(["H18.30.002"] * 5 + ["H19.30.001"] * 4 + ["H19.30.002"] * 3)
+    assert reference.holdout_donor(donors, "auto") == "H19.30.002"
+    assert reference.holdout_donor(donors, "H18.30.002") == "H18.30.002"
+    with pytest.raises(ReferenceBuildError, match="has no frontal"):
+        reference.holdout_donor(donors, "H00.00.000")
+
+
+def test_holdout_bundle_trains_without_the_donor_and_keeps_its_cells_as_tests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    sources = write_ho_sources(tmp_path)
+    fake = FakeCtm(ho_lookup).install(monkeypatch)
+    trained: list[pd.DataFrame] = []
+
+    def recording_precompute(config: dict[str, Any]) -> None:
+        trained.append(pd.read_csv(config["cell_metadata_path"]))
+        ho_precompute(config)
+
+    fake.precompute = recording_precompute
+    spec = prepare_reference_spec(
+        AnnotationReferenceSpec(
+            reference_id=reference.HO_REFERENCE_ID,
+            species="human",
+            role="resolvability",
+            hierarchy=[SUPC, CLUS],
+            sources=ho_spec_sources(sources),
+        )
+    )
+    assert set(spec.sources) == {
+        "whb_region_cell_metadata",
+        "whb_cell_metadata",
+        "whb_neurons_h5ad",
+        "whb_nonneurons_h5ad",
+        "whb_cluster_annotation_term",
+        "whb_cluster_membership",
+    }
+    panel = make_panel(GENES)
+    config = AnnotationConfig(species="human", resolvability={"n_test_cells": 20})
+    store = ReferenceStore(tmp_path / "store")
+    bundle = store.get_or_build(
+        spec, panel, builder=builder_for(spec, config), config=config
+    )
+    bundle_dir = Path(bundle.path)
+    output = json.loads((bundle_dir / BUNDLE_MANIFEST_NAME).read_text())[
+        "builder_output"
+    ]
+    test_set = output["test_set"]
+    assert test_set["holdout_donor"] == "H_small"
+    assert test_set["donor_cells"] == HO_DONORS
+    # Training: the two other donors, clusters with >= 5 cells (c5 has 3).
+    assert test_set["training_clusters_dropped"] == ["c5"]
+    (precompute,) = fake.calls["precompute"]
+    (training,) = trained
+    assert not training["cell_label"].str.startswith("H_small").any()
+    assert 7 not in set(training["cluster_alias"])
+    assert precompute["hierarchy"] == list(reference.WHB_SOURCE_HIERARCHY)
+    (truncate,) = fake.calls["truncate"]
+    assert truncate["new_hierarchy"] == [SUPC, CLUS]
+    assert output["levels"] == [SUPC, CLUS]
+    # Test cells: the held-out donor, capped at n_test_cells, all superclusters.
+    test = res.load_test_cells(bundle_dir)
+    # Water filling: one cap per supercluster (6 here) keeps the total <= 20.
+    per_supercluster = test.obs[f"{res.TRUTH_PREFIX}{SUPC}"].value_counts()
+    assert len(test.obs) <= 20 and test_set["n_test_cells_requested"] == 20
+    assert set(per_supercluster) == {6}
+    # The cap (6) is reached by the donor: no other-region top-up.
+    assert set(test.obs["donor_label"]) == {"H_small"}
+    assert set(test.obs[reference.TEST_SOURCE_COLUMN]) == {"holdout_donor"}
+    assert test_set["other_region"]["n_cells"] == 0
+    assert set(test.obs[f"{res.TRUTH_PREFIX}{SUPC}"]) == {UL_IT, ASTRO, MICRO}
+    # Every truth supercluster here can be named by a call: none left out.
+    exclusion = test_set["truth_exclusion"]
+    assert exclusion["version"] == reference.HO_TRUTH_EXCLUSION_VERSION
+    assert exclusion["region"] == "frontal_cortex"
+    assert exclusion["excluded_superclusters"] == {}
+    assert exclusion["n_pool_cells_before"] == test_set["n_pool_cells"]
+    assert test.genes == GENES  # panel genes present in WHB
+    assert set(test.obs[res.SPILL_GROUP_COLUMN]) == {
+        "Neurons",
+        "Astrocytes",
+        "Microglia",
+    }
+    import anndata as ad
+
+    raw = ad.read_h5ad(sources["h5ad_dir"] / "WHB-10Xv3-Neurons-raw.h5ad")
+    first = test.obs.index[test.obs["feature_matrix_label"] == "WHB-10Xv3-Neurons"][0]
+    expected = raw[first, GENES].X.toarray().ravel()
+    got = test.counts[list(test.obs.index).index(first)].toarray().ravel()
+    np.testing.assert_allclose(got, expected)
+    # A mappable bundle: precompute, lookup and vocab snapshot.
+    from merxen.annotation.mapmycells_engine import MmcBundle
+
+    mmc = MmcBundle.from_dir(bundle_dir)
+    assert mmc.levels == (SUPC, CLUS)
+    assert (bundle_dir / res.TEST_CELLS_OBS_FILE).is_file()
+
+
+def test_holdout_test_set_tops_up_nonneuronal_superclusters_from_other_regions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    sources = write_ho_sources(tmp_path)
+    fake = FakeCtm(ho_lookup).install(monkeypatch)
+    trained: list[pd.DataFrame] = []
+
+    def recording_precompute(config: dict[str, Any]) -> None:
+        trained.append(pd.read_csv(config["cell_metadata_path"]))
+        ho_precompute(config)
+
+    fake.precompute = recording_precompute
+    spec = prepare_reference_spec(
+        AnnotationReferenceSpec(
+            reference_id=reference.HO_REFERENCE_ID,
+            species="human",
+            role="resolvability",
+            hierarchy=[SUPC, CLUS],
+            sources=ho_spec_sources(sources),
+        )
+    )
+    config = AnnotationConfig(species="human", resolvability={"n_test_cells": 1000})
+    bundle = ReferenceStore(tmp_path / "store").get_or_build(
+        spec, make_panel(GENES), builder=builder_for(spec, config), config=config
+    )
+    bundle_dir = Path(bundle.path)
+    test_set = json.loads((bundle_dir / BUNDLE_MANIFEST_NAME).read_text())[
+        "builder_output"
+    ]["test_set"]
+    test = res.load_test_cells(bundle_dir)
+    source = test.obs[reference.TEST_SOURCE_COLUMN]
+    other = test.obs[source == reference.TEST_SOURCE_OTHER_REGION]
+    # Every held-out donor cell (cap 1,000) plus the eligible other-region
+    # cells: non-neuronal nuclei of E2 dissections of clusters the held-out
+    # training reference holds (the planted cluster c5 is never drawn).
+    assert (source == reference.TEST_SOURCE_DONOR).sum() == HO_DONORS["H_small"]
+    assert sorted({label.rsplit("-", 1)[0] for label in other.index}) == [
+        "mtg_astro",
+        "v1c_micro",
+    ]
+    assert len(other) == 7
+    assert set(other["region_of_interest_label"]) <= set(
+        reference.HO_OTHER_REGION_ROI_LABELS
+    )
+    # Disjoint from every reference cell: the frontal cells (training and
+    # held-out donor) and the training cells the precompute was built from.
+    frontal = pd.read_csv(sources["region_dir"] / reference.REGION_CELL_METADATA_FILE)
+    (training,) = trained
+    assert not set(other.index) & set(frontal["cell_label"])
+    assert not set(other.index) & set(training["cell_label"])
+    # Recorded in the bundle: dissections, counts per class, exclusions.
+    record = test_set["other_region"]
+    assert record["roi_labels"] == list(reference.HO_OTHER_REGION_ROI_LABELS)
+    assert record["feature_matrix"] == "WHB-10Xv3-Nonneurons"
+    assert record["version"] == reference.HO_OTHER_REGION_VERSION == 2
+    assert record["n_cells"] == 7
+    assert record["per_supercluster"] == {MICRO: 3, ASTRO: 4}
+    assert record["per_broad_class"] == {"Astrocytes": 4, "Microglia": 3}
+    assert record["per_region"] == {"Human MTG": 4, "Human V1C": 3}
+    assert record["per_donor"] == {"H_big": 4, "H_other": 3}
+    # The cluster rule and what it left out are recorded.
+    assert record["cluster_rule"] == reference.HO_OTHER_REGION_RULE
+    assert record["min_training_cells_per_cluster"] == (
+        reference.HO_MIN_TRAINING_CELLS_PER_CLUSTER
+    )
+    assert record["n_training_clusters"] == test_set["n_training_clusters"]
+    assert record["n_excluded_cluster_not_in_training"] == 2
+    assert record["n_excluded_clusters"] == 1
+    assert record["excluded_cluster_not_in_training_per_supercluster"] == {MICRO: 2}
+    assert record["n_cluster_not_in_training"] == 0
+    assert record["n_excluded_reference_cells"] == 0
+    assert record["disjoint_from_reference_cells"] is True
+    assert set(record["eligible_superclusters"]) == {ASTRO, MICRO}
+    assert test_set["per_source"] == {"holdout_donor": 30, "other_region": 7}
+    assert test_set["per_supercluster"][ASTRO] == 8 + 4
+    # Their counts are the raw WHB counts of the panel genes.
+    import anndata as ad
+
+    raw = ad.read_h5ad(sources["h5ad_dir"] / "WHB-10Xv3-Nonneurons-raw.h5ad")
+    label = other.index[0]
+    np.testing.assert_allclose(
+        test.counts[list(test.obs.index).index(label)].toarray().ravel(),
+        raw[label, GENES].X.toarray().ravel(),
+    )
+
+
+def test_held_out_truths_no_call_can_name_are_excluded() -> None:
+    # E2 (02_make_queries.py) kept neither the sinks and Mixed/Unknown
+    # superclusters nor Amygdala excitatory (implausible in frontal cortex).
+    labels = [
+        "CS202210140_463",  # Miscellaneous (sink, Mixed/Unknown)
+        "CS202210140_483",  # Splatter (sink, Mixed/Unknown)
+        "CS202210140_478",  # Amygdala excitatory
+        "CS202210140_471",  # Ependymal (Mixed/Unknown, not a sink)
+        UL_IT,
+        ASTRO,
+        "CS202210140_468",  # COP: a floor class (OPC), plausible
+    ]
+    assert reference.ho_truth_exclusions(labels, "frontal_cortex") == {
+        "CS202210140_463": reference.HO_EXCLUDED_SINK,
+        "CS202210140_471": reference.HO_EXCLUDED_NO_FLOOR_CLASS,
+        "CS202210140_478": reference.HO_EXCLUDED_REGION_IMPLAUSIBLE,
+        "CS202210140_483": reference.HO_EXCLUDED_SINK,
+    }
+    assert reference.ho_truth_exclusions(["CS000_unknown"], "frontal_cortex") == {
+        "CS000_unknown": reference.HO_EXCLUDED_NO_FLOOR_CLASS
+    }
+
+
+def test_holdout_test_set_leaves_out_excluded_truth_superclusters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    sources = write_ho_sources(tmp_path)
+    FakeCtm(ho_lookup).install(monkeypatch).precompute = ho_precompute
+    seen: list[tuple[set[str], str]] = []
+
+    def microglia_as_sink(labels: Iterable[str], region: str) -> dict[str, str]:
+        seen.append(({str(label) for label in labels}, region))
+        return {MICRO: reference.HO_EXCLUDED_SINK}
+
+    monkeypatch.setattr(reference, "ho_truth_exclusions", microglia_as_sink)
+    spec = prepare_reference_spec(
+        AnnotationReferenceSpec(
+            reference_id=reference.HO_REFERENCE_ID,
+            species="human",
+            role="resolvability",
+            hierarchy=[SUPC, CLUS],
+            sources=ho_spec_sources(sources),
+        )
+    )
+    config = AnnotationConfig(species="human", resolvability={"n_test_cells": 1000})
+    bundle = ReferenceStore(tmp_path / "store").get_or_build(
+        spec, make_panel(GENES), builder=builder_for(spec, config), config=config
+    )
+    bundle_dir = Path(bundle.path)
+    test_set = json.loads((bundle_dir / BUNDLE_MANIFEST_NAME).read_text())[
+        "builder_output"
+    ]["test_set"]
+    test = res.load_test_cells(bundle_dir)
+    donor = test.obs[test.obs[reference.TEST_SOURCE_COLUMN] == "holdout_donor"]
+    # The pool's truths are checked; the excluded ones never become tests.
+    assert seen == [({UL_IT, ASTRO, MICRO}, "frontal_cortex")]
+    assert MICRO not in set(donor[f"{res.TRUTH_PREFIX}{SUPC}"])
+    exclusion = test_set["truth_exclusion"]
+    n_micro = exclusion["excluded_superclusters"][MICRO]["n_pool_cells"]
+    assert n_micro > 0
+    assert exclusion["excluded_superclusters"][MICRO]["reason"] == "sink"
+    assert exclusion["excluded_superclusters"][MICRO]["name"] == "Microglia"
+    assert exclusion["n_excluded_pool_cells"] == n_micro
+    assert test_set["n_pool_cells"] == exclusion["n_pool_cells_before"] - n_micro
+    assert len(donor) == HO_DONORS["H_small"] - n_micro
+
+
+def test_other_region_draw_never_takes_a_reference_cell() -> None:
+    labels = pd.DataFrame(
+        {SUPC: [ASTRO, MICRO], CLUS: ["c3", "c4"], SUBC: ["s4", "s6"]},
+        index=pd.Index([4, 6], name="cluster_alias"),
+    )
+    metadata = pd.DataFrame(
+        {
+            "cell_label": [f"o-{index}" for index in range(8)],
+            "feature_matrix_label": "WHB-10Xv3-Nonneurons",
+            "donor_label": "H_x",
+            "cluster_alias": [4, 4, 4, 4, 6, 6, 6, 6],
+            "region_of_interest_label": "Human MTG",
+        }
+    ).join(labels, on="cluster_alias")
+    # A candidate listed as a reference cell (a planted overlap) is dropped.
+    rows, record = reference.other_region_test_cells(
+        metadata,
+        reference_cells={"o-0", "frontal-1"},
+        training_superclusters=[ASTRO, MICRO, UL_IT],
+        training_clusters=["c3", "c4"],
+        have={ASTRO: 1},
+        cap=3,
+        room=None,
+    )
+    assert record["n_excluded_cluster_not_in_training"] == 0
+    assert "o-0" not in set(rows["cell_label"])
+    assert record["n_excluded_reference_cells"] == 1
+    assert record["disjoint_from_reference_cells"] is True
+    # Capped per supercluster like the donor cells: Astro 1 + 2, Micro 0 + 3.
+    assert record["per_supercluster"] == {MICRO: 3, ASTRO: 2}
+    assert record["candidates_per_supercluster"] == {MICRO: 4, ASTRO: 3}
+    # Reproducible draw.
+    again, _ = reference.other_region_test_cells(
+        metadata,
+        reference_cells={"o-0"},
+        training_superclusters=[ASTRO, MICRO, UL_IT],
+        training_clusters=["c3", "c4"],
+        have={ASTRO: 1},
+        cap=3,
+        room=None,
+    )
+    assert again["cell_label"].tolist() == rows["cell_label"].tolist()
+
+
+def test_other_region_draw_takes_only_clusters_of_the_training_reference() -> None:
+    # User decision 2026-09-27 (HO_OTHER_REGION_VERSION 2): a candidate of a
+    # cluster the held-out training reference lacks is never drawn, even with
+    # room to spare, and is counted.
+    labels = pd.DataFrame(
+        {
+            SUPC: [ASTRO, MICRO, MICRO],
+            CLUS: ["c3", "c4", "c_unseen"],
+            SUBC: ["s4", "s6", "s7"],
+        },
+        index=pd.Index([4, 6, 9], name="cluster_alias"),
+    )
+    metadata = pd.DataFrame(
+        {
+            "cell_label": [f"o-{index}" for index in range(7)] + ["planted"],
+            "feature_matrix_label": "WHB-10Xv3-Nonneurons",
+            "donor_label": "H_x",
+            "cluster_alias": [4, 4, 4, 6, 6, 9, 9, 9],
+            "region_of_interest_label": "Human MTG",
+        }
+    ).join(labels, on="cluster_alias")
+    for seed in range(5):
+        rows, record = reference.other_region_test_cells(
+            metadata,
+            reference_cells=set(),
+            training_superclusters=[ASTRO, MICRO],
+            training_clusters=["c3", "c4"],
+            have={},
+            cap=10,
+            room=None,
+            seed=seed,
+        )
+        drawn = set(rows["cell_label"])
+        assert "planted" not in drawn and not drawn & {"o-5", "o-6"}
+        assert drawn == {"o-0", "o-1", "o-2", "o-3", "o-4"}
+    assert record["n_excluded_cluster_not_in_training"] == 3
+    assert record["n_excluded_clusters"] == 1
+    assert record["excluded_cluster_not_in_training_per_supercluster"] == {MICRO: 3}
+    assert record["n_cluster_not_in_training"] == 0
+    assert record["candidates_per_supercluster"] == {MICRO: 2, ASTRO: 3}
+    assert record["n_training_clusters"] == 2
+    assert record["cluster_rule"] == reference.HO_OTHER_REGION_RULE
+    # A supercluster whose candidates are all of unseen clusters gains none.
+    rows, record = reference.other_region_test_cells(
+        metadata,
+        reference_cells=set(),
+        training_superclusters=[ASTRO, MICRO],
+        training_clusters=["c3"],
+        have={},
+        cap=10,
+        room=None,
+    )
+    assert set(rows[SUPC]) == {ASTRO}
+    assert record["n_excluded_cluster_not_in_training"] == 5
+    assert record["excluded_cluster_not_in_training_per_supercluster"] == {MICRO: 5}
+
+
+def whb_resolvability_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[dict[str, Path], dict[str, Path], FakeCtm]:
+    sources = write_whb_sources(tmp_path)
+    ho = write_ho_sources(tmp_path)
+    fake = FakeCtm(whb_truncated_lookup).install(monkeypatch)
+    fake.precompute = ho_precompute
+    return sources, ho, fake
+
+
+def test_whb_primary_self_maps_the_held_out_cells_onto_the_held_out_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    sources, ho, fake = whb_resolvability_setup(tmp_path, monkeypatch)
+    markers = {node: GENES[index] for node, index in MARKER_OF_SUPC.items()}
+    calls = install_self_map(monkeypatch, markers)
+    spec = prepare_reference_spec(
+        whb_spec(
+            region_precompute=sources["region_dir"],
+            seaad_precomputed_stats=sources["seaad"],
+            whb_h5ad_dir=ho["h5ad_dir"],
+            whb_metadata_dir=ho["metadata"],
+            whb_region_cell_metadata=ho["region_dir"]
+            / reference.REGION_CELL_METADATA_FILE,
+        )
+    )
+    panel = make_panel(GENES)
+    config = AnnotationConfig(species="human")
+    store = ReferenceStore(tmp_path / "store", scratch_root=tmp_path / "scratch")
+    (tmp_path / "scratch").mkdir()
+    bundle = store.get_or_build(
+        spec, panel, builder=builder_for(spec, config), config=config
+    )
+    bundle_dir = Path(bundle.path)
+    manifest = json.loads((bundle_dir / BUNDLE_MANIFEST_NAME).read_text())
+    output = manifest["builder_output"]["resolvability"]
+    # The held-out bundle was built in the same store and mapped onto.
+    (ho_dir,) = (tmp_path / "store" / reference.HO_REFERENCE_ID).glob("[0-9a-f]*")
+    assert output["test_set_bundle"]["build_hash"] == ho_dir.name
+    assert {call["engine"] for call in calls} == {reference.HO_REFERENCE_ID}
+    assert [call["tag"] for call in calls] == ["R1_contam_HO", "clean"]
+    for name in (
+        res.RESOLVABILITY_FILE,
+        res.RESOLVABILITY_CELLS_FILE,
+        res.RESOLVABILITY_SUMMARY_FILE,
+    ):
+        assert (bundle_dir / name).is_file()
+    summary = json.loads((bundle_dir / res.RESOLVABILITY_SUMMARY_FILE).read_text())
+    assert summary["engine"]["reference_id"] == reference.HO_REFERENCE_ID
+    assert summary["engine"]["self"] is False
+    assert summary["depth_grid"] == [10, 15, 30, 60, 120, 250]
+    assert [level["level"] for level in summary["levels"]] == [
+        "lineage",
+        "broad",
+        "nt",
+        "supercluster",
+        "cluster",
+    ]
+    cells = pd.read_parquet(bundle_dir / res.RESOLVABILITY_CELLS_FILE)
+    # Only cells whose native counts reach a depth are simulated at it.
+    test = res.load_test_cells(ho_dir)
+    native = test.native_counts
+    for depth in (30, 250):
+        simulated = cells[(cells["depth"] == depth) & (cells["level"] == "broad")]
+        simulated = simulated[simulated["recipe"] == "R1_contam_HO"]
+        assert set(simulated["cell_id"]) == set(test.obs.index[native >= depth])
+    assert manifest["recorded_settings"]["resolvability"]["outputs_in_bundle"]
+    payload = manifest["build_hash_payload"]["builder_params"]["resolvability"]
+    assert payload["enabled"] is True
+    assert payload["test_set"]["reference_id"] == reference.HO_REFERENCE_ID
+    assert payload["recipes"][0]["spill_fraction"] == 0.25
+    # SEA-AD maps the same held-out cells onto itself, reusing the test set.
+    seaad_spec = prepare_reference_spec(
+        AnnotationReferenceSpec(
+            reference_id="seaad_mr_panel",
+            species="human",
+            role="secondary",
+            sources={
+                "seaad_precomputed_stats": sources["seaad"],
+                **ho_spec_sources(ho),
+            },
+        )
+    )
+    sea_markers = {label: GENES[index] for label, index in SEA_MARKERS.items()}
+    sea_calls = install_self_map(monkeypatch, sea_markers)
+    n_precompute = len(fake.calls["precompute"])
+    sea = store.get_or_build(
+        seaad_spec, panel, builder=builder_for(seaad_spec, config), config=config
+    )
+    assert len(fake.calls["precompute"]) == n_precompute  # held-out bundle reused
+    assert {call["engine"] for call in sea_calls} == {"seaad_mr_panel"}
+    sea_summary = json.loads(
+        (Path(sea.path) / res.RESOLVABILITY_SUMMARY_FILE).read_text()
+    )
+    assert sea_summary["engine"]["self"] is True
+    assert [level["level"] for level in sea_summary["levels"]] == ["broad"]
+    assert sea_summary["test_set_bundle"]["build_hash"] == ho_dir.name
+
+
+def test_self_map_settings_that_change_its_output_change_the_build_hash(
+    tmp_path: Path,
+) -> None:
+    spec = whb_spec(region_precompute=tmp_path)
+    base = builder_for(spec, AnnotationConfig(species="human")).params
+    spill = builder_for(
+        spec, AnnotationConfig(species="human", resolvability={"spill_fraction": 0.3})
+    ).params
+    knob = builder_for(
+        spec, AnnotationConfig(species="human", resolvability={"min_coverage": 0.4})
+    ).params
+    off = builder_for(spec, without_resolvability("human")).params
+    assert spill["resolvability"] != base["resolvability"]
+    assert knob["resolvability"] == base["resolvability"]  # a RESOLVE-time knob
+    assert off["resolvability"] == {"enabled": False}
+    # The simulation logic and the other-region rule are hashed by version.
+    hashed = base["resolvability"]
+    assert hashed["resolvability_version"] == res.RESOLVABILITY_VERSION
+    assert hashed["test_set"]["other_region"]["version"] == (
+        reference.HO_OTHER_REGION_VERSION
+    )
+
+
+def test_other_region_rule_version_changes_the_held_out_hashes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = AnnotationConfig(species="human")
+    spec = whb_spec(region_precompute=tmp_path)
+    ho_spec = AnnotationReferenceSpec(
+        reference_id=reference.HO_REFERENCE_ID,
+        species="human",
+        role="resolvability",
+        hierarchy=[SUPC, CLUS],
+    )
+    before = (builder_for(spec, config).params, builder_for(ho_spec, config).params)
+    monkeypatch.setattr(reference, "HO_OTHER_REGION_VERSION", 1)
+    after = (builder_for(spec, config).params, builder_for(ho_spec, config).params)
+    # The primary's self-map and the held-out test-set bundle both change.
+    assert after[0]["resolvability"] != before[0]["resolvability"]
+    assert after[1] != before[1]
+
+
+def test_resolvability_needs_the_test_set_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    sources = write_whb_sources(tmp_path)
+    ctm = FakeCtm(whb_truncated_lookup).install(monkeypatch)
+    spec = prepare_reference_spec(
+        whb_spec(
+            region_precompute=sources["region_dir"],
+            seaad_precomputed_stats=sources["seaad"],
+        )
+    )
+    config = AnnotationConfig(species="human")
+    with pytest.raises(ReferenceBuildError, match="test-set source"):
+        ReferenceStore(tmp_path / "store").get_or_build(
+            spec, make_panel(GENES), builder=builder_for(spec, config), config=config
+        )
+    # It fails before the marker steps, not after them.
+    assert ctm.calls["reference"] == [] and ctm.calls["query"] == []
+    assert ctm.calls["truncate"] == []
+
+
+def test_prepare_keeps_the_held_out_sources_only_while_resolvability_is_on(
+    tmp_path: Path,
+) -> None:
+    ho = write_ho_sources(tmp_path)
+    sources = write_whb_sources(tmp_path)
+    (sources["region_dir"] / reference.REGION_CELL_METADATA_FILE).write_text(
+        (ho["region_dir"] / reference.REGION_CELL_METADATA_FILE).read_text()
+    )
+    spec = whb_spec(
+        region_precompute=sources["region_dir"],
+        seaad_precomputed_stats=sources["seaad"],
+        whb_h5ad_dir=ho["h5ad_dir"],
+        whb_metadata_dir=ho["metadata"],
+    )
+    kept = prepare_reference_spec(spec)
+    assert {
+        "whb_region_cell_metadata",
+        "whb_neurons_h5ad",
+        "whb_nonneurons_h5ad",
+        "whb_cluster_membership",
+    } <= set(kept.sources)
+    dropped = prepare_reference_spec(spec, SourceOptions(resolvability=False))
+    assert not {"whb_neurons_h5ad", "whb_region_cell_metadata"} & set(dropped.sources)
+    assert "whb_h5ad_dir" not in dropped.sources
+
+
+def write_wmb_testset_sources(tmp_path: Path) -> dict[str, Path]:
+    """The tiny WMB inputs with a synthetic mapping precompute (no ctm)."""
+    sources = write_real_wmb_inputs(tmp_path)
+    # Self-map test cells of both classes: cluster 9 and part of 1 and 3.
+    meta = pd.read_csv(sources["metadata"] / "cell_metadata.csv")
+    picked = pd.concat(
+        [
+            meta[meta.cluster_alias == 9],
+            meta[meta.cluster_alias == 1].head(10),
+            meta[meta.cluster_alias == 3].head(10),
+        ]
+    )
+    picked[["cell_label"]].assign(subclass="x").to_csv(sources["truth"], index=False)
+    genes = json.loads(str(sources["genes"]))
+    tree: dict[str, Any] = {"hierarchy": [CLAS, SUBC_W, SUPT, CLUS_W]}
+    tree[CLAS] = {label: subs for label, (_, subs) in REAL_CLASSES.items()}
+    tree[SUBC_W] = {
+        subclass: [subclass.replace("SUBC", "SUPT")]
+        for subclass in REAL_SUBCLASS_CLUSTERS
+    }
+    tree[SUPT] = {
+        subclass.replace("SUBC", "SUPT"): [
+            f"CS20230722_CLUS_{alias:04d}" for alias in aliases
+        ]
+        for subclass, aliases in REAL_SUBCLASS_CLUSTERS.items()
+    }
+    tree[CLUS_W] = {f"CS20230722_CLUS_{alias:04d}": [] for alias in range(1, 10)}
+    tree["name_mapper"] = {
+        CLAS: {label: {"name": name} for label, (name, _) in REAL_CLASSES.items()}
+    }
+    mapping = write_precompute(
+        tmp_path / "allen" / "precomputed_stats_ABC_revision_230821.h5",
+        tree,
+        genes,
+        n_cells={leaf: 25 for leaf in tree[CLUS_W]},
+        with_detection=False,
+    )
+    return {**sources, "mapping": mapping, "tree": Path(json.dumps(tree))}
+
+
+def test_wmb_testset_adds_non_neuronal_cells_the_marker_build_did_not_use(
+    tmp_path: Path,
+) -> None:
+    sources = write_wmb_testset_sources(tmp_path)
+    genes = json.loads(str(sources["genes"]))
+    spec = prepare_reference_spec(
+        AnnotationReferenceSpec(
+            reference_id=reference.WMB_TESTSET_REFERENCE_ID,
+            species="mouse",
+            role="resolvability",
+            max_cells_per_cluster=20,
+            sources={
+                "wmb_h5ad_dir": sources["h5ad_dir"],
+                "wmb_metadata_dir": sources["metadata"],
+                "wmb_selfmap_test_cells": sources["truth"],
+            },
+        )
+    )
+    config = AnnotationConfig(
+        species="mouse", resolvability={"mouse_nonneuronal_extra_per_supertype": 2}
+    )
+    panel = make_panel(genes[:30], species="mouse")
+    bundle = ReferenceStore(tmp_path / "store").get_or_build(
+        spec, panel, builder=builder_for(spec, config), config=config
+    )
+    bundle_dir = Path(bundle.path)
+    test = res.load_test_cells(bundle_dir)
+    output = json.loads((bundle_dir / BUNDLE_MANIFEST_NAME).read_text())[
+        "builder_output"
+    ]["test_set"]
+    base = set(pd.read_csv(sources["truth"])["cell_label"])
+    assert base <= set(test.obs.index)
+    extra = test.obs[test.obs["test_source"] == "nonneuronal_extra"]
+    # Two per non-neuronal supertype, never a marker-training cell.
+    assert set(extra[f"{res.TRUTH_PREFIX}{CLAS}"]) == {"CS20230722_CLAS_30"}
+    assert extra.groupby(f"{res.TRUTH_PREFIX}{SUPT}").size().max() <= 2
+    sampled, _ = sample_wmb_training_cells(
+        sources["metadata"] / "cell_metadata.csv",
+        {"WMB-10Xv3-AAA": Path(), "WMB-10Xv3-BBB": Path()},
+        max_cells_per_cluster=20,
+        exclude_cells=base,
+    )
+    assert not set(extra.index) & set(sampled["cell_label"])
+    assert output["marker_training_sample"]["disjoint"] is True
+    assert output["n_nonneuronal_extra"] == len(extra)
+    assert set(test.obs[res.SPILL_GROUP_COLUMN]) == {
+        "Neurons",
+        "Astrocytes/Ependymal",
+    }
+    assert test.genes == sorted(genes[:30])
+
+
+def test_wmb_primary_self_maps_its_test_set_onto_itself(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    sources = write_wmb_testset_sources(tmp_path)
+    genes = json.loads(str(sources["genes"]))
+    tree = json.loads(str(sources["tree"]))
+
+    def marker_precompute(config: dict[str, Any]) -> None:
+        import anndata as ad
+
+        cells = pd.read_csv(config["cell_metadata_path"])
+        h5ad_genes = list(
+            ad.read_h5ad(config["h5ad_path_list"][0], backed="r").var_names
+        )
+        counts = (
+            cells["cluster_alias"]
+            .map(lambda a: f"CS20230722_CLUS_{a:04d}")
+            .value_counts()
+        )
+        write_precompute(
+            Path(config["output_path"]),
+            subtree(tree, set(counts.index)),
+            h5ad_genes,
+            n_cells=counts.to_dict(),
+        )
+
+    def lookup(stub: list[str]) -> dict[str, Any]:
+        return {"None": stub[:4], f"{CLAS}/CS20230722_CLAS_01": stub[4:6]}
+
+    fake = FakeCtm(lookup).install(monkeypatch)
+    fake.precompute = marker_precompute
+    markers = {"CS20230722_CLAS_01": genes[20], "CS20230722_CLAS_30": genes[21]}
+    for index, subclass in enumerate(REAL_SUBCLASS_CLUSTERS):
+        markers[subclass] = genes[10 + index]
+    calls = install_self_map(monkeypatch, markers)
+    spec = prepare_reference_spec(
+        AnnotationReferenceSpec(
+            reference_id="wmb_panel",
+            species="mouse",
+            role="primary",
+            drop_level=SUPT,
+            max_cells_per_cluster=20,
+            sources={
+                "wmb_h5ad_dir": sources["h5ad_dir"],
+                "wmb_metadata_dir": sources["metadata"],
+                "wmb_mapping_stats": sources["mapping"],
+                "wmb_selfmap_test_cells": sources["truth"],
+            },
+        )
+    )
+    config = AnnotationConfig(species="mouse")
+    panel = make_panel(genes[:30], species="mouse")
+    store = ReferenceStore(tmp_path / "store", scratch_root=tmp_path / "scratch")
+    (tmp_path / "scratch").mkdir()
+    bundle = store.get_or_build(
+        spec, panel, builder=builder_for(spec, config), config=config
+    )
+    bundle_dir = Path(bundle.path)
+    summary = json.loads((bundle_dir / res.RESOLVABILITY_SUMMARY_FILE).read_text())
+    assert summary["engine"]["self"] is True
+    assert {call["engine"] for call in calls} == {"wmb_panel"}
+    assert summary["depth_grid"] == [10, 20, 50, 100, 250, 500, 1000, 2000]
+    levels = [level["level"] for level in summary["levels"]]
+    assert levels == ["broad", "class", "nt", "subclass", "supertype"]
+    assert (tmp_path / "store" / reference.WMB_TESTSET_REFERENCE_ID).is_dir()
+    cells = pd.read_parquet(bundle_dir / res.RESOLVABILITY_CELLS_FILE)
+    assert set(cells["parent"].dropna()) <= {"01 IT-ET Glut", "30 Astro-Epen"}
+    # Class keys are WMB class names; D_max stops where test cells run out.
+    d_max = summary["d_max"]["class"]
+    assert set(d_max) <= {"01 IT-ET Glut", "30 Astro-Epen"}
+    manifest = json.loads((bundle_dir / BUNDLE_MANIFEST_NAME).read_text())
+    assert manifest["builder_output"]["resolvability"]["n_test_cells"] >= 25
+
+
+def test_mmc_map_function_runs_mapmycells_with_the_production_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    from merxen.annotation import mapmycells_engine
+
+    recorded: dict[str, Any] = {}
+
+    def fake_run_mmc(query_h5ad: Path, bundle: Any, params: Any, **kwargs: Any) -> Any:
+        recorded.update(params=params, kwargs=kwargs, query=Path(query_h5ad))
+        tidy = pd.DataFrame({column: [] for column in mapmycells_engine.TIDY_COLUMNS})
+        output = Path(kwargs["output_parquet"])
+        mapmycells_engine.write_tidy_parquet(tidy, output, {})
+
+        class Result:
+            parquet = output
+            n_cells = 2
+            n_query_genes = 3
+            wall_s = 1.5
+            peak_rss_gb = 0.1
+
+        return Result()
+
+    monkeypatch.setattr(mapmycells_engine, "run_mmc", fake_run_mmc)
+    monkeypatch.setattr(
+        mapmycells_engine,
+        "restrict_lookup",
+        lambda bundle, genes, output: mapmycells_engine.RestrictedLookup(
+            path=None, validation=None, lookup_sha256=None
+        ),
+    )
+
+    class Context:
+        spec = whb_spec().model_copy(update={"rng_seed": 3})
+        config = AnnotationConfig(species="human")
+        scratch_dir = tmp_path / "scratch"
+        work_dir = tmp_path / "work"
+
+    class Engine:
+        reference_id = "whb_frontal_supc_clus_ho"
+        build_hash = "abc"
+
+    runs: list[dict[str, Any]] = []
+    map_query = reference._mmc_map_function(Context(), Engine(), runs)
+
+    class Query:
+        counts = np.array([[1.0, 0.0, 2.0], [0.0, 3.0, 1.0]])
+        obs = pd.DataFrame(index=["a|D10", "b|D10"])
+        genes = GENES[:3]
+
+    map_query(Query(), "R1_contam_HO", 1)
+    params = recorded["params"]
+    assert params.rng_seed == 4 and params.bootstrap_factor == 0.5
+    assert params.bootstrap_iteration == 100 and params.n_processors == 2
+    assert recorded["kwargs"]["expected_ctm_version"] == "1.7.2"
+    assert runs[0]["rng_seed"] == 4 and runs[0]["wall_s"] == 1.5
+    assert not recorded["query"].exists()  # the query is removed after mapping
+
+
+@pytest.mark.slow
+def test_tiny_real_wmb_bundle_self_maps_through_real_mapmycells(
+    tmp_path: Path, small_resources: Any
+) -> None:
+    pytest.importorskip("cell_type_mapper")
+    sources = write_real_wmb_sources(tmp_path)
+    meta = pd.read_csv(sources["metadata"] / "cell_metadata.csv")
+    picked = pd.concat(
+        [meta[meta.cluster_alias == alias].head(8) for alias in (1, 3, 5, 7, 9)]
+    )
+    picked[["cell_label"]].assign(subclass="x").to_csv(sources["truth"], index=False)
+    genes = json.loads(str(sources["genes"]))
+    spec = prepare_reference_spec(
+        AnnotationReferenceSpec(
+            reference_id="wmb_panel",
+            species="mouse",
+            role="primary",
+            drop_level=SUPT,
+            max_cells_per_cluster=10,
+            bootstrap_iteration=20,
+            depth_grid=[10, 50, 200],
+            sources={
+                "wmb_h5ad_dir": sources["h5ad_dir"],
+                "wmb_metadata_dir": sources["metadata"],
+                "wmb_mapping_stats": sources["mapping"],
+                "wmb_selfmap_test_cells": sources["truth"],
+            },
+        )
+    )
+    config = AnnotationConfig(
+        species="mouse",
+        resolvability={"min_cells_per_bin": 5, "min_confident_n": 5},
+    )
+    panel = make_panel(genes[:30], species="mouse")
+    store = ReferenceStore(tmp_path / "store", scratch_root=tmp_path / "scratch")
+    (tmp_path / "scratch").mkdir()
+    bundle = store.get_or_build(
+        spec, panel, builder=builder_for(spec, config), config=config
+    )
+    bundle_dir = Path(bundle.path)
+    summary = json.loads((bundle_dir / res.RESOLVABILITY_SUMMARY_FILE).read_text())
+    runs = summary["mapping_runs"]
+    assert [run["tag"] for run in runs] == ["R1_contam_HO", "clean"]
+    assert all(run["engine"] == "wmb_panel" for run in runs)
+    tables = res.load_resolvability(bundle_dir)
+    assert tables is not None
+    cells = tables.cells
+    assert set(cells["level"]) == {"broad", "class", "nt", "subclass", "supertype"}
+    class_rows = cells[(cells["level"] == "class") & (cells["recipe"] == "clean")]
+    # The planted class markers make deep clean class calls correct.
+    deep = class_rows[class_rows["depth"] == 200]
+    assert len(deep) and deep["correct"].mean() > 0.9
+    manifest = json.loads((bundle_dir / BUNDLE_MANIFEST_NAME).read_text())
+    assert manifest["builder_output"]["resolvability"]["n_test_cells"] == len(
+        res.load_test_cells(
+            tmp_path
+            / "store"
+            / reference.WMB_TESTSET_REFERENCE_ID
+            / summary["test_set_bundle"]["build_hash"]
+        ).obs
+    )
+
+
+def test_large_panels_build_unfiltered_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    fake = FakeCtm(whb_truncated_lookup).install(monkeypatch)
+    sources = write_whb_sources(tmp_path)
+    config = large_config("human", limit=5, cap=6)
+    spec = prepare_reference_spec(
+        whb_spec(
+            region_precompute=sources["region_dir"],
+            seaad_precomputed_stats=sources["seaad"],
+        )
+    )
+    (tmp_path / "scratch").mkdir()
+    store = ReferenceStore(
+        tmp_path / "ssd",
+        large_root=tmp_path / "large",
+        large_panel_genes=5,
+        scratch_root=tmp_path / "scratch",
+    )
+    bundle = store.get_or_build(
+        spec, make_panel(GENES), builder=builder_for(spec, config), config=config
+    )
+    bundle_dir = Path(bundle.path)
+    # Every panel gene is a candidate; the reference markers are kept.
+    assert fake.stub_genes == GENES
+    assert not (bundle_dir / reference.MARKER_PREFILTER_FILE).exists()
+    assert (bundle_dir / reference.REFERENCE_MARKERS_DIR).is_dir()
+    manifest = json.loads((bundle_dir / BUNDLE_MANIFEST_NAME).read_text())
+    assert manifest["build_hash_payload"]["large_panel_prefilter"] is None
+    assert manifest["builder_output"]["markers"]["n_candidate_genes"] == 10

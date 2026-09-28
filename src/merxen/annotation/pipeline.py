@@ -10,13 +10,22 @@ command runs the same code on published ``*_clustered.h5ad`` files:
    (``annotation.panel.ControlRegistry``, identical to
    ``remove_control_features`` on the current panels); take ``total_counts``
    and ``n_genes`` from ``merxen.clustering.cellset.select_table_cells``;
-   resolve gene IDs as ``ANNOTATE_PANEL`` does (native ID, pair lookup,
-   configured fallback table).
+   resolve gene IDs as ``ANNOTATE_PANEL`` does (``annotation.gene_ids``:
+   native ID, pair lookup, the local gene table, aliases, overrides). A
+   published clustered H5AD declares the features of its control-filter
+   record, so ``min_cells`` filtering never changes its declared panel.
 2. **Map table cells only** (``total_counts >= min_counts``), restricted to
    each bundle's panel genes present in the dataset; a missing marker gene
    restricts the lookup (``validate_lookup`` with auto-collapse) and is
-   recorded as ``n_missing_panel_genes``. Subset bundles for > 1% missing
-   genes are M3b.
+   recorded as ``n_missing_panel_genes``. When a missing gene is a root
+   marker, a parent is left with fewer than ``weak_parent_markers`` markers
+   or more than ``subset_bundle_missing_frac`` of the panel is missing
+   (``panel.subset_bundle_trigger``), the run needs a **subset bundle**: MAP
+   writes the subset panel (``subset_panels/<sid>_<run_id>.panel_genes.json``,
+   the parent's family, or its own above ``own_family_missing_frac``) and
+   maps with the store's bundle on it when one exists; otherwise it maps
+   with the restricted lookup and records the request
+   (``MapRunRecord.subset_bundle``) for ``annotation-reference-prep``.
 3. **MMC per bundle use** (``mapmycells_engine.run_mmc``): every use of a
    required primary / secondary bundle (``RequiredBundle.uses``) is a run on
    that use's panel file: the annotation panel of each platform, the human
@@ -49,8 +58,8 @@ import logging
 import os
 import shutil
 import time
-from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Literal
@@ -60,6 +69,11 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
 
 from merxen.annotation.config import AnnotationConfig, AnnotationReferenceSpec
+from merxen.annotation.gene_ids import (
+    ResolutionRules,
+    gene_id_sources,
+    summing_matrix,
+)
 from merxen.annotation.mapmycells_engine import (
     EXTENDED_JSON_GZ_SUFFIX,
     TIDY_SCHEMA_VERSION,
@@ -80,19 +94,22 @@ from merxen.annotation.mapmycells_engine import (
 )
 from merxen.annotation.panel import (
     REQUIRED_BUNDLES_FILE,
-    SPECIES_ID_PATTERNS,
     AnnotationPanel,
     ControlRegistry,
     DeclaredPanel,
-    PanelSource,
     RawPanel,
     RequiredBundles,
+    SubsetBundleTrigger,
+    declared_native_ids,
     declared_panel,
+    feature_columns,
     load_annotation_panel,
-    load_fallback_table,
     pair_symbol_lookup,
-    raw_panel_from_var,
+    raw_panel_from_h5ad,
+    subset_panel,
+    subset_trigger_for_config,
 )
+from merxen.annotation.reference import read_lookup
 from merxen.annotation.schema import CellStatus, Columns, meets_threshold
 from merxen.annotation.store import (
     ANNOTATION_BUILDER_VERSION,
@@ -100,6 +117,7 @@ from merxen.annotation.store import (
     STORE_SCHEMA_VERSION,
     BundleRef,
     ReferenceStore,
+    StoreEntry,
     file_sha256,
 )
 from merxen.annotation.vocab import (
@@ -144,11 +162,28 @@ N_PROCESSORS_ENV: Final = "MERXEN_ANNOTATION_MAP_N_PROCESSORS"
 DEFAULT_N_PROCESSORS: Final = 6
 MOUSE_REGION_STEP: Final = "not_run: mouse region inference and pruned re-map are M6"
 
+SUBSET_PANELS_DIR: Final = "subset_panels"
+SUBSET_PANEL_TEMPLATE: Final = "{sample_id}_{run_id}.panel_genes.json"
+
 SampleSource = Literal["prepared", "clustered"]
+# (reference_id, subset panel_hash) -> the store's subset bundle, if built.
+SubsetBundleFinder = Callable[[str, str], MmcBundle | None]
 
 
 class MapError(RuntimeError):
     """The MAP step cannot run on its inputs."""
+
+
+class AmbiguousSubsetBundleError(MapError):
+    """The store holds several current-builder bundles on one subset panel.
+
+    Attributes:
+        candidates: The bundle directories.
+    """
+
+    def __init__(self, message: str, candidates: Sequence[str]) -> None:
+        super().__init__(message)
+        self.candidates = list(candidates)
 
 
 # --------------------------------------------------------------------------
@@ -165,12 +200,17 @@ class MapSample:
         h5ad_path: Prepared or published clustered H5AD.
         source: ``"prepared"`` (counts in ``X``, every segmented object) or
             ``"clustered"`` (``layers["counts"]``, table cells only).
+        declared_ids_file: A platform panel file (e.g. the Xenium
+            ``gene_panel.json``) giving the native IDs of the declared
+            features a clustered H5AD's ``min_cells`` filter dropped
+            (``raw_panel_from_h5ad``).
     """
 
     sample_id: str
     platform: str
     h5ad_path: Path
     source: SampleSource
+    declared_ids_file: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -347,25 +387,47 @@ def map_bundles(
     return runs
 
 
-def locate_bundle(
-    store: ReferenceStore, reference_id: str, panel_hash: str | None
-) -> MmcBundle:
-    """Find the current-builder bundle of a reference on a panel in a store.
+def _prefilter_matches(manifest: Mapping[str, Any], config: AnnotationConfig) -> bool:
+    """Whether a bundle's large-panel prefilter is the one a run config asks for.
 
-    Standalone runs do not know the source files PREP hashed, so the bundle
-    is found by ``(reference_id, panel_hash)`` among the complete bundles
-    built by the current builder and store schema versions.
+    A large panel may have two bundles, built with and without the per-parent
+    marker prefilter (its method, version and settings enter
+    ``build_hash_payload["large_panel_prefilter"]``; ``None`` without it).
+    The run config asks for none when ``large_panel_marker_prefilter`` is
+    ``none`` or the panel has at most ``large_panel_genes`` genes, else for
+    its method and cap (M3b review 2).
+    """
+    payload = manifest.get("build_hash_payload") or {}
+    prefilter = payload.get("large_panel_prefilter")
+    panel = payload.get("panel") or {}
+    n_genes = panel.get("n_genes") if isinstance(panel, Mapping) else None
+    wanted = (
+        config.panel.large_panel_marker_prefilter != "none"
+        and isinstance(n_genes, int)
+        and n_genes > config.panel.large_panel_genes
+    )
+    if not wanted:
+        return prefilter is None
+    if not isinstance(prefilter, Mapping):
+        return False
+    settings = prefilter.get("settings") or {}
+    return bool(
+        prefilter.get("method") == config.panel.large_panel_marker_prefilter
+        and isinstance(settings, Mapping)
+        and settings.get("cap") == config.panel.large_panel_prefilter_cap
+    )
 
-    Args:
-        store: The reference store.
-        reference_id: Store id.
-        panel_hash: Declared-panel hash.
 
-    Returns:
-        The bundle.
+def _current_bundles(
+    store: ReferenceStore,
+    reference_id: str,
+    panel_hash: str | None,
+    config: AnnotationConfig | None = None,
+) -> list[StoreEntry]:
+    """Complete current-builder bundles of a reference on a panel (store entries).
 
-    Raises:
-        MapError: If there is none, or several (pass the bundle explicitly).
+    With ``config``, only bundles built with the large-panel prefilter the
+    config asks for (``_prefilter_matches``).
     """
     candidates = []
     for entry in store.list():
@@ -381,8 +443,94 @@ def locate_bundle(
         if (
             manifest.get("builder_version") == ANNOTATION_BUILDER_VERSION
             and manifest.get("schema_version") == STORE_SCHEMA_VERSION
+            and (config is None or _prefilter_matches(manifest, config))
         ):
             candidates.append(entry)
+    return candidates
+
+
+def _resolvability_version(entry: StoreEntry) -> int | None:
+    """The resolvability version a bundle's self-map tables were written with."""
+    manifest = json.loads((entry.path / BUNDLE_MANIFEST_NAME).read_text("utf-8"))
+    record = (manifest.get("builder_output") or {}).get("resolvability") or {}
+    value = record.get("resolvability_version") if isinstance(record, dict) else None
+    return value if isinstance(value, int) else None
+
+
+def _prefer_current_resolvability(candidates: list[StoreEntry]) -> list[StoreEntry]:
+    """Among several bundles, keep those with the current self-map tables.
+
+    A ``RESOLVABILITY_VERSION`` bump gives rebuilt bundles a new
+    ``build_hash`` next to the old ones on the same panel; a standalone run
+    then takes the current tables. Bundles without a self-map, or several
+    current ones, stay ambiguous. When no candidate has the current tables
+    (a panel not rebuilt since the bump), the older ones are kept and a
+    warning names their versions: their self-map tables are stale until the
+    panel is rebuilt (a pipeline run's PREP rebuilds them).
+    """
+    from merxen.annotation.resolvability import RESOLVABILITY_VERSION
+
+    versions = [_resolvability_version(entry) for entry in candidates]
+    current = [
+        entry
+        for entry, version in zip(candidates, versions, strict=True)
+        if version == RESOLVABILITY_VERSION
+    ]
+    if current:
+        return current if len(candidates) > 1 else candidates
+    stale = [
+        (entry, version)
+        for entry, version in zip(candidates, versions, strict=True)
+        if version is not None
+    ]
+    if stale:
+        logger.warning(
+            "no bundle of %s on panel %s has the current self-map tables "
+            "(resolvability version %d); %s: their resolvability tables are "
+            "stale until the panel is rebuilt with merxen "
+            "annotation-reference-prep",
+            candidates[0].reference_id,
+            str(candidates[0].panel_hash or "-")[:16],
+            RESOLVABILITY_VERSION,
+            ", ".join(
+                f"{entry.path.name[:16]} has version {version}"
+                for entry, version in stale
+            ),
+        )
+    return candidates
+
+
+def locate_bundle(
+    store: ReferenceStore,
+    reference_id: str,
+    panel_hash: str | None,
+    *,
+    config: AnnotationConfig | None = None,
+) -> MmcBundle:
+    """Find the current-builder bundle of a reference on a panel in a store.
+
+    Standalone runs do not know the source files PREP hashed, so the bundle
+    is found by ``(reference_id, panel_hash)`` among the complete bundles
+    built by the current builder and store schema versions (and, with
+    ``config``, with the large-panel prefilter it asks for: a 5K panel has a
+    bundle with and one without it); of several, the one whose self-map
+    tables have the current ``RESOLVABILITY_VERSION``.
+
+    Args:
+        store: The reference store.
+        reference_id: Store id.
+        panel_hash: Declared-panel hash.
+        config: The run's annotation config (large-panel prefilter).
+
+    Returns:
+        The bundle.
+
+    Raises:
+        MapError: If there is none, or several (pass the bundle explicitly).
+    """
+    candidates = _prefer_current_resolvability(
+        _current_bundles(store, reference_id, panel_hash, config)
+    )
     if not candidates:
         raise MapError(
             f"the store has no builder-v{ANNOTATION_BUILDER_VERSION} bundle of "
@@ -422,6 +570,9 @@ class LoadedSample:
         min_counts: Table-cell threshold.
         n_below_min_in_clustered: Published table cells below ``min_counts``
             (clustered inputs only: their genes were ``min_cells``-filtered).
+        undetected_declared_ids: Declared panel genes absent from ``var``
+            (a clustered H5AD's ``min_cells`` filter dropped them): present
+            in the panel with zero counts, never missing (M3b review 2).
     """
 
     sample: MapSample
@@ -436,6 +587,7 @@ class LoadedSample:
     in_table: np.ndarray
     min_counts: int
     n_below_min_in_clustered: int = 0
+    undetected_declared_ids: tuple[str, ...] = ()
 
     @property
     def n_objects(self) -> int:
@@ -513,10 +665,13 @@ def read_h5ad_counts(
     return obs_names, var, counts, instance_ids
 
 
-def _raw_panel(var: pd.DataFrame, path: Path) -> RawPanel:
-    return raw_panel_from_var(
-        var, source=PanelSource(kind="prepared_h5ad_var", path=str(path))
+def _raw_panel(var: pd.DataFrame, sample: MapSample) -> RawPanel:
+    declared_ids = (
+        declared_native_ids(sample.declared_ids_file)
+        if sample.declared_ids_file is not None
+        else None
     )
+    return raw_panel_from_h5ad(sample.h5ad_path, var=var, declared_ids=declared_ids)
 
 
 def load_samples(
@@ -528,8 +683,8 @@ def load_samples(
     """Load the samples of a pair x segmentation for mapping (step 1).
 
     Controls are removed with the shared registry and gene IDs resolved as in
-    ``ANNOTATE_PANEL`` (native ID, the pair's symbol lookup, the configured
-    fallback table), so the query genes are the panel's IDs.
+    ``ANNOTATE_PANEL`` (``annotation.gene_ids``), so the query genes are the
+    panel's IDs and each feature gets its declared decision.
 
     Args:
         samples: The samples.
@@ -543,52 +698,48 @@ def load_samples(
 
     registry = ControlRegistry.from_config(config.panel)
     species: Species = config.species
-    pattern = SPECIES_ID_PATTERNS[species]
     reads = []
     for sample in samples:
         obs_names, var, counts, instance_ids = read_h5ad_counts(
             sample.h5ad_path, sample.source
         )
         reads.append((sample, obs_names, var, counts, instance_ids))
-    raws = [_raw_panel(var, sample.h5ad_path) for sample, _, var, _, _ in reads]
+    raws = [_raw_panel(var, sample) for sample, _, var, _, _ in reads]
     lookup = pair_symbol_lookup(raws, species)
-    fallback = load_fallback_table(config.panel.gene_id_fallback_csv, species)
+    sources = gene_id_sources(config.panel, species, pair_lookup=lookup)
+    rules = ResolutionRules.from_config(config.panel)
     loaded: list[LoadedSample] = []
     for (sample, obs_names, var, counts, instance_ids), raw in zip(
         reads, raws, strict=True
     ):
-        if len(raw.features) != len(var):
-            raise MapError(f"{sample.h5ad_path}: var has unnamed features")
         declared = declared_panel(
             raw,
             species=species,
             platform=sample.platform,
             sample_id=sample.sample_id,
             registry=registry,
-            pair_lookup=lookup,
-            fallback=fallback,
+            sources=sources,
+            rules=rules,
         )
-        keep: list[int] = []
-        names: list[str] = []
-        ids: list[str] = []
-        for position, row in enumerate(raw.features.itertuples(index=False)):
-            reason = registry.control_reason(
-                str(row.name),
-                platform=sample.platform,
-                feature_type=str(row.feature_type),
-                has_native_id=bool(row.native_id),
+        try:
+            is_gene, column_ids = feature_columns(
+                var, declared=declared, platform=sample.platform, registry=registry
             )
-            if reason is not None:
-                continue
-            native = str(row.native_id)
-            gene_id = (
-                native
-                if native and pattern.fullmatch(native)
-                else declared.symbol_to_id.get(str(row.symbol), "")
+        except ValueError as error:
+            raise MapError(f"{sample.h5ad_path}: {error}") from error
+        keep = [int(position) for position in np.flatnonzero(is_gene)]
+        var_names = [str(name) for name in var.index]
+        names = [var_names[position] for position in keep]
+        ids = [column_ids[position] for position in keep]
+        undetected = tuple(sorted(set(declared.ensembl_ids) - set(ids)))
+        if undetected:
+            logger.info(
+                "%s: %d declared panel gene(s) absent from var (dropped by "
+                "min_cells) are mapped with zero counts: %s",
+                sample.sample_id,
+                len(undetected),
+                ", ".join(undetected[:10]),
             )
-            keep.append(position)
-            names.append(str(row.name))
-            ids.append(gene_id)
         gene_counts = counts[:, keep].tocsr()
         selection = select_table_cells(
             ad.AnnData(X=gene_counts, obs=pd.DataFrame(index=obs_names)),
@@ -635,6 +786,7 @@ def load_samples(
                 in_table=in_table,
                 min_counts=int(min_counts),
                 n_below_min_in_clustered=n_below,
+                undetected_declared_ids=undetected,
             )
         )
     return loaded
@@ -651,6 +803,8 @@ class SampleQuery:
         gene_ids: Query gene IDs (panel order).
         missing_gene_ids: Panel genes the dataset lacks.
         fingerprint: ``query_fingerprint`` of the query.
+        undetected_gene_ids: Query genes with zero counts because a
+            clustered H5AD's ``min_cells`` filter dropped them.
     """
 
     counts: sparse.csr_matrix
@@ -659,13 +813,18 @@ class SampleQuery:
     gene_ids: list[str]
     missing_gene_ids: list[str]
     fingerprint: str
+    undetected_gene_ids: list[str] = field(default_factory=list)
 
 
 def build_sample_query(loaded: LoadedSample, panel: AnnotationPanel) -> SampleQuery:
     """Restrict a sample's table cells to a panel's genes (step 2).
 
     Features that resolve to one ID are summed; panel genes absent from the
-    dataset are listed.
+    dataset are listed. Declared genes a clustered H5AD's ``min_cells``
+    filter dropped (``LoadedSample.undetected_declared_ids``) are query
+    genes with zero counts, as the prepared H5AD would give them almost
+    everywhere, so they neither restrict the lookup nor trigger a subset
+    bundle.
 
     Args:
         loaded: The loaded sample.
@@ -677,27 +836,20 @@ def build_sample_query(loaded: LoadedSample, panel: AnnotationPanel) -> SampleQu
     Raises:
         MapError: If no panel gene is present.
     """
-    from scipy import sparse
-
-    columns: dict[str, list[int]] = {}
-    for position, gene_id in enumerate(loaded.feature_ids):
-        if gene_id:
-            columns.setdefault(gene_id, []).append(position)
-    present = [gene_id for gene_id in panel.ensembl_ids if gene_id in columns]
-    missing = [gene_id for gene_id in panel.ensembl_ids if gene_id not in columns]
+    detected = {gene_id for gene_id in loaded.feature_ids if gene_id}
+    in_data = detected | set(loaded.undetected_declared_ids)
+    present = [gene_id for gene_id in panel.ensembl_ids if gene_id in in_data]
+    missing = [gene_id for gene_id in panel.ensembl_ids if gene_id not in in_data]
+    undetected = [gene_id for gene_id in present if gene_id not in detected]
     if not present:
         raise MapError(
             f"{loaded.sample.sample_id}: none of the {panel.n_genes} panel genes "
             f"of {panel.name} is in the dataset"
         )
-    rows, cols = [], []
-    for column, gene_id in enumerate(present):
-        for position in columns[gene_id]:
-            rows.append(position)
-            cols.append(column)
-    selector = sparse.csr_matrix(
-        (np.ones(len(rows), dtype=loaded.counts.dtype), (rows, cols)),
-        shape=(len(loaded.feature_ids), len(present)),
+    # One column per present panel gene, the sum of every feature resolving
+    # to it (e.g. H2AX and H2AFX; plan §8.4).
+    selector = summing_matrix(
+        list(loaded.feature_ids), present, dtype=loaded.counts.dtype
     )
     table = np.flatnonzero(loaded.in_table)
     query = (loaded.counts[table] @ selector).tocsr()
@@ -710,6 +862,7 @@ def build_sample_query(loaded: LoadedSample, panel: AnnotationPanel) -> SampleQu
         gene_ids=present,
         missing_gene_ids=missing,
         fingerprint=query_fingerprint(cell_ids, total_counts, present),
+        undetected_gene_ids=undetected,
     )
 
 
@@ -719,6 +872,37 @@ def build_sample_query(loaded: LoadedSample, panel: AnnotationPanel) -> SampleQu
 
 class _MapModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class SubsetBundleRecord(_MapModel):
+    """A run's subset-bundle decision (plan §3.3 step 1).
+
+    Attributes:
+        trigger: ``panel.subset_bundle_trigger`` on the bundle's panel and
+            the sample's genes.
+        status: ``used`` (the store had the subset bundle and the run mapped
+            with it), ``requested`` (the run mapped with the parent bundle,
+            its lookup restricted to the genes present; build the subset
+            panel with ``merxen annotation-reference-prep --panel-genes``;
+            always so in a pipeline task, whose bundles come from PREP) or
+            ``ambiguous`` (the store holds several subset bundles; mapped
+            as ``requested``).
+        subset_panel_file: The subset panel, relative to the manifest.
+        subset_panel_hash: Its ``panel_hash``.
+        parent_panel_hash: The bundle panel it was cut from.
+        parent_build_hash: The parent bundle.
+        subset_build_hash: The subset bundle mapped with (``used``).
+        candidates: The store's subset bundles (``ambiguous``).
+    """
+
+    trigger: SubsetBundleTrigger
+    status: Literal["used", "requested", "ambiguous"]
+    subset_panel_file: str
+    subset_panel_hash: str
+    parent_panel_hash: str
+    parent_build_hash: str
+    subset_build_hash: str | None = None
+    candidates: list[str] = Field(default_factory=list)
 
 
 class MapRunRecord(_MapModel):
@@ -744,6 +928,9 @@ class MapRunRecord(_MapModel):
         n_query_genes: Query genes.
         n_missing_panel_genes: Panel genes absent from the dataset.
         missing_panel_genes: Their IDs.
+        undetected_declared_genes: Panel genes of the declared panel that a
+            clustered H5AD's ``min_cells`` filter dropped, mapped with zero
+            counts (not missing).
         engine_params: ``MmcEngineParams`` (reuse key).
         ctm_version: ctm version of the mapping.
         ctm_commit: ctm commit, when known.
@@ -760,6 +947,8 @@ class MapRunRecord(_MapModel):
         reused_from: The published parquet it came from.
         same_mapping_as: Run id of this sample whose mapping this run shares
             (two uses of one bundle on the same query are mapped once).
+        subset_bundle: The subset-bundle decision when the sample lacks
+            enough panel genes (``None`` when no subset bundle is needed).
     """
 
     run_id: str
@@ -781,6 +970,7 @@ class MapRunRecord(_MapModel):
     n_query_genes: int
     n_missing_panel_genes: int
     missing_panel_genes: list[str] = Field(default_factory=list)
+    undetected_declared_genes: list[str] = Field(default_factory=list)
     engine_params: dict[str, Any]
     ctm_version: str | None
     ctm_commit: str | None = None
@@ -794,6 +984,7 @@ class MapRunRecord(_MapModel):
     reused: bool = False
     reused_from: str | None = None
     same_mapping_as: str | None = None
+    subset_bundle: SubsetBundleRecord | None = None
 
 
 class MapSampleRecord(_MapModel):
@@ -1525,6 +1716,7 @@ def annotate_map(
     reuse_from: Path | str | None = None,
     write_provisional: bool = True,
     refused_platforms: Iterable[str] = (),
+    find_subset_bundle: SubsetBundleFinder | None = None,
 ) -> MapManifest:
     """Run the MAP step for the samples of one pair x segmentation.
 
@@ -1548,6 +1740,9 @@ def annotate_map(
         refused_platforms: Platforms whose own panel was refused
             (``refused_platforms``); their samples are recorded without runs.
             Any other sample that no run applies to is an error.
+        find_subset_bundle: Returns the store's bundle of a reference on a
+            subset panel hash, or ``None`` (``store_subset_bundle_finder``);
+            without it every needed subset bundle is only requested.
 
     Returns:
         The manifest (also written to ``<output_dir>/map_manifest.json``).
@@ -1602,6 +1797,7 @@ def annotate_map(
                 segmentation=segmentation,
                 write_provisional=write_provisional,
                 panel_refused=loaded.sample.platform.upper() in refused,
+                find_subset_bundle=find_subset_bundle,
             )
             manifest.samples[loaded.sample.sample_id] = record
             # Written after every sample, so an interrupted run keeps the
@@ -1631,6 +1827,7 @@ def _map_sample(
     segmentation: str | None,
     write_provisional: bool,
     panel_refused: bool = False,
+    find_subset_bundle: SubsetBundleFinder | None = None,
 ) -> MapSampleRecord:
     """Map one sample onto every run that applies to its platform.
 
@@ -1684,7 +1881,14 @@ def _map_sample(
         )
     tidies: list[tuple[MapBundle, pd.DataFrame]] = []
     mapped: dict[tuple[str, str], tuple[str, Path, MapRunRecord]] = {}
-    for run in applicable:
+    for planned in applicable:
+        run, subset_record = _subset_bundle_for(
+            loaded,
+            planned,
+            config,
+            output=output,
+            find_subset_bundle=find_subset_bundle,
+        )
         params = MmcEngineParams.from_reference_spec(run.spec, n_processors=processes)
         query = build_sample_query(loaded, run.panel)
         parquet = sample_dir / MMC_PARQUET_TEMPLATE.format(
@@ -1734,6 +1938,8 @@ def _map_sample(
                     )
         finally:
             shutil.rmtree(run_scratch, ignore_errors=True)
+        if subset_record is not None or run_record.subset_bundle is not None:
+            run_record = run_record.model_copy(update={"subset_bundle": subset_record})
         mapped.setdefault(key, (run.run_id, parquet, run_record))
         record.runs[run.run_id] = run_record
         tidy, _ = read_tidy_parquet(parquet)
@@ -1757,6 +1963,157 @@ def _map_sample(
         record.provisional_labels = _relative(path, output)
         record.provisional_summary = _confident_shares(labels)
     return record
+
+
+def _subset_bundle_for(
+    loaded: LoadedSample,
+    run: MapBundle,
+    config: AnnotationConfig,
+    *,
+    output: Path,
+    find_subset_bundle: SubsetBundleFinder | None,
+) -> tuple[MapBundle, SubsetBundleRecord | None]:
+    """Apply the subset-bundle trigger to one run of one sample (§3.3 step 1).
+
+    Returns:
+        The run to map (on the store's subset bundle and the subset panel
+        when one exists, else unchanged) and the decision record (``None``
+        when no subset bundle is needed).
+    """
+    # Declared genes dropped by min_cells are present with zero counts
+    # (build_sample_query), as on the prepared H5AD.
+    present = {gene_id for gene_id in loaded.feature_ids if gene_id} | set(
+        loaded.undetected_declared_ids
+    )
+    if set(run.panel.ensembl_ids) <= present:
+        return run, None
+    trigger = subset_trigger_for_config(
+        run.panel.ensembl_ids, present, read_lookup(run.bundle.lookup), config.panel
+    )
+    if not trigger.needs_subset or trigger.subset_panel_hash is None:
+        return run, None
+    subset = subset_panel(run.panel, present, trigger)
+    path = (
+        output
+        / SUBSET_PANELS_DIR
+        / SUBSET_PANEL_TEMPLATE.format(
+            sample_id=loaded.sample.sample_id, run_id=run.run_id
+        )
+    )
+    subset.write(path)
+    found: MmcBundle | None = None
+    candidates: list[str] = []
+    if find_subset_bundle is not None:
+        try:
+            found = find_subset_bundle(run.reference_id, subset.panel_hash)
+        except AmbiguousSubsetBundleError as error:
+            candidates = error.candidates
+            logger.warning(
+                "%s %s: %s; mapping with the parent bundle",
+                loaded.sample.sample_id,
+                run.run_id,
+                error,
+            )
+    if found is not None and found.panel_hash != subset.panel_hash:
+        raise MapError(
+            f"subset bundle {found.path} is for panel {str(found.panel_hash)[:16]}, "
+            f"not {subset.panel_hash[:16]}"
+        )
+    status: Literal["used", "requested", "ambiguous"] = (
+        "used" if found is not None else "ambiguous" if candidates else "requested"
+    )
+    record = SubsetBundleRecord(
+        trigger=trigger,
+        status=status,
+        subset_panel_file=_relative(path, output),
+        subset_panel_hash=subset.panel_hash,
+        parent_panel_hash=run.panel.panel_hash,
+        parent_build_hash=run.bundle.build_hash,
+        subset_build_hash=None if found is None else found.build_hash,
+        candidates=candidates,
+    )
+    reasons = ", ".join(trigger.reasons) or trigger.action
+    if found is None:
+        logger.warning(
+            "%s %s: %d of %d panel genes missing (%s): subset bundle %s needed "
+            "(%s); mapping with the parent bundle. Build it with merxen "
+            "annotation-reference-prep --reference-id %s --panel-genes %s",
+            loaded.sample.sample_id,
+            run.run_id,
+            trigger.n_missing,
+            trigger.n_panel_genes,
+            reasons,
+            subset.panel_hash[:16],
+            trigger.action,
+            run.reference_id,
+            path,
+        )
+        return run, record
+    logger.info(
+        "%s %s: %d of %d panel genes missing (%s); mapping with subset bundle %s",
+        loaded.sample.sample_id,
+        run.run_id,
+        trigger.n_missing,
+        trigger.n_panel_genes,
+        reasons,
+        found.path,
+    )
+    return replace(run, bundle=found, panel=subset, panel_name=subset.name), record
+
+
+def store_subset_bundle_finder(
+    store: ReferenceStore, config: AnnotationConfig | None = None
+) -> SubsetBundleFinder:
+    """Return a finder of subset bundles in a store (standalone MAP only).
+
+    A pipeline MAP task never uses it (``--require-bundle-refs``): its
+    bundles come from PREP as bundle refs that Nextflow stages and tracks.
+
+    Args:
+        store: The reference store.
+        config: The run's annotation config (large-panel prefilter).
+
+    Returns:
+        ``(reference_id, panel_hash) -> MmcBundle | None``: the store's one
+        current-builder bundle on that panel, opened through its store entry
+        like a bundle ref (``MmcBundle.from_bundle_ref``: the directory's
+        build hash must match its ``bundle.json``), or ``None`` without one;
+        several raise ``AmbiguousSubsetBundleError``, which MAP records as
+        ``ambiguous`` instead of failing.
+    """
+
+    def find(reference_id: str, panel_hash: str) -> MmcBundle | None:
+        candidates = _prefer_current_resolvability(
+            _current_bundles(store, reference_id, panel_hash, config)
+        )
+        if not candidates:
+            return None
+        if len(candidates) > 1:
+            raise AmbiguousSubsetBundleError(
+                f"{len(candidates)} subset bundles of {reference_id} on panel "
+                f"{panel_hash[:16]}: "
+                + ", ".join(str(entry.path) for entry in candidates),
+                [str(entry.path) for entry in candidates],
+            )
+        return _bundle_from_entry(candidates[0])
+
+    return find
+
+
+def _bundle_from_entry(entry: StoreEntry) -> MmcBundle:
+    """Open a store entry as a bundle ref would (build hash checked)."""
+    manifest = json.loads((entry.path / BUNDLE_MANIFEST_NAME).read_text("utf-8"))
+    ref = BundleRef(
+        reference_id=str(manifest.get("reference_id", entry.reference_id)),
+        species=str(manifest.get("species", "")),
+        role=manifest.get("role", "primary"),
+        panel_hash=entry.panel_hash,
+        # The directory name is the content address: bundle.json must agree.
+        build_hash=entry.path.name,
+        path=str(entry.path),
+        store_root=str(entry.store_root),
+    )
+    return MmcBundle.from_bundle_ref(ref)
 
 
 def _reused_run(
@@ -1891,6 +2248,7 @@ def _run_one(
         n_query_genes=result.n_query_genes,
         n_missing_panel_genes=len(query.missing_gene_ids),
         missing_panel_genes=query.missing_gene_ids,
+        undetected_declared_genes=query.undetected_gene_ids,
         engine_params=params.reuse_key(),
         ctm_version=result.ctm_version,
         ctm_commit=result.ctm_commit,

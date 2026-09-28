@@ -40,11 +40,82 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
+    3: "a712532a2708305f3f569d9f441ec570e961a4437898610cfcd14eb53a48caea",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
     "2: first pin (set c from the curated family list, ID-only bundle tables, "
     "validated WMB universe, self-map test-cell source, read-only bundles)",
+    "3: the resolvability self-map (held-out WHB and WMB test-set builders, "
+    "self-map tables in primary and secondary bundles); resolvability.py pinned",
+    "3: level_emission and composition docs in resolvability.py (RESOLVE-side "
+    "helpers; the bundle files are unchanged)",
+    "3: RESOLVABILITY_VERSION 2 (M3b review: validated regime on both halves, "
+    "per-depth trimmed composition weights, the WHB COP rule on the cells "
+    "table, per-platform packaged floors); it enters build_hash through the "
+    "resolvability builder params, so every self-map bundle gets a new hash "
+    "without a builder bump",
+    "3: large-panel builds refused and the prefilter kept out of the payload "
+    "until a builder applies it (no payload of a buildable panel changes); "
+    "the held-out test-set sources checked before the marker steps (same "
+    "bundles, earlier failure)",
+    "3: RESOLVABILITY_VERSION 3 (H18 follow-up, user decision 2026-09-27: "
+    "pooled deep bins with the point precision in the rule); the version "
+    "enters every self-map bundle's build_hash through the resolvability "
+    "builder params, so those bundles get new hashes without a builder bump",
+    "3: the human held-out test set topped up with other-region non-neuronal "
+    "WHB cells (user decision 2026-09-27); the new content enters the "
+    "whb_frontal_supc_clus_ho build_hash through its hashed other_region "
+    "params and the WHB cell metadata source, and every self-map bundle's "
+    "through the test-set params and RESOLVABILITY_VERSION 3; the mouse "
+    "test-set and all other bundles are unchanged",
+    "3: pooled deep sets reweighted as one set in RESOLVE "
+    "(ResolvabilityTables.decisions, pooled_composition_weights, "
+    "DatasetComposition.at_least); PREP's decisions are unweighted, so the "
+    "bundle files are unchanged",
+    "3: large-panel support (M3b stage D): the per-parent marker prefilter "
+    "(prefilter.py, pinned from here on) runs only above large_panel_genes, "
+    "where builds were refused before, and its method, version and settings "
+    "enter build_hash; the builder refusals move to BundleBuilder.refuse; "
+    "reference markers of panels up to 1,000 genes are deleted right after "
+    "the query markers instead of with the build scratch (same files); ctm "
+    "steps also record process-tree peaks and bundle.json the candidate-gene "
+    "count (metrics only); the self-map mapper and marker steps are shared "
+    "with annotation-panel-simulate. No bundle of a panel up to 1,000 genes "
+    "changes content or build_hash",
+    "3: the WMB query-marker memory model of the no-prefilter refusal is the "
+    "measured M3b 5K envelope (refusals only; no bundle content changes)",
+    "3: RESOLVABILITY_VERSION 4 (M3b review 2: weights trimmed per judged set, "
+    "positive-weight calls only, judged bins at or above D_P keep their own "
+    "verdict, would_raise only with a fit, PREP decides on the stored float32 "
+    "cells, gate-P sets of one replicate); the version enters every self-map "
+    "bundle's build_hash through the resolvability builder params, so those "
+    "bundles get new hashes without a builder bump",
+    "3: the human held-out test set leaves out truth superclusters no call "
+    "can name (sinks, no floor class, region-implausible; M3b review 2); the "
+    "exclusion's version and region enter the whb_frontal_supc_clus_ho "
+    "build_hash through its hashed params, and every human self-map bundle's "
+    "through its test-set params",
+    "3: the no-prefilter refusal keeps the OD-E8 +30% margin on the predicted "
+    "WMB query-marker peak and names the pipeline's option (refusals only; "
+    "no bundle content changes)",
+    "3: the human held-out test set's other-region top-up draws only from "
+    "clusters of the held-out training reference (user decision 2026-09-27); "
+    "HO_OTHER_REGION_VERSION 2 enters the whb_frontal_supc_clus_ho build_hash "
+    "through its hashed other_region params, and every human self-map "
+    "bundle's through its test-set params; the mouse bundles are unchanged",
+    "3: RESOLVABILITY_VERSION 5 (M3b final follow-up: every simulation draw "
+    "keyed by the seed, recipe name and version, cell id and depth, the "
+    "gene efficiency by the gene id, the spill partner by rendezvous "
+    "hashing); the version enters every self-map bundle's build_hash through "
+    "the resolvability builder params, so those bundles get new hashes "
+    "without a builder bump; the test-set bundles are unchanged",
+    "3: RESOLVABILITY_VERSION 6 (M3b review 3: the per-gene efficiency is "
+    "again the pre-registered version-4 draw over the panel's gene order; "
+    "the per-cell keys stay); the version enters every self-map bundle's "
+    "build_hash through the resolvability builder params, so those bundles "
+    "get new hashes without a builder bump; the test-set bundles are "
+    "unchanged",
 )
 
 
@@ -69,8 +140,19 @@ def _dump(node: ast.AST) -> str:
 
 
 def builder_code_fingerprint() -> str:
-    """Return the sha256 of the builder-relevant code, docstrings stripped."""
-    parts = [_dump(ast.parse((SRC / "reference.py").read_text()))]
+    """Return the sha256 of the builder-relevant code, docstrings stripped.
+
+    ``resolvability.py`` writes the self-map tables into primary and
+    secondary bundles (M3b), so it is covered too; a change there that
+    alters those tables also bumps ``RESOLVABILITY_VERSION`` (hashed).
+    ``prefilter.py`` chooses the marker candidates of large panels (M3b
+    stage D); its version and settings are hashed.
+    """
+    parts = [
+        _dump(ast.parse((SRC / "reference.py").read_text())),
+        _dump(ast.parse((SRC / "resolvability.py").read_text())),
+        _dump(ast.parse((SRC / "prefilter.py").read_text())),
+    ]
     store_tree = ast.parse((SRC / "store.py").read_text())
     by_name = {
         node.name: node

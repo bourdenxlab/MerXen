@@ -246,6 +246,19 @@ def test_dwight_runs_one_prep_at_a_time() -> None:
         'annotation_reference_store = "/media/mathieubo/SSD1/MerXen/'
         'annotation_references"' in text
     )
+    # Panels above 1,000 genes go to their own store on /srv/storage (§8.7).
+    assert (
+        'annotation_reference_store_large = "/srv/storage/MerXen/'
+        'annotation_references_large"' in text
+    )
+
+
+def test_prep_max_gb_fraction_matches_the_python_reserve() -> None:
+    """--max-gb = task.memory x fraction; Python reads the reserve back (§8.7)."""
+    groovy = (WORKFLOWS / "lib" / "AnnotationReferences.groovy").read_text()
+    match = re.search(r"PREP_MAX_GB_FRACTION = ([0-9.]+)", groovy)
+    assert match is not None
+    assert float(match.group(1)) == reference_module.PREP_MAX_GB_FRACTION
 
 
 def test_main_nf_calls_only_the_prepare_only_entry() -> None:
@@ -751,6 +764,9 @@ def _cases(root: Path, params: dict[str, Any]) -> dict[str, dict[str, Any]]:
         "annotation_prepare_only": True,
         "annotation_panel_genes_path": str(gene_list),
         "annotation_whb_region_precompute_source": str(region),
+        # The held-out self-map (resolvability on by default) reads these.
+        "annotation_whb_h5ad_dir": str(region),
+        "annotation_whb_metadata_dir": str(region),
         "annotation_reference_store": str(store),
     }
     bundle = {
@@ -781,6 +797,8 @@ def _cases(root: Path, params: dict[str, Any]) -> dict[str, dict[str, Any]]:
                 "annotation_human_references": "whb_frontal_supc_clus",
                 "annotation_panel_mode": "per_platform",
                 "annotation_gene_id_fallback_csv": str(gene_list),
+                "annotation_human_gene_table": str(gene_list),
+                "annotation_mouse_gene_table": str(gene_list),
                 "annotation_xplat_sensitivity_segmentations": "proseg_hybrid,reseg",
                 "annotation_resolvability": False,
             },
@@ -870,6 +888,8 @@ def _cases(root: Path, params: dict[str, Any]) -> dict[str, dict[str, Any]]:
                 **ready,
                 "annotation_panel_genes_path": str(root / "missing.csv"),
                 "annotation_whb_region_precompute_source": None,
+                "annotation_whb_h5ad_dir": None,
+                "annotation_whb_metadata_dir": None,
             },
         },
         "preflight_no_pipeline_sources": {
@@ -879,6 +899,31 @@ def _cases(root: Path, params: dict[str, Any]) -> dict[str, dict[str, Any]]:
                 "annotation_human_references": (
                     "whb_frontal_supc_clus,whb_whole_ctx_panel"
                 ),
+            },
+        },
+        "preflight_human_no_selfmap_sources": {
+            "fn": "prepareOnlyErrors",
+            "params": {
+                **ready,
+                "annotation_whb_h5ad_dir": None,
+                "annotation_whb_metadata_dir": None,
+            },
+        },
+        "preflight_human_seaad_no_selfmap_sources": {
+            "fn": "prepareOnlyErrors",
+            "params": {
+                **ready,
+                "annotation_human_references": "seaad_mr_panel",
+                "annotation_whb_h5ad_dir": None,
+            },
+        },
+        "preflight_human_resolvability_off": {
+            "fn": "prepareOnlyErrors",
+            "params": {
+                **ready,
+                "annotation_whb_h5ad_dir": None,
+                "annotation_whb_metadata_dir": None,
+                "annotation_resolvability": False,
             },
         },
         "preflight_mouse": {
@@ -1306,6 +1351,7 @@ def test_annotation_config_json_validates_in_python(
     else:
         assert config.anatomical_region == "frontal_cortex"
         assert config.panel.gene_id_fallback_csv is None
+        assert config.panel.gene_tables == {}
 
 
 @needs_nextflow
@@ -1316,6 +1362,9 @@ def test_annotation_config_json_follows_the_params(harness: dict[str, Any]) -> N
     ]
     assert config.panel.panel_mode == "per_platform"
     assert config.panel.gene_id_fallback_csv is not None
+    # Both species' gene tables reach the exact-case species test (plan §8.4).
+    assert set(config.panel.gene_tables) == {"human", "mouse"}
+    assert all(path.is_absolute() for path in config.panel.gene_tables.values())
     assert config.xplat_sensitivity_segmentations == ["proseg_hybrid", "reseg"]
     assert config.resolvability.enabled is False
 
@@ -1359,6 +1408,8 @@ def test_prep_arguments(harness: dict[str, Any]) -> None:
     assert sources == [
         f"region_precompute={root / 'region_precompute'}",
         f"seaad_precomputed_stats={root / 'genes.csv'}",
+        f"whb_h5ad_dir={root / 'region_precompute'}",
+        f"whb_metadata_dir={root / 'region_precompute'}",
     ]
     region = _value(harness, "prep_args_region_share").split()
     assert "--no-auto-download" in region
@@ -1450,6 +1501,13 @@ def test_prepare_only_preflight(harness: dict[str, Any]) -> None:
     )
     (no_sources,) = _value(harness, "preflight_no_pipeline_sources")
     assert "whb_whole_ctx_panel have no pipeline source params" in no_sources
+    # The human self-map needs the WHB held-out donor's sources up front.
+    (no_selfmap,) = _value(harness, "preflight_human_no_selfmap_sources")
+    assert "whb_frontal_supc_clus, seaad_mr_panel need" in no_selfmap
+    assert "annotation_whb_h5ad_dir, annotation_whb_metadata_dir" in no_selfmap
+    seaad_only = " | ".join(_value(harness, "preflight_human_seaad_no_selfmap_sources"))
+    assert "seaad_mr_panel need annotation_whb_h5ad_dir" in seaad_only
+    assert _value(harness, "preflight_human_resolvability_off") == []
     mouse = " | ".join(_value(harness, "preflight_mouse"))
     assert "wmb_panel needs annotation_wmb_h5ad_dir" in mouse
     assert "wmb_region_share" not in mouse  # the MERFISH metadata is downloaded
@@ -1549,6 +1607,10 @@ def test_prepare_only_stub_run_builds_bundles_and_runs_no_stage(tmp_path: Path) 
         tmp_path,
         annotation_reference_store=str(store),
         annotation_whb_region_precompute_source=str(region),
+        # The held-out self-map sources the preflight requires while
+        # annotation_resolvability is true (stand-in directories).
+        annotation_whb_h5ad_dir=str(region),
+        annotation_whb_metadata_dir=str(region),
     )
     completed = subprocess.run(
         [

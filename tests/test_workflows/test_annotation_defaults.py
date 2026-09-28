@@ -533,7 +533,19 @@ def _build_cases(tmp_path: Path, defaults: dict[str, Any]) -> dict[str, dict[str
     cases["preflight|map_first|clustering"] = {
         "fn": "preflight",
         "settings": human_settings,
-        "params": {**defaults, "annotation_gene_alias_table": str(existing)},
+        "params": {
+            **defaults,
+            "annotation_gene_alias_table": str(existing),
+            # The human held-out self-map sources (resolvability on).
+            "annotation_whb_region_precompute_source": str(existing),
+            "annotation_whb_h5ad_dir": str(existing),
+            "annotation_whb_metadata_dir": str(existing),
+        },
+    }
+    cases["preflight|map_first|human-no-selfmap-sources"] = {
+        "fn": "preflight",
+        "settings": human_settings,
+        "params": defaults,
     }
     cases["preflight|map_first|no-clustered-stage"] = {
         "fn": "preflight",
@@ -848,6 +860,13 @@ def test_groovy_preflight(groovy_results: dict[str, dict[str, Any]]) -> None:
     assert len(clustering) == 1
     assert "map_first is not available yet for P1" in clustering[0]
     assert _value(groovy_results, "preflight|map_first|no-clustered-stage") == []
+    # A human row that would build WHB / SEA-AD bundles needs the held-out
+    # donor's sources while resolvability is on (the default).
+    human = "\n".join(
+        _value(groovy_results, "preflight|map_first|human-no-selfmap-sources")
+    )
+    assert "whb_frontal_supc_clus, seaad_mr_panel need" in human
+    assert "annotation_whb_region_precompute_source" in human
     # A mouse row that would build wmb_panel needs the self-map test cells
     # while resolvability is on (the default).
     mouse = "\n".join(_value(groovy_results, "preflight|map_first|mouse-no-test-cells"))

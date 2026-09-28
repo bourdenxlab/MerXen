@@ -58,8 +58,15 @@ def _human_provenance() -> AnnotationProvenance:
             n_panel_genes=296,
             markers_per_parent_min=12,
             markers_per_parent_median=30.0,
+            root_markers=230,
+            root_children_separated=15,
+            n_weak_parents=1,
+            n_collapsed_parents=0,
+            n_hidden_leaves=0,
         ),
         panel_trust="validated",
+        trust_reasons=["family_validated"],
+        n_panel_genes_absent=0,
     )
     seaad = ReferenceProvenance(reference_id="seaad_mr_panel", role="secondary")
     return AnnotationProvenance(
@@ -69,10 +76,14 @@ def _human_provenance() -> AnnotationProvenance:
         panel=PanelProvenance(
             panel_hash="a" * 64,
             panel_family="human_set_a",
+            family_basis="listed",
             panel_mode="intersection",
             panel_trust="validated",
+            trust_reasons=["family_validated"],
+            banner=False,
             validation_basis="real_data",
             validated_max_level="supercluster",
+            validated_panels_sha256="d" * 64,
             validated_share={"broad": 1.0, "supercluster": 0.98},
             real_data_qc=RealQcProvenance(
                 outcomes={"marker_consistency": "pass", "paired_broad_jsd": "warn"},
@@ -195,7 +206,7 @@ def test_serialised_provenance_has_no_list_of_mappings() -> None:
     payload = json.loads(_human_provenance().to_uns_json())
     for values in _walk_lists(payload):
         assert not any(isinstance(item, dict) for item in values)
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
     assert payload["label_table_version"] == 1
     assert payload["panel"]["validation_basis"] == "real_data"
 
@@ -282,6 +293,14 @@ def test_trust_basis_and_species_rules() -> None:
     PanelProvenance(panel_trust="provisional")
     with pytest.raises(ValidationError):
         PanelProvenance(panel_trust="trusted")  # type: ignore[arg-type]
+    PanelProvenance(panel_trust="provisional", banner=True)
+    PanelProvenance(panel_trust="broad_only", banner=True)
+    with pytest.raises(ValidationError, match="banner"):
+        PanelProvenance(panel_trust="validated", banner=True)
+    with pytest.raises(ValidationError, match="banner"):
+        PanelProvenance(panel_trust="provisional", banner=False)
+    with pytest.raises(ValidationError):
+        PanelProvenance(family_basis="borrowed")  # type: ignore[arg-type]
     with pytest.raises(ValidationError, match="mouse_gate"):
         AnnotationProvenance(species="human", mouse_gate=MouseGateProvenance())
     with pytest.raises(ValidationError):
