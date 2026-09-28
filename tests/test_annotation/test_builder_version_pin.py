@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "a1b2412f5dacb25e20302288df73f046c069b76ab4263ebdef6b517ffe00a09e",
+    3: "a712532a2708305f3f569d9f441ec570e961a4437898610cfcd14eb53a48caea",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -110,6 +110,12 @@ PIN_HISTORY = (
     "hashing); the version enters every self-map bundle's build_hash through "
     "the resolvability builder params, so those bundles get new hashes "
     "without a builder bump; the test-set bundles are unchanged",
+    "3: RESOLVABILITY_VERSION 6 (M3b review 3: the per-gene efficiency is "
+    "again the pre-registered version-4 draw over the panel's gene order; "
+    "the per-cell keys stay); the version enters every self-map bundle's "
+    "build_hash through the resolvability builder params, so those bundles "
+    "get new hashes without a builder bump; the test-set bundles are "
+    "unchanged",
 )
 
 

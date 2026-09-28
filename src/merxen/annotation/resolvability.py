@@ -114,15 +114,23 @@ logger = logging.getLogger(__name__)
 # (``would_raise_evaluable``); PREP decides on the stored (float32) cells;
 # the human held-out test set drops truth superclusters no production call
 # can name (sinks, no floor class, region-implausible; E2).
-# 5 (M3b final follow-up, 2026-09-28): every simulation draw is keyed by
-# what it simulates (``draw_key``: the seed, the recipe name and version,
-# the cell id, the depth; the gene id for the gene efficiency) instead of
-# one stream over all test cells, and the spill partner is chosen by
+# 5 (M3b final follow-up, 2026-09-28): every per-cell simulation draw is
+# keyed by what it simulates (``draw_key``: the seed, the recipe name and
+# version, the cell id, the depth; version 5 also keyed the gene efficiency
+# by the gene id) instead of one stream over all test cells, and the spill
+# partner is chosen by
 # rendezvous hashing, so adding or removing test cells no longer redraws
 # every other cell (review 2: the redraw moved 0-7 validated bins per
 # dataset); the human held-out test set's other-region cells come only from
 # clusters of the held-out training reference (user decision 2026-09-27).
-RESOLVABILITY_VERSION: Final = 5
+# 6 (M3b review 3, 2026-09-28): the per-gene efficiency is again the
+# pre-registered version-4 draw (one LogNormal(0, sigma) draw over the
+# panel's gene order from the seed); version 5 had keyed it per gene id,
+# which neither requested change needed (the version-4 vector never
+# depended on the test cells) and which replaced the pre-registered seed-0
+# realisation. The per-cell thinning, spill and partner keys of version 5
+# stay.
+RESOLVABILITY_VERSION: Final = 6
 SUMMARY_SCHEMA_VERSION: Final = 1
 RESOLVABILITY_FILE: Final = "resolvability.parquet"
 RESOLVABILITY_CELLS_FILE: Final = "resolvability_cells.parquet"
@@ -134,14 +142,14 @@ DECISION_RECIPE: Final = "R1_contam_HO"
 CLEAN_RECIPE: Final = "clean"
 RECIPE_VERSIONS: Final[dict[str, int]] = {DECISION_RECIPE: 1, CLEAN_RECIPE: 1}
 # Keyed simulation draws (version 5; ``draw_key``): the streams of one
-# simulated cell (its thinning, its spill partner and the spill's thinning)
-# and of one gene (its efficiency).
+# simulated cell (its thinning, its spill partner and the spill's thinning).
 DRAW_KEY_BYTES: Final = 16
 DRAW_STREAM_THIN: Final = "thin"
 DRAW_STREAM_PARTNER: Final = "partner"
 DRAW_STREAM_SPILL: Final = "spill"
 DRAW_STREAM_CANDIDATE: Final = "candidate"
-DRAW_STREAM_GENE_EFFICIENCY: Final = "gene_efficiency"
+# The per-gene efficiency generator (the pre-registered version-4 draw).
+_GENE_EFFICIENCY_STREAM: Final = 0x6566
 # Host x candidate scores per block of the rendezvous partner choice.
 _RENDEZVOUS_BLOCK_SCORES: Final = 1 << 22
 
@@ -493,7 +501,7 @@ def draw_key(*parts: object) -> int:
 
     Args:
         parts: What identifies the draw (seed, recipe name and version, cell
-            or gene id, depth, stream).
+            id, depth, stream).
 
     Returns:
         A non-negative integer below ``2**128`` (a ``numpy`` seed).
@@ -567,36 +575,32 @@ def rendezvous_choice(host_keys: np.ndarray, candidate_keys: np.ndarray) -> np.n
     return chosen
 
 
-def gene_efficiency(genes: Sequence[str], sigma: float | None, seed: int) -> np.ndarray:
+def gene_efficiency(n_genes: int, sigma: float | None, seed: int) -> np.ndarray:
     """Return per-gene detection efficiencies, LogNormal(0, sigma) / median.
 
     One draw per gene, fixed across depths, cells and recipes, as E2's
     ``gene_efficiency.npy``: it models a platform's per-gene detection bias,
-    which every cell shares. Each gene's standard normal is keyed by the seed
-    and the gene id (version 5; ``draw_key``), so it does not depend on the
-    other panel genes, and a recipe with another sigma (a gate-P stress
-    recipe) scales the same normals.
+    which every cell shares. The draw is the pre-registered one (resolvability
+    versions 1-4 and 6): ``n_genes`` normals from one generator seeded by
+    ``[seed, 0x6566]``, in the panel's gene order (the test cells' columns,
+    sorted Ensembl ids). It depends on the seed and the panel only, never on
+    the test cells, so changing the test set leaves it unchanged; a recipe
+    with another sigma (a gate-P stress recipe) scales the same normals.
+    Version 5 keyed each gene's normal by the gene id instead, which redrew
+    the pre-registered seed-0 realisation; version 6 restores it.
 
     Args:
-        genes: Gene ids (the test cells' columns).
+        n_genes: Genes (the test cells' columns).
         sigma: LogNormal sigma (``None``: all ones).
         seed: The simulation seed.
 
     Returns:
-        Efficiencies with median 1, in ``genes`` order.
+        Efficiencies with median 1, in the panel's gene order.
     """
-    if sigma is None or len(genes) == 0:
-        return np.ones(len(genes), dtype=np.float64)
-    normals = np.array(
-        [
-            np.random.default_rng(
-                draw_key(int(seed), DRAW_STREAM_GENE_EFFICIENCY, str(gene))
-            ).standard_normal()
-            for gene in genes
-        ],
-        dtype=np.float64,
-    )
-    values = np.exp(float(sigma) * normals)
+    if sigma is None or n_genes == 0:
+        return np.ones(n_genes, dtype=np.float64)
+    rng = np.random.default_rng([int(seed), _GENE_EFFICIENCY_STREAM])
+    values = np.exp(rng.normal(0.0, float(sigma), n_genes))
     return np.asarray(values / np.median(values), dtype=np.float64)
 
 
@@ -763,9 +767,11 @@ def thin_and_contaminate(
     random cell of another spill group (broad class) whose native counts
     reach that amount; truth stays the host cell's. ``clean`` thins only.
 
-    Every draw is keyed by what it simulates (resolvability version 5;
-    ``cell_draw_key``: the recipe's seed, name and version, the host cell id
-    and ``D``): the host's thinning and the spill's thinning each come from
+    Every per-cell draw is keyed by what it simulates (resolvability version
+    5; ``cell_draw_key``: the recipe's seed, name and version, the host cell
+    id and ``D``), and the gene efficiency depends on the seed and the panel
+    only (``gene_efficiency``): the host's thinning and the spill's thinning
+    each come from
     the host's own generator, and the spill partner is the eligible cell
     with the highest rendezvous score (``rendezvous_choice``; uniform over
     the eligible cells). A simulated cell therefore does not depend on the
@@ -791,7 +797,9 @@ def thin_and_contaminate(
         raise ResolvabilityError(
             "test cell ids must be unique (they key the simulation draws)"
         )
-    efficiency = gene_efficiency(test.genes, recipe.gene_efficiency_sigma, recipe.seed)
+    efficiency = gene_efficiency(
+        len(test.genes), recipe.gene_efficiency_sigma, recipe.seed
+    )
     native = test.native_counts
     groups = test.obs[SPILL_GROUP_COLUMN].astype(str).to_numpy()
     cell_ids = test.obs.index.astype(str).to_numpy()
@@ -3980,7 +3988,7 @@ def run_resolvability(
         f" ({'; '.join(trust.reasons)})" if trust.reasons else "",
     )
     efficiency = gene_efficiency(
-        test.genes, decision_recipe.gene_efficiency_sigma, decision_recipe.seed
+        len(test.genes), decision_recipe.gene_efficiency_sigma, decision_recipe.seed
     )
     extra = [
         pd.DataFrame(
