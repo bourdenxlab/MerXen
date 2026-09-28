@@ -463,3 +463,22 @@ def test_compute_flags_keeps_the_mouse_hooks() -> None:
     astro = result.columns[Columns.FLAG_ASTRO_LOWCOUNT]
     assert astro.dtype == bool and astro.any()
     assert result.null_reasons["microglial_spillover"] == fl.REASON_MOUSE_M6
+
+
+def test_diffuse_flags_only_more_genes_than_the_quantile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        fl, "expected_genes_quantile", lambda depth, labels, *a, **k: np.full(3, 5.0)
+    )
+    result = fl.diffuse_result(
+        np.array([50.0, 50.0, 50.0]),
+        np.array([4.0, 5.0, 6.0]),
+        np.array(["Neurons"] * 3, dtype=object),
+        np.ones(3, dtype=bool),
+        {"Neurons": np.full(10, 0.1)},
+        platform="XENIUM",
+        class_names=("Neurons",),
+        max_informative=1.0,
+    )
+    assert result.raw_flag.tolist() == [False, False, True]

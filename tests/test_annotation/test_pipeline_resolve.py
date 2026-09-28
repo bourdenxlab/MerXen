@@ -932,3 +932,33 @@ def test_human_branch_columns_follow_the_final_chain(
         labels[Columns.level("lineage", "name")].astype(str) == "Neurons"
     )
     assert (branch[lineage_neurons] == "Neurons/unresolved").all()
+
+
+def test_current_family_rederives_a_listed_family_from_an_old_panel_file() -> None:
+    from merxen.annotation.diagnostics import load_validated_panels
+    from merxen.annotation.panel import PanelFamily, compute_panel_hash
+
+    genes = sorted(load_validated_panels().genes["human_set_a_297"].ensembl_ids)
+    old = AnnotationPanel(
+        name="intersection",
+        kind="intersection",
+        species="human",
+        platforms=["MERSCOPE", "XENIUM"],
+        sample_ids=["PX_MERSCOPE", "PX_XENIUM"],
+        panel_mode="intersection",
+        panel_hash=compute_panel_hash(genes),
+        n_genes=len(genes),
+        ensembl_ids=genes,
+        symbols=list(genes),
+        panel_family=PanelFamily(
+            family_id="human_merscope_xenium_6e5fd5fb86ef",
+            basis="own",
+            reference_panel_hash=compute_panel_hash(genes),
+            jaccard=1.0,
+        ),
+    )
+    refreshed = pl.current_family(old, _config())
+    assert refreshed.panel_family is not None
+    assert refreshed.panel_family.family_id == "human_set_a"
+    assert refreshed.panel_family.basis == "listed"
+    assert pl.current_family(refreshed, _config()) is refreshed
