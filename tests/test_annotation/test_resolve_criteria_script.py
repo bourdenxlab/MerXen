@@ -620,7 +620,20 @@ def test_h4_summary_counts_classes_passing(criteria: ModuleType) -> None:
     rows = criteria.h4_table_rows(summary.values())
     assert {row["criterion"] for row in rows} == {"H4[m4_resolve_heldout]"}
     assert len(rows) == 2
+    assert all(
+        row["note"].startswith("partly circular (SEA saw held-out genes)")
+        for row in rows
+    )
     assert "c6 (fold 5.0, AUROC 0.60)" in main["failing"]
+    # The headline H4 row is the non-circular WHB-only set (plan §5.8).
+    whb_only = {**main, "label_set": criteria.H4_HEADLINE_SET}
+    headline = criteria.h4_table_rows([whb_only])
+    assert [row["criterion"] for row in headline] == [
+        "H4",
+        "H4[m4_resolve_heldout_whb_only]",
+    ]
+    assert headline[0]["note"].startswith("headline (non-circular")
+    assert headline[0]["value"] == 6.0 and headline[0]["passes"] is True
 
 
 def test_scripts_help_runs(criteria: ModuleType, pseudo: ModuleType) -> None:
