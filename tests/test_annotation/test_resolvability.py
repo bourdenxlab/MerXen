@@ -1576,6 +1576,103 @@ def test_the_gene_efficiency_does_not_depend_on_the_test_cells() -> None:
     assert all(np.array_equal(subset[sim_id][0], full[sim_id][0]) for sim_id in shared)
 
 
+def test_each_stream_of_a_cell_has_its_own_key() -> None:
+    # The key covers the depth, the recipe (seed, name, version) and the
+    # stream: a spill that reused the host's thinning key, or a key without
+    # the depth or the recipe name, would correlate draws that must be
+    # independent.
+    recipe, clean = recipes()
+    cell = "cluster_7"
+    base = res.cell_draw_key(recipe, cell, 10, res.DRAW_STREAM_THIN)
+    others = [
+        res.cell_draw_key(recipe, cell, 30, res.DRAW_STREAM_THIN),
+        res.cell_draw_key(recipe, cell, 10, res.DRAW_STREAM_SPILL),
+        res.cell_draw_key(recipe, cell, 10, res.DRAW_STREAM_PARTNER),
+        res.cell_draw_key(recipe, "cluster_8", 10, res.DRAW_STREAM_THIN),
+        res.cell_draw_key(
+            res.SimulationRecipe(**{**recipe.to_json(), "name": "other"}),
+            cell,
+            10,
+            res.DRAW_STREAM_THIN,
+        ),
+        res.cell_draw_key(
+            res.SimulationRecipe(**{**recipe.to_json(), "seed": 1}),
+            cell,
+            10,
+            res.DRAW_STREAM_THIN,
+        ),
+        res.cell_draw_key(
+            res.SimulationRecipe(**{**recipe.to_json(), "version": 2}),
+            cell,
+            10,
+            res.DRAW_STREAM_THIN,
+        ),
+    ]
+    assert len({base, *others}) == 1 + len(others)
+    assert res.cell_draw_key(recipe, cell, 10, res.DRAW_STREAM_THIN) == base
+    # A renamed recipe is another draw of the same cells (clean: thinning
+    # only; the spill recipe too).
+    test = make_test_cells(10)
+    for used in (clean, recipe):
+        renamed_recipe = res.SimulationRecipe(**{**used.to_json(), "name": "other"})
+        before = res.thin_and_contaminate(test, GRID, used)
+        after = res.thin_and_contaminate(test, GRID, renamed_recipe)
+        assert list(after.obs.index) == list(before.obs.index)
+        assert (after.counts != before.counts).nnz > 0
+
+
+def test_the_spill_is_thinned_with_its_own_stream() -> None:
+    # Rebuild each simulated cell from its keys: host = its own row thinned
+    # with the thin key, spill = the partner's row thinned with the host's
+    # spill key. Thinning the partner with the host's thin key instead gives
+    # another spill for most cells.
+    test = make_test_cells(20)
+    recipe, _ = recipes()
+    query = res.thin_and_contaminate(test, GRID, recipe)
+    efficiency = res.gene_efficiency(
+        len(test.genes), recipe.gene_efficiency_sigma, recipe.seed
+    )
+    position = {str(cell): index for index, cell in enumerate(test.obs.index)}
+    counts = sparse.csr_matrix(test.counts)
+    rebuilt = 0
+    thin_key_matches = 0
+    for index, (cell, depth, partner) in enumerate(
+        zip(
+            query.obs["cell_id"].astype(str),
+            query.obs["depth"].astype(int),
+            query.obs["partner_id"].astype(str),
+            strict=True,
+        )
+    ):
+        amount = recipe.spill_fraction * depth
+        host = res._thin_rows(
+            counts[[position[cell]]],
+            np.array([float(depth)]),
+            efficiency,
+            [res.cell_draw_key(recipe, cell, depth, res.DRAW_STREAM_THIN)],
+        )
+        spill = res._thin_rows(
+            counts[[position[partner]]],
+            np.array([amount]),
+            efficiency,
+            [res.cell_draw_key(recipe, cell, depth, res.DRAW_STREAM_SPILL)],
+        )
+        with_thin_key = res._thin_rows(
+            counts[[position[partner]]],
+            np.array([amount]),
+            efficiency,
+            [res.cell_draw_key(recipe, cell, depth, res.DRAW_STREAM_THIN)],
+        )
+        row = query.counts[[index]].toarray()
+        assert np.array_equal(row, (host + spill).toarray())
+        rebuilt += 1
+        thin_key_matches += int(
+            np.array_equal(spill.toarray(), with_thin_key.toarray())
+        )
+    assert rebuilt == len(query.obs)
+    assert thin_key_matches < 0.2 * rebuilt
+
+
 def test_select_test_cells_caps_strata_and_keeps_rare_types() -> None:
     obs = pd.DataFrame(
         {"type": ["big"] * 3000 + ["mid"] * 700 + ["rare"] * 12},
@@ -1644,7 +1741,13 @@ def test_planted_non_resolvable_level_is_not_emitted(
     # Twin clusters never reach the target: the fit finds no local
     # threshold, or only one a few lucky high-bp calls reach; at the default
     # the precision is a coin flip.
-    assert set(cluster["reason"]) <= {"no_local_threshold", "too_few_confident_calls"}
+    # A class whose pooled deep set stays short of min_confident_n calls is
+    # insufficient_calls (resolvability version 3).
+    assert set(cluster["reason"]) <= {
+        "no_local_threshold",
+        "too_few_confident_calls",
+        "insufficient_calls",
+    }
     assert (cluster["n_confident"].fillna(0) < 50).all()
     validated = decisions[
         (decisions["level"] == "cluster") & (decisions["regime"] == "validated")
