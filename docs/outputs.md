@@ -509,11 +509,62 @@ default run writes none of these directories. See
 | `<pair_id>/<segmentation>/annotation_map/annotation_map_out/logs/`, `annotation_config.json` | Mapper stdout / stderr / ctm logs per run; the annotation config the task read. |
 | `<pair_id>/<segmentation>/annotation_resolve/annotation_resolve_out/<platform>/<sid>_celltype_labels.parquet` | `CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE` (`map_first` only): the label table of every segmented object (identity, counts, `in_table`, per-level names, raw scores, runner-ups, margins and statuses, final label and tier, consensus, flags with their continuous companions, soft broad vectors, the raw engine columns); the provenance JSON in the parquet schema (`merxen_annotation`). |
 | `<pair_id>/<segmentation>/annotation_resolve/annotation_resolve_out/<platform>/<sid>_annotation_manifest.json` | The sample's `AnnotationProvenance`: panel and trust, references and bundle hashes, engine, resolvability (emitted bins, extrapolated bins, resolvable share), thresholds and floor sources, gate, consensus, flags and composition. |
-| `<pair_id>/<segmentation>/annotation_resolve/annotation_resolve_out/<pair_id>_resolve_summary.json`, `annotation_config.json` | Per sample: trust, degraded mode, gate level and warning, confident and resolvable share per level, realised flag rates, compositions; per pair: the composition JSD with block-bootstrap CIs. The annotation config the task resolved with. |
+| `<pair_id>/<segmentation>/annotation_resolve/annotation_resolve_out/<pair_id>_resolve_summary.json`, `annotation_config.json` | Per sample: trust, degraded mode, gate level and warning, confident share per level of table cells (`confident_share_table`) and of segmented objects (`confident_share_segmented`, the gate warning's denominator), resolvable share per level, realised flag rates, compositions; per pair: the composition JSD with block-bootstrap CIs. The annotation config the task resolved with. |
 
 The bundles themselves live in the reference store
 (`annotation_reference_store`, default `${outdir}/annotation_references`),
 not under these directories, and are never deleted by the pipeline.
+
+#### Label table schema (`<sid>_celltype_labels.parquet`)
+
+One row per segmented object of the sample, in the order of its prepared
+H5AD; `merxen.annotation.schema` holds the contract (`column_specs`,
+`validate_label_table`) and every reader uses it. The provenance JSON
+(`AnnotationProvenance`, the same as `<sid>_annotation_manifest.json`) is in
+the parquet schema metadata under `merxen_annotation`.
+`merxen.annotation.pipeline.read_label_table` returns both.
+
+| Columns | Type | Meaning |
+|---|---|---|
+| `cell_id`, `instance_id` | string, int64 | Object id (the H5AD `obs_names`) and segmentation instance id. |
+| `pair_id`, `sample_id`, `platform`, `segmentation`, `species`, `anatomical_region`, `panel_hash` | category | Identity; `panel_hash` is the declared panel the sample was mapped on. |
+| `total_counts`, `n_genes`, `genes_per_count` | int32, int32, float32 | Counts after control removal, detected genes, and their ratio. |
+| `in_table` | bool | Whether the object is a table cell (`total_counts >= min_counts` of the clustering run, or a cell of a published clustered table). Objects outside the table are `low_counts` at every level. |
+| `depth_bin`, `resolvability_extrapolated` | nullable int32, bool | The cell's depth-grid bin of the resolvability tables, and whether its emission decision was carried from a pooled or deeper bin (§8.3). |
+| `n_missing_panel_genes` | int32 | Panel genes the sample lacks. |
+| `ct_<level>_name` | category | The assigned name at the level (null when the status is `low_counts`, `not_applicable` or `not_attempted_gate`). Levels: human `lineage`, `broad`, `nt`, `supercluster`, `seaad_subclass` (`cluster` only with `annotation_allow_fine_levels`); mouse `broad`, `class`, `nt`, `subclass`. |
+| `ct_<level>_raw`, `ct_<level>_conf` | float32 | The bootstrap probability (lineage, broad, NT: summed over the class's superclusters; SEA-AD subclass: `aggregate_probability`) and the confidence, equal to raw in v1 (raw thresholds; calibrated probabilities are v1.1). NaN where the level is `low_counts` or `not_applicable`. |
+| `ct_<level>_corr`, `ct_<level>_runner_up`, `ct_<level>_margin` | float32, category, float32 | MapMyCells `avg_correlation`, best runner-up and the probability margin to it. |
+| `ct_<level>_status` | category | One `CellStatus` value (below). |
+| `ct_<level>_validated` | bool | Confident and inside the panel family's validated region (level, class, depth); always `false` in a provisional family, whose labels carry the banner. |
+| `ct_final_level`, `ct_final_name` | category | The deepest confident level of the chain and its name (`none` / `Mixed/Unknown` when no level is confident). |
+| `ct_consensus_tier` | int8 | Agreement of the informative methods' 7-class calls (a call is informative when it meets its threshold): the size of the largest agreeing group, 1 when only one method is informative, 0 when none is or all disagree; capped by the degraded mode (v1 `whb_sea`: 2; `whb_only`: 1). |
+| `ct_branch`, `ct_leaf`, `ct_mender_state` | category | The map-first hierarchy keys: branch (human: `Neurons/Excitatory`, `Neurons/Inhibitory`, `Neurons/unresolved`, the glial and vascular classes, `Oligodendrocyte lineage/unresolved`, `Mixed/Unknown`), leaf (the confident supercluster or `unresolved`) and the MENDER state. |
+| `flag_low_counts`, `flag_below_floor`, `flag_method_disagree`, `flag_implausible`, `flag_cop_suppressed` | bool | Status-mirroring flags: outside the table; the deepest attempted level of the chain is `below_floor`, `method_disagree` or `implausible` (H2 counts `flag_implausible` over table cells); a COP call kept at lineage by the COP rule itself: set only when every earlier broad check (confident lineage, the broad floor, resolvability, the threshold) passed, the call then being `below_floor` under the COP floor of 120 counts and `low_confidence` otherwise; a COP call that fails an earlier check keeps that status without the flag. |
+| `contamination_score`, `neg_counts`, `flag_contaminated` | float32, nullable int32, nullable bool | Share and count of the cell's counts on its assigned class's negative genes; the flag against the dataset's beta-binomial null (null where the class × platform stratum has no null or is uninformative). |
+| `expected_genes_q95`, `flag_diffuse_profile` | float32, nullable bool | q95 of the distinct genes of 200 multinomial draws from the class profile at the cell's depth; flag when the cell detects more (null in an uninformative stratum). |
+| `ood_z`, `flag_ood` | float32, nullable bool | Robust z of the supercluster `avg_correlation` within class × platform × depth bin; flag below -3. |
+| `microglia_stat`, `microglia_weight`, `flag_microglial_spillover` | float32, nullable bool | Mouse spill-over flag (§7.4, M6); null for human (off, OD-C5). |
+| `flag_region_incoherent`, `region_coherence`, `flag_astro_lowcount` | nullable bool, float32, bool | Mouse only (M6). |
+| `exclude_hard`, `discovery_caution` | bool | Excluded from downstream use: outside the table, implausible at every attempted level, or a `failed` gate (a refused panel fails the gate); any report-only flag set (contaminated, diffuse, OOD, method disagreement, spill-over, astro low count; null counts as unset). The report-only flags never change a status. |
+| `soft_broad_<class>`, `soft_broad_unallocated` | float32 | Human soft broad vector of each table cell (sums to 1; NaN outside the table): the assigned WHB supercluster's and its runner-ups' bootstrap probabilities aggregated to the seven broad classes, sinks and the residual unallocated (§5.5). Mouse: `soft_class_<class>`. |
+| `mmc_<reference>_<level>_*` | mixed | The raw engine columns of every MAP run (`mmc_whb_*`, `mmc_whb_setc_*`, `mmc_seaad_*`): label, name, bootstrap and aggregate probability, correlation and, at the leaf level, five runner-ups. |
+
+`CellStatus` values (the first failing check wins, in this order):
+
+| Status | Meaning |
+|---|---|
+| `low_counts` | Outside the table (`in_table` false). |
+| `not_attempted_gate` | The dataset gate or a refused panel stopped the level (e.g. supercluster on a `broad_only` dataset). |
+| `not_applicable` | The level does not apply to the call (NT outside neurons). |
+| `implausible` | The WHB node is a sink or not plausible for the region (lineage keeps it when SEA-AD agrees at lineage). |
+| `parent_unresolved` | The parent level is not confident. |
+| `below_floor` | Counts below the class × platform floor. |
+| `not_resolvable` | Resolvability does not emit the (level, class, depth bin) for this dataset's composition. |
+| `low_confidence` | The raw (or local) threshold is not met. |
+| `method_disagree` | SEA-AD does not agree below 60 counts, or confidently disagrees from 60. |
+| `single_method` | Below 60 counts with no second method (degraded mode `whb_only`, unless `annotation_allow_single_method`). |
+| `confident` | Every check passed. |
 
 ## Nextflow reports
 

@@ -666,7 +666,7 @@ the inputs' results tree or the MAP output):
 |---|---|
 | `<platform>/<sid>_celltype_labels.parquet` | The §4.1 label table (every object; validated with `schema.validate_label_table`); the provenance JSON is also in the parquet schema (`merxen_annotation`). |
 | `<platform>/<sid>_annotation_manifest.json` | `AnnotationProvenance` (§4.6): the JSON string `uns["merxen_annotation_json"]` holds. |
-| `<pair>_resolve_summary.json` | Per sample: trust (and banner), degraded mode, gate level and warning with reasons, confident and resolvable share per level, emission, COP control, realised flag rates per class × platform (H16) and the compositions; per pair: the JSD of every composition kind, whole section and shared tissue mask, with its 95% block-bootstrap CI. |
+| `<pair>_resolve_summary.json` | Per sample: trust (and banner), degraded mode, gate level and warning with reasons, confident share per level of table cells and of segmented objects (the `--n-segmented` count when given, the gate warning's denominator), resolvable share per level, emission, COP control, realised flag rates per class × platform (H16: `rate` over the stratum's confident broad calls, `informative`, `informative_h16`) and the compositions; per pair: the JSD of every composition kind, whole section and shared tissue mask, with its 95% block-bootstrap CI. |
 
 ```bash
 merxen annotate-resolve \
@@ -693,6 +693,11 @@ merxen annotate-resolve \
 | `--no-alignment-lookup` | Never take that default: the mask comes only from `--alignment-dir` (a pipeline task gets it from ALIGN's channel, never from a published file ALIGN may still be writing). |
 | `--annotation-config PATH`, `--species` | `AnnotationConfig` JSON; the species defaults to the manifest's (mouse RESOLVE is M6: a mouse MAP output fails with a clean error). |
 | `--platforms`, `--n-bootstrap`, `--tile-um`, `--seed`, `--results-root` | Resolve only these platforms; block-bootstrap replicates (200), tile edge (500 µm) and seed (0); a results tree `--out` must stay out of. |
+
+The human acceptance criteria (plan §14) are re-measured on these outputs
+with `scripts/acceptance/resolve_criteria.py` (see
+[the annotation stage](stages/annotation.md#shadow-baselines-m3)); it never
+changes a pre-registered threshold.
 
 ## Writing a standalone config
 
