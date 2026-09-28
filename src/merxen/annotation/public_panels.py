@@ -30,7 +30,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 logger = logging.getLogger(__name__)
 
@@ -234,6 +234,24 @@ class FetchedPanel:
     downloaded: bool
 
 
+def _previous_retrieval(manifest_path: Path, sha256: str) -> dict[str, Any] | None:
+    """The retrieval record of an earlier manifest of the same pinned file."""
+    if not manifest_path.is_file():
+        return None
+    try:
+        previous = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(previous, dict) or previous.get("sha256") != sha256:
+        return None
+    if "first_retrieved_at" not in previous:
+        return None
+    return {
+        "downloaded": bool(previous.get("downloaded")),
+        "first_retrieved_at": previous.get("first_retrieved_at"),
+    }
+
+
 def fetch_public_panel(
     key: str,
     out_dir: Path | str,
@@ -243,7 +261,10 @@ def fetch_public_panel(
     """Fetch one pinned public panel list and write its normalised gene table.
 
     A verified copy under ``<out_dir>/raw`` is reused; otherwise the file is
-    downloaded and must match the pinned size and sha256.
+    downloaded and must match the pinned size and sha256. The manifest
+    records the first retrieval (``downloaded``, ``first_retrieved_at``),
+    kept from an earlier manifest when the copy is reused, and the latest
+    check (``last_verified_at``).
 
     Args:
         key: ``PUBLIC_PANEL_LISTS`` key.
@@ -290,6 +311,12 @@ def fetch_public_panel(
         writer.writerow(["gene_symbol", "gene_id"])
         writer.writerows(rows)
     manifest_path = root / f"{item.key}{MANIFEST_SUFFIX}"
+    now = datetime.now(UTC).isoformat(timespec="seconds")
+    previous = _previous_retrieval(manifest_path, item.sha256)
+    if downloaded:
+        retrieval = {"downloaded": True, "first_retrieved_at": now}
+    else:
+        retrieval = previous or {"downloaded": False, "first_retrieved_at": None}
     manifest = {
         "key": item.key,
         "title": item.title,
@@ -302,8 +329,8 @@ def fetch_public_panel(
         "n_genes": len(rows),
         "gene_list": str(gene_list_path),
         "gene_list_sha256": _sha256(gene_list_path.read_bytes()),
-        "downloaded": downloaded,
-        "checked_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        **retrieval,
+        "last_verified_at": now,
     }
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     logger.info(
