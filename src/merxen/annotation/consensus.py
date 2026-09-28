@@ -19,13 +19,21 @@ SEA-AD Multiregion second vote into one status per level (``CellStatus``,
    supercluster rule passes (counts >= the COP supercluster floor, 120, and
    supercluster probability >= the supercluster threshold) or SEA-AD
    confidently calls OPC; otherwise the cell stays at lineage
-   ("Oligodendrocyte lineage") with ``flag_cop_suppressed``.
+   ("Oligodendrocyte lineage"). ``flag_cop_suppressed`` (§4.3) marks every
+   table cell with a WHB COP call, a confident lineage and a failing COP
+   rule, whichever broad check (floor, resolvability, threshold or the COP
+   rule itself) decides its status.
 3. **NT** (neurons): a confident broad, the aggregated Exc / Inh probability,
    the class's broad floor (Inh: MERSCOPE 10, Xenium 30) and resolvability;
    no second vote. Non-neurons are ``not_applicable``.
 4. **Supercluster:** a confident parent (NT for neurons, else broad), gate
    level ``full`` (a warning flag does not block), the supercluster
-   probability, the supercluster floor (COP 120) and resolvability.
+   probability, the supercluster floor (COP 120) and resolvability. Plan
+   §5.2 rule 4 asks for a confident broad only; requiring a confident NT for
+   neurons is a recorded M4 deviation (pre-registration §15): the final
+   label is the deepest confident level of a contiguous chain (lineage ->
+   broad -> NT -> supercluster; ``schema`` final-chain check), so a neuron
+   supercluster above an unresolved NT would skip a level.
 5. **SEA-AD subclass** (secondary name, never in ``ct_final``): gate level
    ``full``, a confident WHB broad that SEA-AD's 7-class call agrees with,
    the supercluster floor of the broad class, SEA's raw threshold (0.55
@@ -35,7 +43,11 @@ SEA-AD Multiregion second vote into one status per level (``CellStatus``,
    with ``allow_fine_levels`` and a resolvability pass (OD-E4).
 7. **Final label** = the deepest confident level along lineage -> broad ->
    NT -> supercluster (``Mixed/Unknown`` for none). 8. **Tier**: methods
-   agreeing at the 7-class level, computed independently of the statuses.
+   agreeing at the 7-class level, computed independently of the statuses:
+   the largest group of informative methods on one label, ``0`` for a
+   confident disagreement (two or more informative, all different) and
+   ``-1`` when no method is informative (and outside the table, or without
+   the primary), so ``0`` means disagreement only (review of M4).
 
 **Degraded modes** (§5.3) are one explicit truth table, ``DEGRADED_MODES``:
 which method must agree below 60 counts, which may veto from 60, which
@@ -49,7 +61,9 @@ When several checks fail, the status is the first in this order:
 ``low_counts`` > ``not_attempted_gate`` > ``not_applicable`` >
 ``implausible`` > ``parent_unresolved`` > ``below_floor`` >
 ``not_resolvable`` > ``low_confidence`` > (COP rule) > ``single_method`` /
-``method_disagree``; a level passing every check is ``confident``.
+``method_disagree``; a level passing every check is ``confident``. The SEA-AD
+subclass follows the same order (its SEA-agreement check is its
+``method_disagree``, last).
 """
 
 from __future__ import annotations
@@ -123,6 +137,9 @@ _NOT_ATTEMPTED: Final[frozenset[str]] = frozenset(
 _LL_NEURON_LABELS: Final[frozenset[str]] = frozenset(
     {NEURONS, "Exc", "Inh", "OtherNeuron", "N"}
 )
+# ct_consensus_tier codes besides the agreeing-method counts (§4.1).
+TIER_DISAGREE: Final = 0
+TIER_NONE_INFORMATIVE: Final = -1
 
 
 # --------------------------------------------------------------------------
@@ -673,7 +690,8 @@ class HumanResolution:
         Returns:
             Degraded mode, gate, confident share per level of table cells and
             of segmented objects, resolvable share per level, thresholds and
-            emission per level, COP control shares (H5) and flag counts.
+            emission per level, the consensus tiers of table cells, COP
+            control shares (H5) and flag counts.
         """
         table = self.in_table
         n_table = int(table.sum())
@@ -715,6 +733,8 @@ class HumanResolution:
             "n_objects": n_objects,
             "n_table": n_table,
             "final_level_counts": _counts(self.final_level[table]),
+            # "-1": no informative method, "0": confident disagreement (§4.1).
+            "consensus_tier_counts": _counts(self.consensus_tier[table].astype(int)),
             "levels": per_level,
             "cop_control": {
                 "confident_cop_supercluster_share": (
@@ -809,9 +829,11 @@ def consensus_tier(
 
     A method is informative for a cell when its 7-class call meets its
     threshold. The tier is the size of the largest group of informative
-    methods on one label, 0 when two or more are informative and all
-    disagree (confident disagreement) or none is, 1 when only one is;
-    capped at the degraded mode's ``max_tier``. Agreement, not accuracy.
+    methods on one label, 1 when only one is informative,
+    ``TIER_DISAGREE`` (0) when two or more are and all disagree (confident
+    disagreement, the §4.1 meaning of 0) and ``TIER_NONE_INFORMATIVE`` (-1)
+    when none is; capped at the degraded mode's ``max_tier``. Agreement,
+    not accuracy.
 
     Args:
         labels: One label array per method (``None``: no 7-class call).
@@ -824,7 +846,7 @@ def consensus_tier(
     if not labels:
         return np.zeros(0, dtype=np.int8)
     n = len(labels[0])
-    tier = np.zeros(n, dtype=np.int8)
+    tier = np.full(n, TIER_NONE_INFORMATIVE, dtype=np.int8)
     for index in range(n):
         votes = [
             str(label[index])
@@ -837,7 +859,7 @@ def consensus_tier(
             tier[index] = 1
             continue
         largest = max(votes.count(value) for value in set(votes))
-        tier[index] = largest if largest >= 2 else 0
+        tier[index] = largest if largest >= 2 else TIER_DISAGREE
     return np.minimum(tier, max_tier).astype(np.int8)
 
 
@@ -1236,6 +1258,12 @@ def resolve_human(calls: HumanCalls, settings: HumanResolveSettings) -> HumanRes
         supercluster_raw, supercluster_em.threshold
     )
     cop_passes = cop_supercluster | votes.sea_confident_opc
+    cop_rule_fails = info.is_cop & ~cop_passes
+    # flag_cop_suppressed (§4.3): WHB called COP, the lineage is confident and
+    # the COP rule failed, whichever broad check decides the status (the
+    # floor, resolvability and threshold checks come first); labels follow
+    # the statuses below and do not depend on the flag.
+    cop_suppressed = table & lineage_confident & cop_rule_fails
     builder = _StatusBuilder(n)
     builder.fail(low_counts, CellStatus.LOW_COUNTS)
     builder.fail(no_call, CellStatus.LOW_CONFIDENCE)
@@ -1246,9 +1274,9 @@ def resolve_human(calls: HumanCalls, settings: HumanResolveSettings) -> HumanRes
     builder.fail(~em.emitted, CellStatus.NOT_RESOLVABLE)
     broad_raw = whb.broad.raw if whb is not None else np.full(n, np.nan)
     builder.fail(~meets_threshold(broad_raw, em.threshold), CellStatus.LOW_CONFIDENCE)
-    cop_suppressed = builder.unset() & info.is_cop & ~cop_passes
-    builder.fail(cop_suppressed & (counts < cop_floor), CellStatus.BELOW_FLOOR)
-    builder.fail(cop_suppressed, CellStatus.LOW_CONFIDENCE)
+    cop_decides = builder.unset() & cop_rule_fails
+    builder.fail(cop_decides & (counts < cop_floor), CellStatus.BELOW_FLOOR)
+    builder.fail(cop_decides, CellStatus.LOW_CONFIDENCE)
     for status in (CellStatus.SINGLE_METHOD, CellStatus.METHOD_DISAGREE):
         builder.fail(~votes.broad_ok & (votes.broad_status == status.value), status)
     levels["broad"] = _level_result(
@@ -1341,11 +1369,13 @@ def resolve_human(calls: HumanCalls, settings: HumanResolveSettings) -> HumanRes
         np.array([value is None for value in sea_names]), CellStatus.LOW_CONFIDENCE
     )
     builder.fail(~broad_confident, CellStatus.PARENT_UNRESOLVED)
-    builder.fail(~_equal(votes.sea_class, info.broad), CellStatus.METHOD_DISAGREE)
     builder.fail(counts < floor, CellStatus.BELOW_FLOOR)
     builder.fail(~em.emitted, CellStatus.NOT_RESOLVABLE)
     sea_raw = sea.subclass.scores.raw if sea is not None else np.full(n, np.nan)
     builder.fail(~meets_threshold(sea_raw, em.threshold), CellStatus.LOW_CONFIDENCE)
+    # SEA-AD's 7-class call must agree with ct_broad: the level's
+    # method_disagree, last as at the other levels.
+    builder.fail(~_equal(votes.sea_class, info.broad), CellStatus.METHOD_DISAGREE)
     levels["seaad_subclass"] = _level_result(
         n,
         name=sea_names,
@@ -1450,9 +1480,10 @@ def resolve_human(calls: HumanCalls, settings: HumanResolveSettings) -> HumanRes
             np.array([value is not None for value in votes.ll_class]) & table
         )
     tier = consensus_tier(method_labels, method_informative, max_tier=mode.max_tier)
-    tier[~table] = 0
+    # No tier outside the table or without the primary (§5.3 max tier "-").
+    tier[~table] = TIER_NONE_INFORMATIVE
     if not mode.primary_available:
-        tier[:] = 0
+        tier[:] = TIER_NONE_INFORMATIVE
 
     flags = _human_flags(chain, table, cop_suppressed, gate.level)
     extrapolated = np.logical_or.reduce(

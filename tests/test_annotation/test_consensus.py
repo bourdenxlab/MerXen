@@ -243,7 +243,7 @@ def expected_vote(
 def expected_tier(mode: str, *, sea: str, ll: str) -> int:
     """Methods agreeing at the 7-class level among informative ones."""
     if mode == "primary_missing":
-        return 0
+        return cs.TIER_NONE_INFORMATIVE
     labels = ["whb"]
     if "sea" in mode and sea.endswith("confident"):
         labels.append("whb" if sea.startswith("agree") else "other")
@@ -423,6 +423,78 @@ def test_the_cop_rule(make_trust: MakeTrust) -> None:
     assert summary["cop_derived_opc_share"] == pytest.approx(2 / 3)
 
 
+def test_the_cop_rule_boundary_is_120_counts(make_trust: MakeTrust) -> None:
+    """The pre-registered COP supercluster floor: >= 120 counts (§5.2 rule 2)."""
+    cop = COP_SUPERCLUSTER
+    cells = [
+        Cell(cop, counts=120, bp=0.80, sea_raw=0.3),
+        Cell(cop, counts=119, bp=0.80, sea_raw=0.3),
+    ]
+    result = resolve(cells, Setup(trust=make_trust("validated_real")))
+    assert statuses(result, 0)["broad"] == "confident"
+    assert statuses(result, 0)["supercluster"] == "confident"
+    assert result.final_level[0] == "supercluster"
+    assert statuses(result, 1)["broad"] == "below_floor"
+    flag = result.flags[Columns.FLAG_COP_SUPPRESSED]
+    assert flag[:2].tolist() == [False, True]
+
+
+def test_the_cop_flag_marks_every_failed_cop_rule_on_a_confident_lineage(
+    make_trust: MakeTrust,
+    make_decisions: MakeDecisions,
+    human_level_meta: list[LevelMeta],
+) -> None:
+    """flag_cop_suppressed is the plan §4.3 definition, whichever check decides.
+
+    WHB called COP, the lineage is confident and the COP rule failed: the
+    flag is set even when the broad threshold, floor or resolvability fails
+    first (the status still follows the precedence); it is never set when
+    the lineage is not confident or the rule passes.
+    """
+    cop = COP_SUPERCLUSTER
+    decisions = make_decisions(
+        overrides={
+            (regime, "broad", "OPC", 60): {"status": "not_resolvable"}
+            for regime in ("validated", "provisional")
+        }
+    )
+    cells = [
+        # The broad threshold fails first; the COP rule fails too.
+        Cell(cop, counts=150, bp=0.60, broad_raw=0.5, sea_raw=0.3),
+        # Lineage not confident: not flagged.
+        Cell(cop, counts=150, bp=0.60, lineage_raw=0.5, sea_raw=0.3),
+        # Not resolvable at broad (OPC at 60) and a failing COP rule.
+        Cell(cop, counts=80, bp=0.95, sea_raw=0.3),
+        # The COP rule passes (SEA-AD confidently calls OPC) but broad is not
+        # resolvable: not flagged.
+        Cell(cop, counts=80, bp=0.95, sea_raw=0.9),
+        # The COP rule decides (every other check passes).
+        Cell(cop, counts=150, bp=0.60, sea_raw=0.3),
+    ]
+    result = resolve(
+        cells,
+        Setup(
+            trust=make_trust("validated_real"),
+            decisions=decisions,
+            meta=human_level_meta,
+        ),
+    )
+    broad = result.levels["broad"].status
+    assert broad[:5].tolist() == [
+        "low_confidence",
+        "parent_unresolved",
+        "not_resolvable",
+        "not_resolvable",
+        "low_confidence",
+    ]
+    flag = result.flags[Columns.FLAG_COP_SUPPRESSED]
+    assert flag[:5].tolist() == [True, False, True, False, True]
+    assert result.summary()["cop_control"]["cop_suppressed"] == 3
+    # Labels do not depend on the flag: flagged cells stay at lineage.
+    for index in (0, 2, 4):
+        assert result.final_level[index] == "lineage"
+
+
 def test_the_second_vote_switches_at_60_counts() -> None:
     cells = [
         Cell(EXC, counts=59, sea_broad="Astrocytes", sea_raw=0.3),
@@ -555,20 +627,54 @@ def test_the_sea_subclass_rule() -> None:
         Cell(EXC, counts=40, sea_subclass_raw=0.50),
         Cell(ASTRO, counts=100, sea_broad="Microglia", sea_raw=0.3),
         Cell(OPC_SUPC, counts=100),
+        # ct_broad not confident: parent_unresolved.
+        Cell(EXC, counts=100, broad_raw=0.5, sea_subclass_raw=0.9),
+        # SEA-AD disagrees and the subclass is weak: the documented order
+        # puts low_confidence before method_disagree.
+        Cell(
+            ASTRO, counts=100, sea_broad="Microglia", sea_raw=0.3, sea_subclass_raw=0.3
+        ),
     ]
     result = resolve(cells, Setup(platform="MERSCOPE"))
     sea = result.levels["seaad_subclass"]
-    assert sea.status[:5].tolist() == [
+    assert sea.status[:7].tolist() == [
         "confident",
         "low_confidence",
         "low_confidence",
         "method_disagree",
         "below_floor",
+        "parent_unresolved",
+        "low_confidence",
     ]
     assert sea.threshold[:3].tolist() == [0.45, 0.45, 0.55]
     # Never in ct_final.
     assert result.final_level[0] == "supercluster"
     assert result.final_name[0] == EXC
+
+
+def test_the_sea_subclass_follows_the_leaf_resolvability(
+    make_trust: MakeTrust,
+    make_decisions: MakeDecisions,
+    human_level_meta: list[LevelMeta],
+) -> None:
+    """Rule 5: the leaf's resolvability for the broad class gates the subclass."""
+    decisions = make_decisions(
+        overrides={
+            ("validated", "supercluster", "Exc", 120): {"status": "not_resolvable"}
+        }
+    )
+    cells = [Cell(EXC, counts=150), Cell(EXC, counts=300)]
+    result = resolve(
+        cells,
+        Setup(
+            trust=make_trust("validated_real"),
+            decisions=decisions,
+            meta=human_level_meta,
+        ),
+    )
+    assert statuses(result, 0)["broad"] == "confident"
+    assert statuses(result, 0)["seaad_subclass"] == "not_resolvable"
+    assert statuses(result, 1)["seaad_subclass"] == "confident"
 
 
 def test_the_whb_cluster_is_never_a_final_label(
@@ -597,6 +703,22 @@ def test_the_whb_cluster_is_never_a_final_label(
     assert statuses(stable)["cluster"] == "confident"
     assert stable.final_level[0] == "supercluster"
     assert "cluster" not in cs.HUMAN_CHAIN
+    # A broad-only dataset attempts no level below broad (§5.4), the
+    # report-only cluster included, even when it is stable and resolvable.
+    broad_only = resolve(
+        cells,
+        Setup(
+            trust=make_trust("broad_only"),
+            thresholds=enabled,
+            decisions=make_decisions(),
+            meta=human_level_meta,
+            fine_seed_stability={"cluster": 0.0},
+        ),
+    )
+    assert broad_only.gate.level == "broad_only"
+    assert statuses(broad_only)["broad"] == "confident"
+    assert statuses(broad_only)["cluster"] == "not_attempted_gate"
+    assert broad_only.levels["cluster"].name[0] is None
 
 
 # --------------------------------------------------------------------------
@@ -691,6 +813,52 @@ def test_a_broad_only_gate_blocks_only_the_leaf_levels(make_trust: MakeTrust) ->
     capped = resolve([Cell(EXC)], Setup(trust=make_trust("broad_only")))
     assert capped.gate.level == "broad_only"
     assert statuses(capped)["supercluster"] == "not_attempted_gate"
+
+
+def test_the_status_precedence_puts_the_floor_before_resolvability(
+    make_trust: MakeTrust,
+    make_decisions: MakeDecisions,
+    human_level_meta: list[LevelMeta],
+) -> None:
+    """below_floor > not_resolvable > low_confidence > method_disagree."""
+    decisions = make_decisions(
+        overrides={
+            ("validated", "broad", "Inh", 15): {"status": "not_resolvable"},
+            ("validated", "broad", "Exc", 60): {"status": "not_resolvable"},
+        }
+    )
+    cells = [
+        # Xenium broad Inh floor 30: below it and in a non-emitted bin.
+        Cell(INH, counts=15),
+        # Not resolvable (Exc at 60) and weak: not_resolvable.
+        Cell(EXC, counts=80, broad_raw=0.5, sea_broad="Neurons", sea_raw=0.3),
+        # Weak, and SEA-AD confidently disagrees at the 7-class level only
+        # (same lineage): low_confidence.
+        Cell(
+            OPC_SUPC,
+            counts=300,
+            broad_raw=0.5,
+            sea_broad="Oligodendrocytes",
+            sea_raw=0.95,
+        ),
+    ]
+    result = resolve(
+        cells,
+        Setup(
+            platform="XENIUM",
+            trust=make_trust("validated_real"),
+            decisions=decisions,
+            meta=human_level_meta,
+        ),
+    )
+    assert [statuses(result, index)["lineage"] for index in range(3)] == [
+        "confident"
+    ] * 3
+    assert [statuses(result, index)["broad"] for index in range(3)] == [
+        "below_floor",
+        "not_resolvable",
+        "low_confidence",
+    ]
 
 
 def test_the_segmented_share_uses_the_gate_denominator() -> None:
@@ -956,21 +1124,43 @@ def test_settings_from_a_coupled_config(make_trust: MakeTrust) -> None:
 
 def test_consensus_tier_counts_agreeing_informative_methods() -> None:
     labels = [
-        np.array(["A", "A", "A", None, "A"], dtype=object),
-        np.array(["A", "B", None, None, "B"], dtype=object),
-        np.array(["A", "B", "C", "A", "C"], dtype=object),
+        np.array(["A", "A", "A", None, "A", "A"], dtype=object),
+        np.array(["A", "B", None, None, "B", "A"], dtype=object),
+        np.array(["A", "B", "C", "A", "C", None], dtype=object),
     ]
-    informative = [np.ones(5, dtype=bool)] * 3
+    informative = [np.ones(6, dtype=bool)] * 2 + [np.ones(6, dtype=bool)]
+    informative = [item.copy() for item in informative]
+    for item in informative:
+        item[5] = False  # no method informative on the last cell
     tier = cs.consensus_tier(labels, informative, max_tier=3)
-    assert tier.tolist() == [3, 2, 0, 1, 0]
+    # 0 is a confident disagreement only; no informative method is -1.
+    assert tier.tolist() == [3, 2, 0, 1, 0, -1]
+    assert cs.TIER_DISAGREE == 0 and cs.TIER_NONE_INFORMATIVE == -1
     assert cs.consensus_tier(labels, informative, max_tier=2).tolist() == [
         2,
         2,
         0,
         1,
         0,
+        -1,
     ]
     assert cs.consensus_tier([], [], max_tier=2).tolist() == []
+
+
+def test_the_tier_separates_disagreement_from_no_informative_method() -> None:
+    cells = [
+        # WHB broad 0.5, SEA 0.3: no method informative.
+        Cell(EXC, counts=200, broad_raw=0.5, sea_raw=0.3),
+        # Both informative and different: confident disagreement.
+        Cell(EXC, counts=200, sea_broad="Astrocytes", sea_raw=0.95),
+        # Outside the table.
+        Cell(EXC, counts=5),
+    ]
+    result = resolve(cells)
+    assert result.consensus_tier[:3].tolist() == [-1, 0, -1]
+    counts = result.summary()["consensus_tier_counts"]
+    assert counts["-1"] == 1 and counts["0"] == 1
+    assert result.to_columns()[Columns.CT_CONSENSUS_TIER].dtype == np.int8
 
 
 def test_published_table_cells_below_min_counts_are_below_floor(
