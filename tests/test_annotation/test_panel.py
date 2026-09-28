@@ -897,6 +897,108 @@ def test_read_merscope_codebook(tmp_path: Path) -> None:
     assert panel.controls_removed == {"name_pattern": ["Blank-0"]}
 
 
+def _codebook_rows(symbols: list[str], ids: list[str], n_bits: int = 25) -> list[str]:
+    """Codebook data rows in the VA00282 layout: one trailing comma each."""
+    rows = []
+    for index, (symbol, value) in enumerate(zip(symbols, ids, strict=True)):
+        bits = ["0"] * n_bits
+        bits[index % n_bits] = "1"
+        rows.append(",".join([symbol, value, "merfish", *bits]) + ",")
+    return rows
+
+
+def test_codebook_rows_with_a_trailing_comma_keep_their_columns(
+    tmp_path: Path,
+) -> None:
+    # The ag7 codebook (VA00282): a 28-field header, 29-field rows ending in
+    # ",". Read with the first column as the index, "name" held the
+    # transcript IDs and the panel was refused with 0 of 500 genes.
+    from merxen.annotation.gene_ids import GeneIdSources, GeneTable
+    from merxen.annotation.vocab import asset_path
+
+    genes = pd.read_csv(asset_path("validated_panel_genes.csv"))
+    genes = genes[genes["panel_id"] == "mouse_ag7_500"]
+    listed = pd.read_csv(asset_path("validated_panels.csv"))
+    expected_hash = listed.set_index("panel_id").loc["mouse_ag7_500", "panel_hash"]
+    symbols = genes["gene_symbol"].astype(str).tolist()
+    transcripts = [f"ENSMUST{index:011d}" for index in range(len(symbols))]
+    header = "name,id,barcodeType," + ",".join(f"V{i:04d}T8B1" for i in range(1, 26))
+    blanks = [f"Blank-{index}" for index in range(1, 4)]
+    lines = [
+        header,
+        *_codebook_rows(symbols, transcripts),
+        *_codebook_rows(blanks, blanks),
+    ]
+    assert len(header.split(",")) == 28 and len(lines[1].split(",")) == 29
+    path = tmp_path / "codebook_0_MERSCOPEPanNeuroCellTypePanel500_VA00282.csv"
+    path.write_text("\n".join(lines) + "\n")
+    raw = read_panel_file(path)
+    assert raw.features["name"].tolist()[:3] == symbols[:3]
+    assert raw.features["recorded_id"].tolist()[:3] == transcripts[:3]
+    table = GeneTable.from_pairs(
+        "mouse", zip(genes["gene_symbol"], genes["ensembl_id"], strict=True)
+    )
+    panel = declared_panel(
+        raw,
+        species="mouse",
+        platform="MERSCOPE",
+        sources=GeneIdSources(species="mouse", gene_tables={"mouse": table}),
+    )
+    assert panel.status == "ok"
+    assert panel.n_genes == 500
+    assert panel.panel_hash == expected_hash
+    assert panel.controls_removed == {"name_pattern": blanks}
+
+
+def test_codebook_ids_that_are_not_gene_ids_are_never_counted(tmp_path: Path) -> None:
+    # A custom transgene's UUID (Interstasis B2P2143: MAPThuman, next to 300
+    # Ensembl-transcript genes) and RefSeq accessions are transcript
+    # identifiers: recorded, not native gene IDs, so they cannot refuse the
+    # panel through the native-ID prefix rule (it was "0.000 of 1").
+    uuid = "6e61e6e7-0687-49bd-9896-57fd3207cc14"
+    symbols = [f"GENE{index}" for index in range(30)]
+    ids = [
+        f"ENST{index:011d}" if index % 2 else f"NM_{index:06d}.1" for index in range(30)
+    ]
+    path = tmp_path / "codebook_0_custom.csv"
+    path.write_text(
+        "\n".join(
+            [
+                "# chemistryVersion: Merfish 2.0",
+                "name,id,barcodeType," + ",".join(f"V{i:04d}" for i in range(25)),
+                *_codebook_rows(symbols, ids),
+                *_codebook_rows(["MAPThuman", "Blank-0"], [uuid, "Blank-0"]),
+            ]
+        )
+        + "\n"
+    )
+    raw = read_panel_file(path)
+    assert raw.native_id_column is None
+    assert set(raw.features["native_value"]) == {""}
+    assert raw.features["recorded_id"].tolist() == [*ids, uuid, "Blank-0"]
+    panel = declared_panel(
+        raw,
+        species="human",
+        platform="MERSCOPE",
+        pair_lookup={
+            symbol: f"ENSG{index:011d}" for index, symbol in enumerate(symbols)
+        },
+    )
+    assert panel.status == "ok"
+    assert panel.resolution is not None
+    assert panel.resolution.n_native_values == 0
+    assert panel.n_genes == 30
+    assert set(panel.unresolved) == {"MAPThuman"}
+    # An id that is an Ensembl gene ID is still used natively.
+    gene_ids = tmp_path / "codebook_0_gene_ids.csv"
+    gene_ids.write_text(
+        "name,id,barcodeType,V0001\nGENE0,ENSG00000000010.2,merfish,1\n"
+    )
+    raw = read_panel_file(gene_ids)
+    assert raw.native_id_column == "id"
+    assert raw.features["native_id"].tolist() == ["ENSG00000000010"]
+
+
 def test_read_gene_table(tmp_path: Path) -> None:
     path = tmp_path / "genes_a.csv"
     pd.DataFrame({"gene": shared_symbols(3), "ensembl_id": shared_ids(3)}).to_csv(
