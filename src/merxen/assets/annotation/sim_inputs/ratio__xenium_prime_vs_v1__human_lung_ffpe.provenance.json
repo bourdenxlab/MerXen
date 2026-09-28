@@ -1,0 +1,130 @@
+{
+  "asset_id": "ratio__xenium_prime_vs_v1__human_lung_ffpe",
+  "asset_version": 1,
+  "chemistry": "xenium_prime",
+  "columns": {
+    "gene_id": "Ensembl gene id",
+    "log2_ratio": "log2(5K / v1 per-area ratio / its median), capped +-2"
+  },
+  "description": "Lung 5K / v1 per-area log2 ratios of the R1_xtissue_lung_stress recipe (plan \u00a78.3 v7.4): reported for human Prime families and added to gate P's NP6, never an emission member",
+  "extra": {},
+  "file": "ratio__xenium_prime_vs_v1__human_lung_ffpe.csv",
+  "label": "XOA 3.0 vendor segmentation, public 10x FFPE lung tumour sections (cross-tissue approximation)",
+  "n_rows": 196,
+  "provenance": {
+    "attribution": "10x Genomics (public Xenium datasets)",
+    "date": "2026-09-28",
+    "derived_from": [
+      {
+        "evidence_path": "5k_real/sensitivity/human_lung_5k_vs_v1.csv",
+        "sha256": "1d0ca4f7362a276945b0661aa4b53a01dcf61179d476dbb2fb4d54f0b7d42948",
+        "size": 64117
+      }
+    ],
+    "deriving_script": "scripts/annotation/build_sim_inputs.py",
+    "deriving_script_sha256": "f613cb0ae315e81496c8872826dd2e630c35796c5be33644924da2f96a69536f",
+    "evidence": [
+      "$A/5k_real/SYNTHESIS.txt",
+      "$A/5k_real/sensitivity/REPORT.txt",
+      "$A/5k_real/review/REVIEW_CHECKS.txt"
+    ],
+    "evidence_root": "$A = /srv/storage/MerXen/annotation_dev/evidence_20260926",
+    "licence": "CC BY 4.0 (Creative Commons Attribution 4.0 International)",
+    "licence_note": "licence text taken from search-indexed pages; re-confirm in a browser before redistributing",
+    "licence_terms_recorded": "CC BY 4.0 (Creative Commons Attribution 4.0 International); attribution to 10x Genomics required. Source: 10x Genomics dataset pages as indexed by web search on 2026-09-28; the pages themselves returned HTTP 429 (Vercel bot checkpoint) to non-browser clients and were not read directly, so re-confirm on the page before redistribution",
+    "method": "Per-gene 5K / v1 ratio of counts per um2 of tissue for the 196 genes of both lung panels (FFPE lung tumour sections, not confirmed serial), log2 of ratio / median ratio, capped at +-2 log2. A cross-tissue approximation: 5K-vs-v1 in lung, not 5K-vs-WHB in brain (SYNTHESIS \u00a74.1, \u00a75.3); stress recipe only.",
+    "segmentation": "vendor XOA 3.0.0.15 segmentation of each section (5K and v1)",
+    "source_dataset": "xenium_prime_5k_human_lung_ffpe (10x Genomics public dataset); xenium_v1_human_lung_ffpe (10x Genomics public dataset)",
+    "source_files": [
+      {
+        "dataset_key": "xenium_prime_5k_human_lung_ffpe",
+        "downloaded_utc": "2026-09-28T07:47:01Z",
+        "file": "Xenium_Prime_Human_Lung_Cancer_FFPE_cell_feature_matrix.h5",
+        "server_last_modified": "Tue, 05 Nov 2024 22:08:01 GMT",
+        "sha256": "f8e2727f495284cd821750e7fd45a89682867168527f00caef10d7e9e58dd116",
+        "size": 103878075,
+        "url": "https://cf.10xgenomics.com/samples/xenium/3.0.0/Xenium_Prime_Human_Lung_Cancer_FFPE/Xenium_Prime_Human_Lung_Cancer_FFPE_cell_feature_matrix.h5"
+      },
+      {
+        "dataset_key": "xenium_prime_5k_human_lung_ffpe",
+        "downloaded_utc": "2026-09-28T07:47:03Z",
+        "file": "Xenium_Prime_Human_Lung_Cancer_FFPE_cells.parquet",
+        "server_last_modified": "Tue, 05 Nov 2024 22:08:11 GMT",
+        "sha256": "87d0f6dd12303f2f956691f2cab523df47fb410fc2ec868380d781e54de1e730",
+        "size": 5545487,
+        "url": "https://cf.10xgenomics.com/samples/xenium/3.0.0/Xenium_Prime_Human_Lung_Cancer_FFPE/Xenium_Prime_Human_Lung_Cancer_FFPE_cells.parquet"
+      },
+      {
+        "dataset_key": "xenium_prime_5k_human_lung_ffpe",
+        "downloaded_utc": "2026-09-28T07:47:04Z",
+        "file": "Xenium_Prime_Human_Lung_Cancer_FFPE_gene_panel.json",
+        "server_last_modified": "Tue, 05 Nov 2024 22:08:12 GMT",
+        "sha256": "a507dedd8ae03e6ef8f858c58b6149dbf43b80b0fcc841d32c85878e80167a5d",
+        "size": 4478940,
+        "url": "https://cf.10xgenomics.com/samples/xenium/3.0.0/Xenium_Prime_Human_Lung_Cancer_FFPE/Xenium_Prime_Human_Lung_Cancer_FFPE_gene_panel.json"
+      },
+      {
+        "dataset_key": "xenium_prime_5k_human_lung_ffpe",
+        "downloaded_utc": "2026-09-28T07:47:05Z",
+        "file": "Xenium_Prime_Human_Lung_Cancer_FFPE_experiment.xenium",
+        "server_last_modified": "Tue, 05 Nov 2024 22:08:12 GMT",
+        "sha256": "e6c355e612ecce7a7c84d3420dc5f96798b0d8d06da17d93da64a0c7293b9a54",
+        "size": 2336,
+        "url": "https://cf.10xgenomics.com/samples/xenium/3.0.0/Xenium_Prime_Human_Lung_Cancer_FFPE/Xenium_Prime_Human_Lung_Cancer_FFPE_experiment.xenium"
+      },
+      {
+        "dataset_key": "xenium_v1_human_lung_ffpe",
+        "downloaded_utc": "2026-09-28T07:47:07Z",
+        "file": "Xenium_V1_Human_Lung_Cancer_FFPE_cell_feature_matrix.h5",
+        "server_last_modified": "Tue, 05 Nov 2024 22:27:57 GMT",
+        "sha256": "9d75598f0532b65c8bd38eb4621041ff486eea152b088e28f6b4af25b3c34522",
+        "size": 12671864,
+        "url": "https://cf.10xgenomics.com/samples/xenium/3.0.0/Xenium_V1_Human_Lung_Cancer_FFPE/Xenium_V1_Human_Lung_Cancer_FFPE_cell_feature_matrix.h5"
+      },
+      {
+        "dataset_key": "xenium_v1_human_lung_ffpe",
+        "downloaded_utc": "2026-09-28T07:47:08Z",
+        "file": "Xenium_V1_Human_Lung_Cancer_FFPE_cells.parquet",
+        "server_last_modified": "Tue, 05 Nov 2024 22:28:02 GMT",
+        "sha256": "37d15d9b1f380eb88eb117fe099bc42e9c8dc4f15a80827474639119375a229d",
+        "size": 5071155,
+        "url": "https://cf.10xgenomics.com/samples/xenium/3.0.0/Xenium_V1_Human_Lung_Cancer_FFPE/Xenium_V1_Human_Lung_Cancer_FFPE_cells.parquet"
+      },
+      {
+        "dataset_key": "xenium_v1_human_lung_ffpe",
+        "downloaded_utc": "2026-09-28T07:47:09Z",
+        "file": "Xenium_V1_Human_Lung_Cancer_FFPE_gene_panel.json",
+        "server_last_modified": "Tue, 05 Nov 2024 22:28:02 GMT",
+        "sha256": "77a8964e4c4be31473b984bf3a078553a1dc56f626c1b824b2e4ba96ebb05209",
+        "size": 158827,
+        "url": "https://cf.10xgenomics.com/samples/xenium/3.0.0/Xenium_V1_Human_Lung_Cancer_FFPE/Xenium_V1_Human_Lung_Cancer_FFPE_gene_panel.json"
+      },
+      {
+        "dataset_key": "xenium_v1_human_lung_ffpe",
+        "downloaded_utc": "2026-09-28T07:47:10Z",
+        "file": "Xenium_V1_Human_Lung_Cancer_FFPE_experiment.xenium",
+        "server_last_modified": "Tue, 05 Nov 2024 22:28:02 GMT",
+        "sha256": "809583a6453075b19a6538e09a97707b5d395e28aa9b5639cc90adc099d837b5",
+        "size": 2231,
+        "url": "https://cf.10xgenomics.com/samples/xenium/3.0.0/Xenium_V1_Human_Lung_Cancer_FFPE/Xenium_V1_Human_Lung_Cancer_FFPE_experiment.xenium"
+      }
+    ],
+    "source_notes": "Post-Xenium technote (CG000709): Xenium Prime 5K Human Pan Tissue & Pathways (hAtlas_v1.1); FFPE lung adenocarcinoma; adjacent to v1 section; XOA 3.0.0.15; Post-Xenium technote (CG000709): Xenium v1 Human Lung panel (hLung_v1.1, 289 genes), nuclear-expansion segmentation; FFPE lung adenocarcinoma; XOA 3.0.0.15",
+    "source_page": "https://www.10xgenomics.com/datasets/xenium-human-lung-cancer-post-xenium-technote",
+    "summary": {
+      "median_ratio": 0.2743175575316075,
+      "n_genes": 196,
+      "sd_ln": 0.7019131252142732
+    },
+    "use": "simulation input only (OD-E1 amended 2026-09-28); never trust evidence, never a gate",
+    "xoa_version": "xenium-3.0.0.15 (both sections)"
+  },
+  "reference": null,
+  "role": "stress",
+  "schema_version": 1,
+  "sha256": "d180574c1ca4ef3a978fc0416dca329abd702d70b61c798ce7d8f4140a729045",
+  "size": 6947,
+  "species": "human",
+  "tissue": "lung_ffpe",
+  "trust_effect": "none"
+}

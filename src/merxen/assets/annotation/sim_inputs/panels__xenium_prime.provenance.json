@@ -1,0 +1,69 @@
+{
+  "asset_id": "panels__xenium_prime",
+  "asset_version": 1,
+  "chemistry": "xenium_prime",
+  "columns": {
+    "gene_id": "Ensembl gene id",
+    "panel_key": "public panel key (annotation-panel-fetch)",
+    "species": "human | mouse"
+  },
+  "description": "Gene ids of the public Prime 5K panels; a Xenium panel with Jaccard >= 0.95 to its species' list resolves to chemistry xenium_prime",
+  "extra": {},
+  "file": "panels__xenium_prime.csv",
+  "label": "pinned public Xenium Prime 5K panel lists",
+  "n_rows": 10007,
+  "provenance": {
+    "attribution": "10x Genomics (Xenium panel definitions)",
+    "date": "2026-09-28",
+    "derived_from": [
+      {
+        "evidence_path": "m3b/panels/xenium_prime_5k_human.gene_list.csv",
+        "sha256": "6d7f9ab90e1f819c713408ad2202af1b83109e3638316f7cc36b2e43c501cb91",
+        "size": 115390
+      },
+      {
+        "evidence_path": "m3b/panels/xenium_prime_5k_mouse.gene_list.csv",
+        "sha256": "29bac881a9035e3ea05d39111e5ddc431527cf7a0a85f14a3e419f8a3a403a87",
+        "size": 130304
+      }
+    ],
+    "deriving_script": "scripts/annotation/build_sim_inputs.py",
+    "deriving_script_sha256": "f613cb0ae315e81496c8872826dd2e630c35796c5be33644924da2f96a69536f",
+    "evidence": [
+      "$A/m3b/panels/RETRIEVAL.txt"
+    ],
+    "evidence_root": "$A = /srv/storage/MerXen/annotation_dev/evidence_20260926",
+    "licence": "vendor panel definition files (public); gene identifiers only",
+    "licence_note": "licence text taken from search-indexed pages; re-confirm in a browser before redistributing",
+    "method": "Ensembl gene ids of the pinned vendor panel files (merxen.annotation.public_panels, URL + sha256 pinned in M3b), from the normalised lists annotation-panel-fetch wrote.",
+    "segmentation": "n/a (panel definition)",
+    "source_dataset": "10x Genomics pre-designed Xenium Prime 5K panel definitions (human and mouse Pan Tissue and Pathways)",
+    "source_files": [
+      {
+        "dataset_key": "xenium_prime_5k_human",
+        "file": "XeniumPrimeHuman5Kpan_tissue_pathways_metadata.csv",
+        "sha256": "833ddb3008f2eb5e1b39053a988869c74db82cbaa8124d932965459f3169c58a",
+        "size": 1091372,
+        "url": "https://cdn.10xgenomics.com/raw/upload/software-support/Xenium-panels/5K_panel_files/XeniumPrimeHuman5Kpan_tissue_pathways_metadata.csv"
+      },
+      {
+        "dataset_key": "xenium_prime_5k_mouse",
+        "file": "XeniumPrimeMouse5Kpan_tissue_pathways_metadata.csv",
+        "sha256": "68e79a502fb41169aed2399cddf8ef62023aa0b068d6f59aafe74be2a0a26105",
+        "size": 831051,
+        "url": "https://cdn.10xgenomics.com/raw/upload/software-support/Xenium-panels/5K_panel_files/XeniumPrimeMouse5Kpan_tissue_pathways_metadata.csv"
+      }
+    ],
+    "source_page": "https://www.10xgenomics.com/products/xenium-panels",
+    "use": "chemistry resolution only (plan \u00a73.7 panel_chemistry)",
+    "xoa_version": "n/a (panel definition)"
+  },
+  "reference": null,
+  "role": "panel_list",
+  "schema_version": 1,
+  "sha256": "4383f058294562acbedaf9185e16f32fb327d5e1f3259f1be58f0e4918285161",
+  "size": 455352,
+  "species": null,
+  "tissue": "n/a",
+  "trust_effect": "none"
+}

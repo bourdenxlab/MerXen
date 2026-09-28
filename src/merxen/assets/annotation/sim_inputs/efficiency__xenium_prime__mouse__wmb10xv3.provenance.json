@@ -1,0 +1,115 @@
+{
+  "asset_id": "efficiency__xenium_prime__mouse__wmb10xv3",
+  "asset_version": 1,
+  "chemistry": "xenium_prime",
+  "columns": {
+    "expected_counts": "expected counts from the reference",
+    "gene_id": "Ensembl gene id",
+    "log2_factor": "class-level log2 factor, centred, capped +-3",
+    "observed_counts": "observed counts in the section",
+    "tier": "informative | weak | uninformative (expected counts)",
+    "top_class": "WMB class with the largest share of the gene's expression",
+    "top_class_section_share": "that class's share of the section's cells"
+  },
+  "description": "Measured per-gene factors of the R3_measured_HO member for Xenium Prime 5K mouse against WMB 10Xv3 (plan \u00a78.3 v7.4); rule restricted: informative genes whose top class holds >= 0.5% of the section take their factor + N(0, 0.20 log2), all others a keyed resample",
+  "extra": {},
+  "file": "efficiency__xenium_prime__mouse__wmb10xv3.csv",
+  "label": "XOA 3.0 vendor segmentation, public 10x section",
+  "n_rows": 5006,
+  "provenance": {
+    "attribution": "10x Genomics (public Xenium datasets)",
+    "date": "2026-09-28",
+    "derived_from": [
+      {
+        "evidence_path": "5k_real/sensitivity/mouse_5k_platform_factors.csv",
+        "sha256": "c12339eceafc7e10dff1355f3ffd12ae35e58856ebfcba41ff0916a17cd50d5d",
+        "size": 1529765
+      },
+      {
+        "evidence_path": "5k_real/sensitivity/mouse_5k_class_specificity.tsv",
+        "sha256": "f875317e0ece938cad43d6eac3efbe270deeec13eac8948b6db1842e2e501c6b",
+        "size": 364381
+      },
+      {
+        "evidence_path": "5k_real/mouse5k/qc/percell_calls_mouse5k.parquet",
+        "sha256": "99b5f3f964b6f30dd13d4fb9f5e7f027fdff786013a333301bf41d547a8b75a9",
+        "size": 2700847
+      }
+    ],
+    "deriving_script": "scripts/annotation/build_sim_inputs.py",
+    "deriving_script_sha256": "f613cb0ae315e81496c8872826dd2e630c35796c5be33644924da2f96a69536f",
+    "evidence": [
+      "$A/5k_real/SYNTHESIS.txt",
+      "$A/5k_real/sensitivity/REPORT.txt",
+      "$A/5k_real/review/REVIEW_CHECKS.txt",
+      "$A/5k_real/sim/REPORT.txt"
+    ],
+    "evidence_root": "$A = /srv/storage/MerXen/annotation_dev/evidence_20260926",
+    "licence": "CC BY 4.0 (Creative Commons Attribution 4.0 International)",
+    "licence_note": "licence text taken from search-indexed pages; re-confirm in a browser before redistributing",
+    "licence_terms_recorded": "CC BY 4.0 (Creative Commons Attribution 4.0 International); attribution to 10x Genomics required. Source: 10x Genomics dataset pages as indexed by web search on 2026-09-28; the pages themselves returned HTTP 429 (Vercel bot checkpoint) to non-browser clients and were not read directly, so re-confirm on the page before redistribution",
+    "method": "Per-gene platform factor of the public 5K section against WMB 10Xv3: log2(observed / expected) over confidently called cells, expected = cell totals x the reference pseudobulk profile of the cell's called class, centred on the median informative gene and capped at +-3 log2 (sensitivity task; class-level, class vs subclass r .991, REVIEW_CHECKS C1). Tier: informative expected >= 1,000 counts, weak 200-1,000, uninformative < 200. top_class: the WMB class with the largest share of the gene's reference expression (mouse_5k_class_specificity.tsv); top_class_section_share: that class's share of the section's 63,147 called cells (percell_calls_mouse5k.parquet).",
+    "reference_source": "WMB-10Xv3 (Allen Brain Cell Atlas, taxonomy CCN20230722; Yao et al. 2023); expected counts from the reference pseudobulk of the called WMB classes (RCTD-style; equal to shadow.reference_pseudobulk_log2_factors)",
+    "segmentation": "vendor XOA 3.0.0.15 multimodal cell segmentation (Xenium Multi-Tissue Stain); 58% of transcripts assigned, median cell area 76 um2",
+    "source_dataset": "xenium_prime_5k_mouse_brain_ff (10x Genomics public dataset)",
+    "source_files": [
+      {
+        "dataset_key": "xenium_prime_5k_mouse_brain_ff",
+        "downloaded_utc": "2026-09-28T07:46:41Z",
+        "file": "Xenium_Prime_Mouse_Brain_Coronal_FF_cell_feature_matrix.h5",
+        "server_last_modified": "Wed, 31 Jul 2024 16:25:53 GMT",
+        "sha256": "93be69a14629d3fb84de00c99a7bd893c6f6ffa6610f3077e619530bbe9b3ed3",
+        "size": 54025727,
+        "url": "https://cf.10xgenomics.com/samples/xenium/3.0.0/Xenium_Prime_Mouse_Brain_Coronal_FF/Xenium_Prime_Mouse_Brain_Coronal_FF_cell_feature_matrix.h5"
+      },
+      {
+        "dataset_key": "xenium_prime_5k_mouse_brain_ff",
+        "downloaded_utc": "2026-09-28T07:46:43Z",
+        "file": "Xenium_Prime_Mouse_Brain_Coronal_FF_cells.parquet",
+        "server_last_modified": "Wed, 31 Jul 2024 16:25:57 GMT",
+        "sha256": "5ddc081694a793d77e6cbeab789d33b08ec94fc094f517fede0b4891714d3414",
+        "size": 1399808,
+        "url": "https://cf.10xgenomics.com/samples/xenium/3.0.0/Xenium_Prime_Mouse_Brain_Coronal_FF/Xenium_Prime_Mouse_Brain_Coronal_FF_cells.parquet"
+      },
+      {
+        "dataset_key": "xenium_prime_5k_mouse_brain_ff",
+        "downloaded_utc": "2026-09-28T07:46:45Z",
+        "file": "Xenium_Prime_Mouse_Brain_Coronal_FF_gene_panel.json",
+        "server_last_modified": "Wed, 31 Jul 2024 16:26:01 GMT",
+        "sha256": "e7651df0133eada37ebf12aacec179c03b3ca96e59be24ef7bd18174f19c9b4c",
+        "size": 2731363,
+        "url": "https://cf.10xgenomics.com/samples/xenium/3.0.0/Xenium_Prime_Mouse_Brain_Coronal_FF/Xenium_Prime_Mouse_Brain_Coronal_FF_gene_panel.json"
+      },
+      {
+        "dataset_key": "xenium_prime_5k_mouse_brain_ff",
+        "downloaded_utc": "2026-09-28T07:46:45Z",
+        "file": "Xenium_Prime_Mouse_Brain_Coronal_FF_experiment.xenium",
+        "server_last_modified": "Wed, 31 Jul 2024 16:26:00 GMT",
+        "sha256": "73e376338977864c34ba794957cf4298d1e83f472f85d7b87334f9fd472b441f",
+        "size": 2356,
+        "url": "https://cf.10xgenomics.com/samples/xenium/3.0.0/Xenium_Prime_Mouse_Brain_Coronal_FF/Xenium_Prime_Mouse_Brain_Coronal_FF_experiment.xenium"
+      }
+    ],
+    "source_notes": "Xenium Prime 5K Mouse Pan Tissue & Pathways (mAtlas_v1); FF mouse brain hemisphere coronal; XOA 3.0.0.15",
+    "source_page": "https://www.10xgenomics.com/datasets/xenium-prime-fresh-frozen-mouse-brain",
+    "summary": {
+      "n_genes": 5006,
+      "n_restricted_measured": 1898,
+      "tiers": {
+        "informative": 3436,
+        "uninformative": 996,
+        "weak": 574
+      }
+    },
+    "use": "simulation input only (OD-E1 amended 2026-09-28); never trust evidence, never a gate",
+    "xoa_version": "xenium-3.0.0.15"
+  },
+  "reference": "wmb_10xv3",
+  "role": "member",
+  "schema_version": 1,
+  "sha256": "e61f028e0404892a63d9eb699cafe51148e9b98e8e6b8c113ef00033a8f62367",
+  "size": 437956,
+  "species": "mouse",
+  "tissue": "brain_ff",
+  "trust_effect": "none"
+}

@@ -1,0 +1,85 @@
+{
+  "d3_manifest": {
+    "bundle": "/srv/storage/MerXen/annotation_references_large/wmb_panel/c30f7eab413cba9e5e142c337d01140750f28967adff2100903f04893eced4f8",
+    "efficiency": "measured 5K vs WMB (sensitivity/mouse_5k_platform_factors.csv sim_log2_factor); residual N(0, 0.2 log2) informative, weak + Poisson, uninformative N(0, 1.365)",
+    "efficiency_frac_below_0.125": 0.02037554934079105,
+    "efficiency_frac_below_0.25": 0.08669596484218937,
+    "efficiency_sd_ln": 0.9126511036618853,
+    "grid": [
+      10,
+      20,
+      50,
+      100,
+      250,
+      500,
+      1000,
+      2000
+    ],
+    "mapping": {
+      "bootstrap_factor": 0.5,
+      "bootstrap_iteration": 100,
+      "rng_seed": 0
+    },
+    "n_genes": 5006,
+    "n_simulated": 50820,
+    "n_test_cells": 13059,
+    "recipe": {
+      "depth": "profile",
+      "fixed_totals": null,
+      "gene_efficiency_sigma": "measured",
+      "name": "R3_measured_realdepth",
+      "profile": "mouse5k",
+      "seed": 0,
+      "spill_fraction": 0.25,
+      "version": 1
+    },
+    "test_set": "/srv/storage/MerXen/annotation_references_large/wmb_selfmap_testset/6c94b24030d2a0e4376ce4a7171b02d900cd87ad63a9322af4815ce54da3b21f",
+    "variant": "D3"
+  },
+  "derivation": {
+    "m3c_d3_efficiency_mouse5k.csv": "D3 efficiency.csv gene_id and log2_efficiency (median-normalised log2 efficiency, panel order)",
+    "m3c_d3_predictions_mouse5k.csv": "pred_mouse5k_3.csv rows of the classes with real called share >= 0.01 and ALL; analyse.py per_class over the called class, simulated cells weighted to the real called composition (class weight x within-class subclass weight, trimmed at 10x the class median)",
+    "m3c_real_composition_mouse5k.csv": "cells per called (class, subclass) of percell_calls_mouse5k.parquet"
+  },
+  "evidence_root": "$A = /srv/storage/MerXen/annotation_dev/evidence_20260926",
+  "fixtures": {
+    "m3c_d3_efficiency_mouse5k.csv": "108b083f85d7047b215cc29ff9a4cf35c7395f915c6fbfb8cb5992b8d7559f22",
+    "m3c_d3_predictions_mouse5k.csv": "e2da08d7f85e7aef6f428733f37248474ad6f9a37be83854bdccca685a0e1eed",
+    "m3c_real_composition_mouse5k.csv": "6eb8bed9123eb0f281df20fefd487493807f446192263e35d0477cdaeb8d6376"
+  },
+  "major_classes": [
+    "01 IT-ET Glut",
+    "02 NP-CT-L6b Glut",
+    "04 DG-IMN Glut",
+    "06 CTX-CGE GABA",
+    "07 CTX-MGE GABA",
+    "09 CNU-LGE GABA",
+    "11 CNU-HYa GABA",
+    "12 HY GABA",
+    "13 CNU-HYa Glut",
+    "18 TH Glut",
+    "30 Astro-Epen",
+    "31 OPC-Oligo",
+    "33 Vascular",
+    "34 Immune"
+  ],
+  "purpose": "M3c pre-registration \u00a714 (ii): the D3 regression fixtures",
+  "sources": {
+    "5k_real/mouse5k/qc/percell_calls_mouse5k.parquet": {
+      "path": "$A/5k_real/mouse5k/qc/percell_calls_mouse5k.parquet",
+      "sha256": "99b5f3f964b6f30dd13d4fb9f5e7f027fdff786013a333301bf41d547a8b75a9"
+    },
+    "5k_real/sim/runs/mouse5k/D3/efficiency.csv": {
+      "path": "$A/5k_real/sim/runs/mouse5k/D3/efficiency.csv",
+      "sha256": "9827c0eb60a43cc935f8c1545895fcb2a08d927bb6b190299acd4bbc9e9321cf"
+    },
+    "5k_real/sim/runs/mouse5k/D3/manifest.json": {
+      "path": "$A/5k_real/sim/runs/mouse5k/D3/manifest.json",
+      "sha256": "81b789e949b05d7cb44fc777c20dff4b1e17ba58b62cbafe13e06d475cc07328"
+    },
+    "5k_real/sim/tables/pred_mouse5k_3.csv": {
+      "path": "$A/5k_real/sim/tables/pred_mouse5k_3.csv",
+      "sha256": "de21b164176f378a2fb9eaa5c69ba205e5556e6f63e64b798a5f0e432d4e7d69"
+    }
+  }
+}

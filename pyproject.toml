@@ -95,6 +95,9 @@ merxen = [
     "assets/annotation/*.csv",
     "assets/annotation/*.yaml",
     "assets/annotation/NOTICE",
+    "assets/annotation/sim_inputs/*.csv",
+    "assets/annotation/sim_inputs/*.json",
+    "assets/annotation/sim_inputs/NOTICE",
 ]
 
 [tool.bumpversion]

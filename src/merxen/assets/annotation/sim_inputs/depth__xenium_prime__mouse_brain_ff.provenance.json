@@ -1,0 +1,311 @@
+{
+  "asset_id": "depth__xenium_prime__mouse_brain_ff",
+  "asset_version": 1,
+  "chemistry": "xenium_prime",
+  "columns": {
+    "class_code": "called WMB class (legend in extra.class_legend)",
+    "total_counts": "total counts of the cell"
+  },
+  "description": "Per-class depth profile of Xenium Prime 5K fresh-frozen mouse brain (one coronal hemisphere, ~AP 6.8 mm) for profile mode and the class-depth predictions (plan \u00a78.3 v7.5); in-sample for the section",
+  "extra": {
+    "class_legend": [
+      {
+        "class": "01 IT-ET Glut",
+        "code": 0,
+        "median_counts": 1805.0,
+        "n_cells": 14790,
+        "neuronal": true
+      },
+      {
+        "class": "02 NP-CT-L6b Glut",
+        "code": 1,
+        "median_counts": 1707.0,
+        "n_cells": 2946,
+        "neuronal": true
+      },
+      {
+        "class": "03 OB-CR Glut",
+        "code": 2,
+        "median_counts": 817.0,
+        "n_cells": 51,
+        "neuronal": true
+      },
+      {
+        "class": "04 DG-IMN Glut",
+        "code": 3,
+        "median_counts": 1333.0,
+        "n_cells": 1821,
+        "neuronal": true
+      },
+      {
+        "class": "05 OB-IMN GABA",
+        "code": 4,
+        "median_counts": 890.5,
+        "n_cells": 190,
+        "neuronal": true
+      },
+      {
+        "class": "06 CTX-CGE GABA",
+        "code": 5,
+        "median_counts": 1742.0,
+        "n_cells": 829,
+        "neuronal": true
+      },
+      {
+        "class": "07 CTX-MGE GABA",
+        "code": 6,
+        "median_counts": 2040.0,
+        "n_cells": 1417,
+        "neuronal": true
+      },
+      {
+        "class": "08 CNU-MGE GABA",
+        "code": 7,
+        "median_counts": 1927.5,
+        "n_cells": 440,
+        "neuronal": true
+      },
+      {
+        "class": "09 CNU-LGE GABA",
+        "code": 8,
+        "median_counts": 1794.0,
+        "n_cells": 3339,
+        "neuronal": true
+      },
+      {
+        "class": "10 LSX GABA",
+        "code": 9,
+        "median_counts": 302.5,
+        "n_cells": 12,
+        "neuronal": true
+      },
+      {
+        "class": "11 CNU-HYa GABA",
+        "code": 10,
+        "median_counts": 1889.0,
+        "n_cells": 837,
+        "neuronal": true
+      },
+      {
+        "class": "12 HY GABA",
+        "code": 11,
+        "median_counts": 1884.0,
+        "n_cells": 1059,
+        "neuronal": true
+      },
+      {
+        "class": "13 CNU-HYa Glut",
+        "code": 12,
+        "median_counts": 1999.0,
+        "n_cells": 934,
+        "neuronal": true
+      },
+      {
+        "class": "14 HY Glut",
+        "code": 13,
+        "median_counts": 1963.0,
+        "n_cells": 375,
+        "neuronal": true
+      },
+      {
+        "class": "15 HY Gnrh1 Glut",
+        "code": 14,
+        "median_counts": 1526.0,
+        "n_cells": 1,
+        "neuronal": true
+      },
+      {
+        "class": "17 MH-LH Glut",
+        "code": 15,
+        "median_counts": 1627.0,
+        "n_cells": 76,
+        "neuronal": true
+      },
+      {
+        "class": "18 TH Glut",
+        "code": 16,
+        "median_counts": 2305.5,
+        "n_cells": 3380,
+        "neuronal": true
+      },
+      {
+        "class": "19 MB Glut",
+        "code": 17,
+        "median_counts": 1509.0,
+        "n_cells": 195,
+        "neuronal": true
+      },
+      {
+        "class": "20 MB GABA",
+        "code": 18,
+        "median_counts": 1733.0,
+        "n_cells": 469,
+        "neuronal": true
+      },
+      {
+        "class": "22 MB-HB Sero",
+        "code": 19,
+        "median_counts": 1838.0,
+        "n_cells": 1,
+        "neuronal": true
+      },
+      {
+        "class": "23 P Glut",
+        "code": 20,
+        "median_counts": 1152.5,
+        "n_cells": 4,
+        "neuronal": true
+      },
+      {
+        "class": "24 MY Glut",
+        "code": 21,
+        "median_counts": 2007.5,
+        "n_cells": 206,
+        "neuronal": true
+      },
+      {
+        "class": "25 Pineal Glut",
+        "code": 22,
+        "median_counts": 485.0,
+        "n_cells": 3,
+        "neuronal": true
+      },
+      {
+        "class": "26 P GABA",
+        "code": 23,
+        "median_counts": 1638.0,
+        "n_cells": 177,
+        "neuronal": true
+      },
+      {
+        "class": "27 MY GABA",
+        "code": 24,
+        "median_counts": 519.5,
+        "n_cells": 6,
+        "neuronal": true
+      },
+      {
+        "class": "30 Astro-Epen",
+        "code": 25,
+        "median_counts": 628.0,
+        "n_cells": 10129,
+        "neuronal": false
+      },
+      {
+        "class": "31 OPC-Oligo",
+        "code": 26,
+        "median_counts": 835.0,
+        "n_cells": 10274,
+        "neuronal": false
+      },
+      {
+        "class": "33 Vascular",
+        "code": 27,
+        "median_counts": 601.0,
+        "n_cells": 7380,
+        "neuronal": false
+      },
+      {
+        "class": "34 Immune",
+        "code": 28,
+        "median_counts": 660.0,
+        "n_cells": 1806,
+        "neuronal": false
+      }
+    ]
+  },
+  "file": "depth__xenium_prime__mouse_brain_ff.csv",
+  "label": "XOA 3.0 vendor segmentation, public 10x section",
+  "n_rows": 63147,
+  "provenance": {
+    "attribution": "10x Genomics (public Xenium datasets)",
+    "cross_check": {
+      "equal": true,
+      "file": "5k_real/mouse5k/depth_profile.csv",
+      "sha256": "ff35db2e49c7b22e9599c5e34da8b12e00c00d34c92ec6532047ed729375a6d4"
+    },
+    "date": "2026-09-28",
+    "derived_from": [
+      {
+        "evidence_path": "5k_real/mouse5k/qc/percell_calls_mouse5k.parquet",
+        "sha256": "99b5f3f964b6f30dd13d4fb9f5e7f027fdff786013a333301bf41d547a8b75a9",
+        "size": 2700847
+      },
+      {
+        "evidence_path": "5k_real/mouse5k/depth_profile.csv",
+        "sha256": "ff35db2e49c7b22e9599c5e34da8b12e00c00d34c92ec6532047ed729375a6d4",
+        "size": 4737517
+      }
+    ],
+    "deriving_script": "scripts/annotation/build_sim_inputs.py",
+    "deriving_script_sha256": "f613cb0ae315e81496c8872826dd2e630c35796c5be33644924da2f96a69536f",
+    "evidence": [
+      "$A/5k_real/SYNTHESIS.txt",
+      "$A/5k_real/mouse5k/REPORT.txt",
+      "$A/5k_real/sim/REPORT.txt"
+    ],
+    "evidence_root": "$A = /srv/storage/MerXen/annotation_dev/evidence_20260926",
+    "licence": "CC BY 4.0 (Creative Commons Attribution 4.0 International)",
+    "licence_note": "licence text taken from search-indexed pages; re-confirm in a browser before redistributing",
+    "licence_terms_recorded": "CC BY 4.0 (Creative Commons Attribution 4.0 International); attribution to 10x Genomics required. Source: 10x Genomics dataset pages as indexed by web search on 2026-09-28; the pages themselves returned HTTP 429 (Vercel bot checkpoint) to non-browser clients and were not read directly, so re-confirm on the page before redistribution",
+    "method": "Total counts (Gene Expression features) and the production-settings WMB class call (bundle c30f7eab, bf 0.5, 100 iterations, seed 0) of each of the 63,147 vendor cells with >= 10 counts, in source order, no cell ids; cross-checked cell by cell against depth_profile.csv (sha256 ff35db2e...).",
+    "segmentation": "vendor XOA 3.0.0.15 multimodal cell segmentation (Xenium Multi-Tissue Stain); 58% of transcripts assigned, median cell area 76 um2",
+    "source_dataset": "xenium_prime_5k_mouse_brain_ff (10x Genomics public dataset)",
+    "source_files": [
+      {
+        "dataset_key": "xenium_prime_5k_mouse_brain_ff",
+        "downloaded_utc": "2026-09-28T07:46:41Z",
+        "file": "Xenium_Prime_Mouse_Brain_Coronal_FF_cell_feature_matrix.h5",
+        "server_last_modified": "Wed, 31 Jul 2024 16:25:53 GMT",
+        "sha256": "93be69a14629d3fb84de00c99a7bd893c6f6ffa6610f3077e619530bbe9b3ed3",
+        "size": 54025727,
+        "url": "https://cf.10xgenomics.com/samples/xenium/3.0.0/Xenium_Prime_Mouse_Brain_Coronal_FF/Xenium_Prime_Mouse_Brain_Coronal_FF_cell_feature_matrix.h5"
+      },
+      {
+        "dataset_key": "xenium_prime_5k_mouse_brain_ff",
+        "downloaded_utc": "2026-09-28T07:46:43Z",
+        "file": "Xenium_Prime_Mouse_Brain_Coronal_FF_cells.parquet",
+        "server_last_modified": "Wed, 31 Jul 2024 16:25:57 GMT",
+        "sha256": "5ddc081694a793d77e6cbeab789d33b08ec94fc094f517fede0b4891714d3414",
+        "size": 1399808,
+        "url": "https://cf.10xgenomics.com/samples/xenium/3.0.0/Xenium_Prime_Mouse_Brain_Coronal_FF/Xenium_Prime_Mouse_Brain_Coronal_FF_cells.parquet"
+      },
+      {
+        "dataset_key": "xenium_prime_5k_mouse_brain_ff",
+        "downloaded_utc": "2026-09-28T07:46:45Z",
+        "file": "Xenium_Prime_Mouse_Brain_Coronal_FF_gene_panel.json",
+        "server_last_modified": "Wed, 31 Jul 2024 16:26:01 GMT",
+        "sha256": "e7651df0133eada37ebf12aacec179c03b3ca96e59be24ef7bd18174f19c9b4c",
+        "size": 2731363,
+        "url": "https://cf.10xgenomics.com/samples/xenium/3.0.0/Xenium_Prime_Mouse_Brain_Coronal_FF/Xenium_Prime_Mouse_Brain_Coronal_FF_gene_panel.json"
+      },
+      {
+        "dataset_key": "xenium_prime_5k_mouse_brain_ff",
+        "downloaded_utc": "2026-09-28T07:46:45Z",
+        "file": "Xenium_Prime_Mouse_Brain_Coronal_FF_experiment.xenium",
+        "server_last_modified": "Wed, 31 Jul 2024 16:26:00 GMT",
+        "sha256": "73e376338977864c34ba794957cf4298d1e83f472f85d7b87334f9fd472b441f",
+        "size": 2356,
+        "url": "https://cf.10xgenomics.com/samples/xenium/3.0.0/Xenium_Prime_Mouse_Brain_Coronal_FF/Xenium_Prime_Mouse_Brain_Coronal_FF_experiment.xenium"
+      }
+    ],
+    "source_notes": "Xenium Prime 5K Mouse Pan Tissue & Pathways (mAtlas_v1); FF mouse brain hemisphere coronal; XOA 3.0.0.15",
+    "source_page": "https://www.10xgenomics.com/datasets/xenium-prime-fresh-frozen-mouse-brain",
+    "summary": {
+      "median_counts": 1089.0,
+      "n_cells": 63147,
+      "q05": 211.0,
+      "q95": 3330.0
+    },
+    "use": "simulation input only (OD-E1 amended 2026-09-28); never trust evidence, never a gate",
+    "xoa_version": "xenium-3.0.0.15"
+  },
+  "reference": "wmb_10xv3",
+  "role": "profile",
+  "schema_version": 1,
+  "sha256": "1f9ec03e5a8d8a2f61b6841946abbc4b545c8c6ea5465b1b3283113e1e6274ec",
+  "size": 449518,
+  "species": "mouse",
+  "tissue": "brain_ff",
+  "trust_effect": "none"
+}
