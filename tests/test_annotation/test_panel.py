@@ -1146,6 +1146,63 @@ def test_panel_family_inheritance() -> None:
 # Set a and set c
 
 
+def test_auto_mode_keeps_the_valid_platform_when_one_panel_is_refused(
+    tmp_path: Path,
+) -> None:
+    # MERSCOPE writes its symbols into the ID column (native_id_prefix): it
+    # is refused although its symbols resolve through the pair, so the
+    # pair's Jaccard stays about 1. Auto mode must not refuse the pair
+    # through the intersection: Xenium keeps its own panel and bundles.
+    root = make_pair(tmp_path)
+    merscope_genes = [
+        *shared_symbols(),
+        "H2AX",
+        *MERSCOPE_ONLY,
+        *[f"Blank-{index}" for index in range(5)],
+    ]
+    write_h5ad(
+        root / "merscope" / "S_M_prepared.h5ad",
+        counts=np.ones((200, len(merscope_genes))),
+        var_names=merscope_genes,
+        ensembl_ids=merscope_genes,
+        platform="MERSCOPE",
+        spatial=np.full((200, 2), 2.0),
+    )
+    declared = [
+        declared_panel(
+            raw_panel_from_h5ad(root / sub / f"{sample}_prepared.h5ad"),
+            species="human",
+            platform=platform,
+            pair_lookup=dict(zip(shared_symbols(), shared_ids(), strict=True)),
+        )
+        for sub, sample, platform in (
+            ("merscope", "S_M", "MERSCOPE"),
+            ("xenium", "S_X", "XENIUM"),
+        )
+    ]
+    assert [panel.status for panel in declared] == ["refused", "ok"]
+    mode, score = resolve_panel_mode(declared)
+    assert mode == "per_platform" and score is not None and score >= 0.9
+    assert resolve_panel_mode(declared, requested="intersection")[0] == "intersection"
+    result = compute_panel(
+        root,
+        "human",
+        output_dir=tmp_path / "out",
+        config=human_config(tmp_path),
+        clustering_config=clustering_config(),
+    )
+    assert result.report["panel_mode"] == "per_platform"
+    assert result.report["refused_platforms"] == ["merscope"]
+    assert result.required.status == "ok"
+    refused = {
+        name: item["refused"]
+        for name, item in result.report["annotation_panels"].items()
+    }
+    assert refused["xenium"] is None
+    assert refused["merscope"] and refused["intersection"]
+    assert {bundle.panel_name for bundle in result.required.bundles} == {"xenium"}
+
+
 def test_intersection_is_set_a_including_h2ax(tmp_path: Path) -> None:
     result = compute_panel(
         make_pair(tmp_path),

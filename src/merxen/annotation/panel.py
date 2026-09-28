@@ -1481,6 +1481,11 @@ def resolve_panel_mode(
 ) -> tuple[PanelMode, float | None]:
     """Return the panel mode of a pair (plan §8.5).
 
+    ``auto`` picks ``per_platform`` whenever exactly one of the two declared
+    panels is refused, whatever their Jaccard: the intersection follows both
+    declared panels and would be refused with the pair, while per platform
+    the valid platform keeps its own panel and bundles (M3b review 2).
+
     Args:
         panels: The declared panels, one per platform.
         requested: ``annotation_panel_mode``.
@@ -1503,6 +1508,8 @@ def resolve_panel_mode(
     if requested == "intersection":
         return "intersection", score
     if requested == "per_platform":
+        return "per_platform", score
+    if sum(panel.status == "refused" for panel in panels) == 1:
         return "per_platform", score
     return ("intersection" if score >= min_jaccard else "per_platform"), score
 
@@ -3236,6 +3243,9 @@ def compute_panel(
         "reasons": reasons,
         "panel_mode_requested": panel_config.panel_mode,
         "panel_mode": mode,
+        "refused_platforms": sorted(
+            _platform_name(panel) for panel in declared if panel.status == "refused"
+        ),
         "pair_jaccard": None if pair_jaccard is None else round(pair_jaccard, 6),
         "min_counts": min_counts,
         "min_counts_source": min_counts_source,
