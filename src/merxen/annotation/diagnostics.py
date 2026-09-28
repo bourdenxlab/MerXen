@@ -178,6 +178,88 @@ ThresholdSource = Literal["validated_default", "resolvability_local"]
 DegradedMode = Literal["single_method"]
 
 
+# Panel-card text of the Xenium Prime 5K families (user decision 4 of
+# 2026-09-28 and the M3c trust rules, plan §8.10, D-G13). The notes state
+# limits; they never change a prediction, an emission or a trust state.
+GLIAL_UPPER_BOUND_NOTE: Final = (
+    "Simulated glial coverage is an upper bound: -.06 to -.18 on "
+    "vendor-segmented 5K cells"
+)
+PRECISION_UNMEASURED_NOTE: Final = "Precision is unmeasured on real data"
+PRIME_PRECISION_DETAIL_NOTE: Final = (
+    "The thinned-cell agreement (.996 class / .987 subclass at 250 counts) is a "
+    "self-consistency upper bound, not a precision measurement"
+)
+PRIME_TRUST_NOTE: Final = (
+    "Trust: provisional with the provisional margins; nothing promotes the "
+    "family automatically and the public 5K section never enters a gate or a "
+    "promotion. Gate P (M13) runs on the resolvability version-7 ensemble: "
+    "thresholds and emission are frozen from the ensemble and NP3-NP7 must "
+    "pass in every emission member"
+)
+PRIME_REAL_QC_NOTE: Final = (
+    "Real datasets: a downgrade-only per-class warning when real coverage is "
+    "below the simulated prediction at the dataset's own per-class depth by "
+    "more than 0.10 (it also fires on v1-type large-mask segmentation); no "
+    "empirical offset is applied"
+)
+PRIME_IN_SAMPLE_NOTE: Final = (
+    "The 5K numbers come from one public section (one hemisphere, vendor XOA "
+    "3.0 segmentation) and are in-sample for depth, composition and factors: "
+    "their residual optimism is a lower bound for a new section or segmentation"
+)
+PRIME_MOUSE_NEXT_NOTE: Final = (
+    "Mouse 5K: before any gate-P PR the first in-house dataset (MerXen "
+    "segmentation) measures per-class depth, per-gene factors and "
+    "contamination; PREP is re-run with them as new simulation inputs, never "
+    "as trust evidence"
+)
+PRIME_HUMAN_NOTES: Final[tuple[str, ...]] = (
+    "Human 5K: glial coverage is expected below simulation by analogy with "
+    "mouse; the lung 5K / v1 ratios are a cross-tissue stress member only",
+    "Human 5K: no R3 member (no factor table against WHB exists) and no mouse "
+    "factors, depth profile or depth prior; predictions are per depth scenario "
+    "(per grid bin and the lung-FFPE scenario, median 245 counts)",
+    "Human 5K: provisional until an in-house human 5K dataset measures, in "
+    "order, per-class depth, gene complexity, factors against WHB and real vs "
+    "simulated coverage; human 5K precision is unmeasured everywhere",
+)
+
+
+def panel_card_notes(species: str, chemistry: str) -> list[str]:
+    """Return the panel-card notes of a family (user decision 4; plan §8.10).
+
+    Xenium Prime 5K families (chemistry ``xenium_prime``) carry the glial
+    upper bound and the unmeasured precision (verbatim, user decision 4),
+    then the M3c trust rules: provisional, gate P on the version-7 ensemble,
+    the downgrade-only per-class coverage warning without an offset, and the
+    in-sample caveat; mouse adds the first in-house dataset's measurements,
+    human the human-specific limits. Other chemistries have none.
+
+    Args:
+        species: ``human`` or ``mouse``.
+        chemistry: The panel chemistry (``sim_inputs.resolve_chemistry``).
+
+    Returns:
+        The notes, in display order.
+    """
+    if chemistry != "xenium_prime":
+        return []
+    notes = [
+        GLIAL_UPPER_BOUND_NOTE,
+        PRECISION_UNMEASURED_NOTE,
+        PRIME_PRECISION_DETAIL_NOTE,
+        PRIME_TRUST_NOTE,
+        PRIME_REAL_QC_NOTE,
+        PRIME_IN_SAMPLE_NOTE,
+    ]
+    if species == "human":
+        notes.extend(PRIME_HUMAN_NOTES)
+    else:
+        notes.append(PRIME_MOUSE_NEXT_NOTE)
+    return notes
+
+
 class ValidatedPanelsError(ValueError):
     """The validated-panel tables are inconsistent or malformed."""
 

@@ -265,13 +265,31 @@ def test_depth_profiles_never_cross_species(tmp_path: Path) -> None:
 
 
 def test_panel_card_notes_for_prime_families() -> None:
-    assert simulate.panel_card_notes("mouse", "xenium_prime") == [
-        simulate.GLIAL_UPPER_BOUND_NOTE,
-        simulate.PRECISION_UNMEASURED_NOTE,
-    ]
-    assert len(simulate.panel_card_notes("human", "xenium_prime")) == 3
+    from merxen.annotation import diagnostics
+
+    mouse = simulate.panel_card_notes("mouse", "xenium_prime")
+    human = simulate.panel_card_notes("human", "xenium_prime")
+    # User decision 4, verbatim and first; then the M3c trust rules (§8.10).
+    for notes in (mouse, human):
+        assert notes[:2] == [
+            simulate.GLIAL_UPPER_BOUND_NOTE,
+            simulate.PRECISION_UNMEASURED_NOTE,
+        ]
+        assert diagnostics.PRIME_TRUST_NOTE in notes
+        assert diagnostics.PRIME_REAL_QC_NOTE in notes
+        assert diagnostics.PRIME_IN_SAMPLE_NOTE in notes
+    assert "provisional" in diagnostics.PRIME_TRUST_NOTE
+    assert "every emission member" in diagnostics.PRIME_TRUST_NOTE
+    assert "0.10" in diagnostics.PRIME_REAL_QC_NOTE
+    assert "no empirical offset" in diagnostics.PRIME_REAL_QC_NOTE
+    assert diagnostics.PRIME_MOUSE_NEXT_NOTE in mouse
+    assert diagnostics.PRIME_MOUSE_NEXT_NOTE not in human
+    assert all(note in human for note in diagnostics.PRIME_HUMAN_NOTES)
+    assert "by analogy with mouse" in diagnostics.PRIME_HUMAN_NOTES[0]
     assert simulate.panel_card_notes("mouse", "merscope") == []
+    assert simulate.panel_card_notes("human", "unknown") == []
     assert "-.06 to -.18" in simulate.GLIAL_UPPER_BOUND_NOTE
+    assert simulate.GLIAL_UPPER_BOUND_NOTE == diagnostics.GLIAL_UPPER_BOUND_NOTE
 
 
 def test_member_mean_averages_members() -> None:

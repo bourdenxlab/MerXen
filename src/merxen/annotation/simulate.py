@@ -59,6 +59,8 @@ from typing import TYPE_CHECKING, Any, Final, Literal
 import numpy as np
 import pandas as pd
 
+from merxen.annotation import diagnostics as _diagnostics_notes
+
 if TYPE_CHECKING:
     from merxen.annotation.config import AnnotationConfig, AnnotationReferenceSpec
     from merxen.annotation.panel import AnnotationPanel, PanelComputation
@@ -1846,12 +1848,9 @@ PROFILE_PREDICTIONS_CSV: Final = "profile_predictions.csv"
 CLASS_DEPTH_CSV: Final = "profile_class_depth.csv"
 PROFILE_CELLS_FILE: Final = "profile_cells.parquet"
 # Panel-card notes of the Xenium Prime 5K families (user decision 4, plan
-# §8.10); they state limits, never change a prediction.
-GLIAL_UPPER_BOUND_NOTE: Final = (
-    "Simulated glial coverage is an upper bound: -.06 to -.18 on "
-    "vendor-segmented 5K cells"
-)
-PRECISION_UNMEASURED_NOTE: Final = "Precision is unmeasured on real data"
+# §8.10) live in ``diagnostics``; they state limits, never change a prediction.
+GLIAL_UPPER_BOUND_NOTE: Final = _diagnostics_notes.GLIAL_UPPER_BOUND_NOTE
+PRECISION_UNMEASURED_NOTE: Final = _diagnostics_notes.PRECISION_UNMEASURED_NOTE
 MOUSE_PROFILE_LEVELS: Final[tuple[str, ...]] = ("broad", "class", "nt", "subclass")
 
 
@@ -2582,22 +2581,12 @@ def class_depth_headline(
 
 
 def panel_card_notes(species: str, chemistry: str) -> list[str]:
-    """Return the panel-card notes of a family (user decision 4, §8.10).
+    """Return the panel-card notes of a family (``diagnostics.panel_card_notes``).
 
     Xenium Prime 5K families carry the glial upper bound and the unmeasured
-    precision; human Prime adds that glial coverage is expected below
-    simulation by analogy with mouse.
+    precision (user decision 4), then the M3c trust rules (plan §8.10).
     """
-    if chemistry != "xenium_prime":
-        return []
-    notes = [GLIAL_UPPER_BOUND_NOTE, PRECISION_UNMEASURED_NOTE]
-    if species == "human":
-        notes.append(
-            "Human 5K: glial coverage is expected below simulation by analogy "
-            "with mouse; the lung 5K / v1 ratios are a cross-tissue stress "
-            "member only"
-        )
-    return notes
+    return _diagnostics_notes.panel_card_notes(species, chemistry)
 
 
 MEMBER_TABLE_REFERENCE: Final[dict[str, str]] = {"wmb_panel": "wmb_10xv3"}
