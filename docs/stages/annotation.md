@@ -637,6 +637,16 @@ brain panel and 24 for VZG2), because its counts spread over many genes that
 do not separate brain types. All four panels are `provisional` (own
 families).
 
+**Checked against real 5K data** (phase 1, 2026-09-28; `5k_real/SYNTHESIS.txt`
+in the evidence archive). The "at the expected median depth" line puts every
+cell at one depth. On the one public Xenium Prime 5K mouse section (63,147
+vendor cells, median 1,089 counts; 250 counts is its 6.7th percentile) the
+M3b headline at 250 counts under-predicted real coverage by .13 (class) to
+.22 (subclass under the bundle's provisional decisions) and neurons by up to
+.52, while it over-predicted glia. Read the per-bin table against the
+panel's real per-class depth. Plan milestone M3c (planned) replaces the
+headline with per-class depth profiles (resolvability version 7, plan §8.3).
+
 ### Panel families, diagnostics and trust states (M3b)
 
 **Validated families** are packaged in `assets/annotation/`:
@@ -997,6 +1007,20 @@ H4 and H16 baselines) are in §11 of the pre-registration document.
   on 0-5 with seeds 1 and 2; F = 18.1, p = .01). How the gate should treat
   this spread (the pre-registered seed-0 draw, several draws, or the worst
   of them) is open for the user; no verdict is recorded as a pass meanwhile.
+- **Simulated coverage on Xenium Prime 5K is optimistic for glia, and one
+  efficiency draw decides emission** (phase 1, 2026-09-28;
+  `5k_real/SYNTHESIS.txt` §0, §2, §4.4, `5k_real/sim/REPORT.txt` §6). At the
+  real per-class depth, simulation exceeded real vendor-segmented coverage
+  by +.04 to +.09 overall, +.06 to +.18 for glia (Astro-Epen, OPC-Oligo,
+  Vascular, Immune) and +.09 to +.23 for small hypothalamic classes, in-sample
+  on one section; about 80% of the glial excess is not explained by mask
+  size. Two draws of the same recipe moved 47 of ~450 emitted (level, class,
+  bin) triples of the 5K mouse bundle. Precision is not measured on real
+  data. Both 5K families stay `provisional`. Planned responses (plan §8.3
+  resolvability version 7, §8.8, §8.10; milestone M3c): per-class depth
+  profiles, a draw ensemble with the measured 5K factors as one member,
+  panel-card notes and a downgrade-only per-class coverage warning; no
+  empirical offset. Set a, ag7 and VZG2 keep resolvability version 6.
 - **Set c of families without a curated list** uses the label-free rule,
   which drops far more genes than E5's validated set c (44-73 per pair on the
   E5 pairs); treat such set-c results as provisional.
