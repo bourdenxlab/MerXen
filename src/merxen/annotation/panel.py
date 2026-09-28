@@ -753,8 +753,10 @@ class RawPanel:
         features: One row per feature with columns ``name``, ``symbol``,
             ``native_value`` (the unversioned text of the native ID column,
             ``""`` if none), ``native_id`` (that value when it is an Ensembl
-            gene ID, else ``""``) and ``feature_type`` (``""`` if the source
-            has none), in source order.
+            gene ID, else ``""``), ``feature_type`` (``""`` if the source
+            has none) and ``recorded_id`` (the source's own identifier when
+            it is kept for the record only, e.g. a MERSCOPE codebook's
+            transcript ID; ``""`` otherwise), in source order.
         source: Where it was read from.
         native_id_column: The column the native values came from.
     """
@@ -772,6 +774,7 @@ def _raw_from_columns(
     feature_types: Sequence[Any] | None,
     source: PanelSource,
     native_id_column: str | None = None,
+    recorded_ids: Sequence[Any] | None = None,
 ) -> RawPanel:
     cleaned_names = [_clean_text(name) for name in names]
     cleaned_symbols = (
@@ -794,6 +797,11 @@ def _raw_from_columns(
         if feature_types is not None
         else [""] * len(cleaned_names)
     )
+    recorded = (
+        [_clean_text(value) for value in recorded_ids]
+        if recorded_ids is not None
+        else [""] * len(cleaned_names)
+    )
     frame = pd.DataFrame(
         {
             "name": cleaned_names,
@@ -801,6 +809,7 @@ def _raw_from_columns(
             "native_value": values,
             "native_id": ids,
             "feature_type": types,
+            "recorded_id": recorded,
         }
     )
     frame = frame[frame["name"] != ""].reset_index(drop=True)
@@ -917,28 +926,46 @@ def read_panel_file(path: Path | str) -> RawPanel:
         table = pd.read_parquet(file_path)
     elif suffix in {".csv", ".tsv", ".txt"} or ".csv" in file_path.suffixes:
         is_tsv = suffix == ".tsv" or ".tsv" in file_path.suffixes
+        # index_col=False: MERSCOPE codebook rows end with a trailing
+        # separator (one field more than the header), which would otherwise
+        # make the first column the index and shift every column left.
         table = pd.read_csv(
             file_path,
             sep="\t" if is_tsv else ",",
             comment="#",
             dtype=str,
             keep_default_na=False,
+            index_col=False,
         )
     else:
         raise ValueError(f"unsupported panel file type: {file_path}")
     columns = {str(column).strip(): column for column in table.columns}
     if "barcodeType" in columns and "name" in columns:
-        # Codebook ids are Ensembl transcript IDs (or -1 / the blank name):
-        # recorded, never used as gene IDs (plan §8.4).
+        # Codebook ids are transcript identifiers (Ensembl transcript IDs,
+        # RefSeq accessions, a UUID for a custom transgene; -1 or the blank
+        # name for blanks): recorded, never used as gene IDs and never
+        # counted by the native-ID prefix rules (plan §8.4; M3b review 2).
+        # Only an id that is an Ensembl gene ID serves as the native ID.
+        codebook_ids = table[columns["id"]].tolist() if "id" in columns else None
+        gene_ids = (
+            [
+                value if is_ensembl_gene_id(clean_native_value(value)) else ""
+                for value in codebook_ids
+            ]
+            if codebook_ids is not None
+            else None
+        )
+        has_gene_ids = gene_ids is not None and any(gene_ids)
         return _raw_from_columns(
             table[columns["name"]].tolist(),
             symbols=None,
-            native_ids=(table[columns["id"]].tolist() if "id" in columns else None),
+            native_ids=gene_ids if has_gene_ids else None,
             feature_types=None,
             source=PanelSource(
                 kind="merscope_codebook", path=str(file_path), sha256=digest
             ),
-            native_id_column="id" if "id" in columns else None,
+            native_id_column="id" if has_gene_ids else None,
+            recorded_ids=codebook_ids,
         )
     symbol_column = next((c for c in (*SYMBOL_COLUMNS, "name") if c in columns), None)
     id_column = _first_id_column(table.rename(columns=lambda c: str(c).strip()))
