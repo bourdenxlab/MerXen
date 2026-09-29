@@ -236,12 +236,6 @@ class AnnotationSettings {
             return ""
         }
         def lines = ["Annotation summary (${species}, clustering_squidpy_mode ${mode}):".toString()]
-        if (!AnnotationPreflight.MAP_FIRST_WIRED) {
-            lines << (
-                "  map_first is not wired in this version (M1 scaffolding); " +
-                "no annotation task ran."
-            )
-        }
         if (runInfo?.get("n_expected") != null) {
             lines << "  pair x segmentation branches clustered: ${runInfo.n_expected}".toString()
         }

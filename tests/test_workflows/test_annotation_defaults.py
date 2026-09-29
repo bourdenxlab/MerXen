@@ -1016,19 +1016,18 @@ def test_groovy_completion_summary(groovy_results: dict[str, dict[str, Any]]) ->
         in summary.splitlines()
     )
     assert "  refused panels: none" in summary.splitlines()
+    assert "not wired" not in summary
 
 
 @needs_nextflow
 def test_groovy_preflight(groovy_results: dict[str, dict[str, Any]]) -> None:
-    """Preflight ignores legacy rows and refuses map_first until hook H5.
+    """Preflight ignores legacy rows; map_first runs when explicitly selected (M5).
 
     A map_first row that clusters builds reference bundles, so it needs the
-    references' sources and a writable store as well.
+    references' sources and a writable store; with them it passes.
     """
     assert _value(groovy_results, "preflight|legacy") == []
-    clustering = _value(groovy_results, "preflight|map_first|clustering")
-    assert len(clustering) == 1
-    assert "map_first is not available yet for P1" in clustering[0]
+    assert _value(groovy_results, "preflight|map_first|clustering") == []
     assert _value(groovy_results, "preflight|map_first|no-clustered-stage") == []
     store = "\n".join(_value(groovy_results, "preflight|map_first|readonly-store"))
     assert "annotation_reference_store" in store and "is not writable" in store
@@ -1047,7 +1046,7 @@ def test_groovy_preflight(groovy_results: dict[str, dict[str, Any]]) -> None:
         "wmb_panel needs annotation_wmb_h5ad_dir + annotation_wmb_metadata_dir + "
         "annotation_wmb_mapping_stats_path"
     ) in mouse
-    assert "map_first is not available yet for M1" in mouse
+    assert "not available yet" not in mouse
     invalid = "\n".join(_value(groovy_results, "preflight|map_first|invalid"))
     for expected in (
         "Unknown annotation_panel_mode 'bogus'",

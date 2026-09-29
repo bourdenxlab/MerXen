@@ -3371,8 +3371,46 @@ workflow {
             .mix(clustering_after_visualize_ch)
             .mix(clustering_after_spatial_gene_analysis_ch)
 
-    clustering_prepared_ch = CLUSTERING_SQUIDPY_PREPARE(clustering_inputs_ch)
-    clustering_computed_ch = CLUSTERING_SQUIDPY_COMPUTE(clustering_prepared_ch)
+    // rca-hook:H5: map_first clustering (plan §2.4, §3.1). The mode is one per
+    // run (AnnotationSettings.isMapFirstRun); the legacy branch runs exactly
+    // the legacy PREPARE -> COMPUTE statements, so legacy runs keep their DAG
+    // and task hashes. map_first rows carry their own annotation columns into
+    // samples_json, the pair's ALIGN files come from ALIGN's output channel,
+    // and CLUSTERING_MAP_FIRST (ANNOTATE_PANEL, PREP, MAP, RESOLVE,
+    // COMPUTE_CPU) emits FINALIZE's input, so FINALIZE, the MENDER barrier and
+    // every downstream stage are shared by both modes.
+    if (AnnotationSettings.isMapFirstRun(params)) {
+        clustering_inputs_ch.subscribe { pairId, segmentation, _samplesJson ->
+            AnnotationRunRecord.expect(pairId, segmentation)
+        }
+        clustering_prepared_ch = CLUSTERING_SQUIDPY_PREPARE(
+            clustering_inputs_ch
+                .combine(sample_rows_ch, by: 0)
+                .map { pairId, segmentation, samplesJson, row, settings ->
+                    tuple(
+                        pairId,
+                        segmentation,
+                        AnnotationSettings.samplesJsonWithRowColumns(samplesJson, row, settings),
+                    )
+                }
+        )
+        map_first_alignment_ch = alignment_results_ch
+            .map { pairId, _merscopeLatest, _xeniumLatest, _transformJson, _coordsDir, alignOut ->
+                tuple(pairId, AnnotationReferences.alignmentFiles(alignOut))
+            }
+            .mix(
+                sample_rows_ch
+                    .filter { _pairId, _row, settings -> !settings.need_alignment_results }
+                    .map { pairId, _row, _settings -> tuple(pairId, []) }
+            )
+        clustering_computed_ch = CLUSTERING_MAP_FIRST(
+            clustering_prepared_ch,
+            map_first_alignment_ch,
+        ).computed
+    } else {
+        clustering_prepared_ch = CLUSTERING_SQUIDPY_PREPARE(clustering_inputs_ch)
+        clustering_computed_ch = CLUSTERING_SQUIDPY_COMPUTE(clustering_prepared_ch)
+    }
     clustering_results_ch = CLUSTERING_SQUIDPY_FINALIZE(clustering_computed_ch)
 
     // Cortical depth runs after clustering so the per-cell broad_class and
