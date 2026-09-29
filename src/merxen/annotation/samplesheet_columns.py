@@ -13,6 +13,11 @@ with ``AnatomicalRegionValue`` and ``MouseSectionRegionsValue`` (hook H8).
 Species-specific checks (only ``frontal_cortex`` for human) run in
 ``AnnotationConfig``, which knows the run species.
 
+The MAP step reads each sample's ``mouse_section_regions`` from the
+``samples`` of ``clustering_squidpy_config.json`` (``samples_json``;
+``section_regions_by_sample``) and ``effective_section_regions`` gives a
+sample its value: its own, else the global default (M6, plan §7.2).
+
 This module imports only the standard library, numpy, pandas and pydantic
 (numpy and pandas through ``merxen.annotation.config``).
 """
@@ -20,7 +25,7 @@ This module imports only the standard library, numpy, pandas and pydantic
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
 from typing import Annotated, Any, Final
 
@@ -157,3 +162,52 @@ def split_section_regions(value: str) -> list[str] | None:
     if canonical == "none":
         return []
     return canonical.split(";")
+
+
+def section_regions_by_sample(
+    samples: Iterable[Mapping[str, Any]] | None,
+) -> dict[str, str]:
+    """Return the per-sample ``mouse_section_regions`` of a sample list.
+
+    Args:
+        samples: ``samples`` entries of ``clustering_squidpy_config.json``
+            (``ClusteringSquidpySampleConfig`` dicts; ``samples_json``).
+
+    Returns:
+        Sample id to its canonical value, for the samples that set one
+        (blank and absent values inherit the global param and are left out).
+
+    Raises:
+        ValueError: If a value is invalid or a sample has no ``sample_id``.
+    """
+    values: dict[str, str] = {}
+    for sample in samples or ():
+        if not isinstance(sample, Mapping):
+            continue
+        raw = sample.get(MOUSE_SECTION_REGIONS_COLUMN)
+        if raw is None or not str(raw).strip():
+            continue
+        sample_id = str(sample.get("sample_id") or "").strip()
+        if not sample_id:
+            raise ValueError("a sample with mouse_section_regions has no sample_id")
+        parsed = parse_mouse_section_regions(str(raw))
+        if parsed is not None:
+            values[sample_id] = parsed
+    return values
+
+
+def effective_section_regions(sample_value: str | None, default: str = "auto") -> str:
+    """Return a sample's ``mouse_section_regions``: its own, else the default.
+
+    Args:
+        sample_value: The sample's value (``None`` or blank: inherit).
+        default: The global value (``annotation_mouse_section_regions``).
+
+    Returns:
+        The canonical value.
+
+    Raises:
+        ValueError: If the chosen value is invalid.
+    """
+    own = parse_mouse_section_regions(sample_value)
+    return own if own is not None else normalise_mouse_section_regions(default)

@@ -266,7 +266,9 @@ class FakeMmc:
     are the runner-ups, and every deeper level repeats the node's single
     child (named ``"<name> <depth>"``) with bootstrap probability
     ``p ** (depth + 1)`` and the product of those as its aggregate
-    probability.
+    probability. ``--nodes_to_drop`` removes a first-level node (given at any
+    level of its chain) from the candidates, as ctm drops it from the tree;
+    the recorded config lists the dropped nodes.
     """
 
     root: Path
@@ -274,6 +276,7 @@ class FakeMmc:
     fail_with: int | None = None
     record_seed: int | None = None
     record_drop_level: str | None = None
+    record_nodes_to_drop: list[list[str]] | None = None
 
     def bundle(
         self,
@@ -420,12 +423,23 @@ class FakeMmc:
         self.calls[-1]["lookup"] = lookup
         levels = list(tree["hierarchy"])
         drop_level = option("--drop_level")
+        nodes_text = option("--nodes_to_drop")
+        nodes_to_drop = json.loads(nodes_text) if nodes_text is not None else None
+        dropped = {
+            label
+            for label in markers
+            for level, node in nodes_to_drop or []
+            if node == label or str(node).startswith(f"{label}_")
+        }
+        self.calls[-1]["nodes_to_drop"] = nodes_to_drop
         counts = np.asarray(query.X.toarray())
         genes = list(query.var_names)
         usable = [
             (label, marker)
             for label, marker in markers.items()
-            if marker in genes and marker in lookup.get("None", [])
+            if marker in genes
+            and marker in lookup.get("None", [])
+            and label not in dropped
         ]
         results = []
         for row, cell_id in enumerate(query.obs_names):
@@ -493,6 +507,11 @@ class FakeMmc:
                     self.record_drop_level
                     if self.record_drop_level is not None
                     else drop_level
+                ),
+                "nodes_to_drop": (
+                    self.record_nodes_to_drop
+                    if self.record_nodes_to_drop is not None
+                    else nodes_to_drop
                 ),
             },
             "metadata": {"version": "1.7.2"},
@@ -650,3 +669,292 @@ def human_level_meta() -> list[Any]:
 def make_decisions() -> Callable[..., pd.DataFrame]:
     """Return ``decision_rows``: a synthetic decisions table factory."""
     return decision_rows
+
+
+# --------------------------------------------------------------------------
+# A mouse section for the region step and mouse RESOLVE (M6 tests)
+
+MOUSE_LEVELS: tuple[str, ...] = (
+    "CCN20230722_CLAS",
+    "CCN20230722_SUBC",
+    "CCN20230722_SUPT",
+    "CCN20230722_CLUS",
+)
+MOUSE_CLAS, MOUSE_SUBC = MOUSE_LEVELS[0], MOUSE_LEVELS[1]
+MOUSE_IDS: tuple[str, ...] = tuple(f"ENSMUSG{index:011d}" for index in range(1, 6))
+MOUSE_SYMBOLS: tuple[str, ...] = ("Slc17a7", "Slc17a6", "Hoxb5", "Aqp4", "Other")
+MOUSE_NODES: tuple[FakeNode, ...] = (
+    FakeNode("CL_01", "01 IT-ET Glut", MOUSE_IDS[0], {"broad_class": "Neurons"}),
+    FakeNode("CL_19", "19 MB Glut", MOUSE_IDS[1], {"broad_class": "Neurons"}),
+    FakeNode("CL_24", "24 MY Glut", MOUSE_IDS[2], {"broad_class": "Neurons"}),
+    FakeNode(
+        "CL_30", "30 Astro-Epen", MOUSE_IDS[3], {"broad_class": "Astrocytes/Ependymal"}
+    ),
+)
+# MERFISH grey cells per division of each class; the fake tree gives every
+# class one subclass, "<class> 1".
+MOUSE_MERFISH: dict[str, dict[str, int]] = {
+    "01 IT-ET Glut": {"Isocortex": 1000},
+    "19 MB Glut": {"MB": 900, "MY": 100},
+    "24 MY Glut": {"MY": 1000},
+    "30 Astro-Epen": {"MY": 500, "Isocortex": 500},
+}
+MOUSE_SID = "AG_MERSCOPE"
+MOUSE_TILE = 150.0
+MOUSE_REGION_SHARE_HASH = "e" * 64
+
+
+def mouse_panel() -> Any:
+    """Return the fake mouse section's single-sample panel."""
+    from merxen.annotation.panel import AnnotationPanel, compute_panel_hash
+
+    return AnnotationPanel(
+        name="sample",
+        kind="single_sample",
+        species="mouse",
+        platforms=["MERSCOPE"],
+        sample_ids=[MOUSE_SID],
+        panel_mode="single_sample",
+        panel_hash=compute_panel_hash(list(MOUSE_IDS)),
+        n_genes=len(MOUSE_IDS),
+        ensembl_ids=list(MOUSE_IDS),
+        symbols=list(MOUSE_SYMBOLS),
+    )
+
+
+def mouse_required(panel: Any) -> Any:
+    """Return PREP's required bundles for the fake mouse panel."""
+    from merxen.annotation.panel import (
+        PANEL_GENES_FILE,
+        RequiredBundle,
+        RequiredBundles,
+    )
+
+    return RequiredBundles(
+        pair_id="AG",
+        segmentation="proseg_hybrid",
+        species="mouse",
+        panel_mode="single_sample",
+        status="ok",
+        bundles=[
+            RequiredBundle(
+                reference_id="wmb_panel",
+                role="primary",
+                species="mouse",
+                purpose="annotation",
+                panel_name="sample",
+                panel_hash=panel.panel_hash,
+                panel_file=PANEL_GENES_FILE,
+                n_panel_genes=panel.n_genes,
+            ),
+            RequiredBundle(
+                reference_id="wmb_region_share",
+                role="region_share",
+                species="mouse",
+                purpose="panel_independent",
+            ),
+        ],
+        n_required=2,
+    )
+
+
+def mouse_region_share_bundle(
+    root: Path,
+    *,
+    build_hash: str = MOUSE_REGION_SHARE_HASH,
+    composition: pd.DataFrame | None = None,
+) -> Path:
+    """Write a fake ``wmb_region_share`` bundle of ``MOUSE_MERFISH``.
+
+    Args:
+        root: The store root.
+        build_hash: The bundle's build hash (its directory name).
+        composition: An optional ``section_composition.parquet`` table (G4).
+
+    Returns:
+        The bundle directory.
+    """
+    from merxen.annotation.config import MOUSE_CCF_REGIONS
+
+    share_rows, home_rows = [], []
+    for class_name, counts in MOUSE_MERFISH.items():
+        total = sum(counts.values())
+        for level, name in (("class", class_name), ("subclass", f"{class_name} 1")):
+            for region in MOUSE_CCF_REGIONS:
+                share_rows.append(
+                    {
+                        "level": level,
+                        "node_name": name,
+                        "region": region,
+                        "n": counts.get(region, 0),
+                        "share": counts.get(region, 0) / total,
+                        "n_grey": total,
+                        "n_all": total,
+                    }
+                )
+        home = max(counts, key=lambda region: counts[region])
+        home_rows.append(
+            {
+                "level": "subclass",
+                "node_name": f"{class_name} 1",
+                "home": home,
+                "home_share": counts[home] / total,
+                "n_grey": total,
+            }
+        )
+    bundle_dir = root / "wmb_region_share" / build_hash
+    bundle_dir.mkdir(parents=True)
+    pd.DataFrame(share_rows).to_parquet(bundle_dir / "region_share.parquet")
+    pd.DataFrame(home_rows).to_parquet(bundle_dir / "region_home.parquet")
+    if composition is not None:
+        composition.to_parquet(bundle_dir / "section_composition.parquet")
+    files = [
+        {"path": path.name, "size": path.stat().st_size}
+        for path in sorted(bundle_dir.iterdir())
+    ]
+    (bundle_dir / "bundle.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "status": "complete",
+                "build_hash": build_hash,
+                "reference_id": "wmb_region_share",
+                "species": "mouse",
+                "role": "region_share",
+                "builder_version": 3,
+                "panel": None,
+                "files": files,
+            }
+        )
+    )
+    return bundle_dir
+
+
+def mouse_section() -> tuple[np.ndarray, np.ndarray, list[str]]:
+    """Return counts, µm coordinates and kinds of the fake mouse section.
+
+    200 tiles: Isocortex (01) left, MB (19) right, 5 MY sink calls in MB.
+    The MY cells carry some MB marker counts, so without class 24 they map
+    to 19 MB Glut; their own bootstrap probability (.71) is too low for them
+    to vote. One more MY call in MB (``my_lost``) splits evenly between the
+    IT-ET and MB markers once class 24 is dropped: a confident neuron that
+    no class re-maps confidently (implausible). Two astrocytes (not
+    neurons) never vote. The below-min_counts object comes first, so a
+    selection of table rows by position rather than by cell id shifts every
+    table cell's coordinates.
+    """
+    counts: list[list[int]] = [[1, 0, 0, 0, 0, 0]]  # below min_counts
+    xy: list[tuple[float, float]] = [(0.5 * MOUSE_TILE, 0.5 * MOUSE_TILE)]
+    kinds = ["low"]
+    for i in range(20):
+        for j in range(10):
+            marker = 0 if i < 10 else 1
+            for k in range(3):
+                row = [0] * 6
+                row[marker] = 30
+                counts.append(row)
+                xy.append(((i + 0.2 + 0.3 * k) * MOUSE_TILE, (j + 0.5) * MOUSE_TILE))
+                kinds.append("ctx" if marker == 0 else "mb")
+    for index in range(5):
+        counts.append([0, 8, 20, 0, 0, 0])
+        xy.append(((12 + index + 0.5) * MOUSE_TILE, 3.5 * MOUSE_TILE))
+        kinds.append("my")
+    counts.append([3, 3, 20, 0, 0, 0])
+    xy.append((15.5 * MOUSE_TILE, 6.5 * MOUSE_TILE))
+    kinds.append("my_lost")
+    for index in range(2):
+        counts.append([0, 0, 0, 60, 0, 0])  # above the subclass floor (50)
+        xy.append(((2 + index + 0.5) * MOUSE_TILE, 2.5 * MOUSE_TILE))
+        kinds.append("astro")
+    return np.array(counts), np.array(xy, dtype=np.float64), kinds
+
+
+def write_mouse_h5ad(path: Path, *, spatial: bool = True) -> tuple[Path, list[str]]:
+    """Write the fake mouse section as a prepared h5ad.
+
+    Args:
+        path: The h5ad path.
+        spatial: Write ``obsm['spatial']``.
+
+    Returns:
+        The path and the object kinds (``mouse_section``).
+    """
+    import anndata as ad
+    from scipy import sparse
+
+    counts, xy, kinds = mouse_section()
+    var_names = [*MOUSE_SYMBOLS, "Blank-0001"]
+    var = pd.DataFrame(index=pd.Index(var_names, dtype=str))
+    var["gene"] = var_names
+    var["ensembl_id"] = [*MOUSE_IDS, "Blank-0001"]
+    obs = pd.DataFrame(index=[f"M{index}" for index in range(len(counts))])
+    adata = ad.AnnData(X=sparse.csr_matrix(counts.astype(np.int64)), obs=obs, var=var)
+    if spatial:
+        adata.obsm["spatial"] = xy
+    path.parent.mkdir(parents=True, exist_ok=True)
+    adata.write_h5ad(path)
+    return path, kinds
+
+
+@pytest.fixture
+def mouse_setup(tmp_path: Path, fake_mmc: FakeMmc) -> dict[str, Any]:
+    """The fake mouse section, its panel, WMB bundle and region-share bundle."""
+    from merxen.annotation.config import AnnotationConfig
+    from merxen.annotation.mapmycells_engine import MmcBundle
+    from merxen.annotation.mouse_regions import RegionShareBundle
+    from merxen.annotation.panel import PANEL_GENES_FILE, REQUIRED_BUNDLES_FILE
+    from merxen.annotation.pipeline import MapSample, map_bundles
+
+    panel = mouse_panel()
+    panel_dir = tmp_path / "panel"
+    panel.write(panel_dir / PANEL_GENES_FILE)
+    required = mouse_required(panel)
+    (panel_dir / REQUIRED_BUNDLES_FILE).write_text(
+        json.dumps(required.model_dump(mode="json"))
+    )
+    bundle_dir = fake_mmc.bundle(
+        "wmb_panel",
+        role="primary",
+        species="mouse",
+        panel_hash=panel.panel_hash,
+        n_genes=panel.n_genes,
+        levels=list(MOUSE_LEVELS),
+        nodes=list(MOUSE_NODES),
+        drop_level="CCN20230722_SUPT",
+    )
+    bundle = MmcBundle.from_dir(bundle_dir)
+    config = AnnotationConfig(species="mouse").coupled_to_clustering(10)
+    runs = map_bundles(
+        required, panel_dir, {("wmb_panel", panel.panel_hash): bundle}, config
+    )
+    h5ad, kinds = write_mouse_h5ad(
+        tmp_path / "prepared" / "merscope" / f"{MOUSE_SID}.h5ad"
+    )
+    region_dir = mouse_region_share_bundle(tmp_path / "store")
+    return {
+        "panel": panel,
+        "panel_dir": panel_dir,
+        "bundle": bundle,
+        "config": config,
+        "runs": runs,
+        "sample": MapSample(MOUSE_SID, "MERSCOPE", h5ad, "prepared"),
+        "kinds": kinds,
+        "region_dir": region_dir,
+        "regions": RegionShareBundle.from_dir(region_dir),
+    }
+
+
+def map_mouse(setup: Mapping[str, Any], output: Path, **kwargs: Any) -> Any:
+    """Run MAP on the ``mouse_setup`` section (keyword arguments override)."""
+    from merxen.annotation.pipeline import annotate_map
+
+    return annotate_map(
+        [kwargs.pop("sample", setup["sample"])],
+        setup["runs"],
+        kwargs.pop("config", setup["config"]),
+        output_dir=output,
+        pair_id="AG",
+        segmentation="proseg_hybrid",
+        region_shares=kwargs.pop("region_shares", setup["regions"]),
+        **kwargs,
+    )

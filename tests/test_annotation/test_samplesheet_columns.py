@@ -12,11 +12,15 @@ from merxen.annotation.samplesheet_columns import (
     MOUSE_SECTION_REGIONS_COLUMN,
     OPTIONAL_ANNOTATION_COLUMNS,
     OptionalAnnotationColumns,
+    effective_section_regions,
     parse_anatomical_region,
     parse_mouse_section_regions,
     parse_optional_columns,
+    section_regions_by_sample,
     split_section_regions,
 )
+from merxen.config import ClusteringSquidpySampleConfig
+from merxen.io.samplesheet import parse_samplesheet
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -71,3 +75,42 @@ def test_split_section_regions() -> None:
     assert split_section_regions("NONE") == []
     assert split_section_regions("Isocortex;HPF") == ["Isocortex", "HPF"]
     assert split_section_regions("th") == ["TH"]
+
+
+def test_samplesheet_column_reaches_the_sample_config(tmp_path: Path) -> None:
+    sheet = tmp_path / "samplesheet.csv"
+    with sheet.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["pair_id", "mouse_section_regions"])
+        writer.writeheader()
+        writer.writerow({"pair_id": "AG", "mouse_section_regions": "isocortex;hpf"})
+        writer.writerow({"pair_id": "VZ", "mouse_section_regions": " "})
+        writer.writerow({"pair_id": "NO", "mouse_section_regions": "None"})
+    pairs = {pair.pair_id: pair for pair in parse_samplesheet(sheet)}
+    assert pairs["AG"].mouse_section_regions == "Isocortex;HPF"
+    assert pairs["VZ"].mouse_section_regions is None
+    assert pairs["NO"].mouse_section_regions == "none"
+
+    samples = [
+        ClusteringSquidpySampleConfig(
+            sample_id=f"{pair_id}_MERSCOPE",
+            platform="MERSCOPE",
+            zarr_path=tmp_path / "x.zarr",
+            mouse_section_regions=pair.mouse_section_regions,
+        ).model_dump(mode="json")
+        for pair_id, pair in pairs.items()
+    ]
+    by_sample = section_regions_by_sample(samples)
+    assert by_sample == {"AG_MERSCOPE": "Isocortex;HPF", "NO_MERSCOPE": "none"}
+    assert effective_section_regions(by_sample.get("VZ_MERSCOPE"), "auto") == "auto"
+    assert effective_section_regions("th", "none") == "TH"
+    with pytest.raises(ValueError, match="unknown mouse section region"):
+        section_regions_by_sample([{"sample_id": "S", "mouse_section_regions": "X"}])
+    with pytest.raises(ValueError, match="no sample_id"):
+        section_regions_by_sample([{"mouse_section_regions": "auto"}])
+    with pytest.raises(ValueError):
+        ClusteringSquidpySampleConfig(
+            sample_id="S",
+            platform="MERSCOPE",
+            zarr_path=tmp_path / "x.zarr",
+            mouse_section_regions="Striatum",
+        )
