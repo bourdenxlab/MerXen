@@ -1,5 +1,8 @@
+import groovy.json.JsonOutput
+import groovy.json.JsonSlurperClassic
+
 /*
- * Per-row annotation settings for main.nf (hooks H3, H6; plan §2.4, §3.1).
+ * Per-row annotation settings for main.nf (hooks H3, H5, H6; plan §2.4, §3.1).
  *
  * rowSampleSettings merges forRow into each row's settings map. A legacy row
  * gets no key at all: VALIDATE_ANALYSIS_LAYER takes the settings map as a
@@ -21,6 +24,24 @@ class AnnotationSettings {
 
     static final String LEGACY_MENDER_UNASSIGNED_STATE_POLICY = "state"
     static final String MAP_FIRST_MENDER_UNASSIGNED_STATE_POLICY = "exclude_from_features"
+
+    // Optional samplesheet columns a map_first row carries into samples_json,
+    // per species (merxen.annotation.samplesheet_columns; plan §3.3, §3.7):
+    // ClusteringSquidpySampleConfig fields, None inheriting the global param.
+    static final Map<String, String> ROW_COLUMNS = [
+        human: "anatomical_region",
+        mouse: "mouse_section_regions",
+    ].asImmutable()
+
+    // completionSummary lines: runInfo key -> label.
+    static final Map<String, String> SUMMARY_ITEMS = [
+        failed_annotations: "failed annotations (no label tables; see the failed tasks above)",
+        failed_hierarchies: "failed hierarchies (label tables, no COMPUTE_CPU output)",
+        refused_panels: "refused panels",
+        broad_only_panels: "broad-only panels",
+        provisional_panels: "provisional panels",
+        cross_platform_restricted: "restricted cross-platform statistics",
+    ].asImmutable()
 
     /**
      * Return the annotation settings of one samplesheet row.
@@ -77,6 +98,73 @@ class AnnotationSettings {
         return settings?.get("clustering_squidpy_mode") ?: AnnotationDefaults.LEGACY
     }
 
+    /**
+     * Whether the run clusters in map_first mode (hook H5).
+     *
+     * The mode is one per run: it follows the run species (params.species)
+     * and the clustering_squidpy_mode* params. An invalid species or mode
+     * gives false here; rowSampleSettings then reports it.
+     *
+     * @param params Pipeline params.
+     * @return Whether the resolved mode is map_first.
+     */
+    static boolean isMapFirstRun(Map params) {
+        try {
+            def species = AnnotationDefaults.normalizeSpecies(params?.get("species"))
+            return AnnotationDefaults.resolveMode(params, species) == AnnotationDefaults.MAP_FIRST
+        } catch (IllegalArgumentException ignored) {
+            return false
+        }
+    }
+
+    /**
+     * Carry a map_first row's own annotation column into its samples JSON.
+     *
+     * Each sample gets the row's anatomical_region (human) or
+     * mouse_section_regions (mouse) when the samplesheet row sets it; an
+     * unset column is left out, so the sample inherits the global param
+     * (ClusteringSquidpySampleConfig; plan §3.3). Legacy rows, and map_first
+     * rows without the column, get the samples JSON back unchanged, so their
+     * PREPARE task hash is the legacy one.
+     *
+     * @param samplesJson The pair x segmentation's samples JSON.
+     * @param row Samplesheet row.
+     * @param settings Row settings from rowSampleSettings.
+     * @return The samples JSON.
+     */
+    static String samplesJsonWithRowColumns(Object samplesJson, Map row, Map settings) {
+        if (!isMapFirst(settings)) {
+            return samplesJson.toString()
+        }
+        def species = AnnotationDefaults.normalizeSpecies(settings.get("species"))
+        def column = ROW_COLUMNS[species]
+        def value = rowValue(row, column)
+        if (value == null) {
+            return samplesJson.toString()
+        }
+        def samples = new JsonSlurperClassic().parseText(samplesJson.toString()) as List
+        samples.each { Map sample -> sample[column] = value }
+        return JsonOutput.prettyPrint(JsonOutput.toJson(samples))
+    }
+
+    /**
+     * Return the clustered-table fields a cortical-depth table config adds.
+     *
+     * A map_first row reads the clustered table of its own run, under the
+     * run's table-key suffix (plan §4.8; CorticalDepthTableConfig
+     * clustered_table_key_suffix); a legacy row adds nothing, so its config
+     * JSON and task hash are unchanged.
+     *
+     * @param row Samplesheet row.
+     * @param params Pipeline params.
+     * @return [clustered_table_key_suffix: suffix] for a suffixed map_first
+     *     row, else an empty map.
+     */
+    static Map clusteredTableFields(Map row, Map params) {
+        def suffix = tableKeySuffix(forRow(row, params, params?.get("species")))
+        return suffix ? [clustered_table_key_suffix: suffix] : [:]
+    }
+
     /** Whether a row's settings select legacy clustering (the default). */
     static boolean isLegacy(Map settings) {
         return mode(settings) == AnnotationDefaults.LEGACY
@@ -126,11 +214,11 @@ class AnnotationSettings {
     }
 
     /**
-     * Summarize failed annotations and refused or provisional panels (hook H6).
+     * Summarize a map_first run's failed branches and panels (hook H6).
      *
      * @param params Pipeline params.
-     * @param runInfo Optional run facts: success (Boolean) and the lists
-     *     failed_annotations, refused_panels and provisional_panels.
+     * @param runInfo Optional run facts: success (Boolean), n_expected and
+     *     the SUMMARY_ITEMS lists (AnnotationRunRecord.runInfo).
      * @return "" when the run's species uses legacy mode (nothing to report),
      *     else the summary text.
      */
@@ -154,11 +242,10 @@ class AnnotationSettings {
                 "no annotation task ran."
             )
         }
-        [
-            failed_annotations: "failed annotations",
-            refused_panels: "refused panels",
-            provisional_panels: "provisional panels",
-        ].each { key, label ->
+        if (runInfo?.get("n_expected") != null) {
+            lines << "  pair x segmentation branches clustered: ${runInfo.n_expected}".toString()
+        }
+        SUMMARY_ITEMS.each { key, label ->
             def values = (runInfo?.get(key) ?: []) as List
             lines << "  ${label}: ${values ? values.join(', ') : 'none'}".toString()
         }

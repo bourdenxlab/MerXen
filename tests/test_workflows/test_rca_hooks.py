@@ -8,11 +8,11 @@ rebase or merge cannot silently drop a hook. A hook that also touches further
 lines marks each of them with ``rca-site:H<n>``; their number per file is
 pinned below too.
 
-H5 (the map_first wiring between PREPARE and COMPUTE) arrives with M5, so its
-marker must not exist yet. H10 (M2) is the ``--annotation_prepare_only``
-entry: it builds reference bundles from the samplesheet rows before the
-preflight and empties the rows, so no pipeline stage runs; it needs neither
-H5 nor any PREPARE output.
+H5 (the map_first wiring between PREPARE and COMPUTE) arrives with M5's hook
+commit, so its marker must not exist yet. H10 (M2) is the
+``--annotation_prepare_only`` entry: it builds reference bundles from the
+samplesheet rows before the preflight and empties the rows, so no pipeline
+stage runs; it needs neither H5 nor any PREPARE output.
 """
 
 from __future__ import annotations
@@ -43,9 +43,10 @@ EXPECTED_HOOKS: dict[str, tuple[str, ...]] = {
 }
 # (file, hook) -> number of extra lines the hook touches, each with a site marker.
 EXPECTED_SITES: dict[tuple[str, str], int] = {
-    # The MENDER preflight and MENDER input key lookups, and the MENDER input
-    # closure parameter they need (renamed from ``_settings``).
-    (MAIN_NF, "H2"): 3,
+    # The MENDER preflight and MENDER input key lookups, the MENDER input
+    # closure parameter they need (renamed from ``_settings``) and the
+    # cortical-depth table fields (M5).
+    (MAIN_NF, "H2"): 4,
     # Sample config, clustering config, MENDER, cortical-depth table (M5).
     ("src/merxen/config.py", "H8"): 4,
     ("src/merxen/io/samplesheet.py", "H9"): 2,  # SamplePair fields, row parsing
@@ -139,7 +140,7 @@ def test_hook_sites_are_pinned() -> None:
 
 
 def test_h5_is_left_for_m5() -> None:
-    """M1 does not touch the PREPARE -> COMPUTE wiring (hook H5)."""
+    """The PREPARE -> COMPUTE wiring (hook H5) arrives with its own commit."""
     main_text = (REPO_ROOT / MAIN_NF).read_text()
 
     assert "CLUSTERING_MAP_FIRST(" not in main_text
@@ -210,18 +211,33 @@ def test_h7_includes_follow_their_markers() -> None:
 
 H2_SUFFIX_ARGUMENT = "settings.clustering_squidpy_table_key_suffix,"
 H2_CLOSURE_BINDING = re.compile(r"^\s*settings, // rca-site:H2\b")
+H2_CORTICAL_DEPTH_FIELDS = "] + AnnotationSettings.clusteredTableFields(row, params)"
 
 
 def test_h2_sites_pass_the_row_suffix() -> None:
-    """Each H2 site passes the row suffix to the key function or binds it."""
-    lines = (REPO_ROOT / MAIN_NF).read_text().splitlines()
+    """Each H2 site passes the row suffix to the key function or binds it.
+
+    MENDER's two key lookups pass the row suffix, its input closure binds the
+    row settings, and cortical depth's table configs carry the suffix of a
+    map_first row (M5; nothing for a legacy row).
+    """
+    main_text = (REPO_ROOT / MAIN_NF).read_text()
+    lines = main_text.splitlines()
     site_lines = [line for line in lines if "rca-site:H2" in line]
 
     suffix_lines = [line for line in site_lines if H2_SUFFIX_ARGUMENT in line]
     binding_lines = [line for line in site_lines if H2_CLOSURE_BINDING.match(line)]
+    depth_lines = [line for line in site_lines if H2_CORTICAL_DEPTH_FIELDS in line]
     assert len(suffix_lines) == 2
     assert len(binding_lines) == 1
-    assert len(site_lines) == len(suffix_lines) + len(binding_lines)
+    assert len(depth_lines) == 1
+    assert len(site_lines) == len(suffix_lines) + len(binding_lines) + len(depth_lines)
+    depth_function = main_text[
+        main_text.index("def corticalDepthConfigForPlatform(") : main_text.index(
+            "def distanceFromObjectConfigForPlatform("
+        )
+    ]
+    assert H2_CORTICAL_DEPTH_FIELDS in depth_function
 
 
 def test_mender_input_closure_binds_the_row_settings() -> None:

@@ -8,14 +8,14 @@
  * onto its bundles with MapMyCells; CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE turns
  * the mapping into one label table per sample (thresholds, floors, gate,
  * consensus, flags, compositions). All run on the CPU in the main
- * environment and take no GPU lock. COMPUTE_CPU arrives in M5,
- * ANNOTATION_REPORT in M7.
+ * environment and take no GPU lock. COMPUTE_CPU (M5) is in
+ * clustering_squidpy.nf, ANNOTATION_REPORT arrives in M7.
  * workflows/subworkflows/annotation_references.nf wires PANEL and PREP, only
  * for --annotation_prepare_only runs (hook H10) and map_first runs;
  * workflows/subworkflows/clustering_map_first.nf wires MAP after them
- * (CLUSTERING_ANNOTATE_MAP) and RESOLVE after MAP (CLUSTERING_ANNOTATE), and
- * CLUSTERING_MAP_FIRST (hook H5, M5) is their only caller. Legacy runs never
- * call any of them.
+ * (CLUSTERING_ANNOTATE_MAP), RESOLVE after MAP (CLUSTERING_ANNOTATE) and
+ * COMPUTE_CPU after RESOLVE (CLUSTERING_MAP_FIRST, called by hook H5 in
+ * map_first runs only). Legacy runs never call any of them.
  *
  * Resources are in conf/annotation.config, host concurrency in
  * conf/dwight.annotation.config.

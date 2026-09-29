@@ -17,8 +17,9 @@
  * - ANNOTATION_PREPARE_ONLY: --annotation_prepare_only (main.nf hook H10),
  *   one gene-list panel (annotation_panel_genes_path) per row x segmentation.
  * - ANNOTATION_PREPARED_REFERENCES: map_first runs, from the
- *   CLUSTERING_SQUIDPY_PREPARE outputs; CLUSTERING_MAP_FIRST calls it once
- *   MAP exists (M3-M5) and it emits MAP's input tuple (plan §3.3).
+ *   CLUSTERING_SQUIDPY_PREPARE outputs and the pair's ALIGN files;
+ *   CLUSTERING_MAP_FIRST (hook H5) calls it through CLUSTERING_ANNOTATE_MAP
+ *   and it emits MAP's input tuple (plan §3.3).
  */
 
 include { ANNOTATE_PANEL; ANNOTATE_REFERENCE_PREP } from "../modules/annotation"
@@ -157,32 +158,36 @@ workflow ANNOTATION_PREPARE_ONLY {
 workflow ANNOTATION_PREPARED_REFERENCES {
     take:
     // tuple(pair_id, segmentation, samples_json, clustering_squidpy_config.json,
-    // clustering_prepare_out): the output of CLUSTERING_SQUIDPY_PREPARE.
+    // clustering_prepare_out, alignment_files): the output of
+    // CLUSTERING_SQUIDPY_PREPARE and the pair's ALIGN files
+    // (AnnotationReferences.alignmentFiles: [shared_tissue_mask.npy,
+    // registration_summary.json], or [] without an alignment).
     prepared_ch
 
     main:
     // Set c of the seeded set-a family is its curated list (no mask needed).
     // A label-free set c (other families) needs the pair's shared tissue
-    // mask, which M5 passes from the ALIGN output channel; until then it is
-    // refused rather than computed over the whole section or from a
-    // published mask looked up while ALIGN may still be running (plan §3.2).
-    panel_inputs_ch = prepared_ch.map { pairId, segmentation, _samplesJson, clusteringConfig, preparedDir ->
+    // mask, which comes only from the ALIGN output channel (never from a
+    // published mask looked up while ALIGN may still be running); without it
+    // the label-free set c is refused rather than computed over the whole
+    // section (plan §3.2).
+    panel_inputs_ch = prepared_ch.map { pairId, segmentation, _samplesJson, clusteringConfig, preparedDir, alignmentFiles ->
         tuple(
             pairId,
             segmentation,
             AnnotationReferences.preparedPanelSpec(
                 clusteringConfig.name,
                 preparedDir.name,
-                [],
+                alignmentFiles.collect { item -> item.name },
                 true,
             ),
-            [clusteringConfig, preparedDir],
+            [clusteringConfig, preparedDir] + alignmentFiles,
         )
     }
     references = ANNOTATION_REFERENCES(panel_inputs_ch)
 
     map_inputs_ch = prepared_ch
-        .map { pairId, segmentation, samplesJson, clusteringConfig, preparedDir ->
+        .map { pairId, segmentation, samplesJson, clusteringConfig, preparedDir, _alignmentFiles ->
             tuple(
                 AnnotationReferences.branchKey(pairId, segmentation),
                 pairId,
