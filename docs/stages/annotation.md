@@ -37,9 +37,10 @@ from the reference, root markers, root children separated) and
 `marker_unsupported_nodes`: the mapping-tree nodes no marker of their own
 supports (the nodes below an auto-collapsed parent and, for `wmb_panel`, the
 nodes without any marker-training cell). `cell_type_mapper` can still assign
-these nodes with their ancestors' markers, so RESOLVE (M3) reports such a
-label as unresolved at that level; the nodes stay in the mapping tree, as in
-the validated runs.
+these nodes with their ancestors' markers, so mouse RESOLVE (M6) reports
+such a label as `not_resolvable` at that level; human RESOLVE does not apply
+this rule yet (pending). The nodes stay in the mapping tree, as in the
+validated runs.
 
 ### What `build_hash` covers
 
@@ -764,9 +765,11 @@ for `ANNOTATE_PANEL`); until then RESOLVE reports the whole-section JSD and
 never looks for a published `align_out` that ALIGN may still be writing
 (`--no-alignment-lookup`). A mouse MAP output is resolved with the M6
 mouse rules ([Mouse rules v1](#mouse-rules-v1-consensusresolve_mouse-73-m6));
-the task does not pass the QC stage's registration check yet (the QC
-channel is pipeline wiring, M5), so its gate reports G1 as not evaluated
-(a warning). RESOLVE caches on content (`cache
+the task does not stage the QC stage's registration check yet (the QC
+channel is pipeline wiring, M5), and a pipeline RESOLVE
+(`--require-bundle-refs`) refuses a mouse sample without it, so mouse
+`map_first` needs M5's wiring ([Mouse region step](#mouse-region-step-m6),
+pipeline wiring). RESOLVE caches on content (`cache
 "deep"`), as MAP does, and its task hash also sees the annotation config it
 writes and a fingerprint of the RESOLVE rules: the sha256 of the files under
 `src/merxen/annotation/`, `src/merxen/assets/annotation/` (floors,
@@ -902,11 +905,11 @@ writes `<sid>_celltype_labels.parquet`.
 mouse sample's unpruned WMB run:
 
 1. **Request.** The sample's `mouse_section_regions` (the samplesheet
-   column, carried in the `samples` of `clustering_squidpy_config.json`),
-   else the annotation config's (`annotation_mouse_section_regions`,
-   default `auto`); `merxen annotate --mouse-section-regions` overrides
-   both. `auto` infers the divisions, a `;`-separated list of CCF divisions
-   (`Isocortex`, `OLF`, `OB`, `HPF`, `CTXsp`, `STR`, `PAL`, `TH`, `HY`, `MB`,
+   column, read from the `samples` of `clustering_squidpy_config.json`;
+   pipeline wiring: M5, see below), else the annotation config's
+   (`annotation_mouse_section_regions`, default `auto`); `merxen annotate
+   --mouse-section-regions` overrides both. `auto` infers the divisions, a
+   `;`-separated list of CCF divisions (`Isocortex`, `OLF`, `OB`, `HPF`, `CTXsp`, `STR`, `PAL`, `TH`, `HY`, `MB`,
    `P`, `MY`, `CB`; case-insensitive) overrides the inference, and `none`
    disables pruning (no region-share bundle needed).
 2. **Inference** (`auto`; also run for QC with an override): confident
@@ -933,9 +936,16 @@ mouse sample's unpruned WMB run:
    lookup filtered to the pruned tree (keys of dropped nodes removed,
    markers restricted to the query, marker-less parents collapsed), so
    `cell_type_mapper` never meets a zero-marker parent. Every other cell
-   keeps its label by construction. The re-map is reused from
-   `--reuse-from` like a run (same fingerprint, bundle, engine parameters,
-   ctm version, lookup and drop list).
+   keeps its label by construction, and also its unpruned bootstrap
+   probability, which still counts the runner-up votes on dropped nodes:
+   against a full pruned re-map with the same seed, 1.31% (ag7
+   proseg_hybrid) and 0.69% (VZG2 original_seg) of the table cells are
+   class-confident only in the full re-map and none only in the subset
+   (subclass: 1.19% / 0.50% vs 1.05% / 0.54%, re-draw noise). The subset
+   re-map is therefore conservative at class (a one-directional coverage
+   deficit, never an extra confident call); plan §7.2 keeps it [L]. The
+   re-map is reused from `--reuse-from` like a run (same fingerprint,
+   bundle, engine parameters, ctm version, lookup and drop list).
 
 The sample's `mouse_regions` record in `map_manifest.json` holds the
 request, status, tile counts per division, the inferred and the used
@@ -945,9 +955,46 @@ dropped and changed, the re-map run and the region-share bundle's
 add `mmc_wmb_unpruned_{class,subclass}_{name,bp}`, `region_pruned_changed`
 and `inferred_region`. `load_resolve_runs` gives RESOLVE the pruned table as
 the primary run's `tidy` (the unpruned one as `unpruned_tidy`) and the
-region outputs (`ResolveRun.regions`). Region coupling (`coupled_regions`)
-and other rule variants are M6b and are refused, not ignored. Sagittal, OB-
-and CB-dominated sections are out of scope (use an override or `none`).
+region outputs (`ResolveRun.regions`) with the region-share bundle the step
+used: `--bundle wmb_region_share=DIR` or its staged `--bundle-ref` when
+given, else the recorded path; a bundle whose `build_hash` is not the one
+MAP recorded is refused, and one that cannot be read for a pruned section
+is a gate warning (G3 and G4 not evaluated). Mouse RESOLVE refuses a MAP
+output without the region step (a manifest from before M6, whose
+`mouse_region_step` is not the M6 step, or a mapped sample without a
+`mouse_regions` record): re-run `merxen annotate`. A skipped step
+(`skipped_few_tiles`, `skipped_no_coordinates`) and an override that
+differs from the inferred divisions are gate warnings (plan §7.2), `none`
+is not. The label table's provenance (`mouse_gate`) records the region
+step's status and reasons, the drop list's size and sha256
+(`drop_list_sha256`: sha256 of the JSON `[level, label]` pairs) and the
+region-share bundle as reference `wmb_region_share`; the resolve summary
+has the same under `region_step`, and under `region_coherence.per_class`
+plan §7.2 step 5's class coherence against E7's intrinsic whole-brain
+coherence (median `region_coherence` of the cells called to each class,
+the class's MERFISH `coh_home_median` from
+`wmb_region_restricted_classes.csv`, and their ratio; MERFISH is denser
+than most query sections, so the ratio is a relative QC reading). Region
+coupling (`coupled_regions`) and other rule variants are M6b and are
+refused, not ignored. Sagittal, OB- and CB-dominated sections are out of
+scope (use an override or `none`).
+
+**Pipeline wiring (M5).** `CLUSTERING_MAP_FIRST` is not wired yet; when M5
+wires mouse `map_first`, the tasks need: (1) each entry of the MAP task's
+`samples_json` (`clustering_squidpy_config.json` `samples`) to carry the
+row's value under `mouse_section_regions`, the
+`ClusteringSquidpySampleConfig` field that
+`samplesheet_columns.section_regions_by_sample` reads (the row settings'
+`annotation_mouse_section_regions` key is not read by MAP); (2) the
+RESOLVE task to stage the QC stage's registration check of each sample and
+pass it with `--registration-qc` or `--registration-qc-dir` (a pipeline
+RESOLVE, `--require-bundle-refs`, refuses a mouse sample without it); (3)
+the `wmb_region_share` bundle ref staged for RESOLVE as for MAP; (4) a MAP
+rules fingerprint (as RESOLVE's `rules_fingerprint`) over
+`mouse_regions.py`, `config.py` and the MAP pipeline code, or
+`MOUSE_REGION_STEP`, `REGION_CELLS_SCHEMA_VERSION` and
+`config.mouse_regions` in the MAP annotation config, so a region rule
+change re-runs the deep-cached MAP under `-resume`.
 
 A published clustered H5AD of a small sample can have a `min_cells`-filtered
 `var` (P1212 and P5011 reseg MERSCOPE hold 299 and 268 of 300 features).
@@ -1119,9 +1166,9 @@ before the statuses; level + warning flag as for human):
 
 | Signal | Source | Failed if | Warning if |
 |---|---|---|---|
-| G1 registration | `--registration-qc SID=PATH`: the QC stage's `*_registration_qc.json` or `*_qc_summary.csv` (M0a check) | density ratio < 1.5, or shift > 5 µm against the platform's own cells | ratio < 2.0; no check given, or the check skipped |
+| G1 registration | `--registration-qc SID=PATH` or `--registration-qc-dir DIR`: the QC stage's `*_registration_qc.json` or `*_qc_summary.csv` (M0a check); required in a pipeline task unless `--no-registration-qc` | density ratio < 1.5, or shift > 5 µm against the platform's own cells | ratio < 2.0; no check given (standalone), or the check skipped |
 | G2 marker referee | the table cells' class calls against marker pseudo-labels: six class groups (the vocab broad classes), each with the panel genes whose group profile is >= 20x every other class's profile (E3 rule; groups with < 3 genes left out), labelled with `data/P1212`'s rule (>= 1.5 units and >= 60% of the marker units) | consistency < 0.70 | < 0.80, or fewer than 200 pseudo-labelled cells |
-| G3 implausibility | pre-pruning T2 share: unpruned subclasses with < 25% of their MERFISH cells in the present divisions | – | > 3% |
+| G3 implausibility | pre-pruning T2 share, E7's definition: unpruned subclasses with >= 20 MERFISH grey-matter cells, outside the never-drop classes, with < 25% of those cells in the present divisions; also MO2's "T2 after pruning" on the pruned calls. Not evaluated (a note) when the step was disabled; a skipped step warns (above) | – | > 3% |
 | G4 composition | soft class shares against the pooled MERFISH sections of `--mouse-g4-sections` (the region-share bundle's `section_composition.parquet`; none by default until M6b's AP estimate) | – | Astro-Epen outside ±5 points or Immune outside ±1 point |
 | G5 spill-over | `flag_microglial_spillover` rate | – | > 15% |
 
@@ -1143,8 +1190,14 @@ VZG2 proseg_hybrid).
   Cx3cr1, Aif1, Blnk, C1qa, as E3; VZG2: E3's 13); flagged at statistic >= 10
   and spill weight >= 0.05. Null with fewer than 3 genes
   (`insufficient_panel_genes`) or when more than 0.5% of the marker
-  astrocytes (E3's AST rule on the panel's derived Astro-Epen genes) are
-  flagged. With >= 6 genes the flag is rebuilt on half of them and the
+  astrocytes are flagged. Marker astrocytes follow E3's AST rule: >= 2
+  counts and >= 10 per 1,000 on the panel's derived Astro-Epen genes, and
+  at most 3 per 1,000 on E3's MG_loose purity genes (Cx3cr1, Csf1r, C1qa)
+  when all three are on the panel, else the three most specific derived
+  microglia genes. The purity filter bounds a marker astrocyte's counts on
+  the purity genes, so the check fires through the flag genes outside that
+  set (with purity on every flag gene the rate would be 0 by construction,
+  and the check is then recorded as not evaluated). With >= 6 genes the flag is rebuilt on half of them and the
   held-out half's enrichment is reported (VZG2: 38x). It measures
   spill-over prevalence, never a microglia count. Per cell it agrees with
   E3 on 99.8% of ag7 and VZG2 cells (E3 used supertype profiles; the bundle
@@ -1173,30 +1226,40 @@ MERFISH-638850 sections .31–.33 (AP 8.0–8.4 mm).
 set (Isocortex, OLF, HPF, CTXsp, TH, HY, MB) and the drop list is E7's 60
 nodes. The unpruned labels of ag7 proseg_hybrid and VZG2 original_seg are
 identical to E7's inputs, and E7's full-density T2 counts (395 and 712
-cells: subclasses with < 25% of their MERFISH cells in the present
-divisions, E7's definition) fall to 4 and 0 after pruning (the gate's G3
-definition, which also counts never-drop and small subclasses: 0.44% →
-0.065% and 0.65% → 0.010%). 394 and 712 cells are re-mapped (39–43 s); every
-other cell keeps its label by construction, and a full pruned re-map of
-every cell changes 0.245% / 0.060% of class and 1.24% / 0.42% of subclass
-labels outside the dropped nodes (bootstrap re-draws; MO2 ≤ 0.25% / 1.5%).
+cells: subclasses with >= 20 MERFISH grey-matter cells, outside the
+never-drop classes, with < 25% of them in the present divisions; E7's
+definition, which G3 and MO2 use) fall to 4 and 0 after pruning (0.381% →
+0.004% and 0.635% → 0; MO2 ≤ 0.1%). 394 and 712 cells are re-mapped
+(39–43 s); every other cell keeps its label by construction, and a full
+pruned re-map of every cell changes 0.245% / 0.060% of class and 1.24% /
+0.42% of subclass labels outside the dropped nodes (MO2 ≤ 0.25% / 1.5%).
+The cells the subset re-map leaves keep their unpruned bootstrap
+probability: at class the full re-map only raises it (15.2% / 4.0% of
+those cells up, 0.01% / 0 down; the dropped nodes' votes move to the kept
+classes), so 1.31% / 0.69% of the table cells are class-confident only in
+the full re-map and none only in the subset, a conservative coverage
+deficit of the plan's subset re-map; at subclass the differences are
+symmetric (1.19% / 1.05% and 0.50% / 0.54% confident only in one),
+re-draw noise (`$A/m6/review/SUBSET_VS_FULL_CONFIDENCE.txt`).
 The moved cells go where E7's did (ag7: MY Glut → MB Glut 122, → MB GABA
 54, MY GABA → MB GABA 51; VZG2: MY Glut → MB Glut 475, → MB GABA 102).
 
 | Section, segmentation | Table cells | Gate | G1 ratio / shift (µm) | G2 | G3 | G4 Astro-Epen / Immune (points) | G5 spill-over | Confident class / subclass | F1 | Astro low-count |
 |---|---|---|---|---|---|---|---|---|---|---|
-| ag7 proseg_hybrid | 103,736 | `full` | 2.20 / 0 | .805 | .004 | +1.8 / −0.5 | .062 | .732 / .618 | 0.82% | 2.2% |
-| ag7 reseg | 101,750 | `full` | 2.17 / 0 | .860 | .006 | −3.6 / +0.3 | .056 | .823 / .706 | 0.81% | 1.6% |
-| ag7 original_seg | 136,033 | `full` + warning (G1, G2, G4) | 1.63 / – | .773 | .007 | +7.1 / −0.6 | .057 | .610 / .489 | 1.25% | 11.4% |
-| ag7 proseg_mask | 103,766 | `full` + warning (G1) | 1.98 / 0 | .819 | .005 | +0.8 / −0.3 | .059 | .727 / .613 | 0.79% | 3.3% |
-| VZG2 original_seg | 112,158 | `full` | 2.13 / – | .819 | .006 | +2.2 / +0.1 | .095 | .825 / .759 | 0.28% | 0.5% |
-| VZG2 proseg_hybrid | 104,464 | `full` | 2.40 / 0 | .843 | .006 | +1.3 / +0.4 | .096 | .859 / .794 | 0.24% | 0.3% |
-| VZG2 reseg | 104,276 | `full` + warning (G4) | 2.43 / 0 | .903 | .007 | −3.2 / +1.1 | .090 | .911 / .841 | 0.29% | 0.2% |
-| VZG2 proseg_mask | 104,507 | `full` | 2.37 / 0 | .889 | .006 | −1.0 / +0.8 | .083 | .878 / .820 | 0.22% | 0.4% |
-| VZG2 proseg_hybrid, old (invalid) | 102,134 | `failed` + warning (G1, G2; G4) | 1.34 / 114 | .666 | .006 | +16.4 / −0.7 | .128 | 0 / 0 | 0.58% | 3.0% |
+| ag7 proseg_hybrid | 103,736 | `full` | 2.20 / 0 | .805 | .0038 | +1.8 / −0.5 | .062 | .732 / .618 | 0.82% | 2.2% |
+| ag7 reseg | 101,750 | `full` | 2.17 / 0 | .860 | .0037 | −3.6 / +0.3 | .056 | .823 / .706 | 0.81% | 1.6% |
+| ag7 original_seg | 136,033 | `full` + warning (G1, G2, G4) | 1.63 / – | .773 | .0065 | +7.1 / −0.6 | .057 | .610 / .489 | 1.25% | 11.4% |
+| ag7 proseg_mask | 103,766 | `full` + warning (G1) | 1.98 / 0 | .819 | .0040 | +0.8 / −0.3 | .059 | .727 / .613 | 0.79% | 3.3% |
+| VZG2 original_seg | 112,158 | `full` | 2.13 / – | .819 | .0063 | +2.2 / +0.1 | .095 | .825 / .759 | 0.28% | 0.5% |
+| VZG2 proseg_hybrid | 104,464 | `full` | 2.40 / 0 | .843 | .0060 | +1.3 / +0.4 | .096 | .859 / .794 | 0.24% | 0.3% |
+| VZG2 reseg | 104,276 | `full` + warning (G4) | 2.43 / 0 | .903 | .0069 | −3.2 / +1.1 | .090 | .911 / .841 | 0.29% | 0.2% |
+| VZG2 proseg_mask | 104,507 | `full` | 2.37 / 0 | .889 | .0057 | −1.0 / +0.8 | – (null: FPR) | .878 / .820 | 0.22% | 0.4% |
+| VZG2 proseg_hybrid, old (invalid) | 102,134 | `failed` + warning (G1, G2; G4) | 1.34 / 114 | .666 | .0058 | +16.4 / −0.7 | – (null: FPR) | 0 / 0 | 0.58% | 3.0% |
 
-Shares are of table cells; G3 is the pre-pruning T2 share; "–" is the
-platform's own segmentation (no shift test). MO1 (marker consistency over
+Shares are of table cells; G3 is the pre-pruning T2 share in E7's
+definition (the review re-run; equal to E7's counts on every section); "–"
+under G1 is the platform's own segmentation (no shift test), under G5 a
+spill-over flag nulled by its false-positive check. MO1 (marker consistency over
 all marker-pseudo-confident cells) is .9118 on ag7 proseg_hybrid and .8558
 on VZG2 original_seg (≥ .89 / .84); MO4 (soft class composition vs the
 MERFISH window) holds on both. The soft class JSD against VZG2 original_seg
@@ -1208,16 +1271,22 @@ ratio 1.34, shift 114 µm; G2: .666 < .70) with the G4 warning (Astro-Epen
 +16.4 points), so every cell is `not_attempted_gate` and `exclude_hard`;
 without a registration check G2 alone still fails it. The re-run
 proseg_hybrid of the same section is `full` without a warning (G1 2.40, G2
-.843). The spill-over flag rate and the soft Astro-Epen share are the
-signals that move on the invalid data (12.8% and 33.8%); per-cell
+.843). The spill-over rule's rate and the soft Astro-Epen share are the
+signals that move on the invalid data (12.8% of the cells, and 0.57% of
+its marker astrocytes, which nulls the flag; 33.8%); per-cell
 confidence does not (class bootstrap ≥ 0.9 on .733 of its cells, .739 on ag7
 proseg_hybrid).
 
 **Flags** (report-only; rates over table cells): the spill-over flag fires
-on 5.6–6.2% of ag7 and 8.3–9.6% of VZG2 cells (E3: 6.1% / 9.4%; spill-over
-prevalence, not microglia), with no marker astrocyte flagged on any section
-and a held-out enrichment of 38× on VZG2 original_seg (45–129× on the other
-VZG2 segmentations; ag7 has 5 derived genes, no held-out test). F1 flags
+on 5.6–6.2% of ag7 and 8.9–9.6% of VZG2 cells (proseg_mask's 8.3% is
+nulled, below; E3: 6.1% / 9.4%; spill-over prevalence, not microglia),
+with a held-out enrichment of 38× on VZG2
+original_seg (45–129× on the other VZG2 segmentations; ag7 has 5 derived
+genes, no held-out test). The false-positive check (review re-run; E3's
+MG_loose purity, the flag genes outside it: 2 on ag7, 10 on VZG2) flags
+1–2 of 16,495–26,156 ag7 marker astrocytes (≤ 0.012%) and 0.37–0.46% of
+VZG2's (original_seg 126 of 34,007: MO5 ≤ 0.5%), and nulls the flag on VZG2
+proseg_mask (0.54%) and the old invalid run (0.57%). F1 flags
 0.8% of ag7 (1.25% of original_seg) and 0.22–0.29% of VZG2 cells (MO6:
 0.2–1.0% on ag7 proseg_hybrid and VZG2 original_seg). `flag_astro_lowcount`
 flags 1.6–3.3% of ag7 cells (11.4% of original_seg, where 20% of the table
@@ -1230,13 +1299,14 @@ VZG2 original_seg), and the pruned re-map sends 0–2 cells per section to
 they are `implausible` (a re-mapped cell whose new subclass is not
 confident), below their parent or region-dropped.
 
-**T2 after pruning.** Calls that stay T2 after pruning are almost all in
-never-drop classes (`316 Bergmann NN`, `320 Astro-OLF NN`, `317 Astro-CB NN`:
-178 of the 222 on ag7 reseg are `316 Bergmann NN`) and are nearly never
-emitted (2 confident `320 Astro-OLF NN` subclass calls on ag7 reseg, 1 on
-VZG2 proseg_hybrid); E7's
-definition, which leaves never-drop and small subclasses out, gives 0–16
-cells (≤ 0.012%) on every section.
+**T2 after pruning.** In E7's definition (G3's and MO2's) 0–16 cells
+(≤ 0.012%) per section stay T2 after pruning. Counting every subclass with
+< 25% of its MERFISH cells in the present divisions (the stage C report's
+"plan" reading, withdrawn in review) would add never-drop subclasses the
+rule never removes (`316 Bergmann NN`, `320 Astro-OLF NN`, `317 Astro-CB
+NN`: 178 of 222 such calls on ag7 reseg are `316 Bergmann NN`), nearly
+never emitted (2 confident `320 Astro-OLF NN` subclass calls on ag7 reseg,
+1 on VZG2 proseg_hybrid).
 
 ## Shadow baselines (M3)
 
@@ -1311,10 +1381,11 @@ H4 and H16 baselines) are in §11 of the pre-registration document.
   ag7 / VZG2), but the gate derives its markers per panel and reads .805 /
   .819 on the same sections [L]. G4 is not evaluated until M6b's AP
   estimate chooses the MERFISH window (standalone runs pass
-  `--mouse-g4-sections`). The pipeline's RESOLVE task does not pass the QC
-  stage's registration check yet (M5 wiring), so G1 is not evaluated there
-  and the gate warns; a standalone run passes `--registration-qc`. G1 is the
-  signal that catches misregistered data: per-cell confidence does not
+  `--mouse-g4-sections`). The pipeline's RESOLVE task does not stage the
+  QC stage's registration check yet (M5 wiring) and refuses a mouse sample
+  without one; a standalone run passes `--registration-qc` or
+  `--registration-qc-dir`, and without either G1 is not evaluated and the
+  gate warns. G1 is the signal that catches misregistered data: per-cell confidence does not
   (class bootstrap ≥ 0.9 covers .733 of the invalid VZG2 proseg_hybrid cells
   and .739 of ag7 proseg_hybrid's; M6 exit).
 - **Mouse flags are report-only QC columns.** `flag_microglial_spillover`
