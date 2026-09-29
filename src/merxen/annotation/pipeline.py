@@ -32,16 +32,25 @@ command runs the same code on published ``*_clustered.h5ad`` files:
    set-c run on the segmentations ``annotation_xplat_sensitivity_segmentations``
    names and, for ``per_platform`` pairs, the intersection-panel run
    (``_xpanel``). Two uses on the same gene set are mapped once and recorded
-   under both run ids. The mouse region inference and pruned re-map are M6:
-   mouse maps unpruned here.
-4. **Write** ``<plat>/<sid>_mmc_<run_id>.parquet`` (tidy, per cell x level)
+   under both run ids.
+4. **Mouse region step** (``annotation.mouse_regions``; plan §7.2): from the
+   unpruned WMB run, infer the section's present CCF divisions (or take
+   ``mouse_section_regions``: the sample's own value, else the config's),
+   derive the two-tier drop list and re-map only the table cells whose
+   unpruned class or subclass was dropped, with ``--nodes_to_drop`` and the
+   lookup filtered to the pruned tree. The unpruned tidy parquet stays the
+   run's; the re-mapped cells go to ``<sid>_mmc_<run_id>_pruned.parquet``,
+   the per-cell region columns to ``<sid>_mouse_regions.parquet`` and the
+   decision to the sample's ``mouse_regions`` record. ``load_resolve_runs``
+   gives RESOLVE the merged (pruned) table.
+5. **Write** ``<plat>/<sid>_mmc_<run_id>.parquet`` (tidy, per cell x level)
    and ``map_manifest.json`` (query fingerprint, bundle hashes, engine
    parameters, ctm version, wall time). With ``annotation_reuse_published``
    a run is skipped when a published manifest has the same query
    fingerprint, ``build_hash``, engine parameters, ctm version, tidy schema
    version and (restricted) lookup; an unreadable published manifest only
    disables reuse.
-5. **Provisional labels** ``<plat>/<sid>_ct_provisional.parquet``: ``ct_*``
+6. **Provisional labels** ``<plat>/<sid>_ct_provisional.parquet``: ``ct_*``
    columns from the raw thresholds alone (hard floor = ``min_counts``, sinks
    and region plausibility from the bundle vocabulary, the parent chain),
    plus the raw engine columns ``mmc_*`` (§4.1). They are for inspection and
@@ -92,6 +101,29 @@ from merxen.annotation.mapmycells_engine import (
     write_query_h5ad,
     write_tidy_parquet,
 )
+from merxen.annotation.mouse_regions import (
+    CELL_ID,
+    REGION_SHARE_REFERENCE_ID,
+    REMAP_RUN_SUFFIX,
+    MouseRegionError,
+    MouseRegionOutputs,
+    MouseRegionRecord,
+    RegionPlan,
+    RegionRemapRecord,
+    RegionShareBundle,
+    SectionRegionsRequest,
+    WmbTaxonomy,
+    changed_cells,
+    check_rule_variant,
+    count_dropped_subclasses,
+    load_region_outputs,
+    merge_pruned_tidy,
+    plan_region_step,
+    pruned_lookup,
+    region_cells_filename,
+    region_cells_frame,
+    write_region_cells,
+)
 from merxen.annotation.panel import (
     REQUIRED_BUNDLES_FILE,
     AnnotationPanel,
@@ -110,7 +142,7 @@ from merxen.annotation.panel import (
     subset_trigger_for_config,
 )
 from merxen.annotation.provenance import annotation_manifest_filename
-from merxen.annotation.reference import read_lookup
+from merxen.annotation.reference import lookup_sha256, read_lookup
 from merxen.annotation.schema import (
     CellStatus,
     Columns,
@@ -162,7 +194,7 @@ PROVISIONAL_RULES: Final = (
     "vote or COP rule: the RESOLVE step (M4) replaces these labels."
 )
 # Roles MAP maps onto; resolvability and likelihood references are used by
-# PREP / v1.1, region shares by the mouse region step (M6).
+# PREP / v1.1, region shares by the mouse region step (plan §7.2).
 MAPPED_ROLES: Final[frozenset[str]] = frozenset({"primary", "secondary", "sensitivity"})
 RUN_SUFFIXES: Final[dict[str, str]] = {
     "annotation": "",
@@ -178,7 +210,12 @@ ENGINE_PREFIXES: Final[dict[str, str]] = {
 }
 N_PROCESSORS_ENV: Final = "MERXEN_ANNOTATION_MAP_N_PROCESSORS"
 DEFAULT_N_PROCESSORS: Final = 6
-MOUSE_REGION_STEP: Final = "not_run: mouse region inference and pruned re-map are M6"
+# ``map_manifest.json``'s ``mouse_region_step`` (per-sample outcomes are in
+# each sample's ``mouse_regions`` record).
+MOUSE_REGION_STEP: Final = (
+    "region inference and pruned re-map (plan §7.2), rule variant {variant}"
+)
+REGION_REMAP_PURPOSE: Final = "region_pruned_remap"
 
 SUBSET_PANELS_DIR: Final = "subset_panels"
 SUBSET_PANEL_TEMPLATE: Final = "{sample_id}_{run_id}.panel_genes.json"
@@ -518,6 +555,50 @@ def _prefer_current_resolvability(candidates: list[StoreEntry]) -> list[StoreEnt
     return candidates
 
 
+def locate_bundle_path(
+    store: ReferenceStore,
+    reference_id: str,
+    panel_hash: str | None,
+    *,
+    config: AnnotationConfig | None = None,
+) -> Path:
+    """Find the directory of a reference's current bundle on a panel.
+
+    ``locate_bundle`` for bundles MAP does not map onto (the panel-independent
+    ``wmb_region_share``): the same choice among the store's complete
+    current-builder bundles.
+
+    Args:
+        store: The reference store.
+        reference_id: Store id.
+        panel_hash: Declared-panel hash (``None``: panel-independent).
+        config: The run's annotation config (large-panel prefilter).
+
+    Returns:
+        The bundle directory.
+
+    Raises:
+        MapError: If there is none, or several.
+    """
+    candidates = _prefer_current_resolvability(
+        _current_bundles(store, reference_id, panel_hash, config)
+    )
+    if not candidates:
+        raise MapError(
+            f"the store has no builder-v{ANNOTATION_BUILDER_VERSION} bundle of "
+            f"{reference_id} on panel {(panel_hash or '-')[:16]}; build it with "
+            "merxen annotation-reference-prep"
+        )
+    if len(candidates) > 1:
+        raise MapError(
+            f"{len(candidates)} bundles of {reference_id} on panel "
+            f"{(panel_hash or '-')[:16]}: "
+            + ", ".join(str(entry.path) for entry in candidates)
+            + "; pass one with --bundle"
+        )
+    return candidates[0].path
+
+
 def locate_bundle(
     store: ReferenceStore,
     reference_id: str,
@@ -546,23 +627,9 @@ def locate_bundle(
     Raises:
         MapError: If there is none, or several (pass the bundle explicitly).
     """
-    candidates = _prefer_current_resolvability(
-        _current_bundles(store, reference_id, panel_hash, config)
+    return MmcBundle.from_dir(
+        locate_bundle_path(store, reference_id, panel_hash, config=config)
     )
-    if not candidates:
-        raise MapError(
-            f"the store has no builder-v{ANNOTATION_BUILDER_VERSION} bundle of "
-            f"{reference_id} on panel {(panel_hash or '-')[:16]}; build it with "
-            "merxen annotation-reference-prep"
-        )
-    if len(candidates) > 1:
-        raise MapError(
-            f"{len(candidates)} bundles of {reference_id} on panel "
-            f"{(panel_hash or '-')[:16]}: "
-            + ", ".join(str(entry.path) for entry in candidates)
-            + "; pass one with --bundle"
-        )
-    return MmcBundle.from_dir(candidates[0].path)
 
 
 # --------------------------------------------------------------------------
@@ -1028,6 +1095,8 @@ class MapSampleRecord(_MapModel):
             (a ``per_platform`` pair can refuse one platform's panel), so it
             has no run.
         runs: MMC runs by run id.
+        mouse_regions: The mouse region step (inferred divisions, drop list,
+            pruned re-map; ``None`` for human and unmapped samples).
         provisional_labels: Provisional ``ct_*`` parquet (relative), if any.
         provisional_summary: Confident share of table cells per level.
     """
@@ -1049,6 +1118,7 @@ class MapSampleRecord(_MapModel):
     controls_removed: dict[str, int] = Field(default_factory=dict)
     panel_status: Literal["ok", "refused"] = "ok"
     runs: dict[str, MapRunRecord] = Field(default_factory=dict)
+    mouse_regions: MouseRegionRecord | None = None
     provisional_labels: str | None = None
     provisional_summary: dict[str, float] = Field(default_factory=dict)
 
@@ -1067,7 +1137,8 @@ class MapManifest(_MapModel):
         ctm_commit: ctm commit.
         n_processors: Worker processes.
         min_counts: Table-cell threshold.
-        mouse_region_step: Status of the mouse region step (M6).
+        mouse_region_step: The mouse region step's rule (``MOUSE_REGION_STEP``;
+            ``None`` for human).
         panel_status: ``required_bundles.json`` status: ``"refused"`` when
             no panel can be annotated, so nothing was mapped (RESOLVE writes
             statuses only; plan §3.3 step 2).
@@ -1735,6 +1806,8 @@ def annotate_map(
     write_provisional: bool = True,
     refused_platforms: Iterable[str] = (),
     find_subset_bundle: SubsetBundleFinder | None = None,
+    region_shares: RegionShareBundle | None = None,
+    section_regions: Mapping[str, str] | None = None,
 ) -> MapManifest:
     """Run the MAP step for the samples of one pair x segmentation.
 
@@ -1761,13 +1834,20 @@ def annotate_map(
         find_subset_bundle: Returns the store's bundle of a reference on a
             subset panel hash, or ``None`` (``store_subset_bundle_finder``);
             without it every needed subset bundle is only requested.
+        region_shares: The ``wmb_region_share`` bundle (mouse; required
+            unless every sample's ``mouse_section_regions`` is ``none``).
+        section_regions: ``mouse_section_regions`` per sample id (the
+            samplesheet column); a sample without one takes the config's
+            ``mouse_section_regions``. Mouse only.
 
     Returns:
         The manifest (also written to ``<output_dir>/map_manifest.json``).
 
     Raises:
         CtmVersionError: If the installed ctm is not ``config.ctm_version``.
-        MapError: If the inputs cannot be mapped.
+        MapError: If the inputs cannot be mapped (also: a mouse region
+            request without the region-share bundle, or region settings this
+            version does not implement).
         MmcEngineError: If a mapping fails.
     """
     start = time.monotonic()
@@ -1795,8 +1875,14 @@ def annotate_map(
         ctm_commit=ctm_commit(),
         n_processors=processes,
         min_counts=min_counts,
-        mouse_region_step=MOUSE_REGION_STEP if config.species == "mouse" else None,
+        mouse_region_step=_mouse_region_step_label(config),
         thresholds=config.thresholds.model_dump(mode="json"),
+    )
+    requests = _section_region_requests(
+        [sample.sample_id for sample in samples],
+        config,
+        section_regions=section_regions,
+        region_shares=region_shares,
     )
     try:
         loaded_samples = load_samples(samples, config, min_counts=min_counts)
@@ -1816,6 +1902,8 @@ def annotate_map(
                 write_provisional=write_provisional,
                 panel_refused=loaded.sample.platform.upper() in refused,
                 find_subset_bundle=find_subset_bundle,
+                region_request=requests.get(loaded.sample.sample_id),
+                region_shares=region_shares,
             )
             manifest.samples[loaded.sample.sample_id] = record
             # Written after every sample, so an interrupted run keeps the
@@ -1846,12 +1934,16 @@ def _map_sample(
     write_provisional: bool,
     panel_refused: bool = False,
     find_subset_bundle: SubsetBundleFinder | None = None,
+    region_request: SectionRegionsRequest | None = None,
+    region_shares: RegionShareBundle | None = None,
 ) -> MapSampleRecord:
     """Map one sample onto every run that applies to its platform.
 
     Runs on one bundle with the same query (two uses of one gene set) are
     mapped once; the later run ids get a copy of the tidy table
-    (``same_mapping_as``).
+    (``same_mapping_as``). A mouse sample (``region_request`` given) then
+    runs the region step on its primary run (``_mouse_region_step``); its
+    provisional labels use the pruned calls and carry the region columns.
 
     Raises:
         MapError: If no run applies to the sample and its panel was not
@@ -1962,10 +2054,47 @@ def _map_sample(
         record.runs[run.run_id] = run_record
         tidy, _ = read_tidy_parquet(parquet)
         tidies.append((run, tidy))
+    regions: MouseRegionOutputs | None = None
+    region_run: MapBundle | None = None
+    if region_request is not None and config.species == "mouse":
+        position = next(
+            (
+                index
+                for index, (run, _) in enumerate(tidies)
+                if run.role == "primary" and "annotation" in run.purposes
+            ),
+            None,
+        )
+        if position is not None:
+            region_run, unpruned = tidies[position]
+            record.mouse_regions, regions = _mouse_region_step(
+                loaded,
+                region_run,
+                unpruned,
+                region_request,
+                config,
+                region_shares=region_shares,
+                output=output,
+                sample_dir=sample_dir,
+                scratch=scratch,
+                processes=processes,
+                installed=installed,
+                published=published,
+                published_dir=published_dir,
+            )
+            tidies[position] = (region_run, regions.pruned)
     if write_provisional and tidies:
         labels = provisional_labels(
             loaded, tidies, config, pair_id=pair_id, segmentation=segmentation
         )
+        if regions is not None and region_run is not None:
+            region_columns = regions.engine_columns(
+                loaded.obs_names,
+                prefix=_engine_prefix(region_run),
+                class_level=region_run.bundle.levels[0],
+                subclass_level=region_run.bundle.levels[1],
+            )
+            labels = pd.concat([labels, region_columns.reset_index(drop=True)], axis=1)
         path = sample_dir / f"{sample.sample_id}{PROVISIONAL_SUFFIX}"
         write_provisional_parquet(
             labels,
@@ -1976,11 +2105,491 @@ def _map_sample(
                 "sample_id": sample.sample_id,
                 "thresholds": config.thresholds.model_dump(mode="json"),
                 "runs": {run.run_id: run.bundle.build_hash for run, _ in tidies},
+                "mouse_regions": (
+                    None
+                    if record.mouse_regions is None
+                    else {
+                        "status": record.mouse_regions.status,
+                        "present_regions": record.mouse_regions.present_regions,
+                        "n_nodes_dropped": len(record.mouse_regions.nodes_to_drop),
+                        "pruned_calls": record.mouse_regions.is_pruned,
+                    }
+                ),
             },
         )
         record.provisional_labels = _relative(path, output)
         record.provisional_summary = _confident_shares(labels)
     return record
+
+
+# --------------------------------------------------------------------------
+# Mouse region step (plan §7.2)
+
+
+def _mouse_region_step_label(config: AnnotationConfig) -> str | None:
+    """Return ``map_manifest.json``'s ``mouse_region_step`` (``None`` for human)."""
+    if config.species != "mouse":
+        return None
+    return MOUSE_REGION_STEP.format(variant=config.mouse_regions.rule_variant)
+
+
+def _section_region_requests(
+    sample_ids: Sequence[str],
+    config: AnnotationConfig,
+    *,
+    section_regions: Mapping[str, str] | None,
+    region_shares: RegionShareBundle | None,
+) -> dict[str, SectionRegionsRequest]:
+    """Return each mouse sample's ``mouse_section_regions`` request.
+
+    Checked before anything is mapped, so a missing bundle or an
+    unimplemented rule fails in seconds, not after the mapping.
+
+    Raises:
+        MapError: For per-sample values on a human run, an invalid value, a
+            request that needs the region-share bundle without one, or a
+            rule variant this version does not implement.
+    """
+    given = dict(section_regions or {})
+    if config.species != "mouse":
+        if given:
+            raise MapError(
+                "mouse_section_regions applies to mouse runs only "
+                f"(given for {sorted(given)})"
+            )
+        return {}
+    unknown = sorted(set(given) - set(sample_ids))
+    if unknown:
+        logger.warning("mouse_section_regions names unknown samples %s", unknown)
+    try:
+        check_rule_variant(config.mouse_regions)
+        requests = {
+            sample_id: SectionRegionsRequest.parse(
+                given.get(sample_id) or config.mouse_section_regions
+            )
+            for sample_id in sample_ids
+        }
+    except ValueError as error:
+        raise MapError(str(error)) from error
+    needing = sorted(
+        sample_id
+        for sample_id, request in requests.items()
+        if request.needs_region_shares
+    )
+    if needing and region_shares is None:
+        raise MapError(
+            f"the mouse region step of {needing} needs the "
+            f"{REGION_SHARE_REFERENCE_ID} bundle (build it with merxen "
+            "annotation-reference-prep, or set mouse_section_regions to none "
+            "to map without pruning)"
+        )
+    return requests
+
+
+def _table_xy(loaded: LoadedSample, cell_ids: pd.Index) -> np.ndarray | None:
+    """Return the µm coordinates of the given table cells, or ``None``."""
+    xy, _ = read_spatial(loaded.sample.h5ad_path)
+    if xy is None:
+        return None
+    if len(xy) != loaded.n_objects:
+        logger.warning(
+            "%s: obsm['spatial'] does not fit the objects; no coordinates for "
+            "the region step",
+            loaded.sample.sample_id,
+        )
+        return None
+    positions = loaded.obs_names.get_indexer(cell_ids)
+    if (positions < 0).any():
+        raise MapError("MMC results name cells absent from the sample")
+    return np.asarray(xy[positions], dtype=np.float64)
+
+
+def _mouse_region_step(
+    loaded: LoadedSample,
+    run: MapBundle,
+    unpruned: pd.DataFrame,
+    request: SectionRegionsRequest,
+    config: AnnotationConfig,
+    *,
+    region_shares: RegionShareBundle | None,
+    output: Path,
+    sample_dir: Path,
+    scratch: Path,
+    processes: int,
+    installed: str,
+    published: MapManifest | None,
+    published_dir: Path | None,
+) -> tuple[MouseRegionRecord, MouseRegionOutputs]:
+    """Infer a mouse section's divisions, prune and re-map (plan §7.2).
+
+    Args:
+        loaded: The sample.
+        run: Its primary WMB run (the bundle and panel it mapped with).
+        unpruned: That run's tidy table.
+        request: The sample's ``mouse_section_regions`` request.
+        config: The annotation config.
+        region_shares: The ``wmb_region_share`` bundle.
+        output: ``annotation_map_out``.
+        sample_dir: ``<output>/<platform>``.
+        scratch: Task-local scratch.
+        processes: MMC worker processes.
+        installed: Installed ctm version.
+        published: Published manifest for re-map reuse.
+        published_dir: Its directory.
+
+    Returns:
+        The region record and the outputs (pruned tidy table, cells).
+
+    Raises:
+        MapError: If the bundle has no class and subclass levels or the
+            region step cannot run.
+    """
+    sample_id = loaded.sample.sample_id
+    bundle = run.bundle
+    if len(bundle.levels) < 2:
+        raise MapError(
+            f"{sample_id}: the region step needs the class and subclass levels; "
+            f"{bundle.reference_id} maps {bundle.levels}"
+        )
+    class_level, subclass_level = bundle.levels[0], bundle.levels[1]
+    tree = bundle.tree()
+    try:
+        taxonomy = WmbTaxonomy.from_tree(
+            tree, class_level=class_level, subclass_level=subclass_level
+        )
+    except MouseRegionError as error:
+        raise MapError(f"{sample_id}: {error}") from error
+    cell_ids = pd.Index(unpruned["cell_id"].astype(str).unique())
+    classes = level_frame(unpruned, class_level).reindex(cell_ids)
+    subclasses = level_frame(unpruned, subclass_level).reindex(cell_ids)
+    xy = (
+        _table_xy(loaded, cell_ids)
+        if region_shares is not None and request.needs_region_shares
+        else None
+    )
+    try:
+        plan = plan_region_step(
+            request,
+            cell_ids=cell_ids,
+            class_names=classes["name"].astype(object).to_numpy(),
+            class_labels=classes["assignment"].astype(object).to_numpy(),
+            class_bp=classes["bp"].to_numpy(np.float64),
+            subclass_names=subclasses["name"].astype(object).to_numpy(),
+            subclass_labels=subclasses["assignment"].astype(object).to_numpy(),
+            subclass_bp=subclasses["bp"].to_numpy(np.float64),
+            xy=xy,
+            shares=region_shares.shares if region_shares is not None else None,
+            taxonomy=taxonomy,
+            config=config.mouse_regions,
+        )
+    except MouseRegionError as error:
+        raise MapError(f"{sample_id}: {error}") from error
+    for reason in plan.reasons:
+        logger.warning("%s: %s", sample_id, reason)
+    remap_record: RegionRemapRecord | None = None
+    remap = unpruned.iloc[0:0].copy()
+    pruned = unpruned
+    remap_ids = plan.remap_cell_ids
+    if plan.status == "pruned" and len(remap_ids):
+        remap_record, remap = _remap_cells(
+            loaded,
+            run,
+            plan,
+            remap_ids,
+            config,
+            output=output,
+            sample_dir=sample_dir,
+            scratch=scratch,
+            processes=processes,
+            installed=installed,
+            published=published,
+            published_dir=published_dir,
+        )
+        pruned = merge_pruned_tidy(unpruned, remap)
+    class_changed, subclass_changed = changed_cells(
+        unpruned,
+        pruned,
+        class_level=class_level,
+        subclass_level=subclass_level,
+        cell_ids=cell_ids,
+    )
+    cells = region_cells_frame(
+        plan, class_changed=class_changed, subclass_changed=subclass_changed
+    )
+    inference = plan.inference
+    summary: dict[str, Any] = {
+        "sample_id": sample_id,
+        "run_id": run.run_id,
+        "requested": request.value,
+        "source": request.source,
+        "status": plan.status,
+        "inferred_regions": list(inference.inferred_regions) if inference else [],
+        "present_regions": list(plan.present_regions),
+        "nodes_to_drop": [list(node.as_pair()) for node in plan.nodes],
+    }
+    cells_path = write_region_cells(
+        cells, sample_dir / region_cells_filename(sample_id), summary
+    )
+    levels = plan.dropped_level
+    record = MouseRegionRecord(
+        rule_variant=config.mouse_regions.rule_variant,
+        run_id=run.run_id,
+        requested=request.value,
+        source=request.source,
+        status=plan.status,
+        reasons=list(plan.reasons),
+        params=config.mouse_regions.model_dump(mode="json"),
+        region_share=(
+            region_shares.provenance()
+            if region_shares is not None and request.needs_region_shares
+            else None
+        ),
+        n_table_cells=len(cell_ids),
+        n_confident_neurons=inference.n_confident_neurons if inference else 0,
+        n_voting_neurons=inference.n_voting_neurons if inference else 0,
+        n_assigned_tiles=inference.n_assigned_tiles if inference else 0,
+        tile_counts=dict(inference.tile_counts) if inference else {},
+        largest_component=dict(inference.largest_component) if inference else {},
+        inferred_regions=list(inference.inferred_regions) if inference else [],
+        present_regions=list(plan.present_regions),
+        nodes_to_drop=list(plan.nodes),
+        n_dropped_classes=sum(1 for node in plan.nodes if node.kind == "class"),
+        n_dropped_subclasses=count_dropped_subclasses(plan.nodes, taxonomy),
+        n_cells_region_dropped=int(sum(value is not None for value in levels)),
+        n_cells_region_dropped_class=int(sum(value == "class" for value in levels)),
+        n_cells_class_changed=int(class_changed.sum()),
+        n_cells_subclass_changed=int(subclass_changed.sum()),
+        remap=remap_record,
+        cells_parquet=_relative(cells_path, output),
+        cells_parquet_sha256=file_sha256(cells_path),
+    )
+    logger.info(
+        "%s: region step %s (%s): present %s, %d node(s) dropped, %d cell(s) re-mapped",
+        sample_id,
+        record.status,
+        record.source,
+        ";".join(record.present_regions) or "-",
+        len(record.nodes_to_drop),
+        record.n_cells_region_dropped,
+    )
+    outputs = MouseRegionOutputs(
+        record=record,
+        cells=cells.set_index(CELL_ID, drop=False),
+        unpruned=unpruned,
+        pruned=pruned,
+        remap=remap,
+    )
+    return record, outputs
+
+
+def _reusable_remap(
+    published: MapManifest | None,
+    published_dir: Path | None,
+    *,
+    sample_id: str,
+    fingerprint: str,
+    build_hash: str,
+    engine_params: Mapping[str, Any],
+    ctm_version: str | None,
+    lookup_digest: str,
+    nodes_to_drop: Sequence[Sequence[str]],
+    keep_extended_json: bool,
+) -> tuple[Path, RegionRemapRecord] | None:
+    """Return a published re-map identical to the one requested, if any.
+
+    Identical as for ``_reusable_parquet``, plus the same drop list.
+    """
+    if published is None or published_dir is None:
+        return None
+    sample = published.samples.get(sample_id)
+    regions = sample.mouse_regions if sample is not None else None
+    remap = regions.remap if regions is not None else None
+    if remap is None:
+        return None
+    reasons = []
+    if remap.query_fingerprint != fingerprint:
+        reasons.append("query fingerprint")
+    if remap.build_hash != build_hash:
+        reasons.append("build_hash")
+    if remap.engine_params != dict(engine_params):
+        reasons.append("engine parameters")
+    if remap.ctm_version != ctm_version:
+        reasons.append("ctm version")
+    if remap.tidy_schema_version != TIDY_SCHEMA_VERSION:
+        reasons.append("tidy schema version")
+    if remap.lookup_sha256 != lookup_digest:
+        reasons.append("lookup")
+    if remap.nodes_to_drop != [list(pair) for pair in nodes_to_drop]:
+        reasons.append("nodes to drop")
+    if keep_extended_json and (
+        remap.extended_json is None
+        or not (published_dir / remap.extended_json).is_file()
+    ):
+        reasons.append("kept extended JSON")
+    path = published_dir / remap.parquet
+    if not reasons and (
+        not path.is_file() or file_sha256(path) != remap.parquet_sha256
+    ):
+        reasons.append("parquet missing or changed")
+    if reasons:
+        logger.info(
+            "%s %s: published re-map not reused (%s differ)",
+            sample_id,
+            remap.run_id,
+            ", ".join(reasons),
+        )
+        return None
+    return path, remap
+
+
+def _remap_cells(
+    loaded: LoadedSample,
+    run: MapBundle,
+    plan: RegionPlan,
+    remap_ids: pd.Index,
+    config: AnnotationConfig,
+    *,
+    output: Path,
+    sample_dir: Path,
+    scratch: Path,
+    processes: int,
+    installed: str,
+    published: MapManifest | None,
+    published_dir: Path | None,
+) -> tuple[RegionRemapRecord, pd.DataFrame]:
+    """Re-map the cells whose unpruned call was dropped, on the pruned tree.
+
+    ``--nodes_to_drop`` removes the nodes from the mapping precompute and
+    the lookup is filtered to the pruned tree (``pruned_lookup``), so no
+    zero-marker parent reaches ``cell_type_mapper`` (plan §7.2 step 4).
+    """
+    sample_id = loaded.sample.sample_id
+    bundle = run.bundle
+    query = build_sample_query(loaded, run.panel)
+    positions = query.cell_ids.get_indexer(remap_ids)
+    if (positions < 0).any():
+        raise MapError(f"{sample_id}: re-map cells are not table cells")
+    counts = query.counts[positions]
+    fingerprint = query_fingerprint(
+        remap_ids, query.total_counts[positions], query.gene_ids
+    )
+    try:
+        validation = pruned_lookup(
+            read_lookup(bundle.lookup), bundle.tree(), plan.nodes, query.gene_ids
+        )
+    except ValueError as error:
+        raise MapError(f"{sample_id}: pruned lookup: {error}") from error
+    digest = lookup_sha256(validation.lookup)
+    nodes = [list(node.as_pair()) for node in plan.nodes]
+    params = MmcEngineParams.from_reference_spec(run.spec, n_processors=processes)
+    run_id = run.run_id + REMAP_RUN_SUFFIX
+    parquet = sample_dir / MMC_PARQUET_TEMPLATE.format(
+        sample_id=sample_id, run_id=run_id
+    )
+    collapsed = [parent.key for parent in validation.collapsed]
+    reusable = (
+        _reusable_remap(
+            published,
+            published_dir,
+            sample_id=sample_id,
+            fingerprint=fingerprint,
+            build_hash=bundle.build_hash,
+            engine_params=params.reuse_key(),
+            ctm_version=installed,
+            lookup_digest=digest,
+            nodes_to_drop=nodes,
+            keep_extended_json=config.keep_extended_json,
+        )
+        if config.reuse_published
+        else None
+    )
+    if reusable is not None:
+        source, published_record = reusable
+        if source.resolve() != parquet.resolve():
+            shutil.copy2(source, parquet)
+        extended: str | None = None
+        if config.keep_extended_json and published_record.extended_json is not None:
+            assert published_dir is not None
+            kept = published_dir / published_record.extended_json
+            target = parquet.with_name(
+                parquet.name.removesuffix(".parquet") + EXTENDED_JSON_GZ_SUFFIX
+            )
+            if kept.resolve() != target.resolve():
+                shutil.copy2(kept, target)
+            extended = _relative(target, output)
+        record = published_record.model_copy(
+            update={
+                "parquet": _relative(parquet, output),
+                "bundle_path": str(bundle.path),
+                "extended_json": extended,
+                "reused": True,
+                "reused_from": str(source.resolve()),
+            }
+        )
+        logger.info("%s: reused the pruned re-map %s", run_id, source)
+    else:
+        run_scratch = scratch / f"{sample_id}_{run_id}"
+        try:
+            run_scratch.mkdir(parents=True, exist_ok=True)
+            lookup_path = run_scratch / "lookup.pruned.json"
+            lookup_path.write_text(json.dumps(validation.lookup) + "\n", "utf-8")
+            query_path = write_query_h5ad(
+                counts, remap_ids, query.gene_ids, run_scratch / "query.h5ad"
+            )
+            logger.info(
+                "%s: re-mapping %d cell(s) without %d node(s)",
+                sample_id,
+                len(remap_ids),
+                len(nodes),
+            )
+            result = run_mmc(
+                query_path,
+                bundle,
+                params,
+                output_parquet=parquet,
+                work_dir=run_scratch,
+                expected_ctm_version=config.ctm_version,
+                lookup_path=lookup_path,
+                nodes_to_drop=[node.as_pair() for node in plan.nodes],
+                keep_extended_json=config.keep_extended_json,
+                log_dir=output / "logs",
+                run_metadata={
+                    "run_id": run_id,
+                    "sample_id": sample_id,
+                    "query_fingerprint": fingerprint,
+                    "purposes": [REGION_REMAP_PURPOSE],
+                    "nodes_to_drop": nodes,
+                },
+            )
+        finally:
+            shutil.rmtree(run_scratch, ignore_errors=True)
+        record = RegionRemapRecord(
+            run_id=run_id,
+            reference_id=run.reference_id,
+            build_hash=bundle.build_hash,
+            bundle_path=str(bundle.path),
+            parquet=_relative(parquet, output),
+            parquet_sha256=file_sha256(parquet),
+            n_cells=result.n_cells,
+            n_query_genes=result.n_query_genes,
+            query_fingerprint=fingerprint,
+            lookup_sha256=digest,
+            collapsed_parents=collapsed,
+            nodes_to_drop=nodes,
+            engine_params=params.reuse_key(),
+            ctm_version=result.ctm_version,
+            ctm_commit=result.ctm_commit,
+            tidy_schema_version=TIDY_SCHEMA_VERSION,
+            wall_s=result.wall_s,
+            peak_rss_gb=result.peak_rss_gb,
+            extended_json=(
+                _relative(result.extended_json, output)
+                if result.extended_json is not None
+                else None
+            ),
+        )
+    remap, _ = read_tidy_parquet(parquet)
+    return record, remap
 
 
 def _subset_bundle_for(
@@ -2547,7 +3156,7 @@ def write_refused_manifest(
         ctm_commit=ctm_commit(),
         n_processors=n_processors or default_n_processors(),
         min_counts=config.require_min_counts(),
-        mouse_region_step=MOUSE_REGION_STEP if config.species == "mouse" else None,
+        mouse_region_step=_mouse_region_step_label(config),
         panel_status="refused",
         panel_reasons=list(required.reasons),
         thresholds=config.thresholds.model_dump(mode="json"),
@@ -2628,6 +3237,10 @@ class ResolveRun:
         overridden: Whether the bundle is not the one the run mapped with.
         same_lookup: Whether the bundle's marker lookup equals the one the
             run mapped with (an override with another lookup is refused).
+        unpruned_tidy: For a pruned mouse primary run, the unpruned table
+            (``tidy`` is then the pruned one; plan §7.2).
+        regions: The mouse region step's outputs (per-cell region columns,
+            re-mapped cells), for the primary run of a mouse sample.
     """
 
     record: MapRunRecord
@@ -2635,6 +3248,8 @@ class ResolveRun:
     tidy: pd.DataFrame
     overridden: bool = False
     same_lookup: bool = True
+    unpruned_tidy: pd.DataFrame | None = None
+    regions: MouseRegionOutputs | None = None
 
     @property
     def run_id(self) -> str:
@@ -2796,7 +3411,9 @@ def load_resolve_runs(
         check_sha256: Check each parquet against its recorded sha256.
 
     Returns:
-        Run id to run.
+        Run id to run. A mouse sample's primary run carries its region step
+        (``ResolveRun.regions``) and, when the step pruned, the pruned tidy
+        table as ``tidy`` (the unpruned one as ``unpruned_tidy``).
 
     Raises:
         ResolveError: If a parquet changed, or an override's reference, panel
@@ -2837,6 +3454,23 @@ def load_resolve_runs(
             tidy=tidy,
             overridden=overridden,
             same_lookup=same_lookup,
+        )
+    regions = sample.mouse_regions
+    if regions is not None:
+        base = runs.get(regions.run_id)
+        if base is None:
+            raise ResolveError(
+                f"{sample.sample_id}: the region step read run {regions.run_id}, "
+                "which the manifest does not record"
+            )
+        try:
+            outputs = load_region_outputs(
+                root, regions, base.tidy, check_sha256=check_sha256
+            )
+        except MouseRegionError as error:
+            raise ResolveError(f"{sample.sample_id}: {error}") from error
+        runs[regions.run_id] = replace(
+            base, tidy=outputs.pruned, unpruned_tidy=base.tidy, regions=outputs
         )
     return runs
 

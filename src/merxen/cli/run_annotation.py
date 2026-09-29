@@ -780,6 +780,15 @@ def _bundle_overrides(values: tuple[str, ...]) -> dict[str, Path]:
     help="A results tree --out and --work-dir must stay out of (repeatable; "
     "the inputs' own results trees are always protected).",
 )
+@click.option(
+    "--mouse-section-regions",
+    "section_region_values",
+    multiple=True,
+    help="Mouse: auto, none or ';'-separated CCF divisions (e.g. "
+    "'Isocortex;HPF;TH'), for every sample or as SAMPLE_ID=VALUE (repeatable). "
+    "Default: each sample's clustering-config value, else the annotation "
+    "config's mouse_section_regions (auto).",
+)
 def annotate_command(
     clustered_h5ads: tuple[Path, ...],
     prepared_dir: Path | None,
@@ -808,13 +817,16 @@ def annotate_command(
     declared_ids_values: tuple[str, ...],
     require_bundle_refs: bool,
     results_roots: tuple[Path, ...],
+    section_region_values: tuple[str, ...],
 ) -> None:
     """Map published or prepared samples with MapMyCells (MAP step, plan §3.3).
 
     Writes <out>/<platform>/<sid>_mmc_<run_id>.parquet (tidy per cell x
     level), <sid>_ct_provisional.parquet (raw-threshold labels, provisional
     until RESOLVE) and map_manifest.json; never writes into the inputs'
-    results tree.
+    results tree. Mouse sections also get the region step (plan §7.2):
+    <sid>_mouse_regions.parquet and, when nodes are dropped, the pruned
+    re-map <sid>_mmc_<run_id>_pruned.parquet.
     """
     from merxen.annotation.mapmycells_engine import MmcEngineError
     from merxen.annotation.pipeline import MapError
@@ -851,6 +863,7 @@ def annotate_command(
                 declared_id_files=_key_value_paths(
                     declared_ids_values, "--declared-ids-file"
                 ),
+                section_region_values=section_region_values,
             )
     except (MapError, MmcEngineError) as error:
         raise click.ClickException(f"{type(error).__name__}: {error}") from error
@@ -885,6 +898,7 @@ def _annotate(
     require_bundle_refs: bool,
     results_roots: tuple[Path, ...] = (),
     declared_id_files: Mapping[str, Path] | None = None,
+    section_region_values: tuple[str, ...] = (),
 ) -> None:
     from merxen.annotation.mapmycells_engine import MmcBundle
     from merxen.annotation.panel import (
@@ -986,6 +1000,12 @@ def _annotate(
                     source="prepared",
                 )
             )
+    section_regions = _section_regions(
+        section_region_values,
+        clustering,
+        species=species,
+        sample_ids=[sample.sample_id for sample in samples],
+    )
     inputs = [sample.h5ad_path for sample in samples]
     check_output_outside_inputs(output_dir, inputs, protected_roots=results_roots)
     if work_dir is not None:
@@ -1086,6 +1106,21 @@ def _annotate(
         raise click.UsageError("no reference to map (check --references)")
     if wanted_platforms is not None:
         samples = [sample for sample in samples if sample.platform in wanted_platforms]
+        section_regions = {
+            sample.sample_id: section_regions[sample.sample_id]
+            for sample in samples
+            if sample.sample_id in section_regions
+        }
+    region_shares = _region_share_bundle(
+        required,
+        config,
+        section_regions,
+        [sample.sample_id for sample in samples],
+        overrides=overrides,
+        from_refs=from_refs,
+        require_bundle_refs=require_bundle_refs,
+        reference_store=reference_store,
+    )
     manifest = annotate_map(
         samples,
         runs,
@@ -1106,6 +1141,8 @@ def _annotate(
             if reference_store is not None and not require_bundle_refs
             else None
         ),
+        region_shares=region_shares,
+        section_regions=section_regions,
     )
     click.echo(
         f"annotate: {len(manifest.samples)} sample(s), "
@@ -1118,6 +1155,157 @@ def _annotate(
                 f"- {sample_id} {run_id}: {run.n_cells} cells x {run.n_query_genes} "
                 f"genes, {'reused' if run.reused else f'{run.wall_s:.0f} s'}"
             )
+        regions = record.mouse_regions
+        if regions is not None:
+            click.echo(
+                f"- {sample_id} regions ({regions.source}): {regions.status}; "
+                f"present {';'.join(regions.present_regions) or '-'}; "
+                f"{len(regions.nodes_to_drop)} node(s) dropped, "
+                f"{regions.n_cells_region_dropped} cell(s) re-mapped"
+            )
+
+
+def _section_regions(
+    values: tuple[str, ...],
+    clustering: Mapping[str, Any],
+    *,
+    species: str,
+    sample_ids: list[str],
+) -> dict[str, str]:
+    """Return each sample's ``mouse_section_regions`` for ``annotate_map``.
+
+    A ``SAMPLE_ID=VALUE`` option wins, then a bare option (every sample),
+    then the sample's clustering-config value (the samplesheet column); a
+    sample left out takes the annotation config's value in ``annotate_map``.
+
+    Raises:
+        click.UsageError: For values on a human run or an invalid value.
+    """
+    from merxen.annotation.samplesheet_columns import (
+        parse_mouse_section_regions,
+        section_regions_by_sample,
+    )
+
+    try:
+        from_config = section_regions_by_sample(clustering.get("samples"))
+    except ValueError as error:
+        raise click.UsageError(f"--clustering-config: {error}") from error
+    if species != "mouse":
+        if values:
+            raise click.UsageError("--mouse-section-regions is for mouse runs only")
+        return {}
+    every: str | None = None
+    per_sample: dict[str, str] = {}
+    for value in values:
+        key, separator, rest = value.partition("=")
+        try:
+            if separator:
+                parsed = parse_mouse_section_regions(rest)
+                if parsed is None or not key.strip():
+                    raise ValueError(f"{value!r} must be SAMPLE_ID=VALUE")
+                per_sample[key.strip()] = parsed
+            else:
+                every = parse_mouse_section_regions(value)
+        except ValueError as error:
+            raise click.BadParameter(
+                str(error), param_hint="--mouse-section-regions"
+            ) from error
+    unknown = sorted(set(per_sample) - set(sample_ids))
+    if unknown:
+        raise click.BadParameter(
+            f"no sample {unknown} (samples: {sample_ids})",
+            param_hint="--mouse-section-regions",
+        )
+    result = {
+        sample_id: value
+        for sample_id, value in from_config.items()
+        if sample_id in sample_ids
+    }
+    if every is not None:
+        result.update(dict.fromkeys(sample_ids, every))
+    result.update(per_sample)
+    return result
+
+
+def _region_share_bundle(
+    required: Any,
+    config: AnnotationConfig,
+    section_regions: Mapping[str, str],
+    sample_ids: list[str],
+    *,
+    overrides: Mapping[str, Path],
+    from_refs: Mapping[tuple[str, str | None], Any],
+    require_bundle_refs: bool,
+    reference_store: Any,
+) -> Any:
+    """Return the ``wmb_region_share`` bundle a mouse run's region step needs.
+
+    ``--bundle wmb_region_share=DIR`` wins, then its ``--bundle-ref`` (a
+    pipeline task stages it), then the store's current bundle. ``None``
+    for human runs and when every sample's regions are ``none``.
+
+    Raises:
+        click.UsageError: If the bundle is needed but not found.
+    """
+    from merxen.annotation.mouse_regions import (
+        REGION_SHARE_REFERENCE_ID,
+        MouseRegionError,
+        RegionShareBundle,
+        SectionRegionsRequest,
+    )
+    from merxen.annotation.pipeline import locate_bundle_path
+
+    if config.species != "mouse":
+        return None
+    try:
+        needed = any(
+            SectionRegionsRequest.parse(
+                section_regions.get(sample_id) or config.mouse_section_regions
+            ).needs_region_shares
+            for sample_id in sample_ids
+        )
+    except ValueError as error:
+        raise click.UsageError(str(error)) from error
+    if not needed:
+        return None
+    item = next(
+        (bundle for bundle in required.bundles if bundle.role == "region_share"),
+        None,
+    )
+    reference_id = item.reference_id if item is not None else REGION_SHARE_REFERENCE_ID
+    panel_hash = item.panel_hash if item is not None else None
+    expected_hash: str | None = None
+    path = overrides.get(reference_id)
+    if path is None and (reference_id, panel_hash) in from_refs:
+        ref = from_refs[(reference_id, panel_hash)]
+        path, expected_hash = Path(ref.path), str(ref.build_hash)
+    if path is None and item is None:
+        raise click.UsageError(
+            f"the mouse region step needs {reference_id}, which "
+            "required_bundles.json does not list (add it to the annotation "
+            "references, or give --mouse-section-regions none)"
+        )
+    if path is None and require_bundle_refs:
+        raise click.UsageError(
+            f"no --bundle-ref for {reference_id} (--require-bundle-refs)"
+        )
+    if path is None and reference_store is not None:
+        path = locate_bundle_path(reference_store, reference_id, panel_hash)
+    if path is None:
+        raise click.UsageError(
+            f"no bundle for {reference_id}: give --store, --bundle or --bundle-ref "
+            "(or --mouse-section-regions none)"
+        )
+    try:
+        bundle = RegionShareBundle.from_dir(path)
+    except MouseRegionError as error:
+        raise click.UsageError(str(error)) from error
+    if expected_hash is not None and bundle.build_hash != expected_hash:
+        raise click.UsageError(
+            f"bundle {path} has build_hash {bundle.build_hash[:16]}, its bundle "
+            f"ref says {expected_hash[:16]}"
+        )
+    return bundle
 
 
 def _n_segmented(values: tuple[str, ...]) -> dict[str, int]:

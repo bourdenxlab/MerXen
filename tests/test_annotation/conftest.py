@@ -266,7 +266,9 @@ class FakeMmc:
     are the runner-ups, and every deeper level repeats the node's single
     child (named ``"<name> <depth>"``) with bootstrap probability
     ``p ** (depth + 1)`` and the product of those as its aggregate
-    probability.
+    probability. ``--nodes_to_drop`` removes a first-level node (given at any
+    level of its chain) from the candidates, as ctm drops it from the tree;
+    the recorded config lists the dropped nodes.
     """
 
     root: Path
@@ -274,6 +276,7 @@ class FakeMmc:
     fail_with: int | None = None
     record_seed: int | None = None
     record_drop_level: str | None = None
+    record_nodes_to_drop: list[list[str]] | None = None
 
     def bundle(
         self,
@@ -420,12 +423,23 @@ class FakeMmc:
         self.calls[-1]["lookup"] = lookup
         levels = list(tree["hierarchy"])
         drop_level = option("--drop_level")
+        nodes_text = option("--nodes_to_drop")
+        nodes_to_drop = json.loads(nodes_text) if nodes_text is not None else None
+        dropped = {
+            label
+            for label in markers
+            for level, node in nodes_to_drop or []
+            if node == label or str(node).startswith(f"{label}_")
+        }
+        self.calls[-1]["nodes_to_drop"] = nodes_to_drop
         counts = np.asarray(query.X.toarray())
         genes = list(query.var_names)
         usable = [
             (label, marker)
             for label, marker in markers.items()
-            if marker in genes and marker in lookup.get("None", [])
+            if marker in genes
+            and marker in lookup.get("None", [])
+            and label not in dropped
         ]
         results = []
         for row, cell_id in enumerate(query.obs_names):
@@ -493,6 +507,11 @@ class FakeMmc:
                     self.record_drop_level
                     if self.record_drop_level is not None
                     else drop_level
+                ),
+                "nodes_to_drop": (
+                    self.record_nodes_to_drop
+                    if self.record_nodes_to_drop is not None
+                    else nodes_to_drop
                 ),
             },
             "metadata": {"version": "1.7.2"},
