@@ -374,6 +374,8 @@ class CorticalDepthTableConfig(BaseModel):
     segmentation: str
     table_key: str
     shape_key: str | None = None
+    # rca-site:H8: suffix of the clustered table the depth violins read (§4.8).
+    clustered_table_key_suffix: TableKeySuffix = ""
 
 
 class CorticalDepthConfig(BaseModel):

@@ -46,7 +46,8 @@ EXPECTED_SITES: dict[tuple[str, str], int] = {
     # The MENDER preflight and MENDER input key lookups, and the MENDER input
     # closure parameter they need (renamed from ``_settings``).
     (MAIN_NF, "H2"): 3,
-    ("src/merxen/config.py", "H8"): 3,  # sample config, clustering config, MENDER
+    # Sample config, clustering config, MENDER, cortical-depth table (M5).
+    ("src/merxen/config.py", "H8"): 4,
     ("src/merxen/io/samplesheet.py", "H9"): 2,  # SamplePair fields, row parsing
 }
 # Hook -> text that must follow its marker within HOOK_WINDOW lines.

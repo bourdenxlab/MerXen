@@ -7,7 +7,7 @@ import json
 import logging
 import math
 import shutil
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Final
@@ -22,8 +22,11 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 
-from merxen.annotation.provenance import downstream_summary_from_uns
-from merxen.clustering.map_first import unassigned_states
+from merxen.clustering.map_first import (
+    downstream_annotation_summary,
+    recorded_mender_policy,
+    unassigned_states,
+)
 from merxen.config import MenderConfig
 from merxen.io.spatialdata_io import write_or_replace_element
 from merxen.memory import force_release, log_status
@@ -236,6 +239,36 @@ def _policy_record(
     return record
 
 
+def effective_mender_config(
+    config: MenderConfig, uns: Mapping[str, Any]
+) -> MenderConfig:
+    """Return ``config`` with the unassigned-state policy of its clustered table.
+
+    MENDER_PREPARE's Nextflow script is the legacy one (its text stays
+    unchanged so legacy -resume keeps its tasks), so its config names no
+    policy. A map_first clustered table records the policy of the run that
+    clustered it (``mender_unassigned_state_policy``, default
+    ``exclude_from_features``; plan §4.9), which then applies. A config that
+    sets the policy explicitly wins; legacy tables record none and keep
+    ``state``.
+
+    Args:
+        config: MENDER configuration.
+        uns: ``uns`` of the clustered H5AD.
+
+    Returns:
+        The configuration to run with.
+    """
+    if "unassigned_state_policy" in config.model_fields_set:
+        return config
+    recorded = recorded_mender_policy(uns)
+    if recorded is None or recorded == config.unassigned_state_policy:
+        return config
+    return MenderConfig.model_validate(
+        {**config.model_dump(exclude_unset=True), "unassigned_state_policy": recorded}
+    )
+
+
 def prepare_mender(config: MenderConfig, output_dir: Path | str) -> Path:
     """Validate modern inputs and export MENDER's minimal portable table.
 
@@ -247,11 +280,12 @@ def prepare_mender(config: MenderConfig, output_dir: Path | str) -> Path:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     clustered = ad.read_h5ad(config.source_h5ad)
+    config = effective_mender_config(config, clustered.uns)
     cell_ids = resolve_cell_ids(clustered)
     states, keep = _validate_cell_states(clustered, config)
     selected_ids = cell_ids[keep]
     excluded = excluded_feature_states(states, config)
-    annotation = downstream_summary_from_uns(clustered.uns)
+    annotation = downstream_annotation_summary(clustered.uns)
 
     import spatialdata as sd
 
