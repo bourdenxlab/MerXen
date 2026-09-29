@@ -56,19 +56,19 @@ from merxen.annotation.pipeline import (
     ResolveError,
     ResolveRun,
     SampleResolution,
-    _aggregated_scores,
-    _masked_objects,
-    _merxen_version,
-    _reference_provenance,
-    _resolvability_provenance,
-    _round_share,
-    _run_for,
-    _threshold_values,
-    _vocab_lookup,
+    aggregated_scores,
     build_sample_query,
+    current_merxen_version,
     engine_columns,
+    masked_objects,
+    reference_provenance,
     refused_trust,
+    resolvability_provenance,
+    resolve_threshold_values,
+    round_share,
+    run_for_role,
     trust_for_run,
+    vocab_lookup,
 )
 from merxen.annotation.schema import Columns, safe_token
 from merxen.annotation.vocab import (
@@ -80,10 +80,11 @@ from merxen.annotation.vocab import (
 
 if TYPE_CHECKING:
     from merxen.annotation.config import AnnotationConfig
-    from merxen.annotation.consensus import MouseCalls
+    from merxen.annotation.consensus import LevelCall, MouseCalls
     from merxen.annotation.diagnostics import TrustDecision
     from merxen.annotation.mouse_flags import MouseFlagProfiles
-    from merxen.annotation.mouse_gate import RegistrationSignal
+    from merxen.annotation.mouse_gate import MerfishWindow, RegistrationSignal
+    from merxen.annotation.mouse_regions import RegionShareBundle
     from merxen.annotation.panel import AnnotationPanel
 
 logger = logging.getLogger(__name__)
@@ -125,7 +126,7 @@ def _levels_of(run: ResolveRun) -> tuple[str, str | None]:
     return class_level, subclass_level
 
 
-def _level_call(frame: pd.DataFrame, mapped: np.ndarray) -> Any:
+def _level_call(frame: pd.DataFrame, mapped: np.ndarray) -> LevelCall:
     from merxen.annotation.consensus import LevelCall
 
     runner = pd.to_numeric(
@@ -133,7 +134,7 @@ def _level_call(frame: pd.DataFrame, mapped: np.ndarray) -> Any:
     ).to_numpy(np.float64)
     bp = frame["bp"].to_numpy(np.float64)
     return LevelCall.of(
-        _masked_objects(mapped, frame["name"].astype(object).to_numpy()),
+        masked_objects(mapped, frame["name"].astype(object).to_numpy()),
         np.where(mapped, bp, np.nan),
         corr=frame["avg_correlation"].to_numpy(np.float64),
         runner_up=frame[runner_up_column(1, "name")].astype(object).to_numpy(),
@@ -227,19 +228,19 @@ def mouse_calls_from_runs(
     frame = klass.reindex(obs)
     mapped = frame["assignment"].notna().to_numpy()
     vocab = primary.bundle.vocab()
-    broad_of = _vocab_lookup(vocab, class_level, "broad_class")
-    nt_of = _vocab_lookup(vocab, class_level, "nt")
+    broad_of = vocab_lookup(vocab, class_level, "broad_class")
+    nt_of = vocab_lookup(vocab, class_level, "nt")
     nt_groups = {
         node: (value if broad_of.get(node) == NEURONS else None)
         for node, value in nt_of.items()
     }
     corr = frame["avg_correlation"].to_numpy(np.float64)
-    aggregated: dict[str, Any] = {}
+    aggregated: dict[str, LevelCall] = {}
     for key, groups in (("broad", broad_of), ("nt", nt_groups)):
-        names, raw, runner, margin = _aggregated_scores(frame, groups)
+        names, raw, runner, margin = aggregated_scores(frame, groups)
         raw = np.where(mapped, raw, np.nan)
         aggregated[key] = LevelCall(
-            name=_masked_objects(mapped, names),
+            name=masked_objects(mapped, names),
             scores=LevelScores.of(raw, corr=corr, runner_up=runner, margin=margin),
         )
     subclass_call = None
@@ -458,7 +459,6 @@ def mouse_flag_profiles(
         The profiles, or ``None`` when the bundle has no ``profiles.parquet``.
     """
     from merxen.annotation.mouse_flags import MouseFlagProfiles
-    from merxen.annotation.mouse_regions import MouseRegionError, WmbTaxonomy
 
     path = run.bundle.path / "profiles.parquet"
     if not path.is_file():
@@ -466,18 +466,9 @@ def mouse_flag_profiles(
     class_level, subclass_level = _levels_of(run)
     if subclass_level is None:
         return None
-    try:
-        taxonomy = WmbTaxonomy.from_tree(
-            run.bundle.tree(), class_level=class_level, subclass_level=subclass_level
-        )
-    except MouseRegionError as error:
-        logger.warning("no mouse flag profiles: %s", error)
+    subclass_class = subclass_classes(run)
+    if not subclass_class:
         return None
-    subclass_class = {
-        subclass: cls
-        for cls, subclasses in taxonomy.subclasses.items()
-        for subclass in subclasses
-    }
     table = pd.read_parquet(
         path, columns=["level", "node_name", "gene_id", "expected_fraction"]
     )
@@ -503,34 +494,62 @@ def _symbols_of(loaded: LoadedSample, gene_ids: Sequence[str]) -> list[str]:
     return [symbol_of.get(gene_id, gene_id) for gene_id in gene_ids]
 
 
-def _region_share_bundle(run: ResolveRun | None) -> tuple[Any, str | None]:
-    """The region-share bundle the region step used (``None`` and a reason)."""
-    from merxen.annotation.mouse_regions import MouseRegionError, RegionShareBundle
+def subclass_classes(run: ResolveRun) -> dict[str, str]:
+    """Return subclass name to class name of a WMB run's mapping tree.
 
+    Args:
+        run: The WMB primary run.
+
+    Returns:
+        The map (empty when the tree has no class and subclass levels).
+    """
+    from merxen.annotation.mouse_regions import MouseRegionError, WmbTaxonomy
+
+    class_level, subclass_level = _levels_of(run)
+    if subclass_level is None:
+        return {}
+    try:
+        taxonomy = WmbTaxonomy.from_tree(
+            run.bundle.tree(), class_level=class_level, subclass_level=subclass_level
+        )
+    except MouseRegionError as error:
+        logger.warning("no WMB class of the subclasses: %s", error)
+        return {}
+    return {
+        subclass: cls
+        for cls, subclasses in taxonomy.subclasses.items()
+        for subclass in subclasses
+    }
+
+
+def _region_share_bundle(
+    run: ResolveRun | None,
+) -> tuple[RegionShareBundle | None, str | None]:
+    """The region-share bundle ``load_resolve_runs`` opened (and why not)."""
     if run is None or run.regions is None:
         return None, "no region step"
     record = run.regions.record
-    if record.region_share is None:
-        return None, f"region step {record.status}: no region-share bundle"
-    try:
-        return RegionShareBundle.from_dir(record.region_share["path"]), None
-    except (MouseRegionError, KeyError, OSError) as error:
-        return None, f"region-share bundle unreadable: {error}"
+    if run.regions.region_share is not None:
+        return run.regions.region_share, None
+    if run.regions.region_share_problem is not None:
+        return None, run.regions.region_share_problem
+    return None, f"region step {record.status}: no region-share bundle"
 
 
 def _t2_signal(
     run: ResolveRun | None,
     unpruned_subclass: np.ndarray,
-    bundle: Any,
+    bundle: RegionShareBundle | None,
     reason: str | None,
     config: AnnotationConfig,
 ) -> tuple[float | None, str | None]:
     from merxen.annotation.mouse_gate import t2_share
+    from merxen.annotation.mouse_regions import EVALUATED_STATUSES
 
     if run is None or run.regions is None:
         return None, reason or "no region step"
     record = run.regions.record
-    if record.status not in ("pruned", "no_nodes_dropped"):
+    if record.status not in EVALUATED_STATUSES:
         return None, f"region step {record.status}"
     if bundle is None:
         return None, reason
@@ -539,6 +558,9 @@ def _t2_signal(
             list(unpruned_subclass),
             record.present_regions,
             bundle.shares,
+            subclass_class=subclass_classes(run),
+            never_drop_classes=config.mouse_regions.never_drop_classes,
+            min_merfish_cells=config.mouse_regions.min_merfish_cells_subclass,
             max_present_share=config.mouse_gate.g3_t2_max_present_share,
         ),
         None,
@@ -547,10 +569,10 @@ def _t2_signal(
 
 def _g4_signal(
     shares: Mapping[str, float],
-    bundle: Any,
+    bundle: RegionShareBundle | None,
     reason: str | None,
     config: AnnotationConfig,
-) -> tuple[float | None, float | None, Any, str | None]:
+) -> tuple[float | None, float | None, MerfishWindow | None, str | None]:
     from merxen.annotation.mouse_gate import composition_offsets, merfish_window
 
     sections = list(config.mouse_gate.g4_window_sections)
@@ -634,11 +656,16 @@ def resolve_mouse_sample(
 
     Returns:
         The sample's resolution.
+
+    Raises:
+        ResolveError: If the primary run is not the mouse primary, or the MAP
+            output predates the mouse region step.
     """
     from merxen.annotation import consensus as cs
     from merxen.annotation import flags as fl
     from merxen.annotation.composition import dataset_type_composition
     from merxen.annotation.mouse_flags import (
+        class_coherence_summary,
         microglial_spillover,
         null_spillover,
         region_incoherent,
@@ -648,11 +675,16 @@ def resolve_mouse_sample(
         evaluate_mouse_gate,
         marker_referee,
     )
+    from merxen.annotation.mouse_regions import (
+        REGION_SHARE_REFERENCE_ID,
+        region_step_warnings,
+    )
     from merxen.annotation.provenance import (
         AnnotationProvenance,
         ConsensusProvenance,
         EngineProvenance,
         PanelProvenance,
+        ReferenceProvenance,
         ThresholdProvenance,
     )
     from merxen.annotation.resolvability import load_resolvability
@@ -660,6 +692,7 @@ def resolve_mouse_sample(
     from merxen.annotation.thresholds import EmissionPlan, FloorPlan
     from merxen.annotation.vocab import (
         MOUSE_BROAD_CLASSES,
+        load_class_home_coherence,
         load_state_gene_ids,
         load_vocab,
     )
@@ -669,7 +702,7 @@ def resolve_mouse_sample(
     platform = loaded.sample.platform.upper()
     min_counts = config.require_min_counts()
     overrides = dict(trust_overrides or {})
-    primary = _run_for(runs, "primary")
+    primary = run_for_role(runs, "primary")
     n_objects = loaded.n_objects
     table = np.asarray(loaded.in_table, dtype=bool)
     counts = np.asarray(loaded.total_counts, dtype=np.float64)
@@ -687,6 +720,11 @@ def resolve_mouse_sample(
         raise ResolveError(
             f"{sample_id}: primary run {primary.run_id} maps "
             f"{primary.record.reference_id}, not the mouse primary {primary_id}"
+        )
+    if primary is not None and primary.regions is None:
+        raise ResolveError(
+            f"{sample_id}: the MAP output predates the mouse region step (run "
+            f"{primary.run_id} has no mouse_regions record); re-run merxen annotate"
         )
     trust: TrustDecision | None
     if primary is None:
@@ -779,7 +817,22 @@ def resolve_mouse_sample(
         spillover_rate=spill.rate,
         g5_reason=spill.null_reason,
     )
-    gate = evaluate_mouse_gate(signals, config.mouse_gate, trust=trust)
+    regions = None if primary is None else primary.regions
+    region_record = None if regions is None else regions.record
+    gate = evaluate_mouse_gate(
+        signals,
+        config.mouse_gate,
+        trust=trust,
+        extra_warnings=(
+            []
+            if regions is None or region_record is None
+            else region_step_warnings(
+                region_record.status,
+                region_record.reasons,
+                share_problem=regions.region_share_problem,
+            )
+        ),
+    )
 
     # 3. Statuses (§7.3).
     tables = None if primary is None else load_resolvability(primary.bundle.path)
@@ -1004,8 +1057,8 @@ def resolve_mouse_sample(
     references = {}
     resolvability = {}
     if primary is not None:
-        references[primary.record.reference_id] = _reference_provenance(primary, trust)
-        resolvability[primary.record.reference_id] = _resolvability_provenance(
+        references[primary.record.reference_id] = reference_provenance(primary, trust)
+        resolvability[primary.record.reference_id] = resolvability_provenance(
             tables, emission, resolution, primary.bundle, reweighted=reweight
         )
     panel_prov = None
@@ -1026,14 +1079,29 @@ def resolve_mouse_sample(
         }
     )
     floor_sources = sorted({floors.policy(level) for level in ("class", "subclass")})
-    regions = None if primary is None else primary.regions
-    region_record = None if regions is None else regions.record
+    if region_bundle is not None:
+        references[REGION_SHARE_REFERENCE_ID] = ReferenceProvenance(
+            reference_id=REGION_SHARE_REFERENCE_ID,
+            role="region_share",
+            bundle_path=str(region_bundle.path),
+            build_hash=region_bundle.build_hash,
+        )
+    region_notes = (
+        []
+        if region_record is None
+        else [
+            f"region_step: {region_record.status} ({region_record.source}; "
+            f"{len(region_record.nodes_to_drop)} node(s) dropped, "
+            f"{region_record.n_cells_region_dropped} cell(s) re-mapped)",
+            *(f"region_step: {reason}" for reason in region_record.reasons),
+        ]
+    )
     tiers, tier_counts = np.unique(
         resolution.consensus_tier[table].astype(int), return_counts=True
     )
     provenance = AnnotationProvenance(
         species=species,
-        merxen_version=_merxen_version(),
+        merxen_version=current_merxen_version(),
         panel=panel_prov,
         references=references,
         engine=EngineProvenance(
@@ -1048,7 +1116,7 @@ def resolve_mouse_sample(
         resolvability=resolvability,
         thresholds=ThresholdProvenance(
             mode=config.thresholds.mode,
-            values=_threshold_values(config),
+            values=resolve_threshold_values(config),
             threshold_source=";".join(sources),
             floors_sha256=floors.table.sha256,
             floor_source=";".join(str(item) for item in floor_sources),
@@ -1056,6 +1124,7 @@ def resolve_mouse_sample(
         ),
         flags=flag_set.provenance(),
         mouse_gate=gate.provenance(
+            notes=region_notes,
             section_regions=(
                 [] if region_record is None else list(region_record.present_regions)
             ),
@@ -1073,6 +1142,9 @@ def resolve_mouse_sample(
             ),
             drop_list_size=(
                 None if region_record is None else len(region_record.nodes_to_drop)
+            ),
+            drop_list_sha256=(
+                None if region_record is None else region_record.drop_list_sha256
             ),
             n_remapped=(
                 None if region_record is None else region_record.n_cells_region_dropped
@@ -1128,9 +1200,13 @@ def resolve_mouse_sample(
         "flags": flag_set.summary(),
         "spillover_checks": spill.checks,
         "region_coherence": {
-            "rate": _round_share(coherence.rate),
+            "rate": round_share(coherence.rate),
             "restricted_classes": list(coherence.restricted_classes),
             "null_reason": coherence.null_reason,
+            # Plan §7.2 step 5: class coherence vs intrinsic (MERFISH) coherence.
+            "per_class": class_coherence_summary(
+                coherence.coherence, list(class_table), load_class_home_coherence()
+            ),
         },
         "region_step": (
             None
@@ -1138,9 +1214,17 @@ def resolve_mouse_sample(
             else {
                 "status": region_record.status,
                 "source": region_record.source,
+                "reasons": list(region_record.reasons),
                 "present_regions": list(region_record.present_regions),
                 "n_nodes_dropped": len(region_record.nodes_to_drop),
+                "drop_list_sha256": region_record.drop_list_sha256,
                 "n_cells_region_dropped": region_record.n_cells_region_dropped,
+                "region_share_build_hash": (
+                    None if region_bundle is None else region_bundle.build_hash
+                ),
+                "region_share_problem": (
+                    None if regions is None else regions.region_share_problem
+                ),
             }
         ),
         "composition_run": None if primary is None else primary.run_id,

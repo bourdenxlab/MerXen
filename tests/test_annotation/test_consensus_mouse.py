@@ -322,3 +322,45 @@ def test_marker_unsupported_calls_are_not_resolvable(make_trust: MakeTrust) -> N
     assert statuses(result, 1)["class"] == "confident"
     assert statuses(result, 2)["class"] == "not_resolvable"
     assert result.final_level.tolist() == ["subclass", "nt", "broad"]
+
+
+def test_a_region_dropped_subclass_below_the_floor_is_implausible(
+    make_trust: MakeTrust,
+) -> None:
+    """A region-dropped subclass call never shows as below_floor (§4.2)."""
+    result = resolve([Cell(dropped="subclass", counts=30), Cell(counts=30)], make_trust)
+    assert statuses(result, 0)["class"] == "confident"
+    assert statuses(result, 0)["subclass"] == "implausible"
+    assert statuses(result, 1)["subclass"] == "below_floor"
+    assert result.flags[Columns.FLAG_IMPLAUSIBLE].tolist() == [True, False]
+
+
+def test_a_cell_implausible_at_every_attempted_level_is_excluded(
+    make_trust: MakeTrust,
+) -> None:
+    """exclude_hard: every attempted level implausible or not applicable (§4.3)."""
+    lost = Cell(broad="Unassigned", nt=None, cls="24 MY Glut", class_bp=0.5)
+    result = resolve(
+        [
+            Cell(
+                broad="Unassigned",
+                nt=None,
+                cls="24 MY Glut",
+                class_bp=0.5,
+                dropped="class",
+            ),
+            lost,
+            Cell(cls="19 MB Glut", class_bp=0.7, dropped="class"),
+        ],
+        make_trust,
+    )
+    assert statuses(result, 0) == {
+        "broad": "implausible",
+        "class": "implausible",
+        "nt": "not_applicable",
+        "subclass": "implausible",
+    }
+    assert statuses(result, 1)["class"] == "parent_unresolved"
+    # Kept at broad: the neuron's broad call is confident.
+    assert statuses(result, 2)["broad"] == "confident"
+    assert result.flags[Columns.EXCLUDE_HARD].tolist() == [True, False, False]

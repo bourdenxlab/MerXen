@@ -14,8 +14,10 @@ separate **warning flag** with reasons.
 - **G2 marker referee** (class-group marker consistency over
   marker-pseudo-confident cells, marker sets derived per panel): failed
   < 0.70; warning < 0.80 or not evaluable.
-- **G3 implausibility** (pre-pruning T2 share: unpruned subclasses with
-  < 25% of their MERFISH cells in the present divisions): warning > 3%.
+- **G3 implausibility** (pre-pruning T2 share, E7's definition: unpruned
+  subclasses with >= 20 MERFISH grey-matter cells, outside the never-drop
+  classes, with < 25% of those cells in the present divisions): warning
+  > 3%.
 - **G4 composition** (soft class shares vs a MERFISH window of
   ``wmb_region_share`` sections): warning when Astro-Epen is outside ±5
   points or Immune outside ±1 point.
@@ -171,6 +173,46 @@ class RegistrationSignal:
             status=row.get("registration_status") or None,
             source=str(source),
         )
+
+
+def find_registration_check(
+    directories: Sequence[Path | str], sample_id: str
+) -> RegistrationSignal | None:
+    """Find a sample's M0a registration check in QC stage outputs (G1).
+
+    The QC stage writes ``<dataset>_registration_qc.json`` and
+    ``<dataset>_qc_summary.csv`` with ``dataset`` the lower-cased sample id
+    (``merxen.qc.metrics.save_qc_results``). The JSON wins; a summary
+    without registration columns (a QC run before M0a) does not count.
+
+    Args:
+        directories: QC output directories, searched recursively.
+        sample_id: The annotation sample id (``<pair>_<PLATFORM>``).
+
+    Returns:
+        The signal, or ``None`` when no check is found.
+
+    Raises:
+        ValueError: If a name matches several files.
+    """
+    stem = sample_id.lower()
+    for suffix in (REGISTRATION_JSON_SUFFIX, QC_SUMMARY_SUFFIX):
+        name = f"{stem}{suffix}"
+        matches = sorted(
+            {path.resolve() for root in directories for path in Path(root).rglob(name)}
+        )
+        if len(matches) > 1:
+            raise ValueError(
+                f"several {name} under the QC directories: {[str(m) for m in matches]}"
+            )
+        if matches:
+            try:
+                return RegistrationSignal.from_file(matches[0])
+            except ValueError:
+                if suffix == REGISTRATION_JSON_SUFFIX:
+                    raise
+                logger.info("%s holds no registration check", matches[0])
+    return None
 
 
 def _number(value: object) -> float | None:
@@ -406,27 +448,84 @@ def marker_referee(
 # G3: pre-pruning implausibility
 
 
+def t2_subclasses(
+    present_regions: Sequence[str],
+    shares: RegionShares,
+    *,
+    subclass_class: Mapping[str, str],
+    never_drop_classes: Sequence[str],
+    min_merfish_cells: int = 20,
+    max_present_share: float = 0.25,
+) -> set[str]:
+    """Return E7's region-implausible (T2) subclasses of a section.
+
+    As ``e7lib.implausible_subclasses(present, 0.25)``: a subclass with at
+    least ``min_merfish_cells`` MERFISH grey-matter cells, outside the
+    never-drop classes, with less than ``max_present_share`` of those cells
+    in the present divisions. Pruning never removes the others (never-drop
+    classes; small subclasses follow their class), so counting them would
+    not measure the rule.
+
+    Args:
+        present_regions: The section's present divisions.
+        shares: The region-share bundle's shares.
+        subclass_class: Subclass name to its class name (mapping tree).
+        never_drop_classes: ``MouseRegionConfig.never_drop_classes``.
+        min_merfish_cells: ``MouseRegionConfig.min_merfish_cells_subclass``.
+        max_present_share: E7's 0.25 (``g3_t2_max_present_share``).
+
+    Returns:
+        The T2 subclass names.
+    """
+    present = shares.present_share("subclass", present_regions)
+    n_grey = shares.subclass_n_grey.reindex(present.index).fillna(0)
+    never = {str(name) for name in never_drop_classes}
+    in_never = np.array(
+        [str(subclass_class.get(str(name), "")) in never for name in present.index],
+        dtype=bool,
+    )
+    eligible = (n_grey.to_numpy() >= min_merfish_cells) & ~in_never
+    return {
+        str(name)
+        for name in present.index[eligible & (present.to_numpy() < max_present_share)]
+    }
+
+
 def t2_share(
     unpruned_subclass: Sequence[object],
     present_regions: Sequence[str],
     shares: RegionShares,
     *,
+    subclass_class: Mapping[str, str],
+    never_drop_classes: Sequence[str],
+    min_merfish_cells: int = 20,
     max_present_share: float = 0.25,
 ) -> float:
-    """Return the T2 share (E7): subclasses with little MERFISH mass in the section.
+    """Return the T2 share (E7): table cells called to a T2 subclass.
+
+    G3 and MO2 use this one definition (``t2_subclasses``).
 
     Args:
-        unpruned_subclass: The unpruned subclass call per table cell.
+        unpruned_subclass: The subclass call per table cell (unpruned for
+            G3; the pruned call for MO2's "T2 after pruning").
         present_regions: The section's present divisions.
         shares: The region-share bundle's shares.
-        max_present_share: A subclass is T2 below this share of its MERFISH
-            grey-matter cells in the present divisions (E7: 0.25).
+        subclass_class: Subclass name to its class name.
+        never_drop_classes: Classes never counted.
+        min_merfish_cells: Subclasses with fewer MERFISH cells are not counted.
+        max_present_share: E7's 0.25.
 
     Returns:
-        The share of table cells whose unpruned subclass is T2.
+        The share of table cells whose subclass is T2.
     """
-    present = shares.present_share("subclass", present_regions)
-    t2 = set(present.index[present < max_present_share])
+    t2 = t2_subclasses(
+        present_regions,
+        shares,
+        subclass_class=subclass_class,
+        never_drop_classes=never_drop_classes,
+        min_merfish_cells=min_merfish_cells,
+        max_present_share=max_present_share,
+    )
     names = [None if value is None else str(value) for value in unpruned_subclass]
     if not names:
         return 0.0
@@ -640,10 +739,14 @@ class MouseGateVerdict:
             "trust_state": self.trust_state,
         }
 
-    def provenance(self, **regions: Any) -> MouseGateProvenance:
+    def provenance(
+        self, *, notes: Sequence[str] = (), **regions: Any
+    ) -> MouseGateProvenance:
         """Return ``AnnotationProvenance.mouse_gate`` (§4.6).
 
         Args:
+            notes: Further reasons recorded after the level and warning
+                reasons (the region step's status and reasons).
             **regions: ``MouseGateProvenance`` region fields
                 (``section_regions``, ``region_source``, ...).
 
@@ -656,7 +759,7 @@ class MouseGateVerdict:
             signals=self.signals.values(),
             level=self.level,
             warning=self.warning,
-            reasons=list(self.reasons),
+            reasons=[*self.reasons, *(str(note) for note in notes)],
             **regions,
         )
 

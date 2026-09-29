@@ -1260,6 +1260,11 @@ def compute_flags(
 
     Returns:
         The flag set.
+
+    Raises:
+        ValueError: If a mouse spill-over or region-coherence result does not
+            have one row per query row (a row-alignment bug, never a null
+            flag).
     """
     n = len(inputs.total_counts)
     table = np.asarray(inputs.in_table, dtype=bool)
@@ -1413,7 +1418,12 @@ def compute_flags(
         if inputs.query_rows is not None
         else np.flatnonzero(table)
     )
-    if spill is not None and len(spill.raw_flag) == len(rows):
+    if spill is not None and len(spill.raw_flag) != len(rows):
+        raise ValueError(
+            f"the spill-over result has {len(spill.raw_flag)} rows for "
+            f"{len(rows)} query rows"
+        )
+    if spill is not None:
         stat = np.full(n, np.nan)
         weight = np.full(n, np.nan)
         raw = np.zeros(n, dtype=bool)
@@ -1468,7 +1478,12 @@ def compute_flags(
     if inputs.species == "mouse":
         columns.update(mouse_flag_columns(n))
         coherence = inputs.coherence
-        if coherence is not None and len(coherence.raw_flag) == len(rows):
+        if coherence is not None and len(coherence.raw_flag) != len(rows):
+            raise ValueError(
+                f"the region-coherence result has {len(coherence.raw_flag)} rows "
+                f"for {len(rows)} query rows"
+            )
+        if coherence is not None:
             values = np.full(n, np.nan)
             values[rows] = coherence.coherence
             raw = np.zeros(n, dtype=bool)

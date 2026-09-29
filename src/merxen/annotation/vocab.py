@@ -943,6 +943,24 @@ def load_region_restricted_classes() -> tuple[str, ...]:
     return tuple(str(name) for name in frame.loc[frame["region_restricted"], "class"])
 
 
+def load_class_home_coherence() -> dict[str, float]:
+    """Return each WMB class's intrinsic whole-brain coherence (E7 §3).
+
+    Returns:
+        Class name to ``coh_home_median`` of
+        ``wmb_region_restricted_classes.csv``: the median share of a
+        MERFISH cell's 30 nearest neighbours in its home division with its
+        class (classes without a value are left out).
+    """
+    frame = load_asset_table(REGION_RESTRICTED_FILE)
+    values = pd.to_numeric(frame["coh_home_median"], errors="coerce")
+    return {
+        str(name): float(value)
+        for name, value in zip(frame["class"], values, strict=True)
+        if pd.notna(value)
+    }
+
+
 def load_heldout_markers(species: Species) -> pd.DataFrame:
     """Load the independent held-out marker list of a species (§5.8).
 
