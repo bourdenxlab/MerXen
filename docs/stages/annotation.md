@@ -974,10 +974,65 @@ plan §7.2 step 5's class coherence against E7's intrinsic whole-brain
 coherence (median `region_coherence` of the cells called to each class,
 the class's MERFISH `coh_home_median` from
 `wmb_region_restricted_classes.csv`, and their ratio; MERFISH is denser
-than most query sections, so the ratio is a relative QC reading). Region
-coupling (`coupled_regions`) and other rule variants are M6b and are
-refused, not ignored. Sagittal, OB- and CB-dominated sections are out of
-scope (use an override or `none`).
+than most query sections, so the ratio is a relative QC reading). The M6b
+rule variants (below) need `mouse_regions.rule_variant = "m6b"`; with the
+default `v1` they are refused, not ignored. Sagittal, OB- and CB-dominated
+sections are out of scope (use an override or `none`).
+
+### Mouse AP axis (M6b)
+
+Plan §7.8. **Rule variants** (`MouseRegionConfig`, all off by default; v1
+stays the production rule until the pre-registered selection, §17 of the
+pre-registration, picks one):
+
+- (a) `coupled_regions` `{"OB": ["OLF"]}`: after the tile rule, OB counts as
+  present when OLF is present and the assigned tiles whose majority
+  *structure-level* home is AON (the CCF `parcellation_structure` with the
+  largest share of a subclass's grey-matter MERFISH cells; only
+  `010 IT AON-TT-DP Glut` has that home) hold at least
+  `coupling_min_tile_fraction` (1%) of the assigned tiles; one pass, no
+  component rule. It needs structure-level homes in the region shares
+  (`region_structure_home.parquet`), which the v1 `wmb_region_share`
+  bundle does not build, so MAP refuses it with that bundle.
+- (b), (c) `conditional_never_drop`: class `05 OB-IMN GABA` (with its
+  subclasses) is kept when STR or OLF is present; subclass
+  `025 CA2-FC-IG Glut` when Isocortex and STR are present. A kept subclass
+  also stops its class being dropped as one node. G3 and MO2's T2 do not
+  count kept nodes, as they do not count the never-drop classes.
+- (d) `region_min_tile_fraction` `{"OB": 0.005}`: OB is present at 0.5% of
+  the assigned tiles; other divisions keep 1% and the component rule.
+- (f) the v1 fields `tile_um` (100 / 200 µm) and `min_neurons_per_tile` (2).
+
+**AP estimate and G4 window** (`merxen.annotation.mouse_ap.estimate_ap`;
+E7 §5 step 1): the neuronal subclass composition of the section's confident
+neurons (as the region rule: neuronal class, class and subclass bootstrap
+probability >= 0.9, pruned calls) is compared with every MERFISH-638850
+section of the region-share bundle (`section_composition.parquet`,
+neuronal subclass counts) by the Bhattacharyya coefficient. The best
+section gives the AP estimate and its AP bin; it and its ± 1 neighbours
+among all 53 sections are G4's window. The resolve summary records the
+estimate under `mouse_gate.ap_estimate` (section, AP, similarity, a top-5
+weighted AP, bin, `in_scope` for AP 2.4–10.4 mm, window). Fewer than 100
+confident neurons give no estimate (G4 not evaluated, a note).
+`--mouse-g4-sections` (or `mouse_gate.g4_window_sections`) overrides it
+and `g4_ap_estimate = false` turns it off.
+
+**Scoring** (`scripts/acceptance/mouse_ap_axis.py`, pre-registration §17):
+the unpruned production mappings of the 38 in-scope MERFISH-638850
+sections (30k-cell subsamples, three gene sets) are run through the
+production region step with **leave-neighbours-out** region tables
+(`mouse_ap.MerfishRegionCounts`: division shares, cell numbers, division
+and structure homes recomputed without the section and its ± 1 neighbours;
+with nothing left out they equal the store's `wmb_region_share` tables
+exactly), for v1 and each of the 95 candidates of (a)–(d) × (f). Per
+section it reports inferred, CCF, missed and extra regions, the drop list,
+the **direct harm** (table cells with Allen `average_correlation_score >=
+0.6`, our class bootstrap probability >= 0.9 and an Allen class or subclass
+in the drop list, over table cells), the E7 oracle-relative harm
+(diagnostic), the re-mapped cells and, after the production pruned re-map,
+T2 after pruning; then per-AP-bin tables, MO2 on ag7 and VZG2, the
+candidate table and the pre-registered selection. The `mo10` step scores
+MO10 only once the pre-registration names the selected candidate.
 
 **Pipeline wiring (M5).** `CLUSTERING_MAP_FIRST` is not wired yet; when M5
 wires mouse `map_first`, the tasks need: (1) each entry of the MAP task's
@@ -1169,7 +1224,7 @@ before the statuses; level + warning flag as for human):
 | G1 registration | `--registration-qc SID=PATH` or `--registration-qc-dir DIR`: the QC stage's `*_registration_qc.json` or `*_qc_summary.csv` (M0a check); required in a pipeline task unless `--no-registration-qc` | density ratio < 1.5, or shift > 5 µm against the platform's own cells | ratio < 2.0; no check given (standalone), or the check skipped |
 | G2 marker referee | the table cells' class calls against marker pseudo-labels: six class groups (the vocab broad classes), each with the panel genes whose group profile is >= 20x every other class's profile (E3 rule; groups with < 3 genes left out), labelled with `data/P1212`'s rule (>= 1.5 units and >= 60% of the marker units) | consistency < 0.70 | < 0.80, or fewer than 200 pseudo-labelled cells |
 | G3 implausibility | pre-pruning T2 share, E7's definition: unpruned subclasses with >= 20 MERFISH grey-matter cells, outside the never-drop classes, with < 25% of those cells in the present divisions; also MO2's "T2 after pruning" on the pruned calls. Not evaluated (a note) when the step was disabled; a skipped step warns (above) | – | > 3% |
-| G4 composition | soft class shares against the pooled MERFISH sections of `--mouse-g4-sections` (the region-share bundle's `section_composition.parquet`; none by default until M6b's AP estimate) | – | Astro-Epen outside ±5 points or Immune outside ±1 point |
+| G4 composition | soft class shares against pooled MERFISH sections (the region-share bundle's `section_composition.parquet`): `--mouse-g4-sections`, else the AP estimate's section and its neighbours ([Mouse AP axis](#mouse-ap-axis-m6b)) | – | Astro-Epen outside ±5 points or Immune outside ±1 point |
 | G5 spill-over | `flag_microglial_spillover` rate | – | > 15% |
 
 The primary panel's trust caps the level as for human (`refused` fails,
@@ -1379,9 +1434,9 @@ H4 and H16 baselines) are in §11 of the pre-registration document.
 - **Parts of the mouse gate are provisional** (M6). G2's 0.70 / 0.80
   thresholds were set on MO1's hand-listed marker referee (.911 / .856 on
   ag7 / VZG2), but the gate derives its markers per panel and reads .805 /
-  .819 on the same sections [L]. G4 is not evaluated until M6b's AP
-  estimate chooses the MERFISH window (standalone runs pass
-  `--mouse-g4-sections`). The pipeline's RESOLVE task does not stage the
+  .819 on the same sections [L]. G4's window comes from the AP estimate
+  (M6b), which is validated on held-out MERFISH sections only; the warning
+  bands stay provisional on Xenium [L]. The pipeline's RESOLVE task does not stage the
   QC stage's registration check yet (M5 wiring) and refuses a mouse sample
   without one; a standalone run passes `--registration-qc` or
   `--registration-qc-dir`, and without either G1 is not evaluated and the
