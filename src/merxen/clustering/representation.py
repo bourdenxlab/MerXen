@@ -310,6 +310,8 @@ def whole_section_qc(
     n_genes_used = int(mask.sum())
     max_pcs = min(int(settings.n_pcs), adata.n_obs - 1, n_genes_used - 1)
     effective_neighbors = max(2, min(int(settings.n_neighbors), adata.n_obs - 1))
+    step_seconds: dict[str, float] = {}
+    step_started = time.perf_counter()
     if max_pcs > 0:
         sc.pp.pca(
             adata,
@@ -317,18 +319,24 @@ def whole_section_qc(
             random_state=int(seed),
             mask_var=None if bool(mask.all()) else mask,
         )
+    step_seconds["pca"] = time.perf_counter() - step_started
+    step_started = time.perf_counter()
     sc.pp.neighbors(
         adata,
         n_neighbors=effective_neighbors,
         n_pcs=max_pcs if max_pcs > 0 else None,
         random_state=int(seed),
     )
+    step_seconds["neighbors"] = time.perf_counter() - step_started
+    step_started = time.perf_counter()
     sc.tl.umap(
         adata,
         min_dist=float(settings.umap_min_dist),
         spread=float(settings.umap_spread),
         random_state=int(seed),
     )
+    step_seconds["umap"] = time.perf_counter() - step_started
+    step_started = time.perf_counter()
     sc.tl.leiden(
         adata,
         resolution=float(resolution),
@@ -337,6 +345,11 @@ def whole_section_qc(
         flavor=CPU_LEIDEN_FLAVOR,
         n_iterations=CPU_LEIDEN_N_ITERATIONS,
         directed=False,
+    )
+    step_seconds["leiden"] = time.perf_counter() - step_started
+    logger.info(
+        "QC embedding steps: %s",
+        ", ".join(f"{name} {value:.1f} s" for name, value in step_seconds.items()),
     )
     labels = adata.obs[QC_LEIDEN_KEY].astype(str)
     adata.obs[QC_LEIDEN_KEY] = pd.Categorical(labels.to_numpy())

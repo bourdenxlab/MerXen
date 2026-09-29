@@ -51,6 +51,7 @@ from merxen.clustering.map_first import (
     load_label_inputs,
     run_map_first_hierarchy,
     unassigned_states,
+    write_map_first_plots,
 )
 
 from .conftest import (
@@ -474,7 +475,17 @@ def test_config_must_be_map_first_with_mapped_leaves(tmp_path: Path) -> None:
 
 def test_plots_and_tables_are_written(tmp_path: Path) -> None:
     section = make_section("human")
-    clustered, result = _run(section, tmp_path, plots=True)
+    clustered, result = run_map_first_hierarchy(
+        section.adata,
+        section.labels,
+        make_config(tmp_path),
+        tmp_path / "hierarchy",
+        SAMPLE,
+        provenance=section.provenance,
+        plots=True,
+        branch_umaps=True,
+        stability=False,
+    )
     artifacts = result.artifacts
     for name in (
         f"{SAMPLE}_map_first_umap",
@@ -498,6 +509,19 @@ def test_plots_and_tables_are_written(tmp_path: Path) -> None:
     assert int(leaves["n_cells"].sum()) == clustered.n_obs
     listed = json.loads(clustered.uns[HIERARCHICAL_UNS_KEY]["artifacts_json"])
     assert set(listed) == set(artifacts)
+    # Branch UMAPs are opt-in.
+    default = write_map_first_plots(
+        clustered,
+        output_dir=tmp_path / "default_plots",
+        sample_id=SAMPLE,
+        hierarchy=result.hierarchy,
+        config=make_config(tmp_path),
+    )
+    assert f"{SAMPLE}_map_first_umap" in default
+    assert f"{SAMPLE}_map_first_branch_neurons_excitatory_gene_dotplot" in default
+    assert not [
+        name for name in default if name.endswith("_umap") and "_branch_" in name
+    ]
 
 
 def test_build_hierarchy_rejects_bad_branches() -> None:
