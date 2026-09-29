@@ -112,6 +112,7 @@ from merxen.annotation.panel import (
 from merxen.annotation.provenance import annotation_manifest_filename
 from merxen.annotation.reference import read_lookup
 from merxen.annotation.schema import (
+    LABELS_METADATA_KEY,
     CellStatus,
     Columns,
     label_table_filename,
@@ -2588,7 +2589,6 @@ RESOLVE_SUMMARY_SUFFIX: Final = "_resolve_summary.json"
 # deep-cached COMPUTE_CPU (review of M4).
 RESOLVE_RUN_SUFFIX: Final = "_resolve_run.json"
 RESOLVE_SUMMARY_SCHEMA_VERSION: Final = 2
-LABELS_METADATA_KEY: Final = b"merxen_annotation"
 RESOLVE_STEP: Final = "annotate_resolve"
 MISSING_INSTANCE_ID: Final = -1
 # Plan §8.5: cross-platform statistics of a per_platform pair come from the
