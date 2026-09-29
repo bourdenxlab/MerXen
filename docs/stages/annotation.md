@@ -1031,8 +1031,9 @@ section it reports inferred, CCF, missed and extra regions, the drop list,
 the **direct harm** (table cells with Allen `average_correlation_score >=
 0.6`, our class bootstrap probability >= 0.9 and an Allen class or subclass
 in the drop list, over table cells), the E7 oracle-relative harm
-(diagnostic), the re-mapped cells and, after the production pruned re-map,
-T2 after pruning; then per-AP-bin tables, MO2 on ag7 and VZG2, the
+(diagnostic), the re-mapped cells and, after the production pruned re-map
+(the MAP run's engine parameters including its process count, on which
+`cell_type_mapper`'s bootstrap draws depend), T2 after pruning; then per-AP-bin tables, MO2 on ag7 and VZG2, the
 candidate table and the pre-registered selection. The `mo10` step scores
 MO10 only once the pre-registration names the selected candidate.
 

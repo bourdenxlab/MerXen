@@ -953,14 +953,17 @@ def run_remap_jobs(
     out: Path,
     *,
     gene_csv: str,
-    n_processors: int,
+    n_processors: int | None,
     scratch: Path,
 ) -> list[dict[str, Any]]:
     """Run the production pruned re-maps of one dataset's jobs.
 
     As ``pipeline._remap_cells``: the query of the MAP run (fingerprint
     checked), the re-map cells' rows, the pruned lookup of the run's bundle
-    and ``--nodes_to_drop``, the run's engine parameters.
+    and ``--nodes_to_drop``, and the run's engine parameters **including its
+    process count**: ``cell_type_mapper``'s bootstrap draws depend on it, so
+    only the MAP run's ``n_processors`` reproduces the production re-map
+    (``n_processors`` overrides it for tests only).
     """
     from merxen.annotation.config import AnnotationConfig
     from merxen.annotation.mapmycells_engine import (
@@ -1004,9 +1007,16 @@ def run_remap_jobs(
         raise ValueError(f"{map_dir}: bundle build_hash differs from the run's")
     lookup = read_lookup(bundle.lookup)
     tree = bundle.tree()
-    params = MmcEngineParams.model_validate(
-        {**run.engine_params, "n_processors": n_processors}
-    )
+    engine = dict(run.engine_params)
+    if n_processors is not None:
+        logger.warning(
+            "re-mapping with %d processes, not the MAP run's %s: not the "
+            "production re-map",
+            n_processors,
+            engine.get("n_processors"),
+        )
+        engine["n_processors"] = n_processors
+    params = MmcEngineParams.model_validate(engine)
     results = []
     for job in pending:
         target = remap_dir(out, job["dataset"], job["drop_sha"])
@@ -1677,7 +1687,12 @@ def build_parser() -> argparse.ArgumentParser:
     remap.add_argument("--gene-id-fallback-csv", required=True)
     remap.add_argument("--worker", type=int, default=0)
     remap.add_argument("--n-workers", type=int, default=1)
-    remap.add_argument("--n-processors", type=int, default=2)
+    remap.add_argument(
+        "--n-processors",
+        type=int,
+        default=None,
+        help="override the MAP run's process count (not the production re-map)",
+    )
     remap.add_argument("--scratch", required=True)
 
     summarise = commands.add_parser("summarise", help="T2, bins, candidates, selection")
