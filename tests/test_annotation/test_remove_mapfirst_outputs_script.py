@@ -14,6 +14,8 @@ import hashlib
 import importlib.util
 import json
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from types import ModuleType
 
@@ -138,13 +140,30 @@ def results(tmp_path: Path) -> dict[str, object]:
         keep = outdir / legacy_dir / "keep.txt"
         keep.parent.mkdir(parents=True)
         keep.write_text("legacy")
+    # What the run created, as the before/after comparison lists it
+    # (type, path relative to the results root, size).
+    new_paths = tmp_path / "new_paths.txt"
+    created = [
+        f"d\tP1/proseg_hybrid/{name}\t4096"
+        for name in (*MAP_FIRST_DIRS, *ANNOTATION_DIRS)
+    ]
+    created += [
+        "d\tP1/merscope/compute_cortical_depth_mapfirst\t4096",
+        f"d\t{zarr_path.relative_to(outdir)}/tables/{MAPFIRST}\t4096",
+    ]
+    new_paths.write_text("\n".join(created) + "\n")
     return {
         "outdir": outdir,
         "zarr": zarr_path,
         "root_before": root_before,
         "legacy_before": legacy_before,
         "quarantine": tmp_path / "quarantine",
+        "new_paths": new_paths,
     }
+
+
+ANNOTATION_DIRS = ("annotation_panel", "annotation_map", "annotation_resolve")
+MAP_FIRST_DIRS = ("clustering_squidpy_mapfirst", "mender_mapfirst")
 
 
 def _args(results: dict[str, object], *extra: str) -> list[str]:
@@ -159,6 +178,16 @@ def _args(results: dict[str, object], *extra: str) -> list[str]:
         str(results["quarantine"]),
         *extra,
     ]
+
+
+def _with_annotation_dirs(results: dict[str, object], *extra: str) -> list[str]:
+    return _args(
+        results,
+        "--include-annotation-dirs",
+        "--new-paths",
+        str(results["new_paths"]),
+        *extra,
+    )
 
 
 def test_name_rules(remover: ModuleType) -> None:
@@ -206,7 +235,7 @@ def test_apply_removes_only_map_first_content(
     quarantine = results["quarantine"]
     assert isinstance(zarr_path, Path) and isinstance(outdir, Path)
     assert isinstance(quarantine, Path)
-    assert remover.main(_args(results, "--apply")) == 0
+    assert remover.main(_with_annotation_dirs(results, "--apply")) == 0
 
     assert not (zarr_path / "tables" / MAPFIRST).exists()
     assert not any(
@@ -252,13 +281,118 @@ def test_apply_removes_only_map_first_content(
     assert remover.main(_args(results)) == 0  # a second plan is empty
 
 
-def test_existing_quarantine_target_is_refused(
+def test_annotation_dirs_stay_without_the_opt_in(
+    remover: ModuleType, results: dict[str, object], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Unsuffixed annotation directories do not say which run wrote them."""
+    outdir = results["outdir"]
+    assert isinstance(outdir, Path)
+    assert remover.main(_args(results, "--apply")) == 0
+    for name in ANNOTATION_DIRS:
+        assert (outdir / "P1" / "proseg_hybrid" / name / "out.txt").read_text() == name
+    for name in MAP_FIRST_DIRS:
+        assert not (outdir / "P1" / "proseg_hybrid" / name).exists()
+    assert "needs --include-annotation-dirs" in capsys.readouterr().out
+    with pytest.raises(SystemExit):
+        remover.main(_args(results, "--include-annotation-dirs"))
+
+
+def test_a_pre_existing_annotation_map_and_table_survive(
+    remover: ModuleType, results: dict[str, object], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """With --new-paths, only what the run created moves.
+
+    Here annotation_map and the map_first table existed before the run (an
+    earlier run published them; a later MAP reuses annotation_map), so both
+    are kept, with the table's consolidated entries.
+    """
+    outdir = results["outdir"]
+    zarr_path = results["zarr"]
+    new_paths = results["new_paths"]
+    assert isinstance(outdir, Path) and isinstance(zarr_path, Path)
+    assert isinstance(new_paths, Path)
+    new_paths.write_text(
+        "".join(
+            line + "\n"
+            for line in new_paths.read_text().splitlines()
+            if "annotation_map" not in line and MAPFIRST not in line
+        )
+    )
+    root_before = (zarr_path / "zarr.json").read_bytes()
+    assert remover.main(_with_annotation_dirs(results, "--apply")) == 0
+
+    assert (outdir / "P1/proseg_hybrid/annotation_map/out.txt").read_text() == (
+        "annotation_map"
+    )
+    assert (zarr_path / "tables" / MAPFIRST).is_dir()
+    assert (zarr_path / "zarr.json").read_bytes() == root_before
+    for name in ("annotation_panel", "annotation_resolve", *MAP_FIRST_DIRS):
+        assert not (outdir / "P1" / "proseg_hybrid" / name).exists()
+    printed = capsys.readouterr().out
+    assert "annotation_map (not created by the run)" in printed
+    assert f"{MAPFIRST} (not created by the run)" in printed
+
+
+def test_existing_quarantine_target_is_refused_before_any_move(
     remover: ModuleType, results: dict[str, object]
 ) -> None:
-    """A move never replaces anything already in the quarantine."""
+    """A clash is found before the first move, so nothing is half removed."""
+    outdir = results["outdir"]
+    zarr_path = results["zarr"]
     quarantine = results["quarantine"]
+    assert isinstance(outdir, Path) and isinstance(zarr_path, Path)
     assert isinstance(quarantine, Path)
     clash = quarantine / "outputs" / "P1" / "proseg_hybrid" / "annotation_map"
     clash.mkdir(parents=True)
+    root_before = (zarr_path / "zarr.json").read_bytes()
+    tree_before = _tree_digest(outdir)
+
     with pytest.raises(FileExistsError):
-        remover.main(_args(results, "--apply"))
+        remover.main(_with_annotation_dirs(results, "--apply"))
+
+    # The table moves come first in the plan: they must not have happened.
+    assert (zarr_path / "tables" / MAPFIRST).is_dir()
+    assert (zarr_path / "zarr.json").read_bytes() == root_before
+    assert _tree_digest(outdir) == tree_before
+    for name in (*ANNOTATION_DIRS, *MAP_FIRST_DIRS):
+        assert (outdir / "P1" / "proseg_hybrid" / name).is_dir(), name
+    assert (outdir / "P1" / "merscope" / "compute_cortical_depth_mapfirst").is_dir()
+    held = sorted(str(path.relative_to(quarantine)) for path in quarantine.rglob("*"))
+    assert held == [
+        "outputs",
+        "outputs/P1",
+        "outputs/P1/proseg_hybrid",
+        "outputs/P1/proseg_hybrid/annotation_map",
+    ]
+
+
+def test_each_store_changes_under_its_writer_lock(
+    remover: ModuleType, results: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The table moves and the root prune of a zarr happen inside one lock."""
+    zarr_path = results["zarr"]
+    assert isinstance(zarr_path, Path)
+    root_before = (zarr_path / "zarr.json").read_bytes()
+    events: list[tuple[str, str, bool, bool]] = []
+
+    @contextmanager
+    def recording_lock(path: Path) -> Iterator[Path]:
+        def state(kind: str) -> tuple[str, str, bool, bool]:
+            return (
+                kind,
+                str(path),
+                (zarr_path / "tables" / MAPFIRST).exists(),
+                (zarr_path / "zarr.json").read_bytes() == root_before,
+            )
+
+        events.append(state("enter"))
+        yield path
+        events.append(state("exit"))
+
+    monkeypatch.setattr(remover, "spatialdata_write_lock", recording_lock)
+    assert remover.main(_with_annotation_dirs(results, "--apply")) == 0
+
+    assert events == [
+        ("enter", str(zarr_path), True, True),
+        ("exit", str(zarr_path), False, False),
+    ]
