@@ -10,6 +10,20 @@ per-pair token only when that pair's current terminal stage is complete. The
 token excludes other independent terminal analyses such as GASTON, so the two
 may overlap and neither consumes the other's output.
 
+The token comes from a `join` of the pair's terminal events (clustering,
+mapmycells, distance-from-object and cortical-depth results) with the pair's
+barrier spec. `join` pairs items one to one, so a single spec is consumed by
+the pair's first event even when that event belongs to an earlier stage;
+the terminal stage's own events then find no spec and MENDER is silently
+skipped (for example `stop_stage=mender` with cortical depth enabled:
+FINALIZE's clustering event arrives first). `map_first` rows therefore emit
+one spec per event their pair can emit
+(`AnnotationSettings.terminalSpecCopies`). Legacy rows still emit one, so a
+legacy launch whose pair emits more than one terminal event (clustering plus
+another terminal stage, or several clustering segmentations) skips MENDER;
+run MENDER on such legacy results with `--only_stage mender` (below) until
+the barrier is fixed on `main`.
+
 Enable the default ProSeg-hybrid analysis with:
 
 ```bash

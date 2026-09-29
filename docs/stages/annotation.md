@@ -863,7 +863,8 @@ PREPARE -> ANNOTATE_PANEL -> ANNOTATE_REFERENCE_PREP (per unique bundle)
   its clustering outputs to the same
   `<outdir>/<pair>/<segmentation>/clustering_squidpy/` as a legacy run, so
   snapshot legacy outputs before a `map_first` run into the same outdir
-  (plan §2.3, M-1).
+  (plan §2.3, M-1), or add its outputs beside them with a launch config
+  ([Into a published results directory](#into-a-published-results-directory)).
 - **MENDER.** The clustered table records the run's
   `mender_unassigned_state_policy` (default `exclude_from_features`), which
   MENDER applies to it (its legacy script names no policy); legacy tables
@@ -884,6 +885,103 @@ PREPARE -> ANNOTATE_PANEL -> ANNOTATE_REFERENCE_PREP (per unique bundle)
   hierarchy, the refused, broad-only and provisional panels, and the pairs
   whose cross-platform statistics RESOLVE restricted. A legacy run prints
   nothing.
+
+### Into a published results directory
+
+A `map_first` run into an outdir that already holds legacy results would
+change published files: FINALIZE, MENDER_FINALIZE / MENDER_IMPORT and
+COMPUTE_CORTICAL_DEPTH publish to the legacy `clustering_squidpy/`,
+`mender/` and `<platform>/compute_cortical_depth/` (all `overwrite: true`),
+cortical depth rewrites the segmentation's base table
+(`table_MOSAIK_proseg_hybrid`, not the clustered one) with its depth columns
+while `cortical_depth_write_spatialdata_table` is `true`, PREP publishes to
+`<outdir>/annotation_reference_prep/`, and Nextflow writes its report,
+timeline and trace to `<outdir>/nextflow/`. The M5 exit run (P7513 and
+P1212, proseg_hybrid, 2026-09-29) added its results beside the legacy ones
+without changing any of them with a launch config (`-c`, which overrides
+the process definitions and both profiles) and three flags. On 8 CPUs and
+64 GB (the whole run) it took about 5 hours in two launches (COMPUTE_CPU
+39-43 min per pair, MENDER_COMPUTE 11-26 min per sample; peak RSS 25 GB):
+
+```groovy
+process {
+    // Every publishDir of the run gets overwrite: false; the colliding ones
+    // move to new *_mapfirst directories. MENDER and cortical depth read
+    // FINALIZE's task output, not its published copy.
+    withName: "CLUSTERING_SQUIDPY_FINALIZE" {
+        publishDir = [path: { "${params.outdir}/${pair_id}/${segmentation}/clustering_squidpy_mapfirst" }, mode: "copy", overwrite: false]
+    }
+    withName: "MENDER_FINALIZE" {
+        publishDir = [path: { "${params.outdir}/${pair_id}/${segmentation}/mender_mapfirst" }, mode: "copy", overwrite: false, pattern: "mender_out/**"]
+    }
+    withName: "MENDER_IMPORT" {
+        publishDir = [path: { "${params.outdir}/${pair_id}/${segmentation}/mender_mapfirst/mender_out/${platform.toLowerCase()}" }, mode: "copy", overwrite: false]
+    }
+    // Copy only the output directory: latest_input.zarr is a link to the store.
+    // The pattern names the directory itself: a publishDir pattern is matched
+    // against each declared output, so "compute_cortical_depth_out/**" matches
+    // nothing and publishes an empty directory (the M5 exit run did that; its
+    // depth outputs were copied from the task directories afterwards).
+    withName: "COMPUTE_CORTICAL_DEPTH" {
+        publishDir = [path: { "${params.outdir}/${pair_id}/${platform.toLowerCase()}/compute_cortical_depth_mapfirst" }, mode: "copy", overwrite: false, pattern: "compute_cortical_depth_out"]
+    }
+    withName: "ANNOTATE_REFERENCE_PREP" {
+        publishDir = [path: { "<somewhere outside the results root>/annotation_reference_prep/${bundle.reference_id}/${bundle.panel_tag}" }, mode: "copy", overwrite: false]
+    }
+    // ANNOTATE_PANEL, ANNOTATE_MAP, ANNOTATE_RESOLVE: their default paths,
+    // with overwrite: false.
+}
+report.file = "<evidence dir>/report.html"      // likewise timeline, trace, dag
+```
+
+```bash
+nextflow -c map_first_into_published.config run workflows/main.nf -profile dwight,conda \
+    --samplesheet <rows with start_stage clustering_squidpy, stop_stage mender> \
+    --outdir <published results> --clustering_squidpy_mode map_first \
+    --mender_enabled true --cortical_depth_write_spatialdata_table false
+```
+
+Keep the rows' `stop_stage` at `mender` (or unset): a `map_first` row that
+stops at `mapmycells` runs the legacy MAPMYCELLS (hook H3), which publishes
+to the legacy `mapmycells/`. `-preview` does not show which tasks a row
+gets (it builds the static DAG of every invoked process without reading the
+samplesheet); a `-stub-run` on a synthetic copy of the rows' layout does.
+The stores then gain `tables/<table>_clustering_squidpy_mapfirst` and a
+re-consolidated root `zarr.json`. Two properties of the consolidated
+metadata: a table write re-consolidates from disk, so it also drops entries
+of groups that are no longer on disk (P1212 Xenium carried 93 of a removed
+`.table_MOSAIK_proseg_hybrid.merxen-backup-*` group); and
+`write_or_replace_element` replaces a table (MENDER_IMPORT on the
+`_mapfirst` table, and every legacy replacement) through such a backup
+group and consolidates while it exists, so the root keeps stale entries of
+the removed backup. SpatialData readers skip them.
+`scripts/annotation/remove_mapfirst_outputs.py` removes a run's
+`_mapfirst` tables, their (and their backups') consolidated entries and
+its map_first output directories again, moving everything into a
+quarantine directory on the same disk (dry run by default; `--apply`).
+
+Three more things the M5 exit run showed:
+
+- **`-resume` after a store write re-runs everything.** VALIDATE_ANALYSIS_LAYER
+  and COMPUTE_CORTICAL_DEPTH take the store as a `path` input, which the
+  standard cache hashes by the root directory's size and mtime; every table
+  write re-consolidates the root `zarr.json` and changes that mtime. A
+  `-resume` after FINALIZE has written therefore re-runs VALIDATE, whose new
+  work-directory link enters the samples JSON of PREPARE and FINALIZE, so
+  both run again (MAP, RESOLVE and COMPUTE_CPU stay cached only if their
+  deep caches see byte-identical inputs), including FINALIZE's table write. The exit run's second launch (MENDER after the barrier fix)
+  reset the four root directory mtimes to their pre-run values first, so
+  only PREP (never cached), cortical depth (hashed after FINALIZE) and MENDER
+  ran again.
+- **MENDER needs the barrier fix.** Before `terminalSpecCopies`, a
+  `map_first` row with cortical depth enabled never ran MENDER
+  ([MENDER](mender.md)).
+- **Writer lock.** FINALIZE takes `<zarr>.merxen-write.lock` beside the path
+  it is given, which is VALIDATE_ANALYSIS_LAYER's staged link in the work
+  directory, so its lock file lands in the work directory and does not
+  exclude writers that use the store's real path; MENDER_IMPORT resolves the
+  real path and locks beside the store. Do not run other writers on the
+  same stores while a run writes.
 
 ## Mapping (`merxen annotate`)
 
