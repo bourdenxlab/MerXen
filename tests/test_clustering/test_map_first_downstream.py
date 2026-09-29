@@ -29,6 +29,7 @@ from merxen.annotation.vocab import (
     UNASSIGNED_LABEL,
     UNRESOLVED_LABEL,
 )
+from merxen.clustering.cross_platform import CrossPlatformScope
 from merxen.clustering.map_first import run_map_first_hierarchy
 from merxen.config import CorticalDepthTableConfig, MenderConfig
 from merxen.table_keys import clustered_table_key
@@ -38,7 +39,11 @@ from .conftest import Section, make_config, make_section
 SAMPLE = "P0001_MERSCOPE"
 
 
-def _map_first(section: Section, tmp_path: Path) -> ad.AnnData:
+def _map_first(
+    section: Section,
+    tmp_path: Path,
+    cross_platform: CrossPlatformScope | None = None,
+) -> ad.AnnData:
     clustered, _ = run_map_first_hierarchy(
         section.adata,
         section.labels,
@@ -48,18 +53,29 @@ def _map_first(section: Section, tmp_path: Path) -> ad.AnnData:
         provenance=section.provenance,
         plots=False,
         stability=False,
+        cross_platform=cross_platform,
     )
     return clustered
 
 
-def _finalized_zarr(tmp_path: Path, section: Section) -> tuple[Path, str, Path]:
-    """Write a zarr with shapes and a source table, then FINALIZE into it."""
+def _finalized_zarr(
+    tmp_path: Path,
+    section: Section,
+    cross_platform: CrossPlatformScope | None = None,
+    *,
+    legacy_table: bool = False,
+) -> tuple[Path, str, Path]:
+    """Write a zarr with shapes and a source table, then FINALIZE into it.
+
+    With ``legacy_table`` a legacy clustered table (the same labels without
+    the annotation and hierarchy records) is written beside the map_first one.
+    """
     import spatialdata as sd
     from spatialdata.models import ShapesModel, TableModel
 
     from merxen.analysis.clustering_squidpy import write_clustered_spatialdata_table
 
-    clustered = _map_first(section, tmp_path)
+    clustered = _map_first(section, tmp_path, cross_platform)
     coords = section.adata.obsm["spatial"]
     shapes = gpd.GeoDataFrame(
         {"radius": np.full(len(coords), 5.0)},
@@ -90,6 +106,13 @@ def _finalized_zarr(tmp_path: Path, section: Section) -> tuple[Path, str, Path]:
         segmentation="proseg_hybrid",
         table_key_suffix="mapfirst",
     )
+    if legacy_table:
+        legacy = ad.read_h5ad(h5ad_path)
+        for key in ("merxen_annotation_json", "merxen_hierarchical_clustering"):
+            legacy.uns.pop(key, None)
+        write_clustered_spatialdata_table(
+            zarr_path, legacy, segmentation="proseg_hybrid", table_key_suffix=""
+        )
     return zarr_path, table_key, h5ad_path
 
 
@@ -138,7 +161,11 @@ class _NamingMender:
         )
 
 
-@pytest.mark.parametrize("policy", ["state", "exclude_from_features"])
+# The legacy "state" policy is slow here (about 90 s) and covered by
+# test_mender.py; the default run keeps the map_first default.
+@pytest.mark.parametrize(
+    "policy", [pytest.param("state", marks=pytest.mark.slow), "exclude_from_features"]
+)
 def test_mender_runs_on_a_map_first_table_under_both_policies(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, policy: str
 ) -> None:
@@ -364,3 +391,95 @@ def test_cortical_depth_reads_the_suffixed_table_of_a_map_first_run(
             table_key="table",
             clustered_table_key_suffix="Bad/Key",
         )
+
+
+def _boundaries(path: Path) -> Path:
+    """Write pial / grey-white lines spanning the synthetic section."""
+
+    def line(coords: list[tuple[float, float]], role: str) -> dict[str, Any]:
+        return {
+            "type": "Feature",
+            "properties": {"role": role},
+            "geometry": {"type": "LineString", "coordinates": coords},
+        }
+
+    path.write_text(
+        json.dumps(
+            {
+                "type": "FeatureCollection",
+                "features": [
+                    line([(-50.0, -50.0), (2050.0, -50.0)], "pial_boundary"),
+                    line([(-50.0, 1200.0), (2050.0, 1200.0)], "grey_white_boundary"),
+                ],
+            }
+        )
+    )
+    return path
+
+
+def test_cortical_depth_qc_summary_records_the_map_first_annotation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The written QC summary names gate, trust and scope of a _mapfirst table.
+
+    The legacy clustered table beside it gets no ``annotation`` record (plan
+    §4.9; legacy summaries are unchanged). The figures are skipped (the
+    violins have their own tests above); they dominate the run time.
+    """
+    from merxen.config import CorticalDepthConfig
+    from merxen.cortical_depth import pipeline
+    from merxen.cortical_depth.pipeline import run_cortical_depth
+
+    for name in (
+        "plot_cells_by_annotation",
+        "plot_cells_by_depth",
+        "plot_depth_difference",
+        "plot_depth_overlay",
+        "plot_depth_violins_by_broad_class",
+        "plot_depth_violins_by_subcluster",
+    ):
+        monkeypatch.setattr(pipeline, name, lambda *_args, **_kwargs: None)
+
+    section = make_section("human", gate_level="broad_only")
+    scope = CrossPlatformScope(
+        statistics_level="broad_only",
+        flag=True,
+        reasons=("dataset_gate:P0001_MERSCOPE:broad_only",),
+    )
+    zarr_path, _, _ = _finalized_zarr(tmp_path, section, scope, legacy_table=True)
+    annotation_path = _boundaries(tmp_path / "boundaries.geojson")
+    summaries = {}
+    for label, suffix in (("map_first", "mapfirst"), ("legacy", "")):
+        config = CorticalDepthConfig(
+            dataset_name=SAMPLE,
+            platform="MERSCOPE",
+            latest_zarr_path=zarr_path,
+            output_dir=tmp_path / f"depth_{label}",
+            tables=[
+                CorticalDepthTableConfig(
+                    segmentation="proseg_hybrid",
+                    table_key="table",
+                    clustered_table_key_suffix=suffix,
+                )
+            ],
+            annotation_path=annotation_path,
+            raster_resolution_um=25.0,
+            streamline_spacing_um=250.0,
+            streamline_resample_points=11,
+            write_spatialdata_table=False,
+        )
+        paths = run_cortical_depth(config)
+        summaries[label] = json.loads(paths["qc_summary"].read_text())["tables"][
+            "proseg_hybrid"
+        ]
+
+    annotation = summaries["map_first"]["annotation"]
+    assert annotation["mode"] == "map_first"
+    assert annotation["gate_level"] == "broad_only"
+    assert annotation["gate_warning"] is True
+    assert annotation["panel_trust"] == "validated"
+    assert annotation["cross_platform"]["statistics_level"] == "broad_only"
+    assert annotation["cross_platform"]["reasons"] == [
+        "dataset_gate:P0001_MERSCOPE:broad_only"
+    ]
+    assert "annotation" not in summaries["legacy"]

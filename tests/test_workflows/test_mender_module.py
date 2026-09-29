@@ -584,3 +584,146 @@ def test_barrier_releases_map_first_pairs_after_other_terminal_events(
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert out.read_text() == released
+
+
+ALIGNMENT_MAIN = """
+workflow {
+    def rows = new groovy.json.JsonSlurperClassic().parseText(params.rows)
+    sample_rows_ch = channel.fromList(
+        rows.collect { row -> tuple(row.pair_id, row, row.settings) }
+    )
+    // ALIGN's tuple: pair, MERSCOPE / Xenium latest, transform, coords, align_out.
+    alignment_results_ch = channel.of(
+        tuple("P1", "m.zarr", "x.zarr", "t.json", "coords", params.align_out)
+    )
+__ALIGNMENT__
+    map_first_alignment_ch
+        .map { pairId, files -> [pairId, files.collect { f -> f.toString() }] }
+        .collect(flat: false)
+        .ifEmpty([])
+        .subscribe { items ->
+            new File(params.out).text = groovy.json.JsonOutput.toJson(items)
+        }
+}
+"""
+
+
+@needs_nextflow
+def test_map_first_alignment_gives_one_tuple_per_pair(tmp_path: Path) -> None:
+    """Hook H5's ALIGN files: [mask, summary] for an aligned pair, [] otherwise.
+
+    main.nf's own ``map_first_alignment_ch`` block feeds
+    ``prepared_ch.combine(alignment_ch, by: 0)`` in CLUSTERING_MAP_FIRST, so
+    a pair without an alignment (single-platform section, alignment disabled)
+    must still get exactly one (empty) tuple and an aligned pair exactly one.
+    """
+    assert NEXTFLOW is not None
+    main_text = (REPO_ROOT / "workflows" / "main.nf").read_text()
+    block = _main_nf_block(
+        main_text,
+        "        map_first_alignment_ch = alignment_results_ch",
+        "        clustering_computed_ch = CLUSTERING_MAP_FIRST(",
+    )
+    align_out = tmp_path / "align_out"
+    align_out.mkdir()
+    for name in ("shared_tissue_mask.npy", "registration_summary.json"):
+        (align_out / name).write_text("x")
+    rows = [
+        {"pair_id": "P1", "settings": {"need_alignment_results": True}},
+        {"pair_id": "P2", "settings": {"need_alignment_results": False}},
+    ]
+    (tmp_path / "lib").mkdir()
+    for source in (REPO_ROOT / "workflows" / "lib").glob("*.groovy"):
+        shutil.copy(source, tmp_path / "lib" / source.name)
+    (tmp_path / "main.nf").write_text(ALIGNMENT_MAIN.replace("__ALIGNMENT__", block))
+    out = tmp_path / "alignment.json"
+    (tmp_path / "nextflow.config").write_text(
+        f"params.rows = '{json.dumps(rows)}'\n"
+        f"params.align_out = '{align_out}'\n"
+        f"params.out = '{out}'\n"
+    )
+    env = {**os.environ, "NXF_DISABLE_CHECK_LATEST": "true", "NXF_ANSI_LOG": "false"}
+    completed = subprocess.run(
+        [NEXTFLOW, "-log", str(tmp_path / "nextflow.log"), "run", "main.nf"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    items = sorted(json.loads(out.read_text()))
+    assert items == [
+        [
+            "P1",
+            [
+                str(align_out / "shared_tissue_mask.npy"),
+                str(align_out / "registration_summary.json"),
+            ],
+        ],
+        ["P2", []],
+    ]
+
+
+COMPLETION_MAIN = """
+workflow {
+    AnnotationRunRecord.reset()
+    AnnotationRunRecord.expect("P1", "proseg_hybrid")
+    AnnotationRunRecord.expect("P2", "proseg_hybrid")
+    AnnotationRunRecord.computed("P2", "proseg_hybrid")
+__COMPLETION__
+    channel.of(1).view { "ran" }
+}
+"""
+
+
+@needs_nextflow
+@pytest.mark.parametrize(
+    ("mode", "listed"),
+    [("map_first", True), ("legacy", False)],
+)
+def test_the_end_of_run_summary_lists_the_run_record(
+    tmp_path: Path, mode: str, listed: bool
+) -> None:
+    """Hook H6: main.nf's own onComplete block prints AnnotationRunRecord's facts.
+
+    A branch that entered clustering and got no label tables is listed as a
+    failed annotation in a map_first run; a legacy run prints no summary.
+    """
+    assert NEXTFLOW is not None
+    main_text = (REPO_ROOT / "workflows" / "main.nf").read_text()
+    block = _main_nf_block(
+        main_text, "    // rca-hook:H6", "    build_inputs_ch = sample_rows_ch"
+    )
+    (tmp_path / "lib").mkdir()
+    for source in (REPO_ROOT / "workflows" / "lib").glob("*.groovy"):
+        shutil.copy(source, tmp_path / "lib" / source.name)
+    (tmp_path / "main.nf").write_text(COMPLETION_MAIN.replace("__COMPLETION__", block))
+    (tmp_path / "nextflow.config").write_text(
+        f"includeConfig '{REPO_ROOT / 'workflows' / 'nextflow.config'}'\n"
+        f"params.clustering_squidpy_mode = '{mode}'\n"
+        "params.samplesheet = 'unused.csv'\n"
+        f"params.outdir = '{tmp_path / 'results'}'\n"
+    )
+    env = {**os.environ, "NXF_DISABLE_CHECK_LATEST": "true", "NXF_ANSI_LOG": "false"}
+    completed = subprocess.run(
+        [NEXTFLOW, "-log", str(tmp_path / "nextflow.log"), "run", "main.nf"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    log = (tmp_path / "nextflow.log").read_text() + completed.stdout
+    failed = (
+        "failed annotations (no label tables; see the failed tasks above): "
+        "P1:proseg_hybrid, P2:proseg_hybrid"
+    )
+    if listed:
+        assert "pair x segmentation branches clustered: 2" in log
+        assert failed in log
+    else:
+        assert "Annotation summary" not in log
