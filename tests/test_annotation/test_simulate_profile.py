@@ -239,6 +239,65 @@ def test_the_class_depth_predictor_sums_emitted_bins() -> None:
     assert row["predicted_coverage"] == pytest.approx(0.25 * 0.5 + 0.25 * 0.8)
     headline = simulate.class_depth_headline(table, profile)
     assert headline["class"]["predicted_coverage"] == pytest.approx(0.325)
+    assert headline["class"]["weights"] == simulate.HEADLINE_PROFILE_COMPOSITION
+
+
+def test_a_pooled_scenario_headline_is_weighted_to_the_test_set_composition() -> None:
+    # D5 of 2026-09-29: the human lung-FFPE scenario has no class composition,
+    # so the class-depth headline weights each class by its test cells.
+    scenario = si.DepthProfile(
+        ["pooled"] * 4,
+        [5, 50, 150, 300],
+        species="human",
+        label="lung scenario",
+        pooled=True,
+    )
+    predicted = pd.DataFrame(
+        {
+            "level": ["broad"] * 4,
+            "class": ["Exc", "Exc", "Oligo", "Oligo"],
+            "depth": [10, 100, 10, 100],
+            "status": ["emitted", "emitted", "emitted", "not_resolvable"],
+            "coverage": [0.5, 0.8, 0.4, 0.9],
+            "n_test": [300, 250, 100, 60],
+        }
+    )
+    table = simulate.class_depth_predictions(predicted, scenario, [10, 100])
+    by_class = table.set_index("class")
+    assert by_class.loc["Exc", "n_test_cells"] == 300
+    assert by_class.loc["Oligo", "n_test_cells"] == 100
+    # Scenario bins: 5 below the grid, 50 -> 10, 150 and 300 -> 100.
+    exc = 0.25 * 0.5 + 0.5 * 0.8
+    oligo = 0.25 * 0.4
+    headline = simulate.class_depth_headline(table, scenario)["broad"]
+    assert headline["weights"] == simulate.HEADLINE_TEST_SET_COMPOSITION
+    assert headline["profile_share_covered"] == 0.0
+    assert headline["predicted_coverage"] == pytest.approx(
+        round(0.75 * exc + 0.25 * oligo, 4)
+    )
+    assert headline["resolvable_share"] == pytest.approx(
+        round(0.75 * 0.75 + 0.25 * 0.25, 4)
+    )
+    lines = simulate.render_profile_lines(
+        {"class_depth": {"regime": "provisional", "headline": {"broad": headline}}}
+    )
+    assert "weighted to the test-set composition" in lines[0]
+    # A pooled profile has no class composition even when its placeholder
+    # labels happen to be class names.
+    named = si.DepthProfile(
+        ["Exc", "Exc", "Oligo", "Oligo"],
+        [5, 50, 150, 300],
+        species="human",
+        label="pooled with class labels",
+        pooled=True,
+    )
+    assert simulate.profile_class_shares(named) is None
+    assert simulate.class_depth_headline(table, named)["broad"]["weights"] == (
+        simulate.HEADLINE_TEST_SET_COMPOSITION
+    )
+    # Without test cells there is nothing to weigh by.
+    empty = simulate.class_depth_headline(table.assign(n_test_cells=0), scenario)
+    assert empty["broad"]["predicted_coverage"] is None
 
 
 def test_profile_mode_re_simulates_the_bundles_own_members() -> None:
@@ -278,6 +337,90 @@ def test_profile_mode_re_simulates_the_bundles_own_members() -> None:
             member_table=table,
         )
     ] == ["R1_contam_HO@4", "R3_measured_HO@5"]
+
+
+def test_weighted_profile_predictions_weigh_only_the_all_row() -> None:
+    # Truth class A is over-simulated (3 of 4 cells) against a 50 / 50 target.
+    table = pd.DataFrame(
+        {
+            "cls_call": ["A", "A", "A", "B"],
+            "truth_leaf": ["a", "a", "a", "b"],
+            "cov_x_prov": [1.0, 1.0, 1.0, 0.0],
+        }
+    )
+    sampled = pd.Series(["A", "A", "A", "B"])
+    result = simulate.weighted_profile_predictions(
+        table, ["cov_x_prov"], sampled_class=sampled, class_shares={"A": 0.5, "B": 0.5}
+    ).set_index("class")
+    assert result.loc["ALL", "cov_x_prov"] == pytest.approx(0.5)
+    assert result.loc["A", "cov_x_prov"] == pytest.approx(1.0)
+    assert result.loc["A", "kish_n"] == pytest.approx(3.0)
+    unweighted = simulate.weighted_profile_predictions(
+        table, ["cov_x_prov"], sampled_class=sampled
+    ).set_index("class")
+    assert unweighted.loc["ALL", "cov_x_prov"] == pytest.approx(0.75)
+    # A real composition weighs every row (mouse, phase 1's comp_weights).
+    real = pd.Series({"a": 0.25, "b": 0.75})
+    with_real = simulate.weighted_profile_predictions(
+        table,
+        ["cov_x_prov"],
+        sampled_class=sampled,
+        real_share=real,
+        class_of={"a": "A", "b": "B"},
+        class_shares={"A": 0.5, "B": 0.5},
+    ).set_index("class")
+    assert with_real.loc["ALL", "cov_x_prov"] == pytest.approx(0.25)
+
+
+def test_profile_mode_all_row_weights() -> None:
+    truth = np.array(["A"] * 3 + ["B"])
+    per_class = si.DepthProfile(
+        ["A"] * 1 + ["B"] * 3,
+        [100, 200, 300, 400],
+        species="mouse",
+        label="x",
+        min_cells=1,
+        neuronal={"A": True, "B": False},
+    )
+    basis, shares = simulate.headline_class_shares(per_class, truth)
+    assert basis == simulate.HEADLINE_PROFILE_COMPOSITION
+    assert shares == {"A": 0.25, "B": 0.75}
+    pooled = si.DepthProfile(
+        ["pooled"] * 4, [100, 200, 300, 400], species="human", label="s", pooled=True
+    )
+    basis, shares = simulate.headline_class_shares(pooled, truth)
+    assert basis == simulate.HEADLINE_TEST_SET_COMPOSITION
+    assert shares == {"A": 0.75, "B": 0.25}
+    # A per-class profile none of whose classes is a truth class falls back.
+    foreign = si.DepthProfile(
+        ["C"] * 2, [1, 2], species="mouse", label="f", min_cells=1, neuronal={}
+    )
+    assert simulate.headline_class_shares(foreign, truth)[0] == (
+        simulate.HEADLINE_TEST_SET_COMPOSITION
+    )
+    # Simulated cells: A 1 of 4, B 3 of 4; weighted to A .75 / B .25.
+    weights = simulate.class_share_weights(
+        pd.Series(["A", "B", "B", "B"]), {"A": 0.75, "B": 0.25}
+    )
+    np.testing.assert_allclose(weights, [3.0, 1 / 3, 1 / 3, 1 / 3])
+    np.testing.assert_allclose(
+        simulate.class_share_weights(["A", None], {"A": 1.0}), [2.0, 0.0]
+    )
+    assert simulate.class_share_weights([], {}).size == 0
+    table = pd.DataFrame(
+        {
+            "cls_call": ["A", "B", "B", "B"],
+            "cov_x_prov": [1.0, 0.0, 0.0, 0.0],
+        }
+    )
+    plain = simulate.per_class_predictions(table, None, ["cov_x_prov"])
+    weighted = simulate.per_class_predictions(table, weights, ["cov_x_prov"])
+    combined = simulate.with_all_row(plain, weighted).set_index("class")
+    assert combined.loc["ALL", "cov_x_prov"] == pytest.approx(0.75)
+    assert combined.loc["A", "cov_x_prov"] == pytest.approx(1.0)
+    assert combined.loc["B", "n"] == 3
+    assert list(simulate.with_all_row(plain, weighted).columns) == list(plain.columns)
+    assert simulate.with_all_row(plain, pd.DataFrame()).equals(plain)
 
 
 def test_depth_profiles_never_cross_species(tmp_path: Path) -> None:
@@ -388,6 +531,16 @@ def test_simulation_headline_is_the_depth_profile(
         f"profile_{name}" for name in members
     ]
     assert mode["member_mean_all"]["n"] > 0
+    # A pooled profile has no class composition: the ALL row and the
+    # class-depth headline are weighted to the test-set composition (D5).
+    assert mode["weighted_to_real_composition"] is False
+    assert mode["all_row_weights"] == simulate.HEADLINE_TEST_SET_COMPOSITION
+    headline = record["class_depth"]["headline"]
+    assert headline
+    for item in headline.values():
+        assert item["weights"] == simulate.HEADLINE_TEST_SET_COMPOSITION
+        assert item["predicted_coverage"] is not None
+        assert item["profile_share_covered"] == 0.0
     out = tmp_path / "out"
     predictions = pd.read_csv(
         out / "whb_frontal_supc_clus" / simulate.PROFILE_PREDICTIONS_CSV
@@ -399,6 +552,7 @@ def test_simulation_headline_is_the_depth_profile(
     assert (class_depth["profile_source"] == si.POOL_ALL).all()
     text = (out / simulate.REPORT_TXT).read_text()
     assert text.index("under the depth profile") < text.index("secondary")
+    assert "weighted to the test-set composition" in text
     saved = json.loads((out / simulate.REPORT_JSON).read_text())
     assert saved["settings"]["profile_mode"] is True
     with pytest.raises(simulate.SimulationError, match="profile mode needs"):

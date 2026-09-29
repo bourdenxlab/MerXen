@@ -572,7 +572,10 @@ merxen annotation-panel-simulate --public-panel xenium_prime_5k_mouse \
    realised total), maps them onto the self-map engine and reports the raw
    rule and the coverage under the bundle's provisional decisions per called
    class, per member and as the member mean, weighted to
-   `--real-composition` (class, subclass, n_cells) when given
+   `--real-composition` (class, subclass, n_cells) when given; without one,
+   the per-class rows stay unweighted and the ALL row is weighted to the
+   profile's class composition, or to the test-set composition for a pooled
+   scenario such as the lung-FFPE totals, as is the class-depth headline
    (`<reference>/profile_predictions.csv`, `profile_cells.parquet`). Profile
    mode is a prediction only and never enters emission. `--expected-depth`
    remains a secondary line (one depth for every cell). Xenium Prime 5K

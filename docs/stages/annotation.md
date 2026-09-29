@@ -1234,11 +1234,13 @@ H4 and H16 baselines) are in §11 of the pre-registration document.
   (four emission members and the clean bound) and its fresh-ensemble
   diagnostic another 4 h; with the eight emission members of the amendment
   of 2026-09-29 the estimates are about 9-10 h and 8 h.
-- **Pooled depth scenarios:** `annotation-panel-simulate` has no class
-  composition for a pooled scenario (the lung-FFPE totals of human Prime),
-  so its per-level headline under the scenario prints "-"; the per-class
-  predictions are in `<reference>/profile_class_depth.csv` and profile mode
-  runs as usual.
+- **Pooled depth scenarios:** a pooled scenario (the lung-FFPE totals of
+  human Prime) has no class composition, so `annotation-panel-simulate`
+  weights its per-level class-depth headline and profile mode's ALL row by
+  the test-set composition (each class's share of the self-map test cells),
+  labelled "weighted to the test-set composition" (since 2026-09-29); the
+  per-class predictions are in `<reference>/profile_class_depth.csv` and
+  `profile_predictions.csv`.
 - **Set c of families without a curated list** uses the label-free rule,
   which drops far more genes than E5's validated set c (44-73 per pair on the
   E5 pairs); treat such set-c results as provisional.

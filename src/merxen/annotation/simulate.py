@@ -2511,7 +2511,8 @@ def class_depth_predictions(
     Returns:
         ``level, class, profile_source, n_profile_cells, profile_median,
         share_below_grid, resolvable_share, predicted_coverage,
-        n_emitted_bins`` rows.
+        n_emitted_bins, n_test_cells`` rows (``n_test_cells``: the class's
+        test cells at the level, the weight of a pooled profile's headline).
     """
     from merxen.annotation.resolvability import depth_bin
 
@@ -2557,39 +2558,143 @@ def class_depth_predictions(
                     )
                 ),
                 "n_emitted_bins": int(len(coverage)),
+                "n_test_cells": _max_test_cells(group),
             }
         )
     return pd.DataFrame(rows)
 
 
+def _max_test_cells(group: pd.DataFrame) -> int:
+    """Test cells of a (level, class): its largest ``n_test`` over the bins."""
+    if "n_test" not in group.columns:
+        return 0
+    values = pd.to_numeric(group["n_test"], errors="coerce").dropna()
+    return int(values.max()) if len(values) else 0
+
+
+# How a headline weights its classes (pre-registration §15.2 D5): a real
+# composition when one is given (mouse), the profile's own class composition
+# for a per-class profile, the test-set composition (the self-map test cells'
+# class shares) for a pooled profile or scenario without classes (the human
+# lung-FFPE scenario).
+HEADLINE_REAL_COMPOSITION: Final = "real_composition"
+HEADLINE_PROFILE_COMPOSITION: Final = "profile_class_composition"
+HEADLINE_TEST_SET_COMPOSITION: Final = "test_set_composition"
+HEADLINE_LABELS: Final[dict[str, str]] = {
+    HEADLINE_REAL_COMPOSITION: "weighted to the real composition",
+    HEADLINE_PROFILE_COMPOSITION: "weighted to the profile's class composition",
+    HEADLINE_TEST_SET_COMPOSITION: "weighted to the test-set composition",
+}
+
+
+def profile_class_shares(profile: Any) -> dict[str, float] | None:
+    """Return a per-class profile's own class shares (``None`` if pooled)."""
+    if getattr(profile, "pooled", False):
+        return None
+    n_total = sum(len(values) for values in profile.by_class.values())
+    if n_total <= 0:
+        return None
+    return {str(cls): len(values) / n_total for cls, values in profile.by_class.items()}
+
+
+def headline_class_shares(
+    profile: Any, truth_class: Sequence[object] | np.ndarray
+) -> tuple[str, dict[str, float]]:
+    """Return how profile mode weights its ALL row without a real composition.
+
+    Args:
+        profile: The ``sim_inputs.DepthProfile``.
+        truth_class: Truth class per test cell (``profile_truth_classes``).
+
+    Returns:
+        ``(basis, class shares)``: the profile's own class shares when it is
+        per class and holds a truth class, else the test-set composition.
+    """
+    classes = pd.Series(np.asarray(truth_class, dtype=object)).astype(str)
+    shares = profile_class_shares(profile)
+    if shares and any(shares.get(cls, 0.0) > 0 for cls in set(classes)):
+        return HEADLINE_PROFILE_COMPOSITION, shares
+    test = classes.value_counts(normalize=True)
+    return HEADLINE_TEST_SET_COMPOSITION, {
+        str(cls): float(share) for cls, share in test.items()
+    }
+
+
+def class_share_weights(
+    truth_class: Sequence[object] | pd.Series | np.ndarray,
+    shares: Mapping[str, float],
+) -> np.ndarray:
+    """Return per-cell weights ``shares[c] / (simulated share of c)``.
+
+    Weights the simulated cells of each truth class ``c`` to a class
+    composition (0 for a class without a share; missing classes count as
+    their own ``"nan"`` class).
+
+    Args:
+        truth_class: Truth class per simulated cell.
+        shares: Target share per class.
+
+    Returns:
+        The weights.
+    """
+    classes = pd.Series(np.asarray(truth_class, dtype=object)).astype(str)
+    if classes.empty:
+        return np.zeros(0, dtype=np.float64)
+    simulated = classes.value_counts(normalize=True)
+    return np.array(
+        [float(shares.get(cls, 0.0)) / float(simulated[cls]) for cls in classes],
+        dtype=np.float64,
+    )
+
+
+def with_all_row(prediction: pd.DataFrame, weighted: pd.DataFrame) -> pd.DataFrame:
+    """Return ``prediction`` with its ALL row taken from ``weighted``."""
+    if prediction.empty or weighted.empty:
+        return prediction
+    rows = prediction[prediction["class"] != "ALL"]
+    return pd.concat([rows, weighted[weighted["class"] == "ALL"]], ignore_index=True)[
+        list(prediction.columns)
+    ]
+
+
 def class_depth_headline(
     class_depth: pd.DataFrame, profile: Any
-) -> dict[str, dict[str, float | None]]:
-    """Return, per level, the profile-composition-weighted predictor.
+) -> dict[str, dict[str, Any]]:
+    """Return, per level, the class-composition-weighted class-depth predictor.
 
-    Weights are the profile's own class shares (classes with their own
-    totals); classes the profile lacks do not enter.
+    A per-class profile weights each class by its own class share (classes
+    the profile lacks do not enter). A pooled profile or scenario has no
+    class composition (the human lung-FFPE scenario), so its classes are
+    weighted by the test-set composition, each class's share of the self-map
+    test cells at the level (``n_test_cells``; pre-registration §15.2 D5);
+    ``weights`` records which.
     """
-    result: dict[str, dict[str, float | None]] = {}
+    result: dict[str, dict[str, Any]] = {}
     if class_depth.empty:
         return result
-    n_total = sum(len(values) for values in profile.by_class.values())
+    shares = profile_class_shares(profile) or {}
     for level, rows in class_depth.groupby("level", sort=True):
-        weights = np.array(
-            [
-                len(profile.by_class.get(str(cls), ())) / n_total if n_total else 0.0
-                for cls in rows["class"]
-            ]
-        )
+        weights = np.array([shares.get(str(cls), 0.0) for cls in rows["class"]])
         mass = float(weights.sum())
+        basis = HEADLINE_PROFILE_COMPOSITION
+        if mass <= 0 and "n_test_cells" in rows.columns:
+            counts = pd.to_numeric(rows["n_test_cells"], errors="coerce").fillna(0.0)
+            total = float(counts.sum())
+            if total > 0:
+                weights = counts.to_numpy(np.float64) / total
+                basis = HEADLINE_TEST_SET_COMPOSITION
+        covered = float(weights.sum())
         result[str(level)] = {
+            "weights": basis,
             "profile_share_covered": round(mass, 4),
             "resolvable_share": None
-            if mass <= 0
-            else round(float(np.sum(weights * rows["resolvable_share"]) / mass), 4),
+            if covered <= 0
+            else round(float(np.sum(weights * rows["resolvable_share"]) / covered), 4),
             "predicted_coverage": None
-            if mass <= 0
-            else round(float(np.sum(weights * rows["predicted_coverage"]) / mass), 4),
+            if covered <= 0
+            else round(
+                float(np.sum(weights * rows["predicted_coverage"]) / covered), 4
+            ),
         }
     return result
 
@@ -2744,6 +2849,49 @@ def profile_ensemble(
     ]
 
 
+def weighted_profile_predictions(
+    table: pd.DataFrame,
+    metrics: Sequence[str],
+    *,
+    sampled_class: pd.Series,
+    real_share: pd.Series | None = None,
+    class_of: Mapping[str, str] | None = None,
+    class_shares: Mapping[str, float] | None = None,
+) -> pd.DataFrame:
+    """Return one member's profile-mode predictions with their weights (D5).
+
+    With a real composition every row is weighted to it
+    (``composition_weights_to_real``, mouse). Without one the per-class rows
+    stay unweighted and the ALL row is weighted to ``class_shares`` (the
+    profile's class composition, or the test-set composition for a pooled
+    profile; ``headline_class_shares``).
+
+    Args:
+        table: ``profile_cell_table`` output.
+        metrics: ``profile_metrics(table)``.
+        sampled_class: Truth class each simulated cell was sampled for,
+            aligned to ``table``.
+        real_share: Real called share per subclass, if any.
+        class_of: Subclass -> class names (with ``real_share``).
+        class_shares: Class shares of the ALL row without a real composition.
+
+    Returns:
+        ``per_class_predictions`` rows.
+    """
+    if real_share is not None and not table.empty:
+        weights = composition_weights_to_real(
+            table["truth_leaf"], real_share, class_of or {}
+        )
+        return per_class_predictions(table, weights, metrics)
+    prediction = per_class_predictions(table, None, metrics)
+    if table.empty or not class_shares:
+        return prediction
+    weighted = per_class_predictions(
+        table, class_share_weights(sampled_class, class_shares), metrics
+    )
+    return with_all_row(prediction, weighted)
+
+
 def run_profile_mode(
     *,
     reference_id: str,
@@ -2767,8 +2915,12 @@ def run_profile_mode(
     with the production configuration onto the self-map engine; its
     per-class predictions (the raw rule and the bundle's provisional
     decisions) are weighted to the real called composition when one is
-    given, and the member mean is reported beside each member. Profile mode
-    never enters emission.
+    given, and the member mean is reported beside each member. Without a
+    real composition the per-class rows stay unweighted and the ALL row is
+    weighted to the profile's own class composition, or, for a pooled
+    profile such as the human lung-FFPE scenario, to the test-set
+    composition (the test cells' class shares; pre-registration §15.2 D5),
+    labelled in ``all_row_weights``. Profile mode never enters emission.
 
     Returns:
         The report record and resource rows.
@@ -2827,6 +2979,9 @@ def run_profile_mode(
     if real_composition is not None and species == "mouse":
         counts = real_composition.groupby("subclass")["n_cells"].sum()
         real_share = counts / counts.sum()
+    all_row_basis, class_shares = headline_class_shares(profile, truth)
+    if real_share is not None:
+        all_row_basis = HEADLINE_REAL_COMPOSITION
     runs: list[dict[str, Any]] = []
     map_fn = ref.mmc_map_function(
         engine,
@@ -2853,12 +3008,16 @@ def run_profile_mode(
             cells = rule(cells)
         cells = res.as_stored(cells)
         table = profile_cell_table(cells, species=species, summary=summary, names=names)
-        weights = (
-            composition_weights_to_real(table["truth_leaf"], real_share, class_of)
-            if real_share is not None and not table.empty
-            else None
+        prediction = weighted_profile_predictions(
+            table,
+            profile_metrics(table),
+            sampled_class=query.obs["truth_class_sampled"].reindex(table.index)
+            if not table.empty
+            else pd.Series(dtype=object),
+            real_share=real_share,
+            class_of=class_of,
+            class_shares=class_shares,
         )
-        prediction = per_class_predictions(table, weights, profile_metrics(table))
         predictions[member.name] = prediction
         member_records[member.name] = {
             "recipe": member.recipe.to_json(),
@@ -2911,6 +3070,7 @@ def run_profile_mode(
         "members": list(predictions),
         "profile": profile.to_json(),
         "weighted_to_real_composition": real_share is not None,
+        "all_row_weights": all_row_basis,
         "member_records": member_records,
         "member_mean_all": _headline_rows(mean),
         "member_spread_all": spread,
@@ -2945,21 +3105,34 @@ def render_profile_lines(record: Mapping[str, Any]) -> list[str]:
         )
     class_depth = record.get("class_depth") or {}
     for level, item in (class_depth.get("headline") or {}).items():
+        basis = item.get("weights", HEADLINE_PROFILE_COMPOSITION)
+        weights = (
+            f"{_fmt(item.get('profile_share_covered'))} of profile cells in "
+            "tabulated classes"
+            if basis == HEADLINE_PROFILE_COMPOSITION
+            else f"{HEADLINE_LABELS.get(basis, basis)} (a pooled profile has no "
+            "class composition)"
+        )
         lines.append(
             f"     {level}: resolvable share {_fmt(item.get('resolvable_share'))}, "
             f"predicted coverage {_fmt(item.get('predicted_coverage'))} "
             f"(decisions x per-class depth shares, {class_depth.get('regime')} regime; "
-            f"{_fmt(item.get('profile_share_covered'))} of profile cells in "
-            "tabulated classes)"
+            f"{weights})"
         )
     mode = record.get("profile_mode") or {}
     if mode.get("status") == "run":
         mean = mode.get("member_mean_all") or {}
         spread = mode.get("member_spread_all") or {}
-        weighted = (
-            "weighted to the real composition"
+        basis = mode.get("all_row_weights") or (
+            HEADLINE_REAL_COMPOSITION
             if mode.get("weighted_to_real_composition")
-            else "unweighted"
+            else None
+        )
+        weighted = (
+            "unweighted"
+            if basis is None
+            else f"ALL {HEADLINE_LABELS.get(str(basis), str(basis))}"
+            + ("" if basis == HEADLINE_REAL_COMPOSITION else ", classes unweighted")
         )
         lines.append(
             f"     profile mode ({', '.join(mode.get('members') or [])}; {weighted}; "
