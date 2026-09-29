@@ -92,6 +92,7 @@ from merxen.clustering.stability import (
     adjusted_rand_index,
     subsample_ari,
 )
+from merxen.table_keys import clustered_table_key_suffix
 
 if TYPE_CHECKING:
     import anndata as ad
@@ -264,6 +265,46 @@ def recorded_table_key_suffix(uns: Mapping[str, Any]) -> str | None:
     if record is None or record.get(TABLE_KEY_SUFFIX_FIELD) is None:
         return None
     return str(record[TABLE_KEY_SUFFIX_FIELD])
+
+
+def check_clustered_table_target(
+    uns: Mapping[str, Any], table_key: str, *, consumer: str
+) -> None:
+    """Refuse to pair a clustered table with a table key of the other mode.
+
+    Legacy and map_first clustered tables hold the same cells (plan §4.4),
+    so a consumer that writes back to a SpatialData table (MENDER) cannot
+    tell them apart by their cell ids. A map_first table records the suffix
+    it was clustered for; it may only go to the key with that suffix. A
+    table without a map_first record (legacy) may not go to a suffixed key,
+    which only map_first tables use (plan §4.8).
+
+    Args:
+        uns: ``uns`` of the clustered H5AD the consumer read.
+        table_key: The SpatialData table key the consumer reads or writes.
+        consumer: Name for the error message (e.g. ``MENDER_IMPORT``).
+
+    Raises:
+        ValueError: If the table's mode or suffix does not match ``table_key``.
+    """
+    target = clustered_table_key_suffix(table_key)
+    if map_first_record(uns) is not None:
+        recorded = recorded_table_key_suffix(uns) or ""
+        if target != recorded:
+            raise ValueError(
+                f"{consumer}: the clustered H5AD is a map_first table built for "
+                f"table-key suffix {recorded!r}, but the target table is "
+                f"{table_key!r}; refusing to mix the map_first and legacy "
+                "clustered tables (plan §4.8)"
+            )
+        return
+    if target:
+        raise ValueError(
+            f"{consumer}: the clustered H5AD has no map_first record (a legacy "
+            f"table), but the target table {table_key!r} carries the map_first "
+            f"suffix {target!r}; refusing to mix the map_first and legacy "
+            "clustered tables (plan §4.8)"
+        )
 
 
 def recorded_mender_policy(uns: Mapping[str, Any]) -> str | None:

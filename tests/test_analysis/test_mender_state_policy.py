@@ -30,8 +30,13 @@ from merxen.analysis import mender
 from merxen.analysis.mender import (
     EXCLUDE_FROM_FEATURES_POLICY,
     IN_FEATURES_COLUMN,
+    SKIPPED_NO_ASSIGNED_STATE,
+    cross_platform_comparability,
     excluded_feature_states,
+    finalize_mender,
+    import_mender_spatialdata,
     prepare_mender,
+    skip_reasons,
 )
 from merxen.annotation.provenance import (
     PROVENANCE_UNS_KEY,
@@ -71,18 +76,21 @@ def _config(tmp_path: Path, **overrides: Any) -> MenderConfig:
     return MenderConfig.model_validate(values)
 
 
+MAPFIRST_TABLE = "table_MOSAIK_proseg_hybrid_clustering_squidpy_mapfirst"
+
+
 def _write_clustered(
     tmp_path: Path,
     config: MenderConfig,
     *,
     provenance: str | None = None,
     hierarchy: dict[str, Any] | None = None,
+    state_values: list[str] | None = None,
 ) -> list[str]:
     n_cells = 40
     cell_ids = [f"c{index}" for index in range(n_cells)]
-    states = [
-        MAP_FIRST_STATES[index % len(MAP_FIRST_STATES)] for index in range(n_cells)
-    ]
+    values = state_values or MAP_FIRST_STATES
+    states = [values[index % len(values)] for index in range(n_cells)]
     obs = pd.DataFrame(
         {"cell_id": cell_ids, "hierarchical_cluster": pd.Categorical(states)},
         index=pd.Index([f"row_{index}" for index in range(n_cells)]),
@@ -194,7 +202,8 @@ def test_map_first_tables_record_gate_and_panel_trust_under_both_policies(
         assert manifest["excluded_feature_states"] == expected
 
 
-def test_exclude_policy_refuses_sections_without_an_assigned_state() -> None:
+def test_exclude_policy_skips_sections_without_an_assigned_state() -> None:
+    """A refused panel or failed gate is a status, not an error (plan §3.1)."""
     config = MenderConfig.model_validate(
         {
             "pair_id": "p",
@@ -209,11 +218,157 @@ def test_exclude_policy_refuses_sections_without_an_assigned_state() -> None:
             "unassigned_state_policy": EXCLUDE_FROM_FEATURES_POLICY,
         }
     )
-    states = pd.Series(pd.Categorical(["Mixed/Unknown:unresolved"] * 3))
-    with pytest.raises(ValueError, match="leave no feature"):
-        excluded_feature_states(states, config)
+    states = pd.Series(
+        pd.Categorical(["Mixed/Unknown:unresolved", "Neurons/unresolved:unresolved"])
+    )
+    excluded = excluded_feature_states(states, config)
+    assert excluded == ("Mixed/Unknown:unresolved", "Neurons/unresolved:unresolved")
+    (reason,) = skip_reasons(states, excluded, config)
+    assert "leaves no neighbourhood feature" in reason
+    assigned = pd.Series(pd.Categorical(["Mixed/Unknown:unresolved", "Astrocytes:x"]))
+    assert (
+        skip_reasons(assigned, excluded_feature_states(assigned, config), config) == []
+    )
     legacy = config.model_copy(update={"unassigned_state_policy": "state"})
     assert excluded_feature_states(states, legacy) == ()
+    assert skip_reasons(states, (), legacy) == []
+
+
+def test_an_all_unassigned_table_runs_every_step_without_domains(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PREPARE records the skip; COMPUTE, FINALIZE and IMPORT write outputs only."""
+    config = _config(tmp_path, source_spatialdata_table=MAPFIRST_TABLE)
+    cell_ids = _write_clustered(
+        tmp_path,
+        config,
+        provenance=AnnotationProvenance(
+            species="human",
+            gate=DatasetGateProvenance(level="failed", warning=True),
+            panel=PanelProvenance(panel_trust="refused"),
+        ).to_uns_json(),
+        hierarchy=MAP_FIRST_RECORD,
+        state_values=["Mixed/Unknown:unresolved"],
+    )
+    _fake_spatialdata(monkeypatch, config, cell_ids)
+    prepared = tmp_path / "prepared"
+    manifest = json.loads(prepare_mender(config, prepared).read_text())
+    assert manifest["status"] == SKIPPED_NO_ASSIGNED_STATE
+    assert manifest["annotation"]["gate_level"] == "failed"
+    assert manifest["cross_platform_comparable"] is False
+
+    compute_config = tmp_path / "mender_config.json"
+    compute_config.write_text(
+        json.dumps(
+            {
+                "sample_id": config.sample_id,
+                "platform": config.platform,
+                "segmentation": config.segmentation,
+            }
+        )
+    )
+    # No MENDER module is importable here: a skipped run must not need one.
+    monkeypatch.setitem(sys.modules, "MENDER", None)
+    computed = tmp_path / "computed"
+    outputs = run_mender_compute(compute_config, prepared, computed)
+    compute_manifest = json.loads(outputs["manifest"].read_text())
+    assert compute_manifest["status"] == mender_compute.SKIPPED_STATUS
+    assert mender_compute.SKIPPED_STATUS == SKIPPED_NO_ASSIGNED_STATE
+
+    finalized = finalize_mender(config, prepared, computed, tmp_path / "mender_out")
+    output_manifest = json.loads(finalized["manifest"].read_text())
+    assert output_manifest["status"] == SKIPPED_NO_ASSIGNED_STATE
+    assert output_manifest["domain_counts"] == {}
+    assert output_manifest["annotation"]["panel_trust"] == "refused"
+    sample_dir = finalized["manifest"].parent
+    assert not list(sample_dir.glob("*.h5ad"))
+    assert (sample_dir / "input" / "input_manifest.json").is_file()
+
+    def _no_read(_path: Any) -> None:
+        raise AssertionError("a skipped run must not open the SpatialData store")
+
+    monkeypatch.setitem(
+        sys.modules, "spatialdata", types.SimpleNamespace(read_zarr=_no_read)
+    )
+    imported = json.loads(
+        import_mender_spatialdata(
+            config, sample_dir, tmp_path / "import" / "manifest.json"
+        ).read_text()
+    )
+    assert imported["imported"] is False
+    assert imported["status"] == SKIPPED_NO_ASSIGNED_STATE
+    assert imported["status_reasons"] == manifest["status_reasons"]
+
+
+def test_mender_refuses_a_table_of_the_other_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Legacy and map_first tables share their cells: the key must match the mode."""
+    legacy_h5ad_to_mapfirst = _config(
+        tmp_path / "a", source_spatialdata_table=MAPFIRST_TABLE
+    )
+    legacy_h5ad_to_mapfirst.source_h5ad.parent.mkdir(parents=True)
+    cell_ids = _write_clustered(tmp_path, legacy_h5ad_to_mapfirst)
+    _fake_spatialdata(monkeypatch, legacy_h5ad_to_mapfirst, cell_ids)
+    with pytest.raises(ValueError, match="no map_first record"):
+        prepare_mender(legacy_h5ad_to_mapfirst, tmp_path / "a" / "prepared")
+
+    mapfirst_h5ad_to_legacy = _config(tmp_path / "b")
+    mapfirst_h5ad_to_legacy.source_h5ad.parent.mkdir(parents=True)
+    cell_ids = _write_clustered(
+        tmp_path, mapfirst_h5ad_to_legacy, hierarchy=MAP_FIRST_RECORD
+    )
+    _fake_spatialdata(monkeypatch, mapfirst_h5ad_to_legacy, cell_ids)
+    with pytest.raises(ValueError, match="map_first table built for"):
+        prepare_mender(mapfirst_h5ad_to_legacy, tmp_path / "b" / "prepared")
+
+    # MENDER_IMPORT checks again before it opens the store.
+    sample_dir = tmp_path / "b" / "finalized" / "merscope"
+    sample_dir.mkdir(parents=True)
+    annotated = ad.read_h5ad(mapfirst_h5ad_to_legacy.source_h5ad)
+    annotated.obs["mender_domain"] = pd.Categorical(["0"] * annotated.n_obs)
+    annotated.uns["merxen_mender"] = {"sample_id": "pair1_MERSCOPE"}
+    annotated.write_h5ad(sample_dir / "pair1_MERSCOPE_mender_annotated.h5ad")
+    with pytest.raises(ValueError, match="map_first table built for"):
+        import_mender_spatialdata(
+            mapfirst_h5ad_to_legacy, sample_dir, tmp_path / "b" / "import.json"
+        )
+
+
+def test_niches_are_comparable_across_platforms_only_on_the_mender_state() -> None:
+    """§4.9: cross-platform MENDER uses ct_mender_state within the pair scope."""
+    base = {
+        "pair_id": "p",
+        "sample_id": "p_MERSCOPE",
+        "platform": "MERSCOPE",
+        "segmentation": "proseg_hybrid",
+        "source_h5ad": "x.h5ad",
+        "spatialdata_path": "x.zarr",
+        "source_spatialdata_table": "t",
+        "native_shape_key": "s",
+        "output_dir": "o",
+    }
+    full = {"cross_platform": {"statistics_level": "full", "flag": False}}
+    broad = {"cross_platform": {"statistics_level": "broad_only", "flag": True}}
+    hierarchical = MenderConfig.model_validate(base)
+    mender_state = MenderConfig.model_validate(
+        {**base, "cell_state_key": "ct_mender_state"}
+    )
+
+    assert cross_platform_comparability(hierarchical, full) == {
+        "cross_platform_comparable": False,
+        "cross_platform_comparable_reasons": ["state_key:hierarchical_cluster"],
+    }
+    assert cross_platform_comparability(mender_state, full) == {
+        "cross_platform_comparable": True,
+        "cross_platform_comparable_reasons": [],
+    }
+    assert cross_platform_comparability(mender_state, broad)[
+        "cross_platform_comparable_reasons"
+    ] == ["cross_platform:broad_only"]
+    assert cross_platform_comparability(mender_state, None)[
+        "cross_platform_comparable_reasons"
+    ] == ["cross_platform:no_record"]
 
 
 class _NamingMender:
@@ -419,7 +574,7 @@ def test_a_map_first_table_brings_its_runs_policy(
         gate=DatasetGateProvenance(level="full", warning=False),
         panel=PanelProvenance(panel_trust="validated"),
     ).to_uns_json()
-    config = _config(tmp_path)
+    config = _config(tmp_path, source_spatialdata_table=MAPFIRST_TABLE)
     assert "unassigned_state_policy" not in config.model_fields_set
     cell_ids = _write_clustered(
         tmp_path, config, provenance=provenance, hierarchy=MAP_FIRST_RECORD
@@ -436,10 +591,20 @@ def test_a_map_first_table_brings_its_runs_policy(
     ]
     portable = pd.read_parquet(manifest_path.parent / "mender_input.parquet")
     assert IN_FEATURES_COLUMN in portable.columns
-    # The pair's cross-platform scope reaches the MENDER manifest (§8.5).
+    # The pair's cross-platform scope reaches the MENDER manifest (§8.5), and
+    # hierarchical_cluster niches are not comparable across platforms (§4.9).
     assert manifest["annotation"]["cross_platform"]["statistics_level"] == "broad_only"
+    assert manifest["cross_platform_comparable"] is False
+    assert manifest["cross_platform_comparable_reasons"] == [
+        "state_key:hierarchical_cluster",
+        "cross_platform:broad_only",
+    ]
 
-    explicit = _config(tmp_path / "explicit", unassigned_state_policy="state")
+    explicit = _config(
+        tmp_path / "explicit",
+        unassigned_state_policy="state",
+        source_spatialdata_table=MAPFIRST_TABLE,
+    )
     explicit.source_h5ad.parent.mkdir(parents=True, exist_ok=True)
     cell_ids = _write_clustered(
         tmp_path, explicit, provenance=provenance, hierarchy=MAP_FIRST_RECORD

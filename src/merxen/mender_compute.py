@@ -23,6 +23,9 @@ from scipy import sparse
 # under ``unassigned_state_policy="exclude_from_features"`` (plan §4.9);
 # mirrors ``merxen.analysis.mender.IN_FEATURES_COLUMN``.
 IN_FEATURES_COLUMN = "in_features"
+# ``merxen.analysis.mender.SKIPPED_NO_ASSIGNED_STATE``: PREPARE found no
+# assigned cell state, so there is nothing to compute (plan §3.1, §4.9).
+SKIPPED_STATUS = "skipped_no_assigned_state"
 # MENDER_single.generate_ct_representation names its features
 # ``ct<index into ct_unique>scale<scale>``.
 _FEATURE_NAME = re.compile(r"^ct(\d+)scale(\d+)$")
@@ -219,6 +222,11 @@ def run_mender_compute(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     config = json.loads(config_path.read_text())
+    input_manifest_path = prepared_dir / "input_manifest.json"
+    if input_manifest_path.is_file():
+        input_manifest = json.loads(input_manifest_path.read_text())
+        if input_manifest.get("status") == SKIPPED_STATUS:
+            return _write_skipped(config, input_manifest, output_dir)
     portable = pd.read_parquet(prepared_dir / "mender_input.parquet")
     adata = build_minimal_anndata(portable)
 
@@ -288,6 +296,25 @@ def run_mender_compute(
         "scale_neighbour_summary": scale_path,
         "manifest": manifest_path,
     }
+
+
+def _write_skipped(
+    config: dict[str, Any], input_manifest: dict[str, Any], output_dir: Path
+) -> dict[str, Path]:
+    """Record a skipped run: a compute manifest, no MENDER model."""
+    manifest_path = output_dir / "compute_manifest.json"
+    manifest = {
+        "sample_id": config["sample_id"],
+        "platform": config["platform"],
+        "segmentation": config["segmentation"],
+        "status": SKIPPED_STATUS,
+        "status_reasons": list(input_manifest.get("status_reasons", [])),
+        "n_cells": 0,
+        "domain_counts": {},
+        "cpu_only": True,
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    return {"manifest": manifest_path}
 
 
 def main() -> None:
