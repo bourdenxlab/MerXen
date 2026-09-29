@@ -3749,7 +3749,7 @@ workflow {
                     pairId,
                     terminalStage,
                     currentPairTerminalExpectedCount(settings, terminalStage),
-                )]
+                )] * AnnotationSettings.terminalSpecCopies(settings) // rca-site:H3
             }
         }
     }

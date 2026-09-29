@@ -48,6 +48,8 @@ EXPECTED_SITES: dict[tuple[str, str], int] = {
     # closure parameter they need (renamed from ``_settings``) and the
     # cortical-depth table fields (M5).
     (MAIN_NF, "H2"): 4,
+    # The MENDER barrier's spec copies of map_first rows (M5 exit run).
+    (MAIN_NF, "H3"): 1,
     # Sample config, clustering config, MENDER, cortical-depth table (M5).
     ("src/merxen/config.py", "H8"): 4,
     ("src/merxen/io/samplesheet.py", "H9"): 2,  # SamplePair fields, row parsing
