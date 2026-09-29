@@ -170,7 +170,10 @@ def _spatialdata_zarr(section: Section, path: Path) -> None:
     sdata.write(path)
 
 
-@pytest.mark.parametrize("species", ["human", "mouse"])
+# The mouse zarr round trip is slow (about 30 s); the default run keeps human.
+@pytest.mark.parametrize(
+    "species", ["human", pytest.param("mouse", marks=pytest.mark.slow)]
+)
 def test_tablemodel_zarr_round_trip_keeps_every_new_field(
     species: str, tmp_path: Path
 ) -> None:

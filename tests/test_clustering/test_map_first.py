@@ -473,6 +473,7 @@ def test_config_must_be_map_first_with_mapped_leaves(tmp_path: Path) -> None:
         )
 
 
+@pytest.mark.slow  # About 80 s serial (figures); the CI default run skips it.
 def test_plots_and_tables_are_written(tmp_path: Path) -> None:
     section = make_section("human")
     clustered, result = run_map_first_hierarchy(
