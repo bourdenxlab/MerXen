@@ -426,6 +426,10 @@ RULE_IMPORT_EXEMPTIONS = {
     "merxen.control_features": "control registry (query loading)",
     "merxen.gene_ids": "Ensembl ID pattern (query loading)",
     "merxen.table_keys": "table-key suffix validator (COMPUTE_CPU, FINALIZE)",
+    # merxen.clustering is fingerprinted for cellset.select_table_cells; its
+    # map_first hierarchy (COMPUTE_CPU, M5) is not run by RESOLVE.
+    "merxen.config": "ClusteringSquidpyConfig type hints (TYPE_CHECKING only)",
+    "merxen.analysis.clustering_squidpy": "legacy plot helpers (map_first QC plots)",
 }
 
 
