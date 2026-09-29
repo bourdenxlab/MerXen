@@ -92,6 +92,15 @@ REGION_CELLS_SCHEMA_VERSION: Final = 1
 # the re-mapped cells only).
 REMAP_RUN_SUFFIX: Final = "_pruned"
 UNPRUNED_TOKEN: Final = "unpruned"
+# Start of the region-step reason an override that differs from the inference
+# records (RESOLVE turns it into a gate warning).
+OVERRIDE_DIFFERS_REASON: Final = "the override differs from the inferred divisions"
+# Region-step statuses whose drop list is the section's rule outcome (G3, G4).
+EVALUATED_STATUSES: Final[tuple[str, ...]] = ("pruned", "no_nodes_dropped")
+SKIPPED_STATUSES: Final[tuple[str, ...]] = (
+    "skipped_few_tiles",
+    "skipped_no_coordinates",
+)
 
 RegionSource = Literal["auto", "override", "none"]
 RegionStepStatus = Literal[
@@ -1040,7 +1049,7 @@ def plan_region_step(
         present = request.regions
         if inference is not None and set(inference.inferred_regions) != set(present):
             reasons.append(
-                "the override differs from the inferred divisions "
+                f"{OVERRIDE_DIFFERS_REASON} "
                 f"({';'.join(inference.inferred_regions) or 'none'})"
             )
     nodes = tuple(two_tier_drop_list(present, shares, taxonomy, config))
@@ -1265,6 +1274,13 @@ class MouseRegionRecord(_RegionModel):
         """Whether the section was pruned (a drop list was applied)."""
         return self.status == "pruned"
 
+    @property
+    def drop_list_sha256(self) -> str:
+        """Return the sha256 of the drop list's ``[level, node]`` pairs (§4.6)."""
+        pairs = [list(node.as_pair()) for node in self.nodes_to_drop]
+        payload = json.dumps(pairs, sort_keys=True).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
 
 def count_dropped_subclasses(
     nodes: Sequence[DroppedNode], taxonomy: WmbTaxonomy
@@ -1427,6 +1443,9 @@ class MouseRegionOutputs:
         pruned: The pruned tidy table (the unpruned one when nothing was
             re-mapped).
         remap: The re-mapped cells' tidy table (empty when none).
+        region_share: The region-share bundle the step used, opened for
+            RESOLVE (``open_region_share``), or ``None``.
+        region_share_problem: Why a bundle the step used could not be read.
     """
 
     record: MouseRegionRecord
@@ -1434,6 +1453,8 @@ class MouseRegionOutputs:
     unpruned: pd.DataFrame
     pruned: pd.DataFrame
     remap: pd.DataFrame
+    region_share: RegionShareBundle | None = None
+    region_share_problem: str | None = None
 
     def dropped_level(self, obs_names: pd.Index) -> np.ndarray:
         """Return ``region_dropped_level`` per object (``None`` off-table)."""
@@ -1523,3 +1544,86 @@ def load_region_outputs(
     return MouseRegionOutputs(
         record=record, cells=cells, unpruned=unpruned, pruned=pruned, remap=remap
     )
+
+
+def open_region_share(
+    record: MouseRegionRecord, path: Path | str | None = None
+) -> tuple[RegionShareBundle | None, str | None]:
+    """Open the region-share bundle a section's region step used (RESOLVE).
+
+    Args:
+        record: The section's region record.
+        path: The bundle directory given for it (``--bundle
+            wmb_region_share=DIR`` or its staged bundle ref); default: the
+            path the region step recorded.
+
+    Returns:
+        ``(bundle, None)``; ``(None, problem)`` when the step used a bundle
+        that cannot be read (a gate warning in RESOLVE); ``(None, None)``
+        when the step used none (``none``).
+
+    Raises:
+        MouseRegionError: If the bundle's ``build_hash`` is not the one the
+            region step recorded (its drop list came from other shares).
+    """
+    recorded = record.region_share
+    if recorded is None:
+        if record.status in EVALUATED_STATUSES:
+            return None, "the region record names no region-share bundle"
+        return None, None
+    source = path if path is not None else recorded.get("path")
+    if source is None:
+        return None, "the region record has no region-share path"
+    try:
+        bundle = RegionShareBundle.from_dir(source)
+    except (MouseRegionError, OSError, KeyError) as error:
+        return None, f"region-share bundle {source} unreadable: {error}"
+    expected = recorded.get("build_hash")
+    if expected is not None and bundle.build_hash != str(expected):
+        raise MouseRegionError(
+            f"region-share bundle {source} has build_hash {bundle.build_hash[:16]}, "
+            f"but the region step used {str(expected)[:16]}: resolve with the "
+            "bundle MAP used, or re-run MAP"
+        )
+    return bundle, None
+
+
+def region_step_warnings(
+    status: str | None,
+    reasons: Sequence[str],
+    *,
+    share_problem: str | None = None,
+) -> list[str]:
+    """Return the mouse gate warnings of a section's region step (plan §7.2).
+
+    A skipped step (fewer than ``min_assigned_tiles`` assigned tiles, or no
+    coordinates) leaves the region-implausible calls unpruned, so it warns
+    (plan §7.2: "skip pruning with a warning"); so does an override that
+    differs from the inferred divisions, and a region-share bundle RESOLVE
+    cannot read for a pruned section (G3 and G4 are then not evaluated).
+    ``none`` (pruning disabled on request) does not warn.
+
+    Args:
+        status: ``MouseRegionRecord.status`` (``None``: no region step).
+        reasons: Its recorded reasons.
+        share_problem: Why RESOLVE could not open the region-share bundle.
+
+    Returns:
+        Warning reasons (``region_step: ...``, ``region_share: ...``).
+    """
+    warnings: list[str] = []
+    if status in SKIPPED_STATUSES:
+        detail = "; ".join(reasons) or "no reason recorded"
+        warnings.append(
+            f"region_step: {status} ({detail}): region-implausible calls were "
+            "not pruned"
+        )
+    else:
+        warnings += [
+            f"region_step: {reason}"
+            for reason in reasons
+            if reason.startswith(OVERRIDE_DIFFERS_REASON)
+        ]
+    if share_problem is not None and status in EVALUATED_STATUSES:
+        warnings.append(f"region_share: {share_problem} (G3 and G4 not evaluated)")
+    return warnings

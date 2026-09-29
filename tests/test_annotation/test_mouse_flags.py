@@ -418,6 +418,9 @@ def test_region_coherence_counts_same_class_neighbours() -> None:
     assert coherence[0] == 1.0 and coherence[9] == 1.0
     assert coherence[4] == 0.5  # neighbours 3 (A) and 5 (B)
     assert np.isnan(region_coherence(xy[:2], labels[:2], k=2)).all()
+    # Cells without a call never match each other.
+    uncalled = region_coherence(xy, [None] * 5 + ["B"] * 5, k=2)
+    assert uncalled[:5].tolist() == [0.0] * 5 and uncalled[9] == 1.0
 
 
 def test_f1_needs_a_restricted_class_low_coherence_and_low_confidence() -> None:

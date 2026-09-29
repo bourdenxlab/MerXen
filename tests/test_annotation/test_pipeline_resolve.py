@@ -811,14 +811,20 @@ def test_mouse_resolve_refuses_a_human_map_output(
     manifest.model_copy(update={"species": "mouse"}).write(
         setup.map_dir / MAP_MANIFEST_NAME
     )
+    config = AnnotationConfig(species="mouse").coupled_to_clustering(10)
+    # A mouse manifest without the M6 region step is refused first.
+    with pytest.raises(ResolveError, match="predates the mouse region step"):
+        annotate_resolve(setup.map_dir, config, output_dir=tmp_path / "mouse")
+    manifest.model_copy(
+        update={
+            "species": "mouse",
+            "mouse_region_step": pl.MOUSE_REGION_STEP.format(variant="v1"),
+        }
+    ).write(setup.map_dir / MAP_MANIFEST_NAME)
     # Resolved with the mouse gene rules, the counts no longer fingerprint as
     # MAP mapped them: a clean refusal, never a human run read as mouse.
     with pytest.raises(ResolveError, match="differ from the ones MAP mapped"):
-        annotate_resolve(
-            setup.map_dir,
-            AnnotationConfig(species="mouse").coupled_to_clustering(10),
-            output_dir=tmp_path / "mouse",
-        )
+        annotate_resolve(setup.map_dir, config, output_dir=tmp_path / "mouse2")
 
 
 def test_a_bundle_override_must_describe_the_same_mapping(
@@ -1056,9 +1062,12 @@ def test_cli_annotate_resolve_refuses_a_mismatched_mouse_run_cleanly(
 ) -> None:
     setup = _setup(tmp_path, fake_mmc)
     manifest = pl.load_map_manifest(setup.map_dir / MAP_MANIFEST_NAME)
-    manifest.model_copy(update={"species": "mouse"}).write(
-        setup.map_dir / MAP_MANIFEST_NAME
-    )
+    manifest.model_copy(
+        update={
+            "species": "mouse",
+            "mouse_region_step": pl.MOUSE_REGION_STEP.format(variant="v1"),
+        }
+    ).write(setup.map_dir / MAP_MANIFEST_NAME)
     result = CliRunner().invoke(
         cli_main,
         [

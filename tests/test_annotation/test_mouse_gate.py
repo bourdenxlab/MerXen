@@ -17,7 +17,7 @@ from merxen.annotation.config import (
     AnnotationFlagsConfig,
     MouseGateConfig,
 )
-from merxen.annotation.mouse_flags import MouseFlagProfiles
+from merxen.annotation.mouse_flags import MouseFlagProfiles, SpecificGenes
 from merxen.annotation.mouse_gate import (
     SIGNAL_KEYS,
     MarkerReferee,
@@ -27,12 +27,18 @@ from merxen.annotation.mouse_gate import (
     class_group_markers,
     composition_offsets,
     evaluate_mouse_gate,
+    find_registration_check,
     marker_pseudo_labels,
     marker_referee,
     merfish_window,
     t2_share,
+    t2_subclasses,
 )
-from merxen.annotation.mouse_regions import RegionShares
+from merxen.annotation.mouse_regions import (
+    OVERRIDE_DIFFERS_REASON,
+    RegionShares,
+    region_step_warnings,
+)
 
 CONFIG = MouseGateConfig()
 
@@ -211,6 +217,51 @@ TRUTH_TABLE: list[tuple[str, dict[str, Any], str, bool, dict[str, str]]] = [
         {"g5": "not_evaluated"},
     ),
     (
+        "region step skipped on few tiles warns (plan §7.2)",
+        {
+            "t2_share": None,
+            "t2_reason": "region step skipped_few_tiles",
+            "region_step": ("skipped_few_tiles", ["47 assigned tiles < 200"]),
+        },
+        "full",
+        True,
+        {"g3": "not_evaluated"},
+    ),
+    (
+        "region step skipped without coordinates warns",
+        {
+            "t2_share": None,
+            "t2_reason": "region step skipped_no_coordinates",
+            "region_step": ("skipped_no_coordinates", []),
+        },
+        "full",
+        True,
+        {"g3": "not_evaluated"},
+    ),
+    (
+        "an override that differs from the inference warns",
+        {
+            "region_step": (
+                "no_nodes_dropped",
+                [f"{OVERRIDE_DIFFERS_REASON} (Isocortex;MB)"],
+            )
+        },
+        "full",
+        True,
+        {},
+    ),
+    (
+        "pruning disabled on request is a note only",
+        {
+            "t2_share": None,
+            "t2_reason": "region step disabled",
+            "region_step": ("disabled", ["mouse_section_regions none"]),
+        },
+        "full",
+        False,
+        {"g3": "not_evaluated"},
+    ),
+    (
         "invalid VZG2 proseg_hybrid: G1 fails with a G4 warning",
         {
             "registration": RegistrationSignal(density_ratio=1.33, shift_um=114.1),
@@ -231,8 +282,12 @@ TRUTH_TABLE: list[tuple[str, dict[str, Any], str, bool, dict[str, str]]] = [
 def test_mouse_gate_truth_table(
     change: dict[str, Any], level: str, warning: bool, status: dict[str, str]
 ) -> None:
-    verdict = evaluate_mouse_gate(_good(**change), CONFIG)
+    change = dict(change)
+    step = change.pop("region_step", None)
+    extra = [] if step is None else region_step_warnings(*step)
+    verdict = evaluate_mouse_gate(_good(**change), CONFIG, extra_warnings=extra)
     assert verdict.level == level
+    assert set(extra) <= set(verdict.warning_reasons)
     assert verdict.warning is warning
     expected = {key: "pass" for key in ("g1", "g2", "g3", "g4", "g5")}
     expected.update(status)
@@ -322,6 +377,40 @@ def test_registration_signal_reads_the_qc_json_and_summary(tmp_path: Path) -> No
         RegistrationSignal.from_file(no_columns)
 
 
+def test_find_registration_check_discovers_the_qc_stage_outputs(
+    tmp_path: Path,
+) -> None:
+    """G1 per sample from QC outputs: the JSON wins over the summary CSV."""
+    qc = tmp_path / "qc"
+    (qc / "a").mkdir(parents=True)
+    (qc / "b").mkdir()
+    (qc / "a" / "ag7_merscope_registration_qc.json").write_text(
+        json.dumps({"status": "pass", "density_ratio": 2.2, "shift_um": 0.0})
+    )
+    (qc / "a" / "ag7_merscope_qc_summary.csv").write_text(
+        "dataset,registration_status,registration_density_ratio\nx,pass,9.9\n"
+    )
+    (qc / "b" / "vzg2_merscope_qc_summary.csv").write_text(
+        "dataset,registration_status,registration_density_ratio\nx,warn,1.4\n"
+    )
+    (qc / "b" / "old_merscope_qc_summary.csv").write_text("dataset,n_cells\nx,1\n")
+
+    found = find_registration_check([qc], "AG7_MERSCOPE")
+    assert found is not None and found.density_ratio == 2.2
+    assert found.source is not None and found.source.endswith("_registration_qc.json")
+    summary = find_registration_check([qc / "a", qc / "b"], "VZG2_MERSCOPE")
+    assert summary is not None and (summary.density_ratio, summary.status) == (
+        1.4,
+        "warn",
+    )
+    # A QC summary from before M0a holds no check; an absent sample has none.
+    assert find_registration_check([qc], "OLD_MERSCOPE") is None
+    assert find_registration_check([qc], "NONE_MERSCOPE") is None
+    (qc / "b" / "ag7_merscope_registration_qc.json").write_text("{}")
+    with pytest.raises(ValueError, match="several"):
+        find_registration_check([qc], "AG7_MERSCOPE")
+
+
 # --------------------------------------------------------------------------
 # G2 referee
 
@@ -384,6 +473,58 @@ def test_marker_pseudo_labels_use_the_p1212_rule() -> None:
     ]
 
 
+def test_class_group_markers_use_the_mean_of_the_group_classes() -> None:
+    """A gene specific to one class of a two-class group fails the group mean."""
+    classes = ("01 IT-ET Glut", "19 MB Glut", "30 Astro-Epen")
+    matrix = np.full((3, 5), 1e-5)
+    matrix[0, 0] = 0.3  # G0: only in 01 -> group mean 0.15 = 15x astro
+    matrix[:2, 1] = 0.3  # G1: in both neuron classes -> 30x
+    matrix[:2, 2] = 0.3  # G2: likewise
+    matrix[:2, 3] = 0.3  # G3: likewise
+    matrix[2, 0] = 0.01
+    matrix[2, [1, 2, 3]] = 0.01
+    matrix[2, 4] = 0.5  # G4: astrocytic
+    profiles = MouseFlagProfiles(
+        gene_ids=tuple(GENES[:5]),
+        symbols=tuple(GENES[:5]),
+        class_names=classes,
+        class_profiles=matrix,
+        subclass_names=classes,
+        subclass_class=classes,
+        subclass_profiles=matrix,
+    )
+    group_of = {
+        "01 IT-ET Glut": "Neurons",
+        "19 MB Glut": "Neurons",
+        "30 Astro-Epen": "Astrocytes/Ependymal",
+    }
+    markers, left_out = class_group_markers(
+        profiles, group_of, AnnotationFlagsConfig(), min_genes=1
+    )
+    assert set(markers["Neurons"].symbols) == {"G1", "G2", "G3"}  # not G0
+    assert markers["Astrocytes/Ependymal"].symbols == ("G4",)
+    assert left_out == []
+
+
+def test_marker_pseudo_labels_normalise_by_the_mean_positive_count() -> None:
+    """P1212: units = counts / the gene's mean positive count in the dataset."""
+    markers = {
+        "Neurons": SpecificGenes("Neurons", np.array([0]), ("A",), ("A",), (30.0,)),
+        "Microglia": SpecificGenes("Microglia", np.array([1]), ("B",), ("B",), (30.0,)),
+    }
+    counts = np.zeros((23, 2))
+    counts[:10, 0] = 20  # gene A: ~20 counts per positive cell
+    counts[10:20, 1] = 1  # gene B: ~1 count per positive cell
+    counts[20] = [10, 2]  # 0.52 units of A, 1.83 of B -> Microglia
+    counts[21] = [20, 0]  # 1.05 units: below 1.5, not pseudo-confident
+    counts[22] = [0, 2]  # 1.83 units of B alone
+    labels, confident = marker_pseudo_labels(sparse.csr_matrix(counts), markers)
+    assert labels[20] == "Microglia" and confident[20]
+    assert not confident[21]
+    assert labels[22] == "Microglia" and confident[22]
+    assert not confident[:20].any()  # 20 / 19.1 and 1 / 1.09 units
+
+
 def test_marker_referee_scores_class_calls_against_pseudo_labels() -> None:
     rng = np.random.default_rng(0)
     profiles = _group_profiles()
@@ -393,9 +534,14 @@ def test_marker_referee_scores_class_calls_against_pseudo_labels() -> None:
             for row in range(3)
         ]
     )
-    calls = ["01 IT-ET Glut"] * 100 + ["30 Astro-Epen"] * 100 + ["34 Immune"] * 100
+    calls: list[str | None] = (
+        ["01 IT-ET Glut"] * 100 + ["30 Astro-Epen"] * 100 + ["34 Immune"] * 100
+    )
     # 30 astrocytes called as neurons: consistency 270 / 300.
     calls[100:130] = ["01 IT-ET Glut"] * 30
+    # One pseudo-labelled neuron without a class call is not scored.
+    counts = np.vstack([counts, counts[:1]])
+    calls.append(None)
     config = MouseGateConfig(g2_min_group_markers=2, g2_min_pseudo_confident=50)
     referee = marker_referee(
         sparse.csr_matrix(counts),
@@ -427,24 +573,76 @@ def test_marker_referee_scores_class_calls_against_pseudo_labels() -> None:
 # G3 and G4
 
 
-def test_t2_share_counts_subclasses_outside_the_present_regions() -> None:
-    subclasses = ["S_ctx", "S_my", "S_mixed"]
+def _t2_shares() -> RegionShares:
+    subclasses = ["S_ctx", "S_my", "S_mixed", "S_bergmann", "S_small"]
     share = pd.DataFrame(0.0, index=subclasses, columns=list(MOUSE_CCF_REGIONS))
     share.loc["S_ctx", "Isocortex"] = 1.0
     share.loc["S_my", "MY"] = 1.0
     share.loc["S_mixed", ["Isocortex", "MY"]] = [0.25, 0.75]
-    shares = RegionShares(
+    share.loc["S_bergmann", "CB"] = 1.0
+    share.loc["S_small", "MY"] = 1.0
+    return RegionShares(
         class_share=share.copy(),
         class_n_grey=pd.Series(100, index=subclasses),
         subclass_share=share,
-        subclass_n_grey=pd.Series(100, index=subclasses),
-        subclass_home=pd.Series(["Isocortex", "MY", "MY"], index=subclasses),
+        subclass_n_grey=pd.Series([100, 100, 100, 100, 19], index=subclasses),
+        subclass_home=pd.Series(
+            ["Isocortex", "MY", "MY", "CB", "MY"], index=subclasses
+        ),
     )
+
+
+T2_CLASSES = {
+    "S_ctx": "01 IT-ET Glut",
+    "S_my": "24 MY Glut",
+    "S_mixed": "24 MY Glut",
+    "S_bergmann": "30 Astro-Epen",
+    "S_small": "24 MY Glut",
+}
+NEVER_DROP = ["30 Astro-Epen", "31 OPC-Oligo", "33 Vascular", "34 Immune"]
+
+
+def test_t2_share_counts_subclasses_outside_the_present_regions() -> None:
+    shares = _t2_shares()
+    kwargs: dict[str, Any] = {
+        "subclass_class": T2_CLASSES,
+        "never_drop_classes": NEVER_DROP,
+        "min_merfish_cells": 20,
+    }
     calls = ["S_ctx"] * 6 + ["S_my"] * 3 + ["S_mixed"] + [None] * 2
     # S_my is T2 (0 in Isocortex); S_mixed holds exactly 25%, which is not T2.
-    assert t2_share(calls, ["Isocortex"], shares) == pytest.approx(3 / 12)
-    assert t2_share(calls, ["Isocortex", "MY"], shares) == 0.0
-    assert t2_share([], ["Isocortex"], shares) == 0.0
+    assert t2_share(calls, ["Isocortex"], shares, **kwargs) == pytest.approx(3 / 12)
+    assert t2_share(calls, ["Isocortex", "MY"], shares, **kwargs) == 0.0
+    assert t2_share([], ["Isocortex"], shares, **kwargs) == 0.0
+
+
+def test_t2_leaves_out_never_drop_and_small_subclasses() -> None:
+    """E7's definition: pruning never removes these, so they are not T2."""
+    shares = _t2_shares()
+    t2 = t2_subclasses(
+        ["Isocortex"],
+        shares,
+        subclass_class=T2_CLASSES,
+        never_drop_classes=NEVER_DROP,
+        min_merfish_cells=20,
+    )
+    assert t2 == {"S_my"}  # not S_bergmann (Astro-Epen) or S_small (19 cells)
+    calls = ["S_ctx"] * 4 + ["S_bergmann"] * 2 + ["S_small"] * 2 + ["S_my"] * 2
+    kwargs: dict[str, Any] = {
+        "subclass_class": T2_CLASSES,
+        "never_drop_classes": NEVER_DROP,
+    }
+    assert t2_share(calls, ["Isocortex"], shares, **kwargs) == pytest.approx(0.2)
+    # Without the filters every subclass below 25% would count (0.6).
+    everything = t2_share(
+        calls,
+        ["Isocortex"],
+        shares,
+        subclass_class=T2_CLASSES,
+        never_drop_classes=[],
+        min_merfish_cells=0,
+    )
+    assert everything == pytest.approx(0.6)
 
 
 def test_merfish_window_pools_sections_and_gives_point_offsets() -> None:

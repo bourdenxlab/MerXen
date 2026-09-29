@@ -485,6 +485,14 @@ def test_auto_plan_prunes_and_marks_the_dropped_cells() -> None:
     assert set(levels[~my_cells]) == {None}
     assert list(plan.remap_cell_ids) == list(plan.cell_ids[my_cells])
     assert plan.confident.all()
+    # The MY tile keeps its majority division; inferred_region is only set
+    # for divisions present in the section.
+    cells = region_cells_frame(plan).set_index("cell_id")
+    my_ids = plan.cell_ids[my_cells].astype(str)
+    assert set(cells.loc[my_ids, "tile_region"].astype(str)) == {"MY"}
+    assert cells.loc[my_ids, "inferred_region"].isna().all()
+    ctx_ids = plan.cell_ids[inputs["class_names"] == "01 IT-ET Glut"].astype(str)
+    assert set(cells.loc[ctx_ids, "inferred_region"].astype(str)) == {"Isocortex"}
 
 
 def test_fewer_than_200_assigned_tiles_skip_pruning() -> None:

@@ -109,12 +109,18 @@ def test_ag7_30k_subset_maps_prunes_and_resolves(tmp_path: Path) -> None:
     assert gate["signals"]["g3_implausible_share"] < 0.03
     flags = sample["spillover_checks"]
     assert flags["n_genes"] == 5
+    assert flags["astrocyte_fpr"]["evaluated"]
+    assert flags["astrocyte_fpr"]["purity_basis"] == "e3_mg_loose"
     assert flags["astrocyte_fpr"]["fpr"] <= 0.005  # MO5
     assert set(sample["flags"]["thresholds"]) >= {"microglia_stat_min"}
     f1 = sample["region_coherence"]["rate"]
     assert 0.002 <= f1 <= 0.010  # MO6 band (E7 30k after pruning: 0.68%)
     levels = sample["resolution"]["levels"]
     assert levels["class"]["confident_share_table"] > 0.6
+    # Region-dropped cells without a confident re-map reach RESOLVE.
+    assert levels["class"]["status_counts"].get("implausible", 0) > 0
+    assert levels["subclass"]["status_counts"].get("implausible", 0) > 0
+    assert sample["region_step"]["n_nodes_dropped"] == 60
     labels_path = next(
         (tmp_path / "resolve" / "merscope").glob("*_celltype_labels.parquet")
     )

@@ -118,6 +118,7 @@ from merxen.annotation.vocab import (
 
 if TYPE_CHECKING:
     from merxen.annotation.diagnostics import TrustDecision
+    from merxen.annotation.mouse_gate import MouseGateVerdict
 
 logger = logging.getLogger(__name__)
 
@@ -1526,13 +1527,15 @@ def resolve_human(calls: HumanCalls, settings: HumanResolveSettings) -> HumanRes
     return resolution
 
 
-def _human_flags(
-    chain: Mapping[str, LevelResult],
-    table: np.ndarray,
-    cop_suppressed: np.ndarray,
-    gate_level: str,
-) -> dict[str, np.ndarray]:
-    """Return the status-mirroring flags and ``exclude_hard`` (§4.3)."""
+def _deepest_and_exclude(
+    chain: Mapping[str, LevelResult], table: np.ndarray, gate_level: str
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return each object's deepest attempted status and ``exclude_hard`` (§4.3).
+
+    ``exclude_hard``: off-table objects, objects whose every level is
+    ``implausible``, ``not_applicable`` or ``not_attempted_gate`` with at
+    least one ``implausible``, and every object when the gate failed.
+    """
     n = len(table)
     deepest = np.full(n, None, dtype=object)
     for result in chain.values():
@@ -1551,6 +1554,17 @@ def _human_flags(
     exclude_hard = ~table | (implausible_any & only_implausible)
     if gate_level == "failed":
         exclude_hard = np.ones(n, dtype=bool)
+    return deepest, np.asarray(exclude_hard, dtype=bool)
+
+
+def _human_flags(
+    chain: Mapping[str, LevelResult],
+    table: np.ndarray,
+    cop_suppressed: np.ndarray,
+    gate_level: str,
+) -> dict[str, np.ndarray]:
+    """Return the status-mirroring flags and ``exclude_hard`` (§4.3)."""
+    deepest, exclude_hard = _deepest_and_exclude(chain, table, gate_level)
     return {
         Columns.FLAG_LOW_COUNTS: ~table,
         Columns.FLAG_BELOW_FLOOR: deepest == CellStatus.BELOW_FLOOR.value,
@@ -1698,7 +1712,7 @@ class MouseResolution:
     final_name: np.ndarray
     consensus_tier: np.ndarray
     flags: dict[str, np.ndarray]
-    gate: Any
+    gate: MouseGateVerdict
     depth_bin: np.ndarray
     resolvability_extrapolated: np.ndarray
     emissions: dict[str, LevelEmission]
@@ -1786,7 +1800,7 @@ def _call_parts(
 
 
 def resolve_mouse(
-    calls: MouseCalls, settings: MouseResolveSettings, gate: Any
+    calls: MouseCalls, settings: MouseResolveSettings, gate: MouseGateVerdict
 ) -> MouseResolution:
     """Apply the mouse v1 rules to one sample (plan §7.3, §7.6; §4.2).
 
@@ -2097,28 +2111,11 @@ def _mouse_flags(
     chain: Mapping[str, LevelResult], table: np.ndarray, gate_level: str
 ) -> dict[str, np.ndarray]:
     """Return the status-mirroring flags and ``exclude_hard`` of mouse (§4.3)."""
-    n = len(table)
-    deepest = np.full(n, None, dtype=object)
-    for result in chain.values():
-        attempted = ~_in(result.status, list(_NOT_ATTEMPTED))
-        deepest[attempted] = result.status[attempted]
-    statuses = np.stack([result.status for result in chain.values()], axis=1)
-    implausible_any = (statuses == CellStatus.IMPLAUSIBLE.value).any(axis=1)
-    only_implausible = np.isin(
-        statuses,
-        [
-            CellStatus.IMPLAUSIBLE.value,
-            CellStatus.NOT_APPLICABLE.value,
-            CellStatus.NOT_ATTEMPTED_GATE.value,
-        ],
-    ).all(axis=1)
-    exclude_hard = ~table | (implausible_any & only_implausible)
-    if gate_level == "failed":
-        exclude_hard = np.ones(n, dtype=bool)
+    deepest, exclude_hard = _deepest_and_exclude(chain, table, gate_level)
     return {
         Columns.FLAG_LOW_COUNTS: ~table,
         Columns.FLAG_BELOW_FLOOR: deepest == CellStatus.BELOW_FLOOR.value,
-        Columns.FLAG_METHOD_DISAGREE: np.zeros(n, dtype=bool),
+        Columns.FLAG_METHOD_DISAGREE: np.zeros(len(table), dtype=bool),
         Columns.FLAG_IMPLAUSIBLE: deepest == CellStatus.IMPLAUSIBLE.value,
         Columns.EXCLUDE_HARD: np.asarray(exclude_hard, dtype=bool),
     }

@@ -842,6 +842,49 @@ def region_coherence(
     return coherence
 
 
+def class_coherence_summary(
+    coherence: np.ndarray,
+    classes: Sequence[object],
+    reference: Mapping[str, float],
+) -> dict[str, dict[str, float | int | None]]:
+    """Return per class the section's coherence next to the intrinsic one (§7.2).
+
+    Plan §7.2 step 5's QC item "class coherence vs intrinsic whole-brain
+    coherence": the median ``region_coherence`` of the table cells called to
+    each class, E7's ``coh_home_median`` of the class on MERFISH
+    (``vocab.load_class_home_coherence``) and their ratio. MERFISH is denser
+    than most query sections, so the ratio is a relative QC reading, not a
+    test.
+
+    Args:
+        coherence: ``region_coherence`` per table cell (NaN when undefined).
+        classes: WMB class per table cell (``None``: no call).
+        reference: Class name to its MERFISH ``coh_home_median``.
+
+    Returns:
+        Class name to ``n_cells``, ``median_coherence``,
+        ``merfish_home_median`` and ``ratio`` (classes with at least one
+        called table cell with a coherence, sorted by name).
+    """
+    values = np.asarray(coherence, dtype=np.float64)
+    names = pd.Series(
+        [None if value is None else str(value) for value in classes], dtype=object
+    )
+    frame = pd.DataFrame({"class": names, "coherence": values})
+    frame = frame[frame["class"].notna() & np.isfinite(frame["coherence"])]
+    summary: dict[str, dict[str, float | int | None]] = {}
+    for name, rows in sorted(frame.groupby("class")["coherence"], key=lambda x: x[0]):
+        median = float(rows.median())
+        expected = reference.get(str(name))
+        summary[str(name)] = {
+            "n_cells": len(rows),
+            "median_coherence": _rounded(median),
+            "merfish_home_median": _rounded(expected),
+            "ratio": _rounded(median / expected) if expected else None,
+        }
+    return summary
+
+
 @dataclass
 class CoherenceResult:
     """F1 of the table cells.
