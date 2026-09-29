@@ -170,8 +170,13 @@ if TYPE_CHECKING:
     from scipy import sparse
 
     from merxen.annotation.composition import SectionComposition
-    from merxen.annotation.consensus import HumanCalls, HumanResolution
+    from merxen.annotation.consensus import (
+        HumanCalls,
+        HumanResolution,
+        MouseResolution,
+    )
     from merxen.annotation.diagnostics import TrustDecision
+    from merxen.annotation.mouse_gate import RegistrationSignal
     from merxen.annotation.provenance import (
         AnnotationProvenance,
         ReferenceProvenance,
@@ -4081,7 +4086,7 @@ def _emitted_bins(
 def _resolvability_provenance(
     tables: ResolvabilityTables | None,
     emission: EmissionPlan,
-    resolution: HumanResolution,
+    resolution: HumanResolution | MouseResolution,
     bundle: MmcBundle,
     *,
     reweighted: bool,
@@ -5111,6 +5116,7 @@ def annotate_resolve(
     seed: int = 0,
     validate: bool = True,
     run_record_path: Path | str | None = None,
+    registration: Mapping[str, RegistrationSignal] | None = None,
 ) -> ResolveResult:
     """Run the RESOLVE step for one pair x segmentation (plan §3.4).
 
@@ -5158,13 +5164,14 @@ def annotate_resolve(
         run_record_path: Where the run record goes (a pipeline task keeps it
             out of ``annotation_resolve_out``); default
             ``<output_dir>/<pair>_resolve_run.json``.
+        registration: Mouse: the M0a registration check per sample id (gate
+            G1, plan §7.6); a sample without one warns (G1 not evaluated).
 
     Returns:
         The result.
 
     Raises:
         ResolveError: If the inputs do not fit together.
-        NotImplementedError: For mouse (M6).
     """
     from merxen.annotation.composition import (
         COMPOSITION_KINDS,
@@ -5181,8 +5188,7 @@ def annotate_resolve(
             f"{root / MAP_MANIFEST_NAME} is a {manifest.species} run, the config "
             f"{config.species}"
         )
-    if config.species != "human":
-        raise NotImplementedError("mouse RESOLVE rules are M6 (plan §12)")
+    mouse = config.species == "mouse"
     min_counts = config.require_min_counts()
     if manifest.min_counts != min_counts:
         raise ResolveError(
@@ -5268,28 +5274,50 @@ def annotate_resolve(
             )
             xy = None
         n_objects_segmented = segmented.get(record.sample_id)
-        if n_objects_segmented is None and loaded.sample.source == "clustered":
+        if (
+            n_objects_segmented is None
+            and loaded.sample.source == "clustered"
+            and not mouse
+        ):
             logger.warning(
                 "%s: a clustered H5AD holds table cells only; the segmented-object "
                 "gate warning uses them unless n_segmented is given",
                 record.sample_id,
             )
-        result = resolve_human_sample(
-            loaded,
-            record,
-            runs,
-            config,
-            manifest=manifest,
-            panels=panels,
-            panel_report=panel_report,
-            n_segmented=n_objects_segmented,
-            trust_overrides=trust_overrides,
-            xy=xy,
-            aligned_frame=in_fixed_frame(record.platform, shape_key),
-            panel_mode=panel_mode,
-            validate=validate,
-            seed=seed,
-        )
+        if mouse:
+            from merxen.annotation.mouse_resolve import resolve_mouse_sample
+
+            result = resolve_mouse_sample(
+                loaded,
+                record,
+                runs,
+                config,
+                manifest=manifest,
+                panels=panels,
+                panel_report=panel_report,
+                trust_overrides=trust_overrides,
+                xy=xy,
+                registration=(registration or {}).get(record.sample_id),
+                validate=validate,
+                seed=seed,
+            )
+        else:
+            result = resolve_human_sample(
+                loaded,
+                record,
+                runs,
+                config,
+                manifest=manifest,
+                panels=panels,
+                panel_report=panel_report,
+                n_segmented=n_objects_segmented,
+                trust_overrides=trust_overrides,
+                xy=xy,
+                aligned_frame=in_fixed_frame(record.platform, shape_key),
+                panel_mode=panel_mode,
+                validate=validate,
+                seed=seed,
+            )
         folder = output / record.platform.lower()
         provenance_json = result.provenance.to_uns_json()
         result.labels_path = write_label_table(
@@ -5318,7 +5346,13 @@ def annotate_resolve(
     by_platform = {item.platform: item for item in results.values()}
     per_platform = panel_mode == "per_platform"
     kinds: tuple[str, ...] = XPANEL_KINDS if per_platform else COMPOSITION_KINDS
-    if {"MERSCOPE", "XENIUM"} <= set(by_platform):
+    if mouse and {"MERSCOPE", "XENIUM"} <= set(by_platform):
+        pair["mask_note"] = (
+            "mouse pairs: no cross-platform composition in v1 (M6 resolves "
+            "single-platform mouse sections)"
+        )
+        first = second = None
+    elif {"MERSCOPE", "XENIUM"} <= set(by_platform):
         pair_samples = (by_platform["MERSCOPE"], by_platform["XENIUM"])
         cross = [item.cross_platform for item in pair_samples]
         levels = {record.get("statistics_level") for record in cross}
