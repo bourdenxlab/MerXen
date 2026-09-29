@@ -10,7 +10,7 @@ import shutil
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import anndata as ad
 import matplotlib
@@ -22,11 +22,22 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 
+from merxen.annotation.provenance import downstream_summary_from_uns
+from merxen.clustering.map_first import unassigned_states
 from merxen.config import MenderConfig
 from merxen.io.spatialdata_io import write_or_replace_element
 from merxen.memory import force_release, log_status
 
 logger = logging.getLogger(__name__)
+
+# unassigned_state_policy values (plan §4.9): legacy keeps unassigned cells as
+# a state; map_first keeps them as spatial nodes without a feature state.
+STATE_POLICY: Final = "state"
+EXCLUDE_FROM_FEATURES_POLICY: Final = "exclude_from_features"
+# Portable-table column telling the compute step whether a cell's state is a
+# neighbourhood feature. Written only under "exclude_from_features", so legacy
+# portable tables are unchanged; mender_compute.IN_FEATURES_COLUMN mirrors it.
+IN_FEATURES_COLUMN: Final = "in_features"
 
 CELL_ID_CANDIDATES = (
     "instance_id",
@@ -171,14 +182,76 @@ def _manifest_settings(config: MenderConfig) -> dict[str, Any]:
     return settings
 
 
+def excluded_feature_states(states: pd.Series, config: MenderConfig) -> tuple[str, ...]:
+    """Return the cell states that add no neighbourhood feature (plan §4.9).
+
+    Args:
+        states: The validated categorical cell states.
+        config: MENDER configuration.
+
+    Returns:
+        Nothing under ``unassigned_state_policy="state"`` (legacy); under
+        ``"exclude_from_features"`` the unassigned states present
+        (``Mixed/Unknown`` and ``*/unresolved`` branches,
+        ``merxen.clustering.map_first.is_unassigned_state``).
+
+    Raises:
+        ValueError: If every state present is unassigned, which would leave
+            MENDER without features.
+    """
+    if config.unassigned_state_policy == STATE_POLICY:
+        return ()
+    present = [str(value) for value in states.astype(str).unique()]
+    excluded = unassigned_states(present)
+    if len(excluded) == len(set(present)):
+        raise ValueError(
+            f"every MENDER cell state of {config.cell_state_key!r} is unassigned "
+            f"({list(excluded)[:5]}); unassigned_state_policy="
+            f"{config.unassigned_state_policy!r} would leave no feature"
+        )
+    return excluded
+
+
+def _policy_record(
+    config: MenderConfig,
+    *,
+    excluded: tuple[str, ...],
+    n_excluded_cells: int,
+    annotation: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Return the state-policy and annotation fields of the input manifest.
+
+    Legacy runs (default policy, no annotation provenance in the clustered
+    H5AD) get nothing, so their manifests are unchanged.
+    """
+    if config.unassigned_state_policy == STATE_POLICY and annotation is None:
+        return {}
+    record: dict[str, Any] = {
+        "unassigned_state_policy": config.unassigned_state_policy,
+        "excluded_feature_states": list(excluded),
+        "n_cells_excluded_from_features": int(n_excluded_cells),
+    }
+    if annotation is not None:
+        record["annotation"] = annotation
+    return record
+
+
 def prepare_mender(config: MenderConfig, output_dir: Path | str) -> Path:
-    """Validate modern inputs and export MENDER's minimal portable table."""
+    """Validate modern inputs and export MENDER's minimal portable table.
+
+    Under ``unassigned_state_policy="exclude_from_features"`` the portable
+    table gains ``in_features`` (false for unassigned states), which the
+    compute step uses to drop those states from the neighbourhood features;
+    the cells stay spatial nodes and still get a domain (plan §4.9).
+    """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     clustered = ad.read_h5ad(config.source_h5ad)
     cell_ids = resolve_cell_ids(clustered)
     states, keep = _validate_cell_states(clustered, config)
     selected_ids = cell_ids[keep]
+    excluded = excluded_feature_states(states, config)
+    annotation = downstream_summary_from_uns(clustered.uns)
 
     import spatialdata as sd
 
@@ -223,6 +296,19 @@ def prepare_mender(config: MenderConfig, output_dir: Path | str) -> Path:
     )
     if portable["cell_id"].duplicated().any():
         raise ValueError("Portable MENDER table contains duplicate cell IDs")
+    n_excluded_cells = 0
+    if config.unassigned_state_policy == EXCLUDE_FROM_FEATURES_POLICY:
+        in_features = ~portable["cell_state"].astype(str).isin(excluded).to_numpy()
+        portable[IN_FEATURES_COLUMN] = in_features
+        n_excluded_cells = int((~in_features).sum())
+        logger.info(
+            "[%s] %d cells in %d unassigned states stay spatial nodes without a "
+            "feature state (%s)",
+            config.sample_id,
+            n_excluded_cells,
+            len(excluded),
+            config.unassigned_state_policy,
+        )
     portable_path = output_dir / "mender_input.parquet"
     portable.to_parquet(portable_path, index=False)
 
@@ -250,6 +336,12 @@ def prepare_mender(config: MenderConfig, output_dir: Path | str) -> Path:
         },
         "settings": _manifest_settings(config),
         "portable_table": portable_path.name,
+        **_policy_record(
+            config,
+            excluded=excluded,
+            n_excluded_cells=n_excluded_cells,
+            annotation=annotation,
+        ),
     }
     manifest_path = output_dir / "input_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
@@ -419,6 +511,26 @@ def _provenance(config: MenderConfig, input_manifest: dict[str, Any]) -> dict[st
         "state_counts": dict(input_manifest["state_counts"]),
         **_manifest_settings(config),
     }
+    if "unassigned_state_policy" in input_manifest:
+        # map_first (or a non-default policy): the record goes to h5ad and
+        # zarr ``uns``, where keys must not contain "/" (zarr raises) and
+        # values must not be None, so states and annotation travel as JSON
+        # strings (plan §4.6). Legacy provenance is unchanged.
+        state_counts = result.pop("state_counts")
+        result["state_counts_json"] = json.dumps(state_counts, sort_keys=True)
+        result["unassigned_state_policy"] = str(
+            input_manifest["unassigned_state_policy"]
+        )
+        result["excluded_feature_states_json"] = json.dumps(
+            list(input_manifest.get("excluded_feature_states", []))
+        )
+        result["n_cells_excluded_from_features"] = int(
+            input_manifest.get("n_cells_excluded_from_features", 0)
+        )
+        if input_manifest.get("annotation") is not None:
+            result["annotation_json"] = json.dumps(
+                input_manifest["annotation"], sort_keys=True
+            )
     return result
 
 
@@ -485,8 +597,19 @@ def finalize_mender(
     _plot_context_umap(context, domains, plots_dir, config.figure_dpi)
     _plot_state_domain_heatmap(cells, plots_dir, config.figure_dpi)
 
+    readable: dict[str, Any] = {}
+    if "unassigned_state_policy" in input_manifest:
+        readable = {
+            "state_counts": dict(input_manifest["state_counts"]),
+            "excluded_feature_states": list(
+                input_manifest.get("excluded_feature_states", [])
+            ),
+        }
+        if input_manifest.get("annotation") is not None:
+            readable["annotation"] = input_manifest["annotation"]
     output_manifest = {
         **provenance,
+        **readable,
         "domain_counts": {
             str(key): int(value)
             for key, value in cells["mender_domain"].value_counts(sort=False).items()
