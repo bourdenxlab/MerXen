@@ -13,10 +13,13 @@ from scipy import sparse
 from merxen.annotation.config import AnnotationFlagsConfig, MouseRegionConfig
 from merxen.annotation.mouse_flags import (
     IMMEDIATE_EARLY_GENES,
+    PURITY_BASIS_DERIVED,
+    PURITY_BASIS_MG_LOOSE,
     REASON_ASTRO_FPR,
     REASON_INSUFFICIENT_GENES,
     REASON_NO_COORDINATES,
     MouseFlagProfiles,
+    astro_purity_genes,
     astrocyte_genes,
     floored_profiles,
     marker_astrocytes,
@@ -30,9 +33,23 @@ from merxen.annotation.mouse_flags import (
 )
 from merxen.annotation.vocab import load_region_restricted_classes
 
-# Eight panel genes: 0-2 microglial, 3-4 astrocytic, 5-7 neuronal / shared.
-GENES = [f"ENSMUSG{index:011d}" for index in range(8)]
-SYMBOLS = ["Cx3cr1", "Csf1r", "C1qa", "Aqp4", "Gfap", "Slc17a7", "Snap25", "Fos"]
+# Ten panel genes: 0-4 microglial (0-2 are E3's MG_loose genes), 5-6
+# astrocytic, 7-9 neuronal / shared.
+GENES = [f"ENSMUSG{index:011d}" for index in range(10)]
+SYMBOLS = [
+    "Cx3cr1",
+    "Csf1r",
+    "C1qa",
+    "Aif1",
+    "P2ry12",
+    "Aqp4",
+    "Gfap",
+    "Slc17a7",
+    "Snap25",
+    "Fos",
+]
+MICROGLIA_GENES = [0, 1, 2, 3, 4]
+FREE_FLAG_GENES = [3, 4]  # flag genes outside the MG_loose purity genes
 CLASSES = ("01 IT-ET Glut", "30 Astro-Epen", "34 Immune")
 SUBCLASSES = (
     "007 L2/3 IT CTX Glut",
@@ -53,10 +70,10 @@ def _profile(values: list[float]) -> np.ndarray:
     return array / array.sum()
 
 
-NEURON = _profile([0.0005, 0.0005, 0.0005, 0.001, 0.001, 0.5, 0.4, 0.097])
-ASTRO = _profile([0.0005, 0.0005, 0.0005, 0.5, 0.4, 0.05, 0.048, 0.0005])
-MICROGLIA = _profile([0.3, 0.3, 0.3, 0.001, 0.001, 0.05, 0.047, 0.2])
-BAM = _profile([0.1, 0.4, 0.2, 0.001, 0.001, 0.1, 0.1, 0.098])
+NEURON = _profile([0.0005] * 5 + [0.001, 0.001, 0.5, 0.4, 0.097])
+ASTRO = _profile([0.0005] * 5 + [0.5, 0.4, 0.05, 0.048, 0.0005])
+MICROGLIA = _profile([0.18] * 5 + [0.001, 0.001, 0.05, 0.047, 0.2])
+BAM = _profile([0.1, 0.4, 0.2, 0.05, 0.05, 0.001, 0.001, 0.1, 0.1, 0.098])
 
 
 def _profiles_table() -> pd.DataFrame:
@@ -133,7 +150,7 @@ def test_microglia_and_astrocyte_sets_follow_the_e3_rule(
     config = AnnotationFlagsConfig()
     microglia = microglia_genes(profiles, config)
     # Equal ratios: gene-ID order; Fos (an immediate-early gene) is excluded.
-    assert microglia.symbols == ("Cx3cr1", "Csf1r", "C1qa")
+    assert microglia.symbols == ("Cx3cr1", "Csf1r", "C1qa", "Aif1", "P2ry12")
     astro = astrocyte_genes(profiles, config)
     assert set(astro.symbols) == {"Aqp4", "Gfap"}
     assert np.allclose(floored_profiles(profiles.subclass_profiles).sum(axis=1), 1.0)
@@ -157,9 +174,11 @@ def test_spillover_flags_planted_microglial_counts_only(
     assert np.all(result.weight[600:][flag[600:]] >= 0.05)
     assert result.statistic[600:].min() > result.statistic[:300].max()
     fpr = result.checks["astrocyte_fpr"]
-    assert fpr["n_marker_astrocytes"] >= 250
+    assert fpr["evaluated"] is True and fpr["n_marker_astrocytes"] >= 250
+    assert fpr["purity_genes"] == ["Cx3cr1", "Csf1r", "C1qa"]
+    assert fpr["purity_basis"] == PURITY_BASIS_MG_LOOSE
     assert fpr["fpr"] == 0.0
-    assert result.checks["heldout"]["evaluated"] is False  # 3 genes < 6
+    assert result.checks["heldout"]["evaluated"] is False  # 5 genes < 6
 
 
 def test_spillover_statistic_is_zero_without_the_genes(
@@ -167,7 +186,7 @@ def test_spillover_statistic_is_zero_without_the_genes(
 ) -> None:
     base, target = spillover_reference(profiles)
     counts = np.zeros((3, len(GENES)))
-    counts[0, 5] = 50  # neuron counts only
+    counts[0, 7] = 50  # neuron counts only
     counts[1, 0] = 40  # microglial counts only
     statistic, weight = spillover_statistic(counts, np.array([0, 1, 2]), base, target)
     assert statistic[0] == 0.0 and weight[0] == 0.0
@@ -194,8 +213,8 @@ def test_spillover_null_includes_the_ambient_share(profiles: MouseFlagProfiles) 
     base, target = spillover_reference(profiles)
     genes = np.array([0, 1, 2])
     counts = np.zeros((1, len(GENES)))
-    counts[0, 5] = 980
-    counts[0, 0] = 20  # 2% microglial counts, at a 10% ambient level
+    counts[0, 7] = 990
+    counts[0, 0] = 12  # 1.2% microglial counts, within a 10% ambient share
     with_ambient, _ = spillover_statistic(
         counts, genes, base, target, ambient_share=0.10
     )
@@ -219,7 +238,7 @@ def test_spillover_is_null_with_too_few_specific_genes(
 ) -> None:
     counts = sparse.csr_matrix(np.ones((4, len(GENES))))
     result = microglial_spillover(
-        counts, profiles, AnnotationFlagsConfig(min_specific_genes=4)
+        counts, profiles, AnnotationFlagsConfig(min_specific_genes=6)
     )
     assert not result.defined
     assert result.null_reason == REASON_INSUFFICIENT_GENES
@@ -231,21 +250,93 @@ def test_spillover_is_null_when_marker_astrocytes_are_flagged(
     profiles: MouseFlagProfiles,
 ) -> None:
     rng = np.random.default_rng(1)
-    # Marker astrocytes (<= 3 microglial counts per 1,000); a rule that flags
+    # Marker astrocytes (<= 3 MG_loose counts per 1,000); a rule that flags
     # every cell fails the false-positive check, so the flag is null.
     astro = _cells(ASTRO, 400, 1000, rng)
-    astro[:, :3] = 0
+    astro[:, MICROGLIA_GENES] = 0
     counts = sparse.csr_matrix(astro)
     loose = AnnotationFlagsConfig(microglia_stat_min=0.0, microglia_weight_min=0.0)
     result = microglial_spillover(counts, profiles, loose)
-    assert marker_astrocytes(counts, result.astro_genes, result.genes).sum() > 300
+    purity, _ = astro_purity_genes(profiles, result.genes)
+    assert marker_astrocytes(counts, result.astro_genes, purity).sum() > 300
     assert not result.defined
     assert result.null_reason is not None
     assert result.null_reason.startswith(REASON_ASTRO_FPR)
 
 
-def test_heldout_check_rebuilds_the_flag_on_half_of_the_genes() -> None:
-    genes = [f"g{index}" for index in range(10)]
+def test_astrocyte_fpr_counts_spill_on_the_flag_genes_outside_the_purity_set(
+    profiles: MouseFlagProfiles,
+) -> None:
+    """E3's AST rule excludes on MG_loose only, so the check can fire (MO5)."""
+    rng = np.random.default_rng(5)
+    astro = _cells(ASTRO, 400, 1000, rng)
+    astro[:, MICROGLIA_GENES] = 0
+    # 4-8 per 1,000 flag-gene counts on every astrocyte (Aif1, P2ry12: not
+    # purity genes) ...
+    astro[:, FREE_FLAG_GENES] = 3
+    # ... and a real spill-over component on 20 of them.
+    astro[:20, FREE_FLAG_GENES] = 25
+    counts = sparse.csr_matrix(astro)
+
+    result = microglial_spillover(counts, profiles, AnnotationFlagsConfig())
+
+    fpr = result.checks["astrocyte_fpr"]
+    assert fpr["evaluated"] is True
+    assert fpr["n_marker_astrocytes"] == 400
+    assert fpr["n_flagged"] == 20
+    assert fpr["fpr"] == pytest.approx(20 / 400)
+    assert not result.defined
+    assert result.null_reason is not None
+    assert result.null_reason.startswith(REASON_ASTRO_FPR)
+    # Excluding on the flag's own genes (the pre-review rule) keeps none of
+    # these astrocytes: the rate is 0 by construction.
+    assert not marker_astrocytes(counts, result.astro_genes, result.genes).any()
+
+
+def test_astrocyte_purity_genes_fall_back_to_the_top_derived_genes() -> None:
+    """Without all MG_loose genes: the 3 most specific derived genes."""
+    keep = [index for index in range(len(GENES)) if SYMBOLS[index] != "C1qa"]
+    table = MouseFlagProfiles.from_table(
+        _profiles_table(),
+        gene_ids=[GENES[index] for index in keep],
+        symbols=[SYMBOLS[index] for index in keep],
+        class_level="CCN20230722_CLAS",
+        subclass_level="CCN20230722_SUBC",
+        subclass_class=SUBCLASS_CLASS,
+    )
+    microglia = microglia_genes(table, AnnotationFlagsConfig())
+    purity, basis = astro_purity_genes(table, microglia)
+    assert basis == PURITY_BASIS_DERIVED
+    assert purity.symbols == microglia.symbols[:3]
+    counts = sparse.csr_matrix(np.ones((50, len(keep))))
+    result = microglial_spillover(counts, table, AnnotationFlagsConfig())
+    assert result.checks["astrocyte_fpr"]["n_flag_genes_outside_purity"] == 1
+
+
+def test_astrocyte_fpr_is_not_evaluated_when_purity_covers_the_flag_genes() -> None:
+    """A flag of only MG_loose genes cannot be tested on MG_loose-clean cells."""
+    keep = [index for index in range(len(GENES)) if index not in FREE_FLAG_GENES]
+    table = MouseFlagProfiles.from_table(
+        _profiles_table(),
+        gene_ids=[GENES[index] for index in keep],
+        symbols=[SYMBOLS[index] for index in keep],
+        class_level="CCN20230722_CLAS",
+        subclass_level="CCN20230722_SUBC",
+        subclass_class=SUBCLASS_CLASS,
+    )
+    counts = sparse.csr_matrix(np.ones((50, len(keep))))
+    loose = AnnotationFlagsConfig(microglia_stat_min=0.0, microglia_weight_min=0.0)
+    result = microglial_spillover(counts, table, loose)
+    check = result.checks["astrocyte_fpr"]
+    assert result.genes.symbols == ("Cx3cr1", "Csf1r", "C1qa")
+    assert check["evaluated"] is False
+    assert "cover every flag gene" in check["reason"]
+    assert result.defined  # a check that cannot run never nulls the flag
+
+
+def _heldout_profiles(
+    genes: list[str],
+) -> tuple[MouseFlagProfiles, np.ndarray, np.ndarray]:
     microglia = _profile([0.12] * 6 + [0.01, 0.01, 0.2, 0.2])
     neuron = _profile([0.0001] * 6 + [0.4, 0.3, 0.2, 0.1])
     rows = []
@@ -271,6 +362,12 @@ def test_heldout_check_rebuilds_the_flag_on_half_of_the_genes() -> None:
         subclass_level="CCN20230722_SUBC",
         subclass_class={"007 L2/3": "01 IT-ET Glut", "334 Microglia NN": "34 Immune"},
     )
+    return table, neuron, microglia
+
+
+def test_heldout_check_rebuilds_the_flag_on_half_of_the_genes() -> None:
+    genes = [f"g{index}" for index in range(10)]
+    table, neuron, microglia = _heldout_profiles(genes)
     rng = np.random.default_rng(2)
     counts = np.vstack(
         [
@@ -283,8 +380,35 @@ def test_heldout_check_rebuilds_the_flag_on_half_of_the_genes() -> None:
     )
     heldout = result.checks["heldout"]
     assert heldout["evaluated"] is True
-    assert len(heldout["build_genes"]) == 3 and len(heldout["heldout_genes"]) == 3
+    assert heldout["build_genes"] == ["g0", "g2", "g4"]
+    assert heldout["heldout_genes"] == ["g1", "g3", "g5"]
+    assert set(heldout["build_genes"]).isdisjoint(heldout["heldout_genes"])
     assert heldout["enrichment"] > 10.0
+
+
+def test_heldout_check_gives_no_enrichment_without_heldout_signal() -> None:
+    """Control arm: spill only on the build genes -> held-out enrichment ~1."""
+    genes = [f"g{index}" for index in range(10)]
+    table, neuron, microglia = _heldout_profiles(genes)
+    rng = np.random.default_rng(6)
+    build_only = microglia.copy()
+    build_only[[1, 3, 5]] = 0.0
+    build_only /= build_only.sum()
+    counts = np.vstack(
+        [
+            _cells(neuron, 400, 300, rng),
+            _cells(neuron, 200, 300, rng) + _cells(build_only, 200, 60, rng),
+        ]
+    )
+    # Background on the held-out genes, equal in every cell.
+    counts[:, [1, 3, 5]] += rng.poisson(2.0, size=(len(counts), 3))
+    result = microglial_spillover(
+        sparse.csr_matrix(counts), table, AnnotationFlagsConfig()
+    )
+    heldout = result.checks["heldout"]
+    assert heldout["build_flag_rate"] > 0.25  # the build half still flags
+    assert heldout["enrichment"] is not None
+    assert 0.7 < heldout["enrichment"] < 1.4
 
 
 def test_region_coherence_counts_same_class_neighbours() -> None:
