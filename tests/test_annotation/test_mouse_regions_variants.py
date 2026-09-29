@@ -321,6 +321,36 @@ def test_coupling_needs_aon_tiles_and_a_present_partner() -> None:
     assert inference.coupling_tile_counts == {}
 
 
+def test_structure_tiles_need_their_own_voters() -> None:
+    # Six OLF tiles, each with two AON-home neurons and one piriform neuron
+    # whose subclass has no structure-level home: the tiles are assigned
+    # (three division voters) but have only two structure voters (< 3).
+    xy, names, confident = _section({"007 L2/3 IT CTX Glut": _rect(0, 20, 0, 15)})
+    extra_xy, extra_names = [], []
+    for i in range(6):
+        for k, name in enumerate(
+            ["010 IT AON-TT-DP Glut", "010 IT AON-TT-DP Glut", "013 PIR Glut"]
+        ):
+            extra_xy.append(((i + 0.1 + 0.25 * k) * TILE, 15.5 * TILE))
+            extra_names.append(name)
+    xy = np.vstack([xy, np.array(extra_xy)])
+    names = np.concatenate([names, np.array(extra_names, dtype=object)])
+    confident = np.ones(len(xy), bool)
+    share, home, structure = _tables()
+    shares = RegionShares.from_tables(
+        share, home, structure[structure["node_name"] != "013 PIR Glut"]
+    )
+    config = _config(coupled_regions={"OB": ["OLF"]})
+    inference = infer_regions(xy, names, confident, shares, config)
+    assert inference.tile_counts["OLF"] == 6
+    assert "OLF" in inference.inferred_regions
+    assert inference.coupling_tile_counts == {"OB": 0}
+    assert "OB" not in inference.inferred_regions
+    # Two structure neurons per tile suffice at a 2-neuron minimum.
+    two = _config(coupled_regions={"OB": ["OLF"]}, min_neurons_per_tile=2)
+    assert infer_regions(xy, names, confident, shares, two).coupled_regions == ("OB",)
+
+
 def test_coupling_refuses_shares_without_structure_homes() -> None:
     xy, names, confident = _section(AON_BLOCKS)
     config = _config(coupled_regions={"OB": ["OLF"]})
@@ -410,7 +440,9 @@ def test_a_kept_subclass_stops_its_class_being_dropped_whole() -> None:
     assert "050 OB-IMN A" in names and "051 OB-IMN B" not in names
 
 
-def test_t2_does_not_count_the_kept_nodes() -> None:
+def test_t2_can_leave_the_kept_nodes_out() -> None:
+    # G3 and MO2 pass the static list (kept nodes count); the M6b scoring's
+    # diagnostic T2 leaves the section's kept nodes out as well.
     shares = _shares()
     present = ("Isocortex", "STR")
     base = t2_subclasses(

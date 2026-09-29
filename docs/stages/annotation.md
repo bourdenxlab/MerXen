@@ -997,8 +997,10 @@ pre-registration, picks one):
 - (b), (c) `conditional_never_drop`: class `05 OB-IMN GABA` (with its
   subclasses) is kept when STR or OLF is present; subclass
   `025 CA2-FC-IG Glut` when Isocortex and STR are present. A kept subclass
-  also stops its class being dropped as one node. G3 and MO2's T2 do not
-  count kept nodes, as they do not count the never-drop classes.
+  also stops its class being dropped as one node. G3 and MO2's T2 still
+  count kept nodes (E7's T2 leaves out only the static never-drop classes),
+  so a keep that retains region-implausible calls shows there; the scoring
+  reports the T2 without them beside it.
 - (d) `region_min_tile_fraction` `{"OB": 0.005}`: OB is present at 0.5% of
   the assigned tiles; other divisions keep 1% and the component rule.
 - (f) the v1 fields `tile_um` (100 / 200 µm) and `min_neurons_per_tile` (2).

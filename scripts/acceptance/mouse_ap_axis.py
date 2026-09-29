@@ -732,18 +732,8 @@ def evaluate_candidate(
     t2_regions = (
         plan.present_regions if plan.status != "skipped_few_tiles" else inferred
     )
-    never_classes, never_subclasses = effective_never_drop(config, t2_regions)
-    subclass_class = {
-        sub: cls for cls, subs in taxonomy.subclasses.items() for sub in subs
-    }
-    unpruned_t2 = t2_share(
-        list(data.subclass_names),
-        t2_regions,
-        shares,
-        subclass_class=subclass_class,
-        never_drop_classes=sorted(never_classes),
-        min_merfish_cells=config.min_merfish_cells_subclass,
-        never_drop_subclasses=sorted(never_subclasses),
+    unpruned_t2, _ = t2_values(
+        data.subclass_names, t2_regions, shares, taxonomy, config
     )
     row: dict[str, Any] = {
         "dataset": data.key,
@@ -807,6 +797,56 @@ def evaluate_candidate(
             }
         )
     return row, nodes, remap_ids
+
+
+def t2_values(
+    subclasses: Sequence[object] | np.ndarray,
+    regions: Sequence[str],
+    shares: RegionShares,
+    taxonomy: WmbTaxonomy,
+    config: MouseRegionConfig,
+) -> tuple[float, float]:
+    """Return T2 (MO2's definition) and T2 without the conditionally kept nodes.
+
+    T2 is ``mouse_gate.t2_share`` with the static never-drop classes (MO2 /
+    G3 as pre-registered, §17), so a (b) or (c) keep that retains
+    region-implausible calls counts; the second value leaves the section's
+    kept nodes out as well (``effective_never_drop``; diagnostic).
+
+    Args:
+        subclasses: Subclass call per table cell.
+        regions: The section's present (T2) regions.
+        shares: Its region shares.
+        taxonomy: Its bundle's taxonomy.
+        config: The candidate rule.
+
+    Returns:
+        ``(t2, t2_kept_excluded)``.
+    """
+    subclass_class = {
+        sub: cls for cls, subs in taxonomy.subclasses.items() for sub in subs
+    }
+    calls = list(subclasses)
+    minimum = config.min_merfish_cells_subclass
+    static = t2_share(
+        calls,
+        regions,
+        shares,
+        subclass_class=subclass_class,
+        never_drop_classes=list(config.never_drop_classes),
+        min_merfish_cells=minimum,
+    )
+    classes, kept = effective_never_drop(config, regions)
+    kept_excluded = t2_share(
+        calls,
+        regions,
+        shares,
+        subclass_class=subclass_class,
+        never_drop_classes=sorted(classes),
+        min_merfish_cells=minimum,
+        never_drop_subclasses=sorted(kept),
+    )
+    return static, kept_excluded
 
 
 def _plan_one(task: tuple[str, dict[str, Any]]) -> dict[str, Any]:
@@ -1107,9 +1147,6 @@ def _summarise_one(task: dict[str, Any]) -> list[dict[str, Any]]:
         shares = full_shares(Path(task["region_share_bundle"]), structure)
         data = load_real_dataset(str(first["section"]), Path(task["map_dir"]))
     taxonomy = taxonomy_for(data.bundle_path)
-    subclass_class = {
-        sub: cls for cls, subs in taxonomy.subclasses.items() for sub in subs
-    }
     cache: dict[str, tuple[np.ndarray, np.ndarray, bool, np.ndarray]] = {}
     class_labels = data.class_labels.astype(str)
     subclass_labels = data.subclass_labels.astype(str)
@@ -1138,35 +1175,14 @@ def _summarise_one(task: dict[str, Any]) -> list[dict[str, Any]]:
         candidate = candidate_by_label(str(record["candidate"]))
         config = candidate.config()
         regions = _split(record["t2_regions"])
-        never_classes, never_subclasses = effective_never_drop(config, regions)
-        common = {
-            "subclass_class": subclass_class,
-            "min_merfish_cells": config.min_merfish_cells_subclass,
-        }
         record["remap_missing"] = missing
-        record["t2_after"] = (
-            np.nan
+        t2, t2_kept = (
+            (np.nan, np.nan)
             if missing
-            else t2_share(
-                list(subclasses),
-                regions,
-                shares,
-                never_drop_classes=sorted(never_classes),
-                never_drop_subclasses=sorted(never_subclasses),
-                **common,
-            )
+            else t2_values(subclasses, regions, shares, taxonomy, config)
         )
-        record["t2_after_static_never_drop"] = (
-            np.nan
-            if missing
-            else t2_share(
-                list(subclasses),
-                regions,
-                shares,
-                never_drop_classes=list(config.never_drop_classes),
-                **common,
-            )
-        )
+        record["t2_after"] = t2
+        record["t2_after_kept_excluded"] = t2_kept
         class_changed = classes.astype(object) != data.class_names.astype(object)
         subclass_changed = subclasses.astype(object) != data.subclass_names.astype(
             object

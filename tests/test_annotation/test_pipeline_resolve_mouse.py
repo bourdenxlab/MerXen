@@ -640,7 +640,7 @@ def test_mouse_g4_offsets_compare_astro_epen_and_immune_to_the_window(
     assert gate["signal_status"]["g4"] == "warn"
 
 
-def test_mouse_g3_does_not_count_conditionally_kept_nodes(
+def test_mouse_g3_counts_conditionally_kept_nodes(
     tmp_path: Path, mouse_setup: dict[str, Any], make_trust: MakeTrust
 ) -> None:
     map_dir = tmp_path / "map"
@@ -670,8 +670,10 @@ def test_mouse_g3_does_not_count_conditionally_kept_nodes(
         config=kept,
         registration={SID: PASSING},
     )
+    # E7's T2 as pre-registered: only the static never-drop classes are left
+    # out, so the kept class's region-implausible calls still count.
     signals = result.samples[SID].summary["mouse_gate"]["signals"]
-    assert signals["g3_implausible_share"] == 0.0
+    assert signals["g3_implausible_share"] == pytest.approx(6 / 608, abs=1e-6)
 
 
 def _ap_composition() -> pd.DataFrame:

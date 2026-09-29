@@ -479,13 +479,13 @@ def t2_subclasses(
         present_regions: The section's present divisions.
         shares: The region-share bundle's shares.
         subclass_class: Subclass name to its class name (mapping tree).
-        never_drop_classes: ``MouseRegionConfig.never_drop_classes`` (with
-            an M6b rule: the section's ``mouse_regions.effective_never_drop``
-            classes).
+        never_drop_classes: ``MouseRegionConfig.never_drop_classes`` (G3
+            and MO2: the static list, also under an M6b rule).
         min_merfish_cells: ``MouseRegionConfig.min_merfish_cells_subclass``.
         max_present_share: E7's 0.25 (``g3_t2_max_present_share``).
-        never_drop_subclasses: Subclasses the rule keeps in the section (M6b
-            conditional never-drop; empty in v1).
+        never_drop_subclasses: Further subclasses not to count (the M6b
+            scoring's diagnostic T2 without the conditionally kept nodes;
+            empty for G3 and MO2).
 
     Returns:
         The T2 subclass names.

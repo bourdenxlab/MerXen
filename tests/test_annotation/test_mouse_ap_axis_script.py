@@ -644,3 +644,20 @@ def test_estimate_row_leaves_the_section_out() -> None:
         "allen", section, names[:10], composition, sections, steps
     )
     assert "confident neurons" in few["error"]
+
+
+def test_t2_counts_the_kept_nodes_and_reports_them_apart() -> None:
+    module = _load()
+    taxonomy = _taxonomy()
+    calls = ["050 OB-IMN A"] * 3 + ["007 L2/3 IT CTX Glut"] * 97
+    regions = ["Isocortex", "OLF"]
+    v1 = module.candidate_by_label("v1").config()
+    assert module.t2_values(calls, regions, _shares(), taxonomy, v1) == (0.03, 0.03)
+    keep = module.candidate_by_label("b").config()  # OLF present: 05 kept
+    static, kept_excluded = module.t2_values(calls, regions, _shares(), taxonomy, keep)
+    assert static == pytest.approx(0.03) and kept_excluded == 0.0
+    # With OB present the OB-IMN calls are plausible (no T2 either way).
+    assert module.t2_values(calls, [*regions, "OB"], _shares(), taxonomy, keep) == (
+        0.0,
+        0.0,
+    )
