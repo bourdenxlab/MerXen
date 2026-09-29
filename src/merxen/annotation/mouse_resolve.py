@@ -544,7 +544,10 @@ def _t2_signal(
     config: AnnotationConfig,
 ) -> tuple[float | None, str | None]:
     from merxen.annotation.mouse_gate import t2_share
-    from merxen.annotation.mouse_regions import EVALUATED_STATUSES
+    from merxen.annotation.mouse_regions import (
+        EVALUATED_STATUSES,
+        effective_never_drop,
+    )
 
     if run is None or run.regions is None:
         return None, reason or "no region step"
@@ -553,15 +556,19 @@ def _t2_signal(
         return None, f"region step {record.status}"
     if bundle is None:
         return None, reason
+    never_classes, never_subclasses = effective_never_drop(
+        config.mouse_regions, record.present_regions
+    )
     return (
         t2_share(
             list(unpruned_subclass),
             record.present_regions,
             bundle.shares,
             subclass_class=subclass_classes(run),
-            never_drop_classes=config.mouse_regions.never_drop_classes,
+            never_drop_classes=sorted(never_classes),
             min_merfish_cells=config.mouse_regions.min_merfish_cells_subclass,
             max_present_share=config.mouse_gate.g3_t2_max_present_share,
+            never_drop_subclasses=sorted(never_subclasses),
         ),
         None,
     )

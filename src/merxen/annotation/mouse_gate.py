@@ -460,6 +460,7 @@ def t2_subclasses(
     never_drop_classes: Sequence[str],
     min_merfish_cells: int = 20,
     max_present_share: float = 0.25,
+    never_drop_subclasses: Sequence[str] = (),
 ) -> set[str]:
     """Return E7's region-implausible (T2) subclasses of a section.
 
@@ -474,9 +475,13 @@ def t2_subclasses(
         present_regions: The section's present divisions.
         shares: The region-share bundle's shares.
         subclass_class: Subclass name to its class name (mapping tree).
-        never_drop_classes: ``MouseRegionConfig.never_drop_classes``.
+        never_drop_classes: ``MouseRegionConfig.never_drop_classes`` (with
+            an M6b rule: the section's ``mouse_regions.effective_never_drop``
+            classes).
         min_merfish_cells: ``MouseRegionConfig.min_merfish_cells_subclass``.
         max_present_share: E7's 0.25 (``g3_t2_max_present_share``).
+        never_drop_subclasses: Subclasses the rule keeps in the section (M6b
+            conditional never-drop; empty in v1).
 
     Returns:
         The T2 subclass names.
@@ -484,8 +489,12 @@ def t2_subclasses(
     present = shares.present_share("subclass", present_regions)
     n_grey = shares.subclass_n_grey.reindex(present.index).fillna(0)
     never = {str(name) for name in never_drop_classes}
+    kept = {str(name) for name in never_drop_subclasses}
     in_never = np.array(
-        [str(subclass_class.get(str(name), "")) in never for name in present.index],
+        [
+            str(subclass_class.get(str(name), "")) in never or str(name) in kept
+            for name in present.index
+        ],
         dtype=bool,
     )
     eligible = (n_grey.to_numpy() >= min_merfish_cells) & ~in_never
@@ -504,6 +513,7 @@ def t2_share(
     never_drop_classes: Sequence[str],
     min_merfish_cells: int = 20,
     max_present_share: float = 0.25,
+    never_drop_subclasses: Sequence[str] = (),
 ) -> float:
     """Return the T2 share (E7): table cells called to a T2 subclass.
 
@@ -518,6 +528,7 @@ def t2_share(
         never_drop_classes: Classes never counted.
         min_merfish_cells: Subclasses with fewer MERFISH cells are not counted.
         max_present_share: E7's 0.25.
+        never_drop_subclasses: Subclasses kept by the rule, not counted.
 
     Returns:
         The share of table cells whose subclass is T2.
@@ -529,6 +540,7 @@ def t2_share(
         never_drop_classes=never_drop_classes,
         min_merfish_cells=min_merfish_cells,
         max_present_share=max_present_share,
+        never_drop_subclasses=never_drop_subclasses,
     )
     names = [None if value is None else str(value) for value in unpruned_subclass]
     if not names:

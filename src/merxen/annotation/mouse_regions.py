@@ -43,8 +43,18 @@ in the label table), the re-mapped cells' tidy table in
 ``<sid>_mouse_regions.parquet``; ``MouseRegionRecord`` in
 ``map_manifest.json`` records the decision.
 
-Region coupling (``coupled_regions``) and every other rule variant are M6b
-(§7.8); this module refuses them rather than ignoring them.
+**M6b rule variants** (§7.8; ``MouseRegionConfig``, all off in v1): per
+division ``min_tile_fraction`` overrides (d, ``region_min_tile_fraction``)
+in step 3; then region coupling (a, ``coupled_regions``): a coupled division
+that is not present counts as present when one of its partners is present
+and the tiles whose majority *structure-level* home (the CCF
+``parcellation_structure`` holding the largest share of a subclass's
+grey-matter MERFISH cells; ``RegionShares.subclass_structure_home``) is one
+of its ``coupling_home_structures`` hold at least
+``coupling_min_tile_fraction`` of the assigned tiles (OB with OLF and AON);
+and conditional never-drop nodes (b, c, ``conditional_never_drop``) in step
+5. ``rule_variant`` ``v1`` refuses the M6b fields rather than ignoring them;
+``m6b`` accepts any combination. The tile parameters (f) are v1 fields.
 
 Imports: numpy, pandas, pydantic and the annotation modules; ``pyarrow``
 inside the parquet helpers.
@@ -56,7 +66,7 @@ import hashlib
 import json
 import logging
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final, Literal
 
@@ -66,6 +76,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from merxen.annotation.config import (
     MOUSE_CCF_REGIONS,
+    MOUSE_RULE_VARIANTS,
     MouseRegionConfig,
     normalise_mouse_section_regions,
 )
@@ -84,7 +95,10 @@ from merxen.annotation.vocab import NEURONS, primary_vocab
 logger = logging.getLogger(__name__)
 
 REGION_SHARE_REFERENCE_ID: Final = "wmb_region_share"
-RULE_VARIANTS: Final[tuple[str, ...]] = ("v1",)
+RULE_VARIANTS: Final[tuple[str, ...]] = MOUSE_RULE_VARIANTS
+# Structure-level subclass homes (M6b variant (a)); not written by the v1
+# ``wmb_region_share`` builder, read when a bundle lists it.
+REGION_STRUCTURE_HOME_FILE: Final = "region_structure_home.parquet"
 REGION_CELLS_SUFFIX: Final = "_mouse_regions.parquet"
 REGION_CELLS_METADATA_KEY: Final = b"merxen_mouse_regions"
 REGION_CELLS_SCHEMA_VERSION: Final = 1
@@ -192,26 +206,69 @@ class SectionRegionsRequest:
 
 
 def check_rule_variant(config: MouseRegionConfig) -> None:
-    """Refuse region-rule settings this version does not implement.
+    """Refuse region-rule settings the declared rule variant does not allow.
 
     Args:
         config: The mouse region settings.
 
     Raises:
-        MouseRegionError: For a rule variant other than ``v1`` or any
-            ``coupled_regions`` (both M6b, plan §7.8).
+        MouseRegionError: For an unknown rule variant, or ``v1`` with an M6b
+            field set (``coupled_regions``, ``conditional_never_drop``,
+            ``region_min_tile_fraction``; plan §7.8).
     """
     if config.rule_variant not in RULE_VARIANTS:
         raise MouseRegionError(
             f"mouse region rule variant {config.rule_variant!r} is not "
-            f"implemented (known: {RULE_VARIANTS}); M6b selects the variants "
-            "(plan §7.8)"
+            f"implemented (known: {RULE_VARIANTS}; plan §7.8)"
         )
-    if config.coupled_regions:
+    used = config.uses_m6b_fields()
+    if config.rule_variant == "v1" and used:
         raise MouseRegionError(
-            "coupled_regions is an M6b rule variant (plan §7.8, variant (a)) and "
-            "is not implemented in v1; leave it empty"
+            f"{', '.join(used)} {'is an' if len(used) == 1 else 'are'} M6b rule "
+            "variant setting(s) (plan §7.8) that rule variant v1 does not "
+            "apply; leave them empty or set rule_variant to 'm6b'"
         )
+
+
+def check_region_shares(config: MouseRegionConfig, shares: RegionShares) -> None:
+    """Refuse a rule that needs tables the region shares lack.
+
+    Args:
+        config: The mouse region settings.
+        shares: The region shares the rule will read.
+
+    Raises:
+        MouseRegionError: If ``coupled_regions`` is set and the shares have
+            no structure-level subclass homes.
+    """
+    if config.coupled_regions and shares.subclass_structure_home is None:
+        raise MouseRegionError(
+            "coupled_regions needs structure-level subclass homes "
+            f"({REGION_STRUCTURE_HOME_FILE}), which the region-share tables lack "
+            "(plan §7.8 (a))"
+        )
+
+
+def effective_never_drop(
+    config: MouseRegionConfig, present: Iterable[str]
+) -> tuple[frozenset[str], frozenset[str]]:
+    """Return the classes and subclasses the drop rule keeps for a section.
+
+    Args:
+        config: ``never_drop_classes`` and ``conditional_never_drop``.
+        present: The section's present divisions.
+
+    Returns:
+        ``(classes, subclasses)``: the never-drop classes plus the
+        conditional nodes whose condition holds (plan §7.8 (b), (c)).
+    """
+    regions = set(present)
+    classes = {str(name) for name in config.never_drop_classes}
+    subclasses: set[str] = set()
+    for node in config.conditional_never_drop:
+        if node.applies(regions):
+            (classes if node.level == "class" else subclasses).add(node.name)
+    return frozenset(classes), frozenset(subclasses)
 
 
 # --------------------------------------------------------------------------
@@ -229,6 +286,9 @@ class RegionShares:
         subclass_share: The same per subclass.
         subclass_n_grey: Grey-matter MERFISH cells per subclass.
         subclass_home: Home division per subclass (largest share).
+        subclass_structure_home: Home CCF structure per subclass (the
+            ``parcellation_structure`` with the largest share of its
+            grey-matter cells), or ``None`` (M6b variant (a) only).
     """
 
     class_share: pd.DataFrame
@@ -236,10 +296,14 @@ class RegionShares:
     subclass_share: pd.DataFrame
     subclass_n_grey: pd.Series
     subclass_home: pd.Series
+    subclass_structure_home: pd.Series | None = None
 
     @classmethod
     def from_tables(
-        cls, region_share: pd.DataFrame, region_home: pd.DataFrame
+        cls,
+        region_share: pd.DataFrame,
+        region_home: pd.DataFrame,
+        structure_home: pd.DataFrame | None = None,
     ) -> RegionShares:
         """Build the shares from the bundle's long tables.
 
@@ -248,6 +312,8 @@ class RegionShares:
                 n, share, n_grey, n_all).
             region_home: ``region_home.parquet`` (level, node_name, home,
                 home_share, n_grey).
+            structure_home: Structure-level homes with the columns of
+                ``region_home`` (subclass rows are read), or ``None``.
 
         Returns:
             The shares.
@@ -288,12 +354,22 @@ class RegionShares:
         homes = region_home[region_home["level"].astype(str) == "subclass"]
         home = homes.set_index("node_name")["home"].astype(str)
         home.index = home.index.astype(str)
+        structure: pd.Series | None = None
+        if structure_home is not None:
+            if not {"level", "node_name", "home"} <= set(structure_home.columns):
+                raise MouseRegionError(
+                    "structure home table lacks level/node_name/home"
+                )
+            rows = structure_home[structure_home["level"].astype(str) == "subclass"]
+            structure = rows.set_index("node_name")["home"].astype(str)
+            structure.index = structure.index.astype(str)
         return cls(
             class_share=frames["class"][0],
             class_n_grey=frames["class"][1].astype(np.int64),
             subclass_share=frames["subclass"][0],
             subclass_n_grey=frames["subclass"][1].astype(np.int64),
             subclass_home=home,
+            subclass_structure_home=structure,
         )
 
     def present_share(self, level: DropKind, present: Iterable[str]) -> pd.Series:
@@ -372,9 +448,13 @@ class RegionShareBundle:
             raise MouseRegionError(
                 f"bundle {bundle_dir} is not intact: {'; '.join(problems)}"
             )
+        listed = {str(record.get("path")) for record in manifest.get("files", []) or []}
         shares = RegionShares.from_tables(
             pd.read_parquet(bundle_dir / REGION_SHARE_FILE),
             pd.read_parquet(bundle_dir / REGION_HOME_FILE),
+            pd.read_parquet(bundle_dir / REGION_STRUCTURE_HOME_FILE)
+            if REGION_STRUCTURE_HOME_FILE in listed
+            else None,
         )
         return cls(
             path=bundle_dir,
@@ -556,6 +636,11 @@ class RegionInference:
             cells without finite coordinates).
         cell_tile_region: Majority division of each cell's tile, ``None``
             when the tile is not assigned.
+        coupled_regions: Divisions present by coupling only (M6b (a); in
+            ``inferred_regions`` too).
+        coupling_tile_counts: Per coupled division considered (its partner
+            present, itself not present by the tile rule): the assigned
+            tiles whose majority structure-level home evidences it.
     """
 
     n_confident_neurons: int
@@ -567,6 +652,70 @@ class RegionInference:
     tiles: pd.DataFrame
     cell_tile: np.ndarray
     cell_tile_region: np.ndarray
+    coupled_regions: tuple[str, ...] = ()
+    coupling_tile_counts: dict[str, int] = field(default_factory=dict)
+
+
+def _empty_tiles() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            TILE_I: pd.Series(dtype=np.int64),
+            TILE_J: pd.Series(dtype=np.int64),
+            "region": pd.Series(dtype=object),
+            "n_neurons": pd.Series(dtype=np.int64),
+        }
+    )
+
+
+def _tile_majority(
+    cell_tile: np.ndarray, voters: np.ndarray, home: np.ndarray, min_neurons: int
+) -> pd.DataFrame:
+    """Return the tiles with enough voters and their majority home.
+
+    Args:
+        cell_tile: ``(n, 2)`` tile index per cell.
+        voters: Cells that vote.
+        home: Home per cell (read where ``voters``).
+        min_neurons: Voters a tile needs.
+
+    Returns:
+        One row per assigned tile (``tile_i``, ``tile_j``, ``region``,
+        ``n_neurons``); a tie goes to the first home in sorted order (E7's
+        ``DataFrame.idxmax`` over the sorted columns).
+    """
+    if not voters.any():
+        return _empty_tiles()
+    votes = pd.DataFrame(
+        {
+            TILE_I: cell_tile[voters, 0],
+            TILE_J: cell_tile[voters, 1],
+            "home": home[voters].astype(str),
+        }
+    )
+    counts = votes.groupby([TILE_I, TILE_J, "home"]).size().unstack(fill_value=0)
+    counts = counts.reindex(columns=sorted(counts.columns))
+    totals = counts.sum(axis=1)
+    counts = counts[totals >= min_neurons]
+    if counts.empty:
+        return _empty_tiles()
+    values = counts.to_numpy()
+    majority = np.asarray(counts.columns, dtype=object)[values.argmax(axis=1)]
+    index = counts.index.to_frame(index=False)
+    return pd.DataFrame(
+        {
+            TILE_I: index[TILE_I].to_numpy(np.int64),
+            TILE_J: index[TILE_J].to_numpy(np.int64),
+            "region": majority,
+            "n_neurons": values.sum(axis=1).astype(np.int64),
+        }
+    )
+
+
+def _homes_of(names: np.ndarray, homes: pd.Series) -> tuple[np.ndarray, np.ndarray]:
+    """Return each cell's home (object array) and whether it has one."""
+    home = homes.reindex([None if name is None else str(name) for name in names])
+    values = home.to_numpy(dtype=object)
+    return values, np.array([value is not None and value == value for value in values])
 
 
 def infer_regions(
@@ -583,13 +732,15 @@ def infer_regions(
         subclass_names: Unpruned WMB subclass name per cell.
         confident: ``confident_neurons`` mask.
         shares: The region shares (subclass homes).
-        config: Tile size, neurons per tile, presence thresholds.
+        config: Tile size, neurons per tile, presence thresholds, and the
+            M6b per-division thresholds and coupling.
 
     Returns:
         The inference.
 
     Raises:
-        MouseRegionError: If the arrays do not fit together.
+        MouseRegionError: If the arrays do not fit together, or coupling is
+            set without structure-level homes.
     """
     coordinates = np.asarray(xy, dtype=np.float64)
     n = len(coordinates)
@@ -601,24 +752,15 @@ def infer_regions(
         raise MouseRegionError(
             f"{n} coordinates, {len(names)} subclass names, {len(mask)} flags"
         )
+    if config.coupled_regions:
+        check_region_shares(config, shares)
     finite = np.isfinite(coordinates[:, :2]).all(axis=1)
     cell_tile = np.full((n, 2), -1, dtype=np.int64)
     cell_tile[finite] = np.floor(coordinates[finite, :2] / config.tile_um).astype(
         np.int64
     )
-    home = shares.subclass_home.reindex(
-        [None if name is None else str(name) for name in names]
-    ).to_numpy(dtype=object)
-    has_home = np.array([value is not None and value == value for value in home])
+    home, has_home = _homes_of(names, shares.subclass_home)
     voters = mask & finite & has_home
-    empty_tiles = pd.DataFrame(
-        {
-            TILE_I: pd.Series(dtype=np.int64),
-            TILE_J: pd.Series(dtype=np.int64),
-            "region": pd.Series(dtype=object),
-            "n_neurons": pd.Series(dtype=np.int64),
-        }
-    )
     cell_tile_region = np.full(n, None, dtype=object)
     if not voters.any():
         return RegionInference(
@@ -628,37 +770,11 @@ def infer_regions(
             tile_counts={},
             largest_component={},
             inferred_regions=(),
-            tiles=empty_tiles,
+            tiles=_empty_tiles(),
             cell_tile=cell_tile,
             cell_tile_region=cell_tile_region,
         )
-    votes = pd.DataFrame(
-        {
-            TILE_I: cell_tile[voters, 0],
-            TILE_J: cell_tile[voters, 1],
-            "home": home[voters].astype(str),
-        }
-    )
-    counts = votes.groupby([TILE_I, TILE_J, "home"]).size().unstack(fill_value=0)
-    # E7 takes DataFrame.idxmax over the sorted home columns: a tie goes to
-    # the first division in sorted order.
-    counts = counts.reindex(columns=sorted(counts.columns))
-    totals = counts.sum(axis=1)
-    counts = counts[totals >= config.min_neurons_per_tile]
-    if counts.empty:
-        tiles = empty_tiles
-    else:
-        values = counts.to_numpy()
-        majority = np.asarray(counts.columns, dtype=object)[values.argmax(axis=1)]
-        index = counts.index.to_frame(index=False)
-        tiles = pd.DataFrame(
-            {
-                TILE_I: index[TILE_I].to_numpy(np.int64),
-                TILE_J: index[TILE_J].to_numpy(np.int64),
-                "region": majority,
-                "n_neurons": values.sum(axis=1).astype(np.int64),
-            }
-        )
+    tiles = _tile_majority(cell_tile, voters, home, config.min_neurons_per_tile)
     n_assigned = len(tiles)
     tile_counts = {
         str(region): int(count)
@@ -675,10 +791,37 @@ def infer_regions(
             if name == region
         }
         largest[region] = _largest_component(cells)
-        if count / n_assigned < config.min_tile_fraction:
+        if count / n_assigned < config.tile_fraction_for(region):
             continue
         if largest[region] >= config.min_component_tiles:
             present.append(region)
+    coupled: list[str] = []
+    coupling_counts: dict[str, int] = {}
+    structure_homes = shares.subclass_structure_home
+    if config.coupled_regions and n_assigned and structure_homes is not None:
+        structure, has_structure = _homes_of(names, structure_homes)
+        structure_tiles = _tile_majority(
+            cell_tile,
+            mask & finite & has_structure,
+            structure,
+            config.min_neurons_per_tile,
+        )
+        by_tile = pd.Index(
+            list(zip(structure_tiles[TILE_I], structure_tiles[TILE_J], strict=True))
+        )
+        assigned = pd.Index(list(zip(tiles[TILE_I], tiles[TILE_J], strict=True)))
+        on_assigned = structure_tiles[by_tile.isin(assigned)]
+        by_present = set(present)
+        for target in sorted(config.coupled_regions):
+            partners = config.coupled_regions[target]
+            if target in by_present or not any(p in by_present for p in partners):
+                continue
+            evidence = set(config.coupling_home_structures.get(target, []))
+            count = int(on_assigned["region"].isin(evidence).sum())
+            coupling_counts[target] = count
+            if count / n_assigned >= config.coupling_min_tile_fraction:
+                present.append(target)
+                coupled.append(target)
     order = {region: index for index, region in enumerate(MOUSE_CCF_REGIONS)}
     inferred = tuple(sorted(present, key=lambda region: order.get(region, 99)))
     if n_assigned:
@@ -702,6 +845,10 @@ def infer_regions(
         tiles=tiles,
         cell_tile=cell_tile,
         cell_tile_region=cell_tile_region,
+        coupled_regions=tuple(
+            sorted(coupled, key=lambda region: order.get(region, 99))
+        ),
+        coupling_tile_counts=dict(sorted(coupling_counts.items())),
     )
 
 
@@ -752,7 +899,8 @@ def two_tier_drop_list(
         present: Present divisions.
         shares: MERFISH region shares.
         taxonomy: The mapping tree's classes and subclasses.
-        config: Thresholds and the never-drop classes.
+        config: Thresholds, the never-drop classes and the conditional
+            never-drop nodes (``effective_never_drop``).
 
     Returns:
         Non-overlapping nodes (a class replaces its subclasses when all are
@@ -761,7 +909,7 @@ def two_tier_drop_list(
     present_set = set(present)
     class_share = shares.present_share("class", present_set)
     subclass_share = shares.present_share("subclass", present_set)
-    never = set(config.never_drop_classes)
+    never, kept_subclasses = effective_never_drop(config, present_set)
     nodes: list[DroppedNode] = []
     for class_name in sorted(taxonomy.subclasses):
         if class_name in never or class_name not in shares.class_share.index:
@@ -779,6 +927,8 @@ def two_tier_drop_list(
         members = taxonomy.subclasses[class_name]
         dropped: list[DroppedNode] = []
         for subclass in members:
+            if subclass in kept_subclasses:
+                continue
             n_sub = int(shares.subclass_n_grey.get(subclass, 0))
             sub_share = (
                 float(subclass_share[subclass])
@@ -1227,6 +1377,8 @@ class MouseRegionRecord(_RegionModel):
         tile_counts: Assigned tiles per majority division.
         largest_component: Largest 8-connected component per division.
         inferred_regions: Divisions the inference found present.
+        coupled_regions: Of these, divisions present by coupling only (M6b
+            variant (a)).
         present_regions: Divisions the drop list used.
         nodes_to_drop: The drop list.
         n_dropped_classes: Class nodes dropped.
@@ -1257,6 +1409,7 @@ class MouseRegionRecord(_RegionModel):
     tile_counts: dict[str, int] = Field(default_factory=dict)
     largest_component: dict[str, int] = Field(default_factory=dict)
     inferred_regions: list[str] = Field(default_factory=list)
+    coupled_regions: list[str] = Field(default_factory=list)
     present_regions: list[str] = Field(default_factory=list)
     nodes_to_drop: list[DroppedNode] = Field(default_factory=list)
     n_dropped_classes: int = 0

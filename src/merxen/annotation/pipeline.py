@@ -114,6 +114,7 @@ from merxen.annotation.mouse_regions import (
     SectionRegionsRequest,
     WmbTaxonomy,
     changed_cells,
+    check_region_shares,
     check_rule_variant,
     count_dropped_subclasses,
     load_region_outputs,
@@ -2204,6 +2205,11 @@ def _section_region_requests(
             "annotation-reference-prep, or set mouse_section_regions to none "
             "to map without pruning)"
         )
+    if needing and region_shares is not None:
+        try:
+            check_region_shares(config.mouse_regions, region_shares.shares)
+        except MouseRegionError as error:
+            raise MapError(f"{region_shares.path}: {error}") from error
     return requests
 
 
@@ -2372,6 +2378,7 @@ def _mouse_region_step(
         tile_counts=dict(inference.tile_counts) if inference else {},
         largest_component=dict(inference.largest_component) if inference else {},
         inferred_regions=list(inference.inferred_regions) if inference else [],
+        coupled_regions=list(inference.coupled_regions) if inference else [],
         present_regions=list(plan.present_regions),
         nodes_to_drop=list(plan.nodes),
         n_dropped_classes=sum(1 for node in plan.nodes if node.kind == "class"),

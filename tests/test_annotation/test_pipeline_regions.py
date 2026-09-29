@@ -236,6 +236,19 @@ def test_map_refuses_region_settings_it_cannot_apply(
     ).coupled_to_clustering(10)
     with pytest.raises(MapError, match="coupled_regions"):
         map_mouse(mouse_setup, tmp_path / "b", config=coupled)
+    # With rule variant m6b the coupling needs structure-level homes, which
+    # the region-share bundle lacks.
+    m6b = AnnotationConfig.model_validate(
+        {
+            "species": "mouse",
+            "mouse_regions": {
+                "coupled_regions": {"OB": ["OLF"]},
+                "rule_variant": "m6b",
+            },
+        }
+    ).coupled_to_clustering(10)
+    with pytest.raises(MapError, match="structure-level"):
+        map_mouse(mouse_setup, tmp_path / "b2", config=m6b)
     with pytest.raises(MapError, match="unknown mouse section region"):
         map_mouse(mouse_setup, tmp_path / "c", section_regions={SID: "Striatum"})
     assert not fake_mmc.calls  # all refused before mapping
