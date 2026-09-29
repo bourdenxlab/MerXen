@@ -1237,8 +1237,10 @@ def per_bin_summary(
 
     Returns:
         One row per group and bin with ``n_sections``,
-        ``n_sections_missing_region``, and ``<column>_mean``, ``_max``,
-        ``_n_above`` per column.
+        ``n_sections_missing_region`` (and ``n_sections_extra_region``,
+        ``n_sections_skipped`` (not pruned) when the rows have ``extra`` and
+        ``status``), and ``<column>_mean``, ``_max``, ``_n_above`` per
+        column.
     """
     rows = []
     keys = ["gene_set", "candidate", "ap_bin"]
@@ -1246,6 +1248,10 @@ def per_bin_summary(
         row: dict[str, Any] = dict(zip(keys, group, strict=True))
         row["n_sections"] = len(part)
         row["n_sections_missing_region"] = int((part["missed"].fillna("") != "").sum())
+        if "extra" in part:
+            row["n_sections_extra_region"] = int((part["extra"].fillna("") != "").sum())
+        if "status" in part:
+            row["n_sections_skipped"] = int((part["status"] != "pruned").sum())
         for column in columns:
             values = pd.to_numeric(part[column], errors="coerce")
             row[f"{column}_mean"] = float(values.mean())
