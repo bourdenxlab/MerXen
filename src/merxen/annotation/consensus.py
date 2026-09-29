@@ -1606,12 +1606,18 @@ class MouseCalls:
         region_dropped: Per object, the level (``class`` / ``subclass``)
             whose node region pruning dropped from its unpruned call (the
             cell was re-mapped), else ``None``.
+        marker_unsupported: Per level (``class``, ``subclass``,
+            ``supertype``), whether the call is a node the bundle lists in
+            ``marker_unsupported_nodes`` (no marker of its own: below an
+            auto-collapsed parent, or without a 10Xv3 training cell, plan
+            §7.8); such calls are ``not_resolvable`` at that level.
     """
 
     total_counts: np.ndarray
     in_table: np.ndarray
     wmb: WmbCalls | None
     region_dropped: np.ndarray | None = None
+    marker_unsupported: Mapping[str, np.ndarray] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Check that every column has one value per object."""
@@ -1624,6 +1630,7 @@ class MouseCalls:
                     lengths.append(len(call))
         if self.region_dropped is not None:
             lengths.append(len(self.region_dropped))
+        lengths += [len(values) for values in self.marker_unsupported.values()]
         if any(length != n for length in lengths):
             raise ValueError("every MouseCalls column needs one value per object")
 
@@ -1803,6 +1810,9 @@ def resolve_mouse(
        confident subclass, the subclass threshold and resolvability; never
        a leaf or in ``ct_final``.
 
+    A call to a node the bundle lists as marker-unsupported
+    (``MouseCalls.marker_unsupported``) is ``not_resolvable`` at its level.
+
     The gate (``mouse_gate.evaluate_mouse_gate``, label-free, computed
     before the statuses) makes every level ``not_attempted_gate`` when
     ``failed`` and the leaf levels when ``broad_only``. The status
@@ -1858,6 +1868,12 @@ def resolve_mouse(
     emission = settings.emission
     floors = settings.floors
 
+    def unsupported(level: str) -> np.ndarray:
+        values = calls.marker_unsupported.get(level)
+        if values is None:
+            return np.zeros(n, dtype=bool)
+        return np.asarray(values, dtype=bool)
+
     def emit(level: str) -> LevelEmission:
         return emission.level(level, key, counts)
 
@@ -1896,7 +1912,7 @@ def resolve_mouse(
     builder.fail(no_call, CellStatus.LOW_CONFIDENCE)
     builder.fail(~broad_confident, CellStatus.PARENT_UNRESOLVED)
     builder.fail(counts < floor, CellStatus.BELOW_FLOOR)
-    builder.fail(~em.emitted, CellStatus.NOT_RESOLVABLE)
+    builder.fail(~em.emitted | unsupported("class"), CellStatus.NOT_RESOLVABLE)
     builder.fail(~meets_threshold(class_raw, em.threshold), CellStatus.LOW_CONFIDENCE)
     if settings.class_min_corr is not None:
         corr = (
@@ -1963,7 +1979,7 @@ def resolve_mouse(
     builder.fail(implausible_class, CellStatus.IMPLAUSIBLE)
     builder.fail(~leaf_parent, CellStatus.PARENT_UNRESOLVED)
     builder.fail(counts < floor, CellStatus.BELOW_FLOOR)
-    builder.fail(~em.emitted, CellStatus.NOT_RESOLVABLE)
+    builder.fail(~em.emitted | unsupported("subclass"), CellStatus.NOT_RESOLVABLE)
     builder.fail(~meets_threshold(sub_raw, em.threshold), CellStatus.LOW_CONFIDENCE)
     status = builder.finish()
     implausible_subclass = any_dropped & np.isin(
@@ -2003,7 +2019,7 @@ def resolve_mouse(
         builder.fail(implausible_class, CellStatus.IMPLAUSIBLE)
         builder.fail(~levels["subclass"].confident, CellStatus.PARENT_UNRESOLVED)
         builder.fail(counts < floor, CellStatus.BELOW_FLOOR)
-        builder.fail(~em.emitted, CellStatus.NOT_RESOLVABLE)
+        builder.fail(~em.emitted | unsupported("supertype"), CellStatus.NOT_RESOLVABLE)
         builder.fail(
             ~meets_threshold(fine_raw, em.threshold), CellStatus.LOW_CONFIDENCE
         )

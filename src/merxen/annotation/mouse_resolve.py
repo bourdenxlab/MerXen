@@ -141,6 +141,38 @@ def _level_call(frame: pd.DataFrame, mapped: np.ndarray) -> Any:
     )
 
 
+def marker_unsupported_keys(run: ResolveRun) -> set[tuple[str, str]]:
+    """Return the ``(level, node)`` pairs a bundle lists as marker-unsupported.
+
+    Args:
+        run: The primary run (its bundle's ``builder_output``).
+
+    Returns:
+        The nodes without a marker of their own (plan §7.8, R15).
+    """
+    output = run.bundle.manifest.get("builder_output") or {}
+    record = output.get("marker_unsupported_nodes") or {}
+    details = record.get("details") if isinstance(record, Mapping) else None
+    return {
+        (str(item.get("level")), str(item.get("node")))
+        for item in details or []
+        if isinstance(item, Mapping)
+    }
+
+
+def _unsupported(
+    frame: pd.DataFrame, level: str, nodes: set[tuple[str, str]]
+) -> np.ndarray:
+    labels = frame["assignment"].astype(object).to_numpy()
+    return np.array(
+        [
+            value is not None and not pd.isna(value) and (level, str(value)) in nodes
+            for value in labels
+        ],
+        dtype=bool,
+    )
+
+
 def mouse_calls_from_runs(
     loaded: LoadedSample,
     primary: ResolveRun | None,
@@ -252,9 +284,18 @@ def mouse_calls_from_runs(
             dtype=object,
         )
     )
+    unsupported_nodes = marker_unsupported_keys(primary)
+    marker_unsupported = {"class": _unsupported(frame, class_level, unsupported_nodes)}
+    if subclass_level is not None:
+        marker_unsupported["subclass"] = _unsupported(
+            level_frame(primary.tidy, subclass_level).reindex(obs),
+            subclass_level,
+            unsupported_nodes,
+        )
     calls = MouseCalls(
         total_counts=np.asarray(loaded.total_counts, dtype=np.int64),
         in_table=np.asarray(loaded.in_table, dtype=bool),
+        marker_unsupported=marker_unsupported,
         wmb=WmbCalls(
             klass=_level_call(frame, mapped),
             broad=aggregated["broad"],
@@ -1078,6 +1119,10 @@ def resolve_mouse_sample(
         },
         "reweighted_to_composition": reweight,
         "class_corr_floor": {"value": corr_floor, "note": corr_note},
+        "marker_unsupported_calls": {
+            level: int(np.asarray(values, dtype=bool)[table].sum())
+            for level, values in inputs.calls.marker_unsupported.items()
+        },
         "resolution": summary,
         "mouse_gate": gate.to_json(),
         "flags": flag_set.summary(),
