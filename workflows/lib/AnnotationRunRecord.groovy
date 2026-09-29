@@ -17,9 +17,12 @@ import java.util.concurrent.ConcurrentSkipListSet
  * channel subscriptions in map_first runs only, which pair x segmentation
  * entered clustering, which got label tables and which got a hierarchy;
  * AnnotationSettings.completionSummary lists the branches that stopped, the
- * refused and provisional panels and the pairs whose cross-platform
- * statistics RESOLVE restricted. A legacy run subscribes nothing, so its
- * record stays empty and it prints no summary.
+ * refused and provisional panels, the broad-only and failed dataset gates,
+ * the pairs whose cross-platform statistics are restricted (by the panels or
+ * by a dataset gate, as merxen.clustering.cross_platform scopes them) and
+ * the samples whose MENDER run was skipped for want of an assigned cell
+ * state. A legacy run subscribes nothing, so its record stays empty and it
+ * prints no summary.
  *
  * One Nextflow run is one JVM, so the record is static; the subscriptions
  * run on dataflow threads, hence the concurrent collections.
@@ -39,10 +42,28 @@ class AnnotationRunRecord {
     private static final Set<String> REFUSED_BRANCHES = new ConcurrentSkipListSet<String>()
     private static final Map<String, Set<String>> TRUST = new ConcurrentHashMap<String, Set<String>>()
     private static final Set<String> CROSS_PLATFORM = new ConcurrentSkipListSet<String>()
+    private static final Set<String> DATASET_GATES = new ConcurrentSkipListSet<String>()
+    private static final Set<String> MENDER_SKIPPED = new ConcurrentSkipListSet<String>()
+
+    // As merxen.clustering.cross_platform: statistics levels from least to
+    // most restrictive, the level each dataset gate allows at most (plan
+    // §5.4) and the reason a gate adds.
+    static final List<String> STATISTICS_LEVELS = ["full", "broad_only", "none"].asImmutable()
+    static final Map<String, String> GATE_STATISTICS_CAP = [
+        full: "full",
+        broad_only: "broad_only",
+        failed: "none",
+    ].asImmutable()
+    static final String DATASET_GATE_REASON = "dataset_gate"
+    // merxen.analysis.mender.SKIPPED_NO_ASSIGNED_STATE.
+    static final String MENDER_SKIPPED_STATUS = "skipped_no_assigned_state"
 
     /** Forget everything (tests; one run per JVM otherwise). */
     static void reset() {
-        [EXPECTED, LABELLED, COMPUTED, REFUSED_PANELS, REFUSED_BRANCHES, CROSS_PLATFORM].each { Set values ->
+        [
+            EXPECTED, LABELLED, COMPUTED, REFUSED_PANELS, REFUSED_BRANCHES, CROSS_PLATFORM,
+            DATASET_GATES, MENDER_SKIPPED,
+        ].each { Set values ->
             values.clear()
         }
         TRUST.clear()
@@ -59,8 +80,8 @@ class AnnotationRunRecord {
      * @param pairId Pair id.
      * @param segmentation Segmentation.
      * @param panelDir ANNOTATE_PANEL output (required_bundles.json: status).
-     * @param resolveDir RESOLVE output (the pair summary: trust per sample,
-     *     pair.cross_platform).
+     * @param resolveDir RESOLVE output (the pair summary: trust and dataset
+     *     gate per sample, pair.cross_platform).
      */
     static void labelled(Object pairId, Object segmentation, Object panelDir, Object resolveDir) {
         def key = branch(pairId, segmentation)
@@ -84,11 +105,80 @@ class AnnotationRunRecord {
                     "${key} ${sampleId}".toString()
             }
         }
-        def crossPlatform = (summary.pair instanceof Map) ? summary.pair.cross_platform : null
-        if (crossPlatform instanceof Map && crossPlatform.statistics_level != "full") {
+        gateLevels(summary).each { sampleId, level ->
+            if (level != "full") {
+                DATASET_GATES << "${key} ${sampleId}: ${level}".toString()
+            }
+        }
+        def scope = crossPlatformScope(summary)
+        if (scope != null && scope.statistics_level != "full") {
             CROSS_PLATFORM << (
-                "${key}: ${crossPlatform.statistics_level}${reasonText(crossPlatform.reasons)}"
+                "${key}: ${scope.statistics_level}${reasonText(scope.reasons)}"
             ).toString()
+        }
+    }
+
+    /**
+     * Return each sample's dataset gate level from a RESOLVE pair summary.
+     *
+     * @param summary The parsed pair summary.
+     * @return samples[id].resolution.gate.level per sample that records one,
+     *     sorted by sample id.
+     */
+    static Map<String, String> gateLevels(Map summary) {
+        def levels = new TreeMap<String, String>()
+        ((summary?.samples ?: [:]) as Map).each { sampleId, sample ->
+            def resolution = (sample instanceof Map) ? sample.resolution : null
+            def gate = (resolution instanceof Map) ? resolution.gate : null
+            def level = (gate instanceof Map) ? gate.level : null
+            if (level != null) {
+                levels[sampleId.toString()] = level.toString()
+            }
+        }
+        return levels
+    }
+
+    /**
+     * Return a pair's cross-platform scope as merxen.clustering.cross_platform
+     * builds it: RESOLVE's pair.cross_platform with the dataset gates folded
+     * in (a broad_only gate caps the level at broad_only, a failed gate sets
+     * none, each with reason dataset_gate:<sample>:<level>).
+     *
+     * @param summary The parsed pair summary.
+     * @return [statistics_level, reasons], or null without a pair record.
+     */
+    static Map crossPlatformScope(Map summary) {
+        def record = (summary?.pair instanceof Map) ? summary.pair.cross_platform : null
+        if (!(record instanceof Map)) {
+            return null
+        }
+        def level = (record.statistics_level ?: "none").toString()
+        def reasons = ((record.reasons ?: []) as List).collect { item -> item.toString() }
+        gateLevels(summary).each { sampleId, gateLevel ->
+            def cap = GATE_STATISTICS_CAP[gateLevel] ?: "none"
+            if (cap != "full") {
+                if (STATISTICS_LEVELS.indexOf(cap) > STATISTICS_LEVELS.indexOf(level)) {
+                    level = cap
+                }
+                reasons << "${DATASET_GATE_REASON}:${sampleId}:${gateLevel}".toString()
+            }
+        }
+        return [statistics_level: level, reasons: reasons]
+    }
+
+    /**
+     * Record one sample's MENDER import (MENDER_IMPORT done).
+     *
+     * @param pairId Pair id.
+     * @param segmentation Segmentation.
+     * @param platform Platform.
+     * @param importManifest spatialdata_import_manifest.json (status).
+     */
+    static void menderImported(Object pairId, Object segmentation, Object platform, Object importManifest) {
+        def manifest = readJson(asPath(importManifest))
+        if (manifest?.status == MENDER_SKIPPED_STATUS) {
+            def sample = manifest.sample_id ?: "${pairId}_${platform}"
+            MENDER_SKIPPED << "${branch(pairId, segmentation)} ${sample}${reasonText(manifest.status_reasons)}".toString()
         }
     }
 
@@ -115,9 +205,11 @@ class AnnotationRunRecord {
      *
      * @return failed_annotations (entered clustering, no label tables),
      *     failed_hierarchies (label tables, no hierarchy), refused_panels,
-     *     broad_only_panels, provisional_panels (pair:segmentation sample)
-     *     and cross_platform_restricted (pairs whose cross-platform
-     *     statistics are broad_only or none, with RESOLVE's reasons).
+     *     broad_only_panels, provisional_panels (pair:segmentation sample),
+     *     restricted_dataset_gates (samples whose gate is broad_only or
+     *     failed), cross_platform_restricted (pairs whose cross-platform
+     *     statistics are broad_only or none, with the reasons) and
+     *     mender_skipped (samples without an assigned MENDER state).
      */
     static Map runInfo() {
         return [
@@ -127,7 +219,9 @@ class AnnotationRunRecord {
             refused_panels: ((REFUSED_PANELS as List) + trustList("refused")).sort(),
             broad_only_panels: trustList("broad_only"),
             provisional_panels: trustList("provisional"),
+            restricted_dataset_gates: (DATASET_GATES as List).sort(),
             cross_platform_restricted: (CROSS_PLATFORM as List).sort(),
+            mender_skipped: (MENDER_SKIPPED as List).sort(),
         ]
     }
 

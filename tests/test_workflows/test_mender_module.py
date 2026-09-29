@@ -250,7 +250,6 @@ workflow {
                 run_mender: settings.run_mender,
                 terminal: terminal,
                 count: currentPairTerminalExpectedCount(settings, terminal),
-                spec_copies: AnnotationSettings.terminalSpecCopies(settings),
                 clustering_errors: clusteringErrors,
                 depth_tables: depth.tables,
             ]]
@@ -380,17 +379,44 @@ def test_map_first_never_waits_for_mapmycells(main_nf_results: dict[str, Any]) -
     assert depth["count"] == 2
 
 
-@needs_nextflow
-def test_barrier_spec_copies_cover_every_terminal_event(
-    main_nf_results: dict[str, Any],
-) -> None:
-    """A map_first pair gets one barrier spec per terminal event; legacy one."""
-    for name in ("legacy|stop-mender", "legacy|default-mender"):
-        assert _case(main_nf_results, name)["spec_copies"] == 1, name
-    # FINALIZE (1 segmentation) only.
-    assert _case(main_nf_results, "map_first|stop-mender")["spec_copies"] == 1
-    # FINALIZE plus one cortical-depth result per platform.
-    assert _case(main_nf_results, "map_first|depth-mender")["spec_copies"] == 3
+# The MENDER barrier of legacy runs, as on main (its channels and DAG stay
+# unchanged; the join defect of legacy runs is left for a fix on main).
+LEGACY_BARRIER = """\
+        pair_terminal_grouped_ch = pair_terminal_events_ch
+            .join(pair_terminal_specs_ch)
+            .filter { _pairId, eventStage, _done, expectedStage, _expectedCount ->
+                eventStage == expectedStage
+            }
+            .map { pairId, _eventStage, _done, _expectedStage, expectedCount ->
+                tuple(groupKey(pairId, expectedCount as int), true)
+            }
+            .groupTuple()
+            .map { pairKey, _doneFlags -> tuple(pairKey.getGroupTarget(), true) }
+"""
+
+
+def test_barrier_keeps_the_legacy_join_and_one_spec_per_pair() -> None:
+    """map_first combines each event with the one spec; legacy keeps its join."""
+    main_text = (REPO_ROOT / "workflows" / "main.nf").read_text()
+    specs = _main_nf_block(
+        main_text, "    pair_terminal_specs_ch = ", "    pair_terminal_immediate_ch = "
+    )
+    grouped = _main_nf_block(
+        main_text,
+        "    if (AnnotationSettings.isMapFirstRun(params)) { // rca-site:H3",
+        "    pair_terminal_token_ch = ",
+    )
+    map_first, legacy = grouped.split("    } else {\n")
+    assert "AnnotationSettings" not in specs
+    assert "[tuple(" in specs and ")] *" not in specs
+    assert legacy == LEGACY_BARRIER + "    }\n\n"
+    assert ".combine(pair_terminal_specs_ch, by: 0)" in map_first
+    assert ".join(" not in map_first
+    # Both branches filter, key and group the events alike.
+    assert (
+        map_first.split(".combine(pair_terminal_specs_ch, by: 0)\n")[1]
+        == (LEGACY_BARRIER.split(".join(pair_terminal_specs_ch)\n")[1])
+    )
 
 
 @needs_nextflow
@@ -477,11 +503,14 @@ workflow {
     def rowSettings = rowSampleSettings(sampleRow, runParams)
     def pair = rowSettings.pair_id
     sample_rows_ch = channel.of(tuple(pair, sampleRow, rowSettings))
-    // FINALIZE finishes before cortical depth, as in a real run.
+    // FINALIZE finishes before cortical depth and MAPMYCELLS, as in a real
+    // run. A legacy row waits for MAPMYCELLS, a map_first row for cortical
+    // depth (runMapMyCells is false in map_first).
     pair_terminal_events_ch = channel.of(
         tuple(pair, "clustering_squidpy", true),
         tuple(pair, "compute_cortical_depth", true),
         tuple(pair, "compute_cortical_depth", true),
+        tuple(pair, "mapmycells", true),
     )
 __SPECS__
 __GROUPED__
@@ -507,10 +536,12 @@ def test_barrier_releases_map_first_pairs_after_other_terminal_events(
 ) -> None:
     """main.nf's own barrier text on events in real-run order (M5 exit run).
 
-    The pair's clustering event arrives first and consumes a spec; the two
-    cortical-depth events must still release MENDER. Legacy rows keep the
-    single spec and are not released (the pre-existing barrier defect,
-    reported for a fix on main; legacy channels stay unchanged).
+    The pair's clustering event arrives first. map_first combines every
+    event with the pair's one spec, so the two cortical-depth events release
+    MENDER. Legacy keeps the join: the clustering event consumes the single
+    spec and the MAPMYCELLS event it waits for finds none, so the pair is
+    not released (the pre-existing barrier defect of legacy runs, reported
+    for a fix on main; legacy channels stay unchanged).
     """
     assert NEXTFLOW is not None
     main_nf = REPO_ROOT / "workflows" / "main.nf"
@@ -519,7 +550,9 @@ def test_barrier_releases_map_first_pairs_after_other_terminal_events(
         main_text, "    pair_terminal_specs_ch = ", "    pair_terminal_immediate_ch = "
     )
     grouped = _main_nf_block(
-        main_text, "    pair_terminal_grouped_ch = ", "    pair_terminal_token_ch = "
+        main_text,
+        "    if (AnnotationSettings.isMapFirstRun(params)) { // rca-site:H3",
+        "    pair_terminal_token_ch = ",
     )
     (tmp_path / "lib").mkdir()
     for source in (REPO_ROOT / "workflows" / "lib").glob("*.groovy"):
@@ -533,6 +566,7 @@ def test_barrier_releases_map_first_pairs_after_other_terminal_events(
     (tmp_path / "nextflow.config").write_text(
         f"includeConfig '{REPO_ROOT / 'workflows' / 'nextflow.config'}'\n"
         f"params.mode = '{mode}'\n"
+        f"params.clustering_squidpy_mode = '{mode}'\n"
         f"params.row = '{json.dumps(ROW)}'\n"
         f"params.out = '{out}'\n"
         "params.samplesheet = 'unused.csv'\n"

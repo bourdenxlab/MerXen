@@ -40,7 +40,9 @@ class AnnotationSettings {
         refused_panels: "refused panels",
         broad_only_panels: "broad-only panels",
         provisional_panels: "provisional panels",
+        restricted_dataset_gates: "broad-only or failed dataset gates",
         cross_platform_restricted: "restricted cross-platform statistics",
+        mender_skipped: "MENDER skipped (no assigned cell state)",
     ].asImmutable()
 
     /**
@@ -213,49 +215,48 @@ class AnnotationSettings {
         )
     }
 
+    // Published clustering directory of a legacy table (FINALIZE's publishDir).
+    static final String CLUSTERING_PUBLISH_DIR = "clustering_squidpy"
+
     /**
-     * Return how many copies of a pair's MENDER barrier spec main.nf emits.
+     * Return the published clustering directory MENDER reads a clustered
+     * H5AD from in a MENDER-only restart (hook H2).
      *
-     * The barrier joins every terminal event of a pair (clustering,
-     * mapmycells, distance_from_object and cortical-depth results) with the
-     * pair's spec by pair id and keeps the events of the terminal stage.
-     * `join` pairs items one to one, so with a single spec the pair's first
-     * event consumes it: when that event belongs to another stage (FINALIZE
-     * finishes before cortical depth), the terminal events find no spec and
-     * MENDER never runs. A map_first row therefore gets one spec per event
-     * the pair can emit; unmatched copies are dropped when the channels
-     * close. Legacy rows keep the single spec, so their channels are
-     * unchanged (the same barrier defect of legacy runs is reported for a
-     * fix on main).
+     * A legacy row (no suffix) reads clustering_squidpy/. A map_first row
+     * with suffix s reads clustering_squidpy_<s>/, where a run into a
+     * results directory with legacy outputs publishes FINALIZE (docs/stages/
+     * annotation.md), and else clustering_squidpy/, FINALIZE's default
+     * publishDir. MENDER_PREPARE and MENDER_IMPORT refuse a clustered H5AD
+     * whose mode or suffix does not match the table key they write, so a
+     * legacy H5AD found there is never imported into the map_first table.
      *
-     * @param settings Row settings from rowSampleSettings.
-     * @return 1 for a legacy row, else an upper bound of the pair's terminal
-     *     events (at least 1).
+     * @param outdir Results root.
+     * @param pairId Pair id.
+     * @param segmentation Segmentation.
+     * @param platform Platform.
+     * @param sampleId Sample id.
+     * @param suffix The row's clustering_squidpy_table_key_suffix (null or
+     *     blank for legacy rows).
+     * @return The directory name under <outdir>/<pair>/<segmentation>/.
      */
-    static int terminalSpecCopies(Map settings) {
-        if (!isMapFirst(settings)) {
-            return 1
+    static String publishedClusteringDir(
+        Object outdir, Object pairId, Object segmentation, Object platform, Object sampleId, Object suffix
+    ) {
+        def token = suffix == null ? "" : suffix.toString().trim()
+        if (!token) {
+            return CLUSTERING_PUBLISH_DIR
         }
-        List analysis = (settings.get("analysis_segmentations") ?: []) as List
-        List required = (settings.get("required_clustering_segmentations") ?: []) as List
-        List platforms = (settings.get("active_platforms") ?: []) as List
-        int extra = required.findAll { segmentation -> !analysis.contains(segmentation) }.size()
-        int copies = 0
-        if (settings.get("run_mapmycells")) {
-            // MAPMYCELLS results plus the extra clustering events of MENDER-only
-            // segmentations.
-            copies += analysis.size() + 2 * extra
-        }
-        if (settings.get("run_distance_from_object")) {
-            copies += platforms.size()
-        }
-        if (settings.get("run_compute_cortical_depth")) {
-            copies += platforms.size()
-        }
-        if (settings.get("run_clustering_squidpy")) {
-            copies += required.size()
-        }
-        return Math.max(copies, 1)
+        def suffixed = "${CLUSTERING_PUBLISH_DIR}_${token}".toString()
+        def h5ad = java.nio.file.Paths.get(
+            outdir.toString(),
+            pairId.toString(),
+            segmentation.toString(),
+            suffixed,
+            "clustering_squidpy_out",
+            platform.toString().toLowerCase(),
+            "${sampleId}_clustered.h5ad".toString(),
+        )
+        return java.nio.file.Files.isRegularFile(h5ad) ? suffixed : CLUSTERING_PUBLISH_DIR
     }
 
     /**

@@ -45,11 +45,14 @@ EXPECTED_HOOKS: dict[str, tuple[str, ...]] = {
 # (file, hook) -> number of extra lines the hook touches, each with a site marker.
 EXPECTED_SITES: dict[tuple[str, str], int] = {
     # The MENDER preflight and MENDER input key lookups, the MENDER input
-    # closure parameter they need (renamed from ``_settings``) and the
-    # cortical-depth table fields (M5).
-    (MAIN_NF, "H2"): 4,
-    # The MENDER barrier's spec copies of map_first rows (M5 exit run).
+    # closure parameter they need (renamed from ``_settings``), the
+    # cortical-depth table fields (M5) and the two published clustered-H5AD
+    # lookups of MENDER-only restarts (M5 review).
+    (MAIN_NF, "H2"): 6,
+    # The MENDER barrier of map_first runs: combine instead of join (M5).
     (MAIN_NF, "H3"): 1,
+    # The subscription that records skipped MENDER runs (M5 review).
+    (MAIN_NF, "H6"): 1,
     # Sample config, clustering config, MENDER, cortical-depth table (M5).
     ("src/merxen/config.py", "H8"): 4,
     ("src/merxen/io/samplesheet.py", "H9"): 2,  # SamplePair fields, row parsing
@@ -74,7 +77,12 @@ HOOK_CONTENT: dict[str, tuple[str, ...]] = {
         "if (!AnnotationSettings.isLegacy(settings)) {",
     ),
     "H5": ("if (AnnotationSettings.isMapFirstRun(params)) {",),
-    "H6": (".onComplete {", "AnnotationSettings.completionSummary("),
+    "H6": (
+        ".onComplete {",
+        "AnnotationSettings.completionSummary(",
+        "AnnotationRunRecord.runInfo() + "
+        "[success: annotationCompletionWorkflow.success],",
+    ),
     "H8": ("from merxen.annotation.config import",),
     "H9": ("parse_optional_columns",),
     "H10": (
@@ -259,9 +267,10 @@ H2_CORTICAL_DEPTH_FIELDS = "] + AnnotationSettings.clusteredTableFields(row, par
 def test_h2_sites_pass_the_row_suffix() -> None:
     """Each H2 site passes the row suffix to the key function or binds it.
 
-    MENDER's two key lookups pass the row suffix, its input closure binds the
-    row settings, and cortical depth's table configs carry the suffix of a
-    map_first row (M5; nothing for a legacy row).
+    MENDER's two key lookups and its two published clustered-H5AD lookups
+    pass the row suffix, its input closure binds the row settings, and
+    cortical depth's table configs carry the suffix of a map_first row (M5;
+    nothing for a legacy row).
     """
     main_text = (REPO_ROOT / MAIN_NF).read_text()
     lines = main_text.splitlines()
@@ -270,7 +279,7 @@ def test_h2_sites_pass_the_row_suffix() -> None:
     suffix_lines = [line for line in site_lines if H2_SUFFIX_ARGUMENT in line]
     binding_lines = [line for line in site_lines if H2_CLOSURE_BINDING.match(line)]
     depth_lines = [line for line in site_lines if H2_CORTICAL_DEPTH_FIELDS in line]
-    assert len(suffix_lines) == 2
+    assert len(suffix_lines) == 4
     assert len(binding_lines) == 1
     assert len(depth_lines) == 1
     assert len(site_lines) == len(suffix_lines) + len(binding_lines) + len(depth_lines)
