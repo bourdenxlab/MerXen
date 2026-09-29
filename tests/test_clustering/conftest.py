@@ -48,6 +48,9 @@ LC = CellStatus.LOW_COUNTS
 
 MIN_COUNTS = 10
 N_GENES = 60
+# Control features of real sections (a Xenium negative-control probe and a
+# MERSCOPE blank), added with ``make_section(control_features=True)``.
+CONTROL_FEATURES: tuple[str, ...] = ("NegControlProbe_00001", "Blank-1")
 
 
 @dataclass(frozen=True)
@@ -542,8 +545,15 @@ def make_section(
     seed: int = 0,
     gate_level: str = "full",
     panel_trust: str = "validated",
+    control_features: bool = False,
 ) -> Section:
-    """Return a synthetic section of one species."""
+    """Return a synthetic section of one species.
+
+    With ``control_features`` the counts gain ``CONTROL_FEATURES`` columns
+    whose counts lift every below-``MIN_COUNTS`` object over the threshold
+    when controls are counted; the label table is built without them, as
+    RESOLVE removes controls before it selects table cells (plan §4.4).
+    """
     rng = np.random.default_rng(seed)
     cell_types = tuple(
         types
@@ -557,6 +567,13 @@ def make_section(
     cell_ids = [f"cell_{index:05d}" for index in range(len(keys))]
     labels = build_label_table(species, cell_types, keys, counts, cell_ids)
     genes = [f"GENE{index:03d}" for index in range(N_GENES)]
+    if control_features:
+        controls = np.zeros((len(keys), len(CONTROL_FEATURES)), dtype=np.float32)
+        low = np.asarray([key == "low_counts" for key in keys])
+        controls[low, 0] = MIN_COUNTS
+        controls[~low, 1] = rng.poisson(0.5, size=int((~low).sum()))
+        counts = np.hstack([counts, controls])
+        genes = [*genes, *CONTROL_FEATURES]
     obs = pd.DataFrame(
         {
             "cell_id": cell_ids,

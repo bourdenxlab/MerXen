@@ -10,6 +10,7 @@ suffix, so the clustered H5AD carries its own suffix; MENDER_PREPARE's
 
 from __future__ import annotations
 
+import functools
 import json
 import sys
 from pathlib import Path
@@ -27,6 +28,7 @@ from merxen.analysis.clustering_squidpy import (
 from merxen.annotation.pipeline import write_label_table
 from merxen.annotation.provenance import annotation_manifest_filename
 from merxen.annotation.schema import label_table_filename
+from merxen.clustering import map_first as map_first_module
 from merxen.clustering.cross_platform import resolve_summary_filename
 from merxen.clustering.map_first import (
     CROSS_PLATFORM_FIELD,
@@ -40,7 +42,7 @@ from merxen.clustering_squidpy_stages import main as stages_main
 from merxen.config import ClusteringSquidpyConfig, ClusteringSquidpySampleConfig
 from merxen.table_keys import clustered_table_key
 
-from .conftest import Section, make_section
+from .conftest import CONTROL_FEATURES, Section, make_section
 
 PAIR = "P0001"
 PLATFORMS = ("MERSCOPE", "XENIUM")
@@ -76,10 +78,15 @@ def _legacy_config_json(tmp_path: Path, **extra: Any) -> dict[str, Any]:
     }
 
 
-def _inputs(tmp_path: Path) -> tuple[Path, Path, Path, dict[str, Section]]:
-    """Write PREPARE's outputs and RESOLVE's annotation_resolve_out."""
+def _inputs(
+    tmp_path: Path, *, control_features: bool = True
+) -> tuple[Path, Path, Path, dict[str, Section]]:
+    """Write PREPARE's outputs and RESOLVE's annotation_resolve_out.
+
+    The prepared sections carry control features, as real sections do.
+    """
     sections = {
-        platform: make_section("human", seed=index)
+        platform: make_section("human", seed=index, control_features=control_features)
         for index, platform in enumerate(PLATFORMS)
     }
     prepared = tmp_path / "clustering_prepare_out"
@@ -116,11 +123,23 @@ def _run_cli(monkeypatch: pytest.MonkeyPatch, *args: str) -> None:
 
 @pytest.fixture(scope="module")
 def computed(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
-    """Run the COMPUTE_CPU command line once on a two-platform pair."""
+    """Run the COMPUTE_CPU command line once on a two-platform pair.
+
+    The hierarchy's figures and stability subsamples are skipped: no test
+    here reads them (test_map_first.py covers both), and they dominate the
+    run time.
+    """
     tmp_path = tmp_path_factory.mktemp("map_first_compute")
     config, prepared, labels, sections = _inputs(tmp_path)
     output = tmp_path / "clustering_compute_out"
     monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        map_first_module,
+        "run_map_first_hierarchy",
+        functools.partial(
+            map_first_module.run_map_first_hierarchy, plots=False, stability=False
+        ),
+    )
     try:
         _run_cli(
             monkeypatch,
@@ -164,6 +183,18 @@ def test_compute_cli_writes_the_map_first_table_under_the_legacy_name(
     assert set(clustered.obs_names) == set(in_table.astype(str))
     for column in ("hierarchical_cluster", "broad_class", "subcluster_status"):
         assert column in clustered.obs.columns
+    # Controls are removed before the table cells are selected, as RESOLVE
+    # removes them (plan §4.4): the low-count objects that controls alone
+    # lift over min_counts stay out, and no control is a clustered feature.
+    assert not set(CONTROL_FEATURES) & set(clustered.var_names)
+    assert set(CONTROL_FEATURES) <= set(section.adata.var_names)
+    control_filter = clustered.uns["merxen_clustering_squidpy"][
+        "control_feature_filter"
+    ]
+    assert bool(control_filter["enabled"]) is True
+    assert sorted(control_filter["removed_control_features"]) == sorted(
+        CONTROL_FEATURES
+    )
     assert (computed["output"] / platform.lower() / "plots" / "qc").is_dir()
     assert (
         computed["output"]
