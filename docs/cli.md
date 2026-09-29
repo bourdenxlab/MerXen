@@ -577,8 +577,9 @@ merxen annotation-panel-simulate --public-panel xenium_prime_5k_mouse \
    mode is a prediction only and never enters emission. `--expected-depth`
    remains a secondary line (one depth for every cell). Xenium Prime 5K
    panels carry the panel-card notes "Simulated glial coverage is an upper
-   bound: -.06 to -.18 on vendor-segmented 5K cells" and "Precision is
-   unmeasured on real data", followed by the M3c trust rules (provisional,
+   bound: -.06 to -.18 on vendor-segmented 5K cells, -.04 to -.14
+   re-segmented with ProSeg" and "Precision is unmeasured on real data",
+   followed by the M3c trust rules (provisional,
    gate P on the version-7 ensemble, the downgrade-only per-class coverage
    warning without an offset, the in-sample caveat and the species' next
    measurements; [Annotation](stages/annotation.md#xenium-prime-5k-panel-card-m3c)).

@@ -13,7 +13,10 @@ the M3c version-7 5K mouse bundle and the phase-1 calls:
    informative in both (warning when r < 0.9);
 2. ``nonneuronal_high_depth_flags`` and ``nonneuronal_depth_trend`` on the
    version-7 provisional coverage of the real cells;
-3. ``coverage_vs_simulation`` (as in (iv));
+3. ``coverage_vs_simulation`` (as in (iv)): the class-depth predictor
+   decides each per-class warning; with ``--profile-predictions`` (an
+   ``annotation-panel-simulate`` ``profile_predictions.csv``) the profile-mode
+   member mean is reported beside it (D4 of 2026-09-29);
 4. ``gene_complexity_check``: native genes per cell against cells simulated
    with ``R1_contam_HO@0`` (version-7 conventions) from the bundle's test set
    at the grid values 250-2000.
@@ -79,6 +82,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--calls", type=Path, default=CALLS)
     parser.add_argument("--matrix", type=Path, default=MATRIX)
     parser.add_argument("--out-dir", type=Path, required=True)
+    parser.add_argument(
+        "--profile-predictions",
+        type=Path,
+        default=None,
+        help="profile_predictions.csv of profile mode (reported beside)",
+    )
     args = parser.parse_args(argv)
     args.out_dir.mkdir(parents=True, exist_ok=True)
     calls = pd.read_parquet(args.calls)
@@ -196,13 +205,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     real = real_qc.real_class_coverage(
         cls, {"class": class_ok, "subclass": subclass_ok}
     )
-    comparison = real_qc.coverage_vs_simulation(real, predicted)
+    profile_predicted = (
+        real_qc.profile_coverage_table(
+            pd.read_csv(args.profile_predictions),
+            {"class": "cov_class_prov", "subclass": "cov_subclass_prov"},
+        )
+        if args.profile_predictions is not None
+        else None
+    )
+    comparison = real_qc.coverage_vs_simulation(
+        real, predicted, profile_predicted=profile_predicted
+    )
     comparison.table.to_csv(args.out_dir / "coverage_vs_simulation.csv", index=False)
     record["coverage_vs_simulation"] = comparison.summary()
     lines += [
-        "3. coverage vs simulation (real prov < class-depth prediction - 0.10):",
+        "3. coverage vs simulation (real prov < class-depth prediction - 0.10; "
+        "the profile-mode prediction, when given, reported beside it):",
         f"   {len(comparison.flagged)} flagged: "
         + ", ".join(f"{level}/{name}" for level, name in comparison.flagged),
+        *[
+            f"   {row['level']:8s} {row['class']:22s} real {row['real_coverage']:.3f}"
+            f" class-depth {row['predicted_coverage']:.3f}"
+            f" profile {row['profile_coverage']:.3f}"
+            for row in comparison.table[comparison.table["warn"]].to_dict("records")
+        ],
         "",
     ]
     # 4. Gene complexity against simulated cells.

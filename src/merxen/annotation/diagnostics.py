@@ -180,10 +180,13 @@ DegradedMode = Literal["single_method"]
 
 # Panel-card text of the Xenium Prime 5K families (user decision 4 of
 # 2026-09-28 and the M3c trust rules, plan §8.10, D-G13). The notes state
-# limits; they never change a prediction, an emission or a trust state.
+# limits; they never change a prediction, an emission or a trust state. The
+# ProSeg range was added on 2026-09-29 (orchestrator decision D6, pending the
+# user's confirmation; 5k_real/phase1b/REPORT.txt §5.3: ProSeg 3.2.0 with the
+# vendor XOA cells as its prior).
 GLIAL_UPPER_BOUND_NOTE: Final = (
     "Simulated glial coverage is an upper bound: -.06 to -.18 on "
-    "vendor-segmented 5K cells"
+    "vendor-segmented 5K cells, -.04 to -.14 re-segmented with ProSeg"
 )
 PRECISION_UNMEASURED_NOTE: Final = "Precision is unmeasured on real data"
 PRIME_PRECISION_DETAIL_NOTE: Final = (
@@ -198,9 +201,10 @@ PRIME_TRUST_NOTE: Final = (
     "pass in every emission member"
 )
 PRIME_REAL_QC_NOTE: Final = (
-    "Real datasets: a downgrade-only per-class warning when real coverage is "
-    "below the simulated prediction at the dataset's own per-class depth by "
-    "more than 0.10 (it also fires on v1-type large-mask segmentation); no "
+    "Real datasets: a downgrade-only per-class warning when a class's real "
+    "coverage is below its simulated class-depth prediction at the dataset's "
+    "own per-class depth by more than 0.10 (it fires for glia and small "
+    "hypothalamic classes alike, and on v1-type large-mask segmentation); no "
     "empirical offset is applied"
 )
 PRIME_IN_SAMPLE_NOTE: Final = (

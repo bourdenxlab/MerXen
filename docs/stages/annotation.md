@@ -863,17 +863,21 @@ state limits and never change a prediction, an emission or a trust state
 (user decision 4 of 2026-09-28, plan §8.10):
 
 - "Simulated glial coverage is an upper bound: -.06 to -.18 on
-  vendor-segmented 5K cells" and "Precision is unmeasured on real data" (the
-  thinned-cell agreement, .996 class / .987 subclass at 250 counts, is a
-  self-consistency upper bound);
+  vendor-segmented 5K cells, -.04 to -.14 re-segmented with ProSeg" and
+  "Precision is unmeasured on real data" (the thinned-cell agreement, .996
+  class / .987 subclass at 250 counts, is a self-consistency upper bound; the
+  ProSeg range, added 2026-09-29, comes from a ProSeg re-segmentation of the
+  public section with the vendor cells as its prior,
+  `5k_real/phase1b/REPORT.txt`);
 - trust: `provisional` with the provisional margins; nothing promotes the
   family automatically and the public 5K section never enters a gate or a
   promotion; gate P (M13) runs on the version-7 ensemble, with thresholds and
   emission frozen from the ensemble and NP3-NP7 required in every emission
   member;
-- real datasets get the downgrade-only per-class coverage warning (real <
-  simulated - 0.10, which also fires on v1-type large-mask segmentation); no
-  empirical offset is applied;
+- real datasets get the downgrade-only per-class coverage warning (a
+  class's real coverage below its simulated class-depth prediction - 0.10;
+  it fires for glia and small hypothalamic classes alike, and on v1-type
+  large-mask segmentation); no empirical offset is applied;
 - the 5K numbers come from one public section (one hemisphere, vendor XOA 3.0
   segmentation) and are in-sample for depth, composition and factors;
 - mouse: before any gate-P PR, the first in-house dataset (MerXen
@@ -898,7 +902,7 @@ stay or fall (property-tested).
 
 | Check | Function | Rule | Effect |
 |---|---|---|---|
-| Per-class real vs simulated coverage (version-7 families) | `class_bin_shares`, `predicted_class_coverage`, `real_class_coverage`, `coverage_vs_simulation` | per (level, called class) with >= 200 cells: the dataset's confident share against `sum_d s_c(d) cov(L, c, d)` from `resolvability_class_depth.parquet` at the dataset's own per-class bin shares | warning when real < simulated - 0.10; the text says the warning also fires on v1-type large-mask (nucleus-expansion) segmentation, where simulation over-predicts coverage by +.16 to +.22 |
+| Per-class real vs simulated coverage (version-7 families) | `class_bin_shares`, `predicted_class_coverage`, `real_class_coverage`, `coverage_vs_simulation` | per (level, called class) with >= 200 cells: the dataset's confident share against `sum_d s_c(d) cov(L, c, d)` from `resolvability_class_depth.parquet` at the dataset's own per-class bin shares (the pre-registered predictor); where profile mode has run, its per-class prediction (`profile_coverage_table`) is reported beside it (`profile_coverage`) and never decides | warning per class when real < simulated - 0.10, worded per class (it fires for glia and for small hypothalamic classes alike); the text says the warning also fires on v1-type large-mask (nucleus-expansion) segmentation, where simulation over-predicts coverage by +.16 to +.22 |
 | Non-neuronal high depth | `nonneuronal_high_depth_flags` | non-neuronal cells at >= 1,000 counts in emitted `nonneuronal_high_depth` bins | report-only `flag_nonneuronal_high_depth` |
 | Glial large-mask / high-depth trend | `nonneuronal_depth_trend` | real non-neuronal coverage at >= 1,000 counts below the 500-999 band by more than 2 SE (both >= 200 cells) | report-only (5K vendor glia: class .916 -> .897 -> .886) |
 | Factor re-measure (first in-house dataset of a family with a measured factor table) | `factor_remeasure` | per-gene factors re-measured with the X1 code (`shadow.reference_pseudobulk_totals`) on the confident calls, centred on the median informative gene and capped +-3, against the stored table on genes informative in both | warning when Pearson r < 0.9, recommending a PREP re-run with the in-house table as a new asset (not automatic) |

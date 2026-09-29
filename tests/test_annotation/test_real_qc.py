@@ -100,6 +100,80 @@ def test_coverage_vs_simulation_warns_below_the_margin_and_judges_200_cells() ->
     assert "No offset is applied" in outcome.message
     summary = result.summary()
     assert summary["trust_effect"] == "none" and summary["n_flagged"] == 1
+    assert summary["predictor"] == "class_depth"
+    assert summary["profile_mode_reported"] is False
+    # Worded per class (D4 of 2026-09-29), not as a glial warning.
+    assert outcome.message.startswith("A at class: ")
+    assert "glia" not in outcome.message.lower()
+    assert "class-depth prediction 0.900" in outcome.message
+    assert "profile-mode" not in outcome.message
+    assert outcome.details["predictor"] == "class_depth"
+    assert np.isnan(result.table["profile_coverage"]).all()
+
+
+def test_the_profile_mode_prediction_is_reported_and_never_decides() -> None:
+    # D4 of 2026-09-29: the class-depth predictor decides the warning; the
+    # profile-mode prediction is reported beside it.
+    real = pd.DataFrame(
+        {
+            "level": ["class", "class", "subclass"],
+            "class": ["HY GABA", "Astro", "HY GABA"],
+            "n_cells": [900, 900, 900],
+            "real_coverage": [0.60, 0.85, 0.55],
+        }
+    )
+    predicted = pd.DataFrame(
+        {
+            "level": ["class", "class", "subclass"],
+            "class": ["HY GABA", "Astro", "HY GABA"],
+            "predicted_coverage": [0.76, 0.90, 0.64],
+            "resolvable_share": [1.0, 1.0, 1.0],
+        }
+    )
+    predictions = pd.DataFrame(
+        {
+            "member": ["member_mean"] * 3 + ["R1_contam_HO@0"],
+            "class": ["HY GABA", "Astro", "ALL", "Astro"],
+            "cov_class_prov": [0.65, 0.99, 0.9, 0.1],
+            "cov_subclass_prov": [0.90, 0.95, 0.8, 0.1],
+        }
+    )
+    profile = qc.profile_coverage_table(
+        predictions, {"class": "cov_class_prov", "subclass": "cov_subclass_prov"}
+    )
+    assert sorted(zip(profile["level"], profile["class"], strict=True)) == [
+        ("class", "Astro"),
+        ("class", "HY GABA"),
+        ("subclass", "Astro"),
+        ("subclass", "HY GABA"),
+    ]
+    result = qc.coverage_vs_simulation(real, predicted, profile_predicted=profile)
+    # Class HY GABA: class-depth .76 - .10 > .60 warns although profile mode
+    # (.65) would not; Astro: profile mode .99 would warn, class-depth .90 not;
+    # subclass HY GABA: .64 - .10 = .54 < .55, no warning, profile .90 would.
+    assert result.flagged == [("class", "HY GABA")]
+    table = result.table.set_index(["level", "class"])
+    assert table.loc[("class", "Astro"), "profile_coverage"] == pytest.approx(0.99)
+    assert table.loc[("class", "HY GABA"), "profile_difference"] == pytest.approx(
+        0.60 - 0.65
+    )
+    assert table.loc[("class", "HY GABA"), "difference"] == pytest.approx(-0.16)
+    (outcome,) = result.outcomes
+    assert outcome.message.startswith("HY GABA at class: ")
+    assert "profile-mode prediction 0.650 is reported beside it" in outcome.message
+    assert outcome.details["profile_coverage"] == pytest.approx(0.65)
+    assert result.summary()["profile_mode_reported"] is True
+    # A profile table without the class gives no profile value.
+    partial = profile[profile["class"] != "Astro"]
+    table = qc.coverage_vs_simulation(
+        real, predicted, profile_predicted=partial
+    ).table.set_index(["level", "class"])
+    assert np.isnan(table.loc[("class", "Astro"), "profile_coverage"])
+    assert qc.profile_coverage_table(pd.DataFrame(), {"class": "x"}).empty
+    single = qc.profile_coverage_table(
+        predictions, {"class": "cov_class_prov"}, member="R1_contam_HO@0"
+    )
+    assert single["profile_coverage"].tolist() == [0.1]
 
 
 def test_coverage_vs_simulation_only_ever_warns() -> None:

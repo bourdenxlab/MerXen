@@ -327,8 +327,14 @@ def test_panel_card_notes_for_prime_families() -> None:
     assert "by analogy with mouse" in diagnostics.PRIME_HUMAN_NOTES[0]
     assert simulate.panel_card_notes("mouse", "merscope") == []
     assert simulate.panel_card_notes("human", "unknown") == []
-    assert "-.06 to -.18" in simulate.GLIAL_UPPER_BOUND_NOTE
+    # D6 of 2026-09-29: the glial note gains the ProSeg range.
+    assert simulate.GLIAL_UPPER_BOUND_NOTE == (
+        "Simulated glial coverage is an upper bound: -.06 to -.18 on "
+        "vendor-segmented 5K cells, -.04 to -.14 re-segmented with ProSeg"
+    )
+    assert simulate.PRECISION_UNMEASURED_NOTE == "Precision is unmeasured on real data"
     assert simulate.GLIAL_UPPER_BOUND_NOTE == diagnostics.GLIAL_UPPER_BOUND_NOTE
+    assert "hypothalamic" in diagnostics.PRIME_REAL_QC_NOTE
 
 
 def test_member_mean_averages_members() -> None:

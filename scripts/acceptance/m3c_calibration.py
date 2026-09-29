@@ -192,9 +192,15 @@ def class_depth_prediction(bundle: Path, calls: pd.DataFrame) -> pd.DataFrame:
 
 
 def coverage_warnings(
-    real: pd.DataFrame, predicted: pd.DataFrame
+    real: pd.DataFrame,
+    predicted: pd.DataFrame,
+    profile: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, list[str]]:
-    """``real_qc.coverage_vs_simulation`` on the provisional coverage."""
+    """``real_qc.coverage_vs_simulation`` on the provisional coverage.
+
+    The class-depth predictor decides the warnings; profile mode's member
+    mean, when given, is reported beside it (D4 of 2026-09-29).
+    """
     from merxen.annotation import real_qc
 
     long = []
@@ -208,7 +214,16 @@ def coverage_warnings(
                     "real_coverage": float(row[f"cov_{level}_prov"]),
                 }
             )
-    comparison = real_qc.coverage_vs_simulation(pd.DataFrame(long), predicted)
+    profile_predicted = (
+        None
+        if profile is None
+        else real_qc.profile_coverage_table(
+            profile, {level: f"cov_{level}_prov" for level in LEVELS}
+        )
+    )
+    comparison = real_qc.coverage_vs_simulation(
+        pd.DataFrame(long), predicted, profile_predicted=profile_predicted
+    )
     return comparison.table, [outcome.message for outcome in comparison.outcomes]
 
 
@@ -249,7 +264,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     profile = pd.read_csv(args.run_dir / "wmb_panel" / "profile_predictions.csv")
     profile["class"] = profile["class"].astype(str)
     predicted = class_depth_prediction(args.bundle, calls)
-    warn_table, warnings = coverage_warnings(real, predicted)
+    warn_table, warnings = coverage_warnings(real, predicted, profile)
     rows = []
     members = sorted(profile["member"].astype(str).unique())
     for cls in [*MAJOR, "ALL"]:

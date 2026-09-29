@@ -14,12 +14,19 @@ Checks added by M3c (plan §8.8 table; §8.3 v7.5, v7.9; §8.10):
   ``min_cells`` (200) dataset cells, the dataset's confident share against
   the class-depth prediction ``sum_d s_c(d) cov(L, c, d)`` at the dataset's
   **own** per-class bin shares ``s_c(d)`` (``predicted_class_coverage``, the
-  sums of ``resolvability_class_depth.parquet``). A warning when real <
-  simulated - 0.10 (user decision 4); never an offset. It fires on
-  vendor-segmented 5K glia (simulated glial coverage is an upper bound, -.06
-  to -.18) and on v1-type large-mask (nucleus-expansion) segmentation, where
-  simulation over-predicts coverage by +.16 to +.22 whatever the efficiency
-  model (``5k_real/sim/REPORT.txt`` §7).
+  sums of ``resolvability_class_depth.parquet``), the pre-registered
+  predictor. A warning per (level, class) when real < simulated - 0.10 (user
+  decision 4); never an offset. Where profile mode has run, its per-class
+  prediction is reported beside it (``profile_coverage_table``) and never
+  decides a warning (orchestrator decision D4 of 2026-09-29, pending the
+  user's confirmation; pre-registration §15.2). The warning is worded per
+  class, not as a glial warning: it fires on vendor-segmented 5K glia
+  (simulated glial coverage is an upper bound, -.06 to -.18; -.04 to -.14
+  re-segmented with ProSeg), on small hypothalamic classes (stage D:
+  CNU-HYa GABA, HY GABA, CNU-HYa Glut, HY Glut) and on v1-type large-mask
+  (nucleus-expansion) segmentation, where simulation over-predicts coverage
+  by +.16 to +.22 whatever the efficiency model (``5k_real/sim/REPORT.txt``
+  §7).
 * ``nonneuronal_high_depth_flags`` -- the report-only per-cell
   ``flag_nonneuronal_high_depth``: a non-neuronal cell at >= 1,000 counts
   whose (level, class, bin) was emitted on its own ensemble verdict and is
@@ -92,15 +99,21 @@ FLOAT_TOL: Final = 1e-9
 
 Effect = Literal["warning", "report_only", "downgrade"]
 
+# Worded per class (D4 of 2026-09-29): the warning fires for glia, vascular
+# and immune cells and for small hypothalamic neuron classes alike.
 COVERAGE_WARNING_TEXT: Final = (
-    "real confident share {real:.3f} of {n} cells called {cls} at {level} is "
-    "below the simulated prediction {predicted:.3f} - {margin:.2f} at the "
-    "dataset's own per-class depth. Simulated coverage is an upper bound "
-    "(glia -.06 to -.18 on vendor-segmented 5K cells; precision is unmeasured "
-    "on real data), and the warning also fires on v1-type large-mask "
-    "(nucleus-expansion) segmentation, where simulation over-predicts coverage "
-    "by +.16 to +.22 whatever the efficiency model. No offset is applied; "
-    "emission, thresholds and trust are unchanged."
+    "{cls} at {level}: the real confident share {real:.3f} of the {n} cells "
+    "called {cls} is below the class-depth prediction {predicted:.3f} - "
+    "{margin:.2f} at the dataset's own per-class depth{profile}. Simulated "
+    "coverage of {cls} at {level} is an upper bound for this dataset; its "
+    "precision is unmeasured on real data. The warning also fires on v1-type "
+    "large-mask (nucleus-expansion) segmentation, where simulation "
+    "over-predicts coverage by +.16 to +.22 whatever the efficiency model. No "
+    "offset is applied; emission, thresholds and trust are unchanged."
+)
+COVERAGE_PROFILE_TEXT: Final = (
+    "; the profile-mode prediction {profile:.3f} is reported beside it "
+    "(it does not decide the warning)"
 )
 NONNEURONAL_TREND_TEXT: Final = (
     "real {level} coverage of cells called {cls} falls above {limit:,} counts "
@@ -380,17 +393,22 @@ class CoverageComparison:
 
     Attributes:
         table: Per (level, class): ``n_cells``, ``real_coverage``,
-            ``predicted_coverage``, ``resolvable_share``, ``difference``
-            (real - predicted), ``judged`` (>= ``min_cells``), ``warn``.
+            ``predicted_coverage`` (the class-depth predictor, which decides
+            the warning), ``resolvable_share``, ``difference`` (real -
+            predicted), ``profile_coverage`` and ``profile_difference`` (the
+            profile-mode prediction, reported only; ``nan`` without one),
+            ``judged`` (>= ``min_cells``), ``warn``.
         outcomes: One fired ``warning`` per flagged (level, class).
         margin: The warning margin (0.10).
         min_cells: Dataset cells a (level, class) needs to be judged (200).
+        profile_reported: Whether a profile-mode prediction was given.
     """
 
     table: pd.DataFrame
     outcomes: tuple[QcOutcome, ...]
     margin: float
     min_cells: int
+    profile_reported: bool = False
 
     @property
     def flagged(self) -> list[tuple[str, str]]:
@@ -411,6 +429,8 @@ class CoverageComparison:
             "n_judged": int(self.table["judged"].sum()) if len(self.table) else 0,
             "n_flagged": len(self.flagged),
             "flagged": [{"level": level, "class": cls} for level, cls in self.flagged],
+            "predictor": "class_depth",
+            "profile_mode_reported": bool(self.profile_reported),
             "trust_effect": "none",
             "note": (
                 "warning only: never an offset, never a change of emission, "
@@ -419,24 +439,72 @@ class CoverageComparison:
         }
 
 
+def profile_coverage_table(
+    predictions: pd.DataFrame,
+    metrics: Mapping[str, str],
+    *,
+    member: str = "member_mean",
+) -> pd.DataFrame:
+    """Return profile mode's per-class coverage in ``coverage_vs_simulation`` form.
+
+    Args:
+        predictions: ``annotation-panel-simulate``'s ``profile_predictions.csv``
+            (per member and ``member_mean``: ``class`` and ``cov_*`` columns).
+        metrics: Level -> the coverage column of that level (mouse:
+            ``{"class": "cov_class_prov", "subclass": "cov_subclass_prov"}``).
+        member: The member whose rows are used (default: the member mean).
+
+    Returns:
+        ``level``, ``class``, ``profile_coverage`` (the ALL row left out).
+    """
+    columns = ["level", "class", "profile_coverage"]
+    if predictions.empty or "class" not in predictions.columns:
+        return pd.DataFrame(columns=columns)
+    rows = predictions
+    if "member" in rows.columns:
+        rows = rows[rows["member"].astype(str) == member]
+    rows = rows[rows["class"].astype(str) != "ALL"]
+    records = []
+    for level, column in metrics.items():
+        if column not in rows.columns:
+            continue
+        for cls, value in zip(rows["class"].astype(str), rows[column], strict=True):
+            records.append(
+                {
+                    "level": str(level),
+                    "class": cls,
+                    "profile_coverage": float(value)
+                    if value is not None and np.isfinite(float(value))
+                    else math.nan,
+                }
+            )
+    return pd.DataFrame(records, columns=columns)
+
+
 def coverage_vs_simulation(
     real: pd.DataFrame,
     predicted: pd.DataFrame,
     *,
+    profile_predicted: pd.DataFrame | None = None,
     margin: float = COVERAGE_WARN_MARGIN,
     min_cells: int = COVERAGE_MIN_CELLS,
 ) -> CoverageComparison:
     """Compare a dataset's real coverage with the simulation, per class (§8.8).
 
     A (level, called class) with at least ``min_cells`` dataset cells is
-    flagged when its real confident share is below the prediction at the
-    dataset's own per-class depth minus ``margin`` (user decision 4: real <
-    simulated - 0.10). The check can only warn: it returns warnings and
-    never a trust change, an offset or a change of emission.
+    flagged when its real confident share is below the class-depth
+    prediction at the dataset's own per-class depth minus ``margin`` (user
+    decision 4: real < simulated - 0.10; the pre-registered predictor). The
+    profile-mode prediction, when given, is reported beside it and never
+    decides a warning (D4 of 2026-09-29). The warning is worded per class.
+    The check can only warn: it returns warnings and never a trust change,
+    an offset or a change of emission.
 
     Args:
         real: ``real_class_coverage`` output.
-        predicted: ``predicted_class_coverage`` output.
+        predicted: ``predicted_class_coverage`` output (the class-depth
+            predictor).
+        profile_predicted: Optional ``profile_coverage_table`` output.
         margin: Warning margin.
         min_cells: Cells a (level, class) needs to be judged.
 
@@ -453,11 +521,16 @@ def coverage_vs_simulation(
         "predicted_coverage",
         "resolvable_share",
         "difference",
+        "profile_coverage",
+        "profile_difference",
         "judged",
         "warn",
     ]
+    reported = profile_predicted is not None and not profile_predicted.empty
     if real.empty or predicted.empty:
-        return CoverageComparison(pd.DataFrame(columns=columns), (), margin, min_cells)
+        return CoverageComparison(
+            pd.DataFrame(columns=columns), (), margin, min_cells, reported
+        )
     left = real.assign(
         level=real["level"].astype(str), **{"class": real["class"].astype(str)}
     )
@@ -466,7 +539,19 @@ def coverage_vs_simulation(
         **{"class": predicted["class"].astype(str)},
     )[["level", "class", "predicted_coverage", "resolvable_share"]]
     merged = left.merge(right, on=["level", "class"], how="inner")
+    if profile_predicted is not None and not profile_predicted.empty:
+        profile = profile_predicted.assign(
+            level=profile_predicted["level"].astype(str),
+            **{"class": profile_predicted["class"].astype(str)},
+        )[["level", "class", "profile_coverage"]]
+        merged = merged.merge(profile, on=["level", "class"], how="left")
+    else:
+        merged["profile_coverage"] = math.nan
+    merged["profile_coverage"] = pd.to_numeric(
+        merged["profile_coverage"], errors="coerce"
+    ).astype(np.float64)
     merged["difference"] = merged["real_coverage"] - merged["predicted_coverage"]
+    merged["profile_difference"] = merged["real_coverage"] - merged["profile_coverage"]
     merged["judged"] = merged["n_cells"].astype(int) >= int(min_cells)
     # A float tolerance, so that real = predicted - margin never warns.
     merged["warn"] = merged["judged"] & (
@@ -485,6 +570,9 @@ def coverage_vs_simulation(
                 level=row["level"],
                 predicted=row["predicted_coverage"],
                 margin=margin,
+                profile=COVERAGE_PROFILE_TEXT.format(profile=row["profile_coverage"])
+                if math.isfinite(float(row["profile_coverage"]))
+                else "",
             ),
             level=str(row["level"]),
             cls=str(row["class"]),
@@ -493,11 +581,13 @@ def coverage_vs_simulation(
                 "real_coverage": float(row["real_coverage"]),
                 "predicted_coverage": float(row["predicted_coverage"]),
                 "difference": float(row["difference"]),
+                "predictor": "class_depth",
+                "profile_coverage": float(row["profile_coverage"]),
             },
         )
         for row in merged[merged["warn"]].to_dict("records")
     )
-    return CoverageComparison(merged[columns], outcomes, margin, min_cells)
+    return CoverageComparison(merged[columns], outcomes, margin, min_cells, reported)
 
 
 # --------------------------------------------------------------------------
