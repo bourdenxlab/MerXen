@@ -454,7 +454,7 @@ def test_compute_flags_without_bundle_tables_is_null_with_reasons() -> None:
     assert result.columns[Columns.OOD_Z].dtype == np.float32
 
 
-def test_compute_flags_keeps_the_mouse_hooks() -> None:
+def test_compute_flags_mouse_columns_are_null_without_results() -> None:
     result = fl.compute_flags(
         _flag_inputs("mouse"), AnnotationFlagsConfig(), class_names=CLASSES
     )
@@ -462,7 +462,8 @@ def test_compute_flags_keeps_the_mouse_hooks() -> None:
     assert pd.Series(result.columns[Columns.FLAG_REGION_INCOHERENT]).isna().all()
     astro = result.columns[Columns.FLAG_ASTRO_LOWCOUNT]
     assert astro.dtype == bool and astro.any()
-    assert result.null_reasons["microglial_spillover"] == fl.REASON_MOUSE_M6
+    assert result.null_reasons["microglial_spillover"] == fl.REASON_MOUSE_NOT_COMPUTED
+    assert result.null_reasons["region_incoherent"] == fl.REASON_COHERENCE_NOT_COMPUTED
 
 
 def test_diffuse_flags_only_more_genes_than_the_quantile(
