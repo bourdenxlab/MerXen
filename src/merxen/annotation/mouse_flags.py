@@ -26,10 +26,17 @@ Both flags are report-only: they never change a label or a status.
   subclass-level (supertype is dropped from the mapping tree), and on ag7 /
   VZG2 the two agree on 99.8% of cells (M6 stage B).
 - **False-positive check** (§8.6, MO5): the flag rate among marker
-  astrocytes (E3's AST set with the panel's derived Astro-Epen genes
-  instead of Aqp4 alone: >= 2 counts and >= 10 per 1,000 on them, the
-  microglial genes <= 3 per 1,000) must not exceed ``microglia_fpr_max``
-  (0.5%); above it the flag is null with reason ``astrocyte_fpr``.
+  astrocytes must not exceed ``microglia_fpr_max`` (0.5%); above it the
+  flag is null with reason ``astrocyte_fpr``. Marker astrocytes are E3's
+  AST set (``04_metrics.py``) with the panel's derived Astro-Epen genes
+  instead of Aqp4 alone: >= 2 counts and >= 10 per 1,000 on them, and <= 3
+  per 1,000 on the **purity genes**, E3's MG_loose genes (Cx3cr1, Csf1r,
+  C1qa) when all three are on the panel, else the three most specific
+  derived microglia genes. The purity genes must leave some flag genes
+  free: conditioning on low counts in every flag gene caps a cell's
+  microglial share at 3 per 1,000, below any flagged spill weight, so the
+  rate would be 0 by construction; the check is then not evaluated (a
+  recorded reason) and the flag stays defined.
 - **Held-out check** (§8.6, needs >= 6 genes): the genes are split into
   two halves by specificity rank (odd / even), the flag is rebuilt on the
   first half and the enrichment of the second half (counts per 1,000 in
@@ -104,6 +111,10 @@ PROBABILITY_CLIP: Final = 1e-9
 ASTRO_MIN_COUNTS: Final = 2
 ASTRO_MIN_PER_1000: Final = 10.0
 ASTRO_MAX_MICROGLIA_PER_1000: Final = 3.0
+# E3 04_metrics.py MG_loose genes: the purity genes of the AST set.
+MG_LOOSE_SYMBOLS: Final[tuple[str, ...]] = ("Cx3cr1", "Csf1r", "C1qa")
+PURITY_BASIS_MG_LOOSE: Final = "e3_mg_loose"
+PURITY_BASIS_DERIVED: Final = "derived_top3"
 # Plan §8.6: the held-out check needs >= 6 genes (build on half, test on half).
 MIN_HELDOUT_GENES: Final = 6
 IMMUNE_CLASS_SUFFIX: Final = "Immune"
@@ -450,32 +461,73 @@ def spillover_statistic(
     return np.maximum(statistic, 0.0), grid[best]
 
 
+def astro_purity_genes(
+    profiles: MouseFlagProfiles, microglia: SpecificGenes
+) -> tuple[SpecificGenes, str]:
+    """Return the microglial genes that exclude marker astrocytes (E3 AST).
+
+    Args:
+        profiles: The panel's profiles (gene symbols).
+        microglia: The derived microglia set (the flag's genes).
+
+    Returns:
+        ``(genes, basis)``: E3's MG_loose genes (Cx3cr1, Csf1r, C1qa) when all
+        three are on the panel (``e3_mg_loose``), else the three most
+        specific derived microglia genes (``derived_top3``).
+    """
+    position = {symbol: index for index, symbol in enumerate(profiles.symbols)}
+    if all(symbol in position for symbol in MG_LOOSE_SYMBOLS):
+        indices = np.array(
+            [position[symbol] for symbol in MG_LOOSE_SYMBOLS], dtype=np.int64
+        )
+        return (
+            SpecificGenes(
+                target="astrocyte_purity",
+                indices=indices,
+                gene_ids=tuple(profiles.gene_ids[index] for index in indices),
+                symbols=MG_LOOSE_SYMBOLS,
+                ratios=tuple(math.nan for _ in indices),
+            ),
+            PURITY_BASIS_MG_LOOSE,
+        )
+    return (
+        SpecificGenes(
+            target="astrocyte_purity",
+            indices=microglia.indices[:3],
+            gene_ids=microglia.gene_ids[:3],
+            symbols=microglia.symbols[:3],
+            ratios=microglia.ratios[:3],
+        ),
+        PURITY_BASIS_DERIVED,
+    )
+
+
 def marker_astrocytes(
     counts: sparse.spmatrix | np.ndarray,
     astro: SpecificGenes,
-    microglia: SpecificGenes,
+    purity: SpecificGenes,
 ) -> np.ndarray:
     """Return E3's marker astrocytes (AST) with the panel's derived sets.
 
     Args:
         counts: Cells x query genes.
         astro: Astro-Epen genes.
-        microglia: Microglia genes.
+        purity: The microglial purity genes (``astro_purity_genes``).
 
     Returns:
         Boolean per cell: >= 2 astrocyte counts and >= 10 per 1,000 on
-        them, and <= 3 per 1,000 on the microglia genes.
+        them, and <= 3 per 1,000 on the purity genes.
     """
     from scipy import sparse as sp
 
     matrix = sp.csr_matrix(counts, dtype=np.float64)
     total = np.maximum(np.asarray(matrix.sum(axis=1)).reshape(-1), 1.0)
     astro_counts = np.asarray(matrix[:, astro.indices].sum(axis=1)).reshape(-1)
-    microglia_counts = np.asarray(matrix[:, microglia.indices].sum(axis=1)).reshape(-1)
+    purity_counts = np.asarray(matrix[:, purity.indices].sum(axis=1)).reshape(-1)
     selected: np.ndarray = (
         (astro_counts >= ASTRO_MIN_COUNTS)
         & (1000.0 * astro_counts / total >= ASTRO_MIN_PER_1000)
-        & (1000.0 * microglia_counts / total <= ASTRO_MAX_MICROGLIA_PER_1000)
+        & (1000.0 * purity_counts / total <= ASTRO_MAX_MICROGLIA_PER_1000)
     )
     return selected
 
@@ -620,6 +672,9 @@ def _heldout_check(
         ratios=genes.ratios[0::2],
     )
     held = genes.indices[1::2]
+    held_symbols = list(genes.symbols[1::2])
+    if set(build.indices.tolist()) & set(held.tolist()):
+        raise ValueError("the held-out genes overlap the build genes")
     _, _, flag = _flag_cells(counts, build, base, target, config)
     matrix = sp.csr_matrix(counts, dtype=np.float64)
     total = np.maximum(np.asarray(matrix.sum(axis=1)).reshape(-1), 1.0)
@@ -635,7 +690,7 @@ def _heldout_check(
     return {
         "evaluated": True,
         "build_genes": list(build.symbols),
-        "heldout_genes": [genes.symbols[index] for index in range(1, len(genes), 2)],
+        "heldout_genes": held_symbols,
         "build_flag_rate": round(float(flag.mean()), 6),
         "heldout_per_1000_flagged": _rounded(flagged),
         "heldout_per_1000_unflagged": _rounded(unflagged),
@@ -694,13 +749,33 @@ def microglial_spillover(
     checks: dict[str, Any] = {"n_genes": len(genes)}
     defined = True
     reason = None
-    if len(astro):
-        ast = marker_astrocytes(counts, astro, genes)
+    purity, basis = astro_purity_genes(profiles, genes)
+    free = sorted(set(genes.gene_ids) - set(purity.gene_ids))
+    if not len(astro):
+        checks["astrocyte_fpr"] = {"evaluated": False, "reason": "no Astro-Epen genes"}
+    elif not free:
+        checks["astrocyte_fpr"] = {
+            "evaluated": False,
+            "reason": (
+                "the purity genes cover every flag gene (the rate would be 0 by "
+                "construction)"
+            ),
+            "astro_genes": list(astro.symbols),
+            "purity_genes": list(purity.symbols),
+            "purity_basis": basis,
+        }
+    else:
+        ast = marker_astrocytes(counts, astro, purity)
         n_ast = int(ast.sum())
         fpr = float(flag[ast].mean()) if n_ast else None
         checks["astrocyte_fpr"] = {
+            "evaluated": True,
             "astro_genes": list(astro.symbols),
+            "purity_genes": list(purity.symbols),
+            "purity_basis": basis,
+            "n_flag_genes_outside_purity": len(free),
             "n_marker_astrocytes": n_ast,
+            "n_flagged": int(flag[ast].sum()),
             "fpr": _rounded(fpr),
             "max": config.microglia_fpr_max,
         }
@@ -711,8 +786,6 @@ def microglial_spillover(
                 f"flagged > {config.microglia_fpr_max}"
             )
             logger.warning("microglial spill-over: null (%s)", reason)
-    else:
-        checks["astrocyte_fpr"] = {"evaluated": False, "reason": "no Astro-Epen genes"}
     if heldout:
         checks["heldout"] = _heldout_check(counts, genes, base, target, config)
     result = SpilloverResult(
