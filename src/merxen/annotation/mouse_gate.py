@@ -198,9 +198,13 @@ def find_registration_check(
     stem = sample_id.lower()
     for suffix in (REGISTRATION_JSON_SUFFIX, QC_SUMMARY_SUFFIX):
         name = f"{stem}{suffix}"
-        matches = sorted(
-            {path.resolve() for root in directories for path in Path(root).rglob(name)}
-        )
+        # One file per resolved target (a published symlink and its work-dir
+        # file are one check); the source keeps the path as found.
+        found: dict[Path, Path] = {}
+        for root in directories:
+            for path in sorted(Path(root).rglob(name)):
+                found.setdefault(path.resolve(), path)
+        matches = sorted(found.values())
         if len(matches) > 1:
             raise ValueError(
                 f"several {name} under the QC directories: {[str(m) for m in matches]}"
