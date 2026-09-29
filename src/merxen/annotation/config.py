@@ -908,6 +908,10 @@ class MouseRegionConfig(_AnnotationModel):
         subclass_share_default: Subclass share threshold otherwise.
         min_merfish_cells_subclass: Subclasses with fewer MERFISH cells follow
             their class.
+        min_merfish_cells_class: A class needs this many MERFISH grey-matter
+            cells to count as absent from the present regions (E7
+            ``05c_hybrid_droplist.py``; ``15 HY Gnrh1 Glut`` has 55, so it
+            never takes the strict rule).
         never_drop_classes: WMB classes pruning never drops.
         coupled_regions: Region coupling (e.g. ``{"OB": ["OLF"]}``); off until
             M6b.
@@ -929,6 +933,7 @@ class MouseRegionConfig(_AnnotationModel):
     subclass_share_in_low_class: float = 0.30
     subclass_share_default: float = 0.10
     min_merfish_cells_subclass: int = Field(default=20, ge=1)
+    min_merfish_cells_class: int = Field(default=100, ge=1)
     never_drop_classes: list[str] = Field(
         default_factory=lambda: [
             "25 Pineal Glut",
