@@ -1248,7 +1248,7 @@ def write_map_first_plots(
     Returns:
         The written files by name.
     """
-    from merxen.analysis import clustering_squidpy as legacy
+    import merxen.analysis.clustering_squidpy as legacy
 
     colors = [
         BROAD_CLASS_KEY,
