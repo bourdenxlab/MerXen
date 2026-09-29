@@ -324,7 +324,8 @@ def test_prep_max_gb_fraction_matches_the_python_reserve() -> None:
     assert float(match.group(1)) == reference_module.PREP_MAX_GB_FRACTION
 
 
-def test_main_nf_calls_only_the_prepare_only_entry() -> None:
+def test_main_nf_calls_the_annotation_steps_only_through_their_entries() -> None:
+    """--annotation_prepare_only (H10) only; CLUSTERING_MAP_FIRST waits for H5."""
     main_text = MAIN_NF.read_text()
     assert main_text.count("ANNOTATION_PREPARE_ONLY(sample_rows_raw_ch)") == 1
     for name in (
@@ -336,11 +337,11 @@ def test_main_nf_calls_only_the_prepare_only_entry() -> None:
         "CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE(",
         "CLUSTERING_ANNOTATE_MAP(",
         "CLUSTERING_ANNOTATE(",
-        "CLUSTERING_MAP_FIRST(",
     ):
         assert name not in main_text
-    # CLUSTERING_MAP_FIRST still refuses to run until M5.
-    assert "error(" in MAP_FIRST.read_text()
+    assert main_text.count("CLUSTERING_MAP_FIRST(") == 0
+    # CLUSTERING_MAP_FIRST runs COMPUTE_CPU (M5): no guard left.
+    assert "error(" not in MAP_FIRST.read_text()
 
 
 def test_bundle_collection_waits_for_each_branch_own_count() -> None:
@@ -426,22 +427,13 @@ RULE_IMPORT_EXEMPTIONS = {
     "merxen.control_features": "control registry (query loading)",
     "merxen.gene_ids": "Ensembl ID pattern (query loading)",
     "merxen.table_keys": "table-key suffix validator (COMPUTE_CPU, FINALIZE)",
-    # merxen.clustering is fingerprinted for cellset.select_table_cells; its
-    # map_first hierarchy (COMPUTE_CPU, M5) is not run by RESOLVE.
-    "merxen.config": "ClusteringSquidpyConfig type hints (TYPE_CHECKING only)",
-    "merxen.analysis.clustering_squidpy": "legacy plot helpers (map_first QC plots)",
+    # Of merxen.clustering, RESOLVE runs cellset.select_table_cells only; the
+    # map_first hierarchy is COMPUTE_CPU's (HIERARCHY_SOURCES, M5).
 }
 
 
-def test_resolve_rule_sources_exist_and_cover_their_imports() -> None:
-    """The RESOLVE rules fingerprint must see every module the rules run on."""
-    sources = _rule_sources()
-    assert sources == [
-        "merxen/annotation",
-        "merxen/assets/annotation",
-        "merxen/clustering",
-        "merxen/cli/run_annotation.py",
-    ]
+def _sources_outside(sources: list[str]) -> set[str]:
+    """Modules the source files import from outside the sources."""
     for source in sources:
         assert (SRC / source).exists(), source
     files = [
@@ -450,6 +442,7 @@ def test_resolve_rule_sources_exist_and_cover_their_imports() -> None:
         for path in (
             [SRC / source] if (SRC / source).is_file() else (SRC / source).rglob("*.py")
         )
+        if path.suffix == ".py"
     ]
     covered = [source.removesuffix(".py").replace("/", ".") for source in sources]
     imported = {
@@ -459,12 +452,58 @@ def test_resolve_rule_sources_exist_and_cover_their_imports() -> None:
             r"^\s*(?:from|import) (merxen(?:\.\w+)+)", path.read_text(), re.M
         )
     }
-    outside = {
+    return {
         module
         for module in imported
         if not any(module == root or module.startswith(root + ".") for root in covered)
     }
-    assert outside == set(RULE_IMPORT_EXEMPTIONS)
+
+
+def test_resolve_rule_sources_exist_and_cover_their_imports() -> None:
+    """The RESOLVE rules fingerprint must see every module the rules run on."""
+    sources = _rule_sources()
+    assert sources == [
+        "merxen/annotation",
+        "merxen/assets/annotation",
+        "merxen/clustering/cellset.py",
+        "merxen/cli/run_annotation.py",
+    ]
+    assert _sources_outside(sources) == set(RULE_IMPORT_EXEMPTIONS)
+
+
+def _hierarchy_sources() -> list[str]:
+    match = re.search(
+        r"HIERARCHY_SOURCES = \[(.*?)\]\.asImmutable\(\)", REFERENCES_SOURCE, re.S
+    )
+    assert match is not None
+    return re.findall(r'"([^"]+)"', match.group(1))
+
+
+# Modules the map_first hierarchy code imports from outside its sources, and
+# why a change there needs no COMPUTE_CPU re-run of its own.
+HIERARCHY_IMPORT_EXEMPTIONS = {
+    "merxen.analysis.mapmycells": "gene-ID fallback tables (annotation config only)",
+    "merxen.config": "config models (the config file is a task input)",
+    "merxen.gene_ids": "Ensembl ID pattern (PREPARE's var metadata)",
+    "merxen.io.spatialdata_io": "SpatialData writes (FINALIZE, PREPARE)",
+    "merxen.io.transcript_io": "column lookups (PREPARE's SpatialData reads)",
+    "merxen.memory": "memory logging",
+    "merxen.plotting": "figure saving",
+    "merxen.table_keys": "FINALIZE's key (the suffix is in compute_spec)",
+}
+
+
+def test_hierarchy_sources_exist_and_cover_their_imports() -> None:
+    """The COMPUTE_CPU fingerprint must see every module the hierarchy runs on."""
+    sources = _hierarchy_sources()
+    assert "merxen/clustering" in sources
+    assert "merxen/analysis/clustering_squidpy.py" in sources
+    assert _sources_outside(sources) == set(HIERARCHY_IMPORT_EXEMPTIONS)
+    # The vocabularies the hierarchy reads (merxen.annotation.vocab).
+    from merxen.annotation import vocab
+
+    for filename in vocab.VOCAB_FILES.values():
+        assert f"merxen/assets/annotation/{filename}" in sources, filename
 
 
 # --------------------------------------------------------------------------
@@ -787,6 +826,16 @@ class AnnotationModuleHarness {
                 return AnnotationReferences.mapReuseDir(
                     c.params, c.pair_id, c.segmentation
                 )
+            case "hierarchyFingerprint":
+                return AnnotationReferences.hierarchyFingerprint(c.source_root)
+            case "computeSpec":
+                return AnnotationReferences.computeSpec(c.params, c.source_root)
+            case "computeArguments":
+                return AnnotationReferences.computeArguments(c.spec)
+            case "computeLabelFiles":
+                return AnnotationReferences.computeLabelFiles(c.resolve_dir)*.toString()
+            case "alignmentFiles":
+                return AnnotationReferences.alignmentFiles(c.align_out)*.toString()
         }
         throw new IllegalStateException("unknown case function ${c.fn}")
     }
@@ -842,12 +891,13 @@ workflow {
         .collect()
         .subscribe { rows -> AnnotationModuleHarness.write(params.fixture_out, rows) }
 
+    // No ALIGN files: the published align_out must not be looked up.
     prepared_ch = channel
         .fromList(AnnotationModuleHarness.readList(params.prepared_inputs))
         .map { item ->
             tuple(
                 item.pair_id, item.segmentation, item.samples_json,
-                file(item.config), file(item.prepared_dir),
+                file(item.config), file(item.prepared_dir), [],
             )
         }
     mapped = ANNOTATION_PREPARED_REFERENCES(prepared_ch)
@@ -1179,6 +1229,7 @@ def _cases(root: Path, params: dict[str, Any]) -> dict[str, dict[str, Any]]:
             "params": {"annotation_prepare_only": "true"},
         },
         **_resolve_cases(root, human),
+        **_compute_cases(root, human),
     }
 
 
@@ -1277,6 +1328,66 @@ def _resolve_cases(root: Path, human: dict[str, Any]) -> dict[str, dict[str, Any
         },
         "fingerprint_repo": {"fn": "resolveRulesFingerprint", "source_root": str(SRC)},
         "resolve_summary_file": {"fn": "resolveSummaryFile", "pair_id": "P7513"},
+    }
+
+
+def _compute_cases(root: Path, human: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Cases of the COMPUTE_CPU helpers (spec, arguments, staged files)."""
+    resolve_dir = root / "compute" / "annotation_resolve_out"
+    for platform, sample_id in (("merscope", "P1_MERSCOPE"), ("xenium", "P1_XENIUM")):
+        folder = resolve_dir / platform
+        folder.mkdir(parents=True)
+        (folder / f"{sample_id}_celltype_labels.parquet").write_bytes(b"x")
+        (folder / f"{sample_id}_annotation_manifest.json").write_text("{}")
+        (folder / "notes.txt").write_text("not staged")
+    (resolve_dir / "P1_resolve_summary.json").write_text("{}")
+    (resolve_dir / "annotation_config.json").write_text("{}")
+    align_out = root / "compute" / "align_out"
+    align_out.mkdir()
+    (align_out / "shared_tissue_mask.npy").write_bytes(b"x")
+    (align_out / "registration_summary.json").write_text("{}")
+    half_align = root / "compute" / "half_align_out"
+    half_align.mkdir()
+    (half_align / "shared_tissue_mask.npy").write_bytes(b"x")
+    map_first = {**human, "clustering_squidpy_mode": "map_first"}
+    spec = {
+        "table_key_suffix": "mapfirst",
+        "mender_unassigned_state_policy": "exclude_from_features",
+    }
+    return {
+        "hierarchy_fingerprint_repo": {
+            "fn": "hierarchyFingerprint",
+            "source_root": str(SRC),
+        },
+        "compute_spec_map_first": {
+            "fn": "computeSpec",
+            "params": map_first,
+            "source_root": str(SRC),
+        },
+        "compute_spec_policy": {
+            "fn": "computeSpec",
+            "params": {
+                **map_first,
+                "clustering_squidpy_table_key_suffix": "trial",
+                "mender_unassigned_state_policy": "state",
+            },
+            "source_root": str(SRC),
+        },
+        "compute_spec_empty_suffix": {
+            "fn": "computeSpec",
+            "params": {**map_first, "clustering_squidpy_table_key_suffix": ""},
+            "source_root": str(SRC),
+        },
+        "compute_arguments": {"fn": "computeArguments", "spec": spec},
+        "compute_label_files": {
+            "fn": "computeLabelFiles",
+            "resolve_dir": str(resolve_dir),
+        },
+        "alignment_files": {"fn": "alignmentFiles", "align_out": str(align_out)},
+        "alignment_files_half": {
+            "fn": "alignmentFiles",
+            "align_out": str(half_align),
+        },
     }
 
 
@@ -1814,6 +1925,89 @@ def test_resolve_rules_fingerprint_follows_the_rule_sources(
     assert _value(harness, "fingerprint_missing") == "missing"
     assert base == _python_rules_fingerprint(harness["root"] / "rule_trees" / "base")
     assert _value(harness, "fingerprint_repo") == _python_rules_fingerprint(SRC)
+
+
+def _python_sources_fingerprint(root: Path, sources: list[str]) -> str:
+    """A sources fingerprint, computed as AnnotationReferences.sourcesFingerprint."""
+    files: dict[str, Path] = {}
+    for source in sources:
+        path = root / source
+        if path.is_file():
+            files[source] = path
+        elif path.is_dir():
+            for item in path.rglob("*"):
+                relative = item.relative_to(root).as_posix()
+                if (
+                    item.is_file()
+                    and not relative.endswith((".pyc", ".pyo"))
+                    and "__pycache__" not in relative.split("/")
+                ):
+                    files[relative] = item
+    if not files:
+        return "missing"
+    digest = hashlib.sha256()
+    for relative in sorted(files):
+        digest.update(relative.encode())
+        digest.update(b"\0")
+        digest.update(files[relative].read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+@needs_nextflow
+def test_compute_spec_carries_suffix_policy_and_hierarchy_fingerprint(
+    harness: dict[str, Any],
+) -> None:
+    """COMPUTE_CPU's task inputs see the run settings and the hierarchy code."""
+    fingerprint = _value(harness, "hierarchy_fingerprint_repo")
+    assert fingerprint == _python_sources_fingerprint(SRC, _hierarchy_sources())
+    assert fingerprint != _value(harness, "fingerprint_repo")
+    assert _value(harness, "compute_spec_map_first") == {
+        "table_key_suffix": "mapfirst",
+        "mender_unassigned_state_policy": "exclude_from_features",
+        "hierarchy_fingerprint": fingerprint,
+    }
+    policy = _value(harness, "compute_spec_policy")
+    assert policy["table_key_suffix"] == "trial"
+    assert policy["mender_unassigned_state_policy"] == "state"
+    # Before the flip an empty suffix would overwrite the legacy table.
+    assert "overwrite the legacy one" in _error(harness, "compute_spec_empty_suffix")
+
+
+@needs_nextflow
+def test_compute_arguments_select_map_first_on_the_staged_labels(
+    harness: dict[str, Any],
+) -> None:
+    assert _value(harness, "compute_arguments").split(" ") == [
+        "--mode",
+        "map_first",
+        "--labels-dir",
+        "compute_inputs/annotation_resolve_out",
+        "--table-key-suffix",
+        "mapfirst",
+        "--mender-unassigned-state-policy",
+        "exclude_from_features",
+    ]
+
+
+@needs_nextflow
+def test_compute_stages_the_resolve_outputs_as_files(harness: dict[str, Any]) -> None:
+    """Label tables, manifests and the pair summary; never the directory."""
+    names = [Path(path).name for path in _value(harness, "compute_label_files")]
+    assert names == [
+        "P1_MERSCOPE_annotation_manifest.json",
+        "P1_MERSCOPE_celltype_labels.parquet",
+        "P1_XENIUM_annotation_manifest.json",
+        "P1_XENIUM_celltype_labels.parquet",
+        "P1_resolve_summary.json",
+    ]
+
+
+@needs_nextflow
+def test_alignment_files_need_both_align_outputs(harness: dict[str, Any]) -> None:
+    files = [Path(path).name for path in _value(harness, "alignment_files")]
+    assert files == ["shared_tissue_mask.npy", "registration_summary.json"]
+    assert _value(harness, "alignment_files_half") == []
 
 
 @needs_nextflow

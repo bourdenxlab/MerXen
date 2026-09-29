@@ -5,12 +5,16 @@
  * row before its legacy-only checks. A legacy row gets no check from here.
  * ANNOTATION_PREPARE_ONLY (hook H10) calls prepareOnlyErrors once per
  * --annotation_prepare_only run instead: such a run preflights no row.
+ *
+ * A map_first row that clusters builds reference bundles, so it is checked
+ * like a prepare-only run: the references' source params, the writable
+ * reference stores and the settings annotation_config.json takes.
  */
 class AnnotationPreflight {
 
-    // The map_first processes (ANNOTATE_PANEL, ANNOTATE_REFERENCE_PREP, MAP,
-    // RESOLVE, COMPUTE_CPU) and hook H5 arrive in M2-M5; until M5 sets this,
-    // a map_first run that touches clustered tables is refused.
+    // Hook H5 (main.nf: PREPARE -> CLUSTERING_MAP_FIRST -> FINALIZE) arrives
+    // with the next M5 commit; until it sets this, a map_first run that
+    // touches clustered tables is refused.
     static final boolean MAP_FIRST_WIRED = false
 
     static final Map<String, List<String>> CHOICES = [
@@ -93,6 +97,11 @@ class AnnotationPreflight {
             // Only rows with a clustered-table stage build reference bundles.
             appendSelfmapTestCellCheck(errors, species, params, label)
         }
+        if (settings.get("run_clustering_squidpy")) {
+            // Clustering runs ANNOTATE_REFERENCE_PREP: its sources and stores.
+            appendReferenceSourceChecks(errors, species, params, label)
+            appendStoreChecks(errors, params, label)
+        }
     }
 
     /**
@@ -127,6 +136,35 @@ class AnnotationPreflight {
         appendChoiceChecks(errors, params, label)
         appendCtmVersionCheck(errors, params, label)
         appendReferenceChecks(errors, species, params, label)
+        appendReferenceSourceChecks(errors, species, params, label)
+        def sourceParams = AnnotationReferences.referenceIds(params, species).collectMany { referenceId ->
+            (AnnotationReferences.SOURCE_PARAMS[referenceId] ?: [:]).values() as List
+        }.unique()
+        (sourceParams + OPTIONAL_PATH_PARAMS.both).unique().each { paramName ->
+            appendOptionalPathCheck(errors, params?.get(paramName), paramName, label)
+        }
+        if (species == "human") {
+            def region = params?.get("annotation_human_region")
+            def token = region == null ? null : region.toString().trim().toLowerCase().replaceAll(/[\s\-]+/, "_")
+            if (!(token in AnnotationDefaults.VALIDATED_HUMAN_REGIONS)) {
+                errors << (
+                    "Human annotation_human_region '${region}' for ${label} has no validated " +
+                    "references; only ${AnnotationDefaults.VALIDATED_HUMAN_REGIONS.join(', ')} " +
+                    "is supported (OD-C7)"
+                ).toString()
+            }
+        }
+        appendSelfmapTestCellCheck(errors, species, params, label)
+        appendStoreChecks(errors, params, label)
+        return errors
+    }
+
+    /**
+     * Check that every reference can be built from the params (plan §3.7):
+     * known references with pipeline source params and one full alternative
+     * of the required sources (callers check that the paths exist).
+     */
+    private static void appendReferenceSourceChecks(List errors, String species, Map params, String label) {
         def references = AnnotationReferences.referenceIds(params, species)
         def withoutSources = references.findAll { referenceId ->
             referenceId in AnnotationDefaults.KNOWN_REFERENCES[species] &&
@@ -153,30 +191,16 @@ class AnnotationPreflight {
                 ).toString()
             }
         }
-        def sourceParams = references.collectMany { referenceId ->
-            (AnnotationReferences.SOURCE_PARAMS[referenceId] ?: [:]).values() as List
-        }.unique()
-        (sourceParams + OPTIONAL_PATH_PARAMS.both).unique().each { paramName ->
-            appendOptionalPathCheck(errors, params?.get(paramName), paramName, label)
-        }
-        if (species == "human") {
-            def region = params?.get("annotation_human_region")
-            def token = region == null ? null : region.toString().trim().toLowerCase().replaceAll(/[\s\-]+/, "_")
-            if (!(token in AnnotationDefaults.VALIDATED_HUMAN_REGIONS)) {
-                errors << (
-                    "Human annotation_human_region '${region}' for ${label} has no validated " +
-                    "references; only ${AnnotationDefaults.VALIDATED_HUMAN_REGIONS.join(', ')} " +
-                    "is supported (OD-C7)"
-                ).toString()
-            }
-        }
-        appendSelfmapTestCellCheck(errors, species, params, label)
+    }
+
+    // The reference store (and the large-panel store when set) must be
+    // creatable and writable.
+    private static void appendStoreChecks(List errors, Map params, String label) {
         appendStoreCheck(errors, AnnotationReferences.referenceStore(params), "annotation_reference_store", label)
         def large = AnnotationReferences.referenceStoreLarge(params)
         if (large) {
             appendStoreCheck(errors, large, "annotation_reference_store_large", label)
         }
-        return errors
     }
 
     // Params the human held-out test set (whb_frontal_supc_clus_ho) reads:

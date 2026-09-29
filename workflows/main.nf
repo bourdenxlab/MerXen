@@ -567,7 +567,7 @@ def corticalDepthConfigForPlatform(
             segmentation: segmentation,
             table_key: layerKeys.table_key,
             shape_key: layerKeys.shape_key,
-        ]
+        ] + AnnotationSettings.clusteredTableFields(row, params) // rca-site:H2
     }
     return [
         dataset_name: "${pairId}_${platform}",
@@ -1975,7 +1975,7 @@ workflow {
     annotationCompletionWorkflow.onComplete {
         def annotationSummary = AnnotationSettings.completionSummary(
             annotationCompletionParams,
-            [success: annotationCompletionWorkflow.success],
+            AnnotationRunRecord.runInfo() + [success: annotationCompletionWorkflow.success],
         )
         if (annotationSummary) {
             log.info(annotationSummary)
