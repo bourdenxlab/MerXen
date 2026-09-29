@@ -148,7 +148,12 @@ dataset gate, panel trust and cross-platform scope of the labels
 
 The stage updates the source `latest_spatialdata.zarr` in place by default.
 Set `--cortical_depth_write_spatialdata_table false` to write sidecars and QC
-without replacing SpatialData tables.
+without replacing SpatialData tables. The table it replaces is each
+segmentation's base table (`table_key`, e.g. `table_MOSAIK_proseg_hybrid`),
+also in a `map_first` run, which reads only its annotations from the
+`_mapfirst` clustered table; a `map_first` run that must leave published
+tables untouched sets the flag to `false`
+([Into a published results directory](annotation.md#into-a-published-results-directory)).
 
 ## Performance
 
