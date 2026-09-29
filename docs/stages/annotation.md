@@ -868,23 +868,47 @@ PREPARE -> ANNOTATE_PANEL -> ANNOTATE_REFERENCE_PREP (per unique bundle)
 - **MENDER.** The clustered table records the run's
   `mender_unassigned_state_policy` (default `exclude_from_features`), which
   MENDER applies to it (its legacy script names no policy); legacy tables
-  keep `state`. The MENDER barrier is unchanged: `map_first` runs never run
-  the legacy MAPMYCELLS stage unless `annotation_mode_mapmycells_stage` is
-  `legacy` and the run stops at `mapmycells`, so the barrier never waits for
-  it.
-- **Cross-platform scope.** COMPUTE_CPU copies RESOLVE's
-  `pair.cross_platform` into each clustered table
-  (`uns["merxen_hierarchical_clustering"]["cross_platform_json"]`, and the
-  hierarchical manifest), and MENDER and cortical-depth manifests carry it
-  in their `annotation` record: a `broad_only` pair may be compared across
-  platforms at the broad class and lineage only, a `none` pair not at all
-  (`merxen.clustering.cross_platform.CrossPlatformScope.allows`).
+  keep `state`. MENDER_PREPARE and MENDER_IMPORT refuse a clustered H5AD
+  whose mode or suffix does not match the table key they write (a
+  `map_first` H5AD only to `<...>_clustering_squidpy_<its suffix>`, a legacy
+  H5AD never to a suffixed key): the two tables hold the same cells, so the
+  cell-id checks alone cannot tell them apart. A table whose states are all
+  unassigned (a refused panel, a failed gate) is not an error: MENDER
+  records `status: skipped_no_assigned_state`, writes its manifests without
+  domains and imports nothing. The MENDER barrier of a `map_first` run
+  pairs every terminal event of a pair with the pair's one barrier spec
+  (`combine`; legacy runs keep their `join`, which pairs items one to one,
+  so a pair's earlier FINALIZE event would consume the spec, [MENDER](mender.md)).
+  `map_first` runs never run the legacy MAPMYCELLS stage unless
+  `annotation_mode_mapmycells_stage` is `legacy` and the run stops at
+  `mapmycells`, so the barrier never waits for it.
+- **Cross-platform scope.** COMPUTE_CPU records the pair's cross-platform
+  scope in each clustered table
+  (`uns["merxen_hierarchical_clustering"]["cross_platform_json"]` and
+  `cross_platform_statistics_level`, and the hierarchical manifest), and
+  MENDER and cortical-depth manifests carry it in their `annotation`
+  record. The scope is RESOLVE's `pair.cross_platform`, built from the
+  panels, with each sample's dataset gate folded in (plan §5.4): a
+  `broad_only` gate caps the pair at `broad_only` (flagged, reason
+  `dataset_gate:<sample>:broad_only`; P1212, whose MERSCOPE side is
+  broad-only, is `broad_only` although its panel allows `full`), a `failed`
+  gate sets `none`. A `broad_only` pair may be compared across platforms
+  at the broad class and lineage only, a `none` pair not at all
+  (`merxen.clustering.cross_platform.CrossPlatformScope.allows`), and only
+  the composition kinds RESOLVE compared may be (`allows_kind`: a
+  `per_platform` pair compares its `_xpanel` runs without the confident
+  kind). Every cross-platform consumer applies this scope, not RESOLVE's
+  record alone. MENDER niches are comparable across platforms only on
+  `ct_mender_state` within such a scope (`cross_platform_comparable` in
+  the MENDER manifest; [MENDER](mender.md)).
 - **End-of-run summary.** A `map_first` run logs which pair × segmentation
   branches entered clustering, which got no label tables (a failed PANEL,
   PREP, MAP or RESOLVE task, dropped under `errorStrategy "ignore"`) or no
-  hierarchy, the refused, broad-only and provisional panels, and the pairs
-  whose cross-platform statistics RESOLVE restricted. A legacy run prints
-  nothing.
+  hierarchy, the refused, broad-only and provisional panels, the broad-only
+  and failed dataset gates, the pairs whose cross-platform statistics are
+  restricted (by the panels or a dataset gate, the scope above) and the
+  samples whose MENDER run was skipped for want of an assigned state. A
+  legacy run prints nothing.
 
 ### Into a published results directory
 
@@ -920,8 +944,9 @@ process {
     // Copy only the output directory: latest_input.zarr is a link to the store.
     // The pattern names the directory itself: a publishDir pattern is matched
     // against each declared output, so "compute_cortical_depth_out/**" matches
-    // nothing and publishes an empty directory (the M5 exit run did that; its
-    // depth outputs were copied from the task directories afterwards).
+    // nothing and publishes an empty directory (the M5 exit run's first launch
+    // did that; its second launch re-ran cortical depth with this pattern and
+    // published the outputs).
     withName: "COMPUTE_CORTICAL_DEPTH" {
         publishDir = [path: { "${params.outdir}/${pair_id}/${platform.toLowerCase()}/compute_cortical_depth_mapfirst" }, mode: "copy", overwrite: false, pattern: "compute_cortical_depth_out"]
     }
@@ -959,6 +984,19 @@ the removed backup. SpatialData readers skip them.
 `_mapfirst` tables, their (and their backups') consolidated entries and
 its map_first output directories again, moving everything into a
 quarantine directory on the same disk (dry run by default; `--apply`).
+The unsuffixed `annotation_panel/`, `annotation_map/` and
+`annotation_resolve/` do not record which run wrote them (a later MAP
+reuses a published `annotation_map`), so it moves them only with
+`--include-annotation-dirs --new-paths <the paths the run created>`; with
+`--new-paths` anything not on the list stays.
+
+With the default publishDirs (no launch config), a `map_first` run
+publishes FINALIZE into `clustering_squidpy/` and MENDER into `mender/`,
+the legacy directories: fine for a fresh outdir, but into an outdir with
+legacy results it overwrites them, so use the launch config above. A
+MENDER-only restart of a `map_first` row reads the clustered H5AD from
+`clustering_squidpy_<suffix>/` when that holds it, else from
+`clustering_squidpy/`, and MENDER refuses a legacy H5AD found there.
 
 Three more things the M5 exit run showed:
 
@@ -973,8 +1011,9 @@ Three more things the M5 exit run showed:
   reset the four root directory mtimes to their pre-run values first, so
   only PREP (never cached), cortical depth (hashed after FINALIZE) and MENDER
   ran again.
-- **MENDER needs the barrier fix.** Before `terminalSpecCopies`, a
-  `map_first` row with cortical depth enabled never ran MENDER
+- **MENDER needs the barrier fix.** With the legacy `join`, a `map_first`
+  row with cortical depth enabled never ran MENDER: FINALIZE's event consumed
+  the pair's one spec. `map_first` runs now `combine` every event with it
   ([MENDER](mender.md)).
 - **Writer lock.** FINALIZE takes `<zarr>.merxen-write.lock` beside the path
   it is given, which is VALIDATE_ANALYSIS_LAYER's staged link in the work
