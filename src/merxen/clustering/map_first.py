@@ -146,8 +146,8 @@ LEAF_SUPPRESSING_PANEL_TRUST: Final[frozenset[str]] = frozenset(
 UNASSIGNED_BRANCH_SUFFIX: Final = f"/{UNRESOLVED_LABEL}"
 # Label-table columns copied into ``obs`` besides ``ct_*`` and ``flag_*``
 # (§4.5: flags and their continuous companions, exclude_hard,
-# discovery_caution, depth_bin). ``soft_*``, ``mmc_*`` and ``ll_*`` stay in
-# the parquet.
+# discovery_caution, depth_bin). Nothing else is copied, so ``soft_*``,
+# ``mmc_*`` and ``ll_*`` stay in the parquet.
 OBS_COMPANION_COLUMNS: Final[tuple[str, ...]] = (
     Columns.CONTAMINATION_SCORE,
     Columns.NEG_COUNTS,
@@ -159,12 +159,6 @@ OBS_COMPANION_COLUMNS: Final[tuple[str, ...]] = (
     Columns.EXCLUDE_HARD,
     Columns.DISCOVERY_CAUTION,
     Columns.DEPTH_BIN,
-)
-PARQUET_ONLY_PREFIXES: Final[tuple[str, ...]] = (
-    Columns.SOFT_BROAD_PREFIX,
-    Columns.SOFT_CLASS_PREFIX,
-    Columns.MMC_PREFIX,
-    Columns.LL_PREFIX,
 )
 # Missing numbers in ``uns`` scalars (h5ad cannot store ``None``).
 MISSING_INT: Final = -1
@@ -745,8 +739,6 @@ def label_obs_columns(columns: Iterable[str]) -> list[str]:
     selected = []
     for column in columns:
         name = str(column)
-        if name.startswith(PARQUET_ONLY_PREFIXES):
-            continue
         if (
             name.startswith("ct_")
             or name.startswith("flag_")
@@ -882,6 +874,7 @@ def run_map_first_hierarchy(
     *,
     provenance: AnnotationProvenance | None = None,
     plots: bool = True,
+    branch_umaps: bool = False,
     stability: bool = True,
     stability_subsamples: int = STABILITY_N_SUBSAMPLES,
 ) -> tuple[ad.AnnData, MapFirstResult]:
@@ -911,6 +904,8 @@ def run_map_first_hierarchy(
         provenance: The label table's ``AnnotationProvenance`` (gate, panel
             trust, root markers); stored in ``uns["merxen_annotation_json"]``.
         plots: Write the QC plots.
+        branch_umaps: Also write a UMAP per branch (``branch_embedding``);
+            off by default, as each costs about a whole-section UMAP.
         stability: Run the subsample-stability diagnostic.
         stability_subsamples: Number of stability subsamples.
 
@@ -987,6 +982,7 @@ def run_map_first_hierarchy(
                 sample_id=sample_id,
                 hierarchy=hierarchy,
                 config=config,
+                branch_umaps=branch_umaps,
             )
         )
     artifacts.update(
@@ -1230,15 +1226,16 @@ def write_map_first_plots(
     sample_id: str,
     hierarchy: MapFirstHierarchy,
     config: ClusteringSquidpyConfig,
+    branch_umaps: bool = False,
 ) -> dict[str, Path]:
     """Write the map_first QC plots of one section (§6.2 step 5).
 
     UMAP and spatial maps by ``broad_class``, ``ct_leaf`` and
     ``ct_final_level`` (with the QC Leiden for comparison), and per branch a
-    dotplot of the panel genes by leaf and, for branches of at least
-    ``min_branch_cells`` cells, a branch UMAP by leaf. The plot helpers are
-    legacy ``clustering_squidpy``'s, imported here so the module itself
-    stays light.
+    dotplot of the panel genes by leaf; with ``branch_umaps``, also a branch
+    UMAP by leaf for branches of at least ``min_branch_cells`` cells. The
+    plot helpers are legacy ``clustering_squidpy``'s, imported here so the
+    module itself stays light.
 
     Args:
         clustered: Output of the hierarchy with the QC embedding.
@@ -1246,6 +1243,7 @@ def write_map_first_plots(
         sample_id: Sample id (file prefix).
         hierarchy: The section's hierarchy.
         config: The run's config (point sizes, dpi, ``min_branch_cells``).
+        branch_umaps: Write the per-branch UMAPs.
 
     Returns:
         The written files by name.
@@ -1320,7 +1318,7 @@ def write_map_first_plots(
             title=f"{sample_id} {record['branch']}: panel genes by mapped leaf",
             dpi=max(int(config.figure_dpi), 220),
         )
-        if int(rows.sum()) >= int(config.min_branch_cells):
+        if branch_umaps and int(rows.sum()) >= int(config.min_branch_cells):
             embedded = branch_embedding(
                 clustered,
                 rows,

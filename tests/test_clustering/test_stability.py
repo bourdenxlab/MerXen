@@ -88,6 +88,16 @@ def test_ari_is_exact_for_large_partitions() -> None:
     )
 
 
+def test_ari_is_exact_for_groups_whose_squares_overflow_int32() -> None:
+    # Two groups of ~150k objects: squared group sizes exceed int32.
+    rng = np.random.default_rng(4)
+    labels_a = rng.integers(0, 2, size=300_000)
+    labels_b = np.where(rng.random(300_000) < 0.8, labels_a, 1 - labels_a)
+    assert adjusted_rand_index(labels_a, labels_b) == pytest.approx(
+        adjusted_rand_score(labels_a, labels_b), rel=1e-9
+    )
+
+
 def test_missing_labels_form_one_group() -> None:
     labels_a = np.array(["a", None, None, "b"], dtype=object)
     labels_b = np.array(["x", "y", "y", "x"], dtype=object)
