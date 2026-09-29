@@ -313,6 +313,10 @@ class AnnotationThresholds(_AnnotationModel):
         seaad_subclass_from60: SEA-AD subclass threshold from 60 counts.
         wmb_class: WMB class threshold.
         wmb_subclass: WMB subclass threshold.
+        wmb_class_min_corr: Mouse class-level ``avg_correlation`` floor
+            (§7.3; the M6 shadow study's pre-registered selection,
+            pre-registration §16): applied to real-data-validated mouse panel
+            families only; ``None`` records ``ct_class_corr`` without a floor.
         target_lineage: Precision target at lineage.
         target_broad: Precision target at broad.
         target_nt: Precision target at NT.
@@ -346,6 +350,7 @@ class AnnotationThresholds(_AnnotationModel):
     seaad_subclass_from60: float = 0.45
     wmb_class: float = 0.90
     wmb_subclass: float = 0.80
+    wmb_class_min_corr: float | None = Field(default=None, ge=-1.0, le=1.0)
     target_lineage: float = 0.90
     target_broad: float = 0.90
     target_nt: float = 0.90
@@ -730,6 +735,18 @@ class MouseGateConfig(_AnnotationModel):
             AP-matched MERFISH window (percentage points).
         g4_immune_band_points: G4 band for Immune (percentage points).
         g5_spillover_warn: G5 warns above this spill-over flag rate.
+        g2_min_group_markers: G2 leaves out class groups with fewer derived
+            markers.
+        g2_min_marker_units: Units the top group of a marker
+            pseudo-label needs (``data/P1212`` rule).
+        g2_min_marker_share: Its share of the summed units.
+        g2_min_pseudo_confident: G2 is not evaluated with fewer
+            pseudo-labelled table cells.
+        g3_t2_max_present_share: A subclass is T2 (G3) below this share of
+            its MERFISH cells in the present divisions (E7).
+        g4_window_sections: MERFISH-638850 sections of G4's window (e.g.
+            ``C57BL6J-638850.31``); empty: G4 is not evaluated until M6b's
+            AP estimate chooses the window.
     """
 
     g1_radius_um: float = Field(default=4.0, gt=0.0)
@@ -742,12 +759,20 @@ class MouseGateConfig(_AnnotationModel):
     g4_astro_epen_band_points: float = Field(default=5.0, gt=0.0)
     g4_immune_band_points: float = Field(default=1.0, gt=0.0)
     g5_spillover_warn: float = 0.15
+    g2_min_group_markers: int = Field(default=3, ge=1)
+    g2_min_marker_units: float = Field(default=1.5, gt=0.0)
+    g2_min_marker_share: float = 0.6
+    g2_min_pseudo_confident: int = Field(default=200, ge=1)
+    g3_t2_max_present_share: float = 0.25
+    g4_window_sections: list[str] = Field(default_factory=list)
 
     @field_validator(
         "g2_marker_consistency_fail",
         "g2_marker_consistency_warn",
         "g3_implausible_warn",
         "g5_spillover_warn",
+        "g2_min_marker_share",
+        "g3_t2_max_present_share",
     )
     @classmethod
     def _check_share(cls: type[MouseGateConfig], value: float, info: Any) -> float:
