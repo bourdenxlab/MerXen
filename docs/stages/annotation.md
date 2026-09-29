@@ -864,9 +864,9 @@ Per sample:
    normalisation, one BLAS thread per worker, `--drop_level
    CCN20230722_SUPT` for WMB) and parse the extended JSON at once into the
    tidy parquet; the JSON is deleted unless `annotation_keep_extended_json`.
-   Mouse maps unpruned for now: region inference and the pruned re-map are
-   M6.
-4. Write `map_manifest.json`: per sample the input identity, table-cell
+   Mouse maps unpruned first; the region step below then prunes.
+4. Mouse: the region step ([Mouse region step](#mouse-region-step-m6)).
+5. Write `map_manifest.json`: per sample the input identity, table-cell
    counts, controls removed and, per run, the query fingerprint (sha256 of
    the cell ids, their total counts and the query gene IDs), the bundle's
    `build_hash` and lookup digest, the engine parameters, the ctm version and
@@ -878,6 +878,8 @@ Per sample:
 | `<platform>/<sid>_ct_provisional.parquet` | One row per object: identity, `total_counts`, `n_genes`, `in_table`, **provisional** `ct_<level>_{name,raw,corr,runner_up,margin,status}` and `ct_final_*`, and the raw engine columns `mmc_<reference>_<level>_{label,name,bp,agg,corr}`. |
 | `map_manifest.json` | The run record above, with `panel_status` (`ok`, or `refused` with `panel_reasons` and no runs) and, per run that needs one, `subset_bundle` (trigger, `used`, `requested` or `ambiguous` with the candidates, subset and parent hashes); `annotation-store prune` counts its `build_hash` values as references. |
 | `subset_panels/<sid>_<run_id>.panel_genes.json` | The subset panel of a run whose dataset lacks enough panel genes (`kind` `subset`, `parent_panel_hash`, `excluded_ids`). |
+| `<platform>/<sid>_mouse_regions.parquet` | Mouse: one row per table cell: `tile_i` / `tile_j` (150 µm tile), `tile_region` (the tile's majority home division), `inferred_region` (that division when present), `confident_neuron`, `region_dropped_level` (`class`, `subclass` or null) and `region_pruned_changed`. |
+| `<platform>/<sid>_mmc_wmb_panel_pruned.parquet` | Mouse, when nodes were dropped: the tidy table of the re-mapped cells only (`--nodes_to_drop`). The unpruned run keeps `<sid>_mmc_wmb_panel.parquet`. |
 
 The provisional labels apply the raw thresholds only (WHB lineage / broad /
 NT 0.73 on the bootstrap probability summed over the assigned node's class,
@@ -889,6 +891,60 @@ frontal-cortex plausibility from the bundle vocabulary and the parent
 chain. They have no floors, resolvability, dataset gate, second vote or COP
 rule and are for inspection only; the RESOLVE step (M4) replaces them and
 writes `<sid>_celltype_labels.parquet`.
+
+### Mouse region step (M6)
+
+`merxen.annotation.mouse_regions` (plan §7.2; the E7 design,
+`exp/E7/09_autoregion_v2.py` and `05c_hybrid_droplist.py`) runs on each
+mouse sample's unpruned WMB run:
+
+1. **Request.** The sample's `mouse_section_regions` (the samplesheet
+   column, carried in the `samples` of `clustering_squidpy_config.json`),
+   else the annotation config's (`annotation_mouse_section_regions`,
+   default `auto`); `merxen annotate --mouse-section-regions` overrides
+   both. `auto` infers the divisions, a `;`-separated list of CCF divisions
+   (`Isocortex`, `OLF`, `OB`, `HPF`, `CTXsp`, `STR`, `PAL`, `TH`, `HY`, `MB`,
+   `P`, `MY`, `CB`; case-insensitive) overrides the inference, and `none`
+   disables pruning (no region-share bundle needed).
+2. **Inference** (`auto`; also run for QC with an override): confident
+   neurons (a neuronal class, 01–29, with class and subclass bootstrap
+   probability ≥ 0.9) vote for their subclass's MERFISH home division
+   (`wmb_region_share`: OB split from OLF); each 150 µm tile with ≥ 3 votes
+   takes its majority home (ties: the first division in sorted order); a
+   division is present with ≥ 1% of the assigned tiles and a connected
+   (8-neighbour) component of ≥ 3 tiles. Fewer than 200 assigned tiles, or
+   no `obsm["spatial"]`, skip pruning with a warning (status
+   `skipped_few_tiles` / `skipped_no_coordinates`).
+3. **Two-tier drop rule.** A class with less than 20% of its MERFISH
+   grey-matter cells in the present divisions (and at least 100 such cells:
+   E7's `n_grey >= 100`, so `15 HY Gnrh1 Glut`, 55 cells, never takes the
+   strict rule; `min_merfish_cells_class`) drops its subclasses with a
+   present share below 0.3, and its subclasses with fewer than 20 MERFISH
+   cells follow it; any other class drops its subclasses below 0.1. A class
+   losing every subclass is dropped as one node. Astro-Epen, OPC-Oligo,
+   Vascular, Immune and Pineal, and classes without MERFISH grey cells, are
+   never dropped. For the manual ag7 / VZG2 set (Isocortex, HPF, OLF, CTXsp,
+   TH, HY, MB) this gives E7's 60 nodes exactly.
+4. **Pruned re-map.** Only the table cells whose unpruned class or subclass
+   was dropped are mapped again, with `--nodes_to_drop` and the bundle's
+   lookup filtered to the pruned tree (keys of dropped nodes removed,
+   markers restricted to the query, marker-less parents collapsed), so
+   `cell_type_mapper` never meets a zero-marker parent. Every other cell
+   keeps its label by construction. The re-map is reused from
+   `--reuse-from` like a run (same fingerprint, bundle, engine parameters,
+   ctm version, lookup and drop list).
+
+The sample's `mouse_regions` record in `map_manifest.json` holds the
+request, status, tile counts per division, the inferred and the used
+divisions, the drop list (level, label, name, share, rule), the cells
+dropped and changed, the re-map run and the region-share bundle's
+`build_hash`. The provisional labels use the pruned calls (`mmc_wmb_*`) and
+add `mmc_wmb_unpruned_{class,subclass}_{name,bp}`, `region_pruned_changed`
+and `inferred_region`. `load_resolve_runs` gives RESOLVE the pruned table as
+the primary run's `tidy` (the unpruned one as `unpruned_tidy`) and the
+region outputs (`ResolveRun.regions`). Region coupling (`coupled_regions`)
+and other rule variants are M6b and are refused, not ignored. Sagittal, OB-
+and CB-dominated sections are out of scope (use an override or `none`).
 
 A published clustered H5AD of a small sample can have a `min_cells`-filtered
 `var` (P1212 and P5011 reseg MERSCOPE hold 299 and 268 of 300 features).
