@@ -483,7 +483,9 @@ def _hierarchy_sources() -> list[str]:
 # why a change there needs no COMPUTE_CPU re-run of its own.
 HIERARCHY_IMPORT_EXEMPTIONS = {
     "merxen.analysis.mapmycells": "gene-ID fallback tables (annotation config only)",
-    "merxen.config": "config models (the config file is a task input)",
+    "merxen.annotation.samplesheet_columns": (
+        "samplesheet column parsers (their values are in samples_json)"
+    ),
     "merxen.gene_ids": "Ensembl ID pattern (PREPARE's var metadata)",
     "merxen.io.spatialdata_io": "SpatialData writes (FINALIZE, PREPARE)",
     "merxen.io.transcript_io": "column lookups (PREPARE's SpatialData reads)",
@@ -498,6 +500,9 @@ def test_hierarchy_sources_exist_and_cover_their_imports() -> None:
     sources = _hierarchy_sources()
     assert "merxen/clustering" in sources
     assert "merxen/analysis/clustering_squidpy.py" in sources
+    # The config defaults of the map_first fields that no param or PREPARE
+    # config sets reach COMPUTE_CPU only through this file (M5 review).
+    assert "merxen/config.py" in sources
     assert _sources_outside(sources) == set(HIERARCHY_IMPORT_EXEMPTIONS)
     # The vocabularies the hierarchy reads (merxen.annotation.vocab).
     from merxen.annotation import vocab

@@ -94,7 +94,10 @@ class AnnotationReferences {
     // the label-table schema, vocabularies and provenance it reads, the
     // table-key suffix rule, the compute command and the clustering module
     // it runs through (control-feature removal and its registry, plots,
-    // H5AD writing). Like
+    // H5AD writing), and merxen/config.py, whose ClusteringSquidpyConfig
+    // defaults set the map_first fields no Nextflow param or PREPARE config
+    // writes (qc_leiden_resolution, leaf_source, adaptive_split; M5 review:
+    // an edit there re-runs COMPUTE_CPU, also for unrelated fields). Like
     // RESOLVE's, it travels in the task inputs (compute_spec): a hierarchy
     // change re-runs COMPUTE_CPU under -resume, and a RESOLVE re-run with
     // byte-identical labels leaves it cached (cache "deep" on the labels).
@@ -110,6 +113,7 @@ class AnnotationReferences {
         "merxen/analysis/clustering_squidpy.py",
         "merxen/clustering_squidpy_stages.py",
         "merxen/control_features.py",
+        "merxen/config.py",
     ].asImmutable()
 
     // One fingerprint per (source root, source list) and run: every task of
