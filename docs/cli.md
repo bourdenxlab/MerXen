@@ -562,9 +562,11 @@ merxen annotation-panel-simulate --public-panel xenium_prime_5k_mouse \
    (`<reference>/profile_class_depth.csv`); a class with fewer than 100
    profile cells uses the pooled neuronal or non-neuronal profile, and no
    profile crosses species. With profile mode (on by default when a profile
-   is given; `--no-profile-mode`), each emission member of the family
-   (`R1_contam_HO@0`, `@1`, `@2`, plus `R3_measured_HO@0` for Xenium Prime 5K
-   mouse; `--profile-members` to choose) simulates cells at the profile's
+   is given; `--no-profile-mode`), each emission member of the bundle (its
+   recorded members; for a new version-7 bundle the eight of plan §8.3 v7.3,
+   `R1_contam_HO@0`, `@6`-`@10` plus `R3_measured_HO@2`, `@3` for Xenium
+   Prime 5K mouse, else `R1_contam_HO@0`, `@6`-`@12`; `--profile-members` to
+   choose) simulates cells at the profile's
    per-class TOTAL depth (phase 1's D-recipe: `min(max(2 n_c, 2,000), 8 n_c)`
    cells per truth class, 25% spill, exact-total thinning, binned on the
    realised total), maps them onto the self-map engine and reports the raw
@@ -613,8 +615,9 @@ Outputs in `--out-dir`: `simulate_report.json`, `SIMULATE_REPORT.txt`,
 | `--depth-profile PATH`, `--depth-profile-asset ID` | The per-class (or pooled) depth profile of the headline; see step 3. |
 | `--profile-mode/--no-profile-mode`, `--profile-members LIST`, `--real-composition PATH` | Profile mode (default on with a profile), its members and the real composition its cells are weighted to; see step 3. |
 | `--expected-depth N` | Secondary line: the classes emitted at one median depth. |
-| `--resolvability-version auto\|7` | `7`: for a version-6 family (set a, ag7, VZG2, the pinned P5011 family) also compute the resolvability version-7 decisions (ensemble R1 x 3, plus R3 where a measured table exists) on the bundle's test set as a diagnostic: `<reference>/v7_diagnostic/` holds each ensemble's tables, `v7_diagnostic.json` and `V7_DIAGNOSTIC.txt` (version 6 vs 7 emitted triples lost and gained per level and regime). Never written to the store, never applied; the bundle and its emitted decisions are unchanged. Version-7 families build version 7 anyway (plan §8.3 v7.1). |
-| `--v7-fresh-seeds LIST`, `--v7-fresh-r3-seed N` | A fresh version-7 ensemble B (R1 at these seeds, e.g. `3,4,5`; R3 at `N`, default 1) mapped beside ensemble A (the bundle's, or the diagnostic's); its emitted-triple churn is reported (pre-registration §14 (iii), (vii)). Diagnostic only. |
+| `--resolvability-version auto\|7` | `7`: for a version-6 family (set a, ag7, VZG2, the pinned P5011 family) also compute the resolvability version-7 decisions (the eight emission members of plan §8.3 v7.3: R1 x 8, or R1 x 6 + R3 x 2 where a measured table exists) on the bundle's test set as a diagnostic: `<reference>/v7_diagnostic/` holds each ensemble's tables, `v7_diagnostic.json` and `V7_DIAGNOSTIC.txt` (version 6 vs 7 emitted triples lost and gained per level and regime). Never written to the store, never applied; the bundle and its emitted decisions are unchanged. Version-7 families build version 7 anyway (plan §8.3 v7.1). |
+| `--v7-fresh-seeds LIST`, `--v7-fresh-r3-seeds LIST` | A fresh version-7 ensemble B (R1 at these seeds, e.g. `3,4,5`; R3 at these seeds, default `1`; `--v7-fresh-r3-seed` is an alias) mapped beside ensemble A (the bundle's, or the diagnostic's); its emitted-triple churn is reported (pre-registration §14 (iii), (vii)). B must share no member with A. Diagnostic only. |
+| `--v7-comparator` | Ensemble B is the pre-registered comparator of the amended churn re-test (pre-registration §15.4): `R1_contam_HO@20`-`@25` + `R3_measured_HO@20`, `@21` where a measured table exists, else `R1_contam_HO@20`-`@27`. Diagnostic only. |
 | `--gate-p` | The gate-P programme (NP1–NP9: leave-one-donor-out HO bundles, the second mouse test draw, seeds 0 / 1, stress recipes; plan §8.8, §14). M13 registers it (`merxen.annotation.simulate.register_gate_p_hook`, from `scripts/acceptance/new_panel.py`); until then the option is refused before any compute. |
 
 ## `merxen annotate`

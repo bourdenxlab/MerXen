@@ -777,7 +777,8 @@ def simulate_reference(
     chemistry: Any | None = None,
     v7_diagnostic: bool = False,
     v7_fresh_seeds: Sequence[int] | None = None,
-    v7_fresh_r3_seed: int = 1,
+    v7_fresh_r3_seeds: Sequence[int] | None = None,
+    v7_comparator: bool = False,
 ) -> ReferenceSimulation:
     """Build one reference on a panel and predict what it resolves.
 
@@ -807,7 +808,10 @@ def simulate_reference(
             decisions beside it (``run_v7_diagnostic``; never applied).
         v7_fresh_seeds: R1 seeds of a fresh ensemble B whose churn against
             the bundle's (or the diagnostic's) ensemble is reported.
-        v7_fresh_r3_seed: R3 seed of ensemble B.
+        v7_fresh_r3_seeds: R3 seeds of ensemble B (default ``(1,)``, stage
+            D's B).
+        v7_comparator: Run the pre-registered comparator of the amended
+            re-test of §14 (iii) as ensemble B (pre-registration §15.4).
 
     Returns:
         The simulation of the reference.
@@ -967,7 +971,9 @@ def simulate_reference(
                 }
     diagnostic_resources: list[dict[str, Any]] = []
     stored_version = (resolvability or {}).get("resolvability_version")
-    wants_diagnostic = bool(v7_fresh_seeds) or (v7_diagnostic and stored_version != 7)
+    wants_diagnostic = (
+        bool(v7_fresh_seeds) or v7_comparator or (v7_diagnostic and stored_version != 7)
+    )
     if wants_diagnostic and spec.role in ("primary", "secondary"):
         if decisions.empty:
             record["v7_diagnostic"] = {"status": "not_run", "reason": "no self-map"}
@@ -985,7 +991,8 @@ def simulate_reference(
                 scratch_dir=scratch_dir / reference_id / "v7_diagnostic",
                 store_roots=store.roots,
                 fresh_seeds=v7_fresh_seeds,
-                fresh_r3_seed=v7_fresh_r3_seed,
+                fresh_r3_seeds=v7_fresh_r3_seeds,
+                comparator=v7_comparator,
             )
     if chemistry is not None:
         record["panel_card_notes"] = panel_card_notes(
@@ -1390,7 +1397,8 @@ def run_panel_simulation(
     provenance: Mapping[str, Any] | None = None,
     v7_diagnostic: bool = False,
     v7_fresh_seeds: Sequence[int] | None = None,
-    v7_fresh_r3_seed: int = 1,
+    v7_fresh_r3_seeds: Sequence[int] | None = None,
+    v7_comparator: bool = False,
 ) -> dict[str, Any]:
     """Simulate a candidate panel end to end and write its report.
 
@@ -1423,7 +1431,9 @@ def run_panel_simulation(
         v7_diagnostic: ``--resolvability-version 7``: version-7 decisions of
             the version-6 families as a diagnostic (``run_v7_diagnostic``).
         v7_fresh_seeds: R1 seeds of a fresh ensemble B (churn, §14 (iii)).
-        v7_fresh_r3_seed: R3 seed of ensemble B.
+        v7_fresh_r3_seeds: R3 seeds of ensemble B (default ``(1,)``).
+        v7_comparator: Ensemble B = the pre-registered comparator of the
+            amended re-test (pre-registration §15.4).
 
     Returns:
         The report (also written to ``simulate_report.json``).
@@ -1532,7 +1542,10 @@ def run_panel_simulation(
             "gate_p": gate_p,
             "v7_diagnostic": v7_diagnostic,
             "v7_fresh_seeds": None if not v7_fresh_seeds else list(v7_fresh_seeds),
-            "v7_fresh_r3_seed": v7_fresh_r3_seed,
+            "v7_fresh_r3_seeds": None
+            if v7_fresh_r3_seeds is None
+            else list(v7_fresh_r3_seeds),
+            "v7_comparator": bool(v7_comparator),
         },
         "provenance": dict(provenance or {}),
         "references": {},
@@ -1569,7 +1582,8 @@ def run_panel_simulation(
                 chemistry=chemistry,
                 v7_diagnostic=v7_diagnostic,
                 v7_fresh_seeds=v7_fresh_seeds,
-                v7_fresh_r3_seed=v7_fresh_r3_seed,
+                v7_fresh_r3_seeds=v7_fresh_r3_seeds,
+                v7_comparator=v7_comparator,
             )
             report["references"][simulation.reference_id] = simulation.record
             predicted_frames.append(simulation.predicted)
@@ -2676,6 +2690,60 @@ def _headline_rows(frame: pd.DataFrame) -> dict[str, Any]:
     }
 
 
+def profile_ensemble(
+    summary: Mapping[str, Any],
+    resolvability: Any,
+    *,
+    species: str,
+    chemistry: str,
+    member_table: Any | None,
+) -> list[Any]:
+    """Return the emission members profile mode re-simulates for a bundle.
+
+    The bundle's recorded ``emission_members`` (so a bundle built before the
+    amendment of 2026-09-29 keeps its stage-D members); without a record,
+    the family's members of plan §8.3 v7.3 as amended (or the configured
+    ``ensemble_r1_seeds`` / ``ensemble_r3_seeds``).
+
+    Args:
+        summary: The bundle's ``resolvability_summary.json``.
+        resolvability: ``AnnotationConfig.resolvability``.
+        species: The panel's species.
+        chemistry: The panel chemistry.
+        member_table: The ``member`` asset of R3 members, if any.
+
+    Returns:
+        ``resolvability.EnsembleMember`` objects (emission role).
+    """
+    from merxen.annotation import resolvability as res
+
+    recorded = [str(name) for name in summary.get("emission_members") or []]
+    if recorded:
+        return res.members_from_names(
+            recorded,
+            resolvability,
+            member_table=member_table,
+            table_rule=resolvability.r3_table_rule,
+            residual_sd_log2=resolvability.r3_residual_sd_log2,
+        )
+    r1_seeds = resolvability.ensemble_r1_seeds
+    r3_seeds = resolvability.ensemble_r3_seeds
+    return [
+        item
+        for item in res.ensemble_members(
+            resolvability,
+            species=species,
+            chemistry=chemistry,
+            member_table=member_table,
+            r1_seeds=None if r1_seeds is None else tuple(r1_seeds),
+            r3_seeds=None if r3_seeds is None else tuple(r3_seeds),
+            table_rule=resolvability.r3_table_rule,
+            residual_sd_log2=resolvability.r3_residual_sd_log2,
+        )
+        if item.role == "emission"
+    ]
+
+
 def run_profile_mode(
     *,
     reference_id: str,
@@ -2693,14 +2761,14 @@ def run_profile_mode(
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Simulate, map and tabulate the profile-mode cells of each member.
 
-    Each emission member of the family (``R1_contam_HO@0``, ``@1``, ``@2``
-    and ``R3_measured_HO@0`` where a measured table exists; plan §8.3 v7.3)
-    draws its cells with ``simulate_on_profile`` and is mapped with the
-    production configuration onto the self-map engine; its per-class
-    predictions (the raw rule and the bundle's provisional decisions) are
-    weighted to the real called composition when one is given, and the
-    member mean is reported beside each member. Profile mode never enters
-    emission.
+    Each emission member of the bundle (its recorded ``emission_members``;
+    without a record the family's members of plan §8.3 v7.3 as amended on
+    2026-09-29) draws its cells with ``simulate_on_profile`` and is mapped
+    with the production configuration onto the self-map engine; its
+    per-class predictions (the raw rule and the bundle's provisional
+    decisions) are weighted to the real called composition when one is
+    given, and the member mean is reported beside each member. Profile mode
+    never enters emission.
 
     Returns:
         The report record and resource rows.
@@ -2737,16 +2805,13 @@ def run_profile_mode(
         if reference is None
         else si.member_table_for(species, chemistry_name, reference)
     )
-    ensemble = [
-        item
-        for item in res.ensemble_members(
-            config.resolvability,
-            species=species,
-            chemistry=chemistry_name,
-            member_table=member_table,
-        )
-        if item.role == "emission"
-    ]
+    ensemble = profile_ensemble(
+        summary,
+        config.resolvability,
+        species=species,
+        chemistry=chemistry_name,
+        member_table=member_table,
+    )
     if members:
         known = {item.name: item for item in ensemble}
         unknown = sorted(set(members) - set(known))
@@ -2945,27 +3010,33 @@ def run_v7_diagnostic(
     scratch_dir: Path,
     store_roots: Sequence[Path] = (),
     fresh_seeds: Sequence[int] | None = None,
-    fresh_r3_seed: int = 1,
+    fresh_r3_seeds: Sequence[int] | None = None,
+    comparator: bool = False,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Compute version-7 decisions beside a bundle, never applying them.
 
     For a version-6 family (set a, ag7, VZG2, the P5011 pin) the
-    ensemble A (R1 x ``ensemble_r1_seeds``, plus R3 where a measured table of
-    the species x chemistry exists) is simulated on the bundle's own test
-    set (not topped up) and engine, decided by ``ensemble_decide`` and
-    compared with the bundle's stored version-6 decisions (emitted triples
-    lost and gained per level and regime). With ``fresh_seeds`` a fresh
-    ensemble B (R1 at those seeds, R3 at ``fresh_r3_seed``) is run too and
-    the churn A vs B reported; for a version-7 bundle A is the bundle's own
-    ensemble. Everything is written under ``out_dir/v7_diagnostic`` (never
-    the store); the bundle is only read.
+    ensemble A (the version-7 emission members of plan §8.3 v7.3 as amended
+    on 2026-09-29: R1 x 8 without a measured table, or
+    ``ensemble_r1_seeds`` / ``ensemble_r3_seeds``) is simulated on the
+    bundle's own test set (not topped up) and engine, decided by
+    ``ensemble_decide`` and compared with the bundle's stored version-6
+    decisions (emitted triples lost and gained per level and regime); for a
+    version-7 bundle A is the bundle's own ensemble. With ``comparator`` the
+    pre-registered comparator of the amended re-test of §14 (iii)
+    (``default_member_seeds(..., comparator=True)``; pre-registration §15.4)
+    is run as ensemble B, otherwise with ``fresh_seeds`` a fresh ensemble B
+    (R1 at those seeds, R3 at ``fresh_r3_seeds``, default ``(1,)`` as in
+    stage D); the churn A vs B is reported. B must share no member with A.
+    Everything is written under ``out_dir/v7_diagnostic`` (never the store);
+    the bundle is only read.
 
     Returns:
         The report record and resource rows.
 
     Raises:
         SimulationError: If the test set is missing, the output lies inside
-            a store, or the bundle has no self-map.
+            a store, the bundle has no self-map, or B shares a member with A.
     """
     from merxen.annotation import reference as ref
     from merxen.annotation import resolvability as res
@@ -3017,7 +3088,9 @@ def run_v7_diagnostic(
         runs=runs,
     )
 
-    def emission(seeds: Sequence[int], r3_seed: int) -> list[Any]:
+    def emission(
+        r1_seeds: Sequence[int] | None, r3_seeds: Sequence[int] | None
+    ) -> list[Any]:
         return [
             member
             for member in res.ensemble_members(
@@ -3025,9 +3098,10 @@ def run_v7_diagnostic(
                 species=species,
                 chemistry=chemistry_name,
                 member_table=member_table,
-                r1_seeds=tuple(int(seed) for seed in seeds),
-                r3_seed=int(r3_seed),
+                r1_seeds=None if r1_seeds is None else tuple(r1_seeds),
+                r3_seeds=None if r3_seeds is None else tuple(r3_seeds),
                 table_rule=config.resolvability.r3_table_rule,
+                residual_sd_log2=config.resolvability.r3_residual_sd_log2,
             )
             if member.role == "emission"
         ]
@@ -3068,12 +3142,35 @@ def run_v7_diagnostic(
         if stored_version != res.RESOLVABILITY_VERSION_V7
         else "the bundle's topped-up test set",
     }
+    members_b: list[Any] = []
+    kind_b = None
+    if comparator:
+        r1_b, r3_b = res.default_member_seeds(member_table is not None, comparator=True)
+        members_b, kind_b = emission(r1_b, r3_b), "comparator"
+    elif fresh_seeds:
+        members_b = emission(
+            fresh_seeds, fresh_r3_seeds if fresh_r3_seeds is not None else (1,)
+        )
+        kind_b = "fresh"
     first: pd.DataFrame
     if stored_version == res.RESOLVABILITY_VERSION_V7:
-        first = stored
-        record["ensemble_a"] = {"source": "bundle"}
+        names_a = [str(name) for name in tables.summary.get("emission_members") or []]
     else:
-        members_a = emission(config.resolvability.ensemble_r1_seeds, 0)
+        members_a = emission(
+            config.resolvability.ensemble_r1_seeds,
+            config.resolvability.ensemble_r3_seeds,
+        )
+        names_a = [member.name for member in members_a]
+    shared = sorted({member.name for member in members_b} & set(names_a))
+    if shared:
+        raise SimulationError(
+            f"{reference_id}: ensemble B shares members {shared} with ensemble A; "
+            "a churn test needs independent keyed draws"
+        )
+    if stored_version == res.RESOLVABILITY_VERSION_V7:
+        first = stored
+        record["ensemble_a"] = {"source": "bundle", "members": names_a}
+    else:
         result_a = run(members_a, "ensemble_A")
         first = result_a.decisions
         record["ensemble_a"] = {
@@ -3082,10 +3179,10 @@ def run_v7_diagnostic(
             "files": str(target / "ensemble_A"),
         }
         record["version_6_vs_7"] = res.v7_diagnostic_comparison(stored, first)
-    if fresh_seeds:
-        members_b = emission(fresh_seeds, fresh_r3_seed)
+    if members_b:
         result_b = run(members_b, "ensemble_B")
         record["ensemble_b"] = {
+            "kind": kind_b,
             "members": [member.name for member in members_b],
             "ensemble": result_b.summary["ensemble"],
             "files": str(target / "ensemble_B"),

@@ -5008,9 +5008,34 @@ V7_LARGE_PANEL_GRID: Final[tuple[int, ...]] = (
     3000,
 )
 V7_LARGE_PANEL_GENES: Final = 1000
-# Ensemble members (v7.3; fixed by pre-registration §14.3, only tightenable).
-V7_R1_SEEDS: Final[tuple[int, ...]] = (0, 1, 2)
-V7_R3_SEED: Final = 0
+# Ensemble members (v7.3 as amended on 2026-09-29: orchestrator decision D1 (a),
+# pending the user's confirmation; pre-registration §15.3, fixed there and only
+# tightenable). Eight emission members per version-7 family: R1 x 6 + R3 x 2
+# where the species x chemistry has a measured factor table, else R1 x 8.
+# R1@0 is the pre-registered realisation (gate P's NP3 base); seeds 1-5 of R1
+# and 0-1 of R3 were drawn for the ensembles A and B of the failed stage-D test
+# (iii) and are not re-used.
+V7_R1_SEEDS_WITH_TABLE: Final[tuple[int, ...]] = (0, 6, 7, 8, 9, 10)
+V7_R1_SEEDS_WITHOUT_TABLE: Final[tuple[int, ...]] = (0, 6, 7, 8, 9, 10, 11, 12)
+V7_R3_SEEDS: Final[tuple[int, ...]] = (2, 3)
+V7_EMISSION_MEMBERS: Final = 8
+# The comparator of the amended re-test of pre-registration §14 (iii) (§15.4):
+# disjoint from every production and stage-D member; never production.
+V7_COMPARATOR_R1_SEEDS_WITH_TABLE: Final[tuple[int, ...]] = (20, 21, 22, 23, 24, 25)
+V7_COMPARATOR_R1_SEEDS_WITHOUT_TABLE: Final[tuple[int, ...]] = (
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+)
+V7_COMPARATOR_R3_SEEDS: Final[tuple[int, ...]] = (20, 21)
+# The ensembles of stages A-D (the bundles built before the amendment keep them).
+V7_STAGE_D_R1_SEEDS: Final[tuple[int, ...]] = (0, 1, 2)
+V7_STAGE_D_R3_SEEDS: Final[tuple[int, ...]] = (0,)
 V7_STRESS_SEED: Final = 0
 MemberRole = Literal["emission", "reported", "stress"]
 MEMBER_ROLES: Final[tuple[str, ...]] = ("emission", "reported", "stress")
@@ -5236,6 +5261,35 @@ def member_recipe(
     )
 
 
+def default_member_seeds(
+    has_table: bool, *, comparator: bool = False
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Return the ``(R1 seeds, R3 seeds)`` of a version-7 ensemble (v7.3).
+
+    As amended on 2026-09-29 (pre-registration §15.3): eight emission
+    members, R1 x 6 + R3 x 2 where the family's species x chemistry has a
+    measured factor table, else R1 x 8. ``comparator`` returns the
+    comparator of the amended re-test of §14 (iii) instead, disjoint from
+    every production and stage-D member (never production).
+
+    Args:
+        has_table: Whether a measured ``member`` table exists (an R3 member).
+        comparator: Return the re-test's comparator seeds.
+
+    Returns:
+        R1 seeds and R3 seeds (the R3 seeds are empty without a table).
+    """
+    if comparator:
+        r1 = (
+            V7_COMPARATOR_R1_SEEDS_WITH_TABLE
+            if has_table
+            else V7_COMPARATOR_R1_SEEDS_WITHOUT_TABLE
+        )
+        return r1, V7_COMPARATOR_R3_SEEDS if has_table else ()
+    r1 = V7_R1_SEEDS_WITH_TABLE if has_table else V7_R1_SEEDS_WITHOUT_TABLE
+    return r1, V7_R3_SEEDS if has_table else ()
+
+
 def ensemble_members(
     config: AnnotationResolvabilityConfig,
     *,
@@ -5243,19 +5297,22 @@ def ensemble_members(
     chemistry: str,
     member_table: Any | None = None,
     stress_table: Any | None = None,
-    r1_seeds: Sequence[int] = V7_R1_SEEDS,
-    r3_seed: int = V7_R3_SEED,
+    r1_seeds: Sequence[int] | None = None,
+    r3_seeds: Sequence[int] | None = None,
     table_rule: str = "restricted",
+    residual_sd_log2: float | None = None,
 ) -> list[EnsembleMember]:
-    """Return a version-7 family's members (plan §8.3 v7.3 table).
+    """Return a version-7 family's members (plan §8.3 v7.3 table, as amended).
 
-    Emission: ``R1_contam_HO@0``, ``@1``, ``@2`` plus ``R3_measured_HO@0``
-    when the family's species x chemistry has a measured ``member`` table
-    (Xenium Prime 5K mouse); reported: ``clean@0``; stress (human Prime
-    families with the lung ratio table): ``R1_xtissue_lung_stress@0``. R3 is
-    one member, never the base (user decision 3); ``R1@0`` is the
-    pre-registered realisation. The version-6 families' diagnostic uses the
-    same rule (no table: R1 x 3).
+    Emission: eight members (amendment of 2026-09-29, pre-registration
+    §15.3) -- ``R1_contam_HO@0``, ``@6``-``@10`` plus ``R3_measured_HO@2``,
+    ``@3`` when the family's species x chemistry has a measured ``member``
+    table (Xenium Prime 5K mouse), else ``R1_contam_HO@0``, ``@6``-``@12``;
+    reported: ``clean@0``; stress (human Prime families with the lung ratio
+    table, reported only and never an emission member):
+    ``R1_xtissue_lung_stress@0``. R3 is one member, never the base (user
+    decision 3); ``R1@0`` is the pre-registered realisation. The version-6
+    families' diagnostic uses the same rule (no table: R1 x 8).
 
     Args:
         config: Resolvability settings.
@@ -5263,17 +5320,29 @@ def ensemble_members(
         chemistry: ``sim_inputs.resolve_chemistry`` result.
         member_table: The family's ``member`` asset (``None``: no R3).
         stress_table: The human lung ``stress`` asset (``None``: no stress).
-        r1_seeds: R1 member seeds.
-        r3_seed: R3 member seed.
+        r1_seeds: R1 member seeds (``None``: ``default_member_seeds``).
+        r3_seeds: R3 member seeds (``None``: ``default_member_seeds``);
+            ignored without a table.
         table_rule: R3 table rule.
+        residual_sd_log2: R3 residual SD (``None``: 0.20 log2).
 
     Returns:
-        Members: emission first (R1 seeds, then R3), then reported, then
-        stress.
+        Members: emission first (R1 seeds, then R3 seeds), then reported,
+        then stress.
+
+    Raises:
+        ResolvabilityError: For a member table of another species or
+            repeated seeds.
     """
+    default_r1, default_r3 = default_member_seeds(member_table is not None)
+    r1 = tuple(int(seed) for seed in (default_r1 if r1_seeds is None else r1_seeds))
+    r3 = tuple(int(seed) for seed in (default_r3 if r3_seeds is None else r3_seeds))
+    for label, seeds in (("R1", r1), ("R3", r3)):
+        if len(set(seeds)) != len(seeds):
+            raise ResolvabilityError(f"{label} member seeds repeat: {list(seeds)}")
     members = [
         EnsembleMember(member_recipe(DECISION_RECIPE, seed, config), "emission")
-        for seed in r1_seeds
+        for seed in r1
     ]
     if member_table is not None:
         if member_table.species != species:
@@ -5281,17 +5350,19 @@ def ensemble_members(
                 f"{member_table.asset_id} is a {member_table.species} table; "
                 f"factors never cross species ({species})"
             )
-        members.append(
+        members.extend(
             EnsembleMember(
                 member_recipe(
                     R3_RECIPE,
-                    r3_seed,
+                    seed,
                     config,
                     table=member_table,
                     table_rule=table_rule,
+                    residual_sd_log2=residual_sd_log2,
                 ),
                 "emission",
             )
+            for seed in r3
         )
     members.append(EnsembleMember(member_recipe(CLEAN_RECIPE, 0, config), "reported"))
     if (
@@ -5306,6 +5377,73 @@ def ensemble_members(
                     LUNG_STRESS_RECIPE, V7_STRESS_SEED, config, table=stress_table
                 ),
                 "stress",
+            )
+        )
+    return members
+
+
+def parse_member_name(name: str) -> tuple[str, int]:
+    """Return ``(recipe, seed)`` of a member name ``<recipe>@<seed>``.
+
+    Raises:
+        ResolvabilityError: If the name has no ``@<seed>`` suffix.
+    """
+    recipe, separator, seed = str(name).rpartition("@")
+    if not separator or not recipe or not seed.lstrip("-").isdigit():
+        raise ResolvabilityError(f"{name!r} is not a member name <recipe>@<seed>")
+    return recipe, int(seed)
+
+
+def members_from_names(
+    names: Sequence[str],
+    config: AnnotationResolvabilityConfig,
+    *,
+    member_table: Any | None = None,
+    stress_table: Any | None = None,
+    table_rule: str = "restricted",
+    residual_sd_log2: float | None = None,
+    role: MemberRole = "emission",
+) -> list[EnsembleMember]:
+    """Return the members a bundle records by name (e.g. its emission members).
+
+    Profile mode and the diagnostics re-simulate a bundle's own members, so a
+    bundle built before the amendment of 2026-09-29 keeps its stage-D
+    members.
+
+    Args:
+        names: Member names (``resolvability_summary.json``
+            ``emission_members``).
+        config: Resolvability settings.
+        member_table: The ``member`` asset of R3 members.
+        stress_table: The ``stress`` asset of the lung stress member.
+        table_rule: R3 table rule.
+        residual_sd_log2: R3 residual SD.
+        role: The members' role.
+
+    Returns:
+        The members, in the order given.
+    """
+    members = []
+    for name in names:
+        recipe, seed = parse_member_name(name)
+        table = (
+            member_table
+            if recipe == R3_RECIPE
+            else stress_table
+            if recipe == LUNG_STRESS_RECIPE
+            else None
+        )
+        members.append(
+            EnsembleMember(
+                member_recipe(
+                    recipe,
+                    seed,
+                    config,
+                    table=table,
+                    table_rule=table_rule,
+                    residual_sd_log2=residual_sd_log2,
+                ),
+                role,
             )
         )
     return members
@@ -5702,11 +5840,13 @@ def v7_simulation_payload(
 ) -> dict[str, Any]:
     """Return what a version-7 self-map's ``build_hash`` holds (v7.1).
 
-    Every version-7 input: the version, the members (recipes with their
-    table sha256), every simulation-input asset used (id, version, sha256),
-    the chemistry, the grid, the top-up rule and the simulation
-    conventions. A version-6 bundle's payload never holds it, so version-6
-    ``build_hash`` values are unchanged (pre-registration §14 (i)).
+    Every version-7 input: the version, the ensemble rule's version
+    (``ENSEMBLE_RULE_VERSION``: 2 since the amendment of 2026-09-29, so no
+    bundle decided by the stage A-D rule is reused), the members (recipes
+    with their table sha256), every simulation-input asset used (id,
+    version, sha256), the chemistry, the grid, the top-up rule and the
+    simulation conventions. A version-6 bundle's payload never holds it, so
+    version-6 ``build_hash`` values are unchanged (pre-registration §14 (i)).
 
     Args:
         members: The ensemble members.
@@ -5722,6 +5862,7 @@ def v7_simulation_payload(
 
     return {
         "resolvability_version": RESOLVABILITY_VERSION_V7,
+        "ensemble_rule_version": ENSEMBLE_RULE_VERSION,
         "members": [member.to_json() for member in members],
         "assets": si.asset_hashes(assets),
         "chemistry": dict(chemistry) if isinstance(chemistry, Mapping) else chemistry,
@@ -5754,6 +5895,20 @@ ENSEMBLE_RECIPE: Final = "ensemble"
 CLASS_DEPTH_FILE: Final = "resolvability_class_depth.parquet"
 REASON_ENSEMBLE_PREFIX: Final = "ensemble_"
 REASON_ENSEMBLE_SPREAD: Final = "ensemble_spread"
+# The spread route's margin (amendment of 2026-09-29, pre-registration §15.3):
+# E1 and the spread limit pass, the pooled Wilson bound does not clear its
+# limit by the margin.
+REASON_ENSEMBLE_SPREAD_MARGIN: Final = "ensemble_spread_margin"
+REASONS_ENSEMBLE_E2: Final[tuple[str, ...]] = (
+    REASON_ENSEMBLE_SPREAD,
+    REASON_ENSEMBLE_SPREAD_MARGIN,
+)
+# The ensemble rule's version in a version-7 build hash: 1 = stages A-D; 2 =
+# the amendment of 2026-09-29 (eight members, the spread margin).
+ENSEMBLE_RULE_VERSION: Final = 2
+# The spread margin of a bundle whose ensemble settings do not record one
+# (built before the amendment): it re-derives its decisions as built.
+SPREAD_MARGIN_BEFORE_AMENDMENT: Final = 0.0
 REASON_TOO_FEW_FIT_CELLS: Final = "too_few_fit_cells"
 RULE_UNANIMOUS: Final = "unanimous"
 RULE_SPREAD: Final = "spread"
@@ -5774,6 +5929,9 @@ V7_DECISION_COLUMNS: Final[tuple[str, ...]] = (
     "member_spread",
     "spread_limit",
     "spread_ok",
+    "spread_se",
+    "wilson_clearance",
+    "spread_margin_ok",
     "n_rows",
     "monotone_filled",
     "fill_source",
@@ -5795,6 +5953,7 @@ V7_BOOL_COLUMNS: Final[tuple[str, ...]] = (
     "saturated_bp",
     "member_emitted",
     "spread_ok",
+    "spread_margin_ok",
     "monotone_filled",
     "nonneuronal_high_depth",
 )
@@ -5821,6 +5980,11 @@ class EnsembleSettings:
         monotone_depth: Apply the monotone fill (v7.9).
         nonneuronal_monotone_max_depth: Non-neuronal bins at or above this
             depth are never filled (1,000).
+        spread_wilson_margin_se: The spread route of E2 needs the pooled
+            Wilson bound to clear ``target - wilson_margin`` by this many
+            standard errors of the pooled precision (1; amendment of
+            2026-09-29, pre-registration §15.3; 0: no margin, the rule of
+            stages A-D).
     """
 
     spread_floor: float = 0.03
@@ -5829,6 +5993,7 @@ class EnsembleSettings:
     saturated_bp_share: float = 0.90
     monotone_depth: bool = True
     nonneuronal_monotone_max_depth: int = 1000
+    spread_wilson_margin_se: float = 1.0
 
     def spread_limit(self, p_bar: float, n_bar: float) -> float:
         """Return ``max(floor, multiplier * sqrt(p (1 - p) / n))`` (NP4's statistic).
@@ -5885,13 +6050,48 @@ class EnsembleSettings:
                     defaults.nonneuronal_monotone_max_depth,
                 )
             ),
+            spread_wilson_margin_se=float(
+                getattr(
+                    resolvability,
+                    "ensemble_spread_wilson_margin_se",
+                    defaults.spread_wilson_margin_se,
+                )
+            ),
         )
 
     @classmethod
     def from_json(cls, payload: Mapping[str, Any] | None) -> EnsembleSettings:
-        """Rebuild the settings from ``to_json`` output (defaults for gaps)."""
+        """Rebuild the settings from ``to_json`` output (defaults for gaps).
+
+        A bundle built before the amendment of 2026-09-29 records no spread
+        margin and gets ``SPREAD_MARGIN_BEFORE_AMENDMENT`` (0), so its
+        decisions re-derive as built.
+        """
         fields_ = cls.__dataclass_fields__
-        return cls(**{k: v for k, v in dict(payload or {}).items() if k in fields_})
+        values = {k: v for k, v in dict(payload or {}).items() if k in fields_}
+        values.setdefault("spread_wilson_margin_se", SPREAD_MARGIN_BEFORE_AMENDMENT)
+        return cls(**values)
+
+    def spread_margin_ok(self, wilson_clearance: float, standard_error: float) -> bool:
+        """Return whether a set may use E2's spread route (pre-registration §15.3).
+
+        Args:
+            wilson_clearance: ``L - (target - wilson_margin)``, the pooled
+                Wilson bound's clearance of its E1 limit.
+            standard_error: ``pooled_standard_error`` of the set.
+
+        Returns:
+            True without a margin (0); else whether the clearance reaches
+            ``spread_wilson_margin_se`` standard errors (float tolerance).
+        """
+        if not self.spread_wilson_margin_se > 0:
+            return True
+        if not (math.isfinite(wilson_clearance) and math.isfinite(standard_error)):
+            return False
+        return bool(
+            wilson_clearance
+            >= float(self.spread_wilson_margin_se) * standard_error - _TOLERANCE
+        )
 
     def to_json(self) -> dict[str, Any]:
         """Return the settings as JSON."""
@@ -6011,6 +6211,28 @@ def distinct_cell_stats(
     )
 
 
+def pooled_standard_error(precision: float, n_effective: float) -> float:
+    """Return ``sqrt(p (1 - p) / n_eff)``, the SE of a pooled set's precision.
+
+    The binomial standard error of the pooled point precision on the
+    effective n of its Wilson bound (Kish n x distinct test cells / rows; the
+    distinct confidently called test cells when unweighted), NP4's statistic
+    applied to the pooled set (amendment of 2026-09-29, pre-registration
+    §15.3). 0 when ``p`` is 0 or 1.
+
+    Args:
+        precision: The pooled point precision at the applied threshold.
+        n_effective: Its effective n.
+
+    Returns:
+        The standard error (``nan`` without a precision or a positive n).
+    """
+    if not (math.isfinite(precision) and n_effective > 0):
+        return math.nan
+    p = min(max(float(precision), 0.0), 1.0)
+    return math.sqrt(p * (1.0 - p) / float(n_effective))
+
+
 def member_spread(
     precisions: Sequence[float],
     effective_n: Sequence[float],
@@ -6073,6 +6295,9 @@ def _set_records(
                 "n_rows": 0,
                 "e1_reason": "no_calls",
                 "spread_ok": False,
+                "spread_se": math.nan,
+                "wilson_clearance": math.nan,
+                "spread_margin_ok": False,
                 "would_raise": False,
                 "would_raise_evaluable": False,
             }
@@ -6130,6 +6355,10 @@ def _set_records(
             effective.append(member_stats.n_effective)
             coverages.append(member_stats.coverage)
         spread, limit, within = member_spread(precisions, effective, ensemble)
+        # The spread route's margin (pre-registration §15.3): the pooled
+        # Wilson bound's clearance of its E1 limit, in SE of the precision.
+        standard_error = pooled_standard_error(stats.precision, stats.n_effective)
+        clearance = float(stats.wilson_lb) - (target - settings.wilson_margin)
         finite_p = [value for value in precisions if math.isfinite(value)]
         n_rows = (
             int((meets_threshold(check.bp, applied) & (check.weight > 0)).sum())
@@ -6173,6 +6402,9 @@ def _set_records(
             "member_spread": spread,
             "spread_limit": limit,
             "spread_ok": bool(within),
+            "spread_se": standard_error,
+            "wilson_clearance": clearance,
+            "spread_margin_ok": ensemble.spread_margin_ok(clearance, standard_error),
         }
     return records
 
@@ -6188,7 +6420,15 @@ def _ensemble_judged(record: Mapping[str, Any], settings: RuleSettings) -> bool:
 
 
 def _verdict(record: Mapping[str, Any], unanimous: bool) -> dict[str, Any]:
-    """E1 and E2 of one bin: its status, reason and ensemble rule (v7.7)."""
+    """E1 and E2 of one tested set: its status, reason and ensemble rule (v7.7).
+
+    E1 first; then E2's unanimous route (every emission member emits the
+    bin) or its spread route, which needs the spread within its limit and,
+    since the amendment of 2026-09-29 (pre-registration §15.3), the pooled
+    Wilson bound clearing its limit by the margin (``spread_margin_ok``,
+    computed by ``_set_records``). Used for a bin's own set, the pool a
+    pooled bin takes and the pool whose failure withdraws the judged bins.
+    """
     e1 = record.get("e1_reason")
     if e1 is not None:
         return {
@@ -6202,13 +6442,19 @@ def _verdict(record: Mapping[str, Any], unanimous: bool) -> dict[str, Any]:
             "reason": None,
             "ensemble_rule": RULE_UNANIMOUS,
         }
-    if record.get("spread_ok"):
-        return {"status": STATUS_EMITTED, "reason": None, "ensemble_rule": RULE_SPREAD}
-    return {
-        "status": STATUS_NOT_RESOLVABLE,
-        "reason": REASON_ENSEMBLE_SPREAD,
-        "ensemble_rule": None,
-    }
+    if not record.get("spread_ok"):
+        return {
+            "status": STATUS_NOT_RESOLVABLE,
+            "reason": REASON_ENSEMBLE_SPREAD,
+            "ensemble_rule": None,
+        }
+    if not record.get("spread_margin_ok"):
+        return {
+            "status": STATUS_NOT_RESOLVABLE,
+            "reason": REASON_ENSEMBLE_SPREAD_MARGIN,
+            "ensemble_rule": None,
+        }
+    return {"status": STATUS_EMITTED, "reason": None, "ensemble_rule": RULE_SPREAD}
 
 
 class _EnsemblePools:
@@ -6621,9 +6867,12 @@ def ensemble_decide(
     ``t*_pool`` (the saturated cap, v7.8; the default in the validated
     regime) and (E2) every emission member emits the bin by its own decision
     or the member spread there is within ``max(floor, k * SE)`` with every
-    member holding ``member_min_confident`` calls. Then the monotone fill
-    (v7.9). A failure takes E1's reason prefixed ``ensemble_`` or
-    ``ensemble_spread``.
+    member holding ``member_min_confident`` calls and, since the amendment of
+    2026-09-29 (pre-registration §15.3), the set's Wilson bound clears
+    ``target - wilson_margin`` by ``spread_wilson_margin_se`` standard errors
+    of its precision (``pooled_standard_error``). Then the monotone fill
+    (v7.9). A failure takes E1's reason prefixed ``ensemble_``,
+    ``ensemble_spread`` or ``ensemble_spread_margin``.
 
     Args:
         cells: A version-7 cells table (``member`` column).
@@ -7032,7 +7281,8 @@ def ensemble_summary(
     """Return the summary's ``ensemble`` record (v7.7-v7.10).
 
     Per regime: bins, emitted bins by rule (unanimous, spread, filled),
-    E1 and spread failures, saturated and non-neuronal high-depth bins, the
+    E1, spread and spread-margin failures, saturated and non-neuronal
+    high-depth bins, the
     member spread's distribution where it was evaluated, how often the
     members agree, and each member's emitted count; per level the same
     counts.
@@ -7059,7 +7309,7 @@ def ensemble_summary(
         # The spread of the bins whose E1 passed (where E2 decided).
         tested = (
             frame["ensemble_rule"].notna()
-            | (frame["ensemble_reason"] == REASON_ENSEMBLE_SPREAD)
+            | frame["ensemble_reason"].isin(REASONS_ENSEMBLE_E2)
         ).to_numpy()
         spread = frame["member_spread"].to_numpy(np.float64)[tested]
         finite = spread[np.isfinite(spread)]
@@ -7088,12 +7338,15 @@ def ensemble_summary(
         record["regimes"][regime] = {
             **counts(frame),
             "n_spread_failed": int((reason == REASON_ENSEMBLE_SPREAD).sum()),
+            "n_spread_margin_failed": int(
+                (reason == REASON_ENSEMBLE_SPREAD_MARGIN).sum()
+            ),
             "n_ensemble_e1_failed": int(
                 reason.map(
                     lambda value: (
                         isinstance(value, str)
                         and value.startswith(REASON_ENSEMBLE_PREFIX)
-                        and value != REASON_ENSEMBLE_SPREAD
+                        and value not in REASONS_ENSEMBLE_E2
                     )
                 ).sum()
             ),
@@ -7262,6 +7515,8 @@ def _typed_v7_table(combined: pd.DataFrame) -> pd.DataFrame:
         "member_min_n",
         "member_spread",
         "spread_limit",
+        "spread_se",
+        "wilson_clearance",
         "fill_precision",
         "fill_coverage",
     )
@@ -7584,6 +7839,8 @@ def build_summary_v7(
                 "saturated_bp": bool(record["saturated_bp"]),
                 "member_spread": _optional_float(record["member_spread"]),
                 "spread_limit": _optional_float(record["spread_limit"]),
+                "spread_se": _optional_float(record["spread_se"]),
+                "wilson_clearance": _optional_float(record["wilson_clearance"]),
             }
         )
     unfilled = unfilled_decisions(decisions)

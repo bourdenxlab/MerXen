@@ -241,6 +241,45 @@ def test_the_class_depth_predictor_sums_emitted_bins() -> None:
     assert headline["class"]["predicted_coverage"] == pytest.approx(0.325)
 
 
+def test_profile_mode_re_simulates_the_bundles_own_members() -> None:
+    table = si.get_asset(si.EFFICIENCY_MOUSE_PRIME)
+    stage_d = {
+        "emission_members": [
+            "R1_contam_HO@0",
+            "R1_contam_HO@1",
+            "R1_contam_HO@2",
+            "R3_measured_HO@0",
+        ]
+    }
+    members = simulate.profile_ensemble(
+        stage_d, CONFIG, species="mouse", chemistry="xenium_prime", member_table=table
+    )
+    assert [item.name for item in members] == stage_d["emission_members"]
+    assert all(item.role == "emission" for item in members)
+    # Without a record: the family's members (R1 x 6 + R3 x 2 with a table).
+    default = simulate.profile_ensemble(
+        {}, CONFIG, species="mouse", chemistry="xenium_prime", member_table=table
+    )
+    assert [item.name for item in default] == [
+        *[f"R1_contam_HO@{seed}" for seed in (0, 6, 7, 8, 9, 10)],
+        "R3_measured_HO@2",
+        "R3_measured_HO@3",
+    ]
+    configured = AnnotationResolvabilityConfig(
+        ensemble_r1_seeds=[4], ensemble_r3_seeds=[5]
+    )
+    assert [
+        item.name
+        for item in simulate.profile_ensemble(
+            {},
+            configured,
+            species="mouse",
+            chemistry="xenium_prime",
+            member_table=table,
+        )
+    ] == ["R1_contam_HO@4", "R3_measured_HO@5"]
+
+
 def test_depth_profiles_never_cross_species(tmp_path: Path) -> None:
     with pytest.raises(simulate.SimulationError, match="crosses species"):
         simulate.load_simulation_profile(
@@ -332,11 +371,15 @@ def test_simulation_headline_is_the_depth_profile(
     assert report["panel"]["chemistry"]["chemistry"] == "unknown"
     mode = record["profile_mode"]
     assert mode["status"] == "run", mode
-    assert mode["members"] == ["R1_contam_HO@0", "R1_contam_HO@1", "R1_contam_HO@2"]
+    # Profile mode re-simulates the bundle's own emission members (R1 x 8).
+    bundle_summary = json.loads(
+        (Path(record["bundle_dir"]) / "resolvability_summary.json").read_text()
+    )
+    members = [f"R1_contam_HO@{seed}" for seed in (0, 6, 7, 8, 9, 10, 11, 12)]
+    assert bundle_summary["emission_members"] == members
+    assert mode["members"] == members
     assert [tag for tag in mapped if tag.startswith("profile_")] == [
-        "profile_R1_contam_HO@0",
-        "profile_R1_contam_HO@1",
-        "profile_R1_contam_HO@2",
+        f"profile_{name}" for name in members
     ]
     assert mode["member_mean_all"]["n"] > 0
     out = tmp_path / "out"

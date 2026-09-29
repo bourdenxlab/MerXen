@@ -622,11 +622,22 @@ class AnnotationResolvabilityConfig(_AnnotationModel):
             forcing 7 on a version-6 family is refused outside the
             diagnostic (``annotation-panel-simulate --resolvability-version
             7``).
-        ensemble_r1_seeds: Seeds of the ``R1_contam_HO`` emission members.
+        ensemble_r1_seeds: Seeds of the ``R1_contam_HO`` emission members
+            (``None``: the family-type default of plan §8.3 v7.3 as amended
+            on 2026-09-29, ``[0, 6, 7, 8, 9, 10]`` where the species x
+            chemistry has a measured factor table, else ``[0, 6, ..., 12]``;
+            ``resolvability.default_member_seeds``).
+        ensemble_r3_seeds: Seeds of the ``R3_measured_HO`` emission members
+            where a measured table exists (``None``: ``[2, 3]``).
         ensemble_spread_floor: E2's smallest allowed member spread.
         ensemble_spread_se_multiplier: E2's spread limit in standard errors.
         ensemble_member_min_confident: Confident check-half calls (Kish n)
             each member needs for the spread test.
+        ensemble_spread_wilson_margin_se: The spread route of E2 needs the
+            pooled Wilson bound to clear ``target - wilson_margin`` by this
+            many standard errors ``sqrt(p (1 - p) / n_eff)`` of the pooled
+            precision (amendment of 2026-09-29, pre-registration §15.3; the
+            unanimous route is unaffected).
         saturated_bp_share: Fit-half share at ``bp = 1`` above which a set
             without a local threshold is judged at the cap (v7.8).
         monotone_depth: Apply the monotone-in-depth fill (v7.9).
@@ -674,10 +685,12 @@ class AnnotationResolvabilityConfig(_AnnotationModel):
     gate_p_spread_se_multiplier: float = Field(default=3.5, gt=0.0)
     gate_p_min_coverage: float = 0.30
     version: Literal["auto", 6, 7] = "auto"
-    ensemble_r1_seeds: list[int] = Field(default_factory=lambda: [0, 1, 2])
+    ensemble_r1_seeds: list[int] | None = None
+    ensemble_r3_seeds: list[int] | None = None
     ensemble_spread_floor: float = Field(default=0.03, ge=0.0)
     ensemble_spread_se_multiplier: float = Field(default=3.5, gt=0.0)
     ensemble_member_min_confident: int = Field(default=10, ge=1)
+    ensemble_spread_wilson_margin_se: float = Field(default=1.0, ge=0.0)
     saturated_bp_share: float = 0.90
     monotone_depth: bool = True
     nonneuronal_monotone_max_depth: int = Field(default=1000, ge=1)
@@ -731,10 +744,10 @@ class AnnotationResolvabilityConfig(_AnnotationModel):
     ) -> AnnotationResolvabilityConfig:
         if not self.gate_p_seeds:
             raise ValueError("gate_p_seeds must not be empty")
-        if not self.ensemble_r1_seeds or len(set(self.ensemble_r1_seeds)) != len(
-            self.ensemble_r1_seeds
-        ):
-            raise ValueError("ensemble_r1_seeds must be distinct and not empty")
+        for name in ("ensemble_r1_seeds", "ensemble_r3_seeds"):
+            seeds = getattr(self, name)
+            if seeds is not None and (not seeds or len(set(seeds)) != len(seeds)):
+                raise ValueError(f"{name} must be distinct and not empty")
         if self.gate_p_replicate_min_confident_n > self.gate_p_min_confident_n:
             raise ValueError(
                 "gate_p_replicate_min_confident_n cannot exceed gate_p_min_confident_n"

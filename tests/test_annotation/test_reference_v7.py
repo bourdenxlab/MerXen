@@ -113,11 +113,10 @@ def test_a_version_6_payload_holds_no_version_7_input(tmp_path: Path) -> None:
     assert params["resolvability_version"] == 7
     assert "recipes" not in params
     assert [item["member"] for item in params["v7"]["members"]] == [
-        "R1_contam_HO@0",
-        "R1_contam_HO@1",
-        "R1_contam_HO@2",
+        *[f"R1_contam_HO@{seed}" for seed in (0, 6, 7, 8, 9, 10, 11, 12)],
         "clean@0",
     ]
+    assert params["v7"]["ensemble_rule_version"] == res.ENSEMBLE_RULE_VERSION
     assert params["test_set"]["top_up"]["target"] == 200
     ho_params = ho_builder.params_for(make_panel(GENES))
     assert ho_params["top_up"] == params["test_set"]["top_up"]
@@ -135,8 +134,10 @@ def test_version_7_inputs_enter_the_hash_and_decision_knobs_do_not(
 
     base = payload()
     assert payload(ensemble_r1_seeds=[0, 1, 3]) != base
+    assert payload(ensemble_r1_seeds=[0, 6, 7, 8, 9, 10, 11, 12]) == base
     assert payload(topup_min_class_test_cells=300) != base
     assert payload(ensemble_spread_floor=0.05) == base
+    assert payload(ensemble_spread_wilson_margin_se=2.0) == base
     assert payload(saturated_bp_share=0.95) == base
     assert payload(monotone_depth=False) == base
     # A version-6 family ignores the version-7 inputs.
@@ -161,10 +162,41 @@ def test_the_version_7_grid_above_1000_genes(tmp_path: Path) -> None:
     assert list(plan.grid) == list(res.V7_LARGE_PANEL_GRID)
     assert plan.chemistry is not None and plan.chemistry.chemistry == "unknown"
     assert [member.name for member in plan.members if member.role == "emission"] == [
-        "R1_contam_HO@0",
-        "R1_contam_HO@1",
-        "R1_contam_HO@2",
+        f"R1_contam_HO@{seed}" for seed in (0, 6, 7, 8, 9, 10, 11, 12)
     ]
+
+
+def test_a_version_7_plan_with_a_measured_table_has_r1_x_6_and_r3_x_2() -> None:
+    # Amendment of 2026-09-29 (pre-registration §15.3): a Xenium Prime mouse
+    # panel (declared chemistry) has the WMB factor table, so R1 x 6 + R3 x 2;
+    # the configured R3 seeds and residual reach the members.
+    spec = AnnotationReferenceSpec(
+        reference_id="wmb_panel", species="mouse", role="primary"
+    )
+    genes = [f"ENSMUSG{index:011d}" for index in range(1200)]
+    panel = make_panel(genes, species="mouse")
+
+    def emission(**resolvability: Any) -> list[Any]:
+        config = AnnotationConfig(
+            species="mouse",
+            panel={"panel_chemistry": "xenium_prime"},
+            resolvability=resolvability,
+        )
+        plan = reference.resolvability_plan(spec, panel, config)
+        assert plan.chemistry is not None
+        assert plan.chemistry.chemistry == "xenium_prime"
+        return [member for member in plan.members if member.role == "emission"]
+
+    default = emission()
+    assert [member.name for member in default] == [
+        *[f"R1_contam_HO@{seed}" for seed in (0, 6, 7, 8, 9, 10)],
+        "R3_measured_HO@2",
+        "R3_measured_HO@3",
+    ]
+    configured = emission(ensemble_r3_seeds=[5], r3_residual_sd_log2=0.3)
+    r3 = [member for member in configured if member.recipe.name == res.R3_RECIPE]
+    assert [member.name for member in r3] == ["R3_measured_HO@5"]
+    assert r3[0].recipe.residual_sd_log2 == 0.3
 
 
 def test_neighbour_structured_spill_stays_off() -> None:
@@ -209,10 +241,9 @@ def test_a_version_7_primary_maps_every_member_on_the_topped_up_test_set(
     manifest = json.loads((bundle_dir / BUNDLE_MANIFEST_NAME).read_text())
     output = manifest["builder_output"]["resolvability"]
     assert output["resolvability_version"] == 7
+    # Eight emission members (R1 x 8: no measured table) and clean.
     assert [call["tag"] for call in calls] == [
-        "R1_contam_HO_seed0",
-        "R1_contam_HO_seed1",
-        "R1_contam_HO_seed2",
+        *[f"R1_contam_HO_seed{seed}" for seed in (0, 6, 7, 8, 9, 10, 11, 12)],
         "clean_seed0",
     ]
     for name in (
@@ -228,7 +259,9 @@ def test_a_version_7_primary_maps_every_member_on_the_topped_up_test_set(
     assert summary["top_up"]["version"] == res.TOP_UP_VERSION
     payload = manifest["build_hash_payload"]["builder_params"]["resolvability"]
     assert payload["v7"]["resolvability_version"] == 7
+    assert payload["v7"]["ensemble_rule_version"] == 2
     assert payload["test_set"]["top_up"]["target"] == 12
+    assert summary["ensemble_settings"]["spread_wilson_margin_se"] == 1.0
     with pytest.raises(res.ResolvabilityError, match="version-7"):
         res.load_resolvability(bundle_dir)
     tables = res.load_resolvability(bundle_dir, allow_version_7=True)

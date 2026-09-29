@@ -689,17 +689,28 @@ top-up rule, so its bundles are new build directories. A version-7 self-map:
   cells of training clusters; never another frontal donor. `bundle.json`
   (`test_set.class_top_up`) records each class's cells before and after,
   what each pool held and gave and whether it ran out;
-- simulates and maps each member in turn (`R1_contam_HO@0`, `@1`, `@2`;
-  `R3_measured_HO@0` for Xenium Prime 5K mouse; `clean@0` reported;
-  `R1_xtissue_lung_stress@0` reported for human Prime), 13 grid values
-  above 1,000 genes;
+- simulates and maps each member in turn: eight emission members (since the
+  amendment of 2026-09-29, an orchestrator decision pending the user's
+  confirmation; plan §8.3 v7.3, pre-registration §15) -- `R1_contam_HO@0`,
+  `@6`-`@10` and `R3_measured_HO@2`, `@3` where the species x chemistry has a
+  measured factor table (Xenium Prime 5K mouse), else `R1_contam_HO@0`,
+  `@6`-`@12` (Xenium Prime 5K human, custom, MERSCOPE and unknown panels);
+  `clean@0` reported; `R1_xtissue_lung_stress@0` reported for human Prime,
+  never an emission member; 13 grid values above 1,000 genes. The bundles
+  built in stage D keep their members (`R1_contam_HO@0`-`@2`, plus
+  `R3_measured_HO@0` for 5K mouse). `resolvability.ensemble_r1_seeds` /
+  `ensemble_r3_seeds` override the members;
 - decides each member by the version-6 rule plus the saturated-bp rule (a
   set without a local threshold whose fit-half calls are more than 90% at
   bp = 1 is judged at the 0.99 cap), then the ensemble: a bin is emitted when
   the union of the members' calls passes the §8.3 rule at its own threshold
   with each test cell counted once (E1), and every member emits it or the
   member precisions lie within max(0.03, 3.5 SE) with at least 10 calls each
-  (E2); bins short of calls take the ensemble's deep pool;
+  and the pooled Wilson bound clears target - 0.02 by one standard error
+  `sqrt(p (1 - p) / n_eff)` of the pooled precision (E2; the margin since the
+  amendment of 2026-09-29, `ensemble_spread_margin` when it fails; bundles
+  built before it re-derive without it); bins short of calls take the
+  ensemble's deep pool, whose spread route needs the same margin;
 - fills a bin deeper than the shallowest emitted one when its measured point
   precision and coverage pass (only the power conditions are waived), never
   for non-neuronal classes at 1,000 counts or more (those bins are marked
@@ -767,7 +778,13 @@ of which the report-only supertype level 28; broad to subclass 0.022),
 against 0.081 for two single R1 draws under the same conventions: the
 pre-registered limit of 0.02 is not met (`M3C_EXIT_REPORT.txt` gives the
 cause and the proposed fixes), while the real public-section coverage
-under the two ensembles differs by only +.003 (class and subclass).
+under the two ensembles differs by only +.003 (class and subclass). The
+failure stays on record. *Amendment (2026-09-29; orchestrator decisions
+pending the user's confirmation, pre-registration §15):* eight emission
+members and the one-standard-error margin on the spread route; the test is
+re-run once on the rebuilt bundle against a comparator ensemble
+(`R1_contam_HO@20`-`@25`, `R3_measured_HO@20`, `@21`), and the work stops if
+it fails again.
 Under the lung-FFPE depth scenario (median 245 counts) the human
 profile mode predicts a provisional supercluster coverage of .593 (member
 mean; phase 1's bracket .55-.57) and broad .776.
@@ -1209,9 +1226,10 @@ H4 and H16 baselines) are in §11 of the pre-registration document.
   fires for 19 (level, class) pairs (`M3C_EXIT_REPORT.txt`).
 - **Version-7 cost on 5K panels:** exact-total thinning of 5,000 genes takes
   2-8 min per member, and a 5K mouse member maps in 36-49 min on 8 processes
-  on the shared host, so a version-7 5K mouse PREP takes about 6 h (four
-  emission members and the clean bound) and its fresh-ensemble diagnostic
-  another 4 h.
+  on the shared host, so a version-7 5K mouse PREP took about 6 h in stage D
+  (four emission members and the clean bound) and its fresh-ensemble
+  diagnostic another 4 h; with the eight emission members of the amendment
+  of 2026-09-29 the estimates are about 9-10 h and 8 h.
 - **Pooled depth scenarios:** `annotation-panel-simulate` has no class
   composition for a pooled scenario (the lung-FFPE totals of human Prime),
   so its per-level headline under the scenario prints "-"; the per-class

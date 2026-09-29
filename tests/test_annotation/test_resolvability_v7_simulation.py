@@ -203,42 +203,157 @@ def test_lognormal_recipes_keep_their_version_6_record() -> None:
     assert res.RECIPE_VERSIONS[res.R3_RECIPE] == 1
 
 
+R1_PRODUCTION_WITH_TABLE = [f"R1_contam_HO@{seed}" for seed in (0, 6, 7, 8, 9, 10)]
+R1_PRODUCTION_WITHOUT_TABLE = [
+    f"R1_contam_HO@{seed}" for seed in (0, 6, 7, 8, 9, 10, 11, 12)
+]
+
+
 def test_ensemble_members_follow_the_family_table() -> None:
+    # Eight emission members per version-7 family (amendment of 2026-09-29,
+    # pre-registration §15.3): R1 x 6 + R3 x 2 with a measured table, else
+    # R1 x 8; clean reported; the human Prime lung stress recipe reported only.
     table = si.get_asset(si.EFFICIENCY_MOUSE_PRIME)
     stress = si.get_asset(si.STRESS_HUMAN_LUNG)
     mouse = res.ensemble_members(
         CONFIG, species="mouse", chemistry="xenium_prime", member_table=table
     )
     assert [(item.name, item.role) for item in mouse] == [
-        ("R1_contam_HO@0", "emission"),
-        ("R1_contam_HO@1", "emission"),
-        ("R1_contam_HO@2", "emission"),
-        ("R3_measured_HO@0", "emission"),
+        *[(name, "emission") for name in R1_PRODUCTION_WITH_TABLE],
+        ("R3_measured_HO@2", "emission"),
+        ("R3_measured_HO@3", "emission"),
         ("clean@0", "reported"),
     ]
     human = res.ensemble_members(
         CONFIG, species="human", chemistry="xenium_prime", stress_table=stress
     )
     assert [(item.name, item.role) for item in human] == [
-        ("R1_contam_HO@0", "emission"),
-        ("R1_contam_HO@1", "emission"),
-        ("R1_contam_HO@2", "emission"),
+        *[(name, "emission") for name in R1_PRODUCTION_WITHOUT_TABLE],
         ("clean@0", "reported"),
         ("R1_xtissue_lung_stress@0", "stress"),
     ]
-    other = res.ensemble_members(
-        CONFIG, species="human", chemistry="merscope", stress_table=stress
+    # Custom, MERSCOPE (M13) and unknown families, and the version-6 families'
+    # diagnostic: no table, R1 x 8.
+    for chemistry in ("merscope", "unknown", "xenium_v1"):
+        other = res.ensemble_members(
+            CONFIG, species="human", chemistry=chemistry, stress_table=stress
+        )
+        assert [item.name for item in other] == [
+            *R1_PRODUCTION_WITHOUT_TABLE,
+            "clean@0",
+        ]
+    mouse_other = res.ensemble_members(CONFIG, species="mouse", chemistry="merscope")
+    assert [item.name for item in mouse_other if item.role == "emission"] == (
+        R1_PRODUCTION_WITHOUT_TABLE
     )
-    assert [item.name for item in other] == [
-        "R1_contam_HO@0",
-        "R1_contam_HO@1",
-        "R1_contam_HO@2",
-        "clean@0",
-    ]
+    # R3 members carry the R3 residual (default 0.20 log2, or as passed).
+    assert {item.recipe.residual_sd_log2 for item in mouse[6:8]} == {0.20}
+    residual = res.ensemble_members(
+        CONFIG,
+        species="mouse",
+        chemistry="xenium_prime",
+        member_table=table,
+        residual_sd_log2=0.3,
+    )
+    assert [item.recipe.residual_sd_log2 for item in residual[6:8]] == [0.3, 0.3]
+    for members in (mouse, human, mouse_other):
+        emission = [item for item in members if item.role == "emission"]
+        assert len(emission) == res.V7_EMISSION_MEMBERS == 8
+        assert emission[0].name == "R1_contam_HO@0"
+        assert all(item.recipe.name != res.LUNG_STRESS_RECIPE for item in emission)
     with pytest.raises(res.ResolvabilityError, match="cross species"):
         res.ensemble_members(
             CONFIG, species="human", chemistry="xenium_prime", member_table=table
         )
+
+
+def test_member_seeds_override_and_the_comparator_is_disjoint() -> None:
+    table = si.get_asset(si.EFFICIENCY_MOUSE_PRIME)
+    stage_d = res.ensemble_members(
+        CONFIG,
+        species="mouse",
+        chemistry="xenium_prime",
+        member_table=table,
+        r1_seeds=res.V7_STAGE_D_R1_SEEDS,
+        r3_seeds=res.V7_STAGE_D_R3_SEEDS,
+    )
+    assert [item.name for item in stage_d if item.role == "emission"] == [
+        "R1_contam_HO@0",
+        "R1_contam_HO@1",
+        "R1_contam_HO@2",
+        "R3_measured_HO@0",
+    ]
+    # R3 seeds are ignored without a table.
+    no_table = res.ensemble_members(
+        CONFIG, species="mouse", chemistry="merscope", r1_seeds=(4,), r3_seeds=(9,)
+    )
+    assert [item.name for item in no_table] == ["R1_contam_HO@4", "clean@0"]
+    with pytest.raises(res.ResolvabilityError, match="repeat"):
+        res.ensemble_members(
+            CONFIG, species="mouse", chemistry="merscope", r1_seeds=(1, 1)
+        )
+    with pytest.raises(res.ResolvabilityError, match="repeat"):
+        res.ensemble_members(
+            CONFIG,
+            species="mouse",
+            chemistry="xenium_prime",
+            member_table=table,
+            r3_seeds=(2, 2),
+        )
+    assert res.default_member_seeds(True) == ((0, 6, 7, 8, 9, 10), (2, 3))
+    assert res.default_member_seeds(False) == ((0, 6, 7, 8, 9, 10, 11, 12), ())
+    assert res.default_member_seeds(True, comparator=True) == (
+        (20, 21, 22, 23, 24, 25),
+        (20, 21),
+    )
+    assert res.default_member_seeds(False, comparator=True) == (
+        (20, 21, 22, 23, 24, 25, 26, 27),
+        (),
+    )
+    # The comparator shares no member with production or stage D's A and B;
+    # production shares only the pre-registered R1@0 with A.
+    stage_a = {("R1", 0), ("R1", 1), ("R1", 2), ("R3", 0)}
+    stage_b = {("R1", 3), ("R1", 4), ("R1", 5), ("R3", 1)}
+    for has_table in (True, False):
+        production = {
+            (name, seed)
+            for name, seeds in zip(
+                ("R1", "R3"), res.default_member_seeds(has_table), strict=True
+            )
+            for seed in seeds
+        }
+        comparator = {
+            (name, seed)
+            for name, seeds in zip(
+                ("R1", "R3"),
+                res.default_member_seeds(has_table, comparator=True),
+                strict=True,
+            )
+            for seed in seeds
+        }
+        assert len(production) == len(comparator) == 8
+        assert not production & comparator
+        assert not comparator & (stage_a | stage_b)
+        assert production & stage_a == {("R1", 0)}
+        assert not production & stage_b
+
+
+def test_members_from_names_rebuild_recorded_members() -> None:
+    table = si.get_asset(si.EFFICIENCY_MOUSE_PRIME)
+    names = ["R1_contam_HO@1", "R3_measured_HO@0", "R1_xtissue_lung_stress@0"]
+    members = res.members_from_names(
+        names,
+        CONFIG,
+        member_table=table,
+        stress_table=si.get_asset(si.STRESS_HUMAN_LUNG),
+    )
+    assert [item.name for item in members] == names
+    assert [item.role for item in members] == ["emission"] * 3
+    assert members[1].recipe == res.member_recipe(res.R3_RECIPE, 0, CONFIG, table=table)
+    assert res.parse_member_name("R1_contam_HO@12") == ("R1_contam_HO", 12)
+    for bad in ("R1_contam_HO", "@3", "R1_contam_HO@x"):
+        with pytest.raises(res.ResolvabilityError, match="member name"):
+            res.parse_member_name(bad)
 
 
 def test_member_efficiency_of_the_table_recipes() -> None:
@@ -330,8 +445,11 @@ def test_asset_sha256_enters_the_version_7_payload() -> None:
         top_up={"min_class_test_cells": 200},
     )
     assert payload["resolvability_version"] == 7
+    assert payload["ensemble_rule_version"] == res.ENSEMBLE_RULE_VERSION == 2
     assert payload["assets"][table.asset_id]["sha256"] == table.sha256
-    assert payload["members"][3]["recipe"]["efficiency_table_sha256"] == table.sha256
+    r3 = [item for item in payload["members"] if item["member"].startswith("R3_")]
+    assert [item["member"] for item in r3] == ["R3_measured_HO@2", "R3_measured_HO@3"]
+    assert {item["recipe"]["efficiency_table_sha256"] for item in r3} == {table.sha256}
     changed = table.model_copy(update={"sha256": "0" * 64})
     other = res.v7_simulation_payload(
         members=members,

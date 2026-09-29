@@ -369,6 +369,30 @@ def test_resolvability_and_gate_p_settings() -> None:
         GatePStressRecipe(spill_fraction=1.5)
 
 
+def test_version_7_ensemble_settings() -> None:
+    # Amendment of 2026-09-29 (pre-registration §15.3): the members default to
+    # the family-type rule (None), the spread route's margin is one SE.
+    settings = AnnotationResolvabilityConfig()
+    assert settings.ensemble_r1_seeds is None
+    assert settings.ensemble_r3_seeds is None
+    assert settings.ensemble_spread_wilson_margin_se == 1.0
+    assert settings.ensemble_spread_se_multiplier == 3.5
+    explicit = AnnotationResolvabilityConfig(
+        ensemble_r1_seeds=[0, 1, 2], ensemble_r3_seeds=[0]
+    )
+    assert explicit.ensemble_r1_seeds == [0, 1, 2]
+    for name, value in (
+        ("ensemble_r1_seeds", []),
+        ("ensemble_r1_seeds", [1, 1]),
+        ("ensemble_r3_seeds", []),
+        ("ensemble_r3_seeds", [2, 2]),
+    ):
+        with pytest.raises(ValidationError, match=name):
+            AnnotationResolvabilityConfig(**{name: value})
+    with pytest.raises(ValidationError, match="ensemble_spread_wilson_margin_se"):
+        AnnotationResolvabilityConfig(ensemble_spread_wilson_margin_se=-0.5)
+
+
 def test_gates() -> None:
     gate = AnnotationGate()
     assert (gate.min_frac_ge30, gate.min_table_broad_coverage) == (0.30, 0.25)

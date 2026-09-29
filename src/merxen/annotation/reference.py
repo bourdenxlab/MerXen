@@ -6499,10 +6499,13 @@ def resolvability_plan(
 
     Version 6: nothing beyond the version-6 grid. Version 7: the panel's
     chemistry (``sim_inputs.resolve_chemistry`` with ``panel_chemistry``),
-    the members (R1 x ``ensemble_r1_seeds``, R3 where a measured table of
-    the species x chemistry x reference exists, ``clean``, the human Prime
-    lung stress member), the grid (13 values above 1,000 genes), the assets
-    (member and stress tables, the class-depth profile) and the top-up rule.
+    the members (eight emission members, plan §8.3 v7.3 as amended on
+    2026-09-29: R1 x 6 + R3 x 2 where a measured table of the species x
+    chemistry x reference exists, else R1 x 8, unless ``ensemble_r1_seeds``
+    / ``ensemble_r3_seeds`` set them; ``clean``; the human Prime lung stress
+    member, reported only), the grid (13 values above 1,000 genes), the
+    assets (member and stress tables, the class-depth profile) and the
+    top-up rule.
 
     Args:
         spec: The reference spec (primary, secondary or test set).
@@ -6544,32 +6547,19 @@ def resolvability_plan(
         if species == "human" and chemistry.chemistry == "xenium_prime"
         else None
     )
+    r1_seeds = config.resolvability.ensemble_r1_seeds
+    r3_seeds = config.resolvability.ensemble_r3_seeds
     members = res.ensemble_members(
         config.resolvability,
         species=species,
         chemistry=chemistry.chemistry,
         member_table=member_table,
         stress_table=stress_table,
-        r1_seeds=tuple(config.resolvability.ensemble_r1_seeds),
+        r1_seeds=None if r1_seeds is None else tuple(r1_seeds),
+        r3_seeds=None if r3_seeds is None else tuple(r3_seeds),
         table_rule=config.resolvability.r3_table_rule,
+        residual_sd_log2=config.resolvability.r3_residual_sd_log2,
     )
-    if member_table is not None:
-        members = [
-            res.EnsembleMember(
-                res.member_recipe(
-                    member.recipe.name,
-                    int(member.recipe.seed),
-                    config.resolvability,
-                    table=member_table,
-                    table_rule=config.resolvability.r3_table_rule,
-                    residual_sd_log2=config.resolvability.r3_residual_sd_log2,
-                ),
-                member.role,
-            )
-            if member.recipe.name == res.R3_RECIPE
-            else member
-            for member in members
-        ]
     profiles = si.find_assets(
         role="profile", species=species, chemistry=chemistry.chemistry
     )

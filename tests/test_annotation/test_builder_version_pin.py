@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "d2940376efd23307b0459644f4403c430be7aa6f84d5f850529c7c0d9198bae4",
+    3: "8ad3314b220fbfe88edda14ce2ce06bc4c6f5d0988c9618c979944548b53e132",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -138,6 +138,15 @@ PIN_HISTORY = (
     "bundles gain only that summary record; the version-6 path is "
     "byte-identical (test_resolvability_v6_golden), so no existing bundle "
     "changes",
+    "3: the version-7 ensemble amended (M3c amendment of 2026-09-29, "
+    "pre-registration §15: eight emission members per family and a "
+    "one-standard-error margin on the spread route); ensemble_rule_version 2 "
+    "and the new members enter every version-7 build_hash (panel_params), so "
+    "the new decisions go only into new build directories and the stage-D "
+    "version-7 bundles are never reused by the amended code; those bundles "
+    "re-derive their decisions as built (no recorded margin: 0); the "
+    "version-6 path and payload are byte-identical "
+    "(test_resolvability_v6_golden), so no existing bundle changes",
 )
 
 

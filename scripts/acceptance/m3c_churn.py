@@ -1,17 +1,23 @@
 #!/usr/bin/env python
 """M3c pre-registration §14 (iii): stability of the emitted triples (pass / fail).
 
-On the M3c version-7 5K mouse bundle: ensemble A = the bundle's emission
-members {R1_contam_HO@0, @1, @2, R3_measured_HO@0}; ensemble B = the fresh
-keyed draw {R1_contam_HO@3, @4, @5, R3_measured_HO@1}, run by
-``m3c_v7_diagnostic.py`` (same test cells, grid, mapping configuration and
-mapping seed 0; an output directory, never the store). Triples = the (level,
-class, bin) emitted in the provisional regime of the unweighted PREP
-decisions, after the saturated-bp rule and the monotone fill, over every
-level the bundle decides. churn = (|A \\ B| + |B \\ A|) / |A u B|; pass:
-churn <= 0.02. Reported beside it: the churn per level and for the 14 major
-classes, and the single-member churn R1_contam_HO@0 vs R1_contam_HO@3 under
-the version-7 conventions (phase 1's analogue: 47 / 465 = 0.101).
+On a version-7 5K mouse bundle: ensemble A = the bundle's emission members;
+ensemble B = the ``ensemble_B`` of ``m3c_v7_diagnostic.py`` (same test cells,
+grid, mapping configuration and mapping seed 0; an output directory, never
+the store). Stage D (failed, on record): A = {R1_contam_HO@0, @1, @2,
+R3_measured_HO@0}, B = {R1_contam_HO@3, @4, @5, R3_measured_HO@1}. The
+amended re-test (pre-registration §15.4, 2026-09-29): A = the rebuilt
+bundle's {R1_contam_HO@0, @6-@10, R3_measured_HO@2, @3}, B = the comparator
+{R1_contam_HO@20-@25, R3_measured_HO@20, @21}; the two must share no member.
+Triples = the (level, class, bin) emitted in the provisional regime of the
+unweighted PREP decisions, after the saturated-bp rule and the monotone
+fill, over every level the bundle decides (supertype included). churn =
+(|A \\ B| + |B \\ A|) / |A u B|; pass: churn <= 0.02. Reported beside it:
+the broad-to-subclass churn (broad, class, NT and subclass together), the
+churn per level and for the 14 major classes, the single-member churn of the
+two ensembles' first R1 members under the version-7 conventions (phase 1's
+analogue: 47 / 465 = 0.101) and each ensemble's emitted bins by route with
+its spread-margin failures.
 
 Usage::
 
@@ -31,6 +37,18 @@ from typing import Any
 import pandas as pd
 
 TOLERANCE = 0.02
+# The broad-to-subclass churn reported beside the test (D1 of 2026-09-29).
+BROAD_TO_SUBCLASS = ("broad", "class", "nt", "subclass")
+ROUTE_KEYS = (
+    "n_emitted",
+    "n_unanimous",
+    "n_spread",
+    "n_filled",
+    "n_saturated_emitted",
+    "n_spread_failed",
+    "n_spread_margin_failed",
+    "n_ensemble_e1_failed",
+)
 PHASE1 = {"lost": 32, "gained": 15, "union": 465, "churn": 47 / 465}
 MAJOR = (
     "01 IT-ET Glut",
@@ -69,6 +87,14 @@ def member_rows(table: pd.DataFrame, member: str) -> pd.DataFrame:
     return frame[frame[res.MEMBER_COLUMN].astype(str) == member]
 
 
+def first_r1(members: Sequence[str]) -> str:
+    """The first ``R1_contam_HO`` member of an ensemble."""
+    for name in members:
+        if str(name).startswith("R1_contam_HO@"):
+            return str(name)
+    raise SystemExit(f"no R1_contam_HO member in {list(members)}")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Entry point."""
     from merxen.annotation import resolvability as res
@@ -85,32 +111,49 @@ def main(argv: Sequence[str] | None = None) -> int:
     summary_b = json.loads(
         (args.diag_dir / "ensemble_B" / res.RESOLVABILITY_SUMMARY_FILE).read_text()
     )
+    members_a = [str(name) for name in summary_a.get("emission_members") or []]
+    members_b = [str(name) for name in summary_b.get("emission_members") or []]
+    shared = sorted(set(members_a) & set(members_b))
+    if shared:
+        raise SystemExit(f"A and B share members {shared}: not independent draws")
     a = res.emitted_triples(ensemble_rows(table_a), "provisional")
     b = res.emitted_triples(ensemble_rows(table_b), "provisional")
     churn = res.triple_churn(a, b)
+    broad_to_subclass = res.triple_churn(
+        {triple for triple in a if triple[0] in BROAD_TO_SUBCLASS},
+        {triple for triple in b if triple[0] in BROAD_TO_SUBCLASS},
+    )
+    routes = {
+        label: {
+            key: ((summary.get("ensemble") or {}).get("regimes") or {})
+            .get("provisional", {})
+            .get(key)
+            for key in ROUTE_KEYS
+        }
+        for label, summary in (("A", summary_a), ("B", summary_b))
+    }
     per_class = {}
     for cls in MAJOR:
         first = {triple for triple in a if triple[1] == cls}
         second = {triple for triple in b if triple[1] == cls}
         per_class[cls] = res.triple_churn(first, second)
-    single_a = res.emitted_triples(
-        member_rows(table_a, "R1_contam_HO@0"), "provisional"
-    )
-    single_b = res.emitted_triples(
-        member_rows(table_b, "R1_contam_HO@3"), "provisional"
-    )
+    single_names = (first_r1(members_a), first_r1(members_b))
+    single_a = res.emitted_triples(member_rows(table_a, single_names[0]), "provisional")
+    single_b = res.emitted_triples(member_rows(table_b, single_names[1]), "provisional")
     single = res.triple_churn(single_a, single_b)
     passes = churn["churn"] <= TOLERANCE + 1e-12
     record: dict[str, Any] = {
         "test": "pre-registration §14 (iii)",
         "bundle": str(args.bundle),
         "diagnostic": str(args.diag_dir),
-        "members_a": summary_a.get("emission_members"),
-        "members_b": summary_b.get("emission_members"),
+        "members_a": members_a,
+        "members_b": members_b,
         "levels": sorted({triple[0] for triple in a | b}),
         "churn": churn,
+        "broad_to_subclass": broad_to_subclass,
         "per_major_class": per_class,
-        "single_member_R1@0_vs_R1@3": single,
+        "single_member": {"members": list(single_names), **single},
+        "routes_provisional": routes,
         "phase1_single_draws": PHASE1,
         "tolerance": TOLERANCE,
         "passes": bool(passes),
@@ -126,6 +169,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"RESULT: {'PASS' if passes else 'FAIL'}: churn = ({churn['lost']} + "
         f"{churn['gained']}) / {churn['union']} = {churn['churn']:.4f} "
         f"(tolerance {TOLERANCE}); |A| {churn['n_first']}, |B| {churn['n_second']}",
+        f"broad to subclass (reported): ({broad_to_subclass['lost']} + "
+        f"{broad_to_subclass['gained']}) / {broad_to_subclass['union']} = "
+        f"{broad_to_subclass['churn']:.4f}",
         "",
         "per level:",
         *[
@@ -140,9 +186,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             for cls, item in per_class.items()
         ],
         "",
-        f"single member R1_contam_HO@0 vs R1_contam_HO@3 (version-7 conventions): "
-        f"({single['lost']} + {single['gained']}) / {single['union']} = "
-        f"{single['churn']:.4f}; phase 1 (two single R1 draws): 47 / 465 = 0.101",
+        f"single member {single_names[0]} vs {single_names[1]} (version-7 "
+        f"conventions): ({single['lost']} + {single['gained']}) / "
+        f"{single['union']} = {single['churn']:.4f}; phase 1 (two single R1 "
+        "draws): 47 / 465 = 0.101",
+        "emitted bins by route (provisional regime):",
+        *[
+            f"  {label}: "
+            + ", ".join(f"{key[2:]} {value}" for key, value in counts.items())
+            for label, counts in routes.items()
+        ],
     ]
     (args.out_dir / "CHURN.txt").write_text("\n".join(lines) + "\n")
     print("\n".join(lines))

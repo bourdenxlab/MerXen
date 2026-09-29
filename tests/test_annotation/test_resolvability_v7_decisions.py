@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -201,6 +202,199 @@ def test_a_failing_member_within_the_spread_limit_is_emitted_by_the_spread() -> 
     assert record["ensemble_rule"] == res.RULE_SPREAD
     assert record["member_spread"] == pytest.approx(0.01, abs=1e-3)
     assert record["member_spread"] <= record["spread_limit"]
+    # The pooled Wilson bound clears its limit by more than one SE (§15.3).
+    assert bool(record["spread_margin_ok"])
+    assert record["wilson_clearance"] >= record["spread_se"] > 0
+
+
+# --------------------------------------------------------------------------
+# The spread route's margin (amendment of 2026-09-29, pre-registration §15.3)
+
+
+def spread_frames(n: int, shares: Sequence[float], *, depth: int = 100) -> list:
+    """One member per share, all on the same ``n`` test cells at bp 0.95."""
+    bp = np.full(n, 0.95)
+    return [
+        member_rows(f"m{index}", bp, pattern(n, share), depth=depth)
+        for index, share in enumerate(shares)
+    ]
+
+
+def test_the_spread_route_needs_the_pooled_wilson_bound_one_se_clear() -> None:
+    # m2 fails on its own (0.895 < 0.90); E1 passes on the pooled set (L
+    # .8816 >= .88, p .9017) and the spread (.01) is within its limit, but L
+    # clears .88 by .0016 < SE .0094: not emitted.
+    frames = spread_frames(2000, (0.905, 0.905, 0.895))
+    record = row(decide(frames, ["m0", "m1", "m2"]))
+    members = decide(frames, ["m0", "m1", "m2"]).member_decisions
+    own = members[members["regime"] == "trust"].set_index("member")["status"]
+    assert own["m2"] == res.STATUS_NOT_RESOLVABLE
+    assert own["m0"] == own["m1"] == res.STATUS_EMITTED
+    assert bool(record["spread_ok"])
+    assert record["status"] == res.STATUS_NOT_RESOLVABLE
+    assert record["reason"] == res.REASON_ENSEMBLE_SPREAD_MARGIN
+    assert record["ensemble_rule"] is None
+    assert not bool(record["spread_margin_ok"])
+    # SE = sqrt(p (1 - p) / n_eff) on the Wilson bound's p and n (§15.3).
+    p, n_eff = float(record["precision"]), float(record["n_effective"])
+    assert n_eff == 1000.0
+    assert record["spread_se"] == pytest.approx(math.sqrt(p * (1 - p) / n_eff))
+    assert record["wilson_clearance"] == pytest.approx(
+        res.wilson_lower_bound(p, n_eff) - (0.90 - 0.02)
+    )
+    assert 0 < record["wilson_clearance"] < record["spread_se"]
+    # Without the margin (bundles built before the amendment) it is emitted.
+    before = row(
+        decide(
+            frames,
+            ["m0", "m1", "m2"],
+            ensemble=res.EnsembleSettings(spread_wilson_margin_se=0.0),
+        )
+    )
+    assert before["status"] == res.STATUS_EMITTED
+    assert before["ensemble_rule"] == res.RULE_SPREAD
+    # A margin of k SE scales with k: at k = 0.1 the clearance .0016 > .00094.
+    small = row(
+        decide(
+            frames,
+            ["m0", "m1", "m2"],
+            ensemble=res.EnsembleSettings(spread_wilson_margin_se=0.1),
+        )
+    )
+    assert small["status"] == res.STATUS_EMITTED
+
+
+def test_the_unanimous_route_needs_no_margin() -> None:
+    # Every member emits on its own; the pooled clearance (.0020) is below one
+    # SE (.0094), which only the spread route would need.
+    record = row(decide(spread_frames(2000, (0.902, 0.902, 0.902)), ["m0", "m1", "m2"]))
+    assert record["status"] == res.STATUS_EMITTED
+    assert record["ensemble_rule"] == res.RULE_UNANIMOUS
+    assert not bool(record["spread_margin_ok"])
+    assert record["wilson_clearance"] < record["spread_se"]
+
+
+def test_a_spread_limit_failure_is_reported_before_the_margin() -> None:
+    record = row(decide(spread_frames(2000, (0.99, 0.99, 0.88)), ["m0", "m1", "m2"]))
+    assert record["status"] == res.STATUS_NOT_RESOLVABLE
+    assert record["reason"] == res.REASON_ENSEMBLE_SPREAD
+    assert not bool(record["spread_ok"])
+
+
+def test_the_margin_applies_to_the_ensemble_pool() -> None:
+    # 4,000 cells at 100 (spread route, clearing the margin by .0012) and 40
+    # per member at 250 (75% correct, too few calls: pooled into ">= 100").
+    # The pool passes E1 and the spread limit but not the margin, so the
+    # pooled bin 250 fails and the judged bin 100 (= D_P) is withdrawn.
+    frames = spread_frames(4000, (0.905, 0.905, 0.895))
+    for index, _share in enumerate((0.905, 0.905, 0.895)):
+        frames.append(
+            member_rows(f"m{index}", np.full(40, 0.95), pattern(40, 0.75), depth=250)
+        )
+    kwargs: dict[str, Any] = {"depths": (100, 250)}
+    result = decide(
+        frames,
+        ["m0", "m1", "m2"],
+        ensemble=res.EnsembleSettings(monotone_depth=False),
+        **kwargs,
+    )
+    judged, deep = row(result, depth=100), row(result, depth=250)
+    assert judged["own_status"] == res.STATUS_EMITTED
+    assert bool(judged["spread_margin_ok"])
+    assert judged["status"] == res.STATUS_NOT_RESOLVABLE
+    assert judged["reason"] == (
+        f"{res.POOL_REASON_PREFIX}{res.REASON_ENSEMBLE_SPREAD_MARGIN}"
+    )
+    assert bool(deep["pooled"]) and deep["pool_min_depth"] == 100
+    assert deep["status"] == res.STATUS_NOT_RESOLVABLE
+    assert deep["reason"] == res.REASON_ENSEMBLE_SPREAD_MARGIN
+    assert bool(deep["spread_ok"]) and not bool(deep["spread_margin_ok"])
+    before = decide(
+        frames,
+        ["m0", "m1", "m2"],
+        ensemble=res.EnsembleSettings(monotone_depth=False, spread_wilson_margin_se=0),
+        **kwargs,
+    )
+    assert row(before, depth=100)["status"] == res.STATUS_EMITTED
+    assert row(before, depth=250)["status"] == res.STATUS_EMITTED
+
+
+def test_the_monotone_fill_can_fill_a_bin_that_fails_only_the_margin() -> None:
+    # Pre-registration §15.3: the margin is a condition on the Wilson bound,
+    # which the fill waives; a deeper bin whose point precision and coverage
+    # pass is filled (outside trust and floors) and keeps its ensemble reason.
+    frames = spread_frames(400, (0.99, 0.99, 0.99))
+    frames += spread_frames(2000, (0.905, 0.905, 0.895), depth=250)
+    for frame in frames[3:]:
+        frame["cell_id"] = "deep_" + frame["cell_id"]
+        frame["sim_id"] = frame["cell_id"] + "|D250"
+    result = decide(frames, ["m0", "m1", "m2"], depths=(100, 250))
+    shallow, deep = row(result, depth=100), row(result, depth=250)
+    assert shallow["status"] == res.STATUS_EMITTED
+    assert deep["ensemble_status"] == res.STATUS_NOT_RESOLVABLE
+    assert deep["ensemble_reason"] == res.REASON_ENSEMBLE_SPREAD_MARGIN
+    assert deep["status"] == res.STATUS_EMITTED
+    assert bool(deep["monotone_filled"])
+    unfilled = res.unfilled_decisions(result.decisions)
+    back = unfilled[(unfilled["regime"] == "trust") & (unfilled["depth"] == 250)]
+    assert back["reason"].tolist() == [res.REASON_ENSEMBLE_SPREAD_MARGIN]
+
+
+def test_spread_margin_and_pooled_standard_error() -> None:
+    settings = res.EnsembleSettings()
+    assert settings.spread_wilson_margin_se == 1.0
+    se = res.pooled_standard_error(0.9, 100.0)
+    assert se == pytest.approx(0.03)
+    assert res.pooled_standard_error(1.0, 50.0) == 0.0
+    assert math.isnan(res.pooled_standard_error(math.nan, 50.0))
+    assert math.isnan(res.pooled_standard_error(0.9, 0.0))
+    assert settings.spread_margin_ok(0.03, se)
+    assert settings.spread_margin_ok(0.03 - 1e-10, se)
+    assert not settings.spread_margin_ok(0.03 - 1e-6, se)
+    assert settings.spread_margin_ok(0.0, 0.0)
+    assert not settings.spread_margin_ok(math.nan, se)
+    assert not settings.spread_margin_ok(0.03, math.nan)
+    two = res.EnsembleSettings(spread_wilson_margin_se=2.0)
+    assert two.spread_margin_ok(0.06, se) and not two.spread_margin_ok(0.05, se)
+    none = res.EnsembleSettings(spread_wilson_margin_se=0.0)
+    assert none.spread_margin_ok(-1.0, math.nan)
+
+
+def test_bundles_built_before_the_amendment_re_derive_without_the_margin() -> None:
+    stage_d = {
+        "spread_floor": 0.03,
+        "spread_se_multiplier": 3.5,
+        "member_min_confident": 10,
+        "saturated_bp_share": 0.9,
+        "monotone_depth": True,
+        "nonneuronal_monotone_max_depth": 1000,
+    }
+    rebuilt = res.EnsembleSettings.from_json(stage_d)
+    assert rebuilt.spread_wilson_margin_se == res.SPREAD_MARGIN_BEFORE_AMENDMENT == 0
+    assert res.EnsembleSettings.from_json(None).spread_wilson_margin_se == 0.0
+    current = res.EnsembleSettings()
+    assert res.EnsembleSettings.from_json(current.to_json()) == current
+    assert current.to_json()["spread_wilson_margin_se"] == 1.0
+    config = AnnotationResolvabilityConfig(ensemble_spread_wilson_margin_se=2.5)
+    assert res.EnsembleSettings.from_config(config).spread_wilson_margin_se == 2.5
+    assert (
+        res.EnsembleSettings.from_config(
+            AnnotationResolvabilityConfig()
+        ).spread_wilson_margin_se
+        == 1.0
+    )
+
+
+def test_the_summary_counts_spread_margin_failures() -> None:
+    frames = spread_frames(2000, (0.905, 0.905, 0.895))
+    result = decide(frames, ["m0", "m1", "m2"])
+    record = res.ensemble_summary(result, res.EnsembleSettings())
+    trust = record["regimes"]["trust"]
+    assert trust["n_spread_margin_failed"] == 1
+    assert trust["n_spread_failed"] == 0
+    assert trust["n_ensemble_e1_failed"] == 0
+    assert trust["member_spread"]["n"] == 1
+    assert record["settings"]["spread_wilson_margin_se"] == 1.0
 
 
 def test_members_need_ten_calls_each_for_the_spread() -> None:
@@ -513,15 +707,18 @@ def test_version_7_self_map_records_members_and_the_pooled_table(
     summary = v7_run.summary
     assert summary["resolvability_version"] == 7
     assert summary["decision_recipe"] == res.ENSEMBLE_RECIPE
+    # R1 x 8 without a measured table (amendment of 2026-09-29).
     assert summary["emission_members"] == [
-        "R1_contam_HO@0",
-        "R1_contam_HO@1",
-        "R1_contam_HO@2",
+        f"R1_contam_HO@{seed}" for seed in (0, 6, 7, 8, 9, 10, 11, 12)
     ]
+    assert summary["ensemble_settings"]["spread_wilson_margin_se"] == 1.0
     ensemble = summary["ensemble"]["regimes"]["provisional"]
-    assert {"member_spread", "member_status_agreement", "member_emitted"} <= set(
-        ensemble
-    )
+    assert {
+        "member_spread",
+        "member_status_agreement",
+        "member_emitted",
+        "n_spread_margin_failed",
+    } <= set(ensemble)
     assert set(ensemble["member_emitted"]) == set(summary["emission_members"])
     kinds = set(v7_run.table["kind"].astype(str))
     assert {"member_decision", "decision", "bin", "curve", "gene_efficiency"} <= kinds

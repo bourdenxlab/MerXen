@@ -73,7 +73,7 @@ def test_the_version_7_diagnostic_never_changes_a_version_6_bundle(
     assert summary["resolvability_version"] == 6
     before = bundle_digest(bundle_dir)
     predicted_before = pd.read_csv(tmp_path / "plain" / simulate.PREDICTED_CSV)
-    second = simulate_once("diag", v7_diagnostic=True, v7_fresh_seeds=[3, 4, 5])
+    second = simulate_once("diag", v7_diagnostic=True, v7_comparator=True)
     diag_record = second["references"]["whb_frontal_supc_clus"]
     assert Path(diag_record["bundle_dir"]) == bundle_dir
     assert diag_record["reused"] is True
@@ -84,15 +84,14 @@ def test_the_version_7_diagnostic_never_changes_a_version_6_bundle(
     diagnostic = diag_record["v7_diagnostic"]
     assert diagnostic["applied"] is False
     assert diagnostic["bundle_resolvability_version"] == 6
+    # A = the version-7 members of a family without a measured table (R1 x 8,
+    # amendment of 2026-09-29); B = the pre-registered comparator.
     assert diagnostic["ensemble_a"]["members"] == [
-        "R1_contam_HO@0",
-        "R1_contam_HO@1",
-        "R1_contam_HO@2",
+        f"R1_contam_HO@{seed}" for seed in (0, 6, 7, 8, 9, 10, 11, 12)
     ]
+    assert diagnostic["ensemble_b"]["kind"] == "comparator"
     assert diagnostic["ensemble_b"]["members"] == [
-        "R1_contam_HO@3",
-        "R1_contam_HO@4",
-        "R1_contam_HO@5",
+        f"R1_contam_HO@{seed}" for seed in range(20, 28)
     ]
     for key in ("version_6_vs_7", "fresh_draw_churn"):
         assert {"validated", "provisional"} <= set(diagnostic[key])
@@ -108,6 +107,11 @@ def test_the_version_7_diagnostic_never_changes_a_version_6_bundle(
     )
     stored = json.loads((bundle_dir / res.RESOLVABILITY_SUMMARY_FILE).read_text())
     assert stored == summary
+    # A fresh ensemble B must be an independent keyed draw: sharing a member
+    # with A is refused before anything is simulated.
+    with pytest.raises(SimulationError, match="shares members"):
+        simulate_once("overlap", v7_diagnostic=True, v7_fresh_seeds=[3, 0])
+    assert bundle_digest(bundle_dir) == before
 
 
 def test_the_diagnostic_refuses_to_write_inside_a_store(tmp_path: Path) -> None:

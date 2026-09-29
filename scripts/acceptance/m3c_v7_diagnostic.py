@@ -7,15 +7,21 @@ own test set and engine and written to ``--out-dir/<target>/v7_diagnostic``
 
 * **(vii) the version-6 families** (``whb_set_a_297``, ``whb_set_c_265``,
   ``seaad_set_a``, ``wmb_ag7``, ``wmb_vzg2``; the SSD1 bundles of (i-b)):
-  ensemble A = ``R1_contam_HO@0``, ``@1``, ``@2`` with the version-7
-  conventions (no top-up: the bundle's own test set), compared with the
-  stored version-6 decisions (emitted triples lost and gained per level and
-  regime), and a fresh ensemble B = ``R1_contam_HO@3``, ``@4``, ``@5`` (the
-  version-7 churn under a fresh draw). Diagnostic only, never applied.
+  ensemble A = the version-7 emission members of a family without a
+  measured table (stage D: ``R1_contam_HO@0``, ``@1``, ``@2``; since the
+  amendment of 2026-09-29, pre-registration §15.3: ``R1_contam_HO@0``,
+  ``@6``-``@12``) with the version-7 conventions (no top-up: the bundle's own
+  test set), compared with the stored version-6 decisions (emitted triples
+  lost and gained per level and regime), and an ensemble B (the version-7
+  churn under an independent draw). Diagnostic only, never applied.
 * **(iii) the version-7 5K mouse bundle** (``prime5k_mouse``; ``--bundle``):
-  ensemble A is the bundle's own (``R1_contam_HO@0-2`` and
-  ``R3_measured_HO@0`` on the topped-up test set), ensemble B the fresh keyed
-  draw ``R1_contam_HO@3``, ``@4``, ``@5`` and ``R3_measured_HO@1``.
+  ensemble A is the bundle's own (on the topped-up test set). Ensemble B:
+  ``--ensemble-b comparator`` (default; the amended re-test of
+  pre-registration §15.4) runs the pre-registered comparator
+  ``R1_contam_HO@20``-``@25`` + ``R3_measured_HO@20``, ``@21``
+  (``R1_contam_HO@20``-``@27`` without a table); ``--ensemble-b stage_d``
+  reproduces stage D's fresh draw ``R1_contam_HO@3``, ``@4``, ``@5`` +
+  ``R3_measured_HO@1`` (never used to evaluate the amendment).
 
 Each target's wall time and process-tree peak (PSS and RSS, sampled every
 5 s) are recorded in ``<target>/resources.json``. MapMyCells runs on
@@ -28,7 +34,8 @@ Usage::
         --targets whb_set_a_297,whb_set_c_265,seaad_set_a,wmb_ag7,wmb_vzg2
 
     python scripts/acceptance/m3c_v7_diagnostic.py --out-dir $A/m3c/v7_churn \\
-        --targets prime5k_mouse --bundle /srv/storage/.../wmb_panel/<hash>
+        --targets prime5k_mouse --bundle /srv/storage/.../wmb_panel/<hash> \\
+        --ensemble-b comparator
 """
 
 from __future__ import annotations
@@ -59,8 +66,11 @@ V6_TARGETS: dict[str, tuple[str, str, str, str | None]] = {
     "wmb_ag7": ("wmb_panel", "5a032858", "mouse_ag7_500", "MERSCOPE"),
     "wmb_vzg2": ("wmb_panel", "daa8c4a6", "mouse_vzg2_815", "MERSCOPE"),
 }
-FRESH_R1_SEEDS: tuple[int, ...] = (3, 4, 5)
-FRESH_R3_SEED = 1
+# Stage D's fresh ensemble B (the failed test (iii); never re-used to evaluate
+# the amendment of 2026-09-29).
+STAGE_D_R1_SEEDS: tuple[int, ...] = (3, 4, 5)
+STAGE_D_R3_SEEDS: tuple[int, ...] = (1,)
+ENSEMBLE_B_CHOICES = ("comparator", "stage_d")
 
 
 def _bundle(reference_id: str, prefix: str) -> Path:
@@ -91,6 +101,7 @@ def run_target(
     platform: str | None,
     out_dir: Path,
     scratch_dir: Path,
+    ensemble_b: str = "comparator",
 ) -> dict[str, Any]:
     """Run the version-7 diagnostic of one bundle and record its resources."""
     from merxen.annotation import sim_inputs as si
@@ -159,13 +170,15 @@ def run_target(
             out_dir=target_out,
             scratch_dir=scratch_dir / name,
             store_roots=[STORE, LARGE],
-            fresh_seeds=FRESH_R1_SEEDS,
-            fresh_r3_seed=FRESH_R3_SEED,
+            fresh_seeds=STAGE_D_R1_SEEDS if ensemble_b == "stage_d" else None,
+            fresh_r3_seeds=STAGE_D_R3_SEEDS if ensemble_b == "stage_d" else None,
+            comparator=ensemble_b == "comparator",
         )
     peak = sampler.peak()
     resources = {
         "target": name,
         "bundle": str(bundle),
+        "ensemble_b": ensemble_b,
         "started_at": started_at,
         "wall_s": round(time.monotonic() - started, 1),
         "peak_tree_pss_gb": None
@@ -205,6 +218,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--bundle", type=Path, default=None, help="the prime5k_mouse bundle"
     )
     parser.add_argument("--n-processors", type=int, default=6)
+    parser.add_argument(
+        "--ensemble-b",
+        choices=ENSEMBLE_B_CHOICES,
+        default="comparator",
+        help="comparator: the pre-registered comparator of the amended re-test "
+        "(§15.4); stage_d: stage D's fresh draw",
+    )
     args = parser.parse_args(argv)
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
@@ -227,6 +247,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     platform="XENIUM",
                     out_dir=args.out_dir,
                     scratch_dir=scratch,
+                    ensemble_b=args.ensemble_b,
                 )
             )
             continue
@@ -239,6 +260,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 platform=platform,
                 out_dir=args.out_dir,
                 scratch_dir=scratch,
+                ensemble_b=args.ensemble_b,
             )
         )
         (args.out_dir / "RESOURCES.json").write_text(

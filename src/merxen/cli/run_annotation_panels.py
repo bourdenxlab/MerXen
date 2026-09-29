@@ -206,8 +206,8 @@ def _git_commit() -> str | None:
 @click.option(
     "--profile-members",
     default=None,
-    help="Comma-separated profile-mode members (default: the family's emission "
-    "members, e.g. R1_contam_HO@0,R1_contam_HO@1,R1_contam_HO@2,R3_measured_HO@0).",
+    help="Comma-separated profile-mode members (default: the bundle's emission "
+    "members, e.g. R1_contam_HO@0,R1_contam_HO@6,...,R3_measured_HO@3).",
 )
 @click.option(
     "--resolvability-version",
@@ -227,11 +227,21 @@ def _git_commit() -> str | None:
     "whose emitted-triple churn against ensemble A is reported (diagnostic).",
 )
 @click.option(
+    "--v7-fresh-r3-seeds",
     "--v7-fresh-r3-seed",
-    type=click.IntRange(min=0),
-    default=1,
+    "v7_fresh_r3_seeds",
+    default="1",
     show_default=True,
-    help="R3 seed of the fresh ensemble B (where a measured table exists).",
+    help="Comma-separated R3 seeds of the fresh ensemble B (where a measured "
+    "table exists).",
+)
+@click.option(
+    "--v7-comparator",
+    is_flag=True,
+    default=False,
+    help="Run the pre-registered comparator ensemble of the amended re-test of "
+    "the M3c churn test as ensemble B (R1_contam_HO@20-25 + R3_measured_HO@20, "
+    "@21; R1_contam_HO@20-27 without a measured table; pre-registration §15.4).",
 )
 @click.option(
     "--gate-p",
@@ -281,7 +291,8 @@ def _annotation_panel_simulate(
     gate_p: bool,
     resolvability_version: str = "auto",
     v7_fresh_seeds: str | None = None,
-    v7_fresh_r3_seed: int = 1,
+    v7_fresh_r3_seeds: str = "1",
+    v7_comparator: bool = False,
 ) -> None:
     from merxen.annotation.reference import SourceOptions, set_prep_resources
     from merxen.annotation.simulate import (
@@ -387,7 +398,10 @@ def _annotation_panel_simulate(
         v7_fresh_seeds=None
         if not v7_fresh_seeds
         else [int(item) for item in v7_fresh_seeds.split(",") if item.strip()],
-        v7_fresh_r3_seed=v7_fresh_r3_seed,
+        v7_fresh_r3_seeds=[
+            int(item) for item in v7_fresh_r3_seeds.split(",") if item.strip()
+        ],
+        v7_comparator=v7_comparator,
         provenance={
             "public_panel": public_record,
             "code_commit": _git_commit(),
