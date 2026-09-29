@@ -952,12 +952,15 @@ def extended_json_config(source: Path | str | Mapping[str, Any]) -> dict[str, An
 
 
 def _check_effective_config(
-    effective: Mapping[str, Any], params: MmcEngineParams, bundle: MmcBundle
+    effective: Mapping[str, Any],
+    params: MmcEngineParams,
+    bundle: MmcBundle,
+    nodes_to_drop: Sequence[tuple[str, str]] = (),
 ) -> None:
     """Refuse a mapping whose recorded settings differ from the requested ones.
 
     Only settings the JSON records are compared (fake mappers in tests may
-    record none).
+    record none); a recorded ``nodes_to_drop`` must be the requested list.
     """
     recorded = effective.get("type_assignment") or {}
     expected = {
@@ -976,6 +979,12 @@ def _check_effective_config(
     drop_level = effective.get("drop_level")
     if drop_level is not None and drop_level != bundle.drop_level:
         mismatched["drop_level"] = (drop_level, bundle.drop_level)
+    recorded_nodes = effective.get("nodes_to_drop")
+    if recorded_nodes is not None:
+        recorded_list = [[str(item) for item in pair] for pair in recorded_nodes]
+        requested_nodes = [[str(level), str(node)] for level, node in nodes_to_drop]
+        if recorded_list != requested_nodes:
+            mismatched["nodes_to_drop"] = (recorded_list, requested_nodes)
     if mismatched:
         raise MmcEngineError(
             "cell_type_mapper recorded other settings than requested "
@@ -1361,7 +1370,7 @@ def run_mmc(
         )
     payload: Any = json.loads(extended_json.read_text(encoding="utf-8"))
     effective = extended_json_config(payload)
-    _check_effective_config(effective, params, bundle)
+    _check_effective_config(effective, params, bundle, nodes_to_drop)
     tree_names = bundle.tree().names if bundle.mapping_tree.is_file() else {}
     tidy = parse_extended_json_tidy(payload, cell_order=cells, names=tree_names)
     del payload

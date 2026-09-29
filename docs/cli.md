@@ -606,6 +606,24 @@ merxen annotate --species human \
   --out shadow/P7513/proseg_hybrid
 ```
 
+A mouse section (one MERSCOPE clustered H5AD) maps the same way. Its
+published `var` holds symbols only, so a standalone mouse run needs the
+WMB-10X `gene.csv` as the fallback table (the pipeline passes
+`annotation_mouse_gene_table`); without it no feature resolves to a mouse
+Ensembl ID and the panel is refused. The region step infers the section's
+divisions, prunes the tree and re-maps the dropped cells
+([Mouse region step](stages/annotation.md#mouse-region-step-m6)). A
+100k-cell section takes 8–30 minutes at 6 processes, depending on the host
+load (136k cells: 32 minutes), and peaks at 3.4 GB.
+
+```bash
+merxen annotate --species mouse \
+  --from-clustered-h5ad results/ag7/proseg_hybrid/clustering_squidpy/clustering_squidpy_out/merscope/ag7_MERSCOPE_clustered.h5ad \
+  --store /media/mathieubo/SSD1/MerXen/annotation_references \
+  --gene-id-fallback-csv /media/mathieubo/SSD1/MerXen/mapmycells/abc_atlas/metadata/WMB-10X/20241115/gene.csv \
+  --out shadow/ag7/proseg_hybrid
+```
+
 | Option | Meaning |
 |---|---|
 | `--from-clustered-h5ad PATH` | A published `<sid>_clustered.h5ad` (table cells, raw counts in `layers["counts"]`); repeat once per platform. Pair, segmentation and platform come from the results path. |
@@ -624,8 +642,9 @@ merxen annotate --species human \
 | `--gene-id-fallback-csv PATH` | Local symbol → Ensembl table (M0e), as for `annotation-panel`. |
 | `--declared-ids-file KEY=PATH` | Per sample id or platform, a panel file (e.g. the Xenium `gene_panel.json`) whose native gene IDs complete the declared features a clustered H5AD's `min_cells` filter dropped from `var`, so its declared panel hash is the prepared H5AD's; without it those features are resolved by symbol and listed as `declared_ids_incomplete`. |
 | `--platforms`, `--no-provisional` | Map only these platforms; skip the provisional labels. |
-| `--require-bundle-refs` | Map only the bundles given with `--bundle-ref` / `--bundle`; a missing one fails instead of being looked up in the store (what the pipeline task passes: it maps exactly the bundles `ANNOTATE_REFERENCE_PREP` resolved). A needed subset bundle is then only recorded as `requested`, never looked up in `--store`. Refs of roles MAP does not map (`wmb_region_share`) are accepted and not opened. |
+| `--require-bundle-refs` | Map only the bundles given with `--bundle-ref` / `--bundle`; a missing one fails instead of being looked up in the store (what the pipeline task passes: it maps exactly the bundles `ANNOTATE_REFERENCE_PREP` resolved). A needed subset bundle is then only recorded as `requested`, never looked up in `--store`. The `wmb_region_share` ref is read by the mouse region step only (never mapped onto); a human run accepts and ignores it. |
 | `--allow-refused-panel` | For a refused panel (`required_bundles.json` status `refused`), write `map_manifest.json` with `panel_status: refused`, its reasons and no runs, and exit 0 (pipeline runs: RESOLVE then writes statuses only). Without it a refused panel is an error. |
+| `--mouse-section-regions VALUE` | Mouse: `auto`, `none` or `;`-separated CCF divisions for every sample, or `SAMPLE_ID=VALUE` (repeatable). Default: each sample's `mouse_section_regions` in `--clustering-config` (the samplesheet column), else the annotation config's (`auto`). The region step needs the `wmb_region_share` bundle (`--bundle wmb_region_share=DIR`, its `--bundle-ref`, or the store) unless every sample is `none` ([Mouse region step](stages/annotation.md#mouse-region-step-m6)). |
 
 MapMyCells runs as a subprocess of `merxen.analysis.mapmycells_entrypoint`
 with the validated configuration (bootstrap factor 0.5, 100 iterations,
@@ -683,6 +702,22 @@ merxen annotate-resolve \
   --out resolve/P7513/proseg_hybrid
 ```
 
+A mouse MAP output is resolved with the mouse rules, gate and flags
+([Mouse rules v1](stages/annotation.md#mouse-rules-v1-consensusresolve_mouse-73-m6)).
+Give the gate its registration check (G1: the QC stage's
+`<sid>_registration_qc.json` of that segmentation; without it the gate
+warns) and, until M6b's AP estimate, the MERFISH sections of its
+composition window (G4); 1–5 minutes and at most 3.2 GB per section:
+
+```bash
+merxen annotate-resolve \
+  --map-dir shadow/ag7/proseg_hybrid \
+  --gene-id-fallback-csv /media/mathieubo/SSD1/MerXen/mapmycells/abc_atlas/metadata/WMB-10X/20241115/gene.csv \
+  --registration-qc results/ag7/merscope/proseg_hybrid/qc/qc_out/ag7_merscope_registration_qc.json \
+  --mouse-g4-sections C57BL6J-638850.31,C57BL6J-638850.32,C57BL6J-638850.33 \
+  --out resolve/ag7/proseg_hybrid
+```
+
 | Option | Meaning |
 |---|---|
 | `--map-dir DIR` | The MAP output (`map_manifest.json`, `<platform>/<sid>_mmc_<run_id>.parquet`); every parquet must still have the sha256 the manifest recorded. |
@@ -697,7 +732,11 @@ merxen annotate-resolve \
 | `--n-segmented SID=N` | Segmented objects of a sample: the denominator of the segmented-object gate warning (a published clustered H5AD holds table cells only). |
 | `--alignment-dir DIR` | The pair's `align_out` (shared tissue mask); default `<results>/<pair>/alignment/align_out` of the inputs' results tree, when present. |
 | `--no-alignment-lookup` | Never take that default: the mask comes only from `--alignment-dir` (a pipeline task gets it from ALIGN's channel, never from a published file ALIGN may still be writing). |
-| `--annotation-config PATH`, `--species` | `AnnotationConfig` JSON; the species defaults to the manifest's (mouse RESOLVE is M6: a mouse MAP output fails with a clean error). |
+| `--annotation-config PATH`, `--species` | `AnnotationConfig` JSON; the species defaults to the manifest's (mouse: the M6 mouse rules and gate). |
+| `--registration-qc SID=PATH` | Mouse gate G1: the QC stage's `*_registration_qc.json` or `*_qc_summary.csv` of the sample's segmentation (repeatable; a bare `PATH` for a single-sample MAP output). Without a check G1 is not evaluated and the gate warns; a pipeline task (`--require-bundle-refs`) refuses a mouse sample without one unless `--no-registration-qc` is given. |
+| `--registration-qc-dir DIR` | Mouse gate G1: a QC stage output directory (repeatable); a sample without `--registration-qc` takes `<sample_id lower-case>_registration_qc.json` found under it (else `_qc_summary.csv` with registration columns). Two matches of one name are an error. |
+| `--no-registration-qc` | Mouse: resolve without the registration check (G1 not evaluated; the gate warns). Goes without `--registration-qc` and `--registration-qc-dir`. |
+| `--mouse-g4-sections LIST` | Mouse gate G4: comma-separated MERFISH-638850 sections (e.g. `C57BL6J-638850.31,C57BL6J-638850.32,C57BL6J-638850.33` for hippocampal / thalamic levels like ag7 and VZG2) whose pooled class shares are the composition window; default none (G4 not evaluated until M6b's AP estimate). |
 | `--platforms`, `--n-bootstrap`, `--tile-um`, `--seed`, `--results-root` | Resolve only these platforms; block-bootstrap replicates (200), tile edge (500 µm) and seed (0); a results tree `--out` must stay out of. |
 | `--run-record PATH` | Where the run record goes (default `<out>/<pair>_resolve_run.json`); the pipeline task writes it outside `annotation_resolve_out`, so that directory is byte-deterministic. |
 
