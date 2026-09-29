@@ -515,3 +515,16 @@ Plan §7.3: "`avg_correlation` is recorded (`ct_class_corr`); the M6 shadow eval
 - **Selection.** No admissible floor: none is adopted (`ct_class_corr` stays report-only; the v2 calibration of §7.3 revisits it). One admissible floor: that floor. Both: 0.50 when, on both datasets, `cons(0.50) − cons(0.40) ≥ 0.005` and `cov(0.40) − cov(0.50) ≤ 0.01`; otherwise 0.40.
 - **Application of the selected floor.** It becomes `AnnotationThresholds.wmb_class_min_corr`, a `low_confidence` check at the mouse class level (and so below it) for the real-data-validated mouse families only (ag7, VZG2), where it was measured. `avg_correlation` depends on the number of markers (§7.3), so other panels take no floor until the resolvability simulation provides one (M10); RESOLVE records the floor as not applied for them.
 - **Outputs.** `scripts/acceptance/mouse_corr_shadow.py`; tables and a plain-text report in `$A/m6/stageB/corr_shadow/` (the run log records the git commit and the script's sha256). The outcome is recorded below this section, with the numbers, once the study has run.
+
+**Outcome (run 2026-09-29, after this section was committed in `2cefe69`; script `scripts/acceptance/mouse_corr_shadow.py` at `b55823f`, sha256 `eb0bcf03…`; `$A/m6/stageB/corr_shadow/CORR_SHADOW_REPORT.txt`, `corr_floor_{ag7,vzg2}.csv`, `corr_shadow.json`).** The label tables are the M6 RESOLVE outputs at `b55823f` (`$A/m6/stageB/resolve_final/{ag7,vzg2}`). The MO1 check passes: .9114 (ag7, 88,931 cells) and .8556 (VZG2, 82,857) with the unpruned labels; .9118 and .8558 with the pruned ones. **Selection: none** — neither floor is admissible, so `wmb_class_min_corr` stays `None` and `ct_class_corr` is report-only.
+
+| Dataset | Floor | Class coverage | `cons` (confident calls) | Removed (pseudo-confident) | `rem_cons` | Failing clauses |
+|---|---|---|---|---|---|---|
+| ag7 | none | .7321 | .9630 | – | – | – |
+| ag7 | 0.40 | .7297 | .9636 | 167 | .701 | (i) gain +.0006 |
+| ag7 | 0.50 | .6552 | .9756 | 5,785 | .826 | (iii) coverage −.077; bins [20, 500) lose .08–.22 |
+| VZG2 | none | .8249 | .9030 | – | – | – |
+| VZG2 | 0.40 | .8181 | .9033 | 444 | .847 | (i) gain +.0004; (ii) removed .847 > .803; (iii) bin [100, 250) −.052 |
+| VZG2 | 0.50 | .7233 | .9103 | 8,485 | .852 | (ii) removed .852 > .810; (iii) coverage −.102; bins [100, 1000) lose .13–.31 |
+
+A floor of 0.40 removes few calls (0.2–0.7% of confident cells) and changes consistency by less than a thousandth; 0.50 buys 0.7–1.3 points of consistency at 7.7–10.2 points of class coverage, mostly below 500 counts, and on VZG2 the calls it removes are nearly as marker-consistent as those it keeps (.852 vs .910). Consistency falls with depth on VZG2 (.854 at 1,000–2,000 counts, the deep doublet-like segments), which no correlation floor addresses. No threshold, target or decision rule of §9 changes.

@@ -698,7 +698,9 @@ merxen annotate-resolve \
 | `--n-segmented SID=N` | Segmented objects of a sample: the denominator of the segmented-object gate warning (a published clustered H5AD holds table cells only). |
 | `--alignment-dir DIR` | The pair's `align_out` (shared tissue mask); default `<results>/<pair>/alignment/align_out` of the inputs' results tree, when present. |
 | `--no-alignment-lookup` | Never take that default: the mask comes only from `--alignment-dir` (a pipeline task gets it from ALIGN's channel, never from a published file ALIGN may still be writing). |
-| `--annotation-config PATH`, `--species` | `AnnotationConfig` JSON; the species defaults to the manifest's (mouse RESOLVE is M6: a mouse MAP output fails with a clean error). |
+| `--annotation-config PATH`, `--species` | `AnnotationConfig` JSON; the species defaults to the manifest's (mouse: the M6 mouse rules and gate). |
+| `--registration-qc SID=PATH` | Mouse gate G1: the QC stage's `*_registration_qc.json` or `*_qc_summary.csv` of the sample's segmentation (repeatable; a bare `PATH` for a single-sample MAP output). Without it G1 is not evaluated and the gate warns. |
+| `--mouse-g4-sections LIST` | Mouse gate G4: comma-separated MERFISH-638850 sections (e.g. `C57BL6J-638850.31,C57BL6J-638850.32,C57BL6J-638850.33` for hippocampal / thalamic levels like ag7 and VZG2) whose pooled class shares are the composition window; default none (G4 not evaluated until M6b's AP estimate). |
 | `--platforms`, `--n-bootstrap`, `--tile-um`, `--seed`, `--results-root` | Resolve only these platforms; block-bootstrap replicates (200), tile edge (500 µm) and seed (0); a results tree `--out` must stay out of. |
 | `--run-record PATH` | Where the run record goes (default `<out>/<pair>_resolve_run.json`); the pipeline task writes it outside `annotation_resolve_out`, so that directory is byte-deterministic. |
 
