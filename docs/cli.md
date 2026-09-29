@@ -606,6 +606,24 @@ merxen annotate --species human \
   --out shadow/P7513/proseg_hybrid
 ```
 
+A mouse section (one MERSCOPE clustered H5AD) maps the same way. Its
+published `var` holds symbols only, so a standalone mouse run needs the
+WMB-10X `gene.csv` as the fallback table (the pipeline passes
+`annotation_mouse_gene_table`); without it no feature resolves to a mouse
+Ensembl ID and the panel is refused. The region step infers the section's
+divisions, prunes the tree and re-maps the dropped cells
+([Mouse region step](stages/annotation.md#mouse-region-step-m6)). A
+100k-cell section takes 8–30 minutes at 6 processes, depending on the host
+load (136k cells: 32 minutes), and peaks at 3.4 GB.
+
+```bash
+merxen annotate --species mouse \
+  --from-clustered-h5ad results/ag7/proseg_hybrid/clustering_squidpy/clustering_squidpy_out/merscope/ag7_MERSCOPE_clustered.h5ad \
+  --store /media/mathieubo/SSD1/MerXen/annotation_references \
+  --gene-id-fallback-csv /media/mathieubo/SSD1/MerXen/mapmycells/abc_atlas/metadata/WMB-10X/20241115/gene.csv \
+  --out shadow/ag7/proseg_hybrid
+```
+
 | Option | Meaning |
 |---|---|
 | `--from-clustered-h5ad PATH` | A published `<sid>_clustered.h5ad` (table cells, raw counts in `layers["counts"]`); repeat once per platform. Pair, segmentation and platform come from the results path. |
@@ -682,6 +700,22 @@ merxen annotate-resolve \
   --gene-id-fallback-csv /path/to/WHB/gene.csv \
   --n-segmented P7513_MERSCOPE=211744 --n-segmented P7513_XENIUM=167738 \
   --out resolve/P7513/proseg_hybrid
+```
+
+A mouse MAP output is resolved with the mouse rules, gate and flags
+([Mouse rules v1](stages/annotation.md#mouse-rules-v1-consensusresolve_mouse-73-m6)).
+Give the gate its registration check (G1: the QC stage's
+`<sid>_registration_qc.json` of that segmentation; without it the gate
+warns) and, until M6b's AP estimate, the MERFISH sections of its
+composition window (G4); 1–5 minutes and at most 3.2 GB per section:
+
+```bash
+merxen annotate-resolve \
+  --map-dir shadow/ag7/proseg_hybrid \
+  --gene-id-fallback-csv /media/mathieubo/SSD1/MerXen/mapmycells/abc_atlas/metadata/WMB-10X/20241115/gene.csv \
+  --registration-qc results/ag7/merscope/proseg_hybrid/qc/qc_out/ag7_merscope_registration_qc.json \
+  --mouse-g4-sections C57BL6J-638850.31,C57BL6J-638850.32,C57BL6J-638850.33 \
+  --out resolve/ag7/proseg_hybrid
 ```
 
 | Option | Meaning |

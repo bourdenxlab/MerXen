@@ -1157,6 +1157,87 @@ VZG2 proseg_hybrid).
 - Contamination, diffuse profile and OOD as for human, over the six mouse
   broad classes.
 
+### Mouse exit on real data (M6)
+
+The M6 exit (plan §12 M6; `$A/m6/stageC/M6_EXIT_REPORT.txt` of the
+evidence archive) ran the standalone `merxen annotate` and `merxen
+annotate-resolve` with the defaults above on the published clustered H5ADs
+of ag7 (Ageing07) and VZG2 (the 2026-09-27 re-run with the offset fix),
+every segmentation, and on the old VZG2 proseg_hybrid from before the fix
+(misregistered by about 114 µm) as the gate's negative control. G1 used the
+QC stage's registration check (VZG2 re-run) or the same M0a check computed
+on the run's own transcripts (ag7, the old run); G4 the pooled
+MERFISH-638850 sections .31–.33 (AP 8.0–8.4 mm).
+
+**E7 reproduced.** On every section the inferred divisions are the manual
+set (Isocortex, OLF, HPF, CTXsp, TH, HY, MB) and the drop list is E7's 60
+nodes. The unpruned labels of ag7 proseg_hybrid and VZG2 original_seg are
+identical to E7's inputs, and E7's full-density T2 counts (395 and 712
+cells: subclasses with < 25% of their MERFISH cells in the present
+divisions, E7's definition) fall to 4 and 0 after pruning (the gate's G3
+definition, which also counts never-drop and small subclasses: 0.44% →
+0.065% and 0.65% → 0.010%). 394 and 712 cells are re-mapped (39–43 s); every
+other cell keeps its label by construction, and a full pruned re-map of
+every cell changes 0.245% / 0.060% of class and 1.24% / 0.42% of subclass
+labels outside the dropped nodes (bootstrap re-draws; MO2 ≤ 0.25% / 1.5%).
+The moved cells go where E7's did (ag7: MY Glut → MB Glut 122, → MB GABA
+54, MY GABA → MB GABA 51; VZG2: MY Glut → MB Glut 475, → MB GABA 102).
+
+| Section, segmentation | Table cells | Gate | G1 ratio / shift (µm) | G2 | G3 | G4 Astro-Epen / Immune (points) | G5 spill-over | Confident class / subclass | F1 | Astro low-count |
+|---|---|---|---|---|---|---|---|---|---|---|
+| ag7 proseg_hybrid | 103,736 | `full` | 2.20 / 0 | .805 | .004 | +1.8 / −0.5 | .062 | .732 / .618 | 0.82% | 2.2% |
+| ag7 reseg | 101,750 | `full` | 2.17 / 0 | .860 | .006 | −3.6 / +0.3 | .056 | .823 / .706 | 0.81% | 1.6% |
+| ag7 original_seg | 136,033 | `full` + warning (G1, G2, G4) | 1.63 / – | .773 | .007 | +7.1 / −0.6 | .057 | .610 / .489 | 1.25% | 11.4% |
+| ag7 proseg_mask | 103,766 | `full` + warning (G1) | 1.98 / 0 | .819 | .005 | +0.8 / −0.3 | .059 | .727 / .613 | 0.79% | 3.3% |
+| VZG2 original_seg | 112,158 | `full` | 2.13 / – | .819 | .006 | +2.2 / +0.1 | .095 | .825 / .759 | 0.28% | 0.5% |
+| VZG2 proseg_hybrid | 104,464 | `full` | 2.40 / 0 | .843 | .006 | +1.3 / +0.4 | .096 | .859 / .794 | 0.24% | 0.3% |
+| VZG2 reseg | 104,276 | `full` + warning (G4) | 2.43 / 0 | .903 | .007 | −3.2 / +1.1 | .090 | .911 / .841 | 0.29% | 0.2% |
+| VZG2 proseg_mask | 104,507 | `full` | 2.37 / 0 | .889 | .006 | −1.0 / +0.8 | .083 | .878 / .820 | 0.22% | 0.4% |
+| VZG2 proseg_hybrid, old (invalid) | 102,134 | `failed` + warning (G1, G2; G4) | 1.34 / 114 | .666 | .006 | +16.4 / −0.7 | .128 | 0 / 0 | 0.58% | 3.0% |
+
+Shares are of table cells; G3 is the pre-pruning T2 share; "–" is the
+platform's own segmentation (no shift test). MO1 (marker consistency over
+all marker-pseudo-confident cells) is .9118 on ag7 proseg_hybrid and .8558
+on VZG2 original_seg (≥ .89 / .84); MO4 (soft class composition vs the
+MERFISH window) holds on both. The soft class JSD against VZG2 original_seg
+(MO9, scored at M9 [L]) is 0.027 for the re-run proseg_hybrid, 0.061 for
+proseg_mask and 0.088 for reseg (base-2 distance over the 34 classes).
+
+**Negative control.** The old VZG2 proseg_hybrid is `failed` (G1: density
+ratio 1.34, shift 114 µm; G2: .666 < .70) with the G4 warning (Astro-Epen
++16.4 points), so every cell is `not_attempted_gate` and `exclude_hard`;
+without a registration check G2 alone still fails it. The re-run
+proseg_hybrid of the same section is `full` without a warning (G1 2.40, G2
+.843). The spill-over flag rate and the soft Astro-Epen share are the
+signals that move on the invalid data (12.8% and 33.8%); per-cell
+confidence does not (class bootstrap ≥ 0.9 on .733 of its cells, .739 on ag7
+proseg_hybrid).
+
+**Flags** (report-only; rates over table cells): the spill-over flag fires
+on 5.6–6.2% of ag7 and 8.3–9.6% of VZG2 cells (E3: 6.1% / 9.4%; spill-over
+prevalence, not microglia), with no marker astrocyte flagged on any section
+and a held-out enrichment of 38× on VZG2 original_seg (45–129× on the other
+VZG2 segmentations; ag7 has 5 derived genes, no held-out test). F1 flags
+0.8% of ag7 (1.25% of original_seg) and 0.22–0.29% of VZG2 cells (MO6:
+0.2–1.0% on ag7 proseg_hybrid and VZG2 original_seg). `flag_astro_lowcount`
+flags 1.6–3.3% of ag7 cells (11.4% of original_seg, where 20% of the table
+cells have fewer than 100 counts) and 0.2–0.5% of VZG2 cells.
+
+**Uncovered subclasses.** The unpruned runs call the five uncovered
+subclasses for at most 2 cells per section (none on ag7 proseg_hybrid or
+VZG2 original_seg), and the pruned re-map sends 0–2 cells per section to
+`157 RN Spp1 Glut`, a midbrain subclass the pruning keeps. None is emitted:
+they are `implausible` (a re-mapped cell whose new subclass is not
+confident), below their parent or region-dropped.
+
+**T2 after pruning.** Calls that stay T2 after pruning are almost all in
+never-drop classes (`316 Bergmann NN`, `320 Astro-OLF NN`, `317 Astro-CB NN`:
+178 of the 222 on ag7 reseg are `316 Bergmann NN`) and are nearly never
+emitted (2 confident `320 Astro-OLF NN` subclass calls on ag7 reseg, 1 on
+VZG2 proseg_hybrid); E7's
+definition, which leaves never-drop and small subclasses out, gives 0–16
+cells (≤ 0.012%) on every section.
+
 ## Shadow baselines (M3)
 
 `scripts/acceptance/shadow_baselines.py` scores `merxen annotate` outputs of
@@ -1185,6 +1266,7 @@ reading the `merxen annotate` outputs and the published inputs read-only:
 | `scripts/acceptance/shadow_glial_jsd.py` | 7 | WHB vs SEA-AD glial JSD with a paired block-bootstrap CI |
 | `scripts/acceptance/resolve_criteria.py` | M4 | The human criteria (H1–H5, H7–H10, H16, H17) re-measured on `merxen annotate-resolve` label tables, with the pre-registered thresholds and the flip rule; H4 on the held-out re-maps, including RESOLVE itself run with the held-out WHB call |
 | `scripts/acceptance/marker_pseudo_labels.py` | M4, H9 | Ports of the marker pseudo-label methods of the P7513 (§C) and P1212 (§4) dataset reports, for H9 and H17 |
+| `scripts/acceptance/mouse_corr_shadow.py` | M6, §7.3 | The mouse class `avg_correlation` floor study (none, 0.40, 0.50) on the ag7 proseg_hybrid and VZG2 original_seg label tables: MO1's check, coverage and marker consistency by depth, and the pre-registered selection (pre-registration §16) |
 
 The results and the decisions they feed (X1, OD-B6 / OD-B7, OD-B8, OD-B13, the
 H4 and H16 baselines) are in §11 of the pre-registration document.
@@ -1194,13 +1276,19 @@ H4 and H16 baselines) are in §11 of the pre-registration document.
 - **Four WMB subclasses have no 10Xv3 reference cell** (`157 RN Spp1 Glut`,
   `279 PSV Pax2 Gly-Gaba`, `280 NLL-po Pax7 Gaba`, `297 CU-ECU Pax2 Gly-Gaba`;
   sequenced only by 10X Multiome, ≤ 0.2% of cells in any in-scope posterior
-  section). They are not filled in, but they stay in the mapping tree and
-  the Allen means, so `cell_type_mapper` can still assign them with their
-  ancestors' markers (the validated runs did: 12 ag7 cells as
-  `157 RN Spp1 Glut`). Such labels have no marker support of their own:
-  each mouse bundle lists these nodes in `marker_unsupported_nodes` (and
-  `uncovered_subclasses`, `uncovered_clusters`), and RESOLVE reports them as
-  unresolved at that level.
+  section; user decision 2026-09-26). They are not filled in, but they stay
+  in the mapping tree and the Allen means, so `cell_type_mapper` can still
+  assign them with their ancestors' markers (an ag7 run with the default,
+  not the panel, lookup did: 12 cells as `157 RN Spp1 Glut`; the M6 exit
+  runs with the panel lookup call none of the five on ag7 or VZG2, see
+  [Mouse exit on real data](#mouse-exit-on-real-data-m6)). Such labels have
+  no marker support of their own: each mouse bundle lists these nodes in
+  `marker_unsupported_nodes` (and `uncovered_subclasses`,
+  `uncovered_clusters`), and RESOLVE makes such a call `not_resolvable` at
+  that level (never emitted; the resolve summary counts them). Query cells
+  of these types therefore never get these subclass labels: they map to the
+  nearest covered subclass or stay unresolved at subclass level. They can
+  occur only in posterior sections (AP ≥ 7.5 mm).
 - **A fifth subclass, `261 HB Calcb Chol`, is missing from the marker build**
   because all 19 of its 10Xv3 cells are self-map test cells, which stay out
   of the build so the test set is disjoint (as are 4 other clusters whose only
@@ -1211,6 +1299,32 @@ H4 and H16 baselines) are in §11 of the pre-registration document.
 - Auto-collapsed parents are still assigned inside by `cell_type_mapper`
   (with their ancestors' markers); the nodes below them are in
   `marker_unsupported_nodes` and must not be emitted.
+- **Mouse scope.** The region rule is for coronal sections at AP 2.4–10.4
+  mm that are not OB- or CB-dominated. Real data validate only the
+  hippocampal / thalamic level (ag7 and VZG2, AP 8.0–8.5 mm); on MERFISH the
+  rule's harm is anterior (AP 3.0–6.0 mm: missed OB slivers next to the AON
+  drop OB-type interneurons), which M6b scores (plan §7.8). Give sagittal,
+  OB- or CB-dominated sections an explicit `mouse_section_regions` or
+  `none`.
+- **Parts of the mouse gate are provisional** (M6). G2's 0.70 / 0.80
+  thresholds were set on MO1's hand-listed marker referee (.911 / .856 on
+  ag7 / VZG2), but the gate derives its markers per panel and reads .805 /
+  .819 on the same sections [L]. G4 is not evaluated until M6b's AP
+  estimate chooses the MERFISH window (standalone runs pass
+  `--mouse-g4-sections`). The pipeline's RESOLVE task does not pass the QC
+  stage's registration check yet (M5 wiring), so G1 is not evaluated there
+  and the gate warns; a standalone run passes `--registration-qc`. G1 is the
+  signal that catches misregistered data: per-cell confidence does not
+  (class bootstrap ≥ 0.9 covers .733 of the invalid VZG2 proseg_hybrid cells
+  and .739 of ag7 proseg_hybrid's; M6 exit).
+- **Mouse flags are report-only QC columns.** `flag_microglial_spillover`
+  measures spill-over prevalence, never a microglia count, and a panel with
+  fewer than 6 derived microglia genes (ag7: 5) gets no held-out check.
+  F1 (`flag_region_incoherent`) catches only about a third of the sink calls
+  on good data (VZG2; E7 §3), so it does not replace pruning.
+- **No mouse `avg_correlation` floor.** The M6 shadow study selected none
+  (pre-registration §16); `ct_class_corr` is recorded only, and the v2
+  mouse calibration (plan §7.3) revisits it.
 - **Only ag7, VZG2 and panels inside their gene union use the validated
   mouse configuration.** A new mouse panel uses its own genes as the marker
   universe (not validated; `validated_configuration.marker_universe` false)
