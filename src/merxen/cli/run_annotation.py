@@ -1463,6 +1463,20 @@ def _n_segmented(values: tuple[str, ...]) -> dict[str, int]:
     "default: <out>/<pair>_resolve_run.json. Pipeline tasks keep it out of --out, "
     "whose content is then deterministic.",
 )
+@click.option(
+    "--registration-qc",
+    "registration_values",
+    multiple=True,
+    help="Mouse gate G1: SAMPLE_ID=PATH of the QC stage's *_registration_qc.json "
+    "or *_qc_summary.csv (repeatable; a bare PATH applies to a single sample).",
+)
+@click.option(
+    "--mouse-g4-sections",
+    default=None,
+    help="Mouse gate G4: comma-separated MERFISH-638850 sections of the "
+    "composition window (e.g. C57BL6J-638850.31,C57BL6J-638850.32); default: "
+    "the config's (none: G4 not evaluated until M6b's AP estimate).",
+)
 def annotate_resolve_command(
     map_dir: Path,
     output_dir: Path,
@@ -1487,6 +1501,8 @@ def annotate_resolve_command(
     seed: int,
     results_roots: tuple[Path, ...],
     run_record_path: Path | None,
+    registration_values: tuple[str, ...],
+    mouse_g4_sections: str | None,
 ) -> None:
     """Resolve MAP outputs into label tables (RESOLVE step, plan §3.4).
 
@@ -1525,6 +1541,8 @@ def annotate_resolve_command(
                 seed=seed,
                 results_roots=results_roots,
                 run_record_path=run_record_path,
+                registration_values=registration_values,
+                mouse_g4_sections=mouse_g4_sections,
             )
     except (MapError, MmcEngineError, ResolveError, NotImplementedError) as error:
         raise click.ClickException(f"{type(error).__name__}: {error}") from error
@@ -1555,6 +1573,8 @@ def _annotate_resolve(
     seed: int,
     results_roots: tuple[Path, ...],
     run_record_path: Path | None = None,
+    registration_values: tuple[str, ...] = (),
+    mouse_g4_sections: str | None = None,
 ) -> None:
     from merxen.annotation.panel import REQUIRED_BUNDLES_FILE, prepared_samples
     from merxen.annotation.pipeline import (
@@ -1618,6 +1638,25 @@ def _annotate_resolve(
             }
         )
     config = config.coupled_to_clustering(manifest.min_counts)
+    if mouse_g4_sections is not None:
+        if run_species != "mouse":
+            raise click.UsageError("--mouse-g4-sections applies to mouse runs only")
+        config = config.model_copy(
+            update={
+                "mouse_gate": config.mouse_gate.model_copy(
+                    update={
+                        "g4_window_sections": [
+                            item.strip()
+                            for item in mouse_g4_sections.split(",")
+                            if item.strip()
+                        ]
+                    }
+                )
+            }
+        )
+    registration = _registration_signals(
+        registration_values, list(manifest.samples), run_species
+    )
     samples: list[MapSample] | None = None
     if prepared_dir is not None:
         samples = [
@@ -1680,6 +1719,7 @@ def _annotate_resolve(
         n_bootstrap=n_bootstrap,
         seed=seed,
         run_record_path=run_record_path,
+        registration=registration,
     )
     click.echo(
         f"annotate-resolve: {len(result.samples)} sample(s) in "
@@ -1688,9 +1728,44 @@ def _annotate_resolve(
     for sample_id, sample in result.samples.items():
         gate = sample.summary["resolution"]["gate"]
         levels = sample.summary["resolution"]["levels"]
-        broad = levels["broad"]["confident_share_table"]
+        level = "class" if run_species == "mouse" else "broad"
+        share = levels[level]["confident_share_table"]
         click.echo(
             f"- {sample_id}: gate {gate['level']}"
-            f"{' + warning' if gate['warning'] else ''}, confident broad "
-            f"{broad if broad is None else round(broad, 3)} of table cells"
+            f"{' + warning' if gate['warning'] else ''}, confident {level} "
+            f"{share if share is None else round(share, 3)} of table cells"
         )
+
+
+def _registration_signals(
+    values: tuple[str, ...], sample_ids: list[str], species: str
+) -> dict[str, Any]:
+    """Parse ``--registration-qc`` values into signals per sample id."""
+    from merxen.annotation.mouse_gate import RegistrationSignal
+
+    if not values:
+        return {}
+    if species != "mouse":
+        raise click.UsageError("--registration-qc applies to mouse runs only")
+    signals: dict[str, Any] = {}
+    for value in values:
+        sample_id, sep, path = value.partition("=")
+        if not sep:
+            if len(sample_ids) != 1:
+                raise click.BadParameter(
+                    "a bare PATH needs a single-sample MAP output; give SAMPLE_ID=PATH",
+                    param_hint="--registration-qc",
+                )
+            sample_id, path = sample_ids[0], value
+        if sample_id not in sample_ids:
+            raise click.BadParameter(
+                f"unknown sample {sample_id!r} (MAP samples: {sample_ids})",
+                param_hint="--registration-qc",
+            )
+        try:
+            signals[sample_id] = RegistrationSignal.from_file(Path(path))
+        except (OSError, ValueError) as error:
+            raise click.BadParameter(
+                str(error), param_hint="--registration-qc"
+            ) from error
+    return signals

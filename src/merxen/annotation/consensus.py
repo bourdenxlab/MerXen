@@ -1,4 +1,10 @@
-"""Human consensus rules v1: statuses, final label and tier (plan §5.2, §5.3).
+"""Consensus rules v1: statuses, final label and tier (plan §5.2, §5.3, §7.3).
+
+Mouse (``resolve_mouse``, M6) has one method (the WMB panel lookup), no
+second vote and the chain broad -> class -> NT -> subclass: class bootstrap
+probability >= 0.90 with >= 20 counts and not region-dropped without a
+confident re-map, subclass >= 0.80 with >= 50 counts (plan §7.3), under the
+label-free mouse gate (``mouse_gate``, §7.6); see ``resolve_mouse``.
 
 ``resolve_human`` turns the per-cell calls of the WHB-frontal primary and the
 SEA-AD Multiregion second vote into one status per level (``CellStatus``,
@@ -102,6 +108,7 @@ from merxen.annotation.vocab import (
     HUMAN_BROAD_CLASSES,
     HUMAN_LINEAGE_OF_BROAD_CLASS,
     HUMAN_LINEAGES,
+    MOUSE_BROAD_CLASSES,
     NEURONS,
     UNASSIGNED_LABEL,
     human_floor_class,
@@ -1550,5 +1557,552 @@ def _human_flags(
         Columns.FLAG_METHOD_DISAGREE: deepest == CellStatus.METHOD_DISAGREE.value,
         Columns.FLAG_IMPLAUSIBLE: deepest == CellStatus.IMPLAUSIBLE.value,
         Columns.FLAG_COP_SUPPRESSED: np.asarray(cop_suppressed, dtype=bool) & table,
+        Columns.EXCLUDE_HARD: np.asarray(exclude_hard, dtype=bool),
+    }
+
+
+# --------------------------------------------------------------------------
+# resolve_mouse (plan §7.3, §7.6, §7.7)
+
+MOUSE_CHAIN: Final[tuple[str, ...]] = FINAL_LEVELS["mouse"][1:]
+MOUSE_FINE_LEVELS: Final[tuple[str, ...]] = ("supertype",)
+# Region-dropped levels (``mouse_regions.dropped_levels``): the level whose
+# node the drop list removed from the cell's unpruned call.
+REGION_DROPPED_CLASS: Final = "class"
+REGION_DROPPED_SUBCLASS: Final = "subclass"
+
+
+@dataclass(frozen=True)
+class WmbCalls:
+    """The WMB primary's calls (pruned view; §7.2, §7.3).
+
+    Coarse-level names come from the vocab of the assigned class; their
+    probabilities aggregate the class bootstrap probabilities of the
+    assigned class and its runner-ups of the same broad class / NT (E2).
+
+    Attributes:
+        klass: Assigned class and its bootstrap probability.
+        broad: Broad class (vocab) with the aggregated scores.
+        nt: NT (vocab, neurons only) with the aggregated scores.
+        subclass: Assigned subclass, if mapped.
+        supertype: Report-only supertype call (OD-E4), if read.
+    """
+
+    klass: LevelCall
+    broad: LevelCall
+    nt: LevelCall
+    subclass: LevelCall | None = None
+    supertype: LevelCall | None = None
+
+
+@dataclass(frozen=True)
+class MouseCalls:
+    """Everything ``resolve_mouse`` reads per object (all segmented objects).
+
+    Attributes:
+        total_counts: Counts after control removal.
+        in_table: ``total_counts >= min_counts`` (table cells).
+        wmb: WMB calls, or ``None`` when the primary was not mapped.
+        region_dropped: Per object, the level (``class`` / ``subclass``)
+            whose node region pruning dropped from its unpruned call (the
+            cell was re-mapped), else ``None``.
+    """
+
+    total_counts: np.ndarray
+    in_table: np.ndarray
+    wmb: WmbCalls | None
+    region_dropped: np.ndarray | None = None
+
+    def __post_init__(self) -> None:
+        """Check that every column has one value per object."""
+        n = len(self.total_counts)
+        lengths = [len(self.in_table)]
+        if self.wmb is not None:
+            lengths += [len(self.wmb.klass), len(self.wmb.broad), len(self.wmb.nt)]
+            for call in (self.wmb.subclass, self.wmb.supertype):
+                if call is not None:
+                    lengths.append(len(call))
+        if self.region_dropped is not None:
+            lengths.append(len(self.region_dropped))
+        if any(length != n for length in lengths):
+            raise ValueError("every MouseCalls column needs one value per object")
+
+    def __len__(self) -> int:
+        return len(self.total_counts)
+
+
+@dataclass(frozen=True)
+class MouseResolveSettings:
+    """The settings and bundle-derived plans ``resolve_mouse`` applies.
+
+    Attributes:
+        platform: ``MERSCOPE`` or ``XENIUM``.
+        min_counts: The hard floor and table threshold.
+        emission: The primary's resolvability-gated emission (§8.3).
+        floors: The count floors (class 20, subclass 50 on validated
+            panels; §5.4, §7.3).
+        thresholds: Threshold settings (``wmb_class`` 0.90, ``wmb_subclass``
+            0.80).
+        trust: The primary reference's trust decision.
+        class_min_corr: The class ``avg_correlation`` floor applied
+            (``None``: none; the caller applies ``wmb_class_min_corr`` only
+            to real-data-validated families, §7.3).
+        allow_fine_levels: Report the supertype level (OD-E4).
+        allow_table_below_min_counts: As ``HumanResolveSettings``.
+    """
+
+    platform: str
+    min_counts: int
+    emission: EmissionPlan
+    floors: FloorPlan
+    thresholds: AnnotationThresholds = field(default_factory=AnnotationThresholds)
+    trust: TrustDecision | None = None
+    class_min_corr: float | None = None
+    allow_fine_levels: bool = False
+    allow_table_below_min_counts: bool = False
+
+
+@dataclass
+class MouseResolution:
+    """The output of ``resolve_mouse`` (one entry per object).
+
+    Attributes:
+        levels: Per level: ``LevelResult`` (``broad``, ``class``, ``nt``,
+            ``subclass``; ``supertype`` with ``allow_fine_levels``).
+        final_level: ``ct_final_level``.
+        final_name: ``ct_final_name``.
+        consensus_tier: ``ct_consensus_tier`` (1: the class call is
+            informative; -1: no informative call).
+        flags: ``flag_low_counts``, ``flag_below_floor``,
+            ``flag_method_disagree`` (always false: one method),
+            ``flag_implausible`` and ``exclude_hard``.
+        gate: The mouse gate verdict.
+        depth_bin: Each object's grid bin.
+        resolvability_extrapolated: A confident level rests on a pooled deep
+            set's verdict.
+        emissions: The emission of every level.
+        in_table: Table cells.
+        class_min_corr: The class correlation floor applied, if any.
+        floor_warnings: Levels whose floors follow the unknown-panel rule.
+    """
+
+    levels: dict[str, LevelResult]
+    final_level: np.ndarray
+    final_name: np.ndarray
+    consensus_tier: np.ndarray
+    flags: dict[str, np.ndarray]
+    gate: Any
+    depth_bin: np.ndarray
+    resolvability_extrapolated: np.ndarray
+    emissions: dict[str, LevelEmission]
+    in_table: np.ndarray
+    class_min_corr: float | None = None
+    floor_warnings: list[str] = field(default_factory=list)
+
+    def status(self, level: str) -> np.ndarray:
+        """Return one level's statuses."""
+        return self.levels[level].status
+
+    def to_columns(self) -> dict[str, Any]:
+        """Return the label-table columns ``resolve_mouse`` decides (§4.1, §4.3)."""
+        columns: dict[str, Any] = {}
+        for level, result in self.levels.items():
+            columns.update(result.to_columns(level))
+        columns[Columns.DEPTH_BIN] = pd.array(
+            [
+                None if not np.isfinite(value) else int(value)
+                for value in self.depth_bin
+            ],
+            dtype=pd.Int32Dtype(),
+        )
+        columns[Columns.RESOLVABILITY_EXTRAPOLATED] = self.resolvability_extrapolated
+        columns[Columns.CT_FINAL_LEVEL] = pd.Categorical(
+            self.final_level, categories=list(FINAL_LEVELS["mouse"])
+        )
+        columns[Columns.CT_FINAL_NAME] = pd.Categorical(self.final_name)
+        columns[Columns.CT_CONSENSUS_TIER] = self.consensus_tier.astype(np.int8)
+        for name, values in self.flags.items():
+            columns[name] = values.astype(bool)
+        return columns
+
+    def summary(self) -> dict[str, Any]:
+        """Return the provenance summary (§4.6, resolve summary §3.4)."""
+        table = self.in_table
+        n_table = int(table.sum())
+        n_objects = len(table)
+        per_level: dict[str, Any] = {}
+        for level, result in self.levels.items():
+            confident = result.confident
+            emission = self.emissions.get(level)
+            per_level[level] = {
+                "confident_share_table": (
+                    float(confident[table].mean()) if n_table else None
+                ),
+                "confident_share_segmented": (
+                    float(confident.sum() / n_objects) if n_objects else None
+                ),
+                "validated_share": (
+                    float(result.validated[confident].mean())
+                    if confident.any()
+                    else None
+                ),
+                "status_counts": _counts(result.status[table]),
+                "emission": None if emission is None else emission.summary(table),
+            }
+        return {
+            "degraded_mode": {"name": "wmb_only", "methods": ["wmb"], "max_tier": 1},
+            "gate": self.gate.to_json(),
+            "n_objects": n_objects,
+            "n_table": n_table,
+            "final_level_counts": _counts(self.final_level[table]),
+            "consensus_tier_counts": _counts(self.consensus_tier[table].astype(int)),
+            "levels": per_level,
+            "class_min_corr": self.class_min_corr,
+            "flag_counts": {
+                name: int(values[table].sum()) for name, values in self.flags.items()
+            },
+            "resolvability_extrapolated_share": (
+                float(self.resolvability_extrapolated[table].mean())
+                if n_table
+                else None
+            ),
+            "floor_warnings": list(self.floor_warnings),
+        }
+
+
+def _call_parts(
+    call: LevelCall | None, n: int
+) -> tuple[np.ndarray, np.ndarray, LevelScores | None]:
+    if call is None:
+        return np.full(n, None, dtype=object), np.full(n, np.nan), None
+    return call.name, call.scores.raw.astype(np.float64), call.scores
+
+
+def resolve_mouse(
+    calls: MouseCalls, settings: MouseResolveSettings, gate: Any
+) -> MouseResolution:
+    """Apply the mouse v1 rules to one sample (plan §7.3, §7.6; §4.2).
+
+    1. **Broad** (vocab broad class of the assigned class): the aggregated
+       class probability >= ``wmb_class``, counts >= the floor, and the
+       panel resolves the level for the class at the cell's depth bin.
+    2. **Class:** a confident broad, bootstrap probability >= ``wmb_class``
+       (0.90), counts >= the class floor (20), resolvability, and
+       ``avg_correlation`` >= ``class_min_corr`` when a floor is applied.
+       A cell whose unpruned class region pruning dropped and whose
+       re-mapped class is not confident is ``implausible`` (plan §4.2),
+       and so are its deeper levels: it falls back to broad.
+    3. **NT** (neurons): a confident class, the aggregated NT probability,
+       resolvability; non-neurons ``not_applicable``.
+    4. **Subclass** (leaf): gate level ``full``, a confident parent (NT for
+       neurons, else class), bootstrap probability >= ``wmb_subclass``
+       (0.80), the subclass floor (50), resolvability; a re-mapped cell
+       (class or subclass dropped) whose re-mapped subclass is not
+       confident is ``implausible``.
+    5. **Supertype** (report-only, OD-E4; with ``allow_fine_levels``): a
+       confident subclass, the subclass threshold and resolvability; never
+       a leaf or in ``ct_final``.
+
+    The gate (``mouse_gate.evaluate_mouse_gate``, label-free, computed
+    before the statuses) makes every level ``not_attempted_gate`` when
+    ``failed`` and the leaf levels when ``broad_only``. The status
+    precedence is the human one (module docstring).
+
+    Args:
+        calls: Per-object calls (every segmented object).
+        settings: Thresholds, floors, emission and trust.
+        gate: The mouse gate verdict (``level`` and ``attempts_leaf``).
+
+    Returns:
+        Statuses, labels, tier, flags and the gate verdict per object.
+    """
+    n = len(calls)
+    thresholds = settings.thresholds
+    counts = np.asarray(calls.total_counts, dtype=np.float64)
+    table = np.asarray(calls.in_table, dtype=bool)
+    below_min = table & (counts < settings.min_counts)
+    if bool(below_min.any()):
+        if not settings.allow_table_below_min_counts:
+            raise ValueError("in_table objects must reach min_counts")
+        logger.warning(
+            "%d table cell(s) below min_counts %d (a min_cells-filtered published "
+            "table): below_floor at every level",
+            int(below_min.sum()),
+            settings.min_counts,
+        )
+    primary_refused = settings.trust is not None and settings.trust.state == "refused"
+    wmb = None if primary_refused else calls.wmb
+    class_name, class_raw, class_scores = _call_parts(
+        None if wmb is None else wmb.klass, n
+    )
+    broad_name, broad_raw, broad_scores = _call_parts(
+        None if wmb is None else wmb.broad, n
+    )
+    nt_name, nt_raw, nt_scores = _call_parts(None if wmb is None else wmb.nt, n)
+    sub_name, sub_raw, sub_scores = _call_parts(
+        None if wmb is None else wmb.subclass, n
+    )
+    low_counts = ~table
+    no_call = np.array([value is None for value in class_name], dtype=bool)
+    key = np.asarray(class_name, dtype=object)
+    neuron = np.array([value == NEURONS for value in broad_name], dtype=bool)
+    dropped = (
+        np.full(n, None, dtype=object)
+        if calls.region_dropped is None
+        else np.asarray(calls.region_dropped, dtype=object)
+    )
+    class_dropped = (dropped == REGION_DROPPED_CLASS) & table
+    any_dropped = (
+        (dropped == REGION_DROPPED_CLASS) | (dropped == REGION_DROPPED_SUBCLASS)
+    ) & table
+    emission = settings.emission
+    floors = settings.floors
+
+    def emit(level: str) -> LevelEmission:
+        return emission.level(level, key, counts)
+
+    emissions: dict[str, LevelEmission] = {}
+    levels: dict[str, LevelResult] = {}
+
+    # 1. Broad.
+    em = emit("broad")
+    emissions["broad"] = em
+    floor = floors.per_cell("broad", key)
+    builder = _StatusBuilder(n)
+    builder.fail(low_counts, CellStatus.LOW_COUNTS)
+    builder.fail(no_call, CellStatus.LOW_CONFIDENCE)
+    builder.fail(~_in(broad_name, MOUSE_BROAD_CLASSES), CellStatus.IMPLAUSIBLE)
+    builder.fail(counts < floor, CellStatus.BELOW_FLOOR)
+    builder.fail(~em.emitted, CellStatus.NOT_RESOLVABLE)
+    builder.fail(~meets_threshold(broad_raw, em.threshold), CellStatus.LOW_CONFIDENCE)
+    levels["broad"] = _level_result(
+        n,
+        name=broad_name,
+        scores=broad_scores,
+        status=builder.finish(),
+        threshold=em.threshold,
+        floor=floor,
+        class_key=key,
+        extrapolated=em.extrapolated,
+    )
+    broad_confident = levels["broad"].confident
+
+    # 2. Class.
+    em = emit("class")
+    emissions["class"] = em
+    floor = floors.per_cell("class", key)
+    builder = _StatusBuilder(n)
+    builder.fail(low_counts, CellStatus.LOW_COUNTS)
+    builder.fail(no_call, CellStatus.LOW_CONFIDENCE)
+    builder.fail(~broad_confident, CellStatus.PARENT_UNRESOLVED)
+    builder.fail(counts < floor, CellStatus.BELOW_FLOOR)
+    builder.fail(~em.emitted, CellStatus.NOT_RESOLVABLE)
+    builder.fail(~meets_threshold(class_raw, em.threshold), CellStatus.LOW_CONFIDENCE)
+    if settings.class_min_corr is not None:
+        corr = (
+            class_scores.corr
+            if class_scores is not None and class_scores.corr is not None
+            else np.full(n, np.nan)
+        )
+        builder.fail(
+            ~meets_threshold(corr, np.full(n, settings.class_min_corr)),
+            CellStatus.LOW_CONFIDENCE,
+        )
+    status = builder.finish()
+    # Region-dropped without a confident re-map: implausible (§4.2).
+    implausible_class = class_dropped & (status != CellStatus.CONFIDENT.value)
+    status[implausible_class] = CellStatus.IMPLAUSIBLE.value
+    levels["class"] = _level_result(
+        n,
+        name=class_name,
+        scores=class_scores,
+        status=status,
+        threshold=em.threshold,
+        floor=floor,
+        class_key=key,
+        extrapolated=em.extrapolated,
+    )
+    class_confident = levels["class"].confident
+
+    # 3. NT.
+    em = emit("nt")
+    emissions["nt"] = em
+    floor = floors.per_cell("nt", key)
+    builder = _StatusBuilder(n)
+    builder.fail(low_counts, CellStatus.LOW_COUNTS)
+    builder.fail(no_call, CellStatus.LOW_CONFIDENCE)
+    builder.fail(~neuron, CellStatus.NOT_APPLICABLE)
+    builder.fail(implausible_class, CellStatus.IMPLAUSIBLE)
+    builder.fail(~class_confident, CellStatus.PARENT_UNRESOLVED)
+    builder.fail(counts < floor, CellStatus.BELOW_FLOOR)
+    builder.fail(~em.emitted, CellStatus.NOT_RESOLVABLE)
+    builder.fail(~meets_threshold(nt_raw, em.threshold), CellStatus.LOW_CONFIDENCE)
+    levels["nt"] = _level_result(
+        n,
+        name=_keep(neuron, nt_name),
+        scores=nt_scores,
+        status=builder.finish(),
+        threshold=em.threshold,
+        floor=floor,
+        class_key=key,
+        extrapolated=em.extrapolated,
+    )
+    nt_applicable = levels["nt"].status != CellStatus.NOT_APPLICABLE.value
+    leaf_parent = np.where(nt_applicable, levels["nt"].confident, class_confident)
+    leaf_gated = np.full(n, not gate.attempts_leaf, dtype=bool) & table
+
+    # 4. Subclass.
+    em = emit("subclass")
+    emissions["subclass"] = em
+    floor = floors.per_cell("subclass", key)
+    no_subclass = np.array([value is None for value in sub_name], dtype=bool)
+    builder = _StatusBuilder(n)
+    builder.fail(low_counts, CellStatus.LOW_COUNTS)
+    builder.fail(leaf_gated, CellStatus.NOT_ATTEMPTED_GATE)
+    builder.fail(no_call | no_subclass, CellStatus.LOW_CONFIDENCE)
+    builder.fail(implausible_class, CellStatus.IMPLAUSIBLE)
+    builder.fail(~leaf_parent, CellStatus.PARENT_UNRESOLVED)
+    builder.fail(counts < floor, CellStatus.BELOW_FLOOR)
+    builder.fail(~em.emitted, CellStatus.NOT_RESOLVABLE)
+    builder.fail(~meets_threshold(sub_raw, em.threshold), CellStatus.LOW_CONFIDENCE)
+    status = builder.finish()
+    implausible_subclass = any_dropped & np.isin(
+        status,
+        [
+            CellStatus.BELOW_FLOOR.value,
+            CellStatus.NOT_RESOLVABLE.value,
+            CellStatus.LOW_CONFIDENCE.value,
+        ],
+    )
+    status[implausible_subclass] = CellStatus.IMPLAUSIBLE.value
+    levels["subclass"] = _level_result(
+        n,
+        name=sub_name,
+        scores=sub_scores,
+        status=status,
+        threshold=em.threshold,
+        floor=floor,
+        class_key=key,
+        extrapolated=em.extrapolated,
+    )
+
+    # 5. Supertype (report-only; never a leaf or in ct_final).
+    if settings.allow_fine_levels:
+        em = emit("supertype")
+        emissions["supertype"] = em
+        floor = floors.per_cell("supertype", key)
+        fine = None if wmb is None else wmb.supertype
+        fine_name, fine_raw, fine_scores = _call_parts(fine, n)
+        builder = _StatusBuilder(n)
+        builder.fail(low_counts, CellStatus.LOW_COUNTS)
+        builder.fail(leaf_gated, CellStatus.NOT_ATTEMPTED_GATE)
+        builder.fail(
+            np.array([value is None for value in fine_name], dtype=bool),
+            CellStatus.LOW_CONFIDENCE,
+        )
+        builder.fail(implausible_class, CellStatus.IMPLAUSIBLE)
+        builder.fail(~levels["subclass"].confident, CellStatus.PARENT_UNRESOLVED)
+        builder.fail(counts < floor, CellStatus.BELOW_FLOOR)
+        builder.fail(~em.emitted, CellStatus.NOT_RESOLVABLE)
+        builder.fail(
+            ~meets_threshold(fine_raw, em.threshold), CellStatus.LOW_CONFIDENCE
+        )
+        levels["supertype"] = _level_result(
+            n,
+            name=fine_name,
+            scores=fine_scores,
+            status=builder.finish(),
+            threshold=em.threshold,
+            floor=floor,
+            class_key=key,
+            extrapolated=em.extrapolated,
+        )
+
+    # Nothing attempted without the primary or when the gate fails (§7.5).
+    blocked = table & (
+        np.full(n, wmb is None, dtype=bool)
+        | np.full(n, gate.level == "failed", dtype=bool)
+    )
+    if blocked.any():
+        for result in levels.values():
+            result.status[blocked] = CellStatus.NOT_ATTEMPTED_GATE.value
+            result.name[blocked] = None
+            result.runner_up[blocked] = None
+            result.extrapolated[blocked] = False
+    if settings.trust is not None:
+        for level, result in levels.items():
+            result.validated = settings.trust.validated_mask(
+                level, result.class_key, counts, result.confident
+            )
+
+    chain = {level: levels[level] for level in MOUSE_CHAIN}
+    final_level, final_name = final_label(chain, species="mouse")
+    informative = (
+        table & ~no_call & meets_threshold(class_raw, np.full(n, thresholds.wmb_class))
+    )
+    tier = np.where(informative, 1, TIER_NONE_INFORMATIVE).astype(np.int8)
+    if wmb is None:
+        tier[:] = TIER_NONE_INFORMATIVE
+    flags = _mouse_flags(chain, table, gate.level)
+    extrapolated = np.logical_or.reduce(
+        [result.extrapolated & result.confident for result in chain.values()]
+    )
+    resolution = MouseResolution(
+        levels=levels,
+        final_level=final_level,
+        final_name=final_name,
+        consensus_tier=tier,
+        flags=flags,
+        gate=gate,
+        depth_bin=emission.depth_bins(counts),
+        resolvability_extrapolated=np.asarray(extrapolated, dtype=bool) & table,
+        emissions=emissions,
+        in_table=table,
+        class_min_corr=settings.class_min_corr,
+        floor_warnings=floors.warnings(),
+    )
+    logger.info(
+        "resolve_mouse: gate %s%s; region-implausible class %d; confident share of "
+        "%d table cells: %s",
+        gate.level,
+        " + warning" if gate.warning else "",
+        int((levels["class"].status == CellStatus.IMPLAUSIBLE.value).sum()),
+        int(table.sum()),
+        ", ".join(
+            f"{level} {levels[level].confident[table].mean():.3f}"
+            for level in MOUSE_CHAIN
+            if table.any()
+        ),
+    )
+    return resolution
+
+
+def _mouse_flags(
+    chain: Mapping[str, LevelResult], table: np.ndarray, gate_level: str
+) -> dict[str, np.ndarray]:
+    """Return the status-mirroring flags and ``exclude_hard`` of mouse (§4.3)."""
+    n = len(table)
+    deepest = np.full(n, None, dtype=object)
+    for result in chain.values():
+        attempted = ~_in(result.status, list(_NOT_ATTEMPTED))
+        deepest[attempted] = result.status[attempted]
+    statuses = np.stack([result.status for result in chain.values()], axis=1)
+    implausible_any = (statuses == CellStatus.IMPLAUSIBLE.value).any(axis=1)
+    only_implausible = np.isin(
+        statuses,
+        [
+            CellStatus.IMPLAUSIBLE.value,
+            CellStatus.NOT_APPLICABLE.value,
+            CellStatus.NOT_ATTEMPTED_GATE.value,
+        ],
+    ).all(axis=1)
+    exclude_hard = ~table | (implausible_any & only_implausible)
+    if gate_level == "failed":
+        exclude_hard = np.ones(n, dtype=bool)
+    return {
+        Columns.FLAG_LOW_COUNTS: ~table,
+        Columns.FLAG_BELOW_FLOOR: deepest == CellStatus.BELOW_FLOOR.value,
+        Columns.FLAG_METHOD_DISAGREE: np.zeros(n, dtype=bool),
+        Columns.FLAG_IMPLAUSIBLE: deepest == CellStatus.IMPLAUSIBLE.value,
         Columns.EXCLUDE_HARD: np.asarray(exclude_hard, dtype=bool),
     }
