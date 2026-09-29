@@ -1,11 +1,11 @@
-"""The annotation processes and their wiring (plan §3.1-§3.3, §13.2).
+"""The annotation processes and their wiring (plan §3.1-§3.4, §13.2).
 
 String tests pin the process contract: no ``storeDir`` (the Python
 ``ReferenceStore`` owns the store), CPU-only resources without a GPU lock,
-PREP sized by panel size, one PREP and two MAPs at a time on dwight, MAP's
-ctm check, content cache and publish path, and ``main.nf`` calling the
-annotation workflows only behind hook H10. The MAP channel logic is tested
-in ``test_map_first_subworkflow.py``.
+PREP sized by panel size, one PREP, two MAPs and four RESOLVEs at a time on
+dwight, MAP's ctm check, MAP's and RESOLVE's content cache and publish paths,
+and ``main.nf`` calling the annotation workflows only behind hook H10. The
+MAP and RESOLVE channel logic is tested in ``test_map_first_subworkflow.py``.
 
 When ``nextflow`` is installed, small runs execute the real workflow code
 (``-stub-run``: PREP writes a stub ``bundle_ref.json``; ANNOTATE_PANEL has no
@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import csv
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -72,9 +73,12 @@ PROCESSES = (
     "ANNOTATE_PANEL",
     "ANNOTATE_REFERENCE_PREP",
     "CLUSTERING_SQUIDPY_ANNOTATE_MAP",
+    "CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE",
 )
 PREP = "ANNOTATE_REFERENCE_PREP"
 MAP = "CLUSTERING_SQUIDPY_ANNOTATE_MAP"
+RESOLVE = "CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE"
+SRC = REPO_ROOT / "src"
 
 
 def _process_block(text: str, name: str) -> str:
@@ -98,7 +102,7 @@ def _with_name_block(config_text: str, name: str) -> str:
 # Process contract (string tests)
 
 
-def test_annotation_module_defines_panel_prep_and_map() -> None:
+def test_annotation_module_defines_panel_prep_map_and_resolve() -> None:
     text = MODULE.read_text()
     assert re.findall(r"^process (\w+) \{", text, re.M) == list(PROCESSES)
     assert "merxen annotation-panel" in _process_block(text, "ANNOTATE_PANEL")
@@ -110,6 +114,9 @@ def test_annotation_module_defines_panel_prep_and_map() -> None:
     map_block = _process_block(text, MAP)
     assert "merxen annotate \\\\" in map_block
     assert "stub:" in map_block
+    resolve = _process_block(text, RESOLVE)
+    assert "merxen annotate-resolve \\\\" in resolve
+    assert "stub:" in resolve
 
 
 def test_no_store_dir_anywhere_in_the_annotation_workflows() -> None:
@@ -184,6 +191,44 @@ def test_map_caches_on_content_and_publishes_under_the_segmentation() -> None:
     assert "rm -rf ${AnnotationReferences.MAP_SCRATCH_DIR}" in block
 
 
+def test_resolve_caches_on_content_and_publishes_under_the_segmentation() -> None:
+    """RESOLVE stages what MAP read plus MAP's output; content cache (plan §3.4)."""
+    block = _process_block(MODULE.read_text(), RESOLVE)
+    assert 'cache "deep"' in block
+    assert (
+        'publishDir { "${params.outdir}/${pair_id}/${segmentation}/'
+        'annotation_resolve" }, mode: "copy", overwrite: true'
+    ) in block
+    assert 'path("annotation_resolve_out"), emit: resolved' in block
+    # The run record (clock, wall time, absolute paths) is a separate output,
+    # so annotation_resolve_out is deterministic for M5's deep cache.
+    assert 'path("annotation_resolve_run.json"), emit: run_record' in block
+    assert "val(resolve_spec)" in block
+    for name, staged in (
+        ("clustering_config", "clustering_squidpy_config.json"),
+        ("prepared_dir", "clustering_prepare_out"),
+        ("panel_dir", "annotation_panel_out"),
+        ("map_dir", "annotation_map_out"),
+    ):
+        assert f'path({name}, stageAs: "resolve_inputs/{staged}")' in block
+    assert (
+        'path(bundle_refs, arity: "0..*", '
+        'stageAs: "resolve_inputs/bundle_refs/bundle_ref_?.json")'
+    ) in block
+    assert (
+        'path(alignment_files, arity: "0..*", stageAs: "resolve_inputs/align_out/*")'
+    ) in block
+    script = block[block.index("script:") : block.index("stub:")]
+    assert "AnnotationReferences.resolveConfigJson(resolve_spec)" in script
+    assert "--out annotation_resolve_out" in script
+    assert "--run-record annotation_resolve_run.json" in script
+    stub = block[block.index("stub:") :]
+    assert "annotation_resolve_run.json" in stub
+    # RESOLVE needs no cell_type_mapper and never maps.
+    assert "cell_type_mapper" not in script
+    assert "--n-processors" not in script
+
+
 def test_map_resources_follow_the_plan() -> None:
     """MAP: 6 cpus, 24 GB, 48 GB above 1,000 panel genes (plan §3.3)."""
     block = _with_name_block(ANNOTATION_CONFIG.read_text(), MAP)
@@ -193,6 +238,24 @@ def test_map_resources_follow_the_plan() -> None:
         '? "48 GB" : "24 GB" }'
     ) in block
     assert "maxForks" not in block
+
+
+def test_resolve_resources_follow_the_plan() -> None:
+    """RESOLVE: 2 cpus, 16 GB, 32 GB above 1,000 panel genes (plan §3.4)."""
+    block = _with_name_block(ANNOTATION_CONFIG.read_text(), RESOLVE)
+    assert re.search(r"cpus = 2\n", block)
+    assert (
+        f"memory = {{ (resolve_spec.n_panel_genes ?: 0) > {LARGE_PANEL_GENES} "
+        '? "32 GB" : "16 GB" }'
+    ) in block
+    assert "maxForks" not in block
+
+
+def test_dwight_runs_four_resolves_at_a_time() -> None:
+    text = DWIGHT_ANNOTATION_CONFIG.read_text()
+    block = _with_name_block(text, RESOLVE)
+    assert "maxForks = params.annotation_resolve_max_forks" in block
+    assert re.search(r"annotation_resolve_max_forks = 4\b", text)
 
 
 def test_dwight_runs_two_maps_at_a_time() -> None:
@@ -270,7 +333,9 @@ def test_main_nf_calls_only_the_prepare_only_entry() -> None:
         "ANNOTATION_REFERENCES(",
         "ANNOTATION_PREPARED_REFERENCES(",
         "CLUSTERING_SQUIDPY_ANNOTATE_MAP(",
+        "CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE(",
         "CLUSTERING_ANNOTATE_MAP(",
+        "CLUSTERING_ANNOTATE(",
         "CLUSTERING_MAP_FIRST(",
     ):
         assert name not in main_text
@@ -340,6 +405,62 @@ def test_groovy_file_names_match_python() -> None:
     assert constant("PANEL_INDEPENDENT") == "panel_independent"
     assert constant("GENE_LIST_SOURCE") == "gene_list"
     assert constant("MAP_MANIFEST_FILE") == pipeline_module.MAP_MANIFEST_NAME
+    assert constant("RESOLVE_SUMMARY_SUFFIX") == pipeline_module.RESOLVE_SUMMARY_SUFFIX
+
+
+def _rule_sources() -> list[str]:
+    match = re.search(
+        r"RESOLVE_RULE_SOURCES = \[(.*?)\]\.asImmutable\(\)", REFERENCES_SOURCE, re.S
+    )
+    assert match is not None
+    return re.findall(r'"([^"]+)"', match.group(1))
+
+
+# Modules the RESOLVE rule sources import from outside them, and why a change
+# there needs no RESOLVE re-run of its own: they shape the counts and the
+# query MAP loaded, which RESOLVE reloads and checks against MAP's sample
+# fingerprint (a change fails RESOLVE loudly rather than resolving stale),
+# or they validate settings RESOLVE does not use.
+RULE_IMPORT_EXEMPTIONS = {
+    "merxen.analysis.mapmycells": "gene-ID fallback tables (query loading)",
+    "merxen.control_features": "control registry (query loading)",
+    "merxen.gene_ids": "Ensembl ID pattern (query loading)",
+    "merxen.table_keys": "table-key suffix validator (COMPUTE_CPU, FINALIZE)",
+}
+
+
+def test_resolve_rule_sources_exist_and_cover_their_imports() -> None:
+    """The RESOLVE rules fingerprint must see every module the rules run on."""
+    sources = _rule_sources()
+    assert sources == [
+        "merxen/annotation",
+        "merxen/assets/annotation",
+        "merxen/clustering",
+        "merxen/cli/run_annotation.py",
+    ]
+    for source in sources:
+        assert (SRC / source).exists(), source
+    files = [
+        path
+        for source in sources
+        for path in (
+            [SRC / source] if (SRC / source).is_file() else (SRC / source).rglob("*.py")
+        )
+    ]
+    covered = [source.removesuffix(".py").replace("/", ".") for source in sources]
+    imported = {
+        module
+        for path in files
+        for module in re.findall(
+            r"^\s*(?:from|import) (merxen(?:\.\w+)+)", path.read_text(), re.M
+        )
+    }
+    outside = {
+        module
+        for module in imported
+        if not any(module == root or module.startswith(root + ".") for root in covered)
+    }
+    assert outside == set(RULE_IMPORT_EXEMPTIONS)
 
 
 # --------------------------------------------------------------------------
@@ -605,6 +726,22 @@ class AnnotationModuleHarness {
         switch (c.fn) {
             case "annotationConfig":
                 return AnnotationReferences.annotationConfig(c.params, c.species)
+            case "annotationConfigJson":
+                return AnnotationReferences.annotationConfigJson(c.params, c.species)
+            case "resolveConfig":
+                return AnnotationReferences.resolveConfig(c.params, c.species)
+            case "resolveSpec":
+                return AnnotationReferences.resolveSpec(
+                    c.params, c.panel_dir, c.source_root
+                )
+            case "resolveArguments":
+                return AnnotationReferences.resolveArguments(
+                    c.spec, c.refs, c.alignment
+                )
+            case "resolveRulesFingerprint":
+                return AnnotationReferences.resolveRulesFingerprint(c.source_root)
+            case "resolveSummaryFile":
+                return AnnotationReferences.resolveSummaryFile(c.pair_id)
             case "panelArguments":
                 return AnnotationReferences.panelArguments(
                     c.spec, c.pair_id, c.segmentation
@@ -1037,6 +1174,105 @@ def _cases(root: Path, params: dict[str, Any]) -> dict[str, dict[str, Any]]:
             "fn": "prepareOnly",
             "params": {"annotation_prepare_only": "true"},
         },
+        **_resolve_cases(root, human),
+    }
+
+
+def _write_rule_tree(root: Path, floors: str = "class,floor\nOligo,30\n") -> Path:
+    """Write a small source tree with the RESOLVE rule sources."""
+    (root / "merxen/annotation/__pycache__").mkdir(parents=True)
+    (root / "merxen/annotation/thresholds.py").write_text("WHB_BROAD = 0.73\n")
+    (root / "merxen/annotation/__pycache__/thresholds.cpython-312.pyc").write_bytes(
+        b"compiled"
+    )
+    (root / "merxen/assets/annotation").mkdir(parents=True)
+    (root / "merxen/assets/annotation/floors_human.csv").write_text(floors)
+    (root / "merxen/clustering").mkdir(parents=True)
+    (root / "merxen/clustering/cellset.py").write_text("MIN = 10\n")
+    (root / "merxen/cli").mkdir(parents=True)
+    (root / "merxen/cli/run_annotation.py").write_text("N_BOOTSTRAP = 200\n")
+    (root / "merxen/other.py").write_text("not a rule source\n")
+    return root
+
+
+def _resolve_cases(root: Path, human: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Cases of the RESOLVE helpers (config split, arguments, fingerprint)."""
+    trees = root / "rule_trees"
+    base = _write_rule_tree(trees / "base")
+    same = _write_rule_tree(trees / "same")
+    changed = _write_rule_tree(trees / "floor", floors="class,floor\nOligo,60\n")
+    cache = _write_rule_tree(trees / "cache")
+    (cache / "merxen/annotation/__pycache__/pipeline.cpython-312.pyc").write_bytes(
+        b"new"
+    )
+    (cache / "merxen/annotation/stale.pyc").write_bytes(b"x")
+    outside = _write_rule_tree(trees / "outside")
+    (outside / "merxen/other.py").write_text("changed\n")
+    single = {**human, "annotation_allow_single_method": True}
+    spec = {"species": "human"}
+    refs = ["resolve_inputs/bundle_refs/bundle_ref_1.json"]
+    return {
+        "config_json_human": {
+            "fn": "annotationConfigJson",
+            "params": human,
+            "species": "human",
+        },
+        "config_json_single_method": {
+            "fn": "annotationConfigJson",
+            "params": single,
+            "species": "human",
+        },
+        "resolve_config_human": {
+            "fn": "resolveConfig",
+            "params": human,
+            "species": "human",
+        },
+        "resolve_config_single_method": {
+            "fn": "resolveConfig",
+            "params": single,
+            "species": "human",
+        },
+        "resolve_spec": {
+            "fn": "resolveSpec",
+            "params": single,
+            "panel_dir": str(root / "fixture_panels" / "F3_proseg_hybrid"),
+            "source_root": str(base),
+        },
+        "resolve_arguments": {
+            "fn": "resolveArguments",
+            "spec": spec,
+            "refs": refs,
+            "alignment": [],
+        },
+        "resolve_arguments_mask": {
+            "fn": "resolveArguments",
+            "spec": spec,
+            "refs": [],
+            "alignment": [
+                "resolve_inputs/align_out/shared_tissue_mask.npy",
+                "resolve_inputs/align_out/registration_summary.json",
+            ],
+        },
+        "fingerprint_base": {"fn": "resolveRulesFingerprint", "source_root": str(base)},
+        "fingerprint_same": {"fn": "resolveRulesFingerprint", "source_root": str(same)},
+        "fingerprint_floor": {
+            "fn": "resolveRulesFingerprint",
+            "source_root": str(changed),
+        },
+        "fingerprint_cache": {
+            "fn": "resolveRulesFingerprint",
+            "source_root": str(cache),
+        },
+        "fingerprint_outside": {
+            "fn": "resolveRulesFingerprint",
+            "source_root": str(outside),
+        },
+        "fingerprint_missing": {
+            "fn": "resolveRulesFingerprint",
+            "source_root": str(trees / "nothing"),
+        },
+        "fingerprint_repo": {"fn": "resolveRulesFingerprint", "source_root": str(SRC)},
+        "resolve_summary_file": {"fn": "resolveSummaryFile", "pair_id": "P7513"},
     }
 
 
@@ -1464,6 +1700,116 @@ def test_map_arguments(harness: dict[str, Any]) -> None:
         assert option not in _value(harness, "map_arguments") + " "
     refused = _value(harness, "map_arguments_refused")
     assert "--bundle-ref" not in refused and "--allow-refused-panel" in refused
+
+
+@needs_nextflow
+def test_resolve_only_settings_never_reach_the_map_config(
+    harness: dict[str, Any],
+) -> None:
+    """annotation_allow_single_method changes RESOLVE's config, never MAP's script."""
+    assert _value(harness, "config_json_single_method") == _value(
+        harness, "config_json_human"
+    )
+    base = _value(harness, "config_human")
+    assert "allow_single_method" not in base
+    for name, expected in (
+        ("resolve_config_human", False),
+        ("resolve_config_single_method", True),
+    ):
+        resolve = _value(harness, name)
+        assert resolve["allow_single_method"] is expected
+        assert {
+            key: value for key, value in resolve.items() if key != "allow_single_method"
+        } == base
+        config = AnnotationConfig.model_validate(resolve)
+        assert config.allow_single_method is expected
+
+
+@needs_nextflow
+def test_resolve_spec_carries_the_config_and_the_rules_fingerprint(
+    harness: dict[str, Any],
+) -> None:
+    spec = _value(harness, "resolve_spec")
+    assert {key: spec[key] for key in _value(harness, "map_spec_per_platform")} == (
+        _value(harness, "map_spec_per_platform")
+    )
+    assert spec["annotation_config"]["allow_single_method"] is True
+    assert spec["rules_fingerprint"] == _value(harness, "fingerprint_base")
+
+
+@needs_nextflow
+def test_resolve_arguments(harness: dict[str, Any]) -> None:
+    """RESOLVE reads the staged inputs and exactly the refs MAP mapped with."""
+    args = _value(harness, "resolve_arguments").split(" ")
+    assert args == [
+        "--species",
+        "human",
+        "--map-dir",
+        "resolve_inputs/annotation_map_out",
+        "--panel-dir",
+        "resolve_inputs/annotation_panel_out",
+        "--prepared-dir",
+        "resolve_inputs/clustering_prepare_out",
+        "--clustering-config",
+        "resolve_inputs/clustering_squidpy_config.json",
+        "--require-bundle-refs",
+        "--no-alignment-lookup",
+        "--bundle-ref",
+        "resolve_inputs/bundle_refs/bundle_ref_1.json",
+    ]
+    masked = _value(harness, "resolve_arguments_mask").split(" ")
+    assert "--bundle-ref" not in masked
+    assert masked[-2:] == ["--alignment-dir", "resolve_inputs/align_out"]
+    # Never a store lookup, an override or a results-tree mask lookup.
+    for option in ("--store", "--current-bundles", "--bundle ", "--results-root"):
+        assert option not in _value(harness, "resolve_arguments") + " "
+    assert _value(harness, "resolve_summary_file") == (
+        f"P7513{pipeline_module.RESOLVE_SUMMARY_SUFFIX}"
+    )
+
+
+def _python_rules_fingerprint(root: Path) -> str:
+    """The RESOLVE rules fingerprint, computed as the Groovy helper does."""
+    files: dict[str, Path] = {}
+    for source in _rule_sources():
+        path = root / source
+        if path.is_file():
+            files[source] = path
+        elif path.is_dir():
+            for item in path.rglob("*"):
+                relative = item.relative_to(root).as_posix()
+                if (
+                    item.is_file()
+                    and not relative.endswith((".pyc", ".pyo"))
+                    and "__pycache__" not in relative.split("/")
+                ):
+                    files[relative] = item
+    if not files:
+        return "missing"
+    digest = hashlib.sha256()
+    for relative in sorted(files):
+        digest.update(relative.encode())
+        digest.update(b"\0")
+        digest.update(files[relative].read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+@needs_nextflow
+def test_resolve_rules_fingerprint_follows_the_rule_sources(
+    harness: dict[str, Any],
+) -> None:
+    """A floor, threshold or rule change re-runs RESOLVE; caches never do."""
+    base = _value(harness, "fingerprint_base")
+    assert re.fullmatch(r"[0-9a-f]{64}", base)
+    # Content, not location: the same tree elsewhere has the same fingerprint.
+    assert _value(harness, "fingerprint_same") == base
+    assert _value(harness, "fingerprint_floor") != base
+    assert _value(harness, "fingerprint_cache") == base
+    assert _value(harness, "fingerprint_outside") == base
+    assert _value(harness, "fingerprint_missing") == "missing"
+    assert base == _python_rules_fingerprint(harness["root"] / "rule_trees" / "base")
+    assert _value(harness, "fingerprint_repo") == _python_rules_fingerprint(SRC)
 
 
 @needs_nextflow

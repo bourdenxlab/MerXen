@@ -442,7 +442,9 @@ def column_specs(
             Columns.CT_FINAL_LEVEL, "category", categories=FINAL_LEVELS[species]
         ),
         ColumnSpec(Columns.CT_FINAL_NAME, "category"),
-        ColumnSpec(Columns.CT_CONSENSUS_TIER, "int8", value_range=(0.0, 3.0)),
+        # -1: no informative method (or outside the table / no primary);
+        # 0: confident disagreement; 1-3: informative methods agreeing.
+        ColumnSpec(Columns.CT_CONSENSUS_TIER, "int8", value_range=(-1.0, 3.0)),
         ColumnSpec(
             Columns.CT_BRANCH, "category", categories=branch_categories(species)
         ),

@@ -1,18 +1,21 @@
 /*
- * Reference-based cell-type annotation processes (plan §3.1-§3.3, §11.4).
+ * Reference-based cell-type annotation processes (plan §3.1-§3.4, §11.4).
  *
  * ANNOTATE_PANEL resolves one pair x segmentation's declared panels and lists
  * the reference bundles it needs; ANNOTATE_REFERENCE_PREP gets or builds one
  * bundle per unique (species, reference_id, panel_hash);
  * CLUSTERING_SQUIDPY_ANNOTATE_MAP maps each sample of a pair x segmentation
- * onto its bundles with MapMyCells. All run on the CPU in the main
- * environment and take no GPU lock. RESOLVE arrives in M4, COMPUTE_CPU in
- * M5, ANNOTATION_REPORT in M7.
+ * onto its bundles with MapMyCells; CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE turns
+ * the mapping into one label table per sample (thresholds, floors, gate,
+ * consensus, flags, compositions). All run on the CPU in the main
+ * environment and take no GPU lock. COMPUTE_CPU arrives in M5,
+ * ANNOTATION_REPORT in M7.
  * workflows/subworkflows/annotation_references.nf wires PANEL and PREP, only
  * for --annotation_prepare_only runs (hook H10) and map_first runs;
  * workflows/subworkflows/clustering_map_first.nf wires MAP after them
- * (CLUSTERING_ANNOTATE_MAP), and CLUSTERING_MAP_FIRST (hook H5, M5) is its
- * only caller. Legacy runs never call any of them.
+ * (CLUSTERING_ANNOTATE_MAP) and RESOLVE after MAP (CLUSTERING_ANNOTATE), and
+ * CLUSTERING_MAP_FIRST (hook H5, M5) is their only caller. Legacy runs never
+ * call any of them.
  *
  * Resources are in conf/annotation.config, host concurrency in
  * conf/dwight.annotation.config.
@@ -256,5 +259,108 @@ JSON
     cat > annotation_map_out/map_manifest.json <<'JSON'
 ${stubManifest}
 JSON
+    """
+}
+
+process CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE {
+    tag "${pair_id}:${segmentation}"
+
+    // PREP never caches and re-writes byte-identical bundle refs in new work
+    // directories, so, as for MAP, only content hashing keeps an unchanged
+    // RESOLVE cached (-resume). resolve_spec carries the annotation config
+    // and the RESOLVE rules fingerprint (AnnotationReferences.resolveSpec), so
+    // a threshold, floor, trust, flag or degraded-mode change re-runs this
+    // task alone: MAP is a separate task whose inputs and published-output
+    // reuse key hold none of them (plan §3.1).
+    cache "deep"
+
+    publishDir { "${params.outdir}/${pair_id}/${segmentation}/annotation_resolve" }, mode: "copy", overwrite: true
+
+    input:
+    // resolve_spec: AnnotationReferences.resolveSpec(params, annotation_panel_out,
+    // src) (species, panel status and size, annotation config, rules
+    // fingerprint); bundle_refs: the refs MAP mapped with; alignment_files:
+    // the pair's shared tissue mask and registration summary from ALIGN (M5),
+    // or none.
+    tuple val(pair_id),
+        val(segmentation),
+        val(resolve_spec),
+        val(samples_json),
+        path(clustering_config, stageAs: "resolve_inputs/clustering_squidpy_config.json"),
+        path(prepared_dir, stageAs: "resolve_inputs/clustering_prepare_out"),
+        path(panel_dir, stageAs: "resolve_inputs/annotation_panel_out"),
+        path(bundle_refs, arity: "0..*", stageAs: "resolve_inputs/bundle_refs/bundle_ref_?.json"),
+        path(map_dir, stageAs: "resolve_inputs/annotation_map_out"),
+        path(alignment_files, arity: "0..*", stageAs: "resolve_inputs/align_out/*")
+
+    output:
+    // annotation_resolve_out/<platform>/<sid>_celltype_labels.parquet (plan
+    // §4.1), <platform>/<sid>_annotation_manifest.json (§4.6),
+    // <pair>_resolve_summary.json (gate levels and warnings, trust, realised
+    // flag rates, coverage, resolvable share per level, compositions and the
+    // pair JSD) and the annotation_config.json it resolved with: all
+    // deterministic for given inputs, so a deep-cached COMPUTE_CPU (M5)
+    // staging it re-runs only when a label changes. The run record (clock,
+    // wall time, absolute paths) is published beside it and staged nowhere.
+    tuple val(pair_id),
+        val(segmentation),
+        path("annotation_resolve_out"), emit: resolved
+    path("annotation_resolve_run.json"), emit: run_record
+
+    script:
+    def annotationConfigJson = AnnotationReferences.resolveConfigJson(resolve_spec)
+    def resolveArgs = AnnotationReferences.resolveArguments(
+        resolve_spec,
+        bundle_refs as List,
+        alignment_files as List,
+    )
+    """
+    set -euo pipefail
+    export PYTHONPATH="${projectDir}/../src:\${PYTHONPATH:-}"
+    export CUDA_VISIBLE_DEVICES=""
+    # One Python process: numpy, the block bootstrap and the flag nulls run
+    # single-threaded; the second CPU covers parquet and HDF5 I/O.
+    export OMP_NUM_THREADS=1
+    export OPENBLAS_NUM_THREADS=1
+    export MKL_NUM_THREADS=1
+    export NUMEXPR_NUM_THREADS=1
+    export NUMBA_NUM_THREADS=1
+
+    cat > annotation_config.json <<'JSON'
+${annotationConfigJson}
+JSON
+
+    merxen annotate-resolve \\
+        --annotation-config annotation_config.json \\
+        ${resolveArgs} \\
+        --out annotation_resolve_out \\
+        --run-record annotation_resolve_run.json
+    cp annotation_config.json annotation_resolve_out/annotation_config.json
+    """
+
+    stub:
+    def annotationConfigJson = AnnotationReferences.resolveConfigJson(resolve_spec)
+    def stubSummary = AnnotationReferences.stubResolveSummaryJson(
+        pair_id,
+        segmentation,
+        resolve_spec,
+        bundle_refs as List,
+        alignment_files as List,
+    )
+    def summaryFile = AnnotationReferences.resolveSummaryFile(pair_id)
+    def copyRefs = (bundle_refs as List).collect { ref ->
+        "cp ${ref} annotation_resolve_out/stub_bundle_refs/"
+    }.join("\n    ")
+    """
+    mkdir -p annotation_resolve_out/stub_bundle_refs
+    ${copyRefs}
+    cat > annotation_resolve_out/${summaryFile} <<'JSON'
+${stubSummary}
+JSON
+    cat > annotation_resolve_out/annotation_config.json <<'JSON'
+${annotationConfigJson}
+JSON
+    cp resolve_inputs/annotation_map_out/${AnnotationReferences.MAP_MANIFEST_FILE} annotation_resolve_out/stub_map_manifest.json
+    echo '{"stub": true}' > annotation_resolve_run.json
     """
 }

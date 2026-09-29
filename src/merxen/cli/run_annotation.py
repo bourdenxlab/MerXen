@@ -1118,3 +1118,391 @@ def _annotate(
                 f"- {sample_id} {run_id}: {run.n_cells} cells x {run.n_query_genes} "
                 f"genes, {'reused' if run.reused else f'{run.wall_s:.0f} s'}"
             )
+
+
+def _n_segmented(values: tuple[str, ...]) -> dict[str, int]:
+    """Parse ``--n-segmented SAMPLE_ID=N``."""
+    parsed: dict[str, int] = {}
+    for value in values:
+        key, separator, number = value.partition("=")
+        if not separator or not key.strip():
+            raise click.BadParameter(
+                f"{value!r} must be SAMPLE_ID=N", param_hint="--n-segmented"
+            )
+        try:
+            parsed[key.strip()] = int(number)
+        except ValueError as error:
+            raise click.BadParameter(
+                f"{value!r}: N must be an integer", param_hint="--n-segmented"
+            ) from error
+    return parsed
+
+
+@click.command(name="annotate-resolve")
+@click.option(
+    "--map-dir",
+    type=click.Path(path_type=Path, exists=True, file_okay=False),
+    required=True,
+    help="MAP output (map_manifest.json and <platform>/<sid>_mmc_*.parquet).",
+)
+@click.option(
+    "--out",
+    "output_dir",
+    type=click.Path(path_type=Path, file_okay=False),
+    required=True,
+    help="Output directory (never inside a results tree or the MAP output).",
+)
+@click.option(
+    "--species",
+    type=_SPECIES,
+    default=None,
+    help="Default: the MAP manifest's species.",
+)
+@click.option(
+    "--panel-dir",
+    type=click.Path(path_type=Path, exists=True, file_okay=False),
+    default=None,
+    help="annotation-panel output (default: <map-dir>/panel).",
+)
+@click.option(
+    "--annotation-config",
+    "annotation_config_path",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    default=None,
+    help="annotation_config.json (AnnotationConfig); default: species defaults.",
+)
+@click.option(
+    "--bundle",
+    "bundle_values",
+    multiple=True,
+    help="RUN_ID=BUNDLE_DIR or REFERENCE_ID=BUNDLE_DIR: resolve with this bundle "
+    "(its marker lookup must be the one the run mapped with).",
+)
+@click.option(
+    "--store",
+    type=click.Path(path_type=Path, file_okay=False, exists=True),
+    default=None,
+    help="With --current-bundles: the reference store to take bundles from.",
+)
+@click.option(
+    "--store-large",
+    type=click.Path(path_type=Path, file_okay=False, exists=True),
+    default=None,
+    help="Store for panels above 1,000 genes.",
+)
+@click.option(
+    "--current-bundles",
+    is_flag=True,
+    help="Resolve with the store's current bundle of each run's reference and "
+    "panel (current builder and resolvability tables) instead of the bundle "
+    "the run mapped with.",
+)
+@click.option(
+    "--bundle-ref",
+    "bundle_ref_paths",
+    multiple=True,
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    help="A bundle_ref.json PREP resolved (repeatable): each run is resolved with "
+    "the bundle of its reference and panel.",
+)
+@click.option(
+    "--require-bundle-refs",
+    is_flag=True,
+    help="Every run must have a --bundle-ref with the build_hash it mapped with "
+    "(pipeline tasks: no store lookup, no override).",
+)
+@click.option(
+    "--prepared-dir",
+    type=click.Path(path_type=Path, exists=True, file_okay=False),
+    default=None,
+    help="Read the counts from these prepared H5ADs instead of the manifest's inputs.",
+)
+@click.option(
+    "--clustering-config",
+    "clustering_config_path",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    default=None,
+    help="With --prepared-dir: the clustering_squidpy_config.json MAP read (sample "
+    "platforms); its min_counts and pair_id must be the MAP manifest's.",
+)
+@click.option(
+    "--gene-id-fallback-csv",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    default=None,
+    help="The gene-ID fallback table MAP used (the counts must fingerprint the same).",
+)
+@click.option(
+    "--n-segmented",
+    "n_segmented_values",
+    multiple=True,
+    help="SAMPLE_ID=N segmented objects (gate warning denominator; a clustered "
+    "H5AD holds table cells only).",
+)
+@click.option(
+    "--alignment-dir",
+    type=click.Path(path_type=Path, exists=True, file_okay=False),
+    default=None,
+    help="The pair's align_out (shared tissue mask); default: from the inputs' "
+    "results tree.",
+)
+@click.option(
+    "--no-alignment-lookup",
+    is_flag=True,
+    help="Never look up the inputs' published align_out: the shared tissue mask "
+    "comes only from --alignment-dir (pipeline tasks).",
+)
+@click.option(
+    "--platforms",
+    default=None,
+    help="Comma-separated platforms to resolve (default: all).",
+)
+@click.option("--n-bootstrap", type=click.IntRange(min=1), default=200)
+@click.option("--tile-um", type=click.FloatRange(min=1.0), default=500.0)
+@click.option("--seed", type=int, default=0)
+@click.option(
+    "--results-root",
+    "results_roots",
+    multiple=True,
+    type=click.Path(path_type=Path, file_okay=False),
+    help="A results tree --out must stay out of (repeatable).",
+)
+@click.option(
+    "--run-record",
+    "run_record_path",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=None,
+    help="Where the run record (created_at, wall time, absolute paths) goes; "
+    "default: <out>/<pair>_resolve_run.json. Pipeline tasks keep it out of --out, "
+    "whose content is then deterministic.",
+)
+def annotate_resolve_command(
+    map_dir: Path,
+    output_dir: Path,
+    species: str | None,
+    panel_dir: Path | None,
+    annotation_config_path: Path | None,
+    bundle_values: tuple[str, ...],
+    store: Path | None,
+    store_large: Path | None,
+    current_bundles: bool,
+    bundle_ref_paths: tuple[Path, ...],
+    require_bundle_refs: bool,
+    prepared_dir: Path | None,
+    clustering_config_path: Path | None,
+    gene_id_fallback_csv: Path | None,
+    n_segmented_values: tuple[str, ...],
+    alignment_dir: Path | None,
+    no_alignment_lookup: bool,
+    platforms: str | None,
+    n_bootstrap: int,
+    tile_um: float,
+    seed: int,
+    results_roots: tuple[Path, ...],
+    run_record_path: Path | None,
+) -> None:
+    """Resolve MAP outputs into label tables (RESOLVE step, plan §3.4).
+
+    Writes <out>/<platform>/<sid>_celltype_labels.parquet (§4.1),
+    <sid>_annotation_manifest.json (§4.6), <pair>_resolve_summary.json and
+    the run record; never writes into a results tree (the inputs', a
+    published annotation output's, --results-root) or the MAP and panel
+    outputs.
+    """
+    from merxen.annotation.mapmycells_engine import MmcEngineError
+    from merxen.annotation.pipeline import MapError, ResolveError
+
+    try:
+        with _clean_errors():
+            _annotate_resolve(
+                map_dir=map_dir,
+                output_dir=output_dir,
+                species=species,
+                panel_dir=panel_dir,
+                annotation_config_path=annotation_config_path,
+                bundle_values=bundle_values,
+                store=store,
+                store_large=store_large,
+                current_bundles=current_bundles,
+                bundle_ref_paths=bundle_ref_paths,
+                require_bundle_refs=require_bundle_refs,
+                prepared_dir=prepared_dir,
+                clustering_config_path=clustering_config_path,
+                gene_id_fallback_csv=gene_id_fallback_csv,
+                n_segmented=_n_segmented(n_segmented_values),
+                alignment_dir=alignment_dir,
+                lookup_alignment=not no_alignment_lookup,
+                platforms=platforms,
+                n_bootstrap=n_bootstrap,
+                tile_um=tile_um,
+                seed=seed,
+                results_roots=results_roots,
+                run_record_path=run_record_path,
+            )
+    except (MapError, MmcEngineError, ResolveError, NotImplementedError) as error:
+        raise click.ClickException(f"{type(error).__name__}: {error}") from error
+
+
+def _annotate_resolve(
+    *,
+    map_dir: Path,
+    output_dir: Path,
+    species: str | None,
+    panel_dir: Path | None,
+    annotation_config_path: Path | None,
+    bundle_values: tuple[str, ...],
+    store: Path | None,
+    store_large: Path | None,
+    current_bundles: bool,
+    bundle_ref_paths: tuple[Path, ...],
+    require_bundle_refs: bool,
+    prepared_dir: Path | None,
+    clustering_config_path: Path | None,
+    gene_id_fallback_csv: Path | None,
+    n_segmented: Mapping[str, int],
+    alignment_dir: Path | None,
+    lookup_alignment: bool,
+    platforms: str | None,
+    n_bootstrap: int,
+    tile_um: float,
+    seed: int,
+    results_roots: tuple[Path, ...],
+    run_record_path: Path | None = None,
+) -> None:
+    from merxen.annotation.panel import REQUIRED_BUNDLES_FILE, prepared_samples
+    from merxen.annotation.pipeline import (
+        MAP_MANIFEST_NAME,
+        BundleFinder,
+        MapSample,
+        ResolveError,
+        annotate_resolve,
+        check_output_outside_inputs,
+        current_store_bundles,
+        load_map_manifest,
+        staged_bundle_finder,
+    )
+    from merxen.annotation.store import ReferenceStore
+
+    if require_bundle_refs and (bundle_values or current_bundles):
+        raise click.UsageError(
+            "--require-bundle-refs resolves with the staged refs only: drop "
+            "--bundle and --current-bundles"
+        )
+    if bundle_ref_paths and current_bundles:
+        raise click.UsageError("give --bundle-ref or --current-bundles, not both")
+    manifest = load_map_manifest(map_dir / MAP_MANIFEST_NAME)
+    run_species = species or manifest.species
+    if run_species != manifest.species:
+        raise click.BadParameter(
+            f"--species {run_species} differs from the MAP manifest's "
+            f"{manifest.species}",
+            param_hint="--species",
+        )
+    clustering = _read_json(clustering_config_path) or {}
+    if clustering_config_path is not None and prepared_dir is None:
+        raise click.UsageError("--clustering-config goes with --prepared-dir")
+    configured_min_counts = clustering.get("min_counts")
+    if (
+        configured_min_counts is not None
+        and int(configured_min_counts) != manifest.min_counts
+    ):
+        raise ResolveError(
+            f"the clustering config's min_counts {configured_min_counts} differs "
+            f"from the {manifest.min_counts} MAP mapped with: the table cells "
+            "must be the clustering run's"
+        )
+    configured_pair = clustering.get("pair_id")
+    if (
+        configured_pair
+        and manifest.pair_id
+        and str(configured_pair) != manifest.pair_id
+    ):
+        raise ResolveError(
+            f"the clustering config is pair {configured_pair}, the MAP output "
+            f"pair {manifest.pair_id}"
+        )
+    config = _load_annotation_config(annotation_config_path, run_species)
+    if gene_id_fallback_csv is not None:
+        config = config.model_copy(
+            update={
+                "panel": config.panel.model_copy(
+                    update={"gene_id_fallback_csv": gene_id_fallback_csv}
+                )
+            }
+        )
+    config = config.coupled_to_clustering(manifest.min_counts)
+    samples: list[MapSample] | None = None
+    if prepared_dir is not None:
+        samples = [
+            MapSample(
+                sample_id=item.sample_id,
+                platform=item.platform,
+                h5ad_path=item.h5ad_path.resolve(),
+                source="prepared",
+            )
+            for item in prepared_samples(prepared_dir, clustering_config=clustering)
+        ]
+    inputs = [Path(record.h5ad_path) for record in manifest.samples.values()]
+    inputs += [sample.h5ad_path for sample in samples or ()]
+    # The MAP output and the panel directory (a published annotation_map_out /
+    # annotation_panel_out places its results tree, results_root_of) are
+    # inputs too: never write into them or their results tree.
+    guarded = [*inputs, map_dir / MAP_MANIFEST_NAME]
+    guarded.append((panel_dir or map_dir / "panel") / REQUIRED_BUNDLES_FILE)
+    check_output_outside_inputs(output_dir, guarded, protected_roots=results_roots)
+    if run_record_path is not None:
+        check_output_outside_inputs(
+            run_record_path.parent,
+            guarded,
+            protected_roots=results_roots,
+            what="run record directory",
+        )
+    finder: BundleFinder | None = None
+    if bundle_ref_paths or require_bundle_refs:
+        finder = staged_bundle_finder(
+            bundle_ref_paths, manifest, require=require_bundle_refs
+        )
+    elif current_bundles:
+        store_root = store or config.reference_store
+        if store_root is None:
+            raise click.UsageError("--current-bundles needs --store")
+        finder = current_store_bundles(
+            ReferenceStore(
+                store_root,
+                large_root=store_large or config.reference_store_large,
+                large_panel_genes=config.panel.large_panel_genes,
+            )
+        )
+    result = annotate_resolve(
+        map_dir,
+        config,
+        output_dir=output_dir,
+        panel_dir=panel_dir,
+        samples=samples,
+        bundle_overrides=_bundle_overrides(bundle_values),
+        bundle_finder=finder,
+        n_segmented=n_segmented,
+        alignment_dir=alignment_dir,
+        lookup_alignment=lookup_alignment,
+        platforms=(
+            [item.strip() for item in platforms.split(",") if item.strip()]
+            if platforms
+            else None
+        ),
+        tile_um=tile_um,
+        n_bootstrap=n_bootstrap,
+        seed=seed,
+        run_record_path=run_record_path,
+    )
+    click.echo(
+        f"annotate-resolve: {len(result.samples)} sample(s) in "
+        f"{result.run['wall_time_s']:.0f} s -> {result.summary_path}"
+    )
+    for sample_id, sample in result.samples.items():
+        gate = sample.summary["resolution"]["gate"]
+        levels = sample.summary["resolution"]["levels"]
+        broad = levels["broad"]["confident_share_table"]
+        click.echo(
+            f"- {sample_id}: gate {gate['level']}"
+            f"{' + warning' if gate['warning'] else ''}, confident broad "
+            f"{broad if broad is None else round(broad, 3)} of table cells"
+        )
