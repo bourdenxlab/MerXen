@@ -314,3 +314,53 @@ def test_cortical_depth_subcluster_violins_group_mapped_leaves(tmp_path: Path) -
     assert set(lineage["subcluster_label"]) == {UNRESOLVED_LABEL}
     oligo = frame.loc[frame["broad_class"] == "Oligodendrocytes"]
     assert set(oligo["subcluster_label"]) == {"Oligodendrocyte"}
+
+
+def test_cortical_depth_reads_the_suffixed_table_of_a_map_first_run(
+    tmp_path: Path,
+) -> None:
+    """A map_first row's table config names its run's suffix (plan §4.8).
+
+    main.nf adds ``clustered_table_key_suffix`` to a map_first row's
+    cortical-depth tables only; the depth violins then read the
+    ``*_mapfirst`` table even when the legacy clustered table sits next to it.
+    """
+    from merxen.cortical_depth.pipeline import (
+        _load_cluster_annotations,
+        cluster_annotation_summary,
+    )
+
+    section = make_section("human")
+    clustered = _map_first(section, tmp_path)
+    legacy = clustered.copy()
+    legacy.obs["broad_class"] = "Legacy broad class"
+    del legacy.uns["merxen_annotation_json"]
+    fake = types.SimpleNamespace(
+        tables={
+            clustered_table_key("table", "proseg_hybrid"): legacy,
+            clustered_table_key("table", "proseg_hybrid", "mapfirst"): clustered,
+        }
+    )
+    map_first_config = CorticalDepthTableConfig(
+        segmentation="proseg_hybrid",
+        table_key="table",
+        clustered_table_key_suffix="mapfirst",
+    )
+    legacy_config = CorticalDepthTableConfig(
+        segmentation="proseg_hybrid", table_key="table"
+    )
+
+    map_first_labels = _load_cluster_annotations(fake, map_first_config)
+    legacy_labels = _load_cluster_annotations(fake, legacy_config)
+
+    assert map_first_labels is not None and legacy_labels is not None
+    assert "Legacy broad class" not in set(map_first_labels["broad_class"].astype(str))
+    assert set(legacy_labels["broad_class"].astype(str)) == {"Legacy broad class"}
+    assert cluster_annotation_summary(fake, map_first_config) is not None
+    assert cluster_annotation_summary(fake, legacy_config) is None
+    with pytest.raises(ValueError):
+        CorticalDepthTableConfig(
+            segmentation="proseg_hybrid",
+            table_key="table",
+            clustered_table_key_suffix="Bad/Key",
+        )

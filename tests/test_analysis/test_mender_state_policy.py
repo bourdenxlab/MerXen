@@ -72,7 +72,11 @@ def _config(tmp_path: Path, **overrides: Any) -> MenderConfig:
 
 
 def _write_clustered(
-    tmp_path: Path, config: MenderConfig, *, provenance: str | None = None
+    tmp_path: Path,
+    config: MenderConfig,
+    *,
+    provenance: str | None = None,
+    hierarchy: dict[str, Any] | None = None,
 ) -> list[str]:
     n_cells = 40
     cell_ids = [f"c{index}" for index in range(n_cells)]
@@ -91,6 +95,8 @@ def _write_clustered(
     }
     if provenance is not None:
         clustered.uns[PROVENANCE_UNS_KEY] = provenance
+    if hierarchy is not None:
+        clustered.uns["merxen_hierarchical_clustering"] = hierarchy
     clustered.write_h5ad(config.source_h5ad)
     return cell_ids
 
@@ -378,3 +384,102 @@ def test_compute_module_stays_python39_compatible() -> None:
     source = Path(mender_compute.__file__).read_text(encoding="utf-8")
     ast.parse(source, feature_version=(3, 9))
     assert mender_compute.IN_FEATURES_COLUMN == mender.IN_FEATURES_COLUMN
+
+
+MAP_FIRST_RECORD = {
+    "mode": "map_first",
+    "table_key_suffix": "mapfirst",
+    "mender_unassigned_state_policy": EXCLUDE_FROM_FEATURES_POLICY,
+    "cross_platform_statistics_level": "broad_only",
+    "cross_platform_json": json.dumps(
+        {
+            "statistics_level": "broad_only",
+            "flag": True,
+            "reasons": ["intersection_genes:80<100"],
+            "panel_mode": "per_platform",
+            "jsd_runs": ["whb_frontal_supc_clus_xpanel"],
+            "jsd_purpose": "intersection_xpanel",
+            "source": "resolve_summary",
+        }
+    ),
+}
+
+
+def test_a_map_first_table_brings_its_runs_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MENDER_PREPARE's legacy script names no policy: the table's applies (§4.9).
+
+    The map_first run records ``mender_unassigned_state_policy`` in the
+    clustered table; a config that sets a policy explicitly wins, and a legacy
+    table (no record) keeps ``state``.
+    """
+    provenance = AnnotationProvenance(
+        species="human",
+        gate=DatasetGateProvenance(level="full", warning=False),
+        panel=PanelProvenance(panel_trust="validated"),
+    ).to_uns_json()
+    config = _config(tmp_path)
+    assert "unassigned_state_policy" not in config.model_fields_set
+    cell_ids = _write_clustered(
+        tmp_path, config, provenance=provenance, hierarchy=MAP_FIRST_RECORD
+    )
+    _fake_spatialdata(monkeypatch, config, cell_ids)
+
+    manifest_path = prepare_mender(config, tmp_path / "prepared")
+
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["unassigned_state_policy"] == EXCLUDE_FROM_FEATURES_POLICY
+    assert manifest["excluded_feature_states"] == [
+        "Mixed/Unknown:unresolved",
+        "Neurons/unresolved:unresolved",
+    ]
+    portable = pd.read_parquet(manifest_path.parent / "mender_input.parquet")
+    assert IN_FEATURES_COLUMN in portable.columns
+    # The pair's cross-platform scope reaches the MENDER manifest (§8.5).
+    assert manifest["annotation"]["cross_platform"]["statistics_level"] == "broad_only"
+
+    explicit = _config(tmp_path / "explicit", unassigned_state_policy="state")
+    explicit.source_h5ad.parent.mkdir(parents=True, exist_ok=True)
+    cell_ids = _write_clustered(
+        tmp_path, explicit, provenance=provenance, hierarchy=MAP_FIRST_RECORD
+    )
+    _fake_spatialdata(monkeypatch, explicit, cell_ids)
+    manifest = json.loads(
+        prepare_mender(explicit, tmp_path / "explicit" / "prepared").read_text()
+    )
+    assert manifest["unassigned_state_policy"] == "state"
+
+
+def test_effective_config_keeps_legacy_tables_and_explicit_policies() -> None:
+    config = MenderConfig.model_validate(
+        {
+            "pair_id": "p",
+            "sample_id": "p_MERSCOPE",
+            "platform": "MERSCOPE",
+            "segmentation": "proseg_hybrid",
+            "source_h5ad": "x.h5ad",
+            "spatialdata_path": "x.zarr",
+            "source_spatialdata_table": "t",
+            "native_shape_key": "s",
+            "output_dir": "o",
+        }
+    )
+    legacy_uns = {"merxen_hierarchical_clustering": {"mode": "legacy"}}
+
+    assert mender.effective_mender_config(config, legacy_uns) is config
+    assert mender.effective_mender_config(config, {}) is config
+    updated = mender.effective_mender_config(
+        config, {"merxen_hierarchical_clustering": MAP_FIRST_RECORD}
+    )
+    assert updated.unassigned_state_policy == EXCLUDE_FROM_FEATURES_POLICY
+    assert updated.sample_id == config.sample_id
+    explicit = MenderConfig.model_validate(
+        {**config.model_dump(exclude_unset=True), "unassigned_state_policy": "state"}
+    )
+    assert (
+        mender.effective_mender_config(
+            explicit, {"merxen_hierarchical_clustering": MAP_FIRST_RECORD}
+        )
+        is explicit
+    )
