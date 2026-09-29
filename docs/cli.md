@@ -45,15 +45,16 @@ Commands:
                       Get or build one reference bundle and...
   annotation-store   Inspect the annotation reference store...
   annotate           Map published or prepared samples with...
+  annotate-resolve   Resolve MAP outputs into label tables...
   annotation-panel-fetch
                       Fetch pinned public panel gene lists (URL, size and...
   annotation-panel-simulate
                       Simulate a candidate panel: predicted levels, trust,...
 ```
 
-The reference-based annotation commands (`annotation-*` and `annotate`, plan
-`docs/plans/robust-celltype-annotation-plan.md` §3.2–§3.3) take explicit
-options instead of a single `--config`.
+The reference-based annotation commands (`annotation-*`, `annotate` and
+`annotate-resolve`, plan `docs/plans/robust-celltype-annotation-plan.md`
+§3.2–§3.4) take explicit options instead of a single `--config`.
 
 Logging is configured in the root `main()` group and streams to stderr at
 `INFO` level.
@@ -592,8 +593,9 @@ bundle, standalone on published clustered H5ADs or on a
 `CLUSTERING_SQUIDPY_PREPARE` directory. It never writes (`--out` or
 `--work-dir`) into the inputs' results tree: not below an input's directory,
 not below the results root of a published clustered H5AD or of any input
-under a `<root>/<pair>/<seg>/clustering_squidpy/` layout, and not below a
-`--results-root`.
+under a `<root>/<pair>/<seg>/<step>/` layout (`clustering_squidpy`,
+`annotation_panel`, `annotation_map`, `annotation_resolve`,
+`annotation_report`), and not below a `--results-root`.
 
 ```bash
 merxen annotate --species human \
@@ -645,6 +647,64 @@ and two uses on the same gene set are mapped once and recorded under both
 run ids.
 
 ---
+
+
+## `merxen annotate-resolve`
+
+The annotation RESOLVE step (plan §3.4; M4): turns a MAP output
+(`map_manifest.json` and its tidy parquets) into the per-cell label tables,
+standalone on published MAP outputs or as the `CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE`
+pipeline task (which passes `--prepared-dir`, `--clustering-config`,
+`--bundle-ref` per staged ref, `--require-bundle-refs` and
+`--no-alignment-lookup`). It reads each sample's counts from the
+manifest's inputs (or `--prepared-dir`), checks them against the sample
+fingerprint MAP recorded, applies resolvability-gated emission reweighted to
+the dataset's soft composition, the floors, the dataset gate, the
+degraded-mode consensus and the flags, and writes under `--out`. `--out`
+(and `--run-record`) never lie in a results tree: not in the MAP output or
+the panel directory, not below the results root of an input, of a published
+MAP output (`<root>/<pair>/<seg>/annotation_map/annotation_map_out`) or of a
+published panel directory (`.../annotation_panel/annotation_panel_out`), and
+not below a `--results-root`:
+
+| File | Content |
+|---|---|
+| `<platform>/<sid>_celltype_labels.parquet` | The §4.1 label table (every object; validated with `schema.validate_label_table`); the provenance JSON is also in the parquet schema (`merxen_annotation`). |
+| `<platform>/<sid>_annotation_manifest.json` | `AnnotationProvenance` (§4.6): the JSON string `uns["merxen_annotation_json"]` holds. |
+| `<pair>_resolve_summary.json` | Per sample: trust (and banner), degraded mode, gate level and warning with reasons, `n_segmented` (the gate warning's denominator: the `--n-segmented` count when given, else the input's objects; `n_segmented_source`), confident share per level of table cells and of segmented objects, resolvable share per level, emission, consensus tiers, COP control, realised flag rates per class × platform (H16: `rate` over the stratum's confident broad calls, `informative`, `informative_h16`), the restricted-lookup record and the compositions; per pair: the JSD of every composition kind, whole section and shared tissue mask, with its 95% block-bootstrap CI, and `cross_platform` (the run that fed it; a `per_platform` pair compares the intersection-panel runs `_xpanel`, broad-level only and flagged below 100 intersection genes or on a broad-only intersection, plan §8.5). Deterministic for given inputs. |
+| `<pair>_resolve_run.json` (or `--run-record`) | The run record: `created_at`, `wall_time_s`, absolute MAP manifest and output paths, the summary's sha256. |
+
+```bash
+merxen annotate-resolve \
+  --map-dir shadow/P7513/proseg_hybrid \
+  --current-bundles --store /media/mathieubo/SSD1/MerXen/annotation_references \
+  --gene-id-fallback-csv /path/to/WHB/gene.csv \
+  --n-segmented P7513_MERSCOPE=211744 --n-segmented P7513_XENIUM=167738 \
+  --out resolve/P7513/proseg_hybrid
+```
+
+| Option | Meaning |
+|---|---|
+| `--map-dir DIR` | The MAP output (`map_manifest.json`, `<platform>/<sid>_mmc_<run_id>.parquet`); every parquet must still have the sha256 the manifest recorded. |
+| `--panel-dir DIR` | `annotation-panel` output (default `<map-dir>/panel`): the panel files (trust diagnostics, the flags' query genes), `panel_report.json` and `required_bundles.json`. Each panel's family is re-derived from the current `validated_panels.csv`. |
+| `--bundle KEY=DIR` | Resolve a run (`KEY` = run id or reference id) with this bundle; it must be of the run's reference and panel and have the marker lookup the run mapped with. |
+| `--current-bundles --store DIR [--store-large DIR]` | Resolve every run with the store's current bundle of its reference and panel (current builder, current resolvability tables), under the same checks. |
+| `--bundle-ref PATH` | A `bundle_ref.json` of `annotation-reference-prep` (repeatable): each run is resolved with the bundle of the ref of its reference and panel; a run no ref names keeps its own bundle, and a ref of another build is an override under the same checks. |
+| `--require-bundle-refs` | Every run must have a `--bundle-ref` with the `build_hash` it mapped with (else the MAP output is stale and the command fails): no store lookup and no override (`--bundle`, `--current-bundles` are refused), as a pipeline task. |
+| `--prepared-dir DIR` | Read the counts from these prepared H5ADs instead of the manifest's inputs (a refused panel, whose manifest lists no sample, needs it). |
+| `--clustering-config PATH` | With `--prepared-dir`: the `clustering_squidpy_config.json` MAP read. Its sample platforms are used as MAP used them, and its `min_counts` and `pair_id` must be the MAP manifest's. |
+| `--gene-id-fallback-csv PATH` | The gene-ID fallback table MAP used (otherwise the counts do not fingerprint the same). |
+| `--n-segmented SID=N` | Segmented objects of a sample: the denominator of the segmented-object gate warning (a published clustered H5AD holds table cells only). |
+| `--alignment-dir DIR` | The pair's `align_out` (shared tissue mask); default `<results>/<pair>/alignment/align_out` of the inputs' results tree, when present. |
+| `--no-alignment-lookup` | Never take that default: the mask comes only from `--alignment-dir` (a pipeline task gets it from ALIGN's channel, never from a published file ALIGN may still be writing). |
+| `--annotation-config PATH`, `--species` | `AnnotationConfig` JSON; the species defaults to the manifest's (mouse RESOLVE is M6: a mouse MAP output fails with a clean error). |
+| `--platforms`, `--n-bootstrap`, `--tile-um`, `--seed`, `--results-root` | Resolve only these platforms; block-bootstrap replicates (200), tile edge (500 µm) and seed (0); a results tree `--out` must stay out of. |
+| `--run-record PATH` | Where the run record goes (default `<out>/<pair>_resolve_run.json`); the pipeline task writes it outside `annotation_resolve_out`, so that directory is byte-deterministic. |
+
+The human acceptance criteria (plan §14) are re-measured on these outputs
+with `scripts/acceptance/resolve_criteria.py` (see
+[the annotation stage](stages/annotation.md#shadow-baselines-m3)); it never
+changes a pre-registered threshold.
 
 ## Writing a standalone config
 

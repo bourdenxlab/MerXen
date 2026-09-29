@@ -511,6 +511,50 @@ def test_annotate_map_reuses_identical_published_runs(
             assert (tmp_path / "rerun" / run.parquet).is_file()
 
 
+def test_reuse_ignores_the_resolve_only_settings(
+    tmp_path: Path, fake_mmc: FakeMmc
+) -> None:
+    """A threshold, gate, flag or degraded-mode change re-runs RESOLVE only.
+
+    The MAP reuse key (query fingerprint, build_hash, engine parameters, ctm
+    version, tidy schema, lookup) holds none of RESOLVE's settings, so a
+    re-run MAP with them changed copies every published run (plan §3.1).
+    """
+    samples, runs, config = _setup(tmp_path, fake_mmc)
+    published = tmp_path / "published"
+    annotate_map(
+        samples, runs, config, output_dir=published, pair_id="PX", segmentation="s"
+    )
+    n_calls = len(fake_mmc.calls)
+    changed = config.model_copy(
+        update={
+            "allow_single_method": True,
+            "thresholds": config.thresholds.model_copy(
+                update={"whb_broad": 0.8, "whb_supercluster": 0.75}
+            ),
+            "gate": config.gate.model_copy(update={"min_frac_ge30": 0.5}),
+            "flags": config.flags.model_copy(update={"contamination_alpha": 0.05}),
+        }
+    )
+
+    manifest = annotate_map(
+        samples,
+        runs,
+        changed,
+        output_dir=tmp_path / "rerun",
+        pair_id="PX",
+        segmentation="s",
+        reuse_from=published,
+    )
+
+    assert len(fake_mmc.calls) == n_calls
+    assert all(
+        run.reused
+        for record in manifest.samples.values()
+        for run in record.runs.values()
+    )
+
+
 def test_reuse_needs_the_same_query_and_engine_parameters(
     tmp_path: Path, fake_mmc: FakeMmc
 ) -> None:

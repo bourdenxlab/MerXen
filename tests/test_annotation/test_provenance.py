@@ -206,7 +206,7 @@ def test_serialised_provenance_has_no_list_of_mappings() -> None:
     payload = json.loads(_human_provenance().to_uns_json())
     for values in _walk_lists(payload):
         assert not any(isinstance(item, dict) for item in values)
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
     assert payload["label_table_version"] == 1
     assert payload["panel"]["validation_basis"] == "real_data"
 

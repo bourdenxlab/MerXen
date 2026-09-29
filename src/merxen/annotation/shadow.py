@@ -43,7 +43,107 @@ from typing import TYPE_CHECKING, Any, Final, Literal
 import numpy as np
 import pandas as pd
 
+from merxen.annotation.composition import (
+    BOOTSTRAP_SEED,
+    COMPOSITION_COLUMNS,
+    N_BOOTSTRAP,
+    Resampling,
+    _bootstrap_weights,
+    jensen_shannon_distance,
+    soft_broad_matrix,
+    whb_broad_of,
+)
+from merxen.annotation.composition import (
+    TILE_UM as TILE_UM,
+)
+from merxen.annotation.composition import (
+    UNALLOCATED as UNALLOCATED,
+)
+from merxen.annotation.composition import (
+    BootstrapJsd as BootstrapJsd,
+)
+from merxen.annotation.composition import (
+    block_bootstrap_jsd as block_bootstrap_jsd,
+)
+from merxen.annotation.composition import (
+    broad_class_index as broad_class_index,
+)
+from merxen.annotation.composition import (
+    composition_shares as composition_shares,
+)
+from merxen.annotation.composition import (
+    one_hot_broad_matrix as one_hot_broad_matrix,
+)
+from merxen.annotation.composition import (
+    shared_tile_codes as shared_tile_codes,
+)
+from merxen.annotation.composition import (
+    tile_codes as tile_codes,
+)
+from merxen.annotation.composition import (
+    tile_sums as tile_sums,
+)
 from merxen.annotation.config import AnnotationGate, AnnotationThresholds
+from merxen.annotation.flags import (
+    CONTAMINATION_ALPHA as CONTAMINATION_ALPHA,
+)
+from merxen.annotation.flags import (
+    CONTAMINATION_MAX_INFORMATIVE as CONTAMINATION_MAX_INFORMATIVE,
+)
+from merxen.annotation.flags import (
+    CONTAMINATION_MIN_NEGATIVE as CONTAMINATION_MIN_NEGATIVE,
+)
+from merxen.annotation.flags import (
+    CONTAMINATION_MIN_NULL_CELLS as CONTAMINATION_MIN_NULL_CELLS,
+)
+from merxen.annotation.flags import (
+    CONTAMINATION_NULL_QUANTILE as CONTAMINATION_NULL_QUANTILE,
+)
+from merxen.annotation.flags import (
+    DIFFUSE_MAX_INFORMATIVE as DIFFUSE_MAX_INFORMATIVE,
+)
+from merxen.annotation.flags import (
+    DIFFUSE_N_SIMULATIONS as DIFFUSE_N_SIMULATIONS,
+)
+from merxen.annotation.flags import (
+    DIFFUSE_QUANTILE as DIFFUSE_QUANTILE,
+)
+from merxen.annotation.flags import (
+    BetaBinomialFit as BetaBinomialFit,
+)
+from merxen.annotation.flags import (
+    ContaminationFlags as ContaminationFlags,
+)
+from merxen.annotation.flags import (
+    beta_binomial_upper_tail as beta_binomial_upper_tail,
+)
+from merxen.annotation.flags import (
+    class_profiles as class_profiles,
+)
+from merxen.annotation.flags import (
+    contamination_flags as contamination_flags,
+)
+from merxen.annotation.flags import (
+    depth_grid as depth_grid,
+)
+from merxen.annotation.flags import (
+    distinct_gene_quantiles as distinct_gene_quantiles,
+)
+from merxen.annotation.flags import (
+    expected_genes_quantile as expected_genes_quantile,
+)
+from merxen.annotation.flags import (
+    fit_beta_binomial as fit_beta_binomial,
+)
+from merxen.annotation.flags import (
+    negative_counts as negative_counts,
+)
+from merxen.annotation.flags import (
+    negative_gene_mask as negative_gene_mask,
+)
+from merxen.annotation.flags import (
+    realised_rates as realised_rates,
+)
 from merxen.annotation.schema import meets_threshold
 from merxen.annotation.vocab import (
     COP_SUPERCLUSTER,
@@ -67,11 +167,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-UNALLOCATED: Final = "unallocated"
-COMPOSITION_COLUMNS: Final[tuple[str, ...]] = (*HUMAN_BROAD_CLASSES, UNALLOCATED)
-TILE_UM: Final = 500.0
-N_BOOTSTRAP: Final = 200
-BOOTSTRAP_SEED: Final = 0
 AGREEMENT_MIN_COUNTS: Final = 20
 SEED_PANEL_FAMILY: Final = "human_set_a"
 OPC: Final = "Oligodendrocyte precursors"
@@ -186,383 +281,8 @@ def _object_array(values: Sequence[object] | np.ndarray | pd.Series) -> np.ndarr
     return array
 
 
-def broad_class_index(
-    names: Sequence[object] | np.ndarray | pd.Series,
-    broad_of: Mapping[str, str],
-) -> np.ndarray:
-    """Return the ``COMPOSITION_COLUMNS`` index of each node's broad class.
-
-    Args:
-        names: Node names (``None`` / NaN for missing).
-        broad_of: Node name to human broad class.
-
-    Returns:
-        Integer indices; nodes outside the seven broad classes (sinks,
-        unknown or missing names) get the ``unallocated`` index.
-    """
-    position = {name: index for index, name in enumerate(HUMAN_BROAD_CLASSES)}
-    unallocated = len(HUMAN_BROAD_CLASSES)
-    lookup = {
-        str(name): position.get(str(broad), unallocated)
-        for name, broad in broad_of.items()
-    }
-    return np.array(
-        [
-            unallocated if value is None else lookup.get(str(value), unallocated)
-            for value in _object_array(names)
-        ],
-        dtype=np.int64,
-    )
-
-
-def whb_broad_of(vocab: VocabTable | None = None) -> dict[str, str]:
-    """Return the WHB supercluster name to broad class map (sinks unassigned)."""
-    table = vocab or primary_vocab("human")
-    return {
-        name: (UNASSIGNED_LABEL if table.is_sink(name) else table.broad_class(name))
-        for name in table.names
-    }
-
-
-def soft_broad_matrix(
-    names: np.ndarray,
-    probabilities: np.ndarray,
-    *,
-    broad_of: Mapping[str, str],
-) -> np.ndarray:
-    """Return per-cell soft broad-class mass (plan §5.5).
-
-    Args:
-        names: ``(n, k)`` node names: the assigned supercluster, then its
-            runner-ups (``None`` / NaN where absent).
-        probabilities: ``(n, k)`` bootstrap probabilities of those nodes.
-        broad_of: Node name to broad class.
-
-    Returns:
-        ``(n, 8)`` mass over ``COMPOSITION_COLUMNS``; mass on nodes outside
-        the seven classes and the residual ``1 - sum`` go to ``unallocated``,
-        so every row sums to 1 (cells without a call are all unallocated).
-
-    Raises:
-        ValueError: If the shapes differ.
-    """
-    names = np.asarray(names, dtype=object)
-    probabilities = np.asarray(probabilities, dtype=np.float64)
-    if names.ndim != 2 or names.shape != probabilities.shape:
-        raise ValueError("names and probabilities must be (n, k) arrays of one shape")
-    n_cells, n_nodes = names.shape
-    matrix = np.zeros((n_cells, len(COMPOSITION_COLUMNS)), dtype=np.float64)
-    rows = np.arange(n_cells)
-    n_classes = len(HUMAN_BROAD_CLASSES)
-    for column in range(n_nodes):
-        index = broad_class_index(names[:, column], broad_of)
-        values = np.nan_to_num(probabilities[:, column], nan=0.0)
-        values = np.clip(values, 0.0, 1.0)
-        allocated = index < n_classes
-        np.add.at(matrix, (rows[allocated], index[allocated]), values[allocated])
-    total = matrix[:, :n_classes].sum(axis=1)
-    over = total > 1.0
-    if over.any():
-        matrix[over, :n_classes] /= total[over, None]
-        total = np.minimum(total, 1.0)
-    matrix[:, n_classes] = 1.0 - total
-    return matrix
-
-
-def one_hot_broad_matrix(
-    broad_names: Sequence[object] | np.ndarray | pd.Series,
-    *,
-    include: np.ndarray | None = None,
-) -> np.ndarray:
-    """Return per-cell one-hot broad-class rows (argmax or confident-only).
-
-    Args:
-        broad_names: Broad class per cell (anything outside the seven classes,
-            incl. ``Mixed/Unknown`` and missing, is ``unallocated``).
-        include: Cells that count; excluded cells get an all-zero row
-            (confident-only composition).
-
-    Returns:
-        ``(n, 8)`` rows over ``COMPOSITION_COLUMNS``.
-    """
-    identity = {name: name for name in HUMAN_BROAD_CLASSES}
-    index = broad_class_index(broad_names, identity)
-    matrix = np.zeros((len(index), len(COMPOSITION_COLUMNS)), dtype=np.float64)
-    matrix[np.arange(len(index)), index] = 1.0
-    if include is not None:
-        matrix[~np.asarray(include, dtype=bool)] = 0.0
-    return matrix
-
-
-def jensen_shannon_distance(
-    p: np.ndarray, q: np.ndarray, *, columns: Sequence[int] | None = None
-) -> float:
-    """Return the base-2 Jensen-Shannon distance of two compositions.
-
-    Both vectors are restricted to the seven broad classes (the first seven
-    entries when ``unallocated`` is appended), or to ``columns``, and
-    renormalised, as the plan's JSD (§5.5) and
-    ``scipy.spatial.distance.jensenshannon(p, q, base=2)``.
-
-    Args:
-        p: Class masses (7 or 8 entries; rows of a matrix are vectorised).
-        q: Class masses of the same length.
-        columns: Entries to compare (e.g. the glial classes); default the
-            first seven.
-
-    Returns:
-        The distance in [0, 1]; NaN if either vector has no mass there.
-    """
-    n_classes = len(HUMAN_BROAD_CLASSES)
-    selected = (
-        np.arange(n_classes) if columns is None else np.asarray(columns, dtype=int)
-    )
-    first = np.asarray(p, dtype=np.float64)[..., selected]
-    second = np.asarray(q, dtype=np.float64)[..., selected]
-    first_total = first.sum(axis=-1, keepdims=True)
-    second_total = second.sum(axis=-1, keepdims=True)
-    with np.errstate(invalid="ignore", divide="ignore"):
-        first = first / first_total
-        second = second / second_total
-        middle = 0.5 * (first + second)
-        left = np.where(first > 0, first * np.log2(first / middle), 0.0)
-        right = np.where(second > 0, second * np.log2(second / middle), 0.0)
-    divergence = 0.5 * (left.sum(axis=-1) + right.sum(axis=-1))
-    distance = np.sqrt(np.clip(divergence, 0.0, None))
-    empty = (first_total[..., 0] <= 0) | (second_total[..., 0] <= 0)
-    distance = np.where(empty, np.nan, distance)
-    return float(distance) if np.ndim(distance) == 0 else distance  # type: ignore[return-value]
-
-
-def composition_shares(matrix: np.ndarray) -> dict[str, float]:
-    """Return the class shares of a per-cell matrix, over all its mass.
-
-    Args:
-        matrix: ``(n, 8)`` rows over ``COMPOSITION_COLUMNS``.
-
-    Returns:
-        Share per column (the seven classes and ``unallocated``) of the total
-        mass; the seven-class shares are not renormalised.
-    """
-    totals = np.asarray(matrix, dtype=np.float64).sum(axis=0)
-    mass = float(totals.sum())
-    if mass <= 0:
-        return {name: math.nan for name in COMPOSITION_COLUMNS}
-    return {
-        name: float(value / mass)
-        for name, value in zip(COMPOSITION_COLUMNS, totals, strict=True)
-    }
-
-
-# --------------------------------------------------------------------------
-# Spatial block bootstrap
-
-
-def tile_codes(xy: np.ndarray, tile_um: float = TILE_UM) -> np.ndarray:
-    """Return the square-tile id of each cell (plan §5.5: 500 µm tiles).
-
-    Args:
-        xy: ``(n, 2)`` coordinates in µm.
-        tile_um: Tile edge.
-
-    Returns:
-        Dense integer tile ids ``0..n_tiles-1``; cells with non-finite
-        coordinates get ``-1``.
-
-    Raises:
-        ValueError: If ``tile_um`` is not positive or ``xy`` is not ``(n, 2)``.
-    """
-    if tile_um <= 0:
-        raise ValueError("tile_um must be positive")
-    points = np.asarray(xy, dtype=np.float64)
-    if points.ndim != 2 or points.shape[1] != 2:
-        raise ValueError("xy must be an (n, 2) array")
-    finite = np.isfinite(points).all(axis=1)
-    codes = np.full(len(points), -1, dtype=np.int64)
-    if not finite.any():
-        return codes
-    cells = np.floor(points[finite] / tile_um).astype(np.int64)
-    _, inverse = np.unique(cells, axis=0, return_inverse=True)
-    codes[finite] = inverse.reshape(-1)
-    return codes
-
-
-def shared_tile_codes(
-    xy_a: np.ndarray, xy_b: np.ndarray, tile_um: float = TILE_UM
-) -> tuple[np.ndarray, np.ndarray, int]:
-    """Tile two co-registered sections on one grid (plan §5.5).
-
-    Both sections must be in one frame (the MERSCOPE ``*_aligned_nonrigid``
-    coordinates are in the Xenium frame of ``registration_summary.json``), so
-    tile ``t`` of section A and tile ``t`` of section B cover the same
-    tissue, and a bootstrap can resample tile locations for both at once
-    (``block_bootstrap_jsd(resampling="joint")``).
-
-    Args:
-        xy_a: ``(n_a, 2)`` coordinates of section A in µm.
-        xy_b: ``(n_b, 2)`` coordinates of section B, same frame.
-        tile_um: Tile edge.
-
-    Returns:
-        ``(codes_a, codes_b, n_tiles)``: tile ids on the shared grid
-        (``-1`` for non-finite coordinates) and the number of tiles.
-    """
-    points_a = np.asarray(xy_a, dtype=np.float64)
-    points_b = np.asarray(xy_b, dtype=np.float64)
-    if points_a.ndim != 2 or points_b.ndim != 2:
-        raise ValueError("xy must be (n, 2) arrays")
-    codes = tile_codes(np.vstack([points_a, points_b]), tile_um)
-    n_tiles = int(codes.max()) + 1 if len(codes) and codes.max() >= 0 else 0
-    return codes[: len(points_a)], codes[len(points_a) :], n_tiles
-
-
-def tile_sums(
-    matrix: np.ndarray, codes: np.ndarray, n_tiles: int | None = None
-) -> np.ndarray:
-    """Sum per-cell composition rows by tile.
-
-    Args:
-        matrix: ``(n, k)`` per-cell rows.
-        codes: Tile id per cell (``tile_codes``); ``-1`` cells are dropped.
-        n_tiles: Rows of the result (``shared_tile_codes``: the shared grid's
-            tile count, so both sections' tables have the same rows);
-            default: the largest id + 1.
-
-    Returns:
-        ``(n_tiles, k)`` sums.
-    """
-    codes = np.asarray(codes, dtype=np.int64)
-    values = np.asarray(matrix, dtype=np.float64)
-    keep = codes >= 0
-    if n_tiles is None:
-        n_tiles = int(codes[keep].max()) + 1 if keep.any() else 0
-    sums = np.zeros((n_tiles, values.shape[1]), dtype=np.float64)
-    for column in range(values.shape[1]):
-        sums[:, column] = np.bincount(
-            codes[keep], weights=values[keep, column], minlength=n_tiles
-        )
-    return sums
-
-
-Resampling = Literal["joint", "independent"]
-
-
-@dataclass(frozen=True)
-class BootstrapJsd:
-    """A Jensen-Shannon distance with its spatial block-bootstrap CI.
-
-    Attributes:
-        jsd: Point estimate on all cells.
-        ci_low: 2.5th percentile of the replicates.
-        ci_high: 97.5th percentile of the replicates.
-        n_reps: Replicates.
-        n_tiles_a: Non-empty tiles of the first section.
-        n_tiles_b: Non-empty tiles of the second section.
-        replicates: Replicate distances.
-        resampling: ``joint`` (one draw of shared tile locations for both
-            sections) or ``independent`` (each section's tiles on its own).
-        n_locations: Tile locations resampled (``joint``: tiles non-empty in
-            either section; ``independent``: ``n_tiles_a + n_tiles_b``).
-    """
-
-    jsd: float
-    ci_low: float
-    ci_high: float
-    n_reps: int
-    n_tiles_a: int
-    n_tiles_b: int
-    replicates: np.ndarray
-    resampling: Resampling = "joint"
-    n_locations: int = 0
-
-
-def _bootstrap_weights(
-    rng: np.random.Generator, n_items: int, n_reps: int
-) -> np.ndarray:
-    return rng.multinomial(n_items, np.full(n_items, 1 / n_items), n_reps)
-
-
-def block_bootstrap_jsd(
-    tiles_a: np.ndarray,
-    tiles_b: np.ndarray,
-    *,
-    n_reps: int = N_BOOTSTRAP,
-    seed: int = BOOTSTRAP_SEED,
-    columns: Sequence[int] | None = None,
-    resampling: Resampling = "joint",
-) -> BootstrapJsd:
-    """Bootstrap the JSD of two sections by resampling 500 µm tiles (§5.5).
-
-    - ``joint`` (the registered H1 method): the two sections are tiled on one
-      grid in the shared frame (``shared_tile_codes``), so row ``t`` of both
-      tables is the same tissue. Each replicate draws the tile locations
-      (non-empty in either section) with replacement and applies the same
-      multinomial weights to both sections, so anatomy stays matched
-      between them.
-    - ``independent`` (a sensitivity, or sections without a shared frame):
-      each section's non-empty tiles are drawn on their own; this mismatches
-      anatomy between adjacent sections and widens the interval.
-
-    Args:
-        tiles_a: ``(n_tiles, k)`` tile sums of the first section.
-        tiles_b: ``(n_tiles, k)`` tile sums of the second section (same
-            rows as ``tiles_a`` for ``joint``).
-        n_reps: Replicates (200 in the plan).
-        seed: RNG seed.
-        columns: Classes compared (``jensen_shannon_distance``).
-        resampling: ``joint`` or ``independent``.
-
-    Returns:
-        Point estimate, percentile CI and replicates.
-
-    Raises:
-        ValueError: If a section has no tile, or ``joint`` tables differ in
-            rows.
-    """
-    first = np.asarray(tiles_a, dtype=np.float64)
-    second = np.asarray(tiles_b, dtype=np.float64)
-    nonempty_a = first.sum(axis=1) > 0
-    nonempty_b = second.sum(axis=1) > 0
-    if not nonempty_a.any() or not nonempty_b.any():
-        raise ValueError("each section needs at least one non-empty tile")
-    point = jensen_shannon_distance(
-        first.sum(axis=0), second.sum(axis=0), columns=columns
-    )
-    rng = np.random.default_rng(seed)
-    if resampling == "joint":
-        if first.shape[0] != second.shape[0]:
-            raise ValueError(
-                "joint resampling needs both sections on one tile grid "
-                "(shared_tile_codes)"
-            )
-        keep = nonempty_a | nonempty_b
-        first, second = first[keep], second[keep]
-        weights = _bootstrap_weights(rng, len(first), n_reps)
-        replicate_a, replicate_b = weights @ first, weights @ second
-        n_locations = len(first)
-    elif resampling == "independent":
-        first, second = first[nonempty_a], second[nonempty_b]
-        replicate_a = _bootstrap_weights(rng, len(first), n_reps) @ first
-        replicate_b = _bootstrap_weights(rng, len(second), n_reps) @ second
-        n_locations = len(first) + len(second)
-    else:
-        raise ValueError(f"unknown resampling {resampling!r}")
-    replicates = np.asarray(
-        jensen_shannon_distance(replicate_a, replicate_b, columns=columns),
-        dtype=np.float64,
-    ).reshape(-1)
-    low, high = np.nanpercentile(replicates, [2.5, 97.5])
-    return BootstrapJsd(
-        jsd=float(point),
-        ci_low=float(low),
-        ci_high=float(high),
-        n_reps=int(n_reps),
-        n_tiles_a=int(nonempty_a.sum()),
-        n_tiles_b=int(nonempty_b.sum()),
-        replicates=replicates,
-        resampling=resampling,
-        n_locations=int(n_locations),
-    )
+# Composition, JSD and the spatial block bootstrap live in
+# ``merxen.annotation.composition`` (imported above).
 
 
 # --------------------------------------------------------------------------
@@ -2157,402 +1877,8 @@ def rescale_counts(
 
 
 # --------------------------------------------------------------------------
-# Contamination and diffuse-profile flags (§5.6; M3 item 5, prototype)
-
-CONTAMINATION_ALPHA: Final = 0.01
-CONTAMINATION_MIN_NEGATIVE: Final = 3
-CONTAMINATION_NULL_QUANTILE: Final = 0.75
-CONTAMINATION_MIN_NULL_CELLS: Final = 30
-CONTAMINATION_MAX_INFORMATIVE: Final = 0.15
-DIFFUSE_QUANTILE: Final = 0.95
-DIFFUSE_N_SIMULATIONS: Final = 200
-DIFFUSE_MAX_INFORMATIVE: Final = 0.30
-
-
-def negative_gene_mask(
-    negatives: pd.DataFrame,
-    gene_ids: Sequence[str],
-    classes: Sequence[str],
-) -> np.ndarray:
-    """Return the negative genes of each class as a boolean matrix.
-
-    Args:
-        negatives: ``negative_genes.parquet`` (``broad_class``, ``gene_id``,
-            ``negative``).
-        gene_ids: Query genes (columns).
-        classes: Broad classes (rows).
-
-    Returns:
-        ``classes x genes`` mask.
-    """
-    column = {str(gene): index for index, gene in enumerate(gene_ids)}
-    row = {str(cls): index for index, cls in enumerate(classes)}
-    mask = np.zeros((len(classes), len(gene_ids)), dtype=bool)
-    chosen = negatives[negatives["negative"].astype(bool)]
-    for record in chosen.itertuples(index=False):
-        cls, gene = str(record.broad_class), str(record.gene_id)
-        if cls in row and gene in column:
-            mask[row[cls], column[gene]] = True
-    return mask
-
-
-def negative_counts(
-    counts: sparse.spmatrix | np.ndarray,
-    labels: Sequence[object] | np.ndarray,
-    mask: np.ndarray,
-    classes: Sequence[str],
-) -> np.ndarray:
-    """Return each cell's counts on its class's negative genes.
-
-    Args:
-        counts: Cells x query genes.
-        labels: Broad class per cell.
-        mask: ``negative_gene_mask`` output.
-        classes: Its rows.
-
-    Returns:
-        Counts per cell; NaN for cells outside ``classes``.
-    """
-    from scipy import sparse as sp
-
-    matrix = sp.csr_matrix(counts, dtype=np.float64)
-    per_class = np.asarray(matrix @ mask.T.astype(np.float64))
-    names = _object_array(labels)
-    index = {cls: position for position, cls in enumerate(classes)}
-    rows = np.array(
-        [index.get(str(name), -1) if name is not None else -1 for name in names]
-    )
-    values = np.full(len(names), math.nan)
-    good = rows >= 0
-    values[good] = per_class[np.flatnonzero(good), rows[good]]
-    return values
-
-
-@dataclass(frozen=True)
-class BetaBinomialFit:
-    """A beta-binomial null of negative-gene counts.
-
-    Attributes:
-        alpha: First shape parameter.
-        beta: Second shape parameter.
-        n_cells: Cells fitted.
-        mean_rate: Pooled negative rate of those cells.
-    """
-
-    alpha: float
-    beta: float
-    n_cells: int
-    mean_rate: float
-
-
-def fit_beta_binomial(successes: np.ndarray, trials: np.ndarray) -> BetaBinomialFit:
-    """Fit a beta-binomial by maximum likelihood (method-of-moments start).
-
-    Args:
-        successes: Negative counts per cell.
-        trials: Total counts per cell.
-
-    Returns:
-        The fit.
-
-    Raises:
-        ValueError: If there is no cell or no trial.
-    """
-    from scipy.optimize import minimize
-    from scipy.stats import betabinom
-
-    k = np.asarray(successes, dtype=np.float64)
-    n = np.asarray(trials, dtype=np.float64)
-    if k.size == 0 or n.sum() <= 0:
-        raise ValueError("a beta-binomial fit needs cells with counts")
-    mean = float(np.clip(k.sum() / n.sum(), 1e-6, 1 - 1e-6))
-    rates = k / np.maximum(n, 1.0)
-    variance = float(np.var(rates))
-    binomial_part = float(np.mean(mean * (1 - mean) / np.maximum(n, 1.0)))
-    extra = max(variance - binomial_part, 1e-8)
-    rho = float(np.clip(extra / (mean * (1 - mean)), 1e-4, 0.5))
-    start_total = (1 - rho) / rho
-    start = np.log([mean * start_total, (1 - mean) * start_total])
-    counts_k = k.astype(np.int64)
-    counts_n = n.astype(np.int64)
-
-    def negative_log_likelihood(log_params: np.ndarray) -> float:
-        a, b = np.exp(log_params)
-        return float(-betabinom.logpmf(counts_k, counts_n, a, b).sum())
-
-    result = minimize(negative_log_likelihood, start, method="Nelder-Mead")
-    a, b = np.exp(result.x if result.success else start)
-    return BetaBinomialFit(
-        alpha=float(a), beta=float(b), n_cells=int(k.size), mean_rate=mean
-    )
-
-
-def beta_binomial_upper_tail(
-    successes: np.ndarray, trials: np.ndarray, fit: BetaBinomialFit
-) -> np.ndarray:
-    """Return ``P(K >= k)`` under the fitted beta-binomial, per cell."""
-    from scipy.stats import betabinom
-
-    k = np.asarray(successes, dtype=np.float64)
-    n = np.asarray(trials, dtype=np.float64)
-    return np.asarray(
-        betabinom.sf(k - 1, n.astype(np.int64), fit.alpha, fit.beta), dtype=np.float64
-    )
-
-
-@dataclass(frozen=True)
-class ContaminationFlags:
-    """The §5.6 contamination flag of one dataset (prototype).
-
-    Attributes:
-        score: Negative counts / total counts per cell (NaN outside the
-            classes).
-        negative: Negative counts per cell.
-        p_value: Upper-tail p-value under the class null (NaN where the class
-            has no null).
-        flag: Tail p < alpha with >= the minimum negative counts (False where
-            there is no null).
-        fits: Beta-binomial null per class (``None`` when too few cells).
-    """
-
-    score: np.ndarray
-    negative: np.ndarray
-    p_value: np.ndarray
-    flag: np.ndarray
-    fits: dict[str, BetaBinomialFit | None]
-
-
-def contamination_flags(
-    negative: np.ndarray,
-    total_counts: np.ndarray,
-    labels: Sequence[object] | np.ndarray,
-    null_cells: np.ndarray,
-    classes: Sequence[str],
-    *,
-    alpha: float = CONTAMINATION_ALPHA,
-    min_negative: int = CONTAMINATION_MIN_NEGATIVE,
-    null_quantile: float = CONTAMINATION_NULL_QUANTILE,
-    min_null_cells: int = CONTAMINATION_MIN_NULL_CELLS,
-) -> ContaminationFlags:
-    """Flag cells more contaminated than typical deep cells of their class.
-
-    Per class (one dataset = one platform), the null is a beta-binomial fitted
-    on the negative counts of the class's ``null_cells`` (its confident cells)
-    in the top depth quartile; a cell is flagged if its upper-tail p-value is
-    below ``alpha`` and it has at least ``min_negative`` negative counts
-    (§5.6).
-
-    Args:
-        negative: Negative counts per cell (``negative_counts``).
-        total_counts: Total counts per cell.
-        labels: Broad class per cell.
-        null_cells: Cells eligible for the null (confident calls).
-        classes: Broad classes.
-        alpha: Tail threshold.
-        min_negative: Minimum negative counts of a flagged cell.
-        null_quantile: Depth quantile above which null cells are fitted.
-        min_null_cells: Minimum null cells to fit a class.
-
-    Returns:
-        Scores, p-values, flags and the fits.
-    """
-    k = np.asarray(negative, dtype=np.float64)
-    n = np.asarray(total_counts, dtype=np.float64)
-    names = _object_array(labels)
-    eligible = np.asarray(null_cells, dtype=bool)
-    score = np.where(np.isfinite(k), k / np.maximum(n, 1.0), math.nan)
-    p_value = np.full(len(k), math.nan)
-    fits: dict[str, BetaBinomialFit | None] = {}
-    for cls in classes:
-        members = (names == cls) & np.isfinite(k)
-        candidates = members & eligible
-        if not candidates.any():
-            fits[cls] = None
-            continue
-        depth_cut = np.quantile(n[candidates], null_quantile)
-        fitted = candidates & (n >= depth_cut)
-        if fitted.sum() < min_null_cells:
-            fits[cls] = None
-            continue
-        fit = fit_beta_binomial(k[fitted], n[fitted])
-        fits[cls] = fit
-        p_value[members] = beta_binomial_upper_tail(k[members], n[members], fit)
-    flag = np.nan_to_num(p_value, nan=1.0) < alpha
-    flag &= np.nan_to_num(k, nan=0.0) >= min_negative
-    return ContaminationFlags(
-        score=score, negative=k, p_value=p_value, flag=flag, fits=fits
-    )
-
-
-def class_profiles(
-    profiles: pd.DataFrame,
-    level: str,
-    gene_ids: Sequence[str],
-    node_class: Mapping[str, str],
-    classes: Sequence[str],
-) -> dict[str, np.ndarray]:
-    """Return each class's expected fractions (cell-weighted over its nodes).
-
-    Args:
-        profiles: ``profiles.parquet``.
-        level: Level whose nodes are pooled.
-        gene_ids: Query genes.
-        node_class: Node name to class.
-        classes: Classes to build.
-
-    Returns:
-        Class to its expected fraction over ``gene_ids`` (classes without a
-        node are left out).
-    """
-    rows = profiles[profiles["level"].astype(str) == level]
-    wide = (
-        rows.pivot_table(
-            index="node_name", columns="gene_id", values="mean_cpm", aggfunc="first"
-        )
-        .reindex(columns=[str(gene) for gene in gene_ids])
-        .fillna(0.0)
-    )
-    weights = rows.drop_duplicates("node_name").set_index("node_name")["n_cells"]
-    output: dict[str, np.ndarray] = {}
-    for cls in classes:
-        nodes = [name for name in wide.index if node_class.get(str(name)) == cls]
-        if not nodes:
-            continue
-        w = weights.reindex(nodes).to_numpy(np.float64)
-        mean = (wide.loc[nodes].to_numpy(np.float64) * w[:, None]).sum(axis=0) / w.sum()
-        total = mean.sum()
-        if total > 0:
-            output[cls] = mean / total
-    return output
-
-
-def depth_grid(max_depth: int, *, n_points: int = 48, start: int = 1) -> np.ndarray:
-    """Return a geometric grid of integer depths from ``start`` to ``max_depth``."""
-    top = max(int(max_depth), start)
-    grid: np.ndarray = np.unique(
-        np.rint(np.geomspace(start, top, n_points)).astype(np.int64)
-    )
-    return grid[grid >= start]
-
-
-def distinct_gene_quantiles(
-    profile: np.ndarray,
-    depths: np.ndarray,
-    *,
-    n_simulations: int = DIFFUSE_N_SIMULATIONS,
-    quantile: float = DIFFUSE_QUANTILE,
-    seed: int = 0,
-) -> np.ndarray:
-    """Simulate the distinct-gene quantile of multinomial draws at each depth.
-
-    Args:
-        profile: Expected fraction per gene (sums to 1).
-        depths: Integer depths.
-        n_simulations: Draws per depth (200 in §5.6).
-        quantile: Quantile of the distinct-gene count.
-        seed: RNG seed.
-
-    Returns:
-        The quantile per depth.
-    """
-    rng = np.random.default_rng(seed)
-    probabilities = np.asarray(profile, dtype=np.float64)
-    probabilities = probabilities / probabilities.sum()
-    values = np.empty(len(depths))
-    for index, depth in enumerate(np.asarray(depths, dtype=np.int64)):
-        draws = rng.multinomial(int(depth), probabilities, size=n_simulations)
-        values[index] = np.quantile((draws > 0).sum(axis=1), quantile)
-    return values
-
-
-def expected_genes_quantile(
-    depth: np.ndarray,
-    labels: Sequence[object] | np.ndarray,
-    profiles_by_class: Mapping[str, np.ndarray],
-    *,
-    n_simulations: int = DIFFUSE_N_SIMULATIONS,
-    quantile: float = DIFFUSE_QUANTILE,
-    seed: int = 0,
-    n_grid: int = 48,
-) -> np.ndarray:
-    """Return each cell's simulated distinct-gene quantile at its depth (§5.6).
-
-    Args:
-        depth: Counts per cell on the profiled (query) genes.
-        labels: Class per cell (a key of ``profiles_by_class``).
-        profiles_by_class: Class to expected fractions over the query genes.
-        n_simulations: Multinomial draws per grid depth.
-        quantile: Quantile (0.95: ``expected_genes_q95``).
-        seed: RNG seed.
-        n_grid: Grid depths (interpolated linearly in between).
-
-    Returns:
-        The quantile per cell; NaN for cells without a profile.
-    """
-    counts = np.asarray(depth, dtype=np.float64)
-    names = _object_array(labels)
-    values = np.full(len(counts), math.nan)
-    if len(counts) == 0:
-        return values
-    grid = depth_grid(int(max(np.nanmax(counts), 1)), n_points=n_grid)
-    for offset, (cls, profile) in enumerate(sorted(profiles_by_class.items())):
-        members = names == cls
-        if not members.any():
-            continue
-        curve = distinct_gene_quantiles(
-            profile,
-            grid,
-            n_simulations=n_simulations,
-            quantile=quantile,
-            seed=seed + offset,
-        )
-        values[members] = np.interp(counts[members], grid, curve)
-    return values
-
-
-def realised_rates(
-    flags: np.ndarray,
-    labels: Sequence[object] | np.ndarray,
-    classes: Sequence[str],
-    *,
-    include: np.ndarray | None = None,
-    max_informative: float,
-) -> pd.DataFrame:
-    """Return the realised flag rate per class (H16).
-
-    Args:
-        flags: Flag per cell.
-        labels: Class per cell.
-        classes: Classes to report.
-        include: Cells counted (default: all).
-        max_informative: A class whose rate exceeds it is uninformative.
-
-    Returns:
-        ``class, n_cells, n_flagged, rate, informative`` rows.
-    """
-    names = _object_array(labels)
-    flagged = np.asarray(flags, dtype=bool)
-    keep = (
-        np.ones(len(names), dtype=bool)
-        if include is None
-        else np.asarray(include, bool)
-    )
-    rows = []
-    for cls in classes:
-        members = keep & (names == cls)
-        n_cells = int(members.sum())
-        n_flagged = int((flagged & members).sum())
-        rate = n_flagged / n_cells if n_cells else math.nan
-        rows.append(
-            {
-                "class": cls,
-                "n_cells": n_cells,
-                "n_flagged": n_flagged,
-                "rate": rate,
-                "informative": bool(n_cells and rate <= max_informative),
-            }
-        )
-    return pd.DataFrame(rows)
+# Contamination and diffuse-profile flags (§5.6; M3 item 5): the primitives
+# live in ``merxen.annotation.flags`` (imported above).
 
 
 # --------------------------------------------------------------------------

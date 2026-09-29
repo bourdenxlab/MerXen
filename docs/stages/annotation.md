@@ -703,16 +703,18 @@ expects); ag7 symbols run as human are `refused`
 
 ## Pipeline processes
 
-Three CPU processes in `workflows/modules/annotation.nf`, wired by
+Four CPU processes in `workflows/modules/annotation.nf`, wired by
 `workflows/subworkflows/annotation_references.nf` (PANEL, PREP) and
-`workflows/subworkflows/clustering_map_first.nf` (MAP); none takes the GPU
-lock, and a default (legacy) run instantiates none of them.
+`workflows/subworkflows/clustering_map_first.nf` (MAP in
+`CLUSTERING_ANNOTATE_MAP`, RESOLVE after it in `CLUSTERING_ANNOTATE`); none
+takes the GPU lock, and a default (legacy) run instantiates none of them.
 
 | Process | Runs | Resources | What it does |
 |---|---|---|---|
 | `ANNOTATE_PANEL` | once per pair × segmentation | 1 CPU, 4 GB | `merxen annotation-panel` on the gene list (`--annotation_panel_genes_path`) or on the pair's prepared H5ADs; writes the declared panels and `required_bundles.json`. |
 | `ANNOTATE_REFERENCE_PREP` | once per unique (species, reference, `panel_hash`) across the run | 8 CPUs, 64 GB, 8 h; above 1,000 panel genes `annotation_prep_large_memory` and 24 h; one at a time on dwight | `merxen annotation-reference-prep`: gets the bundle from the store or builds it, and writes `bundle_ref.json`. Seconds when the bundle exists. |
 | `CLUSTERING_SQUIDPY_ANNOTATE_MAP` | once per pair × segmentation, after its last required bundle (`map_first` only, from M5) | 6 CPUs, 24 GB (48 GB above 1,000 panel genes); `annotation_max_forks` (2) at a time on dwight | `merxen annotate` on the pair's prepared H5ADs with exactly the bundle refs PREP resolved: the MapMyCells runs, the tidy parquets, the provisional labels and `map_manifest.json`, published to `<outdir>/<pair>/<seg>/annotation_map/annotation_map_out/`. |
+| `CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE` | once per pair × segmentation, after its own MAP (`map_first` only, from M5) | 2 CPUs, 16 GB (32 GB above 1,000 panel genes); `annotation_resolve_max_forks` (4) at a time on dwight | `merxen annotate-resolve` on the MAP output, the prepared H5ADs, the panel and the same bundle refs: the label tables, annotation manifests and `<pair>_resolve_summary.json`, published to `<outdir>/<pair>/<seg>/annotation_resolve/annotation_resolve_out/` (see [Resolving](#resolving-merxen-annotate-resolve-m4)). 36-63 s per human pair × segmentation in the M4 shadow runs. |
 
 PREP has no `storeDir`: the store's own lock, temporary build directory and
 atomic rename keep concurrent launches safe, and its `build_hash` (sources,
@@ -738,8 +740,8 @@ checkout's `src/` first on `PYTHONPATH`) after checking that the installed
 `cell_type_mapper` is `annotation_ctm_version`. Its table cells and
 `min_counts` come from the clustering config, so they are the clustering
 run's. A refused panel is not a task failure: MAP writes a `map_manifest.json`
-with `panel_status: refused` and its reasons, maps nothing, and RESOLVE (M4)
-will write statuses only. With `annotation_reuse_published` a run whose
+with `panel_status: refused` and its reasons, maps nothing, and RESOLVE
+then writes statuses only. With `annotation_reuse_published` a run whose
 query fingerprint, `build_hash`, engine parameters, ctm version, tidy schema
 version and (restricted) lookup equal the published manifest's is copied
 from `annotation_map/annotation_map_out/` instead of re-mapped, because
@@ -750,6 +752,30 @@ reuse, with a warning. Until M5 wires
 `map_first` (hook H5, `CLUSTERING_MAP_FIRST`), the preflight refuses
 `map_first` runs, so MAP runs only in the workflow tests; the shadow
 evaluation uses the standalone command.
+
+RESOLVE starts for a pair × segmentation as soon as its own MAP has
+finished. It stages the MAP output, the prepared H5ADs and clustering config
+MAP read, the panel directory and MAP's bundle refs, and resolves every run
+with exactly the bundle its staged ref names (`--require-bundle-refs`: a ref
+whose `build_hash` differs from the one the run mapped with fails the task
+as a stale MAP output; the store is never searched). The shared tissue mask
+of the pair JSD comes only from ALIGN's output channel, which M5 wires (as
+for `ANNOTATE_PANEL`); until then RESOLVE reports the whole-section JSD and
+never looks for a published `align_out` that ALIGN may still be writing
+(`--no-alignment-lookup`). A mouse MAP output fails the task with a clean
+error until M6 adds the mouse rules. RESOLVE caches on content (`cache
+"deep"`), as MAP does, and its task hash also sees the annotation config it
+writes and a fingerprint of the RESOLVE rules: the sha256 of the files under
+`src/merxen/annotation/`, `src/merxen/assets/annotation/` (floors,
+vocabularies, validated panels, state genes), `src/merxen/clustering/` and
+`src/merxen/cli/run_annotation.py` of the running checkout (`__pycache__`
+skipped; `AnnotationReferences.RESOLVE_RULE_SOURCES`). So after a threshold,
+floor, trust, flag or degraded-mode change (`annotation_allow_single_method`,
+the only RESOLVE-only param; PANEL, PREP and MAP never see it), `-resume`
+re-runs every RESOLVE, a minute each, and keeps MAP cached: MAP's task
+inputs and its published-output reuse key hold none of these settings. Any
+edit under those source directories re-runs RESOLVE, and so everything that
+reads its tables.
 
 ### Pre-building references (`--annotation_prepare_only`)
 
@@ -874,6 +900,128 @@ A clustered H5AD without the record (written before M1) declares its `var`;
 give it the declared panel with `merxen annotation-panel --panel-file
 <PLATFORM>=<declared panel file>` and `--panel-dir`.
 
+## Resolving (`merxen annotate-resolve`, M4)
+
+The RESOLVE step (`merxen.annotation.pipeline.annotate_resolve`; plan §3.4)
+turns a MAP output into one label table per sample (§4.1). The standalone
+command runs it on published MAP outputs (options in
+[CLI](../cli.md#merxen-annotate-resolve)); the `CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE`
+process runs it after each MAP in `CLUSTERING_ANNOTATE`, which
+`CLUSTERING_MAP_FIRST` calls from M5 (legacy runs never do; see
+[Pipeline processes](#pipeline-processes)).
+Per sample:
+
+1. **Inputs.** The counts are reloaded as MAP loaded them and must have the
+   sample fingerprint MAP recorded; every tidy parquet must have its
+   recorded sha256. A run is resolved with the bundle it mapped with, or
+   with an override / the store's current bundle of the same reference and
+   panel whose marker lookup is the one the run mapped with. The panel's
+   family is re-derived from the current `validated_panels.csv`, and each
+   reference's trust state is decided as PREP decides it
+   (`diagnostics.panel_diagnostics` + `trust_for_panel`).
+2. **Calls.** WHB: the supercluster call with its bootstrap probability,
+   `avg_correlation`, best runner-up and margin; lineage, broad and NT sum
+   the supercluster bootstrap probabilities over the assigned node's class
+   (the bundle's vocab snapshot); SEA-AD: E2's 7-class label and broad
+   probability and the subclass `aggregate_probability`.
+3. **Emission.** The primary bundle's resolvability tables are re-decided
+   with the simulated cells reweighted to the dataset's soft composition
+   per depth bin (the assigned supercluster's bootstrap probability plus
+   its runner-ups', on node labels; §8.3), giving per (level, class, depth
+   bin) whether a level is emitted and, outside real-data-validated
+   families, the local threshold (raise-only). Then the floors, the dataset
+   gate (level + warning flag; a provisional panel warns and shows a banner
+   but never lowers the level) and the degraded-mode consensus
+   (`consensus.resolve_human`, §5.2–§5.4).
+4. **Flags** (`merxen.annotation.flags`, §4.3, §5.6): contamination on the
+   assigned class's negative genes (negative in both WHB frontal and SEA-AD
+   Multiregion, minus the state genes) against a beta-binomial fitted to
+   the class's deep confident cells in this dataset (p < 0.01 with >= 3
+   negative counts); the diffuse profile against the q95 of 200
+   multinomial draws from the class profile; the robust z of
+   `avg_correlation` within class × platform × depth bin (< -3). Realised
+   rates are recorded per class × platform over the confident broad calls;
+   a contamination stratum above 15% or a diffuse stratum above 30% is
+   uninformative and its flag is null (H16's 15% marking is reported beside
+   the diffuse rate). The microglial spill-over flag is off for human
+   (OD-C5). `discovery_caution` is any of contaminated, diffuse, OOD or
+   method disagreement.
+5. **Composition** (`merxen.annotation.composition`, §5.5): the soft broad
+   vector of every table cell (`soft_broad_*`, summing to 1 with
+   `soft_broad_unallocated`), the section's soft, depth-stratified (>= 30
+   counts), confident-only and argmax compositions, and for the pair the
+   base-2 JSD of the renormalised seven-class vectors with a 95% spatial
+   block-bootstrap CI (500 µm tiles, 200 replicates, joint resampling on
+   the shared frame), whole section and inside the shared tissue mask. A
+   `per_platform` pair's JSD and pair compositions come from the WHB runs
+   on the intersection panel (`_xpanel`, §8.5; soft, soft ≥ 30 and argmax:
+   the own-panel confident labels rest on different gene sets), recorded as
+   `cross_platform.jsd_run`; with fewer than 100 intersection genes or a
+   broad-only intersection (by resolvability) the cross-platform statistics
+   are `broad_only`, flagged with reasons, for M5 / M7. The per-sample
+   compositions and `soft_broad_*` stay on the own panel and are never
+   compared across platforms.
+6. **Outputs.** `<platform>/<sid>_celltype_labels.parquet` (validated;
+   provenance in the parquet schema), `<platform>/<sid>_annotation_manifest.json`
+   (`AnnotationProvenance`, the JSON `uns["merxen_annotation_json"]` holds)
+   and `<pair>_resolve_summary.json`, all deterministic for given inputs
+   (the label parquets hold no clock); the run record
+   (`annotation_resolve_run.json`: clock, wall time, absolute paths) is
+   published beside `annotation_resolve_out`, so M5's deep-cached
+   COMPUTE_CPU staging that directory re-runs only when a label changes. A
+   run that mapped with the parent bundle on a restricted lookup (a sample
+   lacking panel genes; §3.3) is resolved with the parent's resolvability
+   and trust, recorded as `resolvability_inherited` (`restricted_lookup`)
+   with a trust reason. A refused panel gives statuses only
+   (`not_attempted_gate`, gate `failed`, `exclude_hard`); mouse RESOLVE is
+   M6.
+
+### Human rules v1 (`consensus.resolve_human`, §5.2)
+
+Raw bootstrap probabilities (float32-tolerant: a stored 0.69 meets 0.69) are
+compared with the v1 thresholds, raised where a bundle or, outside
+real-data-validated families, a local resolvability threshold asks for more.
+
+| Level | Confident when |
+|---|---|
+| Lineage | WHB lineage-summed probability >= 0.73, the node is plausible (not a sink, plausible for the region), counts >= the floor, resolvability emits it, and the second vote passes: below 60 counts SEA-AD agrees at lineage; from 60 SEA-AD does not confidently (>= 0.68) call another lineage. An implausible node keeps its lineage when SEA-AD agrees at lineage. |
+| Broad | Confident lineage, broad-summed probability >= 0.73, the class × platform broad floor, resolvability, and the same vote at the seven-class level. **COP rule:** a WHB "Committed oligodendrocyte precursor" call is broad OPC only with >= 120 counts and supercluster probability >= 0.69, or when SEA-AD confidently calls OPC; otherwise it stays at lineage (`Oligodendrocyte lineage/unresolved` branch). `flag_cop_suppressed` marks every COP call on a confident lineage whose COP rule fails, whichever broad check decides its status (§4.3). |
+| NT | Neurons only (others `not_applicable`): confident broad, the Exc / Inh probability, the broad floor, resolvability; no second vote. |
+| Supercluster | Confident parent (NT for neurons, else broad), gate `full` (a warning does not block), probability >= 0.69, the supercluster floor (COP 120), resolvability. Requiring a confident NT for neurons is a recorded M4 deviation from plan §5.2 rule 4 (broad only; pre-registration §15): the final label is the deepest level of a contiguous confident chain. |
+| SEA-AD subclass | Secondary name, never in `ct_final`: gate `full`, confident WHB broad that SEA-AD's class agrees with, the supercluster floor of the class, SEA-AD's threshold (0.55 below 60 counts, 0.45 from 60), the leaf's resolvability. |
+
+The final label is the deepest confident level along lineage → broad → NT →
+supercluster (`Mixed/Unknown` when none). When several checks fail the
+status is the first of `low_counts` > `not_attempted_gate` >
+`not_applicable` > `implausible` > `parent_unresolved` > `below_floor` >
+`not_resolvable` > `low_confidence` > (COP rule) > `single_method` /
+`method_disagree` ([statuses](../outputs.md#label-table-schema-sid_celltype_labelsparquet));
+the SEA-AD subclass follows the same order, its SEA-AD agreement being its
+`method_disagree`. `ct_consensus_tier` counts the agreeing informative
+methods: 0 is a confident disagreement only, -1 no informative method.
+
+**Degraded modes** (§5.3; `consensus.DEGRADED_MODES`, one truth table):
+
+| Mode | When | Below 60 counts | Maximum tier |
+|---|---|---|---|
+| `whb_sea` | v1 default | SEA-AD must agree; from 60 it may veto | 2 |
+| `whb_only` | SEA-AD failed, disabled or refused for the panel | `single_method` (not confident), unless `annotation_allow_single_method` (WHB decides alone, recorded) | 1 |
+| `primary_missing` | WHB failed or refused | statuses only (`not_attempted_gate`) | 0 |
+| `whb_sea_ll`, `whb_ll` | table rows only: the likelihood-typer vote is not enabled in v1 or v1.1 (OD-B8, decided 2026-09-27) | – | – |
+
+**Dataset gate** (§5.4): `broad_only` when fewer than 30% of table cells
+reach 30 counts (A < 0.30), `failed` when confident broad coverage of table
+cells is below 0.25, otherwise `full`; a warning flag (never a lower level)
+when confident broad coverage of segmented objects is below 0.15, or when a
+simulation-validated family has more than 10% of its confident calls
+outside the validated region. A provisional panel warns and shows the
+banner. **Flags are report-only**: `discovery_caution` marks cells for
+downstream sensitivity analyses (OD-B5: keep, covariate, with / without),
+and no flag changes a status. The realised rates per flag × class ×
+platform are in the resolve summary (`flags.strata`: `rate` over the
+stratum's confident broad calls, `rate_all` over its table cells,
+`informative` for the §4.3 switch, `informative_h16` for H16's 15% mark).
+
 ## Shadow baselines (M3)
 
 `scripts/acceptance/shadow_baselines.py` scores `merxen annotate` outputs of
@@ -900,6 +1048,8 @@ reading the `merxen annotate` outputs and the published inputs read-only:
 | `scripts/acceptance/shadow_flags.py` | 5, H16 | Prototype contamination (dataset-empirical beta-binomial null) and diffuse-profile (multinomial q95) flags; realised rates per class × platform |
 | `scripts/acceptance/shadow_ll.py` | 6, OD-B8 / OD-B13 | LL (vii) on every table cell; coverage and referee outcomes with and without the LL vote |
 | `scripts/acceptance/shadow_glial_jsd.py` | 7 | WHB vs SEA-AD glial JSD with a paired block-bootstrap CI |
+| `scripts/acceptance/resolve_criteria.py` | M4 | The human criteria (H1–H5, H7–H10, H16, H17) re-measured on `merxen annotate-resolve` label tables, with the pre-registered thresholds and the flip rule; H4 on the held-out re-maps, including RESOLVE itself run with the held-out WHB call |
+| `scripts/acceptance/marker_pseudo_labels.py` | M4, H9 | Ports of the marker pseudo-label methods of the P7513 (§C) and P1212 (§4) dataset reports, for H9 and H17 |
 
 The results and the decisions they feed (X1, OD-B6 / OD-B7, OD-B8, OD-B13, the
 H4 and H16 baselines) are in §11 of the pre-registration document.
@@ -997,6 +1147,26 @@ H4 and H16 baselines) are in §11 of the pre-registration document.
   on 0-5 with seeds 1 and 2; F = 18.1, p = .01). How the gate should treat
   this spread (the pre-registered seed-0 draw, several draws, or the worst
   of them) is open for the user; no verdict is recorded as a pass meanwhile.
+- **RESOLVE's resolvability exceptions remove confident oligodendrocyte-lineage
+  labels on the shallow MERSCOPE sections** (M4 shadow run, 2026-09-28;
+  `m4/STAGE_D_REPORT.txt`, `m4/CRITERIA_AFTER_M4.txt`). Without the
+  resolvability tables RESOLVE reproduces the M3 shadow coverage exactly;
+  with the version-6 tables reweighted to each dataset, broad
+  Oligodendrocytes are not emitted at 10-60 counts on P5011 MERSCOPE (no
+  confident broad Oligodendrocytes at all, against 14.8% of table cells
+  without the tables) and at 10 counts on P1212 MERSCOPE (15.8% vs 24.0%),
+  and broad OPC at 10-15 counts on every dataset. The cells keep their
+  confident lineage (branch `Oligodendrocyte lineage/unresolved`) and the
+  soft compositions (`soft_broad_*`, H1) are unaffected, but confident-only
+  compositions of these sections undercount the oligodendrocyte lineage.
+  Confident broad coverage falls by .093 (P1212 MERSCOPE) and .171 (P5011
+  MERSCOPE) against M3, H7 fails on P5011 MERSCOPE (.288 < .30) and P1212
+  MERSCOPE gets the gate warning (.120 of segmented objects). In the set a
+  self-map the wrong broad Oligodendrocyte calls are COP test cells called
+  Oligodendrocyte; scoring those as correct at the broad level (a candidate
+  fix for the M8 gate PR, measured but not adopted) restores every broad
+  Oligodendrocyte label (P1212 / P5011 MERSCOPE broad coverage .427 / .436).
+  A decision for the gate PR (OD-B14).
 - **Set c of families without a curated list** uses the label-free rule,
   which drops far more genes than E5's validated set c (44-73 per pair on the
   E5 pairs); treat such set-c results as provisional.

@@ -12,7 +12,13 @@
  * (MAP records the refusal), and a pair x segmentation whose PREP failed is
  * dropped, as any failed task drops its branch under errorStrategy "ignore".
  *
- * CLUSTERING_MAP_FIRST will be MAP -> RESOLVE (M4) -> COMPUTE_CPU (M5),
+ * CLUSTERING_ANNOTATE (M4) runs CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE on each
+ * pair x segmentation once its own MAP has finished (plan §3.4). RESOLVE is
+ * a separate task from MAP: a threshold, floor, trust, flag or degraded-mode
+ * change re-runs RESOLVE alone (minutes) under -resume, and MAP, whose
+ * inputs and published-output reuse key hold none of them, stays cached.
+ *
+ * CLUSTERING_MAP_FIRST will be CLUSTERING_ANNOTATE -> COMPUTE_CPU (M5),
  * emitting the input shape of CLUSTERING_SQUIDPY_FINALIZE. Its only caller is
  * hook H5 in main.nf, which M5 adds together with COMPUTE_CPU; the preflight
  * refuses map_first runs until then (AnnotationPreflight.MAP_FIRST_WIRED), so
@@ -22,7 +28,7 @@
  */
 
 include { ANNOTATION_PREPARED_REFERENCES } from "./annotation_references"
-include { CLUSTERING_SQUIDPY_ANNOTATE_MAP } from "../modules/annotation"
+include { CLUSTERING_SQUIDPY_ANNOTATE_MAP; CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE } from "../modules/annotation"
 
 workflow CLUSTERING_ANNOTATE_MAP {
     take:
@@ -82,6 +88,75 @@ workflow CLUSTERING_ANNOTATE_MAP {
     maps = mapped_ch
 }
 
+workflow CLUSTERING_ANNOTATE {
+    take:
+    // tuple(pair_id, segmentation, samples_json, clustering_squidpy_config.json,
+    // clustering_prepare_out): the output of CLUSTERING_SQUIDPY_PREPARE.
+    prepared_ch
+
+    main:
+    mapped = CLUSTERING_ANNOTATE_MAP(prepared_ch)
+
+    // A maps tuple exists only once its branch's MAP has finished, so each
+    // RESOLVE waits for its own MAP and no other. resolveSpec carries the
+    // RESOLVE config and the fingerprint of this checkout's RESOLVE rules
+    // (task inputs, so -resume sees them). The shared tissue mask will come
+    // from the pair's ALIGN output channel (M5, as for ANNOTATE_PANEL); until
+    // then RESOLVE gets none and never looks one up among published files.
+    resolve_inputs_ch = mapped.maps.map { pairId, segmentation, samplesJson, clusteringConfig, preparedDir, panelDir, bundleRefs, mapDir ->
+        tuple(
+            pairId,
+            segmentation,
+            AnnotationReferences.resolveSpec(params, panelDir, "${projectDir}/../src"),
+            samplesJson,
+            clusteringConfig,
+            preparedDir,
+            panelDir,
+            bundleRefs,
+            mapDir,
+            [],
+        )
+    }
+    CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE(resolve_inputs_ch)
+    // The deterministic annotation_resolve_out only; the run record stays
+    // out of every downstream input.
+    resolve_out_ch = CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE.out.resolved
+
+    labels_ch = mapped.maps
+        .map { pairId, segmentation, samplesJson, clusteringConfig, preparedDir, panelDir, bundleRefs, mapDir ->
+            tuple(
+                AnnotationReferences.branchKey(pairId, segmentation),
+                pairId,
+                segmentation,
+                samplesJson,
+                clusteringConfig,
+                preparedDir,
+                panelDir,
+                bundleRefs,
+                mapDir,
+            )
+        }
+        .join(
+            resolve_out_ch.map { pairId, segmentation, resolveDir ->
+                tuple(AnnotationReferences.branchKey(pairId, segmentation), resolveDir)
+            }
+        )
+        .map { _branchKey, pairId, segmentation, samplesJson, clusteringConfig, preparedDir, panelDir, bundleRefs, mapDir, resolveDir ->
+            tuple(pairId, segmentation, samplesJson, clusteringConfig, preparedDir, panelDir, bundleRefs, mapDir, resolveDir)
+        }
+
+    emit:
+    // tuple(bundle key, bundle_ref.json): one per PREP task.
+    bundle_refs = mapped.bundle_refs
+    // CLUSTERING_ANNOTATE_MAP's maps (RESOLVE's inputs).
+    maps = mapped.maps
+    // tuple(pair_id, segmentation, samples_json, clustering_squidpy_config.json,
+    // clustering_prepare_out, annotation_panel_out, [bundle_ref.json, ...],
+    // annotation_map_out, annotation_resolve_out): the label tables with what
+    // COMPUTE_CPU (M5) and ANNOTATION_REPORT (M7) read.
+    labels = labels_ch
+}
+
 workflow CLUSTERING_MAP_FIRST {
     take:
     // tuple(pair_id, segmentation, samples_json, clustering_squidpy_config.json,
@@ -89,11 +164,10 @@ workflow CLUSTERING_MAP_FIRST {
     prepared_ch
 
     main:
-    // M5 replaces this guard with CLUSTERING_ANNOTATE_MAP(prepared_ch) ->
-    // RESOLVE -> COMPUTE_CPU; without RESOLVE and COMPUTE_CPU there is no
-    // FINALIZE input to emit.
+    // M5 replaces this guard with CLUSTERING_ANNOTATE(prepared_ch) ->
+    // COMPUTE_CPU; without COMPUTE_CPU there is no FINALIZE input to emit.
     error(
-        "CLUSTERING_MAP_FIRST has no RESOLVE (M4) or COMPUTE_CPU (M5) yet " +
+        "CLUSTERING_MAP_FIRST has no COMPUTE_CPU (M5) yet " +
         "(docs/plans/robust-celltype-annotation-plan.md §12); " +
         "run with the default legacy clustering mode"
     )

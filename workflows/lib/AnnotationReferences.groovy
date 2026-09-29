@@ -1,9 +1,12 @@
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurperClassic
 
+import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.security.MessageDigest
+import java.util.concurrent.ConcurrentHashMap
 
 /*
  * Reference bundles of annotation runs (plan §3.1, §3.2, §3.7).
@@ -11,12 +14,14 @@ import java.nio.file.Paths
  * ANNOTATE_PANEL writes one pair x segmentation's declared panels and its
  * required_bundles.json; ANNOTATE_REFERENCE_PREP gets or builds one bundle
  * per unique (species, reference_id, panel_hash); CLUSTERING_SQUIDPY_ANNOTATE_MAP
- * maps the pair x segmentation onto its bundles (plan §3.3). This class holds
- * what the processes and workflows/subworkflows/annotation_references.nf and
- * clustering_map_first.nf share: the annotation_config.json the commands
- * read, the command arguments, the bundle keys and the per pair x
- * segmentation bookkeeping that lets MAP wait for exactly the bundles its
- * panels need.
+ * maps the pair x segmentation onto its bundles (plan §3.3) and
+ * CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE turns the mapping into label tables
+ * (plan §3.4). This class holds what the processes and
+ * workflows/subworkflows/annotation_references.nf and clustering_map_first.nf
+ * share: the annotation_config.json the commands read, the command
+ * arguments, the bundle keys, the per pair x segmentation bookkeeping that
+ * lets MAP wait for exactly the bundles its panels need, and the RESOLVE
+ * rules fingerprint.
  *
  * Nothing here runs in a legacy run: main.nf calls ANNOTATION_PREPARE_ONLY
  * only with --annotation_prepare_only, and CLUSTERING_MAP_FIRST (map_first)
@@ -43,6 +48,31 @@ class AnnotationReferences {
     static final String MAP_INPUT_DIR = "map_inputs"
     static final String MAP_SCRATCH_DIR = "map_scratch"
     static final String MAP_MANIFEST_FILE = "map_manifest.json"
+
+    // CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE: staged-input directory and the
+    // pair summary's suffix (merxen.annotation.pipeline). The task writes
+    // annotation_resolve_out/, published under
+    // <outdir>/<pair>/<seg>/annotation_resolve/.
+    static final String RESOLVE_INPUT_DIR = "resolve_inputs"
+    static final String RESOLVE_SUMMARY_SUFFIX = "_resolve_summary.json"
+
+    // What the RESOLVE rules fingerprint covers, relative to this checkout's
+    // src/: the threshold, floor, trust, consensus, flag and composition code
+    // with its packaged tables (floors, vocab, validated panels, state
+    // genes), the cell-set rule and the annotate-resolve command. The task
+    // hash cannot see Python code or packaged files, so the fingerprint
+    // travels in RESOLVE's resolve_spec: a rule change re-runs RESOLVE
+    // (minutes) under -resume and never MAP (plan §3.1).
+    static final List<String> RESOLVE_RULE_SOURCES = [
+        "merxen/annotation",
+        "merxen/assets/annotation",
+        "merxen/clustering",
+        "merxen/cli/run_annotation.py",
+    ].asImmutable()
+
+    // One fingerprint per source root and run: every RESOLVE task of a run
+    // reads the same code.
+    private static final Map<String, String> RULES_FINGERPRINTS = new ConcurrentHashMap<String, String>()
 
     // Share of the PREP memory given to cell_type_mapper's --max_gb (the
     // reference-marker step; 40 GB of the 64 GB reserve, as validated).
@@ -156,10 +186,12 @@ class AnnotationReferences {
     }
 
     /**
-     * Return the annotation_config.json content ANNOTATE_PANEL and PREP read.
+     * Return the annotation_config.json content ANNOTATE_PANEL, PREP and MAP read.
      *
      * References are named by id; merxen.annotation.config expands them to
-     * their known specs, so the taxonomy settings live in Python only.
+     * their known specs, so the taxonomy settings live in Python only. The
+     * settings only RESOLVE reads are added by resolveConfig, so changing one
+     * never changes these tasks' scripts (-resume keeps MAP cached).
      *
      * @param params Pipeline params.
      * @param species Species name or alias.
@@ -209,7 +241,6 @@ class AnnotationReferences {
             thresholds: [
                 allow_fine_levels: isTrue(params?.get("annotation_allow_fine_levels")),
             ],
-            allow_single_method: isTrue(params?.get("annotation_allow_single_method")),
             xplat_sensitivity: textOr(params?.get("annotation_xplat_sensitivity"), "geneset_c").toLowerCase(),
             xplat_sensitivity_segmentations: listOf(
                 params?.get("annotation_xplat_sensitivity_segmentations"),
@@ -232,6 +263,24 @@ class AnnotationReferences {
     /** Return annotationConfig as pretty JSON. */
     static String annotationConfigJson(Map params, Object species) {
         return JsonOutput.prettyPrint(JsonOutput.toJson(annotationConfig(params, species)))
+    }
+
+    /**
+     * Return the annotation_config.json content RESOLVE reads.
+     *
+     * annotationConfig plus the settings no earlier task reads: the human
+     * degraded mode annotation_allow_single_method (plan §5.3). Thresholds,
+     * floors, gate and flag settings are Python defaults and packaged tables,
+     * which resolveRulesFingerprint covers.
+     *
+     * @param params Pipeline params.
+     * @param species Species name or alias.
+     * @return A map for merxen.annotation.config.AnnotationConfig.
+     */
+    static Map resolveConfig(Map params, Object species) {
+        def config = annotationConfig(params, species)
+        config.allow_single_method = isTrue(params?.get("annotation_allow_single_method"))
+        return config
     }
 
     /**
@@ -539,6 +588,147 @@ class AnnotationReferences {
         ]
         (bundleRefs ?: []).each { ref -> args += ["--bundle-ref", ref.toString()] }
         return args.collect { arg -> shellQuote(arg) }.join(" ")
+    }
+
+    /**
+     * Return what CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE needs to know before it runs.
+     *
+     * mapSpec (species, panel status, the panel size its memory directive
+     * reads) plus the annotation config RESOLVE writes and the fingerprint of
+     * the RESOLVE rules. Both are task inputs, so the task hash sees them,
+     * with -stub-run too: a RESOLVE-only param or a threshold, floor, trust
+     * or flag change re-runs RESOLVE and leaves MAP cached.
+     *
+     * @param params Pipeline params.
+     * @param panelDir ANNOTATE_PANEL output directory.
+     * @param sourceRoot This checkout's src/ (${projectDir}/../src).
+     * @return mapSpec(panelDir) + [annotation_config, rules_fingerprint].
+     */
+    static Map resolveSpec(Map params, Object panelDir, Object sourceRoot) {
+        def spec = mapSpec(panelDir)
+        return spec + [
+            annotation_config: resolveConfig(params, spec.species),
+            rules_fingerprint: resolveRulesFingerprint(sourceRoot),
+        ]
+    }
+
+    /** Return a resolveSpec's annotation config as pretty JSON. */
+    static String resolveConfigJson(Map spec) {
+        return JsonOutput.prettyPrint(JsonOutput.toJson(spec.annotation_config))
+    }
+
+    /**
+     * Return the merxen annotate-resolve arguments of one RESOLVE task.
+     *
+     * The task reads the staged MAP output, panel, prepared H5ADs and
+     * clustering config, resolves every run with exactly the bundle refs PREP
+     * resolved (--require-bundle-refs: the ones MAP mapped with, no store
+     * lookup), and takes the shared tissue mask only from staged ALIGN files
+     * (M5), never from a published align_out ALIGN may still be writing.
+     *
+     * @param spec resolveSpec result.
+     * @param bundleRefs Staged bundle_ref.json paths.
+     * @param alignmentFiles Staged [shared_tissue_mask.npy,
+     *     registration_summary.json], or an empty list.
+     * @return Shell-quoted arguments (without --annotation-config and --out).
+     */
+    static String resolveArguments(Map spec, List bundleRefs, List alignmentFiles) {
+        def args = [
+            "--species", spec.species.toString(),
+            "--map-dir", "${RESOLVE_INPUT_DIR}/${MAP_OUTPUT_DIR}".toString(),
+            "--panel-dir", "${RESOLVE_INPUT_DIR}/${PANEL_OUTPUT_DIR}".toString(),
+            "--prepared-dir", "${RESOLVE_INPUT_DIR}/clustering_prepare_out".toString(),
+            "--clustering-config", "${RESOLVE_INPUT_DIR}/clustering_squidpy_config.json".toString(),
+            "--require-bundle-refs",
+            "--no-alignment-lookup",
+        ]
+        (bundleRefs ?: []).each { ref -> args += ["--bundle-ref", ref.toString()] }
+        if (alignmentFiles) {
+            args += ["--alignment-dir", "${RESOLVE_INPUT_DIR}/align_out".toString()]
+        }
+        return args.collect { arg -> shellQuote(arg) }.join(" ")
+    }
+
+    /** Return RESOLVE's <pair>_resolve_summary.json name. */
+    static String resolveSummaryFile(Object pairId) {
+        return "${pairId}${RESOLVE_SUMMARY_SUFFIX}".toString()
+    }
+
+    /**
+     * Return the fingerprint of the RESOLVE rules under a source root.
+     *
+     * The sha256 of each RESOLVE_RULE_SOURCES file's path (relative to the
+     * root) and content, in path order; __pycache__ directories and compiled
+     * files are skipped. Computed once per root and run.
+     *
+     * @param sourceRoot This checkout's src/ (${projectDir}/../src).
+     * @return The hex digest, or "missing" when the root holds none of the
+     *     sources (an installed package without its checkout).
+     */
+    static String resolveRulesFingerprint(Object sourceRoot) {
+        def root = asPath(sourceRoot).toAbsolutePath().normalize()
+        return RULES_FINGERPRINTS.computeIfAbsent(root.toString()) { String key -> rulesFingerprint(root) }
+    }
+
+    private static String rulesFingerprint(Path root) {
+        def files = [:] as TreeMap<String, Path>
+        RESOLVE_RULE_SOURCES.each { String source ->
+            def path = root.resolve(source)
+            if (Files.isRegularFile(path)) {
+                files[source] = path
+            } else if (Files.isDirectory(path)) {
+                path.toFile().eachFileRecurse(groovy.io.FileType.FILES) { File file ->
+                    def relative = root.relativize(file.toPath()).toString().replace(File.separator, "/")
+                    def compiled = relative.endsWith(".pyc") || relative.endsWith(".pyo")
+                    if (!compiled && !relative.split("/").contains("__pycache__")) {
+                        files[relative] = file.toPath()
+                    }
+                }
+            }
+        }
+        if (!files) {
+            return "missing"
+        }
+        def digest = MessageDigest.getInstance("SHA-256")
+        files.each { relative, path ->
+            digest.update(relative.getBytes(StandardCharsets.UTF_8))
+            digest.update((byte) 0)
+            digest.update(Files.readAllBytes(path))
+            digest.update((byte) 0)
+        }
+        return digest.digest().encodeHex().toString()
+    }
+
+    /**
+     * Return the stub <pair>_resolve_summary.json of a RESOLVE task (for -stub-run).
+     *
+     * @param pairId Pair id.
+     * @param segmentation Segmentation.
+     * @param spec resolveSpec result.
+     * @param bundleRefs Staged bundle_ref.json paths.
+     * @param alignmentFiles Staged ALIGN files.
+     * @return The JSON text.
+     */
+    static String stubResolveSummaryJson(
+        Object pairId,
+        Object segmentation,
+        Map spec,
+        List bundleRefs,
+        List alignmentFiles
+    ) {
+        return JsonOutput.prettyPrint(JsonOutput.toJson([
+            stub: true,
+            step: "annotate_resolve",
+            pair_id: pairId.toString(),
+            segmentation: segmentation.toString(),
+            species: spec.species,
+            panel_status: spec.panel_status,
+            n_required: spec.n_required,
+            rules_fingerprint: spec.rules_fingerprint,
+            bundle_refs: (bundleRefs ?: []).collect { ref -> ref.toString() },
+            alignment_files: (alignmentFiles ?: []).collect { item -> item.toString() },
+            samples: [:],
+        ]))
     }
 
     /**

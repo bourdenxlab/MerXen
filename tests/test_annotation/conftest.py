@@ -511,3 +511,142 @@ def fake_mmc(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeMmc:
     fake.root.mkdir()
     fake.install(monkeypatch, "1.7.2")
     return fake
+
+
+# --------------------------------------------------------------------------
+# RESOLVE: trust decisions and resolvability decision tables (M4 tests)
+
+HUMAN_TABLE_LEVELS: tuple[tuple[str, str, float, float, str | None], ...] = (
+    ("lineage", "lineage", 0.73, 0.90, None),
+    ("broad", "broad", 0.73, 0.90, "broad"),
+    ("nt", "nt", 0.73, 0.90, "broad"),
+    ("supercluster", "leaf", 0.69, 0.85, "supercluster"),
+    ("cluster", "fine", 0.69, 0.85, "supercluster"),
+)
+HUMAN_GRID: tuple[int, ...] = (10, 15, 30, 60, 120, 250)
+HUMAN_TABLE_CLASSES: tuple[str, ...] = (
+    "Exc",
+    "Inh",
+    "OtherNeuron",
+    "Astro",
+    "Oligo",
+    "OPC",
+    "COP",
+    "Immune",
+    "Vascular",
+    "Fibroblast",
+)
+
+
+@pytest.fixture
+def make_trust() -> Callable[..., Any]:
+    """Return a factory of primary / secondary ``TrustDecision`` objects.
+
+    ``state`` is ``validated_real`` (set a, real data, up to supercluster),
+    ``validated_simulation`` (with ``level_records``), ``provisional``,
+    ``broad_only`` or ``refused``.
+    """
+    from merxen.annotation.diagnostics import TrustDecision, ValidatedLevelRecord
+
+    def factory(
+        state: str = "validated_real",
+        *,
+        role: str = "primary",
+        species: str = "human",
+        level_records: Sequence[Mapping[str, Any]] = (),
+        validated_max_level: str | None = None,
+    ) -> TrustDecision:
+        common: dict[str, Any] = {
+            "reference_id": "whb_frontal_supc_clus" if role == "primary" else "seaad",
+            "role": role,
+            "species": species,
+            "panel_hash": "a" * 64,
+            "family_id": "human_set_a" if species == "human" else "mouse_ag7",
+            "family_basis": "listed",
+        }
+        leaf = "supercluster" if species == "human" else "subclass"
+        if state == "validated_real":
+            return TrustDecision(
+                **common,
+                state="validated",
+                validation_basis="real_data",
+                validated_max_level=validated_max_level or leaf,
+            )
+        if state == "validated_simulation":
+            records = tuple(
+                ValidatedLevelRecord(
+                    family_id=common["family_id"],
+                    panel_hash="a" * 64,
+                    in_class_set=True,
+                    **dict(record),
+                )
+                for record in level_records
+            )
+            return TrustDecision(
+                **{**common, "family_id": "sim_family"},
+                state="validated",
+                validation_basis="simulation",
+                validated_max_level=validated_max_level or "broad",
+                level_records=records,
+            )
+        if state in ("provisional", "broad_only", "refused"):
+            return TrustDecision(
+                **{**common, "family_id": None, "family_basis": None}, state=state
+            )
+        raise ValueError(state)
+
+    return factory
+
+
+def decision_rows(
+    *,
+    regimes: Sequence[str] = ("validated", "provisional"),
+    levels: Sequence[tuple[str, str, float, float, str | None]] = HUMAN_TABLE_LEVELS,
+    classes: Sequence[str] = HUMAN_TABLE_CLASSES,
+    grid: Sequence[int] = HUMAN_GRID,
+    overrides: Mapping[tuple[str, str, str, int], Mapping[str, Any]] | None = None,
+) -> pd.DataFrame:
+    """Return a ``resolvability.decide``-like table: everything emitted.
+
+    ``overrides`` maps ``(regime, level, class, depth)`` to column values
+    (e.g. ``{"status": "not_resolvable", "reason": "..."}`` or a raised
+    ``threshold``). The provisional threshold defaults to the level default.
+    """
+    records = []
+    for regime in regimes:
+        for level, _role, default, _target, _floor in levels:
+            for cls in classes:
+                for depth in grid:
+                    record: dict[str, Any] = {
+                        "regime": regime,
+                        "level": level,
+                        "class": cls,
+                        "depth": depth,
+                        "status": "emitted",
+                        "threshold": default,
+                        "t_star": default,
+                        "extrapolated": False,
+                        "reason": None,
+                    }
+                    record.update(
+                        (overrides or {}).get((regime, level, cls, depth), {})
+                    )
+                    records.append(record)
+    return pd.DataFrame.from_records(records)
+
+
+@pytest.fixture
+def human_level_meta() -> list[Any]:
+    """Return the ``LevelMeta`` of the synthetic human decision tables."""
+    from merxen.annotation.resolvability import LevelMeta
+
+    return [
+        LevelMeta(level, "SUPC", role, default, target, floor)  # type: ignore[arg-type]
+        for level, role, default, target, floor in HUMAN_TABLE_LEVELS
+    ]
+
+
+@pytest.fixture
+def make_decisions() -> Callable[..., pd.DataFrame]:
+    """Return ``decision_rows``: a synthetic decisions table factory."""
+    return decision_rows
