@@ -175,6 +175,37 @@ def test_spillover_statistic_is_zero_without_the_genes(
     assert statistic[1] > 10.0 and weight[1] == 1.0
 
 
+def test_spillover_needs_the_minimum_weight(profiles: MouseFlagProfiles) -> None:
+    """Deep cells with a 2% microglial component are significant but too small."""
+    rng = np.random.default_rng(4)
+    deep = _cells(NEURON, 200, 20000, rng) + _cells(MICROGLIA, 200, 400, rng)
+    counts = sparse.csr_matrix(deep)
+    result = microglial_spillover(counts, profiles, AnnotationFlagsConfig())
+    assert np.median(result.weight) == pytest.approx(0.02)
+    assert (result.statistic >= 10).mean() > 0.9
+    assert result.raw_flag.mean() < 0.1
+    permissive = microglial_spillover(
+        counts, profiles, AnnotationFlagsConfig(microglia_weight_min=0.0)
+    )
+    assert permissive.raw_flag.mean() > 0.9
+
+
+def test_spillover_null_includes_the_ambient_share(profiles: MouseFlagProfiles) -> None:
+    base, target = spillover_reference(profiles)
+    genes = np.array([0, 1, 2])
+    counts = np.zeros((1, len(GENES)))
+    counts[0, 5] = 980
+    counts[0, 0] = 20  # 2% microglial counts, at a 10% ambient level
+    with_ambient, _ = spillover_statistic(
+        counts, genes, base, target, ambient_share=0.10
+    )
+    without, weight = spillover_statistic(
+        counts, genes, base, target, ambient_share=0.0
+    )
+    assert with_ambient[0] == 0.0
+    assert without[0] > 10.0 and weight[0] > 0.0
+
+
 def test_spillover_weight_grid_must_start_at_zero(profiles: MouseFlagProfiles) -> None:
     base, target = spillover_reference(profiles)
     with pytest.raises(ValueError, match="start with 0"):
