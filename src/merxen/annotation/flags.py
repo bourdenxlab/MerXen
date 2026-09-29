@@ -34,9 +34,15 @@ and its flag is null (H16 transparency):
   >= 30 cells with a positive MAD); ``flag_ood`` = z < -3 [L]. No null
   switch is registered for it; its rates are reported with the H16 marking.
 - **Microglial spill-over** (§5.6, §8.6): human off (OD-C5, decided), so the
-  columns are null with a recorded reason; mouse is M6
-  (``mouse_flag_columns`` keeps the hook).
+  columns are null with a recorded reason; mouse (M6) takes the result of
+  ``mouse_flags.microglial_spillover`` (E3's specific-gene test with the
+  panel's derived genes, the astrocyte false-positive check and the
+  held-out check). Its realised rate per class is reported with the H16
+  marking; the flag's own switches are the gene minimum and the FPR check.
 - **Astro-Epen low count** (§7.4, mouse): ``astro_lowcount_flags``.
+- **Region coherence F1** (E7 §3, mouse): ``mouse_flags.region_incoherent``
+  (``flag_region_incoherent``, ``region_coherence``); null without
+  coordinates.
 - ``discovery_caution`` = any of contaminated, diffuse, OOD, method
   disagreement, microglial spill-over or Astro-Epen low count (null flags
   count as false); ``exclude_hard`` comes from the consensus (§4.3).
@@ -62,6 +68,7 @@ if TYPE_CHECKING:
     from scipy import sparse
 
     from merxen.annotation.config import AnnotationFlagsConfig
+    from merxen.annotation.mouse_flags import CoherenceResult, SpilloverResult
     from merxen.annotation.provenance import FlagProvenance
 
 logger = logging.getLogger(__name__)
@@ -497,7 +504,11 @@ FLAG_REGION_INCOHERENT: Final = "region_incoherent"
 REASON_HUMAN_SPILLOVER_OFF: Final = (
     "disabled: human microglial spill-over flag is off (OD-C5)"
 )
-REASON_MOUSE_M6: Final = "not_run: mouse flags are completed in M6"
+REASON_HUMAN_SPILLOVER_NOT_IMPLEMENTED: Final = (
+    "not_run: the spill-over test is mouse-only (E3); OD-C5 keeps it off for human"
+)
+REASON_MOUSE_NOT_COMPUTED: Final = "not_computed: no spill-over result given"
+REASON_COHERENCE_NOT_COMPUTED: Final = "not_computed: no coherence result given"
 DETECTION_PREFIX: Final = "detection_"
 
 
@@ -1130,6 +1141,10 @@ class FlagInputs:
         profiles_by_class: Class profiles on the query genes (``None``: the
             diffuse flag is null).
         wmb_class: Mouse WMB class per object (Astro-Epen low count).
+        spillover: Mouse spill-over result on the table cells
+            (``mouse_flags.microglial_spillover``, rows = ``query_rows``).
+        coherence: Mouse F1 on the table cells
+            (``mouse_flags.region_incoherent``, rows = ``query_rows``).
     """
 
     species: str
@@ -1148,6 +1163,8 @@ class FlagInputs:
     negatives: NegativeGeneSet | None = None
     profiles_by_class: Mapping[str, np.ndarray] | None = None
     wmb_class: np.ndarray | None = None
+    spillover: SpilloverResult | None = None
+    coherence: CoherenceResult | None = None
 
 
 @dataclass
@@ -1382,7 +1399,7 @@ def compute_flags(
     columns[Columns.OOD_Z] = _float32(ood.z)
     columns[Columns.FLAG_OOD] = ood.flag
 
-    # Microglial spill-over (human off, OD-C5; mouse M6) and mouse hooks.
+    # Microglial spill-over (human off, OD-C5; mouse M6) and the mouse flags.
     enabled = config.microglial_spillover_enabled
     if enabled is None:
         enabled = inputs.species == "mouse"
@@ -1390,13 +1407,86 @@ def compute_flags(
     columns[Columns.MICROGLIA_STAT] = np.full(n, np.nan, dtype=np.float32)
     columns[Columns.MICROGLIA_WEIGHT] = np.full(n, np.nan, dtype=np.float32)
     columns[Columns.FLAG_MICROGLIAL_SPILLOVER] = empty
-    null_reasons[FLAG_MICROGLIAL_SPILLOVER] = (
-        REASON_MOUSE_M6 if enabled else REASON_HUMAN_SPILLOVER_OFF
+    spill = inputs.spillover if enabled else None
+    rows = (
+        np.asarray(inputs.query_rows, dtype=np.int64)
+        if inputs.query_rows is not None
+        else np.flatnonzero(table)
     )
+    if spill is not None and len(spill.raw_flag) == len(rows):
+        stat = np.full(n, np.nan)
+        weight = np.full(n, np.nan)
+        raw = np.zeros(n, dtype=bool)
+        stat[rows] = spill.statistic
+        weight[rows] = spill.weight
+        raw[rows] = spill.raw_flag
+        defined = np.zeros(n, dtype=bool)
+        if spill.defined:
+            defined[rows] = True
+        columns[Columns.MICROGLIA_STAT] = _float32(stat)
+        columns[Columns.MICROGLIA_WEIGHT] = np.clip(weight, 0.0, 1.0).astype(np.float32)
+        columns[Columns.FLAG_MICROGLIAL_SPILLOVER] = nullable_flags(raw, defined)
+        gene_sets[f"{FLAG_MICROGLIAL_SPILLOVER}_genes"] = list(spill.genes.gene_ids)
+        if spill.astro_genes is not None:
+            gene_sets[f"{FLAG_MICROGLIAL_SPILLOVER}_astrocyte_genes"] = list(
+                spill.astro_genes.gene_ids
+            )
+        if spill.null_reason is not None:
+            null_reasons[FLAG_MICROGLIAL_SPILLOVER] = spill.null_reason
+        thresholds.update(
+            {
+                "microglia_stat_min": float(config.microglia_stat_min),
+                "microglia_weight_min": float(config.microglia_weight_min),
+                "microglia_fpr_max": float(config.microglia_fpr_max),
+                "specific_gene_ratio": float(config.specific_gene_ratio),
+                "specific_gene_min_share": float(config.specific_gene_min_share),
+                "min_specific_genes": float(config.min_specific_genes),
+            }
+        )
+        strata += [
+            _stratum(
+                FLAG_MICROGLIAL_SPILLOVER,
+                cls,
+                platform,
+                raw,
+                defined & (classes == cls),
+                confident,
+                max_informative=None,
+                unavailable=None if spill.defined else spill.null_reason,
+            )
+            for cls in class_names
+        ]
+    elif enabled:
+        null_reasons[FLAG_MICROGLIAL_SPILLOVER] = (
+            REASON_MOUSE_NOT_COMPUTED
+            if inputs.species == "mouse"
+            else REASON_HUMAN_SPILLOVER_NOT_IMPLEMENTED
+        )
+    else:
+        null_reasons[FLAG_MICROGLIAL_SPILLOVER] = REASON_HUMAN_SPILLOVER_OFF
     astro = np.zeros(n, dtype=bool)
     if inputs.species == "mouse":
         columns.update(mouse_flag_columns(n))
-        null_reasons[FLAG_REGION_INCOHERENT] = REASON_MOUSE_M6
+        coherence = inputs.coherence
+        if coherence is not None and len(coherence.raw_flag) == len(rows):
+            values = np.full(n, np.nan)
+            values[rows] = coherence.coherence
+            raw = np.zeros(n, dtype=bool)
+            raw[rows] = coherence.raw_flag
+            defined = np.zeros(n, dtype=bool)
+            if coherence.defined:
+                defined[rows] = True
+            columns[Columns.REGION_COHERENCE] = np.clip(values, 0.0, 1.0).astype(
+                np.float32
+            )
+            columns[Columns.FLAG_REGION_INCOHERENT] = nullable_flags(raw, defined)
+            gene_sets[f"{FLAG_REGION_INCOHERENT}_classes"] = list(
+                coherence.restricted_classes
+            )
+            if coherence.null_reason is not None:
+                null_reasons[FLAG_REGION_INCOHERENT] = coherence.null_reason
+        else:
+            null_reasons[FLAG_REGION_INCOHERENT] = REASON_COHERENCE_NOT_COMPUTED
         if inputs.wmb_class is not None:
             astro = astro_lowcount_flags(
                 inputs.wmb_class, counts, table, below=config.astro_lowcount_below
@@ -1446,7 +1536,7 @@ def compute_flags(
 
 
 def mouse_flag_columns(n: int) -> dict[str, Any]:
-    """Return the mouse-only flag columns as null hooks (M6 fills them).
+    """Return the mouse-only flag columns as nulls (filled when F1 is given).
 
     Args:
         n: Objects.

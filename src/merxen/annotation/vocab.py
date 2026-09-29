@@ -7,6 +7,8 @@ to MerXen's species vocabularies:
 - ``seaad_mr_subclass_vocab.csv``: the 29 SEA-AD Multiregion subclasses (human
   second vote), plus supertype overrides that split "VLMC & Perivascular".
 - ``wmb_class_vocab.csv``: the 34 Allen WMB classes (mouse primary).
+- ``wmb_region_restricted_classes.csv``: the WMB classes of the mouse
+  region-coherence flag F1 (E7 §3; ``load_region_restricted_classes``).
 
 ``scripts/annotation/build_vocab_tables.py`` writes these tables from the Allen
 taxonomy CSVs and ``overrides.yaml``; they are committed and reviewed, never
@@ -185,6 +187,14 @@ HELDOUT_MARKER_FILES: Final[dict[str, str]] = {
     "human": "heldout_markers_human.csv",
     "mouse": "heldout_markers_mouse.csv",
 }
+# E7 §3 (exp/E7/06_analyse.py, merfish/class_intrinsic_coherence.csv at
+# density 0.29, sha256 2c426d7a...): a class is region-restricted when its
+# top two MERFISH divisions hold >= 80% of its grey-matter cells and its
+# whole-brain home-division kNN30 coherence is >= 0.15, never-drop classes
+# excluded (23 classes, exp/E7/results/sets.json).
+REGION_RESTRICTED_FILE: Final = "wmb_region_restricted_classes.csv"
+REGION_RESTRICTED_MIN_TOP2_SHARE: Final = 0.8
+REGION_RESTRICTED_MIN_HOME_COHERENCE: Final = 0.15
 
 
 def _check_species(species: str) -> Species:
@@ -904,6 +914,33 @@ def load_state_gene_ids(species: Species) -> dict[str, str]:
             raise ValueError(f"{filename}: ID {text} repeats")
         genes[text] = str(symbol)
     return genes
+
+
+def load_region_restricted_classes() -> tuple[str, ...]:
+    """Return the WMB classes of the mouse region-coherence flag F1 (E7 §3).
+
+    Returns:
+        Class names flagged ``region_restricted`` in
+        ``wmb_region_restricted_classes.csv``, in table order.
+
+    Raises:
+        ValueError: If a row's ``region_restricted`` is not a boolean, or
+            disagrees with the E7 criteria on its own columns.
+    """
+    frame = load_asset_table(REGION_RESTRICTED_FILE)
+    _parse_bool_column(frame, "region_restricted", REGION_RESTRICTED_FILE)
+    top2 = pd.to_numeric(frame["top2_share"], errors="coerce")
+    coherence = pd.to_numeric(frame["coh_home_median"], errors="coerce")
+    expected = (top2 >= REGION_RESTRICTED_MIN_TOP2_SHARE) & (
+        coherence >= REGION_RESTRICTED_MIN_HOME_COHERENCE
+    )
+    kept_off = frame["region_restricted"] & ~expected
+    if bool(kept_off.any()):
+        raise ValueError(
+            f"{REGION_RESTRICTED_FILE}: {list(frame.loc[kept_off, 'class'])} are "
+            "region_restricted without meeting the E7 criteria"
+        )
+    return tuple(str(name) for name in frame.loc[frame["region_restricted"], "class"])
 
 
 def load_heldout_markers(species: Species) -> pd.DataFrame:
