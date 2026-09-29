@@ -22,7 +22,9 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 
+from merxen.clustering.cross_platform import CrossPlatformScope
 from merxen.clustering.map_first import (
+    check_clustered_table_target,
     downstream_annotation_summary,
     recorded_mender_policy,
     unassigned_states,
@@ -41,6 +43,18 @@ EXCLUDE_FROM_FEATURES_POLICY: Final = "exclude_from_features"
 # neighbourhood feature. Written only under "exclude_from_features", so legacy
 # portable tables are unchanged; mender_compute.IN_FEATURES_COLUMN mirrors it.
 IN_FEATURES_COLUMN: Final = "in_features"
+# Status of a map_first MENDER run whose states are all unassigned (a refused
+# panel, a failed gate): a data-quality outcome, not an error (plan §3.1).
+# PREPARE records it, COMPUTE / FINALIZE / IMPORT write documented outputs
+# without domains and import nothing; mender_compute.SKIPPED_STATUS and
+# AnnotationRunRecord.MENDER_SKIPPED_STATUS mirror it.
+SKIPPED_NO_ASSIGNED_STATE: Final = "skipped_no_assigned_state"
+# The cell-state key whose niches may be compared across datasets or
+# platforms (plan §4.9): the branch-level state RESOLVE writes. Its states
+# are broad classes with the neurotransmitter split of neurons, so a
+# comparison needs a pair scope that allows the ``nt`` level.
+CROSS_DATASET_STATE_KEY: Final = "ct_mender_state"
+CROSS_DATASET_STATE_LEVEL: Final = "nt"
 
 CELL_ID_CANDIDATES = (
     "instance_id",
@@ -196,23 +210,80 @@ def excluded_feature_states(states: pd.Series, config: MenderConfig) -> tuple[st
         Nothing under ``unassigned_state_policy="state"`` (legacy); under
         ``"exclude_from_features"`` the unassigned states present
         (``Mixed/Unknown`` and ``*/unresolved`` branches,
-        ``merxen.clustering.map_first.is_unassigned_state``).
-
-    Raises:
-        ValueError: If every state present is unassigned, which would leave
-            MENDER without features.
+        ``merxen.clustering.map_first.is_unassigned_state``). When that is
+        every state present, ``skip_reasons`` reports the run as skipped.
     """
     if config.unassigned_state_policy == STATE_POLICY:
         return ()
     present = [str(value) for value in states.astype(str).unique()]
-    excluded = unassigned_states(present)
-    if len(excluded) == len(set(present)):
-        raise ValueError(
-            f"every MENDER cell state of {config.cell_state_key!r} is unassigned "
-            f"({list(excluded)[:5]}); unassigned_state_policy="
-            f"{config.unassigned_state_policy!r} would leave no feature"
-        )
-    return excluded
+    return unassigned_states(present)
+
+
+def skip_reasons(
+    states: pd.Series, excluded: tuple[str, ...], config: MenderConfig
+) -> list[str]:
+    """Return why a MENDER run has no feature to compute niches from.
+
+    Under ``exclude_from_features`` a table whose states are all unassigned
+    (a refused panel or a failed gate labels every cell ``Mixed/Unknown``)
+    leaves MENDER without a neighbourhood feature. That is a data-quality
+    outcome, so the run is recorded as ``skipped_no_assigned_state`` with
+    documented outputs instead of failing (plan §3.1).
+
+    Args:
+        states: The validated cell states.
+        excluded: ``excluded_feature_states`` of ``states``.
+        config: MENDER configuration.
+
+    Returns:
+        The reasons, or an empty list when the run can compute niches.
+    """
+    if config.unassigned_state_policy == STATE_POLICY or not excluded:
+        return []
+    present = {str(value) for value in states.astype(str).unique()}
+    if set(excluded) != present:
+        return []
+    shown = sorted(present)[:5]
+    return [
+        f"every cell state of {config.cell_state_key!r} is unassigned ({shown}); "
+        f"unassigned_state_policy={config.unassigned_state_policy!r} leaves no "
+        "neighbourhood feature"
+    ]
+
+
+def cross_platform_comparability(
+    config: MenderConfig, annotation: Mapping[str, Any] | None
+) -> dict[str, Any]:
+    """Return whether this run's niches may be compared across platforms.
+
+    Cross-dataset or cross-platform MENDER uses ``ct_mender_state`` (plan
+    §4.9): other state keys (``hierarchical_cluster``, whose granularity
+    follows each dataset's gate and resolvability) give niches that are
+    not comparable between the platforms of a pair, whatever the pair's
+    label scope. With ``ct_mender_state`` the pair's cross-platform scope
+    must allow the ``nt`` level (plan §5.4, §8.5).
+
+    Args:
+        config: MENDER configuration.
+        annotation: ``downstream_annotation_summary`` of the clustered table.
+
+    Returns:
+        ``cross_platform_comparable`` and ``cross_platform_comparable_reasons``.
+    """
+    reasons: list[str] = []
+    if config.cell_state_key != CROSS_DATASET_STATE_KEY:
+        reasons.append(f"state_key:{config.cell_state_key}")
+    payload = None if annotation is None else annotation.get("cross_platform")
+    if payload is None:
+        reasons.append("cross_platform:no_record")
+    else:
+        scope = CrossPlatformScope.from_dict(payload)
+        if not scope.allows(CROSS_DATASET_STATE_LEVEL):
+            reasons.append(f"cross_platform:{scope.statistics_level}")
+    return {
+        "cross_platform_comparable": not reasons,
+        "cross_platform_comparable_reasons": reasons,
+    }
 
 
 def _policy_record(
@@ -233,6 +304,7 @@ def _policy_record(
         "unassigned_state_policy": config.unassigned_state_policy,
         "excluded_feature_states": list(excluded),
         "n_cells_excluded_from_features": int(n_excluded_cells),
+        **cross_platform_comparability(config, annotation),
     }
     if annotation is not None:
         record["annotation"] = annotation
@@ -280,11 +352,15 @@ def prepare_mender(config: MenderConfig, output_dir: Path | str) -> Path:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     clustered = ad.read_h5ad(config.source_h5ad)
+    check_clustered_table_target(
+        clustered.uns, config.source_spatialdata_table, consumer="MENDER_PREPARE"
+    )
     config = effective_mender_config(config, clustered.uns)
     cell_ids = resolve_cell_ids(clustered)
     states, keep = _validate_cell_states(clustered, config)
     selected_ids = cell_ids[keep]
     excluded = excluded_feature_states(states, config)
+    skipped = skip_reasons(states, excluded, config)
     annotation = downstream_annotation_summary(clustered.uns)
 
     import spatialdata as sd
@@ -377,6 +453,15 @@ def prepare_mender(config: MenderConfig, output_dir: Path | str) -> Path:
             annotation=annotation,
         ),
     }
+    if skipped:
+        manifest["status"] = SKIPPED_NO_ASSIGNED_STATE
+        manifest["status_reasons"] = skipped
+        logger.warning(
+            "[%s] MENDER skipped (%s): %s",
+            config.sample_id,
+            SKIPPED_NO_ASSIGNED_STATE,
+            "; ".join(skipped),
+        )
     manifest_path = output_dir / "input_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
     logger.info(
@@ -565,6 +650,18 @@ def _provenance(config: MenderConfig, input_manifest: dict[str, Any]) -> dict[st
             result["annotation_json"] = json.dumps(
                 input_manifest["annotation"], sort_keys=True
             )
+        if "cross_platform_comparable" in input_manifest:
+            result["cross_platform_comparable"] = bool(
+                input_manifest["cross_platform_comparable"]
+            )
+            result["cross_platform_comparable_reasons_json"] = json.dumps(
+                list(input_manifest.get("cross_platform_comparable_reasons", []))
+            )
+        if input_manifest.get("status") is not None:
+            result["status"] = str(input_manifest["status"])
+            result["status_reasons_json"] = json.dumps(
+                list(input_manifest.get("status_reasons", []))
+            )
     return result
 
 
@@ -582,6 +679,9 @@ def finalize_mender(
     input_dir = sample_dir / "input"
     tables_dir = sample_dir / "tables"
     plots_dir = sample_dir / "plots"
+    input_manifest = json.loads((prepared_dir / "input_manifest.json").read_text())
+    if input_manifest.get("status") == SKIPPED_NO_ASSIGNED_STATE:
+        return _finalize_skipped(config, prepared_dir, input_manifest, sample_dir)
     for path in (input_dir, tables_dir, plots_dir):
         path.mkdir(parents=True, exist_ok=True)
 
@@ -607,7 +707,6 @@ def finalize_mender(
     original.obs["mender_domain"] = pd.Categorical(
         domain_lookup.loc[original_ids].astype(str).to_numpy()
     )
-    input_manifest = json.loads((prepared_dir / "input_manifest.json").read_text())
     provenance = _provenance(config, input_manifest)
     original.uns["merxen_mender"] = provenance
 
@@ -631,16 +730,7 @@ def finalize_mender(
     _plot_context_umap(context, domains, plots_dir, config.figure_dpi)
     _plot_state_domain_heatmap(cells, plots_dir, config.figure_dpi)
 
-    readable: dict[str, Any] = {}
-    if "unassigned_state_policy" in input_manifest:
-        readable = {
-            "state_counts": dict(input_manifest["state_counts"]),
-            "excluded_feature_states": list(
-                input_manifest.get("excluded_feature_states", [])
-            ),
-        }
-        if input_manifest.get("annotation") is not None:
-            readable["annotation"] = input_manifest["annotation"]
+    readable = _readable_policy_fields(input_manifest)
     output_manifest = {
         **provenance,
         **readable,
@@ -668,6 +758,52 @@ def finalize_mender(
         "cells_parquet": cells_path,
         "manifest": manifest_path,
     }
+
+
+def _readable_policy_fields(input_manifest: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the manifest's policy fields as plain JSON (map_first only)."""
+    if "unassigned_state_policy" not in input_manifest:
+        return {}
+    readable: dict[str, Any] = {
+        "state_counts": dict(input_manifest["state_counts"]),
+        "excluded_feature_states": list(
+            input_manifest.get("excluded_feature_states", [])
+        ),
+    }
+    for key in ("cross_platform_comparable_reasons", "status_reasons"):
+        if key in input_manifest:
+            readable[key] = list(input_manifest[key])
+    if input_manifest.get("annotation") is not None:
+        readable["annotation"] = input_manifest["annotation"]
+    return readable
+
+
+def _finalize_skipped(
+    config: MenderConfig,
+    prepared_dir: Path,
+    input_manifest: Mapping[str, Any],
+    sample_dir: Path,
+) -> dict[str, Path]:
+    """Write the documented output of a skipped run: manifests, no domains."""
+    input_dir = sample_dir / "input"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(
+        prepared_dir / "input_manifest.json", input_dir / "input_manifest.json"
+    )
+    output_manifest = {
+        **_provenance(config, dict(input_manifest)),
+        **_readable_policy_fields(input_manifest),
+        "domain_counts": {},
+        "artifacts": {"input_manifest": "input/input_manifest.json"},
+    }
+    manifest_path = sample_dir / "mender_manifest.json"
+    manifest_path.write_text(json.dumps(output_manifest, indent=2) + "\n")
+    logger.warning(
+        "[%s] MENDER %s: no domains, nothing to import",
+        config.sample_id,
+        input_manifest.get("status"),
+    )
+    return {"manifest": manifest_path}
 
 
 @contextmanager
@@ -723,8 +859,16 @@ def import_mender_spatialdata(
         if finalized_path.name == config.platform.lower()
         else finalized_path / config.platform.lower()
     )
+    finalized_manifest_path = sample_dir / "mender_manifest.json"
+    if finalized_manifest_path.is_file():
+        finalized = json.loads(finalized_manifest_path.read_text())
+        if finalized.get("status") == SKIPPED_NO_ASSIGNED_STATE:
+            return _write_skipped_import(config, finalized, output_manifest_path)
     annotated_path = sample_dir / f"{config.sample_id}_mender_annotated.h5ad"
     annotated = ad.read_h5ad(annotated_path)
+    check_clustered_table_target(
+        annotated.uns, config.source_spatialdata_table, consumer="MENDER_IMPORT"
+    )
     annotated_ids = resolve_cell_ids(annotated)
     domains = pd.Series(
         annotated.obs["mender_domain"].astype(str).to_numpy(),
@@ -804,3 +948,28 @@ def import_mender_spatialdata(
     )
     del annotated
     return output_manifest_path
+
+
+def _write_skipped_import(
+    config: MenderConfig, finalized: Mapping[str, Any], manifest_path: Path
+) -> Path:
+    """Record a skipped run's import: nothing is written to SpatialData."""
+    result: dict[str, Any] = {
+        "sample_id": config.sample_id,
+        "platform": config.platform,
+        "segmentation": config.segmentation,
+        "spatialdata_path": str(config.spatialdata_path.resolve()),
+        "spatialdata_table": config.source_spatialdata_table,
+        "annotated_h5ad": None,
+        "write_spatialdata_table": bool(config.write_spatialdata_table),
+        "imported": False,
+        "status": str(finalized["status"]),
+        "status_reasons": list(finalized.get("status_reasons", [])),
+        "n_cells": 0,
+        "domain_counts": {},
+    }
+    manifest_path.write_text(json.dumps(result, indent=2) + "\n")
+    log_status(
+        f"[{config.sample_id}] MENDER SpatialData import skipped ({result['status']})"
+    )
+    return manifest_path
