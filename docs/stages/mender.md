@@ -62,6 +62,15 @@ model.run_representation()
 model.run_clustering_normal(-0.8, run_umap=True)
 ```
 
+On a `map_first` clustered table the unassigned states (`Mixed/Unknown`
+and the `*/unresolved` branches) follow the run's
+`mender_unassigned_state_policy`, recorded in the table (default
+`exclude_from_features`: those cells stay spatial nodes and get a domain but
+add no state to any neighbourhood); legacy tables keep every state as a
+feature. The MENDER manifests record the policy, the excluded states, the
+dataset gate, the panel trust and the pair's cross-platform scope
+([Map-first clustering runs](annotation.md#map-first-clustering-runs-m5)).
+
 These layer-focused defaults use five separate 20 µm shells spanning a
 maximum radius of 100 µm. Excluding the central cell reduces sensitivity to
 isolated cell-state assignments, while the lower Leiden resolution favours
