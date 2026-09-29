@@ -8,11 +8,12 @@ rebase or merge cannot silently drop a hook. A hook that also touches further
 lines marks each of them with ``rca-site:H<n>``; their number per file is
 pinned below too.
 
-H5 (the map_first wiring between PREPARE and COMPUTE) arrives with M5's hook
-commit, so its marker must not exist yet. H10 (M2) is the
-``--annotation_prepare_only`` entry: it builds reference bundles from the
-samplesheet rows before the preflight and empties the rows, so no pipeline
-stage runs; it needs neither H5 nor any PREPARE output.
+H5 (M5) is the map_first wiring between PREPARE and FINALIZE: one ``if`` on
+the run's mode whose legacy branch runs exactly the legacy PREPARE -> COMPUTE
+statements. H10 (M2) is the ``--annotation_prepare_only`` entry: it builds
+reference bundles from the samplesheet rows before the preflight and empties
+the rows, so no pipeline stage runs; it needs neither H5 nor any PREPARE
+output.
 """
 
 from __future__ import annotations
@@ -34,7 +35,7 @@ EXPECTED_HOOKS: dict[str, tuple[str, ...]] = {
     "H2": (MAIN_NF,),
     "H3": (MAIN_NF,),
     "H4": (MAIN_NF,),
-    "H5": (),  # M5: CLUSTERING_MAP_FIRST between PREPARE and FINALIZE.
+    "H5": (MAIN_NF,),  # M5: CLUSTERING_MAP_FIRST between PREPARE and FINALIZE.
     "H6": (MAIN_NF,),
     "H7": ("workflows/nextflow.config", "workflows/conf/dwight.config"),
     "H8": ("src/merxen/config.py",),
@@ -70,6 +71,7 @@ HOOK_CONTENT: dict[str, tuple[str, ...]] = {
         "AnnotationPreflight.append(errors, settings, params)",
         "if (!AnnotationSettings.isLegacy(settings)) {",
     ),
+    "H5": ("if (AnnotationSettings.isMapFirstRun(params)) {",),
     "H6": (".onComplete {", "AnnotationSettings.completionSummary("),
     "H8": ("from merxen.annotation.config import",),
     "H9": ("parse_optional_columns",),
@@ -139,12 +141,50 @@ def test_hook_sites_are_pinned() -> None:
         assert relative in EXPECTED_HOOKS[hook], (relative, hook)
 
 
-def test_h5_is_left_for_m5() -> None:
-    """The PREPARE -> COMPUTE wiring (hook H5) arrives with its own commit."""
-    main_text = (REPO_ROOT / MAIN_NF).read_text()
+LEGACY_CLUSTERING_STATEMENTS = (
+    "clustering_prepared_ch = CLUSTERING_SQUIDPY_PREPARE(clustering_inputs_ch)",
+    "clustering_computed_ch = CLUSTERING_SQUIDPY_COMPUTE(clustering_prepared_ch)",
+)
 
-    assert "CLUSTERING_MAP_FIRST(" not in main_text
-    assert "rca-hook:H5" not in main_text
+
+def _h5_block(main_text: str) -> tuple[str, str]:
+    """Return the map_first and legacy branches of hook H5."""
+    start = main_text.index("    if (AnnotationSettings.isMapFirstRun(params)) {\n")
+    middle = main_text.index("\n    } else {\n", start)
+    end = main_text.index("\n    }\n", middle + 1)
+    return main_text[start:middle], main_text[middle + len("\n    } else {\n") : end]
+
+
+def test_h5_switches_between_legacy_compute_and_map_first() -> None:
+    """H5 sits between PREPARE's inputs and FINALIZE; legacy runs its old statements.
+
+    The legacy branch holds exactly the two legacy statements, so a legacy
+    run builds the same DAG and task hashes as before M5; FINALIZE follows
+    both branches, so the MENDER barrier and downstream stages are shared.
+    """
+    main_text = (REPO_ROOT / MAIN_NF).read_text()
+    hook = main_text.index("rca-hook:H5")
+    map_first, legacy = _h5_block(main_text)
+
+    assert main_text.index("    clustering_inputs_ch =\n") < hook
+    assert hook < main_text.index("    if (AnnotationSettings.isMapFirstRun(params)) {")
+    assert [line.strip() for line in legacy.strip().splitlines()] == list(
+        LEGACY_CLUSTERING_STATEMENTS
+    )
+    finalize = (
+        "clustering_results_ch = CLUSTERING_SQUIDPY_FINALIZE(clustering_computed_ch)"
+    )
+    assert main_text.count(finalize) == 1
+    assert main_text.index(finalize) > main_text.index(legacy)
+    assert main_text.count("CLUSTERING_MAP_FIRST(") == 1
+    assert "CLUSTERING_MAP_FIRST(" in map_first
+    assert "CLUSTERING_SQUIDPY_PREPARE(" in map_first
+    assert "CLUSTERING_SQUIDPY_COMPUTE(" not in map_first
+    assert "AnnotationSettings.samplesJsonWithRowColumns(" in map_first
+    assert "AnnotationReferences.alignmentFiles(alignOut)" in map_first
+    assert "AnnotationRunRecord.expect(pairId, segmentation)" in map_first
+    # The legacy COMPUTE (GPU env) is called nowhere else.
+    assert main_text.count("CLUSTERING_SQUIDPY_COMPUTE(") == 1
 
 
 @pytest.mark.parametrize("hook", sorted(HOOK_CONTENT))

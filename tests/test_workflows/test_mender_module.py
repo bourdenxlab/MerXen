@@ -426,6 +426,7 @@ def test_preflight_gates_the_legacy_checks_on_the_mode(
         "Unknown annotation_panel_mode 'bogus' for P1 (human, "
         "clustering_squidpy_mode map_first)"
     ) in map_first
+    assert "not available yet" not in map_first
 
 
 @needs_nextflow

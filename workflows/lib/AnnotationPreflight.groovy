@@ -6,16 +6,13 @@
  * ANNOTATION_PREPARE_ONLY (hook H10) calls prepareOnlyErrors once per
  * --annotation_prepare_only run instead: such a run preflights no row.
  *
- * A map_first row that clusters builds reference bundles, so it is checked
- * like a prepare-only run: the references' source params, the writable
- * reference stores and the settings annotation_config.json takes.
+ * map_first runs only when a run selects it (clustering_squidpy_mode or
+ * clustering_squidpy_mode_<species>); legacy stays the default until the
+ * species' flip. A map_first row that clusters builds reference bundles, so
+ * it is checked like a prepare-only run: the references' source params, the
+ * writable reference stores and the settings annotation_config.json takes.
  */
 class AnnotationPreflight {
-
-    // Hook H5 (main.nf: PREPARE -> CLUSTERING_MAP_FIRST -> FINALIZE) arrives
-    // with the next M5 commit; until it sets this, a map_first run that
-    // touches clustered tables is refused.
-    static final boolean MAP_FIRST_WIRED = false
 
     static final Map<String, List<String>> CHOICES = [
         annotation_panel_mode: ["auto", "intersection", "per_platform"],
@@ -63,14 +60,6 @@ class AnnotationPreflight {
         }
         def species = AnnotationDefaults.normalizeSpecies(settings.get("species"))
         def label = "${settings.get('pair_id')} (${species}, clustering_squidpy_mode map_first)"
-        if (!MAP_FIRST_WIRED && usesClusteredTables(settings)) {
-            errors << (
-                "clustering_squidpy_mode map_first is not available yet for " +
-                "${label}: this version has only the annotation scaffolding " +
-                "(milestone M1 of docs/plans/robust-celltype-annotation-plan.md); " +
-                "run with the default legacy mode"
-            ).toString()
-        }
         def suffix = AnnotationSettings.tableKeySuffix(settings)
         if (!suffix && !(species in AnnotationDefaults.FLIPPED_SPECIES)) {
             errors << "${label}: ${AnnotationDefaults.emptySuffixMessage(species)}".toString()

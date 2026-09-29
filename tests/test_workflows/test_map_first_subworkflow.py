@@ -38,8 +38,8 @@ PREP, a large panel) and checks that:
 
 A second run executes the real MAP and RESOLVE scripts (no ``-stub-run``)
 with a fake ``merxen`` that records their command lines and environments;
-for the refused panel both run the real commands (slow). ``main.nf`` does
-not call ``CLUSTERING_MAP_FIRST`` before hook H5.
+for the refused panel both run the real commands (slow). ``main.nf`` calls
+``CLUSTERING_MAP_FIRST`` only in map_first runs (hook H5).
 """
 
 from __future__ import annotations
@@ -1266,8 +1266,8 @@ def test_resolve_is_connected_after_map() -> None:
             assert "CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE(" not in path.read_text(), path
 
 
-def test_main_nf_never_calls_the_map_first_steps() -> None:
-    """Legacy runs are unchanged: main.nf only includes CLUSTERING_MAP_FIRST (H1)."""
+def test_main_nf_calls_map_first_only_through_hook_h5() -> None:
+    """Legacy runs are unchanged: H5's map_first branch calls CLUSTERING_MAP_FIRST."""
     main_text = MAIN_NF.read_text()
     for name in (
         "CLUSTERING_SQUIDPY_ANNOTATE_MAP",
@@ -1275,15 +1275,18 @@ def test_main_nf_never_calls_the_map_first_steps() -> None:
         "CLUSTERING_SQUIDPY_COMPUTE_CPU",
         "CLUSTERING_ANNOTATE_MAP",
         "CLUSTERING_ANNOTATE(",
-        "CLUSTERING_MAP_FIRST(",
     ):
         assert name not in main_text, name
     include = (
         'include { CLUSTERING_MAP_FIRST } from "./subworkflows/clustering_map_first"'
     )
     assert main_text.count(include) == 1
+    assert main_text.count("CLUSTERING_MAP_FIRST(") == 1
+    branch = main_text.index("    if (AnnotationSettings.isMapFirstRun(params)) {")
+    legacy = main_text.index("\n    } else {\n", branch)
+    assert branch < main_text.index("CLUSTERING_MAP_FIRST(") < legacy
     preflight = (LIB_DIR / "AnnotationPreflight.groovy").read_text()
-    assert re.search(r"static final boolean MAP_FIRST_WIRED = false\b", preflight)
+    assert "MAP_FIRST_WIRED" not in preflight
     # Only the subworkflow calls COMPUTE_CPU.
     for path in WORKFLOWS.rglob("*.nf"):
         if path != SUBWORKFLOW:

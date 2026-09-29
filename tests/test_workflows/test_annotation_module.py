@@ -325,7 +325,7 @@ def test_prep_max_gb_fraction_matches_the_python_reserve() -> None:
 
 
 def test_main_nf_calls_the_annotation_steps_only_through_their_entries() -> None:
-    """--annotation_prepare_only (H10) only; CLUSTERING_MAP_FIRST waits for H5."""
+    """--annotation_prepare_only (H10) and CLUSTERING_MAP_FIRST (H5), nothing else."""
     main_text = MAIN_NF.read_text()
     assert main_text.count("ANNOTATION_PREPARE_ONLY(sample_rows_raw_ch)") == 1
     for name in (
@@ -339,7 +339,7 @@ def test_main_nf_calls_the_annotation_steps_only_through_their_entries() -> None
         "CLUSTERING_ANNOTATE(",
     ):
         assert name not in main_text
-    assert main_text.count("CLUSTERING_MAP_FIRST(") == 0
+    assert main_text.count("CLUSTERING_MAP_FIRST(") == 1
     # CLUSTERING_MAP_FIRST runs COMPUTE_CPU (M5): no guard left.
     assert "error(" not in MAP_FIRST.read_text()
 
