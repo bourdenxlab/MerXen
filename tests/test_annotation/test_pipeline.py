@@ -1016,7 +1016,7 @@ def test_map_bundles_needs_every_required_bundle(
     assert [run.run_id for run in runs] == ["whb_frontal_supc_clus"]
 
 
-def test_mouse_maps_unpruned_with_the_drop_level(
+def test_mouse_maps_with_the_drop_level_and_no_pruning_when_none(
     tmp_path: Path, fake_mmc: FakeMmc
 ) -> None:
     levels = [
@@ -1102,20 +1102,39 @@ def test_mouse_maps_unpruned_with_the_drop_level(
         source="prepared",
     )
 
+    sample = MapSample("AG_MERSCOPE", "MERSCOPE", path, "prepared")
+    with pytest.raises(MapError, match="needs the wmb_region_share bundle"):
+        annotate_map(
+            [sample],
+            runs,
+            config,
+            output_dir=tmp_path / "x",
+            pair_id="AG",
+            segmentation="proseg_hybrid",
+        )
+    assert not fake_mmc.calls  # refused before anything is mapped
+
     manifest = annotate_map(
-        [MapSample("AG_MERSCOPE", "MERSCOPE", path, "prepared")],
+        [sample],
         runs,
         config,
         output_dir=tmp_path / "out",
         pair_id="AG",
         segmentation="proseg_hybrid",
+        section_regions={"AG_MERSCOPE": "none"},
     )
 
     command = fake_mmc.calls[-1]["command"]
     assert command[command.index("--drop_level") + 1] == "CCN20230722_SUPT"
-    assert manifest.mouse_region_step == MOUSE_REGION_STEP
+    assert "--nodes_to_drop" not in command
+    assert manifest.mouse_region_step == MOUSE_REGION_STEP.format(variant="v1")
     record = manifest.samples["AG_MERSCOPE"]
     assert set(record.runs) == {"wmb_panel"}
+    assert record.mouse_regions is not None
+    assert record.mouse_regions.status == "disabled"
+    assert record.mouse_regions.source == "none"
+    assert record.mouse_regions.remap is None
+    assert record.mouse_regions.region_share is None
     labels = pd.read_parquet(tmp_path / "out" / str(record.provisional_labels))
     labels = labels.set_index("cell_id")
     assert labels.loc["M0", "ct_class_name"] == "01 IT-ET Glut"
@@ -2656,7 +2675,11 @@ def test_mouse_provisional_statuses_pin_each_threshold_and_parent(
             drop_level="CCN20230722_SUPT",
         )
     )
-    config = AnnotationConfig(species="mouse").coupled_to_clustering(10)
+    # The thresholds only: no region pruning (the region step is tested in
+    # test_mouse_region_step_*).
+    config = AnnotationConfig(
+        species="mouse", mouse_section_regions="none"
+    ).coupled_to_clustering(10)
     runs = map_bundles(
         required, panel_dir, {("wmb_panel", panel.panel_hash): bundle}, config
     )
