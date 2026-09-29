@@ -1498,7 +1498,8 @@ def _n_segmented(values: tuple[str, ...]) -> dict[str, int]:
     default=None,
     help="Mouse gate G4: comma-separated MERFISH-638850 sections of the "
     "composition window (e.g. C57BL6J-638850.31,C57BL6J-638850.32); default: "
-    "the config's (none: G4 not evaluated until M6b's AP estimate).",
+    "the config's (none: the AP estimate chooses the best-matching section and "
+    "its neighbours, plan §7.8).",
 )
 def annotate_resolve_command(
     map_dir: Path,

@@ -13,8 +13,10 @@ into the unpruned calls, plan §7.2), and in this order:
    registration check the caller gives; G2 the derived marker referee on
    the query counts; G3 the pre-pruning T2 share from the region record and
    its ``wmb_region_share`` bundle; G4 the soft class composition against
-   the MERFISH window of ``MouseGateConfig.g4_window_sections`` (none until
-   M6b's AP estimate); G5 the spill-over flag rate
+   the MERFISH window of ``MouseGateConfig.g4_window_sections``, or else of
+   the AP estimate (``mouse_ap.estimate_ap`` on the pruned confident
+   neurons: the best-matching MERFISH section of all sections and its
+   neighbours; plan §7.8 item 4); G5 the spill-over flag rate
    (``mouse_flags.microglial_spillover``, computed here first because it
    does not depend on the statuses). The verdict precedes the statuses.
 3. **Statuses** (``consensus.resolve_mouse``; §7.3) with resolvability-gated
@@ -579,23 +581,75 @@ def _g4_signal(
     bundle: RegionShareBundle | None,
     reason: str | None,
     config: AnnotationConfig,
-) -> tuple[float | None, float | None, MerfishWindow | None, str | None]:
+    *,
+    confident_subclasses: Sequence[object] = (),
+) -> tuple[
+    float | None, float | None, MerfishWindow | None, str | None, dict[str, Any] | None
+]:
+    """G4: the soft class offsets against the MERFISH window (§7.6, §7.8).
+
+    The window is ``g4_window_sections`` when given, else the AP estimate's
+    (``g4_ap_estimate``).
+
+    Returns:
+        ``(astro_epen_points, immune_points, window, reason, ap_estimate)``.
+    """
+    from merxen.annotation.mouse_ap import ApEstimateError, estimate_ap
     from merxen.annotation.mouse_gate import composition_offsets, merfish_window
+    from merxen.annotation.reference import SECTION_COMPOSITION_FILE
 
     sections = list(config.mouse_gate.g4_window_sections)
-    if not sections:
-        return None, None, None, "no MERFISH window (AP estimate: M6b)"
+    if not sections and not config.mouse_gate.g4_ap_estimate:
+        return None, None, None, "no MERFISH window (g4_ap_estimate off)", None
     if bundle is None:
-        return None, None, None, reason or "no region-share bundle"
-    path = Path(bundle.path) / "section_composition.parquet"
+        return None, None, None, reason or "no region-share bundle", None
+    path = Path(bundle.path) / SECTION_COMPOSITION_FILE
     if not path.is_file():
-        return None, None, None, "region-share bundle has no section_composition"
+        return None, None, None, "region-share bundle has no section_composition", None
+    composition = pd.read_parquet(path)
+    estimate: dict[str, Any] | None = None
+    if not sections:
+        regions = config.mouse_regions
+        try:
+            found = estimate_ap(
+                confident_subclasses,
+                composition,
+                scope_mm=(regions.ap_scope_min_mm, regions.ap_scope_max_mm),
+            )
+        except ApEstimateError as error:
+            return None, None, None, f"no AP estimate: {error}", None
+        estimate = found.to_json()
+        sections = list(found.window_sections)
     try:
-        window = merfish_window(pd.read_parquet(path), sections)
+        window = merfish_window(composition, sections)
     except ValueError as error:
-        return None, None, None, str(error)
+        return None, None, None, str(error), estimate
     astro, immune = composition_offsets(shares, window)
-    return astro, immune, window, None
+    return astro, immune, window, None, estimate
+
+
+def _confident_subclasses(
+    inputs: MouseCallInputs, config: AnnotationConfig
+) -> list[object]:
+    """The subclass calls of the table's confident neurons (AP estimate).
+
+    Confident neurons as the region rule (``mouse_regions.confident_neurons``:
+    a neuronal class with class and subclass bootstrap probability >=
+    ``confident_neuron_min_bp``), on the pruned calls.
+    """
+    from merxen.annotation.mouse_regions import confident_neurons
+
+    wmb = inputs.calls.wmb
+    if wmb is None or wmb.subclass is None:
+        return []
+    rows = inputs.table_rows
+    mask = confident_neurons(
+        wmb.klass.name[rows],
+        wmb.klass.scores.raw[rows],
+        wmb.subclass.scores.raw[rows],
+        min_bp=config.mouse_regions.confident_neuron_min_bp,
+    )
+    return list(np.asarray(wmb.subclass.name[rows], dtype=object)[mask])
 
 
 def class_corr_floor(
@@ -806,11 +860,12 @@ def resolve_mouse_sample(
     soft_only = class_shares(
         soft, class_names, argmax=list(class_table), confident=[None] * len(table_rows)
     )["soft"]
-    astro_points, immune_points, window, g4_reason = _g4_signal(
+    astro_points, immune_points, window, g4_reason, ap_estimate = _g4_signal(
         {key: value for key, value in soft_only.items() if key in set(class_names)},
         region_bundle,
         region_reason,
         config,
+        confident_subclasses=_confident_subclasses(inputs, config),
     )
     signals = MouseGateSignals(
         registration=registration,
@@ -823,6 +878,7 @@ def resolve_mouse_sample(
         g4_reason=g4_reason,
         spillover_rate=spill.rate,
         g5_reason=spill.null_reason,
+        ap_estimate=ap_estimate,
     )
     regions = None if primary is None else primary.regions
     region_record = None if regions is None else regions.record

@@ -745,8 +745,12 @@ class MouseGateConfig(_AnnotationModel):
         g3_t2_max_present_share: A subclass is T2 (G3) below this share of
             its MERFISH cells in the present divisions (E7).
         g4_window_sections: MERFISH-638850 sections of G4's window (e.g.
-            ``C57BL6J-638850.31``); empty: G4 is not evaluated until M6b's
-            AP estimate chooses the window.
+            ``C57BL6J-638850.31``); empty: the AP estimate chooses it
+            (``g4_ap_estimate``).
+        g4_ap_estimate: Without ``g4_window_sections``, choose G4's window
+            by the AP estimate (plan §7.8 item 4, ``mouse_ap.estimate_ap``:
+            the best-matching MERFISH section of all sections and its
+            neighbours); off: G4 is not evaluated without explicit sections.
     """
 
     g1_radius_um: float = Field(default=4.0, gt=0.0)
@@ -765,6 +769,7 @@ class MouseGateConfig(_AnnotationModel):
     g2_min_pseudo_confident: int = Field(default=200, ge=1)
     g3_t2_max_present_share: float = 0.25
     g4_window_sections: list[str] = Field(default_factory=list)
+    g4_ap_estimate: bool = True
 
     @field_validator(
         "g2_marker_consistency_fail",

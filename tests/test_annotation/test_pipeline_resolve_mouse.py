@@ -181,7 +181,8 @@ def test_mouse_resolve_writes_valid_labels_gate_and_region_columns(
     assert gate["signal_status"]["g5"] == "not_evaluated"
     assert gate["signals"]["g3_implausible_share"] == pytest.approx(6 / 608, abs=1e-6)
     assert not [r for r in gate["warning_reasons"] if r.startswith("region_")]
-    assert gate["signal_status"]["g4"] == "not_evaluated"  # no window sections
+    # The fixture bundle has no section_composition: no window.
+    assert gate["signal_status"]["g4"] == "not_evaluated"
     assert gate["referee"]["markers"]["Astrocytes/Ependymal"] == ["Aqp4"]
     provenance = sample.provenance
     assert provenance.mouse_gate is not None
@@ -637,6 +638,132 @@ def test_mouse_g4_offsets_compare_astro_epen_and_immune_to_the_window(
     )
     assert gate["signals"]["g4_immune_points"] == pytest.approx(-3.0, abs=1e-6)
     assert gate["signal_status"]["g4"] == "warn"
+
+
+def test_mouse_g3_does_not_count_conditionally_kept_nodes(
+    tmp_path: Path, mouse_setup: dict[str, Any], make_trust: MakeTrust
+) -> None:
+    map_dir = tmp_path / "map"
+    map_mouse(mouse_setup, map_dir)
+    base = _resolve(
+        mouse_setup, map_dir, tmp_path / "base", make_trust, registration={SID: PASSING}
+    )
+    signals = base.samples[SID].summary["mouse_gate"]["signals"]
+    assert signals["g3_implausible_share"] == pytest.approx(6 / 608, abs=1e-6)
+    kept = AnnotationConfig.model_validate(
+        {
+            "species": "mouse",
+            "mouse_gate": {"g2_min_group_markers": 1, "g2_min_pseudo_confident": 10},
+            "mouse_regions": {
+                "rule_variant": "m6b",
+                "conditional_never_drop": [
+                    {"level": "class", "name": "24 MY Glut", "when_any_present": ["MB"]}
+                ],
+            },
+        }
+    ).coupled_to_clustering(10)
+    result = _resolve(
+        mouse_setup,
+        map_dir,
+        tmp_path / "kept",
+        make_trust,
+        config=kept,
+        registration={SID: PASSING},
+    )
+    signals = result.samples[SID].summary["mouse_gate"]["signals"]
+    assert signals["g3_implausible_share"] == 0.0
+
+
+def _ap_composition() -> pd.DataFrame:
+    """Four MERFISH-like sections; S2's neuron mix is the fake section's."""
+    rows = []
+    for section, ap, mix in (
+        ("S1", 3.0, {"01 IT-ET Glut 1": 600}),
+        ("S2", 5.0, {"01 IT-ET Glut 1": 300, "19 MB Glut 1": 300}),
+        ("S3", 7.0, {"19 MB Glut 1": 600}),
+        ("S4", 9.0, {"24 MY Glut 1": 600}),
+    ):
+        astro = {"S1": 50, "S2": 100, "S3": 150, "S4": 200}[section]
+        n_cells = 600 + astro
+        for level, counts in (
+            ("subclass", {**mix, "30 Astro-Epen 1 NN": astro}),
+            (
+                "class",
+                {
+                    **{name.rsplit(" ", 1)[0]: n for name, n in mix.items()},
+                    "30 Astro-Epen": astro,
+                },
+            ),
+        ):
+            for name, n in counts.items():
+                rows.append(
+                    {
+                        "section": section,
+                        "ap_ccf_mm": ap,
+                        "n_cells": n_cells,
+                        "level": level,
+                        "node_name": name,
+                        "n": n,
+                        "freq": n / n_cells,
+                    }
+                )
+    return pd.DataFrame(rows)
+
+
+def test_mouse_g4_window_comes_from_the_ap_estimate(
+    tmp_path: Path, mouse_setup: dict[str, Any], make_trust: MakeTrust
+) -> None:
+    region_dir = mouse_region_share_bundle(
+        tmp_path / "store_ap", build_hash="c" * 64, composition=_ap_composition()
+    )
+    map_dir = tmp_path / "map"
+    map_mouse(
+        mouse_setup, map_dir, region_shares=RegionShareBundle.from_dir(region_dir)
+    )
+
+    result = _resolve(
+        mouse_setup,
+        map_dir,
+        tmp_path / "resolve",
+        make_trust,
+        registration={SID: PASSING},
+    )
+    gate = result.samples[SID].summary["mouse_gate"]
+    estimate = gate["ap_estimate"]
+    # Half IT-ET, half MB neurons: S2 (AP 5.0); its window S1-S3.
+    assert estimate["section"] == "S2" and estimate["ap_mm"] == 5.0
+    assert estimate["ap_bin"] == "4.5-6.0" and estimate["in_scope"]
+    assert estimate["window_sections"] == ["S1", "S2", "S3"]
+    assert gate["window"]["sections"] == ["S1", "S2", "S3"]
+    # Window Astro-Epen share (50 + 100 + 150) / (650 + 700 + 750); two
+    # astrocytes of 608 table cells.
+    assert gate["signals"]["g4_astro_epen_points"] == pytest.approx(
+        100 * (2 / 608 - 300 / 2100), abs=1e-3
+    )
+    assert gate["signal_status"]["g4"] == "warn"
+
+    # Explicit sections win over the estimate; the switch turns it off.
+    explicit = _resolve(
+        mouse_setup,
+        map_dir,
+        tmp_path / "resolve_explicit",
+        make_trust,
+        config=_config(g4_window_sections=["S4"]),
+        registration={SID: PASSING},
+    )
+    gate = explicit.samples[SID].summary["mouse_gate"]
+    assert gate["ap_estimate"] is None and gate["window"]["sections"] == ["S4"]
+    off = _resolve(
+        mouse_setup,
+        map_dir,
+        tmp_path / "resolve_off",
+        make_trust,
+        config=_config(g4_ap_estimate=False),
+        registration={SID: PASSING},
+    )
+    gate = off.samples[SID].summary["mouse_gate"]
+    assert gate["signal_status"]["g4"] == "not_evaluated"
+    assert any("g4_ap_estimate off" in note for note in gate["notes"])
 
 
 def test_class_shares_renormalise_the_soft_mass() -> None:

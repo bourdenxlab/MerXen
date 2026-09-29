@@ -19,8 +19,10 @@ separate **warning flag** with reasons.
   classes, with < 25% of those cells in the present divisions): warning
   > 3%.
 - **G4 composition** (soft class shares vs a MERFISH window of
-  ``wmb_region_share`` sections): warning when Astro-Epen is outside ±5
-  points or Immune outside ±1 point.
+  ``wmb_region_share`` sections: ``g4_window_sections``, or else the
+  AP-estimated section and its neighbours among all sections, plan §7.8
+  item 4): warning when Astro-Epen is outside ±5 points or Immune outside
+  ±1 point.
 - **G5 spill-over** (``flag_microglial_spillover`` rate): warning > 15%.
 
 The primary panel's trust state caps the level as for human (``refused`` ->
@@ -28,7 +30,9 @@ The primary panel's trust state caps the level as for human (``refused`` ->
 the warning. A signal that cannot be evaluated is recorded with its reason;
 G1 and G2 then warn (the gate cannot confirm the data are valid), G3-G5 do
 not (G3: pruning disabled or skipped, which the region step reports; G4: no
-AP window until M6b's ``estimate_ap``; G5: the flag is null with a reason).
+window, i.e. no explicit ``g4_window_sections`` and no AP estimate
+(``mouse_ap.estimate_ap``: too few confident neurons, or
+``g4_ap_estimate`` off); G5: the flag is null with a reason).
 
 **G2's referee** (§8.6, [L]): six class groups (the WMB vocab's broad
 classes: Neurons, Astrocytes/Ependymal, Oligodendrocyte lineage, OEC,
@@ -669,6 +673,8 @@ class MouseGateSignals:
         g4_reason: Why G4 is not evaluated.
         spillover_rate: G5 (``None``: the flag is null).
         g5_reason: Why G5 is not evaluated.
+        ap_estimate: The AP estimate that chose G4's window
+            (``mouse_ap.ApEstimate.to_json``), when one did.
     """
 
     registration: RegistrationSignal | None = None
@@ -681,6 +687,7 @@ class MouseGateSignals:
     g4_reason: str | None = None
     spillover_rate: float | None = None
     g5_reason: str | None = None
+    ap_estimate: dict[str, Any] | None = None
 
     def values(self) -> dict[str, float | None]:
         """Return the signals keyed ``SIGNAL_KEYS`` (provenance ``signals``)."""
@@ -752,6 +759,7 @@ class MouseGateVerdict:
             ),
             "referee": None if signals.referee is None else signals.referee.to_json(),
             "window": None if signals.window is None else signals.window.to_json(),
+            "ap_estimate": signals.ap_estimate,
             "trust_state": self.trust_state,
         }
 
