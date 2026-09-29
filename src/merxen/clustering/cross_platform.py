@@ -11,12 +11,24 @@ cross-platform statistics and at which level (``pair.cross_platform``):
   (``broad_only``, flagged), and without an intersection run there are none
   (``none``).
 
+RESOLVE builds that record from the panels alone. The scope a consumer
+applies also folds in each sample's dataset gate
+(``samples[<id>].resolution.gate.level``, plan §5.4): a ``broad_only``
+dataset is excluded from supercluster-level cross-platform statistics, so
+it caps the pair at ``broad_only`` (flagged, reason
+``dataset_gate:<sample>:broad_only``), and a ``failed`` gate allows no
+cross-platform statement (``none``, reason ``dataset_gate:<sample>:failed``).
+RESOLVE's ``kinds`` / ``omitted_kinds`` say which composition kinds its pair
+statistics compare: a ``per_platform`` pair compares its ``_xpanel`` runs
+without the confident-only kind, which RESOLVE does not resolve.
+
 Per-sample compositions and ``soft_broad_*`` rest on each platform's own
 panel and are never compared across platforms. Every cross-platform
 statement downstream of RESOLVE (the map_first hierarchy's records, the
 downstream manifests, the end-of-run summary, the report) therefore reads
-this record first: ``CrossPlatformScope.allows(level)`` says whether a
-statement at a label level may be made.
+this scope first: ``CrossPlatformScope.allows(level)`` says whether a
+statement at a label level may be made and ``allows_kind(kind)`` whether a
+composition kind may be compared.
 
 Imports: the standard library only (GPU-env safe; plan §3.5, §11.2).
 """
@@ -42,6 +54,15 @@ BROAD_STATEMENT_LEVELS: Final[frozenset[str]] = frozenset({"lineage", "broad"})
 SOURCE_RESOLVE_SUMMARY: Final = "resolve_summary"
 SOURCE_MISSING: Final = "missing"
 NO_PAIR_RECORD: Final = "no_pair_record"
+# Dataset gate levels (merxen.annotation.schema.GATE_LEVELS, test-enforced
+# equal) and the pair statistics level each allows at most (plan §5.4).
+GATE_LEVELS: Final[tuple[str, ...]] = ("full", "broad_only", "failed")
+GATE_STATISTICS_CAP: Final[dict[str, str]] = {
+    "full": "full",
+    "broad_only": "broad_only",
+    "failed": "none",
+}
+DATASET_GATE_REASON: Final = "dataset_gate"
 
 
 @dataclass(frozen=True)
@@ -60,6 +81,15 @@ class CrossPlatformScope:
         jsd_runs: The run ids that feed the pair statistics.
         jsd_purpose: ``annotation`` or ``intersection_xpanel``.
         source: ``resolve_summary``, or ``missing`` without a summary.
+        kinds: The composition kinds RESOLVE's pair statistics compare
+            (``soft``, ``soft_ge30``, ``confident``, ``argmax``); empty
+            when none is recorded.
+        omitted_kinds: Kinds RESOLVE left out of them (``confident`` for a
+            ``per_platform`` pair).
+        resolve_statistics_level: The level RESOLVE recorded from the
+            panels, before the dataset gates were folded in (``None``
+            without a pair record).
+        dataset_gates: ``(sample id, gate level)`` of each sample, sorted.
     """
 
     statistics_level: str
@@ -69,6 +99,10 @@ class CrossPlatformScope:
     jsd_runs: tuple[str, ...] = field(default_factory=tuple)
     jsd_purpose: str | None = None
     source: str = SOURCE_RESOLVE_SUMMARY
+    kinds: tuple[str, ...] = field(default_factory=tuple)
+    omitted_kinds: tuple[str, ...] = field(default_factory=tuple)
+    resolve_statistics_level: str | None = None
+    dataset_gates: tuple[tuple[str, str], ...] = field(default_factory=tuple)
 
     def __post_init__(self: CrossPlatformScope) -> None:
         """Check the level.
@@ -76,11 +110,12 @@ class CrossPlatformScope:
         Raises:
             ValueError: On an unknown ``statistics_level``.
         """
-        if self.statistics_level not in STATISTICS_LEVELS:
-            raise ValueError(
-                f"cross-platform statistics_level must be one of "
-                f"{STATISTICS_LEVELS}, got {self.statistics_level!r}"
-            )
+        for level in (self.statistics_level, self.resolve_statistics_level):
+            if level is not None and level not in STATISTICS_LEVELS:
+                raise ValueError(
+                    f"cross-platform statistics_level must be one of "
+                    f"{STATISTICS_LEVELS}, got {level!r}"
+                )
 
     def allows(self: CrossPlatformScope, level: str) -> bool:
         """Return whether a cross-platform statement at ``level`` may be made.
@@ -99,11 +134,32 @@ class CrossPlatformScope:
             return str(level) in BROAD_STATEMENT_LEVELS
         return False
 
+    def allows_kind(self: CrossPlatformScope, kind: str) -> bool:
+        """Return whether a composition kind may be compared across platforms.
+
+        Args:
+            kind: A composition kind (``soft``, ``soft_ge30``, ``confident``,
+                ``argmax``).
+
+        Returns:
+            ``True`` only when some statement is allowed
+            (``statistics_level`` not ``none``) and RESOLVE's pair
+            statistics compare ``kind``: never for a kind RESOLVE omitted
+            (``confident`` of a ``per_platform`` pair) or for any kind when
+            none is recorded.
+        """
+        if self.statistics_level == "none":
+            return False
+        return str(kind) in self.kinds and str(kind) not in self.omitted_kinds
+
     def to_dict(self: CrossPlatformScope) -> dict[str, Any]:
-        """Return a JSON-ready dict (lists for tuples)."""
+        """Return a JSON-ready dict (lists for tuples, a dict of gates)."""
         payload = asdict(self)
         payload["reasons"] = list(self.reasons)
         payload["jsd_runs"] = list(self.jsd_runs)
+        payload["kinds"] = list(self.kinds)
+        payload["omitted_kinds"] = list(self.omitted_kinds)
+        payload["dataset_gates"] = dict(self.dataset_gates)
         return payload
 
     @classmethod
@@ -126,11 +182,72 @@ class CrossPlatformScope:
             jsd_runs=tuple(str(item) for item in payload.get("jsd_runs") or ()),
             jsd_purpose=_text_or_none(payload.get("jsd_purpose")),
             source=str(payload.get("source", SOURCE_RESOLVE_SUMMARY)),
+            kinds=tuple(str(item) for item in payload.get("kinds") or ()),
+            omitted_kinds=tuple(
+                str(item) for item in payload.get("omitted_kinds") or ()
+            ),
+            resolve_statistics_level=_text_or_none(
+                payload.get("resolve_statistics_level")
+            ),
+            dataset_gates=_gate_pairs(payload.get("dataset_gates")),
         )
 
 
 def _text_or_none(value: Any) -> str | None:
     return None if value is None else str(value)
+
+
+def _gate_pairs(value: Any) -> tuple[tuple[str, str], ...]:
+    if not isinstance(value, Mapping):
+        return ()
+    return tuple(sorted((str(key), str(level)) for key, level in value.items()))
+
+
+def _omitted_kinds(value: Any) -> tuple[str, ...]:
+    """Return RESOLVE's omitted kinds (a dict of reasons, or a list)."""
+    if value is None:
+        return ()
+    if isinstance(value, Mapping):
+        return tuple(sorted(str(key) for key in value))
+    if isinstance(value, str):
+        return (value,)
+    return tuple(sorted(str(item) for item in value))
+
+
+def dataset_gate_levels(summary: Mapping[str, Any]) -> dict[str, str]:
+    """Return each sample's dataset gate level from a RESOLVE pair summary.
+
+    Args:
+        summary: A parsed ``<pair>_resolve_summary.json``.
+
+    Returns:
+        ``samples[<id>].resolution.gate.level`` per sample that records one.
+
+    Raises:
+        ValueError: On a gate level outside ``GATE_LEVELS``.
+    """
+    samples = summary.get("samples")
+    if not isinstance(samples, Mapping):
+        return {}
+    levels: dict[str, str] = {}
+    for sample_id, sample in samples.items():
+        resolution = sample.get("resolution") if isinstance(sample, Mapping) else None
+        gate = resolution.get("gate") if isinstance(resolution, Mapping) else None
+        level = gate.get("level") if isinstance(gate, Mapping) else None
+        if level is None:
+            continue
+        if str(level) not in GATE_LEVELS:
+            raise ValueError(
+                f"{sample_id}: dataset gate level must be one of {GATE_LEVELS}, "
+                f"got {level!r}"
+            )
+        levels[str(sample_id)] = str(level)
+    return levels
+
+
+def _capped_level(level: str, cap: str) -> str:
+    """Return the more restrictive of two statistics levels."""
+    return max(level, cap, key=STATISTICS_LEVELS.index)
 
 
 def resolve_summary_filename(pair_id: str) -> str:
@@ -152,10 +269,15 @@ def scope_from_resolve_summary(summary: Mapping[str, Any]) -> CrossPlatformScope
         summary: A parsed ``<pair>_resolve_summary.json``.
 
     Returns:
-        The scope of ``summary["pair"]["cross_platform"]``; ``none`` with
-        reason ``no_pair_record`` when the pair has no such record (a
+        The scope of ``summary["pair"]["cross_platform"]`` with the samples'
+        dataset gates folded in: any ``broad_only`` gate caps the level at
+        ``broad_only`` and any ``failed`` gate sets ``none``, each flagged
+        with reason ``dataset_gate:<sample>:<level>`` (plan §5.4). ``none``
+        with reason ``no_pair_record`` when the pair has no such record (a
         single-platform sample, or a pair with one platform resolved).
     """
+    gates = dataset_gate_levels(summary)
+    gate_pairs = tuple(sorted(gates.items()))
     pair = summary.get("pair")
     record = pair.get("cross_platform") if isinstance(pair, Mapping) else None
     if not isinstance(record, Mapping):
@@ -164,6 +286,7 @@ def scope_from_resolve_summary(summary: Mapping[str, Any]) -> CrossPlatformScope
             flag=False,
             reasons=(NO_PAIR_RECORD,),
             panel_mode=_text_or_none(summary.get("panel_mode")),
+            dataset_gates=gate_pairs,
         )
     runs = record.get("jsd_run")
     if runs is None:
@@ -172,13 +295,28 @@ def scope_from_resolve_summary(summary: Mapping[str, Any]) -> CrossPlatformScope
         run_ids = (runs,)
     else:
         run_ids = tuple(str(item) for item in runs)
+    recorded = str(record.get("statistics_level") or "none")
+    level = recorded
+    flag = bool(record.get("flag", False))
+    reasons = [str(item) for item in record.get("reasons") or ()]
+    for sample_id, gate_level in gate_pairs:
+        cap = GATE_STATISTICS_CAP[gate_level]
+        if cap == "full":
+            continue
+        level = _capped_level(level, cap)
+        flag = True
+        reasons.append(f"{DATASET_GATE_REASON}:{sample_id}:{gate_level}")
     return CrossPlatformScope(
-        statistics_level=str(record.get("statistics_level") or "none"),
-        flag=bool(record.get("flag", False)),
-        reasons=tuple(str(item) for item in record.get("reasons") or ()),
+        statistics_level=level,
+        flag=flag,
+        reasons=tuple(reasons),
         panel_mode=_text_or_none(record.get("panel_mode")),
         jsd_runs=run_ids,
         jsd_purpose=_text_or_none(record.get("jsd_purpose")),
+        kinds=tuple(str(item) for item in record.get("kinds") or ()),
+        omitted_kinds=_omitted_kinds(record.get("omitted_kinds")),
+        resolve_statistics_level=recorded,
+        dataset_gates=gate_pairs,
     )
 
 
