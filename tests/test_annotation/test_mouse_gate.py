@@ -102,6 +102,13 @@ TRUTH_TABLE: list[tuple[str, dict[str, Any], str, bool, dict[str, str]]] = [
         {"g1": "fail"},
     ),
     (
+        "G1 shift just above 5 um fails",
+        {"registration": RegistrationSignal(density_ratio=2.9, shift_um=6.0)},
+        "failed",
+        False,
+        {"g1": "fail"},
+    ),
+    (
         "G1 shift of 5 um passes",
         {"registration": RegistrationSignal(density_ratio=2.9, shift_um=5.0)},
         "full",
@@ -162,6 +169,13 @@ TRUTH_TABLE: list[tuple[str, dict[str, Any], str, bool, dict[str, str]]] = [
     (
         "G4 Astro-Epen outside 5 points warns",
         {"astro_epen_points": 16.9},
+        "full",
+        True,
+        {"g4": "warn"},
+    ),
+    (
+        "G4 Astro-Epen 6 points below the window warns",
+        {"astro_epen_points": -6.0},
         "full",
         True,
         {"g4": "warn"},
