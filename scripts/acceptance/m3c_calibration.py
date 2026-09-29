@@ -79,11 +79,61 @@ def _file_sha(bundle: Path, prefix: str) -> dict[str, str]:
     }
 
 
+def marker_content_sha256(bundle: Path) -> dict[str, str]:
+    """Return the sha256 of each query-marker file's marker lists alone.
+
+    ``query_markers*.json`` embed a ``log`` and a ``metadata`` record (input
+    paths, timestamps) besides the per-parent marker lists MapMyCells reads;
+    the canonical JSON of the lists (keys sorted) identifies the lookup.
+    """
+    import hashlib
+
+    result = {}
+    for path in sorted(bundle.glob("query_markers*.json")):
+        payload = json.loads(path.read_text())
+        lists = {
+            key: value
+            for key, value in payload.items()
+            if key not in ("log", "metadata")
+        }
+        text = json.dumps(lists, sort_keys=True, separators=(",", ":"))
+        result[path.name] = hashlib.sha256(text.encode()).hexdigest()
+    return result
+
+
 def query_markers_equal(bundle: Path) -> tuple[bool, dict[str, Any]]:
-    """Whether the bundle's query markers equal ``c30f7eab``'s (sha256)."""
-    ours = _file_sha(bundle, "query_markers")
-    theirs = _file_sha(PHASE1_BUNDLE, "query_markers")
-    return bool(ours) and ours == theirs, {"m3c": ours, "c30f7eab": theirs}
+    """Whether the bundle's query markers equal ``c30f7eab``'s (sha256).
+
+    Equal when the files are byte-identical, or when their marker lists are
+    (the files then differ only in the embedded log and metadata records);
+    the mapping precompute must be byte-identical too.
+    """
+    files = {
+        "m3c": _file_sha(bundle, "query_markers"),
+        "c30f7eab": _file_sha(PHASE1_BUNDLE, "query_markers"),
+    }
+    content = {
+        "m3c": marker_content_sha256(bundle),
+        "c30f7eab": marker_content_sha256(PHASE1_BUNDLE),
+    }
+    precompute = {
+        "m3c": _file_sha(bundle, "mapping_precompute"),
+        "c30f7eab": _file_sha(PHASE1_BUNDLE, "mapping_precompute"),
+    }
+    equal_files = bool(files["m3c"]) and files["m3c"] == files["c30f7eab"]
+    equal_content = bool(content["m3c"]) and content["m3c"] == content["c30f7eab"]
+    equal_precompute = (
+        bool(precompute["m3c"]) and precompute["m3c"] == precompute["c30f7eab"]
+    )
+    record = {
+        "file_sha256": files,
+        "marker_lists_sha256": content,
+        "mapping_precompute_sha256": precompute,
+        "files_identical": equal_files,
+        "marker_lists_identical": equal_content,
+        "mapping_precompute_identical": equal_precompute,
+    }
+    return (equal_files or equal_content) and equal_precompute, record
 
 
 def real_coverage(
