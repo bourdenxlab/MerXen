@@ -214,6 +214,51 @@ class AnnotationSettings {
     }
 
     /**
+     * Return how many copies of a pair's MENDER barrier spec main.nf emits.
+     *
+     * The barrier joins every terminal event of a pair (clustering,
+     * mapmycells, distance_from_object and cortical-depth results) with the
+     * pair's spec by pair id and keeps the events of the terminal stage.
+     * `join` pairs items one to one, so with a single spec the pair's first
+     * event consumes it: when that event belongs to another stage (FINALIZE
+     * finishes before cortical depth), the terminal events find no spec and
+     * MENDER never runs. A map_first row therefore gets one spec per event
+     * the pair can emit; unmatched copies are dropped when the channels
+     * close. Legacy rows keep the single spec, so their channels are
+     * unchanged (the same barrier defect of legacy runs is reported for a
+     * fix on main).
+     *
+     * @param settings Row settings from rowSampleSettings.
+     * @return 1 for a legacy row, else an upper bound of the pair's terminal
+     *     events (at least 1).
+     */
+    static int terminalSpecCopies(Map settings) {
+        if (!isMapFirst(settings)) {
+            return 1
+        }
+        List analysis = (settings.get("analysis_segmentations") ?: []) as List
+        List required = (settings.get("required_clustering_segmentations") ?: []) as List
+        List platforms = (settings.get("active_platforms") ?: []) as List
+        int extra = required.findAll { segmentation -> !analysis.contains(segmentation) }.size()
+        int copies = 0
+        if (settings.get("run_mapmycells")) {
+            // MAPMYCELLS results plus the extra clustering events of MENDER-only
+            // segmentations.
+            copies += analysis.size() + 2 * extra
+        }
+        if (settings.get("run_distance_from_object")) {
+            copies += platforms.size()
+        }
+        if (settings.get("run_compute_cortical_depth")) {
+            copies += platforms.size()
+        }
+        if (settings.get("run_clustering_squidpy")) {
+            copies += required.size()
+        }
+        return Math.max(copies, 1)
+    }
+
+    /**
      * Summarize a map_first run's failed branches and panels (hook H6).
      *
      * @param params Pipeline params.

@@ -250,6 +250,7 @@ workflow {
                 run_mender: settings.run_mender,
                 terminal: terminal,
                 count: currentPairTerminalExpectedCount(settings, terminal),
+                spec_copies: AnnotationSettings.terminalSpecCopies(settings),
                 clustering_errors: clusteringErrors,
                 depth_tables: depth.tables,
             ]]
@@ -380,6 +381,19 @@ def test_map_first_never_waits_for_mapmycells(main_nf_results: dict[str, Any]) -
 
 
 @needs_nextflow
+def test_barrier_spec_copies_cover_every_terminal_event(
+    main_nf_results: dict[str, Any],
+) -> None:
+    """A map_first pair gets one barrier spec per terminal event; legacy one."""
+    for name in ("legacy|stop-mender", "legacy|default-mender"):
+        assert _case(main_nf_results, name)["spec_copies"] == 1, name
+    # FINALIZE (1 segmentation) only.
+    assert _case(main_nf_results, "map_first|stop-mender")["spec_copies"] == 1
+    # FINALIZE plus one cortical-depth result per platform.
+    assert _case(main_nf_results, "map_first|depth-mender")["spec_copies"] == 3
+
+
+@needs_nextflow
 def test_map_first_runs_legacy_mapmycells_only_when_asked(
     main_nf_results: dict[str, Any],
 ) -> None:
@@ -443,3 +457,96 @@ def test_cortical_depth_tables_carry_the_suffix_of_map_first_rows(
     ]
     map_first = _case(main_nf_results, "map_first|default-mender")["depth_tables"]
     assert map_first == [{**legacy[0], "clustered_table_key_suffix": "mapfirst"}]
+
+
+BARRIER_MAIN = """
+include {
+    rowSampleSettings;
+    currentPairTerminalStage;
+    currentPairTerminalExpectedCount
+} from '__MAIN__'
+
+workflow {
+    def runParams = [:] + params + [
+        clustering_squidpy_mode: params.mode,
+        stop_stage: "mender",
+        mender_enabled: true,
+        cortical_depth_enabled: true,
+    ]
+    def sampleRow = new groovy.json.JsonSlurperClassic().parseText(params.row)
+    def rowSettings = rowSampleSettings(sampleRow, runParams)
+    def pair = rowSettings.pair_id
+    sample_rows_ch = channel.of(tuple(pair, sampleRow, rowSettings))
+    // FINALIZE finishes before cortical depth, as in a real run.
+    pair_terminal_events_ch = channel.of(
+        tuple(pair, "clustering_squidpy", true),
+        tuple(pair, "compute_cortical_depth", true),
+        tuple(pair, "compute_cortical_depth", true),
+    )
+__SPECS__
+__GROUPED__
+    pair_terminal_grouped_ch
+        .map { pairId, _done -> pairId }
+        .collect()
+        .ifEmpty([])
+        .subscribe { released -> new File(params.out).text = released.join(",") }
+}
+"""
+
+
+def _main_nf_block(main_text: str, start: str, end: str) -> str:
+    """Return main.nf from the line starting with ``start`` up to ``end``."""
+    begin = main_text.index(start)
+    return main_text[begin : main_text.index(end, begin)]
+
+
+@needs_nextflow
+@pytest.mark.parametrize(("mode", "released"), [("map_first", "P1"), ("legacy", "")])
+def test_barrier_releases_map_first_pairs_after_other_terminal_events(
+    tmp_path: Path, mode: str, released: str
+) -> None:
+    """main.nf's own barrier text on events in real-run order (M5 exit run).
+
+    The pair's clustering event arrives first and consumes a spec; the two
+    cortical-depth events must still release MENDER. Legacy rows keep the
+    single spec and are not released (the pre-existing barrier defect,
+    reported for a fix on main; legacy channels stay unchanged).
+    """
+    assert NEXTFLOW is not None
+    main_nf = REPO_ROOT / "workflows" / "main.nf"
+    main_text = main_nf.read_text()
+    specs = _main_nf_block(
+        main_text, "    pair_terminal_specs_ch = ", "    pair_terminal_immediate_ch = "
+    )
+    grouped = _main_nf_block(
+        main_text, "    pair_terminal_grouped_ch = ", "    pair_terminal_token_ch = "
+    )
+    (tmp_path / "lib").mkdir()
+    for source in (REPO_ROOT / "workflows" / "lib").glob("*.groovy"):
+        shutil.copy(source, tmp_path / "lib" / source.name)
+    (tmp_path / "main.nf").write_text(
+        BARRIER_MAIN.replace("__MAIN__", str(main_nf))
+        .replace("__SPECS__", specs)
+        .replace("__GROUPED__", grouped)
+    )
+    out = tmp_path / "released.txt"
+    (tmp_path / "nextflow.config").write_text(
+        f"includeConfig '{REPO_ROOT / 'workflows' / 'nextflow.config'}'\n"
+        f"params.mode = '{mode}'\n"
+        f"params.row = '{json.dumps(ROW)}'\n"
+        f"params.out = '{out}'\n"
+        "params.samplesheet = 'unused.csv'\n"
+        f"params.outdir = '{tmp_path / 'results'}'\n"
+    )
+    env = {**os.environ, "NXF_DISABLE_CHECK_LATEST": "true", "NXF_ANSI_LOG": "false"}
+    completed = subprocess.run(
+        [NEXTFLOW, "-log", str(tmp_path / "nextflow.log"), "run", "main.nf"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert out.read_text() == released
