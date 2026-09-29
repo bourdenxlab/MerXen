@@ -49,6 +49,7 @@ import pandas as pd
 from merxen.annotation.provenance import (
     AnnotationProvenance,
     annotation_manifest_filename,
+    downstream_summary_from_uns,
 )
 from merxen.annotation.schema import (
     LABEL_TABLE_VERSION,
@@ -74,6 +75,7 @@ from merxen.annotation.vocab import (
     load_vocab,
 )
 from merxen.clustering.cellset import restrict_to_table_cells, select_table_cells
+from merxen.clustering.cross_platform import CrossPlatformScope
 from merxen.clustering.representation import (
     QC_BROAD_LEIDEN_KEY,
     QC_LEIDEN_KEY,
@@ -165,6 +167,16 @@ MISSING_INT: Final = -1
 MISSING_TEXT: Final = "unknown"
 # Panels above this many genes get dotplots of the most variable genes only.
 DOTPLOT_MAX_GENES: Final = 300
+# Fields of ``uns["merxen_hierarchical_clustering"]`` that downstream stages
+# read back from a map_first table (plan §4.8, §4.9, §8.5): FINALIZE's and
+# MENDER_PREPARE's Nextflow scripts are those of legacy runs (their text is
+# pinned for legacy -resume), so the table carries its own suffix and the
+# MENDER unassigned-state policy of its run, and the pair's cross-platform
+# scope from RESOLVE's summary.
+TABLE_KEY_SUFFIX_FIELD: Final = "table_key_suffix"
+MENDER_POLICY_FIELD: Final = "mender_unassigned_state_policy"
+CROSS_PLATFORM_FIELD: Final = "cross_platform_json"
+CROSS_PLATFORM_LEVEL_FIELD: Final = "cross_platform_statistics_level"
 
 
 # --------------------------------------------------------------------------
@@ -216,6 +228,98 @@ def unassigned_states(states: Iterable[str]) -> tuple[str, ...]:
         The states for which ``is_unassigned_state`` holds.
     """
     return tuple(sorted({str(state) for state in states if is_unassigned_state(state)}))
+
+
+# --------------------------------------------------------------------------
+# What a map_first table records for downstream stages
+
+
+def map_first_record(uns: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """Return the map_first hierarchy record of a clustered table's ``uns``.
+
+    Args:
+        uns: ``uns`` of a clustered H5AD or zarr table.
+
+    Returns:
+        ``uns["merxen_hierarchical_clustering"]`` of a map_first table, or
+        ``None`` for a legacy table (or none at all).
+    """
+    record = uns.get(HIERARCHICAL_UNS_KEY)
+    if not isinstance(record, Mapping) or record.get("mode") != MAP_FIRST_MODE:
+        return None
+    return record
+
+
+def recorded_table_key_suffix(uns: Mapping[str, Any]) -> str | None:
+    """Return the table-key suffix a map_first table was clustered for.
+
+    Args:
+        uns: ``uns`` of a clustered table.
+
+    Returns:
+        The suffix (``""`` after the species' flip), or ``None`` for a
+        legacy table.
+    """
+    record = map_first_record(uns)
+    if record is None or record.get(TABLE_KEY_SUFFIX_FIELD) is None:
+        return None
+    return str(record[TABLE_KEY_SUFFIX_FIELD])
+
+
+def recorded_mender_policy(uns: Mapping[str, Any]) -> str | None:
+    """Return the MENDER unassigned-state policy of a map_first table's run.
+
+    Args:
+        uns: ``uns`` of a clustered table.
+
+    Returns:
+        ``mender_unassigned_state_policy`` of the run that clustered the
+        table, or ``None`` (legacy table, or none recorded).
+    """
+    record = map_first_record(uns)
+    if record is None or record.get(MENDER_POLICY_FIELD) is None:
+        return None
+    return str(record[MENDER_POLICY_FIELD])
+
+
+def recorded_cross_platform(uns: Mapping[str, Any]) -> CrossPlatformScope | None:
+    """Return the pair's cross-platform scope recorded in a map_first table.
+
+    Args:
+        uns: ``uns`` of a clustered table.
+
+    Returns:
+        The scope, or ``None`` (legacy table, or none recorded).
+    """
+    record = map_first_record(uns)
+    if record is None or record.get(CROSS_PLATFORM_FIELD) is None:
+        return None
+    payload = json.loads(str(record[CROSS_PLATFORM_FIELD]))
+    return None if payload is None else CrossPlatformScope.from_dict(payload)
+
+
+def downstream_annotation_summary(uns: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Return what MENDER and cortical-depth manifests record of the labels.
+
+    ``provenance.downstream_summary_from_uns`` (gate level and warning,
+    panel trust; §4.9) plus, for a map_first table that records it, the
+    pair's cross-platform scope (§8.5), so a cross-platform use of a niche
+    or depth result sees at which level the platforms may be compared.
+
+    Args:
+        uns: ``uns`` of a clustered table.
+
+    Returns:
+        The summary, or ``None`` for a legacy table (legacy manifests stay
+        unchanged).
+    """
+    summary = downstream_summary_from_uns(uns)
+    if summary is None:
+        return None
+    scope = recorded_cross_platform(uns)
+    if scope is not None:
+        summary["cross_platform"] = scope.to_dict()
+    return summary
 
 
 # --------------------------------------------------------------------------
@@ -388,6 +492,21 @@ def primary_root_markers(provenance: AnnotationProvenance | None) -> int | None:
 
 # --------------------------------------------------------------------------
 # Hierarchy columns (pure pandas)
+
+
+def label_table_species(labels: pd.DataFrame) -> Species:
+    """Return the one species of a label table.
+
+    Args:
+        labels: A label table (§4.1).
+
+    Returns:
+        ``human`` or ``mouse``.
+
+    Raises:
+        ValueError: If the table holds no species or more than one.
+    """
+    return _species_of(labels)
 
 
 def _species_of(labels: pd.DataFrame) -> Species:
@@ -877,6 +996,8 @@ def run_map_first_hierarchy(
     branch_umaps: bool = False,
     stability: bool = True,
     stability_subsamples: int = STABILITY_N_SUBSAMPLES,
+    mender_unassigned_state_policy: str | None = None,
+    cross_platform: CrossPlatformScope | None = None,
 ) -> tuple[ad.AnnData, MapFirstResult]:
     """Build the map_first hierarchy and QC embedding of one section (§6.2).
 
@@ -908,6 +1029,13 @@ def run_map_first_hierarchy(
             off by default, as each costs about a whole-section UMAP.
         stability: Run the subsample-stability diagnostic.
         stability_subsamples: Number of stability subsamples.
+        mender_unassigned_state_policy: The run's MENDER unassigned-state
+            policy (``mender_unassigned_state_policy``), recorded in ``uns``
+            so MENDER applies it to this table (§4.9); ``None`` records none.
+        cross_platform: The pair's cross-platform scope from RESOLVE's pair
+            summary (§8.5), recorded in ``uns`` and the manifest so any
+            cross-platform statement downstream reads it; ``None`` records
+            none.
 
     Returns:
         ``(clustered, result)``: the table cells with the hierarchy, legacy
@@ -1001,9 +1129,15 @@ def run_map_first_hierarchy(
         agreement=agreement,
         provenance=provenance,
         artifacts=artifacts,
+        mender_unassigned_state_policy=mender_unassigned_state_policy,
+        cross_platform=cross_platform,
     )
     manifest = _manifest_payload(
-        clustered.uns[HIERARCHICAL_UNS_KEY], hierarchy, qc, stability_record
+        clustered.uns[HIERARCHICAL_UNS_KEY],
+        hierarchy,
+        qc,
+        stability_record,
+        cross_platform=cross_platform,
     )
     manifest_path.write_text(
         json.dumps(manifest, indent=2, sort_keys=True, allow_nan=False) + "\n",
@@ -1048,6 +1182,8 @@ def _record_uns(
     agreement: float,
     provenance: AnnotationProvenance | None,
     artifacts: Mapping[str, Path],
+    mender_unassigned_state_policy: str | None = None,
+    cross_platform: CrossPlatformScope | None = None,
 ) -> None:
     """Write the §4.6 ``uns`` records: scalars and JSON strings only."""
     if provenance is not None:
@@ -1074,9 +1210,16 @@ def _record_uns(
             "hierarchical_cluster_key": HIERARCHICAL_CLUSTER_KEY,
             "neuron_split_key": NEURON_SPLIT_KEY,
             "min_branch_cells": int(config.min_branch_cells),
-            # FINALIZE refuses to write this table under another suffix
-            # (plan §4.8: never overwrite the legacy clustered table).
-            "table_key_suffix": str(config.table_key_suffix),
+            # FINALIZE writes this table under this suffix and refuses any
+            # other (plan §4.8: never overwrite the legacy clustered table).
+            TABLE_KEY_SUFFIX_FIELD: str(config.table_key_suffix),
+            MENDER_POLICY_FIELD: mender_unassigned_state_policy,
+            CROSS_PLATFORM_LEVEL_FIELD: (
+                None if cross_platform is None else cross_platform.statistics_level
+            ),
+            CROSS_PLATFORM_FIELD: (
+                None if cross_platform is None else _json_text(cross_platform.to_dict())
+            ),
             "label_table_version": int(LABEL_TABLE_VERSION),
             "gate_level": gate.gate_level or MISSING_TEXT,
             "gate_warning": bool(gate.gate_warning),
@@ -1144,6 +1287,8 @@ def _manifest_payload(
     hierarchy: MapFirstHierarchy,
     qc: QcLeidenProvenance,
     stability: SubsampleStability | None,
+    *,
+    cross_platform: CrossPlatformScope | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         key: value
@@ -1159,6 +1304,9 @@ def _manifest_payload(
     payload["qc_leiden"] = asdict(qc)
     payload["qc_stability"] = None if stability is None else stability.to_dict()
     payload["artifacts"] = json.loads(str(uns_record["artifacts_json"]))
+    payload["cross_platform"] = (
+        None if cross_platform is None else cross_platform.to_dict()
+    )
     return payload
 
 
