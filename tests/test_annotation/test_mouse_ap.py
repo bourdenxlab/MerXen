@@ -108,7 +108,15 @@ def _cells() -> pd.DataFrame:
         add(section, ap, "30 Astro-Epen", "300 Astro NN", "STR", 4)
     add("S2", 3.0, "05 OB-IMN GABA", "050 OB Gaba", "OB", 7, "MOB")
     add("S3", 4.0, "05 OB-IMN GABA", "050 OB Gaba", "OB", 3, "MOB")
-    add("S3", 4.0, "05 OB-IMN GABA", "050 OB Gaba", "fibre", 2, "lfbs")
+    # More fibre-tract cells than grey ones: they must not vote.
+    add("S3", 4.0, "05 OB-IMN GABA", "050 OB Gaba", "fibre", 12, "lfbs")
+    # A structure home that changes when S3 is left out (CP 20 vs PIR 10).
+    for section, ap in (("S0", 1.0), ("S1", 2.0)):
+        add(section, ap, "01 A Glut", "003 A3 Glut", "OLF", 5, "PIR")
+    add("S3", 4.0, "01 A Glut", "003 A3 Glut", "STR", 20, "CP")
+    # A division tie (Isocortex = OLF): the first in GREY_REGIONS order.
+    add("S1", 2.0, "01 A Glut", "004 A4 Glut", "OLF", 3, "PIR")
+    add("S1", 2.0, "01 A Glut", "004 A4 Glut", "Isocortex", 3, "MOp")
     return pd.DataFrame(rows)
 
 
@@ -173,6 +181,16 @@ def test_structure_homes_follow_the_grey_cells_and_ties_sort() -> None:
     assert tied.loc["002 A2 Glut", "home"] == "AON"
     # The fibre-tract OB cells do not vote for "lfbs".
     assert homes.loc["050 OB Gaba", "home"] == "MOB"
+    assert homes.loc["050 OB Gaba", "n_grey"] == 10
+    # Structure homes are left out with the sections, like the divisions.
+    assert homes.loc["003 A3 Glut", "home"] == "CP"
+    held = counts.tables(counts.neighbours_out("S4"))["structure_home"]
+    held = held.set_index("node_name")
+    assert held.loc["003 A3 Glut", "home"] == "PIR"
+    assert held.loc["003 A3 Glut", "n_grey"] == 10
+    # Division homes: a tie goes to the first division in GREY_REGIONS order.
+    division = counts.tables(())["region_home"].set_index("node_name")
+    assert division.loc["004 A4 Glut", "home"] == "Isocortex"
     shares = counts.shares(())
     assert shares.subclass_structure_home is not None
     assert shares.subclass_structure_home["002 A2 Glut"] == "AON"
@@ -287,6 +305,23 @@ def test_ap_estimate_ignores_non_neurons_and_needs_cells() -> None:
     assert not is_neuronal_subclass("319 Astro-TE NN")
     assert is_neuronal_subclass("007 L2/3 IT CTX Glut")
     assert not is_neuronal_subclass(None)
+
+
+def test_reference_compositions_leave_out_non_neurons() -> None:
+    # S1 has the query's neuron mix but mostly glia; S2 a different mix.
+    rows = [
+        ("S1", 3.0, "001 A Glut", 50),
+        ("S1", 3.0, "002 B Glut", 50),
+        ("S1", 3.0, "319 Astro-TE NN", 5000),
+        ("S2", 5.0, "001 A Glut", 90),
+        ("S2", 5.0, "002 B Glut", 10),
+    ]
+    frame = pd.DataFrame(rows, columns=["section", "ap_ccf_mm", "node_name", "n"])
+    frame["level"] = "subclass"
+    counts, _ = reference_compositions(frame)
+    assert "319 Astro-TE NN" not in counts.columns
+    query = ["001 A Glut"] * 100 + ["002 B Glut"] * 100
+    assert estimate_ap(query, frame).section == "S1"
 
 
 def test_bhattacharyya_coefficient() -> None:

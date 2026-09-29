@@ -108,6 +108,7 @@ TAXONOMY: dict[str, dict[str, tuple[dict[str, int], str]]] = {
         "050 OB-IMN A": ({"OB": 900, "OLF": 50, "STR": 50}, "MOB"),
         "051 OB-IMN B": ({"OB": 1000}, "MOB"),
     },
+    "24 MY Glut": {"240 MY Glut A": ({"MY": 1000}, "MY-unassigned")},
     "30 Astro-Epen": {"300 Astro NN": ({"Isocortex": 500, "OB": 500}, "MOp")},
 }
 
@@ -206,10 +207,13 @@ def _sliver_dataset(module: ModuleType, *, cortex_columns: int = 20) -> Any:
         cells += [((i + 0.5) * tile, 15.2 * tile, "050 OB-IMN A") for _ in range(2)]
     cells += [((10.2 + 0.25 * k) * tile, 15.5 * tile, "051 OB-IMN B") for k in range(3)]
     cells += [((3.5) * tile, (3.5) * tile, "300 Astro NN") for _ in range(10)]
+    # Five MY sink calls in cortex (class bp 0.5: no harm, no vote), dropped
+    # under the inferred and the CCF regions alike (not oracle harm).
+    cells += [((5.5) * tile, (5.5) * tile, "240 MY Glut A") for _ in range(5)]
     sub_class = {sub: cls for cls, subs in TAXONOMY.items() for sub in subs}
     subclasses = np.array([name for _, _, name in cells], dtype=object)
     classes = np.array([sub_class[name] for name in subclasses], dtype=object)
-    bp = np.where(subclasses == "050 OB-IMN A", 0.5, 1.0)
+    bp = np.where(np.isin(subclasses, ["050 OB-IMN A", "240 MY Glut A"]), 0.5, 1.0)
     n = len(cells)
     return module.Dataset(
         key="merfish500/S57",
@@ -221,7 +225,11 @@ def _sliver_dataset(module: ModuleType, *, cortex_columns: int = 20) -> Any:
         cell_ids=pd.Index([f"c{index}" for index in range(n)]),
         class_names=classes,
         class_labels=np.array([_label(name, CLAS) for name in classes], dtype=object),
-        class_bp=np.where(subclasses == "050 OB-IMN A", 0.95, 1.0),
+        class_bp=np.select(
+            [subclasses == "050 OB-IMN A", subclasses == "240 MY Glut A"],
+            [0.95, 0.5],
+            1.0,
+        ),
         subclass_names=subclasses,
         subclass_labels=np.array(
             [_label(name, SUBC) for name in subclasses], dtype=object
@@ -254,8 +262,11 @@ def test_direct_harm_counts_the_missed_sliver_and_coupling_removes_it() -> None:
     # 12 neuroblasts + 3 sliver cells, all confident Allen cells (bp >= .9).
     assert v1_row["n_harm"] == 15
     assert v1_row["harm"] == pytest.approx(15 / n)
-    assert v1_row["harm_confident"] == pytest.approx(15 / n)
-    assert v1_row["n_remap"] == 15 and len(v1_remap) == 15
+    # The five MY calls (class bp 0.5) are not confident: the confident-cell
+    # denominator leaves them out.
+    assert v1_row["n_confident_allen"] == n - 5
+    assert v1_row["harm_confident"] == pytest.approx(15 / (n - 5))
+    assert v1_row["n_remap"] == 20 and len(v1_remap) == 20  # + the MY calls
     # The CCF (oracle) regions keep OB: the whole class is oracle harm too.
     assert v1_row["oracle_harm"] == pytest.approx(15 / n)
     assert v1_row["drop_sha"] == module.drop_sha(v1_nodes)
@@ -270,9 +281,33 @@ def test_direct_harm_counts_the_missed_sliver_and_coupling_removes_it() -> None:
     assert coupled["inferred"] == "Isocortex;OLF;OB" and coupled["coupled"] == "OB"
     assert json.loads(coupled["coupling_tiles"]) == {"OB": 6}
     assert coupled["missed"] == "" and coupled["harm"] == 0.0
-    assert coupled["oracle_harm"] == 0.0 and not remap
+    assert coupled["oracle_harm"] == 0.0 and len(remap) == 5
+    # "extra" is inferred minus the > 0.2% CCF regions, "missed" the >= 1%
+    # CCF regions minus inferred.
+    row, _, _ = module.evaluate_candidate(
+        data,
+        _shares(),
+        _taxonomy(),
+        module.candidate_by_label("v1"),
+        ccf_present={"Isocortex", "OB"},
+        ccf_any={"Isocortex", "OLF", "OB"},
+    )
+    assert (row["missed"], row["extra"]) == ("OB", "")
+    row, _, _ = module.evaluate_candidate(
+        data,
+        _shares(),
+        _taxonomy(),
+        module.candidate_by_label("v1"),
+        ccf_present={"Isocortex", "OLF", "OB"},
+        ccf_any={"Isocortex", "OB"},
+    )
+    assert (row["missed"], row["extra"]) == ("OB", "OLF")
     # Harm needs our class bp >= 0.9 as well as an Allen correlation >= 0.6.
-    data.class_bp = np.where(data.subclass_names == "050 OB-IMN A", 0.8, 1.0)
+    data.class_bp = np.where(
+        data.subclass_names == "050 OB-IMN A",
+        0.8,
+        np.where(data.subclass_names == "240 MY Glut A", 0.5, 1.0),
+    )
     row, _, _ = module.evaluate_candidate(
         data,
         _shares(),
@@ -291,7 +326,8 @@ def test_direct_harm_counts_the_missed_sliver_and_coupling_removes_it() -> None:
         ccf_present=ccf,
         ccf_any=ccf,
     )
-    assert row["n_confident_allen"] == int((data.acs >= 0.6).sum() - 12)
+    # Not confident: 12 neuroblasts (class bp 0.8) and 5 MY calls (0.5).
+    assert row["n_confident_allen"] == int((data.acs >= 0.6).sum() - 17)
 
 
 def test_drop_sha_matches_the_region_record() -> None:
@@ -338,6 +374,9 @@ def _section_rows(
             "harm": harm,
             "t2_after": t2,
             "missed": missed,
+            # The planted anterior sliver section also has an extra region.
+            "extra": "HPF" if section == "S56" else "",
+            "status": "skipped_few_tiles" if section == "S40" else "pruned",
             "dataset": f"merfish500/{section}",
         }
         for section, (ap_bin, harm, t2, missed) in harms.items()
@@ -364,6 +403,8 @@ def test_per_bin_summary_on_a_planted_sliver_set() -> None:
     anterior = bins.set_index("ap_bin").loc["3.0-4.5"]
     assert anterior["n_sections"] == 3
     assert anterior["n_sections_missing_region"] == 2
+    assert anterior["n_sections_extra_region"] == 1
+    assert anterior["n_sections_skipped"] == 0
     assert anterior["harm_mean"] == pytest.approx((0.0001 + 0.0070 + 0.0002) / 3)
     assert anterior["harm_max"] == pytest.approx(0.0070)
     assert anterior["harm_n_above"] == 1  # > 0.1%
@@ -372,6 +413,7 @@ def test_per_bin_summary_on_a_planted_sliver_set() -> None:
     assert (
         posterior["harm_n_above"] == 1 and posterior["n_sections_missing_region"] == 0
     )
+    assert posterior["n_sections_skipped"] == 1
     # MO10 fails on the planted sliver (bin mean, section max, missed + harm).
     verdict = module.mo10_verdict(frame.assign(oracle_harm=0.0), bins)
     entry = verdict["gene_sets"]["merfish500"]
@@ -445,7 +487,7 @@ def test_candidate_table_and_selection_follow_the_preregistration() -> None:
             for label, t2 in (
                 ("v1", 0.0),
                 ("a", 0.0),
-                ("b", 0.0),
+                ("b", 0.001),
                 ("a+b", 0.002),
                 ("f:tile100", 0.0),
             )
@@ -473,6 +515,8 @@ def test_candidate_table_and_selection_follow_the_preregistration() -> None:
     assert table.loc["a", "S_at"] == "merfish500/S1"
     assert not table.loc["a+b", "t2_ok"] and not table.loc["a+b", "admissible"]
     assert not table.loc["f:tile100", "mo2_ag7"] and table.loc["f:tile100", "mo2_vzg2"]
+    # T2 exactly at 0.1% is allowed; above it is not.
+    assert table.loc["b", "t2_ok"] and table.loc["b", "max_t2_bin_mean"] == 0.001
     # a drops one node fewer than v1 in S1; b drops the same nodes.
     assert table.loc["a", "n_drop_decisions_differing"] == 1
     assert table.loc["b", "n_drop_decisions_differing"] == 0
@@ -605,7 +649,7 @@ def test_a_skipped_section_scores_t2_on_its_inferred_regions() -> None:
     assert row["present"] == "" and not nodes and not remap and row["harm"] == 0.0
     assert row["t2_regions"] == "Isocortex;OLF" == row["inferred"]
     # Against the inferred regions the unpruned OB-IMN calls are T2.
-    assert row["t2_unpruned"] == pytest.approx(15 / len(data.cell_ids))
+    assert row["t2_unpruned"] == pytest.approx(20 / len(data.cell_ids))
 
 
 def test_estimate_row_leaves_the_section_out() -> None:

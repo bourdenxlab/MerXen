@@ -676,6 +676,41 @@ def test_mouse_g3_counts_conditionally_kept_nodes(
     assert signals["g3_implausible_share"] == pytest.approx(6 / 608, abs=1e-6)
 
 
+def test_the_ap_estimate_reads_the_confident_neurons_only() -> None:
+    from types import SimpleNamespace
+
+    from merxen.annotation.mouse_resolve import _confident_subclasses
+
+    def call(names: list[str | None], bp: list[float]) -> SimpleNamespace:
+        return SimpleNamespace(
+            name=np.array(names, dtype=object),
+            scores=SimpleNamespace(raw=np.array(bp, dtype=np.float64)),
+        )
+
+    wmb = SimpleNamespace(
+        klass=call(
+            ["01 IT-ET Glut", "01 IT-ET Glut", "30 Astro-Epen", "19 MB Glut", None],
+            [1.0, 0.95, 1.0, 0.5, np.nan],
+        ),
+        subclass=call(
+            [
+                "007 L2/3 IT CTX Glut",
+                "008 L2/3 IT ENT Glut",
+                "319 Astro NN",
+                "190 MB",
+                None,
+            ],
+            [0.95, 0.5, 1.0, 1.0, np.nan],
+        ),
+    )
+    inputs = SimpleNamespace(calls=SimpleNamespace(wmb=wmb), table_rows=np.arange(5))
+    config = AnnotationConfig(species="mouse")
+    # Neuronal class, class and subclass bp >= 0.9 (the region rule's).
+    assert _confident_subclasses(inputs, config) == ["007 L2/3 IT CTX Glut"]  # type: ignore[arg-type]
+    inputs.table_rows = np.array([1, 2, 3])
+    assert _confident_subclasses(inputs, config) == []  # type: ignore[arg-type]
+
+
 def _ap_composition() -> pd.DataFrame:
     """Four MERFISH-like sections; S2's neuron mix is the fake section's."""
     rows = []
