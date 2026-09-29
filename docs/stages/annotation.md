@@ -7,9 +7,13 @@ Reference-based cell-type annotation replaces the legacy marker scoring of
 unchanged. This page covers what exists so far: declared panels
 (`merxen annotation-panel`), the reference bundles that
 `merxen annotation-reference-prep` builds into the reference store, the
-two pipeline processes that run them (`--annotation_prepare_only`), and the
+two pipeline processes that run them (`--annotation_prepare_only`), the
 MAP step (`merxen annotate` and its pipeline process
-`CLUSTERING_SQUIDPY_ANNOTATE_MAP`), which maps samples onto the bundles.
+`CLUSTERING_SQUIDPY_ANNOTATE_MAP`), which maps samples onto the bundles, the
+RESOLVE step (label tables) and, since M5, `map_first` pipeline runs that
+build the map-first hierarchy from the labels
+([Map-first clustering runs](#map-first-clustering-runs-m5)). Legacy stays
+the default for both species until their flips (M8, M9).
 
 ## Reference bundles
 
@@ -703,18 +707,21 @@ expects); ag7 symbols run as human are `refused`
 
 ## Pipeline processes
 
-Four CPU processes in `workflows/modules/annotation.nf`, wired by
-`workflows/subworkflows/annotation_references.nf` (PANEL, PREP) and
+Four CPU processes in `workflows/modules/annotation.nf` and
+`CLUSTERING_SQUIDPY_COMPUTE_CPU` in `workflows/modules/clustering_squidpy.nf`,
+wired by `workflows/subworkflows/annotation_references.nf` (PANEL, PREP) and
 `workflows/subworkflows/clustering_map_first.nf` (MAP in
-`CLUSTERING_ANNOTATE_MAP`, RESOLVE after it in `CLUSTERING_ANNOTATE`); none
-takes the GPU lock, and a default (legacy) run instantiates none of them.
+`CLUSTERING_ANNOTATE_MAP`, RESOLVE after it in `CLUSTERING_ANNOTATE`,
+COMPUTE_CPU after RESOLVE in `CLUSTERING_MAP_FIRST`); none takes the GPU
+lock, and a default (legacy) run instantiates none of them.
 
 | Process | Runs | Resources | What it does |
 |---|---|---|---|
 | `ANNOTATE_PANEL` | once per pair × segmentation | 1 CPU, 4 GB | `merxen annotation-panel` on the gene list (`--annotation_panel_genes_path`) or on the pair's prepared H5ADs; writes the declared panels and `required_bundles.json`. |
 | `ANNOTATE_REFERENCE_PREP` | once per unique (species, reference, `panel_hash`) across the run | 8 CPUs, 64 GB, 8 h; above 1,000 panel genes `annotation_prep_large_memory` and 24 h; one at a time on dwight | `merxen annotation-reference-prep`: gets the bundle from the store or builds it, and writes `bundle_ref.json`. Seconds when the bundle exists. |
-| `CLUSTERING_SQUIDPY_ANNOTATE_MAP` | once per pair × segmentation, after its last required bundle (`map_first` only, from M5) | 6 CPUs, 24 GB (48 GB above 1,000 panel genes); `annotation_max_forks` (2) at a time on dwight | `merxen annotate` on the pair's prepared H5ADs with exactly the bundle refs PREP resolved: the MapMyCells runs, the tidy parquets, the provisional labels and `map_manifest.json`, published to `<outdir>/<pair>/<seg>/annotation_map/annotation_map_out/`. |
-| `CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE` | once per pair × segmentation, after its own MAP (`map_first` only, from M5) | 2 CPUs, 16 GB (32 GB above 1,000 panel genes); `annotation_resolve_max_forks` (4) at a time on dwight | `merxen annotate-resolve` on the MAP output, the prepared H5ADs, the panel and the same bundle refs: the label tables, annotation manifests and `<pair>_resolve_summary.json`, published to `<outdir>/<pair>/<seg>/annotation_resolve/annotation_resolve_out/` (see [Resolving](#resolving-merxen-annotate-resolve-m4)). 36-63 s per human pair × segmentation in the M4 shadow runs. |
+| `CLUSTERING_SQUIDPY_ANNOTATE_MAP` | once per pair × segmentation, after its last required bundle (`map_first` only) | 6 CPUs, 24 GB (48 GB above 1,000 panel genes); `annotation_max_forks` (2) at a time on dwight | `merxen annotate` on the pair's prepared H5ADs with exactly the bundle refs PREP resolved: the MapMyCells runs, the tidy parquets, the provisional labels and `map_manifest.json`, published to `<outdir>/<pair>/<seg>/annotation_map/annotation_map_out/`. |
+| `CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE` | once per pair × segmentation, after its own MAP (`map_first` only) | 2 CPUs, 16 GB (32 GB above 1,000 panel genes); `annotation_resolve_max_forks` (4) at a time on dwight | `merxen annotate-resolve` on the MAP output, the prepared H5ADs, the panel and the same bundle refs: the label tables, annotation manifests and `<pair>_resolve_summary.json`, published to `<outdir>/<pair>/<seg>/annotation_resolve/annotation_resolve_out/` (see [Resolving](#resolving-merxen-annotate-resolve-m4)). 36-63 s per human pair × segmentation in the M4 shadow runs. |
+| `CLUSTERING_SQUIDPY_COMPUTE_CPU` | once per pair × segmentation, after its own RESOLVE (`map_first` only) | 8 CPUs, 32 GB, main environment, no GPU lock; `clustering_squidpy_max_forks` (4) at a time on dwight | `python -m merxen.clustering_squidpy_stages compute --mode map_first` on the prepared H5ADs and RESOLVE's label tables: the map-first hierarchy, legacy-compatible `obs` columns, QC embedding and stability diagnostic, under the legacy file names (`<sid>_clustered.h5ad`), so the shared `CLUSTERING_SQUIDPY_FINALIZE` writes the clustered table. 15-28 min and 2.3-3.5 GB per human proseg_hybrid section in the M5 stage A runs. |
 
 PREP has no `storeDir`: the store's own lock, temporary build directory and
 atomic rename keep concurrent launches safe, and its `build_hash` (sources,
@@ -748,9 +755,8 @@ from `annotation_map/annotation_map_out/` instead of re-mapped, because
 dwight prunes work directories; with `annotation_keep_extended_json` the
 published run must have kept its JSON too. A published manifest that cannot
 be read (the `-stub-run` manifest, an older or newer layout) only disables
-reuse, with a warning. Until M5 wires
-`map_first` (hook H5, `CLUSTERING_MAP_FIRST`), the preflight refuses
-`map_first` runs, so MAP runs only in the workflow tests; the shadow
+reuse, with a warning. In a pipeline run MAP runs only in `map_first` mode
+([Map-first clustering runs](#map-first-clustering-runs-m5)); the shadow
 evaluation uses the standalone command.
 
 RESOLVE starts for a pair × segmentation as soon as its own MAP has
@@ -806,6 +812,78 @@ bundles a same-panel pair on `proseg_hybrid` needs. Building from a pair's
 prepared H5ADs (`per_platform` panels, label-free set c) arrives with the
 `map_first` wiring (M5). The params are listed in
 [Configuration](../configuration.md#reference-based-annotation-in-development).
+
+## Map-first clustering runs (M5)
+
+A run clusters in `map_first` mode when it selects it:
+`--clustering_squidpy_mode map_first` (both species) or
+`--clustering_squidpy_mode_human map_first` / `_mouse`. Legacy stays the
+default, and the mode is one per run (it follows `--species`). Hook H5 in
+`workflows/main.nf` then replaces the legacy GPU `CLUSTERING_SQUIDPY_COMPUTE`
+by `CLUSTERING_MAP_FIRST`; `CLUSTERING_SQUIDPY_PREPARE` and
+`CLUSTERING_SQUIDPY_FINALIZE` are the legacy processes, unchanged:
+
+```text
+PREPARE -> ANNOTATE_PANEL -> ANNOTATE_REFERENCE_PREP (per unique bundle)
+        -> CLUSTERING_SQUIDPY_ANNOTATE_MAP -> CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE
+        -> CLUSTERING_SQUIDPY_COMPUTE_CPU -> FINALIZE -> cortical depth, MENDER, ...
+```
+
+- **Preflight.** A `map_first` row gets no legacy marker, taxonomy or
+  membership check; it is checked for the annotation settings, the
+  references' source params (one full alternative of each required set),
+  existing optional paths, the self-map sources while resolvability is on,
+  and a writable reference store (and large-panel store when set). An empty
+  `clustering_squidpy_table_key_suffix` is refused while the species has not
+  flipped.
+- **Samplesheet columns.** A row's own `anatomical_region` (human) or
+  `mouse_section_regions` (mouse) is carried into each sample of its
+  `samples_json` (and so into the clustering config); rows without the
+  column inherit `annotation_human_region` / `annotation_mouse_section_regions`
+  and keep the legacy samples JSON.
+- **Alignment.** A paired, aligned pair's `shared_tissue_mask.npy` and
+  `registration_summary.json` come from ALIGN's output channel (the ALIGN
+  task of the run, or the published `align_out` when ALIGN does not run in
+  it) and are staged into ANNOTATE_PANEL (label-free set c) and RESOLVE
+  (the pair JSD's shared-mask restriction); a pair without alignment gets
+  none.
+- **COMPUTE_CPU** stages RESOLVE's label tables, annotation manifests and
+  pair summary as files and caches on their content (`cache "deep"` hashes a
+  file's content but a directory only by its metadata): a RESOLVE re-run
+  with byte-identical outputs leaves it cached, a changed label re-runs it.
+  Its task inputs also carry the run's table-key suffix, MENDER policy and a
+  fingerprint of the hierarchy code (`AnnotationReferences.HIERARCHY_SOURCES`),
+  so a hierarchy change re-runs it under `-resume`.
+- **Clustered tables.** Before the species' flip, FINALIZE writes
+  `<source table>_clustering_squidpy_mapfirst` (plan §4.8) and never the
+  legacy key: the clustered H5AD records its suffix, and FINALIZE (whose
+  legacy script names none) writes under it and refuses any other. Cortical
+  depth reads that table (`clustered_table_key_suffix` in its table config)
+  and MENDER receives its key through the row settings. The run publishes
+  its clustering outputs to the same
+  `<outdir>/<pair>/<segmentation>/clustering_squidpy/` as a legacy run, so
+  snapshot legacy outputs before a `map_first` run into the same outdir
+  (plan §2.3, M-1).
+- **MENDER.** The clustered table records the run's
+  `mender_unassigned_state_policy` (default `exclude_from_features`), which
+  MENDER applies to it (its legacy script names no policy); legacy tables
+  keep `state`. The MENDER barrier is unchanged: `map_first` runs never run
+  the legacy MAPMYCELLS stage unless `annotation_mode_mapmycells_stage` is
+  `legacy` and the run stops at `mapmycells`, so the barrier never waits for
+  it.
+- **Cross-platform scope.** COMPUTE_CPU copies RESOLVE's
+  `pair.cross_platform` into each clustered table
+  (`uns["merxen_hierarchical_clustering"]["cross_platform_json"]`, and the
+  hierarchical manifest), and MENDER and cortical-depth manifests carry it
+  in their `annotation` record: a `broad_only` pair may be compared across
+  platforms at the broad class and lineage only, a `none` pair not at all
+  (`merxen.clustering.cross_platform.CrossPlatformScope.allows`).
+- **End-of-run summary.** A `map_first` run logs which pair × segmentation
+  branches entered clustering, which got no label tables (a failed PANEL,
+  PREP, MAP or RESOLVE task, dropped under `errorStrategy "ignore"`) or no
+  hierarchy, the refused, broad-only and provisional panels, and the pairs
+  whose cross-platform statistics RESOLVE restricted. A legacy run prints
+  nothing.
 
 ## Mapping (`merxen annotate`)
 
@@ -967,8 +1045,9 @@ Per sample:
    and `<pair>_resolve_summary.json`, all deterministic for given inputs
    (the label parquets hold no clock); the run record
    (`annotation_resolve_run.json`: clock, wall time, absolute paths) is
-   published beside `annotation_resolve_out`, so M5's deep-cached
-   COMPUTE_CPU staging that directory re-runs only when a label changes. A
+   published beside `annotation_resolve_out`, so COMPUTE_CPU, which stages
+   the label tables, manifests and pair summary as files and caches on their
+   content, re-runs only when a label changes (M5). A
    run that mapped with the parent bundle on a restricted lookup (a sample
    lacking panel genes; §3.3) is resolved with the parent's resolvability
    and trust, recorded as `resolvability_inherited` (`restricted_lookup`)

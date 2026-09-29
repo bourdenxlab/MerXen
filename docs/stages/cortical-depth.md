@@ -137,6 +137,15 @@ are absent the depth values are still computed and the violin plots are skipped
 with a logged note. When annotations are present they are also joined into the
 per-cell `*_cells_with_cortical_depth.parquet` sidecar.
 
+A `map_first` run reads the clustered table of its own clustering mode:
+before the species' flip that is `*_clustering_squidpy_mapfirst`
+(`clustered_table_key_suffix` in each table config, from
+`clustering_squidpy_table_key_suffix`), never the legacy table next to it.
+Its `broad_class` vocabulary includes `Oligodendrocyte lineage` and
+`Mixed/Unknown` (the latter gets no violin), and the QC summary records the
+dataset gate, panel trust and cross-platform scope of the labels
+([Map-first clustering runs](annotation.md#map-first-clustering-runs-m5)).
+
 The stage updates the source `latest_spatialdata.zarr` in place by default.
 Set `--cortical_depth_write_spatialdata_table false` to write sidecars and QC
 without replacing SpatialData tables.
