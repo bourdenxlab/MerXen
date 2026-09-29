@@ -286,3 +286,39 @@ def test_mouse_calls_need_one_value_per_object() -> None:
             in_table=np.array([True]),
             wmb=None,
         )
+
+
+def test_marker_unsupported_calls_are_not_resolvable(make_trust: MakeTrust) -> None:
+    trust = make_trust("validated_real", species="mouse")
+    limits = AnnotationThresholds()
+    emission = th.EmissionPlan(species="mouse", thresholds=limits, trust=trust)
+    floors = th.FloorPlan.build(
+        species="mouse", platform="MERSCOPE", hard_floor=10, trust=trust
+    )
+    base = calls_of([Cell(), Cell(subclass="157 RN Spp1 Glut"), Cell()])
+    calls = cs.MouseCalls(
+        total_counts=base.total_counts,
+        in_table=base.in_table,
+        wmb=base.wmb,
+        marker_unsupported={
+            "subclass": np.array([False, True, False]),
+            "class": np.array([False, False, True]),
+        },
+    )
+    result = cs.resolve_mouse(
+        calls,
+        cs.MouseResolveSettings(
+            platform="MERSCOPE",
+            min_counts=10,
+            emission=emission,
+            floors=floors,
+            thresholds=limits,
+            trust=trust,
+        ),
+        gate(),
+    )
+    assert statuses(result, 0)["subclass"] == "confident"
+    assert statuses(result, 1)["subclass"] == "not_resolvable"
+    assert statuses(result, 1)["class"] == "confident"
+    assert statuses(result, 2)["class"] == "not_resolvable"
+    assert result.final_level.tolist() == ["subclass", "nt", "broad"]
