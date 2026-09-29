@@ -762,8 +762,11 @@ as a stale MAP output; the store is never searched). The shared tissue mask
 of the pair JSD comes only from ALIGN's output channel, which M5 wires (as
 for `ANNOTATE_PANEL`); until then RESOLVE reports the whole-section JSD and
 never looks for a published `align_out` that ALIGN may still be writing
-(`--no-alignment-lookup`). A mouse MAP output fails the task with a clean
-error until M6 adds the mouse rules. RESOLVE caches on content (`cache
+(`--no-alignment-lookup`). A mouse MAP output is resolved with the M6
+mouse rules ([Mouse rules v1](#mouse-rules-v1-consensusresolve_mouse-73-m6));
+the task does not pass the QC stage's registration check yet (the QC
+channel is pipeline wiring, M5), so its gate reports G1 as not evaluated
+(a warning). RESOLVE caches on content (`cache
 "deep"`), as MAP does, and its task hash also sees the annotation config it
 writes and a fingerprint of the RESOLVE rules: the sha256 of the files under
 `src/merxen/annotation/`, `src/merxen/assets/annotation/` (floors,
@@ -1029,8 +1032,8 @@ Per sample:
    lacking panel genes; §3.3) is resolved with the parent's resolvability
    and trust, recorded as `resolvability_inherited` (`restricted_lookup`)
    with a trust reason. A refused panel gives statuses only
-   (`not_attempted_gate`, gate `failed`, `exclude_hard`); mouse RESOLVE is
-   M6.
+   (`not_attempted_gate`, gate `failed`, `exclude_hard`). Mouse samples
+   follow the same steps with the mouse rules below.
 
 ### Human rules v1 (`consensus.resolve_human`, §5.2)
 
@@ -1077,6 +1080,82 @@ and no flag changes a status. The realised rates per flag × class ×
 platform are in the resolve summary (`flags.strata`: `rate` over the
 stratum's confident broad calls, `rate_all` over its table cells,
 `informative` for the §4.3 switch, `informative_h16` for H16's 15% mark).
+
+### Mouse rules v1 (`consensus.resolve_mouse`, §7.3; M6)
+
+`merxen.annotation.mouse_resolve.resolve_mouse_sample` resolves a mouse
+sample on the pruned view of its WMB run (re-mapped cells merged in, see
+[Mouse region step](#mouse-region-step-m6)). One method, no second vote;
+`ct_consensus_tier` is 1 when the class call meets 0.90, else -1.
+
+| Level | Confident when |
+|---|---|
+| Broad | The vocab broad class of the call (Neurons, Astrocytes/Ependymal, Oligodendrocyte lineage, OEC, Vascular cells, Microglia); the class bootstrap probabilities of the call and its same-broad runner-ups sum to >= 0.90, counts >= the floor, resolvability. |
+| Class | Confident broad, class bootstrap probability >= 0.90, the class floor (20 counts on ag7 / VZG2), resolvability, and `avg_correlation` >= `wmb_class_min_corr` when a floor is configured (real-data-validated families only; see the shadow study below). A cell whose unpruned class was region-dropped and whose re-mapped class is not confident is `implausible` at class and below (it falls back to broad). |
+| NT | Neurons only: confident class, the NT-summed probability (Glut / GABA / Other from the vocab), resolvability. |
+| Subclass (leaf) | Gate `full`, confident parent (NT for neurons, else class), bootstrap probability >= 0.80, the subclass floor (50), resolvability. A re-mapped cell (class or subclass dropped) whose new subclass is not confident is `implausible`. |
+| Supertype | Report-only (`allow_fine_levels`, OD-E4): confident subclass, 0.80, resolvability; never a leaf or in `ct_final`. |
+
+A call to a node the bundle lists in `marker_unsupported_nodes` (below an
+auto-collapsed parent, or without a 10Xv3 marker cell, e.g.
+`157 RN Spp1 Glut`) is `not_resolvable` at its level (the resolve summary
+counts them).
+
+**Class `avg_correlation` floor** (§7.3; pre-registration §16): the M6
+shadow study scored floors 0.40 and 0.50 on ag7 proseg_hybrid and VZG2
+original_seg against class coverage and MO1's marker consistency by depth
+and selected **none** (0.40 changes consistency by < 0.001; 0.50 costs 7.7
+/ 10.2 points of class coverage, and on VZG2 removes calls nearly as
+marker-consistent as the kept ones), so `wmb_class_min_corr` stays unset
+and `ct_class_corr` is report-only. Were a floor configured, it would apply
+to the real-data-validated mouse families only (`avg_correlation` depends
+on the number of markers; other panels need a simulation-derived floor). `ct_branch` and `ct_mender_state` are the confident class
+(else `Mixed/Unknown`), `ct_leaf` the confident subclass (else
+`unresolved`); `soft_class_<class>` holds the class bootstrap mass of the
+call and its runner-ups over the 34 WMB classes (the rest is unallocated).
+
+**Mouse gate** (`merxen.annotation.mouse_gate`, §7.6; label-free, computed
+before the statuses; level + warning flag as for human):
+
+| Signal | Source | Failed if | Warning if |
+|---|---|---|---|
+| G1 registration | `--registration-qc SID=PATH`: the QC stage's `*_registration_qc.json` or `*_qc_summary.csv` (M0a check) | density ratio < 1.5, or shift > 5 µm against the platform's own cells | ratio < 2.0; no check given, or the check skipped |
+| G2 marker referee | the table cells' class calls against marker pseudo-labels: six class groups (the vocab broad classes), each with the panel genes whose group profile is >= 20x every other class's profile (E3 rule; groups with < 3 genes left out), labelled with `data/P1212`'s rule (>= 1.5 units and >= 60% of the marker units) | consistency < 0.70 | < 0.80, or fewer than 200 pseudo-labelled cells |
+| G3 implausibility | pre-pruning T2 share: unpruned subclasses with < 25% of their MERFISH cells in the present divisions | – | > 3% |
+| G4 composition | soft class shares against the pooled MERFISH sections of `--mouse-g4-sections` (the region-share bundle's `section_composition.parquet`; none by default until M6b's AP estimate) | – | Astro-Epen outside ±5 points or Immune outside ±1 point |
+| G5 spill-over | `flag_microglial_spillover` rate | – | > 15% |
+
+The primary panel's trust caps the level as for human (`refused` fails,
+`broad_only` blocks the subclass) and a provisional panel warns. A `failed`
+gate makes every table cell `not_attempted_gate` and `exclude_hard` (a
+failed registration check: plan §7.5). G2's marker sets are derived per
+panel, so the 0.70 / 0.80 thresholds, set on MO1's hand-listed referee
+(.911 / .856), are provisional there [L]: the derived referee reads .805 on
+ag7 proseg_hybrid and .819 on VZG2 original_seg (and .666 on the invalid
+VZG2 proseg_hybrid).
+
+**Mouse flags** (`merxen.annotation.mouse_flags`, §7.4, §8.6; report-only):
+
+- `microglia_stat`, `microglia_weight`, `flag_microglial_spillover`: E3's
+  specific-gene binomial likelihood-ratio test. The genes are derived from
+  the bundle's profiles (microglia subclass vs every non-Immune class:
+  ratio >= 20, share >= 1/1000, immediate-early genes excluded; ag7: Csf1r,
+  Cx3cr1, Aif1, Blnk, C1qa, as E3; VZG2: E3's 13); flagged at statistic >= 10
+  and spill weight >= 0.05. Null with fewer than 3 genes
+  (`insufficient_panel_genes`) or when more than 0.5% of the marker
+  astrocytes (E3's AST rule on the panel's derived Astro-Epen genes) are
+  flagged. With >= 6 genes the flag is rebuilt on half of them and the
+  held-out half's enrichment is reported (VZG2: 38x). It measures
+  spill-over prevalence, never a microglia count. Per cell it agrees with
+  E3 on 99.8% of ag7 and VZG2 cells (E3 used supertype profiles; the bundle
+  has subclass profiles).
+- `flag_region_incoherent`, `region_coherence` (F1, E7 §3): a cell of one of
+  E7's 23 region-restricted classes (`wmb_region_restricted_classes.csv`)
+  with kNN30 same-class coherence < 0.1 and class bootstrap < 0.8; null
+  without coordinates.
+- `flag_astro_lowcount`: an Astro-Epen call below 100 counts.
+- Contamination, diffuse profile and OOD as for human, over the six mouse
+  broad classes.
 
 ## Shadow baselines (M3)
 
