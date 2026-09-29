@@ -586,6 +586,35 @@ the dwight values in `workflows/conf/dwight.annotation.config`.
 | `annotation_reuse_published` | `true` | MAP copies a run from the published `<pair>/<seg>/annotation_map/annotation_map_out/map_manifest.json` instead of re-mapping when its query fingerprint, `build_hash`, engine parameters and ctm version are unchanged (Dwight prunes work directories, so `-resume` alone cannot). |
 | `annotation_keep_extended_json` | `false` | Keep each MapMyCells extended JSON, gzipped, next to its tidy parquet (by default it is parsed and deleted). |
 
+#### Annotation config fields of milestone M3c (`--annotation-config`)
+
+The standalone commands (`annotation-reference-prep`, `annotation-panel-simulate`,
+`annotate`) read an `AnnotationConfig` JSON (`merxen.annotation.config`); these
+fields were added by milestone M3c (plan §3.7, §8.3 "Resolvability version 7",
+§8.8). They have no Nextflow parameter yet. The version-7 simulation inputs
+(members, assets, chemistry, grid, top-up rule) enter a version-7 bundle's
+`build_hash`; the decision settings are recorded, not hashed.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `resolvability.version` | `auto` | `auto`: 6 for the families of `validated_panels.csv` and `resolvability_v6_pins.csv`, 7 for every other family. `6` forces version 6; forcing `7` on a version-6 family is refused (use `annotation-panel-simulate --resolvability-version 7` for the diagnostic). |
+| `resolvability.ensemble_r1_seeds` | `[0, 1, 2]` | Seeds of the `R1_contam_HO` emission members (seed 0 is the pre-registered draw). |
+| `resolvability.ensemble_spread_floor`, `resolvability.ensemble_spread_se_multiplier`, `resolvability.ensemble_member_min_confident` | `0.03`, `3.5`, `10` | The E2 spread rule: member precisions within max(floor, multiplier x SE), each member with at least this many check-half confident calls. |
+| `resolvability.saturated_bp_share` | `0.90` | A tested set without a local threshold whose fit-half calls are more than this share at bp = 1 is judged at the 0.99 cap. |
+| `resolvability.monotone_depth`, `resolvability.nonneuronal_monotone_max_depth` | `true`, `1000` | The monotone fill of deeper bins, never for non-neuronal classes at or above this depth. |
+| `resolvability.topup_min_class_test_cells` | `200` | Classes of the leaf's parent level with fewer test cells are topped up before mapping (`0` turns the top-up off). |
+| `resolvability.r3_table_rule`, `resolvability.r3_residual_sd_log2` | `restricted`, `0.20` | The `R3_measured_HO` table rule (`all_measured` only for the D3 regression) and its residual SD. |
+| `resolvability.neighbour_structured_spill` | `false` | Experimental and not implemented (user decision 7); `true` is refused. |
+| `panel.panel_chemistry` | `auto` | `auto` (MERSCOPE -> `merscope`; a Xenium panel with Jaccard >= 0.95 to a pinned Prime list -> `xenium_prime`; else unknown), or a declared `xenium_prime`, `xenium_v1`, `merscope`. Only `xenium_prime` mouse has a measured factor table (the R3 member). |
+| `real_qc.coverage_warn_margin`, `real_qc.coverage_min_cells` | `0.10`, `200` | Per-class real vs simulated coverage: warn per (level, called class) with at least this many cells when the real confident share is below the class-depth prediction at the dataset's own per-class depth by more than the margin (user decision 4; warning only, never an offset). |
+| `real_qc.factor_remeasure_min_r` | `0.9` | First in-house dataset of a family with a measured factor table: warn (and recommend a PREP re-run with the in-house table as a new asset) when the re-measured factors correlate below this with the stored table on the informative genes. |
+| `real_qc.nonneuronal_high_depth_counts` | `1000` | Non-neuronal cells at or above this depth in `nonneuronal_high_depth` bins get the report-only `flag_nonneuronal_high_depth`. |
+| `real_qc.genes_per_count_gap_warn` | `0.45` | Gene-complexity warning: native cells carry more than this share more genes than simulated cells at matched depth; the warning says simulated coverage predictions are unreliable for the dataset. |
+
+The `real_qc` checks are implemented in `merxen.annotation.real_qc` and are
+wired into RESOLVE by the M4 follow-up and into the first in-house dataset of
+a family by M13 (plan §12 M3c); none raises a trust state.
+
 ### Resource limits
 
 The reserved `standard` profile includes

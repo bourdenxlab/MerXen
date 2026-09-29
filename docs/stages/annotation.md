@@ -704,7 +704,11 @@ top-up rule, so its bundles are new build directories. A version-7 self-map:
   precision and coverage pass (only the power conditions are waived), never
   for non-neuronal classes at 1,000 counts or more (those bins are marked
   `nonneuronal_high_depth`); floors and trust come from the decisions before
-  the fill;
+  the fill. When an emission member uses a simulation-input asset
+  (`R3_measured_HO`), the trust constraint is the more severe of the full
+  ensemble's and that of the asset-free members (the R1 draws, decided on
+  the same cells), so an asset can lower the trust state but never raise it
+  (`trust_asset_guard` in the summary; pre-registration §14 (v));
 - writes `resolvability_cells.parquet` (with `member`), `resolvability.parquet`
   (per-member rows, `member_decision` and the ensemble's `decision` rows with
   the rule, member statuses, spread and limit, saturated and filled flags),
@@ -732,6 +736,41 @@ loudly until its follow-up (plan §12 M3c). The version-7 decisions of the
 version-6 families are computed only as a diagnostic
 (`annotation-panel-simulate --resolvability-version 7`, never written to the
 store, never applied).
+
+**Measured (M3c stage D, 2026-09-28; `m3c/` in the evidence archive,
+`M3C_EXIT_REPORT.txt`).** Version-7 bundles were built as new build
+directories of the large store (existing bundles untouched), 8 processes on
+the shared host (load 35-70):
+
+| Family | Bundles | Wall | Peak process-tree PSS | Provisional emission |
+|---|---|---|---|---|
+| Xenium Prime 5K human (5,001 genes; R1 x 3, clean and lung stress reported) | WHB `40886998`, SEA-AD `f0798063`, held-out test set `816f3afe` | 80.8 min (WHB 44.6 min, of which the self-map 35.2; SEA-AD 30.6 min) | 9.3 GB (largest process 7.8 GB) | WHB 312 of 546 bins (291 unanimous, 20 by the spread, 1 filled), SEA-AD 76 of 104 |
+| Xenium Prime 5K mouse (5,006 genes; R1 x 3 + R3; clean reported) | WMB `e0590aac` (16.3 GB, 13.2 GB reference markers), test set `457e0140` (14,072 cells) | 6.0 h build (reference markers 63.5 min, query markers 37.7 min, test set with the top-up 2.8 min, five members 2.3-8.4 min thinning + 36-49 min mapping each, decisions 1 min, trust guard 0.8 min, tables 1.8 min); 7.6 h with profile mode | 25.8 GB over the run (reference markers 23.1 GB; largest process 21.3 GB, query markers) | 1,244 of 2,210 bins (1,052 unanimous, 179 by the spread, 13 filled, 4 at the saturated cap, 61 `nonneuronal_high_depth`) |
+
+The human top-up had nothing to add: COP (152 test cells) and Fibroblast
+(144) are the only classes below 200, and both pools (the held-out donor's
+other cells, the other-region cells of training clusters) were exhausted.
+The mouse top-up added 1,013 cells to 11 classes (OB-CR 60 -> 162, DG-IMN
+70 -> 200, MH-LH 90 -> 200, MB Dopa 80 -> 200, MB-HB Sero 70 -> 168, CB
+GABA 130 -> 200, HY MM and CB Glut 30 -> 200; HY Gnrh1 10 -> 17, Pineal
+10 -> 15 and OEC 10 -> 41, whose pools ran out under the training-cluster
+rule and the 5% cluster cap). A 5K member's exact-total thinning takes 2-8
+min for 120-180k simulated cells (up to 16 min under load), its mapping 2-4 min (human) or 36-49 min (mouse, 8 processes at load
+40-70). On the public 5K mouse section's own per-class depth the mouse
+bundle's class-depth predictor gives provisional class coverage .909 and
+subclass .786; profile mode (member mean, weighted to the real composition)
+class .947 and subclass .789 against the real .871 and .695 under the same
+decisions (the calibration of pre-registration §14 (iv), in-sample). A
+fresh keyed ensemble (R1 at seeds 3-5, R3 at seed 1) moved 52 of the 1,263
+provisional (level, class, bin) triples of the mouse bundle (churn 0.041,
+of which the report-only supertype level 28; broad to subclass 0.022),
+against 0.081 for two single R1 draws under the same conventions: the
+pre-registered limit of 0.02 is not met (`M3C_EXIT_REPORT.txt` gives the
+cause and the proposed fixes), while the real public-section coverage
+under the two ensembles differs by only +.003 (class and subclass).
+Under the lung-FFPE depth scenario (median 245 counts) the human
+profile mode predicts a provisional supercluster coverage of .593 (member
+mean; phase 1's bracket .55-.57) and broad .776.
 
 ### Panel families, diagnostics and trust states (M3b)
 
@@ -796,6 +835,60 @@ gene) inherits `human_set_a` and is `validated`, the MERSCOPE one (268
 genes) is its own family and `provisional` (banner and gate warning, as H8
 expects); ag7 symbols run as human are `refused`
 (`gene_ids:species_mismatch`).
+
+### Xenium Prime 5K panel card (M3c)
+
+Panels of chemistry `xenium_prime` (Jaccard >= 0.95 with a pinned public
+Prime 5K list) carry these panel-card notes
+(`merxen.annotation.diagnostics.panel_card_notes`; printed by
+`annotation-panel-simulate` and meant for the report's panel card, M7). They
+state limits and never change a prediction, an emission or a trust state
+(user decision 4 of 2026-09-28, plan §8.10):
+
+- "Simulated glial coverage is an upper bound: -.06 to -.18 on
+  vendor-segmented 5K cells" and "Precision is unmeasured on real data" (the
+  thinned-cell agreement, .996 class / .987 subclass at 250 counts, is a
+  self-consistency upper bound);
+- trust: `provisional` with the provisional margins; nothing promotes the
+  family automatically and the public 5K section never enters a gate or a
+  promotion; gate P (M13) runs on the version-7 ensemble, with thresholds and
+  emission frozen from the ensemble and NP3-NP7 required in every emission
+  member;
+- real datasets get the downgrade-only per-class coverage warning (real <
+  simulated - 0.10, which also fires on v1-type large-mask segmentation); no
+  empirical offset is applied;
+- the 5K numbers come from one public section (one hemisphere, vendor XOA 3.0
+  segmentation) and are in-sample for depth, composition and factors;
+- mouse: before any gate-P PR, the first in-house dataset (MerXen
+  segmentation) measures per-class depth, factors and contamination, and PREP
+  is re-run with them as new simulation inputs, never as trust evidence;
+- human: glial coverage is expected below simulation by analogy with mouse;
+  there is no R3 member (no factor table against WHB) and no mouse factor,
+  depth profile or depth prior; predictions are per depth scenario (per grid
+  bin and the lung-FFPE scenario, median 245 counts); the family stays
+  provisional until an in-house human 5K dataset measures per-class depth,
+  gene complexity, factors against WHB and real vs simulated coverage.
+
+### Real-data QC (M3c; downgrade-only)
+
+`merxen.annotation.real_qc` holds the checks M3c adds to the label-free QC
+of real datasets (plan §8.8). They are pure functions (tables in, records
+out) that can only warn or report; RESOLVE wires them per dataset in the M4
+follow-up and M13 wires the first in-house dataset of a family. None changes
+emission, a threshold, a floor, a label or a trust state, and
+`apply_qc_outcomes` combines outcomes with a trust state so that it can only
+stay or fall (property-tested).
+
+| Check | Function | Rule | Effect |
+|---|---|---|---|
+| Per-class real vs simulated coverage (version-7 families) | `class_bin_shares`, `predicted_class_coverage`, `real_class_coverage`, `coverage_vs_simulation` | per (level, called class) with >= 200 cells: the dataset's confident share against `sum_d s_c(d) cov(L, c, d)` from `resolvability_class_depth.parquet` at the dataset's own per-class bin shares | warning when real < simulated - 0.10; the text says the warning also fires on v1-type large-mask (nucleus-expansion) segmentation, where simulation over-predicts coverage by +.16 to +.22 |
+| Non-neuronal high depth | `nonneuronal_high_depth_flags` | non-neuronal cells at >= 1,000 counts in emitted `nonneuronal_high_depth` bins | report-only `flag_nonneuronal_high_depth` |
+| Glial large-mask / high-depth trend | `nonneuronal_depth_trend` | real non-neuronal coverage at >= 1,000 counts below the 500-999 band by more than 2 SE (both >= 200 cells) | report-only (5K vendor glia: class .916 -> .897 -> .886) |
+| Factor re-measure (first in-house dataset of a family with a measured factor table) | `factor_remeasure` | per-gene factors re-measured with the X1 code (`shadow.reference_pseudobulk_totals`) on the confident calls, centred on the median informative gene and capped +-3, against the stored table on genes informative in both | warning when Pearson r < 0.9, recommending a PREP re-run with the in-house table as a new asset (not automatic) |
+| Gene complexity | `gene_complexity_check` | median genes per cell of native vs simulated cells per depth bin (>= 50 cells each) | warning when native cells carry > 45% more genes; its text says simulated coverage predictions are unreliable for the dataset |
+
+The thresholds are the `real_qc` fields of the annotation config
+([Configuration](../configuration.md)).
 
 ## Pipeline processes
 
@@ -1107,6 +1200,23 @@ H4 and H16 baselines) are in §11 of the pre-registration document.
   profiles, a draw ensemble with the measured 5K factors as one member,
   panel-card notes and a downgrade-only per-class coverage warning; no
   empirical offset. Set a, ag7 and VZG2 keep resolvability version 6.
+  *Implemented in M3c (2026-09-28):* the version-7 bundles of both 5K
+  families exist; M4's RESOLVE refuses them until its follow-up (plan §12
+  M3c), and the real-data QC functions (`real_qc`) are not yet wired into
+  RESOLVE or the report. On the public section the version-7 predictions
+  still exceed the real coverage by +.07 (class) to +.09 (subclass) overall
+  and by up to +.25 for hypothalamic classes, and the per-class warning
+  fires for 19 (level, class) pairs (`M3C_EXIT_REPORT.txt`).
+- **Version-7 cost on 5K panels:** exact-total thinning of 5,000 genes takes
+  2-8 min per member, and a 5K mouse member maps in 36-49 min on 8 processes
+  on the shared host, so a version-7 5K mouse PREP takes about 6 h (four
+  emission members and the clean bound) and its fresh-ensemble diagnostic
+  another 4 h.
+- **Pooled depth scenarios:** `annotation-panel-simulate` has no class
+  composition for a pooled scenario (the lung-FFPE totals of human Prime),
+  so its per-level headline under the scenario prints "-"; the per-class
+  predictions are in `<reference>/profile_class_depth.csv` and profile mode
+  runs as usual.
 - **Set c of families without a curated list** uses the label-free rule,
   which drops far more genes than E5's validated set c (44-73 per pair on the
   E5 pairs); treat such set-c results as provisional.

@@ -576,7 +576,10 @@ merxen annotation-panel-simulate --public-panel xenium_prime_5k_mouse \
    remains a secondary line (one depth for every cell). Xenium Prime 5K
    panels carry the panel-card notes "Simulated glial coverage is an upper
    bound: -.06 to -.18 on vendor-segmented 5K cells" and "Precision is
-   unmeasured on real data".
+   unmeasured on real data", followed by the M3c trust rules (provisional,
+   gate P on the version-7 ensemble, the downgrade-only per-class coverage
+   warning without an offset, the in-sample caveat and the species' next
+   measurements; [Annotation](stages/annotation.md#xenium-prime-5k-panel-card-m3c)).
 4. For prefiltered panels (the prefilter is opt-in; `--prefilter-compare
    auto`; `always` / `off`),
    finds the unfiltered lookup on the self-map engine's marker precompute,
