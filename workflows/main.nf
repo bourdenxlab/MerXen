@@ -1341,8 +1341,12 @@ def appendMenderPreflightChecks(errors, settings, params) {
                 publishedPairPath(
                     params.outdir,
                     settings.pair_id,
-                    "${segmentation}/clustering_squidpy/" +
-                    "clustering_squidpy_out/${platform.toLowerCase()}/" +
+                    "${segmentation}/" +
+                    AnnotationSettings.publishedClusteringDir(
+                        params.outdir, settings.pair_id, segmentation, platform, sampleId,
+                        settings.clustering_squidpy_table_key_suffix, // rca-site:H2
+                    ) +
+                    "/clustering_squidpy_out/${platform.toLowerCase()}/" +
                     "${sampleId}_clustered.h5ad",
                 )
             )
@@ -3749,7 +3753,7 @@ workflow {
                     pairId,
                     terminalStage,
                     currentPairTerminalExpectedCount(settings, terminalStage),
-                )] * AnnotationSettings.terminalSpecCopies(settings) // rca-site:H3
+                )]
             }
         }
     }
@@ -3810,16 +3814,34 @@ workflow {
         .mix(clustering_terminal_events_ch)
         .mix(mender_extra_clustering_terminal_events_ch)
 
-    pair_terminal_grouped_ch = pair_terminal_events_ch
-        .join(pair_terminal_specs_ch)
-        .filter { _pairId, eventStage, _done, expectedStage, _expectedCount ->
-            eventStage == expectedStage
-        }
-        .map { pairId, _eventStage, _done, _expectedStage, expectedCount ->
-            tuple(groupKey(pairId, expectedCount as int), true)
-        }
-        .groupTuple()
-        .map { pairKey, _doneFlags -> tuple(pairKey.getGroupTarget(), true) }
+    // map_first runs pair every terminal event with the pair's one spec:
+    // combine keeps the spec, whereas join pairs items one to one, so the
+    // pair's first terminal event (FINALIZE's) would consume it and the
+    // events MENDER waits for would be dropped (M5 exit run). Legacy runs
+    // keep the join, so their channels and DAG are unchanged.
+    if (AnnotationSettings.isMapFirstRun(params)) { // rca-site:H3
+        pair_terminal_grouped_ch = pair_terminal_events_ch
+            .combine(pair_terminal_specs_ch, by: 0)
+            .filter { _pairId, eventStage, _done, expectedStage, _expectedCount ->
+                eventStage == expectedStage
+            }
+            .map { pairId, _eventStage, _done, _expectedStage, expectedCount ->
+                tuple(groupKey(pairId, expectedCount as int), true)
+            }
+            .groupTuple()
+            .map { pairKey, _doneFlags -> tuple(pairKey.getGroupTarget(), true) }
+    } else {
+        pair_terminal_grouped_ch = pair_terminal_events_ch
+            .join(pair_terminal_specs_ch)
+            .filter { _pairId, eventStage, _done, expectedStage, _expectedCount ->
+                eventStage == expectedStage
+            }
+            .map { pairId, _eventStage, _done, _expectedStage, expectedCount ->
+                tuple(groupKey(pairId, expectedCount as int), true)
+            }
+            .groupTuple()
+            .map { pairKey, _doneFlags -> tuple(pairKey.getGroupTarget(), true) }
+    }
 
     pair_terminal_token_ch = pair_terminal_immediate_ch.mix(
         pair_terminal_grouped_ch
@@ -3892,8 +3914,12 @@ workflow {
                             publishedPairPath(
                                 params.outdir,
                                 pairId,
-                                "${segmentation}/clustering_squidpy/" +
-                                "clustering_squidpy_out/" +
+                                "${segmentation}/" +
+                                AnnotationSettings.publishedClusteringDir(
+                                    params.outdir, pairId, segmentation, platform, sampleId,
+                                    settings.clustering_squidpy_table_key_suffix, // rca-site:H2
+                                ) +
+                                "/clustering_squidpy_out/" +
                                 "${platform.toLowerCase()}/" +
                                 "${sampleId}_clustered.h5ad",
                             )
@@ -4037,4 +4063,10 @@ workflow {
         }
     mender_finalized_ch = MENDER_FINALIZE(mender_finalize_inputs_ch)
     MENDER_IMPORT(mender_finalized_ch)
+    // Hook H6's record of skipped MENDER runs (no assigned state; map_first only).
+    if (AnnotationSettings.isMapFirstRun(params)) { // rca-site:H6
+        MENDER_IMPORT.out.subscribe { _taskKey, pairId, segmentation, platform, importManifest ->
+            AnnotationRunRecord.menderImported(pairId, segmentation, platform, importManifest)
+        }
+    }
 }

@@ -41,6 +41,7 @@ from merxen.annotation.config import (
     species_defaults,
 )
 from merxen.annotation.vocab import SPECIES
+from merxen.clustering import cross_platform
 from merxen.table_keys import TABLE_KEY_SUFFIX_PATTERN
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -322,6 +323,10 @@ class AnnotationTestHarness {
                 )
             case "clusteredTableFields":
                 return AnnotationSettings.clusteredTableFields(c.row, c.params)
+            case "publishedClusteringDir":
+                return AnnotationSettings.publishedClusteringDir(
+                    c.outdir, "P1", "proseg_hybrid", "MERSCOPE", "P1_MERSCOPE", c.suffix
+                )
             case "runRecord":
                 AnnotationRunRecord.reset()
                 c.expected.each { item ->
@@ -335,6 +340,11 @@ class AnnotationTestHarness {
                 }
                 c.computed.each { item ->
                     AnnotationRunRecord.computed(item[0], item[1])
+                }
+                (c.mender ?: []).each { item ->
+                    AnnotationRunRecord.menderImported(
+                        item.pair_id, item.segmentation, item.platform, item.manifest,
+                    )
                 }
                 def info = AnnotationRunRecord.runInfo()
                 AnnotationRunRecord.reset()
@@ -693,6 +703,25 @@ def _add_m5_cases(
             "row": {"pair_id": "P1"},
             "params": params,
         }
+    published = tmp_path / "published"
+    suffixed_h5ad = (
+        published
+        / "P1/proseg_hybrid/clustering_squidpy_mapfirst/clustering_squidpy_out"
+        / "merscope/P1_MERSCOPE_clustered.h5ad"
+    )
+    suffixed_h5ad.parent.mkdir(parents=True)
+    suffixed_h5ad.write_text("h5ad")
+    for label, outdir, suffix in (
+        ("legacy", published, None),
+        ("legacy-blank", published, " "),
+        ("map_first-suffixed", published, "mapfirst"),
+        ("map_first-default-publishdir", tmp_path / "fresh", "mapfirst"),
+    ):
+        cases[f"publishedClusteringDir|{label}"] = {
+            "fn": "publishedClusteringDir",
+            "outdir": str(outdir),
+            "suffix": suffix,
+        }
     panels = tmp_path / "record"
     refused_panel = panels / "refused_panel"
     refused_panel.mkdir(parents=True)
@@ -722,6 +751,45 @@ def _add_m5_cases(
             }
         )
     )
+    # P5 as P1212: same panel (RESOLVE records full), MERSCOPE gate broad_only.
+    (resolve / "P5_resolve_summary.json").write_text(
+        json.dumps(
+            {
+                "samples": {
+                    "P5_MERSCOPE": {
+                        "trust": {"state": "validated"},
+                        "resolution": {"gate": {"level": "broad_only"}},
+                    },
+                    "P5_XENIUM": {
+                        "trust": {"state": "validated"},
+                        "resolution": {"gate": {"level": "full"}},
+                    },
+                },
+                "pair": {
+                    "cross_platform": {
+                        "statistics_level": "full",
+                        "flag": False,
+                        "reasons": [],
+                    }
+                },
+            }
+        )
+    )
+    mender = panels / "mender"
+    mender.mkdir()
+    (mender / "skipped.json").write_text(
+        json.dumps(
+            {
+                "sample_id": "P5_XENIUM",
+                "status": "skipped_no_assigned_state",
+                "status_reasons": ["every cell state is unassigned"],
+                "imported": False,
+            }
+        )
+    )
+    (mender / "imported.json").write_text(
+        json.dumps({"sample_id": "P5_MERSCOPE", "imported": True})
+    )
     cases["runRecord|mixed"] = {
         "fn": "runRecord",
         "expected": [
@@ -729,6 +797,21 @@ def _add_m5_cases(
             ["P2", "proseg_hybrid"],
             ["P3", "reseg"],
             ["P4", "reseg"],
+            ["P5", "proseg_hybrid"],
+        ],
+        "mender": [
+            {
+                "pair_id": "P5",
+                "segmentation": "proseg_hybrid",
+                "platform": "XENIUM",
+                "manifest": str(mender / "skipped.json"),
+            },
+            {
+                "pair_id": "P5",
+                "segmentation": "proseg_hybrid",
+                "platform": "MERSCOPE",
+                "manifest": str(mender / "imported.json"),
+            },
         ],
         "labelled": [
             {
@@ -749,8 +832,18 @@ def _add_m5_cases(
                 "panel_dir": str(ok_panel),
                 "resolve_dir": str(panels / "missing"),
             },
+            {
+                "pair_id": "P5",
+                "segmentation": "proseg_hybrid",
+                "panel_dir": str(ok_panel),
+                "resolve_dir": str(resolve),
+            },
         ],
-        "computed": [["P1", "proseg_hybrid"], ["P2", "proseg_hybrid"]],
+        "computed": [
+            ["P1", "proseg_hybrid"],
+            ["P2", "proseg_hybrid"],
+            ["P5", "proseg_hybrid"],
+        ],
     }
 
 
@@ -1134,12 +1227,52 @@ def test_groovy_run_record_lists_stopped_branches_and_panels(
 ) -> None:
     """Hook H6's facts: failed branches, refused / provisional panels, scope."""
     info = _value(groovy_results, "runRecord|mixed")
-    assert info["n_expected"] == 4
+    assert info["n_expected"] == 5
     assert info["failed_annotations"] == ["P3:reseg"]
     assert info["failed_hierarchies"] == ["P4:reseg"]
     assert info["refused_panels"] == ["P1:proseg_hybrid (too few genes)"]
     assert info["provisional_panels"] == ["P2:proseg_hybrid P2_MERSCOPE"]
     assert info["broad_only_panels"] == []
-    assert info["cross_platform_restricted"] == [
-        "P2:proseg_hybrid: broad_only (intersection_genes:80<100)"
+    # P5 (as P1212): RESOLVE records full from the panel; the broad-only
+    # MERSCOPE gate restricts it (plan §5.4), as CrossPlatformScope does.
+    assert info["restricted_dataset_gates"] == [
+        "P5:proseg_hybrid P5_MERSCOPE: broad_only"
     ]
+    assert info["cross_platform_restricted"] == [
+        "P2:proseg_hybrid: broad_only (intersection_genes:80<100)",
+        "P5:proseg_hybrid: broad_only (dataset_gate:P5_MERSCOPE:broad_only)",
+    ]
+    assert info["mender_skipped"] == [
+        "P5:proseg_hybrid P5_XENIUM (every cell state is unassigned)"
+    ]
+
+
+@needs_nextflow
+def test_groovy_published_clustering_dir_follows_the_row_suffix(
+    groovy_results: dict[str, dict[str, Any]],
+) -> None:
+    """MENDER-only restarts read a map_first H5AD from its suffixed directory.
+
+    Legacy rows keep clustering_squidpy/; a map_first row reads
+    clustering_squidpy_<suffix>/ when it holds the H5AD (a run into
+    published results redirects FINALIZE there) and else FINALIZE's default
+    clustering_squidpy/, where MENDER refuses a legacy table.
+    """
+    expected = {
+        "legacy": "clustering_squidpy",
+        "legacy-blank": "clustering_squidpy",
+        "map_first-suffixed": "clustering_squidpy_mapfirst",
+        "map_first-default-publishdir": "clustering_squidpy",
+    }
+    for label, directory in expected.items():
+        assert _value(groovy_results, f"publishedClusteringDir|{label}") == directory
+
+
+def test_groovy_scope_constants_match_the_python_scope() -> None:
+    """AnnotationRunRecord folds the gates in as CrossPlatformScope does."""
+    source = (LIB_DIR / "AnnotationRunRecord.groovy").read_text()
+    levels = ", ".join(f'"{level}"' for level in cross_platform.STATISTICS_LEVELS)
+    assert f"STATISTICS_LEVELS = [{levels}]" in source
+    for gate, cap in cross_platform.GATE_STATISTICS_CAP.items():
+        assert f'{gate}: "{cap}",' in source
+    assert f'DATASET_GATE_REASON = "{cross_platform.DATASET_GATE_REASON}"' in source
