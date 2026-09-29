@@ -403,6 +403,15 @@ def test_find_registration_check_discovers_the_qc_stage_outputs(
         1.4,
         "warn",
     )
+    # A published symlink to the same file is one check, recorded as found.
+    published = tmp_path / "published"
+    published.mkdir()
+    (published / "ag7_merscope_registration_qc.json").symlink_to(
+        qc / "a" / "ag7_merscope_registration_qc.json"
+    )
+    linked = find_registration_check([published, qc / "a"], "AG7_MERSCOPE")
+    assert linked is not None and linked.source is not None
+    assert linked.source.startswith(str(published))
     # A QC summary from before M0a holds no check; an absent sample has none.
     assert find_registration_check([qc], "OLD_MERSCOPE") is None
     assert find_registration_check([qc], "NONE_MERSCOPE") is None
