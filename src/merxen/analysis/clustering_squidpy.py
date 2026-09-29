@@ -1545,13 +1545,41 @@ def save_clustered_adata(adata: ad.AnnData, output_path: Path | str) -> Path:
 def _clustered_spatialdata_table_key(
     source_table_key: str,
     segmentation: str | None,
+    table_key_suffix: str = "",
 ) -> str:
     """Return the derived SpatialData table key for a clustered AnnData table.
 
     Delegates to ``merxen.table_keys.clustered_table_key``, which mirrors
-    ``clusteredSpatialdataTableKey`` in ``workflows/main.nf``.
+    ``clusteredSpatialdataTableKey`` in ``workflows/main.nf``; the suffix
+    (``""`` in legacy runs) gives map_first runs of a species that has not
+    flipped their own ``*_mapfirst`` table (plan §4.8).
     """
-    return clustered_table_key(source_table_key, segmentation)
+    return clustered_table_key(source_table_key, segmentation, table_key_suffix)
+
+
+def _check_recorded_table_key_suffix(adata: ad.AnnData, table_key_suffix: str) -> None:
+    """Refuse to write a map_first table under another table-key suffix.
+
+    A map_first clustered H5AD records the suffix it was clustered for in
+    ``uns["merxen_hierarchical_clustering"]["table_key_suffix"]``; writing it
+    with a different suffix (above all ``""``) would overwrite the legacy
+    clustered table (R3, plan §4.8). Legacy H5ADs record none.
+
+    Raises:
+        ValueError: If the recorded and the requested suffix differ.
+    """
+    record = adata.uns.get(HIERARCHICAL_UNS_KEY)
+    if not isinstance(record, dict) or record.get("mode") != "map_first":
+        return
+    recorded = record.get("table_key_suffix")
+    if recorded is None:
+        return
+    if str(recorded) != str(table_key_suffix):
+        raise ValueError(
+            "this map_first clustered table was built for table-key suffix "
+            f"{str(recorded)!r} but is being written with {table_key_suffix!r}; "
+            "refusing to overwrite another clustered table (plan §4.8)"
+        )
 
 
 def build_clustered_spatialdata_table(
@@ -1621,9 +1649,26 @@ def write_clustered_spatialdata_table(
     adata: ad.AnnData,
     *,
     segmentation: str | None,
+    table_key_suffix: str = "",
 ) -> tuple[Path, str]:
-    """Attach the final clustered AnnData object as a SpatialData table."""
+    """Attach the final clustered AnnData object as a SpatialData table.
+
+    Args:
+        zarr_path: The SpatialData zarr.
+        adata: The clustered AnnData.
+        segmentation: Segmentation branch (decides the source-table family).
+        table_key_suffix: Clustered table-key suffix (``""`` in legacy runs;
+            ``"mapfirst"`` for map_first runs before the species flips).
+
+    Returns:
+        ``(zarr_path, written table key)``.
+
+    Raises:
+        ValueError: If a map_first table is written with another suffix
+            than it was clustered for.
+    """
     zarr_path = Path(zarr_path)
+    _check_recorded_table_key_suffix(adata, table_key_suffix)
     clustering_meta = dict(adata.uns.get("merxen_clustering_squidpy", {}))
     source_table_key = str(clustering_meta.get("table_key") or "table")
     spatial_attrs = dict(adata.uns.get("spatialdata_attrs", {}))
@@ -1638,6 +1683,7 @@ def write_clustered_spatialdata_table(
     output_table_key = _clustered_spatialdata_table_key(
         source_table_key,
         segmentation,
+        table_key_suffix,
     )
     parsed_table = build_clustered_spatialdata_table(
         adata,
@@ -2967,6 +3013,7 @@ def finalize_clustering_squidpy(
                 sample.zarr_path,
                 clustered,
                 segmentation=sample.segmentation,
+                table_key_suffix=config.table_key_suffix,
             )
             sample_results.update(
                 spatialdata_zarr=zarr_path,
@@ -3004,6 +3051,7 @@ def run_clustering_squidpy(
                 sample.zarr_path,
                 clustered,
                 segmentation=sample.segmentation,
+                table_key_suffix=config.table_key_suffix,
             )
             artifacts.update(
                 spatialdata_zarr=zarr_path,
