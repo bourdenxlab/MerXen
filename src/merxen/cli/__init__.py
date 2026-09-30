@@ -27,6 +27,7 @@ from merxen.cli.run_annotation_panels import (
     annotation_panel_fetch_command,
     annotation_panel_simulate_command,
 )
+from merxen.cli.run_annotation_report import annotation_report_command
 from merxen.cli.run_build_spatialdata import build_spatialdata_command
 from merxen.cli.run_clustering_squidpy import clustering_squidpy_command
 from merxen.cli.run_comparison import compare_command
@@ -96,3 +97,4 @@ main.add_command(annotation_panel_fetch_command)
 main.add_command(annotation_panel_simulate_command)
 main.add_command(annotate_command)
 main.add_command(annotate_resolve_command)
+main.add_command(annotation_report_command)

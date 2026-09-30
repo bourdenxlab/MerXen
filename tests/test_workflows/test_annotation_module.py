@@ -417,6 +417,18 @@ def _rule_sources() -> list[str]:
     return re.findall(r'"([^"]+)"', match.group(1))
 
 
+def _rule_excludes() -> list[str]:
+    match = re.search(
+        r"RESOLVE_RULE_EXCLUDES = \[(.*?)\]\.asImmutable\(\)", REFERENCES_SOURCE, re.S
+    )
+    assert match is not None
+    return re.findall(r'"([^"]+)"', match.group(1))
+
+
+def _excluded(relative: str) -> bool:
+    return any(relative.startswith(prefix) for prefix in _rule_excludes())
+
+
 # Modules the RESOLVE rule sources import from outside them, and why a change
 # there needs no RESOLVE re-run of its own: they shape the counts and the
 # query MAP loaded, which RESOLVE reloads and checks against MAP's sample
@@ -432,7 +444,7 @@ RULE_IMPORT_EXEMPTIONS = {
 }
 
 
-def _sources_outside(sources: list[str]) -> set[str]:
+def _sources_outside(sources: list[str], excludes: list[str] | None = None) -> set[str]:
     """Modules the source files import from outside the sources."""
     for source in sources:
         assert (SRC / source).exists(), source
@@ -443,6 +455,10 @@ def _sources_outside(sources: list[str]) -> set[str]:
             [SRC / source] if (SRC / source).is_file() else (SRC / source).rglob("*.py")
         )
         if path.suffix == ".py"
+        and not any(
+            path.relative_to(SRC).as_posix().startswith(prefix)
+            for prefix in excludes or []
+        )
     ]
     covered = [source.removesuffix(".py").replace("/", ".") for source in sources]
     imported = {
@@ -468,7 +484,22 @@ def test_resolve_rule_sources_exist_and_cover_their_imports() -> None:
         "merxen/clustering/cellset.py",
         "merxen/cli/run_annotation.py",
     ]
-    assert _sources_outside(sources) == set(RULE_IMPORT_EXEMPTIONS)
+    assert _rule_excludes() == ["merxen/annotation/report"]
+    assert _sources_outside(sources, _rule_excludes()) == set(RULE_IMPORT_EXEMPTIONS)
+    # The excluded report modules exist and no rule source imports them, so
+    # leaving them out of the fingerprint cannot hide a rule change.
+    reports = sorted((SRC / "merxen/annotation").glob("report*.py"))
+    assert reports and all(_excluded(p.relative_to(SRC).as_posix()) for p in reports)
+    for source in sources:
+        root = SRC / source
+        for path in [root] if root.is_file() else root.rglob("*.py"):
+            if path.suffix != ".py" or _excluded(path.relative_to(SRC).as_posix()):
+                continue
+            assert not re.search(
+                r"^\s*(?:from|import) merxen\.annotation\.report",
+                path.read_text(),
+                re.M,
+            ), path
 
 
 def _hierarchy_sources() -> list[str]:
@@ -1268,6 +1299,9 @@ def _resolve_cases(root: Path, human: dict[str, Any]) -> dict[str, dict[str, Any
     (cache / "merxen/annotation/stale.pyc").write_bytes(b"x")
     outside = _write_rule_tree(trees / "outside")
     (outside / "merxen/other.py").write_text("changed\n")
+    report = _write_rule_tree(trees / "report")
+    (report / "merxen/annotation/report.py").write_text("report\n")
+    (report / "merxen/annotation/report_metrics.py").write_text("metrics\n")
     single = {**human, "annotation_allow_single_method": True}
     spec = {"species": "human"}
     refs = ["resolve_inputs/bundle_refs/bundle_ref_1.json"]
@@ -1330,6 +1364,10 @@ def _resolve_cases(root: Path, human: dict[str, Any]) -> dict[str, dict[str, Any
         "fingerprint_missing": {
             "fn": "resolveRulesFingerprint",
             "source_root": str(trees / "nothing"),
+        },
+        "fingerprint_report": {
+            "fn": "resolveRulesFingerprint",
+            "source_root": str(report),
         },
         "fingerprint_repo": {"fn": "resolveRulesFingerprint", "source_root": str(SRC)},
         "resolve_summary_file": {"fn": "resolveSummaryFile", "pair_id": "P7513"},
@@ -1902,6 +1940,7 @@ def _python_rules_fingerprint(root: Path) -> str:
                     item.is_file()
                     and not relative.endswith((".pyc", ".pyo"))
                     and "__pycache__" not in relative.split("/")
+                    and not _excluded(relative)
                 ):
                     files[relative] = item
     if not files:
@@ -1928,6 +1967,8 @@ def test_resolve_rules_fingerprint_follows_the_rule_sources(
     assert _value(harness, "fingerprint_cache") == base
     assert _value(harness, "fingerprint_outside") == base
     assert _value(harness, "fingerprint_missing") == "missing"
+    # The annotation report is left out: adding or editing it keeps RESOLVE cached.
+    assert _value(harness, "fingerprint_report") == base
     assert base == _python_rules_fingerprint(harness["root"] / "rule_trees" / "base")
     assert _value(harness, "fingerprint_repo") == _python_rules_fingerprint(SRC)
 

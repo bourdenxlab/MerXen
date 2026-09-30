@@ -89,6 +89,15 @@ class AnnotationReferences {
         "merxen/cli/run_annotation.py",
     ].asImmutable()
 
+    // Files under RESOLVE_RULE_SOURCES the fingerprint leaves out (relative
+    // path prefixes): the annotation report (merxen/annotation/report.py and
+    // report_*.py, M7) reads RESOLVE's outputs and RESOLVE never imports it
+    // (test-enforced), so a report edit must not re-run RESOLVE; the
+    // fingerprint of a checkout is then the one it had before the report.
+    static final List<String> RESOLVE_RULE_EXCLUDES = [
+        "merxen/annotation/report",
+    ].asImmutable()
+
     // What the map_first hierarchy fingerprint covers (COMPUTE_CPU, plan
     // §3.5): the hierarchy, QC embedding, stability and cross-platform code,
     // the label-table schema, vocabularies and provenance it reads, the
@@ -712,7 +721,7 @@ class AnnotationReferences {
      *     sources (an installed package without its checkout).
      */
     static String resolveRulesFingerprint(Object sourceRoot) {
-        return sourcesFingerprint(sourceRoot, RESOLVE_RULE_SOURCES)
+        return sourcesFingerprint(sourceRoot, RESOLVE_RULE_SOURCES, RESOLVE_RULE_EXCLUDES)
     }
 
     /**
@@ -730,16 +739,17 @@ class AnnotationReferences {
      *
      * @param sourceRoot Root the sources are relative to.
      * @param sources Files or directories (directories are walked).
+     * @param excludes Relative path prefixes of walked files to leave out.
      * @return The hex digest of each file's relative path and content, in
      *     path order, or "missing" when none exists.
      */
-    static String sourcesFingerprint(Object sourceRoot, List<String> sources) {
+    static String sourcesFingerprint(Object sourceRoot, List<String> sources, List<String> excludes = []) {
         def root = asPath(sourceRoot).toAbsolutePath().normalize()
-        def key = "${root}|${sources.join(',')}".toString()
-        return SOURCE_FINGERPRINTS.computeIfAbsent(key) { String ignored -> fingerprint(root, sources) }
+        def key = "${root}|${sources.join(',')}|${excludes.join(',')}".toString()
+        return SOURCE_FINGERPRINTS.computeIfAbsent(key) { String ignored -> fingerprint(root, sources, excludes) }
     }
 
-    private static String fingerprint(Path root, List<String> sources) {
+    private static String fingerprint(Path root, List<String> sources, List<String> excludes) {
         def files = [:] as TreeMap<String, Path>
         sources.each { String source ->
             def path = root.resolve(source)
@@ -749,7 +759,8 @@ class AnnotationReferences {
                 path.toFile().eachFileRecurse(groovy.io.FileType.FILES) { File file ->
                     def relative = root.relativize(file.toPath()).toString().replace(File.separator, "/")
                     def compiled = relative.endsWith(".pyc") || relative.endsWith(".pyo")
-                    if (!compiled && !relative.split("/").contains("__pycache__")) {
+                    def excluded = excludes.any { String prefix -> relative.startsWith(prefix) }
+                    if (!compiled && !excluded && !relative.split("/").contains("__pycache__")) {
                         files[relative] = file.toPath()
                     }
                 }
