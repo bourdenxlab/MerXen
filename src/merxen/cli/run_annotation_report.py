@@ -93,6 +93,16 @@ def _items(value: str | None) -> list[int] | None:
     help="SAMPLE_ID=PATH of a *_cells_with_cortical_depth.parquet (repeatable).",
 )
 @click.option(
+    "--cortical-depth-dir",
+    "depth_dir_values",
+    multiple=True,
+    help=(
+        "SAMPLE_ID=DIR of a compute_cortical_depth_out: the report reads "
+        "DIR/<segmentation>/*_cells_with_cortical_depth.parquet when present "
+        "(repeatable; --cortical-depth wins)."
+    ),
+)
+@click.option(
     "--mender-manifest",
     "mender_values",
     multiple=True,
@@ -169,6 +179,7 @@ def annotation_report_command(
     panel_dir: Path | None,
     clustered_values: tuple[str, ...],
     depth_values: tuple[str, ...],
+    depth_dir_values: tuple[str, ...],
     mender_values: tuple[str, ...],
     alignment_dir: Path | None,
     no_cortical_depth: bool,
@@ -193,6 +204,7 @@ def annotation_report_command(
     from merxen.annotation.report_inputs import (
         ReportInputError,
         ReportSources,
+        depth_cells_file,
         discover_sources,
     )
     from merxen.annotation.report_model import ReportOptions
@@ -230,11 +242,19 @@ def annotation_report_command(
             **sources.clustered_h5ad,
             **_pairs(clustered_values, "--clustered-h5ad"),
         }
+        depth_from_dirs: dict[str, Path] = {}
+        for sample_id, directory in _pairs(
+            depth_dir_values, "--cortical-depth-dir"
+        ).items():
+            found = depth_cells_file(directory, segmentation)
+            if found is not None:
+                depth_from_dirs[sample_id] = found
         depth = (
             {}
             if no_cortical_depth
             else {
                 **sources.cortical_depth,
+                **depth_from_dirs,
                 **_pairs(depth_values, "--cortical-depth"),
             }
         )

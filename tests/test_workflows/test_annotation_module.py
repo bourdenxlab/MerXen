@@ -74,6 +74,7 @@ PROCESSES = (
     "ANNOTATE_REFERENCE_PREP",
     "CLUSTERING_SQUIDPY_ANNOTATE_MAP",
     "CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE",
+    "ANNOTATION_REPORT",
 )
 PREP = "ANNOTATE_REFERENCE_PREP"
 MAP = "CLUSTERING_SQUIDPY_ANNOTATE_MAP"
@@ -102,7 +103,7 @@ def _with_name_block(config_text: str, name: str) -> str:
 # Process contract (string tests)
 
 
-def test_annotation_module_defines_panel_prep_map_and_resolve() -> None:
+def test_annotation_module_defines_panel_prep_map_resolve_and_report() -> None:
     text = MODULE.read_text()
     assert re.findall(r"^process (\w+) \{", text, re.M) == list(PROCESSES)
     assert "merxen annotation-panel" in _process_block(text, "ANNOTATE_PANEL")
@@ -150,8 +151,11 @@ def test_annotation_processes_run_on_the_cpu_with_current_code(name: str) -> Non
     block = _process_block(MODULE.read_text(), name)
     assert 'export CUDA_VISIBLE_DEVICES=""' in block
     assert 'export PYTHONPATH="${projectDir}/../src:\\${PYTHONPATH:-}"' in block
+    # One BLAS thread per worker, except the report: one Python process
+    # whose bootstraps use the task's CPUs (plan §3.6: 4 CPUs).
+    threads = '"${task.cpus}"' if name == "ANNOTATION_REPORT" else "1"
     for variable in ("OMP", "OPENBLAS", "MKL", "NUMBA"):
-        assert f"export {variable}_NUM_THREADS=1" in block
+        assert f"export {variable}_NUM_THREADS={threads}" in block
     code = re.sub(r"^\s*(//|#)[^\n]*", "", block, flags=re.M)
     for token in ("flock", "MERXEN_GPU_LOCK_FILE", "gpu", "queue", "clusterOptions"):
         assert token not in code.replace("CUDA_VISIBLE_DEVICES", ""), token

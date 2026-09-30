@@ -13,7 +13,8 @@ the run's mode whose legacy branch runs exactly the legacy PREPARE -> COMPUTE
 statements. H10 (M2) is the ``--annotation_prepare_only`` entry: it builds
 reference bundles from the samplesheet rows before the preflight and empties
 the rows, so no pipeline stage runs; it needs neither H5 nor any PREPARE
-output.
+output. H11 (M7) is the annotation report: one ``if`` on the run's mode (no
+legacy branch) after MENDER, the last stage the report waits for.
 """
 
 from __future__ import annotations
@@ -41,6 +42,7 @@ EXPECTED_HOOKS: dict[str, tuple[str, ...]] = {
     "H8": ("src/merxen/config.py",),
     "H9": ("src/merxen/io/samplesheet.py",),
     "H10": (MAIN_NF,),  # M2: --annotation_prepare_only entry.
+    "H11": (MAIN_NF,),  # M7: ANNOTATION_REPORTING after MENDER (map_first only).
 }
 # (file, hook) -> number of extra lines the hook touches, each with a site marker.
 EXPECTED_SITES: dict[tuple[str, str], int] = {
@@ -63,6 +65,7 @@ HOOK_CONTENT: dict[str, tuple[str, ...]] = {
         "include { ANNOTATION_PREPARE_ONLY } from "
         '"./subworkflows/annotation_references"',
         'include { CLUSTERING_MAP_FIRST } from "./subworkflows/clustering_map_first"',
+        'include { ANNOTATION_REPORTING } from "./subworkflows/annotation_report"',
     ),
     "H2": (
         'def clusteredSpatialdataTableKey(sourceTableKey, segmentation, suffix = "")',
@@ -85,6 +88,14 @@ HOOK_CONTENT: dict[str, tuple[str, ...]] = {
     ),
     "H8": ("from merxen.annotation.config import",),
     "H9": ("parse_optional_columns",),
+    "H11": (
+        "if (AnnotationSettings.isMapFirstRun(params) && "
+        "AnnotationReport.enabled(params)) {",
+        "ANNOTATION_REPORTING(",
+        "CLUSTERING_MAP_FIRST.out.labels,",
+        "CLUSTERING_MAP_FIRST.out.alignment,",
+        "clustering_results_ch,",
+    ),
     "H10": (
         "if (AnnotationReferences.prepareOnly(params)) {",
         "ANNOTATION_PREPARE_ONLY(sample_rows_raw_ch)",
@@ -320,3 +331,34 @@ def test_lib_classes_used_by_the_hooks_exist() -> None:
         assert re.search(rf"^class {name} \{{", source, re.MULTILINE), name
     for name in re.findall(r"\b(Annotation[A-Z]\w+)\.\w+\(", main_text):
         assert (lib_dir / f"{name}.groovy").is_file(), name
+
+
+def test_h11_reports_after_mender_in_map_first_runs_only() -> None:
+    """H11 is the last block of the workflow, after MENDER, behind the mode.
+
+    The report waits for FINALIZE, cortical depth and MENDER, so its block
+    follows every channel it reads; it has no legacy branch, so a legacy run
+    never instantiates ANNOTATION_REPORTING and keeps its DAG.
+    """
+    main_text = (REPO_ROOT / MAIN_NF).read_text()
+    hook = main_text.index("rca-hook:H11")
+    guard = main_text.index(
+        "    if (AnnotationSettings.isMapFirstRun(params) && "
+        "AnnotationReport.enabled(params)) {\n"
+    )
+    block_end = main_text.index("\n    }\n", guard)
+
+    assert hook < guard
+    for upstream in (
+        "clustering_results_ch = CLUSTERING_SQUIDPY_FINALIZE(",
+        "compute_cortical_depth_results_ch = COMPUTE_CORTICAL_DEPTH(",
+        "mender_finalized_ch = MENDER_FINALIZE(",
+        "MENDER_IMPORT(mender_finalized_ch)",
+    ):
+        assert main_text.index(upstream) < hook, upstream
+    assert main_text.count("ANNOTATION_REPORTING(") == 1
+    assert guard < main_text.index("ANNOTATION_REPORTING(") < block_end
+    assert "} else {" not in main_text[guard:block_end]
+    # Nothing follows H11 in the workflow block.
+    assert main_text[block_end + len("\n    }\n") :].strip() == "}"
+    assert "ANNOTATION_REPORT(" not in main_text

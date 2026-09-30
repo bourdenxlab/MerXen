@@ -43,6 +43,8 @@ class AnnotationSettings {
         restricted_dataset_gates: "broad-only or failed dataset gates",
         cross_platform_restricted: "restricted cross-platform statistics",
         mender_skipped: "MENDER skipped (no assigned cell state)",
+        failed_reports: "annotation reports not built (see the failed tasks above)",
+        failed_report_items: "annotation report items failed (see the report)",
     ].asImmutable()
 
     /**

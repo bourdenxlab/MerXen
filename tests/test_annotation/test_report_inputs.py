@@ -13,6 +13,7 @@ from scipy import sparse
 
 from merxen.annotation.report_inputs import (
     ReportInputError,
+    depth_cells_file,
     load_heldout,
     panel_gene_lookup,
     read_clustered_table,
@@ -89,3 +90,22 @@ def test_load_heldout_keeps_the_pair_and_checks_columns(tmp_path: Path) -> None:
     pd.DataFrame({"pair": ["P1"]}).to_csv(bad, index=False)
     with pytest.raises(ReportInputError, match="lacks the columns"):
         load_heldout(bad, "P1")
+
+
+def test_depth_cells_file_picks_the_segmentations_cell_table(tmp_path: Path) -> None:
+    """A compute_cortical_depth_out holds one cell table per segmentation."""
+    out = tmp_path / "compute_cortical_depth_out"
+    (out / "proseg_hybrid").mkdir(parents=True)
+    (out / "reseg").mkdir()
+    wanted = (
+        out
+        / "proseg_hybrid"
+        / "p1_merscope_proseg_hybrid_cells_with_cortical_depth.parquet"
+    )
+    wanted.write_bytes(b"")
+    (
+        out / "proseg_hybrid" / "p1_merscope_proseg_hybrid_cells_laplace_depth.png"
+    ).write_bytes(b"")
+    assert depth_cells_file(out, "proseg_hybrid") == wanted
+    assert depth_cells_file(out, "reseg") is None
+    assert depth_cells_file(out, "original_seg") is None

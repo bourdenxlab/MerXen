@@ -188,6 +188,23 @@ def resolve_summary_path(resolve_dir: Path, pair_id: str) -> Path:
     return Path(resolve_dir) / f"{pair_id}{RESOLVE_SUMMARY_SUFFIX}"
 
 
+def depth_cells_file(directory: Path | str, segmentation: str) -> Path | None:
+    """Return a segmentation's cortical-depth cell parquet in a depth output.
+
+    Args:
+        directory: A ``compute_cortical_depth_out`` directory (published, or
+            staged by the pipeline's ``ANNOTATION_REPORT``).
+        segmentation: Segmentation.
+
+    Returns:
+        The first (sorted) ``<directory>/<segmentation>/*_cells_with_cortical_depth
+        .parquet``, or ``None`` when the depth run did not cover the
+        segmentation.
+    """
+    hits = sorted((Path(directory) / segmentation).glob(f"*{DEPTH_CELLS_SUFFIX}"))
+    return hits[0] if hits else None
+
+
 def _summary_samples(resolve_dir: Path, pair_id: str) -> dict[str, dict[str, Any]]:
     path = resolve_summary_path(resolve_dir, pair_id)
     if not path.is_file():
@@ -273,12 +290,12 @@ def discover_sources(
             )
         if use_cortical_depth and species == "human":
             for name in cortical_depth_subdirs:
-                directory = (
-                    root / pair_id / platform / name / "compute_cortical_depth_out"
+                hit = depth_cells_file(
+                    root / pair_id / platform / name / "compute_cortical_depth_out",
+                    segmentation,
                 )
-                hits = sorted((directory / segmentation).glob(f"*{DEPTH_CELLS_SUFFIX}"))
-                if hits:
-                    depth[sample_id] = hits[0]
+                if hit is not None:
+                    depth[sample_id] = hit
                     notes.append(f"cortical depth of {sample_id}: {name}")
                     break
         if use_mender:
@@ -805,6 +822,7 @@ __all__ = [
     "ReportInputs",
     "ReportSources",
     "SampleData",
+    "depth_cells_file",
     "discover_sources",
     "load_heldout",
     "load_report_inputs",

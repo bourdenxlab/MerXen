@@ -154,14 +154,15 @@ def test_annotation_configs_are_included_once_at_hook_h7() -> None:
 
 
 # Processes whose resources the annotation configs may set (M2, MAP in M3,
-# RESOLVE in M4, COMPUTE_CPU in M5; REPORT joins when it arrives), with the
-# module that defines each.
+# RESOLVE in M4, COMPUTE_CPU in M5, REPORT in M7), with the module that
+# defines each.
 ANNOTATION_PROCESSES = {
     "ANNOTATE_PANEL": "annotation.nf",
     "ANNOTATE_REFERENCE_PREP": "annotation.nf",
     "CLUSTERING_SQUIDPY_ANNOTATE_MAP": "annotation.nf",
     "CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE": "annotation.nf",
     "CLUSTERING_SQUIDPY_COMPUTE_CPU": "clustering_squidpy.nf",
+    "ANNOTATION_REPORT": "annotation.nf",
 }
 
 

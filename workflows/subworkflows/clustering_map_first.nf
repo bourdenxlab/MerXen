@@ -26,7 +26,8 @@
  * table, the prepared H5ADs, the clustering config, the run's table-key
  * suffix or MENDER policy, or the hierarchy code changes, and stays cached
  * when RESOLVE re-runs with byte-identical outputs. Its only caller is hook
- * H5, in map_first runs.
+ * H5, in map_first runs. Its labels and alignment emits feed
+ * ANNOTATION_REPORTING (subworkflows/annotation_report.nf, hook H11, M7).
  */
 
 include { ANNOTATION_PREPARED_REFERENCES } from "./annotation_references"
@@ -227,6 +228,9 @@ workflow CLUSTERING_MAP_FIRST {
     // (ANNOTATION_REPORT, M7).
     maps = annotated.maps
     labels = annotated.labels
+    // The take channel's tuple(pair_id, alignment_files): the shared tissue
+    // mask ANNOTATION_REPORTING (hook H11, M7) gives the report.
+    alignment = alignment_ch
     // tuple(bundle key, bundle_ref.json): one per PREP task.
     bundle_refs = annotated.bundle_refs
 }
