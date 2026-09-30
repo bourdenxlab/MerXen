@@ -35,6 +35,7 @@ from merxen.cortical_depth.boundaries import (
 from merxen.cortical_depth.equivolumetric import compute_equal_area_depth
 from merxen.cortical_depth.frames import (
     DEPTH_PROVENANCE_UNS_KEY,
+    frame_consistency_metrics,
     resolve_cell_coordinate_frame,
 )
 from merxen.cortical_depth.laplace import solve_laplace_depth
@@ -300,6 +301,20 @@ def _annotate_table(
         f"{coords.source} (boundary_frame={frame.boundary_frame}, "
         f"{frame.resolution})"
     )
+    frame_check = frame_consistency_metrics(
+        coords.coordinates,
+        edge_line=annotations.edge,
+        grids=[result.grid for result in piece_results],
+        coordinate_unit_um=config.coordinate_unit_um,
+    )
+    if frame_check["frame_mismatch_suspected"]:
+        log_status(
+            f"[{config.dataset_name}] WARNING {table_config.segmentation!r}: the "
+            "tissue edge lies a median "
+            f"{frame_check['edge_to_nearest_cell_median_um']:.0f} um from the "
+            f"nearest cell ({coords.source}); the boundaries may not be in "
+            f"boundary_frame={frame.boundary_frame!r}."
+        )
     assignments = _assign_piecewise_cortical_depth_to_cells(
         coords,
         piece_results,
@@ -415,6 +430,7 @@ def _annotate_table(
             "shape_key": shape_key,
             "coordinate_source": coords.source,
             **frame.provenance(),
+            **frame_check,
             "cells_path": str(cells_path),
         }
     )
@@ -841,6 +857,11 @@ def _build_qc_summary(
     finite = thickness[np.isfinite(thickness) & (thickness > 0)]
     failed = [line for line in streamlines if line.qc_flag != "ok"]
     warnings = _depth_warnings(streamlines, finite)
+    warnings.extend(
+        f"frame_mismatch_suspected:{segmentation}"
+        for segmentation, table_summary in table_summaries.items()
+        if table_summary.get("frame_mismatch_suspected")
+    )
     return {
         "dataset_name": config.dataset_name,
         "platform": config.platform,

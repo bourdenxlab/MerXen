@@ -112,6 +112,18 @@ was explicit; stages that copy those columns onward (clustering tables,
 annotated H5ADs, aligned table clones) copy stale values unless they are
 re-run after the depth stage.
 
+The QC summary also measures, per table, whether the cells sit on the
+boundaries: `edge_to_nearest_cell_median_um` (median distance from points
+every 25 µm along the tissue edge to the nearest cell) and
+`ribbon_bin_occupancy` (share of the 50 µm bins inside the ribbon mask that
+hold a cell, also `ribbon_bin_occupancy_by_piece`). In a matching frame the
+edge median is about 80-110 µm and the occupancy about 0.97-0.98 (P7513 /
+P1212, both platforms); native MERSCOPE boundaries on the aligned cells gave
+870-2370 µm and 0.54-0.71. An edge median above 300 µm sets
+`frame_mismatch_suspected` and adds the warning
+`frame_mismatch_suspected:<segmentation>`; the stage still completes. Without
+a tissue-edge line the edge median is `null` and no warning is raised.
+
 Before this setting existed the stage read `<shape_key>_aligned_nonrigid`
 on MERSCOPE whenever it existed, while the boundaries were native. Tables with
 `obsm['spatial']` (`reseg`, `original_seg`) still used native coordinates, but
@@ -175,7 +187,7 @@ Published under
 | `compute_cortical_depth_out/<segmentation>/*_equivolumetric_depth_violin_by_broad_class.png` | Violin of `equivolumetric_depth` per broad cell-type cluster. PDF copy is also written. |
 | `compute_cortical_depth_out/<segmentation>/*_laplace_depth_violin_by_subcluster.png` | Subplot grid, one broad class each, with `laplace_depth` violins per subclustered annotation (`subcluster_label`). PDF copy is also written. |
 | `compute_cortical_depth_out/<segmentation>/*_equivolumetric_depth_violin_by_subcluster.png` | Subplot grid, one broad class each, with `equivolumetric_depth` violins per subclustered annotation. PDF copy is also written. |
-| `compute_cortical_depth_out/cortical_depth_qc_summary.json` | Cell counts, streamline thickness stats, failed/flagged streamlines, warnings, and the coordinate provenance: top-level `boundary_frame`, and per table `shape_key`, `coordinate_source`, `boundary_frame`, `cell_coordinate_frame` and `frame_resolution` (`native_element`, `aligned_element`, `fixed_reference_native_element` or `table_spatial_only`). |
+| `compute_cortical_depth_out/cortical_depth_qc_summary.json` | Cell counts, streamline thickness stats, failed/flagged streamlines, warnings, and the coordinate provenance: top-level `boundary_frame`, and per table `shape_key`, `coordinate_source`, `boundary_frame`, `cell_coordinate_frame` and `frame_resolution` (`native_element`, `aligned_element`, `fixed_reference_native_element` or `table_spatial_only`), plus the frame check `edge_to_nearest_cell_median_um`, `ribbon_bin_occupancy`, `ribbon_bin_occupancy_by_piece` and `frame_mismatch_suspected`. |
 
 The per-cluster violin plots require broad-class and subcluster annotations from
 the [Squidpy clustering](clustering-squidpy.md) stage. This stage is therefore
@@ -229,7 +241,8 @@ layer-relevant analyses.
   volumetric depth.
 - Boundary quality dominates result quality. Check QC overlays for flipped,
   incomplete, self-crossing, or poorly aligned annotations.
-- The boundary frame is declared, not detected. A wrong declaration is caught
-  only when the matching element is missing; check the cell-depth plots.
+- The boundary frame is declared, not detected. A wrong declaration is refused
+  when the matching element is missing; on a store holding both frames it is
+  only flagged by the frame check below (which needs a tissue-edge line).
 - Cells near artificial side boundaries are flagged because their streamlines
   may be influenced by the manually closed ribbon.
