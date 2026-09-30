@@ -33,7 +33,10 @@ from merxen.cortical_depth.boundaries import (
     load_boundary_annotations,
 )
 from merxen.cortical_depth.equivolumetric import compute_equal_area_depth
-from merxen.cortical_depth.frames import resolve_cell_coordinate_frame
+from merxen.cortical_depth.frames import (
+    DEPTH_PROVENANCE_UNS_KEY,
+    resolve_cell_coordinate_frame,
+)
 from merxen.cortical_depth.laplace import solve_laplace_depth
 from merxen.cortical_depth.plotting import (
     depth_contours_to_geojson,
@@ -390,6 +393,7 @@ def _annotate_table(
 
     if config.write_spatialdata_table:
         updated = apply_depth_columns(sdata_obj.tables[table_key], assignments)
+        updated.uns[DEPTH_PROVENANCE_UNS_KEY] = frame.table_provenance(coords.source)
         parsed = _parse_table_for_spatialdata(
             updated,
             source_table=sdata_obj.tables[table_key],

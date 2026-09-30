@@ -23,6 +23,7 @@ from merxen.config import CorticalDepthConfig, CorticalDepthTableConfig
 from merxen.cortical_depth import frames
 from merxen.cortical_depth.frames import (
     ALIGNED_ELEMENT,
+    DEPTH_PROVENANCE_UNS_KEY,
     FIXED_REFERENCE_NATIVE_ELEMENT,
     NATIVE_ELEMENT,
     TABLE_SPATIAL_ONLY,
@@ -423,6 +424,51 @@ def test_xenium_table_coordinates_and_region_are_unchanged(tmp_path: Path) -> No
     written = sd.read_zarr(zarr_path).tables[TABLE]
     assert written.uns["spatialdata_attrs"]["region"] == NATIVE
     assert "laplace_depth" in written.obs.columns
+    assert dict(written.uns[DEPTH_PROVENANCE_UNS_KEY]) == {
+        "boundary_frame": "native",
+        "frame_resolution": NATIVE_ELEMENT,
+        "coordinate_source": "obsm:spatial",
+        "shape_key": NATIVE,
+    }
+
+
+def test_merscope_write_back_keeps_the_native_region_and_records_the_frame(
+    tmp_path: Path,
+) -> None:
+    """Aligned MERSCOPE store: the written-back native table keeps its native
+    region and carries the frame the depth columns were computed in. The
+    pre-fix code retargeted the table to the aligned element and wrote no
+    provenance."""
+    zarr_path = _write_store(tmp_path, platform="MERSCOPE", attrs=MOVING_MANIFEST)
+    boundaries = _write_boundaries(tmp_path / "native.geojson", mirrored=False)
+
+    run_cortical_depth(
+        _config(
+            tmp_path / "out",
+            boundaries,
+            zarr_path=zarr_path,
+            write_spatialdata_table=True,
+        )
+    )
+
+    store = sd.read_zarr(zarr_path)
+    written = store.tables[TABLE]
+    assert written.uns["spatialdata_attrs"]["region"] == NATIVE
+    assert set(written.obs["region"].astype(str)) == {NATIVE}
+    assert dict(written.uns[DEPTH_PROVENANCE_UNS_KEY]) == {
+        "boundary_frame": "native",
+        "frame_resolution": NATIVE_ELEMENT,
+        "coordinate_source": f"shapes:{NATIVE}",
+        "shape_key": NATIVE,
+    }
+    assert bool(written.obs["inside_cortical_ribbon"].all())
+    cells, _ = _read_outputs(tmp_path / "out")
+    by_cell = written.obs.set_index(written.obs["instance_id"].astype(str))
+    np.testing.assert_allclose(
+        by_cell.loc[cells["cell_id"], "laplace_depth"].to_numpy(float),
+        cells["laplace_depth"].to_numpy(float),
+    )
+    assert ALIGNED in store.shapes
 
 
 def _native_cells() -> dict[str, tuple[float, float]]:

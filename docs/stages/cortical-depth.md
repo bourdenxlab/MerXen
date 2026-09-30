@@ -104,7 +104,13 @@ selects the element the cells are read from:
 
 Refusals raise `BoundaryFrameMismatchError` with the element names. When depth
 columns are written back, a native table keeps its native element as its
-SpatialData region.
+SpatialData region, and its `uns['cortical_depth']` records the frame the
+columns were computed in: `boundary_frame`, `frame_resolution`,
+`coordinate_source` and `shape_key` (the same values as the QC summary). A
+table whose depth columns carry no such entry was written before the frame
+was explicit; stages that copy those columns onward (clustering tables,
+annotated H5ADs, aligned table clones) copy stale values unless they are
+re-run after the depth stage.
 
 Before this setting existed the stage read `<shape_key>_aligned_nonrigid`
 on MERSCOPE whenever it existed, while the boundaries were native. Tables with
