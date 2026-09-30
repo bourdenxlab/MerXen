@@ -79,11 +79,44 @@ DEPTH_STRATUM_MIN_COUNTS: Final = 30
 HELDOUT_HEADLINE_SET: Final = "m4_resolve_heldout_whb_only"
 COP_SUPERCLUSTER: Final = "Committed oligodendrocyte precursor"
 OPC: Final = "Oligodendrocyte precursors"
+CGE_SUPERCLUSTER: Final = "CGE interneuron"
+# Nodes the plan names as sinks to watch (§9 item 2: "COP / CGE / Splatter
+# sinks"; Splatter is a vocab sink). Any node whose argmax share of its broad
+# class exceeds its reference share of that class more than SINK_PRONE_RATIO
+# times is listed too (M7 review; within the broad class because the WHB
+# frontal precompute is neuron-enriched: neurons hold 91% of its cells).
+SINK_PRONE_NODES: Final[tuple[str, ...]] = (COP_SUPERCLUSTER, CGE_SUPERCLUSTER)
+SINK_PRONE_RATIO: Final = 3.0
+SINK_COLUMNS: Final[tuple[str, ...]] = (
+    "sample_id",
+    "platform",
+    "node",
+    "broad_class",
+    "sink",
+    "region_plausible",
+    "reasons",
+    "n_argmax",
+    "share_table",
+    "soft_mass_share",
+    "confident_share",
+    "argmax_share_in_broad",
+    "reference_share",
+    "reference_share_in_broad",
+    "argmax_over_reference_in_broad",
+)
 H5_DEFINITIONS: Final[dict[str, str]] = {
     "confident_cop_supercluster_share": "confident COP supercluster / table cells",
     "confident_broad_opc_share": "confident broad OPC / table cells",
     "cop_derived_opc_share": (
         "confident broad OPC cells whose WHB call is COP / confident broad OPC"
+    ),
+    "cop_derived_soft_opc_share": (
+        "soft mass of the COP supercluster (assignment + runner-ups) / soft broad "
+        "OPC mass, table cells"
+    ),
+    "cop_derived_argmax_opc_share": (
+        "table cells whose WHB argmax is COP / table cells whose argmax broad class "
+        "is OPC"
     ),
 }
 RAW_THRESHOLD_KEYS: Final[dict[str, dict[str, str]]] = {
@@ -891,7 +924,14 @@ def _long_coverage(coverage: pd.DataFrame) -> pd.DataFrame:
 
 
 def _composition_rows(
-    result: Any, *, sample: SampleData, level: str, kind: str, region: str
+    result: Any,
+    *,
+    sample: SampleData,
+    level: str,
+    kind: str,
+    region: str,
+    cop_share: float = math.nan,
+    comparison_status: str = "comparable",
 ) -> list[dict[str, Any]]:
     rows = []
     for record in result.records:
@@ -913,6 +953,154 @@ def _composition_rows(
                 "n_cells": result.n_cells,
                 "n_tiles": result.n_tiles,
                 "n_reps": result.n_reps,
+                "cop_derived_share": cop_share if record.category == OPC else math.nan,
+                "comparison_status": comparison_status,
+            }
+        )
+    return rows
+
+
+def _gate_level(sample: SampleData) -> str:
+    gate = (sample.summary.get("resolution") or {}).get("gate") or {}
+    return str(gate.get("level"))
+
+
+def reference_node_shares(
+    bundle: Path | None, level_suffix: str = "_SUPC"
+) -> dict[str, float]:
+    """Return each reference node's share of the bundle's reference cells.
+
+    Args:
+        bundle: The primary bundle directory (``profiles.parquet``).
+        level_suffix: The level's token suffix (``_SUPC``: supercluster).
+
+    Returns:
+        Node name to ``n_cells / total`` over the level's nodes (empty
+        without the table).
+    """
+    if bundle is None or not (Path(bundle) / "profiles.parquet").is_file():
+        return {}
+    frame = pd.read_parquet(
+        Path(bundle) / "profiles.parquet", columns=["level", "node_name", "n_cells"]
+    )
+    frame = frame[frame["level"].astype(str).str.endswith(level_suffix)]
+    counts = frame.drop_duplicates("node_name").set_index("node_name")["n_cells"]
+    total = float(counts.sum())
+    if total <= 0:
+        return {}
+    return {str(name): float(value) / total for name, value in counts.items()}
+
+
+def sink_rows_of(
+    sample: SampleData,
+    table: pd.DataFrame,
+    *,
+    region_name: str,
+    reference_shares: Mapping[str, float],
+    soft_sc: tuple[np.ndarray, list[str]] | None,
+) -> list[dict[str, Any]]:
+    """Return the sinks table rows of one sample (item 2).
+
+    A node is listed when it is a vocab sink, implausible in the region, one
+    of ``SINK_PRONE_NODES`` (COP, CGE), or when its argmax share of its broad
+    class exceeds its reference share of that class more than
+    ``SINK_PRONE_RATIO`` times; each row gives its argmax, soft-mass and
+    confident shares of the table cells and its reference shares.
+
+    Args:
+        sample: The sample.
+        table: Its table cells.
+        region_name: The anatomical region token.
+        reference_shares: ``reference_node_shares`` of the primary bundle.
+        soft_sc: ``supercluster_soft_matrix`` of the table, if any.
+
+    Returns:
+        The rows.
+    """
+    vocab = primary_vocab("human")
+    n_table = max(1, len(table))
+    argmax = names_array(table, "mmc_whb_supercluster_name")
+    confident_names = np.where(
+        confident(table, "supercluster"),
+        names_array(table, Columns.level("supercluster", "name")),
+        "",
+    )
+    nodes, freq = np.unique(argmax, return_counts=True)
+    argmax_counts = {
+        str(node): int(count) for node, count in zip(nodes, freq, strict=True) if node
+    }
+    broad_of = {name: vocab.broad_class(name) for name in vocab.names}
+    argmax_by_broad: dict[str, int] = {}
+    for node, count in argmax_counts.items():
+        key = broad_of.get(node, UNASSIGNED_LABEL)
+        argmax_by_broad[key] = argmax_by_broad.get(key, 0) + count
+    reference_by_broad: dict[str, float] = {}
+    for node, share in reference_shares.items():
+        key = broad_of.get(node, UNASSIGNED_LABEL)
+        reference_by_broad[key] = reference_by_broad.get(key, 0.0) + share
+    soft_shares = (
+        dict(zip(soft_sc[1], soft_sc[0].sum(axis=0) / n_table, strict=True))
+        if soft_sc is not None
+        else {}
+    )
+    rows = []
+    candidates = sorted(set(argmax_counts) | set(SINK_PRONE_NODES))
+    for node in candidates:
+        if node not in vocab:
+            continue
+        broad = broad_of[node]
+        reasons = []
+        if vocab.is_sink(node):
+            reasons.append("vocab_sink")
+        try:
+            plausible = vocab.is_region_plausible(node, region_name)
+        except (KeyError, ValueError):
+            plausible = True
+        if not plausible:
+            reasons.append("region_implausible")
+        if node in SINK_PRONE_NODES:
+            reasons.append("named_sink_prone")
+        n_argmax = argmax_counts.get(node, 0)
+        in_broad = (
+            n_argmax / argmax_by_broad[broad] if argmax_by_broad.get(broad) else 0.0
+        )
+        reference = reference_shares.get(node, 0.0)
+        reference_in_broad = (
+            reference / reference_by_broad[broad]
+            if reference_by_broad.get(broad)
+            else 0.0
+        )
+        ratio = (
+            in_broad / reference_in_broad
+            if reference_in_broad > 0
+            else (math.inf if in_broad > 0 else math.nan)
+        )
+        if reference_shares and ratio > SINK_PRONE_RATIO:
+            reasons.append("argmax_over_reference_in_broad")
+        if not reasons:
+            continue
+        rows.append(
+            {
+                "sample_id": sample.sample_id,
+                "platform": sample.platform,
+                "node": node,
+                "broad_class": broad,
+                "sink": vocab.is_sink(node),
+                "region_plausible": plausible,
+                "reasons": "; ".join(reasons),
+                "n_argmax": n_argmax,
+                "share_table": n_argmax / n_table,
+                "soft_mass_share": soft_shares.get(node, math.nan),
+                "confident_share": float(np.count_nonzero(confident_names == node))
+                / n_table,
+                "argmax_share_in_broad": in_broad,
+                "reference_share": reference if reference_shares else math.nan,
+                "reference_share_in_broad": reference_in_broad
+                if reference_shares
+                else math.nan,
+                "argmax_over_reference_in_broad": ratio
+                if reference_shares
+                else math.nan,
             }
         )
     return rows
@@ -961,6 +1149,11 @@ def item_composition(
     reason_rows: list[dict[str, Any]] = []
     sink_rows: list[dict[str, Any]] = []
     depth_rows: list[dict[str, Any]] = []
+    reference_shares = (
+        reference_node_shares(inputs.bundles.get(primary_reference(inputs)))
+        if species == "human"
+        else {}
+    )
     for sample in inputs.ordered_samples():
         table = table_cells(sample)
         codes = tile_codes_of(sample, options)
@@ -978,7 +1171,27 @@ def item_composition(
                 (counts >= DEPTH_STRATUM_MIN_COUNTS)[:, None], soft, 0.0
             )
         kinds["confident"] = one_hot_matrix(label, classes, include=is_confident)
-        kinds["argmax"] = one_hot_matrix(argmax_classes(table, species), classes)
+        argmax_broad = argmax_classes(table, species)
+        kinds["argmax"] = one_hot_matrix(argmax_broad, classes)
+        # The COP-derived part of each kind's OPC mass (human; plan §9 item 2).
+        soft_sc = supercluster_soft_matrix(table) if species == "human" else None
+        cop_parts: dict[str, np.ndarray] = {}
+        if species == "human":
+            argmax_sc = names_array(table, "mmc_whb_supercluster_name")
+            is_cop = argmax_sc == COP_SUPERCLUSTER
+            cop_parts["argmax"] = is_cop.astype(np.float64)
+            cop_parts["confident"] = (is_confident & (label == OPC) & is_cop).astype(
+                np.float64
+            )
+            if soft_sc is not None and soft is not None:
+                cop_mass = soft_sc[0][:, soft_sc[1].index(COP_SUPERCLUSTER)]
+                cop_parts["soft"] = cop_mass
+                cop_parts["soft_ge30"] = np.where(
+                    counts >= DEPTH_STRATUM_MIN_COUNTS, cop_mass, 0.0
+                )
+        leaf_status = (
+            "comparable" if _gate_level(sample) == "full" else "withheld_for_comparison"
+        )
         for region, keep in regions.items():
             for kind, matrix in kinds.items():
                 result = block_bootstrap_shares(
@@ -990,13 +1203,24 @@ def item_composition(
                     keep=keep,
                 )
                 level = "broad" if species == "human" else "class"
+                selected = np.ones(len(matrix), bool) if keep is None else keep
+                total = float(matrix[selected].sum())
+                cop_share = (
+                    float(cop_parts[kind][selected].sum() / total)
+                    if kind in cop_parts and total > 0
+                    else math.nan
+                )
                 rows.extend(
                     _composition_rows(
-                        result, sample=sample, level=level, kind=kind, region=region
+                        result,
+                        sample=sample,
+                        level=level,
+                        kind=kind,
+                        region=region,
+                        cop_share=cop_share,
                     )
                 )
         if species == "human":
-            soft_sc = supercluster_soft_matrix(table)
             conf_sc = names_array(table, Columns.level("supercluster", "name"))
             sc_names = list(primary_vocab("human").names)
             for region, keep in regions.items():
@@ -1016,6 +1240,7 @@ def item_composition(
                             level="supercluster",
                             kind="soft",
                             region=region,
+                            comparison_status=leaf_status,
                         )
                     )
                 result = block_bootstrap_shares(
@@ -1035,6 +1260,7 @@ def item_composition(
                         level="supercluster",
                         kind="confident",
                         region=region,
+                        comparison_status=leaf_status,
                     )
                 )
         else:
@@ -1059,6 +1285,7 @@ def item_composition(
                     level="subclass",
                     kind="confident",
                     region="whole_section",
+                    comparison_status=leaf_status,
                 )
             )
         # Mixed/Unknown by reason: the first level's status of cells without
@@ -1094,32 +1321,19 @@ def item_composition(
                 if Columns.FLAG_IMPLAUSIBLE in table
                 else np.zeros(len(table), bool)
             )
-            vocab = primary_vocab("human")
             region_name = str(
                 sample.manifest.get("anatomical_region") or "frontal_cortex"
             )
+            sink_rows.extend(
+                sink_rows_of(
+                    sample,
+                    table,
+                    region_name=region_name,
+                    reference_shares=reference_shares,
+                    soft_sc=soft_sc,
+                )
+            )
             argmax = names_array(table, "mmc_whb_supercluster_name")
-            nodes, freq = np.unique(argmax, return_counts=True)
-            for node, count in zip(nodes, freq, strict=True):
-                if not node or node not in vocab:
-                    continue
-                sink = vocab.is_sink(node)
-                try:
-                    plausible = vocab.is_region_plausible(node, region_name)
-                except (KeyError, ValueError):
-                    plausible = True
-                if sink or not plausible:
-                    sink_rows.append(
-                        {
-                            "sample_id": sample.sample_id,
-                            "platform": sample.platform,
-                            "node": node,
-                            "sink": sink,
-                            "region_plausible": plausible,
-                            "n_argmax": int(count),
-                            "share_table": float(count / max(1, len(table))),
-                        }
-                    )
             item.metrics.append(
                 metric(
                     "H2",
@@ -1170,6 +1384,43 @@ def item_composition(
                         note=""
                         if recorded is None
                         else f"RESOLVE recorded {float(recorded):.6g}",
+                    )
+                )
+            # The same question on the soft (headline) and argmax
+            # compositions: how much of their OPC is COP (report records).
+            opc_column = classes.index(OPC)
+            soft_opc = float(soft[:, opc_column].sum()) if soft is not None else 0.0
+            argmax_opc = int(np.count_nonzero(argmax_broad == OPC))
+            for name, numerator, denominator, kind in (
+                (
+                    "cop_derived_soft_opc_share",
+                    float(cop_parts["soft"].sum()) if "soft" in cop_parts else math.nan,
+                    soft_opc,
+                    "soft",
+                ),
+                (
+                    "cop_derived_argmax_opc_share",
+                    float(is_cop.sum()),
+                    float(argmax_opc),
+                    "argmax",
+                ),
+            ):
+                item.metrics.append(
+                    metric(
+                        "H5",
+                        name,
+                        numerator / denominator if denominator > 0 else math.nan,
+                        definition=H5_DEFINITIONS[name],
+                        source="label_table",
+                        sample_id=sample.sample_id,
+                        platform=sample.platform,
+                        kind=kind,
+                        n=len(table),
+                        note=(
+                            f"COP {numerator / max(1, len(table)):.4g} of OPC "
+                            f"{denominator / max(1, len(table)):.4g} (shares of "
+                            "table cells)"
+                        ),
                     )
                 )
         if Columns.DEPTH_BIN in table.columns and soft is not None:
@@ -1240,10 +1491,14 @@ def item_composition(
             high="ci_high",
             ylabel="share of mass",
             title="Composition (whole section; soft with 95% block-bootstrap CI)",
+            overlay="cop_derived_share" if species == "human" else None,
+            overlay_label="COP-derived part of OPC",
         ),
         plotted,
         "Soft (headline, 95% CI over 500 µm tiles), soft >= 30 counts, confident-only "
-        "and argmax composition.",
+        "and argmax composition. Hatched inside the OPC bars: the part carried by "
+        "the COP supercluster (cop_derived_share), a sink while COP mass dominates "
+        "OPC.",
     )
     if "shared_mask" in set(composition.get("region", pd.Series(dtype=str))):
         regions_plot = composition[
@@ -1294,6 +1549,9 @@ def item_composition(
         fine_plot["series"] = (
             fine_plot["platform"].astype(str) + " " + fine_plot["kind"].astype(str)
         )
+        fine_plot["not_comparable"] = (
+            fine_plot["comparison_status"] == "withheld_for_comparison"
+        )
         writer.figure(
             item,
             "supercluster" if species == "human" else "subclass",
@@ -1306,26 +1564,29 @@ def item_composition(
                 high="ci_high",
                 ylabel="share of mass",
                 title="Leaf-level composition (top 25)",
+                hatched="not_comparable",
+                hatched_label="not_attempted_gate: not comparable",
             ),
             fine_plot,
             "Soft and confident composition at the leaf level (supercluster / "
-            "subclass).",
+            "subclass). Hatched: a sample whose dataset gate is not full "
+            "(comparison_status withheld_for_comparison); its leaf-level shares "
+            "are not compared across platforms (plan §5.4).",
         )
+        withheld = sorted(
+            set(fine.loc[fine["comparison_status"] != "comparable", "sample_id"])
+        )
+        if withheld:
+            item.notes.append(
+                "Leaf-level composition of "
+                + ", ".join(withheld)
+                + " is withheld for comparison (dataset gate not full): drawn "
+                "hatched, not comparable with the other platform."
+            )
     writer.table(item, "composition", composition)
     writer.table(item, "mixed_unknown_reasons", pd.DataFrame(reason_rows))
     writer.table(item, "depth_bins", pd.DataFrame(depth_rows))
-    sinks = pd.DataFrame(
-        sink_rows,
-        columns=[
-            "sample_id",
-            "platform",
-            "node",
-            "sink",
-            "region_plausible",
-            "n_argmax",
-            "share_table",
-        ],
-    )
+    sinks = pd.DataFrame(sink_rows, columns=list(SINK_COLUMNS))
     writer.table(item, "sinks_implausible", sinks)
     item.summary = pd.DataFrame(reason_rows)
     return item

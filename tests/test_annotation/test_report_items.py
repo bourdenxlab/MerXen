@@ -215,3 +215,162 @@ def test_heldout_item_shows_the_h4_headline_label_set(tmp_path: Path) -> None:
         ri.HELDOUT_HEADLINE_SET,
         "m4_resolve_heldout",
     }
+
+
+COP = "Committed oligodendrocyte precursor"
+
+
+def _composition_table(n_cop: int, n_opc: int, n_neuron: int) -> pd.DataFrame:
+    """A human label table: COP, OPC and CGE neuron cells with soft columns.
+
+    Every COP cell has bp 0.8 on COP and a 0.2 runner-up on OPC; every OPC
+    cell 0.9 on OPC; every neuron 1.0 on the CGE supercluster. Three cells
+    carry ``flag_implausible``.
+    """
+    n = n_cop + n_opc + n_neuron
+    name = np.r_[
+        np.repeat(COP, n_cop),
+        np.repeat("Oligodendrocyte precursor", n_opc),
+        np.repeat("CGE interneuron", n_neuron),
+    ]
+    bp = np.r_[np.full(n_cop, 0.8), np.full(n_opc, 0.9), np.full(n_neuron, 1.0)]
+    runner = np.r_[
+        np.repeat("Oligodendrocyte precursor", n_cop),
+        np.repeat(None, n_opc + n_neuron),
+    ]
+    runner_bp = np.r_[np.full(n_cop, 0.2), np.zeros(n_opc + n_neuron)]
+    frame = pd.DataFrame(
+        {
+            "cell_id": [f"c{index}" for index in range(n)],
+            "in_table": np.ones(n, dtype=bool),
+            "total_counts": np.full(n, 50.0),
+            "mmc_whb_supercluster_name": name,
+            "mmc_whb_supercluster_bp": bp,
+            "mmc_whb_supercluster_runner_up_1_name": runner,
+            "mmc_whb_supercluster_runner_up_1_bp": runner_bp,
+            "ct_broad_name": np.where(
+                name == "CGE interneuron", "Neurons", "Oligodendrocyte precursors"
+            ),
+            "ct_broad_status": np.where(
+                np.arange(n) < n_cop - 2, "parent_unresolved", "confident"
+            ),
+            "ct_supercluster_name": name,
+            "ct_supercluster_status": np.where(
+                name == "CGE interneuron", "confident", "not_resolvable"
+            ),
+            "ct_final_level": np.where(np.arange(n) < n_cop - 2, "none", "broad"),
+            "flag_implausible": np.arange(n) < 3,
+        }
+    )
+    soft = {f"soft_broad_{safe_token(c)}": np.zeros(n) for c in HUMAN_BROAD_CLASSES}
+    soft["soft_broad_oligodendrocyte_precursors"] = np.r_[
+        np.ones(n_cop), np.full(n_opc, 0.9), np.zeros(n_neuron)
+    ]
+    soft["soft_broad_neurons"] = np.r_[np.zeros(n_cop + n_opc), np.ones(n_neuron)]
+    soft["soft_broad_unallocated"] = np.r_[
+        np.zeros(n_cop), np.full(n_opc, 0.1), np.zeros(n_neuron)
+    ]
+    return frame.assign(**soft)
+
+
+def test_composition_reports_the_cop_part_of_opc_and_the_sink_prone_nodes(
+    tmp_path: Path,
+) -> None:
+    """M7 review: soft OPC is mostly COP mass; the report must say so."""
+    labels = _composition_table(n_cop=30, n_opc=10, n_neuron=60)
+    broad_only = SampleData(
+        sample_id="S_MERSCOPE",
+        platform="MERSCOPE",
+        labels=labels,
+        summary={"resolution": {"gate": {"level": "broad_only"}}},
+        manifest={},
+        labels_path=Path("labels.parquet"),
+    )
+    full = SampleData(
+        sample_id="S_XENIUM",
+        platform="XENIUM",
+        labels=labels.copy(),
+        summary={"resolution": {"gate": {"level": "full"}}},
+        manifest={},
+        labels_path=Path("labels.parquet"),
+    )
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    pd.DataFrame(
+        {
+            "level": ["CCN_SUPC"] * 4 + ["CCN_CLUS"],
+            "node_name": [COP, "Oligodendrocyte precursor", "CGE interneuron"]
+            + ["Upper-layer intratelencephalic", "x"],
+            "n_cells": [1, 99, 100, 400, 7],
+            "gene_id": ["g"] * 5,
+        }
+    ).to_parquet(bundle / "profiles.parquet")
+    assert ri.reference_node_shares(bundle) == pytest.approx(
+        {
+            COP: 1 / 600,
+            "Oligodendrocyte precursor": 99 / 600,
+            "CGE interneuron": 100 / 600,
+            "Upper-layer intratelencephalic": 400 / 600,
+        }
+    )
+    inputs = ReportInputs(
+        sources=ReportSources(
+            species="human", pair_id="S", segmentation="seg", resolve_dir=tmp_path
+        ),
+        summary={},
+        samples={"S_MERSCOPE": broad_only, "S_XENIUM": full},
+        bundles={"whb_frontal_supc_clus": bundle},
+    )
+    item = ri.item_composition(
+        inputs,
+        ri.ItemWriter(tmp_path / "out", make_figures=False),
+        ri.ReportOptions(n_bootstrap=10),
+    )
+    records = {
+        (record.name, record.sample_id): record
+        for record in item.metrics
+        if record.criterion in ("H2", "H5")
+    }
+    # COP mass 30 x 0.8 = 24 of soft OPC mass 30 x 1.0 + 10 x 0.9 = 39.
+    soft = records[("cop_derived_soft_opc_share", "S_MERSCOPE")]
+    assert soft.value == pytest.approx(24 / 39) and soft.kind == "soft"
+    argmax = records[("cop_derived_argmax_opc_share", "S_MERSCOPE")]
+    assert argmax.value == pytest.approx(30 / 40) and argmax.kind == "argmax"
+    # H2: three implausible cells of 100 (not the complement).
+    assert records[("flag_implausible_share", "S_MERSCOPE")].value == pytest.approx(
+        0.03
+    )
+    composition = pd.read_csv(
+        tmp_path / "out" / "tables" / "item02_composition__composition.csv"
+    )
+    opc = composition[
+        (composition["category"] == "Oligodendrocyte precursors")
+        & (composition["kind"] == "soft")
+        & (composition["level"] == "broad")
+        & (composition["sample_id"] == "S_MERSCOPE")
+    ]
+    assert opc["cop_derived_share"].iloc[0] == pytest.approx(24 / 100)
+    assert opc["share"].iloc[0] == pytest.approx(39 / 100)
+    others = composition[composition["category"] != "Oligodendrocyte precursors"]
+    assert others["cop_derived_share"].isna().all()
+    # Leaf-level rows of the broad-only sample are withheld for comparison.
+    leaf = composition[composition["level"] == "supercluster"]
+    status = leaf.groupby("sample_id")["comparison_status"].unique()
+    assert list(status["S_MERSCOPE"]) == ["withheld_for_comparison"]
+    assert list(status["S_XENIUM"]) == ["comparable"]
+    assert any("withheld for comparison" in note for note in item.notes)
+    sinks = pd.read_csv(
+        tmp_path / "out" / "tables" / "item02_composition__sinks_implausible.csv"
+    )
+    merscope = sinks[sinks["sample_id"] == "S_MERSCOPE"].set_index("node")
+    assert {COP, "CGE interneuron"} <= set(merscope.index)
+    assert merscope.loc[COP, "share_table"] == pytest.approx(0.30)
+    assert merscope.loc[COP, "soft_mass_share"] == pytest.approx(0.24)
+    assert merscope.loc[COP, "confident_share"] == 0.0
+    assert merscope.loc["CGE interneuron", "confident_share"] == pytest.approx(0.6)
+    assert "named_sink_prone" in merscope.loc[COP, "reasons"]
+    # COP holds 75% of the argmax OPC-broad cells against 1% of the reference
+    # OPC-broad cells: over the 3x ratio; the OPC node itself is under it.
+    assert merscope.loc[COP, "argmax_over_reference_in_broad"] == pytest.approx(75.0)
+    assert "argmax_over_reference_in_broad" in merscope.loc[COP, "reasons"]
+    assert "Oligodendrocyte precursor" not in merscope.index
