@@ -1,0 +1,35 @@
+class,home_region,top2_share,coh_home_median,region_restricted
+01 IT-ET Glut,Isocortex,0.8259,0.6,true
+02 NP-CT-L6b Glut,Isocortex,0.9532,0.4333,true
+03 OB-CR Glut,OB,0.9444,0.1667,true
+04 DG-IMN Glut,HPF,0.9949,0.8667,true
+05 OB-IMN GABA,OB,0.9674,0.8333,true
+06 CTX-CGE GABA,Isocortex,0.8107,0.0333,false
+07 CTX-MGE GABA,Isocortex,0.87,0.0667,false
+08 CNU-MGE GABA,STR,0.8612,0.0333,false
+09 CNU-LGE GABA,STR,0.964,0.7333,true
+10 LSX GABA,STR,0.9822,0.6,true
+11 CNU-HYa GABA,STR,0.6743,0.4,false
+12 HY GABA,HY,0.9763,0.4333,true
+13 CNU-HYa Glut,STR,0.5089,0.4,false
+14 HY Glut,HY,0.9762,0.4,true
+15 HY Gnrh1 Glut,HY,0.9091,0.0,false
+16 HY MM Glut,HY,1.0,0.6333,true
+17 MH-LH Glut,TH,0.9985,0.7667,true
+18 TH Glut,TH,0.9915,0.5667,true
+19 MB Glut,MB,0.9447,0.4,true
+20 MB GABA,MB,0.9176,0.2333,true
+21 MB Dopa,MB,0.9923,0.2667,true
+22 MB-HB Sero,MB,0.8363,0.3667,true
+23 P Glut,P,0.8712,0.3667,true
+24 MY Glut,MY,0.815,0.1667,true
+25 Pineal Glut,,,,false
+26 P GABA,P,0.8691,0.2,true
+27 MY GABA,MY,0.8861,0.2,true
+28 CB GABA,CB,0.9976,0.5,true
+29 CB Glut,CB,0.9955,0.7667,true
+30 Astro-Epen,Isocortex,0.359,0.1333,false
+31 OPC-Oligo,MB,0.3075,0.3,false
+32 OEC,OB,0.9982,0.5333,true
+33 Vascular,Isocortex,0.39,0.1333,false
+34 Immune,Isocortex,0.4493,0.0,false
