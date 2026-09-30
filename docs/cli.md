@@ -46,14 +46,15 @@ Commands:
   annotation-store   Inspect the annotation reference store...
   annotate           Map published or prepared samples with...
   annotate-resolve   Resolve MAP outputs into label tables...
+  annotation-report  Build the annotation QC report of one pair...
   annotation-panel-fetch
                       Fetch pinned public panel gene lists (URL, size and...
   annotation-panel-simulate
                       Simulate a candidate panel: predicted levels, trust,...
 ```
 
-The reference-based annotation commands (`annotation-*`, `annotate` and
-`annotate-resolve`, plan `docs/plans/robust-celltype-annotation-plan.md`
+The reference-based annotation commands (`annotation-*`, `annotate`,
+`annotate-resolve` and `annotation-report`, plan `docs/plans/robust-celltype-annotation-plan.md`
 §3.2–§3.4) take explicit options instead of a single `--config`.
 
 Logging is configured in the root `main()` group and streams to stderr at
@@ -744,6 +745,44 @@ The human acceptance criteria (plan §14) are re-measured on these outputs
 with `scripts/acceptance/resolve_criteria.py` (see
 [the annotation stage](stages/annotation.md#shadow-baselines-m3)); it never
 changes a pre-registered threshold.
+
+## `merxen annotation-report`
+
+The annotation QC report (plan §9, M7): reads the published RESOLVE, MAP,
+PANEL, clustered-H5AD, cortical-depth, shared-mask and MENDER outputs of one
+pair × segmentation (mouse: one section) and writes into `--out`:
+
+| File | Content |
+|---|---|
+| `report.html` | Static page (inline CSS, no scripts or network assets): banners, the twelve §9 items with notes, tables and figures. |
+| `figures/<item>_<name>.png`, `.pdf`, `.csv` | Every figure as PNG and PDF, with the CSV of exactly what it draws. |
+| `tables/<item>__<name>.csv` | Item tables: the panel card, gate, compositions, reasons, drop lists, provenance. |
+| `<pair>_platform_gene_factors.csv` | Human pairs: per-gene median-centred log2 Xenium / MERSCOPE within confident labels. |
+| `acceptance_metrics.json` | Every measured metric with its §14 criterion, the criteria coverage, a per-sample digest and the provenance footer; metrics only, no verdicts. Deterministic. |
+| `report_run.json` | Wall time, version and options of the build. |
+
+`--out` must be a new or empty directory (`--overwrite` replaces files) and
+may not lie inside the results tree or an input directory unless
+`--allow-results-output` is given.
+
+| Option | Meaning |
+|---|---|
+| `--pair`, `--segmentation`, `--species` | The pair (mouse: the section id RESOLVE used), segmentation and species (`human`). |
+| `--results-root DIR` | Find the outputs in a results tree (`<root>/<pair>/<seg>/annotation_{resolve,map,panel}`, `clustering_squidpy_mapfirst` before `clustering_squidpy`, `<root>/<pair>/<plat>/compute_cortical_depth[_mapfirst]`, `<root>/<pair>/alignment/align_out`, `mender[_mapfirst]`). |
+| `--resolve-dir`, `--map-dir`, `--panel-dir` | Explicit RESOLVE / MAP / PANEL outputs (without `--results-root`, `--resolve-dir` is required). |
+| `--clustered-h5ad SID=PATH`, `--cortical-depth SID=PATH`, `--mender-manifest SID=PATH`, `--alignment-dir DIR` | Explicit inputs (repeatable), overriding the tree lookup. |
+| `--no-cortical-depth`, `--no-alignment`, `--no-mender` | Build without them (item 9 is then `not_available`; no shared-mask statistics). |
+| `--heldout-csv PATH` | A held-out-gene enrichment CSV (`scripts/acceptance/heldout_genes.py`) for item 8 / H4. |
+| `--store DIR` | Reference store, for bundles whose recorded path moved. |
+| `--n-bootstrap`, `--seed`, `--tile-um`, `--density-bin-um` | Block-bootstrap replicates (200), seed (0), tile edge (500 µm), aligned-bin edge (200 µm). |
+| `--no-figures`, `--no-expression`, `--items LIST`, `--strict` | Placeholders instead of drawn figures; skip the count-reading items (4, 7); build only these §9 items (12 is always built); fail on an item error instead of recording it as `failed`. |
+
+```bash
+merxen annotation-report --pair P1212 --segmentation proseg_hybrid \
+  --results-root /srv/storage/MerXen/results \
+  --store /media/mathieubo/SSD1/MerXen/annotation_references \
+  --out reports/P1212_proseg_hybrid
+```
 
 ## Writing a standalone config
 
