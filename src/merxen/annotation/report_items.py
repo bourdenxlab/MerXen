@@ -72,6 +72,10 @@ SECONDARY_REFERENCE: Final = "seaad_mr_panel"
 UNALLOCATED: Final = "unallocated"
 AGREEMENT_MIN_COUNTS: Final = 20
 SECOND_VOTE_BELOW: Final = 60
+# The levels the WHB / SEA-AD vote checks below 60 counts, root first, and
+# the statuses a failed vote leaves (plan §5.2).
+VOTE_LEVELS: Final[tuple[str, ...]] = ("lineage", "broad")
+VOTE_FAILURES: Final[tuple[str, ...]] = ("method_disagree", "single_method")
 DEPTH_STRATUM_MIN_COUNTS: Final = 30
 # The H4 label set item 8 shows first: scripts/acceptance/resolve_criteria.py's
 # non-circular headline (H4_HEADLINE_SET, M4 review: the WHB-only re-resolve
@@ -1942,35 +1946,46 @@ def item_method_agreement(
             tiles.insert(0, "platform", sample.platform)
             map_rows.append(tiles)
         below = counts < SECOND_VOTE_BELOW
-        for level in ("lineage", "broad"):
+        # A cell lost to the vote at a level is parent_unresolved below it, so
+        # the rule's cost at a level is cumulative: its first vote failure at
+        # that level or at any ancestor (lineage -> broad).
+        lost_so_far = np.zeros(len(table), dtype=bool)
+        for level in VOTE_LEVELS:
             status = status_array(table, level)
-            cost = below & np.isin(status, ["method_disagree", "single_method"])
+            at_level = below & np.isin(status, list(VOTE_FAILURES))
+            lost_so_far |= at_level
             cost_rows.append(
                 {
                     "sample_id": sample.sample_id,
                     "platform": sample.platform,
                     "level": level,
                     "n_below60": int(below.sum()),
-                    "n_lost_below60": int(cost.sum()),
-                    "share_table": _share(cost, len(table)),
+                    "n_lost_below60": int(lost_so_far.sum()),
+                    "share_table": _share(lost_so_far, len(table)),
+                    "n_lost_at_level": int(at_level.sum()),
+                    "share_table_at_level": _share(at_level, len(table)),
                 }
             )
             item.metrics.append(
                 metric(
                     "report",
                     "below60_rule_cost",
-                    _share(cost, len(table)),
+                    _share(lost_so_far, len(table)),
                     definition=(
-                        "table cells < 60 counts whose status at the level is "
-                        "method_disagree or "
-                        "single_method (the vote is the level's last check), / table "
-                        "cells"
+                        "table cells < 60 counts whose first vote failure "
+                        "(method_disagree or single_method) is at the level or an "
+                        "ancestor level (lineage), / table cells: the labels the "
+                        "below-60 rule costs at the level"
                     ),
                     source="label_table",
                     sample_id=sample.sample_id,
                     platform=sample.platform,
                     level=level,
                     n=len(table),
+                    note=(
+                        f"at the level itself {_share(at_level, len(table)):.6g} "
+                        f"({int(at_level.sum())} cells)"
+                    ),
                 )
             )
     agreement = (

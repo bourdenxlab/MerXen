@@ -374,3 +374,53 @@ def test_composition_reports_the_cop_part_of_opc_and_the_sink_prone_nodes(
     assert merscope.loc[COP, "argmax_over_reference_in_broad"] == pytest.approx(75.0)
     assert "argmax_over_reference_in_broad" in merscope.loc[COP, "reasons"]
     assert "Oligodendrocyte precursor" not in merscope.index
+
+
+def test_the_below60_rule_cost_is_cumulative_over_the_cascade(tmp_path: Path) -> None:
+    """M7 review: a cell lost at lineage is parent_unresolved at broad."""
+    n = 100
+    lineage = np.full(n, "confident", dtype=object)
+    broad = np.full(n, "confident", dtype=object)
+    lineage[:10] = "method_disagree"  # lost at lineage, below 60
+    broad[:10] = "parent_unresolved"
+    broad[10:14] = "single_method"  # lost at broad, below 60
+    lineage[90:95] = "method_disagree"  # above 60: the rule does not apply
+    broad[90:95] = "parent_unresolved"
+    counts = np.r_[np.full(80, 30.0), np.full(20, 200.0)]
+    labels = pd.DataFrame(
+        {
+            "cell_id": [f"c{index}" for index in range(n)],
+            "in_table": np.ones(n, dtype=bool),
+            "total_counts": counts,
+            "ct_lineage_status": lineage,
+            "ct_broad_status": broad,
+            "mmc_whb_supercluster_name": np.repeat("Astrocyte", n),
+            "mmc_seaad_subclass_name": np.repeat("Astrocyte", n),
+            "mmc_seaad_supertype_name": np.repeat("Astro_1", n),
+        }
+    )
+    inputs = ReportInputs(
+        sources=ReportSources(
+            species="human", pair_id="S", segmentation="seg", resolve_dir=tmp_path
+        ),
+        summary={},
+        samples={"S_MERSCOPE": _sample(labels)},
+    )
+    item = ri.item_method_agreement(
+        inputs, ri.ItemWriter(tmp_path / "out", make_figures=False), ri.ReportOptions()
+    )
+    cost = {
+        record.level: record
+        for record in item.metrics
+        if record.name == "below60_rule_cost"
+    }
+    assert cost["lineage"].value == pytest.approx(0.10)
+    # Broad: the 10 lineage losses plus the 4 lost at broad itself.
+    assert cost["broad"].value == pytest.approx(0.14)
+    assert cost["broad"].note.startswith("at the level itself 0.04 (4 cells)")
+    table = pd.read_csv(
+        tmp_path / "out" / "tables" / "item06_method_agreement__below60_cost.csv"
+    ).set_index("level")
+    assert table.loc["broad", "n_lost_below60"] == 14
+    assert table.loc["broad", "n_lost_at_level"] == 4
+    assert table.loc["lineage", "n_below60"] == 80
