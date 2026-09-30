@@ -8,6 +8,21 @@ near/far pseudobulks, and runs paired PyDESeq2 across tissue blocks.
 No image registration is performed here. Object GeoJSON and cell coordinates
 must already share the same registered coordinate system.
 
+## Coordinate frame
+
+The frame of the object GeoJSON is not configurable yet. Cells are read from
+the table's `obsm['spatial']` when present, which for the native tables this
+stage reads is the section's native frame. On an aligned MERSCOPE store (with
+`*_aligned_nonrigid` elements after [alignment](alignment.md)), a table
+without `obsm['spatial']` (such as `table_MOSAIK_cellpose` of the current
+stores) would instead be read from the aligned shape element, so one run
+would mix native and aligned cells against the same objects. That case is
+refused with `BoundaryFrameMismatchError`; run the stage for `proseg` /
+`original`, whose tables carry `obsm['spatial']`, or on a store without
+aligned elements. Written-back tables keep their native element as their
+SpatialData region. An explicit object-frame setting, as for
+[cortical depth](cortical-depth.md#coordinate-frame), is a planned follow-up.
+
 ## Required inputs
 
 Each active platform needs:
