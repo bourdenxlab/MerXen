@@ -43,7 +43,10 @@ annotation: the first two run only with `--annotation_prepare_only` or in the
 `map_first` clustering mode, and the other three only in `map_first`, where
 `Map-first tree` replaces the legacy clustering compute (see
 [Reference-based annotation](stages/annotation.md)); none runs in a default
-run.
+run. `Label report` (`ANNOTATION_REPORT`) is the annotation QC report of
+each map_first pair × segmentation; it is drawn after `MENDER domains`
+because it runs last, once FINALIZE, cortical depth and MENDER have
+finished when they run (it reads the labels of `Resolve labels`).
 
 ### Colour choice
 
