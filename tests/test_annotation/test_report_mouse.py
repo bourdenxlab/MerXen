@@ -200,6 +200,13 @@ def test_mouse_report_builds_item_10_on_a_synthetic_section(
     )
     record.setdefault("mouse_regions", {})["ap_estimate_mm"] = 5.2
     manifest_path.write_text(json.dumps(manifest))
+    # A gate that is not full must be reported as such (not a fixed level).
+    summary_path = next((tmp_path / "resolve").glob("*_resolve_summary.json"))
+    edited = json.loads(summary_path.read_text())
+    entry = edited["samples"][MOUSE_SID]
+    target = entry.get("mouse_gate") or entry["resolution"]["gate"]
+    target["level"] = "broad_only"
+    summary_path.write_text(json.dumps(edited))
     anterior = build_annotation_report(
         sources,
         tmp_path / "report_anterior",
@@ -212,3 +219,15 @@ def test_mouse_report_builds_item_10_on_a_synthetic_section(
     (banner,) = [b for b in item10.banners if b.code == "anterior_section_mo11"]
     assert "MO11 not yet passed" in banner.text and "5.20 mm" in banner.text
     assert "MO11 not yet passed" in anterior.html.read_text()
+    (gated,) = anterior.metrics.find("MO7", "mouse_gate_level")
+    assert gated.value == "broad_only"
+
+
+def test_mo4_shares_renormalise_the_residual_away() -> None:
+    from merxen.annotation.report_mouse import allocated_class_shares
+
+    soft = np.array([[0.6, 0.2, 0.2], [0.3, 0.3, 0.4]])  # two classes + residual
+    shares, unallocated = allocated_class_shares(soft)
+    np.testing.assert_allclose(shares, [0.9 / 1.4, 0.5 / 1.4])
+    assert unallocated == pytest.approx(0.6 / 2.0)
+    assert shares.sum() == pytest.approx(1.0)

@@ -424,3 +424,28 @@ def test_the_below60_rule_cost_is_cumulative_over_the_cascade(tmp_path: Path) ->
     assert table.loc["broad", "n_lost_below60"] == 14
     assert table.loc["broad", "n_lost_at_level"] == 4
     assert table.loc["lineage", "n_below60"] == 80
+
+
+def test_item_one_judges_self_thinning_on_confident_labels_only() -> None:
+    """The item's wiring: non-confident deep cells are unlabelled, not a class."""
+    n = 600
+    labels = pd.DataFrame(
+        {
+            "in_table": np.ones(n, dtype=bool),
+            "total_counts": np.full(n, 300.0),
+            "ct_broad_name": np.r_[np.repeat("Fibroblasts", 300), np.repeat("", 300)],
+            "ct_broad_status": np.r_[
+                np.repeat("confident", 250),
+                np.repeat("low_confidence", 50),
+                np.repeat("parent_unresolved", 300),
+            ],
+            "mmc_whb_supercluster_name": np.repeat("Fibroblast", n),
+        }
+    )
+    thinning = ri.self_thinning_of(labels, "human")
+    # 250 confident of 600: the low-confidence Fibroblasts are unlabelled too.
+    assert thinning.n_labelled == 250
+    assert thinning.unlabelled_share == pytest.approx(350 / 600)
+    assert thinning.composition == {"Fibroblasts": 1.0}
+    assert thinning.argmax_composition == {"Fibroblasts": 1.0}
+    assert not thinning.reliable
