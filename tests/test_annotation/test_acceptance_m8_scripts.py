@@ -673,7 +673,8 @@ def test_h14_prep_rows_use_each_bundles_build_time_and_check_gpus(
 ) -> None:
     hidden = tmp_path / "w1"
     hidden.mkdir()
-    (hidden / ".command.run").write_text('export CUDA_VISIBLE_DEVICES=""\n')
+    # Nextflow's .command.run exports the config env with single quotes
+    (hidden / ".command.run").write_text("    export CUDA_VISIBLE_DEVICES=''\n")
     exposed = tmp_path / "w2"
     exposed.mkdir()
     (exposed / ".command.run").write_text("nothing\n")
@@ -683,11 +684,16 @@ def test_h14_prep_rows_use_each_bundles_build_time_and_check_gpus(
         {"reference_id": "whb", "build_hash": SET_A, "build_wall_time_s": 137.5},
         {"reference_id": "slow", "build_hash": "b" * 64, "build_wall_time_s": 3 * 3600},
     ]
+    quoted = tmp_path / "w3"
+    quoted.mkdir()
+    (quoted / ".command.run").write_text('export CUDA_VISIBLE_DEVICES=""\n')
+    rows.append(_task("ANNOTATION_REPORT", "P7513:reseg", "30s", workdir=str(quoted)))
+    trace = acceptance.load_trace([_trace(tmp_path / "t1.tsv", rows)])
     out = acceptance.h14_rows(trace, [], acceptance.SEGMENTATIONS, bundles)
     prep = [row for row in out if row.criterion == "H14/prep_wall"]
     assert [row.passes for row in prep] == [True, False]
     gpu = next(row for row in out if row.criterion == "H14/no_gpu")
-    assert gpu.passes is True
+    assert gpu.passes is True and "CUDA hidden in 2 of 2" in gpu.note
     rows.append(
         _task("CLUSTERING_SQUIDPY_COMPUTE", "P7513:reseg", "1m", workdir=str(exposed))
     )

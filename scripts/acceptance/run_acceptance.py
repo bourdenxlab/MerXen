@@ -168,7 +168,9 @@ GPU_PROCESSES: Final = frozenset(
 H14_ANNOTATION_WALL_MAX_H: Final = 2.5
 H14_MAP_PEAK_RSS_MAX_GB: Final = 16.0
 H14_PREP_WALL_MAX_H: Final = 2.5
-CUDA_HIDDEN: Final = 'CUDA_VISIBLE_DEVICES=""'
+# How a task script exports an empty CUDA_VISIBLE_DEVICES (Nextflow writes the
+# config env block with single quotes; a script's own export uses double).
+CUDA_HIDDEN: Final = ("CUDA_VISIBLE_DEVICES=''", 'CUDA_VISIBLE_DEVICES=""')
 
 # H15 (plan §14).
 H15_PAIRS: Final = ("P7513", "P1212")
@@ -701,7 +703,8 @@ def cuda_hidden_counts(trace: pd.DataFrame) -> dict[str, int]:
             continue
         counts["checked"] += 1
         text = path.read_text(encoding="utf-8", errors="replace")
-        counts["with" if CUDA_HIDDEN in text else "without"] += 1
+        hidden = any(f"export {form}" in text for form in CUDA_HIDDEN)
+        counts["with" if hidden else "without"] += 1
     return counts
 
 
