@@ -285,6 +285,7 @@ def item_annotatability(
     flag_rows: list[dict[str, Any]] = []
     gate_rows: list[dict[str, Any]] = []
     thinning_rows: list[dict[str, Any]] = []
+    validated_rows: list[dict[str, Any]] = []
     card_samples: list[dict[str, Any]] = []
     for sample in inputs.ordered_samples():
         table = table_cells(sample)
@@ -486,6 +487,7 @@ def item_annotatability(
                 "min_cells": thinning.min_cells,
             }
         )
+        validated_rows.extend(validated_share_rows(sample, table, species))
         card_samples.append(
             {
                 "sample_id": sample.sample_id,
@@ -634,6 +636,7 @@ def item_annotatability(
     gates = pd.DataFrame(gate_rows)
     writer.table(item, "gate", gates)
     writer.table(item, "self_thinning", pd.DataFrame(thinning_rows))
+    writer.table(item, "validated_share_by_class", pd.DataFrame(validated_rows))
     for row in thinning_rows:
         item.metrics.append(
             metric(
@@ -660,6 +663,47 @@ def item_annotatability(
         "the thinned re-map itself is v1.1 (plan §5.4)."
     )
     return item
+
+
+def validated_share_rows(
+    sample: SampleData, table: pd.DataFrame, species: str
+) -> list[dict[str, Any]]:
+    """Return the validated share of confident labels per level and label.
+
+    ``ct_<L>_validated`` marks confident labels inside the panel family's
+    validated region (plan §4.1, §8.2): for a family validated by simulation
+    it varies per (level, class); on real-data families it is all or none.
+
+    Args:
+        sample: The sample.
+        table: Its table cells.
+        species: Species.
+
+    Returns:
+        Rows ``sample_id``, ``platform``, ``level``, ``label``,
+        ``n_confident``, ``validated_share``.
+    """
+    rows = []
+    for level in LEVELS[species]:
+        column = Columns.level(level, "validated")
+        if column not in table.columns:
+            continue
+        keep = confident(table, level)
+        names = names_array(table, Columns.level(level, "name"))
+        flags = table[column].astype(object).eq(True).to_numpy()
+        for name in sorted(set(names[keep]) - {""}):
+            selected = keep & (names == name)
+            rows.append(
+                {
+                    "sample_id": sample.sample_id,
+                    "platform": sample.platform,
+                    "level": level,
+                    "label": name,
+                    "n_confident": int(selected.sum()),
+                    "validated_share": float(flags[selected].mean()),
+                }
+            )
+    return rows
 
 
 def emission_metrics(
@@ -689,7 +733,11 @@ def emission_metrics(
         column = f"emitted_reweighted_{sample.sample_id}"
         for (reference_id, level), part in emission.groupby(["reference_id", "level"]):
             regime = ((levels.get(level) or {}).get("emission") or {}).get("regime")
-            if "regime" in part.columns and regime is not None:
+            if regime is None:
+                # A level RESOLVE did not emit (a report-only fine level
+                # that is off): no regime, nothing to compare.
+                continue
+            if "regime" in part.columns:
                 part = part[part["regime"].astype(str) == str(regime)]
             if part.empty:
                 continue
