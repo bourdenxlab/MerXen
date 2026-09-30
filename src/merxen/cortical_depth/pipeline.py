@@ -33,6 +33,7 @@ from merxen.cortical_depth.boundaries import (
     load_boundary_annotations,
 )
 from merxen.cortical_depth.equivolumetric import compute_equal_area_depth
+from merxen.cortical_depth.frames import resolve_cell_coordinate_frame
 from merxen.cortical_depth.laplace import solve_laplace_depth
 from merxen.cortical_depth.plotting import (
     depth_contours_to_geojson,
@@ -275,16 +276,26 @@ def _annotate_table(
             f"[{config.dataset_name}] table_key={table_key!r} not found. "
             f"Available tables: {list(sdata_obj.tables.keys())}"
         )
-    shape_key = _resolve_shape_key(
+    frame = resolve_cell_coordinate_frame(
         sdata_obj,
         table=sdata_obj.tables[table_key],
-        requested=table_config.shape_key,
+        table_key=table_key,
+        requested_shape_key=table_config.shape_key,
         platform=config.platform,
+        boundary_frame=config.boundary_frame,
+        dataset_name=config.dataset_name,
     )
+    shape_key = frame.shape_key
     coords = extract_cell_coordinates(
         sdata_obj.tables[table_key],
         sdata_obj=sdata_obj,
         shape_key=shape_key,
+        use_table_spatial=frame.use_table_spatial,
+    )
+    log_status(
+        f"[{config.dataset_name}] {table_config.segmentation!r} cells from "
+        f"{coords.source} (boundary_frame={frame.boundary_frame}, "
+        f"{frame.resolution})"
     )
     assignments = _assign_piecewise_cortical_depth_to_cells(
         coords,
@@ -383,7 +394,7 @@ def _annotate_table(
             updated,
             source_table=sdata_obj.tables[table_key],
             table_key=table_key,
-            region=shape_key,
+            region=frame.region_key,
         )
         write_or_replace_element(
             sdata_obj,
@@ -399,6 +410,7 @@ def _annotate_table(
             "table_key": table_key,
             "shape_key": shape_key,
             "coordinate_source": coords.source,
+            **frame.provenance(),
             "cells_path": str(cells_path),
         }
     )
@@ -805,33 +817,6 @@ def _parse_table_for_spatialdata(
     )
 
 
-def _resolve_shape_key(
-    sdata_obj: Any,
-    *,
-    table: ad.AnnData,
-    requested: str | None,
-    platform: str,
-) -> str | None:
-    if len(sdata_obj.shapes) == 0:
-        return None
-    if requested is not None:
-        aligned = f"{requested}_aligned_nonrigid"
-        if platform.upper() == "MERSCOPE" and aligned in sdata_obj.shapes:
-            return aligned
-        if requested not in sdata_obj.shapes:
-            raise KeyError(
-                f"Requested shape_key={requested!r} not found. "
-                f"Available shapes: {list(sdata_obj.shapes.keys())}"
-            )
-        return requested
-    region = _region_from_attrs(dict(table.uns.get("spatialdata_attrs", {})))
-    if region is not None and region in sdata_obj.shapes:
-        return region
-    if region is not None and f"{region}_aligned_nonrigid" in sdata_obj.shapes:
-        return f"{region}_aligned_nonrigid"
-    return str(list(sdata_obj.shapes.keys())[0])
-
-
 def _region_from_attrs(attrs: dict[str, Any]) -> str | None:
     region = attrs.get("region")
     if isinstance(region, str):
@@ -855,6 +840,7 @@ def _build_qc_summary(
     return {
         "dataset_name": config.dataset_name,
         "platform": config.platform,
+        "boundary_frame": config.boundary_frame,
         "laplace_residual": None
         if solution_residual is None
         else float(solution_residual),
