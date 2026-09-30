@@ -449,7 +449,7 @@ def item_mouse_regions(
                 spill_map.insert(0, "panel", sample.sample_id)
                 spill_frames.append(spill_map)
             rate = float(np.nanmean(spill)) if np.isfinite(spill).any() else math.nan
-            genes = spillover_genes(sample)
+            genes = spillover_genes(sample, inputs.gene_lookup)
             gene_rows.extend(
                 {"sample_id": sample.sample_id, "set": name, "gene": gene}
                 for name, members in (
@@ -748,28 +748,36 @@ def item_mouse_regions(
     return item
 
 
-def _symbols(sample: SampleData) -> dict[str, str]:
-    """Return gene id -> symbol from the clustered H5AD, if one is known."""
-    if sample.clustered_path is None or not Path(sample.clustered_path).is_file():
-        return {}
-    from merxen.annotation.report_inputs import read_clustered_table
+def _symbols(sample: SampleData, lookup: Mapping[str, str]) -> dict[str, str]:
+    """Return gene id -> symbol (clustered H5AD var, else the panel files)."""
+    symbols: dict[str, str] = {}
+    if sample.clustered_path is not None and Path(sample.clustered_path).is_file():
+        from merxen.annotation.report_inputs import (
+            read_clustered_table,
+            resolved_gene_ids,
+        )
 
-    table = read_clustered_table(sample.clustered_path, with_counts=False)
-    return dict(zip(table.gene_ids, table.gene_symbols, strict=True))
+        table = read_clustered_table(sample.clustered_path, with_counts=False)
+        ids = resolved_gene_ids(table.gene_ids, lookup)
+        symbols.update(zip(ids, table.gene_symbols, strict=True))
+    return symbols
 
 
-def spillover_genes(sample: SampleData) -> list[str]:
+def spillover_genes(
+    sample: SampleData, lookup: Mapping[str, str] | None = None
+) -> list[str]:
     """Return the panel's derived microglial spill-over genes (§8.6), as symbols.
 
     Args:
         sample: The sample (its provenance records the gene set).
+        lookup: Case-folded symbol -> Ensembl id of the panel files.
 
     Returns:
         Gene symbols (IDs where no symbol is known), in recorded order.
     """
     sets = (sample.manifest.get("flags") or {}).get("gene_sets") or {}
     ids = [str(gene) for gene in sets.get("microglial_spillover_genes") or []]
-    symbols = _symbols(sample) if ids else {}
+    symbols = _symbols(sample, lookup or {}) if ids else {}
     return [symbols.get(gene, gene) for gene in ids]
 
 
