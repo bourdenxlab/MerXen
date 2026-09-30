@@ -34,7 +34,7 @@ import numpy as np
 import pandas as pd
 
 from merxen.annotation.report_figures import grouped_bars, tile_maps
-from merxen.annotation.report_inputs import ReportInputs
+from merxen.annotation.report_inputs import ReportInputs, SampleData
 from merxen.annotation.report_items import (
     confident,
     names_array,
@@ -237,6 +237,7 @@ def item_mouse_regions(
     sub_region_frames = []
     comp_rows = []
     gate_rows = []
+    gene_rows: list[dict[str, Any]] = []
     classes = list(load_vocab("wmb_class").names)
     for sample in inputs.ordered_samples():
         table = table_cells(sample)
@@ -448,7 +449,15 @@ def item_mouse_regions(
                 spill_map.insert(0, "panel", sample.sample_id)
                 spill_frames.append(spill_map)
             rate = float(np.nanmean(spill)) if np.isfinite(spill).any() else math.nan
-            checks = sample.summary.get("spillover_checks") or {}
+            genes = spillover_genes(sample)
+            gene_rows.extend(
+                {"sample_id": sample.sample_id, "set": name, "gene": gene}
+                for name, members in (
+                    ("microglial_spillover", genes),
+                    ("astrocyte_fpr", _astro_genes(sample)),
+                )
+                for gene in members
+            )
             item.metrics.append(
                 metric(
                     "MO5",
@@ -462,11 +471,7 @@ def item_mouse_regions(
                     sample_id=sample.sample_id,
                     platform=sample.platform,
                     n=int(np.isfinite(spill).sum()),
-                    note="derived gene set: "
-                    + json.dumps(
-                        ((checks.get("astrocyte_fpr") or {}).get("astro_genes")) or [],
-                        sort_keys=True,
-                    ),
+                    note="derived gene set: " + ", ".join(genes) if genes else "",
                 )
             )
         # Subclass x region vs MERFISH share.
@@ -734,8 +739,46 @@ def item_mouse_regions(
         "window (G4).",
     )
     writer.table(item, "gate", pd.DataFrame(gate_rows))
+    writer.table(
+        item,
+        "spillover_gene_sets",
+        pd.DataFrame(gene_rows, columns=["sample_id", "set", "gene"]),
+    )
     item.summary = regions_frame
     return item
+
+
+def _symbols(sample: SampleData) -> dict[str, str]:
+    """Return gene id -> symbol from the clustered H5AD, if one is known."""
+    if sample.clustered_path is None or not Path(sample.clustered_path).is_file():
+        return {}
+    from merxen.annotation.report_inputs import read_clustered_table
+
+    table = read_clustered_table(sample.clustered_path, with_counts=False)
+    return dict(zip(table.gene_ids, table.gene_symbols, strict=True))
+
+
+def spillover_genes(sample: SampleData) -> list[str]:
+    """Return the panel's derived microglial spill-over genes (§8.6), as symbols.
+
+    Args:
+        sample: The sample (its provenance records the gene set).
+
+    Returns:
+        Gene symbols (IDs where no symbol is known), in recorded order.
+    """
+    sets = (sample.manifest.get("flags") or {}).get("gene_sets") or {}
+    ids = [str(gene) for gene in sets.get("microglial_spillover_genes") or []]
+    symbols = _symbols(sample) if ids else {}
+    return [symbols.get(gene, gene) for gene in ids]
+
+
+def _astro_genes(sample: SampleData) -> list[str]:
+    checks = sample.summary.get("spillover_checks") or {}
+    return [
+        str(gene)
+        for gene in (checks.get("astrocyte_fpr") or {}).get("astro_genes") or []
+    ]
 
 
 def _share(mask: np.ndarray, denominator: int) -> float:
