@@ -1456,13 +1456,23 @@ def item_composition(
     for row in (
         headline[headline["kind"] == "soft"].to_dict("records") if len(headline) else []
     ):
+        # Human: share of all mass (the unallocated share is its own row).
+        # Mouse (MO4, G4): share of the allocated mass, as mouse_resolve's
+        # class_shares and §5.5 renormalise; unallocated is its own record.
+        renormalised = species != "human"
+        if renormalised and row["category"] == UNALLOCATED:
+            continue
         item.metrics.append(
             metric(
                 "report" if species == "human" else "MO4",
                 "soft_share",
-                row["share"],
+                row["share_renormalised"] if renormalised else row["share"],
                 definition=(
-                    "soft composition share of all mass (table cells, whole section)"
+                    "soft composition share of the allocated mass (table cells, "
+                    "whole section; unallocated renormalised away)"
+                    if renormalised
+                    else "soft composition share of all mass (table cells, whole "
+                    "section)"
                 ),
                 source="report_metrics.block_bootstrap_shares",
                 sample_id=row["sample_id"],
@@ -1470,8 +1480,8 @@ def item_composition(
                 level=row["level"],
                 kind="soft",
                 group=row["category"],
-                ci_low=row["ci_low"],
-                ci_high=row["ci_high"],
+                ci_low=row["renormalised_ci_low"] if renormalised else row["ci_low"],
+                ci_high=row["renormalised_ci_high"] if renormalised else row["ci_high"],
                 n=row["n_cells"],
             )
         )
