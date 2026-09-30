@@ -139,6 +139,7 @@ def item_cortical_depth(
     profile_rows: list[pd.DataFrame] = []
     contrast_rows: list[dict[str, Any]] = []
     orderings = {}
+    gated_platforms: list[str] = []
     medians_by_platform: dict[str, dict[str, MedianCi]] = {}
     for sample in samples:
         arrays = _depth_arrays(sample)
@@ -189,15 +190,24 @@ def item_cortical_depth(
         ordering = depth_ordering(medians, ORDER, min_cells=MIN_GROUP_CELLS)
         orderings[sample.platform] = ordering
         medians_by_platform[sample.platform] = medians
+        gate_level = str(
+            ((sample.summary.get("resolution") or {}).get("gate") or {}).get("level")
+        )
+        # A dataset whose gate withholds supercluster labels has no ordering to
+        # test: both CI methods record not_available, never a failure.
+        gated = gate_level != "full" and bool(ordering.missing)
+        if gated:
+            gated_platforms.append(sample.platform)
         if columns is not None:
             sensitivity = depth_ordering(
                 medians_columns, ORDER, min_cells=MIN_GROUP_CELLS
             )
+            sensitivity_gated = gate_level != "full" and bool(sensitivity.missing)
             item.metrics.append(
                 metric(
                     "H12",
                     "depth_ordering_passes",
-                    sensitivity.passes,
+                    None if sensitivity_gated else sensitivity.passes,
                     definition=(
                         "the H12 ordering with CIs from resampling the depth "
                         "output's cortical columns (sensitivity; primary: 500 µm tiles)"
@@ -207,15 +217,16 @@ def item_cortical_depth(
                     platform=sample.platform,
                     kind="column_bootstrap",
                     note=(
+                        f"dataset gate {gate_level}: no supercluster labels; "
+                        if sensitivity_gated
+                        else ""
+                    )
+                    + (
                         f"ordered={sensitivity.ordered}; "
                         f"separated={sensitivity.separated}"
                     ),
                 )
             )
-        gate_level = str(
-            ((sample.summary.get("resolution") or {}).get("gate") or {}).get("level")
-        )
-        gated = gate_level != "full" and bool(ordering.missing)
         item.metrics.append(
             metric(
                 "H12",
@@ -380,15 +391,23 @@ def item_cortical_depth(
                 "proxy"
             )
     replication = depth_replication(medians_by_platform, orderings)
+    # Replication needs the ordering on both platforms: a gated platform (no
+    # supercluster labels) leaves it not_available, not failed.
+    replicable = len(orderings) >= 2 and not gated_platforms
     item.metrics.append(
         metric(
             "H12",
             "depth_ordering_replicated",
-            replication.replicated if len(orderings) >= 2 else None,
+            replication.replicated if replicable else None,
             definition="the depth ordering passes on both platforms of the pair",
             source="report_metrics.depth_replication",
             scope="pair",
             note=(
+                f"no ordering on {gated_platforms} (dataset gate not full); "
+                if gated_platforms
+                else ""
+            )
+            + (
                 f"platforms {list(replication.platforms)}; "
                 f"per platform {list(replication.passes_per_platform)}"
             ),

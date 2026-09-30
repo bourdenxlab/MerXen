@@ -294,6 +294,49 @@ def test_report_with_cortical_depth_and_the_shared_mask(
     assert masked.ci_low is not None
 
 
+def test_a_broad_only_gate_makes_both_h12_orderings_not_available(
+    tmp_path: Path, fake_mmc: FakeMmc, make_trust: MakeTrust
+) -> None:
+    """No supercluster labels: neither CI method records a failed ordering."""
+    setup = _resolved(tmp_path / "run", fake_mmc, make_trust)
+    path = setup.root / "resolve_out" / "PX_resolve_summary.json"
+    summary = json.loads(path.read_text())
+    gated = setup.samples[0].sample_id
+    summary["samples"][gated]["resolution"]["gate"]["level"] = "broad_only"
+    path.write_text(json.dumps(summary))
+    suffix = "_cells_with_cortical_depth.parquet"
+    depth = {
+        sample.sample_id: _depth_parquet(
+            setup, index, tmp_path / "depth" / f"{sample.sample_id}{suffix}"
+        )
+        for index, sample in enumerate(setup.samples)
+    }
+    result = build_annotation_report(
+        _sources(setup, cortical_depth=depth),
+        tmp_path / "report",
+        options=OPTIONS,
+        strict=True,
+        make_figures=False,
+        items=[9],
+    )
+    for sample in setup.samples:
+        records = result.metrics.find(
+            "H12", "depth_ordering_passes", sample_id=sample.sample_id
+        )
+        assert {record.kind for record in records} == {None, "column_bootstrap"}
+        for record in records:
+            if sample.sample_id == gated:
+                assert record.status == "not_available" and record.value is None
+                assert record.note.startswith("dataset gate broad_only")
+            else:
+                # The synthetic pair lacks deep-layer superclusters: a failure.
+                assert record.status == "measured" and record.value is False
+    # Replication needs both platforms' orderings.
+    (replicated,) = result.metrics.find("H12", "depth_ordering_replicated")
+    assert replicated.status == "not_available" and replicated.value is None
+    assert replicated.note.startswith("no ordering on")
+
+
 def test_report_without_depth_or_mask_marks_them_missing(
     tmp_path: Path, fake_mmc: FakeMmc, make_trust: MakeTrust
 ) -> None:
