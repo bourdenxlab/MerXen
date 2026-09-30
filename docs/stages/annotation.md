@@ -163,7 +163,25 @@ builders run the self-map of plan §8.3 on their panel
    is implausible in the region (Amygdala excitatory, 6 cells: calls to it
    are excluded) are left out before the draw
    (`reference.ho_truth_exclusions`; `test_set.truth_exclusion` in
-   `bundle.json`).
+   `bundle.json`). *Other-region COP cells (user decision 2026-09-30, M8
+   D1; pre-registration §18):* every human self-map on
+   `whb_frontal_supc_clus_ho` leaves out the test cells whose `test_source`
+   is `other_region` and whose truth supercluster is Committed
+   oligodendrocyte precursor (set a: 132 of its 152 COP test cells; the 20
+   held-out-donor COP cells stay), because almost every wrong broad
+   Oligodendrocyte call of the self-map was such a cell. The held-out bundle
+   and its `test_cells.h5ad` are unchanged: `reference.self_map_test_cells`
+   leaves the cells out when the self-map loads them, and the rest is
+   simulated with the keyed draws. The rule, its revision
+   (`HO_SELF_MAP_TEST_SET_REVISION` 1), the test source and the excluded
+   superclusters are hashed (`test_set.self_map_exclusion` of the build
+   params), so the rebuilt WHB set a / set c and SEA-AD set a bundles have
+   new build hashes at the same `RESOLVABILITY_VERSION` 6;
+   `resolvability_summary.json` and `bundle.json` record
+   `test_set_exclusion` (revision, rule, cells left out per supercluster,
+   kept cells of those superclusters per source). The approval covers the
+   M8 bundles; applying it to later human families on this test set (5K,
+   the M13 panels) needs the user's confirmation.
 2. **Simulation.** Every test cell whose native panel counts reach a grid
    depth `D` is thinned binomially to `D` (human panels up to 1,000 genes
    `[10, 15, 30, 60, 120, 250]`; mouse and larger panels
@@ -434,7 +452,7 @@ and the host thinning is identical for all.
 | `depth_grid.json` | The resolvability depth grid of the panel. |
 | `resolvability.parquet` | Primary and secondary bundles (resolvability on): one long table, `kind` per row type: `bin` (per recipe × level × class × depth: calls, precision and coverage at the default threshold, the local threshold), `curve` (precision and coverage at thresholds 0.50–0.99), `isotonic` (fit-half knots), `node` (per-node precision, recall, F1), `confusion` (truth × call within the called class), `decision` (the three regimes below), `gene_efficiency`. |
 | `resolvability_cells.parquet` | One row per simulated cell × level × recipe: parent class, depth, split half, call, bp, `avg_correlation`, truth, truth class, truth leaf, correct. RESOLVE reweights these to each dataset's composition. |
-| `resolvability_summary.json` | Recipes, levels, settings, test-set counts, `D_max` per level and class, emission per regime, level, class and depth (status, threshold, `t*`, extrapolated, pooled, reason), the pooled deep sets per regime, level and class (`D_P`, the bins taking their verdict, statistics, `t*`, status), floors, validated thresholds the local rule would raise (own bins whose fit half holds 50 calls; pooled sets carry `would_raise`), the validated bins whose fit half holds fewer (`validated_thresholds_not_evaluable`: `t*` unknown, never counted as a raise), the trust constraint, fine-level seed stability, runtimes and mapping runs. |
+| `resolvability_summary.json` | Recipes, levels, settings, test-set counts, `D_max` per level and class, emission per regime, level, class and depth (status, threshold, `t*`, extrapolated, pooled, reason), the pooled deep sets per regime, level and class (`D_P`, the bins taking their verdict, statistics, `t*`, status), floors, validated thresholds the local rule would raise (own bins whose fit half holds 50 calls; pooled sets carry `would_raise`), the validated bins whose fit half holds fewer (`validated_thresholds_not_evaluable`: `t*` unknown, never counted as a raise), the trust constraint, fine-level seed stability, runtimes and mapping runs (with each run's `n_processors`); human held-out self-maps: `test_set_exclusion` (the M8 D1 revision, rule and the cells left out). |
 | `test_cells.h5ad`, `test_cells.parquet` | Resolvability test-set bundles: native panel counts of the test cells and their truth per level (`truth__<level>`), composition key and spill group; human: donor, dissection and `test_source`. |
 
 ### Declared panels, gene IDs and controls (M3b)
@@ -1077,10 +1095,16 @@ Per sample:
    <subset panel>`. Of several builder-v3 bundles on one panel, a
    standalone run takes the one built with the large-panel prefilter its
    config asks for and, of those, the one with the current
-   `RESOLVABILITY_VERSION`. When none has the current version (a panel not
-   rebuilt since the last bump), it takes the older bundle and logs a
-   warning naming its resolvability version: its self-map tables are stale
-   until the panel is rebuilt (a pipeline run's PREP rebuilds it).
+   `RESOLVABILITY_VERSION`, and of those the one whose human held-out
+   self-map has the current test-set revision
+   (`HO_SELF_MAP_TEST_SET_REVISION`, M8 D1; read from the bundle's hashed
+   `test_set.self_map_exclusion`, else its `test_set_exclusion` record; a
+   mouse bundle has no revision). When only older revisions exist it keeps
+   them and logs a warning naming each bundle's revision. When none has the
+   current version (a panel not rebuilt since the last bump), it takes the
+   older bundle and logs a warning naming its resolvability version: its
+   self-map tables are stale until the panel is rebuilt (a pipeline run's
+   PREP rebuilds it).
 3. Run MapMyCells (seed 0, bootstrap factor 0.5, 100 iterations, raw
    normalisation, one BLAS thread per worker, `--drop_level
    CCN20230722_SUPT` for WMB) and parse the extended JSON at once into the
@@ -1552,6 +1576,7 @@ reading the `merxen annotate` outputs and the published inputs read-only:
 | `scripts/acceptance/shadow_glial_jsd.py` | 7 | WHB vs SEA-AD glial JSD with a paired block-bootstrap CI |
 | `scripts/acceptance/resolve_criteria.py` | M4 | The human criteria (H1–H5, H7–H10, H16, H17) re-measured on `merxen annotate-resolve` label tables, with the pre-registered thresholds and the flip rule; H4 on the held-out re-maps, including RESOLVE itself run with the held-out WHB call |
 | `scripts/acceptance/marker_pseudo_labels.py` | M4, H9 | Ports of the marker pseudo-label methods of the P7513 (§C) and P1212 (§4) dataset reports, for H9 and H17 |
+| `scripts/acceptance/draw_spread.py` | M8, D2 | The draw-spread table of a human self-map bundle (pre-registration §18 item 2): the 3 × 3 grid of per-cell × efficiency seeds (0–2), each draw simulated and mapped on the bundle's own (D1) test cells with the self-map's recorded worker count, decided alone (PREP unweighted, and reweighted to each dataset; `--resolve`: RESOLVE per draw, checked to have loaded the replaced bundle); H7, the H8 warning value, H18 (the panel family's floors), the would-raise list and the validated bins per draw and dataset. The scored draw is the bundle's stored rows (its re-map is the control); the cache is keyed by bundle and worker count; `draw_spread_run.json` records the code commit (git, `MERXEN_CODE_COMMIT` or the export's `COMMIT` file) and module sha256 |
 | `scripts/acceptance/mouse_corr_shadow.py` | M6, §7.3 | The mouse class `avg_correlation` floor study (none, 0.40, 0.50) on the ag7 proseg_hybrid and VZG2 original_seg label tables: MO1's check, coverage and marker consistency by depth, and the pre-registered selection (pre-registration §16) |
 
 The results and the decisions they feed (X1, OD-B6 / OD-B7, OD-B8, OD-B13, the
@@ -1584,7 +1609,7 @@ to `<pair>/<seg>/annotation_report/annotation_report_out/`.
 | 5 Negative-marker purity | `contamination_score` quantiles and `flag_contaminated` rate per confident broad label and platform | report-only |
 | 6 Method agreement | WHB vs SEA-AD at 7 classes and lineage by count quartile, consensus tier fractions and a tier map, the below-60 rule's coverage cost (cumulative: cells < 60 counts whose first vote failure, `method_disagree` / `single_method`, is at the level or at lineage; the per-level count beside it) | H3 |
 | 7 Cross-platform (human) | Soft broad and supercluster JSD (whole section, shared mask, joint block bootstrap), set c beside set a (soft, soft ≥ 30, argmax and supercluster), per-type density correlation in 200 µm aligned bins, `<pair>_platform_gene_factors.csv` (median-centred per-gene log2 Xenium / MERSCOPE within confident labels) and per-label pseudobulk r; every statement follows RESOLVE's cross-platform scope, withheld ones are recorded as `withheld`. A `per_platform` pair (§8.5) takes all of them from the intersection run (`mmc_whb_xpanel`: H1 with its recomputation and figure; density, factors and pseudobulk r on its argmax broad labels); its own-panel comparisons are `withheld` (`own_panel_not_comparable`) | H1 |
-| 8 Held-out genes | The held-out-gene enrichment rows of the pair (`--heldout-csv`: `heldout_genes.py` or `resolve_criteria.py` output); with several label sets, the non-circular H4 headline set `m4_resolve_heldout_whb_only` is shown (else an argmax set), all sets in the table CSV; mouse: the spill-over held-out test and astrocyte FPR | H4, MO5 |
+| 8 Held-out genes | The held-out-gene enrichment rows of the pair (`--heldout-csv`: `heldout_genes.py` or `resolve_criteria.py` output); with several label sets, H4's scored set, the non-circular WHB-only held-out re-resolve `m4_resolve_heldout_whb_only` (M8 D6), is shown, else `heldout_whb_confident`, else an argmax set, all sets in the table CSV; a set other than the scored one is noted as not the scored set and its records are criterion `report`, so every H4 record comes from the assigned set; mouse: the spill-over held-out test and astrocyte FPR | H4, MO5 |
 | 9 Cortical depth (human) | First the depth input: QC warnings, coordinate source and ribbon share per platform, and a label-free cross-platform check (below); then the median depth per confident supercluster (NP and CT/6b merged) and broad class with 95% CIs over 500 µm tangential blocks (square tiles as sensitivity); the ordering Upper-layer IT < Deep-layer IT < Deep-layer NP/CT/6b with non-overlapping CIs per platform and its replication across platforms; oligodendrocytes WM > GM; astrocyte / neuron / oligodendrocyte depth gradients (shares of confident broad cells) | H12 |
 | 10 Mouse regions | Inferred vs explicit regions, the tile map, the drop list, relabelled cells and targets, subclass × region vs MERFISH shares, class composition vs the AP-matched window (shares of the allocated soft mass, as G4, with the unallocated share beside them), Astro-Epen with and without low-count cells, F1 rate, spill-over prevalence and its map, gate G1–G5; the M6b fields (AP estimate and bin, rule variant) are read when present and reported `pending_m6b` otherwise; a section with an AP estimate below 6.0 mm gets the MO11 banner ("MO11 not yet passed") | MO2–MO7, MO10 / MO11 placeholders |
 | 11 AD and OOD (human) | Depth-matched real / in-silico `avg_correlation` ratio per class (in-silico = the primary bundle's correct resolvability calls), `flag_ood` rate, SEA-AD disease-supertype share per class (population level, `calibrated = false`) | report-only |
@@ -1668,7 +1693,14 @@ both field sets against this table.
   (`kind = square_tile_500um`): a tile holds about a fifth of the cortical
   depth, so resampling tiles re-mixes depth slices and widens the interval.
   `depth_ci_method` records the unit. Without tangential positions the tiles
-  are the (only) method. For a dataset whose gate is not `full` (no
+  are the (only) method. *Scored CI (pre-registration §18 item 3):* the M8
+  gate scores H12 on the square tiles (`report_depth.SCORED_CI`,
+  `depth_ci_scored`), because the user has not approved the tangential
+  blocks (M7 D23): per platform the `depth_ordering_passes` record with
+  `kind = square_tile_500um` (always written; without tangential positions
+  it equals the primary), and for the pair a `depth_ordering_replicated`
+  record of that kind from the tile orderings, beside the display-primary
+  (kind-less) ones; `acceptance_scoring.score_h12` scores them. For a dataset whose gate is not `full` (no
   supercluster labels) the ordering is `not_available` under both methods,
   and so is the pair's replication (P1212: the MERSCOPE section is
   broad-only).

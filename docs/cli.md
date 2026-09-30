@@ -629,7 +629,7 @@ merxen annotate --species mouse \
 |---|---|
 | `--from-clustered-h5ad PATH` | A published `<sid>_clustered.h5ad` (table cells, raw counts in `layers["counts"]`); repeat once per platform. Pair, segmentation and platform come from the results path. |
 | `--prepared-dir DIR` | Instead: prepared H5ADs (counts in `X`, every segmented object; objects below `--min-counts` are not mapped). |
-| `--store DIR`, `--store-large DIR` | Reference store(s); the bundle of each required (reference, `panel_hash`) is the one complete bundle of the current builder version built with the large-panel prefilter `--annotation-config` asks for (none by default); of several, the one with the current resolvability version. |
+| `--store DIR`, `--store-large DIR` | Reference store(s); the bundle of each required (reference, `panel_hash`) is the one complete bundle of the current builder version built with the large-panel prefilter `--annotation-config` asks for (none by default); of several, the one with the current resolvability version and, of those, the one whose human held-out self-map records the current test-set revision (`HO_SELF_MAP_TEST_SET_REVISION`, M8 D1), with a warning when only older revisions exist. |
 | `--bundle KEY=DIR`, `--bundle-ref PATH` | Use this bundle directory (`KEY` = reference id or run id, e.g. `whb_frontal_supc_clus_setc`) or this `bundle_ref.json` instead of the store lookup. |
 | `--panel-dir DIR` | `merxen annotation-panel` output; default: the panel is computed from the inputs into `<out>/panel`. |
 | `--references IDS` | Comma-separated reference ids to map (default: every primary and secondary bundle the panel requires). |
@@ -724,7 +724,7 @@ merxen annotate-resolve \
 | `--map-dir DIR` | The MAP output (`map_manifest.json`, `<platform>/<sid>_mmc_<run_id>.parquet`); every parquet must still have the sha256 the manifest recorded. |
 | `--panel-dir DIR` | `annotation-panel` output (default `<map-dir>/panel`): the panel files (trust diagnostics, the flags' query genes), `panel_report.json` and `required_bundles.json`. Each panel's family is re-derived from the current `validated_panels.csv`. |
 | `--bundle KEY=DIR` | Resolve a run (`KEY` = run id or reference id) with this bundle; it must be of the run's reference and panel and have the marker lookup the run mapped with. |
-| `--current-bundles --store DIR [--store-large DIR]` | Resolve every run with the store's current bundle of its reference and panel (current builder, current resolvability tables), under the same checks. |
+| `--current-bundles --store DIR [--store-large DIR]` | Resolve every run with the store's current bundle of its reference and panel (current builder, current resolvability tables, and for a human held-out self-map the current test-set revision, M8 D1, with a warning when only older revisions exist), under the same checks. |
 | `--bundle-ref PATH` | A `bundle_ref.json` of `annotation-reference-prep` (repeatable): each run is resolved with the bundle of the ref of its reference and panel; a run no ref names keeps its own bundle, and a ref of another build is an override under the same checks. |
 | `--require-bundle-refs` | Every run must have a `--bundle-ref` with the `build_hash` it mapped with (else the MAP output is stale and the command fails): no store lookup and no override (`--bundle`, `--current-bundles` are refused), as a pipeline task. |
 | `--prepared-dir DIR` | Read the counts from these prepared H5ADs instead of the manifest's inputs (a refused panel, whose manifest lists no sample, needs it). |
