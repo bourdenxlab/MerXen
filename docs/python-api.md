@@ -181,6 +181,10 @@ with Groovy.
 
 ### Internal modules
 - `boundaries.py` — read role-labelled GeoJSON boundaries and masks.
+- `frames.py` — `resolve_cell_coordinate_frame(...)`: pick the native or
+  `*_aligned_nonrigid` cell element matching `boundary_frame`, or refuse;
+  `frame_consistency_metrics(...)`: tissue-edge-to-cell distance and ribbon
+  occupancy behind the `frame_mismatch_suspected` QC warning.
 - `ribbon.py` — construct/rasterize the cortical ribbon.
 - `laplace.py` — sparse 2D Laplace solve and bilinear interpolation.
 - `streamlines.py` — normalized-gradient streamlines.

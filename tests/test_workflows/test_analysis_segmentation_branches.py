@@ -248,6 +248,25 @@ def test_compute_cortical_depth_stage_is_wired_after_clustering(
         assert expected in module_text
 
 
+def test_cortical_depth_boundary_frame_is_explicit_and_validated(
+    combined_config_text: str,
+) -> None:
+    """The boundary frame defaults to native, has a samplesheet override,
+    reaches the stage config and is checked in preflight."""
+    repo_root = Path(__file__).resolve().parents[2]
+    main_text = (repo_root / "workflows" / "main.nf").read_text()
+
+    assert 'cortical_depth_boundary_frame = "native"' in combined_config_text
+    for expected in [
+        "def corticalDepthBoundaryFrame(row, platform, params)",
+        '"${prefix}_cortical_depth_boundary_frame"',
+        '"cortical_depth_boundary_frame"',
+        "boundary_frame: corticalDepthBoundaryFrame(row, platform, params),",
+        'if (!(boundaryFrame in ["native", "aligned"])) {',
+    ]:
+        assert expected in main_text
+
+
 def test_segment_bootstraps_proseg_from_configured_paths(
     combined_config_text: str,
 ) -> None:

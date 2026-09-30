@@ -82,6 +82,7 @@ not require these files.
 | `<platform>_side_boundaries_geojson` | Tissue-edge polyline. New piece-aware annotations should contain exactly one edge line. Generic alias: `side_boundaries_geojson`. |
 | `<platform>_exclusion_masks_geojson` | Optional exclusion polygons for tears, folds, vessels, or artefacts. Generic alias: `exclusion_masks_geojson`. |
 | `<platform>_cortical_ribbon_geojson` | Optional complete ribbon polygon. Generic alias: `cortical_ribbon_geojson`. |
+| `<platform>_cortical_depth_boundary_frame` | Optional frame of this platform's depth annotations: `native` (drawn on the section itself) or `aligned` (the pair's fixed-section frame). Blank inherits `--cortical_depth_boundary_frame` (default `native`). Generic alias: `cortical_depth_boundary_frame`. See [Coordinate frame](stages/cortical-depth.md#coordinate-frame). |
 
 ### Distance-from-object annotation columns
 

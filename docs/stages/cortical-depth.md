@@ -13,8 +13,10 @@ annotations.
 ## Inputs
 
 The stage consumes the current per-platform `latest_spatialdata.zarr` and
-GeoJSON annotations saved from napari or another tool in the same coordinate
-system as the SpatialData table/shape centroids.
+GeoJSON annotations saved from napari or another tool. The annotations are in
+one coordinate frame, set by `boundary_frame` (see
+[Coordinate frame](#coordinate-frame)); by default that is the section's own
+native frame, the frame of its native shapes and tables.
 
 Required, either as separate files or as role-labelled features in one combined
 GeoJSON:
@@ -63,6 +65,72 @@ nextflow run workflows/main.nf \
 The samplesheet must include platform-specific annotation columns such as
 `xenium_pial_boundary_geojson` and `xenium_wm_boundary_geojson`, or generic
 columns such as `pial_boundary_geojson` / `wm_boundary_geojson`.
+
+## Coordinate frame
+
+Depth is only meaningful when the cells and the boundaries share a coordinate
+frame. After [alignment](alignment.md) the moving section's store (MERSCOPE
+by default) holds two frames: its native elements (`MOSAIK_proseg_hybrid`,
+`table_MOSAIK_proseg`, ...) in its own dataset microns, and
+`*_aligned_nonrigid` copies in the fixed (Xenium) section's frame. The two
+differ by a rotation, a possible reflection and millimetres of translation, so
+boundaries applied in the wrong frame cut arbitrarily through the tissue.
+
+The frame of the boundary GeoJSONs is explicit:
+
+| Setting | Values |
+|---------|--------|
+| `--cortical_depth_boundary_frame` | `native` (default) or `aligned`. |
+| samplesheet `<platform>_cortical_depth_boundary_frame` / `cortical_depth_boundary_frame` | Per-row, per-platform override of the parameter. |
+| `boundary_frame` in the stage config JSON | What the Nextflow values become (`CorticalDepthConfig.boundary_frame`). |
+
+`native` matches how the annotations are drawn: each platform's combined
+annotation GeoJSON is drawn on its own section, VALIS reads the same files as
+native-frame tissue masks before any aligned element exists, and the
+spatial-gene stage pairs them with native transcripts. Use `aligned` only for
+boundaries drawn in the fixed section's frame.
+
+The configured table and shape keys are always the native ones; the frame
+selects the element the cells are read from:
+
+| Boundary frame | Store | Cells read from |
+|----------------|-------|-----------------|
+| `native` | any platform, with or without an aligned variant | The native shape element (or the native table's `obsm['spatial']`). |
+| `aligned` | has `<shape_key>_aligned_nonrigid` (moving section) | The aligned shape element's centroids; the native table's native `obsm['spatial']` is not used. |
+| `aligned` | no aligned variant, and the store is the fixed section of a materialized pair (`merxen_alignment_pair_reference`, or a manifest whose fixed role is this platform) | The native element, whose frame is the aligned frame. |
+| `aligned` | no aligned variant, not the fixed section | Refused. |
+| `native` | only the aligned variant exists | Refused. |
+| either | configured `table_key` / `shape_key` names an `*_aligned_nonrigid` element | Refused. |
+
+Refusals raise `BoundaryFrameMismatchError` with the element names. When depth
+columns are written back, a native table keeps its native element as its
+SpatialData region, and its `uns['cortical_depth']` records the frame the
+columns were computed in: `boundary_frame`, `frame_resolution`,
+`coordinate_source` and `shape_key` (the same values as the QC summary). A
+table whose depth columns carry no such entry was written before the frame
+was explicit; stages that copy those columns onward (clustering tables,
+annotated H5ADs, aligned table clones) copy stale values unless they are
+re-run after the depth stage.
+
+The QC summary also measures, per table, whether the cells sit on the
+boundaries: `edge_to_nearest_cell_median_um` (median distance from points
+every 25 µm along the tissue edge to the nearest cell) and
+`ribbon_bin_occupancy` (share of the 50 µm bins inside the ribbon mask that
+hold a cell, also `ribbon_bin_occupancy_by_piece`). In a matching frame the
+edge median is about 80-110 µm and the occupancy about 0.97-0.98 (P7513 /
+P1212, both platforms); native MERSCOPE boundaries on the aligned cells gave
+870-2370 µm and 0.54-0.71. An edge median above 300 µm sets
+`frame_mismatch_suspected` and adds the warning
+`frame_mismatch_suspected:<segmentation>`; the stage still completes. Without
+a tissue-edge line the edge median is `null` and no warning is raised.
+
+Before this setting existed the stage read `<shape_key>_aligned_nonrigid`
+on MERSCOPE whenever it existed, while the boundaries were native. Tables with
+`obsm['spatial']` (`reseg`, `original_seg`) still used native coordinates, but
+`proseg_hybrid` and `proseg_mask` depth of aligned MERSCOPE sections was
+computed on aligned cells against native boundaries and is invalid; the QC
+summary of those runs shows `coordinate_source` ending in `_aligned_nonrigid`
+and no `boundary_frame`. Re-run the stage for them.
 
 ## Method
 
@@ -119,7 +187,7 @@ Published under
 | `compute_cortical_depth_out/<segmentation>/*_equivolumetric_depth_violin_by_broad_class.png` | Violin of `equivolumetric_depth` per broad cell-type cluster. PDF copy is also written. |
 | `compute_cortical_depth_out/<segmentation>/*_laplace_depth_violin_by_subcluster.png` | Subplot grid, one broad class each, with `laplace_depth` violins per subclustered annotation (`subcluster_label`). PDF copy is also written. |
 | `compute_cortical_depth_out/<segmentation>/*_equivolumetric_depth_violin_by_subcluster.png` | Subplot grid, one broad class each, with `equivolumetric_depth` violins per subclustered annotation. PDF copy is also written. |
-| `compute_cortical_depth_out/cortical_depth_qc_summary.json` | Cell counts, streamline thickness stats, failed/flagged streamlines, warnings. |
+| `compute_cortical_depth_out/cortical_depth_qc_summary.json` | Cell counts, streamline thickness stats, failed/flagged streamlines, warnings, and the coordinate provenance: top-level `boundary_frame`, and per table `shape_key`, `coordinate_source`, `boundary_frame`, `cell_coordinate_frame` and `frame_resolution` (`native_element`, `aligned_element`, `fixed_reference_native_element` or `table_spatial_only`), plus the frame check `edge_to_nearest_cell_median_um`, `ribbon_bin_occupancy`, `ribbon_bin_occupancy_by_piece` and `frame_mismatch_suspected`. |
 
 The per-cluster violin plots require broad-class and subcluster annotations from
 the [Squidpy clustering](clustering-squidpy.md) stage. This stage is therefore
@@ -187,5 +255,8 @@ layer-relevant analyses.
   volumetric depth.
 - Boundary quality dominates result quality. Check QC overlays for flipped,
   incomplete, self-crossing, or poorly aligned annotations.
+- The boundary frame is declared, not detected. A wrong declaration is refused
+  when the matching element is missing; on a store holding both frames it is
+  only flagged by the frame check below (which needs a tissue-edge line).
 - Cells near artificial side boundaries are flagged because their streamlines
   may be influenced by the manually closed ribbon.

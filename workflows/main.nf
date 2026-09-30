@@ -593,6 +593,7 @@ def corticalDepthConfigForPlatform(
         annotation_path: optionalNormalizedPathString(
             corticalDepthAnnotationPath(row, platform, "annotation")
         ),
+        boundary_frame: corticalDepthBoundaryFrame(row, platform, params),
         coordinate_unit_um: params.cortical_depth_coordinate_unit_um,
         raster_resolution_um: params.cortical_depth_raster_resolution_um,
         raster_padding_um: params.cortical_depth_raster_padding_um,
@@ -1137,6 +1138,24 @@ def corticalDepthAnnotationPath(row, platform, role) {
     return chooseField(row, candidatesByRole[role] ?: [])
 }
 
+// Frame the platform's depth boundary GeoJSONs are drawn in: "native" (the
+// section's own dataset microns, the default and how the annotations are
+// drawn) or "aligned" (the pair's fixed-section frame). A row-level
+// <platform>_cortical_depth_boundary_frame / cortical_depth_boundary_frame
+// value overrides --cortical_depth_boundary_frame.
+def corticalDepthBoundaryFrame(row, platform, params) {
+    def prefix = platform.toString().toLowerCase()
+    def raw = chooseField(row, [
+        "${prefix}_cortical_depth_boundary_frame",
+        "cortical_depth_boundary_frame",
+    ])
+    if (raw == null) {
+        raw = params.cortical_depth_boundary_frame
+    }
+    def frame = raw == null ? "" : raw.toString().trim().toLowerCase()
+    return frame ?: "native"
+}
+
 def alignmentTissueAnnotationPath(row, platform) {
     def prefix = platform.toString().toLowerCase()
     return chooseField(row, [
@@ -1166,6 +1185,13 @@ def appendCorticalDepthPreflightChecks(errors, row, settings, _params) {
     }
     settings.active_platforms.each { platform ->
         def labelPrefix = "COMPUTE_CORTICAL_DEPTH ${settings.pair_id}:${platform}"
+        def boundaryFrame = corticalDepthBoundaryFrame(row, platform, _params)
+        if (!(boundaryFrame in ["native", "aligned"])) {
+            errors << (
+                "${labelPrefix} cortical_depth_boundary_frame must be " +
+                "'native' or 'aligned', got '${boundaryFrame}'"
+            )
+        }
         def annotationPath = corticalDepthAnnotationPath(row, platform, "annotation")
         if (!isBlankPath(annotationPath)) {
             appendPreflightFileCheck(

@@ -193,13 +193,14 @@ Only present when `--cortical_depth_enabled true`.
 | `compute_cortical_depth_out/<segmentation>/*_cells_laplace_depth.png` | Cells colored by `laplace_depth`. PDF copy is also written. |
 | `compute_cortical_depth_out/<segmentation>/*_cells_equivolumetric_depth.png` | Cells colored by `equivolumetric_depth`. PDF copy is also written. |
 | `compute_cortical_depth_out/<segmentation>/*_cells_tissue_annotation.png` | All cells colored as `grey_matter`, `white_matter`, `excluded`, or `outside_brain`. PDF copy is also written. |
-| `compute_cortical_depth_out/cortical_depth_qc_summary.json` | Cell inside/outside counts, assigned counts, streamline thickness stats, failed/flagged streamlines, warnings. |
+| `compute_cortical_depth_out/cortical_depth_qc_summary.json` | Cell inside/outside counts, assigned counts, streamline thickness stats, failed/flagged streamlines, warnings (including `frame_mismatch_suspected:<segmentation>`), and per table the boundary frame, the cell coordinate source and the frame check `edge_to_nearest_cell_median_um` / `ribbon_bin_occupancy` ([Coordinate frame](stages/cortical-depth.md#coordinate-frame)). |
 
 The updated AnnData `obs` columns include `inside_cortical_ribbon`,
 `cortical_depth_annotation`, `laplace_depth`, `equivolumetric_depth`,
 `distance_to_pia_um`, `distance_to_wm_um`, `streamline_thickness_um`,
 `tangential_position_um`, `nearest_streamline_id`, `column_id`, and
-`cortical_depth_qc_flag`.
+`cortical_depth_qc_flag`; the table's `uns['cortical_depth']` records the
+boundary frame and cell coordinate source they were computed from.
 
 ### Distance from object
 
