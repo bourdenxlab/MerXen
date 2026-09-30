@@ -218,6 +218,25 @@ def window_composition(bundle: Path | None, sections: list[str]) -> pd.DataFrame
     )
 
 
+def allocated_class_shares(soft: np.ndarray) -> tuple[np.ndarray, float]:
+    """Return the class shares over the allocated soft mass and the unallocated share.
+
+    MO4 and the mouse gate's G4 (``mouse_resolve.class_shares``) renormalise
+    the residual away (plan §5.5), reporting the unallocated share beside.
+
+    Args:
+        soft: ``soft_matrix`` rows (classes, then the residual last).
+
+    Returns:
+        ``(shares, unallocated)``: per-class share of the allocated mass, and
+        the residual's share of all soft mass.
+    """
+    allocated = np.asarray(soft, dtype=np.float64)[:, :-1]
+    total = max(1e-12, float(allocated.sum()))
+    residual = float(np.asarray(soft, dtype=np.float64)[:, -1].sum())
+    return allocated.sum(axis=0) / total, residual / max(1e-12, total + residual)
+
+
 def item_mouse_regions(
     inputs: ReportInputs, writer: ItemWriter, options: ReportOptions
 ) -> ReportItem:
@@ -557,13 +576,12 @@ def item_mouse_regions(
             # renormalised away, as mouse_resolve.class_shares and §5.5 do);
             # the unallocated share is recorded beside them.
             allocated = soft[:, :-1]
-            total = max(1e-12, float(allocated.sum()))
-            shares = allocated.sum(axis=0) / total
+            shares, unallocated = allocated_class_shares(soft)
             item.metrics.append(
                 metric(
                     "MO4",
                     "unallocated_soft_share",
-                    float(soft[:, -1].sum() / max(1e-12, soft.sum())),
+                    unallocated,
                     definition=(
                         "soft mass on no WMB class (1 - sum of soft_class_*) / all "
                         "soft mass, table cells"

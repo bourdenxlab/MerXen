@@ -30,6 +30,7 @@ from merxen.annotation.report_figures import (
 )
 from merxen.annotation.report_inputs import ReportInputs, SampleData
 from merxen.annotation.report_metrics import (
+    SelfThinningEligibility,
     agreement_by_quantile,
     block_bootstrap_shares,
     grid_codes,
@@ -504,15 +505,7 @@ def item_annotatability(
                     "reason": stratum.get("reason"),
                 }
             )
-        label, is_confident = confident_class_labels(table, species)
-        # The truth of the diagnostic is the full-depth confident label; the
-        # deep cells without one are counted apart (not as a class).
-        thinning = self_thinning_eligibility(
-            table[Columns.TOTAL_COUNTS].to_numpy(dtype=np.float64),
-            label,
-            is_confident & (label != "") & (label != UNASSIGNED_LABEL),
-            argmax=argmax_classes(table, species),
-        )
+        thinning = self_thinning_of(table, species)
         thinning_rows.append(
             {
                 "sample_id": sample.sample_id,
@@ -750,6 +743,30 @@ def item_annotatability(
         "evaluable."
     )
     return item
+
+
+def self_thinning_of(table: pd.DataFrame, species: str) -> SelfThinningEligibility:
+    """Return a sample's self-thinning eligibility (item 1).
+
+    The truth of the diagnostic is the full-depth confident label at the
+    composition level (human broad, mouse class); the deep cells without one
+    are counted apart, never as a class; the engine's argmax class is
+    reported beside it.
+
+    Args:
+        table: The table cells.
+        species: Species.
+
+    Returns:
+        The eligibility record.
+    """
+    label, is_confident = confident_class_labels(table, species)
+    return self_thinning_eligibility(
+        table[Columns.TOTAL_COUNTS].to_numpy(dtype=np.float64),
+        label,
+        is_confident & (label != "") & (label != UNASSIGNED_LABEL),
+        argmax=argmax_classes(table, species),
+    )
 
 
 def validated_share_rows(
