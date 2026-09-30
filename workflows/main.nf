@@ -32,6 +32,7 @@ include {
 // rca-hook:H1: reference-based annotation (plan §2.4); nothing runs in legacy mode.
 include { ANNOTATION_PREPARE_ONLY } from "./subworkflows/annotation_references"
 include { CLUSTERING_MAP_FIRST } from "./subworkflows/clustering_map_first"
+include { ANNOTATION_REPORTING } from "./subworkflows/annotation_report"
 
 def parseChannels(rawValue, defaults) {
     if (rawValue == null) {
@@ -4094,5 +4095,24 @@ workflow {
         MENDER_IMPORT.out.subscribe { _taskKey, pairId, segmentation, platform, importManifest ->
             AnnotationRunRecord.menderImported(pairId, segmentation, platform, importManifest)
         }
+    }
+
+    // rca-hook:H11: the annotation QC report (plan §3.6, §9; M7), map_first runs only:
+    // after FINALIZE, the pair's cortical depth and the branch's MENDER when they run.
+    if (AnnotationSettings.isMapFirstRun(params) && AnnotationReport.enabled(params)) {
+        ANNOTATION_REPORTING(
+            CLUSTERING_MAP_FIRST.out.labels,
+            CLUSTERING_MAP_FIRST.out.alignment,
+            clustering_results_ch,
+            compute_cortical_depth_results_ch.map { _key, pairId, platform, _latestZarr, corticalDepthOut ->
+                tuple(pairId, platform, corticalDepthOut)
+            },
+            mender_finalized_ch.map {
+                _taskKey, pairId, segmentation, platform, _sampleId, _spatialdataPath,
+                _sourceSpatialdataTable, _nativeShapeKey, _sourceH5adPath, _menderConfig, menderDir ->
+                    tuple(pairId, segmentation, platform, menderDir)
+            },
+            sample_rows_ch.map { pairId, _row, settings -> tuple(pairId, AnnotationReport.pairSpec(settings, params)) },
+        )
     }
 }

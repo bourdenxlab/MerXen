@@ -27,6 +27,7 @@ each pair x segmentation is released with exactly its required bundles
 
 from __future__ import annotations
 
+import ast
 import csv
 import fcntl
 import hashlib
@@ -74,6 +75,7 @@ PROCESSES = (
     "ANNOTATE_REFERENCE_PREP",
     "CLUSTERING_SQUIDPY_ANNOTATE_MAP",
     "CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE",
+    "ANNOTATION_REPORT",
 )
 PREP = "ANNOTATE_REFERENCE_PREP"
 MAP = "CLUSTERING_SQUIDPY_ANNOTATE_MAP"
@@ -102,7 +104,7 @@ def _with_name_block(config_text: str, name: str) -> str:
 # Process contract (string tests)
 
 
-def test_annotation_module_defines_panel_prep_map_and_resolve() -> None:
+def test_annotation_module_defines_panel_prep_map_resolve_and_report() -> None:
     text = MODULE.read_text()
     assert re.findall(r"^process (\w+) \{", text, re.M) == list(PROCESSES)
     assert "merxen annotation-panel" in _process_block(text, "ANNOTATE_PANEL")
@@ -150,8 +152,11 @@ def test_annotation_processes_run_on_the_cpu_with_current_code(name: str) -> Non
     block = _process_block(MODULE.read_text(), name)
     assert 'export CUDA_VISIBLE_DEVICES=""' in block
     assert 'export PYTHONPATH="${projectDir}/../src:\\${PYTHONPATH:-}"' in block
+    # One BLAS thread per worker, except the report: one Python process
+    # whose bootstraps use the task's CPUs (plan §3.6: 4 CPUs).
+    threads = '"${task.cpus}"' if name == "ANNOTATION_REPORT" else "1"
     for variable in ("OMP", "OPENBLAS", "MKL", "NUMBA"):
-        assert f"export {variable}_NUM_THREADS=1" in block
+        assert f"export {variable}_NUM_THREADS={threads}" in block
     code = re.sub(r"^\s*(//|#)[^\n]*", "", block, flags=re.M)
     for token in ("flock", "MERXEN_GPU_LOCK_FILE", "gpu", "queue", "clusterOptions"):
         assert token not in code.replace("CUDA_VISIBLE_DEVICES", ""), token
@@ -417,6 +422,18 @@ def _rule_sources() -> list[str]:
     return re.findall(r'"([^"]+)"', match.group(1))
 
 
+def _rule_excludes() -> list[str]:
+    match = re.search(
+        r"RESOLVE_RULE_EXCLUDES = \[(.*?)\]\.asImmutable\(\)", REFERENCES_SOURCE, re.S
+    )
+    assert match is not None
+    return re.findall(r'"([^"]+)"', match.group(1))
+
+
+def _excluded(relative: str) -> bool:
+    return any(relative.startswith(prefix) for prefix in _rule_excludes())
+
+
 # Modules the RESOLVE rule sources import from outside them, and why a change
 # there needs no RESOLVE re-run of its own: they shape the counts and the
 # query MAP loaded, which RESOLVE reloads and checks against MAP's sample
@@ -432,7 +449,7 @@ RULE_IMPORT_EXEMPTIONS = {
 }
 
 
-def _sources_outside(sources: list[str]) -> set[str]:
+def _sources_outside(sources: list[str], excludes: list[str] | None = None) -> set[str]:
     """Modules the source files import from outside the sources."""
     for source in sources:
         assert (SRC / source).exists(), source
@@ -443,6 +460,10 @@ def _sources_outside(sources: list[str]) -> set[str]:
             [SRC / source] if (SRC / source).is_file() else (SRC / source).rglob("*.py")
         )
         if path.suffix == ".py"
+        and not any(
+            path.relative_to(SRC).as_posix().startswith(prefix)
+            for prefix in excludes or []
+        )
     ]
     covered = [source.removesuffix(".py").replace("/", ".") for source in sources]
     imported = {
@@ -468,7 +489,78 @@ def test_resolve_rule_sources_exist_and_cover_their_imports() -> None:
         "merxen/clustering/cellset.py",
         "merxen/cli/run_annotation.py",
     ]
-    assert _sources_outside(sources) == set(RULE_IMPORT_EXEMPTIONS)
+    assert _rule_excludes() == ["merxen/annotation/report"]
+    assert _sources_outside(sources, _rule_excludes()) == set(RULE_IMPORT_EXEMPTIONS)
+    # The excluded report modules exist and no rule source imports them, so
+    # leaving them out of the fingerprint cannot hide a rule change.
+    reports = sorted((SRC / "merxen/annotation").glob("report*.py"))
+    assert reports and all(_excluded(p.relative_to(SRC).as_posix()) for p in reports)
+    for source in sources:
+        root = SRC / source
+        for path in [root] if root.is_file() else root.rglob("*.py"):
+            if path.suffix != ".py" or _excluded(path.relative_to(SRC).as_posix()):
+                continue
+            assert not _imports_a_report_module(path), path
+
+
+def _imports_a_report_module(path: Path, *, in_annotation: bool | None = None) -> bool:
+    """Whether a module imports ``merxen.annotation.report*`` in any spelling.
+
+    ``import merxen.annotation.report_x``, ``from merxen.annotation.report_x
+    import y``, ``from merxen.annotation import report_x`` (also inside
+    parentheses) and the relative ``from .report_x import y`` / ``from .
+    import report_x`` of a module in ``merxen/annotation``.
+    """
+    tree = ast.parse(path.read_text(), filename=str(path))
+    if in_annotation is None:
+        in_annotation = path.parent == SRC / "merxen" / "annotation"
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(
+                alias.name.startswith("merxen.annotation.report")
+                for alias in node.names
+            ):
+                return True
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            names = [alias.name for alias in node.names]
+            if node.level == 0:
+                if module.startswith("merxen.annotation.report"):
+                    return True
+                if module == "merxen.annotation" and any(
+                    name.startswith("report") for name in names
+                ):
+                    return True
+            elif in_annotation and node.level == 1:
+                if module.startswith("report") or (
+                    not module and any(name.startswith("report") for name in names)
+                ):
+                    return True
+    return False
+
+
+def test_the_report_import_check_sees_every_spelling(tmp_path: Path) -> None:
+    """The RESOLVE-exclusion guard catches each way to import a report module."""
+    spellings = [
+        "import merxen.annotation.report_items",
+        "from merxen.annotation.report_items import item_composition",
+        "from merxen.annotation import report_items",
+        "from merxen.annotation import (\n    consensus,\n    report_items,\n)",
+        "from .report_items import item_composition",
+        "from . import report",
+    ]
+    for index, code in enumerate(spellings):
+        path = tmp_path / f"probe_{index}.py"
+        path.write_text(code + "\n")
+        # A relative import names a report module only inside the package.
+        assert _imports_a_report_module(path, in_annotation=True), code
+        if code.startswith("from ."):
+            assert not _imports_a_report_module(path, in_annotation=False), code
+    clean = tmp_path / "clean.py"
+    clean.write_text(
+        "from merxen.annotation import consensus\nimport merxen.gene_ids\n"
+    )
+    assert not _imports_a_report_module(clean, in_annotation=True)
 
 
 def _hierarchy_sources() -> list[str]:
@@ -1268,6 +1360,9 @@ def _resolve_cases(root: Path, human: dict[str, Any]) -> dict[str, dict[str, Any
     (cache / "merxen/annotation/stale.pyc").write_bytes(b"x")
     outside = _write_rule_tree(trees / "outside")
     (outside / "merxen/other.py").write_text("changed\n")
+    report = _write_rule_tree(trees / "report")
+    (report / "merxen/annotation/report.py").write_text("report\n")
+    (report / "merxen/annotation/report_metrics.py").write_text("metrics\n")
     single = {**human, "annotation_allow_single_method": True}
     spec = {"species": "human"}
     refs = ["resolve_inputs/bundle_refs/bundle_ref_1.json"]
@@ -1330,6 +1425,10 @@ def _resolve_cases(root: Path, human: dict[str, Any]) -> dict[str, dict[str, Any
         "fingerprint_missing": {
             "fn": "resolveRulesFingerprint",
             "source_root": str(trees / "nothing"),
+        },
+        "fingerprint_report": {
+            "fn": "resolveRulesFingerprint",
+            "source_root": str(report),
         },
         "fingerprint_repo": {"fn": "resolveRulesFingerprint", "source_root": str(SRC)},
         "resolve_summary_file": {"fn": "resolveSummaryFile", "pair_id": "P7513"},
@@ -1902,6 +2001,7 @@ def _python_rules_fingerprint(root: Path) -> str:
                     item.is_file()
                     and not relative.endswith((".pyc", ".pyo"))
                     and "__pycache__" not in relative.split("/")
+                    and not _excluded(relative)
                 ):
                     files[relative] = item
     if not files:
@@ -1928,6 +2028,8 @@ def test_resolve_rules_fingerprint_follows_the_rule_sources(
     assert _value(harness, "fingerprint_cache") == base
     assert _value(harness, "fingerprint_outside") == base
     assert _value(harness, "fingerprint_missing") == "missing"
+    # The annotation report is left out: adding or editing it keeps RESOLVE cached.
+    assert _value(harness, "fingerprint_report") == base
     assert base == _python_rules_fingerprint(harness["root"] / "rule_trees" / "base")
     assert _value(harness, "fingerprint_repo") == _python_rules_fingerprint(SRC)
 

@@ -21,8 +21,9 @@ import java.util.concurrent.ConcurrentSkipListSet
  * the pairs whose cross-platform statistics are restricted (by the panels or
  * by a dataset gate, as merxen.clustering.cross_platform scopes them) and
  * the samples whose MENDER run was skipped for want of an assigned cell
- * state. A legacy run subscribes nothing, so its record stays empty and it
- * prints no summary.
+ * state, and the branches whose annotation report (M7) was not built or
+ * recorded failed items. A legacy run subscribes nothing, so its record
+ * stays empty and it prints no summary.
  *
  * One Nextflow run is one JVM, so the record is static; the subscriptions
  * run on dataflow threads, hence the concurrent collections.
@@ -44,6 +45,9 @@ class AnnotationRunRecord {
     private static final Set<String> CROSS_PLATFORM = new ConcurrentSkipListSet<String>()
     private static final Set<String> DATASET_GATES = new ConcurrentSkipListSet<String>()
     private static final Set<String> MENDER_SKIPPED = new ConcurrentSkipListSet<String>()
+    private static final Set<String> REPORT_EXPECTED = new ConcurrentSkipListSet<String>()
+    private static final Set<String> REPORTED = new ConcurrentSkipListSet<String>()
+    private static final Set<String> REPORT_FAILED_ITEMS = new ConcurrentSkipListSet<String>()
 
     // As merxen.clustering.cross_platform: statistics levels from least to
     // most restrictive, the level each dataset gate allows at most (plan
@@ -57,12 +61,14 @@ class AnnotationRunRecord {
     static final String DATASET_GATE_REASON = "dataset_gate"
     // merxen.analysis.mender.SKIPPED_NO_ASSIGNED_STATE.
     static final String MENDER_SKIPPED_STATUS = "skipped_no_assigned_state"
+    // merxen.annotation.report_model item status of an item that raised.
+    static final String REPORT_ITEM_FAILED = "failed"
 
     /** Forget everything (tests; one run per JVM otherwise). */
     static void reset() {
         [
             EXPECTED, LABELLED, COMPUTED, REFUSED_PANELS, REFUSED_BRANCHES, CROSS_PLATFORM,
-            DATASET_GATES, MENDER_SKIPPED,
+            DATASET_GATES, MENDER_SKIPPED, REPORT_EXPECTED, REPORTED, REPORT_FAILED_ITEMS,
         ].each { Set values ->
             values.clear()
         }
@@ -195,6 +201,29 @@ class AnnotationRunRecord {
         return " (${shown}${more})".toString()
     }
 
+    /** Record that a pair x segmentation awaits its annotation report (FINALIZE done). */
+    static void reportExpected(Object pairId, Object segmentation) {
+        REPORT_EXPECTED << branch(pairId, segmentation)
+    }
+
+    /**
+     * Record one pair x segmentation's annotation report (ANNOTATION_REPORT done).
+     *
+     * @param pairId Pair id.
+     * @param segmentation Segmentation.
+     * @param reportDir annotation_report_out (report_run.json: item statuses).
+     */
+    static void reported(Object pairId, Object segmentation, Object reportDir) {
+        def key = branch(pairId, segmentation)
+        REPORTED << key
+        def run = readJson(asPath(reportDir).resolve(AnnotationReport.RUN_FILE))
+        def items = (run?.items instanceof Map) ? (Map) run.items : [:]
+        def failed = items.findAll { _slug, status -> status == REPORT_ITEM_FAILED }.keySet().sort()
+        if (failed) {
+            REPORT_FAILED_ITEMS << "${key}${reasonText(failed)}".toString()
+        }
+    }
+
     /** Record that a pair x segmentation got its map_first hierarchy (COMPUTE_CPU done). */
     static void computed(Object pairId, Object segmentation) {
         COMPUTED << branch(pairId, segmentation)
@@ -208,8 +237,10 @@ class AnnotationRunRecord {
      *     broad_only_panels, provisional_panels (pair:segmentation sample),
      *     restricted_dataset_gates (samples whose gate is broad_only or
      *     failed), cross_platform_restricted (pairs whose cross-platform
-     *     statistics are broad_only or none, with the reasons) and
-     *     mender_skipped (samples without an assigned MENDER state).
+     *     statistics are broad_only or none, with the reasons),
+     *     mender_skipped (samples without an assigned MENDER state),
+     *     failed_reports (awaited a report, got none) and
+     *     failed_report_items (reports with failed items).
      */
     static Map runInfo() {
         return [
@@ -222,6 +253,8 @@ class AnnotationRunRecord {
             restricted_dataset_gates: (DATASET_GATES as List).sort(),
             cross_platform_restricted: (CROSS_PLATFORM as List).sort(),
             mender_skipped: (MENDER_SKIPPED as List).sort(),
+            failed_reports: (REPORT_EXPECTED - REPORTED).sort(),
+            failed_report_items: (REPORT_FAILED_ITEMS as List).sort(),
         ]
     }
 

@@ -137,6 +137,7 @@ graph LR
         clustering_squidpy_annotate_map[Map cells]
         clustering_squidpy_annotate_resolve[Resolve labels]
         clustering_squidpy_compute_cpu[Map-first tree]
+        annotation_report[Label report]
 
         compute_cortical_depth -->|optional| distance_from_object_annotate
         distance_from_object_annotate -->|optional| distance_from_object_cohort
@@ -145,6 +146,7 @@ graph LR
         annotate_reference_prep -->|optional| clustering_squidpy_annotate_map
         clustering_squidpy_annotate_map -->|optional| clustering_squidpy_annotate_resolve
         clustering_squidpy_annotate_resolve -->|optional| clustering_squidpy_compute_cpu
+        mender -->|optional| annotation_report
     end
 
     %% Inter-section edges
