@@ -21,7 +21,11 @@ import pytest
 from click.testing import CliRunner
 
 from merxen.annotation import pipeline as pl
-from merxen.annotation.pipeline import MAP_MANIFEST_NAME, annotate_resolve
+from merxen.annotation.pipeline import (
+    MAP_MANIFEST_NAME,
+    annotate_resolve,
+    write_tidy_parquet,
+)
 from merxen.annotation.report import (
     ReportOutputError,
     build_annotation_report,
@@ -33,7 +37,15 @@ from merxen.annotation.report_model import AcceptanceMetrics, ReportOptions
 from merxen.cli import main as cli_main
 
 from .conftest import FakeMmc
-from .test_pipeline_resolve import Setup, _resolve, _setup
+from .test_pipeline_resolve import (
+    Setup,
+    _add_xpanel_runs,
+    _resolve,
+    _run_record,
+    _set_panel_mode,
+    _setup,
+    _whb_tidy,
+)
 
 MakeTrust = Callable[..., Any]
 OPTIONS = ReportOptions(n_bootstrap=20)
@@ -649,3 +661,149 @@ def test_a_broad_only_scope_withholds_supercluster_statistics(
     assert h1.status == "measured" and h1.value is not None
     item = next(item for item in result.items if item.number == 7)
     assert any("broad_only" in note for note in item.notes)
+
+
+def _add_setc_runs(setup: Setup) -> None:
+    """Add a WHB set c run per sample (the primary calls on the set c panel)."""
+    manifest = pl.load_map_manifest(setup.map_dir / MAP_MANIFEST_NAME)
+    bundle = setup.bundles["whb_frontal_supc_clus"]
+    samples = {}
+    for sample_id, record in manifest.samples.items():
+        primary = record.runs["whb_frontal_supc_clus"]
+        table_ids = set(
+            pd.read_parquet(setup.map_dir / primary.parquet)["cell_id"].astype(str)
+        )
+        frame = setup.calls[record.platform]
+        cells = frame[frame["cell_id"].isin(table_ids)].reset_index(drop=True)
+        run_id = "whb_frontal_supc_clus_setc"
+        parquet = (
+            setup.map_dir
+            / record.platform.lower()
+            / f"{sample_id}_mmc_{run_id}.parquet"
+        )
+        write_tidy_parquet(_whb_tidy(cells), parquet, {"synthetic": True})
+        run = _run_record(
+            run_id, bundle, setup.panel, parquet, setup.map_dir, len(cells)
+        ).model_copy(update={"purposes": ["setc_sensitivity"]})
+        samples[sample_id] = record.model_copy(
+            update={"runs": {**record.runs, run_id: run}}
+        )
+    manifest.model_copy(update={"samples": samples}).write(
+        setup.map_dir / MAP_MANIFEST_NAME
+    )
+
+
+def test_set_c_sits_beside_set_a_for_every_composition_statement(
+    tmp_path: Path, fake_mmc: FakeMmc, make_trust: MakeTrust
+) -> None:
+    """Plan §9 item 7: set c beside set a (soft, soft >= 30, argmax, supercluster)."""
+    setup = _setup(tmp_path / "run", fake_mmc, source="clustered")
+    _add_setc_runs(setup)
+    _resolve(setup, make_trust)
+    labels = pd.read_parquet(
+        setup.root / "resolve_out" / "merscope" / "PX_MERSCOPE_celltype_labels.parquet"
+    )
+    assert "mmc_whb_setc_supercluster_runner_up_1_bp" in labels.columns
+    result = build_annotation_report(
+        _sources(setup),
+        tmp_path / "report",
+        options=OPTIONS,
+        strict=True,
+        make_figures=False,
+        items=[7],
+    )
+    jsd = pd.read_csv(tmp_path / "report" / "tables" / "item07_cross_platform__jsd.csv")
+    setc = jsd[jsd["variant"] == "set_c"]
+    assert set(zip(setc["level"], setc["kind"], strict=True)) == {
+        ("broad", "soft"),
+        ("broad", "soft_ge30"),
+        ("broad", "argmax"),
+        ("supercluster", "soft"),
+    }
+    # The set c calls equal set a's here: the same soft JSD.
+    seta = jsd[(jsd["variant"] == "set_a") & (jsd["level"] == "supercluster")]
+    assert setc[setc["level"] == "supercluster"]["jsd"].iloc[0] == pytest.approx(
+        seta["jsd"].iloc[0]
+    )
+    (record,) = result.metrics.find(
+        "report", "supercluster_jsd", kind="set_c:soft", region="whole_section"
+    )
+    assert record.status == "measured" and record.value is not None
+    (h1,) = result.metrics.find("H1", "broad_jsd", region="whole_section")
+    assert h1.kind == "set_a:soft"
+
+
+def test_a_per_platform_pair_takes_every_cross_platform_statement_from_xpanel(
+    tmp_path: Path, fake_mmc: FakeMmc, make_trust: MakeTrust
+) -> None:
+    """Plan §8.5: own-panel results of a per_platform pair are never compared.
+
+    The intersection runs call every cell an astrocyte on both platforms
+    (JSD 0), while the own-panel runs differ.
+    """
+    setup = _setup(tmp_path / "run", fake_mmc, source="clustered")
+    _add_xpanel_runs(setup)
+    _set_panel_mode(setup, "per_platform")
+    _resolve(setup, make_trust)
+    summary = json.loads(
+        (setup.root / "resolve_out" / "PX_resolve_summary.json").read_text()
+    )
+    assert summary["pair"]["cross_platform"]["jsd_purpose"] == "intersection_xpanel"
+    recorded = next(
+        row
+        for row in summary["pair"]["jsd"]
+        if row["kind"] == "soft" and row["region"] == "whole_section"
+    )
+    result = build_annotation_report(
+        _sources(setup),
+        tmp_path / "report",
+        options=ReportOptions(n_bootstrap=int(summary["pair"]["n_bootstrap"])),
+        strict=True,
+        make_figures=False,
+    )
+    (h1,) = result.metrics.find("H1", "broad_jsd", region="whole_section")
+    assert h1.kind == "intersection_run:soft" and h1.source == "resolve_summary"
+    assert h1.value == pytest.approx(recorded["jsd"], abs=1e-9)
+    assert h1.value == pytest.approx(0.0, abs=1e-6)
+    # The note's recomputation is the same (intersection) run, not set a.
+    note_value = float(h1.note.split("report recomputation ")[1].split(" ")[0])
+    assert note_value == pytest.approx(0.0, abs=1e-6)
+    assert "(intersection_run)" in h1.note
+    own = result.metrics.find(
+        "report", "broad_jsd", kind="set_a:soft", region="whole_section"
+    )
+    assert len(own) == 1 and own[0].status == "withheld" and own[0].value is None
+    assert own[0].note.startswith("own_panel_not_comparable")
+    (confident,) = result.metrics.find(
+        "report", "broad_jsd", kind="intersection_run:confident"
+    )
+    assert confident.status == "withheld"
+    # The figure plots the intersection run only (the own panel is withheld).
+    figure = pd.read_csv(
+        tmp_path / "report" / "figures" / "item07_cross_platform_jsd.csv"
+    )
+    assert set(figure["variant"]) == {"intersection_run"}
+    soft = figure[(figure["level"] == "broad") & (figure["kind"] == "soft")]
+    assert soft["jsd"].to_numpy() == pytest.approx(0.0, abs=1e-6)
+    # Density, gene factors and pseudobulk r: the intersection run's argmax.
+    density = result.metrics.find("report", "density_correlation")
+    kinds = {record.kind: record for record in density}
+    assert {"argmax", "soft", "confident"} <= set(kinds)
+    assert kinds["confident"].status == "withheld"
+    assert "mmc_whb_xpanel" in kinds["argmax"].note
+    pseudo = [
+        record
+        for record in result.metrics.find("report", "label_pseudobulk_r")
+        if record.status == "measured"
+    ]
+    assert pseudo and {record.kind for record in pseudo} == {"argmax"}
+    assert {record.group for record in pseudo} == {"Astrocytes"}
+    factors = pd.read_csv(tmp_path / "report" / "PX_platform_gene_factors.csv")
+    assert set(factors["label"]) == {"Astrocytes"}
+    assert set(factors["label_basis"]) == {"argmax"}
+    withheld = [
+        record
+        for record in result.metrics.find("report", "label_pseudobulk_r")
+        if record.status == "withheld"
+    ]
+    assert len(withheld) == 1 and withheld[0].kind == "confident"
