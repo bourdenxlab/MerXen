@@ -436,7 +436,7 @@ def test_tile_mean_map_averages_per_tile() -> None:
 
 
 def test_self_thinning_is_unreliable_when_one_class_dominates() -> None:
-    # P1212_M-like: 509 deep cells, 89% vascular (plan §9 item 1).
+    # 509 deep cells, 89% vascular (the plan's example, §9 item 1).
     counts = np.r_[np.full(509, 250.0), np.full(2000, 50.0)]
     labels = np.r_[
         np.repeat("Vascular cells", 453),
@@ -447,13 +447,62 @@ def test_self_thinning_is_unreliable_when_one_class_dominates() -> None:
     assert result.n_deep == 509 and result.eligible
     assert result.dominant_label == "Vascular cells"
     assert result.dominant_share == pytest.approx(453 / 509)
-    assert not result.reliable
+    assert result.evaluable_classes == ("Neurons", "Vascular cells")
+    assert not result.reliable and result.reasons[0].startswith("dominant:")
     balanced = rm.self_thinning_eligibility(
         counts, np.r_[np.tile(["A", "B", "C"], 836), ["A"]]
     )
-    assert balanced.eligible and balanced.reliable
+    assert balanced.eligible and balanced.reliable and not balanced.reasons
     few = rm.self_thinning_eligibility(np.full(100, 300.0), np.repeat("A", 100))
     assert not few.eligible and not few.reliable
+
+
+def test_self_thinning_judges_labelled_cells_and_counts_unlabelled_apart() -> None:
+    """Regression (M7 review): P1212_MERSCOPE, 48% unlabelled, 43% Fibroblasts.
+
+    The report used to pass "Mixed/Unknown" as a class: it became the
+    dominant label at 48% (below the old 50% cut) and P1212_M was marked
+    reliable, while ordinary cortex (Xenium, 53-62% Neurons) was not.
+    """
+    n_deep = 509
+    counts = np.full(n_deep, 250.0)
+    labels = np.r_[
+        np.repeat("Fibroblasts", 219),  # 43% of the deep cells
+        np.repeat("Vascular cells", 25),
+        np.repeat("Astrocytes", 20),
+        np.repeat("", 245),  # 48% without a confident broad label
+    ]
+    labelled = labels != ""
+    argmax = np.r_[np.repeat("Fibroblasts", 401), np.repeat("Vascular cells", 108)]
+    p1212 = rm.self_thinning_eligibility(counts, labels, labelled, argmax=argmax)
+    assert p1212.eligible and not p1212.reliable
+    assert p1212.n_labelled == 264
+    assert p1212.unlabelled_share == pytest.approx(245 / 509)
+    assert "" not in p1212.composition
+    assert p1212.dominant_label == "Fibroblasts"
+    assert p1212.dominant_share == pytest.approx(219 / 264)
+    assert any(reason.startswith("unlabelled_share:") for reason in p1212.reasons)
+    assert any(reason.startswith("dominant:Fibroblasts") for reason in p1212.reasons)
+    assert p1212.evaluable_classes == ("Fibroblasts",)
+    assert p1212.argmax_composition["Fibroblasts"] == pytest.approx(401 / 509)
+    # Ordinary cortex: 55 / 29 / 16 neuron / astrocyte / other, all labelled.
+    cortex = np.r_[
+        np.repeat("Neurons", 550),
+        np.repeat("Astrocytes", 290),
+        np.repeat("Oligodendrocytes", 160),
+    ]
+    xenium = rm.self_thinning_eligibility(np.full(1000, 300.0), cortex)
+    assert xenium.reliable and xenium.unlabelled_share == 0.0
+    assert xenium.evaluable_classes == ("Astrocytes", "Neurons", "Oligodendrocytes")
+    # A few unlabelled cells do not matter; more than 30% do.
+    some = rm.self_thinning_eligibility(
+        np.full(1000, 300.0), cortex, np.arange(1000) >= 290
+    )
+    assert some.unlabelled_share == pytest.approx(0.29) and some.reliable
+    many = rm.self_thinning_eligibility(
+        np.full(1000, 300.0), cortex, np.arange(1000) >= 310
+    )
+    assert not many.reliable
 
 
 def test_grid_codes_rejects_bad_input_and_marks_non_finite_points() -> None:

@@ -468,9 +468,13 @@ def item_annotatability(
                 }
             )
         label, is_confident = confident_class_labels(table, species)
+        # The truth of the diagnostic is the full-depth confident label; the
+        # deep cells without one are counted apart (not as a class).
         thinning = self_thinning_eligibility(
             table[Columns.TOTAL_COUNTS].to_numpy(dtype=np.float64),
-            np.where(is_confident, label, UNASSIGNED_LABEL),
+            label,
+            is_confident & (label != "") & (label != UNASSIGNED_LABEL),
+            argmax=argmax_classes(table, species),
         )
         thinning_rows.append(
             {
@@ -478,17 +482,18 @@ def item_annotatability(
                 "platform": sample.platform,
                 "n_deep": thinning.n_deep,
                 "eligible": thinning.eligible,
+                "n_labelled": thinning.n_labelled,
+                "unlabelled_share": thinning.unlabelled_share,
                 "dominant_label": thinning.dominant_label,
                 "dominant_share": thinning.dominant_share,
+                "evaluable_classes": "; ".join(thinning.evaluable_classes),
                 "reliable": thinning.reliable,
-                "composition": json.dumps(
-                    {
-                        key: round(value, 4)
-                        for key, value in thinning.composition.items()
-                    }
-                ),
+                "reasons": "; ".join(thinning.reasons),
+                "composition_labelled": _rounded_json(thinning.composition),
+                "composition_argmax": _rounded_json(thinning.argmax_composition),
                 "min_counts": thinning.min_counts,
                 "min_cells": thinning.min_cells,
+                "min_class_cells": thinning.min_class_cells,
             }
         )
         validated_rows.extend(validated_share_rows(sample, table, species))
@@ -642,29 +647,70 @@ def item_annotatability(
     writer.table(item, "self_thinning", pd.DataFrame(thinning_rows))
     writer.table(item, "validated_share_by_class", pd.DataFrame(validated_rows))
     for row in thinning_rows:
+        base = {
+            "source": "label_table",
+            "sample_id": row["sample_id"],
+            "platform": row["platform"],
+            "n": row["n_deep"],
+        }
         item.metrics.append(
             metric(
                 "report",
                 "self_thinning_eligible",
                 row["eligible"],
                 definition=">= 500 table cells with >= 200 counts",
-                source="label_table",
-                sample_id=row["sample_id"],
-                platform=row["platform"],
-                n=row["n_deep"],
                 note=(
-                    f"dominant {row['dominant_label']} {row['dominant_share']:.3f}; "
+                    f"dominant {row['dominant_label']} {row['dominant_share']:.3f} "
+                    f"of labelled; unlabelled {row['unlabelled_share']:.3f}; "
                     f"reliable={row['reliable']}"
                     if row["dominant_label"] is not None
                     else ""
                 ),
+                **base,
+            )
+        )
+        item.metrics.append(
+            metric(
+                "report",
+                "self_thinning_reliable",
+                row["reliable"],
+                definition=(
+                    "eligible, <= 30% of the deep cells without a confident label "
+                    "and no class holding >= 80% of the labelled deep cells"
+                ),
+                note=row["reasons"],
+                **base,
+            )
+        )
+        item.metrics.append(
+            metric(
+                "report",
+                "self_thinning_unlabelled_share",
+                row["unlabelled_share"],
+                definition=(
+                    "share of the deep (>= 200 counts) table cells without a "
+                    "confident label at the composition level"
+                ),
+                **base,
+            )
+        )
+        item.metrics.append(
+            metric(
+                "report",
+                "self_thinning_evaluable_classes",
+                row["evaluable_classes"],
+                definition="classes with >= 50 labelled deep cells",
+                **base,
             )
         )
     item.summary = gates
     item.notes.append(
         "Self-thinning diagnostic: eligibility and the deep cells' truth composition "
-        "only; "
-        "the thinned re-map itself is v1.1 (plan §5.4)."
+        "(confident labels; the unlabelled share and the argmax composition beside "
+        "it) only; the thinned re-map itself is v1.1 (plan §5.4). Unreliable when "
+        "more than 30% of the deep cells have no confident label or one class holds "
+        ">= 80% of the labelled ones; classes with >= 50 labelled deep cells are "
+        "evaluable."
     )
     return item
 
@@ -793,6 +839,10 @@ def emission_metrics(
                 )
             )
     return records
+
+
+def _rounded_json(shares: Mapping[str, float]) -> str:
+    return json.dumps({key: round(value, 4) for key, value in shares.items()})
 
 
 def _as_float(value: Any) -> float:
