@@ -160,6 +160,7 @@ Cellpose process types.
 | Param | Default | Description |
 |-------|---------|-------------|
 | `cortical_depth_enabled` | `false` | Run `COMPUTE_CORTICAL_DEPTH` as a terminal stage after `CLUSTERING_SQUIDPY`. |
+| `cortical_depth_boundary_frame` | `native` | Frame the boundary GeoJSONs are drawn in: `native` (each section's own coordinates) or `aligned` (the pair's fixed-section frame). Selects the native or `*_aligned_nonrigid` cell element and refuses combinations that cannot match; see [Coordinate frame](stages/cortical-depth.md#coordinate-frame). Samplesheet override: `<platform>_cortical_depth_boundary_frame`. |
 | `cortical_depth_coordinate_unit_um` | `1.0` | Microns per coordinate unit in annotation/cell coordinates. Use the image pixel size if annotations are in pixel coordinates; keep `1.0` when coordinates are already microns. |
 | `cortical_depth_raster_resolution_um` | `5.0` | Finite-difference raster spacing. Smaller values improve geometry fidelity and increase memory/time. |
 | `cortical_depth_raster_padding_um` | `null` | Optional padding around the ribbon bounds. `null` uses a small automatic padding. |
