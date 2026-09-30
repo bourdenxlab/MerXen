@@ -44,6 +44,7 @@ from merxen.annotation.report_items import (
 )
 from merxen.annotation.report_metrics import tile_mean_map
 from merxen.annotation.report_model import ItemWriter, ReportItem, ReportOptions, metric
+from merxen.annotation.report_panel import Banner
 from merxen.annotation.schema import Columns
 from merxen.annotation.vocab import load_vocab
 
@@ -53,6 +54,9 @@ ASTRO_EPEN: Final = "30 Astro-Epen"
 IMMUNE: Final = "34 Immune"
 AP_SCOPE_MM: Final = (2.4, 10.4)
 UNCOVERED_NOTE_AP_MM: Final = 7.5
+# Plan §14 MO11: map_first results from anterior sections (AP < 6.0 mm) keep
+# a banner until the first real anterior section passes MO11.
+ANTERIOR_AP_MM: Final = 6.0
 PENDING: Final = "pending_m6b"
 UNCOVERED_SUBCLASSES: Final[tuple[str, ...]] = (
     "157 RN Spp1 Glut",
@@ -257,6 +261,25 @@ def item_mouse_regions(
                 "the configured window"
             )
         estimate = ap["ap_estimate_mm"]
+        if estimate is not None and float(estimate) < ANTERIOR_AP_MM:
+            item.banners.append(
+                Banner(
+                    severity="warning",
+                    sample_id=sample.sample_id,
+                    code="anterior_section_mo11",
+                    text=(
+                        f"anterior coronal section (AP estimate {float(estimate):.2f} "
+                        f"mm < {ANTERIOR_AP_MM} mm): MO11 not yet passed; map_first "
+                        "results from anterior sections keep this banner until the "
+                        "first real anterior section passes MO11 (plan §14)"
+                    ),
+                )
+            )
+        elif estimate is None:
+            item.notes.append(
+                f"{sample.sample_id}: AP estimate pending (M6b): whether the section "
+                f"is anterior (AP < {ANTERIOR_AP_MM} mm, the MO11 banner) is not known"
+            )
         if estimate is None or float(estimate) >= UNCOVERED_NOTE_AP_MM:
             item.notes.append(
                 f"{sample.sample_id}: the WMB subclasses "
@@ -530,7 +553,27 @@ def item_mouse_regions(
             share_dir, list((gate.get("window") or {}).get("sections") or [])
         )
         if soft is not None:
-            shares = soft[:, :-1].sum(axis=0) / max(1e-12, soft.sum())
+            # MO4 / G4 shares are over the allocated mass (the residual
+            # renormalised away, as mouse_resolve.class_shares and §5.5 do);
+            # the unallocated share is recorded beside them.
+            allocated = soft[:, :-1]
+            total = max(1e-12, float(allocated.sum()))
+            shares = allocated.sum(axis=0) / total
+            item.metrics.append(
+                metric(
+                    "MO4",
+                    "unallocated_soft_share",
+                    float(soft[:, -1].sum() / max(1e-12, soft.sum())),
+                    definition=(
+                        "soft mass on no WMB class (1 - sum of soft_class_*) / all "
+                        "soft mass, table cells"
+                    ),
+                    source="label_table",
+                    sample_id=sample.sample_id,
+                    platform=sample.platform,
+                    n=len(table),
+                )
+            )
             for index, name in enumerate(classes):
                 comp_rows.append(
                     {
@@ -557,12 +600,9 @@ def item_mouse_regions(
                     if Columns.FLAG_ASTRO_LOWCOUNT in table.columns
                     else np.zeros(len(table), bool)
                 )
-                strict = soft[~low]
+                strict = allocated[~low]
                 for name, value in (
-                    (
-                        "astro_epen_soft_share",
-                        float(soft[:, astro].sum() / max(1e-12, soft.sum())),
-                    ),
+                    ("astro_epen_soft_share", float(shares[astro])),
                     (
                         "astro_epen_soft_share_strict",
                         float(strict[:, astro].sum() / max(1e-12, strict.sum()))
@@ -575,7 +615,8 @@ def item_mouse_regions(
                             "MO4" if name == "astro_epen_soft_share" else "report",
                             name,
                             value,
-                            definition="soft Astro-Epen share of table cells"
+                            definition="soft Astro-Epen share of the allocated soft "
+                            "mass of table cells"
                             + (
                                 " without flag_astro_lowcount cells"
                                 if name.endswith("strict")
@@ -595,8 +636,11 @@ def item_mouse_regions(
                     metric(
                         "MO4",
                         "immune_soft_share",
-                        float(soft[:, immune].sum() / max(1e-12, soft.sum())),
-                        definition="soft Immune share of table cells",
+                        float(shares[immune]),
+                        definition=(
+                            "soft Immune share of the allocated soft mass of table "
+                            "cells"
+                        ),
                         source="label_table",
                         sample_id=sample.sample_id,
                         platform=sample.platform,

@@ -138,8 +138,36 @@ def test_mouse_report_builds_item_10_on_a_synthetic_section(
     assert in_dropped.value == 0
     assert metrics.find("MO6", "f1_region_incoherent_rate")
     (level,) = metrics.find("MO7", "mouse_gate_level")
-    assert level.value in ("full", "broad_only", "failed")
-    assert metrics.find("MO4", "astro_epen_soft_share")
+    sample_summary = summary["samples"][MOUSE_SID]
+    gate = (
+        sample_summary.get("mouse_gate")
+        or (sample_summary.get("resolution") or {}).get("gate")
+        or {}
+    )
+    assert level.value == gate["level"]
+    # The dataset gate records of item 1 are MO7's for a mouse section.
+    gate_records = metrics.find("MO7", "gate_level")
+    assert (
+        gate_records
+        and gate_records[0].value == (sample_summary["resolution"]["gate"]["level"])
+    )
+    assert not metrics.find("H8")
+    # MO4 shares are over the allocated soft mass (G4's definition).
+    labels = pd.read_parquet(
+        next((tmp_path / "resolve").rglob(f"{MOUSE_SID}_celltype_labels.parquet"))
+    )
+    table = labels[labels["in_table"]]
+    soft = table[[c for c in table.columns if c.startswith("soft_class_")]]
+    allocated = soft.to_numpy(float)
+    (astro,) = metrics.find("MO4", "astro_epen_soft_share")
+    expected = allocated[:, soft.columns.get_loc("soft_class_30_astro_epen")].sum()
+    assert astro.value == pytest.approx(expected / allocated.sum(), rel=1e-5)
+    (unallocated,) = metrics.find("MO4", "unallocated_soft_share")
+    residual = np.clip(1.0 - allocated.sum(axis=1), 0.0, None).sum()
+    assert unallocated.value == pytest.approx(residual / len(table), rel=1e-4)
+    shares = metrics.find("MO4", "soft_share")
+    assert shares and "unallocated" not in {record.group for record in shares}
+    assert sum(record.value for record in shares) == pytest.approx(1.0, abs=1e-4)
     assert metrics.find("MO5", "spillover_prevalence")
     report = tmp_path / "report"
     tiles = pd.read_csv(report / "figures" / "item10_mouse_regions_tile_map.csv")
@@ -159,3 +187,28 @@ def test_mouse_report_builds_item_10_on_a_synthetic_section(
     assert coverage["MO7"].n_records >= 1 and coverage["MO10"].source.startswith(
         "script"
     )
+    assert not [banner for banner in item.banners if banner.code.startswith("anter")]
+    assert any("is anterior" in note for note in item.notes)
+    # An M6b AP estimate below 6.0 mm: the MO11 banner (plan §14).
+    manifest_path = map_dir / "map_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    samples = manifest["samples"]
+    record = (
+        samples[MOUSE_SID]
+        if isinstance(samples, dict)
+        else next(entry for entry in samples if entry["sample_id"] == MOUSE_SID)
+    )
+    record.setdefault("mouse_regions", {})["ap_estimate_mm"] = 5.2
+    manifest_path.write_text(json.dumps(manifest))
+    anterior = build_annotation_report(
+        sources,
+        tmp_path / "report_anterior",
+        options=ReportOptions(n_bootstrap=10),
+        strict=True,
+        make_figures=False,
+        items=[10],
+    )
+    item10 = next(item for item in anterior.items if item.number == 10)
+    (banner,) = [b for b in item10.banners if b.code == "anterior_section_mo11"]
+    assert "MO11 not yet passed" in banner.text and "5.20 mm" in banner.text
+    assert "MO11 not yet passed" in anterior.html.read_text()
