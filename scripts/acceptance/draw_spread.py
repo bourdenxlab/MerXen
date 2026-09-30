@@ -218,6 +218,31 @@ def resolve_rows(
     return rows
 
 
+def self_map_workers(summary: Mapping[str, Any]) -> int | None:
+    """The MapMyCells worker count the bundle's self-map mapped with.
+
+    ctm splits the query into chunks of ``min(chunk_size, ceil(n / n_processors))``
+    rows and seeds each chunk from the master generator, so the bootstrap
+    draws, and hence the calls, depend on the worker count: the draws of the
+    grid are the bundle's realisation only when they are mapped with the
+    same count (M8 stage A2: 6 workers changed 3.3% of the scored draw's
+    calls; 8, the count PREP used, reproduced it exactly).
+
+    Args:
+        summary: The bundle's ``resolvability_summary.json``.
+
+    Returns:
+        The one ``n_processors`` its mapping runs record, or ``None`` when
+        they record none or disagree.
+    """
+    counts = {
+        int(run["n_processors"])
+        for run in summary.get("mapping_runs") or []
+        if isinstance(run, Mapping) and run.get("n_processors") is not None
+    }
+    return counts.pop() if len(counts) == 1 else None
+
+
 def _git_commit() -> str | None:
     try:
         return subprocess.run(
@@ -299,7 +324,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--resolve", action="store_true", help="RESOLVE per draw")
     parser.add_argument("--store", type=Path, help="reference store (RESOLVE)")
     parser.add_argument("--qc-summary", type=Path, help="segmented objects (RESOLVE)")
-    parser.add_argument("--n-processors", type=int, default=8)
+    parser.add_argument(
+        "--n-processors",
+        type=int,
+        default=None,
+        help="MapMyCells workers (default: the count the self-map recorded, else 8)",
+    )
     parser.add_argument("--max-gb", type=float, default=60.0)
     parser.add_argument("--no-check-scored", action="store_true")
     parser.add_argument(
@@ -359,7 +389,17 @@ def main(argv: list[str] | None = None) -> int:
     recipe = res.simulation_recipes(config.resolvability, seed=ref.TEST_SET_SEED)[0]
     if recipe.to_json() != summary["recipes"][0]:
         parser.error("the decision recipe differs from the bundle's recorded one")
-    ref.set_prep_resources(n_processors=args.n_processors, max_gb=args.max_gb)
+    recorded_workers = self_map_workers(summary)
+    workers = args.n_processors or recorded_workers or 8
+    if recorded_workers is not None and workers != recorded_workers:
+        logger.warning(
+            "mapping the draws with %d workers, but the self-map mapped with %d: "
+            "ctm's chunk seeding makes these draws another realisation, and the "
+            "scored-draw control will not reproduce the stored rows",
+            workers,
+            recorded_workers,
+        )
+    ref.set_prep_resources(n_processors=workers, max_gb=args.max_gb)
     specs = ref.level_specs_for(reference_id, engine, config)
     rules = ref.cells_rules_for(reference_id, config)
     depths = tables.depth_grid
@@ -467,6 +507,8 @@ def main(argv: list[str] | None = None) -> int:
         "scored_draw": draws[0].tag,
         "scored_draw_check": check,
         "mapping_runs": runs,
+        "n_processors": workers,
+        "self_map_n_processors": recorded_workers,
         "datasets_reweighted": sorted(compositions),
         "resolve": bool(args.resolve),
         "git_commit": _git_commit(),

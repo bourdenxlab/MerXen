@@ -359,6 +359,24 @@ def test_script_compares_a_redrawn_scored_draw(script: ModuleType) -> None:
     assert not script.compare_cells(stored, stored.iloc[:1])["same_rows"]
 
 
+def test_script_maps_the_draws_with_the_self_maps_worker_count(
+    script: ModuleType,
+) -> None:
+    # ctm seeds each chunk of ceil(n / n_processors) rows from the master
+    # generator, so only the self-map's own worker count reproduces its draw.
+    summary = {
+        "mapping_runs": [
+            {"tag": "R1_contam_HO", "n_processors": 8},
+            {"tag": "clean", "n_processors": 8},
+        ]
+    }
+    assert script.self_map_workers(summary) == 8
+    summary["mapping_runs"][1]["n_processors"] = 6
+    assert script.self_map_workers(summary) is None
+    assert script.self_map_workers({"mapping_runs": [{"tag": "x"}]}) is None
+    assert script.self_map_workers({}) is None
+
+
 def test_script_serves_the_draw_tables_for_the_one_bundle(
     script: ModuleType, tmp_path: Path
 ) -> None:
