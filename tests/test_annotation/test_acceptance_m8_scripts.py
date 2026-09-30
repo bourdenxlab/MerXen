@@ -1123,6 +1123,29 @@ def test_criteria_rows_cross_check_the_report(acceptance: ModuleType) -> None:
     assert "has no H1" in _get(rows, "H1", "P7513").crosscheck
 
 
+def test_criteria_rows_read_only_the_new_vs_legacy_referee_rows(
+    acceptance: ModuleType,
+) -> None:
+    rows = pd.DataFrame(
+        [
+            {
+                "segmentation": "proseg_hybrid",
+                "sample_id": "P7513_MERSCOPE",
+                "first": first,
+                "second": second,
+                "first_wins": wins,
+            }
+            for first, second, wins in (
+                ("new confident (RESOLVE)", "legacy broad_class", 0.991),
+                ("WHB argmax", "SEA-AD argmax", 0.5),
+                ("new confident (RESOLVE)", "SEA-AD argmax", 0.6),
+            )
+        ]
+    )
+    row = _get(_scored(acceptance, referee=rows), "H10", "P7513_MERSCOPE")
+    assert row.crosscheck.startswith("ok")
+
+
 def test_criteria_rows_compare_h10_with_marker_referee(acceptance: ModuleType) -> None:
     same = pd.DataFrame(
         [
@@ -1387,6 +1410,14 @@ def test_h6_reweights_the_simulation_to_each_dataset(acceptance: ModuleType) -> 
     assert astro["precision"] == pytest.approx(60 / 66) and astro["passes"] is True
     # Immune has 20 test cells: never a class row
     assert not any(r["class"] == "Immune" for r in unweighted)
+    pooled = next(
+        r
+        for r in unweighted
+        if r["level"] == "broad" and r["class"] == "pooled" and r["depth"] == 15
+    )
+    # the Exc and Astro calls together: 154 correct of 160 (Immune calls left out)
+    assert pooled["precision"] == pytest.approx(154 / 160)
+    assert pooled["n_confident_calls"] == 160
     # a dataset with few astrocytes: the Exc errors weigh more
     few_astro = acceptance.dataset_composition(
         pd.Series(
@@ -1437,8 +1468,11 @@ def test_h6_rows_fail_a_dataset_outside_the_targets(acceptance: ModuleType) -> N
         ),
     }
     rows, detail = acceptance.h6_rows(cells, masses)
-    by = {row.dataset: row for row in rows}
+    by = {row.dataset: row for row in rows if row.criterion == "H6"}
     assert by["P7513_MERSCOPE"].verdict == "PASS"
+    info = {row.dataset: row for row in rows if row.criterion == "H6/pooled"}
+    assert info["P1212_XENIUM"].scored is False
+    assert info["P1212_XENIUM"].verdict in ("INFO pass", "INFO fail")
     assert (
         by["P1212_XENIUM"].verdict == "FAIL-OUTSIDE"
         and "broad Astro D15" in by["P1212_XENIUM"].note

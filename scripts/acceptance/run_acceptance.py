@@ -128,6 +128,9 @@ VERDICT_UNSCORED: Final = "UNSCORED (P5)"
 CROSSCHECK_MISMATCH: Final = "CROSSCHECK-MISMATCH"
 FIRST_MEASUREMENTS: Final = frozenset({"H6", "H12", "H13", "H14", "H15"})
 REPORT_ROUNDING: Final = 2e-6  # acceptance_metrics.json keeps 6 significant digits
+REFEREE_NEW: Final = "new confident (RESOLVE)"  # marker_referee.NEW
+REFEREE_LEGACY: Final = "legacy broad_class"  # marker_referee.LEGACY
+H6_POOLED: Final = "pooled"
 
 # H6 (plan §14): v1 raw thresholds, targets, depths and the class-size floor.
 H6_THRESHOLDS: Final[dict[str, float]] = {"broad": 0.73, "supercluster": 0.69}
@@ -861,6 +864,11 @@ def criteria_rows(
         (str(row["segmentation"]), str(row["sample_id"])): row
         for row in h2_breakdown[h2_breakdown["node"] == "all"].to_dict("records")
     }
+    if referee is not None and {"first", "second"} <= set(referee.columns):
+        # A referee.csv of resolve_criteria.py also holds its other two comparisons.
+        referee = referee[
+            (referee["first"] == REFEREE_NEW) & (referee["second"] == REFEREE_LEGACY)
+        ]
     referee_index = (
         {}
         if referee is None
@@ -1306,7 +1314,10 @@ def h6_precision(
         composition: ``dataset_composition`` output, or ``None``.
 
     Returns:
-        One row per level, depth and class with >= 50 test cells.
+        One row per level, depth and class with >= 50 test cells, plus per
+        level and depth a ``pooled`` row (class ``pooled``): the reweighted
+        precision of every confident call of those classes together, the
+        other reading of "classes with n >= 50", for information only.
     """
     rows = []
     for level, (truth_column, call_column, _) in H6_COLUMNS.items():
@@ -1327,9 +1338,34 @@ def h6_precision(
                     ]
                 )
             counts = pd.Series(truth).value_counts()
-            for cls in sorted(counts.index):
-                if counts[cls] < H6_MIN_TEST_CELLS:
-                    continue
+            evaluated = [
+                cls for cls in sorted(counts.index) if counts[cls] >= H6_MIN_TEST_CELLS
+            ]
+            pooled_calls = confident & np.isin(
+                call, np.asarray(evaluated, dtype=object)
+            )
+            pooled_mass = float(weights[pooled_calls].sum())
+            pooled = (
+                float(weights[pooled_calls & (call == truth)].sum()) / pooled_mass
+                if pooled_mass > 0
+                else math.nan
+            )
+            rows.append(
+                {
+                    "level": level,
+                    "depth": depth,
+                    "class": H6_POOLED,
+                    "n_test_cells": int(sum(counts[cls] for cls in evaluated)),
+                    "n_confident_calls": int(pooled_calls.sum()),
+                    "precision": pooled,
+                    "target": H6_TARGETS[level],
+                    "evaluable": math.isfinite(pooled),
+                    "passes": (pooled >= H6_TARGETS[level] - 1e-12)
+                    if math.isfinite(pooled)
+                    else None,
+                }
+            )
+            for cls in evaluated:
                 calls = confident & (call == cls)
                 mass = float(weights[calls].sum())
                 correct = float(weights[calls & (truth == cls)].sum())
@@ -1364,8 +1400,10 @@ def h6_rows(
     rows: list[Row] = []
     for dataset, mass in sorted(masses.items()):
         composition = dataset_composition(mass, mapping)
-        measured = h6_precision(cells, composition)
-        detail += [{"dataset": dataset, **row} for row in measured]
+        everything = h6_precision(cells, composition)
+        detail += [{"dataset": dataset, **row} for row in everything]
+        measured = [row for row in everything if row["class"] != H6_POOLED]
+        pooled = [row for row in everything if row["class"] == H6_POOLED]
         evaluable = [row for row in measured if row["evaluable"]]
         failing = [
             f"{row['level']} {row['class']} D{row['depth']} {row['precision']:.3f}"
@@ -1392,6 +1430,36 @@ def h6_rows(
                         + (
                             f"failing: {'; '.join(failing[:8])}"
                             if failing
+                            else "none failing"
+                        )
+                    )[:400],
+                )
+            )
+        )
+        pooled_failing = [
+            f"{row['level']} D{row['depth']} {row['precision']:.3f}"
+            for row in pooled
+            if row["evaluable"] and not row["passes"]
+        ]
+        rows.append(
+            finalize(
+                Row(
+                    "H6/pooled",
+                    pair,
+                    SCORED_SEGMENTATION,
+                    dataset,
+                    float(len(pooled_failing)),
+                    "==",
+                    0.0,
+                    None if not pooled else not pooled_failing,
+                    False,
+                    "archived E2 HO contam simulation",
+                    note=(
+                        "information: every class with >= 50 test cells pooled per "
+                        "level and depth (the other reading of H6); "
+                        + (
+                            f"failing: {'; '.join(pooled_failing)}"
+                            if pooled_failing
                             else "none failing"
                         )
                     )[:400],
