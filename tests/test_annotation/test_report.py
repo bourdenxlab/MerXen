@@ -451,24 +451,49 @@ def test_output_inside_the_inputs_or_non_empty_is_refused(
     check_output_dir(busy, sources, overwrite=True)
 
 
-def _results_tree(setup: Setup, root: Path) -> Path:
-    """Copy the synthetic outputs into the published results layout."""
+def _results_tree(setup: Setup, root: Path, *, legacy: bool = False) -> Path:
+    """Copy the synthetic outputs into the published results layout.
+
+    ``legacy`` also writes the legacy ``clustering_squidpy``,
+    ``compute_cortical_depth`` and ``mender`` outputs beside the map_first
+    ones (``_mapfirst``), as a results root that ran both modes holds them.
+    """
     base = root / "PX" / "proseg_hybrid"
     shutil.copytree(
         setup.root / "resolve_out",
         base / "annotation_resolve" / "annotation_resolve_out",
     )
     shutil.copytree(setup.map_dir, base / "annotation_map" / "annotation_map_out")
-    for sample in setup.samples:
-        target = (
-            base
-            / "clustering_squidpy_mapfirst"
-            / "clustering_squidpy_out"
-            / sample.platform.lower()
-            / f"{sample.sample_id}_clustered.h5ad"
-        )
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(sample.h5ad_path, target)
+    suffixes = ("_mapfirst", "") if legacy else ("_mapfirst",)
+    for index, sample in enumerate(setup.samples):
+        platform = sample.platform.lower()
+        for suffix in suffixes:
+            target = (
+                base
+                / f"clustering_squidpy{suffix}"
+                / "clustering_squidpy_out"
+                / platform
+                / f"{sample.sample_id}_clustered.h5ad"
+            )
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(sample.h5ad_path, target)
+            if not legacy:
+                continue
+            depth = (
+                root
+                / "PX"
+                / platform
+                / f"compute_cortical_depth{suffix}"
+                / "compute_cortical_depth_out"
+                / "proseg_hybrid"
+                / f"px_{platform}_proseg_hybrid_cells_with_cortical_depth.parquet"
+            )
+            _depth_parquet(setup, index, depth)
+            mender = base / f"mender{suffix}" / "mender_out" / platform
+            mender.mkdir(parents=True, exist_ok=True)
+            (mender / "mender_manifest.json").write_text(
+                json.dumps({"n_cells": 1, "suffix": suffix})
+            )
     return root
 
 
@@ -485,6 +510,32 @@ def test_discover_sources_finds_the_published_layout(
         for path in sources.clustered_h5ad.values()
     )
     assert sources.cortical_depth == {} and sources.alignment_dir is None
+
+
+def test_discover_sources_prefers_the_map_first_outputs_over_legacy_ones(
+    tmp_path: Path, fake_mmc: FakeMmc, make_trust: MakeTrust
+) -> None:
+    """M7 review: legacy outputs beside the map_first ones must not be read.
+
+    On P7513 the legacy clustered H5ADs' MERSCOPE coordinates differ from the
+    current pipeline's by about 80-90 µm (H1's shared mask, the tiles).
+    """
+    setup = _resolved(tmp_path / "run", fake_mmc, make_trust)
+    results = _results_tree(setup, tmp_path / "results", legacy=True)
+    sources = discover_sources(results, "PX", "proseg_hybrid")
+    for mapping, step in (
+        (sources.clustered_h5ad, "clustering_squidpy_mapfirst"),
+        (sources.cortical_depth, "compute_cortical_depth_mapfirst"),
+        (sources.mender, "mender_mapfirst"),
+    ):
+        assert set(mapping) == {"PX_MERSCOPE", "PX_XENIUM"}, step
+        for path in mapping.values():
+            assert step in path.parts, (step, path)
+    result = build_annotation_report(
+        sources, tmp_path / "report", options=OPTIONS, strict=True, make_figures=False
+    )
+    for sample_id, record in result.metrics.provenance["samples"].items():
+        assert "compute_cortical_depth_mapfirst" in record["cortical_depth"], sample_id
 
 
 def test_cli_builds_a_report_from_a_results_tree(
@@ -841,3 +892,120 @@ def test_a_broad_only_dataset_gets_a_broad_level_dotplot(
     assert levels == {"PX_MERSCOPE": "broad", "PX_XENIUM": "supercluster"}
     item = next(item for item in result.items if item.number == 4)
     assert any("PX_MERSCOPE: the supercluster level" in note for note in item.notes)
+
+
+def test_h2_and_h13_come_from_the_label_table_and_the_clustered_ids(
+    tmp_path: Path, fake_mmc: FakeMmc, make_trust: MakeTrust
+) -> None:
+    import anndata as ad
+
+    setup = _resolved(tmp_path / "run", fake_mmc, make_trust)
+    merscope = setup.samples[0]
+    clustered = ad.read_h5ad(merscope.h5ad_path)
+    short = tmp_path / "short" / f"{merscope.sample_id}_clustered.h5ad"
+    short.parent.mkdir()
+    clustered[1:].copy().write_h5ad(short)
+    sources = _sources(
+        setup,
+        clustered_h5ad={
+            **{sample.sample_id: sample.h5ad_path for sample in setup.samples},
+            merscope.sample_id: short,
+        },
+    )
+    result = build_annotation_report(
+        sources,
+        tmp_path / "report",
+        options=OPTIONS,
+        strict=True,
+        make_figures=False,
+        items=[2],
+    )
+    (dropped,) = result.metrics.find(
+        "H13", "table_ids_equal_clustered", sample_id=merscope.sample_id
+    )
+    assert dropped.value is False
+    (kept,) = result.metrics.find(
+        "H13", "table_ids_equal_clustered", sample_id=setup.samples[1].sample_id
+    )
+    assert kept.value is True
+    for sample in setup.samples:
+        labels = pd.read_parquet(
+            setup.root
+            / "resolve_out"
+            / sample.platform.lower()
+            / f"{sample.sample_id}_celltype_labels.parquet",
+            columns=["in_table", "flag_implausible"],
+        )
+        table = labels[labels["in_table"]]
+        expected = float(table["flag_implausible"].astype(bool).mean())
+        assert expected < 0.5
+        (h2,) = result.metrics.find(
+            "H2", "flag_implausible_share", sample_id=sample.sample_id
+        )
+        assert h2.value == pytest.approx(expected, rel=1e-5) and h2.n == len(table)
+
+
+def test_the_digest_takes_the_trust_state_from_resolve_first() -> None:
+    from merxen.annotation.report import dataset_digest
+    from merxen.annotation.report_inputs import ReportInputs, SampleData
+
+    sample = SampleData(
+        sample_id="S_MERSCOPE",
+        platform="MERSCOPE",
+        labels=pd.DataFrame({"in_table": [True]}),
+        summary={
+            "trust": {"state": "provisional", "validation_basis": "simulation"},
+            "resolution": {"gate": {"level": "broad_only", "warning": True}},
+        },
+        manifest={"panel": {"panel_trust": "validated", "panel_family": "fam"}},
+        labels_path=Path("labels.parquet"),
+    )
+    inputs = ReportInputs(
+        sources=ReportSources(
+            species="human", pair_id="S", segmentation="seg", resolve_dir=Path(".")
+        ),
+        summary={},
+        samples={"S_MERSCOPE": sample},
+    )
+    digest = dataset_digest(inputs)["S_MERSCOPE"]
+    assert digest["trust_state"] == "provisional"
+    assert digest["validation_basis"] == "simulation"
+    assert digest["gate_level"] == "broad_only" and digest["gate_warning"] is True
+    assert digest["panel_family"] == "fam"
+
+
+def test_an_explicit_depth_file_wins_over_a_depth_directory(
+    tmp_path: Path, fake_mmc: FakeMmc, make_trust: MakeTrust
+) -> None:
+    setup = _resolved(tmp_path / "run", fake_mmc, make_trust)
+    sample = setup.samples[0]
+    staged = tmp_path / "staged" / "compute_cortical_depth_out"
+    name = f"{sample.sample_id.lower()}_proseg_hybrid_cells_with_cortical_depth"
+    _depth_parquet(setup, 0, staged / "proseg_hybrid" / f"{name}.parquet")
+    explicit = _depth_parquet(setup, 0, tmp_path / "explicit" / f"{name}.parquet")
+    result = CliRunner().invoke(
+        cli_main,
+        [
+            "annotation-report",
+            "--pair",
+            "PX",
+            "--segmentation",
+            "proseg_hybrid",
+            "--resolve-dir",
+            str(setup.root / "resolve_out"),
+            "--cortical-depth-dir",
+            f"{sample.sample_id}={staged}",
+            "--cortical-depth",
+            f"{sample.sample_id}={explicit}",
+            "--out",
+            str(tmp_path / "report"),
+            "--items",
+            "9",
+            "--no-figures",
+            "--no-expression",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    document = json.loads((tmp_path / "report" / "acceptance_metrics.json").read_text())
+    recorded = document["provenance"]["samples"][sample.sample_id]["cortical_depth"]
+    assert recorded == str(explicit)
