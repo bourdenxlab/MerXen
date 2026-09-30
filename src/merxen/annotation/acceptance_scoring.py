@@ -314,8 +314,8 @@ TOLERANCES: Final[dict[str, Any]] = {
         "opc_missing": sorted(D4_OPC_MISSING),
         "opc_missing_P7113_XENIUM": sorted(D4_OPC_MISSING_BY_DATASET["P7113_XENIUM"]),
         "immune": {"dataset": D4_IMMUNE_DATASET, "missing": sorted(D4_IMMUNE_MISSING)},
-        "would_raise": "PREP equal to the text's 15 bins; per dataset a subset of "
-        "the stage A2 list (else each added bin itemised and rechecked)",
+        "would_raise": "PREP within the text's 15 bins; per dataset within the "
+        "stage A2 list (each added bin itemised and rechecked)",
     },
     "D5": {
         "text_values": {f"{s}/{d}": v for (s, d), v in D5_TEXT_VALUES.items()},
@@ -526,7 +526,8 @@ def check_d4_would_raise(
         ]
         if added
         else [],
-        f"{len(raised)} bins, all listed at stage A2",
+        f"{len(raised)} bins, all in D4's list "
+        + ("(the text's)" if dataset.startswith("PREP") else "(stage A2's)"),
     )
 
 
