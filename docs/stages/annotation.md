@@ -789,6 +789,35 @@ Under the lung-FFPE depth scenario (median 245 counts) the human
 profile mode predicts a provisional supercluster coverage of .593 (member
 mean; phase 1's bracket .55-.57) and broad .776.
 
+**Measured after the amendment (M3c stage E2, 2026-09-29/30; code
+`6bb42fd`; `M3C_EXIT_REPORT.txt` §10).** The amended code (eight emission
+members, the one-SE spread margin) was built into new build directories
+of the large store; the stage-D bundles above stay in the store unchanged
+as history. Host load 6-92, 8 processes per job:
+
+| Family | Bundles | Wall | Peak process-tree PSS | Provisional emission |
+|---|---|---|---|---|
+| Xenium Prime 5K human (R1 x 8; clean and lung stress reported) | WHB `7e881fb1`, SEA-AD `1306b298`, held-out test set `816f3afe` (reused) | 2.5 h (WHB 68 min, SEA-AD 69 min) | 9.6 GB | WHB 310 of 546 bins (285 unanimous, 24 by the spread, 1 filled; 1 margin failure), SEA-AD 75 of 104 |
+| Xenium Prime 5K mouse (R1 x 6 + R3 x 2; clean reported) | WMB `f6127077` (16.3 GB), test set `457e0140` (reused, 14,072 cells) | 9.1 h (reference markers 76 min, query markers 64 min, self-map 6.6 h: nine members at 3-6 min thinning + 26-58 min mapping each, decisions 4.5 min, trust guard 3.1 min, tables 4.4 min) | 28.9 GB (reference markers; largest process 21.3 GB, query markers) | 1,197 of 2,210 bins (1,014 unanimous, 174 by the spread, 9 filled, 2 at the saturated cap; 41 spread and 29 margin failures) |
+
+All three are `provisional` (trust constraint none; for the mouse bundle
+the asset-free guard was applied). The re-test of the emitted-triple
+stability (pre-registration §15.4) **failed**: against a comparator
+ensemble (`R1_contam_HO@20`-`@25`, `R3_measured_HO@20`, `@21`; 7.9 h, 21.1
+GB) 62 of the 1,235 provisional triples moved (churn 0.050 > 0.02; broad to
+subclass 0.031; supertype 28 of the 62; two single draws 0.060). In the
+ensemble that did not emit a churned triple the member-spread limit was the
+reason for 32 of them and the new margin for 13. The work stopped there, as
+pre-registered. On the public section the two ensembles give the same real
+provisional class coverage (.873 / .871) but subclass .643 / .687, mostly
+through OPC-Oligo subclass (.564 / .824, three bins at 250-500 counts). The
+mouse class-depth predictor on the section's own per-class depth gives
+provisional class .909 and subclass .735, profile mode (member mean,
+weighted to the real composition) class .945 and subclass .733. Under the
+lung-FFPE scenario, weighted to the test-set composition, the human profile
+mode predicts provisional broad .776 and supercluster .575 (members
+.545-.593).
+
 ### Panel families, diagnostics and trust states (M3b)
 
 **Validated families** are packaged in `assets/annotation/`:
