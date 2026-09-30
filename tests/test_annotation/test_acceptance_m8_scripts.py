@@ -2065,6 +2065,26 @@ def test_score_writes_the_summary_and_sends_failures_back(
     assert any(path.endswith("criteria_table.csv") for path in summary["inputs"])
 
 
+def test_summary_flags_separate_scored_rows_from_the_rest(
+    acceptance: ModuleType,
+) -> None:
+    unscored = {"back_to_user": True, "scored": False}
+    scored = {"back_to_user": True, "scored": True}
+    fine = {"back_to_user": False, "scored": True}
+    flags = acceptance.summary_flags([fine, unscored], [])
+    assert flags == {
+        "n_back_to_user": 1,
+        "all_scored_rows_pass_or_inside_an_exception": True,
+        "nothing_back_to_user": False,
+    }
+    flags = acceptance.summary_flags([fine], ["no draw spread"])
+    assert flags["all_scored_rows_pass_or_inside_an_exception"] is True
+    assert flags["nothing_back_to_user"] is False
+    flags = acceptance.summary_flags([fine, scored], [])
+    assert flags["all_scored_rows_pass_or_inside_an_exception"] is False
+    assert acceptance.summary_flags([fine], [])["nothing_back_to_user"] is True
+
+
 def test_score_scores_nothing_when_the_run_did_not_use_the_d1_bundles(
     acceptance: ModuleType, tmp_path: Path
 ) -> None:

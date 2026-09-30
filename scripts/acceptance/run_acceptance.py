@@ -2042,6 +2042,25 @@ def write_html(summary: Mapping[str, Any], path: Path) -> None:
     path.write_text("\n".join(parts) + "\n", encoding="utf-8")
 
 
+def summary_flags(
+    records: Sequence[Mapping[str, Any]], problems: Sequence[str]
+) -> dict[str, Any]:
+    """Return the summary's back-to-the-user counts and flags.
+
+    ``all_scored_rows_pass_or_inside_an_exception`` looks at the rows the
+    flip rule scores only; ``nothing_back_to_user`` also needs every other
+    row (first-measured failures, cross-check mismatches) and no problem.
+    """
+    back = [record for record in records if record["back_to_user"]]
+    return {
+        "n_back_to_user": len(back),
+        "all_scored_rows_pass_or_inside_an_exception": not any(
+            record["scored"] for record in back
+        ),
+        "nothing_back_to_user": not back and not problems,
+    }
+
+
 def _unscored(rows: Sequence[Row], reasons: Sequence[str]) -> list[Row]:
     note = "; ".join(reasons)[:200]
     for row in rows:
@@ -2258,12 +2277,7 @@ def score(args: argparse.Namespace) -> dict[str, Any]:
         "segmentations": segmentations,
         "p5_check": dataclasses.asdict(prep),
         "verdict_counts": counts(rows),
-        "n_back_to_user": sum(1 for record in records if record["back_to_user"]),
-        "all_scored_rows_pass_or_inside_an_exception": not any(
-            record["back_to_user"] and record["scored"] for record in records
-        ),
-        "nothing_back_to_user": not problems
-        and not any(record["back_to_user"] for record in records),
+        **summary_flags(records, problems),
         "problems": problems,
         "h12": h12_scores,
         "rows": records,
