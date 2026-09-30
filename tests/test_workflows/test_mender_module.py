@@ -1,8 +1,29 @@
-"""Workflow contract tests for the terminal MENDER stage."""
+"""Workflow contract tests for the terminal MENDER stage.
+
+The string tests pin the MENDER wiring. When ``nextflow`` is installed, a
+harness also includes ``rowSampleSettings``, ``currentPairTerminalStage``,
+``currentPairTerminalExpectedCount``, ``appendClusteringSquidpyPreflightChecks``
+and ``corticalDepthConfigForPlatform`` from ``workflows/main.nf`` and runs
+them on samplesheet rows in both clustering modes (plan §3.1, §13.2): in
+map_first MAPMYCELLS runs only when explicitly requested, so the MENDER
+barrier never waits for it, and the legacy clustering preflight and the
+cortical-depth table configs of legacy rows are unchanged.
+"""
 
 from __future__ import annotations
 
+import json
+import os
+import shutil
+import subprocess
 from pathlib import Path
+from typing import Any
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+NEXTFLOW = shutil.which("nextflow")
+needs_nextflow = pytest.mark.skipif(NEXTFLOW is None, reason="nextflow is unavailable")
 
 
 def _texts() -> tuple[str, str, str, str]:
@@ -193,3 +214,516 @@ def test_mender_environment_pins_repository_commit_and_old_stack() -> None:
     assert "envs/environment.mender.yml" in dockerfile_text
     assert 'CUDA_VISIBLE_DEVICES=""' in dockerfile_text
     assert "nvidia" not in dockerfile_text.lower()
+
+
+HARNESS_MAIN = """
+include {
+    rowSampleSettings;
+    currentPairTerminalStage;
+    currentPairTerminalExpectedCount;
+    appendClusteringSquidpyPreflightChecks;
+    corticalDepthConfigForPlatform
+} from '__MAIN__'
+
+workflow {
+    def cases = new groovy.json.JsonSlurperClassic().parse(new File(params.cases))
+    def results = [:]
+    cases.each { name, testCase ->
+        def runParams = [:] + params + testCase.params
+        try {
+            def settings = rowSampleSettings(testCase.row, runParams)
+            def terminal = currentPairTerminalStage(settings)
+            def clusteringErrors = []
+            appendClusteringSquidpyPreflightChecks(
+                clusteringErrors, settings, runParams
+            )
+            def depth = corticalDepthConfigForPlatform(
+                testCase.row, settings.pair_id, "MERSCOPE",
+                settings.analysis_segmentations, runParams,
+            )
+            results[name] = [value: [
+                mode: settings.clustering_squidpy_mode ?: "legacy",
+                annotation_keys: settings.keySet().findAll { key ->
+                    key in AnnotationSettings.KEYS
+                }.sort(),
+                run_mapmycells: settings.run_mapmycells,
+                run_mender: settings.run_mender,
+                terminal: terminal,
+                count: currentPairTerminalExpectedCount(settings, terminal),
+                clustering_errors: clusteringErrors,
+                depth_tables: depth.tables,
+            ]]
+        } catch (Exception error) {
+            results[name] = [error: error.message]
+        }
+    }
+    new File(params.out).text = groovy.json.JsonOutput.toJson(results)
+}
+"""
+
+ROW = {
+    "pair_id": "P1",
+    "analysis_mode": "paired",
+    "analysis_segmentation": "proseg_hybrid",
+    "merscope_dir": "/nonexistent/m",
+    "xenium_dir": "/nonexistent/x",
+}
+MAP_FIRST = {"clustering_squidpy_mode": "map_first"}
+# Legacy clustering preflight inputs that do not exist: legacy rows must
+# report them, map_first rows must not read them (hook H4).
+MISSING_LEGACY_MARKERS = {
+    "clustering_squidpy_broad_marker_lookup_path": "/nonexistent/markers.json",
+    "clustering_squidpy_broad_taxonomy_metadata_path": "/nonexistent/terms.csv",
+}
+TERMINAL_CASES: dict[str, dict[str, Any]] = {
+    "legacy|stop-mender": {"stop_stage": "mender", "mender_enabled": True},
+    "legacy|default-mender": {"mender_enabled": True},
+    "map_first|stop-mender": {
+        **MAP_FIRST,
+        "stop_stage": "mender",
+        "mender_enabled": True,
+    },
+    "map_first|stop-mender-skip": {
+        **MAP_FIRST,
+        "stop_stage": "mender",
+        "mender_enabled": True,
+        "annotation_mode_mapmycells_stage": "skip",
+    },
+    "map_first|default-mender": {**MAP_FIRST, "mender_enabled": True},
+    "map_first|depth-mender": {
+        **MAP_FIRST,
+        "stop_stage": "mender",
+        "mender_enabled": True,
+        "cortical_depth_enabled": True,
+    },
+    "map_first|stop-mapmycells": {**MAP_FIRST, "stop_stage": "mapmycells"},
+    "map_first|stop-mapmycells-skip": {
+        **MAP_FIRST,
+        "stop_stage": "mapmycells",
+        "annotation_mode_mapmycells_stage": "skip",
+    },
+    "legacy|preflight": {**MISSING_LEGACY_MARKERS, "annotation_panel_mode": "bogus"},
+    "map_first|preflight": {
+        **MAP_FIRST,
+        **MISSING_LEGACY_MARKERS,
+        "annotation_panel_mode": "bogus",
+    },
+}
+
+
+@pytest.fixture(scope="module")
+def main_nf_results(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
+    """Run the main.nf functions on every case in one Nextflow run."""
+    assert NEXTFLOW is not None
+    root = tmp_path_factory.mktemp("main_nf_functions")
+    (root / "lib").mkdir()
+    for source in (REPO_ROOT / "workflows" / "lib").glob("*.groovy"):
+        shutil.copy(source, root / "lib" / source.name)
+    (root / "main.nf").write_text(
+        HARNESS_MAIN.replace("__MAIN__", str(REPO_ROOT / "workflows" / "main.nf"))
+    )
+    cases = {
+        name: {"row": ROW, "params": params} for name, params in TERMINAL_CASES.items()
+    }
+    (root / "cases.json").write_text(json.dumps(cases))
+    (root / "nextflow.config").write_text(
+        f"includeConfig '{REPO_ROOT / 'workflows' / 'nextflow.config'}'\n"
+        f"params.cases = '{root / 'cases.json'}'\n"
+        f"params.out = '{root / 'results.json'}'\n"
+        "params.samplesheet = 'unused.csv'\n"
+        f"params.outdir = '{root / 'results'}'\n"
+    )
+    env = {**os.environ, "NXF_DISABLE_CHECK_LATEST": "true", "NXF_ANSI_LOG": "false"}
+    completed = subprocess.run(
+        [NEXTFLOW, "-log", str(root / "nextflow.log"), "run", "main.nf"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    results: dict[str, Any] = json.loads((root / "results.json").read_text())
+    return results
+
+
+def _case(results: dict[str, Any], name: str) -> dict[str, Any]:
+    assert "error" not in results[name], results[name]
+    value: dict[str, Any] = results[name]["value"]
+    return value
+
+
+@needs_nextflow
+def test_map_first_never_waits_for_mapmycells(main_nf_results: dict[str, Any]) -> None:
+    """runMapMyCells is false in map_first, so the MENDER barrier counts clustering."""
+    legacy = _case(main_nf_results, "legacy|stop-mender")
+    assert legacy["mode"] == "legacy"
+    assert legacy["run_mapmycells"] is True
+    assert legacy["terminal"] == "mapmycells"
+    for name in (
+        "map_first|stop-mender",
+        "map_first|stop-mender-skip",
+        "map_first|default-mender",
+    ):
+        case = _case(main_nf_results, name)
+        assert case["mode"] == "map_first", name
+        assert case["run_mender"] is True, name
+        assert case["run_mapmycells"] is False, name
+        assert case["terminal"] == "clustering_squidpy", name
+        # One FINALIZE output per required clustering segmentation.
+        assert case["count"] == 1, name
+    depth = _case(main_nf_results, "map_first|depth-mender")
+    assert depth["run_mapmycells"] is False
+    assert depth["terminal"] == "compute_cortical_depth"
+    assert depth["count"] == 2
+
+
+# The MENDER barrier of legacy runs, as on main (its channels and DAG stay
+# unchanged; the join defect of legacy runs is left for a fix on main).
+LEGACY_BARRIER = """\
+        pair_terminal_grouped_ch = pair_terminal_events_ch
+            .join(pair_terminal_specs_ch)
+            .filter { _pairId, eventStage, _done, expectedStage, _expectedCount ->
+                eventStage == expectedStage
+            }
+            .map { pairId, _eventStage, _done, _expectedStage, expectedCount ->
+                tuple(groupKey(pairId, expectedCount as int), true)
+            }
+            .groupTuple()
+            .map { pairKey, _doneFlags -> tuple(pairKey.getGroupTarget(), true) }
+"""
+
+
+def test_barrier_keeps_the_legacy_join_and_one_spec_per_pair() -> None:
+    """map_first combines each event with the one spec; legacy keeps its join."""
+    main_text = (REPO_ROOT / "workflows" / "main.nf").read_text()
+    specs = _main_nf_block(
+        main_text, "    pair_terminal_specs_ch = ", "    pair_terminal_immediate_ch = "
+    )
+    grouped = _main_nf_block(
+        main_text,
+        "    if (AnnotationSettings.isMapFirstRun(params)) { // rca-site:H3",
+        "    pair_terminal_token_ch = ",
+    )
+    map_first, legacy = grouped.split("    } else {\n")
+    assert "AnnotationSettings" not in specs
+    assert "[tuple(" in specs and ")] *" not in specs
+    assert legacy == LEGACY_BARRIER + "    }\n\n"
+    assert ".combine(pair_terminal_specs_ch, by: 0)" in map_first
+    assert ".join(" not in map_first
+    # Both branches filter, key and group the events alike.
+    assert (
+        map_first.split(".combine(pair_terminal_specs_ch, by: 0)\n")[1]
+        == (LEGACY_BARRIER.split(".join(pair_terminal_specs_ch)\n")[1])
+    )
+
+
+@needs_nextflow
+def test_map_first_runs_legacy_mapmycells_only_when_asked(
+    main_nf_results: dict[str, Any],
+) -> None:
+    """--stop_stage mapmycells with the stage kept legacy (plan §3.1)."""
+    assert _case(main_nf_results, "map_first|stop-mapmycells")["run_mapmycells"] is True
+    assert (
+        _case(main_nf_results, "map_first|stop-mapmycells-skip")["run_mapmycells"]
+        is False
+    )
+
+
+@needs_nextflow
+def test_legacy_rows_get_no_annotation_settings(
+    main_nf_results: dict[str, Any],
+) -> None:
+    """A legacy row's settings (VALIDATE_ANALYSIS_LAYER's task input) are unchanged."""
+    assert _case(main_nf_results, "legacy|default-mender")["annotation_keys"] == []
+    keys = _case(main_nf_results, "map_first|default-mender")["annotation_keys"]
+    assert keys == sorted(
+        [
+            "clustering_squidpy_mode",
+            "clustering_squidpy_table_key_suffix",
+            "annotation_anatomical_region",
+            "annotation_mouse_section_regions",
+            "annotation_mode_mapmycells_stage",
+            "mender_unassigned_state_policy",
+        ]
+    )
+
+
+@needs_nextflow
+def test_preflight_gates_the_legacy_checks_on_the_mode(
+    main_nf_results: dict[str, Any],
+) -> None:
+    """Hook H4: legacy marker checks run for legacy rows only."""
+    legacy = "\n".join(_case(main_nf_results, "legacy|preflight")["clustering_errors"])
+    assert "CLUSTERING_SQUIDPY broad marker lookup" in legacy
+    assert "annotation_panel_mode" not in legacy
+    map_first = "\n".join(
+        _case(main_nf_results, "map_first|preflight")["clustering_errors"]
+    )
+    assert "CLUSTERING_SQUIDPY broad marker lookup" not in map_first
+    assert (
+        "Unknown annotation_panel_mode 'bogus' for P1 (human, "
+        "clustering_squidpy_mode map_first)"
+    ) in map_first
+    assert "not available yet" not in map_first
+
+
+@needs_nextflow
+def test_cortical_depth_tables_carry_the_suffix_of_map_first_rows(
+    main_nf_results: dict[str, Any],
+) -> None:
+    legacy = _case(main_nf_results, "legacy|default-mender")["depth_tables"]
+    assert legacy == [
+        {
+            "segmentation": "proseg_hybrid",
+            "table_key": "table_MOSAIK_proseg_hybrid",
+            "shape_key": "MOSAIK_proseg_hybrid",
+        }
+    ]
+    map_first = _case(main_nf_results, "map_first|default-mender")["depth_tables"]
+    assert map_first == [{**legacy[0], "clustered_table_key_suffix": "mapfirst"}]
+
+
+BARRIER_MAIN = """
+include {
+    rowSampleSettings;
+    currentPairTerminalStage;
+    currentPairTerminalExpectedCount
+} from '__MAIN__'
+
+workflow {
+    def runParams = [:] + params + [
+        clustering_squidpy_mode: params.mode,
+        stop_stage: "mender",
+        mender_enabled: true,
+        cortical_depth_enabled: true,
+    ]
+    def sampleRow = new groovy.json.JsonSlurperClassic().parseText(params.row)
+    def rowSettings = rowSampleSettings(sampleRow, runParams)
+    def pair = rowSettings.pair_id
+    sample_rows_ch = channel.of(tuple(pair, sampleRow, rowSettings))
+    // FINALIZE finishes before cortical depth and MAPMYCELLS, as in a real
+    // run. A legacy row waits for MAPMYCELLS, a map_first row for cortical
+    // depth (runMapMyCells is false in map_first).
+    pair_terminal_events_ch = channel.of(
+        tuple(pair, "clustering_squidpy", true),
+        tuple(pair, "compute_cortical_depth", true),
+        tuple(pair, "compute_cortical_depth", true),
+        tuple(pair, "mapmycells", true),
+    )
+__SPECS__
+__GROUPED__
+    pair_terminal_grouped_ch
+        .map { pairId, _done -> pairId }
+        .collect()
+        .ifEmpty([])
+        .subscribe { released -> new File(params.out).text = released.join(",") }
+}
+"""
+
+
+def _main_nf_block(main_text: str, start: str, end: str) -> str:
+    """Return main.nf from the line starting with ``start`` up to ``end``."""
+    begin = main_text.index(start)
+    return main_text[begin : main_text.index(end, begin)]
+
+
+@needs_nextflow
+@pytest.mark.parametrize(("mode", "released"), [("map_first", "P1"), ("legacy", "")])
+def test_barrier_releases_map_first_pairs_after_other_terminal_events(
+    tmp_path: Path, mode: str, released: str
+) -> None:
+    """main.nf's own barrier text on events in real-run order (M5 exit run).
+
+    The pair's clustering event arrives first. map_first combines every
+    event with the pair's one spec, so the two cortical-depth events release
+    MENDER. Legacy keeps the join: the clustering event consumes the single
+    spec and the MAPMYCELLS event it waits for finds none, so the pair is
+    not released (the pre-existing barrier defect of legacy runs, reported
+    for a fix on main; legacy channels stay unchanged).
+    """
+    assert NEXTFLOW is not None
+    main_nf = REPO_ROOT / "workflows" / "main.nf"
+    main_text = main_nf.read_text()
+    specs = _main_nf_block(
+        main_text, "    pair_terminal_specs_ch = ", "    pair_terminal_immediate_ch = "
+    )
+    grouped = _main_nf_block(
+        main_text,
+        "    if (AnnotationSettings.isMapFirstRun(params)) { // rca-site:H3",
+        "    pair_terminal_token_ch = ",
+    )
+    (tmp_path / "lib").mkdir()
+    for source in (REPO_ROOT / "workflows" / "lib").glob("*.groovy"):
+        shutil.copy(source, tmp_path / "lib" / source.name)
+    (tmp_path / "main.nf").write_text(
+        BARRIER_MAIN.replace("__MAIN__", str(main_nf))
+        .replace("__SPECS__", specs)
+        .replace("__GROUPED__", grouped)
+    )
+    out = tmp_path / "released.txt"
+    (tmp_path / "nextflow.config").write_text(
+        f"includeConfig '{REPO_ROOT / 'workflows' / 'nextflow.config'}'\n"
+        f"params.mode = '{mode}'\n"
+        f"params.clustering_squidpy_mode = '{mode}'\n"
+        f"params.row = '{json.dumps(ROW)}'\n"
+        f"params.out = '{out}'\n"
+        "params.samplesheet = 'unused.csv'\n"
+        f"params.outdir = '{tmp_path / 'results'}'\n"
+    )
+    env = {**os.environ, "NXF_DISABLE_CHECK_LATEST": "true", "NXF_ANSI_LOG": "false"}
+    completed = subprocess.run(
+        [NEXTFLOW, "-log", str(tmp_path / "nextflow.log"), "run", "main.nf"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert out.read_text() == released
+
+
+ALIGNMENT_MAIN = """
+workflow {
+    def rows = new groovy.json.JsonSlurperClassic().parseText(params.rows)
+    sample_rows_ch = channel.fromList(
+        rows.collect { row -> tuple(row.pair_id, row, row.settings) }
+    )
+    // ALIGN's tuple: pair, MERSCOPE / Xenium latest, transform, coords, align_out.
+    alignment_results_ch = channel.of(
+        tuple("P1", "m.zarr", "x.zarr", "t.json", "coords", params.align_out)
+    )
+__ALIGNMENT__
+    map_first_alignment_ch
+        .map { pairId, files -> [pairId, files.collect { f -> f.toString() }] }
+        .collect(flat: false)
+        .ifEmpty([])
+        .subscribe { items ->
+            new File(params.out).text = groovy.json.JsonOutput.toJson(items)
+        }
+}
+"""
+
+
+@needs_nextflow
+def test_map_first_alignment_gives_one_tuple_per_pair(tmp_path: Path) -> None:
+    """Hook H5's ALIGN files: [mask, summary] for an aligned pair, [] otherwise.
+
+    main.nf's own ``map_first_alignment_ch`` block feeds
+    ``prepared_ch.combine(alignment_ch, by: 0)`` in CLUSTERING_MAP_FIRST, so
+    a pair without an alignment (single-platform section, alignment disabled)
+    must still get exactly one (empty) tuple and an aligned pair exactly one.
+    """
+    assert NEXTFLOW is not None
+    main_text = (REPO_ROOT / "workflows" / "main.nf").read_text()
+    block = _main_nf_block(
+        main_text,
+        "        map_first_alignment_ch = alignment_results_ch",
+        "        clustering_computed_ch = CLUSTERING_MAP_FIRST(",
+    )
+    align_out = tmp_path / "align_out"
+    align_out.mkdir()
+    for name in ("shared_tissue_mask.npy", "registration_summary.json"):
+        (align_out / name).write_text("x")
+    rows = [
+        {"pair_id": "P1", "settings": {"need_alignment_results": True}},
+        {"pair_id": "P2", "settings": {"need_alignment_results": False}},
+    ]
+    (tmp_path / "lib").mkdir()
+    for source in (REPO_ROOT / "workflows" / "lib").glob("*.groovy"):
+        shutil.copy(source, tmp_path / "lib" / source.name)
+    (tmp_path / "main.nf").write_text(ALIGNMENT_MAIN.replace("__ALIGNMENT__", block))
+    out = tmp_path / "alignment.json"
+    (tmp_path / "nextflow.config").write_text(
+        f"params.rows = '{json.dumps(rows)}'\n"
+        f"params.align_out = '{align_out}'\n"
+        f"params.out = '{out}'\n"
+    )
+    env = {**os.environ, "NXF_DISABLE_CHECK_LATEST": "true", "NXF_ANSI_LOG": "false"}
+    completed = subprocess.run(
+        [NEXTFLOW, "-log", str(tmp_path / "nextflow.log"), "run", "main.nf"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    items = sorted(json.loads(out.read_text()))
+    assert items == [
+        [
+            "P1",
+            [
+                str(align_out / "shared_tissue_mask.npy"),
+                str(align_out / "registration_summary.json"),
+            ],
+        ],
+        ["P2", []],
+    ]
+
+
+COMPLETION_MAIN = """
+workflow {
+    AnnotationRunRecord.reset()
+    AnnotationRunRecord.expect("P1", "proseg_hybrid")
+    AnnotationRunRecord.expect("P2", "proseg_hybrid")
+    AnnotationRunRecord.computed("P2", "proseg_hybrid")
+__COMPLETION__
+    channel.of(1).view { "ran" }
+}
+"""
+
+
+@needs_nextflow
+@pytest.mark.parametrize(
+    ("mode", "listed"),
+    [("map_first", True), ("legacy", False)],
+)
+def test_the_end_of_run_summary_lists_the_run_record(
+    tmp_path: Path, mode: str, listed: bool
+) -> None:
+    """Hook H6: main.nf's own onComplete block prints AnnotationRunRecord's facts.
+
+    A branch that entered clustering and got no label tables is listed as a
+    failed annotation in a map_first run; a legacy run prints no summary.
+    """
+    assert NEXTFLOW is not None
+    main_text = (REPO_ROOT / "workflows" / "main.nf").read_text()
+    block = _main_nf_block(
+        main_text, "    // rca-hook:H6", "    build_inputs_ch = sample_rows_ch"
+    )
+    (tmp_path / "lib").mkdir()
+    for source in (REPO_ROOT / "workflows" / "lib").glob("*.groovy"):
+        shutil.copy(source, tmp_path / "lib" / source.name)
+    (tmp_path / "main.nf").write_text(COMPLETION_MAIN.replace("__COMPLETION__", block))
+    (tmp_path / "nextflow.config").write_text(
+        f"includeConfig '{REPO_ROOT / 'workflows' / 'nextflow.config'}'\n"
+        f"params.clustering_squidpy_mode = '{mode}'\n"
+        "params.samplesheet = 'unused.csv'\n"
+        f"params.outdir = '{tmp_path / 'results'}'\n"
+    )
+    env = {**os.environ, "NXF_DISABLE_CHECK_LATEST": "true", "NXF_ANSI_LOG": "false"}
+    completed = subprocess.run(
+        [NEXTFLOW, "-log", str(tmp_path / "nextflow.log"), "run", "main.nf"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    log = (tmp_path / "nextflow.log").read_text() + completed.stdout
+    failed = (
+        "failed annotations (no label tables; see the failed tasks above): "
+        "P1:proseg_hybrid, P2:proseg_hybrid"
+    )
+    if listed:
+        assert "pair x segmentation branches clustered: 2" in log
+        assert failed in log
+    else:
+        assert "Annotation summary" not in log

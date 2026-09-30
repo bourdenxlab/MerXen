@@ -13,25 +13,38 @@ import pytest
 
 from merxen.mender_compute import run_mender_compute
 
+UNASSIGNED_STATE = "Mixed/Unknown:unresolved"
 
-def _portable_grid(path: Path) -> None:
+
+def _portable_grid(path: Path, *, policy: str = "state") -> None:
+    """Write a 6 x 6 grid: two assigned states and a diagonal of unassigned cells.
+
+    Under ``exclude_from_features`` the unassigned cells get
+    ``in_features=False``, as ``prepare_mender`` writes them (plan §4.9).
+    """
     rows = []
     for y_index in range(6):
         for x_index in range(6):
+            state = "Neurons/Excitatory:left" if x_index < 3 else "Astrocytes:right"
+            if x_index == y_index:
+                state = UNASSIGNED_STATE
             rows.append(
                 {
                     "cell_id": f"cell_{x_index}_{y_index}",
                     "native_x": float(x_index * 10),
                     "native_y": float(y_index * 10),
-                    "cell_state": "left" if x_index < 3 else "right",
+                    "cell_state": state,
                 }
             )
     frame = pd.DataFrame(rows)
     frame["cell_state"] = pd.Categorical(frame["cell_state"])
+    if policy == "exclude_from_features":
+        frame["in_features"] = frame["cell_state"].astype(str) != UNASSIGNED_STATE
     frame.to_parquet(path, index=False)
 
 
 @pytest.mark.slow
+@pytest.mark.parametrize("policy", ["state", "exclude_from_features"])
 @pytest.mark.parametrize(
     ("clustering_mode", "leiden_resolution", "target_k"),
     [
@@ -44,12 +57,18 @@ def test_real_mender_synthetic_grid_smoke(
     clustering_mode: str,
     leiden_resolution: float,
     target_k: int | None,
+    policy: str,
 ) -> None:
-    """Run the pinned MENDER package when this test uses its dedicated env."""
+    """Run the pinned MENDER package when this test uses its dedicated env.
+
+    Both ``unassigned_state_policy`` values (plan §4.9): unassigned cells
+    stay nodes with a domain; under ``exclude_from_features`` their state
+    contributes no neighbourhood feature.
+    """
     pytest.importorskip("MENDER", reason="run inside envs/environment.mender.yml")
     prepared = tmp_path / "prepared"
     prepared.mkdir()
-    _portable_grid(prepared / "mender_input.parquet")
+    _portable_grid(prepared / "mender_input.parquet", policy=policy)
     config = {
         "sample_id": "synthetic_MERSCOPE",
         "platform": "MERSCOPE",
@@ -77,6 +96,14 @@ def test_real_mender_synthetic_grid_smoke(
     manifest = json.loads(outputs["manifest"].read_text())
     expected_request = -1.5 if clustering_mode == "resolution" else 2
     assert manifest["clustering_request"] == expected_request
+    n_scales = int(config["n_scales"])
+    if policy == "state":
+        assert manifest["n_context_features"] == 3 * n_scales
+        assert "excluded_feature_states" not in manifest
+    else:
+        assert manifest["n_context_features"] == 2 * n_scales
+        assert manifest["excluded_feature_states"] == [UNASSIGNED_STATE]
+        assert manifest["n_cells_excluded_from_features"] == 6
 
 
 @pytest.mark.slow

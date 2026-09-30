@@ -42,8 +42,11 @@ EXPECTED_SHA256: dict[str, str] = {
     "CLUSTERING_SQUIDPY_FINALIZE": (
         "f432a219dc76a850d0faac2261fe02fe0e6e39b2aab4ab1a2706f22c6f84c8d3"
     ),
+    # M5 (hook H5): the legacy PREPARE -> COMPUTE statements moved into the
+    # else-branch of the map_first switch; process texts and defaults are
+    # unchanged, so legacy task hashes, -resume and the legacy DAG are too.
     "main.nf wiring": (
-        "b5bdef3c908d907fa7be0f204cd50f942f1e2817f5944cde3393608b3dd20f50"
+        "f476ca3c9babb8a4acbadf692f760058dc8580e1701b7625212e78511ace5623"
     ),
     "param defaults": (
         "fe4ca1ed06ba1c74dba06b3a50219cfac58a719376ead6792ae7ae0568c5f3c2"

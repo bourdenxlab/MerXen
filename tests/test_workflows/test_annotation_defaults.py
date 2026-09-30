@@ -41,6 +41,7 @@ from merxen.annotation.config import (
     species_defaults,
 )
 from merxen.annotation.vocab import SPECIES
+from merxen.clustering import cross_platform
 from merxen.table_keys import TABLE_KEY_SUFFIX_PATTERN
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -314,6 +315,40 @@ class AnnotationTestHarness {
                 def errors = []
                 AnnotationPreflight.append(errors, c.settings, c.params)
                 return errors
+            case "isMapFirstRun":
+                return AnnotationSettings.isMapFirstRun(c.params)
+            case "samplesJsonWithRowColumns":
+                return AnnotationSettings.samplesJsonWithRowColumns(
+                    c.samples_json, c.row, c.settings
+                )
+            case "clusteredTableFields":
+                return AnnotationSettings.clusteredTableFields(c.row, c.params)
+            case "publishedClusteringDir":
+                return AnnotationSettings.publishedClusteringDir(
+                    c.outdir, "P1", "proseg_hybrid", "MERSCOPE", "P1_MERSCOPE", c.suffix
+                )
+            case "runRecord":
+                AnnotationRunRecord.reset()
+                c.expected.each { item ->
+                    AnnotationRunRecord.expect(item[0], item[1])
+                }
+                c.labelled.each { item ->
+                    AnnotationRunRecord.labelled(
+                        item.pair_id, item.segmentation,
+                        item.panel_dir, item.resolve_dir,
+                    )
+                }
+                c.computed.each { item ->
+                    AnnotationRunRecord.computed(item[0], item[1])
+                }
+                (c.mender ?: []).each { item ->
+                    AnnotationRunRecord.menderImported(
+                        item.pair_id, item.segmentation, item.platform, item.manifest,
+                    )
+                }
+                def info = AnnotationRunRecord.runInfo()
+                AnnotationRunRecord.reset()
+                return info
         }
         throw new IllegalStateException("unknown case function ${c.fn}")
     }
@@ -580,6 +615,18 @@ def _build_cases(tmp_path: Path, defaults: dict[str, Any]) -> dict[str, dict[str
         },
         "params": defaults,
     }
+    _add_m5_cases(cases, tmp_path, defaults)
+    readonly = tmp_path / "readonly"
+    readonly.mkdir()
+    readonly.chmod(0o555)
+    cases["preflight|map_first|readonly-store"] = {
+        "fn": "preflight",
+        "settings": human_settings,
+        "params": {
+            **cases["preflight|map_first|clustering"]["params"],
+            "annotation_reference_store": str(readonly / "store"),
+        },
+    }
     cases["preflight|map_first|mouse-regions"] = {
         "fn": "preflight",
         "settings": {
@@ -589,6 +636,215 @@ def _build_cases(tmp_path: Path, defaults: dict[str, Any]) -> dict[str, dict[str
         "params": defaults,
     }
     return cases
+
+
+SAMPLES_JSON = json.dumps(
+    [
+        {"sample_id": "P1_MERSCOPE", "platform": "MERSCOPE", "segmentation": "reseg"},
+        {"sample_id": "P1_XENIUM", "platform": "XENIUM", "segmentation": "reseg"},
+    ]
+)
+
+
+def _add_m5_cases(
+    cases: dict[str, dict[str, Any]], tmp_path: Path, defaults: dict[str, Any]
+) -> None:
+    """Cases of the M5 helpers: run mode, samples JSON columns, run record."""
+    map_first = {**defaults, "clustering_squidpy_mode": "map_first"}
+    for label, params in (
+        ("legacy", {**defaults, "species": "human"}),
+        ("human", {**map_first, "species": "human"}),
+        (
+            "mouse-param",
+            {
+                **defaults,
+                "species": "mouse",
+                "clustering_squidpy_mode_mouse": "map_first",
+            },
+        ),
+        ("bad-species", {**map_first, "species": "zebrafish"}),
+        (
+            "bad-mode",
+            {**defaults, "species": "human", "clustering_squidpy_mode": "map-first"},
+        ),
+    ):
+        cases[f"isMapFirstRun|{label}"] = {"fn": "isMapFirstRun", "params": params}
+    human = {"clustering_squidpy_mode": "map_first", "species": "human"}
+    mouse = {"clustering_squidpy_mode": "map_first", "species": "mouse"}
+    for label, row, settings in (
+        ("legacy", {"anatomical_region": "frontal_cortex"}, {"species": "human"}),
+        ("human-row", {"anatomical_region": " Frontal-Cortex "}, human),
+        ("human-blank", {"anatomical_region": "  "}, human),
+        ("human-no-column", {}, human),
+        ("human-mouse-column", {"mouse_section_regions": "HPF"}, human),
+        ("mouse-row", {"mouse_section_regions": "Isocortex;HPF"}, mouse),
+        ("mouse-no-column", {"anatomical_region": "frontal_cortex"}, mouse),
+    ):
+        cases[f"samplesJsonWithRowColumns|{label}"] = {
+            "fn": "samplesJsonWithRowColumns",
+            "samples_json": SAMPLES_JSON,
+            "row": {"pair_id": "P1", **row},
+            "settings": settings,
+        }
+    for label, params in (
+        ("legacy", {**defaults, "species": "human"}),
+        ("map_first", {**map_first, "species": "human"}),
+        (
+            "trial",
+            {
+                **map_first,
+                "species": "mouse",
+                "clustering_squidpy_table_key_suffix": "trial",
+            },
+        ),
+    ):
+        cases[f"clusteredTableFields|{label}"] = {
+            "fn": "clusteredTableFields",
+            "row": {"pair_id": "P1"},
+            "params": params,
+        }
+    published = tmp_path / "published"
+    suffixed_h5ad = (
+        published
+        / "P1/proseg_hybrid/clustering_squidpy_mapfirst/clustering_squidpy_out"
+        / "merscope/P1_MERSCOPE_clustered.h5ad"
+    )
+    suffixed_h5ad.parent.mkdir(parents=True)
+    suffixed_h5ad.write_text("h5ad")
+    for label, outdir, suffix in (
+        ("legacy", published, None),
+        ("legacy-blank", published, " "),
+        ("map_first-suffixed", published, "mapfirst"),
+        ("map_first-default-publishdir", tmp_path / "fresh", "mapfirst"),
+    ):
+        cases[f"publishedClusteringDir|{label}"] = {
+            "fn": "publishedClusteringDir",
+            "outdir": str(outdir),
+            "suffix": suffix,
+        }
+    panels = tmp_path / "record"
+    refused_panel = panels / "refused_panel"
+    refused_panel.mkdir(parents=True)
+    (refused_panel / "required_bundles.json").write_text(
+        json.dumps({"status": "refused", "reasons": ["too few genes"], "bundles": []})
+    )
+    ok_panel = panels / "ok_panel"
+    ok_panel.mkdir()
+    (ok_panel / "required_bundles.json").write_text(
+        json.dumps({"status": "ok", "reasons": [], "bundles": []})
+    )
+    resolve = panels / "resolve"
+    resolve.mkdir()
+    (resolve / "P2_resolve_summary.json").write_text(
+        json.dumps(
+            {
+                "samples": {
+                    "P2_MERSCOPE": {"trust": {"state": "provisional"}},
+                    "P2_XENIUM": {"trust": {"state": "validated"}},
+                },
+                "pair": {
+                    "cross_platform": {
+                        "statistics_level": "broad_only",
+                        "reasons": ["intersection_genes:80<100"],
+                    }
+                },
+            }
+        )
+    )
+    # P5 as P1212: same panel (RESOLVE records full), MERSCOPE gate broad_only.
+    (resolve / "P5_resolve_summary.json").write_text(
+        json.dumps(
+            {
+                "samples": {
+                    "P5_MERSCOPE": {
+                        "trust": {"state": "validated"},
+                        "resolution": {"gate": {"level": "broad_only"}},
+                    },
+                    "P5_XENIUM": {
+                        "trust": {"state": "validated"},
+                        "resolution": {"gate": {"level": "full"}},
+                    },
+                },
+                "pair": {
+                    "cross_platform": {
+                        "statistics_level": "full",
+                        "flag": False,
+                        "reasons": [],
+                    }
+                },
+            }
+        )
+    )
+    mender = panels / "mender"
+    mender.mkdir()
+    (mender / "skipped.json").write_text(
+        json.dumps(
+            {
+                "sample_id": "P5_XENIUM",
+                "status": "skipped_no_assigned_state",
+                "status_reasons": ["every cell state is unassigned"],
+                "imported": False,
+            }
+        )
+    )
+    (mender / "imported.json").write_text(
+        json.dumps({"sample_id": "P5_MERSCOPE", "imported": True})
+    )
+    cases["runRecord|mixed"] = {
+        "fn": "runRecord",
+        "expected": [
+            ["P1", "proseg_hybrid"],
+            ["P2", "proseg_hybrid"],
+            ["P3", "reseg"],
+            ["P4", "reseg"],
+            ["P5", "proseg_hybrid"],
+        ],
+        "mender": [
+            {
+                "pair_id": "P5",
+                "segmentation": "proseg_hybrid",
+                "platform": "XENIUM",
+                "manifest": str(mender / "skipped.json"),
+            },
+            {
+                "pair_id": "P5",
+                "segmentation": "proseg_hybrid",
+                "platform": "MERSCOPE",
+                "manifest": str(mender / "imported.json"),
+            },
+        ],
+        "labelled": [
+            {
+                "pair_id": "P1",
+                "segmentation": "proseg_hybrid",
+                "panel_dir": str(refused_panel),
+                "resolve_dir": str(panels / "missing"),
+            },
+            {
+                "pair_id": "P2",
+                "segmentation": "proseg_hybrid",
+                "panel_dir": str(ok_panel),
+                "resolve_dir": str(resolve),
+            },
+            {
+                "pair_id": "P4",
+                "segmentation": "reseg",
+                "panel_dir": str(ok_panel),
+                "resolve_dir": str(panels / "missing"),
+            },
+            {
+                "pair_id": "P5",
+                "segmentation": "proseg_hybrid",
+                "panel_dir": str(ok_panel),
+                "resolve_dir": str(resolve),
+            },
+        ],
+        "computed": [
+            ["P1", "proseg_hybrid"],
+            ["P2", "proseg_hybrid"],
+            ["P5", "proseg_hybrid"],
+        ],
+    }
 
 
 @pytest.fixture(scope="module")
@@ -848,18 +1104,26 @@ def test_groovy_completion_summary(groovy_results: dict[str, dict[str, Any]]) ->
     assert summary.startswith(
         "Annotation summary (mouse, clustering_squidpy_mode map_first):"
     )
-    assert "failed annotations: M1:reseg" in summary
-    assert "refused panels: none" in summary
+    assert (
+        "  failed annotations (no label tables; see the failed tasks above): M1:reseg"
+        in summary.splitlines()
+    )
+    assert "  refused panels: none" in summary.splitlines()
+    assert "not wired" not in summary
 
 
 @needs_nextflow
 def test_groovy_preflight(groovy_results: dict[str, dict[str, Any]]) -> None:
-    """Preflight ignores legacy rows and refuses map_first until M5."""
+    """Preflight ignores legacy rows; map_first runs when explicitly selected (M5).
+
+    A map_first row that clusters builds reference bundles, so it needs the
+    references' sources and a writable store; with them it passes.
+    """
     assert _value(groovy_results, "preflight|legacy") == []
-    clustering = _value(groovy_results, "preflight|map_first|clustering")
-    assert len(clustering) == 1
-    assert "map_first is not available yet for P1" in clustering[0]
+    assert _value(groovy_results, "preflight|map_first|clustering") == []
     assert _value(groovy_results, "preflight|map_first|no-clustered-stage") == []
+    store = "\n".join(_value(groovy_results, "preflight|map_first|readonly-store"))
+    assert "annotation_reference_store" in store and "is not writable" in store
     # A human row that would build WHB / SEA-AD bundles needs the held-out
     # donor's sources while resolvability is on (the default).
     human = "\n".join(
@@ -870,8 +1134,12 @@ def test_groovy_preflight(groovy_results: dict[str, dict[str, Any]]) -> None:
     # A mouse row that would build wmb_panel needs the self-map test cells
     # while resolvability is on (the default).
     mouse = "\n".join(_value(groovy_results, "preflight|map_first|mouse-no-test-cells"))
-    assert "map_first is not available yet for M1" in mouse
     assert "wmb_panel needs annotation_wmb_selfmap_test_cells_path" in mouse
+    assert (
+        "wmb_panel needs annotation_wmb_h5ad_dir + annotation_wmb_metadata_dir + "
+        "annotation_wmb_mapping_stats_path"
+    ) in mouse
+    assert "not available yet" not in mouse
     invalid = "\n".join(_value(groovy_results, "preflight|map_first|invalid"))
     for expected in (
         "Unknown annotation_panel_mode 'bogus'",
@@ -889,3 +1157,122 @@ def test_groovy_preflight(groovy_results: dict[str, dict[str, Any]]) -> None:
     regions = _value(groovy_results, "preflight|map_first|mouse-regions")
     assert len(regions) == 1
     assert "Unknown mouse_section_regions 'Isocortex;Cortex'" in regions[0]
+
+
+@needs_nextflow
+def test_groovy_map_first_run_follows_the_resolved_mode(
+    groovy_results: dict[str, dict[str, Any]],
+) -> None:
+    """Hook H5 switches on the run's mode; invalid params never select map_first."""
+    assert _value(groovy_results, "isMapFirstRun|legacy") is False
+    assert _value(groovy_results, "isMapFirstRun|human") is True
+    assert _value(groovy_results, "isMapFirstRun|mouse-param") is True
+    assert _value(groovy_results, "isMapFirstRun|bad-species") is False
+    assert _value(groovy_results, "isMapFirstRun|bad-mode") is False
+
+
+@needs_nextflow
+def test_groovy_samples_json_carries_the_rows_annotation_column(
+    groovy_results: dict[str, dict[str, Any]],
+) -> None:
+    """Per-row anatomical_region / mouse_section_regions reach samples_json (§3.3).
+
+    Only map_first rows that set the column get it; everything else keeps
+    the samples JSON byte-identical, so PREPARE keeps its legacy task hash.
+    """
+    for label in (
+        "legacy",
+        "human-blank",
+        "human-no-column",
+        "human-mouse-column",
+        "mouse-no-column",
+    ):
+        assert _value(groovy_results, f"samplesJsonWithRowColumns|{label}") == (
+            SAMPLES_JSON
+        ), label
+    human = json.loads(_value(groovy_results, "samplesJsonWithRowColumns|human-row"))
+    assert [sample["anatomical_region"] for sample in human] == ["Frontal-Cortex"] * 2
+    assert all("mouse_section_regions" not in sample for sample in human)
+    mouse = json.loads(_value(groovy_results, "samplesJsonWithRowColumns|mouse-row"))
+    assert [sample["mouse_section_regions"] for sample in mouse] == [
+        "Isocortex;HPF"
+    ] * 2
+    # The clustering config types and normalises them (hook H8).
+    from merxen.config import ClusteringSquidpySampleConfig
+
+    parsed = [
+        ClusteringSquidpySampleConfig.model_validate({**sample, "zarr_path": "x"})
+        for sample in human + mouse
+    ]
+    assert [item.anatomical_region for item in parsed[:2]] == ["frontal_cortex"] * 2
+    assert [item.mouse_section_regions for item in parsed[2:]] == ["Isocortex;HPF"] * 2
+
+
+@needs_nextflow
+def test_groovy_cortical_depth_tables_name_the_runs_suffix(
+    groovy_results: dict[str, dict[str, Any]],
+) -> None:
+    assert _value(groovy_results, "clusteredTableFields|legacy") == {}
+    assert _value(groovy_results, "clusteredTableFields|map_first") == {
+        "clustered_table_key_suffix": "mapfirst"
+    }
+    assert _value(groovy_results, "clusteredTableFields|trial") == {
+        "clustered_table_key_suffix": "trial"
+    }
+
+
+@needs_nextflow
+def test_groovy_run_record_lists_stopped_branches_and_panels(
+    groovy_results: dict[str, dict[str, Any]],
+) -> None:
+    """Hook H6's facts: failed branches, refused / provisional panels, scope."""
+    info = _value(groovy_results, "runRecord|mixed")
+    assert info["n_expected"] == 5
+    assert info["failed_annotations"] == ["P3:reseg"]
+    assert info["failed_hierarchies"] == ["P4:reseg"]
+    assert info["refused_panels"] == ["P1:proseg_hybrid (too few genes)"]
+    assert info["provisional_panels"] == ["P2:proseg_hybrid P2_MERSCOPE"]
+    assert info["broad_only_panels"] == []
+    # P5 (as P1212): RESOLVE records full from the panel; the broad-only
+    # MERSCOPE gate restricts it (plan §5.4), as CrossPlatformScope does.
+    assert info["restricted_dataset_gates"] == [
+        "P5:proseg_hybrid P5_MERSCOPE: broad_only"
+    ]
+    assert info["cross_platform_restricted"] == [
+        "P2:proseg_hybrid: broad_only (intersection_genes:80<100)",
+        "P5:proseg_hybrid: broad_only (dataset_gate:P5_MERSCOPE:broad_only)",
+    ]
+    assert info["mender_skipped"] == [
+        "P5:proseg_hybrid P5_XENIUM (every cell state is unassigned)"
+    ]
+
+
+@needs_nextflow
+def test_groovy_published_clustering_dir_follows_the_row_suffix(
+    groovy_results: dict[str, dict[str, Any]],
+) -> None:
+    """MENDER-only restarts read a map_first H5AD from its suffixed directory.
+
+    Legacy rows keep clustering_squidpy/; a map_first row reads
+    clustering_squidpy_<suffix>/ when it holds the H5AD (a run into
+    published results redirects FINALIZE there) and else FINALIZE's default
+    clustering_squidpy/, where MENDER refuses a legacy table.
+    """
+    expected = {
+        "legacy": "clustering_squidpy",
+        "legacy-blank": "clustering_squidpy",
+        "map_first-suffixed": "clustering_squidpy_mapfirst",
+        "map_first-default-publishdir": "clustering_squidpy",
+    }
+    for label, directory in expected.items():
+        assert _value(groovy_results, f"publishedClusteringDir|{label}") == directory
+
+
+def test_groovy_scope_constants_match_the_python_scope() -> None:
+    """AnnotationRunRecord folds the gates in as CrossPlatformScope does."""
+    source = (LIB_DIR / "AnnotationRunRecord.groovy").read_text()
+    levels = ", ".join(f'"{level}"' for level in cross_platform.STATISTICS_LEVELS)
+    assert f"STATISTICS_LEVELS = [{levels}]" in source
+    for gate, cap in cross_platform.GATE_STATISTICS_CAP.items():
+        assert f'{gate}: "{cap}",' in source
+    assert f'DATASET_GATE_REASON = "{cross_platform.DATASET_GATE_REASON}"' in source

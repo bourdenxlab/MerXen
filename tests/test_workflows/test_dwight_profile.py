@@ -158,3 +158,9 @@ def test_default_standard_and_dwight_profiles_resolve_equivalently() -> None:
             script = process[f"withName:{process_name}"]["beforeScript"]
             assert f'MERXEN_GPU_LOCK_FILE="{lock_path}"' in script
             assert 'exec 9<"${MERXEN_GPU_LOCK_FILE}"' in script
+        # The map_first compute (plan §3.5): Dwight concurrency, no GPU lock.
+        compute_cpu = process["withName:CLUSTERING_SQUIDPY_COMPUTE_CPU"]
+        assert compute_cpu["maxForks"] == 4
+        assert compute_cpu["cpus"] == 8
+        assert "beforeScript" not in compute_cpu
+        assert "conda" not in compute_cpu

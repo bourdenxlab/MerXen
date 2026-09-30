@@ -610,3 +610,49 @@ def annotation_manifest_filename(sample_id: str) -> str:
         ``"<sid>_annotation_manifest.json"``.
     """
     return f"{sample_id}{ANNOTATION_MANIFEST_SUFFIX}"
+
+
+def downstream_summary(provenance: AnnotationProvenance) -> dict[str, Any]:
+    """Return the annotation state that downstream manifests record (§4.9).
+
+    MENDER and cortical depth copy the dataset gate level and warning flag
+    and the panel trust state into their manifests, so a niche or depth
+    result is never read without knowing how far its labels can be trusted.
+
+    Args:
+        provenance: A section's annotation provenance.
+
+    Returns:
+        A JSON-ready dict: ``mode``, ``species``, ``gate_level``,
+        ``gate_warning``, ``gate_reasons`` (human ``gate``, or the mouse gate
+        when there is no human one), ``panel_trust``, ``panel_family``,
+        ``validation_basis``, ``banner`` and ``label_table_version``.
+    """
+    gate = provenance.gate if provenance.gate is not None else provenance.mouse_gate
+    panel = provenance.panel
+    return {
+        "mode": provenance.mode,
+        "species": provenance.species,
+        "gate_level": None if gate is None else gate.level,
+        "gate_warning": None if gate is None else bool(gate.warning),
+        "gate_reasons": [] if gate is None else list(gate.reasons),
+        "panel_trust": None if panel is None else panel.panel_trust,
+        "panel_family": None if panel is None else panel.panel_family,
+        "validation_basis": None if panel is None else panel.validation_basis,
+        "banner": None if panel is None else panel.banner,
+        "label_table_version": provenance.label_table_version,
+    }
+
+
+def downstream_summary_from_uns(uns: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Return ``downstream_summary`` of the provenance stored in ``uns``.
+
+    Args:
+        uns: An AnnData ``uns`` mapping (clustered H5AD or zarr table).
+
+    Returns:
+        The summary, or ``None`` when ``uns`` holds no annotation provenance
+        (legacy runs), so legacy manifests stay unchanged.
+    """
+    provenance = AnnotationProvenance.read_from_uns(uns)
+    return None if provenance is None else downstream_summary(provenance)
