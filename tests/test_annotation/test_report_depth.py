@@ -199,6 +199,30 @@ def test_a_matching_pair_passes_the_depth_check_and_the_ordering(
     assert agreement.value > 0.95 and depth_r.value > 0.95
     (method,) = _records(item, "depth_ci_method")
     assert method.value == PRIMARY_CI
+    # The primary CI resamples 500 µm tangential blocks, the sensitivity tiles.
+    from merxen.annotation.report_metrics import (
+        grid_codes,
+        median_block_ci,
+        tangential_block_codes,
+    )
+
+    sample = inputs.samples["PX_MERSCOPE"]
+    assert sample.depth is not None
+    depth = sample.depth["equivolumetric_depth"].to_numpy()
+    upper = np.isfinite(depth) & (
+        group_labels(sample.labels) == "Upper-layer intratelencephalic"
+    )
+    blocks = tangential_block_codes(
+        sample.depth["tangential_position_um"].to_numpy()[upper], 500.0
+    )
+    expected = median_block_ci(depth[upper], blocks, n_reps=30, seed=0)
+    (record,) = _records(item, "median_depth", sample_id="PX_MERSCOPE", group=ORDER[0])
+    assert record.ci_low == pytest.approx(expected.ci_low, rel=1e-5)
+    assert record.ci_high == pytest.approx(expected.ci_high, rel=1e-5)
+    tiles = median_block_ci(
+        depth[upper], grid_codes(np.asarray(sample.xy)[upper], 500.0), n_reps=30
+    )
+    assert (tiles.ci_low, tiles.ci_high) != (expected.ci_low, expected.ci_high)
     (replicated,) = _records(item, "depth_ordering_replicated")
     assert replicated.value is True
     medians = pd.read_csv(
