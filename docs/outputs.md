@@ -193,7 +193,7 @@ Only present when `--cortical_depth_enabled true`.
 | `compute_cortical_depth_out/<segmentation>/*_cells_laplace_depth.png` | Cells colored by `laplace_depth`. PDF copy is also written. |
 | `compute_cortical_depth_out/<segmentation>/*_cells_equivolumetric_depth.png` | Cells colored by `equivolumetric_depth`. PDF copy is also written. |
 | `compute_cortical_depth_out/<segmentation>/*_cells_tissue_annotation.png` | All cells colored as `grey_matter`, `white_matter`, `excluded`, or `outside_brain`. PDF copy is also written. |
-| `compute_cortical_depth_out/cortical_depth_qc_summary.json` | Cell inside/outside counts, assigned counts, streamline thickness stats, failed/flagged streamlines, warnings. |
+| `compute_cortical_depth_out/cortical_depth_qc_summary.json` | Cell inside/outside counts, assigned counts, streamline thickness stats, failed/flagged streamlines, warnings, and the boundary frame and cell coordinate source per table ([Coordinate frame](stages/cortical-depth.md#coordinate-frame)). |
 
 The updated AnnData `obs` columns include `inside_cortical_ribbon`,
 `cortical_depth_annotation`, `laplace_depth`, `equivolumetric_depth`,
