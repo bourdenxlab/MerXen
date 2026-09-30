@@ -80,8 +80,11 @@ VOTE_FAILURES: Final[tuple[str, ...]] = ("method_disagree", "single_method")
 DEPTH_STRATUM_MIN_COUNTS: Final = 30
 # The H4 label set item 8 shows first: scripts/acceptance/resolve_criteria.py's
 # non-circular headline (H4_HEADLINE_SET, M4 review: the WHB-only re-resolve
-# of the held-out map); then any argmax set (heldout_genes.py's own tables).
+# of the held-out map), which is H4's assigned class (user decision
+# 2026-09-30, M8 D6); without it heldout_genes.py's WHB-only confident set,
+# then any argmax set, each noted as not the scored set.
 HELDOUT_HEADLINE_SET: Final = "m4_resolve_heldout_whb_only"
+HELDOUT_FALLBACK_SETS: Final[tuple[str, ...]] = ("heldout_whb_confident",)
 COP_SUPERCLUSTER: Final = "Committed oligodendrocyte precursor"
 OPC: Final = "Oligodendrocyte precursors"
 CGE_SUPERCLUSTER: Final = "CGE interneuron"
@@ -2156,11 +2159,14 @@ def item_heldout(
         )
         return item
     frame = inputs.heldout.copy()
+    label_set: str | None = None
     if "label_set" in frame.columns and len(frame["label_set"].unique()) > 1:
         names = [str(name) for name in frame["label_set"].unique()]
-        preferred = [name for name in names if name == HELDOUT_HEADLINE_SET] + [
-            name for name in names if "argmax" in name
-        ]
+        preferred = (
+            [name for name in names if name == HELDOUT_HEADLINE_SET]
+            + [name for name in HELDOUT_FALLBACK_SETS if name in names]
+            + [name for name in names if "argmax" in name]
+        )
         label_set = preferred[0] if preferred else names[0]
         item.notes.append(
             f"label set shown: {label_set} (all label sets in the table CSV)"
@@ -2168,6 +2174,14 @@ def item_heldout(
         shown = frame[frame["label_set"].astype(str) == label_set]
     else:
         shown = frame
+        if "label_set" in frame.columns and len(frame):
+            label_set = str(frame["label_set"].iloc[0])
+    if label_set is not None and label_set != HELDOUT_HEADLINE_SET:
+        item.notes.append(
+            f"{label_set} is not H4's scored label set (M8 D6: the WHB-only "
+            f"held-out re-resolve, {HELDOUT_HEADLINE_SET}, from "
+            "scripts/acceptance/resolve_criteria.py); shown for information"
+        )
     for row in shown.to_dict("records"):
         for name in ("fold", "auroc"):
             item.metrics.append(

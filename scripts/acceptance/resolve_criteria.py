@@ -235,6 +235,7 @@ def criterion_row(
     *,
     note: str = "",
     passes: bool | None = None,
+    reported_only: bool = False,
 ) -> dict[str, Any]:
     """Return one ``criteria_table.csv`` row.
 
@@ -248,6 +249,8 @@ def criterion_row(
         comparator: ``<=``, ``>=`` or ``==`` (mechanical checks).
         note: Free text.
         passes: Override for mechanical checks; default from the comparison.
+        reported_only: The row is reported, never scored (an H4 label set
+            that is not H4's assigned class); otherwise the flip rule decides.
 
     Returns:
         The row.
@@ -271,7 +274,7 @@ def criterion_row(
         "comparator": comparator,
         "threshold": threshold,
         "passes": passes,
-        "scored": scored(base, pair, segmentation),
+        "scored": not reported_only and scored(base, pair, segmentation),
         "note": note,
     }
 
@@ -1099,6 +1102,7 @@ def h4_summary(enrichment: pd.DataFrame) -> list[dict[str, Any]]:
                 ),
                 "h4_scored_pair": pair in H4_PAIRS,
                 "h4_pass": n_pass >= H4_MIN_CLASSES,
+                "h4_assigned_class": str(label_set) == H4_HEADLINE_SET,
                 "diagnostic": str(label_set).startswith(H4_DIAGNOSTIC_PREFIX),
                 "failing_at_auroc_ceiling": ";".join(
                     str(cls)
@@ -1116,6 +1120,9 @@ def h4_summary(enrichment: pd.DataFrame) -> list[dict[str, Any]]:
 # The headline H4 label set: plan §5.8 asks for labels no method made with the
 # held-out genes, so the headline is the WHB-only re-resolve of the held-out
 # re-map; the SEA-AD-voted sets saw the held-out genes (partly circular).
+# User decision 2026-09-30 (M8 D6, pre-registration §18): H4's "assigned
+# class" is this set, so only its plain ``H4`` row is scored; every
+# ``H4[<set>]`` row (the headline's copy included) is reported, not scored.
 H4_HEADLINE_SET = "m4_resolve_heldout_whb_only"
 H4_CIRCULAR_SETS: dict[str, str] = {
     "m4_resolve_heldout": "partly circular (SEA saw held-out genes)",
@@ -1129,6 +1136,8 @@ def h4_table_rows(summary: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
     Every label set gets an ``H4[<set>]`` row; the non-circular headline set
     (``H4_HEADLINE_SET``) also gives the plain ``H4`` row, and the sets whose
     SEA-AD votes saw the held-out genes are labelled circular in the note.
+    Only the plain ``H4`` row can be scored (M8 D6: the WHB-only set is H4's
+    assigned class); the ``H4[<set>]`` rows are reported (``scored`` false).
     """
     rows = []
     for row in summary:
@@ -1154,6 +1163,7 @@ def h4_table_rows(summary: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
                     float(H4_MIN_CLASSES),
                     ">=",
                     note=note,
+                    reported_only=name != "H4",
                 )
             )
     return rows
