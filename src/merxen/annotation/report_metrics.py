@@ -45,10 +45,16 @@ CI_PERCENTILES: Final = (2.5, 97.5)
 UNALLOCATED: Final = "unallocated"
 SELF_THINNING_MIN_COUNTS: Final = 200
 SELF_THINNING_MIN_CELLS: Final = 500
-# A self-thinning diagnostic whose deep cells are dominated by one class says
-# little about the others (plan §9 item 1: P1212_M's 509 such cells are 89%
-# Vascular -> unreliable). The report marks it unreliable above this share.
-SELF_THINNING_MAX_DOMINANT_SHARE: Final = 0.5
+# A self-thinning diagnostic whose deep cells are dominated by one class, or
+# whose deep cells mostly lack a truth label, says little (plan §9 item 1:
+# P1212_M's 509 such cells are 89% Vascular -> unreliable). Classes with at
+# least SELF_THINNING_MIN_CLASS_CELLS labelled deep cells are evaluable; one
+# class holding SELF_THINNING_MAX_DOMINANT_SHARE or more of the labelled deep
+# cells, or more than SELF_THINNING_MAX_UNLABELLED_SHARE of the deep cells
+# without a label, makes it unreliable (M7 review).
+SELF_THINNING_MIN_CLASS_CELLS: Final = 50
+SELF_THINNING_MAX_DOMINANT_SHARE: Final = 0.8
+SELF_THINNING_MAX_UNLABELLED_SHARE: Final = 0.3
 GENE_RATIO_PSEUDOCOUNT: Final = 0.001
 
 
@@ -1173,71 +1179,145 @@ class SelfThinningEligibility:
     Attributes:
         n_deep: Table cells with at least ``min_counts`` counts.
         eligible: ``n_deep >= min_cells``.
-        composition: Share of each label among the deep cells.
+        n_labelled: Deep cells with a full-depth (truth) label.
+        unlabelled_share: Share of the deep cells without one
+            (``Mixed/Unknown``: no truth to thin against).
+        composition: Share of each label among the labelled deep cells.
         dominant_label: The commonest label among them.
-        dominant_share: Its share.
-        reliable: Eligible and no label above ``max_dominant_share``.
+        dominant_share: Its share of the labelled deep cells.
+        evaluable_classes: Labels with at least ``min_class_cells`` deep
+            cells (the classes the diagnostic can speak for).
+        argmax_composition: Share of each primary-assignment class among all
+            deep cells (the engine's argmax, labelled or not), if given.
+        reliable: Eligible, ``unlabelled_share <= max_unlabelled_share`` and
+            ``dominant_share < max_dominant_share`` with an evaluable class.
+        reasons: Why it is unreliable (empty when reliable).
         min_counts: Depth threshold (200).
         min_cells: Cells required (500).
+        min_class_cells: Deep cells a class needs to be evaluable (50).
     """
 
     n_deep: int
     eligible: bool
+    n_labelled: int
+    unlabelled_share: float
     composition: dict[str, float]
     dominant_label: str | None
     dominant_share: float
+    evaluable_classes: tuple[str, ...]
+    argmax_composition: dict[str, float]
     reliable: bool
+    reasons: tuple[str, ...]
     min_counts: int
     min_cells: int
+    min_class_cells: int
+
+
+def _shares_of(names: np.ndarray) -> dict[str, float]:
+    """Return each value's share, commonest first (ties by name)."""
+    if names.size == 0:
+        return {}
+    values, freq = np.unique(names, return_counts=True)
+    order = np.lexsort((values, -freq))
+    return {str(values[i]): float(freq[i] / names.size) for i in order}
 
 
 def self_thinning_eligibility(
     total_counts: np.ndarray,
     labels: Sequence[object] | np.ndarray,
+    labelled: np.ndarray | None = None,
     *,
+    argmax: Sequence[object] | np.ndarray | None = None,
     min_counts: int = SELF_THINNING_MIN_COUNTS,
     min_cells: int = SELF_THINNING_MIN_CELLS,
+    min_class_cells: int = SELF_THINNING_MIN_CLASS_CELLS,
     max_dominant_share: float = SELF_THINNING_MAX_DOMINANT_SHARE,
+    max_unlabelled_share: float = SELF_THINNING_MAX_UNLABELLED_SHARE,
 ) -> SelfThinningEligibility:
     """Return the self-thinning eligibility and its truth composition.
 
     The diagnostic re-maps thinned deep cells, whose full-depth labels are
-    the truth (§5.4, E2 verdict 2); it is informative only when ≥ 500 cells
-    have ≥ 200 counts, and only for the classes those cells hold.
+    the truth (§5.4, E2 verdict 2); it is informative only when >= 500 cells
+    have >= 200 counts, only for the classes those cells hold, and only for
+    the cells that have a full-depth label. The truth composition is taken
+    over the **labelled** deep cells; the unlabelled share is reported
+    beside it. The diagnostic is unreliable when more than
+    ``max_unlabelled_share`` of the deep cells have no truth label, or when
+    one class holds ``max_dominant_share`` or more of the labelled ones
+    (plan §9 item 1: P1212_M's 509 deep cells are 89% Vascular under E2's
+    scheme, and about half of them have no confident broad label).
 
     Args:
         total_counts: Counts per table cell.
         labels: Their full-depth labels (e.g. the confident broad class).
+        labelled: Whether each cell has a truth label (default: all).
+        argmax: The engine's primary-assignment class per cell (reported as
+            ``argmax_composition``), if any.
         min_counts: Depth a cell needs.
         min_cells: Deep cells needed.
-        max_dominant_share: Largest single-label share for a reliable run.
+        min_class_cells: Deep labelled cells a class needs to be evaluable.
+        max_dominant_share: A single class at or above this share of the
+            labelled deep cells makes the diagnostic unreliable.
+        max_unlabelled_share: An unlabelled share above this makes it
+            unreliable.
 
     Returns:
         The eligibility record.
     """
     counts = np.asarray(total_counts, dtype=np.float64)
     names = np.asarray(labels, dtype=object).astype(str)
+    has_label = (
+        np.ones(len(names), dtype=bool)
+        if labelled is None
+        else np.asarray(labelled, dtype=bool)
+    )
     deep = counts >= min_counts
     n_deep = int(deep.sum())
-    composition: dict[str, float] = {}
-    dominant: str | None = None
-    dominant_share = math.nan
-    if n_deep:
-        values, freq = np.unique(names[deep], return_counts=True)
-        order = np.argsort(-freq, kind="stable")
-        composition = {str(values[i]): float(freq[i] / n_deep) for i in order}
-        dominant = str(values[order[0]])
-        dominant_share = float(freq[order[0]] / n_deep)
+    truth = deep & has_label
+    n_labelled = int(truth.sum())
+    unlabelled_share = 1.0 - n_labelled / n_deep if n_deep else math.nan
+    composition = _shares_of(names[truth])
+    dominant = next(iter(composition), None)
+    dominant_share = composition[dominant] if dominant is not None else math.nan
+    classes, class_cells = np.unique(names[truth], return_counts=True)
+    evaluable = tuple(
+        sorted(str(name) for name in classes[class_cells >= min_class_cells])
+    )
+    argmax_composition = (
+        {}
+        if argmax is None
+        else _shares_of(np.asarray(argmax, dtype=object).astype(str)[deep])
+    )
     eligible = n_deep >= min_cells
+    reasons: list[str] = []
+    if not eligible:
+        reasons.append(f"n_deep:{n_deep}<{min_cells}")
+    else:
+        if not unlabelled_share <= max_unlabelled_share:
+            reasons.append(
+                f"unlabelled_share:{unlabelled_share:.3f}>{max_unlabelled_share}"
+            )
+        if not dominant_share < max_dominant_share:
+            reasons.append(
+                f"dominant:{dominant}:{dominant_share:.3f}>={max_dominant_share}"
+            )
+        if not evaluable:
+            reasons.append(f"no_class_with_{min_class_cells}_deep_cells")
     return SelfThinningEligibility(
         n_deep=n_deep,
         eligible=bool(eligible),
+        n_labelled=n_labelled,
+        unlabelled_share=float(unlabelled_share),
         composition=composition,
         dominant_label=dominant,
-        dominant_share=dominant_share,
-        reliable=bool(eligible and dominant_share <= max_dominant_share),
+        dominant_share=float(dominant_share),
+        evaluable_classes=evaluable,
+        argmax_composition=argmax_composition,
+        reliable=bool(eligible and not reasons),
+        reasons=tuple(reasons),
         min_counts=int(min_counts),
         min_cells=int(min_cells),
+        min_class_cells=int(min_class_cells),
     )
 
 
@@ -1247,7 +1327,9 @@ __all__ = [
     "GENE_RATIO_PSEUDOCOUNT",
     "N_BOOTSTRAP",
     "SELF_THINNING_MAX_DOMINANT_SHARE",
+    "SELF_THINNING_MAX_UNLABELLED_SHARE",
     "SELF_THINNING_MIN_CELLS",
+    "SELF_THINNING_MIN_CLASS_CELLS",
     "SELF_THINNING_MIN_COUNTS",
     "TILE_UM",
     "UNALLOCATED",
