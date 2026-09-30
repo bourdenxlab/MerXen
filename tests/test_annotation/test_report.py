@@ -34,6 +34,7 @@ from merxen.annotation.report import (
 from merxen.annotation.report_depth import SQUARE_TILE_CI
 from merxen.annotation.report_inputs import ReportSources, discover_sources
 from merxen.annotation.report_model import AcceptanceMetrics, ReportOptions
+from merxen.annotation.vocab import HUMAN_BROAD_CLASSES
 from merxen.cli import main as cli_main
 
 from .conftest import FakeMmc
@@ -807,3 +808,36 @@ def test_a_per_platform_pair_takes_every_cross_platform_statement_from_xpanel(
         if record.status == "withheld"
     ]
     assert len(withheld) == 1 and withheld[0].kind == "confident"
+
+
+def test_a_broad_only_dataset_gets_a_broad_level_dotplot(
+    tmp_path: Path, fake_mmc: FakeMmc, make_trust: MakeTrust
+) -> None:
+    """Item 4 falls back to confident broad labels when the leaf is withheld."""
+    setup = _resolved(tmp_path / "run", fake_mmc, make_trust)
+    path = setup.root / "resolve_out" / "PX_resolve_summary.json"
+    summary = json.loads(path.read_text())
+    summary["samples"]["PX_MERSCOPE"]["resolution"]["gate"]["level"] = "broad_only"
+    path.write_text(json.dumps(summary))
+    result = build_annotation_report(
+        _sources(setup),
+        tmp_path / "report",
+        options=OPTIONS,
+        strict=True,
+        make_figures=False,
+        items=[4],
+    )
+    figures = tmp_path / "report" / "figures"
+    merscope = pd.read_csv(
+        figures / "item04_reference_expectation_dotplot_merscope.csv"
+    )
+    xenium = pd.read_csv(figures / "item04_reference_expectation_dotplot_xenium.csv")
+    assert set(merscope["level"]) == {"broad"}
+    assert set(merscope["label"]) <= set(HUMAN_BROAD_CLASSES)
+    assert merscope["ref_fraction"].notna().all()
+    assert set(xenium["level"]) == {"supercluster"}
+    records = result.metrics.find("report", "pseudobulk_centroid_r")
+    levels = {record.sample_id: record.level for record in records}
+    assert levels == {"PX_MERSCOPE": "broad", "PX_XENIUM": "supercluster"}
+    item = next(item for item in result.items if item.number == 4)
+    assert any("PX_MERSCOPE: the supercluster level" in note for note in item.notes)
