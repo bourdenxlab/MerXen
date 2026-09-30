@@ -1700,7 +1700,7 @@ both field sets against this table.
   `kind = square_tile_500um` (always written; without tangential positions
   it equals the primary), and for the pair a `depth_ordering_replicated`
   record of that kind from the tile orderings, beside the display-primary
-  (kind-less) ones; `acceptance_scoring.score_h12` scores them. For a dataset whose gate is not `full` (no
+  (kind-less) ones; `report_scoring.score_h12` scores them. For a dataset whose gate is not `full` (no
   supercluster labels) the ordering is `not_available` under both methods,
   and so is the pair's replication (P1212: the MERSCOPE section is
   broad-only).
