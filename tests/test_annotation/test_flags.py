@@ -454,7 +454,7 @@ def test_compute_flags_without_bundle_tables_is_null_with_reasons() -> None:
     assert result.columns[Columns.OOD_Z].dtype == np.float32
 
 
-def test_compute_flags_keeps_the_mouse_hooks() -> None:
+def test_compute_flags_mouse_columns_are_null_without_results() -> None:
     result = fl.compute_flags(
         _flag_inputs("mouse"), AnnotationFlagsConfig(), class_names=CLASSES
     )
@@ -462,7 +462,40 @@ def test_compute_flags_keeps_the_mouse_hooks() -> None:
     assert pd.Series(result.columns[Columns.FLAG_REGION_INCOHERENT]).isna().all()
     astro = result.columns[Columns.FLAG_ASTRO_LOWCOUNT]
     assert astro.dtype == bool and astro.any()
-    assert result.null_reasons["microglial_spillover"] == fl.REASON_MOUSE_M6
+    assert result.null_reasons["microglial_spillover"] == fl.REASON_MOUSE_NOT_COMPUTED
+    assert result.null_reasons["region_incoherent"] == fl.REASON_COHERENCE_NOT_COMPUTED
+
+
+def test_compute_flags_refuses_mouse_results_of_other_rows() -> None:
+    """A spill-over or F1 result of the wrong length is a bug, not a null flag."""
+    from merxen.annotation.config import MouseRegionConfig
+    from merxen.annotation.mouse_flags import null_spillover, region_incoherent
+
+    inputs = _flag_inputs("mouse")
+    n_rows = int(np.asarray(inputs.in_table, dtype=bool).sum())
+    spill = null_spillover(n_rows + 1, "insufficient_panel_genes")
+    with pytest.raises(ValueError, match="spill-over result has"):
+        fl.compute_flags(
+            fl.FlagInputs(**{**inputs.__dict__, "spillover": spill}),
+            AnnotationFlagsConfig(),
+            class_names=CLASSES,
+        )
+    coherence = region_incoherent(
+        None, ["01 IT-ET Glut"] * (n_rows - 1), np.ones(n_rows - 1), MouseRegionConfig()
+    )
+    with pytest.raises(ValueError, match="region-coherence result has"):
+        fl.compute_flags(
+            fl.FlagInputs(**{**inputs.__dict__, "coherence": coherence}),
+            AnnotationFlagsConfig(),
+            class_names=CLASSES,
+        )
+    fitting = null_spillover(n_rows, "insufficient_panel_genes")
+    result = fl.compute_flags(
+        fl.FlagInputs(**{**inputs.__dict__, "spillover": fitting}),
+        AnnotationFlagsConfig(),
+        class_names=CLASSES,
+    )
+    assert result.null_reasons["microglial_spillover"] == "insufficient_panel_genes"
 
 
 def test_diffuse_flags_only_more_genes_than_the_quantile(
