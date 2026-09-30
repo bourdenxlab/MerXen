@@ -143,6 +143,10 @@ def grouped_bars(
     ylabel: str = "",
     title: str = "",
     horizontal_line: float | None = None,
+    overlay: str | None = None,
+    overlay_label: str = "",
+    hatched: str | None = None,
+    hatched_label: str = "",
 ) -> Figure:
     """Grouped bar chart, one group per colour, optional CI whiskers and facets.
 
@@ -157,6 +161,12 @@ def grouped_bars(
         ylabel: Y label.
         title: Figure title.
         horizontal_line: A reference line (e.g. 0).
+        overlay: A column with a part of each bar (e.g. the COP-derived part
+            of the OPC share), drawn hatched inside it (NaN: none).
+        overlay_label: Legend entry of the overlay.
+        hatched: A boolean column: bars of rows marked ``True`` are hatched
+            (e.g. not comparable across platforms).
+        hatched_label: Legend entry of the hatched bars.
 
     Returns:
         The figure.
@@ -183,6 +193,11 @@ def grouped_bars(
             keys = sub[category].astype(str).to_numpy()
             heights = _lookup(keys, sub[value], categories)
             offsets = positions - 0.4 + bar_width * (index + 0.5)
+            marked = (
+                _lookup(keys, _flags(sub[hatched]), categories) > 0.5
+                if hatched is not None
+                else np.zeros(len(categories), dtype=bool)
+            )
             ax.bar(
                 offsets,
                 heights,
@@ -190,6 +205,29 @@ def grouped_bars(
                 color=colour_for(name, index),
                 label=name,
             )
+            if marked.any():
+                ax.bar(
+                    offsets[marked],
+                    heights[marked],
+                    width=bar_width,
+                    fill=False,
+                    hatch="xx",
+                    edgecolor="#444444",
+                    linewidth=0.0,
+                )
+            if overlay is not None:
+                parts = _lookup(keys, sub[overlay].astype(float), categories)
+                shown = np.isfinite(parts) & (parts > 0)
+                if shown.any():
+                    ax.bar(
+                        offsets[shown],
+                        parts[shown],
+                        width=bar_width,
+                        fill=False,
+                        hatch="////",
+                        edgecolor="#222222",
+                        linewidth=0.0,
+                    )
             if low is not None and high is not None:
                 lows = _lookup(keys, sub[low], categories)
                 highs = _lookup(keys, sub[high], categories)
@@ -215,11 +253,33 @@ def grouped_bars(
         if facet_value is not None:
             ax.set_title(str(facet_value), fontsize=8, loc="left")
         if row == 0:
-            ax.legend(fontsize=7, frameon=False, ncol=min(4, n_groups))
+            handles, names = ax.get_legend_handles_labels()
+            extra = [
+                (Patch(fill=False, hatch=pattern, edgecolor="#222222"), text)
+                for column, pattern, text in (
+                    (overlay, "////", overlay_label),
+                    (hatched, "xx", hatched_label),
+                )
+                if column is not None and text
+            ]
+            ax.legend(
+                handles + [item[0] for item in extra],
+                names + [item[1] for item in extra],
+                fontsize=7,
+                frameon=False,
+                ncol=min(4, n_groups + len(extra)),
+            )
     if title:
         figure.suptitle(title, fontsize=9)
     figure.tight_layout()
     return figure
+
+
+def _flags(values: pd.Series) -> pd.Series:
+    """Return a boolean-like column as floats (missing -> 0)."""
+    return values.astype(object).map(
+        lambda value: 1.0 if isinstance(value, bool | np.bool_) and value else 0.0
+    )
 
 
 def _lookup(
