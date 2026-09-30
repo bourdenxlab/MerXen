@@ -146,6 +146,10 @@ def test_mouse_report_builds_item_10_on_a_synthetic_section(
     assert len(tiles) and set(tiles["value"]) <= set(regions.value.split(";")) | {"nan"}
     table = pd.read_csv(report / "tables" / "item10_mouse_regions__regions.csv")
     assert table.iloc[0]["ap_status"] == PENDING
+    genes = pd.read_csv(
+        report / "tables" / "item10_mouse_regions__spillover_gene_sets.csv"
+    )
+    assert list(genes.columns) == ["sample_id", "set", "gene"]
     drops = pd.read_csv(report / "tables" / "item10_mouse_regions__drop_list.csv")
     assert len(drops)
     item = next(item for item in result.items if item.number == 10)
