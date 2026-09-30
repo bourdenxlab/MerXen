@@ -50,7 +50,9 @@ HUMAN_CRITERIA_SOURCES: Final[dict[str, tuple[str, str]]] = {
     "H3": ("report", "WHB-SEA 7-class agreement, table cells >= 20 counts"),
     "H4": (
         "report+script",
-        "held-out-gene enrichment: heldout_genes.py; item 8 when given",
+        "resolve_criteria.py H4 row on m4_resolve_heldout_whb_only (M8 D6); "
+        "item 8 shows it when given (its other label sets are criterion "
+        "'report')",
     ),
     "H5": (
         "report",

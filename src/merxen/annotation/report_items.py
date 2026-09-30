@@ -2176,21 +2176,32 @@ def item_heldout(
         shown = frame
         if "label_set" in frame.columns and len(frame):
             label_set = str(frame["label_set"].iloc[0])
-    if label_set is not None and label_set != HELDOUT_HEADLINE_SET:
+    # Only the assigned class's label set (M8 D6) records under H4: every
+    # other set shown (a fallback) is criterion "report", so no H4 record
+    # of acceptance_metrics.json comes from a set that is not scored.
+    scored_set = label_set == HELDOUT_HEADLINE_SET
+    if not scored_set:
         item.notes.append(
-            f"{label_set} is not H4's scored label set (M8 D6: the WHB-only "
+            f"{label_set or 'the unnamed label set'} is not H4's scored label "
+            "set (M8 D6: the WHB-only "
             f"held-out re-resolve, {HELDOUT_HEADLINE_SET}, from "
-            "scripts/acceptance/resolve_criteria.py); shown for information"
+            "scripts/acceptance/resolve_criteria.py); shown for information, "
+            "its records are criterion 'report'"
         )
     for row in shown.to_dict("records"):
         for name in ("fold", "auroc"):
             item.metrics.append(
                 metric(
-                    "H4",
+                    "H4" if scored_set else "report",
                     f"heldout_{name}",
                     row.get(name),
                     definition=(
                         f"held-out-gene enrichment {name} per class and platform (§5.8)"
+                        + (
+                            ""
+                            if scored_set
+                            else f"; not H4's scored set ({HELDOUT_HEADLINE_SET})"
+                        )
                     ),
                     source="heldout_csv",
                     sample_id=f"{inputs.sources.pair_id}_{row.get('platform')}",

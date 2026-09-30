@@ -206,6 +206,7 @@ def test_heldout_item_shows_the_h4_headline_label_set(tmp_path: Path) -> None:
     folds = [record for record in item.metrics if record.name == "heldout_fold"]
     assert {record.kind for record in folds} == {ri.HELDOUT_HEADLINE_SET}
     assert {record.value for record in folds} == {10.0} and len(folds) == 2
+    assert {record.criterion for record in item.metrics} == {"H4"}
     # Every label set stays in the item's table.
     table = pd.read_csv(
         tmp_path / "out" / "tables" / "item08_heldout_genes__heldout.csv"
@@ -247,6 +248,10 @@ def test_heldout_item_notes_when_the_scored_h4_set_is_absent(tmp_path: Path) -> 
     assert [(record.kind, record.value) for record in folds] == [
         ("heldout_whb_confident", 7.0)
     ]
+    # M8 review: a fallback set is shown, but never recorded as H4 (every H4
+    # record of acceptance_metrics.json comes from the assigned set, D6).
+    assert {record.criterion for record in item.metrics} == {"report"}
+    assert all("not H4's scored set" in record.definition for record in folds)
     assert any(
         "heldout_whb_confident is not H4's scored label set" in note
         for note in item.notes
@@ -257,6 +262,14 @@ def test_heldout_item_notes_when_the_scored_h4_set_is_absent(tmp_path: Path) -> 
         inputs, ri.ItemWriter(tmp_path / "out2", make_figures=False), ri.ReportOptions()
     )
     assert any("heldout_argmax is not H4's scored" in note for note in item.notes)
+    assert {record.criterion for record in item.metrics} == {"report"}
+    # A table without a label_set column cannot be the scored set either.
+    inputs.heldout = pd.DataFrame(rows[:1]).drop(columns=["label_set"])
+    item = ri.item_heldout(
+        inputs, ri.ItemWriter(tmp_path / "out3", make_figures=False), ri.ReportOptions()
+    )
+    assert {record.criterion for record in item.metrics} == {"report"}
+    assert any("unnamed label set" in note for note in item.notes)
 
 
 COP = "Committed oligodendrocyte precursor"
