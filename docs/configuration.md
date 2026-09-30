@@ -552,12 +552,16 @@ runs once, and is shared across all samples and segmentation branches. See
 
 These params drive the reference-bundle, mapping and resolving processes of
 the new annotation ([Reference-based annotation](stages/annotation.md)). They
-are read only by `--annotation_prepare_only` runs and, once wired (M5), by
-`map_first` runs; legacy runs ignore them. Defaults are in `workflows/conf/annotation.config`,
+are read only by `--annotation_prepare_only` runs and by `map_first` runs;
+legacy runs ignore them. Defaults are in `workflows/conf/annotation.config`,
 the dwight values in `workflows/conf/dwight.annotation.config`.
 
 | Param | Default | Description |
 |-------|---------|-------------|
+| `clustering_squidpy_mode_human`, `clustering_squidpy_mode_mouse` | `legacy`; `legacy` | Clustering mode per species: `legacy` or `map_first` ([Map-first clustering runs](stages/annotation.md#map-first-clustering-runs-m5)). The flips (M8 human, M9 mouse) set `map_first`. |
+| `clustering_squidpy_mode` | `null` | Explicit mode for both species; overrides the species params. |
+| `clustering_squidpy_table_key_suffix` | `null` | Clustered table-key suffix of a `map_first` run: `null` means `mapfirst` while the species has not flipped (`""` after), so the legacy clustered table is never overwritten; an empty suffix before the flip is refused. Legacy runs always write the unsuffixed key. |
+| `mender_unassigned_state_policy` | `exclude_from_features` | MENDER policy of `map_first` tables (plan §4.9): unassigned cells (`Mixed/Unknown`, `*/unresolved`) stay spatial nodes but add no neighbourhood state. Recorded in the clustered table, which MENDER applies; legacy tables keep `state`. |
 | `annotation_prepare_only` | `false` | Build the reference bundles of `annotation_panel_genes_path` for every row and segmentation, and run no pipeline stage. |
 | `annotation_panel_genes_path` | `null` | Declared panel of a prepare-only run (any gene list `merxen annotation-panel --panel-genes-path` reads). A human gene list of the seeded set-a family also gets its curated set c. |
 | `annotation_human_references`, `annotation_mouse_references` | `whb_frontal_supc_clus,seaad_mr_panel`; `wmb_panel,wmb_region_share` | Reference ids per species. |
@@ -673,6 +677,7 @@ for every task. Portable per-process CPU/memory requests remain in
 | `MECR_REFERENCE` | 16 | 240 GB | 1 |
 | `MECR` | 4 | 48 GB | `mecr_max_forks` = 4 |
 | `CLUSTERING_SQUIDPY` | 8 | 32 GB | `clustering_squidpy_max_forks` = 4 |
+| `CLUSTERING_SQUIDPY_COMPUTE_CPU` (`map_first`) | 8 | 32 GB | `clustering_squidpy_max_forks` = 4; CPU only, no GPU lock |
 | `MAPMYCELLS` | 8 | 160 GB | unbounded |
 
 On Dwight, `CELLPOSE_SEGMENT`, `ALIGN` when `alignment_device != "cpu"`, and

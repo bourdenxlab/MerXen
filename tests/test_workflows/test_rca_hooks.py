@@ -8,11 +8,12 @@ rebase or merge cannot silently drop a hook. A hook that also touches further
 lines marks each of them with ``rca-site:H<n>``; their number per file is
 pinned below too.
 
-H5 (the map_first wiring between PREPARE and COMPUTE) arrives with M5, so its
-marker must not exist yet. H10 (M2) is the ``--annotation_prepare_only``
-entry: it builds reference bundles from the samplesheet rows before the
-preflight and empties the rows, so no pipeline stage runs; it needs neither
-H5 nor any PREPARE output.
+H5 (M5) is the map_first wiring between PREPARE and FINALIZE: one ``if`` on
+the run's mode whose legacy branch runs exactly the legacy PREPARE -> COMPUTE
+statements. H10 (M2) is the ``--annotation_prepare_only`` entry: it builds
+reference bundles from the samplesheet rows before the preflight and empties
+the rows, so no pipeline stage runs; it needs neither H5 nor any PREPARE
+output.
 """
 
 from __future__ import annotations
@@ -34,7 +35,7 @@ EXPECTED_HOOKS: dict[str, tuple[str, ...]] = {
     "H2": (MAIN_NF,),
     "H3": (MAIN_NF,),
     "H4": (MAIN_NF,),
-    "H5": (),  # M5: CLUSTERING_MAP_FIRST between PREPARE and FINALIZE.
+    "H5": (MAIN_NF,),  # M5: CLUSTERING_MAP_FIRST between PREPARE and FINALIZE.
     "H6": (MAIN_NF,),
     "H7": ("workflows/nextflow.config", "workflows/conf/dwight.config"),
     "H8": ("src/merxen/config.py",),
@@ -43,10 +44,17 @@ EXPECTED_HOOKS: dict[str, tuple[str, ...]] = {
 }
 # (file, hook) -> number of extra lines the hook touches, each with a site marker.
 EXPECTED_SITES: dict[tuple[str, str], int] = {
-    # The MENDER preflight and MENDER input key lookups, and the MENDER input
-    # closure parameter they need (renamed from ``_settings``).
-    (MAIN_NF, "H2"): 3,
-    ("src/merxen/config.py", "H8"): 3,  # sample config, clustering config, MENDER
+    # The MENDER preflight and MENDER input key lookups, the MENDER input
+    # closure parameter they need (renamed from ``_settings``), the
+    # cortical-depth table fields (M5) and the two published clustered-H5AD
+    # lookups of MENDER-only restarts (M5 review).
+    (MAIN_NF, "H2"): 6,
+    # The MENDER barrier of map_first runs: combine instead of join (M5).
+    (MAIN_NF, "H3"): 1,
+    # The subscription that records skipped MENDER runs (M5 review).
+    (MAIN_NF, "H6"): 1,
+    # Sample config, clustering config, MENDER, cortical-depth table (M5).
+    ("src/merxen/config.py", "H8"): 4,
     ("src/merxen/io/samplesheet.py", "H9"): 2,  # SamplePair fields, row parsing
 }
 # Hook -> text that must follow its marker within HOOK_WINDOW lines.
@@ -68,7 +76,13 @@ HOOK_CONTENT: dict[str, tuple[str, ...]] = {
         "AnnotationPreflight.append(errors, settings, params)",
         "if (!AnnotationSettings.isLegacy(settings)) {",
     ),
-    "H6": (".onComplete {", "AnnotationSettings.completionSummary("),
+    "H5": ("if (AnnotationSettings.isMapFirstRun(params)) {",),
+    "H6": (
+        ".onComplete {",
+        "AnnotationSettings.completionSummary(",
+        "AnnotationRunRecord.runInfo() + "
+        "[success: annotationCompletionWorkflow.success],",
+    ),
     "H8": ("from merxen.annotation.config import",),
     "H9": ("parse_optional_columns",),
     "H10": (
@@ -137,12 +151,50 @@ def test_hook_sites_are_pinned() -> None:
         assert relative in EXPECTED_HOOKS[hook], (relative, hook)
 
 
-def test_h5_is_left_for_m5() -> None:
-    """M1 does not touch the PREPARE -> COMPUTE wiring (hook H5)."""
-    main_text = (REPO_ROOT / MAIN_NF).read_text()
+LEGACY_CLUSTERING_STATEMENTS = (
+    "clustering_prepared_ch = CLUSTERING_SQUIDPY_PREPARE(clustering_inputs_ch)",
+    "clustering_computed_ch = CLUSTERING_SQUIDPY_COMPUTE(clustering_prepared_ch)",
+)
 
-    assert "CLUSTERING_MAP_FIRST(" not in main_text
-    assert "rca-hook:H5" not in main_text
+
+def _h5_block(main_text: str) -> tuple[str, str]:
+    """Return the map_first and legacy branches of hook H5."""
+    start = main_text.index("    if (AnnotationSettings.isMapFirstRun(params)) {\n")
+    middle = main_text.index("\n    } else {\n", start)
+    end = main_text.index("\n    }\n", middle + 1)
+    return main_text[start:middle], main_text[middle + len("\n    } else {\n") : end]
+
+
+def test_h5_switches_between_legacy_compute_and_map_first() -> None:
+    """H5 sits between PREPARE's inputs and FINALIZE; legacy runs its old statements.
+
+    The legacy branch holds exactly the two legacy statements, so a legacy
+    run builds the same DAG and task hashes as before M5; FINALIZE follows
+    both branches, so the MENDER barrier and downstream stages are shared.
+    """
+    main_text = (REPO_ROOT / MAIN_NF).read_text()
+    hook = main_text.index("rca-hook:H5")
+    map_first, legacy = _h5_block(main_text)
+
+    assert main_text.index("    clustering_inputs_ch =\n") < hook
+    assert hook < main_text.index("    if (AnnotationSettings.isMapFirstRun(params)) {")
+    assert [line.strip() for line in legacy.strip().splitlines()] == list(
+        LEGACY_CLUSTERING_STATEMENTS
+    )
+    finalize = (
+        "clustering_results_ch = CLUSTERING_SQUIDPY_FINALIZE(clustering_computed_ch)"
+    )
+    assert main_text.count(finalize) == 1
+    assert main_text.index(finalize) > main_text.index(legacy)
+    assert main_text.count("CLUSTERING_MAP_FIRST(") == 1
+    assert "CLUSTERING_MAP_FIRST(" in map_first
+    assert "CLUSTERING_SQUIDPY_PREPARE(" in map_first
+    assert "CLUSTERING_SQUIDPY_COMPUTE(" not in map_first
+    assert "AnnotationSettings.samplesJsonWithRowColumns(" in map_first
+    assert "AnnotationReferences.alignmentFiles(alignOut)" in map_first
+    assert "AnnotationRunRecord.expect(pairId, segmentation)" in map_first
+    # The legacy COMPUTE (GPU env) is called nowhere else.
+    assert main_text.count("CLUSTERING_SQUIDPY_COMPUTE(") == 1
 
 
 @pytest.mark.parametrize("hook", sorted(HOOK_CONTENT))
@@ -209,18 +261,34 @@ def test_h7_includes_follow_their_markers() -> None:
 
 H2_SUFFIX_ARGUMENT = "settings.clustering_squidpy_table_key_suffix,"
 H2_CLOSURE_BINDING = re.compile(r"^\s*settings, // rca-site:H2\b")
+H2_CORTICAL_DEPTH_FIELDS = "] + AnnotationSettings.clusteredTableFields(row, params)"
 
 
 def test_h2_sites_pass_the_row_suffix() -> None:
-    """Each H2 site passes the row suffix to the key function or binds it."""
-    lines = (REPO_ROOT / MAIN_NF).read_text().splitlines()
+    """Each H2 site passes the row suffix to the key function or binds it.
+
+    MENDER's two key lookups and its two published clustered-H5AD lookups
+    pass the row suffix, its input closure binds the row settings, and
+    cortical depth's table configs carry the suffix of a map_first row (M5;
+    nothing for a legacy row).
+    """
+    main_text = (REPO_ROOT / MAIN_NF).read_text()
+    lines = main_text.splitlines()
     site_lines = [line for line in lines if "rca-site:H2" in line]
 
     suffix_lines = [line for line in site_lines if H2_SUFFIX_ARGUMENT in line]
     binding_lines = [line for line in site_lines if H2_CLOSURE_BINDING.match(line)]
-    assert len(suffix_lines) == 2
+    depth_lines = [line for line in site_lines if H2_CORTICAL_DEPTH_FIELDS in line]
+    assert len(suffix_lines) == 4
     assert len(binding_lines) == 1
-    assert len(site_lines) == len(suffix_lines) + len(binding_lines)
+    assert len(depth_lines) == 1
+    assert len(site_lines) == len(suffix_lines) + len(binding_lines) + len(depth_lines)
+    depth_function = main_text[
+        main_text.index("def corticalDepthConfigForPlatform(") : main_text.index(
+            "def distanceFromObjectConfigForPlatform("
+        )
+    ]
+    assert H2_CORTICAL_DEPTH_FIELDS in depth_function
 
 
 def test_mender_input_closure_binds_the_row_settings() -> None:

@@ -19,6 +19,7 @@ from shapely.ops import unary_union
 from skimage import io as skio
 from spatialdata.models import TableModel
 
+from merxen.clustering.map_first import downstream_annotation_summary
 from merxen.config import CorticalDepthConfig, CorticalDepthTableConfig
 from merxen.cortical_depth.assign_cells import (
     CORTICAL_DEPTH_COLUMNS,
@@ -403,6 +404,10 @@ def _annotate_table(
             "cells_path": str(cells_path),
         }
     )
+    annotation = cluster_annotation_summary(sdata_obj, table_config)
+    if annotation is not None:
+        # map_first tables only (plan §4.9): legacy summaries are unchanged.
+        summary["annotation"] = annotation
     return (
         {f"{table_config.segmentation}_cells": cells_path, **plot_paths},
         summary,
@@ -413,9 +418,34 @@ def _clustering_table_key(table_config: CorticalDepthTableConfig) -> str:
     """Return the clustering_squidpy table key for a segmentation branch.
 
     Delegates to ``merxen.table_keys.clustered_table_key``, as the
-    clustering stage does when it writes the table.
+    clustering stage does when it writes the table; a map_first run reads
+    its own suffixed table (``clustered_table_key_suffix``, plan §4.8).
     """
-    return clustered_table_key(table_config.table_key, table_config.segmentation)
+    return clustered_table_key(
+        table_config.table_key,
+        table_config.segmentation,
+        table_config.clustered_table_key_suffix,
+    )
+
+
+def cluster_annotation_summary(
+    sdata_obj: Any, table_config: CorticalDepthTableConfig
+) -> dict[str, Any] | None:
+    """Return the annotation gate and panel trust of the clustering table.
+
+    Args:
+        sdata_obj: The SpatialData object (anything with ``tables``).
+        table_config: The segmentation's table settings.
+
+    Returns:
+        ``merxen.clustering.map_first.downstream_annotation_summary`` of the clustered
+        table's annotation provenance (map_first), or ``None`` when the table
+        is absent or holds no provenance (legacy).
+    """
+    table_key = _clustering_table_key(table_config)
+    if table_key not in sdata_obj.tables:
+        return None
+    return downstream_annotation_summary(sdata_obj.tables[table_key].uns)
 
 
 def _load_cluster_annotations(

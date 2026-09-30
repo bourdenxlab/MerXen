@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 
@@ -174,3 +175,65 @@ def test_clustering_gpu_compute_is_isolated_from_spatialdata_io(
     assert "clustering_prepared_ch = CLUSTERING_SQUIDPY_PREPARE" in main_text
     assert "clustering_computed_ch = CLUSTERING_SQUIDPY_COMPUTE" in main_text
     assert "CLUSTERING_SQUIDPY_FINALIZE(clustering_computed_ch)" in main_text
+
+
+def _process_block(module_text: str, name: str) -> str:
+    start = module_text.index(f"process {name} {{")
+    end = module_text.find("\nprocess ", start + 1)
+    return module_text[start : end if end >= 0 else len(module_text)]
+
+
+def test_compute_cpu_runs_map_first_in_the_main_env_without_gpu(
+    combined_config_text: str,
+) -> None:
+    """COMPUTE_CPU (plan §3.5): main env, CPU only, no GPU queue or lock.
+
+    The legacy COMPUTE (GPU env, GPU lock on Dwight) keeps its own selectors,
+    which match its name exactly; no selector reaches COMPUTE_CPU but its own.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    module_text = (
+        repo_root / "workflows" / "modules" / "clustering_squidpy.nf"
+    ).read_text()
+    annotation_config = (
+        repo_root / "workflows" / "conf" / "annotation.config"
+    ).read_text()
+    dwight_annotation = (
+        repo_root / "workflows" / "conf" / "dwight.annotation.config"
+    ).read_text()
+    block = _process_block(module_text, "CLUSTERING_SQUIDPY_COMPUTE_CPU")
+
+    assert 'cache "deep"' in block
+    assert 'export CUDA_VISIBLE_DEVICES=""' in block
+    assert 'export PYTHONPATH="${projectDir}/../src:' in block
+    assert "python -m merxen.clustering_squidpy_stages compute" in block
+    assert "AnnotationReferences.computeArguments(compute_spec)" in block
+    assert 'stageAs: "compute_inputs/annotation_resolve_out/*"' in block
+    for token in ("gpu", "vram", "--nv", "conda", "container", "queue"):
+        assert token not in block.lower(), token
+    # FINALIZE's input shape.
+    assert 'path("clustering_compute_out")' in block
+    selectors = [
+        name
+        for name in re.findall(
+            r'withName:\s*"([^"]+)"', combined_config_text + annotation_config
+        )
+        if name.startswith("CLUSTERING_SQUIDPY_COMPUTE")
+    ]
+    assert set(selectors) == {
+        "CLUSTERING_SQUIDPY_COMPUTE",
+        "CLUSTERING_SQUIDPY_COMPUTE_CPU",
+    }
+    cpu = annotation_config[
+        annotation_config.index('withName: "CLUSTERING_SQUIDPY_COMPUTE_CPU"') :
+    ]
+    cpu = cpu[: cpu.index("}")]
+    assert "cpus = 8" in cpu and 'memory = "32 GB"' in cpu
+    for token in ("conda", "container", "queue", "clusterOptions", "beforeScript"):
+        assert token not in cpu
+    dwight = dwight_annotation[
+        dwight_annotation.index('withName: "CLUSTERING_SQUIDPY_COMPUTE_CPU"') :
+    ]
+    dwight = dwight[: dwight.index("}")]
+    assert "maxForks = params.clustering_squidpy_max_forks" in dwight
+    assert "beforeScript" not in dwight

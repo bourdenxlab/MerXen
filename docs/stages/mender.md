@@ -10,6 +10,21 @@ per-pair token only when that pair's current terminal stage is complete. The
 token excludes other independent terminal analyses such as GASTON, so the two
 may overlap and neither consumes the other's output.
 
+The token comes from matching the pair's terminal events (clustering,
+mapmycells, distance-from-object and cortical-depth results) with the pair's
+one barrier spec, keeping the events of the terminal stage. Legacy runs
+match them with a `join`, which pairs items one to one, so the spec is
+consumed by the pair's first event even when that event belongs to an
+earlier stage; the terminal stage's own events then find no spec and MENDER
+is silently skipped (for example `stop_stage=mender` with cortical depth
+enabled: FINALIZE's clustering event arrives first). `map_first` runs
+therefore `combine` every event with the spec, which keeps it, so no count
+of the events is needed. Legacy runs keep the `join` (their channels and
+DAG stay unchanged), so a legacy launch whose pair emits more than one
+terminal event (clustering plus another terminal stage, or several
+clustering segmentations) skips MENDER; run MENDER on such legacy results
+with `--only_stage mender` (below) until the barrier is fixed on `main`.
+
 Enable the default ProSeg-hybrid analysis with:
 
 ```bash
@@ -61,6 +76,40 @@ model.set_MENDER_para(
 model.run_representation()
 model.run_clustering_normal(-0.8, run_umap=True)
 ```
+
+On a `map_first` clustered table the unassigned states (`Mixed/Unknown`
+and the `*/unresolved` branches) follow the run's
+`mender_unassigned_state_policy`, recorded in the table (default
+`exclude_from_features`: those cells stay spatial nodes and get a domain but
+add no state to any neighbourhood); legacy tables keep every state as a
+feature. The MENDER manifests record the policy, the excluded states, the
+dataset gate, the panel trust and the pair's cross-platform scope
+([Map-first clustering runs](annotation.md#map-first-clustering-runs-m5)).
+
+They also record `cross_platform_comparable` and its reasons: niches may be
+compared across platforms (or datasets) only when both runs use
+`--mender_cell_state_key ct_mender_state` (plan §4.9) and the pair's scope
+allows its branch-level states (`full`). The default `hierarchical_cluster`
+follows each dataset's gate and resolvability (P1212 MERSCOPE, broad-only,
+has 11 branch-level states where its Xenium partner has 20 leaves), so its
+niches are recorded as not comparable (`state_key:hierarchical_cluster`);
+cross-platform niche comparison needs a `ct_mender_state` run.
+
+When every state of a `map_first` table is unassigned under
+`exclude_from_features` (a refused panel or a failed gate), there is no
+neighbourhood feature: MENDER_PREPARE records
+`status: skipped_no_assigned_state` with its reasons, MENDER_COMPUTE and
+MENDER_FINALIZE write their manifests without domains, MENDER_IMPORT writes
+nothing to the store (`imported: false`), and the end-of-run summary lists
+the sample. It is a data-quality outcome, not a failed task.
+
+A MENDER-only restart reads the published clustered H5AD; for a `map_first`
+row it looks in `clustering_squidpy_<suffix>/` first, then in
+`clustering_squidpy/`. MENDER_PREPARE and MENDER_IMPORT refuse an H5AD whose
+mode or table-key suffix does not match the table they write (a `map_first`
+H5AD goes only to `<...>_clustering_squidpy_<its suffix>`, a legacy one never
+to a suffixed key), because legacy and `map_first` tables hold the same
+cells and cannot be told apart by their ids.
 
 These layer-focused defaults use five separate 20 µm shells spanning a
 maximum radius of 100 µm. Excluding the central cell reduces sensitivity to

@@ -1,10 +1,16 @@
-"""Pinned-environment CPU wrapper around MENDER's single-slice model."""
+"""Pinned-environment CPU wrapper around MENDER's single-slice model.
+
+This module runs in the pinned MENDER env (Python 3.9, MENDER at
+``b29dc5e``), so it imports only anndata, numpy, pandas and scipy and uses
+no syntax newer than Python 3.9.
+"""
 
 from __future__ import annotations
 
 import argparse
 import importlib
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +18,17 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 from scipy import sparse
+
+# Portable-table column written by ``merxen.analysis.mender.prepare_mender``
+# under ``unassigned_state_policy="exclude_from_features"`` (plan §4.9);
+# mirrors ``merxen.analysis.mender.IN_FEATURES_COLUMN``.
+IN_FEATURES_COLUMN = "in_features"
+# ``merxen.analysis.mender.SKIPPED_NO_ASSIGNED_STATE``: PREPARE found no
+# assigned cell state, so there is nothing to compute (plan §3.1, §4.9).
+SKIPPED_STATUS = "skipped_no_assigned_state"
+# MENDER_single.generate_ct_representation names its features
+# ``ct<index into ct_unique>scale<scale>``.
+_FEATURE_NAME = re.compile(r"^ct(\d+)scale(\d+)$")
 
 
 def build_minimal_anndata(portable: pd.DataFrame) -> ad.AnnData:
@@ -41,6 +58,73 @@ def build_minimal_anndata(portable: pd.DataFrame) -> ad.AnnData:
     )
     adata.obsm["spatial"] = coordinates
     return adata
+
+
+def feature_excluded_states(portable: pd.DataFrame) -> list[str]:
+    """Return the cell states the portable table keeps out of the features.
+
+    Args:
+        portable: The portable MENDER input.
+
+    Returns:
+        Sorted states whose cells have ``in_features`` false; empty when the
+        column is absent (``unassigned_state_policy="state"``, legacy).
+
+    Raises:
+        ValueError: If a state has cells both in and out of the features.
+    """
+    if IN_FEATURES_COLUMN not in portable.columns:
+        return []
+    flags = portable[IN_FEATURES_COLUMN].astype(bool).to_numpy()
+    states = portable["cell_state"].astype(str).to_numpy()
+    excluded = set(states[~flags])
+    mixed = sorted(excluded & set(states[flags]))
+    if mixed:
+        raise ValueError(
+            f"MENDER states with cells both in and out of the features: {mixed[:5]}"
+        )
+    return sorted(excluded)
+
+
+def exclude_state_features(model: Any, excluded_states: list[str]) -> list[str]:
+    """Drop the neighbourhood features of excluded states from a MENDER model.
+
+    ``run_representation`` counts, for every cell and scale, the neighbours
+    of each state (``ct<i>scale<s>``, ``i`` indexing ``model.ct_unique``).
+    Removing the columns of the excluded states means those cells still
+    count as spatial nodes (they get a domain and their neighbours' states
+    describe them) but add no state to anyone's neighbourhood (plan §4.9).
+
+    Args:
+        model: A ``MENDER_single`` after ``run_representation``.
+        excluded_states: States to drop (``feature_excluded_states``).
+
+    Returns:
+        The feature names removed.
+
+    Raises:
+        RuntimeError: If the features are not named ``ct<i>scale<s>`` or no
+            feature would remain.
+    """
+    if not excluded_states:
+        return []
+    states = [str(value) for value in model.ct_unique]
+    excluded = set(excluded_states)
+    excluded_index = {index for index, state in enumerate(states) if state in excluded}
+    names = [str(name) for name in model.adata_MENDER.var_names]
+    keep = []
+    for name in names:
+        match = _FEATURE_NAME.match(name)
+        if match is None:
+            raise RuntimeError(
+                f"unexpected MENDER feature name {name!r}; cannot exclude states"
+            )
+        keep.append(int(match.group(1)) not in excluded_index)
+    if not any(keep):
+        raise RuntimeError("excluding the unassigned states leaves no MENDER feature")
+    removed = [names[index] for index, kept in enumerate(keep) if not kept]
+    model.adata_MENDER = model.adata_MENDER[:, np.asarray(keep, dtype=bool)].copy()
+    return removed
 
 
 def clustering_request(config: dict[str, Any]) -> float | int:
@@ -138,6 +222,11 @@ def run_mender_compute(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     config = json.loads(config_path.read_text())
+    input_manifest_path = prepared_dir / "input_manifest.json"
+    if input_manifest_path.is_file():
+        input_manifest = json.loads(input_manifest_path.read_text())
+        if input_manifest.get("status") == SKIPPED_STATUS:
+            return _write_skipped(config, input_manifest, output_dir)
     portable = pd.read_parquet(prepared_dir / "mender_input.parquet")
     adata = build_minimal_anndata(portable)
 
@@ -155,6 +244,8 @@ def run_mender_compute(
         n_scales=int(config.get("n_scales", 5)),
     )
     model.run_representation()
+    excluded_states = feature_excluded_states(portable)
+    removed_features = exclude_state_features(model, excluded_states)
     request = clustering_request(config)
     model.run_clustering_normal(
         request,
@@ -192,6 +283,12 @@ def run_mender_compute(
         },
         "cpu_only": True,
     }
+    if IN_FEATURES_COLUMN in portable.columns:
+        manifest["excluded_feature_states"] = excluded_states
+        manifest["n_excluded_features"] = len(removed_features)
+        manifest["n_cells_excluded_from_features"] = int(
+            (~portable[IN_FEATURES_COLUMN].astype(bool)).sum()
+        )
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
     return {
         "context_h5ad": context_path,
@@ -199,6 +296,25 @@ def run_mender_compute(
         "scale_neighbour_summary": scale_path,
         "manifest": manifest_path,
     }
+
+
+def _write_skipped(
+    config: dict[str, Any], input_manifest: dict[str, Any], output_dir: Path
+) -> dict[str, Path]:
+    """Record a skipped run: a compute manifest, no MENDER model."""
+    manifest_path = output_dir / "compute_manifest.json"
+    manifest = {
+        "sample_id": config["sample_id"],
+        "platform": config["platform"],
+        "segmentation": config["segmentation"],
+        "status": SKIPPED_STATUS,
+        "status_reasons": list(input_manifest.get("status_reasons", [])),
+        "n_cells": 0,
+        "domain_counts": {},
+        "cpu_only": True,
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    return {"manifest": manifest_path}
 
 
 def main() -> None:
