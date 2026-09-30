@@ -69,6 +69,7 @@ DEPTH_COLUMNS: Final[tuple[str, ...]] = (
     "laplace_depth",
     "cortical_depth_qc_flag",
     "column_id",
+    "tangential_position_um",
 )
 MOUSE_REGIONS_SUFFIX: Final = "_mouse_regions.parquet"
 

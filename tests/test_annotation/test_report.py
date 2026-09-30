@@ -27,6 +27,7 @@ from merxen.annotation.report import (
     build_annotation_report,
     check_output_dir,
 )
+from merxen.annotation.report_depth import SQUARE_TILE_CI
 from merxen.annotation.report_inputs import ReportSources, discover_sources
 from merxen.annotation.report_model import AcceptanceMetrics, ReportOptions
 from merxen.cli import main as cli_main
@@ -88,6 +89,9 @@ def _depth_parquet(setup: Setup, sample_index: int, path: Path) -> Path:
             "equivolumetric_depth": depth,
             "laplace_depth": depth,
             "cortical_depth_qc_flag": np.where(white, "outside_ribbon", "assigned"),
+            "tangential_position_um": np.where(
+                white, np.nan, rng.uniform(0, 3000, len(labels))
+            ),
             "column_id": np.where(white, np.nan, rng.integers(0, 12, len(labels))),
         }
     )
@@ -282,8 +286,12 @@ def test_report_with_cortical_depth_and_the_shared_mask(
         # The synthetic pair has no deep-layer superclusters: the ordering fails.
         assert ordering.value is False and "missing" in ordering.note
         assert result.metrics.find(
-            "H12", "depth_ordering_passes", sample_id=sample_id, kind="column_bootstrap"
+            "H12", "depth_ordering_passes", sample_id=sample_id, kind=SQUARE_TILE_CI
         )
+        (valid,) = result.metrics.find("H12", "depth_input_valid", sample_id=sample_id)
+        # Too few cells for the label-free depth check: not checked, and the
+        # H12 metrics stay measured.
+        assert valid.value is None and valid.note.startswith("not checked")
     assert result.metrics.find("H12", "depth_ordering_replicated")
     composition = pd.read_csv(
         tmp_path / "report" / "tables" / "item02_composition__composition.csv"
@@ -323,7 +331,7 @@ def test_a_broad_only_gate_makes_both_h12_orderings_not_available(
         records = result.metrics.find(
             "H12", "depth_ordering_passes", sample_id=sample.sample_id
         )
-        assert {record.kind for record in records} == {None, "column_bootstrap"}
+        assert {record.kind for record in records} == {None, SQUARE_TILE_CI}
         for record in records:
             if sample.sample_id == gated:
                 assert record.status == "not_available" and record.value is None

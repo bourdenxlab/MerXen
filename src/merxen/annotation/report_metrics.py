@@ -56,6 +56,17 @@ SELF_THINNING_MIN_CLASS_CELLS: Final = 50
 SELF_THINNING_MAX_DOMINANT_SHARE: Final = 0.8
 SELF_THINNING_MAX_UNLABELLED_SHARE: Final = 0.3
 GENE_RATIO_PSEUDOCOUNT: Final = 0.001
+# Item 9 (H12; M7 review, pre-registered in the pre-registration doc §17):
+# the depth medians' bootstrap unit is a 500 µm tangential block (a full
+# pia-to-WM strip); a pair's depth inputs are valid when, in the 200 µm
+# bins of the fixed frame holding >= 5 cells of each section, the two
+# sections agree on ribbon membership in >= 80% of the bins and their
+# per-bin mean depths correlate with r >= 0.8.
+DEPTH_BLOCK_UM: Final = 500.0
+DEPTH_AGREEMENT_BIN_UM: Final = 200.0
+DEPTH_AGREEMENT_MIN_CELLS: Final = 5
+DEPTH_MIN_RIBBON_AGREEMENT: Final = 0.8
+DEPTH_MIN_BIN_DEPTH_R: Final = 0.8
 
 
 # --------------------------------------------------------------------------
@@ -912,6 +923,175 @@ def profile_gradient(profile: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def tangential_block_codes(
+    tangential_um: np.ndarray, block_um: float = DEPTH_BLOCK_UM
+) -> np.ndarray:
+    """Return each cell's tangential block (a full pia-to-WM strip) id.
+
+    The H12 bootstrap unit (M7 review): ``floor(tangential_position_um /
+    block_um)``. A block spans the whole cortical depth, so resampling blocks
+    keeps every replicate's depth slices in their anatomical proportion (a
+    square tile holds only part of the depth range); a 500 µm block holds
+    about ten neighbouring streamlines, so the replicates are not the
+    near-duplicate ~50 µm strips of the per-streamline column ids.
+
+    Args:
+        tangential_um: Tangential position per cell along the cortex (µm;
+            NaN outside the ribbon).
+        block_um: Block width.
+
+    Returns:
+        Integer block ids (``-1`` for non-finite positions).
+
+    Raises:
+        ValueError: If ``block_um`` is not positive.
+    """
+    if block_um <= 0:
+        raise ValueError("block_um must be positive")
+    values = np.asarray(tangential_um, dtype=np.float64)
+    codes = np.full(len(values), -1, dtype=np.int64)
+    finite = np.isfinite(values)
+    if finite.any():
+        blocks = np.floor(values[finite] / block_um).astype(np.int64)
+        codes[finite] = blocks - blocks.min()
+    return codes
+
+
+@dataclass(frozen=True)
+class DepthAgreement:
+    """Label-free agreement of two sections' cortical depth (item 9 validity).
+
+    Both sections are binned on one grid of the fixed (Xenium) frame; only
+    bins with at least ``min_cells`` cells of each section are compared.
+
+    Attributes:
+        n_bins: Shared bins.
+        ribbon_agreement: Share of shared bins where both sections agree on
+            ribbon membership (more than half of the bin's cells inside the
+            cortical ribbon, or not).
+        n_depth_bins: Shared bins with ``min_cells`` finite depths in each.
+        depth_r: Pearson r of the per-bin mean depth across those bins.
+        bin_um: Bin edge.
+        min_cells: Cells per section a bin needs.
+    """
+
+    n_bins: int
+    ribbon_agreement: float
+    n_depth_bins: int
+    depth_r: float
+    bin_um: float
+    min_cells: int
+
+    def valid(
+        self: DepthAgreement,
+        min_ribbon_agreement: float = DEPTH_MIN_RIBBON_AGREEMENT,
+        min_depth_r: float = DEPTH_MIN_BIN_DEPTH_R,
+    ) -> bool | None:
+        """Return the validity verdict (``None`` when it cannot be computed).
+
+        Args:
+            min_ribbon_agreement: Lowest valid ribbon agreement.
+            min_depth_r: Lowest valid per-bin depth correlation.
+
+        Returns:
+            ``False`` when either value is below its minimum, ``True`` when
+            both reach it, ``None`` when either is not finite.
+        """
+        if not (math.isfinite(self.ribbon_agreement) and math.isfinite(self.depth_r)):
+            return None
+        return bool(
+            self.ribbon_agreement >= min_ribbon_agreement
+            and self.depth_r >= min_depth_r
+        )
+
+
+def depth_input_agreement(
+    xy_a: np.ndarray,
+    inside_a: np.ndarray,
+    depth_a: np.ndarray,
+    xy_b: np.ndarray,
+    inside_b: np.ndarray,
+    depth_b: np.ndarray,
+    *,
+    bin_um: float = DEPTH_AGREEMENT_BIN_UM,
+    min_cells: int = DEPTH_AGREEMENT_MIN_CELLS,
+) -> DepthAgreement:
+    """Return how well two co-registered sections' depth outputs agree.
+
+    Adjacent sections share their anatomy, so in the fixed frame their
+    cortical ribbons and depth fields must overlap; manual boundaries
+    applied in the wrong frame (e.g. native-frame boundaries on aligned
+    coordinates) cut arbitrarily through the tissue and fail both checks.
+    Neither uses a label.
+
+    Args:
+        xy_a: ``(n_a, 2)`` coordinates of the first section (fixed frame).
+        inside_a: Whether each cell lies inside its cortical ribbon.
+        depth_a: Its normalised depth (NaN outside the ribbon).
+        xy_b: ``(n_b, 2)`` coordinates of the second section, same frame.
+        inside_b: Ribbon membership of the second section's cells.
+        depth_b: Their depth.
+        bin_um: Bin edge (200 µm, as the density correlation).
+        min_cells: Cells per section a bin needs.
+
+    Returns:
+        The agreement (NaN values without shared bins).
+
+    Raises:
+        ValueError: If the per-cell arrays do not match the coordinates.
+    """
+    first_xy = np.asarray(xy_a, dtype=np.float64)
+    second_xy = np.asarray(xy_b, dtype=np.float64)
+    arrays = (
+        (np.asarray(inside_a, dtype=bool), np.asarray(depth_a, dtype=np.float64)),
+        (np.asarray(inside_b, dtype=bool), np.asarray(depth_b, dtype=np.float64)),
+    )
+    for points, (inside, depth) in zip((first_xy, second_xy), arrays, strict=True):
+        if len(inside) != len(points) or len(depth) != len(points):
+            raise ValueError("inside and depth need one value per cell")
+    codes = grid_codes(np.vstack([first_xy, second_xy]), bin_um)
+    n_bins = int(codes.max()) + 1 if len(codes) and codes.max() >= 0 else 0
+    if n_bins == 0:
+        return DepthAgreement(0, math.nan, 0, math.nan, float(bin_um), int(min_cells))
+    per_section = []
+    for section_codes, (inside, depth) in zip(
+        (codes[: len(first_xy)], codes[len(first_xy) :]), arrays, strict=True
+    ):
+        used = section_codes >= 0
+        n_cells = np.bincount(section_codes[used], minlength=n_bins)
+        n_inside = np.bincount(
+            section_codes[used],
+            weights=inside[used].astype(np.float64),
+            minlength=n_bins,
+        )
+        finite = used & np.isfinite(depth)
+        n_depth = np.bincount(section_codes[finite], minlength=n_bins)
+        depth_sum = np.bincount(
+            section_codes[finite], weights=depth[finite], minlength=n_bins
+        )
+        with np.errstate(divide="ignore", invalid="ignore"):
+            per_section.append(
+                (n_cells, n_inside / n_cells > 0.5, n_depth, depth_sum / n_depth)
+            )
+    (cells_a, ribbon_a, depths_a, mean_a), (cells_b, ribbon_b, depths_b, mean_b) = (
+        per_section
+    )
+    shared = (cells_a >= min_cells) & (cells_b >= min_cells)
+    n_shared = int(shared.sum())
+    agreement = (
+        float(np.mean(ribbon_a[shared] == ribbon_b[shared])) if n_shared else math.nan
+    )
+    with_depth = shared & (depths_a >= min_cells) & (depths_b >= min_cells)
+    return DepthAgreement(
+        n_bins=n_shared,
+        ribbon_agreement=agreement,
+        n_depth_bins=int(with_depth.sum()),
+        depth_r=_pearson(mean_a[with_depth], mean_b[with_depth]),
+        bin_um=float(bin_um),
+        min_cells=int(min_cells),
+    )
+
+
 # --------------------------------------------------------------------------
 # Platform factors and pseudobulks (items 4, 7)
 
@@ -1323,6 +1503,11 @@ def self_thinning_eligibility(
 
 __all__ = [
     "BOOTSTRAP_SEED",
+    "DEPTH_AGREEMENT_BIN_UM",
+    "DEPTH_AGREEMENT_MIN_CELLS",
+    "DEPTH_BLOCK_UM",
+    "DEPTH_MIN_BIN_DEPTH_R",
+    "DEPTH_MIN_RIBBON_AGREEMENT",
     "DENSITY_BIN_UM",
     "GENE_RATIO_PSEUDOCOUNT",
     "N_BOOTSTRAP",
@@ -1333,6 +1518,7 @@ __all__ = [
     "SELF_THINNING_MIN_COUNTS",
     "TILE_UM",
     "UNALLOCATED",
+    "DepthAgreement",
     "MedianCi",
     "OrderingResult",
     "ReplicationResult",
@@ -1343,6 +1529,7 @@ __all__ = [
     "agreement_by_quantile",
     "aligned_bin_density_correlation",
     "block_bootstrap_shares",
+    "depth_input_agreement",
     "depth_ordering",
     "depth_profile",
     "depth_replication",
@@ -1361,5 +1548,6 @@ __all__ = [
     "share_contrast",
     "soft_level_matrix",
     "spearman_r",
+    "tangential_block_codes",
     "tile_mean_map",
 ]
