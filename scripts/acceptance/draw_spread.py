@@ -26,9 +26,14 @@ Writes to ``--out``: ``draw_spread_rows.csv`` (long: draw x dataset x
 metric), ``draw_spread.csv`` (per dataset and metric: the scored value, the
 min-max over the draws and the draws failing), ``draw_spread_h18.csv``,
 ``draw_spread_bins.csv``, ``draw_spread_bin_spread.csv``,
-``draws/<tag>.cells.parquet`` (cache) and ``draw_spread_run.json`` (inputs,
-code commit, script sha256, the scored-draw check). Inputs are read-only;
-RESOLVE outputs go under ``--out/resolve/<tag>/<pair>/``.
+``draw_spread_would_raise.csv`` (per draw and dataset, every validated
+threshold the local rule would raise at H18's depths: D4's list),
+``draws/<build hash[:16]>_np<workers>/<tag>.cells.parquet`` (the draw cache,
+keyed by the bundle and the worker count, with ``cache.json``; a cache of
+other inputs is refused) and ``draw_spread_run.json`` (inputs, code commit,
+script and module sha256, the scored-draw check, which draws were computed
+or read from the cache). Inputs are read-only; RESOLVE outputs go under
+``--out/resolve/<tag>/<pair>/``.
 """
 
 from __future__ import annotations
@@ -37,6 +42,7 @@ import argparse
 import hashlib
 import json
 import logging
+import os
 import subprocess
 import sys
 from collections.abc import Iterator, Mapping, Sequence
@@ -61,6 +67,7 @@ from merxen.annotation.pipeline import (
     current_store_bundles,
     read_label_table,
 )
+from merxen.annotation.shadow import SEED_PANEL_FAMILY
 from merxen.annotation.store import ReferenceStore
 from merxen.annotation.vocab import load_floor_table
 
@@ -78,6 +85,10 @@ logger = logging.getLogger("draw_spread")
 WHB_RUN = "whb_frontal_supc_clus"
 SEGMENTATION = "proseg_hybrid"
 DECISION_KEYS = ["level", "sim_id"]
+DEFAULT_WORKERS = 8
+COMMIT_ENV = "MERXEN_CODE_COMMIT"
+COMMIT_FILE = "COMMIT"
+CACHE_RECORD = "cache.json"
 
 
 def human_config(fallback_csv: Path | None) -> AnnotationConfig:
@@ -135,28 +146,63 @@ def compare_cells(stored: pd.DataFrame, redrawn: pd.DataFrame) -> dict[str, Any]
     return record
 
 
+class ServedTables:
+    """What ``draw_tables_installed`` served: the patched and the other loads."""
+
+    def __init__(self, bundle_dir: Path) -> None:
+        self.bundle_dir = bundle_dir
+        self.patched = 0
+        self.other: list[str] = []
+
+    def check_served(self, since: int, what: str) -> None:
+        """Raise unless the draw's tables were served since ``since`` loads.
+
+        Args:
+            since: ``patched`` before the RESOLVE call.
+            what: The call, for the message.
+
+        Raises:
+            RuntimeError: When RESOLVE never loaded the bundle whose tables
+                were replaced (it resolved with another bundle, so its rows
+                would silently be the stored seed-0 tables).
+        """
+        if self.patched > since:
+            return
+        others = sorted(set(self.other)) or ["no resolvability tables"]
+        raise RuntimeError(
+            f"{what}: RESOLVE never loaded {self.bundle_dir} (it loaded "
+            f"{', '.join(others)}): the draw's tables were not used; pass the "
+            "bundle the store lookup picks, or resolve with --bundle"
+        )
+
+
 @contextmanager
 def draw_tables_installed(
     bundle_dir: Path, tables: res.ResolvabilityTables
-) -> Iterator[None]:
+) -> Iterator[ServedTables]:
     """Serve ``tables`` wherever RESOLVE loads ``bundle_dir``'s resolvability.
 
     RESOLVE reads a bundle's tables with ``resolvability.load_resolvability``
     (imported when it runs), so replacing the module function for the one
     bundle directory gives RESOLVE the draw's tables and every other input
-    unchanged, as the M4 and M8-prep counterfactuals did.
+    unchanged, as the M4 and M8-prep counterfactuals did. The yielded
+    ``ServedTables`` counts the loads, so a caller can check that RESOLVE
+    used this bundle at all (``check_served``).
     """
     original = res.load_resolvability
     target = bundle_dir.resolve()
+    served = ServedTables(bundle_dir)
 
     def load(directory: Path | str) -> res.ResolvabilityTables | None:
         if Path(directory).resolve() == target:
+            served.patched += 1
             return tables
+        served.other.append(str(directory))
         return original(directory)
 
     res.load_resolvability = load  # type: ignore[assignment]
     try:
-        yield
+        yield served
     finally:
         res.load_resolvability = original  # type: ignore[assignment]
 
@@ -243,43 +289,299 @@ def self_map_workers(summary: Mapping[str, Any]) -> int | None:
     return counts.pop() if len(counts) == 1 else None
 
 
-def _git_commit() -> str | None:
-    try:
-        return subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=Path(__file__).resolve().parent,
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
-    except (OSError, subprocess.CalledProcessError):
-        return None
+def choose_workers(
+    requested: int | None, summary: Mapping[str, Any]
+) -> tuple[int, int | None]:
+    """Return the worker count to map the draws with, and the recorded one.
+
+    The self-map's recorded count (``self_map_workers``) unless one is
+    requested (a warning follows in ``main`` when they differ), else 8.
+
+    Args:
+        requested: ``--n-processors``.
+        summary: The bundle's ``resolvability_summary.json``.
+
+    Returns:
+        ``(workers, recorded)``.
+    """
+    recorded = self_map_workers(summary)
+    return int(requested or recorded or DEFAULT_WORKERS), recorded
 
 
-def _load_draw_cells(
+def require_test_set_revision(
+    summary: Mapping[str, Any], *, allow_pre_d1: bool
+) -> dict[str, Any]:
+    """Return the bundle's test-set exclusion record, or refuse a pre-D1 bundle.
+
+    Args:
+        summary: The bundle's ``resolvability_summary.json``.
+        allow_pre_d1: Accept a bundle without the M8 D1 revision
+            (``--allow-pre-d1``, a diagnostic).
+
+    Returns:
+        ``test_set_exclusion`` (empty for an accepted pre-D1 bundle).
+
+    Raises:
+        ValueError: If the revision is not ``HO_SELF_MAP_TEST_SET_REVISION``
+            and ``allow_pre_d1`` is false.
+    """
+    exclusion = dict(summary.get("test_set_exclusion") or {})
+    if exclusion.get("revision") != ref.HO_SELF_MAP_TEST_SET_REVISION and not (
+        allow_pre_d1
+    ):
+        raise ValueError(
+            f"self-map test-set revision {exclusion.get('revision')} is not "
+            f"{ref.HO_SELF_MAP_TEST_SET_REVISION} (M8 D1); rebuild it or pass "
+            "--allow-pre-d1"
+        )
+    return exclusion
+
+
+def bundle_test_cells(
+    test: res.HeldOutCells,
+    summary: Mapping[str, Any],
+    exclusion: Mapping[str, Any],
+) -> tuple[res.HeldOutCells, dict[str, Any] | None]:
+    """Return the test cells the bundle's self-map simulated.
+
+    With the M8 D1 exclusion recorded, the rule is re-applied
+    (``reference.self_map_test_cells``) and must leave out as many cells as
+    the bundle records; a pre-D1 bundle (``--allow-pre-d1``) simulated all.
+
+    Args:
+        test: ``resolvability.load_test_cells`` of the test-set bundle.
+        summary: The bundle's ``resolvability_summary.json``.
+        exclusion: ``require_test_set_revision`` output.
+
+    Returns:
+        ``(cells, record)``; ``record`` is ``None`` for a pre-D1 bundle.
+
+    Raises:
+        ValueError: If the exclusion does not reproduce the bundle's.
+    """
+    if not exclusion:
+        return test, None
+    reference_id = str((summary.get("test_set_bundle") or {})["reference_id"])
+    kept, recorded = ref.self_map_test_cells(test, reference_id)
+    if recorded is None or recorded["n_excluded"] != exclusion.get("n_excluded"):
+        raise ValueError(
+            "the test-set exclusion does not reproduce the bundle's "
+            f"({exclusion.get('n_excluded')} cells left out; got "
+            f"{None if recorded is None else recorded['n_excluded']})"
+        )
+    return kept, recorded
+
+
+def scored_rows(tables: res.ResolvabilityTables) -> pd.DataFrame:
+    """Return the bundle's stored rows of the scored draw.
+
+    The decision recipe's rows at mapping seed 0 (a bundle may store other
+    mapping seeds of it for the fine-level seed check).
+
+    Args:
+        tables: ``resolvability.load_resolvability`` output.
+
+    Returns:
+        The rows, index reset.
+    """
+    decision = str(tables.summary["decision_recipe"])
+    cells = tables.cells
+    return cells[
+        (cells["recipe"].astype(str) == decision)
+        & (cells["seed"].to_numpy() == ds.MAPPING_SEED)
+    ].reset_index(drop=True)
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def code_identity(script: Path | None = None) -> dict[str, Any]:
+    """Return the code identity of this run.
+
+    In order: the ``MERXEN_CODE_COMMIT`` environment variable, the ``COMMIT``
+    file at the tree's root (next to ``src/``; an exported tree, as the
+    stage A2 runs used), ``git rev-parse HEAD`` of the checkout the script
+    sits in (only when the git top level is the script's own tree, never an
+    enclosing repository). The sha256 of the script and of the imported
+    ``draw_spread`` and ``resolvability`` modules tie the run to its code
+    whichever way it ran.
+
+    Args:
+        script: This script (default: ``__file__``).
+
+    Returns:
+        ``git_commit``, ``git_commit_source``, ``script_sha256`` and
+        ``module_sha256`` (module name to ``{path, sha256}``).
+    """
+    path = Path(script or __file__).resolve()
+    root = path.parents[2] if len(path.parents) > 2 else path.parent
+    commit: str | None = None
+    source: str | None = None
+    if os.environ.get(COMMIT_ENV, "").strip():
+        commit, source = os.environ[COMMIT_ENV].strip(), f"env {COMMIT_ENV}"
+    elif (root / COMMIT_FILE).is_file():
+        commit = (root / COMMIT_FILE).read_text(encoding="utf-8").strip() or None
+        source = str(root / COMMIT_FILE)
+    else:
+        try:
+            top, head = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel", "HEAD"],
+                cwd=path.parent,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.split()
+        except (OSError, ValueError, subprocess.CalledProcessError):
+            top, head = "", ""
+        if top and Path(top).resolve() == root:
+            commit, source = head, "git"
+    modules = {
+        module.__name__: {
+            "path": str(Path(str(module.__file__)).resolve()),
+            "sha256": _sha256(Path(str(module.__file__))),
+        }
+        for module in (ds, res)
+    }
+    return {
+        "git_commit": commit,
+        "git_commit_source": source if commit else None,
+        "script_sha256": _sha256(path),
+        "module_sha256": modules,
+    }
+
+
+def draw_cache(
+    out: Path,
+    *,
+    build_hash: str,
+    workers: int,
+    recipe: Mapping[str, Any],
+    n_test_cells: int,
+    code: Mapping[str, Any],
+) -> Path:
+    """Return (and create) the draw cache of these inputs.
+
+    ``<out>/draws/<build hash[:16]>_np<workers>/`` with ``cache.json``
+    (bundle, worker count, decision recipe, test cells and the module
+    sha256): a re-run into the same ``--out`` reuses only draws of the same
+    bundle, count and code, and refuses a cache written with other inputs.
+
+    Args:
+        out: ``--out``.
+        build_hash: The bundle's build hash.
+        workers: The MapMyCells worker count.
+        recipe: The decision recipe (``to_json``).
+        n_test_cells: The test cells simulated.
+        code: ``code_identity`` output.
+
+    Returns:
+        The cache directory.
+
+    Raises:
+        ValueError: If the directory holds a cache of other inputs.
+    """
+    directory = out / "draws" / f"{str(build_hash)[:16]}_np{int(workers)}"
+    record = {
+        "bundle_build_hash": str(build_hash),
+        "n_processors": int(workers),
+        "recipe": dict(recipe),
+        "n_test_cells": int(n_test_cells),
+        "module_sha256": {
+            name: value["sha256"]
+            for name, value in (code.get("module_sha256") or {}).items()
+        },
+    }
+    path = directory / CACHE_RECORD
+    expected = json.loads(json.dumps(record))
+    if path.is_file():
+        found = json.loads(path.read_text(encoding="utf-8"))
+        if found != expected:
+            differs = sorted(key for key in expected if found.get(key) != expected[key])
+            raise ValueError(
+                f"{directory} caches draws of other inputs ({', '.join(differs)} "
+                "differ); use a new --out"
+            )
+    else:
+        directory.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    return directory
+
+
+def load_draw_cells(
     draw: ds.Draw,
     cache: Path,
     *,
     stored: pd.DataFrame,
     simulate: Any,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, str]:
+    """Return one draw's cells and where they came from.
+
+    Args:
+        draw: The draw.
+        cache: ``draw_cache`` output.
+        stored: The bundle's scored rows (``scored_rows``).
+        simulate: ``draw -> simulate_draw`` rows.
+
+    Returns:
+        ``(cells, source)``: ``stored`` for the scored draw, ``cached`` or
+        ``computed``.
+    """
     if draw.is_scored:
-        return stored
+        return stored, "stored"
     path = cache / f"{draw.tag}.cells.parquet"
     if path.is_file():
-        return res.restore_labels(pd.read_parquet(path))
+        return res.restore_labels(pd.read_parquet(path)), "cached"
     cells = simulate(draw)
     cells.to_parquet(path, index=False)
-    return res.restore_labels(pd.read_parquet(path))
+    return res.restore_labels(pd.read_parquet(path)), "computed"
+
+
+def panel_family_of(summary_path: Path, sample_id: str) -> str | None:
+    """The panel family a dataset's RESOLVE run trusted (``trust.family_id``)."""
+    if not summary_path.is_file():
+        return None
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    trust = ((summary.get("samples") or {}).get(sample_id) or {}).get("trust") or {}
+    family = trust.get("family_id")
+    return None if family is None else str(family)
+
+
+def prep_panel_family(
+    requested: str | None, families: Mapping[str, str | None]
+) -> tuple[str | None, str]:
+    """Return the panel family of PREP's H18 rows and how it was chosen.
+
+    Args:
+        requested: ``--panel-family``.
+        families: Sample id to its RESOLVE trust family.
+
+    Returns:
+        ``(family, basis)``.
+
+    Raises:
+        ValueError: If the datasets trust more than one family.
+    """
+    if requested:
+        return requested, "--panel-family"
+    found = {family for family in families.values() if family is not None}
+    if len(found) > 1:
+        raise ValueError(
+            f"the datasets trust several panel families {sorted(found)}: pass "
+            "--panel-family"
+        )
+    if found:
+        return found.pop(), "the datasets' RESOLVE trust family"
+    return SEED_PANEL_FAMILY, "seed family (no dataset trust record)"
 
 
 def dataset_compositions(
     args: argparse.Namespace,
     depths: Sequence[int],
     min_bin_mass: float,
-) -> dict[str, tuple[str, res.DatasetComposition]]:
-    """Return sample id -> (platform, composition) of the seed-0 RESOLVE runs."""
-    out: dict[str, tuple[str, res.DatasetComposition]] = {}
+) -> dict[str, tuple[str, res.DatasetComposition, str | None]]:
+    """Return sample id -> (platform, composition, panel family) of seed 0."""
+    out: dict[str, tuple[str, res.DatasetComposition, str | None]] = {}
     if args.resolve_root is None or args.runs_root is None:
         return out
     for pair in args.pairs.split(","):
@@ -305,9 +607,17 @@ def dataset_compositions(
             labels, _ = read_label_table(labels_path)
             tidy, _ = read_tidy_parquet(tidy_path)
             leaf = level_frame(tidy, ref.WHB_SUPC)
+            family = panel_family_of(
+                args.resolve_root
+                / pair
+                / SEGMENTATION
+                / f"{pair}_resolve_summary.json",
+                sample_id,
+            )
             out[sample_id] = (
                 platform,
                 ds.dataset_composition(leaf, labels, depths, min_bin_mass=min_bin_mass),
+                family,
             )
     return out
 
@@ -333,6 +643,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-gb", type=float, default=60.0)
     parser.add_argument("--no-check-scored", action="store_true")
     parser.add_argument(
+        "--panel-family",
+        help=(
+            "floor-table family of PREP's H18 rows (default: the datasets' "
+            "RESOLVE trust family, else human_set_a)"
+        ),
+    )
+    parser.add_argument(
         "--allow-pre-d1",
         action="store_true",
         help="accept a bundle without the M8 D1 test-set revision (diagnostic)",
@@ -353,31 +670,19 @@ def main(argv: list[str] | None = None) -> int:
     if tables is None:
         parser.error(f"{bundle_dir} has no resolvability tables")
     summary = tables.summary
-    exclusion = summary.get("test_set_exclusion") or {}
-    if (
-        exclusion.get("revision") != ref.HO_SELF_MAP_TEST_SET_REVISION
-        and not args.allow_pre_d1
-    ):
-        parser.error(
-            f"{bundle_dir}: self-map test-set revision {exclusion.get('revision')} "
-            f"is not {ref.HO_SELF_MAP_TEST_SET_REVISION} (M8 D1); rebuild it or "
-            "pass --allow-pre-d1"
-        )
     test_ref = summary["test_set_bundle"]
     ho_dir = Path(test_ref["path"])
     engine_record = summary.get("engine") or {}
     engine = MmcBundle.from_dir(bundle_dir if engine_record.get("self") else ho_dir)
-    # The bundle's own test cells: the M8 D1 exclusion when the bundle
-    # recorded it (a pre-D1 bundle, --allow-pre-d1, simulated all of them).
-    test = res.load_test_cells(ho_dir)
-    recorded: dict[str, Any] | None = None
-    if exclusion:
-        test, recorded = ref.self_map_test_cells(test, str(test_ref["reference_id"]))
-        if recorded is None or recorded["n_excluded"] != exclusion.get("n_excluded"):
-            parser.error(
-                f"{bundle_dir}: the test-set exclusion does not reproduce the "
-                f"bundle's ({exclusion.get('n_excluded')} cells left out)"
-            )
+    try:
+        exclusion = require_test_set_revision(summary, allow_pre_d1=args.allow_pre_d1)
+        # The bundle's own test cells: the M8 D1 exclusion when the bundle
+        # recorded it (a pre-D1 bundle, --allow-pre-d1, simulated all of them).
+        test, recorded = bundle_test_cells(
+            res.load_test_cells(ho_dir), summary, exclusion
+        )
+    except ValueError as error:
+        parser.error(f"{bundle_dir}: {error}")
     config = human_config(args.gene_id_fallback_csv)
     reference_id = str(manifest.get("reference_id") or WHB_RUN)
     mapping = (manifest.get("recorded_settings") or {}).get("mapping")
@@ -389,8 +694,7 @@ def main(argv: list[str] | None = None) -> int:
     recipe = res.simulation_recipes(config.resolvability, seed=ref.TEST_SET_SEED)[0]
     if recipe.to_json() != summary["recipes"][0]:
         parser.error("the decision recipe differs from the bundle's recorded one")
-    recorded_workers = self_map_workers(summary)
-    workers = args.n_processors or recorded_workers or 8
+    workers, recorded_workers = choose_workers(args.n_processors, summary)
     if recorded_workers is not None and workers != recorded_workers:
         logger.warning(
             "mapping the draws with %d workers, but the self-map mapped with %d: "
@@ -403,13 +707,19 @@ def main(argv: list[str] | None = None) -> int:
     specs = ref.level_specs_for(reference_id, engine, config)
     rules = ref.cells_rules_for(reference_id, config)
     depths = tables.depth_grid
-    decision = str(summary["decision_recipe"])
-    stored = tables.cells[
-        (tables.cells["recipe"].astype(str) == decision)
-        & (tables.cells["seed"].to_numpy() == ds.MAPPING_SEED)
-    ].reset_index(drop=True)
-    cache = args.out / "draws"
-    cache.mkdir(parents=True, exist_ok=True)
+    stored = scored_rows(tables)
+    code = code_identity()
+    try:
+        cache = draw_cache(
+            args.out,
+            build_hash=str(manifest.get("build_hash")),
+            workers=workers,
+            recipe=recipe.to_json(),
+            n_test_cells=len(test.obs),
+            code=code,
+        )
+    except ValueError as error:
+        parser.error(str(error))
     runs: list[dict[str, Any]] = []
     map_fn = ref.mmc_map_function(
         engine,
@@ -434,49 +744,61 @@ def main(argv: list[str] | None = None) -> int:
     compositions = dataset_compositions(
         args, depths, float(config.resolvability.composition_min_bin_cells)
     )
+    try:
+        prep_family, family_basis = prep_panel_family(
+            args.panel_family,
+            {sample: family for sample, (_, _, family) in compositions.items()},
+        )
+    except ValueError as error:
+        parser.error(str(error))
     segmented = n_segmented_table(args.qc_summary) if args.qc_summary else {}
     rows: list[dict[str, Any]] = []
     h18_frames: list[pd.DataFrame] = []
     bin_frames: list[pd.DataFrame] = []
+    raise_frames: list[pd.DataFrame] = []
+    sources: dict[str, str] = {}
     for draw in draws:
-        cells = _load_draw_cells(draw, cache, stored=stored, simulate=simulate)
+        cells, sources[draw.tag] = load_draw_cells(
+            draw, cache, stored=stored, simulate=simulate
+        )
         drawn = ds.tables_with_draw(tables, cells)
-        prep = drawn.decisions()
-        for platform in PLATFORMS:
+        decision_sets = [
+            (f"PREP[{platform} floors]", platform, prep_family, drawn.decisions())
+            for platform in PLATFORMS
+        ] + [
+            (sample_id, platform, family, drawn.decisions(composition=composition))
+            for sample_id, (platform, composition, family) in sorted(
+                compositions.items()
+            )
+        ]
+        for dataset, platform, family, decisions in decision_sets:
             metric_rows, h18, bins = ds.decision_metric_rows(
-                prep,
+                decisions,
                 draw=draw,
-                dataset=f"PREP[{platform} floors]",
+                dataset=dataset,
                 platform=platform,
                 depths=depths,
                 floors=floors,
                 settings=drawn.settings,
+                panel_family=family,
             )
             rows += metric_rows
             h18_frames.append(h18)
             bin_frames.append(bins)
-        for sample_id, (platform, composition) in sorted(compositions.items()):
-            weighted = drawn.decisions(composition=composition)
-            metric_rows, h18, bins = ds.decision_metric_rows(
-                weighted,
-                draw=draw,
-                dataset=sample_id,
-                platform=platform,
-                depths=depths,
-                floors=floors,
-                settings=drawn.settings,
+            raise_frames.append(
+                ds.would_raise_h18_bins(
+                    decisions, drawn.settings, draw=draw, dataset=dataset
+                )
             )
-            rows += metric_rows
-            h18_frames.append(h18)
-            bin_frames.append(bins)
         if args.resolve:
-            with draw_tables_installed(bundle_dir, drawn):
+            with draw_tables_installed(bundle_dir, drawn) as served:
                 for pair in args.pairs.split(","):
                     n_segmented = {
                         f"{pair}_{platform}": segmented[(pair, SEGMENTATION, platform)]
                         for platform in PLATFORMS
                         if (pair, SEGMENTATION, platform) in segmented
                     }
+                    before = served.patched
                     result = annotate_resolve(
                         args.runs_root / pair / SEGMENTATION,
                         config,
@@ -485,8 +807,9 @@ def main(argv: list[str] | None = None) -> int:
                         n_segmented=n_segmented,
                         n_bootstrap=1,
                     )
+                    served.check_served(before, f"draw {draw.tag}, pair {pair}")
                     rows += resolve_rows(draw, result, pair, config)
-        logger.info("draw %s decided", draw.tag)
+        logger.info("draw %s decided (%s)", draw.tag, sources[draw.tag])
     out = args.out
     frame = pd.DataFrame(rows, columns=list(ds.ROW_COLUMNS))
     frame.to_csv(out / "draw_spread_rows.csv", index=False)
@@ -497,6 +820,9 @@ def main(argv: list[str] | None = None) -> int:
     bins_frame = pd.concat(bin_frames, ignore_index=True)
     bins_frame.to_csv(out / "draw_spread_bins.csv", index=False)
     ds.bin_spread(bins_frame).to_csv(out / "draw_spread_bin_spread.csv", index=False)
+    pd.concat(raise_frames, ignore_index=True).to_csv(
+        out / "draw_spread_would_raise.csv", index=False
+    )
     record: Mapping[str, Any] = {
         "bundle": str(bundle_dir),
         "bundle_build_hash": manifest.get("build_hash"),
@@ -504,15 +830,21 @@ def main(argv: list[str] | None = None) -> int:
         "test_set_exclusion": recorded,
         "resolvability_version": summary.get("resolvability_version"),
         "draws": [draw.tag for draw in draws],
+        "draw_sources": sources,
+        "draw_cache": str(cache),
         "scored_draw": draws[0].tag,
         "scored_draw_check": check,
         "mapping_runs": runs,
         "n_processors": workers,
         "self_map_n_processors": recorded_workers,
         "datasets_reweighted": sorted(compositions),
+        "panel_family": {
+            "PREP": prep_family,
+            "PREP_basis": family_basis,
+            **{sample: family for sample, (_, _, family) in compositions.items()},
+        },
         "resolve": bool(args.resolve),
-        "git_commit": _git_commit(),
-        "script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        **code,
     }
     (out / "draw_spread_run.json").write_text(
         json.dumps(record, indent=2, default=str) + "\n", encoding="utf-8"

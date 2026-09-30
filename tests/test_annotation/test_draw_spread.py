@@ -161,6 +161,43 @@ def test_another_draw_is_decided_alone_with_the_unchanged_rules(
         ds.tables_with_draw(tables, tables.cells)
 
 
+def test_each_grid_factor_reaches_the_simulation_alone(
+    stored_tables: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M8 review: the 9 draws must not collapse to 3 (each factor honoured)."""
+    test, _ = stored_tables
+    decision = recipes()[0]
+    original = res.thin_and_contaminate
+    seen: list[tuple[int, int | None]] = []
+
+    def recording(*args: Any, **kwargs: Any) -> Any:
+        seen.append((int(args[2].seed), kwargs.get("efficiency_seed")))
+        return original(*args, **kwargs)
+
+    def simulate(draw: ds.Draw) -> pd.DataFrame:
+        cells = ds.simulate_draw(
+            test,
+            GRID,
+            decision,
+            draw,
+            specs=synthetic_specs(),
+            map_fn=bootstrap_mapper,
+        )
+        return cells.sort_values(["level", "sim_id"]).reset_index(drop=True)
+
+    monkeypatch.setattr(res, "thin_and_contaminate", recording)
+    scored = simulate(ds.Draw(0, 0))
+    efficiency_only = simulate(ds.Draw(0, 1))
+    cells_only = simulate(ds.Draw(1, 0))
+    assert seen == [(0, 0), (0, 1), (1, 0)]
+    for other in (efficiency_only, cells_only):
+        assert len(other) == len(scored)
+        assert not np.array_equal(other["bp"].to_numpy(), scored["bp"].to_numpy())
+    assert not np.array_equal(
+        efficiency_only["bp"].to_numpy(), cells_only["bp"].to_numpy()
+    )
+
+
 def _decisions(rows: list[tuple[str, str, str, int, str, float | None]]) -> Any:
     return pd.DataFrame(
         [
@@ -247,6 +284,51 @@ def test_h18_needs_emission_from_one_step_above_the_floor_to_d_max() -> None:
     assert set(bins["dataset"]) == {"D"} and len(bins) == 7
 
 
+def test_h18_floors_are_the_panel_familys_own() -> None:
+    """M8 review: never the highest floor over the families of the table."""
+    depths = [10, 15, 30, 60, 120]
+    rows = [("trust", "broad", "OPC", d, "emitted", 120.0) for d in depths]
+    rows += [("validated", "broad", "OPC", d, "emitted", None) for d in (60, 120)]
+    decisions = _decisions(rows)
+    floors = pd.DataFrame(
+        {
+            "level": ["broad", "broad"],
+            "floor_class": ["OPC", "OPC"],
+            "platform": ["MERSCOPE", "MERSCOPE"],
+            "panel_family": ["human_set_a", "human_5k"],
+            "min_counts": [10, 30],
+        }
+    )
+
+    def opc(family: str | None) -> pd.Series:
+        frame = ds.h18_human_rows(
+            decisions, depths, "MERSCOPE", floors, dataset="D", panel_family=family
+        )
+        return frame.set_index(["level", "class"]).loc[("broad", "OPC")]
+
+    own = opc("human_5k")
+    assert own["floor"] == 30 and own["floor_family"] == "human_5k"
+    assert own["expected"] == "60,120" and own["passes"]
+    seed = opc("human_set_a")
+    assert seed["floor"] == 10 and seed["expected"] == "15,30,60,120"
+    assert seed["missing"] == "15,30" and not seed["passes"]
+    # A family without rows (and None) falls back to the seed family.
+    for family in (None, "human_unlisted"):
+        fallback = opc(family)
+        assert fallback["floor"] == 10 and fallback["floor_family"] == "human_set_a"
+    assert ds.floor_family(floors.drop(columns=["panel_family"]), "human_5k") is None
+    duplicated = pd.concat([floors, floors.iloc[1:]], ignore_index=True)
+    with pytest.raises(ValueError, match="2 floor rows"):
+        ds.h18_human_rows(
+            decisions,
+            depths,
+            "MERSCOPE",
+            duplicated,
+            dataset="D",
+            panel_family="human_5k",
+        )
+
+
 def test_would_raise_counts_validated_bins_at_the_h18_depths() -> None:
     depths = [10, 15, 30]
     decisions = _decisions(
@@ -270,6 +352,21 @@ def test_would_raise_counts_validated_bins_at_the_h18_depths() -> None:
     raised = {row["metric"]: row for row in rows_out}[ds.METRIC_H18_WOULD_RAISE]
     # Broad from 15 and supercluster from 30 counts only; listed, never judged.
     assert raised["value"] == 2.0 and raised["passes"] is None
+    bins = ds.would_raise_h18_bins(
+        decisions,
+        res.RuleSettings(min_cells_per_bin=50),
+        draw=ds.Draw(1, 0),
+        dataset="D",
+    )
+    assert list(bins.columns) == list(ds.WOULD_RAISE_COLUMNS)
+    assert list(bins[["level", "class", "depth"]].itertuples(index=False)) == [
+        ("broad", "OPC", 15),
+        ("supercluster", "Oligo", 30),
+    ]
+    decisions["would_raise"] = False
+    assert ds.would_raise_h18_bins(
+        decisions, res.RuleSettings(), draw=ds.Draw(0, 0), dataset="D"
+    ).empty
 
 
 def test_spread_table_reports_the_scored_value_and_the_draws_failing() -> None:
@@ -383,10 +480,160 @@ def test_script_serves_the_draw_tables_for_the_one_bundle(
     bundle = tmp_path / "bundle"
     bundle.mkdir()
     marker = SimpleNamespace(name="draw tables")
-    with script.draw_tables_installed(bundle, marker):
-        assert res.load_resolvability(bundle) is marker
+    with script.draw_tables_installed(bundle, marker) as served:
         assert res.load_resolvability(tmp_path / "other") is None
+        # RESOLVE resolved with another bundle: the draw's tables were not
+        # used, so its rows would be the stored seed-0 tables (M8 review).
+        with pytest.raises(RuntimeError, match="never loaded"):
+            served.check_served(0, "draw c0e1, pair P7513")
+        assert res.load_resolvability(bundle) is marker
+        served.check_served(0, "draw c0e1, pair P7513")
+        assert served.patched == 1 and served.other == [str(tmp_path / "other")]
     assert res.load_resolvability(bundle) is None
+
+
+def test_script_chooses_the_self_maps_worker_count(script: ModuleType) -> None:
+    summary = {"mapping_runs": [{"tag": "R1_contam_HO", "n_processors": 8}]}
+    assert script.choose_workers(None, summary) == (8, 8)
+    assert script.choose_workers(6, summary) == (6, 8)
+    assert script.choose_workers(None, {"mapping_runs": [{"tag": "x"}]}) == (
+        8,
+        None,
+    )
+    summary["mapping_runs"][0]["n_processors"] = 4
+    assert script.choose_workers(None, summary) == (4, 4)
+
+
+def test_script_refuses_a_bundle_without_the_d1_revision(script: ModuleType) -> None:
+    from merxen.annotation import reference
+
+    current = {
+        "test_set_exclusion": {
+            "revision": reference.HO_SELF_MAP_TEST_SET_REVISION,
+            "n_excluded": 2,
+        }
+    }
+    assert (
+        script.require_test_set_revision(current, allow_pre_d1=False)
+        == (current["test_set_exclusion"])
+    )
+    with pytest.raises(ValueError, match="M8 D1"):
+        script.require_test_set_revision({}, allow_pre_d1=False)
+    with pytest.raises(ValueError, match="revision 0"):
+        script.require_test_set_revision(
+            {"test_set_exclusion": {"revision": 0}}, allow_pre_d1=False
+        )
+    assert script.require_test_set_revision({}, allow_pre_d1=True) == {}
+
+
+def test_script_leaves_out_the_bundles_test_cells(script: ModuleType) -> None:
+    from merxen.annotation import reference
+
+    from .test_reference import COP, OPC_SUPC, _held_out_cells
+
+    donor, other = reference.TEST_SOURCE_DONOR, reference.TEST_SOURCE_OTHER_REGION
+    test = _held_out_cells(
+        [("a", COP, donor), ("b", COP, other), ("c", OPC_SUPC, other)]
+    )
+    summary = {"test_set_bundle": {"reference_id": reference.HO_REFERENCE_ID}}
+    kept, recorded = script.bundle_test_cells(
+        test, summary, {"revision": 1, "n_excluded": 1}
+    )
+    # The draws simulate the D1 test set, not the 132 other-region COP cells.
+    assert list(kept.obs.index) == ["a", "c"] and recorded["n_excluded"] == 1
+    with pytest.raises(ValueError, match="does not reproduce"):
+        script.bundle_test_cells(test, summary, {"revision": 1, "n_excluded": 3})
+    # A pre-D1 bundle (--allow-pre-d1) simulated every test cell.
+    same, none = script.bundle_test_cells(test, summary, {})
+    assert same is test and none is None
+
+
+def test_script_scores_the_stored_seed_0_rows(
+    script: ModuleType, stored_tables: Any
+) -> None:
+    import dataclasses
+
+    _, tables = stored_tables
+    decision = str(tables.summary["decision_recipe"])
+    seed_1 = tables.cells[tables.cells["recipe"] == decision].assign(seed=1)
+    doubled = dataclasses.replace(
+        tables, cells=pd.concat([tables.cells, seed_1], ignore_index=True)
+    )
+    rows = script.scored_rows(doubled)
+    assert set(rows["recipe"]) == {decision} and set(rows["seed"]) == {0}
+    assert len(rows) == int((tables.cells["recipe"] == decision).sum())
+
+
+def test_script_keys_the_draw_cache_by_bundle_workers_and_code(
+    script: ModuleType, tmp_path: Path, stored_tables: Any
+) -> None:
+    code = script.code_identity()
+    inputs = {
+        "build_hash": "ab" * 32,
+        "workers": 8,
+        "recipe": {"name": "R1_contam_HO", "seed": 0},
+        "n_test_cells": 10,
+        "code": code,
+    }
+    cache = script.draw_cache(tmp_path, **inputs)
+    assert cache == tmp_path / "draws" / f"{'ab' * 8}_np8"
+    assert script.draw_cache(tmp_path, **inputs) == cache
+    # Another worker count gets its own cache; another recipe in the same
+    # cache directory is refused (the aborted 6-worker case of stage A2).
+    assert script.draw_cache(tmp_path, **{**inputs, "workers": 6}).name.endswith("_np6")
+    with pytest.raises(ValueError, match="recipe"):
+        script.draw_cache(tmp_path, **{**inputs, "recipe": {"name": "x"}})
+    calls: list[str] = []
+    stored = script.scored_rows(stored_tables[1])
+
+    def simulate(draw: ds.Draw) -> pd.DataFrame:
+        calls.append(draw.tag)
+        return res.as_stored(stored.copy())
+
+    got, source = script.load_draw_cells(
+        ds.Draw(0, 0), cache, stored=stored, simulate=simulate
+    )
+    assert got is stored and source == "stored"
+    _, first = script.load_draw_cells(
+        ds.Draw(0, 1), cache, stored=stored, simulate=simulate
+    )
+    _, second = script.load_draw_cells(
+        ds.Draw(0, 1), cache, stored=stored, simulate=simulate
+    )
+    assert (first, second) == ("computed", "cached") and calls == ["c0e1"]
+
+
+def test_script_records_its_code_identity_outside_git(
+    script: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    exported = tmp_path / "export" / "scripts" / "acceptance" / "draw_spread.py"
+    exported.parent.mkdir(parents=True)
+    exported.write_bytes((SCRIPTS / "draw_spread.py").read_bytes())
+    monkeypatch.delenv(script.COMMIT_ENV, raising=False)
+    identity = script.code_identity(exported)
+    assert identity["git_commit"] is None
+    (tmp_path / "export" / "COMMIT").write_text("961e2a4\n")
+    identity = script.code_identity(exported)
+    assert identity["git_commit"] == "961e2a4"
+    assert identity["git_commit_source"].endswith("COMMIT")
+    monkeypatch.setenv(script.COMMIT_ENV, "abc1234")
+    assert script.code_identity(exported)["git_commit"] == "abc1234"
+    assert identity["script_sha256"] == script._sha256(SCRIPTS / "draw_spread.py")
+    assert set(identity["module_sha256"]) == {
+        "merxen.annotation.draw_spread",
+        "merxen.annotation.resolvability",
+    }
+
+
+def test_script_prep_family_is_the_datasets_trust_family(script: ModuleType) -> None:
+    assert script.prep_panel_family(None, {"a": "human_set_a", "b": None}) == (
+        "human_set_a",
+        "the datasets' RESOLVE trust family",
+    )
+    assert script.prep_panel_family("human_5k", {"a": "human_set_a"})[0] == ("human_5k")
+    assert script.prep_panel_family(None, {})[0] == "human_set_a"
+    with pytest.raises(ValueError, match="several panel families"):
+        script.prep_panel_family(None, {"a": "human_set_a", "b": "human_5k"})
 
 
 def test_script_resolve_rows_score_h7_and_the_expected_warning(
