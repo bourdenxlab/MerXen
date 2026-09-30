@@ -32,6 +32,7 @@ import csv
 import fcntl
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -297,6 +298,7 @@ workflow {
 FAKE_MERXEN = """#!__PYTHON__
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -988,3 +990,60 @@ def test_main_nf_reports_only_through_hook_h11() -> None:
         "AnnotationReport.pairSpec(settings, params)",
     ):
         assert expected in window, expected
+
+
+# Modules the report sources import from outside REPORT_SOURCES, and why a
+# change there needs no report re-run of its own (the report only reads the
+# outputs these modules shape upstream, or never calls them).
+REPORT_IMPORT_EXEMPTIONS = {
+    "merxen.analysis.clustering_squidpy": (
+        "the map_first hierarchy's clustering (COMPUTE_CPU); the report reads "
+        "merxen.clustering.cross_platform only"
+    ),
+    "merxen.analysis.mapmycells": (
+        "gene-ID fallback tables and reference downloads of PANEL, PREP and MAP; "
+        "the report reads their outputs"
+    ),
+    "merxen.config": "the clustering config of COMPUTE_CPU (map_first hierarchy)",
+    "merxen.control_features": (
+        "the control registry of PANEL and MAP query loading; the report reads "
+        "panel_report.json"
+    ),
+    "merxen.table_keys": "table-key validation of COMPUTE_CPU and FINALIZE",
+}
+# ``from merxen import <name>`` in the sources: only the version, which the
+# report writes to report_run.json (not deterministic, never staged).
+REPORT_PACKAGE_IMPORTS = {"__version__"}
+
+
+def _report_sources() -> list[str]:
+    source = (LIB_DIR / "AnnotationReport.groovy").read_text()
+    match = re.search(r"REPORT_SOURCES = \[(.*?)\]\.asImmutable\(\)", source, re.S)
+    assert match is not None
+    return re.findall(r'"([^"]+)"', match.group(1))
+
+
+def test_report_sources_cover_what_the_report_imports() -> None:
+    """The report fingerprint must see every module that shapes its outputs."""
+    from test_annotation_module import SRC, _sources_outside
+
+    sources = _report_sources()
+    for required in (
+        "merxen/annotation",
+        "merxen/assets/annotation",
+        "merxen/clustering",
+        "merxen/cli/run_annotation_report.py",
+        "merxen/gene_ids.py",
+        "merxen/palette.py",
+        "merxen/plotting.py",
+    ):
+        assert required in sources, required
+    assert _sources_outside(sources) == set(REPORT_IMPORT_EXEMPTIONS)
+    names: set[str] = set()
+    for source in sources:
+        root = SRC / source
+        for path in [root] if root.is_file() else root.rglob("*.py"):
+            text = path.read_text()
+            for match in re.finditer(r"^\s*from merxen import ([\w, ]+)", text, re.M):
+                names |= {name.strip() for name in match.group(1).split(",")}
+    assert names == REPORT_PACKAGE_IMPORTS

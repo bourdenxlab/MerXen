@@ -27,6 +27,7 @@ each pair x segmentation is released with exactly its required bundles
 
 from __future__ import annotations
 
+import ast
 import csv
 import fcntl
 import hashlib
@@ -499,11 +500,67 @@ def test_resolve_rule_sources_exist_and_cover_their_imports() -> None:
         for path in [root] if root.is_file() else root.rglob("*.py"):
             if path.suffix != ".py" or _excluded(path.relative_to(SRC).as_posix()):
                 continue
-            assert not re.search(
-                r"^\s*(?:from|import) merxen\.annotation\.report",
-                path.read_text(),
-                re.M,
-            ), path
+            assert not _imports_a_report_module(path), path
+
+
+def _imports_a_report_module(path: Path, *, in_annotation: bool | None = None) -> bool:
+    """Whether a module imports ``merxen.annotation.report*`` in any spelling.
+
+    ``import merxen.annotation.report_x``, ``from merxen.annotation.report_x
+    import y``, ``from merxen.annotation import report_x`` (also inside
+    parentheses) and the relative ``from .report_x import y`` / ``from .
+    import report_x`` of a module in ``merxen/annotation``.
+    """
+    tree = ast.parse(path.read_text(), filename=str(path))
+    if in_annotation is None:
+        in_annotation = path.parent == SRC / "merxen" / "annotation"
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(
+                alias.name.startswith("merxen.annotation.report")
+                for alias in node.names
+            ):
+                return True
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            names = [alias.name for alias in node.names]
+            if node.level == 0:
+                if module.startswith("merxen.annotation.report"):
+                    return True
+                if module == "merxen.annotation" and any(
+                    name.startswith("report") for name in names
+                ):
+                    return True
+            elif in_annotation and node.level == 1:
+                if module.startswith("report") or (
+                    not module and any(name.startswith("report") for name in names)
+                ):
+                    return True
+    return False
+
+
+def test_the_report_import_check_sees_every_spelling(tmp_path: Path) -> None:
+    """The RESOLVE-exclusion guard catches each way to import a report module."""
+    spellings = [
+        "import merxen.annotation.report_items",
+        "from merxen.annotation.report_items import item_composition",
+        "from merxen.annotation import report_items",
+        "from merxen.annotation import (\n    consensus,\n    report_items,\n)",
+        "from .report_items import item_composition",
+        "from . import report",
+    ]
+    for index, code in enumerate(spellings):
+        path = tmp_path / f"probe_{index}.py"
+        path.write_text(code + "\n")
+        # A relative import names a report module only inside the package.
+        assert _imports_a_report_module(path, in_annotation=True), code
+        if code.startswith("from ."):
+            assert not _imports_a_report_module(path, in_annotation=False), code
+    clean = tmp_path / "clean.py"
+    clean.write_text(
+        "from merxen.annotation import consensus\nimport merxen.gene_ids\n"
+    )
+    assert not _imports_a_report_module(clean, in_annotation=True)
 
 
 def _hierarchy_sources() -> list[str]:
