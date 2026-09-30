@@ -530,11 +530,34 @@ def _resolvability_version(entry: StoreEntry) -> int | None:
 def _self_map_test_set_revision(entry: StoreEntry) -> int | None:
     """The human held-out self-map test-set revision a bundle was built with.
 
-    ``None`` for a bundle whose self-map is not on the human held-out test
-    set (mouse, or no self-map); ``0`` for a human held-out self-map built
-    before the M8 D1 revision, which records no ``test_set_exclusion``.
+    Read from the hashed build params first
+    (``build_hash_payload.builder_params.resolvability.test_set``: its
+    ``reference_id`` and ``self_map_exclusion.revision``), which define the
+    bundle whichever self-map path wrote it (a builder that does not write
+    the ``builder_output`` provenance, e.g. another self-map version, still
+    hashes the revision through the shared test-set params); then from the
+    ``builder_output.resolvability`` record (``test_set_bundle``,
+    ``test_set_exclusion``).
+
+    Returns:
+        ``None`` for a bundle whose self-map is not on the human held-out
+        test set (mouse, or no self-map); ``0`` for a human held-out
+        self-map built before the M8 D1 revision.
     """
     manifest = json.loads((entry.path / BUNDLE_MANIFEST_NAME).read_text("utf-8"))
+    payload = manifest.get("build_hash_payload") or {}
+    params = (
+        ((payload.get("builder_params") or {}).get("resolvability") or {})
+        if isinstance(payload, dict)
+        else {}
+    )
+    hashed = params.get("test_set") if isinstance(params, dict) else None
+    if isinstance(hashed, dict) and hashed.get("reference_id") is not None:
+        if hashed.get("reference_id") != HO_REFERENCE_ID:
+            return None
+        exclusion = hashed.get("self_map_exclusion") or {}
+        value = exclusion.get("revision") if isinstance(exclusion, dict) else None
+        return value if isinstance(value, int) else 0
     record = (manifest.get("builder_output") or {}).get("resolvability") or {}
     if not isinstance(record, dict):
         return None

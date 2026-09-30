@@ -1322,6 +1322,76 @@ def test_locate_bundle_prefers_the_current_human_self_map_test_set(
         locate_bundle(store, "whb_frontal_supc_clus", panel.panel_hash)
 
 
+def test_self_map_test_set_revision_is_read_from_the_hashed_params(
+    tmp_path: Path, fake_mmc: FakeMmc, caplog: pytest.LogCaptureFixture
+) -> None:
+    """M8 review: a D1 bundle whose builder wrote no test_set_exclusion record.
+
+    Another self-map path (M3c's version-7 ensembles) hashes the revision
+    through the shared test-set params but writes none of M8's provenance:
+    the hashed params are authoritative.
+    """
+    from types import SimpleNamespace
+
+    from merxen.annotation.pipeline import _self_map_test_set_revision
+    from merxen.annotation.reference import (
+        HO_REFERENCE_ID,
+        HO_SELF_MAP_TEST_SET_REVISION,
+        ho_self_map_exclusion_params,
+    )
+    from merxen.annotation.resolvability import RESOLVABILITY_VERSION
+
+    panel = _panel(GENE_IDS)
+    common: dict[str, Any] = {
+        "role": "primary",
+        "species": "human",
+        "panel_hash": panel.panel_hash,
+        "n_genes": panel.n_genes,
+        "levels": WHB_LEVELS,
+        "nodes": WHB_NODES,
+    }
+
+    def bundle(build_hash: str, test_set: dict[str, Any] | None) -> Path:
+        path = fake_mmc.bundle("whb_frontal_supc_clus", build_hash=build_hash, **common)
+        manifest = json.loads((path / "bundle.json").read_text())
+        manifest["builder_output"]["resolvability"] = {
+            "resolvability_version": RESOLVABILITY_VERSION,
+            "test_set_bundle": {"reference_id": HO_REFERENCE_ID, "build_hash": "0"},
+        }
+        if test_set is not None:
+            manifest.setdefault("build_hash_payload", {}).setdefault(
+                "builder_params", {}
+            )["resolvability"] = {"enabled": True, "test_set": test_set}
+        (path / "bundle.json").write_text(json.dumps(manifest))
+        return path
+
+    current = bundle(
+        "a" * 64,
+        {
+            "reference_id": HO_REFERENCE_ID,
+            "self_map_exclusion": ho_self_map_exclusion_params(),
+        },
+    )
+    older = bundle("b" * 64, {"reference_id": HO_REFERENCE_ID})
+    unhashed = bundle("c" * 64, None)
+    mouse = bundle("d" * 64, {"reference_id": "wmb_selfmap_testset"})
+
+    def revision(path: Path) -> int | None:
+        return _self_map_test_set_revision(SimpleNamespace(path=path))
+
+    # No builder_output test_set_exclusion on any of them: the current
+    # revision comes from the hashed params alone.
+    assert revision(current) == HO_SELF_MAP_TEST_SET_REVISION
+    assert revision(older) == 0
+    assert revision(unhashed) == 0  # the builder_output record, pre-D1
+    assert revision(mouse) is None
+    store = ReferenceStore(fake_mmc.root)
+    with caplog.at_level(logging.WARNING, logger="merxen.annotation.pipeline"):
+        found = locate_bundle(store, "whb_frontal_supc_clus", panel.panel_hash)
+    assert found.path == current
+    assert not [r for r in caplog.records if "self-map test set" in r.getMessage()]
+
+
 def test_self_map_test_set_revision_applies_only_to_the_human_held_out_set(
     tmp_path: Path, fake_mmc: FakeMmc, caplog: pytest.LogCaptureFixture
 ) -> None:
