@@ -88,7 +88,7 @@ CGE_SUPERCLUSTER: Final = "CGE interneuron"
 # sinks"; Splatter is a vocab sink). Any node whose argmax share of its broad
 # class exceeds its reference share of that class more than SINK_PRONE_RATIO
 # times is listed too (M7 review; within the broad class because the WHB
-# frontal precompute is neuron-enriched: neurons hold 91% of its cells).
+# frontal precompute is neuron-enriched: neurons hold 90% of its cells).
 SINK_PRONE_NODES: Final[tuple[str, ...]] = (COP_SUPERCLUSTER, CGE_SUPERCLUSTER)
 SINK_PRONE_RATIO: Final = 3.0
 SINK_COLUMNS: Final[tuple[str, ...]] = (
