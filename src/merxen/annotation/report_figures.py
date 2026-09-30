@@ -516,7 +516,6 @@ def tile_maps(
     categorical: bool = False,
     title: str = "",
     colour_label: str = "",
-    tile_um: float | None = None,
 ) -> Figure:
     """Draw tile maps (one panel per ``panel`` value)."""
     if frame.empty:
@@ -527,7 +526,7 @@ def tile_maps(
     for index, name in enumerate(names):
         ax = figure.add_subplot(1, len(names), index + 1)
         part = frame[frame[panel].astype(str) == name]
-        size = 4.0 if tile_um is None else max(1.0, 3000.0 / max(1.0, len(part)) ** 0.5)
+        size = _tile_marker_size(part, x, y)
         if categorical:
             for cat_index, category in enumerate(categories):
                 sub = part[part[value].astype(str) == category]
@@ -563,6 +562,19 @@ def tile_maps(
         figure.suptitle(title, fontsize=9)
     figure.tight_layout()
     return figure
+
+
+def _tile_marker_size(part: pd.DataFrame, x: str, y: str) -> float:
+    """Return a square-marker area (pt²) that roughly fills a tile grid panel."""
+    steps = []
+    for column in (x, y):
+        values = np.unique(part[column].to_numpy(dtype=float))
+        if len(values) > 1:
+            steps.append(
+                (values.max() - values.min()) / float(np.min(np.diff(values))) + 1
+            )
+    n_tiles = max(steps) if steps else 1.0
+    return float(max(1.0, (230.0 / n_tiles) ** 2))
 
 
 def forest(
