@@ -1567,45 +1567,111 @@ annotation manifests), MAP (`map_manifest.json`; the mouse region step's
 H5ADs of COMPUTE_CPU / FINALIZE (coordinates and counts), cortical depth,
 the shared tissue mask and the MENDER manifests when present, and the
 bundles the provenance names (read-only). It writes a fresh directory and
-never a results tree unless `--allow-results-output` is given. In map_first
+never into a results tree unless `--allow-results-output` is given: not
+inside an input directory, not at or below the results root of any input
+(also for explicit `--resolve-dir` / `--map-dir` / `--panel-dir`, depth
+tables and MENDER manifests), not inside the store or a recorded bundle, not
+beside the held-out CSV. In map_first
 runs the pipeline builds it as `ANNOTATION_REPORT` (below), which publishes
 to `<pair>/<seg>/annotation_report/annotation_report_out/`.
 
 | Item (§9) | What the report shows | Metrics (`acceptance_metrics.json`) |
 |---|---|---|
-| 1 Annotatability, panel | Confident fraction per level of table cells and of segmented objects, status breakdown, resolvable share, gate values and reasons, trust state and basis, realised flag rates per class × platform, the self-thinning eligibility (≥ 500 cells with ≥ 200 counts) with its truth composition, and the **panel card**: gene-ID resolution by source, unresolved features, controls by type, markers per parent (weak and collapsed parents, nodes MapMyCells patches with ancestor markers), precision-coverage curves per level and depth, D_max and extrapolated share per class, PREP (unweighted) vs RESOLVE (reweighted) emission, thresholds and floors with their source; banners for `provisional`, `broad_only` and `refused` panels and failed or broad-only gates | H7, H8 (MO7), H16, H18 inputs |
-| 2 Composition | Soft (headline), soft ≥ 30 counts, confident-only and argmax composition per level with 95% block-bootstrap CIs (500 µm tiles, 200 replicates, seed 0), whole section vs shared mask, per depth bin, `Mixed/Unknown` by reason, sinks and region-implausible nodes, COP control | H2, H5 (MO4 shares) |
+| 1 Annotatability, panel | Confident fraction per level of table cells and of segmented objects, status breakdown, resolvable share, gate values and reasons, trust state and basis, realised flag rates per class × platform, the self-thinning eligibility (≥ 500 cells with ≥ 200 counts) with its truth composition over the labelled deep cells, the unlabelled share, the argmax composition, the evaluable classes and a reliability verdict, and the **panel card**: gene-ID resolution by source, unresolved features, controls by type, markers per parent (weak and collapsed parents, nodes MapMyCells patches with ancestor markers), precision-coverage curves per level and depth, D_max and extrapolated share per class, PREP (unweighted) vs RESOLVE (reweighted) emission, thresholds and floors with their source; banners for `provisional`, `broad_only` and `refused` panels and failed or broad-only gates | H7, H8 (MO7), H16, H18 inputs |
+| 2 Composition | Soft (headline), soft ≥ 30 counts, confident-only and argmax composition per level with 95% block-bootstrap CIs (500 µm tiles, 200 replicates, seed 0), whole section vs shared mask, per depth bin, `Mixed/Unknown` by reason; the COP-derived part of every OPC bar (`cop_derived_share`, hatched); the sinks table (vocab sinks, region-implausible nodes, COP and CGE, and nodes whose argmax share of their broad class exceeds the reference share of that class more than 3×, with argmax, soft-mass and confident shares); leaf-level rows of a sample whose gate is not full marked `withheld_for_comparison` and drawn hatched; COP control | H2, H5 (with `cop_derived_soft_opc_share`, `cop_derived_argmax_opc_share`; MO4 shares) |
 | 3 Confidence vs counts | 2D histograms of raw bp and `avg_correlation` vs counts per platform and level, with the raw thresholds | — |
-| 4 Reference expectation | Observed fraction-positive and mean log2(CPM+1) per confident leaf label on its most specific panel genes, beside `profiles.parquet`; pseudobulk-centroid r and a correlation re-mapping to the nearest reference centroid | report-only |
+| 4 Reference expectation | Observed fraction-positive and mean log2(CPM+1) per confident leaf label on its most specific panel genes and the §5.8 canonical markers on the panel, beside `profiles.parquet`; pseudobulk-centroid r and a correlation re-mapping to the nearest reference centroid. A sample whose gate is not full (or without a confident leaf label) is shown on its confident broad labels, with reference profiles aggregated from the supercluster rows (reference-cell-weighted) | report-only |
 | 5 Negative-marker purity | `contamination_score` quantiles and `flag_contaminated` rate per confident broad label and platform | report-only |
-| 6 Method agreement | WHB vs SEA-AD at 7 classes and lineage by count quartile, consensus tier fractions and a tier map, the below-60 rule's coverage cost (cells < 60 counts whose broad or lineage status is `method_disagree` / `single_method`) | H3 |
-| 7 Cross-platform (human) | Soft broad and supercluster JSD (whole section, shared mask, joint block bootstrap), set c or the intersection run beside set a, per-type density correlation in 200 µm aligned bins, `<pair>_platform_gene_factors.csv` (median-centred per-gene log2 Xenium / MERSCOPE within confident labels) and per-label pseudobulk r; every statement follows RESOLVE's cross-platform scope, withheld ones are recorded as `withheld` | H1 |
+| 6 Method agreement | WHB vs SEA-AD at 7 classes and lineage by count quartile, consensus tier fractions and a tier map, the below-60 rule's coverage cost (cumulative: cells < 60 counts whose first vote failure, `method_disagree` / `single_method`, is at the level or at lineage; the per-level count beside it) | H3 |
+| 7 Cross-platform (human) | Soft broad and supercluster JSD (whole section, shared mask, joint block bootstrap), set c beside set a (soft, soft ≥ 30, argmax and supercluster), per-type density correlation in 200 µm aligned bins, `<pair>_platform_gene_factors.csv` (median-centred per-gene log2 Xenium / MERSCOPE within confident labels) and per-label pseudobulk r; every statement follows RESOLVE's cross-platform scope, withheld ones are recorded as `withheld`. A `per_platform` pair (§8.5) takes all of them from the intersection run (`mmc_whb_xpanel`: H1 with its recomputation and figure; density, factors and pseudobulk r on its argmax broad labels); its own-panel comparisons are `withheld` (`own_panel_not_comparable`) | H1 |
 | 8 Held-out genes | The held-out-gene enrichment rows of the pair (`--heldout-csv`: `heldout_genes.py` or `resolve_criteria.py` output); with several label sets, the non-circular H4 headline set `m4_resolve_heldout_whb_only` is shown (else an argmax set), all sets in the table CSV; mouse: the spill-over held-out test and astrocyte FPR | H4, MO5 |
-| 9 Cortical depth (human) | Median depth per confident supercluster (NP and CT/6b merged) and broad class with 95% CIs; the ordering Upper-layer IT < Deep-layer IT < Deep-layer NP/CT/6b with non-overlapping CIs per platform and its replication across platforms; oligodendrocytes WM > GM; astrocyte / neuron / oligodendrocyte depth gradients | H12 |
-| 10 Mouse regions | Inferred vs explicit regions, the tile map, the drop list, relabelled cells and targets, subclass × region vs MERFISH shares, class composition vs the AP-matched window, Astro-Epen with and without low-count cells, F1 rate, spill-over prevalence and its map, gate G1–G5; the M6b fields (AP estimate and bin, rule variant) are read when present and reported `pending_m6b` otherwise | MO2–MO7, MO10 / MO11 placeholders |
+| 9 Cortical depth (human) | First the depth input: QC warnings, coordinate source and ribbon share per platform, and a label-free cross-platform check (below); then the median depth per confident supercluster (NP and CT/6b merged) and broad class with 95% CIs over 500 µm tangential blocks (square tiles as sensitivity); the ordering Upper-layer IT < Deep-layer IT < Deep-layer NP/CT/6b with non-overlapping CIs per platform and its replication across platforms; oligodendrocytes WM > GM; astrocyte / neuron / oligodendrocyte depth gradients (shares of confident broad cells) | H12 |
+| 10 Mouse regions | Inferred vs explicit regions, the tile map, the drop list, relabelled cells and targets, subclass × region vs MERFISH shares, class composition vs the AP-matched window (shares of the allocated soft mass, as G4, with the unallocated share beside them), Astro-Epen with and without low-count cells, F1 rate, spill-over prevalence and its map, gate G1–G5; the M6b fields (AP estimate and bin, rule variant) are read when present and reported `pending_m6b` otherwise; a section with an AP estimate below 6.0 mm gets the MO11 banner ("MO11 not yet passed") | MO2–MO7, MO10 / MO11 placeholders |
 | 11 AD and OOD (human) | Depth-matched real / in-silico `avg_correlation` ratio per class (in-silico = the primary bundle's correct resolvability calls), `flag_ood` rate, SEA-AD disease-supertype share per class (population level, `calibrated = false`) | report-only |
 | 12 Provenance | References, bundle and lookup hashes, label sha256, ctm version and commit, seeds, wall times, panel family, trust state, calibration kind, MENDER digest; the H13 id-set check (label `in_table` ids = clustered H5AD ids) | H13, H14 inputs |
 
 **Metrics, not verdicts.** `acceptance_metrics.json` lists every measured
-value as a record (criterion id, name, sample, region, level, kind, value,
-95% CI, n, definition, source, status) with a coverage table of the §14
-criteria: which come from the report and which from the acceptance scripts
-(H6, H9, H10, H15; MO1's own definition, MO10). Pass / fail against the
-pre-registered thresholds is the acceptance programme's (M8, M9). The file,
-the HTML, the CSVs and the figures are byte-identical for identical inputs
-(no timestamps; seeded bootstraps); wall time and versions go to
-`report_run.json`.
+value as a record with a coverage table of the §14 criteria: which come from
+the report and which from the acceptance scripts (H6, H9, H10, H15; MO1's own
+definition, MO10). Pass / fail against the pre-registered thresholds is the
+acceptance programme's (M8, M9). The file, the HTML, the CSVs and the figures
+are byte-identical for identical inputs (no timestamps; seeded bootstraps);
+wall time and versions go to `report_run.json`.
+
+**The `acceptance_metrics.json` contract** (`report_model.AcceptanceMetrics`,
+`REPORT_SCHEMA_VERSION` 1; M8 and M9 read it). Top-level keys:
+
+| Key | Type | Content |
+|---|---|---|
+| `schema_version` | int | `REPORT_SCHEMA_VERSION` |
+| `kind` | str | always `merxen_annotation_report_metrics` |
+| `species` | str | `human` or `mouse` |
+| `pair_id` | str | pair (mouse: the section id RESOLVE used) |
+| `segmentation` | str | segmentation |
+| `metrics` | list of records | every measured metric (below), sorted by criterion, name, sample, region, level, kind, group |
+| `criteria` | list | one row per §14 criterion of the species: `criterion`, `source` (`report`, `report+script` or `script:<name>`), `description`, `n_records` |
+| `datasets` | object | per sample id: platform, counts, trust state and basis, panel family, gate level and warning, banner flag, degraded mode, coordinate source, whether cortical depth was read |
+| `items` | object | per item slug: `number`, `title`, `status` (`ok`, `partial`, `not_available`, `not_applicable`, `failed`), `notes`, `figures`, `tables` |
+| `provenance` | object | the provenance footer (item 12) |
+
+Every record of `metrics` (`report_model.MetricRecord`) has these fields:
+
+| Field | Type | Content |
+|---|---|---|
+| `criterion` | str | §14 id (`H1`, `MO6`) or `report` for a report-only metric |
+| `name` | str | stable snake-case metric name |
+| `scope` | str | `dataset` (one sample) or `pair` |
+| `sample_id` | str or null | the sample (`null` for pair metrics) |
+| `platform` | str or null | its platform |
+| `region` | str or null | `whole_section` / `shared_mask` where relevant |
+| `level` | str or null | annotation level where relevant |
+| `kind` | str or null | composition kind or variant (`set_a:soft`, `intersection_run:soft`, `square_tile_500um`, `outside_ribbon_proxy`, ...) |
+| `group` | str or null | a class, supercluster or stratum |
+| `value` | number, bool, str or null | the value (`null` unless `status` is `measured`) |
+| `ci_low`, `ci_high` | number or null | 95% CI |
+| `n` | int or null | cells (or tiles, bins) behind the value |
+| `definition` | str | how it is computed |
+| `source` | str | where it comes from (`resolve_summary`, `label_table`, `report_metrics.<function>`, `bundle`, ...) |
+| `status` | str | `measured`, `not_available` (the input is missing or invalid; the note says why, e.g. `depth_input_invalid`) or `withheld` (the cross-platform scope forbids the statement, e.g. `own_panel_not_comparable`) |
+| `note` | str | anything a reader must know |
+
+Adding, renaming or removing a top-level key or a record field bumps
+`REPORT_SCHEMA_VERSION`; `tests/test_annotation/test_report_model.py` pins
+both field sets against this table.
 
 **Definitions chosen here (the plan leaves them open).**
 
-- *H12 CIs:* the §5.5 block bootstrap over 500 µm tiles is primary. Because
-  a square tile holds a narrow depth range, resampling tiles re-weights
-  depth and widens the interval; the ordering is also reported with CIs
-  from resampling the depth output's cortical columns (`column_id`,
-  `kind = column_bootstrap`), as a sensitivity. For a dataset whose gate is
-  not `full` (no supercluster labels) the ordering is `not_available` under
-  both CI methods, and so is the pair's replication (P1212: the MERSCOPE
-  section is broad-only).
+- *H12 depth input (pre-registration doc §17):* before any H12 value the
+  report checks the depth input without labels. In the 200 µm bins of the
+  Xenium frame holding ≥ 5 table cells of each section, the two sections must
+  agree on ribbon membership (more than half of a bin's cells inside the
+  cortical ribbon) in ≥ 80% of the bins, and their per-bin mean depths must
+  correlate with r ≥ 0.8. When they do not, the platform whose depth was
+  computed on transformed coordinates (`coordinate_source` naming an
+  `_aligned` shape; both platforms when neither or both did) gets every H12
+  metric, and the pair its replication, as `not_available` with the reason
+  `depth_input_invalid`, an error banner, and the item status `partial`; the
+  tables keep the computed values with `depth_input_valid = false`, and the
+  figures label that platform "depth input invalid". A single platform, or
+  coordinates not in one frame, is `not checked` and stays measured.
+  Calibration on the published outputs: the native-frame (reseg) MERSCOPE
+  depth of the same cells gives .966 / r .987 (P7513) and .938 / r .978
+  (P1212); the published proseg_hybrid MERSCOPE depth, computed on the
+  aligned coordinates with native-frame boundaries, .530 / r .144 and
+  .473 / r −.114.
+- *H12 CIs (pre-registration doc §17):* the bootstrap unit of the medians is
+  a 500 µm tangential block, `floor(tangential_position_um / 500)`: a full
+  pia-to-WM strip, so every replicate keeps the depth slices in their
+  anatomical proportion, and about ten neighbouring streamlines, so the
+  blocks are not near-duplicates. The square 500 µm tile bootstrap (§5.5's
+  composition unit) is reported as a conservative sensitivity
+  (`kind = square_tile_500um`): a tile holds about a fifth of the cortical
+  depth, so resampling tiles re-mixes depth slices and widens the interval.
+  `depth_ci_method` records the unit. Without tangential positions the tiles
+  are the (only) method. For a dataset whose gate is not `full` (no
+  supercluster labels) the ordering is `not_available` under both methods,
+  and so is the pair's replication (P1212: the MERSCOPE section is
+  broad-only).
 - *H12 WM > GM:* with a `white_matter` label in the depth output (the brain
   outline annotated) the share is compared between `white_matter` and
   `grey_matter` cells; without it (the current outputs) cells outside the
@@ -1613,9 +1679,19 @@ the HTML, the CSVs and the figures are byte-identical for identical inputs
 - *Replication (H12, "on both platforms"):* the ordering passes on both
   platforms, reported with the Spearman correlation of the supercluster
   median depths between the platforms.
-- *Self-thinning (item 1):* eligibility and truth composition only; a run
-  whose deep cells are > 50% one class is marked unreliable. The thinned
-  re-map itself is v1.1 (§5.4).
+- *Self-thinning (item 1):* eligibility and truth composition only. The
+  truth is the full-depth confident label, so the composition is over the
+  labelled deep cells, with the unlabelled share and the WHB argmax
+  composition beside it; classes with ≥ 50 labelled deep cells are
+  evaluable. The run is unreliable when more than 30% of the deep cells
+  have no confident label or one class holds ≥ 80% of the labelled ones
+  (P1212_MERSCOPE: 48% unlabelled, 83% of the labelled Fibroblasts). The
+  thinned re-map itself is v1.1 (§5.4).
+- *Sink-prone nodes (item 2):* COP and CGE (the plan's named sinks), and any
+  node whose argmax share of its broad class exceeds its reference share of
+  that class more than 3×. The comparison is within the broad class because
+  the WHB frontal precompute is neuron-enriched (neurons hold 90% of its
+  cells), so a share of all reference cells flags every glial node.
 - *Pseudobulk re-mapping (item 4):* nearest reference centroid by the
   correlation of log2(CPM+1) profiles, not a MapMyCells run.
 
@@ -1656,8 +1732,11 @@ CPUs and 32 GB (`conf/annotation.config`); on the-dwight at most
 an item that raises is recorded in the report as `failed`, and the task
 still publishes. The task hash carries a fingerprint of the report code
 (`AnnotationReport.REPORT_SOURCES`: `merxen/annotation`, its packaged
-tables, `merxen/clustering`, the command), so a report change re-runs the
-report under `-resume`; no other task stages its output.
+tables, `merxen/clustering`, the command, and `merxen/gene_ids.py`,
+`merxen/palette.py` and `merxen/plotting.py`, which shape its outputs from
+outside them; `test_annotation_report_module.py` pins what else they import),
+so a report change re-runs the report under `-resume`; no other task stages
+its output.
 
 **Failure semantics.** A branch whose depth, MENDER or report task fails is
 dropped under `errorStrategy "ignore"`, like its MENDER; the end-of-run
