@@ -45,6 +45,7 @@ MIRROR_X_UM = 5000.0
 OFFSET_Y_UM = 3000.0
 PIA_Y_UM = 0.0
 WM_Y_UM = 400.0
+EDGE_MARGIN_UM = 20.0
 
 
 def _store(shapes: list[str], attrs: dict[str, Any] | None = None) -> SimpleNamespace:
@@ -471,6 +472,80 @@ def test_merscope_write_back_keeps_the_native_region_and_records_the_frame(
     assert ALIGNED in store.shapes
 
 
+def test_frame_check_flags_a_wrong_boundary_frame_declaration(
+    tmp_path: Path,
+) -> None:
+    """Native boundaries declared 'aligned' on a store holding both frames:
+    the cells come from the mirrored element, the tissue edge lies millimetres
+    from them and the ribbon is empty, and QC warns. The correct declaration
+    passes."""
+    zarr_path = _write_store(tmp_path, platform="MERSCOPE", attrs=MOVING_MANIFEST)
+    boundaries = _write_boundaries(
+        tmp_path / "native.geojson", mirrored=False, with_edge=True
+    )
+
+    run_cortical_depth(_config(tmp_path / "right", boundaries, zarr_path=zarr_path))
+    run_cortical_depth(
+        _config(
+            tmp_path / "wrong",
+            boundaries,
+            zarr_path=zarr_path,
+            boundary_frame="aligned",
+        )
+    )
+
+    right_cells, right = _read_outputs(tmp_path / "right")
+    _, wrong = _read_outputs(tmp_path / "wrong")
+    right_table = right["tables"]["proseg_hybrid"]
+    wrong_table = wrong["tables"]["proseg_hybrid"]
+    assert bool(right_cells["inside_cortical_ribbon"].all())
+    # Nearest cells are 60-100 um from the outline (cell rows 40 um inside the
+    # pia / WM lines, columns 100 um inside its sides).
+    assert 50.0 <= right_table["edge_to_nearest_cell_median_um"] <= 110.0
+    # Cells every 100 um in x fill about half of the 50-um bin columns of the
+    # ribbon (0.39 with the padded lattice origin); the mirrored cells none.
+    assert 0.3 <= right_table["ribbon_bin_occupancy"] <= 0.5
+    assert right_table["ribbon_bin_occupancy_by_piece"] == {
+        "piece_1": right_table["ribbon_bin_occupancy"]
+    }
+    assert right_table["frame_mismatch_suspected"] is False
+    assert not any(w.startswith("frame_mismatch") for w in right["warnings"])
+
+    assert wrong_table["coordinate_source"] == f"shapes:{ALIGNED}"
+    assert wrong_table["edge_to_nearest_cell_median_um"] > 3000.0
+    assert wrong_table["ribbon_bin_occupancy"] == 0.0
+    assert wrong_table["frame_mismatch_suspected"] is True
+    assert "frame_mismatch_suspected:proseg_hybrid" in wrong["warnings"]
+
+
+def test_frame_check_without_a_tissue_edge_records_occupancy_only() -> None:
+    """Without an edge line there is no edge distance and no warning; ribbon
+    occupancy is still measured, and cells without coordinates are ignored."""
+    ribbon_grid = SimpleNamespace(
+        spec=SimpleNamespace(
+            x_min=0.0, y_min=0.0, width=10, height=10, step=10.0, resolution_um=10.0
+        ),
+        mask=np.ones((10, 10), dtype=bool),
+        tissue_piece_id="piece_1",
+    )
+    ribbon_grid.spec.points_to_indices = lambda points: (
+        np.floor(np.asarray(points)[:, 1] / 10.0).astype(int),
+        np.floor(np.asarray(points)[:, 0] / 10.0).astype(int),
+    )
+    cells = np.array([[10.0, 10.0], [60.0, 60.0], [np.nan, 5.0]])
+
+    metrics = frames.frame_consistency_metrics(
+        cells,
+        edge_line=None,
+        grids=[ribbon_grid],  # type: ignore[list-item]
+    )
+
+    assert metrics["edge_to_nearest_cell_median_um"] is None
+    assert metrics["frame_mismatch_suspected"] is False
+    # 100 x 100 um ribbon = 4 bins of 50 um; the two cells fill 2.
+    assert metrics["ribbon_bin_occupancy"] == pytest.approx(0.5)
+
+
 def _native_cells() -> dict[str, tuple[float, float]]:
     xs = np.arange(100.0, 1000.0, 100.0)
     ys = np.arange(40.0, WM_Y_UM, 40.0)
@@ -527,7 +602,7 @@ def _write_store(
     return zarr_path
 
 
-def _write_boundaries(path: Path, *, mirrored: bool) -> Path:
+def _write_boundaries(path: Path, *, mirrored: bool, with_edge: bool = False) -> Path:
     def line(points: list[tuple[float, float]]) -> list[list[float]]:
         return [list(_mirror(*p) if mirrored else p) for p in points]
 
@@ -549,6 +624,28 @@ def _write_boundaries(path: Path, *, mirrored: bool) -> Path:
             },
         },
     ]
+    if with_edge:
+        # Closed tissue outline 20 um outside the pia / WM rows of cells; the
+        # pia and WM endpoints lie on its sides.
+        top, bottom = PIA_Y_UM - EDGE_MARGIN_UM, WM_Y_UM + EDGE_MARGIN_UM
+        features.append(
+            {
+                "type": "Feature",
+                "properties": {"role": "tissue_edge"},
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": line(
+                        [
+                            (0.0, top),
+                            (1000.0, top),
+                            (1000.0, bottom),
+                            (0.0, bottom),
+                            (0.0, top),
+                        ]
+                    ),
+                },
+            }
+        )
     path.write_text(json.dumps({"type": "FeatureCollection", "features": features}))
     return path
 
