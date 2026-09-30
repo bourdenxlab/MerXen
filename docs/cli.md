@@ -763,7 +763,10 @@ pair × segmentation (mouse: one section) and writes into `--out`:
 
 `--out` must be a new or empty directory (`--overwrite` replaces files) and
 may not lie inside the results tree or an input directory unless
-`--allow-results-output` is given.
+`--allow-results-output` is given. In map_first pipeline runs the
+`ANNOTATION_REPORT` process runs this command on its staged inputs and
+publishes `<pair>/<seg>/annotation_report/annotation_report_out/` (see
+[the annotation stage](stages/annotation.md#annotation_report-in-the-pipeline-m7)).
 
 | Option | Meaning |
 |---|---|
@@ -771,6 +774,7 @@ may not lie inside the results tree or an input directory unless
 | `--results-root DIR` | Find the outputs in a results tree (`<root>/<pair>/<seg>/annotation_{resolve,map,panel}`, `clustering_squidpy_mapfirst` before `clustering_squidpy`, `<root>/<pair>/<plat>/compute_cortical_depth[_mapfirst]`, `<root>/<pair>/alignment/align_out`, `mender[_mapfirst]`). |
 | `--resolve-dir`, `--map-dir`, `--panel-dir` | Explicit RESOLVE / MAP / PANEL outputs (without `--results-root`, `--resolve-dir` is required). |
 | `--clustered-h5ad SID=PATH`, `--cortical-depth SID=PATH`, `--mender-manifest SID=PATH`, `--alignment-dir DIR` | Explicit inputs (repeatable), overriding the tree lookup. |
+| `--cortical-depth-dir SID=DIR` | A `compute_cortical_depth_out` directory per sample (repeatable): the report reads `DIR/<segmentation>/*_cells_with_cortical_depth.parquet` when the depth run covered the segmentation (`--cortical-depth` wins). The pipeline's `ANNOTATION_REPORT` passes its staged depth outputs this way. |
 | `--no-cortical-depth`, `--no-alignment`, `--no-mender` | Build without them (item 9 is then `not_available`; no shared-mask statistics). |
 | `--heldout-csv PATH` | A held-out-gene enrichment CSV (`scripts/acceptance/heldout_genes.py`) for item 8 / H4. |
 | `--store DIR` | Reference store, for bundles whose recorded path moved. |

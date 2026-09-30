@@ -475,7 +475,8 @@ The annotation QC report (plan §9; M7):
   (`ReportResult`); `check_output_dir`; `ITEM_BUILDERS`.
 - Inputs (`report_inputs`): `discover_sources` (the published layout),
   `ReportSources`, `load_report_inputs` (`ReportInputs`, `SampleData`),
-  `read_clustered_table`, `load_heldout`.
+  `read_clustered_table`, `load_heldout`, `depth_cells_file` (a
+  segmentation's cell table in a `compute_cortical_depth_out`).
 - Metrics (`report_metrics`, numpy / pandas only): `soft_level_matrix`,
   `one_hot_matrix`, `block_bootstrap_shares` (`ShareResult`),
   `jensen_shannon_distance`, `aligned_bin_density_correlation`,

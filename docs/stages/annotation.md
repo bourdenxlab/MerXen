@@ -1567,9 +1567,9 @@ annotation manifests), MAP (`map_manifest.json`; the mouse region step's
 H5ADs of COMPUTE_CPU / FINALIZE (coordinates and counts), cortical depth,
 the shared tissue mask and the MENDER manifests when present, and the
 bundles the provenance names (read-only). It writes a fresh directory and
-never a results tree unless `--allow-results-output` is given (the
-`ANNOTATION_REPORT` pipeline process, which publishes to
-`<pair>/<seg>/annotation_report/`, is the next step of M7).
+never a results tree unless `--allow-results-output` is given. In map_first
+runs the pipeline builds it as `ANNOTATION_REPORT` (below), which publishes
+to `<pair>/<seg>/annotation_report/annotation_report_out/`.
 
 | Item (§9) | What the report shows | Metrics (`acceptance_metrics.json`) |
 |---|---|---|
@@ -1580,7 +1580,7 @@ never a results tree unless `--allow-results-output` is given (the
 | 5 Negative-marker purity | `contamination_score` quantiles and `flag_contaminated` rate per confident broad label and platform | report-only |
 | 6 Method agreement | WHB vs SEA-AD at 7 classes and lineage by count quartile, consensus tier fractions and a tier map, the below-60 rule's coverage cost (cells < 60 counts whose broad or lineage status is `method_disagree` / `single_method`) | H3 |
 | 7 Cross-platform (human) | Soft broad and supercluster JSD (whole section, shared mask, joint block bootstrap), set c or the intersection run beside set a, per-type density correlation in 200 µm aligned bins, `<pair>_platform_gene_factors.csv` (median-centred per-gene log2 Xenium / MERSCOPE within confident labels) and per-label pseudobulk r; every statement follows RESOLVE's cross-platform scope, withheld ones are recorded as `withheld` | H1 |
-| 8 Held-out genes | The `heldout_genes.py` enrichment rows of the pair (`--heldout-csv`); mouse: the spill-over held-out test and astrocyte FPR | H4, MO5 |
+| 8 Held-out genes | The held-out-gene enrichment rows of the pair (`--heldout-csv`: `heldout_genes.py` or `resolve_criteria.py` output); with several label sets, the non-circular H4 headline set `m4_resolve_heldout_whb_only` is shown (else an argmax set), all sets in the table CSV; mouse: the spill-over held-out test and astrocyte FPR | H4, MO5 |
 | 9 Cortical depth (human) | Median depth per confident supercluster (NP and CT/6b merged) and broad class with 95% CIs; the ordering Upper-layer IT < Deep-layer IT < Deep-layer NP/CT/6b with non-overlapping CIs per platform and its replication across platforms; oligodendrocytes WM > GM; astrocyte / neuron / oligodendrocyte depth gradients | H12 |
 | 10 Mouse regions | Inferred vs explicit regions, the tile map, the drop list, relabelled cells and targets, subclass × region vs MERFISH shares, class composition vs the AP-matched window, Astro-Epen with and without low-count cells, F1 rate, spill-over prevalence and its map, gate G1–G5; the M6b fields (AP estimate and bin, rule variant) are read when present and reported `pending_m6b` otherwise | MO2–MO7, MO10 / MO11 placeholders |
 | 11 AD and OOD (human) | Depth-matched real / in-silico `avg_correlation` ratio per class (in-silico = the primary bundle's correct resolvability calls), `flag_ood` rate, SEA-AD disease-supertype share per class (population level, `calibrated = false`) | report-only |
@@ -1603,7 +1603,9 @@ the HTML, the CSVs and the figures are byte-identical for identical inputs
   depth and widens the interval; the ordering is also reported with CIs
   from resampling the depth output's cortical columns (`column_id`,
   `kind = column_bootstrap`), as a sensitivity. For a dataset whose gate is
-  not `full` (no supercluster labels) the ordering is `not_available`.
+  not `full` (no supercluster labels) the ordering is `not_available` under
+  both CI methods, and so is the pair's replication (P1212: the MERSCOPE
+  section is broad-only).
 - *H12 WM > GM:* with a `white_matter` label in the depth output (the brain
   outline annotated) the share is compared between `white_matter` and
   `grey_matter` cells; without it (the current outputs) cells outside the
@@ -1626,6 +1628,44 @@ merxen annotation-report --pair P7513 --segmentation proseg_hybrid \
 
 On the published P7513 and P1212 proseg_hybrid outputs a report takes
 about 40 s and 4 GB (one process).
+
+### `ANNOTATION_REPORT` in the pipeline (M7)
+
+`ANNOTATION_REPORT` (`workflows/modules/annotation.nf`) runs `merxen
+annotation-report` once per map_first pair × segmentation (mouse: section ×
+segmentation). `ANNOTATION_REPORTING`
+(`workflows/subworkflows/annotation_report.nf`), called at `main.nf` hook
+H11 in map_first runs with `annotation_report_enabled` (default `true`),
+releases a branch once these have finished:
+
+| Waits for | When | Staged as |
+|---|---|---|
+| RESOLVE, MAP, PANEL (`CLUSTERING_MAP_FIRST.labels`) | always | `report_inputs/annotation_{resolve,map,panel}_out` |
+| FINALIZE (the clustered H5ADs) | always | `report_inputs/clustering_squidpy_out` |
+| `COMPUTE_CORTICAL_DEPTH` of every active platform of the pair | cortical depth runs after clustering and covers the segmentation | `report_inputs/cortical_depth_<n>/compute_cortical_depth_out`, passed as `--cortical-depth-dir <sample>=<dir>` |
+| `MENDER_FINALIZE` of every sample of the branch | MENDER runs for the segmentation | `report_inputs/mender_<n>/<platform>`, passed as `--mender-manifest` |
+| the pair's ALIGN files (shared tissue mask) | the pair is aligned | `report_inputs/align_out` |
+
+A branch whose neither depth nor MENDER runs starts as soon as FINALIZE
+finishes, and no branch waits for another pair's or segmentation's tasks.
+The bundles are read where RESOLVE's manifests say they are (not staged);
+RESOLVE's outputs carry their hashes. The task runs on the CPU in the main
+environment (`CUDA_VISIBLE_DEVICES=""`, BLAS threads = `task.cpus`) with 4
+CPUs and 32 GB (`conf/annotation.config`); on the-dwight at most
+`annotation_report_max_forks` (2) run at a time. It never passes `--strict`:
+an item that raises is recorded in the report as `failed`, and the task
+still publishes. The task hash carries a fingerprint of the report code
+(`AnnotationReport.REPORT_SOURCES`: `merxen/annotation`, its packaged
+tables, `merxen/clustering`, the command), so a report change re-runs the
+report under `-resume`; no other task stages its output.
+
+**Failure semantics.** A branch whose depth, MENDER or report task fails is
+dropped under `errorStrategy "ignore"`, like its MENDER; the end-of-run
+summary (hook H6) lists it under "annotation reports not built", and a
+report with `failed` items under "annotation report items failed". A
+held-out-gene CSV is not produced in the pipeline, so item 8 is
+`not_available` there until the acceptance programme (M8) runs
+`heldout_genes.py`; standalone builds take it with `--heldout-csv`.
 
 ## Known limitations
 
