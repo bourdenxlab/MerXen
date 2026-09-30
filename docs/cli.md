@@ -761,9 +761,13 @@ pair × segmentation (mouse: one section) and writes into `--out`:
 | `acceptance_metrics.json` | Every measured metric with its §14 criterion, the criteria coverage, a per-sample digest and the provenance footer; metrics only, no verdicts. Deterministic. |
 | `report_run.json` | Wall time, version and options of the build. |
 
-`--out` must be a new or empty directory (`--overwrite` replaces files) and
-may not lie inside the results tree or an input directory unless
-`--allow-results-output` is given. In map_first pipeline runs the
+`--out` must be a new or empty directory (`--overwrite` replaces files) and,
+unless `--allow-results-output` is given, may not lie inside an input
+directory or `--results-root`, at or below the results root of any input
+(the RESOLVE, MAP and PANEL outputs, clustered H5ADs, depth tables, MENDER
+manifests and alignment, whether found in a tree or given explicitly), inside
+`--store` or a bundle RESOLVE's manifests record, or beside `--heldout-csv`
+(rule R3, as `merxen annotate` and `annotate-resolve`). In map_first pipeline runs the
 `ANNOTATION_REPORT` process runs this command on its staged inputs and
 publishes `<pair>/<seg>/annotation_report/annotation_report_out/` (see
 [the annotation stage](stages/annotation.md#annotation_report-in-the-pipeline-m7)).
