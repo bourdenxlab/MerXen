@@ -518,3 +518,47 @@ def test_pearson_and_spearman_need_variance() -> None:
     assert math.isnan(rm.pearson_r(np.ones(5), np.arange(5.0)))
     assert math.isnan(rm.spearman_r(np.arange(2.0), np.arange(2.0)))
     assert rm.spearman_r(np.arange(5.0), np.arange(5.0) ** 3) == pytest.approx(1.0)
+
+
+def test_tangential_block_codes_floor_positions_and_mark_missing() -> None:
+    codes = rm.tangential_block_codes(np.array([10.0, 499.0, 500.0, np.nan, 1600.0]))
+    np.testing.assert_array_equal(codes, [0, 0, 1, -1, 3])
+    shifted = rm.tangential_block_codes(np.array([-600.0, -1.0, 0.0]))
+    np.testing.assert_array_equal(shifted, [0, 1, 2])
+    with pytest.raises(ValueError, match="positive"):
+        rm.tangential_block_codes(np.zeros(2), 0.0)
+
+
+def test_depth_input_agreement_catches_a_mirrored_ribbon() -> None:
+    rng = np.random.default_rng(4)
+    xy_a = rng.uniform(0, 2000, (6000, 2))
+    xy_b = rng.uniform(0, 2000, (6000, 2))
+    # A ribbon in the lower 60% of the section, depth growing with y.
+    inside_a = xy_a[:, 1] < 1200
+    depth_a = np.where(inside_a, xy_a[:, 1] / 1200, np.nan)
+    inside_b = xy_b[:, 1] < 1200
+    depth_b = np.where(inside_b, xy_b[:, 1] / 1200, np.nan)
+    same = rm.depth_input_agreement(xy_a, inside_a, depth_a, xy_b, inside_b, depth_b)
+    assert same.n_bins == 100 and same.ribbon_agreement == pytest.approx(1.0)
+    assert same.depth_r > 0.99 and same.valid() is True
+    # The second section's boundaries mirrored top to bottom.
+    flipped_y = 2000 - xy_b[:, 1]
+    inside_m = flipped_y < 1200
+    depth_m = np.where(inside_m, flipped_y / 1200, np.nan)
+    mirrored = rm.depth_input_agreement(
+        xy_a, inside_a, depth_a, xy_b, inside_m, depth_m
+    )
+    assert mirrored.ribbon_agreement == pytest.approx(0.2, abs=0.05)
+    assert mirrored.depth_r < 0 and mirrored.valid() is False
+    # Either value alone below its minimum fails; NaN cannot be judged.
+    assert rm.DepthAgreement(10, 0.95, 10, 0.5, 200.0, 5).valid() is False
+    assert rm.DepthAgreement(10, 0.7, 10, 0.95, 200.0, 5).valid() is False
+    assert rm.DepthAgreement(10, 0.8, 10, 0.8, 200.0, 5).valid() is True
+    assert rm.DepthAgreement(0, math.nan, 0, math.nan, 200.0, 5).valid() is None
+    # Only bins with >= 5 cells of each section count.
+    few_cells = rm.depth_input_agreement(
+        xy_a[:3], inside_a[:3], depth_a[:3], xy_b, inside_b, depth_b
+    )
+    assert few_cells.n_bins == 0 and few_cells.valid() is None
+    with pytest.raises(ValueError, match="one value per cell"):
+        rm.depth_input_agreement(xy_a, inside_a[:5], depth_a, xy_b, inside_b, depth_b)
