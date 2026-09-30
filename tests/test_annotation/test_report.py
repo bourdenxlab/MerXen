@@ -1009,3 +1009,89 @@ def test_an_explicit_depth_file_wins_over_a_depth_directory(
     document = json.loads((tmp_path / "report" / "acceptance_metrics.json").read_text())
     recorded = document["provenance"]["samples"][sample.sample_id]["cortical_depth"]
     assert recorded == str(explicit)
+
+
+def test_explicit_published_dirs_keep_the_output_out_of_the_results_tree(
+    tmp_path: Path, fake_mmc: FakeMmc, make_trust: MakeTrust
+) -> None:
+    """M7 review: explicit --resolve-dir / --map-dir / --panel-dir are guarded too.
+
+    Rule R3 (as MAP and RESOLVE): the output may not lie at or below the
+    results root of any input, the store, a recorded bundle or the held-out
+    CSV's directory; a pipeline's staged work-dir inputs are not a results
+    tree.
+    """
+    setup = _resolved(tmp_path / "run", fake_mmc, make_trust)
+    results = _results_tree(setup, tmp_path / "results", legacy=True)
+    base = results / "PX" / "proseg_hybrid"
+    published = discover_sources(results, "PX", "proseg_hybrid")
+    explicit = ReportSources(
+        species="human",
+        pair_id="PX",
+        segmentation="proseg_hybrid",
+        resolve_dir=base / "annotation_resolve" / "annotation_resolve_out",
+        map_dir=base / "annotation_map" / "annotation_map_out",
+        panel_dir=None,
+        clustered_h5ad=dict(published.clustered_h5ad),
+        cortical_depth=dict(published.cortical_depth),
+        mender=dict(published.mender),
+    )
+    for out in (
+        base / "annotation_report_manual",
+        results / "PX" / "report",
+        results / "new_reports" / "PX",
+    ):
+        with pytest.raises(ReportOutputError, match="results tree"):
+            check_output_dir(out, explicit)
+    # The <pair>/<seg> directory itself, even with --overwrite.
+    with pytest.raises(ReportOutputError, match="results tree"):
+        check_output_dir(base, explicit, overwrite=True)
+    # Only a depth table or a MENDER manifest from the tree is enough.
+    for mapping in ("cortical_depth", "mender", "clustered_h5ad"):
+        only = ReportSources(
+            species="human",
+            pair_id="PX",
+            segmentation="proseg_hybrid",
+            resolve_dir=setup.root / "resolve_out",
+            **{mapping: dict(getattr(published, mapping))},
+        )
+        with pytest.raises(ReportOutputError, match="results tree"):
+            check_output_dir(results / "elsewhere", only)
+        check_output_dir(tmp_path / "fresh", only)
+    # The store, the recorded bundles and the held-out CSV's directory.
+    store = tmp_path / "store"
+    heldout = tmp_path / "criteria" / "heldout.csv"
+    guarded = _sources(setup, store_root=store, heldout_csv=heldout)
+    for out in (store / "report", heldout.parent / "report"):
+        with pytest.raises(ReportOutputError):
+            check_output_dir(out, guarded)
+    bundle = Path(setup.bundles["whb_frontal_supc_clus"].path)
+    with pytest.raises(ReportOutputError, match="bundle"):
+        check_output_dir(bundle / "report", _sources(setup))
+    check_output_dir(tmp_path / "fresh", guarded)
+    # A pipeline task: inputs staged as links into work directories.
+    work = tmp_path / "work"
+    task = work / "ab" / "0123456789abcdef"
+    staged = task / "report_inputs"
+    staged.mkdir(parents=True)
+    upstream = work / "cd" / "fedcba9876543210" / "annotation_resolve_out"
+    shutil.copytree(setup.root / "resolve_out", upstream)
+    (staged / "annotation_resolve_out").symlink_to(upstream)
+    clustered_out = work / "ab" / "1111" / "clustering_squidpy_out" / "merscope"
+    clustered_out.mkdir(parents=True)
+    h5ad = clustered_out / f"{setup.samples[0].sample_id}_clustered.h5ad"
+    shutil.copy2(setup.samples[0].h5ad_path, h5ad)
+    (staged / "clustering_squidpy_out").symlink_to(clustered_out.parent)
+    pipeline = ReportSources(
+        species="human",
+        pair_id="PX",
+        segmentation="proseg_hybrid",
+        resolve_dir=staged / "annotation_resolve_out",
+        clustered_h5ad={
+            setup.samples[0].sample_id: staged
+            / "clustering_squidpy_out"
+            / "merscope"
+            / h5ad.name
+        },
+    )
+    check_output_dir(task / "annotation_report_out", pipeline)
