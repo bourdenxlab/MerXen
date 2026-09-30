@@ -23,6 +23,7 @@ import logging
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any, Final
 
@@ -74,6 +75,14 @@ from merxen.annotation.vocab import HUMAN_BROAD_CLASSES, primary_vocab
 logger = logging.getLogger(__name__)
 
 LEAF_LEVEL: Final[dict[str, str]] = {"human": "supercluster", "mouse": "subclass"}
+# Item 4's fallback when the leaf level is not emitted (a broad-only or
+# failed gate, or no confident leaf label): the confident composition level.
+FALLBACK_LEVEL: Final[dict[str, str]] = {"human": "broad", "mouse": "class"}
+PROFILE_COLUMNS: Final[tuple[str, ...]] = (
+    "detection_fraction",
+    "mean_log2cpm",
+    "mean_cpm",
+)
 PROFILE_LEVEL_SUFFIX: Final[dict[str, str]] = {
     "supercluster": "_SUPC",
     "subclass": "_SUBC",
@@ -145,6 +154,117 @@ def _profiles(bundle: Path | None, level: str) -> pd.DataFrame | None:
     return frame if len(frame) else None
 
 
+def broad_profiles(
+    supercluster: pd.DataFrame, broad_of: Mapping[str, str]
+) -> pd.DataFrame | None:
+    """Return per-broad-class reference profiles from the supercluster rows.
+
+    Each broad class's detection fraction, mean ``log2(CPM + 1)`` and mean
+    CPM are the reference-cell-weighted means over its superclusters, i.e.
+    the means over all its reference cells (plan §9 item 4; the fallback of
+    a dataset whose leaf level is not emitted).
+
+    Args:
+        supercluster: ``profiles.parquet`` rows of the supercluster level
+            (``node_name``, ``n_cells``, ``gene_id`` and the profile columns).
+        broad_of: Supercluster name to broad class.
+
+    Returns:
+        Rows ``node_name`` (the broad class), ``n_cells``, ``gene_id`` and
+        the profile columns, or ``None`` without superclusters to aggregate.
+    """
+    frame = supercluster.assign(
+        node_name=supercluster["node_name"].astype(str).map(broad_of)
+    ).dropna(subset=["node_name"])
+    if frame.empty:
+        return None
+    weights = frame["n_cells"].astype(np.float64)
+    weighted = frame[["node_name", "gene_id"]].copy()
+    weighted["n_cells"] = weights
+    for column in PROFILE_COLUMNS:
+        weighted[column] = frame[column].astype(np.float64) * weights
+    grouped = weighted.groupby(["node_name", "gene_id"], sort=True).sum().reset_index()
+    for column in PROFILE_COLUMNS:
+        grouped[column] = grouped[column] / grouped["n_cells"]
+    return grouped[["node_name", "n_cells", "gene_id", *PROFILE_COLUMNS]]
+
+
+def canonical_marker_genes(
+    species: str, gene_ids: Sequence[str], symbols: Sequence[str]
+) -> list[str]:
+    """Return the §5.8 canonical markers on the panel, as gene ids.
+
+    The rank-1 markers of ``heldout_markers_<species>.csv`` present on the
+    panel, plus a class's rank-2 alternates when none of its rank-1 markers
+    is; the dotplot shows them beside each label's specific genes (plan §9
+    item 4 catches Microglia lacking P2RY12 and astrocyte spill into
+    neurons: AQP4, GJA1).
+
+    Args:
+        species: ``human`` or ``mouse``.
+        gene_ids: Gene ids of the data.
+        symbols: Their symbols (same order).
+
+    Returns:
+        Gene ids in the list's order.
+    """
+    from merxen.annotation.vocab import load_heldout_markers
+
+    try:
+        markers = load_heldout_markers(species)  # type: ignore[arg-type]
+    except (OSError, ValueError, KeyError) as error:
+        logger.warning("canonical markers of %s not loaded: %s", species, error)
+        return []
+    by_symbol = {
+        str(symbol).casefold(): str(gene)
+        for gene, symbol in zip(gene_ids, symbols, strict=True)
+    }
+    picked: list[str] = []
+    for _, part in markers.groupby("marker_class", sort=False):
+        # A list without ranks (mouse) is all rank 1.
+        ranks = (
+            pd.to_numeric(part["rank"], errors="coerce")
+            if "rank" in part.columns
+            else pd.Series(1, index=part.index)
+        )
+        present = [
+            by_symbol[str(symbol).casefold()]
+            for symbol, rank in zip(part["gene_symbol"], ranks, strict=True)
+            if rank == 1 and str(symbol).casefold() in by_symbol
+        ]
+        if not present:
+            present = [
+                by_symbol[str(symbol).casefold()]
+                for symbol, rank in zip(part["gene_symbol"], ranks, strict=True)
+                if rank == 2 and str(symbol).casefold() in by_symbol
+            ]
+        picked.extend(gene for gene in present if gene not in picked)
+    return picked
+
+
+def _fallback_profiles(bundle: Path | None, species: str) -> pd.DataFrame | None:
+    """Return the fallback level's reference profiles (item 4)."""
+    if species == "human":
+        rows = _profiles(bundle, "supercluster")
+        if rows is None:
+            return None
+        vocab = primary_vocab("human")
+        return broad_profiles(
+            rows, {name: vocab.broad_class(name) for name in vocab.names}
+        )
+    return _profiles(bundle, FALLBACK_LEVEL[species])
+
+
+def _label_order(
+    labels: np.ndarray, reference_nodes: set[str], max_labels: int
+) -> list[str]:
+    """Return labels with >= MIN_LABEL_CELLS cells and a profile, commonest first."""
+    values, freq = np.unique(labels[labels != ""], return_counts=True)
+    ranked = sorted(zip(values, freq, strict=True), key=lambda kv: (-kv[1], kv[0]))
+    order = [str(v) for v, n in ranked if n >= MIN_LABEL_CELLS]
+    return [name for name in order if name in reference_nodes][:max_labels]
+
+
 def specific_genes(
     profiles: pd.DataFrame, labels: Sequence[str], genes: Sequence[str], per_label: int
 ) -> list[str]:
@@ -194,17 +314,18 @@ def item_reference_expectation(
         item.status = "not_available"
         item.notes.append("Expression not read (read_expression off).")
         return item
-    level = LEAF_LEVEL[inputs.species]
+    leaf = LEAF_LEVEL[inputs.species]
+    fallback = FALLBACK_LEVEL[inputs.species]
     bundle = inputs.bundles.get(primary_reference(inputs))
-    profiles = _profiles(bundle, level)
-    if profiles is None:
+    leaf_profiles = _profiles(bundle, leaf)
+    fallback_profiles = _fallback_profiles(bundle, inputs.species)
+    if leaf_profiles is None and fallback_profiles is None:
         item.status = "not_available"
-        item.notes.append(f"No {level} profiles in the primary bundle.")
+        item.notes.append(f"No {leaf} profiles in the primary bundle.")
         return item
     cache: dict[str, ClusteredTable] = {}
     pseudo_rows = []
     any_sample = False
-    ref_nodes = sorted(profiles["node_name"].astype(str).unique())
     for sample in inputs.ordered_samples():
         table = table_cells(sample)
         loaded = _counts_for(sample, table, cache, inputs.gene_lookup)
@@ -212,23 +333,46 @@ def item_reference_expectation(
             item.notes.append(f"{sample.sample_id}: no clustered H5AD counts")
             continue
         matrix, gene_ids, found = loaded
-        labels = np.where(
-            confident(table, level),
-            names_array(table, Columns.level(level, "name")),
-            "",
-        )[found]
-        values, freq = np.unique(labels[labels != ""], return_counts=True)
-        order = [
-            str(v)
-            for v, n in sorted(
-                zip(values, freq, strict=True), key=lambda kv: (-kv[1], kv[0])
+        gate = ((sample.summary.get("resolution") or {}).get("gate") or {}).get("level")
+        level, profiles, order, labels = leaf, leaf_profiles, [], np.array([])
+        if leaf_profiles is not None and gate in (None, "full"):
+            labels = np.where(
+                confident(table, leaf),
+                names_array(table, Columns.level(leaf, "name")),
+                "",
+            )[found]
+            order = _label_order(
+                labels,
+                set(leaf_profiles["node_name"].astype(str)),
+                options.max_dotplot_labels,
             )
-            if n >= MIN_LABEL_CELLS
-        ]
-        order = [name for name in order if name in set(ref_nodes)][
-            : options.max_dotplot_labels
-        ]
-        if not order:
+        if not order and fallback_profiles is not None:
+            # The leaf level is not emitted (gate not full, or no confident
+            # leaf label): the confident broad labels, whose catches (P2RY12
+            # in Microglia, astrocyte spill into neurons) are broad-level.
+            level, profiles = fallback, fallback_profiles
+            labels = np.where(
+                confident(table, fallback),
+                names_array(table, Columns.level(fallback, "name")),
+                "",
+            )[found]
+            order = _label_order(
+                labels,
+                set(fallback_profiles["node_name"].astype(str)),
+                options.max_dotplot_labels,
+            )
+            item.notes.append(
+                f"{sample.sample_id}: the {leaf} level is not emitted (gate {gate}) "
+                f"or has no confident label: dotplot and pseudobulk checks on "
+                f"confident {fallback} labels"
+                + (
+                    " (reference profiles aggregated from the supercluster rows, "
+                    "weighted by reference cells)"
+                    if inputs.species == "human"
+                    else ""
+                )
+            )
+        if not order or profiles is None:
             item.notes.append(
                 f"{sample.sample_id}: no confident {level} label with >= "
                 f"{MIN_LABEL_CELLS} cells and a reference profile"
@@ -236,6 +380,10 @@ def item_reference_expectation(
             continue
         any_sample = True
         genes = specific_genes(profiles, order, gene_ids, options.genes_per_label)
+        symbols = _symbols_for(sample, cache, gene_ids)
+        for gene in canonical_marker_genes(inputs.species, gene_ids, symbols):
+            if gene not in genes:
+                genes.append(gene)
         gene_index = {gene: index for index, gene in enumerate(gene_ids)}
         fraction, mean_log = _cell_log_cpm_stats(matrix, labels, order)
         ref = profiles.set_index(["node_name", "gene_id"])
@@ -251,6 +399,7 @@ def item_reference_expectation(
                     {
                         "sample_id": sample.sample_id,
                         "platform": sample.platform,
+                        "level": level,
                         "label": label,
                         "gene_id": gene,
                         "gene": symbol_of.get(gene, gene),
@@ -268,15 +417,7 @@ def item_reference_expectation(
         writer.figure(
             item,
             f"dotplot_{sample.platform.lower()}",
-            lambda frame=frame, platform=sample.platform, sid=sample.sample_id: dotplot(
-                frame,
-                label="label",
-                gene="gene",
-                size_columns=("obs_fraction", "ref_fraction"),
-                colour_columns=("obs_mean_log2cpm", "ref_mean_log2cpm"),
-                panel_titles=(f"{platform} observed", "reference profile"),
-                title=f"{sid}: confident {level} labels on their specific genes",
-            ),
+            partial(_draw_dotplot, frame, sample.platform, sample.sample_id, level),
             frame,
             f"{sample.platform}: observed fraction positive (size) and mean "
             f"log2(CPM+1) (colour) per confident {level} label, beside the "
@@ -310,6 +451,7 @@ def item_reference_expectation(
                 {
                     "sample_id": sample.sample_id,
                     "platform": sample.platform,
+                    "level": level,
                     "label": label,
                     "n_cells": int(n_cells[li]),
                     "n_genes": len(shared),
@@ -363,6 +505,22 @@ def item_reference_expectation(
         item.status = "not_available"
     item.summary = pseudo
     return item
+
+
+def _draw_dotplot(
+    frame: pd.DataFrame, platform: str, sample_id: str, level: str
+) -> Any:
+    """Draw item 4's dotplot of one sample (observed beside the reference)."""
+    return dotplot(
+        frame,
+        label="label",
+        gene="gene",
+        size_columns=("obs_fraction", "ref_fraction"),
+        colour_columns=("obs_mean_log2cpm", "ref_mean_log2cpm"),
+        panel_titles=(f"{platform} observed", "reference profile"),
+        title=f"{sample_id}: confident {level} labels on their specific and "
+        "canonical genes",
+    )
 
 
 def _symbols_for(
