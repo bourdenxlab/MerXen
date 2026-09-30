@@ -502,6 +502,77 @@ def test_cli_builds_a_report_from_a_results_tree(
     }
 
 
+def test_cli_reads_the_pipelines_staged_layout(
+    tmp_path: Path, fake_mmc: FakeMmc, make_trust: MakeTrust
+) -> None:
+    """ANNOTATION_REPORT's arguments: explicit dirs, depth dirs per sample.
+
+    The process stages each platform's compute_cortical_depth_out and passes
+    it with --cortical-depth-dir SAMPLE_ID=DIR; the report finds the
+    segmentation's cell table inside it (M7 stage B).
+    """
+    setup = _resolved(tmp_path / "run", fake_mmc, make_trust)
+    arguments = [
+        "annotation-report",
+        "--pair",
+        "PX",
+        "--segmentation",
+        "proseg_hybrid",
+        "--resolve-dir",
+        str(setup.root / "resolve_out"),
+        "--map-dir",
+        str(setup.map_dir),
+        "--panel-dir",
+        str(setup.panel_dir),
+        "--no-mender",
+        "--no-alignment",
+        "--out",
+        str(tmp_path / "report"),
+        "--n-bootstrap",
+        "10",
+        "--strict",
+        "--no-figures",
+    ]
+    for index, sample in enumerate(setup.samples):
+        out = tmp_path / "staged" / f"cortical_depth_{index + 1}"
+        depth_out = out / "compute_cortical_depth_out"
+        name = f"{sample.sample_id.lower()}_proseg_hybrid_cells_with_cortical_depth"
+        _depth_parquet(setup, index, depth_out / "proseg_hybrid" / f"{name}.parquet")
+        arguments += [
+            "--clustered-h5ad",
+            f"{sample.sample_id}={sample.h5ad_path}",
+            "--cortical-depth-dir",
+            f"{sample.sample_id}={depth_out}",
+        ]
+    result = CliRunner().invoke(cli_main, arguments)
+    assert result.exit_code == 0, result.output
+    document = json.loads((tmp_path / "report" / "acceptance_metrics.json").read_text())
+    assert document["items"]["item09_cortical_depth"]["status"] == "ok"
+    for sample in setup.samples:
+        assert document["datasets"][sample.sample_id]["cortical_depth"] is True
+    # A depth directory without the segmentation's table gives no depth.
+    empty = tmp_path / "empty" / "compute_cortical_depth_out"
+    (empty / "reseg").mkdir(parents=True)
+    arguments = [
+        value if value != str(tmp_path / "report") else str(tmp_path / "report2")
+        for value in arguments
+    ]
+    arguments = [
+        f"{value.split('=', 1)[0]}={empty}"
+        if "compute_cortical_depth_out" in value
+        else value
+        for value in arguments
+    ]
+    result = CliRunner().invoke(cli_main, arguments)
+    assert result.exit_code == 0, result.output
+    document = json.loads(
+        (tmp_path / "report2" / "acceptance_metrics.json").read_text()
+    )
+    assert document["items"]["item09_cortical_depth"]["status"] != "ok"
+    for sample in setup.samples:
+        assert document["datasets"][sample.sample_id]["cortical_depth"] is False
+
+
 def test_a_broad_only_scope_withholds_supercluster_statistics(
     tmp_path: Path, fake_mmc: FakeMmc, make_trust: MakeTrust
 ) -> None:

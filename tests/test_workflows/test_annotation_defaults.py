@@ -346,6 +346,12 @@ class AnnotationTestHarness {
                         item.pair_id, item.segmentation, item.platform, item.manifest,
                     )
                 }
+                (c.report_expected ?: []).each { item ->
+                    AnnotationRunRecord.reportExpected(item[0], item[1])
+                }
+                (c.reported ?: []).each { item ->
+                    AnnotationRunRecord.reported(item[0], item[1], item[2])
+                }
                 def info = AnnotationRunRecord.runInfo()
                 AnnotationRunRecord.reset()
                 return info
@@ -790,6 +796,21 @@ def _add_m5_cases(
     (mender / "imported.json").write_text(
         json.dumps({"sample_id": "P5_MERSCOPE", "imported": True})
     )
+    # Annotation reports (M7): P2's has a failed item, P5's is clean, P1's
+    # was awaited but never built.
+    reports = panels / "reports"
+    for name, items in (
+        (
+            "P2",
+            {"item01_annotatability": "ok", "item04_reference_expectation": "failed"},
+        ),
+        (
+            "P5",
+            {"item01_annotatability": "ok", "item08_heldout_genes": "not_available"},
+        ),
+    ):
+        (reports / name).mkdir(parents=True)
+        (reports / name / "report_run.json").write_text(json.dumps({"items": items}))
     cases["runRecord|mixed"] = {
         "fn": "runRecord",
         "expected": [
@@ -843,6 +864,15 @@ def _add_m5_cases(
             ["P1", "proseg_hybrid"],
             ["P2", "proseg_hybrid"],
             ["P5", "proseg_hybrid"],
+        ],
+        "report_expected": [
+            ["P1", "proseg_hybrid"],
+            ["P2", "proseg_hybrid"],
+            ["P5", "proseg_hybrid"],
+        ],
+        "reported": [
+            ["P2", "proseg_hybrid", str(reports / "P2")],
+            ["P5", "proseg_hybrid", str(reports / "P5")],
         ],
     }
 
@@ -1244,6 +1274,11 @@ def test_groovy_run_record_lists_stopped_branches_and_panels(
     ]
     assert info["mender_skipped"] == [
         "P5:proseg_hybrid P5_XENIUM (every cell state is unassigned)"
+    ]
+    # M7: the awaited report never built, and the report with a failed item.
+    assert info["failed_reports"] == ["P1:proseg_hybrid"]
+    assert info["failed_report_items"] == [
+        "P2:proseg_hybrid (item04_reference_expectation)"
     ]
 
 
