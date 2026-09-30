@@ -16,7 +16,10 @@ labels without circularity:
 - median equivolumetric depth (0 = pia, 1 = white matter) per confident
   supercluster with a 95% block-bootstrap CI whose unit is a 500 µm
   tangential block (a full pia-to-WM strip; ``tangential_position_um``); the
-  square 500 µm tile bootstrap is reported as a conservative sensitivity;
+  square 500 µm tile bootstrap is reported beside it (``kind =
+  square_tile_500um``), and is the CI the M8 gate scores (``SCORED_CI``,
+  pre-registration §18 item 3) until the user approves the tangential
+  blocks (M7 D23);
 - the ordering Upper-layer IT < Deep-layer IT < Deep-layer NP/CT/6b with
   non-overlapping CIs, per platform, and its replication across the two
   platforms (both pass; rank correlation of the supercluster medians);
@@ -100,6 +103,13 @@ MIN_GROUP_CELLS: Final = 20
 # only (and so the primary) method.
 PRIMARY_CI: Final = "tangential_block_500um"
 SQUARE_TILE_CI: Final = "square_tile_500um"
+# The CI the M8 gate scores H12 on (pre-registration §18 item 3): the square
+# tiles, because adopting the narrower tangential-block CI for the gate
+# needs the user's written approval (§17; M7 D23, not decided). The report
+# keeps the tangential blocks as its display primary; every H12 ordering
+# record with ``kind = SCORED_CI`` (per platform and the pair's replication)
+# is the scored one (``acceptance_scoring.score_h12``).
+SCORED_CI: Final = SQUARE_TILE_CI
 INVALID_REASON: Final = "depth_input_invalid"
 # A depth computed on transformed (aligned) coordinates: the frame in which
 # the manual boundaries must also be (plan §9 item 9; M7 review).
@@ -415,8 +425,10 @@ def item_cortical_depth(
     profile_rows: list[pd.DataFrame] = []
     contrast_rows: list[dict[str, Any]] = []
     orderings = {}
+    tile_orderings = {}
     gated_platforms: list[str] = []
     medians_by_platform: dict[str, dict[str, MedianCi]] = {}
+    tile_medians_by_platform: dict[str, dict[str, MedianCi]] = {}
     methods: set[str] = set()
     for entry in depth_inputs:
         sample, table, depth, tissue = (
@@ -485,6 +497,16 @@ def item_cortical_depth(
         ordering = depth_ordering(medians, ORDER, min_cells=MIN_GROUP_CELLS)
         orderings[sample.platform] = ordering
         medians_by_platform[sample.platform] = medians
+        # The square-tile ordering (SCORED_CI): the sensitivity beside the
+        # tangential blocks, or the primary itself without tangential
+        # positions (then both records hold the same verdict).
+        sensitivity = (
+            depth_ordering(medians_tiles, ORDER, min_cells=MIN_GROUP_CELLS)
+            if primary_method == PRIMARY_CI
+            else ordering
+        )
+        tile_orderings[sample.platform] = sensitivity
+        tile_medians_by_platform[sample.platform] = medians_tiles
         gate_level = str(
             ((sample.summary.get("resolution") or {}).get("gate") or {}).get("level")
         )
@@ -494,34 +516,33 @@ def item_cortical_depth(
         if gated:
             gated_platforms.append(sample.platform)
         gate_note = f"dataset gate {gate_level}: no supercluster labels; "
-        if primary_method == PRIMARY_CI:
-            sensitivity = depth_ordering(
-                medians_tiles, ORDER, min_cells=MIN_GROUP_CELLS
-            )
-            item.metrics.append(
-                _gated(
-                    metric(
-                        "H12",
-                        "depth_ordering_passes",
-                        None if gated else sensitivity.passes,
-                        definition=(
-                            "the H12 ordering with CIs from resampling square 500 µm "
-                            "tiles (conservative sensitivity: a tile holds only part "
-                            f"of the depth range; primary: {PRIMARY_CI})"
-                        ),
-                        source="report_metrics.depth_ordering",
-                        sample_id=sample.sample_id,
-                        platform=sample.platform,
-                        kind=SQUARE_TILE_CI,
-                        note=(gate_note if gated else "")
-                        + (
-                            f"ordered={sensitivity.ordered}; "
-                            f"separated={sensitivity.separated}"
-                        ),
+        item.metrics.append(
+            _gated(
+                metric(
+                    "H12",
+                    "depth_ordering_passes",
+                    None if gated else sensitivity.passes,
+                    definition=(
+                        "the H12 ordering with CIs from resampling square 500 µm "
+                        "tiles: the CI the M8 gate scores (pre-registration §18 "
+                        "item 3; the tangential blocks need the user's approval, "
+                        "M7 D23); conservative, a tile holds only part of the "
+                        f"depth range (display primary: {primary_method})"
                     ),
-                    reason,
-                )
+                    source="report_metrics.depth_ordering",
+                    sample_id=sample.sample_id,
+                    platform=sample.platform,
+                    kind=SQUARE_TILE_CI,
+                    note=(gate_note if gated else "")
+                    + (
+                        f"ordered={sensitivity.ordered}; "
+                        f"separated={sensitivity.separated}; "
+                        f"missing={list(sensitivity.missing)}; ci={SQUARE_TILE_CI}"
+                    ),
+                ),
+                reason,
             )
+        )
         item.metrics.append(
             _gated(
                 metric(
@@ -695,20 +716,44 @@ def item_cortical_depth(
                 "proxy"
             )
     _pair_metrics(item, medians_by_platform, orderings, gated_platforms, invalid)
+    _pair_metrics(
+        item,
+        tile_medians_by_platform,
+        tile_orderings,
+        gated_platforms,
+        invalid,
+        kind=SQUARE_TILE_CI,
+    )
     item.metrics.append(
         metric(
             "H12",
             "depth_ci_method",
             PRIMARY_CI if methods == {PRIMARY_CI} else SQUARE_TILE_CI,
             definition=(
-                "bootstrap unit of the H12 medians: 500 µm tangential blocks "
-                "(floor(tangential_position_um / 500), whole pia-to-WM strips; "
-                "pre-registration doc §17); square 500 µm tiles are the "
-                "sensitivity (kind square_tile_500um)"
+                "bootstrap unit of the report's H12 medians (display primary): "
+                "500 µm tangential blocks (floor(tangential_position_um / 500), "
+                "whole pia-to-WM strips; pre-registration doc §17); square 500 µm "
+                "tiles beside them (kind square_tile_500um)"
             ),
             source="report_depth",
             scope="pair",
             note=f"methods per platform: {sorted(methods)}",
+        )
+    )
+    item.metrics.append(
+        metric(
+            "H12",
+            "depth_ci_scored",
+            SCORED_CI,
+            definition=(
+                "the CI the M8 gate scores H12 on (pre-registration §18 item 3): "
+                "the ordering records with kind square_tile_500um (per platform "
+                "and depth_ordering_replicated) and the square-tile CI of the "
+                "WM - GM contrast; the tangential blocks are reported beside it "
+                "until the user approves them (M7 D23)"
+            ),
+            source="report_depth",
+            scope="pair",
         )
     )
     if invalid:
@@ -853,8 +898,16 @@ def _pair_metrics(
     orderings: Mapping[str, Any],
     gated_platforms: Sequence[str],
     invalid: Mapping[str, str],
+    *,
+    kind: str | None = None,
 ) -> None:
-    """Append the replication records (gated and depth-validity aware)."""
+    """Append the replication records (gated and depth-validity aware).
+
+    ``kind=None`` gives the display-primary records (the replication and the
+    between-platform rank correlation); ``kind=SQUARE_TILE_CI`` the scored
+    replication from the square-tile orderings (the medians, and so the rank
+    correlation, do not depend on the CI method).
+    """
     replication = depth_replication(medians_by_platform, orderings)
     invalid_note = f"{INVALID_REASON} on {sorted(invalid)}" if invalid else ""
     # Replication needs the ordering on both platforms: a gated platform (no
@@ -864,9 +917,17 @@ def _pair_metrics(
         "H12",
         "depth_ordering_replicated",
         replication.replicated if replicable else None,
-        definition="the depth ordering passes on both platforms of the pair",
+        definition=(
+            "the depth ordering passes on both platforms of the pair"
+            + (
+                f" (CIs: {kind}; the CI the M8 gate scores)"
+                if kind is not None
+                else " (CIs: the display primary, depth_ci_method)"
+            )
+        ),
         source="report_metrics.depth_replication",
         scope="pair",
+        kind=kind,
         note=(
             f"no ordering on {list(gated_platforms)} (dataset gate not full); "
             if gated_platforms
@@ -892,7 +953,8 @@ def _pair_metrics(
         else "",
     )
     item.metrics.append(_gated(replicated, invalid_note))
-    item.metrics.append(_gated(between, invalid_note))
+    if kind is None:
+        item.metrics.append(_gated(between, invalid_note))
 
 
 def _figures(
@@ -983,6 +1045,7 @@ __all__ = [
     "INVALID_REASON",
     "ORDER",
     "PRIMARY_CI",
+    "SCORED_CI",
     "SQUARE_TILE_CI",
     "DepthInput",
     "DepthValidity",

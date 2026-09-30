@@ -479,7 +479,9 @@ def h2_breakdown(sample: ResolvedSample) -> list[dict[str, Any]]:
 
     Per implausible WHB node (and all nodes pooled): the share of table
     cells, the share whose lineage is still confident (an implausible node
-    keeps its lineage when SEA-AD agrees at lineage), median counts, the
+    keeps its lineage when SEA-AD agrees at lineage), the flagged cells with
+    a confident broad or supercluster label (M8 D5's scope: "none receives a
+    broad or supercluster label"), median counts, the
     SEA-AD subclass and the WHB runner-up of those cells, and H2 without the
     node (what a vocab change that made it plausible would give; not a
     metric, which only the user can change).
@@ -489,6 +491,8 @@ def h2_breakdown(sample: ResolvedSample) -> list[dict[str, Any]]:
     implausible = labels["flag_implausible"].to_numpy(bool)
     node = labels["mmc_whb_supercluster_name"].astype(object).to_numpy()
     lineage = confident(labels, "lineage")
+    broad = confident(labels, "broad")
+    supercluster = confident(labels, "supercluster")
     counts = labels["total_counts"].to_numpy(np.float64)
     sea_subclass = labels["mmc_seaad_subclass_name"].astype(object).to_numpy()
     runner_up = (
@@ -520,6 +524,9 @@ def h2_breakdown(sample: ResolvedSample) -> list[dict[str, Any]]:
                 "n": int(mask.sum()),
                 "share_table": float(mask.sum() / n_table),
                 "lineage_confident_share": float(lineage[mask].mean()),
+                "n_lineage_confident": int(lineage[mask].sum()),
+                "n_broad_confident": int(broad[mask].sum()),
+                "n_supercluster_confident": int(supercluster[mask].sum()),
                 "median_counts": float(np.median(counts[mask])),
                 "h2_without_node": (
                     float((implausible & ~mask).sum() / n_table)

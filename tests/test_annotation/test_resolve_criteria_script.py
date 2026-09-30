@@ -439,6 +439,14 @@ def test_h2_breakdown_splits_the_implausible_calls_by_node(
     assert rows["all"]["n"] == 3
     assert rows["all"]["lineage_confident_share"] == pytest.approx(2 / 3)
     assert rows["all"]["share_table"] == pytest.approx(3 / 8)
+    # M8 D5's scope: no flagged cell may carry a confident broad or
+    # supercluster label (here c6 and c7 keep a confident broad label).
+    assert rows["all"]["n_lineage_confident"] == 2
+    assert rows["all"]["n_broad_confident"] == 2
+    assert rows["all"]["n_supercluster_confident"] == 0
+    labels.loc["c6", "ct_supercluster_status"] = "confident"
+    again = criteria.h2_breakdown(dataclasses.replace(sample, labels=labels))
+    assert again[0]["node"] == "all" and again[0]["n_supercluster_confident"] == 1
     amygdala = rows["Amygdala excitatory"]
     assert amygdala["kind"] == "region_implausible"
     assert amygdala["n"] == 2

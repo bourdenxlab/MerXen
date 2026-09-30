@@ -15,11 +15,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from merxen.annotation.acceptance_scoring import FAIL, NOT_AVAILABLE, PASS, score_h12
 from merxen.annotation.report_depth import (
     DEEP_NP_CT_6B,
     INVALID_REASON,
     ORDER,
     PRIMARY_CI,
+    SCORED_CI,
     SQUARE_TILE_CI,
     group_labels,
     item_cortical_depth,
@@ -223,8 +225,9 @@ def test_a_matching_pair_passes_the_depth_check_and_the_ordering(
         depth[upper], grid_codes(np.asarray(sample.xy)[upper], 500.0), n_reps=30
     )
     assert (tiles.ci_low, tiles.ci_high) != (expected.ci_low, expected.ci_high)
-    (replicated,) = _records(item, "depth_ordering_replicated")
-    assert replicated.value is True
+    replicated = _records(item, "depth_ordering_replicated")
+    assert {record.kind for record in replicated} == {None, SQUARE_TILE_CI}
+    assert all(record.value is True for record in replicated)
     medians = pd.read_csv(
         tmp_path / "figures" / "item09_cortical_depth_median_depth.csv"
     )
@@ -269,13 +272,15 @@ def test_a_mirrored_boundary_makes_every_h12_metric_of_its_platform_not_availabl
         assert record.ci_low is None and record.note.startswith(INVALID_REASON)
     xenium_orderings = _records(item, "depth_ordering_passes", sample_id="PX_XENIUM")
     assert all(record.status == "measured" for record in xenium_orderings)
-    for name in (
-        "depth_ordering_replicated",
-        "depth_profile_spearman_between_platforms",
+    for name, n_records in (
+        ("depth_ordering_replicated", 2),  # display primary and scored tiles
+        ("depth_profile_spearman_between_platforms", 1),
     ):
-        (record,) = _records(item, name)
-        assert record.status == "not_available" and record.value is None
-        assert record.note.startswith(f"{INVALID_REASON} on ['MERSCOPE']")
+        records = _records(item, name)
+        assert len(records) == n_records
+        for record in records:
+            assert record.status == "not_available" and record.value is None
+            assert record.note.startswith(f"{INVALID_REASON} on ['MERSCOPE']")
     table = pd.read_csv(
         tmp_path / "tables" / "item09_cortical_depth__depth_validity.csv"
     )
@@ -362,3 +367,107 @@ def test_tangential_blocks_keep_every_depth_slice_in_a_replicate() -> None:
     by_tile = median_block_ci(depth[keep], tiles, n_reps=200)
     assert by_block.median == pytest.approx(by_tile.median)
     assert (by_block.ci_high - by_block.ci_low) < (by_tile.ci_high - by_tile.ci_low)
+
+
+def _close_deep_layers(platform: str, seed: int) -> SampleData:
+    """A section whose deep IT and NP/CT/6b medians are close (P7513_XENIUM).
+
+    The deep grey-matter cells are labelled by a noisy depth threshold, so
+    the two groups' medians are about .08 apart: the tangential-block CIs
+    (whole pia-to-WM strips) separate them, the square-tile CIs overlap.
+    """
+    sample = _layer_cells(platform, seed)
+    assert sample.depth is not None
+    rng = np.random.default_rng(seed + 100)
+    depth = sample.depth["equivolumetric_depth"].to_numpy()
+    names = sample.labels["ct_supercluster_name"].to_numpy().astype(object)
+    deep = np.isfinite(depth) & np.isin(
+        names, ["Deep-layer intratelencephalic", "Deep-layer near-projecting"]
+    )
+    noisy = depth[deep] + rng.normal(0.0, 0.8, int(deep.sum()))
+    names[deep] = np.where(
+        noisy > 0.7, "Deep-layer near-projecting", "Deep-layer intratelencephalic"
+    )
+    sample.labels["ct_supercluster_name"] = names
+    return sample
+
+
+def test_h12_is_scored_on_the_square_tiles_where_the_tangential_blocks_pass(
+    tmp_path: Path,
+) -> None:
+    """M8 review: the scored H12 is the tile CI (pre-registration §18 item 3)."""
+    inputs = _inputs(_layer_cells("MERSCOPE", 1), _close_deep_layers("XENIUM", 2))
+    item = _item(inputs, tmp_path)
+    tile = {
+        record.platform: record.value
+        for record in _records(item, "depth_ordering_passes", kind=SQUARE_TILE_CI)
+    }
+    primary = {
+        record.platform: record.value
+        for record in _records(item, "depth_ordering_passes", kind=None)
+    }
+    assert primary == {"MERSCOPE": True, "XENIUM": True}
+    assert tile == {"MERSCOPE": True, "XENIUM": False}
+    (shown,) = _records(item, "depth_ordering_replicated", kind=None)
+    (scored,) = _records(item, "depth_ordering_replicated", kind=SQUARE_TILE_CI)
+    assert shown.value is True and scored.value is False
+    assert "the CI the M8 gate scores" in scored.definition
+    # The between-platform rank correlation does not depend on the CI.
+    assert len(_records(item, "depth_profile_spearman_between_platforms")) == 1
+    (method,) = _records(item, "depth_ci_method")
+    (scored_ci,) = _records(item, "depth_ci_scored")
+    assert method.value == PRIMARY_CI  # the display primary is unchanged
+    assert scored_ci.value == SCORED_CI == SQUARE_TILE_CI
+    score = score_h12(item.metrics, pair_id="P7513")
+    assert score.ci_scored == SQUARE_TILE_CI
+    assert score.ci_reported_beside == PRIMARY_CI
+    assert score.ordering == {"MERSCOPE": PASS, "XENIUM": FAIL}
+    assert score.ordering_verdict == FAIL and score.verdict == FAIL
+    assert score.reported_beside["ordering"] == {"MERSCOPE": PASS, "XENIUM": PASS}
+    assert score.to_json()["ci_scored"] == SQUARE_TILE_CI
+    # P1212 is scored on WM > GM alone (plan §14 H12).
+    other = score_h12(item.metrics, pair_id="P1212")
+    assert not other.ordering_required and other.wm_gm_verdict == PASS
+    assert other.verdict == PASS
+
+
+def test_h12_on_a_gated_platform_is_not_available_under_the_scored_ci(
+    tmp_path: Path,
+) -> None:
+    xenium = _close_deep_layers("XENIUM", 2)
+    xenium.labels["ct_supercluster_status"] = "withheld_for_comparison"
+    xenium.summary["resolution"]["gate"]["level"] = "broad_only"
+    item = _item(_inputs(_layer_cells("MERSCOPE", 1), xenium), tmp_path)
+    (tile,) = _records(
+        item, "depth_ordering_passes", sample_id="PX_XENIUM", kind=SQUARE_TILE_CI
+    )
+    assert tile.status == "not_available" and tile.value is None
+    (scored,) = _records(item, "depth_ordering_replicated", kind=SQUARE_TILE_CI)
+    assert scored.status == "not_available"
+    score = score_h12(item.metrics, pair_id="P7513")
+    assert score.ordering == {"MERSCOPE": PASS, "XENIUM": NOT_AVAILABLE}
+    assert score.verdict == NOT_AVAILABLE
+
+
+def test_without_tangential_positions_the_scored_record_is_the_primary(
+    tmp_path: Path,
+) -> None:
+    samples = [_layer_cells("MERSCOPE", 1), _close_deep_layers("XENIUM", 2)]
+    for sample in samples:
+        assert sample.depth is not None
+        sample.depth = sample.depth.drop(columns=["tangential_position_um"])
+    item = _item(_inputs(*samples), tmp_path)
+    for sample in samples:
+        (primary,) = _records(
+            item, "depth_ordering_passes", sample_id=sample.sample_id, kind=None
+        )
+        (tile,) = _records(
+            item,
+            "depth_ordering_passes",
+            sample_id=sample.sample_id,
+            kind=SQUARE_TILE_CI,
+        )
+        assert primary.value == tile.value
+    (method,) = _records(item, "depth_ci_method")
+    assert method.value == SQUARE_TILE_CI
+    assert score_h12(item.metrics, pair_id="P7513").verdict == FAIL
