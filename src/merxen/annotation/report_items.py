@@ -73,6 +73,10 @@ UNALLOCATED: Final = "unallocated"
 AGREEMENT_MIN_COUNTS: Final = 20
 SECOND_VOTE_BELOW: Final = 60
 DEPTH_STRATUM_MIN_COUNTS: Final = 30
+# The H4 label set item 8 shows first: scripts/acceptance/resolve_criteria.py's
+# non-circular headline (H4_HEADLINE_SET, M4 review: the WHB-only re-resolve
+# of the held-out map); then any argmax set (heldout_genes.py's own tables).
+HELDOUT_HEADLINE_SET: Final = "m4_resolve_heldout_whb_only"
 COP_SUPERCLUSTER: Final = "Committed oligodendrocyte precursor"
 OPC: Final = "Oligodendrocyte precursors"
 H5_DEFINITIONS: Final[dict[str, str]] = {
@@ -1800,14 +1804,15 @@ def item_heldout(
         return item
     frame = inputs.heldout.copy()
     if "label_set" in frame.columns and len(frame["label_set"].unique()) > 1:
-        preferred = [
-            name for name in frame["label_set"].unique() if "argmax" in str(name)
+        names = [str(name) for name in frame["label_set"].unique()]
+        preferred = [name for name in names if name == HELDOUT_HEADLINE_SET] + [
+            name for name in names if "argmax" in name
         ]
-        label_set = preferred[0] if preferred else frame["label_set"].iloc[0]
+        label_set = preferred[0] if preferred else names[0]
         item.notes.append(
             f"label set shown: {label_set} (all label sets in the table CSV)"
         )
-        shown = frame[frame["label_set"] == label_set]
+        shown = frame[frame["label_set"].astype(str) == label_set]
     else:
         shown = frame
     for row in shown.to_dict("records"):

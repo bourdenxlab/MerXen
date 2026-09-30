@@ -173,3 +173,45 @@ def test_emission_metrics_use_the_resolve_regime_and_skip_off_levels() -> None:
     assert records["thresholds_raised_by_local_rule"].value == 1
     assert records["prep_bins_emitted"].kind == "whb:validated"
     assert all(record.criterion == "H18" for record in records.values())
+
+
+def test_heldout_item_shows_the_h4_headline_label_set(tmp_path: Path) -> None:
+    """Item 8 shows resolve_criteria's non-circular H4 headline set first."""
+    rows = []
+    for label_set in ("heldout_argmax", ri.HELDOUT_HEADLINE_SET, "m4_resolve_heldout"):
+        for platform in ("MERSCOPE", "XENIUM"):
+            rows.append(
+                {
+                    "pair": "S",
+                    "platform": platform,
+                    "broad_class": "Neurons",
+                    "label_set": label_set,
+                    "fold": 10.0 if label_set == ri.HELDOUT_HEADLINE_SET else 2.0,
+                    "auroc": 0.9,
+                    "n_assigned": 100,
+                }
+            )
+    inputs = ReportInputs(
+        sources=ReportSources(
+            species="human", pair_id="S", segmentation="seg", resolve_dir=tmp_path
+        ),
+        summary={},
+        samples={"S_MERSCOPE": _sample(pd.DataFrame({"in_table": [True]}))},
+        heldout=pd.DataFrame(rows),
+    )
+    item = ri.item_heldout(
+        inputs, ri.ItemWriter(tmp_path / "out", make_figures=False), ri.ReportOptions()
+    )
+    assert item.status == "ok"
+    folds = [record for record in item.metrics if record.name == "heldout_fold"]
+    assert {record.kind for record in folds} == {ri.HELDOUT_HEADLINE_SET}
+    assert {record.value for record in folds} == {10.0} and len(folds) == 2
+    # Every label set stays in the item's table.
+    table = pd.read_csv(
+        tmp_path / "out" / "tables" / "item08_heldout_genes__heldout.csv"
+    )
+    assert set(table["label_set"]) == {
+        "heldout_argmax",
+        ri.HELDOUT_HEADLINE_SET,
+        "m4_resolve_heldout",
+    }
