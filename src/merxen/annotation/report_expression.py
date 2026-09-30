@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Final
 
@@ -42,6 +42,7 @@ from merxen.annotation.report_inputs import (
     ReportInputs,
     SampleData,
     read_clustered_table,
+    resolved_gene_ids,
 )
 from merxen.annotation.report_items import (
     confident,
@@ -84,7 +85,10 @@ SENSITIVITY_PREFIXES: Final[tuple[tuple[str, str], ...]] = (
 
 
 def _counts_for(
-    sample: SampleData, table: pd.DataFrame, cache: dict[str, ClusteredTable]
+    sample: SampleData,
+    table: pd.DataFrame,
+    cache: dict[str, ClusteredTable],
+    lookup: Mapping[str, str] | None = None,
 ) -> tuple[Any, list[str], np.ndarray] | None:
     """Return the table cells' counts (``table`` order), gene ids and found mask."""
     if sample.clustered_path is None:
@@ -97,7 +101,7 @@ def _counts_for(
     if not found.any():
         return None
     matrix = clustered.counts[position[found]]
-    return matrix, clustered.gene_ids, found
+    return matrix, resolved_gene_ids(clustered.gene_ids, lookup or {}), found
 
 
 def _cell_log_cpm_stats(
@@ -191,7 +195,7 @@ def item_reference_expectation(
     ref_nodes = sorted(profiles["node_name"].astype(str).unique())
     for sample in inputs.ordered_samples():
         table = table_cells(sample)
-        loaded = _counts_for(sample, table, cache)
+        loaded = _counts_for(sample, table, cache, inputs.gene_lookup)
         if loaded is None:
             item.notes.append(f"{sample.sample_id}: no clustered H5AD counts")
             continue
@@ -769,8 +773,8 @@ def item_cross_platform(
     # Gene factors and pseudobulk r.
     if options.read_expression and scope.allows("broad"):
         cache: dict[str, ClusteredTable] = {}
-        loaded_a = _counts_for(first, table_a, cache)
-        loaded_b = _counts_for(second, table_b, cache)
+        loaded_a = _counts_for(first, table_a, cache, inputs.gene_lookup)
+        loaded_b = _counts_for(second, table_b, cache, inputs.gene_lookup)
         if loaded_a is not None and loaded_b is not None:
             factors, pseudo = _gene_factors(
                 first, second, table_a, table_b, loaded_a, loaded_b, cache

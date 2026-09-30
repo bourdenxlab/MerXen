@@ -510,6 +510,8 @@ class ReportInputs:
         bundles: Reference id to its bundle directory (existing ones only).
         mask: The pair's shared tissue mask (``panel.SharedTissueMask``).
         heldout: The held-out-gene enrichment rows of this pair, if given.
+        gene_lookup: Case-folded panel symbol to its resolved Ensembl id,
+            from the PANEL / MAP panel files (symbol-only H5ADs).
     """
 
     sources: ReportSources
@@ -520,6 +522,7 @@ class ReportInputs:
     bundles: dict[str, Path] = field(default_factory=dict)
     mask: Any | None = None
     heldout: pd.DataFrame | None = None
+    gene_lookup: dict[str, str] = field(default_factory=dict)
 
     @property
     def species(self: ReportInputs) -> Species:
@@ -581,6 +584,50 @@ def _map_samples(map_manifest: Mapping[str, Any] | None) -> dict[str, dict[str, 
     if isinstance(samples, list):
         return {str(item.get("sample_id")): dict(item) for item in samples}
     return {str(key): dict(value) for key, value in samples.items()}
+
+
+def panel_gene_lookup(directories: Iterable[Path | None]) -> dict[str, str]:
+    """Return case-folded symbol -> Ensembl id from ``panel_genes*.json`` files.
+
+    PANEL resolves every declared symbol (plan §8.4); a symbol-only
+    MERSCOPE H5AD is joined to the bundles' Ensembl ids through it.
+
+    Args:
+        directories: PANEL outputs (``panel_genes.json``,
+            ``panel_genes_setc.json``, ...).
+
+    Returns:
+        The lookup (first file wins on a conflict; empty without files).
+    """
+    lookup: dict[str, str] = {}
+    for directory in directories:
+        if directory is None or not Path(directory).is_dir():
+            continue
+        for path in sorted(Path(directory).glob("panel_genes*.json")):
+            try:
+                payload = read_json(path)
+            except (ReportInputError, ValueError, OSError):
+                continue
+            ids = payload.get("ensembl_ids") or []
+            symbol_lists = [payload.get("symbols") or []]
+            symbol_lists += list((payload.get("symbols_by_platform") or {}).values())
+            for symbols in symbol_lists:
+                if len(symbols) != len(ids):
+                    continue
+                for symbol, gene_id in zip(symbols, ids, strict=True):
+                    if symbol and gene_id:
+                        lookup.setdefault(str(symbol).casefold(), str(gene_id))
+    return lookup
+
+
+def resolved_gene_ids(gene_ids: Sequence[str], lookup: Mapping[str, str]) -> list[str]:
+    """Return Ensembl ids for an H5AD's genes (symbols resolved through ``lookup``)."""
+    from merxen.gene_ids import is_ensembl_gene_id
+
+    return [
+        gene if is_ensembl_gene_id(gene) else lookup.get(str(gene).casefold(), gene)
+        for gene in gene_ids
+    ]
 
 
 def load_heldout(path: Path, pair_id: str) -> pd.DataFrame | None:
@@ -725,6 +772,12 @@ def load_report_inputs(sources: ReportSources) -> ReportInputs:
     heldout = None
     if sources.heldout_csv is not None:
         heldout = load_heldout(sources.heldout_csv, sources.pair_id)
+    gene_lookup = panel_gene_lookup(
+        [
+            sources.panel_dir,
+            None if sources.map_dir is None else sources.map_dir / "panel",
+        ]
+    )
     return ReportInputs(
         sources=sources,
         summary=summary,
@@ -734,6 +787,7 @@ def load_report_inputs(sources: ReportSources) -> ReportInputs:
         bundles=bundles,
         mask=mask,
         heldout=heldout,
+        gene_lookup=gene_lookup,
     )
 
 
@@ -754,7 +808,9 @@ __all__ = [
     "discover_sources",
     "load_heldout",
     "load_report_inputs",
+    "panel_gene_lookup",
     "read_clustered_table",
+    "resolved_gene_ids",
     "read_json",
     "resolve_summary_path",
     "with_sources",

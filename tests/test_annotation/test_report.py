@@ -162,6 +162,14 @@ def test_report_builds_every_item_with_one_csv_per_figure(
     assert 0.5 < h3.value <= 1.0
     assert document.provenance["samples"]["PX_MERSCOPE"]["labels_sha256"]
     assert (tmp_path / "report" / "PX_platform_gene_factors.csv").is_file()
+    # The symbol-only MERSCOPE H5AD is joined to the profiles through PANEL's ids.
+    dotplot = pd.read_csv(
+        tmp_path
+        / "report"
+        / "figures"
+        / "item04_reference_expectation_dotplot_merscope.csv"
+    )
+    assert len(dotplot) and dotplot["gene_id"].str.startswith("ENSG").all()
 
 
 def test_report_h1_reuses_resolves_pair_jsd_and_recomputes_it(
