@@ -39,7 +39,8 @@ SEA-AD Multiregion second vote into one status per level (``CellStatus``,
    neurons is a recorded M4 deviation (pre-registration §15): the final
    label is the deepest confident level of a contiguous chain (lineage ->
    broad -> NT -> supercluster; ``schema`` final-chain check), so a neuron
-   supercluster above an unresolved NT would skip a level.
+   supercluster above an unresolved NT would skip a level. The user
+   accepted it as a tightening on 2026-09-30 (M8 D9, pre-registration §18).
 5. **SEA-AD subclass** (secondary name, never in ``ct_final``): gate level
    ``full``, a confident WHB broad that SEA-AD's 7-class call agrees with,
    the supercluster floor of the broad class, SEA's raw threshold (0.55
