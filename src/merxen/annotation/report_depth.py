@@ -108,7 +108,7 @@ SQUARE_TILE_CI: Final = "square_tile_500um"
 # needs the user's written approval (§17; M7 D23, not decided). The report
 # keeps the tangential blocks as its display primary; every H12 ordering
 # record with ``kind = SCORED_CI`` (per platform and the pair's replication)
-# is the scored one (``acceptance_scoring.score_h12``).
+# is the scored one (``report_scoring.score_h12``).
 SCORED_CI: Final = SQUARE_TILE_CI
 INVALID_REASON: Final = "depth_input_invalid"
 # A depth computed on transformed (aligned) coordinates: the frame in which

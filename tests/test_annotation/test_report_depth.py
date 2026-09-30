@@ -15,7 +15,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from merxen.annotation.acceptance_scoring import FAIL, NOT_AVAILABLE, PASS, score_h12
 from merxen.annotation.report_depth import (
     DEEP_NP_CT_6B,
     INVALID_REASON,
@@ -28,6 +27,7 @@ from merxen.annotation.report_depth import (
 )
 from merxen.annotation.report_inputs import ReportInputs, ReportSources, SampleData
 from merxen.annotation.report_model import ItemWriter, ReportItem, ReportOptions
+from merxen.annotation.report_scoring import FAIL, NOT_AVAILABLE, PASS, score_h12
 
 OPTIONS = ReportOptions(n_bootstrap=30)
 STEM = "item09_cortical_depth"

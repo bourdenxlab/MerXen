@@ -22,6 +22,11 @@ M8 scoring protocol that must not live only in an evidence script:
 The tolerances were stated at the M8 review (2026-09-30), before stage B;
 they only narrow the approved exceptions (a failure outside them goes back
 to the user), so they loosen nothing.
+
+It is a ``report*`` module on purpose: like the report, it reads what
+RESOLVE wrote and RESOLVE never imports it, so it stays out of the RESOLVE
+rules fingerprint (``AnnotationReferences.RESOLVE_RULE_EXCLUDES``) and an
+edit to the scoring does not re-run RESOLVE in the pipeline.
 """
 
 from __future__ import annotations

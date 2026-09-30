@@ -1,4 +1,4 @@
-"""Tests for the M8 gate scoring rules (``acceptance_scoring``; prereg §18)."""
+"""Tests for the M8 gate scoring rules (``report_scoring``; prereg §18)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from typing import Any
 import pandas as pd
 import pytest
 
-from merxen.annotation import acceptance_scoring as sc
+from merxen.annotation import report_scoring as sc
 from merxen.annotation.report_depth import PRIMARY_CI, SQUARE_TILE_CI
 
 
