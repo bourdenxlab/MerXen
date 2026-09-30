@@ -199,7 +199,8 @@ The updated AnnData `obs` columns include `inside_cortical_ribbon`,
 `cortical_depth_annotation`, `laplace_depth`, `equivolumetric_depth`,
 `distance_to_pia_um`, `distance_to_wm_um`, `streamline_thickness_um`,
 `tangential_position_um`, `nearest_streamline_id`, `column_id`, and
-`cortical_depth_qc_flag`.
+`cortical_depth_qc_flag`; the table's `uns['cortical_depth']` records the
+boundary frame and cell coordinate source they were computed from.
 
 ### Distance from object
 

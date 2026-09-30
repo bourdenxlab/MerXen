@@ -35,6 +35,10 @@ ALIGNED_ELEMENT: Final = "aligned_element"
 FIXED_REFERENCE_NATIVE_ELEMENT: Final = "fixed_reference_native_element"
 TABLE_SPATIAL_ONLY: Final = "table_spatial_only"
 
+# ``uns`` key of the frame provenance written with the depth columns, so a
+# table (and anything that copies its ``uns``) says which frame they came from.
+DEPTH_PROVENANCE_UNS_KEY: Final = "cortical_depth"
+
 
 class BoundaryFrameMismatchError(ValueError):
     """The cell coordinates cannot be put in the frame of the boundaries."""
@@ -71,6 +75,29 @@ class CellCoordinateFrame:
             "cell_coordinate_frame": self.boundary_frame,
             "frame_resolution": self.resolution,
         }
+
+    def table_provenance(
+        self: CellCoordinateFrame, coordinate_source: str
+    ) -> dict[str, str]:
+        """Return the frame provenance stored in a written-back table's ``uns``.
+
+        Args:
+            coordinate_source: Where the cell coordinates were read from
+                (``obsm:spatial`` or ``shapes:<key>``).
+
+        Returns:
+            ``boundary_frame``, ``frame_resolution``, ``coordinate_source`` and,
+            when the store has shapes, ``shape_key``; all strings, so the entry
+            is Zarr-serialisable.
+        """
+        provenance = {
+            "boundary_frame": self.boundary_frame,
+            "frame_resolution": self.resolution,
+            "coordinate_source": str(coordinate_source),
+        }
+        if self.shape_key is not None:
+            provenance["shape_key"] = self.shape_key
+        return provenance
 
 
 def is_aligned_element_key(key: str | None) -> bool:
