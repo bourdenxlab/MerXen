@@ -45,6 +45,8 @@ from merxen.annotation.report_inputs import (
     ReportInputs,
     ReportSources,
     load_report_inputs,
+    recorded_bundle_dirs,
+    report_results_root,
 )
 from merxen.annotation.report_items import (
     item_ad_ood,
@@ -152,11 +154,19 @@ def check_output_dir(
 ) -> None:
     """Refuse an output directory inside the inputs, or a non-empty one.
 
+    The report never writes into a results tree (rule R3, as MAP and
+    RESOLVE): not inside an input directory or ``--results-root``, not at or
+    below the results root of any input (``report_results_root``: the
+    RESOLVE, MAP and PANEL outputs, the clustered H5ADs, the depth tables,
+    the MENDER manifests, the alignment), not inside the reference store or
+    a bundle RESOLVE's manifests record (stores only gain new build
+    directories), and not beside the held-out-gene CSV.
+
     Args:
         out_dir: The requested report directory.
         sources: The report's inputs.
         allow_results_output: Allow writing inside the results tree / an
-            input directory (the pipeline's ``annotation_report`` publish).
+            input directory (an explicit publish into a results tree).
         overwrite: Allow a non-empty directory (files are replaced, none is
             deleted).
 
@@ -171,10 +181,44 @@ def check_output_dir(
                     f"input {root} (pass allow_results_output / --allow-results-output "
                     "to publish into a results tree)"
                 )
+        for directory, reason in guarded_directories(sources):
+            if _is_within(out_dir, directory):
+                raise ReportOutputError(
+                    f"refusing to write the report into {out_dir}: it lies inside "
+                    f"{directory}, {reason} (write the report elsewhere, or pass "
+                    "allow_results_output / --allow-results-output)"
+                )
     if out_dir.exists() and any(out_dir.iterdir()) and not overwrite:
         raise ReportOutputError(
             f"{out_dir} is not empty (pass overwrite / --overwrite)"
         )
+
+
+def guarded_directories(sources: ReportSources) -> list[tuple[Path, str]]:
+    """Return the directories a report output must stay out of, with the reason.
+
+    Args:
+        sources: The report's inputs.
+
+    Returns:
+        ``(directory, reason)`` pairs: every input's results root, the
+        reference store, the bundles RESOLVE's manifests record and the
+        held-out CSV's directory.
+    """
+    guarded: list[tuple[Path, str]] = []
+    for path in sources.input_paths():
+        root = report_results_root(path)
+        if root is not None:
+            guarded.append((root, f"the results tree of the input {path}"))
+    if sources.store_root is not None:
+        guarded.append((Path(sources.store_root), "the reference store"))
+    for bundle in recorded_bundle_dirs(sources.resolve_dir, sources.pair_id):
+        guarded.append((bundle, "a reference bundle RESOLVE's manifests record"))
+    if sources.heldout_csv is not None:
+        guarded.append(
+            (Path(sources.heldout_csv).parent, "the held-out-gene CSV's directory")
+        )
+    return guarded
 
 
 def _failed_item(
@@ -331,4 +375,5 @@ __all__ = [
     "build_annotation_report",
     "check_output_dir",
     "dataset_digest",
+    "guarded_directories",
 ]

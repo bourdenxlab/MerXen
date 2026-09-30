@@ -74,8 +74,108 @@ DEPTH_COLUMNS: Final[tuple[str, ...]] = (
 MOUSE_REGIONS_SUFFIX: Final = "_mouse_regions.parquet"
 
 
+# Step directories of a results tree whose results root the report guards
+# (plan §3.6): ``<root>/<pair>/<seg>/<step>[_<suffix>]/<step>_out`` and
+# ``<root>/<pair>/<plat>/compute_cortical_depth[_<suffix>]/
+# compute_cortical_depth_out``; the pair's ``<root>/<pair>/alignment/
+# align_out``.
+RESULTS_STEP_BASES: Final[tuple[str, ...]] = (
+    "annotation_map",
+    "annotation_panel",
+    "annotation_report",
+    "annotation_resolve",
+    "clustering_squidpy",
+    "compute_cortical_depth",
+    "mender",
+)
+ALIGNMENT_STEP: Final = ("alignment", "align_out")
+
+
 class ReportInputError(ValueError):
     """The report inputs are missing or inconsistent."""
+
+
+def _step_base(name: str) -> str | None:
+    """Return the step a directory name belongs to (``mender_mapfirst``: mender)."""
+    for base in RESULTS_STEP_BASES:
+        if name == base or (name.startswith(f"{base}_") and not name.endswith("_out")):
+            return base
+    return None
+
+
+def report_results_root(path: Path | str) -> Path | None:
+    """Return the results root an input sits in, if it sits in a results tree.
+
+    ``merxen.annotation.pipeline.results_root_of`` first (published clustered
+    H5ADs, the annotation step directories); then the other published layouts
+    the report reads: a step directory ``<step>[_<suffix>]`` whose
+    ``<step>_out`` child is on the path (``clustering_squidpy_mapfirst``,
+    ``mender[_<suffix>]``, ``<plat>/compute_cortical_depth[_<suffix>]``) and
+    the pair's ``alignment/align_out``. Both need the ``<root>/<pair>/<seg or
+    plat>`` levels above them. Pipeline inputs are staged from work
+    directories (``<work>/<xx>/<hash>/<step>_out``), which have no step
+    directory above their ``_out`` directory, so they give ``None``.
+
+    Args:
+        path: An input file or directory.
+
+    Returns:
+        ``<root>``, or ``None`` outside a results tree.
+    """
+    from merxen.annotation.pipeline import results_root_of
+
+    root = results_root_of(path)
+    if root is not None:
+        return root
+    resolved = Path(path).resolve()
+    chain = [resolved, *resolved.parents]
+    for index, ancestor in enumerate(chain):
+        child = chain[index - 1].name if index > 0 else None
+        base = _step_base(ancestor.name)
+        output = f"{base}_out"
+        has_output = child == output or (child is None and (ancestor / output).is_dir())
+        if base is not None and has_output and len(ancestor.parents) > 2:
+            return ancestor.parents[2]
+        step, out = ALIGNMENT_STEP
+        is_alignment = ancestor.name == step and (
+            child == out or (child is None and (ancestor / out).is_dir())
+        )
+        if is_alignment and len(ancestor.parents) > 1:
+            return ancestor.parents[1]
+    return None
+
+
+def recorded_bundle_dirs(resolve_dir: Path, pair_id: str) -> list[Path]:
+    """Return the bundle directories RESOLVE's annotation manifests record.
+
+    Args:
+        resolve_dir: ``annotation_resolve_out``.
+        pair_id: Pair (or mouse section) id.
+
+    Returns:
+        The recorded ``bundle_path`` of every reference (existing or not),
+        sorted; empty when the summary or manifests cannot be read.
+    """
+    summary = resolve_summary_path(resolve_dir, pair_id)
+    try:
+        samples = read_json(summary).get("samples") or {}
+    except (OSError, ValueError):
+        return []
+    found: set[Path] = set()
+    for sample_id, entry in samples.items():
+        platform = _platform_dir(str((entry or {}).get("platform", "")))
+        relative = (entry or {}).get("annotation_manifest") or (
+            Path(platform) / f"{sample_id}{MANIFEST_SUFFIX}"
+        )
+        try:
+            manifest = read_json(Path(resolve_dir) / str(relative))
+        except (OSError, ValueError):
+            continue
+        for record in (manifest.get("references") or {}).values():
+            recorded = (record or {}).get("bundle_path")
+            if recorded:
+                found.add(Path(str(recorded)))
+    return sorted(found)
 
 
 @dataclass(frozen=True)
@@ -126,6 +226,18 @@ class ReportSources:
         if self.results_root is not None:
             roots.append(self.results_root)
         return roots
+
+    def input_paths(self: ReportSources) -> list[Path]:
+        """Return every input directory and file (for the results-tree guard)."""
+        paths: list[Path] = [self.resolve_dir]
+        for item in (self.map_dir, self.panel_dir, self.alignment_dir):
+            if item is not None:
+                paths.append(item)
+        for mapping in (self.clustered_h5ad, self.cortical_depth, self.mender):
+            paths.extend(Path(path) for path in mapping.values())
+        if self.heldout_csv is not None:
+            paths.append(self.heldout_csv)
+        return paths
 
     def describe(self: ReportSources) -> dict[str, Any]:
         """Return the sources as JSON (paths as strings)."""
@@ -829,6 +941,8 @@ __all__ = [
     "load_report_inputs",
     "panel_gene_lookup",
     "read_clustered_table",
+    "recorded_bundle_dirs",
+    "report_results_root",
     "resolved_gene_ids",
     "read_json",
     "resolve_summary_path",
