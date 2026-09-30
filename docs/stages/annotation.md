@@ -1557,6 +1557,76 @@ reading the `merxen annotate` outputs and the published inputs read-only:
 The results and the decisions they feed (X1, OD-B6 / OD-B7, OD-B8, OD-B13, the
 H4 and H16 baselines) are in §11 of the pre-registration document.
 
+## Annotation report (`merxen annotation-report`, M7)
+
+`merxen.annotation.report` builds the QC report of plan §9 from the
+published outputs of one human pair × segmentation (or one mouse section ×
+segmentation): RESOLVE (`<pair>_resolve_summary.json`, the label tables and
+annotation manifests), MAP (`map_manifest.json`; the mouse region step's
+`<sid>_mouse_regions.parquet`), PANEL (`panel_report.json`), the clustered
+H5ADs of COMPUTE_CPU / FINALIZE (coordinates and counts), cortical depth,
+the shared tissue mask and the MENDER manifests when present, and the
+bundles the provenance names (read-only). It writes a fresh directory and
+never a results tree unless `--allow-results-output` is given (the
+`ANNOTATION_REPORT` pipeline process, which publishes to
+`<pair>/<seg>/annotation_report/`, is the next step of M7).
+
+| Item (§9) | What the report shows | Metrics (`acceptance_metrics.json`) |
+|---|---|---|
+| 1 Annotatability, panel | Confident fraction per level of table cells and of segmented objects, status breakdown, resolvable share, gate values and reasons, trust state and basis, realised flag rates per class × platform, the self-thinning eligibility (≥ 500 cells with ≥ 200 counts) with its truth composition, and the **panel card**: gene-ID resolution by source, unresolved features, controls by type, markers per parent (weak and collapsed parents, nodes MapMyCells patches with ancestor markers), precision-coverage curves per level and depth, D_max and extrapolated share per class, PREP (unweighted) vs RESOLVE (reweighted) emission, thresholds and floors with their source; banners for `provisional`, `broad_only` and `refused` panels and failed or broad-only gates | H7, H8 (MO7), H16, H18 inputs |
+| 2 Composition | Soft (headline), soft ≥ 30 counts, confident-only and argmax composition per level with 95% block-bootstrap CIs (500 µm tiles, 200 replicates, seed 0), whole section vs shared mask, per depth bin, `Mixed/Unknown` by reason, sinks and region-implausible nodes, COP control | H2, H5 (MO4 shares) |
+| 3 Confidence vs counts | 2D histograms of raw bp and `avg_correlation` vs counts per platform and level, with the raw thresholds | — |
+| 4 Reference expectation | Observed fraction-positive and mean log2(CPM+1) per confident leaf label on its most specific panel genes, beside `profiles.parquet`; pseudobulk-centroid r and a correlation re-mapping to the nearest reference centroid | report-only |
+| 5 Negative-marker purity | `contamination_score` quantiles and `flag_contaminated` rate per confident broad label and platform | report-only |
+| 6 Method agreement | WHB vs SEA-AD at 7 classes and lineage by count quartile, consensus tier fractions and a tier map, the below-60 rule's coverage cost (cells < 60 counts whose broad or lineage status is `method_disagree` / `single_method`) | H3 |
+| 7 Cross-platform (human) | Soft broad and supercluster JSD (whole section, shared mask, joint block bootstrap), set c or the intersection run beside set a, per-type density correlation in 200 µm aligned bins, `<pair>_platform_gene_factors.csv` (median-centred per-gene log2 Xenium / MERSCOPE within confident labels) and per-label pseudobulk r; every statement follows RESOLVE's cross-platform scope, withheld ones are recorded as `withheld` | H1 |
+| 8 Held-out genes | The `heldout_genes.py` enrichment rows of the pair (`--heldout-csv`); mouse: the spill-over held-out test and astrocyte FPR | H4, MO5 |
+| 9 Cortical depth (human) | Median depth per confident supercluster (NP and CT/6b merged) and broad class with 95% CIs; the ordering Upper-layer IT < Deep-layer IT < Deep-layer NP/CT/6b with non-overlapping CIs per platform and its replication across platforms; oligodendrocytes WM > GM; astrocyte / neuron / oligodendrocyte depth gradients | H12 |
+| 10 Mouse regions | Inferred vs explicit regions, the tile map, the drop list, relabelled cells and targets, subclass × region vs MERFISH shares, class composition vs the AP-matched window, Astro-Epen with and without low-count cells, F1 rate, spill-over prevalence and its map, gate G1–G5; the M6b fields (AP estimate and bin, rule variant) are read when present and reported `pending_m6b` otherwise | MO2–MO7, MO10 / MO11 placeholders |
+| 11 AD and OOD (human) | Depth-matched real / in-silico `avg_correlation` ratio per class (in-silico = the primary bundle's correct resolvability calls), `flag_ood` rate, SEA-AD disease-supertype share per class (population level, `calibrated = false`) | report-only |
+| 12 Provenance | References, bundle and lookup hashes, label sha256, ctm version and commit, seeds, wall times, panel family, trust state, calibration kind, MENDER digest; the H13 id-set check (label `in_table` ids = clustered H5AD ids) | H13, H14 inputs |
+
+**Metrics, not verdicts.** `acceptance_metrics.json` lists every measured
+value as a record (criterion id, name, sample, region, level, kind, value,
+95% CI, n, definition, source, status) with a coverage table of the §14
+criteria: which come from the report and which from the acceptance scripts
+(H6, H9, H10, H15; MO1's own definition, MO10). Pass / fail against the
+pre-registered thresholds is the acceptance programme's (M8, M9). The file,
+the HTML, the CSVs and the figures are byte-identical for identical inputs
+(no timestamps; seeded bootstraps); wall time and versions go to
+`report_run.json`.
+
+**Definitions chosen here (the plan leaves them open).**
+
+- *H12 CIs:* the §5.5 block bootstrap over 500 µm tiles is primary. Because
+  a square tile holds a narrow depth range, resampling tiles re-weights
+  depth and widens the interval; the ordering is also reported with CIs
+  from resampling the depth output's cortical columns (`column_id`,
+  `kind = column_bootstrap`), as a sensitivity. For a dataset whose gate is
+  not `full` (no supercluster labels) the ordering is `not_available`.
+- *H12 WM > GM:* with a `white_matter` label in the depth output (the brain
+  outline annotated) the share is compared between `white_matter` and
+  `grey_matter` cells; without it (the current outputs) cells outside the
+  cortical ribbon stand in for white matter (`kind = outside_ribbon_proxy`).
+- *Replication (H12, "on both platforms"):* the ordering passes on both
+  platforms, reported with the Spearman correlation of the supercluster
+  median depths between the platforms.
+- *Self-thinning (item 1):* eligibility and truth composition only; a run
+  whose deep cells are > 50% one class is marked unreliable. The thinned
+  re-map itself is v1.1 (§5.4).
+- *Pseudobulk re-mapping (item 4):* nearest reference centroid by the
+  correlation of log2(CPM+1) profiles, not a MapMyCells run.
+
+```bash
+merxen annotation-report --pair P7513 --segmentation proseg_hybrid \
+  --results-root /srv/storage/MerXen/results \
+  --store /media/mathieubo/SSD1/MerXen/annotation_references \
+  --out /path/outside/results/P7513_proseg_hybrid_report
+```
+
+On the published P7513 and P1212 proseg_hybrid outputs a report takes
+about 40 s and 4 GB (one process).
+
 ## Known limitations
 
 - **Four WMB subclasses have no 10Xv3 reference cell** (`157 RN Spp1 Glut`,

@@ -467,6 +467,33 @@ M3 shadow evaluation (plan §5.2–§5.5, §14):
 
 See [Reference-based annotation](stages/annotation.md).
 
+### `annotation.report` — [report.py](../src/merxen/annotation/report.py)
+
+The annotation QC report (plan §9; M7):
+
+- `build_annotation_report(sources, out_dir, options=..., allow_results_output=False)`
+  (`ReportResult`); `check_output_dir`; `ITEM_BUILDERS`.
+- Inputs (`report_inputs`): `discover_sources` (the published layout),
+  `ReportSources`, `load_report_inputs` (`ReportInputs`, `SampleData`),
+  `read_clustered_table`, `load_heldout`.
+- Metrics (`report_metrics`, numpy / pandas only): `soft_level_matrix`,
+  `one_hot_matrix`, `block_bootstrap_shares` (`ShareResult`),
+  `jensen_shannon_distance`, `aligned_bin_density_correlation`,
+  `median_block_ci` (`MedianCi`), `depth_ordering` (`OrderingResult`),
+  `depth_replication` (`ReplicationResult`), `share_contrast`,
+  `depth_profile`, `profile_gradient`, `platform_gene_log2_ratios`,
+  `group_mean_counts`, `log_cpm`, `nearest_centroid`,
+  `agreement_by_quantile`, `histogram_2d`, `tile_mean_map`,
+  `self_thinning_eligibility`.
+- Panel card (`report_panel`): `build_panel_card` (`PanelCard`),
+  `trust_banners` (`Banner`), `resolvability_curves`, `resolvability_bins`,
+  `bundle_marker_rows`, `v7_notes`.
+- Items: `report_items` (1, 2, 3, 5, 6, 8, 11, 12), `report_expression`
+  (4, 7), `report_depth` (9), `report_mouse` (10; `ap_fields`,
+  `subclass_region_table`, `window_composition`).
+- Model (`report_model`): `AcceptanceMetrics`, `MetricRecord`, `metric`,
+  `CriterionCoverage`, `ReportItem`, `ReportOptions`.
+
 ### `annotation.likelihood` — [likelihood.py](../src/merxen/annotation/likelihood.py)
 
 The LL (vii) count-likelihood typer (E1 `14_ll_contam.py`) on a bundle's
