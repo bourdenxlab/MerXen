@@ -804,6 +804,36 @@ def test_prep_logs_of_a_build_are_not_a_reuse(acceptance: ModuleType) -> None:
     assert reuse == {SET_A[:16]: False}
 
 
+def test_p5_checks_the_second_policys_map_runs(
+    acceptance: ModuleType, tmp_path: Path
+) -> None:
+    runs = tmp_path / "runs"
+    main = runs / acceptance.MAP_MANIFEST_PATH.format(pair="P7513", seg="proseg_hybrid")
+    state = runs / acceptance.STATE_MAP_MANIFEST_PATH.format(pair="P7513")
+    for path, build_hash in ((main, SET_A), (state, "b" * 64)):
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "samples": {
+                        "P7513_MERSCOPE": {"runs": {"whb": {"build_hash": build_hash}}}
+                    }
+                }
+            )
+        )
+    found = acceptance.map_manifests(runs, ["P7513"], ["proseg_hybrid", "reseg"])
+    assert found == {
+        ("P7513", "proseg_hybrid"): main,
+        ("P7513", "proseg_hybrid/mender_state_policy"): state,
+    }
+    refs = [_bundle(tmp_path, SET_A, "2026-09-30T10:52:48+00:00")]
+    check = acceptance.check_prep_bundles(
+        refs, acceptance._parse_time(RUN_START), map_manifests=found
+    )
+    assert not check.ok
+    assert len(check.reasons) == 1 and "mender_state_policy" in check.reasons[0]
+
+
 # ---------------------------------------------------------------------------
 # run_acceptance.py: criteria rows with the §18 scopes and the report cross-check
 
@@ -1127,6 +1157,85 @@ def test_criteria_rows_cross_check_the_report(acceptance: ModuleType) -> None:
     missing = {("P7513", "proseg_hybrid"): good[("P7513", "proseg_hybrid")][1:]}
     rows = _scored(acceptance, reports=missing)
     assert "has no H1" in _get(rows, "H1", "P7513").crosscheck
+
+
+def test_crosscheck_allows_the_reports_six_digit_rounding(
+    acceptance: ModuleType,
+) -> None:
+    # report_model._clean stores float(f"{x:.6g}"): up to 5e-6 relative.
+    values = 10 ** np.random.default_rng(0).uniform(-4, 0, 20_000)
+    assert all(acceptance._close(v, float(f"{v:.6g}")) for v in values)
+    assert acceptance._close(0.0101767267, 0.0101767)  # stage A3 H2 P5011_MERSCOPE
+    assert acceptance._close(0.1771234567, 0.177123)
+    # a difference in the first five significant digits is a mismatch
+    assert not acceptance._close(0.0101767267, 0.0101769)
+    assert not acceptance._close(0.1482, 0.14822)
+
+
+def test_unrounded_criteria_values_match_the_rounded_report(
+    acceptance: ModuleType,
+) -> None:
+    table = _criteria_table()
+    at = (table["criterion"] == "H2") & (table["dataset"] == "P5011_MERSCOPE")
+    table.loc[at, "value"] = 0.0101767267
+    record = {
+        "criterion": "H2",
+        "name": "flag_implausible_share",
+        "sample_id": "P5011_MERSCOPE",
+        "value": 0.0101767,
+    }
+    reports = {("P5011", "proseg_hybrid"): [record]}
+
+    def h2() -> Any:
+        rows = acceptance.criteria_rows(
+            table, _samples(), _h2(), _enrichment(), reports, None
+        )
+        return next(
+            row
+            for row in rows
+            if row.criterion == "H2" and row.dataset == "P5011_MERSCOPE"
+        )
+
+    row = h2()
+    assert row.crosscheck == "ok"
+    assert row.verdict == "EXCEPTION (D5)" and not acceptance.back_to_user(row)
+    record["value"] = 0.0101777
+    row = h2()
+    assert row.crosscheck.startswith("CROSSCHECK-MISMATCH")
+    assert acceptance.back_to_user_reason(row) == "cross-check mismatch"
+
+
+def test_first_measured_failures_go_back_even_when_not_scored(
+    acceptance: ModuleType,
+) -> None:
+    def row(criterion: str, passes: bool | None, scored: bool = False) -> Any:
+        return acceptance.finalize(
+            acceptance.Row(
+                criterion, "P7113", "all", "P7113", 1.0, "==", 2.0, passes, scored, "x"
+            )
+        )
+
+    for criterion in (
+        "H6/broad",
+        "H6/pooled",
+        "H12",
+        "H13/id_sets",
+        "H13/depth_violins",
+        "H14/annotation_wall",
+        "H14/map_peak_rss",
+        "H15/seed1",
+    ):
+        failed = row(criterion, False)
+        assert failed.verdict == "INFO fail"
+        assert acceptance.back_to_user(failed), criterion
+        assert "first-measured" in acceptance.back_to_user_reason(failed)
+        assert not acceptance.back_to_user(row(criterion, True))
+        assert not acceptance.back_to_user(row(criterion, None))
+    held_out = row("H2", False)
+    assert held_out.verdict == "INFO fail" and not acceptance.back_to_user(held_out)
+    assert acceptance.back_to_user_reason(row("H13/id_sets", False, True)) == (
+        "verdict FAIL-OUTSIDE"
+    )
 
 
 def test_criteria_rows_read_only_the_new_vs_legacy_referee_rows(
@@ -1600,6 +1709,61 @@ def test_h15_seed_threshold_is_one_percent(acceptance: ModuleType) -> None:
     assert rows["H15/seed1"].verdict == "FAIL-OUTSIDE"
 
 
+def test_h15_failed_rerun_is_not_measured_not_a_failure(
+    acceptance: ModuleType, tmp_path: Path
+) -> None:
+    table = _labels_table(["confident"] * 2, ["Neurons", "Astrocytes"])
+    for platform in ("merscope", "xenium"):
+        for part in ("resolve", "map"):
+            directory = tmp_path / "pipeline" / part / platform
+            directory.mkdir(parents=True)
+            table.to_parquet(
+                directory / f"P7513_{platform.upper()}_celltype_labels.parquet"
+            )
+    (tmp_path / "rerun/map").mkdir(parents=True)  # the task failed: no output
+    record = acceptance.h15_compare(
+        "P7513",
+        tmp_path / "pipeline/map",
+        tmp_path / "pipeline/resolve",
+        tmp_path / "rerun/map",
+        tmp_path / "rerun/resolve",
+        tmp_path / "seed1/resolve",
+        notes=["rerun MAP exit 1"],
+    )
+    assert record["identical"] is None and "identical_files" not in record
+    assert "re-run MAP" in record["rerun_problem"]
+    assert "holds no parquet" in record["rerun_problem"]
+    assert "re-run RESOLVE" in record["rerun_problem"]
+    assert record["seed1"] is None and "labels missing" in record["seed1_problem"]
+    assert record["notes"] == ["rerun MAP exit 1"]
+    rows = acceptance.h15_rows({"P7513": record})
+    rows = [row for row in rows if row.pair == "P7513"]
+    assert [row.verdict for row in rows] == ["NOT_AVAILABLE", "NOT_AVAILABLE"]
+    assert all(acceptance.back_to_user(row) for row in rows)
+    assert "re-run MAP" in rows[0].note and "labels missing" in rows[1].note
+    out = tmp_path / "h15_P7513.json"
+    assert (
+        acceptance.main(
+            [
+                "h15",
+                "--pair",
+                "P7513",
+                "--pipeline-map",
+                str(tmp_path / "pipeline/map"),
+                "--pipeline-resolve",
+                str(tmp_path / "pipeline/resolve"),
+                "--note",
+                "rerun MAP exit 1",
+                "--out",
+                str(out),
+            ]
+        )
+        == 0
+    )
+    written = json.loads(out.read_text())
+    assert written["notes"] == ["rerun MAP exit 1"] and "identical" not in written
+
+
 # ---------------------------------------------------------------------------
 # run_acceptance.py: H18 (D4) and the end-to-end score
 
@@ -1733,6 +1897,31 @@ def test_h18_rows_check_d4s_scope(acceptance: ModuleType, tmp_path: Path) -> Non
     assert problems and "workers 6" in problems[0]
 
 
+@pytest.mark.parametrize(
+    ("check", "message"),
+    [
+        (None, "records no scored_draw_check"),
+        ({"skipped": True}, "skipped the scored-draw check"),
+        ({"reproduces": False, "calls_changed": 0.033}, "does not reproduce"),
+    ],
+)
+def test_h18_draw_check_needs_the_scored_draws_control(
+    acceptance: ModuleType, tmp_path: Path, check: dict | None, message: str
+) -> None:
+    _draw_spread(tmp_path)
+    path = tmp_path / "draw_spread_run.json"
+    run = json.loads(path.read_text())
+    if check is None:
+        run.pop("scored_draw_check")
+    else:
+        run["scored_draw_check"] = check
+    path.write_text(json.dumps(run))
+    rows, problems = acceptance.h18_rows(tmp_path, REFERENCE)
+    assert len(problems) == 1 and message in problems[0]
+    draw = next(row for row in rows if row.criterion == "H18/draw_check")
+    assert draw.verdict == "FAIL-OUTSIDE" and acceptance.back_to_user(draw)
+
+
 def _score_inputs(
     acceptance: ModuleType, root: Path, *, bundle_hash: str = SET_A
 ) -> list[str]:
@@ -1861,6 +2050,10 @@ def test_score_writes_the_summary_and_sends_failures_back(
     assert ("H13/viewer", "viewer") in back
     assert ("H1", "P7513") not in back
     assert summary["all_scored_rows_pass_or_inside_an_exception"] is False
+    assert summary["nothing_back_to_user"] is False
+    assert all(
+        row["back_to_user_reason"] for row in summary["rows"] if row["back_to_user"]
+    )
     assert (tmp_path / "out/summary.html").read_text().startswith("<!doctype html>")
     for name in (
         "criteria_scored.csv",

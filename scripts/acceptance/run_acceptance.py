@@ -50,7 +50,10 @@ D7 only, §18 item 6); ``EXCEPTION-RECHECK (Dn)`` outside it; ``FAIL-OUTSIDE``
 for a failure no decision names, which includes every failure of H6 and
 H12-H15 (first measurements, no pre-approved exception, item 4);
 ``NOT_AVAILABLE`` for a scored row that could not be measured. Everything
-but ``PASS``, ``INFO *`` and ``EXCEPTION (Dn)`` goes back to the user.
+but ``PASS``, ``INFO *`` and ``EXCEPTION (Dn)`` goes back to the user, and so
+does any failure of H6 or H12-H15 in a row the flip rule does not score
+(``INFO fail`` on a held-out pair or another segmentation; item 4 names every
+failure of a first-measured criterion).
 
 Before scoring, the P5 check (protocol item 2): every PREP bundle the run
 used names one of the three D1 bundles and was reused (its reuse logged by
@@ -127,7 +130,11 @@ VERDICT_NOT_AVAILABLE: Final = "NOT_AVAILABLE"
 VERDICT_UNSCORED: Final = "UNSCORED (P5)"
 CROSSCHECK_MISMATCH: Final = "CROSSCHECK-MISMATCH"
 FIRST_MEASUREMENTS: Final = frozenset({"H6", "H12", "H13", "H14", "H15"})
-REPORT_ROUNDING: Final = 2e-6  # acceptance_metrics.json keeps 6 significant digits
+# acceptance_metrics.json stores float(f"{x:.6g}") (report_model._clean), up to
+# 5e-6 relative from the full-precision value the criteria table keeps; the
+# cross-check allows twice that, so only a difference in the first 5
+# significant digits is a mismatch.
+REPORT_REL_TOL: Final = 1e-5
 REFEREE_NEW: Final = "new confident (RESOLVE)"  # marker_referee.NEW
 REFEREE_LEGACY: Final = "legacy broad_class"  # marker_referee.LEGACY
 H6_POOLED: Final = "pooled"
@@ -190,6 +197,12 @@ DEPTH_DIR: Final = (
 MAP_MANIFEST_PATH: Final = (
     "{pair}/{seg}/annotation_map/annotation_map_out/map_manifest.json"
 )
+# The second MENDER policy's run (launch Bstate) maps proseg_hybrid again.
+STATE_LABEL: Final = "mender_state_policy"
+STATE_MAP_MANIFEST_PATH: Final = (
+    "{pair}/proseg_hybrid/" + STATE_LABEL + "/annotation_map/annotation_map_out/"
+    "map_manifest.json"
+)
 MENDER_POLICIES: Final[dict[str, str]] = {
     "main": "exclude_from_features",
     "state": "state",
@@ -249,6 +262,7 @@ class Row:
         record = dataclasses.asdict(record_safe(self))
         record["first_measurement"] = self.base in FIRST_MEASUREMENTS
         record["back_to_user"] = back_to_user(self)
+        record["back_to_user_reason"] = back_to_user_reason(self)
         return record
 
 
@@ -285,13 +299,28 @@ def finalize(row: Row, exception: sc.ExceptionVerdict | None = None) -> Row:
     return row
 
 
-def back_to_user(row: Row) -> bool:
-    """Whether a row goes back to the user (§18 items 4 and 6)."""
+def back_to_user_reason(row: Row) -> str:
+    """Why a row goes back to the user (§18 items 4 and 6; empty: it does not).
+
+    A cross-check mismatch, a verdict outside ``PASS`` / ``INFO *`` /
+    ``EXCEPTION (Dn)``, and any failure of a first-measured criterion (H6,
+    H12-H15), also in a row the flip rule does not score (item 4: "any
+    failure comes back to the user").
+    """
     if row.crosscheck.startswith(CROSSCHECK_MISMATCH):
-        return True
-    return row.verdict.startswith(
+        return "cross-check mismatch"
+    if row.verdict.startswith(
         ("EXCEPTION-RECHECK", sc.FAIL_OUTSIDE, VERDICT_NOT_AVAILABLE, "UNSCORED")
-    )
+    ):
+        return f"verdict {row.verdict}"
+    if row.base in FIRST_MEASUREMENTS and row.passes is False:
+        return "first-measured criterion failed (not scored here; item 4)"
+    return ""
+
+
+def back_to_user(row: Row) -> bool:
+    """Whether a row goes back to the user (``back_to_user_reason``)."""
+    return bool(back_to_user_reason(row))
 
 
 def _float(value: Any) -> float:
@@ -741,7 +770,7 @@ def _close(a: Any, b: Any) -> bool:
     x, y = _float(a), _float(b)
     if math.isnan(x) and math.isnan(y):
         return True
-    return math.isclose(x, y, rel_tol=REPORT_ROUNDING, abs_tol=1e-9)
+    return math.isclose(x, y, rel_tol=REPORT_REL_TOL, abs_tol=1e-9)
 
 
 # (criterion, note prefix) -> report metric name, for the dataset-level rows.
@@ -1540,6 +1569,17 @@ def seed_change(seed0: pd.DataFrame, seed1: pd.DataFrame) -> dict[str, Any]:
     }
 
 
+def output_dir_problem(path: Path | None) -> str:
+    """Why a task output directory cannot be compared (empty: it can)."""
+    if path is None:
+        return "not given"
+    if not path.is_dir():
+        return f"{path} does not exist"
+    if not any(path.rglob("*.parquet")):
+        return f"{path} holds no parquet"
+    return ""
+
+
 def h15_compare(
     pair: str,
     pipeline_map: Path,
@@ -1547,20 +1587,58 @@ def h15_compare(
     rerun_map: Path | None,
     rerun_resolve: Path | None,
     seed1_resolve: Path | None,
+    notes: Sequence[str] = (),
 ) -> dict[str, Any]:
-    """Return the H15 record of one pair (``h15`` subcommand)."""
-    record: dict[str, Any] = {"pair": pair, "segmentation": SCORED_SEGMENTATION}
-    if rerun_map is not None and rerun_resolve is not None:
-        files = compare_parquets(pipeline_map, rerun_map) + compare_parquets(
-            pipeline_resolve, rerun_resolve
-        )
-        record["identical_files"] = files
-        record["identical"] = bool(files) and all(item["equal"] for item in files)
+    """Return the H15 record of one pair (``h15`` subcommand).
+
+    A re-run output that is absent or empty (its task failed or never ran)
+    leaves the comparison unmeasured (``identical`` / ``seed1`` ``None``,
+    with the reason), never a difference: H15 measures the re-run's content,
+    not whether the re-run could be staged.
+    """
+    record: dict[str, Any] = {
+        "pair": pair,
+        "segmentation": SCORED_SEGMENTATION,
+        "notes": list(notes),
+    }
+    if rerun_map is not None or rerun_resolve is not None:
+        problems = [
+            f"{what}: {problem}"
+            for what, path in (
+                ("pipeline MAP", pipeline_map),
+                ("pipeline RESOLVE", pipeline_resolve),
+                ("re-run MAP", rerun_map),
+                ("re-run RESOLVE", rerun_resolve),
+            )
+            if (problem := output_dir_problem(path))
+        ]
+        if problems or rerun_map is None or rerun_resolve is None:
+            record["identical"] = None
+            record["rerun_problem"] = "; ".join(problems)
+        else:
+            files = compare_parquets(pipeline_map, rerun_map) + compare_parquets(
+                pipeline_resolve, rerun_resolve
+            )
+            record["identical_files"] = files
+            record["identical"] = bool(files) and all(item["equal"] for item in files)
     if seed1_resolve is not None:
+        names = {
+            f"{pair}_{platform}": f"{platform.lower()}/{pair}_{platform}"
+            "_celltype_labels.parquet"
+            for platform in PLATFORMS
+        }
+        absent = [
+            str(root / name)
+            for name in names.values()
+            for root in (pipeline_resolve, seed1_resolve)
+            if not (root / name).is_file()
+        ]
+        if absent:
+            record["seed1"] = None
+            record["seed1_problem"] = f"labels missing: {absent}"
+            return record
         per_sample = {}
-        for platform in PLATFORMS:
-            sample = f"{pair}_{platform}"
-            name = f"{platform.lower()}/{sample}_celltype_labels.parquet"
+        for sample, name in names.items():
             per_sample[sample] = seed_change(
                 pd.read_parquet(pipeline_resolve / name),
                 pd.read_parquet(seed1_resolve / name),
@@ -1599,7 +1677,8 @@ def h15_rows(records: Mapping[str, Mapping[str, Any]]) -> list[Row]:
                     True,
                     "h15",
                     note=(
-                        "not measured"
+                        "not measured: "
+                        + str(record.get("rerun_problem") or "no re-run record")
                         if identical is None
                         else f"{len(files)} tables compared; differing: "
                         + str([f["file"] for f in files if not f["equal"]][:6])
@@ -1624,7 +1703,8 @@ def h15_rows(records: Mapping[str, Mapping[str, Any]]) -> list[Row]:
                     else share <= H15_SEED_CHANGE_MAX + 1e-12,
                     True,
                     "h15",
-                    note="not measured"
+                    note="not measured: "
+                    + str(record.get("seed1_problem") or "no seed-1 record")
                     if seed1 is None
                     else f"{seed1['n_changed']} of {seed1['n_confident_seed0']} "
                     "seed-0 confident broad labels",
@@ -1655,7 +1735,17 @@ def h18_rows(
     if SCORED_DRAW not in run.get("draws", []):
         problems.append(f"the scored draw {SCORED_DRAW} is not in the draw spread")
     check = run.get("scored_draw_check") or {}
-    if check and not check.get("reproduces", False):
+    if not check:
+        problems.append(
+            "the draw spread records no scored_draw_check: whether the scored draw "
+            "reproduces the stored rows is unknown"
+        )
+    elif check.get("skipped"):
+        problems.append(
+            "the draw spread skipped the scored-draw check (--no-check-scored): "
+            "whether the scored draw reproduces the stored rows is unknown"
+        )
+    elif check.get("reproduces") is not True:
         problems.append(f"the scored draw does not reproduce the stored rows: {check}")
     if (
         run.get("n_processors") != SELF_MAP_WORKERS
@@ -1866,6 +1956,7 @@ ROW_COLUMNS: Final = (
     "comparator",
     "threshold",
     "verdict",
+    "back_to_user_reason",
     "exception",
     "scope_check",
     "crosscheck",
@@ -1977,6 +2068,27 @@ def _prep_logs(trace: pd.DataFrame) -> list[str]:
     return texts
 
 
+def map_manifests(
+    runs_root: Path, pairs: Sequence[str], segmentations: Sequence[str]
+) -> dict[tuple[str, str], Path]:
+    """Return (pair, run) -> ``map_manifest.json`` of every MAP run published.
+
+    The main layout's runs are keyed by segmentation; the second MENDER
+    policy's proseg_hybrid MAP by ``proseg_hybrid/mender_state_policy``, so
+    the P5 check covers every MAP the acceptance run made.
+    """
+    found: dict[tuple[str, str], Path] = {}
+    for pair in pairs:
+        for segmentation in segmentations:
+            path = runs_root / MAP_MANIFEST_PATH.format(pair=pair, seg=segmentation)
+            if path.is_file():
+                found[(pair, segmentation)] = path
+        state = runs_root / STATE_MAP_MANIFEST_PATH.format(pair=pair)
+        if state.is_file():
+            found[(pair, f"{SCORED_SEGMENTATION}/{STATE_LABEL}")] = state
+    return found
+
+
 def _read_optional(path: Path | None) -> pd.DataFrame | None:
     return pd.read_csv(path) if path is not None and path.is_file() else None
 
@@ -2000,16 +2112,9 @@ def score(args: argparse.Namespace) -> dict[str, Any]:
     trace = load_trace([track(path) for path in args.trace])
     reuse = prep_reuse_from_logs(_prep_logs(trace))
     refs = [track(path) for path in _bundle_refs(args.prep_refs)]
-    manifests = {
-        (pair, segmentation): track(
-            args.runs_root / MAP_MANIFEST_PATH.format(pair=pair, seg=segmentation)
-        )
-        for pair in pairs
-        for segmentation in segmentations
-        if (
-            args.runs_root / MAP_MANIFEST_PATH.format(pair=pair, seg=segmentation)
-        ).is_file()
-    }
+    manifests = map_manifests(args.runs_root, pairs, segmentations)
+    for path in manifests.values():
+        track(path)
     prep = check_prep_bundles(
         refs,
         _parse_time(args.run_start),
@@ -2155,8 +2260,10 @@ def score(args: argparse.Namespace) -> dict[str, Any]:
         "verdict_counts": counts(rows),
         "n_back_to_user": sum(1 for record in records if record["back_to_user"]),
         "all_scored_rows_pass_or_inside_an_exception": not any(
-            record["back_to_user"] for record in records
+            record["back_to_user"] and record["scored"] for record in records
         ),
+        "nothing_back_to_user": not problems
+        and not any(record["back_to_user"] for record in records),
         "problems": problems,
         "h12": h12_scores,
         "rows": records,
@@ -2193,6 +2300,7 @@ def h15(args: argparse.Namespace) -> dict[str, Any]:
         args.rerun_map,
         args.rerun_resolve,
         args.seed1_resolve,
+        notes=args.note,
     )
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(
@@ -2236,6 +2344,12 @@ def main(argv: list[str] | None = None) -> int:
     rerun.add_argument("--rerun-map", type=Path)
     rerun.add_argument("--rerun-resolve", type=Path)
     rerun.add_argument("--seed1-resolve", type=Path)
+    rerun.add_argument(
+        "--note",
+        action="append",
+        default=[],
+        help="recorded in the JSON (e.g. a re-run task that failed)",
+    )
     rerun.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
     logging.basicConfig(
