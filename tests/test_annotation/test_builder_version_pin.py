@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "6c6798bdf68c9c8e657a79682b8372c118ad3e78d7fd612fe97d453d6785687f",
+    3: "3dfd14c7fea3c007d4688f7ad6401d5b975f09054e48dbe112e7c8e7d84212d5",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -123,6 +123,10 @@ PIN_HISTORY = (
     "those bundles get new hashes without a builder bump; the held-out "
     "test-set bundle, RESOLVABILITY_VERSION and the mouse bundles are "
     "unchanged",
+    "3: thin_and_contaminate takes an optional efficiency_seed for the M8 "
+    "draw-spread grid (user decision 2026-09-30, M8 D2); every builder "
+    "leaves it unset, so the efficiency stays the recipe seed's and no "
+    "bundle content or build_hash changes",
 )
 
 

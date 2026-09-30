@@ -757,6 +757,8 @@ def thin_and_contaminate(
     test: HeldOutCells,
     depths: Sequence[int],
     recipe: SimulationRecipe,
+    *,
+    efficiency_seed: int | None = None,
 ) -> SimulatedQuery:
     """Simulate test cells at each grid depth with one recipe (§8.3 steps 2-3).
 
@@ -783,6 +785,10 @@ def thin_and_contaminate(
         test: Test cells (unique cell ids).
         depths: Depth grid.
         recipe: Recipe.
+        efficiency_seed: Seed of the per-gene efficiency draw in place of
+            the recipe's (the M8 draw-spread grid, ``draw_spread``, crosses
+            the per-cell seed with the efficiency seed); ``None``, as every
+            production self-map passes, uses ``recipe.seed``.
 
     Returns:
         The simulated query.
@@ -798,7 +804,9 @@ def thin_and_contaminate(
             "test cell ids must be unique (they key the simulation draws)"
         )
     efficiency = gene_efficiency(
-        len(test.genes), recipe.gene_efficiency_sigma, recipe.seed
+        len(test.genes),
+        recipe.gene_efficiency_sigma,
+        recipe.seed if efficiency_seed is None else int(efficiency_seed),
     )
     native = test.native_counts
     groups = test.obs[SPILL_GROUP_COLUMN].astype(str).to_numpy()
