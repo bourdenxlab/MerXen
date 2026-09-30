@@ -40,15 +40,22 @@ class AnnotationReport {
 
     // What the report fingerprint covers, relative to this checkout's src/:
     // the report and everything it reads through (the annotation package with
-    // its packaged tables, the clustering package, the command). The task
+    // its packaged tables, the clustering package, the command) and the
+    // modules that change its outputs from outside them (the symbol-to-Ensembl
+    // join of items 4 and 7, the figure colours and PDF settings). The task
     // hash cannot see Python code, so the fingerprint travels in report_spec
     // and a report change re-runs the report (about a minute) under -resume;
-    // no other task stages the report's output.
+    // no other task stages the report's output. What these sources import
+    // from elsewhere is test-pinned (test_annotation_report_module.py,
+    // REPORT_IMPORT_EXEMPTIONS).
     static final List<String> REPORT_SOURCES = [
         "merxen/annotation",
         "merxen/assets/annotation",
         "merxen/clustering",
         "merxen/cli/run_annotation_report.py",
+        "merxen/gene_ids.py",
+        "merxen/palette.py",
+        "merxen/plotting.py",
     ].asImmutable()
 
     /**
