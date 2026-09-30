@@ -19,8 +19,11 @@ This module holds what the M8 acceptance scripts share:
   the stored decision-recipe rows;
 - ``dataset_composition``: the soft composition RESOLVE reweights to;
 - ``h18_human_rows`` and ``validated_bins``: H18's human rule (broad and
-  supercluster emitted from one grid step above the class's floor up to
-  D_max, for every class with D_max) and the validated bins per decision set;
+  supercluster emitted from one grid step above the class's floor, of the
+  bundle's panel family, up to D_max, for every class with D_max) and the
+  validated bins per decision set;
+- ``would_raise_h18_bins``: the validated thresholds the local rule would
+  raise at H18's depths, per bin (D4's would-raise list);
 - ``decision_metric_rows``, ``spread_table`` and ``bin_spread``: the long
   per-draw rows, and the per (dataset, metric) and per-bin spread tables.
 """
@@ -37,6 +40,7 @@ import numpy as np
 import pandas as pd
 
 from merxen.annotation import resolvability as res
+from merxen.annotation.shadow import SEED_PANEL_FAMILY
 
 GRID_SEEDS: Final[tuple[int, ...]] = (0, 1, 2)
 SCORED_SEEDS: Final[tuple[int, int]] = (0, 0)
@@ -51,6 +55,26 @@ VALIDATED: Final = "validated"
 METRIC_H18_FAILING: Final = "H18/failing_pairs"
 METRIC_H18_WOULD_RAISE: Final = "H18/would_raise"
 METRIC_BINS_EMITTED: Final = "validated_bins_emitted"
+WOULD_RAISE_COLUMNS: Final[tuple[str, ...]] = (
+    "draw",
+    "dataset",
+    "level",
+    "class",
+    "depth",
+)
+H18_COLUMNS: Final[tuple[str, ...]] = (
+    "dataset",
+    "level",
+    "class",
+    "d_max",
+    "floor",
+    "floor_family",
+    "expected",
+    "emitted",
+    "missing",
+    "required",
+    "passes",
+)
 ROW_COLUMNS: Final[tuple[str, ...]] = (
     "draw",
     "cell_seed",
@@ -257,13 +281,47 @@ def dataset_composition(
     )
 
 
-def _floor(floors: pd.DataFrame, level: str, cls: str, platform: str) -> int | None:
+def floor_family(floors: pd.DataFrame, panel_family: str | None) -> str | None:
+    """Return the floor-table family whose floors apply to a panel family.
+
+    The family's own rows, as production RESOLVE reads them
+    (``FloorPlan.panel_family``); a family without any row in the table
+    (``None``, or a family never packaged) falls back to the seed family
+    ``human_set_a``. A table without a ``panel_family`` column has one
+    family (``None``).
+
+    Args:
+        floors: ``vocab.load_floor_table("human")``.
+        panel_family: The bundle's panel family (the datasets' trust
+            ``family_id``).
+
+    Returns:
+        The family to filter the floors on.
+    """
+    if "panel_family" not in floors.columns:
+        return None
+    families = set(floors["panel_family"].astype(str))
+    if panel_family is not None and str(panel_family) in families:
+        return str(panel_family)
+    return SEED_PANEL_FAMILY
+
+
+def _floor(
+    floors: pd.DataFrame, level: str, cls: str, platform: str, family: str | None
+) -> int | None:
     rows = floors[
         (floors["level"].astype(str) == level)
         & (floors["floor_class"].astype(str) == cls)
         & (floors["platform"].astype(str).str.upper() == platform.upper())
     ]
-    return int(rows["min_counts"].max()) if len(rows) else None
+    if family is not None:
+        rows = rows[rows["panel_family"].astype(str) == family]
+    if len(rows) > 1:
+        raise ValueError(
+            f"{len(rows)} floor rows for {level} {cls} on {platform} (family "
+            f"{family}): {rows['min_counts'].tolist()}"
+        )
+    return int(rows["min_counts"].iloc[0]) if len(rows) else None
 
 
 def h18_human_rows(
@@ -273,13 +331,16 @@ def h18_human_rows(
     floors: pd.DataFrame,
     *,
     dataset: str,
+    panel_family: str | None = None,
 ) -> pd.DataFrame:
     """Return H18's human emission check per (level, class) of one decision set.
 
     Plan §14 H18, as M3b and the M8 prep scored it: broad and supercluster
     are emitted (validated regime) for every class with D_max (>= 50 test
     cells in some bin) at every grid depth above the class's packaged floor
-    on ``platform`` up to D_max; a class without D_max is not required.
+    on ``platform`` up to D_max; a class without D_max is not required. The
+    floor is the panel family's (``floor_family``), never the highest over
+    families.
 
     Args:
         decisions: ``ResolvabilityTables.decisions`` output (unweighted PREP
@@ -289,13 +350,19 @@ def h18_human_rows(
         floors: ``vocab.load_floor_table("human")``.
         dataset: Label recorded in the rows (``PREP[MERSCOPE floors]``, a
             sample id).
+        panel_family: The bundle's panel family (``None``: the seed family).
 
     Returns:
-        One row per (level, class): ``dataset``, ``level``, ``class``,
-        ``d_max``, ``floor``, ``expected``, ``emitted``, ``missing``,
-        ``required`` and ``passes``.
+        One row per (level, class) (``H18_COLUMNS``): ``dataset``,
+        ``level``, ``class``, ``d_max``, ``floor``, ``floor_family``,
+        ``expected``, ``emitted``, ``missing``, ``required`` and ``passes``.
+
+    Raises:
+        ValueError: If more than one floor row matches a (level, class,
+            platform) of the family.
     """
     grid = [int(depth) for depth in depths]
+    family = floor_family(floors, panel_family)
     rows: list[dict[str, Any]] = []
     for level in H18_LEVELS:
         trust = decisions[
@@ -323,6 +390,7 @@ def h18_human_rows(
                         "class": str(cls),
                         "d_max": None,
                         "floor": None,
+                        "floor_family": family,
                         "expected": "",
                         "emitted": ",".join(map(str, got)),
                         "missing": "",
@@ -331,7 +399,7 @@ def h18_human_rows(
                     }
                 )
                 continue
-            floor = _floor(floors, level, str(cls), platform)
+            floor = _floor(floors, level, str(cls), platform, family)
             start = floor if floor is not None else grid[0]
             expected = [depth for depth in grid if start < depth <= d_max]
             missing = [depth for depth in expected if depth not in got]
@@ -342,6 +410,7 @@ def h18_human_rows(
                     "class": str(cls),
                     "d_max": d_max,
                     "floor": floor,
+                    "floor_family": family,
                     "expected": ",".join(map(str, expected)),
                     "emitted": ",".join(map(str, got)),
                     "missing": ",".join(map(str, missing)),
@@ -349,21 +418,51 @@ def h18_human_rows(
                     "passes": not missing,
                 }
             )
-    return pd.DataFrame(
-        rows,
-        columns=[
-            "dataset",
-            "level",
-            "class",
-            "d_max",
-            "floor",
-            "expected",
-            "emitted",
-            "missing",
-            "required",
-            "passes",
+    return pd.DataFrame(rows, columns=list(H18_COLUMNS))
+
+
+def would_raise_h18_bins(
+    decisions: pd.DataFrame,
+    settings: res.RuleSettings,
+    *,
+    draw: Draw,
+    dataset: str,
+) -> pd.DataFrame:
+    """Return the validated thresholds the local rule would raise at H18 depths.
+
+    ``resolvability.would_raise_bins`` (evaluable own bins only) at broad
+    from 15 and supercluster from 30 counts: D4's would-raise list, one row
+    per bin (``WOULD_RAISE_COLUMNS``), listed by the gate, never judged here.
+
+    Args:
+        decisions: ``ResolvabilityTables.decisions`` output.
+        settings: The bundle's rule settings.
+        draw: The draw.
+        dataset: ``PREP[...]`` or a sample id.
+
+    Returns:
+        The bins, sorted by level, class and depth.
+    """
+    raised, _ = res.would_raise_bins(decisions, settings)
+    keep = np.array(
+        [
+            str(level) in H18_MIN_DEPTH and int(depth) >= H18_MIN_DEPTH[str(level)]
+            for level, depth in zip(raised["level"], raised["depth"], strict=True)
         ],
+        dtype=bool,
     )
+    raised = raised.loc[keep]
+    frame = pd.DataFrame(
+        {
+            "draw": draw.tag,
+            "dataset": dataset,
+            "level": raised["level"].astype(str).to_numpy(),
+            "class": raised["class"].astype(str).to_numpy(),
+            "depth": raised["depth"].astype(int).to_numpy(),
+        },
+        columns=list(WOULD_RAISE_COLUMNS),
+    )
+    return frame.sort_values(["level", "class", "depth"]).reset_index(drop=True)
 
 
 def validated_bins(
@@ -467,14 +566,15 @@ def decision_metric_rows(
     depths: Sequence[int],
     floors: pd.DataFrame,
     settings: res.RuleSettings,
+    panel_family: str | None = None,
 ) -> tuple[list[dict[str, Any]], pd.DataFrame, pd.DataFrame]:
     """Return one decision set's per-draw rows, H18 rows and validated bins.
 
     Metrics: the number of failing H18 (level, class) pairs (passes at 0),
     the validated thresholds the local rule would raise at H18's depths
-    (``would_raise_bins``, broad from 15 and supercluster from 30 counts;
-    listed by the gate, never a pass or fail here) and the validated bins
-    emitted at the H18 levels.
+    (``would_raise_h18_bins``, broad from 15 and supercluster from 30
+    counts; listed by the gate, never a pass or fail here) and the
+    validated bins emitted at the H18 levels.
 
     Args:
         decisions: ``ResolvabilityTables.decisions`` output.
@@ -484,20 +584,17 @@ def decision_metric_rows(
         depths: The depth grid.
         floors: The human packaged floors.
         settings: The bundle's rule settings.
+        panel_family: The bundle's panel family (``h18_human_rows``).
 
     Returns:
         ``(rows, h18, bins)``.
     """
-    h18 = h18_human_rows(decisions, depths, platform, floors, dataset=dataset)
+    h18 = h18_human_rows(
+        decisions, depths, platform, floors, dataset=dataset, panel_family=panel_family
+    )
     h18.insert(0, "draw", draw.tag)
     failing = h18[h18["required"].astype(bool) & ~h18["passes"].astype(bool)]
-    raised, _ = res.would_raise_bins(decisions, settings)
-    raised = raised[
-        [
-            str(level) in H18_MIN_DEPTH and int(depth) >= H18_MIN_DEPTH[str(level)]
-            for level, depth in zip(raised["level"], raised["depth"], strict=True)
-        ]
-    ]
+    raised = would_raise_h18_bins(decisions, settings, draw=draw, dataset=dataset)
     bins = validated_bins(decisions, draw=draw, dataset=dataset)
     rows = [
         metric_row(
@@ -641,21 +738,25 @@ __all__ = [
     "BIN_SPREAD_COLUMNS",
     "GRID_SEEDS",
     "MAPPING_SEED",
+    "H18_COLUMNS",
     "METRIC_BINS_EMITTED",
     "METRIC_H18_FAILING",
     "METRIC_H18_WOULD_RAISE",
     "ROW_COLUMNS",
     "SCORED_SEEDS",
     "SPREAD_COLUMNS",
+    "WOULD_RAISE_COLUMNS",
     "Draw",
     "bin_spread",
     "dataset_composition",
     "decision_metric_rows",
     "draw_grid",
+    "floor_family",
     "h18_human_rows",
     "metric_row",
     "simulate_draw",
     "spread_table",
     "tables_with_draw",
     "validated_bins",
+    "would_raise_h18_bins",
 ]
