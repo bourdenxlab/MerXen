@@ -531,6 +531,65 @@ def test_simulation_predicts_levels_and_compares_the_prefilter(
     assert "prefilter comparison:" in (out / simulate.REPORT_TXT).read_text()
 
 
+def test_prefilter_comparison_maps_the_cells_the_self_map_simulated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    from merxen.annotation import reference
+    from merxen.annotation import resolvability as res
+    from merxen.annotation.reference import builder_for, prepare_reference_spec
+
+    from .test_reference import ASTRO, GENES, MARKER_OF_SUPC, marker_mapper
+
+    # M8 D1 with Astrocyte in place of COP (the fixture's other-region cells
+    # are Astrocytes and Microglia): the unfiltered re-map must simulate the
+    # same test cells as the bundle's self-map.
+    monkeypatch.setattr(reference, "HO_SELF_MAP_EXCLUDED_SUPERCLUSTERS", ("Astrocyte",))
+    config, store, spec, gene_list, _ = _large_whb_simulation(tmp_path, monkeypatch)
+    mapper = marker_mapper(
+        {node: GENES[index] for node, index in MARKER_OF_SUPC.items()}
+    )
+    mapped: list[set[str]] = []
+
+    def recording_map_function(engine: Any, *, runs: list[Any], **_: Any) -> Any:
+        def map_query(query: Any, tag: str, seed: int) -> pd.DataFrame:
+            mapped.append(set(query.obs["cell_id"].astype(str)))
+            runs.append({"tag": tag, "engine": engine.reference_id, "wall_s": 0.0})
+            return mapper(engine, query)
+
+        return map_query
+
+    monkeypatch.setattr(reference, "mmc_map_function", recording_map_function)
+    build = ReferenceBuild(
+        spec=prepare_reference_spec(spec), builder=builder_for(spec, config)
+    )
+    report = run_panel_simulation(
+        gene_list=gene_list,
+        species="human",
+        name="large_whb",
+        config=config,
+        store=store,
+        builds=lambda panel: [build],
+        out_dir=tmp_path / "out",
+        scratch_dir=tmp_path / "sim_scratch",
+        platform="XENIUM",
+        expected_depth=40,
+    )
+    record = report["references"]["whb_frontal_supc_clus"]
+    assert record["prefilter_comparison"]["status"] == "run"
+    (ho_dir,) = tmp_path.glob(f"*/{reference.HO_REFERENCE_ID}/[0-9a-f]*")
+    test = res.load_test_cells(ho_dir)
+    other = test.obs[reference.TEST_SOURCE_COLUMN] == reference.TEST_SOURCE_OTHER_REGION
+    dropped = set(test.obs.index[other & (test.obs[res.TRUTH_LEAF_COLUMN] == ASTRO)])
+    assert dropped
+    (unfiltered,) = mapped
+    assert not unfiltered & dropped
+    bundle_cells = pd.read_parquet(
+        Path(record["bundle_dir"]) / res.RESOLVABILITY_CELLS_FILE
+    )
+    decision = bundle_cells[bundle_cells["recipe"] == "R1_contam_HO"]
+    assert unfiltered == set(decision["cell_id"].astype(str))
+
+
 def test_cli_simulate_runs_a_gene_list_end_to_end(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
 ) -> None:
