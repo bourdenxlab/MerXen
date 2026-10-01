@@ -23,8 +23,8 @@ M8 scoring protocol that must not live only in an evidence script:
   failure no decision names is ``FAIL-OUTSIDE`` (``verdict``).
 
 The tolerances were stated at the M8 review (2026-09-30), before stage B
-(D10's and D12's with the user's decisions of 2026-10-01, before the
-re-score); they only narrow the approved exceptions (a failure outside them
+(D10's and D12's at the review of 2026-10-01, before the re-score; §20);
+they only narrow the approved exceptions (a failure outside them
 goes back to the user), so they loosen nothing.
 
 It is a ``report*`` module on purpose: like the report, it reads what
@@ -36,6 +36,7 @@ edit to the scoring does not re-run RESOLVE in the pipeline.
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Final
@@ -60,6 +61,7 @@ H12_ORDERING: Final = "depth_ordering_passes"
 H12_REPLICATED: Final = "depth_ordering_replicated"
 H12_WM_GM: Final = "oligodendrocyte_wm_minus_gm_share"
 H12_CI_METHOD: Final = "depth_ci_method"
+_CI_NOTE: Final = re.compile(r"\bci=([a-z0-9_]+)")
 
 
 def _get(record: Any, name: str) -> Any:
@@ -102,7 +104,8 @@ class H12Score:
         pair_id: The pair.
         verdict: ``PASS``, ``FAIL`` or ``NOT_AVAILABLE``.
         ci_scored: The ordering CI the verdict used (``tangential_block_500um``;
-            ``square_tile_500um`` when the pair has no tangential positions).
+            ``square_tile_500um`` when the pair has no tangential positions;
+            ``mixed`` when only one platform has them).
         ci_reported_beside: The square tiles, not scored (``None`` when they
             are the scored primary).
         ordering_required: Whether §14 requires the ordering on this pair.
@@ -169,16 +172,31 @@ def score_h12(records: Iterable[Any], *, pair_id: str) -> H12Score:
     records = list(records)
     notes: list[str] = []
     methods = {_get(record, "value") for record in _h12(records, H12_CI_METHOD)}
-    tiles_only = methods == {SQUARE_TILE_CI}
-    if tiles_only:
-        notes.append("no tangential positions: the scored primary is the tiles")
     orderings = _h12(records, H12_ORDERING)
     scored = [record for record in orderings if _get(record, "kind") is None]
     beside = [record for record in orderings if _get(record, "kind") == SQUARE_TILE_CI]
     ordering: dict[str, str] = {}
+    platform_methods: dict[str, str] = {}
     for record in scored:
-        verdict, _ = _bool_verdict(record)
-        ordering[str(_get(record, "platform"))] = verdict
+        verdict, note = _bool_verdict(record)
+        platform = str(_get(record, "platform"))
+        ordering[platform] = verdict
+        # Each primary record names its own CI (``ci=<method>`` in its note).
+        found = _CI_NOTE.search(note)
+        if found:
+            platform_methods[platform] = found.group(1)
+    used = set(platform_methods.values()) or methods
+    tiles_only = used == {SQUARE_TILE_CI}
+    if tiles_only:
+        notes.append("no tangential positions: the scored primary is the tiles")
+    elif len(used) > 1:
+        notes.append(
+            "mixed CIs: a platform without tangential positions is scored on "
+            f"its tiles ({dict(sorted(platform_methods.items()))})"
+        )
+    ci_scored = (
+        SQUARE_TILE_CI if tiles_only else SCORED_CI if len(used) <= 1 else "mixed"
+    )
     platforms = {
         str(_get(record, "platform"))
         for record in records
@@ -193,7 +211,7 @@ def score_h12(records: Iterable[Any], *, pair_id: str) -> H12Score:
         value = _get(record, "value")
         if isinstance(value, bool) and value != (ordering_verdict == PASS):
             raise ValueError(
-                f"{pair_id}: depth_ordering_replicated ({SCORED_CI}) is {value} but "
+                f"{pair_id}: depth_ordering_replicated ({ci_scored}) is {value} but "
                 f"the platforms' orderings are {ordering}"
             )
     wm_gm: dict[str, dict[str, Any]] = {}
@@ -245,7 +263,7 @@ def score_h12(records: Iterable[Any], *, pair_id: str) -> H12Score:
     return H12Score(
         pair_id=pair_id,
         verdict=verdict,
-        ci_scored=SQUARE_TILE_CI if tiles_only else SCORED_CI,
+        ci_scored=ci_scored,
         ci_reported_beside=None if tiles_only else SQUARE_TILE_CI,
         ordering_required=required,
         ordering=ordering,
@@ -320,45 +338,152 @@ D4_PREP_WOULD_RAISE: Final[frozenset[tuple[str, str, int]]] = frozenset(
 # (level, class, depth) rows stage B failed, on the datasets that failed
 # them (``tables/h6_precision.csv``): OPC, COP and deep-layer CT / 6b, and
 # supercluster Fibroblast 120 on P5011_XENIUM (extended by the user,
-# 2026-10-01). A failing row outside it goes back to the user.
-_D10_ALL: Final = tuple(sorted(D4_DATASETS))
-D10_FAILING: Final[dict[tuple[str, str, int], tuple[str, ...]]] = {
-    ("broad", "OPC", 15): _D10_ALL,
-    ("broad", "OPC", 30): (
-        "P1212_XENIUM",
-        "P7113_MERSCOPE",
-        "P7113_XENIUM",
-        "P7513_MERSCOPE",
-        "P7513_XENIUM",
-    ),
-    ("broad", "OPC", 60): ("P7113_MERSCOPE",),
-    ("broad", "OPC", 120): (
-        "P1212_XENIUM",
-        "P7113_MERSCOPE",
-        "P7113_XENIUM",
-        "P7513_MERSCOPE",
-        "P7513_XENIUM",
-    ),
-    ("supercluster", "Committed oligodendrocyte precursor", 30): _D10_ALL,
-    ("supercluster", "Committed oligodendrocyte precursor", 60): (
-        "P1212_XENIUM",
-        "P7113_MERSCOPE",
-        "P7113_XENIUM",
-        "P7513_MERSCOPE",
-        "P7513_XENIUM",
-    ),
-    ("supercluster", "Committed oligodendrocyte precursor", 120): _D10_ALL,
-    ("supercluster", "Deep-layer corticothalamic and 6b", 30): (
+# 2026-10-01). Each row keeps stage B's precision as its floor, less
+# ``D10_TOLERANCE``; a row outside the list or below its floor goes back to
+# the user. Scored on proseg_hybrid only (H6's scored segmentation).
+D10_SEGMENTATION: Final = "proseg_hybrid"
+D10_TOLERANCE: Final = 0.01
+D10_FAILING: Final[dict[tuple[str, str, int, str], float]] = {
+    ("broad", "OPC", 15, "P1212_MERSCOPE"): 0.8396,
+    ("broad", "OPC", 15, "P1212_XENIUM"): 0.7670,
+    ("broad", "OPC", 15, "P5011_MERSCOPE"): 0.8875,
+    ("broad", "OPC", 15, "P5011_XENIUM"): 0.8932,
+    ("broad", "OPC", 15, "P7113_MERSCOPE"): 0.6888,
+    ("broad", "OPC", 15, "P7113_XENIUM"): 0.7512,
+    ("broad", "OPC", 15, "P7513_MERSCOPE"): 0.7680,
+    ("broad", "OPC", 15, "P7513_XENIUM"): 0.8068,
+    ("broad", "OPC", 30, "P1212_XENIUM"): 0.8644,
+    ("broad", "OPC", 30, "P7113_MERSCOPE"): 0.8112,
+    ("broad", "OPC", 30, "P7113_XENIUM"): 0.8539,
+    ("broad", "OPC", 30, "P7513_MERSCOPE"): 0.8651,
+    ("broad", "OPC", 30, "P7513_XENIUM"): 0.8895,
+    ("broad", "OPC", 60, "P7113_MERSCOPE"): 0.8831,
+    ("broad", "OPC", 120, "P1212_XENIUM"): 0.8564,
+    ("broad", "OPC", 120, "P7113_MERSCOPE"): 0.7989,
+    ("broad", "OPC", 120, "P7113_XENIUM"): 0.8454,
+    ("broad", "OPC", 120, "P7513_MERSCOPE"): 0.8567,
+    ("broad", "OPC", 120, "P7513_XENIUM"): 0.8848,
+    (
+        "supercluster",
+        "Committed oligodendrocyte precursor",
+        30,
         "P1212_MERSCOPE",
-        "P1212_XENIUM",
+    ): 0.8017,
+    ("supercluster", "Committed oligodendrocyte precursor", 30, "P1212_XENIUM"): 0.6926,
+    (
+        "supercluster",
+        "Committed oligodendrocyte precursor",
+        30,
+        "P5011_MERSCOPE",
+    ): 0.8499,
+    ("supercluster", "Committed oligodendrocyte precursor", 30, "P5011_XENIUM"): 0.8279,
+    (
+        "supercluster",
+        "Committed oligodendrocyte precursor",
+        30,
         "P7113_MERSCOPE",
+    ): 0.6106,
+    ("supercluster", "Committed oligodendrocyte precursor", 30, "P7113_XENIUM"): 0.6591,
+    (
+        "supercluster",
+        "Committed oligodendrocyte precursor",
+        30,
         "P7513_MERSCOPE",
+    ): 0.6914,
+    ("supercluster", "Committed oligodendrocyte precursor", 30, "P7513_XENIUM"): 0.7171,
+    ("supercluster", "Committed oligodendrocyte precursor", 60, "P1212_XENIUM"): 0.7786,
+    (
+        "supercluster",
+        "Committed oligodendrocyte precursor",
+        60,
+        "P7113_MERSCOPE",
+    ): 0.7050,
+    ("supercluster", "Committed oligodendrocyte precursor", 60, "P7113_XENIUM"): 0.7503,
+    (
+        "supercluster",
+        "Committed oligodendrocyte precursor",
+        60,
+        "P7513_MERSCOPE",
+    ): 0.7756,
+    ("supercluster", "Committed oligodendrocyte precursor", 60, "P7513_XENIUM"): 0.8030,
+    (
+        "supercluster",
+        "Committed oligodendrocyte precursor",
+        120,
+        "P1212_MERSCOPE",
+    ): 0.7885,
+    (
+        "supercluster",
+        "Committed oligodendrocyte precursor",
+        120,
+        "P1212_XENIUM",
+    ): 0.6785,
+    (
+        "supercluster",
+        "Committed oligodendrocyte precursor",
+        120,
+        "P5011_MERSCOPE",
+    ): 0.8413,
+    (
+        "supercluster",
+        "Committed oligodendrocyte precursor",
+        120,
+        "P5011_XENIUM",
+    ): 0.8335,
+    (
+        "supercluster",
+        "Committed oligodendrocyte precursor",
+        120,
+        "P7113_MERSCOPE",
+    ): 0.5891,
+    (
+        "supercluster",
+        "Committed oligodendrocyte precursor",
+        120,
+        "P7113_XENIUM",
+    ): 0.6432,
+    (
+        "supercluster",
+        "Committed oligodendrocyte precursor",
+        120,
+        "P7513_MERSCOPE",
+    ): 0.6746,
+    (
+        "supercluster",
+        "Committed oligodendrocyte precursor",
+        120,
         "P7513_XENIUM",
-    ),
-    ("supercluster", "Fibroblast", 120): ("P5011_XENIUM",),
-    ("supercluster", "Oligodendrocyte precursor", 30): _D10_ALL,
-    ("supercluster", "Oligodendrocyte precursor", 60): _D10_ALL,
-    ("supercluster", "Oligodendrocyte precursor", 120): _D10_ALL,
+    ): 0.7098,
+    ("supercluster", "Deep-layer corticothalamic and 6b", 30, "P1212_MERSCOPE"): 0.7685,
+    ("supercluster", "Deep-layer corticothalamic and 6b", 30, "P1212_XENIUM"): 0.7796,
+    ("supercluster", "Deep-layer corticothalamic and 6b", 30, "P7113_MERSCOPE"): 0.8202,
+    ("supercluster", "Deep-layer corticothalamic and 6b", 30, "P7513_MERSCOPE"): 0.7807,
+    ("supercluster", "Deep-layer corticothalamic and 6b", 30, "P7513_XENIUM"): 0.8446,
+    ("supercluster", "Fibroblast", 120, "P5011_XENIUM"): 0.7829,
+    ("supercluster", "Oligodendrocyte precursor", 30, "P1212_MERSCOPE"): 0.2360,
+    ("supercluster", "Oligodendrocyte precursor", 30, "P1212_XENIUM"): 0.4950,
+    ("supercluster", "Oligodendrocyte precursor", 30, "P5011_MERSCOPE"): 0.4117,
+    ("supercluster", "Oligodendrocyte precursor", 30, "P5011_XENIUM"): 0.6395,
+    ("supercluster", "Oligodendrocyte precursor", 30, "P7113_MERSCOPE"): 0.4610,
+    ("supercluster", "Oligodendrocyte precursor", 30, "P7113_XENIUM"): 0.5910,
+    ("supercluster", "Oligodendrocyte precursor", 30, "P7513_MERSCOPE"): 0.5261,
+    ("supercluster", "Oligodendrocyte precursor", 30, "P7513_XENIUM"): 0.6270,
+    ("supercluster", "Oligodendrocyte precursor", 60, "P1212_MERSCOPE"): 0.2635,
+    ("supercluster", "Oligodendrocyte precursor", 60, "P1212_XENIUM"): 0.5317,
+    ("supercluster", "Oligodendrocyte precursor", 60, "P5011_MERSCOPE"): 0.4477,
+    ("supercluster", "Oligodendrocyte precursor", 60, "P5011_XENIUM"): 0.6726,
+    ("supercluster", "Oligodendrocyte precursor", 60, "P7113_MERSCOPE"): 0.4976,
+    ("supercluster", "Oligodendrocyte precursor", 60, "P7113_XENIUM"): 0.6260,
+    ("supercluster", "Oligodendrocyte precursor", 60, "P7513_MERSCOPE"): 0.5626,
+    ("supercluster", "Oligodendrocyte precursor", 60, "P7513_XENIUM"): 0.6607,
+    ("supercluster", "Oligodendrocyte precursor", 120, "P1212_MERSCOPE"): 0.3665,
+    ("supercluster", "Oligodendrocyte precursor", 120, "P1212_XENIUM"): 0.6474,
+    ("supercluster", "Oligodendrocyte precursor", 120, "P5011_MERSCOPE"): 0.5673,
+    ("supercluster", "Oligodendrocyte precursor", 120, "P5011_XENIUM"): 0.7687,
+    ("supercluster", "Oligodendrocyte precursor", 120, "P7113_MERSCOPE"): 0.6157,
+    ("supercluster", "Oligodendrocyte precursor", 120, "P7113_XENIUM"): 0.7303,
+    ("supercluster", "Oligodendrocyte precursor", 120, "P7513_MERSCOPE"): 0.6753,
+    ("supercluster", "Oligodendrocyte precursor", 120, "P7513_XENIUM"): 0.7590,
 }
 # D12 (b) (§20): "Re-running MAP with MapMyCells rng_seed 1 changes 7.0%
 # (P7513) and 13.4% (P1212) of the seed-0 confident broad labels. None is a
@@ -389,7 +514,9 @@ TOLERANCES: Final[dict[str, Any]] = {
     },
     "D10": {
         "failing_rows": "the 70 stage B rows (level, class, depth, dataset)",
-        "n_rows": sum(len(value) for value in D10_FAILING.values()),
+        "segmentation": D10_SEGMENTATION,
+        "n_rows": len(D10_FAILING),
+        "precision_below_stage_b_at_most": D10_TOLERANCE,
     },
     "D12": {
         "text_values": dict(D12_TEXT_VALUES),
@@ -600,44 +727,65 @@ def check_d4_would_raise(
 
 
 def check_d10(
-    *, dataset: str, failing: Iterable[tuple[str, str, int]]
+    *,
+    segmentation: str,
+    dataset: str,
+    failing: Iterable[tuple[str, str, int, float]],
 ) -> ExceptionVerdict | None:
-    """D10: H6's failing (level, class, depth) rows of one dataset.
+    """D10: H6's failing (level, class, depth, precision) rows of one dataset.
 
-    ``None`` when nothing fails. In scope when every failing row is one
-    stage B failed on that dataset (``D10_FAILING``); the precision values
-    are not checked (H6 reweights the archived E2 cells, so the same inputs
-    give the same values).
+    ``None`` when nothing fails or on another segmentation. In scope when
+    every failing row is one stage B failed on that dataset
+    (``D10_FAILING``) and its precision is at most ``D10_TOLERANCE`` below
+    stage B's value; otherwise the row is itemised and sent back.
     """
-    rows = {(str(level), str(cls), int(depth)) for level, cls, depth in failing}
-    if not rows:
+    rows = [
+        (str(level), str(cls), int(depth), float(precision))
+        for level, cls, depth, precision in failing
+    ]
+    if not rows or segmentation != D10_SEGMENTATION:
         return None
-    outside = sorted(row for row in rows if dataset not in D10_FAILING.get(row, ()))
+    failed: list[str] = []
+    for level, cls, depth, precision in sorted(rows):
+        floor = D10_FAILING.get((level, cls, depth, dataset))
+        if floor is None:
+            failed.append(f"{level} {cls} D{depth} fails outside D10")
+        elif not precision >= floor - D10_TOLERANCE - 1e-12:
+            failed.append(
+                f"{level} {cls} D{depth} precision {precision:.3f} more than "
+                f"{D10_TOLERANCE} below stage B's {floor:.3f}"
+            )
     return _result(
         "D10",
-        [
-            "failing rows outside D10: "
-            + ", ".join(f"{level} {cls} D{depth}" for level, cls, depth in outside)
-        ]
-        if outside
-        else [],
-        f"{len(rows)} failing rows, all in D10's stage B list",
+        failed,
+        f"{len(rows)} failing rows, all in D10's stage B list within "
+        f"{D10_TOLERANCE} of their precision",
     )
 
 
 def check_d12(
-    *, pair: str, share_threshold: float | None, n_switched: int | None
+    *,
+    pair: str,
+    share_threshold: float | None,
+    n_switched: int | None,
+    n_missing: int | None = 0,
 ) -> ExceptionVerdict | None:
     """D12 (b): H15/seed1's threshold crossings on P7513 and P1212.
 
     ``None`` on another pair. In scope when no seed-0 confident label
-    switches to another confident name and the threshold-crossing share is
-    at most the text's value plus ``D12_TOLERANCE``.
+    switches to another confident name, no cell is missing from either
+    seed's table (a missing cell would count as a crossing), and the
+    threshold-crossing share is at most the text's value plus
+    ``D12_TOLERANCE``.
     """
     if pair not in D12_TEXT_VALUES:
         return None
     text = D12_TEXT_VALUES[pair]
     failed: list[str] = []
+    if n_missing is None:
+        failed.append("cells missing from the seed-1 table not counted")
+    elif int(n_missing) > 0:
+        failed.append(f"{int(n_missing)} cells missing from one seed's table")
     if n_switched is None:
         failed.append("label switches not measured")
     elif int(n_switched) > 0:

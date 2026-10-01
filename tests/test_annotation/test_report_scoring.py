@@ -121,6 +121,24 @@ def test_score_h12_never_scores_the_tiles_beside_the_blocks() -> None:
     assert any("no tangential positions" in note for note in tiles_only.notes)
 
 
+def test_score_h12_names_a_mixed_ci_per_platform() -> None:
+    """One platform without tangential positions: each is scored on its own."""
+    records = _h12_records(
+        {"MERSCOPE": True, "XENIUM": False},
+        {"MERSCOPE": True, "XENIUM": False},
+        {"MERSCOPE": (0.5, 0.4), "XENIUM": (0.5, 0.4)},
+    )
+    records[0]["value"] = SQUARE_TILE_CI  # the pair-level method record
+    for record in records:
+        if record["name"] == "depth_ordering_passes" and record["kind"] is None:
+            method = PRIMARY_CI if record["platform"] == "MERSCOPE" else SQUARE_TILE_CI
+            record["note"] = f"ordered=True; ci={method}"
+    score = sc.score_h12(records, pair_id="P7513")
+    assert score.ci_scored == "mixed"
+    assert score.ordering == {"MERSCOPE": sc.PASS, "XENIUM": sc.FAIL}
+    assert any("mixed CIs" in note for note in score.notes)
+
+
 def test_d3_holds_only_at_the_text_value_and_level() -> None:
     kwargs = {"segmentation": "proseg_hybrid", "dataset": "P1212_MERSCOPE"}
     held = sc.check_d3(value=0.1482, level="broad_only", **kwargs)
@@ -298,27 +316,45 @@ def test_verdict_labels_the_row() -> None:
 
 
 def test_d10_covers_only_the_stage_b_rows_of_each_dataset() -> None:
-    assert sc.check_d10(dataset="P7513_MERSCOPE", failing=[]) is None
+    hybrid = {"segmentation": "proseg_hybrid"}
+    assert sc.check_d10(dataset="P7513_MERSCOPE", failing=[], **hybrid) is None
+    fibro = ("supercluster", "Fibroblast", 120)
     held = sc.check_d10(
         dataset="P5011_XENIUM",
         failing=[
-            ("broad", "OPC", 15),
-            ("supercluster", "Fibroblast", 120),
-            ("supercluster", "Oligodendrocyte precursor", 60),
+            ("broad", "OPC", 15, 0.8932),
+            (*fibro, 0.78),
+            ("supercluster", "Oligodendrocyte precursor", 60, 0.6726),
         ],
+        **hybrid,
     )
     assert held is not None and held.in_scope
     assert held.verdict == "EXCEPTION (D10)"
     # Broad OPC 60 failed on P7113_MERSCOPE only; Fibroblast 120 on
     # P5011_XENIUM only; Astro is not named.
     for dataset, row in (
-        ("P7513_MERSCOPE", ("broad", "OPC", 60)),
-        ("P7513_XENIUM", ("supercluster", "Fibroblast", 120)),
-        ("P7513_XENIUM", ("broad", "Astro", 15)),
+        ("P7513_MERSCOPE", ("broad", "OPC", 60, 0.8)),
+        ("P7513_XENIUM", (*fibro, 0.78)),
+        ("P7513_XENIUM", ("broad", "Astro", 15, 0.8)),
     ):
-        moved = sc.check_d10(dataset=dataset, failing=[row])
+        moved = sc.check_d10(dataset=dataset, failing=[row], **hybrid)
         assert moved is not None and not moved.in_scope
         assert moved.verdict == "EXCEPTION-RECHECK (D10)"
+    # A named row whose precision falls more than the tolerance below stage
+    # B's value goes back to the user.
+    floor = sc.D10_FAILING[(*fibro, "P5011_XENIUM")]
+    low = sc.check_d10(
+        dataset="P5011_XENIUM", failing=[(*fibro, floor - 0.02)], **hybrid
+    )
+    assert low is not None and not low.in_scope
+    assert "below stage B" in low.reasons[0]
+    # H6 is scored on proseg_hybrid only.
+    assert (
+        sc.check_d10(
+            dataset="P5011_XENIUM", failing=[(*fibro, 0.78)], segmentation="reseg"
+        )
+        is None
+    )
 
 
 def test_d12_needs_no_switch_and_the_texts_threshold_share() -> None:
@@ -333,3 +369,7 @@ def test_d12_needs_no_switch_and_the_texts_threshold_share() -> None:
         pair="P7513", share_threshold=0.07, n_switched=None
     ).in_scope
     assert sc.check_d12(pair="P7113", share_threshold=0.07, n_switched=0) is None
+    # A cell missing from one seed's table would count as a crossing.
+    assert not sc.check_d12(
+        pair="P7513", share_threshold=0.07, n_switched=0, n_missing=3
+    ).in_scope

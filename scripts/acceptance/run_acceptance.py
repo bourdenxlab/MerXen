@@ -305,7 +305,9 @@ def back_to_user_reason(row: Row) -> str:
     A cross-check mismatch, a verdict outside ``PASS`` / ``INFO *`` /
     ``EXCEPTION (Dn)``, and any failure of a first-measured criterion (H6,
     H12-H15), also in a row the flip rule does not score (item 4: "any
-    failure comes back to the user").
+    failure comes back to the user"), unless the failure is inside an
+    exception the user approved after the measurement (``EXCEPTION (Dn)``:
+    D10 for H6, D12 for H15's threshold crossings; §20).
     """
     if row.crosscheck.startswith(CROSSCHECK_MISMATCH):
         return "cross-check mismatch"
@@ -1447,9 +1449,11 @@ def h6_rows(
             for row in failing_rows
         ]
         exception = sc.check_d10(
+            segmentation=SCORED_SEGMENTATION,
             dataset=dataset,
             failing=[
-                (row["level"], row["class"], int(row["depth"])) for row in failing_rows
+                (row["level"], row["class"], int(row["depth"]), row["precision"])
+                for row in failing_rows
             ],
         )
         pair = dataset.split("_")[0]
@@ -1767,6 +1771,12 @@ def h15_rows(records: Mapping[str, Mapping[str, Any]]) -> list[Row]:
                     pair=pair,
                     share_threshold=crossing,
                     n_switched=None if switched is None else int(switched),
+                    n_missing=None
+                    if seed1 is None
+                    else sum(
+                        int(item.get("cells_missing_in_seed1", 0))
+                        for item in seed1.get("per_sample", {}).values()
+                    ),
                 ),
             )
         )
