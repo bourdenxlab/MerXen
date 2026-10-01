@@ -439,6 +439,14 @@ def test_h2_breakdown_splits_the_implausible_calls_by_node(
     assert rows["all"]["n"] == 3
     assert rows["all"]["lineage_confident_share"] == pytest.approx(2 / 3)
     assert rows["all"]["share_table"] == pytest.approx(3 / 8)
+    # M8 D5's scope: no flagged cell may carry a confident broad or
+    # supercluster label (here c6 and c7 keep a confident broad label).
+    assert rows["all"]["n_lineage_confident"] == 2
+    assert rows["all"]["n_broad_confident"] == 2
+    assert rows["all"]["n_supercluster_confident"] == 0
+    labels.loc["c6", "ct_supercluster_status"] = "confident"
+    again = criteria.h2_breakdown(dataclasses.replace(sample, labels=labels))
+    assert again[0]["node"] == "all" and again[0]["n_supercluster_confident"] == 1
     amygdala = rows["Amygdala excitatory"]
     assert amygdala["kind"] == "region_implausible"
     assert amygdala["n"] == 2
@@ -634,6 +642,20 @@ def test_h4_summary_counts_classes_passing(criteria: ModuleType) -> None:
     ]
     assert headline[0]["note"].startswith("headline (non-circular")
     assert headline[0]["value"] == 6.0 and headline[0]["passes"] is True
+    # M8 D6: only the plain H4 row (the WHB-only set) is scored; every
+    # H4[<set>] row, the headline's copy included, is reported only.
+    assert [row["scored"] for row in headline] == [True, False]
+    assert all(row["scored"] is False for row in rows)
+    assert main["h4_assigned_class"] is False
+    assert criteria.h4_summary(enrichment.assign(label_set=criteria.H4_HEADLINE_SET))[
+        0
+    ]["h4_assigned_class"]
+    # A pair H4 does not score stays unscored on the headline row too.
+    p5011 = {
+        **summary[("P5011", "m4_resolve_heldout")],
+        "label_set": whb_only["label_set"],
+    }
+    assert [row["scored"] for row in criteria.h4_table_rows([p5011])] == [False, False]
 
 
 def test_scripts_help_runs(criteria: ModuleType, pseudo: ModuleType) -> None:

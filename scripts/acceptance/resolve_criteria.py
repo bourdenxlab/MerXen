@@ -235,6 +235,7 @@ def criterion_row(
     *,
     note: str = "",
     passes: bool | None = None,
+    reported_only: bool = False,
 ) -> dict[str, Any]:
     """Return one ``criteria_table.csv`` row.
 
@@ -248,6 +249,8 @@ def criterion_row(
         comparator: ``<=``, ``>=`` or ``==`` (mechanical checks).
         note: Free text.
         passes: Override for mechanical checks; default from the comparison.
+        reported_only: The row is reported, never scored (an H4 label set
+            that is not H4's assigned class); otherwise the flip rule decides.
 
     Returns:
         The row.
@@ -271,7 +274,7 @@ def criterion_row(
         "comparator": comparator,
         "threshold": threshold,
         "passes": passes,
-        "scored": scored(base, pair, segmentation),
+        "scored": not reported_only and scored(base, pair, segmentation),
         "note": note,
     }
 
@@ -476,7 +479,9 @@ def h2_breakdown(sample: ResolvedSample) -> list[dict[str, Any]]:
 
     Per implausible WHB node (and all nodes pooled): the share of table
     cells, the share whose lineage is still confident (an implausible node
-    keeps its lineage when SEA-AD agrees at lineage), median counts, the
+    keeps its lineage when SEA-AD agrees at lineage), the flagged cells with
+    a confident broad or supercluster label (M8 D5's scope: "none receives a
+    broad or supercluster label"), median counts, the
     SEA-AD subclass and the WHB runner-up of those cells, and H2 without the
     node (what a vocab change that made it plausible would give; not a
     metric, which only the user can change).
@@ -486,6 +491,8 @@ def h2_breakdown(sample: ResolvedSample) -> list[dict[str, Any]]:
     implausible = labels["flag_implausible"].to_numpy(bool)
     node = labels["mmc_whb_supercluster_name"].astype(object).to_numpy()
     lineage = confident(labels, "lineage")
+    broad = confident(labels, "broad")
+    supercluster = confident(labels, "supercluster")
     counts = labels["total_counts"].to_numpy(np.float64)
     sea_subclass = labels["mmc_seaad_subclass_name"].astype(object).to_numpy()
     runner_up = (
@@ -517,6 +524,9 @@ def h2_breakdown(sample: ResolvedSample) -> list[dict[str, Any]]:
                 "n": int(mask.sum()),
                 "share_table": float(mask.sum() / n_table),
                 "lineage_confident_share": float(lineage[mask].mean()),
+                "n_lineage_confident": int(lineage[mask].sum()),
+                "n_broad_confident": int(broad[mask].sum()),
+                "n_supercluster_confident": int(supercluster[mask].sum()),
                 "median_counts": float(np.median(counts[mask])),
                 "h2_without_node": (
                     float((implausible & ~mask).sum() / n_table)
@@ -1099,6 +1109,7 @@ def h4_summary(enrichment: pd.DataFrame) -> list[dict[str, Any]]:
                 ),
                 "h4_scored_pair": pair in H4_PAIRS,
                 "h4_pass": n_pass >= H4_MIN_CLASSES,
+                "h4_assigned_class": str(label_set) == H4_HEADLINE_SET,
                 "diagnostic": str(label_set).startswith(H4_DIAGNOSTIC_PREFIX),
                 "failing_at_auroc_ceiling": ";".join(
                     str(cls)
@@ -1116,6 +1127,9 @@ def h4_summary(enrichment: pd.DataFrame) -> list[dict[str, Any]]:
 # The headline H4 label set: plan §5.8 asks for labels no method made with the
 # held-out genes, so the headline is the WHB-only re-resolve of the held-out
 # re-map; the SEA-AD-voted sets saw the held-out genes (partly circular).
+# User decision 2026-09-30 (M8 D6, pre-registration §18): H4's "assigned
+# class" is this set, so only its plain ``H4`` row is scored; every
+# ``H4[<set>]`` row (the headline's copy included) is reported, not scored.
 H4_HEADLINE_SET = "m4_resolve_heldout_whb_only"
 H4_CIRCULAR_SETS: dict[str, str] = {
     "m4_resolve_heldout": "partly circular (SEA saw held-out genes)",
@@ -1129,6 +1143,8 @@ def h4_table_rows(summary: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
     Every label set gets an ``H4[<set>]`` row; the non-circular headline set
     (``H4_HEADLINE_SET``) also gives the plain ``H4`` row, and the sets whose
     SEA-AD votes saw the held-out genes are labelled circular in the note.
+    Only the plain ``H4`` row can be scored (M8 D6: the WHB-only set is H4's
+    assigned class); the ``H4[<set>]`` rows are reported (``scored`` false).
     """
     rows = []
     for row in summary:
@@ -1154,6 +1170,7 @@ def h4_table_rows(summary: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
                     float(H4_MIN_CLASSES),
                     ">=",
                     note=note,
+                    reported_only=name != "H4",
                 )
             )
     return rows

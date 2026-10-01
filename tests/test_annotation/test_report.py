@@ -352,10 +352,12 @@ def test_a_broad_only_gate_makes_both_h12_orderings_not_available(
             else:
                 # The synthetic pair lacks deep-layer superclusters: a failure.
                 assert record.status == "measured" and record.value is False
-    # Replication needs both platforms' orderings.
-    (replicated,) = result.metrics.find("H12", "depth_ordering_replicated")
-    assert replicated.status == "not_available" and replicated.value is None
-    assert replicated.note.startswith("no ordering on")
+    # Replication needs both platforms' orderings (under both CI methods).
+    replicated = result.metrics.find("H12", "depth_ordering_replicated")
+    assert {record.kind for record in replicated} == {None, SQUARE_TILE_CI}
+    for record in replicated:
+        assert record.status == "not_available" and record.value is None
+        assert record.note.startswith("no ordering on")
 
 
 def test_report_without_depth_or_mask_marks_them_missing(

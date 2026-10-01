@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "a712532a2708305f3f569d9f441ec570e961a4437898610cfcd14eb53a48caea",
+    3: "3dfd14c7fea3c007d4688f7ad6401d5b975f09054e48dbe112e7c8e7d84212d5",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -116,6 +116,17 @@ PIN_HISTORY = (
     "build_hash through the resolvability builder params, so those bundles "
     "get new hashes without a builder bump; the test-set bundles are "
     "unchanged",
+    "3: the human self-maps leave the held-out test set's other-region COP "
+    "cells out (user decision 2026-09-30, M8 D1; "
+    "HO_SELF_MAP_TEST_SET_REVISION 1): the revision and its rule enter every "
+    "human self-map bundle's build_hash through its test-set params, so "
+    "those bundles get new hashes without a builder bump; the held-out "
+    "test-set bundle, RESOLVABILITY_VERSION and the mouse bundles are "
+    "unchanged",
+    "3: thin_and_contaminate takes an optional efficiency_seed for the M8 "
+    "draw-spread grid (user decision 2026-09-30, M8 D2); every builder "
+    "leaves it unset, so the efficiency stays the recipe seed's and no "
+    "bundle content or build_hash changes",
 )
 
 
