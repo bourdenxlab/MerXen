@@ -310,11 +310,20 @@ class AnnotationTestHarness {
                     c.selected, c.settings, c.stop_stage
                 )
             case "completionSummary":
-                return AnnotationSettings.completionSummary(c.params, c.run_info ?: [:])
+                AnnotationSettings.useRowModes(c.row_modes)
+                try {
+                    return AnnotationSettings.completionSummary(
+                        c.params, c.run_info ?: [:]
+                    )
+                } finally {
+                    AnnotationSettings.useRowModes(null)
+                }
             case "preflight":
                 def errors = []
                 AnnotationPreflight.append(errors, c.settings, c.params)
                 return errors
+            case "nearMissModeColumns":
+                return AnnotationSettings.nearMissModeColumns(c.headers)
             case "usesDeprecatedHumanLegacy":
                 return AnnotationSettings.usesDeprecatedHumanLegacy(
                     c.params, c.row_modes
@@ -566,6 +575,27 @@ def _build_cases(tmp_path: Path, defaults: dict[str, Any]) -> dict[str, dict[str
             "species": "human",
             "clustering_squidpy_mode_human": "legacy",
         },
+    }
+    cases["nearMissModeColumns"] = {
+        "fn": "nearMissModeColumns",
+        "headers": [
+            "pair_id",
+            "clustering_squidpy_mode",
+            "Clustering_Squidpy_Mode",
+            " clustering squidpy-mode ",
+            "clustering_squidpy_modes",
+        ],
+    }
+    # §20 D15: the summary follows the row modes (useRowModes).
+    cases["completionSummary|mouse-row-map_first"] = {
+        "fn": "completionSummary",
+        "params": {**defaults, "species": "mouse"},
+        "row_modes": ["", "map_first"],
+    }
+    cases["completionSummary|human-rows-legacy"] = {
+        "fn": "completionSummary",
+        "params": {**defaults, "species": "human"},
+        "row_modes": ["legacy"],
     }
     cases["completionSummary|bad-species"] = {
         "fn": "completionSummary",
@@ -1236,6 +1266,10 @@ def test_groovy_completion_summary(groovy_results: dict[str, dict[str, Any]]) ->
     """Legacy runs print nothing; map_first runs list failed annotations."""
     assert _value(groovy_results, "completionSummary|legacy") == ""
     assert _value(groovy_results, "completionSummary|bad-species") == ""
+    assert _value(groovy_results, "completionSummary|human-rows-legacy") == ""
+    assert _value(groovy_results, "completionSummary|mouse-row-map_first").startswith(
+        "Annotation summary (mouse, clustering_squidpy_mode map_first):"
+    )
     summary = _value(groovy_results, "completionSummary|mouse-map_first")
     assert summary.startswith(
         "Annotation summary (mouse, clustering_squidpy_mode map_first):"
@@ -1324,6 +1358,11 @@ def test_groovy_warns_only_for_human_legacy_rows(
         _value(groovy_results, "usesDeprecatedHumanLegacy|human-legacy-param") is True
     )
     assert _value(groovy_results, "usesDeprecatedHumanLegacy|mouse-legacy") is False
+    # A near-miss header is reported, so a row cannot silently lose its mode.
+    assert _value(groovy_results, "nearMissModeColumns") == [
+        "Clustering_Squidpy_Mode",
+        " clustering squidpy-mode ",
+    ]
     assert _value(groovy_results, "isMapFirstRun|mouse-param") is True
     assert _value(groovy_results, "isMapFirstRun|bad-species") is False
     assert _value(groovy_results, "isMapFirstRun|bad-mode") is False

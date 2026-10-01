@@ -152,6 +152,24 @@ class AnnotationSettings {
     }
 
     /**
+     * Samplesheet headers that look like clustering_squidpy_mode but are not it.
+     *
+     * A header that equals the column only after case-folding, trimming or
+     * replacing spaces and hyphens by underscores is ignored by the pipeline,
+     * so its rows would silently follow the run's mode; main.nf warns.
+     *
+     * @param headers The samplesheet's column names.
+     * @return The near-miss headers (empty when there are none).
+     */
+    static List<String> nearMissModeColumns(Collection headers) {
+        def wanted = AnnotationDefaults.ROW_MODE_COLUMN
+        return (headers ?: []).collect { header -> header?.toString() }.findAll { header ->
+            header != null && header != wanted &&
+                header.trim().toLowerCase().replaceAll(/[\s\-]+/, "_") == wanted
+        }
+    }
+
+    /**
      * Whether a human row still clusters in the deprecated legacy mode.
      *
      * Human flipped to map_first at M8 (pre-registration §20); a human run
@@ -322,22 +340,22 @@ class AnnotationSettings {
      * @param params Pipeline params.
      * @param runInfo Optional run facts: success (Boolean), n_expected and
      *     the SUMMARY_ITEMS lists (AnnotationRunRecord.runInfo).
-     * @return "" when the run's species uses legacy mode (nothing to report),
-     *     else the summary text.
+     * @return "" when no row of the run is map_first (nothing to report;
+     *     isMapFirstRun, which follows the recorded row modes), else the
+     *     summary text, which covers the map_first rows.
      */
     static String completionSummary(Map params, Map runInfo = [:]) {
         def species
-        def mode
         try {
             species = AnnotationDefaults.normalizeSpecies(params?.get("species"))
-            mode = AnnotationDefaults.resolveMode(params, species)
         } catch (IllegalArgumentException ignored) {
             // rowSampleSettings has already reported the invalid param.
             return ""
         }
-        if (mode == AnnotationDefaults.LEGACY) {
+        if (!isMapFirstRun(params)) {
             return ""
         }
+        def mode = AnnotationDefaults.MAP_FIRST
         def lines = ["Annotation summary (${species}, clustering_squidpy_mode ${mode}):".toString()]
         if (runInfo?.get("n_expected") != null) {
             lines << "  pair x segmentation branches clustered: ${runInfo.n_expected}".toString()

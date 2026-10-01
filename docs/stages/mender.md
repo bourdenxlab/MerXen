@@ -20,10 +20,12 @@ is silently skipped (for example `stop_stage=mender` with cortical depth
 enabled: FINALIZE's clustering event arrives first). `map_first` runs
 therefore `combine` every event with the spec, which keeps it, so no count
 of the events is needed. Legacy runs keep the `join` (their channels and
-DAG stay unchanged), so a legacy launch whose pair emits more than one
+DAG stay unchanged), so a launch whose rows are all legacy and whose pair emits more than one
 terminal event (clustering plus another terminal stage, or several
 clustering segmentations) skips MENDER; run MENDER on such legacy results
 with `--only_stage mender` (below) until the barrier is fixed on `main`.
+A run with any `map_first` row (pre-registration §20 D15) uses the `combine`
+for all its rows, so its legacy rows do run MENDER in that case.
 
 Enable the default ProSeg-hybrid analysis with:
 

@@ -1468,6 +1468,26 @@ def _compute_cases(root: Path, human: dict[str, Any]) -> dict[str, dict[str, Any
             "params": map_first,
             "source_root": str(SRC),
         },
+        # §20 D15: a map_first row of a legacy-mode run gets a map_first
+        # row's suffix (as forRow gives it), not the run's legacy "".
+        "compute_spec_mouse_row_opt_in": {
+            "fn": "computeSpec",
+            "params": {
+                **map_first,
+                "species": "mouse",
+                "clustering_squidpy_mode": "legacy",
+            },
+            "source_root": str(SRC),
+        },
+        "compute_spec_human_legacy_run_suffix": {
+            "fn": "computeSpec",
+            "params": {
+                **map_first,
+                "clustering_squidpy_mode": "legacy",
+                "clustering_squidpy_table_key_suffix": "mapfirst",
+            },
+            "source_root": str(SRC),
+        },
         "compute_spec_policy": {
             "fn": "computeSpec",
             "params": {
@@ -2079,6 +2099,10 @@ def test_compute_spec_carries_suffix_policy_and_hierarchy_fingerprint(
         "mender_unassigned_state_policy": "exclude_from_features",
         "hierarchy_fingerprint": fingerprint,
     }
+    mouse_row = _value(harness, "compute_spec_mouse_row_opt_in")
+    assert mouse_row["table_key_suffix"] == "mapfirst"
+    human_row = _value(harness, "compute_spec_human_legacy_run_suffix")
+    assert human_row["table_key_suffix"] == "mapfirst"
     policy = _value(harness, "compute_spec_policy")
     assert policy["table_key_suffix"] == "trial"
     assert policy["mender_unassigned_state_policy"] == "state"

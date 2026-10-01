@@ -1961,11 +1961,21 @@ workflow {
     // any channel runs. A run takes the map_first wiring when any row
     // resolves to map_first; a run whose rows are all legacy keeps the legacy
     // DAG.
+    def samplesheetRows = file(params.samplesheet, checkIfExists: true)
+        .splitCsv(header: true, sep: ",", quote: '"', strip: true)
     AnnotationSettings.useRowModes(
-        file(params.samplesheet, checkIfExists: true)
-            .splitCsv(header: true, sep: ",", quote: '"', strip: true)
-            .collect { row -> row[AnnotationDefaults.ROW_MODE_COLUMN] }
+        samplesheetRows.collect { row -> row[AnnotationDefaults.ROW_MODE_COLUMN] }
     )
+    def nearMissModeColumns = AnnotationSettings.nearMissModeColumns(
+        samplesheetRows ? samplesheetRows[0].keySet() : []
+    )
+    if (nearMissModeColumns) {
+        log.warn(
+            "Samplesheet column(s) ${nearMissModeColumns.join(', ')} are ignored: the " +
+            "per-row mode column is '${AnnotationDefaults.ROW_MODE_COLUMN}' (exact name). " +
+            "Those rows follow the run's clustering mode."
+        )
+    }
     if (AnnotationSettings.usesDeprecatedHumanLegacy(params)) {
         log.warn(
             "Human legacy clustering (clustering_squidpy_mode legacy) is deprecated: " +
