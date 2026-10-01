@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "2ed7774f5fd2d405230e82b1f87dd8d59d8975f1738a66374427cce2fa34fb9e",
+    3: "a4fe8cdce029a0161c323703062c2b00b35c4f9aba5b851770596430042e947e",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -162,6 +162,12 @@ PIN_HISTORY = (
     "version-7 ensemble (M3c) and the human test-set revision and "
     "efficiency_seed of M8 D1 / D2; each change keeps its own build_hash rule "
     "above, so no bundle built by either branch changes",
+    "3: the version-7 self-map records M8 D1's test_set_exclusion in its "
+    "summary and bundle output, as the version-6 path does (its test cells "
+    "already followed D1); provenance only. The version-7 human bundles "
+    "built before the merge (two WHB, two SEA-AD) lack D1's revision in their "
+    "hashed test-set params, so the merged code never reuses them and builds "
+    "new ones; no existing bundle changes",
 )
 
 
