@@ -51,9 +51,16 @@ MAP_FIRST_UNASSIGNED_STATE_POLICY: Final = "exclude_from_features"
 # A clustered table-key suffix: "" or one lower-case token (§4.8).
 TableKeySuffix = Annotated[str, AfterValidator(validate_table_key_suffix)]
 # Default clustering mode per species. Only the flip PRs (M8 human, M9 mouse)
-# change these, together with ``FLIPPED_SPECIES``.
-DEFAULT_CLUSTERING_MODE: Final[dict[str, str]] = {"human": "legacy", "mouse": "legacy"}
-FLIPPED_SPECIES: Final[frozenset[str]] = frozenset()
+# change these, together with ``FLIPPED_SPECIES``. Human flipped at M8
+# (pre-registration §20).
+DEFAULT_CLUSTERING_MODE: Final[dict[str, str]] = {
+    "human": "map_first",
+    "mouse": "legacy",
+}
+FLIPPED_SPECIES: Final[frozenset[str]] = frozenset({"human"})
+# The optional samplesheet column that sets one row's clustering mode
+# (pre-registration §20 D15; ``AnnotationDefaults.ROW_MODE_COLUMN``).
+ROW_MODE_COLUMN: Final = "clustering_squidpy_mode"
 # Table-key suffix of a map_first run of a species that has not flipped yet, so
 # the legacy clustered table is never overwritten (OD-A3, plan §4.8).
 MAP_FIRST_TABLE_KEY_SUFFIX: Final = "mapfirst"
@@ -1469,18 +1476,22 @@ def resolve_clustering_mode(
     mode: str | None = None,
     mode_human: str | None = None,
     mode_mouse: str | None = None,
+    row_mode: str | None = None,
 ) -> str:
-    """Resolve the clustering mode of a run (mirrors ``resolveMode``).
+    """Resolve the clustering mode of a run or row (``resolveRowMode``).
 
     As in Groovy, values are case-insensitive and stripped, and a blank value
-    counts as unset: a blank override falls through to the species param,
-    and a blank species param to the species default.
+    counts as unset: a blank row value falls through to the override, a blank
+    override to the species param, and a blank species param to the species
+    default.
 
     Args:
         species: Run species.
         mode: ``clustering_squidpy_mode``, an override for both species.
         mode_human: ``clustering_squidpy_mode_human`` (``None`` = default).
         mode_mouse: ``clustering_squidpy_mode_mouse`` (``None`` = default).
+        row_mode: The samplesheet row's ``clustering_squidpy_mode`` column,
+            which wins over every param (``None`` = the run's mode).
 
     Returns:
         ``"legacy"`` or ``"map_first"``.
@@ -1491,7 +1502,8 @@ def resolve_clustering_mode(
     _check_species(species)
     per_species = mode_human if species == "human" else mode_mouse
     chosen = (
-        _mode_or_none(mode)
+        _mode_or_none(row_mode)
+        or _mode_or_none(mode)
         or _mode_or_none(per_species)
         or DEFAULT_CLUSTERING_MODE[species]
     )
@@ -1507,6 +1519,24 @@ def _mode_or_none(value: str | None) -> str | None:
     if value is None:
         return None
     return str(value).strip().lower() or None
+
+
+def default_mapmycells_stage(
+    species: Species, *, flipped_species: frozenset[str] = FLIPPED_SPECIES
+) -> str:
+    """Default ``annotation_mode_mapmycells_stage`` (``defaultMapmycellsStage``).
+
+    A flipped species no longer runs the legacy MAPMYCELLS stage beside
+    map_first (``"skip"``); a species that has not flipped keeps it.
+
+    Args:
+        species: Run species.
+        flipped_species: Species whose default is already ``map_first``.
+
+    Returns:
+        ``"skip"`` or ``"legacy"``.
+    """
+    return "skip" if _check_species(species) in flipped_species else "legacy"
 
 
 def resolve_table_key_suffix(

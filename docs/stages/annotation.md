@@ -12,8 +12,9 @@ MAP step (`merxen annotate` and its pipeline process
 `CLUSTERING_SQUIDPY_ANNOTATE_MAP`), which maps samples onto the bundles, the
 RESOLVE step (label tables) and, since M5, `map_first` pipeline runs that
 build the map-first hierarchy from the labels
-([Map-first clustering runs](#map-first-clustering-runs-m5)). Legacy stays
-the default for both species until their flips (M8, M9).
+([Map-first clustering runs](#map-first-clustering-runs-m5)). Human runs
+map_first by default since its flip (M8, pre-registration §20); mouse stays
+legacy until its flip (M9).
 
 ## Reference bundles
 
@@ -971,7 +972,7 @@ wired by `workflows/subworkflows/annotation_references.nf` (PANEL, PREP) and
 `workflows/subworkflows/clustering_map_first.nf` (MAP in
 `CLUSTERING_ANNOTATE_MAP`, RESOLVE after it in `CLUSTERING_ANNOTATE`,
 COMPUTE_CPU after RESOLVE in `CLUSTERING_MAP_FIRST`); none takes the GPU
-lock, and a default (legacy) run instantiates none of them.
+lock, and a run whose rows are all legacy instantiates none of them.
 
 | Process | Runs | Resources | What it does |
 |---|---|---|---|
@@ -1078,13 +1079,27 @@ prepared H5ADs (`per_platform` panels, label-free set c) arrives with the
 
 ## Map-first clustering runs (M5)
 
-A run clusters in `map_first` mode when it selects it:
-`--clustering_squidpy_mode map_first` (both species) or
-`--clustering_squidpy_mode_human map_first` / `_mouse`. Legacy stays the
-default, and the mode is one per run (it follows `--species`). Hook H5 in
-`workflows/main.nf` then replaces the legacy GPU `CLUSTERING_SQUIDPY_COMPUTE`
-by `CLUSTERING_MAP_FIRST`; `CLUSTERING_SQUIDPY_PREPARE` and
-`CLUSTERING_SQUIDPY_FINALIZE` are the legacy processes, unchanged:
+Human runs cluster in `map_first` mode by default since the M8 flip
+(pre-registration §20); mouse stays `legacy` until M9. A run selects its
+mode with `--clustering_squidpy_mode` (both species) or
+`--clustering_squidpy_mode_human` / `_mouse`, and a samplesheet row's
+`clustering_squidpy_mode` column (`legacy` / `map_first`) overrides the run
+for that row (§20 D15), so one run can opt single datasets in or out. Human
+`legacy` still works but is deprecated and logs a warning. After the flip a
+human `map_first` row writes the unsuffixed clustered tables (the legacy
+tables are replaced; keep a snapshot, or set
+`--clustering_squidpy_table_key_suffix mapfirst`, if you need them), MENDER
+uses the `exclude_from_features` policy for unassigned cells, the legacy
+`mapmycells` stage runs only when `--annotation_mode_mapmycells_stage legacy`
+and the row stops at `mapmycells`, and the run needs the reference-source and
+reference-store params, which preflight checks. A header that only resembles
+`clustering_squidpy_mode` (other case, spaces or hyphens) is ignored with a
+warning, and those rows follow the run's mode. Hook
+H5 in `workflows/main.nf` sends `map_first` rows through
+`CLUSTERING_MAP_FIRST` instead of the legacy GPU `CLUSTERING_SQUIDPY_COMPUTE`
+(a run whose rows are all `legacy` keeps the legacy wiring unchanged);
+`CLUSTERING_SQUIDPY_PREPARE` and `CLUSTERING_SQUIDPY_FINALIZE` are the legacy
+processes, unchanged:
 
 ```text
 PREPARE -> ANNOTATE_PANEL -> ANNOTATE_REFERENCE_PREP (per unique bundle)
@@ -1138,10 +1153,11 @@ PREPARE -> ANNOTATE_PANEL -> ANNOTATE_REFERENCE_PREP (per unique bundle)
   cell-id checks alone cannot tell them apart. A table whose states are all
   unassigned (a refused panel, a failed gate) is not an error: MENDER
   records `status: skipped_no_assigned_state`, writes its manifests without
-  domains and imports nothing. The MENDER barrier of a `map_first` run
-  pairs every terminal event of a pair with the pair's one barrier spec
-  (`combine`; legacy runs keep their `join`, which pairs items one to one,
-  so a pair's earlier FINALIZE event would consume the spec, [MENDER](mender.md)).
+  domains and imports nothing. The MENDER barrier of a run with any
+  `map_first` row pairs every terminal event of a pair with the pair's one
+  barrier spec (`combine`, also for that run's legacy rows; a run whose rows
+  are all legacy keeps its `join`, which pairs items one to one, so a pair's
+  earlier FINALIZE event would consume the spec, [MENDER](mender.md)).
   `map_first` runs never run the legacy MAPMYCELLS stage unless
   `annotation_mode_mapmycells_stage` is `legacy` and the run stops at
   `mapmycells`, so the barrier never waits for it.
@@ -1226,12 +1242,19 @@ report.file = "<evidence dir>/report.html"      // likewise timeline, trace, dag
 nextflow -c map_first_into_published.config run workflows/main.nf -profile dwight,conda \
     --samplesheet <rows with start_stage clustering_squidpy, stop_stage mender> \
     --outdir <published results> --clustering_squidpy_mode map_first \
+    --clustering_squidpy_table_key_suffix mapfirst \
     --mender_enabled true --cortical_depth_write_spatialdata_table false
 ```
 
+Since the human flip (pre-registration §20) a human `map_first` run writes
+the unsuffixed clustered tables unless `--clustering_squidpy_table_key_suffix
+mapfirst` is given, as above; without it, this recipe would replace the
+published legacy tables.
+
 Keep the rows' `stop_stage` at `mender` (or unset): a `map_first` row that
-stops at `mapmycells` runs the legacy MAPMYCELLS (hook H3), which publishes
-to the legacy `mapmycells/`. `-preview` does not show which tasks a row
+stops at `mapmycells` with `--annotation_mode_mapmycells_stage legacy` runs
+the legacy MAPMYCELLS (hook H3), which publishes to the legacy `mapmycells/`
+(a human row's default, `skip`, does not). `-preview` does not show which tasks a row
 gets (it builds the static DAG of every invoked process without reading the
 samplesheet); a `-stub-run` on a synthetic copy of the rows' layout does.
 The stores then gain `tables/<table>_clustering_squidpy_mapfirst` and a

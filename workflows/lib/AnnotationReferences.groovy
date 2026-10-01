@@ -782,7 +782,7 @@ class AnnotationReferences {
     /**
      * Return what CLUSTERING_SQUIDPY_COMPUTE_CPU needs to know before it runs.
      *
-     * The run's table-key suffix and MENDER unassigned-state policy (both
+     * The map_first rows' table-key suffix and MENDER unassigned-state policy (both
      * recorded in each clustered table, which FINALIZE and MENDER_PREPARE
      * read: their scripts are the legacy ones) and the fingerprint of the
      * hierarchy code. All are task inputs, so -resume sees them.
@@ -794,8 +794,13 @@ class AnnotationReferences {
      */
     static Map computeSpec(Map params, Object sourceRoot) {
         def species = AnnotationDefaults.normalizeSpecies(params?.get("species"))
+        // COMPUTE_CPU runs for map_first rows only, so its suffix is that of a
+        // map_first row, also in a run whose own mode is legacy and that a
+        // row's clustering_squidpy_mode column opts in (§20 D15): forRow
+        // gives the row the same suffix.
+        def mapFirstParams = AnnotationDefaults.withRowMode(AnnotationDefaults.MAP_FIRST, params)
         return [
-            table_key_suffix: AnnotationDefaults.tableKeySuffix(params, species),
+            table_key_suffix: AnnotationDefaults.tableKeySuffix(mapFirstParams, species),
             mender_unassigned_state_policy: textOr(
                 params?.get("mender_unassigned_state_policy"),
                 AnnotationSettings.MAP_FIRST_MENDER_UNASSIGNED_STATE_POLICY,

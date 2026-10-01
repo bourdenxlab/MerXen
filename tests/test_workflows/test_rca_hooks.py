@@ -55,6 +55,8 @@ EXPECTED_SITES: dict[tuple[str, str], int] = {
     (MAIN_NF, "H3"): 1,
     # The subscription that records skipped MENDER runs (M5 review).
     (MAIN_NF, "H6"): 1,
+    # The samplesheet's row modes, read before the DAG is built (§20 D15).
+    (MAIN_NF, "H5"): 1,
     # Sample config, clustering config, MENDER, cortical-depth table (M5).
     ("src/merxen/config.py", "H8"): 4,
     ("src/merxen/io/samplesheet.py", "H9"): 2,  # SamplePair fields, row parsing
@@ -200,12 +202,15 @@ def test_h5_switches_between_legacy_compute_and_map_first() -> None:
     assert main_text.count("CLUSTERING_MAP_FIRST(") == 1
     assert "CLUSTERING_MAP_FIRST(" in map_first
     assert "CLUSTERING_SQUIDPY_PREPARE(" in map_first
-    assert "CLUSTERING_SQUIDPY_COMPUTE(" not in map_first
     assert "AnnotationSettings.samplesJsonWithRowColumns(" in map_first
     assert "AnnotationReferences.alignmentFiles(alignOut)" in map_first
     assert "AnnotationRunRecord.expect(pairId, segmentation)" in map_first
-    # The legacy COMPUTE (GPU env) is called nowhere else.
-    assert main_text.count("CLUSTERING_SQUIDPY_COMPUTE(") == 1
+    # §20 D15: in a run with a map_first row, the legacy COMPUTE (GPU env)
+    # gets the legacy rows only, and is called nowhere else.
+    assert map_first.count("CLUSTERING_SQUIDPY_COMPUTE(") == 1
+    assert "clustering_prepared_by_mode_ch.legacy" in map_first
+    assert "clustering_prepared_by_mode_ch.map_first" in map_first
+    assert main_text.count("CLUSTERING_SQUIDPY_COMPUTE(") == 2
 
 
 @pytest.mark.parametrize("hook", sorted(HOOK_CONTENT))

@@ -425,9 +425,12 @@ adding or replacing the final clustered table for the active segmentation:
 `table_MOSAIK_proseg_clustering_squidpy` for `reseg` and
 `table_original_clustering_squidpy` for `original_seg`. Set
 `--clustering_squidpy_write_spatialdata_table false` for H5AD-only output.
-A `map_first` run of a species that has not flipped writes the same key with
-the suffix `_mapfirst` (e.g. `table_MOSAIK_proseg_clustering_squidpy_mapfirst`;
-`clustering_squidpy_table_key_suffix`) and never the legacy table; its
+A `map_first` run of a species that has not flipped (mouse, until M9)
+writes the same key with the suffix `_mapfirst` (e.g.
+`table_MOSAIK_proseg_clustering_squidpy_mapfirst`;
+`clustering_squidpy_table_key_suffix`) and never the legacy table; a human
+`map_first` run writes the unsuffixed key since the human flip (M8) unless a
+suffix is given; its
 clustered H5AD records the suffix, the MENDER policy and the pair's
 cross-platform scope in `uns["merxen_hierarchical_clustering"]`
 ([Map-first clustering runs](stages/annotation.md#map-first-clustering-runs-m5)).
@@ -498,8 +501,9 @@ Path: `${outdir}/<pair_id>/<analysis_segmentation>/mapmycells/`
 ### Annotation reference bundles (in development)
 
 Written only by `--annotation_prepare_only` runs (panel and bundles) and by
-`map_first` runs (`--clustering_squidpy_mode map_first`); a default run
-writes none of these directories. See
+`map_first` rows (human by default since M8; mouse with
+`--clustering_squidpy_mode map_first` or the row column); a run whose rows
+are all legacy writes none of these directories. See
 [Reference-based annotation](stages/annotation.md#pipeline-processes).
 
 | Path | Contents |
