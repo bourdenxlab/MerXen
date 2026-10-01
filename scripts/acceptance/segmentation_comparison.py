@@ -109,6 +109,33 @@ metrics with each arm's own confident cells (combined: reseg labels on
 proseg_hybrid counts); the pipeline change the mode would need (stated, not
 implemented).
 
+Post hoc (added after the 2026-10-01 review of the first decision memo; not
+pre-registered, information only: they fit, score and select nothing, and
+analyses 1-4 are unchanged). ``posthoc.csv`` and ``tables/posthoc_*.csv``:
+
+- ``selection_depth``: each arm's confident share per level and H2's
+  implausible share on the cells in both tables (the hybrid_matched table
+  cells) beside the whole tables, and ``reseg(R) - hybrid(H)`` split into
+  cell selection, depth (``hybrid_matched - hybrid`` on the same cells) and
+  the rest (``reseg - hybrid_matched`` on the same cells);
+- ``jsd_reading``: each paired JSD difference of analysis 1 with the side
+  of 0 its CI lies on;
+- ``spillover_summary``: analysis 3's rows counted by the side of 0 of the
+  CI, distance bins apart from whole-class rows, and the near (0-10 µm)
+  minus far (> 50 µm) difference per class and dataset;
+- ``leaking_genes``: analysis 3's per-gene detection-rate differences
+  ranked by their median over class x dataset rows;
+- ``noise_floor``, ``noise_strata``: the control features (MERSCOPE blank
+  barcodes; the Xenium stores' transcripts carry none) tallied like analysis
+  2's genes (``controls``), and analysis 2's per-gene loss within strata of
+  the gene's decoded count over the median control feature's;
+- ``common_bins``, ``common_bins_summary``: analysis 3 on the cells with the
+  same confident label in both arms, with one distance per cell for both
+  arms (its proseg_hybrid centroid to the nearest proseg_hybrid confident
+  cell of another broad class), so a bin holds the same cells in each arm;
+- ``matched_count_sources``: which hybrid_matched items read the thinned
+  counts.
+
 Subcommands, in order (each writes only under ``--out``; the published
 results and the stores are read, never written):
 
@@ -119,7 +146,10 @@ results and the stores are read, never written):
 5. ``transcripts --pair P --platform PLAT``: analysis 2's transcript tallies;
 6. ``analyze``: analyses 1-4 -> ``<out>/segmentation_comparison/``
    (``analysis<N>.csv``, one per analysis with a ``table`` column, and
-   ``tables/``); 7. ``render``: figures (PNG + PDF + CSV) and ``index.html``.
+   ``tables/``);
+7. post hoc: ``controls --pair P --platform PLAT`` (the control features'
+   tallies), then ``posthoc`` (``posthoc.csv``, after ``analyze``);
+8. ``render``: figures (PNG + PDF + CSV) and ``index.html``.
 """
 
 from __future__ import annotations
@@ -532,6 +562,10 @@ class Locations:
     def transcripts_cache(self: Locations, pair: str, platform: str) -> Path:
         """Return analysis 2's tally of one sample."""
         return self.out / "cache" / "transcripts" / f"{sample_id(pair, platform)}"
+
+    def controls_cache(self: Locations, pair: str, platform: str) -> Path:
+        """Return the control features' tally of one sample (post hoc)."""
+        return self.out / "cache" / "controls" / f"{sample_id(pair, platform)}"
 
     def result_dir(self: Locations) -> Path:
         """Return ``<out>/segmentation_comparison``."""
@@ -1292,8 +1326,11 @@ def _id_column(table: Any, name: str) -> tuple[np.ndarray, np.ndarray]:
     return np.asarray(values, dtype=np.uint64), np.asarray(valid, dtype=bool)
 
 
+FEATURE_SETS: Final[tuple[str, ...]] = ("genes", "controls")
+
+
 def load_transcripts(
-    store: Path, platform: str, min_qv: float | None
+    store: Path, platform: str, min_qv: float | None, *, features: str = "genes"
 ) -> TranscriptInputs:
     """Read a store's transcripts and apply the decoding filter.
 
@@ -1301,14 +1338,20 @@ def load_transcripts(
         store: ``latest_spatialdata.zarr``.
         platform: ``MERSCOPE`` or ``XENIUM``.
         min_qv: Minimum qv (Xenium); ``None``: no qv filter.
+        features: ``genes`` (analysis 2: control features removed) or
+            ``controls`` (post hoc: only the control features kept, e.g.
+            MERSCOPE's blank barcodes; ``genes`` then lists those).
 
     Returns:
-        The kept transcripts' columns and the filter record.
+        The kept transcripts' columns and the filter record
+        (``n_control_removed`` counts the control features either way).
     """
     import pyarrow as pa
     import pyarrow.compute as pc
     import pyarrow.parquet as pq
 
+    if features not in FEATURE_SETS:
+        raise ValueError(f"features must be one of {FEATURE_SETS}")
     parts = sorted(
         (store / "points" / "transcripts" / "points.parquet").glob("*.parquet")
     )
@@ -1325,6 +1368,8 @@ def load_transcripts(
         pc.is_in(gene_column, value_set=pa.array(sorted(controls), pa.string()))
     )
     n_control = n_total - int(pc.sum(keep).as_py() or 0)
+    if features == "controls":
+        keep = pc.is_in(gene_column, value_set=pa.array(sorted(controls), pa.string()))
     if min_qv is not None:
         passes = pc.greater_equal(
             table.column("qv"), pa.scalar(float(min_qv), pa.float32())
@@ -1352,6 +1397,7 @@ def load_transcripts(
         dtype=bool,
     )
     record = {
+        "features": features,
         "n_transcripts": int(n_total),
         "n_control_removed": int(n_control),
         "n_below_min_qv_removed": int(n_qv),
@@ -1589,6 +1635,70 @@ def command_transcripts(args: argparse.Namespace) -> int:
             "n_reseg_table": int(len(reseg_table)),
             "n_hybrid_table": int(len(hybrid_table)),
             "checks": checks,
+            "wall_s": round(time.time() - started, 1),
+        },
+        cache / "tally_record.json",
+    )
+    return 0
+
+
+def command_controls(args: argparse.Namespace) -> int:
+    """The control features' tallies of one sample (post hoc; cached).
+
+    The same decoding filter, assignment and nucleus definitions as analysis
+    2's genes (``command_transcripts``), on the control features only (the
+    MERSCOPE blank barcodes). A sample whose store transcripts carry no
+    control feature gets an empty tally and a record that says so.
+    """
+    locations = locations_from(args)
+    pair, platform = args.pair, args.platform.upper()
+    cache = locations.controls_cache(pair, platform)
+    if (cache / "tally.parquet").exists():
+        raise SystemExit(f"{cache} exists (never overwritten)")
+    cache.mkdir(parents=True, exist_ok=True)
+    started = time.time()
+    store = locations.store_path(pair, platform)
+    min_qv = args.xenium_min_qv if platform == "XENIUM" else None
+    inputs = load_transcripts(store, platform, min_qv, features="controls")
+    logger.info(
+        "%s %s: %d control transcripts", pair, platform, inputs.record["n_decoded"]
+    )
+    reseg_table = table_ids_uint64(
+        read_labels(locations.labels_path("reseg", pair, platform))
+    )
+    hybrid_table = table_ids_uint64(
+        read_labels(locations.labels_path("hybrid", pair, platform))
+    )
+    nuclei = read_shapes(store, NUCLEI_SHAPES)
+    nucleus_index = sc.points_in_polygons(inputs.x, inputs.y, nuclei.geometry.values)
+    cells = read_shapes(store, ARM_SHAPES["hybrid"])
+    holders = holder_ids(
+        sc.nucleus_holders(
+            nuclei.geometry.values, cells.geometry.values, [int(i) for i in cells.index]
+        )
+    )
+    tally = transcript_tally_frames(
+        inputs,
+        nucleus_index=nucleus_index,
+        holders=holders,
+        reseg_table=reseg_table,
+        hybrid_table=hybrid_table,
+        groupings={},
+    )
+    tally.to_parquet(cache / "tally.parquet", index=False)
+    write_json(
+        {
+            "pair": pair,
+            "platform": platform,
+            "store": str(store),
+            "filter": inputs.record,
+            "n_control_features": len(inputs.genes),
+            "n_in_nucleus": int((nucleus_index >= 0).sum()),
+            "n_reseg_table": int(len(reseg_table)),
+            "n_hybrid_table": int(len(hybrid_table)),
+            "note": ""
+            if inputs.genes
+            else "not_available: the store's transcripts carry no control feature",
             "wall_s": round(time.time() - started, 1),
         },
         cache / "tally_record.json",
@@ -3228,23 +3338,850 @@ def analysis4(
 
 
 # --------------------------------------------------------------------------
+# Post hoc (after the 2026-10-01 review of the first memo; not pre-registered)
+
+POSTHOC_NOTE: Final = (
+    "post hoc: added after the 2026-10-01 review of the first decision memo; "
+    "not pre-registered; information only (fits, scores and selects nothing)"
+)
+SELECTION_METRICS: Final[tuple[str, ...]] = (
+    "coverage_lineage",
+    "coverage_broad",
+    "coverage_supercluster",
+    "H2_implausible_share",
+)
+SELECTION_LABEL_COLUMNS: Final[tuple[str, ...]] = (
+    "cell_id",
+    "in_table",
+    "total_counts",
+    "flag_implausible",
+    "ct_lineage_status",
+    "ct_broad_status",
+    "ct_supercluster_status",
+)
+NEAR_BIN: Final = sc.DISTANCE_BIN_LABELS[0]
+FAR_BIN: Final = sc.DISTANCE_BIN_LABELS[-1]
+# A gene's decoded count over the median control feature's: <= 2x, between,
+# >= 10x.
+NOISE_STRATA: Final[tuple[str, ...]] = ("<=2x", "2-10x", ">=10x")
+NOISE_LOW: Final = 2.0
+NOISE_HIGH: Final = 10.0
+ALL_GENES: Final = "all genes"
+CONTROL_STRATUM: Final = "control features"
+NO_CONTROLS: Final = (
+    "not_available: the store's transcripts carry no control feature "
+    "(analysis 2's tally removed none)"
+)
+COMMON_NEIGHBOURS: Final = (
+    "one distance per cell for both arms: its proseg_hybrid centroid to the "
+    "nearest proseg_hybrid confident broad cell of another class; cells with "
+    "the same confident broad label in both arms"
+)
+OWN_NEIGHBOURS: Final = (
+    "analysis 3 as pre-registered: each arm's own centroids and its own "
+    "confident cells as neighbours"
+)
+MATCHED_COUNT_SOURCES: Final[tuple[tuple[str, str, str], ...]] = (
+    (
+        "MAP / RESOLVE labels, statuses and soft compositions",
+        "thinned counts",
+        "yes",
+    ),
+    (
+        "label-table measures: H1, H2, H3, H7, H8, the cross-platform JSDs, the "
+        "depth-bin coverage and the labels H12 orders",
+        "thinned counts (through the labels)",
+        "yes",
+    ),
+    (
+        "H9 pseudo-labels (resolve_criteria.py on the clustered H5ADs)",
+        "unthinned proseg_hybrid counts",
+        "no: thinned labels scored against pseudo-labels of unthinned counts",
+    ),
+    (
+        "H10 marker scores (marker_referee.py)",
+        "unthinned proseg_hybrid counts",
+        "no: thinned labels with marker scores of unthinned counts",
+    ),
+    (
+        "report items 4 (reference expectations) and 7 (cross-platform "
+        "concordance, platform factors)",
+        "unthinned proseg_hybrid counts",
+        "no: thinned labels with unthinned counts",
+    ),
+    ("H4 (held-out genes)", "not_available", H4_MATCHED_REASON),
+    (
+        "cortical depth, MENDER, the shared mask",
+        "unchanged inputs (not count-based)",
+        "not applicable",
+    ),
+)
+
+
+def label_metric(labels: pd.DataFrame, metric: str) -> float:
+    """A label-table measure over some table cells (``SELECTION_METRICS``).
+
+    Args:
+        labels: Label rows of the cells.
+        metric: ``coverage_<level>`` (the confident share at the level; H7
+            at broad) or ``H2_implausible_share`` (``flag_implausible``, H2).
+
+    Returns:
+        The share (NaN without cells or without the level's column).
+
+    Raises:
+        ValueError: For an unknown metric.
+    """
+    if metric == "H2_implausible_share":
+        column = "flag_implausible"
+    elif metric.startswith("coverage_"):
+        column = f"ct_{metric.removeprefix('coverage_')}_status"
+    else:
+        raise ValueError(f"unknown metric {metric!r}")
+    if not len(labels) or column not in labels:
+        return math.nan
+    if column == "flag_implausible":
+        return float(labels[column].to_numpy(bool).mean())
+    return float((labels[column].astype(str).to_numpy() == CONFIDENT).mean())
+
+
+def selection_depth_rows(
+    reseg: pd.DataFrame,
+    hybrid: pd.DataFrame,
+    matched: pd.DataFrame,
+    *,
+    pair: str,
+    platform: str,
+) -> list[dict[str, Any]]:
+    """Split ``reseg - hybrid`` of the label measures by cell set and depth.
+
+    With R and H the reseg and proseg_hybrid table cells and S = R & H (the
+    hybrid_matched table cells), ``reseg(R) - hybrid(H)`` is the sum of the
+    cell selection ``(hybrid(S) - hybrid(H)) + (reseg(R) - reseg(S))``, the
+    depth ``hybrid_matched(S) - hybrid(S)`` (the same cells thinned) and the
+    rest ``reseg(S) - hybrid_matched(S)`` (the same cells at the same depth).
+
+    Args:
+        reseg: reseg's table cells' label rows (index ``cell_id``).
+        hybrid: proseg_hybrid's.
+        matched: hybrid_matched's.
+        pair: Pair.
+        platform: Platform.
+
+    Returns:
+        One row per ``SELECTION_METRICS`` entry.
+    """
+    shared = reseg.index.intersection(hybrid.index)
+    hybrid_only = hybrid.index.difference(shared)
+    reseg_only = reseg.index.difference(shared)
+    medians = {
+        "median_counts_hybrid_only": hybrid.loc[hybrid_only, "total_counts"],
+        "median_counts_shared_hybrid": hybrid.loc[shared, "total_counts"],
+        "median_counts_shared_reseg": reseg.loc[shared, "total_counts"],
+        "median_counts_shared_matched": matched.reindex(shared)["total_counts"],
+    }
+    base: dict[str, Any] = {
+        "pair": pair,
+        "role": role(pair),
+        "platform": platform,
+        "n_reseg_table": len(reseg),
+        "n_hybrid_table": len(hybrid),
+        "n_shared": len(shared),
+        "n_hybrid_only": len(hybrid_only),
+        "n_reseg_only": len(reseg_only),
+        "n_matched_table": len(matched),
+        "matched_table_is_shared": set(matched.index) == set(shared),
+        **{
+            name: float(values.median()) if len(values) else math.nan
+            for name, values in medians.items()
+        },
+    }
+    rows = []
+    for metric in SELECTION_METRICS:
+        value = {
+            "reseg_all": label_metric(reseg, metric),
+            "reseg_shared": label_metric(reseg.loc[shared], metric),
+            "reseg_only": label_metric(reseg.loc[reseg_only], metric),
+            "hybrid_all": label_metric(hybrid, metric),
+            "hybrid_shared": label_metric(hybrid.loc[shared], metric),
+            "hybrid_only": label_metric(hybrid.loc[hybrid_only], metric),
+            "matched_shared": label_metric(
+                matched.loc[matched.index.intersection(shared)], metric
+            ),
+        }
+        headline = value["reseg_all"] - value["hybrid_all"]
+        parts = {
+            "part_cell_selection": (value["hybrid_shared"] - value["hybrid_all"])
+            + (value["reseg_all"] - value["reseg_shared"]),
+            "part_depth": value["matched_shared"] - value["hybrid_shared"],
+            "part_same_cells_same_depth": value["reseg_shared"]
+            - value["matched_shared"],
+        }
+        rows.append(
+            {
+                **base,
+                "metric": metric,
+                **value,
+                "headline_reseg_minus_hybrid": headline,
+                "same_cells_reseg_minus_hybrid": value["reseg_shared"]
+                - value["hybrid_shared"],
+                **parts,
+                **{
+                    f"share_of_headline_{name.removeprefix('part_')}": (
+                        part / headline if headline else math.nan
+                    )
+                    for name, part in parts.items()
+                },
+                "hybrid_matched_closes_share_of_headline": (
+                    (value["matched_shared"] - value["hybrid_all"]) / headline
+                    if headline
+                    else math.nan
+                ),
+                "note": POSTHOC_NOTE,
+            }
+        )
+    return rows
+
+
+def ci_side(low: Any, high: Any) -> str:
+    """Where a 95% CI lies: ``below 0``, ``above 0``, ``spans 0`` or ``no CI``."""
+    if not (is_number(low) and is_number(high)):
+        return "no CI"
+    if float(high) < 0:
+        return "below 0"
+    if float(low) > 0:
+        return "above 0"
+    return "spans 0"
+
+
+def jsd_reading(jsd: pd.DataFrame) -> pd.DataFrame:
+    """Analysis 1's paired JSD differences, wide by comparison, with the CI side.
+
+    Args:
+        jsd: ``analysis1_jsd_paired``.
+
+    Returns:
+        One row per pair, kind and region: reseg's JSD, each other arm's,
+        ``reseg - arm`` with its paired CI and the CI's side of 0 (below 0:
+        reseg's two platforms agree more).
+    """
+    part = jsd[
+        (jsd["first"] == "reseg") & jsd["second"].isin(["hybrid", "hybrid_matched"])
+    ]
+    rows: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for record in part.to_dict("records"):
+        key = (record["pair"], record["kind"], record["region"])
+        row = rows.setdefault(
+            key,
+            {
+                "pair": record["pair"],
+                "role": role(str(record["pair"])),
+                "kind": record["kind"],
+                "region": record["region"],
+                "jsd_reseg": record["jsd_first"],
+            },
+        )
+        other = record["second"]
+        low, high = record.get("difference_ci_low"), record.get("difference_ci_high")
+        row[f"jsd_{other}"] = record["jsd_second"]
+        row[f"reseg_minus_{other}"] = record["difference"]
+        row[f"reseg_minus_{other}_ci_low"] = low
+        row[f"reseg_minus_{other}_ci_high"] = high
+        row[f"reseg_minus_{other}_ci_side"] = ci_side(low, high)
+    frame = pd.DataFrame(list(rows.values()))
+    frame["reading"] = (
+        "below 0: reseg's platforms agree more; above 0: less; spans 0: no "
+        "difference at 95%"
+    )
+    frame["note"] = POSTHOC_NOTE
+    return frame
+
+
+def spillover_summary(
+    bins: pd.DataFrame, *, analysis: str, neighbours: str
+) -> pd.DataFrame:
+    """Count analysis 3's rows by the side of 0 of their CI.
+
+    Distance-bin rows and whole-class rows (``distance_bin = all``) are
+    counted apart. Near minus far is, per class and dataset, the hybrid -
+    reseg difference in the 0-10 µm bin minus that in the > 50 µm bin (rows
+    with both).
+
+    Args:
+        bins: ``analysis3_bins`` (or ``posthoc_common_bins``).
+        analysis: Which bins these are (a short name).
+        neighbours: How their distances were measured.
+
+    Returns:
+        One row per cell set, metric and scope (all datasets, development,
+        held-out).
+    """
+    rows = []
+    for (cells, metric), part in bins.groupby(["cells", "metric"], sort=False):
+        for scope, subset in (
+            ("all datasets", part),
+            ("development", part[part["role"] == "development"]),
+            ("held_out", part[part["role"] == "held_out"]),
+        ):
+            in_bins = subset[subset["distance_bin"].astype(str) != "all"]
+            whole = subset[subset["distance_bin"].astype(str) == "all"]
+            wide = in_bins.pivot_table(
+                index=["pair", "platform", "class"],
+                columns="distance_bin",
+                values="hybrid_minus_reseg",
+            )
+            near_far = (
+                (wide[NEAR_BIN] - wide[FAR_BIN]).dropna()
+                if {NEAR_BIN, FAR_BIN} <= set(wide.columns)
+                else pd.Series(dtype=np.float64)
+            )
+            rows.append(
+                {
+                    "analysis": analysis,
+                    "neighbours": neighbours,
+                    "cells": cells,
+                    "metric": metric,
+                    "scope": scope,
+                    "n_bin_rows": len(in_bins),
+                    "n_bin_ci_above_0": int((in_bins["ci_low"] > 0).sum()),
+                    "n_bin_ci_below_0": int((in_bins["ci_high"] < 0).sum()),
+                    "n_class_rows": len(whole),
+                    "n_class_ci_above_0": int((whole["ci_low"] > 0).sum()),
+                    "n_class_ci_below_0": int((whole["ci_high"] < 0).sum()),
+                    "n_class_difference_positive": int(
+                        (whole["hybrid_minus_reseg"] > 0).sum()
+                    ),
+                    "median_class_mean_hybrid": float(whole["mean_hybrid"].median()),
+                    "median_class_mean_reseg": float(whole["mean_reseg"].median()),
+                    "median_class_difference": float(
+                        whole["hybrid_minus_reseg"].median()
+                    ),
+                    "n_near_far_rows": len(near_far),
+                    "median_near_minus_far": float(near_far.median())
+                    if len(near_far)
+                    else math.nan,
+                    "share_near_minus_far_positive": float((near_far > 0).mean())
+                    if len(near_far)
+                    else math.nan,
+                    "note": POSTHOC_NOTE,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def leaking_genes(genes: pd.DataFrame) -> pd.DataFrame:
+    """Rank analysis 3's negative genes by their median detection-rate gain.
+
+    Args:
+        genes: ``analysis3_genes`` (the ``both_confident`` rows are used).
+
+    Returns:
+        One row per gene: the median, mean and largest hybrid - reseg
+        detection-rate difference over its class x dataset rows, where the
+        largest is, and how many rows have their CI above / below 0; ranked
+        by the median (largest first).
+    """
+    part = genes[genes["cells"] == "both_confident"]
+    rows = []
+    for gene, group in part.groupby("gene", sort=True):
+        difference = group["hybrid_minus_reseg"].astype(np.float64)
+        top = group.loc[difference.idxmax()] if difference.notna().any() else None
+        rows.append(
+            {
+                "gene": gene,
+                "n_rows": len(group),
+                "n_datasets": len(group[["pair", "platform"]].drop_duplicates()),
+                "classes_where_negative": "; ".join(
+                    sorted(set(group["class"].astype(str)))
+                ),
+                "median_difference": float(difference.median()),
+                "mean_difference": float(difference.mean()),
+                "max_difference": float(difference.max()),
+                "max_row": (
+                    f"{top['pair']} {top['platform']} {top['class']}"
+                    if top is not None
+                    else ""
+                ),
+                "median_detection_hybrid": float(group["detection_hybrid"].median()),
+                "median_detection_reseg": float(group["detection_reseg"].median()),
+                "n_ci_above_0": int((group["ci_low"] > 0).sum()),
+                "n_ci_below_0": int((group["ci_high"] < 0).sum()),
+            }
+        )
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return frame
+    frame = frame.sort_values(
+        ["median_difference", "gene"], ascending=[False, True], kind="mergesort"
+    ).reset_index(drop=True)
+    frame.insert(0, "rank_by_median", np.arange(1, len(frame) + 1))
+    frame["note"] = POSTHOC_NOTE
+    return frame
+
+
+def noise_stratum(ratio: float) -> str | None:
+    """A gene's stratum by its decoded count over the median control's."""
+    if not math.isfinite(ratio):
+        return None
+    if ratio <= NOISE_LOW:
+        return NOISE_STRATA[0]
+    if ratio < NOISE_HIGH:
+        return NOISE_STRATA[1]
+    return NOISE_STRATA[2]
+
+
+def pooled_shares(frame: pd.DataFrame) -> dict[str, float]:
+    """Analysis 2's shares pooled over a set of features (tally rows)."""
+
+    def total(column: str) -> float:
+        return float(frame[column].sum())
+
+    decoded = total("n_decoded")
+    nucleus = total("n_in_nucleus")
+    reseg = total("n_assigned_reseg") / decoded if decoded else math.nan
+    hybrid = total("n_assigned_hybrid") / decoded if decoded else math.nan
+    return {
+        "pooled_A_reseg": reseg,
+        "pooled_A_hybrid": hybrid,
+        "pooled_L": 1.0 - reseg / hybrid if hybrid else math.nan,
+        "pooled_N_bg": total("n_in_nucleus_unassigned_reseg") / nucleus
+        if nucleus
+        else math.nan,
+        "in_nucleus_share": nucleus / decoded if decoded else math.nan,
+    }
+
+
+def _quantiles(values: pd.Series) -> dict[str, float]:
+    finite = values.astype(np.float64).dropna()
+    if not len(finite):
+        return {"median_L": math.nan, "q10_L": math.nan, "q90_L": math.nan}
+    return {
+        "median_L": float(finite.median()),
+        "q10_L": float(finite.quantile(0.1)),
+        "q90_L": float(finite.quantile(0.9)),
+    }
+
+
+def noise_floor_tables(
+    genes: pd.DataFrame,
+    controls: Mapping[tuple[str, str], tuple[pd.DataFrame, Mapping[str, Any]]],
+) -> dict[str, pd.DataFrame]:
+    """The control features' assignment and analysis 2's loss by noise stratum.
+
+    The control features (MERSCOPE's blank barcodes) carry no transcript of a
+    gene, so what a segmentation assigns of them is noise. A gene's stratum
+    is its decoded count over the median control feature's (``<= 2x``,
+    ``2-10x``, ``>= 10x``); the other platform's L of the same genes is
+    paired with it. The noise share of the table counts assumes every gene
+    has the mean control feature's assigned count.
+
+    Args:
+        genes: ``analysis2_genes`` rows.
+        controls: ``(pair, platform)`` to the control tally's ``all`` rows
+            with ``segmentation_compare.loss_shares`` and its record; a
+            dataset without one, or with no control transcript, is
+            ``not_available``.
+
+    Returns:
+        ``noise_floor`` (one row per dataset) and ``noise_strata`` (one row
+        per dataset with controls and stratum).
+    """
+    floor_rows, strata_rows = [], []
+    for (pair, platform), dataset in genes.groupby(["pair", "platform"], sort=False):
+        base = {"pair": pair, "role": role(str(pair)), "platform": platform}
+        entry = controls.get((str(pair), str(platform)))
+        tally = None if entry is None else entry[0]
+        if tally is None or not len(tally) or not tally["n_decoded"].sum():
+            note = (
+                "not_available: no control tally"
+                if entry is None
+                else str(entry[1].get("note") or "not_available: no control transcript")
+            )
+            floor_rows.append({**base, "n_control_features": 0, "note": note})
+            continue
+        n_controls = len(tally)
+        median_control = float(tally["n_decoded"].median())
+        control_total = float(tally["n_decoded"].sum())
+        gene_total = float(dataset["n_decoded"].sum())
+        mean_control = {
+            arm: float(tally[f"n_assigned_{arm}"].sum()) / n_controls
+            for arm in ("reseg", "hybrid")
+        }
+        floor_rows.append(
+            {
+                **base,
+                "n_control_features": n_controls,
+                "n_control_decoded": int(control_total),
+                "median_control_decoded": median_control,
+                "control_share_of_decoded": control_total
+                / (control_total + gene_total),
+                **{
+                    f"control_{key}": value
+                    for key, value in pooled_shares(tally).items()
+                },
+                "control_median_L": float(tally["L"].median()),
+                **{
+                    f"genes_{key}": value
+                    for key, value in pooled_shares(dataset).items()
+                },
+                **{
+                    f"noise_share_of_table_counts_{arm}": mean_control[arm]
+                    * len(dataset)
+                    / float(dataset[f"n_assigned_{arm}"].sum())
+                    for arm in ("reseg", "hybrid")
+                },
+                "note": POSTHOC_NOTE,
+            }
+        )
+        ratio = dataset["n_decoded"].astype(np.float64) / (
+            median_control if median_control > 0 else math.nan
+        )
+        stratum = ratio.map(noise_stratum)
+        other = genes[(genes["pair"] == pair) & (genes["platform"] != platform)]
+        other_platform = str(other["platform"].iloc[0]) if len(other) else ""
+        other_l = other.set_index("gene")["L"]
+        for name in (ALL_GENES, *NOISE_STRATA):
+            members = dataset if name == ALL_GENES else dataset[stratum == name]
+            loss = members["L"].astype(np.float64)
+            rho = sc.spearman_bootstrap(loss, members["expression_level"])
+            paired = sc.wilcoxon_paired(
+                loss.to_numpy(),
+                other_l.reindex(members["gene"].astype(str)).to_numpy(np.float64),
+            )
+            strata_rows.append(
+                {
+                    **base,
+                    "stratum": name,
+                    "n_genes": len(members),
+                    "share_of_gene_transcripts": float(members["n_decoded"].sum())
+                    / gene_total
+                    if gene_total
+                    else math.nan,
+                    **_quantiles(loss),
+                    "median_N_bg": float(members["N_bg"].median()),
+                    **pooled_shares(members),
+                    "rho_L_expression": rho.effect,
+                    "rho_ci_low": rho.ci_low,
+                    "rho_ci_high": rho.ci_high,
+                    "rho_p_value": rho.p_value,
+                    "other_platform": other_platform,
+                    "median_L_minus_other_platform": paired.median_difference,
+                    "n_paired_genes": paired.n,
+                    "wilcoxon_p_value": paired.p_value,
+                    "note": POSTHOC_NOTE,
+                }
+            )
+        strata_rows.append(
+            {
+                **base,
+                "stratum": CONTROL_STRATUM,
+                "n_genes": n_controls,
+                **_quantiles(tally["L"]),
+                "median_N_bg": float(tally["N_bg"].median()),
+                **pooled_shares(tally),
+                "note": POSTHOC_NOTE,
+            }
+        )
+    return {
+        "noise_floor": pd.DataFrame(floor_rows),
+        "noise_strata": pd.DataFrame(strata_rows),
+    }
+
+
+def common_bins_sample(
+    reseg: ArmData,
+    hybrid: ArmData,
+    *,
+    xy_reseg: np.ndarray,
+    xy_hybrid: np.ndarray,
+    negatives: pd.DataFrame,
+    pair: str,
+    platform: str,
+) -> dict[str, list[dict[str, Any]]]:
+    """Analysis 3 with one distance per cell for both arms (post hoc).
+
+    The cells with the same confident broad label in both arms; each cell's
+    distance is from its proseg_hybrid centroid to the nearest proseg_hybrid
+    confident broad cell of another class, and both arms use it, so a bin
+    holds the same cells in each arm. The metrics, the tiles (proseg_hybrid
+    centroids) and the bootstrap are analysis 3's.
+
+    Args:
+        reseg: reseg table cells (labels, counts).
+        hybrid: proseg_hybrid table cells.
+        xy_reseg: reseg native centroids of ``reseg.labels`` rows.
+        xy_hybrid: proseg_hybrid native centroids of ``hybrid.labels`` rows.
+        negatives: The primary bundle's ``negative_genes.parquet``.
+        pair: Pair.
+        platform: Platform.
+
+    Returns:
+        ``bins`` rows (analysis 3's columns) and one ``cells`` row.
+    """
+    classes = list(HUMAN_BROAD_CLASSES)
+    names_r = pd.Series(
+        confident_names(reseg.labels, "broad"), index=reseg.labels.index
+    )
+    names_h = pd.Series(
+        confident_names(hybrid.labels, "broad"), index=hybrid.labels.index
+    )
+    both = names_r.dropna().index.intersection(names_h.dropna().index)
+    same = both[(names_r.loc[both] == names_h.loc[both]).to_numpy(bool)]
+    position_h = hybrid.labels.index.get_indexer(same)
+    position_r = reseg.labels.index.get_indexer(same)
+    distance = sc.nearest_other_class_distance(xy_hybrid, names_h.to_numpy(object))[
+        position_h
+    ]
+    bins = sc.distance_bin_codes(distance)
+    class_index = np.array(
+        [classes.index(str(name)) for name in names_h.loc[same]], dtype=np.int64
+    )
+    gene_ids = [gene for gene in hybrid.gene_ids if gene]
+    mask = negative_mask(negatives, gene_ids)
+    measured: dict[str, dict[str, np.ndarray]] = {}
+    for arm, data, position in (
+        ("reseg", reseg, position_r),
+        ("hybrid", hybrid, position_h),
+    ):
+        if data.counts is None:
+            raise SystemExit(f"{arm}: counts not loaded")
+        counts = align_genes(data.counts, data.gene_ids, gene_ids)
+        measured[arm] = {
+            "detected": (counts[position] > 0).toarray(),
+            "contamination": data.labels["contamination_score"].to_numpy(np.float64)[
+                position
+            ],
+        }
+    xy = xy_hybrid[position_h]
+    tiles = co.tile_codes(np.where(np.isfinite(xy), xy, xy_reseg[position_r]), TILE_UM)
+    n_bins = len(sc.DISTANCE_BIN_LABELS)
+    rows = []
+    for c_index, cls in enumerate(classes):
+        member = class_index == c_index
+        negative_genes = np.flatnonzero(mask[c_index])
+        whole = np.where(member, 0, -1)
+        for metric in ("contamination_score", "negative_detection_rate"):
+            values = {}
+            for arm in ("reseg", "hybrid"):
+                if metric == "contamination_score":
+                    value = measured[arm]["contamination"]
+                elif len(negative_genes):
+                    value = measured[arm]["detected"][:, negative_genes].mean(axis=1)
+                else:
+                    value = np.full(len(member), math.nan)
+                values[arm] = np.where(member, value, math.nan)
+            result = sc.tile_bootstrap_ratio(
+                values["reseg"], bins, values["hybrid"], bins, tiles, n_bins
+            )
+            overall = sc.tile_bootstrap_ratio(
+                values["reseg"], whole, values["hybrid"], whole, tiles, 1
+            )
+            for b_index, label in enumerate((*sc.DISTANCE_BIN_LABELS, "all")):
+                source, index = (overall, 0) if label == "all" else (result, b_index)
+                rows.append(
+                    {
+                        "pair": pair,
+                        "role": role(pair),
+                        "platform": platform,
+                        "cells": "same_label",
+                        "class": cls,
+                        "metric": metric,
+                        "distance_bin": label,
+                        "n_reseg": int(source.n_a[index]),
+                        "n_hybrid": int(source.n_b[index]),
+                        "mean_reseg": source.mean_a[index],
+                        "mean_hybrid": source.mean_b[index],
+                        "hybrid_minus_reseg": source.difference[index],
+                        "ci_low": source.ci_low[index],
+                        "ci_high": source.ci_high[index],
+                        "n_tiles": source.n_tiles,
+                        "n_negative_genes": int(len(negative_genes)),
+                        "neighbours": COMMON_NEIGHBOURS,
+                    }
+                )
+    cells = {
+        "pair": pair,
+        "role": role(pair),
+        "platform": platform,
+        "n_same_label": int(len(same)),
+        "n_with_distance": int(np.isfinite(distance).sum()),
+        "median_distance_common": float(np.nanmedian(distance))
+        if np.isfinite(distance).any()
+        else math.nan,
+        "n_tiles": int(tiles.max() + 1) if len(tiles) else 0,
+        "neighbours": COMMON_NEIGHBOURS,
+        "note": POSTHOC_NOTE,
+    }
+    return {"bins": rows, "cells": [cells]}
+
+
+def matched_count_sources() -> pd.DataFrame:
+    """Which hybrid_matched items read the thinned counts (§19 literal)."""
+    return pd.DataFrame(
+        [
+            {
+                "item": item,
+                "counts_read": counts,
+                "depth_matched": matched,
+                "note": "pre-registration §19: MAP / RESOLVE on the thinned "
+                "counts, every other input unchanged",
+            }
+            for item, counts, matched in MATCHED_COUNT_SOURCES
+        ]
+    )
+
+
+def primary_negatives(locations: Locations, store: Path, pair: str) -> pd.DataFrame:
+    """The primary bundle's ``negative_genes.parquet`` of a pair's run."""
+    summary = read_json(locations.summary_path("hybrid", pair))
+    first = next(iter(summary["samples"].values()))
+    build = first["bundles"][PRIMARY_REFERENCE]["resolved_build_hash"]
+    return pd.read_parquet(store / PRIMARY_REFERENCE / build / "negative_genes.parquet")
+
+
+def control_tallies(
+    locations: Locations, pairs: Sequence[str]
+) -> dict[tuple[str, str], tuple[pd.DataFrame, dict[str, Any]]]:
+    """The cached control tallies (``all`` rows with the analysis 2 shares).
+
+    A sample without a control tally whose analysis 2 tally removed no
+    control feature gets an empty tally and that reason.
+    """
+    out: dict[tuple[str, str], tuple[pd.DataFrame, dict[str, Any]]] = {}
+    for pair in pairs:
+        for platform in PLATFORMS:
+            cache = locations.controls_cache(pair, platform)
+            if not (cache / "tally.parquet").is_file():
+                record = locations.transcripts_cache(pair, platform) / (
+                    "tally_record.json"
+                )
+                if record.is_file() and not read_json(record)["filter"].get(
+                    "n_control_removed"
+                ):
+                    out[(pair, platform)] = (
+                        pd.DataFrame(columns=list(sc.TALLY_FIELDS)),
+                        {"note": NO_CONTROLS},
+                    )
+                continue
+            tally = pd.read_parquet(cache / "tally.parquet")
+            overall = tally[tally["level"] == "all"].drop(columns=["level", "group"])
+            out[(pair, platform)] = (
+                sc.loss_shares(overall.reset_index(drop=True)),
+                read_json(cache / "tally_record.json"),
+            )
+    return out
+
+
+def posthoc(
+    locations: Locations, pairs: Sequence[str], *, store: Path
+) -> dict[str, pd.DataFrame]:
+    """The post-hoc tables (after the review; not pre-registered)."""
+    directory = locations.result_dir()
+    needed = {
+        name: _read_table(directory, name)
+        for name in (
+            "analysis1_jsd_paired",
+            "analysis2_genes",
+            "analysis3_bins",
+            "analysis3_genes",
+        )
+    }
+    missing = [name for name, frame in needed.items() if frame is None]
+    if missing:
+        raise SystemExit(f"run analyze first: {missing} missing in {directory}")
+    selection = []
+    for pair in pairs:
+        for platform in PLATFORMS:
+            frames = {}
+            for arm in MAIN_ARMS:
+                labels = read_labels(
+                    locations.labels_path(arm, pair, platform),
+                    SELECTION_LABEL_COLUMNS,
+                )
+                frames[arm] = labels[labels["in_table"].to_numpy(bool)].set_index(
+                    "cell_id", drop=False
+                )
+            selection += selection_depth_rows(
+                frames["reseg"],
+                frames["hybrid"],
+                frames["hybrid_matched"],
+                pair=pair,
+                platform=platform,
+            )
+    inputs = {name: frame for name, frame in needed.items() if frame is not None}
+    genes2 = inputs["analysis2_genes"]
+    bins = inputs["analysis3_bins"]
+    tables: dict[str, pd.DataFrame] = {"selection_depth": pd.DataFrame(selection)}
+    tables["jsd_reading"] = jsd_reading(inputs["analysis1_jsd_paired"])
+    tables |= noise_floor_tables(
+        genes2[genes2["pair"].astype(str).isin(list(pairs))],
+        control_tallies(locations, pairs),
+    )
+    common, cells = [], []
+    for pair in pairs:
+        negatives = primary_negatives(locations, store, pair)
+        for platform in PLATFORMS:
+            reseg = load_arm(locations, "reseg", pair, platform)
+            hybrid = load_arm(locations, "hybrid", pair, platform)
+            sample_store = locations.store_path(pair, platform)
+            result = common_bins_sample(
+                reseg,
+                hybrid,
+                xy_reseg=native_centroids(
+                    sample_store, ARM_SHAPES["reseg"], reseg.labels.index
+                ),
+                xy_hybrid=native_centroids(
+                    sample_store, ARM_SHAPES["hybrid"], hybrid.labels.index
+                ),
+                negatives=negatives,
+                pair=pair,
+                platform=platform,
+            )
+            common += result["bins"]
+            cells += result["cells"]
+            logger.info("posthoc common bins: %s %s done", pair, platform)
+    common_bins = pd.DataFrame(common)
+    tables["spillover_summary"] = pd.concat(
+        [
+            spillover_summary(bins, analysis="analysis 3", neighbours=OWN_NEIGHBOURS),
+            spillover_summary(
+                common_bins, analysis="common bins", neighbours=COMMON_NEIGHBOURS
+            ),
+        ],
+        ignore_index=True,
+    )
+    tables["leaking_genes"] = leaking_genes(inputs["analysis3_genes"])
+    tables["common_bins"] = common_bins
+    tables["common_bins_cells"] = pd.DataFrame(cells)
+    tables["matched_count_sources"] = matched_count_sources()
+    return tables
+
+
+# --------------------------------------------------------------------------
 # analyze / render
 
 
-def write_analysis(
-    directory: Path, number: int, tables: Mapping[str, pd.DataFrame]
+def write_tables(
+    directory: Path, stem: str, tables: Mapping[str, pd.DataFrame]
 ) -> Path:
-    """Write ``analysis<N>.csv`` (all tables, ``table`` column) and ``tables/``."""
+    """Write ``<stem>.csv`` (all tables, ``table`` column) and ``tables/``."""
     parts = []
     for name, frame in tables.items():
-        write_table(frame, directory / "tables" / f"analysis{number}_{name}.csv")
+        write_table(frame, directory / "tables" / f"{stem}_{name}.csv")
         part = frame.copy()
         part.insert(0, "table", name)
         parts.append(part)
     combined = (
         pd.concat(parts, ignore_index=True, sort=False) if parts else pd.DataFrame()
     )
-    return write_table(combined, directory / f"analysis{number}.csv")
+    return write_table(combined, directory / f"{stem}.csv")
+
+
+def write_analysis(
+    directory: Path, number: int, tables: Mapping[str, pd.DataFrame]
+) -> Path:
+    """Write ``analysis<N>.csv`` (all tables, ``table`` column) and ``tables/``."""
+    return write_tables(directory, f"analysis{number}", tables)
 
 
 def xenium_gene_panels(samplesheet: Path | None) -> dict[str, Path]:
@@ -3271,7 +4208,7 @@ def command_analyze(args: argparse.Namespace) -> int:
     pairs = _pairs(args)
     wanted = {int(item) for item in args.analyses.split(",") if item}
     store = Path(args.store)
-    run: dict[str, Any] = {"args": vars(args), "analyses": {}}
+    run: dict[str, Any] = {"args": _run_args(args), "analyses": {}}
     if 1 in wanted:
         started = time.time()
         write_analysis(directory, 1, analysis1(locations, pairs))
@@ -3306,6 +4243,33 @@ def command_analyze(args: argparse.Namespace) -> int:
         run, directory / f"analyze_run_{'_'.join(str(n) for n in sorted(wanted))}.json"
     )
     return 0
+
+
+def command_posthoc(args: argparse.Namespace) -> int:
+    """The post-hoc tables -> ``posthoc.csv`` and ``tables/posthoc_*.csv``."""
+    locations = locations_from(args)
+    directory = locations.result_dir()
+    started = time.time()
+    write_tables(
+        directory,
+        "posthoc",
+        posthoc(locations, _pairs(args), store=Path(args.store)),
+    )
+    write_json(
+        {
+            "args": _run_args(args),
+            "note": POSTHOC_NOTE,
+            "wall_s": round(time.time() - started, 1),
+            "code": _code_record(Path(args.export) if args.export else None),
+        },
+        directory / "posthoc_run.json",
+    )
+    return 0
+
+
+def _run_args(args: argparse.Namespace) -> dict[str, Any]:
+    """The parsed arguments without the handler (whose repr is an address)."""
+    return {key: value for key, value in vars(args).items() if not callable(value)}
 
 
 def _code_record(export: Path | None) -> dict[str, Any]:
@@ -3741,6 +4705,105 @@ def render_figures(directory: Path) -> list[Any]:
                 "the same id).",
             )
         )
+    return records + posthoc_figures(directory)
+
+
+HYBRID_ONLY_SERIES: Final = "hybrid-only cells (hybrid)"
+
+
+def legend_above_bars(figure: Any, top: float) -> Any:
+    """Raise the y limit to ``top`` and put the legend in one row at the top."""
+    for ax in figure.axes:
+        ax.set_ylim(0.0, top)
+        legend = ax.get_legend()
+        if legend is not None:
+            ax.legend(
+                handles=legend.legend_handles,
+                labels=[text.get_text() for text in legend.get_texts()],
+                loc="upper left",
+                ncol=4,
+                fontsize=7,
+                frameon=False,
+            )
+    return figure
+
+
+def posthoc_figures(directory: Path) -> list[Any]:
+    """The post-hoc figures (same-cell coverage, loss by noise stratum)."""
+    from merxen.annotation.report_figures import save_report_figure
+
+    figures_dir = directory / "figures"
+    records = []
+    roles = (("development", "development pairs"), ("held_out", "held-out donors"))
+    selection = _read_table(directory, "posthoc_selection_depth")
+    if selection is not None and len(selection):
+        part = selection[selection["metric"] == "coverage_broad"].copy()
+        part["dataset"] = part["pair"] + " " + part["platform"]
+        long = pd.concat(
+            [
+                part.assign(series="reseg", value=part["reseg_shared"]),
+                part.assign(series="hybrid", value=part["hybrid_shared"]),
+                part.assign(series="hybrid_matched", value=part["matched_shared"]),
+                part.assign(series=HYBRID_ONLY_SERIES, value=part["hybrid_only"]),
+            ],
+            ignore_index=True,
+        )
+        for value, text in roles:
+            sub = long[long["role"] == value]
+            if not len(sub):
+                continue
+            figure = bar_figure(
+                sub,
+                category="dataset",
+                group="series",
+                value="value",
+                ylabel="confident broad / cells",
+                title=f"Post hoc: broad coverage on the cells in both tables ({text})",
+            )
+            legend_above_bars(figure, 1.1)
+            records.append(
+                save_report_figure(
+                    figure,
+                    figures_dir,
+                    f"p_same_cell_coverage_{value}",
+                    sub,
+                    "Post hoc. Confident broad share of the cells in both tables "
+                    "(the hybrid_matched table cells) under reseg, proseg_hybrid "
+                    "and hybrid_matched, and of the proseg_hybrid table cells "
+                    "without a reseg table cell under proseg_hybrid.",
+                )
+            )
+    strata = _read_table(directory, "posthoc_noise_strata")
+    if strata is not None and len(strata):
+        part = strata[strata["stratum"] != ALL_GENES].copy()
+        part["dataset"] = part["pair"] + " " + part["platform"]
+        for value, text in roles:
+            sub = part[part["role"] == value]
+            if not len(sub):
+                continue
+            figure = bar_figure(
+                sub,
+                category="dataset",
+                group="stratum",
+                value="median_L",
+                low="q10_L",
+                high="q90_L",
+                ylabel="median L over features (whiskers q10-q90)",
+                title=f"Post hoc: reseg loss L by noise stratum ({text})",
+            )
+            legend_above_bars(figure, 1.2)
+            records.append(
+                save_report_figure(
+                    figure,
+                    figures_dir,
+                    f"p_noise_strata_{value}",
+                    sub,
+                    "Post hoc. Per-feature L = 1 - A_reseg / A_hybrid of the genes "
+                    "by their decoded count over the median blank barcode's (<= 2x, "
+                    "2-10x, >= 10x) and of the blank barcodes themselves (MERSCOPE; "
+                    "the Xenium stores carry no control feature).",
+                )
+            )
     return records
 
 
@@ -3768,6 +4831,147 @@ def _by_role(frame: pd.DataFrame | None, columns: Sequence[str] | None = None) -
             f"<h4>{title}</h4>" + _html_table(frame[frame["role"] == value], columns)
         )
     return "".join(parts)
+
+
+MEMO_NAME: Final = "M8B_DECISION_MEMO.txt"
+
+
+def posthoc_sections(directory: Path, figure_html: Any) -> list[str]:
+    """The page's post-hoc section (after the review; not pre-registered)."""
+
+    def table(name: str) -> pd.DataFrame | None:
+        return _read_table(directory, f"posthoc_{name}")
+
+    selection = table("selection_depth")
+    if selection is not None and len(selection):
+        selection = selection[
+            selection["metric"].isin(["coverage_broad", "H2_implausible_share"])
+        ]
+    leaking = table("leaking_genes")
+    return [
+        "<h2>Post-hoc additions after the review (not pre-registered)</h2>",
+        f'<div class="banner"><b>Post hoc.</b> {html.escape(POSTHOC_NOTE)}. '
+        "Analyses 1-4 above are unchanged. The memo's section 9 is the review; "
+        "its section 10 says how each review item was handled.</div>",
+        "<h3>The cells in both tables: broad coverage and H2 split into cell "
+        "selection, depth and the rest</h3>",
+        '<p class="muted">R, H: the reseg and proseg_hybrid table cells; S = R ∩ H '
+        "(the hybrid_matched table cells). reseg(R) − hybrid(H) = cell selection "
+        "[hybrid(S) − hybrid(H) + reseg(R) − reseg(S)] + depth [hybrid_matched(S) − "
+        "hybrid(S)] + the rest [reseg(S) − hybrid_matched(S)].</p>",
+        figure_html("p_same_cell"),
+        _by_role(
+            selection,
+            [
+                "pair",
+                "platform",
+                "metric",
+                "n_shared",
+                "n_hybrid_only",
+                "median_counts_hybrid_only",
+                "reseg_all",
+                "hybrid_all",
+                "reseg_shared",
+                "hybrid_shared",
+                "matched_shared",
+                "hybrid_only",
+                "headline_reseg_minus_hybrid",
+                "same_cells_reseg_minus_hybrid",
+                "part_cell_selection",
+                "part_depth",
+                "part_same_cells_same_depth",
+                "share_of_headline_cell_selection",
+            ],
+        ),
+        "<h3>Paired JSD differences: the side of 0 of each CI</h3>",
+        _by_role(
+            table("jsd_reading"),
+            [
+                "pair",
+                "kind",
+                "region",
+                "jsd_reseg",
+                "jsd_hybrid",
+                "jsd_hybrid_matched",
+                "reseg_minus_hybrid",
+                "reseg_minus_hybrid_ci_side",
+                "reseg_minus_hybrid_matched",
+                "reseg_minus_hybrid_matched_ci_side",
+            ],
+        ),
+        "<h3>MERSCOPE decoding noise: the blank barcodes</h3>",
+        '<p class="muted">The blank barcodes encode no gene, so what a segmentation '
+        "assigns of them is noise. Genes are put in strata by their decoded count "
+        "over the median blank barcode's. The noise share of the table counts "
+        "assumes every gene has the mean blank barcode's assigned count. The Xenium "
+        "stores' transcripts carry no control feature.</p>",
+        figure_html("p_noise"),
+        _by_role(
+            table("noise_floor"),
+            [
+                "pair",
+                "platform",
+                "n_control_features",
+                "median_control_decoded",
+                "control_pooled_A_reseg",
+                "control_pooled_A_hybrid",
+                "control_pooled_L",
+                "control_pooled_N_bg",
+                "control_in_nucleus_share",
+                "genes_in_nucleus_share",
+                "noise_share_of_table_counts_hybrid",
+                "noise_share_of_table_counts_reseg",
+                "note",
+            ],
+        ),
+        _by_role(
+            table("noise_strata"),
+            [
+                "pair",
+                "platform",
+                "stratum",
+                "n_genes",
+                "share_of_gene_transcripts",
+                "median_L",
+                "q10_L",
+                "q90_L",
+                "pooled_N_bg",
+                "rho_L_expression",
+                "rho_ci_low",
+                "rho_ci_high",
+                "median_L_minus_other_platform",
+                "wilcoxon_p_value",
+            ],
+        ),
+        "<h3>Spill-over: rows by the side of 0 of their CI, and the same cells in "
+        "the same bins</h3>",
+        _html_table(
+            table("spillover_summary"),
+            [
+                "analysis",
+                "cells",
+                "metric",
+                "scope",
+                "n_bin_rows",
+                "n_bin_ci_above_0",
+                "n_bin_ci_below_0",
+                "n_class_rows",
+                "n_class_ci_above_0",
+                "n_class_ci_below_0",
+                "median_class_mean_hybrid",
+                "median_class_mean_reseg",
+                "n_near_far_rows",
+                "median_near_minus_far",
+                "share_near_minus_far_positive",
+            ],
+        ),
+        _by_role(table("common_bins_cells")),
+        "<h3>Negative genes ranked by their median detection gain under "
+        "proseg_hybrid (top 25)</h3>",
+        _html_table(None if leaking is None else leaking.head(25)),
+        "<h3>hybrid_matched: which items read the thinned counts</h3>",
+        _html_table(table("matched_count_sources")),
+    ]
 
 
 def render_page(directory: Path, figures: Sequence[Any]) -> Path:
@@ -3803,16 +5007,21 @@ def render_page(directory: Path, figures: Sequence[Any]) -> Path:
             (bins["distance_bin"] == "all") & (bins["cells"] == "both_confident")
         ]
     links = " ".join(
-        f'<a href="analysis{n}.csv">analysis{n}.csv</a>'
-        for n in (1, 2, 3, 4)
-        if (directory / f"analysis{n}.csv").is_file()
+        f'<a href="{stem}.csv">{stem}.csv</a>'
+        for stem in ("analysis1", "analysis2", "analysis3", "analysis4", "posthoc")
+        if (directory / f"{stem}.csv").is_file()
+    )
+    memo = (
+        f' The decision memo: <a href="{MEMO_NAME}">{MEMO_NAME}</a>.'
+        if (directory / MEMO_NAME).is_file()
+        else ""
     )
     sections = [
         "<h1>M8b segmentation comparison: reseg vs proseg_hybrid</h1>",
         '<p class="muted">Pre-registration §19. M8b scores nothing for gate H and '
         "fits no threshold; the user decides OD-B7′ (the default human segmentation "
         "for cell typing and for per-gene expression) from this evidence. Every table "
-        f"is in <code>tables/</code> and in the per-analysis CSVs: {links}.</p>",
+        f"is in <code>tables/</code> and in the per-analysis CSVs: {links}.{memo}</p>",
         '<div class="banner"><b>Arms.</b> reseg: ProSeg\'s own assignment. hybrid: '
         "proseg_hybrid. hybrid_matched: proseg_hybrid cells thinned to the reseg "
         "cell's total (same id), re-mapped and re-resolved with the production "
@@ -3891,6 +5100,10 @@ def render_page(directory: Path, figures: Sequence[Any]) -> Path:
         _html_table(table("analysis2_gene_lists")),
         "<h2>Analysis 3: spill-over audit (proseg_hybrid)</h2>",
         figure_html("a3_"),
+        "<h3>Cells and the median distance to a confident cell of another class "
+        "(each arm's own neighbours)</h3>",
+        _by_role(table("analysis3_summary")),
+        "<h3>Per class, all distances</h3>",
         _by_role(
             bins,
             [
@@ -3941,6 +5154,8 @@ def render_page(directory: Path, figures: Sequence[Any]) -> Path:
         "<h3>The pipeline change the mode would need (not implemented)</h3>",
         _html_table(table("analysis4_pipeline_change")),
     ]
+    if (directory / "posthoc.csv").is_file():
+        sections += posthoc_sections(directory, figure_html)
     page = (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
@@ -4024,6 +5239,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     transcripts.add_argument("--xenium-min-qv", type=float, default=20.0)
     transcripts.set_defaults(handler=command_transcripts)
+    controls = commands.add_parser("controls")
+    _common(controls)
+    controls.add_argument("--pair", required=True, choices=PAIRS)
+    controls.add_argument(
+        "--platform",
+        required=True,
+        choices=("MERSCOPE", "XENIUM", "merscope", "xenium"),
+    )
+    controls.add_argument("--xenium-min-qv", type=float, default=20.0)
+    controls.set_defaults(handler=command_controls)
     analyze = commands.add_parser("analyze")
     _common(analyze)
     analyze.add_argument("--pairs", default=",".join(PAIRS))
@@ -4034,6 +5259,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--samplesheet", default="", help="the stage B samplesheet (xenium_dir)"
     )
     analyze.set_defaults(handler=command_analyze)
+    posthoc_parser = commands.add_parser("posthoc")
+    _common(posthoc_parser)
+    posthoc_parser.add_argument("--pairs", default=",".join(PAIRS))
+    posthoc_parser.add_argument("--store", required=True)
+    posthoc_parser.set_defaults(handler=command_posthoc)
     render = commands.add_parser("render")
     _common(render)
     render.set_defaults(handler=command_render)

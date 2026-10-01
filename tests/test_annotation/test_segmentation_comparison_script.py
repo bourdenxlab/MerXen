@@ -1222,3 +1222,421 @@ def test_render_draws_every_figure_from_its_tables(
     )
     page = m8b.render_page(directory, figures).read_text()
     assert page.count("<figure>") == len(figures)
+
+
+# ---------------------------------------------------------------------------
+# Post hoc (after the 2026-10-01 review; not pre-registered)
+
+
+def _labels(ids: list[str], status: list[str], implausible: list[bool]) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "cell_id": ids,
+            "in_table": True,
+            "total_counts": np.arange(10, 10 + len(ids), dtype=np.float64),
+            "flag_implausible": implausible,
+            "ct_broad_status": status,
+        },
+        index=pd.Index(ids, name="cell_id"),
+    )
+
+
+def test_label_metric(m8b: ModuleType) -> None:
+    labels = _labels(["1", "2"], ["confident", "low_counts"], [True, False])
+    assert m8b.label_metric(labels, "coverage_broad") == pytest.approx(0.5)
+    assert m8b.label_metric(labels, "H2_implausible_share") == pytest.approx(0.5)
+    assert math.isnan(m8b.label_metric(labels, "coverage_lineage"))
+    assert math.isnan(m8b.label_metric(labels.iloc[:0], "coverage_broad"))
+    with pytest.raises(ValueError):
+        m8b.label_metric(labels, "H7")
+
+
+def test_selection_depth_rows_split_the_headline(m8b: ModuleType) -> None:
+    confident, low = "confident", "low_counts"
+    # R = {1, 2, 3, 9}; H = {1, 2, 3, 4, 5}; S = {1, 2, 3}
+    reseg = _labels(["1", "2", "3", "9"], [confident] * 3 + [low], [False] * 4)
+    hybrid = _labels(
+        ["1", "2", "3", "4", "5"], [confident, confident, low, low, low], [False] * 5
+    )
+    matched = _labels(["1", "2", "3"], [confident, low, low], [False] * 3)
+    rows = m8b.selection_depth_rows(
+        reseg, hybrid, matched, pair="P7513", platform="MERSCOPE"
+    )
+    row = next(r for r in rows if r["metric"] == "coverage_broad")
+    assert row["n_shared"] == 3 and row["n_hybrid_only"] == 2
+    assert row["n_reseg_only"] == 1 and row["matched_table_is_shared"]
+    assert row["reseg_all"] == pytest.approx(0.75)
+    assert row["hybrid_all"] == pytest.approx(0.4)
+    assert row["reseg_shared"] == pytest.approx(1.0)
+    assert row["hybrid_shared"] == pytest.approx(2 / 3)
+    assert row["matched_shared"] == pytest.approx(1 / 3)
+    assert row["hybrid_only"] == pytest.approx(0.0)
+    assert row["headline_reseg_minus_hybrid"] == pytest.approx(0.35)
+    assert row["part_cell_selection"] == pytest.approx((2 / 3 - 0.4) + (0.75 - 1.0))
+    assert row["part_depth"] == pytest.approx(1 / 3 - 2 / 3)
+    assert row["part_same_cells_same_depth"] == pytest.approx(1 - 1 / 3)
+    parts = (
+        row["part_cell_selection"]
+        + row["part_depth"]
+        + row["part_same_cells_same_depth"]
+    )
+    assert parts == pytest.approx(row["headline_reseg_minus_hybrid"])
+    assert row["hybrid_matched_closes_share_of_headline"] == pytest.approx(
+        (1 / 3 - 0.4) / 0.35
+    )
+    assert {r["metric"] for r in rows} == set(m8b.SELECTION_METRICS)
+
+
+def test_ci_side_and_jsd_reading(m8b: ModuleType) -> None:
+    assert m8b.ci_side(-0.2, -0.1) == "below 0"
+    assert m8b.ci_side(0.1, 0.2) == "above 0"
+    assert m8b.ci_side(-0.1, 0.1) == "spans 0"
+    assert m8b.ci_side(math.nan, 0.1) == "no CI"
+    jsd = pd.DataFrame(
+        [
+            {
+                "pair": "P7113",
+                "kind": "soft",
+                "region": "whole_section",
+                "first": "reseg",
+                "second": second,
+                "jsd_first": 0.2,
+                "jsd_second": jsd_second,
+                "difference": 0.2 - jsd_second,
+                "difference_ci_low": low,
+                "difference_ci_high": high,
+            }
+            for second, jsd_second, low, high in (
+                ("hybrid", 0.1, 0.05, 0.15),
+                ("hybrid_matched", 0.25, -0.08, -0.02),
+                ("resolve_summary", 0.2, math.nan, math.nan),
+            )
+        ]
+    )
+    frame = m8b.jsd_reading(jsd)
+    assert len(frame) == 1
+    row = frame.iloc[0]
+    assert row["role"] == "held_out" and row["jsd_reseg"] == pytest.approx(0.2)
+    assert row["reseg_minus_hybrid_ci_side"] == "above 0"
+    assert row["reseg_minus_hybrid_matched_ci_side"] == "below 0"
+    assert row["reseg_minus_hybrid_matched"] == pytest.approx(-0.05)
+
+
+def _bin_rows(pair: str, cls: str, near: float, far: float) -> list[dict[str, Any]]:
+    role = "development" if pair == "P7513" else "held_out"
+    rows = []
+    for label, value in (("0-10", near), ("20-30", 0.0), (">50", far), ("all", 0.5)):
+        rows.append(
+            {
+                "pair": pair,
+                "role": role,
+                "platform": "XENIUM",
+                "cells": "both_confident",
+                "class": cls,
+                "metric": "contamination_score",
+                "distance_bin": label,
+                "mean_reseg": 0.1,
+                "mean_hybrid": 0.1 + value,
+                "hybrid_minus_reseg": value,
+                "ci_low": value - 0.01,
+                "ci_high": value + 0.01,
+            }
+        )
+    return rows
+
+
+def test_spillover_summary_counts_bins_apart_from_classes(m8b: ModuleType) -> None:
+    bins = pd.DataFrame(
+        _bin_rows("P7513", "Neurons", 0.3, 0.1)
+        + _bin_rows("P7513", "Astrocytes", -0.2, 0.0)
+        + _bin_rows("P5011", "Neurons", 0.2, 0.2)
+    )
+    frame = m8b.spillover_summary(bins, analysis="a", neighbours="n")
+    every = frame[frame["scope"] == "all datasets"].iloc[0]
+    # 3 rows x 3 distance bins: above 0 = 0.3, 0.1, 0.2, 0.2; below 0 = -0.2
+    assert every["n_bin_rows"] == 9
+    assert every["n_bin_ci_above_0"] == 4 and every["n_bin_ci_below_0"] == 1
+    assert every["n_class_rows"] == 3 and every["n_class_ci_above_0"] == 3
+    assert every["n_near_far_rows"] == 3
+    # near - far: 0.2, -0.2, 0.0
+    assert every["median_near_minus_far"] == pytest.approx(0.0)
+    assert every["share_near_minus_far_positive"] == pytest.approx(1 / 3)
+    development = frame[frame["scope"] == "development"].iloc[0]
+    assert development["n_class_rows"] == 2
+    assert development["analysis"] == "a" and development["neighbours"] == "n"
+
+
+def test_leaking_genes_ranks_by_median(m8b: ModuleType) -> None:
+    genes = pd.DataFrame(
+        [
+            {
+                "pair": pair,
+                "platform": "XENIUM",
+                "cells": cells,
+                "class": cls,
+                "gene": gene,
+                "hybrid_minus_reseg": value,
+                "detection_hybrid": value,
+                "detection_reseg": 0.0,
+                "ci_low": value - 0.01,
+                "ci_high": value + 0.01,
+            }
+            for pair, cells, cls, gene, value in (
+                ("P7513", "both_confident", "Neurons", "CD68", 0.30),
+                ("P1212", "both_confident", "Neurons", "CD68", 0.00),
+                ("P7113", "both_confident", "Neurons", "CD68", 0.01),
+                ("P7513", "both_confident", "Neurons", "ERMN", 0.05),
+                ("P1212", "both_confident", "Astrocytes", "ERMN", 0.04),
+                ("P7513", "same_label", "Neurons", "ERMN", 0.90),
+            )
+        ]
+    )
+    frame = m8b.leaking_genes(genes)
+    assert frame["gene"].tolist() == ["ERMN", "CD68"]
+    assert frame["rank_by_median"].tolist() == [1, 2]
+    cd68 = frame.set_index("gene").loc["CD68"]
+    assert cd68["max_difference"] == pytest.approx(0.30)
+    assert cd68["max_row"] == "P7513 XENIUM Neurons" and cd68["n_rows"] == 3
+    assert frame.set_index("gene").loc["ERMN", "classes_where_negative"] == (
+        "Astrocytes; Neurons"
+    )
+
+
+def test_noise_stratum(m8b: ModuleType) -> None:
+    assert m8b.noise_stratum(2.0) == "<=2x"
+    assert m8b.noise_stratum(2.01) == "2-10x"
+    assert m8b.noise_stratum(10.0) == ">=10x"
+    assert m8b.noise_stratum(math.nan) is None
+
+
+def _noise_gene_rows(
+    platform: str, decoded: list[int], loss: list[float]
+) -> pd.DataFrame:
+    n = len(decoded)
+    hybrid = np.array(decoded) // 2
+    reseg = np.round(hybrid * (1 - np.array(loss))).astype(int)
+    return pd.DataFrame(
+        {
+            "pair": "P1212",
+            "role": "development",
+            "platform": platform,
+            "gene": [f"G{i}" for i in range(n)],
+            "n_decoded": decoded,
+            "n_assigned_reseg": reseg,
+            "n_assigned_hybrid": hybrid,
+            "n_in_nucleus": np.array(decoded) // 4,
+            "n_in_nucleus_unassigned_reseg": np.array(decoded) // 8,
+            "L": loss,
+            "N_bg": 0.5,
+            "expression_level": np.log10(np.array(decoded, dtype=float)),
+        }
+    )
+
+
+def test_noise_floor_tables(m8b: ModuleType) -> None:
+    decoded = [100, 150, 300, 600, 1000, 5000, 8000]
+    loss = [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3]
+    merscope = _noise_gene_rows("MERSCOPE", decoded, loss)
+    xenium = _noise_gene_rows("XENIUM", decoded, [0.2] * 7)
+    genes = pd.concat([merscope, xenium], ignore_index=True)
+    controls = sc.loss_shares(
+        pd.DataFrame(
+            {
+                "gene": ["Blank-1", "Blank-2", "Blank-3"],
+                "n_decoded": [80, 100, 120],
+                "n_assigned_reseg": [2, 2, 2],
+                "n_assigned_hybrid": [40, 50, 60],
+                "n_assigned_reseg_same_cell": [2, 2, 2],
+                "n_in_nucleus": [40, 40, 40],
+                "n_in_nucleus_unassigned_reseg": [38, 39, 40],
+                "n_in_nucleus_background_reseg": [38, 39, 40],
+                "n_in_nucleus_nontable_reseg": [0, 0, 0],
+            }
+        )
+    )
+    tables = m8b.noise_floor_tables(
+        genes,
+        {
+            ("P1212", "MERSCOPE"): (controls, {"note": ""}),
+            ("P1212", "XENIUM"): (pd.DataFrame(), {"note": "none here"}),
+        },
+    )
+    floor = tables["noise_floor"].set_index("platform")
+    assert floor.loc["XENIUM", "note"] == "none here"
+    row = floor.loc["MERSCOPE"]
+    assert row["median_control_decoded"] == pytest.approx(100.0)
+    assert row["control_pooled_A_hybrid"] == pytest.approx(150 / 300)
+    assert row["control_pooled_L"] == pytest.approx(1 - (6 / 300) / (150 / 300))
+    # mean blank assigned (hybrid 50) x 7 genes over the genes' hybrid total
+    hybrid_total = float(merscope["n_assigned_hybrid"].sum())
+    assert row["noise_share_of_table_counts_hybrid"] == pytest.approx(
+        50 * 7 / hybrid_total
+    )
+    strata = tables["noise_strata"].set_index("stratum")
+    # ratios 1, 1.5, 3, 6, 10, 50, 80
+    assert strata.loc["<=2x", "n_genes"] == 2
+    assert strata.loc["2-10x", "n_genes"] == 2
+    assert strata.loc[">=10x", "n_genes"] == 3
+    assert strata.loc["all genes", "n_genes"] == 7
+    assert strata.loc[">=10x", "median_L"] == pytest.approx(0.4)
+    assert strata.loc[">=10x", "median_L_minus_other_platform"] == pytest.approx(0.2)
+    assert strata.loc[">=10x", "other_platform"] == "XENIUM"
+    assert strata.loc["<=2x", "share_of_gene_transcripts"] == pytest.approx(
+        250 / sum(decoded)
+    )
+    assert strata.loc["control features", "n_genes"] == 3
+    assert set(tables["noise_strata"]["platform"]) == {"MERSCOPE"}
+
+
+def test_common_bins_sample_uses_one_distance_for_both_arms(m8b: ModuleType) -> None:
+    ids = ["1", "2", "3", "4"]
+    counts_r = np.array([[5, 0, 0], [5, 0, 0], [0, 5, 0], [0, 0, 5]])
+    counts_h = np.array([[5, 1, 0], [5, 1, 1], [1, 5, 0], [0, 0, 5]])
+    names = ["Neurons", "Neurons", "Astrocytes", "Oligodendrocytes"]
+    reseg = _arm(m8b, ids, names, counts_r)
+    hybrid = _arm(m8b, ids, names, counts_h)
+    xy_hybrid = np.array([[0.0, 0.0], [100.0, 0.0], [12.0, 0.0], [1000.0, 1000.0]])
+    # reseg's own centroids would put cell 1 far from the astrocyte
+    xy_reseg = xy_hybrid + np.array([[-60.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0, 0]])
+    negatives = pd.DataFrame(
+        {
+            "broad_class": ["Neurons", "Neurons", "Astrocytes"],
+            "gene_id": ["E2", "E3", "E1"],
+            "negative": [True, True, True],
+        }
+    )
+    out = m8b.common_bins_sample(
+        reseg,
+        hybrid,
+        xy_reseg=xy_reseg,
+        xy_hybrid=xy_hybrid,
+        negatives=negatives,
+        pair="P7513",
+        platform="XENIUM",
+    )
+    bins = pd.DataFrame(out["bins"])
+    assert (bins["n_reseg"] == bins["n_hybrid"]).all()
+    neurons = bins[
+        (bins["class"] == "Neurons") & (bins["metric"] == "negative_detection_rate")
+    ].set_index("distance_bin")
+    # cell 1: 12 µm from astrocyte 3 on the proseg_hybrid centroids (10-15)
+    assert neurons.loc["10-15", "n_reseg"] == 1
+    assert neurons.loc["10-15", "mean_hybrid"] == pytest.approx(0.5)
+    assert neurons.loc[">50", "hybrid_minus_reseg"] == pytest.approx(1.0)
+    assert out["cells"][0]["n_same_label"] == 4
+
+
+def test_load_transcripts_keeps_genes_or_controls(
+    m8b: ModuleType, tmp_path: Path
+) -> None:
+    store = tmp_path / "store.zarr"
+    part = store / "points" / "transcripts" / "points.parquet"
+    part.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0],
+            "y": [1.0, 2.0, 3.0, 4.0],
+            "gene": pd.Categorical(["GAD1", "Blank-1", "GAD1", "Blank-2"]),
+            "qv": np.float32([30, 30, 30, 30]),
+            "assignment": pd.array([1, None, 2, 3], dtype="UInt32"),
+            "background": [False, True, False, False],
+            "hybrid_assignment": pd.array([1, 1, None, 3], dtype="UInt32"),
+            "hybrid_background": [False, False, True, False],
+        }
+    ).to_parquet(part / "part.0.parquet", index=False)
+    genes = m8b.load_transcripts(store, "MERSCOPE", None)
+    controls = m8b.load_transcripts(store, "MERSCOPE", None, features="controls")
+    assert genes.genes == ["GAD1"] and len(genes.x) == 2
+    assert controls.genes == ["Blank-1", "Blank-2"] and len(controls.x) == 2
+    assert genes.record["n_control_removed"] == controls.record["n_control_removed"]
+    assert controls.record["features"] == "controls"
+    assert controls.valid_reseg.tolist() == [False, True]
+    with pytest.raises(ValueError):
+        m8b.load_transcripts(store, "MERSCOPE", None, features="all")
+
+
+def test_control_tallies_marks_stores_without_controls(
+    m8b: ModuleType, tmp_path: Path
+) -> None:
+    locations = m8b.Locations(
+        tmp_path / "runs", tmp_path / "results", tmp_path / "b", tmp_path / "out"
+    )
+    xenium = locations.transcripts_cache("P7513", "XENIUM")
+    m8b.write_json({"filter": {"n_control_removed": 0}}, xenium / "tally_record.json")
+    merscope = locations.transcripts_cache("P7513", "MERSCOPE")
+    m8b.write_json({"filter": {"n_control_removed": 5}}, merscope / "tally_record.json")
+    cache = locations.controls_cache("P7113", "MERSCOPE")
+    cache.mkdir(parents=True)
+    tally = pd.DataFrame(
+        {"level": ["all"], "group": ["all"], "gene": ["Blank-1"]}
+        | {field: [4] for field in sc.TALLY_FIELDS}
+    )
+    tally.to_parquet(cache / "tally.parquet", index=False)
+    m8b.write_json({"note": ""}, cache / "tally_record.json")
+    out = m8b.control_tallies(locations, ["P7513", "P7113"])
+    assert set(out) == {("P7513", "XENIUM"), ("P7113", "MERSCOPE")}
+    assert out[("P7513", "XENIUM")][1]["note"] == m8b.NO_CONTROLS
+    assert out[("P7113", "MERSCOPE")][0]["A_hybrid"].tolist() == [1.0]
+
+
+def test_matched_count_sources_and_run_args(m8b: ModuleType) -> None:
+    frame = m8b.matched_count_sources()
+    by_item = dict(zip(frame["item"], frame["depth_matched"], strict=True))
+    assert any(
+        item.startswith("H9") and value.startswith("no")
+        for item, value in by_item.items()
+    )
+    assert any(
+        item.startswith("MAP") and value == "yes" for item, value in by_item.items()
+    )
+    args = m8b.build_parser().parse_args(
+        [
+            "posthoc",
+            "--runs-root",
+            "r",
+            "--results-root",
+            "s",
+            "--stage-b",
+            "b",
+            "--out",
+            "o",
+            "--store",
+            "x",
+        ]
+    )
+    assert args.handler is m8b.command_posthoc
+    recorded = m8b._run_args(args)
+    assert "handler" not in recorded and recorded["store"] == "x"
+
+
+def test_render_page_adds_the_posthoc_section(m8b: ModuleType, tmp_path: Path) -> None:
+    directory = tmp_path / "segmentation_comparison"
+    selection = pd.DataFrame(
+        [
+            {
+                "pair": "P7513",
+                "role": "development",
+                "platform": "MERSCOPE",
+                "metric": "coverage_broad",
+                "reseg_shared": 0.9,
+                "hybrid_shared": 0.8,
+                "matched_shared": 0.7,
+                "hybrid_only": 0.3,
+            }
+        ]
+    )
+    m8b.write_tables(
+        directory,
+        "posthoc",
+        {
+            "selection_depth": selection,
+            "matched_count_sources": m8b.matched_count_sources(),
+        },
+    )
+    (directory / m8b.MEMO_NAME).write_text("memo\n")
+    figures = m8b.render_figures(directory)
+    assert [record.stem for record in figures] == ["p_same_cell_coverage_development"]
+    page = m8b.render_page(directory, figures).read_text()
+    assert "Post-hoc additions after the review" in page
+    assert 'href="posthoc.csv"' in page and f'href="{m8b.MEMO_NAME}"' in page
+    assert "figures/p_same_cell_coverage_development.png" in page
