@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "merxen"
-version = "0.1.0"
+version = "0.2.0"
 description = "Pre-processing, segmentation, and comparative analysis of paired MERSCOPE and Xenium spatial transcriptomics datasets"
 readme = "README.md"
 license = "MIT"
@@ -98,7 +98,7 @@ merxen = [
 ]
 
 [tool.bumpversion]
-current_version = "0.1.0"
+current_version = "0.2.0"
 parse = "(?P<major>\\d+)\\.(?P<minor>\\d+)\\.(?P<patch>\\d+)"
 serialize = ["{major}.{minor}.{patch}"]
 commit = false
