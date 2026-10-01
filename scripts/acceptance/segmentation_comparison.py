@@ -666,6 +666,39 @@ def rewrite_pythonpath(script: str, export: Path) -> tuple[str, str, str]:
     return updated, match.group(1), new_path
 
 
+def source_tree_differences(first: Path, second: Path) -> list[dict[str, str]]:
+    """Return the ``.py`` files that differ between two ``src`` trees.
+
+    Args:
+        first: One ``src`` directory (the B1 task's export).
+        second: The other (the code export this step runs).
+
+    Returns:
+        One record per file only in one tree or with another sha256.
+    """
+
+    def files(root: Path) -> dict[str, str]:
+        return {
+            path.relative_to(root).as_posix(): file_sha256(path)
+            for path in sorted(root.rglob("*.py"))
+            if "__pycache__" not in path.parts
+        }
+
+    a, b = files(first.resolve()), files(second.resolve())
+    out = []
+    for name in sorted(set(a) | set(b)):
+        if a.get(name) != b.get(name):
+            state = (
+                "only_second"
+                if name not in a
+                else "only_first"
+                if name not in b
+                else "differs"
+            )
+            out.append({"file": name, "state": state})
+    return out
+
+
 def task_replacements(locations: Locations, pair: str, process: str) -> dict[str, Path]:
     """Return the staged inputs ``matched-task`` replaces for one process."""
     prepared = locations.prepared_dir(pair)
@@ -917,6 +950,9 @@ def command_matched_task(args: argparse.Namespace) -> int:
         "script_sha256_source": hashlib.sha256(original.encode()).hexdigest(),
         "script_sha256_run": hashlib.sha256(script.encode()).hexdigest(),
         "export": str(args.export),
+        "src_differences_vs_task_code": source_tree_differences(
+            Path(old_path), Path(new_path)
+        ),
     }
     if not args.dry_run:
         runtime = locations.out / "runtime_cache"
@@ -1048,12 +1084,21 @@ def build_farm(
     return record
 
 
+def _pairs(args: argparse.Namespace) -> list[str]:
+    """The pairs a step covers (``--pairs``; all four by default)."""
+    pairs = [item for item in str(getattr(args, "pairs", "") or "").split(",") if item]
+    unknown = sorted(set(pairs) - set(PAIRS))
+    if unknown:
+        raise SystemExit(f"unknown pairs: {unknown}")
+    return pairs or list(PAIRS)
+
+
 def command_farms(args: argparse.Namespace) -> int:
     """Build the symlink farm of every arm."""
     locations = locations_from(args)
     qc_summary = pd.read_csv(args.qc_summary)
     for arm in [item for item in args.arms.split(",") if item]:
-        record = build_farm(locations, arm, qc_summary)
+        record = build_farm(locations, arm, qc_summary, _pairs(args))
         logger.info("farm %s: %d links", arm, len(record["links"]))
     return 0
 
@@ -1066,7 +1111,7 @@ def acceptance_commands(
     out = locations.acceptance_dir(arm)
     scripts = Path(args.export) / "scripts" / "acceptance"
     python = sys.executable
-    common = ["--pairs", ",".join(PAIRS)]
+    common = ["--pairs", ",".join(_pairs(args))]
     commands: list[tuple[str, list[str]]] = []
     if arm != "hybrid_matched":
         commands.append(
@@ -2157,6 +2202,7 @@ def analysis1(locations: Locations, pairs: Sequence[str]) -> dict[str, pd.DataFr
             path = base / name
             if path.is_file():
                 frame = _criteria_frame(path, arm)
+                frame = frame[frame["pair"].astype(str).isin(list(pairs))]
                 if name.startswith("referee"):
                     frame["criterion"] = "H10/marker_referee.py"
                 parts.append(frame)
@@ -3222,7 +3268,7 @@ def command_analyze(args: argparse.Namespace) -> int:
     locations = locations_from(args)
     directory = locations.result_dir()
     directory.mkdir(parents=True, exist_ok=True)
-    pairs = [item for item in args.pairs.split(",") if item]
+    pairs = _pairs(args)
     wanted = {int(item) for item in args.analyses.split(",") if item}
     store = Path(args.store)
     run: dict[str, Any] = {"args": vars(args), "analyses": {}}
@@ -3835,6 +3881,7 @@ def build_parser() -> argparse.ArgumentParser:
     _common(farms)
     farms.add_argument("--qc-summary", required=True)
     farms.add_argument("--arms", default=",".join((*MAIN_ARMS, *CONTEXT_ARMS)))
+    farms.add_argument("--pairs", default=",".join(PAIRS))
     farms.set_defaults(handler=command_farms)
     acceptance = commands.add_parser("acceptance")
     _common(acceptance)
@@ -3842,6 +3889,7 @@ def build_parser() -> argparse.ArgumentParser:
     acceptance.add_argument("--store", required=True)
     acceptance.add_argument("--gene-id-fallback-csv", required=True)
     acceptance.add_argument("--n-processors", type=int, default=6)
+    acceptance.add_argument("--pairs", default=",".join(PAIRS))
     acceptance.set_defaults(handler=command_acceptance)
     transcripts = commands.add_parser("transcripts")
     _common(transcripts)

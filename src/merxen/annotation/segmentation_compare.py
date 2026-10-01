@@ -766,8 +766,8 @@ def spearman_bootstrap(
     rho, p_value = float(result.statistic), float(result.pvalue)
     rng = np.random.default_rng(seed)
     draws = rng.integers(0, n, size=(n_reps, n))
-    ranks_a = np.apply_along_axis(stats.rankdata, 1, a[draws])
-    ranks_b = np.apply_along_axis(stats.rankdata, 1, b[draws])
+    ranks_a = stats.rankdata(a[draws], axis=1)
+    ranks_b = stats.rankdata(b[draws], axis=1)
     centred_a = ranks_a - ranks_a.mean(axis=1, keepdims=True)
     centred_b = ranks_b - ranks_b.mean(axis=1, keepdims=True)
     with np.errstate(divide="ignore", invalid="ignore"):

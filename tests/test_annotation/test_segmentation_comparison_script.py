@@ -1025,3 +1025,64 @@ def test_write_json_is_nan_safe(m8b: ModuleType, tmp_path: Path) -> None:
         {"a": math.nan, "b": [np.float64(1.5), np.int64(2)]}, tmp_path / "x.json"
     )
     assert json.loads(path.read_text()) == {"a": None, "b": [1.5, 2]}
+
+
+def test_source_tree_differences(m8b: ModuleType, tmp_path: Path) -> None:
+    first, second = tmp_path / "a" / "src", tmp_path / "b" / "src"
+    for root in (first, second):
+        (root / "pkg").mkdir(parents=True)
+        (root / "pkg" / "same.py").write_text("x = 1\n")
+    (first / "pkg" / "changed.py").write_text("y = 1\n")
+    (second / "pkg" / "changed.py").write_text("y = 2\n")
+    (second / "pkg" / "new.py").write_text("z = 1\n")
+    (second / "pkg" / "__pycache__").mkdir()
+    (second / "pkg" / "__pycache__" / "junk.py").write_text("")
+    differences = m8b.source_tree_differences(
+        tmp_path / "a" / "x" / ".." / "src", second
+    )
+    assert differences == [
+        {"file": "pkg/changed.py", "state": "differs"},
+        {"file": "pkg/new.py", "state": "only_second"},
+    ]
+
+
+def test_acceptance_commands_per_arm(m8b: ModuleType, tmp_path: Path) -> None:
+    locations = m8b.Locations(
+        tmp_path / "runs", tmp_path / "results", tmp_path / "b", tmp_path / "out"
+    )
+    args = m8b.build_parser().parse_args(
+        [
+            "acceptance",
+            "--runs-root",
+            "r",
+            "--results-root",
+            "R",
+            "--stage-b",
+            "b",
+            "--out",
+            str(tmp_path / "out"),
+            "--export",
+            "/e",
+            "--arm",
+            "reseg",
+            "--store",
+            "/store",
+            "--gene-id-fallback-csv",
+            "/fb.h5ad",
+            "--pairs",
+            "P7513,P5011",
+        ]
+    )
+    names = [name for name, _ in m8b.acceptance_commands(locations, "reseg", args)]
+    assert names == ["heldout_genes", "resolve_criteria", "marker_referee"]
+    criteria = dict(m8b.acceptance_commands(locations, "reseg", args))[
+        "resolve_criteria"
+    ]
+    assert "--skip-h4" not in criteria
+    assert criteria[criteria.index("--pairs") + 1] == "P7513,P5011"
+    assert criteria[criteria.index("--segmentations") + 1] == "proseg_hybrid"
+    matched = dict(m8b.acceptance_commands(locations, "hybrid_matched", args))
+    assert set(matched) == {"resolve_criteria", "marker_referee"}
+    assert "--skip-h4" in matched["resolve_criteria"]
+    with pytest.raises(SystemExit):
+        m8b._pairs(type("A", (), {"pairs": "P9999"})())
