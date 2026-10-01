@@ -241,7 +241,7 @@ def _git_commit() -> str | None:
     default=False,
     help="Run the pre-registered comparator ensemble of the amended re-test of "
     "the M3c churn test as ensemble B (R1_contam_HO@20-25 + R3_measured_HO@20, "
-    "@21; R1_contam_HO@20-27 without a measured table; pre-registration §15.4).",
+    "@21; R1_contam_HO@20-27 without a measured table; pre-registration §22.4).",
 )
 @click.option(
     "--gate-p",

@@ -134,7 +134,7 @@ def test_asset_hashes_record_each_sha256(registry: dict[str, si.SimInputAsset]) 
 
 
 def test_all_measured_rule_reproduces_the_d3_vector(mouse_table: pd.DataFrame) -> None:
-    """Pre-registration §14 (ii-a): max |delta| <= 1e-9 on every 5K gene."""
+    """Pre-registration §21 (ii-a): max |delta| <= 1e-9 on every 5K gene."""
     fixture = pd.read_csv(DATA / "m3c_d3_efficiency_mouse5k.csv")
     result = si.r3_efficiency(
         fixture["gene_id"].tolist(), mouse_table, rule="all_measured", seed=0

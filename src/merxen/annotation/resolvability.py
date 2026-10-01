@@ -2786,7 +2786,7 @@ def _bin_decisions(
 
 
 # The saturated-bp rule (resolvability version 7, v7.8; pre-registration
-# §14.3: share 0.90 and cap 0.99, only tightenable). A call counts as
+# §21.3: share 0.90 and cap 0.99, only tightenable). A call counts as
 # saturated at bp >= 1 - 1e-6 (the float32 tolerance of the stored bp).
 SATURATED_BP_TOLERANCE: Final = 1e-6
 SATURATED_COLUMNS: Final[tuple[str, ...]] = (
@@ -4867,7 +4867,7 @@ def gate_p_member_sets(
     regime: Regime = "provisional",
     seed: int | None = 0,
 ) -> dict[str, dict[tuple[str, str], list[GatePTestedSet] | None]]:
-    """Return each emission member's gate-P tested sets (version 7, §14).
+    """Return each emission member's gate-P tested sets (version 7, §21).
 
     Gate P freezes the ensemble's thresholds and emission (``decisions``: the
     ensemble decisions of the default donor or draw, monotone-filled bins
@@ -4976,7 +4976,7 @@ def gate_p_class_set(
 # Version 7 is additive: nothing above changes, so version 6 stays
 # byte-identical for the families of ``validated_panels.csv`` (and the pins of
 # ``resolvability_v6_pins.csv``), whose decisions are pre-registered for gates
-# H and M (the M3c scope decision; pre-registration §14 (i)). Version 7 (every
+# H and M (the M3c scope decision; pre-registration §21 (i)). Version 7 (every
 # other family) simulates each ensemble member with exact-total thinning, on
 # TOTAL counts: a grid value D is the simulated cell's total, host D / (1 + s)
 # plus spill s D / (1 + s), because real cells are binned by their totals.
@@ -5009,7 +5009,7 @@ V7_LARGE_PANEL_GRID: Final[tuple[int, ...]] = (
 )
 V7_LARGE_PANEL_GENES: Final = 1000
 # Ensemble members (v7.3 as amended on 2026-09-29: orchestrator decision D1 (a),
-# pending the user's confirmation; pre-registration §15.3, fixed there and only
+# pending the user's confirmation; pre-registration §22.3, fixed there and only
 # tightenable). Eight emission members per version-7 family: R1 x 6 + R3 x 2
 # where the species x chemistry has a measured factor table, else R1 x 8.
 # R1@0 is the pre-registered realisation (gate P's NP3 base); seeds 1-5 of R1
@@ -5019,7 +5019,7 @@ V7_R1_SEEDS_WITH_TABLE: Final[tuple[int, ...]] = (0, 6, 7, 8, 9, 10)
 V7_R1_SEEDS_WITHOUT_TABLE: Final[tuple[int, ...]] = (0, 6, 7, 8, 9, 10, 11, 12)
 V7_R3_SEEDS: Final[tuple[int, ...]] = (2, 3)
 V7_EMISSION_MEMBERS: Final = 8
-# The comparator of the amended re-test of pre-registration §14 (iii) (§15.4):
+# The comparator of the amended re-test of pre-registration §21 (iii) (§22.4):
 # disjoint from every production and stage-D member; never production.
 V7_COMPARATOR_R1_SEEDS_WITH_TABLE: Final[tuple[int, ...]] = (20, 21, 22, 23, 24, 25)
 V7_COMPARATOR_R1_SEEDS_WITHOUT_TABLE: Final[tuple[int, ...]] = (
@@ -5266,10 +5266,10 @@ def default_member_seeds(
 ) -> tuple[tuple[int, ...], tuple[int, ...]]:
     """Return the ``(R1 seeds, R3 seeds)`` of a version-7 ensemble (v7.3).
 
-    As amended on 2026-09-29 (pre-registration §15.3): eight emission
+    As amended on 2026-09-29 (pre-registration §22.3): eight emission
     members, R1 x 6 + R3 x 2 where the family's species x chemistry has a
     measured factor table, else R1 x 8. ``comparator`` returns the
-    comparator of the amended re-test of §14 (iii) instead, disjoint from
+    comparator of the amended re-test of §21 (iii) instead, disjoint from
     every production and stage-D member (never production).
 
     Args:
@@ -5305,7 +5305,7 @@ def ensemble_members(
     """Return a version-7 family's members (plan §8.3 v7.3 table, as amended).
 
     Emission: eight members (amendment of 2026-09-29, pre-registration
-    §15.3) -- ``R1_contam_HO@0``, ``@6``-``@10`` plus ``R3_measured_HO@2``,
+    §22.3) -- ``R1_contam_HO@0``, ``@6``-``@10`` plus ``R3_measured_HO@2``,
     ``@3`` when the family's species x chemistry has a measured ``member``
     table (Xenium Prime 5K mouse), else ``R1_contam_HO@0``, ``@6``-``@12``;
     reported: ``clean@0``; stress (human Prime families with the lung ratio
@@ -5846,7 +5846,7 @@ def v7_simulation_payload(
     with their table sha256), every simulation-input asset used (id,
     version, sha256), the chemistry, the grid, the top-up rule and the
     simulation conventions. A version-6 bundle's payload never holds it, so
-    version-6 ``build_hash`` values are unchanged (pre-registration §14 (i)).
+    version-6 ``build_hash`` values are unchanged (pre-registration §21 (i)).
 
     Args:
         members: The ensemble members.
@@ -5895,7 +5895,7 @@ ENSEMBLE_RECIPE: Final = "ensemble"
 CLASS_DEPTH_FILE: Final = "resolvability_class_depth.parquet"
 REASON_ENSEMBLE_PREFIX: Final = "ensemble_"
 REASON_ENSEMBLE_SPREAD: Final = "ensemble_spread"
-# The spread route's margin (amendment of 2026-09-29, pre-registration §15.3):
+# The spread route's margin (amendment of 2026-09-29, pre-registration §22.3):
 # E1 and the spread limit pass, the pooled Wilson bound does not clear its
 # limit by the margin.
 REASON_ENSEMBLE_SPREAD_MARGIN: Final = "ensemble_spread_margin"
@@ -5968,7 +5968,7 @@ NeuronalOf = Mapping[str, bool | None] | Callable[[str], bool | None]
 
 @dataclass(frozen=True)
 class EnsembleSettings:
-    """The version-7 ensemble rules (§3.7; pre-registration §14.3, tightenable).
+    """The version-7 ensemble rules (§3.7; pre-registration §21.3, tightenable).
 
     Attributes:
         spread_floor: E2's smallest allowed member spread (0.03).
@@ -5983,7 +5983,7 @@ class EnsembleSettings:
         spread_wilson_margin_se: The spread route of E2 needs the pooled
             Wilson bound to clear ``target - wilson_margin`` by this many
             standard errors of the pooled precision (1; amendment of
-            2026-09-29, pre-registration §15.3; 0: no margin, the rule of
+            2026-09-29, pre-registration §22.3; 0: no margin, the rule of
             stages A-D).
     """
 
@@ -6073,7 +6073,7 @@ class EnsembleSettings:
         return cls(**values)
 
     def spread_margin_ok(self, wilson_clearance: float, standard_error: float) -> bool:
-        """Return whether a set may use E2's spread route (pre-registration §15.3).
+        """Return whether a set may use E2's spread route (pre-registration §22.3).
 
         Args:
             wilson_clearance: ``L - (target - wilson_margin)``, the pooled
@@ -6218,7 +6218,7 @@ def pooled_standard_error(precision: float, n_effective: float) -> float:
     effective n of its Wilson bound (Kish n x distinct test cells / rows; the
     distinct confidently called test cells when unweighted), NP4's statistic
     applied to the pooled set (amendment of 2026-09-29, pre-registration
-    §15.3). 0 when ``p`` is 0 or 1.
+    §22.3). 0 when ``p`` is 0 or 1.
 
     Args:
         precision: The pooled point precision at the applied threshold.
@@ -6355,7 +6355,7 @@ def _set_records(
             effective.append(member_stats.n_effective)
             coverages.append(member_stats.coverage)
         spread, limit, within = member_spread(precisions, effective, ensemble)
-        # The spread route's margin (pre-registration §15.3): the pooled
+        # The spread route's margin (pre-registration §22.3): the pooled
         # Wilson bound's clearance of its E1 limit, in SE of the precision.
         standard_error = pooled_standard_error(stats.precision, stats.n_effective)
         clearance = float(stats.wilson_lb) - (target - settings.wilson_margin)
@@ -6424,7 +6424,7 @@ def _verdict(record: Mapping[str, Any], unanimous: bool) -> dict[str, Any]:
 
     E1 first; then E2's unanimous route (every emission member emits the
     bin) or its spread route, which needs the spread within its limit and,
-    since the amendment of 2026-09-29 (pre-registration §15.3), the pooled
+    since the amendment of 2026-09-29 (pre-registration §22.3), the pooled
     Wilson bound clearing its limit by the margin (``spread_margin_ok``,
     computed by ``_set_records``). Used for a bin's own set, the pool a
     pooled bin takes and the pool whose failure withdraws the judged bins.
@@ -6868,7 +6868,7 @@ def ensemble_decide(
     regime) and (E2) every emission member emits the bin by its own decision
     or the member spread there is within ``max(floor, k * SE)`` with every
     member holding ``member_min_confident`` calls and, since the amendment of
-    2026-09-29 (pre-registration §15.3), the set's Wilson bound clears
+    2026-09-29 (pre-registration §22.3), the set's Wilson bound clears
     ``target - wilson_margin`` by ``spread_wilson_margin_se`` standard errors
     of its precision (``pooled_standard_error``). Then the monotone fill
     (v7.9). A failure takes E1's reason prefixed ``ensemble_``,
@@ -7907,7 +7907,7 @@ def asset_free_trust(
     neuronal: Mapping[str, bool | None],
     trust: TrustConstraint,
 ) -> tuple[TrustConstraint, dict[str, Any]]:
-    """Guard the trust constraint against simulation-input assets (v7; §14 (v)).
+    """Guard the trust constraint against simulation-input assets (v7; §21 (v)).
 
     Simulation inputs never promote trust (OD-E1 as amended, user decision 1).
     When an emission member uses an asset (``R3_measured_HO``), the ensemble
@@ -8217,9 +8217,9 @@ def v7_diagnostic_comparison(
 ) -> dict[str, Any]:
     """Compare a bundle's decisions with version-7 decisions (diagnostic only).
 
-    Used for the version-6 families (plan §8.3 v7.1; pre-registration §14
+    Used for the version-6 families (plan §8.3 v7.1; pre-registration §21
     (vii): version 6 vs version 7 emitted triples lost and gained per level)
-    and for fresh ensemble draws (§14 (iii)). Nothing is applied.
+    and for fresh ensemble draws (§21 (iii)). Nothing is applied.
 
     Args:
         reference: The bundle's stored decisions (version 6 or 7).
@@ -8242,7 +8242,7 @@ def v7_diagnostic_comparison(
 
 TOP_UP_VERSION: Final = 1
 TOP_UP_STREAM: Final = "class_top_up"
-# Pre-registration §14.3: 200 = 4 x min_confident_n, only tightenable.
+# Pre-registration §21.3: 200 = 4 x min_confident_n, only tightenable.
 TOP_UP_MIN_CLASS_TEST_CELLS: Final = 200
 
 

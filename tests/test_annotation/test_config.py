@@ -370,7 +370,7 @@ def test_resolvability_and_gate_p_settings() -> None:
 
 
 def test_version_7_ensemble_settings() -> None:
-    # Amendment of 2026-09-29 (pre-registration §15.3): the members default to
+    # Amendment of 2026-09-29 (pre-registration §22.3): the members default to
     # the family-type rule (None), the spread route's margin is one SE.
     settings = AnnotationResolvabilityConfig()
     assert settings.ensemble_r1_seeds is None

@@ -167,7 +167,7 @@ def test_the_version_7_grid_above_1000_genes(tmp_path: Path) -> None:
 
 
 def test_a_version_7_plan_with_a_measured_table_has_r1_x_6_and_r3_x_2() -> None:
-    # Amendment of 2026-09-29 (pre-registration §15.3): a Xenium Prime mouse
+    # Amendment of 2026-09-29 (pre-registration §22.3): a Xenium Prime mouse
     # panel (declared chemistry) has the WMB factor table, so R1 x 6 + R3 x 2;
     # the configured R3 seeds and residual reach the members.
     spec = AnnotationReferenceSpec(

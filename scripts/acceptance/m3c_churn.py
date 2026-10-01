@@ -1,12 +1,12 @@
 #!/usr/bin/env python
-"""M3c pre-registration §14 (iii): stability of the emitted triples (pass / fail).
+"""M3c pre-registration §21 (iii): stability of the emitted triples (pass / fail).
 
 On a version-7 5K mouse bundle: ensemble A = the bundle's emission members;
 ensemble B = the ``ensemble_B`` of ``m3c_v7_diagnostic.py`` (same test cells,
 grid, mapping configuration and mapping seed 0; an output directory, never
 the store). Stage D (failed, on record): A = {R1_contam_HO@0, @1, @2,
 R3_measured_HO@0}, B = {R1_contam_HO@3, @4, @5, R3_measured_HO@1}. The
-amended re-test (pre-registration §15.4, 2026-09-29): A = the rebuilt
+amended re-test (pre-registration §22.4, 2026-09-29): A = the rebuilt
 bundle's {R1_contam_HO@0, @6-@10, R3_measured_HO@2, @3}, B = the comparator
 {R1_contam_HO@20-@25, R3_measured_HO@20, @21}; the two must share no member.
 Triples = the (level, class, bin) emitted in the provisional regime of the
@@ -143,7 +143,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     single = res.triple_churn(single_a, single_b)
     passes = churn["churn"] <= TOLERANCE + 1e-12
     record: dict[str, Any] = {
-        "test": "pre-registration §14 (iii)",
+        "test": "pre-registration §21 (iii)",
         "bundle": str(args.bundle),
         "diagnostic": str(args.diag_dir),
         "members_a": members_a,
@@ -160,7 +160,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     }
     (args.out_dir / "CHURN.json").write_text(json.dumps(record, indent=2) + "\n")
     lines = [
-        "M3c pre-registration §14 (iii): emitted-triple churn, fresh keyed ensemble",
+        "M3c pre-registration §21 (iii): emitted-triple churn, fresh keyed ensemble",
         f"bundle {args.bundle}",
         f"A = {', '.join(summary_a.get('emission_members') or [])}",
         f"B = {', '.join(summary_b.get('emission_members') or [])}",

@@ -691,7 +691,7 @@ top-up rule, so its bundles are new build directories. A version-7 self-map:
   what each pool held and gave and whether it ran out;
 - simulates and maps each member in turn: eight emission members (since the
   amendment of 2026-09-29, an orchestrator decision pending the user's
-  confirmation; plan §8.3 v7.3, pre-registration §15) -- `R1_contam_HO@0`,
+  confirmation; plan §8.3 v7.3, pre-registration §22) -- `R1_contam_HO@0`,
   `@6`-`@10` and `R3_measured_HO@2`, `@3` where the species x chemistry has a
   measured factor table (Xenium Prime 5K mouse), else `R1_contam_HO@0`,
   `@6`-`@12` (Xenium Prime 5K human, custom, MERSCOPE and unknown panels);
@@ -719,7 +719,7 @@ top-up rule, so its bundles are new build directories. A version-7 self-map:
   (`R3_measured_HO`), the trust constraint is the more severe of the full
   ensemble's and that of the asset-free members (the R1 draws, decided on
   the same cells), so an asset can lower the trust state but never raise it
-  (`trust_asset_guard` in the summary; pre-registration §14 (v));
+  (`trust_asset_guard` in the summary; pre-registration §21 (v));
 - writes `resolvability_cells.parquet` (with `member`), `resolvability.parquet`
   (per-member rows, `member_decision` and the ensemble's `decision` rows with
   the rule, member statuses, spread and limit, saturated and filled flags),
@@ -771,7 +771,7 @@ min for 120-180k simulated cells (up to 16 min under load), its mapping 2-4 min 
 bundle's class-depth predictor gives provisional class coverage .909 and
 subclass .786; profile mode (member mean, weighted to the real composition)
 class .947 and subclass .789 against the real .871 and .695 under the same
-decisions (the calibration of pre-registration §14 (iv), in-sample). A
+decisions (the calibration of pre-registration §21 (iv), in-sample). A
 fresh keyed ensemble (R1 at seeds 3-5, R3 at seed 1) moved 52 of the 1,263
 provisional (level, class, bin) triples of the mouse bundle (churn 0.041,
 of which the report-only supertype level 28; broad to subclass 0.022),
@@ -780,7 +780,7 @@ pre-registered limit of 0.02 is not met (`M3C_EXIT_REPORT.txt` gives the
 cause and the proposed fixes), while the real public-section coverage
 under the two ensembles differs by only +.003 (class and subclass). The
 failure stays on record. *Amendment (2026-09-29; orchestrator decisions
-pending the user's confirmation, pre-registration §15):* eight emission
+pending the user's confirmation, pre-registration §22):* eight emission
 members and the one-standard-error margin on the spread route; the test is
 re-run once on the rebuilt bundle against a comparator ensemble
 (`R1_contam_HO@20`-`@25`, `R3_measured_HO@20`, `@21`), and the work stops if
@@ -802,7 +802,7 @@ as history. Host load 6-92, 8 processes per job:
 
 All three are `provisional` (trust constraint none; for the mouse bundle
 the asset-free guard was applied). The re-test of the emitted-triple
-stability (pre-registration §15.4) **failed**: against a comparator
+stability (pre-registration §22.4) **failed**: against a comparator
 ensemble (`R1_contam_HO@20`-`@25`, `R3_measured_HO@20`, `@21`; 7.9 h, 21.1
 GB) 62 of the 1,235 provisional triples moved (churn 0.050 > 0.02; broad to
 subclass 0.031; supertype 28 of the 62; two single draws 0.060). In the

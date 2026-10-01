@@ -22,7 +22,7 @@ This module is the registry of those inputs and the recipes that read them
   panel's chemistry).
 * **R3_measured_HO** (``r3_efficiency``; table rules ``restricted``, the
   production rule, and ``all_measured``, phase 1's D3 vector for the
-  regression of pre-registration §14 (ii)). Every draw is keyed by the gene
+  regression of pre-registration §21 (ii)). Every draw is keyed by the gene
   id (``draw_key``), so a gene's value does not depend on the other panel
   genes (up to the common median normalisation).
 * **R1_xtissue_lung_stress** (``xtissue_stress_efficiency``): the R1@0
@@ -116,7 +116,7 @@ STRESS_HUMAN_LUNG: Final = "ratio__xenium_prime_vs_v1__human_lung_ffpe"
 SCENARIO_HUMAN_LUNG: Final = "depth__xenium_prime__human_lung_ffpe"
 PRIME_PANEL_LISTS: Final = "panels__xenium_prime"
 
-# R3_measured_HO (pre-registered, plan §8.3 v7.4 and pre-registration §14.3;
+# R3_measured_HO (pre-registered, plan §8.3 v7.4 and pre-registration §21.3;
 # only tightenable).
 R3_RESIDUAL_SD_LOG2: Final = 0.20
 R3_CAP_LOG2: Final = 3.0
@@ -633,7 +633,7 @@ def r3_efficiency(
     table) takes ``sorted(clip(f, +-cap))[floor(u * n)]`` over the table's
     ``n`` measured genes, ``u`` the keyed uniform of ``(seed,
     "measured_resample", gene)``. Rule ``all_measured`` (phase 1's D3 vector,
-    the regression of pre-registration §14 (ii) only): informative and weak
+    the regression of pre-registration §21 (ii) only): informative and weak
     genes take ``f`` plus the residual (weak: ``sqrt(0.20^2 + (1 / ln 2)^2 /
     (observed + 1))``), uninformative and missing genes ``0 + 1.365 z``, with
     the same residual key. The efficiency is ``2 ** log2 e`` divided by its

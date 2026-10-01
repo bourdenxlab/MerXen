@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Write the D3 regression fixtures of M3c (pre-registration §14 (ii)).
+"""Write the D3 regression fixtures of M3c (pre-registration §21 (ii)).
 
 Phase 1's D3 run (``R3_measured_realdepth``: measured 5K factors plus
 residual, real per-class depth, on the 5K mouse bundle ``c30f7eab``) is the
@@ -88,7 +88,7 @@ def build(evidence_root: Path) -> dict[str, str]:
         ),
     }
     record: dict[str, Any] = {
-        "purpose": "M3c pre-registration §14 (ii): the D3 regression fixtures",
+        "purpose": "M3c pre-registration §21 (ii): the D3 regression fixtures",
         "evidence_root": "$A = /srv/storage/MerXen/annotation_dev/evidence_20260926",
         "sources": {
             name: {"path": f"$A/{name}", "sha256": _sha256(evidence_root / name)}

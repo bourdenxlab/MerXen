@@ -211,7 +211,7 @@ R1_PRODUCTION_WITHOUT_TABLE = [
 
 def test_ensemble_members_follow_the_family_table() -> None:
     # Eight emission members per version-7 family (amendment of 2026-09-29,
-    # pre-registration §15.3): R1 x 6 + R3 x 2 with a measured table, else
+    # pre-registration §22.3): R1 x 6 + R3 x 2 with a measured table, else
     # R1 x 8; clean reported; the human Prime lung stress recipe reported only.
     table = si.get_asset(si.EFFICIENCY_MOUSE_PRIME)
     stress = si.get_asset(si.STRESS_HUMAN_LUNG)

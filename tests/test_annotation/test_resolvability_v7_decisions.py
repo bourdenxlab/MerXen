@@ -202,13 +202,13 @@ def test_a_failing_member_within_the_spread_limit_is_emitted_by_the_spread() -> 
     assert record["ensemble_rule"] == res.RULE_SPREAD
     assert record["member_spread"] == pytest.approx(0.01, abs=1e-3)
     assert record["member_spread"] <= record["spread_limit"]
-    # The pooled Wilson bound clears its limit by more than one SE (§15.3).
+    # The pooled Wilson bound clears its limit by more than one SE (§22.3).
     assert bool(record["spread_margin_ok"])
     assert record["wilson_clearance"] >= record["spread_se"] > 0
 
 
 # --------------------------------------------------------------------------
-# The spread route's margin (amendment of 2026-09-29, pre-registration §15.3)
+# The spread route's margin (amendment of 2026-09-29, pre-registration §22.3)
 
 
 def spread_frames(n: int, shares: Sequence[float], *, depth: int = 100) -> list:
@@ -235,7 +235,7 @@ def test_the_spread_route_needs_the_pooled_wilson_bound_one_se_clear() -> None:
     assert record["reason"] == res.REASON_ENSEMBLE_SPREAD_MARGIN
     assert record["ensemble_rule"] is None
     assert not bool(record["spread_margin_ok"])
-    # SE = sqrt(p (1 - p) / n_eff) on the Wilson bound's p and n (§15.3).
+    # SE = sqrt(p (1 - p) / n_eff) on the Wilson bound's p and n (§22.3).
     p, n_eff = float(record["precision"]), float(record["n_effective"])
     assert n_eff == 1000.0
     assert record["spread_se"] == pytest.approx(math.sqrt(p * (1 - p) / n_eff))
@@ -320,7 +320,7 @@ def test_the_margin_applies_to_the_ensemble_pool() -> None:
 
 
 def test_the_monotone_fill_can_fill_a_bin_that_fails_only_the_margin() -> None:
-    # Pre-registration §15.3: the margin is a condition on the Wilson bound,
+    # Pre-registration §22.3: the margin is a condition on the Wilson bound,
     # which the fill waives; a deeper bin whose point precision and coverage
     # pass is filled (outside trust and floors) and keeps its ensemble reason.
     frames = spread_frames(400, (0.99, 0.99, 0.99))
@@ -1085,7 +1085,7 @@ def test_a_deep_coverage_failure_is_not_filled() -> None:
 
 # --------------------------------------------------------------------------
 # Simulation-input assets never raise the trust constraint (pre-registration
-# §14 (v); OD-E1 as amended: inputs, never trust evidence)
+# §21 (v); OD-E1 as amended: inputs, never trust evidence)
 
 
 def _member(name: str, seed: int, *, asset: bool) -> res.EnsembleMember:

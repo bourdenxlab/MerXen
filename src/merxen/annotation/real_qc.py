@@ -19,7 +19,7 @@ Checks added by M3c (plan §8.8 table; §8.3 v7.5, v7.9; §8.10):
   decision 4); never an offset. Where profile mode has run, its per-class
   prediction is reported beside it (``profile_coverage_table``) and never
   decides a warning (orchestrator decision D4 of 2026-09-29, pending the
-  user's confirmation; pre-registration §15.2). The warning is worded per
+  user's confirmation; pre-registration §22.2). The warning is worded per
   class, not as a glial warning: it fires on vendor-segmented 5K glia
   (simulated glial coverage is an upper bound, -.06 to -.18; -.04 to -.14
   re-segmented with ProSeg), on small hypothalamic classes (stage D:

@@ -636,7 +636,7 @@ class AnnotationResolvabilityConfig(_AnnotationModel):
         ensemble_spread_wilson_margin_se: The spread route of E2 needs the
             pooled Wilson bound to clear ``target - wilson_margin`` by this
             many standard errors ``sqrt(p (1 - p) / n_eff)`` of the pooled
-            precision (amendment of 2026-09-29, pre-registration §15.3; the
+            precision (amendment of 2026-09-29, pre-registration §22.3; the
             unanimous route is unaffected).
         saturated_bp_share: Fit-half share at ``bp = 1`` above which a set
             without a local threshold is judged at the cap (v7.8).

@@ -1,4 +1,4 @@
-"""Golden hashes of the resolvability version-6 path (pre-registration §14 (i-a)).
+"""Golden hashes of the resolvability version-6 path (pre-registration §21 (i-a)).
 
 Milestone M3c adds resolvability version 7 for the families outside
 ``validated_panels.csv`` and keeps version 6 byte-identical for the families
@@ -393,6 +393,6 @@ def test_version_6_path_is_byte_identical(current_hashes: dict[str, str]) -> Non
     }
     missing = sorted(set(GOLDEN) - set(current_hashes))
     assert not differ and not missing, (
-        f"version-6 outputs changed (pre-registration §14 (i) fails): {differ}; "
+        f"version-6 outputs changed (pre-registration §21 (i) fails): {differ}; "
         f"missing {missing}"
     )

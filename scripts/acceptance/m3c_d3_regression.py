@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""M3c pre-registration §14 (ii-b): replay phase 1's D3 on the public 5K section.
+"""M3c pre-registration §21 (ii-b): replay phase 1's D3 on the public 5K section.
 
 Profile mode (plan §8.3 v7.5) with D3's settings — recipe name
 ``R3_measured_realdepth``, version 1, seed 0, table rule ``all_measured``,
@@ -204,7 +204,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     composition = pd.read_csv(DATA / "m3c_real_composition_mouse5k.csv")
     fixture = pd.read_csv(DATA / "m3c_d3_predictions_mouse5k.csv")
     report: dict[str, Any] = {
-        "test": "M3c pre-registration §14 (ii-b)",
+        "test": "M3c pre-registration §21 (ii-b)",
         "started_utc": datetime.now(UTC).isoformat(timespec="seconds"),
         "bundle": str(BUNDLE),
         "test_set": str(TEST_SET),
@@ -214,7 +214,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "runs": {},
     }
     lines = [
-        "M3c pre-registration §14 (ii-b): replay of phase 1's D3 on the public "
+        "M3c pre-registration §21 (ii-b): replay of phase 1's D3 on the public "
         "5K section",
         f"bundle {BUNDLE.name[:16]}, test set {TEST_SET.name[:16]} "
         f"({len(test.obs)} cells), {args.n_processors} processes",

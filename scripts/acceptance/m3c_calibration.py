@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""M3c pre-registration §14 (iv): per-class calibration on the public 5K section.
+"""M3c pre-registration §21 (iv): per-class calibration on the public 5K section.
 
 Reported, in-sample, never pass / fail. For the M3c version-7 5K mouse bundle:
 
@@ -23,7 +23,7 @@ Reported, in-sample, never pass / fail. For the M3c version-7 5K mouse bundle:
   class) the per-class warning flags (``real_qc.coverage_vs_simulation``:
   real < class-depth prediction - 0.10, >= 200 cells); simulated precision
   (member mean; no real counterpart). The ALL row is shown beside the classes.
-* With ``--churn-dir`` (the §14 (iii) diagnostic output of the bundle): the
+* With ``--churn-dir`` (the §21 (iii) diagnostic output of the bundle): the
   real provisional coverage (class, subclass) under ensemble A (the bundle)
   and under the fresh ensemble B.
 
@@ -315,7 +315,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     table.to_csv(args.out_dir / "calibration_per_class.csv", index=False)
     warn_table.to_csv(args.out_dir / "coverage_warning_table.csv", index=False)
     lines = [
-        "M3c pre-registration §14 (iv): per-class calibration on the public 5K section",
+        "M3c pre-registration §21 (iv): per-class calibration on the public 5K section",
         "(reported; in-sample for depth, composition and R3 factors: a best case)",
         f"date {datetime.now(UTC).isoformat(timespec='seconds')}; bundle {args.bundle}",
         f"real calls: phase-1 calls (query markers equal to c30f7eab: {equal}); "

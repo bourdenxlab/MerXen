@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""M3c pre-registration §14 (v): no family is promoted by any M3c change.
+"""M3c pre-registration §21 (v): no family is promoted by any M3c change.
 
 Three parts (pass / fail):
 
@@ -315,7 +315,7 @@ def command_check(baseline: Path, current: Path, out_dir: Path) -> int:
         and properties["passed"]
     )
     report = {
-        "test": "pre-registration §14 (v)",
+        "test": "pre-registration §21 (v)",
         "date": datetime.now(UTC).isoformat(timespec="seconds"),
         "tables": tables,
         "bundles": per_bundle,
@@ -326,7 +326,7 @@ def command_check(baseline: Path, current: Path, out_dir: Path) -> int:
     }
     (out_dir / "NO_PROMOTION.json").write_text(json.dumps(report, indent=2) + "\n")
     lines = [
-        "M3c pre-registration §14 (v): no family promoted by any M3c change",
+        "M3c pre-registration §21 (v): no family promoted by any M3c change",
         f"RESULT: {'PASS' if passes else 'FAIL'}",
         "",
         "1. validated tables vs 83e81e3:",

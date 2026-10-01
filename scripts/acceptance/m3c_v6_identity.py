@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""M3c pre-registration §14 (i-b): the stored version-6 bundles stay byte-identical.
+"""M3c pre-registration §21 (i-b): the stored version-6 bundles stay byte-identical.
 
 For each version-6 production bundle of the SSD1 store (WHB set a 297
 ``b6bfe83d``, WHB set c 265 ``5137090d``, SEA-AD ``d70cda25``, WMB ag7
@@ -55,7 +55,7 @@ import pandas as pd
 logger = logging.getLogger("m3c_v6_identity")
 
 STORE = Path("/media/mathieubo/SSD1/MerXen/annotation_references")
-# The version-6 production bundles of 2026-09-28 (pre-registration §14 (i-b)).
+# The version-6 production bundles of 2026-09-28 (pre-registration §21 (i-b)).
 PREREGISTERED: dict[str, tuple[str, str]] = {
     "whb_set_a_297": ("whb_frontal_supc_clus", "b6bfe83d"),
     "whb_set_c_265": ("whb_frontal_supc_clus", "5137090d"),
@@ -446,7 +446,7 @@ def command_check(baseline: Path, current: Path, out_dir: Path) -> int:
         }
     passes = all(item["passes"] for item in bundles.values())
     report = {
-        "test": "pre-registration §14 (i-b)",
+        "test": "pre-registration §21 (i-b)",
         "date": datetime.now(UTC).isoformat(timespec="seconds"),
         "code_commit": _git_head(),
         "baseline_code": base.get("code_root"),
@@ -460,7 +460,7 @@ def command_check(baseline: Path, current: Path, out_dir: Path) -> int:
     }
     (out_dir / "V6_IDENTITY.json").write_text(json.dumps(report, indent=2) + "\n")
     lines = [
-        "M3c pre-registration §14 (i-b): stored version-6 bundles under the M3c code",
+        "M3c pre-registration §21 (i-b): stored version-6 bundles under the M3c code",
         f"code {report['code_commit']}; baseline {report['baseline_code']}; "
         f"store {STORE}",
         f"RESULT: {'PASS' if passes else 'FAIL'}",

@@ -811,7 +811,7 @@ def simulate_reference(
         v7_fresh_r3_seeds: R3 seeds of ensemble B (default ``(1,)``, stage
             D's B).
         v7_comparator: Run the pre-registered comparator of the amended
-            re-test of §14 (iii) as ensemble B (pre-registration §15.4).
+            re-test of §21 (iii) as ensemble B (pre-registration §22.4).
 
     Returns:
         The simulation of the reference.
@@ -1430,10 +1430,10 @@ def run_panel_simulation(
         provenance: Extra report fields (inputs, code version).
         v7_diagnostic: ``--resolvability-version 7``: version-7 decisions of
             the version-6 families as a diagnostic (``run_v7_diagnostic``).
-        v7_fresh_seeds: R1 seeds of a fresh ensemble B (churn, §14 (iii)).
+        v7_fresh_seeds: R1 seeds of a fresh ensemble B (churn, §21 (iii)).
         v7_fresh_r3_seeds: R3 seeds of ensemble B (default ``(1,)``).
         v7_comparator: Ensemble B = the pre-registered comparator of the
-            amended re-test (pre-registration §15.4).
+            amended re-test (pre-registration §22.4).
 
     Returns:
         The report (also written to ``simulate_report.json``).
@@ -2572,7 +2572,7 @@ def _max_test_cells(group: pd.DataFrame) -> int:
     return int(values.max()) if len(values) else 0
 
 
-# How a headline weights its classes (pre-registration §15.2 D5): a real
+# How a headline weights its classes (pre-registration §22.2 D5): a real
 # composition when one is given (mouse), the profile's own class composition
 # for a per-class profile, the test-set composition (the self-map test cells'
 # class shares) for a pooled profile or scenario without classes (the human
@@ -2666,7 +2666,7 @@ def class_depth_headline(
     the profile lacks do not enter). A pooled profile or scenario has no
     class composition (the human lung-FFPE scenario), so its classes are
     weighted by the test-set composition, each class's share of the self-map
-    test cells at the level (``n_test_cells``; pre-registration §15.2 D5);
+    test cells at the level (``n_test_cells``; pre-registration §22.2 D5);
     ``weights`` records which.
     """
     result: dict[str, dict[str, Any]] = {}
@@ -2919,7 +2919,7 @@ def run_profile_mode(
     real composition the per-class rows stay unweighted and the ALL row is
     weighted to the profile's own class composition, or, for a pooled
     profile such as the human lung-FFPE scenario, to the test-set
-    composition (the test cells' class shares; pre-registration §15.2 D5),
+    composition (the test cells' class shares; pre-registration §22.2 D5),
     labelled in ``all_row_weights``. Profile mode never enters emission.
 
     Returns:
@@ -3153,7 +3153,7 @@ def render_profile_lines(record: Mapping[str, Any]) -> list[str]:
 
 # --------------------------------------------------------------------------
 # Resolvability version 7 as a diagnostic (M3c; plan §8.3 v7.1, §12 M3c (10);
-# pre-registration §14 (iii) and (vii))
+# pre-registration §21 (iii) and (vii))
 
 V7_DIAGNOSTIC_DIR: Final = "v7_diagnostic"
 V7_DIAGNOSTIC_JSON: Final = "v7_diagnostic.json"
@@ -3196,8 +3196,8 @@ def run_v7_diagnostic(
     ``ensemble_decide`` and compared with the bundle's stored version-6
     decisions (emitted triples lost and gained per level and regime); for a
     version-7 bundle A is the bundle's own ensemble. With ``comparator`` the
-    pre-registered comparator of the amended re-test of §14 (iii)
-    (``default_member_seeds(..., comparator=True)``; pre-registration §15.4)
+    pre-registered comparator of the amended re-test of §21 (iii)
+    (``default_member_seeds(..., comparator=True)``; pre-registration §22.4)
     is run as ensemble B, otherwise with ``fresh_seeds`` a fresh ensemble B
     (R1 at those seeds, R3 at ``fresh_r3_seeds``, default ``(1,)`` as in
     stage D); the churn A vs B is reported. B must share no member with A.

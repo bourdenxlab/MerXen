@@ -4,7 +4,7 @@
 An in-sample demonstration (reported, never pass / fail, never trust evidence):
 the section is the one the stored factor table and depth profile were measured
 on, so the factor re-measure should reproduce the stored table and the
-coverage warning repeats the calibration of pre-registration §14 (iv). With
+coverage warning repeats the calibration of pre-registration §21 (iv). With
 the M3c version-7 5K mouse bundle and the phase-1 calls:
 
 1. ``factor_remeasure``: per-gene factors of the section's confident class

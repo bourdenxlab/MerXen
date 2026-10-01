@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""M3c pre-registration §14 (iii) and (vii): version-7 ensemble draws beside a bundle.
+"""M3c pre-registration §21 (iii) and (vii): version-7 ensemble draws beside a bundle.
 
 For each target bundle, ``simulate.run_v7_diagnostic`` is run on the bundle's
 own test set and engine and written to ``--out-dir/<target>/v7_diagnostic``
@@ -9,7 +9,7 @@ own test set and engine and written to ``--out-dir/<target>/v7_diagnostic``
   ``seaad_set_a``, ``wmb_ag7``, ``wmb_vzg2``; the SSD1 bundles of (i-b)):
   ensemble A = the version-7 emission members of a family without a
   measured table (stage D: ``R1_contam_HO@0``, ``@1``, ``@2``; since the
-  amendment of 2026-09-29, pre-registration §15.3: ``R1_contam_HO@0``,
+  amendment of 2026-09-29, pre-registration §22.3: ``R1_contam_HO@0``,
   ``@6``-``@12``) with the version-7 conventions (no top-up: the bundle's own
   test set), compared with the stored version-6 decisions (emitted triples
   lost and gained per level and regime), and an ensemble B (the version-7
@@ -17,7 +17,7 @@ own test set and engine and written to ``--out-dir/<target>/v7_diagnostic``
 * **(iii) the version-7 5K mouse bundle** (``prime5k_mouse``; ``--bundle``):
   ensemble A is the bundle's own (on the topped-up test set). Ensemble B:
   ``--ensemble-b comparator`` (default; the amended re-test of
-  pre-registration §15.4) runs the pre-registered comparator
+  pre-registration §22.4) runs the pre-registered comparator
   ``R1_contam_HO@20``-``@25`` + ``R3_measured_HO@20``, ``@21``
   (``R1_contam_HO@20``-``@27`` without a table); ``--ensemble-b stage_d``
   reproduces stage D's fresh draw ``R1_contam_HO@3``, ``@4``, ``@5`` +
@@ -223,7 +223,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         choices=ENSEMBLE_B_CHOICES,
         default="comparator",
         help="comparator: the pre-registered comparator of the amended re-test "
-        "(§15.4); stage_d: stage D's fresh draw",
+        "(§22.4); stage_d: stage D's fresh draw",
     )
     args = parser.parse_args(argv)
     logging.basicConfig(

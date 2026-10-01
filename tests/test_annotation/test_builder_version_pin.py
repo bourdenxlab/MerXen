@@ -130,7 +130,7 @@ PIN_HISTORY = (
     "every version-6 output are byte-identical (test_resolvability_v6_golden), "
     "so no existing bundle changes",
     "3: the version-7 trust constraint guarded against simulation-input assets "
-    "(M3c stage D, pre-registration §14 (v): the more severe of the full "
+    "(M3c stage D, pre-registration §21 (v): the more severe of the full "
     "ensemble's and the asset-free members' constraint; the summary records "
     "trust_asset_guard); it changes the trust of version-7 bundles with an "
     "asset member only, none of which existed in any store (the 5K mouse "
@@ -139,7 +139,7 @@ PIN_HISTORY = (
     "byte-identical (test_resolvability_v6_golden), so no existing bundle "
     "changes",
     "3: the version-7 ensemble amended (M3c amendment of 2026-09-29, "
-    "pre-registration §15: eight emission members per family and a "
+    "pre-registration §22: eight emission members per family and a "
     "one-standard-error margin on the spread route); ensemble_rule_version 2 "
     "and the new members enter every version-7 build_hash (panel_params), so "
     "the new decisions go only into new build directories and the stage-D "
