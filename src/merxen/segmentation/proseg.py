@@ -14,6 +14,8 @@ import numpy as np
 import pandas as pd
 from numpy.typing import DTypeLike
 
+from merxen.segmentation.tempdirs import large_temp_root
+
 logger = logging.getLogger(__name__)
 
 
@@ -131,6 +133,7 @@ def run_proseg_refinement(
     logger: logging.Logger | None = None,
     progress_callback: Any = None,
     proseg_samples: int | None = None,
+    temp_root: str | Path | None = None,
 ) -> Path:
     """Run ProSeg refinement on transcript data.
 
@@ -166,6 +169,9 @@ def run_proseg_refinement(
         num_threads: Number of CPU threads for ProSeg.
         overwrite: Whether to pass `--overwrite`.
         logger: Optional logger instance.
+        temp_root: Directory for the temporary transcript CSV and mask arrays.
+            Defaults to ``$MERXEN_TMPDIR`` or the working directory, never the
+            system temporary directory (see ``tempdirs.large_temp_root``).
 
     Returns:
         Path to the produced output zarr.
@@ -214,7 +220,9 @@ def run_proseg_refinement(
     os.environ["RAYON_NUM_THREADS"] = str(int(num_threads))
     log.info("Using %s CPU threads for ProSeg", num_threads)
 
-    with tempfile.TemporaryDirectory() as tmp_dir:
+    with tempfile.TemporaryDirectory(
+        prefix="merxen-proseg-", dir=large_temp_root(temp_root)
+    ) as tmp_dir:
         tmp_path = Path(tmp_dir)
 
         if transcript_csv_path is None:
