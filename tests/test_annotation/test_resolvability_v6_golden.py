@@ -54,39 +54,43 @@ from merxen.annotation.vocab import load_floor_table
 from .test_resolvability import bootstrap_mapper, make_test_cells, synthetic_specs
 
 # Computed with the code of 83e81e3 (a git archive export), 2026-09-28.
+# Re-pinned when M3c merged after M8 (2026-10-01): the build hashes of the
+# eight human self-map bundles (seaad_mr_panel, whb_frontal_supc_clus) include
+# M8 D1's held-out test-set revision (pre-registration §18); every other value,
+# the held-out test-set bundles and every mouse value are unchanged.
 GOLDEN: dict[str, str] = {
     "build_hash/human_set_a_296/seaad_mr_panel": (
-        "054bf5e33bfbbf2863d6d47a9b8915a92c8156b27e16c9f549da1025bea12e4c"
+        "7a13e9e825a049502e90c5151bf11f59035533265cc7b77638c81491d1bfa852"
     ),
     "build_hash/human_set_a_296/whb_frontal_supc_clus": (
-        "aa98b2ff04cec0c7d7b22cd375fbc95e4c6592c1606b4c29ccc2010600c09842"
+        "6c5600f6d172e5f807ed99da13d77182db62931b5c92f4f8a948f8419fe6733b"
     ),
     "build_hash/human_set_a_296/whb_frontal_supc_clus_ho": (
         "4638e344e567541fd0d864765901a6ac91ea9944f08b750e29417578f8cc6d34"
     ),
     "build_hash/human_set_a_297/seaad_mr_panel": (
-        "5c4141ded9f2f5be82c91f60f0ed8b4eb56429ba824e8013e84abd85e48d8efc"
+        "593aa50a6f6edd15dcf1e947f8db660fa7cbf8d1a7873f6017bc61c471648089"
     ),
     "build_hash/human_set_a_297/whb_frontal_supc_clus": (
-        "9d6dc74dec83afce9e148477da16e27bf84ca0bd8d0ed226481e908a6a3be8fd"
+        "1d84a05e072be3858769b5df757eb84ccbf4c169ad6908cc8be71ef33c33a62d"
     ),
     "build_hash/human_set_a_297/whb_frontal_supc_clus_ho": (
         "0aa7ff3d658b474b7530e88220f1ea7c358de5e114e18fe014d45c5017d106a6"
     ),
     "build_hash/human_set_c_264/seaad_mr_panel": (
-        "d513dd08b7b98c5007278c2ca67b2eb0695b46c25797a115d6339076ec171931"
+        "73081e0950ff5851caa6d196a98f0a4d76703ed19e776f7abbf3f4fe0464b4a1"
     ),
     "build_hash/human_set_c_264/whb_frontal_supc_clus": (
-        "92ce72d35b5ddfaba16dfe1a1eb3ef48b1dfb9952ecdc18fcdb7f7e39ded421e"
+        "f1244f65320e0d1c3c2ccac5486cd79a2d22a839b8db4fdc3fa28c1332dff978"
     ),
     "build_hash/human_set_c_264/whb_frontal_supc_clus_ho": (
         "075181f249c0231d9e567f8584be88b20569b1fae33891a6161906d738bfe8ea"
     ),
     "build_hash/human_set_c_265/seaad_mr_panel": (
-        "286e741af46d4c905d8bc2998d122d2d7e0ee54a129a10d27e70f0e01fd6e171"
+        "32377a6055b21d1ec66a97cb947e57cbedc244bd52242764bf5b5c8989e5ad07"
     ),
     "build_hash/human_set_c_265/whb_frontal_supc_clus": (
-        "757f22818c02c6db8dd9e5c476a5bc3c66289cf67c7f1bec764a061a27ae913d"
+        "7539fce27a6ec226f170a667aa961b80966fe361bc718983595443a27316ef25"
     ),
     "build_hash/human_set_c_265/whb_frontal_supc_clus_ho": (
         "6d323487ff0c49cc7cbd78dcaf118c11564b0735107b7b3a307e2662f5aba711"

@@ -84,6 +84,7 @@ profile. Override either kind with `--<name>` on the command line.
 | `only_stage` | `null` | Fallback single-stage selector. A row-level `only_stage` overrides row start/stop values; row start/stop values suppress the global `only_stage` fallback for that row. |
 | `gpu_process_lock_enabled` | Dwight: `true` | Serialize local GPU-heavy processes so `CELLPOSE_SEGMENT`, GPU `ALIGN`, and GPU `CLUSTERING_SQUIDPY` do not compete for one workstation GPU. ProSeg does not take this lock. |
 | `gpu_process_lock_file` | Dwight: `/tmp/merxen-dwight-gpu.lock` | One host-wide lock shared by tasks and concurrent launches on Dwight. |
+| `task_tmp_dir` | Dwight: `/srv/storage/MerXen/tmp` | Exported to every task as `TMPDIR`, so library temporary files land on the `/srv/storage` RAID rather than `/tmp` on the small root disk. The directory must exist (`mkdir -p` it once per host). ProSeg and the proseg_hybrid refinement write their large intermediates to `$MERXEN_TMPDIR` if set, otherwise to the task's work directory, never to the system temporary directory. |
 
 Stage names accepted by `start_stage`, `stop_stage`, and `only_stage` are:
 `build_spatialdata`, `segment_nuclei`, `segment`, `enrich`, `mask_image_quantification`,
@@ -160,6 +161,7 @@ Cellpose process types.
 | Param | Default | Description |
 |-------|---------|-------------|
 | `cortical_depth_enabled` | `false` | Run `COMPUTE_CORTICAL_DEPTH` as a terminal stage after `CLUSTERING_SQUIDPY`. |
+| `cortical_depth_boundary_frame` | `native` | Frame the boundary GeoJSONs are drawn in: `native` (each section's own coordinates) or `aligned` (the pair's fixed-section frame). Selects the native or `*_aligned_nonrigid` cell element and refuses combinations that cannot match; see [Coordinate frame](stages/cortical-depth.md#coordinate-frame). Samplesheet override: `<platform>_cortical_depth_boundary_frame`. |
 | `cortical_depth_coordinate_unit_um` | `1.0` | Microns per coordinate unit in annotation/cell coordinates. Use the image pixel size if annotations are in pixel coordinates; keep `1.0` when coordinates are already microns. |
 | `cortical_depth_raster_resolution_um` | `5.0` | Finite-difference raster spacing. Smaller values improve geometry fidelity and increase memory/time. |
 | `cortical_depth_raster_padding_um` | `null` | Optional padding around the ribbon bounds. `null` uses a small automatic padding. |
@@ -550,14 +552,18 @@ runs once, and is shared across all samples and segmentation branches. See
 
 ### Reference-based annotation (in development)
 
-These params drive the reference-bundle and mapping processes of the new
-annotation ([Reference-based annotation](stages/annotation.md)). They are read
-only by `--annotation_prepare_only` runs and, once wired (M5), by `map_first`
-runs; legacy runs ignore them. Defaults are in `workflows/conf/annotation.config`,
+These params drive the reference-bundle, mapping and resolving processes of
+the new annotation ([Reference-based annotation](stages/annotation.md)). They
+are read only by `--annotation_prepare_only` runs and by `map_first` runs;
+legacy runs ignore them. Defaults are in `workflows/conf/annotation.config`,
 the dwight values in `workflows/conf/dwight.annotation.config`.
 
 | Param | Default | Description |
 |-------|---------|-------------|
+| `clustering_squidpy_mode_human`, `clustering_squidpy_mode_mouse` | `legacy`; `legacy` | Clustering mode per species: `legacy` or `map_first` ([Map-first clustering runs](stages/annotation.md#map-first-clustering-runs-m5)). The flips (M8 human, M9 mouse) set `map_first`. |
+| `clustering_squidpy_mode` | `null` | Explicit mode for both species; overrides the species params. |
+| `clustering_squidpy_table_key_suffix` | `null` | Clustered table-key suffix of a `map_first` run: `null` means `mapfirst` while the species has not flipped (`""` after), so the legacy clustered table is never overwritten; an empty suffix before the flip is refused. Legacy runs always write the unsuffixed key. |
+| `mender_unassigned_state_policy` | `exclude_from_features` | MENDER policy of `map_first` tables (plan §4.9): unassigned cells (`Mixed/Unknown`, `*/unresolved`) stay spatial nodes but add no neighbourhood state. Recorded in the clustered table, which MENDER applies; legacy tables keep `state`. |
 | `annotation_prepare_only` | `false` | Build the reference bundles of `annotation_panel_genes_path` for every row and segmentation, and run no pipeline stage. |
 | `annotation_panel_genes_path` | `null` | Declared panel of a prepare-only run (any gene list `merxen annotation-panel --panel-genes-path` reads). A human gene list of the seeded set-a family also gets its curated set c. |
 | `annotation_human_references`, `annotation_mouse_references` | `whb_frontal_supc_clus,seaad_mr_panel`; `wmb_panel,wmb_region_share` | Reference ids per species. |
@@ -583,6 +589,15 @@ the dwight values in `workflows/conf/dwight.annotation.config`.
 | `annotation_merfish_ccf_metadata_path` | `null` | Local MERFISH-C57BL6J-638850-CCF cell metadata; unset, it comes from the pinned download cache. |
 | `annotation_prep_max_forks` | Dwight: `1` | Concurrent `ANNOTATE_REFERENCE_PREP` tasks. |
 | `annotation_max_forks` | `2` (applied on Dwight) | Concurrent `CLUSTERING_SQUIDPY_ANNOTATE_MAP` tasks (6 CPUs and 24 GB each, 48 GB above 1,000 panel genes). |
+| `annotation_resolve_max_forks` | Dwight: `4` | Concurrent `CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE` tasks (2 CPUs and 16 GB each, 32 GB above 1,000 panel genes; about a minute per pair × segmentation). |
+| `annotation_allow_single_method` | `false` | Human degraded mode: in the WHB-only mode (no usable SEA-AD run), let WHB decide alone below 60 counts, recorded in the provenance (otherwise those cells get status `single_method`; plan §5.3). Only RESOLVE reads it, so changing it re-runs `CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE` alone under `-resume`, never MAP. |
+| `annotation_allow_fine_levels` | `false` | Report-only fine levels (OD-E4): the WHB cluster (human) or WMB supertype (mouse) columns `ct_cluster_*` / `ct_supertype_*` in the label table, emitted only where resolvability validates them; never a hierarchy leaf. PREP's fine-level seed check reads it too, so it is in the shared annotation config. |
+| `annotation_human_region` | `frontal_cortex` | Human anatomical region (also the samplesheet column `anatomical_region`): which WHB superclusters are region-plausible (`flag_implausible`, H2). Only `frontal_cortex` is validated; any other value is refused (plan §8.9, OD-C7). |
+| `annotation_human_microglia_flag` | `false` | Human microglial spill-over flag (OD-C5: off; RESOLVE writes `flag_microglial_spillover` as null with the reason in the provenance). Not wired yet. |
+| `annotation_mouse_section_regions`, `annotation_mouse_lkloc` | `auto`; `false` | Mouse region inference and pruning (`auto`, `none` or `;`-separated CCF divisions; also the samplesheet column `mouse_section_regions`, which wins once M5 wires it; [Mouse region step](stages/annotation.md#mouse-region-step-m6)) and the optional mouse glial second opinion (report only; not wired yet). Coronal sections only (AP 2.4–10.4 mm); give a sagittal, OB- or CB-dominated section an explicit list or `none`. The mouse RESOLVE rules, gate and flags have no pipeline params (below). |
+| `annotation_calibration_holdout_donor` | `auto` | The held-out WHB donor of the resolvability test set (`auto` = H19.30.002); v1.1 calibration uses it too. |
+| `annotation_report_enabled`, `annotation_report_max_forks` | `true`; Dwight: `2` | `ANNOTATION_REPORT` (M7): the annotation QC report of each map_first pair × segmentation (`false`: no report); at most this many at a time on the-dwight. |
+| `annotation_mode_mapmycells_stage` | `legacy` | The legacy `mapmycells` stage in `map_first` runs; the flip PRs set `skip`. |
 | `annotation_reuse_published` | `true` | MAP copies a run from the published `<pair>/<seg>/annotation_map/annotation_map_out/map_manifest.json` instead of re-mapping when its query fingerprint, `build_hash`, engine parameters and ctm version are unchanged (Dwight prunes work directories, so `-resume` alone cannot). |
 | `annotation_keep_extended_json` | `false` | Keep each MapMyCells extended JSON, gzipped, next to its tidy parquet (by default it is parsed and deleted). |
 
@@ -615,6 +630,38 @@ fields were added by milestone M3c (plan §3.7, §8.3 "Resolvability version 7",
 The `real_qc` checks are implemented in `merxen.annotation.real_qc` and are
 wired into RESOLVE by the M4 follow-up and into the first in-house dataset of
 a family by M13 (plan §12 M3c); none raises a trust state.
+
+**RESOLVE rule settings have no pipeline params.** The thresholds, targets,
+floors, dataset gate and flag settings RESOLVE applies are the
+pre-registered defaults of `merxen.annotation.config` (plan §3.7, §14);
+changing one is a rule change that needs its own PR (and, for a criterion's
+threshold, the loosening rule of the pre-registration). The standalone
+commands take them from `--annotation-config`; the pipeline writes the
+defaults into each task's `annotation_config.json`, and the RESOLVE rules
+fingerprint re-runs RESOLVE when the packaged tables or the code change.
+
+| Model | Setting | Default | Meaning |
+|---|---|---|---|
+| `AnnotationThresholds` | `whb_broad`, `whb_supercluster`, `seaad_broad` | 0.73, 0.69, 0.68 | Raw bootstrap-probability thresholds (lineage and NT use `whb_broad`); raised (never lowered) to a bundle's recorded default or, outside real-data-validated families, to the resolvability table's local threshold. |
+| | `seaad_subclass_below60`, `seaad_subclass_from60`, `second_vote_below_counts` | 0.55, 0.45, 60 | SEA-AD subclass thresholds, and the depth below which SEA-AD must agree (from 60 counts it may only veto). |
+| | `target_*`, `provisional_target_margin`, `provisional_target_margin_below60`, `provisional_target_cap` | 0.90 (lineage, broad, NT, class), 0.85 (supercluster, subclass); 0.05, 0.10, 0.97 | Resolvability precision targets, and the margins of provisional and simulation-validated families. |
+| | `floors_path`, `allow_fine_levels`, `max_leaf_level` | packaged `floors_<species>.csv`; `false`; human `supercluster`, mouse `subclass` | Class × platform count floors (unknown panels take the maximum over platforms), the report-only fine levels, the deepest emitted level. |
+| `AnnotationGate` | `depth_counts`, `min_frac_ge30`, `min_table_broad_coverage`, `warn_segmented_broad_coverage`, `warn_unvalidated_share` | 30, 0.30, 0.25, 0.15, 0.10 | Dataset gate: `broad_only` when fewer than 30% of table cells reach 30 counts, `failed` below 25% confident broad coverage of table cells; a warning (never a lower level) below 15% coverage of segmented objects or, for simulation-validated families, above 10% confident calls outside the validated region. |
+| `AnnotationFlagsConfig` | `contamination_alpha`, `contamination_min_neg_counts`, `contamination_null_depth_quantile`, `contamination_min_null_cells`, `negative_gene_max_fraction` | 0.01, 3, 0.75, 30, 0.01 | Contamination flag: beta-binomial null fitted per class × platform on the confident cells in the top depth quartile (at least 30), flag at p < 0.01 with at least 3 negative counts; negative genes detected in < 1% of the class's cells in both references. |
+| | `flag_rate_uninformative_above`, `diffuse_quantile`, `diffuse_n_simulations`, `diffuse_rate_uninformative_above` | 0.15, 0.95, 200, 0.30 | Realised-rate switches (a contamination stratum above 15%, a diffuse stratum above 30% is uninformative and its flag null; H16 marks every stratum above 15%), and the diffuse flag's multinomial q95. |
+| | `ood_robust_z`, `ood_min_cells` | -3.0, 30 | OOD flag: robust z of `avg_correlation` within class × platform × depth bin (strata of at least 30 cells). |
+| | `microglial_spillover_enabled`, `microglia_stat_min`, `microglia_weight_min`, `microglia_fpr_max` | `None` (mouse on, human off; OD-C5), 10.0, 0.05, 0.005 | Mouse spill-over flag (§7.4): E3's likelihood-ratio statistic and spill weight a flagged cell needs; the flag is null when more than 0.5% of the marker astrocytes are flagged. |
+| | `specific_gene_ratio`, `specific_gene_min_share`, `min_specific_genes`, `astro_lowcount_below` | 20, 0.001, 3, 100 | The derived microglia genes (§8.6: microglia subclass profile ≥ 20× every non-Immune class, share ≥ 1/1000; fewer than 3 make the flag null) and the depth below which an Astro-Epen call gets `flag_astro_lowcount`. |
+| `AnnotationThresholds` (mouse) | `wmb_class`, `wmb_subclass`, `wmb_class_min_corr`, `provisional_mouse_subclass_floor` | 0.90, 0.80, `None`, 60 | Mouse class and subclass bootstrap thresholds (§7.3; minimums a panel's resolvability may raise); the class `avg_correlation` floor (`None`: the M6 shadow study selected none, pre-registration §16; a configured floor applies to the real-data-validated mouse families only); the subclass count floor of a provisional mouse panel. |
+| `MouseGateConfig` (`mouse_gate`) | `g1_density_ratio_fail`, `g1_density_ratio_warn`, `g1_shift_fail_um`, `g1_radius_um` | 1.5, 2.0, 5.0, 4.0 | G1 registration (§7.6): `failed` below a transcript-density ratio of 1.5 (4 µm around centroids vs random points) or above a 5 µm shift against the platform's own cells, warning below 2.0 or when no check is given. |
+| | `g2_marker_consistency_fail`, `g2_marker_consistency_warn`, `g2_min_group_markers`, `g2_min_marker_units`, `g2_min_marker_share`, `g2_min_pseudo_confident` | 0.70, 0.80, 3, 1.5, 0.6, 200 | G2 derived marker referee: `failed` below 0.70, warning below 0.80 (provisional on derived markers [L]); class groups with fewer than 3 derived genes are left out; a pseudo-label needs 1.5 marker units and 60% of them; fewer than 200 pseudo-labelled cells warn. |
+| | `g3_implausible_warn`, `g3_t2_max_present_share` | 0.03, 0.25 | G3: warning above a 3% pre-pruning share of calls to subclasses with less than 25% of their MERFISH grey-matter cells in the present divisions (E7's T2: subclasses with at least `mouse_regions.min_merfish_cells_subclass` MERFISH cells, outside `mouse_regions.never_drop_classes`). |
+| | `g4_window_sections`, `g4_astro_epen_band_points`, `g4_immune_band_points` | `[]`, 5.0, 1.0 | G4: the MERFISH-638850 sections of the composition window (empty: G4 not evaluated until M6b's AP estimate; standalone `--mouse-g4-sections`) and the warning bands in percentage points. |
+| | `g5_spillover_warn` | 0.15 | G5: warning above a 15% spill-over flag rate. |
+| `MouseRegionConfig` (`mouse_regions`; read by MAP) | `tile_um`, `min_neurons_per_tile`, `confident_neuron_min_bp`, `min_tile_fraction`, `min_component_tiles`, `min_assigned_tiles` | 150, 3, 0.9, 0.01, 3, 200 | Region inference (§7.2, E7): tile edge, confident neurons per assigned tile and their class / subclass bootstrap probability, a division's share of assigned tiles and its connected component, and the tile count below which pruning is skipped with a warning. |
+| | `class_low_share`, `subclass_share_in_low_class`, `subclass_share_default`, `min_merfish_cells_subclass`, `min_merfish_cells_class`, `never_drop_classes` | 0.20, 0.30, 0.10, 20, 100, Pineal, Astro-Epen, OPC-Oligo, Vascular, Immune | The two-tier drop rule ([Mouse region step](stages/annotation.md#mouse-region-step-m6)). |
+| | `coherence_k`, `coherence_min`, `coherence_max_conf` | 30, 0.1, 0.8 | F1 (`flag_region_incoherent`): kNN30 same-class coherence below 0.1 and class bootstrap below 0.8. |
+| | `coupled_regions`, `rule_variant`, `ap_scope_min_mm`, `ap_scope_max_mm` | `{}`, `v1`, 2.4, 10.4 | M6b rule variants (a `rule_variant` other than `v1` or any `coupled_regions` is refused until M6b) and the AP scope the report (M7) will warn outside. |
 
 ### Resource limits
 
@@ -662,6 +709,7 @@ for every task. Portable per-process CPU/memory requests remain in
 | `MECR_REFERENCE` | 16 | 240 GB | 1 |
 | `MECR` | 4 | 48 GB | `mecr_max_forks` = 4 |
 | `CLUSTERING_SQUIDPY` | 8 | 32 GB | `clustering_squidpy_max_forks` = 4 |
+| `CLUSTERING_SQUIDPY_COMPUTE_CPU` (`map_first`) | 8 | 32 GB | `clustering_squidpy_max_forks` = 4; CPU only, no GPU lock |
 | `MAPMYCELLS` | 8 | 160 GB | unbounded |
 
 On Dwight, `CELLPOSE_SEGMENT`, `ALIGN` when `alignment_device != "cpu"`, and

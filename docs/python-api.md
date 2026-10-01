@@ -181,6 +181,10 @@ with Groovy.
 
 ### Internal modules
 - `boundaries.py` — read role-labelled GeoJSON boundaries and masks.
+- `frames.py` — `resolve_cell_coordinate_frame(...)`: pick the native or
+  `*_aligned_nonrigid` cell element matching `boundary_frame`, or refuse;
+  `frame_consistency_metrics(...)`: tissue-edge-to-cell distance and ribbon
+  occupancy behind the `frame_mismatch_suspected` QC warning.
 - `ribbon.py` — construct/rasterize the cortical ribbon.
 - `laplace.py` — sparse 2D Laplace solve and bilinear interpolation.
 - `streamlines.py` — normalized-gradient streamlines.
@@ -416,6 +420,22 @@ imported here.
 - `published_layout`, `results_root_of`, `check_output_outside_inputs` —
   the standalone command never writes into a results tree.
 
+`annotate_resolve` and its inputs (`merxen annotate-resolve`,
+`CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE`):
+
+- `annotate_resolve(map_dir, config, output_dir=..., samples=...,
+  bundle_finder=..., alignment_dir=..., lookup_alignment=True)` — per
+  sample the label table, the annotation manifest and the pair's
+  `<pair>_resolve_summary.json` (`ResolveResult`, `SampleResolution`).
+- `load_resolve_runs` (`ResolveRun`) — the tidy parquets (sha256 checked)
+  and the bundle of each run; `current_store_bundles(store)` (the store's
+  current bundle per reference and panel) and
+  `staged_bundle_finder(ref_paths, manifest, require=...)` (the bundles of
+  staged `bundle_ref.json` files; with `require`, every run must have one of
+  the build it mapped with) pick the bundles.
+- `human_calls_from_runs`, `resolve_human_sample`, `human_branch_columns`,
+  `write_label_table`, `read_label_table`.
+
 ### `annotation.shadow` — [shadow.py](../src/merxen/annotation/shadow.py)
 
 M3 shadow evaluation (plan §5.2–§5.5, §14):
@@ -450,6 +470,42 @@ M3 shadow evaluation (plan §5.2–§5.5, §14):
   E2's or the 7-class LL comparison.
 
 See [Reference-based annotation](stages/annotation.md).
+
+### `annotation.report` — [report.py](../src/merxen/annotation/report.py)
+
+The annotation QC report (plan §9; M7):
+
+- `build_annotation_report(sources, out_dir, options=..., allow_results_output=False)`
+  (`ReportResult`); `check_output_dir` and `guarded_directories` (the output
+  stays out of every input's results tree, the store, the recorded bundles
+  and the held-out CSV's directory); `ITEM_BUILDERS`.
+- Inputs (`report_inputs`): `discover_sources` (the published layout),
+  `ReportSources`, `load_report_inputs` (`ReportInputs`, `SampleData`),
+  `read_clustered_table`, `load_heldout`, `depth_cells_file` (a
+  segmentation's cell table in a `compute_cortical_depth_out`),
+  `report_results_root` (the results root of any published input),
+  `recorded_bundle_dirs`.
+- Metrics (`report_metrics`, numpy / pandas only): `soft_level_matrix`,
+  `one_hot_matrix`, `block_bootstrap_shares` (`ShareResult`),
+  `jensen_shannon_distance`, `aligned_bin_density_correlation`,
+  `median_block_ci` (`MedianCi`), `depth_ordering` (`OrderingResult`),
+  `depth_replication` (`ReplicationResult`), `share_contrast`,
+  `depth_profile`, `profile_gradient`, `platform_gene_log2_ratios`,
+  `group_mean_counts`, `log_cpm`, `nearest_centroid`,
+  `agreement_by_quantile`, `histogram_2d`, `tile_mean_map`,
+  `self_thinning_eligibility`, `tangential_block_codes` (the H12 bootstrap
+  unit), `depth_input_agreement` (`DepthAgreement`; the label-free depth
+  check).
+- Panel card (`report_panel`): `build_panel_card` (`PanelCard`),
+  `trust_banners` (`Banner`), `resolvability_curves`, `resolvability_bins`,
+  `bundle_marker_rows`, `v7_notes`.
+- Items: `report_items` (1, 2, 3, 5, 6, 8, 11, 12; `sink_rows_of`,
+  `reference_node_shares`), `report_expression` (4, 7; `broad_profiles`,
+  `canonical_marker_genes`, `cross_platform_basis`), `report_depth` (9;
+  `depth_validity`), `report_mouse` (10; `ap_fields`,
+  `subclass_region_table`, `window_composition`).
+- Model (`report_model`): `AcceptanceMetrics`, `MetricRecord`, `metric`,
+  `CriterionCoverage`, `ReportItem`, `ReportOptions`.
 
 ### `annotation.likelihood` — [likelihood.py](../src/merxen/annotation/likelihood.py)
 

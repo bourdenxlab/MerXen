@@ -3229,6 +3229,202 @@ def test_whb_primary_self_maps_the_held_out_cells_onto_the_held_out_bundle(
     assert sea_summary["test_set_bundle"]["build_hash"] == ho_dir.name
 
 
+COP = "CS202210140_468"  # Committed oligodendrocyte precursor
+OPC_SUPC = "CS202210140_467"  # Oligodendrocyte precursor
+
+
+def _held_out_cells(rows: Sequence[tuple[str, str, str]]) -> res.HeldOutCells:
+    """Held-out test cells from (cell id, truth supercluster, test source)."""
+    from scipy import sparse
+
+    ids = [row[0] for row in rows]
+    truth = [row[1] for row in rows]
+    obs = pd.DataFrame(
+        {
+            f"{res.TRUTH_PREFIX}{SUPC}": truth,
+            res.TRUTH_LEAF_COLUMN: truth,
+            res.SPILL_GROUP_COLUMN: ["g"] * len(rows),
+            reference.TEST_SOURCE_COLUMN: [row[2] for row in rows],
+        },
+        index=pd.Index(ids, name="cell_id"),
+    )
+    counts = sparse.csr_matrix(
+        np.arange(1, 2 * len(rows) + 1, dtype=float).reshape(-1, 2)
+    )
+    return res.HeldOutCells(counts=counts, genes=["g1", "g2"], obs=obs)
+
+
+def test_self_map_test_cells_leave_out_only_other_region_cop_cells() -> None:
+    donor, other = reference.TEST_SOURCE_DONOR, reference.TEST_SOURCE_OTHER_REGION
+    test = _held_out_cells(
+        [
+            ("donor_cop", COP, donor),
+            ("other_cop_1", COP, other),
+            ("donor_opc", OPC_SUPC, donor),
+            ("other_opc", OPC_SUPC, other),
+            ("other_cop_2", COP, other),
+            ("other_astro", ASTRO, other),
+        ]
+    )
+    kept, record = reference.self_map_test_cells(test, reference.HO_REFERENCE_ID)
+    # M8 D1: the other-region COP cells go; the donor's own COP cells and the
+    # other-region cells of every other supercluster stay.
+    assert list(kept.obs.index) == [
+        "donor_cop",
+        "donor_opc",
+        "other_opc",
+        "other_astro",
+    ]
+    np.testing.assert_array_equal(
+        kept.counts.toarray(), test.counts.toarray()[[0, 2, 3, 5]]
+    )
+    np.testing.assert_array_equal(kept.native_counts, test.native_counts[[0, 2, 3, 5]])
+    assert record is not None
+    assert record["revision"] == reference.HO_SELF_MAP_TEST_SET_REVISION == 1
+    assert record["rule"] == reference.HO_SELF_MAP_EXCLUSION_RULE
+    assert record["test_source"] == other
+    assert record["excluded_superclusters"] == ["Committed oligodendrocyte precursor"]
+    assert record["excluded_labels"] == [COP]
+    assert record["n_test_cells_in_bundle"] == 6
+    assert record["n_excluded"] == 2
+    assert record["n_test_cells"] == 4
+    assert record["excluded_per_supercluster"] == {COP: 2}
+    assert record["kept_per_source_of_excluded_superclusters"] == {donor: 1}
+    # The input is untouched (the held-out bundle's cells stay as built).
+    assert len(test.obs) == 6
+
+
+def test_self_map_test_cells_keep_other_test_sets_and_donor_only_sets() -> None:
+    donor, other = reference.TEST_SOURCE_DONOR, reference.TEST_SOURCE_OTHER_REGION
+    test = _held_out_cells([("a", COP, other), ("b", ASTRO, donor)])
+    # The mouse test set has no exclusion (and no record).
+    same, record = reference.self_map_test_cells(
+        test, reference.WMB_TESTSET_REFERENCE_ID
+    )
+    assert same is test and record is None
+    # A held-out set without other-region COP cells is returned as it is.
+    donor_only = _held_out_cells([("a", COP, donor), ("b", ASTRO, other)])
+    same, record = reference.self_map_test_cells(donor_only, reference.HO_REFERENCE_ID)
+    assert same is donor_only
+    assert record is not None and record["n_excluded"] == 0
+    # A held-out set built before the top-up has no test_source: all donor.
+    legacy = _held_out_cells([("a", COP, donor)])
+    legacy.obs.drop(columns=[reference.TEST_SOURCE_COLUMN], inplace=True)
+    same, record = reference.self_map_test_cells(legacy, reference.HO_REFERENCE_ID)
+    assert same is legacy and record is not None and record["n_excluded"] == 0
+
+
+def test_whb_self_map_leaves_the_excluded_other_region_cells_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    # The fixture's other-region cells are Astrocytes and Microglia (no COP),
+    # so exclude Astrocyte to see the rule act end to end.
+    monkeypatch.setattr(reference, "HO_SELF_MAP_EXCLUDED_SUPERCLUSTERS", ("Astrocyte",))
+    sources, ho, _ = whb_resolvability_setup(tmp_path, monkeypatch)
+    markers = {node: GENES[index] for node, index in MARKER_OF_SUPC.items()}
+    calls = install_self_map(monkeypatch, markers)
+    spec = prepare_reference_spec(
+        whb_spec(
+            region_precompute=sources["region_dir"],
+            seaad_precomputed_stats=sources["seaad"],
+            whb_h5ad_dir=ho["h5ad_dir"],
+            whb_metadata_dir=ho["metadata"],
+            whb_region_cell_metadata=ho["region_dir"]
+            / reference.REGION_CELL_METADATA_FILE,
+        )
+    )
+    config = AnnotationConfig(species="human")
+    store = ReferenceStore(tmp_path / "store", scratch_root=tmp_path / "scratch")
+    (tmp_path / "scratch").mkdir()
+    bundle = store.get_or_build(
+        spec, make_panel(GENES), builder=builder_for(spec, config), config=config
+    )
+    bundle_dir = Path(bundle.path)
+    (ho_dir,) = (tmp_path / "store" / reference.HO_REFERENCE_ID).glob("[0-9a-f]*")
+    test = res.load_test_cells(ho_dir)
+    source = test.obs[reference.TEST_SOURCE_COLUMN]
+    truth = test.obs[res.TRUTH_LEAF_COLUMN]
+    dropped = set(
+        test.obs.index[
+            (source == reference.TEST_SOURCE_OTHER_REGION) & (truth == ASTRO)
+        ]
+    )
+    assert len(dropped) == 4  # the held-out bundle keeps them
+    cells = pd.read_parquet(bundle_dir / res.RESOLVABILITY_CELLS_FILE)
+    simulated = set(cells["cell_id"].astype(str))
+    assert not simulated & dropped
+    # The donor's Astrocytes and the other-region Microglia are simulated.
+    assert (
+        set(test.obs.index[(truth == ASTRO) & (source == "holdout_donor")]) <= simulated
+    )
+    assert (
+        set(test.obs.index[(truth == MICRO) & (source != "holdout_donor")]) <= simulated
+    )
+    # Every mapped query holds only kept cells.
+    assert all(call["n_cells"] > 0 for call in calls)
+    record = {
+        **reference.ho_self_map_exclusion_params(),
+        "excluded_labels": [ASTRO],
+    }
+    summary = json.loads((bundle_dir / res.RESOLVABILITY_SUMMARY_FILE).read_text())
+    recorded = summary["test_set_exclusion"]
+    assert {key: recorded[key] for key in record} == record
+    assert recorded["n_excluded"] == 4
+    assert recorded["n_test_cells"] == len(test.obs) - 4
+    assert recorded["excluded_per_supercluster"] == {ASTRO: 4}
+    manifest = json.loads((bundle_dir / BUNDLE_MANIFEST_NAME).read_text())
+    output = manifest["builder_output"]["resolvability"]
+    assert output["test_set_exclusion"]["n_excluded"] == 4
+    payload = manifest["build_hash_payload"]["builder_params"]["resolvability"]
+    assert payload["test_set"]["self_map_exclusion"] == (
+        reference.ho_self_map_exclusion_params()
+    )
+
+
+def test_self_map_test_set_revision_changes_only_the_self_map_hashes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = AnnotationConfig(species="human")
+    spec = whb_spec(region_precompute=tmp_path)
+    seaad = AnnotationReferenceSpec(
+        reference_id="seaad_mr_panel", species="human", role="secondary"
+    )
+    ho_spec = AnnotationReferenceSpec(
+        reference_id=reference.HO_REFERENCE_ID,
+        species="human",
+        role="resolvability",
+        hierarchy=[SUPC, CLUS],
+    )
+    wmb = AnnotationReferenceSpec(
+        reference_id="wmb_panel", species="mouse", role="primary"
+    )
+    mouse = AnnotationConfig(species="mouse")
+
+    def params() -> tuple[Any, ...]:
+        return (
+            builder_for(spec, config).params,
+            builder_for(seaad, config).params,
+            builder_for(ho_spec, config).params,
+            builder_for(wmb, mouse).params,
+        )
+
+    before = params()
+    hashed = before[0]["resolvability"]["test_set"]["self_map_exclusion"]
+    assert hashed["revision"] == reference.HO_SELF_MAP_TEST_SET_REVISION
+    assert hashed["excluded_superclusters"] == ["Committed oligodendrocyte precursor"]
+    monkeypatch.setattr(reference, "HO_SELF_MAP_TEST_SET_REVISION", 0)
+    after = params()
+    # The WHB and SEA-AD self-maps get new hashes; the held-out bundle (its
+    # test cells are unchanged) and the mouse bundles keep theirs.
+    assert after[0]["resolvability"] != before[0]["resolvability"]
+    assert after[1]["resolvability"] != before[1]["resolvability"]
+    assert after[2] == before[2]
+    assert after[3] == before[3]
+    assert "self_map_exclusion" not in before[3]["resolvability"]["test_set"]
+    # The resolvability algorithm version is not bumped (7 is M3c's).
+    assert before[0]["resolvability"]["resolvability_version"] == 6
+
+
 def test_self_map_settings_that_change_its_output_change_the_build_hash(
     tmp_path: Path,
 ) -> None:
@@ -3571,9 +3767,11 @@ def test_tiny_real_wmb_bundle_self_maps_through_real_mapmycells(
             },
         )
     )
+    # The version-6 path (R1 + clean) through real MapMyCells; a tiny
+    # unlisted family would otherwise get version 7's ensemble (M3c).
     config = AnnotationConfig(
         species="mouse",
-        resolvability={"min_cells_per_bin": 5, "min_confident_n": 5},
+        resolvability={"min_cells_per_bin": 5, "min_confident_n": 5, "version": 6},
     )
     panel = make_panel(genes[:30], species="mouse")
     store = ReferenceStore(tmp_path / "store", scratch_root=tmp_path / "scratch")

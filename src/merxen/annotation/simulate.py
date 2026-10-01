@@ -1214,7 +1214,12 @@ def compare_prefilter(
     unfiltered_engine = dataclasses.replace(
         engine, lookup=lookup_path, lookup_sha256=ref.lookup_sha256(validation.lookup)
     )
-    test = res.load_test_cells(test_set_dir)
+    # The same test cells the bundle's self-map simulated (M8 D1: the human
+    # held-out set without its other-region COP cells).
+    test, _ = ref.self_map_test_cells(
+        res.load_test_cells(test_set_dir),
+        str((resolvability.get("test_set_bundle") or {}).get("reference_id") or ""),
+    )
     runs: list[dict[str, Any]] = []
     grid = spec.resolved_depth_grid(panel.n_genes)
     recipes = res.simulation_recipes(config.resolvability, seed=ref.TEST_SET_SEED)[:1]

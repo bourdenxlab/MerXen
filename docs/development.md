@@ -279,7 +279,10 @@ only the acceptance-gate PRs merge it into `main`. Data-integrity fixes go to
 `workflows/main.nf`, `workflows/nextflow.config`, `workflows/conf/dwight.config`,
 `src/merxen/config.py` and `src/merxen/io/samplesheet.py` are also edited by
 `feature/gaston`, so annotation changes touch them only at the hook points of
-plan §2.4 (H1–H9):
+plan §2.4 (H1–H9), plus two in `main.nf` added by later milestones: H10
+(`--annotation_prepare_only` builds the reference bundles and stops; M2) and
+H11 (the `ANNOTATION_REPORTING` block at the end of the main workflow, map_first
+runs only, after MENDER; M7):
 
 - each hook carries one marker, `// rca-hook:H<n>` in Nextflow and
   `# rca-hook:H<n>` in Python, exactly once per file;

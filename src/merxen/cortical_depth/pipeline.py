@@ -19,6 +19,7 @@ from shapely.ops import unary_union
 from skimage import io as skio
 from spatialdata.models import TableModel
 
+from merxen.clustering.map_first import downstream_annotation_summary
 from merxen.config import CorticalDepthConfig, CorticalDepthTableConfig
 from merxen.cortical_depth.assign_cells import (
     CORTICAL_DEPTH_COLUMNS,
@@ -33,6 +34,11 @@ from merxen.cortical_depth.boundaries import (
     load_boundary_annotations,
 )
 from merxen.cortical_depth.equivolumetric import compute_equal_area_depth
+from merxen.cortical_depth.frames import (
+    DEPTH_PROVENANCE_UNS_KEY,
+    frame_consistency_metrics,
+    resolve_cell_coordinate_frame,
+)
 from merxen.cortical_depth.laplace import solve_laplace_depth
 from merxen.cortical_depth.plotting import (
     depth_contours_to_geojson,
@@ -276,17 +282,41 @@ def _annotate_table(
             f"[{config.dataset_name}] table_key={table_key!r} not found. "
             f"Available tables: {list(sdata_obj.tables.keys())}"
         )
-    shape_key = _resolve_shape_key(
+    frame = resolve_cell_coordinate_frame(
         sdata_obj,
         table=sdata_obj.tables[table_key],
-        requested=table_config.shape_key,
+        table_key=table_key,
+        requested_shape_key=table_config.shape_key,
         platform=config.platform,
+        boundary_frame=config.boundary_frame,
+        dataset_name=config.dataset_name,
     )
+    shape_key = frame.shape_key
     coords = extract_cell_coordinates(
         sdata_obj.tables[table_key],
         sdata_obj=sdata_obj,
         shape_key=shape_key,
+        use_table_spatial=frame.use_table_spatial,
     )
+    log_status(
+        f"[{config.dataset_name}] {table_config.segmentation!r} cells from "
+        f"{coords.source} (boundary_frame={frame.boundary_frame}, "
+        f"{frame.resolution})"
+    )
+    frame_check = frame_consistency_metrics(
+        coords.coordinates,
+        edge_line=annotations.edge,
+        grids=[result.grid for result in piece_results],
+        coordinate_unit_um=config.coordinate_unit_um,
+    )
+    if frame_check["frame_mismatch_suspected"]:
+        log_status(
+            f"[{config.dataset_name}] WARNING {table_config.segmentation!r}: the "
+            "tissue edge lies a median "
+            f"{frame_check['edge_to_nearest_cell_median_um']:.0f} um from the "
+            f"nearest cell ({coords.source}); the boundaries may not be in "
+            f"boundary_frame={frame.boundary_frame!r}."
+        )
     assignments = _assign_piecewise_cortical_depth_to_cells(
         coords,
         piece_results,
@@ -380,11 +410,12 @@ def _annotate_table(
 
     if config.write_spatialdata_table:
         updated = apply_depth_columns(sdata_obj.tables[table_key], assignments)
+        updated.uns[DEPTH_PROVENANCE_UNS_KEY] = frame.table_provenance(coords.source)
         parsed = _parse_table_for_spatialdata(
             updated,
             source_table=sdata_obj.tables[table_key],
             table_key=table_key,
-            region=shape_key,
+            region=frame.region_key,
         )
         write_or_replace_element(
             sdata_obj,
@@ -400,9 +431,15 @@ def _annotate_table(
             "table_key": table_key,
             "shape_key": shape_key,
             "coordinate_source": coords.source,
+            **frame.provenance(),
+            **frame_check,
             "cells_path": str(cells_path),
         }
     )
+    annotation = cluster_annotation_summary(sdata_obj, table_config)
+    if annotation is not None:
+        # map_first tables only (plan §4.9): legacy summaries are unchanged.
+        summary["annotation"] = annotation
     return (
         {f"{table_config.segmentation}_cells": cells_path, **plot_paths},
         summary,
@@ -413,9 +450,34 @@ def _clustering_table_key(table_config: CorticalDepthTableConfig) -> str:
     """Return the clustering_squidpy table key for a segmentation branch.
 
     Delegates to ``merxen.table_keys.clustered_table_key``, as the
-    clustering stage does when it writes the table.
+    clustering stage does when it writes the table; a map_first run reads
+    its own suffixed table (``clustered_table_key_suffix``, plan §4.8).
     """
-    return clustered_table_key(table_config.table_key, table_config.segmentation)
+    return clustered_table_key(
+        table_config.table_key,
+        table_config.segmentation,
+        table_config.clustered_table_key_suffix,
+    )
+
+
+def cluster_annotation_summary(
+    sdata_obj: Any, table_config: CorticalDepthTableConfig
+) -> dict[str, Any] | None:
+    """Return the annotation gate and panel trust of the clustering table.
+
+    Args:
+        sdata_obj: The SpatialData object (anything with ``tables``).
+        table_config: The segmentation's table settings.
+
+    Returns:
+        ``merxen.clustering.map_first.downstream_annotation_summary`` of the clustered
+        table's annotation provenance (map_first), or ``None`` when the table
+        is absent or holds no provenance (legacy).
+    """
+    table_key = _clustering_table_key(table_config)
+    if table_key not in sdata_obj.tables:
+        return None
+    return downstream_annotation_summary(sdata_obj.tables[table_key].uns)
 
 
 def _load_cluster_annotations(
@@ -801,33 +863,6 @@ def _parse_table_for_spatialdata(
     )
 
 
-def _resolve_shape_key(
-    sdata_obj: Any,
-    *,
-    table: ad.AnnData,
-    requested: str | None,
-    platform: str,
-) -> str | None:
-    if len(sdata_obj.shapes) == 0:
-        return None
-    if requested is not None:
-        aligned = f"{requested}_aligned_nonrigid"
-        if platform.upper() == "MERSCOPE" and aligned in sdata_obj.shapes:
-            return aligned
-        if requested not in sdata_obj.shapes:
-            raise KeyError(
-                f"Requested shape_key={requested!r} not found. "
-                f"Available shapes: {list(sdata_obj.shapes.keys())}"
-            )
-        return requested
-    region = _region_from_attrs(dict(table.uns.get("spatialdata_attrs", {})))
-    if region is not None and region in sdata_obj.shapes:
-        return region
-    if region is not None and f"{region}_aligned_nonrigid" in sdata_obj.shapes:
-        return f"{region}_aligned_nonrigid"
-    return str(list(sdata_obj.shapes.keys())[0])
-
-
 def _region_from_attrs(attrs: dict[str, Any]) -> str | None:
     region = attrs.get("region")
     if isinstance(region, str):
@@ -848,9 +883,15 @@ def _build_qc_summary(
     finite = thickness[np.isfinite(thickness) & (thickness > 0)]
     failed = [line for line in streamlines if line.qc_flag != "ok"]
     warnings = _depth_warnings(streamlines, finite)
+    warnings.extend(
+        f"frame_mismatch_suspected:{segmentation}"
+        for segmentation, table_summary in table_summaries.items()
+        if table_summary.get("frame_mismatch_suspected")
+    )
     return {
         "dataset_name": config.dataset_name,
         "platform": config.platform,
+        "boundary_frame": config.boundary_frame,
         "laplace_residual": None
         if solution_residual is None
         else float(solution_residual),

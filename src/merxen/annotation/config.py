@@ -313,6 +313,10 @@ class AnnotationThresholds(_AnnotationModel):
         seaad_subclass_from60: SEA-AD subclass threshold from 60 counts.
         wmb_class: WMB class threshold.
         wmb_subclass: WMB subclass threshold.
+        wmb_class_min_corr: Mouse class-level ``avg_correlation`` floor
+            (§7.3; the M6 shadow study's pre-registered selection,
+            pre-registration §16): applied to real-data-validated mouse panel
+            families only; ``None`` records ``ct_class_corr`` without a floor.
         target_lineage: Precision target at lineage.
         target_broad: Precision target at broad.
         target_nt: Precision target at NT.
@@ -346,6 +350,7 @@ class AnnotationThresholds(_AnnotationModel):
     seaad_subclass_from60: float = 0.45
     wmb_class: float = 0.90
     wmb_subclass: float = 0.80
+    wmb_class_min_corr: float | None = Field(default=None, ge=-1.0, le=1.0)
     target_lineage: float = 0.90
     target_broad: float = 0.90
     target_nt: float = 0.90
@@ -803,6 +808,18 @@ class MouseGateConfig(_AnnotationModel):
             AP-matched MERFISH window (percentage points).
         g4_immune_band_points: G4 band for Immune (percentage points).
         g5_spillover_warn: G5 warns above this spill-over flag rate.
+        g2_min_group_markers: G2 leaves out class groups with fewer derived
+            markers.
+        g2_min_marker_units: Units the top group of a marker
+            pseudo-label needs (``data/P1212`` rule).
+        g2_min_marker_share: Its share of the summed units.
+        g2_min_pseudo_confident: G2 is not evaluated with fewer
+            pseudo-labelled table cells.
+        g3_t2_max_present_share: A subclass is T2 (G3) below this share of
+            its MERFISH cells in the present divisions (E7).
+        g4_window_sections: MERFISH-638850 sections of G4's window (e.g.
+            ``C57BL6J-638850.31``); empty: G4 is not evaluated until M6b's
+            AP estimate chooses the window.
     """
 
     g1_radius_um: float = Field(default=4.0, gt=0.0)
@@ -815,12 +832,20 @@ class MouseGateConfig(_AnnotationModel):
     g4_astro_epen_band_points: float = Field(default=5.0, gt=0.0)
     g4_immune_band_points: float = Field(default=1.0, gt=0.0)
     g5_spillover_warn: float = 0.15
+    g2_min_group_markers: int = Field(default=3, ge=1)
+    g2_min_marker_units: float = Field(default=1.5, gt=0.0)
+    g2_min_marker_share: float = 0.6
+    g2_min_pseudo_confident: int = Field(default=200, ge=1)
+    g3_t2_max_present_share: float = 0.25
+    g4_window_sections: list[str] = Field(default_factory=list)
 
     @field_validator(
         "g2_marker_consistency_fail",
         "g2_marker_consistency_warn",
         "g3_implausible_warn",
         "g5_spillover_warn",
+        "g2_min_marker_share",
+        "g3_t2_max_present_share",
     )
     @classmethod
     def _check_share(cls: type[MouseGateConfig], value: float, info: Any) -> float:
@@ -914,6 +939,9 @@ class AnnotationFlagsConfig(_AnnotationModel):
         contamination_min_neg_counts: Negative counts a flagged cell needs.
         contamination_null_depth_quantile: Cells above this depth quantile of
             their class fit the null.
+        contamination_min_null_cells: Deep confident cells a (class,
+            platform) stratum needs to fit the null; with fewer the stratum
+            has no null and its flag is null (M3 prototype, 30).
         negative_gene_max_fraction: A gene is negative for a class when
             detected in fewer of its reference cells.
         flag_rate_uninformative_above: Contamination strata above this
@@ -923,6 +951,8 @@ class AnnotationFlagsConfig(_AnnotationModel):
         diffuse_rate_uninformative_above: Diffuse strata above this rate are
             uninformative.
         ood_robust_z: Robust z below which a cell is out of distribution.
+        ood_min_cells: Cells a class x platform x depth-bin stratum needs for
+            a robust z (fewer: ``ood_z`` null).
         microglial_spillover_enabled: ``None`` selects the species default
             (mouse on, human off; OD-C5).
         microglia_stat_min: Spill-over statistic threshold (E3 TAU).
@@ -940,12 +970,14 @@ class AnnotationFlagsConfig(_AnnotationModel):
     contamination_alpha: float = 0.01
     contamination_min_neg_counts: int = Field(default=3, ge=0)
     contamination_null_depth_quantile: float = 0.75
+    contamination_min_null_cells: int = Field(default=30, ge=1)
     negative_gene_max_fraction: float = 0.01
     flag_rate_uninformative_above: float = 0.15
     diffuse_quantile: float = 0.95
     diffuse_n_simulations: int = Field(default=200, ge=1)
     diffuse_rate_uninformative_above: float = 0.30
     ood_robust_z: float = Field(default=-3.0, lt=0.0)
+    ood_min_cells: int = Field(default=30, ge=2)
     microglial_spillover_enabled: bool | None = None
     microglia_stat_min: float = 10.0
     microglia_weight_min: float = 0.05
@@ -993,6 +1025,10 @@ class MouseRegionConfig(_AnnotationModel):
         subclass_share_default: Subclass share threshold otherwise.
         min_merfish_cells_subclass: Subclasses with fewer MERFISH cells follow
             their class.
+        min_merfish_cells_class: A class needs this many MERFISH grey-matter
+            cells to count as absent from the present regions (E7
+            ``05c_hybrid_droplist.py``; ``15 HY Gnrh1 Glut`` has 55, so it
+            never takes the strict rule).
         never_drop_classes: WMB classes pruning never drops.
         coupled_regions: Region coupling (e.g. ``{"OB": ["OLF"]}``); off until
             M6b.
@@ -1014,6 +1050,7 @@ class MouseRegionConfig(_AnnotationModel):
     subclass_share_in_low_class: float = 0.30
     subclass_share_default: float = 0.10
     min_merfish_cells_subclass: int = Field(default=20, ge=1)
+    min_merfish_cells_class: int = Field(default=100, ge=1)
     never_drop_classes: list[str] = Field(
         default_factory=lambda: [
             "25 Pineal Glut",

@@ -1,5 +1,5 @@
 /*
- * Map-first clustering of one pair x segmentation (plan §3.1, §3.3).
+ * Map-first clustering of one pair x segmentation (plan §3.1, §3.3-§3.5).
  *
  * CLUSTERING_ANNOTATE_MAP (M3) takes the CLUSTERING_SQUIDPY_PREPARE outputs
  * through ANNOTATION_PREPARED_REFERENCES (subworkflows/annotation_references.nf,
@@ -12,22 +12,33 @@
  * (MAP records the refusal), and a pair x segmentation whose PREP failed is
  * dropped, as any failed task drops its branch under errorStrategy "ignore".
  *
- * CLUSTERING_MAP_FIRST will be MAP -> RESOLVE (M4) -> COMPUTE_CPU (M5),
- * emitting the input shape of CLUSTERING_SQUIDPY_FINALIZE. Its only caller is
- * hook H5 in main.nf, which M5 adds together with COMPUTE_CPU; the preflight
- * refuses map_first runs until then (AnnotationPreflight.MAP_FIRST_WIRED), so
- * nothing here runs in a legacy or map_first pipeline run. Wiring
- * CLUSTERING_MAP_FIRST earlier fails at once instead of silently emitting
- * nothing.
+ * CLUSTERING_ANNOTATE (M4) runs CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE on each
+ * pair x segmentation once its own MAP has finished (plan §3.4). RESOLVE is
+ * a separate task from MAP: a threshold, floor, trust, flag or degraded-mode
+ * change re-runs RESOLVE alone (minutes) under -resume, and MAP, whose
+ * inputs and published-output reuse key hold none of them, stays cached.
+ *
+ * CLUSTERING_MAP_FIRST (M5) = CLUSTERING_ANNOTATE -> CLUSTERING_SQUIDPY_COMPUTE_CPU
+ * and emits the input shape of CLUSTERING_SQUIDPY_FINALIZE, so main.nf's
+ * hook H5 feeds the same FINALIZE, the same MENDER barrier and the same
+ * downstream stages in both clustering modes. COMPUTE_CPU hashes the
+ * content of its staged inputs (cache "deep"): it re-runs when a label
+ * table, the prepared H5ADs, the clustering config, the run's table-key
+ * suffix or MENDER policy, or the hierarchy code changes, and stays cached
+ * when RESOLVE re-runs with byte-identical outputs. Its only caller is hook
+ * H5, in map_first runs. Its labels and alignment emits feed
+ * ANNOTATION_REPORTING (subworkflows/annotation_report.nf, hook H11, M7).
  */
 
 include { ANNOTATION_PREPARED_REFERENCES } from "./annotation_references"
-include { CLUSTERING_SQUIDPY_ANNOTATE_MAP } from "../modules/annotation"
+include { CLUSTERING_SQUIDPY_ANNOTATE_MAP; CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE } from "../modules/annotation"
+include { CLUSTERING_SQUIDPY_COMPUTE_CPU } from "../modules/clustering_squidpy"
 
 workflow CLUSTERING_ANNOTATE_MAP {
     take:
     // tuple(pair_id, segmentation, samples_json, clustering_squidpy_config.json,
-    // clustering_prepare_out): the output of CLUSTERING_SQUIDPY_PREPARE.
+    // clustering_prepare_out, alignment_files): the output of
+    // CLUSTERING_SQUIDPY_PREPARE and the pair's ALIGN files ([] without).
     prepared_ch
 
     main:
@@ -82,22 +93,144 @@ workflow CLUSTERING_ANNOTATE_MAP {
     maps = mapped_ch
 }
 
+workflow CLUSTERING_ANNOTATE {
+    take:
+    // tuple(pair_id, segmentation, samples_json, clustering_squidpy_config.json,
+    // clustering_prepare_out, alignment_files): see CLUSTERING_ANNOTATE_MAP.
+    prepared_ch
+
+    main:
+    mapped = CLUSTERING_ANNOTATE_MAP(prepared_ch)
+
+    // A maps tuple exists only once its branch's MAP has finished, so each
+    // RESOLVE waits for its own MAP and no other. resolveSpec carries the
+    // RESOLVE config and the fingerprint of this checkout's RESOLVE rules
+    // (task inputs, so -resume sees them). The pair's ALIGN files (shared
+    // tissue mask and registration summary) come from the take channel,
+    // i.e. from ALIGN's output channel: RESOLVE never looks one up among
+    // published files.
+    alignment_by_branch_ch = prepared_ch.map { pairId, segmentation, _samplesJson, _clusteringConfig, _preparedDir, alignmentFiles ->
+        tuple(AnnotationReferences.branchKey(pairId, segmentation), alignmentFiles)
+    }
+    resolve_inputs_ch = mapped.maps
+        .map { pairId, segmentation, samplesJson, clusteringConfig, preparedDir, panelDir, bundleRefs, mapDir ->
+            tuple(
+                AnnotationReferences.branchKey(pairId, segmentation),
+                pairId,
+                segmentation,
+                samplesJson,
+                clusteringConfig,
+                preparedDir,
+                panelDir,
+                bundleRefs,
+                mapDir,
+            )
+        }
+        .join(alignment_by_branch_ch)
+        .map { _branchKey, pairId, segmentation, samplesJson, clusteringConfig, preparedDir, panelDir, bundleRefs, mapDir, alignmentFiles ->
+            tuple(
+                pairId,
+                segmentation,
+                AnnotationReferences.resolveSpec(params, panelDir, "${projectDir}/../src"),
+                samplesJson,
+                clusteringConfig,
+                preparedDir,
+                panelDir,
+                bundleRefs,
+                mapDir,
+                alignmentFiles,
+            )
+        }
+    CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE(resolve_inputs_ch)
+    // The deterministic annotation_resolve_out only; the run record stays
+    // out of every downstream input.
+    resolve_out_ch = CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE.out.resolved
+
+    labels_ch = mapped.maps
+        .map { pairId, segmentation, samplesJson, clusteringConfig, preparedDir, panelDir, bundleRefs, mapDir ->
+            tuple(
+                AnnotationReferences.branchKey(pairId, segmentation),
+                pairId,
+                segmentation,
+                samplesJson,
+                clusteringConfig,
+                preparedDir,
+                panelDir,
+                bundleRefs,
+                mapDir,
+            )
+        }
+        .join(
+            resolve_out_ch.map { pairId, segmentation, resolveDir ->
+                tuple(AnnotationReferences.branchKey(pairId, segmentation), resolveDir)
+            }
+        )
+        .map { _branchKey, pairId, segmentation, samplesJson, clusteringConfig, preparedDir, panelDir, bundleRefs, mapDir, resolveDir ->
+            tuple(pairId, segmentation, samplesJson, clusteringConfig, preparedDir, panelDir, bundleRefs, mapDir, resolveDir)
+        }
+
+    emit:
+    // tuple(bundle key, bundle_ref.json): one per PREP task.
+    bundle_refs = mapped.bundle_refs
+    // CLUSTERING_ANNOTATE_MAP's maps (RESOLVE's inputs).
+    maps = mapped.maps
+    // tuple(pair_id, segmentation, samples_json, clustering_squidpy_config.json,
+    // clustering_prepare_out, annotation_panel_out, [bundle_ref.json, ...],
+    // annotation_map_out, annotation_resolve_out): the label tables with what
+    // COMPUTE_CPU (M5) and ANNOTATION_REPORT (M7) read.
+    labels = labels_ch
+}
+
 workflow CLUSTERING_MAP_FIRST {
     take:
     // tuple(pair_id, segmentation, samples_json, clustering_squidpy_config.json,
     // clustering_prepare_out): the output of CLUSTERING_SQUIDPY_PREPARE.
     prepared_ch
+    // tuple(pair_id, alignment_files): one per samplesheet pair, the ALIGN
+    // files AnnotationReferences.alignmentFiles returns ([] without an
+    // alignment).
+    alignment_ch
 
     main:
-    // M5 replaces this guard with CLUSTERING_ANNOTATE_MAP(prepared_ch) ->
-    // RESOLVE -> COMPUTE_CPU; without RESOLVE and COMPUTE_CPU there is no
-    // FINALIZE input to emit.
-    error(
-        "CLUSTERING_MAP_FIRST has no RESOLVE (M4) or COMPUTE_CPU (M5) yet " +
-        "(docs/plans/robust-celltype-annotation-plan.md §12); " +
-        "run with the default legacy clustering mode"
-    )
+    annotated = CLUSTERING_ANNOTATE(prepared_ch.combine(alignment_ch, by: 0))
+
+    // COMPUTE_CPU stages RESOLVE's deterministic label tables, manifests and
+    // pair summary as files and hashes them by content (cache "deep"), so it
+    // re-runs only when a label (or its own inputs, run settings or code)
+    // changes (M4 review).
+    compute_inputs_ch = annotated.labels.map { pairId, segmentation, samplesJson, clusteringConfig, preparedDir, _panelDir, _bundleRefs, _mapDir, resolveDir ->
+        tuple(
+            pairId,
+            segmentation,
+            AnnotationReferences.computeSpec(params, "${projectDir}/../src"),
+            samplesJson,
+            clusteringConfig,
+            preparedDir,
+            AnnotationReferences.computeLabelFiles(resolveDir),
+        )
+    }
+    computed_ch = CLUSTERING_SQUIDPY_COMPUTE_CPU(compute_inputs_ch)
+
+    // The end-of-run summary (hook H6): which branches got label tables and
+    // a hierarchy, their panel status, trust and cross-platform scope.
+    annotated.labels.subscribe { pairId, segmentation, _samplesJson, _clusteringConfig, _preparedDir, panelDir, _bundleRefs, _mapDir, resolveDir ->
+        AnnotationRunRecord.labelled(pairId, segmentation, panelDir, resolveDir)
+    }
+    computed_ch.subscribe { pairId, segmentation, _samplesJson, _computedDir ->
+        AnnotationRunRecord.computed(pairId, segmentation)
+    }
 
     emit:
-    prepared_ch.filter { _prepared -> false }
+    // tuple(pair_id, segmentation, samples_json, clustering_compute_out):
+    // CLUSTERING_SQUIDPY_FINALIZE's input, as CLUSTERING_SQUIDPY_COMPUTE's.
+    computed = computed_ch
+    // CLUSTERING_ANNOTATE's maps (RESOLVE's inputs) and labels
+    // (ANNOTATION_REPORT, M7).
+    maps = annotated.maps
+    labels = annotated.labels
+    // The take channel's tuple(pair_id, alignment_files): the shared tissue
+    // mask ANNOTATION_REPORTING (hook H11, M7) gives the report.
+    alignment = alignment_ch
+    // tuple(bundle key, bundle_ref.json): one per PREP task.
+    bundle_refs = annotated.bundle_refs
 }

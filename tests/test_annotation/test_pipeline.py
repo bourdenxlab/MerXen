@@ -511,6 +511,50 @@ def test_annotate_map_reuses_identical_published_runs(
             assert (tmp_path / "rerun" / run.parquet).is_file()
 
 
+def test_reuse_ignores_the_resolve_only_settings(
+    tmp_path: Path, fake_mmc: FakeMmc
+) -> None:
+    """A threshold, gate, flag or degraded-mode change re-runs RESOLVE only.
+
+    The MAP reuse key (query fingerprint, build_hash, engine parameters, ctm
+    version, tidy schema, lookup) holds none of RESOLVE's settings, so a
+    re-run MAP with them changed copies every published run (plan §3.1).
+    """
+    samples, runs, config = _setup(tmp_path, fake_mmc)
+    published = tmp_path / "published"
+    annotate_map(
+        samples, runs, config, output_dir=published, pair_id="PX", segmentation="s"
+    )
+    n_calls = len(fake_mmc.calls)
+    changed = config.model_copy(
+        update={
+            "allow_single_method": True,
+            "thresholds": config.thresholds.model_copy(
+                update={"whb_broad": 0.8, "whb_supercluster": 0.75}
+            ),
+            "gate": config.gate.model_copy(update={"min_frac_ge30": 0.5}),
+            "flags": config.flags.model_copy(update={"contamination_alpha": 0.05}),
+        }
+    )
+
+    manifest = annotate_map(
+        samples,
+        runs,
+        changed,
+        output_dir=tmp_path / "rerun",
+        pair_id="PX",
+        segmentation="s",
+        reuse_from=published,
+    )
+
+    assert len(fake_mmc.calls) == n_calls
+    assert all(
+        run.reused
+        for record in manifest.samples.values()
+        for run in record.runs.values()
+    )
+
+
 def test_reuse_needs_the_same_query_and_engine_parameters(
     tmp_path: Path, fake_mmc: FakeMmc
 ) -> None:
@@ -972,7 +1016,7 @@ def test_map_bundles_needs_every_required_bundle(
     assert [run.run_id for run in runs] == ["whb_frontal_supc_clus"]
 
 
-def test_mouse_maps_unpruned_with_the_drop_level(
+def test_mouse_maps_with_the_drop_level_and_no_pruning_when_none(
     tmp_path: Path, fake_mmc: FakeMmc
 ) -> None:
     levels = [
@@ -1058,20 +1102,39 @@ def test_mouse_maps_unpruned_with_the_drop_level(
         source="prepared",
     )
 
+    sample = MapSample("AG_MERSCOPE", "MERSCOPE", path, "prepared")
+    with pytest.raises(MapError, match="needs the wmb_region_share bundle"):
+        annotate_map(
+            [sample],
+            runs,
+            config,
+            output_dir=tmp_path / "x",
+            pair_id="AG",
+            segmentation="proseg_hybrid",
+        )
+    assert not fake_mmc.calls  # refused before anything is mapped
+
     manifest = annotate_map(
-        [MapSample("AG_MERSCOPE", "MERSCOPE", path, "prepared")],
+        [sample],
         runs,
         config,
         output_dir=tmp_path / "out",
         pair_id="AG",
         segmentation="proseg_hybrid",
+        section_regions={"AG_MERSCOPE": "none"},
     )
 
     command = fake_mmc.calls[-1]["command"]
     assert command[command.index("--drop_level") + 1] == "CCN20230722_SUPT"
-    assert manifest.mouse_region_step == MOUSE_REGION_STEP
+    assert "--nodes_to_drop" not in command
+    assert manifest.mouse_region_step == MOUSE_REGION_STEP.format(variant="v1")
     record = manifest.samples["AG_MERSCOPE"]
     assert set(record.runs) == {"wmb_panel"}
+    assert record.mouse_regions is not None
+    assert record.mouse_regions.status == "disabled"
+    assert record.mouse_regions.source == "none"
+    assert record.mouse_regions.remap is None
+    assert record.mouse_regions.region_share is None
     labels = pd.read_parquet(tmp_path / "out" / str(record.provisional_labels))
     labels = labels.set_index("cell_id")
     assert labels.loc["M0", "ct_class_name"] == "01 IT-ET Glut"
@@ -1188,6 +1251,178 @@ def test_locate_bundle_prefers_the_current_resolvability_version(
     )
     with pytest.raises(MapError, match="2 bundles"):
         locate_bundle(store, "whb_frontal_supc_clus", panel.panel_hash)
+
+
+def test_locate_bundle_prefers_the_current_human_self_map_test_set(
+    tmp_path: Path, fake_mmc: FakeMmc, caplog: pytest.LogCaptureFixture
+) -> None:
+    # M8 D1: the rebuilt human self-maps (other-region COP test cells left
+    # out) keep RESOLVABILITY_VERSION and sit next to the older bundles on
+    # the same panel; standalone runs take the current test-set revision.
+    from merxen.annotation.reference import (
+        HO_REFERENCE_ID,
+        HO_SELF_MAP_TEST_SET_REVISION,
+    )
+    from merxen.annotation.resolvability import RESOLVABILITY_VERSION
+
+    panel = _panel(GENE_IDS)
+    common: dict[str, Any] = {
+        "role": "primary",
+        "species": "human",
+        "panel_hash": panel.panel_hash,
+        "n_genes": panel.n_genes,
+        "levels": WHB_LEVELS,
+        "nodes": WHB_NODES,
+    }
+
+    def with_test_set(
+        path: Path, revision: int | None, test_reference: str = HO_REFERENCE_ID
+    ) -> Path:
+        manifest_path = path / "bundle.json"
+        manifest = json.loads(manifest_path.read_text())
+        record: dict[str, Any] = {
+            "resolvability_version": RESOLVABILITY_VERSION,
+            "test_set_bundle": {"reference_id": test_reference, "build_hash": "0"},
+        }
+        if revision is not None:
+            record["test_set_exclusion"] = {"revision": revision}
+        manifest["builder_output"]["resolvability"] = record
+        manifest_path.write_text(json.dumps(manifest))
+        return path
+
+    older = with_test_set(
+        fake_mmc.bundle("whb_frontal_supc_clus", build_hash="a" * 64, **common), None
+    )
+    store = ReferenceStore(fake_mmc.root)
+    # Only the pre-D1 bundle: kept, with a warning that names its revision 0.
+    with caplog.at_level(logging.WARNING, logger="merxen.annotation.pipeline"):
+        found = locate_bundle(store, "whb_frontal_supc_clus", panel.panel_hash)
+    assert found.path == older
+    warned = [r for r in caplog.records if "self-map test set" in r.getMessage()]
+    assert len(warned) == 1
+    assert "has revision 0" in warned[0].getMessage()
+    current = with_test_set(
+        fake_mmc.bundle("whb_frontal_supc_clus", build_hash="b" * 64, **common),
+        HO_SELF_MAP_TEST_SET_REVISION,
+    )
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="merxen.annotation.pipeline"):
+        found = locate_bundle(store, "whb_frontal_supc_clus", panel.panel_hash)
+        subset = store_subset_bundle_finder(store)(
+            "whb_frontal_supc_clus", panel.panel_hash
+        )
+    assert found.path == current
+    assert subset is not None and subset.path == current
+    assert not [r for r in caplog.records if "self-map test set" in r.getMessage()]
+    with_test_set(
+        fake_mmc.bundle("whb_frontal_supc_clus", build_hash="c" * 64, **common),
+        HO_SELF_MAP_TEST_SET_REVISION,
+    )
+    with pytest.raises(MapError, match="2 bundles"):
+        locate_bundle(store, "whb_frontal_supc_clus", panel.panel_hash)
+
+
+def test_self_map_test_set_revision_is_read_from_the_hashed_params(
+    tmp_path: Path, fake_mmc: FakeMmc, caplog: pytest.LogCaptureFixture
+) -> None:
+    """M8 review: a D1 bundle whose builder wrote no test_set_exclusion record.
+
+    Another self-map path (M3c's version-7 ensembles) hashes the revision
+    through the shared test-set params but writes none of M8's provenance:
+    the hashed params are authoritative.
+    """
+    from types import SimpleNamespace
+
+    from merxen.annotation.pipeline import _self_map_test_set_revision
+    from merxen.annotation.reference import (
+        HO_REFERENCE_ID,
+        HO_SELF_MAP_TEST_SET_REVISION,
+        ho_self_map_exclusion_params,
+    )
+    from merxen.annotation.resolvability import RESOLVABILITY_VERSION
+
+    panel = _panel(GENE_IDS)
+    common: dict[str, Any] = {
+        "role": "primary",
+        "species": "human",
+        "panel_hash": panel.panel_hash,
+        "n_genes": panel.n_genes,
+        "levels": WHB_LEVELS,
+        "nodes": WHB_NODES,
+    }
+
+    def bundle(build_hash: str, test_set: dict[str, Any] | None) -> Path:
+        path = fake_mmc.bundle("whb_frontal_supc_clus", build_hash=build_hash, **common)
+        manifest = json.loads((path / "bundle.json").read_text())
+        manifest["builder_output"]["resolvability"] = {
+            "resolvability_version": RESOLVABILITY_VERSION,
+            "test_set_bundle": {"reference_id": HO_REFERENCE_ID, "build_hash": "0"},
+        }
+        if test_set is not None:
+            manifest.setdefault("build_hash_payload", {}).setdefault(
+                "builder_params", {}
+            )["resolvability"] = {"enabled": True, "test_set": test_set}
+        (path / "bundle.json").write_text(json.dumps(manifest))
+        return path
+
+    current = bundle(
+        "a" * 64,
+        {
+            "reference_id": HO_REFERENCE_ID,
+            "self_map_exclusion": ho_self_map_exclusion_params(),
+        },
+    )
+    older = bundle("b" * 64, {"reference_id": HO_REFERENCE_ID})
+    unhashed = bundle("c" * 64, None)
+    mouse = bundle("d" * 64, {"reference_id": "wmb_selfmap_testset"})
+
+    def revision(path: Path) -> int | None:
+        return _self_map_test_set_revision(SimpleNamespace(path=path))
+
+    # No builder_output test_set_exclusion on any of them: the current
+    # revision comes from the hashed params alone.
+    assert revision(current) == HO_SELF_MAP_TEST_SET_REVISION
+    assert revision(older) == 0
+    assert revision(unhashed) == 0  # the builder_output record, pre-D1
+    assert revision(mouse) is None
+    store = ReferenceStore(fake_mmc.root)
+    with caplog.at_level(logging.WARNING, logger="merxen.annotation.pipeline"):
+        found = locate_bundle(store, "whb_frontal_supc_clus", panel.panel_hash)
+    assert found.path == current
+    assert not [r for r in caplog.records if "self-map test set" in r.getMessage()]
+
+
+def test_self_map_test_set_revision_applies_only_to_the_human_held_out_set(
+    tmp_path: Path, fake_mmc: FakeMmc, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A mouse self-map (its own test set) has no human test-set revision:
+    # two current mouse bundles stay ambiguous and nothing warns about it.
+    from merxen.annotation.resolvability import RESOLVABILITY_VERSION
+
+    panel = _panel(GENE_IDS)
+    common: dict[str, Any] = {
+        "role": "primary",
+        "species": "human",
+        "panel_hash": panel.panel_hash,
+        "n_genes": panel.n_genes,
+        "levels": WHB_LEVELS,
+        "nodes": WHB_NODES,
+    }
+    for build_hash in ("a" * 64, "b" * 64):
+        path = fake_mmc.bundle("whb_frontal_supc_clus", build_hash=build_hash, **common)
+        manifest = json.loads((path / "bundle.json").read_text())
+        manifest["builder_output"]["resolvability"] = {
+            "resolvability_version": RESOLVABILITY_VERSION,
+            "test_set_bundle": {"reference_id": "wmb_selfmap_testset"},
+        }
+        (path / "bundle.json").write_text(json.dumps(manifest))
+    store = ReferenceStore(fake_mmc.root)
+    with (
+        caplog.at_level(logging.WARNING, logger="merxen.annotation.pipeline"),
+        pytest.raises(MapError, match="2 bundles"),
+    ):
+        locate_bundle(store, "whb_frontal_supc_clus", panel.panel_hash)
+    assert not [r for r in caplog.records if "self-map test set" in r.getMessage()]
 
 
 def test_locate_bundle_warns_when_only_stale_self_map_tables_exist(
@@ -2612,7 +2847,11 @@ def test_mouse_provisional_statuses_pin_each_threshold_and_parent(
             drop_level="CCN20230722_SUPT",
         )
     )
-    config = AnnotationConfig(species="mouse").coupled_to_clustering(10)
+    # The thresholds only: no region pruning (the region step is tested in
+    # test_mouse_region_step_*).
+    config = AnnotationConfig(
+        species="mouse", mouse_section_regions="none"
+    ).coupled_to_clustering(10)
     runs = map_bundles(
         required, panel_dir, {("wmb_panel", panel.panel_hash): bundle}, config
     )

@@ -1,28 +1,45 @@
-"""CLUSTERING_ANNOTATE_MAP: MAP after the required-bundle join (plan §3.1, §3.3).
+"""CLUSTERING_MAP_FIRST: MAP -> RESOLVE -> COMPUTE_CPU (plan §3.1-§3.5).
 
 ``workflows/subworkflows/clustering_map_first.nf`` runs
 ``ANNOTATION_PREPARED_REFERENCES`` (ANNOTATE_PANEL, one ANNOTATE_REFERENCE_PREP
-per unique bundle, the per pair x segmentation ``groupKey`` collection) and
+per unique bundle, the per pair x segmentation ``groupKey`` collection),
 then ``CLUSTERING_SQUIDPY_ANNOTATE_MAP`` on each released pair x
-segmentation. When ``nextflow`` is installed, a harness runs it with
-``-stub-run`` (PREP and MAP write stub outputs; ANNOTATE_PANEL runs for real
-on synthetic prepared H5ADs, or, for the fixture branches, a fake
-``merxen annotation-panel`` writes hand-written ``required_bundles.json``
-files: same-panel set c, ``per_platform``, mouse, refused, a failing and a
-slow PREP, a large panel) and checks that:
+segmentation (``CLUSTERING_ANNOTATE_MAP``),
+``CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE`` after each MAP
+(``CLUSTERING_ANNOTATE``) and ``CLUSTERING_SQUIDPY_COMPUTE_CPU`` after each
+RESOLVE (``CLUSTERING_MAP_FIRST``, main.nf hook H5). When ``nextflow`` is
+installed, a harness runs ``CLUSTERING_MAP_FIRST`` with ``-stub-run`` (PREP,
+MAP, RESOLVE and COMPUTE_CPU write stub outputs; ANNOTATE_PANEL runs for real
+on synthetic prepared H5ADs, or, for the fixture branches, a fake ``merxen
+annotation-panel`` writes hand-written ``required_bundles.json`` files:
+same-panel set c, ``per_platform``, mouse, refused, a failing and a slow
+PREP, a large panel) and checks that:
 
 * MAP starts for a pair x segmentation only after every PREP it needs has
   completed, and never waits for another branch's bundles;
 * MAP receives exactly the bundle refs its ``required_bundles.json`` lists
   (none for a refused panel), and a failed PREP drops only its branches;
-* MAP's resources follow the plan (6 CPUs; 24 GB, 48 GB above 1,000 genes);
-* a ``-resume`` run re-runs PREP (never cached) but keeps MAP cached, because
-  MAP hashes its inputs' content (``cache "deep"``).
+* RESOLVE runs once per pair x segmentation, after its own MAP, on that
+  MAP's output, the same bundle refs and the pair's ALIGN files;
+* COMPUTE_CPU runs once per pair x segmentation, after its own RESOLVE, on
+  the RESOLVE output, in the main environment without a GPU lock, and emits
+  FINALIZE's input shape;
+* MAP's, RESOLVE's and COMPUTE_CPU's resources follow the plan (6 CPUs,
+  24 GB / 48 GB above 1,000 genes; 2 CPUs, 16 GB / 32 GB; 8 CPUs, 32 GB);
+* a ``-resume`` run re-runs PREP (never cached) but keeps MAP, RESOLVE and
+  COMPUTE_CPU cached, because they hash their inputs' content
+  (``cache "deep"``);
+* a ``-resume`` run after a RESOLVE-only change (``annotation_allow_single_method``)
+  re-runs every RESOLVE and no MAP or ANNOTATE_PANEL, and COMPUTE_CPU, whose
+  staged labels changed; a RESOLVE re-run with byte-identical outputs leaves
+  COMPUTE_CPU cached;
+* the end-of-run summary (hook H6) lists the branch whose PREP failed and the
+  refused panels.
 
-A second run executes the real MAP script (no ``-stub-run``) with a fake
-``merxen annotate`` that records its command line and environment (slow).
-``CLUSTERING_MAP_FIRST`` itself still refuses to run until M5, and
-``main.nf`` never calls any of it (legacy runs are unchanged).
+A second run executes the real MAP and RESOLVE scripts (no ``-stub-run``)
+with a fake ``merxen`` that records their command lines and environments;
+for the refused panel both run the real commands (slow). ``main.nf`` calls
+``CLUSTERING_MAP_FIRST`` only in map_first runs (hook H5).
 """
 
 from __future__ import annotations
@@ -45,6 +62,7 @@ import pandas as pd
 import pytest
 from scipy import sparse
 
+from merxen.annotation import pipeline as pipeline_module
 from merxen.annotation.config import AnnotationConfig
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -57,6 +75,7 @@ MAIN_NF = WORKFLOWS / "main.nf"
 NEXTFLOW = shutil.which("nextflow")
 needs_nextflow = pytest.mark.skipif(NEXTFLOW is None, reason="nextflow is unavailable")
 MAP = "CLUSTERING_SQUIDPY_ANNOTATE_MAP"
+RESOLVE = "CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE"
 PREP = "ANNOTATE_REFERENCE_PREP"
 PANEL = "ANNOTATE_PANEL"
 SLOW_PREP_SECONDS = 4
@@ -161,7 +180,28 @@ def _prepared_branch(
         "samples_json": json.dumps(samples),
         "config": str(config),
         "prepared_dir": str(prepared),
+        "alignment_files": [],
     }
+
+
+# The pair whose ALIGN files the harness passes (every other pair has none).
+ALIGNED_PAIR = "F1"
+ALIGN_FILES = ("shared_tissue_mask.npy", "registration_summary.json")
+
+
+def _write_alignment(root: Path, pair_ids: list[str]) -> list[str]:
+    """Write one ALIGN entry per pair: F1's align_out files, [] for the others."""
+    align_out = root / "align" / ALIGNED_PAIR / "align_out"
+    align_out.mkdir(parents=True)
+    files = [str(align_out / name) for name in ALIGN_FILES]
+    for path in files:
+        Path(path).write_text("{}")
+    entries = [
+        {"pair_id": pair_id, "files": files if pair_id == ALIGNED_PAIR else []}
+        for pair_id in sorted(set(pair_ids))
+    ]
+    (root / "alignment_inputs.json").write_text(json.dumps(entries))
+    return files
 
 
 def _write_fixture_panels(root: Path) -> Path:
@@ -212,9 +252,10 @@ def _write_fixture_panels(root: Path) -> Path:
 
 FAKE_MERXEN = """#!__PYTHON__
 # Test double. annotation-panel: copy the fixture panel of a fixture branch,
-# else run the real command. annotate (real MAP script only): record the
-# command line and environment; run the real command for a refused panel
-# (it only writes the refusal) and write a minimal manifest otherwise.
+# else run the real command. annotate / annotate-resolve (real MAP and
+# RESOLVE scripts only): record the command line and environment; run the
+# real command for a refused panel (MAP writes the refusal, RESOLVE the
+# statuses) and write a minimal output otherwise.
 # annotation-reference-prep (real PREP script only): write a bundle ref.
 import json
 import os
@@ -236,6 +277,9 @@ if command == "annotation-panel":
     fixture = FIXTURES / f"{value('--pair-id')}_{value('--segmentation')}"
     if fixture.is_dir():
         shutil.copytree(fixture, value("--output-dir"))
+        (Path(value("--output-dir")) / "fake_panel_argv.json").write_text(
+            json.dumps(args)
+        )
         sys.exit(0)
 elif command == "annotation-reference-prep":
     from merxen.annotation.store import BundleRef
@@ -255,7 +299,7 @@ elif command == "annotation-reference-prep":
         store_root=value("--store"),
     ).write(value("--output"))
     sys.exit(0)
-elif command == "annotate":
+elif command in ("annotate", "annotate-resolve"):
     record = {
         "argv": args,
         "env": {
@@ -276,14 +320,17 @@ elif command == "annotate":
             if arg == "--bundle-ref"
         ],
     }
-    Path("fake_annotate.json").write_text(json.dumps(record))
+    Path(f"fake_{command.replace('-', '_')}.json").write_text(json.dumps(record))
     required = json.loads(
         (Path(value("--panel-dir")) / "required_bundles.json").read_text()
     )
     if required["status"] != "refused":
         out = Path(value("--out"))
         out.mkdir(parents=True)
-        (out / "map_manifest.json").write_text(json.dumps({"fake": True}))
+        name = "map_manifest.json" if command == "annotate" else "fake_summary.json"
+        (out / name).write_text(json.dumps({"fake": True}))
+        if "--run-record" in args:
+            Path(value("--run-record")).write_text(json.dumps({"fake": True}))
         sys.exit(0)
 os.execv(REAL, [REAL, *args])
 """
@@ -348,11 +395,50 @@ class MapHarness {
             map_dir: mapDir.toString(),
         ]
     }
+
+    static Map labelRow(List item) {
+        return mapRow(item[0..7]) + [resolve_dir: item[8].toString()]
+    }
+
+    static Map computedRow(List item) {
+        def (pairId, segmentation, samplesJson, computedDir) = item[0..3]
+        return [
+            pair_id: pairId,
+            segmentation: segmentation,
+            samples_json: samplesJson,
+            computed_dir: computedDir.toString(),
+        ]
+    }
+
+    static void writeText(Object path, String text) {
+        new File(path.toString()).text = text
+    }
 }
 """
 
-HARNESS_MAIN = """
-include { __ENTRY__ } from '__SUBWORKFLOW__'
+# CLUSTERING_ANNOTATE takes PREPARE's tuple plus the pair's ALIGN files.
+HARNESS_ANNOTATE = """
+include { CLUSTERING_ANNOTATE } from '__SUBWORKFLOW__'
+
+workflow {
+    prepared_ch = channel
+        .fromList(MapHarness.readList(params.prepared_inputs))
+        .map { item ->
+            tuple(
+                item.pair_id, item.segmentation, item.samples_json,
+                file(item.config), file(item.prepared_dir),
+                item.alignment_files.collect { path -> file(path) },
+            )
+        }
+    mapped = CLUSTERING_ANNOTATE(prepared_ch)
+    __EMIT__
+}
+"""
+
+# CLUSTERING_MAP_FIRST, as main.nf's hook H5 calls it: PREPARE's tuple, one
+# ALIGN entry per pair, and the end-of-run summary of hook H6.
+HARNESS_MAP_FIRST = """
+include { CLUSTERING_MAP_FIRST } from '__SUBWORKFLOW__'
 
 workflow {
     prepared_ch = channel
@@ -363,27 +449,54 @@ workflow {
                 file(item.config), file(item.prepared_dir),
             )
         }
-    mapped = __ENTRY__(prepared_ch)
+    alignment_ch = channel
+        .fromList(MapHarness.readList(params.alignment_inputs))
+        .map { item -> tuple(item.pair_id, item.files.collect { path -> file(path) }) }
+    prepared_ch.subscribe { pairId, segmentation, _samplesJson, _config, _preparedDir ->
+        AnnotationRunRecord.expect(pairId, segmentation)
+    }
+    mapped = CLUSTERING_MAP_FIRST(prepared_ch, alignment_ch)
     __EMIT__
+    mapped.computed
+        .map { item -> MapHarness.computedRow(item) }
+        .collect()
+        .subscribe { rows -> MapHarness.write(params.computed_out, rows) }
+    def harnessParams = params
+    def harnessWorkflow = workflow
+    harnessWorkflow.onComplete {
+        MapHarness.writeText(
+            harnessParams.summary_out,
+            AnnotationSettings.completionSummary(
+                harnessParams,
+                AnnotationRunRecord.runInfo() + [success: harnessWorkflow.success],
+            ),
+        )
+    }
 }
 """
 
-EMIT_MAPS = """mapped.maps
+EMIT_LABELS = """mapped.maps
         .map { item -> MapHarness.mapRow(item) }
         .collect()
-        .subscribe { rows -> MapHarness.write(params.maps_out, rows) }"""
+        .subscribe { rows -> MapHarness.write(params.maps_out, rows) }
+    mapped.labels
+        .map { item -> MapHarness.labelRow(item) }
+        .collect()
+        .subscribe { rows -> MapHarness.write(params.labels_out, rows) }"""
 
 
-def _write_harness(root: Path, *, entry: str = "CLUSTERING_ANNOTATE_MAP") -> None:
+def _write_harness(root: Path, *, entry: str = "CLUSTERING_MAP_FIRST") -> None:
     (root / "lib").mkdir(parents=True)
     for source in LIB_DIR.glob("*.groovy"):
         shutil.copy(source, root / "lib" / source.name)
     (root / "lib" / "MapHarness.groovy").write_text(HARNESS_CLASS)
-    emit = EMIT_MAPS if entry == "CLUSTERING_ANNOTATE_MAP" else ""
+    template = (
+        HARNESS_MAP_FIRST if entry == "CLUSTERING_MAP_FIRST" else HARNESS_ANNOTATE
+    )
     (root / "main.nf").write_text(
-        HARNESS_MAIN.replace("__ENTRY__", entry)
-        .replace("__SUBWORKFLOW__", str(SUBWORKFLOW))
-        .replace("__EMIT__", emit)
+        template.replace("__SUBWORKFLOW__", str(SUBWORKFLOW)).replace(
+            "__EMIT__", EMIT_LABELS
+        )
     )
 
 
@@ -397,11 +510,22 @@ def _write_inputs(root: Path) -> list[dict[str, str]]:
         for (pair_id, segmentation), n_genes in REAL_BRANCHES.items()
     ]
     (root / "prepared_inputs.json").write_text(json.dumps(items))
+    _write_alignment(root, [item["pair_id"] for item in items])
     return items
 
 
-def _write_config(root: Path, *, failing: bool = True, slow: bool = True) -> Path:
-    """Write the harness config (a failing and a slow PREP when asked)."""
+def _write_config(
+    root: Path,
+    *,
+    failing: bool = True,
+    slow: bool = True,
+    single_method: bool = False,
+) -> Path:
+    """Write the harness config (a failing and a slow PREP when asked).
+
+    ``single_method`` sets ``annotation_allow_single_method``, a setting only
+    RESOLVE reads.
+    """
     fail = '"exit 3"' if failing else '"true"'
     wait = f'"sleep {SLOW_PREP_SECONDS}"' if slow else '"true"'
     before = f"""
@@ -420,7 +544,13 @@ params {{
     outdir = "{root / "results"}"
     annotation_reference_store = "{root / "store"}"
     prepared_inputs = "{root / "prepared_inputs.json"}"
+    alignment_inputs = "{root / "alignment_inputs.json"}"
     maps_out = "{root / "maps_out.json"}"
+    labels_out = "{root / "labels_out.json"}"
+    computed_out = "{root / "computed_out.json"}"
+    summary_out = "{root / "summary_out.txt"}"
+    annotation_allow_single_method = {str(single_method).lower()}
+    clustering_squidpy_mode = "map_first"
 }}
 executor {{
     cpus = 64
@@ -435,7 +565,7 @@ trace {{
     overwrite = true
     raw = true
     file = "{root / "trace.tsv"}"
-    fields = "task_id,process,tag,status,submit,start,complete,cpus,memory"
+    fields = "task_id,process,tag,status,submit,start,complete,cpus,memory,workdir"
 }}
 """
     )
@@ -457,8 +587,50 @@ def _run(
     )
 
 
+def _published_resolve(root: Path) -> dict[str, dict[str, Any]]:
+    """Read every published stub RESOLVE output: summary and config."""
+    published: dict[str, dict[str, Any]] = {}
+    for summary in (root / "results").glob(
+        "*/*/annotation_resolve/annotation_resolve_out/*_resolve_summary.json"
+    ):
+        output = summary.parent
+        published[f"{output.parents[2].name}|{output.parents[1].name}"] = {
+            "summary": json.loads(summary.read_text()),
+            "config": json.loads((output / "annotation_config.json").read_text()),
+        }
+    return published
+
+
+def _collect(root: Path) -> dict[str, Any]:
+    """Read one run's trace, emitted rows, published RESOLVE outputs, summary."""
+    results = {
+        "trace": _read_trace(root / "trace.tsv"),
+        "maps": json.loads((root / "maps_out.json").read_text()),
+        "labels": json.loads((root / "labels_out.json").read_text()),
+        "computed": json.loads((root / "computed_out.json").read_text()),
+        "summary": (root / "summary_out.txt").read_text(),
+        "resolve": _published_resolve(root),
+    }
+    for name in ("maps_out.json", "labels_out.json", "computed_out.json"):
+        (root / name).unlink()
+    (root / "summary_out.txt").unlink()
+    return results
+
+
+def _move_resolve_work_dirs(trace: list[dict[str, str]]) -> None:
+    """Move RESOLVE's task directories aside: -resume must re-run RESOLVE."""
+    for row in _rows(trace, RESOLVE):
+        work = Path(row["workdir"])
+        work.rename(work.with_name(work.name + ".moved"))
+
+
 def _run_harness(root: Path) -> dict[str, Any]:
-    """Run the stub harness, then the same run again with ``-resume``."""
+    """Run the stub harness, then twice more with ``-resume``.
+
+    The first ``-resume`` run changes nothing (the slow PREP only skips its
+    wait); the second sets ``annotation_allow_single_method``, a setting only
+    RESOLVE reads.
+    """
     fixtures = _write_fixture_panels(root)
     env = _fake_merxen_env(root, fixtures)
     _write_harness(root)
@@ -466,19 +638,46 @@ def _run_harness(root: Path) -> dict[str, Any]:
     _write_config(root)
     first = _run(root, env, "-stub-run")
     assert first.returncode == 0, first.stdout + first.stderr
-    trace = _read_trace(root / "trace.tsv")
-    maps = json.loads((root / "maps_out.json").read_text())
-    (root / "maps_out.json").unlink()
+    runs = {"first": _collect(root)}
     # PREP never caches; the resume run skips the slow PREP's wait only.
     _write_config(root, slow=False)
     second = _run(root, env, "-stub-run", "-resume")
     assert second.returncode == 0, second.stdout + second.stderr
+    runs["resume"] = _collect(root)
+    _write_config(root, slow=False, single_method=True)
+    third = _run(root, env, "-stub-run", "-resume")
+    assert third.returncode == 0, third.stdout + third.stderr
+    runs["resolve_change"] = _collect(root)
+    # RESOLVE re-runs (its task directories are gone) and writes the same
+    # bytes: COMPUTE_CPU, which hashes the staged labels, stays cached.
+    _move_resolve_work_dirs(runs["resolve_change"]["trace"])
+    fourth = _run(root, env, "-stub-run", "-resume")
+    assert fourth.returncode == 0, fourth.stdout + fourth.stderr
+    runs["resolve_rerun"] = _collect(root)
     return {
         "root": str(root),
-        "trace": trace,
-        "maps": maps,
-        "resume_trace": _read_trace(root / "trace.tsv"),
-        "resume_maps": json.loads((root / "maps_out.json").read_text()),
+        "trace": runs["first"]["trace"],
+        "maps": runs["first"]["maps"],
+        "labels": runs["first"]["labels"],
+        "computed": runs["first"]["computed"],
+        "summary": runs["first"]["summary"],
+        "resolve": runs["first"]["resolve"],
+        "resume_trace": runs["resume"]["trace"],
+        "resume_maps": runs["resume"]["maps"],
+        "resume_labels": runs["resume"]["labels"],
+        "resume_computed": runs["resume"]["computed"],
+        "change_trace": runs["resolve_change"]["trace"],
+        "change_maps": runs["resolve_change"]["maps"],
+        "change_labels": runs["resolve_change"]["labels"],
+        "change_computed": runs["resolve_change"]["computed"],
+        "change_resolve": runs["resolve_change"]["resolve"],
+        "rerun_trace": runs["resolve_rerun"]["trace"],
+        "rerun_labels": runs["resolve_rerun"]["labels"],
+        "rerun_computed": runs["resolve_rerun"]["computed"],
+        "align_files": [
+            str(root / "align" / ALIGNED_PAIR / "align_out" / name)
+            for name in ALIGN_FILES
+        ],
         "outdir": str(root / "results"),
     }
 
@@ -684,18 +883,328 @@ def test_resume_reruns_prep_but_keeps_map_cached(harness: dict[str, Any]) -> Non
     assert first == again
 
 
+# --------------------------------------------------------------------------
+# RESOLVE after MAP (stub runs)
+
+
+def _branch(key: str) -> tuple[str, str]:
+    pair_id, segmentation = key.split("|")
+    return pair_id, segmentation
+
+
 @needs_nextflow
-def test_map_first_still_refuses_to_run(tmp_path: Path) -> None:
-    """CLUSTERING_MAP_FIRST fails before any task until M5 wires RESOLVE/COMPUTE_CPU."""
-    _write_harness(tmp_path, entry="CLUSTERING_MAP_FIRST")
-    _write_inputs(tmp_path)
-    _write_config(tmp_path, failing=False, slow=False)
-    completed = _run(tmp_path, _nextflow_env(), "-stub-run")
-    assert completed.returncode != 0
-    output = completed.stdout + completed.stderr
-    assert "CLUSTERING_MAP_FIRST has no RESOLVE (M4) or COMPUTE_CPU (M5) yet" in output
-    work = tmp_path / "work"
-    assert not work.exists() or not any(work.iterdir())
+def test_resolve_runs_once_per_branch_after_its_own_map(
+    harness: dict[str, Any],
+) -> None:
+    trace = harness["trace"]
+    resolves = _rows(trace, RESOLVE)
+    tags = Counter(tuple(row["tag"].split(":")) for row in resolves)
+    assert set(tags) == EXPECTED_BRANCHES
+    assert all(count == 1 for count in tags.values()), tags
+    assert all(row["status"] == "COMPLETED" for row in resolves)
+    maps = {tuple(row["tag"].split(":")): row for row in _rows(trace, MAP)}
+    for row in resolves:
+        branch = tuple(row["tag"].split(":"))
+        assert int(row["submit"]) >= int(maps[branch]["complete"]), branch
+    # F3's slow bundles hold back F3's RESOLVE only: the other fixture
+    # branches were resolved before F3 was even mapped.
+    f3_map = int(maps[("F3", "proseg_hybrid")]["submit"])
+    early = [
+        tuple(row["tag"].split(":"))
+        for row in resolves
+        if tuple(row["tag"].split(":")) in FIXTURE_BRANCHES
+        and int(row["submit"]) < f3_map
+    ]
+    assert len(early) == 5
+    released = {(row["pair_id"], row["segmentation"]) for row in harness["labels"]}
+    assert released == EXPECTED_BRANCHES
+
+
+@needs_nextflow
+def test_resolve_reads_its_own_map_output_and_bundle_refs(
+    harness: dict[str, Any],
+) -> None:
+    maps = {(row["pair_id"], row["segmentation"]): row for row in harness["maps"]}
+    for row in harness["labels"]:
+        branch = (row["pair_id"], row["segmentation"])
+        # The labels tuple carries MAP's tuple unchanged plus RESOLVE's output.
+        assert {key: row[key] for key in maps[branch]} == maps[branch]
+        output = Path(row["resolve_dir"])
+        summary = json.loads(
+            (
+                output / f"{branch[0]}{pipeline_module.RESOLVE_SUMMARY_SUFFIX}"
+            ).read_text()
+        )
+        assert summary["stub"] is True
+        assert (summary["pair_id"], summary["segmentation"]) == branch
+        # The staged MAP output is this branch's own.
+        manifest = json.loads((output / "stub_map_manifest.json").read_text())
+        assert (manifest["pair_id"], manifest["segmentation"]) == branch
+        expected = _branch_bundles(harness, branch)
+        assert summary["n_required"] == len(expected)
+        assert summary["bundle_refs"] == [
+            f"resolve_inputs/bundle_refs/bundle_ref_{index + 1}.json"
+            for index in range(len(expected))
+        ]
+        staged = sorted((output / "stub_bundle_refs").glob("*.json"))
+        assert sorted(_refs([str(path) for path in staged])) == sorted(expected)
+        # The pair's ALIGN files come from the ALIGN channel (M5).
+        assert summary["alignment_files"] == (
+            [f"resolve_inputs/align_out/{name}" for name in ALIGN_FILES]
+            if branch[0] == ALIGNED_PAIR
+            else []
+        )
+        assert summary["panel_status"] == ("refused" if not expected else "ok")
+        config = AnnotationConfig.model_validate_json(
+            (output / "annotation_config.json").read_text()
+        )
+        assert config.species == ("mouse" if branch[0] == "F5" else "human")
+        assert config.allow_single_method is False
+
+
+@needs_nextflow
+def test_resolve_resources_follow_the_panel_size(harness: dict[str, Any]) -> None:
+    rows = {
+        tuple(row["tag"].split(":")): row for row in _rows(harness["trace"], RESOLVE)
+    }
+    gib = 1024**3
+    for branch, row in rows.items():
+        assert row["cpus"] == "2", branch
+        expected = 32 if branch == ("F8", "proseg_hybrid") else 16
+        assert int(row["memory"]) == expected * gib, branch
+
+
+@needs_nextflow
+def test_resolve_publishes_under_the_pair_and_segmentation(
+    harness: dict[str, Any],
+) -> None:
+    assert {_branch(key) for key in harness["resolve"]} == EXPECTED_BRANCHES
+    for pair_id, segmentation in EXPECTED_BRANCHES:
+        output = (
+            harness["outdir"]
+            / pair_id
+            / segmentation
+            / "annotation_resolve"
+            / "annotation_resolve_out"
+        )
+        assert (output / f"{pair_id}_resolve_summary.json").is_file()
+        assert (output / "annotation_config.json").is_file()
+
+
+@needs_nextflow
+def test_resume_keeps_resolve_cached(harness: dict[str, Any]) -> None:
+    trace = harness["resume_trace"]
+    resolves = _rows(trace, RESOLVE)
+    assert {tuple(row["tag"].split(":")) for row in resolves} == EXPECTED_BRANCHES
+    assert {row["status"] for row in resolves} == {"CACHED"}
+    # The same MAP and RESOLVE outputs (the refs are PREP's new, identical
+    # files: PREP never caches).
+    first = {
+        (r["pair_id"], r["segmentation"]): (r["map_dir"], r["resolve_dir"])
+        for r in harness["labels"]
+    }
+    again = {
+        (r["pair_id"], r["segmentation"]): (r["map_dir"], r["resolve_dir"])
+        for r in harness["resume_labels"]
+    }
+    assert first == again
+
+
+@needs_nextflow
+def test_a_resolve_only_change_reruns_resolve_alone(harness: dict[str, Any]) -> None:
+    """A threshold-like RESOLVE setting re-runs RESOLVE, never MAP (plan §3.1)."""
+    trace = harness["change_trace"]
+    assert {row["status"] for row in _rows(trace, MAP)} == {"CACHED"}
+    assert {row["status"] for row in _rows(trace, PANEL)} == {"CACHED"}
+    resolves = _rows(trace, RESOLVE)
+    assert {tuple(row["tag"].split(":")) for row in resolves} == EXPECTED_BRANCHES
+    assert {row["status"] for row in resolves} == {"COMPLETED"}
+    # The same MAP outputs, new RESOLVE outputs with the changed config and
+    # the same rules fingerprint (no code changed).
+    first = {(r["pair_id"], r["segmentation"]): r for r in harness["labels"]}
+    changed = {(r["pair_id"], r["segmentation"]): r for r in harness["change_labels"]}
+    assert set(first) == set(changed) == EXPECTED_BRANCHES
+    for branch, row in changed.items():
+        assert row["map_dir"] == first[branch]["map_dir"]
+        assert row["resolve_dir"] != first[branch]["resolve_dir"]
+    for key, published in harness["change_resolve"].items():
+        assert published["config"]["allow_single_method"] is True, key
+        assert (
+            published["summary"]["rules_fingerprint"]
+            == (harness["resolve"][key]["summary"]["rules_fingerprint"])
+        )
+
+
+@needs_nextflow
+def test_panel_stages_the_pairs_align_files(harness: dict[str, Any]) -> None:
+    """ANNOTATE_PANEL gets the ALIGN files from the channel, never a lookup."""
+    maps = {(row["pair_id"], row["segmentation"]): row for row in harness["maps"]}
+    for branch, row in maps.items():
+        if branch not in FIXTURE_BRANCHES:
+            continue
+        argv = json.loads((Path(row["panel_dir"]) / "fake_panel_argv.json").read_text())
+        if branch[0] == ALIGNED_PAIR:
+            assert argv[argv.index("--shared-tissue-mask") + 1] == (
+                "panel_inputs/shared_tissue_mask.npy"
+            )
+            assert argv[argv.index("--registration-summary") + 1] == (
+                "panel_inputs/registration_summary.json"
+            )
+        else:
+            assert "--shared-tissue-mask" not in argv, branch
+        assert "--require-shared-tissue-mask" in argv
+
+
+# --------------------------------------------------------------------------
+# COMPUTE_CPU after RESOLVE (stub runs)
+
+
+COMPUTE = "CLUSTERING_SQUIDPY_COMPUTE_CPU"
+
+
+@needs_nextflow
+def test_compute_runs_once_per_branch_after_its_own_resolve(
+    harness: dict[str, Any],
+) -> None:
+    trace = harness["trace"]
+    computes = _rows(trace, COMPUTE)
+    tags = Counter(tuple(row["tag"].split(":")) for row in computes)
+    assert set(tags) == EXPECTED_BRANCHES
+    assert all(count == 1 for count in tags.values()), tags
+    assert all(row["status"] == "COMPLETED" for row in computes)
+    resolves = {tuple(row["tag"].split(":")): row for row in _rows(trace, RESOLVE)}
+    for row in computes:
+        branch = tuple(row["tag"].split(":"))
+        assert int(row["submit"]) >= int(resolves[branch]["complete"]), branch
+
+
+@needs_nextflow
+def test_compute_emits_finalize_input_and_reads_its_own_labels(
+    harness: dict[str, Any],
+) -> None:
+    """tuple(pair, segmentation, samples_json, clustering_compute_out) per branch."""
+    labels = {(row["pair_id"], row["segmentation"]): row for row in harness["labels"]}
+    computed = {
+        (row["pair_id"], row["segmentation"]): row for row in harness["computed"]
+    }
+    assert set(computed) == EXPECTED_BRANCHES
+    for branch, row in computed.items():
+        output = Path(row["computed_dir"])
+        assert output.name == "clustering_compute_out"
+        assert row["samples_json"] == labels[branch]["samples_json"]
+        manifest = json.loads((output / "stub_compute_manifest.json").read_text())
+        assert (manifest["pair_id"], manifest["segmentation"]) == branch
+        assert manifest["mode"] == "map_first"
+        # The run's suffix (map_first before the flip) and MENDER policy
+        # travel in each clustered table (FINALIZE and MENDER_PREPARE keep
+        # their legacy scripts).
+        assert manifest["table_key_suffix"] == "mapfirst"
+        assert manifest["mender_unassigned_state_policy"] == "exclude_from_features"
+        # The harness has no src/ next to its project directory; the
+        # fingerprint of the real sources is tested in test_annotation_module.
+        assert manifest["hierarchy_fingerprint"] == "missing"
+        # COMPUTE_CPU staged this branch's RESOLVE output.
+        listing = (output / "stub_labels_listing.txt").read_text().split()
+        assert f"{branch[0]}_resolve_summary.json" in listing
+
+
+@needs_nextflow
+def test_compute_resources_and_no_gpu(harness: dict[str, Any]) -> None:
+    gib = 1024**3
+    for row in _rows(harness["trace"], COMPUTE):
+        assert row["cpus"] == "8"
+        assert int(row["memory"]) == 32 * gib
+        command = (Path(row["workdir"]) / ".command.run").read_text()
+        assert "MERXEN_GPU_LOCK_FILE" not in command
+        assert "--gpus" not in command
+
+
+@needs_nextflow
+def test_resume_keeps_compute_cached(harness: dict[str, Any]) -> None:
+    computes = _rows(harness["resume_trace"], COMPUTE)
+    assert {tuple(row["tag"].split(":")) for row in computes} == EXPECTED_BRANCHES
+    assert {row["status"] for row in computes} == {"CACHED"}
+    first = {
+        (r["pair_id"], r["segmentation"]): r["computed_dir"]
+        for r in harness["computed"]
+    }
+    again = {
+        (r["pair_id"], r["segmentation"]): r["computed_dir"]
+        for r in harness["resume_computed"]
+    }
+    assert first == again
+
+
+@needs_nextflow
+def test_compute_reruns_when_its_labels_change(harness: dict[str, Any]) -> None:
+    """A RESOLVE-only change rewrote annotation_resolve_out: COMPUTE_CPU re-runs."""
+    computes = _rows(harness["change_trace"], COMPUTE)
+    assert {tuple(row["tag"].split(":")) for row in computes} == EXPECTED_BRANCHES
+    assert {row["status"] for row in computes} == {"COMPLETED"}
+
+
+def _tree(root: Path) -> dict[str, bytes]:
+    """Relative path -> bytes of every file under ``root`` (links followed)."""
+    return {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+@needs_nextflow
+def test_compute_stays_cached_when_resolve_reruns_with_the_same_labels(
+    harness: dict[str, Any],
+) -> None:
+    """The M4 review note: a deep cache on annotation_resolve_out (plan §3.4)."""
+    trace = harness["rerun_trace"]
+    resolves = _rows(trace, RESOLVE)
+    assert {row["status"] for row in resolves} == {"COMPLETED"}
+    assert {row["status"] for row in _rows(trace, MAP)} == {"CACHED"}
+    computes = _rows(trace, COMPUTE)
+    assert {tuple(row["tag"].split(":")) for row in computes} == EXPECTED_BRANCHES
+    assert {row["status"] for row in computes} == {"CACHED"}
+    before = {(r["pair_id"], r["segmentation"]): r for r in harness["change_labels"]}
+    for row in harness["rerun_labels"]:
+        branch = (row["pair_id"], row["segmentation"])
+        # RESOLVE re-ran (its old task directory was moved aside) and wrote
+        # the same bytes: new files with new timestamps, identical content.
+        output = Path(row["resolve_dir"])
+        old_dir = Path(before[branch]["resolve_dir"])
+        moved = old_dir.parent.with_name(old_dir.parent.name + ".moved") / old_dir.name
+        assert moved.is_dir()
+        assert _tree(output) == _tree(moved)
+    assert {
+        (r["pair_id"], r["segmentation"]): r["computed_dir"]
+        for r in harness["rerun_computed"]
+    } == {
+        (r["pair_id"], r["segmentation"]): r["computed_dir"]
+        for r in harness["change_computed"]
+    }
+
+
+@needs_nextflow
+def test_end_of_run_summary_lists_the_failed_pair_and_refused_panels(
+    harness: dict[str, Any],
+) -> None:
+    """Hook H6: F7's PREP failed, so F7 has no label tables and is listed."""
+    summary = harness["summary"]
+    lines = {
+        line.split(":", 1)[0].strip(): line.split(":", 1)[1].strip()
+        for line in summary.splitlines()[1:]
+        if ":" in line
+    }
+    assert summary.splitlines()[0].startswith(
+        "Annotation summary (human, clustering_squidpy_mode map_first)"
+    )
+    assert lines["pair x segmentation branches clustered"] == str(
+        len(EXPECTED_BRANCHES) + 1
+    )
+    failed = lines["failed annotations (no label tables; see the failed tasks above)"]
+    assert failed == "F7:proseg_hybrid"
+    assert lines["failed hierarchies (label tables, no COMPUTE_CPU output)"] == "none"
+    refused = lines["refused panels"]
+    assert "F4:proseg_hybrid" in refused and "PFEW:proseg_hybrid" in refused
 
 
 # --------------------------------------------------------------------------
@@ -712,29 +1221,76 @@ def test_map_is_connected_after_the_required_bundle_join() -> None:
     assert body.index("ANNOTATION_PREPARED_REFERENCES(") < body.index(
         "CLUSTERING_SQUIDPY_ANNOTATE_MAP("
     )
-    # CLUSTERING_MAP_FIRST keeps its guard until M5.
-    guard = re.sub(
+    # CLUSTERING_MAP_FIRST = CLUSTERING_ANNOTATE -> COMPUTE_CPU (M5).
+    map_first = re.sub(
         r"//[^\n]*", "", text[text.index("workflow CLUSTERING_MAP_FIRST {") :]
     )
-    assert "error(" in guard
-    assert "CLUSTERING_ANNOTATE_MAP(" not in guard
+    assert "error(" not in map_first
+    assert (
+        "annotated = CLUSTERING_ANNOTATE(prepared_ch.combine(alignment_ch, by: 0))"
+        in map_first
+    )
+    assert "CLUSTERING_SQUIDPY_COMPUTE_CPU(compute_inputs_ch)" in map_first
+    assert (
+        'AnnotationReferences.computeSpec(params, "${projectDir}/../src")' in map_first
+    )
+    assert map_first.index("CLUSTERING_ANNOTATE(") < map_first.index(
+        "CLUSTERING_SQUIDPY_COMPUTE_CPU("
+    )
+    assert "computed = computed_ch" in map_first
 
 
-def test_main_nf_never_calls_the_map_step() -> None:
-    """Legacy runs are unchanged: main.nf only includes CLUSTERING_MAP_FIRST (H1)."""
+def test_resolve_is_connected_after_map() -> None:
+    text = SUBWORKFLOW.read_text()
+    body = text[text.index("workflow CLUSTERING_ANNOTATE {") :]
+    body = re.sub(
+        r"//[^\n]*", "", body[: body.index("workflow CLUSTERING_MAP_FIRST {")]
+    )
+    assert "mapped = CLUSTERING_ANNOTATE_MAP(prepared_ch)" in body
+    assert "resolve_inputs_ch = mapped.maps\n" in body
+    assert ".join(alignment_by_branch_ch)" in body
+    assert (
+        'AnnotationReferences.resolveSpec(params, panelDir, "${projectDir}/../src")'
+        in body
+    )
+    assert "CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE(resolve_inputs_ch)" in body
+    # Only the deterministic annotation_resolve_out flows downstream.
+    assert "resolve_out_ch = CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE.out.resolved" in body
+    assert "run_record" not in body
+    assert body.index("CLUSTERING_ANNOTATE_MAP(") < body.index(
+        "CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE("
+    )
+    # Only the subworkflow file calls RESOLVE.
+    for path in WORKFLOWS.rglob("*.nf"):
+        if path != SUBWORKFLOW:
+            assert "CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE(" not in path.read_text(), path
+
+
+def test_main_nf_calls_map_first_only_through_hook_h5() -> None:
+    """Legacy runs are unchanged: H5's map_first branch calls CLUSTERING_MAP_FIRST."""
     main_text = MAIN_NF.read_text()
     for name in (
         "CLUSTERING_SQUIDPY_ANNOTATE_MAP",
+        "CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE",
+        "CLUSTERING_SQUIDPY_COMPUTE_CPU",
         "CLUSTERING_ANNOTATE_MAP",
-        "CLUSTERING_MAP_FIRST(",
+        "CLUSTERING_ANNOTATE(",
     ):
         assert name not in main_text, name
     include = (
         'include { CLUSTERING_MAP_FIRST } from "./subworkflows/clustering_map_first"'
     )
     assert main_text.count(include) == 1
+    assert main_text.count("CLUSTERING_MAP_FIRST(") == 1
+    branch = main_text.index("    if (AnnotationSettings.isMapFirstRun(params)) {")
+    legacy = main_text.index("\n    } else {\n", branch)
+    assert branch < main_text.index("CLUSTERING_MAP_FIRST(") < legacy
     preflight = (LIB_DIR / "AnnotationPreflight.groovy").read_text()
-    assert re.search(r"static final boolean MAP_FIRST_WIRED = false\b", preflight)
+    assert "MAP_FIRST_WIRED" not in preflight
+    # Only the subworkflow calls COMPUTE_CPU.
+    for path in WORKFLOWS.rglob("*.nf"):
+        if path != SUBWORKFLOW:
+            assert "CLUSTERING_SQUIDPY_COMPUTE_CPU(" not in path.read_text(), path
 
 
 # --------------------------------------------------------------------------
@@ -747,12 +1303,14 @@ def test_map_runs_the_real_script_with_the_pipeline_arguments(tmp_path: Path) ->
     """Without -stub-run: ctm check, env, arguments, reuse and a real refusal.
 
     A fake ``merxen`` writes fixture panels and bundle refs and records what
-    ``annotate`` receives; for the refused panel it runs the real
-    ``merxen annotate``, which writes the refusal without mapping.
+    ``annotate`` and ``annotate-resolve`` receive; for the refused panel it
+    runs the real ``merxen annotate``, which writes the refusal without
+    mapping, and the real ``merxen annotate-resolve``, which writes the
+    statuses of every object.
     """
     fixtures = _write_fixture_panels(tmp_path)
     env = _fake_merxen_env(tmp_path, fixtures)
-    _write_harness(tmp_path)
+    _write_harness(tmp_path, entry="CLUSTERING_ANNOTATE")
     items = [
         _prepared_branch(tmp_path / "prepared", pair_id, segmentation, 60)
         for pair_id, segmentation in (
@@ -849,3 +1407,73 @@ def test_map_runs_the_real_script_with_the_pipeline_arguments(tmp_path: Path) ->
     # Task-local scratch is removed after a successful MAP.
     for record_path in (tmp_path / "work").glob("*/*/fake_annotate.json"):
         assert not (record_path.parent / "map_scratch").exists()
+
+    # RESOLVE: after each MAP, on the staged inputs and the same refs.
+    labels = {
+        (row["pair_id"], row["segmentation"]): row
+        for row in json.loads((tmp_path / "labels_out.json").read_text())
+    }
+    assert set(labels) == set(maps)
+    resolve_records = {}
+    for path in (tmp_path / "work").glob("*/*/fake_annotate_resolve.json"):
+        required = json.loads(
+            (
+                path.parent
+                / "resolve_inputs/annotation_panel_out/required_bundles.json"
+            ).read_text()
+        )
+        resolve_records[(required["pair_id"], required["segmentation"])] = json.loads(
+            path.read_text()
+        )
+    assert set(resolve_records) == set(maps)
+    for branch, record in resolve_records.items():
+        argv, environment = record["argv"], record["env"]
+        assert argv[0] == "annotate-resolve"
+        for option, staged in (
+            ("--annotation-config", "annotation_config.json"),
+            ("--map-dir", "resolve_inputs/annotation_map_out"),
+            ("--panel-dir", "resolve_inputs/annotation_panel_out"),
+            ("--prepared-dir", "resolve_inputs/clustering_prepare_out"),
+            ("--clustering-config", "resolve_inputs/clustering_squidpy_config.json"),
+            ("--out", "annotation_resolve_out"),
+            ("--run-record", "annotation_resolve_run.json"),
+        ):
+            assert argv[argv.index(option) + 1] == staged, (branch, option)
+        assert "--require-bundle-refs" in argv and "--no-alignment-lookup" in argv
+        assert "--alignment-dir" not in argv
+        for name in (
+            "OMP_NUM_THREADS",
+            "OPENBLAS_NUM_THREADS",
+            "MKL_NUM_THREADS",
+            "NUMEXPR_NUM_THREADS",
+            "NUMBA_NUM_THREADS",
+        ):
+            assert environment[name] == "1", (branch, name)
+        assert environment["CUDA_VISIBLE_DEVICES"] == ""
+        first_entry = environment["PYTHONPATH"].split(os.pathsep)[0]
+        assert os.path.realpath(first_entry) == os.path.realpath(
+            tmp_path.parent / "src"
+        )
+        # The refs MAP mapped with, in the same order.
+        assert record["refs"] == records[branch]["refs"], branch
+        config = AnnotationConfig.model_validate_json(
+            (Path(labels[branch]["resolve_dir"]) / "annotation_config.json").read_text()
+        )
+        assert config.species == ("mouse" if branch[0] == "F5" else "human")
+    # The refused panel ran the real RESOLVE: statuses only, gate failed.
+    refused_out = Path(labels[("F4", "proseg_hybrid")]["resolve_dir"])
+    summary = json.loads((refused_out / "F4_resolve_summary.json").read_text())
+    assert summary["panel_status"] == "refused"
+    assert set(summary["samples"]) == {"F4_MERSCOPE", "F4_XENIUM"}
+    for sample_id, sample in summary["samples"].items():
+        assert sample["resolution"]["gate"]["level"] == "failed", sample_id
+        platform = sample_id.split("_")[-1].lower()
+        assert (
+            refused_out / platform / f"{sample_id}_celltype_labels.parquet"
+        ).is_file()
+    published = (
+        tmp_path
+        / "results/F4/proseg_hybrid/annotation_resolve/annotation_resolve_out"
+        / "F4_resolve_summary.json"
+    )
+    assert published.is_file()

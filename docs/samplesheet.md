@@ -39,6 +39,7 @@ required. A template lives at
 | `distance_from_object_segmentations` | no | Comma-separated object-distance branches: `proseg`, `original`, and/or `cellpose`; optional `proseg_geometry_assignment` and `proseg_hybrid` are also accepted when present. Legacy names remain aliases. Blank uses the three defaults. |
 | `mender_enabled` | no | Row-level MENDER switch. Blank inherits `--mender_enabled`, which defaults to `false`. |
 | `mender_segmentations` | no | One MENDER branch, a comma-separated subset, or `all`. Blank inherits `--mender_segmentations`, which defaults to `proseg_hybrid`. |
+| `mouse_section_regions` | no | Mouse `map_first` annotation: `auto` (infer the section's CCF divisions), `none` (no region pruning) or `;`-separated divisions (`Isocortex;HPF;TH;...`, from Isocortex, OLF, OB, HPF, CTXsp, STR, PAL, TH, HY, MB, P, MY, CB). Blank inherits `--annotation_mouse_section_regions` (`auto`). Parsed and checked now; the pipeline passes it to MAP from M5 (pipeline wiring: M5), until then use `merxen annotate --mouse-section-regions`. See [Mouse region step](stages/annotation.md#mouse-region-step-m6). |
 | `merscope_dir` | required for MERSCOPE modes if no cache | Path to the raw MERSCOPE region export folder, a direct `.vzg2` archive, or a folder containing exactly one `.vzg2`. Canonical raw folders retain transcript points. A VZG2-only build recovers the Vizualizer image, original cell polygons, centroids, volumes, and cell-by-gene table, but not packed transcript coordinates. |
 | `merscope_spatialdata_path` | required for MERSCOPE modes if no raw dir | Path to an existing (or desired) reusable MERSCOPE SpatialData zarr. If it exists, the build step is **skipped** unless `--force_spatialdata_build true` is passed to Nextflow. For a downstream-only restart, an explicit path overrides `${outdir}/${pair_id}/merscope/latest/latest_spatialdata.zarr` and must point to the durable enriched latest zarr required by that stage. |
 | `merscope_image_prefix` | no | Prefix used to match z-plane image keys when more than one run is present. |
@@ -81,6 +82,7 @@ not require these files.
 | `<platform>_side_boundaries_geojson` | Tissue-edge polyline. New piece-aware annotations should contain exactly one edge line. Generic alias: `side_boundaries_geojson`. |
 | `<platform>_exclusion_masks_geojson` | Optional exclusion polygons for tears, folds, vessels, or artefacts. Generic alias: `exclusion_masks_geojson`. |
 | `<platform>_cortical_ribbon_geojson` | Optional complete ribbon polygon. Generic alias: `cortical_ribbon_geojson`. |
+| `<platform>_cortical_depth_boundary_frame` | Optional frame of this platform's depth annotations: `native` (drawn on the section itself) or `aligned` (the pair's fixed-section frame). Blank inherits `--cortical_depth_boundary_frame` (default `native`). Generic alias: `cortical_depth_boundary_frame`. See [Coordinate frame](stages/cortical-depth.md#coordinate-frame). |
 
 ### Distance-from-object annotation columns
 

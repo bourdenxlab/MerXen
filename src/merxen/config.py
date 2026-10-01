@@ -374,6 +374,8 @@ class CorticalDepthTableConfig(BaseModel):
     segmentation: str
     table_key: str
     shape_key: str | None = None
+    # rca-site:H8: suffix of the clustered table the depth violins read (§4.8).
+    clustered_table_key_suffix: TableKeySuffix = ""
 
 
 class CorticalDepthConfig(BaseModel):
@@ -390,6 +392,11 @@ class CorticalDepthConfig(BaseModel):
     exclusion_path: Path | None = None
     ribbon_path: Path | None = None
     annotation_path: Path | None = None
+    # Frame the boundary GeoJSONs are drawn in: "native" (this section's own
+    # dataset microns, how the annotations are drawn and how VALIS reads them)
+    # or "aligned" (the pair's fixed-section frame). Cells are read from the
+    # element in that frame (merxen.cortical_depth.frames).
+    boundary_frame: Literal["native", "aligned"] = "native"
     coordinate_unit_um: float = Field(default=1.0, gt=0.0)
     raster_resolution_um: float = Field(default=5.0, gt=0.0)
     raster_padding_um: float | None = Field(default=None, gt=0.0)

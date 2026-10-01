@@ -17,6 +17,11 @@ from merxen.config import (
     DistanceFromObjectTableConfig,
 )
 from merxen.cortical_depth.assign_cells import extract_cell_coordinates
+from merxen.cortical_depth.frames import (
+    ALIGNED_ELEMENT_SUFFIX,
+    BoundaryFrameMismatchError,
+    is_aligned_element_key,
+)
 from merxen.distance_from_object.annotations import (
     ObjectAnnotation,
     load_object_annotations,
@@ -229,6 +234,21 @@ def _annotate_table(
         sdata_obj=sdata_obj,
         shape_key=shape_key,
     )
+    if (
+        is_aligned_element_key(shape_key)
+        and coordinates.source == f"shapes:{shape_key}"
+    ):
+        # Tables with obsm['spatial'] are read in the native frame, so reading
+        # this one from the aligned element would mix frames within one run.
+        raise BoundaryFrameMismatchError(
+            f"[{config.dataset_name}:{table_config.segmentation}] {table_key!r} has "
+            "no obsm['spatial'], so its cells would come from the aligned element "
+            f"{shape_key!r}, while tables with obsm['spatial'] are read in the "
+            "native frame. The frame of the object GeoJSON is not configurable "
+            "yet, so aligned cells are refused: run this stage for segmentations "
+            "whose tables carry obsm['spatial'] (proseg, original), or on a store "
+            "without *_aligned_nonrigid elements."
+        )
     assignments = assign_distances_to_objects(
         coordinates,
         annotations,
@@ -279,7 +299,7 @@ def _annotate_table(
             updated,
             source_table=table,
             table_key=table_key,
-            region=shape_key,
+            region=_native_element_key(sdata_obj, shape_key),
         )
         write_or_replace_element(
             sdata_obj,
@@ -352,6 +372,19 @@ def _resolve_shape_key(
     if region is not None and f"{region}_aligned_nonrigid" in sdata_obj.shapes:
         return f"{region}_aligned_nonrigid"
     return str(list(sdata_obj.shapes.keys())[0])
+
+
+def _native_element_key(sdata_obj: Any, shape_key: str | None) -> str | None:
+    """Return the native element of ``shape_key`` when it exists.
+
+    Written-back tables are native tables; retargeting their region to an
+    ``*_aligned_nonrigid`` element would misstate the frame of their
+    ``obsm['spatial']``.
+    """
+    if shape_key is None or not is_aligned_element_key(shape_key):
+        return shape_key
+    native = shape_key[: -len(ALIGNED_ELEMENT_SUFFIX)]
+    return native if native in sdata_obj.shapes else shape_key
 
 
 def _parse_table_for_spatialdata(

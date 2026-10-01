@@ -35,12 +35,18 @@ human invocation (`mecr_enabled = true`, `proseg_hybrid_enabled = true`). Mouse
 mode leaves the large WMB-backed MECR branch disabled unless opted in; cortical
 depth, distance-from-object and MapMyCells are dashed and default to off. See
 [Configuration](configuration.md) for the switches. `Gene panel`
-(`ANNOTATE_PANEL`), `Reference prep` (`ANNOTATE_REFERENCE_PREP`) and `Map cells`
-(`CLUSTERING_SQUIDPY_ANNOTATE_MAP`) are the first steps of reference-based
+(`ANNOTATE_PANEL`), `Reference prep` (`ANNOTATE_REFERENCE_PREP`), `Map cells`
+(`CLUSTERING_SQUIDPY_ANNOTATE_MAP`), `Resolve labels`
+(`CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE`) and `Map-first tree`
+(`CLUSTERING_SQUIDPY_COMPUTE_CPU`) are the steps of reference-based
 annotation: the first two run only with `--annotation_prepare_only` or in the
-`map_first` clustering mode, and `Map cells` only in `map_first` (see
+`map_first` clustering mode, and the other three only in `map_first`, where
+`Map-first tree` replaces the legacy clustering compute (see
 [Reference-based annotation](stages/annotation.md)); none runs in a default
-run.
+run. `Label report` (`ANNOTATION_REPORT`) is the annotation QC report of
+each map_first pair × segmentation; it is drawn after `MENDER domains`
+because it runs last, once FINALIZE, cortical depth and MENDER have
+finished when they run (it reads the labels of `Resolve labels`).
 
 ### Colour choice
 

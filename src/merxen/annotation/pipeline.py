@@ -32,16 +32,25 @@ command runs the same code on published ``*_clustered.h5ad`` files:
    set-c run on the segmentations ``annotation_xplat_sensitivity_segmentations``
    names and, for ``per_platform`` pairs, the intersection-panel run
    (``_xpanel``). Two uses on the same gene set are mapped once and recorded
-   under both run ids. The mouse region inference and pruned re-map are M6:
-   mouse maps unpruned here.
-4. **Write** ``<plat>/<sid>_mmc_<run_id>.parquet`` (tidy, per cell x level)
+   under both run ids.
+4. **Mouse region step** (``annotation.mouse_regions``; plan §7.2): from the
+   unpruned WMB run, infer the section's present CCF divisions (or take
+   ``mouse_section_regions``: the sample's own value, else the config's),
+   derive the two-tier drop list and re-map only the table cells whose
+   unpruned class or subclass was dropped, with ``--nodes_to_drop`` and the
+   lookup filtered to the pruned tree. The unpruned tidy parquet stays the
+   run's; the re-mapped cells go to ``<sid>_mmc_<run_id>_pruned.parquet``,
+   the per-cell region columns to ``<sid>_mouse_regions.parquet`` and the
+   decision to the sample's ``mouse_regions`` record. ``load_resolve_runs``
+   gives RESOLVE the merged (pruned) table.
+5. **Write** ``<plat>/<sid>_mmc_<run_id>.parquet`` (tidy, per cell x level)
    and ``map_manifest.json`` (query fingerprint, bundle hashes, engine
    parameters, ctm version, wall time). With ``annotation_reuse_published``
    a run is skipped when a published manifest has the same query
    fingerprint, ``build_hash``, engine parameters, ctm version, tidy schema
    version and (restricted) lookup; an unreadable published manifest only
    disables reuse.
-5. **Provisional labels** ``<plat>/<sid>_ct_provisional.parquet``: ``ct_*``
+6. **Provisional labels** ``<plat>/<sid>_ct_provisional.parquet``: ``ct_*``
    columns from the raw thresholds alone (hard floor = ``min_counts``, sinks
    and region plausibility from the bundle vocabulary, the parent chain),
    plus the raw engine columns ``mmc_*`` (§4.1). They are for inspection and
@@ -92,6 +101,30 @@ from merxen.annotation.mapmycells_engine import (
     write_query_h5ad,
     write_tidy_parquet,
 )
+from merxen.annotation.mouse_regions import (
+    CELL_ID,
+    REGION_SHARE_REFERENCE_ID,
+    REMAP_RUN_SUFFIX,
+    MouseRegionError,
+    MouseRegionOutputs,
+    MouseRegionRecord,
+    RegionPlan,
+    RegionRemapRecord,
+    RegionShareBundle,
+    SectionRegionsRequest,
+    WmbTaxonomy,
+    changed_cells,
+    check_rule_variant,
+    count_dropped_subclasses,
+    load_region_outputs,
+    merge_pruned_tidy,
+    open_region_share,
+    plan_region_step,
+    pruned_lookup,
+    region_cells_filename,
+    region_cells_frame,
+    write_region_cells,
+)
 from merxen.annotation.panel import (
     REQUIRED_BUNDLES_FILE,
     AnnotationPanel,
@@ -109,8 +142,22 @@ from merxen.annotation.panel import (
     subset_panel,
     subset_trigger_for_config,
 )
-from merxen.annotation.reference import read_lookup
-from merxen.annotation.schema import CellStatus, Columns, meets_threshold
+from merxen.annotation.provenance import annotation_manifest_filename
+from merxen.annotation.reference import (
+    HO_REFERENCE_ID,
+    HO_SELF_MAP_TEST_SET_REVISION,
+    lookup_sha256,
+    read_lookup,
+)
+from merxen.annotation.samplesheet_columns import effective_section_regions
+from merxen.annotation.schema import (
+    LABELS_METADATA_KEY,
+    CellStatus,
+    Columns,
+    label_table_filename,
+    meets_threshold,
+    safe_token,
+)
 from merxen.annotation.store import (
     ANNOTATION_BUILDER_VERSION,
     BUNDLE_MANIFEST_NAME,
@@ -130,6 +177,22 @@ from merxen.clustering.cellset import select_table_cells
 if TYPE_CHECKING:
     from scipy import sparse
 
+    from merxen.annotation.composition import SectionComposition
+    from merxen.annotation.consensus import (
+        HumanCalls,
+        HumanResolution,
+        MouseResolution,
+    )
+    from merxen.annotation.diagnostics import TrustDecision
+    from merxen.annotation.mouse_gate import RegistrationSignal
+    from merxen.annotation.provenance import (
+        AnnotationProvenance,
+        ReferenceProvenance,
+        ResolvabilityProvenance,
+    )
+    from merxen.annotation.resolvability import ResolvabilityTables
+    from merxen.annotation.thresholds import EmissionPlan
+
 logger = logging.getLogger(__name__)
 
 MAP_MANIFEST_NAME: Final = "map_manifest.json"
@@ -144,7 +207,7 @@ PROVISIONAL_RULES: Final = (
     "vote or COP rule: the RESOLVE step (M4) replaces these labels."
 )
 # Roles MAP maps onto; resolvability and likelihood references are used by
-# PREP / v1.1, region shares by the mouse region step (M6).
+# PREP / v1.1, region shares by the mouse region step (plan §7.2).
 MAPPED_ROLES: Final[frozenset[str]] = frozenset({"primary", "secondary", "sensitivity"})
 RUN_SUFFIXES: Final[dict[str, str]] = {
     "annotation": "",
@@ -160,7 +223,14 @@ ENGINE_PREFIXES: Final[dict[str, str]] = {
 }
 N_PROCESSORS_ENV: Final = "MERXEN_ANNOTATION_MAP_N_PROCESSORS"
 DEFAULT_N_PROCESSORS: Final = 6
-MOUSE_REGION_STEP: Final = "not_run: mouse region inference and pruned re-map are M6"
+# ``map_manifest.json``'s ``mouse_region_step`` (per-sample outcomes are in
+# each sample's ``mouse_regions`` record).
+MOUSE_REGION_STEP: Final = (
+    "region inference and pruned re-map (plan §7.2), rule variant {variant}"
+)
+# A mouse MAP output whose mouse_region_step lacks this prefix predates M6.
+MOUSE_REGION_STEP_PREFIX: Final = MOUSE_REGION_STEP.split("{", 1)[0]
+REGION_REMAP_PURPOSE: Final = "region_pruned_remap"
 
 SUBSET_PANELS_DIR: Final = "subset_panels"
 SUBSET_PANEL_TEMPLATE: Final = "{sample_id}_{run_id}.panel_genes.json"
@@ -457,18 +527,104 @@ def _resolvability_version(entry: StoreEntry) -> int | None:
     return value if isinstance(value, int) else None
 
 
+def _self_map_test_set_revision(entry: StoreEntry) -> int | None:
+    """The human held-out self-map test-set revision a bundle was built with.
+
+    Read from the hashed build params first
+    (``build_hash_payload.builder_params.resolvability.test_set``: its
+    ``reference_id`` and ``self_map_exclusion.revision``), which define the
+    bundle whichever self-map path wrote it (a builder that does not write
+    the ``builder_output`` provenance, e.g. another self-map version, still
+    hashes the revision through the shared test-set params); then from the
+    ``builder_output.resolvability`` record (``test_set_bundle``,
+    ``test_set_exclusion``).
+
+    Returns:
+        ``None`` for a bundle whose self-map is not on the human held-out
+        test set (mouse, or no self-map); ``0`` for a human held-out
+        self-map built before the M8 D1 revision.
+    """
+    manifest = json.loads((entry.path / BUNDLE_MANIFEST_NAME).read_text("utf-8"))
+    payload = manifest.get("build_hash_payload") or {}
+    params = (
+        ((payload.get("builder_params") or {}).get("resolvability") or {})
+        if isinstance(payload, dict)
+        else {}
+    )
+    hashed = params.get("test_set") if isinstance(params, dict) else None
+    if isinstance(hashed, dict) and hashed.get("reference_id") is not None:
+        if hashed.get("reference_id") != HO_REFERENCE_ID:
+            return None
+        exclusion = hashed.get("self_map_exclusion") or {}
+        value = exclusion.get("revision") if isinstance(exclusion, dict) else None
+        return value if isinstance(value, int) else 0
+    record = (manifest.get("builder_output") or {}).get("resolvability") or {}
+    if not isinstance(record, dict):
+        return None
+    test_set = record.get("test_set_bundle") or {}
+    if not isinstance(test_set, dict) or test_set.get("reference_id") != (
+        HO_REFERENCE_ID
+    ):
+        return None
+    exclusion = record.get("test_set_exclusion") or {}
+    value = exclusion.get("revision") if isinstance(exclusion, dict) else None
+    return value if isinstance(value, int) else 0
+
+
+def _prefer_current_test_set(candidates: list[StoreEntry]) -> list[StoreEntry]:
+    """Among bundles with the current tables, keep the current human test set.
+
+    User decision 2026-09-30 (M8 D1): the human self-maps leave out the
+    other-region COP test cells (``HO_SELF_MAP_TEST_SET_REVISION``). The
+    rebuilt bundles get new build hashes through their test-set params but
+    keep ``RESOLVABILITY_VERSION``, so they sit next to the older bundles
+    with the same version; a standalone run takes the current revision. When
+    only older revisions exist (a human panel not rebuilt since), they are
+    kept and a warning names them.
+    """
+    revisions = [_self_map_test_set_revision(entry) for entry in candidates]
+    current = [
+        entry
+        for entry, revision in zip(candidates, revisions, strict=True)
+        if revision == HO_SELF_MAP_TEST_SET_REVISION
+    ]
+    if current:
+        return current
+    stale = [
+        (entry, revision)
+        for entry, revision in zip(candidates, revisions, strict=True)
+        if revision is not None
+    ]
+    if stale:
+        logger.warning(
+            "no bundle of %s on panel %s has the current human self-map test set "
+            "(revision %d, M8 D1); %s: rebuild with merxen "
+            "annotation-reference-prep",
+            candidates[0].reference_id,
+            str(candidates[0].panel_hash or "-")[:16],
+            HO_SELF_MAP_TEST_SET_REVISION,
+            ", ".join(
+                f"{entry.path.name[:16]} has revision {revision}"
+                for entry, revision in stale
+            ),
+        )
+    return candidates
+
+
 def _prefer_current_resolvability(candidates: list[StoreEntry]) -> list[StoreEntry]:
     """Among several bundles, keep those with the current self-map tables.
 
     A ``RESOLVABILITY_VERSION`` bump gives rebuilt bundles a new
     ``build_hash`` next to the old ones on the same panel; a standalone run
-    then takes the current tables. Bundles without a self-map, or several
-    current ones, stay ambiguous. When no candidate has the current tables
-    (a panel not rebuilt since the bump), the older ones are kept and a
-    warning names their versions: their self-map tables are stale until the
-    panel is rebuilt (a pipeline run's PREP rebuilds them). Current means
-    version 6 or 7 (M3c): the version is chosen per family, so a panel's
-    bundles built by the current code all carry its family's version.
+    then takes the current tables, and among those the current human
+    held-out test set (``_prefer_current_test_set``, M8 D1). Bundles without
+    a self-map, or several current ones, stay ambiguous. When no candidate
+    has the current tables (a panel not rebuilt since the bump), the older
+    ones are kept and a warning names their versions: their self-map tables
+    are stale until the panel is rebuilt (a pipeline run's PREP rebuilds
+    them). Current means version 6 or 7 (M3c): the version is chosen per
+    family, so a panel's bundles built by the current code all carry its
+    family's version.
     """
     from merxen.annotation.resolvability import (
         RESOLVABILITY_VERSION,
@@ -482,7 +638,7 @@ def _prefer_current_resolvability(candidates: list[StoreEntry]) -> list[StoreEnt
         if version in RESOLVABILITY_VERSIONS
     ]
     if current:
-        return current if len(candidates) > 1 else candidates
+        return _prefer_current_test_set(current)
     stale = [
         (entry, version)
         for entry, version in zip(candidates, versions, strict=True)
@@ -503,6 +659,50 @@ def _prefer_current_resolvability(candidates: list[StoreEntry]) -> list[StoreEnt
             ),
         )
     return candidates
+
+
+def locate_bundle_path(
+    store: ReferenceStore,
+    reference_id: str,
+    panel_hash: str | None,
+    *,
+    config: AnnotationConfig | None = None,
+) -> Path:
+    """Find the directory of a reference's current bundle on a panel.
+
+    ``locate_bundle`` for bundles MAP does not map onto (the panel-independent
+    ``wmb_region_share``): the same choice among the store's complete
+    current-builder bundles.
+
+    Args:
+        store: The reference store.
+        reference_id: Store id.
+        panel_hash: Declared-panel hash (``None``: panel-independent).
+        config: The run's annotation config (large-panel prefilter).
+
+    Returns:
+        The bundle directory.
+
+    Raises:
+        MapError: If there is none, or several.
+    """
+    candidates = _prefer_current_resolvability(
+        _current_bundles(store, reference_id, panel_hash, config)
+    )
+    if not candidates:
+        raise MapError(
+            f"the store has no builder-v{ANNOTATION_BUILDER_VERSION} bundle of "
+            f"{reference_id} on panel {(panel_hash or '-')[:16]}; build it with "
+            "merxen annotation-reference-prep"
+        )
+    if len(candidates) > 1:
+        raise MapError(
+            f"{len(candidates)} bundles of {reference_id} on panel "
+            f"{(panel_hash or '-')[:16]}: "
+            + ", ".join(str(entry.path) for entry in candidates)
+            + "; pass one with --bundle"
+        )
+    return candidates[0].path
 
 
 def locate_bundle(
@@ -533,23 +733,9 @@ def locate_bundle(
     Raises:
         MapError: If there is none, or several (pass the bundle explicitly).
     """
-    candidates = _prefer_current_resolvability(
-        _current_bundles(store, reference_id, panel_hash, config)
+    return MmcBundle.from_dir(
+        locate_bundle_path(store, reference_id, panel_hash, config=config)
     )
-    if not candidates:
-        raise MapError(
-            f"the store has no builder-v{ANNOTATION_BUILDER_VERSION} bundle of "
-            f"{reference_id} on panel {(panel_hash or '-')[:16]}; build it with "
-            "merxen annotation-reference-prep"
-        )
-    if len(candidates) > 1:
-        raise MapError(
-            f"{len(candidates)} bundles of {reference_id} on panel "
-            f"{(panel_hash or '-')[:16]}: "
-            + ", ".join(str(entry.path) for entry in candidates)
-            + "; pass one with --bundle"
-        )
-    return MmcBundle.from_dir(candidates[0].path)
 
 
 # --------------------------------------------------------------------------
@@ -1015,6 +1201,8 @@ class MapSampleRecord(_MapModel):
             (a ``per_platform`` pair can refuse one platform's panel), so it
             has no run.
         runs: MMC runs by run id.
+        mouse_regions: The mouse region step (inferred divisions, drop list,
+            pruned re-map; ``None`` for human and unmapped samples).
         provisional_labels: Provisional ``ct_*`` parquet (relative), if any.
         provisional_summary: Confident share of table cells per level.
     """
@@ -1036,6 +1224,7 @@ class MapSampleRecord(_MapModel):
     controls_removed: dict[str, int] = Field(default_factory=dict)
     panel_status: Literal["ok", "refused"] = "ok"
     runs: dict[str, MapRunRecord] = Field(default_factory=dict)
+    mouse_regions: MouseRegionRecord | None = None
     provisional_labels: str | None = None
     provisional_summary: dict[str, float] = Field(default_factory=dict)
 
@@ -1054,7 +1243,8 @@ class MapManifest(_MapModel):
         ctm_commit: ctm commit.
         n_processors: Worker processes.
         min_counts: Table-cell threshold.
-        mouse_region_step: Status of the mouse region step (M6).
+        mouse_region_step: The mouse region step's rule (``MOUSE_REGION_STEP``;
+            ``None`` for human).
         panel_status: ``required_bundles.json`` status: ``"refused"`` when
             no panel can be annotated, so nothing was mapped (RESOLVE writes
             statuses only; plan §3.3 step 2).
@@ -1277,9 +1467,19 @@ def engine_columns(
     return result
 
 
-def _vocab_lookup(
+def vocab_lookup(
     vocab: pd.DataFrame | None, level: str, column: str
 ) -> dict[str, str | None]:
+    """Return node name to a vocab column's value at one taxonomy level.
+
+    Args:
+        vocab: A bundle's vocab table (``None``: none).
+        level: The taxonomy level.
+        column: The vocab column (``broad_class``, ``nt``, ...).
+
+    Returns:
+        Node name to value (empty without the vocab or the column).
+    """
     if vocab is None or column not in vocab.columns:
         return {}
     rows = vocab[vocab["level"] == level]
@@ -1292,7 +1492,7 @@ def _vocab_lookup(
 def _vocab_flag(
     vocab: pd.DataFrame | None, level: str, column: str, default: bool
 ) -> dict[str, bool]:
-    values = _vocab_lookup(vocab, level, column)
+    values = vocab_lookup(vocab, level, column)
     return {
         node: default if value is None else value.strip().lower() == "true"
         for node, value in values.items()
@@ -1485,10 +1685,10 @@ def provisional_labels(
         if (positions < 0).any():
             raise MapError("MMC results name cells absent from the sample")
         labels = mapped["assignment"].astype(object).to_numpy()
-        broad_of = _vocab_lookup(vocab, leaf_level, "broad_class")
-        nt_of = _vocab_lookup(vocab, leaf_level, "nt")
+        broad_of = vocab_lookup(vocab, leaf_level, "broad_class")
+        nt_of = vocab_lookup(vocab, leaf_level, "nt")
         if species == "human":
-            lineage_of = _vocab_lookup(vocab, leaf_level, "lineage")
+            lineage_of = vocab_lookup(vocab, leaf_level, "lineage")
             sink = _vocab_flag(vocab, leaf_level, "sink", False)
             plausible = _vocab_flag(
                 vocab, leaf_level, f"region_plausible_{region}", True
@@ -1722,6 +1922,8 @@ def annotate_map(
     write_provisional: bool = True,
     refused_platforms: Iterable[str] = (),
     find_subset_bundle: SubsetBundleFinder | None = None,
+    region_shares: RegionShareBundle | None = None,
+    section_regions: Mapping[str, str] | None = None,
 ) -> MapManifest:
     """Run the MAP step for the samples of one pair x segmentation.
 
@@ -1748,13 +1950,20 @@ def annotate_map(
         find_subset_bundle: Returns the store's bundle of a reference on a
             subset panel hash, or ``None`` (``store_subset_bundle_finder``);
             without it every needed subset bundle is only requested.
+        region_shares: The ``wmb_region_share`` bundle (mouse; required
+            unless every sample's ``mouse_section_regions`` is ``none``).
+        section_regions: ``mouse_section_regions`` per sample id (the
+            samplesheet column); a sample without one takes the config's
+            ``mouse_section_regions``. Mouse only.
 
     Returns:
         The manifest (also written to ``<output_dir>/map_manifest.json``).
 
     Raises:
         CtmVersionError: If the installed ctm is not ``config.ctm_version``.
-        MapError: If the inputs cannot be mapped.
+        MapError: If the inputs cannot be mapped (also: a mouse region
+            request without the region-share bundle, or region settings this
+            version does not implement).
         MmcEngineError: If a mapping fails.
     """
     start = time.monotonic()
@@ -1782,8 +1991,14 @@ def annotate_map(
         ctm_commit=ctm_commit(),
         n_processors=processes,
         min_counts=min_counts,
-        mouse_region_step=MOUSE_REGION_STEP if config.species == "mouse" else None,
+        mouse_region_step=_mouse_region_step_label(config),
         thresholds=config.thresholds.model_dump(mode="json"),
+    )
+    requests = _section_region_requests(
+        [sample.sample_id for sample in samples],
+        config,
+        section_regions=section_regions,
+        region_shares=region_shares,
     )
     try:
         loaded_samples = load_samples(samples, config, min_counts=min_counts)
@@ -1803,6 +2018,8 @@ def annotate_map(
                 write_provisional=write_provisional,
                 panel_refused=loaded.sample.platform.upper() in refused,
                 find_subset_bundle=find_subset_bundle,
+                region_request=requests.get(loaded.sample.sample_id),
+                region_shares=region_shares,
             )
             manifest.samples[loaded.sample.sample_id] = record
             # Written after every sample, so an interrupted run keeps the
@@ -1833,12 +2050,16 @@ def _map_sample(
     write_provisional: bool,
     panel_refused: bool = False,
     find_subset_bundle: SubsetBundleFinder | None = None,
+    region_request: SectionRegionsRequest | None = None,
+    region_shares: RegionShareBundle | None = None,
 ) -> MapSampleRecord:
     """Map one sample onto every run that applies to its platform.
 
     Runs on one bundle with the same query (two uses of one gene set) are
     mapped once; the later run ids get a copy of the tidy table
-    (``same_mapping_as``).
+    (``same_mapping_as``). A mouse sample (``region_request`` given) then
+    runs the region step on its primary run (``_mouse_region_step``); its
+    provisional labels use the pruned calls and carry the region columns.
 
     Raises:
         MapError: If no run applies to the sample and its panel was not
@@ -1949,10 +2170,47 @@ def _map_sample(
         record.runs[run.run_id] = run_record
         tidy, _ = read_tidy_parquet(parquet)
         tidies.append((run, tidy))
+    regions: MouseRegionOutputs | None = None
+    region_run: MapBundle | None = None
+    if region_request is not None and config.species == "mouse":
+        position = next(
+            (
+                index
+                for index, (run, _) in enumerate(tidies)
+                if run.role == "primary" and "annotation" in run.purposes
+            ),
+            None,
+        )
+        if position is not None:
+            region_run, unpruned = tidies[position]
+            record.mouse_regions, regions = _mouse_region_step(
+                loaded,
+                region_run,
+                unpruned,
+                region_request,
+                config,
+                region_shares=region_shares,
+                output=output,
+                sample_dir=sample_dir,
+                scratch=scratch,
+                processes=processes,
+                installed=installed,
+                published=published,
+                published_dir=published_dir,
+            )
+            tidies[position] = (region_run, regions.pruned)
     if write_provisional and tidies:
         labels = provisional_labels(
             loaded, tidies, config, pair_id=pair_id, segmentation=segmentation
         )
+        if regions is not None and region_run is not None:
+            region_columns = regions.engine_columns(
+                loaded.obs_names,
+                prefix=_engine_prefix(region_run),
+                class_level=region_run.bundle.levels[0],
+                subclass_level=region_run.bundle.levels[1],
+            )
+            labels = pd.concat([labels, region_columns.reset_index(drop=True)], axis=1)
         path = sample_dir / f"{sample.sample_id}{PROVISIONAL_SUFFIX}"
         write_provisional_parquet(
             labels,
@@ -1963,11 +2221,493 @@ def _map_sample(
                 "sample_id": sample.sample_id,
                 "thresholds": config.thresholds.model_dump(mode="json"),
                 "runs": {run.run_id: run.bundle.build_hash for run, _ in tidies},
+                "mouse_regions": (
+                    None
+                    if record.mouse_regions is None
+                    else {
+                        "status": record.mouse_regions.status,
+                        "present_regions": record.mouse_regions.present_regions,
+                        "n_nodes_dropped": len(record.mouse_regions.nodes_to_drop),
+                        "pruned_calls": record.mouse_regions.is_pruned,
+                    }
+                ),
             },
         )
         record.provisional_labels = _relative(path, output)
         record.provisional_summary = _confident_shares(labels)
     return record
+
+
+# --------------------------------------------------------------------------
+# Mouse region step (plan §7.2)
+
+
+def _mouse_region_step_label(config: AnnotationConfig) -> str | None:
+    """Return ``map_manifest.json``'s ``mouse_region_step`` (``None`` for human)."""
+    if config.species != "mouse":
+        return None
+    return MOUSE_REGION_STEP.format(variant=config.mouse_regions.rule_variant)
+
+
+def _section_region_requests(
+    sample_ids: Sequence[str],
+    config: AnnotationConfig,
+    *,
+    section_regions: Mapping[str, str] | None,
+    region_shares: RegionShareBundle | None,
+) -> dict[str, SectionRegionsRequest]:
+    """Return each mouse sample's ``mouse_section_regions`` request.
+
+    Checked before anything is mapped, so a missing bundle or an
+    unimplemented rule fails in seconds, not after the mapping.
+
+    Raises:
+        MapError: For per-sample values on a human run, an invalid value, a
+            request that needs the region-share bundle without one, or a
+            rule variant this version does not implement.
+    """
+    given = dict(section_regions or {})
+    if config.species != "mouse":
+        if given:
+            raise MapError(
+                "mouse_section_regions applies to mouse runs only "
+                f"(given for {sorted(given)})"
+            )
+        return {}
+    unknown = sorted(set(given) - set(sample_ids))
+    if unknown:
+        logger.warning("mouse_section_regions names unknown samples %s", unknown)
+    try:
+        check_rule_variant(config.mouse_regions)
+        requests = {
+            sample_id: SectionRegionsRequest.parse(
+                effective_section_regions(
+                    given.get(sample_id), config.mouse_section_regions
+                )
+            )
+            for sample_id in sample_ids
+        }
+    except ValueError as error:
+        raise MapError(str(error)) from error
+    needing = sorted(
+        sample_id
+        for sample_id, request in requests.items()
+        if request.needs_region_shares
+    )
+    if needing and region_shares is None:
+        raise MapError(
+            f"the mouse region step of {needing} needs the "
+            f"{REGION_SHARE_REFERENCE_ID} bundle (build it with merxen "
+            "annotation-reference-prep, or set mouse_section_regions to none "
+            "to map without pruning)"
+        )
+    return requests
+
+
+def _table_xy(loaded: LoadedSample, cell_ids: pd.Index) -> np.ndarray | None:
+    """Return the µm coordinates of the given table cells, or ``None``."""
+    xy, _ = read_spatial(loaded.sample.h5ad_path)
+    if xy is None:
+        return None
+    if len(xy) != loaded.n_objects:
+        logger.warning(
+            "%s: obsm['spatial'] does not fit the objects; no coordinates for "
+            "the region step",
+            loaded.sample.sample_id,
+        )
+        return None
+    positions = loaded.obs_names.get_indexer(cell_ids)
+    if (positions < 0).any():
+        raise MapError("MMC results name cells absent from the sample")
+    return np.asarray(xy[positions], dtype=np.float64)
+
+
+def _mouse_region_step(
+    loaded: LoadedSample,
+    run: MapBundle,
+    unpruned: pd.DataFrame,
+    request: SectionRegionsRequest,
+    config: AnnotationConfig,
+    *,
+    region_shares: RegionShareBundle | None,
+    output: Path,
+    sample_dir: Path,
+    scratch: Path,
+    processes: int,
+    installed: str,
+    published: MapManifest | None,
+    published_dir: Path | None,
+) -> tuple[MouseRegionRecord, MouseRegionOutputs]:
+    """Infer a mouse section's divisions, prune and re-map (plan §7.2).
+
+    Args:
+        loaded: The sample.
+        run: Its primary WMB run (the bundle and panel it mapped with).
+        unpruned: That run's tidy table.
+        request: The sample's ``mouse_section_regions`` request.
+        config: The annotation config.
+        region_shares: The ``wmb_region_share`` bundle.
+        output: ``annotation_map_out``.
+        sample_dir: ``<output>/<platform>``.
+        scratch: Task-local scratch.
+        processes: MMC worker processes.
+        installed: Installed ctm version.
+        published: Published manifest for re-map reuse.
+        published_dir: Its directory.
+
+    Returns:
+        The region record and the outputs (pruned tidy table, cells).
+
+    Raises:
+        MapError: If the bundle has no class and subclass levels or the
+            region step cannot run.
+    """
+    sample_id = loaded.sample.sample_id
+    bundle = run.bundle
+    if len(bundle.levels) < 2:
+        raise MapError(
+            f"{sample_id}: the region step needs the class and subclass levels; "
+            f"{bundle.reference_id} maps {bundle.levels}"
+        )
+    class_level, subclass_level = bundle.levels[0], bundle.levels[1]
+    tree = bundle.tree()
+    try:
+        taxonomy = WmbTaxonomy.from_tree(
+            tree, class_level=class_level, subclass_level=subclass_level
+        )
+    except MouseRegionError as error:
+        raise MapError(f"{sample_id}: {error}") from error
+    cell_ids = pd.Index(unpruned["cell_id"].astype(str).unique())
+    classes = level_frame(unpruned, class_level).reindex(cell_ids)
+    subclasses = level_frame(unpruned, subclass_level).reindex(cell_ids)
+    xy = (
+        _table_xy(loaded, cell_ids)
+        if region_shares is not None and request.needs_region_shares
+        else None
+    )
+    try:
+        plan = plan_region_step(
+            request,
+            cell_ids=cell_ids,
+            class_names=classes["name"].astype(object).to_numpy(),
+            class_labels=classes["assignment"].astype(object).to_numpy(),
+            class_bp=classes["bp"].to_numpy(np.float64),
+            subclass_names=subclasses["name"].astype(object).to_numpy(),
+            subclass_labels=subclasses["assignment"].astype(object).to_numpy(),
+            subclass_bp=subclasses["bp"].to_numpy(np.float64),
+            xy=xy,
+            shares=region_shares.shares if region_shares is not None else None,
+            taxonomy=taxonomy,
+            config=config.mouse_regions,
+        )
+    except MouseRegionError as error:
+        raise MapError(f"{sample_id}: {error}") from error
+    for reason in plan.reasons:
+        logger.warning("%s: %s", sample_id, reason)
+    remap_record: RegionRemapRecord | None = None
+    remap = unpruned.iloc[0:0].copy()
+    pruned = unpruned
+    remap_ids = plan.remap_cell_ids
+    if plan.status == "pruned" and len(remap_ids):
+        remap_record, remap = _remap_cells(
+            loaded,
+            run,
+            plan,
+            remap_ids,
+            config,
+            output=output,
+            sample_dir=sample_dir,
+            scratch=scratch,
+            processes=processes,
+            installed=installed,
+            published=published,
+            published_dir=published_dir,
+        )
+        pruned = merge_pruned_tidy(unpruned, remap)
+    class_changed, subclass_changed = changed_cells(
+        unpruned,
+        pruned,
+        class_level=class_level,
+        subclass_level=subclass_level,
+        cell_ids=cell_ids,
+    )
+    cells = region_cells_frame(
+        plan, class_changed=class_changed, subclass_changed=subclass_changed
+    )
+    inference = plan.inference
+    summary: dict[str, Any] = {
+        "sample_id": sample_id,
+        "run_id": run.run_id,
+        "requested": request.value,
+        "source": request.source,
+        "status": plan.status,
+        "inferred_regions": list(inference.inferred_regions) if inference else [],
+        "present_regions": list(plan.present_regions),
+        "nodes_to_drop": [list(node.as_pair()) for node in plan.nodes],
+    }
+    cells_path = write_region_cells(
+        cells, sample_dir / region_cells_filename(sample_id), summary
+    )
+    levels = plan.dropped_level
+    record = MouseRegionRecord(
+        rule_variant=config.mouse_regions.rule_variant,
+        run_id=run.run_id,
+        requested=request.value,
+        source=request.source,
+        status=plan.status,
+        reasons=list(plan.reasons),
+        params=config.mouse_regions.model_dump(mode="json"),
+        region_share=(
+            region_shares.provenance()
+            if region_shares is not None and request.needs_region_shares
+            else None
+        ),
+        n_table_cells=len(cell_ids),
+        n_confident_neurons=inference.n_confident_neurons if inference else 0,
+        n_voting_neurons=inference.n_voting_neurons if inference else 0,
+        n_assigned_tiles=inference.n_assigned_tiles if inference else 0,
+        tile_counts=dict(inference.tile_counts) if inference else {},
+        largest_component=dict(inference.largest_component) if inference else {},
+        inferred_regions=list(inference.inferred_regions) if inference else [],
+        present_regions=list(plan.present_regions),
+        nodes_to_drop=list(plan.nodes),
+        n_dropped_classes=sum(1 for node in plan.nodes if node.kind == "class"),
+        n_dropped_subclasses=count_dropped_subclasses(plan.nodes, taxonomy),
+        n_cells_region_dropped=int(sum(value is not None for value in levels)),
+        n_cells_region_dropped_class=int(sum(value == "class" for value in levels)),
+        n_cells_class_changed=int(class_changed.sum()),
+        n_cells_subclass_changed=int(subclass_changed.sum()),
+        remap=remap_record,
+        cells_parquet=_relative(cells_path, output),
+        cells_parquet_sha256=file_sha256(cells_path),
+    )
+    logger.info(
+        "%s: region step %s (%s): present %s, %d node(s) dropped, %d cell(s) re-mapped",
+        sample_id,
+        record.status,
+        record.source,
+        ";".join(record.present_regions) or "-",
+        len(record.nodes_to_drop),
+        record.n_cells_region_dropped,
+    )
+    outputs = MouseRegionOutputs(
+        record=record,
+        cells=cells.set_index(CELL_ID, drop=False),
+        unpruned=unpruned,
+        pruned=pruned,
+        remap=remap,
+    )
+    return record, outputs
+
+
+def _reusable_remap(
+    published: MapManifest | None,
+    published_dir: Path | None,
+    *,
+    sample_id: str,
+    fingerprint: str,
+    build_hash: str,
+    engine_params: Mapping[str, Any],
+    ctm_version: str | None,
+    lookup_digest: str,
+    nodes_to_drop: Sequence[Sequence[str]],
+    keep_extended_json: bool,
+) -> tuple[Path, RegionRemapRecord] | None:
+    """Return a published re-map identical to the one requested, if any.
+
+    Identical as for ``_reusable_parquet``, plus the same drop list.
+    """
+    if published is None or published_dir is None:
+        return None
+    sample = published.samples.get(sample_id)
+    regions = sample.mouse_regions if sample is not None else None
+    remap = regions.remap if regions is not None else None
+    if remap is None:
+        return None
+    reasons = []
+    if remap.query_fingerprint != fingerprint:
+        reasons.append("query fingerprint")
+    if remap.build_hash != build_hash:
+        reasons.append("build_hash")
+    if remap.engine_params != dict(engine_params):
+        reasons.append("engine parameters")
+    if remap.ctm_version != ctm_version:
+        reasons.append("ctm version")
+    if remap.tidy_schema_version != TIDY_SCHEMA_VERSION:
+        reasons.append("tidy schema version")
+    if remap.lookup_sha256 != lookup_digest:
+        reasons.append("lookup")
+    if remap.nodes_to_drop != [list(pair) for pair in nodes_to_drop]:
+        reasons.append("nodes to drop")
+    if keep_extended_json and (
+        remap.extended_json is None
+        or not (published_dir / remap.extended_json).is_file()
+    ):
+        reasons.append("kept extended JSON")
+    path = published_dir / remap.parquet
+    if not reasons and (
+        not path.is_file() or file_sha256(path) != remap.parquet_sha256
+    ):
+        reasons.append("parquet missing or changed")
+    if reasons:
+        logger.info(
+            "%s %s: published re-map not reused (%s differ)",
+            sample_id,
+            remap.run_id,
+            ", ".join(reasons),
+        )
+        return None
+    return path, remap
+
+
+def _remap_cells(
+    loaded: LoadedSample,
+    run: MapBundle,
+    plan: RegionPlan,
+    remap_ids: pd.Index,
+    config: AnnotationConfig,
+    *,
+    output: Path,
+    sample_dir: Path,
+    scratch: Path,
+    processes: int,
+    installed: str,
+    published: MapManifest | None,
+    published_dir: Path | None,
+) -> tuple[RegionRemapRecord, pd.DataFrame]:
+    """Re-map the cells whose unpruned call was dropped, on the pruned tree.
+
+    ``--nodes_to_drop`` removes the nodes from the mapping precompute and
+    the lookup is filtered to the pruned tree (``pruned_lookup``), so no
+    zero-marker parent reaches ``cell_type_mapper`` (plan §7.2 step 4).
+    """
+    sample_id = loaded.sample.sample_id
+    bundle = run.bundle
+    query = build_sample_query(loaded, run.panel)
+    positions = query.cell_ids.get_indexer(remap_ids)
+    if (positions < 0).any():
+        raise MapError(f"{sample_id}: re-map cells are not table cells")
+    counts = query.counts[positions]
+    fingerprint = query_fingerprint(
+        remap_ids, query.total_counts[positions], query.gene_ids
+    )
+    try:
+        validation = pruned_lookup(
+            read_lookup(bundle.lookup), bundle.tree(), plan.nodes, query.gene_ids
+        )
+    except ValueError as error:
+        raise MapError(f"{sample_id}: pruned lookup: {error}") from error
+    digest = lookup_sha256(validation.lookup)
+    nodes = [list(node.as_pair()) for node in plan.nodes]
+    params = MmcEngineParams.from_reference_spec(run.spec, n_processors=processes)
+    run_id = run.run_id + REMAP_RUN_SUFFIX
+    parquet = sample_dir / MMC_PARQUET_TEMPLATE.format(
+        sample_id=sample_id, run_id=run_id
+    )
+    collapsed = [parent.key for parent in validation.collapsed]
+    reusable = (
+        _reusable_remap(
+            published,
+            published_dir,
+            sample_id=sample_id,
+            fingerprint=fingerprint,
+            build_hash=bundle.build_hash,
+            engine_params=params.reuse_key(),
+            ctm_version=installed,
+            lookup_digest=digest,
+            nodes_to_drop=nodes,
+            keep_extended_json=config.keep_extended_json,
+        )
+        if config.reuse_published
+        else None
+    )
+    if reusable is not None:
+        source, published_record = reusable
+        if source.resolve() != parquet.resolve():
+            shutil.copy2(source, parquet)
+        extended: str | None = None
+        if config.keep_extended_json and published_record.extended_json is not None:
+            assert published_dir is not None
+            kept = published_dir / published_record.extended_json
+            target = parquet.with_name(
+                parquet.name.removesuffix(".parquet") + EXTENDED_JSON_GZ_SUFFIX
+            )
+            if kept.resolve() != target.resolve():
+                shutil.copy2(kept, target)
+            extended = _relative(target, output)
+        record = published_record.model_copy(
+            update={
+                "parquet": _relative(parquet, output),
+                "bundle_path": str(bundle.path),
+                "extended_json": extended,
+                "reused": True,
+                "reused_from": str(source.resolve()),
+            }
+        )
+        logger.info("%s: reused the pruned re-map %s", run_id, source)
+    else:
+        run_scratch = scratch / f"{sample_id}_{run_id}"
+        try:
+            run_scratch.mkdir(parents=True, exist_ok=True)
+            lookup_path = run_scratch / "lookup.pruned.json"
+            lookup_path.write_text(json.dumps(validation.lookup) + "\n", "utf-8")
+            query_path = write_query_h5ad(
+                counts, remap_ids, query.gene_ids, run_scratch / "query.h5ad"
+            )
+            logger.info(
+                "%s: re-mapping %d cell(s) without %d node(s)",
+                sample_id,
+                len(remap_ids),
+                len(nodes),
+            )
+            result = run_mmc(
+                query_path,
+                bundle,
+                params,
+                output_parquet=parquet,
+                work_dir=run_scratch,
+                expected_ctm_version=config.ctm_version,
+                lookup_path=lookup_path,
+                nodes_to_drop=[node.as_pair() for node in plan.nodes],
+                keep_extended_json=config.keep_extended_json,
+                log_dir=output / "logs",
+                run_metadata={
+                    "run_id": run_id,
+                    "sample_id": sample_id,
+                    "query_fingerprint": fingerprint,
+                    "purposes": [REGION_REMAP_PURPOSE],
+                    "nodes_to_drop": nodes,
+                },
+            )
+        finally:
+            shutil.rmtree(run_scratch, ignore_errors=True)
+        record = RegionRemapRecord(
+            run_id=run_id,
+            reference_id=run.reference_id,
+            build_hash=bundle.build_hash,
+            bundle_path=str(bundle.path),
+            parquet=_relative(parquet, output),
+            parquet_sha256=file_sha256(parquet),
+            n_cells=result.n_cells,
+            n_query_genes=result.n_query_genes,
+            query_fingerprint=fingerprint,
+            lookup_sha256=digest,
+            collapsed_parents=collapsed,
+            nodes_to_drop=nodes,
+            engine_params=params.reuse_key(),
+            ctm_version=result.ctm_version,
+            ctm_commit=result.ctm_commit,
+            tidy_schema_version=TIDY_SCHEMA_VERSION,
+            wall_s=result.wall_s,
+            peak_rss_gb=result.peak_rss_gb,
+            extended_json=(
+                _relative(result.extended_json, output)
+                if result.extended_json is not None
+                else None
+            ),
+        )
+    remap, _ = read_tidy_parquet(parquet)
+    return record, remap
 
 
 def _subset_bundle_for(
@@ -2336,13 +3076,30 @@ def published_layout(path: Path | str) -> PublishedLayout:
     )
 
 
+# Per pair x segmentation publish directories of a results tree
+# (``<root>/<pair>/<seg>/<name>/...``): the clustering outputs and the
+# annotation steps' (plan §3.2-§3.6).
+RESULTS_STEP_DIRS: Final[frozenset[str]] = frozenset(
+    {
+        "clustering_squidpy",
+        "annotation_panel",
+        "annotation_map",
+        "annotation_resolve",
+        "annotation_report",
+    }
+)
+
+
 def results_root_of(path: Path | str) -> Path | None:
     """Return the results root that holds a file, if it sits in a results tree.
 
     A published clustered H5AD gives its ``<root>`` directly
     (``published_layout``). Any other file (a prepared H5AD, a view manifest
-    target) is placed by its nearest ``clustering_squidpy`` ancestor:
-    ``<root>/<pair>/<seg>/clustering_squidpy/...``.
+    target, a published MAP manifest or panel file) is placed by its nearest
+    step ancestor (``RESULTS_STEP_DIRS``):
+    ``<root>/<pair>/<seg>/clustering_squidpy/...`` or
+    ``<root>/<pair>/<seg>/annotation_map/annotation_map_out/...`` (and
+    ``annotation_panel``, ``annotation_resolve``, ``annotation_report``).
 
     Args:
         path: An input file.
@@ -2355,7 +3112,7 @@ def results_root_of(path: Path | str) -> Path | None:
         return layout.results_root
     resolved = Path(path).resolve()
     for ancestor in resolved.parents:
-        if ancestor.name == "clustering_squidpy" and len(ancestor.parents) > 2:
+        if ancestor.name in RESULTS_STEP_DIRS and len(ancestor.parents) > 2:
             return ancestor.parents[2]
     return None
 
@@ -2517,7 +3274,7 @@ def write_refused_manifest(
         ctm_commit=ctm_commit(),
         n_processors=n_processors or default_n_processors(),
         min_counts=config.require_min_counts(),
-        mouse_region_step=MOUSE_REGION_STEP if config.species == "mouse" else None,
+        mouse_region_step=_mouse_region_step_label(config),
         panel_status="refused",
         panel_reasons=list(required.reasons),
         thresholds=config.thresholds.model_dump(mode="json"),
@@ -2547,3 +3304,2391 @@ def bundle_ref_bundle(ref_path: Path | str) -> tuple[tuple[str, str | None], Mmc
     """
     ref = BundleRef.model_validate_json(Path(ref_path).read_text(encoding="utf-8"))
     return (ref.reference_id, ref.panel_hash), MmcBundle.from_bundle_ref(ref)
+
+
+# --------------------------------------------------------------------------
+# annotate_resolve (CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE, plan §3.4; M4)
+
+RESOLVE_SUMMARY_SUFFIX: Final = "_resolve_summary.json"
+# The run record (created_at, wall time, absolute input paths) is kept out of
+# the summary so annotation_resolve_out is byte-deterministic for M5's
+# deep-cached COMPUTE_CPU (review of M4).
+RESOLVE_RUN_SUFFIX: Final = "_resolve_run.json"
+RESOLVE_SUMMARY_SCHEMA_VERSION: Final = 2
+RESOLVE_STEP: Final = "annotate_resolve"
+MISSING_INSTANCE_ID: Final = -1
+# Plan §8.5: cross-platform statistics of a per_platform pair come from the
+# WHB runs on the intersection panel, and only at broad level (flagged) when
+# the intersection has fewer genes or is broad-only by resolvability.
+XPANEL_PURPOSE: Final = "intersection_xpanel"
+XPANEL_MIN_GENES: Final = 100
+# Composition kinds of a per_platform pair's cross-platform JSD: RESOLVE does
+# not resolve the intersection run, and the own-panel confident labels rest
+# on different gene sets, so the confident-only kind is left out.
+XPANEL_KINDS: Final[tuple[str, ...]] = ("soft", "soft_ge30", "argmax")
+RESTRICTED_LOOKUP_REASON: Final = "restricted_lookup:parent_resolvability"
+
+
+class ResolveError(RuntimeError):
+    """RESOLVE cannot run on its inputs (an infrastructure error)."""
+
+
+def resolve_summary_filename(pair_id: str | None) -> str:
+    """Return ``<pair>_resolve_summary.json`` (without a pair: no prefix)."""
+    return f"{pair_id}{RESOLVE_SUMMARY_SUFFIX}" if pair_id else "resolve_summary.json"
+
+
+def resolve_run_filename(pair_id: str | None) -> str:
+    """Return ``<pair>_resolve_run.json`` (without a pair: no prefix)."""
+    return f"{pair_id}{RESOLVE_RUN_SUFFIX}" if pair_id else "resolve_run.json"
+
+
+@dataclass(frozen=True)
+class ResolveRun:
+    """One MAP run as RESOLVE reads it: its record, bundle and tidy table.
+
+    Attributes:
+        record: The run in ``map_manifest.json``.
+        bundle: The bundle RESOLVE reads (the run's, or an override).
+        tidy: The run's tidy MMC table.
+        overridden: Whether the bundle is not the one the run mapped with.
+        same_lookup: Whether the bundle's marker lookup equals the one the
+            run mapped with (an override with another lookup is refused).
+        unpruned_tidy: For a pruned mouse primary run, the unpruned table
+            (``tidy`` is then the pruned one; plan §7.2).
+        regions: The mouse region step's outputs (per-cell region columns,
+            re-mapped cells), for the primary run of a mouse sample.
+    """
+
+    record: MapRunRecord
+    bundle: MmcBundle
+    tidy: pd.DataFrame
+    overridden: bool = False
+    same_lookup: bool = True
+    unpruned_tidy: pd.DataFrame | None = None
+    regions: MouseRegionOutputs | None = None
+
+    @property
+    def run_id(self) -> str:
+        """Return the run id."""
+        return self.record.run_id
+
+    @property
+    def prefix(self) -> str:
+        """Return the raw engine column prefix (``mmc_whb``, ``mmc_whb_setc``)."""
+        base = ENGINE_PREFIXES.get(self.record.reference_id, self.record.reference_id)
+        purpose = self.record.purposes[0] if self.record.purposes else "annotation"
+        return f"mmc_{base}{RUN_SUFFIXES.get(purpose, '')}"
+
+    @property
+    def leaf_level(self) -> str:
+        """Return the bundle's first mapping level (WHB supercluster)."""
+        return self.bundle.levels[0]
+
+    @property
+    def leaf_level_name(self) -> str:
+        """Return the tidy table's token of the leaf level (``supercluster``)."""
+        rows = self.tidy[self.tidy["level"].astype(str) == self.leaf_level]
+        if len(rows):
+            return str(rows["level_name"].astype(str).iloc[0])
+        return self.leaf_level
+
+
+# (reference_id, panel_hash) -> the bundle directory RESOLVE should read, or
+# None to keep the run's (``current_store_bundles``).
+BundleFinder = Callable[[str, str | None], Path | None]
+
+
+def current_store_bundles(store: ReferenceStore) -> BundleFinder:
+    """Return a finder of the store's current bundle per (reference, panel).
+
+    RESOLVE on published MAP outputs can read the store's current bundles
+    (current builder, current resolvability tables; ``locate_bundle``) instead
+    of the ones the runs mapped with, when their marker lookups are the same.
+
+    Args:
+        store: The reference store.
+
+    Returns:
+        The finder.
+    """
+
+    def find(reference_id: str, panel_hash: str | None) -> Path | None:
+        return locate_bundle(store, reference_id, panel_hash).path
+
+    return find
+
+
+def staged_bundle_finder(
+    ref_paths: Sequence[Path | str],
+    manifest: MapManifest,
+    *,
+    require: bool = False,
+) -> BundleFinder:
+    """Return a finder of the bundles that PREP's ``bundle_ref.json`` files name.
+
+    A pipeline RESOLVE task (``CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE``) resolves
+    each run with the bundle ref Nextflow staged for its (reference, panel),
+    the one MAP mapped with, and never looks in the store: a bundle the task
+    did not stage is invisible to ``-resume`` (as MAP's
+    ``--require-bundle-refs``).
+
+    Args:
+        ref_paths: ``bundle_ref.json`` files.
+        manifest: The MAP manifest whose runs they must cover.
+        require: Every run must have a ref with the ``build_hash`` it mapped
+            with; without it a run no ref names keeps its own bundle and a
+            ref of another build acts as an override (whose marker lookup
+            ``load_resolve_runs`` still checks).
+
+    Returns:
+        The finder.
+
+    Raises:
+        ResolveError: If two refs name one (reference, panel) with different
+            builds or, with ``require``, a run has no ref or was mapped with
+            another build than its ref's (a stale MAP output).
+    """
+    refs: dict[tuple[str, str | None], BundleRef] = {}
+    for path in ref_paths:
+        ref = BundleRef.model_validate_json(Path(path).read_text(encoding="utf-8"))
+        key = (ref.reference_id, ref.panel_hash)
+        known = refs.get(key)
+        if known is not None and known.build_hash != ref.build_hash:
+            raise ResolveError(
+                f"two bundle refs name {ref.reference_id} on panel "
+                f"{str(ref.panel_hash)[:16]} with different builds "
+                f"({known.build_hash[:16]}, {ref.build_hash[:16]})"
+            )
+        refs[key] = ref
+    if require:
+        for sample in manifest.samples.values():
+            for run in sample.runs.values():
+                staged = refs.get((run.reference_id, run.panel_hash))
+                if staged is None:
+                    raise ResolveError(
+                        f"{sample.sample_id} run {run.run_id} mapped "
+                        f"{run.reference_id} on panel {str(run.panel_hash)[:16]}, "
+                        "but no bundle ref names that bundle"
+                    )
+                if staged.build_hash != run.build_hash:
+                    raise ResolveError(
+                        f"{sample.sample_id} run {run.run_id} was mapped with "
+                        f"bundle {run.build_hash[:16]}, but the staged bundle ref "
+                        f"is {staged.build_hash[:16]}: the MAP output is stale"
+                    )
+
+    def find(reference_id: str, panel_hash: str | None) -> Path | None:
+        found = refs.get((reference_id, panel_hash))
+        return None if found is None else Path(found.path)
+
+    return find
+
+
+def _resolve_bundle(
+    record: MapRunRecord,
+    overrides: Mapping[str, Path],
+    finder: BundleFinder | None,
+) -> tuple[MmcBundle, bool]:
+    path = overrides.get(record.run_id) or overrides.get(record.reference_id)
+    if path is None and finder is not None:
+        path = finder(record.reference_id, record.panel_hash)
+    if path is None:
+        return MmcBundle.from_dir(record.bundle_path), False
+    bundle = MmcBundle.from_dir(path)
+    if bundle.reference_id != record.reference_id:
+        raise ResolveError(
+            f"bundle {path} is a {bundle.reference_id} bundle, not "
+            f"{record.reference_id} (run {record.run_id})"
+        )
+    if record.panel_hash is not None and bundle.panel_hash != record.panel_hash:
+        raise ResolveError(
+            f"bundle {path} was built on panel {str(bundle.panel_hash)[:16]}, but run "
+            f"{record.run_id} mapped panel {record.panel_hash[:16]}"
+        )
+    return bundle, Path(path).resolve() != Path(record.bundle_path).resolve()
+
+
+def load_resolve_runs(
+    map_dir: Path | str,
+    sample: MapSampleRecord,
+    *,
+    bundle_overrides: Mapping[str, Path] | None = None,
+    bundle_finder: BundleFinder | None = None,
+    check_sha256: bool = True,
+    region_share_dir: Path | str | None = None,
+) -> dict[str, ResolveRun]:
+    """Read one sample's MAP runs: tidy parquets and the bundles to resolve with.
+
+    Args:
+        map_dir: The directory holding ``map_manifest.json``.
+        sample: The sample's manifest record.
+        bundle_overrides: Run id or reference id to a bundle directory
+            (``wmb_region_share`` names the mouse region-share bundle).
+        bundle_finder: Picks a bundle per (reference, panel) when no override
+            names the run (``current_store_bundles``).
+        check_sha256: Check each parquet against its recorded sha256.
+        region_share_dir: The mouse region-share bundle to read (a staged
+            bundle ref); default: a ``wmb_region_share`` override, else the
+            path the region step recorded.
+
+    Returns:
+        Run id to run. A mouse sample's primary run carries its region step
+        (``ResolveRun.regions``, with the opened region-share bundle) and,
+        when the step pruned, the pruned tidy table as ``tidy`` (the
+        unpruned one as ``unpruned_tidy``).
+
+    Raises:
+        ResolveError: If a parquet changed, an override's reference, panel
+            or marker lookup differs from what the run mapped with, or the
+            region-share bundle is not the build the region step used.
+    """
+    root = Path(map_dir)
+    overrides = dict(bundle_overrides or {})
+    runs: dict[str, ResolveRun] = {}
+    for run_id, record in sample.runs.items():
+        parquet = root / record.parquet
+        if check_sha256 and file_sha256(parquet) != record.parquet_sha256:
+            raise ResolveError(
+                f"{parquet} differs from the sha256 map_manifest.json recorded"
+            )
+        tidy, _ = read_tidy_parquet(parquet)
+        bundle, overridden = _resolve_bundle(record, overrides, bundle_finder)
+        same_lookup = bundle.lookup_sha256 == (
+            record.lookup_sha256 or record.bundle_lookup_sha256
+        )
+        if overridden and not same_lookup and not record.lookup_restricted:
+            raise ResolveError(
+                f"run {run_id} mapped with lookup "
+                f"{str(record.lookup_sha256)[:16]}, but bundle {bundle.path} has "
+                f"lookup {str(bundle.lookup_sha256)[:16]}: its tables do not "
+                "describe that mapping"
+            )
+        if overridden:
+            logger.info(
+                "%s %s: resolving with bundle %s (mapped with %s)",
+                sample.sample_id,
+                run_id,
+                bundle.build_hash[:16],
+                record.build_hash[:16],
+            )
+        runs[run_id] = ResolveRun(
+            record=record,
+            bundle=bundle,
+            tidy=tidy,
+            overridden=overridden,
+            same_lookup=same_lookup,
+        )
+    regions = sample.mouse_regions
+    if regions is not None:
+        base = runs.get(regions.run_id)
+        if base is None:
+            raise ResolveError(
+                f"{sample.sample_id}: the region step read run {regions.run_id}, "
+                "which the manifest does not record"
+            )
+        share_path = (
+            region_share_dir
+            if region_share_dir is not None
+            else overrides.get(REGION_SHARE_REFERENCE_ID)
+        )
+        try:
+            outputs = load_region_outputs(
+                root, regions, base.tidy, check_sha256=check_sha256
+            )
+            share, problem = open_region_share(regions, share_path)
+        except MouseRegionError as error:
+            raise ResolveError(f"{sample.sample_id}: {error}") from error
+        if problem is not None:
+            logger.warning("%s: %s", sample.sample_id, problem)
+        outputs = replace(outputs, region_share=share, region_share_problem=problem)
+        runs[regions.run_id] = replace(
+            base, tidy=outputs.pruned, unpruned_tidy=base.tidy, regions=outputs
+        )
+    return runs
+
+
+def run_for_role(
+    runs: Mapping[str, ResolveRun], role: str, purpose: str = "annotation"
+) -> ResolveRun | None:
+    """Return the sample's run of a role and purpose, if any.
+
+    Args:
+        runs: Run id to run.
+        role: ``primary``, ``secondary``, ...
+        purpose: The run purpose (``annotation``).
+
+    Returns:
+        The first matching run, or ``None``.
+    """
+    return next(
+        (
+            run
+            for run in runs.values()
+            if run.record.role == role and purpose in run.record.purposes
+        ),
+        None,
+    )
+
+
+def _level_or_empty(
+    tidy: pd.DataFrame, level: str, index: pd.Index
+) -> pd.DataFrame | None:
+    names = set(tidy["level"].astype(str)) | set(tidy["level_name"].astype(str))
+    if level not in names:
+        return None
+    return level_frame(tidy, level).reindex(index)
+
+
+def aggregated_scores(
+    frame: pd.DataFrame, group_of: Mapping[str, str | None]
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return a level's calls aggregated to parent groups (broad, NT).
+
+    Args:
+        frame: One taxonomy level of a tidy table (rows per cell).
+        group_of: Node name to its group (``None``: no group).
+
+    Returns:
+        ``(group, summed probability, runner-up group, margin)`` per cell.
+    """
+    aggregated = aggregate_parent_probability(frame, group_of)
+    margin = aggregated.probability - np.nan_to_num(
+        aggregated.runner_up_probability, nan=0.0
+    )
+    return (
+        aggregated.classes,
+        aggregated.probability,
+        aggregated.runner_up_class,
+        margin,
+    )
+
+
+def aggregate_margin(frame: pd.DataFrame) -> np.ndarray:
+    """Return the margin of a level's ``aggregate_probability`` to its runner-up.
+
+    MMC's ``aggregate_probability`` is the product of the bootstrap
+    probabilities along the assigned path, and a level's runner-ups are
+    children of the same parent, so the runner-up's aggregate probability is
+    its bootstrap probability times the parent's aggregate
+    (``aggregate_probability / bp``). The margin is therefore
+    ``aggregate * (bp - runner_up_bp) / bp``: on the same scale as the raw
+    column (§4.1: "raw margin") and never above it.
+
+    Args:
+        frame: One level of a tidy MMC table.
+
+    Returns:
+        The margins (NaN where the level has no call or ``bp`` is 0).
+    """
+    bp = pd.to_numeric(frame["bp"], errors="coerce").to_numpy(np.float64)
+    aggregate = pd.to_numeric(frame["aggregate_probability"], errors="coerce").to_numpy(
+        np.float64
+    )
+    runner = np.nan_to_num(
+        pd.to_numeric(
+            frame[runner_up_column(1, "probability")], errors="coerce"
+        ).to_numpy(np.float64),
+        nan=0.0,
+    )
+    with np.errstate(divide="ignore", invalid="ignore"):
+        parent = np.where(bp > 0, aggregate / bp, np.nan)
+    margin: np.ndarray = np.clip(aggregate - runner * parent, 0.0, None)
+    return margin
+
+
+def masked_objects(mask: np.ndarray, values: Any) -> np.ndarray:
+    """Return ``values`` as objects with ``None`` where ``mask`` is false."""
+    output = np.asarray(values, dtype=object).copy()
+    output[~np.asarray(mask, dtype=bool)] = None
+    return output
+
+
+@dataclass(frozen=True)
+class HumanCallInputs:
+    """The per-object calls of one human sample, with the leaf frame.
+
+    Attributes:
+        calls: ``consensus.HumanCalls`` (every object).
+        leaf: The primary leaf level of the table cells (tidy rows,
+            indexed by table-cell id), or ``None`` without a primary run.
+        table_rows: Object position of each table cell.
+    """
+
+    calls: HumanCalls
+    leaf: pd.DataFrame | None
+    table_rows: np.ndarray
+
+
+def human_calls_from_runs(
+    loaded: LoadedSample,
+    primary: ResolveRun | None,
+    secondary: ResolveRun | None,
+    *,
+    allow_fine_levels: bool = False,
+) -> HumanCallInputs:
+    """Build ``resolve_human``'s inputs from the MAP tidy tables (§5.2).
+
+    WHB: the supercluster call with its bootstrap probability,
+    ``avg_correlation``, best runner-up and margin; lineage, broad and NT
+    aggregate the supercluster bootstrap probabilities over the bundle's
+    vocab snapshot (E1 / E2, as MAP's provisional labels); the WHB cluster
+    only with ``allow_fine_levels``. SEA-AD: E2's 7-class label and broad
+    probability (``shadow.seaad_broad_calls`` with the class level) and the
+    subclass ``aggregate_probability``. Objects the runs did not map
+    (outside the table) have no call.
+
+    Args:
+        loaded: The sample's counts (every object).
+        primary: The WHB annotation run.
+        secondary: The SEA-AD annotation run.
+        allow_fine_levels: Also read the WHB cluster level.
+
+    Returns:
+        The calls.
+    """
+    from merxen.annotation.consensus import (
+        HumanCalls,
+        LevelCall,
+        LevelScores,
+        SeaCalls,
+        WhbCalls,
+    )
+    from merxen.annotation.shadow import seaad_broad_calls
+
+    obs = pd.Index(loaded.obs_names.astype(str))
+    table_rows = np.flatnonzero(loaded.in_table)
+    whb: WhbCalls | None = None
+    leaf_table: pd.DataFrame | None = None
+    if primary is not None:
+        vocab = primary.bundle.vocab()
+        leaf_level = primary.leaf_level
+        leaf = level_frame(primary.tidy, leaf_level)
+        leaf.index = leaf.index.astype(str)
+        unknown = leaf.index.difference(obs)
+        if len(unknown):
+            raise ResolveError(
+                f"{loaded.sample.sample_id}: run {primary.run_id} names "
+                f"{len(unknown)} cells absent from the sample, e.g. {list(unknown[:3])}"
+            )
+        frame = leaf.reindex(obs)
+        leaf_table = leaf.reindex(obs[table_rows])
+        mapped = frame["assignment"].notna().to_numpy()
+        lineage_of = vocab_lookup(vocab, leaf_level, "lineage")
+        broad_of = vocab_lookup(vocab, leaf_level, "broad_class")
+        nt_of = vocab_lookup(vocab, leaf_level, "nt")
+        nt_groups = {
+            node: (nt if broad_of.get(node) == NEURONS else None)
+            for node, nt in nt_of.items()
+        }
+        runner_probability = pd.to_numeric(
+            frame[runner_up_column(1, "probability")], errors="coerce"
+        ).to_numpy(np.float64)
+        names = frame["name"].astype(object).to_numpy()
+        names = masked_objects(mapped, names)
+        supercluster = LevelCall.of(
+            names,
+            frame["bp"].to_numpy(np.float64),
+            corr=frame["avg_correlation"].to_numpy(np.float64),
+            runner_up=frame[runner_up_column(1, "name")].astype(object).to_numpy(),
+            margin=frame["bp"].to_numpy(np.float64)
+            - np.nan_to_num(runner_probability, nan=0.0),
+        )
+        corr = frame["avg_correlation"].to_numpy(np.float64)
+        scores = {}
+        for key, groups in (
+            ("lineage", lineage_of),
+            ("broad", broad_of),
+            ("nt", nt_groups),
+        ):
+            _classes, raw, runner, margin = aggregated_scores(frame, groups)
+            raw = np.where(mapped, raw, np.nan)
+            scores[key] = LevelScores.of(
+                raw, corr=corr, runner_up=runner, margin=margin
+            )
+        cluster: LevelCall | None = None
+        if allow_fine_levels and len(primary.bundle.levels) > 1:
+            fine = _level_or_empty(primary.tidy, primary.bundle.levels[1], obs)
+            if fine is not None:
+                fine_runner = pd.to_numeric(
+                    fine[runner_up_column(1, "probability")], errors="coerce"
+                ).to_numpy(np.float64)
+                cluster = LevelCall.of(
+                    fine["name"].astype(object).to_numpy(),
+                    fine["bp"].to_numpy(np.float64),
+                    corr=fine["avg_correlation"].to_numpy(np.float64),
+                    runner_up=fine[runner_up_column(1, "name")].astype(object),
+                    margin=fine["bp"].to_numpy(np.float64)
+                    - np.nan_to_num(fine_runner, nan=0.0),
+                )
+        whb = WhbCalls(
+            supercluster=supercluster,
+            lineage=scores["lineage"],
+            broad=scores["broad"],
+            nt=scores["nt"],
+            cluster=cluster,
+        )
+    sea: SeaCalls | None = None
+    if secondary is not None:
+        tidy = secondary.tidy
+        levels = secondary.bundle.levels
+        class_level = _level_or_empty(tidy, levels[0], obs) if levels else None
+        subclass = _level_or_empty(tidy, "subclass", obs)
+        if subclass is None and len(levels) > 1:
+            subclass = _level_or_empty(tidy, levels[1], obs)
+        supertype = _level_or_empty(tidy, "supertype", obs)
+        if supertype is None and len(levels) > 2:
+            supertype = _level_or_empty(tidy, levels[2], obs)
+        if subclass is None:
+            raise ResolveError(
+                f"{loaded.sample.sample_id}: run {secondary.run_id} has no subclass "
+                "level"
+            )
+        broad = seaad_broad_calls(subclass, supertype, class_level=class_level)
+        mapped_sea = subclass["assignment"].notna().to_numpy()
+        broad_names = masked_objects(mapped_sea, broad["broad"].astype(object))
+        sea = SeaCalls(
+            broad=LevelCall.of(
+                broad_names,
+                np.where(mapped_sea, broad["broad_raw"].to_numpy(np.float64), np.nan),
+            ),
+            subclass=LevelCall.of(
+                masked_objects(mapped_sea, subclass["name"].astype(object)),
+                subclass["aggregate_probability"].to_numpy(np.float64),
+                corr=subclass["avg_correlation"].to_numpy(np.float64),
+                runner_up=subclass[runner_up_column(1, "name")].astype(object),
+                margin=aggregate_margin(subclass),
+            ),
+        )
+    calls = HumanCalls(
+        total_counts=np.asarray(loaded.total_counts, dtype=np.int64),
+        in_table=np.asarray(loaded.in_table, dtype=bool),
+        whb=whb,
+        sea=sea,
+    )
+    return HumanCallInputs(calls=calls, leaf=leaf_table, table_rows=table_rows)
+
+
+def _panel_files(panel_dir: Path | None) -> dict[str, Path]:
+    """Map panel hash to its ``panel_genes*.json`` in an ANNOTATE_PANEL output."""
+    if panel_dir is None or not panel_dir.is_dir():
+        return {}
+    files: dict[str, Path] = {}
+    for path in sorted(panel_dir.glob("panel_genes*.json")):
+        try:
+            panel = load_annotation_panel(path)
+        except (ValueError, OSError) as error:
+            logger.warning("skipping unreadable panel file %s: %s", path, error)
+            continue
+        files.setdefault(panel.panel_hash, path)
+    return files
+
+
+def current_family(panel: AnnotationPanel, config: AnnotationConfig) -> AnnotationPanel:
+    """Return the panel with its family re-derived from the validated tables.
+
+    RESOLVE decides trust with the current ``validated_panels.csv`` (§8.2),
+    so a panel file written before its family was listed (e.g. an M3 shadow
+    run) gets the family ``ANNOTATE_PANEL`` would give it now
+    (``panel.panel_family``). Subset panels keep their parent's family.
+
+    Args:
+        panel: The annotation panel.
+        config: The annotation config (validated tables, ``family_min_jaccard``).
+
+    Returns:
+        The panel, with an updated family when it differs (logged).
+    """
+    from merxen.annotation.diagnostics import load_validated_panels
+    from merxen.annotation.panel import panel_family
+
+    if panel.panel_family is not None and panel.panel_family.basis == "subset":
+        return panel
+    validated = load_validated_panels(config.panel.validated_panels_path)
+    family = panel_family(
+        panel.ensembl_ids,
+        species=panel.species,
+        platforms=panel.platforms,
+        known_families=validated.known_families(panel.species),
+        min_jaccard=config.panel.family_min_jaccard,
+    )
+    if family == panel.panel_family:
+        return panel
+    logger.warning(
+        "panel %s (%s): family %s re-derived as %s (%s) from the current "
+        "validated panels",
+        panel.name,
+        panel.panel_hash[:16],
+        None if panel.panel_family is None else panel.panel_family.family_id,
+        family.family_id,
+        family.basis,
+    )
+    return panel.model_copy(update={"panel_family": family})
+
+
+def trust_for_run(
+    run: ResolveRun,
+    panel: AnnotationPanel | None,
+    config: AnnotationConfig,
+    *,
+    panel_report: Mapping[str, Any] | None = None,
+) -> TrustDecision:
+    """Return the trust decision of one run's (reference, panel) (§8.2).
+
+    The same decision PREP and ``annotation-panel-simulate`` take:
+    ``diagnostics.panel_diagnostics`` of the annotation panel with the
+    bundle's ``bundle.json``, then ``trust_for_panel``.
+
+    Args:
+        run: The run (its bundle's manifest).
+        panel: The run's annotation panel (``panel_genes*.json``).
+        config: The annotation config (trust rules, validated panels).
+        panel_report: ``panel_report.json`` content (gene-ID diagnostics).
+
+    Returns:
+        The decision.
+
+    Raises:
+        ResolveError: If the panel is unknown.
+    """
+    from merxen.annotation.diagnostics import (
+        TrustRules,
+        load_validated_panels,
+        panel_diagnostics,
+        trust_for_panel,
+    )
+
+    if panel is None:
+        raise ResolveError(
+            f"run {run.run_id}: no panel_genes*.json with panel hash "
+            f"{str(run.record.panel_hash)[:16]} (pass --panel-dir)"
+        )
+    diagnostics = panel_diagnostics(
+        panel, panel_report=panel_report, bundles=[run.bundle.manifest]
+    )
+    return trust_for_panel(
+        diagnostics,
+        reference_id=run.record.reference_id,
+        role=run.record.role,  # type: ignore[arg-type]
+        validated=load_validated_panels(config.panel.validated_panels_path),
+        rules=TrustRules.from_config(config),
+    )
+
+
+def refused_trust(
+    reference_id: str, species: Species, panel_hash: str, reasons: Sequence[str]
+) -> TrustDecision:
+    """Return a refused primary trust decision (MAP skipped a refused panel).
+
+    Args:
+        reference_id: The primary reference.
+        species: Species.
+        panel_hash: The sample's declared panel hash.
+        reasons: The panel's refusal reasons.
+
+    Returns:
+        The decision (state ``refused``).
+    """
+    from merxen.annotation.diagnostics import TrustDecision, TrustReason
+
+    return TrustDecision(
+        reference_id=reference_id,
+        role="primary",
+        species=species,
+        panel_hash=panel_hash,
+        state="refused",
+        reasons=tuple(
+            TrustReason(code="panel_refused", detail=str(reason))
+            for reason in (reasons or ["the panel was refused before mapping"])
+        ),
+    )
+
+
+def refused_sample_record(loaded: LoadedSample, fingerprint: str) -> MapSampleRecord:
+    """Return the manifest record of a sample MAP skipped (refused panel).
+
+    Args:
+        loaded: The sample's counts.
+        fingerprint: ``loaded.sample_fingerprint()``.
+
+    Returns:
+        A record without runs and with ``panel_status="refused"``.
+    """
+    return MapSampleRecord(
+        sample_id=loaded.sample.sample_id,
+        platform=loaded.sample.platform,
+        source=loaded.sample.source,
+        h5ad_path=str(loaded.sample.h5ad_path),
+        sample_fingerprint=fingerprint,
+        n_objects=loaded.n_objects,
+        n_table_cells=loaded.n_table_cells,
+        min_counts=loaded.min_counts,
+        declared_panel_hash=loaded.declared.panel_hash,
+        n_features=len(loaded.feature_names),
+        n_resolved_features=sum(1 for gene_id in loaded.feature_ids if gene_id),
+        panel_status="refused",
+    )
+
+
+def read_spatial(path: Path | str) -> tuple[np.ndarray | None, str | None]:
+    """Read ``obsm['spatial']`` and the shape key of an H5AD (composition CIs).
+
+    Args:
+        path: A prepared or clustered H5AD.
+
+    Returns:
+        ``(xy, shape_key)``: ``(n, 2)`` coordinates in µm (``None`` when the
+        file has none) and ``uns['merxen_clustering_squidpy']['shape_key']``
+        (``*_aligned_nonrigid`` for MERSCOPE coordinates in the Xenium frame).
+    """
+    import h5py
+
+    with h5py.File(path, "r") as handle:
+        xy = None
+        if "obsm" in handle and "spatial" in handle["obsm"]:
+            xy = np.asarray(handle["obsm"]["spatial"][()], dtype=np.float64)[:, :2]
+        key = "uns/merxen_clustering_squidpy/shape_key"
+        shape_key = None
+        if key in handle:
+            value = _read_elem(handle[key])
+            shape_key = value.decode() if isinstance(value, bytes) else str(value)
+    return xy, shape_key
+
+
+def in_fixed_frame(platform: str, shape_key: str | None) -> bool:
+    """Whether a section's coordinates are in the pair's fixed (Xenium) frame."""
+    return str(platform).upper() == "XENIUM" or "_aligned" in str(shape_key or "")
+
+
+def default_alignment_dir(h5ad_path: Path | str, pair_id: str | None) -> Path | None:
+    """Return ``<results>/<pair>/alignment/align_out`` of an input, if it exists.
+
+    Args:
+        h5ad_path: An input H5AD in a results tree.
+        pair_id: The pair.
+
+    Returns:
+        The directory, or ``None``.
+    """
+    root = results_root_of(h5ad_path)
+    if root is None or not pair_id:
+        return None
+    candidate = root / pair_id / "alignment" / "align_out"
+    return candidate if candidate.is_dir() else None
+
+
+def load_pair_mask(alignment_dir: Path | None) -> Any | None:
+    """Load the pair's shared tissue mask from an ``align_out`` directory.
+
+    Args:
+        alignment_dir: ``align_out`` (``shared_tissue_mask.npy`` and
+            ``registration_summary.json``), or ``None``.
+
+    Returns:
+        ``panel.SharedTissueMask``, or ``None`` when absent or unreadable.
+    """
+    from merxen.annotation.panel import load_shared_tissue_mask
+
+    if alignment_dir is None:
+        return None
+    mask_path = alignment_dir / "shared_tissue_mask.npy"
+    summary_path = alignment_dir / "registration_summary.json"
+    if not mask_path.is_file() or not summary_path.is_file():
+        return None
+    try:
+        return load_shared_tissue_mask(mask_path, summary_path)
+    except (ValueError, OSError) as error:
+        logger.warning("shared tissue mask in %s not used: %s", alignment_dir, error)
+        return None
+
+
+def human_branch_columns(
+    resolution: HumanResolution,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return ``ct_branch`` and ``ct_leaf`` of a human resolution (§4.1).
+
+    The branch is the map_first broad label (``vocab.broad_class_for_map_first``:
+    the confident broad class, else the ``Oligodendrocyte lineage`` / ``Neurons``
+    lineage fallback, else ``Mixed/Unknown``), with neurons split by a
+    confident NT (``Neurons/Excitatory`` / ``Neurons/Inhibitory``, else
+    ``Neurons/unresolved``) and the lineage fallback as
+    ``Oligodendrocyte lineage/unresolved``. The leaf is the confident WHB
+    supercluster, else ``unresolved``.
+
+    Args:
+        resolution: ``resolve_human`` output.
+
+    Returns:
+        ``(branch, leaf)`` per object.
+    """
+    from merxen.annotation.schema import CellStatus
+    from merxen.annotation.vocab import (
+        NT_EXCITATORY,
+        NT_INHIBITORY,
+        OLIGODENDROCYTE_LINEAGE,
+        UNRESOLVED_LABEL,
+        broad_classes_for_map_first,
+    )
+
+    labels = broad_classes_for_map_first(
+        resolution.final_level,
+        resolution.levels["broad"].name,
+        resolution.levels["lineage"].name,
+        species="human",
+    ).astype(str)
+    nt = resolution.levels["nt"]
+    nt_confident = nt.status == CellStatus.CONFIDENT.value
+    branch = np.asarray(labels.to_numpy(), dtype=object).copy()
+    neurons = branch == NEURONS
+    excitatory = neurons & nt_confident & (nt.name == NT_EXCITATORY)
+    inhibitory = neurons & nt_confident & (nt.name == NT_INHIBITORY)
+    branch[neurons] = "Neurons/unresolved"
+    branch[excitatory] = "Neurons/Excitatory"
+    branch[inhibitory] = "Neurons/Inhibitory"
+    branch[branch == OLIGODENDROCYTE_LINEAGE] = (
+        f"{OLIGODENDROCYTE_LINEAGE}/{UNRESOLVED_LABEL}"
+    )
+    supercluster = resolution.levels["supercluster"]
+    leaf = np.where(supercluster.confident, supercluster.name, UNRESOLVED_LABEL)
+    return branch, np.asarray(leaf, dtype=object)
+
+
+@dataclass
+class SampleResolution:
+    """RESOLVE's result for one sample.
+
+    Attributes:
+        sample_id: Sample id.
+        platform: Platform.
+        labels: The label table (§4.1).
+        provenance: ``AnnotationProvenance`` (§4.6).
+        summary: The sample's resolve-summary record.
+        section: Its composition rows on its own annotation run (the
+            per-sample composition; not comparable across platforms for a
+            ``per_platform`` pair).
+        xpanel_section: Its composition rows on the intersection-panel run
+            (``per_platform`` pairs: the pair JSD, §8.5).
+        cross_platform: Which run feeds its cross-platform statistics and at
+            which level (``cross_platform_record``).
+        labels_path: Where the table was written.
+        manifest_path: Where the provenance was written.
+    """
+
+    sample_id: str
+    platform: str
+    labels: pd.DataFrame
+    provenance: AnnotationProvenance
+    summary: dict[str, Any]
+    section: SectionComposition | None = None
+    xpanel_section: SectionComposition | None = None
+    cross_platform: dict[str, Any] = field(default_factory=dict)
+    labels_path: Path | None = None
+    manifest_path: Path | None = None
+
+
+def round_share(value: float | None) -> float | None:
+    """Return a share rounded to 6 decimals (``None`` when not finite)."""
+    if value is None or not np.isfinite(value):
+        return None
+    return round(float(value), 6)
+
+
+def _floats_only(record: Mapping[str, Any]) -> dict[str, float]:
+    return {
+        str(key): float(value)
+        for key, value in record.items()
+        if isinstance(value, int | float)
+        and not isinstance(value, bool)
+        and np.isfinite(value)
+    }
+
+
+def resolve_threshold_values(config: AnnotationConfig) -> dict[str, float]:
+    """Return the numeric thresholds of a config (provenance ``values``)."""
+    return _floats_only(config.thresholds.model_dump(mode="json"))
+
+
+def _emitted_bins(
+    emission: EmissionPlan, levels: Sequence[str]
+) -> dict[str, dict[str, list[int]]]:
+    decisions = emission.decisions
+    if decisions is None:
+        return {}
+    output: dict[str, dict[str, list[int]]] = {}
+    for level in levels:
+        table_level = emission.table_level(level)
+        regime = emission.regime(table_level)
+        rows = decisions[
+            (decisions["level"].astype(str) == table_level)
+            & (decisions["regime"].astype(str) == regime)
+            & (decisions["status"].astype(str) == "emitted")
+        ]
+        per_class: dict[str, list[int]] = {}
+        for cls, group in rows.groupby(rows["class"].astype(str)):
+            per_class[safe_token(str(cls))] = sorted(
+                int(depth) for depth in group["depth"]
+            )
+        output[safe_token(level)] = per_class
+    return output
+
+
+def resolvability_provenance(
+    tables: ResolvabilityTables | None,
+    emission: EmissionPlan,
+    resolution: HumanResolution | MouseResolution,
+    bundle: MmcBundle,
+    *,
+    reweighted: bool,
+    restricted_lookup: bool = False,
+) -> ResolvabilityProvenance:
+    """Return a primary run's resolvability provenance (§4.6).
+
+    Args:
+        tables: The bundle's resolvability tables (``None``: none).
+        emission: The emission plan RESOLVE applied.
+        resolution: The sample's resolution.
+        bundle: The primary bundle.
+        reweighted: Whether emission was reweighted to the composition.
+        restricted_lookup: Whether the run mapped with a restricted lookup.
+
+    Returns:
+        The provenance record.
+    """
+    from merxen.annotation.provenance import ResolvabilityProvenance
+    from merxen.annotation.resolvability import RESOLVABILITY_FILE
+
+    table = resolution.in_table
+    resolvable: dict[str, float] = {}
+    for level, item in resolution.emissions.items():
+        share = item.summary(table)["emitted_share"]
+        if share is not None:
+            resolvable[safe_token(level)] = round(float(share), 6)
+    # Inherited (§3.3): a subset bundle built with its family's tables, or a
+    # restricted lookup on the parent bundle (whose full-panel tables apply).
+    from_bundle = bool(
+        (bundle.manifest.get("builder_output") or {}).get(
+            "resolvability_inherited", False
+        )
+    )
+    inherited_reason: Literal["subset_bundle", "restricted_lookup"] | None = (
+        "restricted_lookup"
+        if restricted_lookup
+        else ("subset_bundle" if from_bundle else None)
+    )
+    if tables is None:
+        return ResolvabilityProvenance(
+            reweighted_to_composition=False,
+            resolvable_share=resolvable,
+            resolvability_inherited=inherited_reason is not None,
+            inherited_reason=inherited_reason,
+        )
+    summary = tables.summary
+    recipes = {item.get("name"): item for item in summary.get("recipes", [])}
+    decision_recipe = str(summary.get("decision_recipe"))
+    version = (recipes.get(decision_recipe) or {}).get("version")
+    files = {
+        str(item.get("path")): item.get("sha256")
+        for item in bundle.manifest.get("files", []) or []
+    }
+    d_max: dict[str, int] = {}
+    for cls, depth in (summary.get("d_max") or {}).get("broad", {}).items():
+        if depth is not None:
+            d_max[safe_token(str(cls))] = int(depth)
+    broad = resolution.levels["broad"]
+    extrapolated: dict[str, float] = {}
+    keys = np.asarray(broad.class_key, dtype=object)
+    for cls in sorted({str(key) for key in keys[table] if key is not None}):
+        members = table & (keys == cls)
+        if members.any():
+            extrapolated[safe_token(cls)] = round(
+                float(resolution.resolvability_extrapolated[members].mean()), 6
+            )
+    return ResolvabilityProvenance(
+        recipe=decision_recipe,
+        recipe_version=None if version is None else int(version),
+        sha256=files.get(RESOLVABILITY_FILE),
+        emitted_depth_bins=_emitted_bins(emission, list(resolution.emissions)),
+        d_max=d_max,
+        extrapolated_share=extrapolated,
+        reweighted_to_composition=reweighted,
+        resolvability_inherited=inherited_reason is not None,
+        inherited_reason=inherited_reason,
+        resolvable_share=resolvable,
+    )
+
+
+def reference_provenance(
+    run: ResolveRun, trust: TrustDecision | None
+) -> ReferenceProvenance:
+    """Return one run's reference provenance (§4.6).
+
+    Args:
+        run: The run and its bundle.
+        trust: The reference's trust decision on the panel.
+
+    Returns:
+        The provenance record.
+    """
+    from merxen.annotation.diagnostics import CoverageDiagnostics
+    from merxen.annotation.provenance import MarkerProvenance, ReferenceProvenance
+
+    manifest = run.bundle.manifest
+    output = manifest.get("builder_output") or {}
+    markers_record = output.get("markers") or {}
+    try:
+        coverage = CoverageDiagnostics.from_bundle_manifest(manifest)
+        markers = coverage.marker_provenance(
+            lookup_sha256=run.bundle.lookup_sha256,
+            n_per_utility=markers_record.get("n_per_utility"),
+        )
+        n_used: int | None = coverage.n_query_genes_used
+        absent: int | None = len(coverage.absent_from_reference)
+    except ValueError:
+        markers = MarkerProvenance(lookup_sha256=run.bundle.lookup_sha256)
+        n_used, absent = run.record.n_query_genes, None
+    return ReferenceProvenance(
+        reference_id=run.record.reference_id,
+        role=run.record.role,  # type: ignore[arg-type]
+        taxonomy_id=run.bundle.taxonomy_id,
+        levels=list(run.bundle.levels),
+        collapsed_parents=list(run.record.collapsed_parents),
+        drop_level=run.bundle.drop_level,
+        bundle_path=str(run.bundle.path),
+        build_hash=run.bundle.build_hash,
+        n_query_genes_used=n_used,
+        markers=markers,
+        panel_trust=None if trust is None else trust.state,
+        trust_reasons=[] if trust is None else trust.reason_codes,
+        n_panel_genes_absent=absent,
+    )
+
+
+def _composition_provenance(
+    shares: Mapping[str, Mapping[str, Any]],
+) -> dict[str, dict[str, float]]:
+    return {
+        safe_token(kind): {
+            key: float(value)
+            for key, value in record.items()
+            if key.startswith("share") and value is not None
+        }
+        for kind, record in shares.items()
+    }
+
+
+def _assigned_broad(names: np.ndarray) -> np.ndarray:
+    """The WHB vocab broad class of each supercluster name (sinks: ``None``)."""
+    from merxen.annotation.composition import whb_broad_of
+    from merxen.annotation.vocab import HUMAN_BROAD_CLASSES
+
+    broad_of = whb_broad_of()
+    classes = set(HUMAN_BROAD_CLASSES)
+    output = np.full(len(names), None, dtype=object)
+    for index, name in enumerate(names):
+        if name is None:
+            continue
+        broad = broad_of.get(str(name))
+        if broad in classes:
+            output[index] = broad
+    return output
+
+
+def restricted_lookup_of(run: ResolveRun | None) -> dict[str, Any] | None:
+    """Return why a run's resolvability is its parent bundle's, if it is (§3.3).
+
+    A run that mapped a sample lacking panel genes with the parent bundle on
+    a restricted lookup (``lookup_restricted``, or a subset bundle
+    ``requested`` / ``ambiguous``, always so in a pipeline task) is resolved
+    with the parent bundle's full-panel resolvability tables and trust:
+    that resolvability is inherited (plan §3.3).
+
+    Args:
+        run: The primary annotation run.
+
+    Returns:
+        ``None`` for a run on its own bundle's full lookup, else the record
+        (``lookup_restricted``, ``subset_bundle_status``,
+        ``n_missing_panel_genes``, ``collapsed_parents``).
+    """
+    if run is None:
+        return None
+    record = run.record
+    subset = record.subset_bundle
+    parent_mapping = subset is not None and subset.status in {"requested", "ambiguous"}
+    if not (record.lookup_restricted or parent_mapping):
+        return None
+    return {
+        "lookup_restricted": bool(record.lookup_restricted),
+        "subset_bundle_status": None if subset is None else subset.status,
+        "n_missing_panel_genes": int(record.n_missing_panel_genes),
+        "collapsed_parents": list(record.collapsed_parents),
+    }
+
+
+def _with_restricted_lookup_reason(trust: TrustDecision) -> TrustDecision:
+    """Add the restricted-lookup reason to a trust decision (state unchanged)."""
+    from merxen.annotation.diagnostics import TrustReason
+
+    if RESTRICTED_LOOKUP_REASON in trust.reason_codes:
+        return trust
+    reason = TrustReason(
+        code=RESTRICTED_LOOKUP_REASON,
+        detail=(
+            "mapped with the parent bundle on a restricted lookup: resolvability "
+            "and trust are the parent panel's (inherited, plan §3.3)"
+        ),
+    )
+    return trust.model_copy(update={"reasons": (*trust.reasons, reason)})
+
+
+def run_table_leaf(run: ResolveRun, loaded: LoadedSample) -> pd.DataFrame:
+    """Return a run's leaf level on the table cells (tidy rows, by cell id).
+
+    Args:
+        run: A WHB run.
+        loaded: The sample.
+
+    Returns:
+        The leaf rows reindexed on the table-cell ids (NaN rows: unmapped).
+
+    Raises:
+        ResolveError: If the run names cells absent from the sample.
+    """
+    obs = pd.Index(loaded.obs_names.astype(str))
+    leaf = level_frame(run.tidy, run.leaf_level)
+    leaf.index = leaf.index.astype(str)
+    unknown = leaf.index.difference(obs)
+    if len(unknown):
+        raise ResolveError(
+            f"{loaded.sample.sample_id}: run {run.run_id} names {len(unknown)} "
+            f"cells absent from the sample, e.g. {list(unknown[:3])}"
+        )
+    return leaf.reindex(obs[np.flatnonzero(loaded.in_table)])
+
+
+def cross_platform_record(
+    panel_mode: str | None,
+    primary: ResolveRun | None,
+    xpanel: ResolveRun | None,
+    *,
+    primary_trust: TrustDecision | None,
+    xpanel_trust: TrustDecision | None,
+    xpanel_panel: AnnotationPanel | None = None,
+) -> dict[str, Any]:
+    """Return which run feeds a sample's cross-platform statistics (§5.5, §8.5).
+
+    Same-panel pairs compare the annotation runs (they are on the
+    intersection panel). ``per_platform`` pairs compare the WHB runs on the
+    intersection panel (``_xpanel``); with fewer than ``XPANEL_MIN_GENES``
+    intersection genes, or an intersection that is broad-only by
+    resolvability (trust ``broad_only`` / ``refused``, or unknown), the
+    cross-platform statistics are broad-level only and flagged; without an
+    intersection run there are none.
+
+    Args:
+        panel_mode: The pair's resolved panel mode.
+        primary: The primary annotation run.
+        xpanel: The primary run on the intersection panel, if mapped.
+        primary_trust: The primary annotation run's trust.
+        xpanel_trust: The intersection run's trust, if known.
+        xpanel_panel: The intersection panel, if its file is known.
+
+    Returns:
+        ``panel_mode``, ``jsd_run``, ``jsd_purpose``, ``n_intersection_genes``,
+        ``intersection_trust``, ``statistics_level`` (``full``,
+        ``broad_only`` or ``none``), ``flag`` and ``reasons``.
+    """
+    if panel_mode != "per_platform":
+        return {
+            "panel_mode": panel_mode,
+            "jsd_run": None if primary is None else primary.run_id,
+            "jsd_purpose": "annotation",
+            "n_intersection_genes": (
+                None if primary is None else primary.record.n_panel_genes
+            ),
+            "intersection_trust": None
+            if primary_trust is None
+            else primary_trust.state,
+            "statistics_level": "full" if primary is not None else "none",
+            "flag": False,
+            "reasons": [],
+        }
+    if xpanel is None:
+        return {
+            "panel_mode": panel_mode,
+            "jsd_run": None,
+            "jsd_purpose": XPANEL_PURPOSE,
+            "n_intersection_genes": None,
+            "intersection_trust": None,
+            "statistics_level": "none",
+            "flag": True,
+            "reasons": ["no_intersection_run"],
+        }
+    n_genes = (
+        xpanel_panel.n_genes
+        if xpanel_panel is not None
+        else xpanel.record.n_panel_genes
+    )
+    reasons: list[str] = []
+    if n_genes is None or n_genes < XPANEL_MIN_GENES:
+        reasons.append(f"intersection_genes:{n_genes}<{XPANEL_MIN_GENES}")
+    state = None if xpanel_trust is None else xpanel_trust.state
+    if state is None:
+        reasons.append("intersection_trust:unknown")
+    elif state in {"broad_only", "refused"}:
+        reasons.append(f"intersection_trust:{state}")
+    return {
+        "panel_mode": panel_mode,
+        "jsd_run": xpanel.run_id,
+        "jsd_purpose": XPANEL_PURPOSE,
+        "n_intersection_genes": n_genes,
+        "intersection_trust": state,
+        "statistics_level": "broad_only" if reasons else "full",
+        "flag": bool(reasons),
+        "reasons": reasons,
+    }
+
+
+def _xpanel_trust(
+    xpanel: ResolveRun,
+    panel: AnnotationPanel | None,
+    config: AnnotationConfig,
+    *,
+    panel_report: Mapping[str, Any] | None,
+    overrides: Mapping[str, TrustDecision],
+) -> TrustDecision | None:
+    """Return the intersection run's trust (a run-id override, else §8.2)."""
+    override = overrides.get(xpanel.run_id)
+    if override is not None:
+        return override
+    try:
+        return trust_for_run(xpanel, panel, config, panel_report=panel_report)
+    except (ResolveError, ValueError) as error:
+        logger.warning(
+            "run %s: no trust decision for the intersection panel (%s)",
+            xpanel.run_id,
+            error,
+        )
+        return None
+
+
+def resolve_human_sample(
+    loaded: LoadedSample,
+    record: MapSampleRecord,
+    runs: Mapping[str, ResolveRun],
+    config: AnnotationConfig,
+    *,
+    manifest: MapManifest,
+    panels: Mapping[str, AnnotationPanel],
+    panel_report: Mapping[str, Any] | None = None,
+    n_segmented: int | None = None,
+    trust_overrides: Mapping[str, TrustDecision] | None = None,
+    xy: np.ndarray | None = None,
+    aligned_frame: bool = False,
+    panel_mode: str | None = None,
+    validate: bool = True,
+    seed: int = 0,
+) -> SampleResolution:
+    """Resolve one human sample (plan §3.4; §4.1, §4.3, §4.6, §5.2-§5.6, §8.2-§8.3).
+
+    Args:
+        loaded: The sample's counts (every object, control-free).
+        record: Its ``map_manifest.json`` record.
+        runs: Its MAP runs (``load_resolve_runs``).
+        config: The annotation config (coupled to ``min_counts``).
+        manifest: The pair's MAP manifest.
+        panels: Panel hash to annotation panel.
+        panel_report: ``panel_report.json`` content.
+        n_segmented: Segmented objects (the gate warning's denominator);
+            default: the objects of the input.
+        trust_overrides: Trust decision per reference id instead of the
+            diagnostics (tests, replays).
+        xy: Coordinates of every object (composition CIs).
+        aligned_frame: Whether ``xy`` is in the pair's fixed frame.
+        panel_mode: The pair's resolved panel mode.
+        validate: Check the table with ``schema.validate_label_table``.
+        seed: Seed of the diffuse-flag simulation.
+
+    Returns:
+        The sample's resolution.
+
+    Raises:
+        ResolveError: If the inputs do not fit together.
+    """
+    from merxen.annotation import consensus as cs
+    from merxen.annotation import flags as fl
+    from merxen.annotation.composition import (
+        dataset_type_composition,
+        section_composition,
+        section_shares,
+        soft_broad_columns,
+        soft_broad_from_level,
+    )
+    from merxen.annotation.provenance import (
+        AnnotationProvenance,
+        ConsensusProvenance,
+        DatasetGateProvenance,
+        EngineProvenance,
+        ThresholdProvenance,
+    )
+    from merxen.annotation.resolvability import load_resolvability
+    from merxen.annotation.schema import (
+        coerce_label_table_dtypes,
+        validate_label_table,
+    )
+    from merxen.annotation.thresholds import EmissionPlan, FloorPlan
+    from merxen.annotation.vocab import HUMAN_BROAD_CLASSES, load_state_gene_ids
+
+    species: Species = "human"
+    sample_id = loaded.sample.sample_id
+    platform = loaded.sample.platform.upper()
+    min_counts = config.require_min_counts()
+    overrides = dict(trust_overrides or {})
+    primary = run_for_role(runs, "primary")
+    secondary = run_for_role(runs, "secondary")
+    n_objects = loaded.n_objects
+    table = np.asarray(loaded.in_table, dtype=bool)
+
+    # Trust decisions (§8.2).
+    primary_id = config.primary_reference().reference_id
+    trust: TrustDecision | None
+    secondary_trust: TrustDecision | None = None
+    if primary is None:
+        trust = overrides.get(primary_id) or refused_trust(
+            primary_id,
+            species,
+            record.declared_panel_hash,
+            manifest.panel_reasons
+            or [f"sample panel status {record.panel_status}: no primary run"],
+        )
+    else:
+        panel = panels.get(str(primary.record.panel_hash))
+        trust = overrides.get(primary.record.reference_id) or trust_for_run(
+            primary, panel, config, panel_report=panel_report
+        )
+    if secondary is not None:
+        panel = panels.get(str(secondary.record.panel_hash))
+        secondary_trust = overrides.get(secondary.record.reference_id) or trust_for_run(
+            secondary, panel, config, panel_report=panel_report
+        )
+    elif overrides.get("seaad_mr_panel") is not None:
+        secondary_trust = overrides["seaad_mr_panel"]
+    # A restricted lookup on the parent bundle: its resolvability and trust
+    # are the parent panel's (inherited, §3.3).
+    restricted = restricted_lookup_of(primary)
+    if restricted is not None and trust is not None:
+        logger.warning(
+            "%s: run %s mapped with the parent bundle on a restricted lookup "
+            "(%d panel genes missing; subset bundle %s): resolvability and trust "
+            "are the parent panel's",
+            sample_id,
+            None if primary is None else primary.run_id,
+            restricted["n_missing_panel_genes"],
+            restricted["subset_bundle_status"],
+        )
+        trust = _with_restricted_lookup_reason(trust)
+    n_segmented_used = n_segmented if n_segmented is not None else n_objects
+
+    inputs = human_calls_from_runs(
+        loaded,
+        primary,
+        secondary,
+        allow_fine_levels=config.thresholds.allow_fine_levels,
+    )
+    counts = np.asarray(loaded.total_counts, dtype=np.float64)
+
+    # Emission reweighted to the dataset's soft composition (§8.3).
+    tables = None if primary is None else load_resolvability(primary.bundle.path)
+    composition = None
+    reweight = bool(
+        tables is not None
+        and config.resolvability.reweight_to_composition
+        and inputs.leaf is not None
+        and len(inputs.leaf)
+    )
+    if reweight:
+        assert tables is not None and inputs.leaf is not None
+        composition = dataset_type_composition(
+            inputs.leaf,
+            counts[inputs.table_rows],
+            tables.depth_grid,
+            min_bin_mass=float(config.resolvability.composition_min_bin_cells),
+        )
+    emission = EmissionPlan.from_tables(
+        tables,
+        species=species,
+        thresholds=config.thresholds,
+        trust=trust,
+        composition=composition,
+        seed_stability_max_change=config.resolvability.seed_stability_max_change,
+    )
+    floors = FloorPlan.build(
+        species=species,
+        platform=platform,
+        hard_floor=min_counts,
+        trust=trust,
+        thresholds=config.thresholds,
+        emission=emission,
+    )
+    settings = cs.HumanResolveSettings.from_config(
+        config,
+        platform=platform,
+        emission=emission,
+        floors=floors,
+        trust=trust,
+        secondary_trust=secondary_trust,
+        n_segmented=n_segmented_used,
+    )
+    if loaded.sample.source == "clustered":
+        settings = replace(settings, allow_table_below_min_counts=True)
+    resolution = cs.resolve_human(inputs.calls, settings)
+
+    # Flags (§4.3, §5.6).
+    whb = inputs.calls.whb
+    names = (
+        whb.supercluster.name
+        if whb is not None
+        else np.full(n_objects, None, dtype=object)
+    )
+    assigned = _assigned_broad(names)
+    query_counts = None
+    query_rows = None
+    gene_ids: tuple[str, ...] = ()
+    negatives = None
+    profiles_by_class = None
+    if primary is not None:
+        panel = panels.get(str(primary.record.panel_hash))
+        if panel is not None:
+            query = build_sample_query(loaded, panel)
+            query_counts = query.counts
+            query_rows = np.flatnonzero(table)
+            gene_ids = tuple(query.gene_ids)
+        else:
+            logger.warning(
+                "%s: no panel file for %s; contamination and diffuse flags are null",
+                sample_id,
+                str(primary.record.panel_hash)[:16],
+            )
+        bundle_dir = primary.bundle.path
+        negatives_path = bundle_dir / "negative_genes.parquet"
+        profiles_path = bundle_dir / "profiles.parquet"
+        if gene_ids and negatives_path.is_file():
+            negatives = fl.NegativeGeneSet.from_table(
+                pd.read_parquet(negatives_path),
+                gene_ids,
+                classes=HUMAN_BROAD_CLASSES,
+                state_gene_ids=load_state_gene_ids(species),
+                max_fraction=config.flags.negative_gene_max_fraction,
+            )
+        if gene_ids and profiles_path.is_file():
+            from merxen.annotation.composition import whb_broad_of
+
+            profiles_by_class = fl.profiles_for_classes(
+                pd.read_parquet(profiles_path),
+                level=primary.leaf_level,
+                gene_ids=gene_ids,
+                node_class=whb_broad_of(),
+                classes=HUMAN_BROAD_CLASSES,
+            )
+    flag_set = fl.compute_flags(
+        fl.FlagInputs(
+            species=species,
+            platform=platform,
+            total_counts=counts,
+            in_table=table,
+            assigned_class=assigned,
+            confident=resolution.levels["broad"].confident,
+            method_disagree=resolution.flags[Columns.FLAG_METHOD_DISAGREE],
+            corr=(
+                whb.supercluster.scores.corr
+                if whb is not None and whb.supercluster.scores.corr is not None
+                else np.full(n_objects, np.nan)
+            ),
+            depth_bin=resolution.depth_bin,
+            exclude_hard=resolution.flags[Columns.EXCLUDE_HARD],
+            query_counts=query_counts,
+            query_rows=query_rows,
+            gene_ids=gene_ids,
+            negatives=negatives,
+            profiles_by_class=profiles_by_class,
+        ),
+        config.flags,
+        class_names=HUMAN_BROAD_CLASSES,
+        seed=seed,
+    )
+
+    # Soft composition (§5.5).
+    soft_rows = (
+        soft_broad_from_level(inputs.leaf)
+        if inputs.leaf is not None
+        else np.tile(
+            np.eye(len(HUMAN_BROAD_CLASSES) + 1)[-1], (len(inputs.table_rows), 1)
+        )
+    )
+    table_rows = inputs.table_rows
+    broad = resolution.levels["broad"]
+    section = section_composition(
+        sample_id,
+        platform,
+        soft_rows,
+        total_counts=counts[table_rows],
+        argmax_broad=np.where(
+            assigned[table_rows] == None,  # noqa: E711
+            UNASSIGNED_LABEL,
+            assigned[table_rows],
+        ),
+        confident_broad=broad.name[table_rows],
+        confident=broad.confident[table_rows],
+        xy=None if xy is None else np.asarray(xy)[table_rows],
+        aligned_frame=aligned_frame,
+    )
+    shares = section_shares(section)["whole_section"]
+
+    # Cross-platform composition (§5.5, §8.5): a per_platform pair compares
+    # the WHB runs on the intersection panel, never the own-panel runs.
+    xpanel = (
+        run_for_role(runs, "primary", XPANEL_PURPOSE)
+        if panel_mode == "per_platform"
+        else None
+    )
+    xpanel_panel = None if xpanel is None else panels.get(str(xpanel.record.panel_hash))
+    xpanel_trust = (
+        None
+        if xpanel is None
+        else _xpanel_trust(
+            xpanel,
+            xpanel_panel,
+            config,
+            panel_report=panel_report,
+            overrides=overrides,
+        )
+    )
+    cross_platform = cross_platform_record(
+        panel_mode,
+        primary,
+        xpanel,
+        primary_trust=trust,
+        xpanel_trust=xpanel_trust,
+        xpanel_panel=xpanel_panel,
+    )
+    xpanel_section = None
+    xpanel_shares = None
+    if xpanel is not None:
+        xpanel_leaf = run_table_leaf(xpanel, loaded)
+        xpanel_mapped = xpanel_leaf["assignment"].notna().to_numpy()
+        xpanel_assigned = _assigned_broad(
+            masked_objects(xpanel_mapped, xpanel_leaf["name"].astype(object))
+        )
+        xpanel_section = section_composition(
+            sample_id,
+            platform,
+            soft_broad_from_level(xpanel_leaf),
+            total_counts=counts[table_rows],
+            argmax_broad=np.where(
+                xpanel_assigned == None,  # noqa: E711
+                UNASSIGNED_LABEL,
+                xpanel_assigned,
+            ),
+            confident_broad=np.full(len(table_rows), None, dtype=object),
+            confident=np.zeros(len(table_rows), dtype=bool),
+            xy=None if xy is None else np.asarray(xy)[table_rows],
+            aligned_frame=aligned_frame,
+        )
+        xpanel_shares = section_shares(xpanel_section, kinds=XPANEL_KINDS)[
+            "whole_section"
+        ]
+    elif panel_mode == "per_platform":
+        logger.warning(
+            "%s: a per_platform pair without an intersection-panel run: no "
+            "cross-platform composition (plan §8.5)",
+            sample_id,
+        )
+
+    # The label table (§4.1).
+    branch, leaf = human_branch_columns(resolution)
+    primary_panel_hash = (
+        primary.record.panel_hash
+        if primary is not None and primary.record.panel_hash
+        else record.declared_panel_hash
+    )
+    n_missing = primary.record.n_missing_panel_genes if primary is not None else 0
+    instance_ids = (
+        np.asarray(loaded.instance_ids, dtype=np.int64)
+        if loaded.instance_ids is not None
+        else np.full(n_objects, MISSING_INSTANCE_ID, dtype=np.int64)
+    )
+    if loaded.instance_ids is None:
+        logger.warning(
+            "%s: the input has no instance ids; instance_id is %d",
+            sample_id,
+            MISSING_INSTANCE_ID,
+        )
+    n_genes = np.asarray(loaded.n_genes, dtype=np.float64)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        genes_per_count = np.where(counts > 0, n_genes / counts, np.nan)
+    data: dict[str, Any] = {
+        Columns.CELL_ID: loaded.obs_names.astype(str),
+        Columns.INSTANCE_ID: instance_ids,
+        Columns.PAIR_ID: [manifest.pair_id or ""] * n_objects,
+        Columns.SAMPLE_ID: [sample_id] * n_objects,
+        Columns.PLATFORM: [platform] * n_objects,
+        Columns.SEGMENTATION: [manifest.segmentation or ""] * n_objects,
+        Columns.SPECIES: [species] * n_objects,
+        Columns.ANATOMICAL_REGION: [config.anatomical_region] * n_objects,
+        Columns.PANEL_HASH: [primary_panel_hash] * n_objects,
+        Columns.TOTAL_COUNTS: counts.astype(np.int32),
+        Columns.N_GENES: n_genes.astype(np.int32),
+        Columns.GENES_PER_COUNT: np.clip(genes_per_count, 0.0, 1.0).astype(np.float32),
+        Columns.IN_TABLE: table,
+        Columns.N_MISSING_PANEL_GENES: np.full(n_objects, n_missing, dtype=np.int32),
+        **resolution.to_columns(),
+        Columns.CT_BRANCH: branch,
+        Columns.CT_LEAF: leaf,
+        Columns.CT_MENDER_STATE: branch,
+        **flag_set.columns,
+        **soft_broad_columns(soft_rows, table_rows, n_objects),
+    }
+    frame = pd.DataFrame(data, index=pd.RangeIndex(n_objects))
+    engine_frames = []
+    for run in runs.values():
+        engine = engine_columns(
+            run.tidy,
+            run.prefix,
+            pd.Index(loaded.obs_names.astype(str)),
+            runner_up_levels=(
+                [run.leaf_level_name] if run.record.role == "primary" else []
+            ),
+        )
+        engine_frames.append(engine.reset_index(drop=True))
+    if engine_frames:
+        frame = pd.concat([frame, *engine_frames], axis=1)
+    frame = coerce_label_table_dtypes(
+        frame, species, include_fine_levels=config.thresholds.allow_fine_levels
+    )
+    if validate:
+        validate_label_table(
+            frame,
+            species,
+            h5ad_index=(
+                loaded.obs_names.astype(str)
+                if loaded.sample.source == "clustered"
+                else None
+            ),
+            include_fine_levels=config.thresholds.allow_fine_levels,
+        )
+
+    # Provenance (§4.6).
+    summary = resolution.summary()
+    references: dict[str, ReferenceProvenance] = {}
+    for item in (primary, secondary):
+        if item is None:
+            continue
+        item_trust = trust if item is primary else secondary_trust
+        references[item.record.reference_id] = reference_provenance(item, item_trust)
+    resolvability = {}
+    if primary is not None:
+        resolvability[primary.record.reference_id] = resolvability_provenance(
+            tables,
+            emission,
+            resolution,
+            primary.bundle,
+            reweighted=reweight,
+            restricted_lookup=restricted is not None,
+        )
+    from merxen.annotation.diagnostics import (
+        panel_diagnostics,
+        panel_provenance,
+    )
+
+    panel_prov = None
+    if primary is not None and trust is not None:
+        primary_panel = panels.get(str(primary.record.panel_hash))
+        diagnostics = None
+        if primary_panel is not None:
+            try:
+                diagnostics = panel_diagnostics(
+                    primary_panel,
+                    panel_report=panel_report,
+                    bundles=[primary.bundle.manifest],
+                )
+            except ValueError as error:
+                logger.warning("%s: no panel diagnostics (%s)", sample_id, error)
+        if diagnostics is not None:
+            panel_prov = panel_provenance(
+                trust,
+                diagnostics,
+                panel_mode=panel_mode,  # type: ignore[arg-type]
+                validated_share={
+                    level: float(value["validated_share"])
+                    for level, value in summary["levels"].items()
+                    if value["validated_share"] is not None
+                },
+                n_missing_panel_genes=n_missing,
+            )
+    if panel_prov is None and trust is not None:
+        from merxen.annotation.provenance import PanelProvenance
+
+        panel_prov = PanelProvenance(
+            panel_hash=record.declared_panel_hash,
+            panel_trust=trust.state,
+            trust_reasons=trust.reason_codes,
+            banner=trust.banner,
+            n_missing_panel_genes=n_missing,
+        )
+    engine_record = primary.record if primary is not None else None
+    params = engine_record.engine_params if engine_record is not None else {}
+    sources = sorted(
+        {
+            emission.threshold_source(level)
+            for level in ("lineage", "broad", "nt", "supercluster")
+        }
+    )
+    floor_sources = sorted(
+        {floors.policy(level) for level in ("broad", "supercluster")}
+    )
+    gate = resolution.gate
+    tiers, tier_counts = np.unique(
+        resolution.consensus_tier[table].astype(int), return_counts=True
+    )
+    provenance = AnnotationProvenance(
+        species=species,
+        anatomical_region=config.anatomical_region,
+        merxen_version=current_merxen_version(),
+        panel=panel_prov,
+        references=references,
+        engine=EngineProvenance(
+            ctm_version=None if engine_record is None else engine_record.ctm_version,
+            ctm_commit=None if engine_record is None else engine_record.ctm_commit,
+            bootstrap_factor=params.get("bootstrap_factor"),
+            bootstrap_iteration=params.get("bootstrap_iteration"),
+            rng_seed=params.get("rng_seed"),
+            n_processors=params.get("n_processors"),
+            wall_time_s=None if engine_record is None else engine_record.wall_s,
+        ),
+        resolvability=resolvability,
+        thresholds=ThresholdProvenance(
+            mode=config.thresholds.mode,
+            values=resolve_threshold_values(config),
+            threshold_source=";".join(sources),
+            floors_sha256=floors.table.sha256,
+            floor_source=";".join(str(item) for item in floor_sources),
+            calibration="none",
+        ),
+        flags=flag_set.provenance(),
+        gate=DatasetGateProvenance(
+            frac_ge30=round_share(gate.frac_ge30),
+            table_broad_coverage=round_share(gate.broad_coverage_table),
+            segmented_broad_coverage=round_share(gate.broad_coverage_segmented),
+            level=gate.level,
+            warning=gate.warning,
+            reasons=list(gate.reasons),
+            n_segmented=n_segmented_used,
+            n_segmented_source="given" if n_segmented is not None else "objects",
+        ),
+        consensus=ConsensusProvenance(
+            degraded_mode=resolution.mode.name,
+            methods=sorted(resolution.mode.methods),
+            max_tier=resolution.mode.max_tier,
+            single_method_override=resolution.single_method_override,
+            likelihood_vote=False,
+            tier_counts={
+                str(int(tier)): int(count)
+                for tier, count in zip(tiers, tier_counts, strict=True)
+            },
+            cop_suppressed=int(
+                resolution.flags[Columns.FLAG_COP_SUPPRESSED][table].sum()
+            ),
+        ),
+        composition=_composition_provenance(shares),
+        confident_fraction_table={
+            level: round(float(value["confident_share_table"]), 6)
+            for level, value in summary["levels"].items()
+            if value["confident_share_table"] is not None
+        },
+        confident_fraction_segmented={
+            level: round(float(value["confident_share_segmented"]), 6)
+            for level, value in summary["levels"].items()
+            if value["confident_share_segmented"] is not None
+        },
+    )
+    sample_summary = {
+        "sample_id": sample_id,
+        "platform": platform,
+        "n_objects": n_objects,
+        "n_table": int(table.sum()),
+        # The gate's segmented-object denominator actually used (§5.4).
+        "n_segmented": n_segmented_used,
+        "n_segmented_source": "given" if n_segmented is not None else "objects",
+        "trust": None if trust is None else trust.to_json(),
+        "secondary_trust": (
+            None if secondary_trust is None else secondary_trust.to_json()
+        ),
+        "banner": None if trust is None else trust.banner,
+        "bundles": {
+            run.run_id: {
+                "reference_id": run.record.reference_id,
+                "mapped_build_hash": run.record.build_hash,
+                "resolved_build_hash": run.bundle.build_hash,
+                "overridden": run.overridden,
+                "same_lookup": run.same_lookup,
+            }
+            for run in runs.values()
+        },
+        "reweighted_to_composition": reweight,
+        "restricted_lookup": restricted,
+        "resolvability_inherited": any(
+            item.resolvability_inherited for item in resolvability.values()
+        ),
+        "resolution": summary,
+        "flags": flag_set.summary(),
+        # The sample's own-panel composition (its label table's soft_broad_*):
+        # a per_platform pair compares xpanel_composition across platforms.
+        "composition_run": None if primary is None else primary.run_id,
+        "composition": shares,
+        "cross_platform": cross_platform,
+        "xpanel_composition": xpanel_shares,
+    }
+    return SampleResolution(
+        sample_id=sample_id,
+        platform=platform,
+        labels=frame,
+        provenance=provenance,
+        summary=sample_summary,
+        section=section,
+        xpanel_section=xpanel_section,
+        cross_platform=cross_platform,
+    )
+
+
+def current_merxen_version() -> str | None:
+    """Return the installed merxen version (``None`` when unknown)."""
+    try:
+        from merxen import __version__
+
+        return str(__version__)
+    except ImportError:  # pragma: no cover - the package always has it
+        return None
+
+
+def write_label_table(
+    labels: pd.DataFrame, path: Path | str, provenance_json: str
+) -> Path:
+    """Write ``<sid>_celltype_labels.parquet`` atomically, provenance in the schema.
+
+    Args:
+        labels: The label table.
+        path: Output file.
+        provenance_json: ``AnnotationProvenance.to_uns_json()``.
+
+    Returns:
+        The written path.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    output = Path(path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    table = pa.Table.from_pandas(labels, preserve_index=False)
+    metadata = dict(table.schema.metadata or {})
+    metadata[LABELS_METADATA_KEY] = provenance_json.encode("utf-8")
+    table = table.replace_schema_metadata(metadata)
+    temporary = output.with_name(output.name + ".partial")
+    pq.write_table(table, temporary)
+    temporary.replace(output)
+    return output
+
+
+def read_label_table(
+    path: Path | str,
+) -> tuple[pd.DataFrame, AnnotationProvenance | None]:
+    """Read a label table and the provenance stored in its schema.
+
+    Args:
+        path: ``<sid>_celltype_labels.parquet``.
+
+    Returns:
+        ``(labels, provenance)`` (``None`` without stored provenance).
+    """
+    import pyarrow.parquet as pq
+
+    from merxen.annotation.provenance import AnnotationProvenance
+
+    table = pq.read_table(path)
+    metadata = table.schema.metadata or {}
+    raw = metadata.get(LABELS_METADATA_KEY)
+    provenance = (
+        None if raw is None else AnnotationProvenance.from_uns_json(raw.decode("utf-8"))
+    )
+    return table.to_pandas(), provenance
+
+
+def _write_json(payload: Mapping[str, Any], path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".partial")
+    temporary.write_text(
+        json.dumps(payload, indent=2, sort_keys=True, allow_nan=False, default=str)
+        + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+    return path
+
+
+def _json_safe(value: Any) -> Any:
+    """Replace non-finite floats by ``None`` (JSON has no NaN)."""
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, float | np.floating):
+        return float(value) if np.isfinite(value) else None
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.bool_):
+        return bool(value)
+    return value
+
+
+@dataclass
+class ResolveResult:
+    """What ``annotate_resolve`` wrote for one pair x segmentation.
+
+    Attributes:
+        samples: Sample id to its resolution.
+        summary: The ``<pair>_resolve_summary.json`` content (deterministic).
+        summary_path: Where it was written.
+        run: The run record (``created_at``, ``wall_time_s``, absolute input
+            and output paths, the summary's sha256).
+        run_path: Where it was written.
+    """
+
+    samples: dict[str, SampleResolution]
+    summary: dict[str, Any]
+    summary_path: Path
+    run: dict[str, Any] = field(default_factory=dict)
+    run_path: Path | None = None
+
+
+def annotate_resolve(
+    map_dir: Path | str,
+    config: AnnotationConfig,
+    *,
+    output_dir: Path | str,
+    panel_dir: Path | str | None = None,
+    samples: Sequence[MapSample] | None = None,
+    bundle_overrides: Mapping[str, Path] | None = None,
+    bundle_finder: BundleFinder | None = None,
+    n_segmented: Mapping[str, int] | None = None,
+    alignment_dir: Path | str | None = None,
+    lookup_alignment: bool = True,
+    trust_overrides: Mapping[str, TrustDecision] | None = None,
+    platforms: Sequence[str] | None = None,
+    tile_um: float = 500.0,
+    n_bootstrap: int = 200,
+    seed: int = 0,
+    validate: bool = True,
+    run_record_path: Path | str | None = None,
+    registration: Mapping[str, RegistrationSignal] | None = None,
+    require_registration: bool = False,
+    region_share_dir: Path | str | None = None,
+) -> ResolveResult:
+    """Run the RESOLVE step for one pair x segmentation (plan §3.4).
+
+    Reads ``map_manifest.json`` and its tidy MMC parquets, the bundles
+    (profiles, negative genes, resolvability tables, trust) and the samples'
+    counts; applies resolvability-gated emission reweighted to each dataset's
+    soft composition with its local thresholds, the floors, the dataset gate,
+    the degraded-mode consensus and the flags; and writes, per sample,
+    ``<plat>/<sid>_celltype_labels.parquet`` (§4.1, validated) and
+    ``<plat>/<sid>_annotation_manifest.json`` (§4.6), and the pair's
+    ``<pair>_resolve_summary.json`` (gate levels and warnings, trust,
+    realised flag rates, coverage, resolvable share per level, compositions
+    and the pair JSD with block-bootstrap CIs; a ``per_platform`` pair's JSD
+    compares the intersection-panel runs, §8.5). Everything under
+    ``output_dir`` is deterministic for given inputs; the clock, the wall
+    time and absolute paths go to the run record ``<pair>_resolve_run.json``
+    (``run_record_path``; default: in ``output_dir``).
+
+    Args:
+        map_dir: ``annotation_map_out`` (``map_manifest.json`` + parquets).
+        config: The annotation config, coupled to the clustering
+            ``min_counts``.
+        output_dir: Where the outputs go.
+        panel_dir: ``ANNOTATE_PANEL`` output (default: ``<map_dir>/panel``).
+        samples: Where the counts come from (default: the manifest's inputs).
+        bundle_overrides: Run id or reference id to a bundle directory.
+        bundle_finder: Picks a bundle per (reference, panel) when no override
+            names the run (``current_store_bundles``).
+        n_segmented: Segmented objects per sample id (default: the objects
+            of the input; a published clustered H5AD holds table cells only,
+            so the segmented-object gate warning then uses table cells).
+        alignment_dir: ``align_out`` of the pair (shared tissue mask; default:
+            ``<results>/<pair>/alignment/align_out`` when the inputs sit in a
+            results tree).
+        lookup_alignment: Look up that default when ``alignment_dir`` is not
+            given. A pipeline task passes ``False``: its mask comes only from
+            ALIGN's channel, never from a published file ALIGN may still be
+            rewriting (as ``ANNOTATE_PANEL``, plan §3.2).
+        trust_overrides: Trust decision per reference id.
+        platforms: Resolve only these platforms.
+        tile_um: Block-bootstrap tile edge.
+        n_bootstrap: Block-bootstrap replicates.
+        seed: Bootstrap and diffuse-simulation seed.
+        validate: Validate every label table.
+        run_record_path: Where the run record goes (a pipeline task keeps it
+            out of ``annotation_resolve_out``); default
+            ``<output_dir>/<pair>_resolve_run.json``.
+        registration: Mouse: the M0a registration check per sample id (gate
+            G1, plan §7.6); a sample without one warns (G1 not evaluated).
+        require_registration: Mouse: refuse a sample without a registration
+            check (a pipeline task: G1 is the primary guard against invalid
+            data, plan §7.5 / §7.6).
+        region_share_dir: Mouse: the region-share bundle to read (a staged
+            bundle ref); default: the one each region step recorded.
+
+    Returns:
+        The result.
+
+    Raises:
+        ResolveError: If the inputs do not fit together, a mouse MAP output
+            predates the region step, or a required registration check is
+            missing.
+    """
+    from merxen.annotation.composition import (
+        COMPOSITION_KINDS,
+        pair_jsd,
+        section_shares,
+        shared_mask_regions,
+    )
+
+    start = time.monotonic()
+    root = Path(map_dir)
+    manifest = load_map_manifest(root / MAP_MANIFEST_NAME)
+    if manifest.species != config.species:
+        raise ResolveError(
+            f"{root / MAP_MANIFEST_NAME} is a {manifest.species} run, the config "
+            f"{config.species}"
+        )
+    mouse = config.species == "mouse"
+    if mouse and not str(manifest.mouse_region_step or "").startswith(
+        MOUSE_REGION_STEP_PREFIX
+    ):
+        raise ResolveError(
+            f"{root / MAP_MANIFEST_NAME}: the MAP output predates the mouse region "
+            f"step (mouse_region_step {manifest.mouse_region_step!r}); re-run "
+            "merxen annotate"
+        )
+    min_counts = config.require_min_counts()
+    if manifest.min_counts != min_counts:
+        raise ResolveError(
+            f"MAP used min_counts {manifest.min_counts}, the config {min_counts}"
+        )
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    panel_root = Path(panel_dir) if panel_dir is not None else root / "panel"
+    panels = {
+        panel_hash: current_family(load_annotation_panel(path), config)
+        for panel_hash, path in _panel_files(panel_root).items()
+    }
+    report_path = panel_root / "panel_report.json"
+    panel_report = (
+        json.loads(report_path.read_text(encoding="utf-8"))
+        if report_path.is_file()
+        else None
+    )
+    required_path = panel_root / REQUIRED_BUNDLES_FILE
+    panel_mode = None
+    if required_path.is_file():
+        panel_mode = RequiredBundles.model_validate_json(
+            required_path.read_text(encoding="utf-8")
+        ).panel_mode
+    wanted = {platform.upper() for platform in platforms} if platforms else None
+    given = {sample.sample_id: sample for sample in samples or ()}
+    records: list[MapSampleRecord | None] = [
+        item
+        for item in manifest.samples.values()
+        if wanted is None or item.platform.upper() in wanted
+    ]
+    if records:
+        inputs = [
+            given.get(item.sample_id)
+            or MapSample(
+                sample_id=item.sample_id,
+                platform=item.platform,
+                h5ad_path=Path(item.h5ad_path),
+                source=item.source,
+            )
+            for item in records
+            if item is not None
+        ]
+    elif manifest.panel_status == "refused" and given:
+        # A refused panel: MAP mapped nothing and recorded no sample, so
+        # RESOLVE writes statuses only for the given inputs (§3.1).
+        inputs = [
+            sample
+            for sample in given.values()
+            if wanted is None or sample.platform.upper() in wanted
+        ]
+        records = [None] * len(inputs)
+    else:
+        raise ResolveError(
+            f"{root / MAP_MANIFEST_NAME} has no sample to resolve"
+            + (" (a refused panel needs the prepared inputs)" if not given else "")
+        )
+    if mouse and require_registration:
+        missing = sorted(
+            item.sample_id
+            for item in inputs
+            if item.sample_id not in (registration or {})
+        )
+        if missing:
+            raise ResolveError(
+                f"mouse RESOLVE needs the M0a registration check (gate G1) of "
+                f"{missing}: give --registration-qc or --registration-qc-dir, or "
+                "--no-registration-qc to resolve without G1 (the gate then warns)"
+            )
+    loaded_samples = load_samples(inputs, config, min_counts=min_counts)
+    segmented = dict(n_segmented or {})
+    results: dict[str, SampleResolution] = {}
+    for loaded, maybe_record in zip(loaded_samples, records, strict=True):
+        fingerprint = loaded.sample_fingerprint()
+        if maybe_record is None:
+            record = refused_sample_record(loaded, fingerprint)
+        else:
+            record = maybe_record
+            if fingerprint != record.sample_fingerprint:
+                raise ResolveError(
+                    f"{record.sample_id}: the counts of {loaded.sample.h5ad_path} "
+                    "differ from the ones MAP mapped (sample fingerprint)"
+                )
+        runs = load_resolve_runs(
+            root,
+            record,
+            bundle_overrides=bundle_overrides,
+            bundle_finder=bundle_finder,
+            region_share_dir=region_share_dir,
+        )
+        xy, shape_key = read_spatial(loaded.sample.h5ad_path)
+        if xy is not None and len(xy) != loaded.n_objects:
+            logger.warning(
+                "%s: obsm['spatial'] does not fit the objects; no coordinates",
+                record.sample_id,
+            )
+            xy = None
+        n_objects_segmented = segmented.get(record.sample_id)
+        if (
+            n_objects_segmented is None
+            and loaded.sample.source == "clustered"
+            and not mouse
+        ):
+            logger.warning(
+                "%s: a clustered H5AD holds table cells only; the segmented-object "
+                "gate warning uses them unless n_segmented is given",
+                record.sample_id,
+            )
+        if mouse:
+            from merxen.annotation.mouse_resolve import resolve_mouse_sample
+
+            result = resolve_mouse_sample(
+                loaded,
+                record,
+                runs,
+                config,
+                manifest=manifest,
+                panels=panels,
+                panel_report=panel_report,
+                trust_overrides=trust_overrides,
+                xy=xy,
+                registration=(registration or {}).get(record.sample_id),
+                validate=validate,
+                seed=seed,
+            )
+        else:
+            result = resolve_human_sample(
+                loaded,
+                record,
+                runs,
+                config,
+                manifest=manifest,
+                panels=panels,
+                panel_report=panel_report,
+                n_segmented=n_objects_segmented,
+                trust_overrides=trust_overrides,
+                xy=xy,
+                aligned_frame=in_fixed_frame(record.platform, shape_key),
+                panel_mode=panel_mode,
+                validate=validate,
+                seed=seed,
+            )
+        folder = output / record.platform.lower()
+        provenance_json = result.provenance.to_uns_json()
+        result.labels_path = write_label_table(
+            result.labels,
+            folder / label_table_filename(record.sample_id),
+            provenance_json,
+        )
+        result.manifest_path = _write_json(
+            json.loads(provenance_json),
+            folder / annotation_manifest_filename(record.sample_id),
+        )
+        result.summary["labels"] = _relative(result.labels_path, output)
+        result.summary["labels_sha256"] = file_sha256(result.labels_path)
+        result.summary["annotation_manifest"] = _relative(result.manifest_path, output)
+        results[record.sample_id] = result
+        logger.info(
+            "%s: wrote %s (%d objects)",
+            record.sample_id,
+            result.labels_path,
+            len(result.labels),
+        )
+
+    # Pair composition statistics (§5.5; H1): a per_platform pair compares
+    # the intersection-panel runs (§8.5).
+    pair: dict[str, Any] = {"jsd": [], "mask_note": None}
+    by_platform = {item.platform: item for item in results.values()}
+    per_platform = panel_mode == "per_platform"
+    kinds: tuple[str, ...] = XPANEL_KINDS if per_platform else COMPOSITION_KINDS
+    if mouse and {"MERSCOPE", "XENIUM"} <= set(by_platform):
+        pair["mask_note"] = (
+            "mouse pairs: no cross-platform composition in v1 (M6 resolves "
+            "single-platform mouse sections)"
+        )
+        first = second = None
+    elif {"MERSCOPE", "XENIUM"} <= set(by_platform):
+        pair_samples = (by_platform["MERSCOPE"], by_platform["XENIUM"])
+        cross = [item.cross_platform for item in pair_samples]
+        levels = {record.get("statistics_level") for record in cross}
+        cross_platform = {
+            "panel_mode": panel_mode,
+            "jsd_run": sorted({str(record.get("jsd_run")) for record in cross}),
+            "jsd_purpose": XPANEL_PURPOSE if per_platform else "annotation",
+            "kinds": list(kinds),
+            "omitted_kinds": (
+                {
+                    "confident": (
+                        "the own-panel confident labels rest on different gene "
+                        "sets and RESOLVE does not resolve the intersection run"
+                    )
+                }
+                if per_platform
+                else {}
+            ),
+            "n_intersection_genes": {
+                item.platform: item.cross_platform.get("n_intersection_genes")
+                for item in pair_samples
+            },
+            "statistics_level": (
+                "none"
+                if "none" in levels
+                else ("broad_only" if "broad_only" in levels else "full")
+            ),
+            "flag": any(bool(record.get("flag")) for record in cross),
+            "reasons": sorted(
+                {
+                    str(reason)
+                    for record in cross
+                    for reason in record.get("reasons", [])
+                }
+            ),
+        }
+        pair = {"jsd": [], "mask_note": None, "cross_platform": cross_platform}
+        if per_platform:
+            first = by_platform["MERSCOPE"].xpanel_section
+            second = by_platform["XENIUM"].xpanel_section
+        else:
+            first = by_platform["MERSCOPE"].section
+            second = by_platform["XENIUM"].section
+    else:
+        first = second = None
+    if first is not None and second is not None:
+        align: Path | None = None
+        if alignment_dir is not None:
+            align = Path(alignment_dir)
+        elif lookup_alignment:
+            source_path = next(
+                (item.h5ad_path for item in inputs if item.platform == "MERSCOPE"),
+                None,
+            )
+            if source_path is not None:
+                align = default_alignment_dir(source_path, manifest.pair_id)
+        mask = load_pair_mask(align)
+        records_jsd, note = pair_jsd(
+            first,
+            second,
+            mask=mask,
+            kinds=kinds,
+            tile_um=tile_um,
+            n_reps=n_bootstrap,
+            seed=seed,
+        )
+        regions, _ = shared_mask_regions(first, second, mask)
+        compositions = {
+            section.platform: section_shares(
+                section,
+                regions={name: keep[index] for name, keep in regions.items()},
+                kinds=kinds,
+            )
+            for index, section in enumerate((first, second))
+        }
+        pair.update(
+            {
+                "jsd": [item.to_json() for item in records_jsd],
+                "mask_note": note,
+                "alignment_dir": None if align is None else str(align),
+                "tile_um": tile_um,
+                "n_bootstrap": n_bootstrap,
+                "compositions": compositions,
+            }
+        )
+    elif "cross_platform" in pair:
+        pair["mask_note"] = (
+            "no intersection-panel run on both platforms: no cross-platform "
+            "composition (plan §8.5)"
+        )
+    map_manifest_path = root / MAP_MANIFEST_NAME
+    # Deterministic content only (no clock, no wall time, no absolute input
+    # path): annotation_resolve_out is what M5's deep-cached COMPUTE_CPU
+    # stages. Those go to the run record.
+    summary = _json_safe(
+        {
+            "schema_version": RESOLVE_SUMMARY_SCHEMA_VERSION,
+            "step": RESOLVE_STEP,
+            "pair_id": manifest.pair_id,
+            "segmentation": manifest.segmentation,
+            "species": manifest.species,
+            "map_manifest_sha256": file_sha256(map_manifest_path),
+            "panel_status": manifest.panel_status,
+            "panel_mode": panel_mode,
+            "thresholds": config.thresholds.model_dump(mode="json"),
+            "flags_config": config.flags.model_dump(mode="json"),
+            "samples": {key: value.summary for key, value in results.items()},
+            "pair": pair,
+        }
+    )
+    summary_path = _write_json(
+        summary, output / resolve_summary_filename(manifest.pair_id)
+    )
+    run = {
+        "step": RESOLVE_STEP,
+        "pair_id": manifest.pair_id,
+        "segmentation": manifest.segmentation,
+        "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "wall_time_s": round(time.monotonic() - start, 3),
+        "map_manifest": str(map_manifest_path.resolve()),
+        "output_dir": str(output.resolve()),
+        "summary": summary_path.name,
+        "summary_sha256": file_sha256(summary_path),
+    }
+    run_path = _write_json(
+        run,
+        Path(run_record_path)
+        if run_record_path is not None
+        else output / resolve_run_filename(manifest.pair_id),
+    )
+    return ResolveResult(
+        samples=results,
+        summary=summary,
+        summary_path=summary_path,
+        run=run,
+        run_path=run_path,
+    )

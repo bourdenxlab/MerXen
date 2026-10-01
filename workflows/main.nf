@@ -32,6 +32,7 @@ include {
 // rca-hook:H1: reference-based annotation (plan §2.4); nothing runs in legacy mode.
 include { ANNOTATION_PREPARE_ONLY } from "./subworkflows/annotation_references"
 include { CLUSTERING_MAP_FIRST } from "./subworkflows/clustering_map_first"
+include { ANNOTATION_REPORTING } from "./subworkflows/annotation_report"
 
 def parseChannels(rawValue, defaults) {
     if (rawValue == null) {
@@ -567,7 +568,7 @@ def corticalDepthConfigForPlatform(
             segmentation: segmentation,
             table_key: layerKeys.table_key,
             shape_key: layerKeys.shape_key,
-        ]
+        ] + AnnotationSettings.clusteredTableFields(row, params) // rca-site:H2
     }
     return [
         dataset_name: "${pairId}_${platform}",
@@ -593,6 +594,7 @@ def corticalDepthConfigForPlatform(
         annotation_path: optionalNormalizedPathString(
             corticalDepthAnnotationPath(row, platform, "annotation")
         ),
+        boundary_frame: corticalDepthBoundaryFrame(row, platform, params),
         coordinate_unit_um: params.cortical_depth_coordinate_unit_um,
         raster_resolution_um: params.cortical_depth_raster_resolution_um,
         raster_padding_um: params.cortical_depth_raster_padding_um,
@@ -1137,6 +1139,24 @@ def corticalDepthAnnotationPath(row, platform, role) {
     return chooseField(row, candidatesByRole[role] ?: [])
 }
 
+// Frame the platform's depth boundary GeoJSONs are drawn in: "native" (the
+// section's own dataset microns, the default and how the annotations are
+// drawn) or "aligned" (the pair's fixed-section frame). A row-level
+// <platform>_cortical_depth_boundary_frame / cortical_depth_boundary_frame
+// value overrides --cortical_depth_boundary_frame.
+def corticalDepthBoundaryFrame(row, platform, params) {
+    def prefix = platform.toString().toLowerCase()
+    def raw = chooseField(row, [
+        "${prefix}_cortical_depth_boundary_frame",
+        "cortical_depth_boundary_frame",
+    ])
+    if (raw == null) {
+        raw = params.cortical_depth_boundary_frame
+    }
+    def frame = raw == null ? "" : raw.toString().trim().toLowerCase()
+    return frame ?: "native"
+}
+
 def alignmentTissueAnnotationPath(row, platform) {
     def prefix = platform.toString().toLowerCase()
     return chooseField(row, [
@@ -1166,6 +1186,13 @@ def appendCorticalDepthPreflightChecks(errors, row, settings, _params) {
     }
     settings.active_platforms.each { platform ->
         def labelPrefix = "COMPUTE_CORTICAL_DEPTH ${settings.pair_id}:${platform}"
+        def boundaryFrame = corticalDepthBoundaryFrame(row, platform, _params)
+        if (!(boundaryFrame in ["native", "aligned"])) {
+            errors << (
+                "${labelPrefix} cortical_depth_boundary_frame must be " +
+                "'native' or 'aligned', got '${boundaryFrame}'"
+            )
+        }
         def annotationPath = corticalDepthAnnotationPath(row, platform, "annotation")
         if (!isBlankPath(annotationPath)) {
             appendPreflightFileCheck(
@@ -1341,8 +1368,12 @@ def appendMenderPreflightChecks(errors, settings, params) {
                 publishedPairPath(
                     params.outdir,
                     settings.pair_id,
-                    "${segmentation}/clustering_squidpy/" +
-                    "clustering_squidpy_out/${platform.toLowerCase()}/" +
+                    "${segmentation}/" +
+                    AnnotationSettings.publishedClusteringDir(
+                        params.outdir, settings.pair_id, segmentation, platform, sampleId,
+                        settings.clustering_squidpy_table_key_suffix, // rca-site:H2
+                    ) +
+                    "/clustering_squidpy_out/${platform.toLowerCase()}/" +
                     "${sampleId}_clustered.h5ad",
                 )
             )
@@ -1975,7 +2006,7 @@ workflow {
     annotationCompletionWorkflow.onComplete {
         def annotationSummary = AnnotationSettings.completionSummary(
             annotationCompletionParams,
-            [success: annotationCompletionWorkflow.success],
+            AnnotationRunRecord.runInfo() + [success: annotationCompletionWorkflow.success],
         )
         if (annotationSummary) {
             log.info(annotationSummary)
@@ -3371,8 +3402,46 @@ workflow {
             .mix(clustering_after_visualize_ch)
             .mix(clustering_after_spatial_gene_analysis_ch)
 
-    clustering_prepared_ch = CLUSTERING_SQUIDPY_PREPARE(clustering_inputs_ch)
-    clustering_computed_ch = CLUSTERING_SQUIDPY_COMPUTE(clustering_prepared_ch)
+    // rca-hook:H5: map_first clustering (plan §2.4, §3.1). The mode is one per
+    // run (AnnotationSettings.isMapFirstRun); the legacy branch runs exactly
+    // the legacy PREPARE -> COMPUTE statements, so legacy runs keep their DAG
+    // and task hashes. map_first rows carry their own annotation columns into
+    // samples_json, the pair's ALIGN files come from ALIGN's output channel,
+    // and CLUSTERING_MAP_FIRST (ANNOTATE_PANEL, PREP, MAP, RESOLVE,
+    // COMPUTE_CPU) emits FINALIZE's input, so FINALIZE, the MENDER barrier and
+    // every downstream stage are shared by both modes.
+    if (AnnotationSettings.isMapFirstRun(params)) {
+        clustering_inputs_ch.subscribe { pairId, segmentation, _samplesJson ->
+            AnnotationRunRecord.expect(pairId, segmentation)
+        }
+        clustering_prepared_ch = CLUSTERING_SQUIDPY_PREPARE(
+            clustering_inputs_ch
+                .combine(sample_rows_ch, by: 0)
+                .map { pairId, segmentation, samplesJson, row, settings ->
+                    tuple(
+                        pairId,
+                        segmentation,
+                        AnnotationSettings.samplesJsonWithRowColumns(samplesJson, row, settings),
+                    )
+                }
+        )
+        map_first_alignment_ch = alignment_results_ch
+            .map { pairId, _merscopeLatest, _xeniumLatest, _transformJson, _coordsDir, alignOut ->
+                tuple(pairId, AnnotationReferences.alignmentFiles(alignOut))
+            }
+            .mix(
+                sample_rows_ch
+                    .filter { _pairId, _row, settings -> !settings.need_alignment_results }
+                    .map { pairId, _row, _settings -> tuple(pairId, []) }
+            )
+        clustering_computed_ch = CLUSTERING_MAP_FIRST(
+            clustering_prepared_ch,
+            map_first_alignment_ch,
+        ).computed
+    } else {
+        clustering_prepared_ch = CLUSTERING_SQUIDPY_PREPARE(clustering_inputs_ch)
+        clustering_computed_ch = CLUSTERING_SQUIDPY_COMPUTE(clustering_prepared_ch)
+    }
     clustering_results_ch = CLUSTERING_SQUIDPY_FINALIZE(clustering_computed_ch)
 
     // Cortical depth runs after clustering so the per-cell broad_class and
@@ -3772,16 +3841,34 @@ workflow {
         .mix(clustering_terminal_events_ch)
         .mix(mender_extra_clustering_terminal_events_ch)
 
-    pair_terminal_grouped_ch = pair_terminal_events_ch
-        .join(pair_terminal_specs_ch)
-        .filter { _pairId, eventStage, _done, expectedStage, _expectedCount ->
-            eventStage == expectedStage
-        }
-        .map { pairId, _eventStage, _done, _expectedStage, expectedCount ->
-            tuple(groupKey(pairId, expectedCount as int), true)
-        }
-        .groupTuple()
-        .map { pairKey, _doneFlags -> tuple(pairKey.getGroupTarget(), true) }
+    // map_first runs pair every terminal event with the pair's one spec:
+    // combine keeps the spec, whereas join pairs items one to one, so the
+    // pair's first terminal event (FINALIZE's) would consume it and the
+    // events MENDER waits for would be dropped (M5 exit run). Legacy runs
+    // keep the join, so their channels and DAG are unchanged.
+    if (AnnotationSettings.isMapFirstRun(params)) { // rca-site:H3
+        pair_terminal_grouped_ch = pair_terminal_events_ch
+            .combine(pair_terminal_specs_ch, by: 0)
+            .filter { _pairId, eventStage, _done, expectedStage, _expectedCount ->
+                eventStage == expectedStage
+            }
+            .map { pairId, _eventStage, _done, _expectedStage, expectedCount ->
+                tuple(groupKey(pairId, expectedCount as int), true)
+            }
+            .groupTuple()
+            .map { pairKey, _doneFlags -> tuple(pairKey.getGroupTarget(), true) }
+    } else {
+        pair_terminal_grouped_ch = pair_terminal_events_ch
+            .join(pair_terminal_specs_ch)
+            .filter { _pairId, eventStage, _done, expectedStage, _expectedCount ->
+                eventStage == expectedStage
+            }
+            .map { pairId, _eventStage, _done, _expectedStage, expectedCount ->
+                tuple(groupKey(pairId, expectedCount as int), true)
+            }
+            .groupTuple()
+            .map { pairKey, _doneFlags -> tuple(pairKey.getGroupTarget(), true) }
+    }
 
     pair_terminal_token_ch = pair_terminal_immediate_ch.mix(
         pair_terminal_grouped_ch
@@ -3854,8 +3941,12 @@ workflow {
                             publishedPairPath(
                                 params.outdir,
                                 pairId,
-                                "${segmentation}/clustering_squidpy/" +
-                                "clustering_squidpy_out/" +
+                                "${segmentation}/" +
+                                AnnotationSettings.publishedClusteringDir(
+                                    params.outdir, pairId, segmentation, platform, sampleId,
+                                    settings.clustering_squidpy_table_key_suffix, // rca-site:H2
+                                ) +
+                                "/clustering_squidpy_out/" +
                                 "${platform.toLowerCase()}/" +
                                 "${sampleId}_clustered.h5ad",
                             )
@@ -3999,4 +4090,29 @@ workflow {
         }
     mender_finalized_ch = MENDER_FINALIZE(mender_finalize_inputs_ch)
     MENDER_IMPORT(mender_finalized_ch)
+    // Hook H6's record of skipped MENDER runs (no assigned state; map_first only).
+    if (AnnotationSettings.isMapFirstRun(params)) { // rca-site:H6
+        MENDER_IMPORT.out.subscribe { _taskKey, pairId, segmentation, platform, importManifest ->
+            AnnotationRunRecord.menderImported(pairId, segmentation, platform, importManifest)
+        }
+    }
+
+    // rca-hook:H11: the annotation QC report (plan §3.6, §9; M7), map_first runs only:
+    // after FINALIZE, the pair's cortical depth and the branch's MENDER when they run.
+    if (AnnotationSettings.isMapFirstRun(params) && AnnotationReport.enabled(params)) {
+        ANNOTATION_REPORTING(
+            CLUSTERING_MAP_FIRST.out.labels,
+            CLUSTERING_MAP_FIRST.out.alignment,
+            clustering_results_ch,
+            compute_cortical_depth_results_ch.map { _key, pairId, platform, _latestZarr, corticalDepthOut ->
+                tuple(pairId, platform, corticalDepthOut)
+            },
+            mender_finalized_ch.map {
+                _taskKey, pairId, segmentation, platform, _sampleId, _spatialdataPath,
+                _sourceSpatialdataTable, _nativeShapeKey, _sourceH5adPath, _menderConfig, menderDir ->
+                    tuple(pairId, segmentation, platform, menderDir)
+            },
+            sample_rows_ch.map { pairId, _row, settings -> tuple(pairId, AnnotationReport.pairSpec(settings, params)) },
+        )
+    }
 }

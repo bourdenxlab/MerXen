@@ -101,6 +101,7 @@ from merxen.annotation.store import (
 )
 from merxen.annotation.vocab import (
     ASSET_DIR,
+    COP_SUPERCLUSTER,
     NEURONS,
     UNASSIGNED_LABEL,
     VOCAB_FILES,
@@ -324,6 +325,25 @@ HO_OTHER_REGION_ROI_LABELS: Final[tuple[str, ...]] = (
 )
 HO_OTHER_REGION_MATRIX: Final = "WHB-10Xv3-Nonneurons"
 HO_OTHER_REGION_SEED: Final = 1
+# What the human self-maps simulate of the held-out test set (plan §8.3 step
+# 1; pre-registration §18). Revision 1 (user decision 2026-09-30, M8 D1):
+# the other-region test cells of the COP supercluster are left out. In the
+# set a self-map almost every wrong broad Oligodendrocyte call is a COP test
+# cell called Oligodendrocyte, and 132 of its 152 COP test cells are
+# other-region ones; their share of the lineage (7.1% at 10 counts) is 14x
+# the frontal reference's. The held-out bundle and its test cells stay as
+# built (HO_OTHER_REGION_VERSION is unchanged): the cells are left out when
+# a self-map loads them, and the revision enters every human self-map
+# bundle's build_hash through its test-set params. RESOLVABILITY_VERSION
+# stays 6 (7 is M3c's version-7 ensemble; a bump would rehash the mouse
+# bundles too). The drop changes the registered test set after the results
+# were known, so it was approved in writing (caveat C1).
+HO_SELF_MAP_TEST_SET_REVISION: Final = 1
+HO_SELF_MAP_EXCLUDED_SUPERCLUSTERS: Final[tuple[str, ...]] = (COP_SUPERCLUSTER,)
+HO_SELF_MAP_EXCLUSION_RULE: Final = (
+    "held-out test cells of the other-region top-up whose truth supercluster is "
+    "one of excluded_superclusters are left out of the self-map"
+)
 # Held-out donor cells whose truth supercluster no production call can name
 # are not test cells (M3b review 2; E2 research/insilico/02_make_queries.py
 # kept only Neurons-class superclusters other than Amygdala excitatory): the
@@ -6090,6 +6110,110 @@ def _resolvability_enabled(context: BuildContext) -> bool:
     )
 
 
+def ho_self_map_exclusion_params() -> dict[str, Any]:
+    """Return what the human self-maps leave out of the held-out test set (hashed).
+
+    Every human self-map on the held-out test set hashes it through its
+    test-set params (``_resolvability_params``), so a new revision gives the
+    WHB and SEA-AD bundles new build hashes; the held-out bundle's own
+    params (``_ho_params``) do not carry it, because its test cells are
+    unchanged.
+
+    Returns:
+        The revision, the rule, the test source and the supercluster names.
+    """
+    return {
+        "revision": HO_SELF_MAP_TEST_SET_REVISION,
+        "rule": HO_SELF_MAP_EXCLUSION_RULE,
+        "test_source": TEST_SOURCE_OTHER_REGION,
+        "excluded_superclusters": list(HO_SELF_MAP_EXCLUDED_SUPERCLUSTERS),
+    }
+
+
+def self_map_test_cells(
+    test: Any, test_reference_id: str
+) -> tuple[Any, dict[str, Any] | None]:
+    """Return the test cells a self-map simulates, and what it left out.
+
+    User decision 2026-09-30 (M8 D1; pre-registration §18): the self-maps on
+    the human held-out test set (``HO_REFERENCE_ID``) leave out the
+    other-region test cells (``test_source``) whose truth supercluster is one
+    of ``HO_SELF_MAP_EXCLUDED_SUPERCLUSTERS`` (the COP supercluster), as the
+    M8-prep ``resimdrop`` rebuild did. The remaining cells are simulated
+    with the keyed draws, so only a host whose spill partner was a dropped
+    cell gets a new spill. The mouse test set is returned unchanged.
+
+    Args:
+        test: ``resolvability.HeldOutCells`` of the test-set bundle.
+        test_reference_id: The test-set reference.
+
+    Returns:
+        ``(cells, record)``: the cells to simulate and, for the human
+        held-out test set, what ``resolvability_summary.json`` and
+        ``bundle.json`` record (revision, rule, cells left out per
+        supercluster); ``(test, None)`` for other test sets.
+    """
+    from merxen.annotation import resolvability as res
+
+    if test_reference_id != HO_REFERENCE_ID:
+        return test, None
+    obs = test.obs
+    name_to_label = {
+        name: label
+        for label, name in load_vocab("whb_supercluster").label_to_name().items()
+    }
+    labels = sorted(
+        name_to_label[name]
+        for name in HO_SELF_MAP_EXCLUDED_SUPERCLUSTERS
+        if name in name_to_label
+    )
+    truth_column = f"{res.TRUTH_PREFIX}{WHB_SUPC}"
+    if truth_column not in obs.columns:
+        truth_column = res.TRUTH_LEAF_COLUMN
+    truth = obs[truth_column].astype(str)
+    if TEST_SOURCE_COLUMN in obs.columns:
+        source = obs[TEST_SOURCE_COLUMN].astype(str)
+    else:
+        source = pd.Series(TEST_SOURCE_DONOR, index=obs.index)
+    dropped = (source == TEST_SOURCE_OTHER_REGION) & truth.isin(labels)
+    record = {
+        **ho_self_map_exclusion_params(),
+        "excluded_labels": labels,
+        "n_test_cells_in_bundle": int(len(obs)),
+        "n_excluded": int(dropped.sum()),
+        "n_test_cells": int((~dropped).sum()),
+        "excluded_per_supercluster": {
+            str(key): int(value)
+            for key, value in truth[dropped].value_counts().sort_index().items()
+        },
+        "kept_per_source_of_excluded_superclusters": {
+            str(key): int(value)
+            for key, value in source[truth.isin(labels) & ~dropped]
+            .value_counts()
+            .sort_index()
+            .items()
+        },
+    }
+    if not dropped.any():
+        return test, record
+    keep = np.flatnonzero(~dropped.to_numpy())
+    logger.info(
+        "%s: %d of %d held-out test cells left out of the self-map (other-region "
+        "cells of %s; revision %d)",
+        HO_REFERENCE_ID,
+        int(dropped.sum()),
+        len(obs),
+        ", ".join(HO_SELF_MAP_EXCLUDED_SUPERCLUSTERS),
+        HO_SELF_MAP_TEST_SET_REVISION,
+    )
+    kept = res.HeldOutCells(
+        counts=test.counts[keep].tocsr(),
+        genes=list(test.genes),
+        obs=obs.iloc[keep].copy(),
+    )
+    return kept, record
+
+
 def _run_self_map(
     context: BuildContext,
     *,
@@ -6131,10 +6255,15 @@ def _run_self_map(
     test_spec = _test_set_spec(context, test_reference_id, test_sources)
     with timer.step("resolvability_test_set"):
         test_ref = context.store.get_or_build(test_spec, panel, config=config)
-    test = res.load_test_cells(Path(test_ref.path))
+    test, exclusion = self_map_test_cells(
+        res.load_test_cells(Path(test_ref.path)), test_reference_id
+    )
     mapped_engine = engine if engine is not None else MmcBundle.from_dir(test_ref.path)
     runs: list[dict[str, Any]] = []
     plan = resolvability_plan(context.spec, panel, config)
+    exclusion_provenance = (
+        {} if exclusion is None else {"test_set_exclusion": exclusion}
+    )
     if plan.version == res.RESOLVABILITY_VERSION_V7:
         return _run_self_map_v7(
             context,
@@ -6146,6 +6275,7 @@ def _run_self_map(
             specs_for=specs_for,
             timer=timer,
             cells_rules=cells_rules,
+            exclusion_provenance=exclusion_provenance,
         )
     grid = context.spec.resolved_depth_grid(panel.n_genes)
     settings = self_map_rule_settings(config)
@@ -6173,6 +6303,7 @@ def _run_self_map(
                     "build_hash": test_ref.build_hash,
                     "path": test_ref.path,
                 },
+                **exclusion_provenance,
                 "mapping_runs": runs,
                 "decisions_note": (
                     "decision settings are recorded, not hashed; RESOLVE "
@@ -6187,6 +6318,7 @@ def _run_self_map(
         "reference_id": test_ref.reference_id,
         "build_hash": test_ref.build_hash,
     }
+    output["resolvability"].update(exclusion_provenance)
     output["resolvability"]["mapping_runs"] = runs
     if result.trust.state is not None:
         output["panel_trust"] = result.trust.state
@@ -6204,8 +6336,12 @@ def _run_self_map_v7(
     specs_for: Any,
     timer: _StepTimer,
     cells_rules: Sequence[Any] = (),
+    exclusion_provenance: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run a version-7 self-map (plan §8.3 v7) and write its tables.
+
+    ``exclusion_provenance`` records the test cells the self-map left out
+    (M8 D1, ``self_map_test_cells``), as the version-6 path does.
 
     The plan's members are simulated on the (topped-up) test set and mapped
     one at a time; ``resolvability.run_resolvability_v7`` decides the
@@ -6264,6 +6400,7 @@ def _run_self_map_v7(
                 "mapping_runs": runs,
                 "v7_inputs": plan.summary_record(),
                 "top_up": top_up,
+                **(exclusion_provenance or {}),
                 "decisions_note": (
                     "decision settings are recorded, not hashed; version-7 "
                     "decisions are re-derived from resolvability_cells.parquet "
@@ -6279,6 +6416,7 @@ def _run_self_map_v7(
     }
     output["resolvability"]["mapping_runs"] = runs
     output["resolvability"]["top_up"] = top_up
+    output["resolvability"].update(exclusion_provenance or {})
     if result.trust.state is not None:
         output["panel_trust"] = result.trust.state
     return output
@@ -6633,7 +6771,10 @@ def _resolvability_params(
         return {"enabled": False}
     test_params: dict[str, Any]
     if test_reference_id == HO_REFERENCE_ID:
-        test_params = _ho_params(spec, config)
+        test_params = {
+            **_ho_params(spec, config),
+            "self_map_exclusion": ho_self_map_exclusion_params(),
+        }
     else:
         test_params = _wmb_testset_params(spec, config)
     return {

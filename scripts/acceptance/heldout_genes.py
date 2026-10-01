@@ -32,7 +32,11 @@ chooses H4's "assigned class" from (plan §5.8 does not define it; M3 PR):
 - (c) ``heldout_whb_confident``: the WHB-only confident broad calls (v1
   thresholds and floors, no second method: SEA-AD saw the held-out genes);
 
-and ``production_argmax`` (circular, for comparison).
+and ``production_argmax`` (circular, for comparison). User decision
+2026-09-30 (M8 D6, pre-registration §18): H4's assigned class is M4's
+WHB-only re-resolve of the held-out re-map (``resolve_criteria.py``, label
+set ``m4_resolve_heldout_whb_only``), so none of these label sets is scored
+(``h4_assigned_class`` false); they are reported beside it.
 
 Writes ``heldout_markers.csv``, ``heldout_enrichment.csv``, ``heldout_h4.csv``
 and ``runs/<pair>/<sid>_<variant>.parquet`` to ``--out``.
@@ -338,6 +342,8 @@ def h4_rows(enrichment: pd.DataFrame) -> list[dict[str, Any]]:
                 ),
                 "h4_scored_pair": pair in H4_PAIRS,
                 "h4_pass": n_pass >= H4_MIN_CLASSES,
+                # M8 D6: H4 is scored on resolve_criteria.py's WHB-only set.
+                "h4_assigned_class": False,
             }
         )
     return rows

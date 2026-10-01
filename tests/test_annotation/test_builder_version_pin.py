@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "8ad3314b220fbfe88edda14ce2ce06bc4c6f5d0988c9618c979944548b53e132",
+    3: "2ed7774f5fd2d405230e82b1f87dd8d59d8975f1738a66374427cce2fa34fb9e",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -147,6 +147,21 @@ PIN_HISTORY = (
     "re-derive their decisions as built (no recorded margin: 0); the "
     "version-6 path and payload are byte-identical "
     "(test_resolvability_v6_golden), so no existing bundle changes",
+    "3: the human self-maps leave the held-out test set's other-region COP "
+    "cells out (user decision 2026-09-30, M8 D1; "
+    "HO_SELF_MAP_TEST_SET_REVISION 1): the revision and its rule enter every "
+    "human self-map bundle's build_hash through its test-set params, so "
+    "those bundles get new hashes without a builder bump; the held-out "
+    "test-set bundle, RESOLVABILITY_VERSION and the mouse bundles are "
+    "unchanged",
+    "3: thin_and_contaminate takes an optional efficiency_seed for the M8 "
+    "draw-spread grid (user decision 2026-09-30, M8 D2); every builder "
+    "leaves it unset, so the efficiency stays the recipe seed's and no "
+    "bundle content or build_hash changes",
+    "3: M3c merged after M8 (2026-10-01): the builder carries both the "
+    "version-7 ensemble (M3c) and the human test-set revision and "
+    "efficiency_seed of M8 D1 / D2; each change keeps its own build_hash rule "
+    "above, so no bundle built by either branch changes",
 )
 
 

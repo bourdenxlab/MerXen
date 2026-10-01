@@ -35,6 +35,9 @@ logger = logging.getLogger(__name__)
 
 LABEL_TABLE_VERSION: Final = 1
 LABEL_TABLE_SUFFIX: Final = "_celltype_labels.parquet"
+# Parquet schema-metadata key under which RESOLVE stores the provenance JSON
+# of a label table (read back by the map_first hierarchy and the report).
+LABELS_METADATA_KEY: Final = b"merxen_annotation"
 PLATFORMS: Final[tuple[str, ...]] = ("MERSCOPE", "XENIUM")
 # Probabilities are stored as float32 (tidy MMC parquet, ``ct_*_raw``), so a
 # bootstrap probability of exactly 0.69, 0.45 or 0.90 reads back just below
@@ -442,7 +445,9 @@ def column_specs(
             Columns.CT_FINAL_LEVEL, "category", categories=FINAL_LEVELS[species]
         ),
         ColumnSpec(Columns.CT_FINAL_NAME, "category"),
-        ColumnSpec(Columns.CT_CONSENSUS_TIER, "int8", value_range=(0.0, 3.0)),
+        # -1: no informative method (or outside the table / no primary);
+        # 0: confident disagreement; 1-3: informative methods agreeing.
+        ColumnSpec(Columns.CT_CONSENSUS_TIER, "int8", value_range=(-1.0, 3.0)),
         ColumnSpec(
             Columns.CT_BRANCH, "category", categories=branch_categories(species)
         ),
