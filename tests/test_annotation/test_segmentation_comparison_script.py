@@ -1013,11 +1013,20 @@ def test_write_analysis_and_render(m8b: ModuleType, tmp_path: Path) -> None:
 
 
 def test_series_colours_are_fixed_per_arm(m8b: ModuleType) -> None:
-    colours = m8b.series_colours(["reseg", "hybrid", "P1 X", "P2 Y"])
+    colours = m8b.series_colours(
+        ["reseg", "hybrid", "P7513 MERSCOPE", "P7513 XENIUM", "P1212 XENIUM", "L"]
+    )
     assert colours["hybrid"] == m8b.ARM_COLOURS["hybrid"]
     assert colours["reseg"] == m8b.ARM_COLOURS["reseg"]
-    assert colours["P1 X"] == m8b.SERIES_COLOURS[0]
-    assert colours["P2 Y"] == m8b.SERIES_COLOURS[1]
+    # a dataset takes its pair's colour, never an arm's
+    assert colours["P7513 MERSCOPE"] == colours["P7513 XENIUM"] == m8b.OTHER_PALETTE[0]
+    assert colours["P1212 XENIUM"] == m8b.OTHER_PALETTE[1]
+    assert colours["L"] == m8b.OTHER_PALETTE[2]
+    assert not set(m8b.OTHER_PALETTE) & set(m8b.ARM_PALETTE)
+    assert (
+        m8b.series_colours(["reseg - hybrid_matched"])["reseg - hybrid_matched"]
+        == (m8b.ARM_COLOURS["hybrid_matched"])
+    )
 
 
 def test_write_json_is_nan_safe(m8b: ModuleType, tmp_path: Path) -> None:
@@ -1086,3 +1095,130 @@ def test_acceptance_commands_per_arm(m8b: ModuleType, tmp_path: Path) -> None:
     assert "--skip-h4" in matched["resolve_criteria"]
     with pytest.raises(SystemExit):
         m8b._pairs(type("A", (), {"pairs": "P9999"})())
+
+
+def test_render_draws_every_figure_from_its_tables(
+    m8b: ModuleType, tmp_path: Path
+) -> None:
+    directory = tmp_path / "segmentation_comparison"
+    datasets = [("P7513", "MERSCOPE"), ("P7513", "XENIUM"), ("P5011", "XENIUM")]
+
+    def role(pair: str) -> str:
+        return "development" if pair == "P7513" else "held_out"
+
+    genes = pd.DataFrame(
+        [
+            {
+                "pair": p,
+                "role": role(p),
+                "platform": plat,
+                "gene": g,
+                "L": 0.3,
+                "N_bg": 0.4,
+            }
+            for p, plat in datasets
+            for g in ("A", "B", "C")
+        ]
+    )
+    by_type = pd.DataFrame(
+        [
+            {
+                "pair": p,
+                "role": role(p),
+                "platform": plat,
+                "level": "broad",
+                "group": c,
+                "gene": g,
+                "L": 0.5,
+                "N_bg": 0.2,
+                "n_assigned_reseg": 5,
+                "n_assigned_hybrid": 10,
+                "n_in_nucleus": 8,
+                "n_in_nucleus_unassigned_reseg": 2,
+            }
+            for p, plat in datasets
+            for c in ("Neurons", "Astrocytes")
+            for g in ("A", "B")
+        ]
+    )
+    bins = pd.DataFrame(
+        [
+            {
+                "pair": p,
+                "role": role(p),
+                "platform": plat,
+                "cells": "both_confident",
+                "class": c,
+                "metric": m,
+                "distance_bin": b,
+                "hybrid_minus_reseg": 0.01,
+                "ci_low": 0.0,
+                "ci_high": 0.02,
+            }
+            for p, plat in datasets
+            for c in ("Neurons", "Astrocytes")
+            for m in ("contamination_score", "negative_detection_rate")
+            for b in ("0-10", ">50", "all")
+        ]
+    )
+    jsd = pd.DataFrame(
+        [
+            {
+                "pair": "P7513",
+                "role": "development",
+                "kind": k,
+                "region": "whole_section",
+                "first": "reseg",
+                "second": s,
+                "difference": -0.01,
+                "difference_ci_low": -0.02,
+                "difference_ci_high": 0.0,
+            }
+            for k in ("soft", "confident")
+            for s in ("hybrid", "hybrid_matched", "resolve_summary")
+        ]
+    )
+    coverage = pd.DataFrame(
+        [
+            {
+                "pair": p,
+                "role": role(p),
+                "platform": plat,
+                "level": "broad",
+                "share_confident_hybrid": 0.6,
+                "share_confident_combined": 0.7,
+            }
+            for p, plat in datasets
+        ]
+    )
+    m8b.write_analysis(directory, 1, {"jsd_paired": jsd})
+    m8b.write_analysis(directory, 2, {"genes": genes, "genes_by_type": by_type})
+    m8b.write_analysis(directory, 3, {"bins": bins})
+    m8b.write_analysis(directory, 4, {"coverage": coverage})
+    figures = m8b.render_figures(directory)
+    stems = {record.stem for record in figures}
+    assert stems == {
+        "a1_jsd_paired",
+        "a2_loss_per_dataset",
+        "a2_loss_by_class_pooled_development",
+        "a2_loss_by_class_pooled_held_out",
+        "a2_loss_by_class_median_development",
+        "a2_loss_by_class_median_held_out",
+        "a3_contamination_score_development",
+        "a3_contamination_score_held_out",
+        "a3_negative_detection_rate_development",
+        "a3_negative_detection_rate_held_out",
+        "a4_coverage",
+    }
+    pooled = pd.read_csv(
+        directory / "figures" / "a2_loss_by_class_pooled_development.csv"
+    )
+    assert set(pooled["metric"]) == {"L", "N_bg"}
+    assert pooled.loc[pooled["metric"] == "L", "value"].tolist() == pytest.approx(
+        [0.5] * 4
+    )
+    assert pooled.loc[pooled["metric"] == "N_bg", "value"].tolist() == pytest.approx(
+        [0.25] * 4
+    )
+    page = m8b.render_page(directory, figures).read_text()
+    assert page.count("<figure>") == len(figures)

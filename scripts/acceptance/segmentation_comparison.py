@@ -3318,30 +3318,48 @@ def _code_record(export: Path | None) -> dict[str, Any]:
 
 # Rendering: figures (PNG + PDF + CSV) and the static page.
 
-# The reference palette's first four categorical slots (validated with the
-# dataviz validator: adjacent CVD dE >= 9.1, normal-vision >= 22.9 on the
-# light surface; slots 3-4 are below 3:1 contrast, so every figure has its
-# table: the CSV beside it and a table on the page). Arms keep their colour
-# in every figure; the datasets of one role take the same four slots.
-SERIES_COLOURS: Final[tuple[str, ...]] = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100")
+# Arms: the reference palette's slots 1-4 (validated with the dataviz
+# validator: adjacent CVD dE >= 9.1, normal-vision >= 22.9 on the light
+# surface). Other series (pairs, metrics) take slots 7, 5, 6 and 8 in that
+# order, never an arm's hue; their first three pass all checks, the fourth
+# is in the CVD warn band (7.2), so a fourth series always has a second
+# encoding. Slots 3-4 and 5 are below 3:1 contrast: every figure has its
+# table (the CSV beside it and a table on the page). A series keeps its
+# colour in every figure; a dataset takes its pair's colour and Xenium bars
+# are hatched.
+ARM_PALETTE: Final[tuple[str, ...]] = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100")
+OTHER_PALETTE: Final[tuple[str, ...]] = ("#4a3aa7", "#e87ba4", "#008300", "#e34948")
+SERIES_COLOURS: Final = ARM_PALETTE
 ARM_COLOURS: Final[dict[str, str]] = {
-    "hybrid": SERIES_COLOURS[0],
-    "reseg": SERIES_COLOURS[1],
-    "hybrid_matched": SERIES_COLOURS[2],
-    COMBINED: SERIES_COLOURS[3],
+    "hybrid": ARM_PALETTE[0],
+    "reseg": ARM_PALETTE[1],
+    "hybrid_matched": ARM_PALETTE[2],
+    COMBINED: ARM_PALETTE[3],
+}
+# A paired difference "reseg - <arm>" takes the colour of the other arm.
+COMPARISON_COLOURS: Final[dict[str, str]] = {
+    f"reseg - {arm}": ARM_COLOURS[arm] for arm in ("hybrid", "hybrid_matched")
 }
 
 
 def series_colours(names: Iterable[str]) -> dict[str, str]:
-    """Colour per series: an arm's own colour, else the slots in order."""
+    """Colour per series.
+
+    An arm (or a ``reseg - <arm>`` comparison) has its own colour; a dataset
+    ``<pair> <PLATFORM>`` takes its pair's colour; anything else takes the
+    other palette's slots in order of first appearance.
+    """
     out: dict[str, str] = {}
-    slot = 0
+    slot: dict[str, int] = {}
     for name in dict.fromkeys(str(value) for value in names):
         if name in ARM_COLOURS:
             out[name] = ARM_COLOURS[name]
+        elif name in COMPARISON_COLOURS:
+            out[name] = COMPARISON_COLOURS[name]
         else:
-            out[name] = SERIES_COLOURS[slot % len(SERIES_COLOURS)]
-            slot += 1
+            key = name.split(" ")[0] if name.split(" ")[0] in PAIRS else name
+            slot.setdefault(key, len(slot))
+            out[name] = OTHER_PALETTE[slot[key] % len(OTHER_PALETTE)]
     return out
 
 
@@ -3356,6 +3374,8 @@ def bar_figure(
     facet: str | None = None,
     ylabel: str = "",
     title: str = "",
+    hatched: str | None = None,
+    hatched_label: str = "",
 ) -> Any:
     """``report_figures.grouped_bars`` with the comparison's series colours."""
     from matplotlib.container import BarContainer
@@ -3374,6 +3394,8 @@ def bar_figure(
         ylabel=ylabel,
         title=title,
         horizontal_line=0.0,
+        hatched=hatched,
+        hatched_label=hatched_label,
     )
     for ax in figure.axes:
         for container in ax.containers:
@@ -3389,6 +3411,64 @@ def bar_figure(
             ):
                 if handle is not None and text.get_text() in colours:
                     handle.set_facecolor(colours[text.get_text()])
+    if title:
+        figure.tight_layout(rect=(0, 0, 1, 1 - 0.45 / figure.get_figheight()))
+    return figure
+
+
+def forest_figure(
+    frame: pd.DataFrame,
+    *,
+    label: str,
+    group: str,
+    value: str,
+    low: str,
+    high: str,
+    title: str,
+    xlabel: str,
+) -> Any:
+    """Point estimates with CIs per label, one colour per group, a zero line."""
+    from merxen.annotation.report_figures import new_figure, placeholder
+
+    if frame.empty:
+        return placeholder(f"{title}: no data")
+    labels = list(dict.fromkeys(frame[label].astype(str)))
+    groups = list(dict.fromkeys(frame[group].astype(str)))
+    colours = series_colours(groups)
+    figure = new_figure(6.5, 0.3 * len(labels) + 1.4)
+    ax = figure.add_subplot(1, 1, 1)
+    ax.axvline(0.0, color="#999999", linewidth=0.8, linestyle="--")
+    step = 0.6 / max(1, len(groups))
+    for index, name in enumerate(groups):
+        part = frame[frame[group].astype(str) == name]
+        y = (
+            np.array([labels.index(str(v)) for v in part[label]])
+            - 0.3
+            + step * (index + 0.5)
+        )
+        centre = part[value].astype(float).to_numpy()
+        lows = part[low].astype(float).to_numpy()
+        highs = part[high].astype(float).to_numpy()
+        ax.errorbar(
+            centre,
+            y,
+            xerr=np.vstack([centre - lows, highs - centre]).clip(0),
+            fmt="o",
+            color=colours[name],
+            markersize=4,
+            elinewidth=1.0,
+            label=name,
+        )
+    ax.set_yticks(np.arange(len(labels)))
+    ax.set_yticklabels(labels, fontsize=7)
+    ax.invert_yaxis()
+    ax.set_xlabel(xlabel, fontsize=8)
+    ax.tick_params(axis="x", labelsize=7)
+    ax.grid(axis="x", color="#e5e5e5", linewidth=0.5)
+    ax.set_axisbelow(True)
+    ax.legend(fontsize=7, frameon=False)
+    ax.set_title(title, fontsize=9)
+    figure.tight_layout()
     return figure
 
 
@@ -3399,7 +3479,7 @@ def _read_table(directory: Path, name: str) -> pd.DataFrame | None:
 
 def render_figures(directory: Path) -> list[Any]:
     """Draw the page's figures from the analysis tables (PNG + PDF + CSV)."""
-    from merxen.annotation.report_figures import forest, save_report_figure
+    from merxen.annotation.report_figures import save_report_figure
 
     figures_dir = directory / "figures"
     records = []
@@ -3443,7 +3523,7 @@ def render_figures(directory: Path) -> list[Any]:
         if len(part):
             part["comparison"] = "reseg - " + part["second"]
             part["label"] = part["pair"] + " " + part["kind"]
-            figure = forest(
+            figure = forest_figure(
                 part,
                 label="label",
                 group="comparison",
@@ -3508,43 +3588,83 @@ def render_figures(directory: Path) -> list[Any]:
         )
     by_type = _read_table(directory, "analysis2_genes_by_type")
     if by_type is not None and len(by_type):
-        part = (
-            by_type[by_type["level"] == "broad"]
-            .groupby(["pair", "role", "platform", "group"], as_index=False)
-            .agg(median_L=("L", "median"), median_N_bg=("N_bg", "median"))
+        broad = by_type[by_type["level"] == "broad"]
+        keys = ["pair", "role", "platform", "group"]
+        pooled = (
+            broad.groupby(keys, as_index=False)[
+                [
+                    "n_assigned_reseg",
+                    "n_assigned_hybrid",
+                    "n_in_nucleus",
+                    "n_in_nucleus_unassigned_reseg",
+                ]
+            ]
+            .sum()
             .rename(columns={"group": "class"})
         )
-        part["dataset"] = part["pair"] + " " + part["platform"]
-        long = pd.concat(
+        hybrid = pooled["n_assigned_hybrid"].where(pooled["n_assigned_hybrid"] > 0)
+        nucleus = pooled["n_in_nucleus"].where(pooled["n_in_nucleus"] > 0)
+        pooled = pd.concat(
             [
-                part.assign(metric="L", value=part["median_L"]),
-                part.assign(metric="N_bg", value=part["median_N_bg"]),
+                pooled.assign(
+                    metric="L", value=1.0 - pooled["n_assigned_reseg"] / hybrid
+                ),
+                pooled.assign(
+                    metric="N_bg",
+                    value=pooled["n_in_nucleus_unassigned_reseg"] / nucleus,
+                ),
             ],
             ignore_index=True,
         )
-        for value, text in roles:
-            sub = long[long["role"] == value]
-            if len(sub):
+        medians = (
+            broad.groupby(keys, as_index=False)
+            .agg(L=("L", "median"), N_bg=("N_bg", "median"))
+            .rename(columns={"group": "class"})
+            .melt(id_vars=["pair", "role", "platform", "class"], var_name="metric")
+        )
+        for kind, frame, ylabel, caption in (
+            (
+                "pooled",
+                pooled,
+                "pooled over the panel genes",
+                "L and N_bg of all panel transcripts of each confident proseg_hybrid "
+                "broad class's cells (pooled over genes).",
+            ),
+            (
+                "median",
+                medians,
+                "median over the panel genes",
+                "Median over the panel genes of the per-gene L and N_bg within each "
+                "confident proseg_hybrid broad class (genes a class does not express "
+                "count as much as its markers; per gene in "
+                "analysis2_genes_by_type.csv).",
+            ),
+        ):
+            frame = frame.copy()
+            frame["dataset"] = frame["pair"] + " " + frame["platform"]
+            for value, text in roles:
+                sub = frame[frame["role"] == value]
+                if not len(sub):
+                    continue
                 figure = bar_figure(
                     sub,
                     category="class",
                     group="metric",
                     value="value",
                     facet="dataset",
-                    ylabel="median over genes",
+                    ylabel=ylabel,
                     title=(
-                        "Analysis 2: loss per confident proseg_hybrid broad "
-                        f"class ({text})"
+                        f"Analysis 2: loss per confident proseg_hybrid broad class, "
+                        f"{kind} ({text})"
                     ),
                 )
                 records.append(
                     save_report_figure(
                         figure,
                         figures_dir,
-                        f"a2_loss_by_class_{value}",
+                        f"a2_loss_by_class_{kind}_{value}",
                         sub,
-                        "Median over genes of L and N_bg within each confident "
-                        "proseg_hybrid broad class.",
+                        caption,
                     )
                 )
     bins = _read_table(directory, "analysis3_bins")
@@ -3559,6 +3679,7 @@ def render_figures(directory: Path) -> list[Any]:
                 & (bins["distance_bin"] != "all")
             ].copy()
             part["dataset"] = part["pair"] + " " + part["platform"]
+            part["xenium"] = part["platform"] == "XENIUM"
             for value, text in roles:
                 sub = part[part["role"] == value]
                 if len(sub):
@@ -3566,6 +3687,8 @@ def render_figures(directory: Path) -> list[Any]:
                         sub,
                         category="distance_bin",
                         group="dataset",
+                        hatched="xenium",
+                        hatched_label="Xenium (hatched)",
                         value="hybrid_minus_reseg",
                         low="ci_low",
                         high="ci_high",
