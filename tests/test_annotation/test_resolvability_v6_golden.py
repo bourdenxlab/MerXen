@@ -53,7 +53,10 @@ from merxen.annotation.vocab import load_floor_table
 
 from .test_resolvability import bootstrap_mapper, make_test_cells, synthetic_specs
 
+TABLE_FLOAT_DIGITS = 10
 # Computed with the code of 83e81e3 (a git archive export), 2026-09-28.
+# The two */table values were re-derived on 2026-10-01 at TABLE_FLOAT_DIGITS on
+# dwight, where the current code still reproduced the 17-digit values exactly.
 # Re-pinned when M3c merged after M8 (2026-10-01): the build hashes of the
 # eight human self-map bundles (seaad_mr_panel, whb_frontal_supc_clus) include
 # M8 D1's held-out test-set revision (pre-registration §18); every other value,
@@ -141,7 +144,7 @@ GOLDEN: dict[str, str] = {
         "8efdd5b187736ebf3c59b3939a7a5a73cde9e0239e4c326ceaa8f5f9e6f9473a"
     ),
     "human_like/table": (
-        "0edf475d90ef350d0016d83193d7ab65c7b02dd7c203f1d4109f446c9d3d0975"
+        "4a3814d2a45ad61dd30af035d4482684eb87d1cccf8f0b421bb35243ee4ce446"
     ),
     "human_like/trust": (
         "fa4b38cee47dbef83659fd1841d5bed4ccd0f3f87ffa68e8ff2639befbab4afd"
@@ -180,7 +183,7 @@ GOLDEN: dict[str, str] = {
         "eb90046020132a76f0ad12aecb595d1440292757d69cc4074f69318c64d46d67"
     ),
     "mouse_like/table": (
-        "c3182b278eeed2ddeeead2a55fe640200ab46addb195004b1275ad268787a0ac"
+        "3486fce6d112a70ca179a2c350b6454b85c980dcb008103b888b5ef86bc354b8"
     ),
     "mouse_like/trust": (
         "2477a4363fea6cf8597c179efe62f6f49d8b58c89bd6af78d32d65500efca1f2"
@@ -211,8 +214,8 @@ def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _cell(value: Any) -> str:
-    """Return the canonical text of one table value."""
+def _cell(value: Any, float_digits: int = 17) -> str:
+    """Return the canonical text of one table value (floats to ``float_digits``)."""
     if value is None or value is pd.NA:
         return ""
     if isinstance(value, bool | np.bool_):
@@ -221,20 +224,25 @@ def _cell(value: Any) -> str:
         return str(int(value))
     if isinstance(value, float | np.floating):
         number = float(value)
-        return "" if math.isnan(number) else f"{number:.17g}"
+        return "" if math.isnan(number) else f"{number:.{float_digits}g}"
     if isinstance(value, list | tuple | dict | np.ndarray):
         items = value.tolist() if isinstance(value, np.ndarray) else value
         return json.dumps(items, sort_keys=True, default=str)
     return str(value)
 
 
-def canonical_csv(frame: pd.DataFrame, sort_by: Sequence[str] | None = None) -> str:
+def canonical_csv(
+    frame: pd.DataFrame,
+    sort_by: Sequence[str] | None = None,
+    float_digits: int = 17,
+) -> str:
     """Return a frame as canonical CSV text (column order kept).
 
     Args:
         frame: The table.
         sort_by: Columns to sort by (their values, stable); ``None`` sorts the
             rows by the canonical text of every column.
+        float_digits: Significant digits of float values (17: exact).
 
     Returns:
         Header and rows, comma-separated, one row per line.
@@ -244,7 +252,10 @@ def canonical_csv(frame: pd.DataFrame, sort_by: Sequence[str] | None = None) -> 
         table = table.sort_values(list(sort_by), kind="mergesort").reset_index(
             drop=True
         )
-    text = [[_cell(value) for value in row] for row in table.itertuples(index=False)]
+    text = [
+        [_cell(value, float_digits) for value in row]
+        for row in table.itertuples(index=False)
+    ]
     if sort_by is None:
         text.sort()
     lines = [",".join(str(column) for column in table.columns)]
@@ -339,7 +350,13 @@ def run_panel(name: str) -> dict[str, str]:
             run.decisions, sort_by=("regime", "level", "class", "depth")
         ).encode("utf-8")
     )
-    result[f"{name}/table"] = _sha256(canonical_csv(run.table).encode("utf-8"))
+    # The table's floats (precisions, Wilson bounds) differ in their last bits
+    # between hosts (GitHub runner vs dwight, same pinned packages), so they
+    # are compared to 10 significant digits; the decisions, cells, floors,
+    # trust and summary stay exact and pin every emission decision.
+    result[f"{name}/table"] = _sha256(
+        canonical_csv(run.table, float_digits=TABLE_FLOAT_DIGITS).encode("utf-8")
+    )
     result[f"{name}/cells"] = _sha256(
         canonical_csv(res.coerce_cells(run.cells)).encode("utf-8")
     )
