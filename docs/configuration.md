@@ -84,6 +84,7 @@ profile. Override either kind with `--<name>` on the command line.
 | `only_stage` | `null` | Fallback single-stage selector. A row-level `only_stage` overrides row start/stop values; row start/stop values suppress the global `only_stage` fallback for that row. |
 | `gpu_process_lock_enabled` | Dwight: `true` | Serialize local GPU-heavy processes so `CELLPOSE_SEGMENT`, GPU `ALIGN`, and GPU `CLUSTERING_SQUIDPY` do not compete for one workstation GPU. ProSeg does not take this lock. |
 | `gpu_process_lock_file` | Dwight: `/tmp/merxen-dwight-gpu.lock` | One host-wide lock shared by tasks and concurrent launches on Dwight. |
+| `task_tmp_dir` | Dwight: `/srv/storage/MerXen/tmp` | Exported to every task as `TMPDIR`, so library temporary files land on the `/srv/storage` RAID rather than `/tmp` on the small root disk. The directory must exist (`mkdir -p` it once per host). ProSeg and the proseg_hybrid refinement write their large intermediates to `$MERXEN_TMPDIR` if set, otherwise to the task's work directory, never to the system temporary directory. |
 
 Stage names accepted by `start_stage`, `stop_stage`, and `only_stage` are:
 `build_spatialdata`, `segment_nuclei`, `segment`, `enrich`, `mask_image_quantification`,
