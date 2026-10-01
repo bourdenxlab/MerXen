@@ -1,4 +1,4 @@
-"""Tests for the M8 gate scoring rules (``report_scoring``; prereg §18)."""
+"""Tests for the M8 gate scoring rules (``report_scoring``; prereg §18, §20)."""
 
 from __future__ import annotations
 
@@ -52,25 +52,36 @@ def _h12_records(
     return records
 
 
-def test_score_h12_scores_the_tile_ordering_not_the_tangential_blocks() -> None:
-    """The P7513_XENIUM case of pre-registration §17: tiles fail, blocks pass."""
+def test_score_h12_scores_the_tangential_blocks_not_the_tiles() -> None:
+    """The P7513_XENIUM case of §17: tiles fail, blocks pass (§20 D11)."""
     records = _h12_records(
         {"MERSCOPE": True, "XENIUM": False},
         {"MERSCOPE": True, "XENIUM": True},
         {"MERSCOPE": (0.5, 0.45), "XENIUM": (0.5, 0.46)},
     )
-    records.append(_record("depth_ordering_replicated", True, scope="pair"))
-    score = sc.score_h12(records, pair_id="P7513")
-    assert score.verdict == sc.FAIL and score.ci_scored == SQUARE_TILE_CI
-    assert score.ordering == {"MERSCOPE": sc.PASS, "XENIUM": sc.FAIL}
-    assert score.reported_beside["replicated"] == [True]
-    record = score.to_json()
-    assert record["ci_scored"] == SQUARE_TILE_CI
-    assert record["ci_reported_beside"] == PRIMARY_CI
-    # A scored replication record that contradicts its platforms is an error.
     records.append(
-        _record("depth_ordering_replicated", True, scope="pair", kind=SQUARE_TILE_CI)
+        _record("depth_ordering_replicated", False, scope="pair", kind=SQUARE_TILE_CI)
     )
+    score = sc.score_h12(records, pair_id="P7513")
+    assert score.verdict == sc.PASS and score.ci_scored == PRIMARY_CI
+    assert score.ordering == {"MERSCOPE": sc.PASS, "XENIUM": sc.PASS}
+    assert score.reported_beside["ordering"] == {
+        "MERSCOPE": sc.PASS,
+        "XENIUM": sc.FAIL,
+    }
+    assert score.reported_beside["replicated"] == [False]
+    record = score.to_json()
+    assert record["ci_scored"] == PRIMARY_CI
+    assert record["ci_reported_beside"] == SQUARE_TILE_CI
+    # The blocks failing fail the pair, whatever the tiles say.
+    failing = _h12_records(
+        {"MERSCOPE": True, "XENIUM": True},
+        {"MERSCOPE": True, "XENIUM": False},
+        {"MERSCOPE": (0.5, 0.45), "XENIUM": (0.5, 0.46)},
+    )
+    assert sc.score_h12(failing, pair_id="P7513").verdict == sc.FAIL
+    # A scored replication record that contradicts its platforms is an error.
+    records.append(_record("depth_ordering_replicated", False, scope="pair"))
     with pytest.raises(ValueError, match="depth_ordering_replicated"):
         sc.score_h12(records, pair_id="P7513")
 
@@ -91,19 +102,23 @@ def test_score_h12_wm_gm_needs_the_tile_ci_above_zero_on_both_platforms() -> Non
     assert sc.score_h12(records, pair_id="P5011").verdict == sc.NOT_AVAILABLE
 
 
-def test_score_h12_without_the_scored_record_does_not_fall_back_to_tangential() -> None:
+def test_score_h12_never_scores_the_tiles_beside_the_blocks() -> None:
     records = _h12_records(
-        {}, {"MERSCOPE": True, "XENIUM": True}, {"MERSCOPE": (0.5, 0.4)}
+        {"MERSCOPE": True, "XENIUM": True}, {}, {"MERSCOPE": (0.5, 0.4)}
     )
     score = sc.score_h12(records, pair_id="P7513")
     assert score.ordering_verdict == sc.NOT_AVAILABLE
     assert score.verdict == sc.NOT_AVAILABLE
-    assert any("older than the M8 review" in note for note in score.notes)
     # A report whose only CI was the tiles is scored on its primary records.
+    records = _h12_records(
+        {}, {"MERSCOPE": True, "XENIUM": True}, {"MERSCOPE": (0.5, 0.4)}
+    )
     records[0]["value"] = SQUARE_TILE_CI
     tiles_only = sc.score_h12(records, pair_id="P7513")
     assert tiles_only.ordering_verdict == sc.PASS
+    assert tiles_only.ci_scored == SQUARE_TILE_CI
     assert tiles_only.ci_reported_beside is None
+    assert any("no tangential positions" in note for note in tiles_only.notes)
 
 
 def test_d3_holds_only_at_the_text_value_and_level() -> None:
@@ -149,9 +164,20 @@ def test_d5_checks_the_value_and_the_confident_labels_of_the_flagged_cells() -> 
             "segmentation": "reseg",
             "dataset": "P1212_MERSCOPE",
         },
-        value=0.010364,
+        value=0.011311,
     )
     assert reseg is not None and reseg.in_scope
+    # §20 D13 moved the reseg text value to the pipeline's 1.13%.
+    above = sc.check_d5(
+        **{
+            **base,
+            "criterion": "H17/H2",
+            "segmentation": "reseg",
+            "dataset": "P1212_MERSCOPE",
+        },
+        value=0.0119,
+    )
+    assert above is not None and not above.in_scope
     # D5 names H17/H2 for P1212_MERSCOPE reseg, not proseg_hybrid H2.
     assert sc.check_d5(**{**base, "dataset": "P1212_MERSCOPE"}, value=0.0103) is None
 
@@ -267,4 +293,43 @@ def test_verdict_labels_the_row() -> None:
     assert sc.verdict(False, True, held) == "EXCEPTION (D5)"
     assert sc.verdict(False, True, moved) == "EXCEPTION-RECHECK (D5)"
     assert sc.verdict(False, True, None) == sc.FAIL_OUTSIDE
-    assert set(sc.TOLERANCES) == {"D3", "D4", "D5", "D7"}
+    assert set(sc.TOLERANCES) == {"D3", "D4", "D5", "D7", "D10", "D12"}
+    assert sc.TOLERANCES["D10"]["n_rows"] == 70
+
+
+def test_d10_covers_only_the_stage_b_rows_of_each_dataset() -> None:
+    assert sc.check_d10(dataset="P7513_MERSCOPE", failing=[]) is None
+    held = sc.check_d10(
+        dataset="P5011_XENIUM",
+        failing=[
+            ("broad", "OPC", 15),
+            ("supercluster", "Fibroblast", 120),
+            ("supercluster", "Oligodendrocyte precursor", 60),
+        ],
+    )
+    assert held is not None and held.in_scope
+    assert held.verdict == "EXCEPTION (D10)"
+    # Broad OPC 60 failed on P7113_MERSCOPE only; Fibroblast 120 on
+    # P5011_XENIUM only; Astro is not named.
+    for dataset, row in (
+        ("P7513_MERSCOPE", ("broad", "OPC", 60)),
+        ("P7513_XENIUM", ("supercluster", "Fibroblast", 120)),
+        ("P7513_XENIUM", ("broad", "Astro", 15)),
+    ):
+        moved = sc.check_d10(dataset=dataset, failing=[row])
+        assert moved is not None and not moved.in_scope
+        assert moved.verdict == "EXCEPTION-RECHECK (D10)"
+
+
+def test_d12_needs_no_switch_and_the_texts_threshold_share() -> None:
+    held = sc.check_d12(pair="P1212", share_threshold=0.13403, n_switched=0)
+    assert held is not None and held.in_scope
+    assert held.verdict == "EXCEPTION (D12)"
+    assert not sc.check_d12(
+        pair="P1212", share_threshold=0.13403, n_switched=2
+    ).in_scope
+    assert not sc.check_d12(pair="P7513", share_threshold=0.0712, n_switched=0).in_scope
+    assert not sc.check_d12(
+        pair="P7513", share_threshold=0.07, n_switched=None
+    ).in_scope
+    assert sc.check_d12(pair="P7113", share_threshold=0.07, n_switched=0) is None

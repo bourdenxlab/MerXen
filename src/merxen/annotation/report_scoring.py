@@ -4,24 +4,28 @@ The annotation report records metrics, never verdicts (``report_model``);
 the acceptance scripts score them. This module holds the two parts of the
 M8 scoring protocol that must not live only in an evidence script:
 
-- **H12** (protocol item 3): scored on the square 500 µm tile CI
-  (``report_depth.SCORED_CI``). The ordering verdict of a platform is its
-  ``depth_ordering_passes`` record with ``kind = square_tile_500um``; the
-  pair's ordering is the AND over both platforms (cross-checked against the
-  pair's ``depth_ordering_replicated`` record of that kind); oligodendrocytes
-  WM > GM needs the square-tile CI of ``oligodendrocyte_wm_minus_gm_share``
-  above 0 on both platforms. The tangential-block records (the report's
-  display primary, M7 D23 undecided) are returned beside it as information.
-- **The approved exceptions' scopes** (protocol item 6): D3, D4, D5 and D7
-  cover the datasets, bins and classes their texts name. Each check here
+- **H12** (protocol item 3 as amended by §20 D11): the ordering is scored on
+  the tangential-block CI, the report's primary (``report_depth.SCORED_CI``;
+  approved by the user on 2026-10-01). The ordering verdict of a platform is
+  its kind-less ``depth_ordering_passes`` record (the tiles where a platform
+  has no tangential positions); the pair's ordering is the AND over both
+  platforms (cross-checked against the pair's kind-less
+  ``depth_ordering_replicated`` record); oligodendrocytes WM > GM needs the
+  square-tile CI of ``oligodendrocyte_wm_minus_gm_share`` above 0 on both
+  platforms (white matter has no tangential position). The square-tile
+  ordering records are returned beside it as information.
+- **The approved exceptions' scopes** (protocol item 6; §20): D3, D4, D5, D7,
+  D10 and D12 cover the datasets, bins and classes their texts name. Each
+  check here
   tests the conditions the text states, with the tolerances below, and
   returns ``EXCEPTION (Dn)`` when they hold and ``EXCEPTION-RECHECK (Dn)``
   (back to the user) when the value moved outside the text's scope. A
   failure no decision names is ``FAIL-OUTSIDE`` (``verdict``).
 
-The tolerances were stated at the M8 review (2026-09-30), before stage B;
-they only narrow the approved exceptions (a failure outside them goes back
-to the user), so they loosen nothing.
+The tolerances were stated at the M8 review (2026-09-30), before stage B
+(D10's and D12's with the user's decisions of 2026-10-01, before the
+re-score); they only narrow the approved exceptions (a failure outside them
+goes back to the user), so they loosen nothing.
 
 It is a ``report*`` module on purpose: like the report, it reads what
 RESOLVE wrote and RESOLVE never imports it, so it stays out of the RESOLVE
@@ -38,7 +42,7 @@ from typing import Any, Final
 
 import pandas as pd
 
-from merxen.annotation.report_depth import PRIMARY_CI, SCORED_CI, SQUARE_TILE_CI
+from merxen.annotation.report_depth import SCORED_CI, SQUARE_TILE_CI
 
 PASS: Final = "PASS"
 FAIL: Final = "FAIL"
@@ -92,19 +96,21 @@ def _pair_verdict(verdicts: Sequence[str], n_platforms: int) -> str:
 
 @dataclass(frozen=True)
 class H12Score:
-    """The scored H12 verdict of one pair (pre-registration §18 item 3).
+    """The scored H12 verdict of one pair (pre-registration §18 item 3, §20 D11).
 
     Attributes:
         pair_id: The pair.
         verdict: ``PASS``, ``FAIL`` or ``NOT_AVAILABLE``.
-        ci_scored: The CI the verdict used (``square_tile_500um``).
-        ci_reported_beside: The report's display primary, not scored.
+        ci_scored: The ordering CI the verdict used (``tangential_block_500um``;
+            ``square_tile_500um`` when the pair has no tangential positions).
+        ci_reported_beside: The square tiles, not scored (``None`` when they
+            are the scored primary).
         ordering_required: Whether §14 requires the ordering on this pair.
         ordering: Per platform, the scored ordering verdict.
         ordering_verdict: The pair's ordering (both platforms).
         wm_gm: Per platform: value, CI, basis and verdict of WM > GM.
         wm_gm_verdict: The pair's WM > GM (both platforms).
-        reported_beside: The tangential-block records (information).
+        reported_beside: The square-tile ordering records (information).
         notes: What a reader must know.
     """
 
@@ -141,14 +147,14 @@ class H12Score:
 def score_h12(records: Iterable[Any], *, pair_id: str) -> H12Score:
     """Score H12 of one pair from its ``acceptance_metrics.json`` records.
 
-    The ordering of each platform is its ``depth_ordering_passes`` record
-    with ``kind = SCORED_CI``; a report older than M8 review (no such record
-    beside a tangential primary) leaves the ordering ``NOT_AVAILABLE``,
-    unless its display primary was itself the square tiles
-    (``depth_ci_method``). The pair's replication record of the scored kind,
-    when present, must agree with the per-platform AND (else ``ValueError``:
-    the report is inconsistent). WM > GM passes on a platform when the
-    square-tile CI of the WM - GM oligodendrocyte share lies above 0.
+    The ordering of each platform is its kind-less ``depth_ordering_passes``
+    record: the report's primary, the tangential blocks (``SCORED_CI``,
+    §20 D11), or the square tiles on a platform without tangential positions
+    (``depth_ci_method``). The pair's kind-less replication record, when
+    present, must agree with the per-platform AND (else ``ValueError``: the
+    report is inconsistent). WM > GM passes on a platform when the
+    square-tile CI of the WM - GM oligodendrocyte share lies above 0. The
+    square-tile ordering records are reported beside the score.
 
     Args:
         records: The pair's metric records (dicts or ``MetricRecord``).
@@ -163,21 +169,16 @@ def score_h12(records: Iterable[Any], *, pair_id: str) -> H12Score:
     records = list(records)
     notes: list[str] = []
     methods = {_get(record, "value") for record in _h12(records, H12_CI_METHOD)}
+    tiles_only = methods == {SQUARE_TILE_CI}
+    if tiles_only:
+        notes.append("no tangential positions: the scored primary is the tiles")
     orderings = _h12(records, H12_ORDERING)
-    scored = [record for record in orderings if _get(record, "kind") == SCORED_CI]
-    if not scored and methods == {SQUARE_TILE_CI}:
-        scored = [record for record in orderings if _get(record, "kind") is None]
-        notes.append("no tangential positions: the display primary is the tiles")
-    beside = [record for record in orderings if _get(record, "kind") is None]
+    scored = [record for record in orderings if _get(record, "kind") is None]
+    beside = [record for record in orderings if _get(record, "kind") == SQUARE_TILE_CI]
     ordering: dict[str, str] = {}
     for record in scored:
         verdict, _ = _bool_verdict(record)
         ordering[str(_get(record, "platform"))] = verdict
-    if not scored and orderings:
-        notes.append(
-            f"no {SCORED_CI} ordering record (a report older than the M8 review): "
-            "the ordering is not scored"
-        )
     platforms = {
         str(_get(record, "platform"))
         for record in records
@@ -187,7 +188,7 @@ def score_h12(records: Iterable[Any], *, pair_id: str) -> H12Score:
         ordering[platform] = NOT_AVAILABLE
     ordering_verdict = _pair_verdict(list(ordering.values()), len(ordering))
     for record in _h12(records, H12_REPLICATED):
-        if _get(record, "kind") != SCORED_CI:
+        if _get(record, "kind") is not None:
             continue
         value = _get(record, "value")
         if isinstance(value, bool) and value != (ordering_verdict == PASS):
@@ -237,15 +238,15 @@ def score_h12(records: Iterable[Any], *, pair_id: str) -> H12Score:
         "replicated": [
             _get(record, "value")
             for record in _h12(records, H12_REPLICATED)
-            if _get(record, "kind") is None
+            if _get(record, "kind") == SQUARE_TILE_CI
         ],
-        "note": "not scored (M7 D23: the tangential-block CI is not approved)",
+        "note": "square tiles, not scored (§20 D11: the tangential blocks are scored)",
     }
     return H12Score(
         pair_id=pair_id,
         verdict=verdict,
-        ci_scored=SCORED_CI,
-        ci_reported_beside=PRIMARY_CI if methods != {SQUARE_TILE_CI} else None,
+        ci_scored=SQUARE_TILE_CI if tiles_only else SCORED_CI,
+        ci_reported_beside=None if tiles_only else SQUARE_TILE_CI,
         ordering_required=required,
         ordering=ordering,
         ordering_verdict=ordering_verdict,
@@ -266,11 +267,13 @@ D3_TEXT_VALUE: Final = 0.148
 D3_TOLERANCE: Final = 0.005
 D3_LEVEL: Final = "broad_only"
 # D5: "H2 exceeds 1% on P5011_MERSCOPE proseg_hybrid (1.02%) and
-# P1212_MERSCOPE reseg (1.04%) ... none receives a broad or supercluster
+# P1212_MERSCOPE reseg (1.13%) ... none receives a broad or supercluster
 # label". Scope: the value may exceed the text's by at most the tolerance.
+# The reseg value was 1.04% (M4) until the user extended D5 to the
+# pipeline's stage B value on 2026-10-01 (§20 D13).
 D5_TEXT_VALUES: Final[dict[tuple[str, str], float]] = {
     ("proseg_hybrid", "P5011_MERSCOPE"): 0.0102,
-    ("reseg", "P1212_MERSCOPE"): 0.0104,
+    ("reseg", "P1212_MERSCOPE"): 0.0113,
 }
 D5_TOLERANCE: Final = 0.0005
 D5_CRITERIA: Final[dict[tuple[str, str], str]] = {
@@ -313,6 +316,57 @@ D4_PREP_WOULD_RAISE: Final[frozenset[tuple[str, str, int]]] = frozenset(
     + [("supercluster", "Astro", depth) for depth in (30, 60, 120)]
     + [("supercluster", "Immune", depth) for depth in (30, 60)]
 )
+# D10 (§20): H6's per-class precision may miss its target in exactly the
+# (level, class, depth) rows stage B failed, on the datasets that failed
+# them (``tables/h6_precision.csv``): OPC, COP and deep-layer CT / 6b, and
+# supercluster Fibroblast 120 on P5011_XENIUM (extended by the user,
+# 2026-10-01). A failing row outside it goes back to the user.
+_D10_ALL: Final = tuple(sorted(D4_DATASETS))
+D10_FAILING: Final[dict[tuple[str, str, int], tuple[str, ...]]] = {
+    ("broad", "OPC", 15): _D10_ALL,
+    ("broad", "OPC", 30): (
+        "P1212_XENIUM",
+        "P7113_MERSCOPE",
+        "P7113_XENIUM",
+        "P7513_MERSCOPE",
+        "P7513_XENIUM",
+    ),
+    ("broad", "OPC", 60): ("P7113_MERSCOPE",),
+    ("broad", "OPC", 120): (
+        "P1212_XENIUM",
+        "P7113_MERSCOPE",
+        "P7113_XENIUM",
+        "P7513_MERSCOPE",
+        "P7513_XENIUM",
+    ),
+    ("supercluster", "Committed oligodendrocyte precursor", 30): _D10_ALL,
+    ("supercluster", "Committed oligodendrocyte precursor", 60): (
+        "P1212_XENIUM",
+        "P7113_MERSCOPE",
+        "P7113_XENIUM",
+        "P7513_MERSCOPE",
+        "P7513_XENIUM",
+    ),
+    ("supercluster", "Committed oligodendrocyte precursor", 120): _D10_ALL,
+    ("supercluster", "Deep-layer corticothalamic and 6b", 30): (
+        "P1212_MERSCOPE",
+        "P1212_XENIUM",
+        "P7113_MERSCOPE",
+        "P7513_MERSCOPE",
+        "P7513_XENIUM",
+    ),
+    ("supercluster", "Fibroblast", 120): ("P5011_XENIUM",),
+    ("supercluster", "Oligodendrocyte precursor", 30): _D10_ALL,
+    ("supercluster", "Oligodendrocyte precursor", 60): _D10_ALL,
+    ("supercluster", "Oligodendrocyte precursor", 120): _D10_ALL,
+}
+# D12 (b) (§20): "Re-running MAP with MapMyCells rng_seed 1 changes 7.0%
+# (P7513) and 13.4% (P1212) of the seed-0 confident broad labels. None is a
+# switch between two confident labels". Scope: no switch (the scored
+# reading, D12 (a)), and the threshold-crossing share at most the text's
+# value plus D5's tolerance.
+D12_TEXT_VALUES: Final[dict[str, float]] = {"P7513": 0.070, "P1212": 0.134}
+D12_TOLERANCE: Final = 0.0005
 TOLERANCES: Final[dict[str, Any]] = {
     "D3": {"text_value": D3_TEXT_VALUE, "band": D3_TOLERANCE, "level": D3_LEVEL},
     "D4": {
@@ -333,6 +387,15 @@ TOLERANCES: Final[dict[str, Any]] = {
         "min_classes_passing": D7_MIN_PASS,
         "min_fold_failing": H4_MIN_FOLD,
     },
+    "D10": {
+        "failing_rows": "the 70 stage B rows (level, class, depth, dataset)",
+        "n_rows": sum(len(value) for value in D10_FAILING.values()),
+    },
+    "D12": {
+        "text_values": dict(D12_TEXT_VALUES),
+        "above_text_at_most": D12_TOLERANCE,
+        "switches": 0,
+    },
 }
 
 
@@ -341,7 +404,7 @@ class ExceptionVerdict:
     """Whether a failing row lies inside an approved exception's scope.
 
     Attributes:
-        decision: ``D3``, ``D4``, ``D5`` or ``D7``.
+        decision: ``D3``, ``D4``, ``D5``, ``D7``, ``D10`` or ``D12``.
         in_scope: Every condition of the text holds.
         reasons: The conditions that failed (empty when in scope), or what
             was checked.
@@ -536,6 +599,63 @@ def check_d4_would_raise(
     )
 
 
+def check_d10(
+    *, dataset: str, failing: Iterable[tuple[str, str, int]]
+) -> ExceptionVerdict | None:
+    """D10: H6's failing (level, class, depth) rows of one dataset.
+
+    ``None`` when nothing fails. In scope when every failing row is one
+    stage B failed on that dataset (``D10_FAILING``); the precision values
+    are not checked (H6 reweights the archived E2 cells, so the same inputs
+    give the same values).
+    """
+    rows = {(str(level), str(cls), int(depth)) for level, cls, depth in failing}
+    if not rows:
+        return None
+    outside = sorted(row for row in rows if dataset not in D10_FAILING.get(row, ()))
+    return _result(
+        "D10",
+        [
+            "failing rows outside D10: "
+            + ", ".join(f"{level} {cls} D{depth}" for level, cls, depth in outside)
+        ]
+        if outside
+        else [],
+        f"{len(rows)} failing rows, all in D10's stage B list",
+    )
+
+
+def check_d12(
+    *, pair: str, share_threshold: float | None, n_switched: int | None
+) -> ExceptionVerdict | None:
+    """D12 (b): H15/seed1's threshold crossings on P7513 and P1212.
+
+    ``None`` on another pair. In scope when no seed-0 confident label
+    switches to another confident name and the threshold-crossing share is
+    at most the text's value plus ``D12_TOLERANCE``.
+    """
+    if pair not in D12_TEXT_VALUES:
+        return None
+    text = D12_TEXT_VALUES[pair]
+    failed: list[str] = []
+    if n_switched is None:
+        failed.append("label switches not measured")
+    elif int(n_switched) > 0:
+        failed.append(f"{int(n_switched)} confident labels switch name")
+    if share_threshold is None or not math.isfinite(float(share_threshold)):
+        failed.append("no threshold-crossing share")
+    elif float(share_threshold) > text + D12_TOLERANCE + 1e-12:
+        failed.append(
+            f"threshold crossings {float(share_threshold):.4%} above the text's "
+            f"{text:.1%} + {D12_TOLERANCE:.2%}"
+        )
+    return _result(
+        "D12",
+        failed,
+        f"no switch; threshold crossings {share_threshold} <= {text} + {D12_TOLERANCE}",
+    )
+
+
 def verdict(passes: bool, scored: bool, exception: ExceptionVerdict | None) -> str:
     """The row's verdict: PASS / INFO / EXCEPTION[-RECHECK] (Dn) / FAIL-OUTSIDE."""
     if passes:
@@ -550,6 +670,8 @@ __all__ = [
     "D4_PREP_WOULD_RAISE",
     "D5_TEXT_VALUES",
     "D7_CLASSES",
+    "D10_FAILING",
+    "D12_TEXT_VALUES",
     "FAIL",
     "FAIL_OUTSIDE",
     "H12_ORDERING_PAIRS",
@@ -563,6 +685,8 @@ __all__ = [
     "check_d4_would_raise",
     "check_d5",
     "check_d7",
+    "check_d10",
+    "check_d12",
     "score_h12",
     "verdict",
 ]

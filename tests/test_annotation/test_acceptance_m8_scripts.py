@@ -1290,9 +1290,12 @@ def test_criteria_rows_compare_h10_with_marker_referee(acceptance: ModuleType) -
 # run_acceptance.py: H12 and H13
 
 
-def _h12_records(xenium_tiles: bool = True) -> list[dict]:
+def _h12_records(xenium_tiles: bool = True, xenium_blocks: bool = True) -> list[dict]:
     records = []
-    for platform, tiles in (("MERSCOPE", True), ("XENIUM", xenium_tiles)):
+    for platform, tiles, blocks in (
+        ("MERSCOPE", True, True),
+        ("XENIUM", xenium_tiles, xenium_blocks),
+    ):
         sid = f"P7513_{platform}"
         records += [
             {
@@ -1301,7 +1304,7 @@ def _h12_records(xenium_tiles: bool = True) -> list[dict]:
                 "platform": platform,
                 "sample_id": sid,
                 "kind": None,
-                "value": True,
+                "value": blocks,
                 "status": "measured",
             },
             {
@@ -1343,23 +1346,25 @@ def _h12_records(xenium_tiles: bool = True) -> list[dict]:
     return records
 
 
-def test_h12_scores_the_square_tiles_and_reports_the_blocks_beside(
+def test_h12_scores_the_tangential_blocks_and_reports_the_tiles_beside(
     acceptance: ModuleType,
 ) -> None:
+    """§20 D11: the P7513 stage B case (tiles fail on Xenium) passes."""
     rows, scores = acceptance.h12_rows(
-        {("P7513", "proseg_hybrid"): _h12_records()}, ["P7513", "P1212"]
+        {("P7513", "proseg_hybrid"): _h12_records(xenium_tiles=False)},
+        ["P7513", "P1212"],
     )
     by_pair = {row.pair: row for row in rows}
     assert by_pair["P7513"].verdict == "PASS"
     assert by_pair["P1212"].verdict == "NOT_AVAILABLE"
-    assert scores[0]["ci_scored"] == "square_tile_500um"
+    assert scores[0]["ci_scored"] == "tangential_block_500um"
+    assert "beside (square tiles, not scored)" in by_pair["P7513"].note
     rows, _ = acceptance.h12_rows(
-        {("P7513", "proseg_hybrid"): _h12_records(xenium_tiles=False)}, ["P7513"]
+        {("P7513", "proseg_hybrid"): _h12_records(xenium_blocks=False)}, ["P7513"]
     )
     assert rows[0].verdict == "FAIL-OUTSIDE" and rows[0].passes is False
-    assert "beside (tangential blocks, not scored)" in rows[0].note
     rows, _ = acceptance.h12_rows(
-        {("P7513", "reseg"): _h12_records(xenium_tiles=False)}, ["P7513"]
+        {("P7513", "reseg"): _h12_records(xenium_blocks=False)}, ["P7513"]
     )
     reseg = next(row for row in rows if row.segmentation == "reseg")
     assert reseg.scored is False and reseg.verdict == "INFO fail"
@@ -1588,10 +1593,13 @@ def test_h6_rows_fail_a_dataset_outside_the_targets(acceptance: ModuleType) -> N
     info = {row.dataset: row for row in rows if row.criterion == "H6/pooled"}
     assert info["P1212_XENIUM"].scored is False
     assert info["P1212_XENIUM"].verdict in ("INFO pass", "INFO fail")
+    # Broad Astro is not one of D10's rows (§20): back to the user.
     assert (
-        by["P1212_XENIUM"].verdict == "FAIL-OUTSIDE"
+        by["P1212_XENIUM"].verdict == "EXCEPTION-RECHECK (D10)"
         and "broad Astro D15" in by["P1212_XENIUM"].note
+        and "outside D10" in by["P1212_XENIUM"].scope_check
     )
+    assert acceptance.back_to_user(by["P1212_XENIUM"])
     assert set(detail["dataset"]) == {"unweighted", "P7513_MERSCOPE", "P1212_XENIUM"}
 
 
@@ -1660,6 +1668,8 @@ def test_h15_compare_finds_identical_and_differing_tables(
     assert (
         record["seed1"]["n_changed"] == 1 and record["seed1"]["n_confident_seed0"] == 6
     )
+    # The one change is a switch between two confident names.
+    assert record["seed1"]["n_switched"] == 1
     rows = {
         row.criterion: row
         for row in acceptance.h15_rows({"P7513": record})
@@ -1684,29 +1694,48 @@ def test_h15_compare_finds_identical_and_differing_tables(
     assert [row.verdict for row in rows if row.pair == "P7513"] == [
         "FAIL-OUTSIDE",
         "NOT_AVAILABLE",
+        "NOT_AVAILABLE",
     ]
     assert all(row.verdict == "NOT_AVAILABLE" for row in rows if row.pair == "P1212")
 
 
 def test_h15_seed_threshold_is_one_percent(acceptance: ModuleType) -> None:
+    """§20 D12: switches are scored; threshold crossings carry D12."""
     record = {
         "identical": True,
         "identical_files": [{"file": "a", "equal": True}],
-        "seed1": {"share_changed": 0.01, "n_changed": 1, "n_confident_seed0": 100},
+        "seed1": {
+            "share_changed": 0.0702,
+            "n_changed": 7020,
+            "n_confident_seed0": 100000,
+            "share_switched": 0.01,
+            "n_switched": 1000,
+        },
     }
-    rows = {
-        row.criterion: row
-        for row in acceptance.h15_rows({"P7513": record})
-        if row.pair == "P7513"
-    }
-    assert rows["H15/seed1"].verdict == "PASS"
-    record["seed1"]["share_changed"] = 0.0101
-    rows = {
-        row.criterion: row
-        for row in acceptance.h15_rows({"P7513": record})
-        if row.pair == "P7513"
-    }
-    assert rows["H15/seed1"].verdict == "FAIL-OUTSIDE"
+
+    def rows() -> dict:
+        return {
+            row.criterion: row
+            for row in acceptance.h15_rows({"P7513": record})
+            if row.pair == "P7513"
+        }
+
+    assert rows()["H15/seed1"].verdict == "PASS"
+    # Switches fail D12's scope too (the text says none switch).
+    threshold = rows()["H15/seed1_threshold"]
+    assert threshold.verdict == "EXCEPTION-RECHECK (D12)"
+    assert acceptance.back_to_user(threshold)
+    record["seed1"] |= {"share_switched": 0.0, "n_switched": 0}
+    threshold = rows()["H15/seed1_threshold"]
+    assert threshold.verdict == "EXCEPTION (D12)" and threshold.passes is False
+    assert not acceptance.back_to_user(threshold)
+    record["seed1"] |= {"share_switched": 0.0101, "n_switched": 1010}
+    assert rows()["H15/seed1"].verdict == "FAIL-OUTSIDE"
+    # An h15 record older than D12 has no switch count: not measured.
+    for key in ("share_switched", "n_switched"):
+        record["seed1"].pop(key)
+    old = rows()["H15/seed1"]
+    assert old.verdict == "NOT_AVAILABLE" and "older than" in old.note
 
 
 def test_h15_failed_rerun_is_not_measured_not_a_failure(
@@ -1738,9 +1767,10 @@ def test_h15_failed_rerun_is_not_measured_not_a_failure(
     assert record["notes"] == ["rerun MAP exit 1"]
     rows = acceptance.h15_rows({"P7513": record})
     rows = [row for row in rows if row.pair == "P7513"]
-    assert [row.verdict for row in rows] == ["NOT_AVAILABLE", "NOT_AVAILABLE"]
+    assert [row.verdict for row in rows] == ["NOT_AVAILABLE"] * 3
     assert all(acceptance.back_to_user(row) for row in rows)
     assert "re-run MAP" in rows[0].note and "labels missing" in rows[1].note
+    assert "labels missing" in rows[2].note
     out = tmp_path / "h15_P7513.json"
     assert (
         acceptance.main(
@@ -2036,7 +2066,7 @@ def test_score_writes_the_summary_and_sends_failures_back(
     assert acceptance.main(argv) == 0
     summary = json.loads((tmp_path / "out/summary.json").read_text())
     assert summary["p5_check"]["ok"] is True
-    assert summary["protocol"]["h12_ci_scored"] == "square_tile_500um"
+    assert summary["protocol"]["h12_ci_scored"] == "tangential_block_500um"
     assert summary["protocol"]["h4_scored_set"] == "m4_resolve_heldout_whb_only"
     verdicts = summary["verdict_counts"]
     assert verdicts["EXCEPTION (D5)"] == 1 and verdicts["EXCEPTION (D3)"] == 1

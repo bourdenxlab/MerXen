@@ -392,10 +392,10 @@ def _close_deep_layers(platform: str, seed: int) -> SampleData:
     return sample
 
 
-def test_h12_is_scored_on_the_square_tiles_where_the_tangential_blocks_pass(
+def test_h12_is_scored_on_the_tangential_blocks_where_the_square_tiles_fail(
     tmp_path: Path,
 ) -> None:
-    """M8 review: the scored H12 is the tile CI (pre-registration §18 item 3)."""
+    """§20 D11: the scored H12 is the tangential-block CI, the tiles beside it."""
     inputs = _inputs(_layer_cells("MERSCOPE", 1), _close_deep_layers("XENIUM", 2))
     item = _item(inputs, tmp_path)
     tile = {
@@ -411,20 +411,21 @@ def test_h12_is_scored_on_the_square_tiles_where_the_tangential_blocks_pass(
     (shown,) = _records(item, "depth_ordering_replicated", kind=None)
     (scored,) = _records(item, "depth_ordering_replicated", kind=SQUARE_TILE_CI)
     assert shown.value is True and scored.value is False
-    assert "the CI the M8 gate scores" in scored.definition
+    assert "the CI the M8 gate scores" in shown.definition
+    assert "reported beside" in scored.definition
     # The between-platform rank correlation does not depend on the CI.
     assert len(_records(item, "depth_profile_spearman_between_platforms")) == 1
     (method,) = _records(item, "depth_ci_method")
     (scored_ci,) = _records(item, "depth_ci_scored")
     assert method.value == PRIMARY_CI  # the display primary is unchanged
-    assert scored_ci.value == SCORED_CI == SQUARE_TILE_CI
+    assert scored_ci.value == SCORED_CI == PRIMARY_CI
     score = score_h12(item.metrics, pair_id="P7513")
-    assert score.ci_scored == SQUARE_TILE_CI
-    assert score.ci_reported_beside == PRIMARY_CI
-    assert score.ordering == {"MERSCOPE": PASS, "XENIUM": FAIL}
-    assert score.ordering_verdict == FAIL and score.verdict == FAIL
-    assert score.reported_beside["ordering"] == {"MERSCOPE": PASS, "XENIUM": PASS}
-    assert score.to_json()["ci_scored"] == SQUARE_TILE_CI
+    assert score.ci_scored == PRIMARY_CI
+    assert score.ci_reported_beside == SQUARE_TILE_CI
+    assert score.ordering == {"MERSCOPE": PASS, "XENIUM": PASS}
+    assert score.ordering_verdict == PASS
+    assert score.reported_beside["ordering"] == {"MERSCOPE": PASS, "XENIUM": FAIL}
+    assert score.to_json()["ci_scored"] == PRIMARY_CI
     # P1212 is scored on WM > GM alone (plan §14 H12).
     other = score_h12(item.metrics, pair_id="P1212")
     assert not other.ordering_required and other.wm_gm_verdict == PASS

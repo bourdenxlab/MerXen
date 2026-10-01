@@ -17,9 +17,9 @@ labels without circularity:
   supercluster with a 95% block-bootstrap CI whose unit is a 500 µm
   tangential block (a full pia-to-WM strip; ``tangential_position_um``); the
   square 500 µm tile bootstrap is reported beside it (``kind =
-  square_tile_500um``), and is the CI the M8 gate scores (``SCORED_CI``,
-  pre-registration §18 item 3) until the user approves the tangential
-  blocks (M7 D23);
+  square_tile_500um``). The tangential blocks are also the CI the M8 gate
+  scores (``SCORED_CI``; approved by the user on 2026-10-01,
+  pre-registration §20 D11, superseding the square tiles of §18 item 3);
 - the ordering Upper-layer IT < Deep-layer IT < Deep-layer NP/CT/6b with
   non-overlapping CIs, per platform, and its replication across the two
   platforms (both pass; rank correlation of the supercluster medians);
@@ -103,13 +103,14 @@ MIN_GROUP_CELLS: Final = 20
 # only (and so the primary) method.
 PRIMARY_CI: Final = "tangential_block_500um"
 SQUARE_TILE_CI: Final = "square_tile_500um"
-# The CI the M8 gate scores H12 on (pre-registration §18 item 3): the square
-# tiles, because adopting the narrower tangential-block CI for the gate
-# needs the user's written approval (§17; M7 D23, not decided). The report
-# keeps the tangential blocks as its display primary; every H12 ordering
-# record with ``kind = SCORED_CI`` (per platform and the pair's replication)
-# is the scored one (``report_scoring.score_h12``).
-SCORED_CI: Final = SQUARE_TILE_CI
+# The CI the M8 gate scores the H12 ordering on: the tangential blocks, the
+# report's primary (approved by the user on 2026-10-01, pre-registration §20
+# D11; it supersedes the square tiles of §18 item 3). The scored ordering
+# records are the kind-less ones (per platform and the pair's replication);
+# a platform without tangential positions has only the tiles, which are then
+# its primary. WM > GM keeps the square tiles: white matter has no
+# tangential position (``report_scoring.score_h12``).
+SCORED_CI: Final = PRIMARY_CI
 INVALID_REASON: Final = "depth_input_invalid"
 # A depth computed on transformed (aligned) coordinates: the frame in which
 # the manual boundaries must also be (plan §9 item 9; M7 review).
@@ -497,8 +498,8 @@ def item_cortical_depth(
         ordering = depth_ordering(medians, ORDER, min_cells=MIN_GROUP_CELLS)
         orderings[sample.platform] = ordering
         medians_by_platform[sample.platform] = medians
-        # The square-tile ordering (SCORED_CI): the sensitivity beside the
-        # tangential blocks, or the primary itself without tangential
+        # The square-tile ordering: the sensitivity beside the tangential
+        # blocks (SCORED_CI), or the primary itself without tangential
         # positions (then both records hold the same verdict).
         sensitivity = (
             depth_ordering(medians_tiles, ORDER, min_cells=MIN_GROUP_CELLS)
@@ -524,10 +525,10 @@ def item_cortical_depth(
                     None if gated else sensitivity.passes,
                     definition=(
                         "the H12 ordering with CIs from resampling square 500 µm "
-                        "tiles: the CI the M8 gate scores (pre-registration §18 "
-                        "item 3; the tangential blocks need the user's approval, "
-                        "M7 D23); conservative, a tile holds only part of the "
-                        f"depth range (display primary: {primary_method})"
+                        "tiles: reported beside the scored tangential blocks "
+                        "(pre-registration §20 D11); conservative, a tile holds "
+                        "only part of the depth range (display primary: "
+                        f"{primary_method})"
                     ),
                     source="report_metrics.depth_ordering",
                     sample_id=sample.sample_id,
@@ -746,11 +747,12 @@ def item_cortical_depth(
             "depth_ci_scored",
             SCORED_CI,
             definition=(
-                "the CI the M8 gate scores H12 on (pre-registration §18 item 3): "
-                "the ordering records with kind square_tile_500um (per platform "
-                "and depth_ordering_replicated) and the square-tile CI of the "
-                "WM - GM contrast; the tangential blocks are reported beside it "
-                "until the user approves them (M7 D23)"
+                "the CI the M8 gate scores H12 on (pre-registration §20 D11): "
+                "the ordering records without a kind, i.e. the tangential "
+                "blocks (per platform and depth_ordering_replicated; the tiles "
+                "where a platform has no tangential positions), and the "
+                "square-tile CI of the WM - GM contrast; the square-tile "
+                "orderings are reported beside it"
             ),
             source="report_depth",
             scope="pair",
@@ -903,10 +905,11 @@ def _pair_metrics(
 ) -> None:
     """Append the replication records (gated and depth-validity aware).
 
-    ``kind=None`` gives the display-primary records (the replication and the
-    between-platform rank correlation); ``kind=SQUARE_TILE_CI`` the scored
-    replication from the square-tile orderings (the medians, and so the rank
-    correlation, do not depend on the CI method).
+    ``kind=None`` gives the display-primary records (the replication the M8
+    gate scores, §20 D11, and the between-platform rank correlation);
+    ``kind=SQUARE_TILE_CI`` the replication from the square-tile orderings,
+    reported beside it (the medians, and so the rank correlation, do not
+    depend on the CI method).
     """
     replication = depth_replication(medians_by_platform, orderings)
     invalid_note = f"{INVALID_REASON} on {sorted(invalid)}" if invalid else ""
@@ -920,9 +923,10 @@ def _pair_metrics(
         definition=(
             "the depth ordering passes on both platforms of the pair"
             + (
-                f" (CIs: {kind}; the CI the M8 gate scores)"
+                f" (CIs: {kind}; reported beside the scored primary)"
                 if kind is not None
-                else " (CIs: the display primary, depth_ci_method)"
+                else " (CIs: the display primary, depth_ci_method; the CI the M8 "
+                "gate scores)"
             )
         ),
         source="report_metrics.depth_replication",

@@ -27,9 +27,9 @@ root, ``<runs>/<pair>/<seg>/``):
   report's 6-significant-digit rounding is ``CROSSCHECK-MISMATCH`` and goes
   back to the user.
 - ``marker_referee.py`` (``--referee``): H10 must equal ``resolve_criteria``'s.
-- The report: H12 (``report_scoring.score_h12``: the square 500 µm tile CI,
-  AND over both platforms, WM > GM on the tile CI; the tangential blocks
-  beside it, not scored, M7 D23) and H13's MENDER, id-set and depth parts.
+- The report: H12 (``report_scoring.score_h12``: the tangential-block CI,
+  §20 D11, AND over both platforms, WM > GM on the tile CI; the square-tile
+  orderings beside it, not scored) and H13's MENDER, id-set and depth parts.
 - ``compare_legacy.py untouched`` (``--legacy``): H13 "legacy tables
   untouched before the flip (sha256)".
 - ``draw_spread.py`` (``--draw-spread``): H18 on the scored draw ``c0e0``
@@ -46,14 +46,14 @@ root, ``<runs>/<pair>/<seg>/``):
 Verdicts (``report_scoring``): ``PASS``; ``INFO pass`` / ``INFO fail`` (not
 scored by the flip rule: held-out or reported rows, rule 3);
 ``EXCEPTION (Dn)`` inside an approved exception's stated scope (D3, D4, D5,
-D7 only, §18 item 6); ``EXCEPTION-RECHECK (Dn)`` outside it; ``FAIL-OUTSIDE``
-for a failure no decision names, which includes every failure of H6 and
-H12-H15 (first measurements, no pre-approved exception, item 4);
-``NOT_AVAILABLE`` for a scored row that could not be measured. Everything
-but ``PASS``, ``INFO *`` and ``EXCEPTION (Dn)`` goes back to the user, and so
-does any failure of H6 or H12-H15 in a row the flip rule does not score
-(``INFO fail`` on a held-out pair or another segmentation; item 4 names every
-failure of a first-measured criterion).
+D7, §18 item 6; D10 for H6 and D12 for H15's threshold crossings, approved
+by the user after stage B, §20); ``EXCEPTION-RECHECK (Dn)`` outside it;
+``FAIL-OUTSIDE`` for a failure no decision names; ``NOT_AVAILABLE`` for a
+scored row that could not be measured. Everything but ``PASS``, ``INFO *``
+and ``EXCEPTION (Dn)`` goes back to the user, and so does any failure of H6
+or H12-H15 in a row the flip rule does not score (``INFO fail`` on a
+held-out pair or another segmentation; item 4 names every failure of a
+first-measured criterion) unless an approved exception covers it.
 
 Before scoring, the P5 check (protocol item 2): every PREP bundle the run
 used names one of the three D1 bundles and was reused (its reuse logged by
@@ -313,7 +313,11 @@ def back_to_user_reason(row: Row) -> str:
         ("EXCEPTION-RECHECK", sc.FAIL_OUTSIDE, VERDICT_NOT_AVAILABLE, "UNSCORED")
     ):
         return f"verdict {row.verdict}"
-    if row.base in FIRST_MEASUREMENTS and row.passes is False:
+    if (
+        row.base in FIRST_MEASUREMENTS
+        and row.passes is False
+        and not row.verdict.startswith("EXCEPTION (")
+    ):
         return "first-measured criterion failed (not scored here; item 4)"
     return ""
 
@@ -999,7 +1003,7 @@ def _criteria_exception(
 def h12_rows(
     reports: Mapping[tuple[str, str], list[dict[str, Any]]], pairs: Sequence[str]
 ) -> tuple[list[Row], list[dict[str, Any]]]:
-    """Score H12 per pair on the proseg_hybrid report (the square tiles).
+    """Score H12 per pair on the proseg_hybrid report (the tangential blocks).
 
     Other segmentations' reports are scored the same way and reported.
     """
@@ -1064,7 +1068,7 @@ def h12_rows(
                     f"{value.get('ci_high')}] {value['verdict']}"
                     for platform, value in sorted(score.wm_gm.items())
                 )
-                + f"; beside (tangential blocks, not scored): {beside}"
+                + f"; beside (square tiles, not scored): {beside}"
                 + ("; " + "; ".join(score.notes) if score.notes else "")
             )
             rows.append(
@@ -1437,11 +1441,17 @@ def h6_rows(
         measured = [row for row in everything if row["class"] != H6_POOLED]
         pooled = [row for row in everything if row["class"] == H6_POOLED]
         evaluable = [row for row in measured if row["evaluable"]]
+        failing_rows = [row for row in evaluable if not row["passes"]]
         failing = [
             f"{row['level']} {row['class']} D{row['depth']} {row['precision']:.3f}"
-            for row in evaluable
-            if not row["passes"]
+            for row in failing_rows
         ]
+        exception = sc.check_d10(
+            dataset=dataset,
+            failing=[
+                (row["level"], row["class"], int(row["depth"])) for row in failing_rows
+            ],
+        )
         pair = dataset.split("_")[0]
         rows.append(
             finalize(
@@ -1460,12 +1470,14 @@ def h6_rows(
                         f"{len(evaluable)} class x depth rows evaluable of "
                         f"{len(measured)}; "
                         + (
-                            f"failing: {'; '.join(failing[:8])}"
+                            f"{len(failing)} failing (all in tables/h6_precision"
+                            f".csv): {'; '.join(failing[:8])}"
                             if failing
                             else "none failing"
                         )
                     )[:400],
-                )
+                ),
+                exception,
             )
         )
         pooled_failing = [
@@ -1547,15 +1559,19 @@ def confident_broad(labels: pd.DataFrame) -> pd.Series:
 def seed_change(seed0: pd.DataFrame, seed1: pd.DataFrame) -> dict[str, Any]:
     """Return the share of seed-0 confident broad labels that seed 1 changes.
 
-    A label changes when a cell is confident under one seed only, or under
-    both with different names; the share is over the seed-0 confident cells.
+    A label changes when a cell is confident under one seed only (a
+    threshold crossing), or under both with different names (a switch, the
+    scored reading of H15/seed1 since §20 D12); the shares are over the
+    seed-0 confident cells.
     """
     a = confident_broad(seed0)
     b = confident_broad(seed1).reindex(a.index)
     conf_a = a.notna().to_numpy()
     conf_b = b.notna().to_numpy()
-    same = conf_a & conf_b & (a.to_numpy() == b.to_numpy())
+    both = conf_a & conf_b
+    same = both & (a.to_numpy() == b.to_numpy())
     changed = (conf_a | conf_b) & ~same
+    switched = both & ~same
     n_a = int(conf_a.sum())
     return {
         "n_cells": len(a),
@@ -1563,6 +1579,8 @@ def seed_change(seed0: pd.DataFrame, seed1: pd.DataFrame) -> dict[str, Any]:
         "n_confident_seed1": int(conf_b.sum()),
         "n_changed": int(changed.sum()),
         "share_changed": float(changed.sum() / n_a) if n_a else math.nan,
+        "n_switched": int(switched.sum()),
+        "share_switched": float(switched.sum() / n_a) if n_a else math.nan,
         "cells_missing_in_seed1": int(
             confident_broad(seed1).index.symmetric_difference(a.index).size
         ),
@@ -1644,12 +1662,15 @@ def h15_compare(
                 pd.read_parquet(seed1_resolve / name),
             )
         n_changed = sum(item["n_changed"] for item in per_sample.values())
+        n_switched = sum(item["n_switched"] for item in per_sample.values())
         n_confident = sum(item["n_confident_seed0"] for item in per_sample.values())
         record["seed1"] = {
             "per_sample": per_sample,
             "n_changed": n_changed,
             "n_confident_seed0": n_confident,
             "share_changed": n_changed / n_confident if n_confident else math.nan,
+            "n_switched": n_switched,
+            "share_switched": n_switched / n_confident if n_confident else math.nan,
         }
     return record
 
@@ -1687,7 +1708,13 @@ def h15_rows(records: Mapping[str, Mapping[str, Any]]) -> list[Row]:
             )
         )
         seed1 = record.get("seed1")
-        share = None if seed1 is None else _float(seed1.get("share_changed"))
+        missing = "not measured: " + str(
+            record.get("seed1_problem") or "no seed-1 record"
+        )
+        # §20 D12 (a): the scored reading counts switches between two
+        # confident names; a seed-1 record older than D12 has no switch count.
+        switched = None if seed1 is None else seed1.get("n_switched")
+        share = None if switched is None else _float(seed1.get("share_switched"))
         rows.append(
             finalize(
                 Row(
@@ -1703,12 +1730,44 @@ def h15_rows(records: Mapping[str, Mapping[str, Any]]) -> list[Row]:
                     else share <= H15_SEED_CHANGE_MAX + 1e-12,
                     True,
                     "h15",
-                    note="not measured: "
-                    + str(record.get("seed1_problem") or "no seed-1 record")
+                    note=missing
+                    if seed1 is None
+                    else "no switch count (an h15 record older than §20 D12)"
+                    if switched is None
+                    else f"{switched} of {seed1['n_confident_seed0']} seed-0 "
+                    "confident broad labels switch to another confident name",
+                )
+            )
+        )
+        # §20 D12 (b): the threshold crossings, kept as a scored row that the
+        # D12 exception covers.
+        crossing = None if seed1 is None else _float(seed1.get("share_changed"))
+        rows.append(
+            finalize(
+                Row(
+                    "H15/seed1_threshold",
+                    pair,
+                    SCORED_SEGMENTATION,
+                    pair,
+                    crossing,
+                    "<=",
+                    H15_SEED_CHANGE_MAX,
+                    None
+                    if crossing is None or not math.isfinite(crossing)
+                    else crossing <= H15_SEED_CHANGE_MAX + 1e-12,
+                    True,
+                    "h15",
+                    note=missing
                     if seed1 is None
                     else f"{seed1['n_changed']} of {seed1['n_confident_seed0']} "
-                    "seed-0 confident broad labels",
-                )
+                    "seed-0 confident broad labels change (confident under one "
+                    "seed only, or a switch)",
+                ),
+                sc.check_d12(
+                    pair=pair,
+                    share_threshold=crossing,
+                    n_switched=None if switched is None else int(switched),
+                ),
             )
         )
     return rows
@@ -2009,7 +2068,8 @@ def write_html(summary: Mapping[str, Any], path: Path) -> None:
         + "</ul>",
         "<h2>Every row</h2>",
         _table(rows, ROW_COLUMNS),
-        "<h2>H12 (square tiles scored; tangential blocks beside, not scored)</h2>",
+        "<h2>H12 (tangential blocks scored, §20 D11; square tiles beside, not "
+        "scored)</h2>",
         _table(
             [
                 {
@@ -2268,8 +2328,8 @@ def score(args: argparse.Namespace) -> dict[str, Any]:
             "scored_draw": SCORED_DRAW,
             "scored_draw_workers": SELF_MAP_WORKERS,
             "h4_scored_set": H4_HEADLINE_SET,
-            "h12_ci_scored": sc.SQUARE_TILE_CI,
-            "h12_reported_beside": "tangential_block_500um (M7 D23, not scored)",
+            "h12_ci_scored": sc.SCORED_CI,
+            "h12_reported_beside": f"{sc.SQUARE_TILE_CI} (§20 D11, not scored)",
             "exception_tolerances": sc.TOLERANCES,
             "first_measurements": sorted(FIRST_MEASUREMENTS),
         },

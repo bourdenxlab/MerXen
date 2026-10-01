@@ -1693,14 +1693,16 @@ both field sets against this table.
   (`kind = square_tile_500um`): a tile holds about a fifth of the cortical
   depth, so resampling tiles re-mixes depth slices and widens the interval.
   `depth_ci_method` records the unit. Without tangential positions the tiles
-  are the (only) method. *Scored CI (pre-registration §18 item 3):* the M8
-  gate scores H12 on the square tiles (`report_depth.SCORED_CI`,
-  `depth_ci_scored`), because the user has not approved the tangential
-  blocks (M7 D23): per platform the `depth_ordering_passes` record with
-  `kind = square_tile_500um` (always written; without tangential positions
-  it equals the primary), and for the pair a `depth_ordering_replicated`
-  record of that kind from the tile orderings, beside the display-primary
-  (kind-less) ones; `report_scoring.score_h12` scores them. For a dataset whose gate is not `full` (no
+  are the (only) method. *Scored CI (pre-registration §20 D11, approved by
+  the user on 2026-10-01; it supersedes the square tiles of §18 item 3):*
+  the M8 gate scores the H12 ordering on the tangential blocks
+  (`report_depth.SCORED_CI`, `depth_ci_scored`): per platform the kind-less
+  `depth_ordering_passes` record (the tiles where a platform has no
+  tangential positions) and for the pair the kind-less
+  `depth_ordering_replicated` record; `report_scoring.score_h12` scores them
+  and reports the square-tile records (`kind = square_tile_500um`, always
+  written) beside them. WM > GM keeps its square-tile CI, because white
+  matter has no tangential position. For a dataset whose gate is not `full` (no
   supercluster labels) the ordering is `not_available` under both methods,
   and so is the pair's replication (P1212: the MERSCOPE section is
   broad-only).
