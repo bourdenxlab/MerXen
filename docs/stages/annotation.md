@@ -839,13 +839,21 @@ prepared H5ADs (`per_platform` panels, label-free set c) arrives with the
 
 ## Map-first clustering runs (M5)
 
-A run clusters in `map_first` mode when it selects it:
-`--clustering_squidpy_mode map_first` (both species) or
-`--clustering_squidpy_mode_human map_first` / `_mouse`. Legacy stays the
-default, and the mode is one per run (it follows `--species`). Hook H5 in
-`workflows/main.nf` then replaces the legacy GPU `CLUSTERING_SQUIDPY_COMPUTE`
-by `CLUSTERING_MAP_FIRST`; `CLUSTERING_SQUIDPY_PREPARE` and
-`CLUSTERING_SQUIDPY_FINALIZE` are the legacy processes, unchanged:
+Human runs cluster in `map_first` mode by default since the M8 flip
+(pre-registration §20); mouse stays `legacy` until M9. A run selects its
+mode with `--clustering_squidpy_mode` (both species) or
+`--clustering_squidpy_mode_human` / `_mouse`, and a samplesheet row's
+`clustering_squidpy_mode` column (`legacy` / `map_first`) overrides the run
+for that row (§20 D15), so one run can opt single datasets in or out. Human
+`legacy` still works but is deprecated and logs a warning. After the flip a
+human `map_first` row writes the unsuffixed clustered tables (the legacy
+tables are replaced; keep a snapshot if you need them) and skips the legacy
+`mapmycells` stage unless `--annotation_mode_mapmycells_stage legacy`. Hook
+H5 in `workflows/main.nf` sends `map_first` rows through
+`CLUSTERING_MAP_FIRST` instead of the legacy GPU `CLUSTERING_SQUIDPY_COMPUTE`
+(a run whose rows are all `legacy` keeps the legacy wiring unchanged);
+`CLUSTERING_SQUIDPY_PREPARE` and `CLUSTERING_SQUIDPY_FINALIZE` are the legacy
+processes, unchanged:
 
 ```text
 PREPARE -> ANNOTATE_PANEL -> ANNOTATE_REFERENCE_PREP (per unique bundle)

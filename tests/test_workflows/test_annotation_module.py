@@ -1479,7 +1479,12 @@ def _compute_cases(root: Path, human: dict[str, Any]) -> dict[str, dict[str, Any
         },
         "compute_spec_empty_suffix": {
             "fn": "computeSpec",
-            "params": {**map_first, "clustering_squidpy_table_key_suffix": ""},
+            # Mouse has not flipped (human has, §20): "" is refused.
+            "params": {
+                **map_first,
+                "species": "mouse",
+                "clustering_squidpy_table_key_suffix": "",
+            },
             "source_root": str(SRC),
         },
         "compute_arguments": {"fn": "computeArguments", "spec": spec},
@@ -2070,7 +2075,7 @@ def test_compute_spec_carries_suffix_policy_and_hierarchy_fingerprint(
     assert fingerprint == _python_sources_fingerprint(SRC, _hierarchy_sources())
     assert fingerprint != _value(harness, "fingerprint_repo")
     assert _value(harness, "compute_spec_map_first") == {
-        "table_key_suffix": "mapfirst",
+        "table_key_suffix": "",  # human has flipped (§20): unsuffixed
         "mender_unassigned_state_policy": "exclude_from_features",
         "hierarchy_fingerprint": fingerprint,
     }

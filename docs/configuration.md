@@ -560,8 +560,8 @@ the dwight values in `workflows/conf/dwight.annotation.config`.
 
 | Param | Default | Description |
 |-------|---------|-------------|
-| `clustering_squidpy_mode_human`, `clustering_squidpy_mode_mouse` | `legacy`; `legacy` | Clustering mode per species: `legacy` or `map_first` ([Map-first clustering runs](stages/annotation.md#map-first-clustering-runs-m5)). The flips (M8 human, M9 mouse) set `map_first`. |
-| `clustering_squidpy_mode` | `null` | Explicit mode for both species; overrides the species params. |
+| `clustering_squidpy_mode_human`, `clustering_squidpy_mode_mouse` | `map_first`; `legacy` | Clustering mode per species: `legacy` or `map_first` ([Map-first clustering runs](stages/annotation.md#map-first-clustering-runs-m5)). Human flipped to `map_first` at M8 (pre-registration §20); human `legacy` is deprecated and warns. Mouse flips at M9. A samplesheet row's `clustering_squidpy_mode` column overrides these for that row. |
+| `clustering_squidpy_mode` | `null` | Explicit mode for both species; overrides the species params (a row's `clustering_squidpy_mode` column overrides it in turn). |
 | `clustering_squidpy_table_key_suffix` | `null` | Clustered table-key suffix of a `map_first` run: `null` means `mapfirst` while the species has not flipped (`""` after), so the legacy clustered table is never overwritten; an empty suffix before the flip is refused. Legacy runs always write the unsuffixed key. |
 | `mender_unassigned_state_policy` | `exclude_from_features` | MENDER policy of `map_first` tables (plan §4.9): unassigned cells (`Mixed/Unknown`, `*/unresolved`) stay spatial nodes but add no neighbourhood state. Recorded in the clustered table, which MENDER applies; legacy tables keep `state`. |
 | `annotation_prepare_only` | `false` | Build the reference bundles of `annotation_panel_genes_path` for every row and segmentation, and run no pipeline stage. |
@@ -597,7 +597,7 @@ the dwight values in `workflows/conf/dwight.annotation.config`.
 | `annotation_mouse_section_regions`, `annotation_mouse_lkloc` | `auto`; `false` | Mouse region inference and pruning (`auto`, `none` or `;`-separated CCF divisions; also the samplesheet column `mouse_section_regions`, which wins once M5 wires it; [Mouse region step](stages/annotation.md#mouse-region-step-m6)) and the optional mouse glial second opinion (report only; not wired yet). Coronal sections only (AP 2.4–10.4 mm); give a sagittal, OB- or CB-dominated section an explicit list or `none`. The mouse RESOLVE rules, gate and flags have no pipeline params (below). |
 | `annotation_calibration_holdout_donor` | `auto` | The held-out WHB donor of the resolvability test set (`auto` = H19.30.002); v1.1 calibration uses it too. |
 | `annotation_report_enabled`, `annotation_report_max_forks` | `true`; Dwight: `2` | `ANNOTATION_REPORT` (M7): the annotation QC report of each map_first pair × segmentation (`false`: no report); at most this many at a time on the-dwight. |
-| `annotation_mode_mapmycells_stage` | `legacy` | The legacy `mapmycells` stage in `map_first` runs; the flip PRs set `skip`. |
+| `annotation_mode_mapmycells_stage` | `null` | The legacy `mapmycells` stage in `map_first` rows: `null` means `skip` for a species that has flipped (human) and `legacy` otherwise (mouse); set `legacy` or `skip` to choose. |
 | `annotation_reuse_published` | `true` | MAP copies a run from the published `<pair>/<seg>/annotation_map/annotation_map_out/map_manifest.json` instead of re-mapping when its query fingerprint, `build_hash`, engine parameters and ctm version are unchanged (Dwight prunes work directories, so `-resume` alone cannot). |
 | `annotation_keep_extended_json` | `false` | Keep each MapMyCells extended JSON, gzipped, next to its tidy parquet (by default it is parsed and deleted). |
 

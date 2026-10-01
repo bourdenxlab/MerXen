@@ -214,7 +214,8 @@ def test_resolved_params_follow_the_include_order(
         workflow_config_params, "conf/dwight.config", DWIGHT_ANNOTATION
     )
     assert conda["annotation_reference_store"] is None
-    assert conda["clustering_squidpy_mode_human"] == "legacy"
+    assert conda["clustering_squidpy_mode_human"] == "map_first"
+    assert conda["clustering_squidpy_mode_mouse"] == "legacy"
     assert dwight["annotation_reference_store"] == (
         "/media/mathieubo/SSD1/MerXen/annotation_references"
     )
