@@ -45,8 +45,12 @@ EXPECTED_SHA256: dict[str, str] = {
     # M5 (hook H5): the legacy PREPARE -> COMPUTE statements moved into the
     # else-branch of the map_first switch; process texts and defaults are
     # unchanged, so legacy task hashes, -resume and the legacy DAG are too.
+    # M8 flip (pre-registration §20 D15): only the map_first branch and the
+    # hook comment changed (legacy rows of a run with a map_first row reach
+    # the legacy COMPUTE from it); the else-branch statements, the process
+    # texts and the legacy inputs are unchanged.
     "main.nf wiring": (
-        "f476ca3c9babb8a4acbadf692f760058dc8580e1701b7625212e78511ace5623"
+        "e4c70139e0d2c5141b5a50dffbffa923eb8ab028639b3787b5acfdce8a62ec6a"
     ),
     "param defaults": (
         "fe4ca1ed06ba1c74dba06b3a50219cfac58a719376ead6792ae7ae0568c5f3c2"

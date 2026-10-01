@@ -62,7 +62,10 @@ class AnnotationSettings {
      */
     static Map forRow(Map row, Map params, Object species) {
         def speciesName = AnnotationDefaults.normalizeSpecies(species)
-        def mode = AnnotationDefaults.resolveMode(params, speciesName)
+        // The row's own clustering_squidpy_mode column wins (§20 D15).
+        def rowMode = rowValue(row, AnnotationDefaults.ROW_MODE_COLUMN)
+        def mode = AnnotationDefaults.resolveRowMode(rowMode, params, speciesName)
+        params = AnnotationDefaults.withRowMode(rowMode, params)
         if (mode == AnnotationDefaults.LEGACY) {
             return [:]
         }
@@ -83,7 +86,7 @@ class AnnotationSettings {
             annotation_mouse_section_regions: sectionRegions,
             annotation_mode_mapmycells_stage: (
                 stringOrNull(params?.get("annotation_mode_mapmycells_stage"))?.toLowerCase() ?:
-                AnnotationDefaults.LEGACY
+                AnnotationDefaults.defaultMapmycellsStage(speciesName)
             ),
             mender_unassigned_state_policy: (
                 stringOrNull(params?.get("mender_unassigned_state_policy")) ?:
@@ -102,20 +105,90 @@ class AnnotationSettings {
         return settings?.get("clustering_squidpy_mode") ?: AnnotationDefaults.LEGACY
     }
 
+    // The run's samplesheet row modes (useRowModes; null until main.nf sets
+    // them, so a caller without a samplesheet resolves the params only).
+    private static List ROW_MODES = null
+
     /**
-     * Whether the run clusters in map_first mode (hook H5).
+     * Record each samplesheet row's clustering_squidpy_mode value (§20 D15).
      *
-     * The mode is one per run: it follows the run species (params.species)
-     * and the clustering_squidpy_mode* params. An invalid species or mode
-     * gives false here; rowSampleSettings then reports it.
+     * main.nf reads the samplesheet once before any channel runs, because
+     * the clustering wiring (hook H5) is chosen when the DAG is built.
+     *
+     * @param rowModes The rows' values in samplesheet order (null clears).
+     */
+    static void useRowModes(Collection rowModes) {
+        ROW_MODES = rowModes == null ? null : new ArrayList(rowModes).asImmutable()
+    }
+
+    /**
+     * Whether the run takes the map_first clustering wiring (hook H5).
+     *
+     * The mode is one per row (pre-registration §20 D15): the row's
+     * clustering_squidpy_mode column, else the run's mode from the run
+     * species (params.species) and the clustering_squidpy_mode* params. The
+     * run takes the map_first wiring when any row resolves to map_first;
+     * without row modes (null) the run's mode decides. An invalid species
+     * or mode gives false here; rowSampleSettings then reports it.
      *
      * @param params Pipeline params.
-     * @return Whether the resolved mode is map_first.
+     * @param rowModes Each samplesheet row's clustering_squidpy_mode value
+     *     (null or blank: the run's mode), or null to use the params only;
+     *     by default the modes main.nf recorded with useRowModes.
+     * @return Whether any row resolves to map_first.
      */
-    static boolean isMapFirstRun(Map params) {
+    static boolean isMapFirstRun(Map params, Collection rowModes = ROW_MODES) {
         try {
             def species = AnnotationDefaults.normalizeSpecies(params?.get("species"))
-            return AnnotationDefaults.resolveMode(params, species) == AnnotationDefaults.MAP_FIRST
+            if (rowModes == null) {
+                return AnnotationDefaults.resolveMode(params, species) == AnnotationDefaults.MAP_FIRST
+            }
+            return rowModes.any { rowMode ->
+                AnnotationDefaults.resolveRowMode(rowMode, params, species) == AnnotationDefaults.MAP_FIRST
+            }
+        } catch (IllegalArgumentException ignored) {
+            return false
+        }
+    }
+
+    /**
+     * Samplesheet headers that look like clustering_squidpy_mode but are not it.
+     *
+     * A header that equals the column only after case-folding, trimming or
+     * replacing spaces and hyphens by underscores is ignored by the pipeline,
+     * so its rows would silently follow the run's mode; main.nf warns.
+     *
+     * @param headers The samplesheet's column names.
+     * @return The near-miss headers (empty when there are none).
+     */
+    static List<String> nearMissModeColumns(Collection headers) {
+        def wanted = AnnotationDefaults.ROW_MODE_COLUMN
+        return (headers ?: []).collect { header -> header?.toString() }.findAll { header ->
+            header != null && header != wanted &&
+                header.trim().toLowerCase().replaceAll(/[\s\-]+/, "_") == wanted
+        }
+    }
+
+    /**
+     * Whether a human row still clusters in the deprecated legacy mode.
+     *
+     * Human flipped to map_first at M8 (pre-registration §20); a human run
+     * whose params or row column ask for legacy gets a deprecation warning.
+     *
+     * @param params Pipeline params.
+     * @param rowModes As isMapFirstRun (default: the recorded row modes).
+     * @return Whether the run is human and a row resolves to legacy.
+     */
+    static boolean usesDeprecatedHumanLegacy(Map params, Collection rowModes = ROW_MODES) {
+        try {
+            def species = AnnotationDefaults.normalizeSpecies(params?.get("species"))
+            if (species != "human") {
+                return false
+            }
+            def modes = rowModes == null ? [null] : rowModes
+            return modes.any { rowMode ->
+                AnnotationDefaults.resolveRowMode(rowMode, params, species) == AnnotationDefaults.LEGACY
+            }
         } catch (IllegalArgumentException ignored) {
             return false
         }
@@ -267,22 +340,22 @@ class AnnotationSettings {
      * @param params Pipeline params.
      * @param runInfo Optional run facts: success (Boolean), n_expected and
      *     the SUMMARY_ITEMS lists (AnnotationRunRecord.runInfo).
-     * @return "" when the run's species uses legacy mode (nothing to report),
-     *     else the summary text.
+     * @return "" when no row of the run is map_first (nothing to report;
+     *     isMapFirstRun, which follows the recorded row modes), else the
+     *     summary text, which covers the map_first rows.
      */
     static String completionSummary(Map params, Map runInfo = [:]) {
         def species
-        def mode
         try {
             species = AnnotationDefaults.normalizeSpecies(params?.get("species"))
-            mode = AnnotationDefaults.resolveMode(params, species)
         } catch (IllegalArgumentException ignored) {
             // rowSampleSettings has already reported the invalid param.
             return ""
         }
-        if (mode == AnnotationDefaults.LEGACY) {
+        if (!isMapFirstRun(params)) {
             return ""
         }
+        def mode = AnnotationDefaults.MAP_FIRST
         def lines = ["Annotation summary (${species}, clustering_squidpy_mode ${mode}):".toString()]
         if (runInfo?.get("n_expected") != null) {
             lines << "  pair x segmentation branches clustered: ${runInfo.n_expected}".toString()

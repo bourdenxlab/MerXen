@@ -313,8 +313,15 @@ def test_mode_overrides_revalidate_and_keep_legacy_untouched(tmp_path: Path) -> 
         )
 
 
-def test_an_empty_suffix_before_the_flip_is_refused(tmp_path: Path) -> None:
-    """A map_first compute never writes the unsuffixed (legacy) key (OD-A3)."""
+def test_an_empty_suffix_before_the_flip_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A map_first compute never writes the unsuffixed (legacy) key (OD-A3).
+
+    Human has flipped (pre-registration §20), so the labels are read as those
+    of mouse, which has not.
+    """
+    monkeypatch.setattr(map_first_module, "label_table_species", lambda _: "mouse")
     config_path, prepared, labels, _ = _inputs(tmp_path)
     config = apply_mode_overrides(
         ClusteringSquidpyConfig.model_validate_json(config_path.read_text()),

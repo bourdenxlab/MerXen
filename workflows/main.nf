@@ -1956,6 +1956,34 @@ workflow {
         .fromPath(params.samplesheet, checkIfExists: true)
         .splitCsv(header: true, sep: ",", quote: '"', strip: true)
 
+    // rca-site:H5 (pre-registration §20 D15): each row's clustering_squidpy_mode
+    // column, read once here because the clustering wiring is chosen before
+    // any channel runs. A run takes the map_first wiring when any row
+    // resolves to map_first; a run whose rows are all legacy keeps the legacy
+    // DAG.
+    def samplesheetRows = file(params.samplesheet, checkIfExists: true)
+        .splitCsv(header: true, sep: ",", quote: '"', strip: true)
+    AnnotationSettings.useRowModes(
+        samplesheetRows.collect { row -> row[AnnotationDefaults.ROW_MODE_COLUMN] }
+    )
+    def nearMissModeColumns = AnnotationSettings.nearMissModeColumns(
+        samplesheetRows ? samplesheetRows[0].keySet() : []
+    )
+    if (nearMissModeColumns) {
+        log.warn(
+            "Samplesheet column(s) ${nearMissModeColumns.join(', ')} are ignored: the " +
+            "per-row mode column is '${AnnotationDefaults.ROW_MODE_COLUMN}' (exact name). " +
+            "Those rows follow the run's clustering mode."
+        )
+    }
+    if (AnnotationSettings.usesDeprecatedHumanLegacy(params)) {
+        log.warn(
+            "Human legacy clustering (clustering_squidpy_mode legacy) is deprecated: " +
+            "human runs map_first by default since M8 (pre-registration §20). " +
+            "The legacy mode stays available until it is removed in a later release."
+        )
+    }
+
     sample_rows_raw_ch = samplesheet_ch.map { row ->
         def settings = rowSampleSettings(row, params)
         log.info(
@@ -3403,17 +3431,23 @@ workflow {
             .mix(clustering_after_spatial_gene_analysis_ch)
 
     // rca-hook:H5: map_first clustering (plan §2.4, §3.1). The mode is one per
-    // run (AnnotationSettings.isMapFirstRun); the legacy branch runs exactly
-    // the legacy PREPARE -> COMPUTE statements, so legacy runs keep their DAG
-    // and task hashes. map_first rows carry their own annotation columns into
-    // samples_json, the pair's ALIGN files come from ALIGN's output channel,
-    // and CLUSTERING_MAP_FIRST (ANNOTATE_PANEL, PREP, MAP, RESOLVE,
-    // COMPUTE_CPU) emits FINALIZE's input, so FINALIZE, the MENDER barrier and
-    // every downstream stage are shared by both modes.
+    // row (its clustering_squidpy_mode column, else the run's; §20 D15). With
+    // any map_first row, rows are prepared once (a legacy row's PREPARE hash
+    // is unchanged) and legacy rows go on to the legacy COMPUTE; a run whose
+    // rows are all legacy runs exactly the legacy PREPARE -> COMPUTE
+    // statements of the else-branch, keeping its DAG and task hashes.
+    // CLUSTERING_MAP_FIRST emits FINALIZE's input, so FINALIZE, the MENDER
+    // barrier and every downstream stage are shared by both modes.
     if (AnnotationSettings.isMapFirstRun(params)) {
-        clustering_inputs_ch.subscribe { pairId, segmentation, _samplesJson ->
-            AnnotationRunRecord.expect(pairId, segmentation)
+        row_is_map_first_ch = sample_rows_ch.map { pairId, _row, settings ->
+            tuple(pairId, AnnotationSettings.isMapFirst(settings))
         }
+        clustering_inputs_ch
+            .combine(row_is_map_first_ch, by: 0)
+            .filter { _pairId, _segmentation, _samplesJson, mapFirst -> mapFirst }
+            .subscribe { pairId, segmentation, _samplesJson, _mapFirst ->
+                AnnotationRunRecord.expect(pairId, segmentation)
+            }
         clustering_prepared_ch = CLUSTERING_SQUIDPY_PREPARE(
             clustering_inputs_ch
                 .combine(sample_rows_ch, by: 0)
@@ -3425,6 +3459,12 @@ workflow {
                     )
                 }
         )
+        clustering_prepared_by_mode_ch = clustering_prepared_ch
+            .combine(row_is_map_first_ch, by: 0)
+            .branch { _pairId, _segmentation, _samplesJson, _config, _preparedDir, mapFirst ->
+                map_first: mapFirst
+                legacy: true
+            }
         map_first_alignment_ch = alignment_results_ch
             .map { pairId, _merscopeLatest, _xeniumLatest, _transformJson, _coordsDir, alignOut ->
                 tuple(pairId, AnnotationReferences.alignmentFiles(alignOut))
@@ -3435,9 +3475,14 @@ workflow {
                     .map { pairId, _row, _settings -> tuple(pairId, []) }
             )
         clustering_computed_ch = CLUSTERING_MAP_FIRST(
-            clustering_prepared_ch,
+            clustering_prepared_by_mode_ch.map_first.map { item -> item.take(5) },
             map_first_alignment_ch,
         ).computed
+            .mix(
+                CLUSTERING_SQUIDPY_COMPUTE(
+                    clustering_prepared_by_mode_ch.legacy.map { item -> item.take(5) }
+                )
+            )
     } else {
         clustering_prepared_ch = CLUSTERING_SQUIDPY_PREPARE(clustering_inputs_ch)
         clustering_computed_ch = CLUSTERING_SQUIDPY_COMPUTE(clustering_prepared_ch)

@@ -1095,10 +1095,10 @@ def test_compute_emits_finalize_input_and_reads_its_own_labels(
         manifest = json.loads((output / "stub_compute_manifest.json").read_text())
         assert (manifest["pair_id"], manifest["segmentation"]) == branch
         assert manifest["mode"] == "map_first"
-        # The run's suffix (map_first before the flip) and MENDER policy
+        # The run's suffix (empty for human since its flip) and MENDER policy
         # travel in each clustered table (FINALIZE and MENDER_PREPARE keep
         # their legacy scripts).
-        assert manifest["table_key_suffix"] == "mapfirst"
+        assert manifest["table_key_suffix"] == ""  # human has flipped (§20)
         assert manifest["mender_unassigned_state_policy"] == "exclude_from_features"
         # The harness has no src/ next to its project directory; the
         # fingerprint of the real sources is tested in test_annotation_module.

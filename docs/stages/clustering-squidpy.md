@@ -65,8 +65,9 @@ reference assets.
 6. Write per-round UMAP/spatial plots, annotation heatmaps, marker tables,
    branch H5ADs, and a manifest under `<sample_id>_hierarchical/`.
 
-In `map_first` mode (`--clustering_squidpy_mode map_first`; legacy is the
-default) the hierarchy comes from reference-based labels instead:
+In `map_first` mode (the human default since M8; `--clustering_squidpy_mode
+map_first` for mouse, or a row's `clustering_squidpy_mode` column) the
+hierarchy comes from reference-based labels instead:
 `CLUSTERING_SQUIDPY_COMPUTE_CPU` replaces the GPU compute between the same
 PREPARE and FINALIZE, the branches and leaves are the confident mapped
 classes, and the clustered table gets the `_mapfirst` suffix before the

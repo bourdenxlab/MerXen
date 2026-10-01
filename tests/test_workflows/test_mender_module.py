@@ -269,6 +269,8 @@ ROW = {
     "xenium_dir": "/nonexistent/x",
 }
 MAP_FIRST = {"clustering_squidpy_mode": "map_first"}
+# Human runs map_first by default since the M8 flip (§20): legacy cases say so.
+LEGACY = {"clustering_squidpy_mode": "legacy"}
 # Legacy clustering preflight inputs that do not exist: legacy rows must
 # report them, map_first rows must not read them (hook H4).
 MISSING_LEGACY_MARKERS = {
@@ -276,8 +278,8 @@ MISSING_LEGACY_MARKERS = {
     "clustering_squidpy_broad_taxonomy_metadata_path": "/nonexistent/terms.csv",
 }
 TERMINAL_CASES: dict[str, dict[str, Any]] = {
-    "legacy|stop-mender": {"stop_stage": "mender", "mender_enabled": True},
-    "legacy|default-mender": {"mender_enabled": True},
+    "legacy|stop-mender": {**LEGACY, "stop_stage": "mender", "mender_enabled": True},
+    "legacy|default-mender": {**LEGACY, "mender_enabled": True},
     "map_first|stop-mender": {
         **MAP_FIRST,
         "stop_stage": "mender",
@@ -290,19 +292,34 @@ TERMINAL_CASES: dict[str, dict[str, Any]] = {
         "annotation_mode_mapmycells_stage": "skip",
     },
     "map_first|default-mender": {**MAP_FIRST, "mender_enabled": True},
+    "map_first|trial-suffix": {
+        **MAP_FIRST,
+        "mender_enabled": True,
+        "clustering_squidpy_table_key_suffix": "trial",
+    },
     "map_first|depth-mender": {
         **MAP_FIRST,
         "stop_stage": "mender",
         "mender_enabled": True,
         "cortical_depth_enabled": True,
     },
-    "map_first|stop-mapmycells": {**MAP_FIRST, "stop_stage": "mapmycells"},
+    "map_first|stop-mapmycells": {
+        **MAP_FIRST,
+        "stop_stage": "mapmycells",
+        "annotation_mode_mapmycells_stage": "legacy",
+    },
+    # Human has flipped: its default skips the legacy MAPMYCELLS stage.
+    "map_first|stop-mapmycells-default": {**MAP_FIRST, "stop_stage": "mapmycells"},
     "map_first|stop-mapmycells-skip": {
         **MAP_FIRST,
         "stop_stage": "mapmycells",
         "annotation_mode_mapmycells_stage": "skip",
     },
-    "legacy|preflight": {**MISSING_LEGACY_MARKERS, "annotation_panel_mode": "bogus"},
+    "legacy|preflight": {
+        **LEGACY,
+        **MISSING_LEGACY_MARKERS,
+        "annotation_panel_mode": "bogus",
+    },
     "map_first|preflight": {
         **MAP_FIRST,
         **MISSING_LEGACY_MARKERS,
@@ -426,6 +443,10 @@ def test_map_first_runs_legacy_mapmycells_only_when_asked(
     """--stop_stage mapmycells with the stage kept legacy (plan §3.1)."""
     assert _case(main_nf_results, "map_first|stop-mapmycells")["run_mapmycells"] is True
     assert (
+        _case(main_nf_results, "map_first|stop-mapmycells-default")["run_mapmycells"]
+        is False
+    )
+    assert (
         _case(main_nf_results, "map_first|stop-mapmycells-skip")["run_mapmycells"]
         is False
     )
@@ -481,8 +502,11 @@ def test_cortical_depth_tables_carry_the_suffix_of_map_first_rows(
             "shape_key": "MOSAIK_proseg_hybrid",
         }
     ]
+    # Human has flipped (§20): its map_first tables are unsuffixed.
     map_first = _case(main_nf_results, "map_first|default-mender")["depth_tables"]
-    assert map_first == [{**legacy[0], "clustered_table_key_suffix": "mapfirst"}]
+    assert map_first == legacy
+    trial = _case(main_nf_results, "map_first|trial-suffix")["depth_tables"]
+    assert trial == [{**legacy[0], "clustered_table_key_suffix": "trial"}]
 
 
 BARRIER_MAIN = """
