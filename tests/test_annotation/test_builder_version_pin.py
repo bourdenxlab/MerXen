@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "3dfd14c7fea3c007d4688f7ad6401d5b975f09054e48dbe112e7c8e7d84212d5",
+    3: "a4fe8cdce029a0161c323703062c2b00b35c4f9aba5b851770596430042e947e",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -116,6 +116,37 @@ PIN_HISTORY = (
     "build_hash through the resolvability builder params, so those bundles "
     "get new hashes without a builder bump; the test-set bundles are "
     "unchanged",
+    "3: resolvability version 7 simulation added (M3c stage B: exact-total "
+    "thinning, the totals grid, ensemble members, the R3 and lung-stress "
+    "efficiencies from sim_inputs.py (pinned from here on), version "
+    "selection); additive: no builder calls it yet, the version-6 path and "
+    "every version-6 build_hash are byte-identical "
+    "(test_resolvability_v6_golden), so no bundle changes",
+    "3: resolvability version 7 wired into PREP per family (M3c stage C: the "
+    "ensemble decisions, saturated-bp rule, monotone fill, class-depth table, "
+    "test-set class top-up, BundleBuilder.panel_params); a version-7 family's "
+    "build_hash gains its version-7 inputs through panel_params (so its "
+    "bundles are new build directories), a version-6 family's payload and "
+    "every version-6 output are byte-identical (test_resolvability_v6_golden), "
+    "so no existing bundle changes",
+    "3: the version-7 trust constraint guarded against simulation-input assets "
+    "(M3c stage D, pre-registration §21 (v): the more severe of the full "
+    "ensemble's and the asset-free members' constraint; the summary records "
+    "trust_asset_guard); it changes the trust of version-7 bundles with an "
+    "asset member only, none of which existed in any store (the 5K mouse "
+    "build was stopped before its self-map for this change); other version-7 "
+    "bundles gain only that summary record; the version-6 path is "
+    "byte-identical (test_resolvability_v6_golden), so no existing bundle "
+    "changes",
+    "3: the version-7 ensemble amended (M3c amendment of 2026-09-29, "
+    "pre-registration §22: eight emission members per family and a "
+    "one-standard-error margin on the spread route); ensemble_rule_version 2 "
+    "and the new members enter every version-7 build_hash (panel_params), so "
+    "the new decisions go only into new build directories and the stage-D "
+    "version-7 bundles are never reused by the amended code; those bundles "
+    "re-derive their decisions as built (no recorded margin: 0); the "
+    "version-6 path and payload are byte-identical "
+    "(test_resolvability_v6_golden), so no existing bundle changes",
     "3: the human self-maps leave the held-out test set's other-region COP "
     "cells out (user decision 2026-09-30, M8 D1; "
     "HO_SELF_MAP_TEST_SET_REVISION 1): the revision and its rule enter every "
@@ -127,6 +158,16 @@ PIN_HISTORY = (
     "draw-spread grid (user decision 2026-09-30, M8 D2); every builder "
     "leaves it unset, so the efficiency stays the recipe seed's and no "
     "bundle content or build_hash changes",
+    "3: M3c merged after M8 (2026-10-01): the builder carries both the "
+    "version-7 ensemble (M3c) and the human test-set revision and "
+    "efficiency_seed of M8 D1 / D2; each change keeps its own build_hash rule "
+    "above, so no bundle built by either branch changes",
+    "3: the version-7 self-map records M8 D1's test_set_exclusion in its "
+    "summary and bundle output, as the version-6 path does (its test cells "
+    "already followed D1); provenance only. The version-7 human bundles "
+    "built before the merge (two WHB, two SEA-AD) lack D1's revision in their "
+    "hashed test-set params, so the merged code never reuses them and builds "
+    "new ones; no existing bundle changes",
 )
 
 
@@ -157,12 +198,16 @@ def builder_code_fingerprint() -> str:
     secondary bundles (M3b), so it is covered too; a change there that
     alters those tables also bumps ``RESOLVABILITY_VERSION`` (hashed).
     ``prefilter.py`` chooses the marker candidates of large panels (M3b
-    stage D); its version and settings are hashed.
+    stage D); its version and settings are hashed. ``sim_inputs.py`` (M3c)
+    turns the simulation-input assets into version-7 member efficiencies and
+    depth profiles; the assets' sha256 enter a version-7 ``build_hash``, the
+    code is covered here.
     """
     parts = [
         _dump(ast.parse((SRC / "reference.py").read_text())),
         _dump(ast.parse((SRC / "resolvability.py").read_text())),
         _dump(ast.parse((SRC / "prefilter.py").read_text())),
+        _dump(ast.parse((SRC / "sim_inputs.py").read_text())),
     ]
     store_tree = ast.parse((SRC / "store.py").read_text())
     by_name = {

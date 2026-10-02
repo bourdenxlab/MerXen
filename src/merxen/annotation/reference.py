@@ -3177,6 +3177,17 @@ def _markers_output(
     }
 
 
+def _bundle_depth_grid(context: BuildContext, n_genes: int | None) -> list[int]:
+    """Return a bundle's depth grid: version 7's for a version-7 self-map."""
+    from merxen.annotation import resolvability as res
+
+    if context.panel is not None and _resolvability_enabled(context):
+        plan = resolvability_plan(context.spec, context.panel, _config_of(context))
+        if plan.version == res.RESOLVABILITY_VERSION_V7:
+            return list(plan.grid)
+    return context.spec.resolved_depth_grid(n_genes)
+
+
 def _write_common_files(
     context: BuildContext,
     tree: TaxonomyTreeView,
@@ -3188,7 +3199,7 @@ def _write_common_files(
     _write_json(context.work_dir / MAPPING_TREE_FILE, tree.to_json())
     vocab = node_vocab_table(tree, taxonomy_id)
     vocab.to_csv(context.work_dir / VOCAB_SNAPSHOT_FILE, index=False)
-    grid = context.spec.resolved_depth_grid(n_genes)
+    grid = _bundle_depth_grid(context, n_genes)
     _write_json(
         context.work_dir / DEPTH_GRID_FILE,
         {
@@ -4951,6 +4962,150 @@ def ho_truth_exclusions(labels: Iterable[str], region: str) -> dict[str, str]:
     return excluded
 
 
+def other_region_candidates(
+    cell_metadata: pd.DataFrame,
+    *,
+    reference_cells: set[str],
+    training_superclusters: Iterable[str],
+    training_clusters: set[str],
+    roi_labels: Sequence[str] = HO_OTHER_REGION_ROI_LABELS,
+    feature_matrix: str = HO_OTHER_REGION_MATRIX,
+) -> tuple[pd.DataFrame, pd.DataFrame, set[str], int, int]:
+    """Return the admissible other-region candidates (``other_region_test_cells``).
+
+    Non-neuronal nuclei (``feature_matrix``) of the dissections
+    ``roi_labels``, of non-neuronal superclusters the training reference
+    holds, not reference cells, of training clusters only
+    (``HO_OTHER_REGION_VERSION`` 2), one row per cell label.
+
+    Returns:
+        ``(candidates indexed by cell label, candidates of clusters the
+        training reference lacks, eligible superclusters, cells in the ROIs,
+        reference cells dropped)``.
+    """
+    frame = cell_metadata[
+        cell_metadata["region_of_interest_label"].astype(str).isin(list(roi_labels))
+        & (cell_metadata["feature_matrix_label"].astype(str) == feature_matrix)
+    ]
+    frame = frame.dropna(subset=list(WHB_SOURCE_HIERARCHY))
+    mappable = {str(label) for label in training_superclusters}
+    eligible = set(nonneuronal_superclusters(frame[WHB_SUPC].astype(str))) & mappable
+    frame = frame[frame[WHB_SUPC].astype(str).isin(eligible)]
+    n_in_rois = int(len(frame))
+    is_reference = frame["cell_label"].astype(str).isin(reference_cells)
+    n_reference = int(is_reference.sum())
+    frame = frame[~is_reference]
+    is_unseen = ~frame[WHB_CLUS].astype(str).isin(training_clusters)
+    unseen_candidates = frame[is_unseen]
+    frame = frame[~is_unseen]
+    frame = frame.drop_duplicates("cell_label").set_index("cell_label", drop=False)
+    frame.index = frame.index.astype(str)
+    return frame, unseen_candidates, eligible, n_in_rois, n_reference
+
+
+def whb_supercluster_classes(labels: Iterable[str]) -> dict[str, str | None]:
+    """Return the leaf-level class of each WHB supercluster label (COP apart)."""
+    from merxen.annotation.vocab import floor_class_for
+
+    label_to_name = load_vocab("whb_supercluster").label_to_name()
+    result: dict[str, str | None] = {}
+    for label in {str(value) for value in labels}:
+        name = label_to_name.get(label)
+        try:
+            result[label] = (
+                None
+                if name is None
+                else floor_class_for(name, species="human", level="supercluster")
+            )
+        except (KeyError, ValueError):
+            result[label] = None
+    return result
+
+
+def whb_class_top_up(
+    test_rows: pd.DataFrame,
+    *,
+    donor_pool: pd.DataFrame,
+    other_candidates: pd.DataFrame,
+    rule: Mapping[str, Any],
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Top the human test set's thin classes up (plan §8.3 v7.6; version 7).
+
+    Classes are the supercluster level's classes (the E2 floor classes, COP
+    apart). Pools in order: the held-out donor's cells the test set does not
+    hold (``donor_pool``: its admissible cells), then, for non-neuronal
+    classes only, the other-region candidates not yet drawn
+    (``other_region_candidates``: training clusters only, never a frontal
+    reference or other donor's cell); stratified by supercluster.
+
+    Args:
+        test_rows: The test cells so far (``cell_label``, WHB levels,
+            ``TEST_SOURCE_COLUMN``).
+        donor_pool: The held-out donor's admissible cells.
+        other_candidates: The admissible other-region cells.
+        rule: ``top_up_rule("human", config)``.
+
+    Returns:
+        ``(test rows with the top-up appended, record)``.
+    """
+    from merxen.annotation import resolvability as res
+    from merxen.annotation import sim_inputs as si
+
+    held = set(test_rows["cell_label"].astype(str))
+    donor = donor_pool[~donor_pool["cell_label"].astype(str).isin(held)].copy()
+    donor["_pool"] = "holdout_donor"
+    other = other_candidates[
+        ~other_candidates["cell_label"].astype(str).isin(held)
+    ].copy()
+    other["_pool"] = "other_region"
+    columns = list(test_rows.columns.drop(TEST_SOURCE_COLUMN, errors="ignore"))
+    candidates = pd.concat(
+        [donor.reset_index(drop=True), other.reset_index(drop=True)],
+        ignore_index=True,
+    )
+    classes = whb_supercluster_classes(
+        list(candidates[WHB_SUPC].astype(str)) + list(test_rows[WHB_SUPC].astype(str))
+    )
+    candidates["_class"] = candidates[WHB_SUPC].astype(str).map(classes)
+    candidates = candidates.dropna(subset=["_class"])
+    candidates = candidates.set_index(candidates["cell_label"].astype(str), drop=False)
+    have_classes = test_rows[WHB_SUPC].astype(str).map(classes).dropna()
+    have = {str(k): int(v) for k, v in have_classes.value_counts().items()}
+    non_neuronal = sorted(
+        str(cls)
+        for cls in classes.values()
+        if cls is not None and si.is_neuronal_class(str(cls), "human") is False
+    )
+    chosen, record = res.class_top_up(
+        candidates,
+        class_column="_class",
+        leaf_column=WHB_SUPC,
+        have=have,
+        target=int(rule["target"]),
+        seed=int(rule["seed"]),
+        pool_column="_pool",
+        pool_order=["holdout_donor", "other_region"],
+        pool_classes={"other_region": non_neuronal},
+    )
+    added = candidates.loc[list(chosen)].reset_index(drop=True)
+    added[TEST_SOURCE_COLUMN] = np.where(
+        added["_pool"].astype(str) == "holdout_donor",
+        TOP_UP_SOURCE,
+        TOP_UP_SOURCE_OTHER_REGION,
+    )
+    record["rule"] = {**dict(rule), "summary": record["rule"]}
+    record["disjoint_from_test_cells"] = not (
+        set(added["cell_label"].astype(str)) & held
+    )
+    record["per_pool"] = {
+        str(k): int(v) for k, v in added["_pool"].astype(str).value_counts().items()
+    }
+    rows = pd.concat(
+        [test_rows, added[[*columns, TEST_SOURCE_COLUMN]]], ignore_index=True
+    )
+    return rows, record
+
+
 def other_region_test_cells(
     cell_metadata: pd.DataFrame,
     *,
@@ -5013,24 +5168,17 @@ def other_region_test_cells(
     from merxen.annotation import resolvability as res
 
     reference = {str(label) for label in reference_cells}
-    frame = cell_metadata[
-        cell_metadata["region_of_interest_label"].astype(str).isin(list(roi_labels))
-        & (cell_metadata["feature_matrix_label"].astype(str) == feature_matrix)
-    ]
-    frame = frame.dropna(subset=list(WHB_SOURCE_HIERARCHY))
-    mappable = {str(label) for label in training_superclusters}
-    eligible = set(nonneuronal_superclusters(frame[WHB_SUPC].astype(str))) & mappable
-    frame = frame[frame[WHB_SUPC].astype(str).isin(eligible)]
-    n_in_rois = int(len(frame))
-    is_reference = frame["cell_label"].astype(str).isin(reference)
-    n_reference = int(is_reference.sum())
-    frame = frame[~is_reference]
     kept_clusters = {str(label) for label in training_clusters}
-    is_unseen = ~frame[WHB_CLUS].astype(str).isin(kept_clusters)
-    unseen_candidates = frame[is_unseen]
-    frame = frame[~is_unseen]
-    frame = frame.drop_duplicates("cell_label").set_index("cell_label", drop=False)
-    frame.index = frame.index.astype(str)
+    frame, unseen_candidates, eligible, n_in_rois, n_reference = (
+        other_region_candidates(
+            cell_metadata,
+            reference_cells=reference,
+            training_superclusters=training_superclusters,
+            training_clusters=kept_clusters,
+            roi_labels=roi_labels,
+            feature_matrix=feature_matrix,
+        )
+    )
     chosen = res.top_up_test_cells(
         frame, stratum=WHB_SUPC, have=have, cap=cap, room=room, seed=seed
     )
@@ -5223,6 +5371,38 @@ def build_whb_frontal_ho(context: BuildContext) -> dict[str, Any]:
     test_rows = pd.concat(
         [test_rows, other_rows[list(test_rows.columns)]], ignore_index=True
     )
+    plan = (
+        resolvability_plan(spec, panel, config)
+        if config.resolvability.enabled
+        else None
+    )
+    top_up_record: dict[str, Any] | None = None
+    if (
+        plan is not None
+        and plan.version == res.RESOLVABILITY_VERSION_V7
+        and plan.top_up is not None
+    ):
+        with timer.step("class_top_up"):
+            candidates, _unseen, _eligible, _n_rois, _n_reference = (
+                other_region_candidates(
+                    _other_region_metadata(context, labels),
+                    reference_cells=frontal_cells
+                    | set(training["cell_label"].astype(str)),
+                    training_superclusters=training[WHB_SUPC].astype(str).unique(),
+                    training_clusters={str(value) for value in kept_clusters},
+                )
+            )
+            test_rows, top_up_record = whb_class_top_up(
+                test_rows,
+                donor_pool=pool.reset_index(drop=True),
+                other_candidates=candidates.reset_index(drop=True),
+                rule=plan.top_up,
+            )
+        logger.info(
+            "%s: class top-up added %d test cells",
+            HO_REFERENCE_ID,
+            top_up_record["n_cells"],
+        )
     matrices = {
         "WHB-10Xv3-Neurons": _source_path(context, SOURCE_WHB_NEURONS_H5AD),
         "WHB-10Xv3-Nonneurons": _source_path(context, SOURCE_WHB_NONNEURONS_H5AD),
@@ -5353,6 +5533,14 @@ def build_whb_frontal_ho(context: BuildContext) -> dict[str, Any]:
             for key, value in test_rows[TEST_SOURCE_COLUMN].value_counts().items()
         },
         "other_region": other_record,
+        **(
+            {}
+            if plan is None or plan.version != res.RESOLVABILITY_VERSION_V7
+            else {
+                "resolvability_version": plan.version,
+                "class_top_up": top_up_record,
+            }
+        ),
         "truth_exclusion": truth_exclusion,
         "seed": TEST_SET_SEED,
         "per_supercluster": {
@@ -5367,6 +5555,101 @@ def build_whb_frontal_ho(context: BuildContext) -> dict[str, Any]:
     }
     output.update(timer.to_json())
     return output
+
+
+def wmb_class_top_up(
+    cells: pd.DataFrame,
+    meta: pd.DataFrame,
+    sampled: pd.DataFrame,
+    used: Iterable[str],
+    rule: Mapping[str, Any],
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Top the mouse test set's thin WMB classes up (plan §8.3 v7.6; version 7).
+
+    Candidates: 10Xv3 cells of the available matrices that neither the
+    marker build trained on (``sampled``, the ``wmb_panel`` training sample)
+    nor the test set holds (``used`` and ``cells``), only of clusters with
+    at least ``min_training_cells_per_cluster`` marker-training cells (the
+    training-cluster rule), at most ``max_cluster_frac`` of a cluster's
+    10Xv3 cells each (the gate-P bound); ``resolvability.class_top_up``
+    draws them per class, stratified by subclass.
+
+    Args:
+        cells: The test cells so far (``cell_label``, WMB levels,
+            ``cluster_alias``).
+        meta: Every candidate 10Xv3 cell with its WMB levels.
+        sampled: The marker-training sample.
+        used: Cell labels already excluded (self-map list and training).
+        rule: ``top_up_rule("mouse", config)``.
+
+    Returns:
+        ``(cells with the top-up appended, record)``.
+
+    Raises:
+        ReferenceBuildError: If a drawn cell is a training or test cell or of
+            a cluster outside the training-cluster rule.
+    """
+    from merxen.annotation import resolvability as res
+
+    training = set(sampled["cell_label"].astype(str))
+    test_ids = set(cells["cell_label"].astype(str))
+    per_cluster = sampled["cluster_alias"].astype(int).value_counts()
+    minimum = int(rule["min_training_cells_per_cluster"])
+    kept = {int(alias) for alias, count in per_cluster.items() if count >= minimum}
+    excluded = set(used) | training | test_ids
+    is_candidate = ~meta["cell_label"].astype(str).isin(excluded)
+    n_before_rule = int(is_candidate.sum())
+    in_training_cluster = meta["cluster_alias"].astype(int).isin(kept)
+    candidates = meta[is_candidate & in_training_cluster]
+    candidates = candidates.set_index(candidates["cell_label"].astype(str), drop=False)
+    sizes = meta["cluster_alias"].astype(int).value_counts()
+    fraction = float(rule["max_cluster_frac"])
+    caps = {
+        str(alias): int(math.floor(fraction * size)) for alias, size in sizes.items()
+    }
+    have = {
+        str(key): int(value)
+        for key, value in cells[WMB_CLAS].astype(str).value_counts().items()
+    }
+    chosen, record = res.class_top_up(
+        candidates.assign(_cluster=candidates["cluster_alias"].astype(int).astype(str)),
+        class_column=WMB_CLAS,
+        leaf_column=WMB_SUBC,
+        have=have,
+        target=int(rule["target"]),
+        seed=int(rule["seed"]),
+        cluster_column="_cluster",
+        cluster_cap=caps,
+    )
+    added = candidates.loc[list(chosen)].reset_index(drop=True)
+    leaked = sorted(set(added["cell_label"].astype(str)) & (training | test_ids))
+    outside = sorted(set(added["cluster_alias"].astype(int)) - kept)
+    if leaked or outside:  # pragma: no cover - guarded by the filters above
+        raise ReferenceBuildError(
+            f"class top-up drew training / test cells {leaked[:5]} or cells of "
+            f"clusters outside the training-cluster rule {outside[:5]}"
+        )
+    taken = added["cluster_alias"].astype(int).value_counts()
+    record.update(
+        {
+            "rule": {**dict(rule), "summary": record["rule"]},
+            "n_candidates_before_cluster_rule": n_before_rule,
+            "n_excluded_cluster_not_in_training": int(
+                (is_candidate & ~in_training_cluster).sum()
+            ),
+            "max_cluster_share_taken": float(
+                max((taken[alias] / sizes[alias] for alias in taken.index), default=0.0)
+            ),
+            "disjoint_from_training": not (
+                set(added["cell_label"].astype(str)) & training
+            ),
+            "disjoint_from_test_cells": not (
+                set(added["cell_label"].astype(str)) & test_ids
+            ),
+        }
+    )
+    added = added.assign(test_source=TOP_UP_SOURCE)
+    return pd.concat([cells, added[list(cells.columns)]], ignore_index=True), record
 
 
 def build_wmb_selfmap_testset(context: BuildContext) -> dict[str, Any]:
@@ -5457,6 +5740,30 @@ def build_wmb_selfmap_testset(context: BuildContext) -> dict[str, Any]:
     extra = pd.concat(parts) if parts else pool.iloc[0:0]
     extra = extra.assign(test_source="nonneuronal_extra")
     cells = pd.concat([base_rows, extra], ignore_index=True)
+    plan = (
+        resolvability_plan(spec, panel, config)
+        if config.resolvability.enabled
+        else None
+    )
+    top_up_record: dict[str, Any] | None = None
+    if (
+        plan is not None
+        and plan.version == res.RESOLVABILITY_VERSION_V7
+        and plan.top_up is not None
+    ):
+        with timer.step("class_top_up"):
+            cells, top_up_record = wmb_class_top_up(
+                cells, meta, sampled, used, plan.top_up
+            )
+        logger.info(
+            "%s: class top-up added %d test cells (%s)",
+            WMB_TESTSET_REFERENCE_ID,
+            top_up_record["n_cells"],
+            ", ".join(
+                f"{cls} {item['before']} -> {item['after']}"
+                for cls, item in top_up_record["per_class"].items()
+            ),
+        )
     reference_genes = set(_matrix_genes(next(iter(matrices.values()))))
     genes = sorted(gene for gene in panel.ensembl_ids if gene in reference_genes)
     if not genes:
@@ -5484,10 +5791,15 @@ def build_wmb_selfmap_testset(context: BuildContext) -> dict[str, Any]:
     )
     test = res.HeldOutCells(counts=counts, genes=list(genes), obs=obs)
     written = res.write_test_cells(test, context.work_dir)
+    grid = (
+        list(plan.grid)
+        if plan is not None and plan.version == res.RESOLVABILITY_VERSION_V7
+        else spec.resolved_depth_grid(panel.n_genes)
+    )
     _write_json(
         context.work_dir / DEPTH_GRID_FILE,
         {
-            "depth_grid": spec.resolved_depth_grid(panel.n_genes),
+            "depth_grid": grid,
             "source": "spec" if spec.depth_grid is not None else "default",
             "species": spec.species,
             "n_panel_genes": panel.n_genes,
@@ -5495,6 +5807,13 @@ def build_wmb_selfmap_testset(context: BuildContext) -> dict[str, Any]:
     )
     native = test.native_counts
     per_class = pd.Series(truth_class).value_counts().sort_index()
+    version_7: dict[str, Any] = {}
+    if plan is not None and plan.version == res.RESOLVABILITY_VERSION_V7:
+        version_7 = {
+            "resolvability_version": plan.version,
+            "class_top_up": top_up_record,
+            "n_class_top_up": int((obs["test_source"] == TOP_UP_SOURCE).sum()),
+        }
     return {
         "reference": "WMB self-map test cells (10Xv3), panel-restricted",
         "test_set": {
@@ -5516,8 +5835,9 @@ def build_wmb_selfmap_testset(context: BuildContext) -> dict[str, Any]:
             },
             "per_class": {str(key): int(value) for key, value in per_class.items()},
             "native_counts_median": float(np.median(native)) if len(native) else None,
+            **version_7,
         },
-        "depth_grid": spec.resolved_depth_grid(panel.n_genes),
+        "depth_grid": grid,
         **timer.to_json(),
     }
 
@@ -5940,11 +6260,25 @@ def _run_self_map(
     )
     mapped_engine = engine if engine is not None else MmcBundle.from_dir(test_ref.path)
     runs: list[dict[str, Any]] = []
-    grid = context.spec.resolved_depth_grid(panel.n_genes)
-    settings = self_map_rule_settings(config)
+    plan = resolvability_plan(context.spec, panel, config)
     exclusion_provenance = (
         {} if exclusion is None else {"test_set_exclusion": exclusion}
     )
+    if plan.version == res.RESOLVABILITY_VERSION_V7:
+        return _run_self_map_v7(
+            context,
+            plan=plan,
+            test=test,
+            test_ref=test_ref,
+            engine=engine,
+            mapped_engine=mapped_engine,
+            specs_for=specs_for,
+            timer=timer,
+            cells_rules=cells_rules,
+            exclusion_provenance=exclusion_provenance,
+        )
+    grid = context.spec.resolved_depth_grid(panel.n_genes)
+    settings = self_map_rule_settings(config)
     with timer.step("resolvability_self_map"):
         result = res.run_resolvability(
             test,
@@ -5991,6 +6325,103 @@ def _run_self_map(
     return output
 
 
+def _run_self_map_v7(
+    context: BuildContext,
+    *,
+    plan: ResolvabilityPlan,
+    test: Any,
+    test_ref: Any,
+    engine: Any | None,
+    mapped_engine: Any,
+    specs_for: Any,
+    timer: _StepTimer,
+    cells_rules: Sequence[Any] = (),
+    exclusion_provenance: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run a version-7 self-map (plan §8.3 v7) and write its tables.
+
+    ``exclusion_provenance`` records the test cells the self-map left out
+    (M8 D1, ``self_map_test_cells``), as the version-6 path does.
+
+    The plan's members are simulated on the (topped-up) test set and mapped
+    one at a time; ``resolvability.run_resolvability_v7`` decides the
+    ensemble, applies the saturated-bp rule and the monotone fill, and
+    writes the four version-7 files (``resolvability_class_depth.parquet``
+    included). Floors and the trust constraint come from the decisions before
+    the fill.
+    """
+    from merxen.annotation import resolvability as res
+    from merxen.annotation import sim_inputs as si
+    from merxen.annotation.store import BUNDLE_MANIFEST_NAME
+    from merxen.annotation.vocab import load_floor_table
+
+    config = _config_of(context)
+    runs: list[dict[str, Any]] = []
+    manifest_path = Path(test_ref.path) / BUNDLE_MANIFEST_NAME
+    test_output = (
+        json.loads(manifest_path.read_text(encoding="utf-8")).get("builder_output")
+        or {}
+        if manifest_path.is_file()
+        else {}
+    )
+    top_up = (test_output.get("test_set") or {}).get("class_top_up")
+    profile = (
+        si.profile_from_asset(plan.profile_asset)
+        if plan.profile_asset is not None
+        else None
+    )
+    ensemble = res.EnsembleSettings.from_config(config.resolvability)
+    with timer.step("resolvability_self_map"):
+        result = res.run_resolvability_v7(
+            test,
+            specs=specs_for(mapped_engine),
+            depths=list(plan.grid),
+            members=list(plan.members),
+            map_fn=_mmc_map_function(context, mapped_engine, runs),
+            settings=self_map_rule_settings(config),
+            ensemble=ensemble,
+            species=context.spec.species,
+            floor_table=load_floor_table(context.spec.species),
+            fine_seed_check=bool(config.thresholds.allow_fine_levels),
+            cells_rules=cells_rules,
+            profile=profile,
+            provenance={
+                "reference_id": context.spec.reference_id,
+                "engine": {
+                    "reference_id": mapped_engine.reference_id,
+                    "build_hash": mapped_engine.build_hash,
+                    "self": engine is not None,
+                },
+                "test_set_bundle": {
+                    "reference_id": test_ref.reference_id,
+                    "build_hash": test_ref.build_hash,
+                    "path": test_ref.path,
+                },
+                "mapping_runs": runs,
+                "v7_inputs": plan.summary_record(),
+                "top_up": top_up,
+                **(exclusion_provenance or {}),
+                "decisions_note": (
+                    "decision settings are recorded, not hashed; version-7 "
+                    "decisions are re-derived from resolvability_cells.parquet "
+                    "with ensemble_decide (RESOLVE: M3c follow-up, plan §12)"
+                ),
+            },
+        )
+        result.write(context.work_dir)
+    output: dict[str, Any] = {"resolvability": result.bundle_output()}
+    output["resolvability"]["test_set_bundle"] = {
+        "reference_id": test_ref.reference_id,
+        "build_hash": test_ref.build_hash,
+    }
+    output["resolvability"]["mapping_runs"] = runs
+    output["resolvability"]["top_up"] = top_up
+    output["resolvability"].update(exclusion_provenance or {})
+    if result.trust.state is not None:
+        output["panel_trust"] = result.trust.state
+    return output
+
+
 def _whb_specs(engine: Any, config: AnnotationConfig) -> list[Any]:
     from merxen.annotation import resolvability as res
 
@@ -6025,6 +6456,309 @@ def _wmb_specs(engine: Any, config: AnnotationConfig) -> list[Any]:
     return res.wmb_level_specs(
         vocab, config.thresholds, supertype_of_cluster=supertype_of or None
     )
+
+
+# --------------------------------------------------------------------------
+# Resolvability version 7 (M3c; plan §8.3 v7.1): per-family selection and the
+# version-7 inputs of a self-map. A version-6 family's payload never changes
+# (``BundleBuilder.panel_params`` returns nothing for it).
+
+# The reference a measured factor table is measured against, per self-map.
+V7_MEMBER_TABLE_REFERENCE: Final[dict[str, str]] = {
+    "wmb_panel": "wmb_10xv3",
+    WMB_TESTSET_REFERENCE_ID: "wmb_10xv3",
+}
+# Test-set references and the primary references whose self-map they serve.
+V7_TEST_SET_OF: Final[dict[str, str]] = {
+    "whb_frontal_supc_clus": HO_REFERENCE_ID,
+    "seaad_mr_panel": HO_REFERENCE_ID,
+    "wmb_panel": WMB_TESTSET_REFERENCE_ID,
+}
+TOP_UP_SOURCE: Final = "class_top_up"
+TOP_UP_SOURCE_OTHER_REGION: Final = "class_top_up_other_region"
+
+
+@dataclass(frozen=True)
+class ResolvabilityPlan:
+    """What a panel's self-map runs (plan §8.3 v7.1-v7.6).
+
+    Attributes:
+        version: 6 or 7.
+        family_id: The panel's family (after trust inheritance), if known.
+        chemistry: ``sim_inputs.ChemistryResolution`` (version 7).
+        members: The ensemble members (version 7).
+        grid: The depth grid.
+        assets: The simulation-input assets the self-map uses.
+        profile_asset: The ``profile`` asset of the family's species x
+            chemistry (class-depth predictions), if any.
+        top_up: The test-set top-up rule (version 7; ``None`` when off).
+    """
+
+    version: int
+    family_id: str | None
+    chemistry: Any | None = None
+    members: tuple[Any, ...] = ()
+    grid: tuple[int, ...] = ()
+    assets: tuple[Any, ...] = ()
+    profile_asset: Any | None = None
+    top_up: dict[str, Any] | None = None
+
+    def simulation_payload(self) -> dict[str, Any]:
+        """Return ``resolvability.v7_simulation_payload`` of the plan."""
+        from merxen.annotation import resolvability as res
+
+        return res.v7_simulation_payload(
+            members=self.members,
+            assets=self.assets,
+            chemistry=self.chemistry.to_json()
+            if self.chemistry is not None
+            else "unknown",
+            depth_grid=self.grid,
+            top_up=self.top_up,
+        )
+
+    def summary_record(self) -> dict[str, Any]:
+        """Return what the version-7 summary records of the plan."""
+        from merxen.annotation import sim_inputs as si
+
+        return {
+            "family_id": self.family_id,
+            "chemistry": None if self.chemistry is None else self.chemistry.to_json(),
+            "assets": si.asset_hashes(self.assets),
+            "profile_asset": None
+            if self.profile_asset is None
+            else self.profile_asset.asset_id,
+            "top_up_rule": self.top_up,
+            "depth_grid_v7": list(self.grid),
+        }
+
+
+def panel_resolvability_version(panel: Any, config: AnnotationConfig) -> int:
+    """Return the resolvability version of a panel (plan §8.3 v7.1).
+
+    ``auto``: 6 for the families of ``validated_panels.csv`` (by the panel's
+    family after trust inheritance, or its listed hash) and the pins of
+    ``resolvability_v6_pins.csv``; 7 for every other family.
+
+    Args:
+        panel: The declared panel (``AnnotationPanel``; any object with a
+            ``panel_hash`` and optionally a ``panel_family``).
+        config: The annotation config (``resolvability.version``).
+
+    Returns:
+        6 or 7.
+
+    Raises:
+        ReferenceBuildError: When version 7 is forced on a version-6 family
+            (refused outside the diagnostic, which writes to an output
+            directory, never to the store).
+    """
+    from merxen.annotation import resolvability as res
+    from merxen.annotation.diagnostics import load_validated_panels
+
+    family = getattr(getattr(panel, "panel_family", None), "family_id", None)
+    automatic = res.resolvability_version_for(
+        family,
+        getattr(panel, "panel_hash", None),
+        validated=load_validated_panels(config.panel.validated_panels_path),
+    )
+    requested = config.resolvability.version
+    if requested == "auto":
+        return automatic
+    if int(requested) == res.RESOLVABILITY_VERSION_V7 and automatic == (
+        res.RESOLVABILITY_VERSION_V6
+    ):
+        raise ReferenceBuildError(
+            f"resolvability version 7 is refused for the version-6 family "
+            f"{family or getattr(panel, 'panel_hash', '?')!s} (its decisions are "
+            "pre-registered for gates H and M, plan §8.3 v7.1); compute it as a "
+            "diagnostic with annotation-panel-simulate --resolvability-version 7"
+        )
+    return int(requested)
+
+
+def _panel_platform(panel: Any) -> str | None:
+    platforms = [str(item).upper() for item in getattr(panel, "platforms", []) or []]
+    if not platforms:
+        return None
+    return platforms[0] if len(set(platforms)) == 1 else "MIXED"
+
+
+def top_up_rule(species: str, config: AnnotationConfig) -> dict[str, Any] | None:
+    """Return the test-set top-up rule a version-7 self-map hashes (v7.6).
+
+    Args:
+        species: ``human`` or ``mouse``.
+        config: The annotation config.
+
+    Returns:
+        The rule, or ``None`` when ``topup_min_class_test_cells`` is 0.
+    """
+    from merxen.annotation import resolvability as res
+
+    target = int(config.resolvability.topup_min_class_test_cells)
+    if target <= 0:
+        return None
+    common = {
+        "version": res.TOP_UP_VERSION,
+        "target": target,
+        "seed": TEST_SET_SEED,
+        "stratified_by": "leaf type (water filling)",
+        "draw": "lowest draw_key(seed, class_top_up, cell id) first",
+    }
+    if species == "mouse":
+        return {
+            **common,
+            "class_level": WMB_CLAS,
+            "leaf_level": WMB_SUBC,
+            "pool": "10Xv3 cells neither marker-training nor test cells",
+            "min_training_cells_per_cluster": HO_MIN_TRAINING_CELLS_PER_CLUSTER,
+            "max_cluster_frac": float(
+                config.resolvability.gate_p_topup_max_cluster_frac
+            ),
+        }
+    return {
+        **common,
+        "class_level": "supercluster floor class (COP separate)",
+        "leaf_level": WHB_SUPC,
+        "pools": ["holdout_donor", "other_region"],
+        "other_region": {
+            "version": HO_OTHER_REGION_VERSION,
+            "classes": "non-neuronal",
+            "training_clusters_only": True,
+        },
+    }
+
+
+def resolvability_plan(
+    spec: AnnotationReferenceSpec, panel: Any, config: AnnotationConfig
+) -> ResolvabilityPlan:
+    """Return the self-map plan of a reference on a panel (plan §8.3 v7).
+
+    Version 6: nothing beyond the version-6 grid. Version 7: the panel's
+    chemistry (``sim_inputs.resolve_chemistry`` with ``panel_chemistry``),
+    the members (eight emission members, plan §8.3 v7.3 as amended on
+    2026-09-29: R1 x 6 + R3 x 2 where a measured table of the species x
+    chemistry x reference exists, else R1 x 8, unless ``ensemble_r1_seeds``
+    / ``ensemble_r3_seeds`` set them; ``clean``; the human Prime lung stress
+    member, reported only), the grid (13 values above 1,000 genes), the
+    assets (member and stress tables, the class-depth profile) and the
+    top-up rule.
+
+    Args:
+        spec: The reference spec (primary, secondary or test set).
+        panel: The declared panel.
+        config: The annotation config.
+
+    Returns:
+        The plan.
+    """
+    from merxen.annotation import resolvability as res
+    from merxen.annotation import sim_inputs as si
+
+    version = panel_resolvability_version(panel, config)
+    family = getattr(getattr(panel, "panel_family", None), "family_id", None)
+    n_genes = int(getattr(panel, "n_genes", 0) or 0)
+    if version == res.RESOLVABILITY_VERSION_V6:
+        return ResolvabilityPlan(
+            version=version,
+            family_id=family,
+            grid=tuple(spec.resolved_depth_grid(n_genes)),
+        )
+    species = str(spec.species)
+    chemistry = si.resolve_chemistry(
+        getattr(panel, "ensembl_ids", []) or [],
+        species=species,
+        platform=_panel_platform(panel),
+        declared=str(config.panel.panel_chemistry),
+    )
+    reference = V7_MEMBER_TABLE_REFERENCE.get(
+        spec.reference_id
+    ) or V7_MEMBER_TABLE_REFERENCE.get(V7_TEST_SET_OF.get(spec.reference_id, ""))
+    member_table = (
+        None
+        if reference is None
+        else si.member_table_for(species, chemistry.chemistry, reference)
+    )
+    stress_table = (
+        si.get_asset(si.STRESS_HUMAN_LUNG)
+        if species == "human" and chemistry.chemistry == "xenium_prime"
+        else None
+    )
+    r1_seeds = config.resolvability.ensemble_r1_seeds
+    r3_seeds = config.resolvability.ensemble_r3_seeds
+    members = res.ensemble_members(
+        config.resolvability,
+        species=species,
+        chemistry=chemistry.chemistry,
+        member_table=member_table,
+        stress_table=stress_table,
+        r1_seeds=None if r1_seeds is None else tuple(r1_seeds),
+        r3_seeds=None if r3_seeds is None else tuple(r3_seeds),
+        table_rule=config.resolvability.r3_table_rule,
+        residual_sd_log2=config.resolvability.r3_residual_sd_log2,
+    )
+    profiles = si.find_assets(
+        role="profile", species=species, chemistry=chemistry.chemistry
+    )
+    profile_asset = (
+        sorted(profiles, key=lambda item: item.asset_id)[0] if profiles else None
+    )
+    assets = [
+        item for item in (member_table, stress_table, profile_asset) if item is not None
+    ]
+    return ResolvabilityPlan(
+        version=version,
+        family_id=family,
+        chemistry=chemistry,
+        members=tuple(members),
+        grid=tuple(res.v7_depth_grid(species, n_genes, spec.depth_grid)),
+        assets=tuple(assets),
+        profile_asset=profile_asset,
+        top_up=top_up_rule(species, config),
+    )
+
+
+def _v7_primary_params(
+    spec: AnnotationReferenceSpec, config: AnnotationConfig, test_reference_id: str
+) -> Any:
+    """Return ``panel -> params`` of a primary or secondary version-7 self-map."""
+
+    def params(panel: Any) -> dict[str, Any] | None:
+        if not config.resolvability.enabled or spec.role not in (
+            "primary",
+            "secondary",
+        ):
+            return None
+        from merxen.annotation import resolvability as res
+
+        plan = resolvability_plan(spec, panel, config)
+        if plan.version != res.RESOLVABILITY_VERSION_V7:
+            return None
+        base = _resolvability_params(spec, config, test_reference_id)
+        base.pop("recipes", None)
+        base["resolvability_version"] = plan.version
+        base["test_set"] = {**base["test_set"], "top_up": plan.top_up}
+        base["v7"] = plan.simulation_payload()
+        return {"resolvability": base}
+
+    return params
+
+
+def _v7_test_set_params(spec: AnnotationReferenceSpec, config: AnnotationConfig) -> Any:
+    """Return ``panel -> params`` of a version-7 test set (the top-up rule)."""
+
+    def params(panel: Any) -> dict[str, Any] | None:
+        if not config.resolvability.enabled:
+            return None
+        from merxen.annotation import resolvability as res
+
+        plan = resolvability_plan(spec, panel, config)
+        if plan.version != res.RESOLVABILITY_VERSION_V7:
+            return None
+        return {"resolvability_version": plan.version, "top_up": plan.top_up}
+
+    return params
 
 
 def _resolvability_params(
@@ -6261,14 +6995,32 @@ class _BuilderRecipe:
     source_patterns: Mapping[str, str] = field(default_factory=dict)
     finds_markers: bool = True
     refuse: Any = None
+    # (spec, config) -> (panel -> params | None): the version-7 inputs.
+    panel_params: Any = None
+
+
+def _ho_primary_v7(spec: AnnotationReferenceSpec, config: AnnotationConfig) -> Any:
+    return _v7_primary_params(spec, config, HO_REFERENCE_ID)
+
+
+def _wmb_primary_v7(spec: AnnotationReferenceSpec, config: AnnotationConfig) -> Any:
+    return _v7_primary_params(spec, config, WMB_TESTSET_REFERENCE_ID)
 
 
 BUILDER_RECIPES: Final[dict[str, _BuilderRecipe]] = {
     "whb_frontal_supc_clus": _BuilderRecipe(
-        "whb_frontal_supc_clus", build_whb_frontal, WHB_TAXONOMY_ID, _whb_params
+        "whb_frontal_supc_clus",
+        build_whb_frontal,
+        WHB_TAXONOMY_ID,
+        _whb_params,
+        panel_params=_ho_primary_v7,
     ),
     "seaad_mr_panel": _BuilderRecipe(
-        "seaad_mr_panel", build_seaad_mr, SEAAD_TAXONOMY_ID, _seaad_params
+        "seaad_mr_panel",
+        build_seaad_mr,
+        SEAAD_TAXONOMY_ID,
+        _seaad_params,
+        panel_params=_ho_primary_v7,
     ),
     "wmb_panel": _BuilderRecipe(
         "wmb_panel",
@@ -6279,6 +7031,7 @@ BUILDER_RECIPES: Final[dict[str, _BuilderRecipe]] = {
         # the legacy downloader's .lock and .tmp files (mapmycells.py).
         source_patterns={SOURCE_WMB_H5AD_DIR: f"*{WMB_H5AD_SUFFIX}"},
         refuse=_wmb_large_panel_refusal,
+        panel_params=_wmb_primary_v7,
     ),
     "wmb_region_share": _BuilderRecipe(
         "wmb_region_share",
@@ -6296,7 +7049,11 @@ BUILDER_RECIPES: Final[dict[str, _BuilderRecipe]] = {
         refuse=_whole_ctx_refusal,
     ),
     HO_REFERENCE_ID: _BuilderRecipe(
-        HO_REFERENCE_ID, build_whb_frontal_ho, WHB_TAXONOMY_ID, _ho_params
+        HO_REFERENCE_ID,
+        build_whb_frontal_ho,
+        WHB_TAXONOMY_ID,
+        _ho_params,
+        panel_params=_v7_test_set_params,
     ),
     WMB_TESTSET_REFERENCE_ID: _BuilderRecipe(
         WMB_TESTSET_REFERENCE_ID,
@@ -6305,6 +7062,7 @@ BUILDER_RECIPES: Final[dict[str, _BuilderRecipe]] = {
         _wmb_testset_params,
         source_patterns={SOURCE_WMB_H5AD_DIR: f"*{WMB_H5AD_SUFFIX}"},
         finds_markers=False,
+        panel_params=_v7_test_set_params,
     ),
 }
 
@@ -6339,6 +7097,9 @@ def builder_for(
         source_patterns=dict(recipe.source_patterns),
         finds_markers=recipe.finds_markers,
         refuse=recipe.refuse,
+        panel_params=None
+        if recipe.panel_params is None
+        else recipe.panel_params(spec, config),
     )
 
 

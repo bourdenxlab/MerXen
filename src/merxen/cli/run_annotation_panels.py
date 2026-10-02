@@ -178,7 +178,70 @@ def _git_commit() -> str | None:
     "--depth-profile",
     type=click.Path(path_type=Path, exists=True, dir_okay=False),
     default=None,
-    help="CSV of per-cell panel counts (column depth or total_counts).",
+    help="CSV of per-cell total counts (column total_counts or depth), per class "
+    "with a class column (the phase-1 depth_profile.csv format) or pooled; the "
+    "report's headline (plan §8.3 v7.5).",
+)
+@click.option(
+    "--depth-profile-asset",
+    default=None,
+    help="A registered simulation-input depth profile instead of a CSV, e.g. "
+    "depth__xenium_prime__mouse_brain_ff (public 5K section) or "
+    "depth__xenium_prime__human_lung_ffpe (lung FFPE scenario).",
+)
+@click.option(
+    "--profile-mode/--no-profile-mode",
+    default=True,
+    show_default=True,
+    help="With a depth profile: also map cells simulated at the profile's "
+    "per-class depth for each emission member (primary reference).",
+)
+@click.option(
+    "--real-composition",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    default=None,
+    help="CSV of real called class, subclass, n_cells to weigh profile-mode "
+    "cells to (mouse).",
+)
+@click.option(
+    "--profile-members",
+    default=None,
+    help="Comma-separated profile-mode members (default: the bundle's emission "
+    "members, e.g. R1_contam_HO@0,R1_contam_HO@6,...,R3_measured_HO@3).",
+)
+@click.option(
+    "--resolvability-version",
+    "resolvability_version",
+    type=click.Choice(["auto", "7"]),
+    default="auto",
+    show_default=True,
+    help="7: also compute the resolvability version-7 decisions of a version-6 "
+    "family (set a, ag7, VZG2, the pinned P5011 family) as a diagnostic under "
+    "<out-dir>/<reference>/v7_diagnostic: never written to the store, never "
+    "applied (plan §8.3 v7.1). Version-7 families build version 7 anyway.",
+)
+@click.option(
+    "--v7-fresh-seeds",
+    default=None,
+    help="Comma-separated R1 seeds of a fresh version-7 ensemble B (e.g. 3,4,5) "
+    "whose emitted-triple churn against ensemble A is reported (diagnostic).",
+)
+@click.option(
+    "--v7-fresh-r3-seeds",
+    "--v7-fresh-r3-seed",
+    "v7_fresh_r3_seeds",
+    default="1",
+    show_default=True,
+    help="Comma-separated R3 seeds of the fresh ensemble B (where a measured "
+    "table exists).",
+)
+@click.option(
+    "--v7-comparator",
+    is_flag=True,
+    default=False,
+    help="Run the pre-registered comparator ensemble of the amended re-test of "
+    "the M3c churn test as ensemble B (R1_contam_HO@20-25 + R3_measured_HO@20, "
+    "@21; R1_contam_HO@20-27 without a measured table; pre-registration §22.4).",
 )
 @click.option(
     "--gate-p",
@@ -221,7 +284,15 @@ def _annotation_panel_simulate(
     prefilter_compare: str,
     expected_depth: int | None,
     depth_profile: Path | None,
+    depth_profile_asset: str | None,
+    profile_mode: bool,
+    real_composition: Path | None,
+    profile_members: str | None,
     gate_p: bool,
+    resolvability_version: str = "auto",
+    v7_fresh_seeds: str | None = None,
+    v7_fresh_r3_seeds: str = "1",
+    v7_comparator: bool = False,
 ) -> None:
     from merxen.annotation.reference import SourceOptions, set_prep_resources
     from merxen.annotation.simulate import (
@@ -315,7 +386,22 @@ def _annotation_panel_simulate(
         prefilter_compare=cast("Any", prefilter_compare),
         expected_depth=expected_depth,
         depth_profile=depth_profile,
+        depth_profile_asset=depth_profile_asset,
+        profile_mode=profile_mode
+        and (depth_profile is not None or depth_profile_asset is not None),
+        real_composition=real_composition,
+        profile_members=None
+        if not profile_members
+        else [item.strip() for item in profile_members.split(",") if item.strip()],
         gate_p=gate_p,
+        v7_diagnostic=resolvability_version == "7",
+        v7_fresh_seeds=None
+        if not v7_fresh_seeds
+        else [int(item) for item in v7_fresh_seeds.split(",") if item.strip()],
+        v7_fresh_r3_seeds=[
+            int(item) for item in v7_fresh_r3_seeds.split(",") if item.strip()
+        ],
+        v7_comparator=v7_comparator,
         provenance={
             "public_panel": public_record,
             "code_commit": _git_commit(),

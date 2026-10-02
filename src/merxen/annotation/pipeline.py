@@ -622,15 +622,20 @@ def _prefer_current_resolvability(candidates: list[StoreEntry]) -> list[StoreEnt
     has the current tables (a panel not rebuilt since the bump), the older
     ones are kept and a warning names their versions: their self-map tables
     are stale until the panel is rebuilt (a pipeline run's PREP rebuilds
-    them).
+    them). Current means version 6 or 7 (M3c): the version is chosen per
+    family, so a panel's bundles built by the current code all carry its
+    family's version.
     """
-    from merxen.annotation.resolvability import RESOLVABILITY_VERSION
+    from merxen.annotation.resolvability import (
+        RESOLVABILITY_VERSION,
+        RESOLVABILITY_VERSIONS,
+    )
 
     versions = [_resolvability_version(entry) for entry in candidates]
     current = [
         entry
         for entry, version in zip(candidates, versions, strict=True)
-        if version == RESOLVABILITY_VERSION
+        if version in RESOLVABILITY_VERSIONS
     ]
     if current:
         return _prefer_current_test_set(current)

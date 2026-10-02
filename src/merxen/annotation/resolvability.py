@@ -140,7 +140,16 @@ TEST_CELLS_OBS_FILE: Final = "test_cells.parquet"
 
 DECISION_RECIPE: Final = "R1_contam_HO"
 CLEAN_RECIPE: Final = "clean"
-RECIPE_VERSIONS: Final[dict[str, int]] = {DECISION_RECIPE: 1, CLEAN_RECIPE: 1}
+# Version-7 recipes (M3c, plan §8.3 v7.3-v7.4): the measured-efficiency member
+# and the cross-tissue human stress recipe; version 6 uses only the two above.
+R3_RECIPE: Final = "R3_measured_HO"
+LUNG_STRESS_RECIPE: Final = "R1_xtissue_lung_stress"
+RECIPE_VERSIONS: Final[dict[str, int]] = {
+    DECISION_RECIPE: 1,
+    CLEAN_RECIPE: 1,
+    R3_RECIPE: 1,
+    LUNG_STRESS_RECIPE: 1,
+}
 # Keyed simulation draws (version 5; ``draw_key``): the streams of one
 # simulated cell (its thinning, its spill partner and the spill's thinning).
 DRAW_KEY_BYTES: Final = 16
@@ -434,15 +443,27 @@ def depth_bin(counts: np.ndarray | Sequence[float], grid: Sequence[int]) -> np.n
 
 @dataclass(frozen=True)
 class SimulationRecipe:
-    """One simulation recipe of the self-map (§8.3 step 3).
+    """One simulation recipe of the self-map (§8.3 step 3; v7.3-v7.4).
 
     Attributes:
-        name: ``R1_contam_HO`` (decisions) or ``clean`` (upper bound).
+        name: ``R1_contam_HO`` (decisions) or ``clean`` (upper bound);
+            version 7 adds ``R3_measured_HO`` and ``R1_xtissue_lung_stress``.
         version: Recipe version.
         gene_efficiency_sigma: Sigma of the per-gene LogNormal(0, sigma)
             efficiency (median-normalised); ``None`` for none.
         spill_fraction: Foreign-class spill as a fraction of the depth.
         seed: Simulation seed.
+        efficiency_source: ``lognormal`` (versions 1-6 and the R1 members),
+            ``measured`` (R3: a ``member`` factor table) or
+            ``xtissue_stress`` (the R1 draw times a ``stress`` ratio table).
+        efficiency_table: The table's simulation-input asset id
+            (``merxen.annotation.sim_inputs``), for ``measured`` and
+            ``xtissue_stress``.
+        efficiency_table_sha256: That asset's sha256 (it enters a version-7
+            ``build_hash``; the recipe refuses another table).
+        table_rule: R3 table rule (``restricted``; ``all_measured`` for the
+            D3 regression only).
+        residual_sd_log2: R3 residual SD of measured genes (0.20 log2).
     """
 
     name: str
@@ -450,16 +471,42 @@ class SimulationRecipe:
     gene_efficiency_sigma: float | None
     spill_fraction: float
     seed: int
+    efficiency_source: str = "lognormal"
+    efficiency_table: str | None = None
+    efficiency_table_sha256: str | None = None
+    table_rule: str | None = None
+    residual_sd_log2: float | None = None
+
+    @property
+    def member(self) -> str:
+        """The ensemble member name, ``<name>@<seed>`` (e.g. ``R1_contam_HO@1``)."""
+        return f"{self.name}@{int(self.seed)}"
 
     def to_json(self) -> dict[str, Any]:
-        """Return the recipe as JSON-native values."""
-        return {
+        """Return the recipe as JSON-native values.
+
+        A ``lognormal`` recipe keeps the five keys of versions 1-6, so its
+        record (and every ``build_hash`` holding it) is unchanged; the
+        version-7 efficiency fields are added only for other sources.
+        """
+        record: dict[str, Any] = {
             "name": self.name,
             "version": self.version,
             "gene_efficiency_sigma": self.gene_efficiency_sigma,
             "spill_fraction": self.spill_fraction,
             "seed": self.seed,
         }
+        if self.efficiency_source != "lognormal":
+            record.update(
+                {
+                    "efficiency_source": self.efficiency_source,
+                    "efficiency_table": self.efficiency_table,
+                    "efficiency_table_sha256": self.efficiency_table_sha256,
+                    "table_rule": self.table_rule,
+                    "residual_sd_log2": self.residual_sd_log2,
+                }
+            )
+        return record
 
 
 def simulation_recipes(
@@ -2272,6 +2319,7 @@ def decide(
     pool_weights: PoolWeights | None = None,
     recipe: str = DECISION_RECIPE,
     seed: int = 0,
+    saturated_bp_share: float | None = None,
 ) -> pd.DataFrame:
     """Return the per (regime, level, class, depth) decisions with pooled deep bins.
 
@@ -2321,6 +2369,12 @@ def decide(
         pool_weights: Optional weights of pooled deep sets (RESOLVE).
         recipe: Recipe the decisions use.
         seed: Mapping seed the decisions use.
+        saturated_bp_share: Resolvability version 7 only (v7.8, the
+            saturated-bp rule): a fitted set without ``t*`` whose
+            positive-weight fit-half calls hold more than this share at
+            ``bp = 1`` is judged at ``threshold_cap``; the table then adds
+            ``threshold_source``, ``saturated_bp`` and ``saturated_share``.
+            ``None`` (version 6) leaves every row and column unchanged.
 
     Returns:
         One row per (regime, level, class, depth): ``status`` (``emitted`` or
@@ -2377,43 +2431,15 @@ def decide(
                     pools=pools,
                     class_dmax=dmax.get((meta.level, cls)),
                     n_test_index=n_test_index,
+                    saturated_bp_share=saturated_bp_share,
                 )
             )
-    columns = [
-        "regime",
-        "level",
-        "class",
-        "depth",
-        "status",
-        "threshold",
-        "t_star",
-        "would_raise",
-        "would_raise_evaluable",
-        "target",
-        "default_threshold",
-        "n_test",
-        "check_set",
-        "n_called",
-        "n_fit",
-        "n_confident",
-        "n_effective",
-        "max_weight_share",
-        "precision",
-        "wilson_lb",
-        "coverage",
-        "g_at_default",
-        "precision_at_default",
-        "d_max",
-        "extrapolated",
-        "pooled",
-        "pool_min_depth",
-        "own_status",
-        "own_reason",
-        "own_n_confident",
-        "reason",
-    ]
+    columns = list(DECISION_COLUMNS)
+    text_columns = set(DECISION_TEXT_COLUMNS)
+    if saturated_bp_share is not None:
+        columns += list(SATURATED_COLUMNS)
+        text_columns.add("threshold_source")
     table = pd.DataFrame.from_records(records)
-    text_columns = {"status", "reason", "check_set", "own_status", "own_reason"}
     for column in columns:
         if column not in table.columns:
             table[column] = np.nan if column not in text_columns else None
@@ -2422,7 +2448,53 @@ def decide(
     table["would_raise"] = _bool_column(table["would_raise"])
     table["would_raise_evaluable"] = _bool_column(table["would_raise_evaluable"])
     table["pooled"] = _bool_column(table["pooled"])
+    if saturated_bp_share is not None:
+        table["saturated_bp"] = _bool_column(table["saturated_bp"])
     return table
+
+
+# ``decide`` output columns (version 6; version 7 adds ``SATURATED_COLUMNS``
+# and ``V7_DECISION_COLUMNS``).
+DECISION_COLUMNS: Final[tuple[str, ...]] = (
+    "regime",
+    "level",
+    "class",
+    "depth",
+    "status",
+    "threshold",
+    "t_star",
+    "would_raise",
+    "would_raise_evaluable",
+    "target",
+    "default_threshold",
+    "n_test",
+    "check_set",
+    "n_called",
+    "n_fit",
+    "n_confident",
+    "n_effective",
+    "max_weight_share",
+    "precision",
+    "wilson_lb",
+    "coverage",
+    "g_at_default",
+    "precision_at_default",
+    "d_max",
+    "extrapolated",
+    "pooled",
+    "pool_min_depth",
+    "own_status",
+    "own_reason",
+    "own_n_confident",
+    "reason",
+)
+DECISION_TEXT_COLUMNS: Final[tuple[str, ...]] = (
+    "status",
+    "reason",
+    "check_set",
+    "own_status",
+    "own_reason",
+)
 
 
 class _LevelPools:
@@ -2460,6 +2532,7 @@ def _class_decisions(
     pools: _LevelPools,
     class_dmax: int | None,
     n_test_index: Mapping[tuple[str, str, int], int],
+    saturated_bp_share: float | None = None,
 ) -> list[dict[str, Any]]:
     """Decide every (regime, depth) bin of one (level, class) (``decide``)."""
 
@@ -2492,7 +2565,12 @@ def _class_decisions(
         own[depth] = {
             record["regime"]: record
             for record in _bin_decisions(
-                groups.get((cls, depth)), meta, depth, settings, base(depth)
+                groups.get((cls, depth)),
+                meta,
+                depth,
+                settings,
+                base(depth),
+                saturated_bp_share=saturated_bp_share,
             )
         }
     pooled: dict[int, dict[str, dict[str, Any]]] = {}
@@ -2502,7 +2580,12 @@ def _class_decisions(
             pooled[depth] = {
                 record["regime"]: record
                 for record in _bin_decisions(
-                    pools.rows(cls, depth), meta, depth, settings, base(depth)
+                    pools.rows(cls, depth),
+                    meta,
+                    depth,
+                    settings,
+                    base(depth),
+                    saturated_bp_share=saturated_bp_share,
                 )
             }
         return pooled[depth]
@@ -2580,6 +2663,8 @@ def _bin_decisions(
     depth: int,
     settings: RuleSettings,
     base: dict[str, Any],
+    *,
+    saturated_bp_share: float | None = None,
 ) -> list[dict[str, Any]]:
     """Decide one (level, class, depth) bin under every regime.
 
@@ -2588,10 +2673,12 @@ def _bin_decisions(
     default, which is not fitted on these cells, so it is checked on every
     call of the bin (both halves): halving it would only cost power
     (M3b review). Its fit-half ``t*`` is reported (``would_raise``), never
-    applied.
+    applied. With ``saturated_bp_share`` (version 7, v7.8) a fitted set
+    without ``t*`` whose fit-half calls are saturated is judged at the cap
+    (``saturated_cap``).
     """
     if group is None or len(group) == 0:
-        return [
+        empty = [
             {
                 **base,
                 "regime": regime,
@@ -2604,6 +2691,12 @@ def _bin_decisions(
             }
             for regime in REGIMES
         ]
+        if saturated_bp_share is not None:
+            for record in empty:
+                record.update(
+                    threshold_source=None, saturated_bp=False, saturated_share=math.nan
+                )
+        return empty
     bp = group["bp"].to_numpy(np.float64)
     correct = group["correct"].to_numpy(bool).astype(np.float64)
     weights = trim_weights(
@@ -2627,6 +2720,9 @@ def _bin_decisions(
     g_default = (
         float(fit.predict(meta.default_threshold)) if fit is not None else math.nan
     )
+    saturated_share = math.nan
+    if saturated_bp_share is not None and fit is not None:
+        saturated_share = saturated_bp_fraction(bp[fit_mask])
     records = []
     for regime in REGIMES:
         target = settings.target(regime, meta.base_target, depth)
@@ -2636,17 +2732,33 @@ def _bin_decisions(
             target=target,
             cap=settings.threshold_cap,
         )
+        saturated = False
         if regime == "validated":
             applied: float | None = meta.default_threshold
             stats = at_default
             check_set = "all"
         else:
             applied = t_star
-            stats = check_threshold(check_bp, check_correct, check_weights, t_star)
+            saturated = (
+                saturated_bp_share is not None
+                and t_star is None
+                and fit is not None
+                and saturated_share > saturated_bp_share
+            )
+            if saturated:
+                applied = settings.threshold_cap
+            stats = check_threshold(check_bp, check_correct, check_weights, applied)
             check_set = "check_half" if settings.split_halves else "all"
         reason = _rule_pass(stats, target, settings)
         if fit is None and regime != "validated":
             reason = "too_few_fit_cells"
+        extra: dict[str, Any] = {}
+        if saturated_bp_share is not None:
+            extra = {
+                "threshold_source": _threshold_source(regime, applied, saturated),
+                "saturated_bp": bool(saturated),
+                "saturated_share": saturated_share,
+            }
         records.append(
             {
                 **base,
@@ -2675,9 +2787,52 @@ def _bin_decisions(
                 "status": STATUS_EMITTED if reason is None else STATUS_NOT_RESOLVABLE,
                 "extrapolated": False,
                 "reason": reason,
+                **extra,
             }
         )
     return records
+
+
+# The saturated-bp rule (resolvability version 7, v7.8; pre-registration
+# §21.3: share 0.90 and cap 0.99, only tightenable). A call counts as
+# saturated at bp >= 1 - 1e-6 (the float32 tolerance of the stored bp).
+SATURATED_BP_TOLERANCE: Final = 1e-6
+SATURATED_COLUMNS: Final[tuple[str, ...]] = (
+    "threshold_source",
+    "saturated_bp",
+    "saturated_share",
+)
+THRESHOLD_SOURCE_DEFAULT: Final = "default"
+THRESHOLD_SOURCE_LOCAL: Final = "resolvability_local"
+THRESHOLD_SOURCE_SATURATED: Final = "saturated_cap"
+THRESHOLD_SOURCE_INHERITED: Final = "monotone_inherited"
+
+
+def saturated_bp_fraction(bp: np.ndarray) -> float:
+    """Return the share of calls at ``bp = 1`` (``nan`` for no call; v7.8).
+
+    Args:
+        bp: The fit-half bp values of a tested set's positive-weight calls.
+
+    Returns:
+        The share with ``bp >= 1 - SATURATED_BP_TOLERANCE``.
+    """
+    values = np.asarray(bp, dtype=np.float64)
+    values = values[np.isfinite(values)]
+    if not len(values):
+        return math.nan
+    return float(np.mean(values >= 1.0 - SATURATED_BP_TOLERANCE))
+
+
+def _threshold_source(
+    regime: Regime, applied: float | None, saturated: bool
+) -> str | None:
+    """Where a version-7 set's applied threshold comes from."""
+    if regime == "validated":
+        return THRESHOLD_SOURCE_DEFAULT
+    if saturated:
+        return THRESHOLD_SOURCE_SATURATED
+    return None if applied is None else THRESHOLD_SOURCE_LOCAL
 
 
 def emission_lookup(
@@ -4229,6 +4384,12 @@ class ResolvabilityTables:
         """The bundle's depth grid."""
         return [int(depth) for depth in self.summary["depth_grid"]]
 
+    @property
+    def version(self) -> int | None:
+        """The bundle's resolvability version (``None`` if unrecorded)."""
+        value = self.summary.get("resolvability_version")
+        return int(value) if value is not None else None
+
     def decisions(
         self,
         *,
@@ -4236,6 +4397,9 @@ class ResolvabilityTables:
         settings: RuleSettings | None = None,
     ) -> pd.DataFrame:
         """Return decisions, reweighted to a dataset's composition when given.
+
+        A version-7 bundle re-derives its ensemble decisions
+        (``ensemble_decisions``).
 
         Args:
             composition: Dataset share per truth type (human supercluster,
@@ -4245,8 +4409,12 @@ class ResolvabilityTables:
             settings: Rule settings (default: the bundle's).
 
         Returns:
-            ``decide`` output.
+            ``decide`` output (version 7: ``ensemble_decide`` decisions).
         """
+        if self.version == RESOLVABILITY_VERSION_V7:
+            return self.ensemble_decisions(
+                composition=composition, settings=settings
+            ).decisions
         rule = settings or self.settings
         if composition is None:
             return decide(
@@ -4279,22 +4447,130 @@ class ResolvabilityTables:
             recipe=str(self.summary["decision_recipe"]),
         )
 
+    def ensemble_decisions(
+        self,
+        *,
+        composition: Mapping[str, float] | DatasetComposition | None = None,
+        settings: RuleSettings | None = None,
+        ensemble: EnsembleSettings | None = None,
+    ) -> EnsembleDecisions:
+        """Re-derive a version-7 bundle's ensemble decisions (§8.3 v7.7-v7.9).
 
-def load_resolvability(directory: Path | str) -> ResolvabilityTables | None:
+        With a composition each member's cells are reweighted separately
+        (``composition_weights`` per member; pooled deep sets per member)
+        and the ensemble re-run with the weights, as RESOLVE will (M4
+        follow-up; plan §12 M3c).
+
+        Args:
+            composition: Dataset composition, or ``None`` (PREP's decisions).
+            settings: Rule settings (default: the bundle's).
+            ensemble: Ensemble settings (default: the bundle's).
+
+        Returns:
+            The ensemble decisions.
+
+        Raises:
+            ResolvabilityError: For a bundle that is not version 7.
+        """
+        if self.version != RESOLVABILITY_VERSION_V7:
+            raise ResolvabilityError(
+                f"ensemble decisions need a version-7 bundle (this is {self.version})"
+            )
+        rule = settings or self.settings
+        rules = ensemble or EnsembleSettings.from_json(
+            self.summary.get("ensemble_settings")
+        )
+        members = [str(name) for name in self.summary.get("emission_members") or []]
+        reported = [
+            str(item["member"])
+            for item in self.summary.get("members") or []
+            if item.get("role") != "emission"
+        ]
+        weights: np.ndarray | None = None
+        pool_weights: PoolWeights | None = None
+        if composition is not None:
+            class_of = leaf_class_map(self.cells)
+            weights = np.zeros(len(self.cells), dtype=np.float64)
+            names = self.cells[MEMBER_COLUMN].astype(str).to_numpy()
+            for name in dict.fromkeys(names):
+                mask = names == name
+                weights[mask] = composition_weights(
+                    self.cells[mask],
+                    composition,
+                    class_of=class_of,
+                    min_type_cells=rule.weight_min_type_cells,
+                    trim_factor=rule.bin_trim_factor,
+                )
+            pool_weights = pooled_composition_weights(
+                composition,
+                class_of=class_of,
+                min_type_cells=rule.weight_min_type_cells,
+                trim_factor=rule.bin_trim_factor,
+            )
+        return ensemble_decide(
+            self.cells,
+            self.levels,
+            self.depth_grid,
+            rule,
+            rules,
+            members=members,
+            reported=reported,
+            weights=weights,
+            pool_weights=pool_weights,
+            neuronal=dict(self.summary.get("neuronal_classes") or {}),
+        )
+
+
+def load_resolvability(
+    directory: Path | str, *, allow_version_7: bool = False
+) -> ResolvabilityTables | None:
     """Read a bundle's resolvability outputs (``None`` when it has none).
+
+    A version-7 bundle (M3c) is read only by a caller that declares support
+    (``allow_version_7``): its decisions come from the ensemble, its cells
+    carry several members of one recipe, and it adds the monotone fill and
+    the non-neuronal high-depth marker, so a consumer written for version 6
+    (M4's RESOLVE until its follow-up, plan §12 M3c) refuses it loudly
+    instead of misreading it.
 
     Args:
         directory: Bundle directory.
+        allow_version_7: The caller handles version-7 bundles.
 
     Returns:
         The tables, or ``None``.
+
+    Raises:
+        ResolvabilityError: For a version-7 bundle without
+            ``allow_version_7``, or an unknown later version.
     """
     root = Path(directory)
     summary_path = root / RESOLVABILITY_SUMMARY_FILE
     if not summary_path.is_file():
         return None
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    version = summary.get("resolvability_version")
+    if version is not None and int(version) > RESOLVABILITY_VERSION_V7:
+        raise ResolvabilityError(
+            f"{root}: resolvability version {version} is newer than this code "
+            f"({RESOLVABILITY_VERSION_V7})"
+        )
+    if (
+        version is not None
+        and int(version) == RESOLVABILITY_VERSION_V7
+        and not (allow_version_7)
+    ):
+        raise ResolvabilityError(
+            f"{root}: a resolvability version-7 bundle (ensemble decisions, "
+            "monotone fill; plan §8.3 v7) needs a consumer that declares "
+            "version-7 support (load_resolvability(..., allow_version_7=True)); "
+            "RESOLVE accepts it after its M3c follow-up (plan §12 M3c)"
+        )
     cells = restore_labels(pd.read_parquet(root / RESOLVABILITY_CELLS_FILE))
+    if MEMBER_COLUMN in cells.columns:
+        cells[MEMBER_COLUMN] = cells[MEMBER_COLUMN].astype(str)
+    if MEMBER_ROLE_COLUMN in cells.columns:
+        cells[MEMBER_ROLE_COLUMN] = cells[MEMBER_ROLE_COLUMN].astype(str)
     fields = RuleSettings.__dataclass_fields__
     stored = {key: value for key, value in summary["settings"].items() if key in fields}
     # Bundles of resolvability versions 2-3 trimmed composition weights per
@@ -4314,7 +4590,11 @@ def load_resolvability(directory: Path | str) -> ResolvabilityTables | None:
 
 
 def replicate_rows(
-    cells: pd.DataFrame, *, recipe: str | None, seed: int | None
+    cells: pd.DataFrame,
+    *,
+    recipe: str | None,
+    seed: int | None,
+    member: str | None = None,
 ) -> pd.DataFrame:
     """Return one replicate's rows: a cells table restricted to a recipe and seed.
 
@@ -4329,15 +4609,21 @@ def replicate_rows(
         cells: A cells table.
         recipe: The recipe to keep (``None``: all).
         seed: The mapping seed to keep (``None``: all).
+        member: The version-7 ensemble member to keep (``None``: all); the
+            R1 members of an ensemble share their recipe and mapping seed.
 
     Returns:
         The rows.
 
     Raises:
         ResolvabilityError: If a (level, cell_id, depth) occurs more than
-            once after the filters (pass ``recipe`` / ``seed``).
+            once after the filters (pass ``recipe`` / ``seed`` / ``member``).
     """
     frame = cells
+    if member is not None:
+        if MEMBER_COLUMN not in frame.columns:
+            raise ResolvabilityError(f"member {member!r}: the cells have no members")
+        frame = frame[(frame[MEMBER_COLUMN].astype(str) == member).to_numpy()]
     if recipe is not None:
         frame = frame[(frame["recipe"].astype(str) == recipe).to_numpy()]
     if seed is not None:
@@ -4374,15 +4660,18 @@ def frozen_threshold_eval(
     regime: Regime = "provisional",
     recipe: str | None = None,
     seed: int | None = None,
+    member: str | None = None,
 ) -> pd.DataFrame:
     """Apply frozen thresholds to replicate cells, per (level, class, depth).
 
     Args:
         cells: Replicate cells table (another donor, draw, seed or recipe).
-        decisions: Frozen ``decide`` output of the base run.
+        decisions: Frozen ``decide`` output of the base run (version 7: the
+            ensemble's).
         regime: Regime whose thresholds are frozen.
         recipe: Restrict the replicate rows to one recipe.
         seed: Restrict the replicate rows to one mapping seed.
+        member: Restrict the replicate rows to one ensemble member.
 
     Returns:
         ``level``, ``class``, ``depth``, ``threshold``, ``n_called``,
@@ -4392,7 +4681,7 @@ def frozen_threshold_eval(
         ResolvabilityError: If the rows mix replicates (``replicate_rows``).
     """
     lookup = emission_lookup(decisions, regime)
-    frame = replicate_rows(cells, recipe=recipe, seed=seed)
+    frame = replicate_rows(cells, recipe=recipe, seed=seed, member=member)
     frame = frame[frame["parent"].notna()]
     records = []
     for (level, cls, depth), group in frame.groupby(
@@ -4468,6 +4757,7 @@ def gate_p_tested_sets(
     regime: Regime = "provisional",
     recipe: str | None = DECISION_RECIPE,
     seed: int | None = 0,
+    member: str | None = None,
 ) -> dict[tuple[str, str], list[GatePTestedSet] | None]:
     """Return the gate-P tested sets per (level, class) (``None``: not evaluable).
 
@@ -4488,6 +4778,8 @@ def gate_p_tested_sets(
         recipe: The recipe of the tested rows (``None``: the table must hold
             one; ``replicate_rows``).
         seed: The mapping seed of the tested rows (``None``: likewise).
+        member: The version-7 ensemble member of the tested rows (gate P
+            scores NP3-NP7 in every emission member; ``gate_p_member_sets``).
 
     Returns:
         Tested sets per (level, class), the pooled set first, then the bins
@@ -4498,7 +4790,7 @@ def gate_p_tested_sets(
         ResolvabilityError: If the rows mix replicates (``replicate_rows``).
     """
     lookup = emission_lookup(decisions, regime)
-    frame = replicate_rows(cells, recipe=recipe, seed=seed).copy()
+    frame = replicate_rows(cells, recipe=recipe, seed=seed, member=member).copy()
     thresholds = np.array(
         [
             _frozen_threshold(lookup.get((str(level), str(cls), int(depth))))
@@ -4574,6 +4866,93 @@ def _tested_set(
     )
 
 
+def gate_p_member_sets(
+    cells: pd.DataFrame,
+    decisions: pd.DataFrame,
+    *,
+    members: Sequence[str],
+    min_confident_n: int = 200,
+    regime: Regime = "provisional",
+    seed: int | None = 0,
+) -> dict[str, dict[tuple[str, str], list[GatePTestedSet] | None]]:
+    """Return each emission member's gate-P tested sets (version 7, §21).
+
+    Gate P freezes the ensemble's thresholds and emission (``decisions``: the
+    ensemble decisions of the default donor or draw, monotone-filled bins
+    included) and scores NP3-NP7 separately in every emission member: each
+    member's own simulation of the held-out calls at the frozen thresholds.
+
+    Args:
+        cells: Pooled held-out version-7 cells (a ``member`` column).
+        decisions: Frozen ensemble decisions.
+        members: The emission members.
+        min_confident_n: ``gate_p_min_confident_n`` (200).
+        regime: Regime of the thresholds.
+        seed: The mapping seed of the tested rows.
+
+    Returns:
+        Per member, ``gate_p_tested_sets`` of its rows.
+    """
+    return {
+        member: gate_p_tested_sets(
+            cells,
+            decisions,
+            min_confident_n=min_confident_n,
+            regime=regime,
+            recipe=None,
+            seed=seed,
+            member=member,
+        )
+        for member in members
+    }
+
+
+GATE_P_PASSED: Final = "passed"
+GATE_P_FAILED: Final = "failed"
+GATE_P_NOT_EVALUABLE: Final = "not_evaluable"
+
+
+def every_member_verdict(
+    verdicts: Mapping[str, Mapping[tuple[str, str], bool | None]],
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """Combine per-member gate-P verdicts: a (level, class) passes only in all.
+
+    Version-7 families (plan §14 "Version-7 families"): a (level, class) is
+    validated only if NP3-NP7 pass in every emission member. A member that
+    fails it fails it; a member where it is not evaluable (``None`` or
+    missing) leaves it not evaluable.
+
+    Args:
+        verdicts: Per member, per (level, class): ``True`` (passes), ``False``
+            (fails) or ``None`` (not evaluable).
+
+    Returns:
+        Per (level, class): ``status`` (``passed``, ``failed`` or
+        ``not_evaluable``), ``failed_members`` and ``unevaluable_members``.
+    """
+    keys = sorted({key for values in verdicts.values() for key in values})
+    result: dict[tuple[str, str], dict[str, Any]] = {}
+    for key in keys:
+        failed = sorted(
+            member for member, values in verdicts.items() if values.get(key) is False
+        )
+        unevaluable = sorted(
+            member for member, values in verdicts.items() if values.get(key) is None
+        )
+        if failed:
+            status = GATE_P_FAILED
+        elif unevaluable or not verdicts:
+            status = GATE_P_NOT_EVALUABLE
+        else:
+            status = GATE_P_PASSED
+        result[key] = {
+            "status": status,
+            "failed_members": failed,
+            "unevaluable_members": unevaluable,
+        }
+    return result
+
+
 def gate_p_class_set(
     truth_classes: pd.Series | Sequence[str],
     *,
@@ -4597,3 +4976,3450 @@ def gate_p_class_set(
     total = int(counts.sum())
     share = float(counts[counts.index.isin(members)].sum()) / total if total else 0.0
     return members, share, share >= min_share - _TOLERANCE
+
+
+# --------------------------------------------------------------------------
+# Resolvability version 7: families, members and simulation (M3c; §8.3 v7)
+#
+# Version 7 is additive: nothing above changes, so version 6 stays
+# byte-identical for the families of ``validated_panels.csv`` (and the pins of
+# ``resolvability_v6_pins.csv``), whose decisions are pre-registered for gates
+# H and M (the M3c scope decision; pre-registration §21 (i)). Version 7 (every
+# other family) simulates each ensemble member with exact-total thinning, on
+# TOTAL counts: a grid value D is the simulated cell's total, host D / (1 + s)
+# plus spill s D / (1 + s), because real cells are binned by their totals.
+
+RESOLVABILITY_VERSION_V6: Final = 6
+RESOLVABILITY_VERSION_V7: Final = 7
+RESOLVABILITY_VERSIONS: Final[tuple[int, ...]] = (6, 7)
+V6_PINS_FILE: Final = "resolvability_v6_pins.csv"
+EFFICIENCY_SOURCES: Final[tuple[str, ...]] = ("lognormal", "measured", "xtissue_stress")
+# Exact-total thinning (v7.2): at most 30 fixed-point steps, stopping per row
+# at |ratio - 1| < 1e-6.
+THIN_MAX_ITER: Final = 30
+THIN_TOLERANCE: Final = 1e-6
+# Panels above 1,000 genes (v7.2): 13 values, neighbours <= 1.67x apart above
+# 100 counts, 3,000 reaching the real 5K q95 (3,330).
+V7_LARGE_PANEL_GRID: Final[tuple[int, ...]] = (
+    10,
+    20,
+    50,
+    100,
+    150,
+    250,
+    350,
+    500,
+    700,
+    1000,
+    1400,
+    2000,
+    3000,
+)
+V7_LARGE_PANEL_GENES: Final = 1000
+# Ensemble members (v7.3 as amended on 2026-09-29: orchestrator decision D1 (a),
+# pending the user's confirmation; pre-registration §22.3, fixed there and only
+# tightenable). Eight emission members per version-7 family: R1 x 6 + R3 x 2
+# where the species x chemistry has a measured factor table, else R1 x 8.
+# R1@0 is the pre-registered realisation (gate P's NP3 base); seeds 1-5 of R1
+# and 0-1 of R3 were drawn for the ensembles A and B of the failed stage-D test
+# (iii) and are not re-used.
+V7_R1_SEEDS_WITH_TABLE: Final[tuple[int, ...]] = (0, 6, 7, 8, 9, 10)
+V7_R1_SEEDS_WITHOUT_TABLE: Final[tuple[int, ...]] = (0, 6, 7, 8, 9, 10, 11, 12)
+V7_R3_SEEDS: Final[tuple[int, ...]] = (2, 3)
+V7_EMISSION_MEMBERS: Final = 8
+# The comparator of the amended re-test of pre-registration §21 (iii) (§22.4):
+# disjoint from every production and stage-D member; never production.
+V7_COMPARATOR_R1_SEEDS_WITH_TABLE: Final[tuple[int, ...]] = (20, 21, 22, 23, 24, 25)
+V7_COMPARATOR_R1_SEEDS_WITHOUT_TABLE: Final[tuple[int, ...]] = (
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+)
+V7_COMPARATOR_R3_SEEDS: Final[tuple[int, ...]] = (20, 21)
+# The ensembles of stages A-D (the bundles built before the amendment keep them).
+V7_STAGE_D_R1_SEEDS: Final[tuple[int, ...]] = (0, 1, 2)
+V7_STAGE_D_R3_SEEDS: Final[tuple[int, ...]] = (0,)
+V7_STRESS_SEED: Final = 0
+MemberRole = Literal["emission", "reported", "stress"]
+MEMBER_ROLES: Final[tuple[str, ...]] = ("emission", "reported", "stress")
+
+
+def load_v6_pins(path: Path | str | None = None) -> pd.DataFrame:
+    """Return the families pinned to resolvability version 6 (OD-E20).
+
+    Args:
+        path: The pins CSV (default: the packaged
+            ``assets/annotation/resolvability_v6_pins.csv``).
+
+    Returns:
+        ``family_id, panel_hash, species, reason, date`` rows.
+
+    Raises:
+        ResolvabilityError: If a column is missing or a row lacks a reason.
+    """
+    from merxen.annotation.vocab import ASSET_DIR
+
+    location = Path(path) if path is not None else ASSET_DIR / V6_PINS_FILE
+    table = pd.read_csv(location, dtype=str, keep_default_na=False)
+    required = ("family_id", "panel_hash", "species", "reason", "date")
+    missing = [column for column in required if column not in table.columns]
+    if missing:
+        raise ResolvabilityError(f"{location.name}: columns {missing} are missing")
+    if (table["reason"].str.strip() == "").any():
+        raise ResolvabilityError(f"{location.name}: every pin needs its reason")
+    return table
+
+
+def v6_family_ids(
+    validated: Any | None = None, pins: pd.DataFrame | None = None
+) -> set[str]:
+    """Return the families that keep resolvability version 6 (v7.1).
+
+    The real-data families of ``validated_panels.csv`` (the families whose
+    decisions are pre-registered for gates H and M: human_set_a with its set
+    c, mouse_ag7, mouse_vzg2) and the families of ``resolvability_v6_pins
+    .csv``. A family validated later by simulation (gate P, M13) was
+    validated on version 7 and stays there.
+
+    Args:
+        validated: A ``diagnostics.ValidatedPanelTable`` (default: the
+            packaged tables).
+        pins: ``load_v6_pins`` output (default: the packaged pins).
+
+    Returns:
+        Family ids.
+    """
+    from merxen.annotation.diagnostics import load_validated_panels
+
+    table = validated if validated is not None else load_validated_panels()
+    families = {
+        str(record.family_id)
+        for record in table.records
+        if str(getattr(record, "validation_basis", "real_data")) == "real_data"
+    }
+    pinned = pins if pins is not None else load_v6_pins()
+    return families | {str(value) for value in pinned["family_id"]}
+
+
+def resolvability_version_for(
+    family_id: str | None,
+    panel_hash: str | None = None,
+    *,
+    validated: Any | None = None,
+    pins: pd.DataFrame | None = None,
+) -> int:
+    """Return the resolvability version of a panel family (plan §8.3 v7.1).
+
+    Args:
+        family_id: The panel's family after trust inheritance
+            (``AnnotationPanel.panel_family.family_id``); a listed or
+            inherited panel carries its validated family's id.
+        panel_hash: The panel hash (a pin may name it).
+        validated: A ``ValidatedPanelTable`` (default: packaged).
+        pins: ``load_v6_pins`` output (default: packaged).
+
+    Returns:
+        6 for the real-data families of ``validated_panels.csv`` (by family
+        id, or by a listed panel hash when the family is not known) and the
+        pinned families (or pinned panel hashes), else 7.
+    """
+    from merxen.annotation.diagnostics import load_validated_panels
+
+    table = validated if validated is not None else load_validated_panels()
+    pinned = pins if pins is not None else load_v6_pins()
+    if family_id is not None and family_id in v6_family_ids(table, pinned):
+        return RESOLVABILITY_VERSION_V6
+    if panel_hash is not None:
+        if panel_hash in set(pinned["panel_hash"]):
+            return RESOLVABILITY_VERSION_V6
+        record = table.record_for_hash(panel_hash)
+        if (
+            record is not None
+            and str(getattr(record, "validation_basis", "real_data")) == "real_data"
+        ):
+            return RESOLVABILITY_VERSION_V6
+    return RESOLVABILITY_VERSION_V7
+
+
+def v7_depth_grid(
+    species: str, n_panel_genes: int | None, explicit: Sequence[int] | None = None
+) -> list[int]:
+    """Return a version-7 family's depth grid (v7.2).
+
+    Args:
+        species: ``human`` or ``mouse``.
+        n_panel_genes: Declared panel size.
+        explicit: An explicit grid (``AnnotationReferenceSpec.depth_grid``).
+
+    Returns:
+        The explicit grid; above 1,000 genes the 13-value grid; otherwise
+        the version-6 grid of the species and size.
+    """
+    from merxen.annotation.config import default_depth_grid
+
+    if explicit is not None:
+        return [int(value) for value in explicit]
+    if n_panel_genes is not None and n_panel_genes > V7_LARGE_PANEL_GENES:
+        return list(V7_LARGE_PANEL_GRID)
+    return default_depth_grid(species, n_panel_genes)  # type: ignore[arg-type]
+
+
+@dataclass(frozen=True)
+class EnsembleMember:
+    """One member of a version-7 draw ensemble (v7.3): a recipe and a seed.
+
+    Attributes:
+        recipe: The simulation recipe (its ``seed`` is the member seed).
+        role: ``emission`` (decides emission), ``reported`` (``clean``: the
+            upper bound) or ``stress`` (reported only; gate P's NP6).
+    """
+
+    recipe: SimulationRecipe
+    role: MemberRole
+
+    @property
+    def name(self) -> str:
+        """``<recipe>@<seed>``."""
+        return self.recipe.member
+
+    def to_json(self) -> dict[str, Any]:
+        """Return the member as JSON-native values (hashed for version 7)."""
+        return {"member": self.name, "role": self.role, "recipe": self.recipe.to_json()}
+
+
+def member_recipe(
+    name: str,
+    seed: int,
+    config: AnnotationResolvabilityConfig,
+    *,
+    table: Any | None = None,
+    table_rule: str = "restricted",
+    residual_sd_log2: float | None = None,
+) -> SimulationRecipe:
+    """Return the recipe of one version-7 member.
+
+    Args:
+        name: ``R1_contam_HO``, ``clean``, ``R3_measured_HO`` or
+            ``R1_xtissue_lung_stress``.
+        seed: The member seed (efficiency and per-cell keys).
+        config: Resolvability settings (sigma, spill fraction).
+        table: The ``sim_inputs.SimInputAsset`` of an R3 (``member``) or
+            stress (``stress``) recipe.
+        table_rule: R3 table rule.
+        residual_sd_log2: R3 residual SD (default 0.20 log2).
+
+    Returns:
+        The recipe.
+
+    Raises:
+        ResolvabilityError: For an unknown recipe or a missing table.
+    """
+    from merxen.annotation import sim_inputs as si
+
+    if name not in RECIPE_VERSIONS:
+        raise ResolvabilityError(f"unknown simulation recipe {name!r}")
+    version = RECIPE_VERSIONS[name]
+    if name == CLEAN_RECIPE:
+        return SimulationRecipe(CLEAN_RECIPE, version, None, 0.0, int(seed))
+    if name == DECISION_RECIPE:
+        return SimulationRecipe(
+            DECISION_RECIPE,
+            version,
+            config.gene_efficiency_sigma,
+            config.spill_fraction,
+            int(seed),
+        )
+    if table is None:
+        raise ResolvabilityError(f"recipe {name} needs its simulation-input table")
+    if name == R3_RECIPE:
+        if table.role != "member":
+            raise ResolvabilityError(f"{name} needs a member table, not {table.role}")
+        if table_rule not in si.TABLE_RULES:
+            raise ResolvabilityError(f"unknown R3 table rule {table_rule!r}")
+        return SimulationRecipe(
+            R3_RECIPE,
+            version,
+            None,
+            config.spill_fraction,
+            int(seed),
+            efficiency_source="measured",
+            efficiency_table=table.asset_id,
+            efficiency_table_sha256=table.sha256,
+            table_rule=table_rule,
+            residual_sd_log2=si.R3_RESIDUAL_SD_LOG2
+            if residual_sd_log2 is None
+            else float(residual_sd_log2),
+        )
+    if table.role != "stress":
+        raise ResolvabilityError(f"{name} needs a stress table, not {table.role}")
+    return SimulationRecipe(
+        LUNG_STRESS_RECIPE,
+        version,
+        config.gene_efficiency_sigma,
+        config.spill_fraction,
+        int(seed),
+        efficiency_source="xtissue_stress",
+        efficiency_table=table.asset_id,
+        efficiency_table_sha256=table.sha256,
+    )
+
+
+def default_member_seeds(
+    has_table: bool, *, comparator: bool = False
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Return the ``(R1 seeds, R3 seeds)`` of a version-7 ensemble (v7.3).
+
+    As amended on 2026-09-29 (pre-registration §22.3): eight emission
+    members, R1 x 6 + R3 x 2 where the family's species x chemistry has a
+    measured factor table, else R1 x 8. ``comparator`` returns the
+    comparator of the amended re-test of §21 (iii) instead, disjoint from
+    every production and stage-D member (never production).
+
+    Args:
+        has_table: Whether a measured ``member`` table exists (an R3 member).
+        comparator: Return the re-test's comparator seeds.
+
+    Returns:
+        R1 seeds and R3 seeds (the R3 seeds are empty without a table).
+    """
+    if comparator:
+        r1 = (
+            V7_COMPARATOR_R1_SEEDS_WITH_TABLE
+            if has_table
+            else V7_COMPARATOR_R1_SEEDS_WITHOUT_TABLE
+        )
+        return r1, V7_COMPARATOR_R3_SEEDS if has_table else ()
+    r1 = V7_R1_SEEDS_WITH_TABLE if has_table else V7_R1_SEEDS_WITHOUT_TABLE
+    return r1, V7_R3_SEEDS if has_table else ()
+
+
+def ensemble_members(
+    config: AnnotationResolvabilityConfig,
+    *,
+    species: str,
+    chemistry: str,
+    member_table: Any | None = None,
+    stress_table: Any | None = None,
+    r1_seeds: Sequence[int] | None = None,
+    r3_seeds: Sequence[int] | None = None,
+    table_rule: str = "restricted",
+    residual_sd_log2: float | None = None,
+) -> list[EnsembleMember]:
+    """Return a version-7 family's members (plan §8.3 v7.3 table, as amended).
+
+    Emission: eight members (amendment of 2026-09-29, pre-registration
+    §22.3) -- ``R1_contam_HO@0``, ``@6``-``@10`` plus ``R3_measured_HO@2``,
+    ``@3`` when the family's species x chemistry has a measured ``member``
+    table (Xenium Prime 5K mouse), else ``R1_contam_HO@0``, ``@6``-``@12``;
+    reported: ``clean@0``; stress (human Prime families with the lung ratio
+    table, reported only and never an emission member):
+    ``R1_xtissue_lung_stress@0``. R3 is one member, never the base (user
+    decision 3); ``R1@0`` is the pre-registered realisation. The version-6
+    families' diagnostic uses the same rule (no table: R1 x 8).
+
+    Args:
+        config: Resolvability settings.
+        species: The family's species.
+        chemistry: ``sim_inputs.resolve_chemistry`` result.
+        member_table: The family's ``member`` asset (``None``: no R3).
+        stress_table: The human lung ``stress`` asset (``None``: no stress).
+        r1_seeds: R1 member seeds (``None``: ``default_member_seeds``).
+        r3_seeds: R3 member seeds (``None``: ``default_member_seeds``);
+            ignored without a table.
+        table_rule: R3 table rule.
+        residual_sd_log2: R3 residual SD (``None``: 0.20 log2).
+
+    Returns:
+        Members: emission first (R1 seeds, then R3 seeds), then reported,
+        then stress.
+
+    Raises:
+        ResolvabilityError: For a member table of another species or
+            repeated seeds.
+    """
+    default_r1, default_r3 = default_member_seeds(member_table is not None)
+    r1 = tuple(int(seed) for seed in (default_r1 if r1_seeds is None else r1_seeds))
+    r3 = tuple(int(seed) for seed in (default_r3 if r3_seeds is None else r3_seeds))
+    for label, seeds in (("R1", r1), ("R3", r3)):
+        if len(set(seeds)) != len(seeds):
+            raise ResolvabilityError(f"{label} member seeds repeat: {list(seeds)}")
+    members = [
+        EnsembleMember(member_recipe(DECISION_RECIPE, seed, config), "emission")
+        for seed in r1
+    ]
+    if member_table is not None:
+        if member_table.species != species:
+            raise ResolvabilityError(
+                f"{member_table.asset_id} is a {member_table.species} table; "
+                f"factors never cross species ({species})"
+            )
+        members.extend(
+            EnsembleMember(
+                member_recipe(
+                    R3_RECIPE,
+                    seed,
+                    config,
+                    table=member_table,
+                    table_rule=table_rule,
+                    residual_sd_log2=residual_sd_log2,
+                ),
+                "emission",
+            )
+            for seed in r3
+        )
+    members.append(EnsembleMember(member_recipe(CLEAN_RECIPE, 0, config), "reported"))
+    if (
+        stress_table is not None
+        and species == "human"
+        and chemistry == "xenium_prime"
+        and stress_table.species == "human"
+    ):
+        members.append(
+            EnsembleMember(
+                member_recipe(
+                    LUNG_STRESS_RECIPE, V7_STRESS_SEED, config, table=stress_table
+                ),
+                "stress",
+            )
+        )
+    return members
+
+
+def parse_member_name(name: str) -> tuple[str, int]:
+    """Return ``(recipe, seed)`` of a member name ``<recipe>@<seed>``.
+
+    Raises:
+        ResolvabilityError: If the name has no ``@<seed>`` suffix.
+    """
+    recipe, separator, seed = str(name).rpartition("@")
+    if not separator or not recipe or not seed.lstrip("-").isdigit():
+        raise ResolvabilityError(f"{name!r} is not a member name <recipe>@<seed>")
+    return recipe, int(seed)
+
+
+def members_from_names(
+    names: Sequence[str],
+    config: AnnotationResolvabilityConfig,
+    *,
+    member_table: Any | None = None,
+    stress_table: Any | None = None,
+    table_rule: str = "restricted",
+    residual_sd_log2: float | None = None,
+    role: MemberRole = "emission",
+) -> list[EnsembleMember]:
+    """Return the members a bundle records by name (e.g. its emission members).
+
+    Profile mode and the diagnostics re-simulate a bundle's own members, so a
+    bundle built before the amendment of 2026-09-29 keeps its stage-D
+    members.
+
+    Args:
+        names: Member names (``resolvability_summary.json``
+            ``emission_members``).
+        config: Resolvability settings.
+        member_table: The ``member`` asset of R3 members.
+        stress_table: The ``stress`` asset of the lung stress member.
+        table_rule: R3 table rule.
+        residual_sd_log2: R3 residual SD.
+        role: The members' role.
+
+    Returns:
+        The members, in the order given.
+    """
+    members = []
+    for name in names:
+        recipe, seed = parse_member_name(name)
+        table = (
+            member_table
+            if recipe == R3_RECIPE
+            else stress_table
+            if recipe == LUNG_STRESS_RECIPE
+            else None
+        )
+        members.append(
+            EnsembleMember(
+                member_recipe(
+                    recipe,
+                    seed,
+                    config,
+                    table=table,
+                    table_rule=table_rule,
+                    residual_sd_log2=residual_sd_log2,
+                ),
+                role,
+            )
+        )
+    return members
+
+
+def member_efficiency(
+    recipe: SimulationRecipe,
+    genes: Sequence[str],
+    *,
+    registry: Mapping[str, Any] | None = None,
+) -> np.ndarray:
+    """Return a member's per-gene efficiency on a panel (test-cell columns).
+
+    ``lognormal``: ``gene_efficiency`` (the pre-registered draw of the seed);
+    ``measured``: ``sim_inputs.r3_efficiency`` on the recipe's table and
+    rule; ``xtissue_stress``: the lognormal draw of the seed times the lung
+    ratio (``sim_inputs.xtissue_stress_efficiency``).
+
+    Raises:
+        ResolvabilityError: For an unknown source, or a table whose sha256
+            differs from the recipe's.
+    """
+    from merxen.annotation import sim_inputs as si
+
+    names = [str(gene) for gene in genes]
+    if recipe.efficiency_source == "lognormal":
+        return gene_efficiency(len(names), recipe.gene_efficiency_sigma, recipe.seed)
+    if recipe.efficiency_source not in EFFICIENCY_SOURCES:
+        raise ResolvabilityError(
+            f"unknown efficiency source {recipe.efficiency_source!r}"
+        )
+    asset = si.get_asset(str(recipe.efficiency_table), registry)
+    if recipe.efficiency_table_sha256 not in (None, asset.sha256):
+        raise ResolvabilityError(
+            f"{recipe.member}: table {asset.asset_id} has sha256 {asset.sha256[:16]}, "
+            f"the recipe was built on {str(recipe.efficiency_table_sha256)[:16]}"
+        )
+    if recipe.efficiency_source == "measured":
+        result = si.r3_efficiency(
+            names,
+            si.efficiency_table(asset),
+            rule=str(recipe.table_rule or "restricted"),
+            seed=int(recipe.seed),
+            asset_id=asset.asset_id,
+            residual_sd_log2=float(
+                si.R3_RESIDUAL_SD_LOG2
+                if recipe.residual_sd_log2 is None
+                else recipe.residual_sd_log2
+            ),
+        )
+        return result.efficiency
+    base = gene_efficiency(len(names), recipe.gene_efficiency_sigma, recipe.seed)
+    efficiency, _measured = si.xtissue_stress_efficiency(
+        names, base, si.ratio_table(asset), seed=int(recipe.seed)
+    )
+    return efficiency
+
+
+def _exact_probabilities(
+    work: sparse.csr_matrix,
+    targets: np.ndarray | Sequence[float],
+    efficiency: np.ndarray,
+    *,
+    max_iter: int,
+    tolerance: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return each entry's row and keep probability ``min(1, s_row e_g)``.
+
+    The row scale ``s`` solves ``sum_g x_g min(1, s e_g) = min(target,
+    native)`` by fixed-point iteration (``s <- s * goal / expected``), each
+    row stopping once ``|ratio - 1| < tolerance`` or after ``max_iter``
+    steps; a row whose target reaches its native counts keeps every count.
+    """
+    n_rows = work.shape[0]
+    rows = np.repeat(np.arange(n_rows), np.diff(work.indptr))
+    counts = work.data
+    gene_eff = np.asarray(efficiency, dtype=np.float64)[work.indices]
+    native = np.bincount(rows, weights=counts, minlength=n_rows)
+    goal = np.minimum(np.asarray(targets, dtype=np.float64), native)
+    weighted = np.bincount(rows, weights=counts * gene_eff, minlength=n_rows)
+    scale = goal / np.maximum(weighted, 1e-12)
+    keep_all = goal >= native
+    active = ~keep_all & (goal > 0)
+    for _ in range(int(max_iter)):
+        if not active.any():
+            break
+        expected = np.bincount(
+            rows,
+            weights=counts * np.minimum(1.0, scale[rows] * gene_eff),
+            minlength=n_rows,
+        )
+        ratio = np.where(expected > 0, goal / np.maximum(expected, 1e-12), 1.0)
+        active &= ~(np.abs(ratio - 1.0) < tolerance)
+        scale = np.where(active, scale * ratio, scale)
+    # The fixed point contracts by the clipped share of the goal per step, so a
+    # row whose efficient genes carry most of its target may not converge in
+    # max_iter steps; solve its piecewise-linear equation exactly instead.
+    for row in np.flatnonzero(active):
+        start, stop = int(work.indptr[row]), int(work.indptr[row + 1])
+        scale[row] = _exact_row_scale(
+            counts[start:stop], gene_eff[start:stop], float(goal[row])
+        )
+    probability = np.clip(scale[rows] * gene_eff, 0.0, 1.0)
+    probability[keep_all[rows]] = 1.0
+    return rows, probability
+
+
+def _exact_row_scale(counts: np.ndarray, efficiency: np.ndarray, goal: float) -> float:
+    """Return ``s`` with ``sum_g x_g min(1, s e_g) = goal`` (0 < goal < sum x).
+
+    ``E(s)`` is piecewise linear and increasing: at ``s``, the genes with
+    ``s e_g >= 1`` keep every count. The breakpoints ``1 / e_g`` are sorted,
+    ``E`` is evaluated at each and the root is interpolated on its segment.
+    """
+    breakpoints = 1.0 / efficiency
+    order = np.argsort(breakpoints, kind="stable")
+    x = counts[order]
+    e = efficiency[order]
+    b = breakpoints[order]
+    total_weight = float(np.sum(x * e))
+    clipped = np.cumsum(x)
+    unclipped_weight = total_weight - np.cumsum(x * e)
+    at_breakpoint = clipped + b * np.maximum(unclipped_weight, 0.0)
+    k = int(np.searchsorted(at_breakpoint, goal, side="left"))
+    if k >= len(x):
+        return float(b[-1])
+    fixed = float(clipped[k - 1]) if k > 0 else 0.0
+    weight = total_weight - (float(np.sum(x[:k] * e[:k])) if k > 0 else 0.0)
+    return (goal - fixed) / max(weight, 1e-300)
+
+
+def _exact_work(matrix: sparse.csr_matrix) -> sparse.csr_matrix:
+    from scipy import sparse as sp
+
+    work = sp.csr_matrix(matrix, dtype=np.float64, copy=True)
+    work.sum_duplicates()
+    work.eliminate_zeros()
+    return work
+
+
+def thin_rows_exact(
+    matrix: sparse.csr_matrix,
+    targets: np.ndarray | Sequence[float],
+    efficiency: np.ndarray,
+    keys: Sequence[int],
+    *,
+    max_iter: int = THIN_MAX_ITER,
+    tolerance: float = THIN_TOLERANCE,
+) -> sparse.csr_matrix:
+    """Thin each row binomially to an exact expected total (v7.2).
+
+    The row scale ``s`` solves ``sum_g x_g min(1, s e_g) = min(target,
+    native)`` by fixed-point iteration (``s <- s * goal / expected``, at most
+    ``max_iter`` steps, each row stopping once ``|ratio - 1| < tolerance``);
+    then ``Binomial(x_g, min(1, s e_g))`` from the row's own generator seeded
+    by its key, over its entries in gene order. Version 6's ``_thin_rows``
+    uses the unclipped scale and falls 3-8% short once efficient genes clip
+    at ``p = 1`` (``5k_real/sim/REPORT.txt`` §1). A row whose target reaches
+    its native counts keeps every count. A row's result depends on nothing
+    but the row, its target and its key; counts are never raised.
+
+    Args:
+        matrix: Rows x genes counts.
+        targets: Expected total per row.
+        efficiency: Per-gene efficiency (the matrix's columns).
+        keys: One ``draw_key`` per row.
+        max_iter: Fixed-point steps.
+        tolerance: Relative stopping tolerance.
+
+    Returns:
+        The thinned counts (CSR, float64).
+
+    Raises:
+        ResolvabilityError: If the keys do not match the rows.
+    """
+    from scipy import sparse as sp
+
+    work = _exact_work(matrix)
+    if len(keys) != work.shape[0]:
+        raise ResolvabilityError(
+            f"thinning: {len(keys)} draw keys for {work.shape[0]} rows"
+        )
+    _rows, probability = _exact_probabilities(
+        work, targets, efficiency, max_iter=max_iter, tolerance=tolerance
+    )
+    counts = work.data.astype(np.int64)
+    thinned = np.zeros(len(counts), dtype=np.int64)
+    indptr = work.indptr
+    for row, key in enumerate(keys):
+        start, stop = int(indptr[row]), int(indptr[row + 1])
+        if stop > start:
+            thinned[start:stop] = np.random.default_rng(int(key)).binomial(
+                counts[start:stop], probability[start:stop]
+            )
+    result = sp.csr_matrix(
+        (thinned.astype(np.float64), work.indices.copy(), work.indptr.copy()),
+        shape=work.shape,
+    )
+    result.eliminate_zeros()
+    return result
+
+
+def expected_thinned_totals(
+    matrix: sparse.csr_matrix,
+    targets: np.ndarray | Sequence[float],
+    efficiency: np.ndarray,
+    *,
+    max_iter: int = THIN_MAX_ITER,
+    tolerance: float = THIN_TOLERANCE,
+) -> np.ndarray:
+    """Return the expected totals ``thin_rows_exact`` draws (no sampling).
+
+    Args:
+        matrix: Rows x genes counts.
+        targets: Expected total per row.
+        efficiency: Per-gene efficiency.
+        max_iter: Fixed-point steps.
+        tolerance: Relative stopping tolerance.
+
+    Returns:
+        ``sum_g x_g p_g`` per row.
+    """
+    work = _exact_work(matrix)
+    rows, probability = _exact_probabilities(
+        work, targets, efficiency, max_iter=max_iter, tolerance=tolerance
+    )
+    return np.bincount(rows, weights=work.data * probability, minlength=work.shape[0])
+
+
+def host_target(depth: float, spill_fraction: float) -> float:
+    """Return the host share of a version-7 grid total: ``D / (1 + s)``."""
+    return float(depth) / (1.0 + float(spill_fraction))
+
+
+def thin_and_contaminate_v7(
+    test: HeldOutCells,
+    depths: Sequence[int],
+    recipe: SimulationRecipe,
+    *,
+    efficiency: np.ndarray | None = None,
+    registry: Mapping[str, Any] | None = None,
+) -> SimulatedQuery:
+    """Simulate test cells on a version-7 grid of TOTAL counts (v7.2).
+
+    For grid value ``D`` and spill fraction ``s``: the host target is ``h =
+    D / (1 + s)`` and the spill ``s h`` (``s = 0.25``: 0.8 D + 0.2 D); hosts
+    are the test cells whose native counts reach ``h`` (``clean``: ``D``);
+    the spill partner is the rendezvous choice among the cells of another
+    spill group whose native counts reach ``s h`` (version 5's keys: the
+    recipe's seed, name and version, the host cell id and ``D``); host and
+    spill are thinned with ``thin_rows_exact``. A simulated cell's bin is
+    ``D``; its realised total is recorded (``total_counts``). Version 6's
+    ``thin_and_contaminate`` is unchanged.
+
+    Args:
+        test: Test cells (unique cell ids).
+        depths: The version-7 grid.
+        recipe: The member's recipe.
+        efficiency: Per-gene efficiency (default: ``member_efficiency``).
+        registry: Simulation-input registry for table recipes.
+
+    Returns:
+        The simulated query (obs adds ``host_target`` and ``member``).
+
+    Raises:
+        ResolvabilityError: If the cell ids are not unique, or a spill recipe
+            has cells of a single group.
+    """
+    from scipy import sparse as sp
+
+    if not test.obs.index.is_unique:
+        raise ResolvabilityError(
+            "test cell ids must be unique (they key the simulation draws)"
+        )
+    gene_eff = (
+        member_efficiency(recipe, test.genes, registry=registry)
+        if efficiency is None
+        else np.asarray(efficiency, dtype=np.float64)
+    )
+    if len(gene_eff) != len(test.genes):
+        raise ResolvabilityError(
+            f"{recipe.member}: {len(gene_eff)} efficiencies for {len(test.genes)} genes"
+        )
+    native = test.native_counts
+    groups = test.obs[SPILL_GROUP_COLUMN].astype(str).to_numpy()
+    cell_ids = test.obs.index.astype(str).to_numpy()
+    counts = sp.csr_matrix(test.counts)
+    candidate_keys = np.array(
+        [_key64(draw_key(DRAW_STREAM_CANDIDATE, cell_id)) for cell_id in cell_ids],
+        dtype=np.uint64,
+    )
+    spill_fraction = float(recipe.spill_fraction)
+    blocks: list[sp.csr_matrix] = []
+    frames: list[pd.DataFrame] = []
+    n_by_depth: dict[int, int] = {}
+    for depth in sorted(int(value) for value in depths):
+        target = host_target(depth, spill_fraction)
+        hosts = np.flatnonzero(native >= target)
+        n_by_depth[depth] = int(len(hosts))
+        if len(hosts) == 0:
+            continue
+        host_ids = [str(cell_id) for cell_id in cell_ids[hosts]]
+        host_counts = thin_rows_exact(
+            counts[hosts],
+            np.full(len(hosts), target),
+            gene_eff,
+            [
+                cell_draw_key(recipe, cell_id, depth, DRAW_STREAM_THIN)
+                for cell_id in host_ids
+            ],
+        )
+        partner_ids = np.full(len(hosts), "", dtype=object)
+        spill = sp.csr_matrix(host_counts.shape, dtype=np.float64)
+        if spill_fraction > 0:
+            amount = spill_fraction * target
+            donors = np.flatnonzero(native >= amount)
+            partners = np.empty(len(hosts), dtype=np.int64)
+            host_keys = np.array(
+                [
+                    _key64(cell_draw_key(recipe, cell_id, depth, DRAW_STREAM_PARTNER))
+                    for cell_id in host_ids
+                ],
+                dtype=np.uint64,
+            )
+            for group in np.unique(groups[hosts]):
+                is_host = groups[hosts] == group
+                candidates = donors[groups[donors] != group]
+                if len(candidates) == 0:
+                    raise ResolvabilityError(
+                        f"no spill donor outside group {group!r} at depth {depth}"
+                    )
+                partners[is_host] = candidates[
+                    rendezvous_choice(host_keys[is_host], candidate_keys[candidates])
+                ]
+            spill = thin_rows_exact(
+                counts[partners],
+                np.full(len(hosts), amount),
+                gene_eff,
+                [
+                    cell_draw_key(recipe, cell_id, depth, DRAW_STREAM_SPILL)
+                    for cell_id in host_ids
+                ],
+            )
+            partner_ids = cell_ids[partners].astype(object)
+        simulated = (host_counts + spill).tocsr()
+        blocks.append(simulated)
+        frames.append(
+            pd.DataFrame(
+                {
+                    "cell_id": cell_ids[hosts],
+                    "depth": np.full(len(hosts), depth, dtype=np.int32),
+                    "partner_id": partner_ids,
+                    "host_counts": np.asarray(host_counts.sum(axis=1)).ravel(),
+                    "spill_counts": np.asarray(spill.sum(axis=1)).ravel(),
+                    "total_counts": np.asarray(simulated.sum(axis=1)).ravel(),
+                    "host_target": np.full(len(hosts), target),
+                    "member": recipe.member,
+                },
+                index=[simulated_id(cell_id, depth) for cell_id in cell_ids[hosts]],
+            )
+        )
+    columns = [
+        "cell_id",
+        "depth",
+        "partner_id",
+        "host_counts",
+        "spill_counts",
+        "total_counts",
+        "host_target",
+        "member",
+    ]
+    if blocks:
+        matrix = sp.vstack(blocks).tocsr()
+        obs = pd.concat(frames)
+    else:
+        matrix = sp.csr_matrix((0, len(test.genes)), dtype=np.float64)
+        obs = pd.DataFrame(columns=columns)
+    return SimulatedQuery(
+        recipe=recipe,
+        counts=matrix,
+        genes=list(test.genes),
+        obs=obs,
+        n_by_depth=n_by_depth,
+    )
+
+
+def v7_simulation_payload(
+    *,
+    members: Sequence[EnsembleMember],
+    assets: Iterable[Any],
+    chemistry: Mapping[str, Any] | str,
+    depth_grid: Sequence[int],
+    top_up: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return what a version-7 self-map's ``build_hash`` holds (v7.1).
+
+    Every version-7 input: the version, the ensemble rule's version
+    (``ENSEMBLE_RULE_VERSION``: 2 since the amendment of 2026-09-29, so no
+    bundle decided by the stage A-D rule is reused), the members (recipes
+    with their table sha256), every simulation-input asset used (id,
+    version, sha256), the chemistry, the grid, the top-up rule and the
+    simulation conventions. A version-6 bundle's payload never holds it, so
+    version-6 ``build_hash`` values are unchanged (pre-registration §21 (i)).
+
+    Args:
+        members: The ensemble members.
+        assets: The ``SimInputAsset`` objects used (tables, profile, lists).
+        chemistry: ``ChemistryResolution.to_json()`` or the chemistry name.
+        depth_grid: The version-7 grid.
+        top_up: The test-set top-up rule (v7.6), when it applies.
+
+    Returns:
+        JSON-native payload.
+    """
+    from merxen.annotation import sim_inputs as si
+
+    return {
+        "resolvability_version": RESOLVABILITY_VERSION_V7,
+        "ensemble_rule_version": ENSEMBLE_RULE_VERSION,
+        "members": [member.to_json() for member in members],
+        "assets": si.asset_hashes(assets),
+        "chemistry": dict(chemistry) if isinstance(chemistry, Mapping) else chemistry,
+        "depth_grid": [int(value) for value in depth_grid],
+        "top_up": None if top_up is None else dict(top_up),
+        "conventions": {
+            "thinning": "exact_total",
+            "thin_max_iter": THIN_MAX_ITER,
+            "thin_tolerance": THIN_TOLERANCE,
+            "grid_values": "total_counts",
+            "host_target": "D / (1 + spill_fraction)",
+        },
+    }
+
+
+# --------------------------------------------------------------------------
+# Resolvability version 7: ensemble decisions (M3c; §8.3 v7.7-v7.10)
+#
+# Every emission member is decided on its own by the version-6 rule plus the
+# saturated-bp rule (``decide`` with ``saturated_bp_share``); the ensemble then
+# judges the union of the members' rows of each (level, class, depth) (or the
+# ensemble deep pool) once, counting each test cell once (E1), and requires the
+# members to agree (E2: unanimous, or the member spread within sampling
+# error). The monotone fill (v7.9) runs last; floors and trust come from the
+# decisions before it.
+
+MEMBER_COLUMN: Final = "member"
+MEMBER_ROLE_COLUMN: Final = "member_role"
+ENSEMBLE_RECIPE: Final = "ensemble"
+CLASS_DEPTH_FILE: Final = "resolvability_class_depth.parquet"
+REASON_ENSEMBLE_PREFIX: Final = "ensemble_"
+REASON_ENSEMBLE_SPREAD: Final = "ensemble_spread"
+# The spread route's margin (amendment of 2026-09-29, pre-registration §22.3):
+# E1 and the spread limit pass, the pooled Wilson bound does not clear its
+# limit by the margin.
+REASON_ENSEMBLE_SPREAD_MARGIN: Final = "ensemble_spread_margin"
+REASONS_ENSEMBLE_E2: Final[tuple[str, ...]] = (
+    REASON_ENSEMBLE_SPREAD,
+    REASON_ENSEMBLE_SPREAD_MARGIN,
+)
+# The ensemble rule's version in a version-7 build hash: 1 = stages A-D; 2 =
+# the amendment of 2026-09-29 (eight members, the spread margin).
+ENSEMBLE_RULE_VERSION: Final = 2
+# The spread margin of a bundle whose ensemble settings do not record one
+# (built before the amendment): it re-derives its decisions as built.
+SPREAD_MARGIN_BEFORE_AMENDMENT: Final = 0.0
+REASON_TOO_FEW_FIT_CELLS: Final = "too_few_fit_cells"
+RULE_UNANIMOUS: Final = "unanimous"
+RULE_SPREAD: Final = "spread"
+FILL_OWN: Final = "own"
+FILL_POOL: Final = "pool"
+V7_DECISION_COLUMNS: Final[tuple[str, ...]] = (
+    "ensemble_rule",
+    "ensemble_status",
+    "ensemble_reason",
+    "member_emitted",
+    "member_statuses",
+    "member_t_star",
+    "member_precision_min",
+    "member_precision_max",
+    "member_coverage_min",
+    "member_coverage_max",
+    "member_min_n",
+    "member_spread",
+    "spread_limit",
+    "spread_ok",
+    "spread_se",
+    "wilson_clearance",
+    "spread_margin_ok",
+    "n_rows",
+    "monotone_filled",
+    "fill_source",
+    "fill_precision",
+    "fill_coverage",
+    "neuronal",
+    "nonneuronal_high_depth",
+)
+V7_TEXT_COLUMNS: Final[tuple[str, ...]] = (
+    "threshold_source",
+    "ensemble_rule",
+    "ensemble_status",
+    "ensemble_reason",
+    "member_statuses",
+    "member_t_star",
+    "fill_source",
+)
+V7_BOOL_COLUMNS: Final[tuple[str, ...]] = (
+    "saturated_bp",
+    "member_emitted",
+    "spread_ok",
+    "spread_margin_ok",
+    "monotone_filled",
+    "nonneuronal_high_depth",
+)
+ENSEMBLE_DECISION_COLUMNS: Final[tuple[str, ...]] = (
+    *DECISION_COLUMNS,
+    *SATURATED_COLUMNS,
+    *V7_DECISION_COLUMNS,
+)
+
+NeuronalOf = Mapping[str, bool | None] | Callable[[str], bool | None]
+
+
+@dataclass(frozen=True)
+class EnsembleSettings:
+    """The version-7 ensemble rules (§3.7; pre-registration §21.3, tightenable).
+
+    Attributes:
+        spread_floor: E2's smallest allowed member spread (0.03).
+        spread_se_multiplier: E2's spread limit in standard errors (3.5).
+        member_min_confident: Confident check-half calls (Kish n) each member
+            needs for the spread test (10).
+        saturated_bp_share: Fit-half share at ``bp = 1`` above which a set
+            without ``t*`` is judged at the cap (0.90; v7.8).
+        monotone_depth: Apply the monotone fill (v7.9).
+        nonneuronal_monotone_max_depth: Non-neuronal bins at or above this
+            depth are never filled (1,000).
+        spread_wilson_margin_se: The spread route of E2 needs the pooled
+            Wilson bound to clear ``target - wilson_margin`` by this many
+            standard errors of the pooled precision (1; amendment of
+            2026-09-29, pre-registration §22.3; 0: no margin, the rule of
+            stages A-D).
+    """
+
+    spread_floor: float = 0.03
+    spread_se_multiplier: float = 3.5
+    member_min_confident: int = 10
+    saturated_bp_share: float = 0.90
+    monotone_depth: bool = True
+    nonneuronal_monotone_max_depth: int = 1000
+    spread_wilson_margin_se: float = 1.0
+
+    def spread_limit(self, p_bar: float, n_bar: float) -> float:
+        """Return ``max(floor, multiplier * sqrt(p (1 - p) / n))`` (NP4's statistic).
+
+        Args:
+            p_bar: Mean member precision.
+            n_bar: Mean member Kish n.
+
+        Returns:
+            The limit (the floor when ``n_bar`` is not positive).
+        """
+        if not n_bar > 0 or not math.isfinite(p_bar):
+            return float(self.spread_floor)
+        p = min(max(float(p_bar), 0.0), 1.0)
+        return max(
+            float(self.spread_floor),
+            float(self.spread_se_multiplier) * math.sqrt(p * (1.0 - p) / n_bar),
+        )
+
+    @classmethod
+    def from_config(cls, resolvability: Any) -> EnsembleSettings:
+        """Return the settings of an ``AnnotationResolvabilityConfig``."""
+        defaults = cls()
+        return cls(
+            spread_floor=float(
+                getattr(resolvability, "ensemble_spread_floor", defaults.spread_floor)
+            ),
+            spread_se_multiplier=float(
+                getattr(
+                    resolvability,
+                    "ensemble_spread_se_multiplier",
+                    defaults.spread_se_multiplier,
+                )
+            ),
+            member_min_confident=int(
+                getattr(
+                    resolvability,
+                    "ensemble_member_min_confident",
+                    defaults.member_min_confident,
+                )
+            ),
+            saturated_bp_share=float(
+                getattr(
+                    resolvability, "saturated_bp_share", defaults.saturated_bp_share
+                )
+            ),
+            monotone_depth=bool(
+                getattr(resolvability, "monotone_depth", defaults.monotone_depth)
+            ),
+            nonneuronal_monotone_max_depth=int(
+                getattr(
+                    resolvability,
+                    "nonneuronal_monotone_max_depth",
+                    defaults.nonneuronal_monotone_max_depth,
+                )
+            ),
+            spread_wilson_margin_se=float(
+                getattr(
+                    resolvability,
+                    "ensemble_spread_wilson_margin_se",
+                    defaults.spread_wilson_margin_se,
+                )
+            ),
+        )
+
+    @classmethod
+    def from_json(cls, payload: Mapping[str, Any] | None) -> EnsembleSettings:
+        """Rebuild the settings from ``to_json`` output (defaults for gaps).
+
+        A bundle built before the amendment of 2026-09-29 records no spread
+        margin and gets ``SPREAD_MARGIN_BEFORE_AMENDMENT`` (0), so its
+        decisions re-derive as built.
+        """
+        fields_ = cls.__dataclass_fields__
+        values = {k: v for k, v in dict(payload or {}).items() if k in fields_}
+        values.setdefault("spread_wilson_margin_se", SPREAD_MARGIN_BEFORE_AMENDMENT)
+        return cls(**values)
+
+    def spread_margin_ok(self, wilson_clearance: float, standard_error: float) -> bool:
+        """Return whether a set may use E2's spread route (pre-registration §22.3).
+
+        Args:
+            wilson_clearance: ``L - (target - wilson_margin)``, the pooled
+                Wilson bound's clearance of its E1 limit.
+            standard_error: ``pooled_standard_error`` of the set.
+
+        Returns:
+            True without a margin (0); else whether the clearance reaches
+            ``spread_wilson_margin_se`` standard errors (float tolerance).
+        """
+        if not self.spread_wilson_margin_se > 0:
+            return True
+        if not (math.isfinite(wilson_clearance) and math.isfinite(standard_error)):
+            return False
+        return bool(
+            wilson_clearance
+            >= float(self.spread_wilson_margin_se) * standard_error - _TOLERANCE
+        )
+
+    def to_json(self) -> dict[str, Any]:
+        """Return the settings as JSON."""
+        return {name: getattr(self, name) for name in self.__dataclass_fields__}
+
+
+def _neuronal(neuronal: NeuronalOf | None, cls: str) -> bool | None:
+    if neuronal is None:
+        return None
+    if isinstance(neuronal, Mapping):
+        value = neuronal.get(str(cls))
+    else:
+        value = neuronal(str(cls))
+    return None if value is None else bool(value)
+
+
+@dataclass(frozen=True)
+class _SetArrays:
+    """The rows of one tested set as arrays (every member's calls)."""
+
+    bp: np.ndarray
+    correct: np.ndarray
+    weight: np.ndarray
+    half: np.ndarray
+    member: np.ndarray
+    cell: np.ndarray
+
+    @classmethod
+    def of(cls, frame: pd.DataFrame | None, trim_factor: float) -> _SetArrays | None:
+        if frame is None or len(frame) == 0:
+            return None
+        return cls(
+            bp=frame["bp"].to_numpy(np.float64),
+            correct=frame["correct"].to_numpy(bool).astype(np.float64),
+            weight=trim_weights(frame["_weight"].to_numpy(np.float64), trim_factor),
+            half=frame["half"].to_numpy(np.int8),
+            member=frame["_member"].to_numpy(np.int64),
+            cell=frame["_cell"].to_numpy(np.int64),
+        )
+
+    def __len__(self) -> int:
+        return len(self.bp)
+
+    def select(self, mask: np.ndarray) -> _SetArrays:
+        return _SetArrays(
+            bp=self.bp[mask],
+            correct=self.correct[mask],
+            weight=self.weight[mask],
+            half=self.half[mask],
+            member=self.member[mask],
+            cell=self.cell[mask],
+        )
+
+    def check_mask(self, regime: Regime, settings: RuleSettings) -> np.ndarray:
+        """The rows a regime checks: all (validated), else the check half."""
+        if regime == "validated" or not settings.split_halves:
+            return np.ones(len(self.bp), dtype=bool)
+        return np.asarray(self.half == 1, dtype=bool)
+
+    def fit_mask(self, settings: RuleSettings) -> np.ndarray:
+        mask = (
+            self.half == 0
+            if settings.split_halves
+            else np.ones(len(self.bp), dtype=bool)
+        )
+        return np.asarray(mask & np.isfinite(self.bp) & (self.weight > 0), dtype=bool)
+
+
+def distinct_cell_stats(
+    bp: np.ndarray,
+    correct: np.ndarray,
+    weights: np.ndarray,
+    cells: np.ndarray,
+    threshold: float | None,
+) -> CheckStats:
+    """Return a pooled set's statistics with each test cell counted once (v7.7).
+
+    The members re-simulate the same test cells, which add no test-cell
+    information: ``n_called`` and ``n_confident`` count distinct test cells,
+    the precision and coverage are weighted over every (member, cell) row,
+    and the Wilson bound uses ``n_effective = Kish n x distinct / rows`` (the
+    distinct count when unweighted).
+
+    Args:
+        bp: bp of the set's rows.
+        correct: Their correctness (0 / 1).
+        weights: Their weights (trimmed).
+        cells: The test cell of each row (any hashable codes).
+        threshold: The applied threshold (``None``: nothing is confident).
+
+    Returns:
+        The statistics.
+    """
+    positive = np.asarray(weights, dtype=np.float64) > 0
+    n_called = int(np.unique(cells[positive]).size) if positive.any() else 0
+    if threshold is None or n_called == 0:
+        return CheckStats(threshold, n_called, 0, 0.0, math.nan, math.nan, 0.0)
+    accepted = meets_threshold(bp, threshold) & positive
+    accepted_weights = weights[accepted]
+    total = float(accepted_weights.sum())
+    called_total = float(weights[positive].sum())
+    if total <= 0:
+        return CheckStats(threshold, n_called, 0, 0.0, math.nan, math.nan, 0.0)
+    distinct = int(np.unique(cells[accepted]).size)
+    rows = int(accepted.sum())
+    precision = float((accepted_weights * correct[accepted]).sum()) / total
+    n_effective = kish_effective_n(accepted_weights) * distinct / rows
+    return CheckStats(
+        threshold=threshold,
+        n_called=n_called,
+        n_confident=distinct,
+        n_effective=n_effective,
+        precision=precision,
+        wilson_lb=wilson_lower_bound(precision, n_effective),
+        coverage=total / called_total if called_total > 0 else 0.0,
+        max_weight_share=float(accepted_weights.max()) / total,
+    )
+
+
+def pooled_standard_error(precision: float, n_effective: float) -> float:
+    """Return ``sqrt(p (1 - p) / n_eff)``, the SE of a pooled set's precision.
+
+    The binomial standard error of the pooled point precision on the
+    effective n of its Wilson bound (Kish n x distinct test cells / rows; the
+    distinct confidently called test cells when unweighted), NP4's statistic
+    applied to the pooled set (amendment of 2026-09-29, pre-registration
+    §22.3). 0 when ``p`` is 0 or 1.
+
+    Args:
+        precision: The pooled point precision at the applied threshold.
+        n_effective: Its effective n.
+
+    Returns:
+        The standard error (``nan`` without a precision or a positive n).
+    """
+    if not (math.isfinite(precision) and n_effective > 0):
+        return math.nan
+    p = min(max(float(precision), 0.0), 1.0)
+    return math.sqrt(p * (1.0 - p) / float(n_effective))
+
+
+def member_spread(
+    precisions: Sequence[float],
+    effective_n: Sequence[float],
+    ensemble: EnsembleSettings,
+) -> tuple[float, float, bool]:
+    """Return ``(spread, limit, within)`` of E2 (v7.7).
+
+    Args:
+        precisions: Each emission member's check-half precision at the
+            ensemble's threshold (``nan``: no confident call).
+        effective_n: Each member's Kish n of those confident calls.
+        ensemble: The ensemble settings.
+
+    Returns:
+        ``max p - min p``, the limit ``max(floor, k * sqrt(p (1 - p) / n))``
+        on the means, and whether every member has ``member_min_confident``
+        calls and the spread is within the limit.
+    """
+    p = np.asarray(precisions, dtype=np.float64)
+    n = np.asarray(effective_n, dtype=np.float64)
+    if not len(p) or not np.all(np.isfinite(p)):
+        return math.nan, float(ensemble.spread_floor), False
+    spread = float(p.max() - p.min())
+    limit = ensemble.spread_limit(float(p.mean()), float(n.mean()))
+    enough = bool(np.all(n >= ensemble.member_min_confident - _TOLERANCE))
+    return spread, limit, enough and spread <= limit + _TOLERANCE
+
+
+def _set_records(
+    arrays: _SetArrays | None,
+    meta: LevelMeta,
+    depth: int,
+    settings: RuleSettings,
+    ensemble: EnsembleSettings,
+    base: dict[str, Any],
+    n_members: int,
+) -> dict[str, dict[str, Any]]:
+    """Judge one ensemble tested set (a bin's pooled rows or a deep pool) per regime.
+
+    E1's statistics (``distinct_cell_stats``) at ``t*_pool`` (the isotonic
+    fit on every member's fit-half rows; the saturated cap, v7.8; the default
+    in the validated regime) and each member's precision, coverage and Kish
+    n there (E2's spread). The E2 unanimity is per bin (``_verdict``).
+    """
+    records: dict[str, dict[str, Any]] = {}
+    if arrays is None:
+        for regime in REGIMES:
+            records[regime] = {
+                **base,
+                "regime": regime,
+                "target": settings.target(regime, meta.base_target, depth),
+                "threshold": None,
+                "t_star": None,
+                "threshold_source": None,
+                "saturated_bp": False,
+                "saturated_share": math.nan,
+                "n_called": 0,
+                "n_fit": 0,
+                "n_confident": 0,
+                "n_rows": 0,
+                "e1_reason": "no_calls",
+                "spread_ok": False,
+                "spread_se": math.nan,
+                "wilson_clearance": math.nan,
+                "spread_margin_ok": False,
+                "would_raise": False,
+                "would_raise_evaluable": False,
+            }
+        return records
+    fit_mask = arrays.fit_mask(settings)
+    n_fit = int(np.unique(arrays.cell[fit_mask]).size) if fit_mask.any() else 0
+    fit: IsotonicFit | None = None
+    if n_fit >= settings.min_cells_per_bin:
+        fit = isotonic_fit(
+            arrays.bp[fit_mask], arrays.correct[fit_mask], arrays.weight[fit_mask]
+        )
+    saturated_share = (
+        saturated_bp_fraction(arrays.bp[fit_mask]) if fit is not None else math.nan
+    )
+    at_default = distinct_cell_stats(
+        arrays.bp, arrays.correct, arrays.weight, arrays.cell, meta.default_threshold
+    )
+    g_default = (
+        float(fit.predict(meta.default_threshold)) if fit is not None else math.nan
+    )
+    for regime in REGIMES:
+        target = settings.target(regime, meta.base_target, depth)
+        t_star = local_threshold(
+            fit,
+            default=meta.default_threshold,
+            target=target,
+            cap=settings.threshold_cap,
+        )
+        saturated = False
+        if regime == "validated":
+            applied: float | None = meta.default_threshold
+        else:
+            applied = t_star
+            saturated = (
+                t_star is None
+                and fit is not None
+                and saturated_share > ensemble.saturated_bp_share
+            )
+            if saturated:
+                applied = settings.threshold_cap
+        check = arrays.select(arrays.check_mask(regime, settings))
+        stats = distinct_cell_stats(
+            check.bp, check.correct, check.weight, check.cell, applied
+        )
+        e1_reason = _rule_pass(stats, target, settings)
+        if fit is None and regime != "validated":
+            e1_reason = REASON_TOO_FEW_FIT_CELLS
+        precisions: list[float] = []
+        effective: list[float] = []
+        coverages: list[float] = []
+        for code in range(n_members):
+            mine = check.select(check.member == code)
+            member_stats = check_threshold(mine.bp, mine.correct, mine.weight, applied)
+            precisions.append(member_stats.precision)
+            effective.append(member_stats.n_effective)
+            coverages.append(member_stats.coverage)
+        spread, limit, within = member_spread(precisions, effective, ensemble)
+        # The spread route's margin (pre-registration §22.3): the pooled
+        # Wilson bound's clearance of its E1 limit, in SE of the precision.
+        standard_error = pooled_standard_error(stats.precision, stats.n_effective)
+        clearance = float(stats.wilson_lb) - (target - settings.wilson_margin)
+        finite_p = [value for value in precisions if math.isfinite(value)]
+        n_rows = (
+            int((meets_threshold(check.bp, applied) & (check.weight > 0)).sum())
+            if applied is not None
+            else 0
+        )
+        records[regime] = {
+            **base,
+            "regime": regime,
+            "target": target,
+            "threshold": applied,
+            "t_star": t_star,
+            "threshold_source": _threshold_source(regime, applied, saturated),
+            "saturated_bp": bool(saturated),
+            "saturated_share": saturated_share,
+            "would_raise": bool(
+                fit is not None
+                and (t_star is None or t_star > meta.default_threshold + _TOLERANCE)
+            ),
+            "would_raise_evaluable": fit is not None,
+            "check_set": "all"
+            if regime == "validated" or not settings.split_halves
+            else "check_half",
+            "n_called": stats.n_called,
+            "n_fit": n_fit,
+            "n_confident": stats.n_confident,
+            "n_effective": stats.n_effective,
+            "max_weight_share": stats.max_weight_share,
+            "precision": stats.precision,
+            "wilson_lb": stats.wilson_lb,
+            "coverage": stats.coverage,
+            "g_at_default": g_default,
+            "precision_at_default": at_default.precision,
+            "n_rows": n_rows,
+            "e1_reason": e1_reason,
+            "member_precision_min": min(finite_p) if finite_p else math.nan,
+            "member_precision_max": max(finite_p) if finite_p else math.nan,
+            "member_coverage_min": float(np.min(coverages)) if coverages else math.nan,
+            "member_coverage_max": float(np.max(coverages)) if coverages else math.nan,
+            "member_min_n": float(np.min(effective)) if effective else math.nan,
+            "member_spread": spread,
+            "spread_limit": limit,
+            "spread_ok": bool(within),
+            "spread_se": standard_error,
+            "wilson_clearance": clearance,
+            "spread_margin_ok": ensemble.spread_margin_ok(clearance, standard_error),
+        }
+    return records
+
+
+def _ensemble_judged(record: Mapping[str, Any], settings: RuleSettings) -> bool:
+    """``_judged`` for an ensemble set: distinct test cells, E1's reason."""
+    if int(record.get("n_confident") or 0) >= settings.min_confident_n:
+        return True
+    return (
+        record.get("e1_reason") == REASON_NO_LOCAL_THRESHOLD
+        and int(record.get("n_called") or 0) >= settings.min_confident_n
+    )
+
+
+def _verdict(record: Mapping[str, Any], unanimous: bool) -> dict[str, Any]:
+    """E1 and E2 of one tested set: its status, reason and ensemble rule (v7.7).
+
+    E1 first; then E2's unanimous route (every emission member emits the
+    bin) or its spread route, which needs the spread within its limit and,
+    since the amendment of 2026-09-29 (pre-registration §22.3), the pooled
+    Wilson bound clearing its limit by the margin (``spread_margin_ok``,
+    computed by ``_set_records``). Used for a bin's own set, the pool a
+    pooled bin takes and the pool whose failure withdraws the judged bins.
+    """
+    e1 = record.get("e1_reason")
+    if e1 is not None:
+        return {
+            "status": STATUS_NOT_RESOLVABLE,
+            "reason": f"{REASON_ENSEMBLE_PREFIX}{e1}",
+            "ensemble_rule": None,
+        }
+    if unanimous:
+        return {
+            "status": STATUS_EMITTED,
+            "reason": None,
+            "ensemble_rule": RULE_UNANIMOUS,
+        }
+    if not record.get("spread_ok"):
+        return {
+            "status": STATUS_NOT_RESOLVABLE,
+            "reason": REASON_ENSEMBLE_SPREAD,
+            "ensemble_rule": None,
+        }
+    if not record.get("spread_margin_ok"):
+        return {
+            "status": STATUS_NOT_RESOLVABLE,
+            "reason": REASON_ENSEMBLE_SPREAD_MARGIN,
+            "ensemble_rule": None,
+        }
+    return {"status": STATUS_EMITTED, "reason": None, "ensemble_rule": RULE_SPREAD}
+
+
+class _EnsemblePools:
+    """The ensemble deep pools of one level: each (member, test cell) once."""
+
+    def __init__(
+        self,
+        level_rows: pd.DataFrame,
+        n_members: int,
+        pool_weights: PoolWeights | None,
+        trim_factor: float,
+    ) -> None:
+        parts = [
+            deepest_rows(level_rows[(level_rows["_member"] == code).to_numpy()])
+            for code in range(n_members)
+        ]
+        self.deepest = [part for part in parts if len(part)]
+        self.pool_weights = pool_weights
+        self.trim_factor = trim_factor
+        self._by_depth: dict[int, pd.DataFrame] = {}
+        self._arrays: dict[tuple[str, int], _SetArrays | None] = {}
+
+    def frame(self, cls: str, depth: int) -> pd.DataFrame:
+        if depth not in self._by_depth:
+            subsets = []
+            for part in self.deepest:
+                subset = part[part["depth"].to_numpy(np.int64) >= depth]
+                if self.pool_weights is not None and len(subset):
+                    subset = subset.copy()
+                    subset["_weight"] = self.pool_weights(subset, depth)
+                subsets.append(subset[subset["parent"].notna().to_numpy()])
+            self._by_depth[depth] = (
+                pd.concat(subsets, ignore_index=True) if subsets else pd.DataFrame()
+            )
+        frame = self._by_depth[depth]
+        if frame.empty:
+            return frame
+        return frame[(frame["parent"].astype(str) == cls).to_numpy()]
+
+    def arrays(self, cls: str, depth: int) -> _SetArrays | None:
+        key = (cls, depth)
+        if key not in self._arrays:
+            self._arrays[key] = _SetArrays.of(self.frame(cls, depth), self.trim_factor)
+        return self._arrays[key]
+
+
+def _member_text(values: Mapping[str, Any]) -> str:
+    return ";".join(f"{name}={values[name]}" for name in values)
+
+
+def _ensemble_class_decisions(
+    meta: LevelMeta,
+    cls: str,
+    grid: Sequence[int],
+    settings: RuleSettings,
+    ensemble: EnsembleSettings,
+    *,
+    groups: Mapping[tuple[str, int], pd.DataFrame],
+    pools: _EnsemblePools,
+    class_dmax: int | None,
+    n_test_index: Mapping[tuple[str, str, int], int],
+    member_view: Mapping[tuple[str, str, str, int], Mapping[str, tuple[str, Any]]],
+    members: Sequence[str],
+    neuronal: bool | None,
+) -> list[dict[str, Any]]:
+    """Decide every (regime, depth) bin of one (level, class) of the ensemble."""
+    high_depth = ensemble.nonneuronal_monotone_max_depth
+
+    def base(depth: int) -> dict[str, Any]:
+        return {
+            "level": meta.level,
+            "class": cls,
+            "depth": depth,
+            "n_test": n_test_index.get((meta.level, cls, depth), 0),
+            "d_max": class_dmax,
+            "default_threshold": meta.default_threshold,
+            "neuronal": neuronal,
+            "nonneuronal_high_depth": bool(
+                neuronal is not True and depth >= high_depth
+            ),
+        }
+
+    def member_fields(regime: str, depth: int) -> tuple[bool, dict[str, Any]]:
+        view = member_view.get((regime, meta.level, cls, depth), {})
+        statuses = {name: (view.get(name) or (None, None))[0] for name in members}
+        t_stars = {
+            name: _optional_float((view.get(name) or (None, None))[1])
+            for name in members
+        }
+        unanimous = bool(members) and all(
+            value == STATUS_EMITTED for value in statuses.values()
+        )
+        return unanimous, {
+            "member_emitted": unanimous,
+            "member_statuses": _member_text(statuses),
+            "member_t_star": _member_text(
+                {k: "" if v is None else f"{v:.3f}" for k, v in t_stars.items()}
+            ),
+        }
+
+    records: list[dict[str, Any]] = []
+    if class_dmax is None:
+        for depth in grid:
+            for regime in REGIMES:
+                _unanimous, fields_ = member_fields(regime, depth)
+                records.append(
+                    {
+                        **base(depth),
+                        **fields_,
+                        "regime": regime,
+                        "target": settings.target(regime, meta.base_target, depth),
+                        "status": STATUS_NOT_RESOLVABLE,
+                        "extrapolated": False,
+                        "pooled": False,
+                        "reason": REASON_TOO_FEW_TEST_CELLS,
+                        "ensemble_status": STATUS_NOT_RESOLVABLE,
+                        "ensemble_reason": REASON_TOO_FEW_TEST_CELLS,
+                        "monotone_filled": False,
+                    }
+                )
+        return records
+    trim = settings.set_trim_factor
+    own_arrays = {
+        depth: _SetArrays.of(groups.get((cls, depth)), trim) for depth in grid
+    }
+    own = {
+        depth: _set_records(
+            own_arrays[depth],
+            meta,
+            depth,
+            settings,
+            ensemble,
+            base(depth),
+            len(members),
+        )
+        for depth in grid
+    }
+    pooled: dict[int, dict[str, dict[str, Any]]] = {}
+
+    def pooled_at(depth: int) -> dict[str, dict[str, Any]]:
+        if depth not in pooled:
+            pooled[depth] = _set_records(
+                pools.arrays(cls, depth),
+                meta,
+                depth,
+                settings,
+                ensemble,
+                base(depth),
+                len(members),
+            )
+        return pooled[depth]
+
+    for regime in REGIMES:
+        pool_min: int | None = None
+        insufficient = False
+        if not _ensemble_judged(own[grid[-1]][regime], settings):
+            insufficient = True
+            for depth in reversed(grid):
+                if _ensemble_judged(pooled_at(depth)[regime], settings):
+                    pool_min, insufficient = depth, False
+                    break
+        regime_records: list[dict[str, Any]] = []
+        for depth in grid:
+            mine = own[depth][regime]
+            unanimous, fields_ = member_fields(regime, depth)
+            own_verdict = _verdict(mine, unanimous)
+            own_fields = {
+                **fields_,
+                "own_status": own_verdict["status"],
+                "own_reason": own_verdict["reason"],
+                "own_n_confident": mine.get("n_confident"),
+                "pool_min_depth": pool_min,
+            }
+            judged = _ensemble_judged(mine, settings)
+            if insufficient and not judged:
+                record = {
+                    **mine,
+                    **own_fields,
+                    "status": STATUS_NOT_RESOLVABLE,
+                    "reason": REASON_INSUFFICIENT_CALLS,
+                    "ensemble_rule": None,
+                    "pooled": False,
+                    "extrapolated": False,
+                }
+            elif pool_min is None or depth < pool_min:
+                record = {
+                    **mine,
+                    **own_fields,
+                    **own_verdict,
+                    "pooled": False,
+                    "extrapolated": False,
+                }
+            elif judged:
+                record = {
+                    **mine,
+                    **own_fields,
+                    **own_verdict,
+                    "pooled": False,
+                    "extrapolated": False,
+                }
+                pool_unanimous, _ = member_fields(regime, pool_min)
+                pool_verdict = _verdict(pooled_at(pool_min)[regime], pool_unanimous)
+                if (
+                    record["status"] == STATUS_EMITTED
+                    and pool_verdict["status"] != STATUS_EMITTED
+                ):
+                    record.update(
+                        status=STATUS_NOT_RESOLVABLE,
+                        reason=f"{POOL_REASON_PREFIX}{pool_verdict['reason']}",
+                        ensemble_rule=None,
+                    )
+            else:
+                verdict_record = pooled_at(pool_min)[regime]
+                record = {
+                    **verdict_record,
+                    **own_fields,
+                    **_verdict(verdict_record, unanimous),
+                    **base(depth),
+                    "regime": regime,
+                    "target": verdict_record["target"],
+                    "extrapolated": depth > pool_min,
+                    "pooled": True,
+                }
+            record["ensemble_status"] = record["status"]
+            record["ensemble_reason"] = record["reason"]
+            record["monotone_filled"] = False
+            record.pop("e1_reason", None)
+            regime_records.append(record)
+        if ensemble.monotone_depth:
+            _monotone_fill(
+                regime_records,
+                regime=regime,
+                own=own,
+                own_arrays=own_arrays,
+                pool_arrays=None if pool_min is None else pools.arrays(cls, pool_min),
+                pool_min=pool_min,
+                settings=settings,
+                ensemble=ensemble,
+                neuronal=neuronal,
+            )
+        records.extend(regime_records)
+    return records
+
+
+def _monotone_fill(
+    records: list[dict[str, Any]],
+    *,
+    regime: Regime,
+    own: Mapping[int, Mapping[str, Mapping[str, Any]]],
+    own_arrays: Mapping[int, _SetArrays | None],
+    pool_arrays: _SetArrays | None,
+    pool_min: int | None,
+    settings: RuleSettings,
+    ensemble: EnsembleSettings,
+    neuronal: bool | None,
+) -> None:
+    """Fill bins deeper than the shallowest emitted one (v7.9; in place).
+
+    A bin v7.7 did not emit is filled when, at ``t_d`` (its own ``t*_pool``
+    or saturated cap, else the applied threshold of the nearest shallower
+    emitted bin), its point precision reaches its target and its coverage
+    ``min_coverage``, measured on its own pooled calls when it has any, else
+    on the ensemble deep pool it belongs to; only the power conditions and a
+    missing threshold are waived. Non-neuronal (or unknown-lineage) classes
+    are never filled at ``nonneuronal_monotone_max_depth`` or deeper. The
+    caller has checked that the class has ``D_max``.
+    """
+    emitted = [int(r["depth"]) for r in records if r["status"] == STATUS_EMITTED]
+    if not emitted:
+        return
+    shallowest = min(emitted)
+    inherited: float | None = None
+    for record in records:
+        depth = int(record["depth"])
+        if record["status"] == STATUS_EMITTED:
+            inherited = _optional_float(record["threshold"])
+            continue
+        if depth <= shallowest:
+            continue
+        if neuronal is not True and depth >= ensemble.nonneuronal_monotone_max_depth:
+            continue
+        own_record = own[depth][regime]
+        threshold = _optional_float(own_record.get("threshold"))
+        source = own_record.get("threshold_source")
+        if threshold is None:
+            threshold, source = inherited, THRESHOLD_SOURCE_INHERITED
+        if threshold is None:
+            continue
+        measured: tuple[str, _SetArrays] | None = None
+        arrays = own_arrays.get(depth)
+        if arrays is not None:
+            check = arrays.select(arrays.check_mask(regime, settings))
+            if bool((check.weight > 0).any()):
+                measured = (FILL_OWN, check)
+        if (
+            measured is None
+            and pool_arrays is not None
+            and pool_min is not None
+            and depth >= pool_min
+        ):
+            check = pool_arrays.select(pool_arrays.check_mask(regime, settings))
+            if bool((check.weight > 0).any()):
+                measured = (FILL_POOL, check)
+        if measured is None:
+            continue
+        stats = distinct_cell_stats(
+            measured[1].bp,
+            measured[1].correct,
+            measured[1].weight,
+            measured[1].cell,
+            threshold,
+        )
+        # The bin's own target (a pooled bin carries its pool's, D_P's).
+        target = float(own_record["target"])
+        if not (
+            math.isfinite(stats.precision)
+            and stats.precision >= target - _TOLERANCE
+            and stats.coverage >= settings.min_coverage - _TOLERANCE
+        ):
+            continue
+        record.update(
+            status=STATUS_EMITTED,
+            reason=None,
+            threshold=threshold,
+            threshold_source=source,
+            monotone_filled=True,
+            fill_source=measured[0],
+            fill_precision=stats.precision,
+            fill_coverage=stats.coverage,
+            extrapolated=True,
+        )
+        inherited = threshold
+
+
+@dataclass
+class EnsembleDecisions:
+    """The version-7 decisions of one self-map (v7.7-v7.9).
+
+    Attributes:
+        decisions: One row per (regime, level, class, depth) after the
+            monotone fill (``ENSEMBLE_DECISION_COLUMNS``).
+        member_decisions: Each member's own ``decide`` rows (saturated-bp rule
+            included) with ``member`` and ``member_role``.
+        members: The emission members, in order.
+    """
+
+    decisions: pd.DataFrame
+    member_decisions: pd.DataFrame
+    members: list[str]
+
+    def unfilled(self) -> pd.DataFrame:
+        """Return the decisions before the monotone fill (floors and trust)."""
+        return unfilled_decisions(self.decisions)
+
+
+def unfilled_decisions(decisions: pd.DataFrame) -> pd.DataFrame:
+    """Return ensemble decisions with the monotone fill undone (v7.9).
+
+    Filled bins take no part in the trust tests or the floors: they get back
+    their v7.7 status and reason.
+
+    Args:
+        decisions: ``ensemble_decide`` decisions.
+
+    Returns:
+        A copy with ``status`` = ``ensemble_status`` and ``reason`` =
+        ``ensemble_reason`` on filled rows.
+    """
+    frame = decisions.copy()
+    if "monotone_filled" not in frame.columns:
+        return frame
+    filled = _bool_column(frame["monotone_filled"]).to_numpy()
+    if filled.any():
+        frame.loc[filled, "status"] = frame.loc[filled, "ensemble_status"]
+        frame.loc[filled, "reason"] = frame.loc[filled, "ensemble_reason"]
+        frame.loc[filled, "extrapolated"] = False
+    return frame
+
+
+def member_names(cells: pd.DataFrame) -> list[str]:
+    """Return the members of a version-7 cells table in first-seen order."""
+    if MEMBER_COLUMN not in cells.columns:
+        raise ResolvabilityError("a version-7 cells table needs a member column")
+    return list(dict.fromkeys(cells[MEMBER_COLUMN].astype(str)))
+
+
+def ensemble_decide(
+    cells: pd.DataFrame,
+    levels: Sequence[LevelMeta],
+    depths: Sequence[int],
+    settings: RuleSettings,
+    ensemble: EnsembleSettings,
+    *,
+    members: Sequence[str],
+    reported: Sequence[str] = (),
+    weights: np.ndarray | None = None,
+    pool_weights: PoolWeights | None = None,
+    neuronal: NeuronalOf | None = None,
+) -> EnsembleDecisions:
+    """Return the version-7 ensemble decisions (plan §8.3 v7.7-v7.9).
+
+    Each emission member (and each ``reported`` member, for the record) is
+    decided on its own by ``decide`` with the saturated-bp rule. Per
+    (regime, level, class, depth) the ensemble's tested set is the union of
+    the emission members' rows (each test cell counted once: n, Kish n x
+    distinct / rows), or, when the bin holds fewer than ``min_confident_n``
+    distinct confident test cells, the ensemble deep pool (from the deep end,
+    each (member, test cell) once at its deepest bin) exactly as version 6
+    pools. The bin is emitted iff (E1) the set passes the §8.3 rule at
+    ``t*_pool`` (the saturated cap, v7.8; the default in the validated
+    regime) and (E2) every emission member emits the bin by its own decision
+    or the member spread there is within ``max(floor, k * SE)`` with every
+    member holding ``member_min_confident`` calls and, since the amendment of
+    2026-09-29 (pre-registration §22.3), the set's Wilson bound clears
+    ``target - wilson_margin`` by ``spread_wilson_margin_se`` standard errors
+    of its precision (``pooled_standard_error``). Then the monotone fill
+    (v7.9). A failure takes E1's reason prefixed ``ensemble_``,
+    ``ensemble_spread`` or ``ensemble_spread_margin``.
+
+    Args:
+        cells: A version-7 cells table (``member`` column).
+        levels: Level metadata.
+        depths: The depth grid.
+        settings: Rule settings.
+        ensemble: Ensemble settings.
+        members: The emission members (``<recipe>@<seed>``).
+        reported: Further members decided for the record only (``clean``,
+            stress).
+        weights: Optional per-row weights (RESOLVE; per member).
+        pool_weights: Optional weights of pooled deep sets, applied per member.
+        neuronal: Per class, whether it is neuronal (v7.9); unknown classes
+            are treated as non-neuronal.
+
+    Returns:
+        The decisions.
+
+    Raises:
+        ResolvabilityError: Without emission members or a member column.
+    """
+    if not members:
+        raise ResolvabilityError("ensemble_decide needs at least one emission member")
+    row_weights = (
+        np.ones(len(cells), dtype=np.float64)
+        if weights is None
+        else np.asarray(weights, dtype=np.float64)
+    )
+    if len(row_weights) != len(cells):
+        raise ResolvabilityError("weights must have one value per cells row")
+    names = cells[MEMBER_COLUMN].astype(str).to_numpy() if len(cells) else np.array([])
+    member_frames: list[pd.DataFrame] = []
+    for role, group in (("emission", members), ("reported", reported)):
+        for name in group:
+            mask = names == name
+            rows = cells[mask]
+            recipe = str(rows["recipe"].iloc[0]) if len(rows) else DECISION_RECIPE
+            decided = decide(
+                rows,
+                levels,
+                depths,
+                settings,
+                weights=row_weights[mask],
+                pool_weights=pool_weights,
+                recipe=recipe,
+                seed=0,
+                saturated_bp_share=ensemble.saturated_bp_share,
+            )
+            decided.insert(0, MEMBER_ROLE_COLUMN, role)
+            decided.insert(0, MEMBER_COLUMN, name)
+            member_frames.append(decided)
+    # Object-typed before the concat: a member's all-missing column (no
+    # threshold anywhere) must not decide the column's dtype.
+    member_decisions = pd.concat(
+        [frame.astype(object) for frame in member_frames], ignore_index=True
+    ).infer_objects()
+    member_view: dict[tuple[str, str, str, int], dict[str, tuple[str, Any]]] = {}
+    emission_rows = member_decisions[member_decisions[MEMBER_ROLE_COLUMN] == "emission"]
+    for member, regime, level, cls, depth, status, t_star in zip(
+        emission_rows[MEMBER_COLUMN],
+        emission_rows["regime"],
+        emission_rows["level"],
+        emission_rows["class"],
+        emission_rows["depth"],
+        emission_rows["status"],
+        emission_rows["t_star"],
+        strict=True,
+    ):
+        member_view.setdefault((str(regime), str(level), str(cls), int(depth)), {})[
+            str(member)
+        ] = (str(status), t_star)
+    code_of = {name: code for code, name in enumerate(members)}
+    selected = np.isin(names, list(members)) & (
+        cells["seed"].to_numpy() == 0 if len(cells) else np.zeros(0, dtype=bool)
+    )
+    frame = cells[selected].copy()
+    frame["_weight"] = row_weights[selected]
+    frame["_member"] = np.array(
+        [code_of[name] for name in names[selected]], dtype=np.int64
+    )
+    frame["_cell"] = pd.factorize(frame["cell_id"].astype(str))[0].astype(np.int64)
+    grid = sorted(int(depth) for depth in depths)
+    n_test = class_test_counts(frame)
+    dmax = d_max_table(n_test, min_cells_per_bin=settings.min_cells_per_bin)
+    n_test_index = {
+        (str(row.level), str(row["class"]), int(row.depth)): int(row.n_test)
+        for _, row in n_test.iterrows()
+    }
+    records: list[dict[str, Any]] = []
+    for meta in levels:
+        level_rows = frame[frame["level"].astype(str) == meta.level]
+        called = level_rows[level_rows["parent"].notna()]
+        groups = {
+            (str(cls), int(depth)): group
+            for (cls, depth), group in called.groupby(
+                [called["parent"].astype(str), "depth"], observed=True
+            )
+        }
+        pools = _EnsemblePools(
+            level_rows, len(members), pool_weights, settings.set_trim_factor
+        )
+        classes = sorted(
+            {str(cls) for cls in called["parent"].dropna().astype(str)}
+            | {cls for (level, cls) in dmax if level == meta.level}
+        )
+        for cls in classes:
+            records.extend(
+                _ensemble_class_decisions(
+                    meta,
+                    cls,
+                    grid,
+                    settings,
+                    ensemble,
+                    groups=groups,
+                    pools=pools,
+                    class_dmax=dmax.get((meta.level, cls)),
+                    n_test_index=n_test_index,
+                    member_view=member_view,
+                    members=list(members),
+                    neuronal=_neuronal(neuronal, cls),
+                )
+            )
+    return EnsembleDecisions(
+        decisions=_ensemble_table(records),
+        member_decisions=member_decisions,
+        members=list(members),
+    )
+
+
+def _ensemble_table(records: Sequence[Mapping[str, Any]]) -> pd.DataFrame:
+    """Return ensemble records as a typed table (``ENSEMBLE_DECISION_COLUMNS``)."""
+    columns = list(ENSEMBLE_DECISION_COLUMNS)
+    text = set(DECISION_TEXT_COLUMNS) | set(V7_TEXT_COLUMNS)
+    table = pd.DataFrame.from_records(list(records))
+    for column in columns:
+        if column not in table.columns:
+            table[column] = None if column in text else np.nan
+    table = table[columns].copy()
+    for column in ("extrapolated", "would_raise", "would_raise_evaluable", "pooled"):
+        table[column] = _bool_column(table[column])
+    for column in V7_BOOL_COLUMNS:
+        table[column] = _bool_column(table[column])
+    table["neuronal"] = pd.array(
+        [
+            None if value is None or pd.isna(value) else bool(value)
+            for value in table["neuronal"]
+        ],
+        dtype="boolean",
+    )
+    return table
+
+
+# --------------------------------------------------------------------------
+# Version 7: per-class depth tables, summaries and churn (v7.5, v7.10)
+
+CLASS_DEPTH_COLUMNS: Final[tuple[str, ...]] = (
+    "regime",
+    "level",
+    "class",
+    "depth",
+    "status",
+    "threshold",
+    "threshold_source",
+    "ensemble_rule",
+    "pooled",
+    "extrapolated",
+    "monotone_filled",
+    "nonneuronal_high_depth",
+    "neuronal",
+    "n_test",
+    "n_confident",
+    "precision",
+    "coverage",
+    "member_precision_min",
+    "member_precision_max",
+    "member_coverage_min",
+    "member_coverage_max",
+    "profile_source",
+    "profile_share",
+    "predicted_coverage_term",
+)
+
+
+def class_depth_table(
+    decisions: pd.DataFrame,
+    *,
+    profile: Any | None = None,
+    grid: Sequence[int] | None = None,
+) -> pd.DataFrame:
+    """Return ``resolvability_class_depth.parquet`` (plan §8.3 v7.5).
+
+    One row per (regime, level L, class c, depth bin d) of the ensemble
+    decisions, the schema RESOLVE consumes (M4 follow-up): ``status`` and the
+    applied ``threshold`` (with ``threshold_source``: ``default``,
+    ``resolvability_local``, ``saturated_cap`` or ``monotone_inherited``),
+    how the bin was decided (``ensemble_rule``, ``pooled``, ``extrapolated``,
+    ``monotone_filled``, ``nonneuronal_high_depth``, ``neuronal``), the
+    ensemble's ``precision`` and ``coverage`` there (a filled bin: its fill
+    measurement; a pooled bin: its pool's), ``n_test`` and ``n_confident``
+    (distinct test cells), and the member minimum and maximum of precision
+    and coverage at the applied threshold. With a depth ``profile`` of the
+    family's species x chemistry (``sim_inputs.DepthProfile``):
+    ``profile_source`` (the class, or the pool it falls back to),
+    ``profile_share`` ``s_c(d)`` (the share of the profile's class-c cells in
+    bin ``d``) and ``predicted_coverage_term`` ``s_c(d) cov(L, c, d)`` on
+    emitted bins (0 elsewhere). RESOLVE sums the same terms with the
+    dataset's own ``s_c(d)`` (its cells called ``c``); the predicted coverage
+    of (L, c) is ``sum_d s_c(d) cov(L, c, d)`` and its resolvable share
+    ``sum_d s_c(d)`` over emitted bins.
+
+    Args:
+        decisions: ``ensemble_decide`` decisions.
+        profile: Optional ``sim_inputs.DepthProfile``.
+        grid: The depth grid (default: the decisions' depths).
+
+    Returns:
+        ``CLASS_DEPTH_COLUMNS`` rows.
+    """
+    if decisions.empty:
+        return pd.DataFrame(columns=list(CLASS_DEPTH_COLUMNS))
+    frame = decisions.copy()
+    filled = _bool_column(frame["monotone_filled"]).to_numpy()
+    precision = frame["precision"].to_numpy(np.float64).copy()
+    coverage = frame["coverage"].to_numpy(np.float64).copy()
+    precision[filled] = frame["fill_precision"].to_numpy(np.float64)[filled]
+    coverage[filled] = frame["fill_coverage"].to_numpy(np.float64)[filled]
+    frame["precision"] = precision
+    frame["coverage"] = coverage
+    depths = sorted(
+        {int(value) for value in (grid or frame["depth"].astype(int).unique())}
+    )
+    shares: dict[str, dict[int, float]] = {}
+    sources: list[str | None] = []
+    profile_share: list[float] = []
+    if profile is not None:
+        for cls, depth in zip(frame["class"].astype(str), frame["depth"], strict=True):
+            source = str(profile.source(cls))
+            if source not in shares:
+                bins = depth_bin(profile.values(source), depths)
+                shares[source] = {
+                    value: float(np.mean(bins == float(value))) for value in depths
+                }
+            sources.append(source)
+            profile_share.append(shares[source].get(int(depth), 0.0))
+        frame["profile_source"] = sources
+        frame["profile_share"] = profile_share
+        emitted = (frame["status"] == STATUS_EMITTED).to_numpy()
+        values = np.nan_to_num(coverage, nan=0.0)
+        frame["predicted_coverage_term"] = np.where(
+            emitted, np.asarray(profile_share) * values, 0.0
+        )
+    else:
+        frame["profile_source"] = None
+        frame["profile_share"] = np.nan
+        frame["predicted_coverage_term"] = np.nan
+    table = frame[list(CLASS_DEPTH_COLUMNS)].reset_index(drop=True)
+    return table
+
+
+def profile_prediction(
+    class_depth: pd.DataFrame, profile: Any | None
+) -> dict[str, Any] | None:
+    """Return the summary's ``profile_prediction`` (plan §8.3 v7.5).
+
+    Per regime and level: the resolvable share and the predicted coverage per
+    class (sums over the class's bins) and, weighted by the profile's own
+    class shares (classes of the profile with their own totals), the level's
+    resolvable share and predicted coverage.
+
+    Args:
+        class_depth: ``class_depth_table`` output (with a profile).
+        profile: The profile (``None``: no prediction).
+
+    Returns:
+        The record, or ``None`` without a profile.
+    """
+    if profile is None or class_depth.empty:
+        return None
+    n_total = sum(len(values) for values in profile.by_class.values())
+    result: dict[str, Any] = {
+        "profile": {
+            "label": profile.label,
+            "asset": profile.asset,
+            "sha256": profile.sha256,
+            "n_cells": int(profile.n_cells),
+        },
+        "regimes": {},
+    }
+    emitted = class_depth["status"] == STATUS_EMITTED
+    frame = class_depth.assign(
+        _resolvable=np.where(emitted, class_depth["profile_share"], 0.0)
+    )
+    for regime, regime_rows in frame.groupby("regime", sort=True):
+        levels: dict[str, Any] = {}
+        for level, rows in regime_rows.groupby("level", sort=True):
+            per_class = rows.groupby("class", sort=True).agg(
+                resolvable_share=("_resolvable", "sum"),
+                predicted_coverage=("predicted_coverage_term", "sum"),
+            )
+            weights = np.array(
+                [
+                    len(profile.by_class.get(str(cls), ())) / n_total
+                    if n_total
+                    else 0.0
+                    for cls in per_class.index
+                ]
+            )
+            mass = float(weights.sum())
+            levels[str(level)] = {
+                "profile_share_covered": round(mass, 6),
+                "resolvable_share": None
+                if mass <= 0
+                else round(
+                    float(np.sum(weights * per_class["resolvable_share"]) / mass), 6
+                ),
+                "predicted_coverage": None
+                if mass <= 0
+                else round(
+                    float(np.sum(weights * per_class["predicted_coverage"]) / mass), 6
+                ),
+                "classes": {
+                    str(cls): {
+                        "resolvable_share": round(float(row.resolvable_share), 6),
+                        "predicted_coverage": round(float(row.predicted_coverage), 6),
+                    }
+                    for cls, row in per_class.iterrows()
+                },
+            }
+        result["regimes"][str(regime)] = levels
+    return result
+
+
+def emitted_triples(
+    decisions: pd.DataFrame,
+    regime: Regime = "provisional",
+    *,
+    levels: Iterable[str] | None = None,
+) -> set[tuple[str, str, int]]:
+    """Return the emitted (level, class, depth) triples of a regime.
+
+    Args:
+        decisions: ``decide`` or ``ensemble_decide`` decisions.
+        regime: The regime.
+        levels: Restrict to these levels (default: all).
+
+    Returns:
+        The triples.
+    """
+    frame = decisions[
+        (decisions["regime"] == regime) & (decisions["status"] == STATUS_EMITTED)
+    ]
+    if levels is not None:
+        frame = frame[frame["level"].astype(str).isin(list(levels))]
+    return {
+        (str(level), str(cls), int(depth))
+        for level, cls, depth in zip(
+            frame["level"], frame["class"], frame["depth"], strict=True
+        )
+    }
+
+
+def triple_churn(
+    first: set[tuple[str, str, int]], second: set[tuple[str, str, int]]
+) -> dict[str, Any]:
+    """Return the churn ``(|A \\ B| + |B \\ A|) / |A u B|`` of emitted triples.
+
+    Args:
+        first: Triples of A.
+        second: Triples of B.
+
+    Returns:
+        ``n_first``, ``n_second``, ``lost`` (in A only), ``gained`` (in B
+        only), ``union``, ``churn`` (0 for two empty sets) and ``per_level``.
+    """
+    union = first | second
+    lost = first - second
+    gained = second - first
+    per_level: dict[str, dict[str, Any]] = {}
+    for level in sorted({triple[0] for triple in union}):
+        a = {triple for triple in first if triple[0] == level}
+        b = {triple for triple in second if triple[0] == level}
+        both = a | b
+        per_level[level] = {
+            "n_first": len(a),
+            "n_second": len(b),
+            "lost": len(a - b),
+            "gained": len(b - a),
+            "churn": (len(a - b) + len(b - a)) / len(both) if both else 0.0,
+        }
+    return {
+        "n_first": len(first),
+        "n_second": len(second),
+        "lost": len(lost),
+        "gained": len(gained),
+        "union": len(union),
+        "churn": (len(lost) + len(gained)) / len(union) if union else 0.0,
+        "lost_triples": sorted(lost),
+        "gained_triples": sorted(gained),
+        "per_level": per_level,
+    }
+
+
+def ensemble_summary(
+    result: EnsembleDecisions, ensemble: EnsembleSettings
+) -> dict[str, Any]:
+    """Return the summary's ``ensemble`` record (v7.7-v7.10).
+
+    Per regime: bins, emitted bins by rule (unanimous, spread, filled),
+    E1, spread and spread-margin failures, saturated and non-neuronal
+    high-depth bins, the
+    member spread's distribution where it was evaluated, how often the
+    members agree, and each member's emitted count; per level the same
+    counts.
+
+    Args:
+        result: ``ensemble_decide`` output.
+        ensemble: The settings.
+
+    Returns:
+        The record.
+    """
+    decisions = result.decisions
+    members = result.member_decisions
+    record: dict[str, Any] = {
+        "members": list(result.members),
+        "settings": ensemble.to_json(),
+        "regimes": {},
+    }
+    for regime in REGIMES:
+        frame = decisions[decisions["regime"] == regime]
+        emitted = frame["status"] == STATUS_EMITTED
+        filled = _bool_column(frame["monotone_filled"])
+        reason = frame["reason"].astype(object)
+        # The spread of the bins whose E1 passed (where E2 decided).
+        tested = (
+            frame["ensemble_rule"].notna()
+            | frame["ensemble_reason"].isin(REASONS_ENSEMBLE_E2)
+        ).to_numpy()
+        spread = frame["member_spread"].to_numpy(np.float64)[tested]
+        finite = spread[np.isfinite(spread)]
+        mine = members[
+            (members["regime"] == regime) & (members[MEMBER_ROLE_COLUMN] == "emission")
+        ]
+        statuses = mine.pivot_table(
+            index=["level", "class", "depth"],
+            columns=MEMBER_COLUMN,
+            values="status",
+            aggfunc="first",
+        )
+        agree = float((statuses.nunique(axis=1) == 1).mean()) if len(statuses) else None
+
+        def counts(rows: pd.DataFrame) -> dict[str, int]:
+            is_emitted = rows["status"] == STATUS_EMITTED
+            is_filled = _bool_column(rows["monotone_filled"])
+            return {
+                "n_bins": int(len(rows)),
+                "n_emitted": int(is_emitted.sum()),
+                "n_unanimous": int((rows["ensemble_rule"] == RULE_UNANIMOUS).sum()),
+                "n_spread": int((rows["ensemble_rule"] == RULE_SPREAD).sum()),
+                "n_filled": int(is_filled.sum()),
+            }
+
+        record["regimes"][regime] = {
+            **counts(frame),
+            "n_spread_failed": int((reason == REASON_ENSEMBLE_SPREAD).sum()),
+            "n_spread_margin_failed": int(
+                (reason == REASON_ENSEMBLE_SPREAD_MARGIN).sum()
+            ),
+            "n_ensemble_e1_failed": int(
+                reason.map(
+                    lambda value: (
+                        isinstance(value, str)
+                        and value.startswith(REASON_ENSEMBLE_PREFIX)
+                        and value not in REASONS_ENSEMBLE_E2
+                    )
+                ).sum()
+            ),
+            "n_saturated_emitted": int(
+                (
+                    emitted & (frame["threshold_source"] == THRESHOLD_SOURCE_SATURATED)
+                ).sum()
+            ),
+            "n_saturated_filled": int(
+                (
+                    filled & (frame["threshold_source"] == THRESHOLD_SOURCE_SATURATED)
+                ).sum()
+            ),
+            "n_nonneuronal_high_depth_emitted": int(
+                (emitted & _bool_column(frame["nonneuronal_high_depth"])).sum()
+            ),
+            "member_spread": {
+                "n": int(len(finite)),
+                "median": float(np.median(finite)) if len(finite) else None,
+                "q90": float(np.quantile(finite, 0.9)) if len(finite) else None,
+                "max": float(finite.max()) if len(finite) else None,
+            },
+            "member_status_agreement": agree,
+            "member_emitted": {
+                str(name): int((rows["status"] == STATUS_EMITTED).sum())
+                for name, rows in mine.groupby(MEMBER_COLUMN, sort=False)
+            },
+            "per_level": {
+                str(level): counts(rows)
+                for level, rows in frame.groupby("level", sort=False)
+            },
+        }
+    return record
+
+
+V7_TABLE_COLUMNS: Final[tuple[str, ...]] = (
+    *TABLE_COLUMNS,
+    MEMBER_COLUMN,
+    MEMBER_ROLE_COLUMN,
+    *SATURATED_COLUMNS,
+    *V7_DECISION_COLUMNS,
+)
+
+
+def resolvability_table_v7(
+    cells: pd.DataFrame,
+    result: EnsembleDecisions,
+    levels: Sequence[LevelMeta],
+    settings: RuleSettings,
+    *,
+    efficiencies: Mapping[str, tuple[Sequence[str], np.ndarray]] | None = None,
+    roles: Mapping[str, str] | None = None,
+) -> pd.DataFrame:
+    """Return a version-7 ``resolvability.parquet`` (plan §8.3 v7.10).
+
+    The version-6 row kinds per member (``bin``, ``curve``, ``isotonic``,
+    ``node``, ``confusion``; ``member`` and ``recipe`` set), each member's
+    own decisions (``kind = member_decision``), the ensemble's
+    (``kind = decision``, ``recipe = ensemble``) with the version-7 columns,
+    and each member's gene efficiency (``kind = gene_efficiency``).
+
+    Args:
+        cells: The version-7 cells table.
+        result: ``ensemble_decide`` output.
+        levels: Level metadata.
+        settings: Rule settings.
+        efficiencies: Per member, the genes and their efficiency.
+        roles: Per member, its role (``emission``, ``reported``, ``stress``).
+
+    Returns:
+        The table (``V7_TABLE_COLUMNS``).
+    """
+    recipe_of = dict(
+        zip(
+            cells[MEMBER_COLUMN].astype(str),
+            cells["recipe"].astype(str),
+            strict=True,
+        )
+    )
+    by_member = cells.assign(recipe=cells[MEMBER_COLUMN].astype(str))
+    empty = pd.DataFrame(columns=list(DECISION_COLUMNS))
+    base = resolvability_table(by_member, empty, levels, settings)
+    base = base.astype({"recipe": object})
+    base[MEMBER_COLUMN] = base["recipe"]
+    base["recipe"] = base[MEMBER_COLUMN].map(lambda name: recipe_of.get(str(name)))
+    member_rows = result.member_decisions.copy()
+    member_rows.insert(0, "kind", "member_decision")
+    member_rows["recipe"] = member_rows[MEMBER_COLUMN].map(
+        lambda name: recipe_of.get(str(name))
+    )
+    decision_rows = result.decisions.copy()
+    decision_rows.insert(0, "kind", "decision")
+    decision_rows["recipe"] = ENSEMBLE_RECIPE
+    extra: list[pd.DataFrame] = []
+    for name, (genes, values) in (efficiencies or {}).items():
+        extra.append(
+            pd.DataFrame(
+                {
+                    "kind": "gene_efficiency",
+                    "recipe": recipe_of.get(name),
+                    MEMBER_COLUMN: name,
+                    "node": list(genes),
+                    "x": np.asarray(values, dtype=np.float64),
+                }
+            )
+        )
+    frames = [base, member_rows, decision_rows, *extra]
+    combined = pd.concat(
+        [frame.astype(object) for frame in frames if len(frame)], ignore_index=True
+    )
+    if roles:
+        missing = (
+            combined[MEMBER_ROLE_COLUMN].isna()
+            if MEMBER_ROLE_COLUMN in combined
+            else None
+        )
+        if missing is not None:
+            combined.loc[missing, MEMBER_ROLE_COLUMN] = combined.loc[
+                missing, MEMBER_COLUMN
+            ].map(lambda name: None if name is None else roles.get(str(name)))
+    return _typed_v7_table(combined)
+
+
+def _typed_v7_table(combined: pd.DataFrame) -> pd.DataFrame:
+    for column in V7_TABLE_COLUMNS:
+        if column not in combined.columns:
+            combined[column] = None
+    combined = combined[list(V7_TABLE_COLUMNS)].copy()
+    text = (
+        "kind",
+        "recipe",
+        "regime",
+        "level",
+        "class",
+        "node",
+        "truth",
+        "call",
+        "status",
+        "reason",
+        MEMBER_COLUMN,
+        MEMBER_ROLE_COLUMN,
+        *V7_TEXT_COLUMNS,
+    )
+    for column in text:
+        combined[column] = pd.Categorical(
+            [_clean_label(value) for value in combined[column].astype(object)]
+        )
+    floats = (
+        "threshold",
+        "n_effective",
+        "precision",
+        "coverage",
+        "recall",
+        "f1",
+        "wilson_lb",
+        "t_star",
+        "target",
+        "default_threshold",
+        "x",
+        "y",
+        "saturated_share",
+        "member_precision_min",
+        "member_precision_max",
+        "member_coverage_min",
+        "member_coverage_max",
+        "member_min_n",
+        "member_spread",
+        "spread_limit",
+        "spread_se",
+        "wilson_clearance",
+        "fill_precision",
+        "fill_coverage",
+    )
+    for column in floats:
+        combined[column] = pd.to_numeric(combined[column], errors="coerce").astype(
+            np.float64
+        )
+    for column in (
+        "seed",
+        "depth",
+        "n_test",
+        "n_called",
+        "n_correct",
+        "n_confident",
+        "d_max",
+        "pool_min_depth",
+        "n_rows",
+    ):
+        combined[column] = pd.to_numeric(combined[column], errors="coerce").astype(
+            "Int64"
+        )
+    for column in ("extrapolated", "pooled", "neuronal", *V7_BOOL_COLUMNS):
+        combined[column] = pd.array(
+            [
+                None
+                if value is None
+                or (isinstance(value, float) and math.isnan(value))
+                or value is pd.NA
+                else bool(value)
+                for value in combined[column]
+            ],
+            dtype="boolean",
+        )
+    return combined
+
+
+def coerce_cells_v7(cells: pd.DataFrame) -> pd.DataFrame:
+    """Return a version-7 cells table with parquet-friendly dtypes.
+
+    ``coerce_cells`` plus the ``member`` and ``member_role`` columns as
+    categories.
+    """
+    frame = coerce_cells(cells)
+    for column in (MEMBER_COLUMN, MEMBER_ROLE_COLUMN):
+        if column in frame.columns:
+            frame[column] = frame[column].astype(str).astype("category")
+    return frame
+
+
+# --------------------------------------------------------------------------
+# Version 7: orchestration (PREP and the diagnostic of version-6 families)
+
+
+@dataclass(frozen=True)
+class _QueryStub:
+    """What ``build_summary`` reads of a simulated query (no counts kept)."""
+
+    obs: pd.DataFrame
+    n_by_depth: dict[int, int]
+
+
+@dataclass
+class EnsembleSimulation:
+    """The mapped members of one version-7 self-map (no counts kept).
+
+    Attributes:
+        cells: The cells table of every member (``member``, ``member_role``).
+        n_simulated: Simulated cells per member.
+        n_by_depth: Test cells simulated per depth, per member.
+        efficiencies: Per member, the genes and their efficiency.
+        timings: Seconds per step.
+    """
+
+    cells: pd.DataFrame
+    n_simulated: dict[str, int]
+    n_by_depth: dict[str, dict[int, int]]
+    efficiencies: dict[str, tuple[list[str], np.ndarray]]
+    timings: dict[str, float]
+
+
+def member_tag(member: EnsembleMember) -> str:
+    """Return a file-name-safe tag of a member (``R1_contam_HO_seed0``)."""
+    return f"{member.recipe.name}_seed{int(member.recipe.seed)}"
+
+
+def simulate_members(
+    test: HeldOutCells,
+    *,
+    specs: Sequence[LevelSpec],
+    depths: Sequence[int],
+    members: Sequence[EnsembleMember],
+    map_fn: MapFunction,
+    cells_rules: Sequence[CellsRule] = (),
+    registry: Mapping[str, Any] | None = None,
+    mapping_seed: int = 0,
+    tag_prefix: str = "",
+) -> EnsembleSimulation:
+    """Simulate, map and tabulate each member in turn (v7.2-v7.4).
+
+    One member's simulated counts and MapMyCells table are held at a time
+    and dropped once its calls are tabulated (``as_stored``), so the parent
+    process keeps only the cells tables (the phase-1 prototype's largest
+    process reached 13.2 GB by holding every draw).
+
+    Args:
+        test: The test cells.
+        specs: Levels to read.
+        depths: The version-7 grid.
+        members: Every member (emission, reported, stress).
+        map_fn: ``(query, tag, seed) -> MMC tidy table``.
+        cells_rules: Production rules applied to each member's cells.
+        registry: Simulation-input registry (table recipes).
+        mapping_seed: Mapping seed (0; 1 for the fine-level check).
+        tag_prefix: Prefix of the mapping tags (diagnostics).
+
+    Returns:
+        The simulation.
+    """
+    frames: list[pd.DataFrame] = []
+    n_simulated: dict[str, int] = {}
+    n_by_depth: dict[str, dict[int, int]] = {}
+    efficiencies: dict[str, tuple[list[str], np.ndarray]] = {}
+    timings: dict[str, float] = {}
+    for member in members:
+        step = time.monotonic()
+        efficiency = member_efficiency(member.recipe, test.genes, registry=registry)
+        query = thin_and_contaminate_v7(
+            test, depths, member.recipe, efficiency=efficiency
+        )
+        timings[f"simulate_{member.name}"] = round(time.monotonic() - step, 3)
+        n_simulated[member.name] = int(len(query.obs))
+        n_by_depth[member.name] = dict(query.n_by_depth)
+        efficiencies[member.name] = (list(test.genes), efficiency)
+        logger.info(
+            "resolvability v7 %s: simulated %d cells from %d test cells in %.1f s",
+            member.name,
+            len(query.obs),
+            len(test.obs),
+            timings[f"simulate_{member.name}"],
+        )
+        step = time.monotonic()
+        tidy = map_fn(query, f"{tag_prefix}{member_tag(member)}", mapping_seed)
+        timings[f"map_{member.name}"] = round(time.monotonic() - step, 3)
+        frame = level_cells(tidy, query, test, specs, seed=mapping_seed)
+        del tidy, query
+        for rule in cells_rules:
+            frame = rule(frame)
+        frame = as_stored(frame)
+        frame[MEMBER_COLUMN] = member.name
+        frame[MEMBER_ROLE_COLUMN] = member.role
+        frames.append(frame)
+        logger.info(
+            "resolvability v7 %s: mapped in %.1f s",
+            member.name,
+            timings[f"map_{member.name}"],
+        )
+    cells = (
+        pd.concat(frames, ignore_index=True)
+        if frames
+        else pd.DataFrame(columns=[*CELLS_COLUMNS, MEMBER_COLUMN, MEMBER_ROLE_COLUMN])
+    )
+    return EnsembleSimulation(
+        cells=cells,
+        n_simulated=n_simulated,
+        n_by_depth=n_by_depth,
+        efficiencies=efficiencies,
+        timings=timings,
+    )
+
+
+def neuronal_classes(
+    cells: pd.DataFrame, species: str, neuronal: NeuronalOf | None = None
+) -> dict[str, bool | None]:
+    """Return whether each class of a cells table is neuronal (v7.9).
+
+    Args:
+        cells: A cells table (its ``parent`` and ``truth_parent`` classes).
+        species: ``human`` or ``mouse`` (``sim_inputs.is_neuronal_class``).
+        neuronal: An explicit mapping or function (overrides the species).
+
+    Returns:
+        Class -> ``True`` / ``False`` / ``None`` (unknown).
+    """
+    from merxen.annotation import sim_inputs as si
+
+    names = sorted(
+        {str(value) for value in cells["parent"].dropna().astype(str)}
+        | {str(value) for value in cells["truth_parent"].dropna().astype(str)}
+    )
+    if neuronal is not None:
+        return {name: _neuronal(neuronal, name) for name in names}
+    return {name: si.is_neuronal_class(name, species) for name in names}
+
+
+@dataclass
+class ResolvabilityResultV7(ResolvabilityResult):
+    """Everything one version-7 self-map produced (plan §8.3 v7.10).
+
+    Attributes:
+        member_decisions: Each member's own decisions.
+        class_depth: ``resolvability_class_depth.parquet`` content.
+    """
+
+    member_decisions: pd.DataFrame = field(default_factory=pd.DataFrame)
+    class_depth: pd.DataFrame = field(default_factory=pd.DataFrame)
+
+    def write(self, directory: Path) -> dict[str, str]:
+        """Write the four version-7 resolvability files.
+
+        Args:
+            directory: The bundle work directory (or a diagnostic directory).
+
+        Returns:
+            File name per output.
+        """
+        directory.mkdir(parents=True, exist_ok=True)
+        coerce_cells_v7(self.cells).to_parquet(
+            directory / RESOLVABILITY_CELLS_FILE, index=False
+        )
+        self.table.to_parquet(directory / RESOLVABILITY_FILE, index=False)
+        self.class_depth.to_parquet(directory / CLASS_DEPTH_FILE, index=False)
+        (directory / RESOLVABILITY_SUMMARY_FILE).write_text(
+            json.dumps(_json_native(self.summary), indent=2, allow_nan=False) + "\n",
+            encoding="utf-8",
+        )
+        return {
+            "table": RESOLVABILITY_FILE,
+            "cells": RESOLVABILITY_CELLS_FILE,
+            "summary": RESOLVABILITY_SUMMARY_FILE,
+            "class_depth": CLASS_DEPTH_FILE,
+        }
+
+    def bundle_output(self) -> dict[str, Any]:
+        """Return the compact record ``bundle.json`` keeps (version 7)."""
+        record = super().bundle_output()
+        record["files"]["class_depth"] = CLASS_DEPTH_FILE
+        record["resolvability_version"] = RESOLVABILITY_VERSION_V7
+        record["decision_recipe"] = ENSEMBLE_RECIPE
+        record["members"] = self.summary["members"]
+        record["ensemble"] = {
+            regime: {
+                key: value
+                for key, value in stats.items()
+                if key
+                in (
+                    "n_bins",
+                    "n_emitted",
+                    "n_unanimous",
+                    "n_spread",
+                    "n_filled",
+                    "n_spread_failed",
+                )
+            }
+            for regime, stats in self.summary["ensemble"]["regimes"].items()
+        }
+        return record
+
+
+def build_summary_v7(
+    *,
+    test: HeldOutCells,
+    levels: Sequence[LevelMeta],
+    depths: Sequence[int],
+    members: Sequence[EnsembleMember],
+    settings: RuleSettings,
+    ensemble: EnsembleSettings,
+    result: EnsembleDecisions,
+    floors: pd.DataFrame,
+    trust: TrustConstraint,
+    simulation: EnsembleSimulation,
+    stability: Mapping[str, float],
+    species: str,
+    neuronal: Mapping[str, bool | None],
+    class_depth: pd.DataFrame,
+    profile: Any | None,
+    runtime: Mapping[str, float],
+    provenance: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return a version-7 ``resolvability_summary.json`` (plan §8.3 v7.10).
+
+    The version-6 summary of the ensemble decisions (``emission``, ``emitted``,
+    pooled sets, floors, trust from the decisions before the fill), plus the
+    version, the members, the ensemble settings and statistics (member
+    spread and agreement), the emitted bins before the fill, each class's
+    lineage, the class-depth file and the profile prediction; ``provenance``
+    adds the assets, chemistry, top-up and engine records.
+    """
+    emission_members = [member for member in members if member.role == "emission"]
+    first = emission_members[0]
+    stub = _QueryStub(
+        obs=pd.DataFrame(index=pd.RangeIndex(simulation.n_simulated[first.name])),
+        n_by_depth=simulation.n_by_depth[first.name],
+    )
+    summary = build_summary(
+        test=test,
+        levels=levels,
+        depths=depths,
+        recipes=[first.recipe],
+        settings=settings,
+        decisions=result.decisions,
+        floors=floors,
+        trust=trust,
+        queries={first.recipe.name: stub},  # type: ignore[dict-item]
+        stability=stability,
+        species=species,
+        runtime=runtime,
+        provenance={},
+    )
+    decisions = result.decisions
+    for record in decisions.to_dict("records"):
+        entry = summary["emission"][str(record["regime"])][str(record["level"])][
+            str(record["class"])
+        ][str(int(record["depth"]))]
+        entry.update(
+            {
+                "threshold_source": record["threshold_source"],
+                "ensemble_rule": record["ensemble_rule"],
+                "monotone_filled": bool(record["monotone_filled"]),
+                "nonneuronal_high_depth": bool(record["nonneuronal_high_depth"]),
+                "saturated_bp": bool(record["saturated_bp"]),
+                "member_spread": _optional_float(record["member_spread"]),
+                "spread_limit": _optional_float(record["spread_limit"]),
+                "spread_se": _optional_float(record["spread_se"]),
+                "wilson_clearance": _optional_float(record["wilson_clearance"]),
+            }
+        )
+    unfilled = unfilled_decisions(decisions)
+    summary.update(
+        {
+            "resolvability_version": RESOLVABILITY_VERSION_V7,
+            "decision_recipe": ENSEMBLE_RECIPE,
+            "recipes": [member.recipe.to_json() for member in members],
+            "members": [member.to_json() for member in members],
+            "emission_members": [member.name for member in emission_members],
+            "n_simulated_cells": dict(simulation.n_simulated),
+            "n_by_depth_per_member": {
+                name: {str(depth): n for depth, n in values.items()}
+                for name, values in simulation.n_by_depth.items()
+            },
+            "ensemble_settings": ensemble.to_json(),
+            "ensemble": ensemble_summary(result, ensemble),
+            "emitted_before_fill": {
+                regime: emitted_summary(unfilled, regime) for regime in REGIMES
+            },
+            "neuronal_classes": dict(neuronal),
+            "class_depth_file": CLASS_DEPTH_FILE,
+            "profile_prediction": profile_prediction(class_depth, profile),
+        }
+    )
+    summary.update(dict(provenance))
+    return summary
+
+
+TRUST_GUARD_VERSION: Final = 1
+_TRUST_SEVERITY: Final[dict[str | None, int]] = {"refused": 0, "broad_only": 1, None: 2}
+
+
+def member_uses_assets(member: EnsembleMember) -> bool:
+    """Whether a member's efficiency comes from a simulation-input asset.
+
+    ``R3_measured_HO`` (a ``member`` factor table) and the stress recipe
+    ``R1_xtissue_lung_stress`` (a ``stress`` ratio table) do; the R1 and
+    clean recipes (a keyed LogNormal draw, or none) do not.
+    """
+    return member.recipe.efficiency_table is not None
+
+
+def lower_trust_constraint(
+    first: TrustConstraint, second: TrustConstraint
+) -> TrustConstraint:
+    """Return the more severe of two trust constraints (refused < broad_only < none).
+
+    Ties keep ``first`` (its reasons and statistics).
+    """
+    if _TRUST_SEVERITY[second.state] < _TRUST_SEVERITY[first.state]:
+        return second
+    return first
+
+
+def asset_free_trust(
+    cells: pd.DataFrame,
+    levels: Sequence[LevelMeta],
+    depths: Sequence[int],
+    settings: RuleSettings,
+    ensemble: EnsembleSettings,
+    *,
+    members: Sequence[EnsembleMember],
+    neuronal: Mapping[str, bool | None],
+    trust: TrustConstraint,
+) -> tuple[TrustConstraint, dict[str, Any]]:
+    """Guard the trust constraint against simulation-input assets (v7; §21 (v)).
+
+    Simulation inputs never promote trust (OD-E1 as amended, user decision 1).
+    When an emission member uses an asset (``R3_measured_HO``), the ensemble
+    of the asset-free emission members (the R1 draws) is decided on the same
+    cells and the trust constraint is the more severe of the two, so that for
+    every set of assets the trust state is at most its state without any
+    asset: an asset can lower the constraint (as real data can), never raise
+    it. Emission and floors keep the full ensemble.
+
+    Args:
+        cells: The cells table of every member.
+        levels: Level metadata.
+        depths: The depth grid.
+        settings: Rule settings.
+        ensemble: Ensemble settings.
+        members: Every member.
+        neuronal: Class lineage.
+        trust: The full ensemble's trust constraint.
+
+    Returns:
+        ``(guarded constraint, summary record)``.
+    """
+    emission = [member for member in members if member.role == "emission"]
+    with_assets = [member.name for member in emission if member_uses_assets(member)]
+    free = [member.name for member in emission if not member_uses_assets(member)]
+    record: dict[str, Any] = {
+        "version": TRUST_GUARD_VERSION,
+        "rule": (
+            "the more severe of the full ensemble's constraint and the "
+            "asset-free emission members' ensemble constraint"
+        ),
+        "asset_members": with_assets,
+        "asset_free_members": free,
+        "ensemble_state": trust.state,
+        "applied": False,
+        "asset_free_state": trust.state,
+        "state": trust.state,
+    }
+    if not with_assets:
+        record["note"] = "no emission member uses a simulation-input asset"
+        return trust, record
+    if not free:
+        # Every emission member uses an asset: nothing is free of them, so
+        # the family keeps no resolvability-based trust beyond broad-only.
+        guarded = TrustConstraint(
+            state="broad_only",
+            reasons=["every emission member uses a simulation-input asset"],
+            broad_emitted_bins=trust.broad_emitted_bins,
+            leaf_share_by_depth=dict(trust.leaf_share_by_depth),
+            leaf_classes=list(trust.leaf_classes),
+        )
+        guarded = lower_trust_constraint(trust, guarded)
+        record.update(
+            {"applied": True, "asset_free_state": None, "state": guarded.state}
+        )
+        return guarded, record
+    rows = cells[cells[MEMBER_COLUMN].astype(str).isin(free)]
+    decided = ensemble_decide(
+        rows,
+        levels,
+        depths,
+        settings,
+        ensemble,
+        members=free,
+        reported=[],
+        neuronal=neuronal,
+    )
+    free_trust = trust_constraint(decided.unfilled(), levels, settings)
+    guarded = lower_trust_constraint(trust, free_trust)
+    record.update(
+        {
+            "applied": True,
+            "asset_free_state": free_trust.state,
+            "asset_free_reasons": list(free_trust.reasons),
+            "state": guarded.state,
+        }
+    )
+    return guarded, record
+
+
+def trust_and_floors(
+    result: EnsembleDecisions,
+    levels: Sequence[LevelMeta],
+    settings: RuleSettings,
+    *,
+    floor_table: pd.DataFrame | None,
+    species: str,
+) -> tuple[TrustConstraint, pd.DataFrame]:
+    """Return the trust constraint and floors of ensemble decisions (v7.7, v7.9).
+
+    Both come from the decisions before the monotone fill (filled bins take
+    no part in the trust tests or the floors), exactly as version 6 derives
+    them from its decision recipe.
+
+    Args:
+        result: ``ensemble_decide`` output.
+        levels: Level metadata.
+        settings: Rule settings.
+        floor_table: Packaged floors.
+        species: ``human`` or ``mouse``.
+
+    Returns:
+        ``(trust constraint, combined floors)``.
+    """
+    unfilled = result.unfilled()
+    floors = combined_floors(
+        unfilled, levels, settings, floor_table=floor_table, species=species
+    )
+    return trust_constraint(unfilled, levels, settings), floors
+
+
+def decide_v7(
+    cells: pd.DataFrame,
+    levels: Sequence[LevelMeta],
+    depths: Sequence[int],
+    settings: RuleSettings,
+    ensemble: EnsembleSettings,
+    *,
+    members: Sequence[EnsembleMember],
+    neuronal: Mapping[str, bool | None],
+) -> EnsembleDecisions:
+    """Return the ensemble decisions of a cells table (emission and reported)."""
+    return ensemble_decide(
+        cells,
+        levels,
+        depths,
+        settings,
+        ensemble,
+        members=[member.name for member in members if member.role == "emission"],
+        reported=[member.name for member in members if member.role != "emission"],
+        neuronal=neuronal,
+    )
+
+
+def run_resolvability_v7(
+    test: HeldOutCells,
+    *,
+    specs: Sequence[LevelSpec],
+    depths: Sequence[int],
+    members: Sequence[EnsembleMember],
+    map_fn: MapFunction,
+    settings: RuleSettings,
+    ensemble: EnsembleSettings,
+    species: str,
+    floor_table: pd.DataFrame | None = None,
+    fine_seed_check: bool = False,
+    provenance: Mapping[str, Any] | None = None,
+    cells_rules: Sequence[CellsRule] = (),
+    registry: Mapping[str, Any] | None = None,
+    profile: Any | None = None,
+    neuronal: NeuronalOf | None = None,
+) -> ResolvabilityResultV7:
+    """Run a version-7 self-map: members, ensemble, fill, tables (§8.3 v7).
+
+    Args:
+        test: The test cells (topped up, v7.6).
+        specs: Levels to evaluate.
+        depths: The version-7 grid.
+        members: Every member (``ensemble_members``).
+        map_fn: ``(query, tag, seed) -> MMC tidy table``.
+        settings: Rule settings.
+        ensemble: Ensemble settings.
+        species: ``human`` or ``mouse``.
+        floor_table: Packaged floors for the max rule.
+        fine_seed_check: Re-map the first emission member with seed 1 and
+            record the fine levels' seed stability.
+        provenance: Extra summary fields (assets, chemistry, top-up, engine).
+        cells_rules: Production rules applied to each member's cells.
+        registry: Simulation-input registry.
+        profile: Optional ``sim_inputs.DepthProfile`` of the family's species
+            x chemistry (class-depth predictions).
+        neuronal: Class lineage override (default: the species vocabularies).
+
+    Returns:
+        The result.
+
+    Raises:
+        ResolvabilityError: Without an emission member.
+    """
+    emission = [member for member in members if member.role == "emission"]
+    if not emission:
+        raise ResolvabilityError("run_resolvability_v7 needs an emission member")
+    started = time.monotonic()
+    simulation = simulate_members(
+        test,
+        specs=specs,
+        depths=depths,
+        members=members,
+        map_fn=map_fn,
+        cells_rules=cells_rules,
+        registry=registry,
+    )
+    timings = dict(simulation.timings)
+    cells = simulation.cells
+    levels = [spec.meta for spec in specs]
+    lineage = neuronal_classes(cells, species, neuronal)
+    step = time.monotonic()
+    result = decide_v7(
+        cells, levels, depths, settings, ensemble, members=members, neuronal=lineage
+    )
+    timings["decide"] = round(time.monotonic() - step, 3)
+    fine_levels = [spec.meta.level for spec in specs if spec.meta.role == "fine"]
+    stability: dict[str, float] = {}
+    if fine_seed_check and fine_levels:
+        step = time.monotonic()
+        second = simulate_members(
+            test,
+            specs=[spec for spec in specs if spec.meta.role == "fine"],
+            depths=depths,
+            members=[emission[0]],
+            map_fn=map_fn,
+            cells_rules=cells_rules,
+            registry=registry,
+            mapping_seed=1,
+            tag_prefix="seed1_",
+        ).cells
+        timings["map_seed1"] = round(time.monotonic() - step, 3)
+        first_rows = cells[
+            (cells[MEMBER_COLUMN].astype(str) == emission[0].name)
+            & (cells["seed"] == 0)
+        ]
+        for level in fine_levels:
+            stability[level] = seed_stability(
+                first_rows, second, result.decisions, level
+            )
+        cells = pd.concat([cells, second], ignore_index=True)
+    trust, floors = trust_and_floors(
+        result, levels, settings, floor_table=floor_table, species=species
+    )
+    step = time.monotonic()
+    trust, trust_guard = asset_free_trust(
+        cells[cells["seed"] == 0] if "seed" in cells.columns else cells,
+        levels,
+        depths,
+        settings,
+        ensemble,
+        members=members,
+        neuronal=lineage,
+        trust=trust,
+    )
+    timings["trust_guard"] = round(time.monotonic() - step, 3)
+    logger.info(
+        "resolvability v7 trust constraint: %s%s",
+        trust.state or "none",
+        f" ({'; '.join(trust.reasons)})" if trust.reasons else "",
+    )
+    step = time.monotonic()
+    table = resolvability_table_v7(
+        cells,
+        result,
+        levels,
+        settings,
+        efficiencies=simulation.efficiencies,
+        roles={member.name: member.role for member in members},
+    )
+    class_depth = class_depth_table(result.decisions, profile=profile, grid=depths)
+    timings["tabulate"] = round(time.monotonic() - step, 3)
+    summary = build_summary_v7(
+        test=test,
+        levels=levels,
+        depths=depths,
+        members=members,
+        settings=settings,
+        ensemble=ensemble,
+        result=result,
+        floors=floors,
+        trust=trust,
+        simulation=simulation,
+        stability=stability,
+        species=species,
+        neuronal=lineage,
+        class_depth=class_depth,
+        profile=profile,
+        runtime={**timings, "total": round(time.monotonic() - started, 3)},
+        provenance=provenance or {},
+    )
+    summary["trust_asset_guard"] = trust_guard
+    for regime, stats in summary["ensemble"]["regimes"].items():
+        logger.info(
+            "resolvability v7 %s: %d of %d bins emitted (%d unanimous, %d by the "
+            "spread, %d filled; %d spread failures)",
+            regime,
+            stats["n_emitted"],
+            stats["n_bins"],
+            stats["n_unanimous"],
+            stats["n_spread"],
+            stats["n_filled"],
+            stats["n_spread_failed"],
+        )
+    return ResolvabilityResultV7(
+        cells=cells,
+        table=table,
+        decisions=result.decisions,
+        floors=floors,
+        trust=trust,
+        summary=summary,
+        member_decisions=result.member_decisions,
+        class_depth=class_depth,
+    )
+
+
+def v7_diagnostic_comparison(
+    reference: pd.DataFrame,
+    candidate: pd.DataFrame,
+    *,
+    regimes: Sequence[Regime] = ("validated", "provisional"),
+) -> dict[str, Any]:
+    """Compare a bundle's decisions with version-7 decisions (diagnostic only).
+
+    Used for the version-6 families (plan §8.3 v7.1; pre-registration §21
+    (vii): version 6 vs version 7 emitted triples lost and gained per level)
+    and for fresh ensemble draws (§21 (iii)). Nothing is applied.
+
+    Args:
+        reference: The bundle's stored decisions (version 6 or 7).
+        candidate: The version-7 decisions computed beside them.
+        regimes: Regimes to compare.
+
+    Returns:
+        Per regime: ``triple_churn(reference, candidate)``.
+    """
+    return {
+        regime: triple_churn(
+            emitted_triples(reference, regime), emitted_triples(candidate, regime)
+        )
+        for regime in regimes
+    }
+
+
+# --------------------------------------------------------------------------
+# Version 7: test-set top-up (v7.6; user decision 5)
+
+TOP_UP_VERSION: Final = 1
+TOP_UP_STREAM: Final = "class_top_up"
+# Pre-registration §21.3: 200 = 4 x min_confident_n, only tightenable.
+TOP_UP_MIN_CLASS_TEST_CELLS: Final = 200
+
+
+def water_fill(available: Mapping[str, int], need: int) -> dict[str, int]:
+    """Split ``need`` cells over strata as equally as their sizes allow.
+
+    Every stratum gets ``min(available, t)`` for the largest level ``t``
+    that fits; the cells left over go one each to the strata with more
+    available, in name order (deterministic).
+
+    Args:
+        available: Candidate cells per stratum.
+        need: Cells to take.
+
+    Returns:
+        Cells to take per stratum (every stratum listed).
+    """
+    names = sorted(str(name) for name in available)
+    sizes = {name: max(0, int(available[name])) for name in names}
+    if need <= 0:
+        return {name: 0 for name in names}
+    if sum(sizes.values()) <= need:
+        return dict(sizes)
+    low, high = 0, max(sizes.values())
+    while low < high:
+        middle = (low + high + 1) // 2
+        if sum(min(size, middle) for size in sizes.values()) <= need:
+            low = middle
+        else:
+            high = middle - 1
+    take = {name: min(size, low) for name, size in sizes.items()}
+    rest = need - sum(take.values())
+    for name in names:
+        if rest <= 0:
+            break
+        if sizes[name] > take[name]:
+            take[name] += 1
+            rest -= 1
+    return take
+
+
+def _top_up_order(seed: int, cell_ids: Sequence[str]) -> np.ndarray:
+    """Return candidate positions ranked by their keyed draw (lowest first)."""
+    keys = [draw_key(int(seed), TOP_UP_STREAM, str(cell)) for cell in cell_ids]
+    return np.array(sorted(range(len(keys)), key=lambda index: keys[index]), dtype=int)
+
+
+def class_top_up(
+    candidates: pd.DataFrame,
+    *,
+    class_column: str,
+    leaf_column: str,
+    have: Mapping[str, int],
+    target: int = TOP_UP_MIN_CLASS_TEST_CELLS,
+    seed: int = 0,
+    pool_column: str | None = None,
+    pool_order: Sequence[str] | None = None,
+    cluster_column: str | None = None,
+    cluster_cap: Mapping[str, int] | None = None,
+    pool_classes: Mapping[str, Iterable[str]] | None = None,
+) -> tuple[pd.Index, dict[str, Any]]:
+    """Top every class with fewer than ``target`` test cells up to it (v7.6).
+
+    Before anything is mapped, a class of the leaf's parent level (mouse WMB
+    class; human leaf-level class) holding fewer than ``target`` test cells
+    gains up to ``target - have`` candidates, stratified by leaf type
+    (``water_fill``), drawn pool by pool in ``pool_order`` (human: the
+    held-out donor's unused cells, then the other-region pool; mouse: one
+    pool). Within a leaf the candidates with the lowest keyed draw
+    (``draw_key(seed, "class_top_up", cell id)``) are taken, so the draw
+    does not depend on the candidates' order. ``cluster_cap`` bounds the
+    cells taken from one cluster (mouse: 5% of its 10Xv3 cells, the gate-P
+    bound); ``pool_classes`` restricts a pool to some classes (human: the
+    other-region pool serves non-neuronal classes only). The caller passes
+    only admissible candidates (not test cells, not marker-training cells,
+    training clusters only, never another frontal donor). No mapping result
+    enters: the rule is a count fixed before mapping.
+
+    Args:
+        candidates: Admissible candidates (index = cell id).
+        class_column: Their class.
+        leaf_column: Their leaf type (the stratum).
+        have: Test cells per class before the top-up (classes with none are
+            not topped up).
+        target: The class minimum (200).
+        seed: The test-set seed.
+        pool_column: Column naming each candidate's pool (``None``: one).
+        pool_order: Pools in priority order (default: sorted names).
+        cluster_column: Column naming each candidate's cluster.
+        cluster_cap: Largest number of cells taken per cluster.
+        pool_classes: Classes a pool may serve (default: every class).
+
+    Returns:
+        ``(chosen ids in id order, record)``: the record holds, per class,
+        the test cells before and after, what each pool held and gave,
+        whether the pools ran out, and the rule.
+    """
+    frame = candidates.copy()
+    frame.index = frame.index.astype(str)
+    frame = frame[~frame.index.duplicated(keep="first")].sort_index()
+    needs = {
+        str(cls): int(target) - int(count)
+        for cls, count in have.items()
+        if 0 < int(count) < int(target)
+    }
+    frame = frame[frame[class_column].astype(str).isin(list(needs))]
+    pools = (
+        frame[pool_column].astype(str)
+        if pool_column is not None
+        else pd.Series("pool", index=frame.index)
+    )
+    order = list(pool_order) if pool_order is not None else sorted(set(pools))
+    ranked = frame.iloc[_top_up_order(seed, list(frame.index))] if len(frame) else frame
+    capped_out = 0
+    if cluster_column is not None and cluster_cap is not None and len(ranked):
+        clusters = ranked[cluster_column].astype(str)
+        rank = clusters.groupby(clusters, sort=False).cumcount().to_numpy()
+        caps = clusters.map(lambda name: int(cluster_cap.get(name, 0))).to_numpy()
+        within = rank < caps
+        capped_out = int((~within).sum())
+        ranked = ranked[within]
+    chosen: list[str] = []
+    per_class: dict[str, Any] = {}
+    for cls in sorted(needs):
+        need = needs[cls]
+        rows = ranked[ranked[class_column].astype(str) == cls]
+        record: dict[str, Any] = {
+            "before": int(have[cls]),
+            "need": int(need),
+            "pools": {},
+        }
+        for pool in order:
+            allowed = pool_classes.get(pool) if pool_classes is not None else None
+            if allowed is not None and cls not in {str(item) for item in allowed}:
+                record["pools"][pool] = {"available": 0, "taken": 0, "serves": False}
+                continue
+            in_pool = rows[pools.reindex(rows.index).to_numpy() == pool]
+            leaves = in_pool[leaf_column].astype(str)
+            available = leaves.value_counts().to_dict()
+            take = water_fill(available, need)
+            picked = [
+                cell
+                for leaf, count in take.items()
+                if count > 0
+                for cell in in_pool.index[(leaves == leaf).to_numpy()][:count]
+            ]
+            chosen.extend(picked)
+            need -= len(picked)
+            record["pools"][pool] = {
+                "available": int(len(in_pool)),
+                "taken": int(len(picked)),
+                "per_leaf": {leaf: int(count) for leaf, count in take.items() if count},
+            }
+        record["after"] = int(have[cls]) + int(needs[cls] - need)
+        record["ran_out"] = bool(need > 0)
+        per_class[cls] = record
+    selected = pd.Index(sorted(set(chosen)))
+    return selected, {
+        "version": TOP_UP_VERSION,
+        "rule": (
+            f"every class with fewer than {int(target)} test cells is topped up to "
+            f"{int(target)} where its pool allows, stratified by leaf type "
+            "(water filling), lowest keyed draw first, before any mapping"
+        ),
+        "target": int(target),
+        "seed": int(seed),
+        "pool_order": order,
+        "n_candidates": int(len(frame)),
+        "n_capped_by_cluster": capped_out,
+        "n_cells": int(len(selected)),
+        "per_class": per_class,
+    }

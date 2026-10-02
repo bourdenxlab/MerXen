@@ -2813,7 +2813,10 @@ def test_holdout_bundle_trains_without_the_donor_and_keeps_its_cells_as_tests(
         "whb_cluster_membership",
     }
     panel = make_panel(GENES)
-    config = AnnotationConfig(species="human", resolvability={"n_test_cells": 20})
+    # The version-6 test set (M3b); version 7 adds the class top-up (M3c).
+    config = AnnotationConfig(
+        species="human", resolvability={"n_test_cells": 20, "version": 6}
+    )
     store = ReferenceStore(tmp_path / "store")
     bundle = store.get_or_build(
         spec, panel, builder=builder_for(spec, config), config=config
@@ -3154,7 +3157,7 @@ def test_whb_primary_self_maps_the_held_out_cells_onto_the_held_out_bundle(
         )
     )
     panel = make_panel(GENES)
-    config = AnnotationConfig(species="human")
+    config = AnnotationConfig(species="human", resolvability={"version": 6})
     store = ReferenceStore(tmp_path / "store", scratch_root=tmp_path / "scratch")
     (tmp_path / "scratch").mkdir()
     bundle = store.get_or_build(
@@ -3764,9 +3767,11 @@ def test_tiny_real_wmb_bundle_self_maps_through_real_mapmycells(
             },
         )
     )
+    # The version-6 path (R1 + clean) through real MapMyCells; a tiny
+    # unlisted family would otherwise get version 7's ensemble (M3c).
     config = AnnotationConfig(
         species="mouse",
-        resolvability={"min_cells_per_bin": 5, "min_confident_n": 5},
+        resolvability={"min_cells_per_bin": 5, "min_confident_n": 5, "version": 6},
     )
     panel = make_panel(genes[:30], species="mouse")
     store = ReferenceStore(tmp_path / "store", scratch_root=tmp_path / "scratch")

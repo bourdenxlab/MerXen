@@ -484,6 +484,11 @@ class AnnotationPanelConfig(_AnnotationModel):
         xplat_min_intersection_genes: A ``per_platform`` intersection panel
             with fewer genes supports broad-level cross-platform statistics
             only (plan §8.5).
+        panel_chemistry: The panel's chemistry for measured simulation
+            inputs (M3c, plan §8.3 v7.4): ``auto`` (MERSCOPE -> ``merscope``;
+            a Xenium panel with Jaccard >= 0.95 to a pinned public Prime list
+            -> ``xenium_prime``; else unknown, which has no factor table) or
+            a declared value.
     """
 
     panel_mode: Literal["auto", "intersection", "per_platform"] = "auto"
@@ -515,6 +520,7 @@ class AnnotationPanelConfig(_AnnotationModel):
     setc_max_abs_log2_deviation: float = Field(default=2.0, gt=0.0)
     setc_log2_pseudocount: float = Field(default=1e-3, gt=0.0)
     xplat_min_intersection_genes: int = Field(default=100, ge=1)
+    panel_chemistry: Literal["auto", "xenium_prime", "xenium_v1", "merscope"] = "auto"
 
     @field_validator(
         "intersection_min_jaccard",
@@ -622,6 +628,41 @@ class AnnotationResolvabilityConfig(_AnnotationModel):
         gate_p_spread_se_multiplier: Replicate spread allowed, in standard
             errors.
         gate_p_min_coverage: Coverage gate P requires.
+        version: Resolvability version (M3c, plan §8.3 v7.1): ``auto`` (6 for
+            the families of ``validated_panels.csv`` and
+            ``resolvability_v6_pins.csv``, else 7), or 6 / 7 explicitly;
+            forcing 7 on a version-6 family is refused outside the
+            diagnostic (``annotation-panel-simulate --resolvability-version
+            7``).
+        ensemble_r1_seeds: Seeds of the ``R1_contam_HO`` emission members
+            (``None``: the family-type default of plan §8.3 v7.3 as amended
+            on 2026-09-29, ``[0, 6, 7, 8, 9, 10]`` where the species x
+            chemistry has a measured factor table, else ``[0, 6, ..., 12]``;
+            ``resolvability.default_member_seeds``).
+        ensemble_r3_seeds: Seeds of the ``R3_measured_HO`` emission members
+            where a measured table exists (``None``: ``[2, 3]``).
+        ensemble_spread_floor: E2's smallest allowed member spread.
+        ensemble_spread_se_multiplier: E2's spread limit in standard errors.
+        ensemble_member_min_confident: Confident check-half calls (Kish n)
+            each member needs for the spread test.
+        ensemble_spread_wilson_margin_se: The spread route of E2 needs the
+            pooled Wilson bound to clear ``target - wilson_margin`` by this
+            many standard errors ``sqrt(p (1 - p) / n_eff)`` of the pooled
+            precision (amendment of 2026-09-29, pre-registration §22.3; the
+            unanimous route is unaffected).
+        saturated_bp_share: Fit-half share at ``bp = 1`` above which a set
+            without a local threshold is judged at the cap (v7.8).
+        monotone_depth: Apply the monotone-in-depth fill (v7.9).
+        nonneuronal_monotone_max_depth: Non-neuronal bins at or above this
+            depth are never filled.
+        topup_min_class_test_cells: Classes with fewer test cells are topped
+            up to this many before mapping (v7.6).
+        r3_table_rule: ``R3_measured_HO`` table rule (``all_measured`` only
+            for the D3 regression).
+        r3_residual_sd_log2: R3 residual SD of measured genes (log2).
+        neighbour_structured_spill: Experimental neighbour-structured spill
+            (user decision 7: behind a flag, off by default; not implemented
+            in M3c, so turning it on is refused).
     """
 
     enabled: bool = True
@@ -655,6 +696,33 @@ class AnnotationResolvabilityConfig(_AnnotationModel):
     gate_p_topup_max_cluster_frac: float = 0.05
     gate_p_spread_se_multiplier: float = Field(default=3.5, gt=0.0)
     gate_p_min_coverage: float = 0.30
+    version: Literal["auto", 6, 7] = "auto"
+    ensemble_r1_seeds: list[int] | None = None
+    ensemble_r3_seeds: list[int] | None = None
+    ensemble_spread_floor: float = Field(default=0.03, ge=0.0)
+    ensemble_spread_se_multiplier: float = Field(default=3.5, gt=0.0)
+    ensemble_member_min_confident: int = Field(default=10, ge=1)
+    ensemble_spread_wilson_margin_se: float = Field(default=1.0, ge=0.0)
+    saturated_bp_share: float = 0.90
+    monotone_depth: bool = True
+    nonneuronal_monotone_max_depth: int = Field(default=1000, ge=1)
+    topup_min_class_test_cells: int = Field(default=200, ge=0)
+    r3_table_rule: Literal["restricted", "all_measured"] = "restricted"
+    r3_residual_sd_log2: float = Field(default=0.20, ge=0.0)
+    neighbour_structured_spill: bool = False
+
+    @field_validator("neighbour_structured_spill")
+    @classmethod
+    def _refuse_neighbour_spill(
+        cls: type[AnnotationResolvabilityConfig], value: bool
+    ) -> bool:
+        if value:
+            raise ValueError(
+                "neighbour_structured_spill is experimental and not implemented "
+                "(user decision 7, OD-E17: behind a flag, off by default; it needs "
+                "a vectorised form and the MERFISH-638850 neighbour table)"
+            )
+        return value
 
     @field_validator("threshold_rule", mode="before")
     @classmethod
@@ -674,6 +742,7 @@ class AnnotationResolvabilityConfig(_AnnotationModel):
         "seed_stability_max_change",
         "gate_p_topup_max_cluster_frac",
         "gate_p_min_coverage",
+        "saturated_bp_share",
     )
     @classmethod
     def _check_share(
@@ -687,6 +756,10 @@ class AnnotationResolvabilityConfig(_AnnotationModel):
     ) -> AnnotationResolvabilityConfig:
         if not self.gate_p_seeds:
             raise ValueError("gate_p_seeds must not be empty")
+        for name in ("ensemble_r1_seeds", "ensemble_r3_seeds"):
+            seeds = getattr(self, name)
+            if seeds is not None and (not seeds or len(set(seeds)) != len(seeds)):
+                raise ValueError(f"{name} must be distinct and not empty")
         if self.gate_p_replicate_min_confident_n > self.gate_p_min_confident_n:
             raise ValueError(
                 "gate_p_replicate_min_confident_n cannot exceed gate_p_min_confident_n"
@@ -812,6 +885,19 @@ class AnnotationRealQcConfig(_AnnotationModel):
         prefilter_spotcheck_min_agreement: 5K prefilter spot-check agreement.
         seeded_families_warn_only_until_gate: The seeded real-data families
             only warn until their species gate has merged.
+        coverage_warn_margin: M3c (user decision 4): warn per (level, called
+            class) when the real confident share is below the class-depth
+            prediction at the dataset's own per-class depth by more than
+            this (``real_qc.coverage_vs_simulation``; never an offset).
+        coverage_min_cells: Dataset cells a (level, class) needs for that
+            warning.
+        factor_remeasure_min_r: M3c: warn when the first in-house dataset's
+            re-measured per-gene factors correlate below this with the
+            stored factor table on the informative genes
+            (``real_qc.factor_remeasure``).
+        nonneuronal_high_depth_counts: M3c (§8.3 v7.9): total counts from
+            which a non-neuronal cell of a ``nonneuronal_high_depth`` bin is
+            flagged (report-only).
     """
 
     marker_consistency_warn: float | None = None
@@ -821,12 +907,18 @@ class AnnotationRealQcConfig(_AnnotationModel):
     genes_per_count_gap_warn: float = Field(default=0.45, ge=0.0)
     prefilter_spotcheck_min_agreement: float = 0.95
     seeded_families_warn_only_until_gate: bool = True
+    coverage_warn_margin: float = 0.10
+    coverage_min_cells: int = Field(default=200, ge=1)
+    factor_remeasure_min_r: float = 0.9
+    nonneuronal_high_depth_counts: int = Field(default=1000, ge=1)
 
     @field_validator(
         "marker_consistency_broad_only",
         "paired_broad_jsd_warn",
         "uninformative_strata_warn_frac",
         "prefilter_spotcheck_min_agreement",
+        "coverage_warn_margin",
+        "factor_remeasure_min_r",
     )
     @classmethod
     def _check_share(

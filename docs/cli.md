@@ -536,7 +536,8 @@ merxen annotation-panel-simulate --public-panel xenium_prime_5k_mouse \
   --param annotation_wmb_mapping_stats_path=/path/precomputed_stats_ABC_revision_230821.h5 \
   --param annotation_wmb_selfmap_test_cells_path=/path/truth.csv \
   --scratch-dir /srv/storage/.../scratch --out-dir /srv/storage/.../simulate/5k_mouse \
-  --n-processors 8 --max-gb 40 --expected-depth 250
+  --n-processors 8 --max-gb 40 \
+  --depth-profile-asset depth__xenium_prime__mouse_brain_ff
 ```
 
 1. Resolves the gene list as a declared panel (`annotation-panel
@@ -551,9 +552,42 @@ merxen annotation-panel-simulate --public-panel xenium_prime_5k_mouse \
    local isotonic thresholds, Wilson bound and point precision, pooled deep
    bins) in the panel's regime (`validated` only for a real-data-validated
    family, else `provisional` with the provisional margins), the trust state,
-   weak and collapsed parents; with `--expected-depth` the classes emitted at
-   that median depth, with `--depth-profile` (CSV of per-cell panel counts)
-   each class's share of cells in emitted bins.
+   weak and collapsed parents. The headline is the **per-class depth
+   profile** (M3c, plan §8.3 v7.5): `--depth-profile` takes a CSV of per-cell
+   total counts, per class (a `class` column, the phase-1 `depth_profile.csv`
+   format) or pooled, and `--depth-profile-asset` a registered
+   simulation-input profile (`depth__xenium_prime__mouse_brain_ff`, the public
+   5K mouse section; `depth__xenium_prime__human_lung_ffpe`, the pooled lung
+   FFPE scenario for human Prime). Per (level, class) it reports the
+   profile's share of the class's cells in emitted bins (resolvable share)
+   and the predicted coverage `sum_d s_c(d) cov(L, c, d)`
+   (`<reference>/profile_class_depth.csv`); a class with fewer than 100
+   profile cells uses the pooled neuronal or non-neuronal profile, and no
+   profile crosses species. With profile mode (on by default when a profile
+   is given; `--no-profile-mode`), each emission member of the bundle (its
+   recorded members; for a new version-7 bundle the eight of plan §8.3 v7.3,
+   `R1_contam_HO@0`, `@6`-`@10` plus `R3_measured_HO@2`, `@3` for Xenium
+   Prime 5K mouse, else `R1_contam_HO@0`, `@6`-`@12`; `--profile-members` to
+   choose) simulates cells at the profile's
+   per-class TOTAL depth (phase 1's D-recipe: `min(max(2 n_c, 2,000), 8 n_c)`
+   cells per truth class, 25% spill, exact-total thinning, binned on the
+   realised total), maps them onto the self-map engine and reports the raw
+   rule and the coverage under the bundle's provisional decisions per called
+   class, per member and as the member mean, weighted to
+   `--real-composition` (class, subclass, n_cells) when given; without one,
+   the per-class rows stay unweighted and the ALL row is weighted to the
+   profile's class composition, or to the test-set composition for a pooled
+   scenario such as the lung-FFPE totals, as is the class-depth headline
+   (`<reference>/profile_predictions.csv`, `profile_cells.parquet`). Profile
+   mode is a prediction only and never enters emission. `--expected-depth`
+   remains a secondary line (one depth for every cell). Xenium Prime 5K
+   panels carry the panel-card notes "Simulated glial coverage is an upper
+   bound: -.06 to -.18 on vendor-segmented 5K cells, -.04 to -.14
+   re-segmented with ProSeg" and "Precision is unmeasured on real data",
+   followed by the M3c trust rules (provisional,
+   gate P on the version-7 ensemble, the downgrade-only per-class coverage
+   warning without an offset, the in-sample caveat and the species' next
+   measurements; [Annotation](stages/annotation.md#xenium-prime-5k-panel-card-m3c)).
 4. For prefiltered panels (the prefilter is opt-in; `--prefilter-compare
    auto`; `always` / `off`),
    finds the unfiltered lookup on the self-map engine's marker precompute,
@@ -584,7 +618,12 @@ Outputs in `--out-dir`: `simulate_report.json`, `SIMULATE_REPORT.txt`,
 | `--scratch-dir PATH` | Build scratch and the unfiltered markers (large for 5K panels: use `/srv/storage`). |
 | `--n-processors N`, `--max-gb N` | ctm processes and reference-marker memory bound. |
 | `--prefilter-compare auto\|always\|off` | See step 4. |
-| `--expected-depth N`, `--depth-profile PATH` | See step 3. |
+| `--depth-profile PATH`, `--depth-profile-asset ID` | The per-class (or pooled) depth profile of the headline; see step 3. |
+| `--profile-mode/--no-profile-mode`, `--profile-members LIST`, `--real-composition PATH` | Profile mode (default on with a profile), its members and the real composition its cells are weighted to; see step 3. |
+| `--expected-depth N` | Secondary line: the classes emitted at one median depth. |
+| `--resolvability-version auto\|7` | `7`: for a version-6 family (set a, ag7, VZG2, the pinned P5011 family) also compute the resolvability version-7 decisions (the eight emission members of plan §8.3 v7.3: R1 x 8, or R1 x 6 + R3 x 2 where a measured table exists) on the bundle's test set as a diagnostic: `<reference>/v7_diagnostic/` holds each ensemble's tables, `v7_diagnostic.json` and `V7_DIAGNOSTIC.txt` (version 6 vs 7 emitted triples lost and gained per level and regime). Never written to the store, never applied; the bundle and its emitted decisions are unchanged. Version-7 families build version 7 anyway (plan §8.3 v7.1). |
+| `--v7-fresh-seeds LIST`, `--v7-fresh-r3-seeds LIST` | A fresh version-7 ensemble B (R1 at these seeds, e.g. `3,4,5`; R3 at these seeds, default `1`; `--v7-fresh-r3-seed` is an alias) mapped beside ensemble A (the bundle's, or the diagnostic's); its emitted-triple churn is reported (pre-registration §21 (iii), (vii)). B must share no member with A. Diagnostic only. |
+| `--v7-comparator` | Ensemble B is the pre-registered comparator of the amended churn re-test (pre-registration §22.4): `R1_contam_HO@20`-`@25` + `R3_measured_HO@20`, `@21` where a measured table exists, else `R1_contam_HO@20`-`@27`. Diagnostic only. |
 | `--gate-p` | The gate-P programme (NP1–NP9: leave-one-donor-out HO bundles, the second mouse test draw, seeds 0 / 1, stress recipes; plan §8.8, §14). M13 registers it (`merxen.annotation.simulate.register_gate_p_hook`, from `scripts/acceptance/new_panel.py`); until then the option is refused before any compute. |
 
 ## `merxen annotate`
