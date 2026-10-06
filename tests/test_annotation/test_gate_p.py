@@ -3960,6 +3960,71 @@ def test_np7_scores_the_default_group_on_its_check_half_only() -> None:
     assert level["n_excluded_confident"] == 5
 
 
+def test_np7_refuses_tested_sets_built_on_other_calls() -> None:
+    """A tested set must hold in the pooled held-out calls what it was built on.
+
+    As for NP3: D1's 30-count bin holds 200 X calls (100 fit-half, 100
+    check-half), D2's 50. A plain concat of the tables holds 250 there and
+    tests the bin on its own; the pooled held-out calls hold 150, below
+    n_min, so there 30 is pooled into ">= 10". Scored on the held-out pool,
+    the concat's sets would let the fit half decide which bins NP7 tests.
+    NP7 refuses them. A hand-built set below n_min is refused even when its
+    count matches the pool.
+    """
+    decisions = _np7_decisions(
+        {("supercluster", "X", 10): 0.70, ("supercluster", "X", 30): 0.70}
+    )
+    d1 = pd.concat(
+        [
+            _np7_rows([(200, "X", "nX", "X", 0.95)], prefix="d1a").assign(half=1),
+            _np7_rows([(200, "X", "nX", "X", 0.95)], depth=30, prefix="d1b"),
+        ],
+        ignore_index=True,
+    )
+    d1.loc[d1["depth"] == 30, "half"] = np.arange(200) % 2
+    d1["half"] = d1["half"].astype(int)
+    d2 = pd.concat(
+        [
+            _np7_rows([(200, "X", "nX", "X", 0.95)], prefix="d2a"),
+            _np7_rows([(50, "X", "nX", "X", 0.95)], depth=30, prefix="d2b"),
+        ],
+        ignore_index=True,
+    )
+    replicates = {("D1", 0): d1, ("D2", 0): d2}
+    options: dict[str, Any] = {
+        "default_group": "D1",
+        "species": "human",
+        "settings": gp.Np7Settings(),
+        "vocab": _np7_vocab(),
+    }
+    concat = pd.concat([d1, d2], ignore_index=True)
+    leaked = res.gate_p_tested_sets(concat, decisions, regime="provisional")
+    assert [
+        (gp.tested_set_label(item), item.n_confident)
+        for item in leaked[("supercluster", "X")] or []
+    ] == [("30", 250), ("10", 400)]
+    with pytest.raises(
+        ValueError, match=r"np7_error_structure: .*supercluster/X 30 .* 250 .* 150"
+    ):
+        gp.np7_error_structure(replicates, decisions, leaked, **options)
+    pooled = gp.pooled_held_out_cells(replicates, default_group="D1")
+    tested = res.gate_p_tested_sets(pooled, decisions, regime="provisional")
+    sets = tested[("supercluster", "X")] or []
+    assert [(gp.tested_set_label(item), item.n_confident) for item in sets] == [
+        (">=10", 550),
+        ("10", 400),
+    ]
+    tables = gp.np7_error_structure(replicates, decisions, tested, **options)
+    assert tables.wrong_node["set"].tolist() == [">=10", "10"]
+    assert tables.wrong_node["n_called_confident"].tolist() == [550, 400]
+    # A set below n_min is no tested set, though its count is the pool's.
+    thin = res.GatePTestedSet("supercluster", "X", (30,), False, 150, 1.0, 0.975)
+    with pytest.raises(ValueError, match=r"supercluster/X 30 .* fewer than .*200"):
+        gp.np7_error_structure(
+            replicates, decisions, {("supercluster", "X"): [*sets, thin]}, **options
+        )
+
+
 def test_np7_tables_per_member_feed_every_member_verdict() -> None:
     """Version 7: NP7 per emission member (K9.1), combined over the members."""
     decisions = _np7_decisions(XY_AT_10)
@@ -4130,10 +4195,16 @@ def test_np7_settings_hold_the_section_14_limits() -> None:
     assert np7.max_excluded_share == pytest.approx(0.01)
     assert np7.max_wrong_node_share == pytest.approx(0.05)
     assert np7.region_column == "region_plausible_frontal_cortex"
+    config = AnnotationResolvabilityConfig()
+    assert np7.min_confident_n == config.gate_p_min_confident_n == 200
+    assert gp.Np7Settings.from_config(config) == np7
+    custom = config.model_copy(update={"gate_p_min_confident_n": 150})
+    assert gp.Np7Settings.from_config(custom).min_confident_n == 150
     for bad in (
         {"max_excluded_share": -0.01},
         {"max_wrong_node_share": 1.5},
         {"region": ""},
+        {"min_confident_n": 0},
     ):
         fields: dict[str, Any] = dict(bad)
         with pytest.raises(ValueError, match="Np7Settings"):

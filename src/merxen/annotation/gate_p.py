@@ -1834,7 +1834,7 @@ def _weighted_set(
 
 
 def _check_set_count(
-    item: res.GatePTestedSet, n_confident: int, min_confident_n: int
+    item: res.GatePTestedSet, n_confident: int, min_confident_n: int, who: str
 ) -> None:
     """Check that a tested set was built on the calls it is scored on.
 
@@ -1844,6 +1844,12 @@ def _check_set_count(
     fitted) holds another count there, and could make a bin a tested set,
     or move D_P, that the pooled calls do not support.
 
+    Args:
+        item: The tested set.
+        n_confident: Its confident calls in the pooled held-out calls.
+        min_confident_n: ``gate_p_min_confident_n`` (200).
+        who: The criterion's function, named in the error.
+
     Raises:
         ValueError: If ``n_confident`` differs from the set's
             ``n_confident``, or is below ``min_confident_n``.
@@ -1851,7 +1857,7 @@ def _check_set_count(
     label = f"{item.level}/{item.cls} {tested_set_label(item)}"
     if n_confident != item.n_confident:
         raise ValueError(
-            f"np3_set_stats: the tested set {label} was built on "
+            f"{who}: the tested set {label} was built on "
             f"{item.n_confident} confident calls but holds {n_confident} in "
             "the pooled held-out calls: build the tested sets with "
             "gate_p_tested_sets on pooled_held_out_cells of the same "
@@ -1860,7 +1866,7 @@ def _check_set_count(
         )
     if n_confident < min_confident_n:
         raise ValueError(
-            f"np3_set_stats: the tested set {label} holds {n_confident} "
+            f"{who}: the tested set {label} holds {n_confident} "
             f"confident calls, fewer than gate_p_min_confident_n "
             f"({min_confident_n}): it is not a tested set"
         )
@@ -2003,7 +2009,9 @@ def np3_set_stats(
             called = index.called_positions(item)
             called_confident = confident[called]
             in_set = called[called_confident]
-            _check_set_count(item, int(len(in_set)), settings.min_confident_n)
+            _check_set_count(
+                item, int(len(in_set)), settings.min_confident_n, "np3_set_stats"
+            )
             set_correct = correct[in_set]
             results: list[WeightedTestedSet] = []
             for scheme in set_schemes:
@@ -4061,6 +4069,11 @@ NP7_WRONG_NODE_COLUMNS: Final[tuple[str, ...]] = (
 )
 # The node of a wrong call without a call value (kept apart from any label).
 _NO_NODE: Final = "<none>"
+# The config's default ``gate_p_min_confident_n`` (200), so that
+# ``Np7Settings()`` duplicates no config literal (CHECK K17 item 3).
+_DEFAULT_MIN_CONFIDENT_N: Final[int] = (
+    AnnotationResolvabilityConfig().gate_p_min_confident_n
+)
 
 
 @dataclass(frozen=True)
@@ -4075,17 +4088,22 @@ class Np7Settings:
             calls at a tested set that one wrong node may receive (0.05).
         region: The region of the vocab's plausibility column
             (``region_plausible_<region>``; ``frontal_cortex``, CHECK K4).
+        min_confident_n: Confident calls a tested set holds at least
+            (``gate_p_min_confident_n``, 200); ``np7_error_structure``
+            refuses a set with fewer, as ``np3_set_stats`` does.
     """
 
     max_excluded_share: float = NP7_MAX_EXCLUDED_SHARE
     max_wrong_node_share: float = NP7_MAX_WRONG_NODE_SHARE
     region: str = NP7_REGION
+    min_confident_n: int = _DEFAULT_MIN_CONFIDENT_N
 
     def __post_init__(self) -> None:
         """Validate the constants.
 
         Raises:
-            ValueError: If a share is outside [0, 1] or the region is empty.
+            ValueError: If a share is outside [0, 1], the region is empty or
+                ``min_confident_n`` is below 1.
         """
         for name in ("max_excluded_share", "max_wrong_node_share"):
             value = getattr(self, name)
@@ -4095,6 +4113,24 @@ class Np7Settings:
                 )
         if not self.region.strip():
             raise ValueError("Np7Settings.region must not be empty")
+        if self.min_confident_n < 1:
+            raise ValueError(
+                "Np7Settings.min_confident_n must be >= 1, got "
+                f"{self.min_confident_n!r}"
+            )
+
+    @classmethod
+    def from_config(cls, config: AnnotationResolvabilityConfig) -> Np7Settings:
+        """Read the NP7 settings from the resolvability config (§14 NP7).
+
+        Args:
+            config: The resolvability config.
+
+        Returns:
+            The settings: ``min_confident_n`` from the config; the shares and
+            the region are the §14 and CHECK K4 constants.
+        """
+        return cls(min_confident_n=config.gate_p_min_confident_n)
 
     @property
     def region_column(self) -> str:
@@ -4418,7 +4454,13 @@ def _np7_wrong_node_table(
     tested: Mapping[tuple[str, str], Sequence[res.GatePTestedSet] | None],
     settings: Np7Settings,
 ) -> pd.DataFrame:
-    """The 5% part per tested set (§14 NP7; D12 truth view, called view reported)."""
+    """The 5% part per tested set (§14 NP7; D12 truth view, called view reported).
+
+    Raises:
+        ValueError: If a tested set does not hold, in the pooled held-out
+            calls, the confident calls it was built on, or holds fewer than
+            ``settings.min_confident_n`` (``_check_set_count``).
+    """
     truth = _labels(rows.frame["truth_parent"])
     counted = rows.confident | rows.excluded_confident
     wrong = rows.excluded_confident | (rows.confident & ~rows.correct)
@@ -4432,6 +4474,9 @@ def _np7_wrong_node_table(
             top = _node_counts(rows.node[mine_wrong])
             node, n_node = top[0] if top else (None, 0)
             called = rows.index.positions(item)
+            _check_set_count(
+                item, int(len(called)), settings.min_confident_n, "np7_error_structure"
+            )
             called_wrong = called[~rows.correct[called]]
             called_top = _node_counts(rows.node[called_wrong])
             called_node, n_called_node = called_top[0] if called_top else (None, 0)
@@ -4557,9 +4602,13 @@ def np7_error_structure(
             level of a simulated cell in the same table.
         decisions: The frozen decisions of the base run (version 7: the
             ensemble's).
-        tested: The tested sets per (level, class) (``gate_p_tested_sets``
-            on the same pooled calls; version 7 ``gate_p_member_sets``);
-            ``None`` marks a (level, class) that is not evaluable.
+        tested: The tested sets per (level, class), from
+            ``gate_p_tested_sets`` (version 7: ``gate_p_member_sets``) on
+            ``pooled_held_out_cells`` of the same replicates, default group,
+            recipe, seed and member; ``None`` marks a (level, class) that is
+            not evaluable. A set built on other calls (a plain concat of the
+            tables keeps the default group's fit half) raises, as in
+            ``np3_set_stats``.
         default_group: The group whose fit half the frozen thresholds were
             fitted on (required; ``None`` when no replicate holds those
             cells).
@@ -4583,9 +4632,11 @@ def np7_error_structure(
     Raises:
         ValueError: If a human run has no vocab or a mouse run has one, no
             row is left after the filters, a key's tested sets are an empty
-            list or of another key, a call to an excluded node has a class,
-            for the vocab (``np7_excluded_nodes``), the assigned nodes or
-            the default group's inputs (``held_out_replicates``).
+            list or of another key, a tested set's confident calls in the
+            pooled calls differ from its ``n_confident`` or are fewer than
+            ``settings.min_confident_n``, a call to an excluded node has a
+            class, for the vocab (``np7_excluded_nodes``), the assigned nodes
+            or the default group's inputs (``held_out_replicates``).
         ResolvabilityError: If the rows mix replicates (``replicate_rows``).
     """
     if species == "human" and vocab is None:
