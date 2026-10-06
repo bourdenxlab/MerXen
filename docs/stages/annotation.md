@@ -1009,18 +1009,34 @@ query genes with the §8.6 / E3 specificity rule
 (`flags.specific_gene_ratio`, `flags.specific_gene_min_share`).
 `real_qc.marker_referee_comparator` chooses the comparison: `node` (the
 default, mouse G2's rule: the class's unweighted mean supercluster profile
-against every other supercluster, sinks included) or `class` (the
-cell-weighted class profile against the other classes' profiles). They
-differ where a class holds a small node that shares another class's genes
-(the Committed oligodendrocyte precursor supercluster, in the OPC class,
-shares oligodendrocyte genes) or a sink resembles a class (Splatter): `node`
-then leaves that class without markers. The sets depend only on the bundle
-and the panel. `RefereeMarkers.to_frame` writes them before a run,
-`RefereeMarkers.from_frame` reads them back, and the run's QC details record
-their sha256 (`fingerprint`). Hand-curated sets (`RefereeMarkers.from_symbols`)
-are scored by the same rule for reporting. The 0.75 / 0.70 thresholds came
-from the H9 hand lists, so the derived statistic is re-measured on set a
-before a new family is scored (M13 C17).
+against every other supercluster, sinks included) or `class` (the class
+profile, the `n_cells`-weighted mean of its superclusters'
+`expected_fraction`, against the other classes' profiles). The `class`
+profile is not `flags.class_profiles`, which weights `mean_cpm` and
+renormalises over the query genes; the two bases give different sets. The
+comparators differ where a class holds a small node that shares another
+class's genes (the Committed oligodendrocyte precursor supercluster, in the
+OPC class, shares oligodendrocyte genes) or a sink resembles a class
+(Splatter): `node` then leaves that class without markers. The sets depend
+only on the bundle and the panel. `RefereeMarkers.to_frame` writes them
+before a run with their provenance (`source`, `comparator`, `min_ratio`,
+`min_share` on every row), `RefereeMarkers.from_frame` reads them back
+(`frozen`), and the run's QC details record their sha256 (`fingerprint`;
+`frozen_fingerprint` for the table as read). A frozen marker that a dataset's
+query genes lack is dropped and listed (`missing_genes`). Supplied derived
+sets must record the run's comparator and specificity rule. Only `derived`
+sets (D27 (a)) drive the outcome: hand-curated sets
+(`RefereeMarkers.from_symbols`, `source` `hand_curated`, D27 (b)) and tables
+without provenance (`supplied`) are scored by the same rule for reporting,
+and `signal()` refuses them. Profiles without `n_cells` load; the `class`
+comparator is then `not_evaluable`. The 200-cell minimum counts scored
+cells (pseudo-labelled and confidently called), not pseudo-labelled cells
+alone.
+The 0.75 / 0.70 thresholds came from the H9 hand lists, so the derived
+statistic is re-measured on set a before a new family is scored (M13 C17).
+With the default `node` comparator set a's panel gives only one class with
+three or more markers, so the referee is `not_evaluable` on set a: that is not
+a pass, and it goes to the user with the threshold question.
 
 On a seeded real-data family whose species gate has not merged into `main`
 (`real_qc.seeded_families_warn_only_until_gate`), the lowering effects of the

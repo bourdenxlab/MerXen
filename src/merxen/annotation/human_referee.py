@@ -22,19 +22,31 @@ classes belong to none).
     class's profile is the unweighted mean of its supercluster profiles,
     compared with every other supercluster, sinks and nodes of no broad
     class included (G2 compares a group with every class outside it).
-  - ``class``: the cell-weighted broad-class profile (``n_cells`` of each
-    supercluster; the codebase's human class profile, as
-    ``flags.class_profiles``) compared with the other broad classes'
-    profiles; nodes of no broad class are not compared.
+  - ``class``: the broad-class profile, the ``n_cells``-weighted mean of
+    its superclusters' ``expected_fraction`` (as mouse G2 uses
+    ``expected_fraction``), compared with the other broad classes'
+    profiles; nodes of no broad class are not compared. This is **not**
+    ``flags.class_profiles`` (the human flags' class profile), which
+    weights each node's ``mean_cpm`` and renormalises the mean over the
+    query genes: the two give different sets (on set a, Neurons 5 against
+    3 markers), so the basis is part of the comparator choice.
 
-  The two differ where one broad class holds a small node that shares
-  another class's genes (WHB's Committed oligodendrocyte precursor, in the
-  OPC class, shares oligodendrocyte genes) or a sink resembles a class
-  (Splatter, neuronal): ``node`` then leaves that class without markers.
-  The sets depend only on the bundle and the panel, so they are fixed
-  before any dataset is read: ``RefereeMarkers.to_frame`` writes them and
-  ``RefereeMarkers.fingerprint`` identifies them; a run with supplied
-  (frozen or hand-curated, D27 (b)) sets records the same fingerprint.
+  The two comparators differ where one broad class holds a small node that
+  shares another class's genes (WHB's Committed oligodendrocyte precursor,
+  in the OPC class, shares oligodendrocyte genes) or a sink resembles a
+  class (Splatter, neuronal): ``node`` then leaves that class without
+  markers. The sets depend only on the bundle and the panel, so they are
+  fixed before any dataset is read: ``RefereeMarkers.to_frame`` writes them
+  with their provenance (``source``, comparator and specificity rule) and
+  ``RefereeMarkers.from_frame`` reads them back (``frozen``);
+  ``RefereeMarkers.fingerprint`` identifies the sets a run used. Only
+  ``derived`` sets (D27 (a)), computed in the run or frozen, drive the
+  outcome: ``HumanMarkerReferee.signal`` refuses hand-curated sets
+  (``RefereeMarkers.from_symbols``, D27 (b), report-only) and tables
+  without provenance. A frozen marker absent from a dataset's query genes
+  (a dataset of the family missing panel genes, §8.7) is dropped and
+  listed (``missing_genes``), and ``frozen_fingerprint`` keeps the frozen
+  table's identity.
 * **Pseudo-labels.** ``data/P1212``'s rule, as mouse G2: each marker's
   counts over its mean positive count among the dataset's table cells;
   class score = the sum; a label when the top class has
@@ -46,7 +58,10 @@ classes belong to none).
   pseudo-label). A confident call to a class without markers can only
   disagree, as in G2. ``not_evaluable`` with fewer than two classes with
   markers, or fewer than ``marker_referee_min_pseudo_confident`` (200)
-  scored cells.
+  scored cells (pseudo-labelled **and** confidently called, G2's naming;
+  not the pseudo-labelled cells alone), or when the marker sets cannot be
+  derived (no counts, no profiles, or the ``class`` comparator without
+  ``n_cells``).
 
 ``HumanMarkerReferee.signal`` gives ``real_qc.MarkerConsistencySignal``;
 ``real_qc.marker_consistency_outcome`` turns it into the outcome (a warning
@@ -54,6 +69,11 @@ below 0.75, the dataset gate capped at ``broad_only`` below 0.70; D18 (a)).
 Those thresholds came from the H9 hand lists; the derived statistic is
 re-measured on set a (M13 C17) before the new-panel human MERSCOPE family is
 scored, and the thresholds go back to the user if set a falls below 0.75.
+D18's fallback names only that case. With the default ``node`` comparator
+set a's panel gives one class with at least three markers (Microglia), so the
+referee is ``not_evaluable`` on set a by construction and neither its cap
+nor its warning can fire there; that result is not a pass and also needs
+the user's decision before the family is scored.
 
 The module needs numpy, pandas and (for the pseudo-labels) scipy.
 """
@@ -98,8 +118,17 @@ COMPARATOR_CLASS: Final = "class"
 REFEREE_COMPARATORS: Final[tuple[str, ...]] = (COMPARATOR_NODE, COMPARATOR_CLASS)
 # The referee needs at least two classes with markers (D18 (a)).
 MIN_MARKER_GROUPS: Final = 2
+# Where marker sets come from (D27): ``derived`` by the §8.6 rule from the
+# profiles (a), in the run or frozen before it; ``hand_curated`` alternates
+# (b), report-only; ``supplied`` for a table that records no provenance.
 SOURCE_DERIVED: Final = "derived"
+SOURCE_HAND_CURATED: Final = "hand_curated"
 SOURCE_SUPPLIED: Final = "supplied"
+MARKER_SOURCES: Final[tuple[str, ...]] = (
+    SOURCE_DERIVED,
+    SOURCE_HAND_CURATED,
+    SOURCE_SUPPLIED,
+)
 PROFILES_FILE: Final = "profiles.parquet"
 PROFILE_COLUMNS: Final[tuple[str, ...]] = (
     "level",
@@ -108,12 +137,20 @@ PROFILE_COLUMNS: Final[tuple[str, ...]] = (
     "gene_id",
     "expected_fraction",
 )
+# The provenance columns repeat one value on every row of a marker table.
+MARKER_PROVENANCE_COLUMNS: Final[tuple[str, ...]] = (
+    "source",
+    "comparator",
+    "min_ratio",
+    "min_share",
+)
 MARKER_FRAME_COLUMNS: Final[tuple[str, ...]] = (
     "group",
     "rank",
     "gene_id",
     "symbol",
     "ratio",
+    *MARKER_PROVENANCE_COLUMNS,
 )
 _BROAD_CLASSES: Final[frozenset[str]] = frozenset(HUMAN_BROAD_CLASSES)
 
@@ -295,11 +332,16 @@ class HumanRefereeProfiles:
     def class_profile(self, cls: str) -> np.ndarray:
         """Return a broad class's cell-weighted profile (``class`` comparator).
 
+        The basis is each node's ``expected_fraction``, as mouse G2's. It is
+        not ``flags.class_profiles``, which weights ``mean_cpm`` and
+        renormalises the mean over the query genes.
+
         Args:
             cls: A broad class with a node.
 
         Returns:
-            The ``n_cells``-weighted mean of its node profiles.
+            The ``n_cells``-weighted mean of its node profiles
+            (``expected_fraction``), not renormalised.
 
         Raises:
             ValueError: If the class has no node or its nodes have no
@@ -341,17 +383,24 @@ def load_referee_profiles(
 
     Returns:
         The profiles, or ``None`` when the bundle has no usable
-        ``profiles.parquet`` (the referee is then ``not_evaluable``).
+        ``profiles.parquet`` (the referee is then ``not_evaluable``). A table
+        without ``n_cells`` loads with NaN cells: the ``node`` comparator
+        does not need them, and the ``class`` comparator is then
+        ``not_evaluable``.
     """
     path = Path(bundle_dir) / PROFILES_FILE
     if not path.is_file():
         return None
     try:
-        table = pd.read_parquet(path, columns=list(PROFILE_COLUMNS))
+        import pyarrow.parquet as pq
+
+        available = set(pq.read_schema(path).names)
+        columns = [column for column in PROFILE_COLUMNS if column in available]
+        table = pd.read_parquet(path, columns=columns)
         return HumanRefereeProfiles.from_table(
             table, level=level, gene_ids=gene_ids, symbols=symbols
         )
-    except ValueError as error:
+    except (ValueError, OSError) as error:
         logger.warning("no human referee profiles from %s: %s", path, error)
         return None
 
@@ -369,16 +418,24 @@ class RefereeMarkers:
             in ``HUMAN_BROAD_CLASSES`` order; only classes with at least
             ``min_group_markers``.
         n_query_genes: Query genes the positions refer to.
-        source: ``derived`` (from the profiles) or ``supplied`` (a frozen or
-            hand-curated table).
+        source: ``derived`` (§8.6 rule on the profiles, D27 (a)),
+            ``hand_curated`` (D27 (b), report-only) or ``supplied`` (a
+            table that records no provenance).
         min_group_markers: The rule that left classes out.
-        comparator: The derivation's comparator (``None`` when supplied
-            without one).
+        comparator: The derivation's comparator (``None`` when not
+            derived or not recorded).
         left_out: Classes with too few markers.
         absent: Broad classes without a node in the profiles.
-        missing_symbols: Per class, supplied symbols absent from the panel.
+        missing_symbols: Per class, hand-curated symbols absent from the
+            panel.
         ratio: The specificity ratio of a derivation.
         min_share: Its minimum share.
+        frozen: Whether the sets were read from a table (``from_frame``).
+        frozen_fingerprint: The fingerprint of the table's sets as read,
+            before markers absent from the query genes were dropped and
+            ``min_group_markers`` applied (``None`` unless frozen).
+        missing_genes: Per class, frozen markers absent from the query
+            genes (dropped).
     """
 
     markers: Mapping[str, SpecificGenes]
@@ -391,13 +448,29 @@ class RefereeMarkers:
     missing_symbols: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     ratio: float | None = None
     min_share: float | None = None
+    frozen: bool = False
+    frozen_fingerprint: str | None = None
+    missing_genes: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Validate the provenance."""
+        if self.source not in MARKER_SOURCES:
+            raise ValueError(
+                f"unknown marker source {self.source!r}; expected one of "
+                f"{MARKER_SOURCES}"
+            )
+        if self.comparator is not None and self.comparator not in REFEREE_COMPARATORS:
+            raise ValueError(
+                f"unknown referee comparator {self.comparator!r}; expected one of "
+                f"{REFEREE_COMPARATORS}"
+            )
 
     @property
     def fingerprint(self) -> str:
         """Return the sha256 of the marker sets (class to sorted gene IDs)."""
-        sets = {group: sorted(genes.gene_ids) for group, genes in self.markers.items()}
-        text = json.dumps(sets, sort_keys=True, separators=(",", ":"))
-        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+        return _fingerprint(
+            {group: genes.gene_ids for group, genes in self.markers.items()}
+        )
 
     def symbol_sets(self) -> dict[str, list[str]]:
         """Return each class's marker symbols, most specific first."""
@@ -408,7 +481,10 @@ class RefereeMarkers:
 
         Returns:
             One row per marker: ``group``, ``rank`` (1 = most specific),
-            ``gene_id``, ``symbol``, ``ratio`` (NaN for hand-curated sets).
+            ``gene_id``, ``symbol``, ``ratio`` (the gene's specificity
+            ratio; NaN for hand-curated sets), and the provenance repeated
+            on every row: ``source``, ``comparator``, ``min_ratio`` and
+            ``min_share`` (the derivation's rule).
         """
         rows = [
             {
@@ -417,6 +493,10 @@ class RefereeMarkers:
                 "gene_id": gene_id,
                 "symbol": symbol,
                 "ratio": ratio,
+                "source": self.source,
+                "comparator": self.comparator,
+                "min_ratio": self.ratio,
+                "min_share": self.min_share,
             }
             for group, genes in self.markers.items()
             for rank, (gene_id, symbol, ratio) in enumerate(
@@ -429,8 +509,10 @@ class RefereeMarkers:
         """Return the sets and their provenance as JSON."""
         return {
             "source": self.source,
+            "frozen": self.frozen,
             "comparator": self.comparator,
             "fingerprint": self.fingerprint,
+            "frozen_fingerprint": self.frozen_fingerprint,
             "min_group_markers": self.min_group_markers,
             "ratio": self.ratio,
             "min_share": self.min_share,
@@ -442,6 +524,9 @@ class RefereeMarkers:
             "absent": list(self.absent),
             "missing_symbols": {
                 group: list(values) for group, values in self.missing_symbols.items()
+            },
+            "missing_genes": {
+                group: list(values) for group, values in self.missing_genes.items()
             },
         }
 
@@ -457,20 +542,28 @@ class RefereeMarkers:
     ) -> RefereeMarkers:
         """Return frozen sets (``to_frame``) on a run's query genes.
 
+        Markers absent from the run's query genes (a dataset of the family
+        missing panel genes, §8.7) are dropped and listed in
+        ``missing_genes``; a class left with fewer than
+        ``min_group_markers`` is left out.
+
         Args:
-            frame: The table (``group``, ``gene_id``; ``rank`` and ``ratio``
-                when present).
+            frame: The table (``group``, ``gene_id``; ``rank``, ``ratio``
+                and the provenance columns when present).
             gene_ids: The run's query genes.
             symbols: Their symbols (the run's panel file).
             min_group_markers: Classes with fewer markers are left out.
-            comparator: The comparator the sets were derived with, if known.
+            comparator: The comparator the sets were derived with, for a
+                table that does not record it.
 
         Returns:
-            The sets (``source`` ``supplied``).
+            The sets (``frozen``; ``source`` as the table records it,
+            ``supplied`` when it records none).
 
         Raises:
             ValueError: If a column is missing, a class is not a human broad
-                class or a gene is not among the query genes.
+                class, a provenance column holds more than one value or an
+                unknown one, or ``comparator`` contradicts the table.
         """
         missing = sorted({"group", "gene_id"} - set(frame.columns))
         if missing:
@@ -484,26 +577,48 @@ class RefereeMarkers:
         if "ratio" not in table.columns:
             table = table.assign(ratio=np.nan)
         _check_groups(table["group"])
-        absent = sorted(set(table["gene_id"]) - set(position))
-        if absent:
+        source = _constant(table, "source")
+        recorded = _constant(table, "comparator")
+        if comparator is not None and recorded is not None and comparator != recorded:
             raise ValueError(
-                f"marker genes {absent[:5]} are not among the query genes "
-                f"({len(absent)} missing)"
+                f"the marker table was derived with comparator {recorded!r}, "
+                f"not {comparator!r}"
             )
+        min_ratio = _constant(table, "min_ratio")
+        min_share = _constant(table, "min_share")
         sets: dict[str, list[tuple[str, float]]] = {}
+        read: dict[str, list[str]] = {}
+        lacking: dict[str, tuple[str, ...]] = {}
         for group in HUMAN_BROAD_CLASSES:
             rows = table[table["group"] == group].sort_values(["rank", "gene_id"])
-            if len(rows):
-                sets[group] = [
-                    (str(gene), float(ratio))
-                    for gene, ratio in zip(rows["gene_id"], rows["ratio"], strict=True)
-                ]
+            if not len(rows):
+                continue
+            read[group] = [str(gene) for gene in rows["gene_id"]]
+            sets[group] = [
+                (str(gene), float(ratio))
+                for gene, ratio in zip(rows["gene_id"], rows["ratio"], strict=True)
+                if str(gene) in position
+            ]
+            absent = tuple(gene for gene in read[group] if gene not in position)
+            if absent:
+                lacking[group] = absent
+        if lacking:
+            logger.warning(
+                "frozen referee markers absent from the query genes, dropped: %s",
+                lacking,
+            )
         return _supplied(
             sets,
             gene_ids=gene_ids,
             symbols=symbols,
             min_group_markers=min_group_markers,
-            comparator=comparator,
+            source=SOURCE_SUPPLIED if source is None else str(source),
+            comparator=str(recorded) if recorded is not None else comparator,
+            ratio=None if min_ratio is None else float(min_ratio),
+            min_share=None if min_share is None else float(min_share),
+            frozen=True,
+            frozen_fingerprint=_fingerprint(read),
+            missing_genes=lacking,
         )
 
     @classmethod
@@ -515,7 +630,7 @@ class RefereeMarkers:
         symbols: Sequence[str],
         min_group_markers: int = 3,
     ) -> RefereeMarkers:
-        """Return hand-curated sets (D27 (b), reported) on a run's query genes.
+        """Return hand-curated sets (D27 (b), report-only) on a run's genes.
 
         Args:
             sets: Broad class to marker symbols.
@@ -524,7 +639,8 @@ class RefereeMarkers:
             min_group_markers: Classes with fewer panel markers are left out.
 
         Returns:
-            The sets; symbols absent from the panel are dropped and listed.
+            The sets (``source`` ``hand_curated``); symbols absent from the
+            panel are dropped and listed.
 
         Raises:
             ValueError: If a class is not a human broad class.
@@ -550,8 +666,31 @@ class RefereeMarkers:
             gene_ids=gene_ids,
             symbols=symbols,
             min_group_markers=min_group_markers,
+            source=SOURCE_HAND_CURATED,
             missing_symbols=missing,
         )
+
+
+def _fingerprint(sets: Mapping[str, Sequence[str]]) -> str:
+    text = json.dumps(
+        {group: sorted(str(gene) for gene in genes) for group, genes in sets.items()},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _constant(table: pd.DataFrame, column: str) -> Any:
+    """Return a provenance column's one value (``None`` if absent or empty)."""
+    if column not in table.columns:
+        return None
+    values = {value for value in table[column] if not pd.isna(value)}
+    if len(values) > 1:
+        raise ValueError(
+            f"marker table column {column!r} holds {sorted(map(str, values))}; "
+            "one value is expected"
+        )
+    return next(iter(values)) if values else None
 
 
 def _positions(gene_ids: Sequence[str], symbols: Sequence[str]) -> dict[str, int]:
@@ -577,8 +716,14 @@ def _supplied(
     gene_ids: Sequence[str],
     symbols: Sequence[str],
     min_group_markers: int,
+    source: str,
     comparator: str | None = None,
+    ratio: float | None = None,
+    min_share: float | None = None,
+    frozen: bool = False,
+    frozen_fingerprint: str | None = None,
     missing_symbols: Mapping[str, tuple[str, ...]] | None = None,
+    missing_genes: Mapping[str, tuple[str, ...]] | None = None,
 ) -> RefereeMarkers:
     position = _positions(gene_ids, symbols)
     markers: dict[str, SpecificGenes] = {}
@@ -598,11 +743,16 @@ def _supplied(
     return RefereeMarkers(
         markers=markers,
         n_query_genes=len(gene_ids),
-        source=SOURCE_SUPPLIED,
+        source=source,
         min_group_markers=min_group_markers,
         comparator=comparator,
         left_out=tuple(left_out),
         missing_symbols=dict(missing_symbols or {}),
+        ratio=ratio,
+        min_share=min_share,
+        frozen=frozen,
+        frozen_fingerprint=frozen_fingerprint,
+        missing_genes=dict(missing_genes or {}),
     )
 
 
@@ -723,6 +873,7 @@ class HumanMarkerReferee:
             "n_pseudo_confident": self.n_pseudo_confident,
             "n_scored": self.n_scored,
             "n_marker_groups": self.n_marker_groups,
+            "source": None if self.markers is None else self.markers.source,
             "comparator": None if self.markers is None else self.markers.comparator,
             "fingerprint": None if self.markers is None else self.markers.fingerprint,
             "marker_sets": markers,
@@ -736,7 +887,22 @@ class HumanMarkerReferee:
         }
 
     def signal(self) -> MarkerConsistencySignal:
-        """Return the input of ``real_qc.marker_consistency_outcome``."""
+        """Return the input of ``real_qc.marker_consistency_outcome``.
+
+        Returns:
+            The signal.
+
+        Raises:
+            ValueError: If the marker sets are not ``derived`` (D27 (a)):
+                hand-curated sets (D27 (b)) are report-only, and a table
+                without provenance cannot show it holds derived sets.
+        """
+        if self.markers is not None and self.markers.source != SOURCE_DERIVED:
+            raise ValueError(
+                f"{self.markers.source} marker sets are report-only: only sets "
+                "derived by the §8.6 rule (D27 (a)) drive the marker-consistency "
+                "outcome"
+            )
         details = self.to_json()
         details.pop("consistency")
         return MarkerConsistencySignal(
@@ -761,6 +927,42 @@ def _names(values: Sequence[object] | np.ndarray) -> np.ndarray:
     )
 
 
+def _check_derivation_rule(
+    markers: RefereeMarkers,
+    flags_config: AnnotationFlagsConfig,
+    settings: HumanRefereeSettings,
+) -> None:
+    """Refuse supplied derived sets whose recorded rule is not the run's.
+
+    Raises:
+        ValueError: If the sets record another comparator, specificity
+            ratio or minimum share, or were read with another
+            ``min_group_markers``.
+    """
+    if markers.source != SOURCE_DERIVED:
+        return
+    if markers.comparator is not None and markers.comparator != settings.comparator:
+        raise ValueError(
+            f"the derived marker sets record comparator {markers.comparator!r}; "
+            f"the run's is {settings.comparator!r}"
+        )
+    if markers.min_group_markers != settings.min_group_markers:
+        raise ValueError(
+            f"the derived marker sets use min_group_markers "
+            f"{markers.min_group_markers}; the run's is {settings.min_group_markers}"
+        )
+    rules = (
+        ("specificity ratio", markers.ratio, flags_config.specific_gene_ratio),
+        ("minimum share", markers.min_share, flags_config.specific_gene_min_share),
+    )
+    for name, value, expected in rules:
+        if value is not None and not math.isclose(value, float(expected)):
+            raise ValueError(
+                f"the derived marker sets record {name} {value}; the run's is "
+                f"{expected}"
+            )
+
+
 def human_marker_referee(
     counts: sparse.spmatrix | np.ndarray | None,
     profiles: HumanRefereeProfiles | None,
@@ -783,14 +985,19 @@ def human_marker_referee(
         confident: Whether each table cell's ``ct_broad`` is confident.
         flags_config: The specificity rule.
         settings: The referee rule (``HumanRefereeSettings.from_config``).
-        markers: Frozen or hand-curated sets used instead of a derivation.
+        markers: Frozen (``RefereeMarkers.from_frame``) or hand-curated
+            sets used instead of a derivation; only derived sets give a
+            ``signal``.
 
     Returns:
-        The referee.
+        The referee; ``not_evaluable`` (``consistency`` ``None`` with a
+        reason) also when the sets cannot be derived, e.g. the ``class``
+        comparator on profiles without ``n_cells``.
 
     Raises:
-        ValueError: If the inputs do not have one entry per table cell or
-            the counts do not have one column per query gene.
+        ValueError: If the inputs do not have one entry per table cell, the
+            counts do not have one column per query gene, or supplied
+            derived sets record another rule than the run's.
     """
     names = _names(broad_names)
     called_mask = np.asarray(confident, dtype=bool).reshape(-1)
@@ -825,12 +1032,17 @@ def human_marker_referee(
                 f"counts have {counts.shape[1]} columns for "
                 f"{len(profiles.gene_ids)} query genes"
             )
-        markers = derive_referee_markers(profiles, flags_config, settings)
-    elif counts.shape[1] != markers.n_query_genes:
-        raise ValueError(
-            f"counts have {counts.shape[1]} columns for {markers.n_query_genes} "
-            "query genes"
-        )
+        try:
+            markers = derive_referee_markers(profiles, flags_config, settings)
+        except ValueError as error:
+            return empty(f"no marker sets: {error}", None)
+    else:
+        if counts.shape[1] != markers.n_query_genes:
+            raise ValueError(
+                f"counts have {counts.shape[1]} columns for "
+                f"{markers.n_query_genes} query genes"
+            )
+        _check_derivation_rule(markers, flags_config, settings)
     labels, pseudo = marker_pseudo_labels(
         counts,
         markers.markers,

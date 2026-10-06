@@ -267,7 +267,9 @@ def test_node_comparator_uses_the_unweighted_mean_of_the_group_nodes() -> None:
     # node) against ~1e-5 outside.
     assert set(markers.markers["Neurons"].symbols) == {"NEU1", "NEU2", "NEU3"}
     astro = (table["node_name"] == "Astrocyte") & (table["gene_id"] == gene)
-    table.loc[astro, "expected_fraction"] = 0.01  # ~0.115 / 0.01 < 20
+    # The unweighted mean (~0.115) is 17.7x this value, below 20x; the
+    # n_cells-weighted mean (400 IT and 200 MGE cells, ~0.154) would be 23.7x.
+    table.loc[astro, "expected_fraction"] = 0.0065
     profiles = HumanRefereeProfiles.from_table(
         table, level=LEVEL, gene_ids=GENE_IDS, symbols=SYMBOLS
     )
@@ -277,11 +279,38 @@ def test_node_comparator_uses_the_unweighted_mean_of_the_group_nodes() -> None:
     assert set(markers.markers["Neurons"].symbols) == {"NEU2", "NEU3"}
 
 
+def test_markers_need_the_minimum_share_as_well_as_the_ratio() -> None:
+    """The §8.6 rule's 1/1000: a gene 500x specific but rare is no marker."""
+    table = profiles_table()
+    actb = table["gene_id"] == GENE_IDS[SYMBOLS.index("ACTB")]
+    table.loc[actb, "expected_fraction"] = 1e-6
+    astro = actb & (table["node_name"] == "Astrocyte")
+    found = {}
+    for share in (0.5, 2.0):
+        table.loc[astro, "expected_fraction"] = share * FLAGS.specific_gene_min_share
+        profiles = HumanRefereeProfiles.from_table(
+            table, level=LEVEL, gene_ids=GENE_IDS, symbols=SYMBOLS
+        )
+        for comparator in (COMPARATOR_NODE, COMPARATOR_CLASS):
+            markers = derive_referee_markers(
+                profiles, FLAGS, settings(comparator=comparator, min_group_markers=1)
+            )
+            found[share, comparator] = "ACTB" in markers.markers["Astrocytes"].symbols
+    assert found == {
+        (0.5, COMPARATOR_NODE): False,
+        (0.5, COMPARATOR_CLASS): False,
+        (2.0, COMPARATOR_NODE): True,
+        (2.0, COMPARATOR_CLASS): True,
+    }
+
+
 def test_class_comparator_uses_broad_class_profiles() -> None:
     """Cell-weighted class profiles against the other classes' profiles.
 
     COP (5 of 105 OPC-class cells) dilutes into the OPC profile, and the
-    sink Splatter belongs to no class, so every class keeps its markers.
+    sink Splatter belongs to no class, so every class keeps its markers. The
+    class profile is the n_cells-weighted mean of the nodes'
+    expected_fraction, not renormalised.
     """
     markers = derive_referee_markers(
         fixture_profiles(), FLAGS, settings(comparator=COMPARATOR_CLASS)
@@ -334,38 +363,127 @@ def test_marker_sets_round_trip_through_a_frozen_table() -> None:
         fixture_profiles(), FLAGS, settings(comparator=COMPARATOR_CLASS)
     )
     frame = markers.to_frame()
-    assert list(frame.columns) == ["group", "rank", "gene_id", "symbol", "ratio"]
+    assert list(frame.columns) == [
+        "group",
+        "rank",
+        "gene_id",
+        "symbol",
+        "ratio",
+        "source",
+        "comparator",
+        "min_ratio",
+        "min_share",
+    ]
     assert len(frame) == 21
     restored = RefereeMarkers.from_frame(frame, gene_ids=GENE_IDS, symbols=SYMBOLS)
     assert _sets(restored) == _sets(markers)
-    assert restored.source == "supplied"
+    # The provenance survives the table (D27 (a) stays visible in the QC).
+    assert (restored.source, restored.frozen) == ("derived", True)
+    assert (markers.source, markers.frozen) == ("derived", False)
+    assert restored.comparator == COMPARATOR_CLASS
+    assert restored.ratio == FLAGS.specific_gene_ratio
+    assert restored.min_share == FLAGS.specific_gene_min_share
     assert restored.fingerprint == markers.fingerprint
+    assert restored.frozen_fingerprint == markers.fingerprint
+    assert restored.missing_genes == {}
     assert len(markers.fingerprint) == 64
+    record = restored.to_json()
+    assert (record["source"], record["frozen"]) == ("derived", True)
     # The fingerprint is the marker sets: dropping one gene changes it.
     fewer = RefereeMarkers.from_frame(
         frame[frame["symbol"] != "AST1"], gene_ids=GENE_IDS, symbols=SYMBOLS
     )
     assert fewer.fingerprint != markers.fingerprint
-    # The order of the rows is irrelevant.
+    # The order of the rows is irrelevant: the ranks order each set.
     shuffled = RefereeMarkers.from_frame(
         frame.sample(frac=1.0, random_state=0), gene_ids=GENE_IDS, symbols=SYMBOLS
     )
     assert shuffled.fingerprint == markers.fingerprint
+    assert shuffled.symbol_sets() == markers.symbol_sets()
+    reversed_ranks = frame.assign(rank=-frame["rank"])
+    backward = RefereeMarkers.from_frame(
+        reversed_ranks, gene_ids=GENE_IDS, symbols=SYMBOLS
+    )
+    assert backward.symbol_sets() == {
+        group: symbols[::-1] for group, symbols in markers.symbol_sets().items()
+    }
     # The fingerprint is the sets, not the ranks inside them.
-    forward = RefereeMarkers.from_symbols(
+    assert backward.fingerprint == markers.fingerprint
+
+
+def test_frozen_tables_keep_hand_curated_and_unrecorded_provenance() -> None:
+    """D27 (b) sets stay hand-curated through a table; a bare table is supplied."""
+    curated = RefereeMarkers.from_symbols(
         {"Astrocytes": ["AST1", "AST2", "AST3"], "Microglia": ["MIC1", "MIC2", "MIC3"]},
         gene_ids=GENE_IDS,
         symbols=SYMBOLS,
     )
-    backward = RefereeMarkers.from_symbols(
-        {"Astrocytes": ["AST3", "AST2", "AST1"], "Microglia": ["MIC2", "MIC1", "MIC3"]},
-        gene_ids=GENE_IDS,
-        symbols=SYMBOLS,
+    assert (curated.source, curated.frozen, curated.comparator) == (
+        "hand_curated",
+        False,
+        None,
     )
-    assert forward.symbol_sets() != backward.symbol_sets()
-    assert forward.fingerprint == backward.fingerprint
-    with pytest.raises(ValueError, match="not among the query genes"):
-        RefereeMarkers.from_frame(frame, gene_ids=GENE_IDS[1:], symbols=SYMBOLS[1:])
+    again = RefereeMarkers.from_frame(
+        curated.to_frame(), gene_ids=GENE_IDS, symbols=SYMBOLS
+    )
+    assert (again.source, again.frozen) == ("hand_curated", True)
+    assert again.fingerprint == curated.fingerprint
+    bare = curated.to_frame()[["group", "rank", "gene_id"]]
+    unrecorded = RefereeMarkers.from_frame(
+        bare, gene_ids=GENE_IDS, symbols=SYMBOLS, comparator=COMPARATOR_NODE
+    )
+    assert (unrecorded.source, unrecorded.comparator) == ("supplied", COMPARATOR_NODE)
+
+
+def test_frozen_tables_refuse_inconsistent_provenance() -> None:
+    frame = derive_referee_markers(
+        fixture_profiles(), FLAGS, settings(comparator=COMPARATOR_CLASS)
+    ).to_frame()
+    with pytest.raises(ValueError, match="comparator 'class', not 'node'"):
+        RefereeMarkers.from_frame(
+            frame, gene_ids=GENE_IDS, symbols=SYMBOLS, comparator=COMPARATOR_NODE
+        )
+    mixed = frame.copy()
+    mixed.loc[0, "source"] = "hand_curated"
+    with pytest.raises(ValueError, match="'source' holds"):
+        RefereeMarkers.from_frame(mixed, gene_ids=GENE_IDS, symbols=SYMBOLS)
+    with pytest.raises(ValueError, match="unknown marker source"):
+        RefereeMarkers.from_frame(
+            frame.assign(source="curated"), gene_ids=GENE_IDS, symbols=SYMBOLS
+        )
+    with pytest.raises(ValueError, match="unknown referee comparator"):
+        RefereeMarkers.from_frame(
+            frame.assign(comparator="cluster"), gene_ids=GENE_IDS, symbols=SYMBOLS
+        )
+
+
+def test_frozen_markers_missing_from_a_dataset_are_dropped_and_listed() -> None:
+    """§8.7: a dataset of the family may lack panel genes; the run continues."""
+    markers = derive_referee_markers(
+        fixture_profiles(), FLAGS, settings(comparator=COMPARATOR_CLASS)
+    )
+    lacking = {"AST1", "MIC1", "MIC2"}
+    keep = [index for index, symbol in enumerate(SYMBOLS) if symbol not in lacking]
+    gene_ids = [GENE_IDS[index] for index in keep]
+    symbols = [SYMBOLS[index] for index in keep]
+    restored = RefereeMarkers.from_frame(
+        markers.to_frame(), gene_ids=gene_ids, symbols=symbols, min_group_markers=2
+    )
+    assert _sets(restored)["Astrocytes"] == ("AST2", "AST3")
+    assert "Microglia" not in restored.markers  # one marker left, two needed
+    assert restored.left_out == ("Microglia",)
+    gene = dict(zip(SYMBOLS, GENE_IDS, strict=True))
+    assert restored.missing_genes == {
+        "Astrocytes": (gene["AST1"],),
+        "Microglia": (gene["MIC1"], gene["MIC2"]),
+    }
+    assert restored.frozen_fingerprint == markers.fingerprint
+    assert restored.fingerprint != markers.fingerprint
+    assert restored.n_query_genes == len(gene_ids)
+    assert restored.to_json()["missing_genes"]["Microglia"] == [
+        gene["MIC1"],
+        gene["MIC2"],
+    ]
 
 
 def test_hand_curated_marker_sets_keep_only_panel_genes() -> None:
@@ -386,7 +504,7 @@ def test_hand_curated_marker_sets_keep_only_panel_genes() -> None:
     }
     assert alternates.left_out == ("Fibroblasts",)
     assert alternates.missing_symbols == {"Astrocytes": ("SLC4A4",)}
-    assert alternates.source == "supplied"
+    assert alternates.source == "hand_curated"
     with pytest.raises(ValueError, match="not a human broad class"):
         RefereeMarkers.from_symbols(
             {"Exc": ["NEU1"]}, gene_ids=GENE_IDS, symbols=SYMBOLS
@@ -432,12 +550,16 @@ def test_referee_scores_confident_broad_calls_against_pseudo_labels() -> None:
     assert referee.recall["Astrocytes"] == pytest.approx(15 / 50)
     assert referee.recall["Neurons"] == pytest.approx(1.0)
     assert referee.precision["Neurons"] == pytest.approx(50 / 85)
+    # The 10 unconfident cells called Astrocytes (pseudo-labelled Neurons)
+    # are not in the precision denominator.
+    assert referee.precision["Astrocytes"] == pytest.approx(1.0)
     assert referee.confusion["Astrocytes"] == {"Astrocytes": 15, "Neurons": 35}
     signal = referee.signal()
     assert isinstance(signal, qc.MarkerConsistencySignal)
     assert signal.consistency == pytest.approx(0.9)
     assert (signal.n_marker_groups, signal.n_pseudo_labelled) == (7, 350)
     assert signal.details["comparator"] == COMPARATOR_CLASS
+    assert signal.details["source"] == "derived"
     assert signal.details["fingerprint"] == referee.markers.fingerprint
     assert json.loads(json.dumps(referee.to_json())) == referee.to_json()
 
@@ -483,8 +605,81 @@ def test_frozen_markers_replace_the_derivation() -> None:
         settings=config,
     )
     assert supplied.consistency == computed.consistency
-    assert supplied.markers is not None and supplied.markers.source == "supplied"
+    assert supplied.markers is not None and supplied.markers.source == "derived"
+    assert supplied.markers.frozen
     assert supplied.markers.fingerprint == computed.markers.fingerprint
+    assert supplied.signal().details["marker_sets"]["frozen"] is True
+
+
+def test_supplied_derived_sets_must_record_the_runs_rule() -> None:
+    counts, truth = simulated_cells()
+    confident = np.ones(len(truth), dtype=bool)
+    frozen = RefereeMarkers.from_frame(
+        derive_referee_markers(
+            fixture_profiles(), FLAGS, settings(comparator=COMPARATOR_CLASS)
+        ).to_frame(),
+        gene_ids=GENE_IDS,
+        symbols=SYMBOLS,
+    )
+    cases: list[tuple[HumanRefereeSettings, AnnotationFlagsConfig, str]] = [
+        (settings(comparator=COMPARATOR_NODE), FLAGS, "comparator 'class'"),
+        (
+            settings(comparator=COMPARATOR_CLASS, min_group_markers=2),
+            FLAGS,
+            "min_group_markers 3",
+        ),
+        (
+            settings(comparator=COMPARATOR_CLASS),
+            AnnotationFlagsConfig(specific_gene_ratio=10.0),
+            "specificity ratio 20",
+        ),
+        (
+            settings(comparator=COMPARATOR_CLASS),
+            AnnotationFlagsConfig(specific_gene_min_share=0.01),
+            "minimum share 0.001",
+        ),
+    ]
+    for rule, flags_config, message in cases:
+        with pytest.raises(ValueError, match=message):
+            human_marker_referee(
+                counts,
+                None,
+                truth,
+                confident,
+                flags_config=flags_config,
+                settings=rule,
+                markers=frozen,
+            )
+
+
+def test_only_derived_sets_drive_the_outcome() -> None:
+    """D27 (b): hand-curated alternates, and unprovenanced tables, report only."""
+    counts, truth = simulated_cells()
+    confident = np.ones(len(truth), dtype=bool)
+    curated = RefereeMarkers.from_symbols(
+        {group: list(genes) for group, genes in CLASS_GENES.items()},
+        gene_ids=GENE_IDS,
+        symbols=SYMBOLS,
+    )
+    bare = RefereeMarkers.from_frame(
+        curated.to_frame()[["group", "rank", "gene_id"]],
+        gene_ids=GENE_IDS,
+        symbols=SYMBOLS,
+    )
+    for markers in (curated, bare):
+        referee = human_marker_referee(
+            counts,
+            None,
+            truth,
+            confident,
+            flags_config=FLAGS,
+            settings=settings(min_pseudo_confident=50),
+            markers=markers,
+        )
+        assert referee.consistency == pytest.approx(1.0)  # reported
+        assert referee.to_json()["source"] == markers.source
+        with pytest.raises(ValueError, match="report-only"):
+            referee.signal()
 
 
 def test_referee_is_not_evaluable_with_fewer_than_two_marker_groups() -> None:
@@ -500,8 +695,9 @@ def test_referee_is_not_evaluable_with_fewer_than_two_marker_groups() -> None:
     )
     assert referee.consistency is None
     assert referee.reason == "0 marker group(s) with >= 4 markers (2 needed)"
-    one = RefereeMarkers.from_symbols(
-        {"Microglia": ["MIC1", "MIC2", "MIC3"]}, gene_ids=GENE_IDS, symbols=SYMBOLS
+    derived = derive_referee_markers(fixture_profiles(), FLAGS, settings()).to_frame()
+    one = RefereeMarkers.from_frame(
+        derived[derived["group"] == "Microglia"], gene_ids=GENE_IDS, symbols=SYMBOLS
     )
     single = human_marker_referee(
         counts,
@@ -542,6 +738,65 @@ def test_referee_is_not_evaluable_with_too_few_pseudo_confident_cells() -> None:
     assert few.consistency is None
     assert few.reason == "100 scored pseudo-confident cells < 200"
     assert few.recall  # the numbers are still reported
+
+
+def test_the_scored_cell_minimum_is_inclusive() -> None:
+    """Exactly ``min_pseudo_confident`` scored cells are enough."""
+    counts, truth = simulated_cells()
+    confident = np.ones(len(truth), dtype=bool)
+    results = {
+        needed: human_marker_referee(
+            counts,
+            fixture_profiles(),
+            truth,
+            confident,
+            flags_config=FLAGS,
+            settings=settings(comparator=COMPARATOR_CLASS, min_pseudo_confident=needed),
+        )
+        for needed in (350, 351)
+    }
+    assert results[350].n_scored == 350
+    assert results[350].consistency == pytest.approx(1.0)
+    assert results[351].consistency is None
+    assert results[351].reason == "350 scored pseudo-confident cells < 351"
+
+
+def test_class_comparator_without_cell_counts_is_not_evaluable(
+    tmp_path: Path,
+) -> None:
+    """A bundle without n_cells: node runs, class is not_evaluable, no crash."""
+    profiles_table().drop(columns="n_cells").to_parquet(tmp_path / "profiles.parquet")
+    loaded = load_referee_profiles(
+        tmp_path, level=LEVEL, gene_ids=GENE_IDS, symbols=SYMBOLS
+    )
+    assert loaded is not None
+    assert np.isnan(loaded.node_cells).all()
+    counts, truth = simulated_cells()
+    confident = np.ones(len(truth), dtype=bool)
+    node = human_marker_referee(
+        counts,
+        loaded,
+        truth,
+        confident,
+        flags_config=FLAGS,
+        settings=settings(comparator=COMPARATOR_NODE, min_pseudo_confident=50),
+    )
+    assert node.consistency is not None
+    by_class = human_marker_referee(
+        counts,
+        loaded,
+        truth,
+        confident,
+        flags_config=FLAGS,
+        settings=settings(comparator=COMPARATOR_CLASS, min_pseudo_confident=50),
+    )
+    assert by_class.consistency is None
+    assert by_class.markers is None
+    assert "n_cells" in str(by_class.reason)
+    outcome = qc.marker_consistency_outcome(
+        by_class.signal(), warn=0.75, broad_only=0.70
+    )
+    assert outcome.outcome == "not_evaluable"
 
 
 def test_referee_is_not_evaluable_without_counts_or_profiles() -> None:

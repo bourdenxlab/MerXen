@@ -54,7 +54,8 @@ SpeciesGateState = Literal["pending", "merged"]
 # How the human marker referee derives its per-panel marker sets (M13 C13,
 # ``human_referee``): ``node`` is mouse G2's rule on the WHB superclusters
 # (each group's mean node profile against every other node), ``class`` the
-# cell-weighted broad-class profile against the other broad classes.
+# n_cells-weighted broad-class ``expected_fraction`` profile against the
+# other broad classes.
 MarkerRefereeComparator = Literal["node", "class"]
 # A clustered table-key suffix: "" or one lower-case token (§4.8).
 TableKeySuffix = Annotated[str, AfterValidator(validate_table_key_suffix)]
@@ -904,7 +905,8 @@ class AnnotationRealQcConfig(_AnnotationModel):
             from the WHB profiles with the §8.6 specificity rule: ``node``
             (mouse G2's rule as ported: each broad class's mean supercluster
             profile against every other supercluster) or ``class`` (the
-            cell-weighted broad-class profile against the other broad
+            broad-class profile, the ``n_cells``-weighted mean of its
+            superclusters' ``expected_fraction``, against the other broad
             classes). ``node`` is the M13 C13 specification; ``class`` is
             the alternative for comparison, not adopted without the user's
             decision.
