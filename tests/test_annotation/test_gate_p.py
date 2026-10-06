@@ -521,8 +521,8 @@ def test_np4_inputs_that_mix_or_lack_replicates_raise() -> None:
         gp.np4_set_verdicts(stats[stats["group"] == "D1"], _targets(), _np4())
 
 
-def test_np4_range_uses_means_of_group_values_d12_proposal() -> None:
-    """Pins the D12 proposal (pending the user's confirmation; pre-registration §23.9).
+def test_np4_range_uses_means_of_group_values_d12() -> None:
+    """Pins D12, confirmed on 2026-10-06 (pre-registration §23.9, §23.10).
 
     p_g and n_g are the means over a group's seeds of the per-seed precision
     and confident n; p_bar and n_bar are the means of the group values; the

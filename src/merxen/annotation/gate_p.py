@@ -32,8 +32,8 @@ Version-7 families score NP4 in every emission member (``member=``) and
 combine the members with ``every_member_verdict``.
 
 The averaging conventions of the range rule (p_bar and n_bar as means of
-seed-averaged group values, unweighted precision) are the D12 proposal of
-the M13 plan, pending the user's confirmation (pre-registration §23.9).
+seed-averaged group values, unweighted precision) are D12 of the M13 plan,
+confirmed by the user on 2026-10-06 (pre-registration §23.9, §23.10).
 """
 
 from __future__ import annotations
@@ -514,12 +514,12 @@ def _check_replicate_grid(stats: pd.DataFrame) -> tuple[list[str], list[object]]
 def _np4_range(
     rows: pd.DataFrame, settings: Np4Settings
 ) -> tuple[float, float, float, float, float, bool]:
-    """NP4's range rule on one tested set (the D12 proposal, pending).
+    """NP4's range rule on one tested set (D12).
 
-    Pending the user's confirmation (M13 plan D12; pre-registration §23.9):
-    per group, p_g and n_g are the arithmetic means over its seeds of the
-    per-seed (unweighted) precision and confident n; p_bar and n_bar are the
-    means of the group values; the limit is
+    M13 plan D12, confirmed on 2026-10-06 (pre-registration §23.9 item 3,
+    §23.10): per group, p_g and n_g are the arithmetic means over its seeds
+    of the per-seed (unweighted) precision and confident n; p_bar and n_bar
+    are the means of the group values; the limit is
     max(floor, k x sqrt(p_bar (1 - p_bar) / n_bar)). This is the registered
     E2 convention (``member_spread``; pre-registration §22.3).
 
