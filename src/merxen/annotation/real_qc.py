@@ -1723,6 +1723,35 @@ def qc_effects(outcomes: Iterable[QcOutcome]) -> QcEffects:
     )
 
 
+def qc_withheld_levels(
+    qc: Iterable[QcOutcome] | QcEffects | None, species: str
+) -> frozenset[str]:
+    """Return the levels a dataset's QC makes ``not_resolvable``.
+
+    The withheld levels and the levels whose emission reads their table
+    (``thresholds.DERIVED_EMISSION_LEVELS``: human ``seaad_subclass`` reads
+    ``supercluster``): the levels ``apply_qc_to_statuses`` withholds.
+
+    Args:
+        qc: The dataset's QC outcomes or their effects (``None``: none).
+        species: ``"human"`` or ``"mouse"``.
+
+    Returns:
+        The levels.
+    """
+    if qc is None:
+        return frozenset()
+    from merxen.annotation.thresholds import DERIVED_EMISSION_LEVELS
+
+    withheld = set(_as_effects(qc).withheld_levels)
+    withheld |= {
+        derived
+        for derived, source in DERIVED_EMISSION_LEVELS[species].items()
+        if source in withheld
+    }
+    return frozenset(withheld)
+
+
 def _as_effects(qc: Iterable[QcOutcome] | QcEffects) -> QcEffects:
     return qc if isinstance(qc, QcEffects) else qc_effects(qc)
 
@@ -1839,14 +1868,7 @@ def apply_qc_to_statuses(
         for level in blocked:
             out_status[level][table] = CellStatus.NOT_ATTEMPTED_GATE.value
             out_names[level][table] = None
-    from merxen.annotation.thresholds import DERIVED_EMISSION_LEVELS
-
-    withheld = set(effects.withheld_levels)
-    withheld |= {
-        derived
-        for derived, source in DERIVED_EMISSION_LEVELS[species].items()
-        if source in withheld
-    }
+    withheld = qc_withheld_levels(effects, species)
     lost: dict[str, np.ndarray] = {}
     order = [level for level in LEVEL_ORDER[species] if level in out_status]
     order += [level for level in out_status if level not in order]
@@ -2920,6 +2942,30 @@ class RealQcResult:
         }
 
 
+WARN_ONLY_NOTE: Final = (
+    "warn-only until the {species} gate merges into main (seeded real-data "
+    "family; seeded_families_warn_only_until_gate)"
+)
+
+
+def _demoted(
+    outcomes: Iterable[QcOutcome], *, species: str, warn_only: bool
+) -> tuple[QcOutcome, ...]:
+    """Return outcomes with the warn-only demotion of a seeded family applied.
+
+    Only the checks of ``SEEDED_WARN_ONLY_CHECKS`` are demoted, and only while
+    the family is seeded and its species gate is pending (D20 (b)).
+    """
+    items = tuple(outcomes)
+    if not warn_only:
+        return items
+    note = WARN_ONLY_NOTE.format(species=species)
+    return tuple(
+        outcome.warn_only(note) if outcome.check in SEEDED_WARN_ONLY_CHECKS else outcome
+        for outcome in items
+    )
+
+
 def _is_seeded(trust: TrustDecision | None) -> bool:
     return (
         trust is not None
@@ -3191,17 +3237,7 @@ def real_data_qc(
         )
     seeded = _is_seeded(trust)
     warn_only = seeded and settings.seeded_warn_only(species)
-    if warn_only:
-        note = (
-            f"warn-only until the {species} gate merges into main (seeded "
-            "real-data family; seeded_families_warn_only_until_gate)"
-        )
-        outcomes = [
-            outcome.warn_only(note)
-            if outcome.check in SEEDED_WARN_ONLY_CHECKS
-            else outcome
-            for outcome in outcomes
-        ]
+    outcomes = list(_demoted(outcomes, species=species, warn_only=warn_only))
     result = RealQcResult(
         species=species,
         outcomes=tuple(outcomes),
