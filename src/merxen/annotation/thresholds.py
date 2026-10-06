@@ -911,7 +911,8 @@ class EmissionPlan:
             the dataset's composition); ``None`` when the bundle has no
             self-map (every level emitted at the defaults; a trust state
             without resolvability is already ``broad_only`` for panels
-            outside the validated families, §8.2).
+            outside the real-data-validated families, simulation-validated
+            ones included, §8.2).
         levels: The bundle's level metadata.
         grid: The bundle's depth grid.
         trust: The primary reference's trust decision (``None``: every level

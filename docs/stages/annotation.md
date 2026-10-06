@@ -896,7 +896,7 @@ panel, first match wins; decided from the cached bundle tables, outside
 | State | Rule | Effect |
 |---|---|---|
 | `refused` | a declared panel refused by the gene-ID resolver; < 50 panel genes in the reference; < 10 root markers; broad unresolvable at every depth ≤ 250 | reference not mapped; primary: gate `failed` (`panel_refused`), every cell `not_attempted_gate` and `exclude_hard`; secondary: degraded mode `single_method` |
-| `broad_only` | leaf resolvable for fewer than half of the classes with enough test cells at every depth ≤ 250; or the bundle of an unlisted panel has no self-map (fail-safe) | leaf and finer levels `not_attempted_gate`, `subcluster_status = not_resolvable_panel`, gate capped at `broad_only` |
+| `broad_only` | leaf resolvable for fewer than half of the classes with enough test cells at every depth ≤ 250; or the bundle of a panel outside the `real_data` families (an unlisted panel, or a family validated by `simulation`) has no self-map (fail-safe; a `simulation` family keeps it, with its family verdict as a note, so promotion never changes what is emitted) | leaf and finer levels `not_attempted_gate`, `subcluster_status = not_resolvable_panel`, gate capped at `broad_only` |
 | `validated` | family listed in `validated_panels.csv` | `real_data`: validated thresholds and packaged floors up to `validated_max_level`, `ct_<L>_validated` on every confident label there; `simulation`: emission exactly as provisional, `ct_<L>_validated` where (level, class) is validated at the cell's depth, gate warning only when > 10% of confident labels lie outside the validated region |
 | `provisional` | anything else | provisional margins, local thresholds, max-rule floors (`unknown_panel`), banner and gate warning flag (never a lower gate level) |
 
@@ -1866,7 +1866,14 @@ before the statuses; level + warning flag as for human):
 | G5 spill-over | `flag_microglial_spillover` rate | – | > 15% |
 
 The primary panel's trust caps the level as for human (`refused` fails,
-`broad_only` blocks the subclass) and a provisional panel warns. A `failed`
+`broad_only` blocks the subclass) and a provisional panel warns. A family
+validated by simulation warns, as for human, when more than 10% of the
+confident labels at broad, class, nt or subclass fall outside its validated
+region (`unvalidated_share:<level>`, `warn_unvalidated_share`): RESOLVE
+evaluates the gate again after the statuses with those shares, and the
+level never changes. The panel record of the provenance is built as for
+human (family, basis, validated level and table digests, panel mode, gene-ID
+diagnostics and validated shares). A `failed`
 gate makes every table cell `not_attempted_gate` and `exclude_hard` (a
 failed registration check: plan §7.5). G2's marker sets are derived per
 panel, so the 0.70 / 0.80 thresholds, set on MO1's hand-listed referee

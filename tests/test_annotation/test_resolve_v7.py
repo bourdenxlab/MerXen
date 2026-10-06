@@ -964,6 +964,41 @@ def _without_volatile(payload: Any) -> Any:
     return payload
 
 
+# M13 C11 (after the digests were computed) fills these fields of the panel
+# record where RESOLVE left them empty: the human record without panel
+# diagnostics and every mouse record (``pipeline.sample_panel_provenance``).
+# The compared provenance resets them to their defaults; the test of C11
+# checks their values.
+C11_PANEL_FIELDS: tuple[str, ...] = (
+    "panel_family",
+    "family_basis",
+    "panel_mode",
+    "validation_basis",
+    "validated_max_level",
+    "validated_panels_sha256",
+    "validated_panel_levels_sha256",
+    "validated_share",
+    "n_declared_genes",
+    "gene_id_resolution",
+    "n_unmapped",
+    "controls_removed",
+)
+
+
+def _without_c11_panel_fields(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return a provenance payload with ``C11_PANEL_FIELDS`` at their defaults."""
+    from merxen.annotation.provenance import PanelProvenance
+
+    if payload.get("panel") is None:
+        return payload
+    defaults = PanelProvenance().model_dump(mode="json")
+    panel = {
+        **payload["panel"],
+        **{name: defaults[name] for name in C11_PANEL_FIELDS},
+    }
+    return {**payload, "panel": panel}
+
+
 def _v6_digests(result: ResolveResult, root: Path) -> dict[str, str]:
     """Return the digests of a RESOLVE result that version 6 must keep."""
 
@@ -978,7 +1013,7 @@ def _v6_digests(result: ResolveResult, root: Path) -> dict[str, str]:
         labels = labels.drop(columns=[NEW_FLAG_COLUMN], errors="ignore")
         digests[f"{sample_id}/labels"] = _digest(_canonical_table(labels))
         digests[f"{sample_id}/provenance"] = _digest(
-            scrub(provenance.model_dump(mode="json"))
+            scrub(_without_c11_panel_fields(provenance.model_dump(mode="json")))
         )
         digests[f"{sample_id}/summary"] = _digest(scrub(sample.summary))
     pair = dict(result.summary)
@@ -1036,10 +1071,15 @@ def test_version_6_resolve_outputs_are_unchanged_but_for_the_null_flag(
     assert digests == V6_GOLDEN[scenario]
     assert Columns.FLAG_NONNEURONAL_HIGH_DEPTH == NEW_FLAG_COLUMN
     for sample in result.samples.values():
-        labels, _ = read_label_table(sample.labels_path)
+        labels, provenance = read_label_table(sample.labels_path)
         flag = labels[Columns.FLAG_NONNEURONAL_HIGH_DEPTH]
         assert str(flag.dtype) == "boolean" and flag.isna().all()
         assert "resolvability_v7" not in sample.summary
+        # The C11 fields hold the run's values (reset only for the digests).
+        assert provenance is not None and provenance.panel is not None
+        assert provenance.panel.panel_mode == (
+            "intersection" if scenario.startswith("human") else "single_sample"
+        )
 
 
 @pytest.mark.parametrize("version", [8, 0, "7", 6.5])

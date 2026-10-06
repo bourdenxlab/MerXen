@@ -38,9 +38,11 @@ Rules (§8.2; thresholds from ``AnnotationPanelConfig``), first match wins:
    ``trust_max_depth`` (resolvability);
 2. ``broad_only``: the leaf level is resolvable for fewer than half of the
    classes with enough test cells at every such depth (resolvability), or
-   the bundle of a panel outside the validated families has no
+   the bundle of a panel outside the real-data-validated families (an
+   unlisted panel, or a family validated by simulation) has no
    resolvability table (the fail-safe: nothing shows its leaves are
-   resolvable);
+   resolvable; a simulation family emits as a provisional panel, so it
+   keeps the fail-safe, and its family verdict is kept as a note);
 3. ``validated``: the panel's family (listed hash, inherited by Jaccard or
    a subset panel of a listed family) is in ``validated_panels.csv``, with
    its ``validation_basis``;
@@ -1326,8 +1328,10 @@ class TrustDecision(_DiagModel):
         state: ``refused``, ``broad_only``, ``provisional`` or ``validated``.
         reasons: Why the state was reached (refusals, broad-only causes, the
             family verdict).
-        notes: Checks that did not decide the state (e.g. a validated family
-            whose bundle has no self-map, so H18 cannot be checked).
+        notes: Checks that did not decide the state (e.g. a real-data
+            family whose bundle has no self-map, so H18 cannot be checked, or
+            the verdict of a listed family that an automatic check
+            overrode).
         complete: Whether coverage and resolvability were both available.
         family_id: The panel's family.
         family_basis: ``own``, ``listed``, ``inherited`` or ``subset``.
@@ -1719,7 +1723,8 @@ def trust_state(
             is then a preview, ``complete=False``, from the gene IDs and the
             family alone).
         resolvability: The bundle's resolvability constraint (``None`` when
-            no self-map ran).
+            no self-map ran: a primary or secondary bundle is then
+            ``broad_only`` unless its family is validated on real data).
 
     Returns:
         The decision.
@@ -1772,6 +1777,11 @@ def trust_state(
             )
         )
     records, family_reason = _family_verdict(family, species, validated)
+    # Only real-data validation stands without a self-map: a family validated
+    # by simulation emits exactly as a provisional panel, so it keeps the
+    # provisional fail-safe and a gate-P promotion never changes what is
+    # emitted (plan §8.2, §14; M13 decision D13 (a)).
+    real_data_family = bool(records) and records[0].validation_basis == "real_data"
     applies_resolvability = role in ("primary", "secondary")
     if resolvability is not None and resolvability.state == "refused":
         reasons.append(
@@ -1804,7 +1814,7 @@ def trust_state(
         resolvability is None
         and applies_resolvability
         and coverage is not None
-        and not records
+        and not real_data_family
     ):
         state = "broad_only"
         why = (
@@ -1812,15 +1822,18 @@ def trust_state(
             if not rules.resolvability_enabled
             else "the bundle has no resolvability self-map"
         )
-        reasons.append(
-            TrustReason(
-                code="resolvability_not_run",
-                detail=(
-                    f"{why}: nothing shows the leaf level is resolvable on a "
-                    "panel outside the validated families (fail-safe)"
-                ),
-            )
+        detail = (
+            f"{why}: nothing shows the leaf level is resolvable on this bundle; "
+            "a family validated by simulation emits as a provisional panel, so "
+            "it keeps the provisional fail-safe (promotion never changes what "
+            "is emitted)"
+            if records
+            else f"{why}: nothing shows the leaf level is resolvable on a "
+            "panel outside the validated families (fail-safe)"
         )
+        reasons.append(TrustReason(code="resolvability_not_run", detail=detail))
+        if records:
+            notes.append(family_reason)
     elif records:
         state = "validated"
         reasons.append(family_reason)
@@ -1978,8 +1991,9 @@ def validated_share_by_class(
 
 def panel_provenance(
     decision: TrustDecision,
-    diagnostics: PanelDiagnostics,
+    diagnostics: PanelDiagnostics | None,
     *,
+    panel_hash: str | None = None,
     panel_mode: PanelMode | None = None,
     validated_share: Mapping[str, float] | None = None,
     n_missing_panel_genes: int | None = None,
@@ -1987,9 +2001,16 @@ def panel_provenance(
 ) -> PanelProvenance:
     """Return ``AnnotationProvenance.panel`` for a dataset (plan §4.6).
 
+    The trust fields (family, basis, validated level, table digests) come
+    from the decision, so a dataset without panel diagnostics (no panel
+    file, or diagnostics that do not fit its bundle) still records them;
+    only the gene-ID fields are then empty.
+
     Args:
         decision: The primary reference's trust decision.
-        diagnostics: The panel's diagnostics.
+        diagnostics: The panel's diagnostics (``None``: not available).
+        panel_hash: The panel hash recorded without diagnostics (default:
+            the decision's); with diagnostics, their panel's hash is used.
         panel_mode: The pair's resolved panel mode.
         validated_share: Validated share of confident labels per level.
         n_missing_panel_genes: Declared genes absent from the dataset.
@@ -1998,9 +2019,23 @@ def panel_provenance(
     Returns:
         The panel provenance.
     """
-    gene_counts = diagnostics.resolved_by_source()
+    gene_fields: dict[str, Any] = {}
+    if diagnostics is not None:
+        gene_counts = diagnostics.resolved_by_source()
+        gene_fields = {
+            "n_declared_genes": diagnostics.n_genes,
+            "gene_id_resolution": {safe_token(k): v for k, v in gene_counts.items()},
+            "n_unmapped": diagnostics.n_unmapped(),
+            "controls_removed": {
+                safe_token(k): v for k, v in diagnostics.controls_removed().items()
+            },
+        }
     return PanelProvenance(
-        panel_hash=diagnostics.panel_hash,
+        panel_hash=(
+            diagnostics.panel_hash
+            if diagnostics is not None
+            else (panel_hash if panel_hash is not None else decision.panel_hash)
+        ),
         panel_family=decision.family_id,
         family_basis=decision.family_basis,
         panel_mode=panel_mode,
@@ -2016,12 +2051,7 @@ def panel_provenance(
             VALIDATED_PANEL_LEVELS_FILE
         ),
         validated_share=dict(validated_share or {}),
-        n_declared_genes=diagnostics.n_genes,
-        gene_id_resolution={safe_token(k): v for k, v in gene_counts.items()},
-        n_unmapped=diagnostics.n_unmapped(),
-        controls_removed={
-            safe_token(k): v for k, v in diagnostics.controls_removed().items()
-        },
         n_missing_panel_genes=n_missing_panel_genes,
         panel_report_sha256=panel_report_sha256,
+        **gene_fields,
     )

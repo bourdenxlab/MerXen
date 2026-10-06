@@ -321,6 +321,118 @@ def test_mouse_gate_trust_caps_the_level_and_warns(
     assert failed.level == "failed"
 
 
+def _simulation_trust(make_trust: Callable[..., Any]) -> Any:
+    return make_trust(
+        "validated_simulation",
+        species="mouse",
+        level_records=[
+            {
+                "level": "class",
+                "class": "01 IT-ET Glut",
+                "status": "validated",
+                "validated_min_depth": 30,
+                "tested_max_depth": 500,
+            }
+        ],
+        validated_max_level="class",
+    )
+
+
+def _unvalidated(verdict: Any) -> list[str]:
+    return [
+        reason
+        for reason in verdict.warning_reasons
+        if reason.startswith("unvalidated_share:")
+    ]
+
+
+def test_mouse_gate_warns_when_simulation_labels_leave_the_validated_region(
+    make_trust: Callable[..., Any],
+) -> None:
+    """The §8.2 10% rule over the mouse chain (M13 D15 (a)): warning, same level.
+
+    A level warns when more than ``warn_unvalidated_share`` (0.10) of its
+    confident labels lie outside the validated region; exactly 10% does
+    not, a level without confident labels is skipped, and the level, its
+    reasons and the signal statuses never change.
+    """
+    trust = _simulation_trust(make_trust)
+    share = {"broad": 0.95, "class": 0.85, "nt": None, "subclass": 0.90}
+    for signals in (
+        _good(),
+        _good(t2_share=0.05),
+        _good(registration=RegistrationSignal(density_ratio=1.0, shift_um=0.0)),
+    ):
+        plain = evaluate_mouse_gate(signals, CONFIG, trust=trust)
+        warned = evaluate_mouse_gate(
+            signals, CONFIG, trust=trust, validated_share=share
+        )
+        assert (warned.level, warned.level_reasons) == (
+            plain.level,
+            plain.level_reasons,
+        )
+        assert warned.signal_status == plain.signal_status
+        assert warned.notes == plain.notes
+        assert warned.warning
+        assert _unvalidated(plain) == []
+        assert _unvalidated(warned) == [
+            "unvalidated_share:class: > 0.1 of confident labels outside the "
+            "validated region"
+        ]
+        assert [r for r in warned.warning_reasons if r not in _unvalidated(warned)] == (
+            list(plain.warning_reasons)
+        )
+    # A passing sample warns only through the rule (no banner warning).
+    passing = evaluate_mouse_gate(_good(), CONFIG, trust=trust)
+    assert passing.level == "full" and not passing.warning
+    assert (
+        evaluate_mouse_gate(
+            _good(), CONFIG, trust=trust, validated_share={"class": 0.9}
+        ).warning_reasons
+        == ()
+    )
+
+
+def test_mouse_gate_unvalidated_share_limit_and_trust_states(
+    make_trust: Callable[..., Any],
+) -> None:
+    """The limit is ``AnnotationGate.warn_unvalidated_share``; only simulation warns."""
+    from merxen.annotation.config import AnnotationGate
+    from merxen.annotation.thresholds import dataset_gate
+
+    trust = _simulation_trust(make_trust)
+    share = {"broad": 0.5, "class": 0.85, "subclass": 0.7}
+    relaxed = evaluate_mouse_gate(
+        _good(), CONFIG, trust=trust, validated_share=share, max_unvalidated_share=0.2
+    )
+    assert _unvalidated(relaxed) == [
+        "unvalidated_share:broad: > 0.2 of confident labels outside the validated "
+        "region",
+        "unvalidated_share:subclass: > 0.2 of confident labels outside the "
+        "validated region",
+    ]
+    # The same rule and text as the human dataset gate.
+    default = evaluate_mouse_gate(_good(), CONFIG, trust=trust, validated_share=share)
+    human = dataset_gate(
+        np.full(100, 200.0),
+        np.ones(100, dtype=bool),
+        trust=trust,
+        validated_share=share,
+        gate=AnnotationGate(),
+    )
+    assert _unvalidated(default) == _unvalidated(human)
+    assert len(_unvalidated(default)) == 3
+    for state in ("validated_real", "provisional", "broad_only", "refused"):
+        other = make_trust(state, species="mouse")
+        verdict = evaluate_mouse_gate(
+            _good(), CONFIG, trust=other, validated_share={"class": 0.0}
+        )
+        assert _unvalidated(verdict) == [], state
+        assert verdict == evaluate_mouse_gate(_good(), CONFIG, trust=other)
+    no_trust = evaluate_mouse_gate(_good(), CONFIG, validated_share={"class": 0.0})
+    assert no_trust == evaluate_mouse_gate(_good(), CONFIG)
+
+
 def test_mouse_gate_json_and_provenance() -> None:
     verdict = evaluate_mouse_gate(
         _good(registration=None, t2_share=None, t2_reason="region step disabled"),

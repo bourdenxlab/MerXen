@@ -828,6 +828,33 @@ def final_label(
     return final_level, final_name
 
 
+def chain_validated_share(
+    levels: Mapping[str, LevelResult], chain: Sequence[str]
+) -> dict[str, float | None]:
+    """Return the share of confident labels inside the validated region per level.
+
+    The input of the simulation-family gate warning (``warn_unvalidated_share``,
+    plan §8.2), read on the emitted chain levels only, as ``ct_final`` is;
+    report-only fine and secondary levels are left out.
+
+    Args:
+        levels: Per-level results with ``validated`` set (``ct_<L>_validated``).
+        chain: The species' chain (``HUMAN_CHAIN`` or ``MOUSE_CHAIN``).
+
+    Returns:
+        Level to the share of its confident labels that are validated
+        (``None``: no confident label at the level), in chain order.
+    """
+    shares: dict[str, float | None] = {}
+    for level in chain:
+        result = levels[level]
+        confident = result.confident
+        shares[level] = (
+            float(result.validated[confident].mean()) if confident.any() else None
+        )
+    return shares
+
+
 def consensus_tier(
     labels: Sequence[np.ndarray],
     informative: Sequence[np.ndarray],
@@ -1447,17 +1474,12 @@ def resolve_human(calls: HumanCalls, settings: HumanResolveSettings) -> HumanRes
 
     # ct_<L>_validated (§4.1) and the simulation-family gate warning.
     validated_share: dict[str, float | None] = {}
-    for level, result in levels.items():
-        if settings.trust is None:
-            continue
-        result.validated = settings.trust.validated_mask(
-            level, result.class_key, counts, result.confident
-        )
-        if level in HUMAN_CHAIN:
-            confident = result.confident
-            validated_share[level] = (
-                float(result.validated[confident].mean()) if confident.any() else None
+    if settings.trust is not None:
+        for level, result in levels.items():
+            result.validated = settings.trust.validated_mask(
+                level, result.class_key, counts, result.confident
             )
+        validated_share = chain_validated_share(levels, HUMAN_CHAIN)
     gate = dataset_gate(
         counts[table],
         broad_confident[table],
