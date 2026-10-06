@@ -71,8 +71,9 @@ a call change (``resolvability.seed_stability``; D6, pre-registration
 §23.9 item 3, confirmed on 2026-10-06). A level over 2% fails NP4 for every
 class of the level (``np4_class_verdicts``), its classes without a changed
 label included. That reading and the others taken where §14 is not
-explicit are listed in ``np4_seed_stability``'s docstring; they are open
-until the user answers them, before the set a dry run is scored.
+explicit are listed in ``np4_seed_stability``'s docstring and put to the
+user in pre-registration §23.14; they are open until the user answers
+them, before the set a dry run is scored.
 
 A replicate is keyed by an opaque (group, seed label) pair:
 the group is a human donor or a mouse draw, so the functions are
@@ -1135,8 +1136,8 @@ def np4_seed_stability(
 
     Readings this implementation takes where §14 is not explicit (strict
     where there is a choice, unless ``seed_stability``, which D6 names,
-    settles it). They are open: each needs the user's answer, recorded in
-    the pre-registration (§23.9 item 3), before the set a dry run (C9) is
+    settles it). They are open and put to the user in pre-registration
+    §23.14: each needs the user's answer before the set a dry run (C9) is
     scored, as for NP5 and NP7. Until then:
 
     - **Each group is scored.** Every group's seed pair must change at most
@@ -1170,7 +1171,8 @@ def np4_seed_stability(
       cell no broad label at the other seed. Stricter: count it as a
       change.
     - **Threshold crossings** are reported and not counted (D6's call
-      changes, above); the user confirms this with the other readings.
+      changes, above). D6 settles this; §23.14 lists it beside the open
+      readings.
 
     Version-7 families score this in every emission member (``member=``),
     each member's seed-0 calls against its own seed-1 re-mapping, and
@@ -1286,7 +1288,8 @@ def np4_class_verdicts(
     (M13 plan CHECK K10, D29): an NP4 failure at any tested set fails the
     (level, class); it does not only raise ``validated_min_depth``. A level
     over the seed limit fails every class of the level (an open reading,
-    listed in ``np4_seed_stability``). The result has the
+    listed in ``np4_seed_stability``; pre-registration §23.14). The result
+    has the
     per-member shape that ``resolvability.every_member_verdict`` combines
     over the version-7 emission members.
 
