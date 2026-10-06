@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import math
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -692,9 +693,10 @@ def _np3_rows(
     decisions = _decisions(depths)
     tested = res.gate_p_tested_sets(cells, decisions, regime="provisional")
     stats = gp.np3_set_stats(
-        cells,
+        {("D1", 0): cells},
         decisions,
         tested,
+        default_group=None,
         composition=composition,
         settings=_np3(),
         depth_histogram=depth_histogram,
@@ -756,6 +758,188 @@ def test_kish_shrinkage_makes_a_set_at_p95_fail_its_wilson_bound() -> None:
     ]
     assert gp.np3_class_verdicts(table) == {("broad", "X"): False}
     assert len(stats) == len(verdicts) == 5
+
+
+def test_np3_wilson_bound_must_reach_the_target_not_the_target_less_002() -> None:
+    """§14 NP3: Wilson bound >= target_L (the emission rule's -.02 is NP6's).
+
+    200 X calls at 100 counts, .95 right in each type (160 of A, 40 of B).
+    Class-balanced, the Kish n is 4 x 160 x 40 / 200 = 128 and the bound
+    .897: above target_L - .02 (.88), below target_L (.90), so it fails.
+    The natural composition (A .8, B .2) matches the set: Kish n 200, bound
+    .910, and the set passes.
+    """
+    cells = _calls(100, [("A", "X", 160, 152, 0.95), ("B", "X", 40, 38, 0.95)])
+    _, _, verdicts = _np3_rows(cells, [100], composition={"A": 0.8, "B": 0.2})
+    balanced = _scheme(verdicts, gp.NP3_CLASS_BALANCED)
+    assert balanced["precision"] == pytest.approx(0.95)
+    assert balanced["kish_n"] == pytest.approx(128.0)
+    assert 0.88 <= balanced["wilson_lb"] < 0.90
+    assert balanced["wilson_lb"] == pytest.approx(0.8974, abs=1e-4)
+    assert balanced["target"] == pytest.approx(0.90)
+    assert balanced["point_ok"] and balanced["coverage_ok"]
+    assert not balanced["wilson_ok"] and not balanced["passed"]
+    natural = _scheme(verdicts, gp.NP3_NATURAL)
+    assert natural["kish_n"] == pytest.approx(200.0)
+    assert natural["wilson_ok"] and natural["passed"]
+
+
+def test_np3_coverage_is_weighted_on_the_scope_and_precision_on_the_set() -> None:
+    """The coverage weighs every call of the class in the set's scope; the
+    precision, Kish n and bound reweight the confident set on its own.
+
+    X's calls at 100 counts: 300 confident of A (270 right), 40 confident of
+    B (right) and 60 unconfident of B. Class-balanced, the confident set
+    gives A and B 170 each: precision (153 + 170) / 340 = .95. The coverage
+    reweights all 400 calls (A and B 200 each, so a B call weighs 2): (200 +
+    40 x 2) / 400 = .70, against .85 unweighted. Taking the set's weights
+    from the calls' weighting instead would give (180 + 80) / 280 = .929.
+    """
+    cells = _calls(
+        100,
+        [
+            ("A", "X", 300, 270, 0.95),
+            ("B", "X", 40, 40, 0.95),
+            ("B", "X", 60, 60, 0.5),
+        ],
+    )
+    composition = {"A": 0.6, "B": 0.4}
+    _, _, verdicts = _np3_rows(cells, [100], composition=composition)
+    # (precision, coverage, the confident set's weights per call of A and B)
+    expected = {
+        gp.NP3_UNWEIGHTED: (310 / 340, 340 / 400, (1.0, 1.0)),
+        gp.NP3_CLASS_BALANCED: (0.95, 0.70, (170 / 300, 170 / 40)),
+        gp.NP3_NATURAL: (
+            (0.6 * 340 * 0.9 + 0.4 * 340) / 340,
+            (0.6 * 400 + 40 * 1.6) / 400,
+            (0.6 * 340 / 300, 0.4 * 340 / 40),
+        ),
+    }
+    for scheme, (precision, coverage, (w_a, w_b)) in expected.items():
+        row = _scheme(verdicts, scheme)
+        assert row["n_called"] == 400 and row["n_confident"] == 340
+        assert row["precision"] == pytest.approx(precision)
+        assert row["coverage"] == pytest.approx(coverage)
+        kish = (300 * w_a + 40 * w_b) ** 2 / (300 * w_a**2 + 40 * w_b**2)
+        assert row["kish_n"] == pytest.approx(kish)
+    balanced = _scheme(verdicts, gp.NP3_CLASS_BALANCED)
+    assert balanced["coverage"] != pytest.approx(
+        _scheme(verdicts, gp.NP3_UNWEIGHTED)["coverage"]
+    )
+
+
+def test_pooled_sets_are_reweighted_as_one_set_across_their_bins() -> None:
+    """§14 "reweighted sets": a ">= D_P" set is weighted as one set, not per bin.
+
+    The ">= 60" set pools 150 cells at their deepest row, 100 counts (30 of
+    A, 120 of B), and 100 cells at 60 (80 of A, 20 of B). Weighted as one
+    set (110 of A, 140 of B), class-balanced, every A call weighs 125 / 110
+    and every B call 125 / 140: Kish n 4 x 110 x 140 / 250 = 246.4. Weighted
+    per bin, the 30 deep A calls and the 20 shallow B calls would each weigh
+    2.5 and the Kish n fall to 160: the failure that
+    ``pooled_composition_weights`` records on ag7.
+    """
+    good = (0.95, True)
+    cells = tracked_cells(
+        [
+            ("a_deep", 30, {60: good, 100: good}),
+            ("b_deep", 120, {60: good, 100: good}),
+            ("a_low", 80, {60: good}),
+            ("b_low", 20, {60: good}),
+        ]
+    )
+    cells[res.TRUTH_LEAF_COLUMN] = np.where(
+        cells["cell_id"].str.startswith("a_"), "A", "B"
+    )
+    composition = {"A": 0.6, "B": 0.4}
+    tested, stats, _ = _np3_rows(cells, [60, 100], composition=composition)
+    pooled = [item for item in tested[("broad", "X")] or [] if item.pooled]
+    assert [(item.depths, item.n_confident) for item in pooled] == [((60, 100), 250)]
+    deepest = res.deepest_rows(cells).reset_index(drop=True)
+    assert sorted(set(deepest["depth"])) == [60, 100]
+    leaf = deepest[res.TRUTH_LEAF_COLUMN].to_numpy()
+    counts = {"A": 110, "B": 140}
+    assert {name: int((leaf == name).sum()) for name in counts} == counts
+    for scheme, shares in (
+        (gp.NP3_CLASS_BALANCED, {"A": 0.5, "B": 0.5}),
+        (gp.NP3_NATURAL, composition),
+    ):
+        expected = np.array([shares[name] * 250 / counts[name] for name in leaf])
+        weights = gp.np3_set_weights(
+            deepest, scheme, composition=composition, trim_factor=10.0
+        )
+        assert weights == pytest.approx(expected)
+        row = _scheme(stats, scheme, ">=60")
+        assert row["n_confident"] == 250
+        kish = float(expected.sum() ** 2 / (expected**2).sum())
+        assert row["kish_n"] == pytest.approx(kish)
+    balanced = _scheme(stats, gp.NP3_CLASS_BALANCED, ">=60")
+    assert balanced["kish_n"] == pytest.approx(4 * 110 * 140 / 250)
+
+
+def test_np3_scores_the_default_group_on_its_check_half_only() -> None:
+    """NP3 pools the replicates itself, so the fit half cannot leak (§14).
+
+    The default donor D1's table holds both halves (400 calls): its 200
+    fit-half calls, on which the frozen thresholds were fitted, are left
+    out, so every set holds D1's 200 check-half calls and D2's 200. A plain
+    concat of the two tables would have scored 600.
+    """
+    d1 = _calls(100, [("A", "X", 400, 400, 0.95)], prefix="d1")
+    d2 = _calls(100, [("A", "X", 200, 200, 0.95)], prefix="d2")
+    assert int((d1["half"] == 0).sum()) == 200
+    replicates = {("D1", 0): d1, ("D2", 0): d2}
+    decisions = _decisions([100])
+    pooled = gp.pooled_held_out_cells(replicates, default_group="D1")
+    tested = res.gate_p_tested_sets(pooled, decisions, regime="provisional")
+    stats = gp.np3_set_stats(
+        replicates,
+        decisions,
+        tested,
+        default_group="D1",
+        composition=NATURAL,
+        settings=_np3(),
+    )
+    assert (stats["n_called"] == 400).all() and (stats["n_confident"] == 400).all()
+    # A fit-half cell of D1 in D2's table is a leak.
+    leaked = {
+        ("D1", 0): d1,
+        ("D2", 0): pd.concat([d2, d1[d1["half"] == 0].iloc[:1]], ignore_index=True),
+    }
+    with pytest.raises(ValueError, match="fit-half"):
+        gp.np3_set_stats(
+            leaked,
+            decisions,
+            tested,
+            default_group="D1",
+            composition=NATURAL,
+            settings=_np3(),
+        )
+    # The default group's table needs its split halves.
+    with pytest.raises(ValueError, match="half"):
+        gp.np3_set_stats(
+            {("D1", 0): d1.drop(columns="half"), ("D2", 0): d2},
+            decisions,
+            tested,
+            default_group="D1",
+            composition=NATURAL,
+            settings=_np3(),
+        )
+    # No caller can leave the default group out by omission.
+    with pytest.raises(TypeError, match="default_group"):
+        gp.np3_set_stats(  # type: ignore[call-arg]
+            replicates, decisions, tested, composition=NATURAL, settings=_np3()
+        )
+    with pytest.raises(ValueError, match="seed label"):
+        gp.np3_set_stats(
+            replicates,
+            decisions,
+            tested,
+            default_group="D1",
+            composition=NATURAL,
+            settings=_np3(),
+            seed=1,
+        )
 
 
 def test_np3_coverage_below_030_fails() -> None:
@@ -864,7 +1048,12 @@ def test_tested_sets_never_hold_fewer_than_200_calls_and_count_each_cell_once() 
         decisions = res.decide(cells, [BROAD], [10, 30, 100], settings())
         tested = res.gate_p_tested_sets(cells, decisions, regime="provisional")
         stats = gp.np3_set_stats(
-            cells, decisions, tested, composition=composition, settings=_np3()
+            {("D1", 0): cells},
+            decisions,
+            tested,
+            default_group=None,
+            composition=composition,
+            settings=_np3(),
         )
         confident = res.frozen_confident_mask(
             cells, res.emission_lookup(decisions, "provisional")
@@ -1121,6 +1310,14 @@ def test_validated_min_depth_walks_down_from_d_p() -> None:
     )
     assert record["tested_max_depth"] == 100 and record["validated_min_depth"] == 30
     assert (record["stop_depth"], record["stop_reason"]) == (20, "untested")
+    # Every bin below D_P tested on its own and passing: the walk reaches the
+    # shallowest grid bin and stops nowhere.
+    record = _min_depth(
+        [pooled, *[_set((depth,)) for depth in (30, 20, 15, 10)]],
+        {">=60": True, "30": True, "20": True, "15": True, "10": True},
+    )
+    assert record["validated_min_depth"] == 10 and record["passed"] is True
+    assert record["stop_depth"] is None and record["stop_reason"] == ""
     # A walk down to the shallowest grid bin has nowhere left to stop.
     record = _min_depth([_set((10, 15, 20))], {">=10": True})
     assert record["validated_min_depth"] == 10 and record["stop_depth"] is None
@@ -1152,19 +1349,50 @@ def test_np3_class_verdicts_feed_every_member_verdict() -> None:
     assert combined[("broad", "Y")]["status"] == res.GATE_P_NOT_EVALUABLE
 
 
+def test_np3_class_verdicts_keep_not_evaluable_after_a_csv_round_trip() -> None:
+    """A not-evaluable class read back from CSV (``passed`` nan) is no pass."""
+    tested: dict[tuple[str, str], list[res.GatePTestedSet] | None] = {
+        ("broad", "X"): [_set((60, 100))],
+        ("broad", "Y"): None,
+        ("broad", "Z"): [_set((60, 100), cls="Z")],
+    }
+    verdicts = pd.concat(
+        [
+            _np3_verdict_rows({">=60": True}),
+            _np3_verdict_rows({">=60": False}, cls="Z"),
+        ],
+        ignore_index=True,
+    )
+    table = gp.validated_min_depth(verdicts, tested, GRID_NP3)
+    expected = {("broad", "X"): True, ("broad", "Y"): None, ("broad", "Z"): False}
+    assert gp.np3_class_verdicts(table) == expected
+    buffer = io.StringIO()
+    table.to_csv(buffer, index=False)
+    buffer.seek(0)
+    read = pd.read_csv(buffer)
+    assert pd.isna(read.loc[read["class"] == "Y", "passed"].iloc[0])
+    assert gp.np3_class_verdicts(read) == expected
+
+
 def test_np3_inputs_that_lack_rows_or_verdicts_raise() -> None:
     cells = _calls(100, [("A", "X", 200, 200, 0.95)])
     decisions = _decisions([100])
     tested = res.gate_p_tested_sets(cells, decisions, regime="provisional")
     with pytest.raises(ValueError, match="no rows"):
         gp.np3_set_stats(
-            cells.iloc[:0], decisions, tested, composition=NATURAL, settings=_np3()
+            {("D1", 0): cells.iloc[:0]},
+            decisions,
+            tested,
+            default_group=None,
+            composition=NATURAL,
+            settings=_np3(),
         )
     with pytest.raises(ValueError, match="belongs to"):
         gp.np3_set_stats(
-            cells,
+            {("D1", 0): cells},
             decisions,
             {("broad", "Y"): [_set((100,))]},
+            default_group=None,
             composition=NATURAL,
             settings=_np3(),
         )
@@ -1178,7 +1406,12 @@ def test_np3_inputs_that_lack_rows_or_verdicts_raise() -> None:
             gp.NP3_CLASS_BALANCED_TEST_CELLS,
         )
     stats = gp.np3_set_stats(
-        cells, decisions, tested, composition=NATURAL, settings=_np3()
+        {("D1", 0): cells},
+        decisions,
+        tested,
+        default_group=None,
+        composition=NATURAL,
+        settings=_np3(),
     )
     with pytest.raises(ValueError, match="no precision target"):
         gp.np3_verdicts(stats.assign(level="unknown"), AnnotationThresholds(), _np3())

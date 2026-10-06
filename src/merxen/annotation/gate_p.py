@@ -18,11 +18,26 @@ set's shallowest bin), its Wilson bound on the Kish effective n reaches
 target_L and the coverage reaches ``gate_p_min_coverage`` (0.30), each under
 two weightings of the set: the reference's natural composition and the
 class-balanced one (equal total weight per truth type within the called
-class's tested set; pre-registration §23.9 item 2). The unweighted values,
-a family dataset's depth histogram (label-free) and the two weightings read
-on the test cells of a set's scope are reported only. A family dataset's
-composition is not used: it needs the dataset's labels, and no real-label
-input reaches gate P other than NP5's registered profile (§23.9 item 6).
+class's tested set; pre-registration §23.9 item 2, confirmed with D12). The
+unweighted values, a family dataset's depth histogram (label-free) and the
+two weightings read on the test cells of a set's scope are reported only. A
+family dataset's composition is not used: it needs the dataset's labels, and
+no real-label input reaches gate P other than NP5's registered profile
+(§23.9 item 6).
+
+Open (M13 review of NP3, to be put to the user before the set a dry run):
+§14 asks for "the reference's natural composition within the class", and
+neither the pre-registration nor the decisions of 2026-10-06 say how it is
+read. The scored ``natural`` scheme is this implementation's reading: every
+truth type of the called class's tested set, a wrong call's type included,
+takes its share of the reference's composition. ``natural_test_cells``
+(report-only) is the other candidate. On a set that is almost all right,
+the set weightings' result is set mainly by the judged-set trim (10 x the
+set's median weight), which caps the weight of a wrong-call type of a few
+calls: on 1,000 calls, 990 right in three types and the 10 wrong ones in two
+others, the class-balanced precision is .918 with the trim and .60 without
+it. Until the user chooses, the code scores ``natural`` and
+``class_balanced`` as written here.
 
 NP4, stability across held-out donors (or draws) and seeds (§14 NP4): per
 (level, class), at every tested set,
@@ -1036,7 +1051,9 @@ def np3_set_weights(
     The schemes, each over the truth types (``truth_leaf``) of ``rows``:
 
     - ``natural``: each type's total weight follows its share in the
-      reference's natural composition;
+      reference's natural composition (this implementation's reading of
+      §14's "natural composition within the class"; open, see the module
+      docstring);
     - ``class_balanced``: each type gets the same total weight
       (pre-registration §23.9 item 2: "equal total weight to each truth type
       within the called class's tested set");
@@ -1122,8 +1139,12 @@ def np3_test_cell_weights(
     to equal shares (``class_balanced_test_cells``), and each class keeps its
     share of the test cells. A class's tested set then takes the weights of
     its calls, so a wrong call weighs what its type's test cells weigh, not
-    a share of the set. This is not the registered NP3 weighting (§23.9 item
-    2); it is reported beside it.
+    a share of the set. ``class_balanced_test_cells`` is not the registered
+    class-balanced weighting (§23.9 item 2). ``natural_test_cells`` is the
+    other reading of §14's natural composition "within the class"; which
+    reading NP3 scores is open (module docstring), and until the user
+    chooses, the set reading (``np3_set_weights``) is scored and this one is
+    reported beside it.
 
     Args:
         scope: The scope's rows (``truth_leaf``, ``truth_parent``, ``level``).
@@ -1243,24 +1264,28 @@ def _weighted_set(
 
 
 def np3_set_stats(
-    cells: pd.DataFrame,
+    replicates: Mapping[ReplicateKey, pd.DataFrame],
     decisions: pd.DataFrame,
     tested: Mapping[tuple[str, str], Sequence[res.GatePTestedSet] | None],
     *,
+    default_group: str | None,
     composition: Mapping[str, float],
     settings: Np3Settings,
     depth_histogram: Mapping[int, float] | None = None,
     regime: res.Regime = "provisional",
     recipe: str | None = res.DECISION_RECIPE,
-    seed: int | None = 0,
+    seed: int = 0,
     member: str | None = None,
 ) -> pd.DataFrame:
     """Score every tested set of the pooled held-out calls (§14 NP3).
 
-    NP3 is scored on the base recipe at seed 0, on all held-out calls
-    (``pooled_held_out_cells``) at the frozen thresholds of ``decisions``,
-    on the tested sets fixed from the same calls (``gate_p_tested_sets``;
-    version 7: per emission member, ``gate_p_member_sets``). Each set is
+    NP3 is scored on the base recipe at seed 0, on all held-out calls at the
+    frozen thresholds of ``decisions``, on the tested sets fixed from the
+    same calls (``gate_p_tested_sets`` on ``pooled_held_out_cells``; version
+    7: per emission member, ``gate_p_member_sets``). The calls are pooled
+    here (``pooled_held_out_cells``), so the default group's fit half, on
+    which the frozen thresholds were fitted, cannot enter NP3 by omission:
+    ``default_group`` is required, as in ``replicate_set_stats``. Each set is
     scored under every scheme of ``np3_set_weights`` (``depth_histogram``
     only with a histogram) and of ``np3_test_cell_weights``; NP3's verdict
     uses ``NP3_SCORED_SCHEMES`` only (``np3_verdicts``).
@@ -1271,21 +1296,30 @@ def np3_set_stats(
     at >= D_P), weighted the same way as a set of their own.
 
     Args:
-        cells: The pooled held-out calls (one replicate's worth of rows:
-            pooled donors or draws with distinct cell ids).
+        replicates: Per (group, seed label), that replicate's cells table
+            (the default group's in full; ``held_out_replicates``). Pooled
+            donors or draws need distinct cell ids.
         decisions: The frozen decisions of the base run (version 7: the
             ensemble's).
         tested: The tested sets per (level, class); ``None`` marks a
             (level, class) that is not evaluable and has no rows.
-        composition: The reference's natural share per truth type; every
-            truth type of the held-out calls needs a positive share.
+        default_group: The group whose fit half the frozen thresholds were
+            fitted on (required, so that no caller leaks it by omission;
+            ``None`` when no replicate holds those cells).
+        composition: The reference's natural share per truth type. Every
+            truth type of the held-out calls needs a positive share, the
+            types of each donor's non-frontal top-up cells included
+            (pre-registration §23.2 D2 (d)): a share table of the frontal
+            cortex alone raises when a top-up type is missing from it.
         settings: The NP3 constants.
         depth_histogram: A family dataset's cell mass per grid bin
             (label-free; report-only).
         regime: The regime whose thresholds are frozen.
         recipe: The recipe of the scored rows (``None``: every recipe, so
-            the table must hold one).
-        seed: The mapping seed of the scored rows (``None``: likewise).
+            the tables must hold one).
+        seed: The seed label of the replicates pooled
+            (``pooled_held_out_cells``); their rows are kept at the same
+            mapping seed, as ``gate_p_tested_sets`` keeps its rows.
         member: The version-7 emission member of the scored rows.
 
     Returns:
@@ -1293,13 +1327,15 @@ def np3_set_stats(
         columns ``NP3_STATS_COLUMNS`` (``scored``: the scheme decides NP3).
 
     Raises:
-        ValueError: If no row is left after the filters, a key's tested sets
-            are an empty list or of another key, or for an invalid
-            composition or histogram.
+        ValueError: If no replicate has seed label ``seed``, no row is left
+            after the filters, a key's tested sets are an empty list or of
+            another key, for an invalid composition or histogram, or for the
+            default group's inputs (``held_out_replicates``).
         ResolvabilityError: If the rows mix replicates (``replicate_rows``).
     """
     _check_tested(tested)
     histogram = None if depth_histogram is None else _depth_histogram(depth_histogram)
+    cells = pooled_held_out_cells(replicates, default_group=default_group, seed=seed)
     frame = res.replicate_rows(
         cells, recipe=recipe, seed=seed, member=member
     ).reset_index(drop=True)
@@ -1623,6 +1659,9 @@ def np3_class_verdicts(
     ``resolvability.every_member_verdict`` combines over the version-7
     emission members.
 
+    A missing ``passed`` (``None``, or the ``nan`` a CSV round trip turns it
+    into) stays not evaluable; it is never read as a pass.
+
     Args:
         table: ``validated_min_depth`` output.
 
@@ -1631,7 +1670,9 @@ def np3_class_verdicts(
         (not evaluable).
     """
     return {
-        (str(level), str(cls)): None if passed is None else bool(passed)
+        (str(level), str(cls)): None
+        if passed is None or pd.isna(passed)
+        else bool(passed)
         for level, cls, passed in zip(
             table["level"], table["class"], table["passed"], strict=True
         )
