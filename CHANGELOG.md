@@ -22,7 +22,11 @@
 - **MENDER.** Map-first tables use the `exclude_from_features` policy: unassigned cells stay spatial nodes but add no neighbourhood state. Legacy tables keep `state`.
 - **Annotation QC report** per pair and segmentation (`annotation_report/`).
 - **Cortical depth.** A `boundary_frame` setting computes depth in the frame of the manual boundaries (the MERSCOPE frame fix).
-- **New panels in RESOLVE.** Panels outside the validated families use resolvability version 7 (custom and unknown panels, Xenium Prime 5K), and RESOLVE now reads those bundles instead of stopping: it applies the version-7 ensemble decisions, writes the report-only label column `flag_nonneuronal_high_depth` (null for version-6 panels) and records the class-depth prediction in the resolve summary. Version-6 outputs are unchanged apart from that null column.
+- **New panels in RESOLVE.** Panels outside the validated families use resolvability version 7 (custom and unknown panels, Xenium Prime 5K), and RESOLVE now reads those bundles instead of stopping: it applies the version-7 ensemble decisions, writes the report-only label column `flag_nonneuronal_high_depth` (null for version-6 panels) and records the class-depth prediction in the resolve summary. Reading version 7 leaves version-6 outputs unchanged apart from that null column; the panel record and mouse gate changes below apply to every bundle version.
+- **Panel record and the mouse 10% rule.**
+  - The panel record of the provenance (`panel`) is now built the same way for mouse as for human, with the panel family, family basis, validation basis, validated level and table digests, panel mode, validated shares and gene-ID diagnostics. Mouse records used to hold only the panel hash, trust state, reasons, banner and missing-gene count.
+  - Without panel diagnostics (no primary run, no panel file, or diagnostics that do not fit the bundle), human and mouse records still carry the trust decision's fields, the panel mode and the validated shares; only the gene-ID fields stay empty. Human records used to leave all of these empty in that case.
+  - A mouse panel family validated by simulation now warns (`unvalidated_share:<level>`) when more than `warn_unvalidated_share` (10%) of the confident labels at broad, class, nt or subclass fall outside its validated region, as the human gate does. The warning never changes the gate level.
 
 ### Acceptance
 
