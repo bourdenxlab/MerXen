@@ -655,6 +655,10 @@ class _FakeTables:
     def depth_grid(self) -> list[int]:
         return [10, 15, 30, 60, 120, 250]
 
+    @property
+    def version(self) -> int | None:
+        return None
+
     def decisions(
         self, *, composition: Any = None, settings: Any = None
     ) -> pd.DataFrame:
@@ -681,8 +685,16 @@ def test_resolvability_tables_are_reweighted_and_trust_sets_the_regime(
         for depth in (10, 15, 30, 60, 120, 250)
     }
     tables = _FakeTables(make_decisions(overrides=overrides), human_level_meta)
-    monkeypatch.setattr(resolvability, "load_resolvability", lambda path: tables)
+    declared: list[bool] = []
+
+    def load(path: Path, *, allow_version_7: bool = False) -> _FakeTables:
+        declared.append(allow_version_7)
+        return tables
+
+    monkeypatch.setattr(resolvability, "load_resolvability", load)
     validated = _resolve(setup, make_trust, "validated")
+    # RESOLVE declares version-7 support (the M3c follow-up).
+    assert declared and all(declared)
     assert all(isinstance(call, DatasetComposition) for call in tables.calls)
     composition = tables.calls[0]
     assert sum(composition.overall.values()) > 0
@@ -704,7 +716,7 @@ def test_resolvability_tables_are_reweighted_and_trust_sets_the_regime(
     # A real-data-validated family keeps its pre-registered emission: the
     # provisional raises in the table change nothing, so the statuses equal
     # a run without resolvability tables.
-    monkeypatch.setattr(resolvability, "load_resolvability", lambda path: None)
+    monkeypatch.setattr(resolvability, "load_resolvability", lambda path, **_: None)
     untabled = _resolve(setup, make_trust, "untabled")
     for sample_id, sample in validated.samples.items():
         for level in ("lineage", "broad", "nt", "supercluster"):
