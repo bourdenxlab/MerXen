@@ -258,6 +258,21 @@ def test_nonneuronal_high_depth_flags_marked_emitted_bins_at_1000_counts() -> No
     assert flags.tolist() == [False, True, True, False, False, True, False]
 
 
+def test_nonneuronal_high_depth_flags_read_a_nullable_lineage_column() -> None:
+    """``class_depth_table`` stores ``neuronal`` as nullable booleans."""
+    table = pd.DataFrame(
+        class_depth_rows("Astro", {1000: 0.9}, neuronal=False, high_depth=(1000,))
+        + class_depth_rows("IT", {1000: 0.9}, neuronal=True, high_depth=(1000,))
+        + class_depth_rows("Unknown", {1000: 0.9}, neuronal=None, high_depth=(1000,))
+    )
+    table["neuronal"] = table["neuronal"].astype("boolean")
+    table["nonneuronal_high_depth"] = table["nonneuronal_high_depth"].astype("boolean")
+    flags = qc.nonneuronal_high_depth_flags(
+        [1500, 1500, 1500], ["Astro", "IT", "Unknown"], table
+    )
+    assert flags.tolist() == [True, False, True]
+
+
 def test_nonneuronal_depth_trend_reports_a_fall_above_1000_counts() -> None:
     rng = np.random.default_rng(0)
     n = 3000

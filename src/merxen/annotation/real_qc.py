@@ -625,11 +625,18 @@ def nonneuronal_high_depth_flags(
     classes = np.asarray(called_class, dtype=object)
     if len(values) != len(classes):
         raise ValueError("totals and called_class differ in length")
+    neuronal = np.array(
+        [_known_true(value) for value in class_depth["neuronal"]], dtype=bool
+    )
+    high_depth = np.array(
+        [_known_true(value) for value in class_depth["nonneuronal_high_depth"]],
+        dtype=bool,
+    )
     table = class_depth[
-        (class_depth["regime"].astype(str) == regime)
-        & (class_depth["status"].astype(str) == STATUS_EMITTED)
-        & class_depth["nonneuronal_high_depth"].fillna(False).astype(bool)
-        & ~class_depth["neuronal"].map(lambda value: value is True or value == 1.0)
+        (class_depth["regime"].astype(str) == regime).to_numpy()
+        & (class_depth["status"].astype(str) == STATUS_EMITTED).to_numpy()
+        & high_depth
+        & ~neuronal
     ]
     if table.empty:
         return np.zeros(len(values), dtype=bool)
@@ -649,6 +656,21 @@ def nonneuronal_high_depth_flags(
             continue
         flags[index] = (str(cls), float(bin_value)) in marked
     return flags
+
+
+def _known_true(value: object) -> bool:
+    """Whether a (possibly nullable) boolean value is known to be true.
+
+    ``class_depth_table`` stores ``neuronal`` as a nullable ``boolean`` column
+    (unknown lineage is missing) and the parquet round trip may give objects
+    or floats; a missing value is never true.
+    """
+    if value is None or value is pd.NA:
+        return False
+    try:
+        return bool(value == 1)
+    except (TypeError, ValueError):
+        return False
 
 
 def _band_label(low: int, high: int | None) -> str:
