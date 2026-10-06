@@ -268,8 +268,31 @@ class _ReplicateIndex:
             self._levels[level] = (rows, deepest.index.to_numpy(np.int64))
         return self._levels[level]
 
-    def positions(self, item: res.GatePTestedSet) -> np.ndarray:
-        """Return the positions of the rows in a tested set (one per test cell).
+    def scope_positions(self, item: res.GatePTestedSet) -> np.ndarray:
+        """Return the positions of the test cells a tested set is drawn from.
+
+        A single bin's scope is every row of the level at its depth; a pooled
+        ">= D_P" set's is each test cell's deepest row of the level when it
+        lies at a depth >= D_P. Every call is kept (any class, a sink, no
+        call, unconfident).
+
+        Args:
+            item: The tested set.
+
+        Returns:
+            Row positions, one per test cell.
+        """
+        rows, deepest = self._level_rows(item.level)
+        if item.pooled:
+            keep = self._depth[deepest] >= min(item.depths)
+            return np.asarray(deepest[keep], dtype=np.int64)
+        return np.asarray(rows[self._depth[rows] == item.depths[0]], dtype=np.int64)
+
+    def called_positions(self, item: res.GatePTestedSet) -> np.ndarray:
+        """Return the positions of the scope's calls of the set's class.
+
+        These are the calls the coverage of the set is measured on (the
+        judged set of ``decide``), confident or not.
 
         Args:
             item: The tested set.
@@ -277,23 +300,23 @@ class _ReplicateIndex:
         Returns:
             Row positions; empty when the replicate has no call of the class.
         """
-        rows, deepest = self._level_rows(item.level)
         code = self._parent_code.get(item.cls)
         if code is None:
             return np.empty(0, dtype=np.int64)
-        if item.pooled:
-            keep = (
-                (self._parent_codes[deepest] == code)
-                & self._confident[deepest]
-                & (self._depth[deepest] >= min(item.depths))
-            )
-            return np.asarray(deepest[keep], dtype=np.int64)
-        keep = (
-            (self._parent_codes[rows] == code)
-            & (self._depth[rows] == item.depths[0])
-            & self._confident[rows]
-        )
-        return np.asarray(rows[keep], dtype=np.int64)
+        scope = self.scope_positions(item)
+        return np.asarray(scope[self._parent_codes[scope] == code], dtype=np.int64)
+
+    def positions(self, item: res.GatePTestedSet) -> np.ndarray:
+        """Return the positions of the rows in a tested set (one per test cell).
+
+        Args:
+            item: The tested set.
+
+        Returns:
+            Row positions: the confident ones of ``called_positions``.
+        """
+        called = self.called_positions(item)
+        return np.asarray(called[self._confident[called]], dtype=np.int64)
 
 
 def held_out_replicates(
