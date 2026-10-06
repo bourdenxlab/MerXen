@@ -3312,6 +3312,7 @@ _WHB_SHAPE: tuple[tuple[str, str, str, str, str, str, str], ...] = (
     # node, key_name, broad_class, nt, lineage, sink, region plausible
     ("nE", "Upper-layer IT", "Neurons", "Excitatory", "Neurons", "False", "True"),
     ("nI", "MGE interneuron", "Neurons", "Inhibitory", "Neurons", "False", "True"),
+    ("nA", "Astrocyte", "Astrocytes", "", "Astrocytes", "False", "True"),
     ("MISC", "Miscellaneous", "Mixed/Unknown", "Excitatory", "Neurons", "True", "True"),
     ("SPLAT", "Splatter", "Mixed/Unknown", "Other", "Neurons", "True", "False"),
     (
@@ -3350,15 +3351,20 @@ def _whb_shape_vocab() -> pd.DataFrame:
 
 
 def _whb_shape_cells(
-    groups: Sequence[tuple[int, str, str]], *, depth: int = 10, bp: float = 0.95
+    groups: Sequence[tuple[int, str, str]],
+    *,
+    depth: int = 10,
+    bp: float = 0.95,
+    vocab: pd.DataFrame | None = None,
+    region: str = "frontal_cortex",
 ) -> pd.DataFrame:
     """A cells table read by the self-map's WHB level specs.
 
     Per group ``(n, truth node, assigned supercluster)``; cell ids are
     ``w<index>`` over the groups. The tidy table holds the supercluster
     assignment at ``bp`` without runner-ups, and ``level_cells`` reads it
-    with ``whb_level_specs`` (lineage, broad, NT, supercluster) as the
-    self-map does.
+    with ``whb_level_specs`` (lineage, broad, NT, supercluster; ``vocab``,
+    default ``_whb_shape_vocab``, and ``region``) as the self-map does.
     """
     truth = [node for n, node, _ in groups for _ in range(n)]
     assigned = [node for n, _, node in groups for _ in range(n)]
@@ -3409,15 +3415,30 @@ def _whb_shape_cells(
         n_by_depth={depth: n_cells},
     )
     specs = res.whb_level_specs(
-        _whb_shape_vocab(), AnnotationThresholds(), include_fine=False
+        _whb_shape_vocab() if vocab is None else vocab,
+        AnnotationThresholds(),
+        region=region,
+        include_fine=False,
     )
     return res.level_cells(tidy, query, test, specs)
 
 
+_NEURON_CLASSES: frozenset[str] = frozenset({"Exc", "Inh", "OtherNeuron"})
+
+
 def _whb_shape_decisions(classes: Sequence[str]) -> pd.DataFrame:
-    """Frozen decisions emitting every WHB level of ``classes`` at 10 (0.70)."""
+    """Frozen decisions emitting the WHB levels of ``classes`` at 10 (0.70).
+
+    NT holds the neuron classes only, as PREP's decisions do (a glial call
+    has no NT class).
+    """
     return _np7_decisions(
-        {(level, cls, 10): 0.70 for level in _WHB_LEVELS for cls in classes}
+        {
+            (level, cls, 10): 0.70
+            for level in _WHB_LEVELS
+            for cls in classes
+            if level != "nt" or cls in _NEURON_CLASSES
+        }
     )
 
 
@@ -3493,6 +3514,9 @@ def test_np7_a_planted_sink_absorbing_more_than_5pct_of_a_class_fails() -> None:
     assert x["n_truth_confident"] == 400 and x["n_truth_excluded"] == 24
     assert x["wrong_node"] == SINK
     assert x["wrong_node_share"] == pytest.approx(0.06)
+    # Without the excluded calls X is clean: the view with them fails it.
+    assert x["n_truth_classed"] == 376 and x["classed_wrong_node"] is None
+    assert x["classed_wrong_node_share"] == 0.0
     assert not bool(x["passed"])
     assert gp.np7_class_verdicts(tables.excluded, tables.wrong_node, tested) == {
         ("supercluster", "X"): False,
@@ -3542,7 +3566,10 @@ def test_np7_region_column_is_parameterised() -> None:
     """CHECK K4: gate P reads ``region_plausible_frontal_cortex`` by default.
 
     The column follows ``Np7Settings.region``; a vocab without it raises
-    rather than reading every node as plausible.
+    rather than reading every node as plausible. The cells table must be
+    built with the region NP7 reads: nH is plausible in frontal cortex and
+    not in the hippocampus, HIPPO the other way round, so a table built for
+    one region is refused when scored with the other, in either direction.
     """
     assert gp.NP7_REGION == "frontal_cortex"
     assert gp.Np7Settings().region == "frontal_cortex"
@@ -3551,14 +3578,20 @@ def test_np7_region_column_is_parameterised() -> None:
         "False" if node == "nH" else "True" for node in vocab["node"]
     ]
     decisions = _np7_decisions(XY_AT_10)
-    cells = _np7_rows(
-        [
-            (500, "X", "nX", "X", 0.95),
-            (500, "Y", "nY", "Y", 0.95),
-            (30, "X", "nH", None, 0.95),
-            (20, "X", HIPPO, None, 0.95),
-        ]
-    )
+
+    def cells_for(parent_nh: str | None, parent_hippo: str | None) -> pd.DataFrame:
+        return _np7_rows(
+            [
+                (500, "X", "nX", "X", 0.95),
+                (500, "Y", "nY", "Y", 0.95),
+                (30, "X", "nH", parent_nh, 0.95),
+                (20, "X", HIPPO, parent_hippo, 0.95),
+            ]
+        )
+
+    frontal_cells = cells_for("X", None)
+    hippocampus_cells = cells_for(None, "X")
+    hippocampus_settings = gp.Np7Settings(region="hippocampus")
     assert gp.np7_excluded_nodes(vocab) == {
         "nX": None,
         "nY": None,
@@ -3570,20 +3603,25 @@ def test_np7_region_column_is_parameterised() -> None:
     assert gp.np7_excluded_nodes(vocab, region="hippocampus")["nH"] == (
         "region_implausible"
     )
-    _, frontal = _np7_tables(cells, decisions, vocab=vocab)
+    _, frontal = _np7_tables(frontal_cells, decisions, vocab=vocab)
     assert _level_row(frontal)["nodes"] == "HIPPO:20"
     _, hippocampus = _np7_tables(
-        cells,
-        decisions,
-        vocab=vocab,
-        settings_np7=gp.Np7Settings(region="hippocampus"),
+        hippocampus_cells, decisions, vocab=vocab, settings_np7=hippocampus_settings
     )
     level = _level_row(hippocampus)
     assert level["nodes"] == "nH:30"
     assert level["n_region_implausible"] == 30
+    with pytest.raises(ValueError, match=r"\['nH'\] have no class"):
+        _np7_tables(hippocampus_cells.query("call != @HIPPO"), decisions, vocab=vocab)
+    with pytest.raises(ValueError, match="another region or vocab"):
+        _np7_tables(hippocampus_cells, decisions, vocab=vocab)
+    with pytest.raises(ValueError, match="another region or vocab"):
+        _np7_tables(
+            frontal_cells, decisions, vocab=vocab, settings_np7=hippocampus_settings
+        )
     with pytest.raises(ValueError, match="region_plausible_cerebellum"):
         _np7_tables(
-            cells,
+            frontal_cells,
             decisions,
             vocab=vocab,
             settings_np7=gp.Np7Settings(region="cerebellum"),
@@ -3600,7 +3638,8 @@ def test_np7_coarse_levels_take_the_node_of_the_supercluster_row() -> None:
     and the supercluster bp decides. At broad, a call to a
     region-implausible node is "correct" in the cells table (both are
     Neurons), but it is a call to an excluded node, so NP7 counts it as a
-    wrong call on that node.
+    wrong call, on its group (the call at the level); the sink's broad call
+    names no group, so its node is the sink.
     """
     groups_supc: list[tuple[int, str, str | None, str | None, float]] = [
         (300, "Exc", "nE", "Exc", 0.95),
@@ -3653,7 +3692,9 @@ def test_np7_coarse_levels_take_the_node_of_the_supercluster_row() -> None:
         assert row["nodes"] == nodes
     broad = tables.wrong_node[tables.wrong_node["level"] == "broad"].iloc[0]
     assert broad["n_truth_confident"] == 308 and broad["n_truth_excluded"] == 8
-    assert broad["wrong_node"] == HIPPO and broad["n_wrong_node"] == 5
+    assert broad["wrong_node"] == "Neurons" and broad["n_wrong_node"] == 5
+    assert broad["split_wrong_node"] == HIPPO and broad["n_split_wrong_node"] == 5
+    assert broad["n_truth_classed"] == 300 and broad["n_classed_wrong_node"] == 0
     assert bool(broad["passed"])
     assert set(gp.np7_class_verdicts(tables.excluded, tables.wrong_node, tested)) == {
         ("broad", "Exc"),
@@ -3714,8 +3755,12 @@ def test_np7_whb_sinks_count_at_broad_and_nt_through_their_supercluster_bp() -> 
     for level in _WHB_LEVELS:
         exc = wrong.loc[(level, "Exc")]
         assert exc["n_truth_confident"] == 403 and exc["n_truth_excluded"] == 27
-        assert exc["wrong_node"] == "SPLAT" and exc["n_wrong_node"] == 24
-        assert exc["wrong_node_share"] == pytest.approx(24 / 403)
+        # At lineage Splatter and Amygdala excitatory both name "Neurons".
+        node, n_node = ("Neurons", 27) if level == "lineage" else ("SPLAT", 24)
+        assert exc["wrong_node"] == node and exc["n_wrong_node"] == n_node
+        assert exc["wrong_node_share"] == pytest.approx(n_node / 403)
+        assert exc["split_wrong_node"] == "SPLAT" and exc["n_split_wrong_node"] == 24
+        assert exc["n_truth_classed"] == 376 and exc["n_classed_wrong_node"] == 0
         assert not bool(exc["passed"])
         assert wrong.loc[(level, "Inh"), "n_truth_excluded"] == 5
     assert gp.np7_class_verdicts(tables.excluded, tables.wrong_node, tested) == {
@@ -3771,7 +3816,10 @@ def test_np7_reads_the_assigned_node_at_the_rows_own_depth() -> None:
         assert row["nodes"] == "SINK:20"
         sets = tables.wrong_node[tables.wrong_node["level"] == level].set_index("set")
         assert sets.loc["10", "n_wrong_node"] == 20
-        assert sets.loc["10", "wrong_node"] == SINK
+        # The sink's lineage call names its group.
+        group = SINK if level == "supercluster" else "Neurons"
+        assert sets.loc["10", "wrong_node"] == group
+        assert sets.loc["10", "split_wrong_node"] == SINK
         assert not bool(sets.loc["10", "passed"])
         assert sets.loc["30", "n_truth_confident"] == 320
         assert sets.loc["30", "n_wrong_node"] == 0 and bool(sets.loc["30", "passed"])
@@ -4188,6 +4236,202 @@ def test_np7_inputs_that_mix_or_lack_rows_raise() -> None:
             settings=gp.Np7Settings(),
             vocab=_np7_vocab(),
         )
+
+
+def test_np7_1pct_part_fails_between_the_two_denominators() -> None:
+    """§23.13 item 2: the excluded calls are counted beside the denominator.
+
+    100 sink calls beside 9,950 confident calls are 1.005% and fail; added
+    to the denominator they would be 100 / 10,050 = 0.995% and pass. 99
+    sink calls (0.995%) pass.
+    """
+    decisions = _np7_decisions(XY_AT_10)
+    for n_sink, passed in ((99, True), (100, False)):
+        cells = _np7_rows(
+            [
+                (4975, "X", "nX", "X", 0.95),
+                (4975, "Y", "nY", "Y", 0.95),
+                (n_sink, "Y", SINK, None, 0.95),
+            ]
+        )
+        tested, tables = _np7_tables(cells, decisions)
+        level = _level_row(tables)
+        assert level["n_confident"] == 9950
+        assert level["n_excluded_confident"] == n_sink
+        assert level["excluded_share"] == pytest.approx(n_sink / 9950)
+        assert bool(level["passed"]) is passed
+        assert gp.np7_class_verdicts(tables.excluded, tables.wrong_node, tested) == {
+            ("supercluster", "X"): passed,
+            ("supercluster", "Y"): passed,
+        }
+
+
+def test_np7_glial_sink_calls_count_at_nt_against_the_neurons_calls() -> None:
+    """§23.13: the 1% part counts every truth class's calls at the level.
+
+    At NT the denominator holds the neurons' calls only (a glial call has no
+    NT class), but an astrocyte assigned Splatter counts in the numerator
+    through its supercluster bp. 40 astrocytes on Splatter are 0.67% of the
+    6,000 confident calls at lineage, broad and supercluster, and 1.33% of
+    the 3,000 neuron calls at NT: every NT class fails, though no neuron
+    reaches a sink. The count of the cells whose truth class is one of the
+    level's classes is reported only.
+    """
+    cells = _whb_shape_cells(
+        [
+            (1500, "nE", "nE"),
+            (1500, "nI", "nI"),
+            (3000, "nA", "nA"),
+            (40, "nA", "SPLAT"),
+        ]
+    )
+    nt_rows = (cells["level"] == "nt").to_numpy()
+    astro = cells["truth_parent"].eq("Astro").to_numpy()
+    assert cells.loc[nt_rows & astro, "parent"].isna().all()
+    classes = ("Exc", "Inh", "Astro")
+    tested, tables = _np7_tables(
+        cells, _whb_shape_decisions(classes), vocab=_whb_shape_vocab()
+    )
+    other_levels = ("lineage", "broad", "supercluster")
+    for level in other_levels:
+        row = _level_row(tables, level)
+        assert row["n_confident"] == 6000 and row["n_excluded_confident"] == 40
+        assert row["n_excluded_level_population"] == 40
+        assert bool(row["passed"])
+    nt = _level_row(tables, "nt")
+    assert nt["n_confident"] == 3000 and nt["n_excluded_confident"] == 40
+    assert nt["excluded_share"] == pytest.approx(40 / 3000)
+    assert nt["n_excluded_level_population"] == 0
+    assert nt["excluded_share_level_population"] == 0.0
+    assert not bool(nt["passed"])
+    assert gp.np7_class_verdicts(tables.excluded, tables.wrong_node, tested) == {
+        **{(level, cls): True for level in other_levels for cls in classes},
+        ("nt", "Exc"): False,
+        ("nt", "Inh"): False,
+    }
+
+
+def test_np7_excluded_calls_are_scored_in_both_truth_views() -> None:
+    """§23.13: the single-wrong-node share with and without excluded calls.
+
+    X has 380 right calls, 21 on nY and 30 calls to excluded nodes spread
+    over 10 sinks. With the excluded calls nY takes 21 / 431 = 4.9%;
+    without them 21 / 401 = 5.2%. The excluded calls enlarge the truth
+    class's denominator, so the view with them alone would pass X; a set
+    passes only when both views pass.
+    """
+    sinks = [f"S{index}" for index in range(10)]
+    vocab = _np7_vocab(sinks=sinks, implausible=())
+    decisions = _np7_decisions(XY_AT_10)
+    cells = _np7_rows(
+        [
+            (380, "X", "nX", "X", 0.95),
+            (21, "X", "nY", "Y", 0.95),
+            *((3, "X", sink, None, 0.95) for sink in sinks),
+            (3000, "Y", "nY", "Y", 0.95),
+        ]
+    )
+    tested, tables = _np7_tables(cells, decisions, vocab=vocab)
+    assert bool(_level_row(tables)["passed"])  # 30 / 3,401
+    x = _by_class(tables).loc["X"]
+    assert x["n_truth_confident"] == 431 and x["n_truth_excluded"] == 30
+    assert x["wrong_node"] == "nY" and x["n_wrong_node"] == 21
+    assert x["wrong_node_share"] == pytest.approx(21 / 431)
+    assert x["wrong_node_share"] <= 0.05
+    assert x["n_truth_classed"] == 401
+    assert x["classed_wrong_node"] == "nY" and x["n_classed_wrong_node"] == 21
+    assert x["classed_wrong_node_share"] == pytest.approx(21 / 401)
+    assert x["classed_wrong_node_share"] > 0.05
+    assert not bool(x["passed"])
+    assert gp.np7_class_verdicts(tables.excluded, tables.wrong_node, tested) == {
+        ("supercluster", "X"): False,
+        ("supercluster", "Y"): True,
+    }
+
+
+def test_np7_an_excluded_call_joins_its_group_at_the_coarse_levels() -> None:
+    """§23.13: an excluded call's node is its call where its level names a group.
+
+    Astrocytes with 12 calls on a frontal excitatory node and 10 on Amygdala
+    excitatory (region-implausible): at lineage and broad both name
+    "Neurons", one node with 22 / 402 = 5.5% of the class, so Astro fails
+    there. Each excluded call on its supercluster (reported) would give
+    12 / 402 = 3.0%. At supercluster the two nodes stay apart and Astro
+    passes.
+    """
+    cells = _whb_shape_cells(
+        [(380, "nA", "nA"), (12, "nA", "nE"), (10, "nA", "AMY"), (1500, "nE", "nE")]
+    )
+    tested, tables = _np7_tables(
+        cells, _whb_shape_decisions(["Exc", "Astro"]), vocab=_whb_shape_vocab()
+    )
+    assert tables.excluded is not None and tables.excluded["passed"].all()
+    wrong = tables.wrong_node.set_index(["level", "class"])
+    for level in ("lineage", "broad"):
+        astro = wrong.loc[(level, "Astro")]
+        assert astro["n_truth_confident"] == 402 and astro["n_truth_excluded"] == 10
+        assert astro["wrong_node"] == "Neurons" and astro["n_wrong_node"] == 22
+        assert astro["wrong_node_share"] == pytest.approx(22 / 402)
+        assert astro["split_wrong_node"] == "Neurons"
+        assert astro["split_wrong_node_share"] == pytest.approx(12 / 402)
+        assert astro["n_truth_classed"] == 392 and astro["n_classed_wrong_node"] == 12
+        assert not bool(astro["passed"])
+    astro = wrong.loc[("supercluster", "Astro")]
+    assert astro["wrong_node"] == "nE" and astro["n_wrong_node"] == 12
+    assert astro["split_wrong_node"] == "nE"
+    assert bool(astro["passed"])
+    assert gp.np7_class_verdicts(tables.excluded, tables.wrong_node, tested) == {
+        ("lineage", "Astro"): False,
+        ("broad", "Astro"): False,
+        ("supercluster", "Astro"): True,
+        **{(level, "Exc"): True for level in _WHB_LEVELS},
+    }
+
+
+def test_np7_refuses_a_table_built_with_another_region() -> None:
+    """A supercluster call to a plausible node with a floor class has a class.
+
+    Built with a region where the frontal-plausible nE is implausible, the
+    self-map gives nE's calls no class. NP7 would read them as plausible
+    and leave them out of both parts of the 1% share, so it refuses the
+    table (the reverse case, a class on an excluded node, is refused too).
+    A plausible node that the self-map gives no class anywhere (a non-sink
+    Mixed/Unknown node) is not refused.
+    """
+    vocab = _whb_shape_vocab()
+    vocab["region_plausible_hippocampus"] = [
+        "False" if node == "nE" else "True" for node in vocab["node"]
+    ]
+    groups = [(400, "nE", "nE"), (300, "nI", "nI")]
+    decisions = _whb_shape_decisions(["Exc", "Inh"])
+    frontal = _whb_shape_cells(groups, vocab=vocab)
+    _np7_tables(frontal, decisions, vocab=vocab)
+    hippocampus = _whb_shape_cells(groups, vocab=vocab, region="hippocampus")
+    supercluster = (hippocampus["level"] == "supercluster").to_numpy()
+    on_ne = (hippocampus["call"] == "nE").to_numpy()
+    assert hippocampus.loc[supercluster & on_ne, "parent"].isna().all()
+    with pytest.raises(ValueError, match=r"400 'supercluster' calls .*\['nE'\]"):
+        _np7_tables(hippocampus, decisions, vocab=vocab)
+    unclassed = pd.concat(
+        [
+            vocab,
+            vocab.iloc[:1].assign(
+                node="UNK",
+                key_label="UNK",
+                key_name="Unknown",
+                broad_class="Mixed/Unknown",
+                sink="False",
+                region_plausible_frontal_cortex="True",
+            ),
+        ],
+        ignore_index=True,
+    )
+    cells = _whb_shape_cells([*groups, (5, "nE", "UNK")], vocab=unclassed)
+    on_unk = (cells["call"] == "UNK").to_numpy()
+    assert cells.loc[on_unk, "parent"].isna().all()
+    _, tables = _np7_tables(cells, decisions, vocab=unclassed)
+    assert tables.excluded is not None
+    assert tables.excluded["n_excluded_calls"].tolist() == [0, 0, 0, 0]
 
 
 def test_np7_settings_hold_the_section_14_limits() -> None:

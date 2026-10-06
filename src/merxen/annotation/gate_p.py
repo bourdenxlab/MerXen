@@ -188,11 +188,12 @@ the frozen thresholds, per emission member for version 7
   no bp of its own);
 - both species: at every tested set of a (level, class), no single wrong
   node receives more than 5% of the truth class's confident calls (D12,
-  pre-registration §23.9 item 5); the called-class view is reported.
+  pre-registration §23.9 item 5), scored with and without the calls to
+  excluded nodes; the called-class view is reported.
 
 A failure of the 1% part fails NP7 for every class of the level. The
 readings taken where §14 is not explicit (the confidence of a call that has
-no class, the 1% part's denominator, excluded calls in the
+no class, the 1% part's denominator and numerator, excluded calls in the
 single-wrong-node view, the wrong node at coarse levels, a level over 1%
 failing every class, an empty truth view failing, a node outside the
 vocab, unweighted shares) are listed in ``np7_error_structure``'s docstring
@@ -218,7 +219,12 @@ from merxen.annotation.config import (
     AnnotationThresholds,
 )
 from merxen.annotation.thresholds import level_target
-from merxen.annotation.vocab import REGION_COLUMN_PREFIX, Species
+from merxen.annotation.vocab import (
+    REGION_COLUMN_PREFIX,
+    UNASSIGNED_LABEL,
+    Species,
+    human_floor_class,
+)
 
 # §14 NP4: "the range ... is <= max(0.03, 3.5 x pooled SE)".
 GATE_P_SPREAD_FLOOR: Final = 0.03
@@ -4045,6 +4051,8 @@ NP7_EXCLUDED_COLUMNS: Final[tuple[str, ...]] = (
     "n_region_implausible",
     "n_not_in_vocab",
     "excluded_share",
+    "n_excluded_level_population",
+    "excluded_share_level_population",
     "max_share",
     "nodes",
     "passed",
@@ -4061,6 +4069,13 @@ NP7_WRONG_NODE_COLUMNS: Final[tuple[str, ...]] = (
     "wrong_node",
     "n_wrong_node",
     "wrong_node_share",
+    "n_truth_classed",
+    "classed_wrong_node",
+    "n_classed_wrong_node",
+    "classed_wrong_node_share",
+    "split_wrong_node",
+    "n_split_wrong_node",
+    "split_wrong_node_share",
     "n_called_confident",
     "called_wrong_node",
     "n_called_wrong_node",
@@ -4146,10 +4161,13 @@ class Np7Tables:
     Attributes:
         excluded: Per level, the confident calls to sink or region-implausible
             nodes against the level's confident calls (columns
-            ``NP7_EXCLUDED_COLUMNS``); ``None`` for mouse, where §14 NP7's
-            1% part does not apply.
+            ``NP7_EXCLUDED_COLUMNS``; ``*_level_population`` report-only);
+            ``None`` for mouse, where §14 NP7's 1% part does not apply.
         wrong_node: Per tested set, the share of the truth class's confident
-            calls on its most frequent wrong node (columns
+            calls on its most frequent wrong node, with and without the calls
+            to excluded nodes (``wrong_node*`` and ``classed_wrong_node*``,
+            both scored), and with each excluded call on its assigned
+            supercluster (``split_wrong_node*``, report-only) (columns
             ``NP7_WRONG_NODE_COLUMNS``).
     """
 
@@ -4267,6 +4285,36 @@ def np7_excluded_nodes(
     return result
 
 
+def _np7_unclassed_nodes(vocab: pd.DataFrame, vocab_level: str) -> frozenset[str]:
+    """The nodes of a vocab level that the self-map gives no class anywhere.
+
+    ``whb_level_specs`` keys a node's calls by the floor class of its broad
+    class and NT (``human_floor_class``), so a node whose broad class is
+    blank, Mixed/Unknown or has no floor class keeps a null ``parent`` even
+    where it is plausible. Every other plausible node's calls carry a class
+    at the node level. A vocab without a ``broad_class`` column names no
+    such node: each of its plausible nodes is expected to carry a class.
+    """
+    if "broad_class" not in vocab.columns:
+        return frozenset()
+    frame = vocab.reset_index(drop=True)
+    rows = frame[(frame["level"].astype(str) == vocab_level).to_numpy()]
+    nts = rows["nt"] if "nt" in rows.columns else pd.Series(None, index=rows.index)
+    unclassed: set[str] = set()
+    for node, broad, nt in zip(
+        rows["node"].astype(str),
+        rows["broad_class"].astype(object),
+        nts.astype(object),
+        strict=True,
+    ):
+        group = _label(broad)
+        if group == UNASSIGNED_LABEL:
+            group = None
+        if human_floor_class(group, _label(nt)) is None:
+            unclassed.add(node)
+    return frozenset(unclassed)
+
+
 def _assigned_positions(frame: pd.DataFrame, node_level: str) -> np.ndarray:
     """Each row's position of the row at ``node_level`` of the same simulated cell.
 
@@ -4322,7 +4370,13 @@ def _lowest_emitted_thresholds(
 
 @dataclass(frozen=True)
 class _Np7Rows:
-    """One member's pooled held-out rows with NP7's per-row arrays."""
+    """One member's pooled held-out rows with NP7's per-row arrays.
+
+    ``node`` is a row's call, or for a call to an excluded node its assigned
+    supercluster; ``group_node`` is a row's call, or for a call to an
+    excluded node that names no group at its level (a WHB sink at broad or
+    NT) its assigned supercluster.
+    """
 
     frame: pd.DataFrame
     index: _ReplicateIndex
@@ -4332,6 +4386,54 @@ class _Np7Rows:
     excluded_confident: np.ndarray
     reason: np.ndarray
     node: np.ndarray
+    group_node: np.ndarray
+
+
+def _check_plausible_calls_have_a_class(
+    frame: pd.DataFrame,
+    calls: np.ndarray,
+    reasons: Mapping[str, str | None],
+    unclassed: frozenset[str],
+    node_level: str,
+) -> None:
+    """Refuse a call to a plausible node that has no class at ``node_level``.
+
+    At the node level a call keeps its class wherever its node is plausible
+    and has a floor class (``whb_level_specs``; the WHB COP rule clears
+    broad rows only). A cells table built with another region, where such a
+    node is implausible, gives its calls a null ``parent``: NP7 would read
+    them as plausible and leave them out of both the numerator and the
+    denominator of the 1% part.
+
+    Raises:
+        ValueError: If such a call has a null ``parent``.
+    """
+    at_level = frame["level"].astype(str).to_numpy() == node_level
+    no_class = at_level & frame["parent"].isna().to_numpy()
+    if not bool(no_class.any()):
+        return
+    named = calls[no_class]
+    codes, uniques = pd.factorize(named, use_na_sentinel=True)
+    classed = np.array(
+        [
+            *(
+                str(value) in reasons
+                and reasons[str(value)] is None
+                and str(value) not in unclassed
+                for value in uniques
+            ),
+            False,
+        ],
+        dtype=bool,
+    )
+    expected = classed[codes]
+    if bool(expected.any()):
+        nodes = sorted({str(value) for value in named[expected]})
+        raise ValueError(
+            f"NP7: {int(expected.sum())} {node_level!r} calls to region-plausible "
+            f"nodes {nodes} have no class (parent): the cells table was built "
+            "with another region or vocab than NP7 reads"
+        )
 
 
 def _np7_rows(
@@ -4339,6 +4441,7 @@ def _np7_rows(
     lookup: Mapping[tuple[str, str, int], tuple[str, float | None, bool]],
     reasons: Mapping[str, str | None] | None,
     node_level: str,
+    unclassed: frozenset[str] = frozenset(),
 ) -> _Np7Rows:
     """NP7's arrays of one member's rows (``reasons`` None: no excluded nodes).
 
@@ -4350,13 +4453,17 @@ def _np7_rows(
 
     Raises:
         ValueError: If a call to an excluded node has a class (``parent``),
-            or for the assigned nodes (``_assigned_positions``).
+            a ``node_level`` call to a plausible node of the vocab that has
+            a floor class (not in ``unclassed``) has none
+            (``_check_plausible_calls_have_a_class``), or for the assigned
+            nodes (``_assigned_positions``).
     """
     n_rows = len(frame)
     confident = res.frozen_confident_mask(frame, lookup)
     calls = _labels(frame["call"])
     node = calls.copy()
     node[pd.isna(node)] = _NO_NODE
+    group_node = node.copy()
     reason: np.ndarray = np.full(n_rows, None, dtype=object)
     excluded: np.ndarray = np.zeros(n_rows, dtype=bool)
     excluded_confident = np.zeros(n_rows, dtype=bool)
@@ -4377,8 +4484,13 @@ def _np7_rows(
                 "nodes have a class (parent): the cells table was built with "
                 "another region or vocab than NP7 reads"
             )
+        _check_plausible_calls_have_a_class(
+            frame, calls, reasons, unclassed, node_level
+        )
         hit = np.flatnonzero(excluded)
         node[hit] = np.asarray(uniques, dtype=object)[codes[hit]]
+        unnamed = hit[pd.isna(calls[hit])]
+        group_node[unnamed] = node[unnamed]
         lowest = _lowest_emitted_thresholds(lookup)
         thresholds = np.array(
             [
@@ -4405,6 +4517,7 @@ def _np7_rows(
         excluded_confident=excluded_confident,
         reason=reason,
         node=node,
+        group_node=group_node,
     )
 
 
@@ -4419,9 +4532,31 @@ def _node_counts(nodes: np.ndarray) -> list[tuple[str, int]]:
     )
 
 
-def _np7_excluded_table(rows: _Np7Rows, settings: Np7Settings) -> pd.DataFrame:
-    """The 1% part per level (§14 NP7, human; K9.1 denominator)."""
+def _level_classes(
+    lookup: Mapping[tuple[str, str, int], tuple[str, float | None, bool]],
+) -> dict[str, frozenset[str]]:
+    """The classes the frozen decisions hold per level (its calls' classes)."""
+    classes: dict[str, set[str]] = {}
+    for level, cls, _ in lookup:
+        classes.setdefault(str(level), set()).add(str(cls))
+    return {level: frozenset(values) for level, values in classes.items()}
+
+
+def _np7_excluded_table(
+    rows: _Np7Rows,
+    settings: Np7Settings,
+    level_classes: Mapping[str, frozenset[str]],
+) -> pd.DataFrame:
+    """The 1% part per level (§14 NP7, human; K9.1 denominator).
+
+    The numerator counts every confident call to an excluded node at the
+    level, whatever the cell's truth class: at NT, whose classes and
+    denominator are the neurons', a glial cell assigned a WHB sink counts
+    too. The count of the cells whose truth class is one of the level's
+    classes (``level_classes``) is reported only (pre-registration §23.13).
+    """
     levels = rows.frame["level"].astype(str).to_numpy()
+    truth = _labels(rows.frame["truth_parent"])
     records: list[dict[str, object]] = []
     for level in sorted(set(levels)):
         at_level = levels == level
@@ -4429,6 +4564,10 @@ def _np7_excluded_table(rows: _Np7Rows, settings: Np7Settings) -> pd.DataFrame:
         hit = rows.excluded_confident & at_level
         n_excluded = int(hit.sum())
         reasons = rows.reason[hit]
+        own = level_classes.get(level, frozenset())
+        n_population = int(
+            sum(value is not None and str(value) in own for value in truth[hit])
+        )
         records.append(
             {
                 "level": level,
@@ -4439,6 +4578,10 @@ def _np7_excluded_table(rows: _Np7Rows, settings: Np7Settings) -> pd.DataFrame:
                 "n_region_implausible": int((reasons == NP7_REASON_REGION).sum()),
                 "n_not_in_vocab": int((reasons == NP7_REASON_NOT_IN_VOCAB).sum()),
                 "excluded_share": n_excluded / n_confident if n_confident else math.nan,
+                "n_excluded_level_population": n_population,
+                "excluded_share_level_population": n_population / n_confident
+                if n_confident
+                else math.nan,
                 "max_share": settings.max_excluded_share,
                 "nodes": ";".join(
                     f"{node}:{count}" for node, count in _node_counts(rows.node[hit])
@@ -4457,6 +4600,12 @@ def _np7_wrong_node_table(
 ) -> pd.DataFrame:
     """The 5% part per tested set (§14 NP7; D12 truth view, called view reported).
 
+    Two truth views are scored, and a set passes only when both pass: with
+    the confident calls to excluded nodes (always wrong, each on its call
+    where its level names a group, else on its assigned supercluster) and
+    without them (the class's confident calls that have a class). The view
+    with every excluded call on its assigned supercluster is reported.
+
     Raises:
         ValueError: If a tested set does not hold, in the pooled held-out
             calls, the confident calls it was built on, or holds fewer than
@@ -4466,22 +4615,36 @@ def _np7_wrong_node_table(
     counted = rows.confident | rows.excluded_confident
     wrong = rows.excluded_confident | (rows.confident & ~rows.correct)
     limit = settings.max_wrong_node_share
+
+    def top_node(nodes: np.ndarray) -> tuple[str | None, int]:
+        top = _node_counts(nodes)
+        return top[0] if top else (None, 0)
+
+    def share(count: int, total: int) -> float:
+        return count / total if total else math.nan
+
+    def within(count: int, total: int) -> bool:
+        return total > 0 and count <= limit * total + _TOLERANCE
+
     records: list[dict[str, object]] = []
     for (level, cls), items in sorted(tested.items(), key=lambda pair: pair[0]):
         for item in items or ():
             scope = rows.index.scope_positions(item)
             mine = scope[(truth[scope] == cls) & counted[scope]]
             mine_wrong = mine[wrong[mine]]
-            top = _node_counts(rows.node[mine_wrong])
-            node, n_node = top[0] if top else (None, 0)
+            node, n_node = top_node(rows.group_node[mine_wrong])
+            split_node, n_split_node = top_node(rows.node[mine_wrong])
+            classed = mine[rows.confident[mine]]
+            classed_wrong = classed[~rows.correct[classed]]
+            classed_node, n_classed_node = top_node(rows.node[classed_wrong])
             called = rows.index.positions(item)
             _check_set_count(
                 item, int(len(called)), settings.min_confident_n, "np7_error_structure"
             )
             called_wrong = called[~rows.correct[called]]
-            called_top = _node_counts(rows.node[called_wrong])
-            called_node, n_called_node = called_top[0] if called_top else (None, 0)
+            called_node, n_called_node = top_node(rows.node[called_wrong])
             n_mine = int(len(mine))
+            n_classed = int(len(classed))
             records.append(
                 {
                     "level": level,
@@ -4494,15 +4657,21 @@ def _np7_wrong_node_table(
                     "n_truth_wrong": int(len(mine_wrong)),
                     "wrong_node": node,
                     "n_wrong_node": n_node,
-                    "wrong_node_share": n_node / n_mine if n_mine else math.nan,
+                    "wrong_node_share": share(n_node, n_mine),
+                    "n_truth_classed": n_classed,
+                    "classed_wrong_node": classed_node,
+                    "n_classed_wrong_node": n_classed_node,
+                    "classed_wrong_node_share": share(n_classed_node, n_classed),
+                    "split_wrong_node": split_node,
+                    "n_split_wrong_node": n_split_node,
+                    "split_wrong_node_share": share(n_split_node, n_mine),
                     "n_called_confident": int(len(called)),
                     "called_wrong_node": called_node,
                     "n_called_wrong_node": n_called_node,
-                    "called_wrong_node_share": n_called_node / len(called)
-                    if len(called)
-                    else math.nan,
+                    "called_wrong_node_share": share(n_called_node, len(called)),
                     "max_share": limit,
-                    "passed": n_mine > 0 and n_node <= limit * n_mine + _TOLERANCE,
+                    "passed": within(n_node, n_mine)
+                    and within(n_classed_node, n_classed),
                 }
             )
     return pd.DataFrame.from_records(records, columns=list(NP7_WRONG_NODE_COLUMNS))
@@ -4548,12 +4717,17 @@ def np7_error_structure(
       registration §23.9 item 5). These are the confident calls of the
       set's scope (a bin's rows, or each test cell's deepest row at >= D_P;
       ``tested_set_mask``'s scope) whose truth class is c, whatever class
-      they were called into. A call's node is its call at the level; a call
-      to an excluded node is always wrong and its node is that node (at
-      broad a call to a region-implausible neuron node names "Neurons" and
-      is "correct" in the cells table, yet production never emits it). The
-      called-class view (the share of the set's own confident calls that
-      are wrong and name one node) is reported only.
+      they were called into. A call's node is its call at the level. A
+      call to an excluded node is always wrong (at broad a call to a
+      region-implausible neuron node names "Neurons" and is "correct" in
+      the cells table, yet production never emits it); its node is its
+      call where the level names a group, else its assigned supercluster.
+      The share is scored with these calls (``wrong_node*``) and without
+      them (``classed_wrong_node*``), and a set passes only when both pass.
+      The called-class view (the share of the set's own confident calls
+      that are wrong and name one node) and the view with every excluded
+      call on its assigned supercluster (``split_wrong_node*``) are
+      reported only.
 
     Readings this implementation takes where §14 is not explicit. They are
     open and put to the user in pre-registration §23.13: each needs the
@@ -4578,22 +4752,38 @@ def np7_error_structure(
       counted beside the level's confident calls, not added to them (the
       share is their number over the level's confident calls). Looser: add
       them to the denominator.
-    - **Sinks in the single-wrong-node view.** Those confident calls also
-      enter the truth view, so a sink that absorbs more than 5% of a class
-      fails the class at every level even when the level stays below 1%
-      (§12 M13: "a planted sink absorbing > 5% of a class fails NP7").
-      Looser: leave them to the 1% part only.
+    - **The 1% part's numerator.** It counts every confident call to an
+      excluded node at the level, whatever the cell's truth class. At NT
+      the denominator holds the neurons' calls only (a glial call has no NT
+      class), yet a glial cell assigned a WHB sink counts in the numerator,
+      judged on its supercluster bp: glial sink calls can fail every NT
+      class while no neuron reaches a sink, which caps
+      ``validated_max_level`` at broad. Looser: count only the cells whose
+      truth class is one of the level's classes (the classes of its frozen
+      decisions; reported as ``n_excluded_level_population``).
+    - **Excluded calls in the single-wrong-node view.** Both views are
+      scored. With them, a sink that absorbs more than 5% of a class fails
+      the class at every level even when the level stays below 1% (§12
+      M13: "a planted sink absorbing > 5% of a class fails NP7"). They also
+      enlarge the class's denominator and so lower every other node's
+      share: 21 calls on one wrong node beside 380 right calls and 30
+      excluded calls spread over 10 sinks are 4.9% with them and 5.2%
+      without. Neither view is nested in the other. Looser: either view
+      alone.
     - **The wrong node at coarse levels.** A wrong call's node is its call
-      at the level (a group at lineage, broad and NT), and an excluded
-      call's node is its assigned supercluster. Looser: group every wrong
-      call by its assigned supercluster, which splits a group's wrong calls
-      over its nodes.
+      at the level (a group at lineage, broad and NT), an excluded call's
+      too where the level names a group, so a glial class's calls to a
+      frontal excitatory node and to Amygdala excitatory are one node at
+      broad ("Neurons"). Merging nodes can only raise the largest share.
+      Looser: each excluded call on its assigned supercluster (reported,
+      ``split_wrong_node*``), or every wrong call on its assigned
+      supercluster, which splits a group's wrong calls over its nodes.
     - **A level over 1% fails every class of the level**
       (``np7_class_verdicts``). Looser: fail only the classes whose truth
       cells reach the excluded nodes.
     - **An empty truth view fails.** A tested set whose truth class has no
-      confident call in its scope fails (a ``nan`` share never passes).
-      Looser: pass it vacuously.
+      confident call in its scope fails (a ``nan`` share never passes), in
+      either view. Looser: pass it vacuously.
     - **A node outside the vocab** counts as implausible, as production
       reads it (``not_in_vocab``); a blank flag is refused
       (``np7_excluded_nodes``).
@@ -4602,6 +4792,11 @@ def np7_error_structure(
 
     Where an alternative is named, the reading taken is the stricter one,
     except for the first: H2's count whatever the bp is stricter.
+
+    The cells tables must be built with the vocab and region NP7 reads: a
+    call to an excluded node that has a class, and a supercluster call to a
+    plausible node with a floor class that has none (the table's region
+    marks it implausible), are refused.
 
     Args:
         replicates: Per (group, seed label), that replicate's cells table
@@ -4642,8 +4837,10 @@ def np7_error_structure(
             list or of another key, a tested set's confident calls in the
             pooled calls differ from its ``n_confident`` or are fewer than
             ``settings.min_confident_n``, a call to an excluded node has a
-            class, for the vocab (``np7_excluded_nodes``), the assigned nodes
-            or the default group's inputs (``held_out_replicates``).
+            class, a supercluster call to a plausible node with a floor
+            class has none, for the vocab (``np7_excluded_nodes``), the
+            assigned nodes or the default group's inputs
+            (``held_out_replicates``).
         ResolvabilityError: If the rows mix replicates (``replicate_rows``).
     """
     if species == "human" and vocab is None:
@@ -4662,6 +4859,9 @@ def np7_error_structure(
         if vocab is None
         else np7_excluded_nodes(vocab, region=settings.region, vocab_level=vocab_level)
     )
+    unclassed = (
+        frozenset() if vocab is None else _np7_unclassed_nodes(vocab, vocab_level)
+    )
     cells = pooled_held_out_cells(replicates, default_group=default_group, seed=seed)
     frame = res.replicate_rows(
         cells, recipe=recipe, seed=seed, member=member
@@ -4671,9 +4871,12 @@ def np7_error_structure(
             f"np7_error_structure: no rows after the filters (recipe={recipe!r}, "
             f"seed={seed!r}, member={member!r})"
         )
-    rows = _np7_rows(frame, res.emission_lookup(decisions, regime), reasons, node_level)
+    lookup = res.emission_lookup(decisions, regime)
+    rows = _np7_rows(frame, lookup, reasons, node_level, unclassed)
     return Np7Tables(
-        excluded=None if reasons is None else _np7_excluded_table(rows, settings),
+        excluded=None
+        if reasons is None
+        else _np7_excluded_table(rows, settings, _level_classes(lookup)),
         wrong_node=_np7_wrong_node_table(rows, tested, settings),
     )
 
