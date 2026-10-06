@@ -841,6 +841,7 @@ def _promoted_samples(
     *,
     panel_dir: Path | None = None,
     coverage: bool = False,
+    config: AnnotationConfig | None = None,
 ) -> tuple[Any, Any, tuple[Any, Any]]:
     """Resolve the section before and after a gate-P promotion of its panel."""
     _add_profiles(setup["bundle"].path)
@@ -868,7 +869,7 @@ def _promoted_samples(
     for name, trust in zip(("before", "after"), trusts, strict=True):
         result = annotate_resolve(
             map_dir,
-            _config(),
+            config or _config(),
             output_dir=tmp_path / name,
             panel_dir=panel_dir or setup["panel_dir"],
             trust_overrides={"wmb_panel": trust},
@@ -1012,3 +1013,65 @@ def test_mouse_panel_provenance_without_the_panel_file_keeps_the_trust_fields(
     assert record.validated_share
     assert record.n_declared_genes is None and record.gene_id_resolution == {}
     assert _unvalidated(after.summary["mouse_gate"]["warning_reasons"])
+
+
+def _unvalidated_levels(labels: pd.DataFrame, limit: float) -> list[str]:
+    """Chain levels whose confident labels leave the validated region > limit."""
+    from merxen.annotation.consensus import MOUSE_CHAIN
+    from merxen.annotation.schema import Columns
+
+    levels = []
+    for level in MOUSE_CHAIN:
+        status = labels[Columns.level(level, "status")].astype(str).to_numpy()
+        confident = status == "confident"
+        if not confident.any():
+            continue
+        validated = labels[Columns.level(level, "validated")].to_numpy(bool)
+        if 1.0 - validated[confident].mean() > limit + 1e-12:
+            levels.append(level)
+    return sorted(levels)
+
+
+def test_mouse_resolve_applies_the_configured_unvalidated_share_limit(
+    tmp_path: Path,
+    mouse_setup: dict[str, Any],
+    promotion_trust: Callable[..., tuple[Any, Any]],
+) -> None:
+    """``gate.warn_unvalidated_share`` is the mouse limit too (M13 C11, D15 (a)).
+
+    The fixture's broad and class labels lie outside the validated region
+    about half the time and its subclass labels always; a configured limit of
+    0.6 keeps only the subclass warning, and its text carries that limit. The
+    default (0.10) would also warn at broad and class, so a RESOLVE that
+    ignored the configured value fails here.
+    """
+    from merxen.annotation.config import AnnotationGate
+
+    limit = 0.6
+    config = _config()
+    config = config.model_copy(
+        update={"gate": AnnotationGate(warn_unvalidated_share=limit)}
+    )
+    assert config.gate.warn_unvalidated_share == limit
+    before, after, _ = _promoted_samples(
+        tmp_path, mouse_setup, promotion_trust, config=config
+    )
+    default_limit = AnnotationGate().warn_unvalidated_share
+    levels = _unvalidated_levels(after.labels, limit)
+    assert levels == ["subclass"]
+    assert set(_unvalidated_levels(after.labels, default_limit)) > set(levels)
+    expected = [
+        f"unvalidated_share:{level}: > {limit} of confident labels outside "
+        "the validated region"
+        for level in levels
+    ]
+    gate = after.summary["mouse_gate"]
+    assert _unvalidated(gate["warning_reasons"]) == expected
+    assert gate["warning"] is True
+    assert _unvalidated(before.summary["mouse_gate"]["warning_reasons"]) == []
+    assert after.summary["resolution"]["gate"] == gate
+    assert after.provenance.mouse_gate is not None
+    assert _unvalidated(after.provenance.mouse_gate.reasons) == expected
+    _, stored = read_label_table(after.labels_path)
+    assert stored is not None and stored.mouse_gate is not None
+    assert _unvalidated(stored.mouse_gate.reasons) == expected
