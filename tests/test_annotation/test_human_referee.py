@@ -69,6 +69,14 @@ CLASS_GENES = {
 # marker. ACTB is shared by every node.
 SYMBOLS = [gene for genes in CLASS_GENES.values() for gene in genes] + ["FOS", "ACTB"]
 GENE_IDS = [f"ENSG{index:011d}" for index in range(len(SYMBOLS))]
+# The panel and the primary bundle the frozen sets are derived on.
+PANEL_HASH = "a" * 64
+BUILD_HASH = "b" * 64
+RUN_IDENTITY: dict[str, Any] = {
+    "gene_ids": GENE_IDS,
+    "panel_hash": PANEL_HASH,
+    "build_hash": BUILD_HASH,
+}
 
 
 def _node_matrix() -> np.ndarray:
@@ -117,6 +125,20 @@ def fixture_profiles() -> HumanRefereeProfiles:
 def settings(**change: Any) -> HumanRefereeSettings:
     base = HumanRefereeSettings.from_config(AnnotationRealQcConfig())
     return dataclasses.replace(base, **change)
+
+
+def frozen_markers(config: HumanRefereeSettings) -> RefereeMarkers:
+    """Sets derived on the fixture panel and bundle, read back from a table."""
+    derived = derive_referee_markers(
+        fixture_profiles(),
+        FLAGS,
+        config,
+        panel_hash=PANEL_HASH,
+        build_hash=BUILD_HASH,
+    )
+    return RefereeMarkers.from_frame(
+        derived.to_frame(), gene_ids=GENE_IDS, symbols=SYMBOLS
+    )
 
 
 def _sets(markers: RefereeMarkers) -> dict[str, tuple[str, ...]]:
@@ -304,6 +326,60 @@ def test_markers_need_the_minimum_share_as_well_as_the_ratio() -> None:
     }
 
 
+def test_derivation_reads_the_specificity_rule_from_the_flags_config() -> None:
+    """A non-default ``AnnotationFlagsConfig`` changes the sets it records."""
+    table = profiles_table()
+    actb = table["gene_id"] == GENE_IDS[SYMBOLS.index("ACTB")]
+    astro = actb & (table["node_name"] == "Astrocyte")
+    microglia = actb & (table["node_name"] == "Microglia")
+
+    def astro_markers(flags: AnnotationFlagsConfig) -> dict[str, bool]:
+        profiles = HumanRefereeProfiles.from_table(
+            table, level=LEVEL, gene_ids=GENE_IDS, symbols=SYMBOLS
+        )
+        found = {}
+        for comparator in (COMPARATOR_NODE, COMPARATOR_CLASS):
+            markers = derive_referee_markers(
+                profiles, flags, settings(comparator=comparator)
+            )
+            assert (markers.ratio, markers.min_share) == (
+                flags.specific_gene_ratio,
+                flags.specific_gene_min_share,
+            )
+            found[comparator] = "ACTB" in markers.markers["Astrocytes"].symbols
+        return found
+
+    # ACTB 17x more astrocytic than microglial: 20x (the default) refuses it,
+    # 15x takes it.
+    table.loc[actb, "expected_fraction"] = 1e-6
+    table.loc[astro, "expected_fraction"] = 0.017
+    table.loc[microglia, "expected_fraction"] = 0.001
+    assert astro_markers(FLAGS) == {COMPARATOR_NODE: False, COMPARATOR_CLASS: False}
+    ratio_15 = AnnotationFlagsConfig(specific_gene_ratio=15.0)
+    assert astro_markers(ratio_15) == {COMPARATOR_NODE: True, COMPARATOR_CLASS: True}
+    # ACTB at half the default 1/1000 share: 1/2500 takes it.
+    table.loc[microglia, "expected_fraction"] = 1e-6
+    table.loc[astro, "expected_fraction"] = 0.5 * FLAGS.specific_gene_min_share
+    assert astro_markers(FLAGS) == {COMPARATOR_NODE: False, COMPARATOR_CLASS: False}
+    share = AnnotationFlagsConfig(specific_gene_min_share=0.0004)
+    assert astro_markers(share) == {COMPARATOR_NODE: True, COMPARATOR_CLASS: True}
+    # The referee derives with the flags config it is given.
+    counts, truth = simulated_cells()
+    referee = human_marker_referee(
+        counts,
+        HumanRefereeProfiles.from_table(
+            table, level=LEVEL, gene_ids=GENE_IDS, symbols=SYMBOLS
+        ),
+        truth,
+        np.ones(len(truth), dtype=bool),
+        flags_config=share,
+        settings=settings(comparator=COMPARATOR_CLASS, min_pseudo_confident=50),
+    )
+    assert referee.markers is not None
+    assert referee.markers.min_share == 0.0004
+    assert "ACTB" in referee.markers.markers["Astrocytes"].symbols
+
+
 def test_class_comparator_uses_broad_class_profiles() -> None:
     """Cell-weighted class profiles against the other classes' profiles.
 
@@ -360,7 +436,11 @@ def test_groups_with_too_few_markers_and_absent_classes_are_recorded() -> None:
 def test_marker_sets_round_trip_through_a_frozen_table() -> None:
     """D27 (a): the derived sets are written and fixed before the run."""
     markers = derive_referee_markers(
-        fixture_profiles(), FLAGS, settings(comparator=COMPARATOR_CLASS)
+        fixture_profiles(),
+        FLAGS,
+        settings(comparator=COMPARATOR_CLASS),
+        panel_hash=PANEL_HASH,
+        build_hash=BUILD_HASH,
     )
     frame = markers.to_frame()
     assert list(frame.columns) == [
@@ -373,6 +453,8 @@ def test_marker_sets_round_trip_through_a_frozen_table() -> None:
         "comparator",
         "min_ratio",
         "min_share",
+        "panel_hash",
+        "build_hash",
     ]
     assert len(frame) == 21
     restored = RefereeMarkers.from_frame(frame, gene_ids=GENE_IDS, symbols=SYMBOLS)
@@ -383,12 +465,16 @@ def test_marker_sets_round_trip_through_a_frozen_table() -> None:
     assert restored.comparator == COMPARATOR_CLASS
     assert restored.ratio == FLAGS.specific_gene_ratio
     assert restored.min_share == FLAGS.specific_gene_min_share
+    assert (restored.panel_hash, restored.build_hash) == (PANEL_HASH, BUILD_HASH)
+    assert restored.query_gene_ids == tuple(GENE_IDS)
     assert restored.fingerprint == markers.fingerprint
     assert restored.frozen_fingerprint == markers.fingerprint
     assert restored.missing_genes == {}
     assert len(markers.fingerprint) == 64
     record = restored.to_json()
     assert (record["source"], record["frozen"]) == ("derived", True)
+    assert (record["panel_hash"], record["build_hash"]) == (PANEL_HASH, BUILD_HASH)
+    assert record["n_query_genes"] == len(GENE_IDS)
     # The fingerprint is the marker sets: dropping one gene changes it.
     fewer = RefereeMarkers.from_frame(
         frame[frame["symbol"] != "AST1"], gene_ids=GENE_IDS, symbols=SYMBOLS
@@ -457,6 +543,207 @@ def test_frozen_tables_refuse_inconsistent_provenance() -> None:
         )
 
 
+def test_derived_sets_must_record_their_rule() -> None:
+    """A self-declared ``derived`` source needs the rule columns.
+
+    A hand-curated table relabelled ``derived`` (no comparator, ratio or
+    share) would otherwise skip every rule check and drive the outcome.
+    """
+    curated = RefereeMarkers.from_symbols(
+        {group: list(genes) for group, genes in CLASS_GENES.items()},
+        gene_ids=GENE_IDS,
+        symbols=SYMBOLS,
+    )
+    relabelled = curated.to_frame().assign(source="derived")
+    with pytest.raises(ValueError, match="must record its rule"):
+        RefereeMarkers.from_frame(relabelled, gene_ids=GENE_IDS, symbols=SYMBOLS)
+    # The comparator argument does not stand in for a derived table's column.
+    with pytest.raises(ValueError, match=r"\['comparator', 'min_ratio', 'min_share'\]"):
+        RefereeMarkers.from_frame(
+            relabelled,
+            gene_ids=GENE_IDS,
+            symbols=SYMBOLS,
+            comparator=COMPARATOR_NODE,
+        )
+    frame = derive_referee_markers(
+        fixture_profiles(), FLAGS, settings(comparator=COMPARATOR_CLASS)
+    ).to_frame()
+    for column in ("comparator", "min_ratio", "min_share"):
+        with pytest.raises(ValueError, match=rf"\['{column}'\]"):
+            RefereeMarkers.from_frame(
+                frame.drop(columns=column), gene_ids=GENE_IDS, symbols=SYMBOLS
+            )
+        with pytest.raises(ValueError, match=rf"\['{column}'\]"):
+            RefereeMarkers.from_frame(
+                frame.assign(**{column: None}), gene_ids=GENE_IDS, symbols=SYMBOLS
+            )
+    derived = derive_referee_markers(fixture_profiles(), FLAGS, settings())
+    with pytest.raises(ValueError, match="must record their rule"):
+        dataclasses.replace(derived, comparator=None)
+    with pytest.raises(ValueError, match="must record their rule"):
+        dataclasses.replace(derived, ratio=None)
+    # Hand-curated and supplied sets record no rule.
+    assert dataclasses.replace(curated, source="supplied").comparator is None
+
+
+def test_supplied_derived_sets_must_belong_to_the_runs_panel_and_bundle() -> None:
+    """A frozen table is bound by re-derivation, or by the run's hashes."""
+    counts, truth = simulated_cells()
+    confident = np.ones(len(truth), dtype=bool)
+    config = settings(comparator=COMPARATOR_CLASS, min_pseudo_confident=50)
+    frozen = frozen_markers(config)
+
+    def run(
+        markers: RefereeMarkers, profiles: HumanRefereeProfiles | None, **identity: Any
+    ) -> float | None:
+        return human_marker_referee(
+            counts,
+            profiles,
+            truth,
+            confident,
+            flags_config=FLAGS,
+            settings=config,
+            markers=markers,
+            gene_ids=GENE_IDS,
+            **identity,
+        ).consistency
+
+    # Without profiles, the recorded panel and bundle must be the run's.
+    assert run(frozen, None, panel_hash=PANEL_HASH, build_hash=BUILD_HASH) == 1.0
+    for identity in (
+        {},
+        {"panel_hash": PANEL_HASH},
+        {"build_hash": BUILD_HASH},
+        {"panel_hash": "c" * 64, "build_hash": BUILD_HASH},
+    ):
+        with pytest.raises(ValueError, match="cannot show"):
+            run(frozen, None, **identity)
+    unrecorded = RefereeMarkers.from_frame(
+        frozen.to_frame().drop(columns=["panel_hash", "build_hash"]),
+        gene_ids=GENE_IDS,
+        symbols=SYMBOLS,
+    )
+    with pytest.raises(ValueError, match="cannot show"):
+        run(unrecorded, None, panel_hash=PANEL_HASH, build_hash=BUILD_HASH)
+    # With profiles the sets are re-derived and compared, hashes or not.
+    assert run(frozen, fixture_profiles()) == 1.0
+    assert run(unrecorded, fixture_profiles()) == 1.0
+    # A recorded bundle other than the run's is refused even then.
+    with pytest.raises(ValueError, match="derived on bundle"):
+        run(frozen, fixture_profiles(), build_hash="d" * 64)
+    # A stale table (another panel or bundle: AST1 not a marker there).
+    frame = frozen.to_frame()
+    stale = RefereeMarkers.from_frame(
+        frame[frame["symbol"] != "AST1"], gene_ids=GENE_IDS, symbols=SYMBOLS
+    )
+    with pytest.raises(ValueError, match="differ from the sets the profiles give"):
+        run(stale, fixture_profiles(), panel_hash=PANEL_HASH, build_hash=BUILD_HASH)
+    # A relabelled hand-curated table with a hand-written rule.
+    curated = RefereeMarkers.from_symbols(
+        {"Astrocytes": ["AST1", "AST2", "MIC1"], "Microglia": ["MIC2", "MIC3", "VAS1"]},
+        gene_ids=GENE_IDS,
+        symbols=SYMBOLS,
+    ).to_frame()
+    forged = RefereeMarkers.from_frame(
+        curated.assign(
+            source="derived",
+            comparator=COMPARATOR_CLASS,
+            min_ratio=FLAGS.specific_gene_ratio,
+            min_share=FLAGS.specific_gene_min_share,
+        ),
+        gene_ids=GENE_IDS,
+        symbols=SYMBOLS,
+    )
+    with pytest.raises(ValueError, match="differ from the sets the profiles give"):
+        run(forged, fixture_profiles())
+    with pytest.raises(ValueError, match="cannot show"):
+        run(forged, None, panel_hash=PANEL_HASH, build_hash=BUILD_HASH)
+    # Hand-curated sets are report-only and need no binding.
+    curated_sets = RefereeMarkers.from_symbols(
+        CLASS_GENES, gene_ids=GENE_IDS, symbols=SYMBOLS
+    )
+    assert run(curated_sets, None) == 1.0
+
+
+def test_frozen_sets_on_a_dataset_lacking_panel_genes_match_the_rederivation() -> None:
+    """§8.7: frozen sets less the missing genes equal the re-derivation.
+
+    A gene's specificity does not depend on the other genes, so the sets
+    re-derived on the dataset's genes are the frozen sets without the genes
+    the dataset lacks.
+    """
+    config = settings(comparator=COMPARATOR_CLASS, min_pseudo_confident=50)
+    frame = frozen_markers(config).to_frame()
+    keep = [index for index, symbol in enumerate(SYMBOLS) if symbol != "AST1"]
+    gene_ids = [GENE_IDS[index] for index in keep]
+    symbols = [SYMBOLS[index] for index in keep]
+    counts, truth = simulated_cells()
+    restored = RefereeMarkers.from_frame(frame, gene_ids=gene_ids, symbols=symbols)
+    referee = human_marker_referee(
+        counts[:, keep],
+        HumanRefereeProfiles.from_table(
+            profiles_table(), level=LEVEL, gene_ids=gene_ids, symbols=symbols
+        ),
+        truth,
+        np.ones(len(truth), dtype=bool),
+        flags_config=FLAGS,
+        settings=config,
+        markers=restored,
+        gene_ids=gene_ids,
+        panel_hash=PANEL_HASH,
+        build_hash=BUILD_HASH,
+    )
+    assert referee.consistency == pytest.approx(1.0)
+    assert referee.markers is not None
+    assert referee.markers.missing_genes == {
+        "Astrocytes": (GENE_IDS[SYMBOLS.index("AST1")],)
+    }
+
+
+def test_supplied_sets_must_index_the_counts_columns() -> None:
+    """Sets read on genes in another order than the counts are refused."""
+    counts, truth = simulated_cells()
+    confident = np.ones(len(truth), dtype=bool)
+    config = settings(comparator=COMPARATOR_CLASS, min_pseudo_confident=50)
+    frame = frozen_markers(config).to_frame()
+    reverse = list(range(len(GENE_IDS)))[::-1]
+    backward = RefereeMarkers.from_frame(
+        frame,
+        gene_ids=[GENE_IDS[index] for index in reverse],
+        symbols=[SYMBOLS[index] for index in reverse],
+    )
+    assert backward.query_gene_ids == tuple(GENE_IDS[::-1])
+    kwargs: dict[str, Any] = {
+        "flags_config": FLAGS,
+        "settings": config,
+        "markers": backward,
+        "panel_hash": PANEL_HASH,
+        "build_hash": BUILD_HASH,
+    }
+    with pytest.raises(ValueError, match="column 0 is ENSG00000000022 there"):
+        human_marker_referee(
+            counts, None, truth, confident, gene_ids=GENE_IDS, **kwargs
+        )
+    with pytest.raises(ValueError, match="need the counts' gene_ids"):
+        human_marker_referee(counts, None, truth, confident, **kwargs)
+    # Counts in the sets' order score as the unpermuted run does.
+    permuted = human_marker_referee(
+        counts[:, reverse], None, truth, confident, gene_ids=GENE_IDS[::-1], **kwargs
+    )
+    assert permuted.consistency == pytest.approx(1.0)
+    # The profiles must index the counts' columns too.
+    with pytest.raises(ValueError, match="the profiles index other query genes"):
+        human_marker_referee(
+            counts,
+            fixture_profiles(),
+            truth,
+            confident,
+            flags_config=FLAGS,
+            settings=config,
+            gene_ids=GENE_IDS[::-1],
+        )
+
+
 def test_frozen_markers_missing_from_a_dataset_are_dropped_and_listed() -> None:
     """§8.7: a dataset of the family may lack panel genes; the run continues."""
     markers = derive_referee_markers(
@@ -480,6 +767,7 @@ def test_frozen_markers_missing_from_a_dataset_are_dropped_and_listed() -> None:
     assert restored.frozen_fingerprint == markers.fingerprint
     assert restored.fingerprint != markers.fingerprint
     assert restored.n_query_genes == len(gene_ids)
+    assert restored.query_gene_ids == tuple(gene_ids)
     assert restored.to_json()["missing_genes"]["Microglia"] == [
         gene["MIC1"],
         gene["MIC2"],
@@ -564,6 +852,64 @@ def test_referee_scores_confident_broad_calls_against_pseudo_labels() -> None:
     assert json.loads(json.dumps(referee.to_json())) == referee.to_json()
 
 
+def test_unconfident_cells_that_agree_with_their_pseudo_label_are_not_scored() -> None:
+    """The numerator counts only scored cells (pseudo-labelled and confident).
+
+    Every table cell carries a ``ct_broad`` name, confident or not
+    (``consensus``), so unconfident cells whose name equals their
+    pseudo-label must not enter the numerator: 100 of them on 315 / 350
+    would read 415 / 350.
+    """
+    counts, truth = simulated_cells()
+    calls = truth.copy()
+    astro = np.flatnonzero(truth == "Astrocytes")
+    calls[astro[:35]] = "Neurons"
+    microglia = np.flatnonzero(truth == "Microglia")
+    extra = np.concatenate([np.arange(50), microglia])
+    counts = sparse.vstack([counts, counts[extra]]).tocsr()
+    calls = np.concatenate([calls, truth[extra]])  # the extra cells agree
+    confident = np.concatenate([np.ones(350, bool), np.zeros(len(extra), bool)])
+    referee = human_marker_referee(
+        counts,
+        fixture_profiles(),
+        calls,
+        confident,
+        flags_config=FLAGS,
+        settings=settings(comparator=COMPARATOR_CLASS, min_pseudo_confident=50),
+    )
+    assert referee.n_pseudo_confident == 450
+    assert (referee.n_confident, referee.n_scored) == (350, 350)
+    assert referee.consistency == pytest.approx(315 / 350)
+    assert referee.recall["Neurons"] == pytest.approx(1.0)
+    assert referee.recall["Astrocytes"] == pytest.approx(15 / 50)
+    assert referee.precision["Neurons"] == pytest.approx(50 / 85)
+    assert referee.confusion["Neurons"] == {"Neurons": 50}
+    assert referee.confusion["Microglia"] == {"Microglia": 50}
+
+
+def test_the_cell_minimum_counts_scored_not_pseudo_labelled_cells() -> None:
+    """350 pseudo-labelled cells, 150 of them confident: 150 < 200."""
+    counts, truth = simulated_cells()
+    confident = np.arange(len(truth)) < 150
+    results = {
+        needed: human_marker_referee(
+            counts,
+            fixture_profiles(),
+            truth,
+            confident,
+            flags_config=FLAGS,
+            settings=settings(comparator=COMPARATOR_CLASS, min_pseudo_confident=needed),
+        )
+        for needed in (200, 150)
+    }
+    short = results[200]
+    assert short.n_pseudo_confident == 350  # enough pseudo-labelled cells
+    assert short.n_scored == 150
+    assert short.consistency is None
+    assert short.reason == "150 scored pseudo-confident cells < 200"
+    assert results[150].consistency == pytest.approx(1.0)
+
+
 def test_referee_accepts_dense_counts_and_is_deterministic() -> None:
     counts, truth = simulated_cells(seed=3)
     kwargs: dict[str, Any] = {
@@ -583,18 +929,16 @@ def test_frozen_markers_replace_the_derivation() -> None:
     counts, truth = simulated_cells()
     confident = np.ones(len(truth), dtype=bool)
     config = settings(comparator=COMPARATOR_CLASS, min_pseudo_confident=50)
-    derived = derive_referee_markers(fixture_profiles(), FLAGS, config)
-    frozen = RefereeMarkers.from_frame(
-        derived.to_frame(), gene_ids=GENE_IDS, symbols=SYMBOLS
-    )
+    frozen = frozen_markers(config)
     supplied = human_marker_referee(
         counts,
-        None,  # no profiles needed when the sets are supplied
+        None,  # no profiles needed when the sets record the run's hashes
         truth,
         confident,
         flags_config=FLAGS,
         settings=config,
         markers=frozen,
+        **RUN_IDENTITY,
     )
     computed = human_marker_referee(
         counts,
@@ -649,6 +993,7 @@ def test_supplied_derived_sets_must_record_the_runs_rule() -> None:
                 flags_config=flags_config,
                 settings=rule,
                 markers=frozen,
+                **RUN_IDENTITY,
             )
 
 
@@ -675,6 +1020,7 @@ def test_only_derived_sets_drive_the_outcome() -> None:
             flags_config=FLAGS,
             settings=settings(min_pseudo_confident=50),
             markers=markers,
+            gene_ids=GENE_IDS,
         )
         assert referee.consistency == pytest.approx(1.0)  # reported
         assert referee.to_json()["source"] == markers.source
@@ -695,7 +1041,13 @@ def test_referee_is_not_evaluable_with_fewer_than_two_marker_groups() -> None:
     )
     assert referee.consistency is None
     assert referee.reason == "0 marker group(s) with >= 4 markers (2 needed)"
-    derived = derive_referee_markers(fixture_profiles(), FLAGS, settings()).to_frame()
+    derived = derive_referee_markers(
+        fixture_profiles(),
+        FLAGS,
+        settings(),
+        panel_hash=PANEL_HASH,
+        build_hash=BUILD_HASH,
+    ).to_frame()
     one = RefereeMarkers.from_frame(
         derived[derived["group"] == "Microglia"], gene_ids=GENE_IDS, symbols=SYMBOLS
     )
@@ -707,6 +1059,7 @@ def test_referee_is_not_evaluable_with_fewer_than_two_marker_groups() -> None:
         flags_config=FLAGS,
         settings=settings(min_pseudo_confident=50),
         markers=one,
+        **RUN_IDENTITY,
     )
     assert single.consistency is None and "1 marker group(s)" in str(single.reason)
     outcome = qc.marker_consistency_outcome(single.signal(), warn=0.75, broad_only=0.70)

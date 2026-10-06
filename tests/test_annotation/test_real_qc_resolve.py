@@ -1038,6 +1038,14 @@ def test_the_referee_runs_on_the_bundle_profiles(
         # Neurons (two nodes), Astrocytes and Oligodendrocytes.
         assert details["n_marker_groups"] == 3
         assert details["source"] == "derived" and details["fingerprint"]
+        # The sets record the panel and the primary bundle they were derived
+        # on, so a table frozen before the run can be checked against them.
+        marker_sets = details["marker_sets"]
+        assert marker_sets["panel_hash"] == setup.panel.panel_hash
+        assert marker_sets["build_hash"] == (
+            setup.bundles["whb_frontal_supc_clus"].build_hash
+        )
+        assert marker_sets["n_query_genes"] == len(GENE_IDS)
         # The synthetic counts are mostly each call's own marker gene.
         assert details["consistency"] >= 0.75
         assert referee["outcome"] == "pass"

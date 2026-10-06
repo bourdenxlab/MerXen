@@ -4959,8 +4959,9 @@ def human_marker_referee_signal(
     The referee's marker sets are derived in the run from the primary WHB
     bundle's ``profiles.parquet`` on the sample's query genes
     (``human_referee.derive_referee_markers``): they depend only on the
-    bundle and the panel, and their fingerprint is recorded in the outcome's
-    details, so a table frozen before the run can be checked against it.
+    bundle and the panel, and their fingerprint, the ``panel_hash`` and the
+    primary bundle's ``build_hash`` are recorded in the outcome's details,
+    so a table frozen before the run can be checked against them.
 
     Args:
         resolution: The QC-free resolution (its confident ``ct_broad``).
@@ -4997,6 +4998,9 @@ def human_marker_referee_signal(
         np.asarray(broad.confident, dtype=bool)[table],
         flags_config=config.flags,
         settings=HumanRefereeSettings.from_config(config.real_qc),
+        gene_ids=query.gene_ids,
+        panel_hash=panel.panel_hash,
+        build_hash=primary.bundle.build_hash,
     )
     return referee.signal()
 

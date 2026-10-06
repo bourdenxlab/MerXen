@@ -1029,11 +1029,19 @@ OPC class, shares oligodendrocyte genes) or a sink resembles a class
 (Splatter): `node` then leaves that class without markers. The sets depend
 only on the bundle and the panel. `RefereeMarkers.to_frame` writes them
 before a run with their provenance (`source`, `comparator`, `min_ratio`,
-`min_share` on every row), `RefereeMarkers.from_frame` reads them back
-(`frozen`), and the run's QC details record their sha256 (`fingerprint`;
-`frozen_fingerprint` for the table as read). A frozen marker that a dataset's
-query genes lack is dropped and listed (`missing_genes`). Supplied derived
-sets must record the run's comparator and specificity rule. Only `derived`
+`min_share`, `panel_hash` and the primary bundle's `build_hash` on every
+row), `RefereeMarkers.from_frame` reads them back (`frozen`) on the run's
+query genes in the counts' order (`query_gene_ids`), and the run's QC
+details record their sha256 (`fingerprint`; `frozen_fingerprint` for the
+table as read), `panel_hash` and `build_hash`. A frozen marker that a
+dataset's query genes lack is dropped and listed (`missing_genes`). A
+`derived` table must record its comparator, `min_ratio` and `min_share`.
+Supplied derived sets must record the run's rule, index the counts' columns
+in order (the referee is given the counts' `gene_ids`), and be shown to
+belong to the run: with the bundle's profiles they are re-derived on the
+run's query genes and must have the same fingerprint; without profiles they
+must record the run's `panel_hash` and `build_hash`. A recorded `build_hash`
+other than the run's is refused either way. Only `derived`
 sets (D27 (a)) drive the outcome: hand-curated sets
 (`RefereeMarkers.from_symbols`, `source` `hand_curated`, D27 (b)) and tables
 without provenance (`supplied`) are scored by the same rule for reporting,

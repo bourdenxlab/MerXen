@@ -37,16 +37,23 @@ classes belong to none).
   class (Splatter, neuronal): ``node`` then leaves that class without
   markers. The sets depend only on the bundle and the panel, so they are
   fixed before any dataset is read: ``RefereeMarkers.to_frame`` writes them
-  with their provenance (``source``, comparator and specificity rule) and
-  ``RefereeMarkers.from_frame`` reads them back (``frozen``);
+  with their provenance (``source``; for derived sets the comparator and
+  specificity rule, which a ``derived`` table must record, and the
+  ``panel_hash`` and primary bundle ``build_hash`` they were derived on)
+  and ``RefereeMarkers.from_frame`` reads them back (``frozen``) on a run's
+  query genes, whose order the sets keep (``query_gene_ids``);
   ``RefereeMarkers.fingerprint`` identifies the sets a run used. Only
   ``derived`` sets (D27 (a)), computed in the run or frozen, drive the
   outcome: ``HumanMarkerReferee.signal`` refuses hand-curated sets
   (``RefereeMarkers.from_symbols``, D27 (b), report-only) and tables
-  without provenance. A frozen marker absent from a dataset's query genes
-  (a dataset of the family missing panel genes, §8.7) is dropped and
-  listed (``missing_genes``), and ``frozen_fingerprint`` keeps the frozen
-  table's identity.
+  without provenance. Supplied derived sets must record the run's rule and
+  be shown to belong to the run: re-derived from the bundle's profiles on
+  the run's query genes with the same fingerprint, or, without profiles,
+  recording the run's ``panel_hash`` and ``build_hash``; a recorded
+  ``build_hash`` other than the run's is refused either way. A frozen
+  marker absent from a dataset's query genes (a dataset of the family
+  missing panel genes, §8.7) is dropped and listed (``missing_genes``), and
+  ``frozen_fingerprint`` keeps the frozen table's identity.
 * **Pseudo-labels.** ``data/P1212``'s rule, as mouse G2: each marker's
   counts over its mean positive count among the dataset's table cells;
   class score = the sum; a label when the top class has
@@ -137,12 +144,17 @@ PROFILE_COLUMNS: Final[tuple[str, ...]] = (
     "gene_id",
     "expected_fraction",
 )
+# The derivation's rule: a table whose ``source`` is ``derived`` must record
+# each of these (D27 (a)).
+MARKER_RULE_COLUMNS: Final[tuple[str, ...]] = ("comparator", "min_ratio", "min_share")
+# What the sets were derived on: the panel (``panel_hash``) and the primary
+# bundle (``build_hash``).
+MARKER_IDENTITY_COLUMNS: Final[tuple[str, ...]] = ("panel_hash", "build_hash")
 # The provenance columns repeat one value on every row of a marker table.
 MARKER_PROVENANCE_COLUMNS: Final[tuple[str, ...]] = (
     "source",
-    "comparator",
-    "min_ratio",
-    "min_share",
+    *MARKER_RULE_COLUMNS,
+    *MARKER_IDENTITY_COLUMNS,
 )
 MARKER_FRAME_COLUMNS: Final[tuple[str, ...]] = (
     "group",
@@ -417,29 +429,35 @@ class RefereeMarkers:
         markers: Broad class to its markers (positions in the query genes),
             in ``HUMAN_BROAD_CLASSES`` order; only classes with at least
             ``min_group_markers``.
-        n_query_genes: Query genes the positions refer to.
+        query_gene_ids: The query genes the positions refer to, in order
+            (the columns of the counts the sets are scored on).
         source: ``derived`` (§8.6 rule on the profiles, D27 (a)),
             ``hand_curated`` (D27 (b), report-only) or ``supplied`` (a
             table that records no provenance).
         min_group_markers: The rule that left classes out.
         comparator: The derivation's comparator (``None`` when not
-            derived or not recorded).
+            derived or not recorded; required for ``derived`` sets).
         left_out: Classes with too few markers.
         absent: Broad classes without a node in the profiles.
         missing_symbols: Per class, hand-curated symbols absent from the
             panel.
-        ratio: The specificity ratio of a derivation.
-        min_share: Its minimum share.
+        ratio: The specificity ratio of a derivation (required for
+            ``derived`` sets).
+        min_share: Its minimum share (required for ``derived`` sets).
         frozen: Whether the sets were read from a table (``from_frame``).
         frozen_fingerprint: The fingerprint of the table's sets as read,
             before markers absent from the query genes were dropped and
             ``min_group_markers`` applied (``None`` unless frozen).
         missing_genes: Per class, frozen markers absent from the query
             genes (dropped).
+        panel_hash: The panel the sets were derived on (``None`` when not
+            recorded).
+        build_hash: The primary bundle they were derived from (``None``
+            when not recorded).
     """
 
     markers: Mapping[str, SpecificGenes]
-    n_query_genes: int
+    query_gene_ids: tuple[str, ...]
     source: str
     min_group_markers: int
     comparator: str | None = None
@@ -451,9 +469,17 @@ class RefereeMarkers:
     frozen: bool = False
     frozen_fingerprint: str | None = None
     missing_genes: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    panel_hash: str | None = None
+    build_hash: str | None = None
 
     def __post_init__(self) -> None:
-        """Validate the provenance."""
+        """Validate the provenance.
+
+        Raises:
+            ValueError: If the source or comparator is unknown, or
+                ``derived`` sets do not record their comparator, specificity
+                ratio and minimum share.
+        """
         if self.source not in MARKER_SOURCES:
             raise ValueError(
                 f"unknown marker source {self.source!r}; expected one of "
@@ -464,6 +490,23 @@ class RefereeMarkers:
                 f"unknown referee comparator {self.comparator!r}; expected one of "
                 f"{REFEREE_COMPARATORS}"
             )
+        if self.source == SOURCE_DERIVED:
+            rule = {
+                "comparator": self.comparator,
+                "min_ratio": self.ratio,
+                "min_share": self.min_share,
+            }
+            unrecorded = [name for name, value in rule.items() if value is None]
+            if unrecorded:
+                raise ValueError(
+                    f"derived marker sets must record their rule; {unrecorded} "
+                    "not recorded"
+                )
+
+    @property
+    def n_query_genes(self) -> int:
+        """Return the number of query genes the positions refer to."""
+        return len(self.query_gene_ids)
 
     @property
     def fingerprint(self) -> str:
@@ -484,7 +527,8 @@ class RefereeMarkers:
             ``gene_id``, ``symbol``, ``ratio`` (the gene's specificity
             ratio; NaN for hand-curated sets), and the provenance repeated
             on every row: ``source``, ``comparator``, ``min_ratio`` and
-            ``min_share`` (the derivation's rule).
+            ``min_share`` (the derivation's rule), ``panel_hash`` and
+            ``build_hash`` (what the sets were derived on).
         """
         rows = [
             {
@@ -497,6 +541,8 @@ class RefereeMarkers:
                 "comparator": self.comparator,
                 "min_ratio": self.ratio,
                 "min_share": self.min_share,
+                "panel_hash": self.panel_hash,
+                "build_hash": self.build_hash,
             }
             for group, genes in self.markers.items()
             for rank, (gene_id, symbol, ratio) in enumerate(
@@ -516,6 +562,9 @@ class RefereeMarkers:
             "min_group_markers": self.min_group_markers,
             "ratio": self.ratio,
             "min_share": self.min_share,
+            "panel_hash": self.panel_hash,
+            "build_hash": self.build_hash,
+            "n_query_genes": self.n_query_genes,
             "markers": self.symbol_sets(),
             "marker_gene_ids": {
                 group: list(genes.gene_ids) for group, genes in self.markers.items()
@@ -549,12 +598,16 @@ class RefereeMarkers:
 
         Args:
             frame: The table (``group``, ``gene_id``; ``rank``, ``ratio``
-                and the provenance columns when present).
-            gene_ids: The run's query genes.
+                and the provenance columns when present; a ``derived`` table
+                must record ``comparator``, ``min_ratio`` and
+                ``min_share``).
+            gene_ids: The run's query genes, in the order of its counts'
+                columns (kept as ``query_gene_ids`` and checked against the
+                counts by ``human_marker_referee``).
             symbols: Their symbols (the run's panel file).
             min_group_markers: Classes with fewer markers are left out.
             comparator: The comparator the sets were derived with, for a
-                table that does not record it.
+                table that does not record it and is not ``derived``.
 
         Returns:
             The sets (``frozen``; ``source`` as the table records it,
@@ -563,7 +616,8 @@ class RefereeMarkers:
         Raises:
             ValueError: If a column is missing, a class is not a human broad
                 class, a provenance column holds more than one value or an
-                unknown one, or ``comparator`` contradicts the table.
+                unknown one, a ``derived`` table does not record its rule,
+                or ``comparator`` contradicts the table.
         """
         missing = sorted({"group", "gene_id"} - set(frame.columns))
         if missing:
@@ -586,6 +640,20 @@ class RefereeMarkers:
             )
         min_ratio = _constant(table, "min_ratio")
         min_share = _constant(table, "min_share")
+        if source == SOURCE_DERIVED:
+            rule = {
+                "comparator": recorded,
+                "min_ratio": min_ratio,
+                "min_share": min_share,
+            }
+            unrecorded = [name for name, value in rule.items() if value is None]
+            if unrecorded:
+                raise ValueError(
+                    f"a derived marker table must record its rule; columns "
+                    f"{unrecorded} are missing or empty"
+                )
+        panel_hash = _constant(table, "panel_hash")
+        build_hash = _constant(table, "build_hash")
         sets: dict[str, list[tuple[str, float]]] = {}
         read: dict[str, list[str]] = {}
         lacking: dict[str, tuple[str, ...]] = {}
@@ -619,6 +687,8 @@ class RefereeMarkers:
             frozen=True,
             frozen_fingerprint=_fingerprint(read),
             missing_genes=lacking,
+            panel_hash=None if panel_hash is None else str(panel_hash),
+            build_hash=None if build_hash is None else str(build_hash),
         )
 
     @classmethod
@@ -724,6 +794,8 @@ def _supplied(
     frozen_fingerprint: str | None = None,
     missing_symbols: Mapping[str, tuple[str, ...]] | None = None,
     missing_genes: Mapping[str, tuple[str, ...]] | None = None,
+    panel_hash: str | None = None,
+    build_hash: str | None = None,
 ) -> RefereeMarkers:
     position = _positions(gene_ids, symbols)
     markers: dict[str, SpecificGenes] = {}
@@ -742,7 +814,7 @@ def _supplied(
         )
     return RefereeMarkers(
         markers=markers,
-        n_query_genes=len(gene_ids),
+        query_gene_ids=tuple(str(gene) for gene in gene_ids),
         source=source,
         min_group_markers=min_group_markers,
         comparator=comparator,
@@ -753,6 +825,8 @@ def _supplied(
         frozen=frozen,
         frozen_fingerprint=frozen_fingerprint,
         missing_genes=dict(missing_genes or {}),
+        panel_hash=panel_hash,
+        build_hash=build_hash,
     )
 
 
@@ -760,6 +834,9 @@ def derive_referee_markers(
     profiles: HumanRefereeProfiles,
     flags_config: AnnotationFlagsConfig,
     settings: HumanRefereeSettings,
+    *,
+    panel_hash: str | None = None,
+    build_hash: str | None = None,
 ) -> RefereeMarkers:
     """Return each broad class's panel markers (§8.6 specificity rule; D27 (a)).
 
@@ -767,6 +844,10 @@ def derive_referee_markers(
         profiles: The primary bundle's node profiles on the query genes.
         flags_config: ``specific_gene_ratio`` and ``specific_gene_min_share``.
         settings: ``min_group_markers`` and the comparator.
+        panel_hash: The panel the query genes come from, recorded with the
+            sets.
+        build_hash: The primary bundle's ``build_hash``, recorded with the
+            sets.
 
     Returns:
         The sets (``source`` ``derived``).
@@ -810,7 +891,7 @@ def derive_referee_markers(
             left_out.append(cls)
     return RefereeMarkers(
         markers=markers,
-        n_query_genes=len(profiles.gene_ids),
+        query_gene_ids=profiles.gene_ids,
         source=SOURCE_DERIVED,
         min_group_markers=settings.min_group_markers,
         comparator=settings.comparator,
@@ -818,6 +899,8 @@ def derive_referee_markers(
         absent=tuple(cls for cls in HUMAN_BROAD_CLASSES if cls not in present),
         ratio=float(flags_config.specific_gene_ratio),
         min_share=float(flags_config.specific_gene_min_share),
+        panel_hash=panel_hash,
+        build_hash=build_hash,
     )
 
 
@@ -934,6 +1017,8 @@ def _check_derivation_rule(
 ) -> None:
     """Refuse supplied derived sets whose recorded rule is not the run's.
 
+    ``derived`` sets always record their rule (``RefereeMarkers``).
+
     Raises:
         ValueError: If the sets record another comparator, specificity
             ratio or minimum share, or were read with another
@@ -941,7 +1026,7 @@ def _check_derivation_rule(
     """
     if markers.source != SOURCE_DERIVED:
         return
-    if markers.comparator is not None and markers.comparator != settings.comparator:
+    if markers.comparator != settings.comparator:
         raise ValueError(
             f"the derived marker sets record comparator {markers.comparator!r}; "
             f"the run's is {settings.comparator!r}"
@@ -956,11 +1041,104 @@ def _check_derivation_rule(
         ("minimum share", markers.min_share, flags_config.specific_gene_min_share),
     )
     for name, value, expected in rules:
-        if value is not None and not math.isclose(value, float(expected)):
+        if value is None or not math.isclose(value, float(expected)):
             raise ValueError(
                 f"the derived marker sets record {name} {value}; the run's is "
                 f"{expected}"
             )
+
+
+def _check_query_genes(
+    expected: tuple[str, ...],
+    n_columns: int,
+    columns: tuple[str, ...] | None,
+    *,
+    what: str,
+) -> None:
+    """Refuse counts whose columns are not the genes the markers index.
+
+    Args:
+        expected: The query genes the marker positions refer to.
+        n_columns: The counts' columns.
+        columns: The counts' gene IDs (``None``: only the count is checked).
+        what: The source of ``expected``, for the message.
+
+    Raises:
+        ValueError: If the number or the order of the genes differs.
+    """
+    if n_columns != len(expected):
+        raise ValueError(
+            f"counts have {n_columns} columns for {len(expected)} query genes ({what})"
+        )
+    if columns is not None and columns != expected:
+        index = next(
+            i for i, (a, b) in enumerate(zip(expected, columns, strict=True)) if a != b
+        )
+        raise ValueError(
+            f"the {what} index other query genes than the counts' columns: column "
+            f"{index} is {expected[index]} there and {columns[index]} in the counts"
+        )
+
+
+def _check_derivation_identity(
+    markers: RefereeMarkers,
+    profiles: HumanRefereeProfiles | None,
+    flags_config: AnnotationFlagsConfig,
+    settings: HumanRefereeSettings,
+    *,
+    panel_hash: str | None,
+    build_hash: str | None,
+) -> None:
+    """Refuse supplied derived sets that cannot be shown to belong to the run.
+
+    A frozen table's ``source`` is self-declared, so its sets must be bound
+    to the run's bundle and panel: with the bundle's ``profiles`` they are
+    re-derived on the run's query genes by the run's rule and must have the
+    same fingerprint (a dataset lacking panel genes, §8.7, still matches,
+    because each gene's specificity does not depend on the others); without
+    profiles, they must record the run's ``panel_hash`` and ``build_hash``.
+    A recorded ``build_hash`` other than the run's is refused either way.
+
+    Raises:
+        ValueError: If the sets were derived on another bundle, differ from
+            the re-derivation, or cannot be bound to the run.
+    """
+    if markers.source != SOURCE_DERIVED:
+        return
+    if (
+        build_hash is not None
+        and markers.build_hash is not None
+        and markers.build_hash != build_hash
+    ):
+        raise ValueError(
+            f"the derived marker sets were derived on bundle {markers.build_hash}; "
+            f"the run's primary bundle is {build_hash}"
+        )
+    if profiles is not None:
+        try:
+            again = derive_referee_markers(profiles, flags_config, settings)
+        except ValueError as error:
+            raise ValueError(
+                f"the supplied derived marker sets cannot be re-derived from the "
+                f"profiles: {error}"
+            ) from error
+        if again.fingerprint != markers.fingerprint:
+            raise ValueError(
+                f"the supplied derived marker sets (fingerprint "
+                f"{markers.fingerprint}) differ from the sets the profiles give on "
+                f"the run's query genes ({again.fingerprint}): a table of another "
+                "panel or bundle"
+            )
+        return
+    recorded = (markers.panel_hash, markers.build_hash)
+    if panel_hash is None or build_hash is None or recorded != (panel_hash, build_hash):
+        raise ValueError(
+            "cannot show that the supplied derived marker sets belong to this run: "
+            "pass the primary bundle's profiles (the sets are re-derived and "
+            "compared), or the run's panel_hash and build_hash, which the sets must "
+            f"record (they record panel_hash {markers.panel_hash} and build_hash "
+            f"{markers.build_hash}; the run's are {panel_hash} and {build_hash})"
+        )
 
 
 def human_marker_referee(
@@ -972,6 +1150,9 @@ def human_marker_referee(
     flags_config: AnnotationFlagsConfig,
     settings: HumanRefereeSettings,
     markers: RefereeMarkers | None = None,
+    gene_ids: Sequence[str] | None = None,
+    panel_hash: str | None = None,
+    build_hash: str | None = None,
 ) -> HumanMarkerReferee:
     """Return the human marker referee of one dataset's table cells (D18 (a)).
 
@@ -980,7 +1161,8 @@ def human_marker_referee(
             pseudo-labels normalise each marker by its mean positive count
             over these cells, so pass every table cell.
         profiles: The primary WHB bundle's profiles on the query genes
-            (``load_referee_profiles``); not needed with ``markers``.
+            (``load_referee_profiles``). With supplied derived ``markers``
+            they re-derive the sets to check them.
         broad_names: ``ct_broad_name`` per table cell.
         confident: Whether each table cell's ``ct_broad`` is confident.
         flags_config: The specificity rule.
@@ -988,6 +1170,13 @@ def human_marker_referee(
         markers: Frozen (``RefereeMarkers.from_frame``) or hand-curated
             sets used instead of a derivation; only derived sets give a
             ``signal``.
+        gene_ids: The counts' column genes, in order. Required with
+            ``markers``, whose ``query_gene_ids`` must equal them; with
+            profiles, they must equal the profiles' genes.
+        panel_hash: The run's panel, recorded with sets derived here and
+            compared with supplied derived sets.
+        build_hash: The run's primary bundle, recorded with sets derived
+            here and compared with supplied derived sets.
 
     Returns:
         The referee; ``not_evaluable`` (``consistency`` ``None`` with a
@@ -996,8 +1185,10 @@ def human_marker_referee(
 
     Raises:
         ValueError: If the inputs do not have one entry per table cell, the
-            counts do not have one column per query gene, or supplied
-            derived sets record another rule than the run's.
+            counts' columns are not the query genes the sets or profiles
+            index, ``markers`` come without ``gene_ids``, or supplied
+            derived sets record another rule than the run's or cannot be
+            shown to belong to the run (``_check_derivation_identity``).
     """
     names = _names(broad_names)
     called_mask = np.asarray(confident, dtype=bool).reshape(-1)
@@ -1024,25 +1215,40 @@ def human_marker_referee(
         return empty("no query counts", markers)
     if counts.shape[0] != n_cells:
         raise ValueError("counts must have one row per table cell")
+    columns = None if gene_ids is None else tuple(str(gene) for gene in gene_ids)
+    if profiles is not None:
+        _check_query_genes(profiles.gene_ids, counts.shape[1], columns, what="profiles")
     if markers is None:
         if profiles is None:
             return empty("no profiles and no supplied marker sets", None)
-        if counts.shape[1] != len(profiles.gene_ids):
-            raise ValueError(
-                f"counts have {counts.shape[1]} columns for "
-                f"{len(profiles.gene_ids)} query genes"
-            )
         try:
-            markers = derive_referee_markers(profiles, flags_config, settings)
+            markers = derive_referee_markers(
+                profiles,
+                flags_config,
+                settings,
+                panel_hash=panel_hash,
+                build_hash=build_hash,
+            )
         except ValueError as error:
             return empty(f"no marker sets: {error}", None)
     else:
-        if counts.shape[1] != markers.n_query_genes:
+        if columns is None:
             raise ValueError(
-                f"counts have {counts.shape[1]} columns for "
-                f"{markers.n_query_genes} query genes"
+                "supplied marker sets need the counts' gene_ids: their positions "
+                "index the query genes they were read on"
             )
+        _check_query_genes(
+            markers.query_gene_ids, counts.shape[1], columns, what="marker sets"
+        )
         _check_derivation_rule(markers, flags_config, settings)
+        _check_derivation_identity(
+            markers,
+            profiles,
+            flags_config,
+            settings,
+            panel_hash=panel_hash,
+            build_hash=build_hash,
+        )
     labels, pseudo = marker_pseudo_labels(
         counts,
         markers.markers,
