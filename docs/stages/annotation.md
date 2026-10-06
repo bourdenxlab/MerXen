@@ -956,10 +956,10 @@ state limits and never change a prediction, an emission or a trust state
 `merxen.annotation.real_qc` holds the checks M3c adds to the label-free QC
 of real datasets (plan §8.8). They are pure functions (tables in, records
 out) that can only warn or report. RESOLVE writes `flag_nonneuronal_high_depth`
-and the class-depth prediction for version-7 bundles (the M3c follow-up); M13
-wires the warnings into RESOLVE and the first in-house dataset of a family.
-None changes
-emission, a threshold, a floor, a label or a trust state, and
+and the class-depth prediction for version-7 bundles (the M3c follow-up), and
+human RESOLVE runs every check of M3c and M13 on each sample (see
+[Real-data QC in RESOLVE](#real-data-qc-in-resolve-m13)). None of the M3c
+checks changes emission, a threshold, a floor, a label or a trust state, and
 `apply_qc_outcomes` combines outcomes with a trust state so that it can only
 stay or fall (property-tested).
 
@@ -994,8 +994,10 @@ raises a trust state, and `apply_qc_to_statuses` gives the statuses a
 QC-applied RESOLVE produces: confident sets only shrink and keep their
 labels. These three are property-tested over every outcome combination. The
 combinators take no emission plan, floor plan or threshold, so they cannot
-change one. The comparison against a QC-free re-run of RESOLVE
-(pre-registration NR1) comes with the RESOLVE wiring (M13 chunk C15).
+change one. Human RESOLVE applies them (see
+[Real-data QC in RESOLVE](#real-data-qc-in-resolve-m13)), and
+`downgrade_only_violations` compares its label tables and records with a
+QC-free re-run (pre-registration NR1).
 `real_data_qc` runs every check from the `real_qc` config:
 
 | Check | Function | Rule | Effect |
@@ -1741,7 +1743,8 @@ with a `ResolvabilityError` for every caller
   sum_d s_c(d) cov(L, c, d) and the resolvable share sum_d s_c(d) over
   emitted bins (`real_qc.dataset_class_depth_prediction`) are recorded per
   (level, class) in the dataset's regime; they are the predictor of the
-  per-class real-vs-simulated coverage check, which M13 wires (chunk C15).
+  per-class real-vs-simulated coverage check, which human RESOLVE runs
+  (see [Real-data QC in RESOLVE](#real-data-qc-in-resolve-m13)).
 - **`flag_nonneuronal_high_depth`** (report-only; plan §8.3 v7.9): a table
   cell is flagged when, at some level of the bundle, its class key there is
   non-neuronal (the bundle's `neuronal_classes`; unknown lineage counts as
@@ -1774,6 +1777,66 @@ resolvability tables of pre-registration §22.8; on the development host they
 also matched at full precision). Label tables written before the column
 still validate: it is an optional contract column
 (`schema.OPTIONAL_CONTRACT_COLUMNS`), checked when present.
+
+### Real-data QC in RESOLVE (M13)
+
+Human RESOLVE runs the downgrade-only real-data QC of plan §8.8 on every
+sample (`real_qc.enabled`, default `true`; M13 chunk C15). Mouse RESOLVE does
+not run it yet: the mouse gate keeps G1-G5 (§7.6), and the rest of the mouse
+wiring follows M6b.
+
+1. **Signals** (`pipeline.human_real_qc_signals`), all from the QC-free
+   resolution and the primary bundle: the bundle's resolvability version,
+   whether the pair holds both platforms (whether or not this run resolves
+   both), whether the bundle's marker lookup is prefiltered, whether its
+   version-7 ensemble has an `R3_measured_HO` member; the human marker referee
+   on the table cells' query counts and the bundle's `profiles.parquet`
+   (marker sets derived in the run, their sha256 in the outcome's details);
+   the registration check (`--registration-qc`, human G1); the sample's flag
+   strata; the version-7 bundle's stored simulated `n_genes` with the table
+   cells counted on the same genes; for version 7, per primary level the real
+   confident share per class key against the class-depth prediction at the
+   sample's own per-class depth, and the non-neuronal depth trend on the same
+   keys; and the QC-free gate verdict, whose own outcome is recorded. The
+   prefilter spot check and the factor re-measure have no producer in RESOLVE,
+   so they are `not_evaluable` wherever they apply.
+2. **Effects.** `real_data_qc` gives the outcomes (seeded real-data families
+   only warn while their species gate is pending). A gate cap or a withheld
+   level re-runs `consensus.resolve_human` with the effects
+   (`HumanResolveSettings.qc`): the cap lowers the dataset gate before the
+   leaf levels read it (the gate-level invariance still holds), a withheld
+   level is not emitted for the dataset (its confident cells
+   `not_resolvable`), and the flags are recomputed. Warnings only join the
+   gate's warning reasons (`real_qc_<check>: ...`). The emission plan, the
+   floor plan, the thresholds, the margins and trust are never touched; a
+   trust downgrade is refused (no check of M13 has one).
+3. **Paired concordance** is scored once both sections are resolved, before
+   any table is written (`pipeline.score_paired_concordance`): the pair's
+   soft broad JSD on the shared-tissue mask (point estimate). Above
+   `real_qc.paired_broad_jsd_warn` the pair's `cross_platform` record is
+   capped at `broad_only` (flagged, reason `real_qc:paired_concordance`), so
+   every downstream cross-platform statement stays at broad. Without a
+   shared-mask value it is `not_evaluable`; an unpaired section is
+   `not_applicable`.
+4. **Records.** Each sample's `real_qc` block in `<pair>_resolve_summary.json`
+   (`RealQcResult.summary`: the outcome per check, every outcome with its
+   numbers, the effects, the downgrades, the flag-rate readings and the
+   per-check tables) and `PanelProvenance.real_data_qc` in the label table
+   and annotation manifest; the pair's `real_qc_config`. The summary's
+   `schema_version` is 3. The report's panel card lists the outcomes
+   (`panel_real_qc.csv`) and a note per fired check.
+
+**The QC-free run (NR1).** With `real_qc.enabled` false RESOLVE runs no check
+and lowers nothing (the summary says the QC is disabled). Comparing a run's
+label tables and provenance with that run's,
+`real_qc.downgrade_only_violations` lists every difference NR1 does not
+allow: a cell confident only with QC, a confident cell with another name, a
+status changed to anything but `not_resolvable`, `not_attempted_gate` or
+`parent_unresolved`, another trust state, another resolvability or threshold
+record (emission, thresholds, floors), and a gate level that rose or fell
+without a named `real_qc_` reason. The QC-free run's outputs on the
+version-6 scenarios equal the golden digests of the code before the QC
+(`test_resolve_v7.py`, the new summary keys aside).
 
 ### Human rules v1 (`consensus.resolve_human`, §5.2)
 
@@ -2062,7 +2125,7 @@ to `<pair>/<seg>/annotation_report/annotation_report_out/`.
 
 | Item (§9) | What the report shows | Metrics (`acceptance_metrics.json`) |
 |---|---|---|
-| 1 Annotatability, panel | Confident fraction per level of table cells and of segmented objects, status breakdown, resolvable share, gate values and reasons, trust state and basis, realised flag rates per class × platform, the self-thinning eligibility (≥ 500 cells with ≥ 200 counts) with its truth composition over the labelled deep cells, the unlabelled share, the argmax composition, the evaluable classes and a reliability verdict, and the **panel card**: gene-ID resolution by source, unresolved features, controls by type, markers per parent (weak and collapsed parents, nodes MapMyCells patches with ancestor markers), precision-coverage curves per level and depth, D_max and extrapolated share per class, PREP (unweighted) vs RESOLVE (reweighted) emission, thresholds and floors with their source; banners for `provisional`, `broad_only` and `refused` panels and failed or broad-only gates | H7, H8 (MO7), H16, H18 inputs |
+| 1 Annotatability, panel | Confident fraction per level of table cells and of segmented objects, status breakdown, resolvable share, gate values and reasons, trust state and basis, realised flag rates per class × platform, the self-thinning eligibility (≥ 500 cells with ≥ 200 counts) with its truth composition over the labelled deep cells, the unlabelled share, the argmax composition, the evaluable classes and a reliability verdict, and the **panel card**: gene-ID resolution by source, unresolved features, controls by type, markers per parent (weak and collapsed parents, nodes MapMyCells patches with ancestor markers), precision-coverage curves per level and depth, D_max and extrapolated share per class, PREP (unweighted) vs RESOLVE (reweighted) emission, thresholds and floors with their source, the real-data QC outcomes per check (`panel_real_qc`, M13); banners for `provisional`, `broad_only` and `refused` panels and failed or broad-only gates | H7, H8 (MO7), H16, H18 inputs |
 | 2 Composition | Soft (headline), soft ≥ 30 counts, confident-only and argmax composition per level with 95% block-bootstrap CIs (500 µm tiles, 200 replicates, seed 0), whole section vs shared mask, per depth bin, `Mixed/Unknown` by reason; the COP-derived part of every OPC bar (`cop_derived_share`, hatched); the sinks table (vocab sinks, region-implausible nodes, COP and CGE, and nodes whose argmax share of their broad class exceeds the reference share of that class more than 3×, with argmax, soft-mass and confident shares); leaf-level rows of a sample whose gate is not full marked `withheld_for_comparison` and drawn hatched; COP control | H2, H5 (with `cop_derived_soft_opc_share`, `cop_derived_argmax_opc_share`; MO4 shares) |
 | 3 Confidence vs counts | 2D histograms of raw bp and `avg_correlation` vs counts per platform and level, with the raw thresholds | — |
 | 4 Reference expectation | Observed fraction-positive and mean log2(CPM+1) per confident leaf label on its most specific panel genes and the §5.8 canonical markers on the panel, beside `profiles.parquet`; pseudobulk-centroid r and a correlation re-mapping to the nearest reference centroid. A sample whose gate is not full (or without a confident leaf label) is shown on its confident broad labels, with reference profiles aggregated from the supercluster rows (reference-cell-weighted) | report-only |
@@ -2383,11 +2446,11 @@ held-out-gene CSV is not produced in the pipeline, so item 8 is
   *Implemented in M3c (2026-09-28):* the version-7 bundles of both 5K
   families exist. *Since the M3c follow-up (2026-10-06):* RESOLVE reads them
   (version-7 decisions, `flag_nonneuronal_high_depth` and the class-depth
-  prediction at the dataset's own per-class depth); the real-data QC
-  warnings (`real_qc`, e.g. the per-class coverage check) are not yet wired
-  into RESOLVE or the report (M13). On the public section the version-7 predictions
-  still exceed the real coverage by +.07 (class) to +.09 (subclass) overall
-  and by up to +.25 for hypothalamic classes, and the per-class warning
+  prediction at the dataset's own per-class depth); since M13 human
+  RESOLVE records the real-data QC outcomes (`real_qc`, e.g. the per-class
+  coverage check) and the report lists them. On the public section the
+  version-7 predictions still exceed the real coverage by +.07 (class) to
+  +.09 (subclass) overall and by up to +.25 for hypothalamic classes, and the per-class warning
   fires for 19 (level, class) pairs (`M3C_EXIT_REPORT.txt`).
 - **Version-7 cost on 5K panels:** exact-total thinning of 5,000 genes takes
   2-8 min per member, and a 5K mouse member maps in 36-49 min on 8 processes

@@ -622,6 +622,11 @@ fields were added by milestone M3c (plan §3.7, §8.3 "Resolvability version 7",
 | `resolvability.r3_table_rule`, `resolvability.r3_residual_sd_log2` | `restricted`, `0.20` | The `R3_measured_HO` table rule (`all_measured` only for the D3 regression) and its residual SD. |
 | `resolvability.neighbour_structured_spill` | `false` | Experimental and not implemented (user decision 7); `true` is refused. |
 | `panel.panel_chemistry` | `auto` | `auto` (MERSCOPE -> `merscope`; a Xenium panel with Jaccard >= 0.95 to a pinned Prime list -> `xenium_prime`; else unknown), or a declared `xenium_prime`, `xenium_v1`, `merscope`. Only `xenium_prime` mouse has a measured factor table (the R3 member). |
+| `real_qc.enabled` | `true` | Run the downgrade-only real-data QC in human RESOLVE (plan §8.8; M13). `false` gives the QC-free run that pre-registration NR1 compares with (`real_qc.downgrade_only_violations`): no check runs, nothing is lowered, and each sample's `real_qc` summary block says the QC is disabled. Mouse RESOLVE does not run it yet (its gate keeps G1-G5; the rest follows M6b). |
+| `real_qc.marker_consistency_warn`, `real_qc.marker_consistency_broad_only` | `null` (human 0.75, mouse 0.80), `0.70` | Marker referee (human, §8.8): a warning below the first; below the second the dataset gate is capped at `broad_only` (trust and margins unchanged). Mouse G2 keeps its own threshold in the mouse gate. |
+| `real_qc.paired_broad_jsd_warn` | `0.20` | Paired concordance: above this soft broad JSD on the shared-tissue mask (point estimate) the pair's supercluster-level cross-platform statistics are withheld (`pair.cross_platform` capped at `broad_only`, reason `real_qc:paired_concordance`). `not_applicable` for an unpaired section. |
+| `real_qc.uninformative_strata_warn_frac` | `0.5` | Flag rates: warn when more than this share of a dataset's (class x platform) strata are uninformative under H16's 15% marking. |
+| `real_qc.prefilter_spotcheck_min_agreement` | `0.95` | 5K prefilter spot check: an emitted level whose prefiltered vs unfiltered lookup agreement is below this becomes `not_resolvable` for the dataset. RESOLVE has no spot-check input yet, so the check is `not_evaluable` on a prefiltered bundle and `not_applicable` otherwise. |
 | `real_qc.coverage_warn_margin`, `real_qc.coverage_min_cells` | `0.10`, `200` | Per-class real vs simulated coverage: warn per (level, called class) with at least this many cells when the real confident share is below the class-depth prediction at the dataset's own per-class depth by more than the margin (user decision 4; warning only, never an offset). Keep `coverage_min_cells` at 100 or more: a class with fewer cells takes the label-free depth histogram for its prediction (`real_qc.CLASS_DEPTH_MIN_CLASS_CELLS`), which should not decide a warning. |
 | `real_qc.factor_remeasure_min_r` | `0.9` | First in-house dataset of a family with a measured factor table: warn (and recommend a PREP re-run with the in-house table as a new asset) when the re-measured factors correlate below this with the stored table on the informative genes. |
 | `real_qc.nonneuronal_high_depth_counts` | `1000` | Non-neuronal cells at or above this depth in `nonneuronal_high_depth` bins get the report-only `flag_nonneuronal_high_depth` (RESOLVE, version-7 bundles). |
@@ -633,9 +638,10 @@ fields were added by milestone M3c (plan §3.7, §8.3 "Resolvability version 7",
 
 The `real_qc` checks are implemented in `merxen.annotation.real_qc`. RESOLVE
 reads `real_qc.nonneuronal_high_depth_counts` for version-7 bundles (the M3c
-follow-up); `real_qc.real_data_qc` reads the other fields, and M13 wires it
-into RESOLVE and the first in-house dataset of a family (plan §12 M3c, M13).
-None raises a trust state.
+follow-up); `real_qc.real_data_qc` reads the other fields, and human RESOLVE
+runs it on every sample (M13; see
+[Real-data QC in RESOLVE](stages/annotation.md#real-data-qc-in-resolve-m13)).
+None raises a trust state, a gate level or an emission.
 
 **RESOLVE rule settings have no pipeline params.** The thresholds, targets,
 floors, dataset gate and flag settings RESOLVE applies are the
