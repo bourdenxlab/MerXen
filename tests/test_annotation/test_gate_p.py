@@ -1,4 +1,4 @@
-"""Tests for gate-P scoring (M13; plan §14 new panel family: NP3, NP4, NP5)."""
+"""Tests for gate-P scoring (M13; plan §14 new panel family: NP3, NP4, NP5, NP7)."""
 
 from __future__ import annotations
 
@@ -2254,3 +2254,698 @@ def test_np5_settings_follow_the_config() -> None:
         fields: dict[str, Any] = {"min_test_cells": 50, **bad}
         with pytest.raises(ValueError, match="Np5Settings"):
             gp.Np5Settings(**fields)
+
+
+# --------------------------------------------------------------------------
+# NP7: error structure (§14 NP7)
+
+SINK = "SINK"
+SPLAT = "SPLAT"  # a sink that is also region-implausible (as WHB Splatter)
+HIPPO = "HIPPO"  # region-implausible in frontal cortex, not a sink
+
+
+def _np7_vocab(
+    plausible: Sequence[str] = ("nX", "nY", "nE"),
+    *,
+    sinks: Sequence[str] = (SINK, SPLAT),
+    implausible: Sequence[str] = (HIPPO, SPLAT),
+    level: str = res.WHB_SUPC,
+) -> pd.DataFrame:
+    """A vocab snapshot as MAP reads it (strings ``True`` / ``False``)."""
+    nodes = list(dict.fromkeys([*plausible, *sinks, *implausible]))
+    return pd.DataFrame(
+        {
+            "level": level,
+            "node": nodes,
+            "node_name": [f"name of {node}" for node in nodes],
+            "sink": ["True" if node in sinks else "False" for node in nodes],
+            "region_plausible_frontal_cortex": [
+                "False" if node in implausible else "True" for node in nodes
+            ],
+        }
+    )
+
+
+def _np7_decisions(
+    emitted: Mapping[tuple[str, str, int], float],
+    withheld: Mapping[tuple[str, str, int], float] | None = None,
+) -> pd.DataFrame:
+    """Frozen provisional decisions: emitted and withheld bins with thresholds."""
+    records = [
+        {
+            "regime": "provisional",
+            "level": level,
+            "class": cls,
+            "depth": depth,
+            "status": status,
+            "threshold": threshold,
+            "extrapolated": False,
+        }
+        for status, entries in (
+            (res.STATUS_EMITTED, emitted),
+            (res.STATUS_NOT_RESOLVABLE, withheld or {}),
+        )
+        for (level, cls, depth), threshold in entries.items()
+    ]
+    return pd.DataFrame.from_records(records)
+
+
+def _np7_rows(
+    groups: Sequence[tuple[int, str, str | None, str | None, float]],
+    *,
+    level: str = "supercluster",
+    depth: int = 10,
+    prefix: str = "c",
+    truth: str | None = None,
+) -> pd.DataFrame:
+    """Rows of one bin: per group ``(n, truth class, call, parent, bp)``.
+
+    A test cell of truth class ``T`` has the truth node ``n<T>`` (or
+    ``truth`` for every group, as a coarse level's group name); a call is
+    correct when it names its truth. Cell ids are ``<prefix><index>``,
+    numbered over the groups, so tables built with the same groups and
+    prefix at other levels or depths hold the same cells.
+    """
+    frames = []
+    start = 0
+    for n, truth_parent, call, parent, bp in groups:
+        ids = [f"{prefix}{start + index}" for index in range(n)]
+        start += n
+        frame = bin_cells(
+            np.full(n, bp, dtype=np.float64),
+            np.zeros(n, dtype=bool),
+            level=level,
+            depth=depth,
+        )
+        truth_value = truth if truth is not None else f"n{truth_parent}"
+        frame["cell_id"] = ids
+        frame["sim_id"] = [f"{cell}|D{depth}" for cell in ids]
+        frame["parent"] = pd.Series([parent] * n, dtype=object)
+        frame["call"] = pd.Series([call] * n, dtype=object)
+        frame["truth"] = truth_value
+        frame["truth_parent"] = truth_parent
+        frame["correct"] = np.full(n, call is not None and call == truth_value)
+        frames.append(frame)
+    return pd.concat(frames, ignore_index=True)
+
+
+def _np7_tables(
+    cells: pd.DataFrame,
+    decisions: pd.DataFrame,
+    *,
+    vocab: pd.DataFrame | None = None,
+    settings_np7: gp.Np7Settings | None = None,
+    **options: Any,
+) -> tuple[dict[tuple[str, str], list[res.GatePTestedSet] | None], gp.Np7Tables]:
+    """The pooled seed-0 tested sets and NP7's tables of one human replicate."""
+    tested = res.gate_p_tested_sets(cells, decisions, regime="provisional")
+    tables = gp.np7_error_structure(
+        {("D1", 0): cells},
+        decisions,
+        tested,
+        default_group=None,
+        species="human",
+        settings=settings_np7 or gp.Np7Settings(),
+        vocab=_np7_vocab() if vocab is None else vocab,
+        **options,
+    )
+    return tested, tables
+
+
+def _by_class(tables: gp.Np7Tables) -> pd.DataFrame:
+    frame = tables.wrong_node
+    assert frame["class"].is_unique
+    return frame.set_index("class")
+
+
+def _level_row(tables: gp.Np7Tables, level: str = "supercluster") -> pd.Series:
+    assert tables.excluded is not None
+    rows = tables.excluded[tables.excluded["level"] == level]
+    assert len(rows) == 1
+    return rows.iloc[0]
+
+
+XY_AT_10 = {("supercluster", "X", 10): 0.70, ("supercluster", "Y", 10): 0.70}
+
+
+def test_np7_a_wrong_node_above_5pct_of_the_truth_class_fails() -> None:
+    """§14 NP7 / D12: the share of truth class c's confident calls on one node.
+
+    At 5% exactly X passes, above it X fails. Y's tested set holds the wrong
+    calls (the called-class view, 6%+), which is reported only: Y's own
+    cells all land on Y, so Y passes (one failing class leaves the others).
+    """
+    decisions = _np7_decisions(XY_AT_10)
+    for n_wrong, passed in ((20, True), (21, False)):
+        cells = _np7_rows(
+            [
+                (380, "X", "nX", "X", 0.95),
+                (n_wrong, "X", "nY", "Y", 0.95),
+                (300, "Y", "nY", "Y", 0.95),
+            ]
+        )
+        tested, tables = _np7_tables(cells, decisions)
+        wrong = _by_class(tables)
+        x = wrong.loc["X"]
+        assert x["set"] == "10" and not x["pooled"]
+        assert x["n_truth_confident"] == 380 + n_wrong
+        assert x["n_truth_wrong"] == n_wrong and x["n_truth_excluded"] == 0
+        assert x["wrong_node"] == "nY" and x["n_wrong_node"] == n_wrong
+        assert x["wrong_node_share"] == pytest.approx(n_wrong / (380 + n_wrong))
+        assert x["max_share"] == pytest.approx(0.05)
+        assert bool(x["passed"]) is passed
+        # X's own tested set is all right: its called-class view is clean.
+        assert x["n_called_confident"] == 380 and x["n_called_wrong_node"] == 0
+        assert x["called_wrong_node"] is None
+        y = wrong.loc["Y"]
+        assert y["n_called_confident"] == 300 + n_wrong
+        assert y["called_wrong_node"] == "nY"
+        assert y["called_wrong_node_share"] == pytest.approx(n_wrong / (300 + n_wrong))
+        assert y["n_truth_confident"] == 300 and y["n_wrong_node"] == 0
+        assert y["wrong_node"] is None and y["wrong_node_share"] == 0.0
+        assert bool(y["passed"])
+        assert gp.np7_class_verdicts(tables.excluded, tables.wrong_node, tested) == {
+            ("supercluster", "X"): passed,
+            ("supercluster", "Y"): True,
+        }
+
+
+def test_np7_a_planted_sink_absorbing_more_than_5pct_of_a_class_fails() -> None:
+    """§12 M13: a planted sink absorbing > 5% of a class fails NP7.
+
+    The sink's calls have a null parent, so the frozen mask leaves them out
+    of every tested set; NP7 still counts them as confident calls of their
+    truth class on one wrong node (the sink). Here the level's share stays
+    below 1%, so only the class fails.
+    """
+    decisions = _np7_decisions(XY_AT_10)
+    cells = _np7_rows(
+        [
+            (376, "X", "nX", "X", 0.95),
+            (24, "X", SINK, None, 0.95),
+            (3000, "Y", "nY", "Y", 0.95),
+        ]
+    )
+    tested, tables = _np7_tables(cells, decisions)
+    (item,) = tested[("supercluster", "X")] or []
+    assert item.n_confident == 376
+    level = _level_row(tables)
+    assert level["n_confident"] == 3376
+    assert level["n_excluded_calls"] == 24
+    assert level["n_excluded_confident"] == 24 and level["n_sink"] == 24
+    assert level["excluded_share"] == pytest.approx(24 / 3376)
+    assert level["nodes"] == "SINK:24"
+    assert bool(level["passed"])
+    x = _by_class(tables).loc["X"]
+    assert x["n_truth_confident"] == 400 and x["n_truth_excluded"] == 24
+    assert x["wrong_node"] == SINK
+    assert x["wrong_node_share"] == pytest.approx(0.06)
+    assert not bool(x["passed"])
+    assert gp.np7_class_verdicts(tables.excluded, tables.wrong_node, tested) == {
+        ("supercluster", "X"): False,
+        ("supercluster", "Y"): True,
+    }
+
+
+def test_np7_sink_rows_with_a_null_parent_count_against_1pct_of_the_level() -> None:
+    """§14 NP7 (human): confident sink or region-implausible calls <= 1%.
+
+    The denominator is the level's confident calls at the frozen thresholds
+    over all classes (K9.1); the sink rows (null parent) are counted beside
+    it, never in it. A node that is a sink and region-implausible counts
+    once, as a sink. Above 1% every class of the level fails.
+    """
+    decisions = _np7_decisions(XY_AT_10)
+    lookup = res.emission_lookup(decisions, "provisional")
+    for n_extra, passed in ((0, True), (1, False)):
+        cells = _np7_rows(
+            [
+                (500, "X", "nX", "X", 0.95),
+                (500, "Y", "nY", "Y", 0.95),
+                (3, "Y", SINK, None, 0.95),
+                (3, "Y", SPLAT, None, 0.95),
+                (4 + n_extra, "X", HIPPO, None, 0.95),
+            ]
+        )
+        assert not res.frozen_confident_mask(cells, lookup)[1000:].any()
+        tested, tables = _np7_tables(cells, decisions)
+        level = _level_row(tables)
+        assert level["n_confident"] == 1000
+        assert level["n_excluded_confident"] == 10 + n_extra
+        assert level["n_sink"] == 6
+        assert level["n_region_implausible"] == 4 + n_extra
+        assert level["n_not_in_vocab"] == 0
+        assert level["excluded_share"] == pytest.approx((10 + n_extra) / 1000)
+        assert level["max_share"] == pytest.approx(0.01)
+        assert level["nodes"] == f"HIPPO:{4 + n_extra};SINK:3;SPLAT:3"
+        assert bool(level["passed"]) is passed
+        assert gp.np7_class_verdicts(tables.excluded, tables.wrong_node, tested) == {
+            ("supercluster", "X"): passed,
+            ("supercluster", "Y"): passed,
+        }
+
+
+def test_np7_region_column_is_parameterised() -> None:
+    """CHECK K4: gate P reads ``region_plausible_frontal_cortex`` by default.
+
+    The column follows ``Np7Settings.region``; a vocab without it raises
+    rather than reading every node as plausible.
+    """
+    assert gp.NP7_REGION == "frontal_cortex"
+    assert gp.Np7Settings().region == "frontal_cortex"
+    vocab = _np7_vocab(("nX", "nY", "nH"))
+    vocab["region_plausible_hippocampus"] = [
+        "False" if node == "nH" else "True" for node in vocab["node"]
+    ]
+    decisions = _np7_decisions(XY_AT_10)
+    cells = _np7_rows(
+        [
+            (500, "X", "nX", "X", 0.95),
+            (500, "Y", "nY", "Y", 0.95),
+            (30, "X", "nH", None, 0.95),
+            (20, "X", HIPPO, None, 0.95),
+        ]
+    )
+    assert gp.np7_excluded_nodes(vocab) == {
+        "nX": None,
+        "nY": None,
+        "nH": None,
+        SINK: "sink",
+        SPLAT: "sink",
+        HIPPO: "region_implausible",
+    }
+    assert gp.np7_excluded_nodes(vocab, region="hippocampus")["nH"] == (
+        "region_implausible"
+    )
+    _, frontal = _np7_tables(cells, decisions, vocab=vocab)
+    assert _level_row(frontal)["nodes"] == "HIPPO:20"
+    _, hippocampus = _np7_tables(
+        cells,
+        decisions,
+        vocab=vocab,
+        settings_np7=gp.Np7Settings(region="hippocampus"),
+    )
+    level = _level_row(hippocampus)
+    assert level["nodes"] == "nH:30"
+    assert level["n_region_implausible"] == 30
+    with pytest.raises(ValueError, match="region_plausible_cerebellum"):
+        _np7_tables(
+            cells,
+            decisions,
+            vocab=vocab,
+            settings_np7=gp.Np7Settings(region="cerebellum"),
+        )
+
+
+def test_np7_coarse_levels_take_the_node_of_the_supercluster_row() -> None:
+    """A lineage, broad or NT call names a group, not a node (``group_level_calls``).
+
+    Its node is the supercluster call of the same simulated cell (one WHB
+    assignment), and each level's share uses that level's bp and
+    denominator. At broad, a call to a region-implausible node is "correct"
+    in the cells table (both are Neurons), but it is a call to an excluded
+    node, so NP7 counts it as a wrong call on that node.
+    """
+    groups_supc: list[tuple[int, str, str | None, str | None, float]] = [
+        (300, "Exc", "nE", "Exc", 0.95),
+        (5, "Exc", HIPPO, None, 0.90),
+        (3, "Exc", SINK, None, 0.90),
+    ]
+    groups_broad: list[tuple[int, str, str | None, str | None, float]] = [
+        (300, "Exc", "Neurons", "Exc", 0.95),
+        (5, "Exc", "Neurons", None, 0.95),
+        (3, "Exc", None, None, math.nan),
+    ]
+    groups_lineage: list[tuple[int, str, str | None, str | None, float]] = [
+        (300, "Exc", "Neurons", "Exc", 0.95),
+        (5, "Exc", "Neurons", None, 0.95),
+        (3, "Exc", "Neurons", None, 0.95),
+    ]
+    cells = pd.concat(
+        [
+            _np7_rows(groups_supc),
+            _np7_rows(groups_broad, level="broad", truth="Neurons"),
+            _np7_rows(groups_lineage, level="lineage", truth="Neurons"),
+        ],
+        ignore_index=True,
+    )
+    decisions = _np7_decisions(
+        {(level, "Exc", 10): 0.70 for level in ("supercluster", "broad", "lineage")}
+    )
+    tested, tables = _np7_tables(cells, decisions)
+    assert tables.excluded is not None
+    assert tables.excluded["level"].tolist() == ["broad", "lineage", "supercluster"]
+    for level, n_confident_excluded, nodes in (
+        ("supercluster", 8, "HIPPO:5;SINK:3"),
+        # The sink's broad call has no group, so no bp: never confident.
+        ("broad", 5, "HIPPO:5"),
+        ("lineage", 8, "HIPPO:5;SINK:3"),
+    ):
+        row = _level_row(tables, level)
+        assert row["n_confident"] == 300
+        assert row["n_excluded_calls"] == 8
+        assert row["n_excluded_confident"] == n_confident_excluded
+        assert row["nodes"] == nodes
+    broad = tables.wrong_node[tables.wrong_node["level"] == "broad"].iloc[0]
+    assert broad["n_truth_confident"] == 305 and broad["n_truth_excluded"] == 5
+    assert broad["wrong_node"] == HIPPO and broad["n_wrong_node"] == 5
+    assert bool(broad["passed"])
+    assert set(gp.np7_class_verdicts(tables.excluded, tables.wrong_node, tested)) == {
+        ("broad", "Exc"),
+        ("lineage", "Exc"),
+        ("supercluster", "Exc"),
+    }
+    # Every row needs the supercluster row of its simulated cell.
+    lone = cells.drop(index=cells.index[(cells["level"] == "supercluster")][:1])
+    with pytest.raises(ValueError, match="no 'supercluster' row"):
+        _np7_tables(lone.reset_index(drop=True), decisions)
+    with pytest.raises(ValueError, match="no 'supercluster' level"):
+        _np7_tables(
+            cells[cells["level"] != "supercluster"].reset_index(drop=True), decisions
+        )
+
+
+def test_np7_an_excluded_call_is_confident_at_the_lowest_threshold_of_its_bin() -> None:
+    """An excluded call has no class, so no frozen threshold of its own.
+
+    It counts as confident when its bp reaches the lowest frozen threshold
+    emitted at its level and depth (K9.1's "emitted bins"): a withheld bin's
+    threshold, a depth without an emitted bin and a NaN bp never count; the
+    calls whatever their bp are reported (``n_excluded_calls``).
+    """
+    decisions = _np7_decisions(
+        {
+            ("supercluster", "X", 10): 0.80,
+            ("supercluster", "Y", 10): 0.60,
+            ("supercluster", "X", 60): 0.70,
+        },
+        withheld={("supercluster", "Z", 10): 0.50, ("supercluster", "X", 30): 0.10},
+    )
+    sink_bp_10 = [0.55, 0.59, 0.60 - 5e-10, 0.75, math.nan]
+    cells = pd.concat(
+        [
+            _np7_rows([(400, "X", "nX", "X", 0.95)], prefix="x"),
+            *(
+                _np7_rows([(1, "X", SINK, None, bp)], prefix=f"s10_{index}_")
+                for index, bp in enumerate(sink_bp_10)
+            ),
+            _np7_rows([(1, "X", SINK, None, 0.99)], depth=30, prefix="s30_"),
+            *(
+                _np7_rows([(1, "X", SINK, None, bp)], depth=60, prefix=f"s60_{index}_")
+                for index, bp in enumerate((0.69, 0.70))
+            ),
+        ],
+        ignore_index=True,
+    )
+    _, tables = _np7_tables(cells, decisions)
+    level = _level_row(tables)
+    assert level["n_confident"] == 400
+    assert level["n_excluded_calls"] == 8
+    assert level["n_excluded_confident"] == 3
+    assert level["nodes"] == "SINK:3"
+
+
+def test_np7_a_node_outside_the_vocab_counts_as_implausible() -> None:
+    """Production reads a WHB node outside the vocab as implausible (RESOLVE)."""
+    vocab = _np7_vocab()
+    vocab = pd.concat(
+        [
+            vocab,
+            pd.DataFrame(
+                {
+                    "level": [res.WHB_SUPC],
+                    "node": ["nR"],
+                    "node_name": [""],
+                    "sink": [""],
+                    "region_plausible_frontal_cortex": [""],
+                }
+            ),
+        ],
+        ignore_index=True,
+    )
+    decisions = _np7_decisions(XY_AT_10)
+    cells = _np7_rows(
+        [
+            (500, "X", "nX", "X", 0.95),
+            (500, "Y", "nY", "Y", 0.95),
+            (2, "X", "nQ", None, 0.95),
+            (3, "X", "nR", None, 0.95),
+        ]
+    )
+    _, tables = _np7_tables(cells, decisions, vocab=vocab)
+    level = _level_row(tables)
+    assert level["n_not_in_vocab"] == 5
+    assert level["nodes"] == "nR:3;nQ:2"
+
+
+def test_np7_pooled_set_reads_each_truth_cell_once_at_its_deepest_row() -> None:
+    """The truth view of a ">= D_P" set takes each test cell's deepest row.
+
+    150 X cells have rows at 10 and 30 counts, 15 of them called Y at 30;
+    120 more have a row at 10 only. The pooled set holds 270 cells (not 420
+    rows) with 15 on Y (5.6%): it fails, while the bin tested on its own at
+    10 counts is clean.
+    """
+    decisions = _np7_decisions(
+        {
+            ("supercluster", "X", 10): 0.70,
+            ("supercluster", "X", 30): 0.70,
+            ("supercluster", "Y", 30): 0.70,
+        }
+    )
+    cells = pd.concat(
+        [
+            _np7_rows([(150, "X", "nX", "X", 0.95)], prefix="t"),
+            _np7_rows([(120, "X", "nX", "X", 0.95)], prefix="u"),
+            _np7_rows(
+                [(135, "X", "nX", "X", 0.95), (15, "X", "nY", "Y", 0.95)],
+                depth=30,
+                prefix="t",
+            ),
+        ],
+        ignore_index=True,
+    )
+    tested, tables = _np7_tables(cells, decisions)
+    assert [
+        gp.tested_set_label(item) for item in tested[("supercluster", "X")] or []
+    ] == [
+        ">=10",
+        "10",
+    ]
+    assert tested[("supercluster", "Y")] is None
+    wrong = tables.wrong_node.set_index("set")
+    assert wrong.loc[">=10", "n_truth_confident"] == 270
+    assert wrong.loc[">=10", "n_wrong_node"] == 15
+    assert wrong.loc[">=10", "wrong_node_share"] == pytest.approx(15 / 270)
+    assert not bool(wrong.loc[">=10", "passed"])
+    assert wrong.loc["10", "n_truth_confident"] == 270
+    assert wrong.loc["10", "n_wrong_node"] == 0 and bool(wrong.loc["10", "passed"])
+    assert gp.np7_class_verdicts(tables.excluded, tables.wrong_node, tested) == {
+        ("supercluster", "X"): False,
+        ("supercluster", "Y"): None,
+    }
+
+
+def test_np7_scores_the_default_group_on_its_check_half_only() -> None:
+    """NP7 is scored on the pooled held-out calls (§14; ``pooled_held_out_cells``)."""
+    decisions = _np7_decisions({("supercluster", "X", 10): 0.70})
+    default = _np7_rows(
+        [(400, "X", "nX", "X", 0.95), (10, "X", SINK, None, 0.95)], prefix="a"
+    )
+    default["half"] = np.arange(len(default)) % 2
+    other = _np7_rows([(400, "X", "nX", "X", 0.95)], prefix="b")
+    replicates = {("D1", 0): default, ("D2", 0): other}
+    pooled = gp.pooled_held_out_cells(replicates, default_group="D1")
+    tested = res.gate_p_tested_sets(pooled, decisions, regime="provisional")
+    tables = gp.np7_error_structure(
+        replicates,
+        decisions,
+        tested,
+        default_group="D1",
+        species="human",
+        settings=gp.Np7Settings(),
+        vocab=_np7_vocab(),
+    )
+    level = _level_row(tables)
+    assert level["n_confident"] == 200 + 400
+    assert level["n_excluded_confident"] == 5
+
+
+def test_np7_tables_per_member_feed_every_member_verdict() -> None:
+    """Version 7: NP7 per emission member (K9.1), combined over the members."""
+    decisions = _np7_decisions(XY_AT_10)
+    frames = []
+    for member, n_sink in (("m0", 3), ("m1", 15)):
+        rows = _np7_rows(
+            [
+                (400, "X", "nX", "X", 0.95),
+                (600, "Y", "nY", "Y", 0.95),
+                (n_sink, "Y", SINK, None, 0.95),
+            ]
+        )
+        rows[res.MEMBER_COLUMN] = member
+        frames.append(rows)
+    cells = pd.concat(frames, ignore_index=True)
+    member_sets = res.gate_p_member_sets(
+        cells, decisions, members=["m0", "m1"], regime="provisional"
+    )
+    verdicts = {}
+    for member, tested in member_sets.items():
+        tables = gp.np7_error_structure(
+            {("D1", 0): cells},
+            decisions,
+            tested,
+            default_group=None,
+            species="human",
+            settings=gp.Np7Settings(),
+            vocab=_np7_vocab(),
+            recipe=None,
+            member=member,
+        )
+        verdicts[member] = gp.np7_class_verdicts(
+            tables.excluded, tables.wrong_node, tested
+        )
+    assert verdicts["m0"] == {("supercluster", "X"): True, ("supercluster", "Y"): True}
+    assert verdicts["m1"] == {
+        ("supercluster", "X"): False,
+        ("supercluster", "Y"): False,
+    }
+    combined = res.every_member_verdict(verdicts)
+    assert combined[("supercluster", "X")]["status"] == res.GATE_P_FAILED
+    assert combined[("supercluster", "X")]["failed_members"] == ["m1"]
+
+
+def test_np7_mouse_scores_the_wrong_node_part_only() -> None:
+    """§14 NP7's 1% part is human only; the 5% part applies to both species."""
+    decisions = _np7_decisions({("class", "X", 10): 0.70, ("class", "Y", 10): 0.70})
+    cells = _np7_rows(
+        [
+            (380, "X", "nX", "X", 0.95),
+            (30, "X", "nY", "Y", 0.95),
+            (300, "Y", "nY", "Y", 0.95),
+            (50, "Y", "nZ", None, 0.95),
+        ],
+        level="class",
+    )
+    tested = res.gate_p_tested_sets(cells, decisions, regime="provisional")
+    tables = gp.np7_error_structure(
+        {("D1", 0): cells},
+        decisions,
+        tested,
+        default_group=None,
+        species="mouse",
+        settings=gp.Np7Settings(),
+    )
+    assert tables.excluded is None
+    wrong = _by_class(tables)
+    assert wrong.loc["X", "wrong_node_share"] == pytest.approx(30 / 410)
+    # Without sinks, a call without a class is not confident (frozen mask).
+    assert wrong.loc["Y", "n_truth_confident"] == 300
+    assert gp.np7_class_verdicts(None, tables.wrong_node, tested) == {
+        ("class", "X"): False,
+        ("class", "Y"): True,
+    }
+    with pytest.raises(ValueError, match="human only"):
+        gp.np7_error_structure(
+            {("D1", 0): cells},
+            decisions,
+            tested,
+            default_group=None,
+            species="mouse",
+            settings=gp.Np7Settings(),
+            vocab=_np7_vocab(),
+        )
+
+
+def test_np7_class_verdicts_need_every_row_and_a_passed_value() -> None:
+    decisions = _np7_decisions(XY_AT_10)
+    cells = _np7_rows([(400, "X", "nX", "X", 0.95), (300, "Y", "nY", "Y", 0.95)])
+    tested, tables = _np7_tables(cells, decisions)
+    assert tables.excluded is not None
+    with_none = {**tested, ("supercluster", "Z"): None}
+    assert gp.np7_class_verdicts(tables.excluded, tables.wrong_node, with_none) == {
+        ("supercluster", "X"): True,
+        ("supercluster", "Y"): True,
+        ("supercluster", "Z"): None,
+    }
+    with pytest.raises(ValueError, match="no NP7 excluded-share row"):
+        gp.np7_class_verdicts(tables.excluded.iloc[:0], tables.wrong_node, tested)
+    with pytest.raises(ValueError, match="no NP7 wrong-node row"):
+        gp.np7_class_verdicts(
+            tables.excluded,
+            tables.wrong_node[tables.wrong_node["class"] != "Y"],
+            tested,
+        )
+    # A CSV round trip keeps a missing verdict missing; it never passes.
+    excluded = pd.read_csv(io.StringIO(tables.excluded.to_csv(index=False)))
+    excluded["passed"] = excluded["passed"].astype(object)
+    excluded.loc[0, "passed"] = math.nan
+    with pytest.raises(ValueError, match="NP7 excluded share row"):
+        gp.np7_class_verdicts(excluded, tables.wrong_node, tested)
+    with pytest.raises(ValueError, match="empty list"):
+        gp.np7_class_verdicts(
+            tables.excluded, tables.wrong_node, {("supercluster", "X"): []}
+        )
+
+
+def test_np7_inputs_that_mix_or_lack_rows_raise() -> None:
+    decisions = _np7_decisions(XY_AT_10)
+    cells = _np7_rows([(400, "X", "nX", "X", 0.95), (300, "Y", "nY", "Y", 0.95)])
+    # A call to an excluded node that still has a class: the cells were
+    # built with another region or vocab than NP7 reads.
+    with_class = pd.concat(
+        [cells, _np7_rows([(5, "X", HIPPO, "X", 0.95)], prefix="h")],
+        ignore_index=True,
+    )
+    with pytest.raises(ValueError, match="another region or vocab"):
+        _np7_tables(with_class, decisions)
+    with pytest.raises(ValueError, match="'sink'"):
+        _np7_tables(cells, decisions, vocab=_np7_vocab().drop(columns=["sink"]))
+    bad_flag = _np7_vocab()
+    bad_flag.loc[0, "sink"] = "yes"
+    with pytest.raises(ValueError, match="true or false"):
+        _np7_tables(cells, decisions, vocab=bad_flag)
+    twice = _np7_vocab()
+    with pytest.raises(ValueError, match="more than once"):
+        _np7_tables(
+            cells,
+            decisions,
+            vocab=pd.concat([twice, twice.iloc[:1]], ignore_index=True),
+        )
+    tested = res.gate_p_tested_sets(cells, decisions, regime="provisional")
+    with pytest.raises(ValueError, match="needs the vocab"):
+        gp.np7_error_structure(
+            {("D1", 0): cells},
+            decisions,
+            tested,
+            default_group=None,
+            species="human",
+            settings=gp.Np7Settings(),
+        )
+    with pytest.raises(ValueError, match="no rows"):
+        _np7_tables(cells, decisions, recipe="other")
+    with pytest.raises(ValueError, match="empty list"):
+        gp.np7_error_structure(
+            {("D1", 0): cells},
+            decisions,
+            {("supercluster", "X"): []},
+            default_group=None,
+            species="human",
+            settings=gp.Np7Settings(),
+            vocab=_np7_vocab(),
+        )
+
+
+def test_np7_settings_hold_the_section_14_limits() -> None:
+    np7 = gp.Np7Settings()
+    assert np7.max_excluded_share == pytest.approx(0.01)
+    assert np7.max_wrong_node_share == pytest.approx(0.05)
+    assert np7.region_column == "region_plausible_frontal_cortex"
+    for bad in (
+        {"max_excluded_share": -0.01},
+        {"max_wrong_node_share": 1.5},
+        {"region": ""},
+    ):
+        fields: dict[str, Any] = dict(bad)
+        with pytest.raises(ValueError, match="Np7Settings"):
+            gp.Np7Settings(**fields)
