@@ -448,6 +448,36 @@ def test_factor_remeasure_runs_only_on_the_first_dataset_with_a_table() -> None:
         counts, genes, labels, profiles, stored, first_dataset_of_family=False
     )
     assert not later.applies and later.reason == "not_first_dataset_of_family"
+    # A later dataset is not the first whether or not a table is given: the
+    # check does not apply to it (not_applicable, never not_evaluable).
+    later_without = qc.factor_remeasure(
+        counts, genes, labels, profiles, None, first_dataset_of_family=False
+    )
+    assert later_without.reason == "not_first_dataset_of_family"
+    outcome = qc.factor_remeasure_outcome(
+        later_without, min_r=qc.FACTOR_REMEASURE_MIN_R, has_r3_member=True
+    )
+    assert outcome.outcome == "not_applicable"
+
+
+def test_factor_remeasure_warns_on_an_undefined_pearson_r() -> None:
+    """A constant factor vector has no Pearson r (NaN): that warns, never passes."""
+    rng = np.random.default_rng(6)
+    true_log2 = rng.normal(0.0, 1.0, 30)
+    counts, labels, profiles = make_factor_data(rng, true_log2)
+    genes = [f"g{index}" for index in range(30)]
+    flat = pd.DataFrame({"tier": ["informative"] * 30, "log2_factor": 0.0}, index=genes)
+    result = qc.factor_remeasure(
+        counts, genes, labels, profiles, flat, informative_min_expected=100.0
+    )
+    assert result.applies and result.n_informative >= 3
+    assert result.pearson_r is not None and np.isnan(result.pearson_r)
+    assert result.outcome is not None and result.outcome.fired
+    outcome = qc.factor_remeasure_outcome(
+        result, min_r=qc.FACTOR_REMEASURE_MIN_R, has_r3_member=True
+    )
+    assert outcome.fired and outcome.outcome == "warn"
+    assert "r nan" in outcome.message
 
 
 def test_gene_complexity_warns_above_45_percent_and_flags_predictions() -> None:

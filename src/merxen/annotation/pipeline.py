@@ -5001,6 +5001,80 @@ def human_marker_referee_signal(
     return referee.signal()
 
 
+def real_qc_bundle_facts(
+    primary: ResolveRun | None, tables: ResolvabilityTables | None
+) -> tuple[int | None, bool | None]:
+    """Return the primary bundle's resolvability version and R3-member fact.
+
+    The applicability facts of the version-7 checks and the factor
+    re-measure (``real_qc.RealQcSignals``; pre-registration §23.5 P4):
+
+    * with the resolvability tables, their version (a summary without the
+      field holds version-6 tables, ``resolvability.RESOLVABILITY_VERSION``)
+      and whether the version-7 ensemble has an ``R3_measured_HO`` emission
+      member;
+    * without them, the version the bundle declares (its hashed build
+      params, ``build_hash_payload.builder_params.resolvability``, else its
+      ``builder_output.resolvability`` record); a version below 7 has no R3
+      member, while for version 7 the member is unknown (``None``);
+    * nothing declared, or a version this code cannot read: both unknown.
+
+    An unknown fact makes the checks it decides ``not_evaluable``, never
+    ``not_applicable``, so a version-7 bundle whose tables were not read is
+    not recorded as one the version-7 checks do not apply to.
+
+    Args:
+        primary: The primary run (``None``: none).
+        tables: The primary bundle's resolvability tables (``None``: none
+            read).
+
+    Returns:
+        ``(resolvability_version, has_r3_member)``.
+    """
+    from merxen.annotation.resolvability import (
+        R3_RECIPE,
+        RESOLVABILITY_VERSION,
+        RESOLVABILITY_VERSION_V7,
+        ResolvabilityError,
+        checked_resolvability_version,
+        parse_member_name,
+    )
+
+    if tables is not None:
+        version = tables.version
+        if version is None:
+            return RESOLVABILITY_VERSION, False
+        members = [str(name) for name in tables.summary.get("emission_members") or []]
+        has_r3 = version == RESOLVABILITY_VERSION_V7 and any(
+            parse_member_name(name)[0] == R3_RECIPE for name in members
+        )
+        return version, has_r3
+    if primary is None:
+        return None, None
+    manifest = primary.bundle.manifest
+
+    def resolvability_record(record: Any) -> Mapping[str, Any]:
+        value = record.get("resolvability") if isinstance(record, Mapping) else None
+        return value if isinstance(value, Mapping) else {}
+
+    payload = manifest.get("build_hash_payload")
+    builder_params = (
+        payload.get("builder_params") if isinstance(payload, Mapping) else None
+    )
+    declared = resolvability_record(builder_params).get("resolvability_version")
+    if declared is None:
+        declared = resolvability_record(manifest.get("builder_output")).get(
+            "resolvability_version"
+        )
+    try:
+        version = checked_resolvability_version(declared, source="bundle manifest")
+    except ResolvabilityError:
+        return None, None
+    if version is None:
+        return None, None
+    return version, (None if version == RESOLVABILITY_VERSION_V7 else False)
+
+
 def human_real_qc_signals(
     loaded: LoadedSample,
     resolution: HumanResolution,
@@ -5020,10 +5094,11 @@ def human_real_qc_signals(
     Every input comes from the QC-free resolution and the primary bundle:
 
     * the facts that decide applicability: the bundle's resolvability
-      version, whether the pair holds the other platform, whether the
-      bundle's marker lookup is prefiltered (``large_panel_prefilter`` of
-      its ``build_hash_payload``) and whether its version-7 ensemble has an
-      ``R3_measured_HO`` emission member;
+      version and whether its version-7 ensemble has an ``R3_measured_HO``
+      emission member (``real_qc_bundle_facts``: unknown when neither the
+      tables nor the bundle state them), whether the pair holds the other
+      platform and whether the bundle's marker lookup is prefiltered
+      (``large_panel_prefilter`` of its ``build_hash_payload``);
     * the human marker referee (``human_marker_referee_signal``) and the
       registration check (G1);
     * the flag strata of the sample's flags;
@@ -5037,7 +5112,9 @@ def human_real_qc_signals(
 
     Paired concordance is left to the pair step (the pair's JSD); the
     prefilter spot check and the factor re-measure have no producer in
-    RESOLVE, so they are ``not_evaluable`` wherever they apply.
+    RESOLVE, so they are ``not_evaluable`` wherever they apply. RESOLVE
+    keeps no record of a family's datasets, so whether this is the family's
+    first is left unknown.
 
     Args:
         loaded: The sample's counts.
@@ -5057,22 +5134,12 @@ def human_real_qc_signals(
     """
     from merxen.annotation import real_qc as rq
     from merxen.annotation.resolvability import (
-        R3_RECIPE,
         RESOLVABILITY_VERSION_V7,
         load_simulated_genes,
-        parse_member_name,
     )
 
     table = np.asarray(resolution.in_table, dtype=bool)
-    version = None if tables is None else tables.version
-    members = (
-        []
-        if tables is None
-        else [str(name) for name in tables.summary.get("emission_members") or []]
-    )
-    has_r3 = version == RESOLVABILITY_VERSION_V7 and any(
-        parse_member_name(name)[0] == R3_RECIPE for name in members
-    )
+    version, has_r3 = real_qc_bundle_facts(primary, tables)
     payload = (
         {}
         if primary is None

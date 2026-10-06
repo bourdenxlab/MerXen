@@ -459,6 +459,59 @@ def test_the_factor_remeasure_applies_only_with_an_r3_member() -> None:
     assert tighter.outcome == "warn" and "r 0.930 < 0.95" in tighter.message
 
 
+def test_an_undefined_pearson_r_warns() -> None:
+    """A constant re-measured factor vector gives NaN: a warning, never a pass."""
+    for pearson in (float("nan"), None):
+        outcome = qc.factor_remeasure_outcome(
+            remeasure(pearson_r=pearson, spearman_r=float("nan")),
+            min_r=0.9,
+            has_r3_member=True,
+        )
+        assert outcome.fired and outcome.outcome == "warn", pearson
+        assert "r nan < 0.90" in outcome.message
+
+
+def test_a_later_dataset_of_a_family_is_not_applicable() -> None:
+    """The first-dataset fact decides before any input is looked at (P4)."""
+    for result in (
+        None,
+        remeasure(applies=False, reason="no_stored_table"),
+        remeasure(applies=False, reason="not_first_dataset_of_family"),
+    ):
+        for has_r3 in (True, None):
+            outcome = qc.factor_remeasure_outcome(
+                result,
+                min_r=0.9,
+                has_r3_member=has_r3,
+                first_dataset_of_family=False,
+            )
+            assert outcome.outcome == "not_applicable", (result, has_r3)
+    with pytest.raises(ValueError, match="other than the family's first"):
+        qc.factor_remeasure_outcome(
+            remeasure(), min_r=0.9, has_r3_member=True, first_dataset_of_family=False
+        )
+    # Unknown (the default) or the first: a missing re-measure is not evaluable.
+    for first in (None, True):
+        missing = qc.factor_remeasure_outcome(
+            None, min_r=0.9, has_r3_member=True, first_dataset_of_family=first
+        )
+        assert missing.outcome == "not_evaluable", first
+
+
+def test_an_unknown_r3_member_is_not_evaluable() -> None:
+    """A family whose R3 member could not be read: never not_applicable."""
+    for result in (None, remeasure(applies=False, reason="no_stored_table")):
+        outcome = qc.factor_remeasure_outcome(result, min_r=0.9, has_r3_member=None)
+        assert outcome.outcome == "not_evaluable"
+    unknown = qc.factor_remeasure_outcome(None, min_r=0.9, has_r3_member=None)
+    assert "R3 member is unknown" in str(unknown.reason)
+    # A re-measure that ran against a stored table is scored.
+    assert (
+        qc.factor_remeasure_outcome(remeasure(), min_r=0.9, has_r3_member=None).outcome
+        == "pass"
+    )
+
+
 # --------------------------------------------------------------------------
 # The orchestrator
 
@@ -754,6 +807,56 @@ def test_a_missing_input_of_an_applicable_check_is_not_evaluable(
     ).provenance()
     for check in ("paired_concordance", "prefilter_spotcheck", "factor_remeasure"):
         assert unpaired.outcomes[check] == "not_applicable", check
+
+
+def test_an_unknown_bundle_fact_is_not_evaluable(make_trust: MakeTrust) -> None:
+    """P4: a resolvability version or R3 fact that could not be read.
+
+    ``None`` is unknown, never "does not apply": the version-7 checks and
+    the factor re-measure are then ``not_evaluable``, whatever inputs are
+    given; a stated later dataset of the family makes the re-measure
+    ``not_applicable``.
+    """
+    config = AnnotationConfig(species="human")
+    trust = make_trust("provisional")
+    inputs = ((None, None), (coverage_signal(0.85, 0.88), trend_signal()))
+    for coverage, trend in inputs:
+        record = qc.real_data_qc(
+            new_panel_signals(
+                resolvability_version=None,
+                has_r3_member=None,
+                coverage=coverage,
+                nonneuronal_trend=trend,
+            ),
+            trust,
+            config,
+        ).provenance()
+        for check in (
+            "coverage_vs_simulation",
+            "nonneuronal_depth_trend",
+            "factor_remeasure",
+        ):
+            assert record.outcomes[check] == "not_evaluable", check
+    later = qc.real_data_qc(
+        new_panel_signals(has_r3_member=True, first_dataset_of_family=False),
+        trust,
+        config,
+    ).provenance()
+    assert later.outcomes["factor_remeasure"] == "not_applicable"
+    unstated = qc.real_data_qc(
+        new_panel_signals(has_r3_member=True), trust, config
+    ).provenance()
+    assert unstated.outcomes["factor_remeasure"] == "not_evaluable"
+    # A stated version other than 7: the version-7 checks do not apply.
+    v6 = qc.real_data_qc(
+        new_panel_signals(
+            resolvability_version=6, coverage=None, nonneuronal_trend=None
+        ),
+        trust,
+        config,
+    ).provenance()
+    for check in ("coverage_vs_simulation", "nonneuronal_depth_trend"):
+        assert v6.outcomes[check] == "not_applicable", check
 
 
 def test_a_missing_gate_verdict_is_recorded_not_evaluable(

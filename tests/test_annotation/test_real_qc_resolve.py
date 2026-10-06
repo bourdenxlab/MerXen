@@ -15,6 +15,7 @@ import itertools
 import json
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -874,14 +875,16 @@ def test_resolve_records_an_outcome_for_every_check(
         assert recorded.outcomes == record["per_check"]
         assert recorded.warn_only is False
         assert sample.summary["real_qc"] == record
-        # The synthetic bundle: version 6 without simulated genes, no
-        # prefilter, no R3 member; a paired section without a shared mask;
-        # no registration check given.
+        # The synthetic bundle: no resolvability tables and no declared
+        # version (unknown, so the version-7 checks and the factor
+        # re-measure are not_evaluable, never not_applicable: P4), no
+        # simulated genes, no prefilter; a paired section without a shared
+        # mask; no registration check given.
         per_check = record["per_check"]
         assert per_check["prefilter_spotcheck"] == "not_applicable"
-        assert per_check["factor_remeasure"] == "not_applicable"
-        assert per_check["coverage_vs_simulation"] == "not_applicable"
-        assert per_check["nonneuronal_depth_trend"] == "not_applicable"
+        assert per_check["factor_remeasure"] == "not_evaluable"
+        assert per_check["coverage_vs_simulation"] == "not_evaluable"
+        assert per_check["nonneuronal_depth_trend"] == "not_evaluable"
         assert per_check["gene_complexity"] == "not_evaluable"
         assert per_check["registration_g1"] == "not_evaluable"
         assert per_check["paired_concordance"] == "not_evaluable"
@@ -1103,20 +1106,29 @@ def test_an_unpaired_section_records_paired_concordance_not_applicable(
 ) -> None:
     """The new-panel family's case: a MERSCOPE-only section (NR1's list).
 
-    The synthetic pair needs its Xenium section to resolve its gene IDs (its
-    MERSCOPE var holds symbols only), so the single-platform case is planted
-    at the pair test RESOLVE uses.
+    A version-7 bundle without an R3 member or a prefilter, as the family's
+    is. The synthetic pair needs its Xenium section to resolve its gene IDs
+    (its MERSCOPE var holds symbols only), so the single-platform case is
+    planted at the pair test RESOLVE uses.
     """
+    from .test_resolve_v7 import _human_v7_config, write_human_tables
+
     assert pl.pair_has_both_platforms(["MERSCOPE", "xenium"])
     assert not pl.pair_has_both_platforms(["MERSCOPE", "MERSCOPE"])
     setup = _setup(tmp_path, fake_mmc)
+    write_human_tables(setup.bundles["whb_frontal_supc_clus"].path, 7)
     monkeypatch.setattr(pl, "pair_has_both_platforms", lambda _platforms: False)
-    applied = _run(setup, make_trust, "qc")
+    applied = _resolve(
+        setup, make_trust, "qc", state="provisional", config=_human_v7_config()
+    )
     for sample in applied.samples.values():
         per_check = sample.summary["real_qc"]["per_check"]
         assert per_check["paired_concordance"] == "not_applicable"
         assert per_check["factor_remeasure"] == "not_applicable"
         assert per_check["prefilter_spotcheck"] == "not_applicable"
+        # Version 7: the version-7 checks apply.
+        assert per_check["coverage_vs_simulation"] != "not_applicable"
+        assert per_check["nonneuronal_depth_trend"] != "not_applicable"
         assert not sample.paired
 
 
@@ -1166,6 +1178,72 @@ def test_registration_g1_follows_its_configured_effect_in_resolve(
     other = applied.samples["PX_XENIUM"].summary["real_qc"]["per_check"]
     assert other["registration_g1"] == "not_evaluable"
     assert _assert_nr1(free, applied) == {sample: [] for sample in free.samples}
+
+
+def _bundle(manifest: dict[str, Any]) -> Any:
+    return SimpleNamespace(bundle=SimpleNamespace(manifest=manifest))
+
+
+def _declared(version: Any, *, where: str = "builder_params") -> dict[str, Any]:
+    if where == "builder_params":
+        return {
+            "build_hash_payload": {
+                "builder_params": {
+                    "resolvability": {"enabled": True, "resolvability_version": version}
+                }
+            }
+        }
+    return {"builder_output": {"resolvability": {"resolvability_version": version}}}
+
+
+def test_the_bundle_facts_of_real_qc_are_unknown_without_tables() -> None:
+    """P4: the version-7 facts come from the tables, else from the bundle.
+
+    A bundle that declares version 7 but whose tables were not read has an
+    unknown R3 member, so the factor re-measure is ``not_evaluable``, and its
+    version-7 checks read version 7 (``not_evaluable`` without inputs).
+    Nothing read: unknown, never "does not apply".
+    """
+    r3 = SimpleNamespace(
+        version=7, summary={"emission_members": ["R1_decision@0", "R3_measured_HO@0"]}
+    )
+    no_r3 = SimpleNamespace(version=7, summary={"emission_members": ["R1_decision@0"]})
+    v6 = SimpleNamespace(version=6, summary={})
+    unrecorded = SimpleNamespace(version=None, summary={})
+    primary = _bundle(_declared(7))
+    assert pl.real_qc_bundle_facts(primary, r3) == (7, True)
+    assert pl.real_qc_bundle_facts(primary, no_r3) == (7, False)
+    assert pl.real_qc_bundle_facts(primary, v6) == (6, False)
+    # A summary without the field: version-6 tables.
+    assert pl.real_qc_bundle_facts(primary, unrecorded) == (6, False)
+    # No tables: the bundle's declared version.
+    assert pl.real_qc_bundle_facts(primary, None) == (7, None)
+    assert pl.real_qc_bundle_facts(_bundle(_declared(6)), None) == (6, False)
+    output = _bundle(_declared(7, where="builder_output"))
+    assert pl.real_qc_bundle_facts(output, None) == (7, None)
+    disabled = {"builder_params": {"resolvability": {"enabled": False}}}
+    for manifest in (
+        {},
+        {"build_hash_payload": disabled},
+        _declared(99),
+        _declared("seven"),
+    ):
+        assert pl.real_qc_bundle_facts(_bundle(manifest), None) == (None, None)
+    assert pl.real_qc_bundle_facts(None, None) == (None, None)
+    config = AnnotationConfig(species="human")
+    record = qc.real_data_qc(
+        qc.RealQcSignals(
+            resolvability_version=7,
+            paired=False,
+            prefilter_applied=False,
+            has_r3_member=None,
+        ),
+        None,
+        config,
+    ).provenance()
+    for check in ("coverage_vs_simulation", "nonneuronal_depth_trend"):
+        assert record.outcomes[check] == "not_evaluable", check
+    assert record.outcomes["factor_remeasure"] == "not_evaluable"
 
 
 def test_qc_lowers_resolution_needs_a_withheld_level_or_a_harder_cap() -> None:

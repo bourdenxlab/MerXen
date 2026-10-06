@@ -1285,12 +1285,14 @@ def factor_remeasure(
     Returns:
         The re-measure.
     """
-    if stored is None:
-        return FactorRemeasure(False, "no_stored_table", asset_id, 0, None, None, None)
+    # A later dataset of the family is not re-measured whether or not a
+    # table is given (``not_applicable``, never ``not_evaluable``).
     if not first_dataset_of_family:
         return FactorRemeasure(
             False, "not_first_dataset_of_family", asset_id, 0, None, None, None
         )
+    if stored is None:
+        return FactorRemeasure(False, "no_stored_table", asset_id, 0, None, None, None)
     from merxen.annotation.shadow import reference_pseudobulk_totals
 
     genes = [str(gene) for gene in gene_ids]
@@ -1330,12 +1332,14 @@ def factor_remeasure(
         )
     here = factors[informative]
     there = stored_factor[informative]
-    pearson = float(np.corrcoef(here, there)[0, 1])
-    spearman = float(
-        np.corrcoef(
-            pd.Series(here).rank().to_numpy(), pd.Series(there).rank().to_numpy()
-        )[0, 1]
-    )
+    # A constant factor vector has no correlation (NaN), which warns below.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        pearson = float(np.corrcoef(here, there)[0, 1])
+        spearman = float(
+            np.corrcoef(
+                pd.Series(here).rank().to_numpy(), pd.Series(there).rank().to_numpy()
+            )[0, 1]
+        )
     fired = not (pearson >= min_r)
     outcome = QcOutcome(
         check="factor_remeasure",
@@ -3110,34 +3114,44 @@ def prefilter_spotcheck(
 
 
 def factor_remeasure_outcome(
-    result: FactorRemeasure | None, *, min_r: float, has_r3_member: bool
+    result: FactorRemeasure | None,
+    *,
+    min_r: float,
+    has_r3_member: bool | None,
+    first_dataset_of_family: bool | None = None,
 ) -> QcOutcome:
     """Return the factor re-measure outcome (§8.8) at the configured ``min_r``.
 
     Applicability comes from the family, never from a missing input: a
     family without an R3 member (no measured factor table) is
-    ``not_applicable``, and so is a dataset other than the family's first. A
-    family with an R3 member whose re-measure did not run, or ran without the
-    stored table, is ``not_evaluable``, as is one with too few informative
-    genes. Otherwise a warning when Pearson r < ``min_r`` (recommending a
-    PREP re-run with the in-house table; never automatic, never trust
-    evidence).
+    ``not_applicable``, and so is a dataset other than the family's first
+    (stated by ``first_dataset_of_family`` or by the re-measure), whatever
+    inputs are given. A family with an R3 member, or whose R3 member is
+    unknown, is ``not_evaluable`` when the re-measure did not run, ran
+    without the stored table or found too few informative genes. Otherwise
+    a warning when Pearson r < ``min_r`` or r is undefined (a constant factor
+    vector), recommending a PREP re-run with the in-house table (never
+    automatic, never trust evidence).
 
     Args:
         result: ``factor_remeasure`` output, or ``None`` when it did not run.
         min_r: The warning threshold (``factor_remeasure_min_r``).
         has_r3_member: Whether the family's bundle has an R3 member (a
-            measured factor table).
+            measured factor table); ``None``: unknown.
+        first_dataset_of_family: Whether the dataset is its family's first
+            in-house dataset; ``None``: unknown.
 
     Returns:
         The outcome.
 
     Raises:
         ValueError: For a re-measure against a stored table on a family
-            without an R3 member.
+            without an R3 member or on a dataset other than the family's
+            first.
     """
-    if not has_r3_member:
-        if result is not None and result.applies:
+    ran = result is not None and result.applies
+    if has_r3_member is False:
+        if ran:
             raise ValueError(
                 "a factor re-measure against a stored table for a family without "
                 "an R3 member"
@@ -3146,10 +3160,23 @@ def factor_remeasure_outcome(
             FACTOR_REMEASURE_CHECK,
             "no R3 member: the family has no measured factor table",
         )
+    if first_dataset_of_family is False:
+        if ran:
+            raise ValueError(
+                "a factor re-measure against a stored table on a dataset other "
+                "than the family's first"
+            )
+        return QcOutcome.not_applicable(
+            FACTOR_REMEASURE_CHECK, "not_first_dataset_of_family"
+        )
+    family = (
+        "whether the family has an R3 member is unknown"
+        if has_r3_member is None
+        else "the family has an R3 member"
+    )
     if result is None:
         return QcOutcome.not_evaluable(
-            FACTOR_REMEASURE_CHECK,
-            "the family has an R3 member but the factor re-measure did not run",
+            FACTOR_REMEASURE_CHECK, f"{family} but the factor re-measure did not run"
         )
     if not result.applies:
         reason = str(result.reason)
@@ -3157,8 +3184,7 @@ def factor_remeasure_outcome(
             return QcOutcome.not_applicable(FACTOR_REMEASURE_CHECK, reason)
         if reason == "no_stored_table":
             reason = (
-                "no_stored_table: the family has an R3 member but its stored "
-                "factor table was not given"
+                f"no_stored_table: {family} but its stored factor table was not given"
             )
         return QcOutcome.not_evaluable(FACTOR_REMEASURE_CHECK, reason)
     pearson = result.pearson_r
@@ -3323,16 +3349,24 @@ class RealQcSignals:
     (the factor re-measure). A check that applies but whose input is missing
     is ``not_evaluable``, never ``not_applicable``: an input left out is
     never recorded as a check that does not apply (pre-registration §23.5
-    P4).
+    P4). For the same reason a fact stated as ``None`` (unknown) makes the
+    checks it decides ``not_evaluable``, and ``first_dataset_of_family``
+    defaults to unknown.
 
     Attributes:
         resolvability_version: The primary bundle's resolvability version
-            (``None``: no resolvability tables).
+            as the bundle declares it (``None``: unknown, e.g. no primary
+            bundle, or a bundle that declares none; the version-7 checks are
+            then ``not_evaluable``).
         paired: Whether the dataset has a section of the other platform.
         prefilter_applied: Whether the bundle's marker lookup is
             prefiltered.
         has_r3_member: Whether the family's bundle has an R3 member (a
-            measured factor table, version 7).
+            measured factor table, version 7); ``None``: unknown (the
+            version-7 tables were not read).
+        first_dataset_of_family: Whether this is the family's first
+            in-house dataset, the only one the factor re-measure runs on
+            (``None``: unknown; ``False`` makes it ``not_applicable``).
         pair_jsd: The pair's JSD rows (``<pair>_resolve_summary.json``
             ``pair.jsd``).
         marker_consistency: The human marker referee (C13).
@@ -3353,7 +3387,8 @@ class RealQcSignals:
     resolvability_version: int | None
     paired: bool
     prefilter_applied: bool
-    has_r3_member: bool
+    has_r3_member: bool | None
+    first_dataset_of_family: bool | None = None
     pair_jsd: Sequence[Mapping[str, Any]] = ()
     marker_consistency: MarkerConsistencySignal | None = None
     flag_strata: Sequence[Any] | None = None
@@ -3499,6 +3534,13 @@ def _is_seeded(trust: TrustDecision | None) -> bool:
     )
 
 
+# Why the version-7 checks are ``not_evaluable`` without a stated version.
+UNKNOWN_VERSION_REASON: Final = (
+    "the bundle's resolvability version is unknown (no resolvability tables "
+    "read and none declared)"
+)
+
+
 def _coverage_outcomes(
     signal: CoverageSignal | None,
     *,
@@ -3506,6 +3548,8 @@ def _coverage_outcomes(
     margin: float,
     min_cells: int,
 ) -> tuple[tuple[QcOutcome, ...], pd.DataFrame | None]:
+    if version is None:
+        return (QcOutcome.not_evaluable(COVERAGE_CHECK, UNKNOWN_VERSION_REASON),), None
     if version != 7:
         return (
             QcOutcome.not_applicable(
@@ -3544,6 +3588,12 @@ def _trend_outcomes(
     signal: NonneuronalTrendSignal | None, *, version: int | None, limit: int
 ) -> tuple[tuple[QcOutcome, ...], pd.DataFrame | None]:
     effect: dict[str, Any] = {"effect": "report_only"}
+    if version is None:
+        return (
+            QcOutcome.not_evaluable(
+                NONNEURONAL_TREND_CHECK, UNKNOWN_VERSION_REASON, **effect
+            ),
+        ), None
     if version != 7:
         return (
             QcOutcome.not_applicable(
@@ -3769,6 +3819,7 @@ def real_data_qc(
             signals.factor,
             min_r=settings.factor_remeasure_min_r,
             has_r3_member=signals.has_r3_member,
+            first_dataset_of_family=signals.first_dataset_of_family,
         )
     )
     if signals.gate is None:

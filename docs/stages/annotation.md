@@ -983,8 +983,10 @@ the family's first, the prefilter spot check without a prefilter, the
 version-7 checks on a version-6 bundle. Whether a check applies comes only
 from facts the caller must state (`RealQcSignals`: the resolvability
 version, whether the section is paired, whether the bundle is prefiltered,
-whether the family has an R3 member). A check that applies but whose input
-is missing is `not_evaluable`, so an input left out is never recorded as
+whether the family has an R3 member; whether the dataset is the family's
+first defaults to unknown). A check that applies but whose input is missing
+is `not_evaluable`, and so is a check whose deciding fact is stated as
+unknown (`None`), so an input left out is never recorded as
 `not_applicable`. A failing check can only lower the dataset: cap its gate
 level (`gate_cap`), make an emitted level `not_resolvable` for it
 (`withhold_level`), withhold the pair's supercluster-level cross-platform
@@ -1786,10 +1788,13 @@ not run it yet: the mouse gate keeps G1-G5 (§7.6), and the rest of the mouse
 wiring follows M6b.
 
 1. **Signals** (`pipeline.human_real_qc_signals`), all from the QC-free
-   resolution and the primary bundle: the bundle's resolvability version,
-   whether the pair holds both platforms (whether or not this run resolves
-   both), whether the bundle's marker lookup is prefiltered, whether its
-   version-7 ensemble has an `R3_measured_HO` member; the human marker referee
+   resolution and the primary bundle: the bundle's resolvability version and
+   whether its version-7 ensemble has an `R3_measured_HO` member (from its
+   resolvability tables, else the version the bundle declares, with the R3
+   member unknown for version 7; unknown when neither states them,
+   `pipeline.real_qc_bundle_facts`), whether the pair holds both platforms
+   (whether or not this run resolves both), whether the bundle's marker
+   lookup is prefiltered; the human marker referee
    on the table cells' query counts and the bundle's `profiles.parquet`
    (marker sets derived in the run, their sha256 in the outcome's details);
    the registration check (`--registration-qc`, human G1); the sample's flag
