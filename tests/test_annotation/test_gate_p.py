@@ -22,7 +22,8 @@ from merxen.annotation.config import (
 )
 
 from .test_resolvability import BROAD, bin_cells, settings, tracked_cells
-from .test_resolvability_v7_decisions import member_rows, pattern
+from .test_resolvability_v7_decisions import GRID as V7_GRID
+from .test_resolvability_v7_decisions import member_rows, monotone_cells, pattern
 
 
 def _decisions_at_10() -> pd.DataFrame:
@@ -2589,6 +2590,7 @@ def test_np5_refuses_a_replicate_of_check_half_rows_alone() -> None:
             settings(),
             res.EnsembleSettings(),
             members=["m0", "m1"],
+            neuronal={"X": True},
         )
 
 
@@ -2617,6 +2619,86 @@ def test_np5_set_thresholds_apply_the_saturated_cap_for_version_7() -> None:
         {("D1", 0): cells.iloc[:90]}, tested, [BROAD], settings()
     )
     assert not few.iloc[0]["fitted"] and int(few.iloc[0]["n_fit"]) == 45
+    # Version 7 as well: a set without a fit never takes the cap, as decide.
+    few_v7 = gp.np5_set_thresholds(
+        {("D1", 0): cells.iloc[:90]},
+        tested,
+        [BROAD],
+        settings(),
+        saturated_bp_share=0.9,
+    ).iloc[0]
+    assert not few_v7["fitted"] and int(few_v7["n_fit"]) == 45
+    assert math.isnan(few_v7["threshold"]) and few_v7["threshold_source"] is None
+
+
+def test_np5_set_thresholds_fit_from_exactly_50_fit_half_calls() -> None:
+    """A set is fitted with ``min_cells_per_bin`` (50) fit-half calls and not
+    with 49, as ``decide`` fits a bin (version 7: the cap needs the fit).
+    """
+    cells = bin_cells(np.ones(400), np.arange(400) % 10 != 0, depth=100)
+    tested = {("broad", "X"): [_set((100,))]}
+    # bin_cells alternates the halves: 100 rows hold 50 fit-half calls.
+    replicates = {("D1", 0): cells.iloc[:100], ("D2", 0): cells.iloc[:98]}
+    for share in (None, 0.9):
+        table = gp.np5_set_thresholds(
+            replicates, tested, [BROAD], settings(), saturated_bp_share=share
+        ).set_index("group")
+        assert int(table.loc["D1", "n_fit"]) == 50 and table.loc["D1", "fitted"]
+        assert int(table.loc["D2", "n_fit"]) == 49 and not table.loc["D2", "fitted"]
+    for rows, source in (
+        (cells.iloc[:100], res.THRESHOLD_SOURCE_SATURATED),
+        (cells.iloc[:98], None),
+    ):
+        decided = _decision_row(
+            res.decide(rows, [BROAD], [100], settings(), saturated_bp_share=0.9), 100
+        )
+        assert decided["threshold_source"] == source
+    assert table.loc["D1", "threshold_source"] == res.THRESHOLD_SOURCE_SATURATED
+    assert table.loc["D1", "threshold"] == pytest.approx(settings().threshold_cap)
+    assert table.loc["D2", "threshold_source"] is None
+
+
+def test_np5_tstar_spread_takes_the_version_7_saturated_cap_as_a_t_star() -> None:
+    """Version 7 from ``np5_set_thresholds`` to ``np5_tstar_spread``: the
+    range is over the applied thresholds, so a replicate at the saturated
+    cap (no t*) enters it at 0.99 (an open reading). Two replicates at the
+    cap agree; the cap beside a fitted t* of 0.85 fails the set.
+    """
+    saturated = bin_cells(np.ones(400), np.arange(400) % 10 != 0, depth=100)
+    rng = np.random.default_rng(11)
+    bp = np.round(0.70 + 0.30 * rng.random(400), 3)
+    fitted = bin_cells(bp, bp >= 0.85, depth=100)
+    tested = {("broad", "X"): [_set((100,))]}
+    cap = settings().threshold_cap
+
+    def thresholds(second: pd.DataFrame) -> pd.DataFrame:
+        return gp.np5_set_thresholds(
+            {("D1", 0): saturated, ("D2", 0): second},
+            tested,
+            [BROAD],
+            settings(),
+            saturated_bp_share=0.9,
+        )
+
+    both = thresholds(saturated)
+    assert both["threshold_source"].tolist() == [res.THRESHOLD_SOURCE_SATURATED] * 2
+    assert both["t_star"].isna().all() and both["fitted"].all()
+    row = _spread(both)
+    assert row["passed"] and row["evaluable"] and row["missing"] == ""
+    assert int(row["n_thresholds"]) == 2 and row["spread"] == pytest.approx(0.0)
+    assert row["threshold_max"] == pytest.approx(cap)
+    mixed = thresholds(fitted).set_index("group")
+    assert mixed.loc["D2", "threshold_source"] == res.THRESHOLD_SOURCE_LOCAL
+    assert mixed.loc["D2", "t_star"] == pytest.approx(0.85)
+    row = _spread(mixed.reset_index())
+    assert not row["passed"] and row["missing"] == ""
+    assert row["spread"] == pytest.approx(cap - 0.85)
+    # A thin replicate (no fit) beside one at the cap: the range is not
+    # evaluable and the set passes on one threshold (reported).
+    thin = thresholds(saturated.iloc[:90])
+    row = _spread(thin)
+    assert row["passed"] and not row["evaluable"] and row["unfitted"] == "D2/0"
+    assert int(row["n_fitted"]) == 1 and int(row["n_thresholds"]) == 1
 
 
 def test_np5_set_threshold_inputs_that_mix_or_lack_rows_raise() -> None:
@@ -2657,38 +2739,51 @@ def test_np5_extrapolated_share_of_051_fails_and_050_passes() -> None:
         return table.iloc[0]
 
     row = share([300.0] * 51 + [40.0] * 49)
-    assert row["extrapolated_share"] == pytest.approx(0.51) and not row["passed"]
+    assert row["profile_share"] == pytest.approx(0.51) and not row["passed"]
+    assert not row["profile_passed"]
     assert int(row["n_depths"]) == 100 and row["expected_bin"] == 250
     # 100 counts take the 60 bin, which is not extrapolated.
     row = share([300.0] * 50 + [100.0] * 50)
-    assert row["extrapolated_share"] == pytest.approx(0.50) and row["passed"]
+    assert row["profile_share"] == pytest.approx(0.50) and row["profile_passed"]
     assert row["max_share"] == pytest.approx(0.5)
+    # Its median (200, in the 120 bin) is extrapolated: the median reading
+    # fails the class.
+    assert row["expected_depth"] == 200.0 and row["expected_bin"] == 120
+    assert row["median_share"] == 1.0 and not row["median_passed"]
+    assert not row["passed"]
     # D9: the share of the class's cells above the grid's deepest bin.
     assert row["above_grid_share"] == pytest.approx(0.5)
+    # A share of 0.50 with its median (100) in the 60 bin passes both.
+    row = share([130.0] * 50 + [70.0] * 50)
+    assert row["profile_share"] == pytest.approx(0.50) and row["median_share"] == 0.0
+    assert row["expected_bin"] == 60 and row["passed"]
     # One expected depth per class (the label-free fallback of a family
-    # without a profile): its cells all take that depth's bin, so the share
-    # is 0 or 1.
+    # without a profile): its cells all take that depth's bin, so both
+    # shares are 0 or 1.
     row = share(130.0)
-    assert row["extrapolated_share"] == 1.0 and not row["passed"]
+    assert row["profile_share"] == 1.0 and row["median_share"] == 1.0
+    assert not row["passed"]
     assert row["expected_bin"] == 120 and row["expected_depth"] == 130.0
     row = share(70.0)
-    assert row["extrapolated_share"] == 0.0 and row["passed"]
+    assert row["profile_share"] == 0.0 and row["median_share"] == 0.0
+    assert row["passed"]
     assert row["expected_bin"] == 60 and row["depth_source"] == "class"
     # Cells below the grid are not emitted, so not extrapolated.
     row = share([5.0] * 60 + [250.0] * 40)
-    assert row["extrapolated_share"] == pytest.approx(0.4) and row["passed"]
-    assert row["expected_bin"] is None
+    assert row["profile_share"] == pytest.approx(0.4) and row["passed"]
+    assert row["expected_bin"] is None and row["median_share"] == 0.0
     # D9: a depth at the grid's deepest bin (250) is in it, not above it.
     assert row["above_grid_share"] == 0.0
     row = share([250.0] * 40 + [251.0] * 60)
     assert row["above_grid_share"] == pytest.approx(0.6)
 
 
-def test_np5_extrapolated_share_uses_the_class_profile_shares() -> None:
-    """Plan §8.3 v7.5: for a family with a per-class profile, NP5's
-    "> 50% extrapolated" test "uses the class's profile shares". The
-    class's profile median alone (one depth) would pass a class whose
-    profile fails.
+def test_np5_extrapolated_share_scores_the_profile_shares_and_the_median() -> None:
+    """For a family with a per-class profile, the confirmed expected depth
+    is each class's median (pre-registration §23.9 item 6, D8) and plan §8.3
+    v7.5 says the test "uses the class's profile shares". The monotone fill
+    can mark a bin between bins that are not, so neither reading is nested
+    in the other: each fails a class the other passes, and both are scored.
     """
     # The frozen decisions mark 30 (a monotone-filled bin), 120 and 250
     # extrapolated; 60 is emitted on its own verdict.
@@ -2697,17 +2792,39 @@ def test_np5_extrapolated_share_uses_the_class_profile_shares() -> None:
     table = gp.np5_extrapolated_share(decisions, {"X": profile}, GRID_NP5, _np5())
     row = table.iloc[0]
     # 40 counts take the 30 bin, 150 the 120 bin and 300 the 250 bin.
-    assert row["extrapolated_share"] == pytest.approx(0.65) and not row["passed"]
-    # The profile median is reported as the class's expected depth.
+    assert row["profile_share"] == pytest.approx(0.65) and not row["profile_passed"]
+    # The median (80) is reported as the expected depth; its bin (60) is not
+    # extrapolated, so the median alone would pass the class.
     assert row["expected_depth"] == 80.0 and row["expected_bin"] == 60
+    assert row["median_share"] == 0.0 and row["median_passed"]
+    assert not row["passed"]
     assert row["above_grid_share"] == pytest.approx(0.20)
     assert int(row["n_depths"]) == 100 and row["depth_source"] == "class"
-    # The median alone falls in the 60 bin: share 0, a pass (the loosening).
     median = gp.np5_extrapolated_share(
         decisions, {"X": float(np.median(profile))}, GRID_NP5, _np5()
     ).iloc[0]
-    assert median["extrapolated_share"] == 0.0 and median["passed"]
+    assert median["profile_share"] == 0.0 and median["passed"]
     assert median["above_grid_share"] == 0.0
+    # The other way round: X is emitted at 30, 60, 120 and 250 with only the
+    # filled 60 bin extrapolated. The profile (45% at 40, 10% at 70 and 45%
+    # at 150 counts) has a share of 0.10, but its median (70) lies in the 60
+    # bin: the profile shares alone would pass the class.
+    filled = _np5_decisions((30, 60, 120, 250), extrapolated=(60,))
+    profile = [40.0] * 45 + [70.0] * 10 + [150.0] * 45
+    row = gp.np5_extrapolated_share(filled, {"X": profile}, GRID_NP5, _np5()).iloc[0]
+    assert row["profile_share"] == pytest.approx(0.10) and row["profile_passed"]
+    assert row["expected_depth"] == 70.0 and row["expected_bin"] == 60
+    assert row["median_share"] == 1.0 and not row["median_passed"]
+    assert not row["passed"]
+    # The median's bin must be in the decisions even when no depth of the
+    # profile falls in it (50 depths at 40 and 50 at 130: median 85, bin 60).
+    with pytest.raises(ValueError, match=r"the bins \[60\] are not in"):
+        gp.np5_extrapolated_share(
+            filled[filled["depth"] != 60],
+            {"X": [40.0] * 50 + [130.0] * 50},
+            GRID_NP5,
+            _np5(),
+        )
 
 
 def test_np5_extrapolated_share_reads_one_regime_and_the_default_depth() -> None:
@@ -2819,6 +2936,70 @@ def test_np5_class_verdicts_combine_its_three_parts() -> None:
         gp.np5_class_verdicts(unknown, spread, extrapolated, tested)
 
 
+def test_np5_class_table_reports_the_parts_and_t_star_sets_passed_on_nothing() -> None:
+    """A tested set with fewer than two replicate thresholds passes the t*
+    part without a range (an open reading); the class table counts such
+    sets per class, beside each part's verdict.
+    """
+    tested: dict[tuple[str, str], list[res.GatePTestedSet] | None] = {
+        ("broad", "X"): [_set((120, 250)), _set((60,))],
+        ("broad", "Y"): None,
+    }
+    base = pd.concat(
+        [
+            _np5_decisions((60, 120, 250), extrapolated=(250,)),
+            _np5_decisions((60, 120, 250), cls="Y"),
+        ],
+        ignore_index=True,
+    )
+    agreement = gp.np5_decision_agreement(
+        base, {("D1", 0): base, ("D2", 0): base}, _np5()
+    )
+    good = _values(0.90, 0.92, 0.95, 0.93, 0.91, 0.94)
+    # Only D1/0 has a fit at the 60 set: one threshold, no range.
+    lonely = {key: (0.90 if key == ("D1", 0) else None) for key in KEYS_NP5}
+    spread = gp.np5_tstar_spread(
+        pd.concat(
+            [
+                _thresholds(good, label=">=120"),
+                _thresholds(lonely, unfitted=KEYS_NP5[1:]),
+            ]
+        ),
+        _np5(),
+    )
+    extrapolated = gp.np5_extrapolated_share(
+        base, {}, GRID_NP5, _np5(), default_depth=130.0
+    )
+    table = gp.np5_class_table(agreement, spread, extrapolated, tested)
+    assert list(table.columns) == list(gp.NP5_CLASS_COLUMNS)
+    assert table["class"].tolist() == ["X", "Y"]
+    x, y = (table.iloc[index] for index in range(2))
+    assert x["passed"] is True and x["tstar_passed"] is True
+    assert int(x["n_sets"]) == 2 and int(x["n_tstar_not_evaluable"]) == 1
+    assert x["tstar_not_evaluable_sets"] == "60"
+    assert int(x["n_tstar_unfitted"]) == len(KEYS_NP5) - 1
+    assert y["passed"] is None and y["tstar_passed"] is None
+    assert int(y["n_sets"]) == 0 and int(y["n_tstar_not_evaluable"]) == 0
+    assert gp.np5_class_verdicts(agreement, spread, extrapolated, tested) == {
+        ("broad", "X"): True,
+        ("broad", "Y"): None,
+    }
+    # Each part is reported on its own.
+    deep = gp.np5_extrapolated_share(base, {}, GRID_NP5, _np5(), default_depth=300.0)
+    x = gp.np5_class_table(agreement, spread, deep, tested).iloc[0]
+    assert (
+        x["agreement_passed"],
+        x["tstar_passed"],
+        x["depth_passed"],
+        x["passed"],
+    ) == (True, True, False, False)
+    with pytest.raises(ValueError, match="evaluable"):
+        gp.np5_class_table(
+            agreement, spread.drop(columns="evaluable"), extrapolated, tested
+        )
+    assert gp.np5_class_table(agreement, spread, extrapolated, {}).empty
+
+
 def test_np5_rederive_reproduces_decide_at_any_mapping_seed() -> None:
     """Each replicate's decisions are re-derived from its own rows, at its
     own mapping seed (§14 NP5: "re-derived in each replicate").
@@ -2894,13 +3075,20 @@ def test_np5_rederive_ensemble_and_members_at_any_mapping_seed() -> None:
         ),
         res.decide(frames[1], [BROAD], [100], settings(), saturated_bp_share=0.9),
     )
+    lineage = {"X": True}
     with pytest.raises(ValueError, match="at least one emission member"):
         gp.np5_rederive_ensemble(
-            seed_1, [BROAD], [100], settings(), ensemble, members=[]
+            seed_1, [BROAD], [100], settings(), ensemble, members=[], neuronal=lineage
         )
     with pytest.raises(ValueError, match="no rows"):
         gp.np5_rederive_ensemble(
-            seed_1, [BROAD], [100], settings(), ensemble, members=["m0", "m9"]
+            seed_1,
+            [BROAD],
+            [100],
+            settings(),
+            ensemble,
+            members=["m0", "m9"],
+            neuronal=lineage,
         )
     with pytest.raises(ValueError, match="one replicate"):
         gp.np5_rederive_ensemble(
@@ -2910,6 +3098,57 @@ def test_np5_rederive_ensemble_and_members_at_any_mapping_seed() -> None:
             settings(),
             ensemble,
             members=["m0", "m1"],
+            neuronal=lineage,
+        )
+
+
+def test_np5_rederive_ensemble_fills_with_the_bundle_lineage() -> None:
+    """The monotone fill (v7.9) stops non-neuronal classes at 1,000 counts,
+    so the lineage is required: with the bundle's ``neuronal_classes`` the
+    replicate is filled as the frozen decisions were, with another it is
+    not.
+    """
+    frames = [
+        frame
+        for member in ("a", "b")
+        for frame in monotone_cells(
+            "G", deep_depth=1000, deep_n=120, deep_share=0.925, member=member
+        )
+    ]
+    cells = pd.concat(frames, ignore_index=True)
+    ensemble = res.EnsembleSettings()
+    bundle = {"G": True}
+    base = res.ensemble_decide(
+        cells,
+        [BROAD],
+        V7_GRID,
+        settings(),
+        ensemble,
+        members=["a", "b"],
+        neuronal=bundle,
+    ).decisions
+
+    def rederive(neuronal: Mapping[str, bool | None]) -> pd.DataFrame:
+        return gp.np5_rederive_ensemble(
+            cells.assign(seed=1),
+            [BROAD],
+            V7_GRID,
+            settings(),
+            ensemble,
+            members=["a", "b"],
+            neuronal=neuronal,
+        )
+
+    pd.testing.assert_frame_equal(rederive(bundle), base)
+    other = rederive({"G": False})
+    deep = other[(other["regime"] == "trust") & (other["depth"] == 1000)].iloc[0]
+    frozen = base[(base["regime"] == "trust") & (base["depth"] == 1000)].iloc[0]
+    assert bool(frozen["monotone_filled"]) and frozen["status"] == res.STATUS_EMITTED
+    assert not bool(deep["monotone_filled"])
+    assert deep["status"] == res.STATUS_NOT_RESOLVABLE
+    with pytest.raises(TypeError, match="neuronal"):
+        gp.np5_rederive_ensemble(  # type: ignore[call-arg]
+            cells, [BROAD], V7_GRID, settings(), ensemble, members=["a", "b"]
         )
 
 

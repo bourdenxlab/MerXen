@@ -89,9 +89,10 @@ confirmed by the user on 2026-10-06 (pre-registration §23.9, §23.10).
 NP5, resolvability consistency (§14 NP5): per (level, class),
 
 - the §8.3 emission decisions re-derived in each replicate
-  (``np5_rederive``; version 7 ``np5_rederive_ensemble``) agree with the
-  base run at every depth bin with >= 50 test cells, except at most the bin
-  adjacent to the emission boundary (``np5_decision_agreement``);
+  (``np5_rederive``; version 7 ``np5_rederive_ensemble``, with the bundle's
+  ``neuronal_classes`` for the monotone fill) agree with the base run at
+  every depth bin with >= 50 test cells, except at most the bin adjacent to
+  the emission boundary (``np5_decision_agreement``);
 - each t* varies <= 0.05 across the replicates at the tested sets
   (``np5_set_thresholds``, fitted on each replicate's rows of the set by the
   shared membership rule; ``np5_tstar_spread``); and
@@ -99,28 +100,61 @@ NP5, resolvability consistency (§14 NP5): per (level, class),
   ``resolvability_extrapolated`` under the frozen decisions
   (``np5_extrapolated_share``). The depths are an input per class. A
   family with a per-class profile (the frozen ``sim_inputs`` profile asset
-  of D8) passes each class's profile depths: the test then uses the class's
-  profile shares (plan §8.3 v7.5: "uses the class's profile shares"), and
-  the class's profile median is reported as its expected depth (§14
-  "Version-7 families"; pre-registration §23.9 item 6, §23.10). One
-  expected depth per class, whose share is 0 or 1, is only the label-free
-  fallback of a family without a profile: the pooled median of its
-  sections for every class.
+  of D8) passes each class's profile depths; a family without one passes
+  the label-free pooled median of its sections for every class. The test
+  is scored twice, on the class's median (the expected depth of
+  pre-registration §23.9 item 6 and §23.10, D8: "each class's median") and
+  on the class's profile shares (plan §8.3 v7.5: the test "uses the class's
+  profile shares"), and the class passes only when both pass (an open
+  reading, below).
 
-Readings this implementation takes where §14 is not explicit (strict where
-there is a choice; to be put to the user with the set a dry run): a bin is
-compared when the base run or the replicate has its 50 test cells; the
-emission boundaries are the base run's status changes inside the grid (its
-edges are none), and at most one compared bin may flip, one that flanks a
-boundary; a replicate whose t* fit exists but never reaches the target
-fails the t* range, and one without a fit (too few fit-half calls) is left
-out of it; "each t* ... at tested sets" is re-fitted in each replicate on
-the replicate's calls of each tested set (the shared membership rule,
-``np5_set_thresholds``), not read from the ``t_star`` of the replicate's
-re-derived decisions, whose bins and pools are the replicate's own and need
-not match the frozen tested sets; and a class without cells in the profile
-takes D8's overall median as one depth (the registered words), so its
-share is 0 or 1; the pooled profile's shares are the alternative.
+``np5_class_table`` combines the three parts per (level, class) and counts
+the tested sets that passed the t* part without a range;
+``np5_class_verdicts`` gives the same verdicts in the per-member shape.
+
+Open readings, taken where §14 is not explicit (strict where there is a
+choice). They are put to the user with the set a dry run, and recorded in
+pre-registration §23.12:
+
+- The median or the profile shares. The confirmed expected depth is each
+  class's median (§23.9 item 6, §23.10, D8), while plan §8.3 v7.5 says the
+  test uses the class's profile shares. The two readings are not nested.
+  The version-7 monotone fill can mark a bin extrapolated between bins that
+  are not, so the extrapolated bins need not be contiguous, and either
+  reading can fail a class that the other passes (examples in
+  ``np5_extrapolated_share``). Both are scored (``median_share``,
+  ``profile_share``) and both must pass; scoring either alone would pass
+  classes that this rule fails.
+- A t* range on too few replicates. A replicate with fewer than
+  ``min_cells_per_bin`` (50) fit-half calls in a set has no fit and is left
+  out of the range, and a set with fewer than two thresholds passes the t*
+  part (``evaluable`` false). A tested set that just reaches 200 pooled
+  confident calls can hold fewer than 50 fit-half calls per replicate, so
+  the thinnest sets can pass the t* part on one threshold or none, as NP4's
+  vacuous sets pass NP4 (§23.9 item 3). ``np5_class_table`` reports their
+  number per class (``n_tstar_not_evaluable``). The alternative, fitting t*
+  on all of a replicate's calls in the set, departs from ``decide``'s
+  fit-half rule.
+- The version-7 saturated cap counts as a t*. A set whose fit never
+  reaches the target but whose fit-half calls are saturated takes the cap
+  (0.99, v7.8), as ``decide`` applies it, and the cap enters the range like
+  a fitted t*: a replicate at the cap beside one at t* 0.90 fails the set
+  (range 0.09).
+- The compared bins: a bin is compared when the base run or the replicate
+  has its 50 test cells.
+- The boundary: the emission boundaries are the base run's status changes
+  inside the grid (its edges are none), and at most one compared bin may
+  flip, one that flanks a boundary.
+- A fit without a threshold: a replicate whose t* fit exists but never
+  reaches the target (and is not capped) fails the t* range.
+- Where t* comes from: "each t* ... at tested sets" is re-fitted in each
+  replicate on the replicate's calls of each tested set (the shared
+  membership rule, ``np5_set_thresholds``), not read from the ``t_star`` of
+  the replicate's re-derived decisions, whose bins and pools are the
+  replicate's own and need not match the frozen tested sets.
+- A class without profile cells takes D8's overall median as one depth
+  (the registered words), so both its shares are 0 or 1; the pooled
+  profile's shares are the alternative.
 
 NP6, sensitivity to contamination and gene-efficiency perturbations (§14
 NP6; ``np6_set_stats``): each stress recipe of an emission member
@@ -2321,9 +2355,24 @@ NP5_EXTRAPOLATED_COLUMNS: Final[tuple[str, ...]] = (
     "n_depths",
     "expected_depth",
     "expected_bin",
-    "extrapolated_share",
+    "profile_share",
+    "median_share",
     "above_grid_share",
     "max_share",
+    "profile_passed",
+    "median_passed",
+    "passed",
+)
+NP5_CLASS_COLUMNS: Final[tuple[str, ...]] = (
+    "level",
+    "class",
+    "n_sets",
+    "agreement_passed",
+    "tstar_passed",
+    "depth_passed",
+    "n_tstar_not_evaluable",
+    "tstar_not_evaluable_sets",
+    "n_tstar_unfitted",
     "passed",
 )
 _DECISION_KEY: Final[tuple[str, ...]] = ("level", "class", "depth")
@@ -2499,14 +2548,18 @@ def np5_rederive_ensemble(
     ensemble: res.EnsembleSettings,
     *,
     members: Sequence[str],
-    neuronal: res.NeuronalOf | None = None,
+    neuronal: res.NeuronalOf,
 ) -> pd.DataFrame:
     """Re-derive one replicate's version-7 ensemble decisions (§14 NP5, v7.7-v7.9).
 
     The ensemble rule of ``ensemble_decide`` on the replicate's rows of the
     emission members. ``ensemble_decide`` decides on mapping seed 0, so a
     replicate at another mapping seed is relabelled to 0 first (its rows
-    are unchanged otherwise).
+    are unchanged otherwise). ``neuronal`` is required: the monotone fill
+    (v7.9) stops non-neuronal classes at its depth limit, and the frozen
+    decisions were filled with the bundle's ``neuronal_classes``; a
+    replicate filled with another lineage could flip bins against the base
+    run for that reason alone.
 
     Args:
         cells: One replicate's version-7 cells table (``member`` column).
@@ -2516,7 +2569,8 @@ def np5_rederive_ensemble(
         ensemble: The bundle's ensemble settings.
         members: The emission members.
         neuronal: Per class, whether it is neuronal (the monotone fill's
-            non-neuronal limit, v7.9).
+            non-neuronal limit, v7.9): the bundle's ``neuronal_classes``
+            (``resolvability_summary.json``), as the frozen decisions used.
 
     Returns:
         The ensemble decisions (``EnsembleDecisions.decisions``).
@@ -2893,13 +2947,17 @@ def np5_tstar_spread(thresholds: pd.DataFrame, settings: Np5Settings) -> pd.Data
     """Judge the range of t* across the replicates at every tested set (§14 NP5).
 
     §14 NP5: each t* varies <= ``max_tstar_spread`` (0.05) across replicates
-    at tested sets. The range is taken over the replicates with a threshold
-    (t*, or the saturated cap of version 7). A replicate whose fit exists
-    but never reaches the target has no threshold, so it would not emit the
-    set at all: the set fails (``missing``). A replicate without a fit (too
-    few fit-half calls) is left out of the range (``unfitted``). With fewer
-    than two thresholds the range is not evaluable and the set passes; this
-    is reported (``evaluable``), so that a pass on nothing is visible.
+    at tested sets. The range is taken over the replicates' applied
+    thresholds (``threshold``): t*, or for version 7 the saturated cap
+    (0.99, v7.8), which enters the range like a fitted t* and can fail the
+    set (an open reading). A replicate whose fit exists but never reaches
+    the target has no threshold, so it would not emit the set at all: the
+    set fails (``missing``). A replicate without a fit (too few fit-half
+    calls) is left out of the range (``unfitted``). With fewer than two
+    thresholds the range is not evaluable and the set passes; this is
+    reported (``evaluable``), and ``np5_class_table`` counts such sets per
+    class, so that a pass on nothing is visible (an open reading, see the
+    module docstring).
 
     Args:
         thresholds: ``np5_set_thresholds`` output (or rows of its columns).
@@ -2987,31 +3045,45 @@ def np5_extrapolated_share(
 
     §14 NP5: a class is not validated at L if its cells at the family's
     expected depth would be more than 50% ``resolvability_extrapolated``. A
-    cell takes the bin of its depth (``depth_bin``) and is
-    ``resolvability_extrapolated`` when the frozen decisions mark that
-    (level, class, bin) ``extrapolated`` (``cell_emission``: a pooled bin
-    deeper than D_P, or a version-7 monotone-filled bin); a cell below the
-    grid is not. The share is over the class's depths, and the class passes
-    at L when it is at most ``max_extrapolated_share``.
+    depth takes its bin (``depth_bin``) and is ``resolvability_extrapolated``
+    when the frozen decisions mark that (level, class, bin) ``extrapolated``
+    (``cell_emission``: a pooled bin deeper than D_P, or a version-7
+    monotone-filled bin); a depth below the grid is not.
 
-    The registered input (§14 "Version-7 families"; plan §8.3 v7.5;
-    pre-registration §23.9 item 6 and §23.10, D8):
+    Two readings of "its cells at the family's expected depth" are scored,
+    and the class passes at L only when both are at most
+    ``max_extrapolated_share`` (an open reading, see the module docstring):
+
+    - the median (pre-registration §23.9 item 6 and §23.10, D8: the expected
+      depth is "each class's median"): the class's cells all taken at the
+      median of its depths, so ``median_share`` is 1 when the median's bin
+      is extrapolated and 0 otherwise. The median is reported as
+      ``expected_depth`` and its bin as ``expected_bin``;
+    - the profile shares (plan §8.3 v7.5: the test "uses the class's
+      profile shares"): ``profile_share`` is the share of the class's
+      depths whose bins are extrapolated.
+
+    The two readings are not nested, because the extrapolated bins need not
+    be contiguous: the version-7 monotone fill can mark a bin between two
+    bins that are emitted on their own verdicts. Against decisions that
+    mark 30, 120 and 250 extrapolated, a profile of 10% at 20, 20% at 40,
+    25% at 80, 25% at 150 and 20% at 300 counts fails on its shares (0.65)
+    and passes on its median (80, in the 60 bin). Against decisions that
+    mark only the filled 60 bin, a profile of 45% at 40, 10% at 70 and 45%
+    at 150 counts passes on its shares (0.10) and fails on its median (70,
+    in the 60 bin). Either reading alone would pass one of them.
+
+    The input (§14 "Version-7 families"; plan §8.3 v7.5; pre-registration
+    §23.9 item 6 and §23.10, D8):
 
     - a family with a per-class profile (its frozen ``sim_inputs`` profile
-      asset) passes each class's profile depths, a sequence: the share is
-      the class's profile share of extrapolated bins (§8.3 v7.5: the test
-      "uses the class's profile shares"), and the profile median is
-      reported as ``expected_depth``. Passing the median alone instead
-      would loosen the test: a profile of 10% at 20, 20% at 40, 25% at 80,
-      25% at 150 and 20% at 300 counts, against decisions that mark 30, 120
-      and 250 extrapolated, has a share of 0.65 and fails, while its median
-      (80, in the 60 bin) has a share of 0 and passes. A class without
-      cells in the profile takes D8's overall median (``default_depth``;
-      a reading, see the module docstring);
+      asset) passes each class's profile depths, a sequence. A class
+      without cells in the profile takes D8's overall median
+      (``default_depth``; a reading, see the module docstring);
     - a family without a profile passes the label-free pooled median of its
       sections for every class (``{}`` and ``default_depth``, one value).
-      The class's cells at one depth all take its bin, so the share is then
-      0 or 1. This is the only use of a single depth.
+
+    With one depth both shares are that depth's (0 or 1).
 
     The same input gives D9's report: the share of the class's depths above
     the grid's deepest bin, which take that bin (``above_grid_share``; a
@@ -3033,14 +3105,16 @@ def np5_extrapolated_share(
         One row per (level, class) of the decisions at the regime, sorted,
         columns ``NP5_EXTRAPOLATED_COLUMNS``: ``expected_depth`` is the median
         of the class's depths and ``expected_bin`` its bin (``None`` below
-        the grid); ``depth_source`` is ``class`` or ``default``.
+        the grid); ``depth_source`` is ``class`` or ``default``;
+        ``profile_passed`` and ``median_passed`` judge the two shares, and
+        ``passed`` is both.
 
     Raises:
         ValueError: For an empty grid, a class without depths and no
             default, depths that are not finite counts >= 0, decisions
             without ``extrapolated`` or rows of the regime, a (level, class,
-            depth) more than once, or a bin a class's depths fall in that its
-            decisions lack.
+            depth) more than once, or a bin a class's depths or their median
+            fall in that its decisions lack.
     """
     grid = sorted({int(depth) for depth in depths})
     if not grid:
@@ -3068,7 +3142,9 @@ def np5_extrapolated_share(
                 "and no default_depth"
             )
         values = _depth_values(value, cls)
-        bins = res.depth_bin(values, grid)
+        median = float(np.median(values))
+        # The class's depths, then its median: each takes its bin.
+        bins = res.depth_bin(np.append(values, median), grid)
         lacking = sorted(
             {int(value) for value in bins[np.isfinite(bins)]} - set(by_depth)
         )
@@ -3080,9 +3156,12 @@ def np5_extrapolated_share(
             [bool(np.isfinite(value)) and by_depth[int(value)] for value in bins],
             dtype=bool,
         )
-        median = float(np.median(values))
-        median_bin = res.depth_bin([median], grid)[0]
-        share = float(flags.mean())
+        median_bin = bins[-1]
+        profile_share = float(flags[:-1].mean())
+        median_share = float(flags[-1])
+        limit = settings.max_extrapolated_share + _TOLERANCE
+        profile_passed = profile_share <= limit
+        median_passed = median_share <= limit
         records.append(
             {
                 "level": level,
@@ -3091,10 +3170,13 @@ def np5_extrapolated_share(
                 "n_depths": int(values.size),
                 "expected_depth": median,
                 "expected_bin": int(median_bin) if np.isfinite(median_bin) else None,
-                "extrapolated_share": share,
+                "profile_share": profile_share,
+                "median_share": median_share,
                 "above_grid_share": float(np.mean(values > grid[-1])),
                 "max_share": settings.max_extrapolated_share,
-                "passed": share <= settings.max_extrapolated_share + _TOLERANCE,
+                "profile_passed": profile_passed,
+                "median_passed": median_passed,
+                "passed": profile_passed and median_passed,
             }
         )
     return pd.DataFrame(
@@ -3127,6 +3209,162 @@ def _passed_by(
     return result
 
 
+def _np5_class_records(
+    agreement: pd.DataFrame,
+    spread: pd.DataFrame,
+    extrapolated: pd.DataFrame,
+    tested: Mapping[tuple[str, str], Sequence[res.GatePTestedSet] | None],
+) -> list[tuple[tuple[str, str], dict[str, object]]]:
+    """Per key of ``tested``, its ``NP5_CLASS_COLUMNS`` record (``np5_class_table``).
+
+    Raises:
+        ValueError: As ``np5_class_table``.
+    """
+    _check_tested(tested)
+    _require_columns(
+        spread,
+        ("level", "class", "set", "n_replicates", "n_fitted", "evaluable", "passed"),
+        "the NP5 t* spread table",
+    )
+    agreed = _passed_by(agreement, ("level", "class"), "NP5 agreement")
+    spread_ok = _passed_by(spread, ("level", "class", "set"), "NP5 t* spread")
+    depth_ok = _passed_by(extrapolated, ("level", "class"), "NP5 extrapolated share")
+    # Per tested set: whether its range was evaluable, and the replicates
+    # left out of it without a fit.
+    evaluable: dict[tuple[str, str, str], list[bool]] = {}
+    unfitted: dict[tuple[str, str, str], int] = {}
+    for level, cls, label, flag, n_replicates, n_fitted in zip(
+        spread["level"].astype(str),
+        spread["class"].astype(str),
+        spread["set"].astype(str),
+        spread["evaluable"].astype(bool),
+        spread["n_replicates"],
+        spread["n_fitted"],
+        strict=True,
+    ):
+        set_key = (level, cls, label)
+        evaluable.setdefault(set_key, []).append(bool(flag))
+        unfitted[set_key] = unfitted.get(set_key, 0) + int(n_replicates) - int(n_fitted)
+    records: list[tuple[tuple[str, str], dict[str, object]]] = []
+    for key, items in tested.items():
+        level, cls = str(key[0]), str(key[1])
+        if items is None:
+            records.append(
+                (
+                    key,
+                    {
+                        "level": level,
+                        "class": cls,
+                        "n_sets": 0,
+                        "agreement_passed": None,
+                        "tstar_passed": None,
+                        "depth_passed": None,
+                        "n_tstar_not_evaluable": 0,
+                        "tstar_not_evaluable_sets": "",
+                        "n_tstar_unfitted": 0,
+                        "passed": None,
+                    },
+                )
+            )
+            continue
+        if (level, cls) not in agreed:
+            raise ValueError(f"{key}: no NP5 agreement rows")
+        if (level, cls) not in depth_ok:
+            raise ValueError(f"{key}: no NP5 extrapolated share row")
+        labels = [tested_set_label(item) for item in items]
+        missing = [label for label in labels if (level, cls, label) not in spread_ok]
+        if missing:
+            raise ValueError(
+                f"{key}: no NP5 t* spread row for the tested sets {missing}"
+            )
+        not_evaluable = [
+            label for label in labels if not all(evaluable[(level, cls, label)])
+        ]
+        agreement_passed = all(agreed[(level, cls)])
+        tstar_passed = all(all(spread_ok[(level, cls, label)]) for label in labels)
+        depth_passed = all(depth_ok[(level, cls)])
+        records.append(
+            (
+                key,
+                {
+                    "level": level,
+                    "class": cls,
+                    "n_sets": len(labels),
+                    "agreement_passed": agreement_passed,
+                    "tstar_passed": tstar_passed,
+                    "depth_passed": depth_passed,
+                    "n_tstar_not_evaluable": len(not_evaluable),
+                    "tstar_not_evaluable_sets": ";".join(not_evaluable),
+                    "n_tstar_unfitted": sum(
+                        unfitted[(level, cls, label)] for label in labels
+                    ),
+                    "passed": agreement_passed and tstar_passed and depth_passed,
+                },
+            )
+        )
+    return records
+
+
+def np5_class_table(
+    agreement: pd.DataFrame,
+    spread: pd.DataFrame,
+    extrapolated: pd.DataFrame,
+    tested: Mapping[tuple[str, str], Sequence[res.GatePTestedSet] | None],
+) -> pd.DataFrame:
+    """Tabulate NP5's three parts and its verdict per (level, class) (§14 NP5).
+
+    A (level, class) passes NP5 when every replicate's re-derived emission
+    agrees with the base run (``np5_decision_agreement``), the t* range is
+    within the limit at each of its tested sets (``np5_tstar_spread``) and
+    its cells at the expected depth are at most 50% extrapolated on both
+    readings (``np5_extrapolated_share``). Beside the verdict the table
+    reports each part and how many of the class's tested sets passed the t*
+    part without a range: ``n_tstar_not_evaluable`` sets (named in
+    ``tstar_not_evaluable_sets``) had fewer than two replicates with a
+    threshold, and ``n_tstar_unfitted`` counts the (set, replicate) pairs
+    left out of a range for want of a fit. Such a pass on nothing is an
+    open reading (module docstring).
+
+    Args:
+        agreement: ``np5_decision_agreement`` output.
+        spread: ``np5_tstar_spread`` output.
+        extrapolated: ``np5_extrapolated_share`` output.
+        tested: The tested sets per (level, class).
+
+    Returns:
+        One row per key of ``tested``, sorted by level and class, columns
+        ``NP5_CLASS_COLUMNS``: a key without a tested set (not evaluable)
+        has no sets and ``None`` for each part and ``passed``.
+
+    Raises:
+        ValueError: If a (level, class) with tested sets has no agreement or
+            extrapolated row, a tested set has no t* spread row, a row has
+            no ``passed`` value, the t* spread table lacks a column, or a
+            key's tested sets are an empty list or of another key.
+    """
+    records = [
+        record
+        for _, record in _np5_class_records(agreement, spread, extrapolated, tested)
+    ]
+    table = pd.DataFrame(
+        {
+            column: pd.Series(
+                [record[column] for record in records],
+                dtype=object
+                if column
+                in ("agreement_passed", "tstar_passed", "depth_passed", "passed")
+                else None,
+            )
+            for column in NP5_CLASS_COLUMNS
+        }
+    )
+    if table.empty:
+        return table
+    return table.sort_values(["level", "class"], kind="mergesort").reset_index(
+        drop=True
+    )
+
+
 def np5_class_verdicts(
     agreement: pd.DataFrame,
     spread: pd.DataFrame,
@@ -3135,13 +3373,10 @@ def np5_class_verdicts(
 ) -> dict[tuple[str, str], bool | None]:
     """Combine NP5's three parts per (level, class) (§14 NP5).
 
-    A (level, class) passes NP5 when every replicate's re-derived emission
-    agrees with the base run (``np5_decision_agreement``), the t* range is
-    within the limit at each of its tested sets (``np5_tstar_spread``) and
-    its cells at the expected depth are at most 50% extrapolated
-    (``np5_extrapolated_share``). The result has the per-member shape that
-    ``resolvability.every_member_verdict`` combines over the version-7
-    emission members.
+    The verdicts of ``np5_class_table`` (which also reports the parts and
+    the tested sets that passed the t* part without a range) in the
+    per-member shape that ``resolvability.every_member_verdict`` combines
+    over the version-7 emission members.
 
     Args:
         agreement: ``np5_decision_agreement`` output.
@@ -3154,36 +3389,12 @@ def np5_class_verdicts(
         (not evaluable), ``False`` when any part fails, else ``True``.
 
     Raises:
-        ValueError: If a (level, class) with tested sets has no agreement or
-            extrapolated row, a tested set has no t* spread row, a row has
-            no ``passed`` value, or a key's tested sets are an empty list or
-            of another key.
+        ValueError: As ``np5_class_table``.
     """
-    _check_tested(tested)
-    agreed = _passed_by(agreement, ("level", "class"), "NP5 agreement")
-    spread_ok = _passed_by(spread, ("level", "class", "set"), "NP5 t* spread")
-    depth_ok = _passed_by(extrapolated, ("level", "class"), "NP5 extrapolated share")
     result: dict[tuple[str, str], bool | None] = {}
-    for key, items in tested.items():
-        if items is None:
-            result[key] = None
-            continue
-        level, cls = str(key[0]), str(key[1])
-        if (level, cls) not in agreed:
-            raise ValueError(f"{key}: no NP5 agreement rows")
-        if (level, cls) not in depth_ok:
-            raise ValueError(f"{key}: no NP5 extrapolated share row")
-        labels = [tested_set_label(item) for item in items]
-        missing = [label for label in labels if (level, cls, label) not in spread_ok]
-        if missing:
-            raise ValueError(
-                f"{key}: no NP5 t* spread row for the tested sets {missing}"
-            )
-        result[key] = (
-            all(agreed[(level, cls)])
-            and all(depth_ok[(level, cls)])
-            and all(all(spread_ok[(level, cls, label)]) for label in labels)
-        )
+    for key, record in _np5_class_records(agreement, spread, extrapolated, tested):
+        passed = record["passed"]
+        result[key] = None if passed is None else bool(passed)
     return result
 
 
