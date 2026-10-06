@@ -448,12 +448,15 @@ def _transform_points(points_obj: Any, result: TransformResult) -> Any:
 def _detach_attrs(element: Any) -> Any:
     """Give a derived element its own deep copy of the source element's attrs.
 
-    Dask ``map_partitions``/``copy`` and pandas copies copy ``attrs`` shallowly,
-    so the derived element shares the nested ``attrs["transform"]`` mapping with
-    its source, and SpatialData's ``set_transformation`` mutates that mapping in
-    place. Without this, stamping the aligned copy with ``Identity`` to the
-    alignment coordinate system silently overwrote the native element's rigid
-    affine as well.
+    SpatialData's ``attrs`` accessor for Dask points carries ``attrs`` over
+    shallowly on ``map_partitions`` and ``copy``: the derived element gets a new
+    top-level mapping, but the nested ``attrs["transform"]`` dict is the same
+    object as its source's, and SpatialData's ``set_transformation`` mutates
+    that dict in place. Without this, stamping the aligned copy with
+    ``Identity`` to the alignment coordinate system silently overwrote the
+    native element's rigid affine as well. pandas and GeoPandas copies already
+    deep-copy ``attrs``; detaching them too keeps every derived element
+    independent of how its library copies metadata.
 
     Args:
         element: Freshly derived points or shapes element.
