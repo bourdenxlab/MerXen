@@ -1,7 +1,7 @@
 """Gate-P scoring (M13, plan §14 new panel family).
 
 Pure functions on cells tables: NP3 precision and coverage, NP4 donor / draw
-stability.
+stability, NP5 resolvability consistency.
 
 Gate P validates a new panel family by simulation only (plan §8.8, §14). The
 thresholds and emission are derived once from the default donor (human) or
@@ -64,6 +64,30 @@ combine the members with ``every_member_verdict``.
 The averaging conventions of the range rule (p_bar and n_bar as means of
 seed-averaged group values, unweighted precision) are D12 of the M13 plan,
 confirmed by the user on 2026-10-06 (pre-registration §23.9, §23.10).
+
+NP5, resolvability consistency (§14 NP5): per (level, class),
+
+- the §8.3 emission decisions re-derived in each replicate
+  (``np5_rederive``; version 7 ``np5_rederive_ensemble``) agree with the
+  base run at every depth bin with >= 50 test cells, except at most the bin
+  adjacent to the emission boundary (``np5_decision_agreement``);
+- each t* varies <= 0.05 across the replicates at the tested sets
+  (``np5_set_thresholds``, fitted on each replicate's rows of the set by the
+  shared membership rule; ``np5_tstar_spread``); and
+- its cells at the family's expected depth are at most 50%
+  ``resolvability_extrapolated`` under the frozen decisions
+  (``np5_extrapolated_share``). The expected depth is an input: per class,
+  its median in the family's frozen ``sim_inputs`` profile asset, or the
+  label-free pooled median (D8; pre-registration §23.9 item 6, §23.10).
+
+Readings this implementation takes where §14 is not explicit (strict where
+there is a choice; to be put to the user with the set a dry run): a bin is
+compared when the base run or the replicate has its 50 test cells; the
+emission boundaries are the base run's status changes inside the grid (its
+edges are none), and at most one compared bin may flip, one that flanks a
+boundary; a replicate whose t* fit exists but never reaches the target
+fails the t* range, and one without a fit (too few fit-half calls) is left
+out of it.
 """
 
 from __future__ import annotations
@@ -1677,3 +1701,879 @@ def np3_class_verdicts(
             table["level"], table["class"], table["passed"], strict=True
         )
     }
+
+
+# --------------------------------------------------------------------------
+# NP5: resolvability consistency (§14 NP5)
+
+# §14 NP5: "each t* varies <= 0.05 across replicates at tested sets".
+NP5_MAX_TSTAR_SPREAD: Final = 0.05
+# §14 NP5: "> 50% resolvability_extrapolated" at the expected depth fails.
+NP5_MAX_EXTRAPOLATED_SHARE: Final = 0.5
+# Where a class's expected depth comes from (``np5_extrapolated_share``).
+NP5_DEPTH_FROM_CLASS: Final = "class"
+NP5_DEPTH_FROM_DEFAULT: Final = "default"
+NP5_AGREEMENT_COLUMNS: Final[tuple[str, ...]] = (
+    "level",
+    "class",
+    "group",
+    "seed",
+    "n_bins",
+    "n_compared",
+    "boundary_depths",
+    "flipped_depths",
+    "n_flipped",
+    "passed",
+)
+NP5_THRESHOLD_COLUMNS: Final[tuple[str, ...]] = (
+    "level",
+    "class",
+    "set",
+    "pooled",
+    "set_min_depth",
+    "group",
+    "seed",
+    "n_called",
+    "n_fit",
+    "fitted",
+    "target",
+    "t_star",
+    "threshold",
+    "threshold_source",
+)
+NP5_SPREAD_COLUMNS: Final[tuple[str, ...]] = (
+    "level",
+    "class",
+    "set",
+    "pooled",
+    "n_replicates",
+    "n_fitted",
+    "n_thresholds",
+    "unfitted",
+    "missing",
+    "threshold_min",
+    "threshold_max",
+    "spread",
+    "max_spread",
+    "evaluable",
+    "passed",
+)
+NP5_EXTRAPOLATED_COLUMNS: Final[tuple[str, ...]] = (
+    "level",
+    "class",
+    "depth_source",
+    "n_depths",
+    "expected_depth",
+    "expected_bin",
+    "extrapolated_share",
+    "above_grid_share",
+    "max_share",
+    "passed",
+)
+_DECISION_KEY: Final[tuple[str, ...]] = ("level", "class", "depth")
+
+
+@dataclass(frozen=True)
+class Np5Settings:
+    """The NP5 constants (§14 NP5; plan §3.7).
+
+    Attributes:
+        min_test_cells: Test cells a depth bin needs, in the base run or the
+            replicate, for its emission decision to be compared (§14: "every
+            depth bin with >= 50 test cells"; ``min_cells_per_bin``, 50, the
+            rule of D_max).
+        max_tstar_spread: The largest range of t* across the replicates at a
+            tested set (0.05).
+        max_extrapolated_share: The largest share of a class's cells at the
+            family's expected depth that may be ``resolvability_extrapolated``
+            (0.5).
+    """
+
+    min_test_cells: int
+    max_tstar_spread: float = NP5_MAX_TSTAR_SPREAD
+    max_extrapolated_share: float = NP5_MAX_EXTRAPOLATED_SHARE
+
+    def __post_init__(self) -> None:
+        """Validate the constants.
+
+        Raises:
+            ValueError: If ``min_test_cells`` is below 1, ``max_tstar_spread``
+                is negative or ``max_extrapolated_share`` is outside [0, 1].
+        """
+        if self.min_test_cells < 1:
+            raise ValueError(
+                f"Np5Settings.min_test_cells must be >= 1, got {self.min_test_cells!r}"
+            )
+        if not self.max_tstar_spread >= 0.0:
+            raise ValueError(
+                "Np5Settings.max_tstar_spread must be >= 0, got "
+                f"{self.max_tstar_spread!r}"
+            )
+        if not 0.0 <= self.max_extrapolated_share <= 1.0:
+            raise ValueError(
+                "Np5Settings.max_extrapolated_share must lie in [0, 1], got "
+                f"{self.max_extrapolated_share!r}"
+            )
+
+    @classmethod
+    def from_config(cls, config: AnnotationResolvabilityConfig) -> Np5Settings:
+        """Read the NP5 constants from the resolvability config (§14 NP5).
+
+        Args:
+            config: The resolvability config.
+
+        Returns:
+            The settings (the t* spread and the extrapolated share are the §14
+            constants 0.05 and 0.5).
+        """
+        return cls(min_test_cells=config.min_cells_per_bin)
+
+
+def _one_seed(frame: pd.DataFrame, name: str) -> int:
+    """The one mapping seed of a replicate's rows.
+
+    Raises:
+        ValueError: If the rows are empty or hold more than one seed.
+    """
+    if frame.empty:
+        raise ValueError(f"{name}: no rows after the filters")
+    seeds = pd.unique(frame["seed"])
+    if len(seeds) != 1:
+        raise ValueError(
+            f"{name}: the rows hold the mapping seeds {sorted(seeds.tolist())}; "
+            "pass one replicate (one seed) per table"
+        )
+    return int(seeds[0])
+
+
+def np5_rederive(
+    cells: pd.DataFrame,
+    levels: Sequence[res.LevelMeta],
+    depths: Sequence[int],
+    settings: res.RuleSettings,
+    *,
+    recipe: str | None = res.DECISION_RECIPE,
+    member: str | None = None,
+    saturated_bp_share: float | None = None,
+) -> pd.DataFrame:
+    """Re-derive one replicate's emission decisions by ``decide`` (§14 NP5).
+
+    NP5 re-derives the §8.3 decisions in each replicate (another donor or
+    draw, another mapping seed) from its own rows, with the base run's rule
+    settings, and compares them with the base run
+    (``np5_decision_agreement``). The replicate's thresholds are fitted on
+    its own fit half; nothing here is scored at the frozen thresholds, so
+    the default group's table is used in full. The rows are kept at their
+    own mapping seed.
+
+    Version 7: one emission member's decisions (``member``, ``recipe=None``
+    and the ensemble's ``saturated_bp_share``, as ``ensemble_decide`` decides
+    each member), or the ensemble's (``np5_rederive_ensemble``).
+
+    Args:
+        cells: One replicate's cells table.
+        levels: The bundle's level metadata.
+        depths: The bundle's depth grid.
+        settings: The bundle's rule settings.
+        recipe: The recipe of the rows (``None``: the rows must hold one).
+        member: The version-7 member of the rows.
+        saturated_bp_share: The saturated-bp rule (v7.8; ``None``: version 6).
+
+    Returns:
+        ``decide`` output.
+
+    Raises:
+        ValueError: If no row is left after the filters, or the rows hold
+            more than one recipe or mapping seed.
+        ResolvabilityError: If a (level, cell, depth) occurs more than once
+            (``replicate_rows``).
+    """
+    frame = res.replicate_rows(cells, recipe=recipe, seed=None, member=member)
+    seed = _one_seed(frame, f"np5_rederive (recipe={recipe!r}, member={member!r})")
+    recipes = sorted({str(value) for value in frame["recipe"]})
+    if len(recipes) != 1:
+        raise ValueError(
+            f"np5_rederive: the rows hold the recipes {recipes}; pass recipe= "
+            "or member= to select one replicate"
+        )
+    return res.decide(
+        frame,
+        levels,
+        depths,
+        settings,
+        recipe=recipes[0],
+        seed=seed,
+        saturated_bp_share=saturated_bp_share,
+    )
+
+
+def np5_rederive_ensemble(
+    cells: pd.DataFrame,
+    levels: Sequence[res.LevelMeta],
+    depths: Sequence[int],
+    settings: res.RuleSettings,
+    ensemble: res.EnsembleSettings,
+    *,
+    members: Sequence[str],
+    neuronal: res.NeuronalOf | None = None,
+) -> pd.DataFrame:
+    """Re-derive one replicate's version-7 ensemble decisions (§14 NP5, v7.7-v7.9).
+
+    The ensemble rule of ``ensemble_decide`` on the replicate's rows of the
+    emission members. ``ensemble_decide`` decides on mapping seed 0, so a
+    replicate at another mapping seed is relabelled to 0 first (its rows
+    are unchanged otherwise).
+
+    Args:
+        cells: One replicate's version-7 cells table (``member`` column).
+        levels: The bundle's level metadata.
+        depths: The bundle's depth grid.
+        settings: The bundle's rule settings.
+        ensemble: The bundle's ensemble settings.
+        members: The emission members.
+        neuronal: Per class, whether it is neuronal (the monotone fill's
+            non-neuronal limit, v7.9).
+
+    Returns:
+        The ensemble decisions (``EnsembleDecisions.decisions``).
+
+    Raises:
+        ValueError: Without members, when a member has no rows, or when the
+            rows hold more than one mapping seed.
+        ResolvabilityError: If a member holds a (level, cell, depth) more
+            than once (``replicate_rows``).
+    """
+    if not members:
+        raise ValueError("np5_rederive_ensemble needs at least one emission member")
+    if res.MEMBER_COLUMN not in cells.columns:
+        raise ValueError("np5_rederive_ensemble: the cells have no member column")
+    names = cells[res.MEMBER_COLUMN].astype(str)
+    frame = cells[names.isin([str(name) for name in members]).to_numpy()]
+    for name in members:
+        rows = res.replicate_rows(frame, recipe=None, seed=None, member=str(name))
+        if rows.empty:
+            raise ValueError(f"np5_rederive_ensemble: member {name!r} has no rows")
+    _one_seed(frame, "np5_rederive_ensemble")
+    relabelled = frame.copy()
+    relabelled["seed"] = np.zeros(len(frame), dtype=frame["seed"].to_numpy().dtype)
+    return res.ensemble_decide(
+        relabelled,
+        levels,
+        depths,
+        settings,
+        ensemble,
+        members=list(members),
+        neuronal=neuronal,
+    ).decisions
+
+
+def _require_columns(frame: pd.DataFrame, columns: Iterable[str], name: str) -> None:
+    """Raise ``ValueError`` naming the columns ``frame`` lacks."""
+    missing = [column for column in columns if column not in frame.columns]
+    if missing:
+        raise ValueError(f"{name}: missing columns {missing}")
+
+
+def _regime_rows(decisions: pd.DataFrame, regime: str, name: str) -> pd.DataFrame:
+    """One regime's rows of a decisions table, one per (level, class, depth).
+
+    Raises:
+        ValueError: If the regime has no rows, or a (level, class, depth)
+            occurs more than once (several members or replicates in one
+            table).
+    """
+    _require_columns(decisions, ("regime", *_DECISION_KEY, "status"), name)
+    frame = decisions[(decisions["regime"].astype(str) == regime).to_numpy()]
+    if frame.empty:
+        raise ValueError(f"{name}: no decisions of the regime {regime!r}")
+    key = pd.DataFrame(
+        {
+            "level": frame["level"].astype(str).to_numpy(),
+            "class": frame["class"].astype(str).to_numpy(),
+            "depth": frame["depth"].to_numpy(np.int64),
+        }
+    )
+    duplicated = key.duplicated()
+    if bool(duplicated.any()):
+        raise ValueError(
+            f"{name}: {int(duplicated.sum())} (level, class, depth) decisions occur "
+            "more than once; pass one decisions table per replicate (version 7: "
+            "the ensemble's, or one member's)"
+        )
+    return frame
+
+
+def _emission_view(
+    decisions: pd.DataFrame, regime: str, name: str
+) -> tuple[dict[tuple[str, str], dict[int, tuple[bool, int]]], set[int]]:
+    """Per (level, class) and depth: (emitted, n_test); and the depths seen."""
+    _require_columns(decisions, ("n_test",), name)
+    frame = _regime_rows(decisions, regime, name)
+    view: dict[tuple[str, str], dict[int, tuple[bool, int]]] = {}
+    for level, cls, depth, status, n_test in zip(
+        frame["level"].astype(str),
+        frame["class"].astype(str),
+        frame["depth"].to_numpy(np.int64),
+        frame["status"].astype(object),
+        frame["n_test"].astype(object),
+        strict=True,
+    ):
+        count = 0 if n_test is None or pd.isna(n_test) else int(n_test)
+        view.setdefault((level, cls), {})[int(depth)] = (
+            status == res.STATUS_EMITTED,
+            count,
+        )
+    return view, {int(depth) for depth in frame["depth"]}
+
+
+def _boundary_depths(emitted: Sequence[bool], grid: Sequence[int]) -> set[int]:
+    """The bins flanking a change of emission status between grid neighbours."""
+    flanking: set[int] = set()
+    for index in range(1, len(grid)):
+        if emitted[index] != emitted[index - 1]:
+            flanking.update((grid[index - 1], grid[index]))
+    return flanking
+
+
+def _joined(depths: Iterable[int]) -> str:
+    """Depths in ascending order, ``;`` joined."""
+    return ";".join(str(depth) for depth in sorted(depths))
+
+
+def np5_decision_agreement(
+    base: pd.DataFrame,
+    replicates: Mapping[ReplicateKey, pd.DataFrame],
+    settings: Np5Settings,
+    *,
+    regime: res.Regime = "provisional",
+) -> pd.DataFrame:
+    """Compare each replicate's re-derived emission with the base run (§14 NP5).
+
+    §14 NP5: per (level, class), the §8.3 emission decisions re-derived in
+    each replicate (``np5_rederive``) agree with the base run at every depth
+    bin with >= 50 test cells, except at most the bin adjacent to the
+    emission boundary. Read here as:
+
+    - a bin is compared when the base run or the replicate has at least
+      ``min_test_cells`` test cells of the class there (``n_test``; the
+      union of the two readings "the base's" and "the replicate's" bins);
+    - a decision is the bin's status at ``regime`` (emitted or not); a
+      (level, class) or bin that a table lacks is not emitted there;
+    - the emission boundaries are the base run's status changes between
+      neighbouring bins of the grid; the bins adjacent to one are the two
+      bins flanking it. The grid's edges are no boundary, so a base that
+      emits every bin (or none) allows no flip;
+    - a replicate passes when no compared bin flips, or exactly one does and
+      it is adjacent to a boundary.
+
+    Args:
+        base: The base run's decisions (``decide``; version 7: the frozen
+            ensemble's, or one member's).
+        replicates: Per (group, seed label), that replicate's re-derived
+            decisions of the same kind as ``base``.
+        settings: The NP5 constants.
+        regime: The regime compared (gate P freezes the provisional one).
+
+    Returns:
+        One row per (level, class) of either table and replicate, sorted by
+        level, class, group and seed, columns ``NP5_AGREEMENT_COLUMNS``:
+        ``boundary_depths`` and ``flipped_depths`` are ``;`` joined.
+
+    Raises:
+        ValueError: Without replicates, for a table without ``n_test`` or
+            rows of the regime, or with a (level, class, depth) more than
+            once.
+    """
+    if not replicates:
+        raise ValueError("np5_decision_agreement: no replicates")
+    base_view, base_depths = _emission_view(base, regime, "the base decisions")
+    minimum = settings.min_test_cells
+    records: list[dict[str, object]] = []
+    for group, seed in sorted(replicates):
+        name = f"replicate {group}/{seed}"
+        view, depths = _emission_view(replicates[(group, seed)], regime, name)
+        grid = sorted(base_depths | depths)
+        for key in sorted(set(base_view) | set(view)):
+            mine = base_view.get(key, {})
+            theirs = view.get(key, {})
+            base_emitted = [mine.get(depth, (False, 0))[0] for depth in grid]
+            boundary = _boundary_depths(base_emitted, grid)
+            compared = [
+                depth
+                for depth in grid
+                if max(mine.get(depth, (False, 0))[1], theirs.get(depth, (False, 0))[1])
+                >= minimum
+            ]
+            flipped = [
+                depth
+                for depth in compared
+                if mine.get(depth, (False, 0))[0] != theirs.get(depth, (False, 0))[0]
+            ]
+            records.append(
+                {
+                    "level": key[0],
+                    "class": key[1],
+                    "group": str(group),
+                    "seed": seed,
+                    "n_bins": len(grid),
+                    "n_compared": len(compared),
+                    "boundary_depths": _joined(boundary),
+                    "flipped_depths": _joined(flipped),
+                    "n_flipped": len(flipped),
+                    "passed": not flipped
+                    or (len(flipped) == 1 and flipped[0] in boundary),
+                }
+            )
+    table = pd.DataFrame.from_records(records, columns=list(NP5_AGREEMENT_COLUMNS))
+    return table.sort_values(
+        ["level", "class", "group", "seed"], kind="mergesort"
+    ).reset_index(drop=True)
+
+
+def _set_threshold(
+    bp: np.ndarray,
+    correct: np.ndarray,
+    half: np.ndarray,
+    meta: res.LevelMeta,
+    target: float,
+    settings: res.RuleSettings,
+    saturated_bp_share: float | None,
+) -> tuple[int, bool, float | None, float | None, str | None]:
+    """Fit one tested set's t* as ``decide`` fits a bin or a pooled set.
+
+    Returns:
+        ``(n_fit, fitted, t_star, threshold, threshold_source)``.
+    """
+    fit_mask = (half == 0) if settings.split_halves else np.ones(len(bp), dtype=bool)
+    fit_mask = fit_mask & np.isfinite(bp)
+    n_fit = int(fit_mask.sum())
+    fit = (
+        res.isotonic_fit(bp[fit_mask], correct[fit_mask])
+        if n_fit >= settings.min_cells_per_bin
+        else None
+    )
+    t_star = res.local_threshold(
+        fit,
+        default=meta.default_threshold,
+        target=target,
+        cap=settings.threshold_cap,
+    )
+    if t_star is not None:
+        return n_fit, True, t_star, t_star, res.THRESHOLD_SOURCE_LOCAL
+    if (
+        fit is not None
+        and saturated_bp_share is not None
+        and res.saturated_bp_fraction(bp[fit_mask]) > saturated_bp_share
+    ):
+        cap = float(settings.threshold_cap)
+        return n_fit, True, None, cap, res.THRESHOLD_SOURCE_SATURATED
+    return n_fit, fit is not None, None, None, None
+
+
+def np5_set_thresholds(
+    replicates: Mapping[ReplicateKey, pd.DataFrame],
+    tested: Mapping[tuple[str, str], Sequence[res.GatePTestedSet] | None],
+    levels: Sequence[res.LevelMeta],
+    settings: res.RuleSettings,
+    *,
+    regime: res.Regime = "provisional",
+    recipe: str | None = res.DECISION_RECIPE,
+    member: str | None = None,
+    saturated_bp_share: float | None = None,
+) -> pd.DataFrame:
+    """Re-derive t* at every tested set in each replicate (§14 NP5).
+
+    A tested set's t* is fitted on the replicate's calls of the class in the
+    set's scope (``tested_set_mask``'s membership rule, so NP3-NP7 cannot
+    drift apart: a bin's calls, or each test cell's deepest call at >= D_P),
+    as ``decide`` fits a bin or a pooled ">= d" set: the isotonic fit on the
+    fit half (``half == 0``; every call without split halves) with at least
+    ``min_cells_per_bin`` calls, then ``local_threshold`` at the regime's
+    target of the set's shallowest bin. The default group's table is used
+    in full: its t* is re-derived on its own fit half, never scored at the
+    frozen thresholds. With ``saturated_bp_share`` (version 7, v7.8) a
+    fitted set without t* whose fit-half calls are saturated takes the cap
+    (``threshold_source = saturated_cap``).
+
+    Args:
+        replicates: Per (group, seed label), that replicate's cells table.
+            Each table must hold exactly one replicate.
+        tested: The tested sets per (level, class) (``gate_p_tested_sets``
+            on the pooled held-out calls; version 7: the member's).
+        levels: The bundle's level metadata (default thresholds, targets).
+        settings: The bundle's rule settings.
+        regime: A fitted regime (``provisional`` in gate P, or ``trust``).
+        recipe: The recipe of the rows (``None``: every recipe, so each table
+            must hold one).
+        member: The version-7 emission member of the rows.
+        saturated_bp_share: The saturated-bp rule (``None``: version 6).
+
+    Returns:
+        One row per (tested set, replicate), sorted by level, class, set,
+        group and seed, columns ``NP5_THRESHOLD_COLUMNS``: ``fitted`` is
+        whether the fit exists; ``t_star`` and ``threshold`` (the applied
+        one: t* or the saturated cap) are ``nan`` without one.
+
+    Raises:
+        ValueError: For the ``validated`` regime (it applies the default,
+            which has no t*), without replicates, for a level without
+            metadata, a replicate without rows after the filters, or a key's
+            tested sets that are an empty list or of another key.
+        ResolvabilityError: If a table holds more than one replicate
+            (``replicate_rows``).
+    """
+    if regime == "validated":
+        raise ValueError(
+            "np5_set_thresholds: the validated regime applies the default "
+            "threshold, which has no t* to vary"
+        )
+    if not replicates:
+        raise ValueError("np5_set_thresholds: no replicates")
+    _check_tested(tested)
+    meta_of = {meta.level: meta for meta in levels}
+    unknown = sorted({level for level, _ in tested} - set(meta_of))
+    if unknown:
+        raise ValueError(f"np5_set_thresholds: no level metadata for {unknown}")
+    ordered = sorted(tested.items(), key=lambda pair: pair[0])
+    records: list[dict[str, object]] = []
+    for group, seed in sorted(replicates):
+        frame = res.replicate_rows(
+            replicates[(group, seed)], recipe=recipe, seed=None, member=member
+        ).reset_index(drop=True)
+        if frame.empty:
+            raise ValueError(
+                f"replicate {group}/{seed} has no rows after the filters "
+                f"(recipe={recipe!r}, member={member!r})"
+            )
+        index = _ReplicateIndex(frame, np.zeros(len(frame), dtype=bool))
+        bp = frame["bp"].to_numpy(np.float64)
+        correct = frame["correct"].to_numpy(bool).astype(np.float64)
+        half = frame["half"].to_numpy(np.int64)
+        for (level, cls), items in ordered:
+            meta = meta_of[level]
+            for item in items or ():
+                called = index.called_positions(item)
+                set_min_depth = int(min(item.depths))
+                target = settings.target(regime, meta.base_target, set_min_depth)
+                n_fit, fitted, t_star, threshold, source = _set_threshold(
+                    bp[called],
+                    correct[called],
+                    half[called],
+                    meta,
+                    target,
+                    settings,
+                    saturated_bp_share,
+                )
+                records.append(
+                    {
+                        "level": level,
+                        "class": cls,
+                        "set": tested_set_label(item),
+                        "pooled": bool(item.pooled),
+                        "set_min_depth": set_min_depth,
+                        "group": str(group),
+                        "seed": seed,
+                        "n_called": int(len(called)),
+                        "n_fit": n_fit,
+                        "fitted": fitted,
+                        "target": target,
+                        "t_star": math.nan if t_star is None else t_star,
+                        "threshold": math.nan if threshold is None else threshold,
+                        "threshold_source": source,
+                    }
+                )
+    table = pd.DataFrame.from_records(records, columns=list(NP5_THRESHOLD_COLUMNS))
+    return table.sort_values(
+        ["level", "class", "set", "group", "seed"], kind="mergesort"
+    ).reset_index(drop=True)
+
+
+def _replicate_labels(rows: pd.DataFrame, mask: np.ndarray) -> str:
+    """``group/seed`` of the masked rows, ``;`` joined."""
+    return ";".join(
+        f"{group}/{seed}"
+        for group, seed in zip(
+            rows["group"][mask].astype(str), rows["seed"][mask], strict=True
+        )
+    )
+
+
+def np5_tstar_spread(thresholds: pd.DataFrame, settings: Np5Settings) -> pd.DataFrame:
+    """Judge the range of t* across the replicates at every tested set (§14 NP5).
+
+    §14 NP5: each t* varies <= ``max_tstar_spread`` (0.05) across replicates
+    at tested sets. The range is taken over the replicates with a threshold
+    (t*, or the saturated cap of version 7). A replicate whose fit exists
+    but never reaches the target has no threshold, so it would not emit the
+    set at all: the set fails (``missing``). A replicate without a fit (too
+    few fit-half calls) is left out of the range (``unfitted``). With fewer
+    than two thresholds the range is not evaluable and the set passes; this
+    is reported (``evaluable``), so that a pass on nothing is visible.
+
+    Args:
+        thresholds: ``np5_set_thresholds`` output (or rows of its columns).
+        settings: The NP5 constants.
+
+    Returns:
+        One row per (level, class, set), columns ``NP5_SPREAD_COLUMNS``.
+
+    Raises:
+        ValueError: If a column is missing.
+    """
+    _require_columns(
+        thresholds,
+        ("level", "class", "set", "pooled", "group", "seed", "fitted", "threshold"),
+        "the t* table",
+    )
+    if thresholds.empty:
+        return pd.DataFrame(columns=list(NP5_SPREAD_COLUMNS))
+    records: list[dict[str, object]] = []
+    for (level, cls, label), rows in thresholds.groupby(
+        ["level", "class", "set"], sort=True
+    ):
+        values = rows["threshold"].to_numpy(np.float64)
+        fitted = rows["fitted"].astype(bool).to_numpy()
+        has = np.isfinite(values)
+        missing = fitted & ~has
+        kept = values[has]
+        evaluable = len(kept) >= 2
+        spread = float(kept.max() - kept.min()) if evaluable else math.nan
+        records.append(
+            {
+                "level": level,
+                "class": cls,
+                "set": label,
+                "pooled": bool(rows["pooled"].iloc[0]),
+                "n_replicates": len(rows),
+                "n_fitted": int(fitted.sum()),
+                "n_thresholds": int(has.sum()),
+                "unfitted": _replicate_labels(rows, ~fitted),
+                "missing": _replicate_labels(rows, missing),
+                "threshold_min": float(kept.min()) if len(kept) else math.nan,
+                "threshold_max": float(kept.max()) if len(kept) else math.nan,
+                "spread": spread,
+                "max_spread": settings.max_tstar_spread,
+                "evaluable": evaluable,
+                "passed": not bool(missing.any())
+                and (not evaluable or spread <= settings.max_tstar_spread + _TOLERANCE),
+            }
+        )
+    return pd.DataFrame.from_records(records, columns=list(NP5_SPREAD_COLUMNS))
+
+
+def _depth_values(value: float | Sequence[float], cls: str) -> np.ndarray:
+    """A class's expected depth (one value) or its cells' depths, checked.
+
+    Raises:
+        ValueError: For no value, or a value that is not finite and >= 0.
+    """
+    values = np.atleast_1d(np.asarray(value, dtype=np.float64)).ravel()
+    if values.size == 0 or not bool(np.all(np.isfinite(values) & (values >= 0.0))):
+        raise ValueError(
+            f"np5_extrapolated_share: the depths of class {cls!r} must be one or "
+            "more finite counts >= 0"
+        )
+    return values
+
+
+def _is_true(value: object) -> bool:
+    """A boolean cell of a decisions table (missing: False)."""
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return False
+    return bool(value)
+
+
+def np5_extrapolated_share(
+    decisions: pd.DataFrame,
+    expected_depth: Mapping[str, float | Sequence[float]],
+    depths: Sequence[int],
+    settings: Np5Settings,
+    *,
+    regime: res.Regime = "provisional",
+    default_depth: float | Sequence[float] | None = None,
+) -> pd.DataFrame:
+    """Share of a class's cells at the expected depth that are extrapolated (§14 NP5).
+
+    §14 NP5: a class is not validated at L if its cells at the family's
+    expected depth would be more than 50% ``resolvability_extrapolated``. A
+    cell takes the bin of its depth (``depth_bin``) and is
+    ``resolvability_extrapolated`` when the frozen decisions mark that
+    (level, class, bin) ``extrapolated`` (``cell_emission``: a pooled bin
+    deeper than D_P, or a version-7 monotone-filled bin); a cell below the
+    grid is not. The share is over the class's depths, and the class passes
+    at L when it is at most ``max_extrapolated_share``.
+
+    The registered input (§14 "Version-7 families"; pre-registration §23.9
+    item 6 and §23.10, D8) is one expected depth per class: its median in
+    the family's frozen ``sim_inputs`` profile asset, with the overall median
+    for classes without calls (``default_depth``), or the label-free pooled
+    median for every class (``{}`` and ``default_depth``). The class's cells
+    at one depth all take its bin, so the share is then 0 or 1. A sequence
+    gives the share over those depths (the class's cells). The same input
+    gives D9's report: the share of the class's depths above the grid's
+    deepest bin, which take that bin (``above_grid_share``).
+
+    Args:
+        decisions: The frozen decisions of the base run (version 7: the
+            ensemble's, monotone-filled bins included).
+        expected_depth: Per class, its expected depth (counts) or its cells'
+            depths.
+        depths: The bundle's depth grid.
+        settings: The NP5 constants.
+        regime: The regime of the frozen decisions.
+        default_depth: The depth(s) of every class without an entry.
+
+    Returns:
+        One row per (level, class) of the decisions at the regime, sorted,
+        columns ``NP5_EXTRAPOLATED_COLUMNS``: ``expected_depth`` is the median
+        of the class's depths and ``expected_bin`` its bin (``None`` below
+        the grid); ``depth_source`` is ``class`` or ``default``.
+
+    Raises:
+        ValueError: For an empty grid, a class without depths and no
+            default, depths that are not finite counts >= 0, decisions
+            without ``extrapolated`` or rows of the regime, a (level, class,
+            depth) more than once, or a bin a class's depths fall in that its
+            decisions lack.
+    """
+    grid = sorted({int(depth) for depth in depths})
+    if not grid:
+        raise ValueError("np5_extrapolated_share: an empty depth grid")
+    _require_columns(decisions, ("extrapolated",), "the decisions")
+    frame = _regime_rows(decisions, regime, "the decisions")
+    marked: dict[tuple[str, str], dict[int, bool]] = {}
+    for level, cls, depth, flag in zip(
+        frame["level"].astype(str),
+        frame["class"].astype(str),
+        frame["depth"].to_numpy(np.int64),
+        frame["extrapolated"].astype(object),
+        strict=True,
+    ):
+        marked.setdefault((level, cls), {})[int(depth)] = _is_true(flag)
+    records: list[dict[str, object]] = []
+    for (level, cls), by_depth in sorted(marked.items()):
+        if cls in expected_depth:
+            source, value = NP5_DEPTH_FROM_CLASS, expected_depth[cls]
+        elif default_depth is not None:
+            source, value = NP5_DEPTH_FROM_DEFAULT, default_depth
+        else:
+            raise ValueError(
+                f"np5_extrapolated_share: no expected depth for class {cls!r} "
+                "and no default_depth"
+            )
+        values = _depth_values(value, cls)
+        bins = res.depth_bin(values, grid)
+        lacking = sorted(
+            {int(value) for value in bins[np.isfinite(bins)]} - set(by_depth)
+        )
+        if lacking:
+            raise ValueError(
+                f"{level}/{cls}: the bins {lacking} are not in the decisions"
+            )
+        flags = np.array(
+            [bool(np.isfinite(value)) and by_depth[int(value)] for value in bins],
+            dtype=bool,
+        )
+        median = float(np.median(values))
+        median_bin = res.depth_bin([median], grid)[0]
+        share = float(flags.mean())
+        records.append(
+            {
+                "level": level,
+                "class": cls,
+                "depth_source": source,
+                "n_depths": int(values.size),
+                "expected_depth": median,
+                "expected_bin": int(median_bin) if np.isfinite(median_bin) else None,
+                "extrapolated_share": share,
+                "above_grid_share": float(np.mean(values > grid[-1])),
+                "max_share": settings.max_extrapolated_share,
+                "passed": share <= settings.max_extrapolated_share + _TOLERANCE,
+            }
+        )
+    return pd.DataFrame(
+        {
+            column: pd.Series(
+                [record[column] for record in records],
+                dtype=object if column == "expected_bin" else None,
+            )
+            for column in NP5_EXTRAPOLATED_COLUMNS
+        }
+    )
+
+
+def _passed_by(
+    table: pd.DataFrame, columns: Sequence[str], name: str
+) -> dict[tuple[str, ...], list[bool]]:
+    """The ``passed`` values of a table per key of ``columns``.
+
+    Raises:
+        ValueError: If a ``passed`` value is missing (``None`` or ``nan``).
+    """
+    result: dict[tuple[str, ...], list[bool]] = {}
+    keys = zip(*(table[column].astype(str) for column in columns), strict=True)
+    for key, passed in zip(keys, table["passed"].astype(object), strict=True):
+        if passed is None or (isinstance(passed, float) and math.isnan(passed)):
+            raise ValueError(f"NP5 {name} row {key} has no passed value")
+        result.setdefault(tuple(key), []).append(bool(passed))
+    return result
+
+
+def np5_class_verdicts(
+    agreement: pd.DataFrame,
+    spread: pd.DataFrame,
+    extrapolated: pd.DataFrame,
+    tested: Mapping[tuple[str, str], Sequence[res.GatePTestedSet] | None],
+) -> dict[tuple[str, str], bool | None]:
+    """Combine NP5's three parts per (level, class) (§14 NP5).
+
+    A (level, class) passes NP5 when every replicate's re-derived emission
+    agrees with the base run (``np5_decision_agreement``), the t* range is
+    within the limit at each of its tested sets (``np5_tstar_spread``) and
+    its cells at the expected depth are at most 50% extrapolated
+    (``np5_extrapolated_share``). The result has the per-member shape that
+    ``resolvability.every_member_verdict`` combines over the version-7
+    emission members.
+
+    Args:
+        agreement: ``np5_decision_agreement`` output.
+        spread: ``np5_tstar_spread`` output.
+        extrapolated: ``np5_extrapolated_share`` output.
+        tested: The tested sets per (level, class).
+
+    Returns:
+        Per (level, class) of ``tested``: ``None`` when it has no tested set
+        (not evaluable), ``False`` when any part fails, else ``True``.
+
+    Raises:
+        ValueError: If a (level, class) with tested sets has no agreement or
+            extrapolated row, a tested set has no t* spread row, a row has
+            no ``passed`` value, or a key's tested sets are an empty list or
+            of another key.
+    """
+    _check_tested(tested)
+    agreed = _passed_by(agreement, ("level", "class"), "agreement")
+    spread_ok = _passed_by(spread, ("level", "class", "set"), "t* spread")
+    depth_ok = _passed_by(extrapolated, ("level", "class"), "extrapolated share")
+    result: dict[tuple[str, str], bool | None] = {}
+    for key, items in tested.items():
+        if items is None:
+            result[key] = None
+            continue
+        level, cls = str(key[0]), str(key[1])
+        if (level, cls) not in agreed:
+            raise ValueError(f"{key}: no NP5 agreement rows")
+        if (level, cls) not in depth_ok:
+            raise ValueError(f"{key}: no NP5 extrapolated share row")
+        labels = [tested_set_label(item) for item in items]
+        missing = [label for label in labels if (level, cls, label) not in spread_ok]
+        if missing:
+            raise ValueError(
+                f"{key}: no NP5 t* spread row for the tested sets {missing}"
+            )
+        result[key] = (
+            all(agreed[(level, cls)])
+            and all(depth_ok[(level, cls)])
+            and all(all(spread_ok[(level, cls, label)]) for label in labels)
+        )
+    return result
