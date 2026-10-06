@@ -51,6 +51,11 @@ MAP_FIRST_UNASSIGNED_STATE_POLICY: Final = "exclude_from_features"
 # Whether a species gate (human H, mouse M) has merged into ``main`` (M13
 # decision D20 (b)); the seeded real-data families only warn while pending.
 SpeciesGateState = Literal["pending", "merged"]
+# How the human marker referee derives its per-panel marker sets (M13 C13,
+# ``human_referee``): ``node`` is mouse G2's rule on the WHB superclusters
+# (each group's mean node profile against every other node), ``class`` the
+# cell-weighted broad-class profile against the other broad classes.
+MarkerRefereeComparator = Literal["node", "class"]
 # A clustered table-key suffix: "" or one lower-case token (§4.8).
 TableKeySuffix = Annotated[str, AfterValidator(validate_table_key_suffix)]
 # Default clustering mode per species. Only the flip PRs (M8 human, M9 mouse)
@@ -885,6 +890,24 @@ class AnnotationRealQcConfig(_AnnotationModel):
             selects the species default (human 0.75; mouse G2's 0.80).
         marker_consistency_broad_only: Human: below this the dataset becomes
             ``broad_only``.
+        marker_referee_min_group_markers: Human referee (M13 C13, D18 (a)):
+            broad classes with fewer derived markers are left out; with
+            fewer than two classes left the referee is ``not_evaluable``.
+            Mouse G2 reads ``mouse_gate.g2_min_group_markers``.
+        marker_referee_min_marker_units: Units the top class of a marker
+            pseudo-label needs (``data/P1212``'s rule, as mouse G2).
+        marker_referee_min_marker_share: Its share of the summed units.
+        marker_referee_min_pseudo_confident: The referee is
+            ``not_evaluable`` with fewer scored cells (marker-pseudo-labelled
+            table cells with a confident ``ct_broad``).
+        marker_referee_comparator: How the per-panel marker sets are derived
+            from the WHB profiles with the §8.6 specificity rule: ``node``
+            (mouse G2's rule as ported: each broad class's mean supercluster
+            profile against every other supercluster) or ``class`` (the
+            cell-weighted broad-class profile against the other broad
+            classes). ``node`` is the M13 C13 specification; ``class`` is
+            the alternative for comparison, not adopted without the user's
+            decision.
         paired_broad_jsd_warn: Paired-platform soft broad JSD warning.
         uninformative_strata_warn_frac: Warn when more flag strata are
             uninformative.
@@ -929,6 +952,11 @@ class AnnotationRealQcConfig(_AnnotationModel):
 
     marker_consistency_warn: float | None = None
     marker_consistency_broad_only: float = 0.70
+    marker_referee_min_group_markers: int = Field(default=3, ge=1)
+    marker_referee_min_marker_units: float = Field(default=1.5, gt=0.0)
+    marker_referee_min_marker_share: float = Field(default=0.6, gt=0.0, le=1.0)
+    marker_referee_min_pseudo_confident: int = Field(default=200, ge=1)
+    marker_referee_comparator: MarkerRefereeComparator = "node"
     paired_broad_jsd_warn: float = 0.20
     uninformative_strata_warn_frac: float = 0.5
     genes_per_count_gap_warn: float = Field(default=0.45, ge=0.0)

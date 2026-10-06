@@ -1943,6 +1943,9 @@ PREFILTER_TEXT: Final = (
 class MarkerConsistencySignal:
     """The human marker referee of one dataset (§8.8; computed by M13 C13).
 
+    ``human_referee.human_marker_referee`` computes it (``.signal()``): the
+    G2 port on per-panel marker sets derived from the WHB profiles (D18 (a)).
+
     Attributes:
         consistency: The share of marker-pseudo-labelled cells whose
             confident ``ct_broad`` agrees with their pseudo-label (``None``

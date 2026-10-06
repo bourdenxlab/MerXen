@@ -995,11 +995,32 @@ change one. The comparison against a QC-free re-run of RESOLVE
 
 | Check | Function | Rule | Effect |
 |---|---|---|---|
-| Marker referee (human) | `marker_consistency_outcome` | per-panel marker consistency of confident broad calls | warning below 0.75; gate capped at `broad_only` below 0.70 (trust and margins unchanged); `not_evaluable` without a statistic |
+| Marker referee (human) | `human_referee.human_marker_referee` (the statistic), `marker_consistency_outcome` | mouse G2 ported to the primary WHB bundle's profiles: per broad class, the panel genes that pass the §8.6 specificity rule (>= 20x and >= 1/1000; immediate-early genes excluded; classes with < 3 markers left out); table cells pseudo-labelled with `data/P1212`'s rule (>= 1.5 units and >= 60% of the marker units); the share of pseudo-labelled cells with a confident `ct_broad` whose call equals the pseudo-label | warning below 0.75; gate capped at `broad_only` below 0.70 (trust and margins unchanged); `not_evaluable` with fewer than 2 classes with markers or fewer than 200 scored cells |
 | Registration G1 (human) | `registration_g1_outcome` | §7.6 as defined there: the fail rule is density ratio < 1.5 or shift > 5 µm; otherwise the warning rule is density ratio < 2.0 | fail rule: warning (`registration_g1_effect`; the gate fails with `gate_failed`); warning rule: warning |
 | Paired concordance | `paired_concordance` | the pair's soft broad JSD on the shared-tissue mask (point estimate; the whole section reported) above 0.20 | supercluster-level cross-platform statistics withheld; `not_applicable` for an unpaired section; `not_evaluable` without a shared-mask value (the whole section is never scored in its place) |
 | Flag rates | `flag_rate_summary` | more than half of the (class x platform) strata of the contamination, diffuse and spill-over flags uninformative under H16's 15% marking (a stratum is uninformative when any of its flags is) | warning; the per-flag, pooled and own-switch readings are reported beside it |
 | Prefilter spot check | `prefilter_spotcheck` | agreement of the prefiltered with the unfiltered lookup below 0.95 at an emitted level | that level `not_resolvable` for the dataset |
+
+**Human marker referee (M13 chunk C13).** `merxen.annotation.human_referee`
+groups the WHB superclusters of the primary bundle's leaf level into the
+seven broad classes (the WHB vocab; sinks and the nodes outside the seven
+classes belong to none) and derives each class's markers on the panel's
+query genes with the §8.6 / E3 specificity rule
+(`flags.specific_gene_ratio`, `flags.specific_gene_min_share`).
+`real_qc.marker_referee_comparator` chooses the comparison: `node` (the
+default, mouse G2's rule: the class's unweighted mean supercluster profile
+against every other supercluster, sinks included) or `class` (the
+cell-weighted class profile against the other classes' profiles). They
+differ where a class holds a small node that shares another class's genes
+(the Committed oligodendrocyte precursor supercluster, in the OPC class,
+shares oligodendrocyte genes) or a sink resembles a class (Splatter): `node`
+then leaves that class without markers. The sets depend only on the bundle
+and the panel. `RefereeMarkers.to_frame` writes them before a run,
+`RefereeMarkers.from_frame` reads them back, and the run's QC details record
+their sha256 (`fingerprint`). Hand-curated sets (`RefereeMarkers.from_symbols`)
+are scored by the same rule for reporting. The 0.75 / 0.70 thresholds came
+from the H9 hand lists, so the derived statistic is re-measured on set a
+before a new family is scored (M13 C17).
 
 On a seeded real-data family whose species gate has not merged into `main`
 (`real_qc.seeded_families_warn_only_until_gate`), the lowering effects of the
