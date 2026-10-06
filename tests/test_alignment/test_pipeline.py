@@ -14,12 +14,18 @@ from scipy import sparse
 from shapely.geometry import box
 from spatialdata import SpatialData
 from spatialdata.models import PointsModel, ShapesModel, TableModel
-from spatialdata.transformations import Identity, get_transformation
+from spatialdata.transformations import (
+    Affine,
+    Identity,
+    get_transformation,
+    set_transformation,
+)
 
 from merxen.alignment.bundle import ValisTransformBundle
 from merxen.alignment.pipeline import (
     MERXEN_ALIGNMENT_ATTR,
     _transform_points,
+    _transform_shapes,
     _write_moving_alignment_to_zarr,
 )
 from merxen.alignment.register import TransformResult
@@ -153,6 +159,27 @@ def test_write_moving_aligned_zarr_adds_transforms_and_nonrigid_elements(
     )
     assert isinstance(nonrigid, Identity)
 
+    # The native transcripts must carry the same rigid affine as the native
+    # shapes; only their non-rigid copy is already in the alignment frame.
+    native_points_rigid = get_transformation(
+        aligned.points["transcripts"],
+        to_coordinate_system="merxen_xenium",
+    )
+    np.testing.assert_allclose(
+        native_points_rigid.to_affine_matrix(
+            input_axes=("x", "y"),
+            output_axes=("x", "y"),
+        ),
+        affine,
+    )
+    assert isinstance(
+        get_transformation(
+            aligned.points["transcripts_aligned_nonrigid"],
+            to_coordinate_system="merxen_xenium",
+        ),
+        Identity,
+    )
+
     point_df = aligned.points["transcripts_aligned_nonrigid"].compute()
     np.testing.assert_allclose(point_df[["x", "y"]].to_numpy(), nonrigid_xy)
     np.testing.assert_allclose(point_df[["raw_x", "raw_y"]].to_numpy(), source_xy)
@@ -160,6 +187,72 @@ def test_write_moving_aligned_zarr_adds_transforms_and_nonrigid_elements(
         aligned.tables["table"].obsm["spatial_merxen_xenium"],
         nonrigid_xy,
     )
+
+
+def _translation_result() -> TransformResult:
+    affine = np.array([[1.0, 0.0, 5.0], [0.0, 1.0, -3.0], [0.0, 0.0, 1.0]])
+    source_xy = np.array([[0.0, 0.0], [4.0, 0.0], [0.0, 4.0]])
+    return TransformResult(
+        merscope_to_common={
+            "selected_mode": "nonrigid",
+            "rigid_affine_matrix": affine.tolist(),
+        },
+        xenium_to_common={"type": "identity"},
+        metadata={"pair_id": "example"},
+        nonrigid_transform=fit_nonrigid_transform(
+            source_xy,
+            source_xy + np.array([5.0, -3.0]),
+            affine_matrix=affine,
+            max_anchors=3,
+        ),
+    )
+
+
+def test_aligned_copies_do_not_share_transformations_with_native() -> None:
+    """Stamping an aligned copy must leave the native element's transforms intact."""
+    rigid = Affine(
+        np.array([[0.0, -1.0, 7.0], [1.0, 0.0, 2.0], [0.0, 0.0, 1.0]]),
+        input_axes=("x", "y"),
+        output_axes=("x", "y"),
+    )
+    points = PointsModel.parse(
+        dd.from_pandas(
+            pd.DataFrame({"x": [0.0, 1.0], "y": [0.0, 1.0], "gene": ["A", "B"]}),
+            npartitions=1,
+        ),
+        coordinates={"x": "x", "y": "y"},
+        feature_key="gene",
+        transformations={"global": Identity(), "merxen_xenium": rigid},
+    )
+    # Points without recognised coordinate columns are passed through unchanged,
+    # so the returned element must still be a detached copy.
+    no_xy_points = dd.from_pandas(
+        pd.DataFrame({"u": [0.0], "v": [0.0], "gene": ["A"]}),
+        npartitions=1,
+    )
+    set_transformation(
+        no_xy_points,
+        {"global": Identity(), "merxen_xenium": rigid},
+        set_all=True,
+    )
+    shapes = ShapesModel.parse(
+        gpd.GeoDataFrame({"geometry": [box(0.0, 0.0, 1.0, 1.0)]}),
+        transformations={"global": Identity(), "merxen_xenium": rigid},
+    )
+    result = _translation_result()
+
+    derived = [
+        (points, _transform_points(points, result)),
+        (no_xy_points, _transform_points(no_xy_points, result)),
+        (shapes, _transform_shapes(shapes, result)),
+    ]
+    for native, aligned in derived:
+        set_transformation(aligned, Identity(), to_coordinate_system="merxen_xenium")
+        assert get_transformation(native, to_coordinate_system="merxen_xenium") is rigid
+        assert isinstance(
+            get_transformation(aligned, to_coordinate_system="merxen_xenium"),
+            Identity,
+        )
 
 
 def test_transform_points_dask_metadata_matches_p7113_shared_domain_order() -> None:

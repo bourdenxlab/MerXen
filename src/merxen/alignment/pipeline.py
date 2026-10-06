@@ -6,6 +6,7 @@ import json
 import logging
 import traceback
 from contextlib import ExitStack
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, cast
 
@@ -345,6 +346,7 @@ def _transform_shapes(
     gdf = shapes.copy()
     if "geometry" not in gdf.columns:
         gdf = gpd.GeoDataFrame(gdf, geometry=gdf.geometry)
+    _detach_attrs(gdf)
 
     def _xy_func(x: Any, y: Any, z: Any | None = None) -> Any:
         x_arr = np.asarray(x, dtype=np.float64)
@@ -390,7 +392,7 @@ def _transform_points(points_obj: Any, result: TransformResult) -> Any:
         ["y", "y_micron", "y_location", "global_y", "y_global_px", "observed_y"],
     )
     if x_col is None or y_col is None:
-        return points_obj
+        return _detach_attrs(points_obj.copy())
 
     raw_x_col = f"raw_{x_col}"
     raw_y_col = f"raw_{y_col}"
@@ -439,8 +441,30 @@ def _transform_points(points_obj: Any, result: TransformResult) -> Any:
 
     if hasattr(points_obj, "map_partitions"):
         meta = _part(points_obj._meta.copy())
-        return points_obj.map_partitions(_part, meta=meta)
-    return _part(points_obj)
+        return _detach_attrs(points_obj.map_partitions(_part, meta=meta))
+    return _detach_attrs(_part(points_obj))
+
+
+def _detach_attrs(element: Any) -> Any:
+    """Give a derived element its own deep copy of the source element's attrs.
+
+    Dask ``map_partitions``/``copy`` and pandas copies copy ``attrs`` shallowly,
+    so the derived element shares the nested ``attrs["transform"]`` mapping with
+    its source, and SpatialData's ``set_transformation`` mutates that mapping in
+    place. Without this, stamping the aligned copy with ``Identity`` to the
+    alignment coordinate system silently overwrote the native element's rigid
+    affine as well.
+
+    Args:
+        element: Freshly derived points or shapes element.
+
+    Returns:
+        The same element, whose attrs no longer alias its source's.
+    """
+    detached = deepcopy(dict(element.attrs))
+    element.attrs.clear()
+    element.attrs.update(detached)
+    return element
 
 
 def _add_registered_table_centroids(
