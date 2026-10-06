@@ -1806,7 +1806,9 @@ wiring follows M6b.
    (`HumanResolveSettings.qc`): the cap lowers the dataset gate before the
    leaf levels read it (the gate-level invariance still holds), a withheld
    level is not emitted for the dataset (its confident cells
-   `not_resolvable`), and the flags are recomputed. Warnings only join the
+   `not_resolvable`, or `parent_unresolved` where their parent lost its
+   confidence too, since RESOLVE checks the parent first), and the flags
+   are recomputed. Warnings only join the
    gate's warning reasons (`real_qc_<check>: ...`). The emission plan, the
    floor plan, the thresholds, the margins and trust are never touched; a
    trust downgrade is refused (no check of M13 has one).

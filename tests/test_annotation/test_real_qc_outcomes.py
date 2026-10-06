@@ -500,22 +500,22 @@ def test_a_gate_cap_gives_the_statuses_of_mouse_resolve(
 
 
 class _WithheldEmission:
-    """An emission plan that emits nothing at one level (a withheld level).
+    """An emission plan that emits nothing at some levels (withheld levels).
 
     Everything else is the wrapped plan's, so RESOLVE run with it is RESOLVE
-    with that level made ``not_resolvable`` and nothing else changed.
+    with those levels made ``not_resolvable`` and nothing else changed.
     """
 
-    def __init__(self, plan: Any, withheld: str) -> None:
+    def __init__(self, plan: Any, withheld: Iterable[str]) -> None:
         self._plan = plan
-        self._withheld = withheld
+        self._withheld = frozenset(withheld)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._plan, name)
 
     def level(self, level: str, key: Any, counts: Any) -> Any:
         emission = self._plan.level(level, key, counts)
-        if level != self._withheld:
+        if level not in self._withheld:
             return emission
         return dataclasses.replace(
             emission, emitted=np.zeros(len(emission.emitted), dtype=bool)
@@ -523,7 +523,9 @@ class _WithheldEmission:
 
 
 def mouse_resolution(
-    cells: list[mouse.Cell], make_trust: MakeTrust, withheld: str | None = None
+    cells: list[mouse.Cell],
+    make_trust: MakeTrust,
+    withheld: str | Iterable[str] | None = None,
 ) -> Any:
     """Run ``resolve_mouse`` as ``test_consensus_mouse.resolve`` does."""
     trust = make_trust("validated_real", species="mouse")
@@ -542,7 +544,9 @@ def mouse_resolution(
         min_counts=10,
         emission=emission
         if withheld is None
-        else _WithheldEmission(emission, withheld),
+        else _WithheldEmission(
+            emission, [withheld] if isinstance(withheld, str) else withheld
+        ),
         floors=floors,
         thresholds=limits,
         trust=trust,
@@ -594,6 +598,48 @@ def test_a_withheld_level_gives_the_confident_sets_of_mouse_resolve(
         assert after[0]["subclass"][1] == CONFIDENT
     if withheld == "class":
         assert after[0]["subclass"][1] == CellStatus.PARENT_UNRESOLVED.value
+
+
+@pytest.mark.parametrize(
+    "withheld",
+    list(itertools.combinations(("broad", "class", "nt", "subclass"), 2)),
+    ids="+".join,
+)
+def test_a_level_and_its_parent_withheld_give_the_statuses_of_mouse_resolve(
+    make_trust: MakeTrust, withheld: tuple[str, str]
+) -> None:
+    """Two levels withheld: a cell whose parent is lost too is parent_unresolved.
+
+    RESOLVE checks the parent before the emission, so a confident cell whose
+    level is withheld and whose parent lost its confidence is
+    ``parent_unresolved``, not ``not_resolvable``.
+    """
+    free = mouse_resolution(MOUSE_CELLS, make_trust)
+    held = mouse_resolution(MOUSE_CELLS, make_trust, withheld)
+    after = qc.apply_qc_to_statuses(
+        *statuses_of(free),
+        [outcome("withhold_level", level=level) for level in withheld],
+        in_table=free.in_table,
+        species="mouse",
+    )
+    for level, result in held.levels.items():
+        was = free.levels[level].status == CONFIDENT
+        assert list(after[0][level] == CONFIDENT) == list(result.status == CONFIDENT), (
+            withheld,
+            level,
+        )
+        # Every cell the QC-free run made confident takes RESOLVE's status.
+        assert list(after[0][level][was]) == list(result.status[was]), (
+            withheld,
+            level,
+        )
+    assert_only_shrinks(statuses_of(free), after)
+    if withheld == ("class", "subclass"):
+        # The neuron's subclass hangs off NT (lost through class), the
+        # astrocyte's off class: both parent_unresolved.
+        for cell in (0, 1):
+            assert after[0]["subclass"][cell] == CellStatus.PARENT_UNRESOLVED.value
+        assert after[0]["class"][0] == CellStatus.NOT_RESOLVABLE.value
 
 
 def test_a_withheld_lineage_unresolves_every_level_below_it() -> None:

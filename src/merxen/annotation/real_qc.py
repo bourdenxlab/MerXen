@@ -1878,18 +1878,22 @@ def apply_qc_to_statuses(
       emission reads its table (``thresholds.DERIVED_EMISSION_LEVELS``: human
       ``seaad_subclass`` reads ``supercluster``), become ``not_resolvable``;
       the confident cells of the levels that hang off them
-      (``LEVEL_PARENTS``) ``parent_unresolved``, names kept.
+      (``LEVEL_PARENTS``) ``parent_unresolved``, names kept. RESOLVE checks
+      the parent before the emission, so a confident cell of a withheld
+      level whose parent lost its confidence too (a level and its parent
+      both withheld) is ``parent_unresolved``.
 
     Statuses only fall from ``confident``: no cell becomes confident and no
     cell that stays confident changes its name, and nothing here reads or
     changes an emission plan, a floor plan, a threshold or a margin. Exact
-    for the gate caps; for a withheld level exact on the confident sets,
-    while a non-confident status that RESOLVE orders after
-    ``not_resolvable`` (a threshold miss) may differ from an in-pass
-    application. The gate level is the caller's: withholding the lineage or
-    broad level also lowers the confident broad coverage the dataset gate
-    reads, which RESOLVE re-evaluates (with no confident broad call the gate
-    fails); pass that gate's cap with the outcomes.
+    for the gate caps; for withheld levels exact on every cell the QC-free
+    run made confident. A cell the QC-free run did not make confident keeps
+    its status, which an in-pass application may write as ``not_resolvable``
+    instead (a threshold miss, which RESOLVE checks after the emission). The
+    gate level is the caller's: withholding the lineage or broad level also
+    lowers the confident broad coverage the dataset gate reads, which
+    RESOLVE re-evaluates (with no confident broad call the gate fails); pass
+    that gate's cap with the outcomes.
 
     Args:
         statuses: Per level, the QC-free run's ``CellStatus`` values.
@@ -1942,18 +1946,19 @@ def apply_qc_to_statuses(
     order += [level for level in out_status if level not in order]
     for level in order:
         now = out_status[level] == confident
+        parent_lost = np.zeros(n, dtype=bool)
+        chosen = np.zeros(n, dtype=bool)
+        for parent in LEVEL_PARENTS[species].get(level, ()):
+            if parent not in lost:
+                continue
+            use = ~chosen & applicable[parent]
+            parent_lost |= use & lost[parent]
+            chosen |= use
+        # RESOLVE checks the parent before the emission: a lost parent decides
+        # first, also at a withheld level.
+        out_status[level][now & parent_lost] = CellStatus.PARENT_UNRESOLVED.value
         if level in withheld:
-            out_status[level][now] = CellStatus.NOT_RESOLVABLE.value
-        else:
-            parent_lost = np.zeros(n, dtype=bool)
-            chosen = np.zeros(n, dtype=bool)
-            for parent in LEVEL_PARENTS[species].get(level, ()):
-                if parent not in lost:
-                    continue
-                use = ~chosen & applicable[parent]
-                parent_lost |= use & lost[parent]
-                chosen |= use
-            out_status[level][now & parent_lost] = CellStatus.PARENT_UNRESOLVED.value
+            out_status[level][now & ~parent_lost] = CellStatus.NOT_RESOLVABLE.value
         lost[level] = before[level] & (out_status[level] != confident)
     return out_status, out_names
 

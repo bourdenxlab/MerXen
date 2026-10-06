@@ -190,6 +190,58 @@ def test_a_withheld_level_is_not_emitted_for_the_dataset(
         )
 
 
+def test_a_level_and_its_parent_withheld_give_the_statuses_of_the_pass(
+    make_trust: MakeTrust,
+    make_decisions: MakeDecisions,
+    human_level_meta: list[LevelMeta],
+) -> None:
+    """NT and supercluster withheld (with and without a gate cap).
+
+    RESOLVE checks the parent before the emission: a neuron's confident
+    supercluster, whose NT is withheld too, becomes ``parent_unresolved``;
+    a non-neuron's (its parent is broad) and the SEA-AD subclass (it reads
+    the supercluster table, its parent is broad) ``not_resolvable``. Every
+    cell the QC-free run made confident takes the status of the pass.
+    """
+    rng = np.random.default_rng(5)
+    calls = human.calls_of([*human.random_cells(rng, 120), *human_cells()])
+    settings = human.Setup(
+        trust=make_trust("validated_real"),
+        decisions=make_decisions(),
+        meta=human_level_meta,
+    ).settings()
+    held = [
+        outcome("withhold_level", level=level, check="prefilter_spotcheck")
+        for level in ("nt", "supercluster")
+    ]
+    for cap in (None, "broad_only"):
+        capped = [outcome("gate_cap", gate_cap=cap)] if cap is not None else []
+        free, applied, effects = _free_and_applied(settings, [*held, *capped], calls)
+        expected = qc.apply_qc_to_statuses(
+            *statuses_of(free), effects, in_table=free.in_table, species="human"
+        )
+        for level, values in expected[0].items():
+            was = free.levels[level].confident
+            assert list(values[was]) == list(applied.levels[level].status[was]), (
+                cap,
+                level,
+            )
+        if cap is not None:
+            continue
+        neuron = free.levels["nt"].confident & free.levels["supercluster"].confident
+        other = (
+            free.levels["nt"].status == CellStatus.NOT_APPLICABLE.value
+        ) & free.levels["supercluster"].confident
+        assert neuron.any() and other.any()
+        status = applied.levels["supercluster"].status
+        assert set(status[neuron]) == {CellStatus.PARENT_UNRESOLVED.value}
+        assert set(status[other]) == {CellStatus.NOT_RESOLVABLE.value}
+        sea = free.levels["seaad_subclass"].confident
+        assert set(applied.levels["seaad_subclass"].status[sea]) == {
+            CellStatus.NOT_RESOLVABLE.value
+        }
+
+
 def test_every_effect_combination_only_lowers_in_the_pass(
     make_trust: MakeTrust,
     make_decisions: MakeDecisions,
