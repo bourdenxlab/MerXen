@@ -57,9 +57,10 @@ per validated level"; ``np4_seed_stability``): the seeds are MapMyCells
 mapping seeds, so seed 1 re-maps seed 0's simulated cells, and a change is
 a call change (``resolvability.seed_stability``; D6, pre-registration
 §23.9 item 3, confirmed on 2026-10-06). A level over 2% fails NP4 for every
-class of the level (``np4_class_verdicts``). The readings taken where §14
-is not explicit are listed in ``np4_seed_stability``'s docstring; they are
-open until the user answers them, before the set a dry run is scored.
+class of the level (``np4_class_verdicts``), its classes without a changed
+label included. That reading and the others taken where §14 is not
+explicit are listed in ``np4_seed_stability``'s docstring; they are open
+until the user answers them, before the set a dry run is scored.
 
 A replicate is keyed by an opaque (group, seed label) pair:
 the group is a human donor or a mouse draw, so the functions are
@@ -1012,26 +1013,43 @@ def np4_seed_stability(
       refused rather than scored. Otherwise gate P stops with an error.
 
     Readings this implementation takes where §14 is not explicit (strict
-    where there is a choice). They are open: each needs the user's answer,
-    recorded in the pre-registration (§23.9 item 3), before the set a dry
-    run (C9) is scored, as for NP5 and NP7. Until then:
+    where there is a choice, unless ``seed_stability``, which D6 names,
+    settles it). They are open: each needs the user's answer, recorded in
+    the pre-registration (§23.9 item 3), before the set a dry run (C9) is
+    scored, as for NP5 and NP7. Until then:
 
     - **Each group is scored.** Every group's seed pair must change at most
       2% of its labels at the level (``changed_share``); the share pooled
       over the groups (``pooled_changed_share``) is reported only. Looser:
       the pooled share alone, which no group exceeds when all pass.
     - **The level's statistic.** The share is over all the level's labels,
-      as §14 words it ("per validated level"), and a level over 2% fails
-      NP4 for every class of the level (``np4_class_verdicts``), its classes
-      without a changed label included. A class's own share (stricter for
-      the class whose labels change, looser for the others) is not
-      computed.
+      as §14 words it ("per validated level"): every class and emitted bin
+      of the level, classes outside C_P and classes without a tested set
+      (not evaluable) included. A level over 2% fails NP4 for every class
+      of the level (``np4_class_verdicts``), its classes without a changed
+      label included, so one unstable class can fail every validated class
+      of its level. Under this reading §12 M13's test "one failing class
+      leaves the other classes of its level validated" holds for NP4's
+      tested-set parts, not for the seed criterion. A class's own share
+      (stricter for the class whose labels change, looser for the others)
+      is not computed. This reading departs from NP4's per-(level, class)
+      design and needs the user's explicit answer.
     - **The base seed's labels.** The denominator is the base seed's
       confident labels, as in ``seed_stability``; a cell confident at the
       other seed only is not counted. Alternative: both seeds' labels.
     - **A group without confident labels at a level** passes it, as nothing
       can change there (``changed_share`` is ``nan``), as NP4's vacuous
       sets do. Stricter: fail it.
+    - **A class the WHB COP rule drops at the other seed.**
+      ``whb_cop_rule`` nulls the broad ``parent`` of a cell whose
+      supercluster COP call fails the rule and keeps its call. When it does
+      so at the other seed only, the base-seed label keeps its name, so it
+      is a threshold crossing (``n_crossed``), not a change, as in
+      ``seed_stability``, which compares calls only; production gives that
+      cell no broad label at the other seed. Stricter: count it as a
+      change.
+    - **Threshold crossings** are reported and not counted (D6's call
+      changes, above); the user confirms this with the other readings.
 
     Version-7 families score this in every emission member (``member=``),
     each member's seed-0 calls against its own seed-1 re-mapping, and
@@ -1146,7 +1164,8 @@ def np4_class_verdicts(
     level's confident labels in every group). The literal reading of §14
     (M13 plan CHECK K10, D29): an NP4 failure at any tested set fails the
     (level, class); it does not only raise ``validated_min_depth``. A level
-    over the seed limit fails every class of the level. The result has the
+    over the seed limit fails every class of the level (an open reading,
+    listed in ``np4_seed_stability``). The result has the
     per-member shape that ``resolvability.every_member_verdict`` combines
     over the version-7 emission members.
 
