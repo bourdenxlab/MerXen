@@ -48,6 +48,9 @@ LeafSource = Literal["mapped", "denovo"]
 UnassignedStatePolicy = Literal["state", "exclude_from_features"]
 LEGACY_UNASSIGNED_STATE_POLICY: Final = "state"
 MAP_FIRST_UNASSIGNED_STATE_POLICY: Final = "exclude_from_features"
+# Whether a species gate (human H, mouse M) has merged into ``main`` (M13
+# decision D20 (b)); the seeded real-data families only warn while pending.
+SpeciesGateState = Literal["pending", "merged"]
 # A clustered table-key suffix: "" or one lower-case token (§4.8).
 TableKeySuffix = Annotated[str, AfterValidator(validate_table_key_suffix)]
 # Default clustering mode per species. Only the flip PRs (M8 human, M9 mouse)
@@ -869,6 +872,11 @@ class MouseGateConfig(_AnnotationModel):
         return self
 
 
+def _pending_species_gates() -> dict[Species, SpeciesGateState]:
+    """Return the species gate record of D20 (b): no species gate has merged."""
+    return {"human": "pending", "mouse": "pending"}
+
+
 class AnnotationRealQcConfig(_AnnotationModel):
     """Downgrade-only QC on real in-house datasets (plan §8.8; rev3).
 
@@ -883,8 +891,23 @@ class AnnotationRealQcConfig(_AnnotationModel):
         genes_per_count_gap_warn: Warn when native cells carry this much more
             genes than simulated cells.
         prefilter_spotcheck_min_agreement: 5K prefilter spot-check agreement.
-        seeded_families_warn_only_until_gate: The seeded real-data families
-            only warn until their species gate has merged.
+        seeded_families_warn_only_until_gate: Per species, whether its gate
+            (human: gate H; mouse: gate M) has merged: ``pending`` or
+            ``merged``. While ``pending``, the checks of plan §8.8 that
+            ``real_qc`` adds (marker referee, paired concordance, flag rates,
+            gene complexity, prefilter spot check) only warn on the seeded
+            ``real_data`` families of that species. A gate counts as merged
+            only after its acceptance-gate PR into ``main`` (M13 decision D20
+            (b), 2026-10-06), so both stay ``pending`` until then. The rev3
+            bool is accepted: ``true`` is both ``pending``, ``false`` both
+            ``merged``.
+        registration_g1_effect: Human registration G1 (§8.8; M0a's guard
+            with §7.6's fail rule): ``warning`` (warn-only in M13, decision
+            D23 (b), approved 2026-10-06) or ``gate_failed`` (§8.8's effect:
+            the dataset gate fails, every cell ``not_attempted_gate`` and
+            ``exclude_hard``), adopted once the set a regression shows no
+            false G1 failure (a tightening, recorded before the new-panel
+            family's QC is read).
         coverage_warn_margin: M3c (user decision 4): warn per (level, called
             class) when the real confident share is below the class-depth
             prediction at the dataset's own per-class depth by more than
@@ -908,7 +931,10 @@ class AnnotationRealQcConfig(_AnnotationModel):
     uninformative_strata_warn_frac: float = 0.5
     genes_per_count_gap_warn: float = Field(default=0.45, ge=0.0)
     prefilter_spotcheck_min_agreement: float = 0.95
-    seeded_families_warn_only_until_gate: bool = True
+    seeded_families_warn_only_until_gate: dict[Species, SpeciesGateState] = Field(
+        default_factory=_pending_species_gates
+    )
+    registration_g1_effect: Literal["warning", "gate_failed"] = "warning"
     coverage_warn_margin: float = 0.10
     coverage_min_cells: int = Field(default=200, ge=1)
     factor_remeasure_min_r: float = 0.9
@@ -936,6 +962,39 @@ class AnnotationRealQcConfig(_AnnotationModel):
         return (
             None if value is None else _check_fraction(value, "marker_consistency_warn")
         )
+
+    @field_validator("seeded_families_warn_only_until_gate", mode="before")
+    @classmethod
+    def _species_gate_record(cls: type[AnnotationRealQcConfig], value: Any) -> Any:
+        # The rev3 bool meant "warn-only until the species gate": true keeps
+        # every species pending, false declares every gate merged.
+        if isinstance(value, bool):
+            return dict.fromkeys(SPECIES, "pending" if value else "merged")
+        return value
+
+    @field_validator("seeded_families_warn_only_until_gate")
+    @classmethod
+    def _fill_species_gates(
+        cls: type[AnnotationRealQcConfig], value: dict[str, str]
+    ) -> dict[str, str]:
+        # A species left out keeps the safe state: its gate has not merged.
+        return {species: value.get(species, "pending") for species in SPECIES}
+
+    def seeded_warn_only(self: AnnotationRealQcConfig, species: str) -> bool:
+        """Return whether the seeded families of ``species`` only warn.
+
+        Args:
+            species: ``"human"`` or ``"mouse"``.
+
+        Returns:
+            ``True`` while the species gate is ``pending`` (D20 (b)).
+        """
+        merged = {
+            key
+            for key, value in self.seeded_families_warn_only_until_gate.items()
+            if value == "merged"
+        }
+        return species not in merged
 
 
 class AnnotationFlagsConfig(_AnnotationModel):

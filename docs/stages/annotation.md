@@ -969,6 +969,36 @@ stay or fall (property-tested).
 The thresholds are the `real_qc` fields of the annotation config
 ([Configuration](../configuration.md)).
 
+**Outcomes and effects (M13).** Every check records one outcome per dataset
+(`pass`, `warn`, `fail`, `not_applicable` or `not_evaluable`;
+`RealQcProvenance`). A check that does not apply is `not_applicable`: paired
+concordance on an unpaired section, the factor re-measure without a measured
+factor table, the prefilter spot check without a prefilter, the version-7
+checks on a version-6 bundle. A check whose input is missing is
+`not_evaluable`. A failing check can only lower the dataset: cap its gate
+level (`gate_cap`), make an emitted level `not_resolvable` for it
+(`withhold_level`), withhold the pair's supercluster-level cross-platform
+statistics (`withhold_pair_stats`) or lower trust (`downgrade`).
+`apply_qc_to_gate` never raises a gate level, `apply_qc_outcomes` never
+raises a trust state, and `apply_qc_to_statuses` gives the statuses a
+QC-applied RESOLVE produces: confident sets only shrink and keep their labels,
+and no emission or floor plan changes (property-tested over every outcome
+combination). `real_data_qc` runs every check from the `real_qc` config:
+
+| Check | Function | Rule | Effect |
+|---|---|---|---|
+| Marker referee (human) | `marker_consistency_outcome` | per-panel marker consistency of confident broad calls | warning below 0.75; gate capped at `broad_only` below 0.70 (trust and margins unchanged); `not_evaluable` without a statistic |
+| Registration G1 (human) | `registration_g1_outcome` | density ratio < 1.5 or shift > 5 µm | warning (`registration_g1_effect`; the gate fails with `gate_failed`) |
+| Paired concordance | `paired_concordance` | the pair's soft broad JSD on the shared-tissue mask (point estimate; the whole section reported) above 0.20 | supercluster-level cross-platform statistics withheld; `not_applicable` for an unpaired section |
+| Flag rates | `flag_rate_summary` | more than half of the (class x platform) strata of the contamination, diffuse and spill-over flags uninformative under H16's 15% marking (a stratum is uninformative when any of its flags is) | warning; the per-flag, pooled and own-switch readings are reported beside it |
+| Prefilter spot check | `prefilter_spotcheck` | agreement of the prefiltered with the unfiltered lookup below 0.95 at an emitted level | that level `not_resolvable` for the dataset |
+
+On a seeded real-data family whose species gate has not merged into `main`
+(`real_qc.seeded_families_warn_only_until_gate`), the lowering effects of the
+referee, paired concordance, flag rates, gene complexity and the spot check
+are demoted to warnings. The dataset gate's own outcome (and mouse G1 and G2)
+is recorded from the gate verdict, never applied twice.
+
 ## Pipeline processes
 
 Four CPU processes in `workflows/modules/annotation.nf` and

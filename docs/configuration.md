@@ -626,11 +626,14 @@ fields were added by milestone M3c (plan §3.7, §8.3 "Resolvability version 7",
 | `real_qc.factor_remeasure_min_r` | `0.9` | First in-house dataset of a family with a measured factor table: warn (and recommend a PREP re-run with the in-house table as a new asset) when the re-measured factors correlate below this with the stored table on the informative genes. |
 | `real_qc.nonneuronal_high_depth_counts` | `1000` | Non-neuronal cells at or above this depth in `nonneuronal_high_depth` bins get the report-only `flag_nonneuronal_high_depth` (RESOLVE, version-7 bundles). |
 | `real_qc.genes_per_count_gap_warn` | `0.45` | Gene-complexity warning: native cells carry more than this share more genes than simulated cells at matched depth; the warning says simulated coverage predictions are unreliable for the dataset. |
+| `real_qc.seeded_families_warn_only_until_gate` | `{"human": "pending", "mouse": "pending"}` | Per species, whether its gate (human H, mouse M) has merged. While `pending`, the checks `real_qc` adds (marker referee, paired concordance, flag rates, gene complexity, prefilter spot check) only warn on the seeded real-data families of that species. A gate counts as merged only after its acceptance-gate PR into `main`. The earlier bool still loads (`true`: both pending; `false`: both merged). |
+| `real_qc.registration_g1_effect` | `warning` | Human registration G1 (the segmentation registration check's density ratio below 1.5 or shift above 5 µm): `warning` (warn-only, the M13 setting) or `gate_failed` (the dataset gate fails, as plan §8.8 registers), adopted once the set a regression shows no false G1 failure. |
 
 The `real_qc` checks are implemented in `merxen.annotation.real_qc`. RESOLVE
 reads `real_qc.nonneuronal_high_depth_counts` for version-7 bundles (the M3c
-follow-up); the warnings are wired into RESOLVE and the first in-house dataset
-of a family by M13 (plan §12 M3c). None raises a trust state.
+follow-up); `real_qc.real_data_qc` reads the other fields, and M13 wires it
+into RESOLVE and the first in-house dataset of a family (plan §12 M3c, M13).
+None raises a trust state.
 
 **RESOLVE rule settings have no pipeline params.** The thresholds, targets,
 floors, dataset gate and flag settings RESOLVE applies are the

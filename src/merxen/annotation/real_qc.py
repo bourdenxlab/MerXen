@@ -53,27 +53,61 @@ Checks added by M3c (plan §8.8 table; §8.3 v7.5, v7.9; §8.10):
 or lower it (refused < broad_only < provisional < validated); every M3c
 check is warning- or report-only and never lowers it.
 
+M13 (chunk C12) adds the outcome model, the combinators and the checks the
+§8.8 table still lacked, so that every check records an outcome per dataset
+(pre-registration §23.5 P4: ``pass``, ``warn``, ``fail``, ``not_applicable``
+or ``not_evaluable``):
+
+* ``QcOutcome`` gains a ``state`` (``evaluated``, ``not_applicable``,
+  ``not_evaluable``) and the lowering effects ``gate_cap`` (the dataset gate
+  level), ``withhold_level`` (an emitted level made ``not_resolvable`` for
+  the dataset) and ``withhold_pair_stats`` (the pair's supercluster-level
+  cross-platform statistics);
+* ``qc_effects`` combines outcomes; ``apply_qc_to_gate`` can only lower a
+  gate verdict and ``apply_qc_to_statuses`` gives the per-level statuses a
+  QC-applied RESOLVE must produce (confident sets only shrink, names of the
+  cells that stay confident unchanged); ``qc_to_provenance`` maps outcomes to
+  ``RealQcProvenance``;
+* the checks: ``marker_consistency_outcome`` (human referee, D18: warning
+  < 0.75, gate cap ``broad_only`` < 0.70), ``registration_g1_outcome``
+  (human G1, warn-only in M13 by D23 (b)), ``paired_concordance`` (soft
+  broad JSD on the shared mask, D21; ``not_applicable`` for an unpaired
+  section), ``flag_rate_summary`` (§8.8's literal reading, D22 / CHECK K6),
+  ``prefilter_spotcheck`` and ``factor_remeasure_outcome``
+  (``not_applicable`` where they do not apply);
+* ``real_data_qc(signals, trust, config)`` runs them all from
+  ``AnnotationRealQcConfig`` and demotes the lowering effects to warnings
+  on the seeded ``real_data`` families until their species gate has merged
+  (D20 (b)).
+
+RESOLVE wires them per dataset in M13 chunk C15.
+
 This module imports only the standard library, numpy and pandas (and
-``merxen.annotation.resolvability`` / ``schema``, which need no more), so it
-imports in the GPU clustering environment.
+``merxen.annotation.resolvability`` / ``schema`` / ``provenance``, which
+need no more), so it imports in the GPU clustering environment.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Final, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal, Protocol, TypeVar, cast
 
 import numpy as np
 import pandas as pd
 
 from merxen.annotation.resolvability import STATUS_EMITTED, depth_bin
-from merxen.annotation.schema import PANEL_TRUST_STATES
+from merxen.annotation.schema import GATE_LEVELS, PANEL_TRUST_STATES, CellStatus
 
 if TYPE_CHECKING:
     from scipy import sparse
+
+    from merxen.annotation.config import AnnotationConfig
+    from merxen.annotation.diagnostics import TrustDecision
+    from merxen.annotation.provenance import RealQcOutcome, RealQcProvenance
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +144,43 @@ TREND_MIN_BAND_CELLS: Final = 200
 TREND_Z: Final = 2.0
 FLOAT_TOL: Final = 1e-9
 
-Effect = Literal["warning", "report_only", "downgrade"]
+Effect = Literal[
+    "warning",
+    "report_only",
+    "downgrade",
+    "gate_cap",
+    "withhold_level",
+    "withhold_pair_stats",
+]
+EFFECTS: Final[tuple[str, ...]] = (
+    "warning",
+    "report_only",
+    "downgrade",
+    "gate_cap",
+    "withhold_level",
+    "withhold_pair_stats",
+)
+# Effects that lower what a dataset emits or reports (plan §8.8): a trust
+# cap, a dataset gate-level cap, an emitted level made ``not_resolvable`` for
+# the dataset, and the pair's supercluster-level cross-platform statistics
+# withheld. Every other effect leaves the dataset's outputs unchanged.
+LOWERING_EFFECTS: Final[frozenset[str]] = frozenset(
+    {"downgrade", "gate_cap", "withhold_level", "withhold_pair_stats"}
+)
+QcState = Literal["evaluated", "not_applicable", "not_evaluable"]
+QC_STATES: Final[tuple[str, ...]] = ("evaluated", "not_applicable", "not_evaluable")
+# Gate levels a QC outcome may cap a dataset at (never ``full``).
+QC_GATE_CAPS: Final[tuple[str, ...]] = ("broad_only", "failed")
+# Provenance outcome tokens (``provenance.RealQcOutcome``), worst first: a
+# check with several outcomes (one per level or class) records the worst, and
+# a check that could not be evaluated in part is never recorded as a pass.
+OUTCOME_ORDER: Final[tuple[str, ...]] = (
+    "fail",
+    "warn",
+    "not_evaluable",
+    "pass",
+    "not_applicable",
+)
 
 # Worded per class (D4 of 2026-09-29): the warning fires for glia, vascular
 # and immune cells and for small hypothalamic neuron classes alike.
@@ -155,16 +225,34 @@ GENE_COMPLEXITY_TEXT: Final = (
 class QcOutcome:
     """One real-data QC outcome (plan §8.8).
 
+    An outcome is ``evaluated`` (it passed or fired), ``not_applicable`` (the
+    check does not apply to the dataset: an unpaired section has no paired
+    concordance, a family without an R3 member no factor re-measure, a panel
+    without a prefilter no spot check) or ``not_evaluable`` (it applies but
+    its input is missing). Only an evaluated outcome can fire.
+
     Attributes:
         check: The check (``coverage_vs_simulation``, ...).
         fired: Whether the check fired.
-        effect: ``warning`` / ``report_only`` (never changes trust) or
-            ``downgrade`` (lowers trust to ``trust_cap``).
+        effect: What a fired outcome does: ``warning`` (the dataset gate's
+            warning flag) or ``report_only`` (neither changes an output);
+            ``downgrade`` (trust lowered to ``trust_cap``), ``gate_cap``
+            (the dataset gate level lowered to ``gate_cap``),
+            ``withhold_level`` (the emitted ``level`` becomes
+            ``not_resolvable`` for the dataset) or ``withhold_pair_stats``
+            (the pair's supercluster-level cross-platform statistics are
+            withheld). None raises a trust state, a gate level or an
+            emission, and none changes a margin, a threshold or a floor.
         message: Human-readable text (empty when not fired).
         trust_cap: For ``downgrade``, the highest trust state kept.
-        level: The level concerned, if any.
+        level: The level concerned, if any (required for
+            ``withhold_level``).
         cls: The class concerned, if any.
         details: Numbers behind the outcome.
+        gate_cap: For ``gate_cap``, the highest gate level kept
+            (``broad_only`` or ``failed``).
+        state: ``evaluated``, ``not_applicable`` or ``not_evaluable``.
+        reason: Why the check was not evaluated (required then).
     """
 
     check: str
@@ -175,9 +263,14 @@ class QcOutcome:
     level: str | None = None
     cls: str | None = None
     details: Mapping[str, Any] = field(default_factory=dict)
+    gate_cap: str | None = None
+    state: QcState = "evaluated"
+    reason: str | None = None
 
     def __post_init__(self) -> None:
-        """Validate the effect and the trust cap."""
+        """Validate the effect, its cap and the state."""
+        if self.effect not in EFFECTS:
+            raise ValueError(f"unknown QC effect {self.effect!r}")
         if self.effect == "downgrade":
             if self.trust_cap not in PANEL_TRUST_STATES:
                 raise ValueError(
@@ -185,6 +278,126 @@ class QcOutcome:
                 )
         elif self.trust_cap is not None:
             raise ValueError(f"a {self.effect} outcome has no trust cap")
+        if self.effect == "gate_cap":
+            if self.gate_cap not in QC_GATE_CAPS:
+                raise ValueError(
+                    f"a gate_cap outcome needs a gate cap in {QC_GATE_CAPS}, got "
+                    f"{self.gate_cap!r}"
+                )
+        elif self.gate_cap is not None:
+            raise ValueError(f"a {self.effect} outcome has no gate cap")
+        if (
+            self.effect == "withhold_level"
+            and self.state == "evaluated"
+            and not self.level
+        ):
+            raise ValueError("a withhold_level outcome needs its level")
+        if self.state not in QC_STATES:
+            raise ValueError(f"unknown QC state {self.state!r}")
+        if self.state != "evaluated":
+            if self.fired:
+                raise ValueError(f"a {self.state} outcome cannot fire")
+            if not self.reason:
+                raise ValueError(f"a {self.state} outcome needs a reason")
+
+    @classmethod
+    def not_applicable(
+        cls,
+        check: str,
+        reason: str,
+        *,
+        effect: Effect = "warning",
+        **fields: Any,
+    ) -> QcOutcome:
+        """Return the outcome of a check that does not apply to the dataset.
+
+        Args:
+            check: The check.
+            reason: Why it does not apply.
+            effect: The effect it would have had.
+            **fields: Further ``QcOutcome`` fields (a cap for capping
+                effects, ``details``).
+
+        Returns:
+            The ``not_applicable`` outcome.
+        """
+        return cls(
+            check, False, effect, state="not_applicable", reason=reason, **fields
+        )
+
+    @classmethod
+    def not_evaluable(
+        cls,
+        check: str,
+        reason: str,
+        *,
+        effect: Effect = "warning",
+        **fields: Any,
+    ) -> QcOutcome:
+        """Return the outcome of a check that applies but cannot be evaluated.
+
+        Args:
+            check: The check.
+            reason: Why it cannot be evaluated (the missing input).
+            effect: The effect it would have had.
+            **fields: Further ``QcOutcome`` fields.
+
+        Returns:
+            The ``not_evaluable`` outcome.
+        """
+        return cls(check, False, effect, state="not_evaluable", reason=reason, **fields)
+
+    @property
+    def lowers(self) -> bool:
+        """Whether the outcome lowers the dataset (fired, lowering effect)."""
+        return bool(self.fired) and self.effect in LOWERING_EFFECTS
+
+    @property
+    def outcome(self) -> str:
+        """Return the provenance token (``provenance.RealQcOutcome``).
+
+        ``not_applicable`` / ``not_evaluable`` for checks not evaluated;
+        ``pass`` when not fired; ``fail`` when fired with a lowering effect;
+        ``warn`` when fired with a warning or report-only effect.
+        """
+        if self.state != "evaluated":
+            return self.state
+        if not self.fired:
+            return "pass"
+        return "fail" if self.effect in LOWERING_EFFECTS else "warn"
+
+    def warn_only(self, note: str) -> QcOutcome:
+        """Return the outcome with a lowering effect demoted to a warning.
+
+        The seeded ``real_data`` families only warn until their species gate
+        has merged (plan §8.8, ``seeded_families_warn_only_until_gate``): the
+        outcome keeps its message (prefixed with ``note``) and records the
+        effect it would have had in ``details`` (``warn_only_effect`` and its
+        cap), so the report can say what was withheld.
+
+        Args:
+            note: Why the effect is withheld.
+
+        Returns:
+            ``self`` unless it lowers; else the warning.
+        """
+        if not self.lowers:
+            return self
+        details = dict(self.details)
+        details["warn_only_effect"] = self.effect
+        if self.gate_cap is not None:
+            details["warn_only_gate_cap"] = self.gate_cap
+        if self.trust_cap is not None:
+            details["warn_only_trust_cap"] = self.trust_cap
+        return QcOutcome(
+            check=self.check,
+            fired=True,
+            effect="warning",
+            message=f"{note}: {self.message}" if self.message else note,
+            level=self.level,
+            cls=self.cls,
+            details=details,
+        )
 
     def to_json(self) -> dict[str, Any]:
         """Return a JSON-safe record."""
@@ -192,8 +405,12 @@ class QcOutcome:
             "check": self.check,
             "fired": bool(self.fired),
             "effect": self.effect,
+            "outcome": self.outcome,
+            "state": self.state,
+            "reason": self.reason,
             "message": self.message,
             "trust_cap": self.trust_cap,
+            "gate_cap": self.gate_cap,
             "level": self.level,
             "class": self.cls,
             "details": _json_safe(dict(self.details)),
@@ -230,8 +447,10 @@ def apply_qc_outcomes(state: str, outcomes: Iterable[QcOutcome]) -> str:
     """Return the trust state after real-data QC: never higher than ``state``.
 
     Only fired ``downgrade`` outcomes lower it (to their ``trust_cap``);
-    warnings and report-only outcomes, and every passing check, leave it
-    unchanged (plan §8.8: real data stay downgrade-only).
+    every other effect (a gate cap, a withheld level or pair statistics, a
+    warning, a report), and every passing, ``not_applicable`` or
+    ``not_evaluable`` check, leaves it unchanged (plan §8.8: real data stay
+    downgrade-only; the marker referee caps the gate, not trust, D18 (a)).
 
     Args:
         state: The trust state from PREP and the validated tables.
@@ -1208,3 +1427,1530 @@ def qc_summary(outcomes: Iterable[QcOutcome]) -> dict[str, Any]:
         "n_fired": sum(1 for item in items if item["fired"]),
         "promotes": False,
     }
+
+
+# --------------------------------------------------------------------------
+# Effects and the downgrade-only combinators (M13)
+
+# The levels a ``broad_only`` gate leaves unattempted (``leaf_gated`` in
+# ``consensus.resolve_human`` / ``resolve_mouse``).
+LEAF_GATED_LEVELS: Final[dict[str, tuple[str, ...]]] = {
+    "human": ("supercluster", "seaad_subclass", "cluster"),
+    "mouse": ("subclass", "supertype"),
+}
+# RESOLVE's levels, parents first.
+LEVEL_ORDER: Final[dict[str, tuple[str, ...]]] = {
+    "human": ("lineage", "broad", "nt", "supercluster", "seaad_subclass", "cluster"),
+    "mouse": ("broad", "class", "nt", "subclass", "supertype"),
+}
+# Per level, its parents in RESOLVE: a confident call needs a confident
+# parent, the first listed one whose status at the cell is not
+# ``not_applicable`` (a neuron's leaf hangs off its NT, a non-neuron's off its
+# broad or class level).
+LEVEL_PARENTS: Final[dict[str, dict[str, tuple[str, ...]]]] = {
+    "human": {
+        "broad": ("lineage",),
+        "nt": ("broad",),
+        "supercluster": ("nt", "broad"),
+        "seaad_subclass": ("broad",),
+        "cluster": ("supercluster",),
+    },
+    "mouse": {
+        "class": ("broad",),
+        "nt": ("class",),
+        "subclass": ("nt", "class"),
+        "supertype": ("subclass",),
+    },
+}
+
+
+class _GateVerdictLike(Protocol):
+    """The fields ``apply_qc_to_gate`` reads (``GateVerdict``, ``MouseGateVerdict``)."""
+
+    @property
+    def level(self) -> str: ...
+
+    @property
+    def warning(self) -> bool: ...
+
+    @property
+    def level_reasons(self) -> tuple[str, ...]: ...
+
+    @property
+    def warning_reasons(self) -> tuple[str, ...]: ...
+
+
+GateT = TypeVar("GateT", bound=_GateVerdictLike)
+
+
+def gate_severity(level: str) -> int:
+    """Return the severity of a gate level (full 0 < broad_only 1 < failed 2).
+
+    Args:
+        level: ``full``, ``broad_only`` or ``failed``.
+
+    Returns:
+        Its index in ``schema.GATE_LEVELS``.
+
+    Raises:
+        ValueError: For an unknown level.
+    """
+    if level not in GATE_LEVELS:
+        raise ValueError(f"unknown gate level {level!r}")
+    return GATE_LEVELS.index(level)
+
+
+@dataclass(frozen=True)
+class QcEffects:
+    """The combined effects of a dataset's QC outcomes (downgrade-only).
+
+    Attributes:
+        gate_cap: The most severe gate level a fired ``gate_cap`` outcome
+            caps the dataset at (``None``: no cap).
+        trust_cap: The lowest trust state a fired ``downgrade`` keeps.
+        withheld_levels: Emitted levels made ``not_resolvable`` for the
+            dataset.
+        withhold_pair_stats: Whether the pair's supercluster-level
+            cross-platform statistics are withheld.
+        level_reasons: Gate level reasons of the gate caps.
+        warning_reasons: Gate warning reasons: fired warnings and every
+            lowering effect other than a gate cap.
+        downgrades: ``<effect>:<check>`` tokens of the lowering effects
+            (``RealQcProvenance.downgrades``).
+    """
+
+    gate_cap: str | None = None
+    trust_cap: str | None = None
+    withheld_levels: tuple[str, ...] = ()
+    withhold_pair_stats: bool = False
+    level_reasons: tuple[str, ...] = ()
+    warning_reasons: tuple[str, ...] = ()
+    downgrades: tuple[str, ...] = ()
+
+    @property
+    def lowers(self) -> bool:
+        """Whether any effect lowers the dataset."""
+        return bool(
+            self.gate_cap
+            or self.trust_cap
+            or self.withheld_levels
+            or self.withhold_pair_stats
+        )
+
+    def to_json(self) -> dict[str, Any]:
+        """Return a JSON-safe record."""
+        return {
+            "gate_cap": self.gate_cap,
+            "trust_cap": self.trust_cap,
+            "withheld_levels": list(self.withheld_levels),
+            "withhold_pair_stats": self.withhold_pair_stats,
+            "level_reasons": list(self.level_reasons),
+            "warning_reasons": list(self.warning_reasons),
+            "downgrades": list(self.downgrades),
+        }
+
+
+def _scope(outcome: QcOutcome) -> str:
+    parts = [str(part) for part in (outcome.level, outcome.cls) if part]
+    return f"[{', '.join(parts)}]" if parts else ""
+
+
+def qc_effects(outcomes: Iterable[QcOutcome]) -> QcEffects:
+    """Combine a dataset's QC outcomes into their effects.
+
+    Only fired outcomes act: a ``warning`` adds a gate warning reason, a
+    ``gate_cap`` the lowest cap and a level reason, a ``downgrade`` the
+    lowest trust cap, ``withhold_level`` its level and ``withhold_pair_stats``
+    the pair flag (each of the last three also a warning reason). A
+    ``report_only`` outcome and every passing, ``not_applicable`` or
+    ``not_evaluable`` outcome have no effect.
+
+    Args:
+        outcomes: The dataset's outcomes.
+
+    Returns:
+        The effects.
+    """
+    gate_cap: str | None = None
+    trust_cap: str | None = None
+    withheld: list[str] = []
+    pair_stats = False
+    level_reasons: list[str] = []
+    warning_reasons: list[str] = []
+    downgrades: list[str] = []
+    for outcome in outcomes:
+        if not outcome.fired or outcome.effect == "report_only":
+            continue
+        reason = f"real_qc_{outcome.check}{_scope(outcome)}: " + (
+            outcome.message or outcome.effect
+        )
+        if outcome.effect == "warning":
+            warning_reasons.append(reason)
+        elif outcome.effect == "gate_cap":
+            cap = str(outcome.gate_cap)
+            if gate_cap is None or gate_severity(cap) > gate_severity(gate_cap):
+                gate_cap = cap
+            level_reasons.append(reason)
+            downgrades.append(f"{cap}:{outcome.check}")
+        elif outcome.effect == "downgrade":
+            cap = str(outcome.trust_cap)
+            if trust_cap is None or trust_rank(cap) < trust_rank(trust_cap):
+                trust_cap = cap
+            warning_reasons.append(reason)
+            downgrades.append(f"trust_{cap}:{outcome.check}")
+        elif outcome.effect == "withhold_level":
+            level = str(outcome.level)
+            if level not in withheld:
+                withheld.append(level)
+            warning_reasons.append(reason)
+            downgrades.append(f"not_resolvable_{level}:{outcome.check}")
+        elif outcome.effect == "withhold_pair_stats":
+            pair_stats = True
+            warning_reasons.append(reason)
+            downgrades.append(f"withhold_pair_stats:{outcome.check}")
+    return QcEffects(
+        gate_cap=gate_cap,
+        trust_cap=trust_cap,
+        withheld_levels=tuple(withheld),
+        withhold_pair_stats=pair_stats,
+        level_reasons=tuple(level_reasons),
+        warning_reasons=tuple(warning_reasons),
+        downgrades=tuple(dict.fromkeys(downgrades)),
+    )
+
+
+def _as_effects(qc: Iterable[QcOutcome] | QcEffects) -> QcEffects:
+    return qc if isinstance(qc, QcEffects) else qc_effects(qc)
+
+
+def apply_qc_to_gate(verdict: GateT, qc: Iterable[QcOutcome] | QcEffects) -> GateT:
+    """Return a dataset gate verdict after real-data QC: never a higher level.
+
+    The level becomes the worse of the verdict's and the QC gate cap; the QC
+    level and warning reasons are appended and the warning flag is set when
+    QC adds a warning reason (it is never cleared). Works for the human
+    ``GateVerdict`` and the ``MouseGateVerdict`` (plan §5.4, §7.6, §8.8).
+
+    Args:
+        verdict: The dataset gate verdict before QC.
+        qc: The dataset's QC outcomes or their effects.
+
+    Returns:
+        The verdict after QC (``verdict`` itself when QC adds nothing).
+    """
+    effects = _as_effects(qc)
+    if not effects.level_reasons and not effects.warning_reasons:
+        return verdict
+    level = str(verdict.level)
+    if effects.gate_cap is not None and gate_severity(effects.gate_cap) > gate_severity(
+        level
+    ):
+        level = effects.gate_cap
+    replaced = dataclasses.replace(
+        cast(Any, verdict),
+        level=level,
+        warning=bool(verdict.warning or effects.warning_reasons),
+        level_reasons=(*verdict.level_reasons, *effects.level_reasons),
+        warning_reasons=(*verdict.warning_reasons, *effects.warning_reasons),
+    )
+    return cast(GateT, replaced)
+
+
+def apply_qc_to_statuses(
+    statuses: Mapping[str, np.ndarray | Sequence[object]],
+    names: Mapping[str, np.ndarray | Sequence[object]],
+    qc: Iterable[QcOutcome] | QcEffects,
+    *,
+    in_table: np.ndarray | Sequence[bool],
+    species: str,
+    gate_level: str = "full",
+) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
+    """Return per-level statuses and names after a dataset's QC effects.
+
+    The expected statuses of RESOLVE with the QC effects applied, from the
+    QC-free run's (``gate_level``: that run's gate level):
+
+    * a gate cap worse than ``gate_level``: ``failed`` makes every table cell
+      ``not_attempted_gate`` at every level, ``broad_only`` at the leaf
+      levels (``LEAF_GATED_LEVELS``), without names, as RESOLVE writes them;
+    * a withheld level: its confident cells, and those of the levels whose
+      emission reads its table (``thresholds.DERIVED_EMISSION_LEVELS``: human
+      ``seaad_subclass`` reads ``supercluster``), become ``not_resolvable``;
+      the confident cells of the levels that hang off them
+      (``LEVEL_PARENTS``) ``parent_unresolved``, names kept.
+
+    Statuses only fall from ``confident``: no cell becomes confident and no
+    cell that stays confident changes its name, and nothing here reads or
+    changes an emission plan, a floor plan, a threshold or a margin. Exact
+    for the gate caps; for a withheld level exact on the confident sets,
+    while a non-confident status that RESOLVE orders after
+    ``not_resolvable`` (a threshold miss) may differ from an in-pass
+    application. The gate level is the caller's: withholding the lineage or
+    broad level also lowers the confident broad coverage the dataset gate
+    reads, which RESOLVE re-evaluates (with no confident broad call the gate
+    fails); pass that gate's cap with the outcomes.
+
+    Args:
+        statuses: Per level, the QC-free run's ``CellStatus`` values.
+        names: Per level, the QC-free run's names (same levels).
+        qc: The dataset's QC outcomes or their effects.
+        in_table: Table cells.
+        species: ``"human"`` or ``"mouse"``.
+        gate_level: The QC-free run's gate level.
+
+    Returns:
+        ``(statuses, names)`` after QC (copies).
+
+    Raises:
+        ValueError: For an unknown species, a level without names or arrays
+            of different lengths.
+    """
+    if species not in LEVEL_PARENTS:
+        raise ValueError(f"unknown species {species!r}")
+    effects = _as_effects(qc)
+    table = np.asarray(in_table, dtype=bool)
+    n = len(table)
+    out_status: dict[str, np.ndarray] = {}
+    out_names: dict[str, np.ndarray] = {}
+    for level, values in statuses.items():
+        if level not in names:
+            raise ValueError(f"no names for level {level!r}")
+        out_status[level] = np.asarray(values, dtype=object).copy()
+        out_names[level] = np.asarray(names[level], dtype=object).copy()
+        if len(out_status[level]) != n or len(out_names[level]) != n:
+            raise ValueError(f"level {level!r} differs in length from in_table")
+    confident = CellStatus.CONFIDENT.value
+    applicable = {
+        level: values != CellStatus.NOT_APPLICABLE.value
+        for level, values in out_status.items()
+    }
+    before = {level: values == confident for level, values in out_status.items()}
+    cap = effects.gate_cap
+    if cap is not None and gate_severity(cap) > gate_severity(gate_level):
+        blocked = (
+            list(out_status)
+            if cap == "failed"
+            else [level for level in out_status if level in LEAF_GATED_LEVELS[species]]
+        )
+        for level in blocked:
+            out_status[level][table] = CellStatus.NOT_ATTEMPTED_GATE.value
+            out_names[level][table] = None
+    from merxen.annotation.thresholds import DERIVED_EMISSION_LEVELS
+
+    withheld = set(effects.withheld_levels)
+    withheld |= {
+        derived
+        for derived, source in DERIVED_EMISSION_LEVELS[species].items()
+        if source in withheld
+    }
+    lost: dict[str, np.ndarray] = {}
+    order = [level for level in LEVEL_ORDER[species] if level in out_status]
+    order += [level for level in out_status if level not in order]
+    for level in order:
+        now = out_status[level] == confident
+        if level in withheld:
+            out_status[level][now] = CellStatus.NOT_RESOLVABLE.value
+        else:
+            parent_lost = np.zeros(n, dtype=bool)
+            chosen = np.zeros(n, dtype=bool)
+            for parent in LEVEL_PARENTS[species].get(level, ()):
+                if parent not in lost:
+                    continue
+                use = ~chosen & applicable[parent]
+                parent_lost |= use & lost[parent]
+                chosen |= use
+            out_status[level][now & parent_lost] = CellStatus.PARENT_UNRESOLVED.value
+        lost[level] = before[level] & (out_status[level] != confident)
+    return out_status, out_names
+
+
+def worst_outcome(tokens: Iterable[str]) -> str:
+    """Return the worst provenance token (``OUTCOME_ORDER``).
+
+    Args:
+        tokens: ``pass``, ``warn``, ``fail``, ``not_applicable`` or
+            ``not_evaluable`` values.
+
+    Returns:
+        The worst of them.
+
+    Raises:
+        ValueError: For no token or an unknown one.
+    """
+    values = set(tokens)
+    unknown = values - set(OUTCOME_ORDER)
+    if unknown:
+        raise ValueError(f"unknown QC outcome(s) {sorted(unknown)}")
+    for token in OUTCOME_ORDER:
+        if token in values:
+            return token
+    raise ValueError("no QC outcome given")
+
+
+_SIGNAL_OUTCOME: Final[dict[str, str]] = {
+    "pass": "pass",
+    "warn": "warn",
+    "fail": "fail",
+    "not_evaluated": "not_evaluable",
+}
+
+
+def gate_outcomes(verdict: Any) -> dict[str, str]:
+    """Return the provenance outcomes a dataset gate verdict records itself.
+
+    The dataset gate applies its own effects (§5.4, §7.6); QC only records
+    them: ``dataset_gate`` is ``fail`` below ``full``, ``warn`` with the
+    warning flag, else ``pass``. A mouse verdict also gives
+    ``registration_g1`` (G1) and ``marker_consistency`` (G2, the mouse
+    marker referee of §8.8) from its signal statuses.
+
+    Args:
+        verdict: ``GateVerdict`` or ``MouseGateVerdict`` before QC.
+
+    Returns:
+        Check -> outcome token.
+    """
+    level = str(verdict.level)
+    record = {
+        "dataset_gate": "fail"
+        if level != "full"
+        else ("warn" if verdict.warning else "pass")
+    }
+    signal_status = getattr(verdict, "signal_status", None)
+    if isinstance(signal_status, Mapping):
+        for signal, check in (("g1", "registration_g1"), ("g2", "marker_consistency")):
+            value = signal_status.get(signal)
+            if value is not None:
+                record[check] = _SIGNAL_OUTCOME.get(str(value), "not_evaluable")
+    return record
+
+
+def qc_to_provenance(
+    outcomes: Iterable[QcOutcome],
+    *,
+    warn_only: bool | None = None,
+    gate: Any = None,
+) -> RealQcProvenance:
+    """Return ``PanelProvenance.real_data_qc`` for a dataset's outcomes.
+
+    Each check records its worst outcome (``worst_outcome``: a check with one
+    outcome per level or class fails if any fails), the dataset gate's own
+    outcomes are added from ``gate`` (``gate_outcomes``), and ``downgrades``
+    lists the lowering effects (``qc_effects``).
+
+    Args:
+        outcomes: The dataset's outcomes (after any warn-only demotion).
+        warn_only: Whether the checks only warned (seeded family).
+        gate: The dataset gate verdict before QC, if any.
+
+    Returns:
+        The provenance record.
+
+    Raises:
+        ValueError: If a check name is not a safe provenance key.
+    """
+    from merxen.annotation.provenance import RealQcProvenance, is_safe_key
+
+    items = list(outcomes)
+    tokens: dict[str, list[str]] = {}
+    for outcome in items:
+        tokens.setdefault(outcome.check, []).append(outcome.outcome)
+    if gate is not None:
+        for check, token in gate_outcomes(gate).items():
+            tokens.setdefault(check, []).append(token)
+    for check in tokens:
+        if not is_safe_key(check):
+            raise ValueError(f"QC check {check!r} is not a safe provenance key")
+    return RealQcProvenance(
+        outcomes=cast(
+            "dict[str, RealQcOutcome]",
+            {check: worst_outcome(values) for check, values in tokens.items()},
+        ),
+        downgrades=list(qc_effects(items).downgrades),
+        warn_only=warn_only,
+    )
+
+
+# --------------------------------------------------------------------------
+# The checks M13 adds (plan §8.8)
+
+MARKER_CONSISTENCY_CHECK: Final = "marker_consistency"
+REGISTRATION_G1_CHECK: Final = "registration_g1"
+PAIRED_CONCORDANCE_CHECK: Final = "paired_concordance"
+FLAG_RATES_CHECK: Final = "flag_rates"
+GENE_COMPLEXITY_CHECK: Final = "gene_complexity"
+PREFILTER_SPOTCHECK_CHECK: Final = "prefilter_spotcheck"
+COVERAGE_CHECK: Final = "coverage_vs_simulation"
+NONNEURONAL_TREND_CHECK: Final = "nonneuronal_depth_trend"
+FACTOR_REMEASURE_CHECK: Final = "factor_remeasure"
+# §8.8: "the checks this module adds (marker referee, paired concordance,
+# flag rates, gene complexity, prefilter spot check) only warn" on the seeded
+# real-data families until their species gate has merged.
+SEEDED_WARN_ONLY_CHECKS: Final[frozenset[str]] = frozenset(
+    {
+        MARKER_CONSISTENCY_CHECK,
+        PAIRED_CONCORDANCE_CHECK,
+        FLAG_RATES_CHECK,
+        GENE_COMPLEXITY_CHECK,
+        PREFILTER_SPOTCHECK_CHECK,
+    }
+)
+# The flags whose rates §8.8 reads: "realised contamination, diffuse and
+# spill-over rates (§5.6)" (the OOD flag's rates are reported only).
+FLAG_RATE_FLAGS: Final[tuple[str, ...]] = (
+    "contaminated",
+    "diffuse_profile",
+    "microglial_spillover",
+)
+# The pair statistic of §8.5 / §8.8 and D21: the intersection run's soft
+# broad JSD, scored on the shared-tissue mask (point estimate), the whole
+# section reported.
+PAIRED_KIND: Final = "soft"
+PAIRED_SCORED_REGION: Final = "shared_mask"
+PAIRED_REPORTED_REGION: Final = "whole_section"
+
+MARKER_CONSISTENCY_TEXT: Final = (
+    "marker consistency {value:.3f} of confident broad calls over {n} "
+    "marker-pseudo-labelled cells ({groups} marker groups) is below {limit:.2f}"
+)
+REGISTRATION_G1_TEXT: Final = (
+    "registration G1 fails ({failed}; M0a guard with the §7.6 fail rule)"
+)
+PAIRED_TEXT: Final = (
+    "the pair's soft broad JSD {value:.3f} on the {region} is above {limit:.2f} "
+    "({other_region} {other}): supercluster-level cross-platform statistics "
+    "are withheld for this pair"
+)
+FLAG_RATES_TEXT: Final = (
+    "{k} of {n} (class x platform) strata are uninformative under H16's 15% "
+    "marking ({flags}), more than {frac:.0%}: most of the dataset's flag "
+    "rates cannot be read (the flags stay report-only)"
+)
+PREFILTER_TEXT: Final = (
+    "{level}: prefiltered vs unfiltered lookup agreement {value:.3f} < "
+    "{limit:.2f} on {n} cells: the level is not_resolvable for this dataset"
+)
+
+
+@dataclass(frozen=True)
+class MarkerConsistencySignal:
+    """The human marker referee of one dataset (§8.8; computed by M13 C13).
+
+    Attributes:
+        consistency: The share of marker-pseudo-labelled cells whose
+            confident ``ct_broad`` agrees with their pseudo-label (``None``
+            when not evaluable).
+        n_marker_groups: Marker groups with at least 3 markers.
+        n_pseudo_labelled: Marker-pseudo-labelled cells scored.
+        reason: Why the statistic is not evaluable, if it is not.
+        details: Further numbers (reported).
+    """
+
+    consistency: float | None
+    n_marker_groups: int = 0
+    n_pseudo_labelled: int = 0
+    reason: str | None = None
+    details: Mapping[str, Any] = field(default_factory=dict)
+
+
+def marker_consistency_outcome(
+    signal: MarkerConsistencySignal | None, *, warn: float, broad_only: float
+) -> QcOutcome:
+    """Return the human marker-referee outcome (§8.8; decision D18).
+
+    A warning below ``warn`` (0.75); below ``broad_only`` (0.70) a dataset
+    gate-level cap at ``broad_only`` (D18 (a)): trust and margins unchanged.
+    ``not_evaluable`` without a statistic (fewer than 2 marker groups of >= 3
+    markers, or too few pseudo-labelled cells; the referee says why).
+
+    Args:
+        signal: The referee, or ``None`` when it did not run.
+        warn: The warning threshold.
+        broad_only: The gate-cap threshold.
+
+    Returns:
+        The outcome.
+
+    Raises:
+        ValueError: If ``broad_only`` exceeds ``warn``.
+    """
+    if broad_only > warn:
+        raise ValueError("the broad_only threshold must not exceed the warning")
+    cap: dict[str, Any] = {"effect": "gate_cap", "gate_cap": "broad_only"}
+    if signal is None:
+        return QcOutcome.not_evaluable(
+            MARKER_CONSISTENCY_CHECK, "the marker referee did not run", **cap
+        )
+    value = signal.consistency
+    if value is None or not math.isfinite(float(value)):
+        return QcOutcome.not_evaluable(
+            MARKER_CONSISTENCY_CHECK,
+            signal.reason or "no marker-consistency statistic",
+            details=dict(signal.details),
+            **cap,
+        )
+    number = float(value)
+    details = {
+        **dict(signal.details),
+        "consistency": number,
+        "n_marker_groups": int(signal.n_marker_groups),
+        "n_pseudo_labelled": int(signal.n_pseudo_labelled),
+        "warn": warn,
+        "broad_only": broad_only,
+    }
+    text = MARKER_CONSISTENCY_TEXT.format(
+        value=number,
+        n=int(signal.n_pseudo_labelled),
+        groups=int(signal.n_marker_groups),
+        limit=broad_only if number < broad_only else warn,
+    )
+    if number < broad_only:
+        return QcOutcome(
+            MARKER_CONSISTENCY_CHECK,
+            True,
+            "gate_cap",
+            message=text + ": the dataset gate is capped at broad_only (trust "
+            "and margins unchanged)",
+            gate_cap="broad_only",
+            details=details,
+        )
+    if number < warn:
+        return QcOutcome(
+            MARKER_CONSISTENCY_CHECK, True, "warning", message=text, details=details
+        )
+    return QcOutcome(
+        MARKER_CONSISTENCY_CHECK,
+        False,
+        "gate_cap",
+        gate_cap="broad_only",
+        details=details,
+    )
+
+
+def registration_g1_outcome(
+    signal: Any,
+    *,
+    density_ratio_fail: float,
+    shift_fail_um: float,
+    effect: str = "warning",
+) -> QcOutcome:
+    """Return the human registration G1 outcome (§8.8; decision D23).
+
+    G1 fails when M0a's density ratio is below ``density_ratio_fail`` (1.5)
+    or the shift against the platform's own segmentation exceeds
+    ``shift_fail_um`` (5 µm), §7.6's fail rule. ``effect`` ``warning`` keeps
+    it warn-only (D23 (b), M13); ``gate_failed`` applies §8.8's effect (the
+    dataset gate fails: every cell ``not_attempted_gate`` and
+    ``exclude_hard``). ``not_evaluable`` without a check or a ratio.
+
+    Args:
+        signal: ``mouse_gate.RegistrationSignal`` (``density_ratio``,
+            ``shift_um``, ``status``), or ``None``.
+        density_ratio_fail: The fail ratio.
+        shift_fail_um: The fail shift.
+        effect: ``warning`` or ``gate_failed``.
+
+    Returns:
+        The outcome.
+
+    Raises:
+        ValueError: For an unknown effect.
+    """
+    if effect not in ("warning", "gate_failed"):
+        raise ValueError(f"unknown registration G1 effect {effect!r}")
+    fields: dict[str, Any] = (
+        {"effect": "gate_cap", "gate_cap": "failed"}
+        if effect == "gate_failed"
+        else {"effect": "warning"}
+    )
+    if signal is None:
+        return QcOutcome.not_evaluable(
+            REGISTRATION_G1_CHECK, "no registration check given", **fields
+        )
+    ratio = getattr(signal, "density_ratio", None)
+    shift = getattr(signal, "shift_um", None)
+    if ratio is None or not math.isfinite(float(ratio)):
+        status = getattr(signal, "status", None)
+        return QcOutcome.not_evaluable(
+            REGISTRATION_G1_CHECK,
+            f"registration check {status or 'without a density ratio'}",
+            **fields,
+        )
+    failed: list[str] = []
+    if float(ratio) < density_ratio_fail:
+        failed.append(f"density ratio {float(ratio):.3f} < {density_ratio_fail}")
+    if shift is not None and float(shift) > shift_fail_um:
+        failed.append(f"shift {float(shift):.1f} um > {shift_fail_um} um")
+    details = {
+        "density_ratio": float(ratio),
+        "shift_um": None if shift is None else float(shift),
+        "density_ratio_fail": density_ratio_fail,
+        "shift_fail_um": shift_fail_um,
+        "effect_setting": effect,
+        "source": getattr(signal, "source", None),
+    }
+    if not failed:
+        return QcOutcome(REGISTRATION_G1_CHECK, False, details=details, **fields)
+    message = REGISTRATION_G1_TEXT.format(failed="; ".join(failed))
+    message += (
+        ": the dataset gate fails"
+        if effect == "gate_failed"
+        else ": warn-only in M13 (decision D23 (b))"
+    )
+    return QcOutcome(
+        REGISTRATION_G1_CHECK, True, message=message, details=details, **fields
+    )
+
+
+def _jsd_number(value: Any) -> float | None:
+    if value is None:
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def paired_concordance(
+    jsd_rows: Sequence[Mapping[str, Any]] | None,
+    *,
+    paired: bool,
+    warn_above: float,
+    kind: str = PAIRED_KIND,
+    scored_region: str = PAIRED_SCORED_REGION,
+    reported_region: str = PAIRED_REPORTED_REGION,
+) -> QcOutcome:
+    """Return the paired-platform concordance outcome (§8.5, §8.8; D21).
+
+    The pair's intersection-run soft broad JSD (``<pair>_resolve_summary.json``
+    ``pair.jsd`` rows of ``kind``): its point estimate on ``scored_region``
+    (the shared-tissue mask, D21) above ``warn_above`` (0.20) withholds the
+    pair's supercluster-level cross-platform statistics; the other region is
+    reported beside it. A pair without a shared-mask row is scored on the
+    whole section, recorded in ``details``. An unpaired section (a
+    single-platform dataset) is ``not_applicable``; a pair without a JSD row
+    ``not_evaluable``.
+
+    Args:
+        jsd_rows: The pair's JSD rows (``kind``, ``region``, ``jsd``,
+            ``ci_low``, ``ci_high``).
+        paired: Whether the dataset has a section of the other platform.
+        warn_above: The warning threshold.
+        kind: The composition kind scored.
+        scored_region: The region scored.
+        reported_region: The region reported beside it.
+
+    Returns:
+        The outcome (the same for both sections of the pair).
+    """
+    effect: dict[str, Any] = {"effect": "withhold_pair_stats"}
+    if not paired:
+        return QcOutcome.not_applicable(
+            PAIRED_CONCORDANCE_CHECK,
+            "unpaired: no section of the other platform",
+            **effect,
+        )
+    rows = {
+        str(row.get("region")): row
+        for row in (jsd_rows or ())
+        if str(row.get("kind")) == kind and _jsd_number(row.get("jsd")) is not None
+    }
+    region = scored_region if scored_region in rows else reported_region
+    if region not in rows:
+        return QcOutcome.not_evaluable(
+            PAIRED_CONCORDANCE_CHECK,
+            f"no {kind} broad JSD of the pair (no intersection run on both platforms)",
+            **effect,
+        )
+    other_region = reported_region if region == scored_region else scored_region
+    row = rows[region]
+    value = float(row["jsd"])
+    other = rows.get(other_region)
+    other_value = None if other is None else _jsd_number(other.get("jsd"))
+    details = {
+        "kind": kind,
+        "statistic": "point",
+        "scored_region": region,
+        "fallback": region != scored_region,
+        "jsd": value,
+        "ci_low": _jsd_number(row.get("ci_low")),
+        "ci_high": _jsd_number(row.get("ci_high")),
+        f"{other_region}_jsd": other_value,
+        "warn_above": warn_above,
+    }
+    if not value > warn_above:
+        return QcOutcome(PAIRED_CONCORDANCE_CHECK, False, details=details, **effect)
+    return QcOutcome(
+        PAIRED_CONCORDANCE_CHECK,
+        True,
+        message=PAIRED_TEXT.format(
+            value=value,
+            region=region,
+            limit=warn_above,
+            other_region=other_region,
+            other="not measured" if other_value is None else f"{other_value:.3f}",
+        ),
+        details=details,
+        **effect,
+    )
+
+
+def _stratum_record(stratum: Any) -> dict[str, Any]:
+    """Return a flag stratum as ``FlagStratum.to_json`` keys."""
+    if isinstance(stratum, Mapping):
+        return {
+            "flag": str(stratum.get("flag")),
+            "class": str(stratum.get("class")),
+            "platform": str(stratum.get("platform")),
+            "rate": _jsd_number(stratum.get("rate")),
+            "informative": bool(stratum.get("informative")),
+            "informative_h16": bool(stratum.get("informative_h16")),
+        }
+    return {
+        "flag": str(stratum.flag),
+        "class": str(stratum.cls),
+        "platform": str(stratum.platform),
+        "rate": None if stratum.rate is None else float(stratum.rate),
+        "informative": bool(stratum.informative),
+        "informative_h16": bool(stratum.informative_h16),
+    }
+
+
+def _share(k: int, n: int) -> float | None:
+    return k / n if n else None
+
+
+@dataclass(frozen=True)
+class FlagRateSummary:
+    """``flag_rate_summary`` output (§8.8 flag rates; H16; decision D22).
+
+    Attributes:
+        table: Per (class, platform) stratum: ``class``, ``platform``,
+            ``flags`` (the §8.8 flags with a stratum there),
+            ``uninformative_flags`` (those above H16's 15% marking or
+            without basis cells), ``uninformative``.
+        outcome: The warning outcome.
+        n_strata: (class, platform) strata counted.
+        n_uninformative: Of those, uninformative.
+        warn_frac: The warning share (0.5).
+        reported: The other readings, reported only: per flag, pooled over
+            flag x class x platform, and D22 option (a) (each flag's own null
+            switch over every flag x class x platform stratum).
+    """
+
+    table: pd.DataFrame
+    outcome: QcOutcome
+    n_strata: int
+    n_uninformative: int
+    warn_frac: float
+    reported: Mapping[str, Any]
+
+    def summary(self) -> dict[str, Any]:
+        """Return a JSON-safe summary."""
+        return {
+            "check": FLAG_RATES_CHECK,
+            "version": REAL_QC_VERSION,
+            "reading": "h16_class_platform",
+            "n_strata": self.n_strata,
+            "n_uninformative": self.n_uninformative,
+            "share_uninformative": _share(self.n_uninformative, self.n_strata),
+            "warn_frac": self.warn_frac,
+            "warn": bool(self.outcome.fired),
+            "uninformative_strata": [
+                {"class": row["class"], "platform": row["platform"]}
+                for row in self.table.to_dict("records")
+                if row["uninformative"]
+            ],
+            "reported": _json_safe(dict(self.reported)),
+            "trust_effect": "none",
+        }
+
+
+def flag_rate_summary(
+    strata: Iterable[Any],
+    *,
+    warn_frac: float,
+    flags: Sequence[str] = FLAG_RATE_FLAGS,
+) -> FlagRateSummary:
+    """Return the flag-rate check of one dataset (§8.8; H16; D22 literal).
+
+    The literal reading of §8.8 (CHECK K6, adopted 2026-10-06): the
+    dataset's (class x platform) strata of the §8.8 flags (``flags``:
+    contamination, diffuse and spill-over; ``FlagSet.strata``), each
+    uninformative under H16's 15% marking when any of its flags' rate is
+    above 15% or has no confident basis cells (``informative_h16`` false);
+    a warning when more than ``warn_frac`` of them are uninformative. The
+    readings counted per flag and pooled over flag x class x platform, and
+    D22 option (a) (each flag's own null switch, every flag x class x
+    platform stratum pooled), are reported beside it; none decides the
+    warning.
+
+    Args:
+        strata: ``FlagStratum`` objects or their ``to_json`` records (the
+            resolve summary's ``flags.strata``).
+        warn_frac: The warning share (``uninformative_strata_warn_frac``).
+        flags: The flags counted.
+
+    Returns:
+        The summary with its outcome.
+    """
+    records = [_stratum_record(item) for item in strata]
+    counted = [record for record in records if record["flag"] in set(flags)]
+    columns = ["class", "platform", "flags", "uninformative_flags", "uninformative"]
+    rows: list[dict[str, Any]] = []
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for record in counted:
+        groups.setdefault((record["class"], record["platform"]), []).append(record)
+    for (cls, platform), members in sorted(groups.items()):
+        uninformative = sorted(
+            record["flag"] for record in members if not record["informative_h16"]
+        )
+        rows.append(
+            {
+                "class": cls,
+                "platform": platform,
+                "flags": sorted(record["flag"] for record in members),
+                "uninformative_flags": uninformative,
+                "uninformative": bool(uninformative),
+            }
+        )
+    table = pd.DataFrame(rows, columns=columns)
+    per_flag: dict[str, dict[str, Any]] = {}
+    for flag in sorted({record["flag"] for record in counted}):
+        members = [record for record in counted if record["flag"] == flag]
+        k = sum(1 for record in members if not record["informative_h16"])
+        per_flag[flag] = {
+            "n_strata": len(members),
+            "n_uninformative": k,
+            "share": _share(k, len(members)),
+        }
+    k_pooled = sum(1 for record in counted if not record["informative_h16"])
+    k_own = sum(1 for record in records if not record["informative"])
+    reported = {
+        "per_flag_h16": per_flag,
+        "pooled_h16": {
+            "n_strata": len(counted),
+            "n_uninformative": k_pooled,
+            "share": _share(k_pooled, len(counted)),
+        },
+        "own_switch_all_flags": {
+            "flags": sorted({record["flag"] for record in records}),
+            "n_strata": len(records),
+            "n_uninformative": k_own,
+            "share": _share(k_own, len(records)),
+            "would_warn": bool(records) and k_own / len(records) > warn_frac,
+        },
+    }
+    n = len(rows)
+    k = int(table["uninformative"].sum()) if n else 0
+    details = {"n_strata": n, "n_uninformative": k, "warn_frac": warn_frac}
+    if not n:
+        outcome = QcOutcome.not_evaluable(
+            FLAG_RATES_CHECK,
+            f"no flag strata of {', '.join(flags)}",
+            details=details,
+        )
+    elif k / n > warn_frac:
+        outcome = QcOutcome(
+            FLAG_RATES_CHECK,
+            True,
+            "warning",
+            message=FLAG_RATES_TEXT.format(
+                k=k, n=n, flags=", ".join(sorted(per_flag)), frac=warn_frac
+            ),
+            details=details,
+        )
+    else:
+        outcome = QcOutcome(FLAG_RATES_CHECK, False, "warning", details=details)
+    return FlagRateSummary(table, outcome, n, k, warn_frac, reported)
+
+
+@dataclass(frozen=True)
+class PrefilterSpotcheckSignal:
+    """The 5K prefilter spot check of one dataset (§8.7, §8.8).
+
+    Attributes:
+        agreement: Per emitted level, the agreement of the prefiltered with
+            the unfiltered lookup on the subsample.
+        n_cells: Cells of the subsample (10k).
+    """
+
+    agreement: Mapping[str, float]
+    n_cells: int = 0
+
+
+def prefilter_spotcheck(
+    signal: PrefilterSpotcheckSignal | None,
+    *,
+    applies: bool,
+    emitted_levels: Sequence[str],
+    min_agreement: float,
+) -> tuple[QcOutcome, ...]:
+    """Return the prefilter spot-check outcomes (§8.8), one per emitted level.
+
+    An emitted level whose agreement is below ``min_agreement`` (0.95)
+    becomes ``not_resolvable`` for the dataset (``withhold_level``). A
+    bundle without a marker prefilter (panels of <= 1,000 genes, or the
+    prefilter off) is ``not_applicable``; a prefiltered bundle without a spot
+    check, or a level without an agreement, ``not_evaluable``.
+
+    Args:
+        signal: The spot check, or ``None``.
+        applies: Whether the bundle's marker lookup is prefiltered.
+        emitted_levels: The levels the dataset emits.
+        min_agreement: The agreement threshold.
+
+    Returns:
+        The outcomes.
+    """
+    effect: dict[str, Any] = {"effect": "withhold_level"}
+    if not applies:
+        return (
+            QcOutcome.not_applicable(
+                PREFILTER_SPOTCHECK_CHECK,
+                "no marker prefilter in the bundle (panels of <= 1,000 genes, "
+                "or the prefilter off)",
+                **effect,
+            ),
+        )
+    if signal is None:
+        return (
+            QcOutcome.not_evaluable(
+                PREFILTER_SPOTCHECK_CHECK,
+                "a prefiltered bundle without a spot check",
+                **effect,
+            ),
+        )
+    if not emitted_levels:
+        return (
+            QcOutcome.not_evaluable(
+                PREFILTER_SPOTCHECK_CHECK, "no emitted level", **effect
+            ),
+        )
+    outcomes: list[QcOutcome] = []
+    for level in emitted_levels:
+        value = signal.agreement.get(level)
+        if value is None or not math.isfinite(float(value)):
+            outcomes.append(
+                QcOutcome.not_evaluable(
+                    PREFILTER_SPOTCHECK_CHECK,
+                    f"no spot-check agreement at {level}",
+                    level=level,
+                    **effect,
+                )
+            )
+            continue
+        number = float(value)
+        fired = number < min_agreement
+        outcomes.append(
+            QcOutcome(
+                PREFILTER_SPOTCHECK_CHECK,
+                fired,
+                message=PREFILTER_TEXT.format(
+                    level=level, value=number, limit=min_agreement, n=signal.n_cells
+                )
+                if fired
+                else "",
+                level=level,
+                details={
+                    "agreement": number,
+                    "min_agreement": min_agreement,
+                    "n_cells": int(signal.n_cells),
+                },
+                **effect,
+            )
+        )
+    return tuple(outcomes)
+
+
+def factor_remeasure_outcome(
+    result: FactorRemeasure | None, *, min_r: float
+) -> QcOutcome:
+    """Return the factor re-measure outcome (§8.8) at the configured ``min_r``.
+
+    ``not_applicable`` for a family without a measured factor table (no R3
+    member) or a dataset other than the family's first; ``not_evaluable``
+    with too few informative genes; otherwise a warning when Pearson r <
+    ``min_r`` (recommending a PREP re-run with the in-house table; never
+    automatic, never trust evidence).
+
+    Args:
+        result: ``factor_remeasure`` output, or ``None`` when it did not run
+            (no measured table).
+        min_r: The warning threshold (``factor_remeasure_min_r``).
+
+    Returns:
+        The outcome.
+    """
+    if result is None:
+        return QcOutcome.not_applicable(
+            FACTOR_REMEASURE_CHECK,
+            "no measured factor table for the family (no R3 member)",
+        )
+    if not result.applies:
+        reason = str(result.reason)
+        if reason in ("no_stored_table", "not_first_dataset_of_family"):
+            return QcOutcome.not_applicable(FACTOR_REMEASURE_CHECK, reason)
+        return QcOutcome.not_evaluable(FACTOR_REMEASURE_CHECK, reason)
+    pearson = result.pearson_r
+    fired = pearson is None or not pearson >= min_r
+    details = {
+        "pearson_r": pearson,
+        "spearman_r": result.spearman_r,
+        "n_informative": result.n_informative,
+        "min_r": min_r,
+        "asset_id": result.asset_id,
+    }
+    return QcOutcome(
+        FACTOR_REMEASURE_CHECK,
+        fired,
+        "warning",
+        message=FACTOR_WARNING_TEXT.format(
+            asset=result.asset_id or "(stored table)",
+            r=math.nan if pearson is None else pearson,
+            min_r=min_r,
+            n=result.n_informative,
+        )
+        if fired
+        else "",
+        details=details,
+    )
+
+
+# --------------------------------------------------------------------------
+# The orchestrator (plan §8.8; M13 chunk C12)
+
+
+@dataclass(frozen=True)
+class GeneComplexitySignal:
+    """``gene_complexity_check`` inputs (simulated cells: M13 C16, D19).
+
+    Attributes:
+        native_n_genes: Genes per native table cell (the bundle's query
+            genes).
+        native_totals: Total counts per native table cell.
+        simulated_n_genes: Genes per simulated cell stored by PREP.
+        simulated_depth: Depth per simulated cell.
+        grid: The bundle's depth grid.
+    """
+
+    native_n_genes: Sequence[float] | np.ndarray
+    native_totals: Sequence[float] | np.ndarray
+    simulated_n_genes: Sequence[float] | np.ndarray
+    simulated_depth: Sequence[float] | np.ndarray
+    grid: Sequence[int]
+
+
+@dataclass(frozen=True)
+class CoverageSignal:
+    """``coverage_vs_simulation`` inputs (version-7 families).
+
+    Attributes:
+        real: ``real_class_coverage`` of the dataset.
+        predicted: The class-depth prediction
+            (``dataset_class_depth_prediction``).
+        profile: Profile mode's prediction, reported only.
+    """
+
+    real: pd.DataFrame
+    predicted: pd.DataFrame
+    profile: pd.DataFrame | None = None
+
+
+@dataclass(frozen=True)
+class NonneuronalTrendSignal:
+    """``nonneuronal_depth_trend`` inputs (version-7 families).
+
+    Attributes:
+        totals: Total counts per table cell.
+        called_class: The called class per table cell.
+        confident: Per level, whether each table cell is confident.
+        nonneuronal_classes: The non-neuronal classes.
+    """
+
+    totals: Sequence[float] | np.ndarray
+    called_class: Sequence[object] | np.ndarray
+    confident: Mapping[str, Sequence[bool] | np.ndarray]
+    nonneuronal_classes: Sequence[str]
+
+
+@dataclass(frozen=True)
+class RealQcSignals:
+    """The label-free inputs of one dataset's real-data QC (plan §8.8).
+
+    A check without its input is ``not_evaluable``, unless the dataset makes
+    it ``not_applicable`` (an unpaired section, a version-6 bundle for the
+    version-7 checks, no prefilter, no measured factor table).
+
+    Attributes:
+        resolvability_version: The primary bundle's resolvability version
+            (``None``: no resolvability tables).
+        paired: Whether the dataset has a section of the other platform.
+        pair_jsd: The pair's JSD rows (``<pair>_resolve_summary.json``
+            ``pair.jsd``).
+        marker_consistency: The human marker referee (C13).
+        flag_strata: ``FlagSet.strata`` (or their JSON records).
+        gene_complexity: Native and simulated genes per cell (C16).
+        prefilter_applied: Whether the bundle's marker lookup is
+            prefiltered.
+        prefilter: The 5K prefilter spot check.
+        emitted_levels: The levels the dataset emits (spot check).
+        factor: ``factor_remeasure`` output (families with a measured table).
+        coverage: Real and predicted per-class coverage (version 7).
+        nonneuronal_trend: The non-neuronal depth-trend inputs (version 7).
+        registration: Human G1 (``mouse_gate.RegistrationSignal``); mouse
+            G1 is the mouse gate's.
+        gate: The dataset gate verdict before QC (its own outcomes are
+            recorded; QC never re-applies them).
+    """
+
+    resolvability_version: int | None = None
+    paired: bool = False
+    pair_jsd: Sequence[Mapping[str, Any]] = ()
+    marker_consistency: MarkerConsistencySignal | None = None
+    flag_strata: Sequence[Any] | None = None
+    gene_complexity: GeneComplexitySignal | None = None
+    prefilter_applied: bool = False
+    prefilter: PrefilterSpotcheckSignal | None = None
+    emitted_levels: Sequence[str] = ()
+    factor: FactorRemeasure | None = None
+    coverage: CoverageSignal | None = None
+    nonneuronal_trend: NonneuronalTrendSignal | None = None
+    registration: Any = None
+    gate: Any = None
+
+
+@dataclass(frozen=True)
+class RealQcResult:
+    """The real-data QC of one dataset (``real_data_qc``).
+
+    Attributes:
+        species: ``"human"`` or ``"mouse"``.
+        outcomes: Every outcome, after any warn-only demotion.
+        seeded: Whether the family is a seeded ``real_data`` family.
+        warn_only: Whether the checks of ``SEEDED_WARN_ONLY_CHECKS`` only
+            warn (a seeded family whose species gate is pending).
+        gate: The dataset gate verdict before QC, if given.
+        flag_rates: The flag-rate summary, if strata were given.
+        tables: Per-check tables (coverage, trend, gene complexity).
+    """
+
+    species: str
+    outcomes: tuple[QcOutcome, ...]
+    seeded: bool
+    warn_only: bool
+    gate: Any = None
+    flag_rates: FlagRateSummary | None = None
+    tables: Mapping[str, pd.DataFrame] = field(default_factory=dict)
+
+    @property
+    def effects(self) -> QcEffects:
+        """Return the combined effects."""
+        return qc_effects(self.outcomes)
+
+    def apply_to_gate(self, verdict: GateT) -> GateT:
+        """Return ``verdict`` after QC (``apply_qc_to_gate``)."""
+        return apply_qc_to_gate(verdict, self.effects)
+
+    def apply_to_trust(self, state: str) -> str:
+        """Return the trust state after QC (``apply_qc_outcomes``)."""
+        return apply_qc_outcomes(state, self.outcomes)
+
+    def provenance(self) -> RealQcProvenance:
+        """Return ``PanelProvenance.real_data_qc``."""
+        return qc_to_provenance(self.outcomes, warn_only=self.warn_only, gate=self.gate)
+
+    def summary(self) -> dict[str, Any]:
+        """Return a JSON-safe record (``<pair>_resolve_summary.json``)."""
+        provenance = self.provenance()
+        return {
+            "version": REAL_QC_VERSION,
+            "species": self.species,
+            "seeded": self.seeded,
+            "warn_only": self.warn_only,
+            "per_check": dict(provenance.outcomes),
+            "downgrades": list(provenance.downgrades),
+            "effects": self.effects.to_json(),
+            "outcomes": [outcome.to_json() for outcome in self.outcomes],
+            "flag_rates": None
+            if self.flag_rates is None
+            else self.flag_rates.summary(),
+            "promotes": False,
+        }
+
+
+def _is_seeded(trust: TrustDecision | None) -> bool:
+    return (
+        trust is not None
+        and trust.state == "validated"
+        and trust.validation_basis == "real_data"
+    )
+
+
+def _coverage_outcomes(
+    signal: CoverageSignal | None,
+    *,
+    version: int | None,
+    margin: float,
+    min_cells: int,
+) -> tuple[tuple[QcOutcome, ...], pd.DataFrame | None]:
+    if version != 7:
+        return (
+            QcOutcome.not_applicable(
+                COVERAGE_CHECK, "version-7 families only (no class-depth table)"
+            ),
+        ), None
+    if signal is None:
+        return (
+            QcOutcome.not_evaluable(COVERAGE_CHECK, "no class-depth prediction"),
+        ), None
+    comparison = coverage_vs_simulation(
+        signal.real,
+        signal.predicted,
+        profile_predicted=signal.profile,
+        margin=margin,
+        min_cells=min_cells,
+    )
+    if comparison.outcomes:
+        return comparison.outcomes, comparison.table
+    n_judged = int(comparison.table["judged"].sum()) if len(comparison.table) else 0
+    details = {"n_judged": n_judged, "margin": margin, "min_cells": min_cells}
+    if not n_judged:
+        return (
+            QcOutcome.not_evaluable(
+                COVERAGE_CHECK,
+                f"no (level, class) with >= {min_cells} cells and a prediction",
+                details=details,
+            ),
+        ), comparison.table
+    return (
+        QcOutcome(COVERAGE_CHECK, False, "warning", details=details),
+    ), comparison.table
+
+
+def _trend_outcomes(
+    signal: NonneuronalTrendSignal | None, *, version: int | None, limit: int
+) -> tuple[tuple[QcOutcome, ...], pd.DataFrame | None]:
+    effect: dict[str, Any] = {"effect": "report_only"}
+    if version != 7:
+        return (
+            QcOutcome.not_applicable(
+                NONNEURONAL_TREND_CHECK, "version-7 families only", **effect
+            ),
+        ), None
+    if signal is None:
+        return (
+            QcOutcome.not_evaluable(
+                NONNEURONAL_TREND_CHECK, "no depth-trend input", **effect
+            ),
+        ), None
+    table, fired = nonneuronal_depth_trend(
+        signal.totals,
+        signal.called_class,
+        signal.confident,
+        signal.nonneuronal_classes,
+        limit=limit,
+    )
+    if fired:
+        return fired, table
+    low = _band_label(*DEPTH_BANDS[0])
+    high = f">= {limit:,} (pooled)"
+    compared = 0
+    if len(table):
+        for _, group in table.groupby(["level", "class"]):
+            counts = group.set_index("band")["n_cells"]
+            if (
+                int(counts.get(low, 0)) >= TREND_MIN_BAND_CELLS
+                and int(counts.get(high, 0)) >= TREND_MIN_BAND_CELLS
+            ):
+                compared += 1
+    if not compared:
+        return (
+            QcOutcome.not_evaluable(
+                NONNEURONAL_TREND_CHECK,
+                f"no non-neuronal class with >= {TREND_MIN_BAND_CELLS} cells in "
+                f"both the {low} band and at >= {limit:,} counts",
+                **effect,
+            ),
+        ), table
+    return (
+        QcOutcome(
+            NONNEURONAL_TREND_CHECK, False, details={"n_compared": compared}, **effect
+        ),
+    ), table
+
+
+def _gene_complexity_outcome(
+    signal: GeneComplexitySignal | None, *, gap_warn: float
+) -> tuple[QcOutcome, pd.DataFrame | None]:
+    if signal is None:
+        return (
+            QcOutcome.not_evaluable(
+                GENE_COMPLEXITY_CHECK,
+                "no simulated n_genes: the bundle stores none (version 6, or "
+                "version 7 built before the artefact; decision D19)",
+            ),
+            None,
+        )
+    table, outcome = gene_complexity_check(
+        signal.native_n_genes,
+        signal.native_totals,
+        signal.simulated_n_genes,
+        signal.simulated_depth,
+        signal.grid,
+        gap_warn=gap_warn,
+    )
+    if not outcome.fired and not (len(table) and table["judged"].any()):
+        return (
+            QcOutcome.not_evaluable(
+                GENE_COMPLEXITY_CHECK,
+                f"no depth bin with >= {GENE_COMPLEXITY_MIN_CELLS} native and "
+                "simulated cells",
+            ),
+            table,
+        )
+    return outcome, table
+
+
+def real_data_qc(
+    signals: RealQcSignals,
+    trust: TrustDecision | None,
+    config: AnnotationConfig,
+) -> RealQcResult:
+    """Run the downgrade-only real-data QC of one dataset (plan §8.8; M13).
+
+    Records one outcome (or one per level or class) for every check of plan
+    §8.8 that ``real_qc`` evaluates, reading ``config.real_qc``
+    (``AnnotationRealQcConfig``): the human marker referee and registration
+    G1, paired concordance, flag rates, gene complexity, the prefilter spot
+    check, per-class coverage against simulation, the non-neuronal depth
+    trend and the factor re-measure. The dataset gate's own outcomes (and
+    mouse G1 / G2) come from ``signals.gate`` and are recorded, never
+    re-applied. On a seeded ``real_data`` family whose species gate is
+    pending (``seeded_families_warn_only_until_gate``, D20 (b)), the lowering
+    effects of ``SEEDED_WARN_ONLY_CHECKS`` are demoted to warnings.
+
+    Nothing here raises a trust state or a gate level, changes a margin, a
+    threshold, a floor or an emission plan, or promotes a family: real data
+    only warn or downgrade (OD-E1 / OD-E9).
+
+    Args:
+        signals: The dataset's inputs.
+        trust: The primary panel's trust decision (seeded families:
+            ``validated`` with ``validation_basis`` ``real_data``).
+        config: The annotation config (``species``, ``real_qc``; human G1
+            reads §7.6's fail rule from ``mouse_gate``).
+
+    Returns:
+        The QC result.
+
+    Raises:
+        ValueError: If the human marker-referee threshold is unset.
+    """
+    species = config.species
+    settings = config.real_qc
+    version = signals.resolvability_version
+    outcomes: list[QcOutcome] = []
+    tables: dict[str, pd.DataFrame] = {}
+    if species == "human":
+        warn = settings.marker_consistency_warn
+        if warn is None:
+            raise ValueError(
+                "real_qc.marker_consistency_warn is unset: pass an AnnotationConfig, "
+                "which fills the species default"
+            )
+        outcomes.append(
+            marker_consistency_outcome(
+                signals.marker_consistency,
+                warn=float(warn),
+                broad_only=settings.marker_consistency_broad_only,
+            )
+        )
+        outcomes.append(
+            registration_g1_outcome(
+                signals.registration,
+                density_ratio_fail=config.mouse_gate.g1_density_ratio_fail,
+                shift_fail_um=config.mouse_gate.g1_shift_fail_um,
+                effect=settings.registration_g1_effect,
+            )
+        )
+    outcomes.append(
+        paired_concordance(
+            signals.pair_jsd,
+            paired=signals.paired,
+            warn_above=settings.paired_broad_jsd_warn,
+        )
+    )
+    flag_rates = None
+    if signals.flag_strata is None:
+        outcomes.append(
+            QcOutcome.not_evaluable(FLAG_RATES_CHECK, "no flag strata given")
+        )
+    else:
+        flag_rates = flag_rate_summary(
+            signals.flag_strata, warn_frac=settings.uninformative_strata_warn_frac
+        )
+        outcomes.append(flag_rates.outcome)
+    complexity, complexity_table = _gene_complexity_outcome(
+        signals.gene_complexity, gap_warn=settings.genes_per_count_gap_warn
+    )
+    outcomes.append(complexity)
+    if complexity_table is not None:
+        tables[GENE_COMPLEXITY_CHECK] = complexity_table
+    outcomes.extend(
+        prefilter_spotcheck(
+            signals.prefilter,
+            applies=signals.prefilter_applied,
+            emitted_levels=signals.emitted_levels,
+            min_agreement=settings.prefilter_spotcheck_min_agreement,
+        )
+    )
+    coverage, coverage_table = _coverage_outcomes(
+        signals.coverage,
+        version=version,
+        margin=settings.coverage_warn_margin,
+        min_cells=settings.coverage_min_cells,
+    )
+    outcomes.extend(coverage)
+    if coverage_table is not None:
+        tables[COVERAGE_CHECK] = coverage_table
+    trend, trend_table = _trend_outcomes(
+        signals.nonneuronal_trend,
+        version=version,
+        limit=settings.nonneuronal_high_depth_counts,
+    )
+    outcomes.extend(trend)
+    if trend_table is not None:
+        tables[NONNEURONAL_TREND_CHECK] = trend_table
+    outcomes.append(
+        factor_remeasure_outcome(signals.factor, min_r=settings.factor_remeasure_min_r)
+    )
+    seeded = _is_seeded(trust)
+    warn_only = seeded and settings.seeded_warn_only(species)
+    if warn_only:
+        note = (
+            f"warn-only until the {species} gate merges into main (seeded "
+            "real-data family; seeded_families_warn_only_until_gate)"
+        )
+        outcomes = [
+            outcome.warn_only(note)
+            if outcome.check in SEEDED_WARN_ONLY_CHECKS
+            else outcome
+            for outcome in outcomes
+        ]
+    result = RealQcResult(
+        species=species,
+        outcomes=tuple(outcomes),
+        seeded=seeded,
+        warn_only=warn_only,
+        gate=signals.gate,
+        flag_rates=flag_rates,
+        tables=tables,
+    )
+    logger.info(
+        "Real-data QC (%s%s): %s",
+        species,
+        ", warn-only" if warn_only else "",
+        ", ".join(
+            f"{check} {token}" for check, token in result.provenance().outcomes.items()
+        ),
+    )
+    return result
