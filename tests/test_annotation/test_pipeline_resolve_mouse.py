@@ -1097,22 +1097,28 @@ def test_mouse_resolve_refuses_a_gate_level_that_moves_with_the_validated_share(
     RESOLVE evaluates the gate again after ``resolve_mouse``, with the
     validated shares; the statuses were decided at the first verdict's level,
     so a second verdict with another level or other level reasons is refused
-    rather than recorded beside labels it did not gate.
+    rather than recorded beside labels it did not gate. The second evaluation
+    reads the validated share of every mouse chain level, nt included (D15 (a)).
     """
     import dataclasses
 
     import merxen.annotation.mouse_gate as mouse_gate
+    from merxen.annotation.consensus import MOUSE_CHAIN
 
     original = mouse_gate.evaluate_mouse_gate
     calls: list[bool] = []
+    share_levels: list[tuple[str, ...]] = []
 
     def moving(*args: Any, **kwargs: Any) -> Any:
         verdict = original(*args, **kwargs)
         second = kwargs.get("validated_share") is not None
         calls.append(second)
+        if second:
+            share_levels.append(tuple(kwargs["validated_share"]))
         return dataclasses.replace(verdict, **update) if second else verdict
 
     monkeypatch.setattr(mouse_gate, "evaluate_mouse_gate", moving)
     with pytest.raises(AssertionError, match="cannot depend on the validated share"):
         _promoted_samples(tmp_path, mouse_setup, promotion_trust)
     assert calls == [False, True]
+    assert share_levels == [MOUSE_CHAIN]

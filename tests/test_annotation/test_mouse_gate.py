@@ -396,18 +396,25 @@ def test_mouse_gate_warns_when_simulation_labels_leave_the_validated_region(
 def test_mouse_gate_unvalidated_share_limit_and_trust_states(
     make_trust: Callable[..., Any],
 ) -> None:
-    """The limit is ``AnnotationGate.warn_unvalidated_share``; only simulation warns."""
+    """The limit is ``AnnotationGate.warn_unvalidated_share``; only simulation warns.
+
+    Every level of the mouse chain (broad, class, nt, subclass; D15 (a)) is
+    read, nt included.
+    """
     from merxen.annotation.config import AnnotationGate
+    from merxen.annotation.consensus import MOUSE_CHAIN
     from merxen.annotation.thresholds import dataset_gate
 
     trust = _simulation_trust(make_trust)
-    share = {"broad": 0.5, "class": 0.85, "subclass": 0.7}
+    share = {"broad": 0.5, "class": 0.85, "nt": 0.5, "subclass": 0.7}
+    assert tuple(share) == MOUSE_CHAIN
     relaxed = evaluate_mouse_gate(
         _good(), CONFIG, trust=trust, validated_share=share, max_unvalidated_share=0.2
     )
     assert _unvalidated(relaxed) == [
         "unvalidated_share:broad: > 0.2 of confident labels outside the validated "
         "region",
+        "unvalidated_share:nt: > 0.2 of confident labels outside the validated region",
         "unvalidated_share:subclass: > 0.2 of confident labels outside the "
         "validated region",
     ]
@@ -421,7 +428,9 @@ def test_mouse_gate_unvalidated_share_limit_and_trust_states(
         gate=AnnotationGate(),
     )
     assert _unvalidated(default) == _unvalidated(human)
-    assert len(_unvalidated(default)) == 3
+    assert [reason.split(":")[1] for reason in _unvalidated(default)] == list(
+        MOUSE_CHAIN
+    )
     for state in ("validated_real", "provisional", "broad_only", "refused"):
         other = make_trust(state, species="mouse")
         verdict = evaluate_mouse_gate(
