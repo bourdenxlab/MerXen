@@ -258,6 +258,94 @@ def test_nonneuronal_high_depth_flags_marked_emitted_bins_at_1000_counts() -> No
     assert flags.tolist() == [False, True, True, False, False, True, False]
 
 
+def test_nonneuronal_high_depth_flags_read_a_nullable_lineage_column() -> None:
+    """``class_depth_table`` stores ``neuronal`` as nullable booleans."""
+    table = pd.DataFrame(
+        class_depth_rows("Astro", {1000: 0.9}, neuronal=False, high_depth=(1000,))
+        + class_depth_rows("IT", {1000: 0.9}, neuronal=True, high_depth=(1000,))
+        + class_depth_rows("Unknown", {1000: 0.9}, neuronal=None, high_depth=(1000,))
+    )
+    table["neuronal"] = table["neuronal"].astype("boolean")
+    table["nonneuronal_high_depth"] = table["nonneuronal_high_depth"].astype("boolean")
+    flags = qc.nonneuronal_high_depth_flags(
+        [1500, 1500, 1500], ["Astro", "IT", "Unknown"], table
+    )
+    assert flags.tolist() == [True, False, True]
+
+
+def test_nonneuronal_high_depth_flags_can_be_restricted_to_levels() -> None:
+    table = pd.DataFrame(
+        class_depth_rows("Astro", {1000: 0.9}, neuronal=False, high_depth=(1000,))
+        + class_depth_rows(
+            "Astro",
+            {1000: 0.9},
+            level="subclass",
+            neuronal=False,
+            high_depth=(1000,),
+            not_emitted=(1000,),
+        )
+    )
+    every = qc.nonneuronal_high_depth_flags([1500], ["Astro"], table)
+    subclass = qc.nonneuronal_high_depth_flags(
+        [1500], ["Astro"], table, levels=["subclass"]
+    )
+    assert every.tolist() == [True] and subclass.tolist() == [False]
+
+
+def test_dataset_class_bin_shares_are_label_free_for_thin_classes() -> None:
+    totals = [100] * 150 + [600] * 50 + [15] * 3
+    classes = ["A"] * 200 + ["B"] * 3
+    shares = qc.dataset_class_bin_shares(totals, classes, GRID, min_class_cells=100)
+    a = shares[shares["class"] == "A"].set_index("depth")
+    b = shares[shares["class"] == "B"].set_index("depth")
+    assert set(a["share_source"]) == {qc.SHARE_SOURCE_OWN}
+    assert a.loc[100, "share"] == pytest.approx(0.75)
+    # B has three cells at 15 counts: it takes every cell's histogram.
+    assert set(b["share_source"]) == {qc.SHARE_SOURCE_LABEL_FREE}
+    assert set(b["n_cells"]) == {3}
+    assert b.loc[100, "share"] == pytest.approx(150 / 203)
+    assert b.loc[500, "share"] == pytest.approx(50 / 203)
+    assert b.loc[10, "share"] == pytest.approx(3 / 203)
+    assert qc.CLASS_DEPTH_MIN_CLASS_CELLS == 100
+    with pytest.raises(ValueError, match="min_class_cells"):
+        qc.dataset_class_bin_shares(totals, classes, GRID, min_class_cells=0)
+
+
+def test_dataset_class_depth_prediction_uses_each_levels_keys_and_regime() -> None:
+    table = pd.DataFrame(
+        class_depth_rows("A", {100: 0.5, 500: 0.9})
+        + class_depth_rows("A", {100: 0.2}, level="subclass")
+        + class_depth_rows("A", {100: 0.4}, level="subclass", regime="validated")
+    )
+    totals = [100] * 150 + [600] * 50
+    keys = {"class": ["A"] * 200, "subclass": ["A"] * 100 + [None] * 100}
+    prediction = qc.dataset_class_depth_prediction(
+        table,
+        totals,
+        keys,
+        {"class": "provisional", "subclass": "validated"},
+        GRID,
+    ).set_index(["level", "class"])
+    own = prediction.loc[("class", "A")]
+    assert own["share_source"] == qc.SHARE_SOURCE_OWN
+    assert own["regime"] == "provisional"
+    assert own["predicted_coverage"] == pytest.approx(0.75 * 0.5 + 0.25 * 0.9)
+    assert own["resolvable_share"] == pytest.approx(1.0)
+    # The subclass key covers 100 cells, all at 100 counts, in the validated
+    # regime's rows.
+    sub = prediction.loc[("subclass", "A")]
+    assert sub["regime"] == "validated" and sub["n_cells"] == 100
+    assert sub["predicted_coverage"] == pytest.approx(0.4)
+    empty = qc.dataset_class_depth_prediction(
+        table.iloc[0:0],
+        totals,
+        keys,
+        {"class": "provisional", "subclass": "provisional"},
+        GRID,
+    )
+    assert empty.empty
+
+
 def test_nonneuronal_depth_trend_reports_a_fall_above_1000_counts() -> None:
     rng = np.random.default_rng(0)
     n = 3000
@@ -416,6 +504,9 @@ def test_real_qc_config_defaults_match_the_module_constants() -> None:
     config = AnnotationRealQcConfig()
     assert config.coverage_warn_margin == qc.COVERAGE_WARN_MARGIN
     assert config.coverage_min_cells == qc.COVERAGE_MIN_CELLS
+    # The label-free depth of thin classes decides no warning at the default
+    # (pre-registration §22.9): every class the warning judges has its own.
+    assert config.coverage_min_cells >= qc.CLASS_DEPTH_MIN_CLASS_CELLS
     assert config.factor_remeasure_min_r == qc.FACTOR_REMEASURE_MIN_R
     assert config.nonneuronal_high_depth_counts == qc.NONNEURONAL_HIGH_DEPTH_COUNTS
     assert config.genes_per_count_gap_warn == qc.GENE_COMPLEXITY_GAP_WARN

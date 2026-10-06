@@ -68,6 +68,7 @@ from merxen.annotation.pipeline import (
     round_share,
     run_for_role,
     trust_for_run,
+    version_7_outputs,
     vocab_lookup,
 )
 from merxen.annotation.schema import Columns, safe_token
@@ -835,7 +836,13 @@ def resolve_mouse_sample(
     )
 
     # 3. Statuses (§7.3).
-    tables = None if primary is None else load_resolvability(primary.bundle.path)
+    # Version-7 bundles too (M3c follow-up): the reweighted ensemble's
+    # decisions, after the saturated-bp rule and the monotone fill.
+    tables = (
+        None
+        if primary is None
+        else load_resolvability(primary.bundle.path, allow_version_7=True)
+    )
     composition = None
     reweight = bool(
         tables is not None
@@ -957,6 +964,12 @@ def resolve_mouse_sample(
         seed=seed,
     )
 
+    # Version 7: the report-only non-neuronal high-depth flag and the
+    # class-depth prediction at the dataset's own per-class depth.
+    version_7 = version_7_outputs(
+        tables, emission, resolution.levels, counts, table, config
+    )
+
     # 5. Composition (§5.5).
     klass = resolution.levels["class"]
     shares = class_shares(
@@ -1009,6 +1022,7 @@ def resolve_mouse_sample(
         Columns.CT_LEAF: leaf,
         Columns.CT_MENDER_STATE: branch,
         **flag_set.columns,
+        Columns.FLAG_NONNEURONAL_HIGH_DEPTH: version_7.flag,
         **soft_class_columns(soft, table_rows, n_objects, class_names),
     }
     frame = pd.DataFrame(data, index=pd.RangeIndex(n_objects))
@@ -1231,6 +1245,8 @@ def resolve_mouse_sample(
         "composition": _composition_record(shares),
         "cross_platform": {},
     }
+    if version_7.summary is not None:
+        sample_summary["resolvability_v7"] = version_7.summary
     return SampleResolution(
         sample_id=sample_id,
         platform=platform,

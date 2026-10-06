@@ -81,6 +81,19 @@ REAL_QC_VERSION: Final = 1
 # Pre-registered constants (plan §8.8, user decision 4; [L]).
 COVERAGE_WARN_MARGIN: Final = 0.10
 COVERAGE_MIN_CELLS: Final = 200
+# A called class needs this many dataset cells for its own per-class depth
+# s_c(d); a thinner class takes the label-free total-count histogram of every
+# cell (the RESOLVE follow-up of plan §12 M3c). Not pre-registered: the value
+# was chosen for the follow-up (M13 chunk C14) and awaits the user's
+# confirmation (pre-registration §22.9). It reuses the registered per-class
+# minimum of a depth profile (plan §8.3 v7.5,
+# ``sim_inputs.PROFILE_MIN_CLASS_CELLS``). It decides no coverage warning only
+# while ``real_qc.coverage_min_cells`` (default ``COVERAGE_MIN_CELLS``, 200)
+# is at least this: a lower setting lets the warning judge classes whose
+# prediction uses the label-free histogram.
+CLASS_DEPTH_MIN_CLASS_CELLS: Final = 100
+SHARE_SOURCE_OWN: Final = "own"
+SHARE_SOURCE_LABEL_FREE: Final = "label_free"
 NONNEURONAL_HIGH_DEPTH_COUNTS: Final = 1000
 FACTOR_REMEASURE_MIN_R: Final = 0.9
 FACTOR_INFORMATIVE_MIN_EXPECTED: Final = 1000.0
@@ -353,6 +366,121 @@ def predicted_class_coverage(
     return pd.DataFrame(rows, columns=columns)
 
 
+def dataset_class_bin_shares(
+    totals: Sequence[float] | np.ndarray,
+    called_class: Sequence[object] | np.ndarray,
+    grid: Sequence[int],
+    *,
+    min_class_cells: int = CLASS_DEPTH_MIN_CLASS_CELLS,
+) -> pd.DataFrame:
+    """Return a dataset's per-class depth ``s_c(d)``, label-free for thin classes.
+
+    A called class with at least ``min_class_cells`` cells takes its own bin
+    shares (``class_bin_shares``, ``share_source`` ``own``); a thinner class
+    takes the bin shares of every cell with a total (a label-free total-count
+    histogram, ``label_free``), so a handful of calls never sets a class's
+    depth (the RESOLVE follow-up of plan §12 M3c). ``n_cells`` stays the
+    class's own cell count either way.
+
+    Args:
+        totals: Total counts per cell.
+        called_class: The cell's called class (missing values are left out
+            of the classes, never of the label-free histogram).
+        grid: The bundle's depth grid.
+        min_class_cells: Cells a class needs for its own shares.
+
+    Returns:
+        ``class``, ``depth``, ``share``, ``n_cells``, ``share_source`` per
+        (class, grid value).
+    """
+    if min_class_cells < 1:
+        raise ValueError("min_class_cells must be >= 1")
+    columns = ["class", "depth", "share", "n_cells", "share_source"]
+    own = class_bin_shares(totals, called_class, grid)
+    if own.empty:
+        return pd.DataFrame(columns=columns)
+    values = np.asarray(totals, dtype=np.float64)
+    pooled = class_bin_shares(
+        values, np.full(len(values), "all", dtype=object), grid
+    ).set_index("depth")["share"]
+    thin = own["n_cells"].to_numpy() < int(min_class_cells)
+    shares = own["share"].to_numpy(np.float64).copy()
+    shares[thin] = pooled.reindex(own["depth"][thin].to_numpy()).to_numpy(np.float64)
+    return pd.DataFrame(
+        {
+            "class": own["class"].astype(str).to_numpy(),
+            "depth": own["depth"].astype(int).to_numpy(),
+            "share": shares,
+            "n_cells": own["n_cells"].astype(int).to_numpy(),
+            "share_source": np.where(thin, SHARE_SOURCE_LABEL_FREE, SHARE_SOURCE_OWN),
+        },
+        columns=columns,
+    )
+
+
+def dataset_class_depth_prediction(
+    class_depth: pd.DataFrame,
+    totals: Sequence[float] | np.ndarray,
+    class_keys: Mapping[str, Sequence[object] | np.ndarray],
+    regimes: Mapping[str, str],
+    grid: Sequence[int],
+    *,
+    min_class_cells: int = CLASS_DEPTH_MIN_CLASS_CELLS,
+) -> pd.DataFrame:
+    """Return the class-depth prediction of each (level, called class) of a dataset.
+
+    ``predicted_class_coverage`` per level, at the dataset's own per-class
+    depth (``dataset_class_bin_shares`` of the cells whose class key at the
+    level is c, label-free for thin classes) and in the dataset's regime at
+    that level (plan §8.3 v7.5; the RESOLVE follow-up of §12 M3c). It is the
+    predictor of ``coverage_vs_simulation``; computing it changes nothing.
+
+    Args:
+        class_depth: The class-depth table of the decisions applied
+            (``resolvability.class_depth_table``).
+        totals: Total counts per cell.
+        class_keys: Per level, each cell's class key there (the class its
+            emission was read for).
+        regimes: Per level, the dataset's regime there.
+        grid: The bundle's depth grid.
+        min_class_cells: Cells a class needs for its own depth.
+
+    Returns:
+        ``level``, ``regime``, ``class``, ``n_cells``, ``share_source``,
+        ``predicted_coverage``, ``resolvable_share`` per (level, class).
+    """
+    columns = [
+        "level",
+        "regime",
+        "class",
+        "n_cells",
+        "share_source",
+        "predicted_coverage",
+        "resolvable_share",
+    ]
+    frames = []
+    for level, keys in class_keys.items():
+        regime = str(regimes[level])
+        shares = dataset_class_bin_shares(
+            totals, keys, grid, min_class_cells=min_class_cells
+        )
+        predicted = predicted_class_coverage(
+            class_depth, shares, regime=regime, levels=[str(level)]
+        )
+        if predicted.empty:
+            continue
+        source = shares.drop_duplicates("class").set_index("class")["share_source"]
+        frames.append(
+            predicted.assign(
+                regime=regime,
+                share_source=predicted["class"].map(source).to_numpy(),
+            )
+        )
+    if not frames:
+        return pd.DataFrame(columns=columns)
+    return pd.concat(frames, ignore_index=True)[columns]
+
+
 def real_class_coverage(
     called_class: Sequence[object] | np.ndarray,
     confident: Mapping[str, Sequence[bool] | np.ndarray],
@@ -601,6 +729,7 @@ def nonneuronal_high_depth_flags(
     *,
     regime: str = "provisional",
     min_counts: int = NONNEURONAL_HIGH_DEPTH_COUNTS,
+    levels: Sequence[str] | None = None,
 ) -> np.ndarray:
     """Return the report-only per-cell ``flag_nonneuronal_high_depth`` (v7.9).
 
@@ -617,6 +746,8 @@ def nonneuronal_high_depth_flags(
         class_depth: ``resolvability_class_depth.parquet``.
         regime: The dataset's regime.
         min_counts: The high-depth limit (1,000).
+        levels: Only these levels' bins (default: every level), for callers
+            whose class key differs by level (RESOLVE).
 
     Returns:
         Boolean flags, one per cell.
@@ -625,12 +756,21 @@ def nonneuronal_high_depth_flags(
     classes = np.asarray(called_class, dtype=object)
     if len(values) != len(classes):
         raise ValueError("totals and called_class differ in length")
+    neuronal = np.array(
+        [_known_true(value) for value in class_depth["neuronal"]], dtype=bool
+    )
+    high_depth = np.array(
+        [_known_true(value) for value in class_depth["nonneuronal_high_depth"]],
+        dtype=bool,
+    )
     table = class_depth[
-        (class_depth["regime"].astype(str) == regime)
-        & (class_depth["status"].astype(str) == STATUS_EMITTED)
-        & class_depth["nonneuronal_high_depth"].fillna(False).astype(bool)
-        & ~class_depth["neuronal"].map(lambda value: value is True or value == 1.0)
+        (class_depth["regime"].astype(str) == regime).to_numpy()
+        & (class_depth["status"].astype(str) == STATUS_EMITTED).to_numpy()
+        & high_depth
+        & ~neuronal
     ]
+    if levels is not None:
+        table = table[table["level"].astype(str).isin([str(item) for item in levels])]
     if table.empty:
         return np.zeros(len(values), dtype=bool)
     grid = sorted({int(value) for value in class_depth["depth"].astype(int)})
@@ -649,6 +789,21 @@ def nonneuronal_high_depth_flags(
             continue
         flags[index] = (str(cls), float(bin_value)) in marked
     return flags
+
+
+def _known_true(value: object) -> bool:
+    """Whether a (possibly nullable) boolean value is known to be true.
+
+    ``class_depth_table`` stores ``neuronal`` as a nullable ``boolean`` column
+    (unknown lineage is missing) and the parquet round trip may give objects
+    or floats; a missing value is never true.
+    """
+    if value is None or value is pd.NA:
+        return False
+    try:
+        return bool(value == 1)
+    except (TypeError, ValueError):
+        return False
 
 
 def _band_label(low: int, high: int | None) -> str:

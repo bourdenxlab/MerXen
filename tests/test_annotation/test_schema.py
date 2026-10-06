@@ -15,6 +15,7 @@ from merxen.annotation.schema import (
     LABEL_TABLE_VERSION,
     LEVEL_FIELDS,
     LEVELS,
+    OPTIONAL_CONTRACT_COLUMNS,
     REPORT_ONLY_LEVELS,
     CellStatus,
     Columns,
@@ -203,6 +204,35 @@ def test_missing_column_and_wrong_dtype_are_reported(
     )
     assert any("genes_per_count: dtype float64" in problem for problem in problems)
     assert any("ct_broad_name: dtype object" in problem for problem in problems)
+
+
+@pytest.mark.parametrize("species", ["human", "mouse"])
+def test_the_nonneuronal_high_depth_flag_is_checked_when_present(
+    species: str, make_label_table: TableFactory, tmp_path: Path
+) -> None:
+    """A table written before the flag validates; a written flag is checked."""
+    table = make_label_table(species)
+    assert Columns.FLAG_NONNEURONAL_HIGH_DEPTH in OPTIONAL_CONTRACT_COLUMNS
+    assert Columns.FLAG_NONNEURONAL_HIGH_DEPTH in column_specs(species)  # type: ignore[arg-type]
+    assert Columns.FLAG_NONNEURONAL_HIGH_DEPTH not in table.columns
+    validate_label_table(table, species)  # type: ignore[arg-type]
+    flagged = table.copy()
+    values = [None, True] + [False] * (len(table) - 2)
+    flagged[Columns.FLAG_NONNEURONAL_HIGH_DEPTH] = values
+    flagged = coerce_label_table_dtypes(flagged, species)  # type: ignore[arg-type]
+    assert str(flagged[Columns.FLAG_NONNEURONAL_HIGH_DEPTH].dtype) == "boolean"
+    validate_label_table(flagged, species)  # type: ignore[arg-type]
+    path = tmp_path / label_table_filename("sample")
+    flagged.to_parquet(path)
+    restored = pd.read_parquet(path)
+    assert str(restored[Columns.FLAG_NONNEURONAL_HIGH_DEPTH].dtype) == "boolean"
+    validate_label_table(restored, species)  # type: ignore[arg-type]
+    wrong = table.copy()
+    wrong[Columns.FLAG_NONNEURONAL_HIGH_DEPTH] = np.full(len(table), 0.5)
+    problems = _problems(wrong, species)
+    assert any(
+        "flag_nonneuronal_high_depth: dtype float64" in problem for problem in problems
+    )
 
 
 def test_unknown_values_are_reported(make_label_table: TableFactory) -> None:

@@ -181,6 +181,7 @@ if TYPE_CHECKING:
     from merxen.annotation.consensus import (
         HumanCalls,
         HumanResolution,
+        LevelResult,
         MouseResolution,
     )
     from merxen.annotation.diagnostics import TrustDecision
@@ -4232,6 +4233,154 @@ def _emitted_bins(
     return output
 
 
+@dataclass(frozen=True)
+class Version7Outputs:
+    """What RESOLVE adds for a version-7 primary bundle (M3c follow-up).
+
+    Attributes:
+        flag: ``flag_nonneuronal_high_depth`` per object: null for every
+            object of a version-6 bundle or without tables, and outside the
+            table.
+        summary: The sample summary's ``resolvability_v7`` record; ``None``
+            for a version-6 bundle or without tables, so their summaries are
+            unchanged.
+    """
+
+    flag: pd.arrays.BooleanArray
+    summary: dict[str, Any] | None
+
+
+def version_7_outputs(
+    tables: ResolvabilityTables | None,
+    emission: EmissionPlan,
+    levels: Mapping[str, LevelResult],
+    counts: np.ndarray,
+    in_table: np.ndarray,
+    config: AnnotationConfig,
+) -> Version7Outputs:
+    """Return the report-only version-7 outputs of one sample (plan §12 M3c).
+
+    For a version-7 bundle, from the class-depth table of the decisions
+    RESOLVE applied (``EmissionPlan.class_depth``; reweighted ensemble
+    decisions after the saturated-bp rule and the monotone fill), per level
+    of the bundle with each table cell's class key there and the dataset's
+    regime:
+
+    * ``flag_nonneuronal_high_depth``: a non-neuronal table cell with at
+      least ``real_qc.nonneuronal_high_depth_counts`` counts whose (level,
+      class, bin) is emitted on its own ensemble verdict and marked
+      ``nonneuronal_high_depth`` at some level (§8.3 v7.9;
+      ``real_qc.nonneuronal_high_depth_flags``);
+    * the class-depth prediction ``sum_d s_c(d) cov(L, c, d)`` at the
+      dataset's own per-class depth, label-free for classes with fewer than
+      ``real_qc.CLASS_DEPTH_MIN_CLASS_CELLS`` cells
+      (``real_qc.dataset_class_depth_prediction``; the predictor of the
+      per-class coverage check, which M13 wires);
+    * the applied decisions' emitted bins by route.
+
+    None of these changes a status, a label, a threshold, a floor or trust.
+    Cells of filled bins are ``resolvability_extrapolated`` through the
+    decisions' ``extrapolated`` column (``EmissionPlan.level``).
+
+    Args:
+        tables: The primary bundle's resolvability tables.
+        emission: The emission plan RESOLVE applied.
+        levels: The resolution's levels (``LevelResult.class_key``).
+        counts: Total counts per object.
+        in_table: Table cells.
+        config: The annotation config (``real_qc``).
+
+    Returns:
+        The flag column and the summary record.
+    """
+    from merxen.annotation import real_qc
+    from merxen.annotation.flags import nullable_flags
+    from merxen.annotation.resolvability import (
+        STATUS_EMITTED,
+        THRESHOLD_SOURCE_SATURATED,
+        ensemble_bin_counts,
+    )
+
+    n_objects = len(counts)
+    table = np.asarray(in_table, dtype=bool)
+    class_depth = emission.class_depth()
+    if class_depth is None or tables is None or emission.decisions is None:
+        unset = np.zeros(n_objects, dtype=bool)
+        return Version7Outputs(flag=nullable_flags(unset, unset), summary=None)
+    tabulated = {meta.level for meta in emission.levels}
+    keys: dict[str, np.ndarray] = {}
+    regimes: dict[str, str] = {}
+    for level, result in levels.items():
+        # Primary levels only: a derived level (human seaad_subclass) reads
+        # another level's table with its own engine's calls.
+        if level not in tabulated or emission.table_level(level) != level:
+            continue
+        keys[level] = np.asarray(result.class_key, dtype=object)[table]
+        regimes[level] = emission.regime(level)
+    totals = np.asarray(counts, dtype=np.float64)[table]
+    min_counts = int(config.real_qc.nonneuronal_high_depth_counts)
+    flagged = np.zeros(len(totals), dtype=bool)
+    per_level: dict[str, int] = {}
+    for level, level_keys in keys.items():
+        hits = real_qc.nonneuronal_high_depth_flags(
+            totals,
+            level_keys,
+            class_depth,
+            regime=regimes[level],
+            min_counts=min_counts,
+            levels=[level],
+        )
+        per_level[level] = int(hits.sum())
+        flagged |= hits
+    values = np.zeros(n_objects, dtype=bool)
+    values[table] = flagged
+    prediction = real_qc.dataset_class_depth_prediction(
+        class_depth, totals, keys, regimes, list(emission.grid)
+    )
+    decisions = emission.decisions
+    applied: dict[str, dict[str, int]] = {}
+    for regime in sorted(set(regimes.values())):
+        rows = decisions[decisions["regime"] == regime]
+        emitted = (rows["status"] == STATUS_EMITTED).to_numpy()
+        saturated = (rows["threshold_source"] == THRESHOLD_SOURCE_SATURATED).to_numpy()
+        high_depth = rows["nonneuronal_high_depth"].fillna(False).to_numpy(dtype=bool)
+        applied[regime] = {
+            **ensemble_bin_counts(rows),
+            "n_saturated_emitted": int((emitted & saturated).sum()),
+            "n_nonneuronal_high_depth_emitted": int((emitted & high_depth).sum()),
+        }
+    summary = {
+        "resolvability_version": emission.resolvability_version,
+        "decision_recipe": tables.summary.get("decision_recipe"),
+        "emission_members": [
+            str(name) for name in tables.summary.get("emission_members") or []
+        ],
+        "applied_decisions": applied,
+        "class_depth_prediction": {
+            "predictor": "class_depth",
+            "min_class_cells": real_qc.CLASS_DEPTH_MIN_CLASS_CELLS,
+            "classes": [
+                {
+                    "level": str(record["level"]),
+                    "regime": str(record["regime"]),
+                    "class": str(record["class"]),
+                    "n_cells": int(record["n_cells"]),
+                    "share_source": str(record["share_source"]),
+                    "predicted_coverage": round_share(record["predicted_coverage"]),
+                    "resolvable_share": round_share(record["resolvable_share"]),
+                }
+                for record in prediction.to_dict("records")
+            ],
+        },
+        "nonneuronal_high_depth": {
+            "min_counts": min_counts,
+            "n_flagged": int(flagged.sum()),
+            "per_level": per_level,
+        },
+    }
+    return Version7Outputs(flag=nullable_flags(values, table), summary=summary)
+
+
 def resolvability_provenance(
     tables: ResolvabilityTables | None,
     emission: EmissionPlan,
@@ -4697,8 +4846,14 @@ def resolve_human_sample(
     )
     counts = np.asarray(loaded.total_counts, dtype=np.float64)
 
-    # Emission reweighted to the dataset's soft composition (§8.3).
-    tables = None if primary is None else load_resolvability(primary.bundle.path)
+    # Emission reweighted to the dataset's soft composition (§8.3). RESOLVE
+    # reads version-7 bundles too (M3c follow-up): their decisions are the
+    # reweighted ensemble's, after the saturated-bp rule and the monotone fill.
+    tables = (
+        None
+        if primary is None
+        else load_resolvability(primary.bundle.path, allow_version_7=True)
+    )
     composition = None
     reweight = bool(
         tables is not None
@@ -4815,6 +4970,12 @@ def resolve_human_sample(
         config.flags,
         class_names=HUMAN_BROAD_CLASSES,
         seed=seed,
+    )
+
+    # Version 7: the report-only non-neuronal high-depth flag and the
+    # class-depth prediction at the dataset's own per-class depth.
+    version_7 = version_7_outputs(
+        tables, emission, resolution.levels, counts, table, config
     )
 
     # Soft composition (§5.5).
@@ -4946,6 +5107,7 @@ def resolve_human_sample(
         Columns.CT_LEAF: leaf,
         Columns.CT_MENDER_STATE: branch,
         **flag_set.columns,
+        Columns.FLAG_NONNEURONAL_HIGH_DEPTH: version_7.flag,
         **soft_broad_columns(soft_rows, table_rows, n_objects),
     }
     frame = pd.DataFrame(data, index=pd.RangeIndex(n_objects))
@@ -5148,6 +5310,8 @@ def resolve_human_sample(
         "cross_platform": cross_platform,
         "xpanel_composition": xpanel_shares,
     }
+    if version_7.summary is not None:
+        sample_summary["resolvability_v7"] = version_7.summary
     return SampleResolution(
         sample_id=sample_id,
         platform=platform,
