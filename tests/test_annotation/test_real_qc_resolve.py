@@ -1102,39 +1102,233 @@ def test_registration_g1_follows_its_configured_effect_in_resolve(
             status = labels[Columns.level(level, "status")].astype(str)
             assert set(status[table]) == {"not_attempted_gate"}
         assert labels[Columns.EXCLUDE_HARD][table].all()
+        # The flags are recomputed on the second pass: their rates' basis is
+        # the confident broad calls, of which a failed gate leaves none.
+        free_strata = free.samples["PX_MERSCOPE"].summary["flags"]["strata"]
+        strata = sample.summary["flags"]["strata"]
+        assert any(stratum["n_basis"] > 0 for stratum in free_strata)
+        assert strata and all(stratum["n_basis"] == 0 for stratum in strata)
+        _, provenance = _tables(applied, "PX_MERSCOPE")
+        assert provenance.flags is not None
+        assert not provenance.flags.realised_rates
     other = applied.samples["PX_XENIUM"].summary["real_qc"]["per_check"]
     assert other["registration_g1"] == "not_evaluable"
     assert _assert_nr1(free, applied) == {sample: [] for sample in free.samples}
 
 
-def test_resolve_on_a_version_7_bundle_scores_coverage_and_the_trend(
-    tmp_path: Path, fake_mmc: FakeMmc, make_trust: MakeTrust
+def test_qc_lowers_resolution_needs_a_withheld_level_or_a_harder_cap() -> None:
+    """The second RESOLVE pass runs for a withheld level or a harder gate cap."""
+    withheld = qc.qc_effects([outcome("withhold_level", level="supercluster")])
+    assert pl.qc_lowers_resolution(withheld, "full")
+    assert pl.qc_lowers_resolution(withheld, "failed")
+    capped = qc.qc_effects([outcome("gate_cap", gate_cap="broad_only")])
+    assert pl.qc_lowers_resolution(capped, "full")
+    assert not pl.qc_lowers_resolution(capped, "broad_only")
+    assert not pl.qc_lowers_resolution(capped, "failed")
+    warned = qc.qc_effects(
+        [
+            outcome("warning"),
+            outcome("report_only"),
+            outcome("withhold_pair_stats", check="paired_concordance"),
+        ]
+    )
+    assert not pl.qc_lowers_resolution(warned, "full")
+
+
+def test_a_withheld_level_in_resolve_is_not_emitted_and_nr1_holds(
+    tmp_path: Path,
+    fake_mmc: FakeMmc,
+    make_trust: MakeTrust,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Version 7: per-class coverage per level's class key, the trend reported."""
-    from .test_resolve_v7 import _human_v7_config, write_human_tables
+    """A withhold outcome (the prefilter spot check's effect) in RESOLVE.
+
+    RESOLVE has no spot-check input yet, so the outcome is planted on the QC
+    result. The second pass withholds supercluster and the SEA-AD subclass
+    that reads its table, the levels above keep their statuses, the gate keeps
+    its level and names the check among its warnings, and NR1 holds.
+    """
+    setup = _setup(tmp_path, fake_mmc)
+    free = _run(setup, make_trust, "free", enabled=False)
+    real_qc = qc.real_data_qc
+
+    def with_a_withheld_supercluster(*args: Any, **kwargs: Any) -> qc.RealQcResult:
+        result = real_qc(*args, **kwargs)
+        withheld = qc.QcOutcome(
+            qc.PREFILTER_SPOTCHECK_CHECK,
+            True,
+            "withhold_level",
+            message="agreement 0.80 < 0.95 at supercluster",
+            level="supercluster",
+        )
+        return result.replace_check(qc.PREFILTER_SPOTCHECK_CHECK, [withheld])
+
+    monkeypatch.setattr(qc, "real_data_qc", with_a_withheld_supercluster)
+    applied = _run(setup, make_trust, "qc")
+    assert _assert_nr1(free, applied) == {sample: [] for sample in free.samples}
+    for sample_id, sample in applied.samples.items():
+        record = sample.summary["real_qc"]
+        assert record["per_check"]["prefilter_spotcheck"] == "fail"
+        assert "not_resolvable_supercluster:prefilter_spotcheck" in record["downgrades"]
+        gate = sample.summary["resolution"]["gate"]
+        free_gate = free.samples[sample_id].summary["resolution"]["gate"]
+        assert gate["level"] == free_gate["level"] == "full"
+        assert any(
+            reason.startswith("real_qc_prefilter_spotcheck")
+            for reason in gate["warning_reasons"]
+        )
+        labels, _ = _tables(applied, sample_id)
+        free_labels, _ = _tables(free, sample_id)
+        for level in ("supercluster", "seaad_subclass"):
+            column = Columns.level(level, "status")
+            was = free_labels[column].astype(str).to_numpy() == CONFIDENT
+            now = labels[column].astype(str).to_numpy()
+            assert was.any(), level
+            assert set(now[was]) == {CellStatus.NOT_RESOLVABLE.value}, level
+        for level in ("lineage", "broad", "nt"):
+            column = Columns.level(level, "status")
+            assert list(labels[column]) == list(free_labels[column])
+
+
+def _label_confident(labels: pd.DataFrame, level: str, table: np.ndarray) -> np.ndarray:
+    """Whether each table cell is confident at ``level`` in a label table."""
+    status = labels[Columns.level(level, "status")].astype(str).to_numpy()
+    return (status == CONFIDENT)[table]
+
+
+def test_resolve_on_a_version_7_bundle_scores_coverage_and_the_trend(
+    tmp_path: Path,
+    fake_mmc: FakeMmc,
+    make_trust: MakeTrust,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Version 7: per-class coverage per level's class key, and the trend.
+
+    NR8's real share per (level, class key) is the label table's confident
+    share, and the warnings are exactly the judged (level, class) below the
+    prediction by more than the margin: a planted low-coverage class (its
+    prediction raised to 1.0) warns. A planted fall of the confident calls at
+    high depth fires the trend, which reads the table cells' counts, each
+    level's class keys and confident calls, and the class-depth table's
+    non-neuronal classes.
+    """
+    from .test_resolve_v7 import HUMAN_NEURONAL, _human_v7_config, write_human_tables
 
     setup = _setup(tmp_path, fake_mmc)
     write_human_tables(setup.bundles["whb_frontal_supc_clus"].path, 7)
     config = _with_real_qc(_human_v7_config(), coverage_min_cells=20)
+    limit = config.real_qc.nonneuronal_high_depth_counts
+    planted = ("broad", "Oligo")
+    class_keys: dict[int, dict[str, np.ndarray]] = {}
+    real_outputs = pl.version_7_outputs
+    real_trend = qc.nonneuronal_depth_trend
+    trend_calls: list[tuple[np.ndarray, np.ndarray, dict[str, np.ndarray], set[str]]]
+    trend_calls = []
+
+    def outputs_with_a_planted_prediction(*args: Any, **kwargs: Any) -> Any:
+        outputs = real_outputs(*args, **kwargs)
+        assert outputs.prediction is not None
+        # Keyed by the sample's objects (``counts``).
+        class_keys[len(args[3])] = dict(outputs.class_keys)
+        prediction = outputs.prediction.copy()
+        row = (prediction["level"] == planted[0]) & (prediction["class"] == planted[1])
+        assert int(row.sum()) == 1
+        prediction.loc[row, "predicted_coverage"] = 1.0
+        return dataclasses.replace(outputs, prediction=prediction)
+
+    def trend_with_a_planted_fall(
+        totals: Any, called_class: Any, confident: Any, classes: Any, **kwargs: Any
+    ) -> Any:
+        values = np.asarray(totals, dtype=np.float64)
+        flags = {
+            level: np.asarray(item, dtype=bool) for level, item in confident.items()
+        }
+        trend_calls.append(
+            (values, np.asarray(called_class, dtype=object), flags, set(classes))
+        )
+        fallen = {level: item & (values < limit) for level, item in flags.items()}
+        return real_trend(
+            totals, called_class, fallen, classes, min_band_cells=10, **kwargs
+        )
+
+    monkeypatch.setattr(pl, "version_7_outputs", outputs_with_a_planted_prediction)
+    monkeypatch.setattr(qc, "nonneuronal_depth_trend", trend_with_a_planted_fall)
+    # The synthetic sections end at 400 counts: the trend compares the cells
+    # below the high-depth limit with those at or above it.
+    monkeypatch.setattr(qc, "DEPTH_BANDS", ((10, limit),))
     applied = _resolve(setup, make_trust, "qc", state="provisional", config=config)
-    for sample in applied.samples.values():
+    nonneuronal = {cls for cls, neuronal in HUMAN_NEURONAL.items() if not neuronal}
+    margin = config.real_qc.coverage_warn_margin
+    for sample_id, sample in applied.samples.items():
         record = sample.summary["real_qc"]
-        assert record["per_check"]["coverage_vs_simulation"] in {"pass", "warn"}
         assert record["per_check"]["gene_complexity"] == "not_evaluable"
+        # No lowering effect: the label table is the QC-free resolution's.
+        assert not record["downgrades"]
+        labels, _ = _tables(applied, sample_id)
+        table = labels[Columns.IN_TABLE].to_numpy(dtype=bool)
+        keys = class_keys[len(labels)]
+        expected = pd.DataFrame(
+            [
+                {
+                    "level": level,
+                    "class": cls,
+                    "n_cells": len(group),
+                    "real_coverage": float(group["confident"].mean()),
+                }
+                for level, level_keys in keys.items()
+                # Cells without a class key are not judged.
+                for cls, group in pd.DataFrame(
+                    {
+                        "class": level_keys,
+                        "confident": _label_confident(labels, level, table),
+                    }
+                )
+                .dropna(subset=["class"])
+                .groupby("class")
+            ]
+        )
         coverage = pd.DataFrame(record["tables"]["coverage_vs_simulation"])
+        order = ["level", "class"]
+        pd.testing.assert_frame_equal(
+            coverage[[*order, "n_cells", "real_coverage"]]
+            .sort_values(order)
+            .reset_index(drop=True),
+            expected.sort_values(order).reset_index(drop=True),
+            check_dtype=False,
+        )
         predicted = pd.DataFrame(
             sample.summary["resolvability_v7"]["class_depth_prediction"]["classes"]
         )
         judged = coverage[coverage["judged"]]
-        assert len(judged)
-        keys = set(zip(predicted["level"], predicted["class"], strict=True))
-        assert set(zip(judged["level"], judged["class"], strict=True)) <= keys
-        assert record["per_check"]["nonneuronal_depth_trend"] in {
-            "pass",
-            "warn",
-            "not_evaluable",
+        assert set(zip(judged["level"], judged["class"], strict=True)) <= set(
+            zip(predicted["level"], predicted["class"], strict=True)
+        )
+        below = judged[judged["real_coverage"] < judged["predicted_coverage"] - margin]
+        warned = {
+            (item["level"], item["class"])
+            for item in record["outcomes"]
+            if item["check"] == "coverage_vs_simulation" and item["fired"]
         }
-        assert "nonneuronal_depth_trend" in record["tables"]
+        assert warned == set(zip(below["level"], below["class"], strict=True))
+        assert planted in warned
+        assert record["per_check"]["coverage_vs_simulation"] == "warn"
+        # The trend fired on the planted fall, on the non-neuronal classes.
+        fired = [
+            item
+            for item in record["outcomes"]
+            if item["check"] == "nonneuronal_depth_trend" and item["fired"]
+        ]
+        assert fired and {item["class"] for item in fired} <= nonneuronal
+        assert record["per_check"]["nonneuronal_depth_trend"] == "warn"
+        totals = labels[Columns.TOTAL_COUNTS].to_numpy(dtype=np.float64)[table]
+        calls = [item for item in trend_calls if len(item[0]) == int(table.sum())]
+        assert sorted(level for item in calls for level in item[2]) == sorted(keys)
+        for values, called, flags, classes in calls:
+            assert classes == nonneuronal
+            np.testing.assert_allclose(values, totals, rtol=1e-6)
+            ((level, confident),) = flags.items()
+            assert list(called) == list(keys[level])
+            assert list(confident) == list(_label_confident(labels, level, table))
 
 
 def test_the_cli_reads_a_human_registration_check(tmp_path: Path) -> None:
