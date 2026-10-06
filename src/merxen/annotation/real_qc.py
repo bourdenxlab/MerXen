@@ -83,9 +83,14 @@ COVERAGE_WARN_MARGIN: Final = 0.10
 COVERAGE_MIN_CELLS: Final = 200
 # A called class needs this many dataset cells for its own per-class depth
 # s_c(d); a thinner class takes the label-free total-count histogram of every
-# cell (the RESOLVE follow-up of plan §12 M3c). 100 is the registered
-# per-class minimum of a depth profile (plan §8.3 v7.5,
-# ``sim_inputs.PROFILE_MIN_CLASS_CELLS``).
+# cell (the RESOLVE follow-up of plan §12 M3c). Not pre-registered: the value
+# was chosen for the follow-up (M13 chunk C14) and awaits the user's
+# confirmation (pre-registration §22.9). It reuses the registered per-class
+# minimum of a depth profile (plan §8.3 v7.5,
+# ``sim_inputs.PROFILE_MIN_CLASS_CELLS``). It decides no coverage warning only
+# while ``real_qc.coverage_min_cells`` (default ``COVERAGE_MIN_CELLS``, 200)
+# is at least this: a lower setting lets the warning judge classes whose
+# prediction uses the label-free histogram.
 CLASS_DEPTH_MIN_CLASS_CELLS: Final = 100
 SHARE_SOURCE_OWN: Final = "own"
 SHARE_SOURCE_LABEL_FREE: Final = "label_free"

@@ -1627,8 +1627,11 @@ with a `ResolvabilityError` for every caller
   depth s_c(d): per level, the table cells whose class key there is c,
   binned by total counts; a class with fewer than 100 such cells
   (`real_qc.CLASS_DEPTH_MIN_CLASS_CELLS`, the per-class minimum of a depth
-  profile, plan §8.3 v7.5) takes the label-free total-count histogram of all
-  table cells (`share_source` `label_free`). The class-depth prediction
+  profile, plan §8.3 v7.5; not pre-registered and awaiting confirmation,
+  pre-registration §22.9) takes the label-free total-count histogram of all
+  table cells (`share_source` `label_free`). The coverage warning judges only
+  classes with at least `real_qc.coverage_min_cells` (200) cells, so at that
+  setting it never uses the label-free histogram. The class-depth prediction
   sum_d s_c(d) cov(L, c, d) and the resolvable share sum_d s_c(d) over
   emitted bins (`real_qc.dataset_class_depth_prediction`) are recorded per
   (level, class) in the dataset's regime; they are the predictor of the
@@ -1641,7 +1644,13 @@ with a `ResolvabilityError` for every caller
   and marked `nonneuronal_high_depth` (never filled). It changes no status,
   label, threshold, floor or trust state and does not enter
   `discovery_caution`. It is null outside the table, and for every cell of
-  a version-6 bundle or a run without resolvability tables.
+  a version-6 bundle or a run without resolvability tables. The mark is set
+  by the bin's grid depth, not the cell's: a bundle whose grid ends below the
+  limit has no marked bins, and the flag is false for every table cell. The
+  new-panel human MERSCOPE family's WHB bundle is one (its grid ends at 250
+  counts), so glia at >= 1,000 counts sit in its open-ended 250 bin, which
+  the fill's non-neuronal limit does not reach either (an open question,
+  pre-registration §22.9).
 - **Summary.** Each sample's entry in `<pair>_resolve_summary.json` gains
   `resolvability_v7`: the version, the decision recipe (`ensemble`), the
   emission members, the applied decisions' bins per regime (emitted,
