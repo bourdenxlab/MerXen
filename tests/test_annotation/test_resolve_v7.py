@@ -171,49 +171,71 @@ def correct_pattern(n: int, share: float) -> np.ndarray:
     return np.floor((ranks + 1) * share + 1e-9) > np.floor(ranks * share + 1e-9)
 
 
+# A class's second truth type (truth leaf, cells per member, share of correct
+# calls) per depth bin, beside its own ``truth`` leaf: reweighting to a
+# dataset that lacks that type changes the class's precision.
+SecondLeaves = Mapping[str, Mapping[int, tuple[str, int, float]]]
+Plan = Mapping[str, Mapping[int, tuple[int, float]]]
+
+
+def _block(
+    meta: res.LevelMeta, cls: str, leaf: str, depth: int, n_cells: int, share: float
+) -> pd.DataFrame:
+    """Return one block of planted test cells of a (level, class, truth leaf)."""
+    correct = correct_pattern(n_cells, share)
+    ids = [f"{leaf}_{depth}_{index}" for index in range(n_cells)]
+    return pd.DataFrame(
+        {
+            "recipe": res.DECISION_RECIPE,
+            "seed": 0,
+            "level": meta.level,
+            "sim_id": [f"{cell}|D{depth}" for cell in ids],
+            "cell_id": ids,
+            "depth": depth,
+            "half": np.arange(n_cells) % 2,
+            "parent": cls,
+            "call": np.where(correct, "right", "wrong"),
+            "bp": np.full(n_cells, 0.95),
+            "corr": 0.5,
+            "truth": "right",
+            "truth_parent": cls,
+            res.TRUTH_LEAF_COLUMN: leaf,
+            "correct": correct,
+            "total_counts": float(depth),
+        }
+    )
+
+
 def synthetic_cells(
     levels: Sequence[res.LevelMeta],
-    plan: Mapping[str, Mapping[int, tuple[int, float]]],
+    plan: Plan,
     truth: Mapping[str, str],
     *,
     members: Sequence[str] | None,
+    second_leaves: SecondLeaves | None = None,
+    level_plans: Mapping[str, Plan] | None = None,
 ) -> pd.DataFrame:
     """Return a resolvability cells table (version 7 with ``members``).
 
-    Every member simulates the same test cells (ids per class and depth);
-    without members the table is a version-6 one of ``R1_contam_HO``.
+    Every member simulates the same test cells (ids per truth leaf and
+    depth); without members the table is a version-6 one of ``R1_contam_HO``.
+    ``level_plans`` replaces ``plan`` at the levels it names.
     """
     frames = []
     for member in members or [None]:
         for meta in levels:
-            for cls, depths in plan.items():
+            for cls, depths in (level_plans or {}).get(meta.level, plan).items():
                 for depth, (n_cells, share) in depths.items():
-                    correct = correct_pattern(n_cells, share)
-                    ids = [f"{truth[cls]}_{depth}_{index}" for index in range(n_cells)]
-                    frame = pd.DataFrame(
-                        {
-                            "recipe": res.DECISION_RECIPE,
-                            "seed": 0,
-                            "level": meta.level,
-                            "sim_id": [f"{cell}|D{depth}" for cell in ids],
-                            "cell_id": ids,
-                            "depth": depth,
-                            "half": np.arange(n_cells) % 2,
-                            "parent": cls,
-                            "call": np.where(correct, "right", "wrong"),
-                            "bp": np.full(n_cells, 0.95),
-                            "corr": 0.5,
-                            "truth": "right",
-                            "truth_parent": cls,
-                            res.TRUTH_LEAF_COLUMN: truth[cls],
-                            "correct": correct,
-                            "total_counts": float(depth),
-                        }
-                    )
-                    if member is not None:
-                        frame[res.MEMBER_COLUMN] = member
-                        frame[res.MEMBER_ROLE_COLUMN] = "emission"
-                    frames.append(frame)
+                    blocks = [(truth[cls], n_cells, share)]
+                    second = (second_leaves or {}).get(cls, {}).get(depth)
+                    if second is not None:
+                        blocks.append(second)
+                    for leaf, n_leaf, leaf_share in blocks:
+                        frame = _block(meta, cls, leaf, depth, n_leaf, leaf_share)
+                        if member is not None:
+                            frame[res.MEMBER_COLUMN] = member
+                            frame[res.MEMBER_ROLE_COLUMN] = "emission"
+                        frames.append(frame)
     return pd.concat(frames, ignore_index=True)
 
 
@@ -223,10 +245,12 @@ def write_tables(
     version: object,
     levels: Sequence[res.LevelMeta],
     grid: Sequence[int],
-    plan: Mapping[str, Mapping[int, tuple[int, float]]],
+    plan: Plan,
     truth: Mapping[str, str],
     neuronal: Mapping[str, bool],
     high_depth: int,
+    second_leaves: SecondLeaves | None = None,
+    level_plans: Mapping[str, Plan] | None = None,
 ) -> None:
     """Write synthetic resolvability files of a version into a bundle.
 
@@ -235,7 +259,14 @@ def write_tables(
     summary with that ``resolvability_version``.
     """
     v7 = version == res.RESOLVABILITY_VERSION_V7
-    cells = synthetic_cells(levels, plan, truth, members=MEMBERS if v7 else None)
+    cells = synthetic_cells(
+        levels,
+        plan,
+        truth,
+        members=MEMBERS if v7 else None,
+        second_leaves=second_leaves,
+        level_plans=level_plans,
+    )
     coerce = res.coerce_cells_v7 if v7 else res.coerce_cells
     coerce(cells).to_parquet(bundle_dir / res.RESOLVABILITY_CELLS_FILE, index=False)
     summary: dict[str, Any] = {
@@ -264,7 +295,12 @@ def write_tables(
     )
 
 
-def write_human_tables(bundle_dir: Path, version: object = 7) -> None:
+def write_human_tables(
+    bundle_dir: Path,
+    version: object = 7,
+    *,
+    second_leaves: SecondLeaves | None = None,
+) -> None:
     """Write the synthetic human resolvability files of a version."""
     write_tables(
         bundle_dir,
@@ -275,6 +311,7 @@ def write_human_tables(bundle_dir: Path, version: object = 7) -> None:
         truth=HUMAN_TRUTH,
         neuronal=HUMAN_NEURONAL,
         high_depth=HUMAN_HIGH_DEPTH,
+        second_leaves=second_leaves,
     )
 
 
@@ -447,24 +484,90 @@ def test_human_resolve_applies_the_version_7_ensemble_decisions(
     assert n_flagged > 0
 
 
+# The real names of the synthetic sections' glial calls and their class keys
+# (the per-cell checks; ``test_pipeline_resolve.WHB``).
+GLIAL_KEYS: dict[str, str] = {"Astrocyte": "Astro", "Oligodendrocyte": "Oligo"}
+
+
+def _without_reweighting(config: AnnotationConfig) -> AnnotationConfig:
+    """Return a config whose RESOLVE keeps PREP's unweighted decisions."""
+    resolvability = config.resolvability.model_copy(
+        update={"reweight_to_composition": False}
+    )
+    return config.model_copy(update={"resolvability": resolvability})
+
+
+def _check_lineage_per_cell(
+    labels: pd.DataFrame, lookup: Mapping[tuple[str, str, int], Mapping[str, Any]]
+) -> int:
+    """Check each glial table cell's lineage emission against decisions.
+
+    A cell is ``not_resolvable`` exactly when its (lineage, class, bin) is
+    not emitted, and a confident cell is ``resolvability_extrapolated``
+    exactly when its bin is.
+
+    Returns:
+        The number of cells checked.
+    """
+    table = labels[Columns.IN_TABLE].to_numpy(bool)
+    bins = res.depth_bin(
+        labels[Columns.TOTAL_COUNTS].to_numpy(np.float64), list(HUMAN_GRID)
+    )
+    names = labels["mmc_whb_supercluster_name"].astype(str).to_numpy()
+    status = labels[Columns.level("lineage", "status")].astype(str).to_numpy()
+    extrapolated = labels[Columns.RESOLVABILITY_EXTRAPOLATED].to_numpy(bool)
+    checked = 0
+    for index in np.flatnonzero(table & np.isfinite(bins)):
+        cls = GLIAL_KEYS.get(names[index])
+        if cls is None:
+            continue
+        record = lookup[("lineage", cls, int(bins[index]))]
+        emitted = record["status"] == res.STATUS_EMITTED
+        assert (status[index] == CellStatus.NOT_RESOLVABLE.value) == (not emitted)
+        if status[index] == CellStatus.CONFIDENT.value:
+            assert extrapolated[index] == bool(record["extrapolated"])
+        checked += 1
+    return checked
+
+
+def _section_composition(
+    setup: Any, sample_id: str, labels: pd.DataFrame, config: AnnotationConfig
+) -> res.DatasetComposition:
+    """Return the composition RESOLVE reweights a section to, from its MAP output.
+
+    ``composition.dataset_type_composition`` of the WHB supercluster level of
+    the section's tidy MMC table (the table cells' assigned nodes and
+    runner-ups) at their total counts, on the bundle's grid.
+    """
+    from merxen.annotation.composition import dataset_type_composition
+    from merxen.annotation.mapmycells_engine import level_frame
+
+    platform = str(labels[Columns.PLATFORM].iloc[0]).lower()
+    tidy = pd.read_parquet(
+        setup.map_dir / platform / f"{sample_id}_mmc_whb_frontal_supc_clus.parquet"
+    )
+    leaf = level_frame(tidy, "CCN202210140_SUPC")
+    leaf.index = leaf.index.astype(str)
+    table = labels[labels[Columns.IN_TABLE].to_numpy(bool)]
+    return dataset_type_composition(
+        leaf.reindex(table[Columns.CELL_ID].astype(str).to_numpy()),
+        table[Columns.TOTAL_COUNTS].to_numpy(np.float64),
+        list(HUMAN_GRID),
+        min_bin_mass=float(config.resolvability.composition_min_bin_cells),
+    )
+
+
 def test_human_resolve_of_a_version_7_bundle_follows_its_decisions_per_cell(
     tmp_path: Path, fake_mmc: FakeMmc, make_trust: MakeTrust
 ) -> None:
-    """Each cell's lineage emission and extrapolation follow the decisions."""
+    """Without reweighting, each cell's lineage emission follows PREP's decisions."""
     from merxen.annotation.thresholds import EmissionPlan
 
     setup = _human_setup(tmp_path, fake_mmc)
     bundle_dir = setup.bundles["whb_frontal_supc_clus"].path
     write_human_tables(bundle_dir)
-    config = _human_v7_config()
-    plain = config.model_copy(
-        update={
-            "resolvability": config.resolvability.model_copy(
-                update={"reweight_to_composition": False}
-            )
-        }
-    )
-    result = _human_resolve(setup, make_trust, state="provisional", config=plain)
+    config = _without_reweighting(_human_v7_config())
+    result = _human_resolve(setup, make_trust, state="provisional", config=config)
     tables = res.load_resolvability(bundle_dir, allow_version_7=True)
     assert tables is not None
     plan = EmissionPlan.from_tables(
@@ -475,29 +578,97 @@ def test_human_resolve_of_a_version_7_bundle_follows_its_decisions_per_cell(
     )
     assert plan.is_version_7 and plan.decisions is not None
     lookup = _decision_lookup(plan.decisions, "provisional")
-    classes = {"Astrocyte": "Astro", "Oligodendrocyte": "Oligo"}
     checked = 0
     for sample in result.samples.values():
         assert sample.summary["reweighted_to_composition"] is False
         labels, _ = read_label_table(sample.labels_path)
+        checked += _check_lineage_per_cell(labels, lookup)
+    assert checked > 0
+
+
+# Astro at 30-99 counts gets a second truth type, one the synthetic sections
+# lack, with poor calls (share 0.6). On PREP's unweighted test cells the bin's
+# precision is 0.8 and it is not emitted; reweighted to a section, that type
+# weighs nothing (absent from the composition) and the bin is Astrocyte's own,
+# precise and emitted. Every other bin is unchanged by reweighting.
+ABSENT_LEAF = "CS_AST_ABSENT"
+REWEIGHT_SECOND_LEAVES: dict[str, dict[int, tuple[str, int, float]]] = {
+    "Astro": {30: (ABSENT_LEAF, 300, 0.6)}
+}
+
+
+def test_human_resolve_reweights_the_version_7_members_to_each_section(
+    tmp_path: Path, fake_mmc: FakeMmc, make_trust: MakeTrust
+) -> None:
+    """RESOLVE applies the ensemble decisions reweighted to each section.
+
+    Cell by cell, the lineage statuses follow ``ResolvabilityTables.decisions``
+    reweighted to the section's own composition (recomputed here from its MAP
+    output), and the planted bin that only reweighting emits differs from a
+    run without reweighting, which follows the unweighted decisions.
+    """
+    setup = _human_setup(tmp_path, fake_mmc)
+    bundle_dir = setup.bundles["whb_frontal_supc_clus"].path
+    write_human_tables(bundle_dir, second_leaves=REWEIGHT_SECOND_LEAVES)
+    config = _human_v7_config()
+    weighted = _human_resolve(
+        setup, make_trust, "weighted", state="provisional", config=config
+    )
+    plain = _human_resolve(
+        setup,
+        make_trust,
+        "plain",
+        state="provisional",
+        config=_without_reweighting(config),
+    )
+    tables = res.load_resolvability(bundle_dir, allow_version_7=True)
+    assert tables is not None
+    unweighted = _decision_lookup(tables.decisions(), "provisional")
+    for level in HUMAN_LEVELS:
+        assert unweighted[(level, "Astro", 30)]["status"] == res.STATUS_NOT_RESOLVABLE
+        assert unweighted[(level, "Astro", 10)]["status"] == res.STATUS_EMITTED
+    flipped = 0
+    for sample_id, sample in weighted.samples.items():
+        assert sample.summary["reweighted_to_composition"] is True
+        labels, _ = read_label_table(sample.labels_path)
+        other, _ = read_label_table(plain.samples[sample_id].labels_path)
+        assert plain.samples[sample_id].summary["reweighted_to_composition"] is False
+        composition = _section_composition(setup, sample_id, labels, config)
+        assert ABSENT_LEAF not in composition.overall
+        decisions = tables.decisions(composition=composition)
+        expected = _decision_lookup(decisions, "provisional")
+        for level in HUMAN_LEVELS:
+            assert expected[(level, "Astro", 30)]["status"] == res.STATUS_EMITTED
+        # Only the planted bin moves: per level, one more emitted bin.
+        moved = {
+            key
+            for key, record in expected.items()
+            if record["status"] != unweighted[key]["status"]
+        }
+        assert moved == {(level, "Astro", 30) for level in HUMAN_LEVELS}
+        applied = sample.summary["resolvability_v7"]["applied_decisions"]
+        applied_plain = plain.samples[sample_id].summary["resolvability_v7"][
+            "applied_decisions"
+        ]
+        assert applied["provisional"]["n_emitted"] == (
+            applied_plain["provisional"]["n_emitted"] + len(HUMAN_LEVELS)
+        )
+        assert _check_lineage_per_cell(labels, expected) > 0
+        assert _check_lineage_per_cell(other, unweighted) > 0
+        # The planted bin's Astrocytes: not resolvable without reweighting,
+        # emitted (and not extrapolated) with it.
         table = labels[Columns.IN_TABLE].to_numpy(bool)
         bins = res.depth_bin(
             labels[Columns.TOTAL_COUNTS].to_numpy(np.float64), list(HUMAN_GRID)
         )
         names = labels["mmc_whb_supercluster_name"].astype(str).to_numpy()
+        planted = table & (names == "Astrocyte") & (bins == 30)
         status = labels[Columns.level("lineage", "status")].astype(str).to_numpy()
-        extrapolated = labels[Columns.RESOLVABILITY_EXTRAPOLATED].to_numpy(bool)
-        for index in np.flatnonzero(table & np.isfinite(bins)):
-            cls = classes.get(names[index])
-            if cls is None:
-                continue
-            record = lookup[("lineage", cls, int(bins[index]))]
-            emitted = record["status"] == res.STATUS_EMITTED
-            assert (status[index] == CellStatus.NOT_RESOLVABLE.value) == (not emitted)
-            if status[index] == CellStatus.CONFIDENT.value:
-                assert extrapolated[index] == bool(record["extrapolated"])
-            checked += 1
-    assert checked > 0
+        status_plain = other[Columns.level("lineage", "status")].astype(str).to_numpy()
+        assert set(status_plain[planted]) == {CellStatus.NOT_RESOLVABLE.value}
+        assert CellStatus.NOT_RESOLVABLE.value not in set(status[planted])
+        flipped += int(planted.sum())
+    assert flipped > 0
 
 
 def test_the_version_7_flag_follows_the_configured_depth_and_changes_nothing(
@@ -534,6 +705,99 @@ def test_the_version_7_flag_follows_the_configured_depth_and_changes_nothing(
             other.drop(columns=[Columns.FLAG_NONNEURONAL_HIGH_DEPTH]),
         )
     assert flagged > 0
+
+
+# Per level, the class keys of a COP cell differ (human: ``OPC`` at lineage,
+# broad and NT, where COP sits inside OPC; ``COP`` at supercluster). Planted:
+# ``OPC`` is emitted, and marked non-neuronal high depth at 250, only at
+# supercluster; at the other levels ``OPC`` and at supercluster ``COP`` are
+# never emitted.
+OPC_TRUTH: dict[str, str] = {"Exc": "CS_EXC", "OPC": "CS_OPC", "COP": "CS_COP"}
+OPC_NEURONAL: dict[str, bool] = {"Exc": True, "OPC": False, "COP": False}
+OPC_PLAN: dict[str, dict[int, tuple[int, float]]] = {
+    "Exc": {depth: (300, 1.0) for depth in HUMAN_GRID},
+    "OPC": {depth: (300, 0.8) for depth in HUMAN_GRID},
+}
+OPC_SUPERCLUSTER_PLAN: dict[str, dict[int, tuple[int, float]]] = {
+    "Exc": {depth: (300, 1.0) for depth in HUMAN_GRID},
+    "OPC": {depth: (300, 1.0) for depth in HUMAN_GRID},
+    "COP": {depth: (300, 0.8) for depth in HUMAN_GRID},
+}
+
+
+def test_the_version_7_flag_reads_each_level_with_its_own_class_key(
+    tmp_path: Path, make_trust: MakeTrust
+) -> None:
+    """A level's class key is looked up in that level's bins only.
+
+    A COP cell (``OPC`` at broad, ``COP`` at supercluster) at 300 counts is
+    not flagged: ``OPC`` is a marked, emitted high-depth bin at supercluster
+    only, where the cell's key is ``COP``. Matching its broad key against
+    every level's bins would flag it.
+    """
+    from types import SimpleNamespace
+
+    from merxen.annotation.pipeline import version_7_outputs
+    from merxen.annotation.thresholds import EmissionPlan
+
+    thresholds = AnnotationThresholds()
+    write_tables(
+        tmp_path,
+        version=7,
+        levels=human_levels(thresholds),
+        grid=HUMAN_GRID,
+        plan=OPC_PLAN,
+        truth=OPC_TRUTH,
+        neuronal=OPC_NEURONAL,
+        high_depth=HUMAN_HIGH_DEPTH,
+        level_plans={"supercluster": OPC_SUPERCLUSTER_PLAN},
+    )
+    tables = res.load_resolvability(tmp_path, allow_version_7=True)
+    assert tables is not None
+    emission = EmissionPlan.from_tables(
+        tables,
+        species="human",
+        thresholds=thresholds,
+        trust=make_trust("provisional"),
+    )
+    class_depth = emission.class_depth()
+    assert class_depth is not None
+    marked = class_depth[
+        (class_depth["regime"] == "provisional")
+        & (class_depth["status"] == res.STATUS_EMITTED)
+        & class_depth["nonneuronal_high_depth"].fillna(False).astype(bool)
+    ]
+    assert set(zip(marked["level"], marked["class"], strict=True)) == {
+        ("supercluster", "OPC")
+    }
+    # Cells: COP (300 counts), OPC (300), OPC (120), Exc (300), and an OPC
+    # cell outside the table.
+    broad_key = np.array(["OPC", "OPC", "OPC", "Exc", "OPC"], dtype=object)
+    supercluster_key = np.array(["COP", "OPC", "OPC", "Exc", "OPC"], dtype=object)
+    levels = {
+        level: SimpleNamespace(
+            class_key=supercluster_key if level == "supercluster" else broad_key
+        )
+        for level in HUMAN_LEVELS
+    }
+    outputs = version_7_outputs(
+        tables,
+        emission,
+        levels,  # type: ignore[arg-type]
+        np.array([300.0, 300.0, 120.0, 300.0, 300.0]),
+        np.array([True, True, True, True, False]),
+        _human_v7_config(),
+    )
+    assert outputs.flag.tolist() == [False, True, False, False, pd.NA]
+    assert outputs.summary is not None
+    record = outputs.summary["nonneuronal_high_depth"]
+    assert record["n_flagged"] == 1
+    assert record["per_level"] == {
+        "lineage": 0,
+        "broad": 0,
+        "nt": 0,
+        "supercluster": 1,
+    }
 
 
 # --------------------------------------------------------------------------

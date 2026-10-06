@@ -504,6 +504,9 @@ def test_real_qc_config_defaults_match_the_module_constants() -> None:
     config = AnnotationRealQcConfig()
     assert config.coverage_warn_margin == qc.COVERAGE_WARN_MARGIN
     assert config.coverage_min_cells == qc.COVERAGE_MIN_CELLS
+    # The label-free depth of thin classes decides no warning at the default
+    # (pre-registration §22.9): every class the warning judges has its own.
+    assert config.coverage_min_cells >= qc.CLASS_DEPTH_MIN_CLASS_CELLS
     assert config.factor_remeasure_min_r == qc.FACTOR_REMEASURE_MIN_R
     assert config.nonneuronal_high_depth_counts == qc.NONNEURONAL_HIGH_DEPTH_COUNTS
     assert config.genes_per_count_gap_warn == qc.GENE_COMPLEXITY_GAP_WARN
