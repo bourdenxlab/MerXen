@@ -1,7 +1,7 @@
 """Gate-P scoring (M13, plan §14 new panel family).
 
 Pure functions on cells tables: NP3 precision and coverage, NP4 donor / draw
-stability, NP5 resolvability consistency, NP7 error structure.
+and seed stability, NP5 resolvability consistency, NP7 error structure.
 
 Gate P validates a new panel family by simulation only (plan §8.8, §14). The
 thresholds and emission are derived once from the default donor (human) or
@@ -52,8 +52,16 @@ A set where some replicate has fewer than 100 calls is scored by the floor
 alone, and one where no replicate has 100 passes NP4 vacuously (``vacuous``,
 reported); this is §14's literal reading.
 
-NP4's seed criterion (seed 0 vs 1 changes <= 2% of confident labels) is a
-separate check. A replicate is keyed by an opaque (group, seed label) pair:
+NP4's seed criterion (§14: "Seed 0 vs 1 changes <= 2% of confident labels
+per validated level"; ``np4_seed_stability``): the seeds are MapMyCells
+mapping seeds, so seed 1 re-maps seed 0's simulated cells, and a change is
+a call change (``resolvability.seed_stability``; D6, pre-registration
+§23.9 item 3, confirmed on 2026-10-06). A level over 2% fails NP4 for every
+class of the level (``np4_class_verdicts``). The readings taken where §14
+is not explicit are listed in ``np4_seed_stability``'s docstring; they are
+open until the user answers them, before the set a dry run is scored.
+
+A replicate is keyed by an opaque (group, seed label) pair:
 the group is a human donor or a mouse draw, so the functions are
 species-agnostic. The frozen thresholds were fitted on the default group's
 fit half, so that group is scored on its check half only
@@ -149,6 +157,8 @@ from merxen.annotation.vocab import REGION_COLUMN_PREFIX, Species
 
 # §14 NP4: "the range ... is <= max(0.03, 3.5 x pooled SE)".
 GATE_P_SPREAD_FLOOR: Final = 0.03
+# §14 NP4: "Seed 0 vs 1 changes <= 2% of confident labels per validated level".
+NP4_MAX_SEED_CHANGE: Final = 0.02
 # A replicate: (group, seed label). The group is a held-out donor (human) or
 # a test draw (mouse); the seed label names the replicate's seed. Both are
 # opaque: each replicate table must hold exactly one replicate.
@@ -188,6 +198,20 @@ NP4_COLUMNS: Final[tuple[str, ...]] = (
     "range_ok",
     "passed",
 )
+NP4_SEED_COLUMNS: Final[tuple[str, ...]] = (
+    "level",
+    "group",
+    "base_seed",
+    "seed",
+    "n_confident",
+    "n_changed",
+    "changed_share",
+    "n_switched",
+    "n_crossed",
+    "pooled_changed_share",
+    "max_change",
+    "passed",
+)
 
 
 @dataclass(frozen=True)
@@ -202,17 +226,21 @@ class Np4Settings:
         spread_se_multiplier: The range limit in pooled standard errors
             (``gate_p_spread_se_multiplier``, 3.5).
         spread_floor: The smallest range limit (0.03).
+        max_seed_change: The largest share of a level's confident labels
+            that seed 1 may change (0.02; ``np4_seed_stability``).
     """
 
     replicate_min_confident_n: int
     spread_se_multiplier: float
     spread_floor: float = GATE_P_SPREAD_FLOOR
+    max_seed_change: float = NP4_MAX_SEED_CHANGE
 
     def __post_init__(self) -> None:
-        """Validate that every constant is positive.
+        """Validate the constants.
 
         Raises:
-            ValueError: If a constant is not > 0.
+            ValueError: If a count or range constant is not > 0, or
+                ``max_seed_change`` is outside [0, 1].
         """
         for name in (
             "replicate_min_confident_n",
@@ -222,6 +250,11 @@ class Np4Settings:
             value = getattr(self, name)
             if not value > 0:
                 raise ValueError(f"Np4Settings.{name} must be > 0, got {value!r}")
+        if not 0.0 <= self.max_seed_change <= 1.0:
+            raise ValueError(
+                "Np4Settings.max_seed_change must lie in [0, 1], got "
+                f"{self.max_seed_change!r}"
+            )
 
     @classmethod
     def from_config(cls, config: AnnotationResolvabilityConfig) -> Np4Settings:
@@ -231,7 +264,9 @@ class Np4Settings:
             config: The resolvability config.
 
         Returns:
-            The settings (the floor is the §14 constant 0.03).
+            The settings (the floor and the seed limit are the §14 constants
+            0.03 and 0.02; ``seed_stability_max_change`` is the §8.3
+            fine-level opt-in's limit, not gate P's).
         """
         return cls(
             replicate_min_confident_n=config.gate_p_replicate_min_confident_n,
@@ -785,33 +820,356 @@ def np4_set_verdicts(
     return pd.DataFrame.from_records(records, columns=list(NP4_COLUMNS))
 
 
+def _np4_seed_grid(
+    replicates: Mapping[ReplicateKey, pd.DataFrame], base_seed: int
+) -> tuple[list[str], list[int]]:
+    """The groups and the seeds compared with the base seed (§23.9 item 3).
+
+    Raises:
+        ValueError: Unless the replicates are the full grid of at least 2
+            groups x the same seeds, the base seed among them and another.
+    """
+    seeds_of: dict[str, set[int]] = {}
+    for group, seed in replicates:
+        seeds_of.setdefault(str(group), set()).add(seed)
+    groups = sorted(seeds_of)
+    if len(groups) < 2:
+        raise ValueError(f"NP4 needs at least 2 groups (donors or draws), got {groups}")
+    seeds = sorted({seed for values in seeds_of.values() for seed in values})
+    incomplete = [group for group in groups if seeds_of[group] != set(seeds)]
+    if incomplete:
+        raise ValueError(
+            f"NP4 seed criterion: the replicates are not the full grid of groups "
+            f"{groups} x seeds {seeds} (incomplete: {incomplete})"
+        )
+    if base_seed not in seeds:
+        raise ValueError(
+            f"NP4 seed criterion: no replicate has the base seed label "
+            f"{base_seed!r} (seeds {seeds})"
+        )
+    others = [seed for seed in seeds if seed != base_seed]
+    if not others:
+        raise ValueError(
+            f"NP4 seed criterion needs a second seed to compare with seed "
+            f"{base_seed!r} (§14: seeds 0 / 1)"
+        )
+    return groups, others
+
+
+def _seed_frame(
+    table: pd.DataFrame, name: str, *, recipe: str | None, member: str | None
+) -> pd.DataFrame:
+    """One replicate's rows after the filters, with a fresh ``RangeIndex``.
+
+    Raises:
+        ValueError: If no row is left after the filters or a column is
+            missing.
+        ResolvabilityError: If the rows mix replicates (``replicate_rows``).
+    """
+    frame = res.replicate_rows(
+        table, recipe=recipe, seed=None, member=member
+    ).reset_index(drop=True)
+    if frame.empty:
+        raise ValueError(
+            f"{name} has no rows after the filters (recipe={recipe!r}, "
+            f"member={member!r})"
+        )
+    _require_columns(frame, ("call", "total_counts", "seed"), name)
+    return frame
+
+
+@dataclass(frozen=True)
+class _SeedChanges:
+    """Per row of the base replicate: its level and how seed 1 changed it."""
+
+    levels: np.ndarray
+    confident: np.ndarray
+    changed: np.ndarray
+    switched: np.ndarray
+    crossed: np.ndarray
+
+
+def _distinct_values(frame: pd.DataFrame, column: str) -> list[str] | None:
+    """The sorted distinct values of a column (``None`` without the column)."""
+    if column not in frame.columns:
+        return None
+    return sorted({str(value) for value in frame[column]})
+
+
+def _seed_changes(
+    base: pd.DataFrame,
+    other: pd.DataFrame,
+    lookup: Mapping[tuple[str, str, int], tuple[str, float | None, bool]],
+    names: tuple[str, str],
+) -> _SeedChanges:
+    """Compare a replicate's calls at the base seed and another mapping seed.
+
+    Raises:
+        ValueError: Unless both tables are one mapping seed each, two
+            different ones, of the same recipe, member, simulated cells and
+            simulated counts.
+    """
+    base_name, other_name = names
+    base_seed = _one_seed(base, base_name)
+    other_seed = _one_seed(other, other_name)
+    if base_seed == other_seed:
+        raise ValueError(
+            f"{base_name} and {other_name} both hold mapping seed {base_seed}: the "
+            "seed criterion compares two mapping seeds of the same simulated "
+            "cells (D6)"
+        )
+    for column in ("recipe", res.MEMBER_COLUMN):
+        left, right = _distinct_values(base, column), _distinct_values(other, column)
+        if left != right:
+            raise ValueError(
+                f"{base_name} and {other_name} hold different {column} values "
+                f"({left} and {right}); pass recipe= or member= to compare one "
+                "replicate at two mapping seeds"
+            )
+
+    def keys(frame: pd.DataFrame) -> pd.MultiIndex:
+        return pd.MultiIndex.from_arrays(
+            [
+                frame["level"].astype(str).to_numpy(),
+                frame["cell_id"].astype(str).to_numpy(),
+                frame["depth"].to_numpy(np.int64),
+            ]
+        )
+
+    # replicate_rows made each (level, cell, depth) unique in both tables.
+    positions = keys(other).get_indexer(keys(base))
+    missing = int((positions < 0).sum())
+    extra = len(other) - (len(base) - missing)
+    if missing or extra:
+        raise ValueError(
+            f"{base_name} and {other_name} do not hold the same simulated cells: "
+            f"{missing} (level, cell, depth) rows of the first are not in the "
+            f"second, which holds {extra} rows the first does not; seed "
+            f"{other_seed} re-maps seed {base_seed}'s simulated cells (D6)"
+        )
+    counts = base["total_counts"].to_numpy(np.float64)
+    remapped = other["total_counts"].to_numpy(np.float64)[positions]
+    same = (counts == remapped) | (np.isnan(counts) & np.isnan(remapped))
+    if not bool(same.all()):
+        raise ValueError(
+            f"{base_name} and {other_name} differ in total_counts at "
+            f"{int((~same).sum())} simulated cells: seeds 0 / 1 are mapping seeds "
+            "that re-map the same simulated counts (D6); another simulation (a "
+            "simulation seed) changes them"
+        )
+    confident = res.frozen_confident_mask(base, lookup)
+    confident_other = res.frozen_confident_mask(other, lookup)[positions]
+    calls = _labels(base["call"])
+    calls_other = _labels(other["call"])[positions]
+    changed = confident & np.asarray(calls != calls_other, dtype=bool)
+    return _SeedChanges(
+        levels=base["level"].astype(str).to_numpy(),
+        confident=confident,
+        changed=changed,
+        switched=changed & confident_other,
+        crossed=confident & ~changed & ~confident_other,
+    )
+
+
+def np4_seed_stability(
+    replicates: Mapping[ReplicateKey, pd.DataFrame],
+    decisions: pd.DataFrame,
+    *,
+    default_group: str | None,
+    settings: Np4Settings,
+    base_seed: int = 0,
+    regime: res.Regime = "provisional",
+    recipe: str | None = res.DECISION_RECIPE,
+    member: str | None = None,
+) -> pd.DataFrame:
+    """Score NP4's seed criterion per level and group (§14 NP4).
+
+    §14 NP4: "Seed 0 vs 1 changes <= 2% of confident labels per validated
+    level" [R]. The seeds are MapMyCells mapping seeds, scored as call
+    changes (D6, folded into D12; pre-registration §23.9 item 3, confirmed
+    on 2026-10-06): seed 1 re-maps each group's seed-0 simulated cells, and
+    the statistic is ``resolvability.seed_stability``'s.
+
+    - **Labels.** A group's confident labels at a level are the rows of its
+      base-seed replicate that are confident at the frozen thresholds
+      (``frozen_confident_mask``), over every class and emitted bin of the
+      level (the population of ``seed_stability``; NP7's 1% denominator,
+      CHECK K9.1). The default group is read on its check half at both
+      seeds (``held_out_replicates``).
+    - **Changes.** A label changes when the other seed's call of the same
+      simulated cell (level, cell, depth) is another name, confident there
+      or not, a sink call included. A label whose name stays and whose bp
+      falls below its threshold at the other seed is a threshold crossing,
+      not a change (D6: "Counting threshold crossings instead would fail by
+      design", M8 D12); it is reported (``n_crossed``). The changes to a
+      name that is confident at the other seed (``n_switched``; gate H's
+      reading of H15, pre-registration §20 D12 (a), looser) are reported.
+    - **Inputs.** Each table holds one replicate at one mapping seed; the
+      replicates are the full grid of at least 2 groups x the same seeds,
+      the base seed among them; and the other seed's table holds the same
+      simulated cells with the same simulated counts (``total_counts``) at
+      another mapping seed. A simulation seed changes the counts, so it is
+      refused rather than scored. Otherwise gate P stops with an error.
+
+    Readings this implementation takes where §14 is not explicit (strict
+    where there is a choice). They are open: each needs the user's answer,
+    recorded in the pre-registration (§23.9 item 3), before the set a dry
+    run (C9) is scored, as for NP5 and NP7. Until then:
+
+    - **Each group is scored.** Every group's seed pair must change at most
+      2% of its labels at the level (``changed_share``); the share pooled
+      over the groups (``pooled_changed_share``) is reported only. Looser:
+      the pooled share alone, which no group exceeds when all pass.
+    - **The level's statistic.** The share is over all the level's labels,
+      as §14 words it ("per validated level"), and a level over 2% fails
+      NP4 for every class of the level (``np4_class_verdicts``), its classes
+      without a changed label included. A class's own share (stricter for
+      the class whose labels change, looser for the others) is not
+      computed.
+    - **The base seed's labels.** The denominator is the base seed's
+      confident labels, as in ``seed_stability``; a cell confident at the
+      other seed only is not counted. Alternative: both seeds' labels.
+    - **A group without confident labels at a level** passes it, as nothing
+      can change there (``changed_share`` is ``nan``), as NP4's vacuous
+      sets do. Stricter: fail it.
+
+    Version-7 families score this in every emission member (``member=``),
+    each member's seed-0 calls against its own seed-1 re-mapping, and
+    combine the members with ``every_member_verdict``.
+
+    Args:
+        replicates: Per (group, seed label), that replicate's cells table
+            (the default group's in full; ``held_out_replicates``).
+        decisions: The frozen decisions of the base run (version 7: the
+            ensemble's).
+        default_group: The group whose fit half the frozen thresholds were
+            fitted on (required; ``None`` when no replicate holds those
+            cells).
+        settings: The NP4 constants (``max_seed_change``).
+        base_seed: The seed label of the base replicates (seed 0, where the
+            tested sets are fixed); every other seed label is compared with
+            it.
+        regime: The regime whose thresholds are frozen.
+        recipe: The recipe of the scored rows (``None``: every recipe, so
+            the tables must hold one).
+        member: The version-7 emission member of the scored rows.
+
+    Returns:
+        One row per (level, group, other seed), sorted by level, group and
+        seed, with columns ``NP4_SEED_COLUMNS``: ``n_confident`` labels,
+        ``n_changed`` of them changed (``changed_share``, ``nan`` without
+        labels), ``n_switched`` and ``n_crossed`` (reported),
+        ``pooled_changed_share`` over the groups (reported), the limit and
+        ``passed``.
+
+    Raises:
+        ValueError: If ``replicates`` is empty or not the full grid, a table
+            has no rows after the filters, lacks a column or holds more than
+            one mapping seed, or a seed pair is not one simulation re-mapped
+            at two mapping seeds; or for the default group's inputs
+            (``held_out_replicates``).
+        ResolvabilityError: If a table holds more than one replicate
+            (``replicate_rows``).
+    """
+    if not replicates:
+        raise ValueError("np4_seed_stability: no replicates")
+    groups, others = _np4_seed_grid(replicates, base_seed)
+    scored = held_out_replicates(replicates, default_group=default_group)
+    tables = {(str(group), seed): table for (group, seed), table in scored.items()}
+    lookup = res.emission_lookup(decisions, regime)
+    changes: dict[tuple[str, int], _SeedChanges] = {}
+    for group in groups:
+        base_name = f"replicate {group}/{base_seed}"
+        base = _seed_frame(
+            tables[(group, base_seed)], base_name, recipe=recipe, member=member
+        )
+        for seed in others:
+            other_name = f"replicate {group}/{seed}"
+            other = _seed_frame(
+                tables[(group, seed)], other_name, recipe=recipe, member=member
+            )
+            changes[(group, seed)] = _seed_changes(
+                base, other, lookup, (base_name, other_name)
+            )
+    levels = sorted({str(level) for item in changes.values() for level in item.levels})
+    limit = settings.max_seed_change
+    records: list[dict[str, object]] = []
+    for level in levels:
+        counts: dict[tuple[str, int], tuple[int, int, int, int]] = {}
+        for (group, seed), item in changes.items():
+            at_level = item.levels == level
+            counts[(group, seed)] = (
+                int((item.confident & at_level).sum()),
+                int((item.changed & at_level).sum()),
+                int((item.switched & at_level).sum()),
+                int((item.crossed & at_level).sum()),
+            )
+        pooled: dict[int, float] = {}
+        for seed in others:
+            n_labels = sum(counts[(group, seed)][0] for group in groups)
+            n_moved = sum(counts[(group, seed)][1] for group in groups)
+            pooled[seed] = n_moved / n_labels if n_labels else math.nan
+        for group in groups:
+            for seed in others:
+                n_confident, n_changed, n_switched, n_crossed = counts[(group, seed)]
+                records.append(
+                    {
+                        "level": level,
+                        "group": group,
+                        "base_seed": base_seed,
+                        "seed": seed,
+                        "n_confident": n_confident,
+                        "n_changed": n_changed,
+                        "changed_share": n_changed / n_confident
+                        if n_confident
+                        else math.nan,
+                        "n_switched": n_switched,
+                        "n_crossed": n_crossed,
+                        "pooled_changed_share": pooled[seed],
+                        "max_change": limit,
+                        "passed": n_changed <= limit * n_confident + _TOLERANCE,
+                    }
+                )
+    return pd.DataFrame.from_records(records, columns=list(NP4_SEED_COLUMNS))
+
+
 def np4_class_verdicts(
     set_verdicts: pd.DataFrame,
+    seed_stability: pd.DataFrame,
     tested: Mapping[tuple[str, str], Sequence[res.GatePTestedSet] | None],
 ) -> dict[tuple[str, str], bool | None]:
-    """Combine NP4's set verdicts per (level, class) (§14 NP4: every tested set).
+    """Combine NP4's parts per (level, class) (§14 NP4).
 
-    The literal reading of §14 (M13 plan CHECK K10): an NP4 failure at any
-    tested set fails the (level, class); it does not only raise
-    ``validated_min_depth``. The result has the per-member shape that
-    ``resolvability.every_member_verdict`` combines over the version-7
-    emission members.
+    A (level, class) passes NP4 when the floor and the range rule pass at
+    every tested set (``np4_set_verdicts``) and its level's seed criterion
+    passes (``np4_seed_stability``: seed 0 vs 1 changes <= 2% of the
+    level's confident labels in every group). The literal reading of §14
+    (M13 plan CHECK K10, D29): an NP4 failure at any tested set fails the
+    (level, class); it does not only raise ``validated_min_depth``. A level
+    over the seed limit fails every class of the level. The result has the
+    per-member shape that ``resolvability.every_member_verdict`` combines
+    over the version-7 emission members.
 
     Args:
         set_verdicts: ``np4_set_verdicts`` output (``level``, ``class``,
             ``set``, ``passed``).
+        seed_stability: ``np4_seed_stability`` output (``level``,
+            ``passed``).
         tested: The tested sets per (level, class).
 
     Returns:
         Per (level, class) of ``tested``: ``None`` when it has no tested set
-        (not evaluable), ``False`` when any of its sets fails, else ``True``.
+        (not evaluable), ``False`` when any of its sets or its level's seed
+        criterion fails, else ``True``.
 
     Raises:
-        ValueError: If a tested set of a key has no verdict row, a key's
-            tested sets are an empty list, or a tested set's level or class
-            differs from its key.
+        ValueError: If a tested set of a key has no verdict row, the level of
+            a key with tested sets has no seed-criterion row, a seed row has
+            no ``passed`` value, a key's tested sets are an empty list, or a
+            tested set's level or class differs from its key.
     """
     _check_tested(tested)
+    seed_ok = _passed_by(seed_stability, ("level",), "NP4 seed criterion")
     passed_by_set = {
         (str(level), str(cls), str(label)): bool(passed)
         for level, cls, label, passed in zip(
@@ -833,7 +1191,12 @@ def np4_class_verdicts(
         ]
         if missing:
             raise ValueError(f"{key}: no NP4 verdict for the tested sets {missing}")
-        result[key] = all(passed_by_set[(key[0], key[1], label)] for label in labels)
+        level = (str(key[0]),)
+        if level not in seed_ok:
+            raise ValueError(f"{key}: no NP4 seed-criterion row for its level")
+        result[key] = all(
+            passed_by_set[(key[0], key[1], label)] for label in labels
+        ) and all(seed_ok[level])
     return result
 
 

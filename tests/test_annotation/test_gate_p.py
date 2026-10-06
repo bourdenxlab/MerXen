@@ -111,6 +111,11 @@ def _tested_from_seed0(
     )
 
 
+def _seed_passed(*levels: str) -> pd.DataFrame:
+    """NP4 seed-criterion rows that pass at each level (``np4_class_verdicts``)."""
+    return pd.DataFrame({"level": list(levels or ("broad",)), "passed": True})
+
+
 def _verdict(
     replicates: Mapping[gp.ReplicateKey, pd.DataFrame],
     default_group: str | None = None,
@@ -122,7 +127,7 @@ def _verdict(
     )
     verdicts = gp.np4_set_verdicts(stats, _targets(), _np4())
     assert len(verdicts) == 1
-    return verdicts.iloc[0], gp.np4_class_verdicts(verdicts, tested)
+    return verdicts.iloc[0], gp.np4_class_verdicts(verdicts, _seed_passed(), tested)
 
 
 def test_planted_donor_shift_fails_np4_while_binomial_noise_passes() -> None:
@@ -313,7 +318,7 @@ def test_zero_call_replicate_is_listed_and_blocks_the_range_rule() -> None:
     row = verdicts.iloc[0]
     assert row["n_replicates"] == 6 and row["n_evaluated"] == 4
     assert not row["range_evaluable"] and row["floor_ok"] and row["passed"]
-    assert gp.np4_class_verdicts(verdicts, tested) == {
+    assert gp.np4_class_verdicts(verdicts, _seed_passed(), tested) == {
         ("broad", "X"): True,
         ("broad", "Y"): None,
     }
@@ -434,10 +439,12 @@ def test_empty_tested_set_lists_raise() -> None:
     with pytest.raises(ValueError, match="empty"):
         gp.replicate_set_stats(replicates, decisions, empty, default_group=None)
     with pytest.raises(ValueError, match="empty"):
-        gp.np4_class_verdicts(_set_verdict_rows({"10": True}), empty)
+        gp.np4_class_verdicts(_set_verdict_rows({"10": True}), _seed_passed(), empty)
     with pytest.raises(ValueError, match="belongs to"):
         gp.np4_class_verdicts(
-            _set_verdict_rows({"10": True}), {("broad", "Y"): [SINGLE_10]}
+            _set_verdict_rows({"10": True}),
+            _seed_passed(),
+            {("broad", "Y"): [SINGLE_10]},
         )
 
 
@@ -458,10 +465,10 @@ def test_class_verdicts_feed_every_member_verdict() -> None:
         ("broad", "Y"): None,
     }
     passing = gp.np4_class_verdicts(
-        _set_verdict_rows({">=30": True, "10": True}), tested
+        _set_verdict_rows({">=30": True, "10": True}), _seed_passed(), tested
     )
     failing = gp.np4_class_verdicts(
-        _set_verdict_rows({">=30": True, "10": False}), tested
+        _set_verdict_rows({">=30": True, "10": False}), _seed_passed(), tested
     )
     assert passing == {("broad", "X"): True, ("broad", "Y"): None}
     assert failing == {("broad", "X"): False, ("broad", "Y"): None}
@@ -473,9 +480,11 @@ def test_class_verdicts_feed_every_member_verdict() -> None:
     assert both[("broad", "X")]["status"] == res.GATE_P_PASSED
     # A key with tested sets needs a verdict row for each of them.
     with pytest.raises(ValueError, match="no NP4 verdict"):
-        gp.np4_class_verdicts(_set_verdict_rows({"10": True}, cls="Z"), tested)
+        gp.np4_class_verdicts(
+            _set_verdict_rows({"10": True}, cls="Z"), _seed_passed(), tested
+        )
     with pytest.raises(ValueError, match="no NP4 verdict"):
-        gp.np4_class_verdicts(_set_verdict_rows({"10": True}), tested)
+        gp.np4_class_verdicts(_set_verdict_rows({"10": True}), _seed_passed(), tested)
 
 
 def test_np4_inputs_that_mix_or_lack_replicates_raise() -> None:
@@ -582,6 +591,16 @@ def test_np4_settings_follow_the_config() -> None:
         }
         with pytest.raises(ValueError, match="must be > 0"):
             gp.Np4Settings(**fields)
+    # §14 NP4: "Seed 0 vs 1 changes <= 2% of confident labels".
+    assert np4.max_seed_change == gp.NP4_MAX_SEED_CHANGE == pytest.approx(0.02)
+    assert custom.max_seed_change == gp.NP4_MAX_SEED_CHANGE
+    for share in (-0.01, 1.5, math.nan):
+        with pytest.raises(ValueError, match=r"max_seed_change must lie in \[0, 1\]"):
+            gp.Np4Settings(
+                replicate_min_confident_n=100,
+                spread_se_multiplier=3.5,
+                max_seed_change=share,
+            )
 
 
 def test_level_targets_and_tested_set_labels() -> None:
@@ -601,6 +620,358 @@ def test_level_targets_and_tested_set_labels() -> None:
         gp.level_targets(AnnotationThresholds(), ["broad", "unknown"])
     assert gp.tested_set_label(POOLED_30) == ">=30"
     assert gp.tested_set_label(SINGLE_10) == "10"
+
+
+# --------------------------------------------------------------------------
+# NP4's seed criterion: seed 0 vs 1 changes <= 2% of confident labels (§14)
+
+# The levels and classes of the seed-criterion replicates: n confident calls
+# of each class at 10 counts.
+SEED_CLASSES = (("broad", "X", 400), ("broad", "Y", 400), ("supercluster", "S", 400))
+SEED_TESTED: dict[tuple[str, str], list[res.GatePTestedSet] | None] = {
+    (level, cls): [res.GatePTestedSet(level, cls, (10,), False, 0, math.nan, math.nan)]
+    for level, cls, _ in SEED_CLASSES
+} | {("supercluster", "T"): None}
+
+
+def _seed_decisions() -> pd.DataFrame:
+    """Frozen decisions emitting every class of ``SEED_CLASSES`` at 10 (0.70)."""
+    return _np7_decisions({(level, cls, 10): 0.70 for level, cls, _ in SEED_CLASSES})
+
+
+def _seed_table(group: str, seed: int) -> pd.DataFrame:
+    """One replicate: ``SEED_CLASSES``' calls at 10 counts, all confident (.95)."""
+    frames = []
+    for level, cls, n in SEED_CLASSES:
+        frame = bin_cells(
+            np.full(n, 0.95), np.ones(n, dtype=bool), level=level, cls=cls, depth=10
+        )
+        frame["call"] = cls
+        frames.append(frame)
+    table = pd.concat(frames, ignore_index=True)
+    table["cell_id"] = f"{group}_" + table["cell_id"].astype(str)
+    table["sim_id"] = f"{group}_" + table["sim_id"].astype(str)
+    table["seed"] = seed
+    return table
+
+
+def _seed_grid(
+    changed: Mapping[str, int] | None = None,
+) -> dict[gp.ReplicateKey, pd.DataFrame]:
+    """Each group's seed-0 calls re-mapped at seed 1 (the same simulated cells).
+
+    Seed 1 calls the first ``changed[group]`` broad X cells Y, confidently.
+    """
+    replicates: dict[gp.ReplicateKey, pd.DataFrame] = {}
+    for group in GROUPS:
+        base = _seed_table(group, 0)
+        other = base.assign(seed=1)
+        hit = np.flatnonzero((other["parent"] == "X").to_numpy())
+        other.loc[hit[: (changed or {}).get(group, 0)], ["call", "parent"]] = "Y"
+        replicates[(group, 0)] = base
+        replicates[(group, 1)] = other
+    return replicates
+
+
+def _seed(
+    replicates: Mapping[gp.ReplicateKey, pd.DataFrame],
+    default_group: str | None = None,
+    **kwargs: Any,
+) -> pd.DataFrame:
+    return gp.np4_seed_stability(
+        replicates,
+        _seed_decisions(),
+        default_group=default_group,
+        settings=_np4(),
+        **kwargs,
+    )
+
+
+def _seed_row(table: pd.DataFrame, group: str, level: str = "broad") -> pd.Series:
+    rows = table[(table["level"] == level) & (table["group"] == group)]
+    assert len(rows) == 1
+    return rows.iloc[0]
+
+
+def _seed_sets(passed: Mapping[str, bool] | None = None) -> pd.DataFrame:
+    """NP4 set verdicts of ``SEED_TESTED`` (each class passes unless named)."""
+    records = [
+        {
+            "level": key[0],
+            "class": key[1],
+            "set": gp.tested_set_label(item),
+            "passed": (passed or {}).get(key[1], True),
+        }
+        for key, items in SEED_TESTED.items()
+        for item in items or ()
+    ]
+    return pd.DataFrame.from_records(records)
+
+
+def test_np4_seed_changes_above_2pct_of_a_level_fail_every_class_of_it() -> None:
+    """§14 NP4: seed 0 vs 1 changes <= 2% of confident labels per level.
+
+    The statistic is the level's: 16 changed labels of a group's 800 broad
+    labels (2%) pass at the limit, 17 fail, and a failing level fails NP4
+    for each of its classes, Y included, whose own labels did not change.
+    """
+    table = _seed(_seed_grid({"D2": 16}))
+    assert list(table.columns) == list(gp.NP4_SEED_COLUMNS)
+    assert table[["level", "group"]].values.tolist() == [
+        [level, group] for level in ("broad", "supercluster") for group in GROUPS
+    ]
+    row = _seed_row(table, "D2")
+    assert (row["base_seed"], row["seed"]) == (0, 1)
+    assert row["n_confident"] == 800 and row["n_changed"] == 16
+    assert row["changed_share"] == pytest.approx(0.02)
+    assert row["n_switched"] == 16 and row["n_crossed"] == 0
+    assert row["max_change"] == gp.NP4_MAX_SEED_CHANGE and row["passed"]
+    assert _seed_row(table, "D1")["n_changed"] == 0
+    assert gp.np4_class_verdicts(_seed_sets(), table, SEED_TESTED) == {
+        ("broad", "X"): True,
+        ("broad", "Y"): True,
+        ("supercluster", "S"): True,
+        ("supercluster", "T"): None,
+    }
+    table = _seed(_seed_grid({"D2": 17}))
+    assert not _seed_row(table, "D2")["passed"]
+    assert _seed_row(table, "D2", "supercluster")["passed"]
+    assert gp.np4_class_verdicts(_seed_sets(), table, SEED_TESTED) == {
+        ("broad", "X"): False,
+        ("broad", "Y"): False,
+        ("supercluster", "S"): True,
+        ("supercluster", "T"): None,
+    }
+
+
+def test_np4_seed_criterion_scores_call_changes_not_threshold_crossings() -> None:
+    """D6 (pre-registration §23.9 item 3): mapping seeds, scored as call changes.
+
+    The base is seed 0's confident labels. A change is another call of the
+    same simulated cell at seed 1, confident there or not (a sink call
+    included); the same name below its threshold at seed 1 is a threshold
+    crossing, reported and not counted.
+    """
+    replicates = _seed_grid()
+    base = replicates[("D1", 0)].copy()
+    y_rows = np.flatnonzero((base["parent"] == "Y").to_numpy())[:20]
+    x_rows = np.flatnonzero((base["parent"] == "X").to_numpy())
+    # Unconfident at seed 0, so not labels: re-called X at seed 1 uncounted.
+    base.loc[y_rows, "bp"] = 0.5
+    other = base.assign(seed=1)
+    other.loc[y_rows, ["call", "parent"]] = "X"
+    switched, unconfident, sink, crossed = (
+        x_rows[:5],
+        x_rows[5:9],
+        x_rows[9:12],
+        x_rows[12:42],
+    )
+    other.loc[switched, ["call", "parent"]] = "Y"
+    other.loc[unconfident, ["call", "parent"]] = "Y"
+    other.loc[unconfident, "bp"] = 0.5
+    other.loc[sink, "call"] = "Splatter"
+    other.loc[sink, "parent"] = None
+    other.loc[crossed, "bp"] = 0.5
+    replicates[("D1", 0)], replicates[("D1", 1)] = base, other
+    row = _seed_row(_seed(replicates), "D1")
+    assert row["n_confident"] == 780
+    assert row["n_changed"] == 12 and row["n_switched"] == 5
+    assert row["n_crossed"] == 30
+    assert row["changed_share"] == pytest.approx(12 / 780) and row["passed"]
+    # Counting the crossings too would give 42 / 780 = 5.4% and fail.
+    assert (row["n_changed"] + row["n_crossed"]) / row["n_confident"] > 0.05
+
+
+def test_np4_seed_criterion_reproduces_resolvability_seed_stability() -> None:
+    """D6 names ``seed_stability``: the same share on any seeded sweep."""
+    n_changed = 0
+    for rng_seed in range(5):
+        rng = np.random.default_rng(rng_seed)
+        replicates: dict[gp.ReplicateKey, pd.DataFrame] = {}
+        for group in ("D1", "D2"):
+            base = _random_cells(rng)
+            base["call"] = base["parent"]
+            base["cell_id"] = f"{group}_" + base["cell_id"].astype(str)
+            base["sim_id"] = f"{group}_" + base["sim_id"].astype(str)
+            other = base.assign(seed=1)
+            moved = rng.random(len(other)) < 0.03
+            flipped = np.where(other.loc[moved, "parent"] == "X", "Y", "X")
+            other.loc[moved, "call"] = flipped
+            other.loc[moved, "parent"] = flipped
+            other["bp"] = np.round(
+                np.clip(other["bp"] + rng.normal(0.0, 0.05, len(other)), 0.0, 1.0), 3
+            )
+            replicates[(group, 0)], replicates[(group, 1)] = base, other
+        decisions = res.decide(
+            pd.concat([replicates[("D1", 0)], replicates[("D2", 0)]]),
+            [BROAD],
+            [10, 30, 100],
+            settings(),
+        )
+        table = gp.np4_seed_stability(
+            replicates, decisions, default_group=None, settings=_np4()
+        )
+        for group in ("D1", "D2"):
+            row = _seed_row(table, group)
+            expected = res.seed_stability(
+                replicates[(group, 0)], replicates[(group, 1)], decisions, "broad"
+            )
+            assert row["n_confident"] > 0
+            assert row["changed_share"] == pytest.approx(expected, abs=1e-12)
+            n_changed += int(row["n_changed"])
+    assert n_changed > 0
+
+
+def test_np4_seed_criterion_scores_each_group_and_reports_the_pooled_share() -> None:
+    """Each group's seed pair is scored; the share over the groups is reported."""
+    table = _seed(_seed_grid({"D1": 24}))
+    d1 = _seed_row(table, "D1")
+    assert d1["changed_share"] == pytest.approx(0.03) and not d1["passed"]
+    for group in ("D2", "D3"):
+        assert _seed_row(table, group)["passed"]
+    broad = table[table["level"] == "broad"]
+    assert np.allclose(broad["pooled_changed_share"], 24 / 2400)
+    assert np.allclose(
+        table.loc[table["level"] == "supercluster", "pooled_changed_share"], 0.0
+    )
+    # The pooled 1% would pass; the group at 3% fails the level.
+    verdicts = gp.np4_class_verdicts(_seed_sets(), table, SEED_TESTED)
+    assert verdicts[("broad", "X")] is False and verdicts[("broad", "Y")] is False
+    assert verdicts[("supercluster", "S")] is True
+
+
+def test_np4_seed_criterion_reads_the_default_group_check_half() -> None:
+    """§14: the default donor's check half, at both seeds (pre-reg §23.9 item 3)."""
+    replicates = _seed_grid()
+    other = replicates[("D1", 1)]
+    fit_x = np.flatnonzero(((other["parent"] == "X") & (other["half"] == 0)).to_numpy())
+    other.loc[fit_x, "call"] = "Y"
+    row = _seed_row(_seed(replicates, default_group="D1"), "D1")
+    assert row["n_confident"] == 400 and row["n_changed"] == 0 and row["passed"]
+    leaky = _seed_row(_seed(replicates), "D1")
+    assert leaky["n_confident"] == 800 and leaky["n_changed"] == 200
+    assert not leaky["passed"]
+
+
+def test_np4_seed_criterion_passes_a_group_without_confident_labels() -> None:
+    """Nothing can change where a group has no confident label (as NP4 vacuous)."""
+    replicates = _seed_grid()
+    for seed in SEEDS:
+        table = replicates[("D3", seed)]
+        table.loc[table["level"] == "supercluster", "bp"] = 0.5
+    row = _seed_row(_seed(replicates), "D3", "supercluster")
+    assert row["n_confident"] == 0 and row["n_changed"] == 0
+    assert math.isnan(row["changed_share"]) and row["passed"]
+
+
+def test_np4_seed_criterion_scores_one_emission_member() -> None:
+    """Version 7: NP4 is scored in every member, each on its own seed pair."""
+    replicates = {
+        key: pd.concat(
+            [table.assign(member=name) for name in ("R1@0", "R1@6")],
+            ignore_index=True,
+        )
+        for key, table in _seed_grid().items()
+    }
+    other = replicates[("D2", 1)]
+    hit = np.flatnonzero(
+        ((other["member"] == "R1@6") & (other["parent"] == "X")).to_numpy()
+    )
+    other.loc[hit[:17], "call"] = "Y"
+    assert _seed_row(_seed(replicates, member="R1@0"), "D2")["passed"]
+    six = _seed_row(_seed(replicates, member="R1@6"), "D2")
+    assert six["n_changed"] == 17 and not six["passed"]
+    with pytest.raises(res.ResolvabilityError, match="more than once"):
+        _seed(replicates)
+
+
+def test_np4_seed_criterion_refuses_inputs_that_are_not_one_simulation_remapped() -> (
+    None
+):
+    """Seeds 0 / 1 re-map the same simulated cells (D6); else gate P stops."""
+    replicates = _seed_grid()
+    key = ("D2", 1)
+
+    def edited(table: pd.DataFrame) -> dict[gp.ReplicateKey, pd.DataFrame]:
+        return {**replicates, key: table}
+
+    # Another simulation (a simulation seed) changes the simulated counts.
+    counts = replicates[key].copy()
+    counts.loc[0, "total_counts"] = 11.0
+    with pytest.raises(ValueError, match="total_counts"):
+        _seed(edited(counts))
+    with pytest.raises(ValueError, match="same simulated cells"):
+        _seed(edited(replicates[key].iloc[1:]))
+    extra = pd.concat([replicates[key], replicates[("D3", 1)].iloc[[0]]])
+    with pytest.raises(ValueError, match="same simulated cells"):
+        _seed(edited(extra))
+    with pytest.raises(ValueError, match="both hold mapping seed 0"):
+        _seed(edited(replicates[key].assign(seed=0)))
+    two_seeds = replicates[key].copy()
+    two_seeds.loc[0, "seed"] = 2
+    with pytest.raises(ValueError, match="mapping seeds"):
+        _seed(edited(two_seeds))
+    clean = replicates[key].assign(recipe=res.CLEAN_RECIPE)
+    with pytest.raises(ValueError, match="recipe"):
+        _seed(edited(clean), recipe=None)
+    with pytest.raises(ValueError, match="no rows"):
+        _seed(edited(clean))
+    mixed = pd.concat([replicates[key], clean], ignore_index=True)
+    with pytest.raises(res.ResolvabilityError, match="more than once"):
+        _seed(edited(mixed), recipe=None)
+    no_counts = replicates[key].drop(columns="total_counts")
+    with pytest.raises(ValueError, match="total_counts"):
+        _seed(edited(no_counts))
+    with pytest.raises(ValueError, match="full grid"):
+        _seed({k: v for k, v in replicates.items() if k != ("D3", 1)})
+    with pytest.raises(ValueError, match="at least 2 groups"):
+        _seed({k: v for k, v in replicates.items() if k[0] == "D1"})
+    with pytest.raises(ValueError, match="base seed"):
+        _seed({(group, seed + 1): v for (group, seed), v in replicates.items()})
+    with pytest.raises(ValueError, match="second seed"):
+        _seed({k: v for k, v in replicates.items() if k[1] == 0})
+    with pytest.raises(ValueError, match="no replicates"):
+        _seed({})
+
+
+def test_np4_class_verdicts_need_the_tested_sets_and_the_seed_criterion() -> None:
+    """NP4 per (level, class): every tested set, and the level's seed criterion."""
+    seeds = _seed(_seed_grid())
+    passing = gp.np4_class_verdicts(_seed_sets(), seeds, SEED_TESTED)
+    assert passing == {
+        ("broad", "X"): True,
+        ("broad", "Y"): True,
+        ("supercluster", "S"): True,
+        ("supercluster", "T"): None,
+    }
+    one_set = gp.np4_class_verdicts(_seed_sets({"X": False}), seeds, SEED_TESTED)
+    assert one_set[("broad", "X")] is False and one_set[("broad", "Y")] is True
+    seed_fails = gp.np4_class_verdicts(
+        _seed_sets(), _seed(_seed_grid({"D3": 17})), SEED_TESTED
+    )
+    assert seed_fails[("broad", "Y")] is False
+    combined = res.every_member_verdict({"R1@0": passing, "R1@6": seed_fails})
+    assert combined[("broad", "Y")]["status"] == res.GATE_P_FAILED
+    assert combined[("broad", "Y")]["failed_members"] == ["R1@6"]
+    assert combined[("supercluster", "S")]["status"] == res.GATE_P_PASSED
+    # A level whose classes have tested sets needs its seed-criterion rows.
+    with pytest.raises(ValueError, match="seed-criterion"):
+        gp.np4_class_verdicts(
+            _seed_sets(), seeds[seeds["level"] == "broad"], SEED_TESTED
+        )
+    blank = seeds.astype({"passed": object})
+    blank.loc[0, "passed"] = None
+    with pytest.raises(ValueError, match="no passed value"):
+        gp.np4_class_verdicts(_seed_sets(), blank, SEED_TESTED)
+    # A level whose classes have no tested set needs none.
+    untested = {
+        ("broad", "X"): SEED_TESTED[("broad", "X")],
+        ("supercluster", "T"): None,
+    }
+    sets = _seed_sets()
+    assert gp.np4_class_verdicts(
+        sets[sets["class"] == "X"], seeds[seeds["level"] == "broad"], untested
+    ) == {("broad", "X"): True, ("supercluster", "T"): None}
 
 
 # --------------------------------------------------------------------------
