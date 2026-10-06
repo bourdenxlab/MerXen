@@ -8,13 +8,17 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import dask.dataframe as dd
+import numpy as np
 import pandas as pd
 import pytest
 import spatialdata as sd
+import zarr
 from spatialdata import datasets
+from spatialdata.models import Labels2DModel
 
 from merxen.io.spatialdata_io import (
     convert_to_latest_zarr,
+    deduplicate_ome_labels_metadata,
     normalize_points_for_latest_write,
     write_or_replace_element,
     write_spatialdata_metadata,
@@ -404,6 +408,128 @@ def test_recoverable_backup_reconsolidates_after_failed_write(
     keys = _consolidated_keys(zarr_path)
     assert "tables/table" in keys
     assert not [key for key in keys if "merxen-backup" in key]
+
+
+def _ome_labels(zarr_path: Path) -> list[str]:
+    group = json.loads((zarr_path / "labels" / "zarr.json").read_text())
+    return list(group["attributes"]["ome"]["labels"])
+
+
+def _consolidated_ome_labels(zarr_path: Path) -> list[str]:
+    root = json.loads((zarr_path / "zarr.json").read_text())
+    group = root["consolidated_metadata"]["metadata"]["labels"]
+    return list(group["attributes"]["ome"]["labels"])
+
+
+@pytest.mark.parametrize("scale_factors", [None, [2]])
+def test_write_or_replace_element_replacing_labels_keeps_ome_labels_unique(
+    tmp_path: Path,
+    scale_factors: list[int] | None,
+) -> None:
+    """Replacing a label element twice must not repeat it in ``ome.labels``.
+
+    ome-zarr's label writer appends the element name to the labels group list
+    on every write, so each replacement of a stored label used to add a copy.
+    """
+    zarr_path = tmp_path / "latest.zarr"
+    datasets.blobs().write(zarr_path)
+    sdata = sd.read_zarr(zarr_path)
+    before = _ome_labels(zarr_path)
+    pixels = np.asarray(sdata.labels["blobs_labels"].data)
+
+    for _ in range(2):
+        replacement = Labels2DModel.parse(
+            pixels,
+            dims=("y", "x"),
+            scale_factors=scale_factors,
+        )
+        write_or_replace_element(
+            sdata, "blobs_labels", "labels", replacement, overwrite=True
+        )
+
+    assert _ome_labels(zarr_path) == before
+    assert _consolidated_ome_labels(zarr_path) == before
+    reloaded = sd.read_zarr(zarr_path)
+    assert sorted(reloaded.labels) == sorted(before)
+
+
+def test_write_or_replace_element_new_label_drops_existing_duplicates(
+    tmp_path: Path,
+) -> None:
+    """Writing a label repairs earlier repeats, keeping first-seen order."""
+    zarr_path = tmp_path / "latest.zarr"
+    datasets.blobs().write(zarr_path)
+    labels_group = zarr.open_group(str(zarr_path / "labels"), mode="r+")
+    ome = dict(labels_group.attrs["ome"])
+    ome["labels"] = [
+        "blobs_multiscale_labels",
+        "blobs_labels",
+        "blobs_multiscale_labels",
+        "blobs_labels",
+    ]
+    labels_group.attrs["ome"] = ome
+    sdata = sd.read_zarr(zarr_path)
+    pixels = np.asarray(sdata.labels["blobs_labels"].data)
+
+    write_or_replace_element(
+        sdata,
+        "added_labels",
+        "labels",
+        Labels2DModel.parse(pixels, dims=("y", "x")),
+    )
+
+    expected = ["blobs_multiscale_labels", "blobs_labels", "added_labels"]
+    assert _ome_labels(zarr_path) == expected
+    assert _consolidated_ome_labels(zarr_path) == expected
+
+
+def test_deduplicate_ome_labels_metadata_reports_repeats_and_dry_run(
+    tmp_path: Path,
+) -> None:
+    """The repair helper lists repeats and only rewrites when asked to."""
+    zarr_path = tmp_path / "latest.zarr"
+    datasets.blobs().write(zarr_path)
+    labels_group = zarr.open_group(str(zarr_path / "labels"), mode="r+")
+    ome = dict(labels_group.attrs["ome"])
+    ome["labels"] = ["blobs_labels", "blobs_multiscale_labels", "blobs_labels"]
+    labels_group.attrs["ome"] = ome
+
+    removed = deduplicate_ome_labels_metadata(zarr_path, dry_run=True)
+
+    assert removed == ["blobs_labels"]
+    assert _ome_labels(zarr_path) == ome["labels"]
+
+    removed = deduplicate_ome_labels_metadata(zarr_path)
+
+    assert removed == ["blobs_labels"]
+    assert _ome_labels(zarr_path) == ["blobs_labels", "blobs_multiscale_labels"]
+    assert deduplicate_ome_labels_metadata(zarr_path) == []
+
+
+def test_deduplicate_ome_labels_metadata_handles_zarr_v2_layout(
+    tmp_path: Path,
+) -> None:
+    """NGFF 0.4 stores keep the list at the top level of ``.zattrs``."""
+    zarr_path = tmp_path / "legacy.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w", zarr_format=2)
+    labels_group = root.create_group("labels")
+    labels_group.attrs["labels"] = ["cells", "nuclei", "cells"]
+
+    removed = deduplicate_ome_labels_metadata(zarr_path)
+
+    assert removed == ["cells"]
+    reread = zarr.open_group(str(zarr_path / "labels"), mode="r")
+    assert reread.attrs["labels"] == ["cells", "nuclei"]
+
+
+def test_deduplicate_ome_labels_metadata_ignores_store_without_labels(
+    tmp_path: Path,
+) -> None:
+    """Stores with no labels group need no repair."""
+    zarr_path = tmp_path / "points_only.zarr"
+    zarr.open_group(str(zarr_path), mode="w")
+
+    assert deduplicate_ome_labels_metadata(zarr_path) == []
 
 
 def test_write_spatialdata_metadata_persists_metadata_and_transforms() -> None:
