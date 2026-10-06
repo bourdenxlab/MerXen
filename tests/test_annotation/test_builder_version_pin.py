@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "bcf186fce7d77662eda3f28d49121470f6be83128bfe285f87335f20cf69f561",
+    3: "eb439453271eeb7d76a4cc3b2d1508dcd6ae873a4b3f7c56a4e6ab4d2a465ae1",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -186,6 +186,13 @@ PIN_HISTORY = (
     "the provenance rule of in-house assets (a source path in place of a "
     "URL; M13 C4); no builder reads either, the packaged assets a bundle "
     "hashes are unchanged, so no bundle content or build_hash changes",
+    "3: gate P's NP6 stress recipes in resolvability.py (M13 C4: "
+    "R1_stress_spill, R1_stress_lognormal, R1_stress_xplatform, "
+    "R3_stress_spill, gate_p_stress_members; thin_and_contaminate reads a "
+    "table recipe's efficiency); no builder simulates them, the R1, R3, clean "
+    "and lung recipe records are unchanged (factor_cap_log2 only when set) and "
+    "every lognormal recipe's draw is the same, so no bundle content or "
+    "build_hash changes (test_resolvability_v6_golden)",
 )
 
 
