@@ -198,9 +198,37 @@ def _write_element_with_recoverable_backup(
         if element_path.exists() or element_path.is_symlink():
             remove_path(element_path)
         os.replace(backup_path, element_path)
+        _reconsolidate_after_backup(sdata_obj, element_key, raise_errors=False)
         raise
     remove_path(backup_path)
+    # write_element consolidated the root metadata while the hidden backup group still
+    # existed; without this the root zarr.json keeps entries for the deleted backup.
+    _reconsolidate_after_backup(sdata_obj, element_key, raise_errors=True)
     return True
+
+
+def _reconsolidate_after_backup(
+    sdata_obj: Any,
+    element_key: str,
+    *,
+    raise_errors: bool,
+) -> None:
+    """Rewrite consolidated metadata once a temporary element backup is gone."""
+    has_consolidated = getattr(sdata_obj, "has_consolidated_metadata", None)
+    write_consolidated = getattr(sdata_obj, "write_consolidated_metadata", None)
+    if not callable(has_consolidated) or not callable(write_consolidated):
+        return
+    try:
+        if has_consolidated():
+            write_consolidated()
+    except Exception:
+        if raise_errors:
+            raise
+        logger.warning(
+            "Could not re-consolidate SpatialData metadata after restoring %s.",
+            element_key,
+            exc_info=True,
+        )
 
 
 def _delete_element_from_disk_or_path(

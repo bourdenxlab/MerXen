@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -349,6 +350,60 @@ def test_write_or_replace_element_removes_orphaned_store_by_path(
     assert wrote
     assert not orphan.exists()
     assert calls == [("write", False), ("write", False)]
+
+
+def _consolidated_keys(zarr_path: Path) -> list[str]:
+    root = json.loads((zarr_path / "zarr.json").read_text())
+    return list(root["consolidated_metadata"]["metadata"])
+
+
+def test_write_or_replace_element_backup_leaves_no_stale_consolidated_entries(
+    tmp_path: Path,
+) -> None:
+    """Replacing a table read from the store must not keep its backup in zarr.json."""
+    zarr_path = tmp_path / "latest.zarr"
+    datasets.blobs().write(zarr_path)
+    sdata = sd.read_zarr(zarr_path)
+    table = sdata.tables["table"].copy()
+    table.obs["replaced"] = 1
+
+    wrote = write_or_replace_element(sdata, "table", "tables", table, overwrite=True)
+
+    assert wrote
+    assert sorted(p.name for p in (zarr_path / "tables").iterdir()) == [
+        "table",
+        "zarr.json",
+    ]
+    keys = _consolidated_keys(zarr_path)
+    assert "tables/table" in keys
+    assert not [key for key in keys if "merxen-backup" in key]
+    assert "replaced" in sd.read_zarr(zarr_path).tables["table"].obs
+
+
+def test_recoverable_backup_reconsolidates_after_failed_write(
+    tmp_path: Path,
+) -> None:
+    """A failed replacement restores the element and drops the backup's entries."""
+    from merxen.io.spatialdata_io import _write_element_with_recoverable_backup
+
+    zarr_path = tmp_path / "latest.zarr"
+    datasets.blobs().write(zarr_path)
+    sdata = sd.read_zarr(zarr_path)
+
+    def _failing_write(key: str, *, overwrite: bool) -> None:
+        # write_element consolidates after writing; fail after that point
+        sdata.write_consolidated_metadata()
+        raise RuntimeError("write failed")
+
+    sdata.write_element = _failing_write  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="write failed"):
+        _write_element_with_recoverable_backup(sdata, "table", "tables")
+
+    assert (zarr_path / "tables" / "table").is_dir()
+    keys = _consolidated_keys(zarr_path)
+    assert "tables/table" in keys
+    assert not [key for key in keys if "merxen-backup" in key]
 
 
 def test_write_spatialdata_metadata_persists_metadata_and_transforms() -> None:
