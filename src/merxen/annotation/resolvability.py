@@ -4768,7 +4768,8 @@ def gate_p_tested_sets(
     set (each test cell counted once, at its deepest bin, ``deepest_rows``)
     until it holds ``min_confident_n`` confident calls; its shallowest bin
     is ``D_P``, whose own test (when it holds enough calls) is a tested set
-    too. Confidence uses the frozen threshold of each call's bin.
+    too. Confidence uses the frozen threshold of each call's bin
+    (``frozen_confident_mask``).
 
     Args:
         cells: Pooled held-out cells (frozen-threshold replicates).
@@ -4791,24 +4792,7 @@ def gate_p_tested_sets(
     """
     lookup = emission_lookup(decisions, regime)
     frame = replicate_rows(cells, recipe=recipe, seed=seed, member=member).copy()
-    thresholds = np.array(
-        [
-            _frozen_threshold(lookup.get((str(level), str(cls), int(depth))))
-            if cls is not None and not pd.isna(cls)
-            else math.nan
-            for level, cls, depth in zip(
-                frame["level"].astype(str),
-                frame["parent"].astype(object),
-                frame["depth"],
-                strict=True,
-            )
-        ],
-        dtype=np.float64,
-    )
-    bp = frame["bp"].to_numpy(np.float64)
-    frame["_confident"] = np.isfinite(thresholds) & (
-        np.nan_to_num(bp, nan=-1.0) >= thresholds - 1e-9
-    )
+    frame["_confident"] = frozen_confident_mask(frame, lookup)
     result: dict[tuple[str, str], list[GatePTestedSet] | None] = {}
     for level, level_rows in frame.groupby(frame["level"].astype(str), observed=True):
         deepest = deepest_rows(level_rows)
@@ -4841,6 +4825,47 @@ def gate_p_tested_sets(
                     sets.append(_tested_set(key, subset, [depth]))
             result[key] = sets or None
     return result
+
+
+def frozen_confident_mask(
+    frame: pd.DataFrame,
+    lookup: Mapping[tuple[str, str, int], tuple[str, float | None, bool]],
+) -> np.ndarray:
+    """Return whether each row is a confident call at its bin's frozen threshold.
+
+    Gate P scores held-out replicates at the thresholds frozen from the base
+    run (§14 evaluation rules). A row is confident when it has a called class
+    (``parent`` not null), the (level, parent, depth) bin of that class is
+    emitted with a threshold in ``lookup``, and its ``bp`` reaches the
+    threshold within 1e-9; a ``NaN`` bp is never confident. Every gate-P
+    criterion (``gate_p_tested_sets``, NP3-NP7) uses this one rule.
+
+    Args:
+        frame: Cells-table rows (``level``, ``parent``, ``depth``, ``bp``).
+        lookup: ``emission_lookup`` of the frozen decisions for one regime.
+
+    Returns:
+        A bool array aligned with the rows of ``frame``.
+    """
+    thresholds = np.array(
+        [
+            _frozen_threshold(lookup.get((str(level), str(cls), int(depth))))
+            if cls is not None and not pd.isna(cls)
+            else math.nan
+            for level, cls, depth in zip(
+                frame["level"].astype(str),
+                frame["parent"].astype(object),
+                frame["depth"],
+                strict=True,
+            )
+        ],
+        dtype=np.float64,
+    )
+    bp = frame["bp"].to_numpy(np.float64)
+    confident = np.isfinite(thresholds) & (
+        np.nan_to_num(bp, nan=-1.0) >= thresholds - 1e-9
+    )
+    return np.asarray(confident, dtype=bool)
 
 
 def _frozen_threshold(entry: tuple[str, float | None, bool] | None) -> float:

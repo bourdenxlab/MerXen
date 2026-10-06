@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "a4fe8cdce029a0161c323703062c2b00b35c4f9aba5b851770596430042e947e",
+    3: "50582d5e126669b4c3f823fc478c28a766dd659ad92838a0989ccc75ed4e787b",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -168,6 +168,10 @@ PIN_HISTORY = (
     "built before the merge (two WHB, two SEA-AD) lack D1's revision in their "
     "hashed test-set params, so the merged code never reuses them and builds "
     "new ones; no existing bundle changes",
+    "3: gate_p_tested_sets takes its confident calls from the new public "
+    "frozen_confident_mask (M13 gate P, which scores at frozen thresholds "
+    "and never runs in a builder); the same rule, moved, so no bundle "
+    "content or build_hash changes",
 )
 
 
