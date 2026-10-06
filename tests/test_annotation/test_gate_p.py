@@ -1531,6 +1531,9 @@ def test_np5_flip_at_the_boundary_bin_is_allowed_and_two_bins_away_fails() -> No
         # One flip two bins away from the boundary, or deeper than it.
         ("D3", 0): _np5_decisions((15, 60, 120, 250)),
         ("D3", 1): _np5_decisions((60, 250)),
+        # Both bins flanking the boundary flip (30 and 60): each is adjacent
+        # to it, but "at most the bin" is one bin.
+        ("D4", 0): _np5_decisions((30, 120, 250)),
     }
     rows = _agreement(base, replicates)
     assert {row["boundary_depths"] for row in rows.values()} == {"30;60"}
@@ -1543,9 +1546,11 @@ def test_np5_flip_at_the_boundary_bin_is_allowed_and_two_bins_away_fails() -> No
         ("D2", 1): ("15;30", False),
         ("D3", 0): ("15", False),
         ("D3", 1): ("120", False),
+        ("D4", 0): ("30;60", False),
     }
     assert {int(row["n_compared"]) for row in rows.values()} == {6}
     assert int(rows[("D2", 1)]["n_flipped"]) == 2
+    assert int(rows[("D4", 0)]["n_flipped"]) == 2
 
 
 def test_np5_agreement_compares_the_bins_where_either_run_has_50_test_cells() -> None:
@@ -1607,6 +1612,32 @@ def test_np5_boundaries_are_status_changes_inside_the_grid() -> None:
     )
     assert {row["boundary_depths"] for row in rows.values()} == {"15;30;60;120"}
     assert all(row["passed"] for row in rows.values())
+    # One flip at each of two boundaries (15 and 60): two flips fail.
+    rows = _agreement(base, {("D1", 0): _np5_decisions((15, 30, 60, 120, 250))})
+    assert rows[("D1", 0)]["flipped_depths"] == "15;60"
+    assert not rows[("D1", 0)]["passed"]
+
+
+def test_np5_a_bin_only_the_replicate_holds_is_compared() -> None:
+    """The grid is the union of the two tables' depths: a bin the base's
+    table lacks is not emitted there, and is compared when the replicate has
+    its 50 test cells.
+    """
+    shallow = GRID_NP5[2:]
+    base = _np5_decisions((60, 120, 250), grid=shallow)
+    rows = _agreement(
+        base,
+        {
+            ("D1", 0): _np5_decisions((10, 60, 120, 250)),
+            ("D1", 1): _np5_decisions((60, 120, 250)),
+        },
+    )
+    assert {int(row["n_bins"]) for row in rows.values()} == {6}
+    assert {int(row["n_compared"]) for row in rows.values()} == {6}
+    # 10 is no boundary bin of the base (it emits from 60 counts).
+    assert rows[("D1", 0)]["flipped_depths"] == "10"
+    assert not rows[("D1", 0)]["passed"]
+    assert rows[("D1", 1)]["passed"] and rows[("D1", 1)]["flipped_depths"] == ""
 
 
 def test_np5_agreement_inputs_that_mix_or_lack_decisions_raise() -> None:
@@ -1780,6 +1811,109 @@ def test_np5_set_thresholds_re_derive_t_star_as_decide_does() -> None:
     assert only_m0["t_star"].tolist() == table[table["seed"] == 0]["t_star"].tolist()
 
 
+def _mixed_threshold_cells(seed: int = 3) -> pd.DataFrame:
+    """``_threshold_cells`` with other classes' calls and sinks in X's scope.
+
+    Y calls, wrong at high bp more often than not, share X's scopes: the
+    test cells c0-c299 at 30 and 100, and b60-b89 at 100, whose deepest
+    call is then Y's (they leave X's pooled ">= 30" set). Sinks (no call,
+    bp 0.99) of the test cells s0-s99 lie at 100.
+    """
+    rng = np.random.default_rng(seed + 100)
+    frames = [_threshold_cells(seed)]
+    for depth, ids in (
+        (30, [f"c{index}" for index in range(300)]),
+        (100, [f"c{index}" for index in range(300)]),
+        (100, [f"b{index}" for index in range(60, 90)]),
+    ):
+        n = len(ids)
+        bp = np.round(0.70 + 0.30 * rng.random(n), 3)
+        frame = bin_cells(bp, rng.random(n) < 0.3, cls="Y", depth=depth)
+        frame["cell_id"] = ids
+        frame["sim_id"] = [f"{cell}|D{depth}" for cell in ids]
+        frame["half"] = res.cell_split_half(ids)
+        frames.append(frame)
+    sinks = [f"s{index}" for index in range(100)]
+    frame = bin_cells(
+        np.full(100, 0.99), np.zeros(100, dtype=bool), depth=100, truth_parent="Y"
+    )
+    frame["parent"] = None
+    frame["call"] = None
+    frame["cell_id"] = sinks
+    frame["sim_id"] = [f"{cell}|D100" for cell in sinks]
+    frame["half"] = res.cell_split_half(sinks)
+    frames.append(frame)
+    return pd.concat(frames, ignore_index=True)
+
+
+def test_np5_set_thresholds_fit_the_class_calls_of_a_mixed_scope() -> None:
+    """A tested set's t* is fitted on the class's calls of its scope only:
+    other classes' calls and sinks share the scope (the bin's rows, or each
+    test cell's deepest row) and stay out of the fit, as in ``decide``.
+    """
+    cells = _mixed_threshold_cells()
+    depths = [10, 30, 100]
+    decisions = res.decide(cells, [BROAD], depths, settings())
+    rows = decisions[
+        (decisions["regime"] == "provisional") & (decisions["class"] == "X")
+    ].set_index("depth")
+    assert bool(rows.loc[100, "pooled"]) and rows.loc[100, "pool_min_depth"] == 30
+    tested = {("broad", "X"): [_set((30, 100)), _set((30,)), _set((10,))]}
+    table = gp.np5_set_thresholds({("D1", 0): cells}, tested, [BROAD], settings())
+    by_set = table.set_index("set")
+    expected = {">=30": 100, "30": 30, "10": 10}
+    for label, depth in expected.items():
+        assert not pd.isna(rows.loc[depth, "t_star"])
+        assert by_set.loc[label, "t_star"] == pytest.approx(
+            rows.loc[depth, "t_star"], abs=1e-12
+        )
+    # The single bins' fit counts are decide's; the pooled set holds the
+    # 370 X test cells whose deepest call is X's (b60-b89's is Y's at 100).
+    assert int(by_set.loc["30", "n_fit"]) == int(rows.loc[30, "n_fit"])
+    assert int(by_set.loc["10", "n_fit"]) == int(rows.loc[10, "n_fit"])
+    assert int(by_set.loc[">=30", "n_called"]) == 370
+    assert int(by_set.loc["30", "n_called"]) == 400
+
+
+def test_np5_refuses_a_replicate_of_check_half_rows_alone() -> None:
+    """NP5 re-derives each replicate on its own fit half, so it takes every
+    table in full. ``held_out_replicates`` keeps the default group's check
+    half only: given that output, the group would have no fit and be left
+    out of the t* range as unfitted, so it raises.
+    """
+    cells = _threshold_cells()
+    other = _threshold_cells(seed=5)
+    other["cell_id"] = "o" + other["cell_id"].astype(str)
+    other["sim_id"] = "o" + other["sim_id"].astype(str)
+    replicates = {("D1", 0): cells, ("D2", 0): other}
+    tested = {("broad", "X"): [_set((10,))]}
+    full = gp.np5_set_thresholds(replicates, tested, [BROAD], settings())
+    assert full["fitted"].all() and full["group"].tolist() == ["D1", "D2"]
+    held_out = gp.held_out_replicates(replicates, default_group="D1")
+    assert set(held_out[("D1", 0)]["half"]) == {1}
+    with pytest.raises(ValueError, match="no fit-half rows"):
+        gp.np5_set_thresholds(held_out, tested, [BROAD], settings())
+    with pytest.raises(ValueError, match="no fit-half rows"):
+        gp.np5_rederive(held_out[("D1", 0)], [BROAD], [10, 30, 100], settings())
+    n = 400
+    members = pd.concat(
+        [
+            member_rows("m0", np.full(n, 0.95), pattern(n, 0.99)),
+            member_rows("m1", np.full(n, 0.95), pattern(n, 0.96)),
+        ],
+        ignore_index=True,
+    )
+    with pytest.raises(ValueError, match="member='m1'.*no fit-half rows"):
+        gp.np5_rederive_ensemble(
+            members[(members["member"] == "m0") | (members["half"] == 1)],
+            [BROAD],
+            [100],
+            settings(),
+            res.EnsembleSettings(),
+            members=["m0", "m1"],
+        )
+
+
 def test_np5_set_thresholds_apply_the_saturated_cap_for_version_7() -> None:
     """v7.8: a fitted set without t* whose fit-half calls are saturated is
     judged at the cap (``threshold_source = saturated_cap``), as ``decide``
@@ -1853,8 +1987,9 @@ def test_np5_extrapolated_share_of_051_fails_and_050_passes() -> None:
     assert row["max_share"] == pytest.approx(0.5)
     # D9: the share of the class's cells above the grid's deepest bin.
     assert row["above_grid_share"] == pytest.approx(0.5)
-    # One expected depth per class (the registered input): its cells all
-    # take that depth's bin, so the share is 0 or 1.
+    # One expected depth per class (the label-free fallback of a family
+    # without a profile): its cells all take that depth's bin, so the share
+    # is 0 or 1.
     row = share(130.0)
     assert row["extrapolated_share"] == 1.0 and not row["passed"]
     assert row["expected_bin"] == 120 and row["expected_depth"] == 130.0
@@ -1865,6 +2000,36 @@ def test_np5_extrapolated_share_of_051_fails_and_050_passes() -> None:
     row = share([5.0] * 60 + [250.0] * 40)
     assert row["extrapolated_share"] == pytest.approx(0.4) and row["passed"]
     assert row["expected_bin"] is None
+    # D9: a depth at the grid's deepest bin (250) is in it, not above it.
+    assert row["above_grid_share"] == 0.0
+    row = share([250.0] * 40 + [251.0] * 60)
+    assert row["above_grid_share"] == pytest.approx(0.6)
+
+
+def test_np5_extrapolated_share_uses_the_class_profile_shares() -> None:
+    """Plan §8.3 v7.5: for a family with a per-class profile, NP5's
+    "> 50% extrapolated" test "uses the class's profile shares". The
+    class's profile median alone (one depth) would pass a class whose
+    profile fails.
+    """
+    # The frozen decisions mark 30 (a monotone-filled bin), 120 and 250
+    # extrapolated; 60 is emitted on its own verdict.
+    decisions = _np5_decisions((30, 60, 120, 250), extrapolated=(30, 120, 250))
+    profile = [20.0] * 10 + [40.0] * 20 + [80.0] * 25 + [150.0] * 25 + [300.0] * 20
+    table = gp.np5_extrapolated_share(decisions, {"X": profile}, GRID_NP5, _np5())
+    row = table.iloc[0]
+    # 40 counts take the 30 bin, 150 the 120 bin and 300 the 250 bin.
+    assert row["extrapolated_share"] == pytest.approx(0.65) and not row["passed"]
+    # The profile median is reported as the class's expected depth.
+    assert row["expected_depth"] == 80.0 and row["expected_bin"] == 60
+    assert row["above_grid_share"] == pytest.approx(0.20)
+    assert int(row["n_depths"]) == 100 and row["depth_source"] == "class"
+    # The median alone falls in the 60 bin: share 0, a pass (the loosening).
+    median = gp.np5_extrapolated_share(
+        decisions, {"X": float(np.median(profile))}, GRID_NP5, _np5()
+    ).iloc[0]
+    assert median["extrapolated_share"] == 0.0 and median["passed"]
+    assert median["above_grid_share"] == 0.0
 
 
 def test_np5_extrapolated_share_reads_one_regime_and_the_default_depth() -> None:

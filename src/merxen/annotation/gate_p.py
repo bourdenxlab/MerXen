@@ -76,9 +76,15 @@ NP5, resolvability consistency (§14 NP5): per (level, class),
   shared membership rule; ``np5_tstar_spread``); and
 - its cells at the family's expected depth are at most 50%
   ``resolvability_extrapolated`` under the frozen decisions
-  (``np5_extrapolated_share``). The expected depth is an input: per class,
-  its median in the family's frozen ``sim_inputs`` profile asset, or the
-  label-free pooled median (D8; pre-registration §23.9 item 6, §23.10).
+  (``np5_extrapolated_share``). The depths are an input per class. A
+  family with a per-class profile (the frozen ``sim_inputs`` profile asset
+  of D8) passes each class's profile depths: the test then uses the class's
+  profile shares (plan §8.3 v7.5: "uses the class's profile shares"), and
+  the class's profile median is reported as its expected depth (§14
+  "Version-7 families"; pre-registration §23.9 item 6, §23.10). One
+  expected depth per class, whose share is 0 or 1, is only the label-free
+  fallback of a family without a profile: the pooled median of its
+  sections for every class.
 
 Readings this implementation takes where §14 is not explicit (strict where
 there is a choice; to be put to the user with the set a dry run): a bin is
@@ -87,7 +93,13 @@ emission boundaries are the base run's status changes inside the grid (its
 edges are none), and at most one compared bin may flip, one that flanks a
 boundary; a replicate whose t* fit exists but never reaches the target
 fails the t* range, and one without a fit (too few fit-half calls) is left
-out of it.
+out of it; "each t* ... at tested sets" is re-fitted in each replicate on
+the replicate's calls of each tested set (the shared membership rule,
+``np5_set_thresholds``), not read from the ``t_star`` of the replicate's
+re-derived decisions, whose bins and pools are the replicate's own and need
+not match the frozen tested sets; and a class without cells in the profile
+takes D8's overall median as one depth (the registered words), so its
+share is 0 or 1; the pooled profile's shares are the alternative.
 """
 
 from __future__ import annotations
@@ -1846,6 +1858,31 @@ def _one_seed(frame: pd.DataFrame, name: str) -> int:
     return int(seeds[0])
 
 
+def _require_fit_half(frame: pd.DataFrame, name: str) -> None:
+    """Refuse a replicate's rows that hold check-half rows but no fit-half rows.
+
+    NP5 re-derives each replicate's emission and t* on the replicate's own
+    fit half, so it takes every replicate's table in full, the default
+    group's included. ``held_out_replicates`` keeps only the default group's
+    check half (``half == 1``): given that output, the group's fit would be
+    empty, and its replicates would be left out of the t* range as
+    ``unfitted`` without an error.
+
+    Raises:
+        ValueError: If ``frame`` has rows with ``half == 1`` and none with
+            ``half == 0``.
+    """
+    if "half" not in frame.columns:
+        return
+    half = frame["half"].to_numpy()
+    if bool((half == 1).any()) and not bool((half == 0).any()):
+        raise ValueError(
+            f"{name}: the rows hold check-half rows (half == 1) and no fit-half "
+            "rows; NP5 re-derives each replicate on its own fit half, so pass "
+            "the replicate tables in full, not held_out_replicates' output"
+        )
+
+
 def np5_rederive(
     cells: pd.DataFrame,
     levels: Sequence[res.LevelMeta],
@@ -1883,13 +1920,16 @@ def np5_rederive(
         ``decide`` output.
 
     Raises:
-        ValueError: If no row is left after the filters, or the rows hold
-            more than one recipe or mapping seed.
+        ValueError: If no row is left after the filters, the rows hold more
+            than one recipe or mapping seed, or they hold check-half rows and
+            no fit-half rows (``held_out_replicates`` output).
         ResolvabilityError: If a (level, cell, depth) occurs more than once
             (``replicate_rows``).
     """
     frame = res.replicate_rows(cells, recipe=recipe, seed=None, member=member)
-    seed = _one_seed(frame, f"np5_rederive (recipe={recipe!r}, member={member!r})")
+    name = f"np5_rederive (recipe={recipe!r}, member={member!r})"
+    seed = _one_seed(frame, name)
+    _require_fit_half(frame, name)
     recipes = sorted({str(value) for value in frame["recipe"]})
     if len(recipes) != 1:
         raise ValueError(
@@ -1938,8 +1978,9 @@ def np5_rederive_ensemble(
         The ensemble decisions (``EnsembleDecisions.decisions``).
 
     Raises:
-        ValueError: Without members, when a member has no rows, or when the
-            rows hold more than one mapping seed.
+        ValueError: Without members, when a member has no rows or check-half
+            rows and no fit-half rows (``held_out_replicates`` output), or
+            when the rows hold more than one mapping seed.
         ResolvabilityError: If a member holds a (level, cell, depth) more
             than once (``replicate_rows``).
     """
@@ -1953,6 +1994,7 @@ def np5_rederive_ensemble(
         rows = res.replicate_rows(frame, recipe=None, seed=None, member=str(name))
         if rows.empty:
             raise ValueError(f"np5_rederive_ensemble: member {name!r} has no rows")
+        _require_fit_half(rows, f"np5_rederive_ensemble (member={name!r})")
     _one_seed(frame, "np5_rederive_ensemble")
     relabelled = frame.copy()
     relabelled["seed"] = np.zeros(len(frame), dtype=frame["seed"].to_numpy().dtype)
@@ -2191,7 +2233,10 @@ def np5_set_thresholds(
     ``min_cells_per_bin`` calls, then ``local_threshold`` at the regime's
     target of the set's shallowest bin. The default group's table is used
     in full: its t* is re-derived on its own fit half, never scored at the
-    frozen thresholds. With ``saturated_bp_share`` (version 7, v7.8) a
+    frozen thresholds, so a table of check-half rows alone (the output of
+    ``held_out_replicates``, which ``replicate_set_stats`` and
+    ``pooled_held_out_cells`` apply themselves) raises rather than leaving
+    the group out as ``unfitted``. With ``saturated_bp_share`` (version 7, v7.8) a
     fitted set without t* whose fit-half calls are saturated takes the cap
     (``threshold_source = saturated_cap``).
 
@@ -2217,8 +2262,9 @@ def np5_set_thresholds(
     Raises:
         ValueError: For the ``validated`` regime (it applies the default,
             which has no t*), without replicates, for a level without
-            metadata, a replicate without rows after the filters, or a key's
-            tested sets that are an empty list or of another key.
+            metadata, a replicate without rows after the filters or with
+            check-half rows and no fit-half rows, or a key's tested sets
+            that are an empty list or of another key.
         ResolvabilityError: If a table holds more than one replicate
             (``replicate_rows``).
     """
@@ -2245,6 +2291,7 @@ def np5_set_thresholds(
                 f"replicate {group}/{seed} has no rows after the filters "
                 f"(recipe={recipe!r}, member={member!r})"
             )
+        _require_fit_half(frame, f"replicate {group}/{seed}")
         index = _ReplicateIndex(frame, np.zeros(len(frame), dtype=bool))
         bp = frame["bp"].to_numpy(np.float64)
         correct = frame["correct"].to_numpy(bool).astype(np.float64)
@@ -2403,25 +2450,40 @@ def np5_extrapolated_share(
     grid is not. The share is over the class's depths, and the class passes
     at L when it is at most ``max_extrapolated_share``.
 
-    The registered input (§14 "Version-7 families"; pre-registration §23.9
-    item 6 and §23.10, D8) is one expected depth per class: its median in
-    the family's frozen ``sim_inputs`` profile asset, with the overall median
-    for classes without calls (``default_depth``), or the label-free pooled
-    median for every class (``{}`` and ``default_depth``). The class's cells
-    at one depth all take its bin, so the share is then 0 or 1. A sequence
-    gives the share over those depths (the class's cells). The same input
-    gives D9's report: the share of the class's depths above the grid's
-    deepest bin, which take that bin (``above_grid_share``).
+    The registered input (§14 "Version-7 families"; plan §8.3 v7.5;
+    pre-registration §23.9 item 6 and §23.10, D8):
+
+    - a family with a per-class profile (its frozen ``sim_inputs`` profile
+      asset) passes each class's profile depths, a sequence: the share is
+      the class's profile share of extrapolated bins (§8.3 v7.5: the test
+      "uses the class's profile shares"), and the profile median is
+      reported as ``expected_depth``. Passing the median alone instead
+      would loosen the test: a profile of 10% at 20, 20% at 40, 25% at 80,
+      25% at 150 and 20% at 300 counts, against decisions that mark 30, 120
+      and 250 extrapolated, has a share of 0.65 and fails, while its median
+      (80, in the 60 bin) has a share of 0 and passes. A class without
+      cells in the profile takes D8's overall median (``default_depth``;
+      a reading, see the module docstring);
+    - a family without a profile passes the label-free pooled median of its
+      sections for every class (``{}`` and ``default_depth``, one value).
+      The class's cells at one depth all take its bin, so the share is then
+      0 or 1. This is the only use of a single depth.
+
+    The same input gives D9's report: the share of the class's depths above
+    the grid's deepest bin, which take that bin (``above_grid_share``; a
+    depth at the deepest bin is not above it). With one depth it is 0 or 1
+    as well.
 
     Args:
         decisions: The frozen decisions of the base run (version 7: the
             ensemble's, monotone-filled bins included).
-        expected_depth: Per class, its expected depth (counts) or its cells'
-            depths.
+        expected_depth: Per class, its cells' depths in the profile (a
+            sequence), or one expected depth (counts).
         depths: The bundle's depth grid.
         settings: The NP5 constants.
         regime: The regime of the frozen decisions.
-        default_depth: The depth(s) of every class without an entry.
+        default_depth: The depth(s) of every class without an entry (D8:
+            the overall median, or the label-free pooled median).
 
     Returns:
         One row per (level, class) of the decisions at the regime, sorted,
