@@ -7331,20 +7331,8 @@ def ensemble_summary(
             aggfunc="first",
         )
         agree = float((statuses.nunique(axis=1) == 1).mean()) if len(statuses) else None
-
-        def counts(rows: pd.DataFrame) -> dict[str, int]:
-            is_emitted = rows["status"] == STATUS_EMITTED
-            is_filled = _bool_column(rows["monotone_filled"])
-            return {
-                "n_bins": int(len(rows)),
-                "n_emitted": int(is_emitted.sum()),
-                "n_unanimous": int((rows["ensemble_rule"] == RULE_UNANIMOUS).sum()),
-                "n_spread": int((rows["ensemble_rule"] == RULE_SPREAD).sum()),
-                "n_filled": int(is_filled.sum()),
-            }
-
         record["regimes"][regime] = {
-            **counts(frame),
+            **ensemble_bin_counts(frame),
             "n_spread_failed": int((reason == REASON_ENSEMBLE_SPREAD).sum()),
             "n_spread_margin_failed": int(
                 (reason == REASON_ENSEMBLE_SPREAD_MARGIN).sum()
@@ -7383,11 +7371,33 @@ def ensemble_summary(
                 for name, rows in mine.groupby(MEMBER_COLUMN, sort=False)
             },
             "per_level": {
-                str(level): counts(rows)
+                str(level): ensemble_bin_counts(rows)
                 for level, rows in frame.groupby("level", sort=False)
             },
         }
     return record
+
+
+def ensemble_bin_counts(rows: pd.DataFrame) -> dict[str, int]:
+    """Return how many ensemble bins were emitted, and by which route.
+
+    Args:
+        rows: ``ensemble_decide`` decision rows (one regime, or one level of
+            it).
+
+    Returns:
+        ``n_bins``, ``n_emitted``, ``n_unanimous``, ``n_spread`` and
+        ``n_filled`` (the monotone fill, v7.9).
+    """
+    is_emitted = rows["status"] == STATUS_EMITTED
+    is_filled = _bool_column(rows["monotone_filled"])
+    return {
+        "n_bins": int(len(rows)),
+        "n_emitted": int(is_emitted.sum()),
+        "n_unanimous": int((rows["ensemble_rule"] == RULE_UNANIMOUS).sum()),
+        "n_spread": int((rows["ensemble_rule"] == RULE_SPREAD).sum()),
+        "n_filled": int(is_filled.sum()),
+    }
 
 
 V7_TABLE_COLUMNS: Final[tuple[str, ...]] = (
