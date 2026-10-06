@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
+import io
 import json
 import math
 import shutil
+import sys
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -36,27 +40,42 @@ def mouse_table(registry: dict[str, si.SimInputAsset]) -> pd.DataFrame:
 # Registry and provenance
 
 
-def test_registry_holds_the_m3c_assets_with_complete_provenance(
+def test_registry_holds_the_m3c_and_m13_assets_with_complete_provenance(
     registry: dict[str, si.SimInputAsset],
 ) -> None:
-    assert set(registry) == {
+    public = {
         si.EFFICIENCY_MOUSE_PRIME,
         si.PROFILE_MOUSE_PRIME_FF,
         si.STRESS_HUMAN_LUNG,
         si.SCENARIO_HUMAN_LUNG,
         si.PRIME_PANEL_LISTS,
     }
-    script = REPO_ROOT / "scripts" / "annotation" / "build_sim_inputs.py"
-    script_sha = hashlib.sha256(script.read_bytes()).hexdigest()
+    assert set(registry) == {*public, si.STRESS_HUMAN_XPLATFORM}
+    scripts = {
+        "build_sim_inputs.py": public,
+        "build_xplatform_stress.py": {si.STRESS_HUMAN_XPLATFORM},
+    }
+    for name, assets in scripts.items():
+        script = REPO_ROOT / "scripts" / "annotation" / name
+        script_sha = hashlib.sha256(script.read_bytes()).hexdigest()
+        for asset_id in assets:
+            provenance = registry[asset_id].provenance
+            assert provenance["deriving_script"] == f"scripts/annotation/{name}"
+            assert provenance["deriving_script_sha256"] == script_sha
     for asset in registry.values():
         assert asset.trust_effect == "none"
         assert asset.size < si.MAX_ASSET_BYTES
         for key in si.REQUIRED_PROVENANCE:
             assert asset.provenance.get(key), (asset.asset_id, key)
-        assert asset.provenance["licence_note"] == si.LICENCE_NOTE
-        assert asset.provenance["deriving_script_sha256"] == script_sha
+        in_house = asset.provenance.get(si.SOURCE_KIND_KEY) == si.SOURCE_KIND_IN_HOUSE
+        assert in_house == (asset.asset_id not in public)
+        if not in_house:
+            assert asset.provenance["licence_note"] == si.LICENCE_NOTE
         for item in asset.provenance["source_files"]:
-            assert item["url"].startswith("https://")
+            if in_house:
+                assert item["path"].startswith("$A/")
+            else:
+                assert item["url"].startswith("https://")
             assert len(item["sha256"]) == 64
         for item in asset.provenance["derived_from"]:
             assert len(item["sha256"]) == 64
@@ -108,6 +127,68 @@ def test_an_asset_cannot_claim_a_trust_effect(tmp_path: Path) -> None:
     payload["trust_effect"] = "promote"
     sidecar.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="trust_effect"):
+        si.load_registry(directory)
+
+
+def test_the_cross_platform_asset_holds_set_a_offsets_centred_and_capped(
+    registry: dict[str, si.SimInputAsset],
+) -> None:
+    """M13 D7 (a): set a's Xenium / MERSCOPE offsets, median 0, capped +-2."""
+    asset = registry[si.STRESS_HUMAN_XPLATFORM]
+    assert asset.role == "stress" and asset.species == "human"
+    assert si.is_cross_platform_stress(asset)
+    assert not si.is_cross_platform_stress(registry[si.STRESS_HUMAN_LUNG])
+    factors = si.xplatform_factors(asset)
+    assert len(factors) == asset.n_rows == 296
+    assert float(factors.median()) == pytest.approx(0.0, abs=1e-12)
+    assert float(factors.abs().max()) == pytest.approx(si.XPLATFORM_CAP_LOG2)
+    summary = asset.provenance["summary"]
+    assert int((factors.abs() >= 2.0 - 1e-12).sum()) == summary["n_capped"] > 0
+    assert summary["pairs"] == ["P7513", "P7113", "P1212", "P5011"]
+    genes = pd.read_csv(si.SIM_INPUTS_DIR.parent / "validated_panel_genes.csv")
+    set_a = set(genes.loc[genes["panel_id"] == "human_set_a_296", "ensembl_id"])
+    assert set(factors.index) == set_a
+    (source,) = asset.provenance["source_files"]
+    assert source["path"] == "$A/research/xplat/log2_xen_over_mer_gene_means.csv"
+    # LAMP2 is the most Xenium-biased set a gene (D-A7), so it sits at the cap.
+    assert factors["ENSG00000005893"] == pytest.approx(2.0)
+    with pytest.raises(si.SimInputError, match="not a cross-platform"):
+        si.xplatform_factors(registry[si.STRESS_HUMAN_LUNG])
+
+
+def test_an_asset_without_provenance_is_refused(tmp_path: Path) -> None:
+    """M13 C4: a stress asset without its provenance never loads."""
+    directory = _copy_assets(tmp_path)
+    sidecar = directory / f"{si.STRESS_HUMAN_XPLATFORM}{si.SIDECAR_SUFFIX}"
+    original = json.loads(sidecar.read_text())
+    payload = dict(original)
+    del payload["provenance"]
+    sidecar.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="provenance"):
+        si.load_registry(directory)
+    for key in ("deriving_script", "deriving_script_sha256", "source_files"):
+        payload = json.loads(json.dumps(original))
+        del payload["provenance"][key]
+        sidecar.write_text(json.dumps(payload))
+        with pytest.raises(si.SimInputError, match=key):
+            si.load_registry(directory)
+
+
+def test_an_in_house_source_needs_its_path_and_sha256(tmp_path: Path) -> None:
+    directory = _copy_assets(tmp_path)
+    sidecar = directory / f"{si.STRESS_HUMAN_XPLATFORM}{si.SIDECAR_SUFFIX}"
+    original = json.loads(sidecar.read_text())
+    for field in ("path", "sha256"):
+        payload = json.loads(json.dumps(original))
+        del payload["provenance"]["source_files"][0][field]
+        sidecar.write_text(json.dumps(payload))
+        with pytest.raises(si.SimInputError, match="path and sha256"):
+            si.load_registry(directory)
+    # Without the in-house kind, the source needs a public URL.
+    payload = json.loads(json.dumps(original))
+    del payload["provenance"][si.SOURCE_KIND_KEY]
+    sidecar.write_text(json.dumps(payload))
+    with pytest.raises(si.SimInputError, match="url and sha256"):
         si.load_registry(directory)
 
 
@@ -253,6 +334,134 @@ def test_xtissue_stress_multiplies_r1_by_the_lung_ratio(
 
 # --------------------------------------------------------------------------
 # Depth profiles
+
+
+def _offsets(genes: list[str], factors: pd.Series, **options: object) -> pd.Series:
+    """Per-gene log2 offsets of the cross-platform stress on a unit base."""
+    efficiency, _ = si.xplatform_stress_efficiency(
+        genes, np.ones(len(genes)), factors, **options
+    )
+    return pd.Series(np.log2(efficiency), index=genes)
+
+
+def test_xplatform_stress_keeps_measured_offsets_and_resamples_the_rest() -> None:
+    """M13 D7 (i): uncovered genes take a keyed resample of the covered values."""
+    factors = pd.Series(
+        [-5.0, -1.0, 0.0, 0.5, 1.0, 3.0],
+        index=[f"ENSG0000000000{index}" for index in range(6)],
+    )
+    covered = list(factors.index[:3])
+    panel = [*covered, "ENSG_NEW_1", "ENSG_NEW_2", "ENSG_NEW_3"]
+    offsets = _offsets(panel, factors, seed=4)
+    _, measured = si.xplatform_stress_efficiency(
+        panel, np.ones(len(panel)), factors, seed=4
+    )
+    assert measured.tolist() == [True] * 3 + [False] * 3
+    shift = offsets[covered[2]]
+    # Covered genes keep their offset (capped at +-2), up to the panel's median.
+    assert (offsets[covered] - shift).tolist() == pytest.approx([-2.0, -1.0, 0.0])
+    pool = {-2.0, -1.0, 0.0, 0.5, 1.0, 2.0}
+    for gene in panel[3:]:
+        assert round(float(offsets[gene] - shift), 12) in pool
+    # A gene's draw depends on its id and the seed only.
+    other = _offsets([covered[2], "ENSG_NEW_2", "ENSG_ZZZ"], factors, seed=4)
+    assert other["ENSG_NEW_2"] - other[covered[2]] == pytest.approx(
+        offsets["ENSG_NEW_2"] - shift
+    )
+    many = [f"ENSG_NEW_{index}" for index in range(200)]
+    draws = [_offsets(many, factors, seed=seed) for seed in (4, 5)]
+    assert not np.allclose(draws[0].to_numpy(), draws[1].to_numpy())
+    np.testing.assert_array_equal(
+        draws[0].to_numpy(), _offsets(many, factors, seed=4).to_numpy()
+    )
+    # The offsets multiply the base: base x 2 ** offset, divided by the median.
+    base = np.exp(np.random.default_rng(1).normal(0, 0.8, len(panel)))
+    stressed, _ = si.xplatform_stress_efficiency(panel, base, factors, seed=4)
+    ratio = np.log2(stressed) - np.log2(base)
+    np.testing.assert_allclose(
+        ratio - ratio[2], (offsets - shift).to_numpy(), atol=1e-12
+    )
+    assert float(np.median(stressed)) == pytest.approx(1.0)
+    # A mouse panel never matches the human table: every gene is resampled.
+    _, mouse = si.xplatform_stress_efficiency(
+        ["ENSMUSG00000000001"], np.ones(1), factors
+    )
+    assert not mouse.any()
+    capped = _offsets(covered, factors, seed=4, cap_log2=0.5)
+    assert (capped - capped[covered[2]]).tolist() == pytest.approx([-0.5, -0.5, 0.0])
+    with pytest.raises(si.SimInputError, match="cap"):
+        si.xplatform_stress_efficiency(panel, np.ones(6), factors, cap_log2=0.0)
+    with pytest.raises(si.SimInputError, match="no finite offset"):
+        si.xplatform_stress_efficiency(
+            panel, np.ones(6), pd.Series([np.nan], index=["ENSG0"])
+        )
+    with pytest.raises(si.SimInputError, match="base efficiencies"):
+        si.xplatform_stress_efficiency(panel, np.ones(5), factors)
+
+
+def _build_script() -> Any:
+    path = REPO_ROOT / "scripts" / "annotation" / "build_xplatform_stress.py"
+    spec = importlib.util.spec_from_file_location("build_xplatform_stress", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_cross_platform_builder_centres_averages_and_caps(tmp_path: Path) -> None:
+    """The deriving script: pairs centred, averaged, re-centred, capped +-2."""
+    builder = _build_script()
+    source = pd.DataFrame(
+        {
+            "P7513": [0.0, 1.0, 2.0, 6.0, -6.0],
+            "P7113": [1.0, 2.0, 3.0, 7.0, -5.0],
+            "P1212": [1.0, 1.0, 1.0, 1.0, 1.0],
+            "P5011": [2.0, 3.0, 4.0, 8.0, -4.0],
+        },
+        index=["LAMP2", "TAC1", "PAX6", "MGST1", "SOX10"],
+    )
+    root = tmp_path / "evidence"
+    (root / "research" / "xplat").mkdir(parents=True)
+    source.to_csv(root / builder.SOURCE_RELATIVE)
+    (root / builder.SOURCE_SCRIPT_RELATIVE).write_text("# derives the source\n")
+    genes = si.SIM_INPUTS_DIR.parent / "validated_panel_genes.csv"
+    built = builder.build_asset(root, genes, REPO_ROOT)
+    table = pd.read_csv(io.StringIO(built.csv_text), dtype={"gene_id": str})
+    ids = builder.set_a_gene_ids(genes)
+    offsets = table.set_index("gene_id")["log2_ratio"]
+    centred = source - source.median()
+    mean = centred.mean(axis=1)
+    expected = (mean - mean.median()).clip(-2.0, 2.0)
+    for symbol, value in expected.items():
+        assert offsets[ids[symbol]] == pytest.approx(value)
+    assert list(table["gene_id"]) == sorted(table["gene_id"])
+    asset = built.asset
+    assert asset.asset_id == si.STRESS_HUMAN_XPLATFORM and asset.n_rows == 5
+    assert asset.provenance[si.SOURCE_KIND_KEY] == si.SOURCE_KIND_IN_HOUSE
+    assert asset.provenance["source_files"][0]["sha256"] == si._sha256_file(
+        root / builder.SOURCE_RELATIVE
+    )
+    assert "/home/" not in si.sidecar_json(asset)
+    renamed = source.rename(index={"SOX10": "NOT_IN_SET_A"})
+    renamed.to_csv(root / builder.SOURCE_RELATIVE)
+    with pytest.raises(builder.XplatformBuildError, match="NOT_IN_SET_A"):
+        builder.build_asset(root, genes, REPO_ROOT)
+    source.drop(columns="P1212").to_csv(root / builder.SOURCE_RELATIVE)
+    with pytest.raises(builder.XplatformBuildError, match="P1212"):
+        builder.build_asset(root, genes, REPO_ROOT)
+    source.assign(P1212=np.inf).to_csv(root / builder.SOURCE_RELATIVE)
+    with pytest.raises(builder.XplatformBuildError, match="finite"):
+        builder.build_asset(root, genes, REPO_ROOT)
+
+
+def test_the_committed_cross_platform_asset_matches_its_source() -> None:
+    """Re-derive the asset from the evidence when it is on this machine."""
+    builder = _build_script()
+    root = Path(builder.EVIDENCE_ROOT_TEXT.split("= ")[1])
+    if not (root / builder.SOURCE_RELATIVE).is_file():
+        pytest.skip(f"the evidence {builder.SOURCE_RELATIVE} is not on this machine")
+    assert builder.main(["--evidence-root", str(root), "--check"]) == 0
 
 
 def test_mouse_profile_falls_back_to_the_lineage_pools(

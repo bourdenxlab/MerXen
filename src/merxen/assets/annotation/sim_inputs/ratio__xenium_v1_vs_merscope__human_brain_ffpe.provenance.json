@@ -1,0 +1,96 @@
+{
+  "asset_id": "ratio__xenium_v1_vs_merscope__human_brain_ffpe",
+  "asset_version": 1,
+  "chemistry": "xenium_v1",
+  "columns": {
+    "gene_id": "Ensembl gene id (human_set_a_296)",
+    "log2_ratio": "log2(Xenium / MERSCOPE) mean counts per cell, each pair centred on its median gene, averaged over the four pairs, centred on the median gene and capped +-2"
+  },
+  "description": "Set a's per-gene log2 Xenium / MERSCOPE offsets, gate P's NP6 cross-platform stress (plan \u00a714 NP6; M13 decision D7): each R1 member's efficiency times 2 ** offset, uncovered panel genes a keyed resample; never a PREP member",
+  "extra": {
+    "pairs": [
+      "P7513",
+      "P7113",
+      "P1212",
+      "P5011"
+    ],
+    "ratio": "log2(Xenium / MERSCOPE)",
+    "stress_kind": "cross_platform"
+  },
+  "file": "ratio__xenium_v1_vs_merscope__human_brain_ffpe.csv",
+  "label": "MerXen proseg_hybrid segmentation, in-house paired Xenium / MERSCOPE brain sections (set a)",
+  "n_rows": 296,
+  "provenance": {
+    "attribution": "in-house paired sections of this project (set a)",
+    "date": "2026-10-06",
+    "derived_from": [
+      {
+        "evidence_path": "research/xplat/log2_xen_over_mer_gene_means.csv",
+        "sha256": "7cb93da0af6910b801211c353971a0f8502c2cd9ae252070d971df21377cf7bf",
+        "size": 24486
+      },
+      {
+        "evidence_path": "research/xplat/xplat_genes.py",
+        "sha256": "6bfd0dd0556a4ca0b3db32be7fb1da5ee402415f40d083d2ad5c075cd5732298",
+        "size": 3720
+      },
+      {
+        "n_rows": 296,
+        "panel_id": "human_set_a_296",
+        "repo_path": "src/merxen/assets/annotation/validated_panel_genes.csv",
+        "rows": "symbol,ensembl_id lines of the genes used, by symbol",
+        "sha256": "200e6cfb052615eb1eb72bca4ddfbf68581158bc4c7d481aa83cb2b6ed705ac0"
+      }
+    ],
+    "deriving_script": "scripts/annotation/build_xplatform_stress.py",
+    "deriving_script_sha256": "77ce49286f82e7a834cc51e6bf37c4f3bb76315756e5f76f9f656e6e48979dbc",
+    "evidence": [
+      "$A/research/xplat/xplat_genes.out",
+      "$A/m13/M13_IMPLEMENTATION_PLAN.md",
+      "$A/m13/DECISIONS_RESOLVED.md"
+    ],
+    "evidence_root": "$A = /srv/storage/MerXen/annotation_dev/evidence_20260926",
+    "licence": "in-house data, no public licence; the asset holds derived per-gene offsets only",
+    "licence_note": "in-house data: no public licence text applies",
+    "method": "Per gene, log2 of the Xenium / MERSCOPE mean counts per cell over all cells of each of the four paired sections (P7513, P7113, P1212, P5011; set a's 296 shared genes; research/xplat/xplat_genes.py); each pair centred on its median gene, averaged over the pairs, centred on the median gene and capped at +-2 log2. Gate P's NP6 multiplies an R1 member's LogNormal draw by 2 ** offset; panel genes the table does not cover take a keyed resample of these values (M13 decision D7 (a) + (i)).",
+    "segmentation": "MerXen proseg_hybrid (Cellpose-SAM prior and ProSeg) on both platforms of each pair",
+    "source_dataset": "MerXen set a paired sections P7513, P7113, P1212 and P5011 (in-house human brain sections, each pair one Xenium and one adjacent MERSCOPE section on the same custom gene panel)",
+    "source_files": [
+      {
+        "file": "log2_xen_over_mer_gene_means.csv",
+        "path": "$A/research/xplat/log2_xen_over_mer_gene_means.csv",
+        "sha256": "7cb93da0af6910b801211c353971a0f8502c2cd9ae252070d971df21377cf7bf",
+        "size": 24486
+      }
+    ],
+    "source_kind": "in_house",
+    "source_page": "plan D-A7 (docs/plans/robust-celltype-annotation-plan.md); $A/research/xplat/xplat_genes.out",
+    "summary": {
+      "n_capped": 61,
+      "n_genes": 296,
+      "pair_median_log2": {
+        "P1212": 0.9119084802626418,
+        "P5011": 1.5216155374297253,
+        "P7113": 0.9802145281433559,
+        "P7513": -0.11540453780881775
+      },
+      "pairs": [
+        "P7513",
+        "P7113",
+        "P1212",
+        "P5011"
+      ],
+      "sd_log2_before_cap": 1.6167263412424933
+    },
+    "use": "gate-P stress input only (plan \u00a714 NP6; M13 decision D7); never trust evidence, never a PREP member",
+    "xoa_version": "not applicable: both platforms' sections were re-segmented by MerXen"
+  },
+  "reference": null,
+  "role": "stress",
+  "schema_version": 1,
+  "sha256": "9efec7035ba18712cf43f945da0d74628f4806f7d66a7daf76a645dd535e160e",
+  "size": 9641,
+  "species": "human",
+  "tissue": "brain_ffpe",
+  "trust_effect": "none"
+}

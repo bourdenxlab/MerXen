@@ -28,6 +28,12 @@ This module is the registry of those inputs and the recipes that read them
 * **R1_xtissue_lung_stress** (``xtissue_stress_efficiency``): the R1@0
   efficiency times the lung 5K / v1 per-area ratio, a cross-tissue
   approximation reported only (§8.3 v7.4, §8.10).
+* **Gate P's cross-platform stress** (``xplatform_stress_efficiency``; plan
+  §14 NP6, M13 decision D7 (a) + (i)): an R1 member's efficiency times the
+  measured human Xenium / MERSCOPE per-gene offsets of set a (an in-house
+  ``stress`` asset, ``STRESS_HUMAN_XPLATFORM``), each panel gene the table
+  does not cover taking a keyed resample of the covered genes' values.
+  Acceptance only: never a PREP member.
 * **Depth profiles** (``DepthProfile``): per-class totals with the pooled
   neuronal and non-neuronal fallbacks of phase 1's D-recipes
   (``5k_real/sim/scripts/simlib.py``); no depth prior crosses species (no
@@ -115,6 +121,8 @@ PROFILE_MOUSE_PRIME_FF: Final = "depth__xenium_prime__mouse_brain_ff"
 STRESS_HUMAN_LUNG: Final = "ratio__xenium_prime_vs_v1__human_lung_ffpe"
 SCENARIO_HUMAN_LUNG: Final = "depth__xenium_prime__human_lung_ffpe"
 PRIME_PANEL_LISTS: Final = "panels__xenium_prime"
+# The M13 gate-P asset (plan §14 NP6; M13 decision D7): in-house, not public.
+STRESS_HUMAN_XPLATFORM: Final = "ratio__xenium_v1_vs_merscope__human_brain_ffpe"
 
 # R3_measured_HO (pre-registered, plan §8.3 v7.4 and pre-registration §21.3;
 # only tightenable).
@@ -135,6 +143,23 @@ TIER_WEAK: Final = "weak"
 XTISSUE_CAP_LOG2: Final = 2.0
 XTISSUE_SD_LN: Final = 0.702
 STREAM_XTISSUE: Final = "xtissue_lung_ratio"
+# Gate P's cross-platform stress (plan §14 NP6: "per-gene log2 factors drawn
+# from the measured human cross-platform offsets (capped +-2)"; M13 decision
+# D7 (a) + (i), pre-registration §23.10): the set a Xenium / MERSCOPE offsets
+# centred on the median gene and capped at +-2 log2; a panel gene without a
+# measured offset takes a keyed resample of the covered genes' values.
+XPLATFORM_CAP_LOG2: Final = 2.0
+STREAM_XPLATFORM_RESAMPLE: Final = "xplatform_resample"
+# ``SimInputAsset.extra["stress_kind"]`` of a cross-platform stress table; the
+# lung ratio table (a cross-tissue stress) carries none.
+STRESS_KIND_KEY: Final = "stress_kind"
+STRESS_KIND_CROSS_PLATFORM: Final = "cross_platform"
+# ``provenance["source_kind"]`` of an asset derived from in-house data: its
+# source files carry their evidence path and sha256 (no public URL; plan §8.8
+# amendment for NP6's factor table: "source path, sha256 and the deriving
+# script"). Public assets carry no source kind and need a URL per file.
+SOURCE_KIND_KEY: Final = "source_kind"
+SOURCE_KIND_IN_HOUSE: Final = "in_house"
 # Depth profiles (phase 1's D-recipes): a class with fewer profile cells takes
 # the pooled neuronal or non-neuronal profile.
 PROFILE_MIN_CLASS_CELLS: Final = 100
@@ -256,8 +281,10 @@ def validate_asset(asset: SimInputAsset, directory: Path | str | None = None) ->
 
     Raises:
         SimInputError: If the file is missing, larger than ``MAX_ASSET_BYTES``
-            or altered (sha256, size), its columns differ from the role's, or
-            the provenance lacks a required field.
+            or altered (sha256, size), its columns differ from the role's, the
+            provenance lacks a required field, or a source file lacks its
+            sha256 or its URL (an in-house source, ``SOURCE_KIND_IN_HOUSE``:
+            its path).
     """
     path = asset.path(directory)
     if not path.is_file():
@@ -273,18 +300,21 @@ def validate_asset(asset: SimInputAsset, directory: Path | str | None = None) ->
         raise SimInputError(
             f"sim input {asset.asset_id}: {path.name} has sha256 {digest[:16]} and "
             f"{size} bytes, the sidecar records {asset.sha256[:16]} and "
-            f"{asset.size} (re-run scripts/annotation/build_sim_inputs.py)"
+            f"{asset.size} (re-run "
+            f"{asset.provenance.get('deriving_script') or 'its deriving script'})"
         )
     missing = [key for key in REQUIRED_PROVENANCE if not asset.provenance.get(key)]
     if missing:
         raise SimInputError(
             f"sim input {asset.asset_id}: provenance lacks {', '.join(missing)}"
         )
+    in_house = asset.provenance.get(SOURCE_KIND_KEY) == SOURCE_KIND_IN_HOUSE
+    locator = "path" if in_house else "url"
     for item in asset.provenance.get("source_files") or []:
-        if not (isinstance(item, Mapping) and item.get("sha256") and item.get("url")):
+        if not (isinstance(item, Mapping) and item.get("sha256") and item.get(locator)):
             raise SimInputError(
-                f"sim input {asset.asset_id}: every source file needs its url "
-                "and sha256"
+                f"sim input {asset.asset_id}: every source file needs its "
+                f"{locator} and sha256"
             )
     header = path.open(encoding="utf-8").readline().strip().split(",")
     expected = list(ROLE_COLUMNS[asset.role])
@@ -793,6 +823,105 @@ def xtissue_stress_efficiency(
     values = np.exp(base + d)
     efficiency = values / np.median(values) if len(values) else values
     return np.asarray(efficiency, dtype=np.float64), measured
+
+
+# --------------------------------------------------------------------------
+# Gate P's cross-platform stress (plan §14 NP6; M13 decision D7)
+
+
+def is_cross_platform_stress(asset: SimInputAsset) -> bool:
+    """Whether a ``stress`` asset is a cross-platform factor table (NP6)."""
+    return (
+        asset.role == "stress"
+        and asset.extra.get(STRESS_KIND_KEY) == STRESS_KIND_CROSS_PLATFORM
+    )
+
+
+def xplatform_factors(
+    asset: SimInputAsset, directory: Path | str | None = None
+) -> pd.Series:
+    """Return a cross-platform stress asset's log2 offset per gene id.
+
+    Raises:
+        SimInputError: If the asset is not a cross-platform stress table or
+            holds a gene twice.
+    """
+    if not is_cross_platform_stress(asset):
+        raise SimInputError(
+            f"{asset.asset_id} is not a cross-platform stress table "
+            f"({asset.role}, {STRESS_KIND_KEY}={asset.extra.get(STRESS_KIND_KEY)!r})"
+        )
+    factors = ratio_table(asset, directory)
+    if not factors.index.is_unique:
+        raise SimInputError(f"{asset.asset_id}: duplicate gene ids")
+    return factors
+
+
+def xplatform_stress_efficiency(
+    genes: Sequence[str],
+    base_efficiency: np.ndarray,
+    factors: pd.Series,
+    *,
+    seed: int = 0,
+    cap_log2: float = XPLATFORM_CAP_LOG2,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return gate P's cross-platform stress efficiency (plan §14 NP6; D7).
+
+    ``log2 e = log2 e_R1 + f``: ``f`` is the gene's measured offset (the
+    asset's log2 Xenium / MERSCOPE ratio, centred on the median gene),
+    capped at ``+-cap_log2``; a panel gene the table does not cover takes
+    ``sorted(clip(f, +-cap))[floor(u * n)]`` over the table's ``n`` genes,
+    ``u`` the keyed uniform of ``(seed, "xplatform_resample", gene)``, so
+    its value depends on its id and the seed only (M13 decision D7 (i): "a
+    keyed empirical resample from the pooled covered-gene distribution,
+    deterministic per gene and seed"). ``e`` is divided by its median over
+    the panel. As for the lung stress, the offsets are between two
+    platforms, so they multiply the R1 member's own draw (its
+    platform-vs-reference model) rather than replace it; a mouse panel's
+    genes are never in the human table, so every one is resampled.
+
+    Args:
+        genes: Panel genes (test-cell column order).
+        base_efficiency: The R1 member's efficiency (``gene_efficiency`` of
+            its seed).
+        factors: ``xplatform_factors`` output.
+        seed: The member seed.
+        cap_log2: Cap of the offsets (``GatePStressRecipe
+            .platform_factor_cap_log2``, +-2).
+
+    Returns:
+        The efficiency and a boolean mask of the genes with a measured
+        offset.
+
+    Raises:
+        SimInputError: For a cap that is not > 0, or a table without a
+            finite offset to resample from.
+    """
+    if not cap_log2 > 0:
+        raise SimInputError(f"the offset cap must be > 0, got {cap_log2!r}")
+    names = [str(gene) for gene in genes]
+    table = pd.to_numeric(factors, errors="coerce")
+    finite = table[np.isfinite(table.to_numpy(np.float64))]
+    if finite.empty:
+        raise SimInputError("the cross-platform table has no finite offset")
+    pool = np.sort(np.clip(finite.to_numpy(np.float64), -cap_log2, cap_log2))
+    values = finite.reindex(names)
+    measured = values.notna().to_numpy(bool)
+    offsets = np.clip(values.fillna(0.0).to_numpy(np.float64), -cap_log2, cap_log2)
+    for position in np.flatnonzero(~measured):
+        u = keyed_uniform(seed, STREAM_XPLATFORM_RESAMPLE, names[position])
+        offsets[position] = pool[min(int(math.floor(u * len(pool))), len(pool) - 1)]
+    base = np.log2(np.asarray(base_efficiency, dtype=np.float64))
+    if base.shape != (len(names),):
+        raise SimInputError(
+            f"{len(base)} base efficiencies for {len(names)} panel genes"
+        )
+    efficiency = (
+        _median_normalised(base + offsets)
+        if len(names)
+        else np.ones(0, dtype=np.float64)
+    )
+    return efficiency, measured
 
 
 # --------------------------------------------------------------------------
