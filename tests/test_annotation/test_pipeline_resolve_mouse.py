@@ -32,6 +32,7 @@ from merxen.cli import main as cli_main
 from .conftest import (
     MOUSE_CLAS,
     MOUSE_SUBC,
+    PROMOTION_CONSTRAINTS,
     FakeMmc,
     map_mouse,
     mouse_region_share_bundle,
@@ -757,3 +758,71 @@ def test_pipeline_mouse_resolve_needs_the_registration_check(
             panel_dir=mouse_setup["panel_dir"],
             require_registration=True,
         )
+
+
+@pytest.mark.parametrize("constraint", PROMOTION_CONSTRAINTS)
+def test_promotion_by_simulation_never_changes_the_mouse_label_table(
+    tmp_path: Path,
+    mouse_setup: dict[str, Any],
+    promotion_trust: Callable[..., tuple[Any, Any]],
+    constraint: str,
+) -> None:
+    """Mouse RESOLVE end to end: a gate-P promotion changes no emitted column.
+
+    The trust decisions come from ``trust_state`` on the section's panel,
+    before and after a gate-P PR lists its family (plan §8.2, §14). The
+    label tables agree on every column except ``ct_<L>_validated``, and the
+    gate level, its reasons and the class correlation floor agree.
+    """
+    _add_profiles(mouse_setup["bundle"].path)
+    map_dir = tmp_path / "map"
+    map_mouse(mouse_setup, map_dir)
+    config = _config()
+    config = config.model_copy(
+        update={
+            "thresholds": config.thresholds.model_copy(
+                update={"wmb_class_min_corr": 0.99}
+            )
+        }
+    )
+    trusts = promotion_trust(
+        constraint, species="mouse", gene_ids=mouse_setup["panel"].ensembl_ids
+    )
+    samples = []
+    for name, trust in zip(("before", "after"), trusts, strict=True):
+        result = annotate_resolve(
+            map_dir,
+            config,
+            output_dir=tmp_path / name,
+            panel_dir=mouse_setup["panel_dir"],
+            trust_overrides={"wmb_panel": trust},
+            n_bootstrap=5,
+            registration={SID: PASSING},
+        )
+        samples.append(result.samples[SID])
+    before, after = samples
+    validated = [
+        column for column in before.labels.columns if column.endswith("_validated")
+    ]
+    assert validated
+    pd.testing.assert_frame_equal(
+        before.labels.drop(columns=validated), after.labels.drop(columns=validated)
+    )
+    for key in ("level", "level_reasons"):
+        assert before.summary["mouse_gate"][key] == after.summary["mouse_gate"][key]
+    assert before.summary["class_corr_floor"] == after.summary["class_corr_floor"]
+    assert before.summary["class_corr_floor"]["value"] is None
+    before_trust, after_trust = trusts
+    panels = (before.provenance.panel, after.provenance.panel)
+    assert panels[0] is not None and panels[1] is not None
+    assert [panel.panel_trust for panel in panels] == [
+        before_trust.state,
+        after_trust.state,
+    ]
+    if constraint == "resolvable":
+        assert (before_trust.state, after_trust.state) == ("provisional", "validated")
+        assert panels[0].banner and not panels[1].banner
+    else:
+        assert before_trust.state == after_trust.state
+        assert not after.labels[validated].to_numpy(bool).any()
+        assert panels[0].banner and panels[1].banner
