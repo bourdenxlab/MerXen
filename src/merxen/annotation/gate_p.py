@@ -2569,6 +2569,8 @@ def _passed_by(
 ) -> dict[tuple[str, ...], list[bool]]:
     """The ``passed`` values of a table per key of ``columns``.
 
+    ``name`` names the criterion and table in the error (``"NP5 agreement"``).
+
     Raises:
         ValueError: If a ``passed`` value is missing (``None`` or ``nan``).
     """
@@ -2576,7 +2578,7 @@ def _passed_by(
     keys = zip(*(table[column].astype(str) for column in columns), strict=True)
     for key, passed in zip(keys, table["passed"].astype(object), strict=True):
         if passed is None or (isinstance(passed, float) and math.isnan(passed)):
-            raise ValueError(f"NP5 {name} row {key} has no passed value")
+            raise ValueError(f"{name} row {key} has no passed value")
         result.setdefault(tuple(key), []).append(bool(passed))
     return result
 
@@ -2614,9 +2616,9 @@ def np5_class_verdicts(
             of another key.
     """
     _check_tested(tested)
-    agreed = _passed_by(agreement, ("level", "class"), "agreement")
-    spread_ok = _passed_by(spread, ("level", "class", "set"), "t* spread")
-    depth_ok = _passed_by(extrapolated, ("level", "class"), "extrapolated share")
+    agreed = _passed_by(agreement, ("level", "class"), "NP5 agreement")
+    spread_ok = _passed_by(spread, ("level", "class", "set"), "NP5 t* spread")
+    depth_ok = _passed_by(extrapolated, ("level", "class"), "NP5 extrapolated share")
     result: dict[tuple[str, str], bool | None] = {}
     for key, items in tested.items():
         if items is None:
