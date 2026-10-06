@@ -1075,3 +1075,44 @@ def test_mouse_resolve_applies_the_configured_unvalidated_share_limit(
     _, stored = read_label_table(after.labels_path)
     assert stored is not None and stored.mouse_gate is not None
     assert _unvalidated(stored.mouse_gate.reasons) == expected
+
+
+@pytest.mark.parametrize(
+    "update",
+    [
+        {"level": "broad_only"},
+        {"level_reasons": ("moved: a level reason the first verdict lacks",)},
+    ],
+    ids=["level", "level_reasons"],
+)
+def test_mouse_resolve_refuses_a_gate_level_that_moves_with_the_validated_share(
+    tmp_path: Path,
+    mouse_setup: dict[str, Any],
+    promotion_trust: Callable[..., tuple[Any, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    update: dict[str, Any],
+) -> None:
+    """The second mouse gate evaluation may only add warnings (M13 C11).
+
+    RESOLVE evaluates the gate again after ``resolve_mouse``, with the
+    validated shares; the statuses were decided at the first verdict's level,
+    so a second verdict with another level or other level reasons is refused
+    rather than recorded beside labels it did not gate.
+    """
+    import dataclasses
+
+    import merxen.annotation.mouse_gate as mouse_gate
+
+    original = mouse_gate.evaluate_mouse_gate
+    calls: list[bool] = []
+
+    def moving(*args: Any, **kwargs: Any) -> Any:
+        verdict = original(*args, **kwargs)
+        second = kwargs.get("validated_share") is not None
+        calls.append(second)
+        return dataclasses.replace(verdict, **update) if second else verdict
+
+    monkeypatch.setattr(mouse_gate, "evaluate_mouse_gate", moving)
+    with pytest.raises(AssertionError, match="cannot depend on the validated share"):
+        _promoted_samples(tmp_path, mouse_setup, promotion_trust)
+    assert calls == [False, True]
