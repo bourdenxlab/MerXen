@@ -752,8 +752,10 @@ top-up rule, so its bundles are new build directories. A version-7 self-map:
   the top-up, assets and chemistry, `profile_prediction`) and
   `resolvability_class_depth.parquet`.
 
-`resolvability_class_depth.parquet` is the table RESOLVE will consume (M4
-follow-up): one row per (regime, level, class, depth bin) with `status`,
+`resolvability_class_depth.parquet` is the table RESOLVE consumes (the M3c
+follow-up; RESOLVE derives it from the decisions it applies, reweighted to the
+dataset, see "Resolvability version 7 in RESOLVE"): one row per (regime,
+level, class, depth bin) with `status`,
 `threshold` and `threshold_source` (`default`, `resolvability_local`,
 `saturated_cap`, `monotone_inherited`), `ensemble_rule`, `pooled`,
 `extrapolated`, `monotone_filled`, `nonneuronal_high_depth`, `neuronal`,
@@ -766,8 +768,9 @@ section), `profile_source`, `profile_share` s_c(d) and
 predicted coverage of (L, c) is the sum of `profile_share` x `coverage` over
 emitted bins with its own s_c(d) (its cells called c), its resolvable share
 the sum of s_c(d). `load_resolvability` refuses a version-7 bundle unless its
-caller declares support (`allow_version_7=True`), so M4's RESOLVE refuses it
-loudly until its follow-up (plan §12 M3c). The version-7 decisions of the
+caller declares support (`allow_version_7=True`), so a consumer written for
+version 6 only refuses it loudly; RESOLVE (human and mouse) and
+`annotation-panel-simulate` declare it. The version-7 decisions of the
 version-6 families are computed only as a diagnostic
 (`annotation-panel-simulate --resolvability-version 7`, never written to the
 store, never applied).
@@ -947,16 +950,18 @@ state limits and never change a prediction, an emission or a trust state
 
 `merxen.annotation.real_qc` holds the checks M3c adds to the label-free QC
 of real datasets (plan §8.8). They are pure functions (tables in, records
-out) that can only warn or report; RESOLVE wires them per dataset in the M4
-follow-up and M13 wires the first in-house dataset of a family. None changes
+out) that can only warn or report. RESOLVE writes `flag_nonneuronal_high_depth`
+and the class-depth prediction for version-7 bundles (the M3c follow-up); M13
+wires the warnings into RESOLVE and the first in-house dataset of a family.
+None changes
 emission, a threshold, a floor, a label or a trust state, and
 `apply_qc_outcomes` combines outcomes with a trust state so that it can only
 stay or fall (property-tested).
 
 | Check | Function | Rule | Effect |
 |---|---|---|---|
-| Per-class real vs simulated coverage (version-7 families) | `class_bin_shares`, `predicted_class_coverage`, `real_class_coverage`, `coverage_vs_simulation` | per (level, called class) with >= 200 cells: the dataset's confident share against `sum_d s_c(d) cov(L, c, d)` from `resolvability_class_depth.parquet` at the dataset's own per-class bin shares (the pre-registered predictor); where profile mode has run, its per-class prediction (`profile_coverage_table`) is reported beside it (`profile_coverage`) and never decides | warning per class when real < simulated - 0.10, worded per class (it fires for glia and for small hypothalamic classes alike); the text says the warning also fires on v1-type large-mask (nucleus-expansion) segmentation, where simulation over-predicts coverage by +.16 to +.22 |
-| Non-neuronal high depth | `nonneuronal_high_depth_flags` | non-neuronal cells at >= 1,000 counts in emitted `nonneuronal_high_depth` bins | report-only `flag_nonneuronal_high_depth` |
+| Per-class real vs simulated coverage (version-7 families) | `class_bin_shares`, `predicted_class_coverage`, `dataset_class_depth_prediction` (RESOLVE's predictor; label-free depth for classes with fewer than 100 cells), `real_class_coverage`, `coverage_vs_simulation` | per (level, called class) with >= 200 cells: the dataset's confident share against `sum_d s_c(d) cov(L, c, d)` from `resolvability_class_depth.parquet` at the dataset's own per-class bin shares (the pre-registered predictor); where profile mode has run, its per-class prediction (`profile_coverage_table`) is reported beside it (`profile_coverage`) and never decides | warning per class when real < simulated - 0.10, worded per class (it fires for glia and for small hypothalamic classes alike); the text says the warning also fires on v1-type large-mask (nucleus-expansion) segmentation, where simulation over-predicts coverage by +.16 to +.22 |
+| Non-neuronal high depth | `nonneuronal_high_depth_flags` | non-neuronal cells at >= 1,000 counts in emitted `nonneuronal_high_depth` bins | report-only `flag_nonneuronal_high_depth`, written by RESOLVE for version-7 bundles |
 | Glial large-mask / high-depth trend | `nonneuronal_depth_trend` | real non-neuronal coverage at >= 1,000 counts below the 500-999 band by more than 2 SE (both >= 200 cells) | report-only (5K vendor glia: class .916 -> .897 -> .886) |
 | Factor re-measure (first in-house dataset of a family with a measured factor table) | `factor_remeasure` | per-gene factors re-measured with the X1 code (`shadow.reference_pseudobulk_totals`) on the confident calls, centred on the median informative gene and capped +-3, against the stored table on genes informative in both | warning when Pearson r < 0.9, recommending a PREP re-run with the in-house table as a new asset (not automatic) |
 | Gene complexity | `gene_complexity_check` | median genes per cell of native vs simulated cells per depth bin (>= 50 cells each) | warning when native cells carry > 45% more genes; its text says simulated coverage predictions are unreliable for the dataset |
@@ -1539,7 +1544,14 @@ Per sample:
    families, the local threshold (raise-only). Then the floors, the dataset
    gate (level + warning flag; a provisional panel warns and shows a banner
    but never lowers the level) and the degraded-mode consensus
-   (`consensus.resolve_human`, §5.2–§5.4).
+   (`consensus.resolve_human`, §5.2–§5.4). A resolvability version-7 bundle
+   (every family outside `validated_panels.csv` and the version-6 pins,
+   such as the M13 custom MERSCOPE panel) is read the same way with its own
+   rule: each ensemble member's cells are reweighted separately and the
+   version-7 ensemble re-decided (E1, E2, the saturated-bp rule), then the
+   monotone fill; cells of a filled bin are `resolvability_extrapolated`
+   and floors come from the decisions before the fill (see "Resolvability
+   version 7 in RESOLVE" below). Version 6 is read exactly as before.
 4. **Flags** (`merxen.annotation.flags`, §4.3, §5.6): contamination on the
    assigned class's negative genes (negative in both WHB frontal and SEA-AD
    Multiregion, minus the state genes) against a beta-binomial fitted to
@@ -1552,7 +1564,8 @@ Per sample:
    uninformative and its flag is null (H16's 15% marking is reported beside
    the diffuse rate). The microglial spill-over flag is off for human
    (OD-C5). `discovery_caution` is any of contaminated, diffuse, OOD or
-   method disagreement.
+   method disagreement. `flag_nonneuronal_high_depth` (report-only, version
+   7 only; null otherwise) is described below.
 5. **Composition** (`merxen.annotation.composition`, §5.5): the soft broad
    vector of every table cell (`soft_broad_*`, summing to 1 with
    `soft_broad_unallocated`), the section's soft, depth-stratified (>= 30
@@ -1583,6 +1596,69 @@ Per sample:
    with a trust reason. A refused panel gives statuses only
    (`not_attempted_gate`, gate `failed`, `exclude_hard`). Mouse samples
    follow the same steps with the mouse rules below.
+
+**Resolvability version 7 in RESOLVE** (the M3c follow-up, plan §12 M3c;
+M13 chunk C14). Human and mouse RESOLVE declare version-7 support
+(`load_resolvability(..., allow_version_7=True)`); a resolvability version
+this code does not know (later than 7, below 1, or not an integer) is refused
+with a `ResolvabilityError` for every caller
+(`resolvability.checked_resolvability_version`). For a version-7 bundle:
+
+- **Decisions.** `ResolvabilityTables.decisions` re-derives the ensemble
+  decisions from `resolvability_cells.parquet`: each emission member's cells
+  are reweighted to the dataset's soft composition per depth bin (pooled deep
+  sets per member, trimmed per tested set as in version 4), the members are
+  decided with the saturated-bp rule, the ensemble rule (E1, E2 with the
+  spread margin of the bundle's ensemble settings) judges each bin, then the
+  monotone fill runs (plan §8.3 v7.7-v7.9). Without reweighting
+  (`resolvability.reweight_to_composition = false`, or no leaf calls) these
+  are PREP's unweighted decisions. Thresholds, targets and every rule
+  constant are the bundle's; RESOLVE changes none of them.
+- **Emission.** A filled bin is emitted at its threshold and its confident
+  cells are `resolvability_extrapolated` (the decisions' `extrapolated`).
+  Floors come from the decisions before the fill (`EmissionPlan.simulated_floors`;
+  the fill only reaches bins deeper than the shallowest emitted one, so it
+  cannot move a floor). The trust state is the bundle's (PREP's guarded
+  constraint); RESOLVE never raises it.
+- **Class-depth table.** `EmissionPlan.class_depth` is
+  `resolvability.class_depth_table` of the decisions RESOLVE applied: the
+  schema of PREP's `resolvability_class_depth.parquet`, but reweighted to the
+  dataset. RESOLVE replaces the profile shares by the dataset's own per-class
+  depth s_c(d): per level, the table cells whose class key there is c,
+  binned by total counts; a class with fewer than 100 such cells
+  (`real_qc.CLASS_DEPTH_MIN_CLASS_CELLS`, the per-class minimum of a depth
+  profile, plan §8.3 v7.5) takes the label-free total-count histogram of all
+  table cells (`share_source` `label_free`). The class-depth prediction
+  sum_d s_c(d) cov(L, c, d) and the resolvable share sum_d s_c(d) over
+  emitted bins (`real_qc.dataset_class_depth_prediction`) are recorded per
+  (level, class) in the dataset's regime; they are the predictor of the
+  per-class real-vs-simulated coverage check, which M13 wires (chunk C15).
+- **`flag_nonneuronal_high_depth`** (report-only; plan §8.3 v7.9): a table
+  cell is flagged when, at some level of the bundle, its class key there is
+  non-neuronal (the bundle's `neuronal_classes`; unknown lineage counts as
+  non-neuronal), its total counts reach `real_qc.nonneuronal_high_depth_counts`
+  (1,000) and its (level, class, bin) is emitted on its own ensemble verdict
+  and marked `nonneuronal_high_depth` (never filled). It changes no status,
+  label, threshold, floor or trust state and does not enter
+  `discovery_caution`. It is null outside the table, and for every cell of
+  a version-6 bundle or a run without resolvability tables.
+- **Summary.** Each sample's entry in `<pair>_resolve_summary.json` gains
+  `resolvability_v7`: the version, the decision recipe (`ensemble`), the
+  emission members, the applied decisions' bins per regime (emitted,
+  unanimous, by the spread, filled, at the saturated cap, non-neuronal high
+  depth), the class-depth prediction per (level, class) (`n_cells`,
+  `share_source`, `predicted_coverage`, `resolvable_share`) and the flag's
+  count per level. A version-6 sample has no such entry.
+
+Version-6 bundles (set a, set c, SEA-AD, ag7, VZG2, the pinned P5011
+MERSCOPE family) and runs without tables give identical RESOLVE outputs
+apart from the new, all-null label column (`test_resolve_v7.py`: golden
+digests of the label tables, provenance and summaries computed with the code
+before this change, floats to 10 significant digits, as for the version-6
+resolvability tables of pre-registration §22.8; on the development host they
+also matched at full precision). Label tables written before the column
+still validate: it is an optional contract column
+(`schema.OPTIONAL_CONTRACT_COLUMNS`), checked when present.
 
 ### Human rules v1 (`consensus.resolve_human`, §5.2)
 
@@ -2183,9 +2259,11 @@ held-out-gene CSV is not produced in the pipeline, so item 8 is
   panel-card notes and a downgrade-only per-class coverage warning; no
   empirical offset. Set a, ag7 and VZG2 keep resolvability version 6.
   *Implemented in M3c (2026-09-28):* the version-7 bundles of both 5K
-  families exist; M4's RESOLVE refuses them until its follow-up (plan §12
-  M3c), and the real-data QC functions (`real_qc`) are not yet wired into
-  RESOLVE or the report. On the public section the version-7 predictions
+  families exist. *Since the M3c follow-up (2026-10-06):* RESOLVE reads them
+  (version-7 decisions, `flag_nonneuronal_high_depth` and the class-depth
+  prediction at the dataset's own per-class depth); the real-data QC
+  warnings (`real_qc`, e.g. the per-class coverage check) are not yet wired
+  into RESOLVE or the report (M13). On the public section the version-7 predictions
   still exceed the real coverage by +.07 (class) to +.09 (subclass) overall
   and by up to +.25 for hypothalamic classes, and the per-class warning
   fires for 19 (level, class) pairs (`M3C_EXIT_REPORT.txt`).

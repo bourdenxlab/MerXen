@@ -8,9 +8,9 @@ monotone fill; cells of filled bins are ``resolvability_extrapolated``; the
 report-only ``flag_nonneuronal_high_depth`` marks non-neuronal cells at
 high depth in bins emitted on their own ensemble verdict; and the summary
 records the class-depth prediction at the dataset's own per-class depth.
-A version-6 bundle gives byte-identical RESOLVE outputs apart from the new
-null column (golden digests of the code before this change), and a version
-this code does not know is refused.
+A version-6 bundle gives identical RESOLVE outputs apart from the new null
+column (golden digests of the code before this change, floats to 10
+significant digits), and a version this code does not know is refused.
 
 The bundles' resolvability files are synthetic: per (member, level, class,
 depth) a block of test cells with a planted share of correct calls, written

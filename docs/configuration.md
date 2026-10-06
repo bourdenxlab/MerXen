@@ -624,12 +624,13 @@ fields were added by milestone M3c (plan §3.7, §8.3 "Resolvability version 7",
 | `panel.panel_chemistry` | `auto` | `auto` (MERSCOPE -> `merscope`; a Xenium panel with Jaccard >= 0.95 to a pinned Prime list -> `xenium_prime`; else unknown), or a declared `xenium_prime`, `xenium_v1`, `merscope`. Only `xenium_prime` mouse has a measured factor table (the R3 member). |
 | `real_qc.coverage_warn_margin`, `real_qc.coverage_min_cells` | `0.10`, `200` | Per-class real vs simulated coverage: warn per (level, called class) with at least this many cells when the real confident share is below the class-depth prediction at the dataset's own per-class depth by more than the margin (user decision 4; warning only, never an offset). |
 | `real_qc.factor_remeasure_min_r` | `0.9` | First in-house dataset of a family with a measured factor table: warn (and recommend a PREP re-run with the in-house table as a new asset) when the re-measured factors correlate below this with the stored table on the informative genes. |
-| `real_qc.nonneuronal_high_depth_counts` | `1000` | Non-neuronal cells at or above this depth in `nonneuronal_high_depth` bins get the report-only `flag_nonneuronal_high_depth`. |
+| `real_qc.nonneuronal_high_depth_counts` | `1000` | Non-neuronal cells at or above this depth in `nonneuronal_high_depth` bins get the report-only `flag_nonneuronal_high_depth` (RESOLVE, version-7 bundles). |
 | `real_qc.genes_per_count_gap_warn` | `0.45` | Gene-complexity warning: native cells carry more than this share more genes than simulated cells at matched depth; the warning says simulated coverage predictions are unreliable for the dataset. |
 
-The `real_qc` checks are implemented in `merxen.annotation.real_qc` and are
-wired into RESOLVE by the M4 follow-up and into the first in-house dataset of
-a family by M13 (plan §12 M3c); none raises a trust state.
+The `real_qc` checks are implemented in `merxen.annotation.real_qc`. RESOLVE
+reads `real_qc.nonneuronal_high_depth_counts` for version-7 bundles (the M3c
+follow-up); the warnings are wired into RESOLVE and the first in-house dataset
+of a family by M13 (plan §12 M3c). None raises a trust state.
 
 **RESOLVE rule settings have no pipeline params.** The thresholds, targets,
 floors, dataset gate and flag settings RESOLVE applies are the
