@@ -1096,3 +1096,27 @@ Gate P is simulation only (§9). These definitions apply to every family, this o
    - (b) the 100-cell per-class minimum of the class-depth prediction. It decides no warning while `real_qc.coverage_min_cells` ≥ 100;
    - (c) `flag_nonneuronal_high_depth` is false for every table cell of the family, because the grid ends at 250 counts;
    - (d) the monotone fill's non-neuronal limit (bins ≥ 1,000) does not reach the open-ended 250 bin, so glia at ≥ 1,000 counts in that bin can be emitted by the fill. A change would be a tightening, but it needs the user's decision.
+
+### 23.11 NP3 readings put to the user, and set a numbers seen before the ruling (M13 NP3 review; recorded 2026-10-06, before the user rules)
+
+**Disclosure.** On 2026-10-06 the review of the NP3 code (M13 chunk C2) scored NP3 read-only on set a's M8 self-map (`$A/m8prep/scratch_store/whb_frontal_supc_clus/resimdrop`). It used the default donor's check half only, `R1_contam_HO` and the bundle's frozen thresholds, with the natural composition approximated by the test cells' type shares. This is not the dry run: no leave-one-donor-out replicate was mapped. At broad (8 classes), the (level, class) records validated were:
+
+| Weighting | Validated | Failing |
+|---|---|---|
+| unweighted (report-only) | 6 | — |
+| test-cell readings (report-only) | 6 | — |
+| `natural`, the set reading as scored | 5 | broad Astro |
+| `class_balanced` as registered, with the trim and rare-type pooling | 4 | broad Astro, broad Oligo |
+
+Broad Oligo's ≥ 30 set has 277 of 278 confident calls right (.996). Class-balanced it scores .965, below target⁺ .97: the one wrong call is of a rare type, and capped at 10 × the set's median weight it still carries 3.5% of the set's weight. These numbers were seen before the readings below are ruled on. Adopting a reading that validates more classes is therefore a post-hoc loosening (§1 rule 2). It needs the user's written approval, or it goes through §9's revision of an unattainable criterion after the dry run.
+
+**Open** ([P] kept; the code's behaviour until the user rules):
+1. **"The reference's natural composition within the class"** (§9 NP3). Neither §23.9 nor §23.10 says how it is read.
+   - *Scored:* the set reading. Every truth type of the called class's tested set, a wrong call's type included, takes its share of the reference composition (`natural`).
+   - *Reported:* the test-cell reading (`natural_test_cells`), which rebalances the types within each truth class over the scope's test cells.
+2. **The class-balanced weighting's trim and rare-type pooling.** §23.9 item 2 (equal total weight per truth type within the called class's tested set) is [U] and scored as written. Two further rules come from the M13 NP3 chunk spec, not from §23.9:
+   - the judged-set trim: each weight is capped at `weight_trim_factor` (10) × the set's median positive weight;
+   - the pooling of a truth type with fewer than `weight_min_type_cells` (20) calls at its broad class.
+
+   Both move `class_balanced` towards passing, so they belong to the same ruling. Example: 1,000 calls of one bin, 990 right in three types of 330 and 10 wrong in two types of 5 of another broad class. The class-balanced precision is .908 with the trim and .60 without it. Under the literal rule, a set below 60 counts (target⁺ .97) has room for almost no wrong-type call.
+3. **Values on a family dataset's composition** (§9 NP3: "reported when one exists"). These are not computed, because that composition needs the dataset's labels, and no real-label input reaches gate P other than NP5's registered profile (§23.9 item 6; CHECK K7). The values on the dataset's depth histogram (label-free) are reported.
