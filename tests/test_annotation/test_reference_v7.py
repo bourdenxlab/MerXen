@@ -251,6 +251,7 @@ def test_a_version_7_primary_maps_every_member_on_the_topped_up_test_set(
         res.RESOLVABILITY_CELLS_FILE,
         res.RESOLVABILITY_SUMMARY_FILE,
         res.CLASS_DEPTH_FILE,
+        res.SIM_GENES_FILE,
     ):
         assert (bundle_dir / name).is_file()
     summary = json.loads((bundle_dir / res.RESOLVABILITY_SUMMARY_FILE).read_text())
@@ -260,6 +261,22 @@ def test_a_version_7_primary_maps_every_member_on_the_topped_up_test_set(
     payload = manifest["build_hash_payload"]["builder_params"]["resolvability"]
     assert payload["v7"]["resolvability_version"] == 7
     assert payload["v7"]["ensemble_rule_version"] == 2
+    # Simulated genes per cell (M13 C16, D19 (a)): stored per member and
+    # simulated cell, counted on the test cells' genes, and keyed into the
+    # version-7 build_hash.
+    assert payload["v7"]["simulated_n_genes_version"] == res.SIM_GENES_VERSION
+    assert output["files"]["sim_genes"] == res.SIM_GENES_FILE
+    simulated = res.load_simulated_genes(bundle_dir)
+    assert simulated is not None
+    (test_dir,) = (tmp_path / "store" / reference.HO_REFERENCE_ID).glob("[0-9a-f]*")
+    assert list(simulated.query_genes) == res.load_test_cells(test_dir).genes
+    assert set(simulated.table[res.MEMBER_COLUMN]) == {
+        call["member"] for call in summary["members"]
+    }
+    assert (
+        simulated.table.groupby(res.MEMBER_COLUMN).size().to_dict()
+        == (summary["n_simulated_cells"])
+    )
     assert payload["test_set"]["top_up"]["target"] == 12
     assert summary["ensemble_settings"]["spread_wilson_margin_se"] == 1.0
     with pytest.raises(res.ResolvabilityError, match="version-7"):

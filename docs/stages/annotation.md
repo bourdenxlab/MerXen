@@ -454,6 +454,7 @@ and the host thinning is identical for all.
 | `resolvability.parquet` | Primary and secondary bundles (resolvability on): one long table, `kind` per row type: `bin` (per recipe × level × class × depth: calls, precision and coverage at the default threshold, the local threshold), `curve` (precision and coverage at thresholds 0.50–0.99), `isotonic` (fit-half knots), `node` (per-node precision, recall, F1), `confusion` (truth × call within the called class), `decision` (the three regimes below), `gene_efficiency`. |
 | `resolvability_cells.parquet` | One row per simulated cell × level × recipe: parent class, depth, split half, call, bp, `avg_correlation`, truth, truth class, truth leaf, correct. RESOLVE reweights these to each dataset's composition. |
 | `resolvability_summary.json` | Recipes, levels, settings, test-set counts, `D_max` per level and class, emission per regime, level, class and depth (status, threshold, `t*`, extrapolated, pooled, reason), the pooled deep sets per regime, level and class (`D_P`, the bins taking their verdict, statistics, `t*`, status), floors, validated thresholds the local rule would raise (own bins whose fit half holds 50 calls; pooled sets carry `would_raise`), the validated bins whose fit half holds fewer (`validated_thresholds_not_evaluable`: `t*` unknown, never counted as a raise), the trust constraint, fine-level seed stability, runtimes and mapping runs (with each run's `n_processors`); human held-out self-maps: `test_set_exclusion` (the M8 D1 revision, rule and the cells left out). |
+| `resolvability_sim_genes.parquet` | Version-7 primary and secondary bundles built since M13 chunk C16: one row per member × simulated cell (test cell × grid depth) with the member, its role, the cell id, the grid depth, the realised total and `n_genes` (the test cells' genes with a simulated count > 0, host plus spill). The summary's `simulated_n_genes` records the genes counted (ids, count, sha256). It is the simulated side of the gene-complexity check (decision D19 (a)); version-6 bundles never hold it. |
 | `test_cells.h5ad`, `test_cells.parquet` | Resolvability test-set bundles: native panel counts of the test cells and their truth per level (`truth__<level>`), composition key and spill group; human: donor, dissection and `test_source`. |
 
 ### Declared panels, gene IDs and controls (M3b)
@@ -749,8 +750,12 @@ top-up rule, so its bundles are new build directories. A version-7 self-map:
   the rule, member statuses, spread and limit, saturated and filled flags),
   `resolvability_summary.json` (`resolvability_version` 7, members, `ensemble`
   statistics incl. the member spread and agreement, `emitted_before_fill`,
-  the top-up, assets and chemistry, `profile_prediction`) and
-  `resolvability_class_depth.parquet`.
+  the top-up, assets and chemistry, `profile_prediction`, `simulated_n_genes`)
+  and `resolvability_class_depth.parquet`; since M13 chunk C16 also
+  `resolvability_sim_genes.parquet`, each member's simulated cells with their
+  realised total and detected genes. Its version (`SIM_GENES_VERSION`)
+  enters the version-7 `build_hash`, so no version-7 bundle built before it
+  is reused; such a bundle stays readable.
 
 `resolvability_class_depth.parquet` is the table RESOLVE consumes (the M3c
 follow-up; RESOLVE derives it from the decisions it applies, reweighted to the
@@ -964,7 +969,7 @@ stay or fall (property-tested).
 | Non-neuronal high depth | `nonneuronal_high_depth_flags` | non-neuronal cells at >= 1,000 counts in emitted `nonneuronal_high_depth` bins | report-only `flag_nonneuronal_high_depth`, written by RESOLVE for version-7 bundles |
 | Glial large-mask / high-depth trend | `nonneuronal_depth_trend` | real non-neuronal coverage at >= 1,000 counts below the 500-999 band by more than 2 SE (both >= 200 cells) | report-only (5K vendor glia: class .916 -> .897 -> .886) |
 | Factor re-measure (first in-house dataset of a family with a measured factor table) | `factor_remeasure` | per-gene factors re-measured with the X1 code (`shadow.reference_pseudobulk_totals`) on the confident calls, centred on the median informative gene and capped +-3, against the stored table on genes informative in both | warning when Pearson r < 0.9, recommending a PREP re-run with the in-house table as a new asset (not automatic) |
-| Gene complexity | `gene_complexity_check` | median genes per cell of native vs simulated cells per depth bin (>= 50 cells each) | warning when native cells carry > 45% more genes; its text says simulated coverage predictions are unreliable for the dataset |
+| Gene complexity | `gene_complexity_check`; inputs from `gene_complexity_signal` (M13 C16) | median genes per cell of native vs simulated cells per depth bin (>= 50 cells each); simulated cells from the version-7 bundle's `resolvability_sim_genes.parquet` (one per test cell and grid depth, the mean over the emission members, binned at the grid depth), native cells counted on the same genes | warning when native cells carry > 45% more genes (`real_qc.genes_per_count_gap_warn`); its text says simulated coverage predictions are unreliable for the dataset; `not_evaluable` for version-6 bundles and version-7 bundles built before C16 |
 
 The thresholds are the `real_qc` fields of the annotation config
 ([Configuration](../configuration.md)).
@@ -1037,6 +1042,22 @@ statistic is re-measured on set a before a new family is scored (M13 C17).
 With the default `node` comparator set a's panel gives only one class with
 three or more markers, so the referee is `not_evaluable` on set a: that is not
 a pass, and it goes to the user with the threshold question.
+
+**Gene-complexity source (M13 chunk C16; decision D19 (a)).** A version-7
+PREP stores the simulated `n_genes` of every member's simulated cells,
+counted on the test cells' genes (`resolvability_sim_genes.parquet`;
+`resolvability.simulated_gene_counts`). `resolvability.load_simulated_genes`
+reads it back and checks the recorded genes against their sha256; it returns
+nothing for a version-6 bundle (the seeded families, whose `build_hash` is
+unchanged) or a version-7 bundle built before the artefact, and the check is
+then `not_evaluable`. `real_qc.native_gene_complexity` counts the native
+cells' genes and totals on the same genes (a query gene the dataset lacks
+counts as not detected and is listed), and `real_qc.gene_complexity_signal`
+builds the check's inputs: one simulated value per test cell and grid depth
+(the mean over the emission members, so the 50-cell minimum counts test
+cells), binned at the grid depth. The outcome's `details.source` records
+the artefact version, the members and the missing genes. RESOLVE passes the
+table cells (M13 chunk C15).
 
 On a seeded real-data family whose species gate has not merged into `main`
 (`real_qc.seeded_families_warn_only_until_gate`), the lowering effects of the

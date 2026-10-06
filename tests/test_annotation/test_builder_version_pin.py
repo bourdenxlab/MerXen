@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "221012fa78966b8a903bd1a29e6046e68207bfe0fca795bd7adb6bf2c24c2b2c",
+    3: "37f58a2de7d3fac89807e91390d484bb8f006c93ccfac2472d78e9b74a8c193d",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -182,6 +182,16 @@ PIN_HISTORY = (
     "(2026-10-06): resolvability.py carries both frozen_confident_mask "
     "and the version guard and ensemble_bin_counts above; each change "
     "keeps its own rule, so no bundle content or build_hash changes",
+    "3: version-7 self-maps store the simulated n_genes per member, test "
+    "cell and depth on the test cells' genes (M13 chunk C16, decision D19 "
+    "(a): resolvability_sim_genes.parquet and the summary's "
+    "simulated_n_genes record); SIM_GENES_VERSION 1 enters every version-7 "
+    "build_hash through v7_simulation_payload (panel_params), so the new "
+    "content goes only into new build directories and no version-7 bundle "
+    "built before it is reused (it stays readable; its gene-complexity "
+    "check is not_evaluable); the version-7 test-set bundles, the version-6 "
+    "path and payload (test_resolvability_v6_golden) and so every seeded "
+    "family's build_hash are unchanged",
 )
 
 

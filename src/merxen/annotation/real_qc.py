@@ -81,6 +81,14 @@ or ``not_evaluable``):
   on the seeded ``real_data`` families until their species gate has merged
   (D20 (b)).
 
+M13 chunk C16 adds the gene-complexity source (D19 (a)):
+``native_gene_complexity`` counts native genes and totals on a bundle's query
+genes, and ``gene_complexity_signal`` builds the check's inputs from the
+simulated genes per cell a version-7 PREP stores
+(``resolvability.load_simulated_genes``). Version-6 bundles (the seeded
+families) and version-7 bundles built before the artefact store none, so the
+check is ``not_evaluable`` for them.
+
 RESOLVE wires them per dataset in M13 chunk C15.
 
 This module imports only the standard library, numpy and pandas (and
@@ -100,7 +108,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal, Protocol, TypeVar, cast
 import numpy as np
 import pandas as pd
 
-from merxen.annotation.resolvability import STATUS_EMITTED, depth_bin
+from merxen.annotation.resolvability import STATUS_EMITTED, SimulatedGenes, depth_bin
 from merxen.annotation.schema import GATE_LEVELS, PANEL_TRUST_STATES, CellStatus
 
 if TYPE_CHECKING:
@@ -1419,6 +1427,81 @@ def gene_complexity_check(
     return table, outcome
 
 
+@dataclass(frozen=True)
+class NativeGeneComplexity:
+    """Native genes and counts per cell on a bundle's query genes (M13 C16).
+
+    Attributes:
+        n_genes: Query genes with a count > 0, per cell.
+        totals: Counts over the query genes, per cell.
+        n_query_genes: The bundle's query genes.
+        missing_genes: Query genes the dataset lacks (they count as not
+            detected), in the bundle's order.
+    """
+
+    n_genes: np.ndarray
+    totals: np.ndarray
+    n_query_genes: int
+    missing_genes: tuple[str, ...]
+
+
+def native_gene_complexity(
+    counts: sparse.spmatrix | np.ndarray,
+    gene_ids: Sequence[str],
+    query_genes: Sequence[str],
+) -> NativeGeneComplexity:
+    """Count native genes and counts per cell on a bundle's query genes.
+
+    D19 (a): native ``n_genes`` is counted on the genes the simulated cells
+    were counted on (the bundle's query genes, ``SimulatedGenes.query_genes``:
+    the test cells' genes), never on the dataset's whole panel, so that a
+    gene the reference lacks cannot make native cells look more complex.
+    Totals are summed over the same genes, so native and simulated depth
+    bins mean the same counts.
+
+    Args:
+        counts: Cells x genes raw counts (dense or scipy sparse); the
+            caller passes the cells to compare (RESOLVE: the table cells).
+        gene_ids: The genes of ``counts`` (unique ids).
+        query_genes: The bundle's query genes.
+
+    Returns:
+        The per-cell genes and totals and the query genes the dataset lacks.
+
+    Raises:
+        ValueError: If ``gene_ids`` does not match the columns of ``counts``
+            or holds duplicates.
+    """
+    genes = [str(gene) for gene in gene_ids]
+    n_columns = int(counts.shape[1])
+    if len(genes) != n_columns:
+        raise ValueError(
+            f"{len(genes)} gene ids for {n_columns} columns of the native counts"
+        )
+    if len(set(genes)) != len(genes):
+        raise ValueError("the native gene ids hold duplicates")
+    position = {gene: index for index, gene in enumerate(genes)}
+    query = [str(gene) for gene in query_genes]
+    columns = [position[gene] for gene in query if gene in position]
+    missing = tuple(gene for gene in query if gene not in position)
+    if hasattr(counts, "tocsr"):
+        # scipy sparse (not imported here: this module imports in the GPU
+        # clustering environment, which has no scipy).
+        selected = counts.tocsr()[:, columns]
+        n_genes = np.asarray((selected > 0).sum(axis=1)).ravel()
+        totals = np.asarray(selected.sum(axis=1), dtype=np.float64).ravel()
+    else:
+        dense = np.asarray(counts, dtype=np.float64)[:, columns]
+        n_genes = (dense > 0).sum(axis=1)
+        totals = dense.sum(axis=1)
+    return NativeGeneComplexity(
+        n_genes=np.asarray(n_genes, dtype=np.int64),
+        totals=np.asarray(totals, dtype=np.float64),
+        n_query_genes=len(query),
+        missing_genes=missing,
+    )
+
+
 def qc_summary(outcomes: Iterable[QcOutcome]) -> dict[str, Any]:
     """Return the JSON-safe record of a dataset's real-data QC outcomes."""
     items = [outcome.to_json() for outcome in outcomes]
@@ -2589,6 +2672,9 @@ def factor_remeasure_outcome(
 class GeneComplexitySignal:
     """``gene_complexity_check`` inputs (simulated cells: M13 C16, D19).
 
+    ``gene_complexity_signal`` builds it from a version-7 bundle's stored
+    simulated genes per cell and the dataset's counts.
+
     Attributes:
         native_n_genes: Genes per native table cell (the bundle's query
             genes).
@@ -2596,6 +2682,8 @@ class GeneComplexitySignal:
         simulated_n_genes: Genes per simulated cell stored by PREP.
         simulated_depth: Depth per simulated cell.
         grid: The bundle's depth grid.
+        source: Where the inputs came from (recorded in the outcome's
+            ``details``).
     """
 
     native_n_genes: Sequence[float] | np.ndarray
@@ -2603,6 +2691,66 @@ class GeneComplexitySignal:
     simulated_n_genes: Sequence[float] | np.ndarray
     simulated_depth: Sequence[float] | np.ndarray
     grid: Sequence[int]
+    source: Mapping[str, Any] = field(default_factory=dict)
+
+
+# How many missing query genes the gene-complexity source lists by name.
+GENE_COMPLEXITY_MISSING_LISTED: Final = 20
+
+
+def gene_complexity_signal(
+    simulated: SimulatedGenes | None,
+    native_counts: sparse.spmatrix | np.ndarray,
+    native_gene_ids: Sequence[str],
+) -> GeneComplexitySignal | None:
+    """Build the gene-complexity inputs from a bundle and a dataset (D19 (a)).
+
+    Simulated cells: one value per (test cell, grid depth), the mean
+    ``n_genes`` over the bundle's emission members
+    (``SimulatedGenes.per_cell``), at the grid depth D (a simulated cell's
+    bin, v7.2; its realised total can fall just below D). Native cells: the
+    given cells' genes and totals on the bundle's query genes
+    (``native_gene_complexity``).
+
+    Args:
+        simulated: ``resolvability.load_simulated_genes`` of the primary
+            bundle (``None``: a version-6 bundle, i.e. a seeded family, or a
+            version-7 bundle built before the artefact).
+        native_counts: Cells x genes raw counts of the cells to compare
+            (RESOLVE: the table cells).
+        native_gene_ids: The genes of ``native_counts``.
+
+    Returns:
+        The signal, or ``None`` without a stored source (the check is then
+        ``not_evaluable``).
+    """
+    if simulated is None:
+        return None
+    native = native_gene_complexity(
+        native_counts, native_gene_ids, simulated.query_genes
+    )
+    per_cell = simulated.per_cell()
+    return GeneComplexitySignal(
+        native_n_genes=native.n_genes,
+        native_totals=native.totals,
+        simulated_n_genes=per_cell["n_genes"].to_numpy(np.float64),
+        simulated_depth=per_cell["depth"].to_numpy(np.float64),
+        grid=list(simulated.depth_grid),
+        source={
+            "artefact_version": simulated.version,
+            "members": list(simulated.emission_members),
+            "simulated_cells": (
+                "one per (test cell, grid depth): the mean n_genes over the "
+                "emission members, binned at the grid depth"
+            ),
+            "native_cells": "genes and total counts on the bundle's query genes",
+            "n_query_genes": native.n_query_genes,
+            "n_query_genes_missing": len(native.missing_genes),
+            "missing_genes": list(
+                native.missing_genes[:GENE_COMPLEXITY_MISSING_LISTED]
+            ),
+        },
+    )
 
 
 @dataclass(frozen=True)
@@ -2873,15 +3021,19 @@ def _gene_complexity_outcome(
         signal.grid,
         gap_warn=gap_warn,
     )
+    source = {"source": dict(signal.source)} if signal.source else {}
     if not outcome.fired and not (len(table) and table["judged"].any()):
         return (
             QcOutcome.not_evaluable(
                 GENE_COMPLEXITY_CHECK,
                 f"no depth bin with >= {GENE_COMPLEXITY_MIN_CELLS} native and "
                 "simulated cells",
+                details=source,
             ),
             table,
         )
+    if source:
+        outcome = dataclasses.replace(outcome, details={**outcome.details, **source})
     return outcome, table
 
 
