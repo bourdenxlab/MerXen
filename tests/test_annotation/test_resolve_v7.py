@@ -808,10 +808,12 @@ def test_the_version_7_flag_reads_each_level_with_its_own_class_key(
 # with the code before the version-7 consumer (the integration branch at
 # 57c8488) by ``_v6_digests``: each sample's label table without
 # ``flag_nonneuronal_high_depth`` (which that code did not write), its
-# provenance and summary, and the pair summary (the test's temporary
-# directory, the MAP manifest digest and ``VOLATILE_KEYS`` left out). A later
-# deliberate change of RESOLVE's output updates them in its own commit, with
-# the reason.
+# provenance with ``C11_PANEL_FIELDS`` reset to their defaults, its summary,
+# and the pair summary (the test's temporary directory, the MAP manifest
+# digest and ``VOLATILE_KEYS`` left out). ``V6_C11_PANEL`` pins the values of
+# the reset fields, which M13 C11 changed deliberately after the digests were
+# computed. A later deliberate change of RESOLVE's output updates the digests
+# or ``V6_C11_PANEL`` in its own commit, with the reason.
 V6_GOLDEN: dict[str, dict[str, str]] = {
     "human_v6_provisional": {
         "PX_MERSCOPE/labels": (
@@ -967,8 +969,10 @@ def _without_volatile(payload: Any) -> Any:
 # M13 C11 (after the digests were computed) fills these fields of the panel
 # record where RESOLVE left them empty: the human record without panel
 # diagnostics and every mouse record (``pipeline.sample_panel_provenance``).
-# The compared provenance resets them to their defaults; the test of C11
-# checks their values.
+# The digested provenance resets them to their defaults, so that the rest of
+# it is still compared with the 57c8488 code (pre-registration, new-panel
+# family section: version-6 outputs unchanged by the version-7 consumer);
+# ``V6_C11_PANEL`` pins their values instead.
 C11_PANEL_FIELDS: tuple[str, ...] = (
     "panel_family",
     "family_basis",
@@ -983,6 +987,58 @@ C11_PANEL_FIELDS: tuple[str, ...] = (
     "n_unmapped",
     "controls_removed",
 )
+
+# The values of ``C11_PANEL_FIELDS`` in each scenario's panel records (every
+# sample of a scenario has the same), set with M13 C11 (5a7592e). The golden
+# scenarios override the trust decision, so the record is built without panel
+# diagnostics: the trust decision's family, basis and validated level (none
+# for a provisional decision), no table digests (the decisions carry none),
+# the pair's panel mode, the validated share of each level with a confident
+# label (the mouse fixture has none at nt), and empty gene-ID fields.
+_C11_NO_DIAGNOSTICS: dict[str, Any] = {
+    "panel_family": None,
+    "family_basis": None,
+    "validation_basis": None,
+    "validated_max_level": None,
+    "validated_panels_sha256": None,
+    "validated_panel_levels_sha256": None,
+    "n_declared_genes": None,
+    "gene_id_resolution": {},
+    "n_unmapped": None,
+    "controls_removed": {},
+}
+_HUMAN_SHARE_LEVELS: tuple[str, ...] = (
+    "lineage",
+    "broad",
+    "nt",
+    "supercluster",
+    "seaad_subclass",
+)
+_HUMAN_PROVISIONAL_PANEL: dict[str, Any] = {
+    **_C11_NO_DIAGNOSTICS,
+    "panel_mode": "intersection",
+    "validated_share": dict.fromkeys(_HUMAN_SHARE_LEVELS, 0.0),
+}
+_MOUSE_PROVISIONAL_PANEL: dict[str, Any] = {
+    **_C11_NO_DIAGNOSTICS,
+    "panel_mode": "single_sample",
+    "validated_share": dict.fromkeys(("broad", "class", "subclass"), 0.0),
+}
+V6_C11_PANEL: dict[str, dict[str, Any]] = {
+    "human_v6_provisional": _HUMAN_PROVISIONAL_PANEL,
+    "human_v6_validated": {
+        **_C11_NO_DIAGNOSTICS,
+        "panel_family": "human_set_a",
+        "family_basis": "listed",
+        "validation_basis": "real_data",
+        "validated_max_level": "supercluster",
+        "panel_mode": "intersection",
+        "validated_share": dict.fromkeys(_HUMAN_SHARE_LEVELS, 1.0),
+    },
+    "human_no_tables": _HUMAN_PROVISIONAL_PANEL,
+    "mouse_v6_provisional": _MOUSE_PROVISIONAL_PANEL,
+    "mouse_no_tables": _MOUSE_PROVISIONAL_PANEL,
+}
 
 
 def _without_c11_panel_fields(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1070,16 +1126,16 @@ def test_version_6_resolve_outputs_are_unchanged_but_for_the_null_flag(
         print(json.dumps({scenario: digests}, sort_keys=True))  # noqa: T201
     assert digests == V6_GOLDEN[scenario]
     assert Columns.FLAG_NONNEURONAL_HIGH_DEPTH == NEW_FLAG_COLUMN
-    for sample in result.samples.values():
+    for sample_id, sample in result.samples.items():
         labels, provenance = read_label_table(sample.labels_path)
         flag = labels[Columns.FLAG_NONNEURONAL_HIGH_DEPTH]
         assert str(flag.dtype) == "boolean" and flag.isna().all()
         assert "resolvability_v7" not in sample.summary
-        # The C11 fields hold the run's values (reset only for the digests).
+        # The C11 fields, reset for the digests, hold their pinned values.
         assert provenance is not None and provenance.panel is not None
-        assert provenance.panel.panel_mode == (
-            "intersection" if scenario.startswith("human") else "single_sample"
-        )
+        panel = provenance.panel.model_dump(mode="json")
+        c11 = {name: panel[name] for name in C11_PANEL_FIELDS}
+        assert c11 == V6_C11_PANEL[scenario], sample_id
 
 
 @pytest.mark.parametrize("version", [8, 0, "7", 6.5])
