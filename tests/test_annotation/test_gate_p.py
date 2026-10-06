@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import math
 from collections.abc import Mapping, Sequence
@@ -1410,6 +1411,62 @@ def test_np3_scores_the_default_group_on_its_check_half_only() -> None:
         )
 
 
+def test_np3_refuses_tested_sets_built_on_other_calls() -> None:
+    """A tested set must hold in the pooled held-out calls what it was built on.
+
+    D1's 60-count bin holds 200 calls (100 fit-half, 100 check-half), D2's
+    50. A plain concat of the tables holds 250 there and tests the bin on
+    its own; the pooled held-out calls hold 150, below n_min. Scored on the
+    held-out pool, that set would pass and extend ``validated_min_depth``
+    from 100 to 60: the fit half would decide which bins are tested. NP3
+    refuses it. Built on ``pooled_held_out_cells``, 60 is not a tested set.
+    A hand-built set below n_min is refused even when its count matches.
+    """
+    d1 = pd.concat(
+        [
+            _calls(100, [("A", "X", 200, 200, 0.95)], prefix="d1a").assign(half=1),
+            _calls(60, [("A", "X", 200, 200, 0.95)], prefix="d1b"),
+        ],
+        ignore_index=True,
+    )
+    d2 = pd.concat(
+        [
+            _calls(100, [("A", "X", 200, 200, 0.95)], prefix="d2a"),
+            _calls(60, [("A", "X", 50, 50, 0.95)], prefix="d2b"),
+        ],
+        ignore_index=True,
+    )
+    replicates = {("D1", 0): d1, ("D2", 0): d2}
+    decisions = _decisions([60, 100])
+    options: dict[str, Any] = {
+        "default_group": "D1",
+        "composition": NATURAL,
+        "settings": _np3(),
+    }
+    concat = pd.concat([d1, d2], ignore_index=True)
+    leaked = res.gate_p_tested_sets(concat, decisions, regime="provisional")
+    assert [
+        (item.depths, item.n_confident) for item in leaked[("broad", "X")] or []
+    ] == [((100,), 400), ((60,), 250)]
+    with pytest.raises(ValueError, match=r"broad/X 60 .* 250 .* 150"):
+        gp.np3_set_stats(replicates, decisions, leaked, **options)
+    pooled = gp.pooled_held_out_cells(replicates, default_group="D1")
+    tested = res.gate_p_tested_sets(pooled, decisions, regime="provisional")
+    (deep,) = tested[("broad", "X")] or []
+    assert (deep.depths, deep.n_confident) == ((100,), 400)
+    stats = gp.np3_set_stats(replicates, decisions, tested, **options)
+    verdicts = gp.np3_verdicts(stats, AnnotationThresholds(), _np3())
+    (record,) = gp.validated_min_depth(verdicts, tested, [60, 100]).to_dict("records")
+    assert record["passed"] is True and record["validated_min_depth"] == 100
+    assert (record["stop_depth"], record["stop_reason"]) == (60, "untested")
+    # A set below n_min is no tested set, though its count is the pool's.
+    thin = res.GatePTestedSet("broad", "X", (60,), False, 150, 1.0, 0.975)
+    with pytest.raises(ValueError, match=r"broad/X 60 .* fewer than .*200"):
+        gp.np3_set_stats(
+            replicates, decisions, {("broad", "X"): [deep, thin]}, **options
+        )
+
+
 def test_np3_coverage_below_030_fails() -> None:
     """§14 NP3: coverage >= 0.30 (``gate_p_min_coverage``); .29 fails."""
     for n_confident, passes in ((300, True), (290, False)):
@@ -1651,6 +1708,153 @@ def test_rare_truth_types_take_their_class_weight_and_weights_are_trimmed() -> N
     assert trimmed[leaf == "C"].max() < raw[leaf == "C"].max()
     assert gp.np3_set_weights(cells, gp.NP3_UNWEIGHTED).tolist() == [1.0] * 310
     assert gp.np3_set_weights(cells.iloc[:0], gp.NP3_CLASS_BALANCED).shape == (0,)
+
+
+def test_np3_set_stats_trim_each_set_at_the_configured_factor() -> None:
+    """The module docstring's example, scored through ``np3_set_stats``.
+
+    X's set at 100 counts: 990 right calls in three types of 330 (class X)
+    and 10 wrong ones in two types of 5 (class Y, no common type in the
+    set). Class-balanced, each type takes a fifth of the weight: a right
+    call 200 / 330, a wrong one 40 (the rare types take their class's
+    weight). The judged-set trim caps the wrong calls at 10 x the median,
+    2,000 / 330: precision .908. Without the trim (``weight_trim_factor``
+    0) the wrong types keep two fifths: .60.
+    """
+    cells = _calls(
+        100,
+        [
+            ("A", "X", 330, 330, 0.95),
+            ("B", "X", 330, 330, 0.95),
+            ("C", "X", 330, 330, 0.95),
+            ("D", "Y", 5, 0, 0.95),
+            ("E", "Y", 5, 0, 0.95),
+        ],
+    )
+    composition = dict.fromkeys("ABCDE", 0.2)
+    cap = 10 * 200 / 330
+    for trim, precision in ((10.0, 600 / (600 + 10 * cap)), (0.0, 0.60)):
+        np3 = dataclasses.replace(_np3(), weight_trim_factor=trim)
+        tested = res.gate_p_tested_sets(cells, _decisions([100]), regime="provisional")
+        stats = gp.np3_set_stats(
+            {("D1", 0): cells},
+            _decisions([100]),
+            tested,
+            default_group=None,
+            composition=composition,
+            settings=np3,
+        )
+        for scheme in gp.NP3_SCORED_SCHEMES:
+            row = _scheme(stats, scheme)
+            assert row["n_confident"] == 1000
+            assert row["precision"] == pytest.approx(precision)
+        assert _scheme(stats, gp.NP3_UNWEIGHTED)["precision"] == pytest.approx(0.99)
+    assert 600 / (600 + 10 * cap) == pytest.approx(0.9083, abs=1e-4)
+
+
+def _two_level_cells() -> pd.DataFrame:
+    """310 test cells at 100 counts, at broad and at supercluster.
+
+    At broad every cell is called X, rightly. At supercluster the 300 cells
+    of type A (truth S1) are called S1, rightly, and the 10 of type R (truth
+    S2) are called S1, wrongly. A and R share the broad class X.
+    """
+    leaf = np.array(["A"] * 300 + ["R"] * 10)
+    ids = [f"c{index}" for index in range(len(leaf))]
+    bp = np.full(len(leaf), 0.95)
+    broad = bin_cells(bp, np.ones(len(leaf), dtype=bool), cls="X", depth=100, leaf=leaf)
+    fine = bin_cells(
+        bp, leaf == "A", level="supercluster", cls="S1", depth=100, leaf=leaf
+    )
+    fine["truth_parent"] = np.where(leaf == "A", "S1", "S2")
+    for frame in (broad, fine):
+        frame["cell_id"] = ids
+        frame["sim_id"] = [f"{cell}|D100" for cell in ids]
+    return pd.concat([broad, fine], ignore_index=True)
+
+
+def test_np3_set_stats_pool_rare_types_at_their_broad_class() -> None:
+    """``np3_set_stats`` pools a rare type at its broad class, per the settings.
+
+    S1's set at supercluster holds 300 right calls of A and 10 wrong ones of
+    R (< ``weight_min_type_cells``, 20). R's broad class X has the common
+    type A in the set, so R takes A's weight: class-balanced and natural
+    precision 300 / 310. Weighted on its own (a type minimum of 5, no
+    broad map, or the set's own supercluster classes, where R is alone in
+    S2), R would take half of the class-balanced weight, trimmed to 10 x
+    the median: .75; natural (R .1): .90.
+    """
+    cells = _two_level_cells()
+    decisions = _np7_decisions(
+        {("broad", "X", 100): 0.70, ("supercluster", "S1", 100): 0.70}
+    )
+    tested = res.gate_p_tested_sets(cells, decisions, regime="provisional")
+    composition = {"A": 0.9, "R": 0.1}
+
+    def precisions(np3: gp.Np3Settings) -> dict[str, float]:
+        stats = gp.np3_set_stats(
+            {("D1", 0): cells},
+            decisions,
+            tested,
+            default_group=None,
+            composition=composition,
+            settings=np3,
+        )
+        rows = stats[stats["class"] == "S1"]
+        return {
+            scheme: float(_scheme(rows, scheme)["precision"])
+            for scheme in gp.NP3_SCORED_SCHEMES
+        }
+
+    pooled = precisions(_np3())
+    assert pooled == pytest.approx(
+        {gp.NP3_CLASS_BALANCED: 300 / 310, gp.NP3_NATURAL: 300 / 310}
+    )
+    own = precisions(dataclasses.replace(_np3(), weight_min_type_cells=5))
+    assert own == pytest.approx({gp.NP3_CLASS_BALANCED: 0.75, gp.NP3_NATURAL: 0.90})
+    # The broad map pools R with A; the set's own classes would not.
+    rows = cells[cells["level"] == "supercluster"].reset_index(drop=True)
+    leaf = rows[res.TRUTH_LEAF_COLUMN].to_numpy()
+    for class_of, shared in (({"A": "X", "R": "X"}, True), (None, False), ({}, False)):
+        weights = gp.np3_set_weights(
+            rows, gp.NP3_CLASS_BALANCED, class_of=class_of, trim_factor=10.0
+        )
+        assert bool(weights[leaf == "R"][0] == pytest.approx(weights[0])) is shared
+
+
+def test_np3_verdicts_fail_each_check_on_a_nan_value() -> None:
+    """A ``nan`` precision, bound or coverage fails its own check (§14 NP3)."""
+    base: dict[str, object] = {
+        "level": "broad",
+        "class": "X",
+        "set": "100",
+        "pooled": False,
+        "set_min_depth": 100,
+        "scheme": gp.NP3_NATURAL,
+        "scored": True,
+        "n_called": 300,
+        "n_confident": 300,
+        "n_correct": 297,
+        "precision": 0.99,
+        "kish_n": 300.0,
+        "wilson_lb": 0.97,
+        "coverage": 1.0,
+        "max_weight_share": 1 / 300,
+    }
+    stats = pd.DataFrame.from_records(
+        [
+            base,
+            {**base, "precision": math.nan},
+            {**base, "wilson_lb": math.nan},
+            {**base, "coverage": math.nan},
+        ],
+        columns=list(gp.NP3_STATS_COLUMNS),
+    )
+    verdicts = gp.np3_verdicts(stats, AnnotationThresholds(), _np3())
+    assert verdicts["point_ok"].tolist() == [True, False, True, True]
+    assert verdicts["wilson_ok"].tolist() == [True, True, False, True]
+    assert verdicts["coverage_ok"].tolist() == [True, True, True, False]
+    assert verdicts["passed"].tolist() == [True, False, False, False]
 
 
 def test_depth_histogram_reweighting_is_report_only() -> None:
@@ -1902,22 +2106,29 @@ def test_np3_settings_follow_the_config() -> None:
     assert np3.min_coverage == pytest.approx(0.30)
     assert np3.weight_min_type_cells == 20
     assert np3.weight_trim_factor == pytest.approx(10.0)
+    assert np3.min_confident_n == 200
     custom = gp.Np3Settings.from_config(
         AnnotationResolvabilityConfig(
-            gate_p_min_coverage=0.4, weight_min_type_cells=5, weight_trim_factor=0.0
+            gate_p_min_coverage=0.4,
+            weight_min_type_cells=5,
+            weight_trim_factor=0.0,
+            gate_p_min_confident_n=300,
         )
     )
     assert (custom.min_coverage, custom.weight_min_type_cells) == (0.4, 5)
     assert custom.weight_trim_factor == 0.0
+    assert custom.min_confident_n == 300
     for bad in (
         {"min_coverage": 1.5},
         {"weight_min_type_cells": 0},
         {"weight_trim_factor": -1.0},
+        {"min_confident_n": 0},
     ):
         fields: dict[str, Any] = {
             "min_coverage": 0.3,
             "weight_min_type_cells": 20,
             "weight_trim_factor": 10.0,
+            "min_confident_n": 200,
             **bad,
         }
         with pytest.raises(ValueError, match="Np3Settings"):

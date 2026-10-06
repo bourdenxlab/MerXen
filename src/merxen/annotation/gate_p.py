@@ -26,19 +26,30 @@ family dataset's composition is not used: it needs the dataset's labels, and
 no real-label input reaches gate P other than NP5's registered profile
 (§23.9 item 6).
 
-Open (M13 review of NP3, to be put to the user before the set a dry run):
-§14 asks for "the reference's natural composition within the class", and
-neither the pre-registration nor the decisions of 2026-10-06 say how it is
-read. The scored ``natural`` scheme is this implementation's reading: every
-truth type of the called class's tested set, a wrong call's type included,
-takes its share of the reference's composition. ``natural_test_cells``
-(report-only) is the other candidate. On a set that is almost all right,
-the set weightings' result is set mainly by the judged-set trim (10 x the
-set's median weight), which caps the weight of a wrong-call type of a few
-calls: on 1,000 calls, 990 right in three types and the 10 wrong ones in two
-others, the class-balanced precision is .918 with the trim and .60 without
-it. Until the user chooses, the code scores ``natural`` and
-``class_balanced`` as written here.
+Open (M13 review of NP3; one ruling, put to the user before the set a dry
+run, pre-registration §23.11):
+
+- §14 asks for "the reference's natural composition within the class",
+  and neither the pre-registration nor the decisions of 2026-10-06 say how
+  it is read. The scored ``natural`` scheme is this implementation's
+  reading: every truth type of the called class's tested set, a wrong
+  call's type included, takes its share of the reference's composition.
+  ``natural_test_cells`` (report-only) is the other candidate.
+- The judged-set trim (``weight_trim_factor``, 10 x the set's median
+  weight) and the pooling of a type with fewer than
+  ``weight_min_type_cells`` (20) calls at its broad class come from the M13
+  NP3 chunk spec, not from §23.9 item 2. On a set that is almost all right
+  they set the result of the set weightings, because the trim caps the
+  weight of a wrong-call type of a few calls: on 1,000 calls of one bin,
+  990 right in three types of 330 and the 10 wrong ones in two types of 5
+  of another broad class, the class-balanced precision is .908 with the
+  trim and .60 without it. Both move ``class_balanced`` towards passing.
+- §14 also asks for the values on a family dataset's composition to be
+  reported. They are not: that composition needs the dataset's labels
+  (above).
+
+Until the user rules, the code scores ``natural`` and ``class_balanced`` as
+written here, with the trim and the rare-type pooling.
 
 NP4, stability across held-out donors (or draws) and seeds (§14 NP4): per
 (level, class), at every tested set,
@@ -1378,19 +1389,23 @@ class Np3Settings:
         weight_trim_factor: Weights are capped at this multiple of the set's
             median positive weight, as ``decide`` trims each judged set
             (``weight_trim_factor``, 10; 0: no cap).
+        min_confident_n: Confident calls a tested set holds at least
+            (``gate_p_min_confident_n``, 200); ``np3_set_stats`` refuses a
+            set with fewer.
     """
 
     min_coverage: float
     weight_min_type_cells: int
     weight_trim_factor: float
+    min_confident_n: int
 
     def __post_init__(self) -> None:
         """Validate the constants.
 
         Raises:
             ValueError: If ``min_coverage`` is outside [0, 1],
-                ``weight_min_type_cells`` is below 1 or ``weight_trim_factor``
-                is negative.
+                ``weight_min_type_cells`` or ``min_confident_n`` is below 1,
+                or ``weight_trim_factor`` is negative.
         """
         if not 0.0 <= self.min_coverage <= 1.0:
             raise ValueError(
@@ -1407,6 +1422,11 @@ class Np3Settings:
                 "Np3Settings.weight_trim_factor must be >= 0, got "
                 f"{self.weight_trim_factor!r}"
             )
+        if self.min_confident_n < 1:
+            raise ValueError(
+                "Np3Settings.min_confident_n must be >= 1, got "
+                f"{self.min_confident_n!r}"
+            )
 
     @classmethod
     def from_config(cls, config: AnnotationResolvabilityConfig) -> Np3Settings:
@@ -1422,6 +1442,7 @@ class Np3Settings:
             min_coverage=config.gate_p_min_coverage,
             weight_min_type_cells=config.weight_min_type_cells,
             weight_trim_factor=config.weight_trim_factor,
+            min_confident_n=config.gate_p_min_confident_n,
         )
 
 
@@ -1778,6 +1799,39 @@ def _weighted_set(
     )
 
 
+def _check_set_count(
+    item: res.GatePTestedSet, n_confident: int, min_confident_n: int
+) -> None:
+    """Check that a tested set was built on the calls it is scored on.
+
+    ``n_confident`` is the set's unweighted confident calls in the pooled
+    held-out calls. A set built on other rows (a plain concat of the tables
+    keeps the default group's fit half, on which the frozen thresholds were
+    fitted) holds another count there, and could make a bin a tested set,
+    or move D_P, that the pooled calls do not support.
+
+    Raises:
+        ValueError: If ``n_confident`` differs from the set's
+            ``n_confident``, or is below ``min_confident_n``.
+    """
+    label = f"{item.level}/{item.cls} {tested_set_label(item)}"
+    if n_confident != item.n_confident:
+        raise ValueError(
+            f"np3_set_stats: the tested set {label} was built on "
+            f"{item.n_confident} confident calls but holds {n_confident} in "
+            "the pooled held-out calls: build the tested sets with "
+            "gate_p_tested_sets on pooled_held_out_cells of the same "
+            "replicates, default group, recipe, seed and member (a plain "
+            "concat keeps the default group's fit half)"
+        )
+    if n_confident < min_confident_n:
+        raise ValueError(
+            f"np3_set_stats: the tested set {label} holds {n_confident} "
+            f"confident calls, fewer than gate_p_min_confident_n "
+            f"({min_confident_n}): it is not a tested set"
+        )
+
+
 def np3_set_stats(
     replicates: Mapping[ReplicateKey, pd.DataFrame],
     decisions: pd.DataFrame,
@@ -1800,7 +1854,11 @@ def np3_set_stats(
     7: per emission member, ``gate_p_member_sets``). The calls are pooled
     here (``pooled_held_out_cells``), so the default group's fit half, on
     which the frozen thresholds were fitted, cannot enter NP3 by omission:
-    ``default_group`` is required, as in ``replicate_set_stats``. Each set is
+    ``default_group`` is required, as in ``replicate_set_stats``. Nor can it
+    shape the tested sets: each set must hold, in the pooled calls, the
+    confident calls it was built on (``n_confident``), and at least
+    ``settings.min_confident_n``; a set built on a plain concat of the
+    tables (the fit half included) raises. Each set is
     scored under every scheme of ``np3_set_weights`` (``depth_histogram``
     only with a histogram) and of ``np3_test_cell_weights``; NP3's verdict
     uses ``NP3_SCORED_SCHEMES`` only (``np3_verdicts``).
@@ -1816,8 +1874,11 @@ def np3_set_stats(
             donors or draws need distinct cell ids.
         decisions: The frozen decisions of the base run (version 7: the
             ensemble's).
-        tested: The tested sets per (level, class); ``None`` marks a
-            (level, class) that is not evaluable and has no rows.
+        tested: The tested sets per (level, class), from
+            ``gate_p_tested_sets`` (version 7: ``gate_p_member_sets``) on
+            ``pooled_held_out_cells`` of the same replicates, default group,
+            recipe, seed and member; ``None`` marks a (level, class) that is
+            not evaluable and has no rows.
         default_group: The group whose fit half the frozen thresholds were
             fitted on (required, so that no caller leaks it by omission;
             ``None`` when no replicate holds those cells).
@@ -1844,8 +1905,11 @@ def np3_set_stats(
     Raises:
         ValueError: If no replicate has seed label ``seed``, no row is left
             after the filters, a key's tested sets are an empty list or of
-            another key, for an invalid composition or histogram, or for the
-            default group's inputs (``held_out_replicates``).
+            another key, a tested set's confident calls in the pooled calls
+            differ from its ``n_confident`` or are fewer than
+            ``settings.min_confident_n``, for an invalid composition or
+            histogram, or for the default group's inputs
+            (``held_out_replicates``).
         ResolvabilityError: If the rows mix replicates (``replicate_rows``).
     """
     _check_tested(tested)
@@ -1905,6 +1969,7 @@ def np3_set_stats(
             called = index.called_positions(item)
             called_confident = confident[called]
             in_set = called[called_confident]
+            _check_set_count(item, int(len(in_set)), settings.min_confident_n)
             set_correct = correct[in_set]
             results: list[WeightedTestedSet] = []
             for scheme in set_schemes:
