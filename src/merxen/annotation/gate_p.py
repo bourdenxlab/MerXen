@@ -1,7 +1,8 @@
 """Gate-P scoring (M13, plan §14 new panel family).
 
 Pure functions on cells tables: NP3 precision and coverage, NP4 donor / draw
-and seed stability, NP5 resolvability consistency, NP7 error structure.
+and seed stability, NP5 resolvability consistency, NP6 stress sensitivity,
+NP7 error structure.
 
 Gate P validates a new panel family by simulation only (plan §8.8, §14). The
 thresholds and emission are derived once from the default donor (human) or
@@ -109,6 +110,23 @@ re-derived decisions, whose bins and pools are the replicate's own and need
 not match the frozen tested sets; and a class without cells in the profile
 takes D8's overall median as one depth (the registered words), so its
 share is 0 or 1; the pooled profile's shares are the alternative.
+
+NP6, sensitivity to contamination and gene-efficiency perturbations (§14
+NP6; ``np6_set_stats``): each stress recipe of an emission member
+(``resolvability.gate_p_stress_members``: spill 0.35, LogNormal(0, 1.0) and
+the measured human cross-platform offsets for R1, capped at +-2 log2 and
+read from the in-house ``sim_inputs`` asset of M13 decision D7; spill 0.35
+only for R3; the lung ratio for human Prime families) is scored against
+that member at the frozen thresholds on the pooled held-out calls at seed
+0, at NP3's tested sets (a set left with fewer than 200 stressed calls
+pooled with the next deeper one): point precision >= target_L, a Wilson
+bound >= target_L - 0.02, and no drop in point precision significantly
+above 0.05 (one-sided 95%, two-proportion z on each set's Kish n; D12,
+pre-registration §23.9 item 4); the clean upper bound and the coverage
+changes are reported. The readings taken where §14 is not explicit (the
+weightings, the order of the sets, a set still thin) are listed in
+``np6_set_stats``' docstring; they are open until the user answers them,
+before the set a dry run is scored.
 
 NP7, error structure (§14 NP7), on the pooled held-out calls at seed 0 at
 the frozen thresholds, per emission member for version 7
@@ -384,6 +402,7 @@ class _ReplicateIndex:
         self._parent_code = {value: code for code, value in enumerate(parent_values)}
         self._depth = frame["depth"].to_numpy(np.int64)
         self._levels: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        self._cell_codes: np.ndarray | None = None
 
     def _level_rows(self, level: str) -> tuple[np.ndarray, np.ndarray]:
         """The positions of a level's rows and of each test cell's deepest row."""
@@ -418,6 +437,58 @@ class _ReplicateIndex:
             return np.asarray(deepest[keep], dtype=np.int64)
         return np.asarray(rows[self._depth[rows] == item.depths[0]], dtype=np.int64)
 
+    def union_scope_positions(self, items: Sequence[res.GatePTestedSet]) -> np.ndarray:
+        """Return the union of tested sets' scopes, each test cell once.
+
+        NP6 pools a tested set left with too few stressed calls with the next
+        deeper one (§14 NP6). The pooled set's scope is the union of their
+        scopes with each test cell kept once, at its deepest row there (§14:
+        "each test cell counted once at its deepest bin"); one set's scope is
+        ``scope_positions``.
+
+        Args:
+            items: Tested sets of one level.
+
+        Returns:
+            Row positions, one per test cell.
+
+        Raises:
+            ValueError: For no set, or sets of more than one level.
+        """
+        if not items:
+            raise ValueError("union_scope_positions needs at least one tested set")
+        if len({item.level for item in items}) > 1:
+            raise ValueError("union_scope_positions: the sets are of several levels")
+        if len(items) == 1:
+            return self.scope_positions(items[0])
+        positions = np.unique(
+            np.concatenate([self.scope_positions(item) for item in items])
+        )
+        if self._cell_codes is None:
+            codes, _ = pd.factorize(self._frame["cell_id"].astype(str).to_numpy())
+            self._cell_codes = np.asarray(codes, dtype=np.int64)
+        cells = self._cell_codes[positions]
+        order = np.lexsort((-self._depth[positions], cells))
+        ranked = cells[order]
+        first = np.ones(len(order), dtype=bool)
+        first[1:] = ranked[1:] != ranked[:-1]
+        return np.sort(positions[order][first])
+
+    def called_in(self, scope: np.ndarray, cls: str) -> np.ndarray:
+        """Return the positions of a scope's calls of a class (any confidence).
+
+        Args:
+            scope: Row positions of one scope.
+            cls: The class.
+
+        Returns:
+            Row positions; empty when the replicate has no call of the class.
+        """
+        code = self._parent_code.get(cls)
+        if code is None:
+            return np.empty(0, dtype=np.int64)
+        return np.asarray(scope[self._parent_codes[scope] == code], dtype=np.int64)
+
     def called_positions(self, item: res.GatePTestedSet) -> np.ndarray:
         """Return the positions of the scope's calls of the set's class.
 
@@ -430,11 +501,9 @@ class _ReplicateIndex:
         Returns:
             Row positions; empty when the replicate has no call of the class.
         """
-        code = self._parent_code.get(item.cls)
-        if code is None:
+        if item.cls not in self._parent_code:
             return np.empty(0, dtype=np.int64)
-        scope = self.scope_positions(item)
-        return np.asarray(scope[self._parent_codes[scope] == code], dtype=np.int64)
+        return self.called_in(self.scope_positions(item), item.cls)
 
     def positions(self, item: res.GatePTestedSet) -> np.ndarray:
         """Return the positions of the rows in a tested set (one per test cell).
@@ -3049,6 +3118,614 @@ def np5_class_verdicts(
             all(agreed[(level, cls)])
             and all(depth_ok[(level, cls)])
             and all(all(spread_ok[(level, cls, label)]) for label in labels)
+        )
+    return result
+
+
+# --------------------------------------------------------------------------
+# NP6: sensitivity to contamination and gene-efficiency perturbations (§14 NP6)
+
+# §14 NP6: "a drop in point precision vs the base recipe not significantly
+# above 0.05 (one-sided 95%)".
+NP6_MAX_DROP: Final = 0.05
+# The one-sided 95% normal quantile of the drop test (pre-registration §23.9
+# item 4, D12: "the one-sided 95% lower bound of p_base - p_stress").
+NP6_DROP_Z: Final = 1.6448536269514722
+# The weightings NP6 scores: NP3's two (D12 names "each set's Kish n", which
+# differs from n only on a reweighted set) and the unweighted set (§14
+# reweights NP3 only, CHECK K9.2); a set passes only under all three
+# (``np6_set_stats``).
+NP6_SCORED_SCHEMES: Final[tuple[str, ...]] = (
+    NP3_UNWEIGHTED,
+    NP3_NATURAL,
+    NP3_CLASS_BALANCED,
+)
+NP6_SCHEMES: Final[tuple[str, ...]] = NP6_SCORED_SCHEMES
+NP6_STATS_COLUMNS: Final[tuple[str, ...]] = (
+    "level",
+    "class",
+    "stress",
+    "tested_set",
+    "set",
+    "pooled_with",
+    "depths",
+    "set_min_depth",
+    "n_stressed_tested",
+    "below_min_confident_n",
+    "scheme",
+    "scored",
+    "n_base",
+    "precision_base",
+    "kish_n_base",
+    "coverage_base",
+    "n_stress",
+    "n_correct_stress",
+    "precision_stress",
+    "kish_n_stress",
+    "wilson_lb_stress",
+    "coverage_stress",
+    "coverage_change",
+    "drop",
+    "drop_se",
+    "drop_lower",
+    "n_clean",
+    "precision_clean",
+    "coverage_clean",
+)
+NP6_VERDICT_COLUMNS: Final[tuple[str, ...]] = (
+    *NP6_STATS_COLUMNS,
+    "target",
+    "min_wilson",
+    "max_drop",
+    "point_ok",
+    "wilson_ok",
+    "drop_ok",
+    "passed",
+)
+
+
+@dataclass(frozen=True)
+class Np6Settings:
+    """The NP6 constants (§14 NP6; plan §3.7).
+
+    Attributes:
+        min_confident_n: Stressed confident calls a tested set needs to be
+            scored on its own; a set with fewer is pooled with the next
+            deeper one (``gate_p_min_confident_n``, 200).
+        wilson_margin: The Wilson bound must reach target_L less this margin
+            (the real-data emission rule, ``wilson_margin``, 0.02).
+        weight_min_type_cells: ``weight_min_type_cells`` of the NP3
+            weightings (20).
+        weight_trim_factor: ``weight_trim_factor`` of the NP3 weightings (10).
+        max_drop: The drop in point precision against the base recipe that
+            must not be significantly exceeded (0.05).
+        drop_z: The one-sided normal quantile of the drop test (95%).
+        scored_schemes: The weightings a set must pass under
+            (``NP6_SCORED_SCHEMES``).
+    """
+
+    min_confident_n: int
+    wilson_margin: float
+    weight_min_type_cells: int
+    weight_trim_factor: float
+    max_drop: float = NP6_MAX_DROP
+    drop_z: float = NP6_DROP_Z
+    scored_schemes: tuple[str, ...] = NP6_SCORED_SCHEMES
+
+    def __post_init__(self) -> None:
+        """Validate the constants.
+
+        Raises:
+            ValueError: For a count below 1, a negative margin or trim, a drop
+                limit outside [0, 1], a quantile that is not > 0, or scored
+                schemes that are empty or not NP6 schemes.
+        """
+        for name in ("min_confident_n", "weight_min_type_cells"):
+            if getattr(self, name) < 1:
+                raise ValueError(
+                    f"Np6Settings.{name} must be >= 1, got {getattr(self, name)!r}"
+                )
+        for name in ("wilson_margin", "weight_trim_factor"):
+            if not getattr(self, name) >= 0.0:
+                raise ValueError(
+                    f"Np6Settings.{name} must be >= 0, got {getattr(self, name)!r}"
+                )
+        if not 0.0 <= self.max_drop <= 1.0:
+            raise ValueError(
+                f"Np6Settings.max_drop must lie in [0, 1], got {self.max_drop!r}"
+            )
+        if not self.drop_z > 0.0:
+            raise ValueError(f"Np6Settings.drop_z must be > 0, got {self.drop_z!r}")
+        unknown = [name for name in self.scored_schemes if name not in NP6_SCHEMES]
+        if not self.scored_schemes or unknown:
+            raise ValueError(
+                f"Np6Settings.scored_schemes must be a non-empty subset of "
+                f"{NP6_SCHEMES}, got {self.scored_schemes!r}"
+            )
+
+    @classmethod
+    def from_config(cls, config: AnnotationResolvabilityConfig) -> Np6Settings:
+        """Read the NP6 constants from the resolvability config (§14 NP6).
+
+        Args:
+            config: The resolvability config.
+
+        Returns:
+            The settings (the drop limit and its quantile are the §14 and
+            D12 constants 0.05 and the one-sided 95% quantile).
+        """
+        return cls(
+            min_confident_n=config.gate_p_min_confident_n,
+            wilson_margin=config.wilson_margin,
+            weight_min_type_cells=config.weight_min_type_cells,
+            weight_trim_factor=config.weight_trim_factor,
+        )
+
+
+@dataclass(frozen=True)
+class SimulationRows:
+    """One simulation's held-out replicates, as NP6 reads them.
+
+    NP6 compares a stress recipe with its base recipe (and reports the clean
+    upper bound) on the same tested sets; each is one simulation of the
+    held-out cells, kept in tables per (group, seed label) like every
+    gate-P replicate and selected by recipe (version 6) or member
+    (version 7).
+
+    Attributes:
+        replicates: Per (group, seed label), the simulation's cells table
+            (the default group's in full; ``held_out_replicates``).
+        recipe: The recipe of its rows (``None``: every recipe, so the tables
+            must hold one).
+        member: The version-7 member of its rows (``None``: every member).
+    """
+
+    replicates: Mapping[ReplicateKey, pd.DataFrame]
+    recipe: str | None
+    member: str | None = None
+
+    @property
+    def name(self) -> str:
+        """The member, else the recipe (``"<all>"`` when neither is set)."""
+        return str(self.member or self.recipe or "<all>")
+
+
+def np6_drop_test(
+    precision_base: float,
+    n_base: float,
+    precision_stress: float,
+    n_stress: float,
+    *,
+    z: float = NP6_DROP_Z,
+) -> tuple[float, float, float]:
+    """Return NP6's drop, its standard error and its one-sided lower bound.
+
+    Pre-registration §23.9 item 4 (D12): the drop ``p_base - p_stress`` has
+    the two-proportion standard error on each set's Kish n,
+    ``sqrt(p_b (1 - p_b) / n_b + p_s (1 - p_s) / n_s)``, and its one-sided
+    95% lower bound is ``drop - z * se``; NP6 fails when the bound exceeds
+    0.05 (the z-test of H0 "drop <= 0.05" at one-sided 5%).
+
+    Args:
+        precision_base: The base recipe's precision on the set.
+        n_base: Its Kish effective n.
+        precision_stress: The stress recipe's precision on the set.
+        n_stress: Its Kish effective n.
+        z: The one-sided quantile.
+
+    Returns:
+        ``(drop, se, lower bound)``; the drop is ``nan`` without both
+        precisions, the others also without a positive n on both sides.
+    """
+    drop = float(precision_base) - float(precision_stress)
+    if not math.isfinite(drop) or not (n_base > 0 and n_stress > 0):
+        return drop, math.nan, math.nan
+    variance = precision_base * (1.0 - precision_base) / n_base + (
+        precision_stress * (1.0 - precision_stress) / n_stress
+    )
+    se = math.sqrt(max(variance, 0.0))
+    return drop, se, drop - z * se
+
+
+class _Np6View:
+    """One simulation's pooled held-out rows, coded for NP6's sets."""
+
+    def __init__(
+        self,
+        rows: SimulationRows,
+        lookup: Mapping[tuple[str, str, int], tuple[str, float | None, bool]],
+        *,
+        default_group: str | None,
+        seed: int,
+        role: str,
+    ) -> None:
+        cells = pooled_held_out_cells(
+            rows.replicates, default_group=default_group, seed=seed
+        )
+        frame = res.replicate_rows(
+            cells, recipe=rows.recipe, seed=seed, member=rows.member
+        ).reset_index(drop=True)
+        if frame.empty:
+            raise ValueError(
+                f"np6_set_stats: the {role} simulation {rows.name} has no rows "
+                f"after the filters (recipe={rows.recipe!r}, seed={seed!r}, "
+                f"member={rows.member!r})"
+            )
+        self.frame = frame
+        self.confident = res.frozen_confident_mask(frame, lookup)
+        self.index = _ReplicateIndex(frame, self.confident)
+        self.correct = frame["correct"].to_numpy(bool)
+        self.slim = frame[[res.TRUTH_LEAF_COLUMN, "truth_parent", "level", "depth"]]
+        self.class_of = res.leaf_class_map(frame)
+
+    def positions(
+        self, items: Sequence[res.GatePTestedSet], cls: str
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """The set's calls of the class (any confidence) and the confident ones."""
+        called = self.index.called_in(self.index.union_scope_positions(items), cls)
+        return called, called[self.confident[called]]
+
+    def n_confident(self, items: Sequence[res.GatePTestedSet], cls: str) -> int:
+        """Confident calls of the class in the pooled sets."""
+        return int(len(self.positions(items, cls)[1]))
+
+    def weighted(
+        self,
+        positions: tuple[np.ndarray, np.ndarray],
+        item: res.GatePTestedSet,
+        scheme: str,
+        options: Mapping[str, Any],
+    ) -> WeightedTestedSet:
+        """Score a set's calls under one weighting (``_weighted_set``).
+
+        ``positions`` is ``positions()``'s output for the set: its calls of
+        the class and the confident ones; ``item`` names the set.
+        """
+        called, in_set = positions
+        set_options = {**options, "class_of": self.class_of}
+        weights = np3_set_weights(self.slim.iloc[in_set], scheme, **set_options)
+        called_weights = np3_set_weights(self.slim.iloc[called], scheme, **set_options)
+        return _weighted_set(
+            item,
+            scheme,
+            self.correct[in_set],
+            weights,
+            self.confident[called],
+            called_weights,
+        )
+
+
+def _np6_merged(
+    key: tuple[str, str], items: Sequence[res.GatePTestedSet]
+) -> res.GatePTestedSet:
+    """The tested set NP6 scores for ``items`` pooled (statistics left empty)."""
+    depths = tuple(sorted({int(depth) for item in items for depth in item.depths}))
+    return res.GatePTestedSet(
+        level=key[0],
+        cls=key[1],
+        depths=depths,
+        pooled=len(items) > 1 or any(item.pooled for item in items),
+        n_confident=0,
+        precision=math.nan,
+        wilson_lb=math.nan,
+    )
+
+
+def np6_set_stats(
+    base: SimulationRows,
+    stressed: SimulationRows,
+    decisions: pd.DataFrame,
+    tested: Mapping[tuple[str, str], Sequence[res.GatePTestedSet] | None],
+    *,
+    default_group: str | None,
+    settings: Np6Settings,
+    composition: Mapping[str, float] | None = None,
+    clean: SimulationRows | None = None,
+    regime: res.Regime = "provisional",
+    seed: int = 0,
+) -> pd.DataFrame:
+    """Score one stress recipe against its base at NP3's tested sets (§14 NP6).
+
+    §14 NP6: with the frozen thresholds, on the held-out calls pooled over
+    every donor or draw at seed 0 (``pooled_held_out_cells``: the default
+    group on its check half), at NP3's tested sets (``tested``: the base
+    run's, ``gate_p_tested_sets``; version 7 per emission member,
+    ``gate_p_member_sets``), the stressed calls must reach point precision
+    >= target_L and a Wilson bound >= target_L - 0.02 (the real-data
+    emission rule, no margin), and their drop in point precision against the
+    base recipe must not be significantly above 0.05 (``np6_drop_test``);
+    the clean upper bound and the coverage changes are reported. Version 7
+    compares each stress member with its own base member
+    (``resolvability.gate_p_stress_members``).
+
+    Thin sets (§14: "those left with < n_min stressed calls are pooled with
+    the next deeper set"). A tested set with fewer than
+    ``settings.min_confident_n`` stressed confident calls is pooled with the
+    next deeper tested set of its (level, class), then the next, until it
+    holds that many or none is left; each test cell counts once, at its
+    deepest row of the pooled sets' scopes (``union_scope_positions``). The
+    base, stressed and clean values of a row are read on the same pooled
+    sets.
+
+    Readings this implementation takes where §14 is not explicit (strict
+    where there is a choice; open until the user answers them, before the
+    set a dry run is scored, as the other gate-P readings):
+
+    - **Weighting.** D12 tests the drop "on each set's Kish n", which
+      differs from n only on a reweighted set, while CHECK K9.2 notes that
+      §14 reweights NP3 only. A set is scored unweighted and under NP3's
+      two weightings (``NP6_SCORED_SCHEMES``; each weighs its own calls, as
+      in ``np3_set_weights``), and it passes only when it passes under all
+      three. A smaller Kish n widens the drop test, so the unweighted test
+      is the one that can fail on a drop the weighted ones leave
+      undecided; the weighted floors are the stricter ones.
+    - **Order of the sets.** The tested sets of a (level, class) are taken
+      by their shallowest bin, then their deepest (a bin at D_P tested on
+      its own comes before the ">= D_P" set, which is then its next deeper
+      set). A thin bin above D_P tested on its own has no deeper set when
+      it is the deepest bin tested on its own: it is scored on its own
+      calls (the ">= D_P" set covers it as well).
+    - **A set still thin when nothing deeper is left** is scored on the
+      calls it has (reported in ``below_min_confident_n``): its Wilson bound
+      on few calls then decides. A set without stressed confident calls
+      fails (a ``nan`` precision never passes).
+
+    Args:
+        base: The base recipe's replicates (version 6: ``R1_contam_HO``;
+            version 7: the emission member).
+        stressed: The stress recipe's replicates (the same groups and seeds).
+        decisions: The frozen decisions of the base run (version 7: the
+            ensemble's).
+        tested: NP3's tested sets per (level, class) of the base's pooled
+            seed-0 calls; ``None`` marks a (level, class) that is not
+            evaluable.
+        default_group: The group whose fit half the frozen thresholds were
+            fitted on (required; ``None`` when no replicate holds those
+            cells).
+        settings: The NP6 constants.
+        composition: The reference's natural share per truth type (needed
+            for the ``natural`` weighting; every truth type of the three
+            simulations needs a positive share).
+        clean: The clean recipe's replicates (the reported upper bound).
+        regime: The regime whose thresholds are frozen.
+        seed: The seed label of the replicates pooled (0).
+
+    Returns:
+        One row per (tested set, weighting), sorted by level, class and
+        tested set, columns ``NP6_STATS_COLUMNS``: ``stress`` names the
+        stressed simulation (its member, else its recipe); ``set`` is the
+        pooled sets' labels joined by ``+``; ``drop_lower`` the drop test's
+        bound; the clean columns are ``nan`` without ``clean``.
+
+    Raises:
+        ValueError: If a simulation has no rows after the filters, the
+            simulations do not hold the same groups at ``seed``, a key's
+            tested sets are an empty list or of another key, the natural
+            weighting is scored without a composition, or for the default
+            group's inputs (``held_out_replicates``).
+        ResolvabilityError: If a simulation's rows mix replicates
+            (``replicate_rows``).
+    """
+    _check_tested(tested)
+    if composition is None and NP3_NATURAL in settings.scored_schemes:
+        raise ValueError(
+            "np6_set_stats: the natural weighting is scored and needs the "
+            "reference's natural composition"
+        )
+    simulations = {"base": base, "stressed": stressed}
+    if clean is not None:
+        simulations["clean"] = clean
+    groups = {
+        role: sorted(str(group) for group, label in rows.replicates if label == seed)
+        for role, rows in simulations.items()
+    }
+    if len({tuple(values) for values in groups.values()}) > 1:
+        raise ValueError(
+            f"np6_set_stats: the simulations hold other groups at seed {seed}: {groups}"
+        )
+    lookup = res.emission_lookup(decisions, regime)
+    views = {
+        role: _Np6View(rows, lookup, default_group=default_group, seed=seed, role=role)
+        for role, rows in simulations.items()
+    }
+    schemes = tuple(
+        scheme
+        for scheme in NP6_SCHEMES
+        if scheme != NP3_NATURAL or composition is not None
+    )
+    if composition is not None:
+        for view in views.values():
+            _natural_shares(
+                composition, view.frame[res.TRUTH_LEAF_COLUMN].astype(str).to_numpy()
+            )
+    options: dict[str, Any] = {
+        "composition": composition,
+        "min_type_cells": settings.weight_min_type_cells,
+        "trim_factor": settings.weight_trim_factor,
+    }
+    stress_view = views["stressed"]
+    records: list[dict[str, object]] = []
+    for key, items in sorted(tested.items(), key=lambda pair: pair[0]):
+        if items is None:
+            continue
+        level, cls = str(key[0]), str(key[1])
+        ordered = sorted(items, key=lambda item: (min(item.depths), max(item.depths)))
+        for position, item in enumerate(ordered):
+            pooled = [item]
+            n_tested = stress_view.n_confident(pooled, cls)
+            n_stressed = n_tested
+            while n_stressed < settings.min_confident_n and position + len(
+                pooled
+            ) < len(ordered):
+                pooled.append(ordered[position + len(pooled)])
+                n_stressed = stress_view.n_confident(pooled, cls)
+            merged = _np6_merged((level, cls), pooled)
+            labels = [tested_set_label(member) for member in pooled]
+            positions = {
+                role: view.positions(pooled, cls) for role, view in views.items()
+            }
+            for scheme in schemes:
+                scored = {
+                    role: view.weighted(positions[role], merged, scheme, options)
+                    for role, view in views.items()
+                }
+                base_set, stress_set = scored["base"], scored["stressed"]
+                drop, drop_se, drop_lower = np6_drop_test(
+                    base_set.precision,
+                    base_set.kish_n,
+                    stress_set.precision,
+                    stress_set.kish_n,
+                    z=settings.drop_z,
+                )
+                clean_set = scored.get("clean")
+                records.append(
+                    {
+                        "level": level,
+                        "class": cls,
+                        "stress": stressed.name,
+                        "tested_set": labels[0],
+                        "set": "+".join(labels),
+                        "pooled_with": ";".join(labels[1:]),
+                        "depths": ";".join(str(depth) for depth in merged.depths),
+                        "set_min_depth": int(min(merged.depths)),
+                        "n_stressed_tested": n_tested,
+                        "below_min_confident_n": n_stressed < settings.min_confident_n,
+                        "scheme": scheme,
+                        "scored": scheme in settings.scored_schemes,
+                        "n_base": base_set.n_confident,
+                        "precision_base": base_set.precision,
+                        "kish_n_base": base_set.kish_n,
+                        "coverage_base": base_set.coverage,
+                        "n_stress": stress_set.n_confident,
+                        "n_correct_stress": stress_set.n_correct,
+                        "precision_stress": stress_set.precision,
+                        "kish_n_stress": stress_set.kish_n,
+                        "wilson_lb_stress": stress_set.wilson_lb,
+                        "coverage_stress": stress_set.coverage,
+                        "coverage_change": stress_set.coverage - base_set.coverage,
+                        "drop": drop,
+                        "drop_se": drop_se,
+                        "drop_lower": drop_lower,
+                        "n_clean": 0 if clean_set is None else clean_set.n_confident,
+                        "precision_clean": math.nan
+                        if clean_set is None
+                        else clean_set.precision,
+                        "coverage_clean": math.nan
+                        if clean_set is None
+                        else clean_set.coverage,
+                    }
+                )
+    stats = pd.DataFrame.from_records(records, columns=list(NP6_STATS_COLUMNS))
+    return stats.sort_values(
+        ["level", "class", "tested_set"], kind="mergesort"
+    ).reset_index(drop=True)
+
+
+def np6_verdicts(
+    stats: pd.DataFrame, thresholds: AnnotationThresholds, settings: Np6Settings
+) -> pd.DataFrame:
+    """Judge every (set, weighting) of ``np6_set_stats`` (§14 NP6).
+
+    A row passes when the stressed point precision reaches target_L (no
+    margin), its Wilson bound on the Kish n reaches target_L -
+    ``wilson_margin`` (the real-data emission rule) and the drop test's
+    one-sided lower bound does not exceed ``max_drop`` (0.05); a ``nan``
+    fails. Report-only weightings are judged too (``scored`` False).
+
+    Args:
+        stats: ``np6_set_stats`` output (one or several stress recipes).
+        thresholds: The threshold settings (targets).
+        settings: The NP6 constants.
+
+    Returns:
+        ``stats`` with ``target``, ``min_wilson``, ``max_drop``, ``point_ok``,
+        ``wilson_ok``, ``drop_ok`` and ``passed`` (``NP6_VERDICT_COLUMNS``).
+
+    Raises:
+        ValueError: For a level without a precision target.
+    """
+    if stats.empty:
+        return pd.DataFrame(columns=list(NP6_VERDICT_COLUMNS))
+    frame = stats.copy()
+    targets = level_targets(
+        thresholds, sorted({str(level) for level in frame["level"]})
+    )
+    target = np.array([targets[str(level)] for level in frame["level"]])
+    frame["target"] = target
+    frame["min_wilson"] = target - settings.wilson_margin
+    frame["max_drop"] = settings.max_drop
+    precision = frame["precision_stress"].to_numpy(np.float64)
+    wilson = frame["wilson_lb_stress"].to_numpy(np.float64)
+    lower = frame["drop_lower"].to_numpy(np.float64)
+    frame["point_ok"] = precision >= target - _TOLERANCE
+    frame["wilson_ok"] = wilson >= target - settings.wilson_margin - _TOLERANCE
+    frame["drop_ok"] = lower <= settings.max_drop + _TOLERANCE
+    frame["passed"] = frame["point_ok"] & frame["wilson_ok"] & frame["drop_ok"]
+    return frame[list(NP6_VERDICT_COLUMNS)]
+
+
+def np6_class_verdicts(
+    verdicts: pd.DataFrame,
+    tested: Mapping[tuple[str, str], Sequence[res.GatePTestedSet] | None],
+    *,
+    stresses: Sequence[str],
+    settings: Np6Settings,
+) -> dict[tuple[str, str], bool | None]:
+    """Combine NP6 per (level, class) over its tested sets and stress recipes.
+
+    A (level, class) passes NP6 when every tested set passes under every
+    scored weighting for every stress recipe of ``stresses`` (§14 NP6: the
+    criteria hold "at NP3's tested sets" for each recipe). The result has
+    the per-member shape that ``resolvability.every_member_verdict``
+    combines over the version-7 emission members: pass one member's stress
+    recipes (``gate_p_stress_members``) with that member's tested sets.
+
+    Args:
+        verdicts: ``np6_verdicts`` output of every stress recipe in
+            ``stresses`` (concatenated).
+        tested: The tested sets per (level, class).
+        stresses: The stress recipes (``SimulationRows.name``) that must
+            each have been scored.
+        settings: The NP6 constants (the scored weightings).
+
+    Returns:
+        Per (level, class) of ``tested``: ``None`` when it has no tested set
+        (not evaluable), ``False`` when any row fails, else ``True``.
+
+    Raises:
+        ValueError: If ``stresses`` is empty, a tested set has no row for a
+            stress recipe and scored weighting, a row has no ``passed``
+            value, or a key's tested sets are an empty list or of another
+            key.
+    """
+    _check_tested(tested)
+    if not stresses:
+        raise ValueError("np6_class_verdicts: no stress recipe to combine")
+    scored = verdicts[verdicts["scored"].astype(bool).to_numpy()]
+    passed_by = _passed_by(
+        scored, ("level", "class", "stress", "tested_set", "scheme"), "NP6"
+    )
+    result: dict[tuple[str, str], bool | None] = {}
+    for key, items in tested.items():
+        if items is None:
+            result[key] = None
+            continue
+        level, cls = str(key[0]), str(key[1])
+        missing = [
+            f"{stress}/{tested_set_label(item)}/{scheme}"
+            for stress in stresses
+            for item in items
+            for scheme in settings.scored_schemes
+            if (level, cls, str(stress), tested_set_label(item), scheme)
+            not in passed_by
+        ]
+        if missing:
+            raise ValueError(f"{key}: no NP6 verdict for {missing}")
+        result[key] = all(
+            all(passed_by[(level, cls, str(stress), tested_set_label(item), scheme)])
+            for stress in stresses
+            for item in items
+            for scheme in settings.scored_schemes
         )
     return result
 
