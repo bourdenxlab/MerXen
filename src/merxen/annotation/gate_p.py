@@ -192,11 +192,12 @@ the frozen thresholds, per emission member for version 7
 
 A failure of the 1% part fails NP7 for every class of the level. The
 readings taken where §14 is not explicit (the confidence of a call that has
-no class, sinks in the single-wrong-node view, the wrong node at coarse
-levels, a level over 1% failing every class, an empty truth view failing,
-a node outside the vocab) are listed in ``np7_error_structure``'s
-docstring. They are open: each needs the user's answer, recorded in the
-pre-registration, before the set a dry run is scored, because the gate-P
+no class, the 1% part's denominator, excluded calls in the
+single-wrong-node view, the wrong node at coarse levels, a level over 1%
+failing every class, an empty truth view failing, a node outside the
+vocab, unweighted shares) are listed in ``np7_error_structure``'s docstring
+and put to the user in pre-registration §23.13. They are open: each needs
+the user's answer before the set a dry run is scored, because the gate-P
 definitions are fixed before the dry run (pre-registration §23.9) and a
 reading chosen after its numbers would be a post-hoc loosening.
 """
@@ -4555,8 +4556,8 @@ def np7_error_structure(
       are wrong and name one node) is reported only.
 
     Readings this implementation takes where §14 is not explicit. They are
-    open: each needs the user's answer, recorded in the pre-registration
-    (§23.9 item 5), before the set a dry run (C9) is scored. The gate-P
+    open and put to the user in pre-registration §23.13: each needs the
+    user's answer before the set a dry run (C9) is scored. The gate-P
     definitions are fixed before the dry run (§23.9), and choosing a looser
     reading after its numbers would be a post-hoc loosening. Until then:
 
@@ -4573,6 +4574,10 @@ def np7_error_structure(
       (``n_excluded_calls`` reports that count), though §14 says "confident
       calls". Others: the threshold of the cell's truth class at that bin
       (never stricter), or the level's raw default (.73 / .69).
+    - **The 1% part's denominator.** The calls to excluded nodes are
+      counted beside the level's confident calls, not added to them (the
+      share is their number over the level's confident calls). Looser: add
+      them to the denominator.
     - **Sinks in the single-wrong-node view.** Those confident calls also
       enter the truth view, so a sink that absorbs more than 5% of a class
       fails the class at every level even when the level stays below 1%
@@ -4592,6 +4597,8 @@ def np7_error_structure(
     - **A node outside the vocab** counts as implausible, as production
       reads it (``not_in_vocab``); a blank flag is refused
       (``np7_excluded_nodes``).
+    - **Unweighted shares**, as NP4's (§23.9 item 3): §14 reweights NP3
+      only.
 
     Where an alternative is named, the reading taken is the stricter one,
     except for the first: H2's count whatever the bp is stricter.

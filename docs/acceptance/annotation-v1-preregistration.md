@@ -1145,3 +1145,22 @@ These readings come from the review of the NP5 code (M13 chunk C3). They were fo
    - a replicate whose fit exists but never reaches the target, and is not capped, fails the t* range;
    - t* is re-fitted in each replicate on its calls of each tested set (the shared membership rule), not read from the replicate's re-derived decisions;
    - a class without cells in the profile takes D8's overall median as one depth, so both its shares are 0 or 1. The pooled profile's shares are the alternative.
+
+### 23.13 NP7 readings put to the user (M13 NP7 review; recorded 2026-10-07, before the set a dry run)
+
+These readings come from the review of the NP7 code (M13 chunk C5). They were found on synthetic tables, and no NP7 output of set a or of the family is recorded. Nothing here changes a threshold or limit: per level, the confident calls to sink or region-implausible nodes stay at most 1% of the level's confident calls (human); at every tested set, one wrong node takes at most 5% of the truth class's confident calls; the region column is `region_plausible_frontal_cortex` (CHECK K4). §23.9 item 5 and §23.10 item 5 (the truth view, the K9.1 denominator, the region) are not reopened.
+
+**Open** ([P] kept; the code's behaviour until the user rules). Each is ruled before the set a dry run is scored. Choosing a reading after its numbers are seen, when it validates more classes, is a post-hoc loosening (§1 rule 2).
+
+1. **When a call to a sink or region-implausible node is confident.** Such a call has no class (`parent` is null), so it has no frozen threshold of its own.
+   - *Scored:* it is confident when the larger of its own bp and the bp of its cell's supercluster row at the same depth reaches the lowest frozen threshold emitted at its level and depth, for any class (K9.1's "emitted bins"). It never counts at a depth where the level emits nothing, or when both bp are missing. The supercluster bp is needed at broad and NT: both WHB sinks (Miscellaneous and Splatter) are Mixed/Unknown at broad, so their calls there name no group and have no bp of their own.
+   - *Stricter:* count every call to such a node, whatever its bp. That is how H2 counts (§7 item 1 treats counting only confident implausible calls as a loosening of H2), though §14 NP7 says "confident calls". The NP7 table reports this count (`n_excluded_calls`) beside the scored one.
+   - *Not stricter:* the threshold of the cell's truth class at that bin, or the level's raw default threshold.
+   - This is the only item where the scored reading is not the strictest one named.
+2. **The 1% part's denominator.** The calls to excluded nodes are counted beside the level's confident calls, not added to them: the share is their number over the level's confident calls. Adding them to the denominator is looser.
+3. **Excluded calls in the single-wrong-node view.** The confident calls to excluded nodes also enter the truth view, each on its assigned supercluster, and always as wrong calls. A sink that takes more than 5% of a class therefore fails the class at every level, even when the level stays within 1% (§12 M13: "a planted sink absorbing > 5% of a class fails NP7"). This includes calls that the cells table marks correct because their group matches the truth at lineage, broad or NT (an excitatory cell assigned Amygdala excitatory; at lineage, a neuron assigned a WHB sink), which production never emits. Looser: leave these calls to the 1% part only.
+4. **The wrong node at the coarse levels.** A wrong call's node is its call at the level (a group at lineage, broad and NT); an excluded call's node is its assigned supercluster. Looser: group every wrong call by its assigned supercluster, which splits a group's wrong calls over its nodes.
+5. **A level over 1% fails every class of the level.** Looser: fail only the classes whose truth cells reach the excluded nodes.
+6. **An empty truth view fails.** A tested set whose truth class has no confident call in the set's scope fails (its share is undefined). Looser: pass it, as NP4's vacuous sets pass (§23.9 item 3).
+7. **A node outside the vocab** counts as region-implausible, as production reads it (`not_in_vocab`, reported apart). A blank `sink` or region flag in the vocab snapshot is refused: the self-map's level specs read a blank sink as false and a blank region flag as true, so no reading of it agrees with both.
+8. **Unweighted shares.** NP7's shares are unweighted, as NP4's are (§23.9 item 3), because §14 reweights NP3 only. The reweighted shares are not computed.
