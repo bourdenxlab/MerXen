@@ -1459,18 +1459,26 @@ def native_gene_complexity(
     Totals are summed over the same genes, so native and simulated depth
     bins mean the same counts.
 
+    ``gene_ids`` may be a sample's resolved feature ids as loaded
+    (``LoadedSample.feature_ids``): an unresolved feature (``""``) or a
+    feature resolving to no query gene is ignored, and several features
+    resolving to one query gene (e.g. H2AX and H2AFX) are summed into one
+    gene, as ``build_sample_query`` sums them (plan §8.4): the gene is
+    detected when their sum is > 0 and the total counts each feature once.
+
     Args:
-        counts: Cells x genes raw counts (dense or scipy sparse); the
+        counts: Cells x features raw counts (dense or scipy sparse); the
             caller passes the cells to compare (RESOLVE: the table cells).
-        gene_ids: The genes of ``counts`` (unique ids).
-        query_genes: The bundle's query genes.
+        gene_ids: The resolved gene id of each column of ``counts`` (``""``
+            when unresolved; duplicates are summed).
+        query_genes: The bundle's query genes (unique ids).
 
     Returns:
         The per-cell genes and totals and the query genes the dataset lacks.
 
     Raises:
         ValueError: If ``gene_ids`` does not match the columns of ``counts``
-            or holds duplicates.
+            or ``query_genes`` holds duplicates.
     """
     genes = [str(gene) for gene in gene_ids]
     n_columns = int(counts.shape[1])
@@ -1478,22 +1486,34 @@ def native_gene_complexity(
         raise ValueError(
             f"{len(genes)} gene ids for {n_columns} columns of the native counts"
         )
-    if len(set(genes)) != len(genes):
-        raise ValueError("the native gene ids hold duplicates")
-    position = {gene: index for index, gene in enumerate(genes)}
     query = [str(gene) for gene in query_genes]
-    columns = [position[gene] for gene in query if gene in position]
-    missing = tuple(gene for gene in query if gene not in position)
+    if len(set(query)) != len(query):
+        raise ValueError("the bundle's query genes hold duplicates")
+    wanted = set(query)
+    columns_of: dict[str, list[int]] = {}
+    for index, gene in enumerate(genes):
+        if gene and gene in wanted:
+            columns_of.setdefault(gene, []).append(index)
+    groups = [columns_of[gene] for gene in query if gene in columns_of]
+    missing = tuple(gene for gene in query if gene not in columns_of)
+    single = [group[0] for group in groups if len(group) == 1]
+    aliased = [group for group in groups if len(group) > 1]
+    every = [index for group in groups for index in group]
     if hasattr(counts, "tocsr"):
         # scipy sparse (not imported here: this module imports in the GPU
         # clustering environment, which has no scipy).
-        selected = counts.tocsr()[:, columns]
-        n_genes = np.asarray((selected > 0).sum(axis=1)).ravel()
-        totals = np.asarray(selected.sum(axis=1), dtype=np.float64).ravel()
+        matrix = counts.tocsr()
+        n_genes = np.asarray((matrix[:, single] > 0).sum(axis=1)).ravel()
+        n_genes = n_genes.astype(np.int64)
+        for group in aliased:
+            n_genes += np.asarray(matrix[:, group].sum(axis=1)).ravel() > 0
+        totals = np.asarray(matrix[:, every].sum(axis=1), dtype=np.float64).ravel()
     else:
-        dense = np.asarray(counts, dtype=np.float64)[:, columns]
-        n_genes = (dense > 0).sum(axis=1)
-        totals = dense.sum(axis=1)
+        dense = np.asarray(counts, dtype=np.float64)
+        n_genes = (dense[:, single] > 0).sum(axis=1).astype(np.int64)
+        for group in aliased:
+            n_genes += dense[:, group].sum(axis=1) > 0
+        totals = dense[:, every].sum(axis=1)
     return NativeGeneComplexity(
         n_genes=np.asarray(n_genes, dtype=np.int64),
         totals=np.asarray(totals, dtype=np.float64),

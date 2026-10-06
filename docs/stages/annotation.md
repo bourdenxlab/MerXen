@@ -1050,14 +1050,22 @@ counted on the test cells' genes (`resolvability_sim_genes.parquet`;
 reads it back and checks the recorded genes against their sha256; it returns
 nothing for a version-6 bundle (the seeded families, whose `build_hash` is
 unchanged) or a version-7 bundle built before the artefact, and the check is
-then `not_evaluable`. `real_qc.native_gene_complexity` counts the native
-cells' genes and totals on the same genes (a query gene the dataset lacks
-counts as not detected and is listed), and `real_qc.gene_complexity_signal`
-builds the check's inputs: one simulated value per test cell and grid depth
-(the mean over the emission members, so the 50-cell minimum counts test
-cells), binned at the grid depth. The outcome's `details.source` records
-the artefact version, the members and the missing genes. RESOLVE passes the
-table cells (M13 chunk C15).
+then `not_evaluable`. The loader also refuses a table whose rows are not
+those the summary counts (in total and per member), a depth off the grid, a
+simulated cell stored twice or a gene count out of range.
+`real_qc.native_gene_complexity` counts the native cells' genes and totals
+on the same genes (a query gene the dataset lacks counts as not detected and
+is listed). It takes a sample's resolved feature ids as loaded: unresolved
+features are ignored and features resolving to one gene are summed, as the
+MAP query sums them. `real_qc.gene_complexity_signal` builds the check's
+inputs: one simulated value per test cell and grid depth (the mean over the
+emission members, so the 50-cell minimum counts test cells), binned at the
+grid depth. Counting test cells rather than member rows is the
+implementation's reading of "per (cell, depth)", not a recorded decision;
+the row reading could only judge more bins, and the family's gate-P PR names
+it for the user. The outcome's `details.source` records the artefact
+version, the members and the missing genes. RESOLVE passes the table cells
+(M13 chunk C15).
 
 On a seeded real-data family whose species gate has not merged into `main`
 (`real_qc.seeded_families_warn_only_until_gate`), the lowering effects of the

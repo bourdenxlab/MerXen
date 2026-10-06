@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "37f58a2de7d3fac89807e91390d484bb8f006c93ccfac2472d78e9b74a8c193d",
+    3: "7d6a33aa35a015d2272694ccda4cdb09b87f715da63824e59c3c5dfaf9f0a9f1",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -192,6 +192,11 @@ PIN_HISTORY = (
     "check is not_evaluable); the version-7 test-set bundles, the version-6 "
     "path and payload (test_resolvability_v6_golden) and so every seeded "
     "family's build_hash are unchanged",
+    "3: C16 review: load_simulated_genes checks the stored table against "
+    "its summary record (row counts in total and per member, emission "
+    "members present, depths on the grid, one row per member, cell and "
+    "depth, gene counts in range); a reader-side check, so no bundle "
+    "content or build_hash changes",
 )
 
 

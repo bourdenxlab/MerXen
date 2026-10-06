@@ -300,6 +300,13 @@ def test_a_directory_without_resolvability_outputs_has_no_artefact(
         ("version", "version"),
         ("genes", "sha256"),
         ("columns", "columns"),
+        # C16 review 5: the table must be the one the summary counts.
+        ("truncated", "rows but the summary records"),
+        ("member_rows", "rows per member"),
+        ("emission_member_absent", "no rows of the emission members"),
+        ("off_grid", "off the grid"),
+        ("repeated_cell", "more than once"),
+        ("n_genes_range", "outside"),
     ],
 )
 def test_a_damaged_artefact_is_refused(
@@ -311,15 +318,49 @@ def test_a_damaged_artefact_is_refused(
         (damaged / path.name).write_bytes(path.read_bytes())
     summary_path = damaged / res.RESOLVABILITY_SUMMARY_FILE
     summary = json.loads(summary_path.read_text())
+    record = summary[res.SIM_GENES_RECORD]
+    table_path = damaged / res.SIM_GENES_FILE
+    table = pd.read_parquet(table_path)
+    table = table.astype({res.MEMBER_COLUMN: str, res.MEMBER_ROLE_COLUMN: str})
+    table["cell_id"] = table["cell_id"].astype(str)
+    first = summary["emission_members"][0]
+    second = summary["emission_members"][1]
     if change == "drop_file":
-        (damaged / res.SIM_GENES_FILE).unlink()
+        table_path.unlink()
     elif change == "version":
-        summary[res.SIM_GENES_RECORD]["version"] = res.SIM_GENES_VERSION + 1
+        record["version"] = res.SIM_GENES_VERSION + 1
     elif change == "genes":
-        summary[res.SIM_GENES_RECORD]["query_genes"][0] = "OTHER"
+        record["query_genes"][0] = "OTHER"
+    elif change == "columns":
+        table.drop(columns=["n_genes"]).to_parquet(table_path)
+    elif change == "truncated":
+        # A file cut short and rewritten: readable, with fewer rows.
+        table.iloc[:-3].to_parquet(table_path)
+    elif change == "member_rows":
+        # Same row count, one row moved to another member.
+        row = table.index[table[res.MEMBER_COLUMN] == first][0]
+        table.loc[row, res.MEMBER_COLUMN] = second
+        table.loc[row, "cell_id"] = "moved"
+        table.to_parquet(table_path)
+    elif change == "emission_member_absent":
+        # Table and record agree, but an emission member was never stored.
+        kept = table[table[res.MEMBER_COLUMN] != first]
+        kept.to_parquet(table_path)
+        record["n_rows"] = len(kept)
+        record["n_rows_per_member"].pop(first)
+    elif change == "off_grid":
+        table.loc[table.index[0], "depth"] = GRID[0] + 1
+        table.to_parquet(table_path)
+    elif change == "repeated_cell":
+        # Same rows per member, one simulated cell twice.
+        rows = table.index[table[res.MEMBER_COLUMN] == first]
+        table.loc[rows[1], ["cell_id", "depth"]] = table.loc[
+            rows[0], ["cell_id", "depth"]
+        ].to_numpy()
+        table.to_parquet(table_path)
     else:
-        table = pd.read_parquet(damaged / res.SIM_GENES_FILE)
-        table.drop(columns=["n_genes"]).to_parquet(damaged / res.SIM_GENES_FILE)
+        table.loc[table.index[0], "n_genes"] = len(record["query_genes"]) + 1
+        table.to_parquet(table_path)
     summary_path.write_text(json.dumps(summary))
     with pytest.raises(res.ResolvabilityError, match=match):
         res.load_simulated_genes(damaged)
@@ -382,8 +423,51 @@ def test_native_genes_are_counted_on_the_query_genes_only() -> None:
 def test_native_counting_refuses_mismatched_genes() -> None:
     with pytest.raises(ValueError, match="columns"):
         qc.native_gene_complexity(np.ones((2, 3)), ["G0", "G1"], ["G0"])
-    with pytest.raises(ValueError, match="duplicate"):
-        qc.native_gene_complexity(np.ones((2, 2)), ["G0", "G0"], ["G0"])
+    with pytest.raises(ValueError, match="query genes hold duplicates"):
+        qc.native_gene_complexity(np.ones((2, 2)), ["G0", "G1"], ["G0", "G0"])
+
+
+def test_native_counting_takes_loaded_feature_ids_as_the_query_sums_them() -> None:
+    """C16 review 3: LoadedSample.feature_ids hold "" and summed aliases.
+
+    Unresolved features ("") and features of no query gene are ignored;
+    two features resolving to one query gene (H2AX and H2AFX) are one gene,
+    detected when their sum is > 0, as build_sample_query sums them.
+    """
+    from merxen.annotation.gene_ids import summing_matrix
+
+    counts = np.array(
+        [
+            # G0, unresolved, H2AX -> GA, unresolved, H2AFX -> GA, G1, X9
+            [1.0, 4.0, 2.0, 0.0, 3.0, 0.0, 6.0],
+            [0.0, 0.0, 0.0, 5.0, 1.0, 2.0, 0.0],
+            [0.0, 9.0, 0.0, 9.0, 0.0, 0.0, 9.0],
+        ]
+    )
+    feature_ids = ["G0", "", "GA", "", "GA", "G1", "X9"]
+    query_genes = ["G0", "GA", "G1", "G3"]
+    present = ["G0", "GA", "G1"]
+    summed = counts @ summing_matrix(feature_ids, present, dtype=np.float64).toarray()
+    for matrix in (counts, sparse.csr_matrix(counts)):
+        native = qc.native_gene_complexity(matrix, feature_ids, query_genes)
+        # GA counts once per cell however many of its aliases hold counts.
+        assert native.n_genes.tolist() == [2, 2, 0]
+        assert native.totals.tolist() == [6.0, 3.0, 0.0]
+        assert native.missing_genes == ("G3",)
+        # The same as counting the summed query (SampleQuery) columns.
+        on_query = qc.native_gene_complexity(summed, present, query_genes)
+        np.testing.assert_array_equal(native.n_genes, on_query.n_genes)
+        np.testing.assert_array_equal(native.totals, on_query.totals)
+        assert native.missing_genes == on_query.missing_genes
+
+
+def test_native_counting_without_any_query_gene_counts_nothing() -> None:
+    counts = np.ones((2, 2))
+    for matrix in (counts, sparse.csr_matrix(counts)):
+        native = qc.native_gene_complexity(matrix, ["", "X9"], ["G0"])
+        assert native.n_genes.tolist() == [0, 0]
+        assert native.totals.tolist() == [0.0, 0.0]
+        assert native.missing_genes == ("G0",)
 
 
 def test_the_signal_takes_emission_members_at_their_grid_depth(

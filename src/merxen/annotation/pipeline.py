@@ -612,13 +612,102 @@ def _prefer_current_test_set(candidates: list[StoreEntry]) -> list[StoreEntry]:
     return candidates
 
 
+def _v7_simulation_versions(entry: StoreEntry) -> tuple[int, int] | None:
+    """The hashed version-7 simulation versions a bundle was built with.
+
+    Read from ``build_hash_payload.builder_params.resolvability.v7``
+    (``resolvability.v7_simulation_payload``): its ``ensemble_rule_version``
+    and ``simulated_n_genes_version`` (``0`` when the payload predates the
+    field: a version-7 bundle built before M13 chunk C16 stores no simulated
+    genes per cell).
+
+    Returns:
+        ``(ensemble_rule_version, simulated_n_genes_version)``, or ``None``
+        for a bundle without a version-7 payload (version 6, no self-map).
+    """
+    manifest = json.loads((entry.path / BUNDLE_MANIFEST_NAME).read_text("utf-8"))
+    payload = manifest.get("build_hash_payload") or {}
+    params = (
+        ((payload.get("builder_params") or {}).get("resolvability") or {})
+        if isinstance(payload, dict)
+        else {}
+    )
+    v7 = params.get("v7") if isinstance(params, dict) else None
+    if not isinstance(v7, dict):
+        return None
+
+    def version(key: str) -> int:
+        value = v7.get(key)
+        return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+    return version("ensemble_rule_version"), version("simulated_n_genes_version")
+
+
+def _prefer_current_v7_simulation(candidates: list[StoreEntry]) -> list[StoreEntry]:
+    """Among version-7 bundles, keep those built with the current simulation.
+
+    ``ENSEMBLE_RULE_VERSION`` (the M3c amendment of 2026-09-29) and
+    ``SIM_GENES_VERSION`` (M13 chunk C16: the simulated genes per cell)
+    enter only the version-7 ``build_hash`` (``v7_simulation_payload``). A
+    rebuilt bundle keeps the builder version, resolvability version 7 and
+    the test-set revision, so it sits next to its older bundle on the same
+    panel; a standalone run takes the current ensemble rule and, among
+    those, the current simulated genes (as ``_prefer_current_test_set``
+    does for M8 D1). A bundle without a version-7 payload is never dropped
+    here, and two current ones stay ambiguous. When no version-7 bundle
+    stores the current simulated genes, the ones kept are used and a
+    warning says their gene-complexity check is ``not_evaluable`` until the
+    panel is rebuilt.
+    """
+    from merxen.annotation.resolvability import (
+        ENSEMBLE_RULE_VERSION,
+        SIM_GENES_VERSION,
+    )
+
+    def current(versions: tuple[int, int]) -> tuple[bool, bool]:
+        rule, genes = versions
+        return rule == ENSEMBLE_RULE_VERSION, genes == SIM_GENES_VERSION
+
+    versions = [_v7_simulation_versions(entry) for entry in candidates]
+    v7 = [
+        (entry, item)
+        for entry, item in zip(candidates, versions, strict=True)
+        if item is not None
+    ]
+    if not v7:
+        return candidates
+    best = max(current(item) for _, item in v7)
+    if not best[1]:
+        logger.warning(
+            "no version-7 bundle of %s on panel %s stores the current simulated "
+            "genes per cell (simulated n_genes version %d, M13 C16); %s: its "
+            "gene-complexity check is not_evaluable until the panel is rebuilt "
+            "with merxen annotation-reference-prep",
+            candidates[0].reference_id,
+            str(candidates[0].panel_hash or "-")[:16],
+            SIM_GENES_VERSION,
+            ", ".join(
+                f"{entry.path.name[:16]} has version {item[1]}"
+                for entry, item in v7
+                if current(item) == best
+            ),
+        )
+    return [
+        entry
+        for entry, item in zip(candidates, versions, strict=True)
+        if item is None or current(item) == best
+    ]
+
+
 def _prefer_current_resolvability(candidates: list[StoreEntry]) -> list[StoreEntry]:
     """Among several bundles, keep those with the current self-map tables.
 
     A ``RESOLVABILITY_VERSION`` bump gives rebuilt bundles a new
     ``build_hash`` next to the old ones on the same panel; a standalone run
     then takes the current tables, and among those the current human
-    held-out test set (``_prefer_current_test_set``, M8 D1). Bundles without
+    held-out test set (``_prefer_current_test_set``, M8 D1), and among those
+    the current version-7 simulation (``_prefer_current_v7_simulation``:
+    ensemble rule and simulated genes per cell, M13 C16). Bundles without
     a self-map, or several current ones, stay ambiguous. When no candidate
     has the current tables (a panel not rebuilt since the bump), the older
     ones are kept and a warning names their versions: their self-map tables
@@ -639,7 +728,7 @@ def _prefer_current_resolvability(candidates: list[StoreEntry]) -> list[StoreEnt
         if version in RESOLVABILITY_VERSIONS
     ]
     if current:
-        return _prefer_current_test_set(current)
+        return _prefer_current_v7_simulation(_prefer_current_test_set(current))
     stale = [
         (entry, version)
         for entry, version in zip(candidates, versions, strict=True)

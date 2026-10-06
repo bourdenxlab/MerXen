@@ -7811,7 +7811,10 @@ class SimulatedGenes:
 
         Each test cell counts once per grid depth (as E1 counts it), so the
         gene-complexity check's cell minimum counts test cells, not member
-        rows.
+        rows. This reading of "per (cell, depth)" (D19 (a)) is the
+        implementation's (M13 chunk C16), not recorded in the M13 decisions:
+        counting member rows instead could only judge more bins (so warn at
+        least as often), and the family's gate-P PR names it for the user.
 
         Args:
             members: Members to average (default: the emission members).
@@ -7872,8 +7875,10 @@ def load_simulated_genes(
 
     Raises:
         ResolvabilityError: For an unknown resolvability or artefact version,
-            or a damaged artefact (file missing, columns missing, the genes
-            not those the summary's sha256 names).
+            or a damaged artefact (``_check_sim_genes_table``: file or
+            columns missing, the genes not those the summary's sha256
+            names, the rows not those the summary counts, a depth off the
+            grid, a repeated simulated cell, a gene count out of range).
     """
     root = Path(directory)
     if summary is None:
@@ -7922,7 +7927,7 @@ def load_simulated_genes(
     table = table.loc[:, list(SIM_GENES_COLUMNS)]
     for column in (MEMBER_COLUMN, MEMBER_ROLE_COLUMN, "cell_id"):
         table[column] = table[column].astype(str)
-    return SimulatedGenes(
+    simulated = SimulatedGenes(
         table=table,
         query_genes=genes,
         depth_grid=tuple(int(depth) for depth in summary["depth_grid"]),
@@ -7931,6 +7936,74 @@ def load_simulated_genes(
         ),
         version=int(stored),
     )
+    _check_sim_genes_table(simulated, record, source=str(root))
+    return simulated
+
+
+def _check_sim_genes_table(
+    simulated: SimulatedGenes, record: Mapping[str, Any], *, source: str
+) -> None:
+    """Check a loaded simulated-genes table against its summary record.
+
+    The record's row counts (``n_rows``, ``n_rows_per_member``) must be the
+    table's, so a truncated or partly rewritten file is refused; every depth
+    must be a grid value (a simulated cell's bin is its grid depth), every
+    (member, cell, depth) must appear once (one draw per member), every
+    emission member must hold rows when the table holds any, and ``n_genes``
+    must lie in ``[0, n_query_genes]`` with non-negative totals.
+
+    Args:
+        simulated: The loaded artefact.
+        record: The summary's ``simulated_n_genes`` record.
+        source: The bundle directory (for messages).
+
+    Raises:
+        ResolvabilityError: If any of these fails.
+    """
+    table = simulated.table
+    if record.get("n_rows") != len(table):
+        raise ResolvabilityError(
+            f"{source}: {SIM_GENES_FILE} holds {len(table)} rows but the summary "
+            f"records {record.get('n_rows')!r}"
+        )
+    per_member = {
+        str(name): int(count)
+        for name, count in table[MEMBER_COLUMN].value_counts(sort=False).items()
+    }
+    recorded = record.get("n_rows_per_member")
+    if not isinstance(recorded, Mapping) or per_member != {
+        str(name): count for name, count in recorded.items()
+    }:
+        raise ResolvabilityError(
+            f"{source}: {SIM_GENES_FILE} holds the rows per member {per_member} "
+            f"but the summary records {recorded!r}"
+        )
+    absent = [name for name in simulated.emission_members if name not in per_member]
+    if len(table) and absent:
+        raise ResolvabilityError(
+            f"{source}: {SIM_GENES_FILE} holds no rows of the emission members {absent}"
+        )
+    depths = table["depth"].to_numpy(np.int64)
+    off_grid = sorted(set(depths.tolist()) - set(simulated.depth_grid))
+    if off_grid:
+        raise ResolvabilityError(
+            f"{source}: {SIM_GENES_FILE} holds depths {off_grid[:5]} off the grid "
+            f"{list(simulated.depth_grid)}"
+        )
+    if table.duplicated([MEMBER_COLUMN, "cell_id", "depth"]).any():
+        raise ResolvabilityError(
+            f"{source}: {SIM_GENES_FILE} holds a (member, cell, depth) more than once"
+        )
+    n_genes = table["n_genes"].to_numpy(np.int64)
+    if len(table) and (
+        n_genes.min() < 0
+        or n_genes.max() > len(simulated.query_genes)
+        or table["total_counts"].to_numpy(np.int64).min() < 0
+    ):
+        raise ResolvabilityError(
+            f"{source}: {SIM_GENES_FILE} holds gene counts outside [0, "
+            f"{len(simulated.query_genes)}] or a negative total"
+        )
 
 
 # --------------------------------------------------------------------------
