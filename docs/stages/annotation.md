@@ -1834,8 +1834,20 @@ allow: a cell confident only with QC, a confident cell with another name, a
 status changed to anything but `not_resolvable`, `not_attempted_gate` or
 `parent_unresolved`, another trust state, another resolvability or threshold
 record (emission, thresholds, floors), and a gate level that rose or fell
-without a named `real_qc_` reason. The QC-free run's outputs on the
-version-6 scenarios equal the golden digests of the code before the QC
+without a named `real_qc_` reason. Each lowered status needs its cause:
+`not_attempted_gate` only at a level the applied gate blocks (every level
+under `failed`, only the leaf levels under `broad_only`), and
+`parent_unresolved` only where the cell's parent lost its confidence. The
+provenance's gate record mixes level and warning reasons, so a lower gate
+level is attributed with the resolve summary's gate records
+(`resolution.gate`, whose `level_reasons` must hold a `real_qc_` reason) or
+with the applied run's QC effects (`real_qc.effects`). With the effects,
+`not_resolvable` is allowed only at a withheld level, the confident sets must
+be those `apply_qc_to_statuses` gives, and the gate level must be the worse
+of the QC-free level and the QC cap (lower only when a withheld lineage or
+broad level lowered the coverage the gate reads). M13 chunk C18 passes all of
+these inputs for its NR1 evidence. The QC-free run's outputs on the version-6
+scenarios equal the golden digests of the code before the QC
 (`test_resolve_v7.py`, the new summary keys aside).
 
 ### Human rules v1 (`consensus.resolve_human`, §5.2)

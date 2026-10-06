@@ -1686,6 +1686,40 @@ class QcEffects:
             "downgrades": list(self.downgrades),
         }
 
+    @classmethod
+    def from_json(cls, record: Mapping[str, Any]) -> QcEffects:
+        """Return the effects of a ``to_json`` record (``real_qc.effects``).
+
+        Args:
+            record: The record (the resolve summary's ``real_qc.effects``).
+
+        Returns:
+            The effects.
+
+        Raises:
+            ValueError: For a gate cap outside ``QC_GATE_CAPS`` or a trust
+                cap outside the trust states.
+        """
+        gate_cap = record.get("gate_cap")
+        trust_cap = record.get("trust_cap")
+        if gate_cap is not None and gate_cap not in QC_GATE_CAPS:
+            raise ValueError(f"unknown QC gate cap {gate_cap!r}")
+        if trust_cap is not None and trust_cap not in PANEL_TRUST_STATES:
+            raise ValueError(f"unknown QC trust cap {trust_cap!r}")
+
+        def strings(key: str) -> tuple[str, ...]:
+            return tuple(str(item) for item in record.get(key) or ())
+
+        return cls(
+            gate_cap=None if gate_cap is None else str(gate_cap),
+            trust_cap=None if trust_cap is None else str(trust_cap),
+            withheld_levels=strings("withheld_levels"),
+            withhold_pair_stats=bool(record.get("withhold_pair_stats", False)),
+            level_reasons=strings("level_reasons"),
+            warning_reasons=strings("warning_reasons"),
+            downgrades=strings("downgrades"),
+        )
+
 
 def _scope(outcome: QcOutcome) -> str:
     parts = [str(part) for part in (outcome.level, outcome.cls) if part]
@@ -1943,6 +1977,14 @@ NR1_UNCHANGED_RECORDS: Final[tuple[str, ...]] = ("resolvability", "thresholds")
 NR1_LABEL_FIELDS: Final[frozenset[str]] = frozenset({"extrapolated_share"})
 # The prefix of a QC reason in the dataset gate (``qc_effects``).
 QC_REASON_PREFIX: Final = "real_qc_"
+# The levels whose confident calls the dataset gate's level reads: the human
+# gate's confident broad coverage (broad, and lineage, the level broad hangs
+# off); the mouse gate's level reads no label (§7.6). Withholding one lowers
+# that coverage, and RESOLVE re-evaluates the gate (NR1).
+GATE_COVERAGE_LEVELS: Final[dict[str, frozenset[str]]] = {
+    "human": frozenset({"lineage", "broad"}),
+    "mouse": frozenset(),
+}
 
 
 def _record(value: Any) -> Mapping[str, Any]:
@@ -1971,6 +2013,152 @@ def _plan_part(record: Any, key: str) -> Any:
     }
 
 
+def _gate_record(value: Any) -> Mapping[str, Any]:
+    """Return a gate verdict record (``GateVerdict``, its JSON or provenance)."""
+    if (
+        value is not None
+        and not isinstance(value, Mapping)
+        and hasattr(value, "to_json")
+    ):
+        return cast("Mapping[str, Any]", value.to_json())
+    return _record(value)
+
+
+def _level_columns(
+    labels: pd.DataFrame, level: str
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Return a level's statuses and names (``None``: the table lacks them)."""
+    from merxen.annotation.schema import Columns
+
+    status_column = Columns.level(level, "status")
+    name_column = Columns.level(level, "name")
+    if status_column not in labels or name_column not in labels:
+        return None
+    return (
+        labels[status_column].astype(str).to_numpy(),
+        labels[name_column].astype(object).to_numpy(),
+    )
+
+
+def _blocks(gate_level: str | None, level: str, species: str) -> bool:
+    """Whether a gate of ``gate_level`` (``None``: unknown) blocks ``level``."""
+    if gate_level == "failed":
+        return True
+    if gate_level is None or gate_level == "broad_only":
+        return level in LEAF_GATED_LEVELS[species]
+    return False
+
+
+def _rereads_gate(effects: QcEffects | None, species: str) -> bool:
+    """Whether the effects withhold a level the dataset gate's level reads."""
+    return bool(
+        effects is not None
+        and qc_withheld_levels(effects, species) & GATE_COVERAGE_LEVELS[species]
+    )
+
+
+def _gate_problems(
+    free_gate: Mapping[str, Any],
+    applied_gate: Mapping[str, Any],
+    *,
+    effects: QcEffects | None,
+    species: str,
+) -> list[str]:
+    """Return NR1's gate violations (``downgrade_only_violations``)."""
+    free_level = free_gate.get("level")
+    applied_level = applied_gate.get("level")
+    if free_level not in GATE_LEVELS or applied_level not in GATE_LEVELS:
+        if free_level != applied_level:
+            return [f"gate level {free_level!r} became {applied_level!r}"]
+        return []
+    free_level, applied_level = str(free_level), str(applied_level)
+    if gate_severity(applied_level) < gate_severity(free_level):
+        return [f"the gate level rose from {free_level} to {applied_level}"]
+    problems: list[str] = []
+    rereads = _rereads_gate(effects, species)
+    if applied_level != free_level:
+        level_reasons = applied_gate.get("level_reasons")
+        if level_reasons is not None:
+            named = any(
+                str(reason).startswith(QC_REASON_PREFIX) for reason in level_reasons
+            )
+            if not named and not rereads:
+                problems.append(
+                    f"the gate level fell from {free_level} to {applied_level} "
+                    "without a named real_qc check among its level reasons"
+                )
+        elif effects is None:
+            problems.append(
+                f"the gate level fell from {free_level} to {applied_level}, and the "
+                "gate record does not separate its level reasons (pass the resolve "
+                "summary's gate records or the QC effects)"
+            )
+    if effects is not None:
+        cap = effects.gate_cap
+        expected = free_level
+        if cap is not None and gate_severity(cap) > gate_severity(expected):
+            expected = cap
+        lower = gate_severity(applied_level) > gate_severity(expected)
+        if applied_level != expected and not (lower and rereads):
+            problems.append(
+                f"the gate level is {applied_level}; the QC-free level {free_level} "
+                f"with the QC gate cap {cap} gives {expected}"
+            )
+    return problems
+
+
+def _confident_set_problems(
+    free_labels: pd.DataFrame,
+    free_status: Mapping[str, np.ndarray],
+    free_names: Mapping[str, np.ndarray],
+    applied_status: Mapping[str, np.ndarray],
+    effects: QcEffects,
+    *,
+    species: str,
+    free_level: str | None,
+    applied_level: str | None,
+) -> list[str]:
+    """Compare the applied confident sets with ``apply_qc_to_statuses``'."""
+    from merxen.annotation.schema import Columns
+
+    if Columns.IN_TABLE not in free_labels:
+        raise ValueError(
+            "comparing with the QC effects needs the label tables' in_table column"
+        )
+    gate_level = free_level or "full"
+    cap = effects.gate_cap
+    expected_level = gate_level
+    if cap is not None and gate_severity(cap) > gate_severity(expected_level):
+        expected_level = cap
+    if (
+        applied_level is not None
+        and gate_severity(applied_level) > gate_severity(expected_level)
+        and _rereads_gate(effects, species)
+    ):
+        # RESOLVE re-evaluated the gate on the lowered broad coverage.
+        effects = dataclasses.replace(effects, gate_cap=applied_level)
+    expected, _ = apply_qc_to_statuses(
+        free_status,
+        free_names,
+        effects,
+        in_table=free_labels[Columns.IN_TABLE].to_numpy(dtype=bool),
+        species=species,
+        gate_level=gate_level,
+    )
+    confident = CellStatus.CONFIDENT.value
+    problems = []
+    for level, values in expected.items():
+        differ = int(
+            ((values == confident) != (applied_status[level] == confident)).sum()
+        )
+        if differ:
+            problems.append(
+                f"{level}: {differ} cell(s) differ from the confident set the QC "
+                "effects give"
+            )
+    return problems
+
+
 def downgrade_only_violations(
     free_labels: pd.DataFrame,
     applied_labels: pd.DataFrame,
@@ -1978,6 +2166,9 @@ def downgrade_only_violations(
     species: str,
     free_provenance: Any = None,
     applied_provenance: Any = None,
+    free_gate: Any = None,
+    applied_gate: Any = None,
+    qc: Iterable[QcOutcome] | QcEffects | Mapping[str, Any] | None = None,
 ) -> list[str]:
     """List how a QC-applied RESOLVE differs from a QC-free re-run (NR1).
 
@@ -1985,16 +2176,37 @@ def downgrade_only_violations(
     the same MAP output (``real_qc.enabled`` false), the trust state, the
     emission plan, the floor plan and every emitted label are identical,
     except labels set to ``not_resolvable`` and the gate level lowered by a
-    named check. Per level of the label tables: no cell is confident only
-    with QC; a cell confident in both keeps its name; a cell whose status
-    changed takes one of ``QC_LOWERED_STATUSES``; and a name changes only
-    where the new status carries none (``not_attempted_gate``). With the
-    provenance records (``AnnotationProvenance`` or its JSON): the panel
-    trust state and the resolvability and threshold records (emission,
+    named check.
+
+    Per level of the label tables: no cell is confident only with QC; a cell
+    confident in both keeps its name; a cell whose status changed takes one
+    of ``QC_LOWERED_STATUSES``; and a name changes only where the new status
+    carries none. Each lowered status needs its cause:
+
+    * ``not_attempted_gate`` only at a level the applied gate blocks (every
+      level under ``failed``, ``LEAF_GATED_LEVELS`` under ``broad_only``; only
+      the leaf levels when the gate level is unknown);
+    * ``parent_unresolved`` only where the cell's parent (the first of
+      ``LEVEL_PARENTS`` that applies at the cell) lost its confidence;
+    * with the QC effects, ``not_resolvable`` only at a withheld level
+      (``qc_withheld_levels``), and the confident sets are those
+      ``apply_qc_to_statuses`` gives from the QC-free run.
+
+    The gate never rises, and a lower level needs a ``real_qc_`` reason among
+    the applied gate's level reasons (the resolve summary's
+    ``resolution.gate``, ``GateVerdict.to_json``). The provenance's gate
+    record mixes level and warning reasons, so with it alone a lower level
+    cannot be attributed and is reported. With the QC effects the applied
+    level is the worse of the QC-free level and the QC gate cap, or lower
+    when a withheld level lowered the confident broad coverage the human
+    gate reads (``GATE_COVERAGE_LEVELS``: RESOLVE re-evaluates the gate,
+    whose level reason is then the coverage's).
+
+    With the provenance records (``AnnotationProvenance`` or its JSON): the
+    panel trust state and the resolvability and threshold records (emission,
     thresholds, floors) are equal, except a resolvability record's
     ``extrapolated_share`` (``NR1_LABEL_FIELDS``: it describes the confident
-    labels and falls with them), and a lower gate level names a ``real_qc_``
-    reason.
+    labels and falls with them).
 
     Args:
         free_labels: The QC-free run's label table.
@@ -2002,34 +2214,74 @@ def downgrade_only_violations(
         species: ``"human"`` or ``"mouse"``.
         free_provenance: The QC-free run's provenance, if compared.
         applied_provenance: The QC-applied run's provenance.
+        free_gate: The QC-free run's gate verdict with its level reasons
+            (``GateVerdict`` or its JSON: the resolve summary's
+            ``resolution.gate``); default: the provenance's gate record.
+        applied_gate: The QC-applied run's gate verdict (as ``free_gate``).
+        qc: The applied run's QC outcomes or effects (``QcEffects`` or its
+            JSON: the resolve summary's ``real_qc.effects``); the label
+            tables then need their ``in_table`` column.
 
     Returns:
         One message per violation (empty: NR1 holds).
 
     Raises:
-        ValueError: For an unknown species.
+        ValueError: For an unknown species, or QC effects without the
+            ``in_table`` column.
     """
     from merxen.annotation.schema import NAMELESS_STATUSES, Columns
 
     if species not in LEVEL_ORDER:
         raise ValueError(f"unknown species {species!r}")
-    problems: list[str] = []
+    effects: QcEffects | None
+    if qc is None:
+        effects = None
+    elif isinstance(qc, Mapping):
+        effects = QcEffects.from_json(qc)
+    else:
+        effects = _as_effects(qc)
     free_ids = free_labels[Columns.CELL_ID].astype(str).tolist()
     applied_ids = applied_labels[Columns.CELL_ID].astype(str).tolist()
     if free_ids != applied_ids:
         return ["the label tables do not hold the same cells in the same order"]
+    free_record, applied_record = _record(free_provenance), _record(applied_provenance)
+    gate_key = "mouse_gate" if species == "mouse" else "gate"
+    free_gate_record = (
+        _gate_record(free_gate)
+        if free_gate is not None
+        else (free_record.get(gate_key) or {})
+    )
+    applied_gate_record = (
+        _gate_record(applied_gate)
+        if applied_gate is not None
+        else (applied_record.get(gate_key) or {})
+    )
+    free_level = free_gate_record.get("level")
+    applied_level = applied_gate_record.get("level")
+    free_gate_level = str(free_level) if free_level in GATE_LEVELS else None
+    gate_level = str(applied_level) if applied_level in GATE_LEVELS else None
+    gate_text = (
+        "a gate of unknown level" if gate_level is None else f"a {gate_level} gate"
+    )
+    withheld = None if effects is None else qc_withheld_levels(effects, species)
     nameless = {str(item) for item in NAMELESS_STATUSES}
     confident = CellStatus.CONFIDENT.value
+    problems: list[str] = []
+    free_status: dict[str, np.ndarray] = {}
+    free_names: dict[str, np.ndarray] = {}
+    applied_status: dict[str, np.ndarray] = {}
+    lost: dict[str, np.ndarray] = {}
     for level in LEVEL_ORDER[species]:
-        status_column = Columns.level(level, "status")
-        name_column = Columns.level(level, "name")
-        if status_column not in free_labels or status_column not in applied_labels:
+        free_columns = _level_columns(free_labels, level)
+        applied_columns = _level_columns(applied_labels, level)
+        if free_columns is None or applied_columns is None:
             continue
-        before = free_labels[status_column].astype(str).to_numpy()
-        after = applied_labels[status_column].astype(str).to_numpy()
-        names_before = free_labels[name_column].astype(object).to_numpy()
-        names_after = applied_labels[name_column].astype(object).to_numpy()
+        before, names_before = free_columns
+        after, names_after = applied_columns
+        free_status[level], free_names[level] = before, names_before
+        applied_status[level] = after
         was, now = before == confident, after == confident
+        lost[level] = was & ~now
         raised = int((now & ~was).sum())
         if raised:
             problems.append(f"{level}: {raised} cell(s) confident only with QC")
@@ -2040,6 +2292,37 @@ def downgrade_only_violations(
                 f"{level}: statuses changed to {bad} (QC may only give "
                 f"{sorted(QC_LOWERED_STATUSES)})"
             )
+        gated = int((changed & (after == CellStatus.NOT_ATTEMPTED_GATE.value)).sum())
+        if gated and not _blocks(gate_level, level, species):
+            problems.append(
+                f"{level}: {gated} cell(s) not_attempted_gate at a level {gate_text} "
+                "does not block"
+            )
+        orphaned = changed & (after == CellStatus.PARENT_UNRESOLVED.value)
+        if orphaned.any():
+            parent_lost = np.zeros(len(after), dtype=bool)
+            chosen = np.zeros(len(after), dtype=bool)
+            for parent in LEVEL_PARENTS[species].get(level, ()):
+                if parent not in free_status:
+                    continue
+                use = ~chosen & (free_status[parent] != CellStatus.NOT_APPLICABLE.value)
+                parent_lost |= use & lost[parent]
+                chosen |= use
+            unexplained = int((orphaned & ~parent_lost).sum())
+            if unexplained:
+                problems.append(
+                    f"{level}: {unexplained} cell(s) parent_unresolved while their "
+                    "parent kept its confidence"
+                )
+        if withheld is not None and level not in withheld:
+            unwithheld = int(
+                (changed & (after == CellStatus.NOT_RESOLVABLE.value)).sum()
+            )
+            if unwithheld:
+                problems.append(
+                    f"{level}: {unwithheld} cell(s) not_resolvable at a level the QC "
+                    "effects do not withhold"
+                )
         same_name = np.array(
             [
                 (pd.isna(a) and pd.isna(b)) or (not pd.isna(a) and a == b)
@@ -2050,9 +2333,26 @@ def downgrade_only_violations(
         renamed = ~same_name & ~np.isin(after, list(nameless))
         if renamed.any():
             problems.append(f"{level}: {int(renamed.sum())} cell(s) changed their name")
+    if effects is not None:
+        problems.extend(
+            _confident_set_problems(
+                free_labels,
+                free_status,
+                free_names,
+                applied_status,
+                effects,
+                species=species,
+                free_level=free_gate_level,
+                applied_level=gate_level,
+            )
+        )
+    problems.extend(
+        _gate_problems(
+            free_gate_record, applied_gate_record, effects=effects, species=species
+        )
+    )
     if free_provenance is None and applied_provenance is None:
         return problems
-    free_record, applied_record = _record(free_provenance), _record(applied_provenance)
     free_trust = (free_record.get("panel") or {}).get("panel_trust")
     applied_trust = (applied_record.get("panel") or {}).get("panel_trust")
     if free_trust != applied_trust:
@@ -2062,24 +2362,6 @@ def downgrade_only_violations(
             applied_record.get(key), key
         ):
             problems.append(f"the {key} record differs")
-    gate_key = "mouse_gate" if species == "mouse" else "gate"
-    free_gate = free_record.get(gate_key) or {}
-    applied_gate = applied_record.get(gate_key) or {}
-    free_level = free_gate.get("level")
-    applied_level = applied_gate.get("level")
-    if free_level in GATE_LEVELS and applied_level in GATE_LEVELS:
-        if gate_severity(str(applied_level)) < gate_severity(str(free_level)):
-            problems.append(f"the gate level rose from {free_level} to {applied_level}")
-        elif applied_level != free_level and not any(
-            str(reason).startswith(QC_REASON_PREFIX)
-            for reason in applied_gate.get("reasons") or ()
-        ):
-            problems.append(
-                f"the gate level fell from {free_level} to {applied_level} "
-                "without a named real_qc check"
-            )
-    elif free_level != applied_level:
-        problems.append(f"gate level {free_level!r} became {applied_level!r}")
     return problems
 
 

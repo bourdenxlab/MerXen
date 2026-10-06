@@ -419,9 +419,38 @@ def test_downgrade_only_violations_compare_trust_emission_and_gate() -> None:
         )
 
     named = {"level": "broad_only", "reasons": ["real_qc_marker_consistency: 0.5"]}
-    assert check(provenance(gate=named)) == []
-    assert check(provenance(gate={"level": "broad_only", "reasons": ["x"]})) == [
-        "the gate level fell from full to broad_only without a named real_qc check"
+    # The provenance gate mixes level and warning reasons: a fall is only
+    # attributed with the summary's gate records (``level_reasons``) or the
+    # QC effects.
+    assert check(provenance(gate=named)) == [
+        "the gate level fell from full to broad_only, and the gate record does "
+        "not separate its level reasons (pass the resolve summary's gate "
+        "records or the QC effects)"
+    ]
+    assert (
+        qc.downgrade_only_violations(
+            labels,
+            labels,
+            species="human",
+            free_provenance=provenance(),
+            applied_provenance=provenance(gate=named),
+            free_gate={"level": "full", "level_reasons": []},
+            applied_gate={
+                "level": "broad_only",
+                "level_reasons": ["real_qc_marker_consistency: 0.5"],
+            },
+        )
+        == []
+    )
+    assert qc.downgrade_only_violations(
+        labels,
+        labels,
+        species="human",
+        free_gate={"level": "full", "level_reasons": []},
+        applied_gate={"level": "broad_only", "level_reasons": ["x"]},
+    ) == [
+        "the gate level fell from full to broad_only without a named real_qc "
+        "check among its level reasons"
     ]
     assert check(provenance(panel={"panel_trust": "broad_only"})) == [
         "trust state 'provisional' became 'broad_only'"
@@ -438,6 +467,262 @@ def test_downgrade_only_violations_compare_trust_emission_and_gate() -> None:
         free_provenance=free_failed,
         applied_provenance=provenance(),
     ) == ["the gate level rose from failed to full"]
+
+
+def _gates(free: str, applied: str, *level_reasons: str) -> dict[str, Any]:
+    """Summary gate records (``GateVerdict.to_json``) of the two runs."""
+    return {
+        "free_gate": {"level": free, "level_reasons": [], "warning_reasons": []},
+        "applied_gate": {
+            "level": applied,
+            "level_reasons": list(level_reasons),
+            "warning_reasons": [],
+        },
+    }
+
+
+CAP_REASON = "real_qc_marker_consistency: consistency 0.5"
+
+
+def test_nr1_allows_the_gate_status_only_at_the_levels_the_gate_blocks() -> None:
+    """Planted (a): a broad_only gate blocks only the leaf levels.
+
+    ``not_attempted_gate`` at broad needs a failed gate; at a leaf level it
+    needs a gate below full; without a gate record only the leaf levels may
+    take it.
+    """
+    free = _labels(
+        {"broad": [CONFIDENT] * 2, "supercluster": [CONFIDENT] * 2},
+        {"broad": ["A", "B"], "supercluster": ["a", "b"]},
+    )
+    every_level = _labels(
+        {
+            "broad": ["not_attempted_gate"] * 2,
+            "supercluster": ["not_attempted_gate"] * 2,
+        },
+        {"broad": [None, None], "supercluster": [None, None]},
+    )
+    leaf_only = _labels(
+        {"broad": [CONFIDENT] * 2, "supercluster": ["not_attempted_gate"] * 2},
+        {"broad": ["A", "B"], "supercluster": [None, None]},
+    )
+
+    def check(applied: pd.DataFrame, **gates: Any) -> list[str]:
+        return qc.downgrade_only_violations(free, applied, species="human", **gates)
+
+    assert check(every_level, **_gates("full", "broad_only", CAP_REASON)) == [
+        "broad: 2 cell(s) not_attempted_gate at a level a broad_only gate does "
+        "not block"
+    ]
+    assert check(every_level, **_gates("full", "failed", CAP_REASON)) == []
+    assert check(leaf_only, **_gates("full", "broad_only", CAP_REASON)) == []
+    assert check(leaf_only, **_gates("full", "full")) == [
+        "supercluster: 2 cell(s) not_attempted_gate at a level a full gate does "
+        "not block"
+    ]
+    # Without a gate record: only the leaf levels.
+    assert check(leaf_only) == []
+    assert check(every_level) == [
+        "broad: 2 cell(s) not_attempted_gate at a level a gate of unknown level "
+        "does not block"
+    ]
+
+
+def test_nr1_allows_parent_unresolved_only_under_a_lost_parent() -> None:
+    """Planted (b): parent_unresolved needs the parent to lose confidence.
+
+    The parent is the first of ``LEVEL_PARENTS`` that applies at the cell (a
+    neuron's supercluster hangs off its NT, a non-neuron's off broad).
+    """
+    free = _labels(
+        {
+            "broad": [CONFIDENT] * 3,
+            "nt": [CONFIDENT, CONFIDENT, "not_applicable"],
+            "supercluster": [CONFIDENT] * 3,
+        },
+        {
+            "broad": ["A", "A", "B"],
+            "nt": ["n", "n", None],
+            "supercluster": ["a", "a", "b"],
+        },
+    )
+
+    def applied(nt: list[str], supercluster: list[str]) -> pd.DataFrame:
+        return _labels(
+            {"broad": [CONFIDENT] * 3, "nt": nt, "supercluster": supercluster},
+            {
+                "broad": ["A", "A", "B"],
+                "nt": ["n", "n", None],
+                "supercluster": ["a", "a", "b"],
+            },
+        )
+
+    def check(table: pd.DataFrame) -> list[str]:
+        return qc.downgrade_only_violations(free, table, species="human")
+
+    nt = [CONFIDENT, CONFIDENT, "not_applicable"]
+    # The broad parent stays confident: no reason for parent_unresolved.
+    assert check(applied(nt, [CONFIDENT, CONFIDENT, "parent_unresolved"])) == [
+        "supercluster: 1 cell(s) parent_unresolved while their parent kept its "
+        "confidence"
+    ]
+    assert check(applied(nt, ["parent_unresolved", CONFIDENT, CONFIDENT])) == [
+        "supercluster: 1 cell(s) parent_unresolved while their parent kept its "
+        "confidence"
+    ]
+    # The NT parent lost its confidence at the first cell only.
+    lost = ["not_resolvable", CONFIDENT, "not_applicable"]
+    assert check(applied(lost, ["parent_unresolved", CONFIDENT, CONFIDENT])) == []
+    assert check(
+        applied(lost, ["parent_unresolved", "parent_unresolved", CONFIDENT])
+    ) == [
+        "supercluster: 1 cell(s) parent_unresolved while their parent kept its "
+        "confidence"
+    ]
+
+
+def test_nr1_needs_a_named_check_among_the_gate_level_reasons() -> None:
+    """Planted (c): a QC warning does not name a gate level fall.
+
+    The gate falls for a non-QC reason (A below its limit) while the only
+    ``real_qc_`` reason is a warning: a violation with the summary's gate
+    records, with the provenance's mixed reasons and with the QC effects.
+    """
+    labels = _labels({"broad": [CONFIDENT]}, {"broad": ["A"]})
+    a_low = "frac_ge30: A = 0.200 < 0.3"
+    warning = "real_qc_flag_rates: most strata uninformative"
+    summary_gates = {
+        "free_gate": {"level": "full", "level_reasons": [], "warning_reasons": []},
+        "applied_gate": {
+            "level": "broad_only",
+            "level_reasons": [a_low],
+            "warning_reasons": [warning],
+        },
+    }
+    assert qc.downgrade_only_violations(
+        labels, labels, species="human", **summary_gates
+    ) == [
+        "the gate level fell from full to broad_only without a named real_qc "
+        "check among its level reasons"
+    ]
+    mixed = {"level": "broad_only", "reasons": [a_low, warning]}
+    assert qc.downgrade_only_violations(
+        labels,
+        labels,
+        species="human",
+        free_provenance={"gate": {"level": "full", "reasons": []}},
+        applied_provenance={"gate": mixed},
+    ) == [
+        "the gate level fell from full to broad_only, and the gate record does "
+        "not separate its level reasons (pass the resolve summary's gate "
+        "records or the QC effects)"
+    ]
+    effects = qc.qc_effects([outcome("warning", check="flag_rates")])
+    assert qc.downgrade_only_violations(
+        _with_table(labels),
+        _with_table(labels),
+        species="human",
+        free_provenance={"gate": {"level": "full", "reasons": []}},
+        applied_provenance={"gate": mixed},
+        qc=effects,
+    ) == [
+        "the gate level is broad_only; the QC-free level full with the QC gate "
+        "cap None gives full"
+    ]
+
+
+def _with_table(table: pd.DataFrame) -> pd.DataFrame:
+    return table.assign(**{Columns.IN_TABLE: True})
+
+
+def test_nr1_with_the_qc_effects_compares_the_confident_sets() -> None:
+    """With the QC effects the confident sets are ``apply_qc_to_statuses``'.
+
+    ``not_resolvable`` is allowed only at a withheld level (and the levels
+    whose emission reads its table), an effect left unapplied is a
+    violation, and the summary's ``effects`` record is accepted.
+    """
+    free = _with_table(
+        _labels(
+            {"broad": [CONFIDENT] * 3, "supercluster": [CONFIDENT] * 3},
+            {"broad": ["A", "A", "B"], "supercluster": ["a", "a", "b"]},
+        )
+    )
+    withheld = qc.qc_effects(
+        [outcome("withhold_level", level="supercluster", check="prefilter_spotcheck")]
+    )
+    applied = free.copy()
+    applied[Columns.level("supercluster", "status")] = ["not_resolvable"] * 3
+    assert (
+        qc.downgrade_only_violations(free, applied, species="human", qc=withheld) == []
+    )
+    assert (
+        qc.downgrade_only_violations(
+            free, applied, species="human", qc=withheld.to_json()
+        )
+        == []
+    )
+    # A withheld broad level that the effects do not name.
+    wrong = applied.copy()
+    wrong[Columns.level("broad", "status")] = ["not_resolvable", CONFIDENT, CONFIDENT]
+    wrong[Columns.level("supercluster", "status")] = [
+        "parent_unresolved",
+        "not_resolvable",
+        "not_resolvable",
+    ]
+    assert qc.downgrade_only_violations(free, wrong, species="human") == []
+    assert qc.downgrade_only_violations(free, wrong, species="human", qc=withheld) == [
+        "broad: 1 cell(s) not_resolvable at a level the QC effects do not withhold",
+        "broad: 1 cell(s) differ from the confident set the QC effects give",
+    ]
+    # The withheld level left confident.
+    assert qc.downgrade_only_violations(free, free, species="human", qc=withheld) == [
+        "supercluster: 3 cell(s) differ from the confident set the QC effects give"
+    ]
+    with pytest.raises(ValueError, match="in_table"):
+        qc.downgrade_only_violations(
+            free.drop(columns=Columns.IN_TABLE), applied, species="human", qc=withheld
+        )
+
+
+def test_nr1_with_the_qc_effects_accepts_a_gate_failed_by_a_withheld_broad() -> None:
+    """A withheld broad level lowers the coverage the gate reads (re-evaluated)."""
+    free = _with_table(
+        _labels(
+            {"broad": [CONFIDENT] * 2, "supercluster": [CONFIDENT] * 2},
+            {"broad": ["A", "B"], "supercluster": ["a", "b"]},
+        )
+    )
+    applied = _with_table(
+        _labels(
+            {
+                "broad": ["not_attempted_gate"] * 2,
+                "supercluster": ["not_attempted_gate"] * 2,
+            },
+            {"broad": [None, None], "supercluster": [None, None]},
+        )
+    )
+    effects = qc.qc_effects(
+        [outcome("withhold_level", level="broad", check="prefilter_spotcheck")]
+    )
+    coverage = "broad_coverage_table: 0.000 < 0.25"
+    assert (
+        qc.downgrade_only_violations(
+            free,
+            applied,
+            species="human",
+            qc=effects,
+            **_gates("full", "failed", coverage),
+        )
+        == []
+    )
+    # Without the effects the fall names no real_qc check.
+    assert qc.downgrade_only_violations(
+        free, applied, species="human", **_gates("full", "failed", coverage)
+    ) == [
+        "the gate level fell from full to failed without a named real_qc check "
+        "among its level reasons"
+    ]
 
 
 # --------------------------------------------------------------------------
@@ -493,17 +778,25 @@ def _tables(result: pl.ResolveResult, sample_id: str) -> tuple[pd.DataFrame, Any
 def _assert_nr1(
     free: pl.ResolveResult, applied: pl.ResolveResult
 ) -> dict[str, list[str]]:
-    """Return NR1's violations per sample (QC-free vs QC-applied run)."""
+    """Return NR1's violations per sample (QC-free vs QC-applied run).
+
+    As C18 compares them: the label tables, the provenance, the resolve
+    summary's gate records and the applied run's QC effects.
+    """
     problems = {}
     for sample_id in free.samples:
         free_labels, free_prov = _tables(free, sample_id)
         applied_labels, applied_prov = _tables(applied, sample_id)
+        applied_summary = applied.samples[sample_id].summary
         problems[sample_id] = qc.downgrade_only_violations(
             free_labels,
             applied_labels,
             species="human",
             free_provenance=free_prov,
             applied_provenance=applied_prov,
+            free_gate=free.samples[sample_id].summary["resolution"]["gate"],
+            applied_gate=applied_summary["resolution"]["gate"],
+            qc=applied_summary["real_qc"].get("effects"),
         )
     return problems
 
