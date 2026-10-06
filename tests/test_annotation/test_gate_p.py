@@ -10,8 +10,10 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import pytest
+from scipy import sparse
 
 from merxen.annotation import gate_p as gp
+from merxen.annotation import mapmycells_engine as mmc
 from merxen.annotation import resolvability as res
 from merxen.annotation.config import (
     AnnotationResolvabilityConfig,
@@ -2387,6 +2389,122 @@ def _level_row(tables: gp.Np7Tables, level: str = "supercluster") -> pd.Series:
 
 XY_AT_10 = {("supercluster", "X", 10): 0.70, ("supercluster", "Y", 10): 0.70}
 
+# Supercluster rows shaped as a frontal WHB bundle's vocab snapshot
+# (``whb_frontal_supc_clus``): both sinks, Miscellaneous and Splatter, are
+# Mixed/Unknown at broad and Neurons at lineage; Splatter and Amygdala
+# excitatory are not plausible in frontal cortex.
+_WHB_SHAPE: tuple[tuple[str, str, str, str, str, str, str], ...] = (
+    # node, key_name, broad_class, nt, lineage, sink, region plausible
+    ("nE", "Upper-layer IT", "Neurons", "Excitatory", "Neurons", "False", "True"),
+    ("nI", "MGE interneuron", "Neurons", "Inhibitory", "Neurons", "False", "True"),
+    ("MISC", "Miscellaneous", "Mixed/Unknown", "Excitatory", "Neurons", "True", "True"),
+    ("SPLAT", "Splatter", "Mixed/Unknown", "Other", "Neurons", "True", "False"),
+    (
+        "AMY",
+        "Amygdala excitatory",
+        "Neurons",
+        "Excitatory",
+        "Neurons",
+        "False",
+        "False",
+    ),
+)
+_WHB_LEVELS: tuple[str, ...] = ("lineage", "broad", "nt", "supercluster")
+
+
+def _whb_shape_vocab() -> pd.DataFrame:
+    """A vocab snapshot with the columns and flags of the frontal WHB bundles."""
+    return pd.DataFrame.from_records(
+        [
+            {
+                "level": res.WHB_SUPC,
+                "node": node,
+                "node_name": name,
+                "key_label": node,
+                "key_name": name,
+                "broad_class": broad,
+                "nt": nt,
+                "lineage": lineage,
+                "sink": sink,
+                "region_plausible_frontal_cortex": plausible,
+                "never_drop": "False",
+            }
+            for node, name, broad, nt, lineage, sink, plausible in _WHB_SHAPE
+        ]
+    )
+
+
+def _whb_shape_cells(
+    groups: Sequence[tuple[int, str, str]], *, depth: int = 10, bp: float = 0.95
+) -> pd.DataFrame:
+    """A cells table read by the self-map's WHB level specs.
+
+    Per group ``(n, truth node, assigned supercluster)``; cell ids are
+    ``w<index>`` over the groups. The tidy table holds the supercluster
+    assignment at ``bp`` without runner-ups, and ``level_cells`` reads it
+    with ``whb_level_specs`` (lineage, broad, NT, supercluster) as the
+    self-map does.
+    """
+    truth = [node for n, node, _ in groups for _ in range(n)]
+    assigned = [node for n, _, node in groups for _ in range(n)]
+    n_cells = len(truth)
+    cell_ids = [f"w{index}" for index in range(n_cells)]
+    sim_ids = [res.simulated_id(cell, depth) for cell in cell_ids]
+    tidy = pd.DataFrame(
+        {
+            "cell_id": sim_ids,
+            "level": res.WHB_SUPC,
+            "level_name": "supercluster",
+            "assignment": assigned,
+            "bp": bp,
+            "avg_correlation": 0.5,
+        }
+    )
+    for rank in range(1, mmc.N_RUNNERS_UP + 1):
+        tidy[mmc.runner_up_column(rank, "assignment")] = None
+        tidy[mmc.runner_up_column(rank, "probability")] = math.nan
+    empty = sparse.csr_matrix((n_cells, 1), dtype=np.float64)
+    test = res.HeldOutCells(
+        counts=empty,
+        genes=["G"],
+        obs=pd.DataFrame(
+            {
+                f"{res.TRUTH_PREFIX}{res.WHB_SUPC}": truth,
+                res.TRUTH_LEAF_COLUMN: truth,
+                res.SPILL_GROUP_COLUMN: "Neurons",
+            },
+            index=cell_ids,
+        ),
+    )
+    query = res.SimulatedQuery(
+        recipe=res.simulation_recipes(AnnotationResolvabilityConfig())[0],
+        counts=empty,
+        genes=["G"],
+        obs=pd.DataFrame(
+            {
+                "cell_id": cell_ids,
+                "depth": depth,
+                "partner_id": "",
+                "host_counts": float(depth),
+                "spill_counts": 0.0,
+                "total_counts": float(depth),
+            },
+            index=sim_ids,
+        ),
+        n_by_depth={depth: n_cells},
+    )
+    specs = res.whb_level_specs(
+        _whb_shape_vocab(), AnnotationThresholds(), include_fine=False
+    )
+    return res.level_cells(tidy, query, test, specs)
+
+
+def _whb_shape_decisions(classes: Sequence[str]) -> pd.DataFrame:
+    """Frozen decisions emitting every WHB level of ``classes`` at 10 (0.70)."""
+    return _np7_decisions(
+        {(level, cls, 10): 0.70 for level in _WHB_LEVELS for cls in classes}
+    )
+
 
 def test_np7_a_wrong_node_above_5pct_of_the_truth_class_fails() -> None:
     """§14 NP7 / D12: the share of truth class c's confident calls on one node.
@@ -2561,25 +2679,36 @@ def test_np7_coarse_levels_take_the_node_of_the_supercluster_row() -> None:
     """A lineage, broad or NT call names a group, not a node (``group_level_calls``).
 
     Its node is the supercluster call of the same simulated cell (one WHB
-    assignment), and each level's share uses that level's bp and
-    denominator. At broad, a call to a region-implausible node is "correct"
-    in the cells table (both are Neurons), but it is a call to an excluded
-    node, so NP7 counts it as a wrong call on that node.
+    assignment), and each level's share uses that level's denominator. An
+    excluded call's bp is the larger of its own and its supercluster row's:
+    a sink names no group at broad, so its broad call has no bp of its own,
+    and the supercluster bp decides. At broad, a call to a
+    region-implausible node is "correct" in the cells table (both are
+    Neurons), but it is a call to an excluded node, so NP7 counts it as a
+    wrong call on that node.
     """
     groups_supc: list[tuple[int, str, str | None, str | None, float]] = [
         (300, "Exc", "nE", "Exc", 0.95),
         (5, "Exc", HIPPO, None, 0.90),
         (3, "Exc", SINK, None, 0.90),
+        (2, "Exc", SINK, None, 0.60),
+        (4, "Exc", SINK, None, 0.50),
     ]
     groups_broad: list[tuple[int, str, str | None, str | None, float]] = [
         (300, "Exc", "Neurons", "Exc", 0.95),
         (5, "Exc", "Neurons", None, 0.95),
         (3, "Exc", None, None, math.nan),
+        (2, "Exc", None, None, math.nan),
+        (4, "Exc", None, None, math.nan),
     ]
     groups_lineage: list[tuple[int, str, str | None, str | None, float]] = [
         (300, "Exc", "Neurons", "Exc", 0.95),
         (5, "Exc", "Neurons", None, 0.95),
         (3, "Exc", "Neurons", None, 0.95),
+        # Its own (group) bp reaches the threshold, its supercluster's not.
+        (2, "Exc", "Neurons", None, 0.80),
+        # Neither does.
+        (4, "Exc", "Neurons", None, 0.65),
     ]
     cells = pd.concat(
         [
@@ -2597,17 +2726,18 @@ def test_np7_coarse_levels_take_the_node_of_the_supercluster_row() -> None:
     assert tables.excluded["level"].tolist() == ["broad", "lineage", "supercluster"]
     for level, n_confident_excluded, nodes in (
         ("supercluster", 8, "HIPPO:5;SINK:3"),
-        # The sink's broad call has no group, so no bp: never confident.
-        ("broad", 5, "HIPPO:5"),
-        ("lineage", 8, "HIPPO:5;SINK:3"),
+        # The sink's broad call has no group, so no bp: its supercluster's
+        # bp (0.90) decides.
+        ("broad", 8, "HIPPO:5;SINK:3"),
+        ("lineage", 10, "HIPPO:5;SINK:5"),
     ):
         row = _level_row(tables, level)
         assert row["n_confident"] == 300
-        assert row["n_excluded_calls"] == 8
+        assert row["n_excluded_calls"] == 14
         assert row["n_excluded_confident"] == n_confident_excluded
         assert row["nodes"] == nodes
     broad = tables.wrong_node[tables.wrong_node["level"] == "broad"].iloc[0]
-    assert broad["n_truth_confident"] == 305 and broad["n_truth_excluded"] == 5
+    assert broad["n_truth_confident"] == 308 and broad["n_truth_excluded"] == 8
     assert broad["wrong_node"] == HIPPO and broad["n_wrong_node"] == 5
     assert bool(broad["passed"])
     assert set(gp.np7_class_verdicts(tables.excluded, tables.wrong_node, tested)) == {
@@ -2623,6 +2753,137 @@ def test_np7_coarse_levels_take_the_node_of_the_supercluster_row() -> None:
         _np7_tables(
             cells[cells["level"] != "supercluster"].reset_index(drop=True), decisions
         )
+
+
+def test_np7_whb_sinks_count_at_broad_and_nt_through_their_supercluster_bp() -> None:
+    """§12 M13's planted sink at every WHB level, on the real snapshot's shape.
+
+    The cells come from the self-map's level specs. Both WHB sinks are
+    Mixed/Unknown at broad, so at broad and NT their calls name no group
+    and have no bp (the review's scenario: broad X used to pass with a sink
+    share of 0 while supercluster X failed). NP7 judges them on their
+    supercluster bp, so 24 X cells on Splatter (6% of X) fail X at every
+    level, broad (the promotion level) and NT included; the level shares
+    stay below 1%.
+    """
+    cells = _whb_shape_cells(
+        [
+            (376, "nE", "nE"),
+            (24, "nE", "SPLAT"),
+            (3, "nE", "AMY"),
+            (2995, "nI", "nI"),
+            (5, "nI", "MISC"),
+        ]
+    )
+    sinks = cells["cell_id"].isin([f"w{index}" for index in range(376, 400)])
+    for level in ("broad", "nt"):
+        at = (cells["level"] == level) & sinks
+        assert cells.loc[at, "call"].isna().all()
+        assert cells.loc[at, "bp"].isna().all()
+        assert cells.loc[at, "parent"].isna().all()
+    lineage = (cells["level"] == "lineage") & sinks
+    assert (cells.loc[lineage, "call"] == "Neurons").all()
+    assert cells.loc[lineage, "correct"].all()
+    tested, tables = _np7_tables(
+        cells, _whb_shape_decisions(["Exc", "Inh"]), vocab=_whb_shape_vocab()
+    )
+    for level in _WHB_LEVELS:
+        row = _level_row(tables, level)
+        assert row["n_confident"] == 376 + 2995
+        assert row["n_excluded_calls"] == 32
+        assert row["n_excluded_confident"] == 32
+        assert row["n_sink"] == 29 and row["n_region_implausible"] == 3
+        assert row["nodes"] == "SPLAT:24;MISC:5;AMY:3"
+        assert bool(row["passed"])
+    wrong = tables.wrong_node.set_index(["level", "class"])
+    for level in _WHB_LEVELS:
+        exc = wrong.loc[(level, "Exc")]
+        assert exc["n_truth_confident"] == 403 and exc["n_truth_excluded"] == 27
+        assert exc["wrong_node"] == "SPLAT" and exc["n_wrong_node"] == 24
+        assert exc["wrong_node_share"] == pytest.approx(24 / 403)
+        assert not bool(exc["passed"])
+        assert wrong.loc[(level, "Inh"), "n_truth_excluded"] == 5
+    assert gp.np7_class_verdicts(tables.excluded, tables.wrong_node, tested) == {
+        **{(level, "Exc"): False for level in _WHB_LEVELS},
+        **{(level, "Inh"): True for level in _WHB_LEVELS},
+    }
+
+
+def test_np7_reads_the_assigned_node_at_the_rows_own_depth() -> None:
+    """A cell's assigned node is its supercluster call at the same depth.
+
+    Under thinning one test cell can land on a sink at 10 counts and on its
+    own node at 30. Only its 10-count rows are calls to the sink, at every
+    level: the bin at 10 fails, the bin at 30 is clean.
+    """
+
+    def both(
+        level: str, call_10: str, call_30: str, truth: str | None
+    ) -> list[pd.DataFrame]:
+        return [
+            _np7_rows(
+                [(300, "X", call_10, "X", 0.95), (20, "X", call_30, None, 0.95)],
+                level=level,
+                truth=truth,
+            ),
+            _np7_rows(
+                [(320, "X", call_10, "X", 0.95)],
+                level=level,
+                depth=30,
+                truth=truth,
+            ),
+        ]
+
+    cells = pd.concat(
+        [
+            *both("supercluster", "nX", SINK, None),
+            *both("lineage", "Neurons", "Neurons", "Neurons"),
+        ],
+        ignore_index=True,
+    )
+    decisions = _np7_decisions(
+        {
+            (level, "X", depth): 0.70
+            for level in ("supercluster", "lineage")
+            for depth in (10, 30)
+        }
+    )
+    tested, tables = _np7_tables(cells, decisions)
+    for level in ("lineage", "supercluster"):
+        row = _level_row(tables, level)
+        assert row["n_confident"] == 300 + 320
+        assert row["n_excluded_calls"] == 20 and row["n_excluded_confident"] == 20
+        assert row["nodes"] == "SINK:20"
+        sets = tables.wrong_node[tables.wrong_node["level"] == level].set_index("set")
+        assert sets.loc["10", "n_wrong_node"] == 20
+        assert sets.loc["10", "wrong_node"] == SINK
+        assert not bool(sets.loc["10", "passed"])
+        assert sets.loc["30", "n_truth_confident"] == 320
+        assert sets.loc["30", "n_wrong_node"] == 0 and bool(sets.loc["30", "passed"])
+    assert gp.np7_class_verdicts(tables.excluded, tables.wrong_node, tested) == {
+        ("lineage", "X"): False,
+        ("supercluster", "X"): False,
+    }
+
+
+def test_np7_a_tested_set_without_confident_calls_of_its_truth_class_fails() -> None:
+    """An empty truth view fails (a ``nan`` share never passes).
+
+    Every call of class X is a Z cell: X's tested set exists (300 confident
+    calls of the called class), but no X cell is in its scope.
+    """
+    decisions = _np7_decisions(XY_AT_10)
+    cells = _np7_rows([(300, "Z", "nX", "X", 0.95), (300, "Y", "nY", "Y", 0.95)])
+    tested, tables = _np7_tables(cells, decisions)
+    x = _by_class(tables).loc["X"]
+    assert x["n_truth_confident"] == 0 and x["n_wrong_node"] == 0
+    assert math.isnan(x["wrong_node_share"])
+    assert x["n_called_confident"] == 300 and x["called_wrong_node"] == "nX"
+    assert not bool(x["passed"])
+    assert gp.np7_class_verdicts(tables.excluded, tables.wrong_node, tested) == {
+        ("supercluster", "X"): False,
+        ("supercluster", "Y"): True,
+    }
 
 
 def test_np7_an_excluded_call_is_confident_at_the_lowest_threshold_of_its_bin() -> None:
@@ -2666,36 +2927,49 @@ def test_np7_an_excluded_call_is_confident_at_the_lowest_threshold_of_its_bin() 
 
 
 def test_np7_a_node_outside_the_vocab_counts_as_implausible() -> None:
-    """Production reads a WHB node outside the vocab as implausible (RESOLVE)."""
-    vocab = _np7_vocab()
-    vocab = pd.concat(
-        [
-            vocab,
-            pd.DataFrame(
-                {
-                    "level": [res.WHB_SUPC],
-                    "node": ["nR"],
-                    "node_name": [""],
-                    "sink": [""],
-                    "region_plausible_frontal_cortex": [""],
-                }
-            ),
-        ],
-        ignore_index=True,
-    )
+    """Production reads a WHB node outside the vocab as implausible (RESOLVE).
+
+    The self-map's level specs give such a call no class at every level
+    (and no group, so no bp, at the coarse levels), so NP7 counts it at
+    every level through its supercluster bp.
+    """
     decisions = _np7_decisions(XY_AT_10)
     cells = _np7_rows(
         [
             (500, "X", "nX", "X", 0.95),
             (500, "Y", "nY", "Y", 0.95),
             (2, "X", "nQ", None, 0.95),
-            (3, "X", "nR", None, 0.95),
         ]
     )
-    _, tables = _np7_tables(cells, decisions, vocab=vocab)
+    _, tables = _np7_tables(cells, decisions)
     level = _level_row(tables)
-    assert level["n_not_in_vocab"] == 5
-    assert level["nodes"] == "nR:3;nQ:2"
+    assert level["n_not_in_vocab"] == 2
+    assert level["nodes"] == "nQ:2"
+    whb = _whb_shape_cells([(400, "nE", "nE"), (2, "nE", "nQ")])
+    outside = whb["cell_id"].isin(["w400", "w401"]).to_numpy()
+    assert whb.loc[outside, "parent"].isna().all()
+    assert whb.loc[outside & (whb["level"] == "broad").to_numpy(), "bp"].isna().all()
+    _, whb_tables = _np7_tables(
+        whb, _whb_shape_decisions(["Exc"]), vocab=_whb_shape_vocab()
+    )
+    assert whb_tables.excluded is not None
+    assert whb_tables.excluded["n_not_in_vocab"].tolist() == [2, 2, 2, 2]
+
+
+def test_np7_refuses_a_blank_vocab_flag() -> None:
+    """A blank sink or region flag is refused, not read as outside the vocab.
+
+    The self-map's level specs read a blank sink as false and a blank
+    region flag as true (``whb_level_specs``), so such a node's calls keep a
+    class there; NP7 cannot read the flag another way.
+    """
+    for column in ("sink", "region_plausible_frontal_cortex"):
+        for blank in ("", " ", math.nan, None):
+            vocab = _np7_vocab()
+            vocab[column] = vocab[column].astype(object)
+            vocab.loc[1, column] = blank
+            with pytest.raises(ValueError, match=f"{column!r} of node 'nY' is blank"):
+                gp.np7_excluded_nodes(vocab)
 
 
 def test_np7_pooled_set_reads_each_truth_cell_once_at_its_deepest_row() -> None:

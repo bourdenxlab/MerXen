@@ -111,16 +111,22 @@ the frozen thresholds, per emission member for version 7
   they lie outside every tested set and are counted beside the
   denominator; a node is read against the bundle's vocab snapshot with the
   frontal-cortex plausibility column (CHECK K4), and a coarse level's call
-  takes the assigned supercluster of its simulated cell;
+  takes the assigned supercluster of its simulated cell, whose bp also
+  counts (a WHB sink names no group at broad or NT, so its call there has
+  no bp of its own);
 - both species: at every tested set of a (level, class), no single wrong
   node receives more than 5% of the truth class's confident calls (D12,
   pre-registration §23.9 item 5); the called-class view is reported.
 
 A failure of the 1% part fails NP7 for every class of the level. The
 readings taken where §14 is not explicit (the confidence of a call that has
-no class, a sink in the single-wrong-node view, a node outside the vocab)
-are listed in ``np7_error_structure``'s docstring, for the user with the
-set a dry run.
+no class, sinks in the single-wrong-node view, the wrong node at coarse
+levels, a level over 1% failing every class, an empty truth view failing,
+a node outside the vocab) are listed in ``np7_error_structure``'s
+docstring. They are open: each needs the user's answer, recorded in the
+pre-registration, before the set a dry run is scored, because the gate-P
+definitions are fixed before the dry run (pre-registration §23.9) and a
+reading chosen after its numbers would be a post-hoc loosening.
 """
 
 from __future__ import annotations
@@ -2800,17 +2806,26 @@ def _labels(values: pd.Series) -> np.ndarray:
     return np.asarray(cleaned[codes], dtype=object)
 
 
-def _vocab_flag(value: object, column: str, node: str) -> bool | None:
-    """A boolean vocab cell (blank: ``None``, a node the vocab does not know).
+def _vocab_flag(value: object, column: str, node: str) -> bool:
+    """A boolean vocab cell (``True`` / ``False``, or their strings).
+
+    A blank cell is refused: the self-map's level specs read a blank sink as
+    false and a blank region flag as true (``whb_level_specs``), so a call
+    to such a node keeps a class in the cells tables, and NP7 has no reading
+    of the flag that agrees with both.
 
     Raises:
-        ValueError: For a value other than true, false or blank.
+        ValueError: For a blank value or one other than true or false.
     """
     if isinstance(value, bool | np.bool_):
         return bool(value)
     text = _label(value)
     if text is None:
-        return None
+        raise ValueError(
+            f"NP7: the vocab's {column!r} of node {node!r} is blank; the self-map's "
+            "level specs read a blank sink as false and a blank region flag as "
+            "true, so NP7 refuses it (fill the snapshot's flag)"
+        )
     lowered = text.strip().lower()
     if lowered in ("true", "false"):
         return lowered == "true"
@@ -2832,9 +2847,10 @@ def np7_excluded_nodes(
     so the self-map's level specs give such calls no class (``parent`` is
     null; ``whb_level_specs``). NP7 counts them from the bundle's vocab
     snapshot: per node, ``sink`` true gives ``sink``; else
-    ``region_plausible_<region>`` false gives ``region_implausible``; else a
-    blank flag (a node the vocab does not know) gives ``not_in_vocab``;
-    else ``None`` (the node is plausible).
+    ``region_plausible_<region>`` false gives ``region_implausible``; else
+    ``None`` (the node is plausible). A node the snapshot does not list is
+    ``not_in_vocab`` (``np7_error_structure``); a blank flag is refused,
+    because the level specs read it as not a sink and as plausible.
 
     Args:
         vocab: The mapped bundle's vocab snapshot (``MmcBundle.vocab``:
@@ -2848,8 +2864,8 @@ def np7_excluded_nodes(
 
     Raises:
         ValueError: If the vocab lacks a column, has no row at
-            ``vocab_level``, holds a node twice or a flag that is not true,
-            false or blank.
+            ``vocab_level``, holds a node twice or a flag that is blank or
+            not true or false.
     """
     column = f"{REGION_COLUMN_PREFIX}{region}"
     _require_columns(vocab, ("level", "node", "sink", column), "NP7: the vocab")
@@ -2872,22 +2888,21 @@ def np7_excluded_nodes(
         plausible = _vocab_flag(region_value, column, node)
         if sink:
             result[node] = NP7_REASON_SINK
-        elif plausible is False:
+        elif not plausible:
             result[node] = NP7_REASON_REGION
-        elif sink is None or plausible is None:
-            result[node] = NP7_REASON_NOT_IN_VOCAB
         else:
             result[node] = None
     return result
 
 
-def _assigned_nodes(frame: pd.DataFrame, node_level: str) -> np.ndarray:
-    """Each row's assigned node: the call of its cell's row at ``node_level``.
+def _assigned_positions(frame: pd.DataFrame, node_level: str) -> np.ndarray:
+    """Each row's position of the row at ``node_level`` of the same simulated cell.
 
     A lineage, broad or NT call names a group of nodes (``group_level_calls``)
     and the WHB cluster call a child of the assigned supercluster, so the
     assigned node of every row is the supercluster call of the same simulated
-    cell (one replicate: (cell, depth) is unique per level).
+    cell, (cell, depth): one replicate holds it once per level, and a test
+    cell thinned to two depths can be assigned two nodes.
 
     Raises:
         ValueError: If ``frame`` has no row at ``node_level``, or a row's cell
@@ -2917,7 +2932,7 @@ def _assigned_nodes(frame: pd.DataFrame, node_level: str) -> np.ndarray:
             f"NP7: {int(missing.sum())} rows have no {node_level!r} row of the same "
             "simulated cell (cell_id, depth), so their assigned node is unknown"
         )
-    return np.asarray(_labels(node_rows["call"])[positions], dtype=object)
+    return np.asarray(np.flatnonzero(is_node)[positions], dtype=np.int64)
 
 
 def _lowest_emitted_thresholds(
@@ -2955,21 +2970,27 @@ def _np7_rows(
 ) -> _Np7Rows:
     """NP7's arrays of one member's rows (``reasons`` None: no excluded nodes).
 
+    A call to an excluded node is confident when the larger of its own bp
+    and the bp of its cell's ``node_level`` row (same depth) reaches the
+    lowest frozen threshold emitted at its level and depth. A sink names no
+    group at broad or NT (WHB Miscellaneous and Splatter are Mixed/Unknown),
+    so its call there has no bp of its own (``group_level_calls``).
+
     Raises:
         ValueError: If a call to an excluded node has a class (``parent``),
-            or for the assigned nodes (``_assigned_nodes``).
+            or for the assigned nodes (``_assigned_positions``).
     """
     n_rows = len(frame)
     confident = res.frozen_confident_mask(frame, lookup)
-    node = _labels(frame["call"])
+    calls = _labels(frame["call"])
+    node = calls.copy()
     node[pd.isna(node)] = _NO_NODE
     reason: np.ndarray = np.full(n_rows, None, dtype=object)
     excluded: np.ndarray = np.zeros(n_rows, dtype=bool)
     excluded_confident = np.zeros(n_rows, dtype=bool)
     if reasons is not None:
-        codes, uniques = pd.factorize(
-            _assigned_nodes(frame, node_level), use_na_sentinel=True
-        )
+        assigned = _assigned_positions(frame, node_level)
+        codes, uniques = pd.factorize(calls[assigned], use_na_sentinel=True)
         why = np.array(
             [*(reasons.get(str(value), NP7_REASON_NOT_IN_VOCAB) for value in uniques)]
             + [None],
@@ -2998,7 +3019,8 @@ def _np7_rows(
             ],
             dtype=np.float64,
         )
-        bp = np.nan_to_num(frame["bp"].to_numpy(np.float64)[hit], nan=-1.0)
+        all_bp = frame["bp"].to_numpy(np.float64)
+        bp = np.nan_to_num(np.fmax(all_bp[hit], all_bp[assigned[hit]]), nan=-1.0)
         excluded_confident[hit] = np.isfinite(thresholds) & (
             bp >= thresholds - _TOLERANCE
         )
@@ -3134,11 +3156,11 @@ def np7_error_structure(
       bins (CHECK K9.1; ``frozen_confident_mask``). A call to such a node
       has no class (``parent`` null), so it lies outside every tested set
       and is counted here beside the denominator, never in it. Its node is
-      the assigned supercluster of the simulated cell (``node_level``; a
-      coarse level's call names a group), read against the vocab snapshot
-      (``np7_excluded_nodes``; ``Np7Settings.region``, frontal cortex for
-      gate P, CHECK K4). A failure here fails NP7 for every class of the
-      level.
+      the assigned supercluster of the simulated cell (``node_level``, at
+      the same depth; a coarse level's call names a group), read against
+      the vocab snapshot (``np7_excluded_nodes``; ``Np7Settings.region``,
+      frontal cortex for gate P, CHECK K4). A failure here fails NP7 for
+      every class of the level.
     - **Single wrong node** (both species): at every tested set of a
       (level, class), the share of truth class c's confident calls that
       land on one wrong node is at most 5% (``wrong_node``; D12, pre-
@@ -3152,25 +3174,47 @@ def np7_error_structure(
       called-class view (the share of the set's own confident calls that
       are wrong and name one node) is reported only.
 
-    Readings this implementation takes where §14 is not explicit (strict
-    where there is a choice; for the user with the set a dry run):
+    Readings this implementation takes where §14 is not explicit. They are
+    open: each needs the user's answer, recorded in the pre-registration
+    (§23.9 item 5), before the set a dry run (C9) is scored. The gate-P
+    definitions are fixed before the dry run (§23.9), and choosing a looser
+    reading after its numbers would be a post-hoc loosening. Until then:
 
-    - a call to an excluded node has no frozen threshold of its own, so it
-      counts as confident when its bp reaches the lowest frozen threshold
-      emitted at its level and depth (any class; the "emitted bins" of
-      K9.1), and never at a depth where nothing is emitted or with a NaN
-      bp. Alternatives: the threshold of the cell's truth class at that
-      bin (never stricter), or the level's raw default (.73 / .69).
-      ``n_excluded_calls`` reports every call to an excluded node, whatever
-      its bp (the H2 count of production);
-    - those confident calls also enter the single-wrong-node truth view, so
-      a sink that absorbs more than 5% of a class fails the class even when
-      the level stays below 1% (§12 M13: "a planted sink absorbing > 5% of
-      a class fails NP7");
-    - a node outside the vocab, or with a blank flag, counts as
-      implausible, as production reads it (``not_in_vocab``);
-    - a tested set whose truth class has no confident call in its scope
-      fails (a ``nan`` share never passes).
+    - **Confidence of a call that has no class.** A call to an excluded node
+      has no frozen threshold of its own. It counts as confident when the
+      larger of its bp and the bp of its cell's supercluster row (same
+      depth) reaches the lowest frozen threshold emitted at its level and
+      depth (any class; the "emitted bins" of K9.1). It never counts at a
+      depth where the level emits nothing, or when both bp are NaN. The
+      supercluster bp is needed at broad and NT, where both WHB sinks
+      (Miscellaneous and Splatter, Mixed/Unknown at broad) name no group,
+      so their calls there have no bp of their own. Stricter: count every
+      call to an excluded node whatever its bp, as H2 does
+      (``n_excluded_calls`` reports that count), though §14 says "confident
+      calls". Others: the threshold of the cell's truth class at that bin
+      (never stricter), or the level's raw default (.73 / .69).
+    - **Sinks in the single-wrong-node view.** Those confident calls also
+      enter the truth view, so a sink that absorbs more than 5% of a class
+      fails the class at every level even when the level stays below 1%
+      (§12 M13: "a planted sink absorbing > 5% of a class fails NP7").
+      Looser: leave them to the 1% part only.
+    - **The wrong node at coarse levels.** A wrong call's node is its call
+      at the level (a group at lineage, broad and NT), and an excluded
+      call's node is its assigned supercluster. Looser: group every wrong
+      call by its assigned supercluster, which splits a group's wrong calls
+      over its nodes.
+    - **A level over 1% fails every class of the level**
+      (``np7_class_verdicts``). Looser: fail only the classes whose truth
+      cells reach the excluded nodes.
+    - **An empty truth view fails.** A tested set whose truth class has no
+      confident call in its scope fails (a ``nan`` share never passes).
+      Looser: pass it vacuously.
+    - **A node outside the vocab** counts as implausible, as production
+      reads it (``not_in_vocab``); a blank flag is refused
+      (``np7_excluded_nodes``).
+
+    Where an alternative is named, the reading taken is the stricter one,
+    except for the first: H2's count whatever the bp is stricter.
 
     Args:
         replicates: Per (group, seed label), that replicate's cells table
