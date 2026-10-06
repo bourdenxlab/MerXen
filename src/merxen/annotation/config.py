@@ -901,13 +901,15 @@ class AnnotationRealQcConfig(_AnnotationModel):
             (b), 2026-10-06), so both stay ``pending`` until then. The rev3
             bool is accepted: ``true`` is both ``pending``, ``false`` both
             ``merged``.
-        registration_g1_effect: Human registration G1 (§8.8; M0a's guard
-            with §7.6's fail rule): ``warning`` (warn-only in M13, decision
-            D23 (b), approved 2026-10-06) or ``gate_failed`` (§8.8's effect:
-            the dataset gate fails, every cell ``not_attempted_gate`` and
+        registration_g1_effect: What human registration G1's fail rule
+            does (§8.8; M0a's guard with §7.6's rules, read from
+            ``mouse_gate``): ``warning`` (warn-only in M13, decision D23 (b),
+            approved 2026-10-06) or ``gate_failed`` (§8.8's effect: the
+            dataset gate fails, every cell ``not_attempted_gate`` and
             ``exclude_hard``), adopted once the set a regression shows no
             false G1 failure (a tightening, recorded before the new-panel
-            family's QC is read).
+            family's QC is read). §7.6's warning rule (density ratio below
+            ``g1_density_ratio_warn``) is a warning under either setting.
         coverage_warn_margin: M3c (user decision 4): warn per (level, called
             class) when the real confident share is below the class-depth
             prediction at the dataset's own per-class depth by more than

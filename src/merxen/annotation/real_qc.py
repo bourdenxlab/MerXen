@@ -70,7 +70,8 @@ or ``not_evaluable``):
   ``RealQcProvenance``;
 * the checks: ``marker_consistency_outcome`` (human referee, D18: warning
   < 0.75, gate cap ``broad_only`` < 0.70), ``registration_g1_outcome``
-  (human G1, warn-only in M13 by D23 (b)), ``paired_concordance`` (soft
+  (human G1 as §7.6 defines it: its fail rule warn-only in M13 by D23 (b),
+  its warning rule a warning), ``paired_concordance`` (soft
   broad JSD on the shared mask, D21; ``not_applicable`` for an unpaired
   section), ``flag_rate_summary`` (§8.8's literal reading, D22 / CHECK K6),
   ``prefilter_spotcheck`` and ``factor_remeasure_outcome``
@@ -1883,6 +1884,8 @@ PREFILTER_SPOTCHECK_CHECK: Final = "prefilter_spotcheck"
 COVERAGE_CHECK: Final = "coverage_vs_simulation"
 NONNEURONAL_TREND_CHECK: Final = "nonneuronal_depth_trend"
 FACTOR_REMEASURE_CHECK: Final = "factor_remeasure"
+# The dataset gate's own outcome (``gate_outcomes``).
+DATASET_GATE_CHECK: Final = "dataset_gate"
 # §8.8: "the checks this module adds (marker referee, paired concordance,
 # flag rates, gene complexity, prefilter spot check) only warn" on the seeded
 # real-data families until their species gate has merged.
@@ -1915,6 +1918,10 @@ MARKER_CONSISTENCY_TEXT: Final = (
 )
 REGISTRATION_G1_TEXT: Final = (
     "registration G1 fails ({failed}; M0a guard with the §7.6 fail rule)"
+)
+REGISTRATION_G1_WARN_TEXT: Final = (
+    "registration G1 warns (density ratio {ratio:.3f} < {limit}; M0a guard with "
+    "the §7.6 warning rule)"
 )
 PAIRED_TEXT: Final = (
     "the pair's soft broad JSD {value:.3f} on the {region} is above {limit:.2f} "
@@ -2031,33 +2038,43 @@ def registration_g1_outcome(
     signal: Any,
     *,
     density_ratio_fail: float,
+    density_ratio_warn: float,
     shift_fail_um: float,
     effect: str = "warning",
 ) -> QcOutcome:
-    """Return the human registration G1 outcome (§8.8; decision D23).
+    """Return the human registration G1 outcome (§8.8; NR9; decision D23).
 
-    G1 fails when M0a's density ratio is below ``density_ratio_fail`` (1.5)
-    or the shift against the platform's own segmentation exceeds
-    ``shift_fail_um`` (5 µm), §7.6's fail rule. ``effect`` ``warning`` keeps
-    it warn-only (D23 (b), M13); ``gate_failed`` applies §8.8's effect (the
+    G1 is §7.6's, as defined there (NR9): it fails when M0a's density ratio
+    is below ``density_ratio_fail`` (1.5) or the shift against the
+    platform's own segmentation exceeds ``shift_fail_um`` (5 µm), and
+    otherwise warns when the ratio is below ``density_ratio_warn`` (2.0).
+    ``effect`` decides only what the fail rule does: ``warning`` keeps it
+    warn-only (D23 (b), M13); ``gate_failed`` applies §8.8's effect (the
     dataset gate fails: every cell ``not_attempted_gate`` and
-    ``exclude_hard``). ``not_evaluable`` without a check or a ratio.
+    ``exclude_hard``). The warning rule is a warning under either effect.
+    ``not_evaluable`` without a check or a ratio.
 
     Args:
         signal: ``mouse_gate.RegistrationSignal`` (``density_ratio``,
             ``shift_um``, ``status``), or ``None``.
-        density_ratio_fail: The fail ratio.
-        shift_fail_um: The fail shift.
+        density_ratio_fail: The fail ratio
+            (``mouse_gate.g1_density_ratio_fail``).
+        density_ratio_warn: The warning ratio
+            (``mouse_gate.g1_density_ratio_warn``).
+        shift_fail_um: The fail shift (``mouse_gate.g1_shift_fail_um``).
         effect: ``warning`` or ``gate_failed``.
 
     Returns:
         The outcome.
 
     Raises:
-        ValueError: For an unknown effect.
+        ValueError: For an unknown effect, or a warning ratio below the fail
+            ratio.
     """
     if effect not in ("warning", "gate_failed"):
         raise ValueError(f"unknown registration G1 effect {effect!r}")
+    if density_ratio_warn < density_ratio_fail:
+        raise ValueError("the G1 warning ratio must be at least the fail ratio")
     fields: dict[str, Any] = (
         {"effect": "gate_cap", "gate_cap": "failed"}
         if effect == "gate_failed"
@@ -2076,19 +2093,33 @@ def registration_g1_outcome(
             f"registration check {status or 'without a density ratio'}",
             **fields,
         )
+    number = float(ratio)
     failed: list[str] = []
-    if float(ratio) < density_ratio_fail:
-        failed.append(f"density ratio {float(ratio):.3f} < {density_ratio_fail}")
+    if number < density_ratio_fail:
+        failed.append(f"density ratio {number:.3f} < {density_ratio_fail}")
     if shift is not None and float(shift) > shift_fail_um:
         failed.append(f"shift {float(shift):.1f} um > {shift_fail_um} um")
+    warned = not failed and number < density_ratio_warn
     details = {
-        "density_ratio": float(ratio),
+        "density_ratio": number,
         "shift_um": None if shift is None else float(shift),
         "density_ratio_fail": density_ratio_fail,
+        "density_ratio_warn": density_ratio_warn,
         "shift_fail_um": shift_fail_um,
         "effect_setting": effect,
+        "rule": "fail" if failed else ("warn" if warned else None),
         "source": getattr(signal, "source", None),
     }
+    if warned:
+        return QcOutcome(
+            REGISTRATION_G1_CHECK,
+            True,
+            "warning",
+            message=REGISTRATION_G1_WARN_TEXT.format(
+                ratio=number, limit=density_ratio_warn
+            ),
+            details=details,
+        )
     if not failed:
         return QcOutcome(REGISTRATION_G1_CHECK, False, details=details, **fields)
     message = REGISTRATION_G1_TEXT.format(failed="; ".join(failed))
@@ -2124,10 +2155,10 @@ def paired_concordance(
     ``pair.jsd`` rows of ``kind``): its point estimate on ``scored_region``
     (the shared-tissue mask, D21) above ``warn_above`` (0.20) withholds the
     pair's supercluster-level cross-platform statistics; the other region is
-    reported beside it. A pair without a shared-mask row is scored on the
-    whole section, recorded in ``details``. An unpaired section (a
-    single-platform dataset) is ``not_applicable``; a pair without a JSD row
-    ``not_evaluable``.
+    reported beside it. Only the registered statistic decides: a pair
+    without a ``scored_region`` row is ``not_evaluable`` (the other region's
+    value is reported in ``details``, never scored). An unpaired section (a
+    single-platform dataset) is ``not_applicable``.
 
     Args:
         jsd_rows: The pair's JSD rows (``kind``, ``region``, ``jsd``,
@@ -2153,27 +2184,36 @@ def paired_concordance(
         for row in (jsd_rows or ())
         if str(row.get("kind")) == kind and _jsd_number(row.get("jsd")) is not None
     }
-    region = scored_region if scored_region in rows else reported_region
-    if region not in rows:
+    other = rows.get(reported_region)
+    other_value = None if other is None else _jsd_number(other.get("jsd"))
+    if scored_region not in rows:
+        reported = (
+            ""
+            if other_value is None
+            else f"; {reported_region} {other_value:.3f} reported, not scored"
+        )
         return QcOutcome.not_evaluable(
             PAIRED_CONCORDANCE_CHECK,
-            f"no {kind} broad JSD of the pair (no intersection run on both platforms)",
+            f"no {kind} broad JSD of the pair on the {scored_region} (the "
+            f"registered statistic, D21){reported}",
+            details={
+                "kind": kind,
+                "scored_region": scored_region,
+                f"{reported_region}_jsd": other_value,
+                "warn_above": warn_above,
+            },
             **effect,
         )
-    other_region = reported_region if region == scored_region else scored_region
-    row = rows[region]
+    row = rows[scored_region]
     value = float(row["jsd"])
-    other = rows.get(other_region)
-    other_value = None if other is None else _jsd_number(other.get("jsd"))
     details = {
         "kind": kind,
         "statistic": "point",
-        "scored_region": region,
-        "fallback": region != scored_region,
+        "scored_region": scored_region,
         "jsd": value,
         "ci_low": _jsd_number(row.get("ci_low")),
         "ci_high": _jsd_number(row.get("ci_high")),
-        f"{other_region}_jsd": other_value,
+        f"{reported_region}_jsd": other_value,
         "warn_above": warn_above,
     }
     if not value > warn_above:
@@ -2183,9 +2223,9 @@ def paired_concordance(
         True,
         message=PAIRED_TEXT.format(
             value=value,
-            region=region,
+            region=scored_region,
             limit=warn_above,
-            other_region=other_region,
+            other_region=reported_region,
             other="not measured" if other_value is None else f"{other_value:.3f}",
         ),
         details=details,
@@ -2462,33 +2502,56 @@ def prefilter_spotcheck(
 
 
 def factor_remeasure_outcome(
-    result: FactorRemeasure | None, *, min_r: float
+    result: FactorRemeasure | None, *, min_r: float, has_r3_member: bool
 ) -> QcOutcome:
     """Return the factor re-measure outcome (§8.8) at the configured ``min_r``.
 
-    ``not_applicable`` for a family without a measured factor table (no R3
-    member) or a dataset other than the family's first; ``not_evaluable``
-    with too few informative genes; otherwise a warning when Pearson r <
-    ``min_r`` (recommending a PREP re-run with the in-house table; never
-    automatic, never trust evidence).
+    Applicability comes from the family, never from a missing input: a
+    family without an R3 member (no measured factor table) is
+    ``not_applicable``, and so is a dataset other than the family's first. A
+    family with an R3 member whose re-measure did not run, or ran without the
+    stored table, is ``not_evaluable``, as is one with too few informative
+    genes. Otherwise a warning when Pearson r < ``min_r`` (recommending a
+    PREP re-run with the in-house table; never automatic, never trust
+    evidence).
 
     Args:
-        result: ``factor_remeasure`` output, or ``None`` when it did not run
-            (no measured table).
+        result: ``factor_remeasure`` output, or ``None`` when it did not run.
         min_r: The warning threshold (``factor_remeasure_min_r``).
+        has_r3_member: Whether the family's bundle has an R3 member (a
+            measured factor table).
 
     Returns:
         The outcome.
+
+    Raises:
+        ValueError: For a re-measure against a stored table on a family
+            without an R3 member.
     """
-    if result is None:
+    if not has_r3_member:
+        if result is not None and result.applies:
+            raise ValueError(
+                "a factor re-measure against a stored table for a family without "
+                "an R3 member"
+            )
         return QcOutcome.not_applicable(
             FACTOR_REMEASURE_CHECK,
-            "no measured factor table for the family (no R3 member)",
+            "no R3 member: the family has no measured factor table",
+        )
+    if result is None:
+        return QcOutcome.not_evaluable(
+            FACTOR_REMEASURE_CHECK,
+            "the family has an R3 member but the factor re-measure did not run",
         )
     if not result.applies:
         reason = str(result.reason)
-        if reason in ("no_stored_table", "not_first_dataset_of_family"):
+        if reason == "not_first_dataset_of_family":
             return QcOutcome.not_applicable(FACTOR_REMEASURE_CHECK, reason)
+        if reason == "no_stored_table":
+            reason = (
+                "no_stored_table: the family has an R3 member but its stored "
+                "factor table was not given"
+            )
         return QcOutcome.not_evaluable(FACTOR_REMEASURE_CHECK, reason)
     pearson = result.pearson_r
     fired = pearson is None or not pearson >= min_r
@@ -2572,43 +2635,52 @@ class NonneuronalTrendSignal:
     nonneuronal_classes: Sequence[str]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class RealQcSignals:
     """The label-free inputs of one dataset's real-data QC (plan §8.8).
 
-    A check without its input is ``not_evaluable``, unless the dataset makes
-    it ``not_applicable`` (an unpaired section, a version-6 bundle for the
-    version-7 checks, no prefilter, no measured factor table).
+    Whether a check applies is decided only from the bundle and dataset
+    facts, which have no default and must be stated: ``resolvability_version``
+    (the version-7 checks), ``paired`` (paired concordance),
+    ``prefilter_applied`` (the prefilter spot check) and ``has_r3_member``
+    (the factor re-measure). A check that applies but whose input is missing
+    is ``not_evaluable``, never ``not_applicable``: an input left out is
+    never recorded as a check that does not apply (pre-registration §23.5
+    P4).
 
     Attributes:
         resolvability_version: The primary bundle's resolvability version
             (``None``: no resolvability tables).
         paired: Whether the dataset has a section of the other platform.
+        prefilter_applied: Whether the bundle's marker lookup is
+            prefiltered.
+        has_r3_member: Whether the family's bundle has an R3 member (a
+            measured factor table, version 7).
         pair_jsd: The pair's JSD rows (``<pair>_resolve_summary.json``
             ``pair.jsd``).
         marker_consistency: The human marker referee (C13).
         flag_strata: ``FlagSet.strata`` (or their JSON records).
         gene_complexity: Native and simulated genes per cell (C16).
-        prefilter_applied: Whether the bundle's marker lookup is
-            prefiltered.
         prefilter: The 5K prefilter spot check.
         emitted_levels: The levels the dataset emits (spot check).
-        factor: ``factor_remeasure`` output (families with a measured table).
+        factor: ``factor_remeasure`` output (families with an R3 member).
         coverage: Real and predicted per-class coverage (version 7).
         nonneuronal_trend: The non-neuronal depth-trend inputs (version 7).
         registration: Human G1 (``mouse_gate.RegistrationSignal``); mouse
             G1 is the mouse gate's.
         gate: The dataset gate verdict before QC (its own outcomes are
-            recorded; QC never re-applies them).
+            recorded; QC never re-applies them). Without it the gate's
+            outcomes are ``not_evaluable``.
     """
 
-    resolvability_version: int | None = None
-    paired: bool = False
+    resolvability_version: int | None
+    paired: bool
+    prefilter_applied: bool
+    has_r3_member: bool
     pair_jsd: Sequence[Mapping[str, Any]] = ()
     marker_consistency: MarkerConsistencySignal | None = None
     flag_strata: Sequence[Any] | None = None
     gene_complexity: GeneComplexitySignal | None = None
-    prefilter_applied: bool = False
     prefilter: PrefilterSpotcheckSignal | None = None
     emitted_levels: Sequence[str] = ()
     factor: FactorRemeasure | None = None
@@ -2824,9 +2896,11 @@ def real_data_qc(
     check, per-class coverage against simulation, the non-neuronal depth
     trend and the factor re-measure. The dataset gate's own outcomes (and
     mouse G1 / G2) come from ``signals.gate`` and are recorded, never
-    re-applied. On a seeded ``real_data`` family whose species gate is
-    pending (``seeded_families_warn_only_until_gate``, D20 (b)), the lowering
-    effects of ``SEEDED_WARN_ONLY_CHECKS`` are demoted to warnings.
+    re-applied (``not_evaluable`` without a verdict). On a seeded
+    ``real_data`` family whose species gate is pending
+    (``seeded_families_warn_only_until_gate``, D20 (b)), the lowering effects
+    of ``SEEDED_WARN_ONLY_CHECKS`` are demoted to warnings; every other check
+    applies as defined.
 
     Nothing here raises a trust state or a gate level, changes a margin, a
     threshold, a floor or an emission plan, or promotes a family: real data
@@ -2868,6 +2942,7 @@ def real_data_qc(
             registration_g1_outcome(
                 signals.registration,
                 density_ratio_fail=config.mouse_gate.g1_density_ratio_fail,
+                density_ratio_warn=config.mouse_gate.g1_density_ratio_warn,
                 shift_fail_um=config.mouse_gate.g1_shift_fail_um,
                 effect=settings.registration_g1_effect,
             )
@@ -2921,8 +2996,24 @@ def real_data_qc(
     if trend_table is not None:
         tables[NONNEURONAL_TREND_CHECK] = trend_table
     outcomes.append(
-        factor_remeasure_outcome(signals.factor, min_r=settings.factor_remeasure_min_r)
+        factor_remeasure_outcome(
+            signals.factor,
+            min_r=settings.factor_remeasure_min_r,
+            has_r3_member=signals.has_r3_member,
+        )
     )
+    if signals.gate is None:
+        # The dataset gate records its own outcomes (and mouse G1 / G2):
+        # without its verdict they are recorded, not left out (P4).
+        gate_checks = (
+            (DATASET_GATE_CHECK, REGISTRATION_G1_CHECK, MARKER_CONSISTENCY_CHECK)
+            if species == "mouse"
+            else (DATASET_GATE_CHECK,)
+        )
+        outcomes.extend(
+            QcOutcome.not_evaluable(check, "no dataset gate verdict given")
+            for check in gate_checks
+        )
     seeded = _is_seeded(trust)
     warn_only = seeded and settings.seeded_warn_only(species)
     if warn_only:

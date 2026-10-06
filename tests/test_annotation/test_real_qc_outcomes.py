@@ -9,9 +9,9 @@ unchanged.
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import itertools
 import json
-import pickle
 from collections.abc import Callable, Iterable
 from typing import Any
 
@@ -20,7 +20,12 @@ import pytest
 
 from merxen.annotation import consensus as cs
 from merxen.annotation import real_qc as qc
-from merxen.annotation.config import AnnotationGate, MouseGateConfig
+from merxen.annotation import thresholds as th
+from merxen.annotation.config import (
+    AnnotationGate,
+    AnnotationThresholds,
+    MouseGateConfig,
+)
 from merxen.annotation.mouse_gate import (
     MarkerReferee,
     MouseGateSignals,
@@ -314,18 +319,22 @@ def assert_only_shrinks(
         assert list(after[1][level][now]) == list(before[1][level][now]), level
 
 
-def test_qc_never_raises_emission_floors_or_confident_labels(
+def test_qc_never_raises_gate_trust_or_confident_labels(
     make_trust: MakeTrust,
 ) -> None:
-    """The §12 property test over every outcome combination (human RESOLVE)."""
+    """The §12 property test over every outcome combination (human RESOLVE).
+
+    Gate level and trust never rise, and confident sets only shrink with
+    their labels kept. The emission and floor plans are not inputs of the
+    combinators (``test_the_combinators_take_no_plan``); the comparison with
+    a QC-free re-run of RESOLVE itself (NR1) is chunk C15's.
+    """
     for trust_state in ("validated_real", "provisional"):
         trust = make_trust(trust_state)
         settings = human.Setup(trust=trust).settings()
         calls = human.calls_of([*human_cells(), *[human.FILLER] * 5])
         result = cs.resolve_human(calls, settings)
         before = statuses_of(result)
-        emission_before = pickle.dumps(settings.emission)
-        floors_before = pickle.dumps(settings.floors)
         # The statuses depend only on the gate cap and the withheld levels:
         # each distinct pair is applied once.
         applied: dict[tuple[str | None, frozenset[str]], Any] = {}
@@ -353,13 +362,42 @@ def test_qc_never_raises_emission_floors_or_confident_labels(
             state = qc.apply_qc_outcomes(trust.state, chosen)
             assert qc.trust_rank(state) <= qc.trust_rank(trust.state)
         assert len(applied) == 3 * 2**3
-        # The QC path never touched the plans RESOLVE applies: they pickle
-        # identically and a re-run resolves identically.
-        assert pickle.dumps(settings.emission) == emission_before
-        assert pickle.dumps(settings.floors) == floors_before
-        rerun = statuses_of(cs.resolve_human(calls, settings))
-        for level, values in before[0].items():
-            assert list(rerun[0][level]) == list(values)
+
+
+def test_the_combinators_take_no_plan() -> None:
+    """No QC combinator or check receives an emission plan, floor plan or settings.
+
+    So none can change what RESOLVE emits, its floors, thresholds or margins:
+    QC reaches RESOLVE only through its outcomes (C15 wires them).
+    """
+    forbidden = ("EmissionPlan", "FloorPlan", "ResolveSettings", "Thresholds")
+    functions = (
+        qc.qc_effects,
+        qc.apply_qc_to_gate,
+        qc.apply_qc_outcomes,
+        qc.apply_qc_to_statuses,
+        qc.qc_to_provenance,
+        qc.marker_consistency_outcome,
+        qc.registration_g1_outcome,
+        qc.paired_concordance,
+        qc.flag_rate_summary,
+        qc.prefilter_spotcheck,
+        qc.factor_remeasure_outcome,
+        qc.real_data_qc,
+    )
+    for function in functions:
+        for name, parameter in inspect.signature(function).parameters.items():
+            annotation = str(parameter.annotation)
+            assert not any(item in annotation for item in forbidden), (
+                function.__name__,
+                name,
+            )
+    fields = {
+        item.name: str(item.type) for item in dataclasses.fields(qc.RealQcSignals)
+    }
+    assert not any(
+        item in annotation for annotation in fields.values() for item in forbidden
+    )
 
 
 @pytest.mark.parametrize(
@@ -459,6 +497,154 @@ def test_a_gate_cap_gives_the_statuses_of_mouse_resolve(
         assert list(after[0][level]) == list(values), level
         assert list(after[1][level]) == list(expected[1][level]), level
     assert_only_shrinks(statuses_of(free), after)
+
+
+class _WithheldEmission:
+    """An emission plan that emits nothing at one level (a withheld level).
+
+    Everything else is the wrapped plan's, so RESOLVE run with it is RESOLVE
+    with that level made ``not_resolvable`` and nothing else changed.
+    """
+
+    def __init__(self, plan: Any, withheld: str) -> None:
+        self._plan = plan
+        self._withheld = withheld
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._plan, name)
+
+    def level(self, level: str, key: Any, counts: Any) -> Any:
+        emission = self._plan.level(level, key, counts)
+        if level != self._withheld:
+            return emission
+        return dataclasses.replace(
+            emission, emitted=np.zeros(len(emission.emitted), dtype=bool)
+        )
+
+
+def mouse_resolution(
+    cells: list[mouse.Cell], make_trust: MakeTrust, withheld: str | None = None
+) -> Any:
+    """Run ``resolve_mouse`` as ``test_consensus_mouse.resolve`` does."""
+    trust = make_trust("validated_real", species="mouse")
+    limits = AnnotationThresholds()
+    emission = th.EmissionPlan(species="mouse", thresholds=limits, trust=trust)
+    floors = th.FloorPlan.build(
+        species="mouse",
+        platform="MERSCOPE",
+        hard_floor=10,
+        trust=trust,
+        thresholds=limits,
+        emission=emission,
+    )
+    settings = cs.MouseResolveSettings(
+        platform="MERSCOPE",
+        min_counts=10,
+        emission=emission
+        if withheld is None
+        else _WithheldEmission(emission, withheld),
+        floors=floors,
+        thresholds=limits,
+        trust=trust,
+    )
+    return cs.resolve_mouse(mouse.calls_of(cells), settings, mouse_gate())
+
+
+MOUSE_CELLS: list[mouse.Cell] = [
+    mouse.Cell(),
+    mouse.ASTRO,
+    mouse.Cell(counts=5),
+    mouse.Cell(class_bp=0.89),
+    mouse.Cell(subclass_bp=0.5),
+    mouse.Cell(nt_bp=0.5),
+]
+
+
+@pytest.mark.parametrize("withheld", ["broad", "class", "nt", "subclass"])
+def test_a_withheld_level_gives_the_confident_sets_of_mouse_resolve(
+    make_trust: MakeTrust, withheld: str
+) -> None:
+    """Mouse parents: a neuron's subclass hangs off its NT, an astrocyte's off class."""
+    free = mouse_resolution(MOUSE_CELLS, make_trust)
+    held = mouse_resolution(MOUSE_CELLS, make_trust, withheld)
+    assert (free.levels[withheld].status == CONFIDENT).any()
+    after = qc.apply_qc_to_statuses(
+        *statuses_of(free),
+        [outcome("withhold_level", level=withheld)],
+        in_table=free.in_table,
+        species="mouse",
+    )
+    for level, result in held.levels.items():
+        assert list(after[0][level] == CONFIDENT) == list(result.status == CONFIDENT), (
+            withheld,
+            level,
+        )
+        # Where RESOLVE itself withholds or loses the parent, the status is the
+        # one RESOLVE writes.
+        lost = (free.levels[level].status == CONFIDENT) & (result.status != CONFIDENT)
+        assert list(after[0][level][lost]) == list(result.status[lost]), (
+            withheld,
+            level,
+        )
+    assert_only_shrinks(statuses_of(free), after)
+    if withheld == "nt":
+        # The neuron loses its subclass through NT; the astrocyte (NT not
+        # applicable) keeps its subclass through class.
+        assert after[0]["subclass"][0] == CellStatus.PARENT_UNRESOLVED.value
+        assert after[0]["subclass"][1] == CONFIDENT
+    if withheld == "class":
+        assert after[0]["subclass"][1] == CellStatus.PARENT_UNRESOLVED.value
+
+
+def test_a_withheld_lineage_unresolves_every_level_below_it() -> None:
+    """Human: broad hangs off lineage; a non-neuron's leaf off broad."""
+    pu = CellStatus.PARENT_UNRESOLVED.value
+    na = CellStatus.NOT_APPLICABLE.value
+    low = CellStatus.LOW_CONFIDENCE.value
+    levels = ("lineage", "broad", "nt", "supercluster", "seaad_subclass", "cluster")
+    # A neuron confident everywhere, a non-neuron (NT not applicable) and a
+    # cell whose lineage is not confident.
+    rows = {
+        "lineage": [CONFIDENT, CONFIDENT, low],
+        "broad": [CONFIDENT, CONFIDENT, pu],
+        "nt": [CONFIDENT, na, pu],
+        "supercluster": [CONFIDENT, CONFIDENT, pu],
+        "seaad_subclass": [CONFIDENT, CONFIDENT, pu],
+        "cluster": [CONFIDENT, CONFIDENT, pu],
+    }
+    statuses = {level: np.array(rows[level], dtype=object) for level in levels}
+    names = {
+        level: np.array([f"{level}_a", f"{level}_b", None], dtype=object)
+        for level in levels
+    }
+    after, after_names = qc.apply_qc_to_statuses(
+        statuses,
+        names,
+        [outcome("withhold_level", level="lineage")],
+        in_table=[True, True, True],
+        species="human",
+    )
+    assert list(after["lineage"]) == [
+        CellStatus.NOT_RESOLVABLE.value,
+        CellStatus.NOT_RESOLVABLE.value,
+        low,
+    ]
+    for level in levels[1:]:
+        expected = [pu, na if level == "nt" else pu, pu]
+        assert list(after[level]) == expected, level
+        assert list(after_names[level]) == list(names[level]), level
+    # Withholding NT leaves the non-neuron's supercluster (its parent is broad).
+    nt_only, _ = qc.apply_qc_to_statuses(
+        statuses,
+        names,
+        [outcome("withhold_level", level="nt")],
+        in_table=[True, True, True],
+        species="human",
+    )
+    assert list(nt_only["broad"]) == [CONFIDENT, CONFIDENT, pu]
+    assert list(nt_only["supercluster"]) == [pu, CONFIDENT, pu]
+    assert list(nt_only["cluster"]) == [pu, CONFIDENT, pu]
+    assert list(nt_only["seaad_subclass"]) == [CONFIDENT, CONFIDENT, pu]
 
 
 def test_apply_qc_to_statuses_rejects_bad_inputs() -> None:

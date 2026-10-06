@@ -11,7 +11,11 @@ import pandas as pd
 import pytest
 
 from merxen.annotation import real_qc as qc
-from merxen.annotation.config import AnnotationConfig, AnnotationRealQcConfig
+from merxen.annotation.config import (
+    AnnotationConfig,
+    AnnotationRealQcConfig,
+    MouseGateConfig,
+)
 from merxen.annotation.flags import FlagStratum
 from merxen.annotation.mouse_gate import RegistrationSignal
 from merxen.annotation.provenance import RealQcProvenance
@@ -133,13 +137,21 @@ def test_marker_consistency_is_not_evaluable_without_a_statistic() -> None:
 # Registration G1 (D23)
 
 
+G1_LIMITS: dict[str, float] = {
+    "density_ratio_fail": 1.5,
+    "density_ratio_warn": 2.0,
+    "shift_fail_um": 5.0,
+}
+
+
 def test_registration_g1_fails_on_the_ratio_or_the_shift() -> None:
-    limits = {"density_ratio_fail": 1.5, "shift_fail_um": 5.0}
+    limits = G1_LIMITS
     passing = qc.registration_g1_outcome(RegistrationSignal(2.9, 0.4), **limits)
     assert passing.outcome == "pass" and passing.effect == "warning"
+    assert passing.details["rule"] is None
     low = qc.registration_g1_outcome(RegistrationSignal(1.2, 0.4), **limits)
     assert low.outcome == "warn" and "density ratio 1.200 < 1.5" in low.message
-    assert "warn-only in M13" in low.message
+    assert "warn-only in M13" in low.message and low.details["rule"] == "fail"
     shifted = qc.registration_g1_outcome(RegistrationSignal(2.9, 7.5), **limits)
     assert shifted.fired and "shift 7.5 um > 5.0 um" in shifted.message
     # §8.8's effect once D23 moves to (a): the dataset gate fails.
@@ -155,6 +167,57 @@ def test_registration_g1_fails_on_the_ratio_or_the_shift() -> None:
     assert skipped.outcome == "not_evaluable" and "skipped" in str(skipped.reason)
     with pytest.raises(ValueError, match="unknown registration G1 effect"):
         qc.registration_g1_outcome(None, effect="exclude", **limits)
+    with pytest.raises(ValueError, match="at least the fail ratio"):
+        qc.registration_g1_outcome(
+            None, density_ratio_fail=1.5, density_ratio_warn=1.4, shift_fail_um=5.0
+        )
+
+
+@pytest.mark.parametrize("effect", ["warning", "gate_failed"])
+def test_registration_g1_warns_below_the_76_warning_ratio(effect: str) -> None:
+    """NR9 is §7.6 as defined there: a ratio in [1.5, 2.0) warns (finding)."""
+    result = qc.registration_g1_outcome(
+        RegistrationSignal(1.7, 0.4), effect=effect, **G1_LIMITS
+    )
+    assert result.outcome == "warn" and result.effect == "warning"
+    assert result.gate_cap is None and not result.lowers
+    assert "density ratio 1.700 < 2.0" in result.message
+    assert "§7.6 warning rule" in result.message
+    assert result.details["rule"] == "warn"
+    assert result.details["density_ratio_warn"] == 2.0
+    gate = qc.apply_qc_to_gate(human_gate(), [result])
+    assert gate.level == "full" and gate.warning
+
+
+@pytest.mark.parametrize(
+    ("ratio", "shift", "rule"),
+    [
+        # The fail rule is strict: exactly 1.5 does not fail, it warns.
+        (1.5, 0.0, "warn"),
+        (1.4999, 0.0, "fail"),
+        # The warning rule is strict too: exactly 2.0 passes.
+        (2.0, 0.0, None),
+        (1.9999, 0.0, "warn"),
+        # A shift of exactly 5 um is not above 5 um.
+        (2.9, 5.0, None),
+        (2.9, 5.0001, "fail"),
+        (2.9, None, None),
+    ],
+)
+def test_registration_g1_boundaries(
+    ratio: float, shift: float | None, rule: str | None
+) -> None:
+    for effect in ("warning", "gate_failed"):
+        result = qc.registration_g1_outcome(
+            RegistrationSignal(ratio, shift), effect=effect, **G1_LIMITS
+        )
+        assert result.details["rule"] == rule, (ratio, shift, effect)
+        expected = {
+            None: "pass",
+            "warn": "warn",
+            "fail": "fail" if effect == "gate_failed" else "warn",
+        }[rule]
+        assert result.outcome == expected, (ratio, shift, effect)
 
 
 # --------------------------------------------------------------------------
@@ -173,7 +236,7 @@ def test_paired_concordance_scores_the_shared_mask_point_estimate() -> None:
     assert result.details["scored_region"] == "shared_mask"
     assert result.details["jsd"] == pytest.approx(0.234905)
     assert result.details["whole_section_jsd"] == pytest.approx(0.226814)
-    assert result.details["statistic"] == "point" and not result.details["fallback"]
+    assert result.details["statistic"] == "point"
     assert "supercluster-level cross-platform statistics" in result.message
     assert qc.qc_effects([result]).withhold_pair_stats
     # The other M8 pairs (<= .154) pass; 0.20 itself is not above 0.20.
@@ -184,12 +247,41 @@ def test_paired_concordance_scores_the_shared_mask_point_estimate() -> None:
         )
 
 
-def test_paired_concordance_falls_back_to_the_whole_section() -> None:
+def test_paired_concordance_never_scores_the_whole_section_in_its_place() -> None:
+    """D21 scores the shared mask only: without it the check is not evaluable."""
     rows = [{"kind": "soft", "region": "whole_section", "jsd": 0.21}]
     result = qc.paired_concordance(rows, paired=True, warn_above=0.20)
-    assert result.fired and result.details["fallback"]
-    assert result.details["scored_region"] == "whole_section"
-    assert result.details["shared_mask_jsd"] is None
+    assert result.outcome == "not_evaluable" and not result.lowers
+    assert result.details["scored_region"] == "shared_mask"
+    assert result.details["whole_section_jsd"] == pytest.approx(0.21)
+    assert "shared_mask" in str(result.reason)
+    assert "whole_section 0.210 reported, not scored" in str(result.reason)
+    assert not qc.qc_effects([result]).withhold_pair_stats
+    # A whole-section value below the threshold is no pass either.
+    low = qc.paired_concordance(
+        [{"kind": "soft", "region": "whole_section", "jsd": 0.05}],
+        paired=True,
+        warn_above=0.20,
+    )
+    assert low.outcome == "not_evaluable"
+    # A shared-mask row without a finite JSD is no row.
+    nan = qc.paired_concordance(
+        [
+            {"kind": "soft", "region": "shared_mask", "jsd": float("nan")},
+            {"kind": "soft", "region": "whole_section", "jsd": 0.05},
+        ],
+        paired=True,
+        warn_above=0.20,
+    )
+    assert nan.outcome == "not_evaluable"
+    # The shared mask alone is scored; the whole section is "not measured".
+    alone = qc.paired_concordance(
+        [{"kind": "soft", "region": "shared_mask", "jsd": 0.3}],
+        paired=True,
+        warn_above=0.20,
+    )
+    assert alone.outcome == "fail" and alone.details["whole_section_jsd"] is None
+    assert "(whole_section not measured)" in alone.message
     empty = qc.paired_concordance([], paired=True, warn_above=0.20)
     assert empty.outcome == "not_evaluable"
     other_kind = qc.paired_concordance(
@@ -338,20 +430,32 @@ def remeasure(**change: Any) -> qc.FactorRemeasure:
     return qc.FactorRemeasure(**values)
 
 
-def test_the_factor_remeasure_applies_only_with_a_measured_table() -> None:
-    assert qc.factor_remeasure_outcome(None, min_r=0.9).outcome == "not_applicable"
+def test_the_factor_remeasure_applies_only_with_an_r3_member() -> None:
+    # No R3 member: not applicable, whatever the re-measure says.
+    for result in (None, remeasure(applies=False, reason="no_stored_table")):
+        outcome = qc.factor_remeasure_outcome(result, min_r=0.9, has_r3_member=False)
+        assert outcome.outcome == "not_applicable"
+    with pytest.raises(ValueError, match="without an R3 member"):
+        qc.factor_remeasure_outcome(remeasure(), min_r=0.9, has_r3_member=False)
+    # An R3 member: a missing input is not evaluable, never not applicable.
+    missing = qc.factor_remeasure_outcome(None, min_r=0.9, has_r3_member=True)
+    assert missing.outcome == "not_evaluable"
+    assert "did not run" in str(missing.reason)
     for reason, token in (
-        ("no_stored_table", "not_applicable"),
+        ("no_stored_table", "not_evaluable"),
         ("not_first_dataset_of_family", "not_applicable"),
         ("too_few_informative_genes", "not_evaluable"),
     ):
         result = qc.factor_remeasure_outcome(
-            remeasure(applies=False, reason=reason), min_r=0.9
+            remeasure(applies=False, reason=reason), min_r=0.9, has_r3_member=True
         )
-        assert result.outcome == token and result.reason == reason
-    assert qc.factor_remeasure_outcome(remeasure(), min_r=0.9).outcome == "pass"
+        assert result.outcome == token and str(result.reason).startswith(reason)
+    assert (
+        qc.factor_remeasure_outcome(remeasure(), min_r=0.9, has_r3_member=True).outcome
+        == "pass"
+    )
     # The configured threshold decides, not the one the re-measure ran with.
-    tighter = qc.factor_remeasure_outcome(remeasure(), min_r=0.95)
+    tighter = qc.factor_remeasure_outcome(remeasure(), min_r=0.95, has_r3_member=True)
     assert tighter.outcome == "warn" and "r 0.930 < 0.95" in tighter.message
 
 
@@ -402,9 +506,10 @@ def new_panel_signals(**change: Any) -> qc.RealQcSignals:
     values: dict[str, Any] = {
         "resolvability_version": 7,
         "paired": False,
+        "prefilter_applied": False,
+        "has_r3_member": False,
         "marker_consistency": qc.MarkerConsistencySignal(0.82, 4, 900),
         "flag_strata": clean_strata(),
-        "prefilter_applied": False,
         "coverage": coverage_signal(0.85, 0.88),
         "nonneuronal_trend": trend_signal(),
         "registration": RegistrationSignal(2.6, 0.5),
@@ -520,6 +625,7 @@ def test_the_orchestrator_reads_the_real_qc_config(make_trust: MakeTrust) -> Non
         prefilter_applied=True,
         prefilter=qc.PrefilterSpotcheckSignal({"broad": 0.96}),
         emitted_levels=["broad"],
+        has_r3_member=True,
         factor=remeasure(pearson_r=0.92),
     )
     trust = make_trust("provisional")
@@ -575,6 +681,241 @@ def test_registration_g1_follows_the_configured_effect(make_trust: MakeTrust) ->
     assert hard.apply_to_gate(human_gate()).level == "failed"
 
 
+def test_registration_g1_warns_on_a_ratio_the_fail_rule_passes(
+    make_trust: MakeTrust,
+) -> None:
+    """A human section at ratio 1.7 warns, as §7.6 does (NR9, D23 (b))."""
+    signals = new_panel_signals(registration=RegistrationSignal(1.7, 0.5))
+    trust = make_trust("provisional")
+    for effect in ("warning", "gate_failed"):
+        config = AnnotationConfig(
+            species="human",
+            real_qc=AnnotationRealQcConfig(registration_g1_effect=effect),
+        )
+        result = qc.real_data_qc(signals, trust, config)
+        assert result.provenance().outcomes["registration_g1"] == "warn", effect
+        gate = result.apply_to_gate(human_gate())
+        assert gate.level == "full" and gate.warning
+        assert any("§7.6 warning rule" in item for item in gate.warning_reasons)
+    # The ratios are the mouse gate's (§7.6): a configured warning ratio decides.
+    lower = AnnotationConfig(
+        species="human",
+        mouse_gate=MouseGateConfig(g1_density_ratio_warn=1.6),
+    )
+    assert (
+        qc.real_data_qc(signals, trust, lower).provenance().outcomes["registration_g1"]
+        == "pass"
+    )
+
+
+def test_the_applicability_facts_have_no_default() -> None:
+    """An input left out can never make a check not_applicable (P4)."""
+    with pytest.raises(TypeError):
+        qc.RealQcSignals()  # type: ignore[call-arg]
+    for fact in (
+        "resolvability_version",
+        "paired",
+        "prefilter_applied",
+        "has_r3_member",
+    ):
+        values: dict[str, Any] = {
+            "resolvability_version": 7,
+            "paired": False,
+            "prefilter_applied": False,
+            "has_r3_member": False,
+        }
+        del values[fact]
+        with pytest.raises(TypeError, match=fact):
+            qc.RealQcSignals(**values)
+    with pytest.raises(TypeError):
+        qc.RealQcSignals(7, False, False, False)  # type: ignore[misc]
+
+
+def test_a_missing_input_of_an_applicable_check_is_not_evaluable(
+    make_trust: MakeTrust,
+) -> None:
+    """A 5K-like bundle (prefiltered, R3 member, paired) with no inputs given."""
+    signals = new_panel_signals(
+        paired=True,
+        prefilter_applied=True,
+        has_r3_member=True,
+        emitted_levels=["broad"],
+    )
+    record = qc.real_data_qc(
+        signals, make_trust("provisional"), AnnotationConfig(species="human")
+    ).provenance()
+    for check in ("paired_concordance", "prefilter_spotcheck", "factor_remeasure"):
+        assert record.outcomes[check] == "not_evaluable", check
+    # The same bundle facts stated false: not applicable.
+    unpaired = qc.real_data_qc(
+        new_panel_signals(),
+        make_trust("provisional"),
+        AnnotationConfig(species="human"),
+    ).provenance()
+    for check in ("paired_concordance", "prefilter_spotcheck", "factor_remeasure"):
+        assert unpaired.outcomes[check] == "not_applicable", check
+
+
+def test_a_missing_gate_verdict_is_recorded_not_evaluable(
+    make_trust: MakeTrust,
+) -> None:
+    human = qc.real_data_qc(
+        new_panel_signals(gate=None),
+        make_trust("provisional"),
+        AnnotationConfig(species="human"),
+    ).provenance()
+    assert human.outcomes["dataset_gate"] == "not_evaluable"
+    assert human.outcomes["registration_g1"] == "pass"
+    mouse = qc.real_data_qc(
+        mouse_signals(gate=None),
+        make_trust("validated_real", species="mouse"),
+        AnnotationConfig(species="mouse"),
+    ).provenance()
+    for check in ("dataset_gate", "registration_g1", "marker_consistency"):
+        assert mouse.outcomes[check] == "not_evaluable", check
+
+
+def test_a_simulation_validated_family_is_not_seeded(make_trust: MakeTrust) -> None:
+    """Only ``real_data`` families warn-only: ``simulation`` ones get the effects."""
+    signals = new_panel_signals(
+        marker_consistency=qc.MarkerConsistencySignal(0.66, 4, 900),
+        paired=True,
+        pair_jsd=P5011_JSD,
+    )
+    config = AnnotationConfig(species="human")
+    simulation = qc.real_data_qc(signals, make_trust("validated_simulation"), config)
+    assert not simulation.seeded and not simulation.warn_only
+    assert simulation.provenance().warn_only is False
+    assert simulation.provenance().downgrades == [
+        "broad_only:marker_consistency",
+        "withhold_pair_stats:paired_concordance",
+    ]
+    assert simulation.apply_to_gate(human_gate()).level == "broad_only"
+    for state in ("provisional", "broad_only"):
+        other = qc.real_data_qc(signals, make_trust(state), config)
+        assert not other.seeded and other.effects.lowers, state
+    seeded = qc.real_data_qc(signals, make_trust("validated_real"), config)
+    assert seeded.seeded and seeded.warn_only and not seeded.effects.lowers
+
+
+@pytest.mark.parametrize(
+    ("record", "mouse_warn_only"),
+    [
+        ({"human": "pending", "mouse": "pending"}, True),
+        ({"human": "merged", "mouse": "pending"}, True),
+        ({"human": "pending", "mouse": "merged"}, False),
+        ({"human": "merged", "mouse": "merged"}, False),
+    ],
+)
+def test_the_warn_only_period_is_read_per_species(
+    make_trust: MakeTrust, record: dict[str, str], mouse_warn_only: bool
+) -> None:
+    """D20 (b): a seeded mouse family reads the mouse entry, never the human."""
+    real_qc = AnnotationRealQcConfig(
+        seeded_families_warn_only_until_gate=record  # type: ignore[arg-type]
+    )
+    signals = mouse_signals(
+        paired=True,
+        pair_jsd=[{"kind": "soft", "region": "shared_mask", "jsd": 0.3}],
+        prefilter_applied=True,
+        prefilter=qc.PrefilterSpotcheckSignal({"class": 0.9}, n_cells=10_000),
+        emitted_levels=["class"],
+    )
+    mouse = qc.real_data_qc(
+        signals,
+        make_trust("validated_real", species="mouse"),
+        AnnotationConfig(species="mouse", real_qc=real_qc),
+    )
+    assert mouse.warn_only is mouse_warn_only
+    assert mouse.effects.lowers is not mouse_warn_only
+    tokens = mouse.provenance().outcomes
+    expected = "warn" if mouse_warn_only else "fail"
+    assert tokens["paired_concordance"] == expected
+    assert tokens["prefilter_spotcheck"] == expected
+    assert mouse.effects.withheld_levels == (() if mouse_warn_only else ("class",))
+    human = qc.real_data_qc(
+        new_panel_signals(marker_consistency=qc.MarkerConsistencySignal(0.66, 4, 900)),
+        make_trust("validated_real"),
+        AnnotationConfig(species="human", real_qc=real_qc),
+    )
+    assert human.warn_only is (record["human"] == "pending")
+
+
+def test_warn_only_demotes_only_the_checks_section_88_names(
+    make_trust: MakeTrust,
+) -> None:
+    """The dataset gate and G1 apply as defined on a seeded family (§8.8)."""
+    signals = new_panel_signals(
+        resolvability_version=6,
+        paired=True,
+        pair_jsd=P5011_JSD,
+        marker_consistency=qc.MarkerConsistencySignal(0.66, 4, 900),
+        registration=RegistrationSignal(1.1, 0.0),
+        coverage=None,
+        nonneuronal_trend=None,
+        gene_complexity=complexity_signal(native=150.0, simulated=100.0),
+        prefilter_applied=True,
+        prefilter=qc.PrefilterSpotcheckSignal({"broad": 0.9}),
+        emitted_levels=["broad"],
+        has_r3_member=True,
+        factor=remeasure(pearson_r=0.5),
+    )
+    trust = make_trust("validated_real")
+
+    def run(state: str) -> qc.RealQcResult:
+        return qc.real_data_qc(
+            signals,
+            trust,
+            AnnotationConfig(
+                species="human",
+                real_qc=AnnotationRealQcConfig(
+                    registration_g1_effect="gate_failed",
+                    seeded_families_warn_only_until_gate={"human": state},  # type: ignore[dict-item]
+                ),
+            ),
+        )
+
+    pending, merged = run("pending"), run("merged")
+    assert pending.warn_only and not merged.warn_only
+    # G1's gate failure is not demoted: the dataset gate fails either way.
+    assert pending.provenance().outcomes["registration_g1"] == "fail"
+    assert pending.effects.gate_cap == "failed"
+    assert pending.apply_to_gate(human_gate()).level == "failed"
+    assert pending.provenance().downgrades == ["failed:registration_g1"]
+    # Every check outside SEEDED_WARN_ONLY_CHECKS records the same outcome.
+    for before, after in zip(merged.outcomes, pending.outcomes, strict=True):
+        assert before.check == after.check
+        if before.check in qc.SEEDED_WARN_ONLY_CHECKS:
+            assert after.effect in ("warning", "report_only") or not after.fired
+            if before.lowers:
+                assert after.outcome == "warn"
+                assert after.details["warn_only_effect"] == before.effect
+        else:
+            assert after == before, before.check
+    lowered = {item.check for item in merged.outcomes if item.lowers}
+    assert lowered == {
+        "marker_consistency",
+        "registration_g1",
+        "paired_concordance",
+        "prefilter_spotcheck",
+    }
+
+
+def test_the_orchestrator_changes_no_config(make_trust: MakeTrust) -> None:
+    """The QC run reads the config and leaves thresholds and margins as they are."""
+    config = AnnotationConfig(species="human")
+    before = config.model_dump()
+    qc.real_data_qc(
+        new_panel_signals(
+            marker_consistency=qc.MarkerConsistencySignal(0.66, 4, 900),
+            registration=RegistrationSignal(1.1, 0.0),
+        ),
+        make_trust("validated_real"),
+        config,
+    )
+    assert config.model_dump() == before
+
+
 def test_the_version_7_checks_are_not_evaluable_without_inputs(
     make_trust: MakeTrust,
 ) -> None:
@@ -607,12 +948,22 @@ def test_the_version_7_checks_are_not_evaluable_without_inputs(
     assert none.outcomes["nonneuronal_depth_trend"] == "not_evaluable"
 
 
+def mouse_signals(**change: Any) -> qc.RealQcSignals:
+    """An unpaired version-6 MERSCOPE mouse section (a seeded family)."""
+    values: dict[str, Any] = {
+        "resolvability_version": 6,
+        "paired": False,
+        "prefilter_applied": False,
+        "has_r3_member": False,
+        "flag_strata": [stratum("microglial_spillover", "Microglia", 0.05)],
+        "gate": mouse_gate(),
+    }
+    values.update(change)
+    return qc.RealQcSignals(**values)
+
+
 def test_a_mouse_dataset_takes_g1_and_g2_from_its_gate(make_trust: MakeTrust) -> None:
-    signals = qc.RealQcSignals(
-        resolvability_version=6,
-        flag_strata=[stratum("microglial_spillover", "Microglia", 0.05)],
-        gate=mouse_gate(),
-    )
+    signals = mouse_signals()
     result = qc.real_data_qc(
         signals,
         make_trust("validated_real", species="mouse"),
