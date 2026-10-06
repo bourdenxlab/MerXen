@@ -1469,6 +1469,122 @@ def test_resolve_on_a_version_7_bundle_scores_coverage_and_the_trend(
             assert list(confident) == list(_label_confident(labels, level, table))
 
 
+def _write_simulated_genes(
+    bundle_dir: Path,
+    query_genes: list[str],
+    n_genes_by_depth: dict[int, tuple[int, int]],
+    members: tuple[str, ...],
+) -> None:
+    """Add a version-7 bundle's simulated ``n_genes`` (M13 C16) to its tables.
+
+    ``n_genes_by_depth`` maps a grid depth to (test cells, genes per cell);
+    every emission member stores the same cells.
+    """
+    from merxen.annotation import resolvability as res
+
+    rows = [
+        {
+            res.MEMBER_COLUMN: member,
+            res.MEMBER_ROLE_COLUMN: "emission",
+            "cell_id": f"t{index}",
+            "depth": depth,
+            "total_counts": depth,
+            "n_genes": n_genes,
+        }
+        for member in members
+        for depth, (n_cells, n_genes) in n_genes_by_depth.items()
+        for index in range(n_cells)
+    ]
+    table = pd.DataFrame(rows, columns=list(res.SIM_GENES_COLUMNS))
+    table.to_parquet(bundle_dir / res.SIM_GENES_FILE, index=False)
+    path = bundle_dir / res.RESOLVABILITY_SUMMARY_FILE
+    summary = json.loads(path.read_text(encoding="utf-8"))
+    summary[res.SIM_GENES_RECORD] = res.sim_genes_record(query_genes, table)
+    path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+
+def test_resolve_scores_gene_complexity_on_the_bundles_query_genes(
+    tmp_path: Path, fake_mmc: FakeMmc, make_trust: MakeTrust
+) -> None:
+    """NR7 (D19 (a)): native cells are counted on the bundle's query genes.
+
+    A version-7 bundle storing simulated ``n_genes`` makes the check
+    evaluable in RESOLVE. The native side is each sample's table cells,
+    counted on the bundle's query genes (a query gene the dataset lacks
+    counts as not detected and is reported), binned by their counts there;
+    the simulated side is the stored cells at their grid depth. A bin where
+    the simulated cells carry as many genes as the native ones passes, and
+    one where they carry half as many warns.
+    """
+    import anndata as ad
+
+    from merxen.annotation import resolvability as res
+
+    from .test_resolve_v7 import (
+        HUMAN_GRID,
+        MEMBERS,
+        _human_v7_config,
+        write_human_tables,
+    )
+
+    setup = _setup(tmp_path, fake_mmc)
+    bundle_dir = setup.bundles["whb_frontal_supc_clus"].path
+    write_human_tables(bundle_dir, 7)
+    absent = "ENSG00000999999"
+    query_genes = [*GENE_IDS, absent]
+    # The synthetic cells detect all six panel genes from about 100 counts.
+    _write_simulated_genes(
+        bundle_dir,
+        query_genes,
+        {10: (20, 2), 30: (20, 4), 100: (60, 6), 250: (60, 3)},
+        MEMBERS,
+    )
+    applied = _resolve(
+        setup, make_trust, "qc", state="provisional", config=_human_v7_config()
+    )
+    gap_warn = setup.config.real_qc.genes_per_count_gap_warn
+    simulated = {10: (20, 2.0), 30: (20, 4.0), 100: (60, 6.0), 250: (60, 3.0)}
+    for sample in setup.samples:
+        record = applied.samples[sample.sample_id].summary["real_qc"]
+        labels, _ = _tables(applied, sample.sample_id)
+        table = labels[Columns.IN_TABLE].to_numpy(dtype=bool)
+        # The prepared H5AD's six panel genes, in GENE_IDS order.
+        native = np.asarray(ad.read_h5ad(sample.h5ad_path).X[:, :6].todense())[table]
+        n_genes = (native > 0).sum(axis=1)
+        bins = res.depth_bin(native.sum(axis=1).astype(np.float64), HUMAN_GRID)
+        rows = pd.DataFrame(record["tables"]["gene_complexity"])
+        assert rows["depth"].tolist() == list(HUMAN_GRID)
+        for row in rows.to_dict("records"):
+            depth = int(row["depth"])
+            in_bin = bins == depth
+            n_simulated, simulated_genes = simulated[depth]
+            assert row["n_native"] == int(in_bin.sum())
+            assert row["n_simulated"] == n_simulated
+            assert row["simulated_median_genes"] == simulated_genes
+            if in_bin.any():
+                assert row["native_median_genes"] == float(np.median(n_genes[in_bin]))
+            judged = int(in_bin.sum()) >= 50 and n_simulated >= 50
+            assert row["judged"] == judged
+            gap = float(np.median(n_genes[in_bin])) / simulated_genes - 1.0
+            assert row["warn"] == (judged and gap > gap_warn)
+        judged_rows = rows[rows["judged"]]
+        assert set(judged_rows["depth"]) == {100, 250}
+        assert set(judged_rows.loc[judged_rows["warn"], "depth"]) == {250}
+        assert record["per_check"]["gene_complexity"] == "warn"
+        (item,) = [
+            entry for entry in record["outcomes"] if entry["check"] == "gene_complexity"
+        ]
+        assert item["fired"] and item["effect"] == "warning"
+        assert item["details"]["bins_warned"] == [250]
+        source = item["details"]["source"]
+        assert source["n_query_genes"] == len(query_genes)
+        assert source["n_query_genes_missing"] == 1
+        assert source["missing_genes"] == [absent]
+        assert source["members"] == list(MEMBERS)
+        # A warning only: nothing is lowered.
+        assert not record["downgrades"]
+
+
 def test_the_cli_reads_a_human_registration_check(tmp_path: Path) -> None:
     from merxen.cli.run_annotation import _registration_signals
 
