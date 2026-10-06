@@ -18,11 +18,18 @@ seeds (§14 NP4): per (level, class), at every tested set,
   donor (or draw) precisions is <= max(0.03, 3.5 x pooled SE), with
   pooled SE = sqrt(p_bar (1 - p_bar) / n_bar) (the range rule).
 
+A set where some replicate has fewer than 100 calls is scored by the floor
+alone, and one where no replicate has 100 passes NP4 vacuously (``vacuous``,
+reported); this is §14's literal reading.
+
 NP4's seed criterion (seed 0 vs 1 changes <= 2% of confident labels) is a
 separate check. A replicate is keyed by an opaque (group, seed label) pair:
 the group is a human donor or a mouse draw, so the functions are
-species-agnostic. Version-7 families score NP4 in every emission member
-(``member=``) and combine the members with ``every_member_verdict``.
+species-agnostic. The frozen thresholds were fitted on the default group's
+fit half, so that group is scored on its check half only
+(``held_out_replicates``; §14 "the default donor's check half").
+Version-7 families score NP4 in every emission member (``member=``) and
+combine the members with ``every_member_verdict``.
 
 The averaging conventions of the range rule (p_bar and n_bar as means of
 seed-averaged group values, unweighted precision) are the D12 proposal of
@@ -200,34 +207,190 @@ def tested_set_mask(
         ValueError: If ``frame`` has another index, or ``confident`` another
             length.
     """
-    if not frame.index.equals(pd.RangeIndex(len(frame))):
-        raise ValueError(
-            "tested_set_mask is positional: pass the replicate's rows with a "
-            "fresh RangeIndex (reset_index(drop=True))"
-        )
-    is_confident = np.asarray(confident, dtype=bool)
-    if is_confident.shape != (len(frame),):
-        raise ValueError(
-            f"confident has {is_confident.shape[0]} entries for {len(frame)} rows"
-        )
-    level_mask = (frame["level"].astype(str) == item.level).to_numpy(bool)
-    of_class = (frame["parent"].astype(object) == item.cls).to_numpy(bool)
-    depth = frame["depth"].to_numpy(np.int64)
-    if not item.pooled:
-        single = level_mask & of_class & (depth == item.depths[0]) & is_confident
-        return np.asarray(single, dtype=bool)
     mask = np.zeros(len(frame), dtype=bool)
-    deepest = res.deepest_rows(frame[level_mask])
-    if deepest.empty:
-        return mask
-    positions = deepest.index.to_numpy(np.int64)
-    keep = (
-        of_class[positions]
-        & is_confident[positions]
-        & (depth[positions] >= min(item.depths))
-    )
-    mask[positions[keep]] = True
+    mask[_ReplicateIndex(frame, confident).positions(item)] = True
     return mask
+
+
+class _ReplicateIndex:
+    """One replicate's columns, coded once for all of its tested sets.
+
+    ``tested_set_mask``'s membership rule on integer codes: each level's rows
+    and deepest rows (``deepest_rows``) are found once per replicate, not
+    once per tested set (a few hundred sets per replicate in gate P).
+    """
+
+    def __init__(self, frame: pd.DataFrame, confident: np.ndarray) -> None:
+        """Code the columns of one replicate's rows.
+
+        Args:
+            frame: The replicate's rows with a fresh ``RangeIndex``.
+            confident: ``frozen_confident_mask`` of ``frame``.
+
+        Raises:
+            ValueError: If ``frame`` has another index, or ``confident``
+                another length.
+        """
+        if not frame.index.equals(pd.RangeIndex(len(frame))):
+            raise ValueError(
+                "tested_set_mask is positional: pass the replicate's rows with a "
+                "fresh RangeIndex (reset_index(drop=True))"
+            )
+        is_confident = np.asarray(confident, dtype=bool)
+        if is_confident.shape != (len(frame),):
+            raise ValueError(
+                f"confident has {is_confident.shape[0]} entries for {len(frame)} rows"
+            )
+        self._frame = frame
+        self._confident = is_confident
+        level_codes, level_values = pd.factorize(frame["level"].astype(str).to_numpy())
+        self._level_codes = np.asarray(level_codes, dtype=np.int64)
+        self._level_code = {str(value): code for code, value in enumerate(level_values)}
+        # A null parent (a sink or no call) gets code -1 and matches no class.
+        parent_codes, parent_values = pd.factorize(
+            frame["parent"].astype(object).to_numpy()
+        )
+        self._parent_codes = np.asarray(parent_codes, dtype=np.int64)
+        self._parent_code = {value: code for code, value in enumerate(parent_values)}
+        self._depth = frame["depth"].to_numpy(np.int64)
+        self._levels: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+
+    def _level_rows(self, level: str) -> tuple[np.ndarray, np.ndarray]:
+        """The positions of a level's rows and of each test cell's deepest row."""
+        if level not in self._levels:
+            code = self._level_code.get(level)
+            rows = (
+                np.flatnonzero(self._level_codes == code)
+                if code is not None
+                else np.empty(0, dtype=np.int64)
+            )
+            deepest = res.deepest_rows(self._frame.iloc[rows])
+            self._levels[level] = (rows, deepest.index.to_numpy(np.int64))
+        return self._levels[level]
+
+    def positions(self, item: res.GatePTestedSet) -> np.ndarray:
+        """Return the positions of the rows in a tested set (one per test cell).
+
+        Args:
+            item: The tested set.
+
+        Returns:
+            Row positions; empty when the replicate has no call of the class.
+        """
+        rows, deepest = self._level_rows(item.level)
+        code = self._parent_code.get(item.cls)
+        if code is None:
+            return np.empty(0, dtype=np.int64)
+        if item.pooled:
+            keep = (
+                (self._parent_codes[deepest] == code)
+                & self._confident[deepest]
+                & (self._depth[deepest] >= min(item.depths))
+            )
+            return np.asarray(deepest[keep], dtype=np.int64)
+        keep = (
+            (self._parent_codes[rows] == code)
+            & (self._depth[rows] == item.depths[0])
+            & self._confident[rows]
+        )
+        return np.asarray(rows[keep], dtype=np.int64)
+
+
+def held_out_replicates(
+    replicates: Mapping[ReplicateKey, pd.DataFrame], *, default_group: str | None
+) -> dict[ReplicateKey, pd.DataFrame]:
+    """Return the replicates as gate P scores them (§14 pooled held-out calls).
+
+    The frozen thresholds are fitted on the fit half (``half == 0``) of the
+    default group's base run, so that group is scored on its check half
+    only, at every seed (§14: "the default donor's check half"; human the
+    default donor, mouse the draw the thresholds came from). Pre-registration
+    §23.2 D2 (d) makes the replicates disjoint, so a fit-half test cell of
+    the default group found in another group's table is a leak and raises.
+    Use the same tables to build the pooled seed-0 tested sets
+    (``gate_p_tested_sets``) and to score the replicates
+    (``replicate_set_stats``, which applies this itself).
+
+    Args:
+        replicates: Per (group, seed label), that replicate's cells table;
+            the default group's tables in full (both halves), so that its
+            fit-half cells can be checked for in the other tables.
+        default_group: The group whose fit half the frozen thresholds were
+            fitted on; ``None`` when no replicate holds those cells.
+
+    Returns:
+        The tables in the order of ``replicates``, the default group's
+        restricted to its check half (``half == 1``); the others unchanged.
+
+    Raises:
+        ValueError: If ``default_group`` is not a group of ``replicates``, a
+            table of it has no ``half`` column or a value other than 0 and
+            1, or another group's table holds one of its fit-half cells.
+    """
+    if default_group is None:
+        return dict(replicates)
+    groups = sorted({str(group) for group, _ in replicates})
+    if default_group not in groups:
+        raise ValueError(
+            f"default_group {default_group!r} is not a group of the replicates {groups}"
+        )
+    result: dict[ReplicateKey, pd.DataFrame] = {}
+    fit_cells: set[str] = set()
+    for key, table in replicates.items():
+        if str(key[0]) != default_group:
+            continue
+        if "half" not in table.columns:
+            raise ValueError(
+                f"replicate {key[0]}/{key[1]}: the default group's table needs "
+                "the split-half column 'half' (0 = fit, 1 = check)"
+            )
+        half = table["half"].to_numpy()
+        if not bool(np.isin(half, (0, 1)).all()):
+            raise ValueError(
+                f"replicate {key[0]}/{key[1]}: 'half' holds values other than "
+                "0 (fit) and 1 (check)"
+            )
+        fit = half == 0
+        fit_cells.update(table["cell_id"].astype(str).to_numpy()[fit])
+        result[key] = table[~fit]
+    for key, table in replicates.items():
+        if str(key[0]) == default_group:
+            continue
+        leaked = table["cell_id"].astype(str).isin(fit_cells).to_numpy(bool)
+        if bool(leaked.any()):
+            raise ValueError(
+                f"replicate {key[0]}/{key[1]} holds {int(leaked.sum())} rows of "
+                f"fit-half test cells of the default group {default_group!r}: "
+                "the frozen thresholds were fitted on them"
+            )
+        result[key] = table
+    return {key: result[key] for key in replicates}
+
+
+def _check_tested(
+    tested: Mapping[tuple[str, str], Sequence[res.GatePTestedSet] | None],
+) -> None:
+    """Check that each key's tested sets are ``None`` or non-empty, of its key.
+
+    Raises:
+        ValueError: For an empty list (``gate_p_tested_sets`` gives ``None``
+            for a key without a tested set, so ``[]`` would pass untested),
+            or a tested set whose level or class differs from its key.
+    """
+    for key, items in tested.items():
+        if items is None:
+            continue
+        if len(items) == 0:
+            raise ValueError(
+                f"{key}: an empty list of tested sets; a (level, class) that is "
+                "not evaluable is None"
+            )
+        for item in items:
+            if (item.level, item.cls) != tuple(key):
+                raise ValueError(
+                    f"the tested set {item.level}/{item.cls} "
+                    f"{tested_set_label(item)} belongs to another key than {key}"
+                )
 
 
 def replicate_set_stats(
@@ -235,6 +398,7 @@ def replicate_set_stats(
     decisions: pd.DataFrame,
     tested: Mapping[tuple[str, str], Sequence[res.GatePTestedSet] | None],
     *,
+    default_group: str | None,
     regime: res.Regime = "provisional",
     recipe: str | None = res.DECISION_RECIPE,
     member: str | None = None,
@@ -243,9 +407,11 @@ def replicate_set_stats(
 
     The replicates are scored at the frozen thresholds of ``decisions`` on
     the tested sets fixed from the pooled seed-0 calls (``tested``, from
-    ``gate_p_tested_sets``). Every (tested set, replicate) pair gets a row,
-    a replicate without calls in the set included (``n_confident`` 0), so
-    the range rule can see that not every replicate has enough calls.
+    ``gate_p_tested_sets`` on ``held_out_replicates``). The default group is
+    scored on its check half only (``held_out_replicates``). Every (tested
+    set, replicate) pair gets a row, a replicate without calls in the set
+    included (``n_confident`` 0), so the range rule can see that not every
+    replicate has enough calls.
 
     Args:
         replicates: Per (group, seed label), that replicate's cells table.
@@ -254,6 +420,9 @@ def replicate_set_stats(
             ensemble's).
         tested: The tested sets per (level, class); ``None`` marks a
             (level, class) that is not evaluable and has no rows.
+        default_group: The group whose fit half the frozen thresholds were
+            fitted on (required, so that no caller leaks it by omission;
+            ``None`` when no replicate holds those cells).
         regime: The regime whose thresholds are frozen.
         recipe: The recipe of the scored rows (``None``: every recipe, so
             the table must hold one).
@@ -266,38 +435,36 @@ def replicate_set_stats(
 
     Raises:
         ValueError: If ``replicates`` is empty, a replicate has no rows after
-            the filters, or a tested set's level or class differs from its
-            key.
+            the filters, a key's tested sets are an empty list or a tested
+            set's level or class differs from its key, or for the default
+            group's inputs (``held_out_replicates``).
         ResolvabilityError: If a table holds more than one replicate
             (``replicate_rows``).
     """
     if not replicates:
         raise ValueError("replicate_set_stats: no replicates")
-    for key, items in tested.items():
-        for item in items or ():
-            if (item.level, item.cls) != tuple(key):
-                raise ValueError(
-                    f"the tested set {item.level}/{item.cls} "
-                    f"{tested_set_label(item)} belongs to another key than {key}"
-                )
+    _check_tested(tested)
+    scored = held_out_replicates(replicates, default_group=default_group)
     lookup = res.emission_lookup(decisions, regime)
+    ordered = sorted(tested.items(), key=lambda pair: pair[0])
     records: list[dict[str, object]] = []
-    for group, seed in sorted(replicates):
+    for group, seed in sorted(scored):
         frame = res.replicate_rows(
-            replicates[(group, seed)], recipe=recipe, seed=None, member=member
+            scored[(group, seed)], recipe=recipe, seed=None, member=member
         ).reset_index(drop=True)
         if frame.empty:
             raise ValueError(
                 f"replicate {group}/{seed} has no rows after the filters "
-                f"(recipe={recipe!r}, member={member!r})"
+                f"(recipe={recipe!r}, member={member!r}, "
+                f"default_group={default_group!r}: its check half only)"
             )
-        confident = res.frozen_confident_mask(frame, lookup)
+        index = _ReplicateIndex(frame, res.frozen_confident_mask(frame, lookup))
         correct = frame["correct"].to_numpy(bool)
-        for (level, cls), items in sorted(tested.items(), key=lambda pair: pair[0]):
+        for (level, cls), items in ordered:
             for item in items or ():
-                mask = tested_set_mask(frame, confident, item)
-                n_confident = int(mask.sum())
-                n_correct = int(correct[mask].sum())
+                positions = index.positions(item)
+                n_confident = int(len(positions))
+                n_correct = int(correct[positions].sum())
                 records.append(
                     {
                         "level": level,
@@ -388,7 +555,8 @@ def np4_set_verdicts(
     replicate has that many calls (otherwise it passes), and fails when the
     range of the seed-averaged group precisions exceeds
     max(``spread_floor``, ``spread_se_multiplier`` x pooled SE). A set where
-    no replicate reaches the minimum is ``vacuous``.
+    no replicate reaches the minimum is ``vacuous`` and passes (§14's literal
+    reading; reported, so that a pass on nothing is visible).
 
     Args:
         stats: ``replicate_set_stats`` output.
@@ -485,8 +653,11 @@ def np4_class_verdicts(
         (not evaluable), ``False`` when any of its sets fails, else ``True``.
 
     Raises:
-        ValueError: If a tested set of a key has no verdict row.
+        ValueError: If a tested set of a key has no verdict row, a key's
+            tested sets are an empty list, or a tested set's level or class
+            differs from its key.
     """
+    _check_tested(tested)
     passed_by_set = {
         (str(level), str(cls), str(label)): bool(passed)
         for level, cls, label, passed in zip(

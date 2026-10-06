@@ -95,10 +95,13 @@ def _grid(
 
 
 def _tested_from_seed0(
-    replicates: Mapping[gp.ReplicateKey, pd.DataFrame], decisions: pd.DataFrame
+    replicates: Mapping[gp.ReplicateKey, pd.DataFrame],
+    decisions: pd.DataFrame,
+    default_group: str | None = None,
 ) -> dict[tuple[str, str], list[res.GatePTestedSet] | None]:
     """The pooled seed-0 tested sets (§14: pooled held-out calls)."""
-    seed0 = [table for (_, seed), table in sorted(replicates.items()) if seed == 0]
+    scored = gp.held_out_replicates(replicates, default_group=default_group)
+    seed0 = [table for (_, seed), table in sorted(scored.items()) if seed == 0]
     return res.gate_p_tested_sets(
         pd.concat(seed0, ignore_index=True), decisions, regime="provisional"
     )
@@ -106,10 +109,13 @@ def _tested_from_seed0(
 
 def _verdict(
     replicates: Mapping[gp.ReplicateKey, pd.DataFrame],
+    default_group: str | None = None,
 ) -> tuple[pd.Series, dict[tuple[str, str], bool | None]]:
     decisions = _decisions_at_10()
-    tested = _tested_from_seed0(replicates, decisions)
-    stats = gp.replicate_set_stats(replicates, decisions, tested)
+    tested = _tested_from_seed0(replicates, decisions, default_group)
+    stats = gp.replicate_set_stats(
+        replicates, decisions, tested, default_group=default_group
+    )
     verdicts = gp.np4_set_verdicts(stats, _targets(), _np4())
     assert len(verdicts) == 1
     return verdicts.iloc[0], gp.np4_class_verdicts(verdicts, tested)
@@ -121,7 +127,9 @@ def test_planted_donor_shift_fails_np4_while_binomial_noise_passes() -> None:
     tested = _tested_from_seed0(noise, _decisions_at_10())
     (item,) = tested[("broad", "X")] or []
     assert item.depths == (10,) and not item.pooled and item.n_confident == 1200
-    stats = gp.replicate_set_stats(noise, _decisions_at_10(), tested)
+    stats = gp.replicate_set_stats(
+        noise, _decisions_at_10(), tested, default_group=None
+    )
     assert len(stats) == 6 and set(stats["n_confident"]) == {400}
     assert stats["set"].unique().tolist() == ["10"]
     row, classes = _verdict(noise)
@@ -208,7 +216,9 @@ def test_replicate_sets_count_each_cell_once_at_its_deepest_bin() -> None:
             res.GatePTestedSet("broad", "X", (30,), False, 0, 0.0, 0.0),
         ]
     }
-    stats = gp.replicate_set_stats({("D1", 0): table}, decisions, tested)
+    stats = gp.replicate_set_stats(
+        {("D1", 0): table}, decisions, tested, default_group=None
+    )
     by_set = stats.set_index("set")
     # >= 30: A once (at 100), D (deepest at 30) and the five deep cells.
     assert by_set.loc[">=30", "n_confident"] == 7
@@ -258,10 +268,17 @@ def test_single_replicate_reproduces_gate_p_tested_sets() -> None:
         tested = res.gate_p_tested_sets(
             cells, decisions, min_confident_n=100, regime="provisional"
         )
-        stats = gp.replicate_set_stats({("pooled", 0): cells}, decisions, tested)
+        stats = gp.replicate_set_stats(
+            {("pooled", 0): cells}, decisions, tested, default_group=None
+        )
+        lookup = res.emission_lookup(decisions, "provisional")
+        confident = res.frozen_confident_mask(cells, lookup)
         for (level, cls), items in tested.items():
             for item in items or []:
                 kinds["pooled" if item.pooled else "single"] += 1
+                # The public mask and the stats share one membership rule.
+                mask = gp.tested_set_mask(cells, confident, item)
+                assert int(mask.sum()) == item.n_confident
                 row = stats[
                     (stats["level"] == level)
                     & (stats["class"] == cls)
@@ -284,7 +301,7 @@ def test_zero_call_replicate_is_listed_and_blocks_the_range_rule() -> None:
     decisions = _decisions_at_10()
     tested = _tested_from_seed0(replicates, decisions)
     assert tested[("broad", "Y")] is None
-    stats = gp.replicate_set_stats(replicates, decisions, tested)
+    stats = gp.replicate_set_stats(replicates, decisions, tested, default_group=None)
     empty = stats[stats["group"] == "D3"]
     assert len(empty) == 2 and set(empty["n_confident"]) == {0}
     assert empty["precision"].isna().all()
@@ -304,6 +321,120 @@ def test_np4_vacuous_when_no_replicate_reaches_the_minimum() -> None:
     assert row["n_evaluated"] == 0 and row["vacuous"]
     assert row["floor_ok"] and not row["range_evaluable"] and row["passed"]
     assert classes == {("broad", "X"): True}
+
+
+def test_np4_range_limit_is_floored_at_003() -> None:
+    """§14 NP4: the range limit is max(0.03, 3.5 x pooled SE).
+
+    At 4,000 calls per replicate 3.5 x SE is about .010, so the 0.03 floor
+    alone decides: a range of .025 passes, one at the limit passes (the
+    1e-9 tolerance) and one of .035 fails.
+    """
+    for top, range_value, passes in (
+        (3900, 0.025, True),
+        (3920, 0.03, True),
+        (3940, 0.035, False),
+    ):
+        counts = {"D1": 3800, "D2": 3860, "D3": top}
+        row, classes = _verdict(_grid(counts, n=4000))
+        assert 3.5 * row["pooled_se"] < 0.011
+        assert row["limit"] == gp.GATE_P_SPREAD_FLOOR
+        assert row["donor_range"] == pytest.approx(range_value)
+        assert row["floor_ok"] and row["range_evaluable"]
+        assert bool(row["range_ok"]) == passes and bool(row["passed"]) == passes
+        assert classes == {("broad", "X"): passes}
+
+
+def test_np4_floor_counts_a_replicate_at_the_target() -> None:
+    """§14 NP4: point precision >= target_L, so exactly target_L passes."""
+    replicates = _grid(dict.fromkeys(GROUPS, 360))  # 360 / 400 = .90
+    row, classes = _verdict(replicates)
+    assert row["target"] == 0.90 and row["target"] == 360 / 400
+    assert row["floor_ok"] and row["floor_failures"] == ""
+    assert row["donor_range"] == 0.0 and row["passed"]
+    assert classes == {("broad", "X"): True}
+    replicates[("D2", 1)] = _replicate("D2", 1, 359)  # .8975
+    row, classes = _verdict(replicates)
+    assert not row["floor_ok"] and row["floor_failures"] == "D2/1"
+    assert row["range_ok"] and not row["passed"]
+    assert classes == {("broad", "X"): False}
+
+
+def test_default_group_is_scored_on_its_check_half_only() -> None:
+    """§14: the default donor's check half; §23.2 D2: no fit-half cell leaks.
+
+    The frozen thresholds were fitted on the default group's fit half
+    (``half == 0``), so its fit-half rows never enter NP4, at any seed.
+    """
+    replicates = _grid(dict.fromkeys(GROUPS, 380))
+    for seed in SEEDS:
+        # D1's fit half (even rows) is all wrong, its check half all right.
+        frame = _replicate("D1", seed, 400)
+        frame["correct"] = frame["half"] == 1
+        replicates[("D1", seed)] = frame
+    scored = gp.held_out_replicates(replicates, default_group="D1")
+    assert list(scored) == list(replicates)
+    for (group, _), table in scored.items():
+        assert len(table) == (200 if group == "D1" else 400)
+        assert set(table["half"]) == ({1} if group == "D1" else {0, 1})
+    unchanged = gp.held_out_replicates(replicates, default_group=None)
+    assert all(unchanged[key] is table for key, table in replicates.items())
+    decisions = _decisions_at_10()
+    tested = _tested_from_seed0(replicates, decisions, "D1")
+    (item,) = tested[("broad", "X")] or []
+    assert item.n_confident == 1000
+    stats = gp.replicate_set_stats(replicates, decisions, tested, default_group="D1")
+    default = stats[stats["group"] == "D1"]
+    assert set(default["n_confident"]) == {200} and set(default["n_correct"]) == {200}
+    others = stats[stats["group"] != "D1"]
+    assert set(others["n_confident"]) == {400} and set(others["n_correct"]) == {380}
+    # Counting D1's fit half too would give D1 a precision of .50.
+    leaky = gp.replicate_set_stats(replicates, decisions, tested, default_group=None)
+    assert set(leaky.loc[leaky["group"] == "D1", "precision"]) == {0.5}
+    with pytest.raises(ValueError, match="not a group"):
+        gp.held_out_replicates(replicates, default_group="D9")
+    no_half = dict(replicates)
+    no_half[("D1", 1)] = replicates[("D1", 1)].drop(columns="half")
+    with pytest.raises(ValueError, match="half"):
+        gp.replicate_set_stats(no_half, decisions, tested, default_group="D1")
+    odd_half = dict(replicates)
+    odd_half[("D1", 0)] = replicates[("D1", 0)].assign(half=2)
+    with pytest.raises(ValueError, match="half"):
+        gp.held_out_replicates(odd_half, default_group="D1")
+    # A fit-half test cell of D1 in another group's table is a leak: under
+    # D2 (d) the replicates are disjoint.
+    leaked = dict(replicates)
+    fit_row = replicates[("D1", 1)].iloc[[0]].assign(seed=1)
+    leaked[("D3", 1)] = pd.concat([replicates[("D3", 1)], fit_row], ignore_index=True)
+    with pytest.raises(ValueError, match="fit-half"):
+        gp.replicate_set_stats(leaked, decisions, tested, default_group="D1")
+    # A check-half cell of D1 elsewhere is not a fit-half leak.
+    shared = dict(replicates)
+    check_row = replicates[("D1", 1)].iloc[[1]].assign(seed=1)
+    shared[("D3", 1)] = pd.concat([replicates[("D3", 1)], check_row], ignore_index=True)
+    assert len(gp.held_out_replicates(shared, default_group="D1")[("D3", 1)]) == 401
+    # Nothing is left of a default group whose table holds only its fit half.
+    only_fit = dict(replicates)
+    only_fit[("D1", 0)] = replicates[("D1", 0)].iloc[::2]
+    with pytest.raises(ValueError, match="no rows"):
+        gp.replicate_set_stats(only_fit, decisions, tested, default_group="D1")
+
+
+def test_empty_tested_set_lists_raise() -> None:
+    """``gate_p_tested_sets`` gives None, never [], for a key without sets."""
+    decisions = _decisions_at_10()
+    replicates = _grid(dict.fromkeys(GROUPS, 380))
+    empty: dict[tuple[str, str], list[res.GatePTestedSet] | None] = {
+        ("broad", "X"): [],
+    }
+    with pytest.raises(ValueError, match="empty"):
+        gp.replicate_set_stats(replicates, decisions, empty, default_group=None)
+    with pytest.raises(ValueError, match="empty"):
+        gp.np4_class_verdicts(_set_verdict_rows({"10": True}), empty)
+    with pytest.raises(ValueError, match="belongs to"):
+        gp.np4_class_verdicts(
+            _set_verdict_rows({"10": True}), {("broad", "Y"): [SINGLE_10]}
+        )
 
 
 def _set_verdict_rows(passed: Mapping[str, bool], cls: str = "X") -> pd.DataFrame:
@@ -350,21 +481,35 @@ def test_np4_inputs_that_mix_or_lack_replicates_raise() -> None:
     clean = table.assign(recipe=res.CLEAN_RECIPE)
     with pytest.raises(res.ResolvabilityError, match="more than once"):
         gp.replicate_set_stats(
-            {("D1", 0): pd.concat([table, clean])}, decisions, tested, recipe=None
+            {("D1", 0): pd.concat([table, clean])},
+            decisions,
+            tested,
+            default_group=None,
+            recipe=None,
         )
     with pytest.raises(res.ResolvabilityError, match="more than once"):
         gp.replicate_set_stats(
-            {("D1", 0): pd.concat([table, table.assign(seed=1)])}, decisions, tested
+            {("D1", 0): pd.concat([table, table.assign(seed=1)])},
+            decisions,
+            tested,
+            default_group=None,
         )
     with pytest.raises(ValueError, match="no rows"):
-        gp.replicate_set_stats({("D1", 0): clean}, decisions, tested)
+        gp.replicate_set_stats(
+            {("D1", 0): clean}, decisions, tested, default_group=None
+        )
     with pytest.raises(ValueError, match="no replicates"):
-        gp.replicate_set_stats({}, decisions, tested)
+        gp.replicate_set_stats({}, decisions, tested, default_group=None)
     with pytest.raises(ValueError, match="belongs to"):
         gp.replicate_set_stats(
-            {("D1", 0): table}, decisions, {("broad", "Y"): [SINGLE_10]}
+            {("D1", 0): table},
+            decisions,
+            {("broad", "Y"): [SINGLE_10]},
+            default_group=None,
         )
-    stats = gp.replicate_set_stats(_grid(dict.fromkeys(GROUPS, 380)), decisions, tested)
+    stats = gp.replicate_set_stats(
+        _grid(dict.fromkeys(GROUPS, 380)), decisions, tested, default_group=None
+    )
     with pytest.raises(ValueError, match="no precision target"):
         gp.np4_set_verdicts(stats, {"supercluster": 0.85}, _np4())
     incomplete = stats[~((stats["group"] == "D2") & (stats["seed"] == 1))]
