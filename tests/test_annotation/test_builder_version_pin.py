@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "50582d5e126669b4c3f823fc478c28a766dd659ad92838a0989ccc75ed4e787b",
+    3: "221012fa78966b8a903bd1a29e6046e68207bfe0fca795bd7adb6bf2c24c2b2c",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -168,10 +168,20 @@ PIN_HISTORY = (
     "built before the merge (two WHB, two SEA-AD) lack D1's revision in their "
     "hashed test-set params, so the merged code never reuses them and builds "
     "new ones; no existing bundle changes",
+    "3: the version-7 summary's per-regime and per-level bin counts moved "
+    "into ensemble_bin_counts, which RESOLVE reuses (refactor; the summary "
+    "is unchanged), so no bundle content changes",
+    "3: load_resolvability and ResolvabilityTables refuse a resolvability "
+    "version the code does not know (checked_resolvability_version; reading "
+    "only, the RESOLVE follow-up of M3c); no bundle content changes",
     "3: gate_p_tested_sets takes its confident calls from the new public "
     "frozen_confident_mask (M13 gate P, which scores at frozen thresholds "
     "and never runs in a builder); the same rule, moved, so no bundle "
     "content or build_hash changes",
+    "3: the M13 branch merged with the RESOLVE version-7 follow-up "
+    "(2026-10-06): resolvability.py carries both frozen_confident_mask "
+    "and the version guard and ensemble_bin_counts above; each change "
+    "keeps its own rule, so no bundle content or build_hash changes",
 )
 
 

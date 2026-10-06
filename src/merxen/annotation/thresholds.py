@@ -61,12 +61,15 @@ import pandas as pd
 
 from merxen.annotation.config import AnnotationGate, AnnotationThresholds
 from merxen.annotation.resolvability import (
+    RESOLVABILITY_VERSION_V7,
     LevelMeta,
     ResolvabilityTables,
     RuleSettings,
+    class_depth_table,
     depth_bin,
     level_emission,
     simulated_floors,
+    unfilled_decisions,
 )
 from merxen.annotation.schema import GateLevel, meets_threshold
 from merxen.annotation.vocab import (
@@ -916,6 +919,10 @@ class EmissionPlan:
         fine_seed_stability: ``resolvability_summary.json``
             ``fine_level_seed_stability``.
         seed_stability_max_change: ``seed_stability_max_change`` (0.02).
+        resolvability_version: The bundle's resolvability version (7: the
+            decisions are the version-7 ensemble's, after the saturated-bp
+            rule and the monotone fill; ``None`` without tables or when the
+            bundle predates the field).
     """
 
     species: Species
@@ -926,6 +933,7 @@ class EmissionPlan:
     trust: TrustDecision | None = None
     fine_seed_stability: Mapping[str, float] | None = None
     seed_stability_max_change: float = 0.02
+    resolvability_version: int | None = None
 
     @classmethod
     def from_tables(
@@ -968,12 +976,40 @@ class EmissionPlan:
             trust=trust,
             fine_seed_stability={str(k): float(v) for k, v in stability.items()},
             seed_stability_max_change=seed_stability_max_change,
+            resolvability_version=tables.version,
         )
 
     @property
     def has_tables(self) -> bool:
         """Whether a resolvability table gates emission."""
         return self.decisions is not None
+
+    @property
+    def is_version_7(self) -> bool:
+        """Whether the decisions are a version-7 ensemble's (M3c)."""
+        return (
+            self.decisions is not None
+            and self.resolvability_version == RESOLVABILITY_VERSION_V7
+        )
+
+    def class_depth(self) -> pd.DataFrame | None:
+        """Return the class-depth table of the decisions applied (version 7).
+
+        ``resolvability.class_depth_table`` of the decisions RESOLVE applies
+        (reweighted to the dataset's composition when it reweights): the
+        schema of PREP's ``resolvability_class_depth.parquet``, with each
+        (regime, level, class, bin)'s status, applied threshold, coverage
+        and the ``monotone_filled`` and ``nonneuronal_high_depth`` marks.
+        Without a profile its ``profile_*`` columns are empty; RESOLVE uses
+        the dataset's own per-class depth instead (plan §8.3 v7.5).
+
+        Returns:
+            The table, or ``None`` for a version-6 bundle or without tables.
+        """
+        if not self.is_version_7:
+            return None
+        assert self.decisions is not None
+        return class_depth_table(self.decisions, grid=self.grid or None)
 
     def table_level(self, level: str) -> str:
         """Return the resolvability level whose table gates ``level``."""
@@ -1125,12 +1161,16 @@ class EmissionPlan:
         """Return the smallest emitted depth per (level, class), provisional regime.
 
         Returns:
-            ``resolvability.simulated_floors`` of the decisions (empty
-            without a table).
+            ``resolvability.simulated_floors`` of the decisions before the
+            monotone fill (empty without a table).
         """
         if self.decisions is None:
             return {}
-        return simulated_floors(self.decisions, "provisional")
+        # Filled bins take no part in the floors (v7.9). The fill only reaches
+        # bins deeper than the shallowest emitted one, so this cannot change a
+        # floor; it keeps the rule explicit. A version-6 table has no filled
+        # bins, so this is the table itself.
+        return simulated_floors(unfilled_decisions(self.decisions), "provisional")
 
     def depth_bins(self, counts: np.ndarray | Sequence[float]) -> np.ndarray:
         """Return each cell's grid bin (NaN below the grid or without a grid)."""

@@ -9,6 +9,7 @@ gate-P member helpers, the test-set top-up and the diagnostic comparison.
 
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -779,6 +780,53 @@ def test_load_resolvability_refuses_version_7_by_default(
     with pytest.raises(res.ResolvabilityError, match="version-7"):
         res.load_resolvability(tmp_path)
     assert res.load_resolvability(tmp_path, allow_version_7=True) is not None
+
+
+@pytest.mark.parametrize("value", [None, 1, 5, 6, 7, np.int64(7)])
+def test_known_resolvability_versions_are_read(value: Any) -> None:
+    version = res.checked_resolvability_version(value, source="test")
+    assert version == (None if value is None else int(value))
+
+
+@pytest.mark.parametrize(
+    ("value", "match"),
+    [
+        (8, "newer than this code"),
+        (0, "unknown resolvability version 0"),
+        (-6, "unknown resolvability version -6"),
+        ("7", "unknown resolvability version '7'"),
+        (6.0, "unknown resolvability version 6.0"),
+        (True, "unknown resolvability version True"),
+    ],
+)
+def test_an_unknown_resolvability_version_is_refused(value: Any, match: str) -> None:
+    with pytest.raises(res.ResolvabilityError, match=match):
+        res.checked_resolvability_version(value, source="test")
+
+
+@pytest.mark.parametrize("value", [8, 0, "7"])
+def test_load_resolvability_refuses_an_unknown_version_for_every_caller(
+    v7_run: res.ResolvabilityResultV7, tmp_path: Path, value: Any
+) -> None:
+    v7_run.write(tmp_path)
+    path = tmp_path / res.RESOLVABILITY_SUMMARY_FILE
+    summary = json.loads(path.read_text())
+    summary["resolvability_version"] = value
+    path.write_text(json.dumps(summary))
+    for allow in (False, True):
+        with pytest.raises(res.ResolvabilityError, match="resolvability version"):
+            res.load_resolvability(tmp_path, allow_version_7=allow)
+
+
+def test_tables_of_an_unknown_version_refuse_to_decide(
+    v7_run: res.ResolvabilityResultV7, tmp_path: Path
+) -> None:
+    v7_run.write(tmp_path)
+    tables = res.load_resolvability(tmp_path, allow_version_7=True)
+    assert tables is not None
+    tables.summary["resolvability_version"] = 9
+    with pytest.raises(res.ResolvabilityError, match="newer than this code"):
+        tables.decisions()
 
 
 def test_a_version_6_table_refuses_ensemble_decisions(tmp_path: Path) -> None:

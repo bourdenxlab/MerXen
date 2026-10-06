@@ -890,7 +890,9 @@ class AnnotationRealQcConfig(_AnnotationModel):
             prediction at the dataset's own per-class depth by more than
             this (``real_qc.coverage_vs_simulation``; never an offset).
         coverage_min_cells: Dataset cells a (level, class) needs for that
-            warning.
+            warning. Below ``real_qc.CLASS_DEPTH_MIN_CLASS_CELLS`` (100) the
+            warning would also judge classes whose prediction takes the
+            label-free depth histogram instead of their own depth.
         factor_remeasure_min_r: M3c: warn when the first in-house dataset's
             re-measured per-gene factors correlate below this with the
             stored factor table on the informative genes

@@ -254,6 +254,7 @@ class Columns:
     MICROGLIA_WEIGHT: Final = "microglia_weight"
     FLAG_MICROGLIAL_SPILLOVER: Final = "flag_microglial_spillover"
     FLAG_ASTRO_LOWCOUNT: Final = "flag_astro_lowcount"
+    FLAG_NONNEURONAL_HIGH_DEPTH: Final = "flag_nonneuronal_high_depth"
     EXCLUDE_HARD: Final = "exclude_hard"
     DISCOVERY_CAUTION: Final = "discovery_caution"
 
@@ -392,14 +393,25 @@ def _level_specs(level: str) -> dict[str, ColumnSpec]:
     return {spec.name: spec for spec in specs}
 
 
+# Contract columns added after label tables were first written: RESOLVE always
+# writes them, ``validate_label_table`` checks them when present and does not
+# require them, so a table written before them (an M8 run, a cached RESOLVE
+# output) still validates. ``flag_nonneuronal_high_depth`` (M3c follow-up,
+# plan §8.3 v7.9): null for every cell of a version-6 bundle.
+OPTIONAL_CONTRACT_COLUMNS: Final[frozenset[str]] = frozenset(
+    {Columns.FLAG_NONNEURONAL_HIGH_DEPTH}
+)
+
+
 def column_specs(
     species: Species, *, include_fine_levels: bool = False
 ) -> dict[str, ColumnSpec]:
-    """Return the required columns of a species' label table.
+    """Return the contract columns of a species' label table.
 
     Soft-composition, raw engine (``mmc_*``) and v1.1 (``ll_*``) columns are
     optional and not listed; ``validate_label_table`` checks soft columns when
-    present.
+    present. The listed ``OPTIONAL_CONTRACT_COLUMNS`` are checked when present
+    and not required.
 
     Args:
         species: ``"human"`` or ``"mouse"``.
@@ -472,6 +484,7 @@ def column_specs(
         ColumnSpec(Columns.FLAG_MICROGLIAL_SPILLOVER, "nullable_bool", nullable=True),
         ColumnSpec(Columns.EXCLUDE_HARD, "bool"),
         ColumnSpec(Columns.DISCOVERY_CAUTION, "bool"),
+        ColumnSpec(Columns.FLAG_NONNEURONAL_HIGH_DEPTH, "nullable_bool", nullable=True),
     ]
     if species == "human":
         flags.append(ColumnSpec(Columns.FLAG_COP_SUPPRESSED, "bool"))
@@ -663,7 +676,8 @@ def validate_label_table(
 ) -> None:
     """Check a label table against the §4.1–§4.3 contract.
 
-    Checks: required columns and their dtypes; vocabularies (statuses,
+    Checks: required columns and their dtypes (``OPTIONAL_CONTRACT_COLUMNS``
+    only when present); vocabularies (statuses,
     platforms, final levels, branches, leaves, MENDER states); value ranges;
     unique non-null ``cell_id``; ``flag_low_counts == ~in_table``;
     ``low_counts`` exactly outside the table; ``ct_<L>_validated`` only on
@@ -694,7 +708,11 @@ def validate_label_table(
     if include_fine_levels:
         specs = column_specs(species, include_fine_levels=True)
     problems: list[str] = []
-    missing = [name for name in specs if name not in df.columns]
+    missing = [
+        name
+        for name in specs
+        if name not in df.columns and name not in OPTIONAL_CONTRACT_COLUMNS
+    ]
     if missing:
         problems.append(f"missing columns {missing}")
     for name, spec in specs.items():
