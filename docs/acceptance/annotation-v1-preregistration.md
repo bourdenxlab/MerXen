@@ -7,6 +7,7 @@
 - **Evidence root** (`$A`): `/srv/storage/MerXen/annotation_dev/evidence_20260926`. The item-1 baselines are in `$A/shadow/baselines/metrics/*.csv` (§10 lists the files); items 2–7 are in `$A/shadow/{e8,x1,heldout,flags,ll,glial_jsd}/` (§11), summarised in `$A/shadow/SHADOW_SUMMARY.txt`.
 - **M3c addendum (2026-09-28):** §14 pre-registers the acceptance tests of milestone M3c (Xenium Prime 5K measured efficiency, per-class depth and emission stability; plan §12 "M3c", as of `ce15cde`) before any M3c code, with your decisions of 2026-09-28 and the M3c scope decision. §9 stays the plan's §14 as of `06a04a1`; the plan's later "Version-7 families" paragraph is quoted in §14.1.
 - **M3c amendment (2026-09-29):** §15 records the orchestrator decisions D1–D7 of 2026-09-29, **pending your confirmation at PR review**, made after §14 (iii) failed in stage D: eight ensemble members, a one-standard-error margin on E2's spread route, the re-test of (iii) on two new keyed ensembles (stop if it fails), and the per-class warning, lung-scenario headline and panel-card changes. It is committed before any code of the amendment and before any new run; the stage-D failure stays on record (§15.1).
+- **M13 (2026-10-06):** §23 pre-registers the real-data acceptance of the new-panel human MERSCOPE family (P5822, P4815, P3518, P7417) and the gate-P definitions that apply to every family, before any measurement on the family. It records the user's decisions of 2026-10-02 (D1 (a), D2 (d), D3 (a), the same-species dry-run rule D4, D25, D26) and marks every item that depends on an unanswered decision as proposed.
 
 ## 1. Rules
 
@@ -829,3 +830,165 @@ The orchestrator put the question of §22.7 to the user with the options of `$A/
 - **Test (i) after the merge with M8:** the golden build hashes of the eight human self-map bundles (`seaad_mr_panel`, `whb_frontal_supc_clus` on the four human golden panels) were re-pinned when M3c merged after M8, because M8 D1's held-out test-set revision enters those build hashes by design (§18); the held-out test-set bundles, every mouse value and every version-6 table stay byte-identical. The version-7 self-map now also records D1's `test_set_exclusion`, which its test cells already followed. The four version-7 human bundles built by M3c before the merge (two WHB, two SEA-AD) predate D1; D1's revision enters every human self-map's hashed test-set params, so the merged code builds new ones and never reuses them.
 - **Test (i) on other hosts:** the resolvability tables' floats differ in their last bits between the GitHub runner and dwight (same pinned packages), so test (i-a) compares those two tables to 10 significant digits (re-derived on dwight, where the 17-digit values still matched); the decisions, cells, floors, trust and summary stay byte-exact. This relaxes only the comparison of those float columns beyond 10 significant digits; every decision and emitted bin is still compared exactly, so no verdict depends on it.
 - **Nothing is promoted** (test (v)): every 5K bundle stays provisional. The current 5K mouse bundle is the amended code's `f6127077…`; stage D's `e0590aac…` stays in the store as history. Nothing reads version 7 until RESOLVE does (the M4 follow-up), which is also where `M3C_EXIT_REPORT.txt` §10.7 question 4 (smoothing emission over neighbouring bins, or reporting the ensemble range) belongs.
+
+## 23. New-panel human MERSCOPE family: real-data acceptance and gate-P definitions (M13; recorded 2026-10-06, before any measurement on the family)
+
+**Status.** Recorded on 2026-10-06 on `feature/rca-m13-new-panel-onboarding` (cut from the integration branch at `57c8488`), before any measurement on the family and before the set a dry run (§23.9). The source is the M13 planner's draft (`$A/m13/M13_IMPLEMENTATION_PLAN.md` §5, 2026-10-02) as corrected by its CHECK section (K1–K17, which supersede the draft text they correct), with the user's answers of 2026-10-02 (§23.2). The rules of §1 apply to everything below.
+
+**Labels.**
+- **[P]**: *proposed; to be confirmed by the user before any of the family's outputs are read.* It marks every threshold and definition that depends on a decision the user has not answered. Where the planner recommended a default, that default is written as the proposal; none is adopted until the user confirms it.
+- **[R]**: registered elsewhere (§9, which is plan §14; plan §8.8; §18–§22) and only cited here. Nothing in this section changes it.
+- **[U]**: decided by the user (§23.2).
+
+**Reading rule.** No output of the family is read, the label-free depth read included, until the user has confirmed, changed or withdrawn every [P] item of §23.3–§23.7. The [P] items of §23.9 are also answered before the set a dry run runs. Each answer is recorded here, dated, before the read or run it governs.
+
+### 23.1 The family, and what exists before this section
+
+- **The family** (the new-panel human MERSCOPE family): four human brain sections, P5822, P4815, P3518 and P7417, from four donors (D26), each imaged on MERSCOPE only (unpaired). One Vizgen custom panel ("HumanBrainV2", codebook C2P2452): 496 genes and 65 `Blank-*` codewords, with an identical `cell_by_gene` header in all four sections.
+  - Provisional `panel_hash` `dcddfbd18fb8…` and `family_id` `human_merscope_dcddfbd18fb8` (basis `own`); Jaccard with set a 0.108 (77 shared genes).
+  - The family is in neither `validated_panels.csv` nor `resolvability_v6_pins.csv`, so it resolves to resolvability version 7 (§21.1) with the eight members of §22.3: `R1_contam_HO@0`, `@6`–`@12`, with `clean@0` reported. MERSCOPE has no measured factor table, so there is no R3 member; it is not a Prime family, so there is no lung stress recipe.
+- **What exists on 2026-10-06, unread:**
+  - the user's legacy-mode pipeline outputs for the four sections (MerXen segmentation, spatial data and the legacy annotation). The legacy labels exist and have not been read;
+  - the outputs of a `map_first` run of 2026-10-02: integration-branch code at `57c8488`, `anatomical_region = frontal_cortex` set explicitly in a samplesheet copy, all four segmentations, cortical depth off, written add-only with the table suffix `m13` under the M8 safeguards (store backups, before / after manifests). Its PREP built the family's version-7 bundle and its MAP tasks completed. All 16 RESOLVE tasks (4 sections × 4 segmentations) failed with `ResolvabilityError` ("a resolvability version-7 bundle … needs a consumer that declares version-7 support"): RESOLVE has no version-7 consumer yet (M13 plan chunk C14; plan §8.3 v7; §21–§22). The family's `map_first` labels therefore do not exist. Its MAP outputs exist under the family's results and have not been read. The run's own instructions forbid reading the family's outputs until this section is committed; only its logs (task states and the error message) have been read.
+- **Before any measurement.** Nothing here was chosen with an annotation or MerXen-segmentation measurement of the family in view. What was computed before this section, all label-free, is disclosed in §23.8.
+
+### 23.2 Decisions of 2026-10-02 recorded with this section
+
+The user's answers, given in the chat on 2026-10-02 and recorded by the M13 orchestrator, verbatim where quoted (`$A/m13/M13_IMPLEMENTATION_PLAN.md`, "USER DECISIONS"). Every other decision the planner put (D5–D24, D27) and the CHECK's D28 and D29 are **unanswered**. Their recommended defaults are not adopted, and every item below that depends on one is [P].
+
+| # | Question (planner's §4) | Answer | Label (§1 rules 1–4) |
+|---|---|---|---|
+| D1 | Does the M8 other-region COP drop (§18 D1) apply to M13, gate P and the human families? | "use for all new panels": option (a) | loosening (rule 2), approved in writing |
+| D2 | Other-region test cells in the leave-one-donor-out sets | "Yes, do this": option (d), a true per-donor hold-out, with (c) as the fallback | definition of the replicates; no threshold |
+| D3 | The family's anatomical region | "Yes it is frontal cortex.": option (a), all four sections | input; no threshold |
+| D4 | The dry run before a new family is scored | "Dry run should only be against panels from the same species as the new panel. The species must be selected when starting a new panel check." | loosening (rule 2: it drops ag7 and VZG2 from the dry run before a human family is scored), approved in writing |
+| D25 | Compute for the family | "Yes lets go ahead, please prepare for this and I will tell you when to start" | compute approval; the user starts each run |
+| D26 | The family's metadata | quoted below | inputs; no threshold |
+
+- **D1 (a).**
+  - The M8 D1 rule (§18: leave out the other-region test cells whose truth supercluster is Committed oligodendrocyte precursor) applies to every human gate-P test set and to the PREP self-map of every new human family, this one included. The gate-P test sets are the default donor's check half and both other donors' leave-one-donor-out sets (D2), with their stress and clean replicates.
+  - It is what the code does today (`reference.self_map_test_cells` applies it to every self-map on `whb_frontal_supc_clus_ho`), so it needs no code change and no rebuild. It settles §18's "Not covered" item for gate P, 5K and the M13 custom panels. Options (b) (key the drop to the M8 bundles) and (c) (also a no-drop set a dry run) were not chosen.
+  - §18's caveats C1 and C2 carry over, and the gate-P PR restates them with the approval: the set a evidence behind D1 (PREP broad Oligodendrocyte precision) does not carry over to other panels; on set a, the other-region and donor COP cells are called Oligodendrocyte at rates that do not differ per depth (Fisher p = .36–1.00); with the drop, the COP → Oligodendrocyte error is estimated from the donors' frontal COP cells only (20 in the default donor on set a), so supercluster COP may be `not_evaluable` in gate P.
+- **D2 (d).**
+  - Each of the two other frontal WHB donors (H19.30.001, H18.30.002) draws its own non-frontal non-neuronal top-up cells, excluding every cell of the default held-out test set, under the same per-class top-up rule. The default donor's (H19.30.002) replicate stays exactly the production check half, and the frozen thresholds still come from it. The replicates are then disjoint: no cell is counted twice, and no fit-half cell leaks.
+  - The per-donor pool sizes are reported from the reference metadata (no mapping) before the first leave-one-donor-out build. If a donor's own pool is too small, the user decides the fallback (c) with those sizes in view, before any replicate is mapped. Under (c) the shared cells stay in every replicate, each cell is counted once in pooled sets, and the default donor's fit-half cells are excluded everywhere. What counts as "too small" is [P].
+- **D3 (a).** All four sections are frontal cortex, and every run sets `anatomical_region = frontal_cortex` explicitly (the run of 2026-10-02 did). NR11 is therefore scored (§23.6). Gate P's NP7 region part uses `region_plausible_frontal_cortex` whatever the sections' region, because gate P simulates from the frontal reference (CHECK K4).
+- **D4.**
+  - The dry run uses only the seeded families of the new family's species: set a before a human family is scored; ag7 and VZG2 (with the second disjoint WMB draw) before a mouse family. The gate-P command takes a required species argument, chosen when a new-panel check starts.
+  - This amends §9's "Dry run" ("Before any new family is scored, the programme runs on the seeded families (set a, ag7, VZG2)") per species; §9 stays the verbatim copy. Dropping a dataset is a loosening under rule 2 (CHECK K2). The user's rule quoted above is the written approval, and this family's gate-P PR quotes it.
+  - Unanswered: whether the human Prime 5K and Xenium Human Brain (266) gate-P runs join this pass (the planner's D4).
+- **D25.**
+  - Approved: the family's PREP, the `map_first` annotation of the four sections, and gate P on the family. The user starts each run.
+  - Run settings the user asked for on 2026-10-02: `map_first` written add-only with a suffix into the family's existing results, with the legacy outputs untouched and the M8 safeguards; all four segmentations; the M8 steps (map-first labels, MENDER, cortical depth, annotation report). Cortical depth and its report items are added once the user's boundaries exist.
+- **D26.**
+  - Answers: "They are four different donors." "Diagnosis unknown, assume the same as the other batch of four for now" (P7513, P1212, P7113, P5011). "The tissue is fresh-frozen, rather than the FFPE of P7513, P5011, P1212, P7113." "The antibody targets are named in the channel names." On the pia / WM boundaries: "Yes, I will draw that for all four once they are processed, before you start running anything", so the H12-style depth check is in scope for all four sections (NR15).
+  - Effects: NR14's spread across sections is a spread across donors. The gate-H analogue thresholds proposed in NR10–NR12 were measured on the FFPE sections of the other batch, and this family is fresh-frozen.
+  - Not answered: Braak / CERAD, age, sex and PMI; section thickness; the expected grey / white matter share and rare classes; whether GFAP, SNAP25, MBP and CLU are protein IF; whether the panel will ever be paired with another panel (NP8).
+
+### 23.3 Rules
+
+1. Real data never promote this family (OD-E1 / OD-E9) [R]. Every check here can only warn, lower a section's gate level, force `broad_only` or `not_resolvable`, or open a review. A passing check changes neither the trust state nor the margins.
+2. The family is not seeded, so §8.8's downgrades apply in full, with no warn-only period [R]. The only exceptions are the ones this section writes (NR5's effect, D18; NR9's effect, D23), each [P].
+3. Nothing below is revised after any of its values is seen, except by a tightening or by a loosening the user approves in writing and the PR quotes (§1 rule 2).
+4. Promotion is possible only through the family's own gate-P PR (§9, gate-P rule), which quotes this section's outcomes. The family's real-data QC runs and is reviewed before any gate-P PR for the family merges; otherwise precondition P2 would fail (CHECK K16).
+5. Repository texts name the family only by its neutral name and the section ids.
+
+### 23.4 Datasets and configuration
+
+- **Datasets:** P5822, P4815, P3518 and P7417 (human, MERSCOPE only, unpaired, four donors).
+- **Segmentation:** proseg_hybrid is scored, as the human default (OD-B7′ = A, §20; D25). reseg is reported; proseg_mask and original_seg run and are reported as context.
+- **Region:** `frontal_cortex` (D3 (a)) [U].
+- **References:** WHB frontal as the primary, SEA-AD as the second vote (the human defaults) [R].
+- **Panel** [P]: the declared panel, frozen under D17 (unanswered: the vendor codebook file, an RGS5 override, or symbol resolution without RGS5).
+  - The frozen `panel_hash` is recorded here, dated, before any output is read, and confirmed on a published clustered H5AD from its `var` only.
+  - The run of 2026-10-02 used the panel as the pipeline derives it, with RGS5 unresolved. A choice that changes the resolved gene set changes the hash, and PREP and MAP are then re-run.
+- **Mode:** `map_first` with the version-7 bundle (R1 × 8, §22.3) and `provisional` trust [R].
+- **Run settings** [P]: the seeds and `n_processors` are fixed and recorded in the PR; every self-map maps with 8 MapMyCells workers, as in §18 item 2.
+- **Code:** the integration-branch code at a recorded commit that includes the RESOLVE version-7 consumer (C14), run with a separate work-dir; outputs add-only with a suffix (D25).
+
+### 23.5 Preconditions [P]
+
+These are mechanical. If any fails, every row is `UNSCORED`.
+
+- **P1.** All four sections carry the same frozen `panel_hash`. All 65 `Blank-*` codewords are removed by the registry, and none reaches the MapMyCells query (NP1, §8.4) [R].
+- **P2.** The family has no `validated_panels.csv` row, and its trust is `provisional`.
+- **P3.** RESOLVE accepts the version-7 bundle (C14), and each MAP and RESOLVE run names its bundle's build hash. C14 keeps the version-6 and M8 RESOLVE outputs identical apart from its new null schema column, under a regression test (CHECK K11).
+- **P4.** The real-data QC module records an outcome for every §8.8 check, per section × segmentation: `pass`, `warn`, `fail`, `not_applicable` or `not_evaluable`.
+
+### 23.6 Criteria
+
+| ID | Criterion | Threshold | Effect when it fails | Kind | Status |
+|---|---|---|---|---|---|
+| NR1 | Downgrade-only mechanics | Compared with a QC-free re-run of RESOLVE on the same MAP output: the trust state, `EmissionPlan`, `FloorPlan` and every emitted label are identical, except labels set to `not_resolvable` and the gate level lowered by a named check. Paired concordance, the factor re-measure and the prefilter spot check are recorded `not_applicable` (no paired section, no R3 member, 496 ≤ 1,000 genes; §8.8) | The M13 exit fails for the family (a code defect) | must pass | definition [P]; the principle [R] (§8.8) |
+| NR2 | Reproducibility (H15 analogue) | (a) An identical re-run gives identical label-table content. (b) MapMyCells `rng_seed` 0 vs 1: confident broad labels switched between two confident names ≤ 1% of the seed-0 confident broad labels (gate H's reading, §20 D12 (a)); the threshold-crossing share is reported | (a) The M13 exit fails. (b) A warning, listed in the PR | (a) must pass; (b) warning | [P] |
+| NR3 | Resources (H14 analogue) | Annotation wall ≤ 2.5 h per section over the evaluated segmentations; MAP peak RSS ≤ 16 GB; no GPU; PREP wall time against NP9's reference (D10 / OD-E18, open) | A warning, listed in the PR | warning | [P] |
+| NR4 | Dataset gate (§5.4, gate A) | As defined: `broad_only` when A < 0.30; `failed` when confident broad coverage of table cells < 0.25; a warning when coverage of segmented objects < 0.15 | As defined; a `failed` section is a family-level concern (§23.7) | QC as defined | [R]; the concern trigger [P] |
+| NR5 | Marker referee on confident `ct_broad` (§8.8) | A warning below 0.75 and `broad_only` below 0.70 (§8.8's human values, which came from the H9 hand lists). Proposed statistic: G2-style pseudo-label consistency on per-panel marker sets derived from WHB profiles (D18 (a)). `not_evaluable` with fewer than 2 marker groups of ≥ 3 markers, or too few marker-pseudo-confident cells. The derived statistic is re-measured on set a before the family is scored; if set a falls below 0.75, the thresholds go back to the user (D18) | A warning; below 0.70 a gate-level cap (D18 (a)) or a trust cap (D18 (b)) | QC | the values [R]; the statistic, marker sets, effect and `not_evaluable` rule [P] (D18) |
+| NR6 | Flag rates (H16, §8.8) | A warning when more than half (`uninformative_strata_warn_frac` 0.5) of a section's (class × platform) strata are uninformative under H16's 15% marking: the literal reading of §8.8 (CHECK K6). D22's option (a) (each flag's own null switch over flag × class × platform) is reported beside it and adopted only with written approval | A warning | QC | the threshold [R]; the reading [P] (D22) |
+| NR7 | Gene complexity (§8.8) | A warning, with the "simulated coverage unreliable" text, when native median `n_genes` > 1.45 × simulated in any depth bin with ≥ 50 cells of each kind. Proposed source: simulated `n_genes` stored by the version-7 PREP and counted on the bundle's query genes, native `n_genes` counted on the same genes (D19 (a)). `not_evaluable` when the bundle stores none; the bundle of 2026-10-02 predates the artefact | A warning | QC | the threshold [R]; the simulated cells' source and the `not_evaluable` rule [P] (D19) |
+| NR8 | Per-class coverage against simulation (version 7; §8.8, §21.1 item 4, §22.2 D4) | Per (level, called class) with ≥ 200 section cells: a warning when real < simulated − 0.10, on the class-depth predictor at the section's own per-class bin shares. Non-neuronal high depth (`flag_nonneuronal_high_depth` and the trend) is report-only | A warning | QC | [R]; needs C14 for the section's per-class depth |
+| NR9 | Registration G1 (M0a, §7.6) | As defined there | §8.8's effect (`failed` + `exclude_hard`), or warn-only in M13 (D23 (b), a loosening against §8.8) | QC | the effect [P] (D23) |
+| NR10 | COP control (H5 analogue) | Confident COP supercluster ≤ 2% of table cells; confident broad OPC ≤ 10%; the COP-derived OPC share reported | Listed; a family-level concern (§23.7) | acceptance | [P] |
+| NR11 | Region plausibility (H2 analogue) | `flag_implausible` ≤ 1% of table cells; scored, because the region is frontal cortex (D3 (a)) | A family-level concern | acceptance | the threshold [P] |
+| NR12 | WHB–SEA-AD 7-class agreement on table cells with ≥ 20 counts (H3 analogue) | ≥ 0.80 (H3's bar for P1212, P7113 and P5011) | A family-level concern | acceptance | [P] |
+| NR13 | Confident broad coverage and gate level per section | Report-only: no per-dataset E2 baseline exists for this panel. The predicted levels are written into the PR from the label-free depth read, before any MAP or RESOLVE output of the family is read. Proposed depth source: the MerXen tables of the evaluated segmentation, `total_counts` only, pooled and per section (D8 (b)) | none | report | [P] (D8) |
+| NR14 | Composition per section and its spread across the four sections (four donors, D26); reseg vs proseg_hybrid agreement on shared cell ids (M8b tooling) | Report-only | none | report | [P] |
+| NR15 | Optional extras, each only if its input exists: held-out-gene enrichment with a panel-specific marker list derived by the §8.6 specificity rule and fixed before the run (D27); protein IF vs RNA concordance per channel, with the targets taken from the channel names (D26); the H12-style depth check on all four sections once the user's pia / WM boundaries exist (D26): Upper-layer IT < Deep-layer IT < Deep-layer NP/CT/6b medians where the gate emits supercluster, and Oligodendrocytes WM > GM, with gate H's scored CIs (tangential blocks for the ordering, §20 D11; square tiles for WM − GM) | Report-only in this first family | none | report | [P] |
+
+### 23.7 What counts as a pass [P]
+
+- **Onboarding accepted** (the family's M13 exit on real data): P1–P4 hold, and NR1 and NR2 (a) pass, on all four sections × proseg_hybrid. Every other row is recorded with the value, threshold and effect it names, and the PR explains each warning.
+- **Family-level concern.** It holds back the family's gate-P PR until the user has reviewed it, and it never promotes or demotes on its own. Any of these triggers it:
+  - NR4 `failed` on any section;
+  - NR5 `broad_only` on ≥ 2 of the 4 sections;
+  - NR10, NR11 or NR12 failing on ≥ 2 of the 4 sections.
+- **A gate-P pass together with a family-level concern:** the PR states both, and the user decides.
+
+### 23.8 Disclosed prior knowledge (before this section was recorded)
+
+Computed on 2026-10-02 from vendor files and directory listings only. All of it is label-free; none of it is an annotation or MerXen-segmentation measurement.
+
+- **The panel:** 496 genes plus 65 blanks; 77 genes shared with set a; 495 of 496 resolved (RGS5 is unresolved because it is ambiguous in the WHB gene table); no codebook file on disk.
+- **Vendor `cell_by_gene` summaries:**
+  - P5822: 178,602 cells, median 309 counts and 107 genes;
+  - P4815: 119,617 cells, median 144 counts and 59 genes;
+  - P3518: 154,962 cells, median 333 counts and 119 genes;
+  - P7417: 132,317 cells, median 280 counts and 91 genes;
+  - blank share of counts 0.62–0.77%; 31–62% of vendor cells above 250 counts; vendor cells hold 46% of the transcripts on P7417.
+- **Region evidence put to the user for D3:** pseudobulk detection of layer markers (CUX2, RORB, CBLN2, TSHZ2) and very high PLP1: neocortex with white matter, not cerebellum.
+- **NP2 preview** from the legacy whole-WHB marker lookup (reference data only): 131 root markers; every WHB root child has ≥ 10 markers except Bergmann glia (0) and Upper rhombic lip (9). NP2 is recomputed on the production frontal bundle's lookup. Whether weak or collapsed parents are accepted is the user's call in the gate-P PR (CHECK K14).
+- **Run state:** which pipeline steps had published outputs per section (directory names only), and the logs of the run of 2026-10-02 (task states and the RESOLVE error).
+
+### 23.9 Gate-P definitions recorded with this section (every family; before the set a dry run)
+
+Gate P is simulation only (§9). These definitions apply to every family, this one first. Each is [P] unless marked otherwise. The NP4 code (M13 plan chunk 1) implements item 3 and marks its D12 part as pending.
+
+1. **C_P.** Per level, C_P is fixed on the truth parent class of the pooled test cells, before any cell is mapped (D12) [P]. The ≥ 700 test cells and ≥ 90% share rules are [R].
+2. **Class-balanced weights** give equal total weight to each truth type within the called class's tested set (D12) [P].
+3. **NP4.**
+   - *Tested sets:* the pooled seed-0 sets (`gate_p_tested_sets`) applied to each replicate. A "≥ D_P" set takes each test cell once, at its deepest row of the level, before any class or confidence filter (D12) [P].
+   - *Floor:* each replicate with ≥ 100 confident calls in the set has point precision ≥ target_L [R].
+   - *Range:* applied only when every replicate has ≥ 100 calls [R]. Per group (a donor or a draw), p_g and n_g are the arithmetic means over its seeds of the per-seed precision and confident n; p̄ and n̄ are the means of the group values; the limit is max(0.03, 3.5 × √(p̄(1 − p̄)/n̄)). The formula is [R]; the averaging is [P] (D12; CHECK K9 item 3). It follows the registered E2 convention (`member_spread`, §22.3).
+   - *Weights:* NP4 precision is unweighted, because §14 reweights NP3 only (CHECK K9 item 2) [P].
+   - *Seeds:* "seeds 0 / 1" are MapMyCells mapping seeds, scored as call changes (D6, folded into D12) [P]. Seed 0 vs 1 changes ≤ 2% of confident labels per validated level [R].
+   - *Every tested set:* an NP4 failure at any tested set fails the (level, class). This is the literal reading of §9 NP4 (CHECK K10). Letting a shallow NP4 failure only raise `validated_min_depth` (D29) would be a loosening.
+   - *Inputs:* each replicate is scored from a table that holds exactly one replicate, and the replicates form a full grid (≥ 2 groups, the same seeds in every group). Otherwise gate P stops with an error.
+4. **NP6.**
+   - *Drop test:* fail when the one-sided 95% lower bound of p_base − p_stress exceeds 0.05, from a two-proportion z-test on each set's Kish n (D12) [P].
+   - *Factors:* the cross-platform factor source and the rule for genes the table does not cover are D7 [P]. Only 77 of this family's 495 genes have measured offsets. The proposal is the registered basis (`research/xplat` `log2_xen_over_mer_gene_means.csv`, D-A7) with a keyed empirical resample for the uncovered genes, centred on the median gene, capped at ±2 log2 and registered as a `sim_inputs` stress asset with provenance.
+   - This family has no R3 member and no lung stress recipe.
+5. **NP7.**
+   - *Single wrong node:* the share of truth class c's confident calls at a tested set that land on one wrong node; the called-class view is reported (D12) [P].
+   - *The 1% denominator:* per level, the pooled held-out confident calls at the frozen thresholds over all classes and emitted bins, per member for version 7 (CHECK K9 item 1) [P].
+   - Calls to sink or region-implausible nodes (rows whose `parent` is null, which lie outside the tested sets) are counted separately against that denominator. The region column is `region_plausible_frontal_cortex` (CHECK K4).
+6. **NP5 expected depth** (D8) [P]: either each class's median in a per-class depth profile registered as a `sim_inputs` `profile` asset (provenance: the source sha256 and the deriving script; `trust_effect: none`; frozen and recorded before gate P runs on the family; CHECK K7), or the label-free pooled median of the family's sections. No other real-label input reaches gate P.
+7. **D1 and D2:** D1 (a) and D2 (d), §23.2 [U].
+8. **Dry run** (D4, §23.2) [U].
+   - For a human family the dry run is set a only. It must pass at broad for every C_P class and at supercluster for the classes H18 expects ([R]: §9 "Dry run"; CHECK K1).
+   - *The classes H18 expects* (D28) [P]: H18's set (every class with ≥ 50 test cells), less only what the user has already approved: the bins and classes that M8 D4 names, and supercluster COP, which D1 removed from H18's scope (§18 C1). Any further narrowing is a loosening.
+   - *Regime* (D5) [P]: the proposal is both version 6 (set a's R1@0) and the version-7 ensemble that this family uses, each at frozen provisional-regime thresholds.
+   - With D1 (a), every dry-run set carries the drop.
+   - A failure means the criteria are unattainable. They are then revised in a PR the user approves, before this family is scored (§9).
+9. **NP9** [P]: the identity re-run covers PREP's bundle and one seed-0 replicate per member, with the tables compared (CHECK K13). The time reference for version-7 families is D10 / OD-E18 (open). The prefilter part does not apply at ≤ 1,000 genes [R].
+10. **NP8** does not apply unless the family will be paired with another panel (D26, unanswered on this point).
+11. **Records** (D14) [P]: no `validated_panel_levels.csv` row is written for classes where nt does not apply, so the rank rule of `validated_max_level` stays unchanged; `ct_seaad_subclass_validated` is always false and report-only, because gate P scores the primary reference only.
