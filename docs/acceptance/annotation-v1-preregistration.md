@@ -1120,3 +1120,28 @@ Broad Oligo's ≥ 30 set has 277 of 278 confident calls right (.996). Class-bala
 
    Both move `class_balanced` towards passing, so they belong to the same ruling. Example: 1,000 calls of one bin, 990 right in three types of 330 and 10 wrong in two types of 5 of another broad class. The class-balanced precision is .908 with the trim and .60 without it. Under the literal rule, a set below 60 counts (target⁺ .97) has room for almost no wrong-type call.
 3. **Values on a family dataset's composition** (§9 NP3: "reported when one exists"). These are not computed, because that composition needs the dataset's labels, and no real-label input reaches gate P other than NP5's registered profile (§23.9 item 6; CHECK K7). The values on the dataset's depth histogram (label-free) are reported.
+
+### 23.12 NP5 readings put to the user (M13 NP5 review; recorded 2026-10-06, before the set a dry run)
+
+These readings come from the review of the NP5 code (M13 chunk C3). They were found on synthetic tables, and no NP5 output of set a or of the family is recorded. Nothing here changes a threshold, target or limit: the t* range stays ≤ 0.05, the extrapolated share ≤ 0.5 and the compared bins need 50 test cells.
+
+**Open** ([P] kept; the code's behaviour until the user rules). Each is ruled before the set a dry run is scored. Choosing a reading after its numbers are seen, when it validates more classes, is a post-hoc loosening (§1 rule 2).
+
+1. **The median or the profile shares** (§9 NP5: "its cells at the family's expected depth").
+   - §23.9 item 6 and §23.10 item 6 (D8, confirmed) make the expected depth each class's median. Plan §8.3 v7.5 says the "> 50% extrapolated" test "uses the class's profile shares".
+   - The two readings are not nested. The version-7 monotone fill can mark a bin extrapolated between bins that are emitted on their own verdicts, so the extrapolated bins need not be contiguous, and either reading can fail a class that the other passes:
+     - decisions that mark 30, 120 and 250 extrapolated, and a profile of 10% at 20, 20% at 40, 25% at 80, 25% at 150 and 20% at 300 counts: the shares give 0.65 (fail), the median (80, in the 60 bin) passes;
+     - decisions that mark only the filled 60 bin, and a profile of 45% at 40, 10% at 70 and 45% at 150 counts: the shares give 0.10 (pass), the median (70, in the 60 bin) fails.
+   - *Scored:* both. A class passes only when both are at most 0.5 (`median_share` and `profile_share` are reported side by side). Scoring either alone would pass a class that this rule fails.
+2. **A t* range on too few replicates.**
+   - A replicate with fewer than 50 fit-half calls in a tested set has no fit and is left out of the range. A set with fewer than two thresholds passes the t* part (`evaluable` false).
+   - A tested set that just reaches 200 pooled confident calls can hold fewer than 50 fit-half calls per replicate. The thinnest sets can then pass the t* part on one threshold or none, as NP4's vacuous sets pass NP4 (§23.9 item 3), and such a set counts as a pass in the every-member verdict.
+   - The NP5 class table reports, per class, how many tested sets passed this way (`n_tstar_not_evaluable`, with their labels) and how many (set, replicate) pairs were left out (`n_tstar_unfitted`).
+   - *Alternative:* fit t* on all of a replicate's calls in the set. That departs from the fit-half rule that `decide` uses.
+3. **The version-7 saturated cap counts as a t*.** A set whose fit never reaches the target, but whose fit-half calls are saturated, takes the cap of 0.99 (v7.8), as `decide` applies it. NP5 puts the cap in the range like a fitted t*, so a replicate at the cap beside one at t* 0.90 fails the set (range 0.09).
+4. **Other readings**, strict where there is a choice (listed in the `gate_p` module docstring):
+   - a bin is compared when the base run or the replicate has 50 test cells there;
+   - the emission boundaries are the base run's status changes inside the grid (the grid's edges are none), and at most one compared bin may flip, one that flanks a boundary;
+   - a replicate whose fit exists but never reaches the target, and is not capped, fails the t* range;
+   - t* is re-fitted in each replicate on its calls of each tested set (the shared membership rule), not read from the replicate's re-derived decisions;
+   - a class without cells in the profile takes D8's overall median as one depth, so both its shares are 0 or 1. The pooled profile's shares are the alternative.
