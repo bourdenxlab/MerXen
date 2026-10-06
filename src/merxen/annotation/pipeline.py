@@ -188,6 +188,7 @@ if TYPE_CHECKING:
     from merxen.annotation.mouse_gate import RegistrationSignal
     from merxen.annotation.provenance import (
         AnnotationProvenance,
+        PanelProvenance,
         ReferenceProvenance,
         ResolvabilityProvenance,
     )
@@ -3976,6 +3977,73 @@ def trust_for_run(
     )
 
 
+def sample_panel_provenance(
+    trust: TrustDecision | None,
+    primary: ResolveRun | None,
+    panels: Mapping[str, AnnotationPanel],
+    *,
+    sample_id: str,
+    declared_panel_hash: str,
+    panel_report: Mapping[str, Any] | None = None,
+    panel_mode: str | None = None,
+    level_summary: Mapping[str, Mapping[str, Any]] | None = None,
+    n_missing_panel_genes: int | None = None,
+) -> PanelProvenance | None:
+    """Return a sample's ``AnnotationProvenance.panel`` (§4.6; human and mouse).
+
+    ``diagnostics.panel_provenance`` of the primary's trust decision, with
+    the diagnostics of its annotation panel and bundle. Without them (no
+    primary run, no panel file, or diagnostics that do not fit the bundle)
+    the record still carries the decision's family, basis, validated level
+    and table digests, the panel mode and the validated shares, with the
+    sample's declared panel hash and no gene-ID fields.
+
+    Args:
+        trust: The primary reference's trust decision (``None``: no record).
+        primary: The primary run.
+        panels: Panel hash to annotation panel.
+        sample_id: The sample (log messages).
+        declared_panel_hash: The sample's declared panel hash (recorded
+            without diagnostics).
+        panel_report: ``panel_report.json`` content.
+        panel_mode: The pair's resolved panel mode.
+        level_summary: The resolution summary's ``levels`` (their
+            ``validated_share``).
+        n_missing_panel_genes: Declared genes absent from the dataset.
+
+    Returns:
+        The record, or ``None`` without a trust decision.
+    """
+    from merxen.annotation.diagnostics import panel_diagnostics, panel_provenance
+
+    if trust is None:
+        return None
+    diagnostics = None
+    if primary is not None:
+        primary_panel = panels.get(str(primary.record.panel_hash))
+        if primary_panel is not None:
+            try:
+                diagnostics = panel_diagnostics(
+                    primary_panel,
+                    panel_report=panel_report,
+                    bundles=[primary.bundle.manifest],
+                )
+            except ValueError as error:
+                logger.warning("%s: no panel diagnostics (%s)", sample_id, error)
+    return panel_provenance(
+        trust,
+        diagnostics,
+        panel_hash=declared_panel_hash,
+        panel_mode=panel_mode,  # type: ignore[arg-type]
+        validated_share={
+            level: float(value["validated_share"])
+            for level, value in (level_summary or {}).items()
+            if value.get("validated_share") is not None
+        },
+        n_missing_panel_genes=n_missing_panel_genes,
+    )
+
+
 def refused_trust(
     reference_id: str, species: Species, panel_hash: str, reasons: Sequence[str]
 ) -> TrustDecision:
@@ -5157,46 +5225,17 @@ def resolve_human_sample(
             reweighted=reweight,
             restricted_lookup=restricted is not None,
         )
-    from merxen.annotation.diagnostics import (
-        panel_diagnostics,
-        panel_provenance,
+    panel_prov = sample_panel_provenance(
+        trust,
+        primary,
+        panels,
+        sample_id=sample_id,
+        declared_panel_hash=record.declared_panel_hash,
+        panel_report=panel_report,
+        panel_mode=panel_mode,
+        level_summary=summary["levels"],
+        n_missing_panel_genes=n_missing,
     )
-
-    panel_prov = None
-    if primary is not None and trust is not None:
-        primary_panel = panels.get(str(primary.record.panel_hash))
-        diagnostics = None
-        if primary_panel is not None:
-            try:
-                diagnostics = panel_diagnostics(
-                    primary_panel,
-                    panel_report=panel_report,
-                    bundles=[primary.bundle.manifest],
-                )
-            except ValueError as error:
-                logger.warning("%s: no panel diagnostics (%s)", sample_id, error)
-        if diagnostics is not None:
-            panel_prov = panel_provenance(
-                trust,
-                diagnostics,
-                panel_mode=panel_mode,  # type: ignore[arg-type]
-                validated_share={
-                    level: float(value["validated_share"])
-                    for level, value in summary["levels"].items()
-                    if value["validated_share"] is not None
-                },
-                n_missing_panel_genes=n_missing,
-            )
-    if panel_prov is None and trust is not None:
-        from merxen.annotation.provenance import PanelProvenance
-
-        panel_prov = PanelProvenance(
-            panel_hash=record.declared_panel_hash,
-            panel_trust=trust.state,
-            trust_reasons=trust.reason_codes,
-            banner=trust.banner,
-            n_missing_panel_genes=n_missing,
-        )
     engine_record = primary.record if primary is not None else None
     params = engine_record.engine_params if engine_record is not None else {}
     sources = sorted(
@@ -5664,6 +5703,7 @@ def annotate_resolve(
                 trust_overrides=trust_overrides,
                 xy=xy,
                 registration=(registration or {}).get(record.sample_id),
+                panel_mode=panel_mode,
                 validate=validate,
                 seed=seed,
             )

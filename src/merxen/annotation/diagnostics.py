@@ -1991,8 +1991,9 @@ def validated_share_by_class(
 
 def panel_provenance(
     decision: TrustDecision,
-    diagnostics: PanelDiagnostics,
+    diagnostics: PanelDiagnostics | None,
     *,
+    panel_hash: str | None = None,
     panel_mode: PanelMode | None = None,
     validated_share: Mapping[str, float] | None = None,
     n_missing_panel_genes: int | None = None,
@@ -2000,9 +2001,16 @@ def panel_provenance(
 ) -> PanelProvenance:
     """Return ``AnnotationProvenance.panel`` for a dataset (plan §4.6).
 
+    The trust fields (family, basis, validated level, table digests) come
+    from the decision, so a dataset without panel diagnostics (no panel
+    file, or diagnostics that do not fit its bundle) still records them;
+    only the gene-ID fields are then empty.
+
     Args:
         decision: The primary reference's trust decision.
-        diagnostics: The panel's diagnostics.
+        diagnostics: The panel's diagnostics (``None``: not available).
+        panel_hash: The panel hash recorded without diagnostics (default:
+            the decision's); with diagnostics, their panel's hash is used.
         panel_mode: The pair's resolved panel mode.
         validated_share: Validated share of confident labels per level.
         n_missing_panel_genes: Declared genes absent from the dataset.
@@ -2011,9 +2019,23 @@ def panel_provenance(
     Returns:
         The panel provenance.
     """
-    gene_counts = diagnostics.resolved_by_source()
+    gene_fields: dict[str, Any] = {}
+    if diagnostics is not None:
+        gene_counts = diagnostics.resolved_by_source()
+        gene_fields = {
+            "n_declared_genes": diagnostics.n_genes,
+            "gene_id_resolution": {safe_token(k): v for k, v in gene_counts.items()},
+            "n_unmapped": diagnostics.n_unmapped(),
+            "controls_removed": {
+                safe_token(k): v for k, v in diagnostics.controls_removed().items()
+            },
+        }
     return PanelProvenance(
-        panel_hash=diagnostics.panel_hash,
+        panel_hash=(
+            diagnostics.panel_hash
+            if diagnostics is not None
+            else (panel_hash if panel_hash is not None else decision.panel_hash)
+        ),
         panel_family=decision.family_id,
         family_basis=decision.family_basis,
         panel_mode=panel_mode,
@@ -2029,12 +2051,7 @@ def panel_provenance(
             VALIDATED_PANEL_LEVELS_FILE
         ),
         validated_share=dict(validated_share or {}),
-        n_declared_genes=diagnostics.n_genes,
-        gene_id_resolution={safe_token(k): v for k, v in gene_counts.items()},
-        n_unmapped=diagnostics.n_unmapped(),
-        controls_removed={
-            safe_token(k): v for k, v in diagnostics.controls_removed().items()
-        },
         n_missing_panel_genes=n_missing_panel_genes,
         panel_report_sha256=panel_report_sha256,
+        **gene_fields,
     )

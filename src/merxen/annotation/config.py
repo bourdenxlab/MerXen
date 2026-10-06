@@ -779,7 +779,8 @@ class AnnotationGate(_AnnotationModel):
         warn_segmented_broad_coverage: Below this coverage of segmented
             objects the warning flag is set.
         warn_unvalidated_share: Simulation-validated families warn when more
-            of a dataset's confident labels fall outside the validated region.
+            of a dataset's confident labels at a chain level fall outside the
+            validated region; the mouse gate applies the same limit (§8.2).
     """
 
     depth_counts: int = Field(default=30, ge=1)

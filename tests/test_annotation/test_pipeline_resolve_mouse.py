@@ -826,3 +826,189 @@ def test_promotion_by_simulation_never_changes_the_mouse_label_table(
         assert before_trust.state == after_trust.state
         assert not after.labels[validated].to_numpy(bool).any()
         assert panels[0].banner and panels[1].banner
+
+
+PROMOTED_DIGESTS: dict[str, str] = {
+    "validated_panels.csv": "1" * 64,
+    "validated_panel_levels.csv": "2" * 64,
+}
+
+
+def _promoted_samples(
+    tmp_path: Path,
+    setup: dict[str, Any],
+    promotion_trust: Callable[..., tuple[Any, Any]],
+    *,
+    panel_dir: Path | None = None,
+    coverage: bool = False,
+) -> tuple[Any, Any, tuple[Any, Any]]:
+    """Resolve the section before and after a gate-P promotion of its panel."""
+    _add_profiles(setup["bundle"].path)
+    if coverage:
+        _add_panel_coverage(setup["bundle"].path)
+    map_dir = tmp_path / "map"
+    map_mouse(setup, map_dir)
+    from merxen.annotation.diagnostics import (
+        VALIDATED_PANEL_LEVELS_FILE,
+        VALIDATED_PANELS_FILE,
+    )
+
+    before_trust, after_trust = promotion_trust(
+        "resolvable", species="mouse", gene_ids=setup["panel"].ensembl_ids
+    )
+    # The digests of the tables the gate-P PR changed.
+    trusts = (
+        before_trust,
+        after_trust.model_copy(
+            update={"tables_sha256": dict(PROMOTED_DIGESTS)}, deep=True
+        ),
+    )
+    assert set(PROMOTED_DIGESTS) == {VALIDATED_PANELS_FILE, VALIDATED_PANEL_LEVELS_FILE}
+    samples = []
+    for name, trust in zip(("before", "after"), trusts, strict=True):
+        result = annotate_resolve(
+            map_dir,
+            _config(),
+            output_dir=tmp_path / name,
+            panel_dir=panel_dir or setup["panel_dir"],
+            trust_overrides={"wmb_panel": trust},
+            n_bootstrap=5,
+            registration={SID: PASSING},
+        )
+        samples.append(result.samples[SID])
+    return samples[0], samples[1], trusts
+
+
+def _unvalidated(reasons: Any) -> list[str]:
+    return [str(item) for item in reasons if str(item).startswith("unvalidated_share")]
+
+
+def test_mouse_resolve_warns_when_simulation_labels_leave_the_validated_region(
+    tmp_path: Path,
+    mouse_setup: dict[str, Any],
+    promotion_trust: Callable[..., tuple[Any, Any]],
+) -> None:
+    """§8.2's 10% rule after ``resolve_mouse`` (M13 C11, D15 (a)).
+
+    Over broad, class, nt and subclass, a level whose confident labels lie
+    outside the simulation family's validated region more than 10% of the
+    time adds an ``unvalidated_share:<L>`` warning to the mouse gate; the
+    level and its reasons stay those of the provisional panel, and the
+    summary, the resolution and the provenance carry the same verdict.
+    """
+    from merxen.annotation.consensus import MOUSE_CHAIN
+    from merxen.annotation.schema import Columns
+
+    before, after, _ = _promoted_samples(tmp_path, mouse_setup, promotion_trust)
+    labels = after.labels
+    expected = []
+    for level in MOUSE_CHAIN:
+        status = labels[Columns.level(level, "status")].astype(str).to_numpy()
+        confident = status == "confident"
+        if not confident.any():
+            continue
+        validated = labels[Columns.level(level, "validated")].to_numpy(bool)
+        if 1.0 - validated[confident].mean() > 0.10 + 1e-12:
+            expected.append(
+                f"unvalidated_share:{level}: > 0.1 of confident labels outside "
+                "the validated region"
+            )
+    assert len(expected) >= 2  # the fixture has labels outside the region
+    gate = after.summary["mouse_gate"]
+    assert _unvalidated(gate["warning_reasons"]) == expected
+    assert gate["warning"] is True
+    assert _unvalidated(before.summary["mouse_gate"]["warning_reasons"]) == []
+    for key in ("level", "level_reasons", "signal_status", "notes"):
+        assert gate[key] == before.summary["mouse_gate"][key], key
+    assert after.summary["resolution"]["gate"] == gate
+    assert after.provenance.mouse_gate is not None
+    assert _unvalidated(after.provenance.mouse_gate.reasons) == expected
+    _, stored = read_label_table(after.labels_path)
+    assert stored is not None and stored.mouse_gate is not None
+    assert _unvalidated(stored.mouse_gate.reasons) == expected
+
+
+def test_mouse_panel_provenance_comes_from_the_panel_diagnostics(
+    tmp_path: Path,
+    mouse_setup: dict[str, Any],
+    promotion_trust: Callable[..., tuple[Any, Any]],
+) -> None:
+    """Mouse ``PanelProvenance`` is ``diagnostics.panel_provenance`` (M13 C11).
+
+    As for human: the family, its basis, the validated level and table
+    digests, the panel mode, the gene-ID diagnostics and the validated
+    share per level of the resolve summary.
+    """
+    from merxen.annotation.diagnostics import panel_diagnostics, panel_provenance
+
+    before, after, trusts = _promoted_samples(
+        tmp_path, mouse_setup, promotion_trust, coverage=True
+    )
+    panel = mouse_setup["panel"]
+    bundle = json.loads((mouse_setup["bundle"].path / "bundle.json").read_text())
+    for sample, trust in zip((before, after), trusts, strict=True):
+        record = sample.provenance.panel
+        assert record is not None
+        shares = {
+            level: float(value["validated_share"])
+            for level, value in sample.summary["resolution"]["levels"].items()
+            if value["validated_share"] is not None
+        }
+        expected = panel_provenance(
+            trust,
+            panel_diagnostics(panel, bundles=[bundle]),
+            panel_mode="single_sample",
+            validated_share=shares,
+            n_missing_panel_genes=0,
+        )
+        assert record == expected
+        assert record.panel_hash == panel.panel_hash
+        assert record.panel_mode == "single_sample"
+        assert record.n_declared_genes == len(IDS)
+        assert record.panel_trust == trust.state
+        _, stored = read_label_table(sample.labels_path)
+        assert stored is not None and stored.panel == record
+    promoted = after.provenance.panel
+    assert promoted is not None
+    assert (promoted.panel_family, promoted.family_basis) == (
+        "mouse_sim_family",
+        "listed",
+    )
+    assert promoted.validation_basis == "simulation"
+    assert promoted.validated_max_level == "class"
+    assert promoted.validated_panels_sha256 == "1" * 64
+    assert promoted.validated_panel_levels_sha256 == "2" * 64
+    assert promoted.validated_share and min(promoted.validated_share.values()) < 0.9
+    provisional = before.provenance.panel
+    assert provisional is not None and provisional.family_basis == "own"
+    assert provisional.validation_basis is None and provisional.banner is True
+
+
+def test_mouse_panel_provenance_without_the_panel_file_keeps_the_trust_fields(
+    tmp_path: Path,
+    mouse_setup: dict[str, Any],
+    promotion_trust: Callable[..., tuple[Any, Any]],
+) -> None:
+    """Without the panel file the record keeps the trust decision's fields."""
+    from merxen.annotation.panel import REQUIRED_BUNDLES_FILE
+
+    bare = tmp_path / "bare_panel"
+    bare.mkdir()
+    shutil.copy(
+        mouse_setup["panel_dir"] / REQUIRED_BUNDLES_FILE, bare / REQUIRED_BUNDLES_FILE
+    )
+    _, after, (_, trust) = _promoted_samples(
+        tmp_path, mouse_setup, promotion_trust, panel_dir=bare
+    )
+    record = after.provenance.panel
+    assert record is not None
+    assert record.panel_hash == mouse_setup["panel"].panel_hash
+    assert (record.panel_family, record.family_basis) == (trust.family_id, "listed")
+    assert record.validation_basis == "simulation"
+    assert record.validated_max_level == "class"
+    assert record.panel_mode == "single_sample"
+    assert record.validated_panels_sha256 == "1" * 64
+    assert record.validated_panel_levels_sha256 == "2" * 64
+    assert record.validated_share
+    assert record.n_declared_genes is None and record.gene_id_resolution == {}
+    assert _unvalidated(after.summary["mouse_gate"]["warning_reasons"])

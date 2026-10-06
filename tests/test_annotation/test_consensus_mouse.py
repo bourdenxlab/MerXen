@@ -281,6 +281,34 @@ def test_supertype_is_report_only(make_trust: MakeTrust) -> None:
     assert result.final_level.tolist() == ["subclass"]
 
 
+def test_chain_validated_share_reads_the_confident_chain_labels(
+    make_trust: MakeTrust,
+) -> None:
+    """The input of the 10% rule (§8.2; M13 D15 (a)): the chain levels only.
+
+    Per chain level (broad, class, nt, subclass) the share of confident
+    labels that are ``ct_<L>_validated``; ``None`` without a confident
+    label; the report-only supertype is never read.
+    """
+    limits = AnnotationThresholds(allow_fine_levels=True)
+    result = resolve([Cell(), Cell(), ASTRO, ASTRO], make_trust, thresholds=limits)
+    levels = result.levels
+    assert "supertype" in levels
+    for level in ("broad", "class", "subclass"):
+        assert levels[level].confident.all(), level
+    assert levels["nt"].confident.tolist() == [True, True, False, False]
+    levels["class"].validated[:] = [True, False, True, False]
+    levels["nt"].validated[:] = [False, True, False, False]
+    # A confident, unvalidated supertype would read 0.0 if it were counted.
+    levels["supertype"].status[:] = CellStatus.CONFIDENT.value
+    levels["supertype"].validated[:] = False
+    shares = cs.chain_validated_share(levels, cs.MOUSE_CHAIN)
+    assert cs.MOUSE_CHAIN == ("broad", "class", "nt", "subclass")
+    assert shares == {"broad": 1.0, "class": 0.5, "nt": 0.5, "subclass": 1.0}
+    astro_only = resolve([ASTRO, ASTRO], make_trust)
+    assert cs.chain_validated_share(astro_only.levels, cs.MOUSE_CHAIN)["nt"] is None
+
+
 def test_mouse_calls_need_one_value_per_object() -> None:
     with pytest.raises(ValueError, match="one value per object"):
         cs.MouseCalls(

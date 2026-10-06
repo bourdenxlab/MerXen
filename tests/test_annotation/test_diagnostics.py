@@ -1294,6 +1294,65 @@ def test_panel_provenance_round_trips(
     assert refused_provenance.panel_trust == "refused" and refused_provenance.banner
 
 
+def test_panel_provenance_without_diagnostics_keeps_the_trust_fields(
+    real_table: tuple[ValidatedPanelTable, list[str]],
+) -> None:
+    """RESOLVE's fallback (no panel file or diagnostics; M13 C11).
+
+    The record keeps every field the trust decision holds (family, basis,
+    validated level, table digests), the panel mode and the validated
+    shares, records the given panel hash, and leaves the gene-ID fields
+    empty; with diagnostics the given hash is ignored.
+    """
+    table, gene_ids = real_table
+    family = family_of(table, gene_ids)
+    panel = annotation_panel(gene_ids, family)
+    diagnostics = panel_diagnostics(
+        panel,
+        panel_report={"declared_panels": {"S_X": report_entry()}},
+        bundles=[bundle_manifest(panel_hash=panel.panel_hash, n_query_genes_used=100)],
+    )
+    decision = trust_for_panel(
+        diagnostics,
+        reference_id="whb_frontal_supc_clus",
+        role="primary",
+        validated=table,
+    )
+    options: dict[str, Any] = {
+        "panel_mode": "per_platform",
+        "validated_share": {"broad": 0.8, "nt": 1.0},
+        "n_missing_panel_genes": 2,
+    }
+    full = panel_provenance(decision, diagnostics, panel_hash="f" * 64, **options)
+    assert full == panel_provenance(decision, diagnostics, **options)
+    assert full.panel_hash == panel.panel_hash
+    fallback = panel_provenance(decision, None, panel_hash="f" * 64, **options)
+    assert fallback.panel_hash == "f" * 64
+    gene_fields = {
+        "n_declared_genes",
+        "gene_id_resolution",
+        "n_unmapped",
+        "controls_removed",
+    }
+    assert fallback.model_dump(exclude=gene_fields | {"panel_hash"}) == (
+        full.model_dump(exclude=gene_fields | {"panel_hash"})
+    )
+    assert (fallback.panel_family, fallback.family_basis) == (
+        decision.family_id,
+        "listed",
+    )
+    assert fallback.validation_basis == "real_data"
+    assert fallback.validated_max_level == decision.validated_max_level
+    assert fallback.validated_panels_sha256 == table.sha256[VALIDATED_PANELS_FILE]
+    assert fallback.panel_mode == "per_platform"
+    assert fallback.validated_share == {"broad": 0.8, "nt": 1.0}
+    assert fallback.n_missing_panel_genes == 2
+    assert fallback.n_declared_genes is None and fallback.n_unmapped is None
+    assert fallback.gene_id_resolution == {} and fallback.controls_removed == {}
+    # Without a hash, the decision's.
+    assert panel_provenance(decision, None).panel_hash == decision.panel_hash
+
+
 def test_the_panel_report_records_the_family_validation(tmp_path: Path) -> None:
     gene_ids = ids(60)
     path = tmp_path / "genes.csv"

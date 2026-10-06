@@ -1760,7 +1760,14 @@ before the statuses; level + warning flag as for human):
 | G5 spill-over | `flag_microglial_spillover` rate | – | > 15% |
 
 The primary panel's trust caps the level as for human (`refused` fails,
-`broad_only` blocks the subclass) and a provisional panel warns. A `failed`
+`broad_only` blocks the subclass) and a provisional panel warns. A family
+validated by simulation warns, as for human, when more than 10% of the
+confident labels at broad, class, nt or subclass fall outside its validated
+region (`unvalidated_share:<level>`, `warn_unvalidated_share`): RESOLVE
+evaluates the gate again after the statuses with those shares, and the
+level never changes. The panel record of the provenance is built as for
+human (family, basis, validated level and table digests, panel mode, gene-ID
+diagnostics and validated shares). A `failed`
 gate makes every table cell `not_attempted_gate` and `exclude_hard` (a
 failed registration check: plan §7.5). G2's marker sets are derived per
 panel, so the 0.70 / 0.80 thresholds, set on MO1's hand-listed referee
