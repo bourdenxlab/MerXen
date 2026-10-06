@@ -71,6 +71,23 @@ GATE_BANNER_TEXT: Final[dict[str, str]] = {
 }
 
 
+# The real-data QC table of the panel card (``panel_real_qc.csv``).
+REAL_QC_COLUMNS: Final[tuple[str, ...]] = (
+    "sample_id",
+    "check",
+    "outcome",
+    "state",
+    "fired",
+    "effect",
+    "gate_cap",
+    "level",
+    "class",
+    "warn_only",
+    "message",
+    "reason",
+)
+
+
 @dataclass(frozen=True)
 class Banner:
     """A report banner.
@@ -109,6 +126,9 @@ class PanelCard:
         classes: Per (sample, class): D_max, extrapolated share.
         thresholds: Per sample: threshold and floor values with sources.
         floors: The packaged floors of the dataset's platform(s) and family.
+        real_qc: Per (sample, outcome): the real-data QC outcomes RESOLVE
+            recorded (``REAL_QC_COLUMNS``; plan §8.8, M13 C15), one row per
+            check, level or class; empty when RESOLVE ran none.
         banners: Trust and gate banners.
         notes: Free-text notes (v7 notes, real-data QC, missing genes).
     """
@@ -123,6 +143,9 @@ class PanelCard:
     classes: pd.DataFrame
     thresholds: pd.DataFrame
     floors: pd.DataFrame
+    real_qc: pd.DataFrame = field(
+        default_factory=lambda: pd.DataFrame(columns=list(REAL_QC_COLUMNS))
+    )
     banners: list[Banner] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
@@ -139,6 +162,7 @@ class PanelCard:
             "panel_classes": self.classes,
             "panel_thresholds": self.thresholds,
             "panel_floors": self.floors,
+            "panel_real_qc": self.real_qc,
         }
 
 
@@ -235,6 +259,43 @@ def trust_banners(
             )
     order = {"error": 0, "warning": 1, "info": 2}
     return sorted(banners, key=lambda banner: order.get(banner.severity, 3))
+
+
+def real_qc_rows(
+    sample_id: str, record: Mapping[str, Any] | None
+) -> list[dict[str, Any]]:
+    """Return a sample's real-data QC outcomes as panel-card rows (plan §8.8).
+
+    Args:
+        sample_id: Sample id.
+        record: The sample's ``real_qc`` block of the resolve summary
+            (``None`` or disabled: no rows).
+
+    Returns:
+        One row per outcome (``REAL_QC_COLUMNS``), in RESOLVE's order.
+    """
+    if not record or not record.get("enabled"):
+        return []
+    warn_only = bool(record.get("warn_only"))
+    rows = []
+    for item in record.get("outcomes") or []:
+        rows.append(
+            {
+                "sample_id": sample_id,
+                "check": item.get("check"),
+                "outcome": item.get("outcome"),
+                "state": item.get("state"),
+                "fired": bool(item.get("fired")),
+                "effect": item.get("effect"),
+                "gate_cap": item.get("gate_cap"),
+                "level": item.get("level"),
+                "class": item.get("class"),
+                "warn_only": warn_only,
+                "message": item.get("message") or "",
+                "reason": item.get("reason"),
+            }
+        )
+    return rows
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -471,6 +532,7 @@ def build_panel_card(
     control_rows: list[dict[str, Any]] = []
     class_rows: list[dict[str, Any]] = []
     threshold_rows: list[dict[str, Any]] = []
+    qc_rows: list[dict[str, Any]] = []
     banners: list[Banner] = []
     notes: list[str] = []
     declared = dict(_declared_rows(panel_report))
@@ -556,6 +618,17 @@ def build_panel_card(
                 sample_id, trust, gate, real_data_qc=panel.get("real_data_qc")
             )
         )
+        sample_qc = real_qc_rows(sample_id, entry.get("real_qc"))
+        qc_rows.extend(sample_qc)
+        fired = [row for row in sample_qc if row["fired"]]
+        if fired:
+            notes.append(
+                f"{sample_id}: real-data QC fired "
+                + "; ".join(
+                    f"{row['check']} ({row['outcome']}): {row['message']}"
+                    for row in fired
+                )
+            )
         missing = sample.get("n_missing_panel_genes")
         if missing:
             notes.append(
@@ -679,6 +752,7 @@ def build_panel_card(
             ],
         ),
         floors=floor_table,
+        real_qc=_frame(qc_rows, REAL_QC_COLUMNS),
         banners=banners,
         notes=notes,
     )
@@ -727,10 +801,12 @@ def _emission_table(
 __all__ = [
     "BANNER_TEXT",
     "GENERIC_V7_NOTE",
+    "REAL_QC_COLUMNS",
     "Banner",
     "PanelCard",
     "build_panel_card",
     "bundle_marker_rows",
+    "real_qc_rows",
     "resolvability_bins",
     "resolvability_curves",
     "trust_banners",

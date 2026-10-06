@@ -888,6 +888,11 @@ class AnnotationRealQcConfig(_AnnotationModel):
     """Downgrade-only QC on real in-house datasets (plan §8.8; rev3).
 
     Attributes:
+        enabled: Run the real-data QC in human RESOLVE (M13 C15). ``false``
+            gives the QC-free run that pre-registration NR1 compares with:
+            no check runs, nothing is lowered and the summary records the QC
+            as disabled. Mouse RESOLVE does not run it yet: its gate keeps
+            G1-G5 (§7.6), and the mouse wiring follows M6b (M13 C22).
         marker_consistency_warn: Marker-referee warning threshold; ``None``
             selects the species default (human 0.75; mouse G2's 0.80).
         marker_consistency_broad_only: Human: below this the dataset becomes
@@ -953,6 +958,7 @@ class AnnotationRealQcConfig(_AnnotationModel):
             flagged (report-only).
     """
 
+    enabled: bool = True
     marker_consistency_warn: float | None = None
     marker_consistency_broad_only: float = 0.70
     marker_referee_min_group_markers: int = Field(default=3, ge=1)

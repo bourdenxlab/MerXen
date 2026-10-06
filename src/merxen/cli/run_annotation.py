@@ -1474,17 +1474,19 @@ def _n_segmented(values: tuple[str, ...]) -> dict[str, int]:
     "--registration-qc",
     "registration_values",
     multiple=True,
-    help="Mouse gate G1: SAMPLE_ID=PATH of the QC stage's *_registration_qc.json "
-    "or *_qc_summary.csv (repeatable; a bare PATH applies to a single sample).",
+    help="Registration G1 (mouse dataset gate; human real-data QC): SAMPLE_ID=PATH "
+    "of the QC stage's *_registration_qc.json or *_qc_summary.csv (repeatable; a "
+    "bare PATH applies to a single sample).",
 )
 @click.option(
     "--registration-qc-dir",
     "registration_dirs",
     multiple=True,
     type=click.Path(path_type=Path, exists=True, file_okay=False),
-    help="Mouse gate G1: a QC stage output directory (repeatable); each sample "
-    "without --registration-qc takes <sample_id lower-case>_registration_qc.json "
-    "(else _qc_summary.csv) found under it.",
+    help="Registration G1 (mouse dataset gate; human real-data QC): a QC stage "
+    "output directory (repeatable); each sample without --registration-qc takes "
+    "<sample_id lower-case>_registration_qc.json (else _qc_summary.csv) found "
+    "under it.",
 )
 @click.option(
     "--no-registration-qc",
@@ -1800,7 +1802,9 @@ def _registration_signals(
     """Parse ``--registration-qc`` values into signals per sample id.
 
     Samples without a value take the check ``--registration-qc-dir`` holds
-    (``mouse_gate.find_registration_check``).
+    (``mouse_gate.find_registration_check``). Mouse RESOLVE reads them as
+    gate G1 (plan §7.6); human RESOLVE as the real-data QC's registration G1
+    (plan §8.8, M13 C15).
     """
     from merxen.annotation.mouse_gate import (
         RegistrationSignal,
@@ -1809,10 +1813,8 @@ def _registration_signals(
 
     if not values and not directories:
         return {}
-    if species != "mouse":
-        raise click.UsageError(
-            "--registration-qc and --registration-qc-dir apply to mouse runs only"
-        )
+    if species not in ("human", "mouse"):
+        raise click.UsageError(f"unknown species {species!r}")
     signals: dict[str, RegistrationSignal] = {}
     for value in values:
         sample_id, sep, path = value.partition("=")

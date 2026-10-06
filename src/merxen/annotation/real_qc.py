@@ -89,7 +89,13 @@ simulated genes per cell a version-7 PREP stores
 families) and version-7 bundles built before the artefact store none, so the
 check is ``not_evaluable`` for them.
 
-RESOLVE wires them per dataset in M13 chunk C15.
+RESOLVE wires them per dataset in M13 chunk C15 (human; ``pipeline``
+``human_real_qc_signals`` and ``score_paired_concordance``,
+``consensus.HumanResolveSettings.qc``): the checks run on the QC-free
+resolution, ``qc_withheld_levels`` and ``apply_qc_to_gate`` are applied in a
+second pass, ``RealQcResult.replace_check`` scores paired concordance once the
+pair's JSD exists, and ``downgrade_only_violations`` compares a QC-applied
+RESOLVE with a QC-free re-run (pre-registration NR1).
 
 This module imports only the standard library, numpy and pandas (and
 ``merxen.annotation.resolvability`` / ``schema`` / ``provenance``, which
@@ -1034,6 +1040,33 @@ def _known_true(value: object) -> bool:
         return False
 
 
+def nonneuronal_classes(class_depth: pd.DataFrame) -> tuple[str, ...]:
+    """Return the class-depth table's classes not known to be neuronal.
+
+    As in ``nonneuronal_high_depth_flags`` and the monotone fill, a class
+    whose lineage is unknown (``neuronal`` missing) counts as non-neuronal.
+
+    Args:
+        class_depth: A class-depth table (``resolvability.class_depth_table``).
+
+    Returns:
+        The classes, sorted.
+    """
+    if class_depth.empty:
+        return ()
+    return tuple(
+        sorted(
+            {
+                str(cls)
+                for cls, neuronal in zip(
+                    class_depth["class"], class_depth["neuronal"], strict=True
+                )
+                if not _known_true(neuronal)
+            }
+        )
+    )
+
+
 def _band_label(low: int, high: int | None) -> str:
     return f"{low:,}-{high - 1:,}" if high is not None else f">= {low:,}"
 
@@ -1730,7 +1763,8 @@ def qc_withheld_levels(
 
     The withheld levels and the levels whose emission reads their table
     (``thresholds.DERIVED_EMISSION_LEVELS``: human ``seaad_subclass`` reads
-    ``supercluster``): the levels ``apply_qc_to_statuses`` withholds.
+    ``supercluster``). ``apply_qc_to_statuses`` and RESOLVE's in-pass
+    application (``consensus.resolve_human``, M13 C15) use the same set.
 
     Args:
         qc: The dataset's QC outcomes or their effects (``None``: none).
@@ -1888,6 +1922,165 @@ def apply_qc_to_statuses(
             out_status[level][now & parent_lost] = CellStatus.PARENT_UNRESOLVED.value
         lost[level] = before[level] & (out_status[level] != confident)
     return out_status, out_names
+
+
+# The statuses a QC-applied RESOLVE may give a cell the QC-free run gave
+# another status (NR1): a withheld level (``not_resolvable``), a gate cap
+# (``not_attempted_gate``) and a lost parent (``parent_unresolved``).
+QC_LOWERED_STATUSES: Final[frozenset[str]] = frozenset(
+    {
+        CellStatus.NOT_RESOLVABLE.value,
+        CellStatus.NOT_ATTEMPTED_GATE.value,
+        CellStatus.PARENT_UNRESOLVED.value,
+    }
+)
+# Provenance records a QC-applied RESOLVE keeps from the QC-free run (NR1):
+# the emission (resolvability, per reference) and the thresholds and floors.
+NR1_UNCHANGED_RECORDS: Final[tuple[str, ...]] = ("resolvability", "thresholds")
+# Fields of a resolvability record that describe the labels, not the
+# emission plan: the share of confident cells whose label rests on a pooled
+# deep set falls with the confident set (``ResolvabilityProvenance``).
+NR1_LABEL_FIELDS: Final[frozenset[str]] = frozenset({"extrapolated_share"})
+# The prefix of a QC reason in the dataset gate (``qc_effects``).
+QC_REASON_PREFIX: Final = "real_qc_"
+
+
+def _record(value: Any) -> Mapping[str, Any]:
+    if value is None:
+        return {}
+    if hasattr(value, "model_dump"):
+        return cast("Mapping[str, Any]", value.model_dump(mode="json"))
+    return cast("Mapping[str, Any]", value)
+
+
+def _plan_part(record: Any, key: str) -> Any:
+    """Return a provenance record without its label-dependent fields (NR1)."""
+    if key != "resolvability" or not isinstance(record, Mapping):
+        return record
+    return {
+        reference: (
+            {
+                name: value
+                for name, value in item.items()
+                if name not in NR1_LABEL_FIELDS
+            }
+            if isinstance(item, Mapping)
+            else item
+        )
+        for reference, item in record.items()
+    }
+
+
+def downgrade_only_violations(
+    free_labels: pd.DataFrame,
+    applied_labels: pd.DataFrame,
+    *,
+    species: str,
+    free_provenance: Any = None,
+    applied_provenance: Any = None,
+) -> list[str]:
+    """List how a QC-applied RESOLVE differs from a QC-free re-run (NR1).
+
+    Pre-registration §23.6 NR1: compared with a QC-free re-run of RESOLVE on
+    the same MAP output (``real_qc.enabled`` false), the trust state, the
+    emission plan, the floor plan and every emitted label are identical,
+    except labels set to ``not_resolvable`` and the gate level lowered by a
+    named check. Per level of the label tables: no cell is confident only
+    with QC; a cell confident in both keeps its name; a cell whose status
+    changed takes one of ``QC_LOWERED_STATUSES``; and a name changes only
+    where the new status carries none (``not_attempted_gate``). With the
+    provenance records (``AnnotationProvenance`` or its JSON): the panel
+    trust state and the resolvability and threshold records (emission,
+    thresholds, floors) are equal, except a resolvability record's
+    ``extrapolated_share`` (``NR1_LABEL_FIELDS``: it describes the confident
+    labels and falls with them), and a lower gate level names a ``real_qc_``
+    reason.
+
+    Args:
+        free_labels: The QC-free run's label table.
+        applied_labels: The QC-applied run's label table (same cells).
+        species: ``"human"`` or ``"mouse"``.
+        free_provenance: The QC-free run's provenance, if compared.
+        applied_provenance: The QC-applied run's provenance.
+
+    Returns:
+        One message per violation (empty: NR1 holds).
+
+    Raises:
+        ValueError: For an unknown species.
+    """
+    from merxen.annotation.schema import NAMELESS_STATUSES, Columns
+
+    if species not in LEVEL_ORDER:
+        raise ValueError(f"unknown species {species!r}")
+    problems: list[str] = []
+    free_ids = free_labels[Columns.CELL_ID].astype(str).tolist()
+    applied_ids = applied_labels[Columns.CELL_ID].astype(str).tolist()
+    if free_ids != applied_ids:
+        return ["the label tables do not hold the same cells in the same order"]
+    nameless = {str(item) for item in NAMELESS_STATUSES}
+    confident = CellStatus.CONFIDENT.value
+    for level in LEVEL_ORDER[species]:
+        status_column = Columns.level(level, "status")
+        name_column = Columns.level(level, "name")
+        if status_column not in free_labels or status_column not in applied_labels:
+            continue
+        before = free_labels[status_column].astype(str).to_numpy()
+        after = applied_labels[status_column].astype(str).to_numpy()
+        names_before = free_labels[name_column].astype(object).to_numpy()
+        names_after = applied_labels[name_column].astype(object).to_numpy()
+        was, now = before == confident, after == confident
+        raised = int((now & ~was).sum())
+        if raised:
+            problems.append(f"{level}: {raised} cell(s) confident only with QC")
+        changed = before != after
+        bad = sorted(set(after[changed]) - QC_LOWERED_STATUSES)
+        if bad:
+            problems.append(
+                f"{level}: statuses changed to {bad} (QC may only give "
+                f"{sorted(QC_LOWERED_STATUSES)})"
+            )
+        same_name = np.array(
+            [
+                (pd.isna(a) and pd.isna(b)) or (not pd.isna(a) and a == b)
+                for a, b in zip(names_before, names_after, strict=True)
+            ],
+            dtype=bool,
+        )
+        renamed = ~same_name & ~np.isin(after, list(nameless))
+        if renamed.any():
+            problems.append(f"{level}: {int(renamed.sum())} cell(s) changed their name")
+    if free_provenance is None and applied_provenance is None:
+        return problems
+    free_record, applied_record = _record(free_provenance), _record(applied_provenance)
+    free_trust = (free_record.get("panel") or {}).get("panel_trust")
+    applied_trust = (applied_record.get("panel") or {}).get("panel_trust")
+    if free_trust != applied_trust:
+        problems.append(f"trust state {free_trust!r} became {applied_trust!r}")
+    for key in NR1_UNCHANGED_RECORDS:
+        if _plan_part(free_record.get(key), key) != _plan_part(
+            applied_record.get(key), key
+        ):
+            problems.append(f"the {key} record differs")
+    gate_key = "mouse_gate" if species == "mouse" else "gate"
+    free_gate = free_record.get(gate_key) or {}
+    applied_gate = applied_record.get(gate_key) or {}
+    free_level = free_gate.get("level")
+    applied_level = applied_gate.get("level")
+    if free_level in GATE_LEVELS and applied_level in GATE_LEVELS:
+        if gate_severity(str(applied_level)) < gate_severity(str(free_level)):
+            problems.append(f"the gate level rose from {free_level} to {applied_level}")
+        elif applied_level != free_level and not any(
+            str(reason).startswith(QC_REASON_PREFIX)
+            for reason in applied_gate.get("reasons") or ()
+        ):
+            problems.append(
+                f"the gate level fell from {free_level} to {applied_level} "
+                "without a named real_qc check"
+            )
+    elif free_level != applied_level:
+        problems.append(f"gate level {free_level!r} became {applied_level!r}")
+    return problems
 
 
 def worst_outcome(tokens: Iterable[str]) -> str:
@@ -2817,13 +3010,17 @@ class NonneuronalTrendSignal:
 
     Attributes:
         totals: Total counts per table cell.
-        called_class: The called class per table cell.
+        called_class: The called class per table cell, or per level the
+            class key there (human RESOLVE: each level reads its own class
+            key, as the class-depth prediction does; M13 C15).
         confident: Per level, whether each table cell is confident.
         nonneuronal_classes: The non-neuronal classes.
     """
 
     totals: Sequence[float] | np.ndarray
-    called_class: Sequence[object] | np.ndarray
+    called_class: (
+        Sequence[object] | np.ndarray | Mapping[str, Sequence[object] | np.ndarray]
+    )
     confident: Mapping[str, Sequence[bool] | np.ndarray]
     nonneuronal_classes: Sequence[str]
 
@@ -2910,6 +3107,47 @@ class RealQcResult:
     def effects(self) -> QcEffects:
         """Return the combined effects."""
         return qc_effects(self.outcomes)
+
+    def outcomes_of(self, check: str) -> tuple[QcOutcome, ...]:
+        """Return the outcomes one check recorded."""
+        return tuple(outcome for outcome in self.outcomes if outcome.check == check)
+
+    def replace_check(self, check: str, outcomes: Iterable[QcOutcome]) -> RealQcResult:
+        """Return the result with one check's outcomes replaced.
+
+        RESOLVE scores paired concordance only once both sections of the pair
+        are resolved (the pair's JSD; M13 C15): the per-sample result then
+        holds its placeholder, which this replaces. The warn-only demotion of
+        a seeded family is applied to the new outcomes as ``real_data_qc``
+        applies it, and the other checks' outcomes keep their order.
+
+        Args:
+            check: The check whose outcomes are replaced.
+            outcomes: Its new outcomes (at least one; all of ``check``).
+
+        Returns:
+            The new result.
+
+        Raises:
+            ValueError: If an outcome is of another check, none is given, or
+                the result records no outcome of ``check``.
+        """
+        new = _demoted(outcomes, species=self.species, warn_only=self.warn_only)
+        if not new:
+            raise ValueError(f"no outcome given for {check!r}")
+        if any(outcome.check != check for outcome in new):
+            raise ValueError(f"every outcome must be of check {check!r}")
+        positions = [
+            index
+            for index, outcome in enumerate(self.outcomes)
+            if outcome.check == check
+        ]
+        if not positions:
+            raise ValueError(f"the result records no {check!r} outcome to replace")
+        kept = [outcome for outcome in self.outcomes if outcome.check != check]
+        first = positions[0]
+        merged = (*kept[:first], *new, *kept[first:])
+        return dataclasses.replace(self, outcomes=merged)
 
     def apply_to_gate(self, verdict: GateT) -> GateT:
         """Return ``verdict`` after QC (``apply_qc_to_gate``)."""
@@ -3031,13 +3269,36 @@ def _trend_outcomes(
                 NONNEURONAL_TREND_CHECK, "no depth-trend input", **effect
             ),
         ), None
-    table, fired = nonneuronal_depth_trend(
-        signal.totals,
-        signal.called_class,
-        signal.confident,
-        signal.nonneuronal_classes,
-        limit=limit,
-    )
+    if isinstance(signal.called_class, Mapping):
+        # Per level, the level's own class key (human RESOLVE).
+        frames: list[pd.DataFrame] = []
+        found: list[QcOutcome] = []
+        for level, flags in signal.confident.items():
+            if level not in signal.called_class:
+                raise ValueError(f"no class key for level {level!r}")
+            part, part_fired = nonneuronal_depth_trend(
+                signal.totals,
+                signal.called_class[level],
+                {level: flags},
+                signal.nonneuronal_classes,
+                limit=limit,
+            )
+            frames.append(part)
+            found.extend(part_fired)
+        table = (
+            pd.concat(frames, ignore_index=True)
+            if frames
+            else pd.DataFrame(columns=["level", "class", "band", "n_cells", "coverage"])
+        )
+        fired = tuple(found)
+    else:
+        table, fired = nonneuronal_depth_trend(
+            signal.totals,
+            signal.called_class,
+            signal.confident,
+            signal.nonneuronal_classes,
+            limit=limit,
+        )
     if fired:
         return fired, table
     low = _band_label(*DEPTH_BANDS[0])
