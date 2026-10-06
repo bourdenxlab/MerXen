@@ -2935,6 +2935,15 @@ def flag_rate_summary(
     platform stratum pooled), are reported beside it; none decides the
     warning.
 
+    A flag without confident basis cells in a stratum has no rate, so under
+    this reading (a warning only, never a lowering) a class with no
+    confident calls makes its stratum uninformative (human strata exist for
+    every broad class), a gate-failed section has every stratum
+    uninformative, and a mouse dataset whose spill-over null is unavailable
+    has every stratum uninformative, so it always warns. Whether to keep
+    this reading is the user's question (D22); C17 reports the readings on
+    the M8 data.
+
     Args:
         strata: ``FlagStratum`` objects or their ``to_json`` records (the
             resolve summary's ``flags.strata``).
