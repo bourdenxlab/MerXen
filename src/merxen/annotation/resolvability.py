@@ -4386,9 +4386,15 @@ class ResolvabilityTables:
 
     @property
     def version(self) -> int | None:
-        """The bundle's resolvability version (``None`` if unrecorded)."""
-        value = self.summary.get("resolvability_version")
-        return int(value) if value is not None else None
+        """The bundle's resolvability version (``None`` if unrecorded).
+
+        Raises:
+            ResolvabilityError: For a version this code cannot read
+                (``checked_resolvability_version``).
+        """
+        return checked_resolvability_version(
+            self.summary.get("resolvability_version"), source="resolvability summary"
+        )
 
     def decisions(
         self,
@@ -4398,8 +4404,11 @@ class ResolvabilityTables:
     ) -> pd.DataFrame:
         """Return decisions, reweighted to a dataset's composition when given.
 
-        A version-7 bundle re-derives its ensemble decisions
-        (``ensemble_decisions``).
+        The bundle's version picks the consumer: a version-7 bundle re-derives
+        its ensemble decisions (``ensemble_decisions``: each member's cells
+        reweighted, the saturated-bp rule, then the monotone fill); versions
+        1-6 (and an unrecorded version) re-run ``decide`` with the bundle's
+        decision recipe, as RESOLVE has done since M4.
 
         Args:
             composition: Dataset share per truth type (human supercluster,
@@ -4410,8 +4419,12 @@ class ResolvabilityTables:
 
         Returns:
             ``decide`` output (version 7: ``ensemble_decide`` decisions).
+
+        Raises:
+            ResolvabilityError: For a version this code cannot read.
         """
-        if self.version == RESOLVABILITY_VERSION_V7:
+        version = self.version
+        if version == RESOLVABILITY_VERSION_V7:
             return self.ensemble_decisions(
                 composition=composition, settings=settings
             ).decisions
@@ -4521,6 +4534,50 @@ class ResolvabilityTables:
         )
 
 
+def checked_resolvability_version(value: object, *, source: str) -> int | None:
+    """Return a recorded resolvability version, refusing one this code cannot read.
+
+    Versions ``RESOLVABILITY_FIRST_VERSION`` (1) to 6 are read by the
+    version-6 consumer (versions 1-5 are the stale tables of a panel not
+    rebuilt since, decided by their own recipe and settings), version 7 by
+    the ensemble consumer (M3c); a summary without the field predates it
+    and is read as version-6 tables. Anything else -- a later version, zero
+    or a negative number, a non-integer -- is refused explicitly, so that no
+    consumer guesses how to read tables it was not written for.
+
+    Args:
+        value: The summary's ``resolvability_version``.
+        source: What the value was read from (for the message).
+
+    Returns:
+        The version, or ``None`` when unrecorded.
+
+    Raises:
+        ResolvabilityError: For an unknown version.
+    """
+    if value is None:
+        return None
+    known = (
+        f"this code reads versions {RESOLVABILITY_FIRST_VERSION}"
+        f"-{RESOLVABILITY_VERSION_V7}"
+    )
+    if isinstance(value, bool) or not isinstance(value, int | np.integer):
+        raise ResolvabilityError(
+            f"{source}: unknown resolvability version {value!r} ({known})"
+        )
+    version = int(value)
+    if version > RESOLVABILITY_VERSION_V7:
+        raise ResolvabilityError(
+            f"{source}: resolvability version {version} is newer than this code "
+            f"({known})"
+        )
+    if version < RESOLVABILITY_FIRST_VERSION:
+        raise ResolvabilityError(
+            f"{source}: unknown resolvability version {version} ({known})"
+        )
+    return version
+
+
 def load_resolvability(
     directory: Path | str, *, allow_version_7: bool = False
 ) -> ResolvabilityTables | None:
@@ -4530,8 +4587,10 @@ def load_resolvability(
     (``allow_version_7``): its decisions come from the ensemble, its cells
     carry several members of one recipe, and it adds the monotone fill and
     the non-neuronal high-depth marker, so a consumer written for version 6
-    (M4's RESOLVE until its follow-up, plan §12 M3c) refuses it loudly
-    instead of misreading it.
+    only refuses it loudly instead of misreading it. RESOLVE declares it
+    (human and mouse; the M3c follow-up, plan §12 M3c). A version this code
+    does not know is refused for every caller
+    (``checked_resolvability_version``).
 
     Args:
         directory: Bundle directory.
@@ -4542,29 +4601,22 @@ def load_resolvability(
 
     Raises:
         ResolvabilityError: For a version-7 bundle without
-            ``allow_version_7``, or an unknown later version.
+            ``allow_version_7``, or an unknown version.
     """
     root = Path(directory)
     summary_path = root / RESOLVABILITY_SUMMARY_FILE
     if not summary_path.is_file():
         return None
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    version = summary.get("resolvability_version")
-    if version is not None and int(version) > RESOLVABILITY_VERSION_V7:
-        raise ResolvabilityError(
-            f"{root}: resolvability version {version} is newer than this code "
-            f"({RESOLVABILITY_VERSION_V7})"
-        )
-    if (
-        version is not None
-        and int(version) == RESOLVABILITY_VERSION_V7
-        and not (allow_version_7)
-    ):
+    version = checked_resolvability_version(
+        summary.get("resolvability_version"), source=str(root)
+    )
+    if version == RESOLVABILITY_VERSION_V7 and not allow_version_7:
         raise ResolvabilityError(
             f"{root}: a resolvability version-7 bundle (ensemble decisions, "
             "monotone fill; plan §8.3 v7) needs a consumer that declares "
-            "version-7 support (load_resolvability(..., allow_version_7=True)); "
-            "RESOLVE accepts it after its M3c follow-up (plan §12 M3c)"
+            "version-7 support (load_resolvability(..., allow_version_7=True)), "
+            "as RESOLVE and annotation-panel-simulate do"
         )
     cells = restore_labels(pd.read_parquet(root / RESOLVABILITY_CELLS_FILE))
     if MEMBER_COLUMN in cells.columns:
@@ -4992,6 +5044,9 @@ def gate_p_class_set(
 RESOLVABILITY_VERSION_V6: Final = 6
 RESOLVABILITY_VERSION_V7: Final = 7
 RESOLVABILITY_VERSIONS: Final[tuple[int, ...]] = (6, 7)
+# The oldest version a consumer still reads (stale tables of versions 1-5 are
+# decided like version 6, by their own recipe; ``checked_resolvability_version``).
+RESOLVABILITY_FIRST_VERSION: Final = 1
 V6_PINS_FILE: Final = "resolvability_v6_pins.csv"
 EFFICIENCY_SOURCES: Final[tuple[str, ...]] = ("lognormal", "measured", "xtissue_stress")
 # Exact-total thinning (v7.2): at most 30 fixed-point steps, stopping per row

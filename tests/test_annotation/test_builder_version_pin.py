@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "c6b57c31a2973ed6540e3f3c8e1f75efc3080a18b842596ea0379e7243f5d8b1",
+    3: "16e74acd9f93aca5951d9520fc264ce2de473534ae62007364ebeb465734e5ae",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -171,6 +171,9 @@ PIN_HISTORY = (
     "3: the version-7 summary's per-regime and per-level bin counts moved "
     "into ensemble_bin_counts, which RESOLVE reuses (refactor; the summary "
     "is unchanged), so no bundle content changes",
+    "3: load_resolvability and ResolvabilityTables refuse a resolvability "
+    "version the code does not know (checked_resolvability_version; reading "
+    "only, the RESOLVE follow-up of M3c); no bundle content changes",
 )
 
 
