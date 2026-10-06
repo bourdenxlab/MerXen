@@ -934,6 +934,100 @@ def test_np4_seed_criterion_refuses_inputs_that_are_not_one_simulation_remapped(
         _seed({})
 
 
+def test_np4_seed_criterion_matches_seed_1_rows_by_simulated_cell() -> None:
+    """Seed 1's rows are matched to seed 0's by (level, cell, depth), not order.
+
+    A pipeline may write the seed-1 table in another row order; comparing
+    the rows in table order would score other cells' calls against each
+    other.
+    """
+    replicates = _seed_grid({"D2": 17})
+    expected = _seed(replicates)
+    assert _seed_row(expected, "D2")["n_changed"] == 17
+    rng = np.random.default_rng(3)
+    shuffled = {
+        key: table.iloc[rng.permutation(len(table))] if key[1] == 1 else table
+        for key, table in replicates.items()
+    }
+    assert all(
+        not np.array_equal(table["cell_id"], replicates[key]["cell_id"])
+        for key, table in shuffled.items()
+        if key[1] == 1
+    )
+    pd.testing.assert_frame_equal(_seed(shuffled), expected)
+    both = {
+        key: table.iloc[rng.permutation(len(table))] for key, table in shuffled.items()
+    }
+    pd.testing.assert_frame_equal(_seed(both), expected)
+
+
+def test_np4_seed_criterion_refuses_a_same_size_seed_1_table_of_other_cells() -> None:
+    """A seed-1 table of the same length must still hold seed 0's cells.
+
+    One simulated cell swapped for another (another cell id, or the same
+    cell at another depth) leaves the length unchanged; it is refused rather
+    than compared with an unrelated row.
+    """
+    replicates = _seed_grid()
+    key = ("D2", 1)
+    foreign = replicates[key].copy()
+    foreign.loc[0, "cell_id"] = replicates[("D3", 1)].loc[0, "cell_id"]
+    assert len(foreign) == len(replicates[("D2", 0)])
+    with pytest.raises(
+        ValueError,
+        match=r"same simulated cells: 1 \(level, cell, depth\) rows .* holds 1 rows",
+    ):
+        _seed({**replicates, key: foreign})
+    deeper = replicates[key].copy()
+    deeper.loc[0, "depth"] = 30
+    with pytest.raises(ValueError, match="same simulated cells"):
+        _seed({**replicates, key: deeper})
+
+
+def test_np4_seed_criterion_reads_missing_simulated_counts_at_both_seeds_as_equal() -> (
+    None
+):
+    """A ``total_counts`` missing at both seeds is the same count; at one, not."""
+    replicates = _seed_grid({"D2": 16})
+    expected = _seed(replicates)
+    for seed in SEEDS:
+        replicates[("D2", seed)].loc[[0, 5], "total_counts"] = np.nan
+    pd.testing.assert_frame_equal(_seed(replicates), expected)
+    replicates[("D2", 1)].loc[7, "total_counts"] = np.nan
+    with pytest.raises(ValueError, match="differ in total_counts at 1 simulated"):
+        _seed(replicates)
+    replicates[("D2", 1)].loc[7, "total_counts"] = 10.0
+    replicates[("D2", 0)].loc[9, "total_counts"] = np.nan
+    with pytest.raises(ValueError, match="differ in total_counts at 1 simulated"):
+        _seed(replicates)
+
+
+def test_np4_seed_criterion_counts_a_label_the_cop_rule_drops_as_a_crossing() -> None:
+    """A seed-0 label whose class the WHB COP rule drops at seed 1 (open reading).
+
+    ``whb_cop_rule`` nulls the broad ``parent`` of a cell whose supercluster
+    COP call fails the rule and keeps its call. The label keeps its name, so
+    it is a threshold crossing (``n_crossed``), not a change, as in
+    ``seed_stability``, which compares calls only: 30 such labels change
+    nothing and the level passes.
+    """
+    rule = res.whb_cop_rule(AnnotationThresholds(), min_depth=0)
+    replicates = _seed_grid()
+    for seed, bp in ((0, 0.95), (1, 0.5)):
+        table = replicates[("D1", seed)]
+        broad_x = table[(table["level"] == "broad") & (table["parent"] == "X")]
+        cop = broad_x.iloc[:30].assign(level="supercluster", parent="COP", bp=bp)
+        cop["call"] = "COP"
+        replicates[("D1", seed)] = rule(pd.concat([table, cop], ignore_index=True))
+    base, other = replicates[("D1", 0)], replicates[("D1", 1)]
+    assert base["parent"].notna().all()
+    assert int(other["parent"].isna().sum()) == 30
+    row = _seed_row(_seed(replicates), "D1")
+    assert row["n_confident"] == 800
+    assert row["n_changed"] == 0 and row["n_crossed"] == 30 and row["passed"]
+    assert res.seed_stability(base, other, _seed_decisions(), "broad") == 0.0
+
+
 def test_np4_class_verdicts_need_the_tested_sets_and_the_seed_criterion() -> None:
     """NP4 per (level, class): every tested set, and the level's seed criterion."""
     seeds = _seed(_seed_grid())
