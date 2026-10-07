@@ -2,7 +2,10 @@
 
 Pure functions on cells tables: NP3 precision and coverage, NP4 donor / draw
 and seed stability, NP5 resolvability consistency, NP6 stress sensitivity,
-NP7 error structure.
+NP7 error structure; then the assembly of a family's gate P: C_P, the
+per-(level, class) records, ``validated_max_level``, the family checks NP1,
+NP2, NP8 and NP9, the NP1-NP9 report and the validated-table rows of a
+passing family.
 
 Gate P validates a new panel family by simulation only (plan §8.8, §14). The
 thresholds and emission are derived once from the default donor (human) or
@@ -206,31 +209,71 @@ and put to the user in pre-registration §23.13. They are open: each needs
 the user's answer before the set a dry run is scored, because the gate-P
 definitions are fixed before the dry run (pre-registration §23.9) and a
 reading chosen after its numbers would be a post-hoc loosening.
+
+Assembly (§14 per-class records and gate-P rule; ``assemble_gate_p``):
+
+- **C_P** per level is fixed on the truth parent class of the pooled
+  held-out test cells before any cell is mapped (``gate_p_class_sets``;
+  pre-registration §23.9 item 1): the classes with >= 700 test cells, which
+  must hold >= 90% of the level's test cells; the excluded classes are
+  listed with their reference shares.
+- **Records.** Each criterion NP3-NP7 is combined over the emission members
+  (``every_member_verdict``; one member for version 6), and a (level,
+  class) is ``validated`` when all five pass in every member, else
+  ``failed:NP<k>`` (the lowest failing criterion) or ``not_evaluable``
+  (``gate_p_class_records``). A failing class does not block the others.
+  NP4's failure at any tested set fails the (level, class) (D29, CHECK
+  K10), as ``np4_class_verdicts`` reads it.
+- **Headline.** ``validated_max_level`` is the last level of the leading
+  run of levels, coarse to fine, where every class of C_P is validated
+  (the rank rule of ``diagnostics._check_table``); the family passes when
+  it reaches broad (human) or class (mouse) and NP1, NP2 and NP9 pass, NP8
+  passing or not applying (``FamilyCheck.counts_as_pass``). Passing makes
+  the family eligible for a gate-P PR the user approves
+  (``validated_table_rows``, ``diagnostics.write_simulation_family``); it
+  promotes nothing by itself, and a family without a self-map is refused
+  (D13 (a)).
+
+The readings the assembly takes where §14 is not explicit (C_P's
+denominator, the NT population, the 90% rule as a level condition, the
+version-7 depths, the status precedence, NP1's vendor-ID test, NP2's and
+NP1's pending acceptance, NP9's prefilter scope) are listed in the
+docstrings of ``gate_p_class_sets``, ``gate_p_class_records``,
+``gate_p_validated_max_level``, ``np1_gene_ids``, ``np2_panel_coverage``
+and ``np9_resources`` and put to the user in pre-registration §23.16. They
+are open until the user rules, before the set a dry run is scored.
 """
 
 from __future__ import annotations
 
+import json
 import math
-from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
-from typing import Any, Final
+import re
+from collections.abc import Collection, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Final, cast
 
 import numpy as np
 import pandas as pd
 
+from merxen.annotation import diagnostics as diag
 from merxen.annotation import resolvability as res
 from merxen.annotation import sim_inputs as si
 from merxen.annotation.config import (
+    AnnotationPanelConfig,
     AnnotationResolvabilityConfig,
     AnnotationThresholds,
 )
 from merxen.annotation.thresholds import level_target
 from merxen.annotation.vocab import (
+    FINAL_LEVELS,
     REGION_COLUMN_PREFIX,
     UNASSIGNED_LABEL,
     Species,
     human_floor_class,
 )
+from merxen.control_features import matches_control_name_pattern
 
 # §14 NP4: "the range ... is <= max(0.03, 3.5 x pooled SE)".
 GATE_P_SPREAD_FLOOR: Final = 0.03
@@ -5146,3 +5189,1875 @@ def np7_class_verdicts(
             all(set_ok[(level, cls, label)]) for label in labels
         )
     return result
+
+
+# --------------------------------------------------------------------------
+# Assembly (§14 gate-P rule and per-class records): C_P, the per-(level,
+# class) records, validated_max_level, the family checks NP1, NP2, NP8 and
+# NP9, and the NP1-NP9 report
+
+# §14 class set: "C_P must hold >= 90% of the pooled test cells".
+GATE_P_CLASS_MIN_SHARE: Final = 0.9
+# §14 per-class records: "A (level, class) is validated when NP3-NP7 pass
+# for it"; gate-P rule: "NP1, NP2 and NP9 for the family (NP8 when it will
+# be paired with a different panel)".
+GATE_P_CLASS_CRITERIA: Final[tuple[str, ...]] = ("NP3", "NP4", "NP5", "NP6", "NP7")
+GATE_P_FAMILY_CHECKS: Final[tuple[str, ...]] = ("NP1", "NP2", "NP8", "NP9")
+# ``validated_panel_levels.csv`` statuses (§4.7; ``diagnostics.
+# LEVEL_STATUS_PATTERN``); a failure is ``failed:NP<k>``.
+RECORD_VALIDATED: Final = "validated"
+RECORD_NOT_EVALUABLE: Final = "not_evaluable"
+RECORD_FAILED_PREFIX: Final = "failed:"
+# Family-check statuses. ``pending``: the mechanical parts pass and the check
+# waits on what the user accepts in the family's gate-P PR (§14 NP1 "the
+# unresolved list reviewed", NP2 "weak and collapsed parents accepted in the
+# PR"); it is not a pass.
+CHECK_PASSED: Final = "passed"
+CHECK_FAILED: Final = "failed"
+CHECK_PENDING: Final = "pending"
+CHECK_NOT_EVALUABLE: Final = "not_evaluable"
+CHECK_NOT_APPLICABLE: Final = "not_applicable"
+# The order in which part statuses decide a check (the first one present).
+_CHECK_PRECEDENCE: Final[tuple[str, ...]] = (
+    CHECK_FAILED,
+    CHECK_NOT_EVALUABLE,
+    CHECK_PENDING,
+)
+# §14 NP1: ">= 95% of non-control features resolved to the run's species
+# (>= 98% when the vendor supplies Ensembl IDs)".
+NP1_MIN_RESOLUTION_VENDOR_IDS: Final = 0.98
+# The gene-ID source of IDs the vendor supplied (``gene_ids.GeneIdSource``).
+NP1_VENDOR_ID_SOURCE: Final = "native"
+# §14 NP2: "Root markers >= 10; every root child with n >= 50 has >= 10
+# markers".
+NP2_ROOT_CHILD_MIN_N: Final = 50
+NP2_ROOT_CHILD_MIN_MARKERS: Final = 10
+NP2_ROOT_CHILD_COLUMNS: Final[tuple[str, ...]] = ("child", "n", "n_markers")
+# §14 NP9: "within 1.5x of §8.7 / §10".
+NP9_TIME_FACTOR: Final = 1.5
+CLASS_SET_COLUMNS: Final[tuple[str, ...]] = (
+    "level",
+    "class",
+    "n_test_cells",
+    "share",
+    "reference_share",
+    "in_class_set",
+)
+CLASS_SET_LEVEL_COLUMNS: Final[tuple[str, ...]] = (
+    "level",
+    "n_test_cells",
+    "n_not_applicable",
+    "n_no_class",
+    "n_classes",
+    "n_in_class_set",
+    "class_set_share",
+    "class_set_share_classed",
+    "min_share",
+    "share_ok",
+    "excluded_classes",
+)
+CLASS_RECORD_COLUMNS: Final[tuple[str, ...]] = (
+    "level",
+    "class",
+    "in_class_set",
+    "status",
+    "failed_criteria",
+    "unevaluable_criteria",
+    "failed_members",
+    "unevaluable_members",
+    "validated_min_depth",
+    "tested_max_depth",
+    "member_validated_min_depths",
+    "member_tested_max_depths",
+)
+LEVEL_WALK_COLUMNS: Final[tuple[str, ...]] = (
+    "level",
+    "rank",
+    "share_ok",
+    "n_in_class_set",
+    "n_validated",
+    "unvalidated_classes",
+    "complete",
+    "counted",
+)
+_NULLABLE_RECORD_COLUMNS: Final = frozenset({"validated_min_depth", "tested_max_depth"})
+GATE_P_REPORT_SCHEMA_VERSION: Final = 1
+GATE_P_REPORT_JSON: Final = "gate_p_report.json"
+GATE_P_REPORT_TXT: Final = "GATE_P_REPORT.txt"
+GATE_P_RECORDS_CSV: Final = "gate_p_class_records.csv"
+GATE_P_CLASS_SETS_CSV: Final = "gate_p_class_sets.csv"
+GATE_P_LEVEL_WALK_CSV: Final = "gate_p_level_walk.csv"
+# Readings this programme takes where §14 is not explicit, each open until
+# the user rules on it before the set a dry run is scored (§23.9: the
+# gate-P definitions are fixed before the dry run). Every report lists them.
+GATE_P_OPEN_READINGS: Final[tuple[str, ...]] = (
+    "NP3: the natural composition, the trim and rare-type pooling "
+    "(pre-registration §23.11)",
+    "NP5: the median and profile shares, t* on few replicates, the saturated "
+    "cap and the other readings of §23.12",
+    "NP7: the confidence, denominator and numerator of the 1% part and the "
+    "other readings of §23.13",
+    "NP4 seed criterion: the level's share and the other readings of §23.14",
+    "NP6: the weightings, the pooling of thin sets and the other readings of §23.15",
+    "Assembly: C_P's denominator, the NT population, the 90% rule, the "
+    "version-7 depths, the status precedence and the NP1 / NP2 / NP9 "
+    "readings of §23.16",
+)
+
+
+def gate_p_levels(species: str) -> tuple[str, ...]:
+    """Return the levels gate P records for a species (§14, up to the leaf).
+
+    Args:
+        species: ``"human"`` or ``"mouse"``.
+
+    Returns:
+        The annotation chain, coarse to fine (``vocab.FINAL_LEVELS``): human
+        lineage, broad, NT, supercluster; mouse broad, class, NT, subclass.
+        The report-only fine levels and the SEA-AD subclass (M13 D14 (a):
+        gate P scores the primary reference only) are not recorded.
+
+    Raises:
+        ValueError: For another species.
+    """
+    if species not in FINAL_LEVELS:
+        raise ValueError(f"species must be one of {tuple(FINAL_LEVELS)}")
+    return tuple(FINAL_LEVELS[species][1:])
+
+
+def _rank(species: str, level: str) -> int:
+    """A gate-P level's rank (``diagnostics.level_rank``)."""
+    rank = diag.level_rank(species, level)
+    if rank is None:
+        raise ValueError(f"{level!r} is not a {species} level")
+    return rank
+
+
+# ..........................................................................
+# Family checks (§14 NP1, NP2, NP8, NP9)
+
+
+@dataclass(frozen=True)
+class FamilyCheck:
+    """One family check of gate P (§14 NP1, NP2, NP8, NP9).
+
+    Attributes:
+        criterion: ``NP1``, ``NP2``, ``NP8`` or ``NP9``.
+        status: ``passed``, ``failed``, ``pending`` (the mechanical parts
+            pass and the check waits on the user's acceptance in the gate-P
+            PR), ``not_evaluable`` or ``not_applicable``.
+        parts: The status of each part, in the order the check reads them.
+        detail: JSON-safe values behind the parts (the report prints them).
+    """
+
+    criterion: str
+    status: str
+    parts: Mapping[str, str]
+    detail: Mapping[str, Any]
+
+    @property
+    def counts_as_pass(self) -> bool:
+        """Whether the check lets the family pass (§14 gate-P rule).
+
+        NP1, NP2 and NP9 must pass; NP8 must pass when it applies (§14:
+        "NP8 when it will be paired with a different panel").
+        """
+        if self.status == CHECK_PASSED:
+            return True
+        return self.criterion == "NP8" and self.status == CHECK_NOT_APPLICABLE
+
+    def to_json(self) -> dict[str, Any]:
+        """Return the check as JSON-safe values."""
+        return {
+            "criterion": self.criterion,
+            "status": self.status,
+            "counts_as_pass": self.counts_as_pass,
+            "parts": dict(self.parts),
+            "detail": _json_safe(dict(self.detail)),
+        }
+
+
+def _combine_parts(parts: Mapping[str, str]) -> str:
+    """A check's status from its parts.
+
+    ``failed`` before ``not_evaluable`` before ``pending``; a check whose
+    every part is ``not_applicable`` is ``not_applicable``; else
+    ``passed``.
+    """
+    values = [value for value in parts.values() if value != CHECK_NOT_APPLICABLE]
+    if not values:
+        return CHECK_NOT_APPLICABLE
+    for status in _CHECK_PRECEDENCE:
+        if status in values:
+            return status
+    return CHECK_PASSED
+
+
+def _json_safe(value: Any) -> Any:
+    """A value with numpy scalars, tuples, sets and non-finite floats made JSON-safe."""
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        items = sorted(value, key=str) if isinstance(value, (set, frozenset)) else value
+        return [_json_safe(item) for item in items]
+    if isinstance(value, np.generic):
+        return _json_safe(value.item())
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
+@dataclass(frozen=True)
+class Np1Settings:
+    """The NP1 constants (§14 NP1; plan §8.4).
+
+    Attributes:
+        min_resolution: Share of non-control features that must resolve
+            (``min_gene_id_resolution``, 0.95).
+        min_resolution_vendor_ids: The share when the vendor supplies
+            Ensembl IDs (0.98).
+    """
+
+    min_resolution: float
+    min_resolution_vendor_ids: float = NP1_MIN_RESOLUTION_VENDOR_IDS
+
+    def __post_init__(self) -> None:
+        """Validate the constants.
+
+        Raises:
+            ValueError: If a share is outside [0, 1].
+        """
+        for name in ("min_resolution", "min_resolution_vendor_ids"):
+            value = getattr(self, name)
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(
+                    f"Np1Settings.{name} must lie in [0, 1], got {value!r}"
+                )
+
+    @classmethod
+    def from_config(cls, config: AnnotationPanelConfig) -> Np1Settings:
+        """Read the NP1 constants from the panel config.
+
+        Args:
+            config: The panel config.
+
+        Returns:
+            The settings (the vendor-ID share is the §14 constant 0.98).
+        """
+        return cls(min_resolution=config.min_gene_id_resolution)
+
+
+def np1_gene_ids(
+    gene_ids: Sequence[diag.GeneIdDiagnostics],
+    query_symbols: Sequence[str],
+    *,
+    settings: Np1Settings,
+    unresolved_reviewed: bool = False,
+) -> FamilyCheck:
+    """Score NP1, gene IDs and controls of the declared panel (§14 NP1).
+
+    §14 NP1: ">= 95% of non-control features resolved to the run's species
+    (>= 98% when the vendor supplies Ensembl IDs); the exact-case species
+    test passes; every control probe / codeword type named in the 10x or
+    Vizgen documentation is removed by the registry and none reaches the
+    mapping query; the unresolved list reviewed". The parts:
+
+    - ``declared``: every declared panel was accepted by the gene-ID
+      resolver (none ``refused``);
+    - ``resolution``: each declared panel's resolved share reaches 0.95, or
+      0.98 when the vendor supplied Ensembl IDs, read as: at least one of
+      its genes resolved from the vendor's own IDs (the ``native`` source);
+    - ``species_test``: each declared panel's exact-case species test is
+      ``pass`` (one ``not_evaluable`` or never run leaves NP1 not
+      evaluable);
+    - ``controls``: no symbol that reaches the mapping query matches a
+      documented control name (``control_features.
+      matches_control_name_pattern``, every platform's anchored rule); the
+      controls removed are reported per type;
+    - ``unresolved``: the unresolved features are listed; while any remain
+      and the user has not reviewed them in the gate-P PR, NP1 is
+      ``pending``.
+
+    Args:
+        gene_ids: The gene-ID diagnostics of each declared panel of the
+            family (``GeneIdDiagnostics``).
+        query_symbols: The gene symbols of the annotation panel, which
+            reach the mapping query.
+        settings: The NP1 constants.
+        unresolved_reviewed: Whether the user reviewed the unresolved list
+            in the gate-P PR.
+
+    Returns:
+        The check.
+    """
+    panels: list[dict[str, Any]] = []
+    unresolved: dict[str, str] = {}
+    for item in gene_ids:
+        vendor_ids = int(item.resolved_by_source.get(NP1_VENDOR_ID_SOURCE, 0)) > 0
+        bar = (
+            settings.min_resolution_vendor_ids
+            if vendor_ids
+            else settings.min_resolution
+        )
+        panels.append(
+            {
+                "name": item.name,
+                "platform": item.platform,
+                "status": item.status,
+                "refusal_reasons": list(item.refusal_reasons),
+                "n_features_in": item.n_features_in,
+                "n_non_control": item.n_non_control,
+                "n_genes": item.n_genes,
+                "resolution_share": item.resolution_share,
+                "vendor_ids": vendor_ids,
+                "min_resolution": bar,
+                "resolution_ok": item.resolution_share >= bar - _TOLERANCE,
+                "resolved_by_source": dict(item.resolved_by_source),
+                "controls_removed": dict(item.controls_removed),
+                "species_check": item.species_check,
+            }
+        )
+        for name, reason in item.unmapped.items():
+            unresolved[f"{item.name}:{name}"] = reason
+    controls_in_query = sorted(
+        {
+            str(symbol)
+            for symbol in query_symbols
+            if matches_control_name_pattern(symbol)
+        }
+    )
+    parts: dict[str, str] = {}
+    if not panels:
+        parts["declared"] = CHECK_NOT_EVALUABLE
+        parts["resolution"] = CHECK_NOT_EVALUABLE
+        parts["species_test"] = CHECK_NOT_EVALUABLE
+    else:
+        parts["declared"] = (
+            CHECK_FAILED
+            if any(panel["status"] == "refused" for panel in panels)
+            else CHECK_PASSED
+        )
+        parts["resolution"] = (
+            CHECK_PASSED
+            if all(panel["resolution_ok"] for panel in panels)
+            else CHECK_FAILED
+        )
+        checks = [panel["species_check"] for panel in panels]
+        if all(check == "pass" for check in checks):
+            parts["species_test"] = CHECK_PASSED
+        elif any(check == "species_mismatch" for check in checks):
+            parts["species_test"] = CHECK_FAILED
+        else:
+            parts["species_test"] = CHECK_NOT_EVALUABLE
+    if not query_symbols:
+        parts["controls"] = CHECK_NOT_EVALUABLE
+    else:
+        parts["controls"] = CHECK_FAILED if controls_in_query else CHECK_PASSED
+    parts["unresolved"] = (
+        CHECK_PASSED if not unresolved or unresolved_reviewed else CHECK_PENDING
+    )
+    return FamilyCheck(
+        criterion="NP1",
+        status=_combine_parts(parts),
+        parts=parts,
+        detail={
+            "declared_panels": panels,
+            "n_query_symbols": len(query_symbols),
+            "controls_in_query": controls_in_query,
+            "unresolved": dict(sorted(unresolved.items())),
+            "unresolved_reviewed": bool(unresolved_reviewed),
+            "rule": (
+                f">= {settings.min_resolution} of non-control features resolved "
+                f"(>= {settings.min_resolution_vendor_ids} when the vendor "
+                "supplies Ensembl IDs); exact-case species test passes; no "
+                "documented control name reaches the query; unresolved list "
+                "reviewed (§14 NP1)"
+            ),
+        },
+    )
+
+
+@dataclass(frozen=True)
+class Np2Settings:
+    """The NP2 constants (§14 NP2; plan §8.2).
+
+    Attributes:
+        min_root_markers: Root markers the panel needs
+            (``min_root_markers``, 10).
+        weak_parent_markers: Parents with fewer markers are weak
+            (``weak_parent_markers``, 5; reported).
+        root_child_min_n: A root child with at least this many cells needs
+            its own markers (50).
+        root_child_min_markers: The markers such a child needs (10).
+    """
+
+    min_root_markers: int
+    weak_parent_markers: int
+    root_child_min_n: int = NP2_ROOT_CHILD_MIN_N
+    root_child_min_markers: int = NP2_ROOT_CHILD_MIN_MARKERS
+
+    def __post_init__(self) -> None:
+        """Validate the constants.
+
+        Raises:
+            ValueError: If a constant is below 1.
+        """
+        for name in (
+            "min_root_markers",
+            "weak_parent_markers",
+            "root_child_min_n",
+            "root_child_min_markers",
+        ):
+            value = getattr(self, name)
+            if value < 1:
+                raise ValueError(f"Np2Settings.{name} must be >= 1, got {value!r}")
+
+    @classmethod
+    def from_config(cls, config: AnnotationPanelConfig) -> Np2Settings:
+        """Read the NP2 constants from the panel config.
+
+        Args:
+            config: The panel config.
+
+        Returns:
+            The settings (the root-child constants are §14's 50 and 10).
+        """
+        return cls(
+            min_root_markers=config.min_root_markers,
+            weak_parent_markers=config.weak_parent_markers,
+        )
+
+
+def np2_panel_coverage(
+    *,
+    root_markers: int,
+    root_children: pd.DataFrame,
+    weak_parents: Sequence[str],
+    collapsed_parents: Sequence[str],
+    settings: Np2Settings,
+    accepted_parents: Collection[str] = (),
+) -> FamilyCheck:
+    """Score NP2, the panel's coverage of the reference (§14 NP2).
+
+    §14 NP2: "Root markers >= 10; every root child with n >= 50 has >= 10
+    markers; weak and collapsed parents accepted in the PR". It is read on
+    the production primary bundle's marker lookup (M13 CHECK K14), which the
+    gate-P driver summarises into the arguments. The parts:
+
+    - ``root_markers``: the root has at least ``min_root_markers`` markers;
+    - ``root_children``: every root child with at least ``root_child_min_n``
+      cells has at least ``root_child_min_markers`` markers;
+    - ``weak_and_collapsed``: every weak or auto-collapsed parent is among
+      ``accepted_parents``, which only the user's acceptance in the gate-P
+      PR supplies (M13 OPEN 4: NP2's weak and collapsed parents are the
+      user's call; none is accepted by default). While one is not, NP2 is
+      ``pending``.
+
+    Args:
+        root_markers: Markers of the taxonomy root.
+        root_children: One row per root child, columns
+            ``NP2_ROOT_CHILD_COLUMNS``: ``child``, its cells ``n`` and its
+            markers ``n_markers`` (a child without children of its own is
+            separated by the root's markers, as
+            ``reference.root_children_with_markers`` counts it).
+        weak_parents: Parents with fewer than ``weak_parent_markers`` markers.
+        collapsed_parents: Parents auto-collapsed for lack of markers.
+        settings: The NP2 constants.
+        accepted_parents: The weak or collapsed parents the user accepted in
+            the gate-P PR.
+
+    Returns:
+        The check.
+
+    Raises:
+        ValueError: If ``root_children`` lacks a column or names a child
+            twice.
+    """
+    _require_columns(root_children, NP2_ROOT_CHILD_COLUMNS, "the NP2 root children")
+    children = root_children[list(NP2_ROOT_CHILD_COLUMNS)].copy()
+    children["child"] = children["child"].astype(str)
+    duplicated = sorted(set(children["child"][children["child"].duplicated()]))
+    if duplicated:
+        raise ValueError(f"the NP2 root children name {duplicated} more than once")
+    n_cells = children["n"].to_numpy(np.int64)
+    n_markers = children["n_markers"].to_numpy(np.int64)
+    judged = n_cells >= settings.root_child_min_n
+    short = judged & (n_markers < settings.root_child_min_markers)
+    parents = sorted(
+        {str(item) for item in weak_parents} | {str(item) for item in collapsed_parents}
+    )
+    accepted = {str(item) for item in accepted_parents}
+    unaccepted = [parent for parent in parents if parent not in accepted]
+    parts = {
+        "root_markers": CHECK_PASSED
+        if root_markers >= settings.min_root_markers
+        else CHECK_FAILED,
+        "root_children": CHECK_NOT_EVALUABLE
+        if children.empty
+        else (CHECK_FAILED if bool(short.any()) else CHECK_PASSED),
+        "weak_and_collapsed": CHECK_PENDING if unaccepted else CHECK_PASSED,
+    }
+    return FamilyCheck(
+        criterion="NP2",
+        status=_combine_parts(parts),
+        parts=parts,
+        detail={
+            "root_markers": int(root_markers),
+            "min_root_markers": settings.min_root_markers,
+            "n_root_children": len(children),
+            "n_root_children_judged": int(judged.sum()),
+            "root_children_short": sorted(children["child"][short].tolist()),
+            "root_children": [
+                {"child": child, "n": int(n), "n_markers": int(markers)}
+                for child, n, markers in zip(
+                    children["child"], n_cells, n_markers, strict=True
+                )
+            ],
+            "weak_parents": sorted({str(item) for item in weak_parents}),
+            "weak_parent_markers": settings.weak_parent_markers,
+            "collapsed_parents": sorted({str(item) for item in collapsed_parents}),
+            "accepted_parents": sorted(accepted & set(parents)),
+            "unaccepted_parents": unaccepted,
+            "accepted_not_listed": sorted(accepted - set(parents)),
+            "rule": (
+                f"root markers >= {settings.min_root_markers}; every root child "
+                f"with n >= {settings.root_child_min_n} has >= "
+                f"{settings.root_child_min_markers} markers; weak and collapsed "
+                "parents accepted in the gate-P PR (§14 NP2)"
+            ),
+        },
+    )
+
+
+def np8_cross_panel(partners: Mapping[str, bool | None] | None = None) -> FamilyCheck:
+    """Score NP8, cross-panel support (§14 NP8; only for paired families).
+
+    §14 NP8 applies "only when the family will be paired with a different
+    panel": the intersection panel with each intended partner meets NP3 at
+    broad level. Whether a family will be paired is the user's answer (for
+    the new-panel human MERSCOPE family it is unanswered, M13 D26, so NP8
+    is ``not_applicable`` by default).
+
+    Args:
+        partners: Per intended partner panel, whether the intersection panel
+            passed NP3 at broad (``None``: not evaluated); ``None`` or empty
+            when the family will not be paired.
+
+    Returns:
+        The check: ``not_applicable`` without partners; else ``passed`` when
+        every partner's intersection passes, ``failed`` when one fails and
+        ``not_evaluable`` when one is not evaluated.
+    """
+    parts: dict[str, str] = {}
+    for partner, passed in sorted((partners or {}).items()):
+        if passed is None:
+            parts[str(partner)] = CHECK_NOT_EVALUABLE
+        else:
+            parts[str(partner)] = CHECK_PASSED if passed else CHECK_FAILED
+    return FamilyCheck(
+        criterion="NP8",
+        status=_combine_parts(parts) if parts else CHECK_NOT_APPLICABLE,
+        parts=parts,
+        detail={
+            "partners": sorted(parts),
+            "rule": (
+                "the intersection panel with each intended partner meets NP3 at "
+                "broad level; applies only to a family that will be paired with "
+                "a different panel (§14 NP8)"
+            ),
+        },
+    )
+
+
+@dataclass(frozen=True)
+class Np9Settings:
+    """The NP9 constants (§14 NP9; plan §8.7).
+
+    Attributes:
+        large_panel_genes: Panels above this size are judged on the
+            prefilter agreement (``large_panel_genes``, 1,000).
+        time_factor: The wall time allowed, in multiples of the time
+            reference (1.5).
+    """
+
+    large_panel_genes: int
+    time_factor: float = NP9_TIME_FACTOR
+
+    def __post_init__(self) -> None:
+        """Validate the constants.
+
+        Raises:
+            ValueError: If ``large_panel_genes`` is below 1 or
+                ``time_factor`` is not > 0.
+        """
+        if self.large_panel_genes < 1:
+            raise ValueError(
+                "Np9Settings.large_panel_genes must be >= 1, got "
+                f"{self.large_panel_genes!r}"
+            )
+        if not self.time_factor > 0:
+            raise ValueError(
+                f"Np9Settings.time_factor must be > 0, got {self.time_factor!r}"
+            )
+
+    @classmethod
+    def from_config(cls, config: AnnotationPanelConfig) -> Np9Settings:
+        """Read the NP9 constants from the panel config.
+
+        Args:
+            config: The panel config.
+
+        Returns:
+            The settings (the time factor is §14's 1.5).
+        """
+        return cls(large_panel_genes=config.large_panel_genes)
+
+
+@dataclass(frozen=True)
+class Np9Inputs:
+    """What NP9 is scored on (§14 NP9), as the gate-P driver measured it.
+
+    Attributes:
+        n_genes: The panel's genes.
+        wall_seconds: Wall time of PREP, resolvability included, and of the
+            gate-P replicates.
+        reference_seconds: The time reference: §8.7 / §10, or for a
+            version-7 family ``np9_time_reference_v7`` (M13 D10 (a)).
+        reference_basis: Where the reference comes from (reported).
+        peak_rss_gb: Peak RSS of each PREP step, query markers included, GB.
+        rss_reserve_gb: The PREP memory reserve, GB.
+        bundle_identical: Whether an identical re-run of PREP gave an
+            identical bundle (M13 CHECK K13).
+        replicate_identical: Per emission member, whether an identical
+            re-run of its seed-0 replicate gave identical tables (K13).
+        prefiltered: Whether the bundle's markers were prefiltered (§8.7).
+        prefilter_verdict: ``simulate.prefilter_verdict`` of the
+            prefiltered against the unfiltered lookup, when compared.
+    """
+
+    n_genes: int
+    wall_seconds: float | None = None
+    reference_seconds: float | None = None
+    reference_basis: str = ""
+    peak_rss_gb: Mapping[str, float] = field(default_factory=dict)
+    rss_reserve_gb: float | None = None
+    bundle_identical: bool | None = None
+    replicate_identical: Mapping[str, bool] = field(default_factory=dict)
+    prefiltered: bool = False
+    prefilter_verdict: Mapping[str, Any] | None = None
+
+
+def np9_time_reference_v7(
+    *,
+    dry_run_seconds: float,
+    dry_run_simulated_cells: int,
+    family_simulated_cells: int,
+) -> float:
+    """Return NP9's time reference for a version-7 family (M13 D10 (a)).
+
+    D10 (a), OD-E18 (a loosening the user approved in writing on
+    2026-10-06; pre-registration §23.10): the reference is the time
+    measured in the set a version-7 dry run, scaled per simulated cell, and
+    NP9 allows ``Np9Settings.time_factor`` (1.5) times it. It is measured
+    before any number of the family.
+
+    Args:
+        dry_run_seconds: Wall time of the set a version-7 dry run.
+        dry_run_simulated_cells: Simulated cells of that dry run.
+        family_simulated_cells: Simulated cells of the family's gate-P run.
+
+    Returns:
+        ``dry_run_seconds x family_simulated_cells / dry_run_simulated_cells``.
+
+    Raises:
+        ValueError: If a time or count is not positive.
+    """
+    if not dry_run_seconds > 0:
+        raise ValueError(f"dry_run_seconds must be > 0, got {dry_run_seconds!r}")
+    if dry_run_simulated_cells < 1 or family_simulated_cells < 1:
+        raise ValueError("the simulated cell counts must be >= 1")
+    return float(dry_run_seconds) * family_simulated_cells / dry_run_simulated_cells
+
+
+def np9_resources(
+    inputs: Np9Inputs, *, members: Sequence[str], settings: Np9Settings
+) -> FamilyCheck:
+    """Score NP9, resources and reproducibility (§14 NP9).
+
+    §14 NP9: "PREP incl. resolvability and the gate-P replicates within 1.5x
+    of §8.7 / §10 (for 5K, of the M3b measurement); peak RSS of every PREP
+    step, query markers included, within the reserve; above 1,000 genes the
+    per-parent prefilter agrees with the unfiltered lookup >= 0.95 per
+    validated level and class with n >= 50 at bp >= 0.8, with no parent
+    below 5 markers; identical re-run -> identical bundle and table
+    content". The parts:
+
+    - ``time``: the wall time is at most ``time_factor`` x the reference;
+    - ``rss``: every PREP step's peak RSS is within the reserve;
+    - ``identity``: PREP's bundle and each emission member's seed-0
+      replicate are identical on an identical re-run (CHECK K13's scope);
+      a member without a re-run leaves NP9 not evaluable;
+    - ``prefilter``: not applicable up to ``large_panel_genes`` genes or
+      when the bundle's markers were not prefiltered (the lookup is then
+      the unfiltered one); else the ``simulate.prefilter_verdict`` passes.
+      That verdict judges every class of every emitted level (§8.7), a
+      superset of §14's "validated level and class" (the stricter reading;
+      pre-registration §23.16).
+
+    A part without its measurement is ``not_evaluable``, so NP9 cannot pass
+    on a missing number.
+
+    Args:
+        inputs: The measurements.
+        members: The family's emission members (one for version 6).
+        settings: The NP9 constants.
+
+    Returns:
+        The check.
+    """
+    parts: dict[str, str] = {}
+    wall, reference = inputs.wall_seconds, inputs.reference_seconds
+    limit = None
+    if wall is None or reference is None or not reference > 0:
+        parts["time"] = CHECK_NOT_EVALUABLE
+    else:
+        limit = settings.time_factor * float(reference)
+        parts["time"] = CHECK_PASSED if wall <= limit + _TOLERANCE else CHECK_FAILED
+    over = sorted(
+        step
+        for step, value in inputs.peak_rss_gb.items()
+        if inputs.rss_reserve_gb is not None
+        and float(value) > inputs.rss_reserve_gb + _TOLERANCE
+    )
+    if not inputs.peak_rss_gb or inputs.rss_reserve_gb is None:
+        parts["rss"] = CHECK_NOT_EVALUABLE
+    else:
+        parts["rss"] = CHECK_FAILED if over else CHECK_PASSED
+    missing = sorted(set(members) - set(inputs.replicate_identical))
+    differing = sorted(
+        member
+        for member, identical in inputs.replicate_identical.items()
+        if not identical
+    )
+    if inputs.bundle_identical is False or differing:
+        parts["identity"] = CHECK_FAILED
+    elif inputs.bundle_identical is None or missing:
+        parts["identity"] = CHECK_NOT_EVALUABLE
+    else:
+        parts["identity"] = CHECK_PASSED
+    verdict = inputs.prefilter_verdict
+    if inputs.n_genes <= settings.large_panel_genes or not inputs.prefiltered:
+        parts["prefilter"] = CHECK_NOT_APPLICABLE
+    elif verdict is None:
+        parts["prefilter"] = CHECK_NOT_EVALUABLE
+    else:
+        parts["prefilter"] = (
+            CHECK_PASSED if bool(verdict.get("passes")) else CHECK_FAILED
+        )
+    return FamilyCheck(
+        criterion="NP9",
+        status=_combine_parts(parts),
+        parts=parts,
+        detail={
+            "n_genes": int(inputs.n_genes),
+            "wall_seconds": wall,
+            "reference_seconds": reference,
+            "reference_basis": inputs.reference_basis,
+            "time_factor": settings.time_factor,
+            "time_limit_seconds": limit,
+            "peak_rss_gb": {
+                str(key): float(value) for key, value in inputs.peak_rss_gb.items()
+            },
+            "rss_reserve_gb": inputs.rss_reserve_gb,
+            "rss_over_reserve": over,
+            "bundle_identical": inputs.bundle_identical,
+            "replicate_identical": {
+                str(key): bool(value)
+                for key, value in inputs.replicate_identical.items()
+            },
+            "members_without_rerun": missing,
+            "large_panel_genes": settings.large_panel_genes,
+            "prefiltered": bool(inputs.prefiltered),
+            "prefilter_verdict": None if verdict is None else dict(verdict),
+        },
+    )
+
+
+# ..........................................................................
+# C_P (§14 class set)
+
+
+@dataclass(frozen=True)
+class ClassSetSettings:
+    """The C_P constants (§14 class set; plan §3.7).
+
+    Attributes:
+        min_test_cells: Pooled test cells a class needs to enter C_P
+            (``gate_p_class_min_test_cells``, 700).
+        min_share: Share of a level's pooled test cells C_P must hold (0.9).
+    """
+
+    min_test_cells: int
+    min_share: float = GATE_P_CLASS_MIN_SHARE
+
+    def __post_init__(self) -> None:
+        """Validate the constants.
+
+        Raises:
+            ValueError: If ``min_test_cells`` is below 1 or ``min_share`` is
+                outside [0, 1].
+        """
+        if self.min_test_cells < 1:
+            raise ValueError(
+                "ClassSetSettings.min_test_cells must be >= 1, got "
+                f"{self.min_test_cells!r}"
+            )
+        if not 0.0 <= self.min_share <= 1.0:
+            raise ValueError(
+                f"ClassSetSettings.min_share must lie in [0, 1], got {self.min_share!r}"
+            )
+
+    @classmethod
+    def from_config(cls, config: AnnotationResolvabilityConfig) -> ClassSetSettings:
+        """Read the C_P constants from the resolvability config.
+
+        Args:
+            config: The resolvability config.
+
+        Returns:
+            The settings (the share is §14's 0.9).
+        """
+        return cls(min_test_cells=config.gate_p_class_min_test_cells)
+
+
+@dataclass(frozen=True)
+class ClassSets:
+    """C_P per level, fixed on the pooled test cells before mapping (§14).
+
+    Attributes:
+        species: Species.
+        classes: One row per (level, truth class), columns
+            ``CLASS_SET_COLUMNS``.
+        levels: One row per gate-P level, columns ``CLASS_SET_LEVEL_COLUMNS``.
+    """
+
+    species: str
+    classes: pd.DataFrame
+    levels: pd.DataFrame
+
+    def level_names(self) -> tuple[str, ...]:
+        """Return the levels, coarse to fine."""
+        return tuple(str(level) for level in self.levels["level"])
+
+    def _level_row(self, level: str) -> pd.Series:
+        rows = self.levels[self.levels["level"] == level]
+        if rows.empty:
+            raise ValueError(f"no class set for the level {level!r}")
+        return rows.iloc[0]
+
+    def members(self, level: str) -> frozenset[str]:
+        """Return C_P at a level.
+
+        Args:
+            level: A gate-P level.
+
+        Returns:
+            Its classes.
+
+        Raises:
+            ValueError: For a level without a class set.
+        """
+        self._level_row(level)
+        rows = self.classes[
+            (self.classes["level"] == level) & self.classes["in_class_set"].astype(bool)
+        ]
+        return frozenset(str(cls) for cls in rows["class"])
+
+    def share_ok(self, level: str) -> bool:
+        """Return whether C_P holds >= the minimum share of the level's cells.
+
+        Args:
+            level: A gate-P level.
+
+        Returns:
+            The level's ``share_ok``.
+
+        Raises:
+            ValueError: For a level without a class set.
+        """
+        return bool(self._level_row(level)["share_ok"])
+
+    def to_json(self) -> dict[str, Any]:
+        """Return the class sets as JSON-safe values."""
+        return {
+            "species": self.species,
+            "levels": _records(self.levels),
+            "classes": _records(self.classes),
+        }
+
+
+def _records(frame: pd.DataFrame) -> list[dict[str, Any]]:
+    """A frame's rows as JSON-safe records (``nan`` as ``None``)."""
+    rows = frame.astype(object).where(frame.notna(), None).to_dict(orient="records")
+    return [_json_safe(row) for row in rows]
+
+
+def gate_p_class_sets(
+    test_cells: pd.DataFrame,
+    *,
+    species: str,
+    default_group: str | None,
+    settings: ClassSetSettings,
+    reference_shares: Mapping[str, Mapping[str, float]] | None = None,
+) -> ClassSets:
+    """Fix C_P per level from the pooled test cells, before mapping (§14).
+
+    §14 class set: "The classes with >= 700 pooled test cells ..., fixed
+    from the test-cell table before any cell is mapped. ... C_P must hold
+    >= 90% of the pooled test cells, and the PR lists the excluded classes
+    with their share of the reference composition." Per level, a test
+    cell's class is its truth parent class (pre-registration §23.9 item 1,
+    D12). The pooled test cells are the held-out ones gate P scores: every
+    group's, the default group's check half only (``held_out_replicates``).
+
+    Readings (pre-registration §23.16; open until the user rules):
+
+    - **Cells a level does not apply to** (truth ``not_neuron`` at NT: the
+      non-neuronal cells) are left out of the level's counts and its
+      denominator. NT then has no row for those classes (M13 D14 (a)), and
+      its 90% rule is read on the neurons. Counting them would put NT below
+      90% on any panel.
+    - **Cells without a class at a level** (a sink truth: WHB Splatter or
+      Miscellaneous; ``truth_parent`` null) stay in the denominator: they
+      are pooled test cells that no class of C_P holds. This is the
+      stricter reading. The share over classed cells only, which
+      ``resolvability.gate_p_class_set`` computes, is reported
+      (``class_set_share_classed``).
+
+    Args:
+        test_cells: The pooled test cells, one row per (level, test cell)
+            or more (a cells table's rows per depth are counted once per
+            cell), columns ``level``, ``cell_id``, ``truth`` and
+            ``truth_parent``; with ``group`` and ``half`` when
+            ``default_group`` is given.
+        species: ``"human"`` or ``"mouse"`` (the levels, ``gate_p_levels``).
+        default_group: The group whose fit half the frozen thresholds were
+            fitted on (required, as in ``replicate_set_stats``; ``None`` when
+            no test cell is of it).
+        settings: The C_P constants.
+        reference_shares: Per level, each class's share of the reference
+            composition (reported beside the excluded classes; ``nan``
+            without it).
+
+    Returns:
+        The class sets of every gate-P level (a level without test cells
+        has none, ``share_ok`` False).
+
+    Raises:
+        ValueError: If a column is missing, the default group's rows have no
+            ``half`` or no ``group`` column or a ``half`` other than 0 and 1,
+            a test cell has two truths at a level, or a test cell is in two
+            groups.
+    """
+    levels = gate_p_levels(species)
+    _require_columns(
+        test_cells, ("level", "cell_id", "truth", "truth_parent"), "the test cells"
+    )
+    frame = test_cells[test_cells["level"].astype(str).isin(levels)]
+    if default_group is not None:
+        _require_columns(frame, ("group", "half"), "the test cells")
+        in_default = (frame["group"].astype(str) == default_group).to_numpy(bool)
+        half = frame["half"].to_numpy()
+        if not bool(np.isin(half[in_default], (0, 1)).all()):
+            raise ValueError(
+                f"the test cells of the default group {default_group!r} have "
+                "'half' values other than 0 (fit) and 1 (check)"
+            )
+        frame = frame[~(in_default & (half == 0))]
+    if "group" in frame.columns:
+        groups = frame[["cell_id", "group"]].astype(str).drop_duplicates()
+        shared = sorted(set(groups["cell_id"][groups["cell_id"].duplicated()]))
+        if shared:
+            raise ValueError(
+                f"{len(shared)} test cells are in more than one group (e.g. "
+                f"{shared[:3]}): the replicates must be disjoint (D2 (d))"
+            )
+    cells = pd.DataFrame(
+        {
+            "level": frame["level"].astype(str).to_numpy(),
+            "cell_id": frame["cell_id"].astype(str).to_numpy(),
+            "truth": frame["truth"].astype(object).to_numpy(),
+            "truth_parent": frame["truth_parent"].astype(object).to_numpy(),
+        }
+    )
+    cells["truth"] = cells["truth"].where(cells["truth"].notna(), None)
+    cells["truth_parent"] = cells["truth_parent"].where(
+        cells["truth_parent"].notna(), None
+    )
+    unique = cells.drop_duplicates()
+    conflicting = unique[unique.duplicated(["level", "cell_id"], keep=False)]
+    if not conflicting.empty:
+        first = conflicting.iloc[0]
+        raise ValueError(
+            f"the test cell {first['cell_id']!r} has more than one truth at "
+            f"{first['level']!r}"
+        )
+    class_records: list[dict[str, object]] = []
+    level_records: list[dict[str, object]] = []
+    for level in levels:
+        rows = unique[unique["level"] == level]
+        applies = (rows["truth"].astype(object) != res.NOT_NEURON).to_numpy(bool)
+        n_not_applicable = int((~applies).sum())
+        rows = rows[applies]
+        classed = rows["truth_parent"].notna().to_numpy(bool)
+        counts = rows["truth_parent"][classed].astype(str).value_counts()
+        members, share_classed, _ = res.gate_p_class_set(
+            rows["truth_parent"][classed].astype(str),
+            min_test_cells=settings.min_test_cells,
+            min_share=settings.min_share,
+        )
+        n_cells = len(rows)
+        n_members = int(counts[counts.index.isin(members)].sum())
+        share = n_members / n_cells if n_cells else math.nan
+        shares = (reference_shares or {}).get(level, {})
+        for cls in sorted(counts.index.astype(str)):
+            class_records.append(
+                {
+                    "level": level,
+                    "class": cls,
+                    "n_test_cells": int(counts[cls]),
+                    "share": int(counts[cls]) / n_cells,
+                    "reference_share": float(shares.get(cls, math.nan)),
+                    "in_class_set": cls in members,
+                }
+            )
+        excluded = sorted(set(counts.index.astype(str)) - set(members))
+        level_records.append(
+            {
+                "level": level,
+                "n_test_cells": n_cells,
+                "n_not_applicable": n_not_applicable,
+                "n_no_class": int((~classed).sum()),
+                "n_classes": len(counts),
+                "n_in_class_set": len(members),
+                "class_set_share": share,
+                "class_set_share_classed": share_classed if len(counts) else math.nan,
+                "min_share": settings.min_share,
+                "share_ok": bool(
+                    n_cells > 0 and share >= settings.min_share - _TOLERANCE
+                ),
+                "excluded_classes": ";".join(excluded),
+            }
+        )
+    return ClassSets(
+        species=species,
+        classes=pd.DataFrame.from_records(
+            class_records, columns=list(CLASS_SET_COLUMNS)
+        ),
+        levels=pd.DataFrame.from_records(
+            level_records, columns=list(CLASS_SET_LEVEL_COLUMNS)
+        ),
+    )
+
+
+# ..........................................................................
+# Per-(level, class) records and validated_max_level (§14 per-class records,
+# gate-P rule)
+
+ClassVerdicts = Mapping[tuple[str, str], bool | None]
+
+
+def _member_keys(
+    verdicts: Mapping[str, Mapping[str, ClassVerdicts]],
+    depths: Mapping[str, pd.DataFrame],
+) -> list[str]:
+    """The emission members, checked to be the same in every input.
+
+    Raises:
+        ValueError: If the criteria are not NP3-NP7, a criterion or the
+            depths have no member or other members, or a member's criteria
+            and depth table hold different (level, class) keys.
+    """
+    if set(verdicts) != set(GATE_P_CLASS_CRITERIA):
+        raise ValueError(
+            f"the per-class verdicts must be those of {GATE_P_CLASS_CRITERIA}, "
+            f"got {sorted(verdicts)}"
+        )
+    members = sorted(str(member) for member in verdicts[GATE_P_CLASS_CRITERIA[0]])
+    if not members:
+        raise ValueError("the per-class verdicts have no emission member")
+    for name, values in [*verdicts.items(), ("the NP3 depths", depths)]:
+        if sorted(str(member) for member in values) != members:
+            raise ValueError(
+                f"{name} has the members {sorted(values)}, not {members}: every "
+                "criterion is scored in every emission member"
+            )
+    for member in members:
+        keys = {
+            criterion: {
+                (str(level), str(cls)) for level, cls in verdicts[criterion][member]
+            }
+            for criterion in GATE_P_CLASS_CRITERIA
+        }
+        table = depths[member]
+        _require_columns(
+            table,
+            ("level", "class", "tested_max_depth", "validated_min_depth", "passed"),
+            f"the NP3 depths of {member}",
+        )
+        keys["NP3 depths"] = {
+            (str(level), str(cls))
+            for level, cls in zip(table["level"], table["class"], strict=True)
+        }
+        reference = keys["NP3"]
+        for name, found in keys.items():
+            if found != reference:
+                raise ValueError(
+                    f"member {member}: {name} holds other (level, class) keys than "
+                    f"NP3 ({sorted(found ^ reference)[:4]}): build every criterion "
+                    "of a member on the same tested sets"
+                )
+    return members
+
+
+def _optional_depth(value: object) -> int | None:
+    """A depth cell as an int (``None``, ``nan`` and blanks as ``None``).
+
+    Raises:
+        ValueError: For a value that is not a depth.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{value!r} is not a depth")
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    if isinstance(value, (float, np.floating)):
+        return None if math.isnan(value) else int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        return int(float(text)) if text else None
+    raise ValueError(f"{value!r} is not a depth")
+
+
+def _depth_index(
+    table: pd.DataFrame,
+) -> dict[tuple[str, str], tuple[bool | None, int | None, int | None]]:
+    """``validated_min_depth`` rows per (level, class): passed, vmd, D_P."""
+    result: dict[tuple[str, str], tuple[bool | None, int | None, int | None]] = {}
+    for level, cls, passed, minimum, d_p in zip(
+        table["level"],
+        table["class"],
+        table["passed"].astype(object),
+        table["validated_min_depth"].astype(object),
+        table["tested_max_depth"].astype(object),
+        strict=True,
+    ):
+        flag = None if passed is None or pd.isna(passed) else bool(passed)
+        result[(str(level), str(cls))] = (
+            flag,
+            _optional_depth(minimum),
+            _optional_depth(d_p),
+        )
+    return result
+
+
+def _joined_members(values: Mapping[str, Sequence[str]]) -> str:
+    """``criterion:member,member;...`` for the criteria with members."""
+    return ";".join(
+        f"{criterion}:{','.join(items)}" for criterion, items in values.items() if items
+    )
+
+
+def gate_p_class_records(
+    verdicts: Mapping[str, Mapping[str, ClassVerdicts]],
+    depths: Mapping[str, pd.DataFrame],
+    class_sets: ClassSets,
+) -> pd.DataFrame:
+    """Return the per-(level, class) records of gate P (§14 per-class records).
+
+    "A (level, class) is validated when NP3-NP7 pass for it ... The record
+    carries [``validated_min_depth``], with D_P as ``tested_max_depth``, or
+    else the failing criterion. A failing or unevaluable class stays
+    provisional per class and does not block the others." Each criterion
+    is combined over the emission members with
+    ``resolvability.every_member_verdict`` (§14 "Version-7 families": a
+    (level, class) is validated only if it passes in every member; one
+    member for version 6). Then, per (level, class):
+
+    - ``failed:NP<k>`` when any criterion fails in any member, ``k`` the
+      lowest such criterion (all of them are listed in
+      ``failed_criteria``);
+    - else ``not_evaluable`` when any criterion is not evaluable in any
+      member (no tested set; a class of C_P without a call at all);
+    - else ``validated``, with ``validated_min_depth`` the deepest of the
+      members' NP3 values (the label is validated where it is validated in
+      every member) and ``tested_max_depth`` the shallowest member D_P,
+      raised to ``validated_min_depth`` when it lies below it (an open
+      reading for version 7, pre-registration §23.16; each member's values
+      are reported).
+
+    The records cover every key of the verdicts and every class of C_P at
+    the gate-P levels (``gate_p_levels``); ``in_class_set`` says whether
+    the class is in C_P. Keys of other levels (the report-only fine level)
+    are left out.
+
+    Args:
+        verdicts: Per criterion of ``GATE_P_CLASS_CRITERIA``, per emission
+            member, its per-(level, class) verdicts (``np3_class_verdicts``,
+            ``np4_class_verdicts``, ``np5_class_verdicts``,
+            ``np6_class_verdicts``, ``np7_class_verdicts``).
+        depths: Per emission member, NP3's ``validated_min_depth`` table.
+        class_sets: C_P per level (``gate_p_class_sets``).
+
+    Returns:
+        One row per (level, class), coarse levels first, columns
+        ``CLASS_RECORD_COLUMNS``.
+
+    Raises:
+        ValueError: If the inputs are not the five criteria in the same
+            members on the same keys (``_member_keys``), or a validated key
+            has no NP3 depth in some member.
+    """
+    members = _member_keys(verdicts, depths)
+    combined = {
+        criterion: res.every_member_verdict(
+            {member: verdicts[criterion][member] for member in members}
+        )
+        for criterion in GATE_P_CLASS_CRITERIA
+    }
+    depth_by_member = {member: _depth_index(depths[member]) for member in members}
+    levels = class_sets.level_names()
+    keys = {
+        (str(level), str(cls))
+        for values in combined.values()
+        for level, cls in values
+        if str(level) in levels
+    }
+    keys |= {(level, cls) for level in levels for cls in class_sets.members(level)}
+    order = {level: position for position, level in enumerate(levels)}
+    records: list[dict[str, object]] = []
+    for level, cls in sorted(keys, key=lambda key: (order[key[0]], key[1])):
+        failed: dict[str, list[str]] = {}
+        unevaluable: dict[str, list[str]] = {}
+        for criterion in GATE_P_CLASS_CRITERIA:
+            entry = combined[criterion].get(
+                (level, cls),
+                {
+                    "status": res.GATE_P_NOT_EVALUABLE,
+                    "failed_members": [],
+                    "unevaluable_members": list(members),
+                },
+            )
+            if entry["status"] == res.GATE_P_FAILED:
+                failed[criterion] = list(entry["failed_members"])
+            elif entry["status"] == res.GATE_P_NOT_EVALUABLE:
+                unevaluable[criterion] = list(entry["unevaluable_members"])
+        member_depths = {
+            member: depth_by_member[member].get((level, cls)) for member in members
+        }
+        passed_depths = {
+            member: value
+            for member, value in member_depths.items()
+            if value is not None and value[0]
+        }
+        status: str
+        minimum: int | None = None
+        d_p: int | None = None
+        if failed:
+            status = RECORD_FAILED_PREFIX + next(iter(failed))
+        elif unevaluable:
+            status = RECORD_NOT_EVALUABLE
+        else:
+            status = RECORD_VALIDATED
+            lacking = sorted(
+                member
+                for member in members
+                if member not in passed_depths
+                or passed_depths[member][1] is None
+                or passed_depths[member][2] is None
+            )
+            if lacking:
+                raise ValueError(
+                    f"({level}, {cls}) passes NP3-NP7 in every member, but the NP3 "
+                    f"depths of {lacking} have no passing validated_min_depth"
+                )
+            minima = [value[1] for value in passed_depths.values()]
+            deep = [value[2] for value in passed_depths.values()]
+            minimum = max(item for item in minima if item is not None)
+            d_p = max(min(item for item in deep if item is not None), minimum)
+        records.append(
+            {
+                "level": level,
+                "class": cls,
+                "in_class_set": cls in class_sets.members(level),
+                "status": status,
+                "failed_criteria": ";".join(failed),
+                "unevaluable_criteria": ";".join(unevaluable),
+                "failed_members": _joined_members(failed),
+                "unevaluable_members": _joined_members(unevaluable),
+                "validated_min_depth": minimum,
+                "tested_max_depth": d_p,
+                "member_validated_min_depths": ";".join(
+                    f"{member}:{value[1]}" for member, value in passed_depths.items()
+                ),
+                "member_tested_max_depths": ";".join(
+                    f"{member}:{value[2]}" for member, value in passed_depths.items()
+                ),
+            }
+        )
+    return pd.DataFrame(
+        {
+            column: pd.Series(
+                [record[column] for record in records],
+                dtype=object if column in _NULLABLE_RECORD_COLUMNS else None,
+            )
+            for column in CLASS_RECORD_COLUMNS
+        }
+    )
+
+
+def gate_p_validated_max_level(
+    records: pd.DataFrame, class_sets: ClassSets
+) -> tuple[str | None, pd.DataFrame]:
+    """Return ``validated_max_level`` and the walk that found it (§14).
+
+    §14 gate-P rule: "``validated_max_level`` is the deepest level <=
+    ``max_leaf_level`` at which every class of C_P is validated". The rank
+    rule of ``diagnostics._check_table`` requires every class of C_P to be
+    validated at every level of rank <= the headline, so the levels are
+    walked coarse to fine and the headline is the last level of the leading
+    run of complete levels. A level is complete when its C_P is not empty,
+    holds >= 90% of its test cells (§14: "C_P must hold >= 90% of the
+    pooled test cells"; a level below it cannot be validated, a reading of
+    pre-registration §23.16) and every class of it is validated.
+
+    Args:
+        records: ``gate_p_class_records`` output.
+        class_sets: C_P per level.
+
+    Returns:
+        ``(headline, walk)``: the headline level (``None`` when even the
+        coarsest level is incomplete) and one row per level, columns
+        ``LEVEL_WALK_COLUMNS``.
+    """
+    validated = {
+        (str(level), str(cls))
+        for level, cls, status in zip(
+            records["level"], records["class"], records["status"], strict=True
+        )
+        if status == RECORD_VALIDATED
+    }
+    rows: list[dict[str, object]] = []
+    headline: str | None = None
+    leading = True
+    for level in class_sets.level_names():
+        members = sorted(class_sets.members(level))
+        unvalidated = [cls for cls in members if (level, cls) not in validated]
+        share_ok = class_sets.share_ok(level)
+        complete = bool(members) and share_ok and not unvalidated
+        leading = leading and complete
+        if leading:
+            headline = level
+        rows.append(
+            {
+                "level": level,
+                "rank": _rank(class_sets.species, level),
+                "share_ok": share_ok,
+                "n_in_class_set": len(members),
+                "n_validated": len(members) - len(unvalidated),
+                "unvalidated_classes": ";".join(unvalidated),
+                "complete": complete,
+                "counted": leading,
+            }
+        )
+    return headline, pd.DataFrame.from_records(rows, columns=list(LEVEL_WALK_COLUMNS))
+
+
+@dataclass(frozen=True)
+class GatePResult:
+    """Gate P for one family (§14 gate-P rule; the NP1-NP9 report's content).
+
+    Attributes:
+        family_id: The family (the frozen panel's hash-derived id, D16).
+        panel_hash: The gate-P-scored panel.
+        species: Species.
+        resolvability_version: 6 (one member) or 7 (the ensemble).
+        members: The emission members NP3-NP7 were scored in.
+        class_sets: C_P per level.
+        records: The per-(level, class) records (``CLASS_RECORD_COLUMNS``).
+        level_walk: The walk to ``validated_max_level``.
+        validated_max_level: The family's headline level, if any.
+        family_checks: NP1, NP2, NP8 and NP9.
+        passes: Whether the family passes gate P.
+        reasons: Why it does not (empty when it passes).
+    """
+
+    family_id: str
+    panel_hash: str
+    species: Species
+    resolvability_version: int
+    members: tuple[str, ...]
+    class_sets: ClassSets
+    records: pd.DataFrame
+    level_walk: pd.DataFrame
+    validated_max_level: str | None
+    family_checks: Mapping[str, FamilyCheck]
+    passes: bool
+    reasons: tuple[str, ...]
+
+    def to_json(self) -> dict[str, Any]:
+        """Return the result as JSON-safe values."""
+        return {
+            "family_id": self.family_id,
+            "panel_hash": self.panel_hash,
+            "species": self.species,
+            "resolvability_version": self.resolvability_version,
+            "members": list(self.members),
+            "passes": self.passes,
+            "reasons": list(self.reasons),
+            "validated_max_level": self.validated_max_level,
+            "min_level": diag.MIN_SIMULATION_LEVEL[self.species],
+            "family_checks": {
+                name: check.to_json() for name, check in self.family_checks.items()
+            },
+            "level_walk": _records(self.level_walk),
+            "class_sets": self.class_sets.to_json(),
+            "records": _records(self.records),
+        }
+
+
+_HASH: Final = re.compile(r"^[0-9a-f]{64}$")
+
+
+def assemble_gate_p(
+    *,
+    family_id: str,
+    panel_hash: str,
+    species: str,
+    resolvability_version: int,
+    verdicts: Mapping[str, Mapping[str, ClassVerdicts]],
+    depths: Mapping[str, pd.DataFrame],
+    class_sets: ClassSets,
+    family_checks: Mapping[str, FamilyCheck],
+) -> GatePResult:
+    """Assemble gate P for one family (§14 gate-P rule).
+
+    §14: "NP1, NP2 and NP9 for the family (NP8 when it will be paired with
+    a different panel) and NP3-NP7 per (level, class) ...
+    ``validated_max_level`` is the deepest level <= ``max_leaf_level`` at
+    which every class of C_P is validated. It is the family's headline
+    level, and promotion requires at least broad (human) / class (mouse)."
+    The family passes when its headline is at least
+    ``diagnostics.MIN_SIMULATION_LEVEL`` and every family check counts as a
+    pass (``FamilyCheck.counts_as_pass``). Passing makes it eligible for a
+    gate-P PR the user approves; it promotes nothing by itself.
+
+    Args:
+        family_id: The family.
+        panel_hash: The gate-P-scored panel's hash.
+        species: ``"human"`` or ``"mouse"``.
+        resolvability_version: 6 (one emission member) or 7 (the
+            ``resolvability.V7_EMISSION_MEMBERS`` members).
+        verdicts: Per criterion NP3-NP7, per member, the class verdicts.
+        depths: Per member, NP3's ``validated_min_depth`` table.
+        class_sets: C_P per level of the species.
+        family_checks: ``NP1``, ``NP2``, ``NP8`` and ``NP9``.
+
+    Returns:
+        The result.
+
+    Raises:
+        ValueError: For an unknown species, a panel hash that is not a
+            sha256, class sets of another species, family checks other than
+            NP1, NP2, NP8 and NP9 (or keyed under another name), a version
+            other than 6 or 7 or a member count that does not match it, or
+            per-class inputs ``gate_p_class_records`` refuses.
+    """
+    levels = gate_p_levels(species)
+    if not _HASH.fullmatch(panel_hash):
+        raise ValueError(f"panel_hash {panel_hash!r} is not a sha256 hex digest")
+    if class_sets.species != species or class_sets.level_names() != levels:
+        raise ValueError(
+            f"the class sets are of {class_sets.species} {class_sets.level_names()}, "
+            f"not {species} {levels}"
+        )
+    if set(family_checks) != set(GATE_P_FAMILY_CHECKS) or any(
+        check.criterion != name for name, check in family_checks.items()
+    ):
+        raise ValueError(
+            f"the family checks must be {GATE_P_FAMILY_CHECKS}, each under its "
+            f"own name; got {sorted(family_checks)}"
+        )
+    records = gate_p_class_records(verdicts, depths, class_sets)
+    members = tuple(sorted(str(member) for member in verdicts["NP3"]))
+    expected = {
+        res.RESOLVABILITY_VERSION_V6: 1,
+        res.RESOLVABILITY_VERSION_V7: res.V7_EMISSION_MEMBERS,
+    }.get(resolvability_version)
+    if expected is None:
+        raise ValueError(
+            f"resolvability_version must be 6 or 7, got {resolvability_version!r}"
+        )
+    if len(members) != expected:
+        raise ValueError(
+            f"a version-{resolvability_version} family is scored in {expected} "
+            f"emission member(s), got {len(members)}: {list(members)}"
+        )
+    headline, walk = gate_p_validated_max_level(records, class_sets)
+    minimum = diag.MIN_SIMULATION_LEVEL[species]
+    reasons: list[str] = []
+    if headline is None:
+        reasons.append(
+            f"no level is validated for every class of C_P (the coarsest, "
+            f"{levels[0]}, is incomplete)"
+        )
+    elif _rank(species, headline) < _rank(species, minimum):
+        reasons.append(
+            f"validated_max_level {headline} is below {minimum} (§14: promotion "
+            f"requires at least {minimum})"
+        )
+    for name in GATE_P_FAMILY_CHECKS:
+        check = family_checks[name]
+        if not check.counts_as_pass:
+            failing = [
+                part for part, value in check.parts.items() if value != CHECK_PASSED
+            ]
+            reasons.append(f"{name} {check.status} ({', '.join(failing) or 'no part'})")
+    return GatePResult(
+        family_id=family_id,
+        panel_hash=panel_hash,
+        species=cast(Species, species),
+        resolvability_version=int(resolvability_version),
+        members=members,
+        class_sets=class_sets,
+        records=records,
+        level_walk=walk,
+        validated_max_level=headline,
+        family_checks={name: family_checks[name] for name in GATE_P_FAMILY_CHECKS},
+        passes=not reasons,
+        reasons=tuple(reasons),
+    )
+
+
+# ..........................................................................
+# The validated-table rows of a passing family (§4.7; the gate-P PR)
+
+
+def validated_table_rows(
+    result: GatePResult,
+    *,
+    panel_id: str,
+    panel_role: str,
+    platforms: Sequence[str],
+    n_genes: int,
+    evidence: str,
+    date: str,
+    approving_pr: str,
+    root_marker_source: str = "",
+    note: str = "",
+) -> tuple[diag.ValidatedPanelRecord, tuple[diag.ValidatedLevelRecord, ...]]:
+    """Return a passing family's ``validated_panels.csv`` and level rows (§4.7).
+
+    The panel row carries ``validation_basis = simulation`` and the
+    headline level; the level rows carry every record of gate P
+    (``in_class_set``, the status, ``validated_min_depth`` and
+    ``tested_max_depth`` = D_P of the validated ones). They are written by
+    ``diagnostics.write_simulation_family`` in the family's gate-P PR, which
+    the user approves (§14); a family that does not pass gate P has none.
+
+    Args:
+        result: The family's gate-P result.
+        panel_id: The row id (the vendor panel's name, never a personal
+            name; M13 D16).
+        panel_role: The row's role (``sample_panel``).
+        platforms: The panel's platforms.
+        n_genes: Its genes.
+        evidence: The evidence path (relative to the evidence archive).
+        date: The decision date (``YYYY-MM-DD``).
+        approving_pr: The gate-P PR.
+        root_marker_source: Where the root markers of the gene list come
+            from.
+        note: Free text.
+
+    Returns:
+        ``(panel record, level records)``.
+
+    Raises:
+        ValueError: If the family does not pass gate P, or a row fails its
+            model's validation.
+    """
+    if not result.passes:
+        raise ValueError(
+            f"{result.family_id} does not pass gate P, so it has no validated "
+            f"rows: {'; '.join(result.reasons)}"
+        )
+    assert result.validated_max_level is not None
+    record = diag.ValidatedPanelRecord(
+        panel_id=panel_id,
+        family_id=result.family_id,
+        panel_hash=result.panel_hash,
+        panel_role=panel_role,
+        species=result.species,
+        platforms=tuple(str(item).upper() for item in platforms),
+        n_genes=n_genes,
+        validated_max_level=result.validated_max_level,
+        validation_basis="simulation",
+        root_marker_source=root_marker_source,
+        evidence=evidence,
+        date=date,
+        approving_pr=approving_pr,
+        note=note,
+    )
+    levels = tuple(
+        diag.ValidatedLevelRecord.model_validate(
+            {
+                "family_id": result.family_id,
+                "panel_hash": result.panel_hash,
+                "level": str(row["level"]),
+                "class": str(row["class"]),
+                "in_class_set": bool(row["in_class_set"]),
+                "status": str(row["status"]),
+                "validated_min_depth": _optional_depth(row["validated_min_depth"]),
+                "tested_max_depth": _optional_depth(row["tested_max_depth"]),
+                "evidence": evidence,
+            }
+        )
+        for _, row in result.records.iterrows()
+    )
+    return record, levels
+
+
+# ..........................................................................
+# The NP1-NP9 report (M13 exit: "an NP report per onboarded family")
+
+
+def _table_summary(frame: pd.DataFrame) -> dict[str, Any]:
+    """The numbers of a criterion table the report prints beside its file."""
+    summary: dict[str, Any] = {"n_rows": len(frame)}
+    if "passed" in frame.columns:
+        # A CSV round trip or numpy turns False into np.False_; a missing
+        # value (None, nan) is not counted as a failure here.
+        summary["n_failed"] = int(
+            sum(
+                isinstance(value, (bool, np.bool_)) and not bool(value)
+                for value in frame["passed"].astype(object)
+            )
+        )
+    for column, name in (
+        ("donor_range", "max_donor_range"),
+        ("changed_share", "max_changed_share"),
+        ("spread", "max_tstar_spread"),
+    ):
+        if column in frame.columns:
+            values = pd.to_numeric(frame[column], errors="coerce")
+            summary[name] = float(values.max()) if values.notna().any() else None
+    if {"stress", "drop"} <= set(frame.columns):
+        drops = pd.to_numeric(frame["drop"], errors="coerce")
+        summary["max_drop_by_stress"] = {
+            str(stress): float(group.max()) if group.notna().any() else None
+            for stress, group in drops.groupby(frame["stress"].astype(str), sort=True)
+        }
+    return summary
+
+
+def gate_p_report(
+    result: GatePResult, *, tables: Mapping[str, pd.DataFrame] | None = None
+) -> dict[str, Any]:
+    """Return the NP1-NP9 report of a family as JSON-safe values.
+
+    The M13 exit's "NP report per onboarded family": C_P and the excluded
+    classes, validated levels per class and depth, ``validated_min_depth``
+    and ``tested_max_depth``, the replicate spread, the stress drops, the
+    runtime and the peak RSS. The criterion tables (``np4_set_verdicts``,
+    ``np6_verdicts``, ...) are summarised by name; ``write_gate_p_report``
+    writes them beside the report.
+
+    Args:
+        result: The family's gate-P result.
+        tables: The criterion tables by name.
+
+    Returns:
+        The report.
+    """
+    payload = result.to_json()
+    payload["schema_version"] = GATE_P_REPORT_SCHEMA_VERSION
+    payload["open_readings"] = list(GATE_P_OPEN_READINGS)
+    payload["tables"] = {
+        name: _table_summary(frame) for name, frame in sorted((tables or {}).items())
+    }
+    return payload
+
+
+def _fmt(value: Any, digits: int = 3) -> str:
+    """A report value: ``-`` for none, floats rounded."""
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return "-"
+    if isinstance(value, float):
+        return f"{value:.{digits}f}"
+    return str(value)
+
+
+def gate_p_report_text(report: Mapping[str, Any]) -> str:
+    """Render ``gate_p_report`` as the plain-text NP1-NP9 report.
+
+    Args:
+        report: ``gate_p_report`` output.
+
+    Returns:
+        The text.
+    """
+    lines = [
+        f"Gate P report: {report['family_id']} ({report['species']}, panel "
+        f"{str(report['panel_hash'])[:16]})",
+        f"Resolvability version {report['resolvability_version']}; emission "
+        f"members: {', '.join(report['members'])}",
+        "",
+        "Verdict: " + ("PASSES gate P" if report["passes"] else "does NOT pass gate P"),
+    ]
+    lines += [f"  - {reason}" for reason in report["reasons"]]
+    lines += [
+        f"validated_max_level: {_fmt(report['validated_max_level'])} "
+        f"(promotion needs at least {report['min_level']})",
+        "",
+        "Family checks:",
+    ]
+    for name, check in report["family_checks"].items():
+        parts = ", ".join(f"{part} {value}" for part, value in check["parts"].items())
+        lines.append(f"  {name}: {check['status']} ({parts or 'no part'})")
+    lines += ["", "Levels (coarse to fine):"]
+    for row in report["level_walk"]:
+        lines.append(
+            f"  {row['level']}: C_P {row['n_validated']}/{row['n_in_class_set']} "
+            f"validated, share ok {row['share_ok']}, complete {row['complete']}, "
+            f"counted {row['counted']}"
+            + (
+                f"; unvalidated {row['unvalidated_classes']}"
+                if row["unvalidated_classes"]
+                else ""
+            )
+        )
+    lines += ["", "Class sets C_P (pooled test cells before mapping):"]
+    for row in report["class_sets"]["levels"]:
+        lines.append(
+            f"  {row['level']}: {row['n_in_class_set']} of {row['n_classes']} classes, "
+            f"share {_fmt(row['class_set_share'])} (classed cells "
+            f"{_fmt(row['class_set_share_classed'])}; >= {row['min_share']}), "
+            f"{row['n_test_cells']} test cells, {row['n_no_class']} without a class, "
+            f"{row['n_not_applicable']} not applicable"
+        )
+        excluded = [
+            item
+            for item in report["class_sets"]["classes"]
+            if item["level"] == row["level"] and not item["in_class_set"]
+        ]
+        for item in excluded:
+            lines.append(
+                f"    excluded {item['class']}: {item['n_test_cells']} test cells "
+                f"(share {_fmt(item['share'])}, reference share "
+                f"{_fmt(item['reference_share'])})"
+            )
+    lines += ["", "Per-(level, class) records:"]
+    for row in report["records"]:
+        detail = ""
+        if row["status"] == RECORD_VALIDATED:
+            detail = (
+                f" validated_min_depth {row['validated_min_depth']}, "
+                f"tested_max_depth {row['tested_max_depth']}"
+            )
+        elif row["failed_criteria"]:
+            detail = f" failed {row['failed_members']}"
+        elif row["unevaluable_criteria"]:
+            detail = f" not evaluable {row['unevaluable_criteria']}"
+        lines.append(
+            f"  {row['level']}/{row['class']}"
+            f"{' (C_P)' if row['in_class_set'] else ''}: {row['status']}{detail}"
+        )
+    np9 = report["family_checks"]["NP9"]["detail"]
+    basis = np9.get("reference_basis") or "no basis"
+    lines += [
+        "",
+        "Resources (NP9): wall "
+        f"{_fmt(np9.get('wall_seconds'), 0)} s against the limit "
+        f"{_fmt(np9.get('time_limit_seconds'), 0)} s ({basis}); "
+        f"peak RSS {np9.get('peak_rss_gb') or '-'} GB, reserve "
+        f"{_fmt(np9.get('rss_reserve_gb'), 1)} GB",
+    ]
+    if report["tables"]:
+        lines += ["", "Criterion tables:"]
+        for name, summary in report["tables"].items():
+            values = ", ".join(f"{key} {_fmt(value)}" for key, value in summary.items())
+            lines.append(f"  {name}: {values}")
+    lines += ["", "Readings open until the user rules (none is a registered value):"]
+    lines += [f"  - {item}" for item in report["open_readings"]]
+    return "\n".join(lines) + "\n"
+
+
+_TABLE_NAME: Final = re.compile(r"^[a-z0-9][a-z0-9_]*$")
+
+
+def write_gate_p_report(
+    result: GatePResult,
+    out_dir: Path | str,
+    *,
+    tables: Mapping[str, pd.DataFrame] | None = None,
+    overwrite: bool = False,
+) -> dict[str, Path]:
+    """Write the NP1-NP9 report of a family (JSON, text and CSV tables).
+
+    Args:
+        result: The family's gate-P result.
+        out_dir: The report directory (created if needed).
+        tables: The criterion tables by name (a lower-case token), each
+            written as ``<name>.csv`` and summarised in the report.
+        overwrite: Replace report files that exist (refused by default, so a
+            gate-P run never overwrites another run's evidence).
+
+    Returns:
+        Path per written file name.
+
+    Raises:
+        ValueError: For a table name that is not a lower-case token or that
+            collides with a report file.
+        FileExistsError: If a file exists and ``overwrite`` is False.
+    """
+    named = dict(tables or {})
+    reserved = {
+        GATE_P_REPORT_JSON,
+        GATE_P_REPORT_TXT,
+        GATE_P_RECORDS_CSV,
+        GATE_P_CLASS_SETS_CSV,
+        GATE_P_LEVEL_WALK_CSV,
+    }
+    for name in named:
+        if not _TABLE_NAME.fullmatch(name) or f"{name}.csv" in reserved:
+            raise ValueError(f"{name!r} is not a usable criterion table name")
+    report = gate_p_report(result, tables=named)
+    base = Path(out_dir)
+    outputs: dict[str, str | pd.DataFrame] = {
+        GATE_P_REPORT_JSON: json.dumps(report, indent=2, sort_keys=True) + "\n",
+        GATE_P_REPORT_TXT: gate_p_report_text(report),
+        GATE_P_RECORDS_CSV: result.records,
+        GATE_P_CLASS_SETS_CSV: result.class_sets.classes.merge(
+            result.class_sets.levels[["level", "class_set_share", "share_ok"]],
+            on="level",
+            how="left",
+        ),
+        GATE_P_LEVEL_WALK_CSV: result.level_walk,
+        **{f"{name}.csv": frame for name, frame in sorted(named.items())},
+    }
+    existing = sorted(name for name in outputs if (base / name).exists())
+    if existing and not overwrite:
+        raise FileExistsError(
+            f"{base} already holds {existing}; pass overwrite=True to replace them"
+        )
+    base.mkdir(parents=True, exist_ok=True)
+    written: dict[str, Path] = {}
+    for name, content in outputs.items():
+        path = base / name
+        if isinstance(content, str):
+            path.write_text(content, encoding="utf-8")
+        else:
+            content.to_csv(path, index=False)
+        written[name] = path
+    return written
