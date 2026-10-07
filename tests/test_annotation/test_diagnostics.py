@@ -11,6 +11,7 @@ from __future__ import annotations
 import csv
 import itertools
 import json
+import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -614,6 +615,65 @@ def test_write_simulation_family_creates_the_tables_in_an_empty_directory(
     assert table.family_ids() == [record.family_id]
     header = (tmp_path / "new" / VALIDATED_PANEL_LEVELS_FILE).read_text().splitlines()
     assert header[0] == ",".join(VALIDATED_LEVELS_COLUMNS)
+
+
+def test_write_simulation_family_replaces_the_panels_table_last(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The family is listed only once its level and gene rows are in place."""
+    names = (
+        VALIDATED_PANELS_FILE,
+        VALIDATED_PANEL_LEVELS_FILE,
+        VALIDATED_PANEL_GENES_FILE,
+    )
+    real_replace = os.replace
+    order: list[str] = []
+
+    def recording(source: Any, target: Any) -> None:
+        order.append(Path(target).name)
+        real_replace(source, target)
+
+    monkeypatch.setattr(os, "replace", recording)
+    record, levels, genes = _sim_family()
+    write_simulation_family(
+        _packaged_copy(tmp_path), record, levels, genes, self_map=ResolvabilityTrust()
+    )
+    assert sorted(order) == sorted(names) and order[-1] == VALIDATED_PANELS_FILE
+
+
+@pytest.mark.parametrize("existing", [True, False])
+def test_write_simulation_family_restores_the_tables_when_a_replace_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, existing: bool
+) -> None:
+    """A failure between the replacements leaves the tables as they were."""
+    directory = _packaged_copy(tmp_path) if existing else tmp_path / "new"
+    before = (
+        {path.name: path.read_bytes() for path in directory.iterdir()}
+        if existing
+        else {}
+    )
+    real_replace = os.replace
+    calls: list[str] = []
+
+    def failing(source: Any, target: Any) -> None:
+        calls.append(Path(target).name)
+        if len(calls) == 2:
+            raise OSError("disk full")
+        real_replace(source, target)
+
+    monkeypatch.setattr(os, "replace", failing)
+    record, levels, genes = _sim_family()
+    with pytest.raises(OSError, match="disk full"):
+        write_simulation_family(
+            directory, record, levels, genes, self_map=ResolvabilityTrust()
+        )
+    monkeypatch.setattr(os, "replace", real_replace)
+    # The first table was replaced, then restored; the panels table never was.
+    assert VALIDATED_PANELS_FILE not in calls[:2]
+    assert {path.name: path.read_bytes() for path in directory.iterdir()} == before
+    if existing:
+        table = load_validated_panels(directory / VALIDATED_PANELS_FILE)
+        assert record.family_id not in table.family_ids()
 
 
 def test_write_simulation_family_refuses_a_family_without_a_self_map(

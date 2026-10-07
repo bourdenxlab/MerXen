@@ -1376,6 +1376,54 @@ def _appended_text(path: Path, columns: Sequence[str], body: str) -> str:
     return text + body
 
 
+def _replace_tables(base: Path, staged: Path, names: Sequence[str]) -> None:
+    """Move staged tables over ``base``'s, ``validated_panels.csv`` last.
+
+    The companions go first, so the family is listed only once its level and
+    gene rows are in place. The current files are copied into the staging
+    directory first; if a replacement fails, the files already replaced are
+    restored (a file that did not exist is removed) and the error is raised,
+    so the tables are left as they were.
+
+    Args:
+        base: The tables' directory.
+        staged: The staging directory (on the same filesystem) holding the
+            new tables under the same names.
+        names: The tables to replace.
+    """
+    order = sorted(names, key=lambda name: name == VALIDATED_PANELS_FILE)
+    kept: dict[str, Path | None] = {}
+    for name in order:
+        current = base / name
+        if current.is_file():
+            copy = staged / f"{name}.previous"
+            copy.write_bytes(current.read_bytes())
+            kept[name] = copy
+        else:
+            kept[name] = None
+    replaced: list[str] = []
+    try:
+        for name in order:
+            os.replace(staged / name, base / name)
+            replaced.append(name)
+    except BaseException:
+        for name in reversed(replaced):
+            backup = kept[name]
+            try:
+                if backup is None:
+                    (base / name).unlink(missing_ok=True)
+                else:
+                    os.replace(backup, base / name)
+            except OSError:
+                logger.exception(
+                    "Validated tables %s: could not restore %s after a failed "
+                    "write; restore it from version control",
+                    base,
+                    name,
+                )
+        raise
+
+
 def write_simulation_family(
     directory: Path | str,
     record: ValidatedPanelRecord,
@@ -1395,7 +1443,8 @@ def write_simulation_family(
     ``read_validated_panels`` (all its cross-row checks: the rank rule of
     ``validated_max_level``, the gene list hashing to ``panel_hash``)
     before they replace the files, so nothing is written when any check
-    fails.
+    fails. ``validated_panels.csv`` is replaced last, and a replacement that
+    fails restores the files already replaced.
 
     Refused:
 
@@ -1539,8 +1588,7 @@ def write_simulation_family(
             raise ValidatedPanelsError(
                 f"{record.family_id}: the written tables do not list the family"
             )
-        for name in texts:
-            os.replace(staged / name, base / name)
+        _replace_tables(base, staged, list(texts))
     logger.info(
         "Validated tables %s: added the simulation family %s (%s, %d level rows)",
         base,
