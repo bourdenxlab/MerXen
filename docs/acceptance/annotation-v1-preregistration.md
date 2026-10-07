@@ -1426,3 +1426,53 @@ No output of the family has been read. This subsection changes no threshold, tar
 - **A48 (b):** no code change. If the pool-size stop fires, the run is re-run in place with `--gate-p-other-region shared`, for the v6 and v7 dry runs and for the family (`COMPUTE_NEXT.md`).
 - **D3 (b):** the plan's M13 exit is amended (plan §12 M13 and M13b).
 - Every other ruling keeps what the code did at `857d75c`.
+
+### 23.21 The set a dry run, the criteria revision and the user's approval (recorded 2026-10-07, before the revised code is written and before the dry run is re-run; no output of the family has been read)
+
+**The dry run as registered.** Set a, code `2a91a36` (an exported tree), other-region draw `shared` (A48 (b)), expected depth 33:
+- **Version 6:** scored, `dry_run.passes` False. Every broad C_P class fails: Astro NP3; Exc and Inh NP6; Immune and OPC NP5; Oligo NP4. At supercluster, Fibroblast and Vascular are `not_evaluable` (CK1).
+- **Version 7:** the first attempt crashed on a full /srv/storage (another user's copy). The re-run (`v7_r2`, same code, a fresh store) scored `dry_run.passes` False: every C_P class fails at every level, mostly NP5 and NP6. `measured_seconds` 4,618.
+- **NP9 identity** failed in both runs on a code bug, not a criterion. The marker lookup's MapMyCells run record (scratch paths, worker count, times) was compared. Fixed in `1a8fe2e`.
+
+**Causes** (memo `$A/m13/DRYRUN_REVISION_MEMO.md`, sections 2 and 6). A read-only re-scorer reproduced both runs cell for cell from the saved replicate frames (`$A/m13/dryrun/revision_whatif_v6/`, `revision_whatif_v7_nc/`):
+1. NP3's scored per-call-set weightings (A1 (a), §23.9 item 2) estimate no precision: a few stray wrong calls take the trim cap. Broad Astro at 120: 0.875, against 0.98–0.99 on the test-cell readings. NP6 reuses them: 215 failing rows, against 0 unweighted at broad and supercluster.
+2. NP5's t* spread ≤ 0.05 measures sample size. Two mapping seeds on the same cells already differ by > 0.05 in 22% of glial sets and 1.4% of Exc/Inh sets.
+3. NP4–NP7 fail a class at sets below its NP3 floor.
+4. NP5's agreement compares a bin when either side has ≥ 50 test cells. At bin 250 the base held 4–21 cells, so its status there was a pooled extrapolation.
+5. Version 7: NP5 compares each member's own decisions (the C8 reading), while NP3/4/6/7 score the frozen ensemble emission.
+
+**The revision approved by the user** (chat, 2026-10-07, answer to V1: "Approve all six (Recommended)"). Every item is a LOOSENING and POST-HOC: its effect on set a was computed before it was proposed.
+- **R1:** NP3's two weightings are read on the test cells of the set's scope (per called cell π_t / N_t, trimmed as before). NP6 uses the same weightings. This replaces A1 (a) and §23.9 item 2's per-call-set reading.
+- **R2:** `validated_min_depth` is the shallowest bin from which every tested set, up to and including the "≥ D_P" set, passes NP3 and NP4–NP7.
+  - A failure in the ≥ D_P group fails the class, as does a failure of a class-level part (NP4's seed criterion, NP5's extrapolated share, NP7's excluded share).
+  - A failure at a shallower set raises the floor.
+- **R3 (c):** NP5's t* part is a consequence check: each replicate's own t*, applied to the set's pooled base calls, gives point precision ≥ target_L − 0.02. In version 7 the check is applied to the ensemble's pooled t*, refitted per replicate.
+- **R5:** in the dry run, a class H18 expects whose record is `not_evaluable` is reported, not failed. This replaces CK1 (a).
+- **R6:** NP5's agreement compares a bin only when the base and the replicate each have ≥ 50 test cells there.
+- **R7 (version 7):** NP5's agreement compares the ensemble emission re-derived per replicate (`np5_rederive_ensemble`) with the frozen ensemble decisions, instead of each member's own. R6 and R2 apply to it. This replaces the C8 reading.
+- **Unchanged:** targets, target⁺, Wilson on Kish n, coverage 0.30, n_min, NP4's floor and range rules, NP6's stresses and drop test, NP7.
+
+**Predicted effect** (re-scorer, from the saved frames; the re-run on the revised code must reproduce it):
+- both dry runs pass, with `validated_max_level` supercluster;
+- version 6 broad floors: Astro 30, Exc 10, Inh 10, Immune 10, OPC 30, Oligo 60;
+- version 7 broad floors: Astro 30, Exc 10, Inh 10, Immune 15, OPC 30, Oligo 120.
+
+**Negative control** (V2, user: "Enough; state fragility (Recommended)"):
+- **Panel:** set a minus 25 Astrocyte- and OPC-specific genes. The list and its expected outcome were recorded in the memo before it ran: `$A/m13/dryrun/negative_control/`, sha256 434720fa… and 35858645….
+- **Version:** it ran as version 7 (a new family, `version: auto`), not version 6 as the memo first said.
+- **Result under the six revisions, against set a version 7:**
+  - broad OPC fails, decided by several members (truth-Oligo cells called OPC at 120);
+  - broad and supercluster Astro fail through member @12 only (NP6 spill stress), so these results are fragile;
+  - supercluster OPC is validated as on set a.
+- **Reading:** the expectation holds for 3 of 4 cells and both broad cells, so the recorded rule ("if neither moves") calls for no tightening. The gate is not blind, but this control does not show it is sharp. The revision PR states this.
+
+**Other answers of 2026-10-07 (same exchange):**
+- **V4, "Every human run (Recommended)":** C2 (registration G1 fails the dataset gate) applies to every human RESOLVE run, as implemented. No set a section fails G1.
+- **V5, "Confirm all four (Recommended)":** the NP5 profile builder's readings (i)–(iv) of §23.20 are adopted.
+- **B1:** the family's frozen panel is `panel_hash` `aa25d5a241d0b273ed855a83c8a0310a86e3242cb6f43345f1736ace846cdd62`.
+
+**Next (CK2):**
+1. The revision is implemented with tests.
+2. The dry run is re-run, v6 then v7 (fresh v7 store), on an export of that commit.
+3. Both must pass and reproduce the predicted records.
+4. Only then is any new family scored.
