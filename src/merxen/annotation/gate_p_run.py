@@ -20,7 +20,9 @@ set, the store and the prepared specs) and:
    stopped on the pool sizes is rerun in place); the configured gate-P
    donors are distinct, at least two, a fixed default donor among them;
    the mapping seeds hold 0 and another one (D6); and NP5's expected depth
-   is given (D8). *After PREP, before any gate-P build or mapping*
+   is given (D8; a family's own profile asset records the primary bundle
+   its tables were resolved with). *After PREP, before any gate-P build or
+   mapping*
    (``_check_request``, which repeats the checks above): the panel is of
    the species; the bundle has a self-map onto its held-out bundle; the
    gate-P donors are frontal donors of that held-out bundle, its held-out
@@ -30,7 +32,9 @@ set, the store and the prepared specs) and:
    with the run's count, so only a reused bundle can differ); and the
    held-out test set's spec derived here reproduces the bundle's held-out
    ``build_hash`` (so every leave-one-donor-out build differs from PREP's
-   only by the donor). A refusal at that stage is recorded in the
+   only by the donor); and a family's own profile asset was built from
+   tables resolved with PREP's primary bundle (``check_profile_bundle``:
+   the same ``build_hash``). A refusal at that stage is recorded in the
    simulation report, which is written before gate P runs.
 2. **Reports the per-donor pool sizes** (pre-registration §23.10, open item
    2; ``reference.ho_donor_pool_sizes``, from the reference metadata only)
@@ -149,6 +153,8 @@ POOL_SIZES_CSV: Final = "gate_p_pool_sizes.csv"
 REPLICATES_DIR: Final = "replicates"
 PRIMARY_REFERENCE: Final = "whb_frontal_supc_clus"
 STATUS_SCORED: Final = "scored"
+# NP5's depth source when a family's own gate_p_profile asset gives it.
+FAMILY_PROFILE_SOURCE: Final = "family_profile_asset"
 STATUS_STOPPED: Final = "stopped"
 # Why a run stopped before any leave-one-donor-out build (``stop_reasons``).
 STOP_POOL_SIZES: Final = "pool_sizes"
@@ -564,10 +570,12 @@ def precheck_gate_p(plan: GatePPlan, options: GatePOptions) -> None:
     is computed or PREP builds anything: the species (M13 D4), the store
     (D11 (b): not a production store), the output (outside every store,
     without an earlier run or its replicates), the configured donors and
-    mapping seeds (D6), and NP5's expected-depth source (D8, CHECK K7). What
-    needs the built bundle (its self-map, held-out donor and frontal donors,
-    the recorded worker count, the held-out ``build_hash``) is checked by
-    ``run_gate_p`` after PREP and before any gate-P build or mapping.
+    mapping seeds (D6), and NP5's expected-depth source (D8, CHECK K7; a
+    family profile must record its primary bundle). What needs the built
+    bundle (its self-map, held-out donor and frontal donors, the recorded
+    worker count, the held-out ``build_hash``, a family profile's primary
+    ``build_hash``) is checked by ``run_gate_p`` after PREP and before any
+    gate-P build or mapping.
 
     Args:
         plan: What the simulation was started with.
@@ -581,12 +589,13 @@ def precheck_gate_p(plan: GatePPlan, options: GatePOptions) -> None:
     _check_store(plan.store, plan.config)
     _check_out_dir(Path(plan.out_dir) / GATE_P_RUN_DIR, plan.store, options)
     _check_donors_and_seeds(plan.config)
-    np5_depth_source(
+    _, _, depth_record, _ = np5_depth_source(
         expected_depth=plan.expected_depth,
         depth_profile=plan.depth_profile,
         depth_profile_asset=plan.depth_profile_asset,
         species=options.species,
     )
+    check_profile_bundle(depth_record, None)
 
 
 def gate_p_precheck(options: GatePOptions) -> GatePPrecheck:
@@ -701,6 +710,49 @@ def _check_request(request: GatePRequest, options: GatePOptions) -> dict[str, An
     }
 
 
+def check_profile_bundle(
+    depth_record: Mapping[str, Any], bundle_dir: Path | None
+) -> None:
+    """Refuse a family's NP5 profile resolved with another primary bundle.
+
+    A ``gate_p_profile`` asset (``scripts/annotation/build_np5_depth_profile.py``)
+    records the primary bundle the family's ``map_first`` tables were
+    resolved with. Gate P scores the decisions of its own PREP bundle, which
+    must be the production bundle that run used (the family's gate-P
+    preconditions), so the two ``build_hash`` values must be equal.
+    ``precheck_gate_p`` calls it before any compute (``bundle_dir`` ``None``:
+    the asset must record a bundle) and ``run_gate_p`` after PREP and before
+    any gate-P build or mapping. Other depth sources pass.
+
+    Args:
+        depth_record: ``np5_depth_source``'s record.
+        bundle_dir: PREP's primary bundle (``None``: not built yet).
+
+    Raises:
+        GatePRunError: When the asset records no primary bundle, or another.
+    """
+    if depth_record.get("source") != FAMILY_PROFILE_SOURCE:
+        return
+    recorded = depth_record.get("primary_build_hash")
+    if not recorded:
+        raise GatePRunError(
+            f"{depth_record.get('depth_profile_asset')} records no primary "
+            "build_hash: gate P cannot check that the family's profile and its "
+            "own PREP come from one bundle"
+        )
+    if bundle_dir is None:
+        return
+    built = str(_manifest(bundle_dir).get("build_hash") or bundle_dir.name)
+    if str(recorded) != built:
+        raise GatePRunError(
+            f"{depth_record.get('depth_profile_asset')} was built from tables "
+            f"resolved with the primary bundle {str(recorded)[:16]}, but gate P's "
+            f"PREP built {built[:16]}: the gate-P store's PREP must be the "
+            "production bundle the family's map_first run used, so rebuild the "
+            "store or the asset"
+        )
+
+
 def _np5_depths(
     request: GatePRequest, species: str
 ) -> tuple[dict[str, Any], float | list[float] | None, dict[str, Any], Any]:
@@ -784,10 +836,15 @@ def np5_depth_source(
                 f"{asset_id} holds no confident broad call: NP5 has no overall "
                 "median (pre-registration §23.20)"
             )
+        run_facts = asset.provenance.get("run") or {}
         record.update(
             {
-                "source": "family_profile_asset",
+                "source": FAMILY_PROFILE_SOURCE,
                 "sha256": asset.sha256,
+                # The primary bundle the family's tables were resolved with;
+                # gate P's own PREP must be that bundle (check_profile_bundle).
+                "primary_reference": run_facts.get("primary_reference"),
+                "primary_build_hash": run_facts.get("primary_build_hash"),
                 "min_class_cells": family.min_cells,
                 "classes_own_depths": sorted(per_class),
                 "classes_below_min_cells": family.below_min_cells(),
@@ -2208,6 +2265,7 @@ def run_gate_p(request: GatePRequest, options: GatePOptions) -> dict[str, Any]:
     expected_depth, default_depth, depth_record, profile = _np5_depths(
         request, options.species
     )
+    check_profile_bundle(depth_record, Path(facts["bundle_dir"]))
     config = request.config
     out: Path = facts["out"]
     out.mkdir(parents=True, exist_ok=True)
@@ -2633,6 +2691,7 @@ def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
 
 
 __all__ = [
+    "FAMILY_PROFILE_SOURCE",
     "GATE_P_RUN_DIR",
     "GATE_P_RUN_JSON",
     "OTHER_REGION_DONOR_OWN",
@@ -2644,6 +2703,7 @@ __all__ = [
     "GatePRunError",
     "Np2Acceptance",
     "bundle_differences",
+    "check_profile_bundle",
     "gate_p_hook",
     "gate_p_precheck",
     "np2_acceptance",

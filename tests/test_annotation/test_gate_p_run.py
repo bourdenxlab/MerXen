@@ -917,6 +917,51 @@ def _weak_parent(monkeypatch: pytest.MonkeyPatch) -> str:
     return "CCN202210140_SUPC/CS202210140_493"
 
 
+def test_gate_p_checks_a_family_profiles_bundle_after_prep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    """A family's NP5 profile of another primary bundle stops gate P after PREP.
+
+    The family's asset records the bundle its map_first tables were resolved
+    with; gate P's own PREP must have built that bundle, before any
+    leave-one-donor-out build or mapping. With the same bundle the run goes
+    on (here it then stops on an unaccepted weak parent, before any build).
+    """
+    family = Family(tmp_path, monkeypatch, gate_config())
+    _weak_parent(monkeypatch)
+    held_out = sorted((tmp_path / "gate_p_store" / reference.HO_REFERENCE_ID).iterdir())
+    real = run._np5_depths
+    recorded: dict[str, Any] = {}
+
+    def family_profile(request: Any, species: str) -> Any:
+        per_class, default, record, profile = real(request, species)
+        record = {
+            **record,
+            "source": run.FAMILY_PROFILE_SOURCE,
+            "depth_profile_asset": "np5_depth__test_family",
+            "primary_build_hash": recorded["hash"],
+        }
+        return per_class, default, record, profile
+
+    monkeypatch.setattr(run, "_np5_depths", family_profile)
+    built = json.loads((family.bundle_dir / "bundle.json").read_text())["build_hash"]
+    options = run.GatePOptions(species="human", accept_small_pools=True)
+    recorded["hash"] = "f" * 64
+    with pytest.raises(run.GatePRunError, match="np5_depth__test_family was built"):
+        run.run_gate_p(family.request(), options)
+    assert family.gate_calls == []
+    assert (
+        sorted((tmp_path / "gate_p_store" / reference.HO_REFERENCE_ID).iterdir())
+        == held_out
+    )
+    recorded["hash"] = built
+    result = run.run_gate_p(family.request(), options)
+    assert result["status"] == run.STATUS_STOPPED
+    assert result["stop_reasons"] == [run.STOP_NP2_PARENTS]
+    assert read_run(result)["np5_depth"]["primary_build_hash"] == built
+    assert family.gate_calls == []
+
+
 def test_gate_p_stops_before_any_build_on_an_unaccepted_weak_parent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
 ) -> None:

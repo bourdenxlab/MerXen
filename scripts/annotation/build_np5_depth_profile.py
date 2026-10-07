@@ -50,14 +50,25 @@ source manifest this script writes under the evidence root
 sha256; the sidecar's ``derived_from`` lists each table by its file name,
 section, segmentation and sha256 only, so no local path outside the
 evidence root reaches the repository. The script refuses a table that is
-not a human ``map_first`` RESOLVE output of a provisional panel, tables of
-another segmentation, panel, family or primary bundle, a section given
-twice, and a confident broad call without a floor class.
+not a human ``map_first`` RESOLVE output of a provisional panel in frontal
+cortex (D3 (a)), tables of another segmentation, panel, family or primary
+bundle, a section given twice, a section ``--sections`` does not name or one
+it names without a table (reading (i) pools every section of the family), a
+section whose dataset gate failed or is not recorded, and a confident broad
+call without a floor class. A failed section adds no confident call, but its
+cells would still move the table median and NP3's report-only histogram, so
+it goes back to the user rather than being pooled or dropped silently.
+
+The asset's sidecar records the primary bundle's ``build_hash`` the tables
+were resolved with (``run.primary_build_hash``); gate P refuses the asset
+when its own PREP bundle has another (``gate_p_run.check_profile_bundle``),
+so the profile and the decisions gate P scores come from one bundle.
 
 Usage::
 
     python scripts/annotation/build_np5_depth_profile.py \\
         --labels <section 1 label table> ... --labels <section 4 label table> \\
+        --sections P5822,P4815,P3518,P7417 \\
         --family-id human_merscope_aa25d5a241d0 --panel-hash aa25d5a241d0 \\
         --tissue brain_ff --date YYYY-MM-DD \\
         --evidence-root /srv/storage/MerXen/annotation_dev/evidence_20260926 \\
@@ -101,6 +112,9 @@ MAP_FIRST = "map_first"
 PROVISIONAL = "provisional"
 CONFIDENT = "confident"
 PRIMARY = "primary"
+# D3 (a): the family's sections are frontal cortex, set explicitly.
+FRONTAL_CORTEX = "frontal_cortex"
+FAILED_GATE = "failed"
 CHEMISTRY_OF_PLATFORM: dict[str, str] = {"MERSCOPE": "merscope"}
 LABEL_COLUMNS: tuple[str, ...] = (
     Columns.SAMPLE_ID,
@@ -153,6 +167,7 @@ class SectionLabels:
         sha256: Its sha256.
         size: Its bytes.
         sample_id: The section.
+        pair_id: Its pair (``None`` for a table without the column).
         platform: Its platform.
         segmentation: Its segmentation.
         panel_hash: Its panel hash.
@@ -166,6 +181,7 @@ class SectionLabels:
     sha256: str
     size: int
     sample_id: str
+    pair_id: str | None
     platform: str
     segmentation: str
     panel_hash: str
@@ -237,6 +253,12 @@ def _run_provenance(provenance: Any, path: Path) -> dict[str, Any]:
             f"{path.name} is a {provenance.species} table; the floor classes of "
             "this asset are human (no mouse gate P before M6b)"
         )
+    if provenance.anatomical_region != FRONTAL_CORTEX:
+        raise ProfileBuildError(
+            f"{path.name} was resolved for the region "
+            f"{provenance.anatomical_region!r}, not {FRONTAL_CORTEX!r} (D3 (a): "
+            "the family's sections are frontal cortex)"
+        )
     trust = None if provenance.panel is None else provenance.panel.panel_trust
     if trust != PROVISIONAL:
         raise ProfileBuildError(
@@ -295,8 +317,14 @@ def read_section(path: Path) -> SectionLabels:
         None if raw is None else AnnotationProvenance.from_uns_json(raw.decode())
     )
     facts = _run_provenance(provenance, path)
-    frame = pq.read_table(path, columns=list(LABEL_COLUMNS)).to_pandas()
+    columns = list(LABEL_COLUMNS)
+    if Columns.PAIR_ID in schema.names:
+        columns.append(Columns.PAIR_ID)
+    frame = pq.read_table(path, columns=columns).to_pandas()
     sample_id = _single(frame, Columns.SAMPLE_ID, path)
+    pair_id = (
+        _single(frame, Columns.PAIR_ID, path) if Columns.PAIR_ID in frame else None
+    )
     if _single(frame, Columns.SPECIES, path) != "human":
         raise ProfileBuildError(f"{path.name}: the species column is not human")
     table = frame[frame[Columns.IN_TABLE].astype(bool).to_numpy()]
@@ -331,6 +359,7 @@ def read_section(path: Path) -> SectionLabels:
         sha256=sha256_file(path),
         size=path.stat().st_size,
         sample_id=sample_id,
+        pair_id=pair_id,
         platform=_single(frame, Columns.PLATFORM, path).upper(),
         segmentation=_single(frame, Columns.SEGMENTATION, path),
         panel_hash=_single(frame, Columns.PANEL_HASH, path),
@@ -340,26 +369,92 @@ def read_section(path: Path) -> SectionLabels:
     )
 
 
+def _named_sections(
+    sections: Sequence[SectionLabels], expected_sections: Sequence[str]
+) -> None:
+    """Refuse tables that are not exactly the family's named sections.
+
+    An entry names a section by its sample id or its pair id. Reading (i)
+    of pre-registration §23.20 pools every section of the family, so a
+    named section without a table, a table of a section not named and an
+    entry naming two sections are refused.
+    """
+    entries = [str(entry).strip() for entry in expected_sections if str(entry).strip()]
+    if not entries:
+        raise ProfileBuildError(
+            "name the family's sections (--sections): reading (i) pools every one"
+        )
+    if len(set(entries)) != len(entries):
+        raise ProfileBuildError(f"--sections names a section twice: {entries}")
+    named: dict[str, list[str]] = {}
+    for entry in entries:
+        hits = [
+            section.sample_id
+            for section in sections
+            if entry in (section.sample_id, section.pair_id)
+        ]
+        if len(hits) > 1:
+            raise ProfileBuildError(
+                f"--sections entry {entry!r} names more than one table ({hits}); "
+                "give the sample ids"
+            )
+        named[entry] = hits
+    missing = sorted(entry for entry, hits in named.items() if not hits)
+    if missing:
+        raise ProfileBuildError(
+            f"the sections {missing} have no label table among those given: "
+            "reading (i) pools every section of the family (pre-registration "
+            "§23.20), so a missing one goes back to the user"
+        )
+    covered = {hit for hits in named.values() for hit in hits}
+    extra = sorted(
+        section.sample_id for section in sections if section.sample_id not in covered
+    )
+    if extra:
+        raise ProfileBuildError(
+            f"the label tables of {extra} are not among the sections --sections names"
+        )
+
+
 def check_sections(
     sections: Sequence[SectionLabels],
     *,
     family_id: str,
     segmentation: str,
     panel_hash: str | None,
+    expected_sections: Sequence[str],
 ) -> None:
     """Refuse sections that are not one family's run on one segmentation.
 
     Raises:
-        ProfileBuildError: For no section, a section given twice, another
-            segmentation, platforms, panels or primary bundles that differ,
-            a panel hash other than ``panel_hash`` (a prefix), or a
-            ``family_id`` other than the panel's own.
+        ProfileBuildError: For no section, a section given twice, tables that
+            are not exactly ``expected_sections`` (each by its sample id or
+            pair id), a section whose dataset gate failed or is not
+            recorded, another segmentation, platforms, panels or primary
+            bundles that differ, a panel hash other than ``panel_hash`` (a
+            prefix), or a ``family_id`` other than the panel's own.
     """
     if not sections:
         raise ProfileBuildError("give at least one label table")
     ids = [section.sample_id for section in sections]
     if len(set(ids)) != len(ids):
         raise ProfileBuildError(f"a section is given twice: {sorted(ids)}")
+    _named_sections(sections, expected_sections)
+    for section in sections:
+        level = section.provenance.get("gate_level")
+        if level is None:
+            raise ProfileBuildError(
+                f"{section.path.name} records no dataset gate level: not a human "
+                "RESOLVE output whose gate can be checked"
+            )
+        if level == FAILED_GATE:
+            raise ProfileBuildError(
+                f"the dataset gate of {section.sample_id} failed: the section has "
+                "no confident call, but its cells would move the table median "
+                "and NP3's report-only histogram; reading (i) pools the family's "
+                "sections, so a failed one goes back to the user (pre-registration "
+                "§23.20)"
+            )
     for name, values in (
         ("segmentation", {section.segmentation for section in sections}),
         ("platform", {section.platform for section in sections}),
@@ -700,6 +795,7 @@ def build_files(args: argparse.Namespace) -> tuple[BuiltProfile, dict[Path, str]
         family_id=args.family_id,
         segmentation=args.segmentation,
         panel_hash=args.panel_hash,
+        expected_sections=args.sections,
     )
     built = build_profile(
         sections,
@@ -730,6 +826,16 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         required=True,
         help="A section's label table (repeat once per section).",
     )
+    parser.add_argument(
+        "--sections",
+        action="append",
+        required=True,
+        help=(
+            "The family's sections, each by its sample id or pair id "
+            "(comma-separated or repeated); the label tables must be exactly "
+            "these, each once."
+        ),
+    )
     parser.add_argument("--family-id", required=True)
     parser.add_argument(
         "--panel-hash",
@@ -752,6 +858,12 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         help="Write nothing; exit 1 if a written file is stale.",
     )
     args = parser.parse_args(argv)
+    args.sections = [
+        entry.strip()
+        for value in args.sections
+        for entry in str(value).split(",")
+        if entry.strip()
+    ]
     if args.panel_hash is not None and not _HEX.fullmatch(args.panel_hash):
         parser.error("--panel-hash must be 12 to 64 lower-case hex digits")
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", args.date):

@@ -967,9 +967,15 @@ PREP bundles, writes the simulation report and then runs gate P, writing
   `build_hash`. It is committed and recorded in the pre-registration before
   gate P runs, and gate P runs from code that holds it. The builder refuses
   a table that is not a human `map_first` RESOLVE output of a provisional
-  panel, tables of another segmentation, panel, family or primary bundle, a
-  section given twice and a confident broad call without a floor class;
-  `--check` re-derives the files.
+  panel in frontal cortex, tables of another segmentation, panel, family or
+  primary bundle, a section given twice, tables that are not exactly the
+  sections `--sections` names (each by its sample id or pair id), a section
+  whose dataset gate failed or is not recorded, and a confident broad call
+  without a floor class; `--check` re-derives the files. The sidecar
+  records the primary bundle the tables were resolved with, and gate P
+  refuses the asset when its own PREP built another one (after PREP, before
+  any leave-one-donor-out build or mapping; an asset that records none is
+  refused before any compute).
 - Gate P is CPU only and maps with the self-map's recorded MapMyCells worker
   count (pre-registration §18 item 2); another count is refused.
 

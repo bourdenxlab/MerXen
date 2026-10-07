@@ -37,6 +37,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 PANEL_HASH = "aa25d5a241d0" + "0" * 52
 FAMILY = own_family_id("human", ["MERSCOPE"], PANEL_HASH)
 BUILD_HASH = "b" * 64
+SECTIONS = ("P5822", "P4815", "P3518", "P7417")
 
 
 def _builder() -> Any:
@@ -95,9 +96,11 @@ def _labels(
     low_counts: int = 5,
 ) -> pd.DataFrame:
     """A label table of ``cells`` (table cells) and ``low_counts`` others."""
+    pair_id = sample_id.split("_")[0]
     rows = [
         {
             "cell_id": f"{sample_id}-{index}",
+            "pair_id": pair_id,
             "sample_id": sample_id,
             "platform": "MERSCOPE",
             "segmentation": segmentation,
@@ -114,6 +117,7 @@ def _labels(
     rows += [
         {
             "cell_id": f"{sample_id}-low{index}",
+            "pair_id": pair_id,
             "sample_id": sample_id,
             "platform": "MERSCOPE",
             "segmentation": segmentation,
@@ -153,6 +157,8 @@ def _argv(tmp_path: Path, tables: list[Path], **change: Any) -> list[str]:
     manifest = change.get("manifest", evidence / "m13" / "np5" / "manifest.json")
     return [
         *(item for path in tables for item in ("--labels", str(path))),
+        "--sections",
+        str(change.get("sections", ",".join(SECTIONS))),
         "--family-id",
         str(change.get("family_id", FAMILY)),
         "--panel-hash",
@@ -172,10 +178,10 @@ def _argv(tmp_path: Path, tables: list[Path], **change: Any) -> list[str]:
     ]
 
 
-def _four_sections(tmp_path: Path) -> list[Path]:
+def _four_sections(tmp_path: Path, suffix: str = "") -> list[Path]:
     tables = tmp_path / "tables"
     tables.mkdir(exist_ok=True)
-    return [_write(tables, sample) for sample in ("P5822", "P4815", "P3518", "P7417")]
+    return [_write(tables, f"{sample}{suffix}") for sample in SECTIONS]
 
 
 def test_the_builder_writes_the_family_profile_asset(
@@ -254,6 +260,33 @@ def test_the_builder_writes_the_family_profile_asset(
         ({"flag": "--family-id", "value": "human_merscope_dcddfbd18fb8"}, "D16"),
         ({"cells": [("Mixed/Unknown", None, True, 100)]}, "without a floor class"),
         ({"no_provenance": True}, "carries no annotation provenance"),
+        # Reading (i) pools every section of the family: one missing, one
+        # not named, or one named twice goes back to the user.
+        ({"n_tables": 3}, r"sections \['P7417'\] have no label table"),
+        (
+            {"flag": "--sections", "value": "P5822,P4815,P3518,P7417,P9999"},
+            r"sections \['P9999'\] have no label table",
+        ),
+        (
+            {"flag": "--sections", "value": "P5822,P4815,P3518"},
+            r"label tables of \['P7417'\] are not among the sections",
+        ),
+        (
+            {"flag": "--sections", "value": "P5822,P4815,P3518,P7417,P3518"},
+            "names a section twice",
+        ),
+        # A failed dataset gate adds no confident call but moves the table
+        # median; a table without a gate record cannot be checked.
+        (
+            {"provenance": {"gate": DatasetGateProvenance(level="failed")}},
+            "dataset gate of P7417 failed",
+        ),
+        ({"provenance": {"gate": None}}, "records no dataset gate level"),
+        # D3 (a): the family's sections are frontal cortex.
+        (
+            {"provenance": {"anatomical_region": "temporal_cortex"}},
+            "not 'frontal_cortex'",
+        ),
     ],
 )
 def test_the_builder_refuses_tables_of_another_run(
@@ -295,6 +328,8 @@ def test_the_builder_refuses_tables_of_another_run(
         ]
     if change.get("duplicate"):
         tables = [*tables, tables[0]]
+    if "n_tables" in change:
+        tables = tables[: change["n_tables"]]
     argv = _argv(tmp_path, tables)
     if "flag" in change:
         position = argv.index(change["flag"])
@@ -303,6 +338,39 @@ def test_the_builder_refuses_tables_of_another_run(
         builder.build_files(builder._parse_args(argv))
     assert builder.main(argv) == 1
     assert not (tmp_path / "sim_inputs").exists()
+
+
+def test_the_sections_are_named_by_sample_or_pair_id(
+    builder: Any, tmp_path: Path
+) -> None:
+    """``--sections`` names each section by its sample id or its pair id."""
+    tables = _four_sections(tmp_path, suffix="_MERSCOPE")
+    args = builder._parse_args(_argv(tmp_path, tables))
+    assert args.sections == list(SECTIONS)
+    built, _ = builder.build_files(args)
+    sections = built.asset.provenance["summary"]["sections"]
+    assert [item["sample_id"] for item in sections] == [
+        f"{sample}_MERSCOPE" for sample in SECTIONS
+    ]
+    by_sample = ",".join(f"{sample}_MERSCOPE" for sample in SECTIONS)
+    repeated = _argv(tmp_path, tables, sections=by_sample)
+    position = repeated.index("--sections")
+    # Repeated flags and commas combine.
+    split = [
+        *repeated[:position],
+        "--sections",
+        by_sample.split(",", 1)[0],
+        "--sections",
+        by_sample.split(",", 1)[1],
+        *repeated[position + 2 :],
+    ]
+    assert builder.build_files(builder._parse_args(split))[0].csv_text == (
+        built.csv_text
+    )
+    with pytest.raises(SystemExit):
+        builder._parse_args(
+            [item for item in repeated if item not in ("--sections", by_sample)]
+        )
 
 
 def test_the_manifest_must_lie_under_the_evidence_root(
@@ -344,8 +412,12 @@ def test_gate_p_reads_the_family_profile_for_np5(
     assert len(per_class["Exc"]) == 320
     totals = [total for *_, ok, total in CELLS if ok] * 4
     assert default == pytest.approx(float(np.median(totals)))
-    assert record["source"] == "family_profile_asset"
+    assert record["source"] == run.FAMILY_PROFILE_SOURCE == "family_profile_asset"
     assert record["classes_below_min_cells"] == {"Immune": 40}
+    # The bundle the family's tables were resolved with, which gate P's own
+    # PREP must be (checked after PREP, before any build or mapping).
+    assert record["primary_reference"] == "whb_frontal_supc_clus"
+    assert record["primary_build_hash"] == BUILD_HASH
     assert record["min_class_cells"] == si.PROFILE_MIN_CLASS_CELLS
     assert record["table_cells_median"] == pytest.approx(
         float(np.median([total for *_, total in CELLS] * 4))
@@ -394,6 +466,36 @@ def test_gate_p_reads_the_family_profile_for_np5(
             depth_profile_asset=asset.asset_id,
             species="mouse",
         )
+
+
+def test_gate_p_refuses_a_family_profile_of_another_primary_bundle(
+    builder: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The profile and the decisions gate P scores come from one bundle."""
+    asset = _registered(builder, tmp_path, monkeypatch)
+    _, _, record, _ = run.np5_depth_source(
+        expected_depth=None,
+        depth_profile=None,
+        depth_profile_asset=asset.asset_id,
+        species="human",
+    )
+    same = tmp_path / "store" / "whb_frontal_supc_clus" / BUILD_HASH
+    other = tmp_path / "store" / "whb_frontal_supc_clus" / ("c" * 64)
+    for directory in (same, other):
+        directory.mkdir(parents=True)
+        (directory / "bundle.json").write_text(
+            json.dumps({"build_hash": directory.name}), encoding="utf-8"
+        )
+    run.check_profile_bundle(record, same)
+    run.check_profile_bundle(record, None)
+    with pytest.raises(run.GatePRunError, match="gate P's PREP built cccccccc"):
+        run.check_profile_bundle(record, other)
+    # An asset that records no bundle is refused before any compute.
+    unrecorded = {**record, "primary_build_hash": None}
+    with pytest.raises(run.GatePRunError, match="records no primary build_hash"):
+        run.check_profile_bundle(unrecorded, None)
+    # Another depth source has no bundle to check.
+    run.check_profile_bundle({"source": "expected_depth"}, other)
 
 
 def family_confident_cells() -> int:
