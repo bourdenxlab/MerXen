@@ -1200,12 +1200,16 @@ seven broad classes (the WHB vocab; sinks and the nodes outside the seven
 classes belong to none) and derives each class's markers on the panel's
 query genes with the §8.6 / E3 specificity rule
 (`flags.specific_gene_ratio`, `flags.specific_gene_min_share`).
-`real_qc.marker_referee_comparator` chooses the comparison: `class` (the
-default since the user's ruling C1 (b) of 2026-10-07: the class profile,
-the `n_cells`-weighted mean of its superclusters' `expected_fraction`,
-against the other classes' profiles) or `node` (the default until then,
-mouse G2's rule: the class's unweighted mean supercluster profile against
-every other supercluster, sinks included). The `class`
+`real_qc.marker_referee_comparator` chooses the comparison: `node` (the
+default, mouse G2's rule: the class's unweighted mean supercluster profile
+against every other supercluster, sinks included) or `class` (the class
+profile, the `n_cells`-weighted mean of its superclusters'
+`expected_fraction`, against the other classes' profiles). A family listed
+in `real_qc.marker_referee_comparator_by_family` takes its own: by the
+user's ruling C1 (b) of 2026-10-07, the new-panel human MERSCOPE family
+(`human_merscope_aa25d5a241d0`) takes `class`. RESOLVE reads the panel's
+family (`current_family`), and the outcome's settings record the
+comparator and the family it was ruled for (`comparator_family`). The `class`
 profile is not `flags.class_profiles`, which weights `mean_cpm` and
 renormalises over the query genes; the two bases give different sets. The
 comparators differ where a class holds a small node that shares another
@@ -1239,8 +1243,10 @@ statistic is re-measured on set a before a new family is scored (M13 C17).
 With the `node` comparator set a's panel gives only one class with three or
 more markers, so the referee was `not_evaluable` on every set a sample (C17);
 the `class` comparator gave 0.745-0.979 on proseg_hybrid. On 2026-10-07 the
-user ruled that the referee uses `class`, with the 0.75 / 0.70 thresholds
-unchanged (pre-registration §23.19, C1 (b)).
+user ruled that the new-panel human MERSCOPE family's referee uses `class`,
+with the 0.75 / 0.70 thresholds unchanged (pre-registration §23.18, §23.19,
+C1 (b): "the user decides NR5 for this family"). Every other family, the
+seeded set a sections included, keeps `node`.
 
 **Gene-complexity source (M13 chunk C16; decision D19 (a)).** A version-7
 PREP stores the simulated `n_genes` of every member's simulated cells,

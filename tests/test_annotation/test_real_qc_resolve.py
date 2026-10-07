@@ -1051,6 +1051,61 @@ def test_the_referee_runs_on_the_bundle_profiles(
         assert referee["outcome"] == "pass"
 
 
+def test_the_referee_takes_the_panel_familys_ruled_comparator(
+    tmp_path: Path, fake_mmc: FakeMmc, make_trust: MakeTrust
+) -> None:
+    """RESOLVE passes the panel's family to the referee (C1 (b), one family).
+
+    The synthetic panel's family is not ruled, so its referee derives its
+    sets with the default ``node`` comparator; listed in
+    ``marker_referee_comparator_by_family`` it takes ``class``, recorded with
+    the family in the outcome's settings.
+    """
+    setup = _setup(tmp_path, fake_mmc)
+    _write_specific_profiles(setup)
+    family = pl.current_family(setup.panel, setup.config).panel_family
+    assert family is not None
+    assert (
+        family.family_id not in setup.config.real_qc.marker_referee_comparator_by_family
+    )
+
+    def referee_settings(output: str, **update: Any) -> list[dict[str, Any]]:
+        result = _run(
+            setup,
+            make_trust,
+            output,
+            marker_referee_min_group_markers=1,
+            marker_referee_min_pseudo_confident=10,
+            **update,
+        )
+        found = []
+        for sample in result.samples.values():
+            (referee,) = [
+                item
+                for item in sample.summary["real_qc"]["outcomes"]
+                if item["check"] == "marker_consistency"
+            ]
+            assert referee["state"] == "evaluated", referee["reason"]
+            found.append(
+                {
+                    **referee["details"]["settings"],
+                    "sets": referee["details"]["marker_sets"],
+                }
+            )
+        return found
+
+    for record in referee_settings("default"):
+        assert (record["comparator"], record["comparator_family"]) == ("node", None)
+        assert record["sets"]["comparator"] == "node"
+    ruled = referee_settings(
+        "ruled", marker_referee_comparator_by_family={family.family_id: "class"}
+    )
+    for record in ruled:
+        assert record["comparator"] == "class"
+        assert record["comparator_family"] == family.family_id
+        assert record["sets"]["comparator"] == "class"
+
+
 class _WholeMask:
     """A shared tissue mask that holds every cell."""
 

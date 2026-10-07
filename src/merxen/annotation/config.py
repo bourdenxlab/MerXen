@@ -889,6 +889,20 @@ def _pending_species_gates() -> dict[Species, SpeciesGateState]:
     return {"human": "pending", "mouse": "pending"}
 
 
+# The families whose marker referee comparator the user ruled on. C1 (b) of
+# 2026-10-07 (pre-registration §23.18, §23.19): "the user decides NR5 for
+# this family", the new-panel human MERSCOPE family (D16's family id of the
+# frozen D17 panel). Every other family keeps the default comparator.
+RULED_REFEREE_COMPARATORS: Final[dict[str, MarkerRefereeComparator]] = {
+    "human_merscope_aa25d5a241d0": "class",
+}
+
+
+def _ruled_referee_comparators() -> dict[str, MarkerRefereeComparator]:
+    """Return a copy of the families' ruled referee comparators."""
+    return dict(RULED_REFEREE_COMPARATORS)
+
+
 class AnnotationRealQcConfig(_AnnotationModel):
     """Downgrade-only QC on real in-house datasets (plan §8.8; rev3).
 
@@ -913,16 +927,23 @@ class AnnotationRealQcConfig(_AnnotationModel):
             ``not_evaluable`` with fewer scored cells (marker-pseudo-labelled
             table cells with a confident ``ct_broad``).
         marker_referee_comparator: How the per-panel marker sets are derived
-            from the WHB profiles with the §8.6 specificity rule: ``class``
-            (the broad-class profile, the ``n_cells``-weighted mean of its
-            superclusters' ``expected_fraction``, against the other broad
-            classes) or ``node`` (mouse G2's rule as ported: each broad
-            class's mean supercluster profile against every other
-            supercluster). ``class`` is the default by the user's ruling C1
-            (b) of 2026-10-07 (pre-registration §23.19; the thresholds
-            unchanged); ``node``, the M13 C13 specification, was the
-            default until then and was ``not_evaluable`` on every set a
-            sample.
+            from the WHB profiles with the §8.6 specificity rule: ``node``
+            (mouse G2's rule as ported: each broad class's mean supercluster
+            profile against every other supercluster; the M13 C13
+            specification and the default, ``not_evaluable`` on every set a
+            sample) or ``class`` (the broad-class profile, the
+            ``n_cells``-weighted mean of its superclusters'
+            ``expected_fraction``, against the other broad classes). A
+            family listed in ``marker_referee_comparator_by_family`` takes
+            its own.
+        marker_referee_comparator_by_family: The comparator of each family
+            the user ruled on, by family id (``referee_comparator``). By
+            default the new-panel human MERSCOPE family
+            (``human_merscope_aa25d5a241d0``) takes ``class``: the user's
+            ruling C1 (b) of 2026-10-07 decides NR5 "for this family"
+            (pre-registration §23.18, §23.19), with the thresholds
+            unchanged. Every other family, the seeded set a sections
+            included, keeps ``marker_referee_comparator``.
         paired_broad_jsd_warn: Paired-platform soft broad JSD warning.
         uninformative_strata_warn_frac: Warn when more flag strata are
             uninformative.
@@ -982,7 +1003,10 @@ class AnnotationRealQcConfig(_AnnotationModel):
     marker_referee_min_marker_units: float = Field(default=1.5, gt=0.0)
     marker_referee_min_marker_share: float = Field(default=0.6, gt=0.0, le=1.0)
     marker_referee_min_pseudo_confident: int = Field(default=200, ge=1)
-    marker_referee_comparator: MarkerRefereeComparator = "class"
+    marker_referee_comparator: MarkerRefereeComparator = "node"
+    marker_referee_comparator_by_family: dict[str, MarkerRefereeComparator] = Field(
+        default_factory=_ruled_referee_comparators
+    )
     paired_broad_jsd_warn: float = 0.20
     uninformative_strata_warn_frac: float = 0.5
     genes_per_count_gap_warn: float = Field(default=0.45, ge=0.0)
@@ -1036,6 +1060,25 @@ class AnnotationRealQcConfig(_AnnotationModel):
     ) -> dict[str, str]:
         # A species left out keeps the safe state: its gate has not merged.
         return {species: value.get(species, "pending") for species in SPECIES}
+
+    def referee_comparator(
+        self: AnnotationRealQcConfig, family_id: str | None
+    ) -> MarkerRefereeComparator:
+        """Return the marker referee comparator of a family.
+
+        Args:
+            family_id: The panel's family id (``None``: unknown).
+
+        Returns:
+            The family's ruled comparator
+            (``marker_referee_comparator_by_family``), else
+            ``marker_referee_comparator``.
+        """
+        if family_id is not None:
+            ruled = self.marker_referee_comparator_by_family.get(str(family_id))
+            if ruled is not None:
+                return ruled
+        return self.marker_referee_comparator
 
     def seeded_warn_only(self: AnnotationRealQcConfig, species: str) -> bool:
         """Return whether the seeded families of ``species`` only warn.

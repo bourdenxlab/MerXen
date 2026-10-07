@@ -22,12 +22,14 @@ C15), and writes the outcome table under ``$A/m13/regression/``:
    script matches it, and the exit status):
 
    * ``qc``: the configuration C17 ran with on 2026-10-07 (the species
-     defaults then: the QC on, the ``node`` referee comparator, G1
-     warn-only by D23 (b), the seeded families warn-only by D20 (b)). The
-     user's rulings of 2026-10-07 moved the defaults (pre-registration
-     §23.19: C1 (b), the ``class`` comparator; C2, G1's fail rule at
-     ``gate_failed``), so the variant pins these settings (``C17_REAL_QC``)
-     and a re-run reproduces C17;
+     defaults then: the QC on, the ``node`` referee comparator for every
+     family, G1 warn-only by D23 (b), NR7 at the bin's lower edge, the
+     seeded families warn-only by D20 (b)). The user's rulings of
+     2026-10-07 changed the defaults (pre-registration §23.19: C1 (b), the
+     ``class`` comparator for the new-panel human MERSCOPE family; C2, G1's
+     fail rule at ``gate_failed``; C3 (b), NR7's interpolated matching), so
+     the variant pins these settings (``C17_REAL_QC``) and a re-run
+     reproduces C17;
    * ``qc_free``: ``real_qc.enabled`` false, the QC-free re-run NR1
      compares with;
    * ``class_comparator``: the referee's ``class`` comparator, reported
@@ -126,11 +128,15 @@ VARIANTS: tuple[str, ...] = (
     VARIANT_APPLIED,
 )
 # The real-data QC settings C17 ran with (the defaults until the user's
-# rulings of 2026-10-07 moved them; pre-registration §23.19). Every variant
+# rulings of 2026-10-07 changed them; pre-registration §23.19). Every variant
 # starts from them, so a re-run reproduces C17.
 C17_REAL_QC: dict[str, Any] = {
     "marker_referee_comparator": "node",
+    # No family took its own comparator then (C1 (b) rules one family).
+    "marker_referee_comparator_by_family": {},
     "registration_g1_effect": "warning",
+    # NR7 at the bin's lower edge, as C16 built it (C3 (b) came later).
+    "gene_complexity_matching": "lower_edge",
 }
 # An NR1 table cell of a sample the applied_after_gate variant did not cover.
 APPLIED_NOT_RUN = f"{VARIANT_APPLIED} not run"

@@ -133,13 +133,15 @@ def _write_m8_run(
 
 
 # The settings C17 ran with (the script's qc variant, C17_REAL_QC): the
-# defaults until the user's rulings of 2026-10-07 moved them.
+# defaults until the user's rulings of 2026-10-07 changed them.
 C17_CONFIG = AnnotationConfig.model_validate(
     {
         "species": "human",
         "real_qc": {
             "marker_referee_comparator": "node",
+            "marker_referee_comparator_by_family": {},
             "registration_g1_effect": "warning",
+            "gene_complexity_matching": "lower_edge",
         },
     }
 )
@@ -388,7 +390,14 @@ def test_variant_configs_are_annotation_configs(script: ModuleType) -> None:
         "species": "human",
         "real_qc": script.C17_REAL_QC,
     }
-    assert _changed(script, "qc", base=None) == script.C17_REAL_QC
+    # C2 moved G1's default, C3 (b) NR7's matching, and C1 (b) gave the
+    # new-panel family the class comparator; C17 ran with none of them (the
+    # node default is unchanged).
+    assert _changed(script, "qc", base=None) == {
+        "marker_referee_comparator_by_family": {},
+        "registration_g1_effect": "warning",
+        "gene_complexity_matching": "lower_edge",
+    }
     assert AnnotationConfig.model_validate(script.variant_config("qc")) == C17_CONFIG
     assert _changed(script, "qc_free") == {"enabled": False}
     assert _changed(script, "class_comparator") == {

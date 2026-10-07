@@ -1198,13 +1198,13 @@ def test_settings_follow_the_real_qc_config() -> None:
         min_marker_units=1.5,
         min_marker_share=0.6,
         min_pseudo_confident=200,
-        # The user's ruling C1 (b) of 2026-10-07 (pre-registration §23.19).
-        comparator=COMPARATOR_CLASS,
+        # The C13 specification; C1 (b) of 2026-10-07 rules one family only.
+        comparator=COMPARATOR_NODE,
     )
     changed = HumanRefereeSettings.from_config(
-        AnnotationRealQcConfig(marker_referee_comparator="node")
+        AnnotationRealQcConfig(marker_referee_comparator="class")
     )
-    assert changed.comparator == COMPARATOR_NODE
+    assert changed.comparator == COMPARATOR_CLASS
     with pytest.raises(ValueError):
         AnnotationRealQcConfig(marker_referee_comparator="cluster")
     with pytest.raises(ValueError):
@@ -1215,6 +1215,55 @@ def test_settings_follow_the_real_qc_config() -> None:
         dataclasses.replace(loaded, comparator="cluster")
     with pytest.raises(ValueError, match="min_marker_share"):
         dataclasses.replace(loaded, min_marker_share=0.0)
+
+
+NEW_PANEL_FAMILY = "human_merscope_aa25d5a241d0"
+
+
+def test_the_class_comparator_is_scoped_to_the_ruled_family() -> None:
+    """C1 (b) of 2026-10-07 decides NR5 for the new-panel family only.
+
+    Pre-registration §23.18: "the user decides NR5 for this family". The
+    family (D16's id of the frozen D17 panel) takes ``class``; any other
+    family, the seeded set a sections included, and a panel without a
+    family keep the default ``node``.
+    """
+    config = AnnotationRealQcConfig()
+    assert config.marker_referee_comparator == COMPARATOR_NODE
+    assert config.marker_referee_comparator_by_family == {
+        NEW_PANEL_FAMILY: COMPARATOR_CLASS
+    }
+    family = HumanRefereeSettings.from_config(config, family_id=NEW_PANEL_FAMILY)
+    assert family.comparator == COMPARATOR_CLASS
+    assert family.comparator_family == NEW_PANEL_FAMILY
+    assert family.to_json()["comparator_family"] == NEW_PANEL_FAMILY
+    # The thresholds and every other setting are the default's.
+    assert dataclasses.replace(
+        family, comparator=COMPARATOR_NODE, comparator_family=None
+    ) == HumanRefereeSettings.from_config(config)
+    for other in ("human_set_a", "human_merscope_6e5fd5fb86ef", None):
+        settings_of = HumanRefereeSettings.from_config(config, family_id=other)
+        assert settings_of.comparator == COMPARATOR_NODE, other
+        assert settings_of.comparator_family is None
+        assert config.referee_comparator(other) == COMPARATOR_NODE
+    # A config can drop the ruling or rule another family.
+    cleared = AnnotationRealQcConfig(marker_referee_comparator_by_family={})
+    assert cleared.referee_comparator(NEW_PANEL_FAMILY) == COMPARATOR_NODE
+    moved = AnnotationRealQcConfig(
+        marker_referee_comparator="class",
+        marker_referee_comparator_by_family={NEW_PANEL_FAMILY: "node"},
+    )
+    assert moved.referee_comparator(NEW_PANEL_FAMILY) == COMPARATOR_NODE
+    assert moved.referee_comparator("human_set_a") == COMPARATOR_CLASS
+    with pytest.raises(ValueError):
+        AnnotationRealQcConfig(
+            marker_referee_comparator_by_family={NEW_PANEL_FAMILY: "cluster"}
+        )
+    # The default record is a copy: one config cannot change the next one's.
+    config.marker_referee_comparator_by_family["human_set_a"] = COMPARATOR_CLASS
+    assert AnnotationRealQcConfig().referee_comparator("human_set_a") == (
+        COMPARATOR_NODE
+    )
 
 
 @pytest.mark.parametrize(

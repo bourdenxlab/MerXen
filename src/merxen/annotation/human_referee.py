@@ -16,10 +16,17 @@ classes belong to none).
   ``specific_gene_ratio`` 20 and ``specific_gene_min_share`` 1/1000;
   immediate-early genes excluded, in human case), most specific first.
   Classes with fewer than ``real_qc.marker_referee_min_group_markers`` (3)
-  are left out. The comparator (``real_qc.marker_referee_comparator``):
+  are left out. The comparator (``real_qc.marker_referee_comparator``,
+  unless ``real_qc.marker_referee_comparator_by_family`` lists the panel's
+  family):
 
-  - ``class`` (the default since the user's ruling C1 (b) of 2026-10-07,
-    pre-registration §23.19): the broad-class profile, the
+  - ``node`` (the C13 specification, the default): mouse G2's rule. The
+    class's profile is the unweighted mean of its supercluster profiles,
+    compared with every other supercluster, sinks and nodes of no broad
+    class included (G2 compares a group with every class outside it).
+  - ``class`` (the new-panel human MERSCOPE family's, by the user's ruling
+    C1 (b) of 2026-10-07, pre-registration §23.18, §23.19: "the user
+    decides NR5 for this family"): the broad-class profile, the
     ``n_cells``-weighted mean of its superclusters' ``expected_fraction``
     (as mouse G2 uses ``expected_fraction``), compared with the other
     broad classes' profiles; nodes of no broad class are not compared.
@@ -28,11 +35,6 @@ classes belong to none).
     weights each node's ``mean_cpm`` and renormalises the mean over the
     query genes: the two give different sets (on set a, Neurons 5 against
     3 markers), so the basis is part of the comparator choice.
-  - ``node`` (the C13 specification, the default until 2026-10-07): mouse
-    G2's rule. The class's profile is the unweighted mean of its
-    supercluster profiles, compared with every other supercluster, sinks
-    and nodes of no broad class included (G2 compares a group with every
-    class outside it).
 
   The two comparators differ where one broad class holds a small node that
   shares another class's genes (WHB's Committed oligodendrocyte precursor,
@@ -83,9 +85,10 @@ D18's fallback names only that case. With the ``node`` comparator set a's
 panel gives one class with at least three markers (Microglia), so the
 referee was ``not_evaluable`` on set a by construction (M13 C17); the
 ``class`` comparator gave 0.745-0.979 on proseg_hybrid. The user ruled on
-2026-10-07 (C1 (b)) that the referee uses ``class`` with the thresholds
-unchanged, a tightening chosen after set a's values were seen
-(pre-registration §23.19).
+2026-10-07 (C1 (b)) that the new-panel human MERSCOPE family's referee uses
+``class`` with the thresholds unchanged, a tightening chosen after set a's
+values were seen (pre-registration §23.19); every other family, the seeded
+set a sections included, keeps ``node``.
 
 The module needs numpy, pandas and (for the pseudo-labels) scipy.
 """
@@ -188,6 +191,9 @@ class HumanRefereeSettings:
         min_pseudo_confident: Scored cells the statistic needs.
         comparator: ``node`` (mouse G2's rule on the superclusters) or
             ``class`` (broad-class profiles).
+        comparator_family: The family whose ruled comparator this is
+            (``real_qc.marker_referee_comparator_by_family``; ``None``: the
+            default ``real_qc.marker_referee_comparator``).
     """
 
     min_group_markers: int
@@ -195,6 +201,7 @@ class HumanRefereeSettings:
     min_marker_share: float
     min_pseudo_confident: int
     comparator: str
+    comparator_family: str | None = None
 
     def __post_init__(self) -> None:
         """Validate the settings."""
@@ -213,21 +220,33 @@ class HumanRefereeSettings:
             raise ValueError("min_marker_share must lie in (0, 1]")
 
     @classmethod
-    def from_config(cls, config: AnnotationRealQcConfig) -> HumanRefereeSettings:
+    def from_config(
+        cls, config: AnnotationRealQcConfig, *, family_id: str | None = None
+    ) -> HumanRefereeSettings:
         """Read the settings from ``AnnotationConfig.real_qc``.
 
         Args:
             config: The real-data QC config.
+            family_id: The panel's family id: a family the user ruled on
+                takes its own comparator
+                (``AnnotationRealQcConfig.referee_comparator``; C1 (b) of
+                2026-10-07 for the new-panel human MERSCOPE family).
 
         Returns:
             The settings.
         """
+        ruled = (
+            None
+            if family_id is None
+            else config.marker_referee_comparator_by_family.get(str(family_id))
+        )
         return cls(
             min_group_markers=int(config.marker_referee_min_group_markers),
             min_marker_units=float(config.marker_referee_min_marker_units),
             min_marker_share=float(config.marker_referee_min_marker_share),
             min_pseudo_confident=int(config.marker_referee_min_pseudo_confident),
-            comparator=str(config.marker_referee_comparator),
+            comparator=str(config.referee_comparator(family_id)),
+            comparator_family=None if ruled is None else str(family_id),
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -238,6 +257,7 @@ class HumanRefereeSettings:
             "min_marker_share": self.min_marker_share,
             "min_pseudo_confident": self.min_pseudo_confident,
             "comparator": self.comparator,
+            "comparator_family": self.comparator_family,
         }
 
 
