@@ -340,6 +340,32 @@ def test_the_builder_refuses_tables_of_another_run(
     assert not (tmp_path / "sim_inputs").exists()
 
 
+def test_a_class_with_exactly_100_calls_takes_its_own_depths(
+    builder: Any, tmp_path: Path
+) -> None:
+    """Reading (ii)'s boundary: 100 pooled confident calls suffice, 99 do not."""
+    cells = (
+        [("Astrocytes", None, True, 90 + index) for index in range(100)]
+        + [("Microglia", None, True, 60 + index) for index in range(99)]
+        + [("Neurons", "Excitatory", True, 200 + index) for index in range(101)]
+    )
+    tables = tmp_path / "tables"
+    tables.mkdir()
+    path = _write(tables, "P5822", cells=cells)
+    assert builder.main(_argv(tmp_path, [path], sections="P5822")) == 0
+    directory = tmp_path / "sim_inputs"
+    asset = si.load_registry(directory)[f"np5_depth__{FAMILY}"]
+    family = si.family_profile_from_asset(asset, directory)
+    assert {name: len(values) for name, values in family.class_depths().items()} == {
+        "Astro": 100,
+        "Exc": 101,
+    }
+    assert family.below_min_cells() == {"Immune": 99}
+    pooled = asset.provenance["summary"]["pooled"]
+    assert pooled["classes_own_depths"] == ["Astro", "Exc"]
+    assert pooled["classes_overall_median"] == ["Immune"]
+
+
 def test_the_sections_are_named_by_sample_or_pair_id(
     builder: Any, tmp_path: Path
 ) -> None:

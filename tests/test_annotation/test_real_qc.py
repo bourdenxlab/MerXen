@@ -692,6 +692,36 @@ def test_nr7_matches_only_test_cells_simulated_at_both_edges() -> None:
     assert rows.loc[120, "judged"]
 
 
+def test_nr7_counts_test_cells_not_member_rows_in_the_open_top_bin() -> None:
+    """C4 (a): the 50-cell minimum counts test cells, at the open top bin too.
+
+    Eight member rows of one test cell at a depth are one cell (their mean),
+    so 30 test cells with 8 rows each at 250 are not judged, while 60 are.
+    """
+    rng = np.random.default_rng(4)
+    native_totals = np.exp(rng.uniform(np.log(250), np.log(500), 80))
+    for n_test, judged in ((30, False), (60, True)):
+        cells = np.repeat([f"t{index}" for index in range(n_test)], 8)
+        # The members of a test cell differ; the bin takes each cell's mean.
+        genes = np.tile(np.arange(8, dtype=np.float64), n_test) + np.repeat(
+            np.arange(n_test, dtype=np.float64), 8
+        )
+        table, _ = qc.gene_complexity_check(
+            _genes_at(native_totals),
+            native_totals,
+            genes,
+            np.full(len(cells), 250.0),
+            C16_GRID,
+            simulated_cell_ids=cells,
+        )
+        top = table.set_index("depth").loc[250]
+        assert top["matching"] == "lower_edge"
+        assert top["n_simulated"] == n_test
+        assert bool(top["judged"]) is judged
+        means = 3.5 + np.arange(n_test, dtype=np.float64)
+        assert top["simulated_median_genes"] == pytest.approx(float(np.median(means)))
+
+
 def test_nr7_interpolation_needs_the_simulated_cells_test_cells() -> None:
     cells = _no_gap_cells()
     del cells["simulated_cell_ids"]
