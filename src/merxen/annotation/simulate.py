@@ -40,7 +40,10 @@ leave-one-donor-out HO bundles, seeds 0 / 1, stress recipes, the NP1-NP9
 report; the second mouse draw follows M6b) is registered with
 ``register_gate_p_hook`` by the ``annotation-panel-simulate --gate-p`` command
 and ``scripts/acceptance/new_panel.py``; without a registered programme the
-option is refused before any compute (``GatePUnavailableError``).
+option is refused before any compute (``GatePUnavailableError``). The
+programme's precheck (``GatePPlan``: the species, config, store, output and
+depth settings) runs before any compute; the base report is written before the
+programme runs, and a programme that raises is recorded in it.
 """
 
 from __future__ import annotations
@@ -154,27 +157,73 @@ class GatePRequest:
     scratch_dir: Path | None = None
 
 
+@dataclass(frozen=True)
+class GatePPlan:
+    """What the gate-P programme can check before any compute (M13).
+
+    ``run_panel_simulation`` passes it to the registered precheck before the
+    panel is computed or any bundle is built, so a refusal that needs no
+    bundle never follows hours of PREP.
+
+    Attributes:
+        species: The species the simulation was started for.
+        config: The annotation config.
+        store: The reference store the simulation builds in.
+        out_dir: The simulation's output directory.
+        scratch_dir: The simulation's scratch directory.
+        expected_depth: ``--expected-depth``.
+        depth_profile: ``--depth-profile``.
+        depth_profile_asset: ``--depth-profile-asset``.
+    """
+
+    species: str
+    config: AnnotationConfig
+    store: ReferenceStore
+    out_dir: Path
+    scratch_dir: Path
+    expected_depth: int | None = None
+    depth_profile: Path | None = None
+    depth_profile_asset: str | None = None
+
+
 GatePHook = Callable[[GatePRequest], dict[str, Any]]
+GatePPrecheck = Callable[[GatePPlan], None]
+# The status of the report's ``gate_p`` record when the programme raised.
+GATE_P_STATUS_REFUSED: Final = "refused"
+GATE_P_STATUS_FAILED: Final = "failed"
 _GATE_P_HOOK: GatePHook | None = None
+_GATE_P_PRECHECK: GatePPrecheck | None = None
 
 
-def register_gate_p_hook(hook: GatePHook | None) -> None:
+def register_gate_p_hook(
+    hook: GatePHook | None, *, precheck: GatePPrecheck | None = None
+) -> None:
     """Register the gate-P programme (M13) that ``--gate-p`` runs.
 
     The hook receives the base simulation (``GatePRequest``) and returns the
-    NP1-NP9 record stored under ``gate_p`` in the report. M13 registers it
-    from ``scripts/acceptance/new_panel.py``; ``None`` unregisters.
+    NP1-NP9 record stored under ``gate_p`` in the report. The precheck, if
+    any, receives a ``GatePPlan`` before any compute and raises to refuse the
+    run there. M13 registers both from ``annotation-panel-simulate --gate-p``
+    (and so from ``scripts/acceptance/new_panel.py``); ``None`` unregisters
+    both.
 
     Args:
         hook: The programme, or ``None``.
+        precheck: Its checks that need no compute, or ``None``.
     """
-    global _GATE_P_HOOK
+    global _GATE_P_HOOK, _GATE_P_PRECHECK
     _GATE_P_HOOK = hook
+    _GATE_P_PRECHECK = precheck if hook is not None else None
 
 
 def gate_p_hook() -> GatePHook | None:
     """Return the registered gate-P programme, if any."""
     return _GATE_P_HOOK
+
+
+def gate_p_precheck() -> GatePPrecheck | None:
+    """Return the registered gate-P precheck, if any."""
+    return _GATE_P_PRECHECK
 
 
 def require_gate_p_hook() -> GatePHook:
@@ -1439,7 +1488,11 @@ def run_panel_simulation(
             weigh profile-mode cells to (mouse).
         profile_members: Profile-mode members (default: the family's
             emission members).
-        gate_p: Run the registered gate-P programme (M13) afterwards.
+        gate_p: Run the registered gate-P programme (M13) afterwards: its
+            precheck (``GatePPlan``) before any compute, the programme after
+            the base report is written. A programme that raises leaves its
+            refusal (``refused``) or failure (``failed``) under ``gate_p``
+            in the written report, and the error is raised again.
         provenance: Extra report fields (inputs, code version).
         v7_diagnostic: ``--resolvability-version 7``: version-7 decisions of
             the version-6 families as a diagnostic (``run_v7_diagnostic``).
@@ -1454,6 +1507,9 @@ def run_panel_simulation(
     Raises:
         GatePUnavailableError: If ``gate_p`` and no programme is registered
             (checked before any compute).
+        SimulationError: If the registered gate-P precheck refuses the run
+            (before any compute), or the programme refuses it after the
+            base simulation (recorded in the report first).
         SimulationError: If the depth profile is of another species or both
             a CSV and an asset are given (before any compute).
     """
@@ -1468,6 +1524,20 @@ def run_panel_simulation(
     if profile_mode and profile is None:
         raise SimulationError(
             "profile mode needs --depth-profile or --depth-profile-asset"
+        )
+    precheck = gate_p_precheck() if hook is not None else None
+    if precheck is not None:
+        precheck(
+            GatePPlan(
+                species=species,
+                config=config,
+                store=store,
+                out_dir=out_dir,
+                scratch_dir=scratch_dir,
+                expected_depth=expected_depth,
+                depth_profile=depth_profile,
+                depth_profile_asset=depth_profile_asset,
+            )
         )
     composition = (
         read_real_composition(real_composition)
@@ -1614,24 +1684,53 @@ def run_panel_simulation(
         "n_processors": _n_processors(),
     }
     report["finished_at"] = datetime.now(UTC).isoformat(timespec="seconds")
+    predicted = _concat(predicted_frames, PREDICTED_COLUMNS)
+    prefilter = _concat(prefilter_frames, PREFILTER_COLUMNS)
     if hook is not None:
-        report["gate_p"] = hook(
-            GatePRequest(
-                panel=panel,
-                config=config,
-                store=store,
-                bundles=bundles,
-                out_dir=out_dir,
-                report=report,
-                builds=tuple(built),
-                scratch_dir=scratch_dir,
-            )
+        # The base simulation's report is written before gate P runs, so a
+        # gate-P refusal or failure after PREP never loses it; the refusal is
+        # then recorded in it and raised.
+        write_report(
+            out_dir,
+            report,
+            predicted=predicted,
+            prefilter=prefilter,
+            resources=resource_rows,
         )
+        try:
+            report["gate_p"] = hook(
+                GatePRequest(
+                    panel=panel,
+                    config=config,
+                    store=store,
+                    bundles=bundles,
+                    out_dir=out_dir,
+                    report=report,
+                    builds=tuple(built),
+                    scratch_dir=scratch_dir,
+                )
+            )
+        except Exception as error:
+            report["gate_p"] = {
+                "status": GATE_P_STATUS_REFUSED
+                if isinstance(error, SimulationError)
+                else GATE_P_STATUS_FAILED,
+                "error": type(error).__name__,
+                "reason": str(error),
+            }
+            write_report(
+                out_dir,
+                report,
+                predicted=predicted,
+                prefilter=prefilter,
+                resources=resource_rows,
+            )
+            raise
     write_report(
         out_dir,
         report,
-        predicted=_concat(predicted_frames, PREDICTED_COLUMNS),
-        prefilter=_concat(prefilter_frames, PREFILTER_COLUMNS),
+        predicted=predicted,
+        prefilter=prefilter,
         resources=resource_rows,
     )
     return report

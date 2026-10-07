@@ -11,8 +11,10 @@ reference.
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import zlib
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +29,7 @@ from merxen.annotation import resolvability as res
 from merxen.annotation.config import AnnotationConfig
 from merxen.annotation.reference import builder_for, prepare_reference_spec
 from merxen.annotation.simulate import (
+    GatePPlan,
     GatePRequest,
     GatePUnavailableError,
     ReferenceBuild,
@@ -167,13 +170,23 @@ class Family:
         *,
         error_every: int = 50,
         build: bool = True,
+        perturb: Callable[[str, str], bool] | None = None,
     ) -> None:
         # Four times the fixture's donors, so each class has tested sets.
         monkeypatch.setattr(
             tr, "HO_DONORS", {donor: 4 * n for donor, n in tr.HO_DONORS.items()}
         )
         sources, ho, self.fake = whb_resolvability_setup(tmp_path, monkeypatch)
-        mapper = oracle_mapper(fixture_truths(ho["metadata"]), error_every=error_every)
+        oracle = oracle_mapper(fixture_truths(ho["metadata"]), error_every=error_every)
+
+        def mapper(engine: Any, query: Any, tag: str = "") -> pd.DataFrame:
+            # ``perturb(engine path, tag)`` makes one mapping differ from an
+            # identical re-run (a non-reproducible realisation, NP9).
+            frame = oracle(engine, query)
+            if perturb is not None and perturb(str(engine.path), tag):
+                frame["avg_correlation"] = 0.25
+            return frame
+
         metadata = pd.read_csv(ho["metadata"] / "cell_metadata.csv")
         self.donor_of = dict(
             zip(
@@ -196,7 +209,7 @@ class Family:
                         "n_processors": reference.prep_resources().n_processors,
                     }
                 )
-                return mapper(engine, query)
+                return mapper(engine, query, tag)
 
             return map_query
 
@@ -215,7 +228,7 @@ class Family:
                     }
                 )
                 runs.append({"tag": tag, "engine": engine.reference_id})
-                return mapper(engine, query)
+                return mapper(engine, query, tag)
 
             return map_query
 
@@ -687,7 +700,12 @@ def test_the_command_registers_gate_p_for_the_species_it_is_given(
     )
     config_file.write_text(config.model_dump_json())
 
-    def invoke(*extra: str, out: str = "cli_out") -> Any:
+    def invoke(
+        *extra: str,
+        out: str = "cli_out",
+        depth: bool = True,
+        config_path: Path = config_file,
+    ) -> Any:
         return CliRunner().invoke(
             cli_main,
             [
@@ -701,7 +719,7 @@ def test_the_command_registers_gate_p_for_the_species_it_is_given(
                 "--store",
                 str(tmp_path / "gate_p_store"),
                 "--annotation-config",
-                str(config_file),
+                str(config_path),
                 "--scratch-dir",
                 str(tmp_path / f"{out}_scratch"),
                 "--out-dir",
@@ -710,8 +728,7 @@ def test_the_command_registers_gate_p_for_the_species_it_is_given(
                 "2",
                 "--max-gb",
                 "3",
-                "--expected-depth",
-                "30",
+                *(["--expected-depth", "30"] if depth else []),
                 "--platform",
                 "MERSCOPE",
                 *extra,
@@ -726,6 +743,25 @@ def test_the_command_registers_gate_p_for_the_species_it_is_given(
     assert result.exit_code != 0 and "C20" in result.output
     assert not (tmp_path / "gate_p_store").exists()
     assert not (tmp_path / "no_species").exists() and not (tmp_path / "mouse").exists()
+    # M13 C8 review: what needs no bundle is refused before PREP (it was
+    # refused only after both bundles were built and the self-map mapped).
+    result = invoke("--gate-p", "--species", "human", out="no_depth", depth=False)
+    assert result.exit_code != 0 and "expected depth" in result.output
+    # D11 (b): the production store (the config's) is refused as gate P's store.
+    production = tmp_path / "production_config.json"
+    production.write_text(
+        config.model_copy(
+            update={"reference_store": tmp_path / "gate_p_store"}
+        ).model_dump_json()
+    )
+    result = invoke(
+        "--gate-p", "--species", "human", out="production", config_path=production
+    )
+    assert result.exit_code != 0 and "production reference store" in result.output
+    assert family.prep_calls == [] and family.gate_calls == []
+    assert not (tmp_path / "gate_p_store").exists()
+    assert not (tmp_path / "no_depth").exists()
+    assert not (tmp_path / "production").exists()
     result = invoke(
         "--gate-p",
         "--species",
@@ -781,7 +817,14 @@ def test_a_version_7_family_is_scored_in_every_emission_member(
     )
     assert summary["resolvability_version"] == 7
     result = run.run_gate_p(
-        family.request(), run.GatePOptions(species="human", accept_small_pools=True)
+        family.request(),
+        run.GatePOptions(
+            species="human",
+            accept_small_pools=True,
+            # A version-6 reference: never used for a version-7 family.
+            time_reference_seconds=1e6,
+            time_reference_basis="stated",
+        ),
     )
     assert result["status"] == run.STATUS_SCORED, result
     record = read_run(result)
@@ -814,6 +857,25 @@ def test_a_version_7_family_is_scored_in_every_emission_member(
             assert (out / f"{name}__{tag}.csv").is_file(), (name, tag)
     assert record["replicate_identity"] == dict.fromkeys(members, True)
     assert record["prep_identity"]["identical"] is True
+    # NP9 (M13 D10 (a)): without the set a dry run's values the time part is
+    # not evaluable; the stated version-6 reference is not used.
+    np9 = report["family_checks"]["NP9"]
+    assert np9["parts"]["time"] == gp.CHECK_NOT_EVALUABLE
+    assert np9["detail"]["reference_seconds"] is None
+    assert record["time_reference_seconds"] is None
+    assert "not used" in record["time_reference_basis"]
+    # D10 (a)'s basis counts every scored replicate's simulated cells, PREP's
+    # default-donor seed-0 rows included (as the forced dry run counts them).
+    prep_rows = replicates[replicates["source"] == "prep_bundle"]
+    assert set(prep_rows["member"]) == {*members, "clean@0"}
+    assert record["simulated_cells_prep_rows"] == int(prep_rows["n_simulated"].sum())
+    assert record["simulated_cells_prep_rows"] == sum(
+        summary["n_simulated_cells"][name] for name in [*members, "clean@0"]
+    )
+    assert record["simulated_cells"] == int(replicates["n_simulated"].sum())
+    assert record["simulated_cells"] == (
+        record["simulated_cells_this_run"] + record["simulated_cells_prep_rows"]
+    )
     # The ensemble's own NP5 re-derivation is reported beside the members'.
     ensemble = pd.read_csv(out / "np5_ensemble_agreement.csv")
     assert set(ensemble["group"]) == set(DONORS)
@@ -856,6 +918,11 @@ def test_version_7_forced_on_a_version_6_family_scores_its_ensemble(
         (replicates["group"] == DEFAULT_DONOR) & (replicates["seed"] == 0)
     ]
     assert {"R1_contam_HO@0", "R1_contam_HO@6", "clean@0"} <= set(default["member"])
+    # D10 (a)'s basis: every scored replicate's simulated cells, here all
+    # simulated by the run itself (the default donor's seed-0 rows included).
+    assert record["simulated_cells_prep_rows"] == 0
+    assert record["simulated_cells"] == record["simulated_cells_this_run"]
+    assert record["simulated_cells"] == int(replicates["n_simulated"].sum())
     report = json.loads(
         (tmp_path / "out" / run.GATE_P_RUN_DIR / gp.GATE_P_REPORT_JSON).read_text()
     )
@@ -874,3 +941,308 @@ def test_version_7_forced_on_a_version_6_family_scores_its_ensemble(
         if path.is_dir() and path.name not in store_before
     }
     assert added == built
+
+
+# --------------------------------------------------------------------------
+# M13 C8 review: the precheck, NP9's identity and time reference
+
+
+def precheck_plan(
+    tmp_path: Path,
+    config: AnnotationConfig | None = None,
+    *,
+    store: ReferenceStore | None = None,
+    out: str = "out",
+    **depth: Any,
+) -> GatePPlan:
+    """What ``run_panel_simulation`` hands the precheck (D11 (b) store)."""
+    (tmp_path / "scratch").mkdir(exist_ok=True)
+    return GatePPlan(
+        species="human",
+        config=config or gate_config(),
+        store=store
+        or ReferenceStore(tmp_path / "gate_p_store", scratch_root=tmp_path / "scratch"),
+        out_dir=tmp_path / out,
+        scratch_dir=tmp_path / "sim_scratch",
+        **{"expected_depth": 30, **depth},
+    )
+
+
+def test_the_precheck_refuses_what_needs_no_bundle_before_any_compute(
+    tmp_path: Path,
+) -> None:
+    options = run.GatePOptions(species="human")
+    # The separate gate-P store, a fresh output and NP5's depth: it runs.
+    run.gate_p_precheck(options)(precheck_plan(tmp_path))
+
+    def refused(
+        plan: GatePPlan,
+        match: str,
+        *,
+        error: type[Exception] = run.GatePRunError,
+        checked: run.GatePOptions = options,
+    ) -> None:
+        with pytest.raises(error, match=match):
+            run.precheck_gate_p(plan, checked)
+
+    # M13 D4: the species selected when the check started.
+    refused(
+        precheck_plan(tmp_path),
+        "second disjoint WMB",
+        error=GatePUnavailableError,
+        checked=run.GatePOptions(species="mouse"),
+    )
+    plan = precheck_plan(tmp_path)
+    refused(GatePPlan(**{**plan.__dict__, "species": "mouse"}), "started for human")
+    # M13 D11 (b): no store root is, or lies in, a production store.
+    config = gate_config()
+    refused(
+        precheck_plan(
+            tmp_path, config.model_copy(update={"reference_store": tmp_path})
+        ),
+        "production reference store",
+    )
+    large = ReferenceStore(
+        tmp_path / "gate_p_store",
+        large_root=tmp_path / "production_large",
+        scratch_root=tmp_path / "scratch",
+    )
+    refused(
+        precheck_plan(
+            tmp_path,
+            config.model_copy(
+                update={"reference_store_large": tmp_path / "production_large"}
+            ),
+            store=large,
+        ),
+        "--store-large",
+    )
+    separate = config.model_copy(
+        update={
+            "reference_store": tmp_path / "production",
+            "reference_store_large": tmp_path / "production_large",
+        }
+    )
+    run.precheck_gate_p(precheck_plan(tmp_path, separate), options)
+    # The output: outside every store, without an earlier run or replicates
+    # (a run stopped on the pool sizes is rerun in place).
+    refused(precheck_plan(tmp_path, out="gate_p_store/x"), "inside a reference store")
+    earlier = tmp_path / "earlier" / run.GATE_P_RUN_DIR
+    earlier.mkdir(parents=True)
+    (earlier / run.GATE_P_RUN_JSON).write_text(json.dumps({"status": "scored"}))
+    refused(precheck_plan(tmp_path, out="earlier"), "already holds a gate-P run")
+    run.precheck_gate_p(
+        precheck_plan(tmp_path, out="earlier"),
+        run.GatePOptions(species="human", overwrite=True),
+    )
+    (earlier / run.GATE_P_RUN_JSON).write_text(
+        json.dumps({"status": run.STATUS_STOPPED})
+    )
+    run.precheck_gate_p(precheck_plan(tmp_path, out="earlier"), options)
+    (earlier / run.REPLICATES_DIR / "H_big").mkdir(parents=True)
+    (earlier / run.REPLICATES_DIR / "H_big" / "x.parquet").write_bytes(b"")
+    refused(precheck_plan(tmp_path, out="earlier"), "replicates of an earlier")
+    # The configured donors and mapping seeds (D6).
+    refused(
+        precheck_plan(
+            tmp_path, gate_config(gate_p_human_donors=["H_small", "H_big", "H_big"])
+        ),
+        "twice",
+    )
+    refused(
+        precheck_plan(tmp_path, gate_config(gate_p_human_donors=["H_small"])),
+        "at least one other donor",
+    )
+    refused(
+        precheck_plan(tmp_path, gate_config(holdout_donor="H_none")),
+        "default held-out donor",
+    )
+    refused(precheck_plan(tmp_path, gate_config(gate_p_seeds=[1, 2])), "gate_p_seeds")
+    # NP5's expected depth (D8, CHECK K7): a per-class CSV is never read.
+    refused(precheck_plan(tmp_path, expected_depth=None), "expected depth")
+    per_class = tmp_path / "per_class.csv"
+    pd.DataFrame({"class": ["Astro", "Oligo"], "total_counts": [40, 60]}).to_csv(
+        per_class, index=False
+    )
+    refused(
+        precheck_plan(tmp_path, expected_depth=None, depth_profile=per_class),
+        "never read for NP5",
+    )
+    pooled = tmp_path / "pooled.csv"
+    pd.DataFrame({"total_counts": [40, 60, 80]}).to_csv(pooled, index=False)
+    run.precheck_gate_p(
+        precheck_plan(tmp_path, expected_depth=None, depth_profile=pooled), options
+    )
+    _, default, record, _ = run.np5_depth_source(
+        expected_depth=None,
+        depth_profile=pooled,
+        depth_profile_asset=None,
+        species="human",
+    )
+    assert default == 60.0 and record["source"] == "pooled_profile_median"
+    # Nothing was built or written by any of them.
+    assert not (tmp_path / "gate_p_store").exists()
+    assert not (tmp_path / "out").exists()
+
+
+def test_same_rows_tells_a_perturbed_replicate_from_an_identical_one() -> None:
+    rows = pd.DataFrame(
+        {
+            "recipe": ["R1_contam_HO"] * 4,
+            "seed": [0] * 4,
+            "level": ["broad", "broad", "supercluster", "supercluster"],
+            "sim_id": ["a", "b", "a", "b"],
+            "call": ["Astro", "Exc", "Astrocyte", "Upper-layer IT"],
+            "bp": [0.95, 0.9, 0.8, 0.7],
+        }
+    )
+    # The same rows in another order are the same replicate.
+    assert run._same_rows(rows, rows.iloc[[3, 1, 0, 2]])
+    perturbed = rows.copy()
+    perturbed.loc[2, "bp"] = 0.8000001
+    assert not run._same_rows(rows, perturbed)
+    flipped = rows.copy()
+    flipped.loc[1, "call"] = "Astro"
+    assert not run._same_rows(rows, flipped)
+    assert not run._same_rows(rows, rows.iloc[:3])
+    assert not run._same_rows(rows, rows.drop(columns=["bp"]))
+    assert not run._same_rows(rows, rows.assign(extra=1))
+
+
+def writable_copy(source: Path, target: Path) -> Path:
+    """A writable copy of a (read-only) bundle directory."""
+    shutil.copytree(source, target, copy_function=shutil.copyfile)
+    for directory, _, _ in os.walk(target):
+        os.chmod(directory, 0o755)
+    return target
+
+
+def test_bundle_differences_lists_every_edited_item(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    import anndata as ad
+
+    family = Family(tmp_path, monkeypatch, gate_config())
+    first = family.bundle_dir
+    copies = tmp_path / "copies"
+    assert run.bundle_differences(first, writable_copy(first, copies / "same")) == []
+    # An edited marker lookup.
+    lookup = writable_copy(first, copies / "lookup")
+    path = lookup / reference.QUERY_MARKERS_FILTERED_FILE
+    markers = json.loads(path.read_text())
+    markers["edited_parent"] = [GENES[0]]
+    path.write_text(json.dumps(markers))
+    assert run.bundle_differences(first, lookup) == [
+        reference.QUERY_MARKERS_FILTERED_FILE
+    ]
+    # An edited decisions row (the stored table) ...
+    decisions = writable_copy(first, copies / "decisions")
+    path = decisions / res.RESOLVABILITY_FILE
+    table = pd.read_parquet(path)
+    numeric = next(
+        column
+        for column in table.columns
+        if pd.api.types.is_float_dtype(table[column]) and table[column].notna().any()
+    )
+    row = int(np.flatnonzero(table[numeric].notna().to_numpy())[0])
+    table.loc[row, numeric] = float(table.loc[row, numeric]) + 0.5
+    table.to_parquet(path, index=False)
+    assert res.RESOLVABILITY_FILE in run.bundle_differences(first, decisions)
+    # ... and an edited simulated cell, from which the decisions are re-derived.
+    cells = writable_copy(first, copies / "cells")
+    path = cells / res.RESOLVABILITY_CELLS_FILE
+    table = pd.read_parquet(path)
+    table["bp"] = 0.99
+    table.to_parquet(path, index=False)
+    differences = run.bundle_differences(first, cells)
+    assert res.RESOLVABILITY_CELLS_FILE in differences
+    assert "decisions" in differences
+    # The held-out test set: one test cell fewer, or one count changed.
+    summary = json.loads((first / res.RESOLVABILITY_SUMMARY_FILE).read_text())
+    test_dir = Path(summary["test_set_bundle"]["path"])
+    fewer = writable_copy(test_dir, copies / "fewer")
+    adata = ad.read_h5ad(fewer / res.TEST_CELLS_FILE)
+    adata[1:].copy().write_h5ad(fewer / res.TEST_CELLS_FILE)
+    assert run.bundle_differences(test_dir, fewer) == [res.TEST_CELLS_FILE]
+    counted = writable_copy(test_dir, copies / "counted")
+    adata = ad.read_h5ad(counted / res.TEST_CELLS_FILE)
+    matrix = adata.X.toarray()
+    matrix[0, 0] += 1
+    adata.X = matrix
+    adata.write_h5ad(counted / res.TEST_CELLS_FILE)
+    assert run.bundle_differences(test_dir, counted) == [res.TEST_CELLS_FILE]
+    assert run.bundle_differences(test_dir, writable_copy(test_dir, copies / "t")) == []
+
+
+def test_np9_identity_fails_when_an_identical_re_run_differs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    member = res.EnsembleMember(
+        res.member_recipe(res.DECISION_RECIPE, 0, gate_config().resolvability),
+        "emission",
+    )
+    # The default donor's seed-0 base rows are PREP's, so gate P maps this
+    # tag only to re-run the replicate for NP9; PREP's rebuild maps onto the
+    # scratch store under the request's scratch directory.
+    rerun = f"gate_p_{DEFAULT_DONOR}_seed0_{res.member_tag(member)}"
+    scratch = tmp_path / "out_scratch"
+
+    def perturb(engine: str, tag: str) -> bool:
+        return tag == rerun or Path(engine).is_relative_to(scratch)
+
+    family = Family(tmp_path, monkeypatch, gate_config(), perturb=perturb)
+    result = run.run_gate_p(
+        family.request(), run.GatePOptions(species="human", accept_small_pools=True)
+    )
+    assert result["status"] == run.STATUS_SCORED, result
+    record = read_run(result)
+    assert record["replicate_identity"] == {member.name: False}
+    prep = record["prep_identity"]
+    assert prep["identical"] is False and prep["same_build_hash"] is True
+    assert res.RESOLVABILITY_CELLS_FILE in prep["differences"]
+    report = json.loads(
+        (tmp_path / "out" / run.GATE_P_RUN_DIR / gp.GATE_P_REPORT_JSON).read_text()
+    )
+    np9 = report["family_checks"]["NP9"]
+    assert np9["parts"]["identity"] == gp.CHECK_FAILED
+    assert np9["status"] == gp.CHECK_FAILED
+    assert np9["detail"]["replicate_identical"] == {member.name: False}
+    assert np9["detail"]["bundle_identical"] is False
+
+
+def test_np9_time_reference_of_a_version_7_family_is_d10s_only() -> None:
+    stated = run.GatePOptions(
+        species="human", time_reference_seconds=1e6, time_reference_basis="v6"
+    )
+    # A version-6 family: the reference the caller states.
+    assert run.np9_time_reference(
+        stated, version7=False, forced_v7=False, simulated_cells=100
+    ) == (1e6, "v6")
+    # A version-7 family without the dry run's values: the stated version-6
+    # reference is not used (D10 (a) fixes it), so the time part is not
+    # evaluable.
+    seconds, basis = run.np9_time_reference(
+        stated, version7=True, forced_v7=False, simulated_cells=100
+    )
+    assert seconds is None
+    assert "D10 (a)" in basis and "not used" in basis
+    # The forced version-7 dry run of a version-6 family keeps the stated one.
+    assert run.np9_time_reference(
+        stated, version7=True, forced_v7=True, simulated_cells=100
+    ) == (1e6, "v6")
+    # With the dry run's values, the reference scales per simulated cell.
+    d10 = run.GatePOptions(
+        species="human",
+        time_reference_seconds=1e6,
+        dry_run_seconds=600.0,
+        dry_run_simulated_cells=1200,
+    )
+    for forced in (False, True):
+        seconds, basis = run.np9_time_reference(
+            d10, version7=True, forced_v7=forced, simulated_cells=300
+        )
+        assert seconds == pytest.approx(150.0) and "D10 (a)" in basis
+    # A version-6 family never uses the version-7 scaling.
+    assert run.np9_time_reference(
+        d10, version7=False, forced_v7=False, simulated_cells=300
+    ) == (1e6, "")

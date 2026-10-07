@@ -286,7 +286,8 @@ def _git_commit() -> str | None:
     "--gate-p-time-reference-seconds",
     type=click.FloatRange(min=0.0, min_open=True),
     default=None,
-    help="NP9's time reference of a version-6 family (plan §8.7 / §10).",
+    help="NP9's time reference of a version-6 family (plan §8.7 / §10); not "
+    "used for a version-7 family, whose reference is M13 D10 (a)'s.",
 )
 @click.option(
     "--gate-p-time-reference-basis",
@@ -397,6 +398,7 @@ def _annotation_panel_simulate(
     from merxen.annotation.store import ReferenceStore, resolve_builder
 
     gate_p_programme: Any = None
+    gate_p_checks: Any = None
     if gate_p:
         # M13 D4: the species is selected when a new panel check starts, so
         # gate P never takes it from a public panel's record.
@@ -407,29 +409,35 @@ def _annotation_panel_simulate(
                 "only)",
                 param_hint="--species",
             )
-        from merxen.annotation.gate_p_run import GatePOptions, gate_p_hook
-
-        gate_p_programme = gate_p_hook(
-            GatePOptions(
-                species=cast("Any", species),
-                other_region=gate_p_other_region,
-                accept_small_pools=gate_p_accept_small_pools,
-                resolvability_version=7 if gate_p_version == "7" else "auto",
-                dry_run=gate_p_dry_run,
-                time_reference_seconds=gate_p_time_reference_seconds,
-                time_reference_basis=gate_p_time_reference_basis,
-                dry_run_seconds=gate_p_dry_run_seconds,
-                dry_run_simulated_cells=gate_p_dry_run_simulated_cells,
-                unresolved_reviewed=gate_p_unresolved_reviewed,
-                accepted_parents=tuple(
-                    item.strip()
-                    for item in (gate_p_accepted_parents or "").split(",")
-                    if item.strip()
-                ),
-                prep_identity=not gate_p_skip_prep_identity,
-                x1_factors=gate_p_x1_factors,
-            )
+        from merxen.annotation.gate_p_run import (
+            GatePOptions,
+            gate_p_hook,
+            gate_p_precheck,
         )
+
+        gate_p_options = GatePOptions(
+            species=cast("Any", species),
+            other_region=gate_p_other_region,
+            accept_small_pools=gate_p_accept_small_pools,
+            resolvability_version=7 if gate_p_version == "7" else "auto",
+            dry_run=gate_p_dry_run,
+            time_reference_seconds=gate_p_time_reference_seconds,
+            time_reference_basis=gate_p_time_reference_basis,
+            dry_run_seconds=gate_p_dry_run_seconds,
+            dry_run_simulated_cells=gate_p_dry_run_simulated_cells,
+            unresolved_reviewed=gate_p_unresolved_reviewed,
+            accepted_parents=tuple(
+                item.strip()
+                for item in (gate_p_accepted_parents or "").split(",")
+                if item.strip()
+            ),
+            prep_identity=not gate_p_skip_prep_identity,
+            x1_factors=gate_p_x1_factors,
+        )
+        gate_p_programme = gate_p_hook(gate_p_options)
+        # run_panel_simulation runs the precheck before any compute (the
+        # depth source, store, output, donors and seeds).
+        gate_p_checks = gate_p_precheck(gate_p_options)
     public_record: dict[str, Any] | None = None
     if public_panel is not None:
         from merxen.annotation.public_panels import (
@@ -498,7 +506,7 @@ def _annotation_panel_simulate(
         return items
 
     if gate_p_programme is not None:
-        register_gate_p_hook(gate_p_programme)
+        register_gate_p_hook(gate_p_programme, precheck=gate_p_checks)
     try:
         if gate_p:
             require_gate_p_hook()

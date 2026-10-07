@@ -8,20 +8,30 @@ base simulation (``simulate.GatePRequest``: the panel, the production PREP
 bundle of the primary reference ``whb_frontal_supc_clus``, its held-out test
 set, the store and the prepared specs) and:
 
-1. **Checks the request before any compute.** The species is the one selected
-   when the check started (M13 D4: a required argument; the mouse path waits
-   for the second WMB draw, M13 C20, after M6b); the panel, config and
-   bundle are of that species; the bundle has a self-map onto its held-out
-   bundle; the gate-P donors are distinct frontal donors of that held-out
-   bundle, the default donor among them; the mapping seeds hold 0 and
-   another one (D6); NP5's expected depth is given; the replicates are
-   mapped with the self-map's recorded MapMyCells worker count
-   (pre-registration §18 item 2: another count is another realisation); the
-   output lies outside every store and holds no earlier run's replicates
-   (a run stopped on the pool sizes is rerun in place); and the held-out
-   test set's spec derived here reproduces the bundle's held-out
+1. **Checks the request**, in two stages. *Before any compute*
+   (``precheck_gate_p``, which ``run_panel_simulation`` calls before the
+   panel is computed or PREP builds anything; registered with
+   ``gate_p_precheck``): the species is the one selected when the check
+   started (M13 D4: a required argument; the mouse path waits for the
+   second WMB draw, M13 C20, after M6b) and the config's; the store is not
+   a production store (D11 (b): no root is or lies in the config's
+   ``reference_store`` or ``reference_store_large``); the output lies
+   outside every store and holds no earlier run or its replicates (a run
+   stopped on the pool sizes is rerun in place); the configured gate-P
+   donors are distinct, at least two, a fixed default donor among them;
+   the mapping seeds hold 0 and another one (D6); and NP5's expected depth
+   is given (D8). *After PREP, before any gate-P build or mapping*
+   (``_check_request``, which repeats the checks above): the panel is of
+   the species; the bundle has a self-map onto its held-out bundle; the
+   gate-P donors are frontal donors of that held-out bundle, its held-out
+   donor among them; the replicates are mapped with the self-map's
+   recorded MapMyCells worker count (pre-registration §18 item 2: another
+   count is another realisation; a bundle PREP builds in the run is mapped
+   with the run's count, so only a reused bundle can differ); and the
+   held-out test set's spec derived here reproduces the bundle's held-out
    ``build_hash`` (so every leave-one-donor-out build differs from PREP's
-   only by the donor).
+   only by the donor). A refusal at that stage is recorded in the
+   simulation report, which is written before gate P runs.
 2. **Reports the per-donor pool sizes** (pre-registration §23.10, open item
    2; ``reference.ho_donor_pool_sizes``, from the reference metadata only)
    before any leave-one-donor-out build. Under D2 (d) a donor whose own
@@ -79,7 +89,10 @@ Readings this driver takes where §14 and the decisions are not explicit
 - NP9's measured time is PREP (the primary and its held-out test set, from
   their ``bundle.json`` timings) plus this run's leave-one-donor-out builds
   and replicates (not the identity re-runs); the simulated cells that scale
-  the version-7 time reference (M13 D10 (a)) are this run's replicates'.
+  the version-7 time reference (M13 D10 (a)) are every scored replicate's,
+  the default donor's seed-0 rows included whether PREP or this run
+  simulated them (``np9_time_reference``). A version-7 family's reference
+  is D10 (a)'s only: a stated version-6 reference is not used.
 - The per-donor pool rule (``reference.ho_donor_pool_sizes``): a judged
   class meets it when the donor's own pools hold
   ``topup_min_class_test_cells`` (200) cells.
@@ -102,6 +115,7 @@ import pandas as pd
 from merxen.annotation import gate_p as gp
 from merxen.annotation import resolvability as res
 from merxen.annotation.simulate import (
+    GatePPlan,
     GatePRequest,
     GatePUnavailableError,
     SimulationError,
@@ -111,7 +125,8 @@ from merxen.annotation.vocab import Species
 if TYPE_CHECKING:
     from merxen.annotation.config import AnnotationConfig, AnnotationReferenceSpec
     from merxen.annotation.mapmycells_engine import MmcBundle
-    from merxen.annotation.simulate import GatePHook
+    from merxen.annotation.simulate import GatePHook, GatePPrecheck
+    from merxen.annotation.store import ReferenceStore
 
 logger = logging.getLogger(__name__)
 
@@ -142,14 +157,15 @@ GATE_P_RUN_OPEN_READINGS: Final[tuple[str, ...]] = (
     "base decisions; the ensemble re-derivation is reported only",
     "C8 NP9: PREP from its bundle.json timings plus the leave-one-donor-out "
     "builds and replicates (identity re-runs left out); the version-7 time "
-    "reference scales by this run's simulated replicate cells (D10 (a))",
+    "reference scales by every scored replicate's simulated cells, the default "
+    "donor's seed-0 rows included whoever simulated them (D10 (a))",
     "C8 D2 pool sizes: a judged class meets the per-class top-up rule when "
     "the donor's own pools hold topup_min_class_test_cells (200) cells",
 )
 
 
 class GatePRunError(SimulationError):
-    """Gate P cannot run on this request (refused before any compute)."""
+    """Gate P cannot run on this request (refused before any gate-P compute)."""
 
 
 @dataclass(frozen=True)
@@ -173,12 +189,14 @@ class GatePOptions:
             from H18's expectation (pre-registration §18 C1: supercluster
             COP); any further narrowing is a loosening.
         time_reference_seconds: NP9's time reference of a version-6 family
-            (§8.7 / §10), stated by the caller.
+            (§8.7 / §10), stated by the caller; never used for a version-7
+            family, whose reference is D10 (a)'s (``np9_time_reference``).
         time_reference_basis: Where it comes from (reported).
         dry_run_seconds: The set a version-7 dry run's measured time (the
             ``measured_seconds`` of its ``gate_p_run.json``), for NP9's
             version-7 reference (M13 D10 (a)).
-        dry_run_simulated_cells: That dry run's ``simulated_cells``.
+        dry_run_simulated_cells: That dry run's ``simulated_cells`` (every
+            scored replicate's simulated cells, ``np9_time_reference``).
         unresolved_reviewed: The user reviewed NP1's unresolved list in the
             gate-P PR.
         accepted_parents: NP2's weak or collapsed parents the user accepted in
@@ -286,6 +304,9 @@ class GatePOptions:
 
 def gate_p_hook(options: GatePOptions) -> GatePHook:
     """Return the gate-P programme to register with ``simulate.register_gate_p_hook``.
+
+    Register it with ``precheck=gate_p_precheck(options)``, so that what
+    needs no bundle is refused before any compute.
 
     Args:
         options: The run's options (the species is required, M13 D4).
@@ -401,27 +422,52 @@ def _mapping_workers(summary: Mapping[str, Any]) -> set[int]:
     return workers
 
 
-def _check_request(request: GatePRequest, options: GatePOptions) -> dict[str, Any]:
-    """Check what needs no compute; return the facts the run starts from.
+def _check_species(species: str, config_species: str, options: GatePOptions) -> None:
+    """Refuse a run of another species than the one selected (M13 D4)."""
+    options.check_supported()
+    if species != options.species or config_species != options.species:
+        raise GatePRunError(
+            f"gate P was started for {options.species} (M13 D4: the species is "
+            f"selected when the check starts), but the panel is {species} and "
+            f"the config {config_species}"
+        )
+
+
+def _check_store(store: ReferenceStore, config: AnnotationConfig) -> None:
+    """Refuse a store that lies in a production store (M13 D11 (b)).
+
+    Gate P builds its leave-one-donor-out bundles in the store it is given,
+    which must be the separate gate-P store: no root of it may be, or lie
+    inside, the config's ``reference_store`` or ``reference_store_large``
+    (the production stores, written only by the user-started runs).
 
     Raises:
-        GatePRunError: For every refusal of the module docstring's step 1.
+        GatePRunError: If a store root is or lies inside a production store.
     """
-    from merxen.annotation import reference as ref
+    production = [
+        Path(root)
+        for root in (config.reference_store, config.reference_store_large)
+        if root is not None
+    ]
+    for root in store.roots:
+        if production and _inside(Path(root), production):
+            raise GatePRunError(
+                f"gate P would build its bundles in {root}, a production reference "
+                f"store ({', '.join(str(path) for path in production)}); point "
+                "--store (and --store-large) at the separate gate-P store (M13 D11 "
+                "(b))"
+            )
 
-    options.check_supported()
-    species = options.species
-    panel = request.panel
-    if panel.species != species or request.config.species != species:
-        raise GatePRunError(
-            f"gate P was started for {species} (M13 D4: the species is selected "
-            f"when the check starts), but the panel is {panel.species} and the "
-            f"config {request.config.species}"
-        )
-    if request.scratch_dir is None:
-        raise GatePRunError("gate P needs the simulation's scratch directory")
-    out = Path(request.out_dir) / GATE_P_RUN_DIR
-    if _inside(out, request.store.roots):
+
+def _check_out_dir(out: Path, store: ReferenceStore, options: GatePOptions) -> None:
+    """Refuse an output inside a store or holding an earlier run.
+
+    Raises:
+        GatePRunError: If ``out`` lies inside a store root, holds an earlier
+            gate-P run that did not stop on the pool sizes (unless
+            ``overwrite``), or holds an earlier run's replicates.
+    """
+    if _inside(out, store.roots):
         raise GatePRunError(
             f"gate P writes to {out}, inside a reference store; reports never go "
             "into a store"
@@ -444,6 +490,112 @@ def _check_request(request: GatePRequest, options: GatePOptions) -> dict[str, An
             f"{replicates} holds the replicates of an earlier gate-P run; give "
             "another output directory (a replicate is never written twice)"
         )
+
+
+def _check_donors_and_seeds(config: AnnotationConfig) -> tuple[list[str], list[int]]:
+    """Check the configured gate-P donors and mapping seeds (no bundle needed).
+
+    Returns:
+        ``(donors, seeds)``: the donors in config order, the seeds sorted.
+
+    Raises:
+        GatePRunError: If a donor is named twice, fewer than two donors are
+            named, a fixed ``holdout_donor`` is not among them, or the seeds
+            do not hold 0 and another seed (D6).
+    """
+    resolvability = config.resolvability
+    donors = [str(donor) for donor in resolvability.gate_p_human_donors]
+    if len(set(donors)) != len(donors):
+        raise GatePRunError(
+            f"gate_p_human_donors names a donor twice ({donors}): each held-out "
+            "donor is one group of replicates, never a duplicated replicate"
+        )
+    if len(donors) < 2:
+        raise GatePRunError(
+            f"gate P needs at least one other donor than the default (NP4 compares "
+            f">= 2 groups); gate_p_human_donors is {donors}"
+        )
+    default = str(resolvability.holdout_donor)
+    if default != "auto" and default not in donors:
+        raise GatePRunError(
+            f"the default held-out donor {default!r} (the frozen thresholds' donor) "
+            f"is not among the gate-P donors {donors}"
+        )
+    seeds = sorted({int(seed) for seed in resolvability.gate_p_seeds})
+    if 0 not in seeds or len(seeds) < 2:
+        raise GatePRunError(
+            f"gate_p_seeds must hold 0 (the frozen run) and another mapping seed "
+            f"(D6), got {seeds}"
+        )
+    return donors, seeds
+
+
+def precheck_gate_p(plan: GatePPlan, options: GatePOptions) -> None:
+    """Refuse, before any compute, a gate-P run that needs no bundle to refuse.
+
+    ``run_panel_simulation`` calls it (``gate_p_precheck``) before the panel
+    is computed or PREP builds anything: the species (M13 D4), the store
+    (D11 (b): not a production store), the output (outside every store,
+    without an earlier run or its replicates), the configured donors and
+    mapping seeds (D6), and NP5's expected-depth source (D8, CHECK K7). What
+    needs the built bundle (its self-map, held-out donor and frontal donors,
+    the recorded worker count, the held-out ``build_hash``) is checked by
+    ``run_gate_p`` after PREP and before any gate-P build or mapping.
+
+    Args:
+        plan: What the simulation was started with.
+        options: The run's options.
+
+    Raises:
+        GatePRunError: For each refusal above.
+        GatePUnavailableError: For a species without a gate-P path yet.
+    """
+    _check_species(plan.species, plan.config.species, options)
+    _check_store(plan.store, plan.config)
+    _check_out_dir(Path(plan.out_dir) / GATE_P_RUN_DIR, plan.store, options)
+    _check_donors_and_seeds(plan.config)
+    np5_depth_source(
+        expected_depth=plan.expected_depth,
+        depth_profile=plan.depth_profile,
+        depth_profile_asset=plan.depth_profile_asset,
+        species=options.species,
+    )
+
+
+def gate_p_precheck(options: GatePOptions) -> GatePPrecheck:
+    """Return the precheck to register beside ``gate_p_hook(options)``.
+
+    Args:
+        options: The run's options.
+
+    Returns:
+        ``plan -> None`` (``precheck_gate_p`` with these options).
+    """
+
+    def precheck(plan: GatePPlan) -> None:
+        precheck_gate_p(plan, options)
+
+    return precheck
+
+
+def _check_request(request: GatePRequest, options: GatePOptions) -> dict[str, Any]:
+    """Check the request before any gate-P compute; return the run's facts.
+
+    The checks of ``precheck_gate_p`` run again here, then those that need
+    the built bundle.
+
+    Raises:
+        GatePRunError: For every refusal of the module docstring's step 1.
+    """
+    from merxen.annotation import reference as ref
+
+    _check_species(request.panel.species, request.config.species, options)
+    _check_store(request.store, request.config)
+    if request.scratch_dir is None:
+        raise GatePRunError("gate P needs the simulation's scratch directory")
+    out = Path(request.out_dir) / GATE_P_RUN_DIR
+    _check_out_dir(out, request.store, options)
+    donors, seeds = _check_donors_and_seeds(request.config)
     bundle = request.bundles.get(PRIMARY_REFERENCE)
     if bundle is None:
         raise GatePRunError(
@@ -480,12 +632,6 @@ def _check_request(request: GatePRequest, options: GatePOptions) -> dict[str, An
         raise GatePRunError(
             f"{test_dir}: the held-out bundle records no held-out donor"
         )
-    donors = [str(donor) for donor in request.config.resolvability.gate_p_human_donors]
-    if len(set(donors)) != len(donors):
-        raise GatePRunError(
-            f"gate_p_human_donors names a donor twice ({donors}): each held-out "
-            "donor is one group of replicates, never a duplicated replicate"
-        )
     missing = sorted(set(donors) - set(donor_cells))
     if missing:
         raise GatePRunError(
@@ -498,17 +644,6 @@ def _check_request(request: GatePRequest, options: GatePOptions) -> dict[str, An
             f"donor) is not among the gate-P donors {donors}"
         )
     extras = [donor for donor in donors if donor != default_donor]
-    if not extras:
-        raise GatePRunError(
-            "gate P needs at least one other donor than the default (NP4 compares "
-            ">= 2 groups)"
-        )
-    seeds = sorted({int(seed) for seed in request.config.resolvability.gate_p_seeds})
-    if 0 not in seeds or len(seeds) < 2:
-        raise GatePRunError(
-            f"gate_p_seeds must hold 0 (the frozen run) and another mapping seed "
-            f"(D6), got {seeds}"
-        )
     workers = _mapping_workers(summary)
     current = ref.prep_resources().n_processors
     if workers and workers != {current}:
@@ -542,13 +677,46 @@ def _check_request(request: GatePRequest, options: GatePOptions) -> dict[str, An
 def _np5_depths(
     request: GatePRequest, species: str
 ) -> tuple[dict[str, Any], float | list[float] | None, dict[str, Any], Any]:
+    """NP5's expected depth from the base simulation's settings.
+
+    Returns:
+        See ``np5_depth_source``.
+
+    Raises:
+        GatePRunError: Without any expected depth.
+    """
+    settings = request.report.get("settings") or {}
+    path = settings.get("depth_profile")
+    asset_id = settings.get("depth_profile_asset")
+    return np5_depth_source(
+        expected_depth=settings.get("expected_depth"),
+        depth_profile=None if path is None else Path(str(path)),
+        depth_profile_asset=None if asset_id is None else str(asset_id),
+        species=species,
+    )
+
+
+def np5_depth_source(
+    *,
+    expected_depth: float | None,
+    depth_profile: Path | None,
+    depth_profile_asset: str | None,
+    species: str,
+) -> tuple[dict[str, Any], float | list[float] | None, dict[str, Any], Any]:
     """NP5's expected depth per class and its source (D8; CHECK K7).
 
     A registered per-class ``profile`` asset gives each class's depths and
     the overall median for the others; otherwise the label-free pooled median
     (``--expected-depth``, or a pooled profile's median). A per-class CSV is
     never read for NP5: only a registered, frozen asset may carry real
-    labels into gate P (pre-registration §23.9 item 6).
+    labels into gate P (pre-registration §23.9 item 6). Reading the profile
+    needs no compute, so ``precheck_gate_p`` calls this before PREP.
+
+    Args:
+        expected_depth: ``--expected-depth``.
+        depth_profile: ``--depth-profile`` (a CSV).
+        depth_profile_asset: ``--depth-profile-asset`` (a registered asset).
+        species: The family's species.
 
     Returns:
         ``(per class, default, record, profile)``; the profile (any kind) also
@@ -559,15 +727,10 @@ def _np5_depths(
     """
     from merxen.annotation import simulate as sim
 
-    settings = request.report.get("settings") or {}
-    asset_id = settings.get("depth_profile_asset")
-    path = settings.get("depth_profile")
-    expected = settings.get("expected_depth")
-    profile = sim.load_simulation_profile(
-        None if path is None else Path(str(path)),
-        None if asset_id is None else str(asset_id),
-        species=species,
-    )
+    asset_id = depth_profile_asset
+    path = None if depth_profile is None else str(depth_profile)
+    expected = expected_depth
+    profile = sim.load_simulation_profile(depth_profile, asset_id, species=species)
     record: dict[str, Any] = {
         "depth_profile_asset": asset_id,
         "depth_profile": path,
@@ -757,8 +920,12 @@ class _Runner:
         ).chemistry
         self.records: list[dict[str, Any]] = []
         self.wall_s = 0.0
+        # Cells this run simulated, and those of the replicates taken from
+        # PREP's bundle: their sum is NP9's per-cell basis (D10 (a)), the
+        # same for a version-7 family (whose default-donor seed-0 rows are
+        # PREP's) and for the forced version-7 dry run (which simulates them).
         self.simulated_cells = 0
-        self.preloaded: dict[tuple[str, str, int], pd.DataFrame] = {}
+        self.prep_simulated_cells = 0
 
     def path(self, group: str, member: res.EnsembleMember, seed: int) -> Path:
         """Where a replicate's cells table is written."""
@@ -865,17 +1032,28 @@ class _Runner:
         return path
 
     def store_rows(
-        self, group: str, member: res.EnsembleMember, seed: int, frame: pd.DataFrame
+        self,
+        group: str,
+        member: res.EnsembleMember,
+        seed: int,
+        frame: pd.DataFrame,
+        *,
+        n_simulated: int,
     ) -> Path:
-        """Write rows taken from PREP's bundle (the frozen base run)."""
+        """Write rows taken from PREP's bundle (the frozen base run).
+
+        Their simulated cells (PREP simulated them, in PREP's time) count in
+        ``prep_simulated_cells``.
+        """
         path = self.write(group, member, seed, frame)
+        self.prep_simulated_cells += int(n_simulated)
         self.records.append(
             {
                 "group": group,
                 "member": member.name,
                 "role": member.role,
                 "seed": int(seed),
-                "n_simulated": None,
+                "n_simulated": int(n_simulated),
                 "n_rows": int(len(frame)),
                 "wall_s": 0.0,
                 "file": str(path.relative_to(self.out)),
@@ -883,6 +1061,11 @@ class _Runner:
             }
         )
         return path
+
+    @property
+    def scaling_cells(self) -> int:
+        """Every scored replicate's simulated cells (NP9's D10 (a) basis)."""
+        return self.simulated_cells + self.prep_simulated_cells
 
     def load(
         self,
@@ -900,6 +1083,26 @@ class _Runner:
                 raise GatePRunError(f"the replicate {path} was never written")
             self.run(group, member, seed, version7=version7)
         return res.restore_labels(pd.read_parquet(path))
+
+
+def _prep_simulated(
+    summary: Mapping[str, Any],
+    member: res.EnsembleMember,
+    rows: pd.DataFrame,
+    *,
+    version7: bool,
+) -> int:
+    """How many cells PREP simulated for a member's seed-0 rows.
+
+    The self-map summary's ``n_simulated_cells`` (keyed by member for
+    version 7, by recipe for version 6); without it, the rows' distinct
+    simulated cells.
+    """
+    key = member.name if version7 else member.recipe.name
+    recorded = (summary.get("n_simulated_cells") or {}).get(key)
+    if recorded is not None:
+        return int(recorded)
+    return int(rows["sim_id"].astype(str).nunique())
 
 
 def _member_rows(
@@ -1519,6 +1722,63 @@ def np2_inputs(bundle_dir: Path) -> dict[str, Any]:
     }
 
 
+def np9_time_reference(
+    options: GatePOptions, *, version7: bool, forced_v7: bool, simulated_cells: int
+) -> tuple[float | None, str]:
+    """NP9's time reference and its basis (§14 NP9; M13 D10 (a)).
+
+    - A version-7 family: only D10 (a)'s reference, the set a version-7 dry
+      run's time scaled per simulated cell (``dry_run_seconds`` and
+      ``dry_run_simulated_cells``). A stated version-6 reference
+      (``time_reference_seconds``) is not used, since D10 (a) fixes the
+      version-7 reference and any other value would be an unregistered one;
+      without the dry run's values the time part is not evaluable.
+    - Version 7 forced on a version-6 family (the §21 (vii) diagnostic path,
+      the set a dry run itself): the dry run's values when given, else the
+      stated version-6 reference.
+    - A version-6 family: the stated reference (§8.7 / §10), else none.
+
+    Both counts of the D10 (a) scaling are every scored replicate's simulated
+    cells (``_Runner.scaling_cells``), the default donor's seed-0 rows
+    included whether PREP (a version-7 family) or the run itself (the forced
+    dry run) simulated them, so the dry run and the family share one basis.
+
+    Args:
+        options: The run's options.
+        version7: Whether the frozen decisions are a version-7 ensemble's.
+        forced_v7: Whether version 7 was forced on a version-6 family.
+        simulated_cells: This run's scaling basis.
+
+    Returns:
+        ``(reference seconds or None, basis)``.
+    """
+    dry = options.dry_run_seconds
+    dry_cells = options.dry_run_simulated_cells
+    if version7 and dry is not None and dry_cells is not None and simulated_cells > 0:
+        reference = gp.np9_time_reference_v7(
+            dry_run_seconds=dry,
+            dry_run_simulated_cells=dry_cells,
+            family_simulated_cells=simulated_cells,
+        )
+        return reference, (
+            f"set a version-7 dry run: {dry:.0f} s for {dry_cells} simulated cells, "
+            f"scaled to {simulated_cells} (M13 D10 (a))"
+        )
+    if version7 and not forced_v7:
+        stated = options.time_reference_seconds
+        ignored = (
+            ""
+            if stated is None
+            else f"; the stated version-6 reference ({stated:.0f} s) is not used"
+        )
+        return None, (
+            "a version-7 family's reference is the set a version-7 dry run's time "
+            "scaled per simulated cell (M13 D10 (a)); without the dry run's seconds "
+            f"and simulated cells the time part is not evaluable{ignored}"
+        )
+    return options.time_reference_seconds, options.time_reference_basis
+
+
 def _prep_measurements(
     bundle_dir: Path, test_dir: Path
 ) -> tuple[float | None, dict[str, float]]:
@@ -1744,7 +2004,9 @@ def run_gate_p(request: GatePRequest, options: GatePOptions) -> dict[str, Any]:
         files written and the NP9 measurements.
 
     Raises:
-        GatePRunError: For a request gate P refuses (before any compute).
+        GatePRunError: For a request gate P refuses (before any gate-P build
+            or mapping; ``precheck_gate_p`` refuses what needs no bundle
+            before any compute).
         GatePUnavailableError: For a species without a gate-P path yet.
     """
     from merxen.annotation import diagnostics as diag
@@ -1901,11 +2163,15 @@ def run_gate_p(request: GatePRequest, options: GatePOptions) -> dict[str, Any]:
         # The default donor's seed-0 base and clean rows are PREP's own.
         if not base.forced_v7:
             for member in [*base.emission, base.clean]:
+                rows = _member_rows(tables.cells, member, version7=base.is_v7)
                 runner.store_rows(
                     default.name,
                     member,
                     0,
-                    _member_rows(tables.cells, member, version7=base.is_v7),
+                    rows,
+                    n_simulated=_prep_simulated(
+                        tables.summary, member, rows, version7=base.is_v7
+                    ),
                 )
         for group in groups:
             for member in base.emission:
@@ -2008,24 +2274,12 @@ def run_gate_p(request: GatePRequest, options: GatePOptions) -> dict[str, Any]:
     measured = (
         None if prep_seconds is None else float(prep_seconds) + float(gate_p_seconds)
     )
-    reference_seconds: float | None = options.time_reference_seconds
-    basis = options.time_reference_basis
-    if (
-        base.is_v7
-        and options.dry_run_seconds is not None
-        and options.dry_run_simulated_cells is not None
-        and runner.simulated_cells > 0
-    ):
-        reference_seconds = gp.np9_time_reference_v7(
-            dry_run_seconds=options.dry_run_seconds,
-            dry_run_simulated_cells=options.dry_run_simulated_cells,
-            family_simulated_cells=runner.simulated_cells,
-        )
-        basis = (
-            f"set a version-7 dry run: {options.dry_run_seconds:.0f} s for "
-            f"{options.dry_run_simulated_cells} simulated cells, scaled to "
-            f"{runner.simulated_cells} (M13 D10 (a))"
-        )
+    reference_seconds, basis = np9_time_reference(
+        options,
+        version7=base.is_v7,
+        forced_v7=base.forced_v7,
+        simulated_cells=runner.scaling_cells,
+    )
     engine_markers = (default.manifest.get("builder_output") or {}).get("markers") or {}
     prefilter = (
         (request.report.get("references") or {}).get(PRIMARY_REFERENCE) or {}
@@ -2106,7 +2360,9 @@ def run_gate_p(request: GatePRequest, options: GatePOptions) -> dict[str, Any]:
             "gate_p_seconds": round(gate_p_seconds, 1),
             "leave_one_donor_out_seconds": round(loo_wall, 1),
             "replicate_seconds": round(runner.wall_s, 1),
-            "simulated_cells": runner.simulated_cells,
+            "simulated_cells": runner.scaling_cells,
+            "simulated_cells_this_run": runner.simulated_cells,
+            "simulated_cells_prep_rows": runner.prep_simulated_cells,
             "time_reference_seconds": reference_seconds,
             "time_reference_basis": basis,
             "process_tree_peak": peak.to_json(),
@@ -2130,7 +2386,7 @@ def run_gate_p(request: GatePRequest, options: GatePOptions) -> dict[str, Any]:
         "run": str(out / GATE_P_RUN_JSON),
         "report": str(out / gp.GATE_P_REPORT_TXT),
         "measured_seconds": measured,
-        "simulated_cells": runner.simulated_cells,
+        "simulated_cells": runner.scaling_cells,
     }
 
 
@@ -2167,6 +2423,10 @@ __all__ = [
     "GatePRunError",
     "bundle_differences",
     "gate_p_hook",
+    "gate_p_precheck",
     "np2_inputs",
+    "np5_depth_source",
+    "np9_time_reference",
+    "precheck_gate_p",
     "run_gate_p",
 ]

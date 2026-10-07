@@ -19,6 +19,7 @@ from merxen.annotation.simulate import (
     REFERENCE_SOURCE_PARAMS,
     GatePUnavailableError,
     ReferenceBuild,
+    SimulationError,
     compare_calls,
     depth_profile_weights,
     emission_summary,
@@ -386,6 +387,109 @@ def test_judged_levels_leave_out_report_only_fine_levels() -> None:
         frame, fine_levels={"supertype"}, allow_fine_levels=True
     ) == ["class", "subclass", "supertype"]
     assert simulate.fine_levels_of(Path("/nonexistent")) == set()
+
+
+def _sixty_gene_simulation(tmp_path: Path, **options: Any) -> dict[str, Any]:
+    """Run the sixty-gene simulation of the no-self-map test with options."""
+    ids = [f"ENSG{index:011d}" for index in range(1, 61)]
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    gene_list = tmp_path / "genes.csv"
+    gene_list.write_text(
+        "gene_symbol,gene_id\n"
+        + "\n".join(f"G{index},{gene}" for index, gene in enumerate(ids))
+        + "\n"
+    )
+    spec = AnnotationReferenceSpec(
+        reference_id="whb_frontal_supc_clus", species="human", role="primary"
+    )
+    (tmp_path / "scratch").mkdir(exist_ok=True)
+    return run_panel_simulation(
+        gene_list=gene_list,
+        species="human",
+        name="sixty",
+        config=AnnotationConfig(species="human", resolvability={"enabled": False}),
+        store=ReferenceStore(tmp_path / "store", scratch_root=tmp_path / "scratch"),
+        builds=lambda panel: [ReferenceBuild(spec=spec, builder=panel_builder())],
+        out_dir=tmp_path / "out",
+        scratch_dir=tmp_path / "sim_scratch",
+        platform="XENIUM",
+        **options,
+    )
+
+
+def test_the_gate_p_precheck_refuses_before_any_compute(tmp_path: Path) -> None:
+    # M13 C8 review: a refusal that needs no bundle (the depth source, the
+    # store, the output, the donors and seeds) comes before PREP, not after.
+    plans: list[simulate.GatePPlan] = []
+    calls: list[Any] = []
+
+    def precheck(plan: simulate.GatePPlan) -> None:
+        plans.append(plan)
+        raise SimulationError("NP5 needs the family's expected depth")
+
+    register_gate_p_hook(lambda request: calls.append(request) or {}, precheck=precheck)
+    try:
+        with pytest.raises(SimulationError, match="expected depth"):
+            _sixty_gene_simulation(tmp_path, gate_p=True, expected_depth=40)
+    finally:
+        register_gate_p_hook(None)
+    assert not calls
+    assert [(plan.species, plan.expected_depth) for plan in plans] == [("human", 40)]
+    assert plans[0].out_dir == tmp_path / "out"
+    assert plans[0].depth_profile is None and plans[0].depth_profile_asset is None
+    # Nothing was computed: no panel, no bundle, no report.
+    assert not (tmp_path / "out").exists() and not (tmp_path / "store").exists()
+    # Unregistering the programme drops its precheck too.
+    register_gate_p_hook(lambda request: {}, precheck=precheck)
+    register_gate_p_hook(None)
+    assert simulate.gate_p_precheck() is None
+
+
+def test_a_gate_p_refusal_after_prep_keeps_the_base_report(tmp_path: Path) -> None:
+    # M13 C8 review: the base simulation's report is written before gate P
+    # runs, and a refusal is recorded in it before it is raised.
+    def refuse(request: simulate.GatePRequest) -> dict[str, Any]:
+        written = json.loads((request.out_dir / simulate.REPORT_JSON).read_text())
+        assert written["status"] == "done" and "gate_p" not in written
+        raise SimulationError("the self-map was mapped with 8 MapMyCells workers")
+
+    register_gate_p_hook(refuse, precheck=lambda plan: None)
+    try:
+        with pytest.raises(SimulationError, match="MapMyCells workers"):
+            _sixty_gene_simulation(tmp_path, gate_p=True)
+    finally:
+        register_gate_p_hook(None)
+    report = json.loads((tmp_path / "out" / simulate.REPORT_JSON).read_text())
+    assert report["status"] == "done"
+    assert report["references"]["whb_frontal_supc_clus"]["status"] == "built"
+    assert report["gate_p"] == {
+        "status": simulate.GATE_P_STATUS_REFUSED,
+        "error": "SimulationError",
+        "reason": "the self-map was mapped with 8 MapMyCells workers",
+    }
+    assert "gate P:" in (tmp_path / "out" / simulate.REPORT_TXT).read_text()
+
+    # Any other failure of the programme is recorded as failed.
+    def crash(request: simulate.GatePRequest) -> dict[str, Any]:
+        raise KeyError("summary")
+
+    register_gate_p_hook(crash)
+    try:
+        with pytest.raises(KeyError):
+            _sixty_gene_simulation(tmp_path / "crash", gate_p=True)
+    finally:
+        register_gate_p_hook(None)
+    report = json.loads((tmp_path / "crash" / "out" / simulate.REPORT_JSON).read_text())
+    assert report["gate_p"]["status"] == simulate.GATE_P_STATUS_FAILED
+    # A programme that returns is stored as before.
+    register_gate_p_hook(lambda request: {"status": "scored"})
+    try:
+        report = _sixty_gene_simulation(tmp_path / "ok", gate_p=True)
+    finally:
+        register_gate_p_hook(None)
+    assert report["gate_p"] == {"status": "scored"}
+    written = json.loads((tmp_path / "ok" / "out" / simulate.REPORT_JSON).read_text())
+    assert written["gate_p"] == {"status": "scored"}
 
 
 # --------------------------------------------------------------------------
