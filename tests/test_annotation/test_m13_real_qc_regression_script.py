@@ -346,14 +346,20 @@ def test_the_resolve_command_pins_m8_bundles_and_adds_registration(
     assert "--registration-qc" not in with_config
 
 
-def _changed(script: ModuleType, variant: str) -> dict[str, Any]:
-    """The fields of a variant that differ from the registered configuration."""
+def _changed(
+    script: ModuleType, variant: str, base: str | None = "qc"
+) -> dict[str, Any]:
+    """The fields of a variant that differ from ``base`` (``None``: defaults)."""
     config = AnnotationConfig.model_validate(script.variant_config(variant))
-    registered = AnnotationConfig(species="human")
-    assert config.model_dump(exclude={"real_qc"}) == registered.model_dump(
+    reference = (
+        AnnotationConfig(species="human")
+        if base is None
+        else AnnotationConfig.model_validate(script.variant_config(base))
+    )
+    assert config.model_dump(exclude={"real_qc"}) == reference.model_dump(
         exclude={"real_qc"}
     )
-    default = registered.real_qc.model_dump()
+    default = reference.real_qc.model_dump()
     return {
         key: value
         for key, value in config.real_qc.model_dump().items()
@@ -362,8 +368,14 @@ def _changed(script: ModuleType, variant: str) -> dict[str, Any]:
 
 
 def test_variant_configs_are_annotation_configs(script: ModuleType) -> None:
-    """Each variant differs from the registered configuration only as named."""
-    assert script.variant_config("qc") is None
+    """Each variant differs from C17's configuration (qc) only as named."""
+    # qc pins the settings C17 ran with; the rulings of 2026-10-07 moved the
+    # defaults away from them (pre-registration §23.19).
+    assert script.variant_config("qc") == {
+        "species": "human",
+        "real_qc": script.C17_REAL_QC,
+    }
+    assert _changed(script, "qc", base=None) == script.C17_REAL_QC
     assert _changed(script, "qc_free") == {"enabled": False}
     assert _changed(script, "class_comparator") == {
         "marker_referee_comparator": "class"
@@ -446,7 +458,9 @@ def test_run_resolve_needs_the_registration_checks_and_keeps_finished_runs(
     assert written == script.variant_config("qc_free")
     applied = json.loads((out / "configs" / "applied_after_gate.json").read_text())
     assert applied == script.variant_config("applied_after_gate")
-    assert not (out / "configs" / "qc.json").exists()
+    # qc pins C17's settings, so it has a config file too.
+    qc = json.loads((out / "configs" / "qc.json").read_text())
+    assert qc == script.variant_config("qc")
 
 
 def test_each_rerun_records_its_command_and_code(
@@ -485,7 +499,9 @@ def test_each_rerun_records_its_command_and_code(
     record = json.loads((target / "regression_rerun.json").read_text())
     assert record["command"] == command
     assert (record["variant"], record["returncode"]) == ("qc", 0)
-    assert record["config"] is None
+    assert record["config"] == script.variant_config("qc")
+    position = command.index("--annotation-config")
+    assert command[position + 1] == str(out / "configs" / "qc.json")
     code = record["code"]
     assert (
         code["commit"]

@@ -1198,12 +1198,13 @@ def test_settings_follow_the_real_qc_config() -> None:
         min_marker_units=1.5,
         min_marker_share=0.6,
         min_pseudo_confident=200,
-        comparator=COMPARATOR_NODE,
+        # The user's ruling C1 (b) of 2026-10-07 (pre-registration §23.19).
+        comparator=COMPARATOR_CLASS,
     )
     changed = HumanRefereeSettings.from_config(
-        AnnotationRealQcConfig(marker_referee_comparator="class")
+        AnnotationRealQcConfig(marker_referee_comparator="node")
     )
-    assert changed.comparator == COMPARATOR_CLASS
+    assert changed.comparator == COMPARATOR_NODE
     with pytest.raises(ValueError):
         AnnotationRealQcConfig(marker_referee_comparator="cluster")
     with pytest.raises(ValueError):

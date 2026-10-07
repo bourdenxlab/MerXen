@@ -1169,11 +1169,12 @@ seven broad classes (the WHB vocab; sinks and the nodes outside the seven
 classes belong to none) and derives each class's markers on the panel's
 query genes with the §8.6 / E3 specificity rule
 (`flags.specific_gene_ratio`, `flags.specific_gene_min_share`).
-`real_qc.marker_referee_comparator` chooses the comparison: `node` (the
-default, mouse G2's rule: the class's unweighted mean supercluster profile
-against every other supercluster, sinks included) or `class` (the class
-profile, the `n_cells`-weighted mean of its superclusters'
-`expected_fraction`, against the other classes' profiles). The `class`
+`real_qc.marker_referee_comparator` chooses the comparison: `class` (the
+default since the user's ruling C1 (b) of 2026-10-07: the class profile,
+the `n_cells`-weighted mean of its superclusters' `expected_fraction`,
+against the other classes' profiles) or `node` (the default until then,
+mouse G2's rule: the class's unweighted mean supercluster profile against
+every other supercluster, sinks included). The `class`
 profile is not `flags.class_profiles`, which weights `mean_cpm` and
 renormalises over the query genes; the two bases give different sets. The
 comparators differ where a class holds a small node that shares another
@@ -1204,9 +1205,11 @@ cells (pseudo-labelled and confidently called), not pseudo-labelled cells
 alone.
 The 0.75 / 0.70 thresholds came from the H9 hand lists, so the derived
 statistic is re-measured on set a before a new family is scored (M13 C17).
-With the default `node` comparator set a's panel gives only one class with
-three or more markers, so the referee is `not_evaluable` on set a: that is not
-a pass, and it goes to the user with the threshold question.
+With the `node` comparator set a's panel gives only one class with three or
+more markers, so the referee was `not_evaluable` on every set a sample (C17);
+the `class` comparator gave 0.745-0.979 on proseg_hybrid. On 2026-10-07 the
+user ruled that the referee uses `class`, with the 0.75 / 0.70 thresholds
+unchanged (pre-registration §23.19, C1 (b)).
 
 **Gene-complexity source (M13 chunk C16; decision D19 (a)).** A version-7
 PREP stores the simulated `n_genes` of every member's simulated cells,

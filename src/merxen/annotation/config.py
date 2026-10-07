@@ -913,14 +913,16 @@ class AnnotationRealQcConfig(_AnnotationModel):
             ``not_evaluable`` with fewer scored cells (marker-pseudo-labelled
             table cells with a confident ``ct_broad``).
         marker_referee_comparator: How the per-panel marker sets are derived
-            from the WHB profiles with the §8.6 specificity rule: ``node``
-            (mouse G2's rule as ported: each broad class's mean supercluster
-            profile against every other supercluster) or ``class`` (the
-            broad-class profile, the ``n_cells``-weighted mean of its
+            from the WHB profiles with the §8.6 specificity rule: ``class``
+            (the broad-class profile, the ``n_cells``-weighted mean of its
             superclusters' ``expected_fraction``, against the other broad
-            classes). ``node`` is the M13 C13 specification; ``class`` is
-            the alternative for comparison, not adopted without the user's
-            decision.
+            classes) or ``node`` (mouse G2's rule as ported: each broad
+            class's mean supercluster profile against every other
+            supercluster). ``class`` is the default by the user's ruling C1
+            (b) of 2026-10-07 (pre-registration §23.19; the thresholds
+            unchanged); ``node``, the M13 C13 specification, was the
+            default until then and was ``not_evaluable`` on every set a
+            sample.
         paired_broad_jsd_warn: Paired-platform soft broad JSD warning.
         uninformative_strata_warn_frac: Warn when more flag strata are
             uninformative.
@@ -970,7 +972,7 @@ class AnnotationRealQcConfig(_AnnotationModel):
     marker_referee_min_marker_units: float = Field(default=1.5, gt=0.0)
     marker_referee_min_marker_share: float = Field(default=0.6, gt=0.0, le=1.0)
     marker_referee_min_pseudo_confident: int = Field(default=200, ge=1)
-    marker_referee_comparator: MarkerRefereeComparator = "node"
+    marker_referee_comparator: MarkerRefereeComparator = "class"
     paired_broad_jsd_warn: float = 0.20
     uninformative_strata_warn_frac: float = 0.5
     genes_per_count_gap_warn: float = Field(default=0.45, ge=0.0)

@@ -21,9 +21,12 @@ C15), and writes the outcome table under ``$A/m13/regression/``:
    ``regression_rerun.json``: the command, the code commit and whether this
    script matches it, and the exit status):
 
-   * ``qc``: the registered configuration (species defaults: the QC on,
-     the ``node`` referee comparator, G1 warn-only by D23 (b), the seeded
-     families warn-only by D20 (b));
+   * ``qc``: the configuration C17 ran with on 2026-10-07 (the species
+     defaults then: the QC on, the ``node`` referee comparator, G1
+     warn-only by D23 (b), the seeded families warn-only by D20 (b)). The
+     user's rulings of 2026-10-07 moved the defaults (pre-registration
+     §23.19: C1 (b), the ``class`` comparator), so the variant pins these
+     settings (``C17_REAL_QC``) and a re-run reproduces C17;
    * ``qc_free``: ``real_qc.enabled`` false, the QC-free re-run NR1
      compares with;
    * ``class_comparator``: the referee's ``class`` comparator, reported
@@ -121,6 +124,10 @@ VARIANTS: tuple[str, ...] = (
     VARIANT_CLASS,
     VARIANT_APPLIED,
 )
+# The real-data QC settings C17 ran with (the defaults until the user's
+# rulings of 2026-10-07 moved them; pre-registration §23.19). Every variant
+# starts from them, so a re-run reproduces C17.
+C17_REAL_QC: dict[str, Any] = {"marker_referee_comparator": "node"}
 # An NR1 table cell of a sample the applied_after_gate variant did not cover.
 APPLIED_NOT_RUN = f"{VARIANT_APPLIED} not run"
 
@@ -342,44 +349,46 @@ def variant_dir(out_dir: Path, variant: str, pair: str, segmentation: str) -> Pa
     return out_dir / "resolve" / variant / pair / segmentation
 
 
-def variant_config(variant: str) -> dict[str, Any] | None:
-    """Return the annotation config of a variant (``None``: species defaults).
+def variant_config(variant: str) -> dict[str, Any]:
+    """Return the annotation config of a variant.
 
-    ``applied_after_gate`` is reported only: it counts the human gate as
-    merged (D20 (b) keeps it ``pending`` until gate H's acceptance PR into
-    ``main``) and sets G1's fail rule to ``gate_failed`` (D23 (a), not yet
-    adopted), so the lowering effects are applied and NR1 is checked on them.
-    It changes no threshold.
+    Every variant starts from the settings C17 ran with (``C17_REAL_QC``;
+    the species defaults until the user's rulings of 2026-10-07 moved them),
+    so ``qc`` reproduces C17 and each other variant differs from it only as
+    named. ``applied_after_gate`` is reported only: it counts the human gate
+    as merged (D20 (b) keeps it ``pending`` until gate H's acceptance PR
+    into ``main``) and sets G1's fail rule to ``gate_failed`` (D23 (a)), so
+    the lowering effects are applied and NR1 is checked on them. It changes
+    no threshold.
 
     Args:
         variant: ``qc``, ``qc_free``, ``class_comparator`` or
             ``applied_after_gate``.
 
     Returns:
-        The config record (``AnnotationConfig`` JSON), or ``None`` for the
-        registered configuration, which M8 also ran with (no config file).
+        The config record (``AnnotationConfig`` JSON).
 
     Raises:
         RegressionError: For an unknown variant.
     """
+    real_qc: dict[str, Any] = dict(C17_REAL_QC)
     if variant == VARIANT_QC:
-        return None
-    if variant == VARIANT_QC_FREE:
-        return {"species": "human", "real_qc": {"enabled": False}}
-    if variant == VARIANT_CLASS:
-        return {"species": "human", "real_qc": {"marker_referee_comparator": "class"}}
-    if variant == VARIANT_APPLIED:
-        return {
-            "species": "human",
-            "real_qc": {
-                "seeded_families_warn_only_until_gate": {
-                    "human": "merged",
-                    "mouse": "pending",
-                },
-                "registration_g1_effect": "gate_failed",
-            },
+        pass
+    elif variant == VARIANT_QC_FREE:
+        real_qc["enabled"] = False
+    elif variant == VARIANT_CLASS:
+        real_qc["marker_referee_comparator"] = "class"
+    elif variant == VARIANT_APPLIED:
+        real_qc["seeded_families_warn_only_until_gate"] = {
+            "human": "merged",
+            "mouse": "pending",
         }
-    raise RegressionError(f"unknown variant {variant!r}; expected one of {VARIANTS}")
+        real_qc["registration_g1_effect"] = "gate_failed"
+    else:
+        raise RegressionError(
+            f"unknown variant {variant!r}; expected one of {VARIANTS}"
+        )
+    return {"species": "human", "real_qc": real_qc}
 
 
 def resolve_command(
@@ -637,12 +646,10 @@ def run_resolve(
     commands: list[list[str]] = []
     for variant in variants:
         config = variant_config(variant)
-        config_path = None
-        if config is not None:
-            config_path = configs / f"{variant}.json"
-            if not dry_run:
-                configs.mkdir(parents=True, exist_ok=True)
-                config_path.write_text(json.dumps(config, indent=1) + "\n")
+        config_path = configs / f"{variant}.json"
+        if not dry_run:
+            configs.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(json.dumps(config, indent=1) + "\n")
         for segmentation in segmentations:
             for pair in pairs:
                 run = read_m8_run(m8_root, pair, segmentation)
@@ -1459,7 +1466,8 @@ def build_tables(
     """
     from merxen.annotation.config import AnnotationConfig
 
-    config = AnnotationConfig(species="human")
+    # The settings the qc variant ran with, not the current defaults.
+    config = AnnotationConfig.model_validate(variant_config(VARIANT_QC))
     warn = float(config.real_qc.marker_consistency_warn or 0.75)
     tables: dict[str, list[dict[str, Any]]] = {
         "outcomes": [],

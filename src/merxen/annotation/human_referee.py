@@ -18,18 +18,21 @@ classes belong to none).
   Classes with fewer than ``real_qc.marker_referee_min_group_markers`` (3)
   are left out. The comparator (``real_qc.marker_referee_comparator``):
 
-  - ``node`` (the C13 specification, the default): mouse G2's rule. The
-    class's profile is the unweighted mean of its supercluster profiles,
-    compared with every other supercluster, sinks and nodes of no broad
-    class included (G2 compares a group with every class outside it).
-  - ``class``: the broad-class profile, the ``n_cells``-weighted mean of
-    its superclusters' ``expected_fraction`` (as mouse G2 uses
-    ``expected_fraction``), compared with the other broad classes'
-    profiles; nodes of no broad class are not compared. This is **not**
+  - ``class`` (the default since the user's ruling C1 (b) of 2026-10-07,
+    pre-registration §23.19): the broad-class profile, the
+    ``n_cells``-weighted mean of its superclusters' ``expected_fraction``
+    (as mouse G2 uses ``expected_fraction``), compared with the other
+    broad classes' profiles; nodes of no broad class are not compared.
+    The thresholds stay 0.75 / 0.70. This is **not**
     ``flags.class_profiles`` (the human flags' class profile), which
     weights each node's ``mean_cpm`` and renormalises the mean over the
     query genes: the two give different sets (on set a, Neurons 5 against
     3 markers), so the basis is part of the comparator choice.
+  - ``node`` (the C13 specification, the default until 2026-10-07): mouse
+    G2's rule. The class's profile is the unweighted mean of its
+    supercluster profiles, compared with every other supercluster, sinks
+    and nodes of no broad class included (G2 compares a group with every
+    class outside it).
 
   The two comparators differ where one broad class holds a small node that
   shares another class's genes (WHB's Committed oligodendrocyte precursor,
@@ -76,11 +79,13 @@ below 0.75, the dataset gate capped at ``broad_only`` below 0.70; D18 (a)).
 Those thresholds came from the H9 hand lists; the derived statistic is
 re-measured on set a (M13 C17) before the new-panel human MERSCOPE family is
 scored, and the thresholds go back to the user if set a falls below 0.75.
-D18's fallback names only that case. With the default ``node`` comparator
-set a's panel gives one class with at least three markers (Microglia), so the
-referee is ``not_evaluable`` on set a by construction and neither its cap
-nor its warning can fire there; that result is not a pass and also needs
-the user's decision before the family is scored.
+D18's fallback names only that case. With the ``node`` comparator set a's
+panel gives one class with at least three markers (Microglia), so the
+referee was ``not_evaluable`` on set a by construction (M13 C17); the
+``class`` comparator gave 0.745-0.979 on proseg_hybrid. The user ruled on
+2026-10-07 (C1 (b)) that the referee uses ``class`` with the thresholds
+unchanged, a tightening chosen after set a's values were seen
+(pre-registration §23.19).
 
 The module needs numpy, pandas and (for the pseudo-labels) scipy.
 """

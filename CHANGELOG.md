@@ -48,6 +48,8 @@
 - **Registration checks reach RESOLVE.** In `map_first` runs the RESOLVE task now receives the QC stage's registration checks (`*_registration_qc.json`), so it waits for the QC stage of its pair and segmentation. Human RESOLVE uses them for registration G1, warn-only in M13.
 - **Simulated genes in version-7 PREP.** A version-7 self-map also writes `resolvability_sim_genes.parquet`, each simulated cell's realised total and detected genes, for the gene-complexity check. Its version enters the version-7 `build_hash`, so version-7 bundles built before it are rebuilt into new build directories rather than reused (they stay readable, with the check `not_evaluable`). Version-6 bundles and their build hashes are unchanged.
 - **Regression script.** `scripts/acceptance/m13_real_qc_regression.py` tabulates the real-data QC outcomes on the M8 human pairs.
+- **The user's rulings of 2026-10-07** (pre-registration §23.19) change these defaults:
+  - the human marker referee derives its marker sets with the `class` comparator (`real_qc.marker_referee_comparator`); the 0.75 / 0.70 thresholds are unchanged. The `node` comparator, the default until then, was `not_evaluable` on every set a sample. The regression script pins the settings C17 ran with, so a re-run reproduces C17.
 
 ### Fixed
 
