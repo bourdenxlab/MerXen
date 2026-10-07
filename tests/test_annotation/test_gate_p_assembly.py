@@ -365,6 +365,17 @@ def test_class_sets_refuse_two_truths_or_shared_cells() -> None:
         gp.gate_p_class_sets(
             shared, species="human", default_group=None, settings=settings
         )
+    # D2 (d): a fit-half cell of the default group in another group is a
+    # shared cell too (the extra donors exclude every default test cell).
+    default = cells.assign(group="D1", half=0)
+    leaked = pd.concat(
+        [default, cells[cells["cell_id"] == "g_Exc_0"].assign(group="D2", half=0)],
+        ignore_index=True,
+    )
+    with pytest.raises(ValueError, match="more than one group"):
+        gp.gate_p_class_sets(
+            leaked, species="human", default_group="D1", settings=settings
+        )
     with pytest.raises(ValueError, match="truth_parent"):
         gp.gate_p_class_sets(
             cells.drop(columns="truth_parent"),
@@ -378,6 +389,55 @@ def test_class_sets_refuse_two_truths_or_shared_cells() -> None:
         )
     with pytest.raises(ValueError, match="min_share"):
         gp.ClassSetSettings(min_test_cells=700, min_share=1.5)
+
+
+def test_class_sets_count_shared_cells_once_under_the_d2_c_fallback() -> None:
+    """D2 (c): shared cells count once; the default fit half is out everywhere."""
+    settings = gp.ClassSetSettings(min_test_cells=700)
+    # The default donor's own cells: 100 Exc in the fit half, 700 in the check.
+    own = _test_cells({"Exc": 800}, group="D1")
+    own["half"] = (own["cell_id"].str.split("_").str[-1].astype(int) >= 100).astype(int)
+    # The shared other-region pool, in every replicate: 150 of its 400 Astro
+    # cells are in the default donor's fit half.
+    pool = _test_cells({"Astro": 400})
+    pool_half = (pool["cell_id"].str.split("_").str[-1].astype(int) >= 150).astype(int)
+    shared = pd.concat(
+        [
+            pool.assign(group="D1", half=pool_half),
+            pool.assign(group="D2", half=0),
+            pool.assign(group="D3", half=0),
+        ],
+        ignore_index=True,
+    )
+    other = _test_cells({"Inh": 500}, group="D2").assign(half=0)
+    pooled = pd.concat([own, shared, other], ignore_index=True)
+    with pytest.raises(ValueError, match="more than one group"):
+        gp.gate_p_class_sets(
+            pooled, species="human", default_group="D1", settings=settings
+        )
+    scored = gp.gate_p_class_sets(
+        pooled,
+        species="human",
+        default_group="D1",
+        settings=settings,
+        disjoint=False,
+    )
+    counts = scored.classes[scored.classes["level"] == "broad"].set_index("class")
+    # 250 Astro: each shared cell once, the 150 fit-half ones dropped from
+    # D2 and D3 as well.
+    assert counts["n_test_cells"].to_dict() == {"Astro": 250, "Exc": 700, "Inh": 500}
+    assert scored.levels.set_index("level").loc["broad"]["n_test_cells"] == 1450
+    assert scored.members("broad") == frozenset({"Exc"})
+    # A default cell listed in both halves cannot be placed.
+    both = pd.concat([own, own.assign(half=1 - own["half"])], ignore_index=True)
+    with pytest.raises(ValueError, match="both halves"):
+        gp.gate_p_class_sets(
+            both,
+            species="human",
+            default_group="D1",
+            settings=settings,
+            disjoint=False,
+        )
 
 
 def test_class_set_settings_follow_the_config() -> None:

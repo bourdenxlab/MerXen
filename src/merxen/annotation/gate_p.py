@@ -6118,6 +6118,7 @@ def gate_p_class_sets(
     default_group: str | None,
     settings: ClassSetSettings,
     reference_shares: Mapping[str, Mapping[str, float]] | None = None,
+    disjoint: bool = True,
 ) -> ClassSets:
     """Fix C_P per level from the pooled test cells, before mapping (§14).
 
@@ -6129,13 +6130,25 @@ def gate_p_class_sets(
     D12). The pooled test cells are the held-out ones gate P scores: every
     group's, the default group's check half only (``held_out_replicates``).
 
+    The replicates (pre-registration §23.10 D2):
+
+    - ``disjoint`` (D2 (d), the default): no test cell is in two groups,
+      the default group's fit half included, because each extra donor
+      excludes every cell of the default held-out test set. A shared cell
+      raises, as a fit-half leak does in ``held_out_replicates``.
+    - not ``disjoint`` (D2 (c), the fallback the user may choose when a
+      donor's own pool is too small; §23.10 open item 2): the shared cells
+      stay in every replicate, each cell is counted once, and the default
+      group's fit-half cells are left out of every group.
+
     Readings (pre-registration §23.16; open until the user rules):
 
     - **Cells a level does not apply to** (truth ``not_neuron`` at NT: the
       non-neuronal cells) are left out of the level's counts and its
       denominator. NT then has no row for those classes (M13 D14 (a)), and
-      its 90% rule is read on the neurons. Counting them would put NT below
-      90% on any panel.
+      its 90% rule is read on the neurons. This is looser than the literal
+      §14 text (">= 90% of the pooled test cells"), which would count them
+      and so put NT below 90% on any panel, capping every family at broad.
     - **Cells without a class at a level** (a sink truth: WHB Splatter or
       Miscellaneous; ``truth_parent`` null) stay in the denominator: they
       are pooled test cells that no class of C_P holds. This is the
@@ -6157,6 +6170,8 @@ def gate_p_class_sets(
         reference_shares: Per level, each class's share of the reference
             composition (reported beside the excluded classes; ``nan``
             without it).
+        disjoint: Whether the replicates are disjoint (D2 (d)); ``False``
+            for the D2 (c) fallback, which counts a shared cell once.
 
     Returns:
         The class sets of every gate-P level (a level without test cells
@@ -6165,7 +6180,8 @@ def gate_p_class_sets(
     Raises:
         ValueError: If a column is missing, the default group's rows have no
             ``half`` or no ``group`` column or a ``half`` other than 0 and 1,
-            a test cell has two truths at a level, or a test cell is in two
+            a default-group cell is in both halves, a test cell has two
+            truths at a level, or (``disjoint``) a test cell is in two
             groups.
     """
     levels = gate_p_levels(species)
@@ -6173,6 +6189,14 @@ def gate_p_class_sets(
         test_cells, ("level", "cell_id", "truth", "truth_parent"), "the test cells"
     )
     frame = test_cells[test_cells["level"].astype(str).isin(levels)]
+    if disjoint and "group" in frame.columns:
+        groups = frame[["cell_id", "group"]].astype(str).drop_duplicates()
+        shared = sorted(set(groups["cell_id"][groups["cell_id"].duplicated()]))
+        if shared:
+            raise ValueError(
+                f"{len(shared)} test cells are in more than one group (e.g. "
+                f"{shared[:3]}): the replicates must be disjoint (D2 (d))"
+            )
     if default_group is not None:
         _require_columns(frame, ("group", "half"), "the test cells")
         in_default = (frame["group"].astype(str) == default_group).to_numpy(bool)
@@ -6182,15 +6206,21 @@ def gate_p_class_sets(
                 f"the test cells of the default group {default_group!r} have "
                 "'half' values other than 0 (fit) and 1 (check)"
             )
-        frame = frame[~(in_default & (half == 0))]
-    if "group" in frame.columns:
-        groups = frame[["cell_id", "group"]].astype(str).drop_duplicates()
-        shared = sorted(set(groups["cell_id"][groups["cell_id"].duplicated()]))
-        if shared:
+        cell_ids = frame["cell_id"].astype(str).to_numpy()
+        placed = pd.DataFrame(
+            {"cell_id": cell_ids[in_default], "half": half[in_default].astype(int)}
+        ).drop_duplicates()
+        split = sorted(set(placed["cell_id"][placed["cell_id"].duplicated()]))
+        if split:
             raise ValueError(
-                f"{len(shared)} test cells are in more than one group (e.g. "
-                f"{shared[:3]}): the replicates must be disjoint (D2 (d))"
+                f"{len(split)} test cells of the default group {default_group!r} "
+                f"are in both halves (e.g. {split[:3]})"
             )
+        # The fit half is left out of every group: under D2 (d) only the
+        # default group holds it; under D2 (c) a shared cell may be listed
+        # in another group as well.
+        fit = set(placed["cell_id"][placed["half"] == 0])
+        frame = frame[~frame["cell_id"].astype(str).isin(fit).to_numpy(bool)]
     cells = pd.DataFrame(
         {
             "level": frame["level"].astype(str).to_numpy(),
