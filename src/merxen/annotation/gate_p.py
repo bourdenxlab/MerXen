@@ -164,14 +164,18 @@ the measured human cross-platform offsets for R1, capped at +-2 log2 and
 read from the in-house ``sim_inputs`` asset of M13 decision D7; spill 0.35
 only for R3; the lung ratio for human Prime families) is scored against
 that member at the frozen thresholds on the pooled held-out calls at seed
-0, at NP3's tested sets (a set left with fewer than 200 stressed calls
-pooled with the next deeper one): point precision >= target_L, a Wilson
-bound >= target_L - 0.02, and no drop in point precision significantly
-above 0.05 (one-sided 95%, two-proportion z on each set's Kish n; D12,
+0, at NP3's tested sets (built on the base's pooled held-out calls, as
+NP3 checks; a set left with fewer than 200 stressed calls pooled with the
+next deeper one): point precision >= target_L, a Wilson bound >=
+target_L - 0.02, and no drop in point precision significantly above 0.05
+(one-sided 95%, two-proportion z on each set's Kish n; D12,
 pre-registration §23.9 item 4); the clean upper bound and the coverage
-changes are reported. The readings taken where §14 is not explicit (the
-weightings, the order of the sets, a set still thin) are listed in
-``np6_set_stats``' docstring; they are open until the user answers them,
+changes are reported. The X1 factor table is reported beside the offsets
+per panel gene (``np6_factor_report``; D7 (b), report-only). The readings
+taken where §14 is not explicit (the weightings, the order of the sets, a
+set still thin, the cells a stressed set holds, the offsets' direction)
+are listed in ``np6_set_stats``' docstring and put to the user in
+pre-registration §23.15; they are open until the user answers them,
 before the set a dry run is scored.
 
 NP7, error structure (§14 NP7), on the pooled held-out calls at seed 0 at
@@ -3743,8 +3747,9 @@ def np6_set_stats(
     sets.
 
     Readings this implementation takes where §14 is not explicit (strict
-    where there is a choice; open until the user answers them, before the
-    set a dry run is scored, as the other gate-P readings):
+    where there is a choice). They are open and put to the user in
+    pre-registration §23.15: each needs the user's answer before the set a
+    dry run is scored, as the other gate-P readings. Until then:
 
     - **Weighting.** D12 tests the drop "on each set's Kish n", which
       differs from n only on a reweighted set, while CHECK K9.2 notes that
@@ -3764,6 +3769,19 @@ def np6_set_stats(
       calls it has (reported in ``below_min_confident_n``): its Wilson bound
       on few calls then decides. A set without stressed confident calls
       fails (a ``nan`` precision never passes).
+    - **Each simulation fills a set's scope itself.** The stressed calls of
+      a set are the stressed simulation's rows at the set's level, class
+      and depths. On the version-7 grid of total counts, spill 0.35 lowers
+      the host target from D / 1.25 to D / 1.35, so a stressed bin can hold
+      test cells the base's does not, and a cell's deepest row can differ;
+      the per-cell draws are keyed by the recipe's name, so the two are
+      independent draws of the test cells, as D12's unpaired test assumes.
+      Alternative: the stressed calls of the base's test cells only (not
+      nested in this reading).
+    - **The offsets' direction and a mouse family** belong to the stress
+      recipe (``resolvability.gate_p_stress_recipes``): every family's draw
+      is multiplied by 2 ** log2(Xenium / MERSCOPE), and a mouse panel's
+      genes all take the resample.
 
     Args:
         base: The base recipe's replicates (version 6: ``R1_contam_HO``;

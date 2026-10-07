@@ -5637,9 +5637,12 @@ def gate_p_stress_recipes(
     §14 NP6 and "Version-7 families": the stress recipes are "applied to
     each R1 member as defined above and to R3 as spill 0.35 only", and
     "human Prime families add ``R1_xtissue_lung_stress``" (M13 CHECK K8).
-    Each stress recipe keeps its base member's seed, so it changes only its
-    one perturbation of that member (the same LogNormal normals, scaled for
-    ``R1_stress_lognormal``):
+    Each stress recipe keeps its base member's seed, so its gene-efficiency
+    draw is the member's (the same LogNormal normals, scaled for
+    ``R1_stress_lognormal``) and it changes one setting of that member; its
+    per-cell thinning, partner and spill draws are keyed by its own name
+    (``cell_draw_key``), so it is an independent draw of the same test
+    cells, as NP6's unpaired drop test assumes (pre-registration §23.15):
 
     - an ``R1_contam_HO`` member: ``R1_stress_spill``,
       ``R1_stress_lognormal`` and ``R1_stress_xplatform``, plus
@@ -5650,7 +5653,9 @@ def gate_p_stress_recipes(
     stresses (its simulation is ``thin_and_contaminate``). §14 names the
     measured human cross-platform offsets for every family; a mouse panel's
     genes are never in that table, so each takes a keyed resample of its
-    values (``sim_inputs.xplatform_stress_efficiency``).
+    values (``sim_inputs.xplatform_stress_efficiency``). The offsets enter
+    with the table's sign, log2(Xenium / MERSCOPE), whatever the family's
+    platform (an open reading, pre-registration §23.15).
 
     Args:
         base: The emission member's recipe.

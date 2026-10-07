@@ -345,7 +345,7 @@ def test_np6_tests_the_drop_on_each_sets_kish_n() -> None:
     natural = _row(verdicts, gp.NP3_NATURAL, "100")
     assert natural["kish_n_stress"] == pytest.approx(200.0)
     assert set(verdicts["scored"]) == {True}
-    # Every weighting is scored: the class-balanced bound (.818 < .88) fails
+    # Every weighting is scored: the class-balanced bound (.809 < .88) fails
     # the class though the unweighted and natural rows pass.
     assert unweighted["passed"] and natural["passed"]
     assert not balanced["wilson_ok"] and not balanced["passed"]
