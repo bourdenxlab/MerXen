@@ -35,9 +35,11 @@ parents"). For a gene list (a vendor panel, a custom panel before ordering):
    evidence measured it, and the summed PSS of each step's process tree),
    and disk (bundle, kept reference markers, test set).
 
-``--gate-p`` is the M13 hook: the gate-P programme (leave-one-donor-out HO
-bundles, the second mouse draw, seeds 0 / 1, stress recipes, the NP1-NP9
-report) registers itself with ``register_gate_p_hook``; until then the
+``--gate-p`` is the M13 hook: the gate-P programme (``gate_p.run_gate_p``:
+leave-one-donor-out HO bundles, seeds 0 / 1, stress recipes, the NP1-NP9
+report; the second mouse draw follows M6b) is registered with
+``register_gate_p_hook`` by the ``annotation-panel-simulate --gate-p`` command
+and ``scripts/acceptance/new_panel.py``; without a registered programme the
 option is refused before any compute (``GatePUnavailableError``).
 """
 
@@ -127,7 +129,7 @@ class GatePUnavailableError(SimulationError):
 
 @dataclass(frozen=True)
 class GatePRequest:
-    """What the gate-P programme (M13, ``scripts/acceptance/new_panel.py``) gets.
+    """What the gate-P programme (M13, ``gate_p.run_gate_p``) gets.
 
     Attributes:
         panel: The declared panel.
@@ -136,6 +138,10 @@ class GatePRequest:
         bundles: The production bundle directory per reference.
         out_dir: The simulation's output directory.
         report: The base simulation report.
+        builds: The prepared specs and builders the base simulation built
+            (the held-out test set's spec and the identity re-run of PREP
+            come from them).
+        scratch_dir: The simulation's scratch directory (outside the stores).
     """
 
     panel: AnnotationPanel
@@ -144,6 +150,8 @@ class GatePRequest:
     bundles: dict[str, Path]
     out_dir: Path
     report: dict[str, Any]
+    builds: tuple[ReferenceBuild, ...] = ()
+    scratch_dir: Path | None = None
 
 
 GatePHook = Callable[[GatePRequest], dict[str, Any]]
@@ -1559,10 +1567,12 @@ def run_panel_simulation(
     prefilter_frames: list[pd.DataFrame] = []
     resource_rows: list[dict[str, Any]] = []
     bundles: dict[str, Path] = {}
+    built: list[ReferenceBuild] = []
     if computation.required.status == "refused":
         report["status"] = "panel_refused"
     else:
-        for item in builds(panel):
+        built = list(builds(panel))
+        for item in built:
             logger.info(
                 "annotation-panel-simulate %s: %s on %d genes",
                 name,
@@ -1613,6 +1623,8 @@ def run_panel_simulation(
                 bundles=bundles,
                 out_dir=out_dir,
                 report=report,
+                builds=tuple(built),
+                scratch_dir=scratch_dir,
             )
         )
     write_report(

@@ -252,7 +252,7 @@ import re
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Final, cast
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import numpy as np
 import pandas as pd
@@ -274,6 +274,10 @@ from merxen.annotation.vocab import (
     human_floor_class,
 )
 from merxen.control_features import matches_control_name_pattern
+
+if TYPE_CHECKING:
+    from merxen.annotation.gate_p_run import GatePOptions
+    from merxen.annotation.simulate import GatePRequest
 
 # §14 NP4: "the range ... is <= max(0.03, 3.5 x pooled SE)".
 GATE_P_SPREAD_FLOOR: Final = 0.03
@@ -5302,6 +5306,9 @@ GATE_P_OPEN_READINGS: Final[tuple[str, ...]] = (
     "Assembly: C_P's denominator, the NT population, the 90% rule, the "
     "version-7 depths, the status precedence and the NP1 / NP2 / NP9 "
     "readings of §23.16",
+    "Driver (C8): the per-donor pool rule, C_P's test cells, NP5 in version 7, "
+    "NP9's measured time, the natural composition, the dry run and NP5's "
+    "depth source of §23.17",
 )
 
 
@@ -7114,3 +7121,147 @@ def write_gate_p_report(
             content.to_csv(path, index=False)
         written[name] = path
     return written
+
+
+# ..........................................................................
+# The seeded families' dry run (§14 "Dry run"; M13 D28)
+
+# H18: "broad and supercluster emitted for every class with >= 50 test cells".
+DRY_RUN_H18_MIN_TEST_CELLS: Final = 50
+DRY_RUN_COLUMNS: Final[tuple[str, ...]] = ("level", "class", "status", "passed")
+
+
+def h18_expected_classes(
+    test_cells: pd.DataFrame,
+    *,
+    species: str,
+    min_test_cells: int = DRY_RUN_H18_MIN_TEST_CELLS,
+) -> dict[str, list[str]]:
+    """Return the classes H18 expects at the leaf level (M13 D28, CHECK K1).
+
+    H18's set is every class with >= 50 test cells of the PREP self-map's
+    test set (pre-registration §9 H18): the default donor's held-out test
+    cells, both halves, after the M8 D1 drop. Each test cell is counted once,
+    by its truth class at the leaf level (human supercluster, mouse
+    subclass).
+
+    Args:
+        test_cells: The default donor's test cells, one row per (level, test
+            cell) or more, columns ``level``, ``cell_id`` and ``truth_parent``.
+        species: ``"human"`` or ``"mouse"``.
+        min_test_cells: H18's minimum (50).
+
+    Returns:
+        ``{leaf level: classes}``, sorted.
+
+    Raises:
+        ValueError: For an unknown species or a missing column.
+    """
+    leaf = gate_p_levels(species)[-1]
+    _require_columns(test_cells, ("level", "cell_id", "truth_parent"), "the test cells")
+    rows = test_cells[test_cells["level"].astype(str) == leaf]
+    rows = rows[["cell_id", "truth_parent"]].dropna().drop_duplicates("cell_id")
+    counts = rows["truth_parent"].astype(str).value_counts()
+    return {leaf: sorted(str(cls) for cls, n in counts.items() if n >= min_test_cells)}
+
+
+def dry_run_verdict(
+    result: GatePResult,
+    *,
+    h18_classes: Mapping[str, Sequence[str]],
+    exemptions: Collection[tuple[str, str]] = (("supercluster", "COP"),),
+) -> dict[str, Any]:
+    """Score a seeded family's dry run (§14 "Dry run"; M13 D28, CHECK K1).
+
+    §14: before any new family is scored, the seeded families "must pass at
+    broad (human) / class (mouse) for every C_P class, and at supercluster /
+    subclass for the classes H18 expects". D28: H18's classes less only what
+    the user already approved; for set a that is supercluster COP, which M8
+    D1 removed from H18's scope (pre-registration §18 C1). M8 D4's approved
+    exceptions are bins of dataset-reweighted runs (broad OPC at 15 and 120,
+    Immune at 60 on one dataset), not classes, so they remove no class here;
+    any further narrowing is a loosening. The broad (class) level must also
+    be complete in the level walk (its C_P holds >= 90% of the test cells),
+    the stricter reading.
+
+    Args:
+        result: The seeded family's gate-P result.
+        h18_classes: ``h18_expected_classes`` output.
+        exemptions: The (level, class) pairs the user removed from H18.
+
+    Returns:
+        ``passes``, the expected (level, class) rows with their status, the
+        failing ones, the exempted ones and the rule.
+    """
+    minimum = diag.MIN_SIMULATION_LEVEL[result.species]
+    exempt = {(str(level), str(cls)) for level, cls in exemptions}
+    expected = {(minimum, cls) for cls in result.class_sets.members(minimum)}
+    exempted: set[tuple[str, str]] = set()
+    for level, classes in h18_classes.items():
+        for cls in classes:
+            key = (str(level), str(cls))
+            if key in exempt:
+                exempted.add(key)
+            else:
+                expected.add(key)
+    status = {
+        (str(level), str(cls)): str(value)
+        for level, cls, value in zip(
+            result.records["level"],
+            result.records["class"],
+            result.records["status"],
+            strict=True,
+        )
+    }
+    order = {level: rank for rank, level in enumerate(gate_p_levels(result.species))}
+    rows = [
+        {
+            "level": level,
+            "class": cls,
+            "status": status.get((level, cls), "no_record"),
+            "passed": status.get((level, cls)) == RECORD_VALIDATED,
+        }
+        for level, cls in sorted(
+            expected, key=lambda key: (order.get(key[0], 99), key[1])
+        )
+    ]
+    walk = result.level_walk
+    minimum_rows = walk[walk["level"].astype(str) == minimum]
+    minimum_complete = bool(
+        not minimum_rows.empty and bool(minimum_rows.iloc[0]["complete"])
+    )
+    failing = [row for row in rows if not row["passed"]]
+    return {
+        "passes": not failing and minimum_complete,
+        "min_level": minimum,
+        "min_level_complete": minimum_complete,
+        "expected": rows,
+        "failing": failing,
+        "exempted": [list(key) for key in sorted(exempted)],
+        "rule": (
+            f"every class of C_P validated at {minimum} (and {minimum} complete in "
+            "the level walk), and every class H18 expects (>= "
+            f"{DRY_RUN_H18_MIN_TEST_CELLS} test cells) validated at the leaf level, "
+            "less the user's approved exemptions (§14 Dry run; M13 D28)"
+        ),
+    }
+
+
+def run_gate_p(request: GatePRequest, options: GatePOptions) -> dict[str, Any]:
+    """Run gate P on one family (M13 chunk C8): ``gate_p_run.run_gate_p``.
+
+    The driver (leave-one-donor-out builds, simulation, mapping, the NP1-NP9
+    report) lives in ``merxen.annotation.gate_p_run``, so this module keeps
+    to pure functions on tables; ``gate_p_run.gate_p_hook(options)`` is what
+    ``simulate.register_gate_p_hook`` takes.
+
+    Args:
+        request: The base simulation.
+        options: The run's options (the species is required, M13 D4).
+
+    Returns:
+        The run record.
+    """
+    from merxen.annotation import gate_p_run
+
+    return gate_p_run.run_gate_p(request, options)

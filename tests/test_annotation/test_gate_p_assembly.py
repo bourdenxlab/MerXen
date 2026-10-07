@@ -1168,3 +1168,57 @@ def test_validated_table_rows_refuse_a_family_that_does_not_pass() -> None:
             date="2026-10-07",
             approving_pr="#0",
         )
+
+
+# --------------------------------------------------------------------------
+# The seeded families' dry run (§14 "Dry run"; M13 D28, CHECK K1)
+
+
+def test_h18_expected_classes_count_each_test_cell_once_at_the_leaf() -> None:
+    cells = _test_cells({"Exc": 60, "Astro": 49, "COP": 50}, rows_per_cell=3)
+    assert gp.h18_expected_classes(cells, species="human") == {
+        "supercluster": ["COP", "Exc"]
+    }
+    assert gp.h18_expected_classes(cells, species="human", min_test_cells=60) == {
+        "supercluster": ["Exc"]
+    }
+    with pytest.raises(ValueError, match="missing columns"):
+        gp.h18_expected_classes(cells.drop(columns="cell_id"), species="human")
+
+
+def test_dry_run_needs_broad_for_c_p_and_supercluster_for_h18s_classes() -> None:
+    key = ("supercluster", "Astro")
+    passing = _assemble()
+    h18 = {"supercluster": ["Astro", "Exc"]}
+    verdict = gp.dry_run_verdict(passing, h18_classes=h18)
+    assert verdict["passes"] and verdict["min_level"] == "broad"
+    assert verdict["min_level_complete"] and verdict["failing"] == []
+    expected = {(row["level"], row["class"]) for row in verdict["expected"]}
+    assert expected == {
+        *(("broad", cls) for cls in ("Exc", "Inh", "Astro", "Oligo")),
+        ("supercluster", "Astro"),
+        ("supercluster", "Exc"),
+    }
+    # A class H18 expects that fails at supercluster fails the dry run ...
+    failing = _assemble(overrides={("NP4", "R1@0", key): False})
+    verdict = gp.dry_run_verdict(failing, h18_classes=h18)
+    assert not verdict["passes"]
+    assert verdict["failing"] == [
+        {
+            "level": "supercluster",
+            "class": "Astro",
+            "status": "failed:NP4",
+            "passed": False,
+        }
+    ]
+    # ... unless the user removed it from H18's scope (D1: supercluster COP).
+    exempt = gp.dry_run_verdict(
+        failing, h18_classes=h18, exemptions=(("supercluster", "Astro"),)
+    )
+    assert exempt["passes"] and exempt["exempted"] == [["supercluster", "Astro"]]
+    # A C_P class not validated at broad fails it, and so does an H18 class
+    # without a record.
+    broad = _assemble(overrides={("NP3", "R1@0", ("broad", "Oligo")): False})
+    assert not gp.dry_run_verdict(broad, h18_classes={})["passes"]
+    missing = gp.dry_run_verdict(passing, h18_classes={"supercluster": ["Fibro"]})
+    assert missing["failing"][0]["status"] == "no_record"
