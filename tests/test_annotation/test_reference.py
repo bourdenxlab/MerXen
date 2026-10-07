@@ -3233,7 +3233,10 @@ def test_pool_sizes_count_each_donors_own_pools_from_metadata(
     other = drawn[
         drawn[reference.TEST_SOURCE_COLUMN] == reference.TEST_SOURCE_OTHER_REGION
     ]
-    assert len(other) == by.loc[("H_mid", "Immune"), "n_other_region_own"]
+    assert len(other) == (
+        by.loc[("H_mid", "Immune"), "n_other_region_own"]
+        + by.loc[("H_mid", "Immune"), "n_other_region_own_dropped"]
+    )
     with pytest.raises(ReferenceBuildError, match="no frontal WHB cell"):
         reference.ho_donor_pool_sizes(
             spec.sources,
@@ -3247,6 +3250,45 @@ def test_pool_sizes_count_each_donors_own_pools_from_metadata(
     shares = reference.whb_frontal_composition(spec.sources, tmp_path / "scratch")
     assert sum(shares.values()) == pytest.approx(1.0)
     assert set(shares) == {UL_IT, ASTRO, MICRO}
+
+
+def test_pool_sizes_leave_out_the_other_region_cells_the_self_map_drops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    # M13 C8 review: M13 D1 (a) drops every leave-one-donor-out set's
+    # other-region COP cells from the self-map, so they never count toward a
+    # donor's pool. Microglia stand in for COP (the fixture's other-region
+    # cells are Astrocytes and Microglia).
+    spec, _config, _store, default_dir = _loo_setup(tmp_path, monkeypatch)
+    default = res.load_test_cells(default_dir)
+
+    def pools() -> pd.DataFrame:
+        return reference.ho_donor_pool_sizes(
+            spec.sources,
+            donors=["H_big", "H_mid"],
+            excluded_cells=set(default.obs.index.astype(str)),
+            default_test_superclusters=default.obs[res.TRUTH_LEAF_COLUMN].astype(str),
+            region="frontal_cortex",
+            target=40,
+            scratch_dir=tmp_path / "scratch",
+        ).set_index(["donor", "class"])
+
+    before = pools()
+    assert (before["n_other_region_own_dropped"] == 0).all()
+    monkeypatch.setattr(reference, "HO_SELF_MAP_EXCLUDED_SUPERCLUSTERS", ("Microglia",))
+    after = pools()
+    immune = after.loc[("H_mid", "Immune")]
+    assert before.loc[("H_mid", "Immune"), "n_other_region_own"] == 3
+    assert immune["n_other_region_own"] == 0
+    assert immune["n_other_region_own_dropped"] == 3
+    assert immune["n_available"] == immune["n_frontal"]
+    assert bool(immune["meets"]) == (immune["n_frontal"] >= 40)
+    assert (after.xs("Immune", level="class")["n_other_region_all_donors"] == 0).all()
+    assert before.loc[("H_mid", "Immune"), "n_other_region_all_donors"] > 0
+    # A class the self-map keeps is counted as before.
+    pd.testing.assert_series_equal(
+        before.loc[("H_mid", "Astro")], after.loc[("H_mid", "Astro")]
+    )
 
 
 def test_other_region_draw_never_takes_a_reference_cell() -> None:

@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "3c386641979e24fe91ecc0a69a503acb8dd5091a4c02540c0155f268a9d95219",
+    3: "2d4a46d01cc56edf450c1e01f1a4aa688a7485e217d29644c1a22f439bddaf28",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -207,6 +207,12 @@ PIN_HISTORY = (
     "production payload, bundle and build_hash is unchanged "
     "(test_resolvability_v6_golden); the pool-size and composition reports "
     "and held_out_test_set_spec are added (no builder output changes)",
+    "3: the D1 drop's supercluster labels move to ho_self_map_excluded_labels "
+    "(the same labels, read by self_map_test_cells as before), and gate P's "
+    "pool-size report (ho_donor_pool_sizes, which no builder calls) leaves "
+    "the self-map's dropped other-region cells out of its counts (M13 C8 "
+    "review); no bundle content or build_hash changes "
+    "(test_resolvability_v6_golden)",
 )
 
 

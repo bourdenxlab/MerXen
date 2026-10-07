@@ -5357,6 +5357,7 @@ GATE_P_POOL_COLUMNS: Final[tuple[str, ...]] = (
     "superclusters",
     "n_frontal",
     "n_other_region_own",
+    "n_other_region_own_dropped",
     "n_other_region_all_donors",
     "n_available",
     "n_default_test",
@@ -5438,6 +5439,13 @@ def ho_donor_pool_sizes(
     pool of every donor is reported beside them (the production draw, and
     the D2 (c) fallback's pool).
 
+    Both other-region counts leave out the cells every human self-map then
+    drops (M8 D1, extended to every gate-P set by M13 D1 (a): the
+    other-region cells of ``HO_SELF_MAP_EXCLUDED_SUPERCLUSTERS``, COP), so
+    ``n_available`` counts only cells a leave-one-donor-out replicate
+    simulates; the donor's own dropped cells are reported in
+    ``n_other_region_own_dropped``.
+
     A class is judged when the default held-out test set holds it; it meets
     the per-class top-up rule when the donor's pools hold ``target`` cells
     of it (``topup_min_class_test_cells``, 200: the class minimum of v7.6,
@@ -5478,6 +5486,7 @@ def ho_donor_pool_sizes(
     metadata = metadata.dropna(subset=list(WHB_SOURCE_HIERARCHY))
     other = other_region_metadata(sources[SOURCE_WHB_CELL_METADATA], labels)
     excluded = {str(cell) for cell in excluded_cells}
+    dropped_labels = ho_self_map_excluded_labels()
     defaults = [str(label) for label in default_test_superclusters]
     known = set(metadata["donor_label"].astype(str))
     missing = sorted(set(donors) - known)
@@ -5505,15 +5514,20 @@ def ho_donor_pool_sizes(
         listed = candidates["cell_label"].astype(str).isin(excluded).to_numpy(bool)
         every = candidates[~listed]
         own = every[(every["donor_label"].astype(str) == donor).to_numpy(bool)]
+        # M8 D1 / M13 D1 (a): the self-map leaves these other-region cells out.
+        own_dropped = own[WHB_SUPC].astype(str).isin(dropped_labels).to_numpy(bool)
+        every = every[~every[WHB_SUPC].astype(str).isin(dropped_labels).to_numpy(bool)]
         supercluster_labels = (
             list(pool[WHB_SUPC].astype(str))
+            + list(own[WHB_SUPC].astype(str))
             + list(every[WHB_SUPC].astype(str))
             + defaults
         )
         classes = whb_supercluster_classes(supercluster_labels)
 
         frontal = _class_counts(pool[WHB_SUPC].astype(str), classes)
-        own_counts = _class_counts(own[WHB_SUPC].astype(str), classes)
+        own_counts = _class_counts(own[~own_dropped][WHB_SUPC].astype(str), classes)
+        dropped_counts = _class_counts(own[own_dropped][WHB_SUPC].astype(str), classes)
         every_counts = _class_counts(every[WHB_SUPC].astype(str), classes)
         default_counts = _class_counts(defaults, classes)
         names = sorted(
@@ -5537,6 +5551,7 @@ def ho_donor_pool_sizes(
                     ),
                     "n_frontal": frontal.get(cls, 0),
                     "n_other_region_own": own_counts.get(cls, 0),
+                    "n_other_region_own_dropped": dropped_counts.get(cls, 0),
                     "n_other_region_all_donors": every_counts.get(cls, 0),
                     "n_available": available,
                     "n_default_test": default_counts.get(cls, 0),
@@ -6543,6 +6558,26 @@ def ho_self_map_exclusion_params() -> dict[str, Any]:
     }
 
 
+def ho_self_map_excluded_labels() -> list[str]:
+    """Return the WHB supercluster labels of ``HO_SELF_MAP_EXCLUDED_SUPERCLUSTERS``.
+
+    The other-region test cells of these superclusters are left out of every
+    human held-out self-map (M8 D1; M13 D1 (a)).
+
+    Returns:
+        The labels, sorted.
+    """
+    name_to_label = {
+        name: label
+        for label, name in load_vocab("whb_supercluster").label_to_name().items()
+    }
+    return sorted(
+        name_to_label[name]
+        for name in HO_SELF_MAP_EXCLUDED_SUPERCLUSTERS
+        if name in name_to_label
+    )
+
+
 def self_map_test_cells(
     test: Any, test_reference_id: str
 ) -> tuple[Any, dict[str, Any] | None]:
@@ -6571,15 +6606,7 @@ def self_map_test_cells(
     if test_reference_id != HO_REFERENCE_ID:
         return test, None
     obs = test.obs
-    name_to_label = {
-        name: label
-        for label, name in load_vocab("whb_supercluster").label_to_name().items()
-    }
-    labels = sorted(
-        name_to_label[name]
-        for name in HO_SELF_MAP_EXCLUDED_SUPERCLUSTERS
-        if name in name_to_label
-    )
+    labels = ho_self_map_excluded_labels()
     truth_column = f"{res.TRUTH_PREFIX}{WHB_SUPC}"
     if truth_column not in obs.columns:
         truth_column = res.TRUTH_LEAF_COLUMN
