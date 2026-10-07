@@ -304,23 +304,32 @@ def test_class_sets_count_each_test_cell_once_and_drop_the_default_fit_half() ->
     )
     assert repeated.members("broad") == frozenset({"Exc"})
     assert repeated.levels.set_index("level").loc["broad"]["n_test_cells"] == 700
-    default = _test_cells({"Exc": 800}, group="D1")
-    default["half"] = (
-        default["cell_id"].str.split("_").str[-1].astype(int) % 2
-    ).to_numpy()
-    other = _test_cells({"Exc": 300}, group="D2")
+    # The default group's halves differ in size and class: the fit half
+    # holds 800 Exc + 100 Inh cells, the check half 50 Exc + 750 Inh.
+    default = _test_cells({"Exc": 850, "Inh": 850}, group="D1")
+    index = default["cell_id"].str.split("_").str[-1].astype(int)
+    is_exc = default["cell_id"].str.contains("_Exc_")
+    default["half"] = np.where(is_exc, index < 50, index < 750).astype(int)
+    # Another group's half 0 is not a fit half: its cells all count.
+    other = _test_cells({"Astro": 300}, group="D2")
     other["half"] = 0
     pooled = pd.concat([default, other], ignore_index=True)
     scored = gp.gate_p_class_sets(
         pooled, species="human", default_group="D1", settings=settings
     )
-    # The default group's fit half is out: 400 check-half cells + 300.
-    assert scored.levels.set_index("level").loc["broad"]["n_test_cells"] == 700
-    assert scored.members("broad") == frozenset({"Exc"})
+    # The default group's fit half is out: its check half + 300 Astro.
+    broad = scored.levels.set_index("level").loc["broad"]
+    assert broad["n_test_cells"] == 1100
+    counts = scored.classes[scored.classes["level"] == "broad"].set_index("class")
+    assert counts["n_test_cells"].to_dict() == {"Astro": 300, "Exc": 50, "Inh": 750}
+    assert scored.members("broad") == frozenset({"Inh"})
+    assert broad["excluded_classes"] == "Astro;Exc"
+    assert scored.levels.set_index("level").loc["nt"]["n_test_cells"] == 800
     unscoped = gp.gate_p_class_sets(
         pooled, species="human", default_group=None, settings=settings
     )
-    assert unscoped.levels.set_index("level").loc["broad"]["n_test_cells"] == 1100
+    assert unscoped.levels.set_index("level").loc["broad"]["n_test_cells"] == 2000
+    assert unscoped.members("broad") == frozenset({"Exc", "Inh"})
     with pytest.raises(ValueError, match="group"):
         gp.gate_p_class_sets(
             _test_cells({"Exc": 10}),
