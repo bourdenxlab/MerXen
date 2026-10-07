@@ -146,19 +146,21 @@ G1_LIMITS: dict[str, float] = {
 
 def test_registration_g1_fails_on_the_ratio_or_the_shift() -> None:
     limits = G1_LIMITS
-    passing = qc.registration_g1_outcome(RegistrationSignal(2.9, 0.4), **limits)
+    warn_only = {**limits, "effect": "warning"}
+    passing = qc.registration_g1_outcome(RegistrationSignal(2.9, 0.4), **warn_only)
     assert passing.outcome == "pass" and passing.effect == "warning"
     assert passing.details["rule"] is None
-    low = qc.registration_g1_outcome(RegistrationSignal(1.2, 0.4), **limits)
+    low = qc.registration_g1_outcome(RegistrationSignal(1.2, 0.4), **warn_only)
     assert low.outcome == "warn" and "density ratio 1.200 < 1.5" in low.message
-    assert "warn-only in M13" in low.message and low.details["rule"] == "fail"
-    shifted = qc.registration_g1_outcome(RegistrationSignal(2.9, 7.5), **limits)
+    assert "warn-only (real_qc.registration_g1_effect = warning)" in low.message
+    assert low.details["rule"] == "fail"
+    shifted = qc.registration_g1_outcome(RegistrationSignal(2.9, 7.5), **warn_only)
     assert shifted.fired and "shift 7.5 um > 5.0 um" in shifted.message
-    # §8.8's effect once D23 moves to (a): the dataset gate fails.
-    hard = qc.registration_g1_outcome(
-        RegistrationSignal(1.2, 0.4), effect="gate_failed", **limits
-    )
+    # §8.8's effect, the default since the user's ruling C2 of 2026-10-07:
+    # the dataset gate fails.
+    hard = qc.registration_g1_outcome(RegistrationSignal(1.2, 0.4), **limits)
     assert hard.outcome == "fail" and hard.gate_cap == "failed"
+    assert hard.details["effect_setting"] == "gate_failed"
     assert qc.apply_qc_to_gate(human_gate(), [hard]).level == "failed"
     assert qc.registration_g1_outcome(None, **limits).outcome == "not_evaluable"
     skipped = qc.registration_g1_outcome(
@@ -719,17 +721,18 @@ def test_the_orchestrator_reads_the_real_qc_config(make_trust: MakeTrust) -> Non
 def test_registration_g1_follows_the_configured_effect(make_trust: MakeTrust) -> None:
     signals = new_panel_signals(registration=RegistrationSignal(1.1, 0.0))
     trust = make_trust("provisional")
-    warn = qc.real_data_qc(signals, trust, AnnotationConfig(species="human"))
-    assert warn.provenance().outcomes["registration_g1"] == "warn"
-    assert warn.apply_to_gate(human_gate()).level == "full"
-    hard = qc.real_data_qc(
+    warn = qc.real_data_qc(
         signals,
         trust,
         AnnotationConfig(
             species="human",
-            real_qc=AnnotationRealQcConfig(registration_g1_effect="gate_failed"),
+            real_qc=AnnotationRealQcConfig(registration_g1_effect="warning"),
         ),
     )
+    assert warn.provenance().outcomes["registration_g1"] == "warn"
+    assert warn.apply_to_gate(human_gate()).level == "full"
+    # The default since the user's ruling C2 of 2026-10-07: §8.8's effect.
+    hard = qc.real_data_qc(signals, trust, AnnotationConfig(species="human"))
     assert hard.provenance().outcomes["registration_g1"] == "fail"
     assert hard.apply_to_gate(human_gate()).level == "failed"
 
@@ -1092,7 +1095,8 @@ def test_the_species_gate_record_defaults_to_pending() -> None:
         "mouse": "pending",
     }
     assert config.seeded_warn_only("human") and config.seeded_warn_only("mouse")
-    assert config.registration_g1_effect == "warning"
+    # The user's ruling C2 of 2026-10-07 (pre-registration §23.19).
+    assert config.registration_g1_effect == "gate_failed"
     partial = AnnotationRealQcConfig(
         seeded_families_warn_only_until_gate={"mouse": "merged"}
     )

@@ -941,12 +941,13 @@ class AnnotationRealQcConfig(_AnnotationModel):
             ``merged``.
         registration_g1_effect: What human registration G1's fail rule
             does (§8.8; M0a's guard with §7.6's rules, read from
-            ``mouse_gate``): ``warning`` (warn-only in M13, decision D23 (b),
-            approved 2026-10-06) or ``gate_failed`` (§8.8's effect: the
-            dataset gate fails, every cell ``not_attempted_gate`` and
-            ``exclude_hard``), adopted once the set a regression shows no
-            false G1 failure (a tightening, recorded before the new-panel
-            family's QC is read). §7.6's warning rule (density ratio below
+            ``mouse_gate``): ``gate_failed`` (§8.8's effect: the dataset
+            gate fails, every cell ``not_attempted_gate`` and
+            ``exclude_hard``), the default since the user's ruling C2 of
+            2026-10-07 (pre-registration §23.19: the set a regression, M13
+            C17, showed no false G1 failure; a tightening), or ``warning``
+            (warn-only, decision D23 (b) of 2026-10-06, the M13 setting
+            until then). §7.6's warning rule (density ratio below
             ``g1_density_ratio_warn``) is a warning under either setting.
         coverage_warn_margin: M3c (user decision 4): warn per (level, called
             class) when the real confident share is below the class-depth
@@ -980,7 +981,7 @@ class AnnotationRealQcConfig(_AnnotationModel):
     seeded_families_warn_only_until_gate: dict[Species, SpeciesGateState] = Field(
         default_factory=_pending_species_gates
     )
-    registration_g1_effect: Literal["warning", "gate_failed"] = "warning"
+    registration_g1_effect: Literal["warning", "gate_failed"] = "gate_failed"
     coverage_warn_margin: float = 0.10
     coverage_min_cells: int = Field(default=200, ge=1)
     factor_remeasure_min_r: float = 0.9

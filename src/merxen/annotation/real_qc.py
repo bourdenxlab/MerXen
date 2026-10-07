@@ -72,8 +72,9 @@ or ``not_evaluable``):
   ``RealQcProvenance``;
 * the checks: ``marker_consistency_outcome`` (human referee, D18: warning
   < 0.75, gate cap ``broad_only`` < 0.70), ``registration_g1_outcome``
-  (human G1 as §7.6 defines it: its fail rule warn-only in M13 by D23 (b),
-  its warning rule a warning), ``paired_concordance`` (soft
+  (human G1 as §7.6 defines it: its fail rule fails the dataset gate,
+  §8.8's effect, since the user's ruling C2 of 2026-10-07, warn-only before
+  by D23 (b); its warning rule a warning), ``paired_concordance`` (soft
   broad JSD on the shared mask, D21; ``not_applicable`` for an unpaired
   section), ``flag_rate_summary`` (§8.8's literal reading, D22 / CHECK K6),
   ``prefilter_spotcheck`` and ``factor_remeasure_outcome``
@@ -2713,7 +2714,7 @@ def registration_g1_outcome(
     density_ratio_fail: float,
     density_ratio_warn: float,
     shift_fail_um: float,
-    effect: str = "warning",
+    effect: str = "gate_failed",
 ) -> QcOutcome:
     """Return the human registration G1 outcome (§8.8; NR9; decision D23).
 
@@ -2721,10 +2722,12 @@ def registration_g1_outcome(
     is below ``density_ratio_fail`` (1.5) or the shift against the
     platform's own segmentation exceeds ``shift_fail_um`` (5 µm), and
     otherwise warns when the ratio is below ``density_ratio_warn`` (2.0).
-    ``effect`` decides only what the fail rule does: ``warning`` keeps it
-    warn-only (D23 (b), M13); ``gate_failed`` applies §8.8's effect (the
-    dataset gate fails: every cell ``not_attempted_gate`` and
-    ``exclude_hard``). The warning rule is a warning under either effect.
+    ``effect`` decides only what the fail rule does: ``gate_failed``
+    applies §8.8's effect (the dataset gate fails: every cell
+    ``not_attempted_gate`` and ``exclude_hard``; the config's default since
+    the user's ruling C2 of 2026-10-07, pre-registration §23.19);
+    ``warning`` keeps it warn-only (D23 (b), the M13 setting until then).
+    The warning rule is a warning under either effect.
     ``not_evaluable`` without a check or a ratio.
 
     Args:
@@ -2735,7 +2738,7 @@ def registration_g1_outcome(
         density_ratio_warn: The warning ratio
             (``mouse_gate.g1_density_ratio_warn``).
         shift_fail_um: The fail shift (``mouse_gate.g1_shift_fail_um``).
-        effect: ``warning`` or ``gate_failed``.
+        effect: ``gate_failed`` (the default) or ``warning``.
 
     Returns:
         The outcome.
@@ -2799,7 +2802,7 @@ def registration_g1_outcome(
     message += (
         ": the dataset gate fails"
         if effect == "gate_failed"
-        else ": warn-only in M13 (decision D23 (b))"
+        else ": warn-only (real_qc.registration_g1_effect = warning)"
     )
     return QcOutcome(
         REGISTRATION_G1_CHECK, True, message=message, details=details, **fields

@@ -132,6 +132,19 @@ def _write_m8_run(
     return directory
 
 
+# The settings C17 ran with (the script's qc variant, C17_REAL_QC): the
+# defaults until the user's rulings of 2026-10-07 moved them.
+C17_CONFIG = AnnotationConfig.model_validate(
+    {
+        "species": "human",
+        "real_qc": {
+            "marker_referee_comparator": "node",
+            "registration_g1_effect": "warning",
+        },
+    }
+)
+
+
 def _qc_result(
     make_trust: MakeTrust,
     *,
@@ -153,7 +166,7 @@ def _qc_result(
     return qc.real_data_qc(
         qc.RealQcSignals(**values),
         make_trust("validated_real"),
-        config or AnnotationConfig(species="human"),
+        config or C17_CONFIG,
     )
 
 
@@ -376,6 +389,7 @@ def test_variant_configs_are_annotation_configs(script: ModuleType) -> None:
         "real_qc": script.C17_REAL_QC,
     }
     assert _changed(script, "qc", base=None) == script.C17_REAL_QC
+    assert AnnotationConfig.model_validate(script.variant_config("qc")) == C17_CONFIG
     assert _changed(script, "qc_free") == {"enabled": False}
     assert _changed(script, "class_comparator") == {
         "marker_referee_comparator": "class"

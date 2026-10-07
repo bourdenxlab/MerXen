@@ -25,8 +25,9 @@ C15), and writes the outcome table under ``$A/m13/regression/``:
      defaults then: the QC on, the ``node`` referee comparator, G1
      warn-only by D23 (b), the seeded families warn-only by D20 (b)). The
      user's rulings of 2026-10-07 moved the defaults (pre-registration
-     §23.19: C1 (b), the ``class`` comparator), so the variant pins these
-     settings (``C17_REAL_QC``) and a re-run reproduces C17;
+     §23.19: C1 (b), the ``class`` comparator; C2, G1's fail rule at
+     ``gate_failed``), so the variant pins these settings (``C17_REAL_QC``)
+     and a re-run reproduces C17;
    * ``qc_free``: ``real_qc.enabled`` false, the QC-free re-run NR1
      compares with;
    * ``class_comparator``: the referee's ``class`` comparator, reported
@@ -127,7 +128,10 @@ VARIANTS: tuple[str, ...] = (
 # The real-data QC settings C17 ran with (the defaults until the user's
 # rulings of 2026-10-07 moved them; pre-registration §23.19). Every variant
 # starts from them, so a re-run reproduces C17.
-C17_REAL_QC: dict[str, Any] = {"marker_referee_comparator": "node"}
+C17_REAL_QC: dict[str, Any] = {
+    "marker_referee_comparator": "node",
+    "registration_g1_effect": "warning",
+}
 # An NR1 table cell of a sample the applied_after_gate variant did not cover.
 APPLIED_NOT_RUN = f"{VARIANT_APPLIED} not run"
 
