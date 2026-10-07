@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import math
 from collections.abc import Mapping, Sequence
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -403,6 +404,76 @@ def test_np6_scores_the_default_group_on_its_check_half_only() -> None:
             settings=np6,
             composition=ONE_TYPE,
         )
+
+
+def test_np6_refuses_tested_sets_built_on_other_calls() -> None:
+    """NP6's sets are NP3's: built on the base's pooled held-out calls.
+
+    As for NP3 and NP7: D1's 60-count bin holds 200 X calls (100 fit-half,
+    100 check-half), D2's 50. A plain concat of the base tables holds 250
+    there and tests the bin on its own; the pooled held-out calls hold 150,
+    below n_min, so 60 is no tested set there. Scored on the held-out pool,
+    the concat's sets would let the fit half decide which sets NP6 tests
+    (and a concat whose deepest bin reached n_min only with the fit half
+    would drop the pooled ">= D_P" set from NP6). NP6 refuses them. A
+    hand-built set below n_min is refused even when its count matches.
+    """
+    d1 = pd.concat(
+        [
+            _calls(100, [("A", "X", 200, 200, 0.95)], prefix="d1a").assign(half=1),
+            _calls(60, [("A", "X", 200, 200, 0.95)], prefix="d1b"),
+        ],
+        ignore_index=True,
+    )
+    d2 = pd.concat(
+        [
+            _calls(100, [("A", "X", 200, 200, 0.95)], prefix="d2a"),
+            _calls(60, [("A", "X", 50, 50, 0.95)], prefix="d2b"),
+        ],
+        ignore_index=True,
+    )
+    replicates = {("D1", 0): d1, ("D2", 0): d2}
+    decisions = _decisions([60, 100])
+    np6 = _np6()
+    options: dict[str, Any] = {
+        "default_group": "D1",
+        "settings": np6,
+        "composition": ONE_TYPE,
+    }
+    base = _rows(replicates, res.DECISION_RECIPE)
+    stressed = _rows(replicates, STRESS)
+    concat = pd.concat([d1, d2], ignore_index=True)
+    leaked = res.gate_p_tested_sets(concat, decisions, regime="provisional")
+    assert [
+        (gp.tested_set_label(item), item.n_confident)
+        for item in leaked[("broad", "X")] or []
+    ] == [("100", 400), ("60", 250)]
+    with pytest.raises(ValueError, match=r"np6_set_stats: .*broad/X 60 .* 250 .* 150"):
+        gp.np6_set_stats(base, stressed, decisions, leaked, **options)
+    pooled = gp.pooled_held_out_cells(replicates, default_group="D1")
+    tested = res.gate_p_tested_sets(pooled, decisions, regime="provisional")
+    (deep,) = tested[("broad", "X")] or []
+    assert (gp.tested_set_label(deep), deep.n_confident) == ("100", 400)
+    stats = gp.np6_set_stats(base, stressed, decisions, tested, **options)
+    assert set(stats["tested_set"]) == {"100"}
+    assert (stats["n_base"] == 400).all()
+    # A set below n_min is no tested set, though its count is the pool's.
+    thin = res.GatePTestedSet("broad", "X", (60,), False, 150, 1.0, 0.975)
+    with pytest.raises(ValueError, match=r"broad/X 60 .* fewer than .*200"):
+        gp.np6_set_stats(
+            base,
+            stressed,
+            decisions,
+            {("broad", "X"): [deep, thin]},
+            **options,
+        )
+    # The check reads the base: a stress that loses D2's calls is scored.
+    lost = {
+        key: table.assign(bp=0.5) if key[0] == "D2" else table
+        for key, table in replicates.items()
+    }
+    stats = gp.np6_set_stats(base, _rows(lost, STRESS), decisions, tested, **options)
+    assert (stats["n_base"] == 400).all() and (stats["n_stress"] == 200).all()
 
 
 # --------------------------------------------------------------------------

@@ -3770,9 +3770,14 @@ def np6_set_stats(
         stressed: The stress recipe's replicates (the same groups and seeds).
         decisions: The frozen decisions of the base run (version 7: the
             ensemble's).
-        tested: NP3's tested sets per (level, class) of the base's pooled
-            seed-0 calls; ``None`` marks a (level, class) that is not
-            evaluable.
+        tested: NP3's tested sets per (level, class), from
+            ``gate_p_tested_sets`` (version 7: ``gate_p_member_sets``) on
+            ``pooled_held_out_cells`` of the base's replicates, default
+            group, recipe, seed and member; ``None`` marks a (level, class)
+            that is not evaluable. Each set must hold, in the base's pooled
+            held-out calls, the confident calls it was built on
+            (``n_confident``) and at least ``settings.min_confident_n``, as
+            in NP3 (``_check_set_count``).
         default_group: The group whose fit half the frozen thresholds were
             fitted on (required; ``None`` when no replicate holds those
             cells).
@@ -3794,9 +3799,13 @@ def np6_set_stats(
     Raises:
         ValueError: If a simulation has no rows after the filters, the
             simulations do not hold the same groups at ``seed``, a key's
-            tested sets are an empty list or of another key, the natural
-            weighting is scored without a composition, or for the default
-            group's inputs (``held_out_replicates``).
+            tested sets are an empty list or of another key, a tested set's
+            confident calls in the base's pooled calls differ from its
+            ``n_confident`` or are fewer than ``settings.min_confident_n``
+            (sets built on a plain concat of the tables, the default group's
+            fit half included), the natural weighting is scored without a
+            composition, or for the default group's inputs
+            (``held_out_replicates``).
         ResolvabilityError: If a simulation's rows mix replicates
             (``replicate_rows``).
     """
@@ -3837,6 +3846,14 @@ def np6_set_stats(
         "min_type_cells": settings.weight_min_type_cells,
         "trim_factor": settings.weight_trim_factor,
     }
+    for key, items in tested.items():
+        for item in items or ():
+            _check_set_count(
+                item,
+                views["base"].n_confident([item], str(key[1])),
+                settings.min_confident_n,
+                "np6_set_stats",
+            )
     stress_view = views["stressed"]
     records: list[dict[str, object]] = []
     for key, items in sorted(tested.items(), key=lambda pair: pair[0]):
