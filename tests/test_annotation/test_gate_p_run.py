@@ -22,11 +22,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from merxen.annotation import diagnostics as diag
 from merxen.annotation import gate_p as gp
 from merxen.annotation import gate_p_run as run
 from merxen.annotation import reference
 from merxen.annotation import resolvability as res
 from merxen.annotation.config import AnnotationConfig
+from merxen.annotation.panel import panel_family
 from merxen.annotation.reference import builder_for, prepare_reference_spec
 from merxen.annotation.simulate import (
     GatePPlan,
@@ -451,9 +453,15 @@ def passing_report() -> dict[str, Any]:
     }
 
 
-def test_a_family_whose_classes_all_validate_passes_gate_p(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
-) -> None:
+def run_passing_family(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Family, dict[str, Any], list[gp.GatePResult]]:
+    """Gate P on a family whose classes all validate.
+
+    Returns:
+        The family, the driver's run record and the ``GatePResult`` it
+        assembled (captured from ``gate_p.assemble_gate_p``).
+    """
     config = gate_config().model_copy(
         update={"panel": gate_config().panel.model_copy(update={"min_root_markers": 3})}
     )
@@ -462,6 +470,14 @@ def test_a_family_whose_classes_all_validate_passes_gate_p(
     monkeypatch.setattr(
         run, "_prep_measurements", lambda *_: (60.0, {"primary:markers": 1.0})
     )
+    assembled: list[gp.GatePResult] = []
+    assemble = gp.assemble_gate_p
+
+    def capture(**kwargs: Any) -> gp.GatePResult:
+        assembled.append(assemble(**kwargs))
+        return assembled[-1]
+
+    monkeypatch.setattr(gp, "assemble_gate_p", capture)
     # The user accepts the weak and collapsed parents in the gate-P PR (NP2).
     inputs = run.np2_inputs(family.bundle_dir)
     accepted = {*inputs["weak_parents"], *inputs["collapsed_parents"]}
@@ -477,6 +493,13 @@ def test_a_family_whose_classes_all_validate_passes_gate_p(
             accepted_parents=tuple(sorted(accepted)),
         ),
     )
+    return family, result, assembled
+
+
+def test_a_family_whose_classes_all_validate_passes_gate_p(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    _, result, _ = run_passing_family(tmp_path, monkeypatch)
     assert result["passes"], result["reasons"]
     assert result["validated_max_level"] == "supercluster"
     assert result["dry_run"]["passes"]
@@ -492,6 +515,102 @@ def test_a_family_whose_classes_all_validate_passes_gate_p(
     assert np9["wall_seconds"] == pytest.approx(record["measured_seconds"])
     assert record["measured_seconds"] >= 60.0
     assert np9["members"] == ["R1_contam_HO@0"]
+
+
+def test_a_driver_result_on_whb_class_keys_goes_through_the_promotion_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    """The gate-P PR's two steps on the driver's own result (M13 final review).
+
+    The writer's other tests feed hand-made results with toy class keys.
+    Here the driver scores the synthetic WHB family, whose cells carry real
+    WHB supercluster ids, so its records name the classes as the driver
+    derives them. ``validated_table_rows`` and ``write_simulation_family``
+    must take them as consensus class keys of their levels, appended to a
+    copy of the packaged tables, and RESOLVE's trust state must read them
+    back per (level, class) at their validated depths.
+    """
+    family, outcome, assembled = run_passing_family(tmp_path, monkeypatch)
+    (result,) = assembled
+    assert result.passes and outcome["passes"]
+    assert result.family_id == outcome["family_id"]
+    records = result.records
+    for level, frame in records.groupby("level"):
+        keys = diag.level_class_keys("human", str(level))
+        assert keys and set(frame["class"].astype(str)) <= keys, level
+    validated = records[records["status"] == gp.RECORD_VALIDATED]
+    assert {"broad", "supercluster"} <= set(validated["level"])
+    # The gate-P PR appends to the packaged tables (a copy of them here).
+    tables = tmp_path / "tables"
+    tables.mkdir()
+    packaged = diag.asset_path(diag.VALIDATED_PANELS_FILE).parent
+    for name in (
+        diag.VALIDATED_PANELS_FILE,
+        diag.VALIDATED_PANEL_LEVELS_FILE,
+        diag.VALIDATED_PANEL_GENES_FILE,
+    ):
+        shutil.copy(packaged / name, tables / name)
+    before = diag.load_validated_panels(tables)
+    panel = family.panel
+    record, levels = gp.validated_table_rows(
+        result,
+        panel_id="human_merscope_xenium_gate_p_test",
+        panel_role="sample_panel",
+        platforms=panel.platforms,
+        n_genes=panel.n_genes,
+        evidence="m13/gate_p/test",
+        date="2026-10-07",
+        approving_pr="#0",
+        root_marker_source="test",
+    )
+    manifest = json.loads((family.bundle_dir / "bundle.json").read_text())
+    self_map = diag.ResolvabilityTrust.from_bundle_manifest(manifest)
+    assert self_map is not None
+    genes = diag.PanelGeneList(
+        panel_id=record.panel_id,
+        ensembl_ids=tuple(panel.ensembl_ids),
+        symbols=dict(zip(panel.ensembl_ids, panel.symbols, strict=True)),
+        root_markers=frozenset(panel.ensembl_ids[:3]),
+    )
+    diag.write_simulation_family(tables, record, levels, genes, self_map=self_map)
+    reread = diag.load_validated_panels(tables)
+    assert reread.family_ids() == sorted({*before.family_ids(), result.family_id})
+    for family_id in before.family_ids():
+        assert reread.family_records(family_id) == before.family_records(family_id)
+    stored = {
+        (item.level, item.class_name): item
+        for item in reread.level_records(result.family_id)
+    }
+    assert set(stored) == set(
+        zip(records["level"].astype(str), records["class"].astype(str), strict=True)
+    )
+    decision = diag.trust_state(
+        reference_id=run.PRIMARY_REFERENCE,
+        role="primary",
+        species="human",
+        panel_hash=panel.panel_hash,
+        n_panel_genes=panel.n_genes,
+        family=panel_family(
+            panel.ensembl_ids,
+            species="human",
+            platforms=panel.platforms,
+            known_families=reread.known_families(),
+        ),
+        validated=reread,
+        rules=diag.TrustRules(min_mapped_genes=5, min_root_markers=3),
+        coverage=diag.CoverageDiagnostics.from_bundle_manifest(manifest),
+        resolvability=self_map,
+    )
+    assert decision.state == "validated", decision
+    assert decision.validation_basis == "simulation"
+    for _, row in validated.iterrows():
+        level, cls = str(row["level"]), str(row["class"])
+        depth = int(row["validated_min_depth"])
+        assert stored[(level, cls)].validated_min_depth == depth
+        assert decision.is_validated(level, cls, depth), (level, cls)
+        assert not decision.is_validated(level, cls, depth - 1), (level, cls)
+    for _, row in records[records["status"] != gp.RECORD_VALIDATED].iterrows():
+        assert not decision.is_validated(str(row["level"]), str(row["class"]), 10**6)
 
 
 def test_gate_p_stops_before_any_build_when_a_donor_pool_is_too_small(
