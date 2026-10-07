@@ -285,7 +285,9 @@ process CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE {
     // src) (species, panel status and size, annotation config, rules
     // fingerprint); bundle_refs: the refs MAP mapped with; alignment_files:
     // the pair's shared tissue mask and registration summary from ALIGN (M5),
-    // or none.
+    // or none; registration_files: the QC stage's registration checks of the
+    // pair x segmentation, one per platform (G1: the mouse gate's, the human
+    // real-data QC's; M13 C15), or none without a QC stage.
     tuple val(pair_id),
         val(segmentation),
         val(resolve_spec),
@@ -295,7 +297,8 @@ process CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE {
         path(panel_dir, stageAs: "resolve_inputs/annotation_panel_out"),
         path(bundle_refs, arity: "0..*", stageAs: "resolve_inputs/bundle_refs/bundle_ref_?.json"),
         path(map_dir, stageAs: "resolve_inputs/annotation_map_out"),
-        path(alignment_files, arity: "0..*", stageAs: "resolve_inputs/align_out/*")
+        path(alignment_files, arity: "0..*", stageAs: "resolve_inputs/align_out/*"),
+        path(registration_files, arity: "0..*", stageAs: "resolve_inputs/registration_qc/*")
 
     output:
     // annotation_resolve_out/<platform>/<sid>_celltype_labels.parquet (plan
@@ -317,6 +320,7 @@ process CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE {
         resolve_spec,
         bundle_refs as List,
         alignment_files as List,
+        registration_files as List,
     )
     """
     set -euo pipefail
@@ -350,6 +354,7 @@ JSON
         resolve_spec,
         bundle_refs as List,
         alignment_files as List,
+        registration_files as List,
     )
     def summaryFile = AnnotationReferences.resolveSummaryFile(pair_id)
     def copyRefs = (bundle_refs as List).collect { ref ->

@@ -223,8 +223,14 @@ def test_resolve_caches_on_content_and_publishes_under_the_segmentation() -> Non
     assert (
         'path(alignment_files, arity: "0..*", stageAs: "resolve_inputs/align_out/*")'
     ) in block
+    # The QC stage's registration checks (G1; M13 C15).
+    assert (
+        'path(registration_files, arity: "0..*", '
+        'stageAs: "resolve_inputs/registration_qc/*")'
+    ) in block
     script = block[block.index("script:") : block.index("stub:")]
     assert "AnnotationReferences.resolveConfigJson(resolve_spec)" in script
+    assert "registration_files as List," in script
     assert "--out annotation_resolve_out" in script
     assert "--run-record annotation_resolve_run.json" in script
     stub = block[block.index("stub:") :]
@@ -876,8 +882,10 @@ class AnnotationModuleHarness {
                 )
             case "resolveArguments":
                 return AnnotationReferences.resolveArguments(
-                    c.spec, c.refs, c.alignment
+                    c.spec, c.refs, c.alignment, c.registration ?: []
                 )
+            case "registrationQcFiles":
+                return AnnotationReferences.registrationQcFiles(c.qc_out)*.toString()
             case "resolveRulesFingerprint":
                 return AnnotationReferences.resolveRulesFingerprint(c.source_root)
             case "resolveSummaryFile":
@@ -1408,6 +1416,16 @@ def _resolve_cases(root: Path, human: dict[str, Any]) -> dict[str, dict[str, Any
                 "resolve_inputs/align_out/registration_summary.json",
             ],
         },
+        "resolve_arguments_registration": {
+            "fn": "resolveArguments",
+            "spec": spec,
+            "refs": refs,
+            "alignment": [],
+            "registration": [
+                "resolve_inputs/registration_qc/p1_merscope_registration_qc.json",
+                "resolve_inputs/registration_qc/p1_xenium_registration_qc.json",
+            ],
+        },
         "fingerprint_base": {"fn": "resolveRulesFingerprint", "source_root": str(base)},
         "fingerprint_same": {"fn": "resolveRulesFingerprint", "source_root": str(same)},
         "fingerprint_floor": {
@@ -1453,6 +1471,15 @@ def _compute_cases(root: Path, human: dict[str, Any]) -> dict[str, dict[str, Any
     half_align = root / "compute" / "half_align_out"
     half_align.mkdir()
     (half_align / "shared_tissue_mask.npy").write_bytes(b"x")
+    # QC task outputs (M13 C15): the registration checks at the top of each
+    # qc_out, not the QC summary or a nested file.
+    qc_merscope = root / "compute" / "qc_merscope" / "qc_out"
+    qc_xenium = root / "compute" / "qc_xenium" / "qc_out"
+    for qc_out, stem in ((qc_merscope, "p1_merscope"), (qc_xenium, "p1_xenium")):
+        (qc_out / "nested").mkdir(parents=True)
+        (qc_out / f"{stem}_registration_qc.json").write_text("{}")
+        (qc_out / f"{stem}_qc_summary.csv").write_text("x")
+        (qc_out / "nested" / f"{stem}_registration_qc.json").write_text("{}")
     map_first = {**human, "clustering_squidpy_mode": "map_first"}
     spec = {
         "table_key_suffix": "mapfirst",
@@ -1516,6 +1543,18 @@ def _compute_cases(root: Path, human: dict[str, Any]) -> dict[str, dict[str, Any
         "alignment_files_half": {
             "fn": "alignmentFiles",
             "align_out": str(half_align),
+        },
+        "registration_qc_files": {
+            "fn": "registrationQcFiles",
+            "qc_out": [str(qc_xenium), str(qc_merscope)],
+        },
+        "registration_qc_files_one": {
+            "fn": "registrationQcFiles",
+            "qc_out": str(qc_merscope),
+        },
+        "registration_qc_files_none": {
+            "fn": "registrationQcFiles",
+            "qc_out": [str(root / "compute" / "no_qc_out")],
         },
     }
 
@@ -2004,6 +2043,15 @@ def test_resolve_arguments(harness: dict[str, Any]) -> None:
     masked = _value(harness, "resolve_arguments_mask").split(" ")
     assert "--bundle-ref" not in masked
     assert masked[-2:] == ["--alignment-dir", "resolve_inputs/align_out"]
+    # Staged registration checks (M13 C15): each sample takes its own from
+    # the staged directory; none staged, no option.
+    registered = _value(harness, "resolve_arguments_registration").split(" ")
+    assert registered == [
+        *args,
+        "--registration-qc-dir",
+        "resolve_inputs/registration_qc",
+    ]
+    assert "--registration-qc" not in args + masked
     # Never a store lookup, an override or a results-tree mask lookup.
     for option in ("--store", "--current-bundles", "--bundle ", "--results-root"):
         assert option not in _value(harness, "resolve_arguments") + " "
@@ -2137,6 +2185,23 @@ def test_compute_stages_the_resolve_outputs_as_files(harness: dict[str, Any]) ->
         "P1_XENIUM_celltype_labels.parquet",
         "P1_resolve_summary.json",
     ]
+
+
+@needs_nextflow
+def test_registration_qc_files_are_the_top_level_checks(
+    harness: dict[str, Any],
+) -> None:
+    """RESOLVE stages each QC task's registration check, sorted (M13 C15)."""
+    files = _value(harness, "registration_qc_files")
+    assert [Path(path).name for path in files] == [
+        "p1_merscope_registration_qc.json",
+        "p1_xenium_registration_qc.json",
+    ]
+    assert all(Path(path).parent.name == "qc_out" for path in files)
+    assert [
+        Path(path).name for path in _value(harness, "registration_qc_files_one")
+    ] == ["p1_merscope_registration_qc.json"]
+    assert _value(harness, "registration_qc_files_none") == []
 
 
 @needs_nextflow

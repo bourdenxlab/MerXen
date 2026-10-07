@@ -1150,13 +1150,18 @@ as a stale MAP output; the store is never searched). The shared tissue mask
 of the pair JSD comes only from ALIGN's output channel, which M5 wires (as
 for `ANNOTATE_PANEL`); until then RESOLVE reports the whole-section JSD and
 never looks for a published `align_out` that ALIGN may still be writing
-(`--no-alignment-lookup`). A mouse MAP output is resolved with the M6
-mouse rules ([Mouse rules v1](#mouse-rules-v1-consensusresolve_mouse-73-m6));
-the task does not stage the QC stage's registration check yet (the QC
-channel is pipeline wiring, M5), and a pipeline RESOLVE
-(`--require-bundle-refs`) refuses a mouse sample without it, so mouse
-`map_first` needs M5's wiring ([Mouse region step](#mouse-region-step-m6),
-pipeline wiring). RESOLVE caches on content (`cache
+(`--no-alignment-lookup`). The task also stages the QC stage's
+registration checks of its pair × segmentation (each platform's
+`<pair>_<platform>_registration_qc.json`, from the QC tasks' output channel
+once all of the branch's QC tasks have finished; M13 C15) and reads them with
+`--registration-qc-dir`: G1 of the mouse gate and the human real-data QC's
+registration G1 (NR9). A branch the QC stage skips (`run_qc` off, or not an
+analysis segmentation) stages none: its human G1 is `not_evaluable`, and a
+pipeline RESOLVE (`--require-bundle-refs`) refuses a mouse sample without a
+check. A mouse MAP output is resolved with the M6 mouse rules
+([Mouse rules v1](#mouse-rules-v1-consensusresolve_mouse-73-m6)); mouse
+`map_first` still needs the rest of M5's wiring
+([Mouse region step](#mouse-region-step-m6), pipeline wiring). RESOLVE caches on content (`cache
 "deep"`), as MAP does, and its task hash also sees the annotation config it
 writes and a fingerprint of the RESOLVE rules: the sha256 of the files under
 `src/merxen/annotation/`, `src/merxen/assets/annotation/` (floors,
@@ -1248,6 +1253,12 @@ PREPARE -> ANNOTATE_PANEL -> ANNOTATE_REFERENCE_PREP (per unique bundle)
   it) and are staged into ANNOTATE_PANEL (label-free set c) and RESOLVE
   (the pair JSD's shared-mask restriction); a pair without alignment gets
   none.
+- **Registration checks.** Each pair × segmentation's
+  `*_registration_qc.json` come from the QC tasks' output channel (hook H5
+  groups the branch's QC tasks, one per active platform) and are staged
+  into RESOLVE (`--registration-qc-dir`: mouse gate G1, human real-data QC
+  G1; M13 C15); a branch the QC stage skips gets none. RESOLVE waits for its
+  branch's QC tasks, which the clustering inputs already wait for.
 - **COMPUTE_CPU** stages RESOLVE's label tables, annotation manifests and
   pair summary as files and caches on their content (`cache "deep"` hashes a
   file's content but a directory only by its metadata): a RESOLVE re-run
@@ -1611,8 +1622,9 @@ row's value under `mouse_section_regions`, the
 `samplesheet_columns.section_regions_by_sample` reads (the row settings'
 `annotation_mouse_section_regions` key is not read by MAP); (2) the
 RESOLVE task to stage the QC stage's registration check of each sample and
-pass it with `--registration-qc` or `--registration-qc-dir` (a pipeline
-RESOLVE, `--require-bundle-refs`, refuses a mouse sample without it); (3)
+pass it with `--registration-qc` or `--registration-qc-dir` (done in M13
+C15 for both species, when the QC stage runs; a pipeline RESOLVE,
+`--require-bundle-refs`, refuses a mouse sample without it); (3)
 the `wmb_region_share` bundle ref staged for RESOLVE as for MAP; (4) a MAP
 rules fingerprint (as RESOLVE's `rules_fingerprint`) over
 `mouse_regions.py`, `config.py` and the MAP pipeline code, or
@@ -1808,7 +1820,7 @@ wiring follows M6b.
    on the table cells' query counts and the bundle's `profiles.parquet`
    (marker sets derived in the run, their sha256 in the outcome's details);
    the registration check (`--registration-qc` or `--registration-qc-dir`,
-   human G1; the pipeline task stages the QC stage's checks, see below); the
+   human G1; the pipeline's RESOLVE task stages the QC stage's checks); the
    sample's flag strata; the version-7 bundle's stored simulated `n_genes`
    with the table cells counted on the same genes; for version 7, per primary
    level the real confident share per class key against the class-depth
@@ -2380,9 +2392,9 @@ held-out-gene CSV is not produced in the pipeline, so item 8 is
   ag7 / VZG2), but the gate derives its markers per panel and reads .805 /
   .819 on the same sections [L]. G4 is not evaluated until M6b's AP
   estimate chooses the MERFISH window (standalone runs pass
-  `--mouse-g4-sections`). The pipeline's RESOLVE task does not stage the
-  QC stage's registration check yet (M5 wiring) and refuses a mouse sample
-  without one; a standalone run passes `--registration-qc` or
+  `--mouse-g4-sections`). The pipeline's RESOLVE task stages the QC
+  stage's registration checks (M13 C15) and refuses a mouse sample without
+  one (a branch the QC stage skips); a standalone run passes `--registration-qc` or
   `--registration-qc-dir`, and without either G1 is not evaluated and the
   gate warns. G1 is the signal that catches misregistered data: per-cell confidence does not
   (class bootstrap ≥ 0.9 covers .733 of the invalid VZG2 proseg_hybrid cells

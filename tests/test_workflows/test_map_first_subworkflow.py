@@ -20,7 +20,9 @@ PREP, a large panel) and checks that:
 * MAP receives exactly the bundle refs its ``required_bundles.json`` lists
   (none for a refused panel), and a failed PREP drops only its branches;
 * RESOLVE runs once per pair x segmentation, after its own MAP, on that
-  MAP's output, the same bundle refs and the pair's ALIGN files;
+  MAP's output, the same bundle refs, the pair's ALIGN files and the
+  branch's registration checks from the QC stage (read with
+  ``--registration-qc-dir``; a branch without an entry still resolves);
 * COMPUTE_CPU runs once per pair x segmentation, after its own RESOLVE, on
   the RESOLVE output, in the main environment without a GPU lock, and emits
   FINALIZE's input shape;
@@ -187,6 +189,16 @@ def _prepared_branch(
 # The pair whose ALIGN files the harness passes (every other pair has none).
 ALIGNED_PAIR = "F1"
 ALIGN_FILES = ("shared_tissue_mask.npy", "registration_summary.json")
+# The branch whose QC registration checks the harness passes (M13 C15), the
+# branch with no registration entry (it must still resolve, without checks)
+# and an entry of a branch that is never mapped (it must be left out).
+REGISTERED_BRANCH = ("F1", "proseg_hybrid")
+REGISTRATION_FILES = (
+    "f1_merscope_registration_qc.json",
+    "f1_xenium_registration_qc.json",
+)
+UNREGISTERED_BRANCH = ("PFEW", "proseg_hybrid")
+STRAY_REGISTRATION_BRANCH = ("F9", "proseg_hybrid")
 
 
 def _write_alignment(root: Path, pair_ids: list[str]) -> list[str]:
@@ -201,6 +213,41 @@ def _write_alignment(root: Path, pair_ids: list[str]) -> list[str]:
         for pair_id in sorted(set(pair_ids))
     ]
     (root / "alignment_inputs.json").write_text(json.dumps(entries))
+    return files
+
+
+def _write_registration(root: Path, branches: list[tuple[str, str]]) -> list[str]:
+    """Write one registration entry per branch (M13 C15).
+
+    ``REGISTERED_BRANCH`` gets its two QC checks, ``UNREGISTERED_BRANCH`` no
+    entry at all, a branch that is never mapped a stray entry, and every
+    other branch ``[]`` (no QC stage).
+    """
+    qc_out = root / "qc" / "_".join(REGISTERED_BRANCH) / "qc_out"
+    qc_out.mkdir(parents=True)
+    files = [str(qc_out / name) for name in REGISTRATION_FILES]
+    for path in files:
+        Path(path).write_text(json.dumps({"status": "PASS", "density_ratio": 3.0}))
+    stray = root / "qc" / "stray" / "f9_merscope_registration_qc.json"
+    stray.parent.mkdir(parents=True)
+    stray.write_text("{}")
+    entries = [
+        {
+            "pair_id": pair_id,
+            "segmentation": segmentation,
+            "files": files if (pair_id, segmentation) == REGISTERED_BRANCH else [],
+        }
+        for pair_id, segmentation in sorted(set(branches))
+        if (pair_id, segmentation) != UNREGISTERED_BRANCH
+    ]
+    entries.append(
+        {
+            "pair_id": STRAY_REGISTRATION_BRANCH[0],
+            "segmentation": STRAY_REGISTRATION_BRANCH[1],
+            "files": [str(stray)],
+        }
+    )
+    (root / "registration_inputs.json").write_text(json.dumps(entries))
     return files
 
 
@@ -416,7 +463,18 @@ class MapHarness {
 }
 """
 
-# CLUSTERING_ANNOTATE takes PREPARE's tuple plus the pair's ALIGN files.
+# The registration checks per pair x segmentation, as hook H5 builds them.
+REGISTRATION_CHANNEL = """registration_ch = channel
+        .fromList(MapHarness.readList(params.registration_inputs))
+        .map { item ->
+            tuple(
+                item.pair_id, item.segmentation,
+                item.files.collect { path -> file(path) },
+            )
+        }"""
+
+# CLUSTERING_ANNOTATE takes PREPARE's tuple plus the pair's ALIGN files, and
+# the registration checks.
 HARNESS_ANNOTATE = """
 include { CLUSTERING_ANNOTATE } from '__SUBWORKFLOW__'
 
@@ -430,13 +488,15 @@ workflow {
                 item.alignment_files.collect { path -> file(path) },
             )
         }
-    mapped = CLUSTERING_ANNOTATE(prepared_ch)
+    __REGISTRATION__
+    mapped = CLUSTERING_ANNOTATE(prepared_ch, registration_ch)
     __EMIT__
 }
 """
 
 # CLUSTERING_MAP_FIRST, as main.nf's hook H5 calls it: PREPARE's tuple, one
-# ALIGN entry per pair, and the end-of-run summary of hook H6.
+# ALIGN entry per pair, the registration checks per pair x segmentation, and
+# the end-of-run summary of hook H6.
 HARNESS_MAP_FIRST = """
 include { CLUSTERING_MAP_FIRST } from '__SUBWORKFLOW__'
 
@@ -452,10 +512,11 @@ workflow {
     alignment_ch = channel
         .fromList(MapHarness.readList(params.alignment_inputs))
         .map { item -> tuple(item.pair_id, item.files.collect { path -> file(path) }) }
+    __REGISTRATION__
     prepared_ch.subscribe { pairId, segmentation, _samplesJson, _config, _preparedDir ->
         AnnotationRunRecord.expect(pairId, segmentation)
     }
-    mapped = CLUSTERING_MAP_FIRST(prepared_ch, alignment_ch)
+    mapped = CLUSTERING_MAP_FIRST(prepared_ch, alignment_ch, registration_ch)
     __EMIT__
     mapped.computed
         .map { item -> MapHarness.computedRow(item) }
@@ -494,9 +555,9 @@ def _write_harness(root: Path, *, entry: str = "CLUSTERING_MAP_FIRST") -> None:
         HARNESS_MAP_FIRST if entry == "CLUSTERING_MAP_FIRST" else HARNESS_ANNOTATE
     )
     (root / "main.nf").write_text(
-        template.replace("__SUBWORKFLOW__", str(SUBWORKFLOW)).replace(
-            "__EMIT__", EMIT_LABELS
-        )
+        template.replace("__SUBWORKFLOW__", str(SUBWORKFLOW))
+        .replace("__EMIT__", EMIT_LABELS)
+        .replace("__REGISTRATION__", REGISTRATION_CHANNEL)
     )
 
 
@@ -511,6 +572,9 @@ def _write_inputs(root: Path) -> list[dict[str, str]]:
     ]
     (root / "prepared_inputs.json").write_text(json.dumps(items))
     _write_alignment(root, [item["pair_id"] for item in items])
+    _write_registration(
+        root, [(item["pair_id"], item["segmentation"]) for item in items]
+    )
     return items
 
 
@@ -545,6 +609,7 @@ params {{
     annotation_reference_store = "{root / "store"}"
     prepared_inputs = "{root / "prepared_inputs.json"}"
     alignment_inputs = "{root / "alignment_inputs.json"}"
+    registration_inputs = "{root / "registration_inputs.json"}"
     maps_out = "{root / "maps_out.json"}"
     labels_out = "{root / "labels_out.json"}"
     computed_out = "{root / "computed_out.json"}"
@@ -954,6 +1019,20 @@ def test_resolve_reads_its_own_map_output_and_bundle_refs(
             if branch[0] == ALIGNED_PAIR
             else []
         )
+        # The branch's registration checks (M13 C15) are staged and read with
+        # --registration-qc-dir; a branch without checks, or without an
+        # entry at all, resolves without them.
+        registered = branch == REGISTERED_BRANCH
+        assert summary["registration_files"] == (
+            [f"resolve_inputs/registration_qc/{name}" for name in REGISTRATION_FILES]
+            if registered
+            else []
+        )
+        arguments = summary["resolve_arguments"].split(" ")
+        assert ("--registration-qc-dir" in arguments) is registered
+        if registered:
+            option = arguments.index("--registration-qc-dir")
+            assert arguments[option + 1] == "resolve_inputs/registration_qc"
         assert summary["panel_status"] == ("refused" if not expected else "ok")
         config = AnnotationConfig.model_validate_json(
             (output / "annotation_config.json").read_text()
@@ -1227,8 +1306,8 @@ def test_map_is_connected_after_the_required_bundle_join() -> None:
     )
     assert "error(" not in map_first
     assert (
-        "annotated = CLUSTERING_ANNOTATE(prepared_ch.combine(alignment_ch, by: 0))"
-        in map_first
+        "annotated = CLUSTERING_ANNOTATE(prepared_ch.combine(alignment_ch, by: 0), "
+        "registration_ch)" in map_first
     )
     assert "CLUSTERING_SQUIDPY_COMPUTE_CPU(compute_inputs_ch)" in map_first
     assert (
@@ -1249,6 +1328,9 @@ def test_resolve_is_connected_after_map() -> None:
     assert "mapped = CLUSTERING_ANNOTATE_MAP(prepared_ch)" in body
     assert "resolve_inputs_ch = mapped.maps\n" in body
     assert ".join(alignment_by_branch_ch)" in body
+    # Never an inner join on the registration checks: it would drop a branch.
+    assert ".join(registration_by_branch_ch, remainder: true)" in body
+    assert "registrationFiles ?: []" in body
     assert (
         'AnnotationReferences.resolveSpec(params, panelDir, "${projectDir}/../src")'
         in body
@@ -1293,6 +1375,195 @@ def test_main_nf_calls_map_first_only_through_hook_h5() -> None:
             assert "CLUSTERING_SQUIDPY_COMPUTE_CPU(" not in path.read_text(), path
 
 
+REGISTRATION_MAIN = """
+workflow {
+    def rows = new groovy.json.JsonSlurperClassic().parseText(params.rows)
+    sample_rows_ch = channel.fromList(
+        rows.collect { row -> tuple(row.pair_id, row, row.settings) }
+    )
+    // QC's tuple: key, pair, platform, segmentation, zarr, qc_out, table and
+    // shape keys.
+    def qcRows = new groovy.json.JsonSlurperClassic().parseText(params.qc)
+    qc_results_ch = channel.fromList(
+        qcRows.collect { item ->
+            tuple(
+                "key", item.pair_id, item.platform, item.segmentation, "x.zarr",
+                file(item.qc_out), "table", "shape",
+            )
+        }
+    )
+__REGISTRATION__
+    map_first_registration_ch
+        .map { pairId, segmentation, files ->
+            [pairId, segmentation, files.collect { f -> f.toString() }]
+        }
+        .collect(flat: false)
+        .ifEmpty([])
+        .subscribe { items ->
+            new File(params.out).text = groovy.json.JsonOutput.toJson(items)
+        }
+}
+"""
+
+
+def _main_nf_block(main_text: str, start: str, end: str) -> str:
+    """Return main.nf from the line starting with ``start`` up to ``end``."""
+    begin = main_text.index(start)
+    return main_text[begin : main_text.index(end, begin)]
+
+
+def test_the_registration_branches_complement_the_qc_stage() -> None:
+    """Hook H5 gives [] exactly to the branches qc_inputs_ch leaves out.
+
+    A branch given [] although its QC runs could resolve before its checks
+    arrive, so the two predicates must stay each other's negation.
+    """
+    main_text = MAIN_NF.read_text()
+    qc_filter = _main_nf_block(
+        main_text, "    qc_inputs_ch = analysis_layer_validation_results_ch", ".map {"
+    )
+    assert (
+        "settings.run_qc && settings.analysis_segmentations.contains(_segmentation)"
+        in qc_filter
+    )
+    block = _main_nf_block(
+        main_text,
+        "        map_first_registration_ch = qc_results_ch",
+        "        map_first_alignment_ch = alignment_results_ch",
+    )
+    assert (
+        "!(settings.run_qc && settings.analysis_segmentations.contains(segmentation))"
+        in block
+    )
+    assert "settings.analysis_input_segmentations" in block
+    assert "groupKey(" in block and ".groupTuple(remainder: true)" in block
+    assert "AnnotationReferences.registrationQcFiles(qcOutDirs)" in block
+    branch = main_text.index("    if (AnnotationSettings.isMapFirstRun(params)) {")
+    legacy = main_text.index("\n    } else {\n", branch)
+    assert branch < main_text.index(block) < legacy
+    assert "            map_first_registration_ch,\n        ).computed" in main_text
+
+
+@needs_nextflow
+def test_map_first_registration_gives_one_tuple_per_branch(tmp_path: Path) -> None:
+    """Hook H5's registration checks (M13 C15): main.nf's own block.
+
+    Per pair x segmentation: the QC tasks' ``*_registration_qc.json`` (one
+    per active platform, released once all have finished), ``[]`` for a
+    branch the QC stage skips (``run_qc`` off, or a segmentation that is not
+    an analysis segmentation) and for a QC output without a registration
+    check. The QC summary CSV is never staged.
+    """
+    assert NEXTFLOW is not None
+    block = _main_nf_block(
+        MAIN_NF.read_text(),
+        "        map_first_registration_ch = qc_results_ch",
+        "        map_first_alignment_ch = alignment_results_ch",
+    )
+    outputs = {}
+    for name, files in (
+        (
+            "p1_merscope",
+            ["p1_merscope_registration_qc.json", "p1_merscope_qc_summary.csv"],
+        ),
+        ("p1_xenium", ["p1_xenium_registration_qc.json"]),
+        ("p3_merscope", ["p3_merscope_qc_summary.csv"]),
+    ):
+        qc_out = tmp_path / name / "qc_out"
+        qc_out.mkdir(parents=True)
+        for file_name in files:
+            (qc_out / file_name).write_text("{}")
+        (qc_out / "nested").mkdir()
+        (qc_out / "nested" / f"{name}_registration_qc.json").write_text("{}")
+        outputs[name] = qc_out
+    both = ["MERSCOPE", "XENIUM"]
+    rows = [
+        {
+            "pair_id": "P1",
+            "settings": {
+                "active_platforms": both,
+                "run_qc": True,
+                "analysis_segmentations": ["proseg_hybrid"],
+                "analysis_input_segmentations": ["proseg_hybrid", "reseg"],
+            },
+        },
+        {
+            "pair_id": "P2",
+            "settings": {
+                "active_platforms": both,
+                "run_qc": False,
+                "analysis_segmentations": ["proseg_hybrid"],
+                "analysis_input_segmentations": ["proseg_hybrid"],
+            },
+        },
+        {
+            "pair_id": "P3",
+            "settings": {
+                "active_platforms": ["MERSCOPE"],
+                "run_qc": True,
+                "analysis_segmentations": ["proseg_hybrid"],
+                "analysis_input_segmentations": ["proseg_hybrid"],
+            },
+        },
+    ]
+    qc = [
+        {
+            "pair_id": "P1",
+            "platform": "MERSCOPE",
+            "segmentation": "proseg_hybrid",
+            "qc_out": str(outputs["p1_merscope"]),
+        },
+        {
+            "pair_id": "P3",
+            "platform": "MERSCOPE",
+            "segmentation": "proseg_hybrid",
+            "qc_out": str(outputs["p3_merscope"]),
+        },
+        {
+            "pair_id": "P1",
+            "platform": "XENIUM",
+            "segmentation": "proseg_hybrid",
+            "qc_out": str(outputs["p1_xenium"]),
+        },
+    ]
+    (tmp_path / "lib").mkdir()
+    for source in LIB_DIR.glob("*.groovy"):
+        shutil.copy(source, tmp_path / "lib" / source.name)
+    (tmp_path / "main.nf").write_text(
+        REGISTRATION_MAIN.replace("__REGISTRATION__", block)
+    )
+    out = tmp_path / "registration.json"
+    (tmp_path / "nextflow.config").write_text(
+        f"params.rows = '{json.dumps(rows)}'\n"
+        f"params.qc = '{json.dumps(qc)}'\n"
+        f"params.out = '{out}'\n"
+    )
+    completed = subprocess.run(
+        [NEXTFLOW, "-log", str(tmp_path / "nextflow.log"), "run", "main.nf"],
+        cwd=tmp_path,
+        env=_nextflow_env(),
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    items = sorted(json.loads(out.read_text()))
+    assert items == [
+        [
+            "P1",
+            "proseg_hybrid",
+            [
+                str(outputs["p1_merscope"] / "p1_merscope_registration_qc.json"),
+                str(outputs["p1_xenium"] / "p1_xenium_registration_qc.json"),
+            ],
+        ],
+        ["P1", "reseg", []],
+        ["P2", "proseg_hybrid", []],
+        ["P3", "proseg_hybrid", []],
+    ]
+
+
 # --------------------------------------------------------------------------
 # The real MAP script (fake merxen annotate)
 
@@ -1320,6 +1591,9 @@ def test_map_runs_the_real_script_with_the_pipeline_arguments(tmp_path: Path) ->
         )
     ]
     (tmp_path / "prepared_inputs.json").write_text(json.dumps(items))
+    _write_registration(
+        tmp_path, [(item["pair_id"], item["segmentation"]) for item in items]
+    )
     _write_config(tmp_path, failing=False, slow=False)
     # F1 has a published MAP output: its task reuses from there.
     published = tmp_path / "results/F1/proseg_hybrid/annotation_map/annotation_map_out"
@@ -1415,6 +1689,7 @@ def test_map_runs_the_real_script_with_the_pipeline_arguments(tmp_path: Path) ->
     }
     assert set(labels) == set(maps)
     resolve_records = {}
+    record_path_dirs = {}
     for path in (tmp_path / "work").glob("*/*/fake_annotate_resolve.json"):
         required = json.loads(
             (
@@ -1422,9 +1697,9 @@ def test_map_runs_the_real_script_with_the_pipeline_arguments(tmp_path: Path) ->
                 / "resolve_inputs/annotation_panel_out/required_bundles.json"
             ).read_text()
         )
-        resolve_records[(required["pair_id"], required["segmentation"])] = json.loads(
-            path.read_text()
-        )
+        key = (required["pair_id"], required["segmentation"])
+        resolve_records[key] = json.loads(path.read_text())
+        record_path_dirs[key] = path.parent
     assert set(resolve_records) == set(maps)
     for branch, record in resolve_records.items():
         argv, environment = record["argv"], record["env"]
@@ -1441,6 +1716,16 @@ def test_map_runs_the_real_script_with_the_pipeline_arguments(tmp_path: Path) ->
             assert argv[argv.index(option) + 1] == staged, (branch, option)
         assert "--require-bundle-refs" in argv and "--no-alignment-lookup" in argv
         assert "--alignment-dir" not in argv
+        # The QC stage's registration checks (G1; M13 C15), when staged.
+        if branch == REGISTERED_BRANCH:
+            option = argv.index("--registration-qc-dir")
+            assert argv[option + 1] == "resolve_inputs/registration_qc"
+            staged = record_path_dirs[branch] / "resolve_inputs" / "registration_qc"
+            assert sorted(path.name for path in staged.iterdir()) == sorted(
+                REGISTRATION_FILES
+            )
+        else:
+            assert "--registration-qc-dir" not in argv, branch
         for name in (
             "OMP_NUM_THREADS",
             "OPENBLAS_NUM_THREADS",

@@ -3465,6 +3465,47 @@ workflow {
                 map_first: mapFirst
                 legacy: true
             }
+        // The registration checks RESOLVE reads (G1: the mouse gate's, the
+        // human real-data QC's NR9; M13 C15): per pair x segmentation, the QC
+        // stage's *_registration_qc.json of each active platform, released
+        // once all of the branch's QC tasks have finished (groupKey), and []
+        // for a branch the QC stage skips (qc_inputs_ch's filter: run_qc and
+        // an analysis segmentation).
+        map_first_registration_ch = qc_results_ch
+            .map { _key, pairId, _platform, segmentation, _latestZarr, qcOutDir, _tableKey, _shapeKey ->
+                tuple(pairId, segmentation, qcOutDir)
+            }
+            .combine(
+                sample_rows_ch.map { pairId, _row, settings ->
+                    tuple(pairId, settings.active_platforms.size())
+                },
+                by: 0,
+            )
+            .map { pairId, segmentation, qcOutDir, nPlatforms ->
+                tuple(
+                    groupKey(AnnotationReferences.branchKey(pairId, segmentation), nPlatforms),
+                    pairId,
+                    segmentation,
+                    qcOutDir,
+                )
+            }
+            .groupTuple(remainder: true)
+            .map { _branchKey, pairIds, segmentations, qcOutDirs ->
+                tuple(
+                    pairIds[0],
+                    segmentations[0],
+                    AnnotationReferences.registrationQcFiles(qcOutDirs),
+                )
+            }
+            .mix(
+                sample_rows_ch.flatMap { pairId, _row, settings ->
+                    settings.analysis_input_segmentations
+                        .findAll { segmentation ->
+                            !(settings.run_qc && settings.analysis_segmentations.contains(segmentation))
+                        }
+                        .collect { segmentation -> tuple(pairId, segmentation, []) }
+                }
+            )
         map_first_alignment_ch = alignment_results_ch
             .map { pairId, _merscopeLatest, _xeniumLatest, _transformJson, _coordsDir, alignOut ->
                 tuple(pairId, AnnotationReferences.alignmentFiles(alignOut))
@@ -3477,6 +3518,7 @@ workflow {
         clustering_computed_ch = CLUSTERING_MAP_FIRST(
             clustering_prepared_by_mode_ch.map_first.map { item -> item.take(5) },
             map_first_alignment_ch,
+            map_first_registration_ch,
         ).computed
             .mix(
                 CLUSTERING_SQUIDPY_COMPUTE(

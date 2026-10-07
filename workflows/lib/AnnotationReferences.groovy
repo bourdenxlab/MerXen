@@ -73,6 +73,14 @@ class AnnotationReferences {
     static final String SHARED_TISSUE_MASK_FILE = "shared_tissue_mask.npy"
     static final String REGISTRATION_SUMMARY_FILE = "registration_summary.json"
 
+    // The QC stage's registration checks RESOLVE reads as gate G1 (mouse) and
+    // the real-data QC's registration G1 (human, NR9; M13 C15): each
+    // platform's <pair>_<platform lower-case>_registration_qc.json
+    // (merxen.qc.metrics.save_qc_results; mouse_gate.REGISTRATION_JSON_SUFFIX),
+    // staged under RESOLVE_INPUT_DIR/RESOLVE_REGISTRATION_DIR.
+    static final String REGISTRATION_QC_SUFFIX = "_registration_qc.json"
+    static final String RESOLVE_REGISTRATION_DIR = "registration_qc"
+
     // What the RESOLVE rules fingerprint covers, relative to this checkout's
     // src/: the threshold, floor, trust, consensus, flag and composition code
     // with its packaged tables (floors, vocab, validated panels, state
@@ -681,13 +689,24 @@ class AnnotationReferences {
      * lookup), and takes the shared tissue mask only from staged ALIGN files
      * (M5), never from a published align_out ALIGN may still be writing.
      *
+     * The QC stage's registration checks, when staged, are read with
+     * --registration-qc-dir (mouse gate G1; human real-data QC G1, NR9):
+     * each sample takes its own <sample_id lower-case>_registration_qc.json.
+     *
      * @param spec resolveSpec result.
      * @param bundleRefs Staged bundle_ref.json paths.
      * @param alignmentFiles Staged [shared_tissue_mask.npy,
      *     registration_summary.json], or an empty list.
+     * @param registrationFiles Staged *_registration_qc.json files, or an
+     *     empty list (no QC stage for the branch).
      * @return Shell-quoted arguments (without --annotation-config and --out).
      */
-    static String resolveArguments(Map spec, List bundleRefs, List alignmentFiles) {
+    static String resolveArguments(
+        Map spec,
+        List bundleRefs,
+        List alignmentFiles,
+        List registrationFiles = []
+    ) {
         def args = [
             "--species", spec.species.toString(),
             "--map-dir", "${RESOLVE_INPUT_DIR}/${MAP_OUTPUT_DIR}".toString(),
@@ -701,7 +720,41 @@ class AnnotationReferences {
         if (alignmentFiles) {
             args += ["--alignment-dir", "${RESOLVE_INPUT_DIR}/align_out".toString()]
         }
+        if (registrationFiles) {
+            args += [
+                "--registration-qc-dir",
+                "${RESOLVE_INPUT_DIR}/${RESOLVE_REGISTRATION_DIR}".toString(),
+            ]
+        }
         return args.collect { arg -> shellQuote(arg) }.join(" ")
+    }
+
+    /**
+     * Return the registration checks of a pair x segmentation's QC tasks.
+     *
+     * Each QC task (one per platform) writes its check to the top of its
+     * qc_out directory when the registration check ran; RESOLVE stages them
+     * (M13 C15: without them the human real-data QC's registration G1 is
+     * not_evaluable, and a pipeline mouse RESOLVE refuses the sample).
+     *
+     * @param qcOutDirs The branch's qc_out directories (or one directory).
+     * @return The *_registration_qc.json files, sorted by name; an empty list
+     *     when none exists.
+     */
+    static List registrationQcFiles(Object qcOutDirs) {
+        def directories = qcOutDirs instanceof Collection ? qcOutDirs as List : [qcOutDirs]
+        def files = []
+        directories.findAll { item -> item != null }.each { item ->
+            def directory = asPath(item)
+            if (Files.isDirectory(directory)) {
+                directory.toFile().listFiles()?.each { File file ->
+                    if (file.isFile() && file.name.endsWith(REGISTRATION_QC_SUFFIX)) {
+                        files << file.toPath()
+                    }
+                }
+            }
+        }
+        return files.sort { Path path -> path.fileName.toString() }
     }
 
     /** Return RESOLVE's <pair>_resolve_summary.json name. */
@@ -915,6 +968,7 @@ class AnnotationReferences {
      * @param spec resolveSpec result.
      * @param bundleRefs Staged bundle_ref.json paths.
      * @param alignmentFiles Staged ALIGN files.
+     * @param registrationFiles Staged registration checks.
      * @return The JSON text.
      */
     static String stubResolveSummaryJson(
@@ -922,7 +976,8 @@ class AnnotationReferences {
         Object segmentation,
         Map spec,
         List bundleRefs,
-        List alignmentFiles
+        List alignmentFiles,
+        List registrationFiles = []
     ) {
         return JsonOutput.prettyPrint(JsonOutput.toJson([
             stub: true,
@@ -938,6 +993,8 @@ class AnnotationReferences {
             annotation_config: spec.annotation_config,
             bundle_refs: (bundleRefs ?: []).collect { ref -> ref.toString() },
             alignment_files: (alignmentFiles ?: []).collect { item -> item.toString() },
+            registration_files: (registrationFiles ?: []).collect { item -> item.toString() },
+            resolve_arguments: resolveArguments(spec, bundleRefs, alignmentFiles, registrationFiles),
             samples: [:],
         ]))
     }

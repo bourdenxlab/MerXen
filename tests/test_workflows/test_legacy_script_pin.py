@@ -49,8 +49,11 @@ EXPECTED_SHA256: dict[str, str] = {
     # hook comment changed (legacy rows of a run with a map_first row reach
     # the legacy COMPUTE from it); the else-branch statements, the process
     # texts and the legacy inputs are unchanged.
+    # M13 C15: the map_first branch also builds RESOLVE's registration
+    # checks from the QC stage and passes them to CLUSTERING_MAP_FIRST; the
+    # else-branch, the process texts and the legacy inputs are unchanged.
     "main.nf wiring": (
-        "e4c70139e0d2c5141b5a50dffbffa923eb8ab028639b3787b5acfdce8a62ec6a"
+        "e3f78c9a688945365e9272a732e49d847250da1613115bfb65d5ac4297d82917"
     ),
     "param defaults": (
         "fe4ca1ed06ba1c74dba06b3a50219cfac58a719376ead6792ae7ae0568c5f3c2"
