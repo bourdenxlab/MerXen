@@ -605,7 +605,11 @@ merxen annotation-panel-simulate --public-panel xenium_prime_5k_mouse \
 Outputs in `--out-dir`: `simulate_report.json`, `SIMULATE_REPORT.txt`,
 `predicted_levels.csv` (+ `<reference>/predicted_levels_unfiltered.csv`),
 `prefilter_comparison.csv`, `resources.csv`, `panel/` (the panel files) and
-`<reference>/logs/`.
+`<reference>/logs/`. The report's `provenance` records the code that ran:
+`code_commit` with `code_commit_source` `export` when the command runs from a
+`git archive` export with a `COMMIT` file at its root (an export has no
+`.git`; a malformed `COMMIT` file is refused before any compute), else `git`
+(`git rev-parse HEAD`), else both `null`.
 
 | Option | Description |
 |--------|-------------|

@@ -17,6 +17,7 @@ starts without loading them.
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 from pathlib import Path
 from typing import Any, cast
@@ -69,10 +70,19 @@ def annotation_panel_fetch_command(panels: tuple[str, ...], out_dir: Path) -> No
         )
 
 
-def _git_commit() -> str | None:
+# The root of the source tree this module runs from (it lies in
+# ``src/merxen/cli``): a git worktree, or a ``git archive`` export, which has
+# no ``.git`` and names its commit in a ``COMMIT`` file at its root (as the
+# M13 dry-run script's export step writes it).
+_SOURCE_ROOT = Path(__file__).resolve().parents[3]
+CODE_COMMIT_FILE = "COMMIT"
+_FULL_COMMIT_ID = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+
+
+def _git_commit(root: Path) -> str | None:
     try:
         result = subprocess.run(
-            ["git", "-C", str(Path(__file__).resolve().parent), "rev-parse", "HEAD"],
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
             capture_output=True,
             text=True,
             check=False,
@@ -81,6 +91,40 @@ def _git_commit() -> str | None:
     except (OSError, subprocess.TimeoutExpired):
         return None
     return result.stdout.strip() or None
+
+
+def code_commit(source_root: Path | None = None) -> tuple[str | None, str | None]:
+    """Return the commit of the code that runs, and where it was read.
+
+    The ``COMMIT`` file at the tree's root is read first: an exported tree
+    has no ``.git``, so ``git rev-parse`` there finds no repository, or the
+    wrong one when the export lies inside another repository. A worktree
+    has no such file and is asked with ``git rev-parse HEAD``.
+
+    Args:
+        source_root: The tree's root (default: the tree this module runs
+            from).
+
+    Returns:
+        ``(commit, source)`` with source ``export`` (the ``COMMIT`` file) or
+        ``git``; ``(None, None)`` when neither gives a commit.
+
+    Raises:
+        click.ClickException: If the ``COMMIT`` file does not hold one full
+            commit id (the run would record a commit nobody can check).
+    """
+    root = _SOURCE_ROOT if source_root is None else source_root
+    marker = root / CODE_COMMIT_FILE
+    if marker.is_file():
+        text = marker.read_text(encoding="utf-8").strip()
+        if not _FULL_COMMIT_ID.fullmatch(text):
+            raise click.ClickException(
+                f"{marker} does not hold one full commit id (got {text[:80]!r}); "
+                "export the code again"
+            )
+        return text, "export"
+    commit = _git_commit(root)
+    return (commit, "git") if commit else (None, None)
 
 
 @click.command(name="annotation-panel-simulate")
@@ -397,6 +441,8 @@ def _annotation_panel_simulate(
     )
     from merxen.annotation.store import ReferenceStore, resolve_builder
 
+    # Before any compute: a malformed COMMIT file of an export is refused.
+    commit, commit_source = code_commit()
     gate_p_programme: Any = None
     gate_p_checks: Any = None
     if gate_p:
@@ -541,7 +587,8 @@ def _annotation_panel_simulate(
             v7_comparator=v7_comparator,
             provenance={
                 "public_panel": public_record,
-                "code_commit": _git_commit(),
+                "code_commit": commit,
+                "code_commit_source": commit_source,
                 "references": reference_ids,
                 "params": {key: str(value) for key, value in sorted(params.items())},
                 "store": str(store),

@@ -46,6 +46,8 @@ from .test_reference import (
 
 DONORS = ["H_small", "H_big", "H_mid"]
 DEFAULT_DONOR = "H_small"
+# The commit an exported tree's COMMIT file names.
+EXPORTED = "0123456789abcdef0123456789abcdef01234567"
 
 
 def fixture_truths(metadata_dir: Path) -> dict[str, str]:
@@ -500,11 +502,25 @@ def test_gate_p_stops_before_any_build_when_a_donor_pool_is_too_small(
     # before any leave-one-donor-out set is built or any replicate mapped.
     family = Family(tmp_path, monkeypatch, gate_config(topup_min_class_test_cells=1000))
     held_out = sorted((tmp_path / "gate_p_store" / reference.HO_REFERENCE_ID).iterdir())
-    result = run.run_gate_p(family.request(), run.GatePOptions(species="human"))
+    report = {
+        "platform": "MERSCOPE",
+        "settings": {"expected_depth": 30},
+        "panel": {"gene_ids": {}},
+        "references": {},
+        "provenance": {"code_commit": EXPORTED, "code_commit_source": "export"},
+    }
+    result = run.run_gate_p(
+        family.request(report=report), run.GatePOptions(species="human")
+    )
     assert result["status"] == run.STATUS_STOPPED
     assert "per-class top-up rule" in result["reason"]
     record = read_run(result)
     assert record["status"] == run.STATUS_STOPPED
+    # The stopped record names the code that ran, as the simulation did.
+    assert (record["code_commit"], record["code_commit_source"]) == (
+        EXPORTED,
+        "export",
+    )
     short = pd.DataFrame(record["pool_sizes"]["short"])
     assert set(short["donor"]) == {"H_big", "H_mid"}
     assert (short["n_available"] < 1000).all() and short["judged"].all()
@@ -762,6 +778,12 @@ def test_the_command_registers_gate_p_for_the_species_it_is_given(
     assert not (tmp_path / "gate_p_store").exists()
     assert not (tmp_path / "no_depth").exists()
     assert not (tmp_path / "production").exists()
+    # Run as from a `git archive` export: its COMMIT file names the code that
+    # runs, and both reports record it (the dry-run script writes the file).
+    export = tmp_path / "export"
+    export.mkdir()
+    (export / run_annotation_panels.CODE_COMMIT_FILE).write_text(EXPORTED + "\n")
+    monkeypatch.setattr(run_annotation_panels, "_SOURCE_ROOT", export)
     result = invoke(
         "--gate-p",
         "--species",
@@ -776,6 +798,12 @@ def test_the_command_registers_gate_p_for_the_species_it_is_given(
     record = json.loads(Path(report["gate_p"]["run"]).read_text())
     assert record["options"]["species"] == "human"
     assert record["options"]["prep_identity"] is False
+    assert report["provenance"]["code_commit"] == EXPORTED
+    assert report["provenance"]["code_commit_source"] == "export"
+    assert (record["code_commit"], record["code_commit_source"]) == (
+        EXPORTED,
+        "export",
+    )
     assert (tmp_path / "cli_out" / run.GATE_P_RUN_DIR / gp.GATE_P_REPORT_TXT).is_file()
     # The programme is registered for the command's run only.
     assert simulate.gate_p_hook() is None

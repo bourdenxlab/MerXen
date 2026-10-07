@@ -2053,8 +2053,13 @@ def run_gate_p(request: GatePRequest, options: GatePOptions) -> dict[str, Any]:
     default_all = {
         str(cell) for cell in res.load_test_cells(facts["test_dir"]).obs.index
     }
+    # The code that ran, as the base simulation recorded it (the command
+    # reads an exported tree's COMMIT file, else git); a stopped run keeps it.
+    provenance = request.report.get("provenance") or {}
     record: dict[str, Any] = {
         "schema_version": GATE_P_RUN_SCHEMA_VERSION,
+        "code_commit": provenance.get("code_commit"),
+        "code_commit_source": provenance.get("code_commit_source"),
         "options": options.to_json(),
         "family_id": None
         if request.panel.panel_family is None

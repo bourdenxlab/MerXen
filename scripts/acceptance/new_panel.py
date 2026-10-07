@@ -15,6 +15,13 @@ unchanged (``merxen annotation-panel-simulate --help`` lists them, the
 ``--gate-p-*`` options included). Point ``--store`` at the separate gate-P
 store (M13 D11 (b)); the production store is never written by gate P.
 
+Run it from a frozen ``git archive`` export of the code with a ``COMMIT``
+file at the export's root holding the full commit id (the M13 dry-run
+script's export step writes it): an export has no ``.git``, and the command
+records that commit in ``simulate_report.json`` (``provenance.code_commit``)
+and ``gate_p/gate_p_run.json`` (``code_commit``). From a worktree the commit
+comes from ``git rev-parse HEAD``.
+
 Exit status: 0 when gate P was scored, 3 when it stopped on the per-donor pool
 sizes (pre-registration §23.10 open item 2: the user chooses D2 (d) as it
 stands, ``--gate-p-accept-small-pools``, or the fallback (c),

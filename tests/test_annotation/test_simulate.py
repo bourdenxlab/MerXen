@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+import click
 import numpy as np
 import pandas as pd
 import pytest
@@ -283,6 +284,79 @@ def test_cli_refuses_gate_p_before_any_compute(tmp_path: Path) -> None:
     assert result.exit_code != 0
     assert "M13" in result.output
     assert not (tmp_path / "out").exists() and not (tmp_path / "store").exists()
+
+
+EXPORTED_COMMIT = "0123456789abcdef0123456789abcdef01234567"
+
+
+def test_code_commit_reads_an_exports_commit_file_before_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``git archive`` export names its commit in ``COMMIT`` (it has no .git).
+
+    The file is read first, because git in an export finds no repository,
+    or an enclosing one; a worktree without the file is asked with git.
+    """
+    from merxen.cli import run_annotation_panels as panels
+
+    asked: list[Path] = []
+
+    def git_commit(root: Path) -> str | None:
+        asked.append(root)
+        return "f" * 40
+
+    monkeypatch.setattr(panels, "_git_commit", git_commit)
+    assert panels.code_commit(tmp_path) == ("f" * 40, "git")
+    assert asked == [tmp_path]
+    (tmp_path / panels.CODE_COMMIT_FILE).write_text(EXPORTED_COMMIT + "\n")
+    assert panels.code_commit(tmp_path) == (EXPORTED_COMMIT, "export")
+    assert asked == [tmp_path]
+    sha256_id = "a" * 64
+    (tmp_path / panels.CODE_COMMIT_FILE).write_text(sha256_id)
+    assert panels.code_commit(tmp_path) == (sha256_id, "export")
+    for text in ("baeaa75", f"{EXPORTED_COMMIT}\n{EXPORTED_COMMIT}", "", "HEAD"):
+        (tmp_path / panels.CODE_COMMIT_FILE).write_text(text)
+        with pytest.raises(click.ClickException, match="full commit id"):
+            panels.code_commit(tmp_path)
+    (tmp_path / panels.CODE_COMMIT_FILE).unlink()
+    monkeypatch.setattr(panels, "_git_commit", lambda _root: None)
+    assert panels.code_commit(tmp_path) == (None, None)
+    # The default tree is the one the module runs from (src/merxen/cli).
+    assert Path(panels.__file__).resolve().parents[3] == panels._SOURCE_ROOT
+    assert (panels._SOURCE_ROOT / "src" / "merxen" / "cli").is_dir()
+
+
+def test_cli_refuses_a_malformed_commit_file_before_any_compute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from merxen.cli import run_annotation_panels as panels
+
+    export = tmp_path / "export"
+    export.mkdir()
+    (export / panels.CODE_COMMIT_FILE).write_text("baeaa75\n")
+    monkeypatch.setattr(panels, "_SOURCE_ROOT", export)
+    gene_list = tmp_path / "genes.csv"
+    gene_list.write_text("gene_symbol,gene_id\nGfap,ENSMUSG00000020932\n")
+    result = CliRunner().invoke(
+        cli_main,
+        [
+            "annotation-panel-simulate",
+            "--gene-list",
+            str(gene_list),
+            "--species",
+            "mouse",
+            "--store",
+            str(tmp_path / "store"),
+            "--scratch-dir",
+            str(tmp_path / "scratch"),
+            "--out-dir",
+            str(tmp_path / "out"),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "full commit id" in result.output
+    assert not (tmp_path / "out").exists() and not (tmp_path / "store").exists()
+    assert not (tmp_path / "scratch").exists()
 
 
 def panel_builder() -> BundleBuilder:
