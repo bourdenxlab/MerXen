@@ -1259,7 +1259,9 @@ These readings come from the implementation of gate P's assembly (M13 chunk C7):
 - **D10 (a).** The time reference for version 7 is `gate_p.np9_time_reference_v7`.
 - **NP8** is `not_applicable` until the user says the family will be paired (D26).
 - **NP2's weak and collapsed parents** (§23.10, still open item 4). NP2 is `pending` until the user accepts them in the gate-P PR, and a pending NP2 does not pass.
-- **Writing the rows.** Validated rows are written only for a family that passes gate P. They are appended to the packaged tables with the existing lines kept, and are read back through every check of `read_validated_panels` before they replace the files.
+- **Writing the rows.** Validated rows are written only for a family that passes gate P. They are appended to the packaged tables with the existing lines kept, and are read back through every check of `read_validated_panels` before they replace the files. `validated_panels.csv` is replaced last, and a failed replacement restores the files already replaced.
+- **D2.** C_P is fixed on disjoint replicates (D2 (d)): a test cell in two groups stops gate P, the default donor's fit half included. If the user chooses the fallback (c) (§23.10, still open item 2), `gate_p_class_sets` takes `disjoint=False`: each shared cell is counted once, and the default donor's fit-half cells are left out of every group, as §23.2 defines (c).
+- **NP9's members.** NP9 records the members its re-runs were scored on, and the assembly refuses an NP9 whose members are not the verdicts' emission members (CHECK K13).
 
 **Open** ([P] kept; the code's behaviour until the user rules). Each is ruled before the set a dry run is scored. Choosing a reading after its numbers are seen, when it validates more classes, is a post-hoc loosening (§1 rule 2).
 
@@ -1267,7 +1269,8 @@ These readings come from the implementation of gate P's assembly (M13 chunk C7):
    - *Scored (stricter):* they stay in the denominator of the 90% rule.
    - *Looser:* the share over classed cells only, as `resolvability.gate_p_class_set` computes it. It is reported as `class_set_share_classed`.
 2. **The NT population.** At NT, the cells whose truth is `not_neuron` are left out of NT's counts and of its denominator. These are the non-neuronal cells and the sink cells. NT's C_P and its 90% rule are therefore read on the neurons.
-   - This follows D14 (a). Counting those cells would put NT below 90% on any panel and cap every family at broad.
+   - *Scored (looser than the literal reading):* this follows D14 (a).
+   - *Literal (stricter):* §14's "≥ 90% of the pooled test cells" counts those cells too. That would put NT below 90% on any panel and cap every family at broad.
 3. **The 90% rule decides the level.** §14 says only that C_P "must hold" ≥ 90% of the pooled test cells.
    - *Scored:* a level whose C_P holds less than that is incomplete, so neither it nor any finer level can be `validated_max_level`.
    - *Looser:* report the share only.
