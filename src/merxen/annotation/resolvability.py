@@ -6202,9 +6202,11 @@ def v7_simulation_payload(
     (``ENSEMBLE_RULE_VERSION``: 2 since the amendment of 2026-09-29, so no
     bundle decided by the stage A-D rule is reused), the members (recipes
     with their table sha256), every simulation-input asset used (id,
-    version, sha256), the chemistry, the grid, the top-up rule and the
-    simulation conventions. A version-6 bundle's payload never holds it, so
-    version-6 ``build_hash`` values are unchanged (pre-registration §21 (i)).
+    version, sha256), the chemistry, the grid, the top-up rule, the version
+    of the stored simulated genes per cell (``SIM_GENES_VERSION``, M13 C16:
+    no bundle built without them is reused) and the simulation conventions.
+    A version-6 bundle's payload never holds it, so version-6 ``build_hash``
+    values are unchanged (pre-registration §21 (i)).
 
     Args:
         members: The ensemble members.
@@ -6226,6 +6228,7 @@ def v7_simulation_payload(
         "chemistry": dict(chemistry) if isinstance(chemistry, Mapping) else chemistry,
         "depth_grid": [int(value) for value in depth_grid],
         "top_up": None if top_up is None else dict(top_up),
+        "simulated_n_genes_version": SIM_GENES_VERSION,
         "conventions": {
             "thinning": "exact_total",
             "thin_max_iter": THIN_MAX_ITER,
@@ -6251,6 +6254,28 @@ MEMBER_COLUMN: Final = "member"
 MEMBER_ROLE_COLUMN: Final = "member_role"
 ENSEMBLE_RECIPE: Final = "ensemble"
 CLASS_DEPTH_FILE: Final = "resolvability_class_depth.parquet"
+# Simulated genes per cell (M13 chunk C16; decision D19 (a)): a version-7
+# self-map stores, per member and simulated cell, the realised total and the
+# number of query genes with a simulated count > 0, so that RESOLVE's
+# gene-complexity check (plan §8.8; pre-registration NR7) compares native and
+# simulated cells on the same genes. The query genes counted are the test
+# cells' genes (the panel genes the test-set reference holds); the summary
+# records them, so RESOLVE counts the native cells on exactly these. The
+# version enters every version-7 build_hash (``v7_simulation_payload``): a
+# version-7 bundle built before the artefact is never reused by this code (it
+# stays readable, and its check is ``not_evaluable``). Version-6 bundles (the
+# seeded families) never hold it, so no version-6 build_hash changes.
+SIM_GENES_FILE: Final = "resolvability_sim_genes.parquet"
+SIM_GENES_VERSION: Final = 1
+SIM_GENES_RECORD: Final = "simulated_n_genes"
+SIM_GENES_COLUMNS: Final[tuple[str, ...]] = (
+    MEMBER_COLUMN,
+    MEMBER_ROLE_COLUMN,
+    "cell_id",
+    "depth",
+    "total_counts",
+    "n_genes",
+)
 REASON_ENSEMBLE_PREFIX: Final = "ensemble_"
 REASON_ENSEMBLE_SPREAD: Final = "ensemble_spread"
 # The spread route's margin (amendment of 2026-09-29, pre-registration §22.3):
@@ -7935,6 +7960,323 @@ def coerce_cells_v7(cells: pd.DataFrame) -> pd.DataFrame:
 
 
 # --------------------------------------------------------------------------
+# Version 7: simulated genes per cell (M13 chunk C16; decision D19 (a))
+
+
+def genes_sha256(genes: Sequence[str]) -> str:
+    """Return the sha256 of a gene list in its order (one id per line).
+
+    Args:
+        genes: Gene ids.
+
+    Returns:
+        The hex digest.
+    """
+    return hashlib.sha256("\n".join(str(gene) for gene in genes).encode()).hexdigest()
+
+
+def simulated_gene_counts(query: SimulatedQuery) -> pd.DataFrame:
+    """Return the realised total and detected genes of each simulated cell.
+
+    A gene is detected when the simulated cell (host plus spill) holds a
+    count > 0 of it; only the query's genes (the test cells' genes) are
+    counted. An explicit zero entry is not a detected gene.
+
+    Args:
+        query: A simulated query.
+
+    Returns:
+        One row per simulated cell, in the query's order: ``cell_id``,
+        ``depth`` (the grid value D, the simulated cell's bin),
+        ``total_counts`` (realised) and ``n_genes``.
+    """
+    counts = query.counts
+    detected = np.asarray((counts > 0).sum(axis=1)).ravel()
+    totals = np.asarray(counts.sum(axis=1), dtype=np.float64).ravel()
+    obs = query.obs
+    return pd.DataFrame(
+        {
+            "cell_id": obs["cell_id"].astype(str).to_numpy(),
+            "depth": obs["depth"].to_numpy(np.int32),
+            "total_counts": np.rint(totals).astype(np.int32),
+            "n_genes": detected.astype(np.int32),
+        }
+    )
+
+
+def coerce_sim_genes(table: pd.DataFrame) -> pd.DataFrame:
+    """Return a simulated-genes table with parquet-friendly dtypes.
+
+    Args:
+        table: ``SIM_GENES_COLUMNS`` rows.
+
+    Returns:
+        A copy in column order: member, role and cell id as categories,
+        depth, total and genes as int32.
+    """
+    frame = table.loc[:, list(SIM_GENES_COLUMNS)].copy()
+    for column in (MEMBER_COLUMN, MEMBER_ROLE_COLUMN, "cell_id"):
+        frame[column] = frame[column].astype(str).astype("category")
+    for column in ("depth", "total_counts", "n_genes"):
+        frame[column] = frame[column].astype(np.int32)
+    return frame.reset_index(drop=True)
+
+
+def sim_genes_record(query_genes: Sequence[str], table: pd.DataFrame) -> dict[str, Any]:
+    """Return the summary record of a self-map's simulated genes per cell.
+
+    Args:
+        query_genes: The genes counted (the test cells' genes).
+        table: The stored table.
+
+    Returns:
+        ``resolvability_summary.json`` ``simulated_n_genes``: the version,
+        the file, the counting rule, the genes counted (ids, count and
+        sha256) and the rows per member.
+    """
+    genes = [str(gene) for gene in query_genes]
+    members = (
+        table[MEMBER_COLUMN].astype(str) if len(table) else pd.Series([], dtype=object)
+    )
+    return {
+        "version": SIM_GENES_VERSION,
+        "file": SIM_GENES_FILE,
+        "count": (
+            "query genes with a simulated count > 0 per simulated cell (host "
+            "and spill); one row per member, test cell and grid depth"
+        ),
+        "n_query_genes": len(genes),
+        "query_genes_sha256": genes_sha256(genes),
+        "query_genes": genes,
+        "n_rows": int(len(table)),
+        "n_rows_per_member": {
+            str(name): int(count)
+            for name, count in members.value_counts(sort=False).sort_index().items()
+        },
+    }
+
+
+@dataclass(frozen=True)
+class SimulatedGenes:
+    """A version-7 bundle's simulated genes per cell (M13 C16; D19 (a)).
+
+    Attributes:
+        table: ``SIM_GENES_COLUMNS`` rows (member, role and cell id as
+            strings).
+        query_genes: The genes counted (the test cells' genes, the query
+            genes native cells are counted on), in the bundle's order.
+        depth_grid: The bundle's depth grid.
+        emission_members: The bundle's emission members.
+        version: ``SIM_GENES_VERSION`` the bundle was built with.
+    """
+
+    table: pd.DataFrame
+    query_genes: tuple[str, ...]
+    depth_grid: tuple[int, ...]
+    emission_members: tuple[str, ...]
+    version: int
+
+    def per_cell(self, members: Sequence[str] | None = None) -> pd.DataFrame:
+        """Return one value per (test cell, depth), the mean over members.
+
+        Each test cell counts once per grid depth (as E1 counts it), so the
+        gene-complexity check's cell minimum counts test cells, not member
+        rows. This reading of "per (cell, depth)" (D19 (a)) is the
+        implementation's (M13 chunk C16), not recorded in the M13 decisions:
+        counting member rows instead could only judge more bins (so warn at
+        least as often), and the family's gate-P PR names it for the user.
+
+        Args:
+            members: Members to average (default: the emission members).
+
+        Returns:
+            ``cell_id``, ``depth``, ``n_genes`` and ``total_counts`` (means
+            over the members) and ``n_members``, sorted by depth and cell.
+        """
+        chosen = set(self.emission_members if members is None else members)
+        rows = self.table[self.table[MEMBER_COLUMN].astype(str).isin(chosen)]
+        if rows.empty:
+            return pd.DataFrame(
+                {
+                    "cell_id": pd.Series([], dtype=object),
+                    "depth": pd.Series([], dtype=np.int64),
+                    "n_genes": pd.Series([], dtype=np.float64),
+                    "total_counts": pd.Series([], dtype=np.float64),
+                    "n_members": pd.Series([], dtype=np.int64),
+                }
+            )
+        grouped = (
+            rows.assign(
+                cell_id=rows["cell_id"].astype(str),
+                depth=rows["depth"].astype(np.int64),
+                n_genes=rows["n_genes"].astype(np.float64),
+                total_counts=rows["total_counts"].astype(np.float64),
+            )
+            .groupby(["depth", "cell_id"], sort=True)
+            .agg(
+                n_genes=("n_genes", "mean"),
+                total_counts=("total_counts", "mean"),
+                n_members=("n_genes", "size"),
+            )
+            .reset_index()
+        )
+        return grouped.loc[
+            :, ["cell_id", "depth", "n_genes", "total_counts", "n_members"]
+        ]
+
+
+def load_simulated_genes(
+    directory: Path | str, *, summary: Mapping[str, Any] | None = None
+) -> SimulatedGenes | None:
+    """Read a bundle's simulated genes per cell (``None`` when it has none).
+
+    ``None`` for a bundle without resolvability outputs, a version-6 bundle
+    (the seeded families; it never stores them) and a version-7 bundle built
+    before the artefact (no ``simulated_n_genes`` record): the
+    gene-complexity check is then ``not_evaluable`` (D19 (a)).
+
+    Args:
+        directory: Bundle directory.
+        summary: The bundle's ``resolvability_summary.json`` when already
+            read (e.g. ``ResolvabilityTables.summary``).
+
+    Returns:
+        The stored table, or ``None``.
+
+    Raises:
+        ResolvabilityError: For an unknown resolvability or artefact version,
+            or a damaged artefact (``_check_sim_genes_table``: file or
+            columns missing, the genes not those the summary's sha256
+            names, the rows not those the summary counts, a depth off the
+            grid, a repeated simulated cell, a gene count out of range).
+    """
+    root = Path(directory)
+    if summary is None:
+        summary_path = root / RESOLVABILITY_SUMMARY_FILE
+        if not summary_path.is_file():
+            return None
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    version = checked_resolvability_version(
+        summary.get("resolvability_version"), source=str(root)
+    )
+    if version != RESOLVABILITY_VERSION_V7:
+        return None
+    record = summary.get(SIM_GENES_RECORD)
+    if record is None:
+        return None
+    stored = record.get("version")
+    if (
+        isinstance(stored, bool)
+        or not isinstance(stored, int)
+        or not 1 <= stored <= SIM_GENES_VERSION
+    ):
+        raise ResolvabilityError(
+            f"{root}: unknown simulated n_genes version {stored!r} (this code "
+            f"reads 1-{SIM_GENES_VERSION})"
+        )
+    path = root / SIM_GENES_FILE
+    if not path.is_file():
+        raise ResolvabilityError(
+            f"{root}: the summary records simulated n_genes but {SIM_GENES_FILE} "
+            "is missing"
+        )
+    genes = tuple(str(gene) for gene in record.get("query_genes") or ())
+    if len(genes) != record.get("n_query_genes") or genes_sha256(genes) != record.get(
+        "query_genes_sha256"
+    ):
+        raise ResolvabilityError(
+            f"{root}: the simulated n_genes' query genes do not match their "
+            "recorded count and sha256"
+        )
+    table = pd.read_parquet(path)
+    missing = [column for column in SIM_GENES_COLUMNS if column not in table.columns]
+    if missing:
+        raise ResolvabilityError(
+            f"{root}: {SIM_GENES_FILE} lacks the columns {missing}"
+        )
+    table = table.loc[:, list(SIM_GENES_COLUMNS)]
+    for column in (MEMBER_COLUMN, MEMBER_ROLE_COLUMN, "cell_id"):
+        table[column] = table[column].astype(str)
+    simulated = SimulatedGenes(
+        table=table,
+        query_genes=genes,
+        depth_grid=tuple(int(depth) for depth in summary["depth_grid"]),
+        emission_members=tuple(
+            str(name) for name in summary.get("emission_members") or ()
+        ),
+        version=int(stored),
+    )
+    _check_sim_genes_table(simulated, record, source=str(root))
+    return simulated
+
+
+def _check_sim_genes_table(
+    simulated: SimulatedGenes, record: Mapping[str, Any], *, source: str
+) -> None:
+    """Check a loaded simulated-genes table against its summary record.
+
+    The record's row counts (``n_rows``, ``n_rows_per_member``) must be the
+    table's, so a truncated or partly rewritten file is refused; every depth
+    must be a grid value (a simulated cell's bin is its grid depth), every
+    (member, cell, depth) must appear once (one draw per member), every
+    emission member must hold rows when the table holds any, and ``n_genes``
+    must lie in ``[0, n_query_genes]`` with non-negative totals.
+
+    Args:
+        simulated: The loaded artefact.
+        record: The summary's ``simulated_n_genes`` record.
+        source: The bundle directory (for messages).
+
+    Raises:
+        ResolvabilityError: If any of these fails.
+    """
+    table = simulated.table
+    if record.get("n_rows") != len(table):
+        raise ResolvabilityError(
+            f"{source}: {SIM_GENES_FILE} holds {len(table)} rows but the summary "
+            f"records {record.get('n_rows')!r}"
+        )
+    per_member = {
+        str(name): int(count)
+        for name, count in table[MEMBER_COLUMN].value_counts(sort=False).items()
+    }
+    recorded = record.get("n_rows_per_member")
+    if not isinstance(recorded, Mapping) or per_member != {
+        str(name): count for name, count in recorded.items()
+    }:
+        raise ResolvabilityError(
+            f"{source}: {SIM_GENES_FILE} holds the rows per member {per_member} "
+            f"but the summary records {recorded!r}"
+        )
+    absent = [name for name in simulated.emission_members if name not in per_member]
+    if len(table) and absent:
+        raise ResolvabilityError(
+            f"{source}: {SIM_GENES_FILE} holds no rows of the emission members {absent}"
+        )
+    depths = table["depth"].to_numpy(np.int64)
+    off_grid = sorted(set(depths.tolist()) - set(simulated.depth_grid))
+    if off_grid:
+        raise ResolvabilityError(
+            f"{source}: {SIM_GENES_FILE} holds depths {off_grid[:5]} off the grid "
+            f"{list(simulated.depth_grid)}"
+        )
+    if table.duplicated([MEMBER_COLUMN, "cell_id", "depth"]).any():
+        raise ResolvabilityError(
+            f"{source}: {SIM_GENES_FILE} holds a (member, cell, depth) more than once"
+        )
+    n_genes = table["n_genes"].to_numpy(np.int64)
+    if len(table) and (
+        n_genes.min() < 0
+        or n_genes.max() > len(simulated.query_genes)
+        or table["total_counts"].to_numpy(np.int64).min() < 0
+    ):
+        raise ResolvabilityError(
+            f"{source}: {SIM_GENES_FILE} holds gene counts outside [0, "
+            f"{len(simulated.query_genes)}] or a negative total"
+        )
+
+
+# --------------------------------------------------------------------------
 # Version 7: orchestration (PREP and the diagnostic of version-6 families)
 
 
@@ -7956,6 +8298,8 @@ class EnsembleSimulation:
         n_by_depth: Test cells simulated per depth, per member.
         efficiencies: Per member, the genes and their efficiency.
         timings: Seconds per step.
+        sim_genes: Per member and simulated cell, the realised total and the
+            detected query genes (``SIM_GENES_COLUMNS``; M13 C16).
     """
 
     cells: pd.DataFrame
@@ -7963,6 +8307,9 @@ class EnsembleSimulation:
     n_by_depth: dict[str, dict[int, int]]
     efficiencies: dict[str, tuple[list[str], np.ndarray]]
     timings: dict[str, float]
+    sim_genes: pd.DataFrame = field(
+        default_factory=lambda: pd.DataFrame(columns=list(SIM_GENES_COLUMNS))
+    )
 
 
 def member_tag(member: EnsembleMember) -> str:
@@ -7987,7 +8334,8 @@ def simulate_members(
     One member's simulated counts and MapMyCells table are held at a time
     and dropped once its calls are tabulated (``as_stored``), so the parent
     process keeps only the cells tables (the phase-1 prototype's largest
-    process reached 13.2 GB by holding every draw).
+    process reached 13.2 GB by holding every draw) and each simulated cell's
+    realised total and detected query genes (``simulated_gene_counts``).
 
     Args:
         test: The test cells.
@@ -8004,6 +8352,7 @@ def simulate_members(
         The simulation.
     """
     frames: list[pd.DataFrame] = []
+    gene_frames: list[pd.DataFrame] = []
     n_simulated: dict[str, int] = {}
     n_by_depth: dict[str, dict[int, int]] = {}
     efficiencies: dict[str, tuple[list[str], np.ndarray]] = {}
@@ -8018,6 +8367,10 @@ def simulate_members(
         n_simulated[member.name] = int(len(query.obs))
         n_by_depth[member.name] = dict(query.n_by_depth)
         efficiencies[member.name] = (list(test.genes), efficiency)
+        detected = simulated_gene_counts(query)
+        detected.insert(0, MEMBER_ROLE_COLUMN, member.role)
+        detected.insert(0, MEMBER_COLUMN, member.name)
+        gene_frames.append(detected)
         logger.info(
             "resolvability v7 %s: simulated %d cells from %d test cells in %.1f s",
             member.name,
@@ -8046,12 +8399,18 @@ def simulate_members(
         if frames
         else pd.DataFrame(columns=[*CELLS_COLUMNS, MEMBER_COLUMN, MEMBER_ROLE_COLUMN])
     )
+    sim_genes = coerce_sim_genes(
+        pd.concat(gene_frames, ignore_index=True)
+        if gene_frames
+        else pd.DataFrame(columns=list(SIM_GENES_COLUMNS))
+    )
     return EnsembleSimulation(
         cells=cells,
         n_simulated=n_simulated,
         n_by_depth=n_by_depth,
         efficiencies=efficiencies,
         timings=timings,
+        sim_genes=sim_genes,
     )
 
 
@@ -8086,13 +8445,19 @@ class ResolvabilityResultV7(ResolvabilityResult):
     Attributes:
         member_decisions: Each member's own decisions.
         class_depth: ``resolvability_class_depth.parquet`` content.
+        sim_genes: ``resolvability_sim_genes.parquet`` content (M13 C16;
+            ``None``: not written).
     """
 
     member_decisions: pd.DataFrame = field(default_factory=pd.DataFrame)
     class_depth: pd.DataFrame = field(default_factory=pd.DataFrame)
+    sim_genes: pd.DataFrame | None = None
 
     def write(self, directory: Path) -> dict[str, str]:
-        """Write the four version-7 resolvability files.
+        """Write the version-7 resolvability files.
+
+        The four M3c files, plus ``resolvability_sim_genes.parquet`` when the
+        result holds simulated genes per cell (M13 C16).
 
         Args:
             directory: The bundle work directory (or a diagnostic directory).
@@ -8106,21 +8471,35 @@ class ResolvabilityResultV7(ResolvabilityResult):
         )
         self.table.to_parquet(directory / RESOLVABILITY_FILE, index=False)
         self.class_depth.to_parquet(directory / CLASS_DEPTH_FILE, index=False)
-        (directory / RESOLVABILITY_SUMMARY_FILE).write_text(
-            json.dumps(_json_native(self.summary), indent=2, allow_nan=False) + "\n",
-            encoding="utf-8",
-        )
-        return {
+        files = {
             "table": RESOLVABILITY_FILE,
             "cells": RESOLVABILITY_CELLS_FILE,
             "summary": RESOLVABILITY_SUMMARY_FILE,
             "class_depth": CLASS_DEPTH_FILE,
         }
+        if self.sim_genes is not None:
+            coerce_sim_genes(self.sim_genes).to_parquet(
+                directory / SIM_GENES_FILE, index=False
+            )
+            files["sim_genes"] = SIM_GENES_FILE
+        (directory / RESOLVABILITY_SUMMARY_FILE).write_text(
+            json.dumps(_json_native(self.summary), indent=2, allow_nan=False) + "\n",
+            encoding="utf-8",
+        )
+        return files
 
     def bundle_output(self) -> dict[str, Any]:
         """Return the compact record ``bundle.json`` keeps (version 7)."""
         record = super().bundle_output()
         record["files"]["class_depth"] = CLASS_DEPTH_FILE
+        genes_record = self.summary.get(SIM_GENES_RECORD)
+        if self.sim_genes is not None and genes_record is not None:
+            record["files"]["sim_genes"] = SIM_GENES_FILE
+            record[SIM_GENES_RECORD] = {
+                key: value
+                for key, value in genes_record.items()
+                if key != "query_genes"
+            }
         record["resolvability_version"] = RESOLVABILITY_VERSION_V7
         record["decision_recipe"] = ENSEMBLE_RECIPE
         record["members"] = self.summary["members"]
@@ -8169,8 +8548,9 @@ def build_summary_v7(
     pooled sets, floors, trust from the decisions before the fill), plus the
     version, the members, the ensemble settings and statistics (member
     spread and agreement), the emitted bins before the fill, each class's
-    lineage, the class-depth file and the profile prediction; ``provenance``
-    adds the assets, chemistry, top-up and engine records.
+    lineage, the class-depth file, the profile prediction and the record of
+    the simulated genes per cell (``sim_genes_record``, M13 C16);
+    ``provenance`` adds the assets, chemistry, top-up and engine records.
     """
     emission_members = [member for member in members if member.role == "emission"]
     first = emission_members[0]
@@ -8232,6 +8612,7 @@ def build_summary_v7(
             "neuronal_classes": dict(neuronal),
             "class_depth_file": CLASS_DEPTH_FILE,
             "profile_prediction": profile_prediction(class_depth, profile),
+            SIM_GENES_RECORD: sim_genes_record(test.genes, simulation.sim_genes),
         }
     )
     summary.update(dict(provenance))
@@ -8574,6 +8955,7 @@ def run_resolvability_v7(
         summary=summary,
         member_decisions=result.member_decisions,
         class_depth=class_depth,
+        sim_genes=simulation.sim_genes,
     )
 
 

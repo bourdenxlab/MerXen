@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "2d4a46d01cc56edf450c1e01f1a4aa688a7485e217d29644c1a22f439bddaf28",
+    3: "88feb836db5d10e924a927863479f6cc409da86a890ae3f19c5ccc551d23b8c5",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -213,6 +213,26 @@ PIN_HISTORY = (
     "the self-map's dropped other-region cells out of its counts (M13 C8 "
     "review); no bundle content or build_hash changes "
     "(test_resolvability_v6_golden)",
+    "3: version-7 self-maps store the simulated n_genes per member, test "
+    "cell and depth on the test cells' genes (M13 chunk C16, decision D19 "
+    "(a): resolvability_sim_genes.parquet and the summary's "
+    "simulated_n_genes record); SIM_GENES_VERSION 1 enters every version-7 "
+    "build_hash through v7_simulation_payload (panel_params), so the new "
+    "content goes only into new build directories and no version-7 bundle "
+    "built before it is reused (it stays readable; its gene-complexity "
+    "check is not_evaluable); the version-7 test-set bundles, the version-6 "
+    "path and payload (test_resolvability_v6_golden) and so every seeded "
+    "family's build_hash are unchanged",
+    "3: C16 review: load_simulated_genes checks the stored table against "
+    "its summary record (row counts in total and per member, emission "
+    "members present, depths on the grid, one row per member, cell and "
+    "depth, gene counts in range); a reader-side check, so no bundle "
+    "content or build_hash changes",
+    "3: merge of M13 C4/C8 (gate P's stress recipes and leave-one-donor-out "
+    "test sets) with M13 C16 (version-7 simulated n_genes): each side keeps "
+    "its own rule and neither changes the other's code, so the merged "
+    "fingerprint differs from both without any bundle content or build_hash "
+    "change (test_resolvability_v6_golden)",
 )
 
 

@@ -46,7 +46,10 @@ PROVENANCE_UNS_KEY: Final = "merxen_annotation_json"
 ANNOTATION_MANIFEST_SUFFIX: Final = "_annotation_manifest.json"
 SAFE_KEY_PATTERN: Final = re.compile(r"^[A-Za-z0-9_.\-]+$")
 
-RealQcOutcome = Literal["pass", "warn", "fail", "not_evaluable"]
+# Per check (pre-registration §23.5 P4): ``not_applicable`` where the check
+# does not apply to the dataset (an unpaired section, no R3 member, no
+# prefilter), ``not_evaluable`` where it applies but its input is missing.
+RealQcOutcome = Literal["pass", "warn", "fail", "not_applicable", "not_evaluable"]
 
 
 def is_safe_key(key: object) -> bool:
@@ -206,7 +209,10 @@ class RealQcProvenance(_ProvenanceModel):
     """Downgrade-only real-data QC outcomes (plan §8.8).
 
     Attributes:
-        outcomes: Outcome per check, keyed by a safe check name.
+        outcomes: Outcome per check, keyed by a safe check name: ``pass``,
+            ``warn``, ``fail`` (the check lowered the dataset: a gate cap, a
+            withheld level, withheld pair statistics or a trust downgrade),
+            ``not_applicable`` or ``not_evaluable``.
         downgrades: Downgrades applied to this dataset (e.g.
             ``"broad_only:marker_consistency"``).
         warn_only: Whether the checks only warned (seeded families before

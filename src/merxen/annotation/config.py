@@ -48,6 +48,15 @@ LeafSource = Literal["mapped", "denovo"]
 UnassignedStatePolicy = Literal["state", "exclude_from_features"]
 LEGACY_UNASSIGNED_STATE_POLICY: Final = "state"
 MAP_FIRST_UNASSIGNED_STATE_POLICY: Final = "exclude_from_features"
+# Whether a species gate (human H, mouse M) has merged into ``main`` (M13
+# decision D20 (b)); the seeded real-data families only warn while pending.
+SpeciesGateState = Literal["pending", "merged"]
+# How the human marker referee derives its per-panel marker sets (M13 C13,
+# ``human_referee``): ``node`` is mouse G2's rule on the WHB superclusters
+# (each group's mean node profile against every other node), ``class`` the
+# n_cells-weighted broad-class ``expected_fraction`` profile against the
+# other broad classes.
+MarkerRefereeComparator = Literal["node", "class"]
 # A clustered table-key suffix: "" or one lower-case token (§4.8).
 TableKeySuffix = Annotated[str, AfterValidator(validate_table_key_suffix)]
 # Default clustering mode per species. Only the flip PRs (M8 human, M9 mouse)
@@ -875,22 +884,68 @@ class MouseGateConfig(_AnnotationModel):
         return self
 
 
+def _pending_species_gates() -> dict[Species, SpeciesGateState]:
+    """Return the species gate record of D20 (b): no species gate has merged."""
+    return {"human": "pending", "mouse": "pending"}
+
+
 class AnnotationRealQcConfig(_AnnotationModel):
     """Downgrade-only QC on real in-house datasets (plan §8.8; rev3).
 
     Attributes:
+        enabled: Run the real-data QC in human RESOLVE (M13 C15). ``false``
+            gives the QC-free run that pre-registration NR1 compares with:
+            no check runs, nothing is lowered and the summary records the QC
+            as disabled. Mouse RESOLVE does not run it yet: its gate keeps
+            G1-G5 (§7.6), and the mouse wiring follows M6b (M13 C22).
         marker_consistency_warn: Marker-referee warning threshold; ``None``
             selects the species default (human 0.75; mouse G2's 0.80).
         marker_consistency_broad_only: Human: below this the dataset becomes
             ``broad_only``.
+        marker_referee_min_group_markers: Human referee (M13 C13, D18 (a)):
+            broad classes with fewer derived markers are left out; with
+            fewer than two classes left the referee is ``not_evaluable``.
+            Mouse G2 reads ``mouse_gate.g2_min_group_markers``.
+        marker_referee_min_marker_units: Units the top class of a marker
+            pseudo-label needs (``data/P1212``'s rule, as mouse G2).
+        marker_referee_min_marker_share: Its share of the summed units.
+        marker_referee_min_pseudo_confident: The referee is
+            ``not_evaluable`` with fewer scored cells (marker-pseudo-labelled
+            table cells with a confident ``ct_broad``).
+        marker_referee_comparator: How the per-panel marker sets are derived
+            from the WHB profiles with the §8.6 specificity rule: ``node``
+            (mouse G2's rule as ported: each broad class's mean supercluster
+            profile against every other supercluster) or ``class`` (the
+            broad-class profile, the ``n_cells``-weighted mean of its
+            superclusters' ``expected_fraction``, against the other broad
+            classes). ``node`` is the M13 C13 specification; ``class`` is
+            the alternative for comparison, not adopted without the user's
+            decision.
         paired_broad_jsd_warn: Paired-platform soft broad JSD warning.
         uninformative_strata_warn_frac: Warn when more flag strata are
             uninformative.
         genes_per_count_gap_warn: Warn when native cells carry this much more
             genes than simulated cells.
         prefilter_spotcheck_min_agreement: 5K prefilter spot-check agreement.
-        seeded_families_warn_only_until_gate: The seeded real-data families
-            only warn until their species gate has merged.
+        seeded_families_warn_only_until_gate: Per species, whether its gate
+            (human: gate H; mouse: gate M) has merged: ``pending`` or
+            ``merged``. While ``pending``, the checks of plan §8.8 that
+            ``real_qc`` adds (marker referee, paired concordance, flag rates,
+            gene complexity, prefilter spot check) only warn on the seeded
+            ``real_data`` families of that species. A gate counts as merged
+            only after its acceptance-gate PR into ``main`` (M13 decision D20
+            (b), 2026-10-06), so both stay ``pending`` until then. The rev3
+            bool is accepted: ``true`` is both ``pending``, ``false`` both
+            ``merged``.
+        registration_g1_effect: What human registration G1's fail rule
+            does (§8.8; M0a's guard with §7.6's rules, read from
+            ``mouse_gate``): ``warning`` (warn-only in M13, decision D23 (b),
+            approved 2026-10-06) or ``gate_failed`` (§8.8's effect: the
+            dataset gate fails, every cell ``not_attempted_gate`` and
+            ``exclude_hard``), adopted once the set a regression shows no
+            false G1 failure (a tightening, recorded before the new-panel
+            family's QC is read). §7.6's warning rule (density ratio below
+            ``g1_density_ratio_warn``) is a warning under either setting.
         coverage_warn_margin: M3c (user decision 4): warn per (level, called
             class) when the real confident share is below the class-depth
             prediction at the dataset's own per-class depth by more than
@@ -908,13 +963,22 @@ class AnnotationRealQcConfig(_AnnotationModel):
             flagged (report-only).
     """
 
+    enabled: bool = True
     marker_consistency_warn: float | None = None
     marker_consistency_broad_only: float = 0.70
+    marker_referee_min_group_markers: int = Field(default=3, ge=1)
+    marker_referee_min_marker_units: float = Field(default=1.5, gt=0.0)
+    marker_referee_min_marker_share: float = Field(default=0.6, gt=0.0, le=1.0)
+    marker_referee_min_pseudo_confident: int = Field(default=200, ge=1)
+    marker_referee_comparator: MarkerRefereeComparator = "node"
     paired_broad_jsd_warn: float = 0.20
     uninformative_strata_warn_frac: float = 0.5
     genes_per_count_gap_warn: float = Field(default=0.45, ge=0.0)
     prefilter_spotcheck_min_agreement: float = 0.95
-    seeded_families_warn_only_until_gate: bool = True
+    seeded_families_warn_only_until_gate: dict[Species, SpeciesGateState] = Field(
+        default_factory=_pending_species_gates
+    )
+    registration_g1_effect: Literal["warning", "gate_failed"] = "warning"
     coverage_warn_margin: float = 0.10
     coverage_min_cells: int = Field(default=200, ge=1)
     factor_remeasure_min_r: float = 0.9
@@ -942,6 +1006,39 @@ class AnnotationRealQcConfig(_AnnotationModel):
         return (
             None if value is None else _check_fraction(value, "marker_consistency_warn")
         )
+
+    @field_validator("seeded_families_warn_only_until_gate", mode="before")
+    @classmethod
+    def _species_gate_record(cls: type[AnnotationRealQcConfig], value: Any) -> Any:
+        # The rev3 bool meant "warn-only until the species gate": true keeps
+        # every species pending, false declares every gate merged.
+        if isinstance(value, bool):
+            return dict.fromkeys(SPECIES, "pending" if value else "merged")
+        return value
+
+    @field_validator("seeded_families_warn_only_until_gate")
+    @classmethod
+    def _fill_species_gates(
+        cls: type[AnnotationRealQcConfig], value: dict[str, str]
+    ) -> dict[str, str]:
+        # A species left out keeps the safe state: its gate has not merged.
+        return {species: value.get(species, "pending") for species in SPECIES}
+
+    def seeded_warn_only(self: AnnotationRealQcConfig, species: str) -> bool:
+        """Return whether the seeded families of ``species`` only warn.
+
+        Args:
+            species: ``"human"`` or ``"mouse"``.
+
+        Returns:
+            ``True`` while the species gate is ``pending`` (D20 (b)).
+        """
+        merged = {
+            key
+            for key, value in self.seeded_families_warn_only_until_gate.items()
+            if value == "merged"
+        }
+        return species not in merged
 
 
 class AnnotationFlagsConfig(_AnnotationModel):

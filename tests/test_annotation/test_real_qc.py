@@ -111,6 +111,89 @@ def test_coverage_vs_simulation_warns_below_the_margin_and_judges_200_cells() ->
     assert np.isnan(result.table["profile_coverage"]).all()
 
 
+@pytest.mark.parametrize(
+    ("species", "gate_level", "blocked"),
+    [
+        ("human", "full", set()),
+        ("human", "broad_only", {"supercluster", "cluster"}),
+        ("human", "failed", {"broad", "supercluster", "cluster"}),
+        ("mouse", "broad_only", {"subclass"}),
+    ],
+)
+def test_coverage_rows_record_the_gate_level_and_whether_it_blocks_them(
+    species: str, gate_level: str, blocked: set[str]
+) -> None:
+    """A level the gate before QC left unattempted is marked (C15 review F2).
+
+    Its real coverage is 0 by the gate, so the warning (kept: the rule is
+    unchanged) says the shortfall is the gate's, not the simulation's.
+    """
+    levels = ["broad", "supercluster", "cluster"]
+    if species == "mouse":
+        levels = ["class", "subclass"]
+    real = pd.DataFrame(
+        {
+            "level": levels,
+            "class": ["A"] * len(levels),
+            "n_cells": [500] * len(levels),
+            "real_coverage": [0.0] * len(levels),
+        }
+    )
+    predicted = real[["level", "class"]].assign(
+        predicted_coverage=0.9, resolvable_share=1.0
+    )
+    result = qc.coverage_vs_simulation(
+        real, predicted, gate_level=gate_level, species=species
+    )
+    table = result.table.set_index("level")
+    assert set(table["gate_level"]) == {gate_level}
+    assert {level for level in levels if table.loc[level, "gate_blocked"]} == blocked
+    # Every row still warns: the rule does not depend on the gate.
+    assert sorted(result.flagged) == sorted((level, "A") for level in levels)
+    for item in result.outcomes:
+        assert item.details["gate_level"] == gate_level
+        assert item.details["gate_blocked"] is (item.level in blocked)
+        gate_text = f"The dataset gate before QC is {gate_level}"
+        assert (gate_text in item.message) is (item.level in blocked)
+        assert "No offset is applied" in item.message
+    summary = result.summary()
+    assert summary["gate_level"] == gate_level
+    assert summary["n_flagged_gate_blocked"] == len(blocked)
+    assert {item["level"] for item in summary["flagged"] if item["gate_blocked"]} == (
+        blocked
+    )
+
+
+def test_coverage_without_a_gate_level_leaves_blocking_unknown() -> None:
+    real = pd.DataFrame(
+        {
+            "level": ["supercluster"],
+            "class": ["A"],
+            "n_cells": [500],
+            "real_coverage": [0.0],
+        }
+    )
+    predicted = real[["level", "class"]].assign(
+        predicted_coverage=0.9, resolvable_share=1.0
+    )
+    result = qc.coverage_vs_simulation(real, predicted)
+    assert result.table["gate_level"].tolist() == [None]
+    assert result.table["gate_blocked"].tolist() == [None]
+    (item,) = result.outcomes
+    assert item.details["gate_blocked"] is None
+    assert "dataset gate before QC" not in item.message
+    summary = result.summary()
+    assert summary["gate_level"] is None
+    assert summary["n_flagged_gate_blocked"] == 0
+    assert summary["flagged"] == [
+        {"level": "supercluster", "class": "A", "gate_blocked": None}
+    ]
+    with pytest.raises(ValueError, match="unknown gate level"):
+        qc.coverage_vs_simulation(real, predicted, gate_level="partial")
+    empty = qc.coverage_vs_simulation(real.iloc[:0], predicted, gate_level="full")
+    assert empty.table.empty and empty.summary()["n_flagged_gate_blocked"] == 0
+
+
 def test_the_profile_mode_prediction_is_reported_and_never_decides() -> None:
     # D4 of 2026-09-29: the class-depth predictor decides the warning; the
     # profile-mode prediction is reported beside it.
@@ -448,6 +531,36 @@ def test_factor_remeasure_runs_only_on_the_first_dataset_with_a_table() -> None:
         counts, genes, labels, profiles, stored, first_dataset_of_family=False
     )
     assert not later.applies and later.reason == "not_first_dataset_of_family"
+    # A later dataset is not the first whether or not a table is given: the
+    # check does not apply to it (not_applicable, never not_evaluable).
+    later_without = qc.factor_remeasure(
+        counts, genes, labels, profiles, None, first_dataset_of_family=False
+    )
+    assert later_without.reason == "not_first_dataset_of_family"
+    outcome = qc.factor_remeasure_outcome(
+        later_without, min_r=qc.FACTOR_REMEASURE_MIN_R, has_r3_member=True
+    )
+    assert outcome.outcome == "not_applicable"
+
+
+def test_factor_remeasure_warns_on_an_undefined_pearson_r() -> None:
+    """A constant factor vector has no Pearson r (NaN): that warns, never passes."""
+    rng = np.random.default_rng(6)
+    true_log2 = rng.normal(0.0, 1.0, 30)
+    counts, labels, profiles = make_factor_data(rng, true_log2)
+    genes = [f"g{index}" for index in range(30)]
+    flat = pd.DataFrame({"tier": ["informative"] * 30, "log2_factor": 0.0}, index=genes)
+    result = qc.factor_remeasure(
+        counts, genes, labels, profiles, flat, informative_min_expected=100.0
+    )
+    assert result.applies and result.n_informative >= 3
+    assert result.pearson_r is not None and np.isnan(result.pearson_r)
+    assert result.outcome is not None and result.outcome.fired
+    outcome = qc.factor_remeasure_outcome(
+        result, min_r=qc.FACTOR_REMEASURE_MIN_R, has_r3_member=True
+    )
+    assert outcome.fired and outcome.outcome == "warn"
+    assert "r nan" in outcome.message
 
 
 def test_gene_complexity_warns_above_45_percent_and_flags_predictions() -> None:
