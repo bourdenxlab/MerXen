@@ -946,9 +946,30 @@ PREP bundles, writes the simulation report and then runs gate P, writing
   (b)). A store that is, or lies in, the config's `reference_store` or
   `reference_store_large` is refused before any compute, so gate P never
   writes into the production store.
-- NP5 needs an expected depth: a registered per-class `profile` asset
+- NP5 needs an expected depth: a registered per-class profile asset
   (`--depth-profile-asset`) or the label-free pooled median
   (`--expected-depth`). A per-class CSV is never read for NP5.
+- A family with real sections takes its own NP5 profile (M13 D8 with CHECK
+  K7): `scripts/annotation/build_np5_depth_profile.py` reads the family's
+  first provisional `map_first` RESOLVE label tables (one per section, the
+  scored segmentation) and writes the asset `np5_depth__<family_id>` (role
+  `gate_p_profile`: per class and distinct total count, its cells) with its
+  sidecar into `src/merxen/assets/annotation/sim_inputs/`, and a source
+  manifest under the evidence root (the tables' paths and sha256; the
+  sidecar names the tables by file name and sha256 only). The confident
+  broad calls are keyed by the E2 floor class gate P decides by, and the
+  other table cells are kept apart. Gate P gives a class with at least 100
+  confident broad calls their depths and every other class (fewer calls,
+  none, or supercluster COP) the median of the confident broad calls; NP3's
+  report-only depth histogram uses every table cell
+  (`sim_inputs.FamilyDepthProfile`; the readings are pre-registration
+  §23.20). PREP selects `profile` assets only, so the asset never enters a
+  `build_hash`. It is committed and recorded in the pre-registration before
+  gate P runs, and gate P runs from code that holds it. The builder refuses
+  a table that is not a human `map_first` RESOLVE output of a provisional
+  panel, tables of another segmentation, panel, family or primary bundle, a
+  section given twice and a confident broad call without a floor class;
+  `--check` re-derives the files.
 - Gate P is CPU only and maps with the self-map's recorded MapMyCells worker
   count (pre-registration §18 item 2); another count is refused.
 

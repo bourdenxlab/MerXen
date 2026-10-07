@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "88feb836db5d10e924a927863479f6cc409da86a890ae3f19c5ccc551d23b8c5",
+    3: "2d960816289f217e14d24f40510e95c12e97959cc38bf09df974b62236cfba06",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -233,6 +233,11 @@ PIN_HISTORY = (
     "its own rule and neither changes the other's code, so the merged "
     "fingerprint differs from both without any bundle content or build_hash "
     "change (test_resolvability_v6_golden)",
+    "3: sim_inputs.py gains the gate_p_profile role and FamilyDepthProfile "
+    "(M13 D8 with CHECK K7: a new family's own NP5 depth profile, which only "
+    "gate P reads); resolvability_plan selects profile assets only, so no "
+    "PREP reads the role, no such asset is registered yet, and no bundle "
+    "content or build_hash changes (test_resolvability_v6_golden)",
 )
 
 

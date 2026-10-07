@@ -739,6 +739,16 @@ def np5_depth_source(
     labels into gate P (pre-registration §23.9 item 6). Reading the profile
     needs no compute, so ``precheck_gate_p`` calls this before PREP.
 
+    A family's own ``gate_p_profile`` asset (M13 D8 with CHECK K7,
+    ``sim_inputs.FamilyDepthProfile``; built by
+    ``scripts/annotation/build_np5_depth_profile.py``) is read with the
+    readings of pre-registration §23.20: a class with at least
+    ``sim_inputs.PROFILE_MIN_CLASS_CELLS`` (100) confident broad calls takes
+    their depths, and every other class (fewer calls, none, or supercluster
+    COP, which has no broad key) the median of the confident broad calls of
+    every class; the profile returned for NP3's report-only depth histogram
+    is every table cell of the family, label-free.
+
     Args:
         expected_depth: ``--expected-depth``.
         depth_profile: ``--depth-profile`` (a CSV).
@@ -752,6 +762,7 @@ def np5_depth_source(
     Raises:
         GatePRunError: Without any expected depth.
     """
+    from merxen.annotation import sim_inputs as si
     from merxen.annotation import simulate as sim
 
     asset_id = depth_profile_asset
@@ -763,6 +774,30 @@ def np5_depth_source(
         "depth_profile": path,
         "expected_depth": expected,
     }
+    asset = None if asset_id is None else si.get_asset(asset_id)
+    if asset is not None and asset.role == si.GATE_P_PROFILE_ROLE:
+        family = si.family_profile_from_asset(asset)
+        per_class = family.class_depths()
+        default = family.overall_median()
+        if default is None:
+            raise GatePRunError(
+                f"{asset_id} holds no confident broad call: NP5 has no overall "
+                "median (pre-registration §23.20)"
+            )
+        record.update(
+            {
+                "source": "family_profile_asset",
+                "sha256": asset.sha256,
+                "min_class_cells": family.min_cells,
+                "classes_own_depths": sorted(per_class),
+                "classes_below_min_cells": family.below_min_cells(),
+                "overall_median": default,
+                "table_cells_median": family.table_median(),
+                "n_table_cells": int(family.table_totals.size),
+                "n_confident_broad": int(family.confident.n_cells),
+            }
+        )
+        return per_class, default, record, family.table_profile()
     if profile is not None and asset_id is not None and not profile.pooled:
         per_class = {
             str(cls): [float(value) for value in values]

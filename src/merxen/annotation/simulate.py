@@ -2838,7 +2838,8 @@ def load_simulation_profile(
 
     Args:
         path: A per-class or pooled CSV (``sim_inputs.read_depth_profile_table``).
-        asset_id: A ``profile`` or ``scenario`` asset id.
+        asset_id: A ``profile``, ``scenario`` or ``gate_p_profile`` asset id
+            (a family's NP5 profile: its confident broad calls per class).
         species: The panel's species.
 
     Returns:
@@ -2854,7 +2855,7 @@ def load_simulation_profile(
         raise SimulationError("give --depth-profile or --depth-profile-asset, not both")
     if asset_id is not None:
         asset = si.get_asset(asset_id)
-        if asset.role not in ("profile", "scenario"):
+        if asset.role not in ("profile", "scenario", si.GATE_P_PROFILE_ROLE):
             raise SimulationError(f"{asset_id} is a {asset.role} asset, not a profile")
         if asset.species != species:
             raise SimulationError(

@@ -50,10 +50,18 @@ def test_registry_holds_the_m3c_and_m13_assets_with_complete_provenance(
         si.SCENARIO_HUMAN_LUNG,
         si.PRIME_PANEL_LISTS,
     }
-    assert set(registry) == {*public, si.STRESS_HUMAN_XPLATFORM}
+    # A new family's NP5 profile (M13 D8), committed once its builder has run
+    # on the family's map_first labels (pre-registration §23.20).
+    family_profiles = {
+        asset_id
+        for asset_id, asset in registry.items()
+        if asset.role == si.GATE_P_PROFILE_ROLE
+    }
+    assert set(registry) == {*public, si.STRESS_HUMAN_XPLATFORM, *family_profiles}
     scripts = {
         "build_sim_inputs.py": public,
         "build_xplatform_stress.py": {si.STRESS_HUMAN_XPLATFORM},
+        "build_np5_depth_profile.py": family_profiles,
     }
     for name, assets in scripts.items():
         script = REPO_ROOT / "scripts" / "annotation" / name
