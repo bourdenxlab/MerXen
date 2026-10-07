@@ -96,6 +96,42 @@ def test_notices_attribute_the_public_data() -> None:
     assert "sim_inputs/" in main and "CC BY 4.0" in main
 
 
+def test_the_notice_lists_every_asset_with_its_sources(
+    registry: dict[str, si.SimInputAsset],
+) -> None:
+    """Every registered asset is in the NOTICE, the in-house ones apart.
+
+    The in-house cross-platform asset (M13 D7) is built by its own script;
+    the NOTICE lists it under "In-house assets" with its source paths under
+    the evidence root, not among the public vendor data.
+    """
+    notice = (si.SIM_INPUTS_DIR / si.NOTICE_FILE).read_text(encoding="utf-8")
+    public, heading, in_house = notice.partition("\nIn-house assets\n")
+    assert heading
+    for asset in registry.values():
+        own = asset.provenance.get(si.SOURCE_KIND_KEY) == si.SOURCE_KIND_IN_HOUSE
+        section = in_house if own else public
+        assert f"- {asset.file} (" in section, asset.asset_id
+        for item in asset.provenance["source_files"]:
+            assert item["path" if own else "url"] in section
+            assert item["sha256"] in section
+        if own:
+            assert asset.provenance["deriving_script"] in section
+            assert asset.provenance["licence"] in section
+    assert "https://" not in in_house
+
+
+def test_the_committed_public_assets_match_their_sources() -> None:
+    """Re-derive the public assets and the NOTICE when the inputs are here."""
+    builder = _build_script("build_sim_inputs.py")
+    evidence = Path("/srv/storage/MerXen/annotation_dev/evidence_20260926")
+    public = Path("/srv/storage/MerXen/public_validation")
+    if not (evidence.is_dir() and (public / "MANIFEST.tsv").is_file()):
+        pytest.skip("the phase-1 evidence or the public data are not on this machine")
+    argv = ["--evidence-root", str(evidence), "--public-root", str(public)]
+    assert builder.main([*argv, "--check"]) == 0
+
+
 def _copy_assets(tmp_path: Path) -> Path:
     target = tmp_path / "sim_inputs"
     shutil.copytree(si.SIM_INPUTS_DIR, target)
@@ -399,9 +435,9 @@ def test_xplatform_stress_keeps_measured_offsets_and_resamples_the_rest() -> Non
         si.xplatform_stress_efficiency(panel, np.ones(5), factors)
 
 
-def _build_script() -> Any:
-    path = REPO_ROOT / "scripts" / "annotation" / "build_xplatform_stress.py"
-    spec = importlib.util.spec_from_file_location("build_xplatform_stress", path)
+def _build_script(name: str = "build_xplatform_stress.py") -> Any:
+    path = REPO_ROOT / "scripts" / "annotation" / name
+    spec = importlib.util.spec_from_file_location(Path(name).stem, path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module

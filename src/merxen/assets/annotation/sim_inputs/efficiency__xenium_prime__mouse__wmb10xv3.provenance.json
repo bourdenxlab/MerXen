@@ -37,7 +37,7 @@
       }
     ],
     "deriving_script": "scripts/annotation/build_sim_inputs.py",
-    "deriving_script_sha256": "f613cb0ae315e81496c8872826dd2e630c35796c5be33644924da2f96a69536f",
+    "deriving_script_sha256": "32b8bc56012d49fb0af156d566088e4d11c32c940d494e5ac7f84f4d51d2f977",
     "evidence": [
       "$A/5k_real/SYNTHESIS.txt",
       "$A/5k_real/sensitivity/REPORT.txt",
