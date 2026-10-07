@@ -25,10 +25,15 @@ separate **warning flag** with reasons.
 
 The primary panel's trust state caps the level as for human (``refused`` ->
 ``failed``, ``broad_only`` -> ``broad_only``) and a provisional panel sets
-the warning. A signal that cannot be evaluated is recorded with its reason;
-G1 and G2 then warn (the gate cannot confirm the data are valid), G3-G5 do
-not (G3: pruning disabled or skipped, which the region step reports; G4: no
-AP window until M6b's ``estimate_ap``; G5: the flag is null with a reason).
+the warning. A family validated by simulation warns, as for human, when
+more than ``warn_unvalidated_share`` (10%) of the confident labels at a
+chain level (broad, class, nt, subclass) fall outside its validated region
+(§8.2; M13 decision D15 (a)); RESOLVE evaluates the gate again after
+``resolve_mouse`` with those shares, and the level cannot change. A signal
+that cannot be evaluated is recorded with its reason; G1 and G2 then warn
+(the gate cannot confirm the data are valid), G3-G5 do not (G3: pruning
+disabled or skipped, which the region step reports; G4: no AP window until
+M6b's ``estimate_ap``; G5: the flag is null with a reason).
 
 **G2's referee** (§8.6, [L]): six class groups (the WMB vocab's broad
 classes: Neurons, Astrocytes/Ependymal, Oligodendrocyte lineage, OEC,
@@ -777,6 +782,8 @@ def evaluate_mouse_gate(
     config: MouseGateConfig,
     *,
     trust: TrustDecision | None = None,
+    validated_share: Mapping[str, float | None] | None = None,
+    max_unvalidated_share: float | None = None,
     extra_warnings: Sequence[str] = (),
 ) -> MouseGateVerdict:
     """Return the mouse gate verdict (§7.6 truth table; see the module docstring).
@@ -786,6 +793,13 @@ def evaluate_mouse_gate(
         config: ``AnnotationConfig.mouse_gate``.
         trust: The primary panel's trust decision (caps the level; a
             provisional panel warns).
+        validated_share: Share of confident labels inside the validated
+            region per chain level (``consensus.chain_validated_share`` after
+            ``resolve_mouse``); a simulation-validated family warns where
+            more than ``max_unvalidated_share`` fall outside it (§8.2). It
+            never changes the level.
+        max_unvalidated_share: ``AnnotationGate.warn_unvalidated_share``
+            (default: its pre-registered value, 0.10).
         extra_warnings: Further warning reasons.
 
     Returns:
@@ -920,6 +934,22 @@ def evaluate_mouse_gate(
             warnings.append(
                 f"panel_provisional: primary panel trust {trust.state} (banner; "
                 "never a lower gate level)"
+            )
+        if validated_share:
+            # The human gate's rule and wording (thresholds.dataset_gate).
+            from merxen.annotation.config import AnnotationGate
+
+            limit = (
+                AnnotationGate().warn_unvalidated_share
+                if max_unvalidated_share is None
+                else max_unvalidated_share
+            )
+            _, reasons = trust.unvalidated_share_warning(
+                validated_share, max_share=limit
+            )
+            warnings.extend(
+                f"{reason}: > {limit} of confident labels outside the validated region"
+                for reason in reasons
             )
     warnings.extend(str(item) for item in extra_warnings)
     verdict = MouseGateVerdict(

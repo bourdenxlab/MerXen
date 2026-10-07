@@ -21,6 +21,10 @@ into the unpruned calls, plan §7.2), and in this order:
    emission reweighted to the dataset's soft subclass composition, the
    mouse floors and, for real-data-validated families only, the class
    ``avg_correlation`` floor ``wmb_class_min_corr`` (pre-registration §16).
+   The gate is then evaluated again with the validated share of the
+   confident labels at broad, class, nt and subclass: a simulation-validated
+   family warns when more than 10% lie outside its validated region (§8.2,
+   ``warn_unvalidated_share``; M13 D15 (a)), at the same level.
 4. **Flags** (§4.3): contamination, diffuse and OOD as for human on the six
    mouse broad classes; spill-over; F1 region coherence
    (``mouse_flags.region_incoherent``); Astro-Epen low count.
@@ -29,7 +33,8 @@ into the unpruned calls, plan §7.2), and in this order:
    the section's soft, confident and argmax class shares.
 6. The **label table** (§4.1, validated), with the raw engine columns and
    the region columns (``mmc_wmb_unpruned_*``, ``region_pruned_changed``,
-   ``inferred_region``), and the **provenance** (§4.6, ``mouse_gate``).
+   ``inferred_region``), and the **provenance** (§4.6, ``mouse_gate``; the
+   panel record from ``diagnostics.panel_provenance``, as for human).
 
 Pair statistics (cross-platform JSD) are not computed for mouse pairs in
 v1: the only mouse data are single-platform MERSCOPE sections (M6).
@@ -67,6 +72,7 @@ from merxen.annotation.pipeline import (
     resolve_threshold_values,
     round_share,
     run_for_role,
+    sample_panel_provenance,
     trust_for_run,
     version_7_outputs,
     vocab_lookup,
@@ -636,6 +642,7 @@ def resolve_mouse_sample(
     trust_overrides: Mapping[str, TrustDecision] | None = None,
     xy: np.ndarray | None = None,
     registration: RegistrationSignal | None = None,
+    panel_mode: str | None = None,
     validate: bool = True,
     seed: int = 0,
 ) -> SampleResolution:
@@ -652,6 +659,7 @@ def resolve_mouse_sample(
         trust_overrides: Trust decision per reference id.
         xy: Coordinates of every object (F1; G4 needs none).
         registration: The M0a registration check of the segmentation (G1).
+        panel_mode: The pair's resolved panel mode (panel provenance).
         validate: Check the table with ``schema.validate_label_table``.
         seed: Seed of the diffuse-flag simulation.
 
@@ -684,7 +692,6 @@ def resolve_mouse_sample(
         AnnotationProvenance,
         ConsensusProvenance,
         EngineProvenance,
-        PanelProvenance,
         ReferenceProvenance,
         ThresholdProvenance,
     )
@@ -820,19 +827,17 @@ def resolve_mouse_sample(
     )
     regions = None if primary is None else primary.regions
     region_record = None if regions is None else regions.record
+    region_warnings = (
+        []
+        if regions is None or region_record is None
+        else region_step_warnings(
+            region_record.status,
+            region_record.reasons,
+            share_problem=regions.region_share_problem,
+        )
+    )
     gate = evaluate_mouse_gate(
-        signals,
-        config.mouse_gate,
-        trust=trust,
-        extra_warnings=(
-            []
-            if regions is None or region_record is None
-            else region_step_warnings(
-                region_record.status,
-                region_record.reasons,
-                share_problem=regions.region_share_problem,
-            )
-        ),
+        signals, config.mouse_gate, trust=trust, extra_warnings=region_warnings
     )
 
     # 3. Statuses (§7.3).
@@ -887,6 +892,22 @@ def resolve_mouse_sample(
         allow_table_below_min_counts=loaded.sample.source == "clustered",
     )
     resolution = cs.resolve_mouse(inputs.calls, settings, gate)
+    # The simulation-family warning (§8.2; M13 D15 (a)): the gate again, with
+    # the validated share of the chain's confident labels, as human does. Its
+    # level decided which levels were attempted, so it cannot change.
+    final_gate = evaluate_mouse_gate(
+        signals,
+        config.mouse_gate,
+        trust=trust,
+        validated_share=cs.chain_validated_share(resolution.levels, cs.MOUSE_CHAIN),
+        max_unvalidated_share=config.gate.warn_unvalidated_share,
+        extra_warnings=region_warnings,
+    )
+    if (final_gate.level, final_gate.level_reasons) != (gate.level, gate.level_reasons):
+        raise AssertionError(
+            "the mouse gate level cannot depend on the validated share"
+        )
+    gate = resolution.gate = final_gate
 
     # 4. Flags (§4.3).
     coherence = region_incoherent(
@@ -1075,15 +1096,17 @@ def resolve_mouse_sample(
         resolvability[primary.record.reference_id] = resolvability_provenance(
             tables, emission, resolution, primary.bundle, reweighted=reweight
         )
-    panel_prov = None
-    if trust is not None:
-        panel_prov = PanelProvenance(
-            panel_hash=record.declared_panel_hash,
-            panel_trust=trust.state,
-            trust_reasons=trust.reason_codes,
-            banner=trust.banner,
-            n_missing_panel_genes=n_missing,
-        )
+    panel_prov = sample_panel_provenance(
+        trust,
+        primary,
+        panels,
+        sample_id=sample_id,
+        declared_panel_hash=record.declared_panel_hash,
+        panel_report=panel_report,
+        panel_mode=panel_mode,
+        level_summary=summary["levels"],
+        n_missing_panel_genes=n_missing,
+    )
     engine_record = primary.record if primary is not None else None
     params = engine_record.engine_params if engine_record is not None else {}
     sources = sorted(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import itertools
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +14,10 @@ import pytest
 
 from merxen.annotation import thresholds as th
 from merxen.annotation.config import AnnotationGate, AnnotationThresholds
-from merxen.annotation.resolvability import LevelMeta
+from merxen.annotation.diagnostics import level_rank
+from merxen.annotation.resolvability import LevelMeta, RuleSettings
+
+from .conftest import HUMAN_TABLE_CLASSES
 
 T = AnnotationThresholds()
 HUMAN_GRID = (10, 15, 30, 60, 120, 250)
@@ -616,3 +619,150 @@ def test_simulation_families_warn_only_outside_their_validated_region(
         validated_share={"broad": 0.0},
     )
     assert not real.warning
+
+
+# --------------------------------------------------------------------------
+# Simulation rows keep the provisional margins (plan §8.2, §14; M13)
+
+PROMOTED_LEVELS: dict[str, tuple[str, ...]] = {
+    "human": ("lineage", "broad", "nt", "supercluster", "seaad_subclass", "cluster"),
+    "mouse": ("broad", "class", "nt", "subclass", "supertype"),
+}
+# A class each species' simulation family validates at broad (and, mouse,
+# class and subclass): even a validated (level, class) keeps the margins.
+PROMOTED_CLASS: dict[str, str] = {"human": "Exc", "mouse": "01 IT-ET Glut"}
+
+
+@pytest.mark.parametrize(
+    ("species", "level"),
+    [
+        (species, level)
+        for species, levels in PROMOTED_LEVELS.items()
+        for level in levels
+    ],
+)
+def test_simulation_rows_keep_the_provisional_margins(
+    promotion_trust: Callable[..., tuple[Any, Any]],
+    make_trust: Callable[..., Any],
+    make_decisions: MakeDecisions,
+    human_level_meta: list[LevelMeta],
+    species: str,
+    level: str,
+) -> None:
+    """A gate-P row validates labels; it never removes a margin or a floor rule.
+
+    For every level, a simulation-validated family decides in the
+    provisional regime (targets + margins, local thresholds), with the same
+    emission and floors as the provisional panel it was before promotion:
+    the max-rule floors without their warning, and the mouse subclass floor
+    of at least 60. A real-data family drops the margins up to its
+    validated level.
+    """
+    from .test_consensus_mouse import MOUSE_CLASS_CALLS, MOUSE_GRID, MOUSE_TABLE_LEVELS
+
+    provisional, simulation = promotion_trust("resolvable", species=species)
+    real = make_trust("validated_real", species=species)
+    assert (provisional.state, simulation.state) == ("provisional", "validated")
+    assert simulation.validation_basis == "simulation"
+    rank = level_rank(species, level)
+    real_rank = level_rank(species, str(real.validated_max_level))
+    assert rank is not None and real_rank is not None
+    real_covers = rank <= real_rank
+    # Regime and targets: base + margin (+0.10 below 60 counts), capped.
+    settings = RuleSettings()
+    base = th.level_target(level, T)
+    grid = HUMAN_GRID if species == "human" else MOUSE_GRID
+    for decision in (provisional, simulation):
+        assert decision.emission_regime(level) == "provisional"
+        assert decision.applies_provisional_margins(level)
+        assert decision.threshold_source(level) == "resolvability_local"
+        for depth in grid:
+            target = settings.target(decision.emission_regime(level), base, depth)
+            assert target == pytest.approx(
+                T.provisional_target(base, below60=depth < 60)
+            )
+            assert target > base
+    assert real.applies_provisional_margins(level) is not real_covers
+    # Emission: the provisional rows of the table, raised thresholds and
+    # unemitted bins included.
+    cls = PROMOTED_CLASS[species]
+    table_level = th.DERIVED_EMISSION_LEVELS[species].get(level, level)
+    if species == "human":
+        shallow, middle, counts = 30, 60, np.array([35.0, 70.0, 300.0])
+        meta: Sequence[LevelMeta] = human_level_meta
+        decisions = make_decisions(
+            overrides={
+                ("provisional", table_level, cls, shallow): {"threshold": 0.95},
+                ("provisional", table_level, cls, middle): {"status": "not_resolvable"},
+            }
+        )
+        classes: Sequence[str] = HUMAN_TABLE_CLASSES
+    else:
+        shallow, middle, counts = 50, 100, np.array([60.0, 150.0, 600.0])
+        meta = [
+            LevelMeta(name, "CLAS", role, default, target, floor)  # type: ignore[arg-type]
+            for name, role, default, target, floor in MOUSE_TABLE_LEVELS
+        ]
+        classes = tuple(MOUSE_CLASS_CALLS)
+        decisions = make_decisions(
+            levels=MOUSE_TABLE_LEVELS,
+            classes=classes,
+            grid=MOUSE_GRID,
+            overrides={
+                ("provisional", table_level, cls, shallow): {"threshold": 0.95},
+                ("provisional", table_level, cls, middle): {"status": "not_resolvable"},
+            },
+        )
+    limits = AnnotationThresholds(allow_fine_levels=True)
+    keys = np.array([cls] * 3, dtype=object)
+
+    def emission_plan(trust: Any) -> th.EmissionPlan:
+        return th.EmissionPlan(
+            species=species,  # type: ignore[arg-type]
+            thresholds=limits,
+            decisions=decisions,
+            levels=tuple(meta),
+            grid=grid,
+            trust=trust,
+            fine_seed_stability={"cluster": 0.0, "supertype": 0.0},
+        )
+
+    before = emission_plan(provisional).level(level, keys, counts)
+    after = emission_plan(simulation).level(level, keys, counts)
+    assert (before.regime, after.regime) == ("provisional", "provisional")
+    assert after.emitted.tolist() == before.emitted.tolist() == [True, False, True]
+    assert after.threshold.tolist() == before.threshold.tolist()
+    if level not in th.SECONDARY_LEVELS:
+        assert after.threshold[0] == pytest.approx(0.95)
+    if real_covers:
+        validated = emission_plan(real).level(level, keys, counts)
+        assert validated.regime == "validated"
+        assert validated.emitted.tolist() == [True, True, True]
+    # Floors: the max rule of the provisional panel, without its warning.
+    floors = {
+        name: th.FloorPlan.build(
+            species=species,  # type: ignore[arg-type]
+            platform="MERSCOPE",
+            hard_floor=10,
+            trust=trust,
+            thresholds=limits,
+            emission=emission_plan(trust),
+        )
+        for name, trust in (("before", provisional), ("after", simulation))
+    }
+    for floor_class in classes:
+        first = floors["before"].floor(level, floor_class)
+        second = floors["after"].floor(level, floor_class)
+        assert first.min_counts == second.min_counts
+        if th.FLOOR_LEVELS[species][level] is not None:
+            assert (first.source, first.warning) == ("unknown_panel", True)
+            assert (second.source, second.warning) == ("simulation_validated", False)
+        if species == "mouse" and level in th.MOUSE_SUBCLASS_FLOOR_LEVELS:
+            assert second.min_counts >= 60
+    assert floors["after"].warnings() == []
+    if species == "mouse" and level == "subclass":
+        packaged = th.FloorPlan.build(
+            species="mouse", platform="MERSCOPE", hard_floor=10, trust=real
+        )
+        assert packaged.floor(level, "30 Astro-Epen").min_counts == 50
+        assert floors["after"].floor(level, "30 Astro-Epen").min_counts == 60

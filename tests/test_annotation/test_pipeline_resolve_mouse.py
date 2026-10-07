@@ -32,6 +32,7 @@ from merxen.cli import main as cli_main
 from .conftest import (
     MOUSE_CLAS,
     MOUSE_SUBC,
+    PROMOTION_CONSTRAINTS,
     FakeMmc,
     map_mouse,
     mouse_region_share_bundle,
@@ -757,3 +758,367 @@ def test_pipeline_mouse_resolve_needs_the_registration_check(
             panel_dir=mouse_setup["panel_dir"],
             require_registration=True,
         )
+
+
+@pytest.mark.parametrize("constraint", PROMOTION_CONSTRAINTS)
+def test_promotion_by_simulation_never_changes_the_mouse_label_table(
+    tmp_path: Path,
+    mouse_setup: dict[str, Any],
+    promotion_trust: Callable[..., tuple[Any, Any]],
+    constraint: str,
+) -> None:
+    """Mouse RESOLVE end to end: a gate-P promotion changes no emitted column.
+
+    The trust decisions come from ``trust_state`` on the section's panel,
+    before and after a gate-P PR lists its family (plan §8.2, §14). The
+    label tables agree on every column except ``ct_<L>_validated``, and the
+    gate level, its reasons and the class correlation floor agree.
+    """
+    _add_profiles(mouse_setup["bundle"].path)
+    map_dir = tmp_path / "map"
+    map_mouse(mouse_setup, map_dir)
+    config = _config()
+    config = config.model_copy(
+        update={
+            "thresholds": config.thresholds.model_copy(
+                update={"wmb_class_min_corr": 0.99}
+            )
+        }
+    )
+    trusts = promotion_trust(
+        constraint, species="mouse", gene_ids=mouse_setup["panel"].ensembl_ids
+    )
+    samples = []
+    for name, trust in zip(("before", "after"), trusts, strict=True):
+        result = annotate_resolve(
+            map_dir,
+            config,
+            output_dir=tmp_path / name,
+            panel_dir=mouse_setup["panel_dir"],
+            trust_overrides={"wmb_panel": trust},
+            n_bootstrap=5,
+            registration={SID: PASSING},
+        )
+        samples.append(result.samples[SID])
+    before, after = samples
+    validated = [
+        column for column in before.labels.columns if column.endswith("_validated")
+    ]
+    assert validated
+    pd.testing.assert_frame_equal(
+        before.labels.drop(columns=validated), after.labels.drop(columns=validated)
+    )
+    for key in ("level", "level_reasons"):
+        assert before.summary["mouse_gate"][key] == after.summary["mouse_gate"][key]
+    assert before.summary["class_corr_floor"] == after.summary["class_corr_floor"]
+    assert before.summary["class_corr_floor"]["value"] is None
+    before_trust, after_trust = trusts
+    panels = (before.provenance.panel, after.provenance.panel)
+    assert panels[0] is not None and panels[1] is not None
+    assert [panel.panel_trust for panel in panels] == [
+        before_trust.state,
+        after_trust.state,
+    ]
+    if constraint == "resolvable":
+        assert (before_trust.state, after_trust.state) == ("provisional", "validated")
+        assert panels[0].banner and not panels[1].banner
+    else:
+        assert before_trust.state == after_trust.state
+        assert not after.labels[validated].to_numpy(bool).any()
+        assert panels[0].banner and panels[1].banner
+
+
+PROMOTED_DIGESTS: dict[str, str] = {
+    "validated_panels.csv": "1" * 64,
+    "validated_panel_levels.csv": "2" * 64,
+}
+
+
+def _promoted_samples(
+    tmp_path: Path,
+    setup: dict[str, Any],
+    promotion_trust: Callable[..., tuple[Any, Any]],
+    *,
+    panel_dir: Path | None = None,
+    coverage: bool = False,
+    config: AnnotationConfig | None = None,
+) -> tuple[Any, Any, tuple[Any, Any]]:
+    """Resolve the section before and after a gate-P promotion of its panel."""
+    _add_profiles(setup["bundle"].path)
+    if coverage:
+        _add_panel_coverage(setup["bundle"].path)
+    map_dir = tmp_path / "map"
+    map_mouse(setup, map_dir)
+    from merxen.annotation.diagnostics import (
+        VALIDATED_PANEL_LEVELS_FILE,
+        VALIDATED_PANELS_FILE,
+    )
+
+    before_trust, after_trust = promotion_trust(
+        "resolvable", species="mouse", gene_ids=setup["panel"].ensembl_ids
+    )
+    # The digests of the tables the gate-P PR changed.
+    trusts = (
+        before_trust,
+        after_trust.model_copy(
+            update={"tables_sha256": dict(PROMOTED_DIGESTS)}, deep=True
+        ),
+    )
+    assert set(PROMOTED_DIGESTS) == {VALIDATED_PANELS_FILE, VALIDATED_PANEL_LEVELS_FILE}
+    samples = []
+    for name, trust in zip(("before", "after"), trusts, strict=True):
+        result = annotate_resolve(
+            map_dir,
+            config or _config(),
+            output_dir=tmp_path / name,
+            panel_dir=panel_dir or setup["panel_dir"],
+            trust_overrides={"wmb_panel": trust},
+            n_bootstrap=5,
+            registration={SID: PASSING},
+        )
+        samples.append(result.samples[SID])
+    return samples[0], samples[1], trusts
+
+
+def _unvalidated(reasons: Any) -> list[str]:
+    return [str(item) for item in reasons if str(item).startswith("unvalidated_share")]
+
+
+def test_mouse_resolve_warns_when_simulation_labels_leave_the_validated_region(
+    tmp_path: Path,
+    mouse_setup: dict[str, Any],
+    promotion_trust: Callable[..., tuple[Any, Any]],
+) -> None:
+    """§8.2's 10% rule after ``resolve_mouse`` (M13 C11, D15 (a)).
+
+    Over broad, class, nt and subclass, a level whose confident labels lie
+    outside the simulation family's validated region more than 10% of the
+    time adds an ``unvalidated_share:<L>`` warning to the mouse gate; the
+    level and its reasons stay those of the provisional panel, and the
+    summary, the resolution and the provenance carry the same verdict.
+    """
+    from merxen.annotation.consensus import MOUSE_CHAIN
+    from merxen.annotation.schema import Columns
+
+    before, after, _ = _promoted_samples(tmp_path, mouse_setup, promotion_trust)
+    labels = after.labels
+    expected = []
+    for level in MOUSE_CHAIN:
+        status = labels[Columns.level(level, "status")].astype(str).to_numpy()
+        confident = status == "confident"
+        if not confident.any():
+            continue
+        validated = labels[Columns.level(level, "validated")].to_numpy(bool)
+        if 1.0 - validated[confident].mean() > 0.10 + 1e-12:
+            expected.append(
+                f"unvalidated_share:{level}: > 0.1 of confident labels outside "
+                "the validated region"
+            )
+    assert len(expected) >= 2  # the fixture has labels outside the region
+    gate = after.summary["mouse_gate"]
+    assert _unvalidated(gate["warning_reasons"]) == expected
+    assert gate["warning"] is True
+    assert _unvalidated(before.summary["mouse_gate"]["warning_reasons"]) == []
+    for key in ("level", "level_reasons", "signal_status", "notes"):
+        assert gate[key] == before.summary["mouse_gate"][key], key
+    assert after.summary["resolution"]["gate"] == gate
+    assert after.provenance.mouse_gate is not None
+    assert _unvalidated(after.provenance.mouse_gate.reasons) == expected
+    _, stored = read_label_table(after.labels_path)
+    assert stored is not None and stored.mouse_gate is not None
+    assert _unvalidated(stored.mouse_gate.reasons) == expected
+
+
+def test_mouse_panel_provenance_comes_from_the_panel_diagnostics(
+    tmp_path: Path,
+    mouse_setup: dict[str, Any],
+    promotion_trust: Callable[..., tuple[Any, Any]],
+) -> None:
+    """Mouse ``PanelProvenance`` is ``diagnostics.panel_provenance`` (M13 C11).
+
+    As for human: the family, its basis, the validated level and table
+    digests, the panel mode, the gene-ID diagnostics and the validated
+    share per level of the resolve summary.
+    """
+    from merxen.annotation.diagnostics import panel_diagnostics, panel_provenance
+
+    before, after, trusts = _promoted_samples(
+        tmp_path, mouse_setup, promotion_trust, coverage=True
+    )
+    panel = mouse_setup["panel"]
+    bundle = json.loads((mouse_setup["bundle"].path / "bundle.json").read_text())
+    for sample, trust in zip((before, after), trusts, strict=True):
+        record = sample.provenance.panel
+        assert record is not None
+        shares = {
+            level: float(value["validated_share"])
+            for level, value in sample.summary["resolution"]["levels"].items()
+            if value["validated_share"] is not None
+        }
+        expected = panel_provenance(
+            trust,
+            panel_diagnostics(panel, bundles=[bundle]),
+            panel_mode="single_sample",
+            validated_share=shares,
+            n_missing_panel_genes=0,
+        )
+        assert record == expected
+        assert record.panel_hash == panel.panel_hash
+        assert record.panel_mode == "single_sample"
+        assert record.n_declared_genes == len(IDS)
+        assert record.panel_trust == trust.state
+        _, stored = read_label_table(sample.labels_path)
+        assert stored is not None and stored.panel == record
+    promoted = after.provenance.panel
+    assert promoted is not None
+    assert (promoted.panel_family, promoted.family_basis) == (
+        "mouse_sim_family",
+        "listed",
+    )
+    assert promoted.validation_basis == "simulation"
+    assert promoted.validated_max_level == "class"
+    assert promoted.validated_panels_sha256 == "1" * 64
+    assert promoted.validated_panel_levels_sha256 == "2" * 64
+    assert promoted.validated_share and min(promoted.validated_share.values()) < 0.9
+    provisional = before.provenance.panel
+    assert provisional is not None and provisional.family_basis == "own"
+    assert provisional.validation_basis is None and provisional.banner is True
+
+
+def test_mouse_panel_provenance_without_the_panel_file_keeps_the_trust_fields(
+    tmp_path: Path,
+    mouse_setup: dict[str, Any],
+    promotion_trust: Callable[..., tuple[Any, Any]],
+) -> None:
+    """Without the panel file the record keeps the trust decision's fields."""
+    from merxen.annotation.panel import REQUIRED_BUNDLES_FILE
+
+    bare = tmp_path / "bare_panel"
+    bare.mkdir()
+    shutil.copy(
+        mouse_setup["panel_dir"] / REQUIRED_BUNDLES_FILE, bare / REQUIRED_BUNDLES_FILE
+    )
+    _, after, (_, trust) = _promoted_samples(
+        tmp_path, mouse_setup, promotion_trust, panel_dir=bare
+    )
+    record = after.provenance.panel
+    assert record is not None
+    assert record.panel_hash == mouse_setup["panel"].panel_hash
+    assert (record.panel_family, record.family_basis) == (trust.family_id, "listed")
+    assert record.validation_basis == "simulation"
+    assert record.validated_max_level == "class"
+    assert record.panel_mode == "single_sample"
+    assert record.validated_panels_sha256 == "1" * 64
+    assert record.validated_panel_levels_sha256 == "2" * 64
+    assert record.validated_share
+    assert record.n_declared_genes is None and record.gene_id_resolution == {}
+    assert _unvalidated(after.summary["mouse_gate"]["warning_reasons"])
+
+
+def _unvalidated_levels(labels: pd.DataFrame, limit: float) -> list[str]:
+    """Chain levels whose confident labels leave the validated region > limit."""
+    from merxen.annotation.consensus import MOUSE_CHAIN
+    from merxen.annotation.schema import Columns
+
+    levels = []
+    for level in MOUSE_CHAIN:
+        status = labels[Columns.level(level, "status")].astype(str).to_numpy()
+        confident = status == "confident"
+        if not confident.any():
+            continue
+        validated = labels[Columns.level(level, "validated")].to_numpy(bool)
+        if 1.0 - validated[confident].mean() > limit + 1e-12:
+            levels.append(level)
+    return sorted(levels)
+
+
+def test_mouse_resolve_applies_the_configured_unvalidated_share_limit(
+    tmp_path: Path,
+    mouse_setup: dict[str, Any],
+    promotion_trust: Callable[..., tuple[Any, Any]],
+) -> None:
+    """``gate.warn_unvalidated_share`` is the mouse limit too (M13 C11, D15 (a)).
+
+    The fixture's broad and class labels lie outside the validated region
+    about half the time and its subclass labels always; a configured limit of
+    0.6 keeps only the subclass warning, and its text carries that limit. The
+    default (0.10) would also warn at broad and class, so a RESOLVE that
+    ignored the configured value fails here.
+    """
+    from merxen.annotation.config import AnnotationGate
+
+    limit = 0.6
+    config = _config()
+    config = config.model_copy(
+        update={"gate": AnnotationGate(warn_unvalidated_share=limit)}
+    )
+    assert config.gate.warn_unvalidated_share == limit
+    before, after, _ = _promoted_samples(
+        tmp_path, mouse_setup, promotion_trust, config=config
+    )
+    default_limit = AnnotationGate().warn_unvalidated_share
+    levels = _unvalidated_levels(after.labels, limit)
+    assert levels == ["subclass"]
+    assert set(_unvalidated_levels(after.labels, default_limit)) > set(levels)
+    expected = [
+        f"unvalidated_share:{level}: > {limit} of confident labels outside "
+        "the validated region"
+        for level in levels
+    ]
+    gate = after.summary["mouse_gate"]
+    assert _unvalidated(gate["warning_reasons"]) == expected
+    assert gate["warning"] is True
+    assert _unvalidated(before.summary["mouse_gate"]["warning_reasons"]) == []
+    assert after.summary["resolution"]["gate"] == gate
+    assert after.provenance.mouse_gate is not None
+    assert _unvalidated(after.provenance.mouse_gate.reasons) == expected
+    _, stored = read_label_table(after.labels_path)
+    assert stored is not None and stored.mouse_gate is not None
+    assert _unvalidated(stored.mouse_gate.reasons) == expected
+
+
+@pytest.mark.parametrize(
+    "update",
+    [
+        {"level": "broad_only"},
+        {"level_reasons": ("moved: a level reason the first verdict lacks",)},
+    ],
+    ids=["level", "level_reasons"],
+)
+def test_mouse_resolve_refuses_a_gate_level_that_moves_with_the_validated_share(
+    tmp_path: Path,
+    mouse_setup: dict[str, Any],
+    promotion_trust: Callable[..., tuple[Any, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    update: dict[str, Any],
+) -> None:
+    """The second mouse gate evaluation may only add warnings (M13 C11).
+
+    RESOLVE evaluates the gate again after ``resolve_mouse``, with the
+    validated shares; the statuses were decided at the first verdict's level,
+    so a second verdict with another level or other level reasons is refused
+    rather than recorded beside labels it did not gate. The second evaluation
+    reads the validated share of every mouse chain level, nt included (D15 (a)).
+    """
+    import dataclasses
+
+    import merxen.annotation.mouse_gate as mouse_gate
+    from merxen.annotation.consensus import MOUSE_CHAIN
+
+    original = mouse_gate.evaluate_mouse_gate
+    calls: list[bool] = []
+    share_levels: list[tuple[str, ...]] = []
+
+    def moving(*args: Any, **kwargs: Any) -> Any:
+        verdict = original(*args, **kwargs)
+        second = kwargs.get("validated_share") is not None
+        calls.append(second)
+        if second:
+            share_levels.append(tuple(kwargs["validated_share"]))
+        return dataclasses.replace(verdict, **update) if second else verdict
+
+    monkeypatch.setattr(mouse_gate, "evaluate_mouse_gate", moving)
+    with pytest.raises(AssertionError, match="cannot depend on the validated share"):
+        _promoted_samples(tmp_path, mouse_setup, promotion_trust)
+    assert calls == [False, True]
+    assert share_levels == [MOUSE_CHAIN]
