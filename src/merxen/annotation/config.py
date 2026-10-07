@@ -928,6 +928,15 @@ class AnnotationRealQcConfig(_AnnotationModel):
             uninformative.
         genes_per_count_gap_warn: Warn when native cells carry this much more
             genes than simulated cells.
+        gene_complexity_matching: Which simulated cells a native depth bin
+            is compared with (NR7): ``interpolated`` (the user's ruling C3
+            (b) of 2026-10-07, pre-registration §23.19: inside the grid,
+            each test cell's simulated genes interpolated, linearly in log
+            depth, between the bin's edges to the bin's native median total;
+            the open top bin at its lower edge) or ``lower_edge`` (the
+            simulated cells at the bin's lower edge, as M13 C16 first built
+            it; native cells in a bin carry more counts than its lower edge,
+            so it shows a gap without one).
         prefilter_spotcheck_min_agreement: 5K prefilter spot-check agreement.
         seeded_families_warn_only_until_gate: Per species, whether its gate
             (human: gate H; mouse: gate M) has merged: ``pending`` or
@@ -977,6 +986,7 @@ class AnnotationRealQcConfig(_AnnotationModel):
     paired_broad_jsd_warn: float = 0.20
     uninformative_strata_warn_frac: float = 0.5
     genes_per_count_gap_warn: float = Field(default=0.45, ge=0.0)
+    gene_complexity_matching: Literal["interpolated", "lower_edge"] = "interpolated"
     prefilter_spotcheck_min_agreement: float = 0.95
     seeded_families_warn_only_until_gate: dict[Species, SpeciesGateState] = Field(
         default_factory=_pending_species_gates

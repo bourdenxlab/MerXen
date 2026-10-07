@@ -1122,7 +1122,7 @@ stay or fall (property-tested).
 | Non-neuronal high depth | `nonneuronal_high_depth_flags` | non-neuronal cells at >= 1,000 counts in emitted `nonneuronal_high_depth` bins | report-only `flag_nonneuronal_high_depth`, written by RESOLVE for version-7 bundles |
 | Glial large-mask / high-depth trend | `nonneuronal_depth_trend` | real non-neuronal coverage at >= 1,000 counts below the 500-999 band by more than 2 SE (both >= 200 cells) | report-only (5K vendor glia: class .916 -> .897 -> .886) |
 | Factor re-measure (first in-house dataset of a family with a measured factor table) | `factor_remeasure` | per-gene factors re-measured with the X1 code (`shadow.reference_pseudobulk_totals`) on the confident calls, centred on the median informative gene and capped +-3, against the stored table on genes informative in both | warning when Pearson r < 0.9, recommending a PREP re-run with the in-house table as a new asset (not automatic) |
-| Gene complexity | `gene_complexity_check`; inputs from `gene_complexity_signal` (M13 C16) | median genes per cell of native vs simulated cells per depth bin (>= 50 cells each); simulated cells from the version-7 bundle's `resolvability_sim_genes.parquet` (one per test cell and grid depth, the mean over the emission members, binned at the grid depth), native cells counted on the same genes | warning when native cells carry > 45% more genes (`real_qc.genes_per_count_gap_warn`); its text says simulated coverage predictions are unreliable for the dataset; `not_evaluable` for version-6 bundles and version-7 bundles built before C16 |
+| Gene complexity | `gene_complexity_check`; inputs from `gene_complexity_signal` (M13 C16) | median genes per cell of native vs simulated cells per depth bin (>= 50 cells each); simulated cells from the version-7 bundle's `resolvability_sim_genes.parquet` (one per test cell and grid depth, the mean over the emission members, binned at the grid depth), native cells counted on the same genes; inside the grid each native bin [D_i, D_i+1) is compared with the test cells' genes interpolated, linearly in log depth, between D_i and D_i+1 to the bin's native median total (`real_qc.gene_complexity_matching = interpolated`, the user's ruling C3 (b) of 2026-10-07), the open top bin with the cells at its lower edge | warning when native cells carry > 45% more genes (`real_qc.genes_per_count_gap_warn`); its text says simulated coverage predictions are unreliable for the dataset; `not_evaluable` for version-6 bundles and version-7 bundles built before C16 |
 
 The thresholds are the `real_qc` fields of the annotation config
 ([Configuration](../configuration.md)).
@@ -1234,6 +1234,21 @@ the row reading could only judge more bins, and the family's gate-P PR names
 it for the user. The outcome's `details.source` records the artefact
 version, the members and the missing genes. RESOLVE passes the table cells
 (M13 chunk C15).
+
+**Depth matching (the user's ruling C3 (b) of 2026-10-07; pre-registration
+§23.19).** Native cells in a bin [D_i, D_i+1) carry more counts than D_i, so
+compared with the simulated cells at D_i they carry more genes even without
+a complexity gap: on synthetic cells without one the gap was 0.18-0.57 per
+bin, above the 0.45 limit in the shallow bins (`$A/m13/c16`). With
+`real_qc.gene_complexity_matching = interpolated` (the default) each test
+cell's simulated genes are interpolated, linearly in log depth, between its
+values at D_i and D_i+1 to the bin's native median total, and the bin
+compares the native median with the median of those values (-0.06 to -0.01
+on the same synthetic cells). Only test cells simulated at both edges are
+matched, and the 50-cell minimum counts them. The open top bin (at or above
+the last grid value) has no upper edge and keeps the lower edge. The per-bin
+table records the matching, the native median total, the edges and the
+interpolation weight. `lower_edge` gives the C16 matching.
 
 On a seeded real-data family whose species gate has not merged into `main`
 (`real_qc.seeded_families_warn_only_until_gate`), the lowering effects of the

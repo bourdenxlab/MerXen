@@ -520,14 +520,18 @@ def _complexity_outcome(result: qc.RealQcResult) -> qc.QcOutcome:
 
 
 def _bundle_like(simulated_n_genes: int) -> res.SimulatedGenes:
-    """Sixty simulated cells at D = 30 with a fixed simulated n_genes."""
+    """Sixty test cells simulated at D = 30 and 100 with a fixed n_genes.
+
+    NR7 interpolates a test cell's genes between the native bin's edges
+    (30 and 100) at the bin's native median total (C3 (b)).
+    """
     table = pd.DataFrame(
         {
             res.MEMBER_COLUMN: "R1_contam_HO@0",
             res.MEMBER_ROLE_COLUMN: "emission",
-            "cell_id": [f"c{index}" for index in range(60)],
-            "depth": 30,
-            "total_counts": 30,
+            "cell_id": [f"c{index}" for index in range(60)] * 2,
+            "depth": np.repeat([30, 100], 60),
+            "total_counts": np.repeat([30, 100], 60),
             "n_genes": simulated_n_genes,
         }
     )

@@ -49,7 +49,10 @@ Checks added by M3c (plan §8.8 table; §8.3 v7.5, v7.9; §8.10):
   simulated cells per depth bin; a warning when native cells carry > 45%
   more genes (beyond E2's 30-45%) which, from M3c, also says that simulated
   coverage predictions are unreliable for the dataset (v1-type cells carried
-  2-73% more genes than simulated ones at matched depth).
+  2-73% more genes than simulated ones at matched depth). Inside the grid a
+  native bin is matched by interpolating each test cell's simulated genes to
+  the bin's native median total (the user's ruling C3 (b) of 2026-10-07);
+  the open top bin keeps its lower edge.
 
 ``apply_qc_outcomes`` combines outcomes with a trust state and can only keep
 or lower it (refused < broad_only < provisional < validated); every M3c
@@ -152,6 +155,16 @@ FACTOR_INFORMATIVE_MIN_EXPECTED: Final = 1000.0
 FACTOR_CAP_LOG2: Final = 3.0
 GENE_COMPLEXITY_GAP_WARN: Final = 0.45
 GENE_COMPLEXITY_MIN_CELLS: Final = 50
+# NR7's depth matching (the user's ruling C3 (b) of 2026-10-07,
+# pre-registration §23.19): a native bin inside the grid is compared with the
+# test cells' simulated genes interpolated to its native median total; the
+# lower edge is the M13 C16 matching, kept for the open top bin.
+GENE_COMPLEXITY_INTERPOLATED: Final = "interpolated"
+GENE_COMPLEXITY_LOWER_EDGE: Final = "lower_edge"
+GENE_COMPLEXITY_MATCHINGS: Final[tuple[str, ...]] = (
+    GENE_COMPLEXITY_INTERPOLATED,
+    GENE_COMPLEXITY_LOWER_EDGE,
+)
 # The depth bands of the non-neuronal trend (REVIEW_CHECKS C3).
 DEPTH_BANDS: Final[tuple[tuple[int, int | None], ...]] = (
     (500, 1000),
@@ -1437,17 +1450,37 @@ def gene_complexity_check(
     *,
     gap_warn: float = GENE_COMPLEXITY_GAP_WARN,
     min_cells: int = GENE_COMPLEXITY_MIN_CELLS,
+    simulated_cell_ids: Sequence[object] | np.ndarray | None = None,
+    matching: str = GENE_COMPLEXITY_INTERPOLATED,
 ) -> tuple[pd.DataFrame, QcOutcome]:
     """Compare genes per cell of native and simulated cells per depth bin (§8.8).
 
-    Native cells are binned by their total counts (``depth_bin``), simulated
-    cells by their depth (the grid value, or the realised total binned the
-    same way). A bin with at least ``min_cells`` cells of each is judged:
-    ``gap`` = native median / simulated median - 1. The check warns when a
-    judged bin's gap exceeds ``gap_warn`` (45%, beyond E2's 30-45%); from
-    M3c the warning also says that simulated coverage predictions are
-    unreliable for the dataset. Every judged bin records whether native cells
-    carry more genes than simulated ones at all (report-only).
+    Native cells are binned by their total counts (``depth_bin``: the bin
+    [D_i, D_i+1) of the grid), simulated cells by their depth (the grid
+    value, or the realised total binned the same way). ``matching`` says
+    which simulated cells a native bin is compared with:
+
+    - ``interpolated`` (the user's ruling C3 (b) of 2026-10-07,
+      pre-registration §23.19): inside the grid, each simulated test cell's
+      genes are interpolated, linearly in log depth, between its values at
+      D_i and D_i+1 to the native bin's median total, and the bin compares
+      the native median with the median of those values. Only test cells
+      simulated at both edges are matched (``simulated_cell_ids`` pairs
+      them). The open top bin (>= the last grid value) has no upper edge
+      and keeps the lower edge. Native cells in a bin carry more counts
+      than D_i, so at the lower edge they carry more genes even without a
+      complexity gap (0.18-0.57 on synthetic cells without one, against
+      -0.06 to -0.01 interpolated; ``$A/m13/c16``);
+    - ``lower_edge``: the simulated cells at D_i (M13 C16 as first built,
+      and the M3c public-section check).
+
+    A bin with at least ``min_cells`` native cells and ``min_cells``
+    simulated (matched) test cells is judged: ``gap`` = native median /
+    simulated median - 1. The check warns when a judged bin's gap exceeds
+    ``gap_warn`` (45%, beyond E2's 30-45%); from M3c the warning also says
+    that simulated coverage predictions are unreliable for the dataset.
+    Every judged bin records whether native cells carry more genes than
+    simulated ones at all (report-only).
 
     Args:
         native_n_genes: Genes detected per native cell.
@@ -1457,25 +1490,92 @@ def gene_complexity_check(
         grid: The depth grid.
         gap_warn: Warning gap (0.45).
         min_cells: Cells of each kind a judged bin needs.
+        simulated_cell_ids: The test cell of each simulated cell (needed by
+            ``interpolated``; one value per test cell and depth, as
+            ``SimulatedGenes.per_cell`` gives; repeats are averaged).
+        matching: ``interpolated`` or ``lower_edge``.
 
     Returns:
-        ``(per-bin table, outcome)``.
+        ``(per-bin table, outcome)``. The table adds, per bin, the matching
+        used, the native median total, the interpolation's edges and its
+        weight on the upper edge.
+
+    Raises:
+        ValueError: For an unknown matching, or ``interpolated`` without
+            ``simulated_cell_ids`` of the simulated cells' length.
     """
+    if matching not in GENE_COMPLEXITY_MATCHINGS:
+        raise ValueError(
+            f"unknown gene-complexity matching {matching!r}; expected one of "
+            f"{GENE_COMPLEXITY_MATCHINGS}"
+        )
     native_bins = _bins(np.asarray(native_totals, dtype=np.float64), grid)
     simulated_bins = _bins(np.asarray(simulated_depth, dtype=np.float64), grid)
     native = np.asarray(native_n_genes, dtype=np.float64)
+    native_total = np.asarray(native_totals, dtype=np.float64)
     simulated = np.asarray(simulated_n_genes, dtype=np.float64)
-    rows: list[dict[str, Any]] = []
-    for depth in sorted(int(value) for value in grid):
-        in_native = native_bins == float(depth)
-        in_simulated = simulated_bins == float(depth)
-        n_native = int(in_native.sum())
-        n_simulated = int(in_simulated.sum())
-        judged = n_native >= min_cells and n_simulated >= min_cells
-        native_median = float(np.median(native[in_native])) if n_native else math.nan
-        simulated_median = (
-            float(np.median(simulated[in_simulated])) if n_simulated else math.nan
+    by_cell: pd.DataFrame | None = None
+    if matching == GENE_COMPLEXITY_INTERPOLATED:
+        cell_ids = np.asarray(
+            [] if simulated_cell_ids is None else simulated_cell_ids, dtype=object
         )
+        if len(cell_ids) != len(simulated):
+            raise ValueError(
+                "the interpolated gene-complexity matching needs the test cell "
+                "of every simulated cell (simulated_cell_ids)"
+            )
+        frame = pd.DataFrame(
+            {
+                "cell": cell_ids.astype(str),
+                "depth": simulated_bins,
+                "genes": simulated,
+            }
+        ).dropna(subset=["depth"])
+        by_cell = frame.pivot_table(
+            index="cell", columns="depth", values="genes", aggfunc="mean"
+        )
+    depths = sorted(int(value) for value in grid)
+    rows: list[dict[str, Any]] = []
+    for position, depth in enumerate(depths):
+        in_native = native_bins == float(depth)
+        n_native = int(in_native.sum())
+        native_median = float(np.median(native[in_native])) if n_native else math.nan
+        median_total = (
+            float(np.median(native_total[in_native])) if n_native else math.nan
+        )
+        upper = depths[position + 1] if position + 1 < len(depths) else None
+        weight = math.nan
+        if by_cell is not None and upper is not None:
+            used = GENE_COMPLEXITY_INTERPOLATED
+            low = by_cell.get(float(depth))
+            high = by_cell.get(float(upper))
+            if low is None or high is None:
+                values = np.empty(0, dtype=np.float64)
+            else:
+                paired = pd.concat([low, high], axis=1).dropna()
+                values = paired.to_numpy(np.float64)
+            n_simulated = int(len(values))
+            if n_native and n_simulated:
+                # Linear in log depth between the bin's edges (the C16 probe).
+                weight = (math.log(median_total) - math.log(depth)) / (
+                    math.log(upper) - math.log(depth)
+                )
+                weight = min(max(weight, 0.0), 1.0)
+                matched = (1.0 - weight) * values[:, 0] + weight * values[:, 1]
+                simulated_median = float(np.median(matched))
+            else:
+                simulated_median = math.nan
+        else:
+            used = GENE_COMPLEXITY_LOWER_EDGE
+            if by_cell is not None:
+                # The open top bin: one value per test cell, as inside.
+                column = by_cell.get(float(depth))
+                edge = np.empty(0) if column is None else column.dropna().to_numpy()
+            else:
+                edge = simulated[simulated_bins == float(depth)]
+            n_simulated = int(len(edge))
+            simulated_median = float(np.median(edge)) if n_simulated else math.nan
+        judged = n_native >= min_cells and n_simulated >= min_cells
         gap = (
             native_median / simulated_median - 1.0
             if judged and simulated_median > 0
@@ -1484,8 +1584,15 @@ def gene_complexity_check(
         rows.append(
             {
                 "depth": depth,
+                "matching": used,
                 "n_native": n_native,
                 "n_simulated": n_simulated,
+                "native_median_total": median_total,
+                "simulated_depth_low": depth,
+                "simulated_depth_high": upper
+                if used == GENE_COMPLEXITY_INTERPOLATED
+                else None,
+                "interpolation_weight": weight,
                 "native_median_genes": native_median,
                 "simulated_median_genes": simulated_median,
                 "gap": gap,
@@ -1509,6 +1616,7 @@ def gene_complexity_check(
                 "bins_warned": [int(value) for value in warned["depth"]],
                 "max_gap": float(worst["gap"]),
                 "gap_warn": gap_warn,
+                "matching": matching,
                 "coverage_predictions_reliable": False,
             },
         )
@@ -1520,6 +1628,7 @@ def gene_complexity_check(
             effect="warning",
             details={
                 "gap_warn": gap_warn,
+                "matching": matching,
                 "native_exceeds_simulated_in_some_bin": exceeds,
             },
         )
@@ -3317,6 +3426,9 @@ class GeneComplexitySignal:
         grid: The bundle's depth grid.
         source: Where the inputs came from (recorded in the outcome's
             ``details``).
+        simulated_cell_ids: The test cell of each simulated cell (NR7's
+            interpolated matching pairs a test cell's values at a bin's two
+            edges); ``None`` allows only the lower-edge matching.
     """
 
     native_n_genes: Sequence[float] | np.ndarray
@@ -3325,6 +3437,7 @@ class GeneComplexitySignal:
     simulated_depth: Sequence[float] | np.ndarray
     grid: Sequence[int]
     source: Mapping[str, Any] = field(default_factory=dict)
+    simulated_cell_ids: Sequence[object] | np.ndarray | None = None
 
 
 # How many missing query genes the gene-complexity source lists by name.
@@ -3341,7 +3454,9 @@ def gene_complexity_signal(
     Simulated cells: one value per (test cell, grid depth), the mean
     ``n_genes`` over the bundle's emission members
     (``SimulatedGenes.per_cell``), at the grid depth D (a simulated cell's
-    bin, v7.2; its realised total can fall just below D). Native cells: the
+    bin, v7.2; its realised total can fall just below D), with the test cell
+    of each (``simulated_cell_ids``), so that the check can interpolate a
+    test cell's genes between a bin's edges (C3 (b)). Native cells: the
     given cells' genes and totals on the bundle's query genes
     (``native_gene_complexity``).
 
@@ -3369,6 +3484,7 @@ def gene_complexity_signal(
         simulated_n_genes=per_cell["n_genes"].to_numpy(np.float64),
         simulated_depth=per_cell["depth"].to_numpy(np.float64),
         grid=list(simulated.depth_grid),
+        simulated_cell_ids=per_cell["cell_id"].astype(str).to_numpy(object),
         source={
             "artefact_version": simulated.version,
             "members": list(simulated.emission_members),
@@ -3756,7 +3872,10 @@ def _trend_outcomes(
 
 
 def _gene_complexity_outcome(
-    signal: GeneComplexitySignal | None, *, gap_warn: float
+    signal: GeneComplexitySignal | None,
+    *,
+    gap_warn: float,
+    matching: str = GENE_COMPLEXITY_INTERPOLATED,
 ) -> tuple[QcOutcome, pd.DataFrame | None]:
     if signal is None:
         return (
@@ -3774,6 +3893,8 @@ def _gene_complexity_outcome(
         signal.simulated_depth,
         signal.grid,
         gap_warn=gap_warn,
+        simulated_cell_ids=signal.simulated_cell_ids,
+        matching=matching,
     )
     source = {"source": dict(signal.source)} if signal.source else {}
     if not outcome.fired and not (len(table) and table["judged"].any()):
@@ -3874,7 +3995,9 @@ def real_data_qc(
         )
         outcomes.append(flag_rates.outcome)
     complexity, complexity_table = _gene_complexity_outcome(
-        signals.gene_complexity, gap_warn=settings.genes_per_count_gap_warn
+        signals.gene_complexity,
+        gap_warn=settings.genes_per_count_gap_warn,
+        matching=settings.gene_complexity_matching,
     )
     outcomes.append(complexity)
     if complexity_table is not None:

@@ -547,12 +547,14 @@ def trend_signal(n_per_band: int = 300) -> qc.NonneuronalTrendSignal:
 
 
 def complexity_signal(native: float, simulated: float) -> qc.GeneComplexitySignal:
+    """60 native cells at 120 counts; 60 test cells simulated at 120 and 250."""
     return qc.GeneComplexitySignal(
         native_n_genes=np.full(60, native),
         native_totals=np.full(60, 120.0),
-        simulated_n_genes=np.full(60, simulated),
-        simulated_depth=np.full(60, 120.0),
+        simulated_n_genes=np.full(120, simulated),
+        simulated_depth=np.repeat([120.0, 250.0], 60),
         grid=[10, 15, 30, 60, 120, 250],
+        simulated_cell_ids=np.tile([f"t{index}" for index in range(60)], 2),
     )
 
 
@@ -716,6 +718,28 @@ def test_the_orchestrator_reads_the_real_qc_config(make_trust: MakeTrust) -> Non
     assert changed.outcomes["coverage_vs_simulation"] == "warn"
     assert changed.outcomes["prefilter_spotcheck"] == "fail"
     assert changed.outcomes["factor_remeasure"] == "warn"
+
+
+def test_nr7_matching_follows_the_real_qc_config(make_trust: MakeTrust) -> None:
+    """C3 (b) of 2026-10-07: interpolated by default; the lower edge on request."""
+    assert AnnotationRealQcConfig().gene_complexity_matching == "interpolated"
+    with pytest.raises(ValueError):
+        AnnotationRealQcConfig(gene_complexity_matching="nearest")  # type: ignore[arg-type]
+    signals = new_panel_signals(gene_complexity=complexity_signal(150.0, 100.0))
+    trust = make_trust("provisional")
+    for matching in ("interpolated", "lower_edge"):
+        config = AnnotationConfig(
+            species="human",
+            real_qc=AnnotationRealQcConfig(gene_complexity_matching=matching),
+        )
+        result = qc.real_data_qc(signals, trust, config)
+        (outcome,) = [
+            item for item in result.outcomes if item.check == "gene_complexity"
+        ]
+        assert outcome.details["matching"] == matching
+        assert outcome.fired
+        table = result.tables["gene_complexity"].set_index("depth")
+        assert table.loc[120, "matching"] == matching
 
 
 def test_registration_g1_follows_the_configured_effect(make_trust: MakeTrust) -> None:

@@ -50,6 +50,7 @@
 - **Regression script.** `scripts/acceptance/m13_real_qc_regression.py` tabulates the real-data QC outcomes on the M8 human pairs.
 - **The user's rulings of 2026-10-07** (pre-registration §23.19) change these defaults:
   - registration G1's fail rule fails the dataset gate (`real_qc.registration_g1_effect = gate_failed`, §8.8's effect), after the set a regression showed no false G1 failure; it was warn-only in M13 until then (D23 (b));
+  - the gene-complexity check matches each native depth bin inside the grid by interpolating each test cell's simulated genes to the bin's native median total (`real_qc.gene_complexity_matching = interpolated`); the open top bin keeps its lower edge. At the lower edge the check showed a gap where there was none;
   - the human marker referee derives its marker sets with the `class` comparator (`real_qc.marker_referee_comparator`); the 0.75 / 0.70 thresholds are unchanged. The `node` comparator, the default until then, was `not_evaluable` on every set a sample. The regression script pins the settings C17 ran with, so a re-run reproduces C17.
 
 ### Fixed

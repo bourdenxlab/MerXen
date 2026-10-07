@@ -238,8 +238,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     simulated_genes = np.diff(query.counts.tocsr().indptr)
     simulated_depth = query.obs["total_counts"].to_numpy(np.float64)
     native_genes = np.diff(counts.tocsr().indptr)
+    # The M3c check bins realised totals at the lower edge, as it was run
+    # (M13's interpolated matching, ruling C3 (b), needs per-cell pairs).
     table, outcome = real_qc.gene_complexity_check(
-        native_genes, counts_arr, simulated_genes, simulated_depth, grid
+        native_genes,
+        counts_arr,
+        simulated_genes,
+        simulated_depth,
+        grid,
+        matching=real_qc.GENE_COMPLEXITY_LOWER_EDGE,
     )
     table.to_csv(args.out_dir / "gene_complexity.csv", index=False)
     record["gene_complexity"] = outcome.to_json()

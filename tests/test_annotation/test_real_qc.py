@@ -573,6 +573,7 @@ def test_gene_complexity_warns_above_45_percent_and_flags_predictions() -> None:
         simulated_n_genes=np.full(300, 100.0),
         simulated_depth=simulated_depth,
         grid=GRID,
+        matching="lower_edge",
     )
     assert outcome.fired and outcome.effect == "warning"
     assert "Simulated coverage predictions are unreliable" in outcome.message
@@ -584,6 +585,7 @@ def test_gene_complexity_warns_above_45_percent_and_flags_predictions() -> None:
         simulated_n_genes=np.full(300, 100.0),
         simulated_depth=simulated_depth,
         grid=GRID,
+        matching="lower_edge",
     )
     assert not quiet.fired
     assert quiet.details["native_exceeds_simulated_in_some_bin"] is True
@@ -596,9 +598,121 @@ def test_gene_complexity_ignores_bins_with_too_few_cells() -> None:
         simulated_n_genes=np.full(10, 100.0),
         simulated_depth=np.full(10, 250),
         grid=GRID,
+        matching="lower_edge",
     )
     assert not outcome.fired
     assert not table["judged"].any()
+
+
+# --------------------------------------------------------------------------
+# NR7's depth matching (the user's ruling C3 (b) of 2026-10-07)
+
+C16_GRID = [10, 15, 30, 60, 120, 250]
+
+
+def _genes_at(totals: np.ndarray) -> np.ndarray:
+    """Genes per cell without any complexity gap: linear in log depth."""
+    return 40.0 * np.log(np.asarray(totals, dtype=np.float64))
+
+
+def _no_gap_cells(n_native: int = 400, n_test: int = 200) -> dict[str, np.ndarray]:
+    """Native cells and simulated test cells on one genes-per-depth curve."""
+    rng = np.random.default_rng(16)
+    native_totals = np.exp(rng.uniform(np.log(30), np.log(500), n_native))
+    cells = np.repeat([f"t{index}" for index in range(n_test)], len(C16_GRID))
+    depths = np.tile(C16_GRID, n_test).astype(np.float64)
+    return {
+        "native_n_genes": _genes_at(native_totals),
+        "native_totals": native_totals,
+        "simulated_n_genes": _genes_at(depths),
+        "simulated_depth": depths,
+        "simulated_cell_ids": cells,
+    }
+
+
+def test_nr7_interpolates_simulated_genes_to_the_native_bin_median_total() -> None:
+    """Without a complexity gap the interpolated gap is 0; the lower edge's is not."""
+    cells = _no_gap_cells()
+    table, outcome = qc.gene_complexity_check(grid=C16_GRID, **cells)
+    rows = table.set_index("depth")
+    inside = rows.loc[[30, 60, 120]]
+    assert (inside["matching"] == "interpolated").all()
+    assert inside["judged"].all()
+    assert inside["gap"].abs().max() < 1e-3
+    assert not outcome.fired
+    assert outcome.details["matching"] == "interpolated"
+    # The weight puts the bin's native median total between its edges.
+    for depth, upper in ((30, 60), (60, 120), (120, 250)):
+        row = rows.loc[depth]
+        assert row["simulated_depth_high"] == upper
+        expected = (np.log(row["native_median_total"]) - np.log(depth)) / (
+            np.log(upper) - np.log(depth)
+        )
+        assert row["interpolation_weight"] == pytest.approx(expected)
+        assert 0.0 <= row["interpolation_weight"] < 1.0
+    # The registered lower edge sees a gap where there is none.
+    edge, _ = qc.gene_complexity_check(grid=C16_GRID, matching="lower_edge", **cells)
+    edge_rows = edge.set_index("depth")
+    assert (edge_rows.loc[[30, 60, 120], "gap"] > 0.05).all()
+    assert (edge_rows["matching"] == "lower_edge").all()
+
+
+def test_nr7_keeps_the_lower_edge_for_the_open_top_bin() -> None:
+    cells = _no_gap_cells()
+    table, _ = qc.gene_complexity_check(grid=C16_GRID, **cells)
+    top = table.set_index("depth").loc[250]
+    # No upper edge above the grid: the cells at 250, one value per test cell.
+    assert top["matching"] == "lower_edge"
+    assert pd.isna(top["simulated_depth_high"])
+    assert np.isnan(top["interpolation_weight"])
+    assert top["n_simulated"] == 200
+    assert top["simulated_median_genes"] == pytest.approx(40.0 * np.log(250))
+    assert top["gap"] > 0
+
+
+def test_nr7_matches_only_test_cells_simulated_at_both_edges() -> None:
+    """A test cell without a row at the upper edge is left out of the bin."""
+    cells = _no_gap_cells(n_test=80)
+    keep = ~(
+        np.isin(cells["simulated_cell_ids"], [f"t{index}" for index in range(40)])
+        & (cells["simulated_depth"] == 60)
+    )
+    thinned = {
+        key: value[keep] if key.startswith("simulated") else value
+        for key, value in cells.items()
+    }
+    table, _ = qc.gene_complexity_check(grid=C16_GRID, **thinned)
+    rows = table.set_index("depth")
+    # Bins 30 (edges 30, 60) and 60 (edges 60, 120) lose the 40 cells.
+    assert rows.loc[30, "n_simulated"] == 40
+    assert rows.loc[60, "n_simulated"] == 40
+    assert rows.loc[120, "n_simulated"] == 80
+    # 40 matched test cells are below the 50-cell minimum: not judged.
+    assert not rows.loc[30, "judged"] and not rows.loc[60, "judged"]
+    assert rows.loc[120, "judged"]
+
+
+def test_nr7_interpolation_needs_the_simulated_cells_test_cells() -> None:
+    cells = _no_gap_cells()
+    del cells["simulated_cell_ids"]
+    with pytest.raises(ValueError, match="simulated_cell_ids"):
+        qc.gene_complexity_check(grid=C16_GRID, **cells)
+    with pytest.raises(ValueError, match="unknown gene-complexity matching"):
+        qc.gene_complexity_check(grid=C16_GRID, matching="nearest", **cells)
+    # The lower edge needs none.
+    table, _ = qc.gene_complexity_check(grid=C16_GRID, matching="lower_edge", **cells)
+    assert table["judged"].any()
+
+
+def test_nr7_warns_on_a_real_gap_under_interpolation() -> None:
+    cells = _no_gap_cells()
+    cells["native_n_genes"] = 1.6 * cells["native_n_genes"]
+    table, outcome = qc.gene_complexity_check(grid=C16_GRID, **cells)
+    inside = table.set_index("depth").loc[[30, 60, 120], "gap"]
+    assert inside.to_numpy() == pytest.approx([0.6, 0.6, 0.6], abs=1e-3)
+    assert outcome.fired
+    assert outcome.details["matching"] == "interpolated"
+    assert {30, 60, 120} <= set(outcome.details["bins_warned"])
 
 
 def test_qc_summary_never_promotes() -> None:

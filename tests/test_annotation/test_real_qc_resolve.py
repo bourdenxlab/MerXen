@@ -1648,8 +1648,10 @@ def test_resolve_scores_gene_complexity_on_the_bundles_query_genes(
     evaluable in RESOLVE. The native side is each sample's table cells,
     counted on the bundle's query genes (a query gene the dataset lacks
     counts as not detected and is reported), binned by their counts there;
-    the simulated side is the stored cells at their grid depth. A bin where
-    the simulated cells carry as many genes as the native ones passes, and
+    the simulated side is the stored test cells, each interpolated between
+    the bin's edges to the bin's native median total (the user's ruling C3
+    (b) of 2026-10-07), the open top bin at its lower edge. A bin where the
+    simulated cells carry about as many genes as the native ones passes, and
     one where they carry half as many warns.
     """
     import anndata as ad
@@ -1672,14 +1674,14 @@ def test_resolve_scores_gene_complexity_on_the_bundles_query_genes(
     _write_simulated_genes(
         bundle_dir,
         query_genes,
-        {10: (20, 2), 30: (20, 4), 100: (60, 6), 250: (60, 3)},
+        {10: (20, 2), 30: (20, 4), 100: (60, 6), 250: (60, 4)},
         MEMBERS,
     )
     applied = _resolve(
         setup, make_trust, "qc", state="provisional", config=_human_v7_config()
     )
     gap_warn = setup.config.real_qc.genes_per_count_gap_warn
-    simulated = {10: (20, 2.0), 30: (20, 4.0), 100: (60, 6.0), 250: (60, 3.0)}
+    simulated = {10: (20, 2.0), 30: (20, 4.0), 100: (60, 6.0), 250: (60, 4.0)}
     for sample in setup.samples:
         record = applied.samples[sample.sample_id].summary["real_qc"]
         labels, _ = _tables(applied, sample.sample_id)
@@ -1687,21 +1689,40 @@ def test_resolve_scores_gene_complexity_on_the_bundles_query_genes(
         # The prepared H5AD's six panel genes, in GENE_IDS order.
         native = np.asarray(ad.read_h5ad(sample.h5ad_path).X[:, :6].todense())[table]
         n_genes = (native > 0).sum(axis=1)
-        bins = res.depth_bin(native.sum(axis=1).astype(np.float64), HUMAN_GRID)
+        totals = native.sum(axis=1).astype(np.float64)
+        bins = res.depth_bin(totals, HUMAN_GRID)
         rows = pd.DataFrame(record["tables"]["gene_complexity"])
-        assert rows["depth"].tolist() == list(HUMAN_GRID)
+        grid = list(HUMAN_GRID)
+        assert rows["depth"].tolist() == grid
         for row in rows.to_dict("records"):
             depth = int(row["depth"])
             in_bin = bins == depth
-            n_simulated, simulated_genes = simulated[depth]
+            position = grid.index(depth)
+            n_low, genes_low = simulated[depth]
+            expected = genes_low
+            if position + 1 < len(grid):
+                # The same test cells (t0, t1, ...) at both edges: matched.
+                upper = grid[position + 1]
+                n_high, genes_high = simulated[upper]
+                n_simulated = min(n_low, n_high)
+                assert row["matching"] == "interpolated"
+                if in_bin.any():
+                    weight = (np.log(np.median(totals[in_bin])) - np.log(depth)) / (
+                        np.log(upper) - np.log(depth)
+                    )
+                    expected = (1 - weight) * genes_low + weight * genes_high
+            else:
+                n_simulated = n_low
+                assert row["matching"] == "lower_edge"
             assert row["n_native"] == int(in_bin.sum())
             assert row["n_simulated"] == n_simulated
-            assert row["simulated_median_genes"] == simulated_genes
-            if in_bin.any():
-                assert row["native_median_genes"] == float(np.median(n_genes[in_bin]))
+            if not in_bin.any():
+                continue
+            assert row["simulated_median_genes"] == pytest.approx(expected)
+            assert row["native_median_genes"] == float(np.median(n_genes[in_bin]))
             judged = int(in_bin.sum()) >= 50 and n_simulated >= 50
             assert row["judged"] == judged
-            gap = float(np.median(n_genes[in_bin])) / simulated_genes - 1.0
+            gap = float(np.median(n_genes[in_bin])) / expected - 1.0
             assert row["warn"] == (judged and gap > gap_warn)
         judged_rows = rows[rows["judged"]]
         assert set(judged_rows["depth"]) == {100, 250}
