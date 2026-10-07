@@ -165,21 +165,32 @@ def _depths(
     return tables
 
 
-def _check(criterion: str, status: str = gp.CHECK_PASSED) -> gp.FamilyCheck:
+def _check(
+    criterion: str,
+    status: str = gp.CHECK_PASSED,
+    *,
+    members: Sequence[str] = V6_MEMBERS,
+) -> gp.FamilyCheck:
+    """A family check; NP9's detail records the members it was scored in."""
+    detail: dict[str, Any] = {}
+    if criterion == "NP9":
+        detail["members"] = sorted(members)
     return gp.FamilyCheck(
-        criterion=criterion, status=status, parts={"part": status}, detail={}
+        criterion=criterion, status=status, parts={"part": status}, detail=detail
     )
 
 
-def _family_checks(**statuses: str) -> dict[str, gp.FamilyCheck]:
+def _family_checks(
+    members: Sequence[str] = V6_MEMBERS, **statuses: str
+) -> dict[str, gp.FamilyCheck]:
     checks = {
         "NP1": _check("NP1"),
         "NP2": _check("NP2"),
         "NP8": _check("NP8", gp.CHECK_NOT_APPLICABLE),
-        "NP9": _check("NP9"),
+        "NP9": _check("NP9", members=members),
     }
     for name, status in statuses.items():
-        checks[name] = _check(name, status)
+        checks[name] = _check(name, status, members=members)
     return checks
 
 
@@ -200,7 +211,7 @@ def _assemble(
         verdicts=_verdicts(members, overrides),
         depths=_depths(members, depth_values),
         class_sets=class_sets or _class_sets(),
-        family_checks=checks or _family_checks(),
+        family_checks=checks or _family_checks(members),
     )
 
 
@@ -595,6 +606,30 @@ def test_assemble_refuses_inputs_of_another_family_shape() -> None:
     mouse_sets = gp.ClassSets("mouse", _class_sets().classes, _class_sets().levels)
     with pytest.raises(ValueError, match="class sets"):
         call(class_sets=mouse_sets)
+
+
+def test_assemble_refuses_np9_scored_on_other_members() -> None:
+    """CHECK K13: NP9's re-runs cover the members the verdicts were scored in."""
+    v7_checks = _family_checks(V7_MEMBERS)
+    passing = _assemble(V7_MEMBERS, checks={**v7_checks, "NP9": _np9(V7_MEMBERS)})
+    assert passing.passes
+    assert passing.family_checks["NP9"].detail["members"] == sorted(V7_MEMBERS)
+    # NP9 scored with one member's re-run passes on its own, but seven of the
+    # eight version-7 members were never re-run.
+    narrow = _np9(V6_MEMBERS)
+    assert narrow.status == gp.CHECK_PASSED
+    with pytest.raises(ValueError, match="NP9 was scored on the members"):
+        _assemble(V7_MEMBERS, checks={**v7_checks, "NP9": narrow})
+    with pytest.raises(ValueError, match="NP9 was scored on the members"):
+        _assemble(checks={**_family_checks(), "NP9": _np9(V7_MEMBERS)})
+    # An NP9 that does not record its members cannot be tied to them.
+    unrecorded = gp.FamilyCheck(
+        criterion="NP9", status=gp.CHECK_PASSED, parts={"part": "passed"}, detail={}
+    )
+    with pytest.raises(ValueError, match="does not record"):
+        _assemble(checks={**_family_checks(), "NP9": unrecorded})
+    with pytest.raises(ValueError, match="emission members"):
+        _np9(())
 
 
 def test_gate_p_levels_are_the_annotation_chain() -> None:

@@ -5905,7 +5905,9 @@ def np9_resources(
       pre-registration §23.16).
 
     A part without its measurement is ``not_evaluable``, so NP9 cannot pass
-    on a missing number.
+    on a missing number. The members are recorded in the detail
+    (``members``), and ``assemble_gate_p`` refuses an NP9 scored on other
+    members than the verdicts, so that the re-run scope is the family's.
 
     Args:
         inputs: The measurements.
@@ -5914,7 +5916,13 @@ def np9_resources(
 
     Returns:
         The check.
+
+    Raises:
+        ValueError: If ``members`` is empty.
     """
+    scored = sorted({str(member) for member in members})
+    if not scored:
+        raise ValueError("NP9 needs the family's emission members")
     parts: dict[str, str] = {}
     wall, reference = inputs.wall_seconds, inputs.reference_seconds
     limit = None
@@ -5933,7 +5941,7 @@ def np9_resources(
         parts["rss"] = CHECK_NOT_EVALUABLE
     else:
         parts["rss"] = CHECK_FAILED if over else CHECK_PASSED
-    missing = sorted(set(members) - set(inputs.replicate_identical))
+    missing = sorted(set(scored) - {str(key) for key in inputs.replicate_identical})
     differing = sorted(
         member
         for member, identical in inputs.replicate_identical.items()
@@ -5959,6 +5967,7 @@ def np9_resources(
         status=_combine_parts(parts),
         parts=parts,
         detail={
+            "members": scored,
             "n_genes": int(inputs.n_genes),
             "wall_seconds": wall,
             "reference_seconds": reference,
@@ -6671,8 +6680,10 @@ def assemble_gate_p(
         ValueError: For an unknown species, a panel hash that is not a
             sha256, class sets of another species, family checks other than
             NP1, NP2, NP8 and NP9 (or keyed under another name), a version
-            other than 6 or 7 or a member count that does not match it, or
-            per-class inputs ``gate_p_class_records`` refuses.
+            other than 6 or 7 or a member count that does not match it, an
+            NP9 that does not record its members or was scored on other
+            members than the verdicts (CHECK K13: every emission member is
+            re-run), or per-class inputs ``gate_p_class_records`` refuses.
     """
     levels = gate_p_levels(species)
     if not _HASH.fullmatch(panel_hash):
@@ -6703,6 +6714,18 @@ def assemble_gate_p(
         raise ValueError(
             f"a version-{resolvability_version} family is scored in {expected} "
             f"emission member(s), got {len(members)}: {list(members)}"
+        )
+    np9_members = family_checks["NP9"].detail.get("members")
+    if np9_members is None or isinstance(np9_members, str):
+        raise ValueError(
+            "NP9 does not record the members it was scored on "
+            "(np9_resources records them)"
+        )
+    if tuple(sorted(str(member) for member in np9_members)) != members:
+        raise ValueError(
+            f"NP9 was scored on the members {sorted(map(str, np9_members))}, not "
+            f"the emission members {list(members)} of the verdicts (CHECK K13: "
+            "each member's seed-0 replicate is re-run)"
         )
     headline, walk = gate_p_validated_max_level(records, class_sets)
     minimum = diag.MIN_SIMULATION_LEVEL[species]
