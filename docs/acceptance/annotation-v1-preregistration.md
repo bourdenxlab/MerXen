@@ -1186,7 +1186,11 @@ These readings come from the review of the NP7 code (M13 chunk C5). They were fo
 These readings come from the implementation and review of NP4's seed criterion (M13 chunk C6, `gate_p.np4_seed_stability` and `np4_class_verdicts`). They were found on synthetic tables. No replicate of set a or of the family has been mapped at seed 1, so no output of the criterion exists. Nothing here changes a threshold or limit: seed 0 vs 1 changes at most 2% of confident labels per validated level (§9 NP4) [R]. §23.9 item 3 and §23.10 item 3 are not reopened.
 
 **Settled by D6** (§23.9 item 3, confirmed in §23.10). The seeds are MapMyCells mapping seeds. Seed 1 re-maps each group's seed-0 simulated cells, and a label changes when seed 1 gives the same simulated cell (level, cell, depth) another call, whether that call is confident or not, a sink call included. This is the statistic of `resolvability.seed_stability`, and a seeded test checks that the two give identical shares. It follows that:
-- a label that keeps its name and falls below its threshold at seed 1 is a threshold crossing. It is reported (`n_crossed`) and not counted. D6 gives the reason: counting crossings fails by design, as they were 7.0% and 13.4% of the seed-0 confident broad labels of P7513 and P1212 at M8 (§20 D12);
+- a label that keeps its name and falls below its threshold at seed 1 is a threshold crossing. It is reported (`n_crossed`) and not counted.
+  - D6 gives the reason: near the thresholds the bootstrap probability is noisy (a standard error of about 0.045 at 100 iterations, §20 D12 (b)), so counting crossings would fail by design.
+  - Gate H's figures of 7.0% (P7513) and 13.4% (P1212) at M8 (§20 D12) illustrate that noise, but they are not this statistic. They come from real sections, they also count cells confident at seed 1 only, and they include seed-0 confident labels whose seed-1 call is another, unconfident name, which gate P counts as changes.
+  - They are therefore neither an estimate of gate P's `n_crossed` nor evidence that the D6 statistic stays under 2%.
+  - *Corrected 2026-10-07* after the M13 NP4 seed-criterion review. The first wording cited them as crossings of this criterion;
 - a change to a name that is confident at seed 1 is also reported on its own (`n_switched`). This is gate H's reading of H15 (§20 D12 (a)). It is looser, because it ignores changes to a call that is not confident;
 - gate P stops with an error unless seed 1's table holds the same simulated cells with the same `total_counts` as seed 0's. A simulation seed changes the counts, so it is refused rather than scored.
 
@@ -1366,5 +1370,14 @@ No gate-P output of set a or of the family exists. None of the family's outputs 
    - *Alternatives:* each platform's own median, or the MERSCOPE sections only. No per-class profile asset exists for set a.
 9. **The version-7 dry run's measured time** (NP9's reference for the family, D10 (a)) [P]. The version-7 dry run builds its own leave-one-donor-out bundles in a store of its own. Its measured time then counts those builds, as the family's run will.
    - *Alternative:* reuse the version-6 dry run's bundles. The reference is then lower by the build time, about 5 of roughly 150–240 minutes, which is a tightening for the family.
+
+**NR7's depth matching** (M13 chunk C16; found on synthetic tables, `$A/m13/c16/open1_interpolation_probe.out`; no real data). The gene-complexity check compares the native cells of each grid bin [D_i, D_i+1) with the simulated cells at D_i, the bin's lower edge.
+- Native cells in a bin carry more counts than D_i, so they carry more genes even without any complexity gap.
+- On synthetic cells with no true gap (native medians of 150–330 counts), the measured gap is 0.18–0.57 per bin, above the 0.45 limit in the shallow bins.
+- Interpolating each test cell's simulated genes to the native bin's median total brings the gap to −0.06 to −0.01. This is possible inside the grid but not above its last value.
+- NR7 only warns, and it is `not_evaluable` on the family's bundle of 2026-10-02.
+- **Open:** the user chooses the reading before any real-data QC output of the family is read: the lower edge (as implemented), interpolation at the native median total, or another matching.
+  - Interpolation fires fewer warnings. Whether it is §8.8's "matched depth" or a loosening is part of that ruling.
+  - A related reading of the same chunk: the 50-cell minimum counts test cells, not member rows (the docs of the gene-complexity check). It is named in the family's gate-P PR.
 
 **Still open beyond the dry run** (§23.10): D17, the declared panel; D2's "too small", decided with the pool sizes of the run in view; D26's unanswered metadata; NP2's weak or collapsed parents; and §22.9's four questions. The NP5 depth profile of the family (D8 with CHECK K7) does not exist yet. Its asset is written, frozen and recorded only after D17 is frozen, from the family's first provisional `map_first` run with RESOLVE's version-7 consumer.
