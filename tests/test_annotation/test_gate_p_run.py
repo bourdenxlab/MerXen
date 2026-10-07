@@ -10,6 +10,7 @@ reference.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import shutil
@@ -517,6 +518,172 @@ def test_a_family_whose_classes_all_validate_passes_gate_p(
     assert np9["members"] == ["R1_contam_HO@0"]
 
 
+def _copy_packaged_tables(directory: Path) -> Path:
+    """A copy of the packaged validated tables (the gate-P PR appends to them)."""
+    tables = directory / "tables"
+    tables.mkdir(parents=True)
+    packaged = diag.asset_path(diag.VALIDATED_PANELS_FILE).parent
+    for name in (
+        diag.VALIDATED_PANELS_FILE,
+        diag.VALIDATED_PANEL_LEVELS_FILE,
+        diag.VALIDATED_PANEL_GENES_FILE,
+    ):
+        shutil.copy(packaged / name, tables / name)
+    return tables
+
+
+def _writer_inputs(family: Family, result: gp.GatePResult) -> tuple[Any, ...]:
+    """The gate-P PR's rows of a driver result, its gene list and self-map."""
+    panel = family.panel
+    record, levels = gp.validated_table_rows(
+        result,
+        panel_id="human_merscope_xenium_gate_p_test",
+        panel_role="sample_panel",
+        platforms=panel.platforms,
+        n_genes=panel.n_genes,
+        evidence="m13/gate_p/test",
+        date="2026-10-07",
+        approving_pr="#0",
+        root_marker_source="test",
+    )
+    manifest = json.loads((family.bundle_dir / "bundle.json").read_text())
+    self_map = diag.ResolvabilityTrust.from_bundle_manifest(manifest)
+    genes = diag.PanelGeneList(
+        panel_id=record.panel_id,
+        ensembl_ids=tuple(panel.ensembl_ids),
+        symbols=dict(zip(panel.ensembl_ids, panel.symbols, strict=True)),
+        root_markers=frozenset(panel.ensembl_ids[:3]),
+    )
+    return record, levels, genes, self_map
+
+
+def run_family_with_unvalidated_classes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Family, dict[str, Any], list[gp.GatePResult]]:
+    """Gate P on the passing family with one class failed and one not evaluable.
+
+    The fixture's classes all validate, so two criteria are wrapped in the
+    driver: NP7 fails supercluster Immune and NP6 cannot evaluate supercluster
+    Astro. The driver assembles, records and writes them as it would real
+    verdicts; broad and NT stay validated, so the family passes at NT.
+    """
+    np6, np7 = gp.np6_class_verdicts, gp.np7_class_verdicts
+
+    def np6_unevaluable(*args: Any, **kwargs: Any) -> dict[tuple[str, str], Any]:
+        verdicts = dict(np6(*args, **kwargs))
+        verdicts[("supercluster", "Astro")] = None
+        return verdicts
+
+    def np7_failing(*args: Any, **kwargs: Any) -> dict[tuple[str, str], Any]:
+        verdicts = dict(np7(*args, **kwargs))
+        verdicts[("supercluster", "Immune")] = False
+        return verdicts
+
+    monkeypatch.setattr(gp, "np6_class_verdicts", np6_unevaluable)
+    monkeypatch.setattr(gp, "np7_class_verdicts", np7_failing)
+    return run_passing_family(tmp_path, monkeypatch)
+
+
+def test_a_driver_result_with_unvalidated_classes_and_key_mix_ups(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    """Non-validated records are written as such; key mix-ups are refused.
+
+    The M13 tidy review's open low findings: the driver-to-writer test fed
+    only validated records and caught no class key of another level. Here
+    the driver's result holds a ``failed:NP7`` and a ``not_evaluable``
+    record at supercluster and the family passes at NT. The gate-P PR's two
+    steps keep both statuses without depths, and the trust state built on
+    the written tables validates neither at any depth while it validates
+    the classes' broad records. Then each lineage / broad / NT /
+    supercluster key mix-up put into the driver's records is refused by the
+    writer, with nothing written.
+    """
+    family, outcome, assembled = run_family_with_unvalidated_classes(
+        tmp_path, monkeypatch
+    )
+    (result,) = assembled
+    status = result.records.set_index(["level", "class"])["status"]
+    assert status[("supercluster", "Immune")] == "failed:NP7"
+    assert status[("supercluster", "Astro")] == gp.RECORD_NOT_EVALUABLE
+    assert status[("supercluster", "Exc")] == gp.RECORD_VALIDATED
+    assert result.passes and outcome["passes"]
+    assert result.validated_max_level == "nt" == outcome["validated_max_level"]
+    tables = _copy_packaged_tables(tmp_path)
+    record, levels, genes, self_map = _writer_inputs(family, result)
+    assert record.validated_max_level == "nt"
+    by_key = {(item.level, item.class_name): item for item in levels}
+    for key in (("supercluster", "Immune"), ("supercluster", "Astro")):
+        assert by_key[key].validated_min_depth is None
+        assert not by_key[key].is_validated
+    diag.write_simulation_family(tables, record, levels, genes, self_map=self_map)
+    reread = diag.load_validated_panels(tables)
+    stored = {
+        (item.level, item.class_name): item
+        for item in reread.level_records(result.family_id)
+    }
+    assert stored[("supercluster", "Immune")].status == "failed:NP7"
+    assert stored[("supercluster", "Astro")].status == gp.RECORD_NOT_EVALUABLE
+    assert stored[("supercluster", "Immune")].validated_min_depth is None
+    manifest = json.loads((family.bundle_dir / "bundle.json").read_text())
+    panel = family.panel
+    decision = diag.trust_state(
+        reference_id=run.PRIMARY_REFERENCE,
+        role="primary",
+        species="human",
+        panel_hash=panel.panel_hash,
+        n_panel_genes=panel.n_genes,
+        family=panel_family(
+            panel.ensembl_ids,
+            species="human",
+            platforms=panel.platforms,
+            known_families=reread.known_families(),
+        ),
+        validated=reread,
+        rules=diag.TrustRules(min_mapped_genes=5, min_root_markers=3),
+        coverage=diag.CoverageDiagnostics.from_bundle_manifest(manifest),
+        resolvability=self_map,
+    )
+    assert decision.state == "validated"
+    for cls in ("Immune", "Astro"):
+        assert not decision.is_validated("supercluster", cls, 10**6)
+        depth = int(stored[("broad", cls)].validated_min_depth or 0)
+        assert decision.is_validated("broad", cls, depth)
+    assert decision.is_validated(
+        "supercluster", "Exc", int(stored[("supercluster", "Exc")].validated_min_depth)
+    )
+    # A lineage / broad / NT / supercluster key mix-up in the driver's records
+    # is refused by the writer, and nothing is written (D14 (a), D16).
+    mix_ups = (
+        # A supercluster-only key at broad and lineage (COP is OPC there).
+        ("broad", "Astro", "COP"),
+        ("lineage", "Exc", "COP"),
+        # A glial class at NT, where NT does not apply.
+        ("nt", "Exc", "Astro"),
+        # A label table's broad name in place of the floor-class key.
+        ("broad", "Astro", "Astrocytes"),
+        # A lineage name in place of the floor-class key.
+        ("lineage", "Exc", "Neurons"),
+        # A supercluster's name in place of the floor-class key.
+        ("supercluster", "Exc", "Upper-layer intratelencephalic"),
+    )
+    for level, cls, wrong in mix_ups:
+        records = result.records.copy()
+        row = (records["level"] == level) & (records["class"] == cls)
+        assert int(row.sum()) == 1, (level, cls)
+        records.loc[row, "class"] = wrong
+        mixed = dataclasses.replace(result, records=records)
+        fresh = _copy_packaged_tables(tmp_path / f"{level}_{wrong}")
+        before = {path.name: path.read_bytes() for path in sorted(fresh.iterdir())}
+        record, levels, genes, self_map = _writer_inputs(family, mixed)
+        with pytest.raises(diag.ValidatedPanelsError, match="consensus class key"):
+            diag.write_simulation_family(
+                fresh, record, levels, genes, self_map=self_map
+            )
+        after = {path.name: path.read_bytes() for path in sorted(fresh.iterdir())}
+        assert after == before, (level, wrong)
+
+
 def test_a_driver_result_on_whb_class_keys_goes_through_the_promotion_writer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
 ) -> None:
@@ -541,37 +708,12 @@ def test_a_driver_result_on_whb_class_keys_goes_through_the_promotion_writer(
     validated = records[records["status"] == gp.RECORD_VALIDATED]
     assert {"broad", "supercluster"} <= set(validated["level"])
     # The gate-P PR appends to the packaged tables (a copy of them here).
-    tables = tmp_path / "tables"
-    tables.mkdir()
-    packaged = diag.asset_path(diag.VALIDATED_PANELS_FILE).parent
-    for name in (
-        diag.VALIDATED_PANELS_FILE,
-        diag.VALIDATED_PANEL_LEVELS_FILE,
-        diag.VALIDATED_PANEL_GENES_FILE,
-    ):
-        shutil.copy(packaged / name, tables / name)
+    tables = _copy_packaged_tables(tmp_path)
     before = diag.load_validated_panels(tables)
     panel = family.panel
-    record, levels = gp.validated_table_rows(
-        result,
-        panel_id="human_merscope_xenium_gate_p_test",
-        panel_role="sample_panel",
-        platforms=panel.platforms,
-        n_genes=panel.n_genes,
-        evidence="m13/gate_p/test",
-        date="2026-10-07",
-        approving_pr="#0",
-        root_marker_source="test",
-    )
-    manifest = json.loads((family.bundle_dir / "bundle.json").read_text())
-    self_map = diag.ResolvabilityTrust.from_bundle_manifest(manifest)
+    record, levels, genes, self_map = _writer_inputs(family, result)
     assert self_map is not None
-    genes = diag.PanelGeneList(
-        panel_id=record.panel_id,
-        ensembl_ids=tuple(panel.ensembl_ids),
-        symbols=dict(zip(panel.ensembl_ids, panel.symbols, strict=True)),
-        root_markers=frozenset(panel.ensembl_ids[:3]),
-    )
+    manifest = json.loads((family.bundle_dir / "bundle.json").read_text())
     diag.write_simulation_family(tables, record, levels, genes, self_map=self_map)
     reread = diag.load_validated_panels(tables)
     assert reread.family_ids() == sorted({*before.family_ids(), result.family_id})
