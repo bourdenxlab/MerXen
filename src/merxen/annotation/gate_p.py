@@ -215,6 +215,7 @@ import numpy as np
 import pandas as pd
 
 from merxen.annotation import resolvability as res
+from merxen.annotation import sim_inputs as si
 from merxen.annotation.config import (
     AnnotationResolvabilityConfig,
     AnnotationThresholds,
@@ -4039,6 +4040,117 @@ def np6_class_verdicts(
             for scheme in settings.scored_schemes
         )
     return result
+
+
+def _rank_correlation(left: pd.Series, right: pd.Series) -> float:
+    """Spearman correlation of two aligned series (``nan`` below 3 pairs)."""
+    both = pd.concat([left, right], axis=1).dropna()
+    if len(both) < 3:
+        return math.nan
+    ranks = both.rank()
+    return float(ranks.iloc[:, 0].corr(ranks.iloc[:, 1]))
+
+
+def np6_factor_report(
+    genes: Sequence[str],
+    factors: pd.Series,
+    x1_factors: pd.DataFrame,
+    *,
+    seed: int = 0,
+    cap_log2: float = si.XPLATFORM_CAP_LOG2,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Report the X1 factor table beside NP6's cross-platform offsets (D7 (b)).
+
+    M13 decision D7 adopts (a) + (i) as NP6's factor source (set a's measured
+    Xenium / MERSCOPE offsets, uncovered genes resampled) and (b), the M3
+    shadow X1 factors (``$A/shadow/x1/x1_factors.csv``: each set a pair and
+    platform against the WHB pseudobulk, centred on the median gene and
+    capped at +-2 log2), as report-only (pre-registration §23.10: "The X1
+    factor table is reported only"). This report reads no cell and maps
+    nothing: per panel gene, the offset the cross-platform stress applies at
+    ``seed`` beside the X1 factors, and how much of the panel each table
+    covers. It decides no verdict.
+
+    Args:
+        genes: The family's panel genes (Ensembl ids).
+        factors: ``sim_inputs.xplatform_factors`` of the NP6 stress asset.
+        x1_factors: The X1 table (columns ``pair``, ``platform``,
+            ``gene_id``, ``log2_factor`` and ``capped``).
+        seed: The member seed of the offsets (a resampled gene's value
+            depends on it).
+        cap_log2: The offsets' cap (``platform_factor_cap_log2``, 2).
+
+    Returns:
+        ``(per gene, summary)``. Per gene: ``gene_id``; ``measured`` (the
+        stress asset holds the gene); ``offset``, the log2 multiplier the
+        stress applies to the R1 draw, relative to the panel's median gene;
+        ``x1_<platform>``, the mean X1 factor over the pairs per platform
+        (lower case; ``nan`` for a gene X1 lacks); ``x1_difference``,
+        Xenium less MERSCOPE when both are present; ``x1_n_capped``, the
+        X1 rows of the gene at the cap. Summary: the gene counts, the
+        Spearman correlation of ``offset`` and ``x1_difference`` over the
+        measured genes X1 holds, the standard deviations and the share of
+        the panel's X1 genes capped on any row.
+
+    Raises:
+        ValueError: If the X1 table lacks a column, or holds a (pair,
+            platform, gene) twice.
+        SimInputError: As ``sim_inputs.xplatform_stress_efficiency``.
+    """
+    required = ("pair", "platform", "gene_id", "log2_factor", "capped")
+    missing = [column for column in required if column not in x1_factors.columns]
+    if missing:
+        raise ValueError(f"np6_factor_report: the X1 table lacks {missing}")
+    names = [str(gene) for gene in genes]
+    x1 = x1_factors.assign(
+        gene_id=x1_factors["gene_id"].astype(str),
+        platform=x1_factors["platform"].astype(str).str.lower(),
+    )
+    if x1.duplicated(["pair", "platform", "gene_id"]).any():
+        raise ValueError(
+            "np6_factor_report: the X1 table holds a (pair, platform, gene) twice"
+        )
+    efficiency, measured = si.xplatform_stress_efficiency(
+        names, np.ones(len(names)), factors, seed=int(seed), cap_log2=cap_log2
+    )
+    report = pd.DataFrame(
+        {"gene_id": names, "measured": measured, "offset": np.log2(efficiency)}
+    )
+    means = x1.pivot_table(
+        index="gene_id", columns="platform", values="log2_factor", aggfunc="mean"
+    )
+    platforms = sorted(str(platform) for platform in means.columns)
+    for platform in platforms:
+        report[f"x1_{platform}"] = means[platform].reindex(names).to_numpy(np.float64)
+    if {"xenium", "merscope"} <= set(platforms):
+        report["x1_difference"] = report["x1_xenium"] - report["x1_merscope"]
+    else:
+        report["x1_difference"] = math.nan
+    capped = x1[x1["capped"].astype(str).str.lower() == "true"]
+    report["x1_n_capped"] = (
+        capped.groupby("gene_id").size().reindex(names).fillna(0).astype(int).to_numpy()
+    )
+    in_x1 = report["gene_id"].isin(set(x1["gene_id"])).to_numpy(bool)
+    shared = report[report["measured"].to_numpy(bool) & in_x1]
+    summary: dict[str, Any] = {
+        "seed": int(seed),
+        "n_genes": len(names),
+        "n_measured": int(report["measured"].sum()),
+        "n_resampled": int((~report["measured"]).sum()),
+        "n_x1": int(in_x1.sum()),
+        "n_measured_and_x1": len(shared),
+        "x1_platforms": platforms,
+        "spearman_offset_x1_difference": _rank_correlation(
+            shared["offset"], shared["x1_difference"]
+        ),
+        "sd_offset": float(report["offset"].std(ddof=1)),
+        "sd_x1_difference": float(report["x1_difference"].std(ddof=1)),
+        "x1_capped_share": float((report.loc[in_x1, "x1_n_capped"] > 0).mean())
+        if in_x1.any()
+        else math.nan,
+        "use": "report only (M13 D7 (b)); decides no NP6 verdict",
+    }
+    return report, summary
 
 
 # --------------------------------------------------------------------------

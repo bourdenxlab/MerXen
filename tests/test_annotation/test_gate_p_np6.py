@@ -13,6 +13,7 @@ import pytest
 
 from merxen.annotation import gate_p as gp
 from merxen.annotation import resolvability as res
+from merxen.annotation import sim_inputs as si
 from merxen.annotation.config import (
     AnnotationResolvabilityConfig,
     AnnotationThresholds,
@@ -629,3 +630,86 @@ def test_np6_settings_follow_the_config() -> None:
             _np6(**bad)
     assert gp.SimulationRows({}, None, "R1_stress_spill@6").name == "R1_stress_spill@6"
     assert gp.SimulationRows({}, STRESS).name == STRESS
+
+
+# --------------------------------------------------------------------------
+# D7 (b): the X1 factor table, reported beside the offsets
+
+
+def _x1_table() -> pd.DataFrame:
+    """X1 rows: two pairs x two platforms; G1 capped on MERSCOPE, G9 off-panel."""
+    rows = []
+    values = {
+        "G1": {"MERSCOPE": (-2.0, -2.0), "XENIUM": (-1.0, -1.4)},
+        "G2": {"MERSCOPE": (0.0, 0.2), "XENIUM": (0.9, 1.1)},
+        "G3": {"MERSCOPE": (0.5, 0.5), "XENIUM": (1.75, 1.75)},
+        "G9": {"MERSCOPE": (1.0, 1.0), "XENIUM": (2.0, 2.0)},
+    }
+    for gene, platforms in values.items():
+        for platform, pair_values in platforms.items():
+            for pair, value in zip(("P1", "P2"), pair_values, strict=True):
+                rows.append(
+                    {
+                        "pair": pair,
+                        "platform": platform,
+                        "gene_id": gene,
+                        "symbol": gene.lower(),
+                        "log2_factor": value,
+                        "log2_factor_uncapped": -3.0 if abs(value) == 2.0 else value,
+                        "capped": abs(value) == 2.0,
+                    }
+                )
+    return pd.DataFrame(rows)
+
+
+def test_np6_factor_report_puts_the_x1_factors_beside_the_offsets() -> None:
+    """M13 D7 (b): X1 is reported beside the scored offsets, never scored.
+
+    G1-G3 are measured (G1 at -3, capped at -2), G4 is resampled from the
+    capped values; X1 holds G1-G3 (and G9, off the panel), G1 at the cap on
+    both MERSCOPE pairs. Xenium less MERSCOPE ranks G1 < G2 < G3 as the
+    offsets do (Spearman 1).
+    """
+    factors = pd.Series({"G1": -3.0, "G2": 0.5, "G3": 1.0})
+    genes = ["G1", "G2", "G3", "G4"]
+    report, summary = gp.np6_factor_report(genes, factors, _x1_table(), seed=3)
+    assert report["gene_id"].tolist() == genes
+    assert report["measured"].tolist() == [True, True, True, False]
+    offset = report.set_index("gene_id")["offset"]
+    assert offset["G2"] - offset["G1"] == pytest.approx(2.5)
+    assert offset["G3"] - offset["G2"] == pytest.approx(0.5)
+    assert float(np.median(offset)) == pytest.approx(0.0, abs=1e-12)
+    assert round(float(offset["G4"] - offset["G1"]), 12) in {0.0, 2.5, 3.0}
+    x1 = report.set_index("gene_id")
+    assert x1.loc["G1", "x1_merscope"] == pytest.approx(-2.0)
+    assert x1.loc["G1", "x1_xenium"] == pytest.approx(-1.2)
+    assert x1.loc["G2", "x1_difference"] == pytest.approx(0.9)
+    assert x1.loc["G3", "x1_difference"] == pytest.approx(1.25)
+    assert math.isnan(x1.loc["G4", "x1_merscope"])
+    assert math.isnan(x1.loc["G4", "x1_difference"])
+    assert x1["x1_n_capped"].tolist() == [2, 0, 0, 0]
+    assert summary["n_genes"] == 4
+    assert (summary["n_measured"], summary["n_resampled"]) == (3, 1)
+    assert (summary["n_x1"], summary["n_measured_and_x1"]) == (3, 3)
+    assert summary["x1_platforms"] == ["merscope", "xenium"]
+    assert summary["spearman_offset_x1_difference"] == pytest.approx(1.0)
+    assert summary["x1_capped_share"] == pytest.approx(1 / 3)
+    assert summary["sd_x1_difference"] == pytest.approx(
+        float(np.std([0.8, 0.9, 1.25], ddof=1))
+    )
+    # The offsets are the stress's own (sim_inputs), so the report and the
+    # simulation agree gene by gene.
+    efficiency, _ = si.xplatform_stress_efficiency(genes, np.ones(4), factors, seed=3)
+    np.testing.assert_allclose(offset.to_numpy(), np.log2(efficiency))
+    # A table with one platform has no difference; too few pairs, no Spearman.
+    merscope = _x1_table()[lambda frame: frame["platform"] == "MERSCOPE"]
+    report, summary = gp.np6_factor_report(genes, factors, merscope)
+    assert report["x1_difference"].isna().all()
+    assert math.isnan(summary["spearman_offset_x1_difference"])
+    with pytest.raises(ValueError, match="lacks"):
+        gp.np6_factor_report(genes, factors, _x1_table().drop(columns="capped"))
+    with pytest.raises(ValueError, match="twice"):
+        twice = _x1_table()
+        gp.np6_factor_report(
+            genes, factors, pd.concat([twice, twice.iloc[:1]], ignore_index=True)
+        )
