@@ -1302,7 +1302,7 @@ Delete the deprecated labeller, its params and `ClusteringSquidpyAnnotationConfi
   - *Run:* the C17 regression on the M8 human pairs (`$A/m13/regression/`). It found no false registration G1 failure. The registered `node` marker referee is `not_evaluable` on every set a sample, and the `class` comparator is reported only. Both results go to the user (pre-registration §23.18).
   - *Not run:* the set a dry run (C9; the commands are in `$A/m13/COMPUTE_NEXT.md`) and gate P on the new-panel family (C18), which waits for a passing dry run, the frozen panel (D17) and the registered NP5 depth profile (D8). No gate-P number exists for set a or the family.
   - *Ruled on 2026-10-07* (above): the readings of pre-registration §23.11–§23.17 and the D18 and D23 rulings (§23.18). The NP5 depth of set a is read and recorded by the dry run itself (§23.18 item 8).
-  - *Implemented after the rulings:* the defaults of C1 (b), C2 and C3 (b), and NP2's stop on an unaccepted parent (B2).
+  - *Implemented after the rulings:* the defaults of C1 (b), C2 and C3 (b), NP2's stop on an unaccepted parent (B2), and the NP5 depth-profile builder (`scripts/annotation/build_np5_depth_profile.py`, D8 with CHECK K7). Its readings (CHECK CK3) are recorded in pre-registration §23.20 as adopted defaults, put to you before any of the family's outputs are read; it has not run.
   - *Moved to M13b (D3 (b), 2026-10-07):* the mouse path, C20–C22 (the second WMB draw, the ag7 / VZG2 dry run and the mouse regression rows), after M6b and before any mouse family is scored.
 
 ### M13b `[feature]` (2026-10-07; moved out of M13 by D3 (b)): mouse gate P (the M13 chunks C20–C22; after M6b; 1–1.25 developer-days + CPU compute, M13 plan §4)

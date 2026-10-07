@@ -941,7 +941,7 @@ PREP bundles, writes the simulation report and then runs gate P, writing
 - `--species` is required: the species is chosen when a new panel check
   starts (M13 D4). The human path is implemented. A mouse family is refused
   before any compute until the second disjoint WMB test draw and the ag7 /
-  VZG2 dry run exist (M13 chunks C20–C21, after M6b).
+  VZG2 dry run exist (M13 chunks C20–C21, moved to M13b, after M6b).
 - `--store` and `--store-large` must name a separate gate-P store (M13 D11
   (b)). A store that is, or lies in, the config's `reference_store` or
   `reference_store_large` is refused before any compute, so gate P never
@@ -2741,13 +2741,16 @@ held-out-gene CSV is not produced in the pipeline, so item 8 is
   E5 pairs); treat such set-c results as provisional.
 - **Gate P has promoted no family yet** (M13, 2026-10-07). The human
   programme is implemented and tested on synthetic tables only. The set a
-  dry run (version 6 and the version-7 ensemble) has not run, and no new
-  family may be scored before it passes. The readings of pre-registration
-  §23.11–§23.17 are open until the user rules on them before the dry run is
-  scored (§23.18 lists them). The mouse path waits for the second WMB test
-  draw and the ag7 / VZG2 dry run (M13 chunks C20–C22, after M6b). For the
-  new-panel human MERSCOPE family, gate P also waits for the frozen
-  declared panel (D17) and the registered NP5 depth profile (D8).
+  dry run (version 6 and the version-7 ensemble) has not finished, and no
+  new family may be scored before it passes (directly, or after a revision
+  PR the user approves and a re-run that passes). The user ruled on the
+  readings of pre-registration §23.11–§23.18 on 2026-10-07 (§23.19). The
+  mouse path waits for the second WMB test draw and the ag7 / VZG2 dry run
+  (M13 chunks C20–C22, moved to M13b, after M6b). For the new-panel human
+  MERSCOPE family, whose declared panel is frozen (D17), gate P also waits
+  for the family's `map_first` re-run with the current code and its
+  registered NP5 depth profile (D8; the builder's readings, §23.20, go to
+  the user before it runs).
 
 ## Licences
 

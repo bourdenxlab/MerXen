@@ -1226,7 +1226,7 @@ class FamilyDepthProfile:
 
     Attributes:
         confident: The confident broad calls per class (a per-class
-            ``DepthProfile``; ``min_cells`` is the asset's minimum).
+            ``DepthProfile`` whose ``min_cells`` is ``PROFILE_MIN_CLASS_CELLS``).
         table_totals: Total counts of every table cell (label-free).
         asset: The asset id.
         sha256: The asset's sha256.
