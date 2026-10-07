@@ -360,8 +360,17 @@ def code_commit(source_root: Path | None = None) -> tuple[str | None, str | None
 @click.option(
     "--gate-p-accepted-parents",
     default=None,
-    help="Comma-separated weak or collapsed parents the user accepted in the "
-    "gate-P PR (NP2).",
+    help="Comma-separated weak or collapsed parents the user accepted (NP2), "
+    "each by its lookup key, node label or node name; given before the run "
+    "(a gate-P output is never re-scored in place).",
+)
+@click.option(
+    "--gate-p-run-with-unaccepted-parents",
+    is_flag=True,
+    default=False,
+    help="Run although PREP lists a weak or collapsed parent the user has not "
+    "accepted (NP2 then stays pending); otherwise a run that is not a dry run "
+    "stops before any leave-one-donor-out build (M13 ruling B2 (b)).",
 )
 @click.option(
     "--gate-p-skip-prep-identity",
@@ -427,6 +436,7 @@ def _annotation_panel_simulate(
     gate_p_dry_run_simulated_cells: int | None = None,
     gate_p_unresolved_reviewed: bool = False,
     gate_p_accepted_parents: str | None = None,
+    gate_p_run_with_unaccepted_parents: bool = False,
     gate_p_skip_prep_identity: bool = False,
     gate_p_x1_factors: Path | None = None,
 ) -> None:
@@ -477,6 +487,7 @@ def _annotation_panel_simulate(
                 for item in (gate_p_accepted_parents or "").split(",")
                 if item.strip()
             ),
+            run_with_unaccepted_parents=gate_p_run_with_unaccepted_parents,
             prep_identity=not gate_p_skip_prep_identity,
             x1_factors=gate_p_x1_factors,
         )

@@ -51,6 +51,7 @@
 - **The user's rulings of 2026-10-07** (pre-registration §23.19) change these defaults:
   - registration G1's fail rule fails the dataset gate (`real_qc.registration_g1_effect = gate_failed`, §8.8's effect), after the set a regression showed no false G1 failure; it was warn-only in M13 until then (D23 (b));
   - the gene-complexity check matches each native depth bin inside the grid by interpolating each test cell's simulated genes to the bin's native median total (`real_qc.gene_complexity_matching = interpolated`); the open top bin keeps its lower edge. At the lower edge the check showed a gap where there was none;
+  - gate P reads NP2's weak and collapsed parents from PREP's bundle before any leave-one-donor-out build: outside a dry run, a parent that `--gate-p-accepted-parents` does not name stops the run there (exit status 3), so it goes back to the user before gate P runs; `--gate-p-run-with-unaccepted-parents` runs with NP2 pending. An accepted parent may be named by its lookup key, node label or node name;
   - the human marker referee derives its marker sets with the `class` comparator (`real_qc.marker_referee_comparator`); the 0.75 / 0.70 thresholds are unchanged. The `node` comparator, the default until then, was `not_evaluable` on every set a sample. The regression script pins the settings C17 ran with, so a re-run reproduces C17.
 
 ### Fixed

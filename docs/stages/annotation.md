@@ -960,11 +960,21 @@ PREP bundles, writes the simulation report and then runs gate P, writing
    the held-out `build_hash`). A refusal after PREP is recorded under
    `gate_p` in `simulate_report.json`.
 2. It reports the per-donor pool sizes from the reference metadata
-   (`reference.ho_donor_pool_sizes`) before any leave-one-donor-out build.
-   Under D2 (d) a donor whose own pool cannot meet the per-class top-up rule
-   stops gate P here (status `stopped`; exit status 3 from `new_panel.py`),
-   unless `--gate-p-accept-small-pools` or the fallback
-   `--gate-p-other-region shared` (D2 (c)) is given.
+   (`reference.ho_donor_pool_sizes`) and NP2's weak and collapsed parents
+   from PREP's `bundle.json` (reference data only) before any
+   leave-one-donor-out build. Gate P stops here (status `stopped`, with
+   `stop_reasons`; exit status 3 from `new_panel.py`) when under D2 (d) a
+   donor's own pool cannot meet the per-class top-up rule, unless
+   `--gate-p-accept-small-pools` or the fallback `--gate-p-other-region
+   shared` (D2 (c); the user's ruling A48 (b) of 2026-10-07 takes it) is
+   given; and, outside a dry run, when PREP lists a weak or collapsed parent
+   that `--gate-p-accepted-parents` does not name (the user's ruling B2 (b)
+   of 2026-10-07: such a parent goes back to the user before gate P runs),
+   unless `--gate-p-run-with-unaccepted-parents` is given (NP2 then stays
+   pending). An accepted entry names a parent by its lookup key, its node
+   label or its node's name (`gate_p_run.np2_acceptance`), so "Bergmann
+   glia" matches its supercluster's key; an entry naming two parents is
+   refused. A stopped run is rerun in place.
 3. It builds each other frontal WHB donor's held-out bundle in the gate-P
    store (`resolvability.holdout_donor`; under D2 (d) also
    `holdout_other_region_donor_only` and the default test set's cells as
@@ -994,7 +1004,7 @@ nothing is written to a store.
 | Criterion | Function | Rule |
 |---|---|---|
 | NP1 gene IDs | `np1_gene_ids` | ≥ 95% of the declared panel resolved (≥ 98% when the vendor supplies IDs); no control reaches the query; the unresolved list reviewed in the gate-P PR |
-| NP2 panel coverage | `np2_panel_coverage` | ≥ 10 root markers, and ≥ 10 markers for each root child with ≥ 50 cells; weak or collapsed parents accepted by the user in the gate-P PR (`--gate-p-accepted-parents`) |
+| NP2 panel coverage | `np2_panel_coverage` | ≥ 10 root markers, and ≥ 10 markers for each root child with ≥ 50 cells; weak or collapsed parents accepted by the user (`--gate-p-accepted-parents`, given before the run; an unaccepted one stops a family's run before any build) |
 | NP3 frozen-threshold precision | `np3_set_stats`, `np3_verdicts`, `validated_min_depth` | on pooled tested sets of ≥ 200 confident held-out calls (deep bins pooled; each test cell once), under the reference's natural composition and the class-balanced composition (both must pass; Kish effective n): point precision ≥ the provisional target, Wilson lower bound ≥ target_L, coverage ≥ 0.30; `validated_min_depth` walks down the grid from D_P |
 | NP4 stability | `np4_set_verdicts`, `np4_seed_stability` | per replicate (donor × seed) with ≥ 100 confident calls, point precision ≥ target_L; replicate range ≤ max(0.03, 3.5 SE); seed 0 vs 1 changes ≤ 2% of a level's confident labels (D6) |
 | NP5 resolvability consistency | `np5_decision_agreement`, `np5_tstar_spread`, `np5_extrapolated_share` | the re-derived decisions agree except one flip next to a boundary; t* spread ≤ 0.05; ≤ 50% of the class's cells at the expected depth extrapolated (median and profile readings both scored) |

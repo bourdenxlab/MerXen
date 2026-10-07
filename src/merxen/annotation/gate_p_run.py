@@ -34,11 +34,18 @@ set, the store and the prepared specs) and:
    simulation report, which is written before gate P runs.
 2. **Reports the per-donor pool sizes** (pre-registration §23.10, open item
    2; ``reference.ho_donor_pool_sizes``, from the reference metadata only)
-   before any leave-one-donor-out build. Under D2 (d) a donor whose own
-   pool cannot meet the per-class top-up rule stops gate P here
-   (``status`` ``stopped``), before any replicate is mapped, unless the
-   user chose (d) as it stands (``accept_small_pools``) or the fallback (c)
-   (``other_region="shared"``).
+   and NP2's weak and collapsed parents (PREP's ``bundle.json``, reference
+   data only; ``np2_acceptance``) before any leave-one-donor-out build.
+   Gate P stops here (``status`` ``stopped``), before any replicate is
+   mapped, when under D2 (d) a donor's own pool cannot meet the per-class
+   top-up rule, unless the user chose (d) as it stands
+   (``accept_small_pools``) or the fallback (c) (``other_region="shared"``);
+   and, outside a dry run, when PREP lists a weak or collapsed parent that
+   the user has not accepted (``accepted_parents``), unless
+   ``run_with_unaccepted_parents`` (the user's ruling B2 (b) of 2026-10-07,
+   pre-registration §23.19: any parent other than those accepted comes back
+   to the user before gate P runs; an NP2 that stays pending cannot pass,
+   and a gate-P output is never re-scored in place).
 3. **Builds each extra donor's held-out bundle** in the request's store
    (M13 D11 (b): the separate gate-P store the command is pointed at)
    through a config override (``resolvability.holdout_donor``; a new
@@ -96,6 +103,11 @@ Readings this driver takes where §14 and the decisions are not explicit
 - The per-donor pool rule (``reference.ho_donor_pool_sizes``): a judged
   class meets it when the donor's own pools hold
   ``topup_min_class_test_cells`` (200) cells.
+- NP2's accepted parents (``np2_acceptance``): an accepted entry names a
+  weak or collapsed parent by its lookup key (``<level>/<node>``), its node
+  label or its node's name in the bundle's vocab snapshot, so the user's
+  names match the keys PREP records; an entry matching two parents is
+  refused, one matching none is reported (``unmatched``).
 """
 
 from __future__ import annotations
@@ -138,6 +150,9 @@ REPLICATES_DIR: Final = "replicates"
 PRIMARY_REFERENCE: Final = "whb_frontal_supc_clus"
 STATUS_SCORED: Final = "scored"
 STATUS_STOPPED: Final = "stopped"
+# Why a run stopped before any leave-one-donor-out build (``stop_reasons``).
+STOP_POOL_SIZES: Final = "pool_sizes"
+STOP_NP2_PARENTS: Final = "np2_unaccepted_parents"
 # Pre-registration §23.2 D2: (d) each extra donor draws its own other-region
 # cells (the default); (c) the fallback, the production pool shared by every
 # replicate, each cell counted once in pooled sets.
@@ -161,6 +176,9 @@ GATE_P_RUN_OPEN_READINGS: Final[tuple[str, ...]] = (
     "donor's seed-0 rows included whoever simulated them (D10 (a))",
     "C8 D2 pool sizes: a judged class meets the per-class top-up rule when "
     "the donor's own pools hold topup_min_class_test_cells (200) cells",
+    "B2 NP2 parents: an accepted entry matches a weak or collapsed parent by "
+    "its lookup key, node label or node name; outside a dry run an unaccepted "
+    "parent stops gate P before any build (ruling B2 (b), 2026-10-07)",
 )
 
 
@@ -199,8 +217,15 @@ class GatePOptions:
             scored replicate's simulated cells, ``np9_time_reference``).
         unresolved_reviewed: The user reviewed NP1's unresolved list in the
             gate-P PR.
-        accepted_parents: NP2's weak or collapsed parents the user accepted in
-            the gate-P PR (none by default, open item 4).
+        accepted_parents: NP2's weak or collapsed parents the user accepted
+            (none by default): each by its lookup key, node label or node
+            name (``np2_acceptance``). They are passed before the run: a
+            gate-P output is never re-scored in place.
+        run_with_unaccepted_parents: Run although PREP lists a weak or
+            collapsed parent the user has not accepted (NP2 then stays
+            pending, so the family cannot pass); otherwise a run that is not
+            a dry run stops before any leave-one-donor-out build (ruling B2
+            (b) of 2026-10-07).
         partners: NP8's intended partner panels and whether each one's
             intersection passed NP3 at broad (none: not applicable, D26).
         prep_identity: Rebuild PREP's bundle in a scratch store and compare
@@ -223,6 +248,7 @@ class GatePOptions:
     dry_run_simulated_cells: int | None = None
     unresolved_reviewed: bool = False
     accepted_parents: tuple[str, ...] = ()
+    run_with_unaccepted_parents: bool = False
     partners: Mapping[str, bool | None] | None = None
     prep_identity: bool = True
     x1_factors: Path | None = None
@@ -295,6 +321,7 @@ class GatePOptions:
             "dry_run_simulated_cells": self.dry_run_simulated_cells,
             "unresolved_reviewed": self.unresolved_reviewed,
             "accepted_parents": list(self.accepted_parents),
+            "run_with_unaccepted_parents": self.run_with_unaccepted_parents,
             "partners": None if self.partners is None else dict(self.partners),
             "prep_identity": self.prep_identity,
             "x1_factors": None if self.x1_factors is None else str(self.x1_factors),
@@ -1675,7 +1702,9 @@ def np2_inputs(bundle_dir: Path) -> dict[str, Any]:
 
     Returns:
         ``root_markers``, ``root_children`` (``gate_p.NP2_ROOT_CHILD_COLUMNS``),
-        ``weak_parents`` and ``collapsed_parents``.
+        ``weak_parents``, ``collapsed_parents`` and ``parent_names`` (each
+        weak or collapsed parent's node name in the bundle's vocab
+        snapshot, ``None`` where it has none).
     """
     from merxen.annotation import reference as ref
     from merxen.annotation.mapmycells_engine import MmcBundle
@@ -1708,7 +1737,7 @@ def np2_inputs(bundle_dir: Path) -> dict[str, Any]:
     markers_output = (_manifest(bundle_dir).get("builder_output") or {}).get(
         "markers"
     ) or {}
-    return {
+    result: dict[str, Any] = {
         "root_markers": root_markers,
         "root_children": pd.DataFrame.from_records(
             rows, columns=list(gp.NP2_ROOT_CHILD_COLUMNS)
@@ -1720,6 +1749,131 @@ def np2_inputs(bundle_dir: Path) -> dict[str, Any]:
             str(item) for item in markers_output.get("collapsed_parents") or []
         ],
     }
+    parents = {*result["weak_parents"], *result["collapsed_parents"]}
+    result["parent_names"] = _parent_names(engine, sorted(parents))
+    return result
+
+
+def _parent_names(engine: MmcBundle, keys: Sequence[str]) -> dict[str, str | None]:
+    """Each lookup key's node name in the bundle's vocab snapshot."""
+    from merxen.annotation import reference as ref
+
+    vocab = engine.vocab()
+    names: dict[str, str | None] = {}
+    for key in keys:
+        name: str | None = None
+        if key != ref.ROOT_KEY and vocab is not None and "key_name" in vocab:
+            level, node = ref.parse_lookup_key(key)
+            if (level, node) in vocab.index:
+                value = str(vocab.loc[(level, node), "key_name"])
+                name = value or None
+        names[key] = name
+    return names
+
+
+@dataclass(frozen=True)
+class Np2Acceptance:
+    """NP2's weak and collapsed parents against the user's accepted entries.
+
+    Attributes:
+        parents: The weak or collapsed parents' lookup keys, sorted.
+        names: Each parent's node name (``None`` where the vocab has none).
+        accepted: The parents an entry accepts.
+        unaccepted: The parents no entry accepts.
+        matched: Per entry, the parents it names.
+        unmatched: The entries that name no listed parent.
+    """
+
+    parents: tuple[str, ...]
+    names: Mapping[str, str | None]
+    accepted: tuple[str, ...]
+    unaccepted: tuple[str, ...]
+    matched: Mapping[str, list[str]]
+    unmatched: tuple[str, ...]
+
+    def to_json(self) -> dict[str, Any]:
+        """Return the record ``gate_p_run.json`` keeps (``np2_parents``)."""
+
+        def named(keys: Iterable[str]) -> list[dict[str, Any]]:
+            return [{"key": key, "name": self.names.get(key)} for key in keys]
+
+        return {
+            "parents": named(self.parents),
+            "accepted": named(self.accepted),
+            "unaccepted": named(self.unaccepted),
+            "matched": {entry: list(keys) for entry, keys in self.matched.items()},
+            "unmatched": list(self.unmatched),
+        }
+
+
+def np2_acceptance(
+    np2: Mapping[str, Any], accepted_parents: Sequence[str]
+) -> Np2Acceptance:
+    """Match the user's accepted entries to NP2's weak and collapsed parents.
+
+    An entry accepts a parent it names by the parent's lookup key
+    (``<level>/<node>``), its node label or its node's name (``np2_inputs``
+    ``parent_names``), so the user's names match the keys PREP records (the
+    user's ruling B2 (b) of 2026-10-07 names Bergmann glia and Upper rhombic
+    lip).
+
+    Args:
+        np2: ``np2_inputs`` of the primary bundle.
+        accepted_parents: The user's entries.
+
+    Returns:
+        The acceptance.
+
+    Raises:
+        GatePRunError: If an entry names more than one parent.
+    """
+    from merxen.annotation import reference as ref
+
+    parents = tuple(
+        sorted({*np2.get("weak_parents", ()), *np2.get("collapsed_parents", ())})
+    )
+    names = {key: (np2.get("parent_names") or {}).get(key) for key in parents}
+
+    def labels(key: str) -> set[str]:
+        found = {key}
+        node = None if key == ref.ROOT_KEY else ref.parse_lookup_key(key)[1]
+        for label in (node, names.get(key)):
+            if label:
+                found.add(str(label))
+        return found
+
+    matched: dict[str, list[str]] = {}
+    for entry in dict.fromkeys(str(item) for item in accepted_parents):
+        hits = [key for key in parents if entry in labels(key)]
+        if len(hits) > 1:
+            raise GatePRunError(
+                f"the accepted parent {entry!r} names more than one weak or "
+                f"collapsed parent ({hits}); give their lookup keys"
+            )
+        matched[entry] = hits
+    accepted = tuple(sorted({key for hits in matched.values() for key in hits}))
+    return Np2Acceptance(
+        parents=parents,
+        names=names,
+        accepted=accepted,
+        unaccepted=tuple(key for key in parents if key not in accepted),
+        matched=matched,
+        unmatched=tuple(entry for entry, hits in matched.items() if not hits),
+    )
+
+
+def np2_stop_applies(acceptance: Np2Acceptance, options: GatePOptions) -> bool:
+    """Whether NP2's parents stop the run before any build (ruling B2 (b)).
+
+    A run that is not a dry run stops when PREP lists a parent the user has
+    not accepted, unless ``run_with_unaccepted_parents``. A dry run never
+    stops on NP2, which is not part of its rule (M13 D28).
+    """
+    return bool(
+        acceptance.unaccepted
+        and not options.dry_run
+        and not options.run_with_unaccepted_parents
+    )
 
 
 def np9_time_reference(
@@ -1999,7 +2153,8 @@ def run_gate_p(request: GatePRequest, options: GatePOptions) -> dict[str, Any]:
 
     Returns:
         The run record stored under ``gate_p`` in the simulation report:
-        ``status`` (``scored``, or ``stopped`` by the pool sizes, D2), the
+        ``status`` (``scored``, or ``stopped`` by the pool sizes, D2, or by
+        NP2's unaccepted parents, B2; ``stop_reasons``), the
         family's verdict, ``validated_max_level``, the dry-run verdict, the
         files written and the NP9 measurements.
 
@@ -2079,6 +2234,11 @@ def run_gate_p(request: GatePRequest, options: GatePOptions) -> dict[str, Any]:
         "mapping_workers": facts["workers"],
         "open_readings": list(GATE_P_RUN_OPEN_READINGS),
     }
+    # B2 (b) of 2026-10-07: NP2's weak and collapsed parents (reference data
+    # only), before any leave-one-donor-out build.
+    np2 = np2_inputs(Path(facts["bundle_dir"]))
+    acceptance = np2_acceptance(np2, options.accepted_parents)
+    record["np2_parents"] = acceptance.to_json()
     # D2: the per-donor pool sizes, before any leave-one-donor-out build.
     donor_own = options.other_region == OTHER_REGION_DONOR_OWN
     pools = ref.ho_donor_pool_sizes(
@@ -2097,19 +2257,36 @@ def run_gate_p(request: GatePRequest, options: GatePOptions) -> dict[str, Any]:
         "target": int(config.resolvability.topup_min_class_test_cells),
         "short": _jsonable(short.to_dict(orient="records")),
     }
+    stops: dict[str, str] = {}
     if donor_own and not short.empty and not options.accept_small_pools:
-        record["status"] = STATUS_STOPPED
-        record["reason"] = (
+        stops[STOP_POOL_SIZES] = (
             f"{len(short)} (donor, class) pools cannot meet the per-class top-up "
             "rule under D2 (d); gate P stops before any replicate is mapped "
             "(pre-registration §23.10 open item 2): the user chooses (d) as it "
             "stands (accept_small_pools) or the fallback (c) (other_region "
-            "'shared') with these sizes in view"
+            "'shared'; the user's ruling A48 (b) of 2026-10-07)"
         )
+    if np2_stop_applies(acceptance, options):
+        listed = ", ".join(
+            f"{key} ({acceptance.names.get(key) or 'no name'})"
+            for key in acceptance.unaccepted
+        )
+        stops[STOP_NP2_PARENTS] = (
+            f"PREP lists weak or collapsed parents the user has not accepted: "
+            f"{listed}; NP2 would stay pending, so gate P stops before any "
+            "replicate is mapped (the user's ruling B2 (b) of 2026-10-07): the "
+            "user accepts them (accepted_parents) or runs with them unaccepted "
+            "(run_with_unaccepted_parents)"
+        )
+    if stops:
+        record["status"] = STATUS_STOPPED
+        record["stop_reasons"] = list(stops)
+        record["reason"] = "; ".join(stops.values())
         _write_json(out / GATE_P_RUN_JSON, record)
         logger.warning("gate P stopped: %s", record["reason"])
         return {
             "status": STATUS_STOPPED,
+            "stop_reasons": list(stops),
             "reason": record["reason"],
             "run": str(out / GATE_P_RUN_JSON),
             "pool_sizes": str(out / POOL_SIZES_CSV),
@@ -2307,7 +2484,6 @@ def run_gate_p(request: GatePRequest, options: GatePOptions) -> dict[str, Any]:
         members=[member.name for member in base.emission],
         settings=gp.Np9Settings.from_config(config.panel),
     )
-    np2 = np2_inputs(Path(facts["bundle_dir"]))
     family_checks = {
         "NP1": _np1(request, options),
         "NP2": gp.np2_panel_coverage(
@@ -2316,7 +2492,7 @@ def run_gate_p(request: GatePRequest, options: GatePOptions) -> dict[str, Any]:
             weak_parents=np2["weak_parents"],
             collapsed_parents=np2["collapsed_parents"],
             settings=gp.Np2Settings.from_config(config.panel),
-            accepted_parents=options.accepted_parents,
+            accepted_parents=acceptance.accepted,
         ),
         "NP8": gp.np8_cross_panel(options.partners),
         "NP9": np9,
@@ -2424,12 +2600,17 @@ __all__ = [
     "OTHER_REGION_DONOR_OWN",
     "OTHER_REGION_SHARED",
     "POOL_SIZES_CSV",
+    "STOP_NP2_PARENTS",
+    "STOP_POOL_SIZES",
     "GatePOptions",
     "GatePRunError",
+    "Np2Acceptance",
     "bundle_differences",
     "gate_p_hook",
     "gate_p_precheck",
+    "np2_acceptance",
     "np2_inputs",
+    "np2_stop_applies",
     "np5_depth_source",
     "np9_time_reference",
     "precheck_gate_p",

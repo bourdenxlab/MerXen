@@ -22,10 +22,15 @@ records that commit in ``simulate_report.json`` (``provenance.code_commit``)
 and ``gate_p/gate_p_run.json`` (``code_commit``). From a worktree the commit
 comes from ``git rev-parse HEAD``.
 
-Exit status: 0 when gate P was scored, 3 when it stopped on the per-donor pool
-sizes (pre-registration §23.10 open item 2: the user chooses D2 (d) as it
-stands, ``--gate-p-accept-small-pools``, or the fallback (c),
-``--gate-p-other-region shared``), the command's own status otherwise.
+Exit status: 0 when gate P was scored, 3 when it stopped before any
+leave-one-donor-out build (``stop_reasons`` in ``gate_p_run.json``): on the
+per-donor pool sizes (pre-registration §23.10 open item 2; the user's ruling
+A48 (b) of 2026-10-07 takes the fallback (c), ``--gate-p-other-region
+shared``; ``--gate-p-accept-small-pools`` runs D2 (d) as it stands), or, in a
+run that is not a dry run, on a weak or collapsed parent of PREP's bundle that
+``--gate-p-accepted-parents`` does not name (ruling B2 (b): it goes back to the
+user; ``--gate-p-run-with-unaccepted-parents`` runs with NP2 pending); the
+command's own status otherwise.
 
 Usage (set a dry run, version 6)::
 

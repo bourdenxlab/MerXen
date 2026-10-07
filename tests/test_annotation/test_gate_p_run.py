@@ -658,6 +658,106 @@ def test_gate_p_stops_before_any_build_when_a_donor_pool_is_too_small(
     assert facts["out"] == tmp_path / "out" / run.GATE_P_RUN_DIR
 
 
+def test_np2_acceptance_matches_a_parent_by_key_node_or_name() -> None:
+    """B2 (pre-registration §23.19): the user accepted parents by name."""
+    np2 = {
+        "weak_parents": ["CCN202210140_SUPC/CS202210140_493"],
+        "collapsed_parents": ["CCN202210140_SUPC/CS202210140_487"],
+        "parent_names": {
+            "CCN202210140_SUPC/CS202210140_493": "Bergmann glia",
+            "CCN202210140_SUPC/CS202210140_487": "Upper rhombic lip",
+        },
+    }
+    named = run.np2_acceptance(np2, ("Bergmann glia", "Upper rhombic lip"))
+    assert named.unaccepted == ()
+    assert named.accepted == tuple(sorted(np2["parent_names"]))
+    assert named.matched["Bergmann glia"] == ["CCN202210140_SUPC/CS202210140_493"]
+    by_key = run.np2_acceptance(np2, ("CCN202210140_SUPC/CS202210140_487",))
+    assert by_key.unaccepted == ("CCN202210140_SUPC/CS202210140_493",)
+    by_node = run.np2_acceptance(np2, ("CS202210140_493", "Lower rhombic lip"))
+    assert by_node.accepted == ("CCN202210140_SUPC/CS202210140_493",)
+    # An entry naming no listed parent accepts nothing and is reported.
+    assert by_node.unmatched == ("Lower rhombic lip",)
+    record = by_node.to_json()
+    assert record["unaccepted"] == [
+        {"key": "CCN202210140_SUPC/CS202210140_487", "name": "Upper rhombic lip"}
+    ]
+    twice = {
+        "weak_parents": ["L1/a", "L2/b"],
+        "collapsed_parents": [],
+        "parent_names": {"L1/a": "Same", "L2/b": "Same"},
+    }
+    with pytest.raises(run.GatePRunError, match="more than one"):
+        run.np2_acceptance(twice, ("Same",))
+
+
+def _weak_parent(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Make PREP's bundle list one weak parent the user has not accepted."""
+    real = run.np2_inputs
+
+    def with_weak(bundle_dir: Path) -> dict[str, Any]:
+        inputs = real(bundle_dir)
+        key = "CCN202210140_SUPC/CS202210140_493"
+        return {
+            **inputs,
+            "weak_parents": [*inputs["weak_parents"], key],
+            "parent_names": {**inputs["parent_names"], key: "Bergmann glia"},
+        }
+
+    monkeypatch.setattr(run, "np2_inputs", with_weak)
+    return "CCN202210140_SUPC/CS202210140_493"
+
+
+def test_gate_p_stops_before_any_build_on_an_unaccepted_weak_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    """B2: any weak parent the user has not accepted comes back before gate P runs."""
+    family = Family(tmp_path, monkeypatch, gate_config())
+    key = _weak_parent(monkeypatch)
+    held_out = sorted((tmp_path / "gate_p_store" / reference.HO_REFERENCE_ID).iterdir())
+    inputs = run.np2_inputs(family.bundle_dir)
+    others = sorted({*inputs["weak_parents"], *inputs["collapsed_parents"]} - {key})
+    result = run.run_gate_p(
+        family.request(),
+        run.GatePOptions(
+            species="human", accept_small_pools=True, accepted_parents=tuple(others)
+        ),
+    )
+    assert result["status"] == run.STATUS_STOPPED
+    assert result["stop_reasons"] == [run.STOP_NP2_PARENTS]
+    assert "Bergmann glia" in result["reason"]
+    record = read_run(result)
+    assert record["np2_parents"]["unaccepted"] == [
+        {"key": key, "name": "Bergmann glia"}
+    ]
+    # Nothing was built or mapped, and the user's answer runs in place.
+    assert (
+        sorted((tmp_path / "gate_p_store" / reference.HO_REFERENCE_ID).iterdir())
+        == held_out
+    )
+    assert family.gate_calls == []
+    facts = run._check_request(
+        family.request(),
+        run.GatePOptions(
+            species="human",
+            accept_small_pools=True,
+            accepted_parents=(*others, "Bergmann glia"),
+        ),
+    )
+    assert facts["out"] == tmp_path / "out" / run.GATE_P_RUN_DIR
+    # A dry run does not stop on NP2 (not part of the dry-run rule), and the
+    # user can run with the parent unaccepted, NP2 then pending.
+    for options in (
+        run.GatePOptions(species="human", accept_small_pools=True, dry_run=True),
+        run.GatePOptions(
+            species="human", accept_small_pools=True, run_with_unaccepted_parents=True
+        ),
+    ):
+        assert not run.np2_stop_applies(
+            run.np2_acceptance(run.np2_inputs(family.bundle_dir), ()), options
+        )
+
+
 def test_the_d2_c_fallback_shares_the_pool_and_every_set_keeps_the_d1_drop(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
 ) -> None:
@@ -668,7 +768,11 @@ def test_the_d2_c_fallback_shares_the_pool_and_every_set_keeps_the_d1_drop(
     result = run.run_gate_p(
         family.request(),
         run.GatePOptions(
-            species="human", other_region=run.OTHER_REGION_SHARED, prep_identity=False
+            species="human",
+            other_region=run.OTHER_REGION_SHARED,
+            prep_identity=False,
+            # NP2's fixture parents stay unaccepted (pending), as before B2.
+            run_with_unaccepted_parents=True,
         ),
     )
     # (c) never stops on the pool sizes: the user chose it with them in view.
@@ -909,6 +1013,7 @@ def test_the_command_registers_gate_p_for_the_species_it_is_given(
         "human",
         "--gate-p-accept-small-pools",
         "--gate-p-skip-prep-identity",
+        "--gate-p-run-with-unaccepted-parents",
     )
     assert result.exit_code == 0, result.output
     assert "gate P scored" in result.output
@@ -917,6 +1022,7 @@ def test_the_command_registers_gate_p_for_the_species_it_is_given(
     record = json.loads(Path(report["gate_p"]["run"]).read_text())
     assert record["options"]["species"] == "human"
     assert record["options"]["prep_identity"] is False
+    assert record["options"]["run_with_unaccepted_parents"] is True
     assert report["provenance"]["code_commit"] == EXPORTED
     assert report["provenance"]["code_commit_source"] == "export"
     assert (record["code_commit"], record["code_commit_source"]) == (
@@ -971,6 +1077,8 @@ def test_a_version_7_family_is_scored_in_every_emission_member(
             # A version-6 reference: never used for a version-7 family.
             time_reference_seconds=1e6,
             time_reference_basis="stated",
+            # NP2's fixture parents stay unaccepted (pending), as before B2.
+            run_with_unaccepted_parents=True,
         ),
     )
     assert result["status"] == run.STATUS_SCORED, result
@@ -1050,6 +1158,8 @@ def test_version_7_forced_on_a_version_6_family_scores_its_ensemble(
             accept_small_pools=True,
             resolvability_version=7,
             prep_identity=False,
+            # NP2's fixture parents stay unaccepted (pending), as before B2.
+            run_with_unaccepted_parents=True,
         ),
     )
     assert result["status"] == run.STATUS_SCORED, result
@@ -1339,7 +1449,13 @@ def test_np9_identity_fails_when_an_identical_re_run_differs(
 
     family = Family(tmp_path, monkeypatch, gate_config(), perturb=perturb)
     result = run.run_gate_p(
-        family.request(), run.GatePOptions(species="human", accept_small_pools=True)
+        family.request(),
+        run.GatePOptions(
+            species="human",
+            accept_small_pools=True,
+            # NP2's fixture parents stay unaccepted (pending), as before B2.
+            run_with_unaccepted_parents=True,
+        ),
     )
     assert result["status"] == run.STATUS_SCORED, result
     record = read_run(result)
