@@ -1381,3 +1381,25 @@ No gate-P output of set a or of the family exists. None of the family's outputs 
   - A related reading of the same chunk: the 50-cell minimum counts test cells, not member rows (the docs of the gene-complexity check). It is named in the family's gate-P PR.
 
 **Still open beyond the dry run** (§23.10): D17, the declared panel; D2's "too small", decided with the pool sizes of the run in view; D26's unanswered metadata; NP2's weak or collapsed parents; and §22.9's four questions. The NP5 depth profile of the family (D8 with CHECK K7) does not exist yet. Its asset is written, frozen and recorded only after D17 is frozen, from the family's first provisional `map_first` run with RESOLVE's version-7 consumer.
+
+### 23.19 Decisions of 2026-10-07 on the open rulings (recorded before the set a dry run runs)
+
+The orchestrator put every open ruling of §22.9 and §23.11–§23.18 and the open rows of the decision table to the user in one memo: 63 items, each with options, what the code does now, a recommendation and a label (tightening / neutral / LOOSENING / POST-HOC). An adversarial CHECK section (CK1–CK21) followed. The memo, frozen as answered, is `$A/m13/M13_DECISION_MEMO.answered_20261007.md`.
+
+**The user's answer** (chat, 2026-10-07): "Accept all recommendations, allowing loosenings for A2, A31, C3, A8, A21 and D3 (b)".
+
+- **Every recommendation of the memo is adopted**, as corrected by its CHECK section. 57 of the 63 keep what the code did at `857d75c`. The explicit answers the CHECK asked for follow the recommendations:
+  - **A17 (a):** NP4's seed limit "≤ 2% per validated level" is the level's share, over every class and emitted bin.
+  - **C1 (b):** the marker referee (NR5) uses the `class` comparator, with the registered 0.75 / 0.70 thresholds unchanged. This is a tightening, and POST-HOC: the registered `node` statistic was not evaluable on set a.
+  - **C2:** registration G1 moves to `gate_failed`. A tightening.
+  - **A48 (b):** if the pool-size stop fires, the shared other-region draw (D2 (c)) is used, the same for the v6 and v7 dry runs and the family. Per CK17, this replaces the registered "decide with the sizes in view" step. The pool sizes are reference metadata and are still reported.
+  - **CK1 (a):** a class H18 expects that gate P cannot evaluate (fewer than n_min = 200 confident calls) fails the dry run, as coded.
+  - **CK2:** after a criteria revision (§9), the dry run is re-run under the revised criteria and must pass. A failed dry run is never re-scored under another reading.
+- **Loosenings, approved in writing by the user:**
+  - A2 (a): keep the class-balanced weight cap (10 × the set's median) and rare-type pooling (< 20 calls). This one is POST-HOC.
+  - A31 (a): NT's C_P and its 90% rule are read on neurons only.
+  - C3 (b): NR7 matches each native depth bin to simulated cells by interpolation, not at the bin's lower edge.
+  - A8 (a): a call to a sink or region-implausible node counts as confident when the larger of its own and its supercluster's bp reaches the lowest frozen threshold emitted at that level and depth.
+  - A21 (a): a WHB COP-rule drop at one seed only is a threshold crossing.
+- **D3 (b), amending text confirmed on 2026-10-06:** M13 closes on the human path. The mouse chunks C20–C22 (the mouse dry run, the mouse regression rows and the mouse per-donor spread) move into the mouse work after M6b. They still run before any mouse family is scored (D4: same-species dry runs).
+- **The memo's warning, accepted:** the set a dry run is expected to fail by construction (CK1: supercluster Fibroblast cannot reach 200 confident calls under any D2 option; on set a's self-map, NP3 class-balanced already fails broad Astro and Oligo). The registered path then applies: the criteria are revised in a PR the user approves, recorded before any new family is scored, and the dry run is re-run (CK2).
