@@ -18,7 +18,9 @@ Three things live here:
   (level, class) records of ``simulation`` families: status,
   ``validated_min_depth``, ``tested_max_depth``; gate P, M13) and
   ``validated_panel_genes.csv`` (each row's resolved IDs and root markers,
-  so a near-identical panel can inherit the family, OD-E7);
+  so a near-identical panel can inherit the family, OD-E7); a gate-P PR
+  adds a ``simulation`` family to them with ``write_simulation_family``
+  (M13);
 * **the trust-state machine** (``trust_state``): ``refused`` /
   ``broad_only`` / ``provisional`` / ``validated`` per (reference, panel),
   with its effects (``TrustDecision``).
@@ -65,9 +67,13 @@ This module imports only the standard library, numpy, pandas and pydantic
 
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import logging
+import os
 import re
+import tempfile
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import cache
@@ -97,7 +103,13 @@ from merxen.annotation.schema import (
     meets_threshold,
     safe_token,
 )
-from merxen.annotation.vocab import Species, asset_path
+from merxen.annotation.vocab import (
+    NEURONS,
+    Species,
+    asset_path,
+    floor_class_for,
+    primary_vocab,
+)
 
 if TYPE_CHECKING:
     from merxen.annotation.config import AnnotationConfig
@@ -1262,6 +1274,281 @@ def load_validated_panels(path: Path | str | None = None) -> ValidatedPanelTable
             "(its companions are read from the same directory)"
         )
     return read_validated_panels(directory)
+
+
+# --------------------------------------------------------------------------
+# Writing a gate-P family (M13; plan §14 gate-P rule, §4.7)
+
+
+def level_class_keys(species: str, level: str) -> frozenset[str]:
+    """Return the class keys a ``validated_panel_levels.csv`` row may name.
+
+    The keys are those RESOLVE reads the per-(level, class) records with
+    (``TrustDecision.validated_mask``): the consensus ``class_key`` of each
+    level, derived from the primary vocab. Human: the E2 floor classes of
+    the plausible WHB superclusters at lineage, broad and NT, with ``COP``
+    apart at supercluster only (``vocab.floor_class_for``); mouse: the WMB
+    class names. NT holds only the neuron classes, because NT does not apply
+    to the others (M13 D14 (a): no row where NT does not apply). The SEA-AD
+    subclass (the second vote; D14 (a): ``ct_seaad_subclass_validated`` is
+    report-only) and the report-only fine levels have no keys: gate P scores
+    the primary reference up to the leaf only.
+
+    Args:
+        species: ``"human"`` or ``"mouse"``.
+        level: A level name.
+
+    Returns:
+        The class keys of the level (empty for a level gate P never
+        records).
+    """
+    if species not in ("human", "mouse"):
+        return frozenset()
+    vocab = primary_vocab("human" if species == "human" else "mouse")
+    names = vocab.names
+    if species == "human":
+        if level == "nt":
+            chosen = [name for name in names if vocab.broad_class(name) == NEURONS]
+        elif level in ("lineage", "broad", "supercluster"):
+            chosen = list(names)
+        else:
+            return frozenset()
+        keys = {
+            floor_class_for(
+                name,
+                species="human",
+                level="supercluster" if level == "supercluster" else "broad",
+            )
+            for name in chosen
+        }
+        return frozenset(key for key in keys if key is not None)
+    if level == "nt":
+        return frozenset(name for name in names if vocab.broad_class(name) == NEURONS)
+    if level in ("broad", "class", "subclass"):
+        return frozenset(names)
+    return frozenset()
+
+
+def own_family_id(species: str, platforms: Iterable[str], panel_hash: str) -> str:
+    """Return a panel's own, hash-derived family id (``panel.panel_family``).
+
+    Args:
+        species: Species.
+        platforms: The panel's platforms.
+        panel_hash: The panel hash.
+
+    Returns:
+        ``<species>_<platforms>_<hash prefix>``, as ``panel_family`` names a
+        panel that is its own family (M13 D16: mechanical).
+    """
+    token = "_".join(sorted({str(item).lower() for item in platforms})) or "any"
+    return f"{species}_{token}_{panel_hash[:12]}"
+
+
+def _csv_text(columns: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
+    """Rows rendered as CSV lines (no header), ``\\n`` line ends."""
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\n")
+    for row in rows:
+        if len(row) != len(columns):
+            raise ValueError(f"a row of {len(row)} fields for {len(columns)} columns")
+        writer.writerow(row)
+    return buffer.getvalue()
+
+
+def _appended_text(path: Path, columns: Sequence[str], body: str) -> str:
+    """A table's text with ``body`` appended; existing lines kept as they are.
+
+    Raises:
+        ValidatedPanelsError: If the existing header is not ``columns``.
+    """
+    header = ",".join(columns) + "\n"
+    if not path.is_file():
+        return header + body
+    text = path.read_text(encoding="utf-8")
+    first = text.splitlines()[0] if text else ""
+    if first != ",".join(columns):
+        raise ValidatedPanelsError(
+            f"{path.name}: the header {first!r} is not {','.join(columns)!r}"
+        )
+    if not text.endswith("\n"):
+        text += "\n"
+    return text + body
+
+
+def write_simulation_family(
+    directory: Path | str,
+    record: ValidatedPanelRecord,
+    levels: Sequence[ValidatedLevelRecord],
+    genes: PanelGeneList,
+    *,
+    self_map: ResolvabilityTrust | None,
+) -> ValidatedPanelTable:
+    """Add a gate-P family to the validated tables (plan §14, §4.7; M13).
+
+    Appends the family's ``validated_panels.csv`` row (``validation_basis =
+    simulation``), its ``validated_panel_levels.csv`` rows and its
+    ``validated_panel_genes.csv`` rows to the tables in ``directory`` (the
+    packaged tables in a gate-P PR, which the user approves; §14 gate-P
+    rule). The existing lines are kept as they are. The combined tables are
+    written to a temporary directory and read back with
+    ``read_validated_panels`` (all its cross-row checks: the rank rule of
+    ``validated_max_level``, the gene list hashing to ``panel_hash``)
+    before they replace the files, so nothing is written when any check
+    fails.
+
+    Refused:
+
+    - a record whose basis is not ``simulation``;
+    - a family whose bundle has no resolvability self-map (``self_map``
+      ``None``; M13 D13 (a): such a family stays ``broad_only``, so its
+      evidence cannot promote it);
+    - a ``family_id`` other than the panel's own hash-derived id (D16), or
+      one already in the tables;
+    - level rows of another family or panel hash, none at all, or naming a
+      class that is not a consensus class key of its level
+      (``level_class_keys``: no NT row where NT does not apply, no SEA-AD
+      subclass row; D14 (a));
+    - a gene list of another ``panel_id``.
+
+    Args:
+        directory: The directory of ``validated_panels.csv`` (created with
+            the three tables when it holds none).
+        record: The family's panel row.
+        levels: Its per-(level, class) rows.
+        genes: Its resolved IDs, symbols and root markers.
+        self_map: The family bundle's resolvability constraint
+            (``ResolvabilityTrust.from_bundle_manifest``; ``None`` when the
+            bundle has no self-map).
+
+    Returns:
+        The tables as read back from ``directory``.
+
+    Raises:
+        ValidatedPanelsError: For any refusal above, or when the combined
+            tables fail ``read_validated_panels``.
+    """
+    if record.validation_basis != "simulation":
+        raise ValidatedPanelsError(
+            f"{record.panel_id}: write_simulation_family writes simulation rows "
+            f"only, not {record.validation_basis}"
+        )
+    if self_map is None:
+        raise ValidatedPanelsError(
+            f"{record.family_id}: the family bundle has no resolvability self-map; "
+            "a simulation family without one stays broad_only (M13 D13 (a)), so "
+            "its gate-P evidence cannot promote it"
+        )
+    expected = own_family_id(record.species, record.platforms, record.panel_hash)
+    if record.family_id != expected:
+        raise ValidatedPanelsError(
+            f"family_id {record.family_id!r} is not the panel's hash-derived id "
+            f"{expected!r} (M13 D16)"
+        )
+    if not levels:
+        raise ValidatedPanelsError(
+            f"{record.family_id}: a simulation family needs its "
+            f"{VALIDATED_PANEL_LEVELS_FILE} rows"
+        )
+    problems: list[str] = []
+    for level in levels:
+        if level.family_id != record.family_id or level.panel_hash != (
+            record.panel_hash
+        ):
+            problems.append(
+                f"the level row {level.level}/{level.class_name} is of "
+                f"{level.family_id} {level.panel_hash[:16]}, not the record's"
+            )
+        if level.class_name not in level_class_keys(record.species, level.level):
+            problems.append(
+                f"{level.level}/{level.class_name} is not a consensus class key of "
+                f"the {record.species} level {level.level!r} (D14 (a))"
+            )
+    if genes.panel_id != record.panel_id:
+        problems.append(
+            f"the gene list is of {genes.panel_id!r}, not {record.panel_id!r}"
+        )
+    if problems:
+        raise ValidatedPanelsError(
+            f"{record.family_id}: " + "; ".join(sorted(set(problems)))
+        )
+    base = Path(directory)
+    panels_path = base / VALIDATED_PANELS_FILE
+    if panels_path.is_file():
+        existing = read_validated_panels(base)
+        if record.family_id in existing.family_ids():
+            raise ValidatedPanelsError(
+                f"family {record.family_id} is already in {panels_path}"
+            )
+    panel_rows = [
+        [
+            record.panel_id,
+            record.family_id,
+            record.panel_hash,
+            record.panel_role,
+            record.species,
+            ";".join(record.platforms),
+            str(record.n_genes),
+            record.validated_max_level,
+            record.validation_basis,
+            record.root_marker_source,
+            record.evidence,
+            record.date,
+            record.approving_pr,
+            record.note,
+        ]
+    ]
+    level_rows = [
+        [
+            level.family_id,
+            level.panel_hash,
+            level.level,
+            level.class_name,
+            "true" if level.in_class_set else "false",
+            level.status,
+            "" if level.validated_min_depth is None else str(level.validated_min_depth),
+            "" if level.tested_max_depth is None else str(level.tested_max_depth),
+            level.evidence,
+        ]
+        for level in levels
+    ]
+    gene_rows = [
+        [
+            genes.panel_id,
+            gene_id,
+            str(genes.symbols.get(gene_id, gene_id)),
+            "true" if gene_id in genes.root_markers else "false",
+        ]
+        for gene_id in sorted(genes.ensembl_ids)
+    ]
+    texts = {
+        name: _appended_text(base / name, columns, _csv_text(columns, rows))
+        for name, columns, rows in (
+            (VALIDATED_PANELS_FILE, VALIDATED_PANELS_COLUMNS, panel_rows),
+            (VALIDATED_PANEL_LEVELS_FILE, VALIDATED_LEVELS_COLUMNS, level_rows),
+            (VALIDATED_PANEL_GENES_FILE, VALIDATED_GENES_COLUMNS, gene_rows),
+        )
+    }
+    base.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=base, prefix=".validated_") as staging:
+        staged = Path(staging)
+        for name, text in texts.items():
+            (staged / name).write_text(text, encoding="utf-8")
+        table = read_validated_panels(staged, source=str(base))
+        if record.family_id not in table.family_ids():
+            raise ValidatedPanelsError(
+                f"{record.family_id}: the written tables do not list the family"
+            )
+        for name in texts:
+            os.replace(staged / name, base / name)
+    logger.info(
+        "Validated tables %s: added the simulation family %s (%s, %d level rows)",
+        base,
+        record.family_id,
+        record.validated_max_level,
+        len(levels),
+    )
+    return read_validated_panels(base)
 
 
 # --------------------------------------------------------------------------
