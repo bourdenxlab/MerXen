@@ -6276,7 +6276,23 @@ LEVEL_WALK_COLUMNS: Final[tuple[str, ...]] = (
     "counted",
 )
 _NULLABLE_RECORD_COLUMNS: Final = frozenset({"validated_min_depth", "tested_max_depth"})
-GATE_P_REPORT_SCHEMA_VERSION: Final = 1
+# 2 since pre-registration §23.21: ``open_readings`` became
+# ``scored_readings`` and ``readings_ruled``, and the table summaries count
+# failures on the scored rows only (``reported_only`` marks the others).
+GATE_P_REPORT_SCHEMA_VERSION: Final = 2
+# The criterion tables (``<name>__<member>``) that are reported only since
+# pre-registration §23.21: NP3's own walk (R2), the t* spread (R3 (c)) and
+# NP5's every-set class table (R2); in version 7 also each member's own NP5
+# agreement (R7). Their failures fail nothing.
+GATE_P_REPORTED_ONLY_TABLES: Final[tuple[str, ...]] = (
+    "np3_depths",
+    "np5_spread",
+    "np5_class",
+)
+GATE_P_REPORTED_ONLY_TABLES_V7: Final[tuple[str, ...]] = (
+    *GATE_P_REPORTED_ONLY_TABLES,
+    "np5_agreement",
+)
 GATE_P_REPORT_JSON: Final = "gate_p_report.json"
 GATE_P_REPORT_TXT: Final = "GATE_P_REPORT.txt"
 GATE_P_RECORDS_CSV: Final = "gate_p_class_records.csv"
@@ -7332,8 +7348,8 @@ def _member_keys(
 
     Raises:
         ValueError: If the criteria are not NP3-NP7, a criterion or the
-            depths have no member or other members, or a member's criteria
-            and depth table hold different (level, class) keys.
+            depth walks have no member or other members, or a member's
+            criteria and depth walk hold different (level, class) keys.
     """
     if set(verdicts) != set(GATE_P_CLASS_CRITERIA):
         raise ValueError(
@@ -7343,7 +7359,7 @@ def _member_keys(
     members = sorted(str(member) for member in verdicts[GATE_P_CLASS_CRITERIA[0]])
     if not members:
         raise ValueError("the per-class verdicts have no emission member")
-    for name, values in [*verdicts.items(), ("the NP3 depths", depths)]:
+    for name, values in [*verdicts.items(), ("the depth walk", depths)]:
         if sorted(str(member) for member in values) != members:
             raise ValueError(
                 f"{name} has the members {sorted(values)}, not {members}: every "
@@ -7360,9 +7376,9 @@ def _member_keys(
         _require_columns(
             table,
             ("level", "class", "tested_max_depth", "validated_min_depth", "passed"),
-            f"the NP3 depths of {member}",
+            f"the depth walk of {member}",
         )
-        keys["NP3 depths"] = {
+        keys["the depth walk"] = {
             (str(level), str(cls))
             for level, cls in zip(table["level"], table["class"], strict=True)
         }
@@ -7448,7 +7464,8 @@ def gate_p_class_records(
     - else ``not_evaluable`` when any criterion is not evaluable in any
       member (no tested set; a class of C_P without a call at all);
     - else ``validated``, with ``validated_min_depth`` the deepest of the
-      members' NP3 values (the label is validated where it is validated in
+      members' depth walks (``gate_p_depth_walk``, revision R2 of
+      pre-registration §23.21; the label is validated where it is validated in
       every member) and ``tested_max_depth`` the shallowest member D_P,
       raised to ``validated_min_depth`` when it lies below it (the
       version-7 reading of pre-registration §23.16, ruled on 2026-10-07,
@@ -7461,10 +7478,11 @@ def gate_p_class_records(
 
     Args:
         verdicts: Per criterion of ``GATE_P_CLASS_CRITERIA``, per emission
-            member, its per-(level, class) verdicts (``np3_class_verdicts``,
-            ``np4_class_verdicts``, ``np5_class_verdicts``,
-            ``np6_class_verdicts``, ``np7_class_verdicts``).
-        depths: Per emission member, NP3's ``validated_min_depth`` table.
+            member, its per-(level, class) verdicts (``gate_p_depth_walk``'s,
+            revision R2 of pre-registration §23.21).
+        depths: Per emission member, its depth walk (``gate_p_depth_walk``'s
+            table: ``validated_min_depth``, D_P as ``tested_max_depth`` and
+            ``passed``).
         class_sets: C_P per level (``gate_p_class_sets``).
 
     Returns:
@@ -7474,7 +7492,7 @@ def gate_p_class_records(
     Raises:
         ValueError: If the inputs are not the five criteria in the same
             members on the same keys (``_member_keys``), or a validated key
-            has no NP3 depth in some member.
+            has no passing depth walk in some member.
     """
     members = _member_keys(verdicts, depths)
     combined = {
@@ -7536,8 +7554,8 @@ def gate_p_class_records(
             )
             if lacking:
                 raise ValueError(
-                    f"({level}, {cls}) passes NP3-NP7 in every member, but the NP3 "
-                    f"depths of {lacking} have no passing validated_min_depth"
+                    f"({level}, {cls}) passes NP3-NP7 in every member, but the "
+                    f"depth walks of {lacking} have no passing validated_min_depth"
                 )
             minima = [value[1] for value in passed_depths.values()]
             deep = [value[2] for value in passed_depths.values()]
@@ -7716,8 +7734,9 @@ def assemble_gate_p(
         species: ``"human"`` or ``"mouse"``.
         resolvability_version: 6 (one emission member) or 7 (the
             ``resolvability.V7_EMISSION_MEMBERS`` members).
-        verdicts: Per criterion NP3-NP7, per member, the class verdicts.
-        depths: Per member, NP3's ``validated_min_depth`` table.
+        verdicts: Per criterion NP3-NP7, per member, the class verdicts
+            (``gate_p_depth_walk``'s).
+        depths: Per member, its depth walk (``gate_p_depth_walk``'s table).
         class_sets: C_P per level of the species.
         family_checks: ``NP1``, ``NP2``, ``NP8`` and ``NP9``.
 
@@ -7903,18 +7922,52 @@ def validated_table_rows(
 # The NP1-NP9 report (M13 exit: "an NP report per onboarded family")
 
 
-def _table_summary(frame: pd.DataFrame) -> dict[str, Any]:
-    """The numbers of a criterion table the report prints beside its file."""
+def _is_reported_only(name: str, resolvability_version: int) -> bool:
+    """Whether a criterion table (``<name>`` or ``<name>__<member>``) is report-only."""
+    base = name.split("__", 1)[0]
+    reported = (
+        GATE_P_REPORTED_ONLY_TABLES_V7
+        if resolvability_version == res.RESOLVABILITY_VERSION_V7
+        else GATE_P_REPORTED_ONLY_TABLES
+    )
+    return base in reported
+
+
+def _table_summary(frame: pd.DataFrame, *, reported_only: bool) -> dict[str, Any]:
+    """The numbers of a criterion table the report prints beside its file.
+
+    ``n_failed`` counts the failing rows that are scored: every row of a
+    scored table, or those marked ``scored`` when the table has the column
+    (NP3's and NP6's weightings, pre-registration §23.21 R1). Failing rows
+    that are reported only are counted in ``n_failed_reported_only``; a
+    report-only table (``GATE_P_REPORTED_ONLY_TABLES``) has ``reported_only``
+    and no ``n_failed``. A scored failure below a class's D_P only raises
+    its floor (``depth_walk``, R2).
+    """
     summary: dict[str, Any] = {"n_rows": len(frame)}
+    if reported_only:
+        summary["reported_only"] = True
     if "passed" in frame.columns:
         # A CSV round trip or numpy turns False into np.False_; a missing
         # value (None, nan) is not counted as a failure here.
-        summary["n_failed"] = int(
-            sum(
+        failing = np.array(
+            [
                 isinstance(value, (bool, np.bool_)) and not bool(value)
                 for value in frame["passed"].astype(object)
-            )
+            ],
+            dtype=bool,
         )
+        scored = (
+            np.zeros(len(frame), dtype=bool)
+            if reported_only
+            else np.array([_is_true(value) for value in frame["scored"]], dtype=bool)
+            if "scored" in frame.columns
+            else np.ones(len(frame), dtype=bool)
+        )
+        if not reported_only:
+            summary["n_failed"] = int((failing & scored).sum())
+        if reported_only or not bool(scored.all()):
+            summary["n_failed_reported_only"] = int((failing & ~scored).sum())
     for column, name in (
         ("donor_range", "max_donor_range"),
         ("changed_share", "max_changed_share"),
@@ -7941,10 +7994,11 @@ def gate_p_report(
     classes, validated levels per class and depth, ``validated_min_depth``
     and ``tested_max_depth``, the replicate spread, the stress drops, the
     runtime and the peak RSS. The criterion tables (``np4_set_verdicts``,
-    ``np6_verdicts``, ...) are summarised by name; ``write_gate_p_report``
-    writes them beside the report. The report names the reading each
-    revised criterion scores (``GATE_P_SCORED_READINGS``, pre-registration
-    §23.21) and the rulings that closed the open readings
+    ``np6_verdicts``, ...) are summarised by name, failures counted on the
+    scored rows and the report-only tables marked (``_table_summary``);
+    ``write_gate_p_report`` writes them beside the report. The report names
+    the reading each revised criterion scores (``GATE_P_SCORED_READINGS``,
+    pre-registration §23.21) and the rulings that closed the open readings
     (``GATE_P_READINGS_RULED``).
 
     Args:
@@ -7959,7 +8013,11 @@ def gate_p_report(
     payload["readings_ruled"] = list(GATE_P_READINGS_RULED)
     payload["scored_readings"] = list(GATE_P_SCORED_READINGS)
     payload["tables"] = {
-        name: _table_summary(frame) for name, frame in sorted((tables or {}).items())
+        name: _table_summary(
+            frame,
+            reported_only=_is_reported_only(name, result.resolvability_version),
+        )
+        for name, frame in sorted((tables or {}).items())
     }
     return payload
 
@@ -8059,10 +8117,19 @@ def gate_p_report_text(report: Mapping[str, Any]) -> str:
         f"{_fmt(np9.get('rss_reserve_gb'), 1)} GB",
     ]
     if report["tables"]:
-        lines += ["", "Criterion tables:"]
+        lines += [
+            "",
+            "Criterion tables (n_failed counts the scored rows; a scored failure "
+            "below a class's D_P only raises its floor, depth_walk):",
+        ]
         for name, summary in report["tables"].items():
-            values = ", ".join(f"{key} {_fmt(value)}" for key, value in summary.items())
-            lines.append(f"  {name}: {values}")
+            values = ", ".join(
+                f"{key} {_fmt(value)}"
+                for key, value in summary.items()
+                if key != "reported_only"
+            )
+            marker = " (reported only)" if summary.get("reported_only") else ""
+            lines.append(f"  {name}{marker}: {values}")
     lines += [
         "",
         "Scored readings (pre-registration §23.21, the criteria revision "

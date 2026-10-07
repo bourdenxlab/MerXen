@@ -36,7 +36,7 @@ from .test_gate_p import (
     _thresholds,
     _values,
 )
-from .test_gate_p_assembly import _assemble, _class_sets
+from .test_gate_p_assembly import V7_MEMBERS, _assemble, _class_sets
 from .test_gate_p_np6 import STRESS, _np6, _np6_tables
 from .test_resolvability import bin_cells, settings
 
@@ -860,3 +860,66 @@ def test_report_names_the_scored_readings_and_the_rulings() -> None:
     assert "Readings ruled: pre-registration §23.19, §23.21" in text
     for name in ("natural_test_cells", "R1", "R2", "R3 (c)", "R5", "R6", "R7"):
         assert name in text, name
+
+
+def test_report_counts_failures_on_the_scored_rows_only() -> None:
+    """The report's table summaries count a failure only where it is scored:
+    NP3's and NP6's reported weightings, NP3's own walk, the t* spread,
+    NP5's every-set class table and (version 7) each member's own NP5
+    agreement are reported only (pre-registration §23.21).
+    """
+    np3 = pd.DataFrame(
+        {
+            "scheme": [*TEST_CELL_SCHEMES, *CALL_SET_SCHEMES],
+            "scored": [True, True, False, False],
+            "passed": [True, False, False, False],
+        }
+    )
+    spread = pd.DataFrame({"spread": [0.1, 0.2], "passed": [False, False]})
+    agreement = pd.DataFrame({"passed": [False, True]})
+    np4 = pd.DataFrame({"passed": [False, None, True]})
+    tables = {
+        "np3_verdicts__r1_seed0": np3,
+        "np3_depths__r1_seed0": agreement,
+        "np5_spread__r1_seed0": spread,
+        "np5_class__r1_seed0": agreement,
+        "np5_agreement__r1_seed0": agreement,
+        "np4_sets__r1_seed0": np4,
+    }
+    report = gp.gate_p_report(_assemble(), tables=tables)
+    assert report["schema_version"] == 2
+    summary = report["tables"]
+    assert summary["np3_verdicts__r1_seed0"] == {
+        "n_rows": 4,
+        "n_failed": 1,
+        "n_failed_reported_only": 2,
+    }
+    assert summary["np5_spread__r1_seed0"] == {
+        "n_rows": 2,
+        "reported_only": True,
+        "n_failed_reported_only": 2,
+        "max_tstar_spread": 0.2,
+    }
+    for name in ("np3_depths__r1_seed0", "np5_class__r1_seed0"):
+        assert summary[name] == {
+            "n_rows": 2,
+            "reported_only": True,
+            "n_failed_reported_only": 1,
+        }
+    # A member's own NP5 agreement is scored in version 6 only (R7).
+    assert summary["np5_agreement__r1_seed0"] == {"n_rows": 2, "n_failed": 1}
+    assert summary["np4_sets__r1_seed0"] == {"n_rows": 3, "n_failed": 1}
+    text = gp.gate_p_report_text(report)
+    assert "n_failed counts the scored rows" in text
+    assert (
+        "  np5_spread__r1_seed0 (reported only): n_rows 2, "
+        "n_failed_reported_only 2, max_tstar_spread 0.200"
+    ) in text
+    assert "  np4_sets__r1_seed0: n_rows 3, n_failed 1" in text
+    v7 = gp.gate_p_report(_assemble(V7_MEMBERS), tables=tables)
+    assert v7["tables"]["np5_agreement__r1_seed0"] == {
+        "n_rows": 2,
+        "reported_only": True,
+        "n_failed_reported_only": 1,
+    }
+    assert v7["tables"]["np4_sets__r1_seed0"] == {"n_rows": 3, "n_failed": 1}

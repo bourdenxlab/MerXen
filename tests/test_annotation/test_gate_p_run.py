@@ -1508,7 +1508,12 @@ def test_version_7_np5_scores_the_ensemble_re_derived_per_replicate(
         assert member_tstar["threshold"].notna().all()
     report = json.loads((out / gp.GATE_P_REPORT_JSON).read_text())
     assert report["scored_readings"] == list(gp.GATE_P_SCORED_READINGS)
-    assert "open_readings" not in read_run(result)
+    # Schema 2 (§23.21): the readings, and the dry run's reported rows.
+    assert report["schema_version"] == 2 and "open_readings" not in report
+    record = read_run(result)
+    assert record["schema_version"] == 2 and "open_readings" not in record
+    assert record["readings_ruled"] == list(gp.GATE_P_READINGS_RULED)
+    assert all("reported" in row for row in record["dry_run"]["expected"])
 
 
 def test_version_7_forced_on_a_version_6_family_scores_its_ensemble(

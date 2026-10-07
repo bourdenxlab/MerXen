@@ -134,7 +134,7 @@ def _depths(
     values: Mapping[tuple[str, Key], tuple[bool | None, int | None, int | None]]
     | None = None,
 ) -> dict[str, pd.DataFrame]:
-    """NP3 ``validated_min_depth`` tables: every key validated from 30, D_P 120."""
+    """Depth walks (``gate_p_depth_walk``): every key validated from 30, D_P 120."""
     tables: dict[str, pd.DataFrame] = {}
     for member in members:
         rows = []
@@ -545,7 +545,7 @@ def test_class_records_refuse_inputs_not_scored_on_the_same_members_and_keys() -
             depths,
             sets,
         )
-    with pytest.raises(ValueError, match="members"):
+    with pytest.raises(ValueError, match="the depth walk has the members"):
         gp.gate_p_class_records(verdicts, _depths(("R1@6",)), sets)
     other = _verdicts(("R1@0", "R1@6"))
     other["NP7"].pop("R1@6")
@@ -556,8 +556,18 @@ def test_class_records_refuse_inputs_not_scored_on_the_same_members_and_keys() -
     with pytest.raises(ValueError, match="same tested sets"):
         gp.gate_p_class_records(missing, depths, sets)
     lacking = _depths(values={("R1@0", ("broad", "Exc")): (False, None, 120)})
-    with pytest.raises(ValueError, match="no passing validated_min_depth"):
+    with pytest.raises(
+        ValueError, match="depth walks of .* no passing validated_min_depth"
+    ):
         gp.gate_p_class_records(verdicts, lacking, sets)
+    walk = _depths()
+    walk["R1@0"] = walk["R1@0"].iloc[1:]
+    with pytest.raises(ValueError, match="R1@0: the depth walk holds other"):
+        gp.gate_p_class_records(verdicts, walk, sets)
+    walk = _depths()
+    walk["R1@0"] = walk["R1@0"].drop(columns="tested_max_depth")
+    with pytest.raises(ValueError, match="the depth walk of R1@0: missing"):
+        gp.gate_p_class_records(verdicts, walk, sets)
 
 
 def test_class_records_keep_a_c_p_class_without_calls_not_evaluable() -> None:

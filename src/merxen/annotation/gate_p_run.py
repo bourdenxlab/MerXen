@@ -156,7 +156,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-GATE_P_RUN_SCHEMA_VERSION: Final = 1
+# 2 since pre-registration §23.21: ``open_readings`` became ``readings`` and
+# ``readings_ruled``, and a dry-run row carries ``reported`` (R5; ``passed``
+# is then null).
+GATE_P_RUN_SCHEMA_VERSION: Final = 2
 GATE_P_RUN_DIR: Final = "gate_p"
 GATE_P_RUN_JSON: Final = "gate_p_run.json"
 POOL_SIZES_CSV: Final = "gate_p_pool_sizes.csv"
