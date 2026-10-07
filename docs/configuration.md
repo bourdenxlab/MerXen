@@ -643,6 +643,38 @@ runs it on every sample (M13; see
 [Real-data QC in RESOLVE](stages/annotation.md#real-data-qc-in-resolve-m13)).
 None raises a trust state, a gate level or an emission.
 
+#### Gate-P settings (`--annotation-config`, M13)
+
+Gate P (`annotation-panel-simulate --gate-p`, `scripts/acceptance/new_panel.py`;
+[Gate P](stages/annotation.md#gate-p-simulation-based-validation-of-a-panel-family-m13))
+reads these `resolvability` fields of the `AnnotationConfig` JSON. They have
+no Nextflow parameter: gate P is a standalone acceptance programme, never a
+pipeline stage. The thresholds are the pre-registered values of plan §3.7
+and §14 (pre-registration §23.9). Changing one is a rule change that needs
+its own PR, and a loosening needs the user's written approval.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `resolvability.gate_p_seeds` | `[0, 1]` | MapMyCells mapping seeds of the replicates (D6). Seed 1 re-maps seed 0's simulated cells. The list must hold 0 and another seed. |
+| `resolvability.gate_p_human_donors` | `["H19.30.002", "H19.30.001", "H18.30.002"]` | The frontal WHB donors: the held-out donor of the production test set (scored on its check half) and the two leave-one-donor-out donors. They must be distinct frontal donors of the held-out bundle, at least two, with the default held-out donor among them. |
+| `resolvability.gate_p_min_confident_n`, `resolvability.gate_p_replicate_min_confident_n` | `200`, `100` | Confident held-out calls a pooled tested set needs (NP3–NP7), and a replicate needs for NP4's floor and range. |
+| `resolvability.gate_p_class_min_test_cells` | `700` | Pooled test cells a class needs to enter C_P (which must hold ≥ 90% of a level's test cells). |
+| `resolvability.gate_p_spread_se_multiplier` | `3.5` | NP4's replicate range limit max(0.03, multiplier × SE). |
+| `resolvability.gate_p_min_coverage` | `0.30` | Coverage NP3 requires of each tested set. |
+| `resolvability.gate_p_stress.spill_fraction`, `.gene_efficiency_sigma`, `.platform_factor_cap_log2` | `0.35`, `1.0`, `2.0` | NP6's stress members: foreign-class spill, LogNormal(0, sigma) efficiency, and the cap on the cross-platform offsets (log2). |
+| `resolvability.weight_min_type_cells`, `resolvability.weight_trim_factor` | `20`, `10.0` | Shared with RESOLVE's composition reweighting. In NP3 a truth type with fewer calls takes its broad class's weight, and each weight is capped at this multiple of the set's median positive weight (pre-registration §23.11 item 2, open). |
+| `resolvability.holdout_other_region_donor_only` | `false` | Set only by gate P on its leave-one-donor-out builds (D2 (d)): the held-out test set draws its other-region top-up from the held-out donor only. It enters that bundle's `build_hash` only when set, so every production bundle is unchanged. |
+| `resolvability.gate_p_mouse_test_draws` | `2` | Disjoint WMB test draws of the mouse path. No code reads it yet: the mouse path waits for M13 chunk C20, after M6b. (`resolvability.gate_p_topup_max_cluster_frac`, 0.05, is already read by the version-7 mouse class top-up of PREP.) |
+
+NP6's Wilson margin is `resolvability.wilson_margin` (0.02), shared with
+the self-map. NP4's seed criterion uses the pre-registered constant 0.02
+(`gate_p.NP4_MAX_SEED_CHANGE`), not `resolvability.seed_stability_max_change`,
+which belongs to the fine-level opt-in (both are 0.02). The NP3, NP5, NP6 and
+NP7 limits not listed above are module constants of `merxen.annotation.gate_p`
+(`Np3Settings`–`Np9Settings`). NP1 and NP2 read `panel.min_gene_id_resolution`
+(0.95) and `panel.min_root_markers` (10), and NP9 `panel.large_panel_genes`
+(1,000).
+
 **RESOLVE rule settings have no pipeline params.** The thresholds, targets,
 floors, dataset gate and flag settings RESOLVE applies are the
 pre-registered defaults of `merxen.annotation.config` (plan §3.7, §14);

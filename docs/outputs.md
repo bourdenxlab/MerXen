@@ -530,6 +530,38 @@ The bundles themselves live in the reference store
 (`annotation_reference_store`, default `${outdir}/annotation_references`),
 not under these directories, and are never deleted by the pipeline.
 
+#### Gate-P outputs (M13)
+
+Gate P is a standalone acceptance programme, not a pipeline stage:
+`merxen annotation-panel-simulate --gate-p` or
+`scripts/acceptance/new_panel.py`
+([Gate P](stages/annotation.md#gate-p-simulation-based-validation-of-a-panel-family-m13)).
+It writes the base simulation's files into `--out-dir`
+(`simulate_report.json`, with a `gate_p` block that records a refusal or
+failure, `SIMULATE_REPORT.txt` and the rest of the
+[panel simulation](cli.md#merxen-annotation-panel-simulate) outputs), and its own
+files into `<out-dir>/gate_p/`. Its bundles go to the separate gate-P store it
+is pointed at, never to the production store.
+
+| Path (under `<out-dir>/gate_p/`) | Contents |
+|------|----------|
+| `gate_p_run.json` | The run record: `status` (`scored`, or `stopped` on the per-donor pool sizes), `family_id`, `passes`, `reasons`, `validated_max_level`, the dry-run verdict (`dry_run`, with `--gate-p-dry-run`), the times (`measured_seconds`, `prep_seconds`, `gate_p_seconds`, `leave_one_donor_out_seconds`, `replicate_seconds`), `simulated_cells` (with `simulated_cells_this_run` and `simulated_cells_prep_rows`: NP9's version-7 scaling basis, M13 D10 (a)), the time reference and its basis, the process-tree peak memory, each replicate's record, the identity re-runs (`replicate_identity`, `prep_identity`), NP5's depth source, the NP6 factor report, the readings the run took (`open_readings`) and the written files. |
+| `gate_p_pool_sizes.csv` | Per extra donor and judged class: its frontal test cells, its own and every donor's admissible other-region cells, the cells the D1 drop removes, and the default test set's count (D2; written before any leave-one-donor-out build). |
+| `gate_p_report.json`, `GATE_P_REPORT.txt` | The NP1–NP9 report: C_P and the excluded classes per level, the per-(level, class) records, `validated_max_level`, the family checks (NP1, NP2, NP8, NP9) and the headline verdict. |
+| `gate_p_class_records.csv` | One row per (level, class): `in_class_set`, status (`validated`, `failed:NP<k>` or `not_evaluable`), every failing criterion and member, `validated_min_depth` and `tested_max_depth` (version 7: with each member's values). |
+| `gate_p_class_sets.csv`, `gate_p_level_walk.csv` | C_P per level with each class's test cells, share and reference share; the coarse-to-fine level walk (`share_ok`, the classes validated and not, `complete`) that gives `validated_max_level`. |
+| `<table>__<member>.csv` | Per emission member (`r1_contam_ho_seed0`, …): `tested_sets`, `np3_verdicts`, `np3_depths`, `np4_stats`, `np4_sets`, `np4_seed`, `np5_agreement`, `np5_thresholds`, `np5_spread`, `np5_extrapolated`, `np5_class`, `np6_verdicts`, `np7_wrong_node` and `np7_excluded` (human), and with `--gate-p-x1-factors` `np6_factors`. Also `np5_ensemble_agreement.csv` (version 7, report only) and `pool_sizes.csv`. |
+| `replicates/<donor>/seed<k>/<member>.parquet` | Each replicate's gate-P rows, written as soon as it is mapped (base members at every seed, stress members and the clean upper bound at seed 0). A rerun into a directory that holds replicates is refused. |
+
+A family that passes is promoted only by its gate-P PR, which adds rows to
+the packaged tables in `src/merxen/assets/annotation/`
+(`diagnostics.write_simulation_family`): one `validated_panels.csv` row with
+`validation_basis = simulation`, the family's `validated_panel_genes.csv`
+rows, and its `validated_panel_levels.csv` rows (`family_id`, `panel_hash`,
+`level`, `class`, `in_class_set`, `status`, `validated_min_depth`,
+`tested_max_depth`, `evidence`). RESOLVE then records the family's validation
+basis and table digests in each sample's provenance (`panel`).
+
 #### Label table schema (`<sid>_celltype_labels.parquet`)
 
 One row per segmented object of the sample, in the order of its prepared

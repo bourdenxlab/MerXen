@@ -28,6 +28,30 @@
   - Without panel diagnostics (no primary run, no panel file, or diagnostics that do not fit the bundle), human and mouse records still carry the trust decision's fields, the panel mode and the validated shares; only the gene-ID fields stay empty. Human records used to leave all of these empty in that case.
   - A mouse panel family validated by simulation now warns (`unvalidated_share:<level>`) when more than `warn_unvalidated_share` (10%) of the confident labels at broad, class, nt or subclass fall outside its validated region, as the human gate does. The warning never changes the gate level.
 
+### Added: new-panel onboarding and simulation-based validation (M13)
+
+- **Gate P.** `merxen annotation-panel-simulate --gate-p` and `scripts/acceptance/new_panel.py` validate a new panel family by simulation (plan §14, NP1–NP9). They write the NP1–NP9 report and per-(level, class) records under `<out-dir>/gate_p/`. See [gate P](docs/stages/annotation.md#gate-p-simulation-based-validation-of-a-panel-family-m13).
+  - Leave-one-donor-out held-out bundles for the two other frontal WHB donors, each drawing its own other-region test cells, built in a separate gate-P store. The production store is refused.
+  - Mapping seeds 0 and 1, NP6 stress members (spill, LogNormal efficiency, cross-platform offsets, the lung stress for human Prime), the clean upper bound and NP9's identity re-runs.
+  - `--species` is required, and only the human path is implemented. A mouse family is refused until the second WMB test draw exists (after M6b).
+  - No family has been promoted. The set a dry run runs first, and the readings put to the user in pre-registration §23.11–§23.17 are open until the user rules on them.
+- **Promotion writer.** `diagnostics.write_simulation_family` adds a passing family's rows in its gate-P PR: the `validated_panels.csv` row (`validation_basis = simulation`), its `validated_panel_levels.csv` rows and its `validated_panel_genes.csv` rows. It refuses a family without a self-map, a `family_id` other than the panel's own, and rows for classes or levels RESOLVE does not read.
+- **Cross-platform stress asset.** `ratio__xenium_v1_vs_merscope__human_brain_ffpe` (set a's measured Xenium / MERSCOPE offsets, with a keyed resample for the genes it does not cover, capped at ±2 log2) is registered as an in-house simulation input with provenance. The `sim_inputs` NOTICE now lists in-house assets.
+- **Real-data QC in human RESOLVE** (plan §8.8). Every human sample now runs the downgrade-only QC:
+  - checks: the marker referee, registration G1, paired concordance, flag rates, gene complexity, per-class coverage against simulation, the prefilter spot check and the factor re-measure;
+  - outcomes: `pass`, `warn`, `fail`, `not_applicable` or `not_evaluable`, recorded in the provenance (`panel.real_data_qc`), the resolve summary (`real_qc`; `schema_version` 3) and the report's panel card (the `panel_real_qc` table);
+  - effects: a check can only lower a dataset (cap its gate level, withhold a level, withhold the pair's supercluster-level cross-platform statistics). It never raises a trust state or changes a margin;
+  - the seeded real-data families only warn until their species gate merges into `main`. `real_qc.seeded_families_warn_only_until_gate` is now a per-species record; the old bool still loads;
+  - `real_qc.enabled = false` gives the QC-free run.
+  See [configuration](docs/configuration.md) for the `real_qc` fields.
+- **Registration checks reach RESOLVE.** In `map_first` runs the RESOLVE task now receives the QC stage's registration checks (`*_registration_qc.json`), so it waits for the QC stage of its pair and segmentation. Human RESOLVE uses them for registration G1, warn-only in M13.
+- **Simulated genes in version-7 PREP.** A version-7 self-map also writes `resolvability_sim_genes.parquet`, each simulated cell's realised total and detected genes, for the gene-complexity check. Its version enters the version-7 `build_hash`, so version-7 bundles built before it are rebuilt into new build directories rather than reused (they stay readable, with the check `not_evaluable`). Version-6 bundles and their build hashes are unchanged.
+- **Regression script.** `scripts/acceptance/m13_real_qc_regression.py` tabulates the real-data QC outcomes on the M8 human pairs.
+
+### Fixed
+
+- **Trust fail-safe of simulation families.** A panel family validated by simulation whose bundle has no self-map now stays `broad_only`, the provisional fail-safe, with the family verdict as a note. Before, it became `validated`, so promoting such a family would have changed what RESOLVE emits. Families validated on real data keep their state. No simulation family is listed yet, so no output changes.
+
 ### Acceptance
 
 - The human acceptance (gate H) is scored in `results/acceptance/2026-09-30/` on P7513, P1212, P7113 and P5011, all four segmentations:

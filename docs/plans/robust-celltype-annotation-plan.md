@@ -1286,6 +1286,16 @@ Delete the deprecated labeller, its params and `ClusteringSquidpyAnnotationConfi
     The full table is in `$A/m13/DECISIONS_RESOLVED.md`.
 
   The family's real-data acceptance and the gate-P definitions for every family are pre-registered in §23 of the pre-registration (2026-10-06, before any measurement on the family); every item that depended on an unanswered decision was marked proposed, and all of them except the items still open above were confirmed on 2026-10-06 (§23.10).
+- **Status (2026-10-07; branch `feature/rca-m13-new-panel-onboarding`, not yet merged into the integration branch).** By M13 plan chunk:
+  - *Built and tested on synthetic tables:*
+    - the gate-P programme: C1–C6 (the NP3–NP7 criteria), C7 (assembly, family checks, report and the `validated_panels.csv` writer) and C8 (the driver, `annotation-panel-simulate --gate-p` and `scripts/acceptance/new_panel.py`, human path);
+    - the trust fail-safe fix and the mouse 10% rule (C10, C11);
+    - the real-data QC: C12, C13, C15 and C16 in human RESOLVE and the report. C14 (RESOLVE reads version 7) was merged into the integration branch as PR #39;
+    - the docs (C19) and the pre-registered gate-P definitions (C19a: pre-registration §23.9, §23.10).
+  - *Run:* the C17 regression on the M8 human pairs (`$A/m13/regression/`). It found no false registration G1 failure. The registered `node` marker referee is `not_evaluable` on every set a sample, and the `class` comparator is reported only. Both results go to the user (pre-registration §23.18).
+  - *Not run:* the set a dry run (C9; the commands are in `$A/m13/COMPUTE_NEXT.md`) and gate P on the new-panel family (C18), which waits for a passing dry run, the frozen panel (D17) and the registered NP5 depth profile (D8). No gate-P number exists for set a or the family.
+  - *Open before the dry run is scored:* the readings put to the user in pre-registration §23.11–§23.17, the NP5 depth of set a and the D18 and D23 rulings (§23.18).
+  - *Deferred until after M6b:* the mouse path, C20–C22 (the second WMB draw, the ag7 / VZG2 dry run and regression rows). M13's registered exit needs them (CHECK K2).
 
 ---
 

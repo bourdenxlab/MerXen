@@ -1321,3 +1321,50 @@ These readings come from the gate-P driver (M13 chunk C8: `gate_p_run.run_gate_p
 5. **NP3's natural composition** is the WHB frontal reference's share of cells per supercluster, over every frontal donor (the held-out test set's region metadata), and the same shares give the excluded classes' reference shares in C_P's report. *Alternative:* each donor's own training reference.
 6. **The dry run (D28).** H18's classes are the supercluster classes with ≥ 50 cells of the default donor's held-out test set after the D1 drop (both halves). Supercluster COP is exempt (§18 C1). M8 D4's exceptions are bins of dataset-reweighted runs (broad OPC at 15 and 120 counts, Immune at 60 on one dataset), so they exempt no class. The broad level must also be complete, its C_P holding ≥ 90% of its test cells. *Looser:* treat D4's bins as class exemptions, or drop the 90% condition.
 7. **NP5's expected depth source.** A registered per-class `profile` asset (`--depth-profile-asset`, D8 with CHECK K7) gives each class's depths, and the profile's overall median gives every other class's. Otherwise `--expected-depth`, the label-free pooled median, is used for every class, or a pooled profile's median. A per-class CSV is never read for NP5. Gate P refuses to run without one of these, before any compute.
+
+### 23.18 Status before the set a dry run (recorded 2026-10-07, after the M13 chunks were merged on the M13 branch; before the dry run runs)
+
+**What exists.**
+- The gate-P code: the criteria NP3–NP7 (M13 chunks C1–C6), the assembly, the family checks, the report and the writer (C7), and the driver (C8). It was tested on synthetic tables only.
+- The real-data QC in human RESOLVE (C12–C16).
+- The regression of the real-data QC on the M8 human pairs (C17).
+
+No gate-P output of set a or of the family exists. None of the family's outputs has been read since §23.10: the reading rule still holds while D17 is open. This subsection changes no threshold, target or criterion.
+
+**Superseded wording.** §23.9 says the NP4 code "marks its D12 part as pending". D12 was confirmed on 2026-10-06 (§23.10), and the code no longer marks it pending (M13 chunk C2).
+
+**The C17 regression on set a** (2026-10-07; `$A/m13/regression/REPORT.txt`; code `105ace2`; M8 RESOLVE outputs read only). It covers set a's 16 section × segmentation rows (P7513, P1212, P7113 and P5011, both platforms, proseg_hybrid and reseg). It is recorded here before any real-data QC output of the family is read, as D18 and D23 require. The rows are warn-only, because gate H has not merged into `main` (D20 (b)).
+- **NR1.** No downgrade-only violation. With and without the QC, the label tables are identical to M8's.
+- **NR9, registration G1 (D23).**
+  - The fail rule fired on no row, so there is no false failure.
+  - The warning rule fired on P5011_MERSCOPE (proseg_hybrid and reseg), with density ratios 1.99 and 1.91, and on P1212_MERSCOPE reseg, at 1.74.
+  - Under D23 (b) the move to `failed` + `exclude_hard` (`real_qc.registration_g1_effect = gate_failed`) is decided on this result. The move is a tightening. **Open:** the user's decision, recorded here before any real-data QC output of the family is read. Until then G1 stays warn-only.
+- **NR5, the marker referee (D18).**
+  - The statistic as implemented (`real_qc.marker_referee_comparator = node`, mouse G2's rule) is `not_evaluable` on all 16 rows. Only one broad class, Microglia with 19 markers, has ≥ 3 derived markers on set a's panel, and the rule needs two classes.
+  - The `class` comparator is reported, not adopted. It gives 0.745–0.979 on proseg_hybrid, with P7513_XENIUM at 0.745, below 0.75, and 0.889–1.000 on reseg.
+  - By D18, a set a value below 0.75 sends the thresholds back to the user. A `not_evaluable` statistic is not a pass either.
+  - **Open:** the user decides NR5 for this family before any number of the family is seen. The options are:
+    - keep the `node` statistic, under which NR5 is likely `not_evaluable` on the family too;
+    - adopt the `class` comparator, whose set a values are now known;
+    - change the marker sets or the thresholds.
+  - Each option is a change after set a's numbers were seen, so the user's written decision is quoted in the family's gate-P PR.
+
+**Open before the set a dry run is scored** ([P] kept; the code's behaviour until the user rules). Choosing a reading after its numbers are seen, when it validates more classes, is a post-hoc loosening (§1 rule 2).
+
+1. The NP3 readings, §23.11 items 1–3.
+   - These include the trim and the rare-type pooling of the class-balanced weighting. Both come from the M13 chunk spec, not from §23.9, and both move it towards passing.
+   - On set a's self-map, `class_balanced` as scored fails broad Astro and broad Oligo (§23.11).
+2. The NP5 readings, §23.12 items 1–4.
+3. The NP7 readings, §23.13 items 1–9. Item 1, which counts only confident calls to sink or implausible nodes, is the one NP7 reading where the code does not take the strictest option named.
+4. The NP4 seed readings, §23.14 items 1–5. Item 1, the level's share against each class's share, needs the user's explicit answer.
+5. The NP6 readings, §23.15 items 1–8.
+6. The assembly readings, §23.16 items 1–9. Item 2, the NT population, is scored on the reading that is looser than the literal one. If the user keeps it, the user's written approval is quoted in the gate-P PR.
+7. The driver readings, §23.17 items 1–7.
+8. **NP5's expected depth for the set a dry run** [P]. D8 (§23.10) defines it for the family only. Proposal: the label-free pooled median of `total_counts` over the table cells of the set a family's M8 sections on the scored segmentation (proseg_hybrid).
+   - The sections are P7513, P1212 and P7113 on both platforms, and P5011_XENIUM, whose 298-gene panel inherits set a. P5011_MERSCOPE is its own family.
+   - The median is read from the M8 RESOLVE label tables, using only their `total_counts` and `in_table` columns (`$A/m13/dryrun/inputs/set_a_expected_depth.py`), and is recorded here before the dry run is scored.
+   - *Alternatives:* each platform's own median, or the MERSCOPE sections only. No per-class profile asset exists for set a.
+9. **The version-7 dry run's measured time** (NP9's reference for the family, D10 (a)) [P]. The version-7 dry run builds its own leave-one-donor-out bundles in a store of its own. Its measured time then counts those builds, as the family's run will.
+   - *Alternative:* reuse the version-6 dry run's bundles. The reference is then lower by the build time, about 5 of roughly 150–240 minutes, which is a tightening for the family.
+
+**Still open beyond the dry run** (§23.10): D17, the declared panel; D2's "too small", decided with the pool sizes of the run in view; D26's unanswered metadata; NP2's weak or collapsed parents; and §22.9's four questions. The NP5 depth profile of the family (D8 with CHECK K7) does not exist yet. Its asset is written, frozen and recorded only after D17 is frozen, from the family's first provisional `map_first` run with RESOLVE's version-7 consumer.

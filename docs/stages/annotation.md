@@ -631,8 +631,9 @@ markers: the pre-registered rule of plan §8.7 / NP9, whatever the
 unfiltered lookup gives; the relaxed reading "no parent made weak by the
 prefilter" is reported as `no_parent_made_weak`, not applied). The pinned
 public 10x panel lists
-come from `merxen annotation-panel-fetch`. `--gate-p` is the M13 hook for
-the gate-P programme; it is refused until M13 registers it.
+come from `merxen annotation-panel-fetch`. `--gate-p` runs the gate-P
+programme after the simulation (M13; see
+[Gate P](#gate-p-simulation-based-validation-of-a-panel-family-m13)).
 
 **Measured on the four public 10x panels** (M3b, 8 processes on the shared
 host, the production configuration, resolvability version 4;
@@ -913,6 +914,158 @@ gene) inherits `human_set_a` and is `validated`, the MERSCOPE one (268
 genes) is its own family and `provisional` (banner and gate warning, as H8
 expects); ag7 symbols run as human are `refused`
 (`gene_ids:species_mismatch`).
+
+### Gate P: simulation-based validation of a panel family (M13)
+
+Gate P (plan §14, §8.8) is how a panel family outside the seeded families
+is promoted from `provisional` to `validated` with `validation_basis =
+simulation`. It is simulation only: real datasets never promote a family
+(OD-E1 / OD-E9); they get the downgrade-only real-data QC
+([Real-data QC in RESOLVE](#real-data-qc-in-resolve-m13)). Promotion changes
+no emitted label, status, threshold, margin or floor, only
+`ct_<L>_validated`, the banner and the warning flag (property-tested in
+`test_consensus.py`, `test_consensus_mouse.py`, `test_diagnostics.py` and
+`test_pipeline_resolve_mouse.py`, M13 chunk C10). The programme is `merxen.annotation.gate_p` (the criteria and the
+assembly) and `merxen.annotation.gate_p_run` (the driver). The definitions
+are pre-registered in `docs/acceptance/annotation-v1-preregistration.md`
+§23.9 and §23.10. The readings the code takes where plan §14 is not explicit
+are put to the user there, in §23.11–§23.17, and §23.18 lists what is still
+open.
+
+**Running it.** `scripts/acceptance/new_panel.py --species <species> ...`,
+a thin wrapper over `merxen annotation-panel-simulate --gate-p`
+([CLI](../cli.md#merxen-annotation-panel-simulate)), builds the family's
+PREP bundles, writes the simulation report and then runs gate P, writing
+`<out-dir>/gate_p/` ([outputs](../outputs.md#gate-p-outputs-m13)).
+
+- `--species` is required: the species is chosen when a new panel check
+  starts (M13 D4). The human path is implemented. A mouse family is refused
+  before any compute until the second disjoint WMB test draw and the ag7 /
+  VZG2 dry run exist (M13 chunks C20–C21, after M6b).
+- `--store` and `--store-large` must name a separate gate-P store (M13 D11
+  (b)). A store that is, or lies in, the config's `reference_store` or
+  `reference_store_large` is refused before any compute, so gate P never
+  writes into the production store.
+- NP5 needs an expected depth: a registered per-class `profile` asset
+  (`--depth-profile-asset`) or the label-free pooled median
+  (`--expected-depth`). A per-class CSV is never read for NP5.
+- Gate P is CPU only and maps with the self-map's recorded MapMyCells worker
+  count (pre-registration §18 item 2); another count is refused.
+
+**What the driver does** (`gate_p_run.run_gate_p`):
+
+1. It checks the request in two stages: what needs no bundle before any
+   compute (`precheck_gate_p`), then what needs the built PREP bundle (a
+   self-map onto the held-out bundle, the gate-P donors, the worker count,
+   the held-out `build_hash`). A refusal after PREP is recorded under
+   `gate_p` in `simulate_report.json`.
+2. It reports the per-donor pool sizes from the reference metadata
+   (`reference.ho_donor_pool_sizes`) before any leave-one-donor-out build.
+   Under D2 (d) a donor whose own pool cannot meet the per-class top-up rule
+   stops gate P here (status `stopped`; exit status 3 from `new_panel.py`),
+   unless `--gate-p-accept-small-pools` or the fallback
+   `--gate-p-other-region shared` (D2 (c)) is given.
+3. It builds each other frontal WHB donor's held-out bundle in the gate-P
+   store (`resolvability.holdout_donor`; under D2 (d) also
+   `holdout_other_region_donor_only` and the default test set's cells as
+   `gate_p_excluded_test_cells`, so the donors' test sets are disjoint).
+   Every set leaves out the other-region COP test cells (M8 D1, extended to
+   every human gate-P set by M13 D1 (a)).
+4. It fixes C_P per level from the test cells before any cell is mapped
+   (`gate_p_class_sets`).
+5. It simulates and maps every emission member at mapping seeds 0 and 1, the
+   member's NP6 stress members and the clean upper bound at seed 0, against
+   each donor's own held-out bundle with the WHB cells rules. The default
+   donor (H19.30.002) is scored on its check half only. Each replicate is
+   written to `replicates/<donor>/seed<k>/<member>.parquet` as soon as it is
+   mapped.
+6. It re-runs one seed-0 replicate per emission member and PREP's bundle (in
+   a scratch store) for NP9's identity part (CHECK K13).
+7. It scores NP3–NP7 per emission member and NP1, NP2, NP8 and NP9 per
+   family, assembles the family (`gate_p.assemble_gate_p`) and writes the
+   report.
+
+`--gate-p-version 7` scores a version-6 family's version-7 ensemble (M13 D5
+(c)): the emission members are simulated on the bundle's own test set, and
+nothing is written to a store.
+
+**Criteria** (plan §14; every threshold is pre-registered and unchanged):
+
+| Criterion | Function | Rule |
+|---|---|---|
+| NP1 gene IDs | `np1_gene_ids` | ≥ 95% of the declared panel resolved (≥ 98% when the vendor supplies IDs); no control reaches the query; the unresolved list reviewed in the gate-P PR |
+| NP2 panel coverage | `np2_panel_coverage` | ≥ 10 root markers, and ≥ 10 markers for each root child with ≥ 50 cells; weak or collapsed parents accepted by the user in the gate-P PR (`--gate-p-accepted-parents`) |
+| NP3 frozen-threshold precision | `np3_set_stats`, `np3_verdicts`, `validated_min_depth` | on pooled tested sets of ≥ 200 confident held-out calls (deep bins pooled; each test cell once), under the reference's natural composition and the class-balanced composition (both must pass; Kish effective n): point precision ≥ the provisional target, Wilson lower bound ≥ target_L, coverage ≥ 0.30; `validated_min_depth` walks down the grid from D_P |
+| NP4 stability | `np4_set_verdicts`, `np4_seed_stability` | per replicate (donor × seed) with ≥ 100 confident calls, point precision ≥ target_L; replicate range ≤ max(0.03, 3.5 SE); seed 0 vs 1 changes ≤ 2% of a level's confident labels (D6) |
+| NP5 resolvability consistency | `np5_decision_agreement`, `np5_tstar_spread`, `np5_extrapolated_share` | the re-derived decisions agree except one flip next to a boundary; t* spread ≤ 0.05; ≤ 50% of the class's cells at the expected depth extrapolated (median and profile readings both scored) |
+| NP6 stress sensitivity | `np6_set_stats`, `np6_class_verdicts` | under spill 0.35, LogNormal(0, 1) efficiency and the cross-platform offsets (`ratio__xenium_v1_vs_merscope__human_brain_ffpe`, capped ±2 log2; the lung stress for human Prime): point ≥ target_L, Wilson ≥ target_L − 0.02, and the one-sided 95% lower bound of the precision drop ≤ 0.05 |
+| NP7 error structure | `np7_error_structure` | per level ≤ 1% of confident calls on sink or region-implausible nodes (human); ≤ 5% of a truth class's confident calls on one wrong node |
+| NP8 cross-panel | `np8_cross_panel` | only for a family that will be paired with another panel |
+| NP9 resources | `np9_resources` | PREP plus the replicates within 1.5 × the time reference (version 7: the set a version-7 dry run's time scaled per simulated cell, D10 (a)); peak RSS within the reserve; identical re-run; the prefilter agreement above 1,000 genes |
+
+A version-7 family is scored on every emission member: a (level, class) is
+`validated` when NP3–NP7 pass in every member (`every_member_verdict`), else
+`failed:NP<k>` or `not_evaluable`. One failing class leaves the other
+classes of its level validated. `validated_max_level` is the deepest level
+of the leading run of levels where every class of C_P is validated (the rank
+rule), and the family passes when it reaches broad (human) or class (mouse)
+and NP1, NP2 and NP9 pass, NP8 passing or not applying.
+
+**Dry run.** Before a new family of a species is scored, gate P runs on that
+species' seeded families with `--gate-p-dry-run` (`gate_p.dry_run_verdict`;
+M13 D4, D28): set a for a human family, ag7 and VZG2 for a mouse family. The
+dry run must pass at broad (class) for every class of C_P and at supercluster
+(subclass) for the classes H18 expects, less supercluster COP (pre-registration
+§18 C1). For human it runs on version 6 and on the version-7 ensemble
+(`--gate-p-version 7`, D5 (c)). A failure makes the criteria unattainable,
+and they are revised in a PR the user approves before any new family is
+scored.
+
+**Promotion.** A family that passes is promoted only by its own gate-P PR,
+which the user approves:
+
+1. `gate_p.validated_table_rows` turns the result into the family's
+   `validated_panels.csv` row (`validation_basis = simulation`) and its
+   `validated_panel_levels.csv` rows (`in_class_set`, `status`,
+   `validated_min_depth`, and `tested_max_depth` = D_P).
+2. `diagnostics.write_simulation_family` appends them, with the family's
+   `validated_panel_genes.csv` rows, to the packaged tables. It keeps the
+   existing lines and reads the combined tables back through every check of
+   `read_validated_panels` before they replace the files.
+   `validated_panels.csv` is replaced last.
+3. The writer refuses:
+   - a family whose bundle has no self-map (D13 (a));
+   - a `family_id` other than the panel's own hash-derived id (D16);
+   - a class that is not a consensus class key of its level;
+   - an NT row where NT does not apply, and any SEA-AD subclass row (D14
+     (a)).
+
+In RESOLVE, a `simulation` family emits exactly as a provisional panel: the
+same thresholds, margins, floors and statuses. Only `ct_<L>_validated`
+changes: it marks a confident label of a validated (level, class) at or
+above that class's `validated_min_depth`. A validated label deeper than
+`tested_max_depth` is reported as extrapolated. The gate warns, without
+lowering its level, when more than `warn_unvalidated_share` (10%) of
+the confident labels at a chain level fall outside the validated region;
+since M13 the mouse gate applies the same rule over broad, class, nt and
+subclass. A `simulation` family whose bundle has no self-map keeps the
+provisional fail-safe (`broad_only`, with the family verdict as a note),
+so promotion can never widen what such a bundle emits (M13 C10).
+
+**`m3c_no_promotion.py` fails once a gate-P row lands, by design.** That
+script checks pre-registration §21 (v), that no M3c change promotes a
+family:
+
+- part 1 requires the validated tables to be byte-identical to `83e81e3`
+  with no row added;
+- part 2 requires every bundle's trust state to be at most its `83e81e3`
+  state.
+
+A gate-P PR adds rows and moves its family's bundles to `validated`, so
+both parts fail. This is the intended promotion, not an M3c regression. The
+script guards the M3c changes only. After the first gate-P PR, do not use
+it as a regression check; re-baseline it on the gate-P commit if it is
+needed again.
 
 ### Xenium Prime 5K panel card (M3c)
 
@@ -2537,6 +2690,15 @@ held-out-gene CSV is not produced in the pipeline, so item 8 is
 - **Set c of families without a curated list** uses the label-free rule,
   which drops far more genes than E5's validated set c (44-73 per pair on the
   E5 pairs); treat such set-c results as provisional.
+- **Gate P has promoted no family yet** (M13, 2026-10-07). The human
+  programme is implemented and tested on synthetic tables only. The set a
+  dry run (version 6 and the version-7 ensemble) has not run, and no new
+  family may be scored before it passes. The readings of pre-registration
+  §23.11–§23.17 are open until the user rules on them before the dry run is
+  scored (§23.18 lists them). The mouse path waits for the second WMB test
+  draw and the ag7 / VZG2 dry run (M13 chunks C20–C22, after M6b). For the
+  new-panel human MERSCOPE family, gate P also waits for the frozen
+  declared panel (D17) and the registered NP5 depth profile (D8).
 
 ## Licences
 
