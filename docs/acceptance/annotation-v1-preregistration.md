@@ -1238,3 +1238,56 @@ These readings come from the implementation of NP6 (M13 chunk C4: `resolvability
    - *Implemented:* each pair's column is centred on its median gene (the pair medians, −0.12 to +1.52 log2, are a platform-wide scale that the median normalisation of every efficiency removes anyway), the four centred values are averaged per gene, and the means are centred on the median gene and capped (`scripts/annotation/build_xplatform_stress.py`).
    - *Effect on the committed asset (296 genes):* the averaged offsets have an SD of 1.617 log2 before the cap, against 1.59–1.77 for the single pairs, and 20.6% of genes are capped, against 19–24%. So the averaging barely narrows the spread, and the stress is about as strong as any one pair's.
    - *Alternatives:* the median of the four centred values (SD 1.26 after the cap and 19.9% capped, against 1.27 and 20.6% for the mean); or one stress recipe per pair (stricter, at four times the compute of this recipe).
+
+### 23.16 Assembly readings put to the user (M13 chunk C7; recorded 2026-10-07, before the set a dry run)
+
+These readings come from the implementation of gate P's assembly (M13 chunk C7): `gate_p.gate_p_class_sets`, `gate_p_class_records`, `gate_p_validated_max_level` and `assemble_gate_p`; the family checks `np1_gene_ids`, `np2_panel_coverage`, `np8_cross_panel` and `np9_resources`; the NP1–NP9 report; and `diagnostics.write_simulation_family`. They were found on synthetic tables. No gate-P output of set a or of the family exists. Nothing here changes a threshold or limit, all of them [R]:
+- C_P holds the classes with ≥ 700 pooled test cells, and it must hold ≥ 90% of them;
+- a (level, class) is validated when NP3–NP7 pass in every emission member;
+- `validated_max_level` is the deepest level at which every class of C_P is validated, and promotion needs at least broad (human) or class (mouse);
+- NP1: ≥ 95% resolved (≥ 98% with vendor IDs);
+- NP2: ≥ 10 root markers, and ≥ 10 markers for each root child with n ≥ 50;
+- NP9: within 1.5× of the time reference.
+
+§23.9 items 1, 9, 10 and 11 and the decisions of §23.10 (D10, D13, D14, D16, D29) are not reopened.
+
+**Settled** (listed so that the record is complete):
+- **D13 (a).** The writer refuses a family whose bundle has no resolvability self-map.
+- **D14 (a).** No NT row is written for a class where NT does not apply, and no SEA-AD subclass row. The writer refuses both, and any class that is not a consensus class key of its level.
+- **D16.** The writer refuses a `family_id` other than the panel's own hash-derived id.
+- **D29.** An NP4 failure at any tested set fails the (level, class).
+- **D10 (a).** The time reference for version 7 is `gate_p.np9_time_reference_v7`.
+- **NP8** is `not_applicable` until the user says the family will be paired (D26).
+- **NP2's weak and collapsed parents** (§23.10, still open item 4). NP2 is `pending` until the user accepts them in the gate-P PR, and a pending NP2 does not pass.
+- **Writing the rows.** Validated rows are written only for a family that passes gate P. They are appended to the packaged tables with the existing lines kept, and are read back through every check of `read_validated_panels` before they replace the files.
+
+**Open** ([P] kept; the code's behaviour until the user rules). Each is ruled before the set a dry run is scored. Choosing a reading after its numbers are seen, when it validates more classes, is a post-hoc loosening (§1 rule 2).
+
+1. **C_P's denominator.** Some pooled test cells have no class at a level: sink truths such as WHB Splatter and Miscellaneous, whose `truth_parent` is null.
+   - *Scored (stricter):* they stay in the denominator of the 90% rule.
+   - *Looser:* the share over classed cells only, as `resolvability.gate_p_class_set` computes it. It is reported as `class_set_share_classed`.
+2. **The NT population.** At NT, the cells whose truth is `not_neuron` are left out of NT's counts and of its denominator. These are the non-neuronal cells and the sink cells. NT's C_P and its 90% rule are therefore read on the neurons.
+   - This follows D14 (a). Counting those cells would put NT below 90% on any panel and cap every family at broad.
+3. **The 90% rule decides the level.** §14 says only that C_P "must hold" ≥ 90% of the pooled test cells.
+   - *Scored:* a level whose C_P holds less than that is incomplete, so neither it nor any finer level can be `validated_max_level`.
+   - *Looser:* report the share only.
+4. **The version-7 depths.** For a (level, class) validated in every member:
+   - `validated_min_depth` is the deepest of the members' NP3 values, so the class is validated only where every member validates it;
+   - `tested_max_depth` is the shallowest member D_P, so a label is extrapolated wherever any member extrapolates it. It is raised to `validated_min_depth` when it lies below that.
+
+   Each member's values are reported. `tested_max_depth` only marks labels as extrapolated; it decides no emission and no validation mark. *Alternatives:* the deepest D_P, or the median.
+5. **Status precedence.** A (level, class) that fails any criterion in any member is `failed:NP<k>`, with k the lowest failing criterion, even when another criterion is not evaluable. The record lists every failing criterion and member. *Looser:* `not_evaluable` before `failed`.
+6. **Classes outside C_P** get records with `in_class_set` false and their own status. A validated one is marked `ct_<L>_validated` in production. They never decide `validated_max_level`.
+7. **NP1.**
+   - *Vendor-supplied IDs.* The 98% bar applies when at least one feature of a declared panel resolved from the vendor's own IDs (the `native` source). The family's run resolved 491 of its 496 genes that way (§23.10), so its bar is 98%. *Looser:* apply the bar only when every feature carries a vendor ID.
+   - *Controls reaching the query.* Every platform's anchored control-name rule is applied to the symbols of the annotation panel. The substring rule is not, because a resolved gene can contain a control token. *Stricter:* apply both rules.
+   - *The unresolved list.* While it is not empty and the user has not reviewed it in the gate-P PR, NP1 is `pending` and does not pass. The family's list is empty (§23.10).
+   - *The species test.* A test that was not run, or that is `not_evaluable`, leaves NP1 not evaluable, so the family does not pass.
+8. **NP2's root children.**
+   - *n* of a root child is its cells in the production primary bundle's reference. The gate-P driver supplies it, with the child's markers from the bundle's lookup (CHECK K14).
+   - A child without children of its own counts with the root's markers, as `reference.root_children_with_markers` counts it.
+   - *Alternative:* the child's pooled test cells.
+9. **NP9.**
+   - *Prefilter scope.* Above 1,000 genes, the part is scored on `simulate.prefilter_verdict`, which judges every class with ≥ 50 calls at every emitted level. That is a superset of §14's "validated level and class", so the reading is stricter. A bundle whose markers were not prefiltered has nothing to compare, and the part is `not_applicable`.
+   - *The measured time* is PREP, resolvability included, plus the gate-P replicates. The limit is 1.5 × the reference. For version 7 the reference is D10 (a)'s: the set a version-7 dry run's time × the family's simulated cells / the dry run's simulated cells.
+   - *Missing measurements.* A part without its measurement is `not_evaluable`: no time, no RSS, or a member without a re-run (CHECK K13's scope: PREP's bundle and one seed-0 replicate per member). The family then does not pass.
