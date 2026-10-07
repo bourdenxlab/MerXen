@@ -206,6 +206,9 @@ def test_mouse_resolve_writes_valid_labels_gate_and_region_columns(
     )
     summary = json.loads(result.summary_path.read_text())
     assert summary["species"] == "mouse"
+    # Mouse RESOLVE runs no real-data QC (M13 C15): no QC block, no QC config.
+    assert "real_qc_config" not in summary
+    assert "real_qc" not in summary["samples"][SID]
     step = summary["samples"][SID]["region_step"]
     assert step["status"] == "pruned"
     assert step["drop_list_sha256"] == provenance.mouse_gate.drop_list_sha256

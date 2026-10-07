@@ -5079,6 +5079,30 @@ def real_qc_bundle_facts(
     return version, (None if version == RESOLVABILITY_VERSION_V7 else False)
 
 
+def real_qc_prefilter_applied(primary: ResolveRun | None) -> bool | None:
+    """Return whether the primary bundle's marker lookup is prefiltered.
+
+    The applicability fact of the prefilter spot check
+    (``real_qc.prefilter_spotcheck``): the bundle's hashed
+    ``build_hash_payload.large_panel_prefilter`` (``None`` or absent without
+    a prefilter, as ``_prefilter_matches`` reads it). Without a primary run
+    the fact is unknown (``None``), so the spot check is ``not_evaluable``,
+    never ``not_applicable`` (pre-registration §23.5 P4).
+
+    Args:
+        primary: The primary run (``None``: none).
+
+    Returns:
+        Whether the lookup is prefiltered, or ``None`` when unknown.
+    """
+    if primary is None:
+        return None
+    payload = primary.bundle.manifest.get("build_hash_payload")
+    if not isinstance(payload, Mapping):
+        return False
+    return payload.get("large_panel_prefilter") is not None
+
+
 def human_real_qc_signals(
     loaded: LoadedSample,
     resolution: HumanResolution,
@@ -5102,7 +5126,7 @@ def human_real_qc_signals(
       emission member (``real_qc_bundle_facts``: unknown when neither the
       tables nor the bundle state them), whether the pair holds the other
       platform and whether the bundle's marker lookup is prefiltered
-      (``large_panel_prefilter`` of its ``build_hash_payload``);
+      (``real_qc_prefilter_applied``: unknown without a primary run);
     * the human marker referee (``human_marker_referee_signal``) and the
       registration check (G1);
     * the flag strata of the sample's flags;
@@ -5144,12 +5168,7 @@ def human_real_qc_signals(
 
     table = np.asarray(resolution.in_table, dtype=bool)
     version, has_r3 = real_qc_bundle_facts(primary, tables)
-    payload = (
-        {}
-        if primary is None
-        else primary.bundle.manifest.get("build_hash_payload") or {}
-    )
-    prefiltered = payload.get("large_panel_prefilter") is not None
+    prefiltered = real_qc_prefilter_applied(primary)
     simulated = (
         None
         if tables is None or primary is None
@@ -6497,7 +6516,12 @@ def annotate_resolve(
             "panel_mode": panel_mode,
             "thresholds": config.thresholds.model_dump(mode="json"),
             "flags_config": config.flags.model_dump(mode="json"),
-            "real_qc_config": config.real_qc.model_dump(mode="json"),
+            # Human only: mouse RESOLVE runs no real-data QC (M13 C15).
+            **(
+                {}
+                if mouse
+                else {"real_qc_config": config.real_qc.model_dump(mode="json")}
+            ),
             "samples": {key: value.summary for key, value in results.items()},
             "pair": pair,
         }

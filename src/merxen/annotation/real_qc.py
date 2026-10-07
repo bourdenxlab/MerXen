@@ -26,7 +26,9 @@ Checks added by M3c (plan §8.8 table; §8.3 v7.5, v7.9; §8.10):
   CNU-HYa GABA, HY GABA, CNU-HYa Glut, HY Glut) and on v1-type large-mask
   (nucleus-expansion) segmentation, where simulation over-predicts coverage
   by +.16 to +.22 whatever the efficiency model (``5k_real/sim/REPORT.txt``
-  §7).
+  §7). Each row records the dataset gate level before QC and whether that
+  gate left the level unattempted (``gate_blocked``, M13 C15): there the
+  warning still fires and says the shortfall is the gate's.
 * ``nonneuronal_high_depth_flags`` -- the report-only per-cell
   ``flag_nonneuronal_high_depth``: a non-neuronal cell at >= 1,000 counts
   whose (level, class, bin) was emitted on its own ensemble verdict and is
@@ -202,7 +204,7 @@ OUTCOME_ORDER: Final[tuple[str, ...]] = (
 COVERAGE_WARNING_TEXT: Final = (
     "{cls} at {level}: the real confident share {real:.3f} of the {n} cells "
     "called {cls} is below the class-depth prediction {predicted:.3f} - "
-    "{margin:.2f} at the dataset's own per-class depth{profile}. Simulated "
+    "{margin:.2f} at the dataset's own per-class depth{profile}.{gate} Simulated "
     "coverage of {cls} at {level} is an upper bound for this dataset; its "
     "precision is unmeasured on real data. The warning also fires on v1-type "
     "large-mask (nucleus-expansion) segmentation, where simulation "
@@ -212,6 +214,15 @@ COVERAGE_WARNING_TEXT: Final = (
 COVERAGE_PROFILE_TEXT: Final = (
     "; the profile-mode prediction {profile:.3f} is reported beside it "
     "(it does not decide the warning)"
+)
+# A (level, class) the dataset gate before QC did not attempt (M13 C15
+# review): its real confident share is 0 by the gate, not by the simulation.
+# The warning is kept (dropping it would be a loosening, CHECK K6 rule 4) and
+# says so; whether such levels are judged at all is the user's call.
+COVERAGE_GATE_BLOCKED_TEXT: Final = (
+    " The dataset gate before QC is {gate_level}, which does not attempt "
+    "{level}: no cell can be confident there, so this shortfall is the gate's, "
+    "not evidence that the simulation over-predicts {cls}."
 )
 NONNEURONAL_TREND_TEXT: Final = (
     "real {level} coverage of cells called {cls} falls above {limit:,} counts "
@@ -759,11 +770,15 @@ class CoverageComparison:
             the warning), ``resolvable_share``, ``difference`` (real -
             predicted), ``profile_coverage`` and ``profile_difference`` (the
             profile-mode prediction, reported only; ``nan`` without one),
-            ``judged`` (>= ``min_cells``), ``warn``.
+            ``judged`` (>= ``min_cells``), ``warn``, ``gate_level`` (the
+            dataset gate level before QC; ``None``: not given) and
+            ``gate_blocked`` (whether that gate leaves the level unattempted,
+            so that no cell can be confident there; ``None``: unknown).
         outcomes: One fired ``warning`` per flagged (level, class).
         margin: The warning margin (0.10).
         min_cells: Dataset cells a (level, class) needs to be judged (200).
         profile_reported: Whether a profile-mode prediction was given.
+        gate_level: The dataset gate level before QC (``None``: not given).
     """
 
     table: pd.DataFrame
@@ -771,11 +786,13 @@ class CoverageComparison:
     margin: float
     min_cells: int
     profile_reported: bool = False
+    gate_level: str | None = None
 
     @property
     def flagged(self) -> list[tuple[str, str]]:
         """Return the flagged (level, class) pairs."""
-        rows = self.table[self.table["warn"]]
+        # ``astype``: an empty table's object column would select columns.
+        rows = self.table[self.table["warn"].astype(bool)]
         return [
             (str(level), str(cls))
             for level, cls in zip(rows["level"], rows["class"], strict=True)
@@ -783,6 +800,14 @@ class CoverageComparison:
 
     def summary(self) -> dict[str, Any]:
         """Return a JSON-safe summary (``<pair>_resolve_summary.json``)."""
+        rows = self.table[self.table["warn"].astype(bool)]
+        blocked: list[bool | None] = [
+            None if value is None else bool(value) for value in rows["gate_blocked"]
+        ]
+        flagged = [
+            {"level": level, "class": cls, "gate_blocked": value}
+            for (level, cls), value in zip(self.flagged, blocked, strict=True)
+        ]
         return {
             "check": "coverage_vs_simulation",
             "version": REAL_QC_VERSION,
@@ -790,7 +815,9 @@ class CoverageComparison:
             "min_cells": self.min_cells,
             "n_judged": int(self.table["judged"].sum()) if len(self.table) else 0,
             "n_flagged": len(self.flagged),
-            "flagged": [{"level": level, "class": cls} for level, cls in self.flagged],
+            "flagged": flagged,
+            "gate_level": self.gate_level,
+            "n_flagged_gate_blocked": sum(value is True for value in blocked),
             "predictor": "class_depth",
             "profile_mode_reported": bool(self.profile_reported),
             "trust_effect": "none",
@@ -850,6 +877,8 @@ def coverage_vs_simulation(
     profile_predicted: pd.DataFrame | None = None,
     margin: float = COVERAGE_WARN_MARGIN,
     min_cells: int = COVERAGE_MIN_CELLS,
+    gate_level: str | None = None,
+    species: str = "human",
 ) -> CoverageComparison:
     """Compare a dataset's real coverage with the simulation, per class (§8.8).
 
@@ -862,6 +891,13 @@ def coverage_vs_simulation(
     The check can only warn: it returns warnings and never a trust change,
     an offset or a change of emission.
 
+    With the dataset gate level before QC, each row records it and whether
+    the gate leaves the row's level unattempted (``gate_blocked``: every
+    level under ``failed``, ``LEAF_GATED_LEVELS`` under ``broad_only``). A
+    blocked level has no confident cell, so its warning still fires (the
+    rule is unchanged) but says that the shortfall is the gate's, not the
+    simulation's (M13 C15 review).
+
     Args:
         real: ``real_class_coverage`` output.
         predicted: ``predicted_class_coverage`` output (the class-depth
@@ -869,12 +905,18 @@ def coverage_vs_simulation(
         profile_predicted: Optional ``profile_coverage_table`` output.
         margin: Warning margin.
         min_cells: Cells a (level, class) needs to be judged.
+        gate_level: The dataset gate level the real coverage was measured
+            under (``None``: not given; ``gate_blocked`` is then unknown).
+        species: ``"human"`` or ``"mouse"`` (the levels a ``broad_only``
+            gate leaves unattempted).
 
     Returns:
         The comparison.
     """
     if margin < 0:
         raise ValueError("the margin must be >= 0")
+    if gate_level is not None and gate_level not in GATE_LEVELS:
+        raise ValueError(f"unknown gate level {gate_level!r}")
     columns = [
         "level",
         "class",
@@ -887,11 +929,13 @@ def coverage_vs_simulation(
         "profile_difference",
         "judged",
         "warn",
+        "gate_level",
+        "gate_blocked",
     ]
     reported = profile_predicted is not None and not profile_predicted.empty
     if real.empty or predicted.empty:
         return CoverageComparison(
-            pd.DataFrame(columns=columns), (), margin, min_cells, reported
+            pd.DataFrame(columns=columns), (), margin, min_cells, reported, gate_level
         )
     left = real.assign(
         level=real["level"].astype(str), **{"class": real["class"].astype(str)}
@@ -920,6 +964,14 @@ def coverage_vs_simulation(
         merged["real_coverage"] < merged["predicted_coverage"] - margin - FLOAT_TOL
     )
     merged = merged.sort_values(["level", "class"]).reset_index(drop=True)
+    merged["gate_level"] = pd.Series([gate_level] * len(merged), dtype=object)
+    merged["gate_blocked"] = pd.Series(
+        [
+            None if gate_level is None else _blocks(gate_level, str(level), species)
+            for level in merged["level"]
+        ],
+        dtype=object,
+    )
     outcomes = tuple(
         QcOutcome(
             check="coverage_vs_simulation",
@@ -935,6 +987,11 @@ def coverage_vs_simulation(
                 profile=COVERAGE_PROFILE_TEXT.format(profile=row["profile_coverage"])
                 if math.isfinite(float(row["profile_coverage"]))
                 else "",
+                gate=COVERAGE_GATE_BLOCKED_TEXT.format(
+                    gate_level=gate_level, level=row["level"], cls=row["class"]
+                )
+                if row["gate_blocked"] is True
+                else "",
             ),
             level=str(row["level"]),
             cls=str(row["class"]),
@@ -945,11 +1002,15 @@ def coverage_vs_simulation(
                 "difference": float(row["difference"]),
                 "predictor": "class_depth",
                 "profile_coverage": float(row["profile_coverage"]),
+                "gate_level": gate_level,
+                "gate_blocked": row["gate_blocked"],
             },
         )
         for row in merged[merged["warn"]].to_dict("records")
     )
-    return CoverageComparison(merged[columns], outcomes, margin, min_cells, reported)
+    return CoverageComparison(
+        merged[columns], outcomes, margin, min_cells, reported, gate_level
+    )
 
 
 # --------------------------------------------------------------------------
@@ -3041,7 +3102,7 @@ class PrefilterSpotcheckSignal:
 def prefilter_spotcheck(
     signal: PrefilterSpotcheckSignal | None,
     *,
-    applies: bool,
+    applies: bool | None,
     emitted_levels: Sequence[str],
     min_agreement: float,
 ) -> tuple[QcOutcome, ...]:
@@ -3050,12 +3111,15 @@ def prefilter_spotcheck(
     An emitted level whose agreement is below ``min_agreement`` (0.95)
     becomes ``not_resolvable`` for the dataset (``withhold_level``). A
     bundle without a marker prefilter (panels of <= 1,000 genes, or the
-    prefilter off) is ``not_applicable``; a prefiltered bundle without a spot
-    check, or a level without an agreement, ``not_evaluable``.
+    prefilter off) is ``not_applicable``; a bundle whose prefilter is
+    unknown, a prefiltered bundle without a spot check, or a level without an
+    agreement, ``not_evaluable`` (P4: an unknown fact is never recorded as a
+    check that does not apply).
 
     Args:
         signal: The spot check, or ``None``.
-        applies: Whether the bundle's marker lookup is prefiltered.
+        applies: Whether the bundle's marker lookup is prefiltered
+            (``None``: unknown).
         emitted_levels: The levels the dataset emits.
         min_agreement: The agreement threshold.
 
@@ -3063,6 +3127,15 @@ def prefilter_spotcheck(
         The outcomes.
     """
     effect: dict[str, Any] = {"effect": "withhold_level"}
+    if applies is None:
+        return (
+            QcOutcome.not_evaluable(
+                PREFILTER_SPOTCHECK_CHECK,
+                "whether the bundle's marker lookup is prefiltered is unknown "
+                "(no primary bundle)",
+                **effect,
+            ),
+        )
     if not applies:
         return (
             QcOutcome.not_applicable(
@@ -3369,7 +3442,8 @@ class RealQcSignals:
             then ``not_evaluable``).
         paired: Whether the dataset has a section of the other platform.
         prefilter_applied: Whether the bundle's marker lookup is
-            prefiltered.
+            prefiltered (``None``: unknown, e.g. no primary bundle; the spot
+            check is then ``not_evaluable``).
         has_r3_member: Whether the family's bundle has an R3 member (a
             measured factor table, version 7); ``None``: unknown (the
             version-7 tables were not read).
@@ -3395,7 +3469,7 @@ class RealQcSignals:
 
     resolvability_version: int | None
     paired: bool
-    prefilter_applied: bool
+    prefilter_applied: bool | None
     has_r3_member: bool | None
     first_dataset_of_family: bool | None = None
     pair_jsd: Sequence[Mapping[str, Any]] = ()
@@ -3556,6 +3630,8 @@ def _coverage_outcomes(
     version: int | None,
     margin: float,
     min_cells: int,
+    gate_level: str | None = None,
+    species: str = "human",
 ) -> tuple[tuple[QcOutcome, ...], pd.DataFrame | None]:
     if version is None:
         return (QcOutcome.not_evaluable(COVERAGE_CHECK, UNKNOWN_VERSION_REASON),), None
@@ -3575,6 +3651,8 @@ def _coverage_outcomes(
         profile_predicted=signal.profile,
         margin=margin,
         min_cells=min_cells,
+        gate_level=gate_level,
+        species=species,
     )
     if comparison.outcomes:
         return comparison.outcomes, comparison.table
@@ -3806,11 +3884,15 @@ def real_data_qc(
             min_agreement=settings.prefilter_spotcheck_min_agreement,
         )
     )
+    # The real coverage is measured on the resolution before QC, so the
+    # levels its gate left unattempted are marked (``gate_blocked``).
     coverage, coverage_table = _coverage_outcomes(
         signals.coverage,
         version=version,
         margin=settings.coverage_warn_margin,
         min_cells=settings.coverage_min_cells,
+        gate_level=None if signals.gate is None else str(signals.gate.level),
+        species=species,
     )
     outcomes.extend(coverage)
     if coverage_table is not None:

@@ -965,7 +965,7 @@ stay or fall (property-tested).
 
 | Check | Function | Rule | Effect |
 |---|---|---|---|
-| Per-class real vs simulated coverage (version-7 families) | `class_bin_shares`, `predicted_class_coverage`, `dataset_class_depth_prediction` (RESOLVE's predictor; label-free depth for classes with fewer than 100 cells), `real_class_coverage`, `coverage_vs_simulation` | per (level, called class) with >= 200 cells: the dataset's confident share against `sum_d s_c(d) cov(L, c, d)` from `resolvability_class_depth.parquet` at the dataset's own per-class bin shares (the pre-registered predictor); where profile mode has run, its per-class prediction (`profile_coverage_table`) is reported beside it (`profile_coverage`) and never decides | warning per class when real < simulated - 0.10, worded per class (it fires for glia and for small hypothalamic classes alike); the text says the warning also fires on v1-type large-mask (nucleus-expansion) segmentation, where simulation over-predicts coverage by +.16 to +.22 |
+| Per-class real vs simulated coverage (version-7 families) | `class_bin_shares`, `predicted_class_coverage`, `dataset_class_depth_prediction` (RESOLVE's predictor; label-free depth for classes with fewer than 100 cells), `real_class_coverage`, `coverage_vs_simulation` | per (level, called class) with >= 200 cells: the dataset's confident share against `sum_d s_c(d) cov(L, c, d)` from `resolvability_class_depth.parquet` at the dataset's own per-class bin shares (the pre-registered predictor); where profile mode has run, its per-class prediction (`profile_coverage_table`) is reported beside it (`profile_coverage`) and never decides; each row records the dataset gate level the real share was measured under (`gate_level`) and whether that gate leaves the level unattempted (`gate_blocked`) | warning per class when real < simulated - 0.10, worded per class (it fires for glia and for small hypothalamic classes alike); the text says the warning also fires on v1-type large-mask (nucleus-expansion) segmentation, where simulation over-predicts coverage by +.16 to +.22, and, at a gate-blocked level, that the shortfall is the gate's |
 | Non-neuronal high depth | `nonneuronal_high_depth_flags` | non-neuronal cells at >= 1,000 counts in emitted `nonneuronal_high_depth` bins | report-only `flag_nonneuronal_high_depth`, written by RESOLVE for version-7 bundles |
 | Glial large-mask / high-depth trend | `nonneuronal_depth_trend` | real non-neuronal coverage at >= 1,000 counts below the 500-999 band by more than 2 SE (both >= 200 cells) | report-only (5K vendor glia: class .916 -> .897 -> .886) |
 | Factor re-measure (first in-house dataset of a family with a measured factor table) | `factor_remeasure` | per-gene factors re-measured with the X1 code (`shadow.reference_pseudobulk_totals`) on the confident calls, centred on the median informative gene and capped +-3, against the stored table on genes informative in both | warning when Pearson r < 0.9, recommending a PREP re-run with the in-house table as a new asset (not automatic) |
@@ -1802,17 +1802,26 @@ wiring follows M6b.
    member unknown for version 7; unknown when neither states them,
    `pipeline.real_qc_bundle_facts`), whether the pair holds both platforms
    (whether or not this run resolves both), whether the bundle's marker
-   lookup is prefiltered; the human marker referee
+   lookup is prefiltered (its hashed `large_panel_prefilter`; unknown
+   without a primary run, `pipeline.real_qc_prefilter_applied`); the human
+   marker referee
    on the table cells' query counts and the bundle's `profiles.parquet`
    (marker sets derived in the run, their sha256 in the outcome's details);
-   the registration check (`--registration-qc`, human G1); the sample's flag
-   strata; the version-7 bundle's stored simulated `n_genes` with the table
-   cells counted on the same genes; for version 7, per primary level the real
-   confident share per class key against the class-depth prediction at the
-   sample's own per-class depth, and the non-neuronal depth trend on the same
-   keys; and the QC-free gate verdict, whose own outcome is recorded. The
-   prefilter spot check and the factor re-measure have no producer in RESOLVE,
-   so they are `not_evaluable` wherever they apply.
+   the registration check (`--registration-qc` or `--registration-qc-dir`,
+   human G1; the pipeline task stages the QC stage's checks, see below); the
+   sample's flag strata; the version-7 bundle's stored simulated `n_genes`
+   with the table cells counted on the same genes; for version 7, per primary
+   level the real confident share per class key against the class-depth
+   prediction at the sample's own per-class depth, and the non-neuronal depth
+   trend on the same keys; and the QC-free gate verdict, whose own outcome is
+   recorded. Each coverage row records that gate's level and whether it left
+   the row's level unattempted (`gate_blocked`: every level under `failed`,
+   supercluster, SEA-AD subclass and cluster under `broad_only`); such a
+   level has no confident cell, so its warning still fires (the rule is
+   unchanged) and says that the shortfall is the gate's, not the
+   simulation's. The prefilter spot check and the factor re-measure have no
+   producer in RESOLVE, so they are `not_evaluable` wherever they apply (and
+   wherever it is unknown whether they apply).
 2. **Effects.** `real_data_qc` gives the outcomes (seeded real-data families
    only warn while their species gate is pending). A gate cap or a withheld
    level re-runs `consensus.resolve_human` with the effects
@@ -1837,7 +1846,8 @@ wiring follows M6b.
    (`RealQcResult.summary`: the outcome per check, every outcome with its
    numbers, the effects, the downgrades, the flag-rate readings and the
    per-check tables) and `PanelProvenance.real_data_qc` in the label table
-   and annotation manifest; the pair's `real_qc_config`. The summary's
+   and annotation manifest; the pair's `real_qc_config` (human pairs only).
+   The summary's
    `schema_version` is 3. The report's panel card lists the outcomes
    (`panel_real_qc.csv`) and a note per fired check.
 

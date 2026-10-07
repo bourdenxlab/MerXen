@@ -1096,6 +1096,21 @@ def test_paired_concordance_withholds_the_pairs_supercluster_statistics(
         assert provenance.panel.real_data_qc is not None
         assert provenance.panel.real_data_qc.outcomes["paired_concordance"] == token
         assert provenance.gate is not None and provenance.gate.warning
+        # The pair step rewrites the provenance's gate (``record_real_qc``):
+        # its reasons are the summary's, with the paired-concordance reason,
+        # which on a seeded family carries the warn-only note (D20 (b)).
+        assert provenance.gate.level == gate["level"]
+        assert provenance.gate.reasons == [
+            *gate["level_reasons"],
+            *gate["warning_reasons"],
+        ]
+        (reason,) = [
+            item
+            for item in provenance.gate.reasons
+            if item.startswith("real_qc_paired_concordance")
+        ]
+        note = qc.WARN_ONLY_NOTE.format(species="human")
+        assert (note in reason) is seeded
     if seeded:
         assert record["statistics_level"] == "full"
         assert pl.PAIRED_CONCORDANCE_REASON not in record["reasons"]
@@ -1252,6 +1267,79 @@ def test_the_bundle_facts_of_real_qc_are_unknown_without_tables() -> None:
     for check in ("coverage_vs_simulation", "nonneuronal_depth_trend"):
         assert record.outcomes[check] == "not_evaluable", check
     assert record.outcomes["factor_remeasure"] == "not_evaluable"
+
+
+def test_the_prefilter_fact_is_read_from_the_primary_bundle() -> None:
+    """P4: the spot check's applicability is the bundle's hashed prefilter.
+
+    A bundle whose ``build_hash_payload`` holds a ``large_panel_prefilter``
+    is one the spot check applies to (``not_evaluable`` in RESOLVE, which has
+    no spot-check producer); one without it (``None`` or absent, as run
+    selection reads it) is ``not_applicable``. Without a primary run the fact
+    is unknown, never "does not apply" (C15 review F3).
+    """
+    from merxen.annotation.prefilter import prefilter_payload
+
+    prefiltered = {"large_panel_prefilter": prefilter_payload(2000, 5)}
+    assert pl.real_qc_prefilter_applied(_bundle({"build_hash_payload": prefiltered}))
+    for manifest in (
+        {"build_hash_payload": {"large_panel_prefilter": None}},
+        {"build_hash_payload": {}},
+        {},
+    ):
+        assert pl.real_qc_prefilter_applied(_bundle(manifest)) is False
+    assert pl.real_qc_prefilter_applied(None) is None
+    config = AnnotationConfig(species="human")
+
+    def token(applied: bool | None) -> str:
+        signals = qc.RealQcSignals(
+            resolvability_version=6,
+            paired=False,
+            prefilter_applied=applied,
+            has_r3_member=False,
+        )
+        record = qc.real_data_qc(signals, None, config).provenance()
+        return record.outcomes["prefilter_spotcheck"]
+
+    assert token(None) == "not_evaluable"
+    assert token(True) == "not_evaluable"
+    assert token(False) == "not_applicable"
+
+
+def test_resolve_on_a_prefiltered_bundle_records_the_spot_check_not_evaluable(
+    tmp_path: Path, fake_mmc: FakeMmc, make_trust: MakeTrust
+) -> None:
+    """A 5K-type bundle (marker lookup prefiltered): the spot check applies.
+
+    RESOLVE has no spot-check producer, so P4 records ``not_evaluable``; a
+    reading of the bundle that lost the prefilter would record
+    ``not_applicable`` (C15 review F3).
+    """
+    from merxen.annotation.prefilter import prefilter_payload
+
+    setup = _setup(tmp_path, fake_mmc)
+    path = setup.bundles["whb_frontal_supc_clus"].path / "bundle.json"
+    manifest = json.loads(path.read_text())
+    manifest.setdefault("build_hash_payload", {})["large_panel_prefilter"] = (
+        prefilter_payload(2000, 5)
+    )
+    path.write_text(json.dumps(manifest))
+    applied = _run(setup, make_trust, "qc")
+    for sample_id, sample in applied.samples.items():
+        record = sample.summary["real_qc"]
+        assert record["per_check"]["prefilter_spotcheck"] == "not_evaluable"
+        (spotcheck,) = [
+            item
+            for item in record["outcomes"]
+            if item["check"] == "prefilter_spotcheck"
+        ]
+        assert spotcheck["state"] == "not_evaluable"
+        assert "without a spot check" in spotcheck["reason"]
+        _, provenance = _tables(applied, sample_id)
+        assert provenance.panel is not None
+        assert provenance.panel.real_data_qc is not None
+        outcomes = provenance.panel.real_data_qc.outcomes
+        assert outcomes["prefilter_spotcheck"] == "not_evaluable"
 
 
 def test_qc_lowers_resolution_needs_a_withheld_level_or_a_harder_cap() -> None:
@@ -1467,6 +1555,54 @@ def test_resolve_on_a_version_7_bundle_scores_coverage_and_the_trend(
             ((level, confident),) = flags.items()
             assert list(called) == list(keys[level])
             assert list(confident) == list(_label_confident(labels, level, table))
+
+
+def test_coverage_rows_record_the_gate_that_blocks_their_level(
+    tmp_path: Path, fake_mmc: FakeMmc, make_trust: MakeTrust
+) -> None:
+    """NR8 under a ``broad_only`` gate before QC (C15 review F2).
+
+    The gate leaves the leaf levels unattempted, so their real coverage is 0
+    by the gate, not by the simulation. Each coverage row records the gate
+    level and whether it blocks the row's level, and a warning at a blocked
+    level says the shortfall is the gate's. The warning rule is unchanged:
+    dropping those warnings would be a loosening (CHECK K6 rule 4).
+    """
+    from .test_resolve_v7 import _human_v7_config, write_human_tables
+
+    setup = _setup(tmp_path, fake_mmc)
+    write_human_tables(setup.bundles["whb_frontal_supc_clus"].path, 7)
+    config = _with_real_qc(_human_v7_config(), coverage_min_cells=20)
+    # No table cell reaches the gate's depth: A = 0 < 0.30, so broad_only.
+    gate = config.gate.model_copy(update={"depth_counts": 10**6})
+    config = config.model_copy(update={"gate": gate})
+    applied = _resolve(setup, make_trust, "qc", state="provisional", config=config)
+    blocked_levels = set(qc.LEAF_GATED_LEVELS["human"])
+    n_blocked = 0
+    for sample in applied.samples.values():
+        assert sample.summary["resolution"]["gate"]["level"] == "broad_only"
+        record = sample.summary["real_qc"]
+        coverage = pd.DataFrame(record["tables"]["coverage_vs_simulation"])
+        assert len(coverage)
+        assert set(coverage["gate_level"]) == {"broad_only"}
+        assert coverage["gate_blocked"].tolist() == [
+            level in blocked_levels for level in coverage["level"]
+        ]
+        blocked_rows = coverage[coverage["gate_blocked"].astype(bool)]
+        assert len(blocked_rows) and (blocked_rows["real_coverage"] == 0).all()
+        for item in record["outcomes"]:
+            if item["check"] != "coverage_vs_simulation" or not item["fired"]:
+                continue
+            blocked = item["level"] in blocked_levels
+            assert item["details"]["gate_level"] == "broad_only"
+            assert item["details"]["gate_blocked"] is blocked
+            assert ("this shortfall is the gate's" in item["message"]) is blocked
+            assert ("dataset gate before QC is broad_only" in item["message"]) is (
+                blocked
+            )
+            n_blocked += blocked
+    # The planted case: blocked levels still warn, now saying why.
+    assert n_blocked
 
 
 def _write_simulated_genes(
