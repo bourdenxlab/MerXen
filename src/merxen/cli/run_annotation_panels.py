@@ -7,7 +7,8 @@
   (``merxen.annotation.simulate``): build the species' self-map references
   on a gene list with the production configuration and report the predicted
   levels per class and depth, trust, weak parents, the large-panel prefilter
-  comparison, runtime, disk and peak memory. ``--gate-p`` is the M13 hook.
+  comparison, runtime, disk and peak memory. ``--gate-p`` then runs the
+  gate-P programme (M13; ``merxen.annotation.gate_p_run``) on the family.
 
 The annotation modules are imported inside the commands, so ``merxen``
 starts without loading them.
@@ -247,9 +248,87 @@ def _git_commit() -> str | None:
     "--gate-p",
     is_flag=True,
     default=False,
-    help="Run the gate-P programme (NP1-NP9) after the simulation; M13 "
-    "registers it (merxen.annotation.simulate.register_gate_p_hook), refused "
-    "until then.",
+    help="Run the gate-P programme (NP1-NP9; merxen.annotation.gate_p_run) after "
+    "the simulation, writing <out-dir>/gate_p. Needs --species (M13 D4); gate P "
+    "builds its leave-one-donor-out bundles in --store. The human path only: a "
+    "mouse family waits for the second WMB test draw (M13 C20).",
+)
+@click.option(
+    "--gate-p-other-region",
+    type=click.Choice(["donor_own", "shared"]),
+    default="donor_own",
+    show_default=True,
+    help="Other-region test cells of the leave-one-donor-out sets: donor_own "
+    "(D2 (d): each donor draws its own) or shared (the fallback (c)).",
+)
+@click.option(
+    "--gate-p-accept-small-pools",
+    is_flag=True,
+    default=False,
+    help="Run D2 (d) although a donor's own pool cannot meet the per-class "
+    "top-up rule (otherwise gate P stops after the pool-size report).",
+)
+@click.option(
+    "--gate-p-version",
+    type=click.Choice(["auto", "7"]),
+    default="auto",
+    show_default=True,
+    help="7: score a version-6 family's version-7 ensemble (M13 D5 (c); never "
+    "written to a store).",
+)
+@click.option(
+    "--gate-p-dry-run",
+    is_flag=True,
+    default=False,
+    help="Also score the seeded family's dry-run rule (M13 D28).",
+)
+@click.option(
+    "--gate-p-time-reference-seconds",
+    type=click.FloatRange(min=0.0, min_open=True),
+    default=None,
+    help="NP9's time reference of a version-6 family (plan §8.7 / §10).",
+)
+@click.option(
+    "--gate-p-time-reference-basis",
+    default="",
+    help="Where --gate-p-time-reference-seconds comes from (reported).",
+)
+@click.option(
+    "--gate-p-dry-run-seconds",
+    type=click.FloatRange(min=0.0, min_open=True),
+    default=None,
+    help="The set a version-7 dry run's measured_seconds (NP9's version-7 "
+    "reference, M13 D10 (a)).",
+)
+@click.option(
+    "--gate-p-dry-run-simulated-cells",
+    type=click.IntRange(min=1),
+    default=None,
+    help="That dry run's simulated_cells.",
+)
+@click.option(
+    "--gate-p-unresolved-reviewed",
+    is_flag=True,
+    default=False,
+    help="The user reviewed NP1's unresolved list in the gate-P PR.",
+)
+@click.option(
+    "--gate-p-accepted-parents",
+    default=None,
+    help="Comma-separated weak or collapsed parents the user accepted in the "
+    "gate-P PR (NP2).",
+)
+@click.option(
+    "--gate-p-skip-prep-identity",
+    is_flag=True,
+    default=False,
+    help="Do not rebuild PREP for NP9's identity part (NP9 is then not evaluable).",
+)
+@click.option(
+    "--gate-p-x1-factors",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    default=None,
+    help="The X1 factor table, reported beside NP6's offsets (M13 D7 (b)).",
 )
 def annotation_panel_simulate_command(**options: Any) -> None:
     """Simulate a candidate panel: predicted levels, trust, prefilter, resources."""
@@ -293,19 +372,64 @@ def _annotation_panel_simulate(
     v7_fresh_seeds: str | None = None,
     v7_fresh_r3_seeds: str = "1",
     v7_comparator: bool = False,
+    gate_p_other_region: str = "donor_own",
+    gate_p_accept_small_pools: bool = False,
+    gate_p_version: str = "auto",
+    gate_p_dry_run: bool = False,
+    gate_p_time_reference_seconds: float | None = None,
+    gate_p_time_reference_basis: str = "",
+    gate_p_dry_run_seconds: float | None = None,
+    gate_p_dry_run_simulated_cells: int | None = None,
+    gate_p_unresolved_reviewed: bool = False,
+    gate_p_accepted_parents: str | None = None,
+    gate_p_skip_prep_identity: bool = False,
+    gate_p_x1_factors: Path | None = None,
 ) -> None:
     from merxen.annotation.reference import SourceOptions, set_prep_resources
     from merxen.annotation.simulate import (
         SELF_MAP_REFERENCES,
         ReferenceBuild,
         reference_sources,
+        register_gate_p_hook,
         require_gate_p_hook,
         run_panel_simulation,
     )
     from merxen.annotation.store import ReferenceStore, resolve_builder
 
+    gate_p_programme: Any = None
     if gate_p:
-        require_gate_p_hook()
+        # M13 D4: the species is selected when a new panel check starts, so
+        # gate P never takes it from a public panel's record.
+        if species is None:
+            raise click.BadParameter(
+                "--gate-p needs --species: the species is selected when a new "
+                "panel check starts (M13 D4; a human family is dry-run on set a "
+                "only)",
+                param_hint="--species",
+            )
+        from merxen.annotation.gate_p_run import GatePOptions, gate_p_hook
+
+        gate_p_programme = gate_p_hook(
+            GatePOptions(
+                species=cast("Any", species),
+                other_region=gate_p_other_region,
+                accept_small_pools=gate_p_accept_small_pools,
+                resolvability_version=7 if gate_p_version == "7" else "auto",
+                dry_run=gate_p_dry_run,
+                time_reference_seconds=gate_p_time_reference_seconds,
+                time_reference_basis=gate_p_time_reference_basis,
+                dry_run_seconds=gate_p_dry_run_seconds,
+                dry_run_simulated_cells=gate_p_dry_run_simulated_cells,
+                unresolved_reviewed=gate_p_unresolved_reviewed,
+                accepted_parents=tuple(
+                    item.strip()
+                    for item in (gate_p_accepted_parents or "").split(",")
+                    if item.strip()
+                ),
+                prep_identity=not gate_p_skip_prep_identity,
+                x1_factors=gate_p_x1_factors,
+            )
+        )
     public_record: dict[str, Any] | None = None
     if public_panel is not None:
         from merxen.annotation.public_panels import (
@@ -373,46 +497,66 @@ def _annotation_panel_simulate(
             items.append(ReferenceBuild(spec=spec, builder=builder))
         return items
 
-    report = run_panel_simulation(
-        gene_list=gene_list,
-        species=species,
-        name=name or gene_list.stem,
-        config=config,
-        store=reference_store,
-        builds=builds,
-        out_dir=out_dir,
-        scratch_dir=scratch_dir / "simulate",
-        platform=platform,
-        prefilter_compare=cast("Any", prefilter_compare),
-        expected_depth=expected_depth,
-        depth_profile=depth_profile,
-        depth_profile_asset=depth_profile_asset,
-        profile_mode=profile_mode
-        and (depth_profile is not None or depth_profile_asset is not None),
-        real_composition=real_composition,
-        profile_members=None
-        if not profile_members
-        else [item.strip() for item in profile_members.split(",") if item.strip()],
-        gate_p=gate_p,
-        v7_diagnostic=resolvability_version == "7",
-        v7_fresh_seeds=None
-        if not v7_fresh_seeds
-        else [int(item) for item in v7_fresh_seeds.split(",") if item.strip()],
-        v7_fresh_r3_seeds=[
-            int(item) for item in v7_fresh_r3_seeds.split(",") if item.strip()
-        ],
-        v7_comparator=v7_comparator,
-        provenance={
-            "public_panel": public_record,
-            "code_commit": _git_commit(),
-            "references": reference_ids,
-            "params": {key: str(value) for key, value in sorted(params.items())},
-            "store": str(store),
-            "store_large": None
-            if (store_large or config.reference_store_large) is None
-            else str(store_large or config.reference_store_large),
-        },
-    )
+    if gate_p_programme is not None:
+        register_gate_p_hook(gate_p_programme)
+    try:
+        if gate_p:
+            require_gate_p_hook()
+        report = run_panel_simulation(
+            gene_list=gene_list,
+            species=species,
+            name=name or gene_list.stem,
+            config=config,
+            store=reference_store,
+            builds=builds,
+            out_dir=out_dir,
+            scratch_dir=scratch_dir / "simulate",
+            platform=platform,
+            prefilter_compare=cast("Any", prefilter_compare),
+            expected_depth=expected_depth,
+            depth_profile=depth_profile,
+            depth_profile_asset=depth_profile_asset,
+            profile_mode=profile_mode
+            and (depth_profile is not None or depth_profile_asset is not None),
+            real_composition=real_composition,
+            profile_members=None
+            if not profile_members
+            else [item.strip() for item in profile_members.split(",") if item.strip()],
+            gate_p=gate_p,
+            v7_diagnostic=resolvability_version == "7",
+            v7_fresh_seeds=None
+            if not v7_fresh_seeds
+            else [int(item) for item in v7_fresh_seeds.split(",") if item.strip()],
+            v7_fresh_r3_seeds=[
+                int(item) for item in v7_fresh_r3_seeds.split(",") if item.strip()
+            ],
+            v7_comparator=v7_comparator,
+            provenance={
+                "public_panel": public_record,
+                "code_commit": _git_commit(),
+                "references": reference_ids,
+                "params": {key: str(value) for key, value in sorted(params.items())},
+                "store": str(store),
+                "store_large": None
+                if (store_large or config.reference_store_large) is None
+                else str(store_large or config.reference_store_large),
+            },
+        )
+    finally:
+        if gate_p_programme is not None:
+            register_gate_p_hook(None)
     click.echo(
         f"annotation-panel-simulate: {report['name']} ({report['status']}) -> {out_dir}"
     )
+    gate_p_record = report.get("gate_p")
+    if gate_p and isinstance(gate_p_record, dict):
+        click.echo(
+            f"annotation-panel-simulate: gate P {gate_p_record.get('status')}"
+            + (
+                f", passes {gate_p_record.get('passes')}, validated_max_level "
+                f"{gate_p_record.get('validated_max_level')}"
+                if gate_p_record.get("status") == "scored"
+                else f": {gate_p_record.get('reason')}"
+            )
+            + f" -> {gate_p_record.get('run')}"
+        )

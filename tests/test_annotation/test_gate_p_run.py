@@ -661,6 +661,111 @@ def test_gate_p_refuses_requests_before_any_compute(
         run.GatePOptions(species="rat")  # type: ignore[arg-type]
 
 
+def test_the_command_registers_gate_p_for_the_species_it_is_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    from click.testing import CliRunner
+
+    from merxen.annotation import simulate
+    from merxen.cli import main as cli_main
+    from merxen.cli import run_annotation_panels
+
+    family = Family(tmp_path, monkeypatch, gate_config(), build=False)
+    monkeypatch.setattr(
+        run_annotation_panels, "_reference_spec", lambda *_: family.spec
+    )
+    gene_list = tmp_path / "genes.csv"
+    gene_list.write_text(
+        "gene_symbol,gene_id\n"
+        + "\n".join(f"G{index},{gene}" for index, gene in enumerate(GENES))
+        + "\n"
+    )
+    config_file = tmp_path / "annotation_config.json"
+    # The fixture's ten genes are a panel (as test_simulate's fixture sets).
+    config = family.config.model_copy(
+        update={"panel": family.config.panel.model_copy(update={"min_mapped_genes": 5})}
+    )
+    config_file.write_text(config.model_dump_json())
+
+    def invoke(*extra: str, out: str = "cli_out") -> Any:
+        return CliRunner().invoke(
+            cli_main,
+            [
+                "annotation-panel-simulate",
+                "--gene-list",
+                str(gene_list),
+                "--name",
+                "family",
+                "--references",
+                run.PRIMARY_REFERENCE,
+                "--store",
+                str(tmp_path / "gate_p_store"),
+                "--annotation-config",
+                str(config_file),
+                "--scratch-dir",
+                str(tmp_path / f"{out}_scratch"),
+                "--out-dir",
+                str(tmp_path / out),
+                "--n-processors",
+                "2",
+                "--max-gb",
+                "3",
+                "--expected-depth",
+                "30",
+                "--platform",
+                "MERSCOPE",
+                *extra,
+            ],
+        )
+
+    # M13 D4: --gate-p needs the species; mouse waits for C20. Both are
+    # refused before any compute.
+    result = invoke("--gate-p", out="no_species")
+    assert result.exit_code != 0 and "--species" in result.output
+    result = invoke("--gate-p", "--species", "mouse", out="mouse")
+    assert result.exit_code != 0 and "C20" in result.output
+    assert not (tmp_path / "gate_p_store").exists()
+    assert not (tmp_path / "no_species").exists() and not (tmp_path / "mouse").exists()
+    result = invoke(
+        "--gate-p",
+        "--species",
+        "human",
+        "--gate-p-accept-small-pools",
+        "--gate-p-skip-prep-identity",
+    )
+    assert result.exit_code == 0, result.output
+    assert "gate P scored" in result.output
+    report = json.loads((tmp_path / "cli_out" / simulate.REPORT_JSON).read_text())
+    assert report["gate_p"]["status"] == run.STATUS_SCORED
+    record = json.loads(Path(report["gate_p"]["run"]).read_text())
+    assert record["options"]["species"] == "human"
+    assert record["options"]["prep_identity"] is False
+    assert (tmp_path / "cli_out" / run.GATE_P_RUN_DIR / gp.GATE_P_REPORT_TXT).is_file()
+    # The programme is registered for the command's run only.
+    assert simulate.gate_p_hook() is None
+
+
+def test_new_panel_script_requires_the_species_and_runs_the_command() -> None:
+    import importlib.util
+
+    script = Path(__file__).resolve().parents[2] / "scripts/acceptance/new_panel.py"
+    spec = importlib.util.spec_from_file_location("new_panel", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.command_args("human", ["--out-dir", "x", "--gate-p"]) == [
+        "--species",
+        "human",
+        "--gate-p",
+        "--out-dir",
+        "x",
+    ]
+    with pytest.raises(SystemExit):
+        module.command_args("human", ["--species", "mouse"])
+    with pytest.raises(SystemExit):
+        module.main(["--out-dir", "x"])
+
+
 def test_a_version_7_family_is_scored_in_every_emission_member(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
 ) -> None:
