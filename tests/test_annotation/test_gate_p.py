@@ -1279,6 +1279,8 @@ def test_kish_shrinkage_makes_a_set_at_p95_fail_its_wilson_bound() -> None:
     truth types (180 of A, 20 of B). Unweighted the bound is .910 >= .90.
     Class-balanced, each type carries half the weight: the precision stays
     .95 (>= target+ .95), but the Kish n falls to 72 and the bound to .873.
+    The scored test-cell reading (pre-registration §23.21 R1) and the
+    per-call-set one agree here: the set is its scope's every test cell.
     """
     cells = _calls(100, [("A", "X", 180, 171, 0.95), ("B", "X", 20, 19, 0.95)])
     tested, stats, verdicts = _np3_rows(cells, [100])
@@ -1289,17 +1291,19 @@ def test_kish_shrinkage_makes_a_set_at_p95_fail_its_wilson_bound() -> None:
     assert unweighted["kish_n"] == pytest.approx(200)
     assert unweighted["wilson_lb"] == pytest.approx(0.9104, abs=1e-4)
     assert unweighted["passed"] and not unweighted["scored"]
-    balanced = _scheme(verdicts, gp.NP3_CLASS_BALANCED)
-    assert balanced["scored"]
-    assert balanced["precision"] == pytest.approx(0.95)
-    assert balanced["kish_n"] == pytest.approx(72.0)
-    assert balanced["wilson_lb"] == pytest.approx(0.8731, abs=1e-4)
-    assert balanced["target_plus"] == pytest.approx(0.95)
-    assert balanced["point_ok"] and balanced["coverage_ok"]
-    assert not balanced["wilson_ok"] and not balanced["passed"]
+    for scheme in (gp.NP3_CLASS_BALANCED_TEST_CELLS, gp.NP3_CLASS_BALANCED):
+        balanced = _scheme(verdicts, scheme)
+        assert bool(balanced["scored"]) is (scheme in gp.NP3_SCORED_SCHEMES)
+        assert balanced["precision"] == pytest.approx(0.95)
+        assert balanced["kish_n"] == pytest.approx(72.0)
+        assert balanced["wilson_lb"] == pytest.approx(0.8731, abs=1e-4)
+        assert balanced["target_plus"] == pytest.approx(0.95)
+        assert balanced["point_ok"] and balanced["coverage_ok"]
+        assert not balanced["wilson_ok"] and not balanced["passed"]
     # The natural composition (A .9, B .1) matches the set: weights 1.
-    natural = _scheme(verdicts, gp.NP3_NATURAL)
-    assert natural["kish_n"] == pytest.approx(200) and natural["passed"]
+    for scheme in (gp.NP3_NATURAL_TEST_CELLS, gp.NP3_NATURAL):
+        natural = _scheme(verdicts, scheme)
+        assert natural["kish_n"] == pytest.approx(200) and natural["passed"]
     table = gp.validated_min_depth(verdicts, tested, [100])
     assert table.to_dict("records") == [
         {
@@ -1710,7 +1714,8 @@ def test_class_balanced_gives_each_truth_type_of_the_set_equal_weight() -> None:
     X's set: 300 calls of A and 60 of B (class X, right) and 40 of C (class
     Y, wrong). Class-balanced weights give each of the three types a third
     of the set, so the precision is 2/3, though 90% of the calls are right:
-    a wrong type weighs as much as a right one. The report-only test-cell
+    a wrong type weighs as much as a right one. This per-call-set reading
+    is reported only since pre-registration §23.21 R1. The scored test-cell
     reading rebalances the types within each truth class over the bin's
     test cells instead (C's own 500 calls of Y included); it leaves class
     totals, and so this precision, unchanged.
@@ -1731,9 +1736,10 @@ def test_class_balanced_gives_each_truth_type_of_the_set_equal_weight() -> None:
     _, _, verdicts = _np3_rows(cells, [100])
     x_rows = verdicts[verdicts["class"] == "X"]
     assert _scheme(x_rows, gp.NP3_UNWEIGHTED)["precision"] == pytest.approx(0.90)
-    assert _scheme(x_rows, gp.NP3_CLASS_BALANCED)["precision"] == pytest.approx(2 / 3)
+    per_set = _scheme(x_rows, gp.NP3_CLASS_BALANCED)
+    assert per_set["precision"] == pytest.approx(2 / 3) and not per_set["scored"]
     on_cells = _scheme(x_rows, gp.NP3_CLASS_BALANCED_TEST_CELLS)
-    assert not on_cells["scored"]
+    assert on_cells["scored"]
     assert on_cells["precision"] == pytest.approx(0.90)
     # A and B carry 180 test-cell weights each (class X's 360, rebalanced).
     scope = cells.reset_index(drop=True)
@@ -1809,7 +1815,10 @@ def test_np3_set_stats_trim_each_set_at_the_configured_factor() -> None:
     call 200 / 330, a wrong one 40 (the rare types take their class's
     weight). The judged-set trim caps the wrong calls at 10 x the median,
     2,000 / 330: precision .908. Without the trim (``weight_trim_factor``
-    0) the wrong types keep two fifths: .60.
+    0) the wrong types keep two fifths: .60. These are the per-call-set
+    weightings, reported only since pre-registration §23.21 R1; on the test
+    cells of the scope every call weighs 1 (each type's calls are all its
+    test cells), so the scored ones read .99.
     """
     cells = _calls(
         100,
@@ -1834,11 +1843,12 @@ def test_np3_set_stats_trim_each_set_at_the_configured_factor() -> None:
             composition=composition,
             settings=np3,
         )
-        for scheme in gp.NP3_SCORED_SCHEMES:
+        for scheme in (gp.NP3_NATURAL, gp.NP3_CLASS_BALANCED):
             row = _scheme(stats, scheme)
             assert row["n_confident"] == 1000
             assert row["precision"] == pytest.approx(precision)
-        assert _scheme(stats, gp.NP3_UNWEIGHTED)["precision"] == pytest.approx(0.99)
+        for scheme in (gp.NP3_UNWEIGHTED, *gp.NP3_SCORED_SCHEMES):
+            assert _scheme(stats, scheme)["precision"] == pytest.approx(0.99)
     assert 600 / (600 + 10 * cap) == pytest.approx(0.9083, abs=1e-4)
 
 
@@ -1872,7 +1882,8 @@ def test_np3_set_stats_pool_rare_types_at_their_broad_class() -> None:
     precision 300 / 310. Weighted on its own (a type minimum of 5, no
     broad map, or the set's own supercluster classes, where R is alone in
     S2), R would take half of the class-balanced weight, trimmed to 10 x
-    the median: .75; natural (R .1): .90.
+    the median: .75; natural (R .1): .90. (The per-call-set weightings,
+    reported only since pre-registration §23.21 R1.)
     """
     cells = _two_level_cells()
     decisions = _np7_decisions(
@@ -1893,7 +1904,7 @@ def test_np3_set_stats_pool_rare_types_at_their_broad_class() -> None:
         rows = stats[stats["class"] == "S1"]
         return {
             scheme: float(_scheme(rows, scheme)["precision"])
-            for scheme in gp.NP3_SCORED_SCHEMES
+            for scheme in (gp.NP3_NATURAL, gp.NP3_CLASS_BALANCED)
         }
 
     pooled = precisions(_np3())
@@ -2000,13 +2011,19 @@ def _set(depths: Sequence[int], cls: str = "X") -> res.GatePTestedSet:
 def _np3_verdict_rows(
     passed: Mapping[str, bool | tuple[bool, bool]], cls: str = "X"
 ) -> pd.DataFrame:
-    """NP3 verdict rows per set: one bool, or (natural, class-balanced)."""
+    """NP3 verdict rows per set: one bool, or (natural, class-balanced).
+
+    The two scored weightings (the test-cell ones since pre-registration
+    §23.21 R1); the reported-only rows fail, so a walk that read them shows.
+    """
     records = []
     for label, value in passed.items():
         natural, balanced = value if isinstance(value, tuple) else (value, value)
         for scheme, ok in (
-            (gp.NP3_NATURAL, natural),
-            (gp.NP3_CLASS_BALANCED, balanced),
+            (gp.NP3_NATURAL_TEST_CELLS, natural),
+            (gp.NP3_CLASS_BALANCED_TEST_CELLS, balanced),
+            (gp.NP3_NATURAL, False),
+            (gp.NP3_CLASS_BALANCED, False),
             (gp.NP3_UNWEIGHTED, False),
         ):
             records.append(
@@ -2180,7 +2197,9 @@ def test_np3_inputs_that_lack_rows_or_verdicts_raise() -> None:
     verdicts = gp.np3_verdicts(stats, AnnotationThresholds(), _np3())
     with pytest.raises(ValueError, match="no NP3 verdict"):
         gp.validated_min_depth(
-            verdicts[verdicts["scheme"] != gp.NP3_CLASS_BALANCED], tested, [100]
+            verdicts[verdicts["scheme"] != gp.NP3_CLASS_BALANCED_TEST_CELLS],
+            tested,
+            [100],
         )
     with pytest.raises(ValueError, match="grid"):
         gp.validated_min_depth(verdicts, tested, [10, 30])
@@ -2321,38 +2340,39 @@ def test_np5_flip_at_the_boundary_bin_is_allowed_and_two_bins_away_fails() -> No
     assert int(rows[("D4", 0)]["n_flipped"]) == 2
 
 
-def test_np5_agreement_compares_the_bins_where_either_run_has_50_test_cells() -> None:
+def test_np5_agreement_ignores_a_bin_where_neither_run_has_50_test_cells() -> None:
+    """Neither run holds 50 test cells at 250: the flip there is ignored on
+    both readings (the both-sides rule of pre-registration §23.21 R6 is
+    pinned in ``test_gate_p_revision``).
+    """
     thin = {depth: 100 for depth in GRID_NP5} | {250: 49}
     base = _np5_decisions((60, 120, 250), n_test=thin)
-    rows = _agreement(
-        base,
-        {
-            # Neither run has 50 test cells at 250: the flip there is ignored.
-            ("D1", 0): _np5_decisions((60, 120), n_test=thin),
-            # The replicate has 50: the bin is compared, and the flip fails.
-            ("D2", 0): _np5_decisions((60, 120), n_test=thin | {250: 50}),
-        },
-    )
-    assert rows[("D1", 0)]["passed"] and int(rows[("D1", 0)]["n_compared"]) == 5
-    assert rows[("D1", 0)]["flipped_depths"] == ""
-    assert not rows[("D2", 0)]["passed"] and rows[("D2", 0)]["flipped_depths"] == "250"
-    # The base has 50 and the replicate none: compared as well.
-    base = _np5_decisions((60, 120, 250), n_test=thin | {250: 50})
     rows = _agreement(base, {("D1", 0): _np5_decisions((60, 120), n_test=thin)})
-    assert not rows[("D1", 0)]["passed"]
+    row = rows[("D1", 0)]
+    assert row["passed"] and int(row["n_compared"]) == 5
+    assert row["flipped_depths"] == "" and row["flipped_depths_union"] == ""
+    assert row["passed_union"] and int(row["n_compared_union"]) == 5
 
 
 def test_np5_a_class_missing_from_one_run_is_not_emitted_there() -> None:
+    """A (level, class) a table lacks is not emitted there and holds no test
+    cell, so none of its bins is compared (both runs need 50, §23.21 R6);
+    the either-side reading reported beside it compares them.
+    """
     base = _np5_decisions((60, 120, 250))
     replicate = _np5_decisions((120, 250), cls="Y")
     table = gp.np5_decision_agreement(base, {("D1", 0): replicate}, _np5())
     rows = {str(row["class"]): row for _, row in table.iterrows()}
     assert set(rows) == {"X", "Y"}
+    for row in rows.values():
+        assert row["passed"] and row["flipped_depths"] == ""
+        assert int(row["n_compared"]) == 0
     # X is emitted from 60 in the base only; Y in the replicate only, so the
     # base has no boundary for Y.
-    assert rows["X"]["flipped_depths"] == "60;120;250" and not rows["X"]["passed"]
-    assert rows["Y"]["flipped_depths"] == "120;250" and not rows["Y"]["passed"]
-    assert rows["Y"]["boundary_depths"] == ""
+    x, y = rows["X"], rows["Y"]
+    assert x["flipped_depths_union"] == "60;120;250" and not x["passed_union"]
+    assert y["flipped_depths_union"] == "120;250" and not y["passed_union"]
+    assert y["boundary_depths"] == ""
 
 
 def test_np5_boundaries_are_status_changes_inside_the_grid() -> None:
@@ -2386,10 +2406,10 @@ def test_np5_boundaries_are_status_changes_inside_the_grid() -> None:
     assert not rows[("D1", 0)]["passed"]
 
 
-def test_np5_a_bin_only_the_replicate_holds_is_compared() -> None:
+def test_np5_a_bin_only_the_replicate_holds_is_not_compared() -> None:
     """The grid is the union of the two tables' depths: a bin the base's
-    table lacks is not emitted there, and is compared when the replicate has
-    its 50 test cells.
+    table lacks is not emitted there and holds no test cell of the base, so
+    it is not compared (§23.21 R6); the either-side reading compared it.
     """
     shallow = GRID_NP5[2:]
     base = _np5_decisions((60, 120, 250), grid=shallow)
@@ -2401,11 +2421,13 @@ def test_np5_a_bin_only_the_replicate_holds_is_compared() -> None:
         },
     )
     assert {int(row["n_bins"]) for row in rows.values()} == {6}
-    assert {int(row["n_compared"]) for row in rows.values()} == {6}
+    assert {int(row["n_compared"]) for row in rows.values()} == {4}
+    assert {int(row["n_compared_union"]) for row in rows.values()} == {6}
+    assert all(row["passed"] for row in rows.values())
     # 10 is no boundary bin of the base (it emits from 60 counts).
-    assert rows[("D1", 0)]["flipped_depths"] == "10"
-    assert not rows[("D1", 0)]["passed"]
-    assert rows[("D1", 1)]["passed"] and rows[("D1", 1)]["flipped_depths"] == ""
+    assert rows[("D1", 0)]["flipped_depths_union"] == "10"
+    assert not rows[("D1", 0)]["passed_union"]
+    assert rows[("D1", 1)]["passed_union"]
 
 
 def test_np5_agreement_inputs_that_mix_or_lack_decisions_raise() -> None:
@@ -3011,7 +3033,7 @@ def test_np5_class_verdicts_combine_its_three_parts() -> None:
         gp.np5_class_verdicts(
             agreement[agreement["class"] != "X"], spread, extrapolated, tested
         )
-    with pytest.raises(ValueError, match="t\\* spread"):
+    with pytest.raises(ValueError, match="t\\* row"):
         gp.np5_class_verdicts(
             agreement, spread[spread["set"] != "60"], extrapolated, tested
         )

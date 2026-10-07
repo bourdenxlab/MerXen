@@ -409,23 +409,37 @@ def test_gate_p_runs_end_to_end_on_disjoint_leave_one_donor_out_sets(
     assert (out / gp.GATE_P_REPORT_TXT).is_file()
     records = pd.read_csv(out / gp.GATE_P_RECORDS_CSV)
     assert set(records["level"]) <= set(gp.gate_p_levels("human"))
-    # The planted errors all land on other classes, so the class-balanced
-    # weighting fails broad Immune at NP3 (its wrong calls' types weigh as
-    # much as its own); the other classes of the level stay validated.
+    # The planted errors all land on other classes. Per call set (scored
+    # before pre-registration §23.21) their few truth types take the trim
+    # cap, and the class-balanced weighting failed broad Immune at NP3; on
+    # the test cells of the scope (R1) a wrong call weighs what its type's
+    # test cells weigh, as the unweighted set, and every class validates.
     status = records.set_index(["level", "class"])["status"]
-    assert status[("broad", "Immune")] == "failed:NP3"
-    assert status[("broad", "Astro")] == gp.RECORD_VALIDATED
-    assert status[("broad", "Exc")] == gp.RECORD_VALIDATED
-    assert result["validated_max_level"] is None and not result["passes"]
+    assert set(status) == {gp.RECORD_VALIDATED}
+    np3 = pd.read_csv(out / "np3_verdicts__r1_contam_ho_seed0.csv", dtype={"set": str})
+    immune = np3[(np3["level"] == "broad") & (np3["class"] == "Immune")]
+    immune = immune.set_index(["set", "scheme"])
+    per_set = immune.loc[("250", gp.NP3_CLASS_BALANCED)]
+    on_cells = immune.loc[("250", gp.NP3_CLASS_BALANCED_TEST_CELLS)]
+    assert not per_set["scored"] and not per_set["passed"]
+    assert on_cells["scored"] and on_cells["passed"]
+    assert on_cells["precision"] == pytest.approx(
+        immune.loc[("250", gp.NP3_UNWEIGHTED), "precision"]
+    )
+    # One depth walk per member over NP3-NP7 (R2) gives the records' depths.
+    walk = pd.read_csv(out / "depth_walk__r1_contam_ho_seed0.csv")
+    walked = walk.set_index(["level", "class"])["validated_min_depth"]
+    depths = records.set_index(["level", "class"])["validated_min_depth"]
+    assert all(depths[key] == walked[key] for key in depths.index)
+    # The family checks fail (no gene-ID entry, unaccepted parents, no time
+    # reference); every C_P class is validated up to supercluster.
+    assert result["validated_max_level"] == "supercluster" and not result["passes"]
     tested = pd.read_csv(out / "tested_sets__r1_contam_ho_seed0.csv")
     assert (tested["n_confident"].dropna() >= 5).all()
-    # The dry run (D28) fails on broad Immune. At supercluster it expects only
-    # the classes with >= 50 of the default donor's test cells (H18's set).
+    # The dry run (D28) passes. At supercluster it expects only the classes
+    # with >= 50 of the default donor's test cells (H18's set).
     dry = record["dry_run"]
-    assert not dry["passes"]
-    assert [(row["level"], row["class"]) for row in dry["failing"]] == [
-        ("broad", "Immune")
-    ]
+    assert dry["passes"] and dry["failing"] == []
     leaf = {row["class"] for row in dry["expected"] if row["level"] == "supercluster"}
     assert leaf == {"Exc"}
     assert result["simulated_cells"] == record["simulated_cells"] > 0
@@ -629,25 +643,24 @@ def run_family_with_unvalidated_classes(
 ) -> tuple[Family, dict[str, Any], list[gp.GatePResult]]:
     """Gate P on the passing family with one class failed and one not evaluable.
 
-    The fixture's classes all validate, so two criteria are wrapped in the
-    driver: NP7 fails supercluster Immune and NP6 cannot evaluate supercluster
+    The fixture's classes all validate, so the driver's depth walk (which
+    gives every criterion's verdict, pre-registration §23.21 R2) is wrapped:
+    NP7 fails supercluster Immune and NP6 cannot evaluate supercluster
     Astro. The driver assembles, records and writes them as it would real
     verdicts; broad and NT stay validated, so the family passes at NT.
     """
-    np6, np7 = gp.np6_class_verdicts, gp.np7_class_verdicts
+    walk = gp.gate_p_depth_walk
 
-    def np6_unevaluable(*args: Any, **kwargs: Any) -> dict[tuple[str, str], Any]:
-        verdicts = dict(np6(*args, **kwargs))
-        verdicts[("supercluster", "Astro")] = None
-        return verdicts
+    def unvalidated(
+        *args: Any, **kwargs: Any
+    ) -> tuple[dict[str, dict[tuple[str, str], Any]], pd.DataFrame]:
+        verdicts, table = walk(*args, **kwargs)
+        changed = {criterion: dict(values) for criterion, values in verdicts.items()}
+        changed["NP7"][("supercluster", "Immune")] = False
+        changed["NP6"][("supercluster", "Astro")] = None
+        return changed, table
 
-    def np7_failing(*args: Any, **kwargs: Any) -> dict[tuple[str, str], Any]:
-        verdicts = dict(np7(*args, **kwargs))
-        verdicts[("supercluster", "Immune")] = False
-        return verdicts
-
-    monkeypatch.setattr(gp, "np6_class_verdicts", np6_unevaluable)
-    monkeypatch.setattr(gp, "np7_class_verdicts", np7_failing)
+    monkeypatch.setattr(gp, "gate_p_depth_walk", unvalidated)
     return run_passing_family(tmp_path, monkeypatch)
 
 
@@ -1391,6 +1404,81 @@ def test_a_version_7_family_is_scored_in_every_emission_member(
     # Every leave-one-donor-out set is a version-7 test set (topped up).
     for item in record["leave_one_donor_out"]:
         assert item["class_top_up"] is not None
+
+
+def test_version_7_np5_scores_the_ensemble_re_derived_per_replicate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    """Pre-registration §23.21 R7: in version 7, NP5's agreement compares the
+    ensemble's emission re-derived per replicate with the frozen ensemble
+    decisions, R6 and R2 applying to it; each member's own re-derivation is
+    reported only. R3 (c) reads the ensemble's t* re-fitted per replicate.
+
+    Every seed-1 replicate's re-derived ensemble withholds every bin, so the
+    ensemble flips throughout the D_P group of every tested class: NP5 fails
+    in every member, on the ensemble's seed-1 rows. Before §23.21 the
+    ensemble's re-derivation was reported only and could fail nothing.
+    """
+    monkeypatch.setattr(res, "V7_EMISSION_MEMBERS", 2)
+    config = gate_config(version="auto", ensemble_r1_seeds=[0, 6])
+    config = config.model_copy(
+        update={"panel": config.panel.model_copy(update={"min_root_markers": 3})}
+    )
+    family = Family(tmp_path, monkeypatch, config, error_every=10**9)
+    rederive = gp.np5_rederive_ensemble
+
+    def withheld(cells: pd.DataFrame, *args: Any, **kwargs: Any) -> pd.DataFrame:
+        decisions = rederive(cells, *args, **kwargs)
+        if int(pd.unique(cells["seed"])[0]) != 1:
+            return decisions
+        decisions = decisions.copy()
+        emitted = (decisions["status"] == res.STATUS_EMITTED).to_numpy()
+        decisions.loc[emitted, "status"] = res.STATUS_NOT_RESOLVABLE
+        return decisions
+
+    monkeypatch.setattr(gp, "np5_rederive_ensemble", withheld)
+    result = run.run_gate_p(
+        family.request(report=passing_report()),
+        run.GatePOptions(
+            species="human",
+            accept_small_pools=True,
+            dry_run=True,
+            run_with_unaccepted_parents=True,
+        ),
+    )
+    assert result["status"] == run.STATUS_SCORED, result
+    out = tmp_path / "out" / run.GATE_P_RUN_DIR
+    ensemble = pd.read_csv(out / "np5_ensemble_agreement.csv")
+    assert ensemble[ensemble["seed"] == 0]["passed"].all()
+    assert not ensemble[ensemble["seed"] == 1]["passed"].all()
+    records = pd.read_csv(out / gp.GATE_P_RECORDS_CSV)
+    tested = records[records["status"] != gp.RECORD_NOT_EVALUABLE]
+    assert len(tested) > 0
+    for criteria in tested["failed_criteria"].fillna(""):
+        assert "NP5" in str(criteria).split(";"), criteria
+    for seed in (0, 6):
+        tag = f"r1_contam_ho_seed{seed}"
+        walk = pd.read_csv(out / f"depth_walk__{tag}.csv")
+        failures = walk[walk["passed"].astype(str) == "False"]["deep_failures"]
+        assert len(failures) > 0
+        for text in failures.astype(str):
+            np5 = [item for item in text.split(";") if item.startswith("NP5:")]
+            assert len(np5) == 1, text
+            agreement = [
+                entry
+                for entry in np5[0].removeprefix("NP5:").split(",")
+                if entry.startswith("agreement ")
+            ]
+            assert agreement and all("/1@" in entry for entry in agreement), text
+        # Each member's own re-derivation is still written (reported only).
+        assert (out / f"np5_agreement__{tag}.csv").is_file()
+        consequence = pd.read_csv(out / f"np5_tstar_consequence__{tag}.csv")
+        assert set(consequence["threshold_from"]) == {gp.NP5_TSTAR_FROM_ENSEMBLE}
+        thresholds = pd.read_csv(out / f"np5_ensemble_thresholds__{tag}.csv")
+        assert set(thresholds["group"]) == set(DONORS)
+    report = json.loads((out / gp.GATE_P_REPORT_JSON).read_text())
+    assert report["scored_readings"] == list(gp.GATE_P_SCORED_READINGS)
+    assert "open_readings" not in read_run(result)
 
 
 def test_version_7_forced_on_a_version_6_family_scores_its_ensemble(

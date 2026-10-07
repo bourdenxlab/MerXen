@@ -999,7 +999,9 @@ def test_np9_settings_follow_the_config() -> None:
 # The report
 
 
-def test_report_lists_c_p_records_checks_and_the_open_readings(tmp_path: Path) -> None:
+def test_report_lists_c_p_records_checks_and_the_scored_readings(
+    tmp_path: Path,
+) -> None:
     result = _assemble(
         overrides={("NP6", "R1@0", ("supercluster", "Astro")): False},
         checks={**_family_checks(), "NP9": _np9()},
@@ -1038,13 +1040,14 @@ def test_report_lists_c_p_records_checks_and_the_open_readings(tmp_path: Path) -
         "spill": 0.04,
     }
     assert report["family_checks"]["NP9"]["detail"]["time_limit_seconds"] == 1500.0
-    assert len(report["open_readings"]) == len(gp.GATE_P_OPEN_READINGS)
+    assert report["scored_readings"] == list(gp.GATE_P_SCORED_READINGS)
+    assert report["readings_ruled"] == ["§23.19", "§23.21"]
     text = written[gp.GATE_P_REPORT_TXT].read_text()
     assert "PASSES gate P" in text
     assert "validated_max_level: nt" in text
     assert "excluded Vascular: 100 test cells" in text
     assert "supercluster/Astro (C_P): failed:NP6 failed NP6:R1@0" in text
-    assert "§23.16" in text
+    assert "Readings ruled: pre-registration §23.19, §23.21" in text
     records = pd.read_csv(written[gp.GATE_P_RECORDS_CSV])
     assert len(records) == len(result.records)
     with pytest.raises(FileExistsError, match="overwrite"):
@@ -1209,6 +1212,7 @@ def test_dry_run_needs_broad_for_c_p_and_supercluster_for_h18s_classes() -> None
             "class": "Astro",
             "status": "failed:NP4",
             "passed": False,
+            "reported": False,
         }
     ]
     # ... unless the user removed it from H18's scope (D1: supercluster COP).

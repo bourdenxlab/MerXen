@@ -74,12 +74,15 @@ set, the store and the prepared specs) and:
    emission member (the default donor's, compared with PREP's stored rows)
    and PREP's bundle (rebuilt in a scratch store, its tables and test set
    compared).
-7. **Scores** NP3-NP7 per emission member (``gate_p`` C1-C6), NP1, NP2, NP8
-   and NP9, assembles the family (``gate_p.assemble_gate_p``) and writes
-   the NP1-NP9 report under ``<out_dir>/gate_p`` with every criterion table
-   (``gate_p.write_gate_p_report``) and ``gate_p_run.json`` (the run's
-   record). With ``dry_run`` the seeded family's dry-run rule is scored too
-   (``gate_p.dry_run_verdict``; M13 D28).
+7. **Scores** NP3-NP7 per emission member (``gate_p`` C1-C6) under the
+   criteria revision the user approved on 2026-10-07 (pre-registration
+   §23.21: R1, R2, R3 (c), R5, R6, R7; ``gate_p.GATE_P_SCORED_READINGS``),
+   with one depth walk per member over NP3-NP7 (``gate_p.gate_p_depth_walk``),
+   NP1, NP2, NP8 and NP9, assembles the family (``gate_p.assemble_gate_p``)
+   and writes the NP1-NP9 report under ``<out_dir>/gate_p`` with every
+   criterion table (``gate_p.write_gate_p_report``) and ``gate_p_run.json``
+   (the run's record). With ``dry_run`` the seeded family's dry-run rule is
+   scored too (``gate_p.dry_run_verdict``; M13 D28; R5).
 
 Resolvability version 7 forced on a version-6 family (M13 D5 (c) and CHECK
 K11, pre-registration §21 (vii)'s diagnostic path) simulates the version-7
@@ -88,15 +91,21 @@ emission members on the bundle's own test set and engine, as
 scores the family as a version-7 family; nothing is written to a store.
 
 Readings this driver takes where §14 and the decisions are not explicit
-(each listed in the report's ``open_readings``):
+(each listed in the run record's ``readings``; put to the user in
+pre-registration §23.17 and ruled on 2026-10-07, §23.19, the version-7 NP5
+reading revised the same day by §23.21 R7):
 
 - C_P is counted on every test cell of each group's test set (after the D1
   drop; the default donor's check half), the "test-cell table" of §14,
   including the few cells whose native counts reach no grid depth.
-- NP5 in a version-7 family: each emission member's decisions are re-derived
-  in each replicate and compared with that member's own base decisions (the
-  default donor at seed 0); the ensemble's re-derivation
-  (``gate_p.np5_rederive_ensemble``) is reported beside it.
+- NP5 in a version-7 family (revision R7, replacing the C8 reading): the
+  ensemble's emission is re-derived in each replicate
+  (``gate_p.np5_rederive_ensemble``, with the bundle's lineage) and compared
+  with the frozen ensemble decisions, the same table for every member; R6
+  and R2 apply to it. R3 (c)'s consequence check reads the ensemble's t*
+  re-fitted per replicate (``gate_p.np5_ensemble_set_thresholds``). Each
+  member's own re-derivation against its own base decisions (the default
+  donor at seed 0) is reported only (``np5_agreement__<member>``).
 - NP9's measured time is PREP (the primary and its held-out test set, from
   their ``bundle.json`` timings) plus this run's leave-one-donor-out builds
   and replicates (not the identity re-runs); the simulated cells that scale
@@ -170,12 +179,15 @@ OTHER_REGION_MODES: Final[tuple[str, ...]] = (
 )
 # The regime gate P freezes (§14: the provisional emission rule and margins).
 GATE_P_REGIME: Final[res.Regime] = "provisional"
-# The readings this driver takes (module docstring); listed in every report.
-GATE_P_RUN_OPEN_READINGS: Final[tuple[str, ...]] = (
+# The readings this driver takes (module docstring), ruled on 2026-10-07
+# (pre-registration §23.19; NP5's version-7 reading revised by §23.21 R7);
+# listed in every run record.
+GATE_P_RUN_READINGS: Final[tuple[str, ...]] = (
     "C8 C_P: every test cell of each group's test set (after the D1 drop; the "
     "default donor's check half), cells reaching no grid depth included",
-    "C8 NP5 (version 7): each member re-derived per replicate against its own "
-    "base decisions; the ensemble re-derivation is reported only",
+    "NP5 (version 7, §23.21 R7): the ensemble re-derived per replicate against "
+    "the frozen ensemble decisions, the same for every member; each member's "
+    "own re-derivation is reported only",
     "C8 NP9: PREP from its bundle.json timings plus the leave-one-donor-out "
     "builds and replicates (identity re-runs left out); the version-7 time "
     "reference scales by every scored replicate's simulated cells, the default "
@@ -1483,8 +1495,19 @@ def _score_member(
     vocab: pd.DataFrame,
     config: AnnotationConfig,
     species: Species,
+    ensemble: _EnsembleNp5 | None = None,
 ) -> _MemberScore:
-    """Score NP3-NP7 of one emission member (§14; every member for version 7)."""
+    """Score NP3-NP7 of one emission member (§14; every member for version 7).
+
+    Under the criteria revision of pre-registration §23.21: NP3 and NP6 read
+    the test-cell weightings (R1); NP5's agreement compares bins where both
+    runs hold the minimum (R6) and, in version 7, is the ensemble's
+    (``ensemble``, R7), and its t* part is the consequence check (R3 (c);
+    version 7 on the ensemble's re-fitted t*); the verdicts and
+    ``validated_min_depth`` come from one depth walk over NP3-NP7 (R2). The
+    readings they replace are written beside them (NP3's own walk
+    ``np3_depths``, the t* spread, each member's own NP5 agreement).
+    """
     resolvability = config.resolvability
     recipe, name = base.selector(member)
     default_table = replicates.get((default_group, 0))
@@ -1565,7 +1588,9 @@ def _score_member(
         )
         for key, table in per_replicate.items()
     }
-    np5_agreement = gp.np5_decision_agreement(
+    # Each member's own re-derivation against its own base decisions: scored
+    # in version 6; in version 7 reported only (§23.21 R7).
+    np5_member_agreement = gp.np5_decision_agreement(
         rederived[(default_group, 0)], rederived, np5_settings, regime=GATE_P_REGIME
     )
     np5_thresholds = gp.np5_set_thresholds(
@@ -1578,7 +1603,30 @@ def _score_member(
         member=name,
         saturated_bp_share=saturated,
     )
+    # The t* spread is reported only (§23.21 R3 (c)).
     np5_spread = gp.np5_tstar_spread(np5_thresholds, np5_settings)
+    if ensemble is not None:
+        np5_agreement = ensemble.agreement
+        consequence_thresholds = gp.np5_ensemble_set_thresholds(
+            ensemble.rederived, tested, base.settings, regime=GATE_P_REGIME
+        )
+        threshold_from = gp.NP5_TSTAR_FROM_ENSEMBLE
+    else:
+        np5_agreement = np5_member_agreement
+        consequence_thresholds = np5_thresholds
+        threshold_from = gp.NP5_TSTAR_FROM_MEMBER
+    np5_consequence = gp.np5_tstar_consequence(
+        pooled,
+        tested,
+        consequence_thresholds,
+        targets,
+        default_group=default_group,
+        settings=np5_settings,
+        recipe=recipe,
+        seed=0,
+        member=name,
+        threshold_from=threshold_from,
+    )
     np5_extrapolated = gp.np5_extrapolated_share(
         decisions,
         expected_depth,
@@ -1644,37 +1692,50 @@ def _score_member(
         seed=0,
         member=name,
     )
-    verdicts = {
-        "NP3": gp.np3_class_verdicts(depths),
-        "NP4": gp.np4_class_verdicts(np4_sets, np4_seed, tested),
-        "NP5": gp.np5_class_verdicts(
-            np5_agreement, np5_spread, np5_extrapolated, tested
+    # One depth rule for NP3-NP7 (§23.21 R2).
+    verdicts, walk = gp.gate_p_depth_walk(
+        gp.CriterionTables(
+            np3_verdicts=np3_verdicts,
+            np4_sets=np4_sets,
+            np4_seed=np4_seed,
+            np5_agreement=np5_agreement,
+            np5_tstar=np5_consequence,
+            np5_extrapolated=np5_extrapolated,
+            np6_verdicts=np6_verdicts,
+            np6_stresses=tuple(stress_names),
+            np7_wrong_node=np7.wrong_node,
+            np7_excluded=np7.excluded,
         ),
-        "NP6": gp.np6_class_verdicts(
-            np6_verdicts, tested, stresses=stress_names, settings=np6_settings
-        ),
-        "NP7": gp.np7_class_verdicts(np7.excluded, np7.wrong_node, tested),
-    }
+        tested,
+        base.grid,
+        np6_settings=np6_settings,
+    )
     tables = {
+        "depth_walk": walk,
         "np3_verdicts": np3_verdicts,
+        # NP3's own walk (the floor before §23.21 R2), reported only.
         "np3_depths": depths,
         "np4_stats": np4_stats,
         "np4_sets": np4_sets,
         "np4_seed": np4_seed,
-        "np5_agreement": np5_agreement,
+        # The member's own re-derivation (scored in version 6 only, R7).
+        "np5_agreement": np5_member_agreement,
         "np5_thresholds": np5_thresholds,
         "np5_spread": np5_spread,
+        "np5_tstar_consequence": np5_consequence,
         "np5_extrapolated": np5_extrapolated,
         "np5_class": gp.np5_class_table(
-            np5_agreement, np5_spread, np5_extrapolated, tested
+            np5_agreement, np5_consequence, np5_extrapolated, tested
         ),
         "np6_verdicts": np6_verdicts,
         "np7_wrong_node": np7.wrong_node,
         "tested_sets": _tested_table(tested),
     }
+    if ensemble is not None:
+        tables["np5_ensemble_thresholds"] = consequence_thresholds
     if np7.excluded is not None:
         tables["np7_excluded"] = np7.excluded
-    return _MemberScore(verdicts=verdicts, depths=depths, tables=tables)
+    return _MemberScore(verdicts=verdicts, depths=walk, tables=tables)
 
 
 def _tested_table(
@@ -1713,7 +1774,23 @@ def _tested_table(
     return pd.DataFrame.from_records(rows)
 
 
-def _np5_ensemble_agreement(
+@dataclass(frozen=True)
+class _EnsembleNp5:
+    """The version-7 ensemble's NP5 re-derivation (pre-registration §23.21 R7).
+
+    Attributes:
+        rederived: Per (group, seed), the replicate's re-derived ensemble
+            decisions (``gate_p.np5_rederive_ensemble``).
+        agreement: Their agreement with the frozen ensemble decisions
+            (``gate_p.np5_decision_agreement``, R6), NP5's scored agreement
+            in every member.
+    """
+
+    rederived: dict[gp.ReplicateKey, pd.DataFrame]
+    agreement: pd.DataFrame
+
+
+def _np5_ensemble(
     *,
     base: _Base,
     runner: _Runner,
@@ -1721,8 +1798,8 @@ def _np5_ensemble_agreement(
     seeds: Sequence[int],
     shared: bool,
     default_group: str,
-) -> pd.DataFrame | None:
-    """The ensemble's NP5 re-derivation per replicate (version 7, reported)."""
+) -> _EnsembleNp5 | None:
+    """The ensemble's NP5 re-derivation per replicate (version 7; R7, scored)."""
     if not base.is_v7 or base.ensemble is None:
         return None
     names = [member.name for member in base.emission]
@@ -1753,12 +1830,13 @@ def _np5_ensemble_agreement(
                 members=names,
                 neuronal=base.neuronal,
             )
-    return gp.np5_decision_agreement(
+    agreement = gp.np5_decision_agreement(
         base.decisions,
         rederived,
         gp.Np5Settings.from_config(runner.request.config.resolvability),
         regime=GATE_P_REGIME,
     )
+    return _EnsembleNp5(rederived=rederived, agreement=agreement)
 
 
 # --------------------------------------------------------------------------
@@ -2338,7 +2416,8 @@ def run_gate_p(request: GatePRequest, options: GatePOptions) -> dict[str, Any]:
         "store_roots": [str(root) for root in request.store.roots],
         "np5_depth": depth_record,
         "mapping_workers": facts["workers"],
-        "open_readings": list(GATE_P_RUN_OPEN_READINGS),
+        "readings": list(GATE_P_RUN_READINGS),
+        "readings_ruled": list(gp.GATE_P_READINGS_RULED),
     }
     # B2 (b) of 2026-10-07: NP2's weak and collapsed parents (reference data
     # only), before any leave-one-donor-out build.
@@ -2499,6 +2578,18 @@ def run_gate_p(request: GatePRequest, options: GatePOptions) -> dict[str, Any]:
     }
     depths: dict[str, pd.DataFrame] = {}
     report_tables: dict[str, pd.DataFrame] = {}
+    # Version 7: the ensemble's NP5 re-derivation, scored in every member
+    # (pre-registration §23.21 R7), before the members are scored.
+    ensemble_np5 = _np5_ensemble(
+        base=base,
+        runner=runner,
+        groups=groups,
+        seeds=seeds,
+        shared=not donor_own,
+        default_group=default.name,
+    )
+    if ensemble_np5 is not None:
+        report_tables["np5_ensemble_agreement"] = ensemble_np5.agreement
     for member in base.emission:
         replicates = {
             (group.name, int(seed)): runner.load(group.name, member, seed)
@@ -2527,6 +2618,7 @@ def run_gate_p(request: GatePRequest, options: GatePOptions) -> dict[str, Any]:
             vocab=vocab,
             config=config,
             species=options.species,
+            ensemble=ensemble_np5,
         )
         for criterion, values in score.verdicts.items():
             verdicts[criterion][member.name] = values
@@ -2535,16 +2627,6 @@ def run_gate_p(request: GatePRequest, options: GatePOptions) -> dict[str, Any]:
         for name, frame in score.tables.items():
             report_tables[f"{name}__{tag}"] = frame
         del replicates, stresses
-    ensemble_agreement = _np5_ensemble_agreement(
-        base=base,
-        runner=runner,
-        groups=groups,
-        seeds=seeds,
-        shared=not donor_own,
-        default_group=default.name,
-    )
-    if ensemble_agreement is not None:
-        report_tables["np5_ensemble_agreement"] = ensemble_agreement
     report_tables["pool_sizes"] = pools
     if options.x1_factors is not None:
         x1 = pd.read_csv(options.x1_factors)

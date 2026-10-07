@@ -428,12 +428,15 @@ def test_np6_tests_the_drop_on_each_sets_kish_n() -> None:
 
     X's calls are 180 of truth type A and 20 of B. Class-balanced, the Kish
     n of the set falls from 200 to 72 in both simulations, which widens the
-    drop test; the unweighted test keeps n = 200. Each weighting decides.
+    drop test; the unweighted test keeps n = 200. Each scored weighting
+    decides (the test-cell ones since pre-registration §23.21 R1; here the
+    set is its scope's every test cell, so they equal the per-call-set
+    ones, which are reported only).
     """
     base = _calls(100, [("A", "X", 180, 180, 0.95), ("B", "X", 20, 20, 0.95)])
     stressed = _calls(100, [("A", "X", 180, 171, 0.95), ("B", "X", 20, 17, 0.95)])
     _, verdicts = _np6_tables(base, stressed, [100], composition={"A": 0.9, "B": 0.1})
-    balanced = _row(verdicts, gp.NP3_CLASS_BALANCED, "100")
+    balanced = _row(verdicts, gp.NP3_CLASS_BALANCED_TEST_CELLS, "100")
     assert balanced["kish_n_base"] == pytest.approx(72.0)
     assert balanced["kish_n_stress"] == pytest.approx(72.0)
     assert balanced["precision_stress"] == pytest.approx((0.95 + 0.85) / 2)
@@ -443,13 +446,18 @@ def test_np6_tests_the_drop_on_each_sets_kish_n() -> None:
     unweighted = _row(verdicts, gp.NP3_UNWEIGHTED, "100")
     assert unweighted["kish_n_stress"] == pytest.approx(200.0)
     assert unweighted["precision_stress"] == pytest.approx(188 / 200)
-    natural = _row(verdicts, gp.NP3_NATURAL, "100")
+    natural = _row(verdicts, gp.NP3_NATURAL_TEST_CELLS, "100")
     assert natural["kish_n_stress"] == pytest.approx(200.0)
-    assert set(verdicts["scored"]) == {True}
-    # Every weighting is scored: the class-balanced bound (.809 < .88) fails
-    # the class though the unweighted and natural rows pass.
+    scored = verdicts.set_index("scheme")["scored"].astype(bool).to_dict()
+    assert scored == {
+        scheme: scheme in gp.NP6_SCORED_SCHEMES for scheme in gp.NP6_SCHEMES
+    }
+    # Every scored weighting decides: the class-balanced bound (.809 < .88)
+    # fails the class though the unweighted and natural rows pass.
     assert unweighted["passed"] and natural["passed"]
     assert not balanced["wilson_ok"] and not balanced["passed"]
+    per_set = _row(verdicts, gp.NP3_CLASS_BALANCED, "100")
+    assert per_set["kish_n_stress"] == pytest.approx(balanced["kish_n_stress"])
 
 
 def test_np6_reports_the_clean_upper_bound_and_coverage_changes() -> None:
@@ -613,7 +621,7 @@ def test_np6_class_verdicts_need_every_stress_recipe_and_weighting() -> None:
         gp.np6_class_verdicts(passing, tested, stresses=stresses, settings=np6)
     with pytest.raises(ValueError, match="no NP6 verdict"):
         gp.np6_class_verdicts(
-            passing[passing["scheme"] != gp.NP3_NATURAL],
+            passing[passing["scheme"] != gp.NP3_NATURAL_TEST_CELLS],
             tested,
             stresses=[STRESS],
             settings=np6,
@@ -688,16 +696,23 @@ def test_np6_inputs_that_mismatch_or_lack_rows_raise() -> None:
             settings=np6,
             composition=ONE_TYPE,
         )
-    # Without the natural weighting scored, no composition is needed.
+    # Without a natural weighting scored, no composition is needed (and the
+    # natural weightings are not computed).
     stats = gp.np6_set_stats(
         _rows({("D1", 0): base}, res.DECISION_RECIPE),
         _rows({("D1", 0): base}, STRESS),
         decisions,
         tested,
         default_group=None,
-        settings=_np6(scored_schemes=(gp.NP3_UNWEIGHTED, gp.NP3_CLASS_BALANCED)),
+        settings=_np6(
+            scored_schemes=(gp.NP3_UNWEIGHTED, gp.NP3_CLASS_BALANCED_TEST_CELLS)
+        ),
     )
-    assert set(stats["scheme"]) == {gp.NP3_UNWEIGHTED, gp.NP3_CLASS_BALANCED}
+    assert set(stats["scheme"]) == {
+        gp.NP3_UNWEIGHTED,
+        gp.NP3_CLASS_BALANCED_TEST_CELLS,
+        gp.NP3_CLASS_BALANCED,
+    }
     assert gp.np6_verdicts(stats.iloc[:0], AnnotationThresholds(), np6).empty
 
 
@@ -707,10 +722,11 @@ def test_np6_settings_follow_the_config() -> None:
     assert np6.wilson_margin == pytest.approx(0.02)
     assert np6.max_drop == pytest.approx(0.05)
     assert np6.drop_z == pytest.approx(1.6448536, abs=1e-7)
+    # Pre-registration §23.21 R1: NP3's two weightings on the test cells.
     assert np6.scored_schemes == (
         gp.NP3_UNWEIGHTED,
-        gp.NP3_NATURAL,
-        gp.NP3_CLASS_BALANCED,
+        gp.NP3_NATURAL_TEST_CELLS,
+        gp.NP3_CLASS_BALANCED_TEST_CELLS,
     )
     assert (np6.weight_min_type_cells, np6.weight_trim_factor) == (20, 10.0)
     assert np6.pool_rows == gp.NP6_POOL_FIRST_SET
