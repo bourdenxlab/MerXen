@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -156,6 +156,50 @@ def test_np6_pools_a_thin_set_on_the_test_cells_of_the_union_scope() -> None:
     assert int(thin["n_stress"]) == 150 + 300 and int(thin["n_base"]) == 600
     assert thin["precision_stress"] == pytest.approx(1.0)
     assert set(tested) == {("broad", "X")}
+
+
+def test_np6_base_test_cell_rows_are_np3_s_on_every_unpooled_set() -> None:
+    """R1: NP6 weighs each simulation's calls as NP3 does, so the base
+    simulation's test-cell rows are NP3's at every unpooled set.
+
+    At 100 counts truth types A (3,000 test cells) and B (150) of class X
+    share it half and half, so a B cell weighs 20 A cells. Of the X calls,
+    100 A calls are confident and right, 150 B calls confident and wrong and
+    2,900 A calls unconfident. Trimmed at 10 x the median over every call
+    (an A weight), a B call weighs 10 A calls: 100 / 1,600. (Over the
+    confident calls alone the median would be B's and nothing trimmed: 100 /
+    3,100.) At 30 counts, 300 A calls are confident and right: 1.0, each set
+    on its own scope.
+    """
+    deep = _calls(
+        100,
+        [
+            ("A", "X", 100, 100, 0.95),
+            ("A", "X", 2900, 2900, 0.5),
+            ("B", "X", 150, 0, 0.95),
+        ],
+    )
+    shallow = _calls(30, [("A", "X", 300, 300, 0.95)], prefix="s")
+    cells = pd.concat([deep, shallow], ignore_index=True)
+    composition = {"A": 0.5, "B": 0.5}
+    tested, verdicts = _np6_tables(cells, cells, [30, 100], composition=composition)
+    assert [gp.tested_set_label(item) for item in tested[("broad", "X")] or []] == [
+        "100",
+        "30",
+    ]
+    _, _, np3 = _np3_rows(cells, [30, 100], composition=composition)
+    for label, expected in (("100", 100 / 1600), ("30", 1.0)):
+        for scheme in TEST_CELL_SCHEMES:
+            rows = verdicts[
+                (verdicts["scheme"] == scheme) & (verdicts["tested_set"] == label)
+            ]
+            assert len(rows) == 1
+            row = rows.iloc[0]
+            assert row["set"] == label
+            mine = _scheme(np3, scheme, label)
+            assert mine["precision"] == pytest.approx(expected)
+            assert row["precision_base"] == pytest.approx(mine["precision"])
+            assert row["kish_n_base"] == pytest.approx(mine["kish_n"])
 
 
 # --------------------------------------------------------------------------
@@ -447,12 +491,58 @@ def test_np5_consequence_refuses_thresholds_of_the_other_source() -> None:
     assert row.iloc[0]["failed"] == "D1/0:0.550->0.8500"
 
 
+def test_np5_consequence_reads_the_calls_of_each_set_s_scope() -> None:
+    """R3 (c) is read on the base calls in the set's scope, not on every
+    call of the class: at 30 counts 200 calls at bp .95, all right; at 60,
+    200 at bp .95, 150 right. At t* .90 the set 30 passes (1.0) and the set
+    60 fails (.75); on both bins' calls each would read .875 and fail.
+    """
+    cells = pd.concat(
+        [
+            bin_cells(np.full(200, 0.95), np.ones(200, dtype=bool), depth=30),
+            bin_cells(np.full(200, 0.95), np.arange(200) < 150, depth=60),
+        ],
+        ignore_index=True,
+    )
+    tested = res.gate_p_tested_sets(cells, _decisions([30, 60]), regime="provisional")
+    assert [gp.tested_set_label(item) for item in tested[("broad", "X")] or []] == [
+        "60",
+        "30",
+    ]
+    targets = gp.level_targets(AnnotationThresholds(), ["broad"])
+    member = pd.concat(
+        [_thresholds(_values(*[0.9] * 6), label=label) for label in ("30", "60")],
+        ignore_index=True,
+    )
+    ensemble = gp.np5_ensemble_set_thresholds(
+        {("D1", 0): _ensemble_rows({30: (0.9, 100), 60: (0.9, 100)})},
+        tested,
+        settings(),
+    )
+    for thresholds, source in (
+        (member, gp.NP5_TSTAR_FROM_MEMBER),
+        (ensemble, gp.NP5_TSTAR_FROM_ENSEMBLE),
+    ):
+        table = gp.np5_tstar_consequence(
+            {("D1", 0): cells},
+            tested,
+            thresholds,
+            targets,
+            default_group=None,
+            threshold_from=source,
+        ).set_index("set")
+        assert int(table.loc["30", "n_called"]) == 200
+        assert table.loc["30", "passed"]
+        assert table.loc["30", "min_precision"] == pytest.approx(1.0)
+        assert not table.loc["60", "passed"]
+        assert table.loc["60", "min_precision"] == pytest.approx(0.75)
+
+
 # --------------------------------------------------------------------------
 # R2: one depth rule for NP3-NP7
 
 WALK_GRID = (10, 15, 20, 30, 60, 100)
 WALK_SETS = [_set((60, 100)), _set((60,)), _set((30,)), _set((20,)), _set((15,))]
-WALK_LABELS = [gp.tested_set_label(item) for item in WALK_SETS]
 WALK_STRESSES = ("spill", "lognormal")
 
 
@@ -462,14 +552,17 @@ def _walk_tables(
     class_parts: Collection[str] = (),
     flips: Mapping[tuple[str, int], str] | None = None,
     boundary: str = "",
+    sets: Sequence[res.GatePTestedSet] = WALK_SETS,
 ) -> gp.CriterionTables:
     """Every criterion table of broad X (and of the unevaluable Y).
 
     ``failing`` holds (criterion, set label) pairs that fail; ``class_parts``
     the criteria whose class-level part fails (NP4 seed, NP5 extrapolated
     share, NP7 excluded share); ``flips`` the NP5 flipped depths per
-    replicate (``;`` joined), ``boundary`` the base's boundary bins.
+    replicate (``;`` joined), ``boundary`` the base's boundary bins; ``sets``
+    broad X's tested sets.
     """
+    labels = [gp.tested_set_label(item) for item in sets]
 
     def ok(criterion: str, label: str) -> bool:
         return (criterion, label) not in failing
@@ -484,7 +577,7 @@ def _walk_tables(
             # The reported-only weightings fail: the walk must not read them.
             "passed": ok("NP3", label) if scheme in gp.NP3_SCORED_SCHEMES else False,
         }
-        for label in WALK_LABELS
+        for label in labels
         for scheme in (*gp.NP3_SCORED_SCHEMES, gp.NP3_NATURAL)
     ]
     np6 = [
@@ -498,7 +591,7 @@ def _walk_tables(
             "passed": ok("NP6", label) if scheme in gp.NP6_SCORED_SCHEMES else False,
         }
         for stress in WALK_STRESSES
-        for label in WALK_LABELS
+        for label in labels
         for scheme in (*gp.NP6_SCORED_SCHEMES, gp.NP3_CLASS_BALANCED)
     ]
 
@@ -507,8 +600,8 @@ def _walk_tables(
             {
                 "level": "broad",
                 "class": "X",
-                "set": WALK_LABELS,
-                "passed": [ok(criterion, label) for label in WALK_LABELS],
+                "set": labels,
+                "passed": [ok(criterion, label) for label in labels],
             }
         )
 
@@ -552,9 +645,13 @@ TESTED_WALK: dict[tuple[str, str], list[res.GatePTestedSet] | None] = {
 
 def _walk(
     tables: gp.CriterionTables,
+    sets: Sequence[res.GatePTestedSet] = WALK_SETS,
 ) -> tuple[dict[str, bool | None], dict[str, object]]:
     verdicts, table = gp.gate_p_depth_walk(
-        tables, TESTED_WALK, WALK_GRID, np6_settings=_np6()
+        tables,
+        {("broad", "X"): list(sets), ("broad", "Y"): None},
+        WALK_GRID,
+        np6_settings=_np6(),
     )
     assert list(table.columns) == list(gp.DEPTH_WALK_COLUMNS)
     assert set(verdicts) == set(gp.GATE_P_CLASS_CRITERIA)
@@ -639,6 +736,41 @@ def test_np5_agreement_counts_the_flips_at_or_above_the_floor() -> None:
     assert (record["stop_depth"], record["stop_reason"]) == (30, "NP5")
 
 
+def test_without_a_pooled_set_d_p_is_the_deepest_set_tested_on_its_own() -> None:
+    """R2: when the deepest bin holds n_min itself nothing is pooled, and
+    D_P is that bin: a failure at a shallower set only raises the floor.
+    """
+    sets = [_set((60,)), _set((30,)), _set((20,)), _set((15,))]
+    verdicts, record = _walk(_walk_tables({("NP4", "20")}, sets=sets), sets)
+    assert set(verdicts.values()) == {True}
+    assert record["passed"] is True and record["tested_max_depth"] == 60
+    assert record["deep_sets"] == "60" and record["validated_min_depth"] == 30
+    assert (record["stop_depth"], record["stop_reason"]) == (20, "NP4")
+
+
+def test_the_walk_goes_on_below_a_d_p_without_its_own_test() -> None:
+    """R2: a ">= D_P" set whose D_P is not tested on its own: the walk goes
+    on from the next shallower bin.
+    """
+    sets = [_set((60, 100)), _set((30,)), _set((20,)), _set((15,))]
+    verdicts, record = _walk(_walk_tables(sets=sets), sets)
+    assert set(verdicts.values()) == {True}
+    assert record["passed"] is True and record["tested_max_depth"] == 60
+    assert record["validated_min_depth"] == 15
+    assert (record["stop_depth"], record["stop_reason"]) == (10, "untested")
+
+
+def test_the_walk_stops_at_an_untested_bin_above_a_tested_one() -> None:
+    """R2: the walk stops at the first bin not tested on its own, though a
+    shallower bin is tested and passes.
+    """
+    sets = [_set((60, 100)), _set((60,)), _set((20,)), _set((15,))]
+    verdicts, record = _walk(_walk_tables(sets=sets), sets)
+    assert set(verdicts.values()) == {True}
+    assert record["passed"] is True and record["validated_min_depth"] == 60
+    assert (record["stop_depth"], record["stop_reason"]) == (30, "untested")
+
+
 def test_depth_walk_refuses_tables_without_a_tested_set_s_row() -> None:
     tables = _walk_tables()
     lacking = dataclasses.replace(tables, np4_sets=tables.np4_sets.iloc[1:])
@@ -702,6 +834,16 @@ def test_dry_run_reports_an_h18_class_that_is_not_evaluable() -> None:
     assert ("broad", "OPC") in {
         (row["level"], row["class"]) for row in broad["failing"]
     }
+    # ... also when H18 expects it there: a C_P class at broad is never
+    # reported.
+    both = gp.dry_run_verdict(
+        _assemble(class_sets=sets), h18_classes={"broad": ["OPC"]}
+    )
+    rows = {(row["level"], row["class"]): row for row in both["expected"]}
+    assert rows[("broad", "OPC")]["status"] == gp.RECORD_NOT_EVALUABLE
+    assert rows[("broad", "OPC")]["passed"] is False
+    assert not rows[("broad", "OPC")]["reported"]
+    assert not both["passes"] and both["reported_not_evaluable"] == []
 
 
 # --------------------------------------------------------------------------

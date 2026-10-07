@@ -1414,10 +1414,20 @@ def test_version_7_np5_scores_the_ensemble_re_derived_per_replicate(
     decisions, R6 and R2 applying to it; each member's own re-derivation is
     reported only. R3 (c) reads the ensemble's t* re-fitted per replicate.
 
-    Every seed-1 replicate's re-derived ensemble withholds every bin, so the
-    ensemble flips throughout the D_P group of every tested class: NP5 fails
-    in every member, on the ensemble's seed-1 rows. Before §23.21 the
-    ensemble's re-derivation was reported only and could fail nothing.
+    Three replicates' re-derived ensembles are changed:
+
+    - the default donor's seed 0 withholds every bin. Compared with the
+      frozen decisions it flips throughout the D_P group of every tested
+      class, so NP5 fails in every member on its rows; compared with itself
+      (its own seed-0 re-derivation as the base) it would agree, and every
+      other replicate would flip instead;
+    - every seed-1 replicate withholds every bin and holds no test cell in
+      any bin: under R6 no bin is compared and it agrees; read on the bins
+      where either run holds the minimum (the ``*_union`` reading R6
+      replaced) it would flip;
+    - the second donor's seed 0 has a fit but no threshold at every bin, so
+      R3 (c) fails each tested set on it (``missing``); a member's own t*
+      would pass.
     """
     monkeypatch.setattr(res, "V7_EMISSION_MEMBERS", 2)
     config = gate_config(version="auto", ensemble_r1_seeds=[0, 6])
@@ -1426,17 +1436,25 @@ def test_version_7_np5_scores_the_ensemble_re_derived_per_replicate(
     )
     family = Family(tmp_path, monkeypatch, config, error_every=10**9)
     rederive = gp.np5_rederive_ensemble
+    no_threshold = DONORS[1]
+    seen: list[tuple[str, int]] = []
 
-    def withheld(cells: pd.DataFrame, *args: Any, **kwargs: Any) -> pd.DataFrame:
-        decisions = rederive(cells, *args, **kwargs)
-        if int(pd.unique(cells["seed"])[0]) != 1:
-            return decisions
-        decisions = decisions.copy()
+    def changed(cells: pd.DataFrame, *args: Any, **kwargs: Any) -> pd.DataFrame:
+        decisions = rederive(cells, *args, **kwargs).copy()
+        donors = cells["cell_id"].astype(str).map(family.donor_of).value_counts()
+        replicate = (str(donors.index[0]), int(pd.unique(cells["seed"])[0]))
+        seen.append(replicate)
         emitted = (decisions["status"] == res.STATUS_EMITTED).to_numpy()
-        decisions.loc[emitted, "status"] = res.STATUS_NOT_RESOLVABLE
+        if replicate == (DEFAULT_DONOR, 0) or replicate[1] == 1:
+            decisions.loc[emitted, "status"] = res.STATUS_NOT_RESOLVABLE
+        if replicate[1] == 1:
+            decisions["n_test"] = 0
+        if replicate == (no_threshold, 0):
+            decisions["threshold"] = np.nan
+            decisions["n_fit"] = 10**6
         return decisions
 
-    monkeypatch.setattr(gp, "np5_rederive_ensemble", withheld)
+    monkeypatch.setattr(gp, "np5_rederive_ensemble", changed)
     result = run.run_gate_p(
         family.request(report=passing_report()),
         run.GatePOptions(
@@ -1447,10 +1465,15 @@ def test_version_7_np5_scores_the_ensemble_re_derived_per_replicate(
         ),
     )
     assert result["status"] == run.STATUS_SCORED, result
+    assert sorted(seen) == sorted((donor, seed) for donor in DONORS for seed in (0, 1))
     out = tmp_path / "out" / run.GATE_P_RUN_DIR
     ensemble = pd.read_csv(out / "np5_ensemble_agreement.csv")
-    assert ensemble[ensemble["seed"] == 0]["passed"].all()
-    assert not ensemble[ensemble["seed"] == 1]["passed"].all()
+    default_rows = (ensemble["group"] == DEFAULT_DONOR) & (ensemble["seed"] == 0)
+    assert not ensemble[default_rows]["passed"].all()
+    assert ensemble[~default_rows]["passed"].all()
+    seed_1 = ensemble[ensemble["seed"] == 1]
+    assert (seed_1["n_compared"] == 0).all()
+    assert not seed_1["passed_union"].all()
     records = pd.read_csv(out / gp.GATE_P_RECORDS_CSV)
     tested = records[records["status"] != gp.RECORD_NOT_EVALUABLE]
     assert len(tested) > 0
@@ -1469,13 +1492,20 @@ def test_version_7_np5_scores_the_ensemble_re_derived_per_replicate(
                 for entry in np5[0].removeprefix("NP5:").split(",")
                 if entry.startswith("agreement ")
             ]
-            assert agreement and all("/1@" in entry for entry in agreement), text
+            assert agreement, text
+            assert all(f"{DEFAULT_DONOR}/0@" in entry for entry in agreement), text
         # Each member's own re-derivation is still written (reported only).
         assert (out / f"np5_agreement__{tag}.csv").is_file()
         consequence = pd.read_csv(out / f"np5_tstar_consequence__{tag}.csv")
         assert set(consequence["threshold_from"]) == {gp.NP5_TSTAR_FROM_ENSEMBLE}
+        assert len(consequence) > 0 and not consequence["passed"].any()
+        assert set(consequence["missing"]) == {f"{no_threshold}/0"}
         thresholds = pd.read_csv(out / f"np5_ensemble_thresholds__{tag}.csv")
         assert set(thresholds["group"]) == set(DONORS)
+        assert list(thresholds.columns) == list(gp.NP5_ENSEMBLE_THRESHOLD_COLUMNS)
+        # The member's own t* fits every set.
+        member_tstar = pd.read_csv(out / f"np5_thresholds__{tag}.csv")
+        assert member_tstar["threshold"].notna().all()
     report = json.loads((out / gp.GATE_P_REPORT_JSON).read_text())
     assert report["scored_readings"] == list(gp.GATE_P_SCORED_READINGS)
     assert "open_readings" not in read_run(result)
