@@ -1502,3 +1502,24 @@ This subsection changes no threshold, target or criterion. It records how the co
 - The negative control's effect had not been computed under this reading.
 
 **Status.** This is the reading the code scores. It is put to the user with the revision PR, beside §23.21.
+
+### 23.23 The set a dry run re-run on the revised code passes (recorded 2026-10-07, before any output of the family is read)
+
+Code `a3c0707` (§23.21 and §23.22 implemented), exported to `$A/m13/dryrun/code/head`; other-region draw `shared`; expected depth 33. The registered dry run's code is kept at `code/head_2a91a36`.
+
+- **Version 6 (`v6_rev1`):**
+  - `dry_run.passes` True; `validated_max_level` supercluster.
+  - Supercluster Fibroblast and Vascular are reported as not evaluable (R5).
+  - NP9 identity passed (the `1a8fe2e` fix).
+  - All 27 records equal the re-scorer's prediction (§23.21).
+- **Version 7 (`v7_rev1`, fresh store `gate_p_store_v7_rev1`):**
+  - `dry_run.passes` True; `validated_max_level` supercluster.
+  - All 27 records equal the prediction.
+  - Broad floors: Astro 30, Exc 10, Inh 10, Immune 15, OPC 30, Oligo 120.
+- **NP9's time reference for the family (D10 (a)):** version 7's `measured_seconds` 4,259.4 for 6,744,671 simulated cells.
+  - At its start the host's load was 2.85 / 4.24 / 38.15 (1 / 5 / 15 min), falling.
+  - Start was held until the 15-minute load fell below 40, after another user's job had held the load at about 350.
+  - The family's run is to be started at a similar load, and both loads are reported in its gate-P PR.
+- **Still open in the family verdict, as expected for a dry run:** NP2 pending (set a's Vascular parent, never accepted) and NP9 not evaluable (time: no reference for set a itself). Neither is part of the dry-run rule (D28).
+
+CK2 is met. Gate P may now run on the new-panel family (C18), after its PREP and `map_first` re-run on this code or later, and the NP5 profile asset.
