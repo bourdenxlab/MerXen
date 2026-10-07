@@ -3029,6 +3029,226 @@ def test_holdout_test_set_leaves_out_excluded_truth_superclusters(
     assert len(donor) == HO_DONORS["H_small"] - n_micro
 
 
+# Gate P's leave-one-donor-out sets (M13; pre-registration §23.2 D2 (d)):
+# H_mid's own c5 cells are eligible only when H_mid is held out (c5 then has
+# enough training cells: H_big's 3 and H_small's), so the default set
+# (H_small held out) never draws them.
+LOO_OTHER_REGION = (
+    *HO_OTHER_REGION,
+    ("mid_c5", 3, 7, "WHB-10Xv3-Nonneurons", "Human MTG", "H_mid"),
+)
+
+
+def _loo_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Any, AnnotationConfig, ReferenceStore, Path]:
+    """The held-out spec, its config, a store and the default held-out bundle."""
+    import sys
+
+    monkeypatch.setattr(
+        sys.modules[__name__], "HO_OTHER_REGION", LOO_OTHER_REGION, raising=True
+    )
+    sources = write_ho_sources(tmp_path)
+    FakeCtm(ho_lookup).install(monkeypatch).precompute = ho_precompute
+    spec = prepare_reference_spec(
+        AnnotationReferenceSpec(
+            reference_id=reference.HO_REFERENCE_ID,
+            species="human",
+            role="resolvability",
+            hierarchy=[SUPC, CLUS],
+            sources=ho_spec_sources(sources),
+        )
+    )
+    config = AnnotationConfig(
+        species="human", resolvability={"n_test_cells": 1000, "version": 6}
+    )
+    store = ReferenceStore(tmp_path / "store")
+    default = store.get_or_build(
+        spec, make_panel(GENES), builder=builder_for(spec, config), config=config
+    )
+    return spec, config, store, Path(default.path)
+
+
+def _loo(
+    config: AnnotationConfig, donor: str, *, donor_only: bool = True
+) -> AnnotationConfig:
+    resolvability = config.resolvability.model_copy(
+        update={"holdout_donor": donor, "holdout_other_region_donor_only": donor_only}
+    )
+    return config.model_copy(update={"resolvability": resolvability})
+
+
+def test_leave_one_donor_out_set_draws_only_the_donors_own_other_region_cells(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    spec, config, store, default_dir = _loo_setup(tmp_path, monkeypatch)
+    default_cells = set(res.load_test_cells(default_dir).obs.index.astype(str))
+    excluded = default_dir / res.TEST_CELLS_OBS_FILE
+    loo_spec = spec.model_copy(
+        update={
+            "sources": {
+                **spec.sources,
+                reference.SOURCE_GATE_P_EXCLUDED_TEST_CELLS: excluded,
+            }
+        }
+    )
+    loo_config = _loo(config, "H_mid")
+    bundle = store.get_or_build(
+        loo_spec,
+        make_panel(GENES),
+        builder=builder_for(loo_spec, loo_config),
+        config=loo_config,
+    )
+    bundle_dir = Path(bundle.path)
+    assert bundle.build_hash != default_dir.name
+    manifest = json.loads((bundle_dir / BUNDLE_MANIFEST_NAME).read_text())
+    test_set = manifest["builder_output"]["test_set"]
+    assert test_set["holdout_donor"] == "H_mid"
+    test = res.load_test_cells(bundle_dir)
+    other = test.obs[
+        test.obs[reference.TEST_SOURCE_COLUMN] == reference.TEST_SOURCE_OTHER_REGION
+    ]
+    # Only H_mid's own other-region cells; none of the default test set.
+    assert sorted(other.index) == [f"mid_c5-{index}" for index in range(3)]
+    assert set(other["donor_label"]) == {"H_mid"}
+    assert not set(test.obs.index) & default_cells
+    rule = test_set["gate_p_leave_one_donor_out"]
+    assert rule["holdout_donor"] == "H_mid" and rule["disjoint_from_excluded"]
+    assert rule["n_left_out_other_donors"] > 0
+    assert rule["n_excluded_listed"] == len(default_cells)
+    payload = manifest["build_hash_payload"]
+    assert payload["builder_params"]["other_region"]["donor_only"] is True
+    assert reference.SOURCE_GATE_P_EXCLUDED_TEST_CELLS in payload["sources"]
+    # The production draw for the same donor takes every donor's cells.
+    plain_config = _loo(config, "H_mid", donor_only=False)
+    plain = store.get_or_build(
+        spec,
+        make_panel(GENES),
+        builder=builder_for(spec, plain_config),
+        config=plain_config,
+    )
+    plain_test = res.load_test_cells(Path(plain.path))
+    plain_other = plain_test.obs[
+        plain_test.obs[reference.TEST_SOURCE_COLUMN]
+        == reference.TEST_SOURCE_OTHER_REGION
+    ]
+    assert set(plain_other["donor_label"]) > {"H_mid"}
+    plain_manifest = json.loads((Path(plain.path) / BUNDLE_MANIFEST_NAME).read_text())
+    plain_params = plain_manifest["build_hash_payload"]["builder_params"]
+    assert "donor_only" not in plain_params["other_region"]
+    assert (
+        "gate_p_leave_one_donor_out" not in plain_manifest["builder_output"]["test_set"]
+    )
+    # The production config's held-out params carry no gate-P key at all.
+    default_payload = json.loads((default_dir / BUNDLE_MANIFEST_NAME).read_text())[
+        "build_hash_payload"
+    ]["builder_params"]
+    assert "donor_only" not in default_payload["other_region"]
+
+
+def test_leave_one_donor_out_builds_refuse_half_a_configuration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    spec, config, store, default_dir = _loo_setup(tmp_path, monkeypatch)
+    excluded = default_dir / res.TEST_CELLS_OBS_FILE
+    listed = spec.model_copy(
+        update={
+            "sources": {
+                **spec.sources,
+                reference.SOURCE_GATE_P_EXCLUDED_TEST_CELLS: excluded,
+            }
+        }
+    )
+    panel = make_panel(GENES)
+    with pytest.raises(ReferenceBuildError, match="needs both"):
+        only_flag = _loo(config, "H_mid")
+        store.get_or_build(
+            spec, panel, builder=builder_for(spec, only_flag), config=only_flag
+        )
+    with pytest.raises(ReferenceBuildError, match="needs both"):
+        only_source = _loo(config, "H_mid", donor_only=False)
+        store.get_or_build(
+            listed, panel, builder=builder_for(listed, only_source), config=only_source
+        )
+    # The default donor cannot be held out again against its own test set.
+    again = _loo(config, "H_small")
+    with pytest.raises(ReferenceBuildError, match="holds out another donor"):
+        store.get_or_build(
+            listed, panel, builder=builder_for(listed, again), config=again
+        )
+
+
+def test_pool_sizes_count_each_donors_own_pools_from_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    spec, config, store, default_dir = _loo_setup(tmp_path, monkeypatch)
+    default = res.load_test_cells(default_dir)
+    pools = reference.ho_donor_pool_sizes(
+        spec.sources,
+        donors=["H_big", "H_mid"],
+        excluded_cells=set(default.obs.index.astype(str)),
+        default_test_superclusters=default.obs[res.TRUTH_LEAF_COLUMN].astype(str),
+        region="frontal_cortex",
+        target=40,
+        scratch_dir=tmp_path / "scratch",
+    )
+    assert list(pools.columns) == list(reference.GATE_P_POOL_COLUMNS)
+    # Only non-neuronal classes (the other-region pool serves no neurons).
+    assert set(pools["class"]) == {"Astro", "Immune"}
+    by = pools.set_index(["donor", "class"])
+    # H_mid's own eligible c5 cells; H_big's c5 cluster has too few training
+    # cells when H_big is held out, so it has none of its own.
+    assert by.loc[("H_mid", "Immune"), "n_other_region_own"] == 3
+    assert by.loc[("H_big", "Immune"), "n_other_region_own"] == 0
+    # Frontal cells per donor and class (no truth exclusion in the fixture).
+    frontal = pd.read_csv(spec.sources["whb_region_cell_metadata"])
+    supercluster = frontal["cluster_alias"].map(
+        lambda alias: CLUS_TO_SUPC[SUBC_TO_CLUS[f"s{alias}"]]
+    )
+    mid_astro = (frontal["donor_label"] == "H_mid") & (supercluster == ASTRO)
+    assert by.loc[("H_mid", "Astro"), "n_frontal"] == int(mid_astro.sum())
+    for donor, cls in by.index:
+        row = by.loc[(donor, cls)]
+        assert row["n_available"] == row["n_frontal"] + row["n_other_region_own"]
+        assert bool(row["meets"]) == (row["n_available"] >= 40)
+        assert bool(row["judged"]) == (row["n_default_test"] > 0)
+    # The pool report counts what the leave-one-donor-out build then draws.
+    excluded = default_dir / res.TEST_CELLS_OBS_FILE
+    loo_spec = spec.model_copy(
+        update={
+            "sources": {
+                **spec.sources,
+                reference.SOURCE_GATE_P_EXCLUDED_TEST_CELLS: excluded,
+            }
+        }
+    )
+    loo_config = _loo(config, "H_mid")
+    bundle = store.get_or_build(
+        loo_spec,
+        make_panel(GENES),
+        builder=builder_for(loo_spec, loo_config),
+        config=loo_config,
+    )
+    drawn = res.load_test_cells(Path(bundle.path)).obs
+    other = drawn[
+        drawn[reference.TEST_SOURCE_COLUMN] == reference.TEST_SOURCE_OTHER_REGION
+    ]
+    assert len(other) == by.loc[("H_mid", "Immune"), "n_other_region_own"]
+    with pytest.raises(ReferenceBuildError, match="no frontal WHB cell"):
+        reference.ho_donor_pool_sizes(
+            spec.sources,
+            donors=["H_none"],
+            excluded_cells=(),
+            default_test_superclusters=(),
+            region="frontal_cortex",
+            target=40,
+            scratch_dir=tmp_path / "scratch",
+        )
+    shares = reference.whb_frontal_composition(spec.sources, tmp_path / "scratch")
+    assert sum(shares.values()) == pytest.approx(1.0)
+    assert set(shares) == {UL_IT, ASTRO, MICRO}
+
+
 def test_other_region_draw_never_takes_a_reference_cell() -> None:
     labels = pd.DataFrame(
         {SUPC: [ASTRO, MICRO], CLUS: ["c3", "c4"], SUBC: ["s4", "s6"]},

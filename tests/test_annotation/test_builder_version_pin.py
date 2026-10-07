@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "00944fb3c3b6b4ac4588f2f230f263650f9c3fc267084c0ad9128192b10f6166",
+    3: "3c386641979e24fe91ecc0a69a503acb8dd5091a4c02540c0155f268a9d95219",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -198,6 +198,15 @@ PIN_HISTORY = (
     "other_region_metadata, _test_set_source_paths, _spec_of_test_set; M13 "
     "C8 refactor): the same files are read and the same specs built, so no "
     "bundle content or build_hash changes (test_resolvability_v6_golden)",
+    "3: gate P's leave-one-donor-out held-out test sets (M13 C8, D2 (d)): "
+    "build_whb_frontal_ho draws the other-region top-up from the held-out "
+    "donor only and never a cell of the default test set when "
+    "resolvability.holdout_other_region_donor_only and the "
+    "gate_p_excluded_test_cells source are both set; the flag enters the "
+    "held-out params only when set and the source only when given, so every "
+    "production payload, bundle and build_hash is unchanged "
+    "(test_resolvability_v6_golden); the pool-size and composition reports "
+    "and held_out_test_set_spec are added (no builder output changes)",
 )
 
 

@@ -596,6 +596,10 @@ class AnnotationResolvabilityConfig(_AnnotationModel):
             non-neuronal supertype.
         holdout_donor: Human held-out donor (``auto`` = the frontal donor
             with the fewest cells, H19.30.002).
+        holdout_other_region_donor_only: Draw the held-out test set's
+            other-region top-up cells only from the held-out donor (gate P's
+            leave-one-donor-out sets, pre-registration §23.2 D2 (d)); off for
+            every production test set, which draws them from every donor.
         threshold_rule: Always ``local_isotonic`` (never the set-level rule,
             E2 verdict 3).
         threshold_cap: Cap on local thresholds.
@@ -672,6 +676,7 @@ class AnnotationResolvabilityConfig(_AnnotationModel):
     n_test_cells: int | None = Field(default=None, ge=1)
     mouse_nonneuronal_extra_per_supertype: int = Field(default=30, ge=0)
     holdout_donor: str = "auto"
+    holdout_other_region_donor_only: bool = False
     threshold_rule: Literal["local_isotonic"] = "local_isotonic"
     threshold_cap: float = 0.99
     min_cells_per_bin: int = Field(default=50, ge=1)

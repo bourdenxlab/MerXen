@@ -68,7 +68,7 @@ import shutil
 import statistics
 import time
 import uuid
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -177,6 +177,12 @@ SOURCE_WHB_WHOLE_PRECOMPUTE: Final = "whb_whole_precompute"
 SOURCE_WHB_REGION_CELL_METADATA: Final = "whb_region_cell_metadata"
 SOURCE_WHB_REGION_DIR: Final = "whb_region_dir"
 REGION_CELL_METADATA_FILE: Final = "region_cell_metadata.csv"
+# Gate P's leave-one-donor-out test sets (M13; pre-registration §23.2 D2 (d)):
+# the cells such a test set may not hold, i.e. every cell of the default
+# held-out test set (that bundle's ``test_cells.parquet``). Only gate P passes
+# it, with ``resolvability.holdout_other_region_donor_only``; its file
+# identity enters the build_hash as every source's does.
+SOURCE_GATE_P_EXCLUDED_TEST_CELLS: Final = "gate_p_excluded_test_cells"
 
 # WHB (Siletti) taxonomy CCN202210140 and the frontal region (plan §3.2).
 WHB_TAXONOMY_ID: Final = "CCN202210140"
@@ -5264,6 +5270,284 @@ def other_region_test_cells(
     return rows, record
 
 
+def read_test_cell_ids(path: Path | str) -> frozenset[str]:
+    """Read the cell ids of a held-out test set's cell table.
+
+    Args:
+        path: A test-set bundle's ``test_cells.parquet`` (its ``cell_id``
+            column), or any ``read_cell_label_list`` file.
+
+    Returns:
+        The cell ids.
+    """
+    file_path = Path(path)
+    if file_path.suffix.lower() == ".parquet":
+        frame = pd.read_parquet(file_path)
+        column = "cell_id" if "cell_id" in frame.columns else frame.columns[0]
+        return frozenset(frame[column].dropna().astype(str))
+    return frozenset(read_cell_label_list(file_path))
+
+
+def _gate_p_excluded_test_cells(context: BuildContext) -> frozenset[str] | None:
+    """The cells a gate-P leave-one-donor-out test set may not hold (D2 (d)).
+
+    Returns:
+        ``None`` for every production test set; the excluded cell ids when
+        both ``resolvability.holdout_other_region_donor_only`` and the
+        ``gate_p_excluded_test_cells`` source are set.
+
+    Raises:
+        ReferenceBuildError: When only one of them is set.
+    """
+    donor_only = bool(_config_of(context).resolvability.holdout_other_region_donor_only)
+    listed = SOURCE_GATE_P_EXCLUDED_TEST_CELLS in context.sources
+    if not donor_only and not listed:
+        return None
+    if donor_only != listed:
+        raise ReferenceBuildError(
+            f"{HO_REFERENCE_ID}: a gate-P leave-one-donor-out test set needs both "
+            "resolvability.holdout_other_region_donor_only and the "
+            f"{SOURCE_GATE_P_EXCLUDED_TEST_CELLS!r} source (pre-registration §23.2 "
+            "D2 (d)); got only one"
+        )
+    return read_test_cell_ids(_source_path(context, SOURCE_GATE_P_EXCLUDED_TEST_CELLS))
+
+
+def _leave_one_donor_out_cells(
+    other: pd.DataFrame, *, donor: str, excluded: frozenset[str] | None
+) -> tuple[pd.DataFrame, dict[str, Any] | None]:
+    """Keep the held-out donor's own other-region cells, none of them excluded.
+
+    Gate P's leave-one-donor-out sets (pre-registration §23.2 D2 (d)): each
+    extra donor draws its own non-frontal non-neuronal cells, never a cell
+    of the default held-out test set. Production test sets
+    (``excluded is None``) keep every donor's cells.
+
+    Args:
+        other: ``other_region_metadata`` rows.
+        donor: The held-out donor.
+        excluded: The excluded cell ids, or ``None``.
+
+    Returns:
+        ``(rows, record)``; the record is ``None`` for a production set.
+    """
+    if excluded is None:
+        return other, None
+    own = (other["donor_label"].astype(str) == donor).to_numpy(bool)
+    listed = other["cell_label"].astype(str).isin(excluded).to_numpy(bool)
+    kept = other[own & ~listed]
+    return kept, {
+        "rule": (
+            "other-region cells of the held-out donor only, none of the "
+            "default held-out test set (pre-registration §23.2 D2 (d))"
+        ),
+        "holdout_donor": donor,
+        "n_excluded_listed": len(excluded),
+        "n_other_region_cells": int(len(other)),
+        "n_left_out_other_donors": int((~own).sum()),
+        "n_left_out_excluded": int((own & listed).sum()),
+        "n_kept": int(len(kept)),
+    }
+
+
+# Gate P's per-donor pool sizes (M13; pre-registration §23.10 open item 2).
+GATE_P_POOL_COLUMNS: Final[tuple[str, ...]] = (
+    "donor",
+    "class",
+    "superclusters",
+    "n_frontal",
+    "n_other_region_own",
+    "n_other_region_all_donors",
+    "n_available",
+    "n_default_test",
+    "target",
+    "judged",
+    "meets",
+)
+
+
+def whb_frontal_composition(
+    sources: Mapping[str, Path], scratch_dir: Path
+) -> dict[str, float]:
+    """Return the WHB frontal reference's share of cells per supercluster.
+
+    Gate P's NP3 ``natural`` weighting (plan §14 NP3: "the reference's
+    natural composition") and the reference shares of C_P's excluded
+    classes: every frontal WHB cell of the held-out test set's region
+    metadata (all donors), by its supercluster label. The other-region
+    top-up types are training superclusters of the frontal reference, so
+    each has a share.
+
+    Args:
+        sources: The held-out test set's sources (``held_out_test_set_spec``).
+        scratch_dir: Scratch for a derived region cell metadata table.
+
+    Returns:
+        Supercluster label -> share of the frontal cells (summing to 1).
+
+    Raises:
+        ReferenceBuildError: If a source is missing or no cell has a label.
+    """
+    if SOURCE_WHB_CLUSTER_MEMBERSHIP not in sources:
+        raise ReferenceBuildError(
+            f"the reference composition needs the {SOURCE_WHB_CLUSTER_MEMBERSHIP!r} "
+            "source"
+        )
+    metadata = ho_region_metadata(sources, scratch_dir)
+    labels = membership_labels(
+        sources[SOURCE_WHB_CLUSTER_MEMBERSHIP], WHB_SOURCE_HIERARCHY
+    )
+    supercluster = metadata.join(labels, on="cluster_alias")[WHB_SUPC].dropna()
+    counts = supercluster.astype(str).value_counts()
+    total = int(counts.sum())
+    if total == 0:
+        raise ReferenceBuildError("no frontal WHB cell has a supercluster label")
+    return {str(label): int(count) / total for label, count in counts.items()}
+
+
+def _class_counts(
+    superclusters: Iterable[str], classes: Mapping[str, str | None]
+) -> dict[str, int]:
+    """Cells per class of WHB supercluster labels (``whb_supercluster_classes``)."""
+    mapped = pd.Series([classes.get(str(value)) for value in superclusters])
+    counts = mapped.dropna().astype(str).value_counts()
+    return {str(key): int(value) for key, value in counts.items()}
+
+
+def ho_donor_pool_sizes(
+    sources: Mapping[str, Path],
+    *,
+    donors: Sequence[str],
+    excluded_cells: Collection[str],
+    default_test_superclusters: Iterable[str],
+    region: str,
+    target: int,
+    scratch_dir: Path,
+) -> pd.DataFrame:
+    """Return each donor's own test-cell pools per non-neuronal class (D2 (d)).
+
+    Pre-registration §23.10 (open item 2): before any leave-one-donor-out
+    set is built, the per-donor pool sizes are reported from the reference
+    metadata, without any mapping. Each donor's pools are counted as
+    ``build_whb_frontal_ho`` draws them when that donor is held out under
+    D2 (d) (``holdout_other_region_donor_only``): its frontal cells of
+    superclusters a call can name (``ho_truth_exclusions``) and its own
+    admissible other-region non-neuronal cells (``other_region_candidates``
+    against that donor's training reference), neither of them a cell of
+    the default held-out test set (``excluded_cells``). The other-region
+    pool of every donor is reported beside them (the production draw, and
+    the D2 (c) fallback's pool).
+
+    A class is judged when the default held-out test set holds it; it meets
+    the per-class top-up rule when the donor's pools hold ``target`` cells
+    of it (``topup_min_class_test_cells``, 200: the class minimum of v7.6,
+    pre-registration §21.3). That reading of "a donor's own pool cannot meet
+    the per-class top-up rule" is this function's (§23.10 gives none); the
+    user decides (d) as it stands or the fallback (c) with the sizes in
+    view.
+
+    Args:
+        sources: The held-out test set's sources (``held_out_test_set_spec``).
+        donors: The donors to report (gate P's extra donors).
+        excluded_cells: Every cell of the default held-out test set.
+        default_test_superclusters: The default test set's truth
+            superclusters, one per test cell.
+        region: The anatomical region of the truth exclusions.
+        target: The per-class minimum.
+        scratch_dir: Scratch for a derived region cell metadata table.
+
+    Returns:
+        One row per (donor, non-neuronal class), columns
+        ``GATE_P_POOL_COLUMNS``.
+
+    Raises:
+        ReferenceBuildError: If a donor has no frontal cell, or a source is
+            missing.
+    """
+    from merxen.annotation import sim_inputs as si
+
+    for name in (SOURCE_WHB_CLUSTER_MEMBERSHIP, SOURCE_WHB_CELL_METADATA):
+        if name not in sources:
+            raise ReferenceBuildError(f"the pool-size report needs the {name!r} source")
+    metadata = ho_region_metadata(sources, scratch_dir)
+    frontal_cells = set(metadata["cell_label"].astype(str))
+    labels = membership_labels(
+        sources[SOURCE_WHB_CLUSTER_MEMBERSHIP], WHB_SOURCE_HIERARCHY
+    )
+    metadata = metadata.join(labels, on="cluster_alias")
+    metadata = metadata.dropna(subset=list(WHB_SOURCE_HIERARCHY))
+    other = other_region_metadata(sources[SOURCE_WHB_CELL_METADATA], labels)
+    excluded = {str(cell) for cell in excluded_cells}
+    defaults = [str(label) for label in default_test_superclusters]
+    known = set(metadata["donor_label"].astype(str))
+    missing = sorted(set(donors) - known)
+    if missing:
+        raise ReferenceBuildError(
+            f"the donors {missing} have no frontal WHB cell (donors: {sorted(known)})"
+        )
+    records: list[dict[str, Any]] = []
+    for donor in donors:
+        is_donor = (metadata["donor_label"].astype(str) == donor).to_numpy(bool)
+        training = metadata[~is_donor]
+        per_cluster = training[WHB_CLUS].value_counts()
+        kept = per_cluster[per_cluster >= HO_MIN_TRAINING_CELLS_PER_CLUSTER].index
+        training = training[training[WHB_CLUS].isin(kept)]
+        pool = metadata[is_donor]
+        truth_excluded = ho_truth_exclusions(pool[WHB_SUPC].astype(str), region)
+        pool = pool[~pool[WHB_SUPC].astype(str).isin(list(truth_excluded))]
+        pool = pool[~pool["cell_label"].astype(str).isin(excluded)]
+        candidates, _unseen, _eligible, _n_rois, _n_reference = other_region_candidates(
+            other,
+            reference_cells=frontal_cells | set(training["cell_label"].astype(str)),
+            training_superclusters=training[WHB_SUPC].astype(str).unique(),
+            training_clusters={str(value) for value in kept},
+        )
+        listed = candidates["cell_label"].astype(str).isin(excluded).to_numpy(bool)
+        every = candidates[~listed]
+        own = every[(every["donor_label"].astype(str) == donor).to_numpy(bool)]
+        supercluster_labels = (
+            list(pool[WHB_SUPC].astype(str))
+            + list(every[WHB_SUPC].astype(str))
+            + defaults
+        )
+        classes = whb_supercluster_classes(supercluster_labels)
+
+        frontal = _class_counts(pool[WHB_SUPC].astype(str), classes)
+        own_counts = _class_counts(own[WHB_SUPC].astype(str), classes)
+        every_counts = _class_counts(every[WHB_SUPC].astype(str), classes)
+        default_counts = _class_counts(defaults, classes)
+        names = sorted(
+            {
+                str(cls)
+                for cls in classes.values()
+                if cls is not None and si.is_neuronal_class(str(cls), "human") is False
+            }
+        )
+        for cls in names:
+            available = frontal.get(cls, 0) + own_counts.get(cls, 0)
+            judged = default_counts.get(cls, 0) > 0
+            records.append(
+                {
+                    "donor": donor,
+                    "class": cls,
+                    "superclusters": ";".join(
+                        sorted(
+                            label for label, value in classes.items() if value == cls
+                        )
+                    ),
+                    "n_frontal": frontal.get(cls, 0),
+                    "n_other_region_own": own_counts.get(cls, 0),
+                    "n_other_region_all_donors": every_counts.get(cls, 0),
+                    "n_available": available,
+                    "n_default_test": default_counts.get(cls, 0),
+                    "target": int(target),
+                    "judged": judged,
+                    "meets": available >= int(target),
+                }
+            )
+    return pd.DataFrame.from_records(records, columns=list(GATE_P_POOL_COLUMNS))
+
+
 def build_whb_frontal_ho(context: BuildContext) -> dict[str, Any]:
     """Build the ``whb_frontal_supc_clus_ho`` bundle (human, resolvability).
 
@@ -5288,17 +5572,32 @@ def build_whb_frontal_ho(context: BuildContext) -> dict[str, Any]:
     ``bundle.json`` (``test_set.other_region``: the rule, what it left out)
     and per cell (``test_source``).
 
+    Gate P's leave-one-donor-out sets (M13; pre-registration §23.2 D2 (d);
+    ``resolvability.holdout_other_region_donor_only`` with the
+    ``gate_p_excluded_test_cells`` source): the other-region top-up (and the
+    version-7 class top-up's other-region pool) draws only the held-out
+    donor's own cells and never a cell of the default held-out test set, so
+    the replicates are disjoint. The rule is recorded in
+    ``test_set.gate_p_leave_one_donor_out``; production test sets never set
+    it.
+
     Args:
         context: The build context.
 
     Returns:
         ``bundle.json`` builder output.
+
+    Raises:
+        ReferenceBuildError: If a leave-one-donor-out build is half
+            configured, or its held-out donor's own frontal cells are listed
+            as excluded (the default donor cannot be held out again).
     """
     from merxen.annotation import resolvability as res
 
     spec = context.spec
     panel = _panel_of(context)
     config = _config_of(context)
+    excluded = _gate_p_excluded_test_cells(context)
     timer = _StepTimer(context.work_dir / CTM_LOG_DIR)
     output: dict[str, Any] = {
         "reference": "WHB frontal region without the held-out donor (E2 HO recipe)"
@@ -5323,6 +5622,16 @@ def build_whb_frontal_ho(context: BuildContext) -> dict[str, Any]:
     dropped_clusters = sorted(set(per_cluster.index) - set(kept_clusters))
     training = training[training[WHB_CLUS].isin(kept_clusters)]
     pool = metadata[is_test_donor].set_index("cell_label", drop=False)
+    if excluded is not None:
+        listed = pool["cell_label"].astype(str).isin(excluded).to_numpy(bool)
+        if bool(listed.any()):
+            raise ReferenceBuildError(
+                f"{HO_REFERENCE_ID}: {int(listed.sum())} frontal cells of the "
+                f"held-out donor {donor!r} are in "
+                f"{SOURCE_GATE_P_EXCLUDED_TEST_CELLS!r}: a leave-one-donor-out "
+                "set holds out another donor than the "
+                "default test set's (gate P, pre-registration §23.2 D2 (d))"
+            )
     region = config.anatomical_region or WHB_WHOLE_CORTEX_REGION
     exclusions = ho_truth_exclusions(pool[WHB_SUPC].astype(str), region)
     is_excluded = pool[WHB_SUPC].astype(str).isin(list(exclusions)).to_numpy()
@@ -5375,9 +5684,13 @@ def build_whb_frontal_ho(context: BuildContext) -> dict[str, Any]:
         HO_MAX_TEST_CELLS_PER_SUPERCLUSTER,
         n_test,
     )
+    loo_record: dict[str, Any] | None = None
     with timer.step("other_region_cells"):
+        other_metadata, loo_record = _leave_one_donor_out_cells(
+            _other_region_metadata(context, labels), donor=donor, excluded=excluded
+        )
         other_rows, other_record = other_region_test_cells(
-            _other_region_metadata(context, labels),
+            other_metadata,
             reference_cells=frontal_cells | set(training["cell_label"].astype(str)),
             training_superclusters=training[WHB_SUPC].astype(str).unique(),
             training_clusters=[str(value) for value in kept_clusters],
@@ -5413,7 +5726,11 @@ def build_whb_frontal_ho(context: BuildContext) -> dict[str, Any]:
         with timer.step("class_top_up"):
             candidates, _unseen, _eligible, _n_rois, _n_reference = (
                 other_region_candidates(
-                    _other_region_metadata(context, labels),
+                    _leave_one_donor_out_cells(
+                        _other_region_metadata(context, labels),
+                        donor=donor,
+                        excluded=excluded,
+                    )[0],
                     reference_cells=frontal_cells
                     | set(training["cell_label"].astype(str)),
                     training_superclusters=training[WHB_SUPC].astype(str).unique(),
@@ -5431,6 +5748,14 @@ def build_whb_frontal_ho(context: BuildContext) -> dict[str, Any]:
             HO_REFERENCE_ID,
             top_up_record["n_cells"],
         )
+    if excluded is not None and loo_record is not None:
+        shared = sorted(set(test_rows["cell_label"].astype(str)) & excluded)
+        if shared:  # pragma: no cover - guarded by the filters above
+            raise ReferenceBuildError(
+                f"{HO_REFERENCE_ID}: the leave-one-donor-out test set holds "
+                f"{len(shared)} excluded cells, e.g. {shared[:5]}"
+            )
+        loo_record["disjoint_from_excluded"] = True
     matrices = {
         "WHB-10Xv3-Neurons": _source_path(context, SOURCE_WHB_NEURONS_H5AD),
         "WHB-10Xv3-Nonneurons": _source_path(context, SOURCE_WHB_NONNEURONS_H5AD),
@@ -5569,6 +5894,7 @@ def build_whb_frontal_ho(context: BuildContext) -> dict[str, Any]:
                 "class_top_up": top_up_record,
             }
         ),
+        **({} if loo_record is None else {"gate_p_leave_one_donor_out": loo_record}),
         "truth_exclusion": truth_exclusion,
         "seed": TEST_SET_SEED,
         "per_supercluster": {
@@ -5985,6 +6311,37 @@ def _spec_of_test_set(
         rng_seed=template.rng_seed,
         depth_grid=template.depth_grid,
     )
+
+
+def held_out_test_set_spec(
+    primary: AnnotationReferenceSpec, config: AnnotationConfig
+) -> AnnotationReferenceSpec:
+    """Return the held-out test set's spec of a prepared human primary spec.
+
+    The spec the WHB primary's self-map builds its held-out test set from
+    (``_test_set_spec``), for gate P's leave-one-donor-out builds (M13),
+    which change only the config (``resolvability.holdout_donor``) and, under
+    pre-registration §23.2 D2 (d), add the ``gate_p_excluded_test_cells``
+    source.
+
+    Args:
+        primary: The prepared ``whb_frontal_supc_clus`` spec (sources are
+            files, ``prepare_reference_spec``).
+        config: The annotation config.
+
+    Returns:
+        The ``whb_frontal_supc_clus_ho`` spec.
+
+    Raises:
+        ReferenceBuildError: If a held-out source is missing.
+    """
+    sources = _test_set_source_paths(
+        {name: Path(path) for name, path in primary.sources.items()},
+        owner=primary.reference_id,
+        reference_id=HO_REFERENCE_ID,
+        names=HO_SOURCES,
+    )
+    return _spec_of_test_set(primary, config, sources, HO_REFERENCE_ID)
 
 
 def _work_bundle(
@@ -6876,6 +7233,13 @@ def _ho_params(
             "roi_labels": list(HO_OTHER_REGION_ROI_LABELS),
             "feature_matrix": HO_OTHER_REGION_MATRIX,
             "seed": HO_OTHER_REGION_SEED,
+            # Gate P's leave-one-donor-out sets only (D2 (d)); absent from
+            # every production payload, so no production build_hash changes.
+            **(
+                {"donor_only": True}
+                if config.resolvability.holdout_other_region_donor_only
+                else {}
+            ),
         },
     }
 
