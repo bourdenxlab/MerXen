@@ -1476,3 +1476,29 @@ No output of the family has been read. This subsection changes no threshold, tar
 2. The dry run is re-run, v6 then v7 (fresh v7 store), on an export of that commit.
 3. Both must pass and reproduce the predicted records.
 4. Only then is any new family scored.
+
+### 23.22 R3 (c) in version 7: the ensemble's t* is read at every bin of a tested set (recorded 2026-10-07, after the review of the revised code; before the dry run is re-run)
+
+This subsection changes no threshold, target or criterion. It records how the code reads one phrase of §23.21 R3 (c) that the text does not settle.
+
+**The phrase.** In version 7, R3 (c) is "applied to the ensemble's pooled t*, refitted per replicate": the threshold of the replicate's re-derived ensemble decisions (`np5_rederive_ensemble`) "at each tested set". A "≥ D_P" set spans several bins, and the replicate's ensemble can decide them on different sets. For example, D_P may be decided on its own and a deeper bin on the replicate's deep pool, each with its own threshold.
+
+**The first implementation** (`8e4479e`) read one threshold per (set, replicate): the decision at the set's shallowest bin, applied to every call of the set. That never applies the replicate's thresholds at the deeper bins. A review counter-example: the replicate applies 0.85 at 120 and its pool's 0.55 at 250. Its emission of the "≥ 120" set's base calls has precision 0.85, below 0.88, but the shallowest-bin reading gives 1.0 and passes the set.
+
+**The reading taken** (`np5_ensemble_set_thresholds`, `np5_tstar_consequence`): each base call of the set is kept at its own bin's threshold in the replicate, as the replicate's emission applies them.
+- A bin of the set whose decision is fitted (`n_fit` ≥ `min_cells_per_bin`) but has no threshold fails the set (`missing`: the replicate would emit nothing there), as a fitted member without a t* does.
+- An unfitted bin emits none of its calls.
+- A replicate with no fitted bin in the set is left out (`unfitted`).
+- A single-bin set reads as before. The member form (version 6, and the report-only cross-check) is unchanged: one t* per (set, replicate), applied to every call of the set.
+
+**Why this reading.** It is what the replicate's ensemble would emit, so it asks R3 (c)'s question ("does the threshold's wobble change what is emitted"): every call is held to the threshold the replicate applies to it. The readings are not nested. Where a deeper bin's threshold is lower than D_P's, the reading taken keeps more of that bin's calls than the shallowest-bin reading, so it is stricter there; where it is higher, it keeps fewer, so it is looser there. The alternative of the review, the worst single bin's threshold applied to every call of the set, holds calls to thresholds the replicate never applies to them.
+
+**What was known when it was recorded:**
+- On set a version 7 (`v7_r2`), a review probe (`$A/m13/tmp/revision_impl/review_adv_stats/`, read-only on the saved frames) computed three readings:
+  - the shallowest-bin reading;
+  - each call at its own bin's threshold (the reading taken);
+  - the worst single-bin threshold.
+  None fails a set; the smallest margin is +0.116 to +0.117. 240 of the 288 (member, pooled set, replicate) rows have more than one threshold across their bins, and none has a fitted bin without a threshold.
+- The negative control's effect had not been computed under this reading.
+
+**Status.** This is the reading the code scores. It is put to the user with the revision PR, beside §23.21.

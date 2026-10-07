@@ -37,8 +37,9 @@ effect on set a computed before it was proposed:
   (``np5_tstar_consequence``): each replicate's own t*, applied to the base
   recipe's pooled held-out seed-0 calls in the set's scope, gives point
   precision >= target_L - 0.02. Version 7 applies it to the ensemble's
-  pooled t* re-fitted per replicate (``np5_ensemble_set_thresholds``). The
-  t* spread (``np5_tstar_spread``) is reported only.
+  pooled t* re-fitted per replicate (``np5_ensemble_set_thresholds``), each
+  call at its own bin's threshold (pre-registration §23.22). The t* spread
+  (``np5_tstar_spread``) is reported only.
 - **R5** the dry run reports, not fails, a class H18 expects whose record is
   ``not_evaluable`` (``dry_run_verdict``; replaces CK1 (a)).
 - **R6** NP5's agreement compares a bin only where the base and the
@@ -162,7 +163,9 @@ three of them revised by §23.21:
 - Where t* comes from: re-fitted in each replicate on the replicate's calls
   of each tested set (``np5_set_thresholds``); version 7 revised by R3 (c)
   to the ensemble's t* re-fitted per replicate, read from the re-derived
-  ensemble decisions at the set's shallowest bin.
+  ensemble decisions at every bin of the set and applied to each bin's
+  calls (pre-registration §23.22; a ">= D_P" set's deeper bins may take the
+  replicate's deep pool's t*).
 - A class without profile cells takes D8's overall median as one depth
   (the registered words), so both its shares are 0 or 1.
 
@@ -2455,6 +2458,13 @@ NP5_THRESHOLD_COLUMNS: Final[tuple[str, ...]] = (
     "threshold",
     "threshold_source",
 )
+# Version 7 (§23.21 R3 (c), read per bin, pre-registration §23.22): one row
+# per (tested set, replicate, bin of the set).
+NP5_ENSEMBLE_THRESHOLD_COLUMNS: Final[tuple[str, ...]] = (
+    *NP5_THRESHOLD_COLUMNS[: NP5_THRESHOLD_COLUMNS.index("set_min_depth") + 1],
+    "depth",
+    *NP5_THRESHOLD_COLUMNS[NP5_THRESHOLD_COLUMNS.index("set_min_depth") + 1 :],
+)
 NP5_SPREAD_COLUMNS: Final[tuple[str, ...]] = (
     "level",
     "class",
@@ -3197,19 +3207,22 @@ def np5_ensemble_set_thresholds(
     *,
     regime: res.Regime = "provisional",
 ) -> pd.DataFrame:
-    """Read the ensemble's t* at every tested set in each replicate (§23.21 R3 (c)).
+    """Read the ensemble's t* at every bin of each tested set per replicate (R3 (c)).
 
     Version 7: revision R3 (c) (pre-registration §23.21) applies NP5's
     consequence check to the ensemble's pooled t*, re-fitted per replicate:
-    the threshold of the replicate's re-derived ensemble decisions
-    (``np5_rederive_ensemble``) at the tested set, read at the set's
-    shallowest bin (a ">= D_P" set at D_P; there the replicate's decision is
-    its own bin's or the pool's it takes). The applied ``threshold`` is
-    taken (``t*_pool``, the saturated cap, or a monotone fill's inherited
-    one); a decision without a threshold is ``fitted`` when its fit held
-    ``min_cells_per_bin`` fit-half cells (``n_fit``), so it fails the check,
-    and is left out otherwise, as ``np5_set_thresholds`` reads a member's
-    re-fit.
+    the thresholds of the replicate's re-derived ensemble decisions
+    (``np5_rederive_ensemble``) at the tested set. They are read at every
+    bin of the set (pre-registration §23.22): a ">= D_P" set's bins may be
+    decided on different sets in the replicate (D_P on its own, a deeper
+    bin on the replicate's deep pool), and the replicate's emission applies
+    each bin's threshold to that bin's calls (``np5_tstar_consequence``).
+    The applied ``threshold`` is taken (``t*_pool``, the saturated cap, or
+    a monotone fill's inherited one); a decision without a threshold is
+    ``fitted`` when its fit held ``min_cells_per_bin`` fit-half cells
+    (``n_fit``), so it fails the check, and is left out otherwise, as
+    ``np5_set_thresholds`` reads a member's re-fit. A bin the replicate's
+    decisions lack has no fit.
 
     Args:
         rederived: Per (group, seed label), the replicate's re-derived
@@ -3219,8 +3232,9 @@ def np5_ensemble_set_thresholds(
         regime: The regime compared (gate P freezes the provisional one).
 
     Returns:
-        One row per (tested set, replicate), sorted by level, class, set,
-        group and seed, columns ``NP5_THRESHOLD_COLUMNS``.
+        One row per (tested set, replicate, bin of the set), sorted by
+        level, class, set, group, seed and depth, columns
+        ``NP5_ENSEMBLE_THRESHOLD_COLUMNS``.
 
     Raises:
         ValueError: Without replicates, for decisions without rows of the
@@ -3241,36 +3255,40 @@ def np5_ensemble_set_thresholds(
         }
         for (level, cls), items in ordered:
             for item in items or ():
-                depth = int(min(item.depths))
-                row = rows.get((str(level), str(cls), depth), {})
-                threshold = _optional_float(row.get("threshold"))
-                t_star = _optional_float(row.get("t_star"))
-                n_fit = _optional_float(row.get("n_fit"))
-                n_called = _optional_float(row.get("n_called"))
-                target = _optional_float(row.get("target"))
-                source = _label(row.get("threshold_source"))
-                fitted = n_fit is not None and n_fit >= settings.min_cells_per_bin
-                records.append(
-                    {
-                        "level": level,
-                        "class": cls,
-                        "set": tested_set_label(item),
-                        "pooled": bool(item.pooled),
-                        "set_min_depth": depth,
-                        "group": str(group),
-                        "seed": seed,
-                        "n_called": 0 if n_called is None else int(n_called),
-                        "n_fit": 0 if n_fit is None else int(n_fit),
-                        "fitted": fitted or threshold is not None,
-                        "target": math.nan if target is None else target,
-                        "t_star": math.nan if t_star is None else t_star,
-                        "threshold": math.nan if threshold is None else threshold,
-                        "threshold_source": source,
-                    }
-                )
-    table = pd.DataFrame.from_records(records, columns=list(NP5_THRESHOLD_COLUMNS))
+                set_min_depth = int(min(item.depths))
+                for depth in sorted(int(value) for value in item.depths):
+                    row = rows.get((str(level), str(cls), depth), {})
+                    threshold = _optional_float(row.get("threshold"))
+                    t_star = _optional_float(row.get("t_star"))
+                    n_fit = _optional_float(row.get("n_fit"))
+                    n_called = _optional_float(row.get("n_called"))
+                    target = _optional_float(row.get("target"))
+                    source = _label(row.get("threshold_source"))
+                    fitted = n_fit is not None and n_fit >= settings.min_cells_per_bin
+                    records.append(
+                        {
+                            "level": level,
+                            "class": cls,
+                            "set": tested_set_label(item),
+                            "pooled": bool(item.pooled),
+                            "set_min_depth": set_min_depth,
+                            "depth": depth,
+                            "group": str(group),
+                            "seed": seed,
+                            "n_called": 0 if n_called is None else int(n_called),
+                            "n_fit": 0 if n_fit is None else int(n_fit),
+                            "fitted": fitted or threshold is not None,
+                            "target": math.nan if target is None else target,
+                            "t_star": math.nan if t_star is None else t_star,
+                            "threshold": math.nan if threshold is None else threshold,
+                            "threshold_source": source,
+                        }
+                    )
+    table = pd.DataFrame.from_records(
+        records, columns=list(NP5_ENSEMBLE_THRESHOLD_COLUMNS)
+    )
     return table.sort_values(
-        ["level", "class", "set", "group", "seed"], kind="mergesort"
+        ["level", "class", "set", "group", "seed", "depth"], kind="mergesort"
     ).reset_index(drop=True)
 
 
@@ -3283,6 +3301,65 @@ def _optional_float(value: object) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if math.isfinite(number) else None
+
+
+def _consequence_thresholds(
+    thresholds: pd.DataFrame, *, per_bin: bool
+) -> dict[tuple[str, str, str], dict[str, dict[int | None, tuple[bool, float]]]]:
+    """Per tested set and replicate, (fitted, threshold) per bin (``None``: the set).
+
+    Raises:
+        ValueError: If a (set, replicate[, bin]) occurs more than once.
+    """
+    depths: Iterable[object] = (
+        thresholds["depth"] if per_bin else [None] * len(thresholds)
+    )
+    result: dict[tuple[str, str, str], dict[str, dict[int | None, tuple[bool, float]]]]
+    result = {}
+    for level, cls, label, group, replicate, depth, fitted, value in zip(
+        thresholds["level"].astype(str),
+        thresholds["class"].astype(str),
+        thresholds["set"].astype(str),
+        thresholds["group"].astype(str),
+        thresholds["seed"],
+        depths,
+        thresholds["fitted"].astype(bool),
+        thresholds["threshold"].to_numpy(np.float64),
+        strict=True,
+    ):
+        name = f"{group}/{replicate}"
+        bins = result.setdefault((level, cls, label), {}).setdefault(name, {})
+        key = None if depth is None else int(cast(Any, depth))
+        if key in bins:
+            raise ValueError(
+                f"np5_tstar_consequence: the t* row of {level}/{cls} {label}, "
+                f"replicate {name}" + ("" if key is None else f", bin {key}") + " "
+                "occurs more than once"
+            )
+        bins[key] = (bool(fitted), float(value))
+    return result
+
+
+def _check_set_bins(
+    values: Mapping[int | None, object], bins: Sequence[int | None], where: str
+) -> None:
+    """Require one threshold row per bin of a set (``None``: the set's one).
+
+    Raises:
+        ValueError: If a bin has no row, or a row is of a bin outside the set.
+    """
+    lacking = [depth for depth in bins if depth not in values]
+    if lacking:
+        raise ValueError(
+            f"np5_tstar_consequence: {where} has no t* row for bin "
+            + ", ".join(str(depth) for depth in lacking)
+        )
+    extra = [depth for depth in values if depth not in bins]
+    if extra:
+        raise ValueError(
+            f"np5_tstar_consequence: {where} has t* rows for bins {extra} outside "
+            "the set"
+        )
 
 
 def np5_tstar_consequence(
@@ -3301,18 +3378,30 @@ def np5_tstar_consequence(
     """NP5's t* part as a consequence check (pre-registration §23.21 R3 (c)).
 
     Revision R3 (c), approved by the user on 2026-10-07: at each tested set,
-    each replicate's own t* (``thresholds``: ``np5_set_thresholds``, or for
-    version 7 the ensemble's pooled t* re-fitted per replicate,
-    ``np5_ensemble_set_thresholds``), applied to the base recipe's pooled
-    held-out seed-0 calls of the class in the set's scope (the population
-    the set was tested on; any confidence, ``bp`` >= t* within 1e-9), gives
-    an unweighted point precision >= target_L - ``tstar_precision_margin``
-    (0.02). A replicate without a fit is left out (``unfitted``); a fitted
-    one without a threshold fails the set (``missing``: it would emit
-    nothing there). A threshold no base call reaches gives no precision and
-    fails the set. The check asks whether the threshold's wobble changes
-    what is emitted, not how much it wobbles: the t* spread
-    (``np5_tstar_spread``) is reported only.
+    each replicate's own t*, applied to the base recipe's pooled held-out
+    seed-0 calls of the class in the set's scope (the population the set
+    was tested on; any confidence, ``bp`` >= t* within 1e-9), gives an
+    unweighted point precision >= target_L - ``tstar_precision_margin``
+    (0.02). The thresholds come from:
+
+    - ``member`` (``np5_set_thresholds``): the member's t* re-fitted on the
+      set's calls in the replicate, one per (set, replicate), applied to
+      every call of the set;
+    - ``ensemble`` (version 7, ``np5_ensemble_set_thresholds``): the
+      ensemble's pooled t* re-fitted per replicate, one per (set,
+      replicate, bin of the set). Each call is kept at its own bin's
+      threshold, as the replicate's emission applies them (pre-registration
+      §23.22): a ">= D_P" set's deeper bins may take the replicate's deep
+      pool's t*.
+
+    A replicate without a fit (no bin of the set fitted) is left out
+    (``unfitted``); one fitted without a threshold, at the set or at any bin
+    of it, fails the set (``missing``: it would emit nothing there). An
+    unfitted bin of an otherwise fitted replicate emits none of its calls.
+    A threshold no base call reaches gives no precision and fails the set.
+    The check asks whether the threshold's wobble changes what is emitted,
+    not how much it wobbles: the t* spread (``np5_tstar_spread``) is
+    reported only.
 
     Args:
         replicates: Per (group, seed label), the base simulation's cells
@@ -3320,8 +3409,8 @@ def np5_tstar_consequence(
             ``pooled_held_out_cells``).
         tested: The tested sets per (level, class) (version 7: the
             member's), built on the same pooled seed-0 calls.
-        thresholds: Per (tested set, replicate), the replicate's threshold
-            (``NP5_THRESHOLD_COLUMNS``).
+        thresholds: The replicates' thresholds: ``NP5_THRESHOLD_COLUMNS``
+            (``member``) or ``NP5_ENSEMBLE_THRESHOLD_COLUMNS`` (``ensemble``).
         targets: target_L per level (``level_targets``).
         default_group: The group whose fit half the frozen thresholds were
             fitted on (required, as in NP3).
@@ -3331,20 +3420,38 @@ def np5_tstar_consequence(
         seed: The seed label of the pooled rows (0).
         member: The version-7 emission member of the base rows.
         threshold_from: Where the thresholds come from (``member`` or
-            ``ensemble``; reported).
+            ``ensemble``).
 
     Returns:
         One row per tested set, sorted by level, class and set, columns
         ``NP5_CONSEQUENCE_COLUMNS``: ``failed`` lists each failing
-        replicate as ``group/seed:t*->precision``; ``evaluable`` is whether
-        any replicate was scored.
+        replicate as ``group/seed:t*->precision`` (``ensemble``:
+        ``group/seed:bin=t*,...->precision`` over the bins with a
+        threshold); ``evaluable`` is whether any replicate was scored.
 
     Raises:
-        ValueError: If a tested set has no threshold row, a level has no
-            target, a column is missing, no row is left after the filters,
-            a key's tested sets are an empty list or of another key, or for
-            the default group's inputs (``held_out_replicates``).
+        ValueError: For an unknown ``threshold_from``, thresholds of the
+            other source (a ``depth`` column exactly for ``ensemble``), a
+            tested set (``ensemble``: a bin of it) without a threshold row
+            for a replicate or with one more than once, a level without a
+            target, a missing column, no row left after the filters, a
+            key's tested sets that are an empty list or of another key, or
+            for the default group's inputs (``held_out_replicates``).
     """
+    if threshold_from not in (NP5_TSTAR_FROM_MEMBER, NP5_TSTAR_FROM_ENSEMBLE):
+        raise ValueError(
+            f"np5_tstar_consequence: threshold_from must be "
+            f"{NP5_TSTAR_FROM_MEMBER!r} or {NP5_TSTAR_FROM_ENSEMBLE!r}, got "
+            f"{threshold_from!r}"
+        )
+    per_bin = threshold_from == NP5_TSTAR_FROM_ENSEMBLE
+    if per_bin != ("depth" in thresholds.columns):
+        raise ValueError(
+            "np5_tstar_consequence: the ensemble's thresholds are read per bin "
+            "(np5_ensemble_set_thresholds, a depth column) and a member's per "
+            f"set (np5_set_thresholds); got threshold_from={threshold_from!r} "
+            f"with{'' if 'depth' in thresholds.columns else 'out'} a depth column"
+        )
     _check_tested(tested)
     _require_columns(
         thresholds,
@@ -3368,20 +3475,8 @@ def np5_tstar_consequence(
     index = _ReplicateIndex(frame, np.zeros(len(frame), dtype=bool))
     bp = np.nan_to_num(frame["bp"].to_numpy(np.float64), nan=-1.0)
     correct = frame["correct"].to_numpy(bool)
-    by_set: dict[tuple[str, str, str], list[tuple[str, bool, float]]] = {}
-    for level, cls, label, group, replicate, fitted, value in zip(
-        thresholds["level"].astype(str),
-        thresholds["class"].astype(str),
-        thresholds["set"].astype(str),
-        thresholds["group"].astype(str),
-        thresholds["seed"],
-        thresholds["fitted"].astype(bool),
-        thresholds["threshold"].to_numpy(np.float64),
-        strict=True,
-    ):
-        by_set.setdefault((level, cls, label), []).append(
-            (f"{group}/{replicate}", bool(fitted), float(value))
-        )
+    call_depth = frame["depth"].to_numpy(np.int64)
+    by_set = _consequence_thresholds(thresholds, per_bin=per_bin)
     records: list[dict[str, object]] = []
     for (level, cls), items in sorted(tested.items(), key=lambda pair: pair[0]):
         for item in items or ():
@@ -3396,19 +3491,51 @@ def np5_tstar_consequence(
                 raise ValueError(f"np5_tstar_consequence: no target for {level!r}")
             limit = float(targets[level]) - margin
             called = index.called_positions(item)
+            bins: list[int | None] = (
+                [*sorted(int(depth) for depth in item.depths)] if per_bin else [None]
+            )
             precisions: list[float] = []
             failed: list[str] = []
             missing: list[str] = []
             unfitted: list[str] = []
-            for name, fitted, value in rows:
-                if not math.isfinite(value):
-                    (missing if fitted else unfitted).append(name)
+            for name, values in rows.items():
+                _check_set_bins(
+                    values, bins, f"replicate {name} of {level}/{cls} {label}"
+                )
+                applied = {
+                    depth: value
+                    for depth, (_, value) in values.items()
+                    if math.isfinite(value)
+                }
+                if any(
+                    fit and not math.isfinite(value) for fit, value in values.values()
+                ):
+                    missing.append(name)
                     continue
-                kept = called[bp[called] >= value - _TOLERANCE]
+                if not applied:
+                    unfitted.append(name)
+                    continue
+                if per_bin:
+                    at_call = np.array(
+                        [
+                            applied.get(int(depth), math.nan)
+                            for depth in call_depth[called]
+                        ],
+                        dtype=np.float64,
+                    )
+                    shown = ",".join(
+                        f"{depth}={value:.3f}"
+                        for depth, value in sorted(applied.items())
+                    )
+                else:
+                    at_call = np.full(len(called), applied[None], dtype=np.float64)
+                    shown = f"{applied[None]:.3f}"
+                keep = np.isfinite(at_call) & (bp[called] >= at_call - _TOLERANCE)
+                kept = called[keep]
                 precision = float(correct[kept].mean()) if len(kept) else math.nan
                 precisions.append(precision)
                 if not precision >= limit - _TOLERANCE:
-                    failed.append(f"{name}:{value:.3f}->{precision:.4f}")
+                    failed.append(f"{name}:{shown}->{precision:.4f}")
             finite = [value for value in precisions if math.isfinite(value)]
             records.append(
                 {
@@ -6180,7 +6307,8 @@ GATE_P_SCORED_READINGS: Final[tuple[str, ...]] = (
     "NP5 t* (R3 (c)): each replicate's t*, applied to the base's pooled "
     "seed-0 calls of the set, gives point precision >= target_L - 0.02 "
     "(np5_tstar_consequence; version 7: the ensemble's t* re-fitted per "
-    "replicate); the t* spread (np5_spread) is reported only",
+    "replicate, each call at its own bin's threshold, §23.22); the t* spread "
+    "(np5_spread) is reported only",
     "NP5 agreement (R6): a bin is compared only where the base and the "
     "replicate each hold >= 50 test cells; the either-side reading is "
     "reported (*_union columns)",

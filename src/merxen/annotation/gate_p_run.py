@@ -103,7 +103,8 @@ reading revised the same day by §23.21 R7):
   (``gate_p.np5_rederive_ensemble``, with the bundle's lineage) and compared
   with the frozen ensemble decisions, the same table for every member; R6
   and R2 apply to it. R3 (c)'s consequence check reads the ensemble's t*
-  re-fitted per replicate (``gate_p.np5_ensemble_set_thresholds``). Each
+  re-fitted per replicate at every bin of a tested set
+  (``gate_p.np5_ensemble_set_thresholds``, pre-registration §23.22). Each
   member's own re-derivation against its own base decisions (the default
   donor at seed 0) is reported only (``np5_agreement__<member>``).
 - NP9's measured time is PREP (the primary and its held-out test set, from

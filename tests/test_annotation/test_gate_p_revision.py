@@ -311,40 +311,140 @@ def _ensemble_rows(values: Mapping[int, tuple[float | None, int]]) -> pd.DataFra
 
 
 def test_np5_ensemble_set_thresholds_read_the_rederived_ensemble_t_star() -> None:
-    """R3 (c), version 7: each replicate's t* is the ensemble's pooled t*
-    re-fitted on that replicate (``np5_rederive_ensemble``), read at each
-    tested set's shallowest bin; a fit needs ``min_cells_per_bin`` cells.
+    """R3 (c), version 7: each replicate's thresholds are the ensemble's
+    pooled t* re-fitted on that replicate (``np5_rederive_ensemble``), read
+    at every bin of each tested set (pre-registration §23.22: a ">= D_P"
+    set's deeper bins may take the replicate's deep pool's t*); a fit needs
+    ``min_cells_per_bin`` fit cells, exactly that many included.
     """
     tested: dict[tuple[str, str], list[res.GatePTestedSet] | None] = {
         ("broad", "X"): [_set((120, 250)), _set((60,))],
         ("broad", "Y"): None,
     }
+    minimum = settings().min_cells_per_bin
     rederived = {
-        ("D1", 0): _ensemble_rows({60: (0.85, 100), 120: (0.80, 100)}),
-        # 120: fitted, no t* (missing); 60: too few fit cells (unfitted).
-        ("D2", 1): _ensemble_rows({60: (None, 10), 120: (None, 100)}),
+        ("D1", 0): _ensemble_rows(
+            {60: (0.85, 100), 120: (0.80, 100), 250: (0.55, 100)}
+        ),
+        # 120: fitted (exactly the minimum), no t* (missing); 250 and 60:
+        # one fit cell short (unfitted).
+        ("D2", 1): _ensemble_rows(
+            {60: (None, minimum - 1), 120: (None, minimum), 250: (None, minimum - 1)}
+        ),
     }
     table = gp.np5_ensemble_set_thresholds(rederived, tested, settings())
-    assert list(table.columns) == list(gp.NP5_THRESHOLD_COLUMNS)
+    assert list(table.columns) == list(gp.NP5_ENSEMBLE_THRESHOLD_COLUMNS)
     view = {
-        (row["set"], row["group"], int(row["seed"])): row for _, row in table.iterrows()
+        (row["set"], row["group"], int(row["seed"]), int(row["depth"])): row
+        for _, row in table.iterrows()
     }
     assert set(view) == {
-        (label, group, seed)
-        for label in (">=120", "60")
+        (label, group, seed, depth)
+        for label, depths in ((">=120", (120, 250)), ("60", (60,)))
         for group, seed in (("D1", 0), ("D2", 1))
+        for depth in depths
     }
-    assert view[(">=120", "D1", 0)]["threshold"] == pytest.approx(0.80)
-    assert view[("60", "D1", 0)]["threshold"] == pytest.approx(0.85)
-    assert view[(">=120", "D1", 0)]["set_min_depth"] == 120
-    missing = view[(">=120", "D2", 1)]
+    assert view[(">=120", "D1", 0, 120)]["threshold"] == pytest.approx(0.80)
+    assert view[(">=120", "D1", 0, 250)]["threshold"] == pytest.approx(0.55)
+    assert view[("60", "D1", 0, 60)]["threshold"] == pytest.approx(0.85)
+    assert set(table[table["set"] == ">=120"]["set_min_depth"]) == {120}
+    missing = view[(">=120", "D2", 1, 120)]
     assert missing["fitted"] and math.isnan(missing["threshold"])
-    unfitted = view[("60", "D2", 1)]
-    assert not unfitted["fitted"] and math.isnan(unfitted["threshold"])
-    spread = gp.np5_tstar_spread(table, _np5())
-    assert spread.set_index("set").loc[">=120", "missing"] == "D2/1"
+    for key in ((">=120", "D2", 1, 250), ("60", "D2", 1, 60)):
+        assert not view[key]["fitted"] and math.isnan(view[key]["threshold"])
     with pytest.raises(ValueError, match="no replicates"):
         gp.np5_ensemble_set_thresholds({}, tested, settings())
+
+
+POOLED_X: dict[tuple[str, str], list[res.GatePTestedSet] | None] = {
+    ("broad", "X"): [_set((120, 250))]
+}
+
+
+def _pooled_cells() -> pd.DataFrame:
+    """Base calls of broad X's ">=120" set: 200 at 120 (bp .95, right) and
+    200 at 250 (100 at bp .95, right; 100 at bp .60, 40 right).
+    """
+    at_120 = bin_cells(np.full(200, 0.95), np.ones(200, dtype=bool), depth=120)
+    at_250 = bin_cells(
+        np.concatenate([np.full(100, 0.95), np.full(100, 0.60)]),
+        np.concatenate([np.ones(100, dtype=bool), np.arange(100) < 40]),
+        depth=250,
+    )
+    return pd.concat([at_120, at_250], ignore_index=True)
+
+
+def _ensemble_consequence(
+    thresholds: pd.DataFrame, *, threshold_from: str = gp.NP5_TSTAR_FROM_ENSEMBLE
+) -> pd.DataFrame:
+    return gp.np5_tstar_consequence(
+        {("D1", 0): _pooled_cells()},
+        POOLED_X,
+        thresholds,
+        gp.level_targets(AnnotationThresholds(), ["broad"]),
+        default_group=None,
+        threshold_from=threshold_from,
+    )
+
+
+def _pooled_consequence(rows: pd.DataFrame) -> pd.Series:
+    """R3 (c), version 7, of one replicate's re-derived ensemble ``rows``."""
+    thresholds = gp.np5_ensemble_set_thresholds({("D1", 0): rows}, POOLED_X, settings())
+    table = _ensemble_consequence(thresholds)
+    assert list(table.columns) == list(gp.NP5_CONSEQUENCE_COLUMNS)
+    assert len(table) == 1
+    return table.iloc[0]
+
+
+def test_np5_ensemble_consequence_applies_each_bin_s_threshold() -> None:
+    """R3 (c), version 7 (pre-registration §23.22): a replicate's re-derived
+    ensemble applies .85 at 120 but its deep pool's .55 at 250, so its
+    emission of the ">=120" set's base calls is 200 + 100 + 40 right of 400
+    = .85 < .88 (target_L .90 - .02): the set fails. Read at the shallowest
+    bin only (.85 for every call), the precision would be 1.0.
+    """
+    row = _pooled_consequence(_ensemble_rows({120: (0.85, 100), 250: (0.55, 100)}))
+    assert row["threshold_from"] == gp.NP5_TSTAR_FROM_ENSEMBLE
+    assert int(row["n_called"]) == 400 and int(row["n_scored"]) == 1
+    assert row["min_precision"] == pytest.approx(0.85)
+    assert not row["passed"]
+    assert row["failed"] == "D1/0:120=0.850,250=0.550->0.8500"
+    # The deep pool at .65 keeps the .60 band out: 300 / 300.
+    row = _pooled_consequence(_ensemble_rows({120: (0.85, 100), 250: (0.65, 100)}))
+    assert row["passed"] and row["min_precision"] == pytest.approx(1.0)
+    # A fitted bin of the set without a threshold fails the set (it would
+    # emit none of that bin's calls), at any bin.
+    row = _pooled_consequence(_ensemble_rows({120: (0.85, 100), 250: (None, 100)}))
+    assert not row["passed"] and row["missing"] == "D1/0"
+    # An unfitted bin is left out: its calls are not emitted (200 / 200).
+    row = _pooled_consequence(_ensemble_rows({120: (0.85, 100), 250: (None, 10)}))
+    assert row["passed"] and row["missing"] == "" and row["unfitted"] == ""
+    assert row["min_precision"] == pytest.approx(1.0)
+    # No bin fitted: the replicate is left out.
+    row = _pooled_consequence(_ensemble_rows({120: (None, 10), 250: (None, 10)}))
+    assert row["passed"] and row["unfitted"] == "D1/0" and not row["evaluable"]
+
+
+def test_np5_consequence_refuses_thresholds_of_the_other_source() -> None:
+    """A member's per-set t* is no per-bin ensemble table, and back; every
+    bin of a set needs exactly one row per replicate.
+    """
+    rows = _ensemble_rows({120: (0.85, 100), 250: (0.65, 100)})
+    per_bin = gp.np5_ensemble_set_thresholds({("D1", 0): rows}, POOLED_X, settings())
+    member = _thresholds({("D1", 0): 0.55}, label=">=120")
+    with pytest.raises(ValueError, match="per bin"):
+        _ensemble_consequence(member)
+    with pytest.raises(ValueError, match="per bin"):
+        _ensemble_consequence(per_bin, threshold_from=gp.NP5_TSTAR_FROM_MEMBER)
+    with pytest.raises(ValueError, match="threshold_from"):
+        _ensemble_consequence(member, threshold_from="pool")
+    with pytest.raises(ValueError, match="bin 250"):
+        _ensemble_consequence(per_bin[per_bin["depth"] != 250])
+    with pytest.raises(ValueError, match="more than once"):
+        _ensemble_consequence(pd.concat([per_bin, per_bin.iloc[:1]], ignore_index=True))
+    # The member form applies one t* per (set, replicate) to every bin.
+    row = _ensemble_consequence(member, threshold_from=gp.NP5_TSTAR_FROM_MEMBER)
+    assert row.iloc[0]["failed"] == "D1/0:0.550->0.8500"
 
 
 # --------------------------------------------------------------------------
