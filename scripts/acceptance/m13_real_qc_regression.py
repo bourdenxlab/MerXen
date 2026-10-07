@@ -17,7 +17,9 @@ C15), and writes the outcome table under ``$A/m13/regression/``:
    platform's own cells as the offset reference, the store's primary
    points), into ``registration/<seg>/<sample>_registration_qc.json``.
 2. ``resolve``: ``merxen annotate-resolve`` per pair x segmentation and
-   variant, into ``resolve/<variant>/<pair>/<seg>/``:
+   variant, into ``resolve/<variant>/<pair>/<seg>/`` (with
+   ``regression_rerun.json``: the command, the code commit and whether this
+   script matches it, and the exit status):
 
    * ``qc``: the registered configuration (species defaults: the QC on,
      the ``node`` referee comparator, G1 warn-only by D23 (b), the seeded
@@ -25,7 +27,11 @@ C15), and writes the outcome table under ``$A/m13/regression/``:
    * ``qc_free``: ``real_qc.enabled`` false, the QC-free re-run NR1
      compares with;
    * ``class_comparator``: the referee's ``class`` comparator, reported
-     beside the registered statistic (D18; never decides).
+     beside the registered statistic (D18; never decides);
+   * ``applied_after_gate``: the human gate counted as merged and G1's fail
+     rule at §8.8's effect (``gate_failed``, D23 (a)), reported only (it
+     adopts neither): the lowering effects the ``qc`` variant only warns
+     about are applied here, so NR1 is also checked where the QC lowers.
 
 3. ``table``: the outcome table and the readings the M13 decisions ask of
    C17, with a report:
@@ -50,7 +56,9 @@ C15), and writes the outcome table under ``$A/m13/regression/``:
      + ``exclude_hard``, a tightening) can be decided and recorded before
      any QC output of the new family is read;
    * ``nr1.csv``: NR1's downgrade-only comparison of ``qc`` with
-     ``qc_free``, and the identity of both with the M8 label tables (the
+     ``qc_free`` (trivially satisfied when ``qc`` lowers nothing, as on a
+     warn-only family) and of ``applied_after_gate`` with ``qc_free``, and
+     the identity of ``qc`` and ``qc_free`` with the M8 label tables (the
      version-7 column ``flag_nonneuronal_high_depth`` that M8 predates must
      be null on these version-6 bundles);
    * ``regression_summary.json`` and ``REPORT.txt``.
@@ -62,8 +70,12 @@ No MapMyCells, no PREP and no Nextflow.
 
 Usage::
 
+    PYTHONPATH=src python scripts/acceptance/m13_real_qc_regression.py all --dry-run
     PYTHONPATH=src python scripts/acceptance/m13_real_qc_regression.py all
     PYTHONPATH=src python scripts/acceptance/m13_real_qc_regression.py table
+
+``--dry-run`` lists the registration checks and prints the RESOLVE commands;
+it reads no store, runs nothing and writes nothing.
 """
 
 from __future__ import annotations
@@ -102,7 +114,15 @@ SCORED_SEGMENTATION = "proseg_hybrid"
 VARIANT_QC = "qc"
 VARIANT_QC_FREE = "qc_free"
 VARIANT_CLASS = "class_comparator"
-VARIANTS: tuple[str, ...] = (VARIANT_QC, VARIANT_QC_FREE, VARIANT_CLASS)
+VARIANT_APPLIED = "applied_after_gate"
+VARIANTS: tuple[str, ...] = (
+    VARIANT_QC,
+    VARIANT_QC_FREE,
+    VARIANT_CLASS,
+    VARIANT_APPLIED,
+)
+# An NR1 table cell of a sample the applied_after_gate variant did not cover.
+APPLIED_NOT_RUN = f"{VARIANT_APPLIED} not run"
 
 # The layer keys of ``workflows/main.nf`` ``analysisLayerKeys`` and the
 # registration reference of ``workflows/modules/qc.nf`` (the platform's own
@@ -325,8 +345,15 @@ def variant_dir(out_dir: Path, variant: str, pair: str, segmentation: str) -> Pa
 def variant_config(variant: str) -> dict[str, Any] | None:
     """Return the annotation config of a variant (``None``: species defaults).
 
+    ``applied_after_gate`` is reported only: it counts the human gate as
+    merged (D20 (b) keeps it ``pending`` until gate H's acceptance PR into
+    ``main``) and sets G1's fail rule to ``gate_failed`` (D23 (a), not yet
+    adopted), so the lowering effects are applied and NR1 is checked on them.
+    It changes no threshold.
+
     Args:
-        variant: ``qc``, ``qc_free`` or ``class_comparator``.
+        variant: ``qc``, ``qc_free``, ``class_comparator`` or
+            ``applied_after_gate``.
 
     Returns:
         The config record (``AnnotationConfig`` JSON), or ``None`` for the
@@ -341,6 +368,17 @@ def variant_config(variant: str) -> dict[str, Any] | None:
         return {"species": "human", "real_qc": {"enabled": False}}
     if variant == VARIANT_CLASS:
         return {"species": "human", "real_qc": {"marker_referee_comparator": "class"}}
+    if variant == VARIANT_APPLIED:
+        return {
+            "species": "human",
+            "real_qc": {
+                "seeded_families_warn_only_until_gate": {
+                    "human": "merged",
+                    "mouse": "pending",
+                },
+                "registration_g1_effect": "gate_failed",
+            },
+        }
     raise RegressionError(f"unknown variant {variant!r}; expected one of {VARIANTS}")
 
 
@@ -465,7 +503,7 @@ def registration_record(
         points_key=points_key,
         reference_shape_key=reference_shape_key,
     )
-    record = result.to_dict()
+    record: dict[str, Any] = dict(result.to_dict())
     record["inputs"] = {
         "zarr": str(zarr),
         "shape_key": shape_key,
@@ -487,6 +525,7 @@ def run_registration(
     results: Path,
     force: bool = False,
     threads: int = 4,
+    dry_run: bool = False,
 ) -> list[Path]:
     """Compute the registration check of every section x segmentation.
 
@@ -499,13 +538,12 @@ def run_registration(
         force: Recompute existing checks.
         threads: Dask workers reading the points (the QC stage's
             ``DASK_NUM_WORKERS``).
+        dry_run: Only list the checks (each store and its output file);
+            read no store and write nothing.
 
     Returns:
-        The check files.
+        The check files (computed, kept, or to compute).
     """
-    import dask
-
-    dask.config.set(num_workers=threads)
     written: list[Path] = []
     for segmentation in segmentations:
         for pair in pairs:
@@ -513,13 +551,29 @@ def run_registration(
             for sample_id, platform in run.samples.items():
                 path = registration_path(out_dir, segmentation, sample_id)
                 written.append(path)
+                shape_key, reference = layer_keys(platform, segmentation)
+                zarr = latest_zarr(results, pair, platform)
                 if path.exists() and not force:
                     logger.info("registration %s %s: kept", sample_id, segmentation)
                     continue
-                shape_key, reference = layer_keys(platform, segmentation)
+                if dry_run:
+                    logger.info(
+                        "registration %s %s: would compute %s (%s, reference %s) "
+                        "into %s",
+                        sample_id,
+                        segmentation,
+                        zarr,
+                        shape_key,
+                        reference,
+                        path,
+                    )
+                    continue
+                import dask
+
+                dask.config.set(num_workers=threads)
                 started = time.time()
                 record = registration_record(
-                    latest_zarr(results, pair, platform),
+                    zarr,
                     shape_key=shape_key,
                     reference_shape_key=reference,
                 )
@@ -572,7 +626,8 @@ def run_resolve(
         dry_run: Only return the commands.
 
     Returns:
-        The commands (run, or to run).
+        The commands run, or to run under ``dry_run``; a finished re-run (its
+        summary exists, without ``force``) is kept, logged and left out.
 
     Raises:
         RegressionError: If a registration check is missing or a re-run
@@ -611,11 +666,24 @@ def run_resolve(
                     protected_roots=protected_roots,
                     fallback=fallback,
                 )
-                commands.append(command)
                 summary = target / f"{pair}_resolve_summary.json"
-                if dry_run or (summary.exists() and not force):
+                if summary.exists() and not force:
+                    logger.info("resolve %s %s %s: kept", variant, pair, segmentation)
+                    continue
+                commands.append(command)
+                if dry_run:
                     continue
                 target.mkdir(parents=True, exist_ok=True)
+                record: dict[str, Any] = {
+                    "variant": variant,
+                    "pair": pair,
+                    "segmentation": segmentation,
+                    "config": config,
+                    "command": command,
+                    "code": _code_record(),
+                    "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                }
+                _write_rerun_record(target, record)
                 started = time.time()
                 with (target / "resolve.log").open("w", encoding="utf-8") as log:
                     completed = subprocess.run(
@@ -625,6 +693,9 @@ def run_resolve(
                         env={**os.environ, **SINGLE_THREAD_ENV},
                         check=False,
                     )
+                record["returncode"] = completed.returncode
+                record["seconds"] = round(time.time() - started, 1)
+                _write_rerun_record(target, record)
                 if completed.returncode != 0:
                     raise RegressionError(
                         f"RESOLVE {variant} {pair} {segmentation} failed "
@@ -656,6 +727,21 @@ def _effect_after_gate(outcome: Mapping[str, Any]) -> str:
     return str(details.get("warn_only_effect") or outcome.get("effect"))
 
 
+def _gate_cap_after_gate(outcome: Mapping[str, Any]) -> str | None:
+    """Return the gate cap an outcome sets once the species gate merges (D20).
+
+    ``None`` for an outcome that did not fire: a check records the cap it
+    would set (``gate_cap``) also when it passes or is not evaluable, and
+    that cap caps nothing. For a fired one, the cap the seeded families'
+    warn-only demotion withheld, else its own (``None`` without a cap).
+    """
+    if not outcome.get("fired"):
+        return None
+    details = outcome.get("details") or {}
+    cap = details.get("warn_only_gate_cap") or outcome.get("gate_cap")
+    return None if cap is None else str(cap)
+
+
 def _value(outcome: Mapping[str, Any]) -> float | None:
     details = outcome.get("details") or {}
     key = VALUE_KEYS.get(str(outcome.get("check")))
@@ -664,7 +750,7 @@ def _value(outcome: Mapping[str, Any]) -> float | None:
         return None if value is None else float(value)
     if outcome.get("check") == "flag_rates":
         n, k = details.get("n_strata"), details.get("n_uninformative")
-        return float(k) / float(n) if n else None
+        return float(k) / float(n) if n and k is not None else None
     return None
 
 
@@ -691,7 +777,6 @@ def outcome_rows(
         if not block.get("enabled"):
             raise RegressionError(f"{pair} {segmentation} {sample_id}: QC not enabled")
         for outcome in block.get("outcomes") or []:
-            details = outcome.get("details") or {}
             rows.append(
                 {
                     "pair": pair,
@@ -706,8 +791,7 @@ def outcome_rows(
                     "fired": bool(outcome.get("fired")),
                     "effect": outcome.get("effect"),
                     "effect_after_gate": _effect_after_gate(outcome),
-                    "gate_cap_after_gate": details.get("warn_only_gate_cap")
-                    or outcome.get("gate_cap"),
+                    "gate_cap_after_gate": _gate_cap_after_gate(outcome),
                     "warn_only": bool(block.get("warn_only")),
                     "value": _value(outcome),
                     "reason": outcome.get("reason"),
@@ -721,12 +805,19 @@ def _gate(item: Mapping[str, Any]) -> dict[str, Any]:
     return dict((item.get("resolution") or {}).get("gate") or {})
 
 
+def _downgrades(item: Mapping[str, Any] | None) -> list[str]:
+    """Return a sample's applied lowering effects (``real_qc.downgrades``)."""
+    block = (item or {}).get("real_qc") or {}
+    return [str(token) for token in block.get("downgrades") or []]
+
+
 def sample_rows(
     qc_summary: Mapping[str, Any],
     free_summary: Mapping[str, Any] | None,
     *,
     pair: str,
     segmentation: str,
+    applied_summary: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Return one row per sample: gate before / after QC and the check tokens.
 
@@ -735,16 +826,20 @@ def sample_rows(
         free_summary: The ``qc_free`` variant's summary (``None``: not run).
         pair: The pair id.
         segmentation: The segmentation.
+        applied_summary: The ``applied_after_gate`` variant's summary
+            (reported only; ``None``: not run).
 
     Returns:
         The rows.
     """
     rows: list[dict[str, Any]] = []
     free_samples = (free_summary or {}).get("samples") or {}
+    applied_samples = (applied_summary or {}).get("samples") or {}
     for sample_id, item in sorted((qc_summary.get("samples") or {}).items()):
         block = item.get("real_qc") or {}
         gate = _gate(item)
         free_gate = _gate(free_samples.get(sample_id) or {})
+        applied_item = applied_samples.get(sample_id)
         row: dict[str, Any] = {
             "pair": pair,
             "segmentation": segmentation,
@@ -760,7 +855,13 @@ def sample_rows(
                 str(reason)
                 for reason in (block.get("effects") or {}).get("warning_reasons", [])
             ),
-            "downgrades": "; ".join(str(d) for d in block.get("downgrades") or []),
+            "downgrades": "; ".join(_downgrades(item)),
+            "gate_level_applied_after_gate": None
+            if applied_item is None
+            else _gate(applied_item).get("level"),
+            "downgrades_applied_after_gate": None
+            if applied_item is None
+            else "; ".join(_downgrades(applied_item)),
         }
         for check, token in sorted((block.get("per_check") or {}).items()):
             row[f"check:{check}"] = token
@@ -1141,6 +1242,38 @@ def _sample_files(directory: Path, item: Mapping[str, Any]) -> tuple[Path, Path]
     return directory / str(item["labels"]), directory / str(item["annotation_manifest"])
 
 
+def _nr1_violations(
+    *,
+    free_dir: Path,
+    free_item: Mapping[str, Any],
+    free: pd.DataFrame,
+    applied_dir: Path,
+    applied_item: Mapping[str, Any],
+    applied: pd.DataFrame,
+) -> str:
+    """Return NR1's verdict on one sample of a QC-applied run (``none``: none).
+
+    ``real_qc.downgrade_only_violations`` of the applied run against the
+    QC-free run: label tables, provenance, the gates with their level
+    reasons and the applied run's QC effects.
+    """
+    from merxen.annotation.real_qc import downgrade_only_violations
+
+    problems = downgrade_only_violations(
+        free,
+        applied,
+        species="human",
+        free_provenance=read_json(free_dir / str(free_item["annotation_manifest"])),
+        applied_provenance=read_json(
+            applied_dir / str(applied_item["annotation_manifest"])
+        ),
+        free_gate=_gate(free_item),
+        applied_gate=_gate(applied_item),
+        qc=(applied_item.get("real_qc") or {}).get("effects"),
+    )
+    return "; ".join(problems) or "none"
+
+
 def nr1_rows(
     *,
     pair: str,
@@ -1151,8 +1284,15 @@ def nr1_rows(
     free_summary: Mapping[str, Any] | None,
     m8_dir: Path,
     m8_summary: Mapping[str, Any],
+    applied_dir: Path | None = None,
+    applied_summary: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Return NR1 (``qc`` vs ``qc_free``) and the identity with M8 per sample.
+    """Return NR1 (``qc`` and ``applied_after_gate`` vs ``qc_free``) per sample.
+
+    NR1 of the ``qc`` variant is trivially satisfied on a sample whose QC
+    lowers nothing (``qc_lowerings`` empty, as on a warn-only family): the
+    ``applied_after_gate`` variant applies the withheld effects, so NR1 is
+    also checked where the QC lowers.
 
     Args:
         pair: The pair id.
@@ -1163,59 +1303,77 @@ def nr1_rows(
         free_summary: Its summary.
         m8_dir: The M8 RESOLVE directory.
         m8_summary: The M8 summary.
+        applied_dir: The ``applied_after_gate`` re-run's directory
+            (``None``: not run).
+        applied_summary: Its summary.
 
     Returns:
-        One row per sample: NR1's violations and both identities with M8.
+        One row per sample: the lowerings each QC-applied variant applied,
+        NR1's violations of each and the identity of ``qc`` and ``qc_free``
+        with M8.
     """
-    from merxen.annotation.real_qc import downgrade_only_violations
-
     rows: list[dict[str, Any]] = []
     m8_samples = m8_summary.get("samples") or {}
     free_samples = (free_summary or {}).get("samples") or {}
+    applied_samples = (applied_summary or {}).get("samples") or {}
     for sample_id, item in sorted((qc_summary.get("samples") or {}).items()):
-        labels_path, manifest_path = _sample_files(qc_dir, item)
-        applied = pd.read_parquet(labels_path)
+        labels_path, _ = _sample_files(qc_dir, item)
+        labels = pd.read_parquet(labels_path)
         old_item = m8_samples.get(sample_id)
         m8_labels = (
             None
             if old_item is None
             else pd.read_parquet(_sample_files(m8_dir, old_item)[0])
         )
+        applied_item = applied_samples.get(sample_id)
         row: dict[str, Any] = {
             "pair": pair,
             "segmentation": segmentation,
             "sample_id": sample_id,
             "platform": str(item.get("platform")).upper(),
-            "n_cells": len(applied),
+            "n_cells": len(labels),
+            "qc_lowerings": "; ".join(_downgrades(item)) or "none",
+            "applied_after_gate_lowerings": APPLIED_NOT_RUN
+            if applied_dir is None or applied_item is None
+            else "; ".join(_downgrades(applied_item)) or "none",
         }
         row["qc_vs_m8"] = (
             "no M8 table"
             if m8_labels is None
-            else "; ".join(label_identity(applied, m8_labels)) or "identical"
+            else "; ".join(label_identity(labels, m8_labels)) or "identical"
         )
         free_item = free_samples.get(sample_id)
         if free_dir is None or free_item is None:
             row["nr1_violations"] = "qc_free not run"
+            row["nr1_applied_after_gate_violations"] = "qc_free not run"
             row["qc_free_vs_m8"] = "qc_free not run"
+            rows.append(row)
+            continue
+        free = pd.read_parquet(_sample_files(free_dir, free_item)[0])
+        row["nr1_violations"] = _nr1_violations(
+            free_dir=free_dir,
+            free_item=free_item,
+            free=free,
+            applied_dir=qc_dir,
+            applied_item=item,
+            applied=labels,
+        )
+        if applied_dir is None or applied_item is None:
+            row["nr1_applied_after_gate_violations"] = APPLIED_NOT_RUN
         else:
-            free_labels_path, free_manifest_path = _sample_files(free_dir, free_item)
-            free = pd.read_parquet(free_labels_path)
-            problems = downgrade_only_violations(
-                free,
-                applied,
-                species="human",
-                free_provenance=read_json(free_manifest_path),
-                applied_provenance=read_json(manifest_path),
-                free_gate=_gate(free_item),
-                applied_gate=_gate(item),
-                qc=(item.get("real_qc") or {}).get("effects"),
+            row["nr1_applied_after_gate_violations"] = _nr1_violations(
+                free_dir=free_dir,
+                free_item=free_item,
+                free=free,
+                applied_dir=applied_dir,
+                applied_item=applied_item,
+                applied=pd.read_parquet(_sample_files(applied_dir, applied_item)[0]),
             )
-            row["nr1_violations"] = "; ".join(problems) or "none"
-            row["qc_free_vs_m8"] = (
-                "no M8 table"
-                if m8_labels is None
-                else "; ".join(label_identity(free, m8_labels)) or "identical"
-            )
+        row["qc_free_vs_m8"] = (
+            "no M8 table"
+            if m8_labels is None
+            else "; ".join(label_identity(free, m8_labels)) or "identical"
+        )
         rows.append(row)
     return rows
 
@@ -1225,6 +1383,14 @@ def nr1_rows(
 
 
 def _code_record() -> dict[str, Any]:
+    """Return the code a step ran with (commit, tree state and this script).
+
+    ``dirty`` is ``git status`` of the repository (ignored files are not
+    seen), so ``script_matches_head`` also compares this file with its blob
+    at ``HEAD``: false for an uncommitted change and for a copy run from
+    elsewhere (no blob at its path).
+    """
+
     def git(*args: str) -> str | None:
         try:
             return subprocess.run(
@@ -1238,13 +1404,31 @@ def _code_record() -> dict[str, Any]:
 
     import hashlib
 
+    script = Path(__file__).resolve()
+    try:
+        relative: str | None = script.relative_to(REPO.resolve()).as_posix()
+    except ValueError:
+        relative = None
+    head_blob = None if relative is None else git("rev-parse", f"HEAD:{relative}")
+    blob = git("hash-object", str(script))
     status = git("status", "--porcelain")
     return {
         "commit": git("rev-parse", "HEAD"),
         "branch": git("rev-parse", "--abbrev-ref", "HEAD"),
         "dirty": None if status is None else bool(status),
-        "script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "script": relative or str(script),
+        "script_sha256": hashlib.sha256(script.read_bytes()).hexdigest(),
+        "script_matches_head": None
+        if blob is None
+        else bool(head_blob and head_blob == blob),
     }
+
+
+def _write_rerun_record(target: Path, record: Mapping[str, Any]) -> None:
+    """Write a RESOLVE re-run's record (``regression_rerun.json``)."""
+    (target / "regression_rerun.json").write_text(
+        json.dumps(record, indent=1, default=str) + "\n", encoding="utf-8"
+    )
 
 
 def _frame(rows: Sequence[Mapping[str, Any]]) -> pd.DataFrame:
@@ -1323,7 +1507,10 @@ def build_tables(
             keys = {"pair": pair, "segmentation": segmentation}
             tables["outcomes"] += outcome_rows(qc_summary, **keys)
             tables["samples"] += sample_rows(
-                qc_summary, summaries[VARIANT_QC_FREE], **keys
+                qc_summary,
+                summaries[VARIANT_QC_FREE],
+                applied_summary=summaries[VARIANT_APPLIED],
+                **keys,
             )
             tables["marker_consistency"] += marker_rows(
                 qc_summary, summaries[VARIANT_CLASS], **keys
@@ -1332,6 +1519,7 @@ def build_tables(
             tables["flag_rates"] += flag_rate_rows(qc_summary, **keys)
             tables["registration_g1"] += g1_rows(qc_summary, **keys)
             free_summary = summaries[VARIANT_QC_FREE]
+            applied_summary = summaries[VARIANT_APPLIED]
             tables["nr1"] += nr1_rows(
                 **keys,
                 qc_dir=directories[VARIANT_QC],
@@ -1340,6 +1528,10 @@ def build_tables(
                 free_summary=free_summary,
                 m8_dir=run.resolve_dir,
                 m8_summary=m8_summary,
+                applied_dir=None
+                if applied_summary is None
+                else directories[VARIANT_APPLIED],
+                applied_summary=applied_summary,
             )
     out_dir.mkdir(parents=True, exist_ok=True)
     for name, rows in tables.items():
@@ -1384,17 +1576,7 @@ def build_tables(
         },
         "d22_flag_rates": d22_summary(tables["flag_rates"]),
         "d23_registration_g1": d23_verdict(tables["registration_g1"]),
-        "nr1": {
-            "violations": [
-                f"{row['sample_id']}/{row['segmentation']}: {row['nr1_violations']}"
-                for row in nr1
-                if row["nr1_violations"] not in ("none",)
-            ],
-            "qc_identical_to_m8": all(row["qc_vs_m8"] == "identical" for row in nr1),
-            "qc_free_identical_to_m8": all(
-                row["qc_free_vs_m8"] == "identical" for row in nr1
-            ),
-        },
+        "nr1": nr1_summary(nr1),
         "not_covered": [
             "ag7 and VZG2 (mouse) rows: chunk C22, after M6b",
             "proseg_mask and original_seg: no M8 RESOLVE outputs",
@@ -1406,6 +1588,54 @@ def build_tables(
     report = render_report(result, tables)
     (out_dir / "REPORT.txt").write_text(report, encoding="utf-8")
     return result
+
+
+def nr1_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Return NR1's reading over the ``nr1_rows`` of the regression.
+
+    Args:
+        rows: ``nr1_rows`` of every pair x segmentation.
+
+    Returns:
+        ``violations`` of the ``qc`` variant, the samples it lowered and
+        whether NR1 is ``trivially_satisfied`` (no sample lowered: the
+        comparison cannot fail); ``applied_after_gate`` with the same for
+        that variant (``run`` false when it was not run on every sample);
+        and the identity of ``qc`` and ``qc_free`` with M8.
+    """
+
+    def name(row: Mapping[str, Any]) -> str:
+        return f"{row['sample_id']}/{row['segmentation']}"
+
+    def listed(column: str) -> list[str]:
+        # Every sample with something other than "none" (a missing qc_free
+        # run is listed: NR1 was not checked there).
+        return [
+            f"{name(row)}: {row[column]}"
+            for row in rows
+            if row[column] not in ("none", APPLIED_NOT_RUN)
+        ]
+
+    qc_lowered = listed("qc_lowerings")
+    applied_run = bool(rows) and all(
+        row["applied_after_gate_lowerings"] != APPLIED_NOT_RUN for row in rows
+    )
+    applied_lowered = listed("applied_after_gate_lowerings")
+    return {
+        "violations": listed("nr1_violations"),
+        "lowered_samples": qc_lowered,
+        "trivially_satisfied": not qc_lowered,
+        "applied_after_gate": {
+            "run": applied_run,
+            "violations": listed("nr1_applied_after_gate_violations"),
+            "lowered_samples": applied_lowered,
+            "trivially_satisfied": not applied_lowered,
+        },
+        "qc_identical_to_m8": all(row["qc_vs_m8"] == "identical" for row in rows),
+        "qc_free_identical_to_m8": all(
+            row["qc_free_vs_m8"] == "identical" for row in rows
+        ),
+    }
 
 
 def _fmt(value: Any, digits: int = 3) -> str:
@@ -1433,7 +1663,9 @@ def render_report(
         "M13 C17: real-data QC regression on the M8 human pairs (set a)",
         "=" * 66,
         f"code {code.get('commit')} ({code.get('branch')}; dirty "
-        f"{code.get('dirty')}); M8 RESOLVE outputs read only; RESOLVE re-run "
+        f"{code.get('dirty')}; script matches HEAD "
+        f"{code.get('script_matches_head')}); M8 RESOLVE outputs read only; "
+        "RESOLVE re-run "
         "with M8's MAP output, bundles, gate denominators and alignment, plus "
         "the registration checks computed here.",
         "",
@@ -1531,19 +1763,38 @@ def render_report(
         f"{', '.join(d23['not_evaluated']) or 'none'})",
         f"   {d23['decision']}",
         "",
-        "6. NR1 (qc vs qc_free) and identity with the M8 label tables",
+        "6. NR1 (qc vs qc_free; applied_after_gate vs qc_free, reported) and "
+        "identity with the M8 label tables",
     ]
     for row in tables["nr1"]:
         lines.append(
             f"   {row['sample_id']:16s} {row['segmentation']:13s} NR1 "
-            f"{row['nr1_violations']}; qc vs M8 {row['qc_vs_m8']}; qc_free vs M8 "
-            f"{row['qc_free_vs_m8']}"
+            f"{row['nr1_violations']} (lowered: {row['qc_lowerings']}); "
+            f"applied_after_gate NR1 {row['nr1_applied_after_gate_violations']} "
+            f"(lowered: {row['applied_after_gate_lowerings']}); qc vs M8 "
+            f"{row['qc_vs_m8']}; qc_free vs M8 {row['qc_free_vs_m8']}"
         )
     nr1 = result["nr1"]
+    applied = nr1["applied_after_gate"]
     lines += [
-        f"   NR1 violations: {len(nr1['violations'])}; qc identical to M8: "
-        f"{nr1['qc_identical_to_m8']}; qc_free identical to M8: "
-        f"{nr1['qc_free_identical_to_m8']}",
+        f"   NR1 violations: {len(nr1['violations'])}"
+        + (
+            " (trivially satisfied: the qc variant lowered no sample; the "
+            "applied path is checked by applied_after_gate)"
+            if nr1["trivially_satisfied"]
+            else f" over {len(nr1['lowered_samples'])} lowered samples"
+        )
+        + f"; qc identical to M8: {nr1['qc_identical_to_m8']}; qc_free identical "
+        f"to M8: {nr1['qc_free_identical_to_m8']}",
+        "   applied_after_gate (reported only: the human gate counted as merged, "
+        "G1 at gate_failed; adopts neither): "
+        + (
+            f"NR1 violations {len(applied['violations'])} over "
+            f"{len(applied['lowered_samples'])} lowered samples"
+            + (" (trivially satisfied)" if applied["trivially_satisfied"] else "")
+            if applied["run"]
+            else "not run on every sample"
+        ),
         "",
         "Not covered: " + "; ".join(result["not_covered"]) + ".",
     ]
@@ -1575,7 +1826,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--threads", type=int, default=4, help="registration: dask workers"
     )
     parser.add_argument(
-        "--dry-run", action="store_true", help="resolve: print the commands only"
+        "--dry-run",
+        action="store_true",
+        help="every step: list the registration checks and print the RESOLVE "
+        "commands; read no store, run nothing, write nothing (table: skipped)",
     )
     args = parser.parse_args(argv)
     logging.basicConfig(
@@ -1594,6 +1848,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             results=args.results,
             force=args.force,
             threads=args.threads,
+            dry_run=args.dry_run,
         )
     if args.step in ("resolve", "all"):
         commands = run_resolve(
@@ -1611,7 +1866,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.dry_run:
             for command in commands:
                 print(" ".join(command))
-            return 0
+    if args.dry_run:
+        if args.step in ("table", "all"):
+            logger.info("table: skipped under --dry-run (it writes the tables)")
+        return 0
     if args.step in ("table", "all"):
         build_tables(
             args.out,

@@ -163,12 +163,17 @@ def _qc_summary(
     pair: str = "P5011",
     jsd: Sequence[Mapping[str, Any]] = P5011_JSD,
 ) -> dict[str, Any]:
-    """A resolve summary whose samples carry the QC blocks RESOLVE writes."""
+    """A resolve summary whose samples carry the QC blocks RESOLVE writes.
+
+    The gate is ``human_gate()`` (full) after the sample's QC, as RESOLVE
+    records it (``RealQcResult.apply_to_gate``).
+    """
     from merxen.annotation.pipeline import real_qc_record
 
     samples: dict[str, Any] = {}
     for sample_id, result in results.items():
         platform = sample_id.rsplit("_", 1)[1]
+        gate = human_gate() if result is None else result.apply_to_gate(human_gate())
         samples[sample_id] = {
             "platform": platform,
             "labels": f"{platform.lower()}/{sample_id}_celltype_labels.parquet",
@@ -176,14 +181,7 @@ def _qc_summary(
                 f"{platform.lower()}/{sample_id}_annotation_manifest.json"
             ),
             "trust": {"state": "validated"},
-            "resolution": {
-                "gate": {
-                    "level": "full",
-                    "warning": False,
-                    "level_reasons": [],
-                    "warning_reasons": [],
-                }
-            },
+            "resolution": {"gate": gate.to_json()},
             "real_qc": real_qc_record(result, enabled=result is not None),
         }
     return {
@@ -348,22 +346,45 @@ def test_the_resolve_command_pins_m8_bundles_and_adds_registration(
     assert "--registration-qc" not in with_config
 
 
-def test_variant_configs_are_annotation_configs(script: ModuleType) -> None:
-    assert script.variant_config("qc") is None
-    free = AnnotationConfig.model_validate(script.variant_config("qc_free"))
-    assert free.real_qc.enabled is False
-    alternative = AnnotationConfig.model_validate(
-        script.variant_config("class_comparator")
+def _changed(script: ModuleType, variant: str) -> dict[str, Any]:
+    """The fields of a variant that differ from the registered configuration."""
+    config = AnnotationConfig.model_validate(script.variant_config(variant))
+    registered = AnnotationConfig(species="human")
+    assert config.model_dump(exclude={"real_qc"}) == registered.model_dump(
+        exclude={"real_qc"}
     )
-    assert alternative.real_qc.enabled is True
-    assert alternative.real_qc.marker_referee_comparator == "class"
-    default = AnnotationConfig(species="human").real_qc
-    # Only the named field differs from the registered configuration.
-    assert {
-        key
-        for key, value in alternative.real_qc.model_dump().items()
-        if value != default.model_dump()[key]
-    } == {"marker_referee_comparator"}
+    default = registered.real_qc.model_dump()
+    return {
+        key: value
+        for key, value in config.real_qc.model_dump().items()
+        if value != default[key]
+    }
+
+
+def test_variant_configs_are_annotation_configs(script: ModuleType) -> None:
+    """Each variant differs from the registered configuration only as named."""
+    assert script.variant_config("qc") is None
+    assert _changed(script, "qc_free") == {"enabled": False}
+    assert _changed(script, "class_comparator") == {
+        "marker_referee_comparator": "class"
+    }
+    # Reported only: the human gate counted as merged (the mouse one stays
+    # pending) and G1 at §8.8's effect; no threshold changes.
+    assert _changed(script, "applied_after_gate") == {
+        "seeded_families_warn_only_until_gate": {"human": "merged", "mouse": "pending"},
+        "registration_g1_effect": "gate_failed",
+    }
+    applied = AnnotationConfig.model_validate(
+        script.variant_config("applied_after_gate")
+    ).real_qc
+    assert applied.seeded_warn_only("human") is False
+    assert applied.seeded_warn_only("mouse") is True
+    assert set(script.VARIANTS) == {
+        "qc",
+        "qc_free",
+        "class_comparator",
+        "applied_after_gate",
+    }
     with pytest.raises(script.RegressionError, match="unknown variant"):
         script.variant_config("strict")
 
@@ -403,7 +424,7 @@ def test_run_resolve_needs_the_registration_checks_and_keeps_finished_runs(
     commands = script.run_resolve(
         out, variants=list(script.VARIANTS), dry_run=True, **kwargs
     )
-    assert len(commands) == 3
+    assert len(commands) == 4
     assert not out.exists()
     with pytest.raises(script.RegressionError, match="registration checks missing"):
         script.run_resolve(out, variants=["qc"], **kwargs)
@@ -415,10 +436,133 @@ def test_run_resolve_needs_the_registration_checks_and_keeps_finished_runs(
         done = script.variant_dir(out, variant, "P5011", "reseg")
         done.mkdir(parents=True)
         (done / "P5011_resolve_summary.json").write_text("{}")
-    script.run_resolve(out, variants=list(script.VARIANTS), **kwargs)
+    # Finished re-runs are kept and left out of the commands to run.
+    assert script.run_resolve(out, variants=list(script.VARIANTS), **kwargs) == []
+    assert (
+        script.run_resolve(out, variants=list(script.VARIANTS), dry_run=True, **kwargs)
+        == []
+    )
     written = json.loads((out / "configs" / "qc_free.json").read_text())
     assert written == script.variant_config("qc_free")
+    applied = json.loads((out / "configs" / "applied_after_gate.json").read_text())
+    assert applied == script.variant_config("applied_after_gate")
     assert not (out / "configs" / "qc.json").exists()
+
+
+def test_each_rerun_records_its_command_and_code(
+    script: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A re-run's record names the code it ran with, and its exit status."""
+    import subprocess
+
+    m8 = tmp_path / "m8"
+    _write_m8_run(m8, "P5011", "reseg")
+    out = tmp_path / "out"
+    for sample_id in ("P5011_MERSCOPE", "P5011_XENIUM"):
+        path = script.registration_path(out, "reseg", sample_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}")
+    real_run = subprocess.run
+    exit_codes = {"qc": 0, "qc_free": 3}
+
+    def fake_run(command: Sequence[str], *args: Any, **kwargs: Any) -> Any:
+        if command[0] == "git":
+            return real_run(command, *args, **kwargs)
+        target = Path(command[command.index("--out") + 1])
+        variant = target.parent.parent.name
+        return subprocess.CompletedProcess(command, exit_codes[variant])
+
+    monkeypatch.setattr(script.subprocess, "run", fake_run)
+    kwargs: dict[str, Any] = {
+        "pairs": ["P5011"],
+        "segmentations": ["reseg"],
+        "m8_root": m8,
+        "store": tmp_path / "store",
+        "protected_roots": [m8],
+    }
+    (command,) = script.run_resolve(out, variants=["qc"], **kwargs)
+    target = script.variant_dir(out, "qc", "P5011", "reseg")
+    record = json.loads((target / "regression_rerun.json").read_text())
+    assert record["command"] == command
+    assert (record["variant"], record["returncode"]) == ("qc", 0)
+    assert record["config"] is None
+    code = record["code"]
+    assert (
+        code["commit"]
+        == real_run(
+            ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+    )
+    assert code["script"] == "scripts/acceptance/m13_real_qc_regression.py"
+    assert isinstance(code["script_matches_head"], bool)
+    assert isinstance(code["dirty"], bool)
+    with pytest.raises(script.RegressionError, match="exit 3"):
+        script.run_resolve(out, variants=["qc_free"], **kwargs)
+    failed = json.loads(
+        (
+            script.variant_dir(out, "qc_free", "P5011", "reseg")
+            / "regression_rerun.json"
+        ).read_text()
+    )
+    assert failed["returncode"] == 3
+    assert failed["config"] == script.variant_config("qc_free")
+
+
+def test_dry_run_reads_no_store_runs_nothing_and_writes_nothing(
+    script: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--dry-run`` covers every step: registration too, and the table."""
+    m8 = tmp_path / "m8"
+    _write_m8_run(m8, "P5011", "reseg")
+    out = tmp_path / "out"
+
+    def refuse(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("nothing may run under --dry-run")
+
+    monkeypatch.setattr(script, "registration_record", refuse)
+    monkeypatch.setattr(script.subprocess, "run", refuse)
+    monkeypatch.setattr(script, "build_tables", refuse)
+    common = [
+        "--out",
+        str(out),
+        "--m8-resolve",
+        str(m8),
+        "--results",
+        str(tmp_path / "results"),
+        "--store",
+        str(tmp_path / "store"),
+        "--pairs",
+        "P5011",
+        "--segmentations",
+        "reseg",
+        "--dry-run",
+    ]
+    for step in ("registration", "resolve", "table", "all"):
+        assert script.main([step, *common]) == 0
+        assert not out.exists(), step
+    printed = [line for line in capsys.readouterr().out.splitlines() if line]
+    # The resolve commands, printed by "resolve" and "all" (one per variant).
+    assert len(printed) == 2 * len(script.VARIANTS)
+    assert all("annotate-resolve" in line for line in printed)
+    planned = script.run_registration(
+        out,
+        pairs=["P5011"],
+        segmentations=["reseg"],
+        m8_root=m8,
+        results=tmp_path / "results",
+        dry_run=True,
+    )
+    assert planned == [
+        script.registration_path(out, "reseg", "P5011_MERSCOPE"),
+        script.registration_path(out, "reseg", "P5011_XENIUM"),
+    ]
+    assert not out.exists()
 
 
 def test_registration_record_runs_the_qc_stage_check_on_the_store(
@@ -517,6 +661,62 @@ def test_outcome_rows_record_the_effect_withheld_until_the_gate_merges(
         script.outcome_rows(disabled, pair="P5011", segmentation="reseg")
 
 
+def test_gate_cap_after_gate_is_set_only_by_a_fired_outcome(
+    script: ModuleType, make_trust: MakeTrust
+) -> None:
+    """An outcome that did not fire caps nothing, whatever cap it records.
+
+    The referee records ``gate_cap: broad_only`` also when it passes or is
+    not evaluable (set a: not evaluable on all 16 sections); the column must
+    not read as a cap after gate H merges.
+    """
+
+    def marker_row(value: float | None, groups: int, **change: Any) -> Any:
+        summary = _qc_summary(
+            {
+                "P5011_MERSCOPE": _qc_result(
+                    make_trust,
+                    marker_consistency=_referee_signal(value, groups),
+                    **change,
+                )
+            }
+        )
+        rows = script.outcome_rows(summary, pair="P5011", segmentation="reseg")
+        return next(row for row in rows if row["check"] == "marker_consistency")
+
+    not_evaluable = marker_row(None, 1)
+    assert not_evaluable["state"] == "not_evaluable"
+    assert not_evaluable["effect_after_gate"] == "none"
+    assert not_evaluable["gate_cap_after_gate"] is None
+    passing = marker_row(0.9, 2)
+    assert (passing["outcome"], passing["fired"]) == ("pass", False)
+    assert passing["gate_cap_after_gate"] is None
+    warned = marker_row(0.72, 2)
+    assert (warned["outcome"], warned["effect_after_gate"]) == ("warn", "warning")
+    assert warned["gate_cap_after_gate"] is None
+    # Below 0.70 on the seeded family: a warning now, broad_only after gate H.
+    withheld = marker_row(0.6, 2)
+    assert (withheld["outcome"], withheld["effect"]) == ("warn", "warning")
+    assert withheld["effect_after_gate"] == "gate_cap"
+    assert withheld["gate_cap_after_gate"] == "broad_only"
+    # With the gate merged the cap is applied and read from the outcome.
+    merged = AnnotationConfig.model_validate(
+        script.variant_config("applied_after_gate")
+    )
+    applied = marker_row(0.6, 2, config=merged)
+    assert (applied["outcome"], applied["effect"]) == ("fail", "gate_cap")
+    assert applied["gate_cap_after_gate"] == "broad_only"
+    # A pair statistic withheld after the gate carries no gate cap.
+    summary = _qc_summary({"P5011_MERSCOPE": _qc_result(make_trust)})
+    paired = next(
+        row
+        for row in script.outcome_rows(summary, pair="P5011", segmentation="reseg")
+        if row["check"] == "paired_concordance"
+    )
+    assert paired["effect_after_gate"] == "withhold_pair_stats"
+    assert paired["gate_cap_after_gate"] is None
+
+
 def test_marker_rows_and_the_d18_reading(
     script: ModuleType, make_trust: MakeTrust
 ) -> None:
@@ -575,11 +775,16 @@ def test_marker_rows_and_the_d18_reading(
 def test_paired_rows_check_the_d21_expectation(
     script: ModuleType, make_trust: MakeTrust
 ) -> None:
-    def rows(pair: str, segmentation: str, jsd: Sequence[Mapping[str, Any]]) -> Any:
+    def rows(
+        pair: str,
+        segmentation: str,
+        jsd: Sequence[Mapping[str, Any]],
+        config: AnnotationConfig | None = None,
+    ) -> Any:
         summary = _qc_summary(
             {
-                f"{pair}_MERSCOPE": _qc_result(make_trust, pair_jsd=jsd),
-                f"{pair}_XENIUM": _qc_result(make_trust, pair_jsd=jsd),
+                f"{pair}_MERSCOPE": _qc_result(make_trust, pair_jsd=jsd, config=config),
+                f"{pair}_XENIUM": _qc_result(make_trust, pair_jsd=jsd, config=config),
             },
             pair=pair,
             jsd=jsd,
@@ -595,6 +800,14 @@ def test_paired_rows_check_the_d21_expectation(
         "withhold_pair_stats",
     )
     assert p5011["expectation_met"] is True
+    # P5011's own values with a pass token (the outcome changed while the
+    # values did not, e.g. under another warning threshold): not met.
+    lenient = AnnotationConfig(species="human", real_qc={"paired_broad_jsd_warn": 0.3})
+    p5011_pass = rows("P5011", "proseg_hybrid", P5011_JSD, lenient)
+    assert p5011_pass["shared_mask_jsd"] == pytest.approx(0.234905)
+    assert p5011_pass["whole_section_jsd"] == pytest.approx(0.226814)
+    assert p5011_pass["outcome"] == "pass"
+    assert p5011_pass["expectation_met"] is False
     low = [
         {"kind": "soft", "region": "shared_mask", "jsd": 0.1277},
         {"kind": "soft", "region": "whole_section", "jsd": 0.1291},
@@ -850,11 +1063,24 @@ def test_build_tables_writes_the_outcome_table_and_the_readings(
         "P5011_MERSCOPE/proseg_hybrid:paired_concordance:withhold_pair_stats",
         "P5011_XENIUM/proseg_hybrid:paired_concordance:withhold_pair_stats",
     ]
+    # Warn-only: the qc variant lowers nothing, so NR1 holds trivially (and
+    # the report says so); the applied variant was not run here.
     assert result["nr1"] == {
         "violations": [],
+        "lowered_samples": [],
+        "trivially_satisfied": True,
+        "applied_after_gate": {
+            "run": False,
+            "violations": [],
+            "lowered_samples": [],
+            "trivially_satisfied": True,
+        },
         "qc_identical_to_m8": True,
         "qc_free_identical_to_m8": True,
     }
+    markers = outcomes[outcomes["check"] == "marker_consistency"]
+    assert set(markers["state"]) == {"not_evaluable"}
+    assert markers["gate_cap_after_gate"].isna().all()
     samples = pd.read_csv(out / "samples.csv")
     assert list(samples["gate_level_qc_free"]) == ["full", "full"]
     assert "check:paired_concordance" in samples.columns
@@ -867,6 +1093,9 @@ def test_build_tables_writes_the_outcome_table_and_the_readings(
     report = (out / "REPORT.txt").read_text()
     for heading in ("D18", "D21", "D22", "D23", "NR1", "Not covered"):
         assert heading in report
+    assert "NR1 violations: 0 (trivially satisfied" in report
+    assert "applied_after_gate (reported only" in report
+    assert "not run on every sample" in report
 
 
 def test_build_tables_reports_an_nr1_violation_and_a_drift_from_m8(
@@ -907,3 +1136,121 @@ def test_build_tables_reports_an_nr1_violation_and_a_drift_from_m8(
     assert markers["class_outcome"].isna().all()
     paired = pd.read_csv(out / "paired_concordance.csv")
     assert paired.loc[0, "expected"] is np.nan or pd.isna(paired.loc[0, "expected"])
+
+
+def test_build_tables_scores_d18_on_the_scored_segmentation_only(
+    script: ModuleType, tmp_path: Path, make_trust: MakeTrust
+) -> None:
+    """A reseg value below 0.75 is reported, never read by the scored verdict."""
+    m8 = tmp_path / "m8"
+    out = tmp_path / "out"
+    statuses = {
+        sample: ["confident", "low_confidence", "confident"]
+        for sample in ("P5011_MERSCOPE", "P5011_XENIUM")
+    }
+    for segmentation, value, groups in (
+        ("proseg_hybrid", None, 1),
+        ("reseg", 0.6, 2),
+    ):
+        _write_m8_run(m8, "P5011", segmentation)
+        _write_rerun(
+            script.variant_dir(out, "qc", "P5011", segmentation),
+            _qc_summary(
+                {
+                    sample: _qc_result(
+                        make_trust,
+                        marker_consistency=_referee_signal(value, groups),
+                    )
+                    for sample in statuses
+                }
+            ),
+            statuses,
+        )
+    result = script.build_tables(
+        out,
+        pairs=["P5011"],
+        segmentations=["proseg_hybrid", "reseg"],
+        m8_root=m8,
+    )
+    readings = result["d18_marker_consistency"]
+    assert readings["scored_segmentation"]["verdict"] == "not_evaluable"
+    assert readings["scored_segmentation"]["n_sections"] == 2
+    assert readings["scored_segmentation"]["thresholds_back_to_user"] is False
+    assert readings["all_segmentations"]["verdict"] == "below_warn"
+    assert readings["all_segmentations"]["n_below_warn"] == 2
+    outcomes = pd.read_csv(out / "outcomes.csv")
+    reseg = outcomes[
+        (outcomes["check"] == "marker_consistency")
+        & (outcomes["segmentation"] == "reseg")
+    ]
+    assert set(reseg["effect_after_gate"]) == {"gate_cap"}
+    assert set(reseg["gate_cap_after_gate"]) == {"broad_only"}
+
+
+def test_build_tables_checks_nr1_where_the_applied_variant_lowers(
+    script: ModuleType, tmp_path: Path, make_trust: MakeTrust
+) -> None:
+    """applied_after_gate applies the withheld effects; NR1 is checked there."""
+    m8 = tmp_path / "m8"
+    out = tmp_path / "out"
+    _write_m8_run(m8, "P5011", "proseg_hybrid")
+    base = ["confident", "low_confidence", "confident"]
+    raised = ["confident", "confident", "confident"]
+    samples = ("P5011_MERSCOPE", "P5011_XENIUM")
+    statuses = dict.fromkeys(samples, base)
+    merged = AnnotationConfig.model_validate(
+        script.variant_config("applied_after_gate")
+    )
+    _write_rerun(
+        script.variant_dir(out, "qc", "P5011", "proseg_hybrid"),
+        _qc_summary({sample: _qc_result(make_trust) for sample in samples}),
+        statuses,
+    )
+    _write_rerun(
+        script.variant_dir(out, "qc_free", "P5011", "proseg_hybrid"),
+        _qc_summary(dict.fromkeys(samples)),
+        statuses,
+    )
+    # The MERSCOPE section's marker referee is below 0.70: broad_only applied.
+    applied = {
+        "P5011_MERSCOPE": _qc_result(
+            make_trust,
+            config=merged,
+            marker_consistency=_referee_signal(0.6, 2),
+        ),
+        "P5011_XENIUM": _qc_result(make_trust, config=merged),
+    }
+    _write_rerun(
+        script.variant_dir(out, "applied_after_gate", "P5011", "proseg_hybrid"),
+        _qc_summary(applied),
+        {"P5011_MERSCOPE": base, "P5011_XENIUM": raised},
+    )
+    result = script.build_tables(
+        out, pairs=["P5011"], segmentations=["proseg_hybrid"], m8_root=m8
+    )
+    nr1 = result["nr1"]
+    assert nr1["trivially_satisfied"] is True
+    assert nr1["violations"] == []
+    reading = nr1["applied_after_gate"]
+    assert reading["run"] is True
+    assert reading["trivially_satisfied"] is False
+    assert reading["lowered_samples"] == [
+        "P5011_MERSCOPE/proseg_hybrid: broad_only:marker_consistency; "
+        "withhold_pair_stats:paired_concordance",
+        "P5011_XENIUM/proseg_hybrid: withhold_pair_stats:paired_concordance",
+    ]
+    # The cell confident only with the QC applied breaks NR1 there.
+    (violation,) = reading["violations"]
+    assert violation.startswith("P5011_XENIUM/proseg_hybrid: ")
+    assert "confident only with QC" in violation
+    table = pd.read_csv(out / "nr1.csv").set_index("sample_id")
+    assert table.loc["P5011_MERSCOPE", "nr1_applied_after_gate_violations"] == "none"
+    assert table.loc["P5011_MERSCOPE", "qc_lowerings"] == "none"
+    samples_table = pd.read_csv(out / "samples.csv").set_index("sample_id")
+    assert samples_table.loc["P5011_MERSCOPE", "gate_level_qc"] == "full"
+    assert (
+        samples_table.loc["P5011_MERSCOPE", "gate_level_applied_after_gate"]
+        == "broad_only"
+    )
+    report = (out / "REPORT.txt").read_text()
+    assert "NR1 violations 1 over 2 lowered samples" in report
