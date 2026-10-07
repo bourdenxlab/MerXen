@@ -147,7 +147,8 @@ LUNG_STRESS_RECIPE: Final = "R1_xtissue_lung_stress"
 # Gate P's NP6 stress recipes (M13; plan §14 NP6, §3.7 ``gate_p_stress``):
 # each R1 member stressed with spill 0.35, with LogNormal(0, 1.0) and with the
 # measured human cross-platform offsets, and R3 with spill 0.35 only; human
-# Prime families add ``LUNG_STRESS_RECIPE`` (``gate_p_stress_members``).
+# Prime families add ``LUNG_STRESS_RECIPE`` at each R1 member's seed
+# (``gate_p_stress_members``; pre-registration §23.15 item 7, open).
 # Acceptance only: no PREP or RESOLVE run simulates them.
 GATE_P_STRESS_SPILL: Final = "R1_stress_spill"
 GATE_P_STRESS_LOGNORMAL: Final = "R1_stress_lognormal"
@@ -5648,6 +5649,13 @@ def gate_p_stress_recipes(
       ``R1_stress_lognormal`` and ``R1_stress_xplatform``, plus
       ``R1_xtissue_lung_stress`` for a human Xenium Prime family;
     - an ``R3_measured_HO`` member: ``R3_stress_spill`` only.
+
+    The lung stress is thus added once per R1 member, at the member's seed
+    (R1@s's efficiency times the ratio, the keyed LogNormal at s for the
+    genes it does not cover). §8.3 v7.4 defines ``R1_xtissue_lung_stress``
+    on R1@0 only and §14 does not say how often NP6 adds it; one stress per
+    member is the stricter reading, open until the user rules
+    (pre-registration §23.15 item 7).
 
     A version-6 family's base, R1@0 (``simulation_recipes``), takes the R1
     stresses (its simulation is ``thin_and_contaminate``). §14 names the

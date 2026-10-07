@@ -26,6 +26,12 @@ This script writes ``ratio__xenium_v1_vs_merscope__human_brain_ffpe.csv``
    (``validated_panel_genes.csv``, ``human_set_a_296``); a symbol without
    one is refused.
 
+Neither D7 nor pre-registration §23.10 says how the four pairs are
+combined: steps 1 and 2 are this script's choice, put to the user in
+pre-registration §23.15 item 8 (on the source, the averaged offsets' SD
+before the cap is 1.617 log2 against 1.59-1.77 for single pairs, and 20.6%
+of genes are capped against 19-24%).
+
 The data are in-house, so the sidecar records ``source_kind: in_house`` and
 each source file by its path under the evidence root and its sha256 (no
 URL). It never records a local path outside the evidence root.
@@ -36,7 +42,9 @@ Usage::
         --evidence-root /srv/storage/MerXen/annotation_dev/evidence_20260926
 
 ``--check`` writes nothing and exits 1 when a committed file differs from
-what the inputs produce.
+what the inputs produce. ``scripts/annotation/build_sim_inputs.py`` writes
+the directory's ``NOTICE``, which lists this asset under "In-house assets";
+re-run it after this script changes the sidecar.
 """
 
 from __future__ import annotations

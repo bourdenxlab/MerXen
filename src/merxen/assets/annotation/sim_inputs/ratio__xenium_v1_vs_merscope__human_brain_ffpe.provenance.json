@@ -43,7 +43,7 @@
       }
     ],
     "deriving_script": "scripts/annotation/build_xplatform_stress.py",
-    "deriving_script_sha256": "77ce49286f82e7a834cc51e6bf37c4f3bb76315756e5f76f9f656e6e48979dbc",
+    "deriving_script_sha256": "b3e805acb435326de5b947fc4e4d4e7fd7c918f5c6fe16a3b89e75556ee0c2d9",
     "evidence": [
       "$A/research/xplat/xplat_genes.out",
       "$A/m13/M13_IMPLEMENTATION_PLAN.md",
