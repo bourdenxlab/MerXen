@@ -2099,6 +2099,11 @@ def _same_frames(first: pd.DataFrame, second: pd.DataFrame) -> bool:
     return True
 
 
+# The marker lookup's MapMyCells run record (config with scratch paths,
+# timestamp, duration, version): not bundle content (NP9 identity).
+_LOOKUP_RUN_RECORD: Final = "metadata"
+
+
 def bundle_differences(first: Path, second: Path) -> list[str]:
     """Return what differs between two builds of one bundle (NP9 identity).
 
@@ -2108,7 +2113,8 @@ def bundle_differences(first: Path, second: Path) -> list[str]:
     from them), the marker lookup, the mapping tree and the vocab snapshot;
     for a held-out test-set bundle, its test cells (obs, genes and counts).
     Records that hold times, paths or memory (``bundle.json``, the summary's
-    runtime and mapping runs) are not content.
+    runtime and mapping runs, the marker lookup's ``metadata`` block) are not
+    content.
 
     Args:
         first: One bundle directory.
@@ -2141,6 +2147,13 @@ def bundle_differences(first: Path, second: Path) -> list[str]:
                 differences.append(name)
     for name in (ref.QUERY_MARKERS_FILTERED_FILE, ref.MAPPING_TREE_FILE):
         values = [_read_json(directory / name) for directory in (first, second)]
+        if name == ref.QUERY_MARKERS_FILTERED_FILE:
+            # MapMyCells' run record: the build's scratch paths, worker count,
+            # timestamp and duration differ on every re-run.
+            values = [
+                {key: item for key, item in value.items() if key != _LOOKUP_RUN_RECORD}
+                for value in values
+            ]
         if values[0] != values[1]:
             differences.append(name)
     vocab = [first / ref.VOCAB_SNAPSHOT_FILE, second / ref.VOCAB_SNAPSHOT_FILE]

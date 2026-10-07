@@ -1637,6 +1637,19 @@ def test_bundle_differences_lists_every_edited_item(
     first = family.bundle_dir
     copies = tmp_path / "copies"
     assert run.bundle_differences(first, writable_copy(first, copies / "same")) == []
+    # A re-run's MapMyCells run record (scratch paths, worker count, times) in
+    # the marker lookup is not content (the set a dry run's NP9 identity failed
+    # on it alone).
+    record = writable_copy(first, copies / "record")
+    path = record / reference.QUERY_MARKERS_FILTERED_FILE
+    markers = json.loads(path.read_text())
+    markers["metadata"] = {
+        "config": {"query_path": "/scratch/merxen-bundle-other/query.h5ad"},
+        "n_processors": 3,
+        "timestamp": "another time",
+    }
+    path.write_text(json.dumps(markers))
+    assert run.bundle_differences(first, record) == []
     # An edited marker lookup.
     lookup = writable_copy(first, copies / "lookup")
     path = lookup / reference.QUERY_MARKERS_FILTERED_FILE
