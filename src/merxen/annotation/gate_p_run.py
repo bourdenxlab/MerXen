@@ -2527,7 +2527,10 @@ def run_gate_p(request: GatePRequest, options: GatePOptions) -> dict[str, Any]:
             weak_parents=np2["weak_parents"],
             collapsed_parents=np2["collapsed_parents"],
             settings=gp.Np2Settings.from_config(config.panel),
-            accepted_parents=acceptance.accepted,
+            # The parents the user's entries name, by their lookup keys (an
+            # entry may name one by its node label or name), and the entries
+            # that name none, which NP2 reports as accepted_not_listed.
+            accepted_parents=(*acceptance.accepted, *acceptance.unmatched),
         ),
         "NP8": gp.np8_cross_panel(options.partners),
         "NP9": np9,

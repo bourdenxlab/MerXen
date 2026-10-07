@@ -455,9 +455,20 @@ def passing_report() -> dict[str, Any]:
 
 
 def run_passing_family(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    accepted_parents: Callable[[dict[str, Any]], tuple[str, ...]] | None = None,
+    dry_run: bool = True,
 ) -> tuple[Family, dict[str, Any], list[gp.GatePResult]]:
     """Gate P on a family whose classes all validate.
+
+    Args:
+        tmp_path: The test's directory.
+        monkeypatch: The test's monkeypatch.
+        accepted_parents: The user's NP2 entries, from PREP's ``np2_inputs``
+            (default: every weak and collapsed parent's lookup key).
+        dry_run: Run as the seeded family's dry run.
 
     Returns:
         The family, the driver's run record and the ``GatePResult`` it
@@ -479,19 +490,22 @@ def run_passing_family(
         return assembled[-1]
 
     monkeypatch.setattr(gp, "assemble_gate_p", capture)
-    # The user accepts the weak and collapsed parents in the gate-P PR (NP2).
+    # The user accepts the weak and collapsed parents before the run (NP2).
     inputs = run.np2_inputs(family.bundle_dir)
-    accepted = {*inputs["weak_parents"], *inputs["collapsed_parents"]}
-    assert accepted
+    keys = {*inputs["weak_parents"], *inputs["collapsed_parents"]}
+    assert keys
+    entries = (
+        tuple(sorted(keys)) if accepted_parents is None else accepted_parents(inputs)
+    )
     result = run.run_gate_p(
         family.request(report=passing_report()),
         run.GatePOptions(
             species="human",
             accept_small_pools=True,
-            dry_run=True,
+            dry_run=dry_run,
             time_reference_seconds=1e6,
             time_reference_basis="test",
-            accepted_parents=tuple(sorted(accepted)),
+            accepted_parents=entries,
         ),
     )
     return family, result, assembled
@@ -516,6 +530,59 @@ def test_a_family_whose_classes_all_validate_passes_gate_p(
     assert np9["wall_seconds"] == pytest.approx(record["measured_seconds"])
     assert record["measured_seconds"] >= 60.0
     assert np9["members"] == ["R1_contam_HO@0"]
+
+
+def test_np2_parents_accepted_by_name_pass_np2_in_a_full_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    """B2 (b): the user's names reach NP2 as the lookup keys PREP records.
+
+    The user accepted "Bergmann glia" and "Upper rhombic lip" by name, not
+    by lookup key. A family run (not a dry run) whose PREP lists weak and
+    collapsed parents, accepted by node name, node label or (for the root,
+    which has neither) lookup key, does not stop, scores NP2's
+    ``weak_and_collapsed`` part passed and passes; an entry naming no listed
+    parent is reported (``accepted_not_listed``) and accepts nothing.
+    """
+    seen: dict[str, Any] = {}
+
+    def by_name(inputs: dict[str, Any]) -> tuple[str, ...]:
+        names = inputs["parent_names"]
+        entries = []
+        for position, key in enumerate(
+            sorted({*inputs["weak_parents"], *inputs["collapsed_parents"]})
+        ):
+            if key == reference.ROOT_KEY:
+                entries.append(key)
+            elif position % 2 == 0 and names.get(key):
+                entries.append(str(names[key]))
+            else:
+                entries.append(reference.parse_lookup_key(key)[1])
+        seen["keys"] = sorted({*inputs["weak_parents"], *inputs["collapsed_parents"]})
+        seen["entries"] = entries
+        return (*entries, "Lower rhombic lip")
+
+    _, result, _ = run_passing_family(
+        tmp_path, monkeypatch, accepted_parents=by_name, dry_run=False
+    )
+    # The fixture's parents are accepted by name and node label, not by key
+    # (only the root has neither).
+    named = [entry for entry in seen["entries"] if entry not in seen["keys"]]
+    assert len(named) >= 2
+    assert result["status"] == run.STATUS_SCORED, result
+    record = read_run(result)
+    assert record["np2_parents"]["unaccepted"] == []
+    assert record["np2_parents"]["unmatched"] == ["Lower rhombic lip"]
+    report = json.loads(
+        (tmp_path / "out" / "gate_p" / gp.GATE_P_REPORT_JSON).read_text()
+    )
+    np2 = report["family_checks"]["NP2"]
+    assert np2["parts"]["weak_and_collapsed"] == gp.CHECK_PASSED
+    assert np2["status"] == gp.CHECK_PASSED
+    assert np2["detail"]["accepted_parents"] == seen["keys"]
+    assert np2["detail"]["unaccepted_parents"] == []
+    assert np2["detail"]["accepted_not_listed"] == ["Lower rhombic lip"]
+    assert result["passes"], result["reasons"]
 
 
 def _copy_packaged_tables(directory: Path) -> Path:

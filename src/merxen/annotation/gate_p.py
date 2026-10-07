@@ -5670,7 +5670,10 @@ def np2_panel_coverage(
         collapsed_parents: Parents auto-collapsed for lack of markers.
         settings: The NP2 constants.
         accepted_parents: The weak or collapsed parents the user accepted in
-            the gate-P PR.
+            the gate-P PR, by their lookup keys (the driver resolves the
+            user's entries, ``gate_p_run.np2_acceptance``, and adds the
+            entries that name no listed parent, reported as
+            ``accepted_not_listed``).
 
     Returns:
         The check.
