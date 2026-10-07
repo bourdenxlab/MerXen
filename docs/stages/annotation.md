@@ -929,8 +929,11 @@ no emitted label, status, threshold, margin or floor, only
 assembly) and `merxen.annotation.gate_p_run` (the driver). The definitions
 are pre-registered in `docs/acceptance/annotation-v1-preregistration.md`
 §23.9 and §23.10. The readings the code takes where plan §14 is not explicit
-are put to the user there, in §23.11–§23.17, and §23.18 lists what is still
-open.
+were put to the user there, in §23.11–§23.17, and ruled on 2026-10-07
+(§23.19). The set a dry run then failed, and the user approved the criteria
+revision of §23.21 the same day (R1, R2, R3 (c), R5, R6, R7; below). No
+reading is open; every report lists the reading each revised criterion
+scores (`gate_p.GATE_P_SCORED_READINGS`).
 
 **Running it.** `scripts/acceptance/new_panel.py --species <species> ...`,
 a thin wrapper over `merxen annotation-panel-simulate --gate-p`
@@ -1018,32 +1021,46 @@ PREP bundles, writes the simulation report and then runs gate P, writing
    mapped.
 6. It re-runs one seed-0 replicate per emission member and PREP's bundle (in
    a scratch store) for NP9's identity part (CHECK K13).
-7. It scores NP3–NP7 per emission member and NP1, NP2, NP8 and NP9 per
-   family, assembles the family (`gate_p.assemble_gate_p`) and writes the
-   report.
+7. It scores NP3–NP7 per emission member, with one depth walk over the
+   five criteria per member (`gate_p.gate_p_depth_walk`, R2; version 7: the
+   ensemble's NP5 re-derivation is computed first and scored in every
+   member, R7), and NP1, NP2, NP8 and NP9 per family, assembles the family
+   (`gate_p.assemble_gate_p`) and writes the report.
 
 `--gate-p-version 7` scores a version-6 family's version-7 ensemble (M13 D5
 (c)): the emission members are simulated on the bundle's own test set, and
 nothing is written to a store.
 
-**Criteria** (plan §14; every threshold is pre-registered and unchanged):
+**Criteria** (plan §14; every threshold is pre-registered and unchanged; the
+readings as revised by pre-registration §23.21 on 2026-10-07):
 
 | Criterion | Function | Rule |
 |---|---|---|
 | NP1 gene IDs | `np1_gene_ids` | ≥ 95% of the declared panel resolved (≥ 98% when the vendor supplies IDs); no control reaches the query; the unresolved list reviewed in the gate-P PR |
 | NP2 panel coverage | `np2_panel_coverage` | ≥ 10 root markers, and ≥ 10 markers for each root child with ≥ 50 cells; weak or collapsed parents accepted by the user (`--gate-p-accepted-parents`, given before the run; an unaccepted one stops a family's run before any build). The detail lists the accepted parents by lookup key, whatever the entry named them by, and the entries that name no listed parent (`accepted_not_listed`) |
-| NP3 frozen-threshold precision | `np3_set_stats`, `np3_verdicts`, `validated_min_depth` | on pooled tested sets of ≥ 200 confident held-out calls (deep bins pooled; each test cell once), under the reference's natural composition and the class-balanced composition (both must pass; Kish effective n): point precision ≥ the provisional target, Wilson lower bound ≥ target_L, coverage ≥ 0.30; `validated_min_depth` walks down the grid from D_P |
+| NP3 frozen-threshold precision | `np3_set_stats`, `np3_verdicts`, `np3_test_cell_weights` | on pooled tested sets of ≥ 200 confident held-out calls (deep bins pooled; each test cell once), under the reference's natural composition and the class-balanced composition, both read on the test cells of the set's scope (R1: each called cell of truth type t weighs π_t / N_t, trimmed at 10 × the median; both must pass; Kish effective n): point precision ≥ the provisional target, Wilson lower bound ≥ target_L, coverage ≥ 0.30. The per-call-set weightings (scored before §23.21) are reported only |
 | NP4 stability | `np4_set_verdicts`, `np4_seed_stability` | per replicate (donor × seed) with ≥ 100 confident calls, point precision ≥ target_L; replicate range ≤ max(0.03, 3.5 SE); seed 0 vs 1 changes ≤ 2% of a level's confident labels (D6) |
-| NP5 resolvability consistency | `np5_decision_agreement`, `np5_tstar_spread`, `np5_extrapolated_share` | the re-derived decisions agree except one flip next to a boundary; t* spread ≤ 0.05; ≤ 50% of the class's cells at the expected depth extrapolated (median and profile readings both scored) |
-| NP6 stress sensitivity | `np6_set_stats`, `np6_class_verdicts` | under spill 0.35, LogNormal(0, 1) efficiency and the cross-platform offsets (`ratio__xenium_v1_vs_merscope__human_brain_ffpe`, capped ±2 log2; the lung stress for human Prime): point ≥ target_L, Wilson ≥ target_L − 0.02, and the one-sided 95% lower bound of the precision drop ≤ 0.05 |
+| NP5 resolvability consistency | `np5_decision_agreement`, `np5_tstar_consequence`, `np5_extrapolated_share` | the re-derived decisions agree except one flip next to a boundary, comparing a bin only where the base and the replicate each hold ≥ 50 test cells (R6; version 7: the ensemble re-derived per replicate against the frozen ensemble decisions, R7); each replicate's t*, applied to the base's pooled calls of the set, gives point precision ≥ target_L − 0.02 (R3 (c); version 7 the ensemble's re-fitted t*; the t* spread is reported only); ≤ 50% of the class's cells at the expected depth extrapolated (median and profile readings both scored) |
+| NP6 stress sensitivity | `np6_set_stats`, `np6_verdicts` | under spill 0.35, LogNormal(0, 1) efficiency and the cross-platform offsets (`ratio__xenium_v1_vs_merscope__human_brain_ffpe`, capped ±2 log2; the lung stress for human Prime): point ≥ target_L, Wilson ≥ target_L − 0.02, and the one-sided 95% lower bound of the precision drop ≤ 0.05, unweighted and under NP3's two test-cell weightings (R1) |
 | NP7 error structure | `np7_error_structure` | per level ≤ 1% of confident calls on sink or region-implausible nodes (human); ≤ 5% of a truth class's confident calls on one wrong node |
 | NP8 cross-panel | `np8_cross_panel` | only for a family that will be paired with another panel |
 | NP9 resources | `np9_resources` | PREP plus the replicates within 1.5 × the time reference (version 7: the set a version-7 dry run's time scaled per simulated cell, D10 (a)); peak RSS within the reserve; identical re-run; the prefilter agreement above 1,000 genes |
 
+**Depth scope** (R2, `gate_p_depth_walk`). `validated_min_depth` is the
+shallowest bin from which every tested set, up to and including the "≥ D_P"
+set, passes NP3 and NP4–NP7. A failure in the ≥ D_P group (every tested set
+whose shallowest bin is ≥ D_P), or of a class-level part (NP4's seed
+criterion, NP5's extrapolated share, NP7's excluded share), fails the class;
+a failure at a shallower set only raises the floor: the walk goes down from
+D_P through the bins tested on their own and stops at the first one that is
+untested or fails any criterion. NP5's agreement at floor d counts only
+flips at bins ≥ d. Each member's walk is written as `depth_walk__<member>`;
+NP3's own walk (`np3_depths`) is reported only.
+
 A version-7 family is scored on every emission member: a (level, class) is
-`validated` when NP3–NP7 pass in every member (`every_member_verdict`), else
-`failed:NP<k>` or `not_evaluable`. One failing class leaves the other
-classes of its level validated. `validated_max_level` is the deepest level
+`validated` when NP3–NP7 pass in every member (`every_member_verdict`), from
+the deepest member floor, else `failed:NP<k>` or `not_evaluable`. One failing
+class leaves the other classes of its level validated. `validated_max_level` is the deepest level
 of the leading run of levels where every class of C_P is validated (the rank
 rule), and the family passes when it reaches broad (human) or class (mouse)
 and NP1, NP2 and NP9 pass, NP8 passing or not applying.
@@ -1053,10 +1070,14 @@ species' seeded families with `--gate-p-dry-run` (`gate_p.dry_run_verdict`;
 M13 D4, D28): set a for a human family, ag7 and VZG2 for a mouse family. The
 dry run must pass at broad (class) for every class of C_P and at supercluster
 (subclass) for the classes H18 expects, less supercluster COP (pre-registration
-§18 C1). For human it runs on version 6 and on the version-7 ensemble
+§18 C1). A class H18 expects whose record is `not_evaluable` (fewer than
+n_min confident calls) is reported, not failed (R5; `reported_not_evaluable`
+in the verdict). For human it runs on version 6 and on the version-7 ensemble
 (`--gate-p-version 7`, D5 (c)). A failure makes the criteria unattainable,
 and they are revised in a PR the user approves before any new family is
-scored.
+scored; the dry run is then re-run under the revised criteria and must pass
+(CK2). The set a dry run of 2026-10-07 failed in both versions; the revision
+of pre-registration §23.21 followed, and its re-run is pending.
 
 **Promotion.** A family that passes is promoted only by its own gate-P PR,
 which the user approves:
@@ -2752,11 +2773,13 @@ held-out-gene CSV is not produced in the pipeline, so item 8 is
   which drops far more genes than E5's validated set c (44-73 per pair on the
   E5 pairs); treat such set-c results as provisional.
 - **Gate P has promoted no family yet** (M13, 2026-10-07). The human
-  programme is implemented and tested on synthetic tables only. The set a
-  dry run (version 6 and the version-7 ensemble) has not finished, and no
-  new family may be scored before it passes (directly, or after a revision
-  PR the user approves and a re-run that passes). The user ruled on the
-  readings of pre-registration §23.11–§23.18 on 2026-10-07 (§23.19). The
+  programme is implemented and tested on synthetic tables. The set a dry run
+  (version 6 and the version-7 ensemble) failed on 2026-10-07, and the user
+  approved the criteria revision of pre-registration §23.21 (R1, R2, R3 (c),
+  R5, R6, R7) the same day; it is implemented, and no new family may be
+  scored before the dry run, re-run on the revised code, passes (CK2). The
+  user ruled on the readings of pre-registration §23.11–§23.18 on 2026-10-07
+  (§23.19). The
   mouse path waits for the second WMB test draw and the ag7 / VZG2 dry run
   (M13 chunks C20–C22, moved to M13b, after M6b). For the new-panel human
   MERSCOPE family, whose declared panel is frozen (D17), gate P also waits
