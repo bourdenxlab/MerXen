@@ -4783,23 +4783,42 @@ def read_panel_counts(
 
 def _ho_region_metadata(context: BuildContext) -> pd.DataFrame:
     """Return the frontal WHB cells (donor, cluster alias) of the test set."""
+    return ho_region_metadata(
+        {name: Path(record.path) for name, record in context.sources.items()},
+        context.scratch_dir,
+    )
+
+
+def ho_region_metadata(sources: Mapping[str, Path], scratch_dir: Path) -> pd.DataFrame:
+    """Return the frontal WHB cells (donor, cluster alias) of the held-out test set.
+
+    Args:
+        sources: The held-out test set's source paths by name: the region
+            cell metadata, or the WHB cell metadata and its ROI map.
+        scratch_dir: Where the region cell metadata is written when it is
+            derived from the WHB cell metadata.
+
+    Returns:
+        ``cell_label``, ``feature_matrix_label``, ``donor_label``,
+        ``cluster_alias`` and ``region_of_interest_label`` per frontal cell.
+
+    Raises:
+        ReferenceBuildError: If neither source is given.
+    """
     columns = ["cell_label", "feature_matrix_label", "donor_label", "cluster_alias"]
-    if SOURCE_WHB_REGION_CELL_METADATA in context.sources:
-        path = _source_path(context, SOURCE_WHB_REGION_CELL_METADATA)
+    if SOURCE_WHB_REGION_CELL_METADATA in sources:
+        path = Path(sources[SOURCE_WHB_REGION_CELL_METADATA])
         return pd.read_csv(path, usecols=columns + ["region_of_interest_label"])
-    if (
-        SOURCE_WHB_CELL_METADATA in context.sources
-        and SOURCE_WHB_ROI_MAP in context.sources
-    ):
+    if SOURCE_WHB_CELL_METADATA in sources and SOURCE_WHB_ROI_MAP in sources:
         from merxen.analysis.mapmycells import _write_region_cell_metadata
 
-        path = context.scratch_dir / REGION_CELL_METADATA_FILE
+        path = Path(scratch_dir) / REGION_CELL_METADATA_FILE
         _write_region_cell_metadata(
-            cell_metadata_path=_source_path(context, SOURCE_WHB_CELL_METADATA),
+            cell_metadata_path=Path(sources[SOURCE_WHB_CELL_METADATA]),
             output_path=path,
             region_labels=list(WHB_FRONTAL_ROI_LABELS),
             min_cells_per_leaf=WHB_FRONTAL_MIN_CELLS_PER_LEAF,
-            roi_map_path=_source_path(context, SOURCE_WHB_ROI_MAP),
+            roi_map_path=Path(sources[SOURCE_WHB_ROI_MAP]),
             region_column="region_of_interest_label",
         )
         return pd.read_csv(path, usecols=columns + ["region_of_interest_label"])
@@ -4811,20 +4830,29 @@ def _ho_region_metadata(context: BuildContext) -> pd.DataFrame:
 
 
 def _other_region_metadata(context: BuildContext, labels: pd.DataFrame) -> pd.DataFrame:
+    """Return the WHB cells of the other-region dissections (context sources)."""
+    return other_region_metadata(
+        _source_path(context, SOURCE_WHB_CELL_METADATA), labels
+    )
+
+
+def other_region_metadata(
+    cell_metadata: Path | str, labels: pd.DataFrame
+) -> pd.DataFrame:
     """Return the WHB cells of the other-region dissections, with WHB levels.
 
     Reads the WHB cell metadata (only the columns the draw needs) and keeps
     the non-neuronal nuclei of ``HO_OTHER_REGION_ROI_LABELS``.
 
     Args:
-        context: The build context (``whb_cell_metadata`` source).
+        cell_metadata: The WHB cell metadata (``whb_cell_metadata`` source).
         labels: WHB level labels per cluster alias (``membership_labels``).
 
     Returns:
         ``cell_label``, ``feature_matrix_label``, ``donor_label``,
         ``cluster_alias``, ``region_of_interest_label`` and the WHB levels.
     """
-    path = _source_path(context, SOURCE_WHB_CELL_METADATA)
+    path = Path(cell_metadata)
     frame = pd.read_csv(
         path,
         usecols=[
@@ -5853,21 +5881,36 @@ def _test_set_sources(
     Raises:
         ReferenceBuildError: If a test-set source is missing.
     """
-    available = {
-        name: Path(context.sources[name].path)
-        for name in names
-        if name in context.sources
-    }
+    return _test_set_source_paths(
+        {name: Path(record.path) for name, record in context.sources.items()},
+        owner=context.spec.reference_id,
+        reference_id=reference_id,
+        names=names,
+    )
+
+
+def _test_set_source_paths(
+    sources: Mapping[str, Path],
+    *,
+    owner: str,
+    reference_id: str,
+    names: Sequence[str],
+) -> dict[str, Path]:
+    """Return a test set's source paths among a primary's source paths.
+
+    Raises:
+        ReferenceBuildError: If a test-set source is missing.
+    """
+    available = {name: Path(sources[name]) for name in names if name in sources}
     if reference_id == HO_REFERENCE_ID:
         has_metadata = SOURCE_WHB_REGION_CELL_METADATA in available or (
-            SOURCE_WHB_CELL_METADATA in context.sources
-            and SOURCE_WHB_ROI_MAP in context.sources
+            SOURCE_WHB_CELL_METADATA in sources and SOURCE_WHB_ROI_MAP in sources
         )
         missing = [] if has_metadata else [SOURCE_WHB_REGION_CELL_METADATA]
         if SOURCE_WHB_REGION_CELL_METADATA not in available:
             for name in (SOURCE_WHB_CELL_METADATA, SOURCE_WHB_ROI_MAP):
-                if name in context.sources:
-                    available[name] = Path(context.sources[name].path)
+                if name in sources:
+                    available[name] = Path(sources[name])
         missing += [
             name
             for name in names
@@ -5877,7 +5920,7 @@ def _test_set_sources(
         missing = [name for name in names if name not in available]
     if missing:
         raise ReferenceBuildError(
-            f"{context.spec.reference_id}: the resolvability self-map (enabled) "
+            f"{owner}: the resolvability self-map (enabled) "
             f"needs the test-set source(s) {missing} for {reference_id}; pass the "
             "WHB h5ad and metadata directories (annotation_whb_h5ad_dir, "
             "annotation_whb_metadata_dir, annotation_whb_region_precompute_source) "
@@ -5904,8 +5947,21 @@ def _test_set_spec(
     reference settings, so the WHB and SEA-AD self-maps share one held-out
     bundle.
     """
-    config = _config_of(context)
-    available = _test_set_sources(context, reference_id, names)
+    return _spec_of_test_set(
+        context.spec,
+        _config_of(context),
+        _test_set_sources(context, reference_id, names),
+        reference_id,
+    )
+
+
+def _spec_of_test_set(
+    primary: AnnotationReferenceSpec,
+    config: AnnotationConfig,
+    available: Mapping[str, Path],
+    reference_id: str,
+) -> AnnotationReferenceSpec:
+    """The test set's spec from its primary's spec and sources (``_test_set_spec``)."""
     template_id = (
         "whb_frontal_supc_clus" if reference_id == HO_REFERENCE_ID else "wmb_panel"
     )
@@ -5913,8 +5969,8 @@ def _test_set_spec(
         (item for item in config.references if item.reference_id == template_id),
         None,
     )
-    if template is None or context.spec.reference_id == template_id:
-        template = context.spec
+    if template is None or primary.reference_id == template_id:
+        template = primary
     known = KNOWN_REFERENCES[reference_id]
     return AnnotationReferenceSpec(
         reference_id=reference_id,

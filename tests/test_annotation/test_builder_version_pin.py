@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "eb439453271eeb7d76a4cc3b2d1508dcd6ae873a4b3f7c56a4e6ab4d2a465ae1",
+    3: "00944fb3c3b6b4ac4588f2f230f263650f9c3fc267084c0ad9128192b10f6166",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -193,6 +193,11 @@ PIN_HISTORY = (
     "and lung recipe records are unchanged (factor_cap_log2 only when set) and "
     "every lognormal recipe's draw is the same, so no bundle content or "
     "build_hash changes (test_resolvability_v6_golden)",
+    "3: the held-out test set's region metadata, other-region metadata and "
+    "test-set sources are read from source paths (ho_region_metadata, "
+    "other_region_metadata, _test_set_source_paths, _spec_of_test_set; M13 "
+    "C8 refactor): the same files are read and the same specs built, so no "
+    "bundle content or build_hash changes (test_resolvability_v6_golden)",
 )
 
 
