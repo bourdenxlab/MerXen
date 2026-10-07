@@ -1361,9 +1361,8 @@ def np4_class_verdicts(
     (level, class); it does not only raise ``validated_min_depth``. A level
     over the seed limit fails every class of the level (an open reading,
     listed in ``np4_seed_stability``; pre-registration §23.14). The result
-    has the
-    per-member shape that ``resolvability.every_member_verdict`` combines
-    over the version-7 emission members.
+    has the per-member shape that ``resolvability.every_member_verdict``
+    combines over the version-7 emission members.
 
     Args:
         set_verdicts: ``np4_set_verdicts`` output (``level``, ``class``,

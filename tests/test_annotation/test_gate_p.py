@@ -842,6 +842,95 @@ def test_np4_seed_criterion_scores_each_group_and_reports_the_pooled_share() -> 
     assert verdicts[("supercluster", "S")] is True
 
 
+def test_np4_seed_rows_carry_their_own_groups_switches_and_crossings() -> None:
+    """Each row holds its own (level, group, seed)'s counts, sorted by them.
+
+    The replicates are given with the groups and seeds out of order, and
+    seed 2 re-maps seed 0 as seed 1 does. Every (group, seed) pair switches
+    and crosses its own number of labels, so a row that carried another
+    pair's counts, or rows left in the input order, would show.
+    """
+    order = {"D1": 0, "D2": 1, "D3": 2}
+
+    def switched(group: str, seed: int) -> int:
+        return 2 * order[group] + seed
+
+    replicates: dict[gp.ReplicateKey, pd.DataFrame] = {}
+    for group in ("D3", "D1", "D2"):
+        base = _seed_table(group, 0)
+        x_rows = np.flatnonzero((base["parent"] == "X").to_numpy())
+        s_rows = np.flatnonzero((base["parent"] == "S").to_numpy())
+        for seed in (2, 0, 1):
+            if seed == 0:
+                replicates[(group, 0)] = base
+                continue
+            other = base.assign(seed=seed)
+            n_switched = switched(group, seed)
+            other.loc[x_rows[:n_switched], ["call", "parent"]] = "Y"
+            crossed = x_rows[n_switched : n_switched + 10 + n_switched]
+            other.loc[crossed, "bp"] = 0.5
+            other.loc[s_rows[: 20 + n_switched], "bp"] = 0.5
+            replicates[(group, seed)] = other
+    table = _seed(replicates)
+    keys = [
+        (level, group, seed)
+        for level in ("broad", "supercluster")
+        for group in GROUPS
+        for seed in (1, 2)
+    ]
+    assert list(zip(table["level"], table["group"], table["seed"], strict=True)) == (
+        keys
+    )
+    for (level, group, seed), (_, row) in zip(keys, table.iterrows(), strict=True):
+        n = switched(group, seed)
+        assert row["base_seed"] == 0
+        if level == "broad":
+            assert row["n_confident"] == 800
+            assert row["n_changed"] == row["n_switched"] == n
+            assert row["n_crossed"] == 10 + n
+        else:
+            assert row["n_confident"] == 400
+            assert row["n_changed"] == row["n_switched"] == 0
+            assert row["n_crossed"] == 20 + n
+    broad = table[table["level"] == "broad"].set_index(["group", "seed"])
+    # Each seed's pooled share is over that seed's pairs only.
+    for seed in (1, 2):
+        pooled = broad.xs(seed, level="seed")["pooled_changed_share"]
+        expected = sum(switched(group, seed) for group in GROUPS) / (3 * 800)
+        assert np.allclose(pooled, expected)
+
+
+def test_np4_pooled_changed_share_weighs_groups_by_their_labels() -> None:
+    """The pooled share is the groups' changes over their labels, not a mean.
+
+    D1 changes 8 of its 800 broad labels (1%), D2 6 of its 200 (3%: the
+    others are unconfident at both seeds) and D3 none of 800. The pooled
+    share is 14 / 1,800 (0.78%), not the mean of the group shares (1.33%),
+    and D2 fails the level although the pooled share would pass.
+    """
+    replicates = _seed_grid({"D1": 8, "D2": 6})
+    base = replicates[("D2", 0)]
+    unconfident = np.concatenate(
+        [np.flatnonzero((base["parent"] == cls).to_numpy())[100:] for cls in ("X", "Y")]
+    )
+    for seed in SEEDS:
+        replicates[("D2", seed)].loc[unconfident, "bp"] = 0.5
+    table = _seed(replicates)
+    rows = {group: _seed_row(table, group) for group in GROUPS}
+    assert [rows[group]["n_confident"] for group in GROUPS] == [800, 200, 800]
+    assert [rows[group]["n_changed"] for group in GROUPS] == [8, 6, 0]
+    assert rows["D2"]["changed_share"] == pytest.approx(0.03)
+    assert [bool(rows[group]["passed"]) for group in GROUPS] == [True, False, True]
+    broad = table[table["level"] == "broad"]
+    assert np.allclose(broad["pooled_changed_share"], 14 / 1800)
+    mean_share = float(broad["changed_share"].mean())
+    assert mean_share == pytest.approx((0.01 + 0.03 + 0.0) / 3)
+    assert not np.isclose(14 / 1800, mean_share)
+    assert np.allclose(
+        table.loc[table["level"] == "supercluster", "pooled_changed_share"], 0.0
+    )
+
+
 def test_np4_seed_criterion_reads_the_default_group_check_half() -> None:
     """§14: the default donor's check half, at both seeds (pre-reg §23.9 item 3)."""
     replicates = _seed_grid()
