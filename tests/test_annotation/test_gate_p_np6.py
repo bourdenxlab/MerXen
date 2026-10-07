@@ -228,23 +228,29 @@ def test_a_thin_stressed_set_is_pooled_with_the_next_deeper_set() -> None:
     assert not rows.loc["30", "below_min_confident_n"]
 
 
-def test_a_pooled_stressed_set_counts_each_cell_once_at_its_deepest_row() -> None:
+def test_a_pooled_stressed_set_keeps_each_cell_once_at_its_row_in_the_thin_set() -> (
+    None
+):
     """Pooling a bin with the ">= D_P" set keeps each test cell once.
 
     150 cells ``a`` reach 100 counts and 150 cells ``b`` only 30. The base
     holds 300 calls at 30 (a set of its own) and 150 at 100, so its
     ">= 30" set pools a's 100 rows with b's 30 rows. Stressed, a stays
-    confident at both depths and only 20 of b at 30: the bin 30 holds 170
-    calls and joins ">= 30". There a counts once, at 100: 170 calls, not
-    the 320 of the two scopes stacked.
+    confident at both depths but is wrong at 100, and only 20 of b stay
+    confident at 30: the bin 30 holds 170 calls and joins ">= 30". There
+    each cell counts once (170 calls, not the 320 of the two scopes
+    stacked), by default at its row in the thin set: a's correct 30 rows.
+    Kept at their deepest row (the alternative reading, pre-registration
+    §23.15 item 2), a's wrong 100 rows are scored instead.
     """
     good = (0.95, True)
     base = tracked_cells([("a", 150, {30: good, 100: good}), ("b", 150, {30: good})])
     base[res.TRUTH_LEAF_COLUMN] = "A"
     stressed = base.copy()
     b30 = stressed["cell_id"].str.startswith("b_") & (stressed["depth"] == 30)
-    index = stressed.index[b30][20:]
-    stressed.loc[index, "bp"] = 0.5
+    stressed.loc[stressed.index[b30][20:], "bp"] = 0.5
+    a100 = stressed["cell_id"].str.startswith("a_") & (stressed["depth"] == 100)
+    stressed.loc[a100, "correct"] = False
     tested, verdicts = _np6_tables(base, stressed, (30, 100))
     assert sorted(
         gp.tested_set_label(item) for item in tested[("broad", "X")] or []
@@ -256,9 +262,104 @@ def test_a_pooled_stressed_set_counts_each_cell_once_at_its_deepest_row() -> Non
     assert row["n_stressed_tested"] == 170
     assert row["set"] == "30+>=30" and row["depths"] == "30;100"
     assert row["n_stress"] == 170 and row["n_base"] == 300
+    assert row["precision_stress"] == pytest.approx(1.0)
     assert row["below_min_confident_n"]
     pooled = _row(verdicts, gp.NP3_UNWEIGHTED, ">=30")
     assert pooled["set"] == ">=30" and pooled["n_stress"] == 170
+    assert pooled["precision_stress"] == pytest.approx(20 / 170)
+    _, deepest = _np6_tables(
+        base, stressed, (30, 100), np6=_np6(pool_rows=gp.NP6_POOL_DEEPEST_ROW)
+    )
+    row = _row(deepest, gp.NP3_UNWEIGHTED, "30")
+    assert row["set"] == "30+>=30"
+    assert row["n_stress"] == 170 and row["n_base"] == 300
+    assert row["precision_stress"] == pytest.approx(20 / 170)
+
+
+def test_a_thin_set_of_nested_cells_is_scored_on_its_own_calls() -> None:
+    """A thin set's own stressed rows decide, not the deeper set's.
+
+    Both simulations place each test cell at every grid depth it reaches,
+    so the cells of a deeper set are nested in a shallower one's. 300 cells
+    reach 60 counts; the base calls them confidently and correctly at 30
+    and 60 (two sets tested on their own). A stress keeping 210 confident
+    calls at 30 at precision .50 fails "30". One keeping only 150 at
+    precision 1/3 leaves "30" thin, so it pools with "60", which adds no
+    cell: "30" is scored on its 150 calls and fails. Kept at their deepest
+    row (the alternative reading, pre-registration §23.15 item 2), the same
+    cells would be scored on their 60 rows (precision 1.0) and the worse
+    stress would pass.
+    """
+    good = (0.95, True)
+    base = tracked_cells([("c", 300, {30: good, 60: good})])
+    base[res.TRUTH_LEAF_COLUMN] = "A"
+
+    def stress(n_confident: int, n_correct: int) -> pd.DataFrame:
+        frame = base.copy()
+        at30 = frame.index[frame["depth"] == 30]
+        frame.loc[at30[n_confident:], "bp"] = 0.5
+        frame.loc[at30[n_correct:], "correct"] = False
+        return frame
+
+    tested, verdicts = _np6_tables(base, stress(210, 105), (30, 60))
+    assert sorted(
+        gp.tested_set_label(item) for item in tested[("broad", "X")] or []
+    ) == ["30", "60"]
+    row = _row(verdicts, gp.NP3_UNWEIGHTED, "30")
+    assert row["set"] == "30" and row["n_stress"] == 210
+    assert row["precision_stress"] == pytest.approx(0.5)
+    assert not row["passed"]
+    assert _row(verdicts, gp.NP3_UNWEIGHTED, "60")["passed"]
+    worse = stress(150, 50)
+    _, verdicts = _np6_tables(base, worse, (30, 60))
+    row = _row(verdicts, gp.NP3_UNWEIGHTED, "30")
+    assert row["set"] == "30+60" and row["n_stressed_tested"] == 150
+    assert row["below_min_confident_n"]
+    assert row["n_stress"] == 150 and row["n_base"] == 300
+    assert row["precision_stress"] == pytest.approx(1 / 3)
+    assert not row["point_ok"] and not row["passed"]
+    assert not verdicts[verdicts["tested_set"] == "30"]["passed"].any()
+    _, deepest = _np6_tables(
+        base, worse, (30, 60), np6=_np6(pool_rows=gp.NP6_POOL_DEEPEST_ROW)
+    )
+    row = _row(deepest, gp.NP3_UNWEIGHTED, "30")
+    assert row["set"] == "30+60" and not row["below_min_confident_n"]
+    assert row["n_stress"] == 300 and row["precision_stress"] == pytest.approx(1.0)
+    assert deepest[deepest["tested_set"] == "30"]["passed"].all()
+
+
+def test_a_deeper_set_adds_only_the_cells_the_thin_set_lacks() -> None:
+    """Pooled sets keep the thin set's rows and add the deeper set's other cells.
+
+    120 cells ``a`` reach 60 counts and 200 cells ``c`` are simulated at 60
+    only (as no simulation does, to show the rule); in the base 100 cells
+    ``e`` at 30 make 30 a set of its own. Stressed, e is gone and a is
+    confident at both depths but wrong at 60: "30" holds 120 calls and
+    pools with "60". The pooled set keeps a's correct 30 rows and adds c:
+    320 calls, 320 correct. At the deepest row it would score a's wrong 60
+    rows: 200 correct of 320.
+    """
+    good = (0.95, True)
+    base = tracked_cells([("a", 120, {30: good, 60: good}), ("c", 200, {60: good})])
+    base[res.TRUTH_LEAF_COLUMN] = "A"
+    extra = tracked_cells([("e", 100, {30: good})])
+    extra[res.TRUTH_LEAF_COLUMN] = "A"
+    base = pd.concat([base, extra], ignore_index=True)
+    stressed = base[~base["cell_id"].str.startswith("e_")].copy()
+    a60 = stressed["cell_id"].str.startswith("a_") & (stressed["depth"] == 60)
+    stressed.loc[a60, "correct"] = False
+    tested, verdicts = _np6_tables(base, stressed, (30, 60))
+    assert sorted(
+        gp.tested_set_label(item) for item in tested[("broad", "X")] or []
+    ) == ["30", "60"]
+    row = _row(verdicts, gp.NP3_UNWEIGHTED, "30")
+    assert row["set"] == "30+60" and row["n_stressed_tested"] == 120
+    assert row["n_stress"] == 320 and row["n_correct_stress"] == 320
+    _, deepest = _np6_tables(
+        base, stressed, (30, 60), np6=_np6(pool_rows=gp.NP6_POOL_DEEPEST_ROW)
+    )
+    row = _row(deepest, gp.NP3_UNWEIGHTED, "30")
+    assert row["n_stress"] == 320 and row["n_correct_stress"] == 200
 
 
 # --------------------------------------------------------------------------
@@ -612,6 +713,8 @@ def test_np6_settings_follow_the_config() -> None:
         gp.NP3_CLASS_BALANCED,
     )
     assert (np6.weight_min_type_cells, np6.weight_trim_factor) == (20, 10.0)
+    assert np6.pool_rows == gp.NP6_POOL_FIRST_SET
+    assert gp.NP6_POOL_READINGS == (gp.NP6_POOL_FIRST_SET, gp.NP6_POOL_DEEPEST_ROW)
     custom = gp.Np6Settings.from_config(
         AnnotationResolvabilityConfig(
             gate_p_min_confident_n=300, gate_p_replicate_min_confident_n=100
@@ -625,6 +728,7 @@ def test_np6_settings_follow_the_config() -> None:
         {"drop_z": 0.0},
         {"scored_schemes": ()},
         {"scored_schemes": (gp.NP3_DEPTH_HISTOGRAM,)},
+        {"pool_rows": "shallowest_row"},
     ):
         with pytest.raises(ValueError, match="Np6Settings"):
             _np6(**bad)

@@ -495,17 +495,31 @@ class _ReplicateIndex:
             return np.asarray(deepest[keep], dtype=np.int64)
         return np.asarray(rows[self._depth[rows] == item.depths[0]], dtype=np.int64)
 
-    def union_scope_positions(self, items: Sequence[res.GatePTestedSet]) -> np.ndarray:
+    def union_scope_positions(
+        self, items: Sequence[res.GatePTestedSet], *, deepest: bool = False
+    ) -> np.ndarray:
         """Return the union of tested sets' scopes, each test cell once.
 
         NP6 pools a tested set left with too few stressed calls with the next
-        deeper one (§14 NP6). The pooled set's scope is the union of their
-        scopes with each test cell kept once, at its deepest row there (§14:
-        "each test cell counted once at its deepest bin"); one set's scope is
-        ``scope_positions``.
+        deeper one (§14 NP6); ``items`` are in pooling order, the thin set
+        first. The pooled set's scope is the union of their scopes with each
+        test cell kept once (pre-registration §23.15 item 2):
+
+        - by default at its row in the first of ``items`` whose scope holds
+          it: the thin set keeps its own rows and a deeper set adds only the
+          test cells it lacks. The simulations place each test cell at every
+          grid depth it reaches, so a deeper set's cells are nested in a
+          shallower set's and the pooled set is in effect the thin set;
+        - with ``deepest``, at its deepest row in the pooled scopes (the
+          rule of a ">= D_P" set, §14 "each test cell counted once at its
+          deepest bin", applied across the pooled sets): a thin set's nested
+          cells are then scored on the deeper set's rows.
+
+        One set's scope is ``scope_positions``.
 
         Args:
-            items: Tested sets of one level.
+            items: Tested sets of one level, in pooling order.
+            deepest: Keep each test cell at its deepest row instead.
 
         Returns:
             Row positions, one per test cell.
@@ -519,14 +533,20 @@ class _ReplicateIndex:
             raise ValueError("union_scope_positions: the sets are of several levels")
         if len(items) == 1:
             return self.scope_positions(items[0])
-        positions = np.unique(
-            np.concatenate([self.scope_positions(item) for item in items])
-        )
+        scopes = [self.scope_positions(item) for item in items]
+        positions = np.concatenate(scopes)
         if self._cell_codes is None:
             codes, _ = pd.factorize(self._frame["cell_id"].astype(str).to_numpy())
             self._cell_codes = np.asarray(codes, dtype=np.int64)
         cells = self._cell_codes[positions]
-        order = np.lexsort((-self._depth[positions], cells))
+        if deepest:
+            rank = -self._depth[positions]
+        else:
+            rank = np.repeat(
+                np.arange(len(scopes), dtype=np.int64),
+                [len(scope) for scope in scopes],
+            )
+        order = np.lexsort((rank, cells))
         ranked = cells[order]
         first = np.ones(len(order), dtype=bool)
         first[1:] = ranked[1:] != ranked[:-1]
@@ -3440,6 +3460,15 @@ NP6_SCORED_SCHEMES: Final[tuple[str, ...]] = (
     NP3_CLASS_BALANCED,
 )
 NP6_SCHEMES: Final[tuple[str, ...]] = NP6_SCORED_SCHEMES
+# Where a test cell of thin pooled sets is scored (§14 NP6: a set "left with
+# < n_min stressed calls [is] pooled with the next deeper set";
+# pre-registration §23.15 item 2, open): at its row in the thin set, a deeper
+# set adding only the cells it lacks (the default, the stricter reading), or
+# at its deepest row in the pooled sets (``_ReplicateIndex.
+# union_scope_positions``).
+NP6_POOL_FIRST_SET: Final = "first_set"
+NP6_POOL_DEEPEST_ROW: Final = "deepest_row"
+NP6_POOL_READINGS: Final[tuple[str, ...]] = (NP6_POOL_FIRST_SET, NP6_POOL_DEEPEST_ROW)
 NP6_STATS_COLUMNS: Final[tuple[str, ...]] = (
     "level",
     "class",
@@ -3501,6 +3530,10 @@ class Np6Settings:
         drop_z: The one-sided normal quantile of the drop test (95%).
         scored_schemes: The weightings a set must pass under
             (``NP6_SCORED_SCHEMES``).
+        pool_rows: Where a test cell of pooled thin sets is scored
+            (``NP6_POOL_READINGS``; an open reading, pre-registration §23.15
+            item 2): ``NP6_POOL_FIRST_SET`` (default) at its row in the thin
+            set, ``NP6_POOL_DEEPEST_ROW`` at its deepest row.
     """
 
     min_confident_n: int
@@ -3510,14 +3543,16 @@ class Np6Settings:
     max_drop: float = NP6_MAX_DROP
     drop_z: float = NP6_DROP_Z
     scored_schemes: tuple[str, ...] = NP6_SCORED_SCHEMES
+    pool_rows: str = NP6_POOL_FIRST_SET
 
     def __post_init__(self) -> None:
         """Validate the constants.
 
         Raises:
             ValueError: For a count below 1, a negative margin or trim, a drop
-                limit outside [0, 1], a quantile that is not > 0, or scored
-                schemes that are empty or not NP6 schemes.
+                limit outside [0, 1], a quantile that is not > 0, scored
+                schemes that are empty or not NP6 schemes, or an unknown
+                ``pool_rows``.
         """
         for name in ("min_confident_n", "weight_min_type_cells"):
             if getattr(self, name) < 1:
@@ -3540,6 +3575,11 @@ class Np6Settings:
             raise ValueError(
                 f"Np6Settings.scored_schemes must be a non-empty subset of "
                 f"{NP6_SCHEMES}, got {self.scored_schemes!r}"
+            )
+        if self.pool_rows not in NP6_POOL_READINGS:
+            raise ValueError(
+                f"Np6Settings.pool_rows must be one of {NP6_POOL_READINGS}, "
+                f"got {self.pool_rows!r}"
             )
 
     @classmethod
@@ -3637,7 +3677,9 @@ class _Np6View:
         default_group: str | None,
         seed: int,
         role: str,
+        pool_rows: str = NP6_POOL_FIRST_SET,
     ) -> None:
+        self.deepest = pool_rows == NP6_POOL_DEEPEST_ROW
         cells = pooled_held_out_cells(
             rows.replicates, default_group=default_group, seed=seed
         )
@@ -3661,7 +3703,8 @@ class _Np6View:
         self, items: Sequence[res.GatePTestedSet], cls: str
     ) -> tuple[np.ndarray, np.ndarray]:
         """The set's calls of the class (any confidence) and the confident ones."""
-        called = self.index.called_in(self.index.union_scope_positions(items), cls)
+        scope = self.index.union_scope_positions(items, deepest=self.deepest)
+        called = self.index.called_in(scope, cls)
         return called, called[self.confident[called]]
 
     def n_confident(self, items: Sequence[res.GatePTestedSet], cls: str) -> int:
@@ -3741,10 +3784,9 @@ def np6_set_stats(
     the next deeper set"). A tested set with fewer than
     ``settings.min_confident_n`` stressed confident calls is pooled with the
     next deeper tested set of its (level, class), then the next, until it
-    holds that many or none is left; each test cell counts once, at its
-    deepest row of the pooled sets' scopes (``union_scope_positions``). The
-    base, stressed and clean values of a row are read on the same pooled
-    sets.
+    holds that many or none is left; each test cell counts once
+    (``_ReplicateIndex.union_scope_positions``). The base, stressed and
+    clean values of a row are read on the same pooled sets.
 
     Readings this implementation takes where §14 is not explicit (strict
     where there is a choice). They are open and put to the user in
@@ -3759,6 +3801,18 @@ def np6_set_stats(
       three. A smaller Kish n widens the drop test, so the unweighted test
       is the one that can fail on a drop the weighted ones leave
       undecided; the weighted floors are the stricter ones.
+    - **Where a pooled test cell is scored** (``settings.pool_rows``). By
+      default at its row in the thin set: a deeper set adds only the test
+      cells the thin set lacks. Every simulation (version 6 and version 7)
+      places each test cell at every grid depth it reaches, so a deeper
+      set's cells are nested in a shallower set's; pooling then adds no
+      cell, and a thin set is scored on its own stressed calls ("a set
+      still thin" below decides). The alternative,
+      ``NP6_POOL_DEEPEST_ROW``, keeps each cell at its deepest row of the
+      pooled sets (the rule of a ">= D_P" set across the pooled sets). It
+      scores a thin set's cells on the deeper set's rows, so a stress that
+      leaves a shallow bin with fewer, worse confident calls than a milder
+      stress can pass where the milder one fails (the example of §23.15).
     - **Order of the sets.** The tested sets of a (level, class) are taken
       by their shallowest bin, then their deepest (a bin at D_P tested on
       its own comes before the ">= D_P" set, which is then its next deeper
@@ -3847,7 +3901,14 @@ def np6_set_stats(
         )
     lookup = res.emission_lookup(decisions, regime)
     views = {
-        role: _Np6View(rows, lookup, default_group=default_group, seed=seed, role=role)
+        role: _Np6View(
+            rows,
+            lookup,
+            default_group=default_group,
+            seed=seed,
+            role=role,
+            pool_rows=settings.pool_rows,
+        )
         for role, rows in simulations.items()
     }
     schemes = tuple(
