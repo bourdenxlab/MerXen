@@ -1542,3 +1542,25 @@ CK2 is met. Gate P may now run on the new-panel family (C18), after its PREP and
   - Overall median: 328 counts (confident broad calls). The label-free table median, reported only, is 236.
 - **Source manifest:** `$A/m13/npf_run/np5_profile/source_manifest.json`.
 - **The first read of the family's outputs:** building this asset. Nothing else of the family's outputs has been read.
+
+### 23.25 Gate P on the new-panel family: result (recorded 2026-10-08, when the run ended)
+
+**The run.** Code `2c25541` (export `$A/m13/npf_run/code/head`), at host load 5.3 / 12.1 / 11.1 at its start (the v7 dry run's was 2.9 / 4.2 / 38.2). Run outputs: `$A/m13/npf_run/gate_p_run/`.
+- **First attempt:** under D2 (d), it stopped before any mapping: 6 (donor, class) pools could not meet the per-class top-up rule.
+- **Re-run in place** with `--gate-p-other-region shared`, as A48 (b) rules (§23.19). It scored in 1 h 42 min.
+
+**Verdict: the family does not pass gate P.** `validated_max_level` none, because lineage is not complete. The family stays `provisional` (§14 Gate-P rule). The real-data onboarding (§23.7) is separate.
+- **Family checks:**
+  - NP1 passed.
+  - NP2 passed: no weak or collapsed parent; the two names the user accepted matched none.
+  - NP8 not applicable.
+  - NP9 passed: `measured_seconds` 5,003 against the reference 4,929 × 1.5 (set a's v7 dry run, scaled to 7,805,264 simulated cells), RSS within the reserve, identity identical.
+- **Lineage: every class fails NP7's 1% part** in 7 of the 8 members.
+  - Confident calls to excluded nodes are 1.12–2.92% of the level's confident calls; member @9 is at 1.00% and passes.
+  - Almost all of these calls go to the WHB sink Miscellaneous (CS202210140_463), counted confident by the larger of the call's own lineage bp and its supercluster bp (§23.13 item 1, ruled A8 (a)).
+  - At broad, NT and supercluster the same share is 0.09–0.69%, which passes.
+- **Broad:** 5 of 6 C_P classes validated. Broad Oligo fails NP3 in member @6 only: class-balanced precision 0.948 at the ≥ D_P set (bin 250), against target⁺ 0.95.
+- **Supercluster:** all 6 C_P classes validated (Exc only from depth 250).
+- **NT:** both classes validated.
+
+**No revision.** These criteria passed the set a dry run, so the registered rule (§9 "Dry run"; CK2) gives no ground to revise them for this family. Changing NP7 or NP3 now would be a post-hoc loosening that validates more classes (§1 rule 2). Any later revision applies to the next families only, after a dry run.
