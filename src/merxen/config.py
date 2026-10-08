@@ -354,6 +354,77 @@ class MaskImageQuantificationConfig(BaseModel):
         return int(value)
 
 
+_IMAGE_KEY_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+
+
+class RegisteredImageSpec(BaseModel):
+    """One externally acquired image to register onto the dataset image grid.
+
+    The alignment matrix is the 3x3 affine exported by Xenium Explorer: it maps
+    level-0 pixel coordinates of this image to level-0 pixel coordinates of the
+    reference image (Xenium ``morphology_focus``).
+    """
+
+    image_key: str = Field(pattern=_IMAGE_KEY_PATTERN)
+    image_path: Path
+    alignment_matrix_path: Path
+    channel_names: list[str] | None = None
+    registration_channel: str | None = "DAPI"
+
+    @field_validator("channel_names")
+    @classmethod
+    def _validate_channel_names(
+        cls: type[RegisteredImageSpec],
+        value: list[str] | None,
+    ) -> list[str] | None:
+        if value is None:
+            return None
+        names = [str(name).strip() for name in value]
+        if not names or any(not name for name in names):
+            raise ValueError("channel_names must be non-empty strings")
+        if len(set(names)) != len(names):
+            raise ValueError(f"channel_names must be unique, got {names}")
+        return names
+
+
+class ImageRegistrationConfig(BaseModel):
+    """Configuration for registering external images onto the mask grid."""
+
+    dataset_name: str
+    platform: Literal["MERSCOPE", "XENIUM"]
+    latest_zarr_path: Path
+    output_dir: Path
+    images: list[RegisteredImageSpec] = Field(min_length=1)
+    reference_image_key: str = "morphology_focus"
+    reference_channel: str = "DAPI"
+    reference_pixel_size_um: float = Field(default=0.2125, gt=0.0)
+    matrix_scale_tolerance: float = Field(default=0.02, gt=0.0, lt=1.0)
+    refine_affine: bool = True
+    registration_pixel_size_um: float = Field(default=0.85, gt=0.0)
+    refinement_window_um: float = Field(default=200.0, gt=0.0)
+    min_refinement_windows: int = Field(default=20, ge=3)
+    # P7513 sweep: shifts up to 80 um were measured to within 0.2 um, so 50 um
+    # leaves headroom while rejecting fits beyond a quarter of the window.
+    max_refinement_shift_um: float = Field(default=50.0, gt=0.0)
+    max_refinement_rotation_deg: float = Field(default=2.0, gt=0.0)
+    max_refinement_scale_change: float = Field(default=0.02, gt=0.0)
+    tile_size: int = Field(default=4096, gt=0)
+    chunk_size: int = Field(default=4096, gt=0)
+    build_viewer_pyramid: bool = True
+
+    @model_validator(mode="after")
+    def _validate_image_keys(self: ImageRegistrationConfig) -> ImageRegistrationConfig:
+        keys = [spec.image_key for spec in self.images]
+        if len(set(keys)) != len(keys):
+            raise ValueError(f"image_key values must be unique, got {keys}")
+        if self.reference_image_key in keys:
+            raise ValueError(
+                f"image_key {self.reference_image_key!r} would overwrite the "
+                "reference image"
+            )
+        return self
+
+
 class QCConfig(BaseModel):
     """Configuration for QC metric computation."""
 

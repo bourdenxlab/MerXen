@@ -54,6 +54,21 @@ required. A template lives at
 | `xenium_min_qv` | no | Minimum transcript quality value to retain. Defaults to `20`. |
 | `xenium_voxel_layers` | no | ProSeg voxel layer count for Xenium. Defaults to `2`. |
 | `xenium_spec_path` | no | Override path to `experiment.xenium` or `specs.json` used to derive the micron→pixel transform. |
+| `xenium_registered_images_csv` | no | CSV listing post-Xenium images (e.g. IF) of this section to register onto the Xenium mask grid, one row per image with its Xenium Explorer matrix. Enables the `register_images` stage for the row. See [Registered-image CSV](#registered-image-csv). |
+
+### Registered-image CSV
+
+`xenium_registered_images_csv` points to a CSV with one row per image:
+`image_key`, `image_path`, `alignment_matrix`, and optional `channel_names`
+(`;`-separated) and `registration_channel` (default `DAPI`; `none` disables
+refinement). Relative paths resolve against the CSV's directory.
+
+```csv
+image_key,image_path,alignment_matrix,channel_names
+post_xenium_if,Slide511_s2.ome.tiff,Slide511_s2_matrix.csv,DAPI;p62;AT8
+```
+
+Full details: [Image registration](stages/register-images.md#inputs).
 
 ### Cortical-depth annotation columns
 

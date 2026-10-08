@@ -1,4 +1,4 @@
-# requirements.lock sha256: d84e58252d081913f610eb3b58041a8d12c08a5cef75608ebc6677bcb8c1b919
+# requirements.lock sha256: 13f9fc02e8019fbb7427baa4613c6928b6f1a03f1e16ee461dcdab5b65382027
 # Nextflow caches this env as work/conda/env-<hash of this file's text>. The
 # thin editable install below does not change when only the lockfile does, so
 # the checksum above ties the text to requirements/requirements.lock and a

@@ -19,6 +19,7 @@ Commands:
   cellpose-nuclei-segment
                       Run reusable DAPI-only Cellpose nuclei segmentation
   enrich             Enrich a segmented zarr with per-shape tables
+  register-images    Register OME-TIFF images with Xenium Explorer matrices
   mask-image-quantification
                       Quantify image channels over final Cellpose masks
   compute-cortical-depth
@@ -130,6 +131,25 @@ merxen enrich --config enrich_config.json [--force-rerun]
 | `--force-rerun` | Overwrite existing shape layers and tables. |
 
 Details: [Stage 3 — Enrichment](stages/enrichment.md).
+
+---
+
+## `merxen register-images`
+
+Register external OME-TIFF images (e.g. post-Xenium IF) onto the reference
+image grid using Xenium Explorer matrices, refine the affine on DAPI, and write
+the resampled images into the SpatialData zarr.
+
+```bash
+merxen register-images --config register_images_config.json [--force-rerun]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--config PATH` | JSON validated against `ImageRegistrationConfig`. |
+| `--force-rerun` | Re-register images even when an identical registration is recorded. |
+
+Details: [Image registration](stages/register-images.md).
 
 ---
 

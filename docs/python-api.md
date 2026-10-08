@@ -28,7 +28,7 @@ merxen/
 ```
 
 The subpackage structure mirrors the Nextflow stage graph:
-`build → segment-nuclei → segment → enrich → mask-image-quantification → qc → align →
+`build → segment-nuclei → segment → enrich → register-images → mask-image-quantification → qc → align →
 materialize-alignment → alignment-qc → compare → visualize → spatial-gene-analysis →
 clustering-squidpy → compute-cortical-depth → distance-from-object →
 mapmycells`. Cortical depth is skipped unless `--cortical_depth_enabled true`
@@ -163,6 +163,24 @@ with Groovy.
 - `sanitize_table_key`, `resolve_points_cols`, `ensure_shape_has_cell_id`,
   `build_gene_list_from_base_table`, `clone_table_for_region`.
 
+## `merxen.image_registration`
+
+### `image_registration` — [image_registration.py](../src/merxen/image_registration.py)
+- `load_alignment_matrix(path)` — read and validate a Xenium Explorer 3×3 affine.
+- `check_matrix_scale(matrix, *, image_pixel_size_um, reference_pixel_size_um, tolerance)`
+  — reject inverted or micron-based matrices by their scale.
+- `measure_local_shifts(reference, moving, valid, *, window_px)` — windowed
+  phase-correlation residual shifts.
+- `fit_affine_displacement(centers_xy, shifts_xy)` — robust affine fit to a
+  shift field.
+- `run_image_registration(config, *, force_rerun)` — stage entry point.
+
+### `io.ome_tiff` — [ome_tiff.py](../src/merxen/io/ome_tiff.py)
+- `read_ome_tiff_info(path)` — levels, channel names, and pixel size without
+  reading pixels.
+- `open_ome_tiff_level(info, level, *, channel_names)` — lazy `(c, y, x)`
+  DataArray of one pyramid level.
+
 ## `merxen.mask_image_quantification`
 
 ### `mask_image_quantification` — [mask_image_quantification.py](../src/merxen/mask_image_quantification.py)
@@ -172,7 +190,8 @@ with Groovy.
   features to hybrid cells by their shared identifier without quantifying
   hybrid polygons.
 - `run_mask_image_quantification(config, *, force_rerun)` — stage entry point
-  that writes the SpatialData table and sidecar outputs.
+  that writes the SpatialData table and sidecar outputs. An existing table is
+  reused only when it covers exactly the zarr's current source images.
 
 ## `merxen.cortical_depth`
 

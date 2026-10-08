@@ -37,6 +37,7 @@ from merxen.cli.run_distance_from_object import (
     distance_from_object_command,
 )
 from merxen.cli.run_enrichment import enrich_command
+from merxen.cli.run_image_registration import register_images_command
 from merxen.cli.run_mapmycells import mapmycells_command
 from merxen.cli.run_mask_image_quantification import (
     mask_image_quantification_command,
@@ -72,6 +73,7 @@ main.add_command(cellpose_segment_command)
 main.add_command(cellpose_nuclei_segment_command)
 main.add_command(proseg_segment_command)
 main.add_command(enrich_command)
+main.add_command(register_images_command)
 main.add_command(build_viewer_caches_command)
 main.add_command(mask_image_quantification_command)
 main.add_command(validate_analysis_layer_command)

@@ -78,10 +78,13 @@ graph LR
         %%metro exit: bottom | merscope, xenium
         %%metro exit: right | optional
         enrich[Enrich]
+        register_images[Register images]
         mask_image_quantification[Mask image quant.]
         qc[QC]
 
-        enrich -->|merscope,xenium,optional| mask_image_quantification
+        enrich -->|merscope,xenium| mask_image_quantification
+        enrich -->|optional| register_images
+        register_images -->|optional| mask_image_quantification
         mask_image_quantification -->|merscope,xenium,optional| qc
     end
 

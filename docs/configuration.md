@@ -66,6 +66,7 @@ profile. Override either kind with `--<name>` on the command line.
 | `analysis_mode` | `paired` | Fallback row mode: `paired`, `merscope`, or `xenium`. A non-empty samplesheet `analysis_mode` value overrides this per row. |
 | `enable_alignment` | `false` | Fallback row alignment switch. A non-empty samplesheet `enable_alignment` value overrides this per row; alignment only applies to paired rows. |
 | `analysis_segmentation` | `all` | Fallback downstream analysis branches after enrichment. Valid values: `all`, `both`, `reseg`, `original_seg`, `proseg_mask`/`cellpose`, `proseg_hybrid`; comma-separated combinations are accepted. `all` includes all four branches, while `both` restricts analysis to `reseg,original_seg`. A non-empty samplesheet value overrides this per row. |
+| `register_images_refine_affine` | `true` | Refine each Xenium Explorer matrix with a robust DAPI-to-DAPI affine fit before resampling registered images. The stage itself is enabled per row by `xenium_registered_images_csv`; see [stages/register-images.md](stages/register-images.md). |
 | `mask_image_quantification_enabled` | `true` | Insert the Cellpose-mask image quantification stage between enrichment and QC. A non-empty samplesheet `mask_image_quantification_enabled` value overrides this per row. |
 | `mecr_enabled` | species-dependent | Insert species-matched whole-brain mutually exclusive co-expression rate analysis after QC. Defaults to `true` for human and `false` for mouse; mouse may opt in to the complete WMB reference. |
 | `spatial_gene_analysis_enabled` | `true` | Insert spatial gene analysis between visualization and clustering. A non-empty samplesheet value overrides this per row; disabled rows proceed directly from visualization to clustering. |
@@ -87,10 +88,12 @@ profile. Override either kind with `--<name>` on the command line.
 | `task_tmp_dir` | Dwight: `/srv/storage/MerXen/tmp` | Exported to every task as `TMPDIR`, so library temporary files land on the `/srv/storage` RAID rather than `/tmp` on the small root disk. The directory must exist (`mkdir -p` it once per host). ProSeg and the proseg_hybrid refinement write their large intermediates to `$MERXEN_TMPDIR` if set, otherwise to the task's work directory, never to the system temporary directory. |
 
 Stage names accepted by `start_stage`, `stop_stage`, and `only_stage` are:
-`build_spatialdata`, `segment_nuclei`, `segment`, `enrich`, `mask_image_quantification`,
-`qc`, `mecr`, `align`, `align_qc`, `compare`, `visualize`,
-`spatial_gene_analysis`, `clustering_squidpy`, `compute_cortical_depth`,
-`distance_from_object`, `mender`, and `mapmycells`.
+`build_spatialdata`, `segment_nuclei`, `segment`, `enrich`, `register_images`,
+`mask_image_quantification`, `qc`, `mecr`, `align`, `align_qc`, `compare`,
+`visualize`, `spatial_gene_analysis`, `clustering_squidpy`,
+`compute_cortical_depth`, `distance_from_object`, `mender`, and `mapmycells`.
+`register_images` is available only for rows that set
+`xenium_registered_images_csv` and process Xenium.
 `mask_image_quantification` is
 available only when the effective `mask_image_quantification_enabled` value is
 `true`. `compute_cortical_depth` is available only when the effective
@@ -143,6 +146,16 @@ Cellpose process types.
 |-------|---------|-------------|
 | `mask_image_quantification_enabled` | `true` | Run Cellpose-mask image quantification after enrichment by default. |
 | `mask_image_quantification_max_forks` | Dwight: `3` | Maximum concurrent quantification processes. |
+
+### Image registration
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `register_images_refine_affine` | `true` | Apply the DAPI affine refinement on top of each Xenium Explorer matrix. |
+| `register_images_max_forks` | Dwight: `2` | Maximum concurrent registration processes. |
+
+`REGISTER_IMAGES` requests 8 CPUs and 32 GB (P7513 peaked at 8.5 GB with about five cores busy). The viewer pyramid of each
+registered image follows `viewer_cache_build_image_pyramid`.
 
 ### Viewer caches
 

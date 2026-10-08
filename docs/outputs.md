@@ -157,6 +157,21 @@ Path: `${outdir}/<pair_id>/<platform>/enrichment/`
 | `latest_input.zarr` | Staged symlink to `../latest/latest_spatialdata.zarr`. |
 | `enrich_out/` | Assignment summary CSVs per shape (transcripts assigned, gene totals). |
 
+### Image registration
+
+Path: `${outdir}/<pair_id>/xenium/register_images/` (only for rows that set
+`xenium_registered_images_csv`)
+
+| File | Contents |
+|------|----------|
+| `latest_input.zarr` | Staged symlink to `../latest/latest_spatialdata.zarr`, updated in place with one image element per registered image plus its viewer pyramid. |
+| `register_images_out/*_registered_images.json` | Registered and removed image keys for the section. |
+| `register_images_out/*_<image_key>_registration_summary.json` | Explorer and final matrices, scale check, refinement status, residuals before/after. |
+| `register_images_out/*_<image_key>_registration_qc.png` / `.pdf` | DAPI overlay, residual-shift field, and residual histograms. |
+| `register_images_out/*_<image_key>_registration_local_shifts.csv` | Per-window residual shifts before and after refinement. |
+
+See [Image registration](stages/register-images.md#reading-the-qc).
+
 ### Mask Image Quantification
 
 Path: `${outdir}/<pair_id>/<platform>/mask_image_quantification/`
