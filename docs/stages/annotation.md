@@ -454,6 +454,7 @@ and the host thinning is identical for all.
 | `resolvability.parquet` | Primary and secondary bundles (resolvability on): one long table, `kind` per row type: `bin` (per recipe × level × class × depth: calls, precision and coverage at the default threshold, the local threshold), `curve` (precision and coverage at thresholds 0.50–0.99), `isotonic` (fit-half knots), `node` (per-node precision, recall, F1), `confusion` (truth × call within the called class), `decision` (the three regimes below), `gene_efficiency`. |
 | `resolvability_cells.parquet` | One row per simulated cell × level × recipe: parent class, depth, split half, call, bp, `avg_correlation`, truth, truth class, truth leaf, correct. RESOLVE reweights these to each dataset's composition. |
 | `resolvability_summary.json` | Recipes, levels, settings, test-set counts, `D_max` per level and class, emission per regime, level, class and depth (status, threshold, `t*`, extrapolated, pooled, reason), the pooled deep sets per regime, level and class (`D_P`, the bins taking their verdict, statistics, `t*`, status), floors, validated thresholds the local rule would raise (own bins whose fit half holds 50 calls; pooled sets carry `would_raise`), the validated bins whose fit half holds fewer (`validated_thresholds_not_evaluable`: `t*` unknown, never counted as a raise), the trust constraint, fine-level seed stability, runtimes and mapping runs (with each run's `n_processors`); human held-out self-maps: `test_set_exclusion` (the M8 D1 revision, rule and the cells left out). |
+| `resolvability_sim_genes.parquet` | Version-7 primary and secondary bundles built since M13 chunk C16: one row per member × simulated cell (test cell × grid depth) with the member, its role, the cell id, the grid depth, the realised total and `n_genes` (the test cells' genes with a simulated count > 0, host plus spill). The summary's `simulated_n_genes` records the genes counted (ids, count, sha256). It is the simulated side of the gene-complexity check (decision D19 (a)); version-6 bundles never hold it. |
 | `test_cells.h5ad`, `test_cells.parquet` | Resolvability test-set bundles: native panel counts of the test cells and their truth per level (`truth__<level>`), composition key and spill group; human: donor, dissection and `test_source`. |
 
 ### Declared panels, gene IDs and controls (M3b)
@@ -630,8 +631,9 @@ markers: the pre-registered rule of plan §8.7 / NP9, whatever the
 unfiltered lookup gives; the relaxed reading "no parent made weak by the
 prefilter" is reported as `no_parent_made_weak`, not applied). The pinned
 public 10x panel lists
-come from `merxen annotation-panel-fetch`. `--gate-p` is the M13 hook for
-the gate-P programme; it is refused until M13 registers it.
+come from `merxen annotation-panel-fetch`. `--gate-p` runs the gate-P
+programme after the simulation (M13; see
+[Gate P](#gate-p-simulation-based-validation-of-a-panel-family-m13)).
 
 **Measured on the four public 10x panels** (M3b, 8 processes on the shared
 host, the production configuration, resolvability version 4;
@@ -749,8 +751,12 @@ top-up rule, so its bundles are new build directories. A version-7 self-map:
   the rule, member statuses, spread and limit, saturated and filled flags),
   `resolvability_summary.json` (`resolvability_version` 7, members, `ensemble`
   statistics incl. the member spread and agreement, `emitted_before_fill`,
-  the top-up, assets and chemistry, `profile_prediction`) and
-  `resolvability_class_depth.parquet`.
+  the top-up, assets and chemistry, `profile_prediction`, `simulated_n_genes`)
+  and `resolvability_class_depth.parquet`; since M13 chunk C16 also
+  `resolvability_sim_genes.parquet`, each member's simulated cells with their
+  realised total and detected genes. Its version (`SIM_GENES_VERSION`)
+  enters the version-7 `build_hash`, so no version-7 bundle built before it
+  is reused; such a bundle stays readable.
 
 `resolvability_class_depth.parquet` is the table RESOLVE consumes (the M3c
 follow-up; RESOLVE derives it from the decisions it applies, reweighted to the
@@ -891,7 +897,7 @@ panel, first match wins; decided from the cached bundle tables, outside
 | State | Rule | Effect |
 |---|---|---|
 | `refused` | a declared panel refused by the gene-ID resolver; < 50 panel genes in the reference; < 10 root markers; broad unresolvable at every depth ≤ 250 | reference not mapped; primary: gate `failed` (`panel_refused`), every cell `not_attempted_gate` and `exclude_hard`; secondary: degraded mode `single_method` |
-| `broad_only` | leaf resolvable for fewer than half of the classes with enough test cells at every depth ≤ 250; or the bundle of an unlisted panel has no self-map (fail-safe) | leaf and finer levels `not_attempted_gate`, `subcluster_status = not_resolvable_panel`, gate capped at `broad_only` |
+| `broad_only` | leaf resolvable for fewer than half of the classes with enough test cells at every depth ≤ 250; or the bundle of a panel outside the `real_data` families (an unlisted panel, or a family validated by `simulation`) has no self-map (fail-safe; a `simulation` family keeps it, with its family verdict as a note, so promotion never changes what is emitted) | leaf and finer levels `not_attempted_gate`, `subcluster_status = not_resolvable_panel`, gate capped at `broad_only` |
 | `validated` | family listed in `validated_panels.csv` | `real_data`: validated thresholds and packaged floors up to `validated_max_level`, `ct_<L>_validated` on every confident label there; `simulation`: emission exactly as provisional, `ct_<L>_validated` where (level, class) is validated at the cell's depth, gate warning only when > 10% of confident labels lie outside the validated region |
 | `provisional` | anything else | provisional margins, local thresholds, max-rule floors (`unknown_panel`), banner and gate warning flag (never a lower gate level) |
 
@@ -908,6 +914,383 @@ gene) inherits `human_set_a` and is `validated`, the MERSCOPE one (268
 genes) is its own family and `provisional` (banner and gate warning, as H8
 expects); ag7 symbols run as human are `refused`
 (`gene_ids:species_mismatch`).
+
+### Gate P: simulation-based validation of a panel family (M13)
+
+Gate P (plan §14, §8.8) is how a panel family outside the seeded families
+is promoted from `provisional` to `validated` with `validation_basis =
+simulation`. It is simulation only: real datasets never promote a family
+(OD-E1 / OD-E9); they get the downgrade-only real-data QC
+([Real-data QC in RESOLVE](#real-data-qc-in-resolve-m13)). Promotion changes
+no emitted label, status, threshold, margin or floor, only
+`ct_<L>_validated`, the banner and the warning flag (property-tested in
+`test_consensus.py`, `test_consensus_mouse.py`, `test_diagnostics.py` and
+`test_pipeline_resolve_mouse.py`, M13 chunk C10). The programme is `merxen.annotation.gate_p` (the criteria and the
+assembly) and `merxen.annotation.gate_p_run` (the driver). The definitions
+are pre-registered in `docs/acceptance/annotation-v1-preregistration.md`
+§23.9 and §23.10. The readings the code takes where plan §14 is not explicit
+were put to the user there, in §23.11–§23.17, and ruled on 2026-10-07
+(§23.19). The set a dry run then failed, and the user approved the criteria
+revision of §23.21 the same day (R1, R2, R3 (c), R5, R6, R7; below). The dry
+run, re-run on the revised code, passed (§23.23). Gate P then ran on the
+new-panel human MERSCOPE family, which did not pass (§23.25), so no family
+has been promoted ([below](#gate-p-on-the-new-panel-human-merscope-family-m13)).
+No reading is open; every report lists the reading each revised criterion
+scores (`gate_p.GATE_P_SCORED_READINGS`).
+
+**Running it.** `scripts/acceptance/new_panel.py --species <species> ...`,
+a thin wrapper over `merxen annotation-panel-simulate --gate-p`
+([CLI](../cli.md#merxen-annotation-panel-simulate)), builds the family's
+PREP bundles, writes the simulation report and then runs gate P, writing
+`<out-dir>/gate_p/` ([outputs](../outputs.md#gate-p-outputs-m13)).
+
+- `--species` is required: the species is chosen when a new panel check
+  starts (M13 D4). The human path is implemented. A mouse family is refused
+  before any compute until the second disjoint WMB test draw and the ag7 /
+  VZG2 dry run exist (M13 chunks C20–C21, moved to M13b, after M6b).
+- `--store` and `--store-large` must name a separate gate-P store (M13 D11
+  (b)). A store that is, or lies in, the config's `reference_store` or
+  `reference_store_large` is refused before any compute, so gate P never
+  writes into the production store.
+- NP5 needs an expected depth: a registered per-class profile asset
+  (`--depth-profile-asset`) or the label-free pooled median
+  (`--expected-depth`). A per-class CSV is never read for NP5.
+- A family with real sections takes its own NP5 profile (M13 D8 with CHECK
+  K7): `scripts/annotation/build_np5_depth_profile.py` reads the family's
+  first provisional `map_first` RESOLVE label tables (one per section, the
+  scored segmentation) and writes the asset `np5_depth__<family_id>` (role
+  `gate_p_profile`: per class and distinct total count, its cells) with its
+  sidecar into `src/merxen/assets/annotation/sim_inputs/`, and a source
+  manifest under the evidence root (the tables' paths and sha256; the
+  sidecar names the tables by file name and sha256 only). The confident
+  broad calls are keyed by the E2 floor class gate P decides by, and the
+  other table cells are kept apart. Gate P gives a class with at least 100
+  confident broad calls their depths and every other class (fewer calls,
+  none, or supercluster COP) the median of the confident broad calls; NP3's
+  report-only depth histogram uses every table cell
+  (`sim_inputs.FamilyDepthProfile`; the readings are pre-registration
+  §23.20). PREP selects `profile` assets only, so the asset never enters a
+  `build_hash`. It is committed and recorded in the pre-registration before
+  gate P runs, and gate P runs from code that holds it. The builder refuses
+  a table that is not a human `map_first` RESOLVE output of a provisional
+  panel in frontal cortex, tables of another segmentation, panel, family or
+  primary bundle, a section given twice, tables that are not exactly the
+  sections `--sections` names (each by its sample id or pair id), a section
+  whose dataset gate failed or is not recorded, and a confident broad call
+  without a floor class; `--check` re-derives the files. The sidecar
+  records the primary bundle the tables were resolved with, and gate P
+  refuses the asset when its own PREP built another one (after PREP, before
+  any leave-one-donor-out build or mapping; an asset that records none is
+  refused before any compute).
+- Gate P is CPU only and maps with the self-map's recorded MapMyCells worker
+  count (pre-registration §18 item 2); another count is refused.
+
+**What the driver does** (`gate_p_run.run_gate_p`):
+
+1. It checks the request in two stages: what needs no bundle before any
+   compute (`precheck_gate_p`), then what needs the built PREP bundle (a
+   self-map onto the held-out bundle, the gate-P donors, the worker count,
+   the held-out `build_hash`). A refusal after PREP is recorded under
+   `gate_p` in `simulate_report.json`.
+2. It reports the per-donor pool sizes from the reference metadata
+   (`reference.ho_donor_pool_sizes`) and NP2's weak and collapsed parents
+   from PREP's `bundle.json` (reference data only) before any
+   leave-one-donor-out build. Gate P stops here (status `stopped`, with
+   `stop_reasons`; exit status 3 from `new_panel.py`) when under D2 (d) a
+   donor's own pool cannot meet the per-class top-up rule, unless
+   `--gate-p-accept-small-pools` or the fallback `--gate-p-other-region
+   shared` (D2 (c); the user's ruling A48 (b) of 2026-10-07 takes it) is
+   given; and, outside a dry run, when PREP lists a weak or collapsed parent
+   that `--gate-p-accepted-parents` does not name (the user's ruling B2 (b)
+   of 2026-10-07: such a parent goes back to the user before gate P runs),
+   unless `--gate-p-run-with-unaccepted-parents` is given (NP2 then stays
+   pending). An accepted entry names a parent by its lookup key, its node
+   label or its node's name (`gate_p_run.np2_acceptance`), so "Bergmann
+   glia" matches its supercluster's key; an entry naming two parents is
+   refused. A stopped run is rerun in place.
+3. It builds each other frontal WHB donor's held-out bundle in the gate-P
+   store (`resolvability.holdout_donor`; under D2 (d) also
+   `holdout_other_region_donor_only` and the default test set's cells as
+   `gate_p_excluded_test_cells`, so the donors' test sets are disjoint).
+   Every set leaves out the other-region COP test cells (M8 D1, extended to
+   every human gate-P set by M13 D1 (a)).
+4. It fixes C_P per level from the test cells before any cell is mapped
+   (`gate_p_class_sets`).
+5. It simulates and maps every emission member at mapping seeds 0 and 1, the
+   member's NP6 stress members and the clean upper bound at seed 0, against
+   each donor's own held-out bundle with the WHB cells rules. The default
+   donor (H19.30.002) is scored on its check half only. Each replicate is
+   written to `replicates/<donor>/seed<k>/<member>.parquet` as soon as it is
+   mapped.
+6. It re-runs one seed-0 replicate per emission member and PREP's bundle (in
+   a scratch store) for NP9's identity part (CHECK K13).
+7. It scores NP3–NP7 per emission member, with one depth walk over the
+   five criteria per member (`gate_p.gate_p_depth_walk`, R2; version 7: the
+   ensemble's NP5 re-derivation is computed first and scored in every
+   member, R7), and NP1, NP2, NP8 and NP9 per family, assembles the family
+   (`gate_p.assemble_gate_p`) and writes the report.
+
+`--gate-p-version 7` scores a version-6 family's version-7 ensemble (M13 D5
+(c)): the emission members are simulated on the bundle's own test set, and
+nothing is written to a store.
+
+**Criteria** (plan §14; every threshold is pre-registered and unchanged; the
+readings as revised by pre-registration §23.21 on 2026-10-07):
+
+| Criterion | Function | Rule |
+|---|---|---|
+| NP1 gene IDs | `np1_gene_ids` | ≥ 95% of the declared panel resolved (≥ 98% when the vendor supplies IDs); no control reaches the query; the unresolved list reviewed in the gate-P PR |
+| NP2 panel coverage | `np2_panel_coverage` | ≥ 10 root markers, and ≥ 10 markers for each root child with ≥ 50 cells; weak or collapsed parents accepted by the user (`--gate-p-accepted-parents`, given before the run; an unaccepted one stops a family's run before any build). The detail lists the accepted parents by lookup key, whatever the entry named them by, and the entries that name no listed parent (`accepted_not_listed`) |
+| NP3 frozen-threshold precision | `np3_set_stats`, `np3_verdicts`, `np3_test_cell_weights` | on pooled tested sets of ≥ 200 confident held-out calls (deep bins pooled; each test cell once), under the reference's natural composition and the class-balanced composition, both read on the test cells of the set's scope (R1: each called cell of truth type t weighs π_t / N_t, trimmed at 10 × the median; both must pass; Kish effective n): point precision ≥ the provisional target, Wilson lower bound ≥ target_L, coverage ≥ 0.30. The per-call-set weightings (scored before §23.21) are reported only |
+| NP4 stability | `np4_set_verdicts`, `np4_seed_stability` | per replicate (donor × seed) with ≥ 100 confident calls, point precision ≥ target_L; replicate range ≤ max(0.03, 3.5 SE); seed 0 vs 1 changes ≤ 2% of a level's confident labels (D6) |
+| NP5 resolvability consistency | `np5_decision_agreement`, `np5_tstar_consequence`, `np5_extrapolated_share` | the re-derived decisions agree except one flip next to a boundary, comparing a bin only where the base and the replicate each hold ≥ 50 test cells (R6; version 7: the ensemble re-derived per replicate against the frozen ensemble decisions, R7); each replicate's t*, applied to the base's pooled calls of the set, gives point precision ≥ target_L − 0.02 (R3 (c); version 7 the ensemble's re-fitted t*, each call at its own bin's threshold, §23.22; the t* spread is reported only); ≤ 50% of the class's cells at the expected depth extrapolated (median and profile readings both scored) |
+| NP6 stress sensitivity | `np6_set_stats`, `np6_verdicts` | under spill 0.35, LogNormal(0, 1) efficiency and the cross-platform offsets (`ratio__xenium_v1_vs_merscope__human_brain_ffpe`, capped ±2 log2; the lung stress for human Prime): point ≥ target_L, Wilson ≥ target_L − 0.02, and the one-sided 95% lower bound of the precision drop ≤ 0.05, unweighted and under NP3's two test-cell weightings (R1) |
+| NP7 error structure | `np7_error_structure` | per level ≤ 1% of confident calls on sink or region-implausible nodes (human); ≤ 5% of a truth class's confident calls on one wrong node |
+| NP8 cross-panel | `np8_cross_panel` | only for a family that will be paired with another panel |
+| NP9 resources | `np9_resources` | PREP plus the replicates within 1.5 × the time reference (version 7: the set a version-7 dry run's time scaled per simulated cell, D10 (a)); peak RSS within the reserve; identical re-run; the prefilter agreement above 1,000 genes |
+
+**Depth scope** (R2, `gate_p_depth_walk`). `validated_min_depth` is the
+shallowest bin from which every tested set, up to and including the "≥ D_P"
+set, passes NP3 and NP4–NP7. A failure in the ≥ D_P group (every tested set
+whose shallowest bin is ≥ D_P), or of a class-level part (NP4's seed
+criterion, NP5's extrapolated share, NP7's excluded share), fails the class;
+a failure at a shallower set only raises the floor: the walk goes down from
+D_P through the bins tested on their own and stops at the first one that is
+untested or fails any criterion. NP5's agreement at floor d counts only
+flips at bins ≥ d. Each member's walk is written as `depth_walk__<member>`;
+NP3's own walk (`np3_depths`) is reported only.
+
+A version-7 family is scored on every emission member: a (level, class) is
+`validated` when NP3–NP7 pass in every member (`every_member_verdict`), from
+the deepest member floor, else `failed:NP<k>` or `not_evaluable`. One failing
+class leaves the other classes of its level validated. `validated_max_level` is the deepest level
+of the leading run of levels where every class of C_P is validated (the rank
+rule), and the family passes when it reaches broad (human) or class (mouse)
+and NP1, NP2 and NP9 pass, NP8 passing or not applying.
+
+**Dry run.** Before a new family of a species is scored, gate P runs on that
+species' seeded families with `--gate-p-dry-run` (`gate_p.dry_run_verdict`;
+M13 D4, D28): set a for a human family, ag7 and VZG2 for a mouse family. The
+dry run must pass at broad (class) for every class of C_P and at supercluster
+(subclass) for the classes H18 expects, less supercluster COP (pre-registration
+§18 C1). A class H18 expects whose record is `not_evaluable` (fewer than
+n_min confident calls) is reported, not failed (R5; `reported_not_evaluable`
+in the verdict). For human it runs on version 6 and on the version-7 ensemble
+(`--gate-p-version 7`, D5 (c)). A failure makes the criteria unattainable,
+and they are revised in a PR the user approves before any new family is
+scored; the dry run is then re-run under the revised criteria and must pass
+(CK2). A failed dry run is never re-scored under another reading.
+
+**The set a dry run and the criteria revision (2026-10-07; pre-registration
+§23.21–§23.23).**
+
+- *As registered* (code `2a91a36`, other-region draw `shared`, expected depth
+  33), both versions failed. Version 6 failed every broad C_P class (Astro
+  NP3; Exc and Inh NP6; Immune and OPC NP5; Oligo NP4); version 7 failed
+  every C_P class at every level, mostly on NP5 and NP6. NP9's identity part
+  also failed on a code defect (the marker lookup's MapMyCells run record was
+  compared; fixed in `1a8fe2e`).
+- *Causes*, reproduced cell for cell by a read-only re-scorer from the saved
+  replicates: NP3's per-call-set weightings estimate no precision (a few
+  stray wrong calls take the trim cap), and NP6 reused them; NP5's t* spread
+  ≤ 0.05 measures sample size (two mapping seeds on the same cells already
+  differ by more than 0.05 in 22% of glial sets); NP4–NP7 failed a class at
+  sets below its NP3 floor; NP5 compared bins where only one side had test
+  cells; and version 7's NP5 compared each member's own decisions while
+  NP3/4/6/7 score the ensemble emission.
+- *The revision*, approved by the user on 2026-10-07 ("Approve all six
+  (Recommended)"): R1 (NP3's weightings on the test cells of the set's
+  scope, also in NP6), R2 (the depth walk, `validated_min_depth` from the
+  shallowest bin whose sets all pass), R3 (c) (NP5's t* part as a
+  consequence check), R5 (a class H18 expects that is `not_evaluable` is
+  reported in the dry run, not failed), R6 (NP5 compares a bin only where
+  both sides hold ≥ 50 test cells) and R7 (version 7: NP5 compares the
+  ensemble re-derived per replicate with the frozen ensemble decisions). All
+  six are loosenings chosen after the failures were seen (post-hoc). The
+  targets, target⁺, the Wilson rule, coverage 0.30, n_min, NP4's floor and
+  range, NP6's stresses and drop test, and NP7 are unchanged. §23.22 records
+  how R3 (c) reads a version-7 set that spans several bins: each call is
+  held to its own bin's threshold in the replicate.
+- *Negative control* (user: "Enough; state fragility (Recommended)"): set
+  a less 25 Astrocyte- and OPC-specific genes, its expected outcome recorded
+  before it ran, scored as version 7 by the re-scorer under the six
+  revisions. Broad OPC failed in several members; broad and supercluster
+  Astro failed through one member's spill stress only (@12), so those two
+  results are fragile; supercluster OPC did not move. The gate is therefore
+  not blind, but this control does not show that it is sharp. It was not
+  re-scored under §23.22's reading.
+- *The re-run on the revised code* (`a3c0707`) passed in both versions,
+  `validated_max_level` supercluster, with all 27 records equal to the
+  re-scorer's prediction. Version-7 broad floors: Astro 30, Exc 10, Inh 10,
+  Immune 15, OPC 30, Oligo 120. Supercluster Fibroblast and Vascular are
+  reported as not evaluable (R5). The version-7 run's `measured_seconds`
+  (4,259 s for 6,744,671 simulated cells) is NP9's time reference for the
+  next human families (D10 (a)).
+
+**Onboarding a new family** (the order M13 followed for the new-panel human
+MERSCOPE family; pre-registration §23.9, §23.10, §23.19–§23.25):
+
+1. The species is chosen, and that species' dry run must have passed under
+   the current criteria (human: set a, versions 6 and 7; passed on
+   2026-10-07 on `a3c0707`). Any change to the criteria re-runs the dry run
+   before a family is scored.
+2. The declared panel is frozen (its `panel_hash` and the hash-derived
+   `family_id`, D16), and the family's real-data acceptance and any
+   family-specific setting are pre-registered before any of its outputs are
+   read.
+3. The user starts the family's PREP and `map_first` annotation (add-only,
+   with a table suffix). The family is `provisional`, so RESOLVE emits under
+   the provisional regime and runs the real-data QC in full
+   ([below](#gate-p-on-the-new-panel-human-merscope-family-m13)).
+4. The NP5 depth profile is built from that run's proseg_hybrid label tables
+   (`build_np5_depth_profile.py`), committed, and its sha256 recorded in the
+   pre-registration before gate P runs.
+5. Gate P runs from a `git archive` export of the code that holds the asset:
+   `new_panel.py --species human --depth-profile-asset np5_depth__<family_id>`
+   with the dry run's `--gate-p-dry-run-seconds` and
+   `--gate-p-dry-run-simulated-cells` (NP9's reference) and the parents the
+   user accepted (`--gate-p-accepted-parents`), and `--store` /
+   `--store-large` on the separate gate-P store
+   ([configuration](../configuration.md#gate-p-command-options-m13)). A stop
+   on the pool sizes alone is re-run in place with `--gate-p-other-region
+   shared` (ruling A48 (b)); a stop on NP2's parents goes back to the user.
+6. A family that passes is promoted by its own gate-P PR (below). A family
+   that fails stays `provisional`, with the reason recorded in the
+   pre-registration and the PR. The criteria are not revised for it: a
+   revision after its numbers are seen would be a post-hoc loosening (§1
+   rule 2). A revision for later families needs its own PR, the user's
+   approval and a passing dry run.
+7. The family's real-data onboarding (pre-registration §23.6–§23.7, NR1–NR15)
+   is scored separately on the same run. It never promotes; a family-level
+   concern holds back the family's gate-P PR until the user has reviewed it.
+
+**Promotion.** A family that passes is promoted only by its own gate-P PR,
+which the user approves:
+
+1. `gate_p.validated_table_rows` turns the result into the family's
+   `validated_panels.csv` row (`validation_basis = simulation`) and its
+   `validated_panel_levels.csv` rows (`in_class_set`, `status`,
+   `validated_min_depth`, and `tested_max_depth` = D_P).
+2. `diagnostics.write_simulation_family` appends them, with the family's
+   `validated_panel_genes.csv` rows, to the packaged tables. It keeps the
+   existing lines and reads the combined tables back through every check of
+   `read_validated_panels` before they replace the files.
+   `validated_panels.csv` is replaced last.
+3. The writer refuses:
+   - a family whose bundle has no self-map (D13 (a));
+   - a `family_id` other than the panel's own hash-derived id (D16);
+   - a class that is not a consensus class key of its level;
+   - an NT row where NT does not apply, and any SEA-AD subclass row (D14
+     (a)).
+
+In RESOLVE, a `simulation` family emits exactly as a provisional panel: the
+same thresholds, margins, floors and statuses. Only `ct_<L>_validated`
+changes: it marks a confident label of a validated (level, class) at or
+above that class's `validated_min_depth`. A validated label deeper than
+`tested_max_depth` is reported as extrapolated. The gate warns, without
+lowering its level, when more than `warn_unvalidated_share` (10%) of
+the confident labels at a chain level fall outside the validated region;
+since M13 the mouse gate applies the same rule over broad, class, nt and
+subclass. A `simulation` family whose bundle has no self-map keeps the
+provisional fail-safe (`broad_only`, with the family verdict as a note),
+so promotion can never widen what such a bundle emits (M13 C10).
+
+**`m3c_no_promotion.py` fails once a gate-P row lands, by design.** That
+script checks pre-registration §21 (v), that no M3c change promotes a
+family:
+
+- part 1 requires the validated tables to be byte-identical to `83e81e3`
+  with no row added;
+- part 2 requires every bundle's trust state to be at most its `83e81e3`
+  state.
+
+A gate-P PR adds rows and moves its family's bundles to `validated`, so
+both parts fail. This is the intended promotion, not an M3c regression. The
+script guards the M3c changes only. After the first gate-P PR, do not use
+it as a regression check; re-baseline it on the gate-P commit if it is
+needed again. At the end of M13 no gate-P row has landed: the new-panel
+human MERSCOPE family did not pass and stays `provisional`, and the
+validated tables are byte-identical to `83e81e3`. The script is expected to
+fail from the first family's gate-P PR on.
+
+### Gate P on the new-panel human MERSCOPE family (M13)
+
+The first in-house custom family: P5822, P4815, P3518 and P7417 (four
+donors, frontal cortex, fresh-frozen, MERSCOPE only and unpaired), one
+496-gene Vizgen panel (`family_id` `human_merscope_aa25d5a241d0`, `panel_id`
+`human_merscope_hbv2_496`), resolvability version 7 with eight R1 members.
+Its `map_first` run of 2026-10-07 (code `a070e05`, all four segmentations,
+`anatomical_region = frontal_cortex`) wrote the `_m13` tables, and its NP5
+asset `np5_depth__human_merscope_aa25d5a241d0` came from that run's
+proseg_hybrid tables (pre-registration §23.24).
+
+**Gate P: not passed** (§23.25; code `2c25541`, 1 h 42 min). Under D2 (d)
+the run stopped on the pool sizes (6 donor × class pools too small) and was
+re-run in place with the shared other-region draw (A48 (b)).
+`validated_max_level` is none, because lineage is incomplete: in 7 of the 8
+members every lineage class fails NP7's 1% part. Confident calls to
+excluded nodes are 1.12–2.92% of lineage's confident calls (member @9: 1.00%,
+a pass), almost all to the WHB sink Miscellaneous, counted confident by the
+larger of the call's own lineage bp and its supercluster bp (ruling A8 (a)).
+At broad, NT and supercluster the same share is 0.09–0.69%. Below lineage,
+5 of 6 broad C_P classes are validated (broad Oligo fails NP3 in member @6
+only: class-balanced 0.948 against target⁺ 0.95 at the ≥ D_P set, bin 250),
+all 6 supercluster classes (Exc only from 250 counts) and both NT classes.
+NP1, NP2 and NP9 pass (NP9: 5,003 s against 1.5 × 4,929 s); NP8 does not
+apply. These criteria passed the set a dry run, so they are not revised for
+this family; any later revision applies to the next families only, after a
+dry run.
+
+**What a provisional family means in production.** A family that fails gate
+P is run exactly as before: it keeps trust `provisional`
+(`family_not_validated`) in every RESOLVE, and only a gate-P PR can make it
+`validated`. The family's resolve summaries record this (`trust`:
+`validated_max_level` null, `effects.banner` and `effects.gate_warning`
+true).
+
+- Emission: the version-7 ensemble decisions re-derived at each section's
+  own composition, with the provisional margins (targets + 0.05, + 0.10
+  below 60 counts, capped at 0.97), local thresholds that only raise, and
+  floors at the maximum of the known (over platforms and panels) and the
+  simulated floor.
+- Labels: confident labels are emitted at every level the decisions allow,
+  supercluster included, but `ct_<L>_validated` is false on every label and
+  the panel record has no validated level.
+- Gate and report: the dataset gate sets its warning flag and the report
+  shows the provisional banner; the provisional state alone never lowers the
+  gate level.
+- Real-data QC: the family is not seeded, so every check applies with its
+  full effect (no warn-only period). The marker referee uses the `class`
+  comparator (`real_qc.marker_referee_comparator_by_family`), and registration
+  G1 fails the dataset gate wherever a registration check exists.
+- Promotion later would change only `ct_<L>_validated`, the banner and the
+  warning flag, never an emitted label, so outputs produced now stay valid.
+
+**Real-data onboarding: accepted** (pre-registration §23.26, read only from
+the run's outputs; re-runs in scratch). P1–P4 hold, and NR1 (downgrade-only
+mechanics, 16 of 16 section × segmentation runs) and NR2 (a) (an identical
+re-run gives the same label-table content) pass; no family-level concern
+fires. On proseg_hybrid (P5822 / P4815 / P3518 / P7417): gate `full` on all
+four, confident broad coverage of table cells 0.504 / 0.537 / 0.671 / 0.634,
+marker referee 0.957–0.982, WHB–SEA-AD 7-class agreement 0.865–0.913,
+`flag_implausible` 0.28–0.88%, confident COP 0, seed 0 vs 1 switched 0%
+(threshold crossings 4.5–6.1%), annotation wall 0.20–0.30 h per section and
+MAP peak RSS ≤ 11.3 GB. The warnings to read the labels with:
+
+- NR8: simulation over-predicts real coverage in 21–24 (level, class) rows
+  per section, by up to 0.54 at broad (P5822 Astro) and 0.60 at supercluster
+  (P7417 Inh). At broad only Oligo (all four), Exc on P3518 and Fibroblast on
+  P5822 are within 0.10. Read the class-depth predictions as optimistic for
+  this panel.
+- NR7: the gene-complexity gap exceeds 0.45 on P5822 (0.55) and P3518 (0.78),
+  in the open top bin (250 counts) only.
+- NR6: more than half of the flag strata are uninformative on all four
+  sections.
+- NR9: registration G1 was not evaluated. The family's results hold no
+  registration check from the QC stage, so every RESOLVE recorded it
+  `not_evaluable`; computed read-only for the record, no section meets the
+  fail rule and P5822 would warn (density ratio 1.75).
+- NR13: the predicted levels were not recorded before the outputs were read.
 
 ### Xenium Prime 5K panel card (M3c)
 
@@ -951,23 +1334,160 @@ state limits and never change a prediction, an emission or a trust state
 `merxen.annotation.real_qc` holds the checks M3c adds to the label-free QC
 of real datasets (plan §8.8). They are pure functions (tables in, records
 out) that can only warn or report. RESOLVE writes `flag_nonneuronal_high_depth`
-and the class-depth prediction for version-7 bundles (the M3c follow-up); M13
-wires the warnings into RESOLVE and the first in-house dataset of a family.
-None changes
-emission, a threshold, a floor, a label or a trust state, and
+and the class-depth prediction for version-7 bundles (the M3c follow-up), and
+human RESOLVE runs every check of M3c and M13 on each sample (see
+[Real-data QC in RESOLVE](#real-data-qc-in-resolve-m13)). None of the M3c
+checks changes emission, a threshold, a floor, a label or a trust state, and
 `apply_qc_outcomes` combines outcomes with a trust state so that it can only
 stay or fall (property-tested).
 
 | Check | Function | Rule | Effect |
 |---|---|---|---|
-| Per-class real vs simulated coverage (version-7 families) | `class_bin_shares`, `predicted_class_coverage`, `dataset_class_depth_prediction` (RESOLVE's predictor; label-free depth for classes with fewer than 100 cells), `real_class_coverage`, `coverage_vs_simulation` | per (level, called class) with >= 200 cells: the dataset's confident share against `sum_d s_c(d) cov(L, c, d)` from `resolvability_class_depth.parquet` at the dataset's own per-class bin shares (the pre-registered predictor); where profile mode has run, its per-class prediction (`profile_coverage_table`) is reported beside it (`profile_coverage`) and never decides | warning per class when real < simulated - 0.10, worded per class (it fires for glia and for small hypothalamic classes alike); the text says the warning also fires on v1-type large-mask (nucleus-expansion) segmentation, where simulation over-predicts coverage by +.16 to +.22 |
+| Per-class real vs simulated coverage (version-7 families) | `class_bin_shares`, `predicted_class_coverage`, `dataset_class_depth_prediction` (RESOLVE's predictor; label-free depth for classes with fewer than 100 cells), `real_class_coverage`, `coverage_vs_simulation` | per (level, called class) with >= 200 cells: the dataset's confident share against `sum_d s_c(d) cov(L, c, d)` from `resolvability_class_depth.parquet` at the dataset's own per-class bin shares (the pre-registered predictor); where profile mode has run, its per-class prediction (`profile_coverage_table`) is reported beside it (`profile_coverage`) and never decides; each row records the dataset gate level the real share was measured under (`gate_level`) and whether that gate leaves the level unattempted (`gate_blocked`) | warning per class when real < simulated - 0.10, worded per class (it fires for glia and for small hypothalamic classes alike); the text says the warning also fires on v1-type large-mask (nucleus-expansion) segmentation, where simulation over-predicts coverage by +.16 to +.22, and, at a gate-blocked level, that the shortfall is the gate's |
 | Non-neuronal high depth | `nonneuronal_high_depth_flags` | non-neuronal cells at >= 1,000 counts in emitted `nonneuronal_high_depth` bins | report-only `flag_nonneuronal_high_depth`, written by RESOLVE for version-7 bundles |
 | Glial large-mask / high-depth trend | `nonneuronal_depth_trend` | real non-neuronal coverage at >= 1,000 counts below the 500-999 band by more than 2 SE (both >= 200 cells) | report-only (5K vendor glia: class .916 -> .897 -> .886) |
 | Factor re-measure (first in-house dataset of a family with a measured factor table) | `factor_remeasure` | per-gene factors re-measured with the X1 code (`shadow.reference_pseudobulk_totals`) on the confident calls, centred on the median informative gene and capped +-3, against the stored table on genes informative in both | warning when Pearson r < 0.9, recommending a PREP re-run with the in-house table as a new asset (not automatic) |
-| Gene complexity | `gene_complexity_check` | median genes per cell of native vs simulated cells per depth bin (>= 50 cells each) | warning when native cells carry > 45% more genes; its text says simulated coverage predictions are unreliable for the dataset |
+| Gene complexity | `gene_complexity_check`; inputs from `gene_complexity_signal` (M13 C16) | median genes per cell of native vs simulated cells per depth bin (>= 50 cells each); simulated cells from the version-7 bundle's `resolvability_sim_genes.parquet` (one per test cell and grid depth, the mean over the emission members, binned at the grid depth), native cells counted on the same genes; inside the grid each native bin [D_i, D_i+1) is compared with the test cells' genes interpolated, linearly in log depth, between D_i and D_i+1 to the bin's native median total (`real_qc.gene_complexity_matching = interpolated`, the user's ruling C3 (b) of 2026-10-07), the open top bin with the cells at its lower edge | warning when native cells carry > 45% more genes (`real_qc.genes_per_count_gap_warn`); its text says simulated coverage predictions are unreliable for the dataset; `not_evaluable` for version-6 bundles and version-7 bundles built before C16 |
 
 The thresholds are the `real_qc` fields of the annotation config
 ([Configuration](../configuration.md)).
+
+**Outcomes and effects (M13).** Every check records one outcome per dataset
+(`pass`, `warn`, `fail`, `not_applicable` or `not_evaluable`;
+`RealQcProvenance`). A check that does not apply is `not_applicable`: paired
+concordance on an unpaired section, the factor re-measure for a family
+without an R3 member (no measured factor table) or on a dataset other than
+the family's first, the prefilter spot check without a prefilter, the
+version-7 checks on a version-6 bundle. Whether a check applies comes only
+from facts the caller must state (`RealQcSignals`: the resolvability
+version, whether the section is paired, whether the bundle is prefiltered,
+whether the family has an R3 member; whether the dataset is the family's
+first defaults to unknown). A check that applies but whose input is missing
+is `not_evaluable`, and so is a check whose deciding fact is stated as
+unknown (`None`), so an input left out is never recorded as
+`not_applicable`. A failing check can only lower the dataset: cap its gate
+level (`gate_cap`), make an emitted level `not_resolvable` for it
+(`withhold_level`), withhold the pair's supercluster-level cross-platform
+statistics (`withhold_pair_stats`) or lower trust (`downgrade`).
+`apply_qc_to_gate` never raises a gate level, `apply_qc_outcomes` never
+raises a trust state, and `apply_qc_to_statuses` gives the statuses a
+QC-applied RESOLVE produces: confident sets only shrink and keep their
+labels. These three are property-tested over every outcome combination. The
+combinators take no emission plan, floor plan or threshold, so they cannot
+change one. Human RESOLVE applies them (see
+[Real-data QC in RESOLVE](#real-data-qc-in-resolve-m13)), and
+`downgrade_only_violations` compares its label tables and records with a
+QC-free re-run (pre-registration NR1).
+`real_data_qc` runs every check from the `real_qc` config:
+
+| Check | Function | Rule | Effect |
+|---|---|---|---|
+| Marker referee (human) | `human_referee.human_marker_referee` (the statistic), `marker_consistency_outcome` | mouse G2 ported to the primary WHB bundle's profiles: per broad class, the panel genes that pass the §8.6 specificity rule (>= 20x and >= 1/1000; immediate-early genes excluded; classes with < 3 markers left out); table cells pseudo-labelled with `data/P1212`'s rule (>= 1.5 units and >= 60% of the marker units); the share of pseudo-labelled cells with a confident `ct_broad` whose call equals the pseudo-label | warning below 0.75; gate capped at `broad_only` below 0.70 (trust and margins unchanged); `not_evaluable` with fewer than 2 classes with markers or fewer than 200 scored cells |
+| Registration G1 (human) | `registration_g1_outcome` | §7.6 as defined there: the fail rule is density ratio < 1.5 or shift > 5 µm; otherwise the warning rule is density ratio < 2.0 | fail rule: the dataset gate fails (`registration_g1_effect = gate_failed`, the default since 2026-10-07; `warning` keeps it warn-only); warning rule: warning |
+| Paired concordance | `paired_concordance` | the pair's soft broad JSD on the shared-tissue mask (point estimate; the whole section reported) above 0.20 | supercluster-level cross-platform statistics withheld; `not_applicable` for an unpaired section; `not_evaluable` without a shared-mask value (the whole section is never scored in its place) |
+| Flag rates | `flag_rate_summary` | more than half of the (class x platform) strata of the contamination, diffuse and spill-over flags uninformative under H16's 15% marking (a stratum is uninformative when any of its flags is) | warning; the per-flag, pooled and own-switch readings are reported beside it |
+| Prefilter spot check | `prefilter_spotcheck` | agreement of the prefiltered with the unfiltered lookup below 0.95 at an emitted level | that level `not_resolvable` for the dataset |
+
+**Human marker referee (M13 chunk C13).** `merxen.annotation.human_referee`
+groups the WHB superclusters of the primary bundle's leaf level into the
+seven broad classes (the WHB vocab; sinks and the nodes outside the seven
+classes belong to none) and derives each class's markers on the panel's
+query genes with the §8.6 / E3 specificity rule
+(`flags.specific_gene_ratio`, `flags.specific_gene_min_share`).
+`real_qc.marker_referee_comparator` chooses the comparison: `node` (the
+default, mouse G2's rule: the class's unweighted mean supercluster profile
+against every other supercluster, sinks included) or `class` (the class
+profile, the `n_cells`-weighted mean of its superclusters'
+`expected_fraction`, against the other classes' profiles). A family listed
+in `real_qc.marker_referee_comparator_by_family` takes its own: by the
+user's ruling C1 (b) of 2026-10-07, the new-panel human MERSCOPE family
+(`human_merscope_aa25d5a241d0`) takes `class`. RESOLVE reads the panel's
+family (`current_family`), and the outcome's settings record the
+comparator and the family it was ruled for (`comparator_family`). The `class`
+profile is not `flags.class_profiles`, which weights `mean_cpm` and
+renormalises over the query genes; the two bases give different sets. The
+comparators differ where a class holds a small node that shares another
+class's genes (the Committed oligodendrocyte precursor supercluster, in the
+OPC class, shares oligodendrocyte genes) or a sink resembles a class
+(Splatter): `node` then leaves that class without markers. The sets depend
+only on the bundle and the panel. `RefereeMarkers.to_frame` writes them
+before a run with their provenance (`source`, `comparator`, `min_ratio`,
+`min_share`, `panel_hash` and the primary bundle's `build_hash` on every
+row), `RefereeMarkers.from_frame` reads them back (`frozen`) on the run's
+query genes in the counts' order (`query_gene_ids`), and the run's QC
+details record their sha256 (`fingerprint`; `frozen_fingerprint` for the
+table as read), `panel_hash` and `build_hash`. A frozen marker that a
+dataset's query genes lack is dropped and listed (`missing_genes`). A
+`derived` table must record its comparator, `min_ratio` and `min_share`.
+Supplied derived sets must record the run's rule, index the counts' columns
+in order (the referee is given the counts' `gene_ids`), and be shown to
+belong to the run: with the bundle's profiles they are re-derived on the
+run's query genes and must have the same fingerprint; without profiles they
+must record the run's `panel_hash` and `build_hash`. A recorded `build_hash`
+other than the run's is refused either way. Only `derived`
+sets (D27 (a)) drive the outcome: hand-curated sets
+(`RefereeMarkers.from_symbols`, `source` `hand_curated`, D27 (b)) and tables
+without provenance (`supplied`) are scored by the same rule for reporting,
+and `signal()` refuses them. Profiles without `n_cells` load; the `class`
+comparator is then `not_evaluable`. The 200-cell minimum counts scored
+cells (pseudo-labelled and confidently called), not pseudo-labelled cells
+alone.
+The 0.75 / 0.70 thresholds came from the H9 hand lists, so the derived
+statistic is re-measured on set a before a new family is scored (M13 C17).
+With the `node` comparator set a's panel gives only one class with three or
+more markers, so the referee was `not_evaluable` on every set a sample (C17);
+the `class` comparator gave 0.745-0.979 on proseg_hybrid. On 2026-10-07 the
+user ruled that the new-panel human MERSCOPE family's referee uses `class`,
+with the 0.75 / 0.70 thresholds unchanged (pre-registration §23.18, §23.19,
+C1 (b): "the user decides NR5 for this family"). Every other family, the
+seeded set a sections included, keeps `node`.
+
+**Gene-complexity source (M13 chunk C16; decision D19 (a)).** A version-7
+PREP stores the simulated `n_genes` of every member's simulated cells,
+counted on the test cells' genes (`resolvability_sim_genes.parquet`;
+`resolvability.simulated_gene_counts`). `resolvability.load_simulated_genes`
+reads it back and checks the recorded genes against their sha256; it returns
+nothing for a version-6 bundle (the seeded families, whose `build_hash` is
+unchanged) or a version-7 bundle built before the artefact, and the check is
+then `not_evaluable`. The loader also refuses a table whose rows are not
+those the summary counts (in total and per member), a depth off the grid, a
+simulated cell stored twice or a gene count out of range.
+`real_qc.native_gene_complexity` counts the native cells' genes and totals
+on the same genes (a query gene the dataset lacks counts as not detected and
+is listed). It takes a sample's resolved feature ids as loaded: unresolved
+features are ignored and features resolving to one gene are summed, as the
+MAP query sums them. `real_qc.gene_complexity_signal` builds the check's
+inputs: one simulated value per test cell and grid depth (the mean over the
+emission members, so the 50-cell minimum counts test cells), binned at the
+grid depth. Counting test cells rather than member rows is the
+implementation's reading of "per (cell, depth)", not a recorded decision;
+the row reading could only judge more bins, and the family's gate-P PR names
+it for the user. The outcome's `details.source` records the artefact
+version, the members and the missing genes. RESOLVE passes the table cells
+(M13 chunk C15).
+
+**Depth matching (the user's ruling C3 (b) of 2026-10-07; pre-registration
+§23.19).** Native cells in a bin [D_i, D_i+1) carry more counts than D_i, so
+compared with the simulated cells at D_i they carry more genes even without
+a complexity gap: on synthetic cells without one the gap was 0.18-0.57 per
+bin, above the 0.45 limit in the shallow bins (`$A/m13/c16`). With
+`real_qc.gene_complexity_matching = interpolated` (the default) each test
+cell's simulated genes are interpolated, linearly in log depth, between its
+values at D_i and D_i+1 to the bin's native median total, and the bin
+compares the native median with the median of those values (-0.06 to -0.01
+on the same synthetic cells). Only test cells simulated at both edges are
+matched, and the 50-cell minimum counts them. The open top bin (at or above
+the last grid value) has no upper edge and keeps the lower edge. The per-bin
+table records the matching, the native median total, the edges and the
+interpolation weight. `lower_edge` gives the C16 matching.
+
+On a seeded real-data family whose species gate has not merged into `main`
+(`real_qc.seeded_families_warn_only_until_gate`), the lowering effects of the
+referee, paired concordance, flag rates, gene complexity and the spot check
+are demoted to warnings. Every other check applies as defined, registration
+G1 included. The dataset gate's own outcome (and mouse G1 and G2) is recorded
+from the gate verdict, never applied twice; without a verdict it is
+`not_evaluable`.
 
 ## Pipeline processes
 
@@ -1032,13 +1552,18 @@ as a stale MAP output; the store is never searched). The shared tissue mask
 of the pair JSD comes only from ALIGN's output channel, which M5 wires (as
 for `ANNOTATE_PANEL`); until then RESOLVE reports the whole-section JSD and
 never looks for a published `align_out` that ALIGN may still be writing
-(`--no-alignment-lookup`). A mouse MAP output is resolved with the M6
-mouse rules ([Mouse rules v1](#mouse-rules-v1-consensusresolve_mouse-73-m6));
-the task does not stage the QC stage's registration check yet (the QC
-channel is pipeline wiring, M5), and a pipeline RESOLVE
-(`--require-bundle-refs`) refuses a mouse sample without it, so mouse
-`map_first` needs M5's wiring ([Mouse region step](#mouse-region-step-m6),
-pipeline wiring). RESOLVE caches on content (`cache
+(`--no-alignment-lookup`). The task also stages the QC stage's
+registration checks of its pair × segmentation (each platform's
+`<pair>_<platform>_registration_qc.json`, from the QC tasks' output channel
+once all of the branch's QC tasks have finished; M13 C15) and reads them with
+`--registration-qc-dir`: G1 of the mouse gate and the human real-data QC's
+registration G1 (NR9). A branch the QC stage skips (`run_qc` off, or not an
+analysis segmentation) stages none: its human G1 is `not_evaluable`, and a
+pipeline RESOLVE (`--require-bundle-refs`) refuses a mouse sample without a
+check. A mouse MAP output is resolved with the M6 mouse rules
+([Mouse rules v1](#mouse-rules-v1-consensusresolve_mouse-73-m6)); mouse
+`map_first` still needs the rest of M5's wiring
+([Mouse region step](#mouse-region-step-m6), pipeline wiring). RESOLVE caches on content (`cache
 "deep"`), as MAP does, and its task hash also sees the annotation config it
 writes and a fingerprint of the RESOLVE rules: the sha256 of the files under
 `src/merxen/annotation/`, `src/merxen/assets/annotation/` (floors,
@@ -1130,6 +1655,12 @@ PREPARE -> ANNOTATE_PANEL -> ANNOTATE_REFERENCE_PREP (per unique bundle)
   it) and are staged into ANNOTATE_PANEL (label-free set c) and RESOLVE
   (the pair JSD's shared-mask restriction); a pair without alignment gets
   none.
+- **Registration checks.** Each pair × segmentation's
+  `*_registration_qc.json` come from the QC tasks' output channel (hook H5
+  groups the branch's QC tasks, one per active platform) and are staged
+  into RESOLVE (`--registration-qc-dir`: mouse gate G1, human real-data QC
+  G1; M13 C15); a branch the QC stage skips gets none. RESOLVE waits for its
+  branch's QC tasks, which the clustering inputs already wait for.
 - **COMPUTE_CPU** stages RESOLVE's label tables, annotation manifests and
   pair summary as files and caches on their content (`cache "deep"` hashes a
   file's content but a directory only by its metadata): a RESOLVE re-run
@@ -1493,8 +2024,9 @@ row's value under `mouse_section_regions`, the
 `samplesheet_columns.section_regions_by_sample` reads (the row settings'
 `annotation_mouse_section_regions` key is not read by MAP); (2) the
 RESOLVE task to stage the QC stage's registration check of each sample and
-pass it with `--registration-qc` or `--registration-qc-dir` (a pipeline
-RESOLVE, `--require-bundle-refs`, refuses a mouse sample without it); (3)
+pass it with `--registration-qc` or `--registration-qc-dir` (done in M13
+C15 for both species, when the QC stage runs; a pipeline RESOLVE,
+`--require-bundle-refs`, refuses a mouse sample without it); (3)
 the `wmb_region_share` bundle ref staged for RESOLVE as for MAP; (4) a MAP
 rules fingerprint (as RESOLVE's `rules_fingerprint`) over
 `mouse_regions.py`, `config.py` and the MAP pipeline code, or
@@ -1635,7 +2167,8 @@ with a `ResolvabilityError` for every caller
   sum_d s_c(d) cov(L, c, d) and the resolvable share sum_d s_c(d) over
   emitted bins (`real_qc.dataset_class_depth_prediction`) are recorded per
   (level, class) in the dataset's regime; they are the predictor of the
-  per-class real-vs-simulated coverage check, which M13 wires (chunk C15).
+  per-class real-vs-simulated coverage check, which human RESOLVE runs
+  (see [Real-data QC in RESOLVE](#real-data-qc-in-resolve-m13)).
 - **`flag_nonneuronal_high_depth`** (report-only; plan §8.3 v7.9): a table
   cell is flagged when, at some level of the bundle, its class key there is
   non-neuronal (the bundle's `neuronal_classes`; unknown lineage counts as
@@ -1668,6 +2201,104 @@ resolvability tables of pre-registration §22.8; on the development host they
 also matched at full precision). Label tables written before the column
 still validate: it is an optional contract column
 (`schema.OPTIONAL_CONTRACT_COLUMNS`), checked when present.
+
+### Real-data QC in RESOLVE (M13)
+
+Human RESOLVE runs the downgrade-only real-data QC of plan §8.8 on every
+sample (`real_qc.enabled`, default `true`; M13 chunk C15). Mouse RESOLVE does
+not run it yet: the mouse gate keeps G1-G5 (§7.6), and the rest of the mouse
+wiring follows M6b.
+
+1. **Signals** (`pipeline.human_real_qc_signals`), all from the QC-free
+   resolution and the primary bundle: the bundle's resolvability version and
+   whether its version-7 ensemble has an `R3_measured_HO` member (from its
+   resolvability tables, else the version the bundle declares, with the R3
+   member unknown for version 7; unknown when neither states them,
+   `pipeline.real_qc_bundle_facts`), whether the pair holds both platforms
+   (whether or not this run resolves both), whether the bundle's marker
+   lookup is prefiltered (its hashed `large_panel_prefilter`; unknown
+   without a primary run, `pipeline.real_qc_prefilter_applied`); the human
+   marker referee
+   on the table cells' query counts and the bundle's `profiles.parquet`
+   (marker sets derived in the run, their sha256 in the outcome's details);
+   the registration check (`--registration-qc` or `--registration-qc-dir`,
+   human G1; the pipeline's RESOLVE task stages the QC stage's checks); the
+   sample's flag strata; the version-7 bundle's stored simulated `n_genes`
+   with the table cells counted on the same genes; for version 7, per primary
+   level the real confident share per class key against the class-depth
+   prediction at the sample's own per-class depth, and the non-neuronal depth
+   trend on the same keys; and the QC-free gate verdict, whose own outcome is
+   recorded. Each coverage row records that gate's level and whether it left
+   the row's level unattempted (`gate_blocked`: every level under `failed`,
+   supercluster, SEA-AD subclass and cluster under `broad_only`); such a
+   level has no confident cell, so its warning still fires (the rule is
+   unchanged) and says that the shortfall is the gate's, not the
+   simulation's. The prefilter spot check and the factor re-measure have no
+   producer in RESOLVE, so they are `not_evaluable` wherever they apply (and
+   wherever it is unknown whether they apply).
+2. **Effects.** `real_data_qc` gives the outcomes (seeded real-data families
+   only warn while their species gate is pending). A gate cap or a withheld
+   level re-runs `consensus.resolve_human` with the effects
+   (`HumanResolveSettings.qc`): the cap lowers the dataset gate before the
+   leaf levels read it (the gate-level invariance still holds), a withheld
+   level is not emitted for the dataset (its confident cells
+   `not_resolvable`, or `parent_unresolved` where their parent lost its
+   confidence too, since RESOLVE checks the parent first), and the flags
+   are recomputed. Warnings only join the
+   gate's warning reasons (`real_qc_<check>: ...`). The emission plan, the
+   floor plan, the thresholds, the margins and trust are never touched; a
+   trust downgrade is refused (no check of M13 has one).
+3. **Paired concordance** is scored once both sections are resolved, before
+   any table is written (`pipeline.score_paired_concordance`): the pair's
+   soft broad JSD on the shared-tissue mask (point estimate). Above
+   `real_qc.paired_broad_jsd_warn` the pair's `cross_platform` record is
+   capped at `broad_only` (flagged, reason `real_qc:paired_concordance`), so
+   every downstream cross-platform statement stays at broad. Without a
+   shared-mask value it is `not_evaluable`; an unpaired section is
+   `not_applicable`.
+4. **Records.** Each sample's `real_qc` block in `<pair>_resolve_summary.json`
+   (`RealQcResult.summary`: the outcome per check, every outcome with its
+   numbers, the effects, the downgrades, the flag-rate readings and the
+   per-check tables) and `PanelProvenance.real_data_qc` in the label table
+   and annotation manifest; the pair's `real_qc_config` (human pairs only).
+   The summary's
+   `schema_version` is 3. The report's panel card lists the outcomes
+   (`panel_real_qc.csv`) and a note per fired check.
+
+**The QC-free run (NR1).** With `real_qc.enabled` false RESOLVE runs no check
+and lowers nothing (the summary says the QC is disabled). Comparing a run's
+label tables and provenance with that run's,
+`real_qc.downgrade_only_violations` lists every difference NR1 does not
+allow: a cell confident only with QC, a confident cell with another name, a
+status changed to anything but `not_resolvable`, `not_attempted_gate` or
+`parent_unresolved`, another trust state, another resolvability or threshold
+record (emission, thresholds, floors), and a gate level that rose or fell
+without a named `real_qc_` reason. Each lowered status needs its cause:
+`not_attempted_gate` only at a level the applied gate blocks (every level
+under `failed`, only the leaf levels under `broad_only`), and
+`parent_unresolved` only where the cell's parent lost its confidence. The
+provenance's gate record mixes level and warning reasons, so a lower gate
+level is attributed with the resolve summary's gate records
+(`resolution.gate`, whose `level_reasons` must hold a `real_qc_` reason) or
+with the applied run's QC effects (`real_qc.effects`). With the effects,
+`not_resolvable` is allowed only at a withheld level, the confident sets must
+be those `apply_qc_to_statuses` gives, and the gate level must be the worse
+of the QC-free level and the QC cap (lower only when a withheld lineage or
+broad level lowered the coverage the gate reads). M13 chunk C18 passes all of
+these inputs for its NR1 evidence. The QC-free run's outputs on the version-6
+scenarios equal the golden digests of the code before the QC
+(`test_resolve_v7.py`, the new summary keys aside).
+
+**Measured.** On set a's M8 pairs (C17, `scripts/acceptance/m13_real_qc_regression.py`,
+warn-only settings pinned) no NR1 violation was found and registration G1's
+fail rule fired on no row. On the new-panel human MERSCOPE family the QC
+lowered nothing, NR1 found no violation on 16 of 16 section × segmentation
+runs, and the coverage, flag-rate and gene-complexity checks warned
+([results](#gate-p-on-the-new-panel-human-merscope-family-m13)). Registration
+G1 needs the QC stage's registration check (`*_registration_qc.json`); the
+family's results hold none, so G1 was `not_evaluable` in every RESOLVE and
+its `gate_failed` effect could not act. Check that the QC stage has written
+these files before relying on G1.
 
 ### Human rules v1 (`consensus.resolve_human`, §5.2)
 
@@ -1760,7 +2391,14 @@ before the statuses; level + warning flag as for human):
 | G5 spill-over | `flag_microglial_spillover` rate | – | > 15% |
 
 The primary panel's trust caps the level as for human (`refused` fails,
-`broad_only` blocks the subclass) and a provisional panel warns. A `failed`
+`broad_only` blocks the subclass) and a provisional panel warns. A family
+validated by simulation warns, as for human, when more than 10% of the
+confident labels at broad, class, nt or subclass fall outside its validated
+region (`unvalidated_share:<level>`, `warn_unvalidated_share`): RESOLVE
+evaluates the gate again after the statuses with those shares, and the
+level never changes. The panel record of the provenance is built as for
+human (family, basis, validated level and table digests, panel mode, gene-ID
+diagnostics and validated shares). A `failed`
 gate makes every table cell `not_attempted_gate` and `exclude_hard` (a
 failed registration check: plan §7.5). G2's marker sets are derived per
 panel, so the 0.70 / 0.80 thresholds, set on MO1's hand-listed referee
@@ -1949,7 +2587,7 @@ to `<pair>/<seg>/annotation_report/annotation_report_out/`.
 
 | Item (§9) | What the report shows | Metrics (`acceptance_metrics.json`) |
 |---|---|---|
-| 1 Annotatability, panel | Confident fraction per level of table cells and of segmented objects, status breakdown, resolvable share, gate values and reasons, trust state and basis, realised flag rates per class × platform, the self-thinning eligibility (≥ 500 cells with ≥ 200 counts) with its truth composition over the labelled deep cells, the unlabelled share, the argmax composition, the evaluable classes and a reliability verdict, and the **panel card**: gene-ID resolution by source, unresolved features, controls by type, markers per parent (weak and collapsed parents, nodes MapMyCells patches with ancestor markers), precision-coverage curves per level and depth, D_max and extrapolated share per class, PREP (unweighted) vs RESOLVE (reweighted) emission, thresholds and floors with their source; banners for `provisional`, `broad_only` and `refused` panels and failed or broad-only gates | H7, H8 (MO7), H16, H18 inputs |
+| 1 Annotatability, panel | Confident fraction per level of table cells and of segmented objects, status breakdown, resolvable share, gate values and reasons, trust state and basis, realised flag rates per class × platform, the self-thinning eligibility (≥ 500 cells with ≥ 200 counts) with its truth composition over the labelled deep cells, the unlabelled share, the argmax composition, the evaluable classes and a reliability verdict, and the **panel card**: gene-ID resolution by source, unresolved features, controls by type, markers per parent (weak and collapsed parents, nodes MapMyCells patches with ancestor markers), precision-coverage curves per level and depth, D_max and extrapolated share per class, PREP (unweighted) vs RESOLVE (reweighted) emission, thresholds and floors with their source, the real-data QC outcomes per check (`panel_real_qc`, M13); banners for `provisional`, `broad_only` and `refused` panels and failed or broad-only gates | H7, H8 (MO7), H16, H18 inputs |
 | 2 Composition | Soft (headline), soft ≥ 30 counts, confident-only and argmax composition per level with 95% block-bootstrap CIs (500 µm tiles, 200 replicates, seed 0), whole section vs shared mask, per depth bin, `Mixed/Unknown` by reason; the COP-derived part of every OPC bar (`cop_derived_share`, hatched); the sinks table (vocab sinks, region-implausible nodes, COP and CGE, and nodes whose argmax share of their broad class exceeds the reference share of that class more than 3×, with argmax, soft-mass and confident shares); leaf-level rows of a sample whose gate is not full marked `withheld_for_comparison` and drawn hatched; COP control | H2, H5 (with `cop_derived_soft_opc_share`, `cop_derived_argmax_opc_share`; MO4 shares) |
 | 3 Confidence vs counts | 2D histograms of raw bp and `avg_correlation` vs counts per platform and level, with the raw thresholds | — |
 | 4 Reference expectation | Observed fraction-positive and mean log2(CPM+1) per confident leaf label on its most specific panel genes and the §5.8 canonical markers on the panel, beside `profiles.parquet`; pseudobulk-centroid r and a correlation re-mapping to the nearest reference centroid. A sample whose gate is not full (or without a confident leaf label) is shown on its confident broad labels, with reference profiles aggregated from the supercluster rows (reference-cell-weighted) | report-only |
@@ -2167,9 +2805,9 @@ held-out-gene CSV is not produced in the pipeline, so item 8 is
   ag7 / VZG2), but the gate derives its markers per panel and reads .805 /
   .819 on the same sections [L]. G4 is not evaluated until M6b's AP
   estimate chooses the MERFISH window (standalone runs pass
-  `--mouse-g4-sections`). The pipeline's RESOLVE task does not stage the
-  QC stage's registration check yet (M5 wiring) and refuses a mouse sample
-  without one; a standalone run passes `--registration-qc` or
+  `--mouse-g4-sections`). The pipeline's RESOLVE task stages the QC
+  stage's registration checks (M13 C15) and refuses a mouse sample without
+  one (a branch the QC stage skips); a standalone run passes `--registration-qc` or
   `--registration-qc-dir`, and without either G1 is not evaluated and the
   gate warns. G1 is the signal that catches misregistered data: per-cell confidence does not
   (class bootstrap ≥ 0.9 covers .733 of the invalid VZG2 proseg_hybrid cells
@@ -2270,11 +2908,11 @@ held-out-gene CSV is not produced in the pipeline, so item 8 is
   *Implemented in M3c (2026-09-28):* the version-7 bundles of both 5K
   families exist. *Since the M3c follow-up (2026-10-06):* RESOLVE reads them
   (version-7 decisions, `flag_nonneuronal_high_depth` and the class-depth
-  prediction at the dataset's own per-class depth); the real-data QC
-  warnings (`real_qc`, e.g. the per-class coverage check) are not yet wired
-  into RESOLVE or the report (M13). On the public section the version-7 predictions
-  still exceed the real coverage by +.07 (class) to +.09 (subclass) overall
-  and by up to +.25 for hypothalamic classes, and the per-class warning
+  prediction at the dataset's own per-class depth); since M13 human
+  RESOLVE records the real-data QC outcomes (`real_qc`, e.g. the per-class
+  coverage check) and the report lists them. On the public section the
+  version-7 predictions still exceed the real coverage by +.07 (class) to
+  +.09 (subclass) overall and by up to +.25 for hypothalamic classes, and the per-class warning
   fires for 19 (level, class) pairs (`M3C_EXIT_REPORT.txt`).
 - **Version-7 cost on 5K panels:** exact-total thinning of 5,000 genes takes
   2-8 min per member, and a 5K mouse member maps in 36-49 min on 8 processes
@@ -2312,6 +2950,24 @@ held-out-gene CSV is not produced in the pipeline, so item 8 is
 - **Set c of families without a curated list** uses the label-free rule,
   which drops far more genes than E5's validated set c (44-73 per pair on the
   E5 pairs); treat such set-c results as provisional.
+- **Gate P has promoted no family yet** (M13, 2026-10-08). The human
+  programme passed the set a dry run after the criteria revision of
+  pre-registration §23.21, whose six items are post-hoc loosenings; the
+  negative control showed the revised gate is not blind, but two of its
+  three moves rest on one member's spill stress. The new-panel human
+  MERSCOPE family failed gate P at lineage (NP7's 1% sink share, driven by
+  calls to the WHB sink Miscellaneous counted confident through their
+  supercluster bp) and stays `provisional`
+  ([details](#gate-p-on-the-new-panel-human-merscope-family-m13)). The
+  mouse path waits for the second WMB test draw and the ag7 / VZG2 dry run
+  (M13 chunks C20–C22, moved to M13b, after M6b).
+- **Simulation over-predicts real coverage on the new-panel family** (M13
+  NR8). In 21–24 (level, class) rows per section the real confident share
+  falls more than 0.10 below the class-depth prediction, by up to 0.54 at
+  broad and 0.60 at supercluster; at broad only Oligo is within 0.10 on
+  every section (and Exc on P3518, Fibroblast on P5822). The per-class
+  coverage warning fires accordingly. Treat a new panel's simulated coverage
+  as optimistic until the family's real coverage is measured.
 
 ## Licences
 

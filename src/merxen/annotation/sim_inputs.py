@@ -18,8 +18,10 @@ This module is the registry of those inputs and the recipes that read them
   per-gene factor table of an ensemble member), ``profile`` (per-cell total
   counts and called class of a public section), ``stress`` (a cross-tissue
   ratio of a stress recipe), ``scenario`` (a pooled depth histogram, reported
-  only) and ``panel_list`` (the pinned public Prime gene lists that resolve a
-  panel's chemistry).
+  only), ``panel_list`` (the pinned public Prime gene lists that resolve a
+  panel's chemistry) and ``gate_p_profile`` (a new family's own per-class
+  depth histograms for gate P's NP5, M13 D8; read by gate P only, never by
+  PREP, so it never enters a ``build_hash``).
 * **R3_measured_HO** (``r3_efficiency``; table rules ``restricted``, the
   production rule, and ``all_measured``, phase 1's D3 vector for the
   regression of pre-registration §21 (ii)). Every draw is keyed by the gene
@@ -28,10 +30,23 @@ This module is the registry of those inputs and the recipes that read them
 * **R1_xtissue_lung_stress** (``xtissue_stress_efficiency``): the R1@0
   efficiency times the lung 5K / v1 per-area ratio, a cross-tissue
   approximation reported only (§8.3 v7.4, §8.10).
+* **Gate P's cross-platform stress** (``xplatform_stress_efficiency``; plan
+  §14 NP6, M13 decision D7 (a) + (i)): an R1 member's efficiency times the
+  measured human Xenium / MERSCOPE per-gene offsets of set a (an in-house
+  ``stress`` asset, ``STRESS_HUMAN_XPLATFORM``), each panel gene the table
+  does not cover taking a keyed resample of the covered genes' values.
+  Acceptance only: never a PREP member.
 * **Depth profiles** (``DepthProfile``): per-class totals with the pooled
   neuronal and non-neuronal fallbacks of phase 1's D-recipes
   (``5k_real/sim/scripts/simlib.py``); no depth prior crosses species (no
   mouse profile or kappa for human, SYNTHESIS §5.3).
+* **A family's NP5 profile** (``FamilyDepthProfile``, role
+  ``gate_p_profile``; M13 D8 with CHECK K7, pre-registration §23.20): the
+  confident broad calls of each E2 floor class of the family's first
+  provisional ``map_first`` run and its other table cells, as histograms of
+  total counts (``scripts/annotation/build_np5_depth_profile.py``). Gate P
+  gives a class with at least ``PROFILE_MIN_CLASS_CELLS`` calls its own
+  depths and every other class the confident calls' overall median.
 * **Chemistry** (``resolve_chemistry``): MERSCOPE → ``merscope``; a Xenium
   panel with Jaccard ≥ 0.95 to a pinned public Prime list → ``xenium_prime``;
   a declared value; else ``unknown`` (no measured table).
@@ -68,7 +83,9 @@ NOTICE_FILE: Final = "NOTICE"
 MAX_ASSET_BYTES: Final = 1_000_000
 TRUST_EFFECT: Final = "none"
 
-AssetRole = Literal["member", "profile", "stress", "scenario", "panel_list"]
+AssetRole = Literal[
+    "member", "profile", "stress", "scenario", "panel_list", "gate_p_profile"
+]
 Chemistry = Literal["xenium_prime", "xenium_v1", "merscope", "unknown"]
 DeclaredChemistry = Literal["auto", "xenium_prime", "xenium_v1", "merscope"]
 TableRule = Literal["restricted", "all_measured"]
@@ -78,7 +95,13 @@ ASSET_ROLES: Final[tuple[str, ...]] = (
     "stress",
     "scenario",
     "panel_list",
+    "gate_p_profile",
 )
+# A new family's own NP5 depth profile (M13 D8 with CHECK K7): gate P reads
+# it; ``reference.resolvability_plan`` selects ``profile`` assets only, so no
+# PREP reads it and it never enters a ``build_hash``.
+GATE_P_PROFILE_ROLE: Final = "gate_p_profile"
+
 CHEMISTRIES: Final[tuple[str, ...]] = (
     "xenium_prime",
     "xenium_v1",
@@ -115,6 +138,8 @@ PROFILE_MOUSE_PRIME_FF: Final = "depth__xenium_prime__mouse_brain_ff"
 STRESS_HUMAN_LUNG: Final = "ratio__xenium_prime_vs_v1__human_lung_ffpe"
 SCENARIO_HUMAN_LUNG: Final = "depth__xenium_prime__human_lung_ffpe"
 PRIME_PANEL_LISTS: Final = "panels__xenium_prime"
+# The M13 gate-P asset (plan §14 NP6; M13 decision D7): in-house, not public.
+STRESS_HUMAN_XPLATFORM: Final = "ratio__xenium_v1_vs_merscope__human_brain_ffpe"
 
 # R3_measured_HO (pre-registered, plan §8.3 v7.4 and pre-registration §21.3;
 # only tightenable).
@@ -135,12 +160,33 @@ TIER_WEAK: Final = "weak"
 XTISSUE_CAP_LOG2: Final = 2.0
 XTISSUE_SD_LN: Final = 0.702
 STREAM_XTISSUE: Final = "xtissue_lung_ratio"
+# Gate P's cross-platform stress (plan §14 NP6: "per-gene log2 factors drawn
+# from the measured human cross-platform offsets (capped +-2)"; M13 decision
+# D7 (a) + (i), pre-registration §23.10): the set a Xenium / MERSCOPE offsets
+# centred on the median gene and capped at +-2 log2; a panel gene without a
+# measured offset takes a keyed resample of the covered genes' values.
+XPLATFORM_CAP_LOG2: Final = 2.0
+STREAM_XPLATFORM_RESAMPLE: Final = "xplatform_resample"
+# ``SimInputAsset.extra["stress_kind"]`` of a cross-platform stress table; the
+# lung ratio table (a cross-tissue stress) carries none.
+STRESS_KIND_KEY: Final = "stress_kind"
+STRESS_KIND_CROSS_PLATFORM: Final = "cross_platform"
+# ``provenance["source_kind"]`` of an asset derived from in-house data: its
+# source files carry their evidence path and sha256 (no public URL; plan §8.8
+# amendment for NP6's factor table: "source path, sha256 and the deriving
+# script"). Public assets carry no source kind and need a URL per file.
+SOURCE_KIND_KEY: Final = "source_kind"
+SOURCE_KIND_IN_HOUSE: Final = "in_house"
 # Depth profiles (phase 1's D-recipes): a class with fewer profile cells takes
 # the pooled neuronal or non-neuronal profile.
 PROFILE_MIN_CLASS_CELLS: Final = 100
 POOL_NEURONAL: Final = "__neurons__"
 POOL_NON_NEURONAL: Final = "__nonneurons__"
 POOL_ALL: Final = "__all__"
+# A family NP5 profile's legend kinds and the class of its other table cells.
+PROFILE_KIND_CONFIDENT: Final = "confident_broad"
+PROFILE_KIND_NOT_CONFIDENT: Final = "not_confident"
+PROFILE_NOT_CONFIDENT: Final = "__not_confident__"
 # Chemistry resolution (plan §3.7 panel_chemistry).
 CHEMISTRY_MIN_JACCARD: Final = 0.95
 # Human broad classes of the resolvability levels that are neuronal
@@ -162,12 +208,18 @@ PROFILE_COLUMNS: Final[tuple[str, ...]] = ("class_code", "total_counts")
 RATIO_COLUMNS: Final[tuple[str, ...]] = ("gene_id", "log2_ratio")
 SCENARIO_COLUMNS: Final[tuple[str, ...]] = ("total_counts", "n_cells")
 PANEL_LIST_COLUMNS: Final[tuple[str, ...]] = ("panel_key", "species", "gene_id")
+GATE_P_PROFILE_COLUMNS: Final[tuple[str, ...]] = (
+    "class_code",
+    "total_counts",
+    "n_cells",
+)
 ROLE_COLUMNS: Final[dict[str, tuple[str, ...]]] = {
     "member": EFFICIENCY_COLUMNS,
     "profile": PROFILE_COLUMNS,
     "stress": RATIO_COLUMNS,
     "scenario": SCENARIO_COLUMNS,
     "panel_list": PANEL_LIST_COLUMNS,
+    "gate_p_profile": GATE_P_PROFILE_COLUMNS,
 }
 
 
@@ -256,8 +308,10 @@ def validate_asset(asset: SimInputAsset, directory: Path | str | None = None) ->
 
     Raises:
         SimInputError: If the file is missing, larger than ``MAX_ASSET_BYTES``
-            or altered (sha256, size), its columns differ from the role's, or
-            the provenance lacks a required field.
+            or altered (sha256, size), its columns differ from the role's, the
+            provenance lacks a required field, or a source file lacks its
+            sha256 or its URL (an in-house source, ``SOURCE_KIND_IN_HOUSE``:
+            its path).
     """
     path = asset.path(directory)
     if not path.is_file():
@@ -273,18 +327,21 @@ def validate_asset(asset: SimInputAsset, directory: Path | str | None = None) ->
         raise SimInputError(
             f"sim input {asset.asset_id}: {path.name} has sha256 {digest[:16]} and "
             f"{size} bytes, the sidecar records {asset.sha256[:16]} and "
-            f"{asset.size} (re-run scripts/annotation/build_sim_inputs.py)"
+            f"{asset.size} (re-run "
+            f"{asset.provenance.get('deriving_script') or 'its deriving script'})"
         )
     missing = [key for key in REQUIRED_PROVENANCE if not asset.provenance.get(key)]
     if missing:
         raise SimInputError(
             f"sim input {asset.asset_id}: provenance lacks {', '.join(missing)}"
         )
+    in_house = asset.provenance.get(SOURCE_KIND_KEY) == SOURCE_KIND_IN_HOUSE
+    locator = "path" if in_house else "url"
     for item in asset.provenance.get("source_files") or []:
-        if not (isinstance(item, Mapping) and item.get("sha256") and item.get("url")):
+        if not (isinstance(item, Mapping) and item.get("sha256") and item.get(locator)):
             raise SimInputError(
-                f"sim input {asset.asset_id}: every source file needs its url "
-                "and sha256"
+                f"sim input {asset.asset_id}: every source file needs its "
+                f"{locator} and sha256"
             )
     header = path.open(encoding="utf-8").readline().strip().split(",")
     expected = list(ROLE_COLUMNS[asset.role])
@@ -796,6 +853,105 @@ def xtissue_stress_efficiency(
 
 
 # --------------------------------------------------------------------------
+# Gate P's cross-platform stress (plan §14 NP6; M13 decision D7)
+
+
+def is_cross_platform_stress(asset: SimInputAsset) -> bool:
+    """Whether a ``stress`` asset is a cross-platform factor table (NP6)."""
+    return (
+        asset.role == "stress"
+        and asset.extra.get(STRESS_KIND_KEY) == STRESS_KIND_CROSS_PLATFORM
+    )
+
+
+def xplatform_factors(
+    asset: SimInputAsset, directory: Path | str | None = None
+) -> pd.Series:
+    """Return a cross-platform stress asset's log2 offset per gene id.
+
+    Raises:
+        SimInputError: If the asset is not a cross-platform stress table or
+            holds a gene twice.
+    """
+    if not is_cross_platform_stress(asset):
+        raise SimInputError(
+            f"{asset.asset_id} is not a cross-platform stress table "
+            f"({asset.role}, {STRESS_KIND_KEY}={asset.extra.get(STRESS_KIND_KEY)!r})"
+        )
+    factors = ratio_table(asset, directory)
+    if not factors.index.is_unique:
+        raise SimInputError(f"{asset.asset_id}: duplicate gene ids")
+    return factors
+
+
+def xplatform_stress_efficiency(
+    genes: Sequence[str],
+    base_efficiency: np.ndarray,
+    factors: pd.Series,
+    *,
+    seed: int = 0,
+    cap_log2: float = XPLATFORM_CAP_LOG2,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return gate P's cross-platform stress efficiency (plan §14 NP6; D7).
+
+    ``log2 e = log2 e_R1 + f``: ``f`` is the gene's measured offset (the
+    asset's log2 Xenium / MERSCOPE ratio, centred on the median gene),
+    capped at ``+-cap_log2``; a panel gene the table does not cover takes
+    ``sorted(clip(f, +-cap))[floor(u * n)]`` over the table's ``n`` genes,
+    ``u`` the keyed uniform of ``(seed, "xplatform_resample", gene)``, so
+    its value depends on its id and the seed only (M13 decision D7 (i): "a
+    keyed empirical resample from the pooled covered-gene distribution,
+    deterministic per gene and seed"). ``e`` is divided by its median over
+    the panel. As for the lung stress, the offsets are between two
+    platforms, so they multiply the R1 member's own draw (its
+    platform-vs-reference model) rather than replace it; a mouse panel's
+    genes are never in the human table, so every one is resampled.
+
+    Args:
+        genes: Panel genes (test-cell column order).
+        base_efficiency: The R1 member's efficiency (``gene_efficiency`` of
+            its seed).
+        factors: ``xplatform_factors`` output.
+        seed: The member seed.
+        cap_log2: Cap of the offsets (``GatePStressRecipe
+            .platform_factor_cap_log2``, +-2).
+
+    Returns:
+        The efficiency and a boolean mask of the genes with a measured
+        offset.
+
+    Raises:
+        SimInputError: For a cap that is not > 0, or a table without a
+            finite offset to resample from.
+    """
+    if not cap_log2 > 0:
+        raise SimInputError(f"the offset cap must be > 0, got {cap_log2!r}")
+    names = [str(gene) for gene in genes]
+    table = pd.to_numeric(factors, errors="coerce")
+    finite = table[np.isfinite(table.to_numpy(np.float64))]
+    if finite.empty:
+        raise SimInputError("the cross-platform table has no finite offset")
+    pool = np.sort(np.clip(finite.to_numpy(np.float64), -cap_log2, cap_log2))
+    values = finite.reindex(names)
+    measured = values.notna().to_numpy(bool)
+    offsets = np.clip(values.fillna(0.0).to_numpy(np.float64), -cap_log2, cap_log2)
+    for position in np.flatnonzero(~measured):
+        u = keyed_uniform(seed, STREAM_XPLATFORM_RESAMPLE, names[position])
+        offsets[position] = pool[min(int(math.floor(u * len(pool))), len(pool) - 1)]
+    base = np.log2(np.asarray(base_efficiency, dtype=np.float64))
+    if base.shape != (len(names),):
+        raise SimInputError(
+            f"{len(base)} base efficiencies for {len(names)} panel genes"
+        )
+    efficiency = (
+        _median_normalised(base + offsets)
+        if len(names)
+        else np.ones(0, dtype=np.float64)
+    )
+    return efficiency, measured
+
+
+# --------------------------------------------------------------------------
 # Depth profiles
 
 
@@ -1005,11 +1161,15 @@ def profile_from_asset(
     A ``profile`` asset holds per-cell class codes (legend in the sidecar's
     ``extra.class_legend``: code, class, neuronal) and totals in source
     order; a ``scenario`` asset holds a pooled histogram (total, cells),
-    expanded in ascending total order and sampled pooled.
+    expanded in ascending total order and sampled pooled; a
+    ``gate_p_profile`` asset gives its confident broad calls per class
+    (``family_profile_from_asset``; its other table cells are left out).
 
     Raises:
         SimInputError: For another role or a code missing from the legend.
     """
+    if asset.role == GATE_P_PROFILE_ROLE:
+        return family_profile_from_asset(asset, directory).confident
     table = read_asset_table(asset, directory)
     species = str(asset.species or "")
     if asset.role == "profile":
@@ -1049,6 +1209,165 @@ def profile_from_asset(
         )
     raise SimInputError(
         f"{asset.asset_id} is a {asset.role} asset, not a depth profile"
+    )
+
+
+@dataclass(frozen=True)
+class FamilyDepthProfile:
+    """A family's own depth profile for gate P's NP5 (M13 D8 with CHECK K7).
+
+    The ``gate_p_profile`` asset of a new family (built by
+    ``scripts/annotation/build_np5_depth_profile.py`` from its first
+    provisional ``map_first`` run): the confident broad calls of each E2
+    floor class and the family's other table cells, as histograms of total
+    counts. Gate P alone reads it; no PREP ever does (``resolvability_plan``
+    selects ``profile`` assets only), so it never enters a ``build_hash``.
+    The readings it applies are pre-registration §23.20's.
+
+    Attributes:
+        confident: The confident broad calls per class (a per-class
+            ``DepthProfile`` whose ``min_cells`` is ``PROFILE_MIN_CLASS_CELLS``).
+        table_totals: Total counts of every table cell (label-free).
+        asset: The asset id.
+        sha256: The asset's sha256.
+    """
+
+    confident: DepthProfile
+    table_totals: np.ndarray
+    asset: str
+    sha256: str
+
+    @property
+    def min_cells(self) -> int:
+        """Confident broad calls a class needs for its own depths."""
+        return self.confident.min_cells
+
+    def class_depths(self) -> dict[str, list[float]]:
+        """Return the depths of each class with at least ``min_cells`` calls.
+
+        Reading (ii) of pre-registration §23.20: a class with fewer takes the
+        overall median, as a class without calls (plan §8.3 v7.5's profile
+        minimum, which ``DepthProfile`` applies too).
+        """
+        return {
+            name: [float(value) for value in values]
+            for name, values in sorted(self.confident.by_class.items())
+            if len(values) >= self.min_cells
+        }
+
+    def below_min_cells(self) -> dict[str, int]:
+        """Return the classes with calls but fewer than ``min_cells``."""
+        return {
+            name: len(values)
+            for name, values in sorted(self.confident.by_class.items())
+            if 0 < len(values) < self.min_cells
+        }
+
+    def overall_median(self) -> float | None:
+        """Return the median of the confident broad calls, classes pooled.
+
+        Reading (iv) of pre-registration §23.20 ("the profile's overall
+        median", A45 (a)).
+        """
+        totals = self.confident.totals
+        return float(np.median(totals)) if totals.size else None
+
+    def table_median(self) -> float | None:
+        """Return the label-free median of every table cell (reported)."""
+        totals = self.table_totals
+        return float(np.median(totals)) if totals.size else None
+
+    def table_profile(self) -> DepthProfile:
+        """Return every table cell as a pooled, label-free profile."""
+        return DepthProfile(
+            np.full(len(self.table_totals), POOL_ALL, dtype=object),
+            self.table_totals,
+            species=self.confident.species,
+            label=f"{self.confident.label} (every table cell)",
+            neuronal={POOL_ALL: None},
+            pooled=True,
+            asset=self.asset,
+            sha256=self.sha256,
+        )
+
+
+def family_profile_from_asset(
+    asset: SimInputAsset, directory: Path | str | None = None
+) -> FamilyDepthProfile:
+    """Return a ``gate_p_profile`` asset's family depth profile.
+
+    Rows (``class_code``, ``total_counts``, ``n_cells``) are expanded to one
+    value per cell. The legend (``extra.class_legend``: ``code``, ``class``,
+    ``kind``, ``neuronal``) marks each code's cells as confident broad calls
+    of the class (``PROFILE_KIND_CONFIDENT``) or as the other table cells
+    (``PROFILE_KIND_NOT_CONFIDENT``).
+
+    Raises:
+        SimInputError: For another role, a code without a legend entry, an
+            unknown kind, a class listed twice, a cell count below 1, or a
+            recorded class minimum other than ``PROFILE_MIN_CLASS_CELLS``.
+    """
+    if asset.role != GATE_P_PROFILE_ROLE:
+        raise SimInputError(
+            f"{asset.asset_id} is a {asset.role} asset, not a {GATE_P_PROFILE_ROLE}"
+        )
+    table = read_asset_table(asset, directory)
+    legend = asset.extra.get("class_legend") or []
+    entries = {int(item["code"]): item for item in legend}
+    kinds = {str(item.get("kind")) for item in legend}
+    unknown = sorted(kinds - {PROFILE_KIND_CONFIDENT, PROFILE_KIND_NOT_CONFIDENT})
+    if unknown:
+        raise SimInputError(f"{asset.asset_id}: unknown legend kinds {unknown}")
+    names = [str(item["class"]) for item in legend]
+    if len(set(names)) != len(names) or len(entries) != len(legend):
+        raise SimInputError(f"{asset.asset_id}: a class or code is listed twice")
+    codes = table["class_code"].astype(int).to_numpy()
+    missing = sorted(set(codes.tolist()) - set(entries))
+    if missing:
+        raise SimInputError(f"{asset.asset_id}: class codes {missing} lack a legend")
+    counts = table["n_cells"].astype(int).to_numpy()
+    if (counts < 1).any():
+        raise SimInputError(f"{asset.asset_id}: a row holds fewer than one cell")
+    totals = np.repeat(table["total_counts"].to_numpy(np.float64), counts)
+    cell_codes = np.repeat(codes, counts)
+    confident_codes = sorted(
+        code
+        for code, item in entries.items()
+        if item.get("kind") == PROFILE_KIND_CONFIDENT
+    )
+    confident = np.isin(cell_codes, confident_codes)
+    classes = np.array(
+        [str(entries[int(code)]["class"]) for code in cell_codes[confident]],
+        dtype=object,
+    )
+    flags = {
+        str(item["class"]): item.get("neuronal")
+        for item in legend
+        if item.get("kind") == PROFILE_KIND_CONFIDENT
+    }
+    # Reading (ii) uses the registered profile minimum; an asset recording
+    # another one is refused rather than applied.
+    recorded = asset.extra.get("min_class_cells")
+    if recorded is not None and int(recorded) != PROFILE_MIN_CLASS_CELLS:
+        raise SimInputError(
+            f"{asset.asset_id}: min_class_cells {recorded} is not the registered "
+            f"{PROFILE_MIN_CLASS_CELLS} (plan §8.3 v7.5; pre-registration §23.20)"
+        )
+    min_cells = PROFILE_MIN_CLASS_CELLS
+    return FamilyDepthProfile(
+        confident=DepthProfile(
+            classes,
+            totals[confident],
+            species=str(asset.species or ""),
+            label=asset.label,
+            neuronal=flags,
+            min_cells=min_cells,
+            asset=asset.asset_id,
+            sha256=asset.sha256,
+        ),
+        table_totals=totals,
+        asset=asset.asset_id,
+        sha256=asset.sha256,
     )
 
 

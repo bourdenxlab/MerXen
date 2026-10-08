@@ -13,7 +13,8 @@
  * dropped, as any failed task drops its branch under errorStrategy "ignore".
  *
  * CLUSTERING_ANNOTATE (M4) runs CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE on each
- * pair x segmentation once its own MAP has finished (plan §3.4). RESOLVE is
+ * pair x segmentation once its own MAP has finished (plan §3.4), with the
+ * branch's registration checks from the QC stage (M13 C15). RESOLVE is
  * a separate task from MAP: a threshold, floor, trust, flag or degraded-mode
  * change re-runs RESOLVE alone (minutes) under -resume, and MAP, whose
  * inputs and published-output reuse key hold none of them, stays cached.
@@ -98,6 +99,10 @@ workflow CLUSTERING_ANNOTATE {
     // tuple(pair_id, segmentation, samples_json, clustering_squidpy_config.json,
     // clustering_prepare_out, alignment_files): see CLUSTERING_ANNOTATE_MAP.
     prepared_ch
+    // tuple(pair_id, segmentation, registration_files): the QC stage's
+    // *_registration_qc.json of the pair x segmentation (one per platform;
+    // [] without a QC stage), main.nf hook H5.
+    registration_ch
 
     main:
     mapped = CLUSTERING_ANNOTATE_MAP(prepared_ch)
@@ -111,6 +116,13 @@ workflow CLUSTERING_ANNOTATE {
     // published files.
     alignment_by_branch_ch = prepared_ch.map { pairId, segmentation, _samplesJson, _clusteringConfig, _preparedDir, alignmentFiles ->
         tuple(AnnotationReferences.branchKey(pairId, segmentation), alignmentFiles)
+    }
+    // The registration checks (G1; M13 C15, NR9) join by pair x segmentation.
+    // A branch without an entry is never dropped: the join keeps it and it
+    // resolves without checks once the registration channel has closed. An
+    // entry without a RESOLVE branch is left out.
+    registration_by_branch_ch = registration_ch.map { pairId, segmentation, registrationFiles ->
+        tuple(AnnotationReferences.branchKey(pairId, segmentation), registrationFiles)
     }
     resolve_inputs_ch = mapped.maps
         .map { pairId, segmentation, samplesJson, clusteringConfig, preparedDir, panelDir, bundleRefs, mapDir ->
@@ -127,7 +139,17 @@ workflow CLUSTERING_ANNOTATE {
             )
         }
         .join(alignment_by_branch_ch)
-        .map { _branchKey, pairId, segmentation, samplesJson, clusteringConfig, preparedDir, panelDir, bundleRefs, mapDir, alignmentFiles ->
+        .map { branchKey, pairId, segmentation, samplesJson, clusteringConfig, preparedDir, panelDir, bundleRefs, mapDir, alignmentFiles ->
+            tuple(
+                branchKey,
+                [pairId, segmentation, samplesJson, clusteringConfig, preparedDir, panelDir, bundleRefs, mapDir, alignmentFiles],
+            )
+        }
+        .join(registration_by_branch_ch, remainder: true)
+        .filter { _branchKey, branch, _registrationFiles -> branch != null }
+        .map { _branchKey, branch, registrationFiles ->
+            def (pairId, segmentation, samplesJson, clusteringConfig, preparedDir) = branch[0..4]
+            def (panelDir, bundleRefs, mapDir, alignmentFiles) = branch[5..8]
             tuple(
                 pairId,
                 segmentation,
@@ -139,6 +161,7 @@ workflow CLUSTERING_ANNOTATE {
                 bundleRefs,
                 mapDir,
                 alignmentFiles,
+                registrationFiles ?: [],
             )
         }
     CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE(resolve_inputs_ch)
@@ -190,9 +213,13 @@ workflow CLUSTERING_MAP_FIRST {
     // files AnnotationReferences.alignmentFiles returns ([] without an
     // alignment).
     alignment_ch
+    // tuple(pair_id, segmentation, registration_files): per pair x
+    // segmentation, the QC stage's registration checks
+    // (AnnotationReferences.registrationQcFiles; [] without a QC stage).
+    registration_ch
 
     main:
-    annotated = CLUSTERING_ANNOTATE(prepared_ch.combine(alignment_ch, by: 0))
+    annotated = CLUSTERING_ANNOTATE(prepared_ch.combine(alignment_ch, by: 0), registration_ch)
 
     // COMPUTE_CPU stages RESOLVE's deterministic label tables, manifests and
     // pair summary as files and hashes them by content (cache "deep"), so it

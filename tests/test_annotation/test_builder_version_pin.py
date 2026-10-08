@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "16e74acd9f93aca5951d9520fc264ce2de473534ae62007364ebeb465734e5ae",
+    3: "2d960816289f217e14d24f40510e95c12e97959cc38bf09df974b62236cfba06",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -174,6 +174,70 @@ PIN_HISTORY = (
     "3: load_resolvability and ResolvabilityTables refuse a resolvability "
     "version the code does not know (checked_resolvability_version; reading "
     "only, the RESOLVE follow-up of M3c); no bundle content changes",
+    "3: gate_p_tested_sets takes its confident calls from the new public "
+    "frozen_confident_mask (M13 gate P, which scores at frozen thresholds "
+    "and never runs in a builder); the same rule, moved, so no bundle "
+    "content or build_hash changes",
+    "3: the M13 branch merged with the RESOLVE version-7 follow-up "
+    "(2026-10-06): resolvability.py carries both frozen_confident_mask "
+    "and the version guard and ensemble_bin_counts above; each change "
+    "keeps its own rule, so no bundle content or build_hash changes",
+    "3: sim_inputs.py gains gate P's cross-platform stress efficiency and "
+    "the provenance rule of in-house assets (a source path in place of a "
+    "URL; M13 C4); no builder reads either, the packaged assets a bundle "
+    "hashes are unchanged, so no bundle content or build_hash changes",
+    "3: gate P's NP6 stress recipes in resolvability.py (M13 C4: "
+    "R1_stress_spill, R1_stress_lognormal, R1_stress_xplatform, "
+    "R3_stress_spill, gate_p_stress_members; thin_and_contaminate reads a "
+    "table recipe's efficiency); no builder simulates them, the R1, R3, clean "
+    "and lung recipe records are unchanged (factor_cap_log2 only when set) and "
+    "every lognormal recipe's draw is the same, so no bundle content or "
+    "build_hash changes (test_resolvability_v6_golden)",
+    "3: the held-out test set's region metadata, other-region metadata and "
+    "test-set sources are read from source paths (ho_region_metadata, "
+    "other_region_metadata, _test_set_source_paths, _spec_of_test_set; M13 "
+    "C8 refactor): the same files are read and the same specs built, so no "
+    "bundle content or build_hash changes (test_resolvability_v6_golden)",
+    "3: gate P's leave-one-donor-out held-out test sets (M13 C8, D2 (d)): "
+    "build_whb_frontal_ho draws the other-region top-up from the held-out "
+    "donor only and never a cell of the default test set when "
+    "resolvability.holdout_other_region_donor_only and the "
+    "gate_p_excluded_test_cells source are both set; the flag enters the "
+    "held-out params only when set and the source only when given, so every "
+    "production payload, bundle and build_hash is unchanged "
+    "(test_resolvability_v6_golden); the pool-size and composition reports "
+    "and held_out_test_set_spec are added (no builder output changes)",
+    "3: the D1 drop's supercluster labels move to ho_self_map_excluded_labels "
+    "(the same labels, read by self_map_test_cells as before), and gate P's "
+    "pool-size report (ho_donor_pool_sizes, which no builder calls) leaves "
+    "the self-map's dropped other-region cells out of its counts (M13 C8 "
+    "review); no bundle content or build_hash changes "
+    "(test_resolvability_v6_golden)",
+    "3: version-7 self-maps store the simulated n_genes per member, test "
+    "cell and depth on the test cells' genes (M13 chunk C16, decision D19 "
+    "(a): resolvability_sim_genes.parquet and the summary's "
+    "simulated_n_genes record); SIM_GENES_VERSION 1 enters every version-7 "
+    "build_hash through v7_simulation_payload (panel_params), so the new "
+    "content goes only into new build directories and no version-7 bundle "
+    "built before it is reused (it stays readable; its gene-complexity "
+    "check is not_evaluable); the version-7 test-set bundles, the version-6 "
+    "path and payload (test_resolvability_v6_golden) and so every seeded "
+    "family's build_hash are unchanged",
+    "3: C16 review: load_simulated_genes checks the stored table against "
+    "its summary record (row counts in total and per member, emission "
+    "members present, depths on the grid, one row per member, cell and "
+    "depth, gene counts in range); a reader-side check, so no bundle "
+    "content or build_hash changes",
+    "3: merge of M13 C4/C8 (gate P's stress recipes and leave-one-donor-out "
+    "test sets) with M13 C16 (version-7 simulated n_genes): each side keeps "
+    "its own rule and neither changes the other's code, so the merged "
+    "fingerprint differs from both without any bundle content or build_hash "
+    "change (test_resolvability_v6_golden)",
+    "3: sim_inputs.py gains the gate_p_profile role and FamilyDepthProfile "
+    "(M13 D8 with CHECK K7: a new family's own NP5 depth profile, which only "
+    "gate P reads); resolvability_plan selects profile assets only, so no "
+    "PREP reads the role, no such asset is registered yet, and no bundle "
+    "content or build_hash changes (test_resolvability_v6_golden)",
 )
 
 

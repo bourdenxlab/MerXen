@@ -605,7 +605,11 @@ merxen annotation-panel-simulate --public-panel xenium_prime_5k_mouse \
 Outputs in `--out-dir`: `simulate_report.json`, `SIMULATE_REPORT.txt`,
 `predicted_levels.csv` (+ `<reference>/predicted_levels_unfiltered.csv`),
 `prefilter_comparison.csv`, `resources.csv`, `panel/` (the panel files) and
-`<reference>/logs/`.
+`<reference>/logs/`. The report's `provenance` records the code that ran:
+`code_commit` with `code_commit_source` `export` when the command runs from a
+`git archive` export with a `COMMIT` file at its root (an export has no
+`.git`; a malformed `COMMIT` file is refused before any compute), else `git`
+(`git rev-parse HEAD`), else both `null`.
 
 | Option | Description |
 |--------|-------------|
@@ -624,7 +628,17 @@ Outputs in `--out-dir`: `simulate_report.json`, `SIMULATE_REPORT.txt`,
 | `--resolvability-version auto\|7` | `7`: for a version-6 family (set a, ag7, VZG2, the pinned P5011 family) also compute the resolvability version-7 decisions (the eight emission members of plan §8.3 v7.3: R1 x 8, or R1 x 6 + R3 x 2 where a measured table exists) on the bundle's test set as a diagnostic: `<reference>/v7_diagnostic/` holds each ensemble's tables, `v7_diagnostic.json` and `V7_DIAGNOSTIC.txt` (version 6 vs 7 emitted triples lost and gained per level and regime). Never written to the store, never applied; the bundle and its emitted decisions are unchanged. Version-7 families build version 7 anyway (plan §8.3 v7.1). |
 | `--v7-fresh-seeds LIST`, `--v7-fresh-r3-seeds LIST` | A fresh version-7 ensemble B (R1 at these seeds, e.g. `3,4,5`; R3 at these seeds, default `1`; `--v7-fresh-r3-seed` is an alias) mapped beside ensemble A (the bundle's, or the diagnostic's); its emitted-triple churn is reported (pre-registration §21 (iii), (vii)). B must share no member with A. Diagnostic only. |
 | `--v7-comparator` | Ensemble B is the pre-registered comparator of the amended churn re-test (pre-registration §22.4): `R1_contam_HO@20`-`@25` + `R3_measured_HO@20`, `@21` where a measured table exists, else `R1_contam_HO@20`-`@27`. Diagnostic only. |
-| `--gate-p` | The gate-P programme (NP1–NP9: leave-one-donor-out HO bundles, the second mouse test draw, seeds 0 / 1, stress recipes; plan §8.8, §14). M13 registers it (`merxen.annotation.simulate.register_gate_p_hook`, from `scripts/acceptance/new_panel.py`); until then the option is refused before any compute. |
+| `--gate-p` | The gate-P programme after the simulation (NP1–NP9: leave-one-donor-out HO bundles, seeds 0 / 1, stress recipes; plan §8.8, §14; `merxen.annotation.gate_p_run`), writing `<out-dir>/gate_p`. Needs `--species` (M13 D4); the human path only (a mouse family waits for the second WMB test draw, M13 C20). `scripts/acceptance/new_panel.py` wraps it. What needs no bundle is refused before any compute: a store that is or lies in the config's `reference_store` / `reference_store_large` (point `--store` and `--store-large` at the separate gate-P store, M13 D11 (b)), an output inside a store or holding an earlier gate-P run, the configured donors and seeds, and a missing NP5 depth (`--depth-profile-asset` or `--expected-depth`). What needs the built bundle is refused after PREP and before any gate-P build or mapping; `simulate_report.json` is written before gate P runs and records such a refusal under `gate_p`. |
+| `--gate-p-other-region donor_own\|shared` | The leave-one-donor-out sets' other-region test cells: `donor_own` (D2 (d), each donor draws its own) or `shared` (the fallback (c)). |
+| `--gate-p-accept-small-pools` | Run D2 (d) although a donor's own pool cannot meet the per-class top-up rule (otherwise gate P stops after the pool-size report, exit status 3 from `new_panel.py`; the user's ruling A48 (b) of 2026-10-07 takes `--gate-p-other-region shared` when it does). |
+| `--gate-p-version auto\|7` | `7`: score a version-6 family's version-7 ensemble (M13 D5 (c); never written to a store). |
+| `--gate-p-dry-run` | Also score the seeded family's dry-run rule (M13 D28). |
+| `--gate-p-time-reference-seconds S`, `--gate-p-time-reference-basis TEXT` | NP9's time reference of a version-6 family (plan §8.7 / §10) and its source. Not used for a version-7 family. |
+| `--gate-p-dry-run-seconds S`, `--gate-p-dry-run-simulated-cells N` | The set a version-7 dry run's `measured_seconds` and `simulated_cells` (its `gate_p_run.json`): NP9's version-7 reference, scaled per simulated cell (M13 D10 (a)). Without them a version-7 family's NP9 time part is not evaluable. |
+| `--gate-p-unresolved-reviewed`, `--gate-p-accepted-parents LIST` | The user reviewed NP1's unresolved list; the weak or collapsed parents the user accepted (NP2), each by its lookup key (`<level>/<node>`), node label or node name, given before the run (a gate-P output is never re-scored in place). Outside a dry run, a weak or collapsed parent of PREP's bundle that the list does not name stops gate P before any leave-one-donor-out build (exit status 3 from `new_panel.py`; the user's ruling B2 (b) of 2026-10-07). |
+| `--gate-p-run-with-unaccepted-parents` | Run although PREP lists a weak or collapsed parent the user has not accepted; NP2 then stays pending, so the family cannot pass. |
+| `--gate-p-skip-prep-identity` | Do not rebuild PREP for NP9's identity part (NP9 is then not evaluable). |
+| `--gate-p-x1-factors PATH` | The X1 factor table, reported beside NP6's offsets (M13 D7 (b)). |
 
 ## `merxen annotate`
 
@@ -773,8 +787,8 @@ merxen annotate-resolve \
 | `--alignment-dir DIR` | The pair's `align_out` (shared tissue mask); default `<results>/<pair>/alignment/align_out` of the inputs' results tree, when present. |
 | `--no-alignment-lookup` | Never take that default: the mask comes only from `--alignment-dir` (a pipeline task gets it from ALIGN's channel, never from a published file ALIGN may still be writing). |
 | `--annotation-config PATH`, `--species` | `AnnotationConfig` JSON; the species defaults to the manifest's (mouse: the M6 mouse rules and gate). |
-| `--registration-qc SID=PATH` | Mouse gate G1: the QC stage's `*_registration_qc.json` or `*_qc_summary.csv` of the sample's segmentation (repeatable; a bare `PATH` for a single-sample MAP output). Without a check G1 is not evaluated and the gate warns; a pipeline task (`--require-bundle-refs`) refuses a mouse sample without one unless `--no-registration-qc` is given. |
-| `--registration-qc-dir DIR` | Mouse gate G1: a QC stage output directory (repeatable); a sample without `--registration-qc` takes `<sample_id lower-case>_registration_qc.json` found under it (else `_qc_summary.csv` with registration columns). Two matches of one name are an error. |
+| `--registration-qc SID=PATH` | Registration G1: the QC stage's `*_registration_qc.json` or `*_qc_summary.csv` of the sample's segmentation (repeatable; a bare `PATH` for a single-sample MAP output). Mouse: gate G1; without a check G1 is not evaluated and the gate warns, and a pipeline task (`--require-bundle-refs`) refuses a mouse sample without one unless `--no-registration-qc` is given. Human: the real-data QC's registration G1 (its fail rule fails the dataset gate, `real_qc.registration_g1_effect`, since 2026-10-07; `warning` keeps it warn-only); without a check it is `not_evaluable`. |
+| `--registration-qc-dir DIR` | Registration G1 (mouse and human, as above): a QC stage output directory (repeatable); a sample without `--registration-qc` takes `<sample_id lower-case>_registration_qc.json` found under it (else `_qc_summary.csv` with registration columns). Two matches of one name are an error. |
 | `--no-registration-qc` | Mouse: resolve without the registration check (G1 not evaluated; the gate warns). Goes without `--registration-qc` and `--registration-qc-dir`. |
 | `--mouse-g4-sections LIST` | Mouse gate G4: comma-separated MERFISH-638850 sections (e.g. `C57BL6J-638850.31,C57BL6J-638850.32,C57BL6J-638850.33` for hippocampal / thalamic levels like ag7 and VZG2) whose pooled class shares are the composition window; default none (G4 not evaluated until M6b's AP estimate). |
 | `--platforms`, `--n-bootstrap`, `--tile-um`, `--seed`, `--results-root` | Resolve only these platforms; block-bootstrap replicates (200), tile edge (500 µm) and seed (0); a results tree `--out` must stay out of. |

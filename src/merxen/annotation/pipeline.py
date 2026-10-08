@@ -188,11 +188,18 @@ if TYPE_CHECKING:
     from merxen.annotation.mouse_gate import RegistrationSignal
     from merxen.annotation.provenance import (
         AnnotationProvenance,
+        PanelProvenance,
         ReferenceProvenance,
         ResolvabilityProvenance,
     )
+    from merxen.annotation.real_qc import (
+        MarkerConsistencySignal,
+        QcEffects,
+        RealQcResult,
+        RealQcSignals,
+    )
     from merxen.annotation.resolvability import ResolvabilityTables
-    from merxen.annotation.thresholds import EmissionPlan
+    from merxen.annotation.thresholds import EmissionPlan, GateVerdict
 
 logger = logging.getLogger(__name__)
 
@@ -612,13 +619,102 @@ def _prefer_current_test_set(candidates: list[StoreEntry]) -> list[StoreEntry]:
     return candidates
 
 
+def _v7_simulation_versions(entry: StoreEntry) -> tuple[int, int] | None:
+    """The hashed version-7 simulation versions a bundle was built with.
+
+    Read from ``build_hash_payload.builder_params.resolvability.v7``
+    (``resolvability.v7_simulation_payload``): its ``ensemble_rule_version``
+    and ``simulated_n_genes_version`` (``0`` when the payload predates the
+    field: a version-7 bundle built before M13 chunk C16 stores no simulated
+    genes per cell).
+
+    Returns:
+        ``(ensemble_rule_version, simulated_n_genes_version)``, or ``None``
+        for a bundle without a version-7 payload (version 6, no self-map).
+    """
+    manifest = json.loads((entry.path / BUNDLE_MANIFEST_NAME).read_text("utf-8"))
+    payload = manifest.get("build_hash_payload") or {}
+    params = (
+        ((payload.get("builder_params") or {}).get("resolvability") or {})
+        if isinstance(payload, dict)
+        else {}
+    )
+    v7 = params.get("v7") if isinstance(params, dict) else None
+    if not isinstance(v7, dict):
+        return None
+
+    def version(key: str) -> int:
+        value = v7.get(key)
+        return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+    return version("ensemble_rule_version"), version("simulated_n_genes_version")
+
+
+def _prefer_current_v7_simulation(candidates: list[StoreEntry]) -> list[StoreEntry]:
+    """Among version-7 bundles, keep those built with the current simulation.
+
+    ``ENSEMBLE_RULE_VERSION`` (the M3c amendment of 2026-09-29) and
+    ``SIM_GENES_VERSION`` (M13 chunk C16: the simulated genes per cell)
+    enter only the version-7 ``build_hash`` (``v7_simulation_payload``). A
+    rebuilt bundle keeps the builder version, resolvability version 7 and
+    the test-set revision, so it sits next to its older bundle on the same
+    panel; a standalone run takes the current ensemble rule and, among
+    those, the current simulated genes (as ``_prefer_current_test_set``
+    does for M8 D1). A bundle without a version-7 payload is never dropped
+    here, and two current ones stay ambiguous. When no version-7 bundle
+    stores the current simulated genes, the ones kept are used and a
+    warning says their gene-complexity check is ``not_evaluable`` until the
+    panel is rebuilt.
+    """
+    from merxen.annotation.resolvability import (
+        ENSEMBLE_RULE_VERSION,
+        SIM_GENES_VERSION,
+    )
+
+    def current(versions: tuple[int, int]) -> tuple[bool, bool]:
+        rule, genes = versions
+        return rule == ENSEMBLE_RULE_VERSION, genes == SIM_GENES_VERSION
+
+    versions = [_v7_simulation_versions(entry) for entry in candidates]
+    v7 = [
+        (entry, item)
+        for entry, item in zip(candidates, versions, strict=True)
+        if item is not None
+    ]
+    if not v7:
+        return candidates
+    best = max(current(item) for _, item in v7)
+    if not best[1]:
+        logger.warning(
+            "no version-7 bundle of %s on panel %s stores the current simulated "
+            "genes per cell (simulated n_genes version %d, M13 C16); %s: its "
+            "gene-complexity check is not_evaluable until the panel is rebuilt "
+            "with merxen annotation-reference-prep",
+            candidates[0].reference_id,
+            str(candidates[0].panel_hash or "-")[:16],
+            SIM_GENES_VERSION,
+            ", ".join(
+                f"{entry.path.name[:16]} has version {item[1]}"
+                for entry, item in v7
+                if current(item) == best
+            ),
+        )
+    return [
+        entry
+        for entry, item in zip(candidates, versions, strict=True)
+        if item is None or current(item) == best
+    ]
+
+
 def _prefer_current_resolvability(candidates: list[StoreEntry]) -> list[StoreEntry]:
     """Among several bundles, keep those with the current self-map tables.
 
     A ``RESOLVABILITY_VERSION`` bump gives rebuilt bundles a new
     ``build_hash`` next to the old ones on the same panel; a standalone run
     then takes the current tables, and among those the current human
-    held-out test set (``_prefer_current_test_set``, M8 D1). Bundles without
+    held-out test set (``_prefer_current_test_set``, M8 D1), and among those
+    the current version-7 simulation (``_prefer_current_v7_simulation``:
+    ensemble rule and simulated genes per cell, M13 C16). Bundles without
     a self-map, or several current ones, stay ambiguous. When no candidate
     has the current tables (a panel not rebuilt since the bump), the older
     ones are kept and a warning names their versions: their self-map tables
@@ -639,7 +735,7 @@ def _prefer_current_resolvability(candidates: list[StoreEntry]) -> list[StoreEnt
         if version in RESOLVABILITY_VERSIONS
     ]
     if current:
-        return _prefer_current_test_set(current)
+        return _prefer_current_v7_simulation(_prefer_current_test_set(current))
     stale = [
         (entry, version)
         for entry, version in zip(candidates, versions, strict=True)
@@ -3315,7 +3411,9 @@ RESOLVE_SUMMARY_SUFFIX: Final = "_resolve_summary.json"
 # the summary so annotation_resolve_out is byte-deterministic for M5's
 # deep-cached COMPUTE_CPU (review of M4).
 RESOLVE_RUN_SUFFIX: Final = "_resolve_run.json"
-RESOLVE_SUMMARY_SCHEMA_VERSION: Final = 2
+# 3 (M13 C15): each human sample's ``real_qc`` block and the pair's
+# ``real_qc_config``.
+RESOLVE_SUMMARY_SCHEMA_VERSION: Final = 3
 RESOLVE_STEP: Final = "annotate_resolve"
 MISSING_INSTANCE_ID: Final = -1
 # Plan §8.5: cross-platform statistics of a per_platform pair come from the
@@ -3976,6 +4074,73 @@ def trust_for_run(
     )
 
 
+def sample_panel_provenance(
+    trust: TrustDecision | None,
+    primary: ResolveRun | None,
+    panels: Mapping[str, AnnotationPanel],
+    *,
+    sample_id: str,
+    declared_panel_hash: str,
+    panel_report: Mapping[str, Any] | None = None,
+    panel_mode: str | None = None,
+    level_summary: Mapping[str, Mapping[str, Any]] | None = None,
+    n_missing_panel_genes: int | None = None,
+) -> PanelProvenance | None:
+    """Return a sample's ``AnnotationProvenance.panel`` (§4.6; human and mouse).
+
+    ``diagnostics.panel_provenance`` of the primary's trust decision, with
+    the diagnostics of its annotation panel and bundle. Without them (no
+    primary run, no panel file, or diagnostics that do not fit the bundle)
+    the record still carries the decision's family, basis, validated level
+    and table digests, the panel mode and the validated shares, with the
+    sample's declared panel hash and no gene-ID fields.
+
+    Args:
+        trust: The primary reference's trust decision (``None``: no record).
+        primary: The primary run.
+        panels: Panel hash to annotation panel.
+        sample_id: The sample (log messages).
+        declared_panel_hash: The sample's declared panel hash (recorded
+            without diagnostics).
+        panel_report: ``panel_report.json`` content.
+        panel_mode: The pair's resolved panel mode.
+        level_summary: The resolution summary's ``levels`` (their
+            ``validated_share``).
+        n_missing_panel_genes: Declared genes absent from the dataset.
+
+    Returns:
+        The record, or ``None`` without a trust decision.
+    """
+    from merxen.annotation.diagnostics import panel_diagnostics, panel_provenance
+
+    if trust is None:
+        return None
+    diagnostics = None
+    if primary is not None:
+        primary_panel = panels.get(str(primary.record.panel_hash))
+        if primary_panel is not None:
+            try:
+                diagnostics = panel_diagnostics(
+                    primary_panel,
+                    panel_report=panel_report,
+                    bundles=[primary.bundle.manifest],
+                )
+            except ValueError as error:
+                logger.warning("%s: no panel diagnostics (%s)", sample_id, error)
+    return panel_provenance(
+        trust,
+        diagnostics,
+        panel_hash=declared_panel_hash,
+        panel_mode=panel_mode,  # type: ignore[arg-type]
+        validated_share={
+            level: float(value["validated_share"])
+            for level, value in (level_summary or {}).items()
+            if value.get("validated_share") is not None
+        },
+        n_missing_panel_genes=n_missing_panel_genes,
+    )
+
+
 def refused_trust(
     reference_id: str, species: Species, panel_hash: str, reasons: Sequence[str]
 ) -> TrustDecision:
@@ -4173,6 +4338,12 @@ class SampleResolution:
             which level (``cross_platform_record``).
         labels_path: Where the table was written.
         manifest_path: Where the provenance was written.
+        real_qc: The sample's real-data QC (human RESOLVE with
+            ``real_qc.enabled``; M13 C15), ``None`` otherwise.
+        gate: The dataset gate verdict after real-data QC (human), which the
+            pair step updates once paired concordance is scored.
+        paired: Whether the sample has a section of the other platform in
+            the pair (paired concordance applies).
     """
 
     sample_id: str
@@ -4185,6 +4356,9 @@ class SampleResolution:
     cross_platform: dict[str, Any] = field(default_factory=dict)
     labels_path: Path | None = None
     manifest_path: Path | None = None
+    real_qc: RealQcResult | None = None
+    gate: GateVerdict | None = None
+    paired: bool = False
 
 
 def round_share(value: float | None) -> float | None:
@@ -4244,10 +4418,20 @@ class Version7Outputs:
         summary: The sample summary's ``resolvability_v7`` record; ``None``
             for a version-6 bundle or without tables, so their summaries are
             unchanged.
+        prediction: The class-depth prediction per (level, class)
+            (``real_qc.dataset_class_depth_prediction``), the predictor of
+            the per-class coverage check (M13 C15); ``None`` without it.
+        class_keys: Per primary level of the bundle, each table cell's class
+            key there.
+        nonneuronal_classes: The class-depth table's classes that are not
+            known to be neuronal (the non-neuronal depth trend).
     """
 
     flag: pd.arrays.BooleanArray
     summary: dict[str, Any] | None
+    prediction: pd.DataFrame | None = None
+    class_keys: Mapping[str, np.ndarray] = field(default_factory=dict)
+    nonneuronal_classes: tuple[str, ...] = ()
 
 
 def version_7_outputs(
@@ -4378,7 +4562,13 @@ def version_7_outputs(
             "per_level": per_level,
         },
     }
-    return Version7Outputs(flag=nullable_flags(values, table), summary=summary)
+    return Version7Outputs(
+        flag=nullable_flags(values, table),
+        summary=summary,
+        prediction=prediction,
+        class_keys=keys,
+        nonneuronal_classes=real_qc.nonneuronal_classes(class_depth),
+    )
 
 
 def resolvability_provenance(
@@ -4721,6 +4911,454 @@ def _xpanel_trust(
         return None
 
 
+# --------------------------------------------------------------------------
+# Real-data QC in RESOLVE (plan §8.8; M13 chunk C15)
+
+# The pair's cross-platform statistics reason when paired concordance
+# withholds their supercluster level (``pair.cross_platform.reasons``).
+PAIRED_CONCORDANCE_REASON: Final = "real_qc:paired_concordance"
+
+
+def pair_has_both_platforms(platforms: Iterable[str]) -> bool:
+    """Whether a pair holds a MERSCOPE and a Xenium section (paired QC applies)."""
+    return {"MERSCOPE", "XENIUM"} <= {str(item).upper() for item in platforms}
+
+
+def qc_lowers_resolution(effects: QcEffects, gate_level: str) -> bool:
+    """Whether QC effects change what ``resolve_human`` decides.
+
+    A gate cap more severe than the QC-free gate level or a withheld level
+    needs the second pass; warnings, report-only outcomes and withheld pair
+    statistics only change the gate's reasons or the pair record.
+
+    Args:
+        effects: The dataset's QC effects.
+        gate_level: The QC-free run's gate level.
+
+    Returns:
+        Whether the second pass is needed.
+    """
+    from merxen.annotation.real_qc import gate_severity
+
+    if effects.withheld_levels:
+        return True
+    cap = effects.gate_cap
+    return cap is not None and gate_severity(cap) > gate_severity(gate_level)
+
+
+def human_marker_referee_signal(
+    resolution: HumanResolution,
+    *,
+    primary: ResolveRun | None,
+    panel: AnnotationPanel | None,
+    query: SampleQuery | None,
+    config: AnnotationConfig,
+) -> MarkerConsistencySignal | None:
+    """Return the human marker referee of one sample (§8.8; D18 (a), D27 (a)).
+
+    The referee's marker sets are derived in the run from the primary WHB
+    bundle's ``profiles.parquet`` on the sample's query genes
+    (``human_referee.derive_referee_markers``): they depend only on the
+    bundle and the panel, and their fingerprint, the ``panel_hash`` and the
+    primary bundle's ``build_hash`` are recorded in the outcome's details,
+    so a table frozen before the run can be checked against them. The
+    comparator is the panel family's
+    (``AnnotationRealQcConfig.referee_comparator``: the user's ruling C1 (b)
+    of 2026-10-07 gives the new-panel human MERSCOPE family ``class``; every
+    other family keeps the default ``node``).
+
+    Args:
+        resolution: The QC-free resolution (its confident ``ct_broad``).
+        primary: The primary run.
+        panel: The primary run's annotation panel.
+        query: The table cells on the panel's genes.
+        config: The annotation config (``real_qc``, ``flags``).
+
+    Returns:
+        The signal, or ``None`` without a primary run, panel or query (the
+        check is then ``not_evaluable``).
+    """
+    if primary is None or panel is None or query is None:
+        return None
+    from merxen.annotation.human_referee import (
+        HumanRefereeSettings,
+        human_marker_referee,
+        load_referee_profiles,
+    )
+
+    symbol_of = dict(zip(panel.ensembl_ids, panel.symbols, strict=True))
+    table = np.asarray(resolution.in_table, dtype=bool)
+    broad = resolution.levels["broad"]
+    profiles = load_referee_profiles(
+        primary.bundle.path,
+        level=primary.leaf_level,
+        gene_ids=query.gene_ids,
+        symbols=[symbol_of.get(gene, gene) for gene in query.gene_ids],
+    )
+    referee = human_marker_referee(
+        query.counts,
+        profiles,
+        np.asarray(broad.name, dtype=object)[table],
+        np.asarray(broad.confident, dtype=bool)[table],
+        flags_config=config.flags,
+        settings=HumanRefereeSettings.from_config(
+            config.real_qc,
+            family_id=(
+                None if panel.panel_family is None else panel.panel_family.family_id
+            ),
+        ),
+        gene_ids=query.gene_ids,
+        panel_hash=panel.panel_hash,
+        build_hash=primary.bundle.build_hash,
+    )
+    return referee.signal()
+
+
+def real_qc_bundle_facts(
+    primary: ResolveRun | None, tables: ResolvabilityTables | None
+) -> tuple[int | None, bool | None]:
+    """Return the primary bundle's resolvability version and R3-member fact.
+
+    The applicability facts of the version-7 checks and the factor
+    re-measure (``real_qc.RealQcSignals``; pre-registration §23.5 P4):
+
+    * with the resolvability tables, their version (a summary without the
+      field holds version-6 tables, ``resolvability.RESOLVABILITY_VERSION``)
+      and whether the version-7 ensemble has an ``R3_measured_HO`` emission
+      member;
+    * without them, the version the bundle declares (its hashed build
+      params, ``build_hash_payload.builder_params.resolvability``, else its
+      ``builder_output.resolvability`` record); a version below 7 has no R3
+      member, while for version 7 the member is unknown (``None``);
+    * nothing declared, or a version this code cannot read: both unknown.
+
+    An unknown fact makes the checks it decides ``not_evaluable``, never
+    ``not_applicable``, so a version-7 bundle whose tables were not read is
+    not recorded as one the version-7 checks do not apply to.
+
+    Args:
+        primary: The primary run (``None``: none).
+        tables: The primary bundle's resolvability tables (``None``: none
+            read).
+
+    Returns:
+        ``(resolvability_version, has_r3_member)``.
+    """
+    from merxen.annotation.resolvability import (
+        R3_RECIPE,
+        RESOLVABILITY_VERSION,
+        RESOLVABILITY_VERSION_V7,
+        ResolvabilityError,
+        checked_resolvability_version,
+        parse_member_name,
+    )
+
+    if tables is not None:
+        version = tables.version
+        if version is None:
+            return RESOLVABILITY_VERSION, False
+        members = [str(name) for name in tables.summary.get("emission_members") or []]
+        has_r3 = version == RESOLVABILITY_VERSION_V7 and any(
+            parse_member_name(name)[0] == R3_RECIPE for name in members
+        )
+        return version, has_r3
+    if primary is None:
+        return None, None
+    manifest = primary.bundle.manifest
+
+    def resolvability_record(record: Any) -> Mapping[str, Any]:
+        value = record.get("resolvability") if isinstance(record, Mapping) else None
+        return value if isinstance(value, Mapping) else {}
+
+    payload = manifest.get("build_hash_payload")
+    builder_params = (
+        payload.get("builder_params") if isinstance(payload, Mapping) else None
+    )
+    declared = resolvability_record(builder_params).get("resolvability_version")
+    if declared is None:
+        declared = resolvability_record(manifest.get("builder_output")).get(
+            "resolvability_version"
+        )
+    try:
+        version = checked_resolvability_version(declared, source="bundle manifest")
+    except ResolvabilityError:
+        return None, None
+    if version is None:
+        return None, None
+    return version, (None if version == RESOLVABILITY_VERSION_V7 else False)
+
+
+def real_qc_prefilter_applied(primary: ResolveRun | None) -> bool | None:
+    """Return whether the primary bundle's marker lookup is prefiltered.
+
+    The applicability fact of the prefilter spot check
+    (``real_qc.prefilter_spotcheck``): the bundle's hashed
+    ``build_hash_payload.large_panel_prefilter`` (``None`` or absent without
+    a prefilter, as ``_prefilter_matches`` reads it). Without a primary run
+    the fact is unknown (``None``), so the spot check is ``not_evaluable``,
+    never ``not_applicable`` (pre-registration §23.5 P4).
+
+    Args:
+        primary: The primary run (``None``: none).
+
+    Returns:
+        Whether the lookup is prefiltered, or ``None`` when unknown.
+    """
+    if primary is None:
+        return None
+    payload = primary.bundle.manifest.get("build_hash_payload")
+    if not isinstance(payload, Mapping):
+        return False
+    return payload.get("large_panel_prefilter") is not None
+
+
+def human_real_qc_signals(
+    loaded: LoadedSample,
+    resolution: HumanResolution,
+    *,
+    primary: ResolveRun | None,
+    panel: AnnotationPanel | None,
+    query: SampleQuery | None,
+    tables: ResolvabilityTables | None,
+    version_7: Version7Outputs,
+    config: AnnotationConfig,
+    registration: RegistrationSignal | None,
+    paired: bool,
+    flag_strata: Sequence[Any] | None,
+) -> RealQcSignals:
+    """Return the label-free inputs of one human sample's real-data QC (§8.8).
+
+    Every input comes from the QC-free resolution and the primary bundle:
+
+    * the facts that decide applicability: the bundle's resolvability
+      version and whether its version-7 ensemble has an ``R3_measured_HO``
+      emission member (``real_qc_bundle_facts``: unknown when neither the
+      tables nor the bundle state them), whether the pair holds the other
+      platform and whether the bundle's marker lookup is prefiltered
+      (``real_qc_prefilter_applied``: unknown without a primary run);
+    * the human marker referee (``human_marker_referee_signal``) and the
+      registration check (G1);
+    * the flag strata of the sample's flags;
+    * the gene-complexity source of a version-7 bundle that stores simulated
+      ``n_genes`` (``resolvability.load_simulated_genes``; table cells
+      counted on the same genes);
+    * for version 7, per primary level the real confident share per class
+      key against the class-depth prediction at the sample's own per-class
+      depth, and the non-neuronal depth trend on the same keys;
+    * the QC-free dataset gate verdict, whose own outcome is recorded.
+
+    Paired concordance is left to the pair step (the pair's JSD); the
+    prefilter spot check and the factor re-measure have no producer in
+    RESOLVE, so they are ``not_evaluable`` wherever they apply. RESOLVE
+    keeps no record of a family's datasets, so whether this is the family's
+    first is left unknown.
+
+    Args:
+        loaded: The sample's counts.
+        resolution: The QC-free resolution.
+        primary: The primary run.
+        panel: The primary run's annotation panel.
+        query: The table cells on the panel's genes.
+        tables: The primary bundle's resolvability tables.
+        version_7: The sample's version-7 outputs.
+        config: The annotation config.
+        registration: The sample's M0a registration check, if given.
+        paired: Whether the pair holds a section of the other platform.
+        flag_strata: The sample's flag strata (``FlagSet.strata``).
+
+    Returns:
+        The signals.
+    """
+    from merxen.annotation import real_qc as rq
+    from merxen.annotation.resolvability import (
+        RESOLVABILITY_VERSION_V7,
+        load_simulated_genes,
+    )
+
+    table = np.asarray(resolution.in_table, dtype=bool)
+    version, has_r3 = real_qc_bundle_facts(primary, tables)
+    prefiltered = real_qc_prefilter_applied(primary)
+    simulated = (
+        None
+        if tables is None or primary is None
+        else load_simulated_genes(primary.bundle.path, summary=tables.summary)
+    )
+    complexity = (
+        None
+        if simulated is None
+        else rq.gene_complexity_signal(
+            simulated, loaded.counts[table], loaded.feature_ids
+        )
+    )
+    emitted = [
+        level
+        for level, item in resolution.emissions.items()
+        if bool(np.asarray(item.emitted, dtype=bool)[table].any())
+    ]
+    coverage = None
+    trend = None
+    if version == RESOLVABILITY_VERSION_V7 and version_7.prediction is not None:
+        totals = np.asarray(loaded.total_counts, dtype=np.float64)[table]
+        confident = {
+            level: np.asarray(resolution.levels[level].confident, dtype=bool)[table]
+            for level in version_7.class_keys
+        }
+        frames = [
+            rq.real_class_coverage(keys, {level: confident[level]})
+            for level, keys in version_7.class_keys.items()
+        ]
+        real = (
+            pd.concat(frames, ignore_index=True)
+            if frames
+            else rq.real_class_coverage([], {})
+        )
+        coverage = rq.CoverageSignal(real=real, predicted=version_7.prediction)
+        trend = rq.NonneuronalTrendSignal(
+            totals=totals,
+            called_class=dict(version_7.class_keys),
+            confident=confident,
+            nonneuronal_classes=version_7.nonneuronal_classes,
+        )
+    return rq.RealQcSignals(
+        resolvability_version=version,
+        paired=paired,
+        prefilter_applied=prefiltered,
+        has_r3_member=has_r3,
+        marker_consistency=human_marker_referee_signal(
+            resolution, primary=primary, panel=panel, query=query, config=config
+        ),
+        flag_strata=flag_strata,
+        gene_complexity=complexity,
+        emitted_levels=emitted,
+        coverage=coverage,
+        nonneuronal_trend=trend,
+        registration=registration,
+        gate=resolution.gate,
+    )
+
+
+def real_qc_record(result: RealQcResult | None, *, enabled: bool) -> dict[str, Any]:
+    """Return a sample's ``real_qc`` block of ``<pair>_resolve_summary.json``.
+
+    Args:
+        result: The sample's real-data QC (``None`` when disabled).
+        enabled: ``real_qc.enabled``.
+
+    Returns:
+        ``RealQcResult.summary`` with ``enabled`` and the per-check tables
+        (coverage, the non-neuronal trend, gene complexity) as records; with
+        the QC disabled only ``enabled``, the version and ``promotes``.
+    """
+    from merxen.annotation.real_qc import REAL_QC_VERSION
+
+    if not enabled or result is None:
+        return {"enabled": False, "version": REAL_QC_VERSION, "promotes": False}
+    return {
+        "enabled": True,
+        **result.summary(),
+        "tables": {
+            name: frame.to_dict("records")
+            for name, frame in sorted(result.tables.items())
+        },
+    }
+
+
+def record_real_qc(result: SampleResolution, *, enabled: bool) -> None:
+    """Write a sample's real-data QC into its summary and provenance.
+
+    The summary's ``real_qc`` block, its ``resolution.gate`` and the
+    provenance's dataset gate take the gate verdict after QC; the panel
+    provenance's ``real_data_qc`` takes the outcomes
+    (``RealQcResult.provenance``). Called by ``resolve_human_sample`` and
+    again by ``score_paired_concordance``.
+
+    Args:
+        result: The sample's resolution (changed in place).
+        enabled: ``real_qc.enabled``.
+    """
+    from merxen.annotation.provenance import PanelProvenance
+
+    result.summary["real_qc"] = real_qc_record(result.real_qc, enabled=enabled)
+    if result.real_qc is None:
+        return
+    gate = result.gate
+    if gate is not None:
+        result.summary["resolution"]["gate"] = gate.to_json()
+        if result.provenance.gate is not None:
+            result.provenance.gate = result.provenance.gate.model_copy(
+                update={
+                    "level": gate.level,
+                    "warning": gate.warning,
+                    "reasons": list(gate.reasons),
+                }
+            )
+    panel = result.provenance.panel
+    if panel is not None:
+        result.provenance.panel = PanelProvenance.model_validate(
+            {
+                **panel.model_dump(),
+                "real_data_qc": result.real_qc.provenance().model_dump(),
+            }
+        )
+
+
+def score_paired_concordance(
+    results: Mapping[str, SampleResolution],
+    pair: dict[str, Any],
+    config: AnnotationConfig,
+) -> bool:
+    """Score paired concordance on the pair's JSD and apply its effects (§8.8).
+
+    For each paired sample with real-data QC, the placeholder outcome is
+    replaced by ``real_qc.paired_concordance`` on the pair's JSD rows (the
+    soft broad JSD on the shared-tissue mask, D21), with the seeded
+    families' warn-only demotion; its warning joins the sample's gate and
+    the records are rewritten (``record_real_qc``). When the outcome
+    withholds the pair's supercluster-level cross-platform statistics, the
+    pair's ``cross_platform`` record is capped at ``broad_only`` (flagged,
+    reason ``PAIRED_CONCORDANCE_REASON``), which every downstream
+    cross-platform statement reads (``clustering.cross_platform``). Without
+    JSD rows nothing changes: the placeholder stays ``not_evaluable``.
+
+    Args:
+        results: The pair's sample resolutions (changed in place).
+        pair: The pair record of the resolve summary (changed in place).
+        config: The annotation config (``real_qc.paired_broad_jsd_warn``).
+
+    Returns:
+        Whether the pair's supercluster-level statistics were withheld.
+    """
+    from merxen.annotation import real_qc as rq
+
+    rows = list(pair.get("jsd") or [])
+    if not rows:
+        return False
+    withheld = False
+    for result in results.values():
+        if result.real_qc is None or not result.paired:
+            continue
+        outcome = rq.paired_concordance(
+            rows, paired=True, warn_above=config.real_qc.paired_broad_jsd_warn
+        )
+        updated = result.real_qc.replace_check(rq.PAIRED_CONCORDANCE_CHECK, [outcome])
+        added = rq.qc_effects(updated.outcomes_of(rq.PAIRED_CONCORDANCE_CHECK))
+        result.real_qc = updated
+        if result.gate is not None:
+            result.gate = rq.apply_qc_to_gate(result.gate, added)
+        record_real_qc(result, enabled=True)
+        withheld = withheld or added.withhold_pair_stats
+    record = pair.get("cross_platform")
+    if withheld and isinstance(record, dict):
+        if record.get("statistics_level") == "full":
+            record["statistics_level"] = "broad_only"
+        record["flag"] = True
+        reasons = [str(item) for item in record.get("reasons") or []]
+        if PAIRED_CONCORDANCE_REASON not in reasons:
+            reasons.append(PAIRED_CONCORDANCE_REASON)
+        record["reasons"] = sorted(reasons)
+    return withheld
+
+
 def resolve_human_sample(
     loaded: LoadedSample,
     record: MapSampleRecord,
@@ -4737,8 +5375,17 @@ def resolve_human_sample(
     panel_mode: str | None = None,
     validate: bool = True,
     seed: int = 0,
+    registration: RegistrationSignal | None = None,
+    paired: bool = False,
 ) -> SampleResolution:
     """Resolve one human sample (plan §3.4; §4.1, §4.3, §4.6, §5.2-§5.6, §8.2-§8.3).
+
+    With ``real_qc.enabled`` the sample's real-data QC (plan §8.8; M13 C15)
+    runs on the QC-free resolution, its lowering effects are applied in a
+    second ``resolve_human`` pass, and the outcomes are recorded in the
+    summary (``real_qc``) and in ``PanelProvenance.real_data_qc``; paired
+    concordance is scored by ``annotate_resolve`` once the pair's JSD exists
+    (``score_paired_concordance``).
 
     Args:
         loaded: The sample's counts (every object, control-free).
@@ -4757,12 +5404,17 @@ def resolve_human_sample(
         panel_mode: The pair's resolved panel mode.
         validate: Check the table with ``schema.validate_label_table``.
         seed: Seed of the diffuse-flag simulation.
+        registration: The sample's M0a registration check (human G1, NR9);
+            without it G1 is ``not_evaluable``.
+        paired: Whether the pair holds a section of the other platform
+            (paired concordance applies).
 
     Returns:
         The sample's resolution.
 
     Raises:
-        ResolveError: If the inputs do not fit together.
+        ResolveError: If the inputs do not fit together, or a real-data QC
+            outcome would lower trust (no check of M13 does).
     """
     from merxen.annotation import consensus as cs
     from merxen.annotation import flags as fl
@@ -4911,6 +5563,7 @@ def resolve_human_sample(
     gene_ids: tuple[str, ...] = ()
     negatives = None
     profiles_by_class = None
+    query: SampleQuery | None = None
     if primary is not None:
         panel = panels.get(str(primary.record.panel_hash))
         if panel is not None:
@@ -4945,38 +5598,87 @@ def resolve_human_sample(
                 node_class=whb_broad_of(),
                 classes=HUMAN_BROAD_CLASSES,
             )
-    flag_set = fl.compute_flags(
-        fl.FlagInputs(
-            species=species,
-            platform=platform,
-            total_counts=counts,
-            in_table=table,
-            assigned_class=assigned,
-            confident=resolution.levels["broad"].confident,
-            method_disagree=resolution.flags[Columns.FLAG_METHOD_DISAGREE],
-            corr=(
-                whb.supercluster.scores.corr
-                if whb is not None and whb.supercluster.scores.corr is not None
-                else np.full(n_objects, np.nan)
+
+    def flags_of(result: HumanResolution) -> fl.FlagSet:
+        return fl.compute_flags(
+            fl.FlagInputs(
+                species=species,
+                platform=platform,
+                total_counts=counts,
+                in_table=table,
+                assigned_class=assigned,
+                confident=result.levels["broad"].confident,
+                method_disagree=result.flags[Columns.FLAG_METHOD_DISAGREE],
+                corr=(
+                    whb.supercluster.scores.corr
+                    if whb is not None and whb.supercluster.scores.corr is not None
+                    else np.full(n_objects, np.nan)
+                ),
+                depth_bin=result.depth_bin,
+                exclude_hard=result.flags[Columns.EXCLUDE_HARD],
+                query_counts=query_counts,
+                query_rows=query_rows,
+                gene_ids=gene_ids,
+                negatives=negatives,
+                profiles_by_class=profiles_by_class,
             ),
-            depth_bin=resolution.depth_bin,
-            exclude_hard=resolution.flags[Columns.EXCLUDE_HARD],
-            query_counts=query_counts,
-            query_rows=query_rows,
-            gene_ids=gene_ids,
-            negatives=negatives,
-            profiles_by_class=profiles_by_class,
-        ),
-        config.flags,
-        class_names=HUMAN_BROAD_CLASSES,
-        seed=seed,
-    )
+            config.flags,
+            class_names=HUMAN_BROAD_CLASSES,
+            seed=seed,
+        )
+
+    flag_set = flags_of(resolution)
 
     # Version 7: the report-only non-neuronal high-depth flag and the
     # class-depth prediction at the dataset's own per-class depth.
     version_7 = version_7_outputs(
         tables, emission, resolution.levels, counts, table, config
     )
+
+    # Real-data QC (plan §8.8; M13 C15): every check is computed on the
+    # QC-free resolution above (the run pre-registration NR1 compares with).
+    # Its lowering effects are then applied in a second pass (a gate cap
+    # before the leaf levels read the gate, a withheld level not emitted for
+    # the dataset), with the flags recomputed; warnings only join the gate.
+    # Paired concordance is scored by the pair step, once both sections are
+    # resolved.
+    is_paired = bool(paired)
+    qc_result: RealQcResult | None = None
+    if config.real_qc.enabled:
+        from merxen.annotation.real_qc import apply_qc_to_gate, real_data_qc
+
+        qc_result = real_data_qc(
+            human_real_qc_signals(
+                loaded,
+                resolution,
+                primary=primary,
+                panel=(
+                    None
+                    if primary is None
+                    else panels.get(str(primary.record.panel_hash))
+                ),
+                query=query,
+                tables=tables,
+                version_7=version_7,
+                config=config,
+                registration=registration,
+                paired=is_paired,
+                flag_strata=flag_set.strata,
+            ),
+            trust,
+            config,
+        )
+        effects = qc_result.effects
+        if effects.trust_cap is not None:
+            raise ResolveError(
+                f"{sample_id}: a real-data QC trust downgrade "
+                f"({effects.trust_cap}) is not wired into RESOLVE"
+            )
+        if qc_lowers_resolution(effects, resolution.gate.level):
+            resolution = cs.resolve_human(inputs.calls, replace(settings, qc=effects))
+            flag_set = flags_of(resolution)
+        else:
+            resolution.gate = apply_qc_to_gate(resolution.gate, effects)
 
     # Soft composition (§5.5).
     soft_rows = (
@@ -5157,46 +5859,17 @@ def resolve_human_sample(
             reweighted=reweight,
             restricted_lookup=restricted is not None,
         )
-    from merxen.annotation.diagnostics import (
-        panel_diagnostics,
-        panel_provenance,
+    panel_prov = sample_panel_provenance(
+        trust,
+        primary,
+        panels,
+        sample_id=sample_id,
+        declared_panel_hash=record.declared_panel_hash,
+        panel_report=panel_report,
+        panel_mode=panel_mode,
+        level_summary=summary["levels"],
+        n_missing_panel_genes=n_missing,
     )
-
-    panel_prov = None
-    if primary is not None and trust is not None:
-        primary_panel = panels.get(str(primary.record.panel_hash))
-        diagnostics = None
-        if primary_panel is not None:
-            try:
-                diagnostics = panel_diagnostics(
-                    primary_panel,
-                    panel_report=panel_report,
-                    bundles=[primary.bundle.manifest],
-                )
-            except ValueError as error:
-                logger.warning("%s: no panel diagnostics (%s)", sample_id, error)
-        if diagnostics is not None:
-            panel_prov = panel_provenance(
-                trust,
-                diagnostics,
-                panel_mode=panel_mode,  # type: ignore[arg-type]
-                validated_share={
-                    level: float(value["validated_share"])
-                    for level, value in summary["levels"].items()
-                    if value["validated_share"] is not None
-                },
-                n_missing_panel_genes=n_missing,
-            )
-    if panel_prov is None and trust is not None:
-        from merxen.annotation.provenance import PanelProvenance
-
-        panel_prov = PanelProvenance(
-            panel_hash=record.declared_panel_hash,
-            panel_trust=trust.state,
-            trust_reasons=trust.reason_codes,
-            banner=trust.banner,
-            n_missing_panel_genes=n_missing,
-        )
     engine_record = primary.record if primary is not None else None
     params = engine_record.engine_params if engine_record is not None else {}
     sources = sorted(
@@ -5312,7 +5985,7 @@ def resolve_human_sample(
     }
     if version_7.summary is not None:
         sample_summary["resolvability_v7"] = version_7.summary
-    return SampleResolution(
+    result = SampleResolution(
         sample_id=sample_id,
         platform=platform,
         labels=frame,
@@ -5321,7 +5994,12 @@ def resolve_human_sample(
         section=section,
         xpanel_section=xpanel_section,
         cross_platform=cross_platform,
+        real_qc=qc_result,
+        gate=resolution.gate,
+        paired=is_paired,
     )
+    record_real_qc(result, enabled=config.real_qc.enabled)
+    return result
 
 
 def current_merxen_version() -> str | None:
@@ -5468,7 +6146,13 @@ def annotate_resolve(
     ``<pair>_resolve_summary.json`` (gate levels and warnings, trust,
     realised flag rates, coverage, resolvable share per level, compositions
     and the pair JSD with block-bootstrap CIs; a ``per_platform`` pair's JSD
-    compares the intersection-panel runs, §8.5). Everything under
+    compares the intersection-panel runs, §8.5). Human samples also run the
+    downgrade-only real-data QC (§8.8; ``real_qc.enabled``): each sample's
+    outcomes go to its ``real_qc`` summary block and
+    ``PanelProvenance.real_data_qc``, its lowering effects to its labels and
+    gate, and paired concordance, scored on the pair's JSD before any table
+    is written, may withhold the pair's supercluster-level cross-platform
+    statistics. Everything under
     ``output_dir`` is deterministic for given inputs; the clock, the wall
     time and absolute paths go to the run record ``<pair>_resolve_run.json``
     (``run_record_path``; default: in ``output_dir``).
@@ -5502,8 +6186,10 @@ def annotate_resolve(
         run_record_path: Where the run record goes (a pipeline task keeps it
             out of ``annotation_resolve_out``); default
             ``<output_dir>/<pair>_resolve_run.json``.
-        registration: Mouse: the M0a registration check per sample id (gate
-            G1, plan §7.6); a sample without one warns (G1 not evaluated).
+        registration: The M0a registration check per sample id: mouse gate
+            G1 (plan §7.6; a sample without one warns, G1 not evaluated) and
+            human registration G1 of the real-data QC (§8.8, NR9; without
+            one it is ``not_evaluable``).
         require_registration: Mouse: refuse a sample without a registration
             check (a pipeline task: G1 is the primary guard against invalid
             data, plan §7.5 / §7.6).
@@ -5613,6 +6299,12 @@ def annotate_resolve(
             )
     loaded_samples = load_samples(inputs, config, min_counts=min_counts)
     segmented = dict(n_segmented or {})
+    # Paired concordance applies when the pair holds both platforms, whether
+    # or not this run resolves both (plan §8.8).
+    paired = pair_has_both_platforms(
+        [item.platform for item in manifest.samples.values()]
+        + [item.platform for item in inputs]
+    )
     results: dict[str, SampleResolution] = {}
     for loaded, maybe_record in zip(loaded_samples, records, strict=True):
         fingerprint = loaded.sample_fingerprint()
@@ -5664,6 +6356,7 @@ def annotate_resolve(
                 trust_overrides=trust_overrides,
                 xy=xy,
                 registration=(registration or {}).get(record.sample_id),
+                panel_mode=panel_mode,
                 validate=validate,
                 seed=seed,
             )
@@ -5683,28 +6376,10 @@ def annotate_resolve(
                 panel_mode=panel_mode,
                 validate=validate,
                 seed=seed,
+                registration=(registration or {}).get(record.sample_id),
+                paired=paired,
             )
-        folder = output / record.platform.lower()
-        provenance_json = result.provenance.to_uns_json()
-        result.labels_path = write_label_table(
-            result.labels,
-            folder / label_table_filename(record.sample_id),
-            provenance_json,
-        )
-        result.manifest_path = _write_json(
-            json.loads(provenance_json),
-            folder / annotation_manifest_filename(record.sample_id),
-        )
-        result.summary["labels"] = _relative(result.labels_path, output)
-        result.summary["labels_sha256"] = file_sha256(result.labels_path)
-        result.summary["annotation_manifest"] = _relative(result.manifest_path, output)
         results[record.sample_id] = result
-        logger.info(
-            "%s: wrote %s (%d objects)",
-            record.sample_id,
-            result.labels_path,
-            len(result.labels),
-        )
 
     # Pair composition statistics (§5.5; H1): a per_platform pair compares
     # the intersection-panel runs (§8.5).
@@ -5809,6 +6484,31 @@ def annotate_resolve(
             "no intersection-panel run on both platforms: no cross-platform "
             "composition (plan §8.5)"
         )
+    # Paired concordance on the pair's JSD (plan §8.8; M13 C15), then the
+    # label tables and manifests, whose provenance records the QC outcomes.
+    if not mouse and config.real_qc.enabled:
+        score_paired_concordance(results, pair, config)
+    for sample_id, result in results.items():
+        folder = output / result.platform.lower()
+        provenance_json = result.provenance.to_uns_json()
+        result.labels_path = write_label_table(
+            result.labels,
+            folder / label_table_filename(sample_id),
+            provenance_json,
+        )
+        result.manifest_path = _write_json(
+            json.loads(provenance_json),
+            folder / annotation_manifest_filename(sample_id),
+        )
+        result.summary["labels"] = _relative(result.labels_path, output)
+        result.summary["labels_sha256"] = file_sha256(result.labels_path)
+        result.summary["annotation_manifest"] = _relative(result.manifest_path, output)
+        logger.info(
+            "%s: wrote %s (%d objects)",
+            sample_id,
+            result.labels_path,
+            len(result.labels),
+        )
     map_manifest_path = root / MAP_MANIFEST_NAME
     # Deterministic content only (no clock, no wall time, no absolute input
     # path): annotation_resolve_out is what M5's deep-cached COMPUTE_CPU
@@ -5825,6 +6525,12 @@ def annotate_resolve(
             "panel_mode": panel_mode,
             "thresholds": config.thresholds.model_dump(mode="json"),
             "flags_config": config.flags.model_dump(mode="json"),
+            # Human only: mouse RESOLVE runs no real-data QC (M13 C15).
+            **(
+                {}
+                if mouse
+                else {"real_qc_config": config.real_qc.model_dump(mode="json")}
+            ),
             "samples": {key: value.summary for key, value in results.items()},
             "pair": pair,
         }

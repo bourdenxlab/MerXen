@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -498,3 +499,270 @@ def test_recipe_versions_agree_between_store_and_resolvability() -> None:
     for name, version in RESOLVABILITY_RECIPE_VERSIONS.items():
         assert res.RECIPE_VERSIONS[name] == version
     assert RESOLVABILITY_RECIPE_VERSIONS[res.R3_RECIPE] == 1
+    # Gate P's NP6 stress recipes never enter a bundle, so the store does not
+    # version them.
+    for name in (
+        res.GATE_P_STRESS_SPILL,
+        res.GATE_P_STRESS_LOGNORMAL,
+        res.GATE_P_STRESS_XPLATFORM,
+        res.GATE_P_STRESS_R3_SPILL,
+    ):
+        assert res.RECIPE_VERSIONS[name] == 1
+        assert name not in RESOLVABILITY_RECIPE_VERSIONS
+
+
+# --------------------------------------------------------------------------
+# Gate P's NP6 stress recipes (M13; plan §14 NP6)
+
+
+def _stress_names(
+    stresses: dict[str, list[res.EnsembleMember]],
+) -> dict[str, list[str]]:
+    return {name: [item.name for item in items] for name, items in stresses.items()}
+
+
+def test_np6_stresses_each_r1_member_three_ways() -> None:
+    """§14 NP6: spill 0.35, LogNormal(0, 1.0) and the cross-platform offsets.
+
+    The new-panel human MERSCOPE family has R1 x 8 (no R3, no lung): each
+    member gets the three stresses at its own seed, each changing one thing.
+    """
+    xplatform = si.get_asset(si.STRESS_HUMAN_XPLATFORM)
+    members = res.ensemble_members(CONFIG, species="human", chemistry="merscope")
+    stresses = res.gate_p_stress_members(
+        members,
+        CONFIG,
+        species="human",
+        chemistry="merscope",
+        xplatform_table=xplatform,
+    )
+    assert _stress_names(stresses) == {
+        name: [
+            f"{recipe}@{name.split('@')[1]}"
+            for recipe in (
+                res.GATE_P_STRESS_SPILL,
+                res.GATE_P_STRESS_LOGNORMAL,
+                res.GATE_P_STRESS_XPLATFORM,
+            )
+        ]
+        for name in R1_PRODUCTION_WITHOUT_TABLE
+    }
+    assert {item.role for items in stresses.values() for item in items} == {"stress"}
+    base = res.member_recipe(res.DECISION_RECIPE, 6, CONFIG)
+    spill, lognormal, offsets = (item.recipe for item in stresses["R1_contam_HO@6"])
+    assert (spill.spill_fraction, spill.gene_efficiency_sigma) == (0.35, 0.8)
+    assert (lognormal.spill_fraction, lognormal.gene_efficiency_sigma) == (0.25, 1.0)
+    assert (offsets.spill_fraction, offsets.gene_efficiency_sigma) == (0.25, 0.8)
+    assert {spill.seed, lognormal.seed, offsets.seed} == {base.seed}
+    assert spill.efficiency_source == lognormal.efficiency_source == "lognormal"
+    assert list(spill.to_json()) == list(base.to_json())
+    record = offsets.to_json()
+    assert record["efficiency_source"] == "xplatform_stress"
+    assert record["efficiency_table"] == si.STRESS_HUMAN_XPLATFORM
+    assert record["efficiency_table_sha256"] == xplatform.sha256
+    assert record["factor_cap_log2"] == 2.0
+    # The registered recipes' records keep their keys (version-7 build_hash).
+    r3 = res.member_recipe(
+        res.R3_RECIPE, 2, CONFIG, table=si.get_asset(si.EFFICIENCY_MOUSE_PRIME)
+    )
+    lung = res.member_recipe(
+        res.LUNG_STRESS_RECIPE, 0, CONFIG, table=si.get_asset(si.STRESS_HUMAN_LUNG)
+    )
+    for recipe in (r3, lung):
+        assert "factor_cap_log2" not in recipe.to_json()
+    # A version-6 family's base is its R1@0 recipe.
+    (v6_base, _clean) = res.simulation_recipes(CONFIG)
+    v6 = res.gate_p_stress_members(
+        [res.EnsembleMember(v6_base, "emission")],
+        CONFIG,
+        species="human",
+        chemistry="merscope",
+        xplatform_table=xplatform,
+    )
+    assert _stress_names(v6) == {
+        "R1_contam_HO@0": [
+            "R1_stress_spill@0",
+            "R1_stress_lognormal@0",
+            "R1_stress_xplatform@0",
+        ]
+    }
+
+
+def test_np6_stresses_r3_by_spill_only_and_adds_lung_for_human_prime() -> None:
+    xplatform = si.get_asset(si.STRESS_HUMAN_XPLATFORM)
+    table = si.get_asset(si.EFFICIENCY_MOUSE_PRIME)
+    mouse = res.ensemble_members(
+        CONFIG, species="mouse", chemistry="xenium_prime", member_table=table
+    )
+    stresses = res.gate_p_stress_members(
+        mouse,
+        CONFIG,
+        species="mouse",
+        chemistry="xenium_prime",
+        xplatform_table=xplatform,
+        member_table=table,
+    )
+    names = _stress_names(stresses)
+    assert list(names) == [
+        *R1_PRODUCTION_WITH_TABLE,
+        "R3_measured_HO@2",
+        "R3_measured_HO@3",
+    ]
+    assert names["R3_measured_HO@3"] == ["R3_stress_spill@3"]
+    assert len(names["R1_contam_HO@7"]) == 3
+    (r3_spill,) = (item.recipe for item in stresses["R3_measured_HO@2"])
+    base = next(item.recipe for item in mouse if item.name == "R3_measured_HO@2")
+    assert r3_spill.spill_fraction == 0.35
+    assert (
+        dataclasses.replace(
+            r3_spill, name=base.name, spill_fraction=base.spill_fraction
+        )
+        == base
+    )
+    lung = si.get_asset(si.STRESS_HUMAN_LUNG)
+    human = res.ensemble_members(
+        CONFIG, species="human", chemistry="xenium_prime", stress_table=lung
+    )
+    prime = res.gate_p_stress_members(
+        human,
+        CONFIG,
+        species="human",
+        chemistry="xenium_prime",
+        xplatform_table=xplatform,
+        lung_table=lung,
+    )
+    assert list(prime) == R1_PRODUCTION_WITHOUT_TABLE
+    assert _stress_names(prime)["R1_contam_HO@9"][-1] == "R1_xtissue_lung_stress@9"
+    lung_member = prime["R1_contam_HO@9"][-1].recipe
+    assert lung_member == res.member_recipe(
+        res.LUNG_STRESS_RECIPE, 9, CONFIG, table=lung
+    )
+    with pytest.raises(res.ResolvabilityError, match="lung ratio table"):
+        res.gate_p_stress_members(
+            human,
+            CONFIG,
+            species="human",
+            chemistry="xenium_prime",
+            xplatform_table=xplatform,
+        )
+
+
+def test_np6_stress_members_refuse_what_they_cannot_stress() -> None:
+    xplatform = si.get_asset(si.STRESS_HUMAN_XPLATFORM)
+    lung = si.get_asset(si.STRESS_HUMAN_LUNG)
+    table = si.get_asset(si.EFFICIENCY_MOUSE_PRIME)
+    options: dict[str, Any] = {
+        "species": "human",
+        "chemistry": "merscope",
+        "xplatform_table": xplatform,
+    }
+    clean = res.member_recipe(res.CLEAN_RECIPE, 0, CONFIG)
+    with pytest.raises(res.ResolvabilityError, match="only R1 and R3"):
+        res.gate_p_stress_recipes(clean, CONFIG, **options)
+    other = res.member_recipe(
+        res.DECISION_RECIPE, 0, AnnotationResolvabilityConfig(spill_fraction=0.3)
+    )
+    with pytest.raises(res.ResolvabilityError, match="does not reproduce"):
+        res.gate_p_stress_recipes(other, CONFIG, **options)
+    r3 = res.member_recipe(res.R3_RECIPE, 2, CONFIG, table=table)
+    with pytest.raises(res.ResolvabilityError, match="member table"):
+        res.gate_p_stress_recipes(r3, CONFIG, **options)
+    with pytest.raises(res.ResolvabilityError, match="cross-platform"):
+        res.member_recipe(res.GATE_P_STRESS_XPLATFORM, 0, CONFIG, table=lung)
+    with pytest.raises(res.ResolvabilityError, match="lung ratio table"):
+        res.member_recipe(res.LUNG_STRESS_RECIPE, 0, CONFIG, table=xplatform)
+    with pytest.raises(res.ResolvabilityError, match="needs its"):
+        res.member_recipe(res.GATE_P_STRESS_XPLATFORM, 0, CONFIG)
+    with pytest.raises(res.ResolvabilityError, match="member table"):
+        res.member_recipe(res.GATE_P_STRESS_R3_SPILL, 0, CONFIG, table=xplatform)
+    reported = [
+        item
+        for item in res.ensemble_members(CONFIG, species="human", chemistry="merscope")
+        if item.role != "emission"
+    ]
+    with pytest.raises(res.ResolvabilityError, match="at least one emission"):
+        res.gate_p_stress_members(reported, CONFIG, **options)
+    twice = [
+        res.EnsembleMember(
+            res.member_recipe(res.DECISION_RECIPE, 0, CONFIG), "emission"
+        )
+    ] * 2
+    with pytest.raises(res.ResolvabilityError, match="repeats"):
+        res.gate_p_stress_members(twice, CONFIG, **options)
+
+
+def test_np6_stress_parameters_follow_the_config() -> None:
+    config = AnnotationResolvabilityConfig(
+        gate_p_stress={
+            "spill_fraction": 0.4,
+            "gene_efficiency_sigma": 1.2,
+            "platform_factor_cap_log2": 1.5,
+        }
+    )
+    xplatform = si.get_asset(si.STRESS_HUMAN_XPLATFORM)
+    spill = res.member_recipe(res.GATE_P_STRESS_SPILL, 3, config)
+    lognormal = res.member_recipe(res.GATE_P_STRESS_LOGNORMAL, 3, config)
+    offsets = res.member_recipe(res.GATE_P_STRESS_XPLATFORM, 3, config, table=xplatform)
+    assert spill.spill_fraction == 0.4
+    assert lognormal.gene_efficiency_sigma == 1.2
+    assert offsets.factor_cap_log2 == 1.5
+    genes = [f"G{index:03d}" for index in range(101)]
+    capped = res.member_efficiency(offsets, genes)
+    base = res.gene_efficiency(len(genes), 0.8, 3)
+    offset = np.log2(capped) - np.log2(base)
+    assert float(offset.max() - offset.min()) <= 3.0 + 1e-9
+
+
+def test_np6_lognormal_stress_scales_the_members_normals() -> None:
+    """§3.7: LogNormal(0, 1.0) stresses the member's own draw (sigma 0.8)."""
+    genes = [f"G{index:03d}" for index in range(101)]
+    for seed in (0, 6, 12):
+        base = res.member_efficiency(
+            res.member_recipe(res.DECISION_RECIPE, seed, CONFIG), genes
+        )
+        stressed = res.member_efficiency(
+            res.member_recipe(res.GATE_P_STRESS_LOGNORMAL, seed, CONFIG), genes
+        )
+        np.testing.assert_allclose(np.log(stressed), 1.25 * np.log(base), atol=1e-12)
+
+
+def test_np6_cross_platform_stress_multiplies_the_members_draw() -> None:
+    xplatform = si.get_asset(si.STRESS_HUMAN_XPLATFORM)
+    factors = si.xplatform_factors(xplatform)
+    genes = sorted([*factors.index[:40], "ENSG99999999998", "ENSG99999999999"])
+    recipe = res.member_recipe(res.GATE_P_STRESS_XPLATFORM, 7, CONFIG, table=xplatform)
+    expected, measured = si.xplatform_stress_efficiency(
+        genes, res.gene_efficiency(len(genes), 0.8, 7), factors, seed=7, cap_log2=2.0
+    )
+    np.testing.assert_array_equal(res.member_efficiency(recipe, genes), expected)
+    assert int((~measured).sum()) == 2
+
+
+def test_version_6_thinning_reads_a_table_recipe(
+    test_cells: res.HeldOutCells, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A version-6 family's NP6 cross-platform stress uses its table's efficiency."""
+    xplatform = si.get_asset(si.STRESS_HUMAN_XPLATFORM)
+    recipe = res.member_recipe(res.GATE_P_STRESS_XPLATFORM, 0, CONFIG, table=xplatform)
+    efficiency = np.ones(len(test_cells.genes))
+    efficiency[:10] = 0.0
+    calls: list[str] = []
+
+    def table_efficiency(
+        given: res.SimulationRecipe, genes: Any, registry: Any = None
+    ) -> np.ndarray:
+        calls.append(given.member)
+        return efficiency
+
+    monkeypatch.setattr(res, "member_efficiency", table_efficiency)
+    query = res.thin_and_contaminate(test_cells, [100], recipe)
+    assert calls == ["R1_stress_xplatform@0"]
+    assert query.counts.shape[0] > 0
+    assert query.counts[:, :10].nnz == 0
+    with pytest.raises(res.ResolvabilityError, match="efficiency seed"):
+        res.thin_and_contaminate(test_cells, [100], recipe, efficiency_seed=1)
+    # A lognormal recipe keeps its own draw (never the table path).
+    res.thin_and_contaminate(
+        test_cells, [100], res.member_recipe(res.GATE_P_STRESS_SPILL, 0, CONFIG)
+    )
+    assert calls == ["R1_stress_xplatform@0"]

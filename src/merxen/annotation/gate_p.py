@@ -1,0 +1,8386 @@
+"""Gate-P scoring (M13, plan §14 new panel family).
+
+Pure functions on cells tables: NP3 precision and coverage, NP4 donor / draw
+and seed stability, NP5 resolvability consistency, NP6 stress sensitivity,
+NP7 error structure; then the assembly of a family's gate P: C_P, the
+per-(level, class) records, ``validated_max_level``, the family checks NP1,
+NP2, NP8 and NP9, the NP1-NP9 report and the validated-table rows of a
+passing family.
+
+Gate P validates a new panel family by simulation only (plan §8.8, §14). The
+thresholds and emission are derived once from the default donor (human) or
+draw (mouse) at seed 0 and then frozen; the held-out replicates are scored
+at those frozen thresholds on the pooled tested sets (``gate_p_tested_sets``:
+each set holds >= ``gate_p_min_confident_n`` confident calls, deep bins
+pooled with each test cell counted once at its deepest bin).
+
+Rulings and the criteria revision. The readings this module takes where §14
+is not explicit were put to the user in pre-registration §23.11-§23.17 and
+ruled on 2026-10-07 (§23.19: every recommendation adopted, with the
+loosenings A2 (a), A31, C3, A8 and A21 approved in writing). The set a dry
+run then failed, and the user approved the criteria revision of §23.21 the
+same day ("Approve all six"); every item is a LOOSENING and POST-HOC, its
+effect on set a computed before it was proposed:
+
+- **R1** NP3's two weightings are read on the test cells of the set's
+  scope (``np3_test_cell_weights``: each called cell of truth type t weighs
+  pi_t / N_t, trimmed at 10 x the median as before); NP6 uses the same
+  weightings, each simulation on its own scope. The per-call-set readings
+  (A1 (a), §23.9 item 2) are reported only.
+- **R2** ``validated_min_depth`` is the shallowest bin from which every
+  tested set, up to and including the ">= D_P" set, passes NP3 and NP4-NP7
+  (``gate_p_depth_walk``). A failure in the ">= D_P" group or of a
+  class-level part (NP4's seed criterion, NP5's extrapolated share, NP7's
+  excluded share) fails the class; a failure at a shallower set raises the
+  floor. NP3's own walk (``validated_min_depth``) is reported only.
+- **R3 (c)** NP5's t* part is a consequence check
+  (``np5_tstar_consequence``): each replicate's own t*, applied to the base
+  recipe's pooled held-out seed-0 calls in the set's scope, gives point
+  precision >= target_L - 0.02. Version 7 applies it to the ensemble's
+  pooled t* re-fitted per replicate (``np5_ensemble_set_thresholds``), each
+  call at its own bin's threshold (pre-registration §23.22). The t* spread
+  (``np5_tstar_spread``) is reported only.
+- **R5** the dry run reports, not fails, a class H18 expects whose record is
+  ``not_evaluable`` (``dry_run_verdict``; replaces CK1 (a)).
+- **R6** NP5's agreement compares a bin only where the base and the
+  replicate each hold >= 50 test cells (``np5_decision_agreement``).
+- **R7** version 7: NP5's agreement compares the ensemble's emission
+  re-derived per replicate (``np5_rederive_ensemble``) with the frozen
+  ensemble decisions; R6 and R2 apply to it. Each member's own
+  re-derivation is reported only (the C8 reading it replaces).
+
+Unchanged: the targets, target+, Wilson on the Kish n, the coverage 0.30,
+n_min, NP4's floor and range rules, NP6's stresses and drop test, and NP7.
+Every report lists the reading each revised criterion scores
+(``GATE_P_SCORED_READINGS``) and the rulings (``GATE_P_READINGS_RULED``).
+
+NP3, precision and coverage at the panel's depth (§14 NP3): per (level,
+class), at every tested set of the pooled held-out calls
+(``pooled_held_out_cells``) from ``validated_min_depth`` up to and including
+the ">= D_P" set, the point precision reaches target+_L (the margin of the
+set's shallowest bin), its Wilson bound on the Kish effective n reaches
+target_L and the coverage reaches ``gate_p_min_coverage`` (0.30), each under
+two weightings read on the test cells of the set's scope (R1): the
+reference's natural composition within each truth class
+(``natural_test_cells``) and equal shares of the truth types within each
+truth class (``class_balanced_test_cells``). The weights are trimmed at
+``weight_trim_factor`` (10) x their median, and a type with fewer than
+``weight_min_type_cells`` (20) test cells takes its class's weight (ruling
+A2 (a), §23.19, an approved loosening). The unweighted values, a family
+dataset's depth histogram (label-free) and the two per-call-set weightings
+(``natural`` and ``class_balanced``, ``np3_set_weights``: every truth type
+of the called class's tested set, a wrong call's type included, takes its
+full share, so a few stray wrong calls take the trim cap) are reported
+only. A family dataset's composition is not used: it needs the dataset's
+labels, and no real-label input reaches gate P other than NP5's registered
+profile (§23.9 item 6).
+
+NP4, stability across held-out donors (or draws) and seeds (§14 NP4): per
+(level, class), at every tested set,
+
+- each replicate with >= ``gate_p_replicate_min_confident_n`` (100)
+  confident calls there has point precision >= target_L (the floor); and
+- where every replicate has >= 100 calls, the range of the seed-averaged
+  donor (or draw) precisions is <= max(0.03, 3.5 x pooled SE), with
+  pooled SE = sqrt(p_bar (1 - p_bar) / n_bar) (the range rule).
+
+A set where some replicate has fewer than 100 calls is scored by the floor
+alone, and one where no replicate has 100 passes NP4 vacuously (``vacuous``,
+reported); this is §14's literal reading.
+
+NP4's seed criterion (§14: "Seed 0 vs 1 changes <= 2% of confident labels
+per validated level"; ``np4_seed_stability``): the seeds are MapMyCells
+mapping seeds, so seed 1 re-maps seed 0's simulated cells, and a change is
+a call change (``resolvability.seed_stability``; D6, pre-registration
+§23.9 item 3, confirmed on 2026-10-06). A level over 2% fails NP4 for every
+class of the level, its classes without a changed label included (a
+class-level part under R2). The readings taken where §14 is not explicit
+are listed in ``np4_seed_stability``'s docstring; they were put to the user
+in pre-registration §23.14 and ruled on 2026-10-07 (§23.19).
+
+A replicate is keyed by an opaque (group, seed label) pair:
+the group is a human donor or a mouse draw, so the functions are
+species-agnostic. The frozen thresholds were fitted on the default group's
+fit half, so that group is scored on its check half only
+(``held_out_replicates``; §14 "the default donor's check half").
+Version-7 families score NP4 in every emission member (``member=``) and
+combine the members with ``every_member_verdict``.
+
+The averaging conventions of the range rule (p_bar and n_bar as means of
+seed-averaged group values, unweighted precision) are D12 of the M13 plan,
+confirmed by the user on 2026-10-06 (pre-registration §23.9, §23.10).
+
+NP5, resolvability consistency (§14 NP5): per (level, class),
+
+- the §8.3 emission decisions re-derived in each replicate
+  (``np5_rederive``; version 7 the ensemble's, ``np5_rederive_ensemble``,
+  with the bundle's ``neuronal_classes`` for the monotone fill, R7) agree
+  with the base run (version 7: the frozen ensemble decisions) at every
+  depth bin where both hold >= 50 test cells (R6), except at most the bin
+  adjacent to the emission boundary (``np5_decision_agreement``); under R2
+  only flips at bins >= the floor count;
+- each replicate's t* at each tested set (``np5_set_thresholds``, fitted on
+  the replicate's rows of the set by the shared membership rule; version 7
+  the ensemble's re-fitted t*, ``np5_ensemble_set_thresholds``), applied to
+  the base's pooled calls of the set, gives point precision >= target_L -
+  0.02 (``np5_tstar_consequence``, R3 (c)); and
+- its cells at the family's expected depth are at most 50%
+  ``resolvability_extrapolated`` under the frozen decisions
+  (``np5_extrapolated_share``; a class-level part under R2). The depths are
+  an input per class. A family with a per-class profile (the frozen
+  ``sim_inputs`` profile asset of D8) passes each class's profile depths; a
+  family without one passes the label-free pooled median of its sections
+  for every class. The test is scored twice, on the class's median (the
+  expected depth of pre-registration §23.9 item 6 and §23.10, D8: "each
+  class's median") and on the class's profile shares (plan §8.3 v7.5: the
+  test "uses the class's profile shares"), and the class passes only when
+  both pass.
+
+``np5_class_table`` tabulates the three parts per (level, class) on every
+tested set (reported); the scored verdict is the depth walk's (R2).
+
+Readings taken where §14 is not explicit (strict where there is a choice),
+put to the user in pre-registration §23.12 and ruled on 2026-10-07 (§23.19),
+three of them revised by §23.21:
+
+- The median and the profile shares are both scored: the two readings are
+  not nested (the version-7 monotone fill can mark a bin extrapolated
+  between bins that are not; examples in ``np5_extrapolated_share``).
+- The t* part on few replicates: a replicate with fewer than
+  ``min_cells_per_bin`` (50) fit-half calls in a set has no fit and is left
+  out; a set where no replicate is scored passes (``evaluable`` false), and
+  ``np5_class_table`` counts such sets per class (``n_tstar_not_evaluable``).
+- The version-7 saturated cap counts as a threshold: a replicate at the cap
+  (0.99, v7.8) applies it in the consequence check, as ``decide`` does.
+- The compared bins: revised by R6 (both runs hold 50 test cells; the
+  either-side reading is reported in the ``*_union`` columns).
+- The boundary: the emission boundaries are the base run's status changes
+  inside the grid (its edges are none), and at most one compared bin may
+  flip, one that flanks a boundary.
+- A fit without a threshold: a replicate whose t* fit exists but never
+  reaches the target (and is not capped) fails the set (it would emit
+  nothing there).
+- Where t* comes from: re-fitted in each replicate on the replicate's calls
+  of each tested set (``np5_set_thresholds``); version 7 revised by R3 (c)
+  to the ensemble's t* re-fitted per replicate, read from the re-derived
+  ensemble decisions at every bin of the set and applied to each bin's
+  calls (pre-registration §23.22; a ">= D_P" set's deeper bins may take the
+  replicate's deep pool's t*).
+- A class without profile cells takes D8's overall median as one depth
+  (the registered words), so both its shares are 0 or 1.
+
+NP6, sensitivity to contamination and gene-efficiency perturbations (§14
+NP6; ``np6_set_stats``): each stress recipe of an emission member
+(``resolvability.gate_p_stress_members``: spill 0.35, LogNormal(0, 1.0) and
+the measured human cross-platform offsets for R1, capped at +-2 log2 and
+read from the in-house ``sim_inputs`` asset of M13 decision D7; spill 0.35
+only for R3; the lung ratio for human Prime families) is scored against
+that member at the frozen thresholds on the pooled held-out calls at seed
+0, at NP3's tested sets (built on the base's pooled held-out calls, as
+NP3 checks; a set left with fewer than 200 stressed calls pooled with the
+next deeper one): point precision >= target_L, a Wilson bound >=
+target_L - 0.02, and no drop in point precision significantly above 0.05
+(one-sided 95%, two-proportion z on each set's Kish n; D12,
+pre-registration §23.9 item 4), unweighted and under NP3's two test-cell
+weightings (R1); the clean upper bound, the coverage changes and the
+per-call-set weightings are reported. The X1 factor table is reported
+beside the offsets per panel gene (``np6_factor_report``; D7 (b),
+report-only). The readings taken where §14 is not explicit (the weightings,
+the order of the sets, a set still thin, the cells a stressed set holds,
+the offsets' direction) are listed in ``np6_set_stats``' docstring; they
+were put to the user in pre-registration §23.15 and ruled on 2026-10-07
+(§23.19), the weightings revised by §23.21 R1.
+
+NP7, error structure (§14 NP7), on the pooled held-out calls at seed 0 at
+the frozen thresholds, per emission member for version 7
+(``np7_error_structure``; unweighted, as §14 reweights NP3 only):
+
+- human: per level, the confident calls to sink or region-implausible nodes
+  are at most 1% of the level's confident calls over all classes and
+  emitted bins (CHECK K9.1). Such calls have no class (``parent`` null), so
+  they lie outside every tested set and are counted beside the
+  denominator; a node is read against the bundle's vocab snapshot with the
+  frontal-cortex plausibility column (CHECK K4), and a coarse level's call
+  takes the assigned supercluster of its simulated cell, whose bp also
+  counts (a WHB sink names no group at broad or NT, so its call there has
+  no bp of its own);
+- both species: at every tested set of a (level, class), no single wrong
+  node receives more than 5% of the truth class's confident calls (D12,
+  pre-registration §23.9 item 5), scored with and without the calls to
+  excluded nodes; the called-class view is reported.
+
+A failure of the 1% part fails NP7 for every class of the level (a
+class-level part under R2). The readings taken where §14 is not explicit
+(the confidence of a call that has no class, the 1% part's denominator and
+numerator, excluded calls in the single-wrong-node view, the wrong node at
+coarse levels, a level over 1% failing every class, an empty truth view
+failing, a node outside the vocab, unweighted shares) are listed in
+``np7_error_structure``'s docstring; they were put to the user in
+pre-registration §23.13 and ruled on 2026-10-07 (§23.19).
+
+Assembly (§14 per-class records and gate-P rule; ``assemble_gate_p``):
+
+- **C_P** per level is fixed on the truth parent class of the pooled
+  held-out test cells before any cell is mapped (``gate_p_class_sets``;
+  pre-registration §23.9 item 1): the classes with >= 700 test cells, which
+  must hold >= 90% of the level's test cells; the excluded classes are
+  listed with their reference shares.
+- **Records.** Each member's NP3-NP7 verdicts and ``validated_min_depth``
+  come from one depth walk (``gate_p_depth_walk``, R2): a criterion fails
+  the (level, class) when it fails in the ">= D_P" group or in its
+  class-level part, and a failure at a shallower set only raises the floor
+  (before §23.21, NP4-NP7 failed the class at any tested set, D29 and CHECK
+  K10). Each criterion is combined over the emission members
+  (``every_member_verdict``; one member for version 6), and a (level,
+  class) is ``validated`` when all five pass in every member, with the
+  deepest member floor, else ``failed:NP<k>`` (the lowest failing
+  criterion) or ``not_evaluable`` (``gate_p_class_records``). A failing
+  class does not block the others.
+- **Headline.** ``validated_max_level`` is the last level of the leading
+  run of levels, coarse to fine, where every class of C_P is validated
+  (the rank rule of ``diagnostics._check_table``); the family passes when
+  it reaches broad (human) or class (mouse) and NP1, NP2 and NP9 pass, NP8
+  passing or not applying (``FamilyCheck.counts_as_pass``). Passing makes
+  the family eligible for a gate-P PR the user approves
+  (``validated_table_rows``, ``diagnostics.write_simulation_family``); it
+  promotes nothing by itself, and a family without a self-map is refused
+  (D13 (a)).
+
+The readings the assembly takes where §14 is not explicit (C_P's
+denominator, the NT population, the 90% rule as a level condition, the
+version-7 depths, the status precedence, NP1's vendor-ID test, NP2's and
+NP1's pending acceptance, NP9's prefilter scope) are listed in the
+docstrings of ``gate_p_class_sets``, ``gate_p_class_records``,
+``gate_p_validated_max_level``, ``np1_gene_ids``, ``np2_panel_coverage``
+and ``np9_resources``; they were put to the user in pre-registration §23.16
+and ruled on 2026-10-07 (§23.19).
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import re
+from collections.abc import Collection, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Final, cast
+
+import numpy as np
+import pandas as pd
+
+from merxen.annotation import diagnostics as diag
+from merxen.annotation import resolvability as res
+from merxen.annotation import sim_inputs as si
+from merxen.annotation.config import (
+    AnnotationPanelConfig,
+    AnnotationResolvabilityConfig,
+    AnnotationThresholds,
+)
+from merxen.annotation.thresholds import level_target
+from merxen.annotation.vocab import (
+    FINAL_LEVELS,
+    REGION_COLUMN_PREFIX,
+    UNASSIGNED_LABEL,
+    Species,
+    human_floor_class,
+)
+from merxen.control_features import matches_control_name_pattern
+
+if TYPE_CHECKING:
+    from merxen.annotation.gate_p_run import GatePOptions
+    from merxen.annotation.simulate import GatePRequest
+
+# §14 NP4: "the range ... is <= max(0.03, 3.5 x pooled SE)".
+GATE_P_SPREAD_FLOOR: Final = 0.03
+# §14 NP4: "Seed 0 vs 1 changes <= 2% of confident labels per validated level".
+NP4_MAX_SEED_CHANGE: Final = 0.02
+# A replicate: (group, seed label). The group is a held-out donor (human) or
+# a test draw (mouse); the seed label names the replicate's seed. Both are
+# opaque: each replicate table must hold exactly one replicate.
+ReplicateKey = tuple[str, int]
+
+_TOLERANCE: Final = 1e-9
+STATS_COLUMNS: Final[tuple[str, ...]] = (
+    "level",
+    "class",
+    "set",
+    "pooled",
+    "set_min_depth",
+    "group",
+    "seed",
+    "n_confident",
+    "n_correct",
+    "precision",
+)
+NP4_COLUMNS: Final[tuple[str, ...]] = (
+    "level",
+    "class",
+    "set",
+    "pooled",
+    "target",
+    "n_replicates",
+    "n_groups",
+    "n_evaluated",
+    "vacuous",
+    "floor_ok",
+    "floor_failures",
+    "range_evaluable",
+    "p_bar",
+    "n_bar",
+    "donor_range",
+    "pooled_se",
+    "limit",
+    "range_ok",
+    "passed",
+)
+NP4_SEED_COLUMNS: Final[tuple[str, ...]] = (
+    "level",
+    "group",
+    "base_seed",
+    "seed",
+    "n_confident",
+    "n_changed",
+    "changed_share",
+    "n_switched",
+    "n_crossed",
+    "pooled_changed_share",
+    "max_change",
+    "passed",
+)
+
+
+@dataclass(frozen=True)
+class Np4Settings:
+    """The NP4 constants (§14 NP4; plan §3.7 ``gate_p_*``).
+
+    Attributes:
+        replicate_min_confident_n: Confident calls a replicate needs in a
+            tested set for the floor to apply to it; the range rule applies
+            only when every replicate has them
+            (``gate_p_replicate_min_confident_n``, 100).
+        spread_se_multiplier: The range limit in pooled standard errors
+            (``gate_p_spread_se_multiplier``, 3.5).
+        spread_floor: The smallest range limit (0.03).
+        max_seed_change: The largest share of a level's confident labels
+            that seed 1 may change (0.02; ``np4_seed_stability``).
+    """
+
+    replicate_min_confident_n: int
+    spread_se_multiplier: float
+    spread_floor: float = GATE_P_SPREAD_FLOOR
+    max_seed_change: float = NP4_MAX_SEED_CHANGE
+
+    def __post_init__(self) -> None:
+        """Validate the constants.
+
+        Raises:
+            ValueError: If a count or range constant is not > 0, or
+                ``max_seed_change`` is outside [0, 1].
+        """
+        for name in (
+            "replicate_min_confident_n",
+            "spread_se_multiplier",
+            "spread_floor",
+        ):
+            value = getattr(self, name)
+            if not value > 0:
+                raise ValueError(f"Np4Settings.{name} must be > 0, got {value!r}")
+        if not 0.0 <= self.max_seed_change <= 1.0:
+            raise ValueError(
+                "Np4Settings.max_seed_change must lie in [0, 1], got "
+                f"{self.max_seed_change!r}"
+            )
+
+    @classmethod
+    def from_config(cls, config: AnnotationResolvabilityConfig) -> Np4Settings:
+        """Read the NP4 constants from the resolvability config (§14 NP4).
+
+        Args:
+            config: The resolvability config.
+
+        Returns:
+            The settings (the floor and the seed limit are the §14 constants
+            0.03 and 0.02; ``seed_stability_max_change`` is the §8.3
+            fine-level opt-in's limit, not gate P's).
+        """
+        return cls(
+            replicate_min_confident_n=config.gate_p_replicate_min_confident_n,
+            spread_se_multiplier=config.gate_p_spread_se_multiplier,
+        )
+
+
+def level_targets(
+    thresholds: AnnotationThresholds, levels: Iterable[str]
+) -> dict[str, float]:
+    """Return target_L per level, the precision NP4's floor requires (§14).
+
+    Args:
+        thresholds: The threshold settings.
+        levels: Levels to look up.
+
+    Returns:
+        ``{level: target}``: 0.90 for broad, lineage, NT and class, 0.85 for
+        supercluster and subclass with the defaults.
+
+    Raises:
+        ValueError: For a level without a precision target.
+    """
+    return {level: level_target(level, thresholds) for level in levels}
+
+
+def tested_set_label(item: res.GatePTestedSet) -> str:
+    """Return a tested set's label: ``">=<D_P>"`` when pooled, else its depth.
+
+    Args:
+        item: A tested set (§14 evaluation rules).
+
+    Returns:
+        The label, e.g. ``">=30"`` or ``"10"``.
+    """
+    if item.pooled:
+        return f">={min(item.depths)}"
+    return str(item.depths[0])
+
+
+def tested_set_mask(
+    frame: pd.DataFrame, confident: np.ndarray, item: res.GatePTestedSet
+) -> np.ndarray:
+    """Return which rows of one replicate belong to a tested set (§14 NP3-NP7).
+
+    One membership rule for every gate-P criterion, the one
+    ``gate_p_tested_sets`` uses to build the sets:
+
+    - a single bin holds the confident rows of the set's level, class and
+      depth;
+    - a pooled ">= D_P" set holds each test cell once, at its deepest row of
+      the level (``deepest_rows`` over every row of the level, before any
+      class or confidence filter), when that row is a confident call of the
+      class at a depth >= D_P. A cell called into another class, or
+      unconfident, at its deepest bin is not rescued by a shallower row.
+
+    Args:
+        frame: One replicate's rows with a fresh ``RangeIndex``
+            (``reset_index(drop=True)``): the mask is positional.
+        confident: ``frozen_confident_mask`` of ``frame``.
+        item: The tested set.
+
+    Returns:
+        A bool array aligned with the rows of ``frame``.
+
+    Raises:
+        ValueError: If ``frame`` has another index, or ``confident`` another
+            length.
+    """
+    mask = np.zeros(len(frame), dtype=bool)
+    mask[_ReplicateIndex(frame, confident).positions(item)] = True
+    return mask
+
+
+class _ReplicateIndex:
+    """One replicate's columns, coded once for all of its tested sets.
+
+    ``tested_set_mask``'s membership rule on integer codes: each level's rows
+    and deepest rows (``deepest_rows``) are found once per replicate, not
+    once per tested set (a few hundred sets per replicate in gate P).
+    """
+
+    def __init__(self, frame: pd.DataFrame, confident: np.ndarray) -> None:
+        """Code the columns of one replicate's rows.
+
+        Args:
+            frame: The replicate's rows with a fresh ``RangeIndex``.
+            confident: ``frozen_confident_mask`` of ``frame``.
+
+        Raises:
+            ValueError: If ``frame`` has another index, or ``confident``
+                another length.
+        """
+        if not frame.index.equals(pd.RangeIndex(len(frame))):
+            raise ValueError(
+                "tested_set_mask is positional: pass the replicate's rows with a "
+                "fresh RangeIndex (reset_index(drop=True))"
+            )
+        is_confident = np.asarray(confident, dtype=bool)
+        if is_confident.shape != (len(frame),):
+            raise ValueError(
+                f"confident has {is_confident.shape[0]} entries for {len(frame)} rows"
+            )
+        self._frame = frame
+        self._confident = is_confident
+        level_codes, level_values = pd.factorize(frame["level"].astype(str).to_numpy())
+        self._level_codes = np.asarray(level_codes, dtype=np.int64)
+        self._level_code = {str(value): code for code, value in enumerate(level_values)}
+        # A null parent (a sink or no call) gets code -1 and matches no class.
+        parent_codes, parent_values = pd.factorize(
+            frame["parent"].astype(object).to_numpy()
+        )
+        self._parent_codes = np.asarray(parent_codes, dtype=np.int64)
+        self._parent_code = {value: code for code, value in enumerate(parent_values)}
+        self._depth = frame["depth"].to_numpy(np.int64)
+        self._levels: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        self._cell_codes: np.ndarray | None = None
+
+    def _level_rows(self, level: str) -> tuple[np.ndarray, np.ndarray]:
+        """The positions of a level's rows and of each test cell's deepest row."""
+        if level not in self._levels:
+            code = self._level_code.get(level)
+            rows = (
+                np.flatnonzero(self._level_codes == code)
+                if code is not None
+                else np.empty(0, dtype=np.int64)
+            )
+            deepest = res.deepest_rows(self._frame.iloc[rows])
+            self._levels[level] = (rows, deepest.index.to_numpy(np.int64))
+        return self._levels[level]
+
+    def scope_positions(self, item: res.GatePTestedSet) -> np.ndarray:
+        """Return the positions of the test cells a tested set is drawn from.
+
+        A single bin's scope is every row of the level at its depth; a pooled
+        ">= D_P" set's is each test cell's deepest row of the level when it
+        lies at a depth >= D_P. Every call is kept (any class, a sink, no
+        call, unconfident).
+
+        Args:
+            item: The tested set.
+
+        Returns:
+            Row positions, one per test cell.
+        """
+        rows, deepest = self._level_rows(item.level)
+        if item.pooled:
+            keep = self._depth[deepest] >= min(item.depths)
+            return np.asarray(deepest[keep], dtype=np.int64)
+        return np.asarray(rows[self._depth[rows] == item.depths[0]], dtype=np.int64)
+
+    def union_scope_positions(
+        self, items: Sequence[res.GatePTestedSet], *, deepest: bool = False
+    ) -> np.ndarray:
+        """Return the union of tested sets' scopes, each test cell once.
+
+        NP6 pools a tested set left with too few stressed calls with the next
+        deeper one (§14 NP6); ``items`` are in pooling order, the thin set
+        first. The pooled set's scope is the union of their scopes with each
+        test cell kept once (pre-registration §23.15 item 2):
+
+        - by default at its row in the first of ``items`` whose scope holds
+          it: the thin set keeps its own rows and a deeper set adds only the
+          test cells it lacks. The simulations place each test cell at every
+          grid depth it reaches, so a deeper set's cells are nested in a
+          shallower set's and the pooled set is in effect the thin set;
+        - with ``deepest``, at its deepest row in the pooled scopes (the
+          rule of a ">= D_P" set, §14 "each test cell counted once at its
+          deepest bin", applied across the pooled sets): a thin set's nested
+          cells are then scored on the deeper set's rows.
+
+        One set's scope is ``scope_positions``.
+
+        Args:
+            items: Tested sets of one level, in pooling order.
+            deepest: Keep each test cell at its deepest row instead.
+
+        Returns:
+            Row positions, one per test cell.
+
+        Raises:
+            ValueError: For no set, or sets of more than one level.
+        """
+        if not items:
+            raise ValueError("union_scope_positions needs at least one tested set")
+        if len({item.level for item in items}) > 1:
+            raise ValueError("union_scope_positions: the sets are of several levels")
+        if len(items) == 1:
+            return self.scope_positions(items[0])
+        scopes = [self.scope_positions(item) for item in items]
+        positions = np.concatenate(scopes)
+        if self._cell_codes is None:
+            codes, _ = pd.factorize(self._frame["cell_id"].astype(str).to_numpy())
+            self._cell_codes = np.asarray(codes, dtype=np.int64)
+        cells = self._cell_codes[positions]
+        if deepest:
+            rank = -self._depth[positions]
+        else:
+            rank = np.repeat(
+                np.arange(len(scopes), dtype=np.int64),
+                [len(scope) for scope in scopes],
+            )
+        order = np.lexsort((rank, cells))
+        ranked = cells[order]
+        first = np.ones(len(order), dtype=bool)
+        first[1:] = ranked[1:] != ranked[:-1]
+        return np.sort(positions[order][first])
+
+    def called_in(self, scope: np.ndarray, cls: str) -> np.ndarray:
+        """Return the positions of a scope's calls of a class (any confidence).
+
+        Args:
+            scope: Row positions of one scope.
+            cls: The class.
+
+        Returns:
+            Row positions; empty when the replicate has no call of the class.
+        """
+        code = self._parent_code.get(cls)
+        if code is None:
+            return np.empty(0, dtype=np.int64)
+        return np.asarray(scope[self._parent_codes[scope] == code], dtype=np.int64)
+
+    def called_positions(self, item: res.GatePTestedSet) -> np.ndarray:
+        """Return the positions of the scope's calls of the set's class.
+
+        These are the calls the coverage of the set is measured on (the
+        judged set of ``decide``), confident or not.
+
+        Args:
+            item: The tested set.
+
+        Returns:
+            Row positions; empty when the replicate has no call of the class.
+        """
+        if item.cls not in self._parent_code:
+            return np.empty(0, dtype=np.int64)
+        return self.called_in(self.scope_positions(item), item.cls)
+
+    def positions(self, item: res.GatePTestedSet) -> np.ndarray:
+        """Return the positions of the rows in a tested set (one per test cell).
+
+        Args:
+            item: The tested set.
+
+        Returns:
+            Row positions: the confident ones of ``called_positions``.
+        """
+        called = self.called_positions(item)
+        return np.asarray(called[self._confident[called]], dtype=np.int64)
+
+
+def held_out_replicates(
+    replicates: Mapping[ReplicateKey, pd.DataFrame], *, default_group: str | None
+) -> dict[ReplicateKey, pd.DataFrame]:
+    """Return the replicates as gate P scores them (§14 pooled held-out calls).
+
+    The frozen thresholds are fitted on the fit half (``half == 0``) of the
+    default group's base run, so that group is scored on its check half
+    only, at every seed (§14: "the default donor's check half"; human the
+    default donor, mouse the draw the thresholds came from). Pre-registration
+    §23.2 D2 (d) makes the replicates disjoint, so a fit-half test cell of
+    the default group found in another group's table is a leak and raises.
+    Use the same tables to build the pooled seed-0 tested sets
+    (``gate_p_tested_sets``) and to score the replicates
+    (``replicate_set_stats``, which applies this itself).
+
+    Args:
+        replicates: Per (group, seed label), that replicate's cells table;
+            the default group's tables in full (both halves), so that its
+            fit-half cells can be checked for in the other tables.
+        default_group: The group whose fit half the frozen thresholds were
+            fitted on; ``None`` when no replicate holds those cells.
+
+    Returns:
+        The tables in the order of ``replicates``, the default group's
+        restricted to its check half (``half == 1``); the others unchanged.
+
+    Raises:
+        ValueError: If ``default_group`` is not a group of ``replicates``, a
+            table of it has no ``half`` column or a value other than 0 and
+            1, or another group's table holds one of its fit-half cells.
+    """
+    if default_group is None:
+        return dict(replicates)
+    groups = sorted({str(group) for group, _ in replicates})
+    if default_group not in groups:
+        raise ValueError(
+            f"default_group {default_group!r} is not a group of the replicates {groups}"
+        )
+    result: dict[ReplicateKey, pd.DataFrame] = {}
+    fit_cells: set[str] = set()
+    for key, table in replicates.items():
+        if str(key[0]) != default_group:
+            continue
+        if "half" not in table.columns:
+            raise ValueError(
+                f"replicate {key[0]}/{key[1]}: the default group's table needs "
+                "the split-half column 'half' (0 = fit, 1 = check)"
+            )
+        half = table["half"].to_numpy()
+        if not bool(np.isin(half, (0, 1)).all()):
+            raise ValueError(
+                f"replicate {key[0]}/{key[1]}: 'half' holds values other than "
+                "0 (fit) and 1 (check)"
+            )
+        fit = half == 0
+        fit_cells.update(table["cell_id"].astype(str).to_numpy()[fit])
+        result[key] = table[~fit]
+    for key, table in replicates.items():
+        if str(key[0]) == default_group:
+            continue
+        leaked = table["cell_id"].astype(str).isin(fit_cells).to_numpy(bool)
+        if bool(leaked.any()):
+            raise ValueError(
+                f"replicate {key[0]}/{key[1]} holds {int(leaked.sum())} rows of "
+                f"fit-half test cells of the default group {default_group!r}: "
+                "the frozen thresholds were fitted on them"
+            )
+        result[key] = table
+    return {key: result[key] for key in replicates}
+
+
+def pooled_held_out_cells(
+    replicates: Mapping[ReplicateKey, pd.DataFrame],
+    *,
+    default_group: str | None,
+    seed: int = 0,
+) -> pd.DataFrame:
+    """Return the pooled held-out calls of one seed (§14 "Pooled held-out calls").
+
+    The tested sets are fixed, and NP3, NP6 and NP7 scored, at the frozen
+    thresholds on every held-out call at seed 0: human, the default donor's
+    check half plus both other donors (each mapped against the bundle built
+    without it); mouse, both draws, the draw the thresholds came from on its
+    check half (pre-registration §23.9 item 3). The tables are pooled after
+    ``held_out_replicates``, so the default group's fit half never enters.
+
+    Args:
+        replicates: Per (group, seed label), that replicate's cells table
+            (the default group's in full; ``held_out_replicates``).
+        default_group: The group whose fit half the frozen thresholds were
+            fitted on (``None`` when no replicate holds those cells).
+        seed: The seed label to pool.
+
+    Returns:
+        The rows of every replicate with seed label ``seed``, in key order,
+        with a fresh ``RangeIndex``.
+
+    Raises:
+        ValueError: If no replicate has seed label ``seed``, or for the
+            default group's inputs (``held_out_replicates``).
+    """
+    scored = held_out_replicates(replicates, default_group=default_group)
+    tables = [scored[key] for key in sorted(scored) if key[1] == seed]
+    if not tables:
+        raise ValueError(f"pooled_held_out_cells: no replicate has seed label {seed!r}")
+    return pd.concat(tables, ignore_index=True)
+
+
+def _check_tested(
+    tested: Mapping[tuple[str, str], Sequence[res.GatePTestedSet] | None],
+) -> None:
+    """Check that each key's tested sets are ``None`` or non-empty, of its key.
+
+    Raises:
+        ValueError: For an empty list (``gate_p_tested_sets`` gives ``None``
+            for a key without a tested set, so ``[]`` would pass untested),
+            or a tested set whose level or class differs from its key.
+    """
+    for key, items in tested.items():
+        if items is None:
+            continue
+        if len(items) == 0:
+            raise ValueError(
+                f"{key}: an empty list of tested sets; a (level, class) that is "
+                "not evaluable is None"
+            )
+        for item in items:
+            if (item.level, item.cls) != tuple(key):
+                raise ValueError(
+                    f"the tested set {item.level}/{item.cls} "
+                    f"{tested_set_label(item)} belongs to another key than {key}"
+                )
+
+
+def replicate_set_stats(
+    replicates: Mapping[ReplicateKey, pd.DataFrame],
+    decisions: pd.DataFrame,
+    tested: Mapping[tuple[str, str], Sequence[res.GatePTestedSet] | None],
+    *,
+    default_group: str | None,
+    regime: res.Regime = "provisional",
+    recipe: str | None = res.DECISION_RECIPE,
+    member: str | None = None,
+) -> pd.DataFrame:
+    """Count each replicate's confident calls in every tested set (§14 NP4).
+
+    The replicates are scored at the frozen thresholds of ``decisions`` on
+    the tested sets fixed from the pooled seed-0 calls (``tested``, from
+    ``gate_p_tested_sets`` on ``held_out_replicates``). The default group is
+    scored on its check half only (``held_out_replicates``). Every (tested
+    set, replicate) pair gets a row, a replicate without calls in the set
+    included (``n_confident`` 0), so the range rule can see that not every
+    replicate has enough calls.
+
+    Args:
+        replicates: Per (group, seed label), that replicate's cells table.
+            Each table must hold exactly one replicate.
+        decisions: The frozen decisions of the base run (version 7: the
+            ensemble's).
+        tested: The tested sets per (level, class); ``None`` marks a
+            (level, class) that is not evaluable and has no rows.
+        default_group: The group whose fit half the frozen thresholds were
+            fitted on (required, so that no caller leaks it by omission;
+            ``None`` when no replicate holds those cells).
+        regime: The regime whose thresholds are frozen.
+        recipe: The recipe of the scored rows (``None``: every recipe, so
+            the table must hold one).
+        member: The version-7 emission member of the scored rows.
+
+    Returns:
+        One row per (tested set, replicate), sorted by level, class, set,
+        group and seed, with columns ``STATS_COLUMNS``; ``precision`` is
+        ``nan`` without calls.
+
+    Raises:
+        ValueError: If ``replicates`` is empty, a replicate has no rows after
+            the filters, a key's tested sets are an empty list or a tested
+            set's level or class differs from its key, or for the default
+            group's inputs (``held_out_replicates``).
+        ResolvabilityError: If a table holds more than one replicate
+            (``replicate_rows``).
+    """
+    if not replicates:
+        raise ValueError("replicate_set_stats: no replicates")
+    _check_tested(tested)
+    scored = held_out_replicates(replicates, default_group=default_group)
+    lookup = res.emission_lookup(decisions, regime)
+    ordered = sorted(tested.items(), key=lambda pair: pair[0])
+    records: list[dict[str, object]] = []
+    for group, seed in sorted(scored):
+        frame = res.replicate_rows(
+            scored[(group, seed)], recipe=recipe, seed=None, member=member
+        ).reset_index(drop=True)
+        if frame.empty:
+            raise ValueError(
+                f"replicate {group}/{seed} has no rows after the filters "
+                f"(recipe={recipe!r}, member={member!r}, "
+                f"default_group={default_group!r}: its check half only)"
+            )
+        index = _ReplicateIndex(frame, res.frozen_confident_mask(frame, lookup))
+        correct = frame["correct"].to_numpy(bool)
+        for (level, cls), items in ordered:
+            for item in items or ():
+                positions = index.positions(item)
+                n_confident = int(len(positions))
+                n_correct = int(correct[positions].sum())
+                records.append(
+                    {
+                        "level": level,
+                        "class": cls,
+                        "set": tested_set_label(item),
+                        "pooled": bool(item.pooled),
+                        "set_min_depth": int(min(item.depths)),
+                        "group": str(group),
+                        "seed": seed,
+                        "n_confident": n_confident,
+                        "n_correct": n_correct,
+                        "precision": n_correct / n_confident
+                        if n_confident
+                        else math.nan,
+                    }
+                )
+    stats = pd.DataFrame.from_records(records, columns=list(STATS_COLUMNS))
+    return stats.sort_values(
+        ["level", "class", "set", "group", "seed"], kind="mergesort"
+    ).reset_index(drop=True)
+
+
+def _check_replicate_grid(stats: pd.DataFrame) -> tuple[list[str], list[object]]:
+    """The groups and seeds of NP4's stats, which must form a full grid.
+
+    Every tested set must hold one row per (group, seed) of the product of
+    the stats' groups and seeds, with at least two groups: a missing
+    replicate would otherwise shrink the range silently.
+    """
+    groups = sorted({str(group) for group in stats["group"]})
+    seeds = sorted(set(stats["seed"]))
+    if len(groups) < 2:
+        raise ValueError(f"NP4 needs at least 2 groups (donors or draws), got {groups}")
+    expected = sorted((group, seed) for group in groups for seed in seeds)
+    for (level, cls, label), rows in stats.groupby(
+        ["level", "class", "set"], sort=True
+    ):
+        pairs = sorted(zip(rows["group"].astype(str), rows["seed"], strict=True))
+        if pairs != expected:
+            raise ValueError(
+                f"NP4 {level}/{cls} {label}: the replicates are not the full "
+                f"grid of groups {groups} x seeds {seeds}"
+            )
+    return groups, seeds
+
+
+def _np4_range(
+    rows: pd.DataFrame, settings: Np4Settings
+) -> tuple[float, float, float, float, float, bool]:
+    """NP4's range rule on one tested set (D12).
+
+    M13 plan D12, confirmed on 2026-10-06 (pre-registration §23.9 item 3,
+    §23.10): per group, p_g and n_g are the arithmetic means over its seeds
+    of the per-seed (unweighted) precision and confident n; p_bar and n_bar
+    are the means of the group values; the limit is
+    max(floor, k x sqrt(p_bar (1 - p_bar) / n_bar)). This is the registered
+    E2 convention (``member_spread``; pre-registration §22.3).
+
+    Returns:
+        ``(p_bar, n_bar, donor_range, pooled_se, limit, range_ok)``.
+    """
+    per_group = rows.groupby(rows["group"].astype(str), sort=True).agg(
+        p_g=("precision", "mean"), n_g=("n_confident", "mean")
+    )
+    p_bar = float(per_group["p_g"].mean())
+    n_bar = float(per_group["n_g"].mean())
+    donor_range = float(per_group["p_g"].max() - per_group["p_g"].min())
+    pooled_se = res.pooled_standard_error(p_bar, n_bar)
+    limit = max(settings.spread_floor, settings.spread_se_multiplier * pooled_se)
+    return (
+        p_bar,
+        n_bar,
+        donor_range,
+        pooled_se,
+        limit,
+        donor_range <= limit + _TOLERANCE,
+    )
+
+
+def np4_set_verdicts(
+    stats: pd.DataFrame, targets: Mapping[str, float], settings: Np4Settings
+) -> pd.DataFrame:
+    """Score NP4's floor and range rule at every tested set (§14 NP4).
+
+    Per (level, class, set): the floor fails for each replicate with at
+    least ``replicate_min_confident_n`` confident calls whose point
+    precision is below target_L; the range rule applies only when every
+    replicate has that many calls (otherwise it passes), and fails when the
+    range of the seed-averaged group precisions exceeds
+    max(``spread_floor``, ``spread_se_multiplier`` x pooled SE). A set where
+    no replicate reaches the minimum is ``vacuous`` and passes (§14's literal
+    reading; reported, so that a pass on nothing is visible).
+
+    Args:
+        stats: ``replicate_set_stats`` output.
+        targets: target_L per level (``level_targets``).
+        settings: The NP4 constants.
+
+    Returns:
+        One row per (level, class, set), columns ``NP4_COLUMNS``;
+        ``floor_failures`` lists the failing replicates as ``group/seed``
+        joined by ``;``. The range statistics are ``nan`` where the range
+        rule does not apply.
+
+    Raises:
+        ValueError: If a level has no target, or the replicates are not the
+            full grid of at least 2 groups x the same seeds.
+    """
+    if stats.empty:
+        return pd.DataFrame(columns=list(NP4_COLUMNS))
+    missing = sorted({str(level) for level in stats["level"]} - set(targets))
+    if missing:
+        raise ValueError(f"NP4: no precision target for levels {missing}")
+    groups, _ = _check_replicate_grid(stats)
+    minimum = settings.replicate_min_confident_n
+    records: list[dict[str, object]] = []
+    for (level, cls, label), rows in stats.groupby(
+        ["level", "class", "set"], sort=True
+    ):
+        target = float(targets[str(level)])
+        n_confident = rows["n_confident"].to_numpy(np.int64)
+        precision = rows["precision"].to_numpy(np.float64)
+        evaluated = n_confident >= minimum
+        below = evaluated & (precision < target - _TOLERANCE)
+        failures = ";".join(
+            f"{group}/{seed}"
+            for group, seed in zip(
+                rows["group"][below].astype(str), rows["seed"][below], strict=True
+            )
+        )
+        n_evaluated = int(evaluated.sum())
+        range_evaluable = n_evaluated == len(rows)
+        if range_evaluable:
+            p_bar, n_bar, donor_range, pooled_se, limit, range_ok = _np4_range(
+                rows, settings
+            )
+        else:
+            p_bar = n_bar = donor_range = pooled_se = limit = math.nan
+            range_ok = True
+        floor_ok = not bool(below.any())
+        records.append(
+            {
+                "level": level,
+                "class": cls,
+                "set": label,
+                "pooled": bool(rows["pooled"].iloc[0]),
+                "target": target,
+                "n_replicates": len(rows),
+                "n_groups": len(groups),
+                "n_evaluated": n_evaluated,
+                "vacuous": n_evaluated == 0,
+                "floor_ok": floor_ok,
+                "floor_failures": failures,
+                "range_evaluable": range_evaluable,
+                "p_bar": p_bar,
+                "n_bar": n_bar,
+                "donor_range": donor_range,
+                "pooled_se": pooled_se,
+                "limit": limit,
+                "range_ok": range_ok,
+                "passed": floor_ok and range_ok,
+            }
+        )
+    return pd.DataFrame.from_records(records, columns=list(NP4_COLUMNS))
+
+
+def _np4_seed_grid(
+    replicates: Mapping[ReplicateKey, pd.DataFrame], base_seed: int
+) -> tuple[list[str], list[int]]:
+    """The groups and the seeds compared with the base seed (§23.9 item 3).
+
+    Raises:
+        ValueError: Unless the replicates are the full grid of at least 2
+            groups x the same seeds, the base seed among them and another.
+    """
+    seeds_of: dict[str, set[int]] = {}
+    for group, seed in replicates:
+        seeds_of.setdefault(str(group), set()).add(seed)
+    groups = sorted(seeds_of)
+    if len(groups) < 2:
+        raise ValueError(f"NP4 needs at least 2 groups (donors or draws), got {groups}")
+    seeds = sorted({seed for values in seeds_of.values() for seed in values})
+    incomplete = [group for group in groups if seeds_of[group] != set(seeds)]
+    if incomplete:
+        raise ValueError(
+            f"NP4 seed criterion: the replicates are not the full grid of groups "
+            f"{groups} x seeds {seeds} (incomplete: {incomplete})"
+        )
+    if base_seed not in seeds:
+        raise ValueError(
+            f"NP4 seed criterion: no replicate has the base seed label "
+            f"{base_seed!r} (seeds {seeds})"
+        )
+    others = [seed for seed in seeds if seed != base_seed]
+    if not others:
+        raise ValueError(
+            f"NP4 seed criterion needs a second seed to compare with seed "
+            f"{base_seed!r} (§14: seeds 0 / 1)"
+        )
+    return groups, others
+
+
+def _seed_frame(
+    table: pd.DataFrame, name: str, *, recipe: str | None, member: str | None
+) -> pd.DataFrame:
+    """One replicate's rows after the filters, with a fresh ``RangeIndex``.
+
+    Raises:
+        ValueError: If no row is left after the filters or a column is
+            missing.
+        ResolvabilityError: If the rows mix replicates (``replicate_rows``).
+    """
+    frame = res.replicate_rows(
+        table, recipe=recipe, seed=None, member=member
+    ).reset_index(drop=True)
+    if frame.empty:
+        raise ValueError(
+            f"{name} has no rows after the filters (recipe={recipe!r}, "
+            f"member={member!r})"
+        )
+    _require_columns(frame, ("call", "total_counts", "seed"), name)
+    return frame
+
+
+@dataclass(frozen=True)
+class _SeedChanges:
+    """Per row of the base replicate: its level and how seed 1 changed it."""
+
+    levels: np.ndarray
+    confident: np.ndarray
+    changed: np.ndarray
+    switched: np.ndarray
+    crossed: np.ndarray
+
+
+def _distinct_values(frame: pd.DataFrame, column: str) -> list[str] | None:
+    """The sorted distinct values of a column (``None`` without the column)."""
+    if column not in frame.columns:
+        return None
+    return sorted({str(value) for value in frame[column]})
+
+
+def _seed_changes(
+    base: pd.DataFrame,
+    other: pd.DataFrame,
+    lookup: Mapping[tuple[str, str, int], tuple[str, float | None, bool]],
+    names: tuple[str, str],
+) -> _SeedChanges:
+    """Compare a replicate's calls at the base seed and another mapping seed.
+
+    Raises:
+        ValueError: Unless both tables are one mapping seed each, two
+            different ones, of the same recipe, member, simulated cells and
+            simulated counts.
+    """
+    base_name, other_name = names
+    base_seed = _one_seed(base, base_name)
+    other_seed = _one_seed(other, other_name)
+    if base_seed == other_seed:
+        raise ValueError(
+            f"{base_name} and {other_name} both hold mapping seed {base_seed}: the "
+            "seed criterion compares two mapping seeds of the same simulated "
+            "cells (D6)"
+        )
+    for column in ("recipe", res.MEMBER_COLUMN):
+        left, right = _distinct_values(base, column), _distinct_values(other, column)
+        if left != right:
+            raise ValueError(
+                f"{base_name} and {other_name} hold different {column} values "
+                f"({left} and {right}); pass recipe= or member= to compare one "
+                "replicate at two mapping seeds"
+            )
+
+    def keys(frame: pd.DataFrame) -> pd.MultiIndex:
+        return pd.MultiIndex.from_arrays(
+            [
+                frame["level"].astype(str).to_numpy(),
+                frame["cell_id"].astype(str).to_numpy(),
+                frame["depth"].to_numpy(np.int64),
+            ]
+        )
+
+    # replicate_rows made each (level, cell, depth) unique in both tables.
+    positions = keys(other).get_indexer(keys(base))
+    missing = int((positions < 0).sum())
+    extra = len(other) - (len(base) - missing)
+    if missing or extra:
+        raise ValueError(
+            f"{base_name} and {other_name} do not hold the same simulated cells: "
+            f"{missing} (level, cell, depth) rows of the first are not in the "
+            f"second, which holds {extra} rows the first does not; seed "
+            f"{other_seed} re-maps seed {base_seed}'s simulated cells (D6)"
+        )
+    counts = base["total_counts"].to_numpy(np.float64)
+    remapped = other["total_counts"].to_numpy(np.float64)[positions]
+    same = (counts == remapped) | (np.isnan(counts) & np.isnan(remapped))
+    if not bool(same.all()):
+        raise ValueError(
+            f"{base_name} and {other_name} differ in total_counts at "
+            f"{int((~same).sum())} simulated cells: seeds 0 / 1 are mapping seeds "
+            "that re-map the same simulated counts (D6); another simulation (a "
+            "simulation seed) changes them"
+        )
+    confident = res.frozen_confident_mask(base, lookup)
+    confident_other = res.frozen_confident_mask(other, lookup)[positions]
+    calls = _labels(base["call"])
+    calls_other = _labels(other["call"])[positions]
+    changed = confident & np.asarray(calls != calls_other, dtype=bool)
+    return _SeedChanges(
+        levels=base["level"].astype(str).to_numpy(),
+        confident=confident,
+        changed=changed,
+        switched=changed & confident_other,
+        crossed=confident & ~changed & ~confident_other,
+    )
+
+
+def np4_seed_stability(
+    replicates: Mapping[ReplicateKey, pd.DataFrame],
+    decisions: pd.DataFrame,
+    *,
+    default_group: str | None,
+    settings: Np4Settings,
+    base_seed: int = 0,
+    regime: res.Regime = "provisional",
+    recipe: str | None = res.DECISION_RECIPE,
+    member: str | None = None,
+) -> pd.DataFrame:
+    """Score NP4's seed criterion per level and group (§14 NP4).
+
+    §14 NP4: "Seed 0 vs 1 changes <= 2% of confident labels per validated
+    level" [R]. The seeds are MapMyCells mapping seeds, scored as call
+    changes (D6, folded into D12; pre-registration §23.9 item 3, confirmed
+    on 2026-10-06): seed 1 re-maps each group's seed-0 simulated cells, and
+    the statistic is ``resolvability.seed_stability``'s.
+
+    - **Labels.** A group's confident labels at a level are the rows of its
+      base-seed replicate that are confident at the frozen thresholds
+      (``frozen_confident_mask``), over every class and emitted bin of the
+      level (the population of ``seed_stability``; NP7's 1% denominator,
+      CHECK K9.1). The default group is read on its check half at both
+      seeds (``held_out_replicates``).
+    - **Changes.** A label changes when the other seed's call of the same
+      simulated cell (level, cell, depth) is another name, confident there
+      or not, a sink call included. A label whose name stays and whose bp
+      falls below its threshold at the other seed is a threshold crossing,
+      not a change (D6: "Counting threshold crossings instead would fail by
+      design", M8 D12); it is reported (``n_crossed``). The changes to a
+      name that is confident at the other seed (``n_switched``; gate H's
+      reading of H15, pre-registration §20 D12 (a), looser) are reported.
+    - **Inputs.** Each table holds one replicate at one mapping seed; the
+      replicates are the full grid of at least 2 groups x the same seeds,
+      the base seed among them; and the other seed's table holds the same
+      simulated cells with the same simulated counts (``total_counts``) at
+      another mapping seed. A simulation seed changes the counts, so it is
+      refused rather than scored. Otherwise gate P stops with an error.
+
+    Readings this implementation takes where §14 is not explicit (strict
+    where there is a choice, unless ``seed_stability``, which D6 names,
+    settles it), put to the user in pre-registration §23.14 and ruled on
+    2026-10-07 (§23.19; A17 (a): the level's share):
+
+    - **Each group is scored.** Every group's seed pair must change at most
+      2% of its labels at the level (``changed_share``); the share pooled
+      over the groups (``pooled_changed_share``) is reported only. Looser:
+      the pooled share alone, which no group exceeds when all pass.
+    - **The level's statistic.** The share is over all the level's labels,
+      as §14 words it ("per validated level"): every class and emitted bin
+      of the level, classes outside C_P and classes without a tested set
+      (not evaluable) included. A level over 2% fails NP4 for every class
+      of the level (``np4_class_verdicts``), its classes without a changed
+      label included, so one unstable class can fail every validated class
+      of its level. Under this reading §12 M13's test "one failing class
+      leaves the other classes of its level validated" holds for NP4's
+      tested-set parts, not for the seed criterion. A class's own share
+      (stricter for the class whose labels change, looser for the others)
+      is not computed. This reading departs from NP4's per-(level, class)
+      design and needs the user's explicit answer.
+    - **The base seed's labels.** The denominator is the base seed's
+      confident labels, as in ``seed_stability``; a cell confident at the
+      other seed only is not counted. Alternative: both seeds' labels.
+    - **A group without confident labels at a level** passes it, as nothing
+      can change there (``changed_share`` is ``nan``), as NP4's vacuous
+      sets do. Stricter: fail it.
+    - **A class the WHB COP rule drops at the other seed.**
+      ``whb_cop_rule`` nulls the broad ``parent`` of a cell whose
+      supercluster COP call fails the rule and keeps its call. When it does
+      so at the other seed only, the base-seed label keeps its name, so it
+      is a threshold crossing (``n_crossed``), not a change, as in
+      ``seed_stability``, which compares calls only; production gives that
+      cell no broad label at the other seed. Stricter: count it as a
+      change.
+    - **Threshold crossings** are reported and not counted (D6's call
+      changes, above). D6 settles this; §23.14 lists it beside the other
+      readings.
+
+    Version-7 families score this in every emission member (``member=``),
+    each member's seed-0 calls against its own seed-1 re-mapping, and
+    combine the members with ``every_member_verdict``.
+
+    Args:
+        replicates: Per (group, seed label), that replicate's cells table
+            (the default group's in full; ``held_out_replicates``).
+        decisions: The frozen decisions of the base run (version 7: the
+            ensemble's).
+        default_group: The group whose fit half the frozen thresholds were
+            fitted on (required; ``None`` when no replicate holds those
+            cells).
+        settings: The NP4 constants (``max_seed_change``).
+        base_seed: The seed label of the base replicates (seed 0, where the
+            tested sets are fixed); every other seed label is compared with
+            it.
+        regime: The regime whose thresholds are frozen.
+        recipe: The recipe of the scored rows (``None``: every recipe, so
+            the tables must hold one).
+        member: The version-7 emission member of the scored rows.
+
+    Returns:
+        One row per (level, group, other seed), sorted by level, group and
+        seed, with columns ``NP4_SEED_COLUMNS``: ``n_confident`` labels,
+        ``n_changed`` of them changed (``changed_share``, ``nan`` without
+        labels), ``n_switched`` and ``n_crossed`` (reported),
+        ``pooled_changed_share`` over the groups (reported), the limit and
+        ``passed``.
+
+    Raises:
+        ValueError: If ``replicates`` is empty or not the full grid, a table
+            has no rows after the filters, lacks a column or holds more than
+            one mapping seed, or a seed pair is not one simulation re-mapped
+            at two mapping seeds; or for the default group's inputs
+            (``held_out_replicates``).
+        ResolvabilityError: If a table holds more than one replicate
+            (``replicate_rows``).
+    """
+    if not replicates:
+        raise ValueError("np4_seed_stability: no replicates")
+    groups, others = _np4_seed_grid(replicates, base_seed)
+    scored = held_out_replicates(replicates, default_group=default_group)
+    tables = {(str(group), seed): table for (group, seed), table in scored.items()}
+    lookup = res.emission_lookup(decisions, regime)
+    changes: dict[tuple[str, int], _SeedChanges] = {}
+    for group in groups:
+        base_name = f"replicate {group}/{base_seed}"
+        base = _seed_frame(
+            tables[(group, base_seed)], base_name, recipe=recipe, member=member
+        )
+        for seed in others:
+            other_name = f"replicate {group}/{seed}"
+            other = _seed_frame(
+                tables[(group, seed)], other_name, recipe=recipe, member=member
+            )
+            changes[(group, seed)] = _seed_changes(
+                base, other, lookup, (base_name, other_name)
+            )
+    levels = sorted({str(level) for item in changes.values() for level in item.levels})
+    limit = settings.max_seed_change
+    records: list[dict[str, object]] = []
+    for level in levels:
+        counts: dict[tuple[str, int], tuple[int, int, int, int]] = {}
+        for (group, seed), item in changes.items():
+            at_level = item.levels == level
+            counts[(group, seed)] = (
+                int((item.confident & at_level).sum()),
+                int((item.changed & at_level).sum()),
+                int((item.switched & at_level).sum()),
+                int((item.crossed & at_level).sum()),
+            )
+        pooled: dict[int, float] = {}
+        for seed in others:
+            n_labels = sum(counts[(group, seed)][0] for group in groups)
+            n_moved = sum(counts[(group, seed)][1] for group in groups)
+            pooled[seed] = n_moved / n_labels if n_labels else math.nan
+        for group in groups:
+            for seed in others:
+                n_confident, n_changed, n_switched, n_crossed = counts[(group, seed)]
+                records.append(
+                    {
+                        "level": level,
+                        "group": group,
+                        "base_seed": base_seed,
+                        "seed": seed,
+                        "n_confident": n_confident,
+                        "n_changed": n_changed,
+                        "changed_share": n_changed / n_confident
+                        if n_confident
+                        else math.nan,
+                        "n_switched": n_switched,
+                        "n_crossed": n_crossed,
+                        "pooled_changed_share": pooled[seed],
+                        "max_change": limit,
+                        "passed": n_changed <= limit * n_confident + _TOLERANCE,
+                    }
+                )
+    return pd.DataFrame.from_records(records, columns=list(NP4_SEED_COLUMNS))
+
+
+def np4_class_verdicts(
+    set_verdicts: pd.DataFrame,
+    seed_stability: pd.DataFrame,
+    tested: Mapping[tuple[str, str], Sequence[res.GatePTestedSet] | None],
+) -> dict[tuple[str, str], bool | None]:
+    """Combine NP4's parts per (level, class) (§14 NP4).
+
+    A (level, class) passes NP4 when the floor and the range rule pass at
+    every tested set (``np4_set_verdicts``) and its level's seed criterion
+    passes (``np4_seed_stability``: seed 0 vs 1 changes <= 2% of the
+    level's confident labels in every group). This is the every-set
+    reading (M13 plan CHECK K10, D29), scored until pre-registration §23.21
+    and reported since: under revision R2 an NP4 failure at a set below D_P
+    only raises ``validated_min_depth`` (``gate_p_depth_walk``). A level over
+    the seed limit fails every class of the level (ruled on 2026-10-07,
+    §23.19; a class-level part under R2). The result has the per-member
+    shape that ``resolvability.every_member_verdict`` combines over the
+    version-7 emission members.
+
+    Args:
+        set_verdicts: ``np4_set_verdicts`` output (``level``, ``class``,
+            ``set``, ``passed``).
+        seed_stability: ``np4_seed_stability`` output (``level``,
+            ``passed``).
+        tested: The tested sets per (level, class).
+
+    Returns:
+        Per (level, class) of ``tested``: ``None`` when it has no tested set
+        (not evaluable), ``False`` when any of its sets or its level's seed
+        criterion fails, else ``True``.
+
+    Raises:
+        ValueError: If a tested set of a key has no verdict row, the level of
+            a key with tested sets has no seed-criterion row, a seed row has
+            no ``passed`` value, a key's tested sets are an empty list, or a
+            tested set's level or class differs from its key.
+    """
+    _check_tested(tested)
+    seed_ok = _passed_by(seed_stability, ("level",), "NP4 seed criterion")
+    passed_by_set = {
+        (str(level), str(cls), str(label)): bool(passed)
+        for level, cls, label, passed in zip(
+            set_verdicts["level"],
+            set_verdicts["class"],
+            set_verdicts["set"],
+            set_verdicts["passed"],
+            strict=True,
+        )
+    }
+    result: dict[tuple[str, str], bool | None] = {}
+    for key, items in tested.items():
+        if items is None:
+            result[key] = None
+            continue
+        labels = [tested_set_label(item) for item in items]
+        missing = [
+            label for label in labels if (key[0], key[1], label) not in passed_by_set
+        ]
+        if missing:
+            raise ValueError(f"{key}: no NP4 verdict for the tested sets {missing}")
+        level = (str(key[0]),)
+        if level not in seed_ok:
+            raise ValueError(f"{key}: no NP4 seed-criterion row for its level")
+        result[key] = all(
+            passed_by_set[(key[0], key[1], label)] for label in labels
+        ) and all(seed_ok[level])
+    return result
+
+
+# --------------------------------------------------------------------------
+# NP3: precision and coverage at the panel's depth (§14 NP3)
+
+# §14 NP3: "reweighted both to the reference's natural composition within the
+# class and to a class-balanced one". The weightings NP3 scores (revision R1,
+# pre-registration §23.21, approved 2026-10-07): both read on the test cells
+# of the set's scope (``np3_test_cell_weights``: each called cell of truth type
+# t weighs pi_t / N_t, trimmed at 10 x the median as before).
+NP3_NATURAL_TEST_CELLS: Final = "natural_test_cells"
+NP3_CLASS_BALANCED_TEST_CELLS: Final = "class_balanced_test_cells"
+NP3_SCORED_SCHEMES: Final[tuple[str, ...]] = (
+    NP3_NATURAL_TEST_CELLS,
+    NP3_CLASS_BALANCED_TEST_CELLS,
+)
+# Reported only: the two weightings read on the set's calls (A1 (a) and
+# §23.9 item 2, scored until §23.21 R1: every truth type among the calls
+# takes its full share, so a few stray wrong calls take the trim cap); the
+# unweighted values; and a family dataset's depth histogram (§14: "values on a
+# family dataset's depth histogram ... reported when one exists").
+NP3_NATURAL: Final = "natural"
+NP3_CLASS_BALANCED: Final = "class_balanced"
+NP3_UNWEIGHTED: Final = "unweighted"
+NP3_DEPTH_HISTOGRAM: Final = "depth_histogram"
+NP3_SET_SCHEMES: Final[tuple[str, ...]] = (
+    NP3_UNWEIGHTED,
+    NP3_NATURAL,
+    NP3_CLASS_BALANCED,
+    NP3_DEPTH_HISTOGRAM,
+)
+NP3_TEST_CELL_SCHEMES: Final[tuple[str, ...]] = (
+    NP3_NATURAL_TEST_CELLS,
+    NP3_CLASS_BALANCED_TEST_CELLS,
+)
+NP3_REASON_NOT_EVALUABLE: Final = "not_evaluable"
+NP3_REASON_DEEP_SET_FAILED: Final = "deep_set_failed"
+# The truth class of a test cell without one at a level (null truth_parent).
+_NO_TRUTH_CLASS: Final = "<none>"
+NP3_STATS_COLUMNS: Final[tuple[str, ...]] = (
+    "level",
+    "class",
+    "set",
+    "pooled",
+    "set_min_depth",
+    "scheme",
+    "scored",
+    "n_called",
+    "n_confident",
+    "n_correct",
+    "precision",
+    "kish_n",
+    "wilson_lb",
+    "coverage",
+    "max_weight_share",
+)
+NP3_VERDICT_COLUMNS: Final[tuple[str, ...]] = (
+    *NP3_STATS_COLUMNS,
+    "target",
+    "target_plus",
+    "min_coverage",
+    "point_ok",
+    "wilson_ok",
+    "coverage_ok",
+    "passed",
+)
+NP3_DEPTH_COLUMNS: Final[tuple[str, ...]] = (
+    "level",
+    "class",
+    "tested_max_depth",
+    "validated_min_depth",
+    "passed",
+    "reason",
+    "n_sets",
+    "failed_sets",
+    "stop_depth",
+    "stop_reason",
+)
+# Columns of ``validated_min_depth`` that hold None (kept as Python objects).
+_NULLABLE_DEPTH_COLUMNS: Final = frozenset(
+    {"tested_max_depth", "validated_min_depth", "passed", "stop_depth"}
+)
+
+
+@dataclass(frozen=True)
+class Np3Settings:
+    """The NP3 constants (§14 NP3; plan §3.7).
+
+    Attributes:
+        min_coverage: Coverage every tested set needs under each weighting
+            (``gate_p_min_coverage``, 0.30).
+        weight_min_type_cells: Calls a truth type needs in a set to be
+            weighted on its own; rarer types take the weight of their broad
+            class (``weight_min_type_cells``, 20; ``composition_weights``).
+        weight_trim_factor: Weights are capped at this multiple of the set's
+            median positive weight, as ``decide`` trims each judged set
+            (``weight_trim_factor``, 10; 0: no cap).
+        min_confident_n: Confident calls a tested set holds at least
+            (``gate_p_min_confident_n``, 200); ``np3_set_stats`` refuses a
+            set with fewer.
+    """
+
+    min_coverage: float
+    weight_min_type_cells: int
+    weight_trim_factor: float
+    min_confident_n: int
+
+    def __post_init__(self) -> None:
+        """Validate the constants.
+
+        Raises:
+            ValueError: If ``min_coverage`` is outside [0, 1],
+                ``weight_min_type_cells`` or ``min_confident_n`` is below 1,
+                or ``weight_trim_factor`` is negative.
+        """
+        if not 0.0 <= self.min_coverage <= 1.0:
+            raise ValueError(
+                "Np3Settings.min_coverage must lie in [0, 1], got "
+                f"{self.min_coverage!r}"
+            )
+        if self.weight_min_type_cells < 1:
+            raise ValueError(
+                "Np3Settings.weight_min_type_cells must be >= 1, got "
+                f"{self.weight_min_type_cells!r}"
+            )
+        if not self.weight_trim_factor >= 0.0:
+            raise ValueError(
+                "Np3Settings.weight_trim_factor must be >= 0, got "
+                f"{self.weight_trim_factor!r}"
+            )
+        if self.min_confident_n < 1:
+            raise ValueError(
+                "Np3Settings.min_confident_n must be >= 1, got "
+                f"{self.min_confident_n!r}"
+            )
+
+    @classmethod
+    def from_config(cls, config: AnnotationResolvabilityConfig) -> Np3Settings:
+        """Read the NP3 constants from the resolvability config (§14 NP3).
+
+        Args:
+            config: The resolvability config.
+
+        Returns:
+            The settings.
+        """
+        return cls(
+            min_coverage=config.gate_p_min_coverage,
+            weight_min_type_cells=config.weight_min_type_cells,
+            weight_trim_factor=config.weight_trim_factor,
+            min_confident_n=config.gate_p_min_confident_n,
+        )
+
+
+@dataclass(frozen=True)
+class WeightedTestedSet:
+    """A gate-P tested set scored under one weighting (§14 NP3).
+
+    The weighted variant of ``resolvability.GatePTestedSet``: the Wilson
+    bound uses the Kish effective n of the weights (§14: "Wilson bounds on
+    reweighted sets use the Kish effective n"). Only calls with a positive
+    weight count, as in ``check_threshold``.
+
+    Attributes:
+        level: Level.
+        cls: Class.
+        depths: Depth bins in the set (one bin, or a pooled ">= D_P" set).
+        pooled: Whether bins were pooled from the deep end.
+        scheme: The weighting (``NP3_SET_SCHEMES``, ``NP3_TEST_CELL_SCHEMES``).
+        n_called: Calls of the class in the set's scope (the coverage's
+            denominator).
+        n_confident: Confident calls in the set.
+        n_correct: The correct ones among them.
+        precision: Their weighted precision (``nan`` without weight).
+        kish_n: The Kish effective n of their weights.
+        wilson_lb: The Wilson 95% lower bound of the precision on ``kish_n``.
+        coverage: The weighted share of the scope's calls that are confident.
+        max_weight_share: The largest single confident call's share of the
+            confident weight.
+    """
+
+    level: str
+    cls: str
+    depths: tuple[int, ...]
+    pooled: bool
+    scheme: str
+    n_called: int
+    n_confident: int
+    n_correct: int
+    precision: float
+    kish_n: float
+    wilson_lb: float
+    coverage: float
+    max_weight_share: float
+
+
+def _one_set(types: np.ndarray) -> pd.DataFrame:
+    """A frame ``composition_weights`` reweights as one group (one set)."""
+    return pd.DataFrame(
+        {
+            "recipe": "set",
+            "seed": 0,
+            "level": "set",
+            "depth": 0,
+            res.TRUTH_LEAF_COLUMN: types,
+        }
+    )
+
+
+def _natural_shares(
+    composition: Mapping[str, float] | None, types: np.ndarray
+) -> dict[str, float]:
+    """Check the reference's natural composition against the test types.
+
+    Raises:
+        ValueError: Without a composition, for a share that is not finite or
+            is negative, or when a test type has no positive share: its
+            calls would take weight 0 and drop out of the set, which could
+            only raise the set's precision.
+    """
+    if composition is None:
+        raise ValueError(
+            "the natural weighting needs the reference's natural composition "
+            "(share per truth type)"
+        )
+    shares = {str(name): float(value) for name, value in composition.items()}
+    invalid = sorted(
+        name
+        for name, value in shares.items()
+        if not math.isfinite(value) or value < 0.0
+    )
+    if invalid:
+        raise ValueError(
+            f"the natural composition has shares that are not finite and >= 0: "
+            f"{invalid}"
+        )
+    missing = sorted(
+        {str(name) for name in np.unique(types) if not shares.get(str(name), 0.0) > 0}
+    )
+    if missing:
+        raise ValueError(
+            f"the natural composition has no positive share for the truth types "
+            f"{missing}: their calls would weigh nothing"
+        )
+    return shares
+
+
+def _depth_histogram(histogram: Mapping[int, float]) -> dict[int, float]:
+    """Check a family dataset's depth histogram (mass per grid bin).
+
+    Raises:
+        ValueError: For a mass that is not finite or is negative.
+    """
+    masses = {int(depth): float(mass) for depth, mass in histogram.items()}
+    invalid = sorted(
+        depth for depth, mass in masses.items() if not math.isfinite(mass) or mass < 0.0
+    )
+    if invalid:
+        raise ValueError(
+            f"the depth histogram has masses that are not finite and >= 0 at the "
+            f"bins {invalid}"
+        )
+    return masses
+
+
+def _depth_weights(depths: np.ndarray, histogram: Mapping[int, float]) -> np.ndarray:
+    """Weights that give each depth bin of a set its share of the histogram.
+
+    ``w(d) = h(d) / p(d)``, with ``h`` the histogram's mass over the set's
+    bins normalised and ``p(d)`` the set's share of rows at ``d`` (mean 1);
+    all zero when the histogram has no mass on the set's bins.
+    """
+    values, inverse, counts = np.unique(depths, return_inverse=True, return_counts=True)
+    mass = np.array([histogram.get(int(value), 0.0) for value in values])
+    if not float(mass.sum()) > 0.0:
+        return np.zeros(len(depths), dtype=np.float64)
+    per_depth = (mass / mass.sum()) / (counts / counts.sum())
+    return np.asarray(per_depth[inverse], dtype=np.float64)
+
+
+def np3_set_weights(
+    rows: pd.DataFrame,
+    scheme: str,
+    *,
+    composition: Mapping[str, float] | None = None,
+    depth_histogram: Mapping[int, float] | None = None,
+    class_of: Mapping[str, str] | None = None,
+    min_type_cells: int = 20,
+    trim_factor: float = 0.0,
+) -> np.ndarray:
+    """Return the NP3 weights of one set of calls, weighted as one set (§14 NP3).
+
+    The schemes, each over the truth types (``truth_leaf``) of ``rows``, all
+    reported only since revision R1 (pre-registration §23.21; NP3 scores the
+    test-cell weightings of ``np3_test_cell_weights``):
+
+    - ``natural``: each type's total weight follows its share in the
+      reference's natural composition (the per-call-set reading of §14's
+      "natural composition within the class", A1 (a), scored until §23.21);
+    - ``class_balanced``: each type gets the same total weight
+      (pre-registration §23.9 item 2: "equal total weight to each truth type
+      within the called class's tested set"; scored until §23.21);
+    - ``unweighted``: weight 1;
+    - ``depth_histogram`` (report-only): each depth bin of the set gets its
+      share of a family dataset's depth histogram, restricted to the set's
+      bins (label-free).
+
+    ``natural`` and ``class_balanced`` reuse ``composition_weights``: a type
+    with fewer than ``min_type_cells`` rows takes the weight of its broad
+    class's common types (or of its broad class as a whole), so a handful of
+    calls cannot stand for a whole type. Every scheme but ``unweighted`` is
+    then capped at ``trim_factor`` x the set's median positive weight
+    (``trim_weights``; the judged-set trim of ``decide``).
+
+    Args:
+        rows: The set's rows (``truth_leaf``; ``depth`` for the histogram;
+            ``truth_parent`` and ``level`` when ``class_of`` is not given).
+        scheme: One of ``NP3_SET_SCHEMES``.
+        composition: The reference's natural share per truth type (any
+            scale; ``natural`` only). Every type of ``rows`` needs a positive
+            share.
+        depth_histogram: The family dataset's cell mass per grid bin
+            (``depth_histogram`` only).
+        class_of: Broad class per truth type, the pooling unit of rare types
+            (default ``leaf_class_map(rows)``).
+        min_type_cells: ``weight_min_type_cells``.
+        trim_factor: ``weight_trim_factor`` (``np3_set_stats`` passes the
+            config's; 0: no cap).
+
+    Returns:
+        Weights aligned with ``rows``.
+
+    Raises:
+        ValueError: For an unknown scheme, a missing or invalid composition or
+            histogram.
+    """
+    if scheme not in NP3_SET_SCHEMES:
+        raise ValueError(
+            f"np3_set_weights: unknown scheme {scheme!r}, expected one of "
+            f"{NP3_SET_SCHEMES} (test-cell schemes: np3_test_cell_weights)"
+        )
+    if scheme == NP3_UNWEIGHTED:
+        return np.ones(len(rows), dtype=np.float64)
+    if scheme == NP3_DEPTH_HISTOGRAM:
+        if depth_histogram is None:
+            raise ValueError("the depth_histogram weighting needs a depth histogram")
+        histogram = _depth_histogram(depth_histogram)
+        if rows.empty:
+            return np.zeros(0, dtype=np.float64)
+        weights = _depth_weights(rows["depth"].to_numpy(np.int64), histogram)
+        return res.trim_weights(weights, trim_factor)
+    types = rows[res.TRUTH_LEAF_COLUMN].astype(str).to_numpy()
+    if scheme == NP3_NATURAL:
+        target = _natural_shares(composition, types)
+    else:
+        target = dict.fromkeys((str(name) for name in np.unique(types)), 1.0)
+    if rows.empty:
+        return np.zeros(0, dtype=np.float64)
+    weights = res.composition_weights(
+        _one_set(types),
+        target,
+        class_of=res.leaf_class_map(rows) if class_of is None else class_of,
+        min_type_cells=min_type_cells,
+    )
+    return res.trim_weights(weights, trim_factor)
+
+
+def np3_test_cell_weights(
+    scope: pd.DataFrame,
+    scheme: str,
+    *,
+    composition: Mapping[str, float] | None = None,
+    min_type_cells: int = 20,
+) -> np.ndarray:
+    """Return the test-cell weights of a tested set's scope (NP3's scored ones).
+
+    Reweights the test cells a tested set is drawn from (one level: a bin's
+    rows, or each cell's deepest row at >= D_P), as RESOLVE reweights test
+    cells to a dataset's composition, rather than the set's calls: within
+    each truth class of the level (``truth_parent``), its truth types are
+    rebalanced to the reference's natural shares (``natural_test_cells``) or
+    to equal shares (``class_balanced_test_cells``), and each class keeps its
+    share of the test cells. A class's tested set then takes the weights of
+    its calls, so a called cell of truth type t weighs pi_t / N_t (N_t: the
+    type's test cells in the scope) and a wrong call weighs what its type's
+    test cells weigh, not a share of the set. The precision of the set under
+    these weights estimates the precision the class would have in tissue of
+    that composition.
+
+    These are the weightings NP3 and NP6 score since revision R1
+    (pre-registration §23.21, approved by the user on 2026-10-07; it
+    replaces A1 (a) and §23.9 item 2's per-call-set reading, which
+    ``np3_set_weights`` still reports). The callers trim the calls' weights
+    at ``weight_trim_factor`` x their median (``res.trim_weights``), as
+    before.
+
+    Args:
+        scope: The scope's rows (``truth_leaf``, ``truth_parent``, ``level``).
+        scheme: One of ``NP3_TEST_CELL_SCHEMES``.
+        composition: The reference's natural share per truth type
+            (``natural_test_cells`` only).
+        min_type_cells: ``weight_min_type_cells``: rarer types take the weight
+            of their truth class's common types (``composition_weights``).
+
+    Returns:
+        Weights aligned with ``scope`` (mean 1).
+
+    Raises:
+        ValueError: For an unknown scheme, rows of several levels, a truth
+            type with more than one truth class, or a missing or invalid
+            composition.
+    """
+    if scheme not in NP3_TEST_CELL_SCHEMES:
+        raise ValueError(
+            f"np3_test_cell_weights: unknown scheme {scheme!r}, expected one of "
+            f"{NP3_TEST_CELL_SCHEMES}"
+        )
+    if scope.empty:
+        return np.zeros(0, dtype=np.float64)
+    if scope["level"].astype(str).nunique() > 1:
+        raise ValueError(
+            "np3_test_cell_weights: the scope holds rows of several levels"
+        )
+    types = scope[res.TRUTH_LEAF_COLUMN].astype(str).to_numpy()
+    classes = np.array(
+        [
+            _NO_TRUTH_CLASS if pd.isna(value) else str(value)
+            for value in scope["truth_parent"].astype(object)
+        ],
+        dtype=object,
+    )
+    pairs = pd.DataFrame({"type": types, "class": classes}).drop_duplicates()
+    duplicated = pairs["type"].duplicated(keep=False)
+    if bool(duplicated.any()):
+        raise ValueError(
+            f"the truth types {sorted(set(pairs.loc[duplicated, 'type']))} have "
+            "more than one truth class at this level"
+        )
+    shares = (
+        _natural_shares(composition, types)
+        if scheme == NP3_NATURAL_TEST_CELLS
+        else None
+    )
+    class_share = pd.Series(classes).value_counts(normalize=True)
+    target: dict[str, float] = {}
+    for cls, members in pairs.groupby("class", sort=True)["type"]:
+        names = [str(name) for name in members]
+        if shares is None:
+            within = dict.fromkeys(names, 1.0 / len(names))
+        else:
+            total = sum(shares[name] for name in names)
+            within = {name: shares[name] / total for name in names}
+        for name in names:
+            target[name] = float(class_share[cls]) * within[name]
+    return res.composition_weights(
+        _one_set(types),
+        target,
+        class_of=dict(zip(pairs["type"], pairs["class"], strict=True)),
+        min_type_cells=min_type_cells,
+    )
+
+
+def _weighted_set(
+    item: res.GatePTestedSet,
+    scheme: str,
+    correct: np.ndarray,
+    weights: np.ndarray,
+    called_confident: np.ndarray,
+    called_weights: np.ndarray,
+) -> WeightedTestedSet:
+    """Score one tested set under one weighting (``check_threshold`` rules).
+
+    ``correct`` and ``weights`` are the set's confident calls; the coverage
+    is the confident share of the scope's calls of the class, on their own
+    weights (``called_weights``; ``called_confident`` marks the confident
+    ones).
+    """
+    positive = weights > 0
+    kept = weights[positive]
+    total = float(kept.sum())
+    n_confident = int(positive.sum())
+    if total > 0:
+        precision = float((kept * correct[positive]).sum()) / total
+        kish_n = res.kish_effective_n(kept)
+        wilson_lb = res.wilson_lower_bound(precision, kish_n)
+        max_weight_share = float(kept.max()) / total
+    else:
+        precision = wilson_lb = max_weight_share = math.nan
+        kish_n = 0.0
+    called_positive = called_weights > 0
+    called_total = float(called_weights[called_positive].sum())
+    coverage = (
+        float(called_weights[called_positive & called_confident].sum()) / called_total
+        if called_total > 0
+        else math.nan
+    )
+    return WeightedTestedSet(
+        level=item.level,
+        cls=item.cls,
+        depths=tuple(int(depth) for depth in item.depths),
+        pooled=bool(item.pooled),
+        scheme=scheme,
+        n_called=int(called_positive.sum()),
+        n_confident=n_confident,
+        n_correct=int(correct[positive].sum()),
+        precision=precision,
+        kish_n=kish_n,
+        wilson_lb=wilson_lb,
+        coverage=coverage,
+        max_weight_share=max_weight_share,
+    )
+
+
+def _check_set_count(
+    item: res.GatePTestedSet, n_confident: int, min_confident_n: int, who: str
+) -> None:
+    """Check that a tested set was built on the calls it is scored on.
+
+    ``n_confident`` is the set's unweighted confident calls in the pooled
+    held-out calls. A set built on other rows (a plain concat of the tables
+    keeps the default group's fit half, on which the frozen thresholds were
+    fitted) holds another count there, and could make a bin a tested set,
+    or move D_P, that the pooled calls do not support.
+
+    Args:
+        item: The tested set.
+        n_confident: Its confident calls in the pooled held-out calls.
+        min_confident_n: ``gate_p_min_confident_n`` (200).
+        who: The criterion's function, named in the error.
+
+    Raises:
+        ValueError: If ``n_confident`` differs from the set's
+            ``n_confident``, or is below ``min_confident_n``.
+    """
+    label = f"{item.level}/{item.cls} {tested_set_label(item)}"
+    if n_confident != item.n_confident:
+        raise ValueError(
+            f"{who}: the tested set {label} was built on "
+            f"{item.n_confident} confident calls but holds {n_confident} in "
+            "the pooled held-out calls: build the tested sets with "
+            "gate_p_tested_sets on pooled_held_out_cells of the same "
+            "replicates, default group, recipe, seed and member (a plain "
+            "concat keeps the default group's fit half)"
+        )
+    if n_confident < min_confident_n:
+        raise ValueError(
+            f"{who}: the tested set {label} holds {n_confident} "
+            f"confident calls, fewer than gate_p_min_confident_n "
+            f"({min_confident_n}): it is not a tested set"
+        )
+
+
+def np3_set_stats(
+    replicates: Mapping[ReplicateKey, pd.DataFrame],
+    decisions: pd.DataFrame,
+    tested: Mapping[tuple[str, str], Sequence[res.GatePTestedSet] | None],
+    *,
+    default_group: str | None,
+    composition: Mapping[str, float],
+    settings: Np3Settings,
+    depth_histogram: Mapping[int, float] | None = None,
+    regime: res.Regime = "provisional",
+    recipe: str | None = res.DECISION_RECIPE,
+    seed: int = 0,
+    member: str | None = None,
+) -> pd.DataFrame:
+    """Score every tested set of the pooled held-out calls (§14 NP3).
+
+    NP3 is scored on the base recipe at seed 0, on all held-out calls at the
+    frozen thresholds of ``decisions``, on the tested sets fixed from the
+    same calls (``gate_p_tested_sets`` on ``pooled_held_out_cells``; version
+    7: per emission member, ``gate_p_member_sets``). The calls are pooled
+    here (``pooled_held_out_cells``), so the default group's fit half, on
+    which the frozen thresholds were fitted, cannot enter NP3 by omission:
+    ``default_group`` is required, as in ``replicate_set_stats``. Nor can it
+    shape the tested sets: each set must hold, in the pooled calls, the
+    confident calls it was built on (``n_confident``), and at least
+    ``settings.min_confident_n``; a set built on a plain concat of the
+    tables (the fit half included) raises. Each set is
+    scored under every scheme of ``np3_set_weights`` (``depth_histogram``
+    only with a histogram) and of ``np3_test_cell_weights``; NP3's verdict
+    uses ``NP3_SCORED_SCHEMES`` only (``np3_verdicts``).
+
+    A set's precision, Kish n and Wilson bound are on its confident calls,
+    weighted as one set; its coverage is the confident share of the calls of
+    the class in the set's scope (a bin's calls, or the cells' deepest calls
+    at >= D_P), weighted the same way as a set of their own.
+
+    Args:
+        replicates: Per (group, seed label), that replicate's cells table
+            (the default group's in full; ``held_out_replicates``). Pooled
+            donors or draws need distinct cell ids.
+        decisions: The frozen decisions of the base run (version 7: the
+            ensemble's).
+        tested: The tested sets per (level, class), from
+            ``gate_p_tested_sets`` (version 7: ``gate_p_member_sets``) on
+            ``pooled_held_out_cells`` of the same replicates, default group,
+            recipe, seed and member; ``None`` marks a (level, class) that is
+            not evaluable and has no rows.
+        default_group: The group whose fit half the frozen thresholds were
+            fitted on (required, so that no caller leaks it by omission;
+            ``None`` when no replicate holds those cells).
+        composition: The reference's natural share per truth type. Every
+            truth type of the held-out calls needs a positive share, the
+            types of each donor's non-frontal top-up cells included
+            (pre-registration §23.2 D2 (d)): a share table of the frontal
+            cortex alone raises when a top-up type is missing from it.
+        settings: The NP3 constants.
+        depth_histogram: A family dataset's cell mass per grid bin
+            (label-free; report-only).
+        regime: The regime whose thresholds are frozen.
+        recipe: The recipe of the scored rows (``None``: every recipe, so
+            the tables must hold one).
+        seed: The seed label of the replicates pooled
+            (``pooled_held_out_cells``); their rows are kept at the same
+            mapping seed, as ``gate_p_tested_sets`` keeps its rows.
+        member: The version-7 emission member of the scored rows.
+
+    Returns:
+        One row per (tested set, scheme), sorted by level, class and set,
+        columns ``NP3_STATS_COLUMNS`` (``scored``: the scheme decides NP3).
+
+    Raises:
+        ValueError: If no replicate has seed label ``seed``, no row is left
+            after the filters, a key's tested sets are an empty list or of
+            another key, a tested set's confident calls in the pooled calls
+            differ from its ``n_confident`` or are fewer than
+            ``settings.min_confident_n``, for an invalid composition or
+            histogram, or for the default group's inputs
+            (``held_out_replicates``).
+        ResolvabilityError: If the rows mix replicates (``replicate_rows``).
+    """
+    _check_tested(tested)
+    histogram = None if depth_histogram is None else _depth_histogram(depth_histogram)
+    cells = pooled_held_out_cells(replicates, default_group=default_group, seed=seed)
+    frame = res.replicate_rows(
+        cells, recipe=recipe, seed=seed, member=member
+    ).reset_index(drop=True)
+    if frame.empty:
+        raise ValueError(
+            f"np3_set_stats: no rows after the filters (recipe={recipe!r}, "
+            f"seed={seed!r}, member={member!r})"
+        )
+    _natural_shares(composition, frame[res.TRUTH_LEAF_COLUMN].astype(str).to_numpy())
+    confident = res.frozen_confident_mask(frame, res.emission_lookup(decisions, regime))
+    index = _ReplicateIndex(frame, confident)
+    correct = frame["correct"].to_numpy(bool)
+    columns = [res.TRUTH_LEAF_COLUMN, "truth_parent", "level", "depth"]
+    slim = frame[columns]
+    class_of = res.leaf_class_map(frame)
+    set_schemes = tuple(
+        scheme
+        for scheme in NP3_SET_SCHEMES
+        if scheme != NP3_DEPTH_HISTOGRAM or histogram is not None
+    )
+    trim = settings.weight_trim_factor
+    options: dict[str, Any] = {
+        "composition": composition,
+        "depth_histogram": histogram,
+        "class_of": class_of,
+        "min_type_cells": settings.weight_min_type_cells,
+        "trim_factor": trim,
+    }
+    # Per scope (level, pooled, D_P or depth) and test-cell scheme: the
+    # scope's positions in ascending order and their weights.
+    scopes: dict[tuple[str, bool, int, str], tuple[np.ndarray, np.ndarray]] = {}
+
+    def scope_weights(
+        item: res.GatePTestedSet, scheme: str
+    ) -> tuple[np.ndarray, np.ndarray]:
+        key = (item.level, bool(item.pooled), int(min(item.depths)), scheme)
+        if key not in scopes:
+            positions = index.scope_positions(item)
+            weights = np3_test_cell_weights(
+                slim.iloc[positions],
+                scheme,
+                composition=composition,
+                min_type_cells=settings.weight_min_type_cells,
+            )
+            order = np.argsort(positions, kind="mergesort")
+            scopes[key] = (positions[order], weights[order])
+        return scopes[key]
+
+    records: list[dict[str, object]] = []
+    for (level, cls), items in sorted(tested.items(), key=lambda pair: pair[0]):
+        for item in items or ():
+            called = index.called_positions(item)
+            called_confident = confident[called]
+            in_set = called[called_confident]
+            _check_set_count(
+                item, int(len(in_set)), settings.min_confident_n, "np3_set_stats"
+            )
+            set_correct = correct[in_set]
+            results: list[WeightedTestedSet] = []
+            for scheme in set_schemes:
+                weights = np3_set_weights(slim.iloc[in_set], scheme, **options)
+                called_weights = np3_set_weights(slim.iloc[called], scheme, **options)
+                results.append(
+                    _weighted_set(
+                        item,
+                        scheme,
+                        set_correct,
+                        weights,
+                        called_confident,
+                        called_weights,
+                    )
+                )
+            for scheme in NP3_TEST_CELL_SCHEMES:
+                positions, weights = scope_weights(item, scheme)
+                called_weights = res.trim_weights(
+                    weights[np.searchsorted(positions, called)], trim
+                )
+                results.append(
+                    _weighted_set(
+                        item,
+                        scheme,
+                        set_correct,
+                        called_weights[called_confident],
+                        called_confident,
+                        called_weights,
+                    )
+                )
+            for result in results:
+                records.append(
+                    {
+                        "level": level,
+                        "class": cls,
+                        "set": tested_set_label(item),
+                        "pooled": result.pooled,
+                        "set_min_depth": int(min(item.depths)),
+                        "scheme": result.scheme,
+                        "scored": result.scheme in NP3_SCORED_SCHEMES,
+                        "n_called": result.n_called,
+                        "n_confident": result.n_confident,
+                        "n_correct": result.n_correct,
+                        "precision": result.precision,
+                        "kish_n": result.kish_n,
+                        "wilson_lb": result.wilson_lb,
+                        "coverage": result.coverage,
+                        "max_weight_share": result.max_weight_share,
+                    }
+                )
+    stats = pd.DataFrame.from_records(records, columns=list(NP3_STATS_COLUMNS))
+    return stats.sort_values(["level", "class", "set"], kind="mergesort").reset_index(
+        drop=True
+    )
+
+
+def np3_verdicts(
+    stats: pd.DataFrame, thresholds: AnnotationThresholds, settings: Np3Settings
+) -> pd.DataFrame:
+    """Judge every (tested set, scheme) of ``np3_set_stats`` (§14 NP3).
+
+    A row passes when its point precision reaches target+_L, the provisional
+    target with the margin of the set's shallowest bin (+0.05 at >= 60
+    counts, +0.10 below, capped at 0.97: ``provisional_target``, with the
+    60-count switch of ``RuleSettings``), its Wilson bound on the Kish n
+    reaches target_L, and its coverage reaches ``min_coverage``; a ``nan``
+    fails. Report-only schemes are judged too (``scored`` False).
+
+    Args:
+        stats: ``np3_set_stats`` output.
+        thresholds: The threshold settings (targets and margins).
+        settings: The NP3 constants.
+
+    Returns:
+        ``stats`` with ``target``, ``target_plus``, ``min_coverage``,
+        ``point_ok``, ``wilson_ok``, ``coverage_ok`` and ``passed``
+        (columns ``NP3_VERDICT_COLUMNS``).
+
+    Raises:
+        ValueError: For a level without a precision target.
+    """
+    if stats.empty:
+        return pd.DataFrame(columns=list(NP3_VERDICT_COLUMNS))
+    frame = stats.copy()
+    targets = level_targets(
+        thresholds, sorted({str(level) for level in frame["level"]})
+    )
+    below = thresholds.second_vote_below_counts
+    target = np.array([targets[str(level)] for level in frame["level"]])
+    target_plus = np.array(
+        [
+            thresholds.provisional_target(
+                targets[str(level)], below60=int(depth) < below
+            )
+            for level, depth in zip(frame["level"], frame["set_min_depth"], strict=True)
+        ]
+    )
+    frame["target"] = target
+    frame["target_plus"] = target_plus
+    frame["min_coverage"] = settings.min_coverage
+    precision = frame["precision"].to_numpy(np.float64)
+    wilson = frame["wilson_lb"].to_numpy(np.float64)
+    coverage = frame["coverage"].to_numpy(np.float64)
+    frame["point_ok"] = precision >= target_plus - _TOLERANCE
+    frame["wilson_ok"] = wilson >= target - _TOLERANCE
+    frame["coverage_ok"] = coverage >= settings.min_coverage - _TOLERANCE
+    frame["passed"] = frame["point_ok"] & frame["wilson_ok"] & frame["coverage_ok"]
+    return frame[list(NP3_VERDICT_COLUMNS)]
+
+
+def _np3_set_passed(
+    verdicts: pd.DataFrame,
+) -> dict[tuple[str, str, str], dict[str, bool]]:
+    """The scored verdicts per (level, class, set) and scheme."""
+    result: dict[tuple[str, str, str], dict[str, bool]] = {}
+    if verdicts.empty:
+        return result
+    scored = verdicts[verdicts["scored"].astype(bool).to_numpy()]
+    for level, cls, label, scheme, passed in zip(
+        scored["level"],
+        scored["class"],
+        scored["set"],
+        scored["scheme"],
+        scored["passed"],
+        strict=True,
+    ):
+        result.setdefault((str(level), str(cls), str(label)), {})[str(scheme)] = bool(
+            passed
+        )
+    return result
+
+
+def validated_min_depth(
+    verdicts: pd.DataFrame,
+    tested: Mapping[tuple[str, str], Sequence[res.GatePTestedSet] | None],
+    depths: Sequence[int],
+) -> pd.DataFrame:
+    """Return NP3's per-(level, class) record: D_P and ``validated_min_depth``.
+
+    NP3's own walk: the record's floor until pre-registration §23.21, and
+    reported since. Revision R2 takes the floor from NP3 and NP4-NP7
+    together (``gate_p_depth_walk``), which reads NP3's sets as this walk
+    does.
+
+    §14 per-class records: a tested set passes NP3 when it passes under every
+    scheme of ``NP3_SCORED_SCHEMES``. D_P (``tested_max_depth``) is the
+    shallowest bin of the pooled ">= D_P" set, or the deepest bin when that
+    bin is tested on its own (no pool). NP3 holds for the (level, class)
+    when every tested set at or above D_P passes (the ">= D_P" set, and any
+    bin there tested on its own); ``validated_min_depth`` is then the
+    shallowest bin from which every grid bin below D_P is tested on its own
+    and passes: the walk down from D_P stops at the first bin that is not
+    tested on its own (``untested``) or fails (``failed``). A failing class
+    does not block the other classes.
+
+    Args:
+        verdicts: ``np3_verdicts`` output (``level``, ``class``, ``set``,
+            ``scheme``, ``scored``, ``passed``).
+        tested: The tested sets per (level, class).
+        depths: The simulation's depth grid (the bundle's ``depth_grid``).
+
+    Returns:
+        One row per (level, class) of ``tested``, columns
+        ``NP3_DEPTH_COLUMNS``: ``passed`` True, False or None (not
+        evaluable); ``validated_min_depth`` None unless passed;
+        ``failed_sets`` the labels of every failing tested set, ``;``
+        joined; ``stop_depth`` and ``stop_reason`` where the walk stopped.
+
+    Raises:
+        ValueError: If a tested set has no verdict for a scored scheme, a
+            key has more than one pooled set or a tested depth is not in
+            the grid, or a key's tested sets are an empty list or of
+            another key.
+    """
+    _check_tested(tested)
+    grid = sorted({int(depth) for depth in depths})
+    passed_by_set = _np3_set_passed(verdicts)
+    records: list[dict[str, object]] = []
+    for key in sorted(tested):
+        items = tested[key]
+        record: dict[str, object] = {
+            "level": key[0],
+            "class": key[1],
+            "tested_max_depth": None,
+            "validated_min_depth": None,
+            "passed": None,
+            "reason": NP3_REASON_NOT_EVALUABLE,
+            "n_sets": 0,
+            "failed_sets": "",
+            "stop_depth": None,
+            "stop_reason": "",
+        }
+        records.append(record)
+        if items is None:
+            continue
+        pooled = [item for item in items if item.pooled]
+        if len(pooled) > 1:
+            raise ValueError(
+                f"{key}: {len(pooled)} pooled tested sets; a (level, class) has "
+                "at most one"
+            )
+        off_grid = sorted(
+            {int(depth) for item in items for depth in item.depths} - set(grid)
+        )
+        if off_grid:
+            raise ValueError(
+                f"{key}: the tested depths {off_grid} are not in the grid {grid}"
+            )
+        set_passed: dict[str, bool] = {}
+        for item in items:
+            label = tested_set_label(item)
+            schemes = passed_by_set.get((key[0], key[1], label), {})
+            missing = [scheme for scheme in NP3_SCORED_SCHEMES if scheme not in schemes]
+            if missing:
+                raise ValueError(
+                    f"{key}: no NP3 verdict for the tested set {label} under {missing}"
+                )
+            set_passed[label] = all(schemes[scheme] for scheme in NP3_SCORED_SCHEMES)
+        d_p = (
+            int(min(pooled[0].depths))
+            if pooled
+            else max(int(item.depths[0]) for item in items)
+        )
+        deep_ok = all(
+            set_passed[tested_set_label(item)]
+            for item in items
+            if min(item.depths) >= d_p
+        )
+        record.update(
+            tested_max_depth=d_p,
+            n_sets=len(items),
+            failed_sets=";".join(
+                label for label, passed in set_passed.items() if not passed
+            ),
+        )
+        if not deep_ok:
+            record.update(passed=False, reason=NP3_REASON_DEEP_SET_FAILED)
+            continue
+        single = {
+            int(item.depths[0]): tested_set_label(item)
+            for item in items
+            if not item.pooled
+        }
+        minimum = d_p
+        for depth in reversed([value for value in grid if value < d_p]):
+            own = single.get(depth)
+            if own is None or not set_passed[own]:
+                record.update(
+                    stop_depth=depth,
+                    stop_reason="untested" if own is None else "failed",
+                )
+                break
+            minimum = depth
+        record.update(passed=True, reason="", validated_min_depth=minimum)
+    return pd.DataFrame(
+        {
+            column: pd.Series(
+                [record[column] for record in records],
+                dtype=object if column in _NULLABLE_DEPTH_COLUMNS else None,
+            )
+            for column in NP3_DEPTH_COLUMNS
+        }
+    )
+
+
+def np3_class_verdicts(
+    table: pd.DataFrame,
+) -> dict[tuple[str, str], bool | None]:
+    """Return NP3's verdict per (level, class) (``validated_min_depth`` rows).
+
+    The result has the per-member shape that
+    ``resolvability.every_member_verdict`` combines over the version-7
+    emission members.
+
+    A missing ``passed`` (``None``, or the ``nan`` a CSV round trip turns it
+    into) stays not evaluable; it is never read as a pass.
+
+    Args:
+        table: ``validated_min_depth`` output.
+
+    Returns:
+        Per (level, class): ``True`` (passes), ``False`` (fails) or ``None``
+        (not evaluable).
+    """
+    return {
+        (str(level), str(cls)): None
+        if passed is None or pd.isna(passed)
+        else bool(passed)
+        for level, cls, passed in zip(
+            table["level"], table["class"], table["passed"], strict=True
+        )
+    }
+
+
+# --------------------------------------------------------------------------
+# NP5: resolvability consistency (§14 NP5)
+
+# §14 NP5: "each t* varies <= 0.05 across replicates at tested sets".
+NP5_MAX_TSTAR_SPREAD: Final = 0.05
+# §14 NP5: "> 50% resolvability_extrapolated" at the expected depth fails.
+NP5_MAX_EXTRAPOLATED_SHARE: Final = 0.5
+# Revision R3 (c) (pre-registration §23.21): each replicate's t*, applied to
+# the base's pooled calls of a tested set, gives point precision >= target_L
+# less this margin.
+NP5_TSTAR_PRECISION_MARGIN: Final = 0.02
+# Where a class's expected depth comes from (``np5_extrapolated_share``).
+NP5_DEPTH_FROM_CLASS: Final = "class"
+NP5_DEPTH_FROM_DEFAULT: Final = "default"
+NP5_AGREEMENT_COLUMNS: Final[tuple[str, ...]] = (
+    "level",
+    "class",
+    "group",
+    "seed",
+    "n_bins",
+    "n_compared",
+    "boundary_depths",
+    "flipped_depths",
+    "n_flipped",
+    "passed",
+    # Reported only: the either-side reading of the compared bins (a bin
+    # where the base or the replicate holds 50 test cells), scored until
+    # revision R6 (pre-registration §23.21).
+    "n_compared_union",
+    "flipped_depths_union",
+    "passed_union",
+)
+NP5_THRESHOLD_COLUMNS: Final[tuple[str, ...]] = (
+    "level",
+    "class",
+    "set",
+    "pooled",
+    "set_min_depth",
+    "group",
+    "seed",
+    "n_called",
+    "n_fit",
+    "fitted",
+    "target",
+    "t_star",
+    "threshold",
+    "threshold_source",
+)
+# Version 7 (§23.21 R3 (c), read per bin, pre-registration §23.22): one row
+# per (tested set, replicate, bin of the set).
+NP5_ENSEMBLE_THRESHOLD_COLUMNS: Final[tuple[str, ...]] = (
+    *NP5_THRESHOLD_COLUMNS[: NP5_THRESHOLD_COLUMNS.index("set_min_depth") + 1],
+    "depth",
+    *NP5_THRESHOLD_COLUMNS[NP5_THRESHOLD_COLUMNS.index("set_min_depth") + 1 :],
+)
+NP5_SPREAD_COLUMNS: Final[tuple[str, ...]] = (
+    "level",
+    "class",
+    "set",
+    "pooled",
+    "n_replicates",
+    "n_fitted",
+    "n_thresholds",
+    "unfitted",
+    "missing",
+    "threshold_min",
+    "threshold_max",
+    "spread",
+    "max_spread",
+    "evaluable",
+    "passed",
+)
+# Where the thresholds of NP5's consequence check come from (§23.21 R3 (c)):
+# each member's own re-fit (version 6), or the ensemble's pooled t* re-fitted
+# per replicate (version 7).
+NP5_TSTAR_FROM_MEMBER: Final = "member"
+NP5_TSTAR_FROM_ENSEMBLE: Final = "ensemble"
+NP5_CONSEQUENCE_COLUMNS: Final[tuple[str, ...]] = (
+    "level",
+    "class",
+    "set",
+    "pooled",
+    "set_min_depth",
+    "threshold_from",
+    "target",
+    "limit",
+    "n_called",
+    "n_replicates",
+    "n_fitted",
+    "n_scored",
+    "unfitted",
+    "missing",
+    "min_precision",
+    "failed",
+    "evaluable",
+    "passed",
+)
+NP5_EXTRAPOLATED_COLUMNS: Final[tuple[str, ...]] = (
+    "level",
+    "class",
+    "depth_source",
+    "n_depths",
+    "expected_depth",
+    "expected_bin",
+    "profile_share",
+    "median_share",
+    "above_grid_share",
+    "max_share",
+    "profile_passed",
+    "median_passed",
+    "passed",
+)
+NP5_CLASS_COLUMNS: Final[tuple[str, ...]] = (
+    "level",
+    "class",
+    "n_sets",
+    "agreement_passed",
+    "tstar_passed",
+    "depth_passed",
+    "n_tstar_not_evaluable",
+    "tstar_not_evaluable_sets",
+    "n_tstar_unfitted",
+    "passed",
+)
+_DECISION_KEY: Final[tuple[str, ...]] = ("level", "class", "depth")
+
+
+@dataclass(frozen=True)
+class Np5Settings:
+    """The NP5 constants (§14 NP5; plan §3.7).
+
+    Attributes:
+        min_test_cells: Test cells a depth bin needs, in the base run and in
+            the replicate (revision R6, pre-registration §23.21), for its
+            emission decision to be compared (§14: "every depth bin with >=
+            50 test cells"; ``min_cells_per_bin``, 50, the rule of D_max).
+        max_tstar_spread: The largest range of t* across the replicates at a
+            tested set (0.05; reported only since revision R3 (c)).
+        max_extrapolated_share: The largest share of a class's cells at the
+            family's expected depth that may be ``resolvability_extrapolated``
+            (0.5).
+        tstar_precision_margin: How far below target_L the point precision
+            of the base's calls at a replicate's t* may fall (0.02; revision
+            R3 (c), ``np5_tstar_consequence``).
+    """
+
+    min_test_cells: int
+    max_tstar_spread: float = NP5_MAX_TSTAR_SPREAD
+    max_extrapolated_share: float = NP5_MAX_EXTRAPOLATED_SHARE
+    tstar_precision_margin: float = NP5_TSTAR_PRECISION_MARGIN
+
+    def __post_init__(self) -> None:
+        """Validate the constants.
+
+        Raises:
+            ValueError: If ``min_test_cells`` is below 1, ``max_tstar_spread``
+                is negative, ``max_extrapolated_share`` is outside [0, 1] or
+                ``tstar_precision_margin`` outside [0, 1).
+        """
+        if self.min_test_cells < 1:
+            raise ValueError(
+                f"Np5Settings.min_test_cells must be >= 1, got {self.min_test_cells!r}"
+            )
+        if not self.max_tstar_spread >= 0.0:
+            raise ValueError(
+                "Np5Settings.max_tstar_spread must be >= 0, got "
+                f"{self.max_tstar_spread!r}"
+            )
+        if not 0.0 <= self.max_extrapolated_share <= 1.0:
+            raise ValueError(
+                "Np5Settings.max_extrapolated_share must lie in [0, 1], got "
+                f"{self.max_extrapolated_share!r}"
+            )
+        if not 0.0 <= self.tstar_precision_margin < 1.0:
+            raise ValueError(
+                "Np5Settings.tstar_precision_margin must lie in [0, 1), got "
+                f"{self.tstar_precision_margin!r}"
+            )
+
+    @classmethod
+    def from_config(cls, config: AnnotationResolvabilityConfig) -> Np5Settings:
+        """Read the NP5 constants from the resolvability config (§14 NP5).
+
+        Args:
+            config: The resolvability config.
+
+        Returns:
+            The settings (the t* spread and the extrapolated share are the §14
+            constants 0.05 and 0.5; the t* consequence margin is §23.21 R3
+            (c)'s 0.02).
+        """
+        return cls(min_test_cells=config.min_cells_per_bin)
+
+
+def _one_seed(frame: pd.DataFrame, name: str) -> int:
+    """The one mapping seed of a replicate's rows.
+
+    Raises:
+        ValueError: If the rows are empty or hold more than one seed.
+    """
+    if frame.empty:
+        raise ValueError(f"{name}: no rows after the filters")
+    seeds = pd.unique(frame["seed"])
+    if len(seeds) != 1:
+        raise ValueError(
+            f"{name}: the rows hold the mapping seeds {sorted(seeds.tolist())}; "
+            "pass one replicate (one seed) per table"
+        )
+    return int(seeds[0])
+
+
+def _require_fit_half(frame: pd.DataFrame, name: str) -> None:
+    """Refuse a replicate's rows that hold check-half rows but no fit-half rows.
+
+    NP5 re-derives each replicate's emission and t* on the replicate's own
+    fit half, so it takes every replicate's table in full, the default
+    group's included. ``held_out_replicates`` keeps only the default group's
+    check half (``half == 1``): given that output, the group's fit would be
+    empty, and its replicates would be left out of the t* range as
+    ``unfitted`` without an error.
+
+    Raises:
+        ValueError: If ``frame`` has rows with ``half == 1`` and none with
+            ``half == 0``.
+    """
+    if "half" not in frame.columns:
+        return
+    half = frame["half"].to_numpy()
+    if bool((half == 1).any()) and not bool((half == 0).any()):
+        raise ValueError(
+            f"{name}: the rows hold check-half rows (half == 1) and no fit-half "
+            "rows; NP5 re-derives each replicate on its own fit half, so pass "
+            "the replicate tables in full, not held_out_replicates' output"
+        )
+
+
+def np5_rederive(
+    cells: pd.DataFrame,
+    levels: Sequence[res.LevelMeta],
+    depths: Sequence[int],
+    settings: res.RuleSettings,
+    *,
+    recipe: str | None = res.DECISION_RECIPE,
+    member: str | None = None,
+    saturated_bp_share: float | None = None,
+) -> pd.DataFrame:
+    """Re-derive one replicate's emission decisions by ``decide`` (§14 NP5).
+
+    NP5 re-derives the §8.3 decisions in each replicate (another donor or
+    draw, another mapping seed) from its own rows, with the base run's rule
+    settings, and compares them with the base run
+    (``np5_decision_agreement``). The replicate's thresholds are fitted on
+    its own fit half; nothing here is scored at the frozen thresholds, so
+    the default group's table is used in full. The rows are kept at their
+    own mapping seed.
+
+    Version 7: one emission member's decisions (``member``, ``recipe=None``
+    and the ensemble's ``saturated_bp_share``, as ``ensemble_decide`` decides
+    each member), or the ensemble's (``np5_rederive_ensemble``).
+
+    Args:
+        cells: One replicate's cells table.
+        levels: The bundle's level metadata.
+        depths: The bundle's depth grid.
+        settings: The bundle's rule settings.
+        recipe: The recipe of the rows (``None``: the rows must hold one).
+        member: The version-7 member of the rows.
+        saturated_bp_share: The saturated-bp rule (v7.8; ``None``: version 6).
+
+    Returns:
+        ``decide`` output.
+
+    Raises:
+        ValueError: If no row is left after the filters, the rows hold more
+            than one recipe or mapping seed, or they hold check-half rows and
+            no fit-half rows (``held_out_replicates`` output).
+        ResolvabilityError: If a (level, cell, depth) occurs more than once
+            (``replicate_rows``).
+    """
+    frame = res.replicate_rows(cells, recipe=recipe, seed=None, member=member)
+    name = f"np5_rederive (recipe={recipe!r}, member={member!r})"
+    seed = _one_seed(frame, name)
+    _require_fit_half(frame, name)
+    recipes = sorted({str(value) for value in frame["recipe"]})
+    if len(recipes) != 1:
+        raise ValueError(
+            f"np5_rederive: the rows hold the recipes {recipes}; pass recipe= "
+            "or member= to select one replicate"
+        )
+    return res.decide(
+        frame,
+        levels,
+        depths,
+        settings,
+        recipe=recipes[0],
+        seed=seed,
+        saturated_bp_share=saturated_bp_share,
+    )
+
+
+def np5_rederive_ensemble(
+    cells: pd.DataFrame,
+    levels: Sequence[res.LevelMeta],
+    depths: Sequence[int],
+    settings: res.RuleSettings,
+    ensemble: res.EnsembleSettings,
+    *,
+    members: Sequence[str],
+    neuronal: res.NeuronalOf,
+) -> pd.DataFrame:
+    """Re-derive one replicate's version-7 ensemble decisions (§14 NP5, v7.7-v7.9).
+
+    The ensemble rule of ``ensemble_decide`` on the replicate's rows of the
+    emission members. ``ensemble_decide`` decides on mapping seed 0, so a
+    replicate at another mapping seed is relabelled to 0 first (its rows
+    are unchanged otherwise). ``neuronal`` is required: the monotone fill
+    (v7.9) stops non-neuronal classes at its depth limit, and the frozen
+    decisions were filled with the bundle's ``neuronal_classes``; a
+    replicate filled with another lineage could flip bins against the base
+    run for that reason alone.
+
+    Args:
+        cells: One replicate's version-7 cells table (``member`` column).
+        levels: The bundle's level metadata.
+        depths: The bundle's depth grid.
+        settings: The bundle's rule settings.
+        ensemble: The bundle's ensemble settings.
+        members: The emission members.
+        neuronal: Per class, whether it is neuronal (the monotone fill's
+            non-neuronal limit, v7.9): the bundle's ``neuronal_classes``
+            (``resolvability_summary.json``), as the frozen decisions used.
+
+    Returns:
+        The ensemble decisions (``EnsembleDecisions.decisions``).
+
+    Raises:
+        ValueError: Without members, when a member has no rows or check-half
+            rows and no fit-half rows (``held_out_replicates`` output), or
+            when the rows hold more than one mapping seed.
+        ResolvabilityError: If a member holds a (level, cell, depth) more
+            than once (``replicate_rows``).
+    """
+    if not members:
+        raise ValueError("np5_rederive_ensemble needs at least one emission member")
+    if res.MEMBER_COLUMN not in cells.columns:
+        raise ValueError("np5_rederive_ensemble: the cells have no member column")
+    names = cells[res.MEMBER_COLUMN].astype(str)
+    frame = cells[names.isin([str(name) for name in members]).to_numpy()]
+    for name in members:
+        rows = res.replicate_rows(frame, recipe=None, seed=None, member=str(name))
+        if rows.empty:
+            raise ValueError(f"np5_rederive_ensemble: member {name!r} has no rows")
+        _require_fit_half(rows, f"np5_rederive_ensemble (member={name!r})")
+    _one_seed(frame, "np5_rederive_ensemble")
+    relabelled = frame.copy()
+    relabelled["seed"] = np.zeros(len(frame), dtype=frame["seed"].to_numpy().dtype)
+    return res.ensemble_decide(
+        relabelled,
+        levels,
+        depths,
+        settings,
+        ensemble,
+        members=list(members),
+        neuronal=neuronal,
+    ).decisions
+
+
+def _require_columns(frame: pd.DataFrame, columns: Iterable[str], name: str) -> None:
+    """Raise ``ValueError`` naming the columns ``frame`` lacks."""
+    missing = [column for column in columns if column not in frame.columns]
+    if missing:
+        raise ValueError(f"{name}: missing columns {missing}")
+
+
+def _regime_rows(decisions: pd.DataFrame, regime: str, name: str) -> pd.DataFrame:
+    """One regime's rows of a decisions table, one per (level, class, depth).
+
+    Raises:
+        ValueError: If the regime has no rows, or a (level, class, depth)
+            occurs more than once (several members or replicates in one
+            table).
+    """
+    _require_columns(decisions, ("regime", *_DECISION_KEY, "status"), name)
+    frame = decisions[(decisions["regime"].astype(str) == regime).to_numpy()]
+    if frame.empty:
+        raise ValueError(f"{name}: no decisions of the regime {regime!r}")
+    key = pd.DataFrame(
+        {
+            "level": frame["level"].astype(str).to_numpy(),
+            "class": frame["class"].astype(str).to_numpy(),
+            "depth": frame["depth"].to_numpy(np.int64),
+        }
+    )
+    duplicated = key.duplicated()
+    if bool(duplicated.any()):
+        raise ValueError(
+            f"{name}: {int(duplicated.sum())} (level, class, depth) decisions occur "
+            "more than once; pass one decisions table per replicate (version 7: "
+            "the ensemble's, or one member's)"
+        )
+    return frame
+
+
+def _emission_view(
+    decisions: pd.DataFrame, regime: str, name: str
+) -> tuple[dict[tuple[str, str], dict[int, tuple[bool, int]]], set[int]]:
+    """Per (level, class) and depth: (emitted, n_test); and the depths seen."""
+    _require_columns(decisions, ("n_test",), name)
+    frame = _regime_rows(decisions, regime, name)
+    view: dict[tuple[str, str], dict[int, tuple[bool, int]]] = {}
+    for level, cls, depth, status, n_test in zip(
+        frame["level"].astype(str),
+        frame["class"].astype(str),
+        frame["depth"].to_numpy(np.int64),
+        frame["status"].astype(object),
+        frame["n_test"].astype(object),
+        strict=True,
+    ):
+        count = 0 if n_test is None or pd.isna(n_test) else int(n_test)
+        view.setdefault((level, cls), {})[int(depth)] = (
+            status == res.STATUS_EMITTED,
+            count,
+        )
+    return view, {int(depth) for depth in frame["depth"]}
+
+
+def _boundary_depths(emitted: Sequence[bool], grid: Sequence[int]) -> set[int]:
+    """The bins flanking a change of emission status between grid neighbours."""
+    flanking: set[int] = set()
+    for index in range(1, len(grid)):
+        if emitted[index] != emitted[index - 1]:
+            flanking.update((grid[index - 1], grid[index]))
+    return flanking
+
+
+def _joined(depths: Iterable[int]) -> str:
+    """Depths in ascending order, ``;`` joined."""
+    return ";".join(str(depth) for depth in sorted(depths))
+
+
+def _agreement_passed(flipped: Sequence[int], boundary: Collection[int]) -> bool:
+    """No flip, or exactly one at a bin adjacent to a boundary (§14 NP5)."""
+    return not flipped or (len(flipped) == 1 and flipped[0] in boundary)
+
+
+def np5_decision_agreement(
+    base: pd.DataFrame,
+    replicates: Mapping[ReplicateKey, pd.DataFrame],
+    settings: Np5Settings,
+    *,
+    regime: res.Regime = "provisional",
+) -> pd.DataFrame:
+    """Compare each replicate's re-derived emission with the base run (§14 NP5).
+
+    §14 NP5: per (level, class), the §8.3 emission decisions re-derived in
+    each replicate (``np5_rederive``; version 7 ``np5_rederive_ensemble``,
+    revision R7) agree with the base run at every depth bin with >= 50 test
+    cells, except at most the bin adjacent to the emission boundary. Read
+    here as:
+
+    - a bin is compared when the base run and the replicate each have at
+      least ``min_test_cells`` test cells of the class there (``n_test``;
+      revision R6, pre-registration §23.21: a bin with a test on one side
+      and a pooled extrapolation on the other is no consistency check). The
+      either-side reading scored before §23.21 is reported in the
+      ``*_union`` columns;
+    - a decision is the bin's status at ``regime`` (emitted or not); a
+      (level, class) or bin that a table lacks is not emitted there;
+    - the emission boundaries are the base run's status changes between
+      neighbouring bins of the grid; the bins adjacent to one are the two
+      bins flanking it. The grid's edges are no boundary, so a base that
+      emits every bin (or none) allows no flip;
+    - a replicate passes when no compared bin flips, or exactly one does and
+      it is adjacent to a boundary.
+
+    Args:
+        base: The base run's decisions (``decide``; version 7: the frozen
+            ensemble's, or one member's).
+        replicates: Per (group, seed label), that replicate's re-derived
+            decisions of the same kind as ``base``.
+        settings: The NP5 constants.
+        regime: The regime compared (gate P freezes the provisional one).
+
+    The row's ``passed`` judges the whole grid; the gate-P verdict reads
+    ``flipped_depths`` and ``boundary_depths`` at each floor of the depth
+    walk (``gate_p_depth_walk``, revision R2).
+
+    Returns:
+        One row per (level, class) of either table and replicate, sorted by
+        level, class, group and seed, columns ``NP5_AGREEMENT_COLUMNS``:
+        ``boundary_depths`` and ``flipped_depths`` are ``;`` joined.
+
+    Raises:
+        ValueError: Without replicates, for a table without ``n_test`` or
+            rows of the regime, or with a (level, class, depth) more than
+            once.
+    """
+    if not replicates:
+        raise ValueError("np5_decision_agreement: no replicates")
+    base_view, base_depths = _emission_view(base, regime, "the base decisions")
+    minimum = settings.min_test_cells
+    records: list[dict[str, object]] = []
+    for group, seed in sorted(replicates):
+        name = f"replicate {group}/{seed}"
+        view, depths = _emission_view(replicates[(group, seed)], regime, name)
+        grid = sorted(base_depths | depths)
+        for key in sorted(set(base_view) | set(view)):
+            mine = base_view.get(key, {})
+            theirs = view.get(key, {})
+            base_emitted = [mine.get(depth, (False, 0))[0] for depth in grid]
+            boundary = _boundary_depths(base_emitted, grid)
+            counts = {
+                depth: (
+                    mine.get(depth, (False, 0))[1],
+                    theirs.get(depth, (False, 0))[1],
+                )
+                for depth in grid
+            }
+            changed = {
+                depth
+                for depth in grid
+                if mine.get(depth, (False, 0))[0] != theirs.get(depth, (False, 0))[0]
+            }
+            compared = [depth for depth in grid if min(counts[depth]) >= minimum]
+            union = [depth for depth in grid if max(counts[depth]) >= minimum]
+            flipped = [depth for depth in compared if depth in changed]
+            flipped_union = [depth for depth in union if depth in changed]
+            records.append(
+                {
+                    "level": key[0],
+                    "class": key[1],
+                    "group": str(group),
+                    "seed": seed,
+                    "n_bins": len(grid),
+                    "n_compared": len(compared),
+                    "boundary_depths": _joined(boundary),
+                    "flipped_depths": _joined(flipped),
+                    "n_flipped": len(flipped),
+                    "passed": _agreement_passed(flipped, boundary),
+                    "n_compared_union": len(union),
+                    "flipped_depths_union": _joined(flipped_union),
+                    "passed_union": _agreement_passed(flipped_union, boundary),
+                }
+            )
+    table = pd.DataFrame.from_records(records, columns=list(NP5_AGREEMENT_COLUMNS))
+    return table.sort_values(
+        ["level", "class", "group", "seed"], kind="mergesort"
+    ).reset_index(drop=True)
+
+
+def _set_threshold(
+    bp: np.ndarray,
+    correct: np.ndarray,
+    half: np.ndarray,
+    meta: res.LevelMeta,
+    target: float,
+    settings: res.RuleSettings,
+    saturated_bp_share: float | None,
+) -> tuple[int, bool, float | None, float | None, str | None]:
+    """Fit one tested set's t* as ``decide`` fits a bin or a pooled set.
+
+    Returns:
+        ``(n_fit, fitted, t_star, threshold, threshold_source)``.
+    """
+    fit_mask = (half == 0) if settings.split_halves else np.ones(len(bp), dtype=bool)
+    fit_mask = fit_mask & np.isfinite(bp)
+    n_fit = int(fit_mask.sum())
+    fit = (
+        res.isotonic_fit(bp[fit_mask], correct[fit_mask])
+        if n_fit >= settings.min_cells_per_bin
+        else None
+    )
+    t_star = res.local_threshold(
+        fit,
+        default=meta.default_threshold,
+        target=target,
+        cap=settings.threshold_cap,
+    )
+    if t_star is not None:
+        return n_fit, True, t_star, t_star, res.THRESHOLD_SOURCE_LOCAL
+    if (
+        fit is not None
+        and saturated_bp_share is not None
+        and res.saturated_bp_fraction(bp[fit_mask]) > saturated_bp_share
+    ):
+        cap = float(settings.threshold_cap)
+        return n_fit, True, None, cap, res.THRESHOLD_SOURCE_SATURATED
+    return n_fit, fit is not None, None, None, None
+
+
+def np5_set_thresholds(
+    replicates: Mapping[ReplicateKey, pd.DataFrame],
+    tested: Mapping[tuple[str, str], Sequence[res.GatePTestedSet] | None],
+    levels: Sequence[res.LevelMeta],
+    settings: res.RuleSettings,
+    *,
+    regime: res.Regime = "provisional",
+    recipe: str | None = res.DECISION_RECIPE,
+    member: str | None = None,
+    saturated_bp_share: float | None = None,
+) -> pd.DataFrame:
+    """Re-derive t* at every tested set in each replicate (§14 NP5).
+
+    A tested set's t* is fitted on the replicate's calls of the class in the
+    set's scope (``tested_set_mask``'s membership rule, so NP3-NP7 cannot
+    drift apart: a bin's calls, or each test cell's deepest call at >= D_P),
+    as ``decide`` fits a bin or a pooled ">= d" set: the isotonic fit on the
+    fit half (``half == 0``; every call without split halves) with at least
+    ``min_cells_per_bin`` calls, then ``local_threshold`` at the regime's
+    target of the set's shallowest bin. The default group's table is used
+    in full: its t* is re-derived on its own fit half, never scored at the
+    frozen thresholds, so a table of check-half rows alone (the output of
+    ``held_out_replicates``, which ``replicate_set_stats`` and
+    ``pooled_held_out_cells`` apply themselves) raises rather than leaving
+    the group out as ``unfitted``. With ``saturated_bp_share`` (version 7, v7.8) a
+    fitted set without t* whose fit-half calls are saturated takes the cap
+    (``threshold_source = saturated_cap``).
+
+    Args:
+        replicates: Per (group, seed label), that replicate's cells table.
+            Each table must hold exactly one replicate.
+        tested: The tested sets per (level, class) (``gate_p_tested_sets``
+            on the pooled held-out calls; version 7: the member's).
+        levels: The bundle's level metadata (default thresholds, targets).
+        settings: The bundle's rule settings.
+        regime: A fitted regime (``provisional`` in gate P, or ``trust``).
+        recipe: The recipe of the rows (``None``: every recipe, so each table
+            must hold one).
+        member: The version-7 emission member of the rows.
+        saturated_bp_share: The saturated-bp rule (``None``: version 6).
+
+    Returns:
+        One row per (tested set, replicate), sorted by level, class, set,
+        group and seed, columns ``NP5_THRESHOLD_COLUMNS``: ``fitted`` is
+        whether the fit exists; ``t_star`` and ``threshold`` (the applied
+        one: t* or the saturated cap) are ``nan`` without one.
+
+    Raises:
+        ValueError: For the ``validated`` regime (it applies the default,
+            which has no t*), without replicates, for a level without
+            metadata, a replicate without rows after the filters or with
+            check-half rows and no fit-half rows, or a key's tested sets
+            that are an empty list or of another key.
+        ResolvabilityError: If a table holds more than one replicate
+            (``replicate_rows``).
+    """
+    if regime == "validated":
+        raise ValueError(
+            "np5_set_thresholds: the validated regime applies the default "
+            "threshold, which has no t* to vary"
+        )
+    if not replicates:
+        raise ValueError("np5_set_thresholds: no replicates")
+    _check_tested(tested)
+    meta_of = {meta.level: meta for meta in levels}
+    unknown = sorted({level for level, _ in tested} - set(meta_of))
+    if unknown:
+        raise ValueError(f"np5_set_thresholds: no level metadata for {unknown}")
+    ordered = sorted(tested.items(), key=lambda pair: pair[0])
+    records: list[dict[str, object]] = []
+    for group, seed in sorted(replicates):
+        frame = res.replicate_rows(
+            replicates[(group, seed)], recipe=recipe, seed=None, member=member
+        ).reset_index(drop=True)
+        if frame.empty:
+            raise ValueError(
+                f"replicate {group}/{seed} has no rows after the filters "
+                f"(recipe={recipe!r}, member={member!r})"
+            )
+        _require_fit_half(frame, f"replicate {group}/{seed}")
+        index = _ReplicateIndex(frame, np.zeros(len(frame), dtype=bool))
+        bp = frame["bp"].to_numpy(np.float64)
+        correct = frame["correct"].to_numpy(bool).astype(np.float64)
+        half = frame["half"].to_numpy(np.int64)
+        for (level, cls), items in ordered:
+            meta = meta_of[level]
+            for item in items or ():
+                called = index.called_positions(item)
+                set_min_depth = int(min(item.depths))
+                target = settings.target(regime, meta.base_target, set_min_depth)
+                n_fit, fitted, t_star, threshold, source = _set_threshold(
+                    bp[called],
+                    correct[called],
+                    half[called],
+                    meta,
+                    target,
+                    settings,
+                    saturated_bp_share,
+                )
+                records.append(
+                    {
+                        "level": level,
+                        "class": cls,
+                        "set": tested_set_label(item),
+                        "pooled": bool(item.pooled),
+                        "set_min_depth": set_min_depth,
+                        "group": str(group),
+                        "seed": seed,
+                        "n_called": int(len(called)),
+                        "n_fit": n_fit,
+                        "fitted": fitted,
+                        "target": target,
+                        "t_star": math.nan if t_star is None else t_star,
+                        "threshold": math.nan if threshold is None else threshold,
+                        "threshold_source": source,
+                    }
+                )
+    table = pd.DataFrame.from_records(records, columns=list(NP5_THRESHOLD_COLUMNS))
+    return table.sort_values(
+        ["level", "class", "set", "group", "seed"], kind="mergesort"
+    ).reset_index(drop=True)
+
+
+def _replicate_labels(rows: pd.DataFrame, mask: np.ndarray) -> str:
+    """``group/seed`` of the masked rows, ``;`` joined."""
+    return ";".join(
+        f"{group}/{seed}"
+        for group, seed in zip(
+            rows["group"][mask].astype(str), rows["seed"][mask], strict=True
+        )
+    )
+
+
+def np5_tstar_spread(thresholds: pd.DataFrame, settings: Np5Settings) -> pd.DataFrame:
+    """Judge the range of t* across the replicates at every tested set (§14 NP5).
+
+    §14 NP5: each t* varies <= ``max_tstar_spread`` (0.05) across replicates
+    at tested sets. Reported only since revision R3 (c) (pre-registration
+    §23.21: the spread measures sample size, not the panel); NP5's t* part
+    is the consequence check, ``np5_tstar_consequence``. The range is taken
+    over the replicates' applied thresholds (``threshold``): t*, or for
+    version 7 the saturated cap (0.99, v7.8), which enters the range like a
+    fitted t*. A replicate whose fit exists but never reaches the target has
+    no threshold, so it would not emit the set at all: the set fails
+    (``missing``). A replicate without a fit (too few fit-half calls) is
+    left out of the range (``unfitted``). With fewer than two thresholds the
+    range is not evaluable and the set passes; this is reported
+    (``evaluable``).
+
+    Args:
+        thresholds: ``np5_set_thresholds`` output (or rows of its columns).
+        settings: The NP5 constants.
+
+    Returns:
+        One row per (level, class, set), columns ``NP5_SPREAD_COLUMNS``.
+
+    Raises:
+        ValueError: If a column is missing.
+    """
+    _require_columns(
+        thresholds,
+        ("level", "class", "set", "pooled", "group", "seed", "fitted", "threshold"),
+        "the t* table",
+    )
+    if thresholds.empty:
+        return pd.DataFrame(columns=list(NP5_SPREAD_COLUMNS))
+    records: list[dict[str, object]] = []
+    for (level, cls, label), rows in thresholds.groupby(
+        ["level", "class", "set"], sort=True
+    ):
+        values = rows["threshold"].to_numpy(np.float64)
+        fitted = rows["fitted"].astype(bool).to_numpy()
+        has = np.isfinite(values)
+        missing = fitted & ~has
+        kept = values[has]
+        evaluable = len(kept) >= 2
+        spread = float(kept.max() - kept.min()) if evaluable else math.nan
+        records.append(
+            {
+                "level": level,
+                "class": cls,
+                "set": label,
+                "pooled": bool(rows["pooled"].iloc[0]),
+                "n_replicates": len(rows),
+                "n_fitted": int(fitted.sum()),
+                "n_thresholds": int(has.sum()),
+                "unfitted": _replicate_labels(rows, ~fitted),
+                "missing": _replicate_labels(rows, missing),
+                "threshold_min": float(kept.min()) if len(kept) else math.nan,
+                "threshold_max": float(kept.max()) if len(kept) else math.nan,
+                "spread": spread,
+                "max_spread": settings.max_tstar_spread,
+                "evaluable": evaluable,
+                "passed": not bool(missing.any())
+                and (not evaluable or spread <= settings.max_tstar_spread + _TOLERANCE),
+            }
+        )
+    return pd.DataFrame.from_records(records, columns=list(NP5_SPREAD_COLUMNS))
+
+
+def np5_ensemble_set_thresholds(
+    rederived: Mapping[ReplicateKey, pd.DataFrame],
+    tested: Mapping[tuple[str, str], Sequence[res.GatePTestedSet] | None],
+    settings: res.RuleSettings,
+    *,
+    regime: res.Regime = "provisional",
+) -> pd.DataFrame:
+    """Read the ensemble's t* at every bin of each tested set per replicate (R3 (c)).
+
+    Version 7: revision R3 (c) (pre-registration §23.21) applies NP5's
+    consequence check to the ensemble's pooled t*, re-fitted per replicate:
+    the thresholds of the replicate's re-derived ensemble decisions
+    (``np5_rederive_ensemble``) at the tested set. They are read at every
+    bin of the set (pre-registration §23.22): a ">= D_P" set's bins may be
+    decided on different sets in the replicate (D_P on its own, a deeper
+    bin on the replicate's deep pool), and the replicate's emission applies
+    each bin's threshold to that bin's calls (``np5_tstar_consequence``).
+    The applied ``threshold`` is taken (``t*_pool``, the saturated cap, or
+    a monotone fill's inherited one); a decision without a threshold is
+    ``fitted`` when its fit held ``min_cells_per_bin`` fit-half cells
+    (``n_fit``), so it fails the check, and is left out otherwise, as
+    ``np5_set_thresholds`` reads a member's re-fit. A bin the replicate's
+    decisions lack has no fit.
+
+    Args:
+        rederived: Per (group, seed label), the replicate's re-derived
+            ensemble decisions.
+        tested: The tested sets per (level, class) (one member's).
+        settings: The bundle's rule settings (``min_cells_per_bin``).
+        regime: The regime compared (gate P freezes the provisional one).
+
+    Returns:
+        One row per (tested set, replicate, bin of the set), sorted by
+        level, class, set, group, seed and depth, columns
+        ``NP5_ENSEMBLE_THRESHOLD_COLUMNS``.
+
+    Raises:
+        ValueError: Without replicates, for decisions without rows of the
+            regime or with a (level, class, depth) more than once, or a
+            key's tested sets that are an empty list or of another key.
+    """
+    if not rederived:
+        raise ValueError("np5_ensemble_set_thresholds: no replicates")
+    _check_tested(tested)
+    ordered = sorted(tested.items(), key=lambda pair: pair[0])
+    records: list[dict[str, object]] = []
+    for group, seed in sorted(rederived):
+        name = f"replicate {group}/{seed}"
+        frame = _regime_rows(rederived[(group, seed)], regime, name)
+        rows: dict[tuple[str, str, int], dict[str, Any]] = {
+            (str(row["level"]), str(row["class"]), int(row["depth"])): row
+            for row in frame.to_dict("records")
+        }
+        for (level, cls), items in ordered:
+            for item in items or ():
+                set_min_depth = int(min(item.depths))
+                for depth in sorted(int(value) for value in item.depths):
+                    row = rows.get((str(level), str(cls), depth), {})
+                    threshold = _optional_float(row.get("threshold"))
+                    t_star = _optional_float(row.get("t_star"))
+                    n_fit = _optional_float(row.get("n_fit"))
+                    n_called = _optional_float(row.get("n_called"))
+                    target = _optional_float(row.get("target"))
+                    source = _label(row.get("threshold_source"))
+                    fitted = n_fit is not None and n_fit >= settings.min_cells_per_bin
+                    records.append(
+                        {
+                            "level": level,
+                            "class": cls,
+                            "set": tested_set_label(item),
+                            "pooled": bool(item.pooled),
+                            "set_min_depth": set_min_depth,
+                            "depth": depth,
+                            "group": str(group),
+                            "seed": seed,
+                            "n_called": 0 if n_called is None else int(n_called),
+                            "n_fit": 0 if n_fit is None else int(n_fit),
+                            "fitted": fitted or threshold is not None,
+                            "target": math.nan if target is None else target,
+                            "t_star": math.nan if t_star is None else t_star,
+                            "threshold": math.nan if threshold is None else threshold,
+                            "threshold_source": source,
+                        }
+                    )
+    table = pd.DataFrame.from_records(
+        records, columns=list(NP5_ENSEMBLE_THRESHOLD_COLUMNS)
+    )
+    return table.sort_values(
+        ["level", "class", "set", "group", "seed", "depth"], kind="mergesort"
+    ).reset_index(drop=True)
+
+
+def _optional_float(value: object) -> float | None:
+    """A numeric cell as a float (``None``, ``nan`` and blanks as ``None``)."""
+    if value is None or isinstance(value, (bool, np.bool_)):
+        return None
+    try:
+        number = float(cast(Any, value))
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _consequence_thresholds(
+    thresholds: pd.DataFrame, *, per_bin: bool
+) -> dict[tuple[str, str, str], dict[str, dict[int | None, tuple[bool, float]]]]:
+    """Per tested set and replicate, (fitted, threshold) per bin (``None``: the set).
+
+    Raises:
+        ValueError: If a (set, replicate[, bin]) occurs more than once.
+    """
+    depths: Iterable[object] = (
+        thresholds["depth"] if per_bin else [None] * len(thresholds)
+    )
+    result: dict[tuple[str, str, str], dict[str, dict[int | None, tuple[bool, float]]]]
+    result = {}
+    for level, cls, label, group, replicate, depth, fitted, value in zip(
+        thresholds["level"].astype(str),
+        thresholds["class"].astype(str),
+        thresholds["set"].astype(str),
+        thresholds["group"].astype(str),
+        thresholds["seed"],
+        depths,
+        thresholds["fitted"].astype(bool),
+        thresholds["threshold"].to_numpy(np.float64),
+        strict=True,
+    ):
+        name = f"{group}/{replicate}"
+        bins = result.setdefault((level, cls, label), {}).setdefault(name, {})
+        key = None if depth is None else int(cast(Any, depth))
+        if key in bins:
+            raise ValueError(
+                f"np5_tstar_consequence: the t* row of {level}/{cls} {label}, "
+                f"replicate {name}" + ("" if key is None else f", bin {key}") + " "
+                "occurs more than once"
+            )
+        bins[key] = (bool(fitted), float(value))
+    return result
+
+
+def _check_set_bins(
+    values: Mapping[int | None, object], bins: Sequence[int | None], where: str
+) -> None:
+    """Require one threshold row per bin of a set (``None``: the set's one).
+
+    Raises:
+        ValueError: If a bin has no row, or a row is of a bin outside the set.
+    """
+    lacking = [depth for depth in bins if depth not in values]
+    if lacking:
+        raise ValueError(
+            f"np5_tstar_consequence: {where} has no t* row for bin "
+            + ", ".join(str(depth) for depth in lacking)
+        )
+    extra = [depth for depth in values if depth not in bins]
+    if extra:
+        raise ValueError(
+            f"np5_tstar_consequence: {where} has t* rows for bins {extra} outside "
+            "the set"
+        )
+
+
+def np5_tstar_consequence(
+    replicates: Mapping[ReplicateKey, pd.DataFrame],
+    tested: Mapping[tuple[str, str], Sequence[res.GatePTestedSet] | None],
+    thresholds: pd.DataFrame,
+    targets: Mapping[str, float],
+    *,
+    default_group: str | None,
+    settings: Np5Settings | None = None,
+    recipe: str | None = res.DECISION_RECIPE,
+    seed: int = 0,
+    member: str | None = None,
+    threshold_from: str = NP5_TSTAR_FROM_MEMBER,
+) -> pd.DataFrame:
+    """NP5's t* part as a consequence check (pre-registration §23.21 R3 (c)).
+
+    Revision R3 (c), approved by the user on 2026-10-07: at each tested set,
+    each replicate's own t*, applied to the base recipe's pooled held-out
+    seed-0 calls of the class in the set's scope (the population the set
+    was tested on; any confidence, ``bp`` >= t* within 1e-9), gives an
+    unweighted point precision >= target_L - ``tstar_precision_margin``
+    (0.02). The thresholds come from:
+
+    - ``member`` (``np5_set_thresholds``): the member's t* re-fitted on the
+      set's calls in the replicate, one per (set, replicate), applied to
+      every call of the set;
+    - ``ensemble`` (version 7, ``np5_ensemble_set_thresholds``): the
+      ensemble's pooled t* re-fitted per replicate, one per (set,
+      replicate, bin of the set). Each call is kept at its own bin's
+      threshold, as the replicate's emission applies them (pre-registration
+      §23.22): a ">= D_P" set's deeper bins may take the replicate's deep
+      pool's t*.
+
+    A replicate without a fit (no bin of the set fitted) is left out
+    (``unfitted``); one fitted without a threshold, at the set or at any bin
+    of it, fails the set (``missing``: it would emit nothing there). An
+    unfitted bin of an otherwise fitted replicate emits none of its calls.
+    A threshold no base call reaches gives no precision and fails the set.
+    The check asks whether the threshold's wobble changes what is emitted,
+    not how much it wobbles: the t* spread (``np5_tstar_spread``) is
+    reported only.
+
+    Args:
+        replicates: Per (group, seed label), the base simulation's cells
+            table (the default group's in full; pooled here with
+            ``pooled_held_out_cells``).
+        tested: The tested sets per (level, class) (version 7: the
+            member's), built on the same pooled seed-0 calls.
+        thresholds: The replicates' thresholds: ``NP5_THRESHOLD_COLUMNS``
+            (``member``) or ``NP5_ENSEMBLE_THRESHOLD_COLUMNS`` (``ensemble``).
+        targets: target_L per level (``level_targets``).
+        default_group: The group whose fit half the frozen thresholds were
+            fitted on (required, as in NP3).
+        settings: The NP5 constants (the margin; default the registered
+            0.02).
+        recipe: The recipe of the base rows.
+        seed: The seed label of the pooled rows (0).
+        member: The version-7 emission member of the base rows.
+        threshold_from: Where the thresholds come from (``member`` or
+            ``ensemble``).
+
+    Returns:
+        One row per tested set, sorted by level, class and set, columns
+        ``NP5_CONSEQUENCE_COLUMNS``: ``failed`` lists each failing
+        replicate as ``group/seed:t*->precision`` (``ensemble``:
+        ``group/seed:bin=t*,...->precision`` over the bins with a
+        threshold); ``evaluable`` is whether any replicate was scored.
+
+    Raises:
+        ValueError: For an unknown ``threshold_from``, thresholds of the
+            other source (a ``depth`` column exactly for ``ensemble``), a
+            tested set (``ensemble``: a bin of it) without a threshold row
+            for a replicate or with one more than once, a level without a
+            target, a missing column, no row left after the filters, a
+            key's tested sets that are an empty list or of another key, or
+            for the default group's inputs (``held_out_replicates``).
+    """
+    if threshold_from not in (NP5_TSTAR_FROM_MEMBER, NP5_TSTAR_FROM_ENSEMBLE):
+        raise ValueError(
+            f"np5_tstar_consequence: threshold_from must be "
+            f"{NP5_TSTAR_FROM_MEMBER!r} or {NP5_TSTAR_FROM_ENSEMBLE!r}, got "
+            f"{threshold_from!r}"
+        )
+    per_bin = threshold_from == NP5_TSTAR_FROM_ENSEMBLE
+    if per_bin != ("depth" in thresholds.columns):
+        raise ValueError(
+            "np5_tstar_consequence: the ensemble's thresholds are read per bin "
+            "(np5_ensemble_set_thresholds, a depth column) and a member's per "
+            f"set (np5_set_thresholds); got threshold_from={threshold_from!r} "
+            f"with{'' if 'depth' in thresholds.columns else 'out'} a depth column"
+        )
+    _check_tested(tested)
+    _require_columns(
+        thresholds,
+        ("level", "class", "set", "group", "seed", "fitted", "threshold"),
+        "the t* table",
+    )
+    margin = (
+        NP5_TSTAR_PRECISION_MARGIN
+        if settings is None
+        else settings.tstar_precision_margin
+    )
+    cells = pooled_held_out_cells(replicates, default_group=default_group, seed=seed)
+    frame = res.replicate_rows(
+        cells, recipe=recipe, seed=seed, member=member
+    ).reset_index(drop=True)
+    if frame.empty:
+        raise ValueError(
+            f"np5_tstar_consequence: no rows after the filters (recipe={recipe!r}, "
+            f"seed={seed!r}, member={member!r})"
+        )
+    index = _ReplicateIndex(frame, np.zeros(len(frame), dtype=bool))
+    bp = np.nan_to_num(frame["bp"].to_numpy(np.float64), nan=-1.0)
+    correct = frame["correct"].to_numpy(bool)
+    call_depth = frame["depth"].to_numpy(np.int64)
+    by_set = _consequence_thresholds(thresholds, per_bin=per_bin)
+    records: list[dict[str, object]] = []
+    for (level, cls), items in sorted(tested.items(), key=lambda pair: pair[0]):
+        for item in items or ():
+            label = tested_set_label(item)
+            rows = by_set.get((str(level), str(cls), label))
+            if not rows:
+                raise ValueError(
+                    f"np5_tstar_consequence: no t* rows for the tested set "
+                    f"{level}/{cls} {label}"
+                )
+            if level not in targets:
+                raise ValueError(f"np5_tstar_consequence: no target for {level!r}")
+            limit = float(targets[level]) - margin
+            called = index.called_positions(item)
+            bins: list[int | None] = (
+                [*sorted(int(depth) for depth in item.depths)] if per_bin else [None]
+            )
+            precisions: list[float] = []
+            failed: list[str] = []
+            missing: list[str] = []
+            unfitted: list[str] = []
+            for name, values in rows.items():
+                _check_set_bins(
+                    values, bins, f"replicate {name} of {level}/{cls} {label}"
+                )
+                applied = {
+                    depth: value
+                    for depth, (_, value) in values.items()
+                    if math.isfinite(value)
+                }
+                if any(
+                    fit and not math.isfinite(value) for fit, value in values.values()
+                ):
+                    missing.append(name)
+                    continue
+                if not applied:
+                    unfitted.append(name)
+                    continue
+                if per_bin:
+                    at_call = np.array(
+                        [
+                            applied.get(int(depth), math.nan)
+                            for depth in call_depth[called]
+                        ],
+                        dtype=np.float64,
+                    )
+                    shown = ",".join(
+                        f"{depth}={value:.3f}"
+                        for depth, value in sorted(applied.items())
+                    )
+                else:
+                    at_call = np.full(len(called), applied[None], dtype=np.float64)
+                    shown = f"{applied[None]:.3f}"
+                keep = np.isfinite(at_call) & (bp[called] >= at_call - _TOLERANCE)
+                kept = called[keep]
+                precision = float(correct[kept].mean()) if len(kept) else math.nan
+                precisions.append(precision)
+                if not precision >= limit - _TOLERANCE:
+                    failed.append(f"{name}:{shown}->{precision:.4f}")
+            finite = [value for value in precisions if math.isfinite(value)]
+            records.append(
+                {
+                    "level": level,
+                    "class": cls,
+                    "set": label,
+                    "pooled": bool(item.pooled),
+                    "set_min_depth": int(min(item.depths)),
+                    "threshold_from": threshold_from,
+                    "target": float(targets[level]),
+                    "limit": limit,
+                    "n_called": int(len(called)),
+                    "n_replicates": len(rows),
+                    "n_fitted": len(rows) - len(unfitted),
+                    "n_scored": len(precisions),
+                    "unfitted": ";".join(unfitted),
+                    "missing": ";".join(missing),
+                    "min_precision": min(finite) if finite else math.nan,
+                    "failed": ";".join(failed),
+                    "evaluable": bool(precisions),
+                    "passed": not failed and not missing,
+                }
+            )
+    return pd.DataFrame.from_records(records, columns=list(NP5_CONSEQUENCE_COLUMNS))
+
+
+def _depth_values(value: float | Sequence[float], cls: str) -> np.ndarray:
+    """A class's expected depth (one value) or its cells' depths, checked.
+
+    Raises:
+        ValueError: For no value, or a value that is not finite and >= 0.
+    """
+    values = np.atleast_1d(np.asarray(value, dtype=np.float64)).ravel()
+    if values.size == 0 or not bool(np.all(np.isfinite(values) & (values >= 0.0))):
+        raise ValueError(
+            f"np5_extrapolated_share: the depths of class {cls!r} must be one or "
+            "more finite counts >= 0"
+        )
+    return values
+
+
+def _is_true(value: object) -> bool:
+    """A boolean cell of a decisions table (missing: False)."""
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return False
+    return bool(value)
+
+
+def np5_extrapolated_share(
+    decisions: pd.DataFrame,
+    expected_depth: Mapping[str, float | Sequence[float]],
+    depths: Sequence[int],
+    settings: Np5Settings,
+    *,
+    regime: res.Regime = "provisional",
+    default_depth: float | Sequence[float] | None = None,
+) -> pd.DataFrame:
+    """Share of a class's cells at the expected depth that are extrapolated (§14 NP5).
+
+    §14 NP5: a class is not validated at L if its cells at the family's
+    expected depth would be more than 50% ``resolvability_extrapolated``. A
+    depth takes its bin (``depth_bin``) and is ``resolvability_extrapolated``
+    when the frozen decisions mark that (level, class, bin) ``extrapolated``
+    (``cell_emission``: a pooled bin deeper than D_P, or a version-7
+    monotone-filled bin); a depth below the grid is not.
+
+    Two readings of "its cells at the family's expected depth" are scored,
+    and the class passes at L only when both are at most
+    ``max_extrapolated_share`` (ruled on 2026-10-07, pre-registration
+    §23.19; a class-level part under revision R2, §23.21):
+
+    - the median (pre-registration §23.9 item 6 and §23.10, D8: the expected
+      depth is "each class's median"): the class's cells all taken at the
+      median of its depths, so ``median_share`` is 1 when the median's bin
+      is extrapolated and 0 otherwise. The median is reported as
+      ``expected_depth`` and its bin as ``expected_bin``;
+    - the profile shares (plan §8.3 v7.5: the test "uses the class's
+      profile shares"): ``profile_share`` is the share of the class's
+      depths whose bins are extrapolated.
+
+    The two readings are not nested, because the extrapolated bins need not
+    be contiguous: the version-7 monotone fill can mark a bin between two
+    bins that are emitted on their own verdicts. Against decisions that
+    mark 30, 120 and 250 extrapolated, a profile of 10% at 20, 20% at 40,
+    25% at 80, 25% at 150 and 20% at 300 counts fails on its shares (0.65)
+    and passes on its median (80, in the 60 bin). Against decisions that
+    mark only the filled 60 bin, a profile of 45% at 40, 10% at 70 and 45%
+    at 150 counts passes on its shares (0.10) and fails on its median (70,
+    in the 60 bin). Either reading alone would pass one of them.
+
+    The input (§14 "Version-7 families"; plan §8.3 v7.5; pre-registration
+    §23.9 item 6 and §23.10, D8):
+
+    - a family with a per-class profile (its frozen ``sim_inputs`` profile
+      asset) passes each class's profile depths, a sequence. A class
+      without cells in the profile takes D8's overall median
+      (``default_depth``; a reading, see the module docstring);
+    - a family without a profile passes the label-free pooled median of its
+      sections for every class (``{}`` and ``default_depth``, one value).
+
+    With one depth both shares are that depth's (0 or 1).
+
+    The same input gives D9's report: the share of the class's depths above
+    the grid's deepest bin, which take that bin (``above_grid_share``; a
+    depth at the deepest bin is not above it). With one depth it is 0 or 1
+    as well.
+
+    Args:
+        decisions: The frozen decisions of the base run (version 7: the
+            ensemble's, monotone-filled bins included).
+        expected_depth: Per class, its cells' depths in the profile (a
+            sequence), or one expected depth (counts).
+        depths: The bundle's depth grid.
+        settings: The NP5 constants.
+        regime: The regime of the frozen decisions.
+        default_depth: The depth(s) of every class without an entry (D8:
+            the overall median, or the label-free pooled median).
+
+    Returns:
+        One row per (level, class) of the decisions at the regime, sorted,
+        columns ``NP5_EXTRAPOLATED_COLUMNS``: ``expected_depth`` is the median
+        of the class's depths and ``expected_bin`` its bin (``None`` below
+        the grid); ``depth_source`` is ``class`` or ``default``;
+        ``profile_passed`` and ``median_passed`` judge the two shares, and
+        ``passed`` is both.
+
+    Raises:
+        ValueError: For an empty grid, a class without depths and no
+            default, depths that are not finite counts >= 0, decisions
+            without ``extrapolated`` or rows of the regime, a (level, class,
+            depth) more than once, or a bin a class's depths or their median
+            fall in that its decisions lack.
+    """
+    grid = sorted({int(depth) for depth in depths})
+    if not grid:
+        raise ValueError("np5_extrapolated_share: an empty depth grid")
+    _require_columns(decisions, ("extrapolated",), "the decisions")
+    frame = _regime_rows(decisions, regime, "the decisions")
+    marked: dict[tuple[str, str], dict[int, bool]] = {}
+    for level, cls, depth, flag in zip(
+        frame["level"].astype(str),
+        frame["class"].astype(str),
+        frame["depth"].to_numpy(np.int64),
+        frame["extrapolated"].astype(object),
+        strict=True,
+    ):
+        marked.setdefault((level, cls), {})[int(depth)] = _is_true(flag)
+    records: list[dict[str, object]] = []
+    for (level, cls), by_depth in sorted(marked.items()):
+        if cls in expected_depth:
+            source, value = NP5_DEPTH_FROM_CLASS, expected_depth[cls]
+        elif default_depth is not None:
+            source, value = NP5_DEPTH_FROM_DEFAULT, default_depth
+        else:
+            raise ValueError(
+                f"np5_extrapolated_share: no expected depth for class {cls!r} "
+                "and no default_depth"
+            )
+        values = _depth_values(value, cls)
+        median = float(np.median(values))
+        # The class's depths, then its median: each takes its bin.
+        bins = res.depth_bin(np.append(values, median), grid)
+        lacking = sorted(
+            {int(value) for value in bins[np.isfinite(bins)]} - set(by_depth)
+        )
+        if lacking:
+            raise ValueError(
+                f"{level}/{cls}: the bins {lacking} are not in the decisions"
+            )
+        flags = np.array(
+            [bool(np.isfinite(value)) and by_depth[int(value)] for value in bins],
+            dtype=bool,
+        )
+        median_bin = bins[-1]
+        profile_share = float(flags[:-1].mean())
+        median_share = float(flags[-1])
+        limit = settings.max_extrapolated_share + _TOLERANCE
+        profile_passed = profile_share <= limit
+        median_passed = median_share <= limit
+        records.append(
+            {
+                "level": level,
+                "class": cls,
+                "depth_source": source,
+                "n_depths": int(values.size),
+                "expected_depth": median,
+                "expected_bin": int(median_bin) if np.isfinite(median_bin) else None,
+                "profile_share": profile_share,
+                "median_share": median_share,
+                "above_grid_share": float(np.mean(values > grid[-1])),
+                "max_share": settings.max_extrapolated_share,
+                "profile_passed": profile_passed,
+                "median_passed": median_passed,
+                "passed": profile_passed and median_passed,
+            }
+        )
+    return pd.DataFrame(
+        {
+            column: pd.Series(
+                [record[column] for record in records],
+                dtype=object if column == "expected_bin" else None,
+            )
+            for column in NP5_EXTRAPOLATED_COLUMNS
+        }
+    )
+
+
+def _passed_by(
+    table: pd.DataFrame, columns: Sequence[str], name: str
+) -> dict[tuple[str, ...], list[bool]]:
+    """The ``passed`` values of a table per key of ``columns``.
+
+    ``name`` names the criterion and table in the error (``"NP5 agreement"``).
+
+    Raises:
+        ValueError: If a ``passed`` value is missing (``None`` or ``nan``).
+    """
+    result: dict[tuple[str, ...], list[bool]] = {}
+    keys = zip(*(table[column].astype(str) for column in columns), strict=True)
+    for key, passed in zip(keys, table["passed"].astype(object), strict=True):
+        if passed is None or (isinstance(passed, float) and math.isnan(passed)):
+            raise ValueError(f"{name} row {key} has no passed value")
+        result.setdefault(tuple(key), []).append(bool(passed))
+    return result
+
+
+def _np5_class_records(
+    agreement: pd.DataFrame,
+    tstar: pd.DataFrame,
+    extrapolated: pd.DataFrame,
+    tested: Mapping[tuple[str, str], Sequence[res.GatePTestedSet] | None],
+) -> list[tuple[tuple[str, str], dict[str, object]]]:
+    """Per key of ``tested``, its ``NP5_CLASS_COLUMNS`` record (``np5_class_table``).
+
+    Raises:
+        ValueError: As ``np5_class_table``.
+    """
+    _check_tested(tested)
+    _require_columns(
+        tstar,
+        ("level", "class", "set", "n_replicates", "n_fitted", "evaluable", "passed"),
+        "the NP5 t* table",
+    )
+    agreed = _passed_by(agreement, ("level", "class"), "NP5 agreement")
+    tstar_ok = _passed_by(tstar, ("level", "class", "set"), "NP5 t*")
+    depth_ok = _passed_by(extrapolated, ("level", "class"), "NP5 extrapolated share")
+    # Per tested set: whether its range was evaluable, and the replicates
+    # left out of it without a fit.
+    evaluable: dict[tuple[str, str, str], list[bool]] = {}
+    unfitted: dict[tuple[str, str, str], int] = {}
+    for level, cls, label, flag, n_replicates, n_fitted in zip(
+        tstar["level"].astype(str),
+        tstar["class"].astype(str),
+        tstar["set"].astype(str),
+        tstar["evaluable"].astype(bool),
+        tstar["n_replicates"],
+        tstar["n_fitted"],
+        strict=True,
+    ):
+        set_key = (level, cls, label)
+        evaluable.setdefault(set_key, []).append(bool(flag))
+        unfitted[set_key] = unfitted.get(set_key, 0) + int(n_replicates) - int(n_fitted)
+    records: list[tuple[tuple[str, str], dict[str, object]]] = []
+    for key, items in tested.items():
+        level, cls = str(key[0]), str(key[1])
+        if items is None:
+            records.append(
+                (
+                    key,
+                    {
+                        "level": level,
+                        "class": cls,
+                        "n_sets": 0,
+                        "agreement_passed": None,
+                        "tstar_passed": None,
+                        "depth_passed": None,
+                        "n_tstar_not_evaluable": 0,
+                        "tstar_not_evaluable_sets": "",
+                        "n_tstar_unfitted": 0,
+                        "passed": None,
+                    },
+                )
+            )
+            continue
+        if (level, cls) not in agreed:
+            raise ValueError(f"{key}: no NP5 agreement rows")
+        if (level, cls) not in depth_ok:
+            raise ValueError(f"{key}: no NP5 extrapolated share row")
+        labels = [tested_set_label(item) for item in items]
+        missing = [label for label in labels if (level, cls, label) not in tstar_ok]
+        if missing:
+            raise ValueError(f"{key}: no NP5 t* row for the tested sets {missing}")
+        not_evaluable = [
+            label for label in labels if not all(evaluable[(level, cls, label)])
+        ]
+        agreement_passed = all(agreed[(level, cls)])
+        tstar_passed = all(all(tstar_ok[(level, cls, label)]) for label in labels)
+        depth_passed = all(depth_ok[(level, cls)])
+        records.append(
+            (
+                key,
+                {
+                    "level": level,
+                    "class": cls,
+                    "n_sets": len(labels),
+                    "agreement_passed": agreement_passed,
+                    "tstar_passed": tstar_passed,
+                    "depth_passed": depth_passed,
+                    "n_tstar_not_evaluable": len(not_evaluable),
+                    "tstar_not_evaluable_sets": ";".join(not_evaluable),
+                    "n_tstar_unfitted": sum(
+                        unfitted[(level, cls, label)] for label in labels
+                    ),
+                    "passed": agreement_passed and tstar_passed and depth_passed,
+                },
+            )
+        )
+    return records
+
+
+def np5_class_table(
+    agreement: pd.DataFrame,
+    tstar: pd.DataFrame,
+    extrapolated: pd.DataFrame,
+    tested: Mapping[tuple[str, str], Sequence[res.GatePTestedSet] | None],
+) -> pd.DataFrame:
+    """Tabulate NP5's three parts per (level, class) on every tested set (§14 NP5).
+
+    A (level, class) passes here when every replicate's re-derived emission
+    agrees with the base run on the whole grid (``np5_decision_agreement``),
+    the t* part passes at each of its tested sets and its cells at the
+    expected depth are at most 50% extrapolated on both readings
+    (``np5_extrapolated_share``). The t* part is the consequence check
+    (``np5_tstar_consequence``, revision R3 (c), pre-registration §23.21);
+    ``np5_tstar_spread``'s rows, the range rule scored before §23.21, are
+    read the same way. This is the every-set reading, reported: the scored
+    verdict reads the parts at each floor of the depth walk
+    (``gate_p_depth_walk``, revision R2). Beside each part the table reports
+    how many of the class's tested sets passed the t* part on no replicate:
+    ``n_tstar_not_evaluable`` sets (named in ``tstar_not_evaluable_sets``;
+    for the consequence check no replicate was scored, for the range rule
+    fewer than two had a threshold), and ``n_tstar_unfitted`` counts the
+    (set, replicate) pairs left out for want of a fit.
+
+    Args:
+        agreement: ``np5_decision_agreement`` output.
+        tstar: ``np5_tstar_consequence`` output (or ``np5_tstar_spread``'s).
+        extrapolated: ``np5_extrapolated_share`` output.
+        tested: The tested sets per (level, class).
+
+    Returns:
+        One row per key of ``tested``, sorted by level and class, columns
+        ``NP5_CLASS_COLUMNS``: a key without a tested set (not evaluable)
+        has no sets and ``None`` for each part and ``passed``.
+
+    Raises:
+        ValueError: If a (level, class) with tested sets has no agreement or
+            extrapolated row, a tested set has no t* row, a row has no
+            ``passed`` value, the t* table lacks a column, or a key's tested
+            sets are an empty list or of another key.
+    """
+    records = [
+        record
+        for _, record in _np5_class_records(agreement, tstar, extrapolated, tested)
+    ]
+    table = pd.DataFrame(
+        {
+            column: pd.Series(
+                [record[column] for record in records],
+                dtype=object
+                if column
+                in ("agreement_passed", "tstar_passed", "depth_passed", "passed")
+                else None,
+            )
+            for column in NP5_CLASS_COLUMNS
+        }
+    )
+    if table.empty:
+        return table
+    return table.sort_values(["level", "class"], kind="mergesort").reset_index(
+        drop=True
+    )
+
+
+def np5_class_verdicts(
+    agreement: pd.DataFrame,
+    tstar: pd.DataFrame,
+    extrapolated: pd.DataFrame,
+    tested: Mapping[tuple[str, str], Sequence[res.GatePTestedSet] | None],
+) -> dict[tuple[str, str], bool | None]:
+    """Combine NP5's three parts per (level, class) on every tested set (§14 NP5).
+
+    The verdicts of ``np5_class_table`` (the every-set reading, reported;
+    the scored verdict is ``gate_p_depth_walk``'s, revision R2) in the
+    per-member shape that ``resolvability.every_member_verdict`` combines
+    over the version-7 emission members.
+
+    Args:
+        agreement: ``np5_decision_agreement`` output.
+        tstar: ``np5_tstar_consequence`` output (or ``np5_tstar_spread``'s).
+        extrapolated: ``np5_extrapolated_share`` output.
+        tested: The tested sets per (level, class).
+
+    Returns:
+        Per (level, class) of ``tested``: ``None`` when it has no tested set
+        (not evaluable), ``False`` when any part fails, else ``True``.
+
+    Raises:
+        ValueError: As ``np5_class_table``.
+    """
+    result: dict[tuple[str, str], bool | None] = {}
+    for key, record in _np5_class_records(agreement, tstar, extrapolated, tested):
+        passed = record["passed"]
+        result[key] = None if passed is None else bool(passed)
+    return result
+
+
+# --------------------------------------------------------------------------
+# NP6: sensitivity to contamination and gene-efficiency perturbations (§14 NP6)
+
+# §14 NP6: "a drop in point precision vs the base recipe not significantly
+# above 0.05 (one-sided 95%)".
+NP6_MAX_DROP: Final = 0.05
+# The one-sided 95% normal quantile of the drop test (pre-registration §23.9
+# item 4, D12: "the one-sided 95% lower bound of p_base - p_stress").
+NP6_DROP_Z: Final = 1.6448536269514722
+# The weightings NP6 scores: NP3's two (D12 names "each set's Kish n", which
+# differs from n only on a reweighted set) and the unweighted set (§14
+# reweights NP3 only, CHECK K9.2); a set passes only under all three
+# (``np6_set_stats``). NP3's two are its test-cell weightings since revision
+# R1 (pre-registration §23.21): each simulation's calls take the test-cell
+# weights of its own scope. The per-call-set weightings are reported only.
+NP6_SCORED_SCHEMES: Final[tuple[str, ...]] = (
+    NP3_UNWEIGHTED,
+    NP3_NATURAL_TEST_CELLS,
+    NP3_CLASS_BALANCED_TEST_CELLS,
+)
+NP6_SCHEMES: Final[tuple[str, ...]] = (
+    *NP6_SCORED_SCHEMES,
+    NP3_NATURAL,
+    NP3_CLASS_BALANCED,
+)
+# The weightings that need the reference's natural composition.
+_NATURAL_SCHEMES: Final = frozenset({NP3_NATURAL, NP3_NATURAL_TEST_CELLS})
+# Where a test cell of thin pooled sets is scored (§14 NP6: a set "left with
+# < n_min stressed calls [is] pooled with the next deeper set";
+# pre-registration §23.15 item 2, ruled §23.19): at its row in the thin set, a deeper
+# set adding only the cells it lacks (the default, the stricter reading), or
+# at its deepest row in the pooled sets (``_ReplicateIndex.
+# union_scope_positions``).
+NP6_POOL_FIRST_SET: Final = "first_set"
+NP6_POOL_DEEPEST_ROW: Final = "deepest_row"
+NP6_POOL_READINGS: Final[tuple[str, ...]] = (NP6_POOL_FIRST_SET, NP6_POOL_DEEPEST_ROW)
+NP6_STATS_COLUMNS: Final[tuple[str, ...]] = (
+    "level",
+    "class",
+    "stress",
+    "tested_set",
+    "set",
+    "pooled_with",
+    "depths",
+    "set_min_depth",
+    "n_stressed_tested",
+    "below_min_confident_n",
+    "scheme",
+    "scored",
+    "n_base",
+    "precision_base",
+    "kish_n_base",
+    "coverage_base",
+    "n_stress",
+    "n_correct_stress",
+    "precision_stress",
+    "kish_n_stress",
+    "wilson_lb_stress",
+    "coverage_stress",
+    "coverage_change",
+    "drop",
+    "drop_se",
+    "drop_lower",
+    "n_clean",
+    "precision_clean",
+    "coverage_clean",
+)
+NP6_VERDICT_COLUMNS: Final[tuple[str, ...]] = (
+    *NP6_STATS_COLUMNS,
+    "target",
+    "min_wilson",
+    "max_drop",
+    "point_ok",
+    "wilson_ok",
+    "drop_ok",
+    "passed",
+)
+
+
+@dataclass(frozen=True)
+class Np6Settings:
+    """The NP6 constants (§14 NP6; plan §3.7).
+
+    Attributes:
+        min_confident_n: Stressed confident calls a tested set needs to be
+            scored on its own; a set with fewer is pooled with the next
+            deeper one (``gate_p_min_confident_n``, 200).
+        wilson_margin: The Wilson bound must reach target_L less this margin
+            (the real-data emission rule, ``wilson_margin``, 0.02).
+        weight_min_type_cells: ``weight_min_type_cells`` of the NP3
+            weightings (20).
+        weight_trim_factor: ``weight_trim_factor`` of the NP3 weightings (10).
+        max_drop: The drop in point precision against the base recipe that
+            must not be significantly exceeded (0.05).
+        drop_z: The one-sided normal quantile of the drop test (95%).
+        scored_schemes: The weightings a set must pass under
+            (``NP6_SCORED_SCHEMES``).
+        pool_rows: Where a test cell of pooled thin sets is scored
+            (``NP6_POOL_READINGS``; pre-registration §23.15 item 2, ruled
+            on 2026-10-07, §23.19): ``NP6_POOL_FIRST_SET`` (default) at its
+            row in the thin set, ``NP6_POOL_DEEPEST_ROW`` at its deepest row.
+    """
+
+    min_confident_n: int
+    wilson_margin: float
+    weight_min_type_cells: int
+    weight_trim_factor: float
+    max_drop: float = NP6_MAX_DROP
+    drop_z: float = NP6_DROP_Z
+    scored_schemes: tuple[str, ...] = NP6_SCORED_SCHEMES
+    pool_rows: str = NP6_POOL_FIRST_SET
+
+    def __post_init__(self) -> None:
+        """Validate the constants.
+
+        Raises:
+            ValueError: For a count below 1, a negative margin or trim, a drop
+                limit outside [0, 1], a quantile that is not > 0, scored
+                schemes that are empty or not NP6 schemes, or an unknown
+                ``pool_rows``.
+        """
+        for name in ("min_confident_n", "weight_min_type_cells"):
+            if getattr(self, name) < 1:
+                raise ValueError(
+                    f"Np6Settings.{name} must be >= 1, got {getattr(self, name)!r}"
+                )
+        for name in ("wilson_margin", "weight_trim_factor"):
+            if not getattr(self, name) >= 0.0:
+                raise ValueError(
+                    f"Np6Settings.{name} must be >= 0, got {getattr(self, name)!r}"
+                )
+        if not 0.0 <= self.max_drop <= 1.0:
+            raise ValueError(
+                f"Np6Settings.max_drop must lie in [0, 1], got {self.max_drop!r}"
+            )
+        if not self.drop_z > 0.0:
+            raise ValueError(f"Np6Settings.drop_z must be > 0, got {self.drop_z!r}")
+        unknown = [name for name in self.scored_schemes if name not in NP6_SCHEMES]
+        if not self.scored_schemes or unknown:
+            raise ValueError(
+                f"Np6Settings.scored_schemes must be a non-empty subset of "
+                f"{NP6_SCHEMES}, got {self.scored_schemes!r}"
+            )
+        if self.pool_rows not in NP6_POOL_READINGS:
+            raise ValueError(
+                f"Np6Settings.pool_rows must be one of {NP6_POOL_READINGS}, "
+                f"got {self.pool_rows!r}"
+            )
+
+    @classmethod
+    def from_config(cls, config: AnnotationResolvabilityConfig) -> Np6Settings:
+        """Read the NP6 constants from the resolvability config (§14 NP6).
+
+        Args:
+            config: The resolvability config.
+
+        Returns:
+            The settings (the drop limit and its quantile are the §14 and
+            D12 constants 0.05 and the one-sided 95% quantile).
+        """
+        return cls(
+            min_confident_n=config.gate_p_min_confident_n,
+            wilson_margin=config.wilson_margin,
+            weight_min_type_cells=config.weight_min_type_cells,
+            weight_trim_factor=config.weight_trim_factor,
+        )
+
+
+@dataclass(frozen=True)
+class SimulationRows:
+    """One simulation's held-out replicates, as NP6 reads them.
+
+    NP6 compares a stress recipe with its base recipe (and reports the clean
+    upper bound) on the same tested sets; each is one simulation of the
+    held-out cells, kept in tables per (group, seed label) like every
+    gate-P replicate and selected by recipe (version 6) or member
+    (version 7).
+
+    Attributes:
+        replicates: Per (group, seed label), the simulation's cells table
+            (the default group's in full; ``held_out_replicates``).
+        recipe: The recipe of its rows (``None``: every recipe, so the tables
+            must hold one).
+        member: The version-7 member of its rows (``None``: every member).
+    """
+
+    replicates: Mapping[ReplicateKey, pd.DataFrame]
+    recipe: str | None
+    member: str | None = None
+
+    @property
+    def name(self) -> str:
+        """The member, else the recipe (``"<all>"`` when neither is set)."""
+        return str(self.member or self.recipe or "<all>")
+
+
+def np6_drop_test(
+    precision_base: float,
+    n_base: float,
+    precision_stress: float,
+    n_stress: float,
+    *,
+    z: float = NP6_DROP_Z,
+) -> tuple[float, float, float]:
+    """Return NP6's drop, its standard error and its one-sided lower bound.
+
+    Pre-registration §23.9 item 4 (D12): the drop ``p_base - p_stress`` has
+    the two-proportion standard error on each set's Kish n,
+    ``sqrt(p_b (1 - p_b) / n_b + p_s (1 - p_s) / n_s)``, and its one-sided
+    95% lower bound is ``drop - z * se``; NP6 fails when the bound exceeds
+    0.05 (the z-test of H0 "drop <= 0.05" at one-sided 5%).
+
+    Args:
+        precision_base: The base recipe's precision on the set.
+        n_base: Its Kish effective n.
+        precision_stress: The stress recipe's precision on the set.
+        n_stress: Its Kish effective n.
+        z: The one-sided quantile.
+
+    Returns:
+        ``(drop, se, lower bound)``; the drop is ``nan`` without both
+        precisions, the others also without a positive n on both sides.
+    """
+    drop = float(precision_base) - float(precision_stress)
+    if not math.isfinite(drop) or not (n_base > 0 and n_stress > 0):
+        return drop, math.nan, math.nan
+    variance = precision_base * (1.0 - precision_base) / n_base + (
+        precision_stress * (1.0 - precision_stress) / n_stress
+    )
+    se = math.sqrt(max(variance, 0.0))
+    return drop, se, drop - z * se
+
+
+class _Np6View:
+    """One simulation's pooled held-out rows, coded for NP6's sets."""
+
+    def __init__(
+        self,
+        rows: SimulationRows,
+        lookup: Mapping[tuple[str, str, int], tuple[str, float | None, bool]],
+        *,
+        default_group: str | None,
+        seed: int,
+        role: str,
+        pool_rows: str = NP6_POOL_FIRST_SET,
+    ) -> None:
+        self.deepest = pool_rows == NP6_POOL_DEEPEST_ROW
+        cells = pooled_held_out_cells(
+            rows.replicates, default_group=default_group, seed=seed
+        )
+        frame = res.replicate_rows(
+            cells, recipe=rows.recipe, seed=seed, member=rows.member
+        ).reset_index(drop=True)
+        if frame.empty:
+            raise ValueError(
+                f"np6_set_stats: the {role} simulation {rows.name} has no rows "
+                f"after the filters (recipe={rows.recipe!r}, seed={seed!r}, "
+                f"member={rows.member!r})"
+            )
+        self.frame = frame
+        self.confident = res.frozen_confident_mask(frame, lookup)
+        self.index = _ReplicateIndex(frame, self.confident)
+        self.correct = frame["correct"].to_numpy(bool)
+        self.slim = frame[[res.TRUTH_LEAF_COLUMN, "truth_parent", "level", "depth"]]
+        self.class_of = res.leaf_class_map(frame)
+        # Per (scheme, pooled sets' labels): the union scope's positions in
+        # ascending order and their test-cell weights (shared by the classes
+        # of a level only when their sets coincide, so keyed by the labels).
+        self._scope_weights: dict[
+            tuple[str, str, tuple[str, ...]], tuple[np.ndarray, np.ndarray]
+        ] = {}
+
+    def positions(
+        self, items: Sequence[res.GatePTestedSet], cls: str
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """The set's calls of the class (any confidence) and the confident ones."""
+        scope = self.index.union_scope_positions(items, deepest=self.deepest)
+        called = self.index.called_in(scope, cls)
+        return called, called[self.confident[called]]
+
+    def n_confident(self, items: Sequence[res.GatePTestedSet], cls: str) -> int:
+        """Confident calls of the class in the pooled sets."""
+        return int(len(self.positions(items, cls)[1]))
+
+    def test_cell_weighted(
+        self,
+        items: Sequence[res.GatePTestedSet],
+        cls: str,
+        item: res.GatePTestedSet,
+        scheme: str,
+        options: Mapping[str, Any],
+    ) -> WeightedTestedSet:
+        """Score pooled sets' calls on the test-cell weights of their scope.
+
+        As ``np3_set_stats`` scores NP3's test-cell weightings (revision R1,
+        pre-registration §23.21): the test cells of the pooled sets' union
+        scope in this simulation's own rows (each cell once,
+        ``union_scope_positions``) are reweighted by
+        ``np3_test_cell_weights``; the calls of the class take their cells'
+        weights, trimmed at ``trim_factor`` x the median over the calls, and
+        the confident ones form the set. ``item`` names the set.
+        """
+        key = (
+            scheme,
+            item.level,
+            tuple(tested_set_label(member) for member in items),
+        )
+        if key not in self._scope_weights:
+            scope = self.index.union_scope_positions(items, deepest=self.deepest)
+            weights = np3_test_cell_weights(
+                self.slim.iloc[scope],
+                scheme,
+                composition=options["composition"],
+                min_type_cells=int(options["min_type_cells"]),
+            )
+            order = np.argsort(scope, kind="mergesort")
+            self._scope_weights[key] = (scope[order], weights[order])
+        positions, weights = self._scope_weights[key]
+        called = self.index.called_in(positions, cls)
+        called_weights = res.trim_weights(
+            weights[np.searchsorted(positions, called)],
+            float(options["trim_factor"]),
+        )
+        confident = self.confident[called]
+        return _weighted_set(
+            item,
+            scheme,
+            self.correct[called[confident]],
+            called_weights[confident],
+            confident,
+            called_weights,
+        )
+
+    def weighted(
+        self,
+        positions: tuple[np.ndarray, np.ndarray],
+        item: res.GatePTestedSet,
+        scheme: str,
+        options: Mapping[str, Any],
+    ) -> WeightedTestedSet:
+        """Score a set's calls under one per-call-set weighting (``_weighted_set``).
+
+        ``positions`` is ``positions()``'s output for the set: its calls of
+        the class and the confident ones; ``item`` names the set.
+        """
+        called, in_set = positions
+        set_options = {**options, "class_of": self.class_of}
+        weights = np3_set_weights(self.slim.iloc[in_set], scheme, **set_options)
+        called_weights = np3_set_weights(self.slim.iloc[called], scheme, **set_options)
+        return _weighted_set(
+            item,
+            scheme,
+            self.correct[in_set],
+            weights,
+            self.confident[called],
+            called_weights,
+        )
+
+
+def _np6_merged(
+    key: tuple[str, str], items: Sequence[res.GatePTestedSet]
+) -> res.GatePTestedSet:
+    """The tested set NP6 scores for ``items`` pooled (statistics left empty)."""
+    depths = tuple(sorted({int(depth) for item in items for depth in item.depths}))
+    return res.GatePTestedSet(
+        level=key[0],
+        cls=key[1],
+        depths=depths,
+        pooled=len(items) > 1 or any(item.pooled for item in items),
+        n_confident=0,
+        precision=math.nan,
+        wilson_lb=math.nan,
+    )
+
+
+def np6_set_stats(
+    base: SimulationRows,
+    stressed: SimulationRows,
+    decisions: pd.DataFrame,
+    tested: Mapping[tuple[str, str], Sequence[res.GatePTestedSet] | None],
+    *,
+    default_group: str | None,
+    settings: Np6Settings,
+    composition: Mapping[str, float] | None = None,
+    clean: SimulationRows | None = None,
+    regime: res.Regime = "provisional",
+    seed: int = 0,
+) -> pd.DataFrame:
+    """Score one stress recipe against its base at NP3's tested sets (§14 NP6).
+
+    §14 NP6: with the frozen thresholds, on the held-out calls pooled over
+    every donor or draw at seed 0 (``pooled_held_out_cells``: the default
+    group on its check half), at NP3's tested sets (``tested``: the base
+    run's, ``gate_p_tested_sets``; version 7 per emission member,
+    ``gate_p_member_sets``), the stressed calls must reach point precision
+    >= target_L and a Wilson bound >= target_L - 0.02 (the real-data
+    emission rule, no margin), and their drop in point precision against the
+    base recipe must not be significantly above 0.05 (``np6_drop_test``);
+    the clean upper bound and the coverage changes are reported. Version 7
+    compares each stress member with its own base member
+    (``resolvability.gate_p_stress_members``).
+
+    Thin sets (§14: "those left with < n_min stressed calls are pooled with
+    the next deeper set"). A tested set with fewer than
+    ``settings.min_confident_n`` stressed confident calls is pooled with the
+    next deeper tested set of its (level, class), then the next, until it
+    holds that many or none is left; each test cell counts once
+    (``_ReplicateIndex.union_scope_positions``). The base, stressed and
+    clean values of a row are read on the same pooled sets.
+
+    Readings this implementation takes where §14 is not explicit (strict
+    where there is a choice), put to the user in pre-registration §23.15
+    and ruled on 2026-10-07 (§23.19; the weighting revised by §23.21 R1):
+
+    - **Weighting.** D12 tests the drop "on each set's Kish n", which
+      differs from n only on a reweighted set, while CHECK K9.2 notes that
+      §14 reweights NP3 only. A set is scored unweighted and under NP3's
+      two scored weightings (``NP6_SCORED_SCHEMES``), and it passes only
+      when it passes under all three. Since revision R1 (§23.21) NP3's two
+      are read on the test cells of the scope: each simulation's calls take
+      the test-cell weights of its own scope of the (pooled) sets
+      (``_Np6View.test_cell_weighted``, as ``np3_set_stats``). The
+      per-call-set weightings (``np3_set_weights``) are reported only
+      (``scored`` False). A smaller Kish n widens the drop test, so the
+      unweighted test is the one that can fail on a drop the weighted ones
+      leave undecided; the weighted floors are the stricter ones.
+    - **Where a pooled test cell is scored** (``settings.pool_rows``). By
+      default at its row in the thin set: a deeper set adds only the test
+      cells the thin set lacks. Every simulation (version 6 and version 7)
+      places each test cell at every grid depth it reaches, so a deeper
+      set's cells are nested in a shallower set's; pooling then adds no
+      cell, and a thin set is scored on its own stressed calls ("a set
+      still thin" below decides). The alternative,
+      ``NP6_POOL_DEEPEST_ROW``, keeps each cell at its deepest row of the
+      pooled sets (the rule of a ">= D_P" set across the pooled sets). It
+      scores a thin set's cells on the deeper set's rows, so a stress that
+      leaves a shallow bin with fewer, worse confident calls than a milder
+      stress can pass where the milder one fails (the example of §23.15).
+    - **Order of the sets.** The tested sets of a (level, class) are taken
+      by their shallowest bin, then their deepest (a bin at D_P tested on
+      its own comes before the ">= D_P" set, which is then its next deeper
+      set). A thin bin above D_P tested on its own has no deeper set when
+      it is the deepest bin tested on its own: it is scored on its own
+      calls (the ">= D_P" set covers it as well).
+    - **A set still thin when nothing deeper is left** is scored on the
+      calls it has (reported in ``below_min_confident_n``): its Wilson bound
+      on few calls then decides. A set without stressed confident calls
+      fails (a ``nan`` precision never passes).
+    - **Each simulation fills a set's scope itself.** The stressed calls of
+      a set are the stressed simulation's rows at the set's level, class
+      and depths. On the version-7 grid of total counts, spill 0.35 lowers
+      the host target from D / 1.25 to D / 1.35, so a stressed bin can hold
+      test cells the base's does not, and a cell's deepest row can differ;
+      the per-cell draws are keyed by the recipe's name, so the two are
+      independent draws of the test cells, as D12's unpaired test assumes.
+      Alternative: the stressed calls of the base's test cells only (not
+      nested in this reading).
+    - **The offsets' direction and a mouse family** belong to the stress
+      recipe (``resolvability.gate_p_stress_recipes``): every family's draw
+      is multiplied by 2 ** log2(Xenium / MERSCOPE), and a mouse panel's
+      genes all take the resample.
+
+    Args:
+        base: The base recipe's replicates (version 6: ``R1_contam_HO``;
+            version 7: the emission member).
+        stressed: The stress recipe's replicates (the same groups and seeds).
+        decisions: The frozen decisions of the base run (version 7: the
+            ensemble's).
+        tested: NP3's tested sets per (level, class), from
+            ``gate_p_tested_sets`` (version 7: ``gate_p_member_sets``) on
+            ``pooled_held_out_cells`` of the base's replicates, default
+            group, recipe, seed and member; ``None`` marks a (level, class)
+            that is not evaluable. Each set must hold, in the base's pooled
+            held-out calls, the confident calls it was built on
+            (``n_confident``) and at least ``settings.min_confident_n``, as
+            in NP3 (``_check_set_count``).
+        default_group: The group whose fit half the frozen thresholds were
+            fitted on (required; ``None`` when no replicate holds those
+            cells).
+        settings: The NP6 constants.
+        composition: The reference's natural share per truth type (needed
+            for the natural weightings, ``natural_test_cells`` scored and
+            ``natural`` reported; every truth type of the three simulations
+            needs a positive share).
+        clean: The clean recipe's replicates (the reported upper bound).
+        regime: The regime whose thresholds are frozen.
+        seed: The seed label of the replicates pooled (0).
+
+    Returns:
+        One row per (tested set, weighting), sorted by level, class and
+        tested set, columns ``NP6_STATS_COLUMNS``: ``stress`` names the
+        stressed simulation (its member, else its recipe); ``set`` is the
+        pooled sets' labels joined by ``+``; ``drop_lower`` the drop test's
+        bound; the clean columns are ``nan`` without ``clean``.
+
+    Raises:
+        ValueError: If a simulation has no rows after the filters, the
+            simulations do not hold the same groups at ``seed``, a key's
+            tested sets are an empty list or of another key, a tested set's
+            confident calls in the base's pooled calls differ from its
+            ``n_confident`` or are fewer than ``settings.min_confident_n``
+            (sets built on a plain concat of the tables, the default group's
+            fit half included), a natural weighting is scored without a
+            composition, or for the default group's inputs
+            (``held_out_replicates``).
+        ResolvabilityError: If a simulation's rows mix replicates
+            (``replicate_rows``).
+    """
+    _check_tested(tested)
+    if composition is None and _NATURAL_SCHEMES & set(settings.scored_schemes):
+        raise ValueError(
+            "np6_set_stats: a natural weighting is scored and needs the "
+            "reference's natural composition"
+        )
+    simulations = {"base": base, "stressed": stressed}
+    if clean is not None:
+        simulations["clean"] = clean
+    groups = {
+        role: sorted(str(group) for group, label in rows.replicates if label == seed)
+        for role, rows in simulations.items()
+    }
+    if len({tuple(values) for values in groups.values()}) > 1:
+        raise ValueError(
+            f"np6_set_stats: the simulations hold other groups at seed {seed}: {groups}"
+        )
+    lookup = res.emission_lookup(decisions, regime)
+    views = {
+        role: _Np6View(
+            rows,
+            lookup,
+            default_group=default_group,
+            seed=seed,
+            role=role,
+            pool_rows=settings.pool_rows,
+        )
+        for role, rows in simulations.items()
+    }
+    schemes = tuple(
+        scheme
+        for scheme in NP6_SCHEMES
+        if scheme not in _NATURAL_SCHEMES or composition is not None
+    )
+    if composition is not None:
+        for view in views.values():
+            _natural_shares(
+                composition, view.frame[res.TRUTH_LEAF_COLUMN].astype(str).to_numpy()
+            )
+    options: dict[str, Any] = {
+        "composition": composition,
+        "min_type_cells": settings.weight_min_type_cells,
+        "trim_factor": settings.weight_trim_factor,
+    }
+    for key, items in tested.items():
+        for item in items or ():
+            _check_set_count(
+                item,
+                views["base"].n_confident([item], str(key[1])),
+                settings.min_confident_n,
+                "np6_set_stats",
+            )
+    stress_view = views["stressed"]
+    records: list[dict[str, object]] = []
+    for key, items in sorted(tested.items(), key=lambda pair: pair[0]):
+        if items is None:
+            continue
+        level, cls = str(key[0]), str(key[1])
+        ordered = sorted(items, key=lambda item: (min(item.depths), max(item.depths)))
+        for position, item in enumerate(ordered):
+            pooled = [item]
+            n_tested = stress_view.n_confident(pooled, cls)
+            n_stressed = n_tested
+            while n_stressed < settings.min_confident_n and position + len(
+                pooled
+            ) < len(ordered):
+                pooled.append(ordered[position + len(pooled)])
+                n_stressed = stress_view.n_confident(pooled, cls)
+            merged = _np6_merged((level, cls), pooled)
+            labels = [tested_set_label(member) for member in pooled]
+            positions = {
+                role: view.positions(pooled, cls) for role, view in views.items()
+            }
+            for scheme in schemes:
+                if scheme in NP3_TEST_CELL_SCHEMES:
+                    scored = {
+                        role: view.test_cell_weighted(
+                            pooled, cls, merged, scheme, options
+                        )
+                        for role, view in views.items()
+                    }
+                else:
+                    scored = {
+                        role: view.weighted(positions[role], merged, scheme, options)
+                        for role, view in views.items()
+                    }
+                base_set, stress_set = scored["base"], scored["stressed"]
+                drop, drop_se, drop_lower = np6_drop_test(
+                    base_set.precision,
+                    base_set.kish_n,
+                    stress_set.precision,
+                    stress_set.kish_n,
+                    z=settings.drop_z,
+                )
+                clean_set = scored.get("clean")
+                records.append(
+                    {
+                        "level": level,
+                        "class": cls,
+                        "stress": stressed.name,
+                        "tested_set": labels[0],
+                        "set": "+".join(labels),
+                        "pooled_with": ";".join(labels[1:]),
+                        "depths": ";".join(str(depth) for depth in merged.depths),
+                        "set_min_depth": int(min(merged.depths)),
+                        "n_stressed_tested": n_tested,
+                        "below_min_confident_n": n_stressed < settings.min_confident_n,
+                        "scheme": scheme,
+                        "scored": scheme in settings.scored_schemes,
+                        "n_base": base_set.n_confident,
+                        "precision_base": base_set.precision,
+                        "kish_n_base": base_set.kish_n,
+                        "coverage_base": base_set.coverage,
+                        "n_stress": stress_set.n_confident,
+                        "n_correct_stress": stress_set.n_correct,
+                        "precision_stress": stress_set.precision,
+                        "kish_n_stress": stress_set.kish_n,
+                        "wilson_lb_stress": stress_set.wilson_lb,
+                        "coverage_stress": stress_set.coverage,
+                        "coverage_change": stress_set.coverage - base_set.coverage,
+                        "drop": drop,
+                        "drop_se": drop_se,
+                        "drop_lower": drop_lower,
+                        "n_clean": 0 if clean_set is None else clean_set.n_confident,
+                        "precision_clean": math.nan
+                        if clean_set is None
+                        else clean_set.precision,
+                        "coverage_clean": math.nan
+                        if clean_set is None
+                        else clean_set.coverage,
+                    }
+                )
+    stats = pd.DataFrame.from_records(records, columns=list(NP6_STATS_COLUMNS))
+    return stats.sort_values(
+        ["level", "class", "tested_set"], kind="mergesort"
+    ).reset_index(drop=True)
+
+
+def np6_verdicts(
+    stats: pd.DataFrame, thresholds: AnnotationThresholds, settings: Np6Settings
+) -> pd.DataFrame:
+    """Judge every (set, weighting) of ``np6_set_stats`` (§14 NP6).
+
+    A row passes when the stressed point precision reaches target_L (no
+    margin), its Wilson bound on the Kish n reaches target_L -
+    ``wilson_margin`` (the real-data emission rule) and the drop test's
+    one-sided lower bound does not exceed ``max_drop`` (0.05); a ``nan``
+    fails. Report-only weightings are judged too (``scored`` False).
+
+    Args:
+        stats: ``np6_set_stats`` output (one or several stress recipes).
+        thresholds: The threshold settings (targets).
+        settings: The NP6 constants.
+
+    Returns:
+        ``stats`` with ``target``, ``min_wilson``, ``max_drop``, ``point_ok``,
+        ``wilson_ok``, ``drop_ok`` and ``passed`` (``NP6_VERDICT_COLUMNS``).
+
+    Raises:
+        ValueError: For a level without a precision target.
+    """
+    if stats.empty:
+        return pd.DataFrame(columns=list(NP6_VERDICT_COLUMNS))
+    frame = stats.copy()
+    targets = level_targets(
+        thresholds, sorted({str(level) for level in frame["level"]})
+    )
+    target = np.array([targets[str(level)] for level in frame["level"]])
+    frame["target"] = target
+    frame["min_wilson"] = target - settings.wilson_margin
+    frame["max_drop"] = settings.max_drop
+    precision = frame["precision_stress"].to_numpy(np.float64)
+    wilson = frame["wilson_lb_stress"].to_numpy(np.float64)
+    lower = frame["drop_lower"].to_numpy(np.float64)
+    frame["point_ok"] = precision >= target - _TOLERANCE
+    frame["wilson_ok"] = wilson >= target - settings.wilson_margin - _TOLERANCE
+    frame["drop_ok"] = lower <= settings.max_drop + _TOLERANCE
+    frame["passed"] = frame["point_ok"] & frame["wilson_ok"] & frame["drop_ok"]
+    return frame[list(NP6_VERDICT_COLUMNS)]
+
+
+def np6_class_verdicts(
+    verdicts: pd.DataFrame,
+    tested: Mapping[tuple[str, str], Sequence[res.GatePTestedSet] | None],
+    *,
+    stresses: Sequence[str],
+    settings: Np6Settings,
+) -> dict[tuple[str, str], bool | None]:
+    """Combine NP6 per (level, class) over its tested sets and stress recipes.
+
+    A (level, class) passes NP6 when every tested set passes under every
+    scored weighting for every stress recipe of ``stresses`` (§14 NP6: the
+    criteria hold "at NP3's tested sets" for each recipe). This is the
+    every-set reading, scored until pre-registration §23.21; under revision
+    R2 a set below D_P only raises the floor (``gate_p_depth_walk``, which
+    reads the same rows per set). The result has the per-member shape that
+    ``resolvability.every_member_verdict`` combines over the version-7
+    emission members: pass one member's stress recipes
+    (``gate_p_stress_members``) with that member's tested sets.
+
+    Args:
+        verdicts: ``np6_verdicts`` output of every stress recipe in
+            ``stresses`` (concatenated).
+        tested: The tested sets per (level, class).
+        stresses: The stress recipes (``SimulationRows.name``) that must
+            each have been scored.
+        settings: The NP6 constants (the scored weightings).
+
+    Returns:
+        Per (level, class) of ``tested``: ``None`` when it has no tested set
+        (not evaluable), ``False`` when any row fails, else ``True``.
+
+    Raises:
+        ValueError: If ``stresses`` is empty, a tested set has no row for a
+            stress recipe and scored weighting, a row has no ``passed``
+            value, or a key's tested sets are an empty list or of another
+            key.
+    """
+    _check_tested(tested)
+    if not stresses:
+        raise ValueError("np6_class_verdicts: no stress recipe to combine")
+    scored = verdicts[verdicts["scored"].astype(bool).to_numpy()]
+    passed_by = _passed_by(
+        scored, ("level", "class", "stress", "tested_set", "scheme"), "NP6"
+    )
+    result: dict[tuple[str, str], bool | None] = {}
+    for key, items in tested.items():
+        if items is None:
+            result[key] = None
+            continue
+        level, cls = str(key[0]), str(key[1])
+        missing = [
+            f"{stress}/{tested_set_label(item)}/{scheme}"
+            for stress in stresses
+            for item in items
+            for scheme in settings.scored_schemes
+            if (level, cls, str(stress), tested_set_label(item), scheme)
+            not in passed_by
+        ]
+        if missing:
+            raise ValueError(f"{key}: no NP6 verdict for {missing}")
+        result[key] = all(
+            all(passed_by[(level, cls, str(stress), tested_set_label(item), scheme)])
+            for stress in stresses
+            for item in items
+            for scheme in settings.scored_schemes
+        )
+    return result
+
+
+def _rank_correlation(left: pd.Series, right: pd.Series) -> float:
+    """Spearman correlation of two aligned series (``nan`` below 3 pairs)."""
+    both = pd.concat([left, right], axis=1).dropna()
+    if len(both) < 3:
+        return math.nan
+    ranks = both.rank()
+    return float(ranks.iloc[:, 0].corr(ranks.iloc[:, 1]))
+
+
+def np6_factor_report(
+    genes: Sequence[str],
+    factors: pd.Series,
+    x1_factors: pd.DataFrame,
+    *,
+    seed: int = 0,
+    cap_log2: float = si.XPLATFORM_CAP_LOG2,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Report the X1 factor table beside NP6's cross-platform offsets (D7 (b)).
+
+    M13 decision D7 adopts (a) + (i) as NP6's factor source (set a's measured
+    Xenium / MERSCOPE offsets, uncovered genes resampled) and (b), the M3
+    shadow X1 factors (``$A/shadow/x1/x1_factors.csv``: each set a pair and
+    platform against the WHB pseudobulk, centred on the median gene and
+    capped at +-2 log2), as report-only (pre-registration §23.10: "The X1
+    factor table is reported only"). This report reads no cell and maps
+    nothing: per panel gene, the offset the cross-platform stress applies at
+    ``seed`` beside the X1 factors, and how much of the panel each table
+    covers. It decides no verdict.
+
+    Args:
+        genes: The family's panel genes (Ensembl ids).
+        factors: ``sim_inputs.xplatform_factors`` of the NP6 stress asset.
+        x1_factors: The X1 table (columns ``pair``, ``platform``,
+            ``gene_id``, ``log2_factor`` and ``capped``).
+        seed: The member seed of the offsets (a resampled gene's value
+            depends on it).
+        cap_log2: The offsets' cap (``platform_factor_cap_log2``, 2).
+
+    Returns:
+        ``(per gene, summary)``. Per gene: ``gene_id``; ``measured`` (the
+        stress asset holds the gene); ``offset``, the log2 multiplier the
+        stress applies to the R1 draw, relative to the panel's median gene;
+        ``x1_<platform>``, the mean X1 factor over the pairs per platform
+        (lower case; ``nan`` for a gene X1 lacks); ``x1_difference``,
+        Xenium less MERSCOPE when both are present; ``x1_n_capped``, the
+        X1 rows of the gene at the cap. Summary: the gene counts, the
+        Spearman correlation of ``offset`` and ``x1_difference`` over the
+        measured genes X1 holds, the standard deviations and the share of
+        the panel's X1 genes capped on any row.
+
+    Raises:
+        ValueError: If the X1 table lacks a column, or holds a (pair,
+            platform, gene) twice.
+        SimInputError: As ``sim_inputs.xplatform_stress_efficiency``.
+    """
+    required = ("pair", "platform", "gene_id", "log2_factor", "capped")
+    missing = [column for column in required if column not in x1_factors.columns]
+    if missing:
+        raise ValueError(f"np6_factor_report: the X1 table lacks {missing}")
+    names = [str(gene) for gene in genes]
+    x1 = x1_factors.assign(
+        gene_id=x1_factors["gene_id"].astype(str),
+        platform=x1_factors["platform"].astype(str).str.lower(),
+    )
+    if x1.duplicated(["pair", "platform", "gene_id"]).any():
+        raise ValueError(
+            "np6_factor_report: the X1 table holds a (pair, platform, gene) twice"
+        )
+    efficiency, measured = si.xplatform_stress_efficiency(
+        names, np.ones(len(names)), factors, seed=int(seed), cap_log2=cap_log2
+    )
+    report = pd.DataFrame(
+        {"gene_id": names, "measured": measured, "offset": np.log2(efficiency)}
+    )
+    means = x1.pivot_table(
+        index="gene_id", columns="platform", values="log2_factor", aggfunc="mean"
+    )
+    platforms = sorted(str(platform) for platform in means.columns)
+    for platform in platforms:
+        report[f"x1_{platform}"] = means[platform].reindex(names).to_numpy(np.float64)
+    if {"xenium", "merscope"} <= set(platforms):
+        report["x1_difference"] = report["x1_xenium"] - report["x1_merscope"]
+    else:
+        report["x1_difference"] = math.nan
+    capped = x1[x1["capped"].astype(str).str.lower() == "true"]
+    report["x1_n_capped"] = (
+        capped.groupby("gene_id").size().reindex(names).fillna(0).astype(int).to_numpy()
+    )
+    in_x1 = report["gene_id"].isin(set(x1["gene_id"])).to_numpy(bool)
+    shared = report[report["measured"].to_numpy(bool) & in_x1]
+    summary: dict[str, Any] = {
+        "seed": int(seed),
+        "n_genes": len(names),
+        "n_measured": int(report["measured"].sum()),
+        "n_resampled": int((~report["measured"]).sum()),
+        "n_x1": int(in_x1.sum()),
+        "n_measured_and_x1": len(shared),
+        "x1_platforms": platforms,
+        "spearman_offset_x1_difference": _rank_correlation(
+            shared["offset"], shared["x1_difference"]
+        ),
+        "sd_offset": float(report["offset"].std(ddof=1)),
+        "sd_x1_difference": float(report["x1_difference"].std(ddof=1)),
+        "x1_capped_share": float((report.loc[in_x1, "x1_n_capped"] > 0).mean())
+        if in_x1.any()
+        else math.nan,
+        "use": "report only (M13 D7 (b)); decides no NP6 verdict",
+    }
+    return report, summary
+
+
+# --------------------------------------------------------------------------
+# NP7: error structure (§14 NP7)
+
+# §14 NP7 (human): "confident calls to sink or region-implausible nodes <= 1%
+# of confident calls".
+NP7_MAX_EXCLUDED_SHARE: Final = 0.01
+# §14 NP7: "no single wrong node receives > 5% of the class's confident calls".
+NP7_MAX_WRONG_NODE_SHARE: Final = 0.05
+# CHECK K4, pre-registration §23.9 item 5: gate P simulates from the frontal
+# WHB reference, so NP7's region part reads this column whatever the
+# family's sections are.
+NP7_REGION: Final = "frontal_cortex"
+# The cells-table level whose ``call`` is the assigned WHB supercluster (a
+# node; ``node_level_calls``), and the vocab snapshot level of those nodes.
+NP7_NODE_LEVEL: Final = "supercluster"
+NP7_VOCAB_LEVEL: Final = res.WHB_SUPC
+# Why a node is excluded (a node that is both a sink and region-implausible,
+# as WHB Splatter, counts as a sink).
+NP7_REASON_SINK: Final = "sink"
+NP7_REASON_REGION: Final = "region_implausible"
+NP7_REASON_NOT_IN_VOCAB: Final = "not_in_vocab"
+NP7_EXCLUDED_COLUMNS: Final[tuple[str, ...]] = (
+    "level",
+    "n_confident",
+    "n_excluded_calls",
+    "n_excluded_confident",
+    "n_sink",
+    "n_region_implausible",
+    "n_not_in_vocab",
+    "excluded_share",
+    "n_excluded_level_population",
+    "excluded_share_level_population",
+    "max_share",
+    "nodes",
+    "passed",
+)
+NP7_WRONG_NODE_COLUMNS: Final[tuple[str, ...]] = (
+    "level",
+    "class",
+    "set",
+    "pooled",
+    "set_min_depth",
+    "n_truth_confident",
+    "n_truth_excluded",
+    "n_truth_wrong",
+    "wrong_node",
+    "n_wrong_node",
+    "wrong_node_share",
+    "n_truth_classed",
+    "classed_wrong_node",
+    "n_classed_wrong_node",
+    "classed_wrong_node_share",
+    "split_wrong_node",
+    "n_split_wrong_node",
+    "split_wrong_node_share",
+    "n_called_confident",
+    "called_wrong_node",
+    "n_called_wrong_node",
+    "called_wrong_node_share",
+    "max_share",
+    "passed",
+)
+# The node of a wrong call without a call value (kept apart from any label).
+_NO_NODE: Final = "<none>"
+# The config's default ``gate_p_min_confident_n`` (200), so that
+# ``Np7Settings()`` duplicates no config literal (CHECK K17 item 3).
+_DEFAULT_MIN_CONFIDENT_N: Final[int] = (
+    AnnotationResolvabilityConfig().gate_p_min_confident_n
+)
+
+
+@dataclass(frozen=True)
+class Np7Settings:
+    """The NP7 constants (§14 NP7).
+
+    Attributes:
+        max_excluded_share: The largest share of a level's confident calls
+            that confident calls to sink or region-implausible nodes may
+            reach (human; 0.01).
+        max_wrong_node_share: The largest share of a truth class's confident
+            calls at a tested set that one wrong node may receive (0.05).
+        region: The region of the vocab's plausibility column
+            (``region_plausible_<region>``; ``frontal_cortex``, CHECK K4).
+        min_confident_n: Confident calls a tested set holds at least
+            (``gate_p_min_confident_n``, 200); ``np7_error_structure``
+            refuses a set with fewer, as ``np3_set_stats`` does.
+    """
+
+    max_excluded_share: float = NP7_MAX_EXCLUDED_SHARE
+    max_wrong_node_share: float = NP7_MAX_WRONG_NODE_SHARE
+    region: str = NP7_REGION
+    min_confident_n: int = _DEFAULT_MIN_CONFIDENT_N
+
+    def __post_init__(self) -> None:
+        """Validate the constants.
+
+        Raises:
+            ValueError: If a share is outside [0, 1], the region is empty or
+                ``min_confident_n`` is below 1.
+        """
+        for name in ("max_excluded_share", "max_wrong_node_share"):
+            value = getattr(self, name)
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(
+                    f"Np7Settings.{name} must lie in [0, 1], got {value!r}"
+                )
+        if not self.region.strip():
+            raise ValueError("Np7Settings.region must not be empty")
+        if self.min_confident_n < 1:
+            raise ValueError(
+                "Np7Settings.min_confident_n must be >= 1, got "
+                f"{self.min_confident_n!r}"
+            )
+
+    @classmethod
+    def from_config(cls, config: AnnotationResolvabilityConfig) -> Np7Settings:
+        """Read the NP7 settings from the resolvability config (§14 NP7).
+
+        Args:
+            config: The resolvability config.
+
+        Returns:
+            The settings: ``min_confident_n`` from the config; the shares and
+            the region are the §14 and CHECK K4 constants.
+        """
+        return cls(min_confident_n=config.gate_p_min_confident_n)
+
+    @property
+    def region_column(self) -> str:
+        """The vocab column of the region (``region_plausible_<region>``)."""
+        return f"{REGION_COLUMN_PREFIX}{self.region}"
+
+
+@dataclass(frozen=True)
+class Np7Tables:
+    """NP7's two tables for one emission member (``np7_error_structure``).
+
+    Attributes:
+        excluded: Per level, the confident calls to sink or region-implausible
+            nodes against the level's confident calls (columns
+            ``NP7_EXCLUDED_COLUMNS``; ``*_level_population`` report-only);
+            ``None`` for mouse, where §14 NP7's 1% part does not apply.
+        wrong_node: Per tested set, the share of the truth class's confident
+            calls on its most frequent wrong node, with and without the calls
+            to excluded nodes (``wrong_node*`` and ``classed_wrong_node*``,
+            both scored), and with each excluded call on its assigned
+            supercluster (``split_wrong_node*``, report-only) (columns
+            ``NP7_WRONG_NODE_COLUMNS``).
+    """
+
+    excluded: pd.DataFrame | None
+    wrong_node: pd.DataFrame
+
+
+def _label(value: object) -> str | None:
+    """A label cell of a table (``None``, ``nan`` and blank: ``None``)."""
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return None
+    text = str(value)
+    return text if text.strip() else None
+
+
+def _labels(values: pd.Series) -> np.ndarray:
+    """``_label`` of every cell of a column, as an object array.
+
+    The distinct values are cleaned once (``pd.factorize``); a missing value
+    takes code -1, which indexes the trailing ``None``.
+    """
+    codes, uniques = pd.factorize(
+        values.astype(object).to_numpy(), use_na_sentinel=True
+    )
+    cleaned = np.array([*(_label(value) for value in uniques), None], dtype=object)
+    return np.asarray(cleaned[codes], dtype=object)
+
+
+def _vocab_flag(value: object, column: str, node: str) -> bool:
+    """A boolean vocab cell (``True`` / ``False``, or their strings).
+
+    A blank cell is refused: the self-map's level specs read a blank sink as
+    false and a blank region flag as true (``whb_level_specs``), so a call
+    to such a node keeps a class in the cells tables, and NP7 has no reading
+    of the flag that agrees with both.
+
+    Raises:
+        ValueError: For a blank value or one other than true or false.
+    """
+    if isinstance(value, bool | np.bool_):
+        return bool(value)
+    text = _label(value)
+    if text is None:
+        raise ValueError(
+            f"NP7: the vocab's {column!r} of node {node!r} is blank; the self-map's "
+            "level specs read a blank sink as false and a blank region flag as "
+            "true, so NP7 refuses it (fill the snapshot's flag)"
+        )
+    lowered = text.strip().lower()
+    if lowered in ("true", "false"):
+        return lowered == "true"
+    raise ValueError(
+        f"NP7: the vocab's {column!r} of node {node!r} is {text!r}, not true or false"
+    )
+
+
+def np7_excluded_nodes(
+    vocab: pd.DataFrame,
+    *,
+    region: str = NP7_REGION,
+    vocab_level: str = NP7_VOCAB_LEVEL,
+) -> dict[str, str | None]:
+    """Return why each node of a vocab level is excluded from the calls (§14 NP7).
+
+    Production never emits a call to a sink or region-implausible node, and
+    reads a node outside the vocab as implausible (``consensus.resolve_human``),
+    so the self-map's level specs give such calls no class (``parent`` is
+    null; ``whb_level_specs``). NP7 counts them from the bundle's vocab
+    snapshot: per node, ``sink`` true gives ``sink``; else
+    ``region_plausible_<region>`` false gives ``region_implausible``; else
+    ``None`` (the node is plausible). A node the snapshot does not list is
+    ``not_in_vocab`` (``np7_error_structure``); a blank flag is refused,
+    because the level specs read it as not a sink and as plausible.
+
+    Args:
+        vocab: The mapped bundle's vocab snapshot (``MmcBundle.vocab``:
+            ``level``, ``node``, ``sink``, ``region_plausible_<region>``).
+        region: The region of the plausibility column.
+        vocab_level: The vocab level of the nodes (the WHB supercluster).
+
+    Returns:
+        Per node label of ``vocab_level``, the reason or ``None``. A label
+        missing here is a node outside the vocab (``not_in_vocab``).
+
+    Raises:
+        ValueError: If the vocab lacks a column, has no row at
+            ``vocab_level``, holds a node twice or a flag that is blank or
+            not true or false.
+    """
+    column = f"{REGION_COLUMN_PREFIX}{region}"
+    _require_columns(vocab, ("level", "node", "sink", column), "NP7: the vocab")
+    frame = vocab.reset_index(drop=True)
+    rows = frame[(frame["level"].astype(str) == vocab_level).to_numpy()]
+    if rows.empty:
+        raise ValueError(f"NP7: the vocab has no node at the level {vocab_level!r}")
+    nodes = rows["node"].astype(str)
+    if bool(nodes.duplicated().any()):
+        repeated = sorted(set(nodes[nodes.duplicated()]))
+        raise ValueError(
+            f"NP7: the vocab lists the nodes {repeated} more than once at "
+            f"{vocab_level!r}"
+        )
+    result: dict[str, str | None] = {}
+    for node, sink_value, region_value in zip(
+        nodes, rows["sink"].astype(object), rows[column].astype(object), strict=True
+    ):
+        sink = _vocab_flag(sink_value, "sink", node)
+        plausible = _vocab_flag(region_value, column, node)
+        if sink:
+            result[node] = NP7_REASON_SINK
+        elif not plausible:
+            result[node] = NP7_REASON_REGION
+        else:
+            result[node] = None
+    return result
+
+
+def _np7_unclassed_nodes(vocab: pd.DataFrame, vocab_level: str) -> frozenset[str]:
+    """The nodes of a vocab level that the self-map gives no class anywhere.
+
+    ``whb_level_specs`` keys a node's calls by the floor class of its broad
+    class and NT (``human_floor_class``), so a node whose broad class is
+    blank, Mixed/Unknown or has no floor class keeps a null ``parent`` even
+    where it is plausible. Every other plausible node's calls carry a class
+    at the node level. A vocab without a ``broad_class`` column names no
+    such node: each of its plausible nodes is expected to carry a class.
+    """
+    if "broad_class" not in vocab.columns:
+        return frozenset()
+    frame = vocab.reset_index(drop=True)
+    rows = frame[(frame["level"].astype(str) == vocab_level).to_numpy()]
+    nts = rows["nt"] if "nt" in rows.columns else pd.Series(None, index=rows.index)
+    unclassed: set[str] = set()
+    for node, broad, nt in zip(
+        rows["node"].astype(str),
+        rows["broad_class"].astype(object),
+        nts.astype(object),
+        strict=True,
+    ):
+        group = _label(broad)
+        if group == UNASSIGNED_LABEL:
+            group = None
+        if human_floor_class(group, _label(nt)) is None:
+            unclassed.add(node)
+    return frozenset(unclassed)
+
+
+def _assigned_positions(frame: pd.DataFrame, node_level: str) -> np.ndarray:
+    """Each row's position of the row at ``node_level`` of the same simulated cell.
+
+    A lineage, broad or NT call names a group of nodes (``group_level_calls``)
+    and the WHB cluster call a child of the assigned supercluster, so the
+    assigned node of every row is the supercluster call of the same simulated
+    cell, (cell, depth): one replicate holds it once per level, and a test
+    cell thinned to two depths can be assigned two nodes.
+
+    Raises:
+        ValueError: If ``frame`` has no row at ``node_level``, or a row's cell
+            has none there.
+    """
+    levels = frame["level"].astype(str).to_numpy()
+    is_node = levels == node_level
+    if not bool(is_node.any()):
+        raise ValueError(
+            f"NP7: the rows hold no {node_level!r} level, whose calls name the "
+            "assigned nodes"
+        )
+    node_rows = frame[is_node]
+    index = pd.MultiIndex.from_arrays(
+        [
+            node_rows["cell_id"].astype(str).to_numpy(),
+            node_rows["depth"].to_numpy(np.int64),
+        ]
+    )
+    keys = pd.MultiIndex.from_arrays(
+        [frame["cell_id"].astype(str).to_numpy(), frame["depth"].to_numpy(np.int64)]
+    )
+    positions = index.get_indexer(keys)
+    missing = positions < 0
+    if bool(missing.any()):
+        raise ValueError(
+            f"NP7: {int(missing.sum())} rows have no {node_level!r} row of the same "
+            "simulated cell (cell_id, depth), so their assigned node is unknown"
+        )
+    return np.asarray(np.flatnonzero(is_node)[positions], dtype=np.int64)
+
+
+def _lowest_emitted_thresholds(
+    lookup: Mapping[tuple[str, str, int], tuple[str, float | None, bool]],
+) -> dict[tuple[str, int], float]:
+    """The lowest frozen threshold of the bins emitted per (level, depth)."""
+    lowest: dict[tuple[str, int], float] = {}
+    for (level, _, depth), (status, threshold, _) in lookup.items():
+        if status != res.STATUS_EMITTED or threshold is None:
+            continue
+        key = (str(level), int(depth))
+        lowest[key] = min(lowest.get(key, math.inf), float(threshold))
+    return lowest
+
+
+@dataclass(frozen=True)
+class _Np7Rows:
+    """One member's pooled held-out rows with NP7's per-row arrays.
+
+    ``node`` is a row's call, or for a call to an excluded node its assigned
+    supercluster; ``group_node`` is a row's call, or for a call to an
+    excluded node that names no group at its level (a WHB sink at broad or
+    NT) its assigned supercluster.
+    """
+
+    frame: pd.DataFrame
+    index: _ReplicateIndex
+    confident: np.ndarray
+    correct: np.ndarray
+    excluded: np.ndarray
+    excluded_confident: np.ndarray
+    reason: np.ndarray
+    node: np.ndarray
+    group_node: np.ndarray
+
+
+def _check_plausible_calls_have_a_class(
+    frame: pd.DataFrame,
+    calls: np.ndarray,
+    reasons: Mapping[str, str | None],
+    unclassed: frozenset[str],
+    node_level: str,
+) -> None:
+    """Refuse a call to a plausible node that has no class at ``node_level``.
+
+    At the node level a call keeps its class wherever its node is plausible
+    and has a floor class (``whb_level_specs``; the WHB COP rule clears
+    broad rows only). A cells table built with another region, where such a
+    node is implausible, gives its calls a null ``parent``: NP7 would read
+    them as plausible and leave them out of both the numerator and the
+    denominator of the 1% part.
+
+    Raises:
+        ValueError: If such a call has a null ``parent``.
+    """
+    at_level = frame["level"].astype(str).to_numpy() == node_level
+    no_class = at_level & frame["parent"].isna().to_numpy()
+    if not bool(no_class.any()):
+        return
+    named = calls[no_class]
+    codes, uniques = pd.factorize(named, use_na_sentinel=True)
+    classed = np.array(
+        [
+            *(
+                str(value) in reasons
+                and reasons[str(value)] is None
+                and str(value) not in unclassed
+                for value in uniques
+            ),
+            False,
+        ],
+        dtype=bool,
+    )
+    expected = classed[codes]
+    if bool(expected.any()):
+        nodes = sorted({str(value) for value in named[expected]})
+        raise ValueError(
+            f"NP7: {int(expected.sum())} {node_level!r} calls to region-plausible "
+            f"nodes {nodes} have no class (parent): the cells table was built "
+            "with another region or vocab than NP7 reads"
+        )
+
+
+def _np7_rows(
+    frame: pd.DataFrame,
+    lookup: Mapping[tuple[str, str, int], tuple[str, float | None, bool]],
+    reasons: Mapping[str, str | None] | None,
+    node_level: str,
+    unclassed: frozenset[str] = frozenset(),
+) -> _Np7Rows:
+    """NP7's arrays of one member's rows (``reasons`` None: no excluded nodes).
+
+    A call to an excluded node is confident when the larger of its own bp
+    and the bp of its cell's ``node_level`` row (same depth) reaches the
+    lowest frozen threshold emitted at its level and depth. A sink names no
+    group at broad or NT (WHB Miscellaneous and Splatter are Mixed/Unknown),
+    so its call there has no bp of its own (``group_level_calls``).
+
+    Raises:
+        ValueError: If a call to an excluded node has a class (``parent``),
+            a ``node_level`` call to a plausible node of the vocab that has
+            a floor class (not in ``unclassed``) has none
+            (``_check_plausible_calls_have_a_class``), or for the assigned
+            nodes (``_assigned_positions``).
+    """
+    n_rows = len(frame)
+    confident = res.frozen_confident_mask(frame, lookup)
+    calls = _labels(frame["call"])
+    node = calls.copy()
+    node[pd.isna(node)] = _NO_NODE
+    group_node = node.copy()
+    reason: np.ndarray = np.full(n_rows, None, dtype=object)
+    excluded: np.ndarray = np.zeros(n_rows, dtype=bool)
+    excluded_confident = np.zeros(n_rows, dtype=bool)
+    if reasons is not None:
+        assigned = _assigned_positions(frame, node_level)
+        codes, uniques = pd.factorize(calls[assigned], use_na_sentinel=True)
+        why = np.array(
+            [*(reasons.get(str(value), NP7_REASON_NOT_IN_VOCAB) for value in uniques)]
+            + [None],
+            dtype=object,
+        )
+        reason = np.asarray(why[codes], dtype=object)
+        excluded = np.asarray(pd.notna(reason), dtype=bool)
+        with_class = excluded & frame["parent"].notna().to_numpy()
+        if bool(with_class.any()):
+            raise ValueError(
+                f"NP7: {int(with_class.sum())} calls to sink or region-implausible "
+                "nodes have a class (parent): the cells table was built with "
+                "another region or vocab than NP7 reads"
+            )
+        _check_plausible_calls_have_a_class(
+            frame, calls, reasons, unclassed, node_level
+        )
+        hit = np.flatnonzero(excluded)
+        node[hit] = np.asarray(uniques, dtype=object)[codes[hit]]
+        unnamed = hit[pd.isna(calls[hit])]
+        group_node[unnamed] = node[unnamed]
+        lowest = _lowest_emitted_thresholds(lookup)
+        thresholds = np.array(
+            [
+                lowest.get((str(level), int(depth)), math.nan)
+                for level, depth in zip(
+                    frame["level"].to_numpy()[hit],
+                    frame["depth"].to_numpy()[hit],
+                    strict=True,
+                )
+            ],
+            dtype=np.float64,
+        )
+        all_bp = frame["bp"].to_numpy(np.float64)
+        bp = np.nan_to_num(np.fmax(all_bp[hit], all_bp[assigned[hit]]), nan=-1.0)
+        excluded_confident[hit] = np.isfinite(thresholds) & (
+            bp >= thresholds - _TOLERANCE
+        )
+    return _Np7Rows(
+        frame=frame,
+        index=_ReplicateIndex(frame, confident),
+        confident=confident,
+        correct=frame["correct"].to_numpy(bool),
+        excluded=excluded,
+        excluded_confident=excluded_confident,
+        reason=reason,
+        node=node,
+        group_node=group_node,
+    )
+
+
+def _node_counts(nodes: np.ndarray) -> list[tuple[str, int]]:
+    """Counts per node, the largest first (ties by label)."""
+    if len(nodes) == 0:
+        return []
+    values, counts = np.unique(nodes.astype(str), return_counts=True)
+    return sorted(
+        ((str(value), int(count)) for value, count in zip(values, counts, strict=True)),
+        key=lambda pair: (-pair[1], pair[0]),
+    )
+
+
+def _level_classes(
+    lookup: Mapping[tuple[str, str, int], tuple[str, float | None, bool]],
+) -> dict[str, frozenset[str]]:
+    """The classes the frozen decisions hold per level (its calls' classes)."""
+    classes: dict[str, set[str]] = {}
+    for level, cls, _ in lookup:
+        classes.setdefault(str(level), set()).add(str(cls))
+    return {level: frozenset(values) for level, values in classes.items()}
+
+
+def _np7_excluded_table(
+    rows: _Np7Rows,
+    settings: Np7Settings,
+    level_classes: Mapping[str, frozenset[str]],
+) -> pd.DataFrame:
+    """The 1% part per level (§14 NP7, human; K9.1 denominator).
+
+    The numerator counts every confident call to an excluded node at the
+    level, whatever the cell's truth class: at NT, whose classes and
+    denominator are the neurons', a glial cell assigned a WHB sink counts
+    too. The count of the cells whose truth class is one of the level's
+    classes (``level_classes``) is reported only (pre-registration §23.13).
+    """
+    levels = rows.frame["level"].astype(str).to_numpy()
+    truth = _labels(rows.frame["truth_parent"])
+    records: list[dict[str, object]] = []
+    for level in sorted(set(levels)):
+        at_level = levels == level
+        n_confident = int((rows.confident & at_level).sum())
+        hit = rows.excluded_confident & at_level
+        n_excluded = int(hit.sum())
+        reasons = rows.reason[hit]
+        own = level_classes.get(level, frozenset())
+        n_population = int(
+            sum(value is not None and str(value) in own for value in truth[hit])
+        )
+        records.append(
+            {
+                "level": level,
+                "n_confident": n_confident,
+                "n_excluded_calls": int((rows.excluded & at_level).sum()),
+                "n_excluded_confident": n_excluded,
+                "n_sink": int((reasons == NP7_REASON_SINK).sum()),
+                "n_region_implausible": int((reasons == NP7_REASON_REGION).sum()),
+                "n_not_in_vocab": int((reasons == NP7_REASON_NOT_IN_VOCAB).sum()),
+                "excluded_share": n_excluded / n_confident if n_confident else math.nan,
+                "n_excluded_level_population": n_population,
+                "excluded_share_level_population": n_population / n_confident
+                if n_confident
+                else math.nan,
+                "max_share": settings.max_excluded_share,
+                "nodes": ";".join(
+                    f"{node}:{count}" for node, count in _node_counts(rows.node[hit])
+                ),
+                "passed": n_excluded
+                <= settings.max_excluded_share * n_confident + _TOLERANCE,
+            }
+        )
+    return pd.DataFrame.from_records(records, columns=list(NP7_EXCLUDED_COLUMNS))
+
+
+def _np7_wrong_node_table(
+    rows: _Np7Rows,
+    tested: Mapping[tuple[str, str], Sequence[res.GatePTestedSet] | None],
+    settings: Np7Settings,
+) -> pd.DataFrame:
+    """The 5% part per tested set (§14 NP7; D12 truth view, called view reported).
+
+    Two truth views are scored, and a set passes only when both pass: with
+    the confident calls to excluded nodes (always wrong, each on its call
+    where its level names a group, else on its assigned supercluster) and
+    without them (the class's confident calls that have a class). The view
+    with every excluded call on its assigned supercluster is reported.
+
+    Raises:
+        ValueError: If a tested set does not hold, in the pooled held-out
+            calls, the confident calls it was built on, or holds fewer than
+            ``settings.min_confident_n`` (``_check_set_count``).
+    """
+    truth = _labels(rows.frame["truth_parent"])
+    counted = rows.confident | rows.excluded_confident
+    wrong = rows.excluded_confident | (rows.confident & ~rows.correct)
+    limit = settings.max_wrong_node_share
+
+    def top_node(nodes: np.ndarray) -> tuple[str | None, int]:
+        top = _node_counts(nodes)
+        return top[0] if top else (None, 0)
+
+    def share(count: int, total: int) -> float:
+        return count / total if total else math.nan
+
+    def within(count: int, total: int) -> bool:
+        return total > 0 and count <= limit * total + _TOLERANCE
+
+    records: list[dict[str, object]] = []
+    for (level, cls), items in sorted(tested.items(), key=lambda pair: pair[0]):
+        for item in items or ():
+            scope = rows.index.scope_positions(item)
+            mine = scope[(truth[scope] == cls) & counted[scope]]
+            mine_wrong = mine[wrong[mine]]
+            node, n_node = top_node(rows.group_node[mine_wrong])
+            split_node, n_split_node = top_node(rows.node[mine_wrong])
+            classed = mine[rows.confident[mine]]
+            classed_wrong = classed[~rows.correct[classed]]
+            classed_node, n_classed_node = top_node(rows.node[classed_wrong])
+            called = rows.index.positions(item)
+            _check_set_count(
+                item, int(len(called)), settings.min_confident_n, "np7_error_structure"
+            )
+            called_wrong = called[~rows.correct[called]]
+            called_node, n_called_node = top_node(rows.node[called_wrong])
+            n_mine = int(len(mine))
+            n_classed = int(len(classed))
+            records.append(
+                {
+                    "level": level,
+                    "class": cls,
+                    "set": tested_set_label(item),
+                    "pooled": bool(item.pooled),
+                    "set_min_depth": int(min(item.depths)),
+                    "n_truth_confident": n_mine,
+                    "n_truth_excluded": int(rows.excluded_confident[mine].sum()),
+                    "n_truth_wrong": int(len(mine_wrong)),
+                    "wrong_node": node,
+                    "n_wrong_node": n_node,
+                    "wrong_node_share": share(n_node, n_mine),
+                    "n_truth_classed": n_classed,
+                    "classed_wrong_node": classed_node,
+                    "n_classed_wrong_node": n_classed_node,
+                    "classed_wrong_node_share": share(n_classed_node, n_classed),
+                    "split_wrong_node": split_node,
+                    "n_split_wrong_node": n_split_node,
+                    "split_wrong_node_share": share(n_split_node, n_mine),
+                    "n_called_confident": int(len(called)),
+                    "called_wrong_node": called_node,
+                    "n_called_wrong_node": n_called_node,
+                    "called_wrong_node_share": share(n_called_node, len(called)),
+                    "max_share": limit,
+                    "passed": within(n_node, n_mine)
+                    and within(n_classed_node, n_classed),
+                }
+            )
+    return pd.DataFrame.from_records(records, columns=list(NP7_WRONG_NODE_COLUMNS))
+
+
+def np7_error_structure(
+    replicates: Mapping[ReplicateKey, pd.DataFrame],
+    decisions: pd.DataFrame,
+    tested: Mapping[tuple[str, str], Sequence[res.GatePTestedSet] | None],
+    *,
+    default_group: str | None,
+    species: Species,
+    settings: Np7Settings,
+    vocab: pd.DataFrame | None = None,
+    node_level: str = NP7_NODE_LEVEL,
+    vocab_level: str = NP7_VOCAB_LEVEL,
+    regime: res.Regime = "provisional",
+    recipe: str | None = res.DECISION_RECIPE,
+    seed: int = 0,
+    member: str | None = None,
+) -> Np7Tables:
+    """Score NP7's error structure on the pooled held-out calls (§14 NP7).
+
+    NP7 is scored at the frozen thresholds on all held-out calls at seed 0
+    (``pooled_held_out_cells``; the default group on its check half), per
+    emission member for version 7. Two parts:
+
+    - **Calls to excluded nodes** (human only): per level, the confident calls
+      to sink or region-implausible nodes are at most 1% of the level's
+      confident calls (``excluded``). The denominator is the level's
+      confident calls at the frozen thresholds over all classes and emitted
+      bins (CHECK K9.1; ``frozen_confident_mask``). A call to such a node
+      has no class (``parent`` null), so it lies outside every tested set
+      and is counted here beside the denominator, never in it. Its node is
+      the assigned supercluster of the simulated cell (``node_level``, at
+      the same depth; a coarse level's call names a group), read against
+      the vocab snapshot (``np7_excluded_nodes``; ``Np7Settings.region``,
+      frontal cortex for gate P, CHECK K4). A failure here fails NP7 for
+      every class of the level.
+    - **Single wrong node** (both species): at every tested set of a
+      (level, class), the share of truth class c's confident calls that
+      land on one wrong node is at most 5% (``wrong_node``; D12, pre-
+      registration §23.9 item 5). These are the confident calls of the
+      set's scope (a bin's rows, or each test cell's deepest row at >= D_P;
+      ``tested_set_mask``'s scope) whose truth class is c, whatever class
+      they were called into. A call's node is its call at the level. A
+      call to an excluded node is always wrong (at broad a call to a
+      region-implausible neuron node names "Neurons" and is "correct" in
+      the cells table, yet production never emits it); its node is its
+      call where the level names a group, else its assigned supercluster.
+      The share is scored with these calls (``wrong_node*``) and without
+      them (``classed_wrong_node*``), and a set passes only when both pass.
+      The called-class view (the share of the set's own confident calls
+      that are wrong and name one node) and the view with every excluded
+      call on its assigned supercluster (``split_wrong_node*``) are
+      reported only.
+
+    Readings this implementation takes where §14 is not explicit, put to
+    the user in pre-registration §23.13 and ruled on 2026-10-07 (§23.19;
+    A8 (a), an approved loosening, below):
+
+    - **Confidence of a call that has no class.** A call to an excluded node
+      has no frozen threshold of its own. It counts as confident when the
+      larger of its bp and the bp of its cell's supercluster row (same
+      depth) reaches the lowest frozen threshold emitted at its level and
+      depth (any class; the "emitted bins" of K9.1). It never counts at a
+      depth where the level emits nothing, or when both bp are NaN. The
+      supercluster bp is needed at broad and NT, where both WHB sinks
+      (Miscellaneous and Splatter, Mixed/Unknown at broad) name no group,
+      so their calls there have no bp of their own. Stricter: count every
+      call to an excluded node whatever its bp, as H2 does
+      (``n_excluded_calls`` reports that count), though §14 says "confident
+      calls". Others: the threshold of the cell's truth class at that bin
+      (never stricter), or the level's raw default (.73 / .69).
+    - **The 1% part's denominator.** The calls to excluded nodes are
+      counted beside the level's confident calls, not added to them (the
+      share is their number over the level's confident calls). Looser: add
+      them to the denominator.
+    - **The 1% part's numerator.** It counts every confident call to an
+      excluded node at the level, whatever the cell's truth class. At NT
+      the denominator holds the neurons' calls only (a glial call has no NT
+      class), yet a glial cell assigned a WHB sink counts in the numerator,
+      judged on its supercluster bp: glial sink calls can fail every NT
+      class while no neuron reaches a sink, which caps
+      ``validated_max_level`` at broad. Looser: count only the cells whose
+      truth class is one of the level's classes (the classes of its frozen
+      decisions; reported as ``n_excluded_level_population``).
+    - **Excluded calls in the single-wrong-node view.** Both views are
+      scored. With them, a sink that absorbs more than 5% of a class fails
+      the class at every level even when the level stays below 1% (§12
+      M13: "a planted sink absorbing > 5% of a class fails NP7"). They also
+      enlarge the class's denominator and so lower every other node's
+      share: 21 calls on one wrong node beside 380 right calls and 30
+      excluded calls spread over 10 sinks are 4.9% with them and 5.2%
+      without. Neither view is nested in the other. Looser: either view
+      alone.
+    - **The wrong node at coarse levels.** A wrong call's node is its call
+      at the level (a group at lineage, broad and NT), an excluded call's
+      too where the level names a group, so a glial class's calls to a
+      frontal excitatory node and to Amygdala excitatory are one node at
+      broad ("Neurons"). Merging nodes can only raise the largest share.
+      Looser: each excluded call on its assigned supercluster (reported,
+      ``split_wrong_node*``), or every wrong call on its assigned
+      supercluster, which splits a group's wrong calls over its nodes.
+    - **A level over 1% fails every class of the level**
+      (``np7_class_verdicts``). Looser: fail only the classes whose truth
+      cells reach the excluded nodes.
+    - **An empty truth view fails.** A tested set whose truth class has no
+      confident call in its scope fails (a ``nan`` share never passes), in
+      either view. Looser: pass it vacuously.
+    - **A node outside the vocab** counts as implausible, as production
+      reads it (``not_in_vocab``); a blank flag is refused
+      (``np7_excluded_nodes``).
+    - **Unweighted shares**, as NP4's (§23.9 item 3): §14 reweights NP3
+      only.
+
+    Where an alternative is named, the reading taken is the stricter one,
+    except for the first: H2's count whatever the bp is stricter.
+
+    The cells tables must be built with the vocab and region NP7 reads: a
+    call to an excluded node that has a class, and a supercluster call to a
+    plausible node with a floor class that has none (the table's region
+    marks it implausible), are refused.
+
+    Args:
+        replicates: Per (group, seed label), that replicate's cells table
+            (the default group's in full; ``held_out_replicates``), every
+            level of a simulated cell in the same table.
+        decisions: The frozen decisions of the base run (version 7: the
+            ensemble's).
+        tested: The tested sets per (level, class), from
+            ``gate_p_tested_sets`` (version 7: ``gate_p_member_sets``) on
+            ``pooled_held_out_cells`` of the same replicates, default group,
+            recipe, seed and member; ``None`` marks a (level, class) that is
+            not evaluable. A set built on other calls (a plain concat of the
+            tables keeps the default group's fit half) raises, as in
+            ``np3_set_stats``.
+        default_group: The group whose fit half the frozen thresholds were
+            fitted on (required; ``None`` when no replicate holds those
+            cells).
+        species: ``human`` scores both parts and needs ``vocab``; ``mouse``
+            scores the single-wrong-node part only (§14 NP7: the 1% part is
+            "Human").
+        settings: The NP7 constants.
+        vocab: The mapped bundle's vocab snapshot (human).
+        node_level: The cells-table level whose call is the assigned node.
+        vocab_level: The vocab level of those nodes.
+        regime: The regime whose thresholds are frozen.
+        recipe: The recipe of the scored rows (``None``: every recipe, so
+            the tables must hold one).
+        seed: The seed label of the replicates pooled.
+        member: The version-7 emission member of the scored rows.
+
+    Returns:
+        The two tables (``excluded`` is ``None`` for mouse), sorted by level
+        (and class and set).
+
+    Raises:
+        ValueError: If a human run has no vocab or a mouse run has one, no
+            row is left after the filters, a key's tested sets are an empty
+            list or of another key, a tested set's confident calls in the
+            pooled calls differ from its ``n_confident`` or are fewer than
+            ``settings.min_confident_n``, a call to an excluded node has a
+            class, a supercluster call to a plausible node with a floor
+            class has none, for the vocab (``np7_excluded_nodes``), the
+            assigned nodes or the default group's inputs
+            (``held_out_replicates``).
+        ResolvabilityError: If the rows mix replicates (``replicate_rows``).
+    """
+    if species == "human" and vocab is None:
+        raise ValueError(
+            "NP7 for a human family needs the vocab snapshot (sink and region "
+            "plausibility of the nodes)"
+        )
+    if species != "human" and vocab is not None:
+        raise ValueError(
+            "NP7's calls to sink or region-implausible nodes are human only "
+            "(§14 NP7); pass no vocab for mouse"
+        )
+    _check_tested(tested)
+    reasons = (
+        None
+        if vocab is None
+        else np7_excluded_nodes(vocab, region=settings.region, vocab_level=vocab_level)
+    )
+    unclassed = (
+        frozenset() if vocab is None else _np7_unclassed_nodes(vocab, vocab_level)
+    )
+    cells = pooled_held_out_cells(replicates, default_group=default_group, seed=seed)
+    frame = res.replicate_rows(
+        cells, recipe=recipe, seed=seed, member=member
+    ).reset_index(drop=True)
+    if frame.empty:
+        raise ValueError(
+            f"np7_error_structure: no rows after the filters (recipe={recipe!r}, "
+            f"seed={seed!r}, member={member!r})"
+        )
+    lookup = res.emission_lookup(decisions, regime)
+    rows = _np7_rows(frame, lookup, reasons, node_level, unclassed)
+    return Np7Tables(
+        excluded=None
+        if reasons is None
+        else _np7_excluded_table(rows, settings, _level_classes(lookup)),
+        wrong_node=_np7_wrong_node_table(rows, tested, settings),
+    )
+
+
+def np7_class_verdicts(
+    excluded: pd.DataFrame | None,
+    wrong_node: pd.DataFrame,
+    tested: Mapping[tuple[str, str], Sequence[res.GatePTestedSet] | None],
+) -> dict[tuple[str, str], bool | None]:
+    """Combine NP7's two parts per (level, class) (§14 NP7).
+
+    A (level, class) passes NP7 when its level's confident calls to sink or
+    region-implausible nodes are within 1% (human) and no single wrong node
+    takes more than 5% of its truth class's confident calls at any of its
+    tested sets. This is the every-set reading, scored until
+    pre-registration §23.21; under revision R2 a wrong-node failure below
+    D_P only raises the floor (``gate_p_depth_walk``). The result has the
+    per-member shape that ``resolvability.every_member_verdict`` combines
+    over the version-7 emission members.
+
+    Args:
+        excluded: ``Np7Tables.excluded`` (``None`` for mouse).
+        wrong_node: ``Np7Tables.wrong_node``.
+        tested: The tested sets per (level, class).
+
+    Returns:
+        Per (level, class) of ``tested``: ``None`` when it has no tested set
+        (not evaluable), ``False`` when any part fails, else ``True``.
+
+    Raises:
+        ValueError: If a (level, class) with tested sets has no excluded-share
+            row for its level (human), a tested set has no wrong-node row, a
+            row has no ``passed`` value, or a key's tested sets are an empty
+            list or of another key.
+    """
+    _check_tested(tested)
+    level_ok = (
+        None
+        if excluded is None
+        else _passed_by(excluded, ("level",), "NP7 excluded share")
+    )
+    set_ok = _passed_by(wrong_node, ("level", "class", "set"), "NP7 wrong node")
+    result: dict[tuple[str, str], bool | None] = {}
+    for key, items in tested.items():
+        if items is None:
+            result[key] = None
+            continue
+        level, cls = str(key[0]), str(key[1])
+        if level_ok is not None and (level,) not in level_ok:
+            raise ValueError(f"{key}: no NP7 excluded-share row for its level")
+        labels = [tested_set_label(item) for item in items]
+        missing = [label for label in labels if (level, cls, label) not in set_ok]
+        if missing:
+            raise ValueError(
+                f"{key}: no NP7 wrong-node row for the tested sets {missing}"
+            )
+        result[key] = (level_ok is None or all(level_ok[(level,)])) and all(
+            all(set_ok[(level, cls, label)]) for label in labels
+        )
+    return result
+
+
+# --------------------------------------------------------------------------
+# One depth rule for NP3-NP7 (pre-registration §23.21 R2)
+
+DEPTH_REASON_NOT_EVALUABLE: Final = "not_evaluable"
+DEPTH_REASON_DEEP_GROUP_FAILED: Final = "deep_group_failed"
+DEPTH_REASON_CLASS_PART_FAILED: Final = "class_part_failed"
+DEPTH_STOP_UNTESTED: Final = "untested"
+# The class-level part of each criterion that has one (never moved by depth).
+CLASS_LEVEL_PARTS: Final[Mapping[str, str]] = {
+    "NP4": "seed_criterion",
+    "NP5": "extrapolated_share",
+    "NP7": "excluded_share",
+}
+DEPTH_WALK_COLUMNS: Final[tuple[str, ...]] = (
+    "level",
+    "class",
+    "tested_max_depth",
+    "validated_min_depth",
+    "passed",
+    "reason",
+    "n_sets",
+    "deep_sets",
+    "deep_failures",
+    "class_failures",
+    "failed_sets",
+    "stop_depth",
+    "stop_reason",
+)
+
+
+@dataclass(frozen=True)
+class CriterionTables:
+    """One emission member's NP3-NP7 tables, as ``gate_p_depth_walk`` reads them.
+
+    Attributes:
+        np3_verdicts: ``np3_verdicts`` (the scored weightings per set).
+        np4_sets: ``np4_set_verdicts``.
+        np4_seed: ``np4_seed_stability`` (per level).
+        np5_agreement: The scored agreement table (``np5_decision_agreement``;
+            version 7 the ensemble's, revision R7).
+        np5_tstar: ``np5_tstar_consequence`` (revision R3 (c)).
+        np5_extrapolated: ``np5_extrapolated_share`` (per class).
+        np6_verdicts: ``np6_verdicts`` of every stress recipe.
+        np6_stresses: The stress recipes that must each have been scored.
+        np7_wrong_node: ``Np7Tables.wrong_node``.
+        np7_excluded: ``Np7Tables.excluded`` (``None`` for mouse).
+    """
+
+    np3_verdicts: pd.DataFrame
+    np4_sets: pd.DataFrame
+    np4_seed: pd.DataFrame
+    np5_agreement: pd.DataFrame
+    np5_tstar: pd.DataFrame
+    np5_extrapolated: pd.DataFrame
+    np6_verdicts: pd.DataFrame
+    np6_stresses: tuple[str, ...]
+    np7_wrong_node: pd.DataFrame
+    np7_excluded: pd.DataFrame | None
+
+
+SetKey = tuple[str, str, str]
+
+
+def _per_set(table: pd.DataFrame, name: str) -> dict[SetKey, bool]:
+    """A per-set table's verdict per (level, class, set): all its rows pass."""
+    _require_columns(table, ("level", "class", "set", "passed"), name)
+    return {
+        (key[0], key[1], key[2]): all(values)
+        for key, values in _passed_by(table, ("level", "class", "set"), name).items()
+    }
+
+
+def _depth_list(value: object) -> list[int]:
+    """A ``;``-joined depth cell as ints (blank, ``None`` and ``nan``: none)."""
+    text = _label(value)
+    if text is None:
+        return []
+    return [int(float(item)) for item in text.split(";") if item.strip()]
+
+
+# One replicate's NP5 agreement row: its name, flipped bins and the base's
+# boundary bins.
+AgreementRow = tuple[str, list[int], set[int]]
+
+
+@dataclass(frozen=True)
+class _WalkParts:
+    """The per-set and class-level verdicts of one member's NP3-NP7.
+
+    Attributes:
+        sets: Per criterion, per (level, class, set label), the set passes.
+        seed: NP4's seed criterion per level.
+        extrapolated: NP5's extrapolated share per (level, class).
+        excluded: NP7's excluded share per level (``None`` for mouse).
+        agreement: NP5's agreement rows per (level, class).
+    """
+
+    sets: dict[str, dict[SetKey, bool]]
+    seed: dict[str, bool]
+    extrapolated: dict[tuple[str, str], bool]
+    excluded: dict[str, bool] | None
+    agreement: dict[tuple[str, str], list[AgreementRow]]
+
+
+def _walk_parts(tables: CriterionTables, np6_settings: Np6Settings) -> _WalkParts:
+    """Read every criterion table once (``gate_p_depth_walk``)."""
+    np3: dict[SetKey, bool] = {}
+    for key, schemes in _np3_set_passed(tables.np3_verdicts).items():
+        missing = [scheme for scheme in NP3_SCORED_SCHEMES if scheme not in schemes]
+        if not missing:
+            np3[key] = all(schemes[scheme] for scheme in NP3_SCORED_SCHEMES)
+    scored = tables.np6_verdicts[tables.np6_verdicts["scored"].astype(bool).to_numpy()]
+    np6_rows = _passed_by(
+        scored, ("level", "class", "stress", "tested_set", "scheme"), "NP6"
+    )
+    np6: dict[SetKey, bool] = {}
+    for (level, cls, _stress, label, _scheme), values in np6_rows.items():
+        np6[(level, cls, label)] = np6.get((level, cls, label), True) and all(values)
+    np6_complete = {
+        (level, cls, label)
+        for level, cls, label in np6
+        if all(
+            (level, cls, str(stress), label, scheme) in np6_rows
+            for stress in tables.np6_stresses
+            for scheme in np6_settings.scored_schemes
+        )
+    }
+    seed = {
+        key[0]: all(values)
+        for key, values in _passed_by(
+            tables.np4_seed, ("level",), "NP4 seed criterion"
+        ).items()
+    }
+    extrapolated = {
+        (key[0], key[1]): all(values)
+        for key, values in _passed_by(
+            tables.np5_extrapolated, ("level", "class"), "NP5 extrapolated share"
+        ).items()
+    }
+    excluded = (
+        None
+        if tables.np7_excluded is None
+        else {
+            key[0]: all(values)
+            for key, values in _passed_by(
+                tables.np7_excluded, ("level",), "NP7 excluded share"
+            ).items()
+        }
+    )
+    _require_columns(
+        tables.np5_agreement,
+        ("level", "class", "group", "seed", "flipped_depths", "boundary_depths"),
+        "the NP5 agreement table",
+    )
+    agreement: dict[tuple[str, str], list[AgreementRow]] = {}
+    for level, cls, group, replicate, flipped, boundary in zip(
+        tables.np5_agreement["level"].astype(str),
+        tables.np5_agreement["class"].astype(str),
+        tables.np5_agreement["group"].astype(str),
+        tables.np5_agreement["seed"],
+        tables.np5_agreement["flipped_depths"].astype(object),
+        tables.np5_agreement["boundary_depths"].astype(object),
+        strict=True,
+    ):
+        agreement.setdefault((level, cls), []).append(
+            (f"{group}/{replicate}", _depth_list(flipped), set(_depth_list(boundary)))
+        )
+    return _WalkParts(
+        sets={
+            "NP3": np3,
+            "NP4": _per_set(tables.np4_sets, "NP4"),
+            "NP5": _per_set(tables.np5_tstar, "NP5 t*"),
+            "NP6": {key: value for key, value in np6.items() if key in np6_complete},
+            "NP7": _per_set(tables.np7_wrong_node, "NP7 wrong node"),
+        },
+        seed=seed,
+        extrapolated=extrapolated,
+        excluded=excluded,
+        agreement=agreement,
+    )
+
+
+def _class_part_failures(parts: _WalkParts, key: tuple[str, str]) -> list[str]:
+    """The criteria whose class-level part fails for ``key`` (R2: never moved
+    by depth).
+
+    Raises:
+        ValueError: If a part has no row for the key's level or class.
+    """
+    level, cls = key
+    failing: list[str] = []
+    seed = parts.seed.get(level)
+    if seed is None:
+        raise ValueError(f"{key}: no NP4 seed-criterion row for its level")
+    if not seed:
+        failing.append("NP4")
+    extrapolated = parts.extrapolated.get((level, cls))
+    if extrapolated is None:
+        raise ValueError(f"{key}: no NP5 extrapolated share row")
+    if not extrapolated:
+        failing.append("NP5")
+    if parts.excluded is not None:
+        excluded = parts.excluded.get(level)
+        if excluded is None:
+            raise ValueError(f"{key}: no NP7 excluded-share row for its level")
+        if not excluded:
+            failing.append("NP7")
+    return failing
+
+
+def _agreement_failures(rows: Sequence[AgreementRow], floor: int) -> list[str]:
+    """NP5 agreement at floor ``floor`` (R2): only flips at bins >= the floor
+    count, and one flip at a bin adjacent to a boundary of the base (on the
+    whole grid) is allowed. A failing replicate reads ``agreement
+    <group>/<seed>@<bin>+<bin>``.
+    """
+    failing: list[str] = []
+    for name, flipped, boundary in rows:
+        kept = [depth for depth in flipped if depth >= floor]
+        if not _agreement_passed(kept, boundary):
+            failing.append(f"agreement {name}@{'+'.join(map(str, sorted(kept)))}")
+    return failing
+
+
+def gate_p_depth_walk(
+    tables: CriterionTables,
+    tested: Mapping[tuple[str, str], Sequence[res.GatePTestedSet] | None],
+    depths: Sequence[int],
+    *,
+    np6_settings: Np6Settings,
+) -> tuple[dict[str, dict[tuple[str, str], bool | None]], pd.DataFrame]:
+    """One depth rule for NP3-NP7: the verdicts and ``validated_min_depth`` (R2).
+
+    Revision R2 (pre-registration §23.21, approved by the user on
+    2026-10-07): ``validated_min_depth`` is the shallowest bin from which
+    every tested set, up to and including the ">= D_P" set, passes NP3 and
+    NP4-NP7. Per (level, class) of ``tested``:
+
+    - D_P (``tested_max_depth``) is the shallowest bin of the pooled ">=
+      D_P" set, or the deepest bin when that bin is tested on its own;
+    - a criterion fails the class when it fails at a set of the ">= D_P"
+      group (every tested set whose shallowest bin is >= D_P), or when its
+      class-level part fails (NP4's seed criterion, per level; NP5's
+      extrapolated share; NP7's excluded share, per level, human only);
+    - otherwise the class passes every criterion, and the walk goes down
+      from D_P through the grid bins tested on their own: it stops at the
+      first bin that is not tested on its own (``untested``) or fails any
+      criterion there (``stop_reason`` names them), and
+      ``validated_min_depth`` is the last bin passed. A failure at a set
+      shallower than D_P only raises the floor;
+    - NP5's agreement at floor d counts only flips at bins >= d (the ">=
+      D_P" group reads it at D_P); the boundary exemption is unchanged (the
+      base's boundaries on the whole grid, ``np5_decision_agreement``).
+
+    A set's verdict per criterion: NP3, every scored weighting passes
+    (``NP3_SCORED_SCHEMES``); NP4, ``np4_set_verdicts``; NP5's t* part, the
+    consequence check (``np5_tstar_consequence``, R3 (c)); NP6, every
+    stress recipe under every scored weighting (a thin set pooled with
+    deeper sets is judged as its own tested set, as ``np6_class_verdicts``
+    keys it); NP7, the single-wrong-node part.
+
+    Before §23.21, NP4-NP7 failed the class at any tested set and only NP3
+    set the floor (``validated_min_depth``, reported as NP3's own walk);
+    ``failed_sets`` reports every failing set and replicate on the whole
+    grid, the every-set reading.
+
+    Args:
+        tables: The member's criterion tables.
+        tested: The tested sets per (level, class).
+        depths: The simulation's depth grid.
+        np6_settings: The NP6 constants (the scored weightings).
+
+    Returns:
+        ``(verdicts, table)``: per criterion of ``GATE_P_CLASS_CRITERIA``,
+        per (level, class), ``True``, ``False`` or ``None`` (not
+        evaluable), in the per-member shape ``gate_p_class_records`` and
+        ``every_member_verdict`` combine; and one row per (level, class),
+        columns ``DEPTH_WALK_COLUMNS``, whose ``passed``,
+        ``validated_min_depth`` and ``tested_max_depth`` are the record's
+        depths (``passed`` None when not evaluable).
+
+    Raises:
+        ValueError: If a tested set has no row in a criterion's table (NP6:
+            for a stress recipe and scored weighting), a class-level part
+            has no row for a tested key, a tested key has no agreement row,
+            a ``passed`` value is missing, a key has more than one pooled
+            set or a tested depth is not in the grid, or a key's tested
+            sets are an empty list or of another key.
+    """
+    _check_tested(tested)
+    grid = sorted({int(depth) for depth in depths})
+    parts = _walk_parts(tables, np6_settings)
+    verdicts: dict[str, dict[tuple[str, str], bool | None]] = {
+        criterion: {} for criterion in GATE_P_CLASS_CRITERIA
+    }
+    records: list[dict[str, object]] = []
+    for key in sorted(tested):
+        level, cls = str(key[0]), str(key[1])
+        items = tested[key]
+        record: dict[str, object] = {
+            "level": level,
+            "class": cls,
+            "tested_max_depth": None,
+            "validated_min_depth": None,
+            "passed": None,
+            "reason": DEPTH_REASON_NOT_EVALUABLE,
+            "n_sets": 0,
+            "deep_sets": "",
+            "deep_failures": "",
+            "class_failures": "",
+            "failed_sets": "",
+            "stop_depth": None,
+            "stop_reason": "",
+        }
+        records.append(record)
+        if items is None:
+            for criterion in GATE_P_CLASS_CRITERIA:
+                verdicts[criterion][key] = None
+            continue
+        pooled = [item for item in items if item.pooled]
+        if len(pooled) > 1:
+            raise ValueError(
+                f"{key}: {len(pooled)} pooled tested sets; a (level, class) has "
+                "at most one"
+            )
+        off_grid = sorted(
+            {int(depth) for item in items for depth in item.depths} - set(grid)
+        )
+        if off_grid:
+            raise ValueError(
+                f"{key}: the tested depths {off_grid} are not in the grid {grid}"
+            )
+        labels = {tested_set_label(item): item for item in items}
+        for criterion in GATE_P_CLASS_CRITERIA:
+            lacking = [
+                label
+                for label in labels
+                if (level, cls, label) not in parts.sets[criterion]
+            ]
+            if lacking:
+                raise ValueError(
+                    f"{key}: no {criterion} verdict for the tested sets {lacking}"
+                    + (
+                        f" (every stress recipe of {list(tables.np6_stresses)} "
+                        "under every scored weighting)"
+                        if criterion == "NP6"
+                        else ""
+                    )
+                )
+        if (level, cls) not in parts.agreement:
+            raise ValueError(f"{key}: no NP5 agreement rows")
+        replicates = parts.agreement[(level, cls)]
+
+        def failures(
+            set_labels: Sequence[str],
+            floor: int,
+            replicates: Sequence[AgreementRow] = replicates,
+            level: str = level,
+            cls: str = cls,
+        ) -> dict[str, list[str]]:
+            failing: dict[str, list[str]] = {}
+            for criterion in GATE_P_CLASS_CRITERIA:
+                bad = [
+                    label
+                    for label in set_labels
+                    if not parts.sets[criterion][(level, cls, label)]
+                ]
+                if bad:
+                    failing[criterion] = bad
+            disagreeing = _agreement_failures(replicates, floor)
+            if disagreeing:
+                failing.setdefault("NP5", []).extend(disagreeing)
+            return failing
+
+        def joined(failing: Mapping[str, Sequence[str]]) -> str:
+            return ";".join(
+                f"{criterion}:{','.join(failing[criterion])}"
+                for criterion in GATE_P_CLASS_CRITERIA
+                if failing.get(criterion)
+            )
+
+        d_p = (
+            int(min(pooled[0].depths))
+            if pooled
+            else max(int(item.depths[0]) for item in items)
+        )
+        deep = [label for label, item in labels.items() if min(item.depths) >= d_p]
+        deep_failed = failures(deep, d_p)
+        class_failed = _class_part_failures(parts, key)
+        for criterion in GATE_P_CLASS_CRITERIA:
+            verdicts[criterion][key] = (
+                criterion not in deep_failed and criterion not in class_failed
+            )
+        record.update(
+            tested_max_depth=d_p,
+            n_sets=len(items),
+            deep_sets=";".join(deep),
+            deep_failures=joined(deep_failed),
+            class_failures=";".join(
+                f"{criterion}:{CLASS_LEVEL_PARTS[criterion]}"
+                for criterion in class_failed
+            ),
+            failed_sets=joined(failures(list(labels), grid[0])),
+        )
+        if deep_failed or class_failed:
+            record.update(
+                passed=False,
+                reason=DEPTH_REASON_DEEP_GROUP_FAILED
+                if deep_failed
+                else DEPTH_REASON_CLASS_PART_FAILED,
+            )
+            continue
+        single = {
+            int(item.depths[0]): label
+            for label, item in labels.items()
+            if not item.pooled
+        }
+        minimum = d_p
+        for depth in reversed([value for value in grid if value < d_p]):
+            own = single.get(depth)
+            if own is None:
+                record.update(stop_depth=depth, stop_reason=DEPTH_STOP_UNTESTED)
+                break
+            failing = failures([own], depth)
+            if failing:
+                record.update(
+                    stop_depth=depth,
+                    stop_reason=";".join(
+                        criterion
+                        for criterion in GATE_P_CLASS_CRITERIA
+                        if criterion in failing
+                    ),
+                )
+                break
+            minimum = depth
+        record.update(passed=True, reason="", validated_min_depth=minimum)
+    table = pd.DataFrame(
+        {
+            column: pd.Series(
+                [record[column] for record in records],
+                dtype=object if column in _NULLABLE_DEPTH_COLUMNS else None,
+            )
+            for column in DEPTH_WALK_COLUMNS
+        }
+    )
+    return verdicts, table
+
+
+# --------------------------------------------------------------------------
+# Assembly (§14 gate-P rule and per-class records): C_P, the per-(level,
+# class) records, validated_max_level, the family checks NP1, NP2, NP8 and
+# NP9, and the NP1-NP9 report
+
+# §14 class set: "C_P must hold >= 90% of the pooled test cells".
+GATE_P_CLASS_MIN_SHARE: Final = 0.9
+# §14 per-class records: "A (level, class) is validated when NP3-NP7 pass
+# for it"; gate-P rule: "NP1, NP2 and NP9 for the family (NP8 when it will
+# be paired with a different panel)".
+GATE_P_CLASS_CRITERIA: Final[tuple[str, ...]] = ("NP3", "NP4", "NP5", "NP6", "NP7")
+GATE_P_FAMILY_CHECKS: Final[tuple[str, ...]] = ("NP1", "NP2", "NP8", "NP9")
+# ``validated_panel_levels.csv`` statuses (§4.7; ``diagnostics.
+# LEVEL_STATUS_PATTERN``); a failure is ``failed:NP<k>``.
+RECORD_VALIDATED: Final = "validated"
+RECORD_NOT_EVALUABLE: Final = "not_evaluable"
+RECORD_FAILED_PREFIX: Final = "failed:"
+# Family-check statuses. ``pending``: the mechanical parts pass and the check
+# waits on what the user accepts in the family's gate-P PR (§14 NP1 "the
+# unresolved list reviewed", NP2 "weak and collapsed parents accepted in the
+# PR"); it is not a pass.
+CHECK_PASSED: Final = "passed"
+CHECK_FAILED: Final = "failed"
+CHECK_PENDING: Final = "pending"
+CHECK_NOT_EVALUABLE: Final = "not_evaluable"
+CHECK_NOT_APPLICABLE: Final = "not_applicable"
+# The order in which part statuses decide a check (the first one present).
+_CHECK_PRECEDENCE: Final[tuple[str, ...]] = (
+    CHECK_FAILED,
+    CHECK_NOT_EVALUABLE,
+    CHECK_PENDING,
+)
+# §14 NP1: ">= 95% of non-control features resolved to the run's species
+# (>= 98% when the vendor supplies Ensembl IDs)".
+NP1_MIN_RESOLUTION_VENDOR_IDS: Final = 0.98
+# The gene-ID source of IDs the vendor supplied (``gene_ids.GeneIdSource``).
+NP1_VENDOR_ID_SOURCE: Final = "native"
+# §14 NP2: "Root markers >= 10; every root child with n >= 50 has >= 10
+# markers".
+NP2_ROOT_CHILD_MIN_N: Final = 50
+NP2_ROOT_CHILD_MIN_MARKERS: Final = 10
+NP2_ROOT_CHILD_COLUMNS: Final[tuple[str, ...]] = ("child", "n", "n_markers")
+# §14 NP9: "within 1.5x of §8.7 / §10".
+NP9_TIME_FACTOR: Final = 1.5
+CLASS_SET_COLUMNS: Final[tuple[str, ...]] = (
+    "level",
+    "class",
+    "n_test_cells",
+    "share",
+    "reference_share",
+    "in_class_set",
+)
+CLASS_SET_LEVEL_COLUMNS: Final[tuple[str, ...]] = (
+    "level",
+    "n_test_cells",
+    "n_not_applicable",
+    "n_no_class",
+    "n_classes",
+    "n_in_class_set",
+    "class_set_share",
+    "class_set_share_classed",
+    "min_share",
+    "share_ok",
+    "excluded_classes",
+)
+CLASS_RECORD_COLUMNS: Final[tuple[str, ...]] = (
+    "level",
+    "class",
+    "in_class_set",
+    "status",
+    "failed_criteria",
+    "unevaluable_criteria",
+    "failed_members",
+    "unevaluable_members",
+    "validated_min_depth",
+    "tested_max_depth",
+    "member_validated_min_depths",
+    "member_tested_max_depths",
+)
+LEVEL_WALK_COLUMNS: Final[tuple[str, ...]] = (
+    "level",
+    "rank",
+    "share_ok",
+    "n_in_class_set",
+    "n_validated",
+    "unvalidated_classes",
+    "complete",
+    "counted",
+)
+_NULLABLE_RECORD_COLUMNS: Final = frozenset({"validated_min_depth", "tested_max_depth"})
+# 2 since pre-registration §23.21: ``open_readings`` became
+# ``scored_readings`` and ``readings_ruled``, and the table summaries count
+# failures on the scored rows only (``reported_only`` marks the others).
+GATE_P_REPORT_SCHEMA_VERSION: Final = 2
+# The criterion tables (``<name>__<member>``) that are reported only since
+# pre-registration §23.21: NP3's own walk (R2), the t* spread (R3 (c)) and
+# NP5's every-set class table (R2); in version 7 also each member's own NP5
+# agreement (R7). Their failures fail nothing.
+GATE_P_REPORTED_ONLY_TABLES: Final[tuple[str, ...]] = (
+    "np3_depths",
+    "np5_spread",
+    "np5_class",
+)
+GATE_P_REPORTED_ONLY_TABLES_V7: Final[tuple[str, ...]] = (
+    *GATE_P_REPORTED_ONLY_TABLES,
+    "np5_agreement",
+)
+GATE_P_REPORT_JSON: Final = "gate_p_report.json"
+GATE_P_REPORT_TXT: Final = "GATE_P_REPORT.txt"
+GATE_P_RECORDS_CSV: Final = "gate_p_class_records.csv"
+GATE_P_CLASS_SETS_CSV: Final = "gate_p_class_sets.csv"
+GATE_P_LEVEL_WALK_CSV: Final = "gate_p_level_walk.csv"
+# The rulings on the readings this programme takes where §14 is not explicit:
+# the readings of pre-registration §23.11-§23.18 were ruled on 2026-10-07
+# (§23.19), and the criteria revision after the set a dry run was approved the
+# same day (§23.21). None is open; every report names them.
+GATE_P_READINGS_RULED: Final[tuple[str, ...]] = ("§23.19", "§23.21")
+# Which reading each revised criterion scores (pre-registration §23.21,
+# approved by the user on 2026-10-07: "Approve all six"); every report lists
+# them beside the tables that hold the reported-only readings.
+GATE_P_SCORED_READINGS: Final[tuple[str, ...]] = (
+    "NP3 (R1): scored natural_test_cells and class_balanced_test_cells (each "
+    "called cell weighs pi_t / N_t on the test cells of the set's scope, "
+    "trimmed at 10 x the median); the per-call-set natural and class_balanced "
+    "are reported only",
+    "NP6 (R1): scored unweighted, natural_test_cells and "
+    "class_balanced_test_cells (each simulation's calls on the test cells of "
+    "its own scope); natural and class_balanced are reported only",
+    "Depth (R2): validated_min_depth is the shallowest bin from which every "
+    "tested set up to and including the >= D_P set passes NP3-NP7 "
+    "(depth_walk); a failure in the >= D_P group or of a class-level part (NP4 "
+    "seed criterion, NP5 extrapolated share, NP7 excluded share) fails the "
+    "class, one at a shallower set raises the floor; NP3's own walk "
+    "(np3_depths) is reported only",
+    "NP5 t* (R3 (c)): each replicate's t*, applied to the base's pooled "
+    "seed-0 calls of the set, gives point precision >= target_L - 0.02 "
+    "(np5_tstar_consequence; version 7: the ensemble's t* re-fitted per "
+    "replicate, each call at its own bin's threshold, §23.22); the t* spread "
+    "(np5_spread) is reported only",
+    "NP5 agreement (R6): a bin is compared only where the base and the "
+    "replicate each hold >= 50 test cells; the either-side reading is "
+    "reported (*_union columns)",
+    "NP5 agreement, version 7 (R7): the ensemble's emission re-derived per "
+    "replicate against the frozen ensemble decisions (np5_ensemble_agreement); "
+    "each member's own re-derivation (np5_agreement) is reported only",
+    "Dry run (R5): a class H18 expects whose record is not_evaluable is "
+    "reported, not failed",
+)
+
+
+def gate_p_levels(species: str) -> tuple[str, ...]:
+    """Return the levels gate P records for a species (§14, up to the leaf).
+
+    Args:
+        species: ``"human"`` or ``"mouse"``.
+
+    Returns:
+        The annotation chain, coarse to fine (``vocab.FINAL_LEVELS``): human
+        lineage, broad, NT, supercluster; mouse broad, class, NT, subclass.
+        The report-only fine levels and the SEA-AD subclass (M13 D14 (a):
+        gate P scores the primary reference only) are not recorded.
+
+    Raises:
+        ValueError: For another species.
+    """
+    if species not in FINAL_LEVELS:
+        raise ValueError(f"species must be one of {tuple(FINAL_LEVELS)}")
+    return tuple(FINAL_LEVELS[species][1:])
+
+
+def _rank(species: str, level: str) -> int:
+    """A gate-P level's rank (``diagnostics.level_rank``)."""
+    rank = diag.level_rank(species, level)
+    if rank is None:
+        raise ValueError(f"{level!r} is not a {species} level")
+    return rank
+
+
+# ..........................................................................
+# Family checks (§14 NP1, NP2, NP8, NP9)
+
+
+@dataclass(frozen=True)
+class FamilyCheck:
+    """One family check of gate P (§14 NP1, NP2, NP8, NP9).
+
+    Attributes:
+        criterion: ``NP1``, ``NP2``, ``NP8`` or ``NP9``.
+        status: ``passed``, ``failed``, ``pending`` (the mechanical parts
+            pass and the check waits on the user's acceptance in the gate-P
+            PR), ``not_evaluable`` or ``not_applicable``.
+        parts: The status of each part, in the order the check reads them.
+        detail: JSON-safe values behind the parts (the report prints them).
+    """
+
+    criterion: str
+    status: str
+    parts: Mapping[str, str]
+    detail: Mapping[str, Any]
+
+    @property
+    def counts_as_pass(self) -> bool:
+        """Whether the check lets the family pass (§14 gate-P rule).
+
+        NP1, NP2 and NP9 must pass; NP8 must pass when it applies (§14:
+        "NP8 when it will be paired with a different panel").
+        """
+        if self.status == CHECK_PASSED:
+            return True
+        return self.criterion == "NP8" and self.status == CHECK_NOT_APPLICABLE
+
+    def to_json(self) -> dict[str, Any]:
+        """Return the check as JSON-safe values."""
+        return {
+            "criterion": self.criterion,
+            "status": self.status,
+            "counts_as_pass": self.counts_as_pass,
+            "parts": dict(self.parts),
+            "detail": _json_safe(dict(self.detail)),
+        }
+
+
+def _combine_parts(parts: Mapping[str, str]) -> str:
+    """A check's status from its parts.
+
+    ``failed`` before ``not_evaluable`` before ``pending``; a check whose
+    every part is ``not_applicable`` is ``not_applicable``; else
+    ``passed``.
+    """
+    values = [value for value in parts.values() if value != CHECK_NOT_APPLICABLE]
+    if not values:
+        return CHECK_NOT_APPLICABLE
+    for status in _CHECK_PRECEDENCE:
+        if status in values:
+            return status
+    return CHECK_PASSED
+
+
+def _json_safe(value: Any) -> Any:
+    """A value with numpy scalars, tuples, sets and non-finite floats made JSON-safe."""
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        items = sorted(value, key=str) if isinstance(value, (set, frozenset)) else value
+        return [_json_safe(item) for item in items]
+    if isinstance(value, np.generic):
+        return _json_safe(value.item())
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
+@dataclass(frozen=True)
+class Np1Settings:
+    """The NP1 constants (§14 NP1; plan §8.4).
+
+    Attributes:
+        min_resolution: Share of non-control features that must resolve
+            (``min_gene_id_resolution``, 0.95).
+        min_resolution_vendor_ids: The share when the vendor supplies
+            Ensembl IDs (0.98).
+    """
+
+    min_resolution: float
+    min_resolution_vendor_ids: float = NP1_MIN_RESOLUTION_VENDOR_IDS
+
+    def __post_init__(self) -> None:
+        """Validate the constants.
+
+        Raises:
+            ValueError: If a share is outside [0, 1].
+        """
+        for name in ("min_resolution", "min_resolution_vendor_ids"):
+            value = getattr(self, name)
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(
+                    f"Np1Settings.{name} must lie in [0, 1], got {value!r}"
+                )
+
+    @classmethod
+    def from_config(cls, config: AnnotationPanelConfig) -> Np1Settings:
+        """Read the NP1 constants from the panel config.
+
+        Args:
+            config: The panel config.
+
+        Returns:
+            The settings (the vendor-ID share is the §14 constant 0.98).
+        """
+        return cls(min_resolution=config.min_gene_id_resolution)
+
+
+def np1_gene_ids(
+    gene_ids: Sequence[diag.GeneIdDiagnostics],
+    query_symbols: Sequence[str],
+    *,
+    settings: Np1Settings,
+    unresolved_reviewed: bool = False,
+) -> FamilyCheck:
+    """Score NP1, gene IDs and controls of the declared panel (§14 NP1).
+
+    §14 NP1: ">= 95% of non-control features resolved to the run's species
+    (>= 98% when the vendor supplies Ensembl IDs); the exact-case species
+    test passes; every control probe / codeword type named in the 10x or
+    Vizgen documentation is removed by the registry and none reaches the
+    mapping query; the unresolved list reviewed". The parts:
+
+    - ``declared``: every declared panel was accepted by the gene-ID
+      resolver (none ``refused``);
+    - ``resolution``: each declared panel's resolved share reaches 0.95, or
+      0.98 when the vendor supplied Ensembl IDs, read as: at least one of
+      its genes resolved from the vendor's own IDs (the ``native`` source);
+    - ``species_test``: each declared panel's exact-case species test is
+      ``pass`` (one ``not_evaluable`` or never run leaves NP1 not
+      evaluable);
+    - ``controls``: no symbol that reaches the mapping query matches a
+      documented control name (``control_features.
+      matches_control_name_pattern``, every platform's anchored rule); the
+      controls removed are reported per type;
+    - ``unresolved``: the unresolved features are listed; while any remain
+      and the user has not reviewed them in the gate-P PR, NP1 is
+      ``pending``.
+
+    Args:
+        gene_ids: The gene-ID diagnostics of each declared panel of the
+            family (``GeneIdDiagnostics``).
+        query_symbols: The gene symbols of the annotation panel, which
+            reach the mapping query.
+        settings: The NP1 constants.
+        unresolved_reviewed: Whether the user reviewed the unresolved list
+            in the gate-P PR.
+
+    Returns:
+        The check.
+    """
+    panels: list[dict[str, Any]] = []
+    unresolved: dict[str, str] = {}
+    for item in gene_ids:
+        vendor_ids = int(item.resolved_by_source.get(NP1_VENDOR_ID_SOURCE, 0)) > 0
+        bar = (
+            settings.min_resolution_vendor_ids
+            if vendor_ids
+            else settings.min_resolution
+        )
+        panels.append(
+            {
+                "name": item.name,
+                "platform": item.platform,
+                "status": item.status,
+                "refusal_reasons": list(item.refusal_reasons),
+                "n_features_in": item.n_features_in,
+                "n_non_control": item.n_non_control,
+                "n_genes": item.n_genes,
+                "resolution_share": item.resolution_share,
+                "vendor_ids": vendor_ids,
+                "min_resolution": bar,
+                "resolution_ok": item.resolution_share >= bar - _TOLERANCE,
+                "resolved_by_source": dict(item.resolved_by_source),
+                "controls_removed": dict(item.controls_removed),
+                "species_check": item.species_check,
+            }
+        )
+        for name, reason in item.unmapped.items():
+            unresolved[f"{item.name}:{name}"] = reason
+    controls_in_query = sorted(
+        {
+            str(symbol)
+            for symbol in query_symbols
+            if matches_control_name_pattern(symbol)
+        }
+    )
+    parts: dict[str, str] = {}
+    if not panels:
+        parts["declared"] = CHECK_NOT_EVALUABLE
+        parts["resolution"] = CHECK_NOT_EVALUABLE
+        parts["species_test"] = CHECK_NOT_EVALUABLE
+    else:
+        parts["declared"] = (
+            CHECK_FAILED
+            if any(panel["status"] == "refused" for panel in panels)
+            else CHECK_PASSED
+        )
+        parts["resolution"] = (
+            CHECK_PASSED
+            if all(panel["resolution_ok"] for panel in panels)
+            else CHECK_FAILED
+        )
+        checks = [panel["species_check"] for panel in panels]
+        if all(check == "pass" for check in checks):
+            parts["species_test"] = CHECK_PASSED
+        elif any(check == "species_mismatch" for check in checks):
+            parts["species_test"] = CHECK_FAILED
+        else:
+            parts["species_test"] = CHECK_NOT_EVALUABLE
+    if not query_symbols:
+        parts["controls"] = CHECK_NOT_EVALUABLE
+    else:
+        parts["controls"] = CHECK_FAILED if controls_in_query else CHECK_PASSED
+    parts["unresolved"] = (
+        CHECK_PASSED if not unresolved or unresolved_reviewed else CHECK_PENDING
+    )
+    return FamilyCheck(
+        criterion="NP1",
+        status=_combine_parts(parts),
+        parts=parts,
+        detail={
+            "declared_panels": panels,
+            "n_query_symbols": len(query_symbols),
+            "controls_in_query": controls_in_query,
+            "unresolved": dict(sorted(unresolved.items())),
+            "unresolved_reviewed": bool(unresolved_reviewed),
+            "rule": (
+                f">= {settings.min_resolution} of non-control features resolved "
+                f"(>= {settings.min_resolution_vendor_ids} when the vendor "
+                "supplies Ensembl IDs); exact-case species test passes; no "
+                "documented control name reaches the query; unresolved list "
+                "reviewed (§14 NP1)"
+            ),
+        },
+    )
+
+
+@dataclass(frozen=True)
+class Np2Settings:
+    """The NP2 constants (§14 NP2; plan §8.2).
+
+    Attributes:
+        min_root_markers: Root markers the panel needs
+            (``min_root_markers``, 10).
+        weak_parent_markers: Parents with fewer markers are weak
+            (``weak_parent_markers``, 5; reported).
+        root_child_min_n: A root child with at least this many cells needs
+            its own markers (50).
+        root_child_min_markers: The markers such a child needs (10).
+    """
+
+    min_root_markers: int
+    weak_parent_markers: int
+    root_child_min_n: int = NP2_ROOT_CHILD_MIN_N
+    root_child_min_markers: int = NP2_ROOT_CHILD_MIN_MARKERS
+
+    def __post_init__(self) -> None:
+        """Validate the constants.
+
+        Raises:
+            ValueError: If a constant is below 1.
+        """
+        for name in (
+            "min_root_markers",
+            "weak_parent_markers",
+            "root_child_min_n",
+            "root_child_min_markers",
+        ):
+            value = getattr(self, name)
+            if value < 1:
+                raise ValueError(f"Np2Settings.{name} must be >= 1, got {value!r}")
+
+    @classmethod
+    def from_config(cls, config: AnnotationPanelConfig) -> Np2Settings:
+        """Read the NP2 constants from the panel config.
+
+        Args:
+            config: The panel config.
+
+        Returns:
+            The settings (the root-child constants are §14's 50 and 10).
+        """
+        return cls(
+            min_root_markers=config.min_root_markers,
+            weak_parent_markers=config.weak_parent_markers,
+        )
+
+
+def np2_panel_coverage(
+    *,
+    root_markers: int,
+    root_children: pd.DataFrame,
+    weak_parents: Sequence[str],
+    collapsed_parents: Sequence[str],
+    settings: Np2Settings,
+    accepted_parents: Collection[str] = (),
+) -> FamilyCheck:
+    """Score NP2, the panel's coverage of the reference (§14 NP2).
+
+    §14 NP2: "Root markers >= 10; every root child with n >= 50 has >= 10
+    markers; weak and collapsed parents accepted in the PR". It is read on
+    the production primary bundle's marker lookup (M13 CHECK K14), which the
+    gate-P driver summarises into the arguments. The parts:
+
+    - ``root_markers``: the root has at least ``min_root_markers`` markers;
+    - ``root_children``: every root child with at least ``root_child_min_n``
+      cells has at least ``root_child_min_markers`` markers;
+    - ``weak_and_collapsed``: every weak or auto-collapsed parent is among
+      ``accepted_parents``, which only the user's acceptance in the gate-P
+      PR supplies (M13 OPEN 4: NP2's weak and collapsed parents are the
+      user's call; none is accepted by default). While one is not, NP2 is
+      ``pending``.
+
+    Args:
+        root_markers: Markers of the taxonomy root.
+        root_children: One row per root child, columns
+            ``NP2_ROOT_CHILD_COLUMNS``: ``child``, its cells ``n`` and its
+            markers ``n_markers`` (a child without children of its own is
+            separated by the root's markers, as
+            ``reference.root_children_with_markers`` counts it).
+        weak_parents: Parents with fewer than ``weak_parent_markers`` markers.
+        collapsed_parents: Parents auto-collapsed for lack of markers.
+        settings: The NP2 constants.
+        accepted_parents: The weak or collapsed parents the user accepted in
+            the gate-P PR, by their lookup keys (the driver resolves the
+            user's entries, ``gate_p_run.np2_acceptance``, and adds the
+            entries that name no listed parent, reported as
+            ``accepted_not_listed``).
+
+    Returns:
+        The check.
+
+    Raises:
+        ValueError: If ``root_children`` lacks a column or names a child
+            twice.
+    """
+    _require_columns(root_children, NP2_ROOT_CHILD_COLUMNS, "the NP2 root children")
+    children = root_children[list(NP2_ROOT_CHILD_COLUMNS)].copy()
+    children["child"] = children["child"].astype(str)
+    duplicated = sorted(set(children["child"][children["child"].duplicated()]))
+    if duplicated:
+        raise ValueError(f"the NP2 root children name {duplicated} more than once")
+    n_cells = children["n"].to_numpy(np.int64)
+    n_markers = children["n_markers"].to_numpy(np.int64)
+    judged = n_cells >= settings.root_child_min_n
+    short = judged & (n_markers < settings.root_child_min_markers)
+    parents = sorted(
+        {str(item) for item in weak_parents} | {str(item) for item in collapsed_parents}
+    )
+    accepted = {str(item) for item in accepted_parents}
+    unaccepted = [parent for parent in parents if parent not in accepted]
+    parts = {
+        "root_markers": CHECK_PASSED
+        if root_markers >= settings.min_root_markers
+        else CHECK_FAILED,
+        "root_children": CHECK_NOT_EVALUABLE
+        if children.empty
+        else (CHECK_FAILED if bool(short.any()) else CHECK_PASSED),
+        "weak_and_collapsed": CHECK_PENDING if unaccepted else CHECK_PASSED,
+    }
+    return FamilyCheck(
+        criterion="NP2",
+        status=_combine_parts(parts),
+        parts=parts,
+        detail={
+            "root_markers": int(root_markers),
+            "min_root_markers": settings.min_root_markers,
+            "n_root_children": len(children),
+            "n_root_children_judged": int(judged.sum()),
+            "root_children_short": sorted(children["child"][short].tolist()),
+            "root_children": [
+                {"child": child, "n": int(n), "n_markers": int(markers)}
+                for child, n, markers in zip(
+                    children["child"], n_cells, n_markers, strict=True
+                )
+            ],
+            "weak_parents": sorted({str(item) for item in weak_parents}),
+            "weak_parent_markers": settings.weak_parent_markers,
+            "collapsed_parents": sorted({str(item) for item in collapsed_parents}),
+            "accepted_parents": sorted(accepted & set(parents)),
+            "unaccepted_parents": unaccepted,
+            "accepted_not_listed": sorted(accepted - set(parents)),
+            "rule": (
+                f"root markers >= {settings.min_root_markers}; every root child "
+                f"with n >= {settings.root_child_min_n} has >= "
+                f"{settings.root_child_min_markers} markers; weak and collapsed "
+                "parents accepted in the gate-P PR (§14 NP2)"
+            ),
+        },
+    )
+
+
+def np8_cross_panel(partners: Mapping[str, bool | None] | None = None) -> FamilyCheck:
+    """Score NP8, cross-panel support (§14 NP8; only for paired families).
+
+    §14 NP8 applies "only when the family will be paired with a different
+    panel": the intersection panel with each intended partner meets NP3 at
+    broad level. Whether a family will be paired is the user's answer (for
+    the new-panel human MERSCOPE family it is unanswered, M13 D26, so NP8
+    is ``not_applicable`` by default).
+
+    Args:
+        partners: Per intended partner panel, whether the intersection panel
+            passed NP3 at broad (``None``: not evaluated); ``None`` or empty
+            when the family will not be paired.
+
+    Returns:
+        The check: ``not_applicable`` without partners; else ``passed`` when
+        every partner's intersection passes, ``failed`` when one fails and
+        ``not_evaluable`` when one is not evaluated.
+    """
+    parts: dict[str, str] = {}
+    for partner, passed in sorted((partners or {}).items()):
+        if passed is None:
+            parts[str(partner)] = CHECK_NOT_EVALUABLE
+        else:
+            parts[str(partner)] = CHECK_PASSED if passed else CHECK_FAILED
+    return FamilyCheck(
+        criterion="NP8",
+        status=_combine_parts(parts) if parts else CHECK_NOT_APPLICABLE,
+        parts=parts,
+        detail={
+            "partners": sorted(parts),
+            "rule": (
+                "the intersection panel with each intended partner meets NP3 at "
+                "broad level; applies only to a family that will be paired with "
+                "a different panel (§14 NP8)"
+            ),
+        },
+    )
+
+
+@dataclass(frozen=True)
+class Np9Settings:
+    """The NP9 constants (§14 NP9; plan §8.7).
+
+    Attributes:
+        large_panel_genes: Panels above this size are judged on the
+            prefilter agreement (``large_panel_genes``, 1,000).
+        time_factor: The wall time allowed, in multiples of the time
+            reference (1.5).
+    """
+
+    large_panel_genes: int
+    time_factor: float = NP9_TIME_FACTOR
+
+    def __post_init__(self) -> None:
+        """Validate the constants.
+
+        Raises:
+            ValueError: If ``large_panel_genes`` is below 1 or
+                ``time_factor`` is not > 0.
+        """
+        if self.large_panel_genes < 1:
+            raise ValueError(
+                "Np9Settings.large_panel_genes must be >= 1, got "
+                f"{self.large_panel_genes!r}"
+            )
+        if not self.time_factor > 0:
+            raise ValueError(
+                f"Np9Settings.time_factor must be > 0, got {self.time_factor!r}"
+            )
+
+    @classmethod
+    def from_config(cls, config: AnnotationPanelConfig) -> Np9Settings:
+        """Read the NP9 constants from the panel config.
+
+        Args:
+            config: The panel config.
+
+        Returns:
+            The settings (the time factor is §14's 1.5).
+        """
+        return cls(large_panel_genes=config.large_panel_genes)
+
+
+@dataclass(frozen=True)
+class Np9Inputs:
+    """What NP9 is scored on (§14 NP9), as the gate-P driver measured it.
+
+    Attributes:
+        n_genes: The panel's genes.
+        wall_seconds: Wall time of PREP, resolvability included, and of the
+            gate-P replicates.
+        reference_seconds: The time reference: §8.7 / §10, or for a
+            version-7 family ``np9_time_reference_v7`` (M13 D10 (a)).
+        reference_basis: Where the reference comes from (reported).
+        peak_rss_gb: Peak RSS of each PREP step, query markers included, GB.
+        rss_reserve_gb: The PREP memory reserve, GB.
+        bundle_identical: Whether an identical re-run of PREP gave an
+            identical bundle (M13 CHECK K13).
+        replicate_identical: Per emission member, whether an identical
+            re-run of its seed-0 replicate gave identical tables (K13).
+        prefiltered: Whether the bundle's markers were prefiltered (§8.7).
+        prefilter_verdict: ``simulate.prefilter_verdict`` of the
+            prefiltered against the unfiltered lookup, when compared.
+    """
+
+    n_genes: int
+    wall_seconds: float | None = None
+    reference_seconds: float | None = None
+    reference_basis: str = ""
+    peak_rss_gb: Mapping[str, float] = field(default_factory=dict)
+    rss_reserve_gb: float | None = None
+    bundle_identical: bool | None = None
+    replicate_identical: Mapping[str, bool] = field(default_factory=dict)
+    prefiltered: bool = False
+    prefilter_verdict: Mapping[str, Any] | None = None
+
+
+def np9_time_reference_v7(
+    *,
+    dry_run_seconds: float,
+    dry_run_simulated_cells: int,
+    family_simulated_cells: int,
+) -> float:
+    """Return NP9's time reference for a version-7 family (M13 D10 (a)).
+
+    D10 (a), OD-E18 (a loosening the user approved in writing on
+    2026-10-06; pre-registration §23.10): the reference is the time
+    measured in the set a version-7 dry run, scaled per simulated cell, and
+    NP9 allows ``Np9Settings.time_factor`` (1.5) times it. It is measured
+    before any number of the family.
+
+    Args:
+        dry_run_seconds: Wall time of the set a version-7 dry run.
+        dry_run_simulated_cells: Simulated cells of that dry run.
+        family_simulated_cells: Simulated cells of the family's gate-P run.
+
+    Returns:
+        ``dry_run_seconds x family_simulated_cells / dry_run_simulated_cells``.
+
+    Raises:
+        ValueError: If a time or count is not positive.
+    """
+    if not dry_run_seconds > 0:
+        raise ValueError(f"dry_run_seconds must be > 0, got {dry_run_seconds!r}")
+    if dry_run_simulated_cells < 1 or family_simulated_cells < 1:
+        raise ValueError("the simulated cell counts must be >= 1")
+    return float(dry_run_seconds) * family_simulated_cells / dry_run_simulated_cells
+
+
+def np9_resources(
+    inputs: Np9Inputs, *, members: Sequence[str], settings: Np9Settings
+) -> FamilyCheck:
+    """Score NP9, resources and reproducibility (§14 NP9).
+
+    §14 NP9: "PREP incl. resolvability and the gate-P replicates within 1.5x
+    of §8.7 / §10 (for 5K, of the M3b measurement); peak RSS of every PREP
+    step, query markers included, within the reserve; above 1,000 genes the
+    per-parent prefilter agrees with the unfiltered lookup >= 0.95 per
+    validated level and class with n >= 50 at bp >= 0.8, with no parent
+    below 5 markers; identical re-run -> identical bundle and table
+    content". The parts:
+
+    - ``time``: the wall time is at most ``time_factor`` x the reference;
+    - ``rss``: every PREP step's peak RSS is within the reserve;
+    - ``identity``: PREP's bundle and each emission member's seed-0
+      replicate are identical on an identical re-run (CHECK K13's scope);
+      a member without a re-run leaves NP9 not evaluable;
+    - ``prefilter``: not applicable up to ``large_panel_genes`` genes or
+      when the bundle's markers were not prefiltered (the lookup is then
+      the unfiltered one); else the ``simulate.prefilter_verdict`` passes.
+      That verdict judges every class of every emitted level (§8.7), a
+      superset of §14's "validated level and class" (the stricter reading;
+      pre-registration §23.16).
+
+    A part without its measurement is ``not_evaluable``, so NP9 cannot pass
+    on a missing number. The members are recorded in the detail
+    (``members``), and ``assemble_gate_p`` refuses an NP9 scored on other
+    members than the verdicts, so that the re-run scope is the family's.
+
+    Args:
+        inputs: The measurements.
+        members: The family's emission members (one for version 6).
+        settings: The NP9 constants.
+
+    Returns:
+        The check.
+
+    Raises:
+        ValueError: If ``members`` is empty.
+    """
+    scored = sorted({str(member) for member in members})
+    if not scored:
+        raise ValueError("NP9 needs the family's emission members")
+    parts: dict[str, str] = {}
+    wall, reference = inputs.wall_seconds, inputs.reference_seconds
+    limit = None
+    if wall is None or reference is None or not reference > 0:
+        parts["time"] = CHECK_NOT_EVALUABLE
+    else:
+        limit = settings.time_factor * float(reference)
+        parts["time"] = CHECK_PASSED if wall <= limit + _TOLERANCE else CHECK_FAILED
+    over = sorted(
+        step
+        for step, value in inputs.peak_rss_gb.items()
+        if inputs.rss_reserve_gb is not None
+        and float(value) > inputs.rss_reserve_gb + _TOLERANCE
+    )
+    if not inputs.peak_rss_gb or inputs.rss_reserve_gb is None:
+        parts["rss"] = CHECK_NOT_EVALUABLE
+    else:
+        parts["rss"] = CHECK_FAILED if over else CHECK_PASSED
+    missing = sorted(set(scored) - {str(key) for key in inputs.replicate_identical})
+    differing = sorted(
+        member
+        for member, identical in inputs.replicate_identical.items()
+        if not identical
+    )
+    if inputs.bundle_identical is False or differing:
+        parts["identity"] = CHECK_FAILED
+    elif inputs.bundle_identical is None or missing:
+        parts["identity"] = CHECK_NOT_EVALUABLE
+    else:
+        parts["identity"] = CHECK_PASSED
+    verdict = inputs.prefilter_verdict
+    if inputs.n_genes <= settings.large_panel_genes or not inputs.prefiltered:
+        parts["prefilter"] = CHECK_NOT_APPLICABLE
+    elif verdict is None:
+        parts["prefilter"] = CHECK_NOT_EVALUABLE
+    else:
+        parts["prefilter"] = (
+            CHECK_PASSED if bool(verdict.get("passes")) else CHECK_FAILED
+        )
+    return FamilyCheck(
+        criterion="NP9",
+        status=_combine_parts(parts),
+        parts=parts,
+        detail={
+            "members": scored,
+            "n_genes": int(inputs.n_genes),
+            "wall_seconds": wall,
+            "reference_seconds": reference,
+            "reference_basis": inputs.reference_basis,
+            "time_factor": settings.time_factor,
+            "time_limit_seconds": limit,
+            "peak_rss_gb": {
+                str(key): float(value) for key, value in inputs.peak_rss_gb.items()
+            },
+            "rss_reserve_gb": inputs.rss_reserve_gb,
+            "rss_over_reserve": over,
+            "bundle_identical": inputs.bundle_identical,
+            "replicate_identical": {
+                str(key): bool(value)
+                for key, value in inputs.replicate_identical.items()
+            },
+            "members_without_rerun": missing,
+            "large_panel_genes": settings.large_panel_genes,
+            "prefiltered": bool(inputs.prefiltered),
+            "prefilter_verdict": None if verdict is None else dict(verdict),
+        },
+    )
+
+
+# ..........................................................................
+# C_P (§14 class set)
+
+
+@dataclass(frozen=True)
+class ClassSetSettings:
+    """The C_P constants (§14 class set; plan §3.7).
+
+    Attributes:
+        min_test_cells: Pooled test cells a class needs to enter C_P
+            (``gate_p_class_min_test_cells``, 700).
+        min_share: Share of a level's pooled test cells C_P must hold (0.9).
+    """
+
+    min_test_cells: int
+    min_share: float = GATE_P_CLASS_MIN_SHARE
+
+    def __post_init__(self) -> None:
+        """Validate the constants.
+
+        Raises:
+            ValueError: If ``min_test_cells`` is below 1 or ``min_share`` is
+                outside [0, 1].
+        """
+        if self.min_test_cells < 1:
+            raise ValueError(
+                "ClassSetSettings.min_test_cells must be >= 1, got "
+                f"{self.min_test_cells!r}"
+            )
+        if not 0.0 <= self.min_share <= 1.0:
+            raise ValueError(
+                f"ClassSetSettings.min_share must lie in [0, 1], got {self.min_share!r}"
+            )
+
+    @classmethod
+    def from_config(cls, config: AnnotationResolvabilityConfig) -> ClassSetSettings:
+        """Read the C_P constants from the resolvability config.
+
+        Args:
+            config: The resolvability config.
+
+        Returns:
+            The settings (the share is §14's 0.9).
+        """
+        return cls(min_test_cells=config.gate_p_class_min_test_cells)
+
+
+@dataclass(frozen=True)
+class ClassSets:
+    """C_P per level, fixed on the pooled test cells before mapping (§14).
+
+    Attributes:
+        species: Species.
+        classes: One row per (level, truth class), columns
+            ``CLASS_SET_COLUMNS``.
+        levels: One row per gate-P level, columns ``CLASS_SET_LEVEL_COLUMNS``.
+    """
+
+    species: str
+    classes: pd.DataFrame
+    levels: pd.DataFrame
+
+    def level_names(self) -> tuple[str, ...]:
+        """Return the levels, coarse to fine."""
+        return tuple(str(level) for level in self.levels["level"])
+
+    def _level_row(self, level: str) -> pd.Series:
+        rows = self.levels[self.levels["level"] == level]
+        if rows.empty:
+            raise ValueError(f"no class set for the level {level!r}")
+        return rows.iloc[0]
+
+    def members(self, level: str) -> frozenset[str]:
+        """Return C_P at a level.
+
+        Args:
+            level: A gate-P level.
+
+        Returns:
+            Its classes.
+
+        Raises:
+            ValueError: For a level without a class set.
+        """
+        self._level_row(level)
+        rows = self.classes[
+            (self.classes["level"] == level) & self.classes["in_class_set"].astype(bool)
+        ]
+        return frozenset(str(cls) for cls in rows["class"])
+
+    def share_ok(self, level: str) -> bool:
+        """Return whether C_P holds >= the minimum share of the level's cells.
+
+        Args:
+            level: A gate-P level.
+
+        Returns:
+            The level's ``share_ok``.
+
+        Raises:
+            ValueError: For a level without a class set.
+        """
+        return bool(self._level_row(level)["share_ok"])
+
+    def to_json(self) -> dict[str, Any]:
+        """Return the class sets as JSON-safe values."""
+        return {
+            "species": self.species,
+            "levels": _records(self.levels),
+            "classes": _records(self.classes),
+        }
+
+
+def _records(frame: pd.DataFrame) -> list[dict[str, Any]]:
+    """A frame's rows as JSON-safe records (``nan`` as ``None``)."""
+    rows = frame.astype(object).where(frame.notna(), None).to_dict(orient="records")
+    return [_json_safe(row) for row in rows]
+
+
+def gate_p_class_sets(
+    test_cells: pd.DataFrame,
+    *,
+    species: str,
+    default_group: str | None,
+    settings: ClassSetSettings,
+    reference_shares: Mapping[str, Mapping[str, float]] | None = None,
+    disjoint: bool = True,
+) -> ClassSets:
+    """Fix C_P per level from the pooled test cells, before mapping (§14).
+
+    §14 class set: "The classes with >= 700 pooled test cells ..., fixed
+    from the test-cell table before any cell is mapped. ... C_P must hold
+    >= 90% of the pooled test cells, and the PR lists the excluded classes
+    with their share of the reference composition." Per level, a test
+    cell's class is its truth parent class (pre-registration §23.9 item 1,
+    D12). The pooled test cells are the held-out ones gate P scores: every
+    group's, the default group's check half only (``held_out_replicates``).
+
+    The replicates (pre-registration §23.10 D2):
+
+    - ``disjoint`` (D2 (d), the default): no test cell is in two groups,
+      the default group's fit half included, because each extra donor
+      excludes every cell of the default held-out test set. A shared cell
+      raises, as a fit-half leak does in ``held_out_replicates``.
+    - not ``disjoint`` (D2 (c), the fallback the user may choose when a
+      donor's own pool is too small; §23.10 open item 2): the shared cells
+      stay in every replicate, each cell is counted once, and the default
+      group's fit-half cells are left out of every group.
+
+    Readings (pre-registration §23.16; ruled on 2026-10-07, §23.19):
+
+    - **Cells a level does not apply to** (truth ``not_neuron`` at NT: the
+      non-neuronal cells) are left out of the level's counts and its
+      denominator. NT then has no row for those classes (M13 D14 (a)), and
+      its 90% rule is read on the neurons. This is looser than the literal
+      §14 text (">= 90% of the pooled test cells"), which would count them
+      and so put NT below 90% on any panel, capping every family at broad.
+    - **Cells without a class at a level** (a sink truth: WHB Splatter or
+      Miscellaneous; ``truth_parent`` null) stay in the denominator: they
+      are pooled test cells that no class of C_P holds. This is the
+      stricter reading. The share over classed cells only, which
+      ``resolvability.gate_p_class_set`` computes, is reported
+      (``class_set_share_classed``).
+
+    Args:
+        test_cells: The pooled test cells, one row per (level, test cell)
+            or more (a cells table's rows per depth are counted once per
+            cell), columns ``level``, ``cell_id``, ``truth`` and
+            ``truth_parent``; with ``group`` and ``half`` when
+            ``default_group`` is given.
+        species: ``"human"`` or ``"mouse"`` (the levels, ``gate_p_levels``).
+        default_group: The group whose fit half the frozen thresholds were
+            fitted on (required, as in ``replicate_set_stats``; ``None`` when
+            no test cell is of it).
+        settings: The C_P constants.
+        reference_shares: Per level, each class's share of the reference
+            composition (reported beside the excluded classes; ``nan``
+            without it).
+        disjoint: Whether the replicates are disjoint (D2 (d)); ``False``
+            for the D2 (c) fallback, which counts a shared cell once.
+
+    Returns:
+        The class sets of every gate-P level (a level without test cells
+        has none, ``share_ok`` False).
+
+    Raises:
+        ValueError: If a column is missing, the default group's rows have no
+            ``half`` or no ``group`` column or a ``half`` other than 0 and 1,
+            a default-group cell is in both halves, a test cell has two
+            truths at a level, or (``disjoint``) a test cell is in two
+            groups.
+    """
+    levels = gate_p_levels(species)
+    _require_columns(
+        test_cells, ("level", "cell_id", "truth", "truth_parent"), "the test cells"
+    )
+    frame = test_cells[test_cells["level"].astype(str).isin(levels)]
+    if disjoint and "group" in frame.columns:
+        groups = frame[["cell_id", "group"]].astype(str).drop_duplicates()
+        shared = sorted(set(groups["cell_id"][groups["cell_id"].duplicated()]))
+        if shared:
+            raise ValueError(
+                f"{len(shared)} test cells are in more than one group (e.g. "
+                f"{shared[:3]}): the replicates must be disjoint (D2 (d))"
+            )
+    if default_group is not None:
+        _require_columns(frame, ("group", "half"), "the test cells")
+        in_default = (frame["group"].astype(str) == default_group).to_numpy(bool)
+        half = frame["half"].to_numpy()
+        if not bool(np.isin(half[in_default], (0, 1)).all()):
+            raise ValueError(
+                f"the test cells of the default group {default_group!r} have "
+                "'half' values other than 0 (fit) and 1 (check)"
+            )
+        cell_ids = frame["cell_id"].astype(str).to_numpy()
+        placed = pd.DataFrame(
+            {"cell_id": cell_ids[in_default], "half": half[in_default].astype(int)}
+        ).drop_duplicates()
+        split = sorted(set(placed["cell_id"][placed["cell_id"].duplicated()]))
+        if split:
+            raise ValueError(
+                f"{len(split)} test cells of the default group {default_group!r} "
+                f"are in both halves (e.g. {split[:3]})"
+            )
+        # The fit half is left out of every group: under D2 (d) only the
+        # default group holds it; under D2 (c) a shared cell may be listed
+        # in another group as well.
+        fit = set(placed["cell_id"][placed["half"] == 0])
+        frame = frame[~frame["cell_id"].astype(str).isin(fit).to_numpy(bool)]
+    cells = pd.DataFrame(
+        {
+            "level": frame["level"].astype(str).to_numpy(),
+            "cell_id": frame["cell_id"].astype(str).to_numpy(),
+            "truth": frame["truth"].astype(object).to_numpy(),
+            "truth_parent": frame["truth_parent"].astype(object).to_numpy(),
+        }
+    )
+    cells["truth"] = cells["truth"].where(cells["truth"].notna(), None)
+    cells["truth_parent"] = cells["truth_parent"].where(
+        cells["truth_parent"].notna(), None
+    )
+    unique = cells.drop_duplicates()
+    conflicting = unique[unique.duplicated(["level", "cell_id"], keep=False)]
+    if not conflicting.empty:
+        first = conflicting.iloc[0]
+        raise ValueError(
+            f"the test cell {first['cell_id']!r} has more than one truth at "
+            f"{first['level']!r}"
+        )
+    class_records: list[dict[str, object]] = []
+    level_records: list[dict[str, object]] = []
+    for level in levels:
+        rows = unique[unique["level"] == level]
+        applies = (rows["truth"].astype(object) != res.NOT_NEURON).to_numpy(bool)
+        n_not_applicable = int((~applies).sum())
+        rows = rows[applies]
+        classed = rows["truth_parent"].notna().to_numpy(bool)
+        counts = rows["truth_parent"][classed].astype(str).value_counts()
+        members, share_classed, _ = res.gate_p_class_set(
+            rows["truth_parent"][classed].astype(str),
+            min_test_cells=settings.min_test_cells,
+            min_share=settings.min_share,
+        )
+        n_cells = len(rows)
+        n_members = int(counts[counts.index.isin(members)].sum())
+        share = n_members / n_cells if n_cells else math.nan
+        shares = (reference_shares or {}).get(level, {})
+        for cls in sorted(counts.index.astype(str)):
+            class_records.append(
+                {
+                    "level": level,
+                    "class": cls,
+                    "n_test_cells": int(counts[cls]),
+                    "share": int(counts[cls]) / n_cells,
+                    "reference_share": float(shares.get(cls, math.nan)),
+                    "in_class_set": cls in members,
+                }
+            )
+        excluded = sorted(set(counts.index.astype(str)) - set(members))
+        level_records.append(
+            {
+                "level": level,
+                "n_test_cells": n_cells,
+                "n_not_applicable": n_not_applicable,
+                "n_no_class": int((~classed).sum()),
+                "n_classes": len(counts),
+                "n_in_class_set": len(members),
+                "class_set_share": share,
+                "class_set_share_classed": share_classed if len(counts) else math.nan,
+                "min_share": settings.min_share,
+                "share_ok": bool(
+                    n_cells > 0 and share >= settings.min_share - _TOLERANCE
+                ),
+                "excluded_classes": ";".join(excluded),
+            }
+        )
+    return ClassSets(
+        species=species,
+        classes=pd.DataFrame.from_records(
+            class_records, columns=list(CLASS_SET_COLUMNS)
+        ),
+        levels=pd.DataFrame.from_records(
+            level_records, columns=list(CLASS_SET_LEVEL_COLUMNS)
+        ),
+    )
+
+
+# ..........................................................................
+# Per-(level, class) records and validated_max_level (§14 per-class records,
+# gate-P rule)
+
+ClassVerdicts = Mapping[tuple[str, str], bool | None]
+
+
+def _member_keys(
+    verdicts: Mapping[str, Mapping[str, ClassVerdicts]],
+    depths: Mapping[str, pd.DataFrame],
+) -> list[str]:
+    """The emission members, checked to be the same in every input.
+
+    Raises:
+        ValueError: If the criteria are not NP3-NP7, a criterion or the
+            depth walks have no member or other members, or a member's
+            criteria and depth walk hold different (level, class) keys.
+    """
+    if set(verdicts) != set(GATE_P_CLASS_CRITERIA):
+        raise ValueError(
+            f"the per-class verdicts must be those of {GATE_P_CLASS_CRITERIA}, "
+            f"got {sorted(verdicts)}"
+        )
+    members = sorted(str(member) for member in verdicts[GATE_P_CLASS_CRITERIA[0]])
+    if not members:
+        raise ValueError("the per-class verdicts have no emission member")
+    for name, values in [*verdicts.items(), ("the depth walk", depths)]:
+        if sorted(str(member) for member in values) != members:
+            raise ValueError(
+                f"{name} has the members {sorted(values)}, not {members}: every "
+                "criterion is scored in every emission member"
+            )
+    for member in members:
+        keys = {
+            criterion: {
+                (str(level), str(cls)) for level, cls in verdicts[criterion][member]
+            }
+            for criterion in GATE_P_CLASS_CRITERIA
+        }
+        table = depths[member]
+        _require_columns(
+            table,
+            ("level", "class", "tested_max_depth", "validated_min_depth", "passed"),
+            f"the depth walk of {member}",
+        )
+        keys["the depth walk"] = {
+            (str(level), str(cls))
+            for level, cls in zip(table["level"], table["class"], strict=True)
+        }
+        reference = keys["NP3"]
+        for name, found in keys.items():
+            if found != reference:
+                raise ValueError(
+                    f"member {member}: {name} holds other (level, class) keys than "
+                    f"NP3 ({sorted(found ^ reference)[:4]}): build every criterion "
+                    "of a member on the same tested sets"
+                )
+    return members
+
+
+def _optional_depth(value: object) -> int | None:
+    """A depth cell as an int (``None``, ``nan`` and blanks as ``None``).
+
+    Raises:
+        ValueError: For a value that is not a depth.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{value!r} is not a depth")
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    if isinstance(value, (float, np.floating)):
+        return None if math.isnan(value) else int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        return int(float(text)) if text else None
+    raise ValueError(f"{value!r} is not a depth")
+
+
+def _depth_index(
+    table: pd.DataFrame,
+) -> dict[tuple[str, str], tuple[bool | None, int | None, int | None]]:
+    """``validated_min_depth`` rows per (level, class): passed, vmd, D_P."""
+    result: dict[tuple[str, str], tuple[bool | None, int | None, int | None]] = {}
+    for level, cls, passed, minimum, d_p in zip(
+        table["level"],
+        table["class"],
+        table["passed"].astype(object),
+        table["validated_min_depth"].astype(object),
+        table["tested_max_depth"].astype(object),
+        strict=True,
+    ):
+        flag = None if passed is None or pd.isna(passed) else bool(passed)
+        result[(str(level), str(cls))] = (
+            flag,
+            _optional_depth(minimum),
+            _optional_depth(d_p),
+        )
+    return result
+
+
+def _joined_members(values: Mapping[str, Sequence[str]]) -> str:
+    """``criterion:member,member;...`` for the criteria with members."""
+    return ";".join(
+        f"{criterion}:{','.join(items)}" for criterion, items in values.items() if items
+    )
+
+
+def gate_p_class_records(
+    verdicts: Mapping[str, Mapping[str, ClassVerdicts]],
+    depths: Mapping[str, pd.DataFrame],
+    class_sets: ClassSets,
+) -> pd.DataFrame:
+    """Return the per-(level, class) records of gate P (§14 per-class records).
+
+    "A (level, class) is validated when NP3-NP7 pass for it ... The record
+    carries [``validated_min_depth``], with D_P as ``tested_max_depth``, or
+    else the failing criterion. A failing or unevaluable class stays
+    provisional per class and does not block the others." Each criterion
+    is combined over the emission members with
+    ``resolvability.every_member_verdict`` (§14 "Version-7 families": a
+    (level, class) is validated only if it passes in every member; one
+    member for version 6). Then, per (level, class):
+
+    - ``failed:NP<k>`` when any criterion fails in any member, ``k`` the
+      lowest such criterion (all of them are listed in
+      ``failed_criteria``);
+    - else ``not_evaluable`` when any criterion is not evaluable in any
+      member (no tested set; a class of C_P without a call at all);
+    - else ``validated``, with ``validated_min_depth`` the deepest of the
+      members' depth walks (``gate_p_depth_walk``, revision R2 of
+      pre-registration §23.21; the label is validated where it is validated in
+      every member) and ``tested_max_depth`` the shallowest member D_P,
+      raised to ``validated_min_depth`` when it lies below it (the
+      version-7 reading of pre-registration §23.16, ruled on 2026-10-07,
+      §23.19; each member's values are reported).
+
+    The records cover every key of the verdicts and every class of C_P at
+    the gate-P levels (``gate_p_levels``); ``in_class_set`` says whether
+    the class is in C_P. Keys of other levels (the report-only fine level)
+    are left out.
+
+    Args:
+        verdicts: Per criterion of ``GATE_P_CLASS_CRITERIA``, per emission
+            member, its per-(level, class) verdicts (``gate_p_depth_walk``'s,
+            revision R2 of pre-registration §23.21).
+        depths: Per emission member, its depth walk (``gate_p_depth_walk``'s
+            table: ``validated_min_depth``, D_P as ``tested_max_depth`` and
+            ``passed``).
+        class_sets: C_P per level (``gate_p_class_sets``).
+
+    Returns:
+        One row per (level, class), coarse levels first, columns
+        ``CLASS_RECORD_COLUMNS``.
+
+    Raises:
+        ValueError: If the inputs are not the five criteria in the same
+            members on the same keys (``_member_keys``), or a validated key
+            has no passing depth walk in some member.
+    """
+    members = _member_keys(verdicts, depths)
+    combined = {
+        criterion: res.every_member_verdict(
+            {member: verdicts[criterion][member] for member in members}
+        )
+        for criterion in GATE_P_CLASS_CRITERIA
+    }
+    depth_by_member = {member: _depth_index(depths[member]) for member in members}
+    levels = class_sets.level_names()
+    keys = {
+        (str(level), str(cls))
+        for values in combined.values()
+        for level, cls in values
+        if str(level) in levels
+    }
+    keys |= {(level, cls) for level in levels for cls in class_sets.members(level)}
+    order = {level: position for position, level in enumerate(levels)}
+    records: list[dict[str, object]] = []
+    for level, cls in sorted(keys, key=lambda key: (order[key[0]], key[1])):
+        failed: dict[str, list[str]] = {}
+        unevaluable: dict[str, list[str]] = {}
+        for criterion in GATE_P_CLASS_CRITERIA:
+            entry = combined[criterion].get(
+                (level, cls),
+                {
+                    "status": res.GATE_P_NOT_EVALUABLE,
+                    "failed_members": [],
+                    "unevaluable_members": list(members),
+                },
+            )
+            if entry["status"] == res.GATE_P_FAILED:
+                failed[criterion] = list(entry["failed_members"])
+            elif entry["status"] == res.GATE_P_NOT_EVALUABLE:
+                unevaluable[criterion] = list(entry["unevaluable_members"])
+        member_depths = {
+            member: depth_by_member[member].get((level, cls)) for member in members
+        }
+        passed_depths = {
+            member: value
+            for member, value in member_depths.items()
+            if value is not None and value[0]
+        }
+        status: str
+        minimum: int | None = None
+        d_p: int | None = None
+        if failed:
+            status = RECORD_FAILED_PREFIX + next(iter(failed))
+        elif unevaluable:
+            status = RECORD_NOT_EVALUABLE
+        else:
+            status = RECORD_VALIDATED
+            lacking = sorted(
+                member
+                for member in members
+                if member not in passed_depths
+                or passed_depths[member][1] is None
+                or passed_depths[member][2] is None
+            )
+            if lacking:
+                raise ValueError(
+                    f"({level}, {cls}) passes NP3-NP7 in every member, but the "
+                    f"depth walks of {lacking} have no passing validated_min_depth"
+                )
+            minima = [value[1] for value in passed_depths.values()]
+            deep = [value[2] for value in passed_depths.values()]
+            minimum = max(item for item in minima if item is not None)
+            d_p = max(min(item for item in deep if item is not None), minimum)
+        records.append(
+            {
+                "level": level,
+                "class": cls,
+                "in_class_set": cls in class_sets.members(level),
+                "status": status,
+                "failed_criteria": ";".join(failed),
+                "unevaluable_criteria": ";".join(unevaluable),
+                "failed_members": _joined_members(failed),
+                "unevaluable_members": _joined_members(unevaluable),
+                "validated_min_depth": minimum,
+                "tested_max_depth": d_p,
+                "member_validated_min_depths": ";".join(
+                    f"{member}:{value[1]}" for member, value in passed_depths.items()
+                ),
+                "member_tested_max_depths": ";".join(
+                    f"{member}:{value[2]}" for member, value in passed_depths.items()
+                ),
+            }
+        )
+    return pd.DataFrame(
+        {
+            column: pd.Series(
+                [record[column] for record in records],
+                dtype=object if column in _NULLABLE_RECORD_COLUMNS else None,
+            )
+            for column in CLASS_RECORD_COLUMNS
+        }
+    )
+
+
+def gate_p_validated_max_level(
+    records: pd.DataFrame, class_sets: ClassSets
+) -> tuple[str | None, pd.DataFrame]:
+    """Return ``validated_max_level`` and the walk that found it (§14).
+
+    §14 gate-P rule: "``validated_max_level`` is the deepest level <=
+    ``max_leaf_level`` at which every class of C_P is validated". The rank
+    rule of ``diagnostics._check_table`` requires every class of C_P to be
+    validated at every level of rank <= the headline, so the levels are
+    walked coarse to fine and the headline is the last level of the leading
+    run of complete levels. A level is complete when its C_P is not empty,
+    holds >= 90% of its test cells (§14: "C_P must hold >= 90% of the
+    pooled test cells"; a level below it cannot be validated, a reading of
+    pre-registration §23.16) and every class of it is validated.
+
+    Args:
+        records: ``gate_p_class_records`` output.
+        class_sets: C_P per level.
+
+    Returns:
+        ``(headline, walk)``: the headline level (``None`` when even the
+        coarsest level is incomplete) and one row per level, columns
+        ``LEVEL_WALK_COLUMNS``.
+    """
+    validated = {
+        (str(level), str(cls))
+        for level, cls, status in zip(
+            records["level"], records["class"], records["status"], strict=True
+        )
+        if status == RECORD_VALIDATED
+    }
+    rows: list[dict[str, object]] = []
+    headline: str | None = None
+    leading = True
+    for level in class_sets.level_names():
+        members = sorted(class_sets.members(level))
+        unvalidated = [cls for cls in members if (level, cls) not in validated]
+        share_ok = class_sets.share_ok(level)
+        complete = bool(members) and share_ok and not unvalidated
+        leading = leading and complete
+        if leading:
+            headline = level
+        rows.append(
+            {
+                "level": level,
+                "rank": _rank(class_sets.species, level),
+                "share_ok": share_ok,
+                "n_in_class_set": len(members),
+                "n_validated": len(members) - len(unvalidated),
+                "unvalidated_classes": ";".join(unvalidated),
+                "complete": complete,
+                "counted": leading,
+            }
+        )
+    return headline, pd.DataFrame.from_records(rows, columns=list(LEVEL_WALK_COLUMNS))
+
+
+@dataclass(frozen=True)
+class GatePResult:
+    """Gate P for one family (§14 gate-P rule; the NP1-NP9 report's content).
+
+    Attributes:
+        family_id: The family (the frozen panel's hash-derived id, D16).
+        panel_hash: The gate-P-scored panel.
+        species: Species.
+        resolvability_version: 6 (one member) or 7 (the ensemble).
+        members: The emission members NP3-NP7 were scored in.
+        class_sets: C_P per level.
+        records: The per-(level, class) records (``CLASS_RECORD_COLUMNS``).
+        level_walk: The walk to ``validated_max_level``.
+        validated_max_level: The family's headline level, if any.
+        family_checks: NP1, NP2, NP8 and NP9.
+        passes: Whether the family passes gate P.
+        reasons: Why it does not (empty when it passes).
+    """
+
+    family_id: str
+    panel_hash: str
+    species: Species
+    resolvability_version: int
+    members: tuple[str, ...]
+    class_sets: ClassSets
+    records: pd.DataFrame
+    level_walk: pd.DataFrame
+    validated_max_level: str | None
+    family_checks: Mapping[str, FamilyCheck]
+    passes: bool
+    reasons: tuple[str, ...]
+
+    def to_json(self) -> dict[str, Any]:
+        """Return the result as JSON-safe values."""
+        return {
+            "family_id": self.family_id,
+            "panel_hash": self.panel_hash,
+            "species": self.species,
+            "resolvability_version": self.resolvability_version,
+            "members": list(self.members),
+            "passes": self.passes,
+            "reasons": list(self.reasons),
+            "validated_max_level": self.validated_max_level,
+            "min_level": diag.MIN_SIMULATION_LEVEL[self.species],
+            "family_checks": {
+                name: check.to_json() for name, check in self.family_checks.items()
+            },
+            "level_walk": _records(self.level_walk),
+            "class_sets": self.class_sets.to_json(),
+            "records": _records(self.records),
+        }
+
+
+_HASH: Final = re.compile(r"^[0-9a-f]{64}$")
+
+
+def assemble_gate_p(
+    *,
+    family_id: str,
+    panel_hash: str,
+    species: str,
+    resolvability_version: int,
+    verdicts: Mapping[str, Mapping[str, ClassVerdicts]],
+    depths: Mapping[str, pd.DataFrame],
+    class_sets: ClassSets,
+    family_checks: Mapping[str, FamilyCheck],
+) -> GatePResult:
+    """Assemble gate P for one family (§14 gate-P rule).
+
+    §14: "NP1, NP2 and NP9 for the family (NP8 when it will be paired with
+    a different panel) and NP3-NP7 per (level, class) ...
+    ``validated_max_level`` is the deepest level <= ``max_leaf_level`` at
+    which every class of C_P is validated. It is the family's headline
+    level, and promotion requires at least broad (human) / class (mouse)."
+    The family passes when its headline is at least
+    ``diagnostics.MIN_SIMULATION_LEVEL`` and every family check counts as a
+    pass (``FamilyCheck.counts_as_pass``). Passing makes it eligible for a
+    gate-P PR the user approves; it promotes nothing by itself.
+
+    Args:
+        family_id: The family.
+        panel_hash: The gate-P-scored panel's hash.
+        species: ``"human"`` or ``"mouse"``.
+        resolvability_version: 6 (one emission member) or 7 (the
+            ``resolvability.V7_EMISSION_MEMBERS`` members).
+        verdicts: Per criterion NP3-NP7, per member, the class verdicts
+            (``gate_p_depth_walk``'s).
+        depths: Per member, its depth walk (``gate_p_depth_walk``'s table).
+        class_sets: C_P per level of the species.
+        family_checks: ``NP1``, ``NP2``, ``NP8`` and ``NP9``.
+
+    Returns:
+        The result.
+
+    Raises:
+        ValueError: For an unknown species, a panel hash that is not a
+            sha256, class sets of another species, family checks other than
+            NP1, NP2, NP8 and NP9 (or keyed under another name), a version
+            other than 6 or 7 or a member count that does not match it, an
+            NP9 that does not record its members or was scored on other
+            members than the verdicts (CHECK K13: every emission member is
+            re-run), or per-class inputs ``gate_p_class_records`` refuses.
+    """
+    levels = gate_p_levels(species)
+    if not _HASH.fullmatch(panel_hash):
+        raise ValueError(f"panel_hash {panel_hash!r} is not a sha256 hex digest")
+    if class_sets.species != species or class_sets.level_names() != levels:
+        raise ValueError(
+            f"the class sets are of {class_sets.species} {class_sets.level_names()}, "
+            f"not {species} {levels}"
+        )
+    if set(family_checks) != set(GATE_P_FAMILY_CHECKS) or any(
+        check.criterion != name for name, check in family_checks.items()
+    ):
+        raise ValueError(
+            f"the family checks must be {GATE_P_FAMILY_CHECKS}, each under its "
+            f"own name; got {sorted(family_checks)}"
+        )
+    records = gate_p_class_records(verdicts, depths, class_sets)
+    members = tuple(sorted(str(member) for member in verdicts["NP3"]))
+    expected = {
+        res.RESOLVABILITY_VERSION_V6: 1,
+        res.RESOLVABILITY_VERSION_V7: res.V7_EMISSION_MEMBERS,
+    }.get(resolvability_version)
+    if expected is None:
+        raise ValueError(
+            f"resolvability_version must be 6 or 7, got {resolvability_version!r}"
+        )
+    if len(members) != expected:
+        raise ValueError(
+            f"a version-{resolvability_version} family is scored in {expected} "
+            f"emission member(s), got {len(members)}: {list(members)}"
+        )
+    np9_members = family_checks["NP9"].detail.get("members")
+    if np9_members is None or isinstance(np9_members, str):
+        raise ValueError(
+            "NP9 does not record the members it was scored on "
+            "(np9_resources records them)"
+        )
+    if tuple(sorted(str(member) for member in np9_members)) != members:
+        raise ValueError(
+            f"NP9 was scored on the members {sorted(map(str, np9_members))}, not "
+            f"the emission members {list(members)} of the verdicts (CHECK K13: "
+            "each member's seed-0 replicate is re-run)"
+        )
+    headline, walk = gate_p_validated_max_level(records, class_sets)
+    minimum = diag.MIN_SIMULATION_LEVEL[species]
+    reasons: list[str] = []
+    if headline is None:
+        reasons.append(
+            f"no level is validated for every class of C_P (the coarsest, "
+            f"{levels[0]}, is incomplete)"
+        )
+    elif _rank(species, headline) < _rank(species, minimum):
+        reasons.append(
+            f"validated_max_level {headline} is below {minimum} (§14: promotion "
+            f"requires at least {minimum})"
+        )
+    for name in GATE_P_FAMILY_CHECKS:
+        check = family_checks[name]
+        if not check.counts_as_pass:
+            failing = [
+                part for part, value in check.parts.items() if value != CHECK_PASSED
+            ]
+            reasons.append(f"{name} {check.status} ({', '.join(failing) or 'no part'})")
+    return GatePResult(
+        family_id=family_id,
+        panel_hash=panel_hash,
+        species=cast(Species, species),
+        resolvability_version=int(resolvability_version),
+        members=members,
+        class_sets=class_sets,
+        records=records,
+        level_walk=walk,
+        validated_max_level=headline,
+        family_checks={name: family_checks[name] for name in GATE_P_FAMILY_CHECKS},
+        passes=not reasons,
+        reasons=tuple(reasons),
+    )
+
+
+# ..........................................................................
+# The validated-table rows of a passing family (§4.7; the gate-P PR)
+
+
+def validated_table_rows(
+    result: GatePResult,
+    *,
+    panel_id: str,
+    panel_role: str,
+    platforms: Sequence[str],
+    n_genes: int,
+    evidence: str,
+    date: str,
+    approving_pr: str,
+    root_marker_source: str = "",
+    note: str = "",
+) -> tuple[diag.ValidatedPanelRecord, tuple[diag.ValidatedLevelRecord, ...]]:
+    """Return a passing family's ``validated_panels.csv`` and level rows (§4.7).
+
+    The panel row carries ``validation_basis = simulation`` and the
+    headline level; the level rows carry every record of gate P
+    (``in_class_set``, the status, ``validated_min_depth`` and
+    ``tested_max_depth`` = D_P of the validated ones). They are written by
+    ``diagnostics.write_simulation_family`` in the family's gate-P PR, which
+    the user approves (§14); a family that does not pass gate P has none.
+
+    Args:
+        result: The family's gate-P result.
+        panel_id: The row id (the vendor panel's name, never a personal
+            name; M13 D16).
+        panel_role: The row's role (``sample_panel``).
+        platforms: The panel's platforms.
+        n_genes: Its genes.
+        evidence: The evidence path (relative to the evidence archive).
+        date: The decision date (``YYYY-MM-DD``).
+        approving_pr: The gate-P PR.
+        root_marker_source: Where the root markers of the gene list come
+            from.
+        note: Free text.
+
+    Returns:
+        ``(panel record, level records)``.
+
+    Raises:
+        ValueError: If the family does not pass gate P, or a row fails its
+            model's validation.
+    """
+    if not result.passes:
+        raise ValueError(
+            f"{result.family_id} does not pass gate P, so it has no validated "
+            f"rows: {'; '.join(result.reasons)}"
+        )
+    assert result.validated_max_level is not None
+    record = diag.ValidatedPanelRecord(
+        panel_id=panel_id,
+        family_id=result.family_id,
+        panel_hash=result.panel_hash,
+        panel_role=panel_role,
+        species=result.species,
+        platforms=tuple(str(item).upper() for item in platforms),
+        n_genes=n_genes,
+        validated_max_level=result.validated_max_level,
+        validation_basis="simulation",
+        root_marker_source=root_marker_source,
+        evidence=evidence,
+        date=date,
+        approving_pr=approving_pr,
+        note=note,
+    )
+    levels = tuple(
+        diag.ValidatedLevelRecord.model_validate(
+            {
+                "family_id": result.family_id,
+                "panel_hash": result.panel_hash,
+                "level": str(row["level"]),
+                "class": str(row["class"]),
+                "in_class_set": bool(row["in_class_set"]),
+                "status": str(row["status"]),
+                "validated_min_depth": _optional_depth(row["validated_min_depth"]),
+                "tested_max_depth": _optional_depth(row["tested_max_depth"]),
+                "evidence": evidence,
+            }
+        )
+        for _, row in result.records.iterrows()
+    )
+    return record, levels
+
+
+# ..........................................................................
+# The NP1-NP9 report (M13 exit: "an NP report per onboarded family")
+
+
+def _is_reported_only(name: str, resolvability_version: int) -> bool:
+    """Whether a criterion table (``<name>`` or ``<name>__<member>``) is report-only."""
+    base = name.split("__", 1)[0]
+    reported = (
+        GATE_P_REPORTED_ONLY_TABLES_V7
+        if resolvability_version == res.RESOLVABILITY_VERSION_V7
+        else GATE_P_REPORTED_ONLY_TABLES
+    )
+    return base in reported
+
+
+def _table_summary(frame: pd.DataFrame, *, reported_only: bool) -> dict[str, Any]:
+    """The numbers of a criterion table the report prints beside its file.
+
+    ``n_failed`` counts the failing rows that are scored: every row of a
+    scored table, or those marked ``scored`` when the table has the column
+    (NP3's and NP6's weightings, pre-registration §23.21 R1). Failing rows
+    that are reported only are counted in ``n_failed_reported_only``; a
+    report-only table (``GATE_P_REPORTED_ONLY_TABLES``) has ``reported_only``
+    and no ``n_failed``. A scored failure below a class's D_P only raises
+    its floor (``depth_walk``, R2).
+    """
+    summary: dict[str, Any] = {"n_rows": len(frame)}
+    if reported_only:
+        summary["reported_only"] = True
+    if "passed" in frame.columns:
+        # A CSV round trip or numpy turns False into np.False_; a missing
+        # value (None, nan) is not counted as a failure here.
+        failing = np.array(
+            [
+                isinstance(value, (bool, np.bool_)) and not bool(value)
+                for value in frame["passed"].astype(object)
+            ],
+            dtype=bool,
+        )
+        scored = (
+            np.zeros(len(frame), dtype=bool)
+            if reported_only
+            else np.array([_is_true(value) for value in frame["scored"]], dtype=bool)
+            if "scored" in frame.columns
+            else np.ones(len(frame), dtype=bool)
+        )
+        if not reported_only:
+            summary["n_failed"] = int((failing & scored).sum())
+        if reported_only or not bool(scored.all()):
+            summary["n_failed_reported_only"] = int((failing & ~scored).sum())
+    for column, name in (
+        ("donor_range", "max_donor_range"),
+        ("changed_share", "max_changed_share"),
+        ("spread", "max_tstar_spread"),
+    ):
+        if column in frame.columns:
+            values = pd.to_numeric(frame[column], errors="coerce")
+            summary[name] = float(values.max()) if values.notna().any() else None
+    if {"stress", "drop"} <= set(frame.columns):
+        drops = pd.to_numeric(frame["drop"], errors="coerce")
+        summary["max_drop_by_stress"] = {
+            str(stress): float(group.max()) if group.notna().any() else None
+            for stress, group in drops.groupby(frame["stress"].astype(str), sort=True)
+        }
+    return summary
+
+
+def gate_p_report(
+    result: GatePResult, *, tables: Mapping[str, pd.DataFrame] | None = None
+) -> dict[str, Any]:
+    """Return the NP1-NP9 report of a family as JSON-safe values.
+
+    The M13 exit's "NP report per onboarded family": C_P and the excluded
+    classes, validated levels per class and depth, ``validated_min_depth``
+    and ``tested_max_depth``, the replicate spread, the stress drops, the
+    runtime and the peak RSS. The criterion tables (``np4_set_verdicts``,
+    ``np6_verdicts``, ...) are summarised by name, failures counted on the
+    scored rows and the report-only tables marked (``_table_summary``);
+    ``write_gate_p_report`` writes them beside the report. The report names
+    the reading each revised criterion scores (``GATE_P_SCORED_READINGS``,
+    pre-registration §23.21) and the rulings that closed the open readings
+    (``GATE_P_READINGS_RULED``).
+
+    Args:
+        result: The family's gate-P result.
+        tables: The criterion tables by name.
+
+    Returns:
+        The report.
+    """
+    payload = result.to_json()
+    payload["schema_version"] = GATE_P_REPORT_SCHEMA_VERSION
+    payload["readings_ruled"] = list(GATE_P_READINGS_RULED)
+    payload["scored_readings"] = list(GATE_P_SCORED_READINGS)
+    payload["tables"] = {
+        name: _table_summary(
+            frame,
+            reported_only=_is_reported_only(name, result.resolvability_version),
+        )
+        for name, frame in sorted((tables or {}).items())
+    }
+    return payload
+
+
+def _fmt(value: Any, digits: int = 3) -> str:
+    """A report value: ``-`` for none, floats rounded."""
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return "-"
+    if isinstance(value, float):
+        return f"{value:.{digits}f}"
+    return str(value)
+
+
+def gate_p_report_text(report: Mapping[str, Any]) -> str:
+    """Render ``gate_p_report`` as the plain-text NP1-NP9 report.
+
+    Args:
+        report: ``gate_p_report`` output.
+
+    Returns:
+        The text.
+    """
+    lines = [
+        f"Gate P report: {report['family_id']} ({report['species']}, panel "
+        f"{str(report['panel_hash'])[:16]})",
+        f"Resolvability version {report['resolvability_version']}; emission "
+        f"members: {', '.join(report['members'])}",
+        "",
+        "Verdict: " + ("PASSES gate P" if report["passes"] else "does NOT pass gate P"),
+    ]
+    lines += [f"  - {reason}" for reason in report["reasons"]]
+    lines += [
+        f"validated_max_level: {_fmt(report['validated_max_level'])} "
+        f"(promotion needs at least {report['min_level']})",
+        "",
+        "Family checks:",
+    ]
+    for name, check in report["family_checks"].items():
+        parts = ", ".join(f"{part} {value}" for part, value in check["parts"].items())
+        lines.append(f"  {name}: {check['status']} ({parts or 'no part'})")
+    lines += ["", "Levels (coarse to fine):"]
+    for row in report["level_walk"]:
+        lines.append(
+            f"  {row['level']}: C_P {row['n_validated']}/{row['n_in_class_set']} "
+            f"validated, share ok {row['share_ok']}, complete {row['complete']}, "
+            f"counted {row['counted']}"
+            + (
+                f"; unvalidated {row['unvalidated_classes']}"
+                if row["unvalidated_classes"]
+                else ""
+            )
+        )
+    lines += ["", "Class sets C_P (pooled test cells before mapping):"]
+    for row in report["class_sets"]["levels"]:
+        lines.append(
+            f"  {row['level']}: {row['n_in_class_set']} of {row['n_classes']} classes, "
+            f"share {_fmt(row['class_set_share'])} (classed cells "
+            f"{_fmt(row['class_set_share_classed'])}; >= {row['min_share']}), "
+            f"{row['n_test_cells']} test cells, {row['n_no_class']} without a class, "
+            f"{row['n_not_applicable']} not applicable"
+        )
+        excluded = [
+            item
+            for item in report["class_sets"]["classes"]
+            if item["level"] == row["level"] and not item["in_class_set"]
+        ]
+        for item in excluded:
+            lines.append(
+                f"    excluded {item['class']}: {item['n_test_cells']} test cells "
+                f"(share {_fmt(item['share'])}, reference share "
+                f"{_fmt(item['reference_share'])})"
+            )
+    lines += ["", "Per-(level, class) records:"]
+    for row in report["records"]:
+        detail = ""
+        if row["status"] == RECORD_VALIDATED:
+            detail = (
+                f" validated_min_depth {row['validated_min_depth']}, "
+                f"tested_max_depth {row['tested_max_depth']}"
+            )
+        elif row["failed_criteria"]:
+            detail = f" failed {row['failed_members']}"
+        elif row["unevaluable_criteria"]:
+            detail = f" not evaluable {row['unevaluable_criteria']}"
+        lines.append(
+            f"  {row['level']}/{row['class']}"
+            f"{' (C_P)' if row['in_class_set'] else ''}: {row['status']}{detail}"
+        )
+    np9 = report["family_checks"]["NP9"]["detail"]
+    basis = np9.get("reference_basis") or "no basis"
+    lines += [
+        "",
+        "Resources (NP9): wall "
+        f"{_fmt(np9.get('wall_seconds'), 0)} s against the limit "
+        f"{_fmt(np9.get('time_limit_seconds'), 0)} s ({basis}); "
+        f"peak RSS {np9.get('peak_rss_gb') or '-'} GB, reserve "
+        f"{_fmt(np9.get('rss_reserve_gb'), 1)} GB",
+    ]
+    if report["tables"]:
+        lines += [
+            "",
+            "Criterion tables (n_failed counts the scored rows; a scored failure "
+            "below a class's D_P only raises its floor, depth_walk):",
+        ]
+        for name, summary in report["tables"].items():
+            values = ", ".join(
+                f"{key} {_fmt(value)}"
+                for key, value in summary.items()
+                if key != "reported_only"
+            )
+            marker = " (reported only)" if summary.get("reported_only") else ""
+            lines.append(f"  {name}{marker}: {values}")
+    lines += [
+        "",
+        "Scored readings (pre-registration §23.21, the criteria revision "
+        "approved on 2026-10-07):",
+    ]
+    lines += [f"  - {item}" for item in report["scored_readings"]]
+    lines += [
+        "",
+        "Readings ruled: pre-registration "
+        f"{', '.join(report['readings_ruled'])} (none is open)",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+_TABLE_NAME: Final = re.compile(r"^[a-z0-9][a-z0-9_]*$")
+
+
+def write_gate_p_report(
+    result: GatePResult,
+    out_dir: Path | str,
+    *,
+    tables: Mapping[str, pd.DataFrame] | None = None,
+    overwrite: bool = False,
+) -> dict[str, Path]:
+    """Write the NP1-NP9 report of a family (JSON, text and CSV tables).
+
+    Args:
+        result: The family's gate-P result.
+        out_dir: The report directory (created if needed).
+        tables: The criterion tables by name (a lower-case token), each
+            written as ``<name>.csv`` and summarised in the report.
+        overwrite: Replace report files that exist (refused by default, so a
+            gate-P run never overwrites another run's evidence).
+
+    Returns:
+        Path per written file name.
+
+    Raises:
+        ValueError: For a table name that is not a lower-case token or that
+            collides with a report file.
+        FileExistsError: If a file exists and ``overwrite`` is False.
+    """
+    named = dict(tables or {})
+    reserved = {
+        GATE_P_REPORT_JSON,
+        GATE_P_REPORT_TXT,
+        GATE_P_RECORDS_CSV,
+        GATE_P_CLASS_SETS_CSV,
+        GATE_P_LEVEL_WALK_CSV,
+    }
+    for name in named:
+        if not _TABLE_NAME.fullmatch(name) or f"{name}.csv" in reserved:
+            raise ValueError(f"{name!r} is not a usable criterion table name")
+    report = gate_p_report(result, tables=named)
+    base = Path(out_dir)
+    outputs: dict[str, str | pd.DataFrame] = {
+        GATE_P_REPORT_JSON: json.dumps(report, indent=2, sort_keys=True) + "\n",
+        GATE_P_REPORT_TXT: gate_p_report_text(report),
+        GATE_P_RECORDS_CSV: result.records,
+        GATE_P_CLASS_SETS_CSV: result.class_sets.classes.merge(
+            result.class_sets.levels[["level", "class_set_share", "share_ok"]],
+            on="level",
+            how="left",
+        ),
+        GATE_P_LEVEL_WALK_CSV: result.level_walk,
+        **{f"{name}.csv": frame for name, frame in sorted(named.items())},
+    }
+    existing = sorted(name for name in outputs if (base / name).exists())
+    if existing and not overwrite:
+        raise FileExistsError(
+            f"{base} already holds {existing}; pass overwrite=True to replace them"
+        )
+    base.mkdir(parents=True, exist_ok=True)
+    written: dict[str, Path] = {}
+    for name, content in outputs.items():
+        path = base / name
+        if isinstance(content, str):
+            path.write_text(content, encoding="utf-8")
+        else:
+            content.to_csv(path, index=False)
+        written[name] = path
+    return written
+
+
+# ..........................................................................
+# The seeded families' dry run (§14 "Dry run"; M13 D28)
+
+# H18: "broad and supercluster emitted for every class with >= 50 test cells".
+DRY_RUN_H18_MIN_TEST_CELLS: Final = 50
+DRY_RUN_COLUMNS: Final[tuple[str, ...]] = (
+    "level",
+    "class",
+    "status",
+    "passed",
+    "reported",
+)
+
+
+def h18_expected_classes(
+    test_cells: pd.DataFrame,
+    *,
+    species: str,
+    min_test_cells: int = DRY_RUN_H18_MIN_TEST_CELLS,
+) -> dict[str, list[str]]:
+    """Return the classes H18 expects at the leaf level (M13 D28, CHECK K1).
+
+    H18's set is every class with >= 50 test cells of the PREP self-map's
+    test set (pre-registration §9 H18): the default donor's held-out test
+    cells, both halves, after the M8 D1 drop. Each test cell is counted once,
+    by its truth class at the leaf level (human supercluster, mouse
+    subclass).
+
+    Args:
+        test_cells: The default donor's test cells, one row per (level, test
+            cell) or more, columns ``level``, ``cell_id`` and ``truth_parent``.
+        species: ``"human"`` or ``"mouse"``.
+        min_test_cells: H18's minimum (50).
+
+    Returns:
+        ``{leaf level: classes}``, sorted.
+
+    Raises:
+        ValueError: For an unknown species or a missing column.
+    """
+    leaf = gate_p_levels(species)[-1]
+    _require_columns(test_cells, ("level", "cell_id", "truth_parent"), "the test cells")
+    rows = test_cells[test_cells["level"].astype(str) == leaf]
+    rows = rows[["cell_id", "truth_parent"]].dropna().drop_duplicates("cell_id")
+    counts = rows["truth_parent"].astype(str).value_counts()
+    return {leaf: sorted(str(cls) for cls, n in counts.items() if n >= min_test_cells)}
+
+
+def dry_run_verdict(
+    result: GatePResult,
+    *,
+    h18_classes: Mapping[str, Sequence[str]],
+    exemptions: Collection[tuple[str, str]] = (("supercluster", "COP"),),
+) -> dict[str, Any]:
+    """Score a seeded family's dry run (§14 "Dry run"; M13 D28, CHECK K1).
+
+    §14: before any new family is scored, the seeded families "must pass at
+    broad (human) / class (mouse) for every C_P class, and at supercluster /
+    subclass for the classes H18 expects". D28: H18's classes less only what
+    the user already approved; for set a that is supercluster COP, which M8
+    D1 removed from H18's scope (pre-registration §18 C1). M8 D4's approved
+    exceptions are bins of dataset-reweighted runs (broad OPC at 15 and 120,
+    Immune at 60 on one dataset), not classes, so they remove no class here;
+    any further narrowing is a loosening. The broad (class) level must also
+    be complete in the level walk (its C_P holds >= 90% of the test cells),
+    the stricter reading.
+
+    Revision R5 (pre-registration §23.21, approved by the user on
+    2026-10-07; it replaces CK1 (a)): a class H18 expects whose record is
+    ``not_evaluable`` (fewer than n_min confident calls, so no tested set)
+    is reported, not failed (``passed`` None, ``reported`` True, listed in
+    ``reported_not_evaluable``). It stays provisional, as every unevaluable
+    class does. A C_P class at broad (class) that is not evaluable still
+    fails, and so does an H18 class without a record.
+
+    Args:
+        result: The seeded family's gate-P result.
+        h18_classes: ``h18_expected_classes`` output.
+        exemptions: The (level, class) pairs the user removed from H18.
+
+    Returns:
+        ``passes``, the expected (level, class) rows (``DRY_RUN_COLUMNS``)
+        with their status, the failing ones, the H18 classes reported as not
+        evaluable, the exempted ones and the rule.
+    """
+    minimum = diag.MIN_SIMULATION_LEVEL[result.species]
+    exempt = {(str(level), str(cls)) for level, cls in exemptions}
+    class_set = {(minimum, cls) for cls in result.class_sets.members(minimum)}
+    expected = set(class_set)
+    exempted: set[tuple[str, str]] = set()
+    h18: set[tuple[str, str]] = set()
+    for level, classes in h18_classes.items():
+        for cls in classes:
+            key = (str(level), str(cls))
+            if key in exempt:
+                exempted.add(key)
+            else:
+                expected.add(key)
+                h18.add(key)
+    status = {
+        (str(level), str(cls)): str(value)
+        for level, cls, value in zip(
+            result.records["level"],
+            result.records["class"],
+            result.records["status"],
+            strict=True,
+        )
+    }
+    order = {level: rank for rank, level in enumerate(gate_p_levels(result.species))}
+    rows: list[dict[str, Any]] = []
+    for level, cls in sorted(expected, key=lambda key: (order.get(key[0], 99), key[1])):
+        value = status.get((level, cls), "no_record")
+        reported = (
+            (level, cls) in h18
+            and (level, cls) not in class_set
+            and value == RECORD_NOT_EVALUABLE
+        )
+        rows.append(
+            {
+                "level": level,
+                "class": cls,
+                "status": value,
+                "passed": None if reported else value == RECORD_VALIDATED,
+                "reported": reported,
+            }
+        )
+    walk = result.level_walk
+    minimum_rows = walk[walk["level"].astype(str) == minimum]
+    minimum_complete = bool(
+        not minimum_rows.empty and bool(minimum_rows.iloc[0]["complete"])
+    )
+    failing = [row for row in rows if row["passed"] is False]
+    return {
+        "passes": not failing and minimum_complete,
+        "min_level": minimum,
+        "min_level_complete": minimum_complete,
+        "expected": rows,
+        "failing": failing,
+        "reported_not_evaluable": [
+            [row["level"], row["class"]] for row in rows if row["reported"]
+        ],
+        "exempted": [list(key) for key in sorted(exempted)],
+        "rule": (
+            f"every class of C_P validated at {minimum} (and {minimum} complete in "
+            "the level walk), and every class H18 expects (>= "
+            f"{DRY_RUN_H18_MIN_TEST_CELLS} test cells) validated at the leaf level, "
+            "less the user's approved exemptions (§14 Dry run; M13 D28); an H18 "
+            "class that is not evaluable is reported, not failed (§23.21 R5)"
+        ),
+    }
+
+
+def run_gate_p(request: GatePRequest, options: GatePOptions) -> dict[str, Any]:
+    """Run gate P on one family (M13 chunk C8): ``gate_p_run.run_gate_p``.
+
+    The driver (leave-one-donor-out builds, simulation, mapping, the NP1-NP9
+    report) lives in ``merxen.annotation.gate_p_run``, so this module keeps
+    to pure functions on tables; ``gate_p_run.gate_p_hook(options)`` is what
+    ``simulate.register_gate_p_hook`` takes.
+
+    Args:
+        request: The base simulation.
+        options: The run's options (the species is required, M13 D4).
+
+    Returns:
+        The run record.
+    """
+    from merxen.annotation import gate_p_run
+
+    return gate_p_run.run_gate_p(request, options)

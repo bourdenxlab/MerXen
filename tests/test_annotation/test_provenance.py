@@ -321,3 +321,135 @@ def test_manifest_filename() -> None:
     assert annotation_manifest_filename("P1212_XENIUM") == (
         "P1212_XENIUM_annotation_manifest.json"
     )
+
+
+# --------------------------------------------------------------------------
+# validation_basis round trip of a simulation row (M13)
+
+
+@pytest.mark.filterwarnings("ignore:Writing zarr v2 data:UserWarning")
+def test_a_simulation_row_round_trips_from_the_csv_to_the_uns(tmp_path: Path) -> None:
+    """CSV -> read_validated_panels -> trust_for_panel -> panel_provenance -> uns.
+
+    A gate-P row (``validation_basis = simulation``) reaches the label
+    table's provenance with its basis, level and table digests; the same
+    row on a bundle without a self-map stays ``broad_only`` (the fail-safe)
+    and records no basis.
+    """
+    from merxen.annotation.diagnostics import (
+        VALIDATED_PANEL_LEVELS_FILE,
+        VALIDATED_PANELS_FILE,
+        panel_diagnostics,
+        panel_provenance,
+        read_validated_panels,
+        trust_for_panel,
+    )
+    from merxen.annotation.panel import panel_family
+
+    from .test_diagnostics import (
+        annotation_panel,
+        bundle_manifest,
+        ids,
+        level_row,
+        panel_row,
+        report_entry,
+        write_tables,
+    )
+
+    gene_ids = ids(100)
+    row = panel_row(
+        "sim_panel",
+        gene_ids,
+        family_id="sim_family",
+        max_level="broad",
+        basis="simulation",
+    )
+    levels = [
+        level_row("sim_family", row["panel_hash"], "broad", "Exc", min_depth=15),
+        level_row(
+            "sim_family",
+            row["panel_hash"],
+            "supercluster",
+            "Exc",
+            status="failed:NP4",
+            min_depth=None,
+            max_depth=None,
+        ),
+    ]
+    directory = write_tables(
+        tmp_path / "tables", [row], levels=levels, genes={"sim_panel": (gene_ids, ())}
+    )
+    table = read_validated_panels(directory)
+    (record,) = table.records
+    assert record.validation_basis == "simulation"
+    family = panel_family(
+        gene_ids,
+        species="human",
+        platforms=["XENIUM"],
+        known_families=table.known_families(),
+    )
+    panel = annotation_panel(gene_ids, family)
+    report = {"declared_panels": {"S_X": report_entry()}}
+    restored = {}
+    for name, self_map in (("self_map", True), ("no_self_map", False)):
+        diagnostics = panel_diagnostics(
+            panel,
+            panel_report=report,
+            bundles=[
+                bundle_manifest(
+                    panel_hash=panel.panel_hash,
+                    n_query_genes_used=100,
+                    resolvability=self_map,
+                )
+            ],
+        )
+        decision = trust_for_panel(
+            diagnostics,
+            reference_id="whb_frontal_supc_clus",
+            role="primary",
+            validated=table,
+        )
+        provenance = AnnotationProvenance(
+            species="human",
+            panel=panel_provenance(
+                decision,
+                diagnostics,
+                panel_mode="per_platform",
+                validated_share={"broad": 0.75},
+            ),
+        )
+        adata = ad.AnnData(np.zeros((2, 2), dtype=np.float32))
+        adata.obs_names = ["cell_0", "cell_1"]
+        adata.var_names = ["GENE1", "GENE2"]
+        provenance.write_to_uns(adata.uns)
+        path = tmp_path / f"{name}.h5ad"
+        adata.write_h5ad(path)
+        read_back = AnnotationProvenance.read_from_uns(ad.read_h5ad(path).uns)
+        assert read_back == provenance
+        assert (
+            AnnotationProvenance.from_uns_json(provenance.to_uns_json()) == provenance
+        )
+        assert read_back is not None and read_back.panel is not None
+        restored[name] = read_back.panel
+    promoted = restored["self_map"]
+    assert promoted.panel_trust == "validated"
+    assert promoted.validation_basis == "simulation"
+    assert promoted.validated_max_level == "broad"
+    assert (promoted.panel_family, promoted.family_basis) == ("sim_family", "listed")
+    assert promoted.trust_reasons == ["family_validated"] and promoted.banner is False
+    assert promoted.validated_panels_sha256 == table.sha256[VALIDATED_PANELS_FILE]
+    assert (
+        promoted.validated_panel_levels_sha256
+        == (table.sha256[VALIDATED_PANEL_LEVELS_FILE])
+    )
+    assert promoted.validated_share == {"broad": 0.75}
+    payload = json.loads(
+        AnnotationProvenance(species="human", panel=promoted).to_uns_json()
+    )
+    assert payload["panel"]["validation_basis"] == "simulation"
+    fail_safe = restored["no_self_map"]
+    assert fail_safe.panel_trust == "broad_only" and fail_safe.banner is True
+    assert fail_safe.validation_basis is None
+    assert fail_safe.validated_max_level is None
+    assert fail_safe.trust_reasons == ["resolvability_not_run"]
+    assert fail_safe.panel_family == "sim_family"

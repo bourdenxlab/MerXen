@@ -111,6 +111,89 @@ def test_coverage_vs_simulation_warns_below_the_margin_and_judges_200_cells() ->
     assert np.isnan(result.table["profile_coverage"]).all()
 
 
+@pytest.mark.parametrize(
+    ("species", "gate_level", "blocked"),
+    [
+        ("human", "full", set()),
+        ("human", "broad_only", {"supercluster", "cluster"}),
+        ("human", "failed", {"broad", "supercluster", "cluster"}),
+        ("mouse", "broad_only", {"subclass"}),
+    ],
+)
+def test_coverage_rows_record_the_gate_level_and_whether_it_blocks_them(
+    species: str, gate_level: str, blocked: set[str]
+) -> None:
+    """A level the gate before QC left unattempted is marked (C15 review F2).
+
+    Its real coverage is 0 by the gate, so the warning (kept: the rule is
+    unchanged) says the shortfall is the gate's, not the simulation's.
+    """
+    levels = ["broad", "supercluster", "cluster"]
+    if species == "mouse":
+        levels = ["class", "subclass"]
+    real = pd.DataFrame(
+        {
+            "level": levels,
+            "class": ["A"] * len(levels),
+            "n_cells": [500] * len(levels),
+            "real_coverage": [0.0] * len(levels),
+        }
+    )
+    predicted = real[["level", "class"]].assign(
+        predicted_coverage=0.9, resolvable_share=1.0
+    )
+    result = qc.coverage_vs_simulation(
+        real, predicted, gate_level=gate_level, species=species
+    )
+    table = result.table.set_index("level")
+    assert set(table["gate_level"]) == {gate_level}
+    assert {level for level in levels if table.loc[level, "gate_blocked"]} == blocked
+    # Every row still warns: the rule does not depend on the gate.
+    assert sorted(result.flagged) == sorted((level, "A") for level in levels)
+    for item in result.outcomes:
+        assert item.details["gate_level"] == gate_level
+        assert item.details["gate_blocked"] is (item.level in blocked)
+        gate_text = f"The dataset gate before QC is {gate_level}"
+        assert (gate_text in item.message) is (item.level in blocked)
+        assert "No offset is applied" in item.message
+    summary = result.summary()
+    assert summary["gate_level"] == gate_level
+    assert summary["n_flagged_gate_blocked"] == len(blocked)
+    assert {item["level"] for item in summary["flagged"] if item["gate_blocked"]} == (
+        blocked
+    )
+
+
+def test_coverage_without_a_gate_level_leaves_blocking_unknown() -> None:
+    real = pd.DataFrame(
+        {
+            "level": ["supercluster"],
+            "class": ["A"],
+            "n_cells": [500],
+            "real_coverage": [0.0],
+        }
+    )
+    predicted = real[["level", "class"]].assign(
+        predicted_coverage=0.9, resolvable_share=1.0
+    )
+    result = qc.coverage_vs_simulation(real, predicted)
+    assert result.table["gate_level"].tolist() == [None]
+    assert result.table["gate_blocked"].tolist() == [None]
+    (item,) = result.outcomes
+    assert item.details["gate_blocked"] is None
+    assert "dataset gate before QC" not in item.message
+    summary = result.summary()
+    assert summary["gate_level"] is None
+    assert summary["n_flagged_gate_blocked"] == 0
+    assert summary["flagged"] == [
+        {"level": "supercluster", "class": "A", "gate_blocked": None}
+    ]
+    with pytest.raises(ValueError, match="unknown gate level"):
+        qc.coverage_vs_simulation(real, predicted, gate_level="partial")
+    empty = qc.coverage_vs_simulation(real.iloc[:0], predicted, gate_level="full")
+    assert empty.table.empty and empty.summary()["n_flagged_gate_blocked"] == 0
+
+
 def test_the_profile_mode_prediction_is_reported_and_never_decides() -> None:
     # D4 of 2026-09-29: the class-depth predictor decides the warning; the
     # profile-mode prediction is reported beside it.
@@ -448,6 +531,36 @@ def test_factor_remeasure_runs_only_on_the_first_dataset_with_a_table() -> None:
         counts, genes, labels, profiles, stored, first_dataset_of_family=False
     )
     assert not later.applies and later.reason == "not_first_dataset_of_family"
+    # A later dataset is not the first whether or not a table is given: the
+    # check does not apply to it (not_applicable, never not_evaluable).
+    later_without = qc.factor_remeasure(
+        counts, genes, labels, profiles, None, first_dataset_of_family=False
+    )
+    assert later_without.reason == "not_first_dataset_of_family"
+    outcome = qc.factor_remeasure_outcome(
+        later_without, min_r=qc.FACTOR_REMEASURE_MIN_R, has_r3_member=True
+    )
+    assert outcome.outcome == "not_applicable"
+
+
+def test_factor_remeasure_warns_on_an_undefined_pearson_r() -> None:
+    """A constant factor vector has no Pearson r (NaN): that warns, never passes."""
+    rng = np.random.default_rng(6)
+    true_log2 = rng.normal(0.0, 1.0, 30)
+    counts, labels, profiles = make_factor_data(rng, true_log2)
+    genes = [f"g{index}" for index in range(30)]
+    flat = pd.DataFrame({"tier": ["informative"] * 30, "log2_factor": 0.0}, index=genes)
+    result = qc.factor_remeasure(
+        counts, genes, labels, profiles, flat, informative_min_expected=100.0
+    )
+    assert result.applies and result.n_informative >= 3
+    assert result.pearson_r is not None and np.isnan(result.pearson_r)
+    assert result.outcome is not None and result.outcome.fired
+    outcome = qc.factor_remeasure_outcome(
+        result, min_r=qc.FACTOR_REMEASURE_MIN_R, has_r3_member=True
+    )
+    assert outcome.fired and outcome.outcome == "warn"
+    assert "r nan" in outcome.message
 
 
 def test_gene_complexity_warns_above_45_percent_and_flags_predictions() -> None:
@@ -460,6 +573,7 @@ def test_gene_complexity_warns_above_45_percent_and_flags_predictions() -> None:
         simulated_n_genes=np.full(300, 100.0),
         simulated_depth=simulated_depth,
         grid=GRID,
+        matching="lower_edge",
     )
     assert outcome.fired and outcome.effect == "warning"
     assert "Simulated coverage predictions are unreliable" in outcome.message
@@ -471,6 +585,7 @@ def test_gene_complexity_warns_above_45_percent_and_flags_predictions() -> None:
         simulated_n_genes=np.full(300, 100.0),
         simulated_depth=simulated_depth,
         grid=GRID,
+        matching="lower_edge",
     )
     assert not quiet.fired
     assert quiet.details["native_exceeds_simulated_in_some_bin"] is True
@@ -483,9 +598,151 @@ def test_gene_complexity_ignores_bins_with_too_few_cells() -> None:
         simulated_n_genes=np.full(10, 100.0),
         simulated_depth=np.full(10, 250),
         grid=GRID,
+        matching="lower_edge",
     )
     assert not outcome.fired
     assert not table["judged"].any()
+
+
+# --------------------------------------------------------------------------
+# NR7's depth matching (the user's ruling C3 (b) of 2026-10-07)
+
+C16_GRID = [10, 15, 30, 60, 120, 250]
+
+
+def _genes_at(totals: np.ndarray) -> np.ndarray:
+    """Genes per cell without any complexity gap: linear in log depth."""
+    return 40.0 * np.log(np.asarray(totals, dtype=np.float64))
+
+
+def _no_gap_cells(n_native: int = 400, n_test: int = 200) -> dict[str, np.ndarray]:
+    """Native cells and simulated test cells on one genes-per-depth curve."""
+    rng = np.random.default_rng(16)
+    native_totals = np.exp(rng.uniform(np.log(30), np.log(500), n_native))
+    cells = np.repeat([f"t{index}" for index in range(n_test)], len(C16_GRID))
+    depths = np.tile(C16_GRID, n_test).astype(np.float64)
+    return {
+        "native_n_genes": _genes_at(native_totals),
+        "native_totals": native_totals,
+        "simulated_n_genes": _genes_at(depths),
+        "simulated_depth": depths,
+        "simulated_cell_ids": cells,
+    }
+
+
+def test_nr7_interpolates_simulated_genes_to_the_native_bin_median_total() -> None:
+    """Without a complexity gap the interpolated gap is 0; the lower edge's is not."""
+    cells = _no_gap_cells()
+    table, outcome = qc.gene_complexity_check(grid=C16_GRID, **cells)
+    rows = table.set_index("depth")
+    inside = rows.loc[[30, 60, 120]]
+    assert (inside["matching"] == "interpolated").all()
+    assert inside["judged"].all()
+    assert inside["gap"].abs().max() < 1e-3
+    assert not outcome.fired
+    assert outcome.details["matching"] == "interpolated"
+    # The weight puts the bin's native median total between its edges.
+    for depth, upper in ((30, 60), (60, 120), (120, 250)):
+        row = rows.loc[depth]
+        assert row["simulated_depth_high"] == upper
+        expected = (np.log(row["native_median_total"]) - np.log(depth)) / (
+            np.log(upper) - np.log(depth)
+        )
+        assert row["interpolation_weight"] == pytest.approx(expected)
+        assert 0.0 <= row["interpolation_weight"] < 1.0
+    # The registered lower edge sees a gap where there is none.
+    edge, _ = qc.gene_complexity_check(grid=C16_GRID, matching="lower_edge", **cells)
+    edge_rows = edge.set_index("depth")
+    assert (edge_rows.loc[[30, 60, 120], "gap"] > 0.05).all()
+    assert (edge_rows["matching"] == "lower_edge").all()
+
+
+def test_nr7_keeps_the_lower_edge_for_the_open_top_bin() -> None:
+    cells = _no_gap_cells()
+    table, _ = qc.gene_complexity_check(grid=C16_GRID, **cells)
+    top = table.set_index("depth").loc[250]
+    # No upper edge above the grid: the cells at 250, one value per test cell.
+    assert top["matching"] == "lower_edge"
+    assert pd.isna(top["simulated_depth_high"])
+    assert np.isnan(top["interpolation_weight"])
+    assert top["n_simulated"] == 200
+    assert top["simulated_median_genes"] == pytest.approx(40.0 * np.log(250))
+    assert top["gap"] > 0
+
+
+def test_nr7_matches_only_test_cells_simulated_at_both_edges() -> None:
+    """A test cell without a row at the upper edge is left out of the bin."""
+    cells = _no_gap_cells(n_test=80)
+    keep = ~(
+        np.isin(cells["simulated_cell_ids"], [f"t{index}" for index in range(40)])
+        & (cells["simulated_depth"] == 60)
+    )
+    thinned = {
+        key: value[keep] if key.startswith("simulated") else value
+        for key, value in cells.items()
+    }
+    table, _ = qc.gene_complexity_check(grid=C16_GRID, **thinned)
+    rows = table.set_index("depth")
+    # Bins 30 (edges 30, 60) and 60 (edges 60, 120) lose the 40 cells.
+    assert rows.loc[30, "n_simulated"] == 40
+    assert rows.loc[60, "n_simulated"] == 40
+    assert rows.loc[120, "n_simulated"] == 80
+    # 40 matched test cells are below the 50-cell minimum: not judged.
+    assert not rows.loc[30, "judged"] and not rows.loc[60, "judged"]
+    assert rows.loc[120, "judged"]
+
+
+def test_nr7_counts_test_cells_not_member_rows_in_the_open_top_bin() -> None:
+    """C4 (a): the 50-cell minimum counts test cells, at the open top bin too.
+
+    Eight member rows of one test cell at a depth are one cell (their mean),
+    so 30 test cells with 8 rows each at 250 are not judged, while 60 are.
+    """
+    rng = np.random.default_rng(4)
+    native_totals = np.exp(rng.uniform(np.log(250), np.log(500), 80))
+    for n_test, judged in ((30, False), (60, True)):
+        cells = np.repeat([f"t{index}" for index in range(n_test)], 8)
+        # The members of a test cell differ; the bin takes each cell's mean.
+        genes = np.tile(np.arange(8, dtype=np.float64), n_test) + np.repeat(
+            np.arange(n_test, dtype=np.float64), 8
+        )
+        table, _ = qc.gene_complexity_check(
+            _genes_at(native_totals),
+            native_totals,
+            genes,
+            np.full(len(cells), 250.0),
+            C16_GRID,
+            simulated_cell_ids=cells,
+        )
+        top = table.set_index("depth").loc[250]
+        assert top["matching"] == "lower_edge"
+        assert top["n_simulated"] == n_test
+        assert bool(top["judged"]) is judged
+        means = 3.5 + np.arange(n_test, dtype=np.float64)
+        assert top["simulated_median_genes"] == pytest.approx(float(np.median(means)))
+
+
+def test_nr7_interpolation_needs_the_simulated_cells_test_cells() -> None:
+    cells = _no_gap_cells()
+    del cells["simulated_cell_ids"]
+    with pytest.raises(ValueError, match="simulated_cell_ids"):
+        qc.gene_complexity_check(grid=C16_GRID, **cells)
+    with pytest.raises(ValueError, match="unknown gene-complexity matching"):
+        qc.gene_complexity_check(grid=C16_GRID, matching="nearest", **cells)
+    # The lower edge needs none.
+    table, _ = qc.gene_complexity_check(grid=C16_GRID, matching="lower_edge", **cells)
+    assert table["judged"].any()
+
+
+def test_nr7_warns_on_a_real_gap_under_interpolation() -> None:
+    cells = _no_gap_cells()
+    cells["native_n_genes"] = 1.6 * cells["native_n_genes"]
+    table, outcome = qc.gene_complexity_check(grid=C16_GRID, **cells)
+    inside = table.set_index("depth").loc[[30, 60, 120], "gap"]
+    assert inside.to_numpy() == pytest.approx([0.6, 0.6, 0.6], abs=1e-3)
+    assert outcome.fired
+    assert outcome.details["matching"] == "interpolated"
+    assert {30, 60, 120} <= set(outcome.details["bins_warned"])
 
 
 def test_qc_summary_never_promotes() -> None:
