@@ -44,8 +44,10 @@ legacy Squidpy stage runs Leiden on each section, scores each broad cluster
 against Allen marker sets, writes one `broad_class` per cluster, and then
 re-clusters inside each broad class ([Squidpy clustering](stages/clustering-squidpy.md)).
 Every cell in a cluster gets the cluster's label, whatever its own counts
-say. On imaging panels of about 300 genes, with many cells below 60 counts,
-clusters follow depth and segmentation quality as much as cell type. Measured
+say. On imaging panels of about 300 genes, where seven of the eight human sections'
+proseg_hybrid cells have a pooled median of 33 counts (17 to 71 per section;
+the set a dry run's expected depth, pre-registration §23.21), clusters follow
+depth and segmentation quality as much as cell type. Measured
 on the four human pairs, the legacy MERSCOPE and Xenium `broad_class`
 compositions differed by a Jensen–Shannon distance of 0.51 / 1.00 / 0.66 /
 0.44 (P7513 / P1212 / P7113 / P5011), and P1212's MERSCOPE section had no
