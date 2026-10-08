@@ -1564,3 +1564,49 @@ CK2 is met. Gate P may now run on the new-panel family (C18), after its PREP and
 - **NT:** both classes validated.
 
 **No revision.** These criteria passed the set a dry run, so the registered rule (§9 "Dry run"; CK2) gives no ground to revise them for this family. Changing NP7 or NP3 now would be a post-hoc loosening that validates more classes (§1 rule 2). Any later revision applies to the next families only, after a dry run.
+
+### 23.26 The family's real-data onboarding: results (recorded 2026-10-08, after gate P)
+
+**What was read and run.** The family's run of 2026-10-07 on code `a070e05` (§23.24), read only from `<family results>/acceptance/2026-10-07/runs/` (P4815 from its NPF3b re-run, whose `_m13` tables are in the store; its NPF3 and NPF3b label tables are identical in content on all four segmentations). Re-runs used the run's own code export, task scripts and staged inputs, CPU only, into scratch under `$A/m13/npf_acceptance/`; no results store or published run output was written. Evidence: `$A/m13/npf_acceptance/ACCEPTANCE_REPORT.md`, its `tables/` and `scripts/`. No threshold, reading or criterion was changed.
+- **NR1:** RESOLVE re-run on each section x segmentation's published MAP output, as published (QC on) and with `real_qc.enabled` false.
+- **NR2 (a):** the QC-on re-runs compared with the published outputs; MAP re-run on P5822 proseg_hybrid at the published seed (0, 6 workers) and RESOLVE on it.
+- **NR2 (b):** MAP with `rng_seed` 1 on all four sections x proseg_hybrid, then RESOLVE; scored with M8's `seed_change` (gate H's reading, §20 D12 (a)).
+
+**Rows** (proseg_hybrid, the scored segmentation; values in the order P5822 / P4815 / P3518 / P7417):
+
+| Row | Value | Threshold | Effect | Outcome |
+|---|---|---|---|---|
+| P1 | One `panel_hash` (`aa25d5a241d0…`) in every label table and manifest. No `Blank-*` feature in any store table, prepared panel or MapMyCells query (496 query genes on both references). The 65 blanks are dropped at ingestion, upstream of the registry, which therefore removed 0 | §23.5 | `UNSCORED` if not | holds |
+| P2 | No `validated_panels.csv` row; trust `provisional` (`family_not_validated`) | §23.5 | `UNSCORED` if not | holds |
+| P3 | RESOLVE consumed the version-7 bundle; MAP and RESOLVE name `0e32a8f6…` (WHB) and `23a89f5f…` (SEA-AD) | §23.5 | `UNSCORED` if not | holds |
+| P4 | All ten §8.8 checks carry an outcome token on every section x segmentation | §23.5 | `UNSCORED` if not | holds |
+| NR1 | No violation on 16 of 16 section x segmentation (`real_qc.downgrade_only_violations` of the run's code, and every difference listed). Trust state, gate level (`full`), emission plan (resolvability record), thresholds and floors, and every label column are identical. The only differences are the QC's gate warnings, each named by its check (`real_qc_coverage_vs_simulation` x22 / 21 / 23 / 24, `real_qc_flag_rates` x1 each, `real_qc_gene_complexity` x1 on P5822 and P3518), and the QC provenance records | Identical except labels set to `not_resolvable` and a gate level lowered by a named check | The M13 exit fails | **pass** |
+| NR2 (a) | The QC-on re-runs give label parquets byte-identical (sha256) to the published ones, with identical summaries and manifests, 16 of 16. The MAP re-run's three parquets are identical in content (its manifest differs only in `created_at`, wall times and RSS), and the label table RESOLVE gives on it is identical in content | Identical label-table content | The M13 exit fails | **pass** |
+| NR2 (b) | Switched between two confident names: 0 of 131,388 / 63,860 / 102,118 / 93,320 seed-0 confident broad labels (0%). Threshold crossings, reported: 5.25% / 6.05% / 5.37% / 4.50% | Switched ≤ 1% | A warning | pass |
+| NR3 | PANEL + MAP + RESOLVE wall over the four segmentations (H14's sum): 0.30 / 0.20 / 0.24 / 0.22 h (every non-PREP task of the section: 2.04 / 1.14 / 1.43 / 1.38 h). MAP peak RSS 11.3 / 10.2 / 10.6 / 10.4 GB. No GPU process; GPUs hidden in all 146 task scripts. PREP, reported: WHB 385 s, SEA-AD 487 s (NP9's PREP part 758 s) against NP9's limit of 1.5 x 4,929 s for PREP and the replicates together (gate P measured 5,003 s) | ≤ 2.5 h; ≤ 16 GB; no GPU | A warning | pass |
+| NR4 | Gate `full` on all four. A 0.928 / 0.884 / 0.979 / 0.969. Confident broad coverage of table cells 0.504 / 0.537 / 0.671 / 0.634, of segmented objects 0.465 / 0.504 / 0.665 / 0.625 | `broad_only` A < 0.30; `failed` < 0.25; warning < 0.15 | As defined; `failed` is a concern | pass |
+| NR5 | `class` comparator (C1 (b)), 7 marker groups: 0.968 / 0.982 / 0.957 / 0.975 (other segmentations 0.951–0.977) | Warning < 0.75; `broad_only` < 0.70 | Gate cap | pass |
+| NR6 | Uninformative strata, literal reading: 6/7, 4/7, 7/7, 5/7. Option (a), reported: 5/21, 4/21, 6/21, 5/21, which would not warn | Warning > 0.5 | A warning | **warning** on all four |
+| NR7 | Largest gap 0.55 / 0.41 / 0.78 / 0.35, always at the open top bin (250, matched at its lower edge). The other bins lie between −0.25 and +0.04 | Warning > 0.45 | A warning | **warning** on P5822 and P3518 |
+| NR8 | (Level, class) with ≥ 200 cells below the prediction − 0.10: 22 of 33, 21 of 29, 23 of 33, 24 of 33. At broad every class but Oligo falls short (Astro real 0.36–0.61 against 0.87–0.94 predicted; Oligo 0.55–0.75 against 0.54–0.72). `flag_nonneuronal_high_depth` is false for every cell (§22.9 (c)); the OPC and Oligo high-depth trend fires, report-only | Warning when real < simulated − 0.10 | A warning | **warning** on all four |
+| NR9 | `not_evaluable` in every RESOLVE ("no registration check given": no M0a check exists for these sections). G1 is a per-section check (§7.6), so it is applicable but was not run. Computed read-only for this record: density ratio 1.75 / 3.05 / 2.18 / 3.16, shift 0 µm, no fail rule on any section x segmentation; P5822 would warn (< 2.0) | Fail < 1.5 or shift > 5 µm; warning < 2.0 | `failed` + `exclude_hard` (C2) | not evaluated |
+| NR10 | Confident COP supercluster 0 on all four. Confident broad OPC 0.98% / 1.35% / 1.19% / 0.51%. COP-derived OPC share, reported: 4.9% / 3.7% / 2.6% / 6.6% | ≤ 2%; ≤ 10% | Concern on ≥ 2 sections | pass |
+| NR11 | `flag_implausible` 0.50% / 0.34% / 0.88% / 0.28%, mostly the WHB sink Miscellaneous. Reported segmentation reseg: P3518 1.28% | ≤ 1% | Concern on ≥ 2 sections | pass |
+| NR12 | 0.865 / 0.892 / 0.913 / 0.900 (recomputed from the MAP outputs, equal to the report's) | ≥ 0.80 | Concern on ≥ 2 sections | pass |
+| NR13 | Gate `full` on all four. Confident broad coverage of table cells 0.504 / 0.537 / 0.671 / 0.634. **No predicted levels were recorded**: no label-free depth read was written before the family's MAP or RESOLVE outputs were read (§23.24: the NP5 asset was the first read) | Report-only | None | report (prediction missing) |
+| NR14 | Share of confident broad calls: Oligodendrocytes 0.55 / 0.49 / 0.30 / 0.64, Neurons 0.16 / 0.17 / 0.33 / 0.10, Vascular 0.09–0.17, Astrocytes 0.05–0.14, Microglia 0.03–0.09, OPC 0.008–0.025, Fibroblasts ~0. reseg vs proseg_hybrid on shared cell ids: 74% / 86% / 95% / 95% of the proseg_hybrid table cells have a reseg table cell; among cells confident in both, the broad name agrees in 99.74–99.87% (supercluster 99.87–99.91%) | Report-only | None | report |
+| NR15 | Depth check `not_run`: no pia / WM boundaries exist. Protein IF: the channel names name GFAP, SNAP25, MBP and CLU, none of which is on the RNA panel, so a per-gene concordance cannot be computed. Reported instead (a reading taken after the run): the cellpose-mask intensity of each channel in the RNA-confident broad class it marks, AUROC against the other confident cells: GFAP 0.62–0.95, SNAP25 0.69–0.94, MBP 0.85–0.91, CLU 0.52–0.80. Held-out-gene enrichment `not_run`: no marker list was fixed before the run | Report-only | None | report |
+
+**A probe of NR1's lowering path, report-only.** The published QC lowered nothing on the family, so the NR1 comparison above never exercises a lowering. A probe re-run raised the referee's thresholds to 0.99 / 0.995 (not registered values; never a published run). The gate then fell to `broad_only` by `real_qc_marker_consistency` on all four sections. Only the gated levels' statuses (to `not_attempted_gate`) and the columns derived from them changed; trust, emission and thresholds did not. The same checker found no violation.
+
+**Verdict (§23.7): Onboarding accepted.** P1–P4 hold, and NR1 and NR2 (a) pass on all four sections x proseg_hybrid (and on reseg, proseg_mask and original_seg). The warnings (NR6, NR7, NR8) are explained in the PR.
+
+**Family-level concerns (§23.7): none fires.**
+- NR4 is `failed` on no section.
+- NR5 is `broad_only` on no section (lowest 0.957).
+- NR10, NR11 and NR12 fail on no section.
+
+The family stays `provisional`: gate P did not pass (§23.25), and real data never promote (§23.3 rule 1). Points for the user beyond the triggers:
+- NR8's shortfall is large and family-wide: simulation over-predicts real coverage for every broad class but Oligodendrocytes, by up to 0.6.
+- NR9 was never evaluated in the run.
+- NR13's prediction was not made before the outputs were read.
