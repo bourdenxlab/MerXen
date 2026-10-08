@@ -13,6 +13,7 @@ from merxen.config import (
     VisualizationSampleConfig,
     load_config_from_json,
 )
+from merxen.io.spatialdata_schema import PROSEG_ASSIGNMENT_COLUMN
 from merxen.qc.gene_comparison import (
     compute_gene_comparison_from_paths,
     compute_gene_summary_from_path,
@@ -156,6 +157,8 @@ def _write_paired_visualizations(
         xenium_zarr_path=xenium_sample.zarr_path,
         merscope_assignment_shape_key=merscope_sample.shape_key,
         xenium_assignment_shape_key=xenium_sample.shape_key,
+        merscope_assignment_column=_sanity_assignment_column(merscope_sample),
+        xenium_assignment_column=_sanity_assignment_column(xenium_sample),
     )
     transcript_overview_plot = cfg.output_dir / f"{cfg.pair_id}_transcript_overview.png"
     plot_transcript_overview(
@@ -228,6 +231,7 @@ def _write_single_visualizations(
         overlay_plot,
         zarr_path=sample.zarr_path,
         assignment_shape_key=sample.shape_key,
+        assignment_column=_sanity_assignment_column(sample),
     )
     transcript_overview_plot = cfg.output_dir / f"{sample_id}_transcript_overview.png"
     plot_single_transcript_overview(
@@ -249,3 +253,18 @@ def _write_single_visualizations(
     plot_assignment_bar(assignment_df, assign_plot)
     paths.append(assign_plot)
     return paths
+
+
+def _sanity_assignment_column(sample: VisualizationSampleConfig) -> str | None:
+    """Return the stored per-transcript assignment column for a sanity overlay.
+
+    ProSeg writes its own transcript assignment, so reseg overlays read it
+    rather than testing which ProSeg polygon each transcript falls inside.
+    The other branches keep their shape-based or hybrid assignment sources.
+    """
+    segmentation = (
+        "" if sample.segmentation is None else str(sample.segmentation).strip().lower()
+    )
+    if segmentation == "reseg":
+        return PROSEG_ASSIGNMENT_COLUMN
+    return None
