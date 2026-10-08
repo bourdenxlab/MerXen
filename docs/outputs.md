@@ -552,6 +552,17 @@ is pointed at, never to the production store.
 | `gate_p_class_sets.csv`, `gate_p_level_walk.csv` | C_P per level with each class's test cells, share and reference share; the coarse-to-fine level walk (`share_ok`, the classes validated and not, `complete`) that gives `validated_max_level`. |
 | `<table>__<member>.csv` | Per emission member (`r1_contam_ho_seed0`, …): `depth_walk` (the scored verdicts and `validated_min_depth` over NP3–NP7, pre-registration §23.21 R2), `tested_sets`, `np3_verdicts` (`scored` marks the test-cell weightings, R1), `np3_depths` (NP3's own walk, reported only), `np4_stats`, `np4_sets`, `np4_seed`, `np5_agreement` (the member's own re-derivation: scored in version 6, reported only in version 7, R7; the either-side bins in its `*_union` columns, R6), `np5_thresholds`, `np5_spread` (reported only), `np5_tstar_consequence` (NP5's t* part, R3 (c)), `np5_ensemble_thresholds` (version 7: the ensemble's t* re-fitted per replicate, one row per bin of each tested set, pre-registration §23.22), `np5_extrapolated`, `np5_class` (the every-set reading, reported only), `np6_verdicts` (`scored` marks unweighted and the test-cell weightings), `np7_wrong_node` and `np7_excluded` (human), and with `--gate-p-x1-factors` `np6_factors`. Also `np5_ensemble_agreement.csv` (version 7: NP5's scored agreement in every member, R7) and `pool_sizes.csv`. |
 | `replicates/<donor>/seed<k>/<member>.parquet` | Each replicate's gate-P rows, written as soon as it is mapped (base members at every seed, stress members and the clean upper bound at seed 0). A rerun into a directory that holds replicates is refused. |
+| `logs/<donor>/` | Each replicate mapping's MapMyCells logs (`*.ctm.log`, `*.stdout.log`, `*.stderr.log`). |
+
+Both JSON files are at `schema_version` 2 since the criteria revision of
+pre-registration §23.21 (2026-10-07). A version-1 file comes from a run
+before the revision: its `open_readings` lists readings the user had not yet
+ruled, its dry-run rows have no `reported` field, and its `n_failed` also
+counts report-only rows. The family's NP5 depth-profile asset is an input,
+not an output, of gate P: it is committed to
+`src/merxen/assets/annotation/sim_inputs/` before the run
+([configuration](configuration.md#gate-p-command-options-m13)), and
+`gate_p_run.json` records it under `np5_depth`.
 
 A family that passes is promoted only by its gate-P PR, which adds rows to
 the packaged tables in `src/merxen/assets/annotation/`

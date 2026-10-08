@@ -652,8 +652,11 @@ Gate P (`annotation-panel-simulate --gate-p`, `scripts/acceptance/new_panel.py`;
 reads these `resolvability` fields of the `AnnotationConfig` JSON. They have
 no Nextflow parameter: gate P is a standalone acceptance programme, never a
 pipeline stage. The thresholds are the pre-registered values of plan §3.7
-and §14 (pre-registration §23.9). Changing one is a rule change that needs
-its own PR, and a loosening needs the user's written approval.
+and §14 (pre-registration §23.9); the criteria revision of §23.21 changed how
+some criteria are read, not a threshold. Changing one is a rule change that
+needs its own PR, a loosening needs the user's written approval, and the
+dry run of the species is re-run under the changed rule before any family is
+scored.
 
 | Field | Default | Description |
 |-------|---------|-------------|
@@ -664,7 +667,7 @@ its own PR, and a loosening needs the user's written approval.
 | `resolvability.gate_p_spread_se_multiplier` | `3.5` | NP4's replicate range limit max(0.03, multiplier × SE). |
 | `resolvability.gate_p_min_coverage` | `0.30` | Coverage NP3 requires of each tested set. |
 | `resolvability.gate_p_stress.spill_fraction`, `.gene_efficiency_sigma`, `.platform_factor_cap_log2` | `0.35`, `1.0`, `2.0` | NP6's stress members: foreign-class spill, LogNormal(0, sigma) efficiency, and the cap on the cross-platform offsets (log2). |
-| `resolvability.weight_min_type_cells`, `resolvability.weight_trim_factor` | `20`, `10.0` | Shared with RESOLVE's composition reweighting. In NP3 a truth type with fewer calls takes its broad class's weight, and each weight is capped at this multiple of the set's median positive weight (pre-registration §23.11 item 2, open). |
+| `resolvability.weight_min_type_cells`, `resolvability.weight_trim_factor` | `20`, `10.0` | Shared with RESOLVE's composition reweighting. In NP3 and NP6's weighted rows a truth type with fewer test cells in the set's scope takes its truth class's weight, and each call's weight is capped at this multiple of the set's median positive weight. Kept by the user's ruling A2 (a) of 2026-10-07 (a loosening approved in writing, pre-registration §23.19); since revision R1 (§23.21) the weights are read on the test cells of the set's scope (`gate_p.np3_test_cell_weights`). |
 | `resolvability.holdout_other_region_donor_only` | `false` | Set only by gate P on its leave-one-donor-out builds (D2 (d)): the held-out test set draws its other-region top-up from the held-out donor only. It enters that bundle's `build_hash` only when set, so every production bundle is unchanged. |
 | `resolvability.gate_p_mouse_test_draws` | `2` | Disjoint WMB test draws of the mouse path. No code reads it yet: the mouse path waits for M13 chunk C20, after M6b. (`resolvability.gate_p_topup_max_cluster_frac`, 0.05, is already read by the version-7 mouse class top-up of PREP.) |
 
@@ -676,6 +679,52 @@ NP7 limits not listed above are module constants of `merxen.annotation.gate_p`
 (`Np3Settings`–`Np9Settings`). NP1 and NP2 read `panel.min_gene_id_resolution`
 (0.95) and `panel.min_root_markers` (10), and NP9 `panel.large_panel_genes`
 (1,000).
+
+#### Gate-P command options (M13)
+
+`scripts/acceptance/new_panel.py --species human|mouse <options>` passes every
+other option to `merxen annotation-panel-simulate --gate-p` unchanged (the
+full list is in the [CLI reference](cli.md#merxen-annotation-panel-simulate)).
+It exits 0 when gate P was scored and 3 when gate P stopped before any
+leave-one-donor-out build (`stop_reasons` in `gate_p_run.json`). Run it from a
+`git archive` export with a `COMMIT` file at its root, so the reports record
+the code that ran.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--species` | required | The species chosen when the check starts (M13 D4); a mouse family is refused until M13b. |
+| `--store`, `--store-large` | required; the config's `reference_store_large` | Both must name the separate gate-P store (D11 (b)): a store root that is, or lies inside, the config's `reference_store` or `reference_store_large` (the production stores) is refused before any compute. Without `--store-large` the config's `reference_store_large` is used when it is set, and is then refused. |
+| `--depth-profile-asset ID`, `--expected-depth N` | none | NP5's expected depth: a registered profile asset (a family with real sections: `np5_depth__<family_id>`) or the label-free pooled median. One is required; a per-class CSV (`--depth-profile`) is never read for NP5. |
+| `--gate-p-other-region donor_own\|shared` | `donor_own` | The leave-one-donor-out sets' other-region test cells: each donor's own (D2 (d)) or the production draw (the fallback (c)). By the user's ruling A48 (b), a run that stops on the pool sizes alone is re-run in place with `shared`. |
+| `--gate-p-accept-small-pools` | off | Run D2 (d) although a donor's pool is too small. |
+| `--gate-p-accepted-parents LIST` | none | Comma-separated weak or collapsed parents the user accepted (NP2), each by lookup key, node label or node name; given before the run. |
+| `--gate-p-run-with-unaccepted-parents` | off | Run although PREP lists a parent the user has not accepted (NP2 stays pending, so the family cannot pass). |
+| `--gate-p-unresolved-reviewed` | off | The user reviewed NP1's unresolved gene list in the gate-P PR. |
+| `--gate-p-dry-run` | off | Also score the seeded family's dry-run rule (D28, R5). |
+| `--gate-p-version auto\|7` | `auto` | `7` scores a version-6 family's version-7 ensemble (D5 (c)); nothing is written to a store. |
+| `--gate-p-dry-run-seconds S`, `--gate-p-dry-run-simulated-cells N` | none | NP9's version-7 time reference (D10 (a)): the set a version-7 dry run's `measured_seconds` and `simulated_cells` from its `gate_p_run.json` (since 2026-10-07: 4,259.36 s and 6,744,671 cells, run `v7_rev1`). Without them NP9's time part is not evaluable for a version-7 family. |
+| `--gate-p-time-reference-seconds S`, `--gate-p-time-reference-basis TEXT` | none | NP9's time reference of a version-6 family and its source; not used for version 7. |
+| `--gate-p-skip-prep-identity` | off | Do not rebuild PREP for NP9's identity part (NP9 is then not evaluable). |
+| `--gate-p-x1-factors PATH` | none | The X1 factor table, reported beside NP6's offsets (D7 (b)). |
+
+**The NP5 depth-profile asset.** A family with real sections takes its own
+profile, built by `scripts/annotation/build_np5_depth_profile.py` from its
+first provisional `map_first` run (pre-registration §23.20) and committed to
+`src/merxen/assets/annotation/sim_inputs/` as `np5_depth__<family_id>.csv`
+with its `.provenance.json` sidecar (role `gate_p_profile`). Only gate P reads
+it; PREP never selects it, so it enters no `build_hash`. The builder takes
+`--labels` (one RESOLVE label table per section, repeated), `--sections` (the
+family's sections by sample or pair id), `--family-id`, `--panel-hash`
+(checked), `--segmentation` (default `proseg_hybrid`), `--tissue`, `--date`,
+`--evidence-root` and `--manifest` (the source manifest, written under the
+evidence root), and `--check` (write nothing; exit 1 when a committed file is
+stale). Re-run `scripts/annotation/build_sim_inputs.py` afterwards so the
+`NOTICE` lists the asset. The registered asset of the new-panel human
+MERSCOPE family is `np5_depth__human_merscope_aa25d5a241d0` (sha256
+`79026806…`, pre-registration §23.24): 390,686 confident broad calls over the
+four sections, overall median 328 counts; Fibroblast (3 calls) takes the
+overall median. Gate P refuses an asset whose tables were resolved with
+another primary bundle than the one its own PREP builds.
 
 **RESOLVE rule settings have no pipeline params.** The thresholds, targets,
 floors, dataset gate and flag settings RESOLVE applies are the

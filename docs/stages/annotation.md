@@ -931,8 +931,11 @@ are pre-registered in `docs/acceptance/annotation-v1-preregistration.md`
 §23.9 and §23.10. The readings the code takes where plan §14 is not explicit
 were put to the user there, in §23.11–§23.17, and ruled on 2026-10-07
 (§23.19). The set a dry run then failed, and the user approved the criteria
-revision of §23.21 the same day (R1, R2, R3 (c), R5, R6, R7; below). No
-reading is open; every report lists the reading each revised criterion
+revision of §23.21 the same day (R1, R2, R3 (c), R5, R6, R7; below). The dry
+run, re-run on the revised code, passed (§23.23). Gate P then ran on the
+new-panel human MERSCOPE family, which did not pass (§23.25), so no family
+has been promoted ([below](#gate-p-on-the-new-panel-human-merscope-family-m13)).
+No reading is open; every report lists the reading each revised criterion
 scores (`gate_p.GATE_P_SCORED_READINGS`).
 
 **Running it.** `scripts/acceptance/new_panel.py --species <species> ...`,
@@ -1076,8 +1079,90 @@ in the verdict). For human it runs on version 6 and on the version-7 ensemble
 (`--gate-p-version 7`, D5 (c)). A failure makes the criteria unattainable,
 and they are revised in a PR the user approves before any new family is
 scored; the dry run is then re-run under the revised criteria and must pass
-(CK2). The set a dry run of 2026-10-07 failed in both versions; the revision
-of pre-registration §23.21 followed, and its re-run is pending.
+(CK2). A failed dry run is never re-scored under another reading.
+
+**The set a dry run and the criteria revision (2026-10-07; pre-registration
+§23.21–§23.23).**
+
+- *As registered* (code `2a91a36`, other-region draw `shared`, expected depth
+  33), both versions failed. Version 6 failed every broad C_P class (Astro
+  NP3; Exc and Inh NP6; Immune and OPC NP5; Oligo NP4); version 7 failed
+  every C_P class at every level, mostly on NP5 and NP6. NP9's identity part
+  also failed on a code defect (the marker lookup's MapMyCells run record was
+  compared; fixed in `1a8fe2e`).
+- *Causes*, reproduced cell for cell by a read-only re-scorer from the saved
+  replicates: NP3's per-call-set weightings estimate no precision (a few
+  stray wrong calls take the trim cap), and NP6 reused them; NP5's t* spread
+  ≤ 0.05 measures sample size (two mapping seeds on the same cells already
+  differ by more than 0.05 in 22% of glial sets); NP4–NP7 failed a class at
+  sets below its NP3 floor; NP5 compared bins where only one side had test
+  cells; and version 7's NP5 compared each member's own decisions while
+  NP3/4/6/7 score the ensemble emission.
+- *The revision*, approved by the user on 2026-10-07 ("Approve all six
+  (Recommended)"): R1 (NP3's weightings on the test cells of the set's
+  scope, also in NP6), R2 (the depth walk, `validated_min_depth` from the
+  shallowest bin whose sets all pass), R3 (c) (NP5's t* part as a
+  consequence check), R5 (a class H18 expects that is `not_evaluable` is
+  reported in the dry run, not failed), R6 (NP5 compares a bin only where
+  both sides hold ≥ 50 test cells) and R7 (version 7: NP5 compares the
+  ensemble re-derived per replicate with the frozen ensemble decisions). All
+  six are loosenings chosen after the failures were seen (post-hoc). The
+  targets, target⁺, the Wilson rule, coverage 0.30, n_min, NP4's floor and
+  range, NP6's stresses and drop test, and NP7 are unchanged. §23.22 records
+  how R3 (c) reads a version-7 set that spans several bins: each call is
+  held to its own bin's threshold in the replicate.
+- *Negative control* (user: "Enough; state fragility (Recommended)"): set
+  a less 25 Astrocyte- and OPC-specific genes, its expected outcome recorded
+  before it ran, scored as version 7 by the re-scorer under the six
+  revisions. Broad OPC failed in several members; broad and supercluster
+  Astro failed through one member's spill stress only (@12), so those two
+  results are fragile; supercluster OPC did not move. The gate is therefore
+  not blind, but this control does not show that it is sharp. It was not
+  re-scored under §23.22's reading.
+- *The re-run on the revised code* (`a3c0707`) passed in both versions,
+  `validated_max_level` supercluster, with all 27 records equal to the
+  re-scorer's prediction. Version-7 broad floors: Astro 30, Exc 10, Inh 10,
+  Immune 15, OPC 30, Oligo 120. Supercluster Fibroblast and Vascular are
+  reported as not evaluable (R5). The version-7 run's `measured_seconds`
+  (4,259 s for 6,744,671 simulated cells) is NP9's time reference for the
+  next human families (D10 (a)).
+
+**Onboarding a new family** (the order M13 followed for the new-panel human
+MERSCOPE family; pre-registration §23.9, §23.10, §23.19–§23.25):
+
+1. The species is chosen, and that species' dry run must have passed under
+   the current criteria (human: set a, versions 6 and 7; passed on
+   2026-10-07 on `a3c0707`). Any change to the criteria re-runs the dry run
+   before a family is scored.
+2. The declared panel is frozen (its `panel_hash` and the hash-derived
+   `family_id`, D16), and the family's real-data acceptance and any
+   family-specific setting are pre-registered before any of its outputs are
+   read.
+3. The user starts the family's PREP and `map_first` annotation (add-only,
+   with a table suffix). The family is `provisional`, so RESOLVE emits under
+   the provisional regime and runs the real-data QC in full
+   ([below](#gate-p-on-the-new-panel-human-merscope-family-m13)).
+4. The NP5 depth profile is built from that run's proseg_hybrid label tables
+   (`build_np5_depth_profile.py`), committed, and its sha256 recorded in the
+   pre-registration before gate P runs.
+5. Gate P runs from a `git archive` export of the code that holds the asset:
+   `new_panel.py --species human --depth-profile-asset np5_depth__<family_id>`
+   with the dry run's `--gate-p-dry-run-seconds` and
+   `--gate-p-dry-run-simulated-cells` (NP9's reference) and the parents the
+   user accepted (`--gate-p-accepted-parents`), and `--store` /
+   `--store-large` on the separate gate-P store
+   ([configuration](../configuration.md#gate-p-command-options-m13)). A stop
+   on the pool sizes alone is re-run in place with `--gate-p-other-region
+   shared` (ruling A48 (b)); a stop on NP2's parents goes back to the user.
+6. A family that passes is promoted by its own gate-P PR (below). A family
+   that fails stays `provisional`, with the reason recorded in the
+   pre-registration and the PR. The criteria are not revised for it: a
+   revision after its numbers are seen would be a post-hoc loosening (§1
+   rule 2). A revision for later families needs its own PR, the user's
+   approval and a passing dry run.
+7. The family's real-data onboarding (pre-registration §23.6–§23.7, NR1–NR15)
+   is scored separately on the same run. It never promotes; a family-level
+   concern holds back the family's gate-P PR until the user has reviewed it.
 
 **Promotion.** A family that passes is promoted only by its own gate-P PR,
 which the user approves:
@@ -1123,7 +1208,89 @@ A gate-P PR adds rows and moves its family's bundles to `validated`, so
 both parts fail. This is the intended promotion, not an M3c regression. The
 script guards the M3c changes only. After the first gate-P PR, do not use
 it as a regression check; re-baseline it on the gate-P commit if it is
-needed again.
+needed again. At the end of M13 no gate-P row has landed: the new-panel
+human MERSCOPE family did not pass and stays `provisional`, and the
+validated tables are byte-identical to `83e81e3`. The script is expected to
+fail from the first family's gate-P PR on.
+
+### Gate P on the new-panel human MERSCOPE family (M13)
+
+The first in-house custom family: P5822, P4815, P3518 and P7417 (four
+donors, frontal cortex, fresh-frozen, MERSCOPE only and unpaired), one
+496-gene Vizgen panel (`family_id` `human_merscope_aa25d5a241d0`, `panel_id`
+`human_merscope_hbv2_496`), resolvability version 7 with eight R1 members.
+Its `map_first` run of 2026-10-07 (code `a070e05`, all four segmentations,
+`anatomical_region = frontal_cortex`) wrote the `_m13` tables, and its NP5
+asset `np5_depth__human_merscope_aa25d5a241d0` came from that run's
+proseg_hybrid tables (pre-registration §23.24).
+
+**Gate P: not passed** (§23.25; code `2c25541`, 1 h 42 min). Under D2 (d)
+the run stopped on the pool sizes (6 donor × class pools too small) and was
+re-run in place with the shared other-region draw (A48 (b)).
+`validated_max_level` is none, because lineage is incomplete: in 7 of the 8
+members every lineage class fails NP7's 1% part. Confident calls to
+excluded nodes are 1.12–2.92% of lineage's confident calls (member @9: 1.00%,
+a pass), almost all to the WHB sink Miscellaneous, counted confident by the
+larger of the call's own lineage bp and its supercluster bp (ruling A8 (a)).
+At broad, NT and supercluster the same share is 0.09–0.69%. Below lineage,
+5 of 6 broad C_P classes are validated (broad Oligo fails NP3 in member @6
+only: class-balanced 0.948 against target⁺ 0.95 at the ≥ D_P set, bin 250),
+all 6 supercluster classes (Exc only from 250 counts) and both NT classes.
+NP1, NP2 and NP9 pass (NP9: 5,003 s against 1.5 × 4,929 s); NP8 does not
+apply. These criteria passed the set a dry run, so they are not revised for
+this family; any later revision applies to the next families only, after a
+dry run.
+
+**What a provisional family means in production.** A family that fails gate
+P is run exactly as before: it keeps trust `provisional`
+(`family_not_validated`) in every RESOLVE, and only a gate-P PR can make it
+`validated`. The family's resolve summaries record this (`trust`:
+`validated_max_level` null, `effects.banner` and `effects.gate_warning`
+true).
+
+- Emission: the version-7 ensemble decisions re-derived at each section's
+  own composition, with the provisional margins (targets + 0.05, + 0.10
+  below 60 counts, capped at 0.97), local thresholds that only raise, and
+  floors at the maximum of the known (over platforms and panels) and the
+  simulated floor.
+- Labels: confident labels are emitted at every level the decisions allow,
+  supercluster included, but `ct_<L>_validated` is false on every label and
+  the panel record has no validated level.
+- Gate and report: the dataset gate sets its warning flag and the report
+  shows the provisional banner; the provisional state alone never lowers the
+  gate level.
+- Real-data QC: the family is not seeded, so every check applies with its
+  full effect (no warn-only period). The marker referee uses the `class`
+  comparator (`real_qc.marker_referee_comparator_by_family`), and registration
+  G1 fails the dataset gate wherever a registration check exists.
+- Promotion later would change only `ct_<L>_validated`, the banner and the
+  warning flag, never an emitted label, so outputs produced now stay valid.
+
+**Real-data onboarding: accepted** (pre-registration §23.26, read only from
+the run's outputs; re-runs in scratch). P1–P4 hold, and NR1 (downgrade-only
+mechanics, 16 of 16 section × segmentation runs) and NR2 (a) (an identical
+re-run gives the same label-table content) pass; no family-level concern
+fires. On proseg_hybrid (P5822 / P4815 / P3518 / P7417): gate `full` on all
+four, confident broad coverage of table cells 0.504 / 0.537 / 0.671 / 0.634,
+marker referee 0.957–0.982, WHB–SEA-AD 7-class agreement 0.865–0.913,
+`flag_implausible` 0.28–0.88%, confident COP 0, seed 0 vs 1 switched 0%
+(threshold crossings 4.5–6.1%), annotation wall 0.20–0.30 h per section and
+MAP peak RSS ≤ 11.3 GB. The warnings to read the labels with:
+
+- NR8: simulation over-predicts real coverage in 21–24 (level, class) rows
+  per section, by up to 0.54 at broad (P5822 Astro) and 0.60 at supercluster
+  (P7417 Inh). At broad only Oligo (all four), Exc on P3518 and Fibroblast on
+  P5822 are within 0.10. Read the class-depth predictions as optimistic for
+  this panel.
+- NR7: the gene-complexity gap exceeds 0.45 on P5822 (0.55) and P3518 (0.78),
+  in the open top bin (250 counts) only.
+- NR6: more than half of the flag strata are uninformative on all four
+  sections.
+- NR9: registration G1 was not evaluated. The family's results hold no
+  registration check from the QC stage, so every RESOLVE recorded it
+  `not_evaluable`; computed read-only for the record, no section meets the
+  fail rule and P5822 would warn (density ratio 1.75).
+- NR13: the predicted levels were not recorded before the outputs were read.
 
 ### Xenium Prime 5K panel card (M3c)
 
@@ -2122,6 +2289,17 @@ these inputs for its NR1 evidence. The QC-free run's outputs on the version-6
 scenarios equal the golden digests of the code before the QC
 (`test_resolve_v7.py`, the new summary keys aside).
 
+**Measured.** On set a's M8 pairs (C17, `scripts/acceptance/m13_real_qc_regression.py`,
+warn-only settings pinned) no NR1 violation was found and registration G1's
+fail rule fired on no row. On the new-panel human MERSCOPE family the QC
+lowered nothing, NR1 found no violation on 16 of 16 section × segmentation
+runs, and the coverage, flag-rate and gene-complexity checks warned
+([results](#gate-p-on-the-new-panel-human-merscope-family-m13)). Registration
+G1 needs the QC stage's registration check (`*_registration_qc.json`); the
+family's results hold none, so G1 was `not_evaluable` in every RESOLVE and
+its `gate_failed` effect could not act. Check that the QC stage has written
+these files before relying on G1.
+
 ### Human rules v1 (`consensus.resolve_human`, §5.2)
 
 Raw bootstrap probabilities (float32-tolerant: a stored 0.69 meets 0.69) are
@@ -2772,20 +2950,24 @@ held-out-gene CSV is not produced in the pipeline, so item 8 is
 - **Set c of families without a curated list** uses the label-free rule,
   which drops far more genes than E5's validated set c (44-73 per pair on the
   E5 pairs); treat such set-c results as provisional.
-- **Gate P has promoted no family yet** (M13, 2026-10-07). The human
-  programme is implemented and tested on synthetic tables. The set a dry run
-  (version 6 and the version-7 ensemble) failed on 2026-10-07, and the user
-  approved the criteria revision of pre-registration §23.21 (R1, R2, R3 (c),
-  R5, R6, R7) the same day; it is implemented, and no new family may be
-  scored before the dry run, re-run on the revised code, passes (CK2). The
-  user ruled on the readings of pre-registration §23.11–§23.18 on 2026-10-07
-  (§23.19). The
+- **Gate P has promoted no family yet** (M13, 2026-10-08). The human
+  programme passed the set a dry run after the criteria revision of
+  pre-registration §23.21, whose six items are post-hoc loosenings; the
+  negative control showed the revised gate is not blind, but two of its
+  three moves rest on one member's spill stress. The new-panel human
+  MERSCOPE family failed gate P at lineage (NP7's 1% sink share, driven by
+  calls to the WHB sink Miscellaneous counted confident through their
+  supercluster bp) and stays `provisional`
+  ([details](#gate-p-on-the-new-panel-human-merscope-family-m13)). The
   mouse path waits for the second WMB test draw and the ag7 / VZG2 dry run
-  (M13 chunks C20–C22, moved to M13b, after M6b). For the new-panel human
-  MERSCOPE family, whose declared panel is frozen (D17), gate P also waits
-  for the family's `map_first` re-run with the current code and its
-  registered NP5 depth profile (D8; the builder's readings, §23.20, go to
-  the user before it runs).
+  (M13 chunks C20–C22, moved to M13b, after M6b).
+- **Simulation over-predicts real coverage on the new-panel family** (M13
+  NR8). In 21–24 (level, class) rows per section the real confident share
+  falls more than 0.10 below the class-depth prediction, by up to 0.54 at
+  broad and 0.60 at supercluster; at broad only Oligo is within 0.10 on
+  every section (and Exc on P3518, Fibroblast on P5822). The per-class
+  coverage warning fires accordingly. Treat a new panel's simulated coverage
+  as optimistic until the family's real coverage is measured.
 
 ## Licences
 
