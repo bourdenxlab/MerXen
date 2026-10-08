@@ -359,6 +359,23 @@ def _delete_element_from_disk_or_path(
     remove_path(element_path)
 
 
+def delete_element(sdata_obj: Any, key: str, element_type: str) -> None:
+    """Remove one element from disk and memory, keeping root metadata consistent.
+
+    Args:
+        sdata_obj: Disk-backed SpatialData object that holds the element.
+        key: Element name.
+        element_type: Element group, e.g. ``"images"`` or ``"tables"``.
+    """
+    element_key = str(key)
+    _delete_element_from_disk_or_path(sdata_obj, element_key, element_type)
+    container = _get_element_container(sdata_obj, element_type)
+    if element_key in container:
+        del container[element_key]
+    # Consolidated root metadata still lists the deleted group until rewritten.
+    _reconsolidate_metadata(sdata_obj, element_key, raise_errors=True)
+
+
 def write_spatialdata_metadata(
     sdata_obj: Any,
     *,
