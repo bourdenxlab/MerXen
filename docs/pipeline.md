@@ -37,6 +37,12 @@ for the full list of simplifications. The graph below is the precise version.
   └────────┬────────┘
            ▼
   ┌─────────────────┐
+  │ REGISTER_IMAGES │   optional, Xenium: post-run IF onto
+  │                 │   the mask grid (Explorer matrix +
+  │                 │   DAPI affine refinement)
+  └────────┬────────┘
+           ▼
+  ┌─────────────────┐
   │ MASK_IMAGE_     │   Cellpose-mask image-channel
   │ QUANTIFICATION  │   min/median/mean/max/IQR table
   └────────┬────────┘
@@ -148,6 +154,7 @@ For a samplesheet row with `pair_id=EXAMPLE01`:
 | 2a | `CELLPOSE_SEGMENT` × 2 | `merxen cellpose-segment` | `source_spatialdata.zarr` | `cellpose_masks_tiled.npy`, stitching stats, seeded transcript CSV, affine JSON |
 | 2b | `PROSEG_SEGMENT` × 2 | `merxen proseg-segment` | Cellpose artifacts | durable `latest/latest_spatialdata.zarr` |
 | 3 | `ENRICH` × 2 | `merxen enrich` | latest zarr + Cellpose mask | same durable `latest/latest_spatialdata.zarr`, now enriched with per-shape counts tables |
+| 3r | `REGISTER_IMAGES` × 1 (Xenium, opt-in) | `merxen register-images` | enriched Xenium zarr + OME-TIFFs + Xenium Explorer matrices | same durable zarr, now with one image element per registered image, plus `register_images_out/` QC |
 | 4 | `MASK_IMAGE_QUANTIFICATION` × 2 | `merxen mask-image-quantification` | enriched zarr + Cellpose mask | same durable zarr, now with `table_MOSAIK_cellpose_image_quantification` plus sidecars |
 | 5 | `QC` × 2 | `merxen qc` | quantified/enriched zarr | `qc_out/` (metrics CSV, plots) |
 | 6a | `MECR_REFERENCE` × 1 | `merxen mecr-reference` | complete species-matched whole-brain reference + selected spatial panel | shared MECR marker/statistics tables |

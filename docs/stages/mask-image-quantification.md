@@ -44,6 +44,12 @@ enriched zarr as before.
 Rows are named `cellpose_<label_id>`. Feature names use
 `{image_key}__{channel}__{stat}`.
 
+Images registered by [`REGISTER_IMAGES`](register-images.md), such as
+post-Xenium IF, are ordinary source images on the mask grid and are quantified
+the same way. An existing quantification table is reused only when its
+`image_key` set matches the zarr's current source images; registering or
+removing an image triggers re-quantification.
+
 When `table_MOSAIK_proseg_hybrid` exists, the stage joins these Cellpose-mask
 measurements onto hybrid cells by their shared `instance_id`. It does not
 re-quantify expanded hybrid polygons. The hybrid expression matrix remains

@@ -316,10 +316,12 @@ rerunning `ALIGN` or `ALIGN_QC`.
 
 Accepted stages are:
 
-`build_spatialdata`, `segment_nuclei`, `segment`, `enrich`, `mask_image_quantification`,
-`qc`, `mecr`, `align`, `align_qc`, `compare`, `visualize`,
-`spatial_gene_analysis`, `clustering_squidpy`, `compute_cortical_depth`, and
-`mapmycells`.
+`build_spatialdata`, `segment_nuclei`, `segment`, `enrich`, `register_images`,
+`mask_image_quantification`, `qc`, `mecr`, `align`, `align_qc`, `compare`,
+`visualize`, `spatial_gene_analysis`, `clustering_squidpy`,
+`compute_cortical_depth`, and `mapmycells`.
+`register_images` is only active for Xenium rows that set
+`xenium_registered_images_csv`; see [Image registration](stages/register-images.md).
 `mecr` is only active for rows whose effective `mecr_enabled` value is `true`.
 `spatial_gene_analysis` is only active for rows whose effective
 `spatial_gene_analysis_enabled` value is `true`; disabled rows continue from

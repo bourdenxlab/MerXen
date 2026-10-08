@@ -39,6 +39,7 @@ converge at alignment; dashed stations are governed by a parameter. See
 - [SpatialData build](stages/spatialdata-build.md)
 - [Segmentation](stages/segmentation.md) (Cellpose-SAM + ProSeg)
 - [Enrichment](stages/enrichment.md)
+- [Image registration](stages/register-images.md) (post-Xenium IF onto the mask grid)
 - [Mask image quantification](stages/mask-image-quantification.md)
 - [Cortical depth](stages/cortical-depth.md)
 - [QC](stages/qc.md)
