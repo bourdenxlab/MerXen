@@ -16,6 +16,7 @@ import pandas as pd
 import spatialdata as sd
 from spatialdata.models import TableModel
 
+from merxen.alignment.manifest import NONRIGID_ELEMENT_SUFFIX
 from merxen.config import MaskImageQuantificationConfig
 from merxen.io.image_source import build_image_source, fetch_tile
 from merxen.io.spatialdata_io import write_or_replace_element
@@ -89,13 +90,13 @@ def build_mask_image_quantification_table(
     if not image_keys:
         raise RuntimeError(
             f"[{dataset_name}] No source image elements found to quantify after "
-            "excluding private viewer-cache images."
+            "excluding private viewer-cache and aligned images."
         )
     skipped_cache_images = len(images) - len(image_keys)
     log_status(
         f"[{dataset_name}] Quantifying {len(image_keys)} source image element(s) "
         f"over {label_ids.size:,} Cellpose masks; skipped "
-        f"{skipped_cache_images} private viewer-cache image(s)"
+        f"{skipped_cache_images} private viewer-cache or aligned image(s)"
     )
 
     matrix_parts: list[np.ndarray] = []
@@ -429,7 +430,14 @@ def _hybrid_image_join_is_complete(
 
 def _source_image_keys(sdata_obj: Any) -> list[str]:
     images = getattr(sdata_obj, "images", None) or {}
-    return [str(key) for key in images if not is_derived_cache_key(str(key))]
+    # Aligned images are resampled onto the counterpart platform's grid, so they
+    # never match this dataset's Cellpose mask.
+    return [
+        str(key)
+        for key in images
+        if not is_derived_cache_key(str(key))
+        and not str(key).endswith(NONRIGID_ELEMENT_SUFFIX)
+    ]
 
 
 def _quantified_image_keys(table: ad.AnnData) -> set[str]:

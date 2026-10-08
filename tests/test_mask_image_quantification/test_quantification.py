@@ -502,3 +502,43 @@ def test_newly_registered_image_triggers_requantification(
     table = sdata.tables[MASK_IMAGE_QUANTIFICATION_TABLE_KEY]
     assert set(table.var["image_key"]) == {"morphology_focus", "post_xenium_if"}
     assert "post_xenium_if__p62__mean" in table.var_names
+
+
+def test_aligned_counterpart_image_is_not_quantified(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An aligned image lives on the counterpart grid, not this mask's grid.
+
+    Alignment materializes ``MERSCOPE_z_projection_aligned_nonrigid`` into the
+    MERSCOPE store after quantification has run. A rerun must neither treat it
+    as a newly registered image nor try to quantify it over the native masks.
+    """
+    latest = tmp_path / "latest.zarr"
+    latest.mkdir()
+    mask_path = tmp_path / "mask.npy"
+    np.save(mask_path, np.array([[1, 1], [2, 0]], dtype=np.uint32))
+    sdata = SimpleNamespace(
+        images={"MERSCOPE_z_projection": _image(np.ones((2, 2, 1)), ["DAPI"])},
+        tables={},
+    )
+    writes = _patch_in_memory_zarr(monkeypatch, sdata)
+    cfg = MaskImageQuantificationConfig(
+        dataset_name="P1_MERSCOPE",
+        platform="MERSCOPE",
+        latest_zarr_path=latest,
+        mask_path=mask_path,
+        output_dir=tmp_path / "quant_out",
+    )
+    run_mask_image_quantification(cfg)
+
+    sdata.images["MERSCOPE_z_projection_aligned_nonrigid"] = _image(
+        np.ones((3, 3, 1)),
+        ["DAPI"],
+    )
+    run_mask_image_quantification(cfg)
+    assert writes == [MASK_IMAGE_QUANTIFICATION_TABLE_KEY]
+
+    run_mask_image_quantification(cfg, force_rerun=True)
+    table = sdata.tables[MASK_IMAGE_QUANTIFICATION_TABLE_KEY]
+    assert set(table.var["image_key"]) == {"MERSCOPE_z_projection"}

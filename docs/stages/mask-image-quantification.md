@@ -9,7 +9,9 @@ polygon-rasterized masks.
 
 1. Read the enriched `latest_spatialdata.zarr`.
 2. Load the final nonzero labels from `cellpose_masks_tiled.npy`.
-3. Iterate every SpatialData image element and every image channel.
+3. Iterate every SpatialData source image element and every image channel.
+   Viewer-cache pyramids and `*_aligned_nonrigid` images, which alignment
+   resamples onto the counterpart platform's grid, are skipped.
 4. Fail if an image's native `(y, x)` shape differs from the mask shape.
 5. Compute exact `min`, `median`, `mean`, `max`, and `iqr` for each
    cellpose label/channel.
