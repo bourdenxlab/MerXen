@@ -1,5 +1,11 @@
 # Reference-based annotation (in development)
 
+> **New to the annotation?** Read the
+> [cell-type annotation overview and method](../annotation-overview.md) first:
+> it summarises the whole flow, the outputs and the trust states, and gives
+> the exact rule behind each level with a worked example. This page is the
+> detailed reference, organised by milestone.
+
 Reference-based cell-type annotation replaces the legacy marker scoring of
 [Squidpy clustering](clustering-squidpy.md) when a species runs in
 `map_first` mode. It is being built milestone by milestone
