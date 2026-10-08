@@ -85,9 +85,7 @@ def build_mask_image_quantification_table(
     if not images:
         raise RuntimeError(f"[{dataset_name}] No image elements found to quantify.")
 
-    image_keys = [
-        image_key for image_key in images if not is_derived_cache_key(str(image_key))
-    ]
+    image_keys = _source_image_keys(sdata_obj)
     if not image_keys:
         raise RuntimeError(
             f"[{dataset_name}] No source image elements found to quantify after "
@@ -178,6 +176,16 @@ def run_mask_image_quantification(
             and config.table_key in sdata_obj.tables
             and _sidecar_outputs_exist(paths)
         )
+        if existing_quantification:
+            quantified = _quantified_image_keys(sdata_obj.tables[config.table_key])
+            current = set(_source_image_keys(sdata_obj))
+            if quantified != current:
+                # Images were registered or removed since the table was written.
+                log_status(
+                    f"[{config.dataset_name}] Image set changed (quantified "
+                    f"{sorted(quantified)}, now {sorted(current)}); re-quantifying."
+                )
+                existing_quantification = False
         if existing_quantification:
             if _hybrid_image_join_is_complete(
                 sdata_obj,
@@ -417,6 +425,17 @@ def _hybrid_image_join_is_complete(
         and HYBRID_IMAGE_QUANTIFICATION_OBSM_KEY
         in sdata_obj.tables[PROSEG_HYBRID_TABLE_KEY].obsm
     )
+
+
+def _source_image_keys(sdata_obj: Any) -> list[str]:
+    images = getattr(sdata_obj, "images", None) or {}
+    return [str(key) for key in images if not is_derived_cache_key(str(key))]
+
+
+def _quantified_image_keys(table: ad.AnnData) -> set[str]:
+    if "image_key" not in table.var.columns:
+        return set()
+    return set(table.var["image_key"].astype(str))
 
 
 def _table_instance_ids(
