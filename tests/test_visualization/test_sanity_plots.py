@@ -10,6 +10,7 @@ import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import pytest
 from shapely.geometry import box
 
 from merxen.visualization.sanity_plots import (
@@ -184,3 +185,59 @@ def test_hybrid_sanity_crop_uses_stored_assignment_and_provenance() -> None:
         "outside",
     ]
     assert assignment_column == "hybrid_assignment"
+
+
+def test_crop_points_assignment_column_overrides_shape_containment() -> None:
+    """A stored assignment column should win over polygon containment."""
+    shapes = gpd.GeoDataFrame({"geometry": [box(0.0, 0.0, 4.0, 4.0)]})
+    points = pd.DataFrame(
+        {
+            "x": [1.0, 2.0, 8.0],
+            "y": [1.0, 2.0, 8.0],
+            "assignment": pd.Series([0, pd.NA, 3], dtype="UInt32"),
+            "background": [False, True, False],
+        }
+    )
+    sdata = SimpleNamespace(
+        shapes={
+            "MOSAIK_proseg": shapes,
+            "MOSAIK_proseg_aligned_nonrigid": shapes,
+        },
+        points={"transcripts": points},
+        images={},
+    )
+
+    cropped, _, assignment_column = _crop_points(
+        sdata,
+        (0.0, 0.0, 10.0, 10.0),
+        max_points=None,
+        random_state=0,
+        assignment_shape_key="MOSAIK_proseg",
+        assignment_column="assignment",
+        prefer_aligned_points=False,
+        prefer_aligned_assignment=True,
+    )
+
+    assert cropped["assigned"].tolist() == [True, False, True]
+    assert assignment_column == "assignment"
+
+
+def test_crop_points_rejects_missing_assignment_column() -> None:
+    """A requested assignment column that the points lack should fail loudly."""
+    shapes = gpd.GeoDataFrame({"geometry": [box(0.0, 0.0, 4.0, 4.0)]})
+    points = pd.DataFrame({"x": [1.0], "y": [1.0]})
+    sdata = SimpleNamespace(
+        shapes={"MOSAIK_proseg": shapes},
+        points={"transcripts": points},
+        images={},
+    )
+
+    with pytest.raises(KeyError, match="assignment_column='assignment'"):
+        _crop_points(
+            sdata,
+            (0.0, 0.0, 10.0, 10.0),
+            max_points=None,
+            random_state=0,
+            assignment_shape_key="MOSAIK_proseg",
+            assignment_column="assignment",
+        )
