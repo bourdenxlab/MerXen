@@ -1523,3 +1523,22 @@ Code `a3c0707` (§23.21 and §23.22 implemented), exported to `$A/m13/dryrun/cod
 - **Still open in the family verdict, as expected for a dry run:** NP2 pending (set a's Vascular parent, never accepted) and NP9 not evaluable (time: no reference for set a itself). Neither is part of the dry-run rule (D28).
 
 CK2 is met. Gate P may now run on the new-panel family (C18), after its PREP and `map_first` re-run on this code or later, and the NP5 profile asset.
+
+### 23.24 The family's re-run and its NP5 depth profile (recorded 2026-10-08, before gate P runs on the family)
+
+**The re-run.** The family's PREP and `map_first` re-ran on code `a070e05` (export `$A/m13/chain/head_a070e05`), replacing the `_m13` tables of 2026-10-06 (user's choice, 2026-10-07: "Start now, replace _m13", after a full backup). Run outputs are under the family's `acceptance/2026-10-07/runs/`.
+- **One task failed:** `CLUSTERING_SQUIDPY_FINALIZE` (P4815, proseg_mask) read a table while another task was replacing it.
+  - **Cause:** the store write lock is keyed on the unresolved path, and each Nextflow task reaches the store through its own work-dir symlink, so the writers were not serialized. The fix goes to `main` separately.
+  - **Recovery:** P4815 re-ran alone (run label `npf3b`, store writers serialized with `maxForks = 1`).
+  - **Checks:** no failed task; no table file outside the `_m13` tables changed; every `_m13` table was rewritten. P4815's four `_m13` tables carry `ct_*` columns identical to the first run's, and its proseg_hybrid label table is identical in content (only the parquet provenance metadata differs).
+- **The family's primary bundle:** `whb_frontal_supc_clus` `build_hash` `0e32a8f6ce934cdb0da2af581e03a225e92a8131b90c34f1802d08485e075113`. Gate P checks its own PREP bundle against this before any build (`e95d66e`).
+
+**The NP5 depth profile.**
+- **Asset:** `np5_depth__human_merscope_aa25d5a241d0` (role `gate_p_profile`), sha256 `7902680605779eb0511b0bf47ad313c7a853b9cb3b1d0edc10244934d3fc4e44`, committed in `20fb4c7`.
+- **How it was built:** `build_np5_depth_profile.py`, with the readings (i)–(iv) of §23.20 that the user confirmed on 2026-10-07 (V5), from the four sections' proseg_hybrid label tables of the run above, pooled.
+  - 679,343 table cells; 390,686 confident broad calls.
+  - Classes with their own depths: Astro, Exc, Immune, Inh, OPC, Oligo, Vascular.
+  - Fibroblast takes the overall median.
+  - Overall median: 328 counts (confident broad calls). The label-free table median, reported only, is 236.
+- **Source manifest:** `$A/m13/npf_run/np5_profile/source_manifest.json`.
+- **The first read of the family's outputs:** building this asset. Nothing else of the family's outputs has been read.
