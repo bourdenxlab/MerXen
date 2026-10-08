@@ -1,0 +1,360 @@
+{
+  "asset_id": "np5_depth__human_merscope_aa25d5a241d0",
+  "asset_version": 1,
+  "chemistry": "merscope",
+  "columns": {
+    "class_code": "the class (legend in extra.class_legend)",
+    "n_cells": "table cells of the class with these total counts",
+    "total_counts": "total counts of the cells"
+  },
+  "description": "Per-class depth profile of human_merscope_aa25d5a241d0 for gate P's NP5 (plan \u00a714 NP5; M13 decision D8 with CHECK K7): its first provisional map_first run's confident broad calls per E2 floor class and its other table cells, as histograms of total counts; never a PREP input",
+  "extra": {
+    "class_legend": [
+      {
+        "class": "Astro",
+        "code": 0,
+        "kind": "confident_broad",
+        "median_counts": 514.0,
+        "n_cells": 37788,
+        "neuronal": false
+      },
+      {
+        "class": "Exc",
+        "code": 1,
+        "kind": "confident_broad",
+        "median_counts": 601.0,
+        "n_cells": 49386,
+        "neuronal": true
+      },
+      {
+        "class": "Fibroblast",
+        "code": 2,
+        "kind": "confident_broad",
+        "median_counts": 137.0,
+        "n_cells": 3,
+        "neuronal": false
+      },
+      {
+        "class": "Immune",
+        "code": 3,
+        "kind": "confident_broad",
+        "median_counts": 300.0,
+        "n_cells": 25561,
+        "neuronal": false
+      },
+      {
+        "class": "Inh",
+        "code": 4,
+        "kind": "confident_broad",
+        "median_counts": 426.0,
+        "n_cells": 26165,
+        "neuronal": true
+      },
+      {
+        "class": "OPC",
+        "code": 5,
+        "kind": "confident_broad",
+        "median_counts": 544.0,
+        "n_cells": 6714,
+        "neuronal": false
+      },
+      {
+        "class": "Oligo",
+        "code": 6,
+        "kind": "confident_broad",
+        "median_counts": 259.0,
+        "n_cells": 193344,
+        "neuronal": false
+      },
+      {
+        "class": "Vascular",
+        "code": 7,
+        "kind": "confident_broad",
+        "median_counts": 377.0,
+        "n_cells": 51725,
+        "neuronal": false
+      },
+      {
+        "class": "__not_confident__",
+        "code": 8,
+        "kind": "not_confident",
+        "median_counts": 107.0,
+        "n_cells": 288657,
+        "neuronal": null
+      }
+    ],
+    "family_id": "human_merscope_aa25d5a241d0",
+    "min_class_cells": 100,
+    "panel_hash": "aa25d5a241d0b273ed855a83c8a0310a86e3242cb6f43345f1736ace846cdd62"
+  },
+  "file": "np5_depth__human_merscope_aa25d5a241d0.csv",
+  "label": "MerXen proseg_hybrid segmentation, map_first confident broad calls of human_merscope_aa25d5a241d0 (4 sections)",
+  "n_rows": 15491,
+  "provenance": {
+    "attribution": "in-house sections of this project (human_merscope_aa25d5a241d0)",
+    "date": "2026-10-08",
+    "derived_from": [
+      {
+        "file": "P5822_MERSCOPE_celltype_labels.parquet",
+        "sample_id": "P5822_MERSCOPE",
+        "segmentation": "proseg_hybrid",
+        "sha256": "48c666352d6dbbbad661ca2b04ef5237490c8d222929b7af2af098d52bb213e1",
+        "size": 36873033
+      },
+      {
+        "file": "P4815_MERSCOPE_celltype_labels.parquet",
+        "sample_id": "P4815_MERSCOPE",
+        "segmentation": "proseg_hybrid",
+        "sha256": "2208a4db38fc8a84acf0ea280c9e06ad6088b1a97cb6e0cfb8fed865c17418bc",
+        "size": 17330759
+      },
+      {
+        "file": "P3518_MERSCOPE_celltype_labels.parquet",
+        "sample_id": "P3518_MERSCOPE",
+        "segmentation": "proseg_hybrid",
+        "sha256": "334e805f9d4c2c2f5cd6c3211ea2c58caaa28701c844c5b2ca205ba4ff376bb4",
+        "size": 21577844
+      },
+      {
+        "file": "P7417_MERSCOPE_celltype_labels.parquet",
+        "sample_id": "P7417_MERSCOPE",
+        "segmentation": "proseg_hybrid",
+        "sha256": "f29794155db26f90c4c5d42c3d93d9e9682a0afc73ded22fd2cf19a9509332fb",
+        "size": 19923174
+      }
+    ],
+    "deriving_script": "scripts/annotation/build_np5_depth_profile.py",
+    "deriving_script_sha256": "200fc351e998c9d0f6e62014b32de40e5f45d496edf1a7ede97689a417c73150",
+    "evidence": [
+      "$A/m13/npf_run/np5_profile/source_manifest.json",
+      "docs/acceptance/annotation-v1-preregistration.md \u00a723.20"
+    ],
+    "evidence_root": "$A = /srv/storage/MerXen/annotation_dev/evidence_20260926",
+    "licence": "in-house data, no public licence; the asset holds derived per-class depth histograms only",
+    "licence_note": "in-house data: no public licence text applies",
+    "method": "Every table cell of the sections, pooled, each cell once: a confident broad call coded by its E2 floor class (vocab.human_floor_class of ct_broad_name and ct_nt_name), every other table cell __not_confident__; one row per class and distinct total_counts with its cells. Gate P's NP5 gives a class with >= 100 confident broad calls its own depths and every other class the median of the confident broad calls (sim_inputs.FamilyDepthProfile; pre-registration \u00a723.20).",
+    "readings": {
+      "finer_levels": "(iii) every gate-P level is keyed by the E2 floor classes, so an NT or supercluster class takes the depths of its floor class's confident broad calls; supercluster COP takes the overall median (A45 (a))",
+      "overall_median": "(iv) the median of the confident broad calls, every class pooled (A45 (a), pre-registration \u00a723.17 item 7); the label-free median of every table cell is reported and gives NP3's report-only depth histogram",
+      "segmentation_and_pooling": "(i) the scored segmentation, the sections pooled (each table cell once; D8 (b)); each section's values reported",
+      "small_classes": "(ii) a class with fewer than min_class_cells pooled confident broad calls takes the overall median, as a class without calls (plan \u00a78.3 v7.5's profile minimum)"
+    },
+    "run": {
+      "anatomical_region": "frontal_cortex",
+      "mode": "map_first",
+      "panel_trust": "provisional",
+      "primary_build_hash": "0e32a8f6ce934cdb0da2af581e03a225e92a8131b90c34f1802d08485e075113",
+      "primary_reference": "whb_frontal_supc_clus"
+    },
+    "segmentation": "MerXen proseg_hybrid",
+    "source_dataset": "the human_merscope_aa25d5a241d0 family's map_first RESOLVE label tables, sections P5822_MERSCOPE, P4815_MERSCOPE, P3518_MERSCOPE, P7417_MERSCOPE (in-house; proseg_hybrid)",
+    "source_files": [
+      {
+        "file": "source_manifest.json",
+        "path": "$A/m13/npf_run/np5_profile/source_manifest.json",
+        "sha256": "21b4c4bc2d936ee165f1f92c7dbab9a1c8d508989540a609bb5c058debce8130",
+        "size": 8714
+      }
+    ],
+    "source_kind": "in_house",
+    "source_page": "pre-registration \u00a723.9 item 6, \u00a723.10 (D8 (b) with CHECK K7) and \u00a723.20 (docs/acceptance/annotation-v1-preregistration.md); $A/m13/npf_run/np5_profile/source_manifest.json",
+    "summary": {
+      "pooled": {
+        "classes_overall_median": [
+          "Fibroblast"
+        ],
+        "classes_own_depths": [
+          "Astro",
+          "Exc",
+          "Immune",
+          "Inh",
+          "OPC",
+          "Oligo",
+          "Vascular"
+        ],
+        "median_counts_table_cells": 236.0,
+        "min_class_cells": 100,
+        "n_confident_broad": 390686,
+        "n_sections": 4,
+        "n_table_cells": 679343,
+        "overall_median_confident_broad": 328.0
+      },
+      "sections": [
+        {
+          "classes": {
+            "Astro": {
+              "median_counts": 627.0,
+              "n_cells": 12033
+            },
+            "Exc": {
+              "median_counts": 731.5,
+              "n_cells": 12442
+            },
+            "Fibroblast": {
+              "median_counts": 137.0,
+              "n_cells": 1
+            },
+            "Immune": {
+              "median_counts": 384.0,
+              "n_cells": 11829
+            },
+            "Inh": {
+              "median_counts": 477.0,
+              "n_cells": 8409
+            },
+            "OPC": {
+              "median_counts": 690.0,
+              "n_cells": 2553
+            },
+            "Oligo": {
+              "median_counts": 291.0,
+              "n_cells": 72118
+            },
+            "Vascular": {
+              "median_counts": 525.0,
+              "n_cells": 12003
+            }
+          },
+          "gate_level": "full",
+          "median_counts_confident_broad": 353.0,
+          "median_counts_table_cells": 213.0,
+          "n_confident_broad": 131388,
+          "n_table_cells": 260938,
+          "sample_id": "P5822_MERSCOPE"
+        },
+        {
+          "classes": {
+            "Astro": {
+              "median_counts": 324.0,
+              "n_cells": 6853
+            },
+            "Exc": {
+              "median_counts": 413.0,
+              "n_cells": 8066
+            },
+            "Fibroblast": {
+              "median_counts": 133.0,
+              "n_cells": 1
+            },
+            "Immune": {
+              "median_counts": 153.0,
+              "n_cells": 2925
+            },
+            "Inh": {
+              "median_counts": 240.0,
+              "n_cells": 3101
+            },
+            "OPC": {
+              "median_counts": 417.0,
+              "n_cells": 1607
+            },
+            "Oligo": {
+              "median_counts": 165.0,
+              "n_cells": 31339
+            },
+            "Vascular": {
+              "median_counts": 271.0,
+              "n_cells": 9968
+            }
+          },
+          "gate_level": "full",
+          "median_counts_confident_broad": 227.0,
+          "median_counts_table_cells": 146.0,
+          "n_confident_broad": 63860,
+          "n_table_cells": 118830,
+          "sample_id": "P4815_MERSCOPE"
+        },
+        {
+          "classes": {
+            "Astro": {
+              "median_counts": 604.0,
+              "n_cells": 14205
+            },
+            "Exc": {
+              "median_counts": 735.0,
+              "n_cells": 21812
+            },
+            "Immune": {
+              "median_counts": 326.0,
+              "n_cells": 7900
+            },
+            "Inh": {
+              "median_counts": 500.0,
+              "n_cells": 12088
+            },
+            "OPC": {
+              "median_counts": 583.0,
+              "n_cells": 1809
+            },
+            "Oligo": {
+              "median_counts": 286.0,
+              "n_cells": 30151
+            },
+            "Vascular": {
+              "median_counts": 413.0,
+              "n_cells": 14153
+            }
+          },
+          "gate_level": "full",
+          "median_counts_confident_broad": 432.0,
+          "median_counts_table_cells": 355.0,
+          "n_confident_broad": 102118,
+          "n_table_cells": 152291,
+          "sample_id": "P3518_MERSCOPE"
+        },
+        {
+          "classes": {
+            "Astro": {
+              "median_counts": 439.0,
+              "n_cells": 4697
+            },
+            "Exc": {
+              "median_counts": 477.0,
+              "n_cells": 7066
+            },
+            "Fibroblast": {
+              "median_counts": 319.0,
+              "n_cells": 1
+            },
+            "Immune": {
+              "median_counts": 211.0,
+              "n_cells": 2907
+            },
+            "Inh": {
+              "median_counts": 293.0,
+              "n_cells": 2567
+            },
+            "OPC": {
+              "median_counts": 406.0,
+              "n_cells": 745
+            },
+            "Oligo": {
+              "median_counts": 243.0,
+              "n_cells": 59736
+            },
+            "Vascular": {
+              "median_counts": 346.0,
+              "n_cells": 15601
+            }
+          },
+          "gate_level": "full",
+          "median_counts_confident_broad": 280.0,
+          "median_counts_table_cells": 249.0,
+          "n_confident_broad": 93320,
+          "n_table_cells": 147284,
+          "sample_id": "P7417_MERSCOPE"
+        }
+      ]
+    },
+    "use": "gate-P NP5 input only (plan \u00a714 NP5; M13 decision D8 with CHECK K7); never trust evidence, never a PREP input",
+    "xoa_version": "not applicable: the sections were segmented by MerXen"
+  },
+  "reference": "whb_frontal_supc_clus",
+  "role": "gate_p_profile",
+  "schema_version": 1,
+  "sha256": "7902680605779eb0511b0bf47ad313c7a853b9cb3b1d0edc10244934d3fc4e44",
+  "size": 140181,
+  "species": "human",
+  "tissue": "brain_ff",
+  "trust_effect": "none"
+}

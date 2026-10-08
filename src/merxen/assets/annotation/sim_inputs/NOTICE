@@ -105,6 +105,15 @@ Derived from this project's own sections by their own scripts, not
 from public data: their sidecars record each source file by its path
 under the evidence root and its sha256 (no URL).
 
+- np5_depth__human_merscope_aa25d5a241d0.csv (gate_p_profile, human, brain_ff):
+  MerXen proseg_hybrid segmentation, map_first confident broad calls of human_merscope_aa25d5a241d0 (4 sections).
+  Source: the human_merscope_aa25d5a241d0 family's map_first RESOLVE label tables, sections P5822_MERSCOPE, P4815_MERSCOPE, P3518_MERSCOPE, P7417_MERSCOPE (in-house; proseg_hybrid).
+    $A/m13/npf_run/np5_profile/source_manifest.json
+      sha256 21b4c4bc2d936ee165f1f92c7dbab9a1c8d508989540a609bb5c058debce8130
+  Deriving script: scripts/annotation/build_np5_depth_profile.py.
+  Licence: in-house data, no public licence; the asset holds derived per-class depth histograms only.
+  Attribution: in-house sections of this project (human_merscope_aa25d5a241d0).
+
 - ratio__xenium_v1_vs_merscope__human_brain_ffpe.csv (stress, human, brain_ffpe):
   MerXen proseg_hybrid segmentation, in-house paired Xenium / MERSCOPE brain sections (set a).
   Source: MerXen set a paired sections P7513, P7113, P1212 and P5011 (in-house human brain sections, each pair one Xenium and one adjacent MERSCOPE section on the same custom gene panel).
