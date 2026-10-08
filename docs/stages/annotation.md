@@ -1837,12 +1837,14 @@ Three more things the M5 exit run showed:
   row with cortical depth enabled never ran MENDER: FINALIZE's event consumed
   the pair's one spec. `map_first` runs now `combine` every event with it
   ([MENDER](mender.md)).
-- **Writer lock.** FINALIZE takes `<zarr>.merxen-write.lock` beside the path
-  it is given, which is VALIDATE_ANALYSIS_LAYER's staged link in the work
-  directory, so its lock file lands in the work directory and does not
-  exclude writers that use the store's real path; MENDER_IMPORT resolves the
-  real path and locks beside the store. Do not run other writers on the
-  same stores while a run writes.
+- **Writer lock (fixed).** At the exit run FINALIZE took
+  `<zarr>.merxen-write.lock` beside the path it was given, which is
+  VALIDATE_ANALYSIS_LAYER's staged link in the work directory, so its lock
+  file landed in the work directory and did not exclude writers that use the
+  store's real path. Every writer (FINALIZE, MENDER_IMPORT, alignment,
+  `remove_mapfirst_outputs.py`) now takes the one shared lock,
+  `merxen.io.spatialdata_io.spatialdata_write_lock`, which resolves every
+  symlink and locks beside the real store.
 
 ## Mapping (`merxen annotate`)
 
