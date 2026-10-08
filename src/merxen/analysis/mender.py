@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import logging
 import math
 import shutil
-from collections.abc import Iterator
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +20,11 @@ import pandas as pd
 import seaborn as sns
 
 from merxen.config import MenderConfig
-from merxen.io.spatialdata_io import write_or_replace_element
+from merxen.io.spatialdata_io import (
+    spatialdata_write_lock,
+    spatialdata_write_lock_path,
+    write_or_replace_element,
+)
 from merxen.memory import force_release, log_status
 
 logger = logging.getLogger(__name__)
@@ -513,19 +514,6 @@ def finalize_mender(
     }
 
 
-@contextmanager
-def spatialdata_write_lock(zarr_path: Path | str) -> Iterator[Path]:
-    """Acquire the shared MerXen writer lock for one SpatialData store."""
-    lock_path = Path(f"{Path(zarr_path)}.merxen-write.lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a", encoding="utf-8") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
-        try:
-            yield lock_path
-        finally:
-            fcntl.flock(handle, fcntl.LOCK_UN)
-
-
 def _spatialdata_table_contract(table: ad.AnnData) -> tuple[str, str, str]:
     attrs = dict(table.uns.get("spatialdata_attrs", {}))
     region_key = str(attrs.get("region_key", "region"))
@@ -577,7 +565,7 @@ def import_mender_spatialdata(
     provenance = dict(annotated.uns["merxen_mender"])
 
     imported = False
-    lock_path = Path(f"{config.spatialdata_path}.merxen-write.lock")
+    lock_path = spatialdata_write_lock_path(config.spatialdata_path)
     if config.write_spatialdata_table:
         import spatialdata as sd
         from spatialdata.models import TableModel
