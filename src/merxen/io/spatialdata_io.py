@@ -66,16 +66,33 @@ _ELEMENT_TYPE_ALIASES = {
 
 
 def spatialdata_write_lock_path(zarr_path: Path | str) -> Path:
-    """Return the shared, store-adjacent MerXen writer lock path."""
-    return Path(f"{Path(zarr_path)}.merxen-write.lock")
+    """Return the shared MerXen writer lock path beside the real store.
+
+    Every path that reaches one store must map to one lock file, or concurrent
+    writers are not serialized. Nextflow stages a store into each task's work
+    directory as a symlink (some modules add a second hop), so a lock derived
+    from the unresolved path would sit beside each task's own symlink. The
+    path is therefore made absolute and every symlink in it is resolved before
+    the lock name is derived. A store that does not exist yet resolves through
+    its existing ancestors, so it gets the lock it keeps once written.
+
+    Args:
+        zarr_path: SpatialData Zarr path, possibly relative or through symlinks.
+
+    Returns:
+        ``<real store path>.merxen-write.lock``.
+    """
+    store_path = Path(zarr_path).resolve()
+    return store_path.with_name(f"{store_path.name}.merxen-write.lock")
 
 
 @contextmanager
 def spatialdata_write_lock(zarr_path: Path | str) -> Iterator[Path]:
     """Serialize all additive MerXen writes to one SpatialData store.
 
-    The lock deliberately lives beside the Zarr so it is visible to every
-    process and cluster node that can mutate the shared store. Callers must
+    The lock deliberately lives beside the real Zarr (symlinks resolved) so it
+    is visible to every process and cluster node that can mutate the shared
+    store, whichever staged or symlinked path each one was given. Callers must
     acquire it before reading SpatialData and retain it until persistence is
     complete, preventing a stale read/modify/write cycle from dropping columns
     written by another terminal analysis.

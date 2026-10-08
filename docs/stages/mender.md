@@ -81,8 +81,9 @@ context AnnData.
 
 `MENDER_FINALIZE` joins domains by immutable cell ID and publishes the
 annotated source H5AD, context H5AD, manifests, tables, and plots.
-`MENDER_IMPORT` then takes the shared `<zarr>.merxen-write.lock`, rereads the
-latest store, and updates only `mender_domain` and `uns["merxen_mender"]` in
+`MENDER_IMPORT` then takes the shared `<zarr>.merxen-write.lock` (beside the
+real store, with the staged symlink resolved, so every writer reaching the
+store takes the same lock), rereads the latest store, and updates only `mender_domain` and `uns["merxen_mender"]` in
 the derived clustered table. The import is separate so finalized standalone
 artifacts remain published if the SpatialData write fails.
 

@@ -27,6 +27,10 @@ from merxen.analysis.mender import (
     spatialdata_write_lock,
 )
 from merxen.config import MenderConfig
+from merxen.io.spatialdata_io import (
+    spatialdata_write_lock as shared_spatialdata_write_lock,
+)
+from merxen.io.spatialdata_io import spatialdata_write_lock_path
 from merxen.mender_compute import (
     build_minimal_anndata,
     run_mender_compute,
@@ -495,4 +499,9 @@ def test_shared_spatialdata_lock_serializes_contending_writers(
     assert second_acquired.wait(timeout=2)
     first.join(timeout=2)
     second.join(timeout=2)
-    assert Path(f"{zarr_path}.merxen-write.lock").exists()
+    assert spatialdata_write_lock_path(zarr_path).exists()
+
+
+def test_mender_import_takes_the_shared_store_writer_lock() -> None:
+    # A private copy of the lock would drift from the shared lock path rules.
+    assert spatialdata_write_lock is shared_spatialdata_write_lock
