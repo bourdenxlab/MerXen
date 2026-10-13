@@ -1384,6 +1384,9 @@ RESOLVE_REGISTRATION_INPUT = (
 # Hook H5's registration block in main.nf, from its comment to the ALIGN files.
 REGISTRATION_BLOCK_START = "        // The registration checks RESOLVE reads"
 REGISTRATION_BLOCK_END = "        map_first_alignment_ch = alignment_results_ch"
+# The run record's source of a branch whose row runs QC in the launch but not
+# for that segmentation (AnnotationRunRecord.REGISTRATION_SOURCE_TEXT).
+ROW_RUNS_QC_TEXT = "row runs QC, not for this segmentation; published checks not used"
 
 REGISTRATION_MAIN = r'''
 process STAGE_AS_RESOLVE {
@@ -1588,11 +1591,13 @@ def _settings(
 
 
 def test_the_registration_branches_complement_the_qc_stage() -> None:
-    """Hook H5 falls back exactly for the branches qc_inputs_ch leaves out.
+    """Hook H5 covers exactly the branches qc_inputs_ch leaves out.
 
     A branch that took a published check although its QC runs in the launch
     could resolve on an older check (or before its own arrives), so the two
-    predicates must stay each other's negation.
+    predicates must stay each other's negation. Of those branches, only a row
+    whose QC stage does not run looks up published checks: a segmentation
+    the QC of a running row skips may have been re-segmented in the launch.
     """
     main_text = MAIN_NF.read_text()
     qc_filter = _main_nf_block(
@@ -1612,6 +1617,14 @@ def test_the_registration_branches_complement_the_qc_stage() -> None:
     assert "AnnotationReferences.registrationQcFiles(qcOutDirs)" in block
     assert "AnnotationReferences.publishedRegistrationQcFiles(" in block
     assert "AnnotationRunRecord.registrationChecks(" in block
+    row_runs_qc = block.index("                    if (settings.run_qc) {")
+    published = block.index("AnnotationReferences.publishedRegistrationQcFiles(")
+    assert (
+        row_runs_qc
+        < block.index("AnnotationRunRecord.REGISTRATION_ROW_RUNS_QC")
+        < block.index("                    } else {", row_runs_qc)
+        < published
+    )
     branch = main_text.index("    if (AnnotationSettings.isMapFirstRun(params)) {")
     legacy = main_text.index("\n    } else {\n", branch)
     assert branch < main_text.index(block) < legacy
@@ -1637,10 +1650,10 @@ def test_map_first_registration_gives_one_tuple_per_branch(tmp_path: Path) -> No
     """Hook H5's registration checks (M13 C15): main.nf's own block.
 
     Per pair x segmentation: the QC tasks' ``*_registration_qc.json`` (one
-    per active platform, released once all have finished), ``[]`` for a
-    branch the QC stage skips (``run_qc`` off, or a segmentation that is not
-    an analysis segmentation) when nothing is published, and for a QC output
-    without a registration check. The QC summary CSV is never staged.
+    per active platform, released once all have finished), ``[]`` for a row
+    whose QC stage does not run when nothing is published, for a segmentation
+    that is not an analysis segmentation of a row whose QC runs, and for a QC
+    output without a registration check. The QC summary CSV is never staged.
     """
     outputs = {
         name: _write_qc_out(tmp_path / name / "qc_out", name, files)
@@ -1706,7 +1719,7 @@ def test_map_first_registration_gives_one_tuple_per_branch(tmp_path: Path) -> No
     ]
     assert info["registration_published"] == []
     assert info["registration_missing"] == [
-        "P1:reseg (0 of 2; published QC outputs)",
+        f"P1:reseg (0 of 2; {ROW_RUNS_QC_TEXT})",
         "P2:proseg_hybrid (0 of 2; published QC outputs)",
         "P3:proseg_hybrid (0 of 1; QC stage of this launch)",
     ]
@@ -1716,16 +1729,20 @@ def test_map_first_registration_gives_one_tuple_per_branch(tmp_path: Path) -> No
 def test_map_first_registration_falls_back_to_the_published_checks(
     tmp_path: Path,
 ) -> None:
-    """A branch whose QC stage does not run takes the published checks.
+    """A row whose QC stage does not run takes the published checks.
 
     The usual re-annotation of published results starts after qc
-    (``start_stage clustering_squidpy``): the QC stage does not run, and
-    RESOLVE stages each active platform's check from the QC stage's publish
-    location under ``params.outdir`` (VZG2 mouse, 2026-10-13: all four
-    segmentations refused for want of G1). A branch whose QC runs in the
-    launch takes its own QC tasks' checks, never the published ones; a
-    branch with neither gets none, as before. The run record lists the
-    published and the missing checks.
+    (``start_stage clustering_squidpy``): the row's QC stage does not run,
+    and RESOLVE stages each active platform's check from the QC stage's
+    publish location under ``params.outdir`` (VZG2 mouse, 2026-10-13: all
+    four segmentations refused for want of G1), for every segmentation of
+    the row. A branch whose QC runs in the launch takes its own QC tasks'
+    checks, never the published ones. A segmentation that is not an
+    analysis segmentation of a row whose QC runs (a MENDER-only one) gets
+    none even when a check is published: the launch may have re-segmented
+    it, and the published check would be an older launch's. A branch with
+    neither gets none, as before. The run record lists the published and the
+    missing checks, with the reason.
     """
     outdir = tmp_path / "results"
     work = tmp_path / "earlier_work"
@@ -1746,8 +1763,9 @@ def test_map_first_registration_falls_back_to_the_published_checks(
         return _publish_qc_out(work, outdir, pair_id, platform, segmentation, files)
 
     # P1: QC runs for proseg_hybrid in this launch (and an earlier launch
-    # published it too); reseg is not an analysis segmentation, so its QC
-    # does not run and only its published checks exist.
+    # published it too); reseg is not an analysis segmentation (MENDER-only),
+    # so its QC does not run although the row's does, and its published
+    # checks, an older launch's, are not staged.
     launch = {
         platform: _write_qc_out(
             tmp_path / "launch" / f"p1_{platform.lower()}" / "qc_out",
@@ -1766,9 +1784,12 @@ def test_map_first_registration_falls_back_to_the_published_checks(
             ("P1", "XENIUM", "proseg_hybrid", True),
             ("P1", "MERSCOPE", "reseg", True),
             ("P1", "XENIUM", "reseg", True),
-            # P2: a paired row started at clustering_squidpy.
+            # P2: a paired row started at clustering_squidpy; reseg is not
+            # one of its analysis segmentations.
             ("P2", "MERSCOPE", "proseg_hybrid", True),
             ("P2", "XENIUM", "proseg_hybrid", True),
+            ("P2", "MERSCOPE", "reseg", True),
+            ("P2", "XENIUM", "reseg", True),
             # P5: only its MERSCOPE QC output holds a check.
             ("P5", "MERSCOPE", "proseg_hybrid", True),
             ("P5", "XENIUM", "proseg_hybrid", False),
@@ -1789,7 +1810,10 @@ def test_map_first_registration_falls_back_to_the_published_checks(
         {
             "pair_id": "P2",
             "settings": _settings(
-                both, analysis=analysis, inputs=analysis, **restarted
+                both,
+                analysis=analysis,
+                inputs=["proseg_hybrid", "reseg"],
+                **restarted,
             ),
         },
         # P3: a mouse section started at clustering_squidpy, nothing published.
@@ -1834,15 +1858,16 @@ def test_map_first_registration_falls_back_to_the_published_checks(
             "proseg_hybrid",
             [str(launch[platform] / names[("P1", platform)]) for platform in both],
         ],
-        [
-            "P1",
-            "reseg",
-            [published_check("P1", platform, "reseg") for platform in both],
-        ],
+        ["P1", "reseg", []],
         [
             "P2",
             "proseg_hybrid",
             [published_check("P2", platform, "proseg_hybrid") for platform in both],
+        ],
+        [
+            "P2",
+            "reseg",
+            [published_check("P2", platform, "reseg") for platform in both],
         ],
         ["P3", "proseg_hybrid", []],
         ["P4", "proseg_hybrid", []],
@@ -1856,12 +1881,13 @@ def test_map_first_registration_falls_back_to_the_published_checks(
             "proseg_hybrid",
             ["with-dir", *(f"{names[('P1', p)]} qc_stage" for p in both)],
         ],
-        ["P1", "reseg", ["with-dir", *(f"{names[('P1', p)]} published" for p in both)]],
+        ["P1", "reseg", ["without-dir"]],
         [
             "P2",
             "proseg_hybrid",
             ["with-dir", *(f"{names[('P2', p)]} published" for p in both)],
         ],
+        ["P2", "reseg", ["with-dir", *(f"{names[('P2', p)]} published" for p in both)]],
         ["P3", "proseg_hybrid", ["without-dir"]],
         ["P4", "proseg_hybrid", ["without-dir"]],
         [
@@ -1871,17 +1897,23 @@ def test_map_first_registration_falls_back_to_the_published_checks(
         ],
     ]
     assert info["registration_published"] == [
-        f"P1:reseg ({names[('P1', 'MERSCOPE')]}; {names[('P1', 'XENIUM')]})",
         f"P2:proseg_hybrid ({names[('P2', 'MERSCOPE')]}; {names[('P2', 'XENIUM')]})",
+        f"P2:reseg ({names[('P2', 'MERSCOPE')]}; {names[('P2', 'XENIUM')]})",
         f"P5:proseg_hybrid ({names[('P5', 'MERSCOPE')]})",
     ]
     assert info["registration_missing"] == [
+        f"P1:reseg (0 of 2; {ROW_RUNS_QC_TEXT})",
         "P3:proseg_hybrid (0 of 1; published QC outputs)",
         "P4:proseg_hybrid (0 of 1; published QC outputs)",
         "P5:proseg_hybrid (1 of 2; published QC outputs)",
     ]
     assert "P2:proseg_hybrid: the QC stage does not run in this launch" in log
     assert str(dangling / "qc_out") in log
+    assert (
+        "P1:reseg: the row's QC stage runs in this launch but not for this segmentation"
+    ) in log
+    # P1:reseg's published checks are never looked up.
+    assert str(published[("P1", "MERSCOPE", "reseg")]) not in log
 
 
 # --------------------------------------------------------------------------
