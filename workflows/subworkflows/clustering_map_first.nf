@@ -15,8 +15,8 @@
  * CLUSTERING_ANNOTATE (M4) runs CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE on each
  * pair x segmentation once its own MAP has finished (plan §3.4), with the
  * branch's registration checks from the QC stage (M13 C15: this launch's
- * QC tasks, or the published QC outputs when the QC stage does not run;
- * main.nf hook H5). RESOLVE is
+ * QC tasks, or the published QC outputs when the row's QC stage does not
+ * run; main.nf hook H5). RESOLVE is
  * a separate task from MAP: a threshold, floor, trust, flag or degraded-mode
  * change re-runs RESOLVE alone (minutes) under -resume, and MAP, whose
  * inputs and published-output reuse key hold none of them, stays cached.
@@ -103,9 +103,9 @@ workflow CLUSTERING_ANNOTATE {
     prepared_ch
     // tuple(pair_id, segmentation, registration_files): the QC stage's
     // *_registration_qc.json of the pair x segmentation (one per platform),
-    // from this launch's QC tasks or, when the QC stage does not run for the
-    // branch, from the published QC outputs ([] when neither has one),
-    // main.nf hook H5.
+    // from this launch's QC tasks or, when the row's QC stage does not run,
+    // from the published QC outputs ([] when neither has one, and for a
+    // segmentation the QC of a row that runs it skips), main.nf hook H5.
     registration_ch
 
     main:

@@ -3641,12 +3641,17 @@ workflow {
         // stage runs in this launch (qc_inputs_ch's filter: run_qc and an
         // analysis segmentation) takes its own QC tasks' checks, released
         // once all of them have finished (groupKey), and never a published
-        // one, even when its QC wrote none. Every other branch (start_stage
-        // after qc, only_stage, run_qc off, or not an analysis segmentation)
-        // takes the checks an earlier launch's QC published under
-        // params.outdir for the outputs this launch starts from, or none
-        // (mouse RESOLVE then refuses, human G1 is not_evaluable). The source
-        // of each branch's checks goes to the end-of-run summary (hook H6).
+        // one, even when its QC wrote none. Every branch of a row whose QC
+        // stage does not run at all (settings.run_qc false: a start_stage
+        // after qc or an only_stage, the run's or the row's) takes the checks
+        // an earlier launch's QC published under params.outdir for the
+        // outputs this launch starts from, or none. A segmentation that is
+        // not an analysis segmentation of a row whose QC runs (a MENDER-only
+        // one) takes none and never a published one: the launch's earlier
+        // stages may have re-segmented it, so a published check could be an
+        // older launch's. Without a check, mouse RESOLVE refuses and human G1
+        // is not_evaluable. The source of each branch's checks, or why none
+        // was looked up, goes to the end-of-run summary (hook H6).
         map_first_registration_from_qc_ch = qc_results_ch
             .map { _key, pairId, _platform, segmentation, _latestZarr, qcOutDir, _tableKey, _shapeKey ->
                 tuple(pairId, segmentation, qcOutDir)
@@ -3682,40 +3687,59 @@ workflow {
                     !(settings.run_qc && settings.analysis_segmentations.contains(segmentation))
                 }
                 .collect { segmentation ->
-                    def publishedChecks = AnnotationReferences.publishedRegistrationQcFiles(
-                        params.outdir,
-                        pairId,
-                        settings.active_platforms,
-                        segmentation,
-                    )
-                    if (AnnotationSettings.isMapFirst(settings)) {
-                        def branchText = "${pairId}:${segmentation}: the QC stage does not run in this launch"
-                        if (publishedChecks) {
-                            log.info(
-                                "${branchText}; RESOLVE stages the published registration checks " +
-                                publishedChecks.join(", ")
-                            )
-                        } else {
-                            def searched = AnnotationReferences.publishedQcOutDirs(
-                                params.outdir,
-                                pairId,
-                                settings.active_platforms,
-                                segmentation,
-                            )
+                    def nPlatforms = settings.active_platforms.size()
+                    if (settings.run_qc) {
+                        if (AnnotationSettings.isMapFirst(settings)) {
                             log.warn(
-                                "${branchText} and no registration check is published in " +
-                                "${searched.join(', ')} (mouse RESOLVE refuses, human " +
-                                "registration G1 is not_evaluable)"
+                                "${pairId}:${segmentation}: the row's QC stage runs in this launch " +
+                                "but not for this segmentation (not an analysis_segmentation), so " +
+                                "RESOLVE stages no registration check and published ones are not " +
+                                "used (mouse RESOLVE refuses, human registration G1 is not_evaluable)"
                             )
                         }
+                        tuple(
+                            pairId,
+                            segmentation,
+                            [],
+                            nPlatforms,
+                            AnnotationRunRecord.REGISTRATION_ROW_RUNS_QC,
+                        )
+                    } else {
+                        def publishedChecks = AnnotationReferences.publishedRegistrationQcFiles(
+                            params.outdir,
+                            pairId,
+                            settings.active_platforms,
+                            segmentation,
+                        )
+                        if (AnnotationSettings.isMapFirst(settings)) {
+                            def branchText = "${pairId}:${segmentation}: the QC stage does not run in this launch"
+                            if (publishedChecks) {
+                                log.info(
+                                    "${branchText}; RESOLVE stages the published registration checks " +
+                                    publishedChecks.join(", ")
+                                )
+                            } else {
+                                def searched = AnnotationReferences.publishedQcOutDirs(
+                                    params.outdir,
+                                    pairId,
+                                    settings.active_platforms,
+                                    segmentation,
+                                )
+                                log.warn(
+                                    "${branchText} and no registration check is published in " +
+                                    "${searched.join(', ')} (mouse RESOLVE refuses, human " +
+                                    "registration G1 is not_evaluable)"
+                                )
+                            }
+                        }
+                        tuple(
+                            pairId,
+                            segmentation,
+                            publishedChecks,
+                            nPlatforms,
+                            AnnotationRunRecord.REGISTRATION_PUBLISHED,
+                        )
                     }
-                    tuple(
-                        pairId,
-                        segmentation,
-                        publishedChecks,
-                        settings.active_platforms.size(),
-                        AnnotationRunRecord.REGISTRATION_PUBLISHED,
-                    )
                 }
         }
         map_first_registration_sources_ch = map_first_registration_from_qc_ch

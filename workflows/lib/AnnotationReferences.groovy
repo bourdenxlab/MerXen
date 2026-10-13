@@ -798,13 +798,14 @@ class AnnotationReferences {
     /**
      * Return the published registration checks of a pair x segmentation.
      *
-     * Hook H5 stages them into RESOLVE only for a branch whose QC stage does
-     * not run in the launch (start_stage after qc, only_stage, run_qc off,
-     * or not an analysis segmentation): the checks an earlier launch's QC
-     * published for the outputs this launch starts from. A branch whose QC
-     * runs takes its own QC tasks' checks (registrationQcFiles) and never
-     * these. A qc_out whose work directory is gone (a dangling symlink)
-     * gives none.
+     * Hook H5 stages them into RESOLVE only for the branches of a row whose
+     * QC stage does not run in the launch (run_qc false: a start_stage after
+     * qc or an only_stage): the checks an earlier launch's QC published for
+     * the outputs this launch starts from. A branch whose QC runs takes its
+     * own QC tasks' checks (registrationQcFiles) and never these; nor does a
+     * segmentation that is not an analysis segmentation of a row whose QC
+     * runs, which the launch may have re-segmented (it takes none). A qc_out
+     * whose work directory is gone (a dangling symlink) gives none.
      *
      * @param outdir params.outdir.
      * @param pairId Pair id.

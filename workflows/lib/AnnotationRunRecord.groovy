@@ -24,8 +24,9 @@ import java.util.concurrent.ConcurrentSkipListSet
  * state, the branches whose annotation report (M7) was not built or
  * recorded failed items, and where each branch's registration checks came
  * from (hook H5: this launch's QC stage, or the QC outputs an earlier launch
- * published when the QC stage does not run) with the branches that lack a
- * check for some active platform. A legacy run subscribes nothing, so its
+ * published when the row's QC stage does not run, or none for a segmentation
+ * the QC of its row skips in a launch that runs it) with the branches that
+ * lack a check for some active platform. A legacy run subscribes nothing, so its
  * record stays empty and it prints no summary.
  *
  * One Nextflow run is one JVM, so the record is static; the subscriptions
@@ -69,12 +70,17 @@ class AnnotationRunRecord {
     // merxen.annotation.report_model item status of an item that raised.
     static final String REPORT_ITEM_FAILED = "failed"
     // Where a branch's registration checks came from (hook H5): the QC tasks
-    // of this launch, or the QC outputs an earlier launch published.
+    // of this launch, the QC outputs an earlier launch published (the row's
+    // QC stage does not run), or nowhere: a segmentation that is not an
+    // analysis segmentation of a row whose QC runs in the launch, which may
+    // have re-segmented it, so a published check could be an older launch's.
     static final String REGISTRATION_QC_STAGE = "qc_stage"
     static final String REGISTRATION_PUBLISHED = "published"
+    static final String REGISTRATION_ROW_RUNS_QC = "row_runs_qc"
     static final Map<String, String> REGISTRATION_SOURCE_TEXT = [
         (REGISTRATION_QC_STAGE): "QC stage of this launch",
         (REGISTRATION_PUBLISHED): "published QC outputs",
+        (REGISTRATION_ROW_RUNS_QC): "row runs QC, not for this segmentation; published checks not used",
     ].asImmutable()
 
     /** Forget everything (tests; one run per JVM otherwise). */
@@ -247,7 +253,8 @@ class AnnotationRunRecord {
      *
      * @param pairId Pair id.
      * @param segmentation Segmentation.
-     * @param source REGISTRATION_QC_STAGE or REGISTRATION_PUBLISHED.
+     * @param source REGISTRATION_QC_STAGE, REGISTRATION_PUBLISHED or
+     *     REGISTRATION_ROW_RUNS_QC.
      * @param files The *_registration_qc.json files RESOLVE stages (may be
      *     empty).
      * @param nPlatforms The row's active platforms (one check each).
@@ -287,8 +294,8 @@ class AnnotationRunRecord {
      *     registration_published (branches whose registration checks came
      *     from published QC outputs, with the files) and
      *     registration_missing (branches with fewer checks than active
-     *     platforms: found of expected, and the source), both of the
-     *     branches that entered clustering.
+     *     platforms: found of expected, and the source, or why no published
+     *     check was looked up), both of the branches that entered clustering.
      */
     static Map runInfo() {
         return [
