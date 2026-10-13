@@ -3636,12 +3636,18 @@ workflow {
                 legacy: true
             }
         // The registration checks RESOLVE reads (G1: the mouse gate's, the
-        // human real-data QC's NR9; M13 C15): per pair x segmentation, the QC
-        // stage's *_registration_qc.json of each active platform, released
-        // once all of the branch's QC tasks have finished (groupKey), and []
-        // for a branch the QC stage skips (qc_inputs_ch's filter: run_qc and
-        // an analysis segmentation).
-        map_first_registration_ch = qc_results_ch
+        // human real-data QC's NR9; M13 C15): per pair x segmentation, the
+        // *_registration_qc.json of each active platform. A branch whose QC
+        // stage runs in this launch (qc_inputs_ch's filter: run_qc and an
+        // analysis segmentation) takes its own QC tasks' checks, released
+        // once all of them have finished (groupKey), and never a published
+        // one, even when its QC wrote none. Every other branch (start_stage
+        // after qc, only_stage, run_qc off, or not an analysis segmentation)
+        // takes the checks an earlier launch's QC published under
+        // params.outdir for the outputs this launch starts from, or none
+        // (mouse RESOLVE then refuses, human G1 is not_evaluable). The source
+        // of each branch's checks goes to the end-of-run summary (hook H6).
+        map_first_registration_from_qc_ch = qc_results_ch
             .map { _key, pairId, _platform, segmentation, _latestZarr, qcOutDir, _tableKey, _shapeKey ->
                 tuple(pairId, segmentation, qcOutDir)
             }
@@ -3657,25 +3663,70 @@ workflow {
                     pairId,
                     segmentation,
                     qcOutDir,
+                    nPlatforms,
                 )
             }
             .groupTuple(remainder: true)
-            .map { _branchKey, pairIds, segmentations, qcOutDirs ->
+            .map { _branchKey, pairIds, segmentations, qcOutDirs, nPlatforms ->
                 tuple(
                     pairIds[0],
                     segmentations[0],
                     AnnotationReferences.registrationQcFiles(qcOutDirs),
+                    nPlatforms[0],
+                    AnnotationRunRecord.REGISTRATION_QC_STAGE,
                 )
             }
-            .mix(
-                sample_rows_ch.flatMap { pairId, _row, settings ->
-                    settings.analysis_input_segmentations
-                        .findAll { segmentation ->
-                            !(settings.run_qc && settings.analysis_segmentations.contains(segmentation))
-                        }
-                        .collect { segmentation -> tuple(pairId, segmentation, []) }
+        map_first_registration_published_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
+            settings.analysis_input_segmentations
+                .findAll { segmentation ->
+                    !(settings.run_qc && settings.analysis_segmentations.contains(segmentation))
                 }
-            )
+                .collect { segmentation ->
+                    def publishedChecks = AnnotationReferences.publishedRegistrationQcFiles(
+                        params.outdir,
+                        pairId,
+                        settings.active_platforms,
+                        segmentation,
+                    )
+                    if (AnnotationSettings.isMapFirst(settings)) {
+                        def branchText = "${pairId}:${segmentation}: the QC stage does not run in this launch"
+                        if (publishedChecks) {
+                            log.info(
+                                "${branchText}; RESOLVE stages the published registration checks " +
+                                publishedChecks.join(", ")
+                            )
+                        } else {
+                            def searched = AnnotationReferences.publishedQcOutDirs(
+                                params.outdir,
+                                pairId,
+                                settings.active_platforms,
+                                segmentation,
+                            )
+                            log.warn(
+                                "${branchText} and no registration check is published in " +
+                                "${searched.join(', ')} (mouse RESOLVE refuses, human " +
+                                "registration G1 is not_evaluable)"
+                            )
+                        }
+                    }
+                    tuple(
+                        pairId,
+                        segmentation,
+                        publishedChecks,
+                        settings.active_platforms.size(),
+                        AnnotationRunRecord.REGISTRATION_PUBLISHED,
+                    )
+                }
+        }
+        map_first_registration_sources_ch = map_first_registration_from_qc_ch
+            .mix(map_first_registration_published_ch)
+        map_first_registration_sources_ch.subscribe { pairId, segmentation, registrationFiles, nPlatforms, source ->
+            AnnotationRunRecord.registrationChecks(pairId, segmentation, source, registrationFiles, nPlatforms)
+        }
+        map_first_registration_ch = map_first_registration_sources_ch
+            .map { pairId, segmentation, registrationFiles, _nPlatforms, _source ->
+                tuple(pairId, segmentation, registrationFiles)
+            }
         map_first_alignment_ch = alignment_results_ch
             .map { pairId, _merscopeLatest, _xeniumLatest, _transformJson, _coordsDir, alignOut ->
                 tuple(pairId, AnnotationReferences.alignmentFiles(alignOut))
