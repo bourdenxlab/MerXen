@@ -289,6 +289,40 @@ def test_guard_skips_human_sources_for_mouse_only(
     assert config_default.returncode == 1
 
 
+def test_guard_allows_the_human_gene_table_value_only_under_its_own_params(
+    stub_nextflow: Path, project_dir: Path
+) -> None:
+    """The default exception is the gene-table read, not every use of the file.
+
+    The legacy MapMyCells source ``mecr_whb_nonneurons_h5ad_path`` holds the
+    same SSD1 file but reads the whole matrix, so a human launch that leaves it
+    on SSD1 is refused even though its value equals the allowed gene table.
+    """
+    with (stub_nextflow.parent / "flat.config").open("a") as handle:
+        handle.write(f"params.mecr_whb_nonneurons_h5ad_path = '{HUMAN_GENE_TABLE}'\n")
+
+    result = _run_guard(
+        stub_nextflow,
+        project_dir,
+        [
+            "--species",
+            "human",
+            "--annotation_reference_store",
+            "/srv/storage/store",
+            "--annotation_whb_h5ad_dir",
+            "/srv/storage/whb",
+        ],
+    )
+
+    assert result.returncode == 1, result.stderr
+    refused = set(re.findall(r"^launch_guard:   params\.(\w+) = ", result.stderr, re.M))
+    assert refused == {"mecr_whb_nonneurons_h5ad_path"}
+    assert "allowed (allow-list): params.annotation_human_gene_table" in result.stderr
+    assert (
+        "allowed (allow-list): params.annotation_gene_id_fallback_csv" in result.stderr
+    )
+
+
 def test_guard_allow_keys_name_params_a_launch_does_not_read(
     stub_nextflow: Path, project_dir: Path
 ) -> None:

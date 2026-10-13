@@ -32,8 +32,11 @@
 #     the params named in LAUNCH_GUARD_ALLOW_KEYS (comma-separated). The
 #     default allow-list is the human gene table alone (the WHB Nonneurons
 #     h5ad: only its var index is read, to test gene symbols against the human
-#     gene set; its sha256 is recorded in the SSD1 addendum). Drop it from
-#     the list when the human table moves (plan U6).
+#     gene set; its sha256 is recorded in the SSD1 addendum), and only under
+#     the params that read it as a gene table (annotation_human_gene_table and
+#     annotation_gene_id_fallback_csv): the same file under another param, such
+#     as the legacy mecr_whb_nonneurons_h5ad_path, is a full matrix read and is
+#     refused. Drop it from the list when the human table moves (plan U6).
 #   * for --species mouse, the params of the human WHB and SEA-AD references
 #     (names with a "whb" or "seaad" part): a mouse launch never reads them.
 #
@@ -157,7 +160,8 @@ done
 
 species="${override[species]:-${config_species}}"
 
-IFS=',' read -r -a allowed_values <<<"${HUMAN_GENE_TABLE},${LAUNCH_GUARD_ALLOW:-}"
+GENE_TABLE_KEYS=(annotation_human_gene_table annotation_gene_id_fallback_csv)
+IFS=',' read -r -a allowed_values <<<"${LAUNCH_GUARD_ALLOW:-}"
 IFS=',' read -r -a allowed_keys <<<"${LAUNCH_GUARD_ALLOW_KEYS:-}"
 
 is_listed() { # is_listed NEEDLE LIST...
@@ -177,7 +181,9 @@ for index in "${!resolved_keys[@]}"; do
     value="${resolved_values[index]}"
     [[ "${value}" == *"${PREFIX}"* ]] || continue
     name="${key#params.}"
-    if is_listed "${value}" ${allowed_values[@]+"${allowed_values[@]}"} ||
+    if { [[ "${value}" == "${HUMAN_GENE_TABLE}" && "${key}" == params.* ]] &&
+        is_listed "${name}" "${GENE_TABLE_KEYS[@]}"; } ||
+        is_listed "${value}" ${allowed_values[@]+"${allowed_values[@]}"} ||
         { [[ "${key}" == params.* ]] && is_listed "${name}" ${allowed_keys[@]+"${allowed_keys[@]}"}; }; then
         allowed+=("${key} = ${value}")
     elif [[ "${species}" == mouse && "${key}" == params.* && "${name}" =~ (^|_)(whb|seaad)(_|$) ]]; then
