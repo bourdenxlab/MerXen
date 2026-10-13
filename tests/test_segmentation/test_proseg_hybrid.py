@@ -17,6 +17,13 @@ import spatialdata as sd
 from scipy import sparse
 from shapely.geometry import Point, box
 from spatialdata.models import PointsModel, ShapesModel, TableModel
+from spatialdata.transformations import (
+    Affine,
+    BaseTransformation,
+    Identity,
+    Scale,
+    get_transformation,
+)
 
 from merxen.alignment.manifest import ALIGNMENT_MANIFEST_ATTR
 from merxen.config import ProsegHybridConfig
@@ -218,7 +225,12 @@ def test_overlap_assignment_uses_proseg_only_inside_overlap() -> None:
     ]
 
 
-def _write_hybrid_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
+def _write_hybrid_inputs(
+    tmp_path: Path,
+    *,
+    points_transformations: dict[str, BaseTransformation] | None = None,
+    shapes_transformations: dict[str, BaseTransformation] | None = None,
+) -> tuple[Path, Path, Path]:
     """Write a two-cell Proseg zarr, its Cellpose mask and transforms."""
     coordinates = [
         (x, y, assignment)
@@ -244,6 +256,7 @@ def _write_hybrid_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
         dd.from_pandas(points_df, npartitions=2),
         coordinates={"x": "x", "y": "y", "z": "z"},
         feature_key="gene",
+        transformations=points_transformations,
     )
     source_shape_gdf = gpd.GeoDataFrame(
         {
@@ -253,7 +266,9 @@ def _write_hybrid_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
         geometry="geometry",
         index=pd.Index([0, 1], name="cell"),
     )
-    source_shapes = ShapesModel.parse(source_shape_gdf)
+    source_shapes = ShapesModel.parse(
+        source_shape_gdf, transformations=shapes_transformations
+    )
     obs = pd.DataFrame(
         {
             "cell": [0, 1],
@@ -336,6 +351,69 @@ def test_hybrid_refinement_roundtrips_spatialdata(
         result.attrs[ALIGNMENT_MANIFEST_ATTR]["invalidation_reason"]
         == "ProSeg-hybrid points, shapes, and table replaced"
     )
+
+
+def test_hybrid_shapes_take_the_transcripts_transformations(
+    tmp_path: Path,
+) -> None:
+    """Hybrid shapes are built from transcript x/y, so they share its frame.
+
+    The store's first shapes element here maps to 'global' in mosaic pixels, as
+    the vendor MERSCOPE boundaries do; the hybrid shapes must not copy it.
+    """
+    rigid = Affine(
+        np.array([[-0.99, -0.1, 11201.0], [-0.1, 0.995, 495.0], [0.0, 0.0, 1.0]]),
+        input_axes=("x", "y"),
+        output_axes=("x", "y"),
+    )
+    zarr_path, mask_path, transforms_path = _write_hybrid_inputs(
+        tmp_path,
+        points_transformations={"global": Identity(), "merxen_xenium": rigid},
+        shapes_transformations={"global": Scale([9.26, 9.26], axes=("x", "y"))},
+    )
+    run_proseg_hybrid_refinement(
+        zarr_path, mask_path, transforms_path, ProsegHybridConfig(min_transcripts=10)
+    )
+
+    result = sd.read_zarr(zarr_path)
+    hybrid = get_transformation(result.shapes[PROSEG_HYBRID_SHAPE_NAME], get_all=True)
+    assert set(hybrid) == {"global", "merxen_xenium"}
+    assert isinstance(hybrid["global"], Identity)
+    assert hybrid["merxen_xenium"].input_axes == ("x", "y")
+    np.testing.assert_allclose(
+        hybrid["merxen_xenium"].to_affine_matrix(
+            input_axes=("x", "y"), output_axes=("x", "y")
+        ),
+        rigid.to_affine_matrix(input_axes=("x", "y"), output_axes=("x", "y")),
+    )
+
+
+def test_hybrid_shapes_refuse_a_transcript_transformation_that_mixes_in_z(
+    tmp_path: Path,
+) -> None:
+    """A z-dependent x/y map cannot be carried by 2D shapes exactly."""
+    tilted = Affine(
+        np.array(
+            [
+                [1.0, 0.0, 0.5, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ]
+        ),
+        input_axes=("x", "y", "z"),
+        output_axes=("x", "y", "z"),
+    )
+    zarr_path, mask_path, transforms_path = _write_hybrid_inputs(
+        tmp_path, points_transformations={"global": tilted}
+    )
+    with pytest.raises(ValueError, match="depend on z"):
+        run_proseg_hybrid_refinement(
+            zarr_path,
+            mask_path,
+            transforms_path,
+            ProsegHybridConfig(min_transcripts=10),
+        )
 
 
 def test_hybrid_refinement_writes_temporary_parts_in_the_working_directory(
