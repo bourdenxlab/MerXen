@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import anndata as ad
 import numpy as np
@@ -12,6 +13,7 @@ import pytest
 import xarray as xr
 from spatialdata.models import TableModel
 
+import merxen.mask_image_quantification as quantification_module
 from merxen.config import MaskImageQuantificationConfig
 from merxen.mask_image_quantification import (
     HYBRID_IMAGE_QUANTIFICATION_OBS_PREFIX,
@@ -465,6 +467,41 @@ def test_existing_quantification_is_reused_when_images_are_unchanged(
 
     run_mask_image_quantification(cfg)
     run_mask_image_quantification(cfg)
+
+    assert writes == [MASK_IMAGE_QUANTIFICATION_TABLE_KEY]
+
+
+def test_quantification_serializes_with_another_store_writer(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    store_lock_contention: Any,
+) -> None:
+    """Quantification waits for a writer holding the store lock through another
+    staged symlink, and keeps the lock from its read until the table is written."""
+    latest = tmp_path / "latest.zarr"
+    latest.mkdir()
+    mask_path = tmp_path / "mask.npy"
+    np.save(mask_path, np.array([[1, 1], [2, 0]], dtype=np.uint32))
+    sdata = SimpleNamespace(
+        images={"img": _image(np.ones((2, 2, 1)), ["DAPI"])},
+        tables={},
+    )
+    writes = _patch_in_memory_zarr(monkeypatch, sdata)
+
+    store_lock_contention.run(
+        lambda staged: run_mask_image_quantification(
+            MaskImageQuantificationConfig(
+                dataset_name="P1_XENIUM",
+                platform="XENIUM",
+                latest_zarr_path=staged,
+                mask_path=mask_path,
+                output_dir=tmp_path / "quant_out",
+            )
+        ),
+        latest,
+        reads=[(quantification_module.sd, "read_zarr")],
+        persists=[(quantification_module, "write_or_replace_element")],
+    )
 
     assert writes == [MASK_IMAGE_QUANTIFICATION_TABLE_KEY]
 

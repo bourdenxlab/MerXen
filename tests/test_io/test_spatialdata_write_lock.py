@@ -173,3 +173,28 @@ def test_store_not_yet_written_gets_the_lock_it_will_keep(tmp_path: Path) -> Non
     )
     assert spatialdata_write_lock_path(dangling) == before
     assert before == future_store.resolve().parent / "latest.zarr.merxen-write.lock"
+
+
+def test_nested_acquisition_raises_instead_of_deadlocking(tmp_path: Path) -> None:
+    # The flock is taken on a file opened per call, and a second open of that
+    # file conflicts with the first even in one process: a nested acquisition by
+    # the holding thread would wait for itself forever.
+    store = tmp_path / "results" / "latest.zarr"
+    store.mkdir(parents=True)
+    staged = _stage_like_nextflow(store, tmp_path / "work" / "aa")
+
+    with spatialdata_write_lock(store) as lock_path:
+        with (
+            pytest.raises(RuntimeError, match="already holds"),
+            spatialdata_write_lock(staged),
+        ):
+            pass
+        # The refused nested call must not have released the outer lock.
+        with (
+            lock_path.open("a", encoding="utf-8") as probe,
+            pytest.raises(BlockingIOError),
+        ):
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    with spatialdata_write_lock(staged) as reacquired:
+        assert reacquired == lock_path

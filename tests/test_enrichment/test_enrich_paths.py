@@ -6,6 +6,7 @@ import json
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import anndata as ad
 import geopandas as gpd
@@ -15,6 +16,7 @@ import pytest
 import xarray as xr
 from shapely.geometry import box
 
+import merxen.enrichment.enrich as enrich_module
 from merxen.config import EnrichmentConfig
 from merxen.enrichment.enrich import (
     CELLPOSE_NUCLEI_SHAPE_NAME,
@@ -147,11 +149,16 @@ def test_is_already_enriched_requires_real_xenium_image() -> None:
     assert _is_already_enriched(sdata, "XENIUM")
 
 
-def test_enrich_single_latest_writes_elements_in_place(
+def _stub_merscope_enrichment(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-) -> None:
-    """Enrichment should update latest in place without temp full-zarr rewrites."""
+) -> SimpleNamespace:
+    """Stage a persistent store, its staged input link, and in-memory contents.
+
+    Reads of the persistent store return the in-memory ``dst`` and reads of the
+    original source return a MERSCOPE-like ``src``; the Cellpose steps are
+    stubbed. Returns the paths and ``dst``.
+    """
     target = tmp_path / "results" / "latest" / "latest_spatialdata.zarr"
     target.mkdir(parents=True)
     latest = tmp_path / "latest_input.zarr"
@@ -211,18 +218,37 @@ def test_enrich_single_latest_writes_elements_in_place(
         ),
     )
 
-    cfg = EnrichmentConfig(
-        dataset_name="P1_MERSCOPE",
-        platform="MERSCOPE",
-        latest_zarr_path=latest,
-        mask_path=mask,
-        nuclei_mask_path=mask,
-        original_data_path=original,
-        output_dir=tmp_path / "enrich_out",
-        persistent_output_path=target,
+    return SimpleNamespace(
+        target=target, latest=latest, original=original, mask=mask, dst=dst
     )
 
-    out = enrich_single_latest(cfg)
+
+def _stub_merscope_enrichment_config(
+    tmp_path: Path, stub: SimpleNamespace, *, persistent_output_path: Path
+) -> EnrichmentConfig:
+    return EnrichmentConfig(
+        dataset_name="P1_MERSCOPE",
+        platform="MERSCOPE",
+        latest_zarr_path=stub.latest,
+        mask_path=stub.mask,
+        nuclei_mask_path=stub.mask,
+        original_data_path=stub.original,
+        output_dir=tmp_path / "enrich_out",
+        persistent_output_path=persistent_output_path,
+    )
+
+
+def test_enrich_single_latest_writes_elements_in_place(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Enrichment should update latest in place without temp full-zarr rewrites."""
+    stub = _stub_merscope_enrichment(monkeypatch, tmp_path)
+    target, latest, dst = stub.target, stub.latest, stub.dst
+
+    out = enrich_single_latest(
+        _stub_merscope_enrichment_config(tmp_path, stub, persistent_output_path=target)
+    )
 
     assert out == target
     assert latest.is_symlink()
@@ -235,6 +261,32 @@ def test_enrich_single_latest_writes_elements_in_place(
     assert ORIGINAL_TABLE_NAME in dst.tables
     assert not any("__enrich_tmp" in path.name for path in target.parent.iterdir())
     assert not any("pre_enrich_backup" in path.name for path in target.parent.iterdir())
+
+
+def test_enrichment_serializes_with_another_store_writer(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    store_lock_contention: Any,
+) -> None:
+    """Enrichment waits for a writer holding the store lock through another
+    staged symlink, and keeps the lock from its read until the attrs are written."""
+    stub = _stub_merscope_enrichment(monkeypatch, tmp_path)
+
+    store_lock_contention.run(
+        lambda staged: enrich_single_latest(
+            _stub_merscope_enrichment_config(
+                tmp_path, stub, persistent_output_path=staged
+            )
+        ),
+        stub.target,
+        reads=[(enrich_module.sd, "read_zarr")],
+        persists=[
+            (enrich_module, "write_or_replace_element"),
+            (enrich_module, "write_spatialdata_metadata"),
+        ],
+    )
+
+    assert ORIGINAL_TABLE_NAME in stub.dst.tables
 
 
 def test_enrich_single_latest_adds_missing_nuclei_without_rebuilding_tables(

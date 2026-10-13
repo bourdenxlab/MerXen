@@ -19,7 +19,7 @@ from spatialdata.models import TableModel
 from merxen.alignment.manifest import NONRIGID_ELEMENT_SUFFIX
 from merxen.config import MaskImageQuantificationConfig
 from merxen.io.image_source import build_image_source, fetch_tile
-from merxen.io.spatialdata_io import write_or_replace_element
+from merxen.io.spatialdata_io import spatialdata_write_lock, write_or_replace_element
 from merxen.io.spatialdata_schema import (
     INSTANCE_ID_COLUMN,
     SOURCE_CELL_ID_COLUMN,
@@ -170,6 +170,27 @@ def run_mask_image_quantification(
         )
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    # The image table and the hybrid-table join each replace a whole table, so
+    # the store lock is held from the read until both are persisted.
+    with spatialdata_write_lock(latest_path):
+        return _quantify_store(
+            config,
+            latest_path=latest_path,
+            mask_path=mask_path,
+            paths=paths,
+            force_rerun=force_rerun,
+        )
+
+
+def _quantify_store(
+    config: MaskImageQuantificationConfig,
+    *,
+    latest_path: Path,
+    mask_path: Path,
+    paths: dict[str, Path],
+    force_rerun: bool,
+) -> dict[str, Path]:
+    """Quantify one store and persist its tables; the caller holds its lock."""
     sdata_obj = sd.read_zarr(latest_path)
     try:
         existing_quantification = (

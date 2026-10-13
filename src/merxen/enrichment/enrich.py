@@ -31,6 +31,7 @@ from merxen.io.image_source import (
     image_to_cyx,
 )
 from merxen.io.spatialdata_io import (
+    spatialdata_write_lock,
     write_or_replace_element,
     write_spatialdata_metadata,
 )
@@ -721,10 +722,7 @@ def enrich_single_latest(
         if config.persistent_output_path is not None
         else latest_path
     )
-    mask_path = Path(config.mask_path)
-    nuclei_mask_path = Path(config.nuclei_mask_path)
     dataset_name = str(config.dataset_name).upper()
-    platform = config.platform.upper()
 
     if not latest_path.exists():
         raise FileNotFoundError(
@@ -732,6 +730,41 @@ def enrich_single_latest(
         )
 
     write_path = _resolve_enrichment_write_path(latest_path, target_path)
+    # Enrichment adds and replaces elements and rewrites the store's attrs, so
+    # the store lock is held from the read until the metadata is persisted.
+    with spatialdata_write_lock(write_path):
+        _enrich_store_in_place(
+            config,
+            write_path=write_path,
+            force_rerun=force_rerun,
+            polygon_n_jobs=polygon_n_jobs,
+            polygon_show_progress=polygon_show_progress,
+        )
+
+    if keep_backup:
+        log_status(
+            f"[{dataset_name}] keep_backup ignored; "
+            "enrichment writes elements in place."
+        )
+    if latest_path != write_path:
+        stage_existing_output(write_path, latest_path)
+    return write_path
+
+
+def _enrich_store_in_place(
+    config: EnrichmentConfig,
+    *,
+    write_path: Path,
+    force_rerun: bool,
+    polygon_n_jobs: int,
+    polygon_show_progress: bool,
+) -> None:
+    """Enrich the store at ``write_path``; the caller holds its write lock."""
+    mask_path = Path(config.mask_path)
+    nuclei_mask_path = Path(config.nuclei_mask_path)
+    dataset_name = str(config.dataset_name).upper()
+    platform = config.platform.upper()
+
     log_status(f"[{dataset_name}] Loading latest zarr for enrichment: {write_path}")
     dst = _read_latest_zarr_for_enrichment(write_path, platform, dataset_name)
 
@@ -740,9 +773,7 @@ def enrich_single_latest(
         log_status(f"[{dataset_name}] Already enriched; skipping.")
         del dst
         force_release(note=f"after enrichment skip {dataset_name}")
-        if latest_path != write_path:
-            stage_existing_output(write_path, latest_path)
-        return write_path
+        return
 
     nuclei_missing = CELLPOSE_NUCLEI_SHAPE_NAME not in dst.shapes
     if not force_rerun and nuclei_missing and _is_enriched_except_nuclei(dst, platform):
@@ -781,12 +812,10 @@ def enrich_single_latest(
         write_spatialdata_metadata(dst, write_attrs=True)
         del dst, nuclei_gdf
         force_release(note=f"after incremental nuclei enrichment ({dataset_name})")
-        if latest_path != write_path:
-            stage_existing_output(write_path, latest_path)
         log_status(
             f"[{dataset_name}] Incremental nuclei enrichment complete: {write_path}"
         )
-        return write_path
+        return
 
     overwrite_existing = bool(force_rerun or not already_enriched)
     if overwrite_existing and not force_rerun:
@@ -978,13 +1007,4 @@ def enrich_single_latest(
     write_spatialdata_metadata(dst, write_attrs=True)
     del dst, src, cp_gdf, nuclei_gdf
     force_release(note=f"after in-place enrichment ({dataset_name})")
-
-    if keep_backup:
-        log_status(
-            f"[{dataset_name}] keep_backup ignored; "
-            "enrichment writes elements in place."
-        )
-    if latest_path != write_path:
-        stage_existing_output(write_path, latest_path)
     log_status(f"[{dataset_name}] Enrichment complete: {write_path}")
-    return write_path

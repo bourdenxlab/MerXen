@@ -18,6 +18,7 @@ from shapely.geometry import Point, Polygon
 from merxen.config import DistanceFromObjectCohortConfig, DistanceFromObjectConfig
 from merxen.cortical_depth.assign_cells import CellCoordinateTable
 from merxen.cortical_depth.frames import BoundaryFrameMismatchError
+from merxen.distance_from_object import pipeline as distance_pipeline
 from merxen.distance_from_object.annotations import (
     ObjectAnnotation,
     load_object_annotations,
@@ -262,10 +263,15 @@ def test_paired_pydeseq2_smoke_returns_near_vs_far_results() -> None:
     assert result.loc["GeneA", "log2FoldChange"] > 0
 
 
-def test_distance_pipeline_writes_sidecars_and_preserves_obs(
+def _stub_distance_store(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-) -> None:
+) -> tuple[Path, Path, list[ad.AnnData]]:
+    """Stage a store directory, one plaque, and an in-memory four-cell table.
+
+    Returns the store path, the object annotation path, and the list that
+    collects every table the pipeline writes back.
+    """
     latest_path = tmp_path / "latest.zarr"
     latest_path.mkdir()
     object_path = tmp_path / "objects.geojson"
@@ -323,7 +329,13 @@ def test_distance_pipeline_writes_sidecars_and_preserves_obs(
         "merxen.distance_from_object.pipeline.write_or_replace_element",
         lambda _sdata, _key, _kind, value, **_kwargs: written_tables.append(value),
     )
-    config = DistanceFromObjectConfig.model_validate(
+    return latest_path, object_path, written_tables
+
+
+def _stub_distance_config(
+    tmp_path: Path, latest_path: Path, object_path: Path
+) -> DistanceFromObjectConfig:
+    return DistanceFromObjectConfig.model_validate(
         {
             "pair_id": "block_1",
             "dataset_name": "block_1_XENIUM",
@@ -336,7 +348,18 @@ def test_distance_pipeline_writes_sidecars_and_preserves_obs(
         }
     )
 
-    paths = run_distance_from_object(config)
+
+def test_distance_pipeline_writes_sidecars_and_preserves_obs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    latest_path, object_path, written_tables = _stub_distance_store(
+        monkeypatch, tmp_path
+    )
+
+    paths = run_distance_from_object(
+        _stub_distance_config(tmp_path, latest_path, object_path)
+    )
 
     assert paths["reseg_cells"].exists()
     assert paths["reseg_pseudobulk"].exists()
@@ -350,6 +373,29 @@ def test_distance_pipeline_writes_sidecars_and_preserves_obs(
         "D",
     ]
     assert "distance_to_object_edge_um" in written_tables[0].obs
+
+
+def test_distance_write_back_serializes_with_another_store_writer(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    store_lock_contention: Any,
+) -> None:
+    """The write-back waits for a writer holding the store lock through another
+    staged symlink, and keeps the lock from its read until the table is written."""
+    latest_path, object_path, written_tables = _stub_distance_store(
+        monkeypatch, tmp_path
+    )
+
+    store_lock_contention.run(
+        lambda staged: run_distance_from_object(
+            _stub_distance_config(tmp_path, staged, object_path)
+        ),
+        latest_path,
+        reads=[(distance_pipeline.sd, "read_zarr")],
+        persists=[(distance_pipeline, "write_or_replace_element")],
+    )
+
+    assert len(written_tables) == 1
 
 
 def _aligned_merscope_store(*, with_table_spatial: bool) -> tuple[Any, ad.AnnData]:
