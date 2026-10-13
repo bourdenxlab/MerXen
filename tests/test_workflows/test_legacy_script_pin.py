@@ -55,8 +55,10 @@ EXPECTED_SHA256: dict[str, str] = {
     # 2026-10-13: the map_first branch falls back to the published
     # registration checks when the QC stage does not run for a branch; the
     # else-branch, the process texts and the legacy inputs are unchanged.
+    # 2026-10-13: that fallback is narrowed to rows whose QC stage does not
+    # run at all; again only the map_first branch changed.
     "main.nf wiring": (
-        "bfd8ca0e9b4fada98e0b99667815174a28fd679675c56da6a5bcdbce93553e2b"
+        "65ea609bc42e7f079a6a805ddb61d6b9140ef4ad39842dc88593178af6696d4a"
     ),
     "param defaults": (
         "fe4ca1ed06ba1c74dba06b3a50219cfac58a719376ead6792ae7ae0568c5f3c2"
