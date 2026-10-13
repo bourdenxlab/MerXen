@@ -21,9 +21,13 @@ import java.util.concurrent.ConcurrentSkipListSet
  * the pairs whose cross-platform statistics are restricted (by the panels or
  * by a dataset gate, as merxen.clustering.cross_platform scopes them) and
  * the samples whose MENDER run was skipped for want of an assigned cell
- * state, and the branches whose annotation report (M7) was not built or
- * recorded failed items. A legacy run subscribes nothing, so its record
- * stays empty and it prints no summary.
+ * state, the branches whose annotation report (M7) was not built or
+ * recorded failed items, and where each branch's registration checks came
+ * from (hook H5: this launch's QC stage, or the QC outputs an earlier launch
+ * published when the row's QC stage does not run, or none for a segmentation
+ * the QC of its row skips in a launch that runs it) with the branches that
+ * lack a check for some active platform. A legacy run subscribes nothing, so its
+ * record stays empty and it prints no summary.
  *
  * One Nextflow run is one JVM, so the record is static; the subscriptions
  * run on dataflow threads, hence the concurrent collections.
@@ -48,6 +52,8 @@ class AnnotationRunRecord {
     private static final Set<String> REPORT_EXPECTED = new ConcurrentSkipListSet<String>()
     private static final Set<String> REPORTED = new ConcurrentSkipListSet<String>()
     private static final Set<String> REPORT_FAILED_ITEMS = new ConcurrentSkipListSet<String>()
+    // Per branch: [source, check file names, n active platforms] (hook H5).
+    private static final Map<String, List> REGISTRATION = new ConcurrentHashMap<String, List>()
 
     // As merxen.clustering.cross_platform: statistics levels from least to
     // most restrictive, the level each dataset gate allows at most (plan
@@ -63,6 +69,19 @@ class AnnotationRunRecord {
     static final String MENDER_SKIPPED_STATUS = "skipped_no_assigned_state"
     // merxen.annotation.report_model item status of an item that raised.
     static final String REPORT_ITEM_FAILED = "failed"
+    // Where a branch's registration checks came from (hook H5): the QC tasks
+    // of this launch, the QC outputs an earlier launch published (the row's
+    // QC stage does not run), or nowhere: a segmentation that is not an
+    // analysis segmentation of a row whose QC runs in the launch, which may
+    // have re-segmented it, so a published check could be an older launch's.
+    static final String REGISTRATION_QC_STAGE = "qc_stage"
+    static final String REGISTRATION_PUBLISHED = "published"
+    static final String REGISTRATION_ROW_RUNS_QC = "row_runs_qc"
+    static final Map<String, String> REGISTRATION_SOURCE_TEXT = [
+        (REGISTRATION_QC_STAGE): "QC stage of this launch",
+        (REGISTRATION_PUBLISHED): "published QC outputs",
+        (REGISTRATION_ROW_RUNS_QC): "row runs QC, not for this segmentation; published checks not used",
+    ].asImmutable()
 
     /** Forget everything (tests; one run per JVM otherwise). */
     static void reset() {
@@ -73,6 +92,7 @@ class AnnotationRunRecord {
             values.clear()
         }
         TRUST.clear()
+        REGISTRATION.clear()
     }
 
     /** Record that a pair x segmentation entered map_first clustering. */
@@ -224,6 +244,36 @@ class AnnotationRunRecord {
         }
     }
 
+    /**
+     * Record where a pair x segmentation's registration checks came from (hook H5).
+     *
+     * RESOLVE stages the files under their own names, so its outputs do not
+     * tell a same-launch check from a published one; the end-of-run summary
+     * does.
+     *
+     * @param pairId Pair id.
+     * @param segmentation Segmentation.
+     * @param source REGISTRATION_QC_STAGE, REGISTRATION_PUBLISHED or
+     *     REGISTRATION_ROW_RUNS_QC.
+     * @param files The *_registration_qc.json files RESOLVE stages (may be
+     *     empty).
+     * @param nPlatforms The row's active platforms (one check each).
+     */
+    static void registrationChecks(
+        Object pairId,
+        Object segmentation,
+        Object source,
+        Collection files,
+        Object nPlatforms
+    ) {
+        def names = (files ?: []).collect { item -> asPath(item).fileName.toString() }.sort()
+        REGISTRATION[branch(pairId, segmentation)] = [
+            source.toString(),
+            names,
+            nPlatforms as int,
+        ].asImmutable()
+    }
+
     /** Record that a pair x segmentation got its map_first hierarchy (COMPUTE_CPU done). */
     static void computed(Object pairId, Object segmentation) {
         COMPUTED << branch(pairId, segmentation)
@@ -239,8 +289,13 @@ class AnnotationRunRecord {
      *     failed), cross_platform_restricted (pairs whose cross-platform
      *     statistics are broad_only or none, with the reasons),
      *     mender_skipped (samples without an assigned MENDER state),
-     *     failed_reports (awaited a report, got none) and
-     *     failed_report_items (reports with failed items).
+     *     failed_reports (awaited a report, got none),
+     *     failed_report_items (reports with failed items),
+     *     registration_published (branches whose registration checks came
+     *     from published QC outputs, with the files) and
+     *     registration_missing (branches with fewer checks than active
+     *     platforms: found of expected, and the source, or why no published
+     *     check was looked up), both of the branches that entered clustering.
      */
     static Map runInfo() {
         return [
@@ -255,7 +310,26 @@ class AnnotationRunRecord {
             mender_skipped: (MENDER_SKIPPED as List).sort(),
             failed_reports: (REPORT_EXPECTED - REPORTED).sort(),
             failed_report_items: (REPORT_FAILED_ITEMS as List).sort(),
+            registration_published: registrationPublished(),
+            registration_missing: registrationMissing(),
         ]
+    }
+
+    private static List<String> registrationPublished() {
+        return REGISTRATION.findAll { key, record ->
+            key in EXPECTED && record[0] == REGISTRATION_PUBLISHED && record[1]
+        }.collect { key, record ->
+            "${key} (${(record[1] as List).join('; ')})".toString()
+        }.sort()
+    }
+
+    private static List<String> registrationMissing() {
+        return REGISTRATION.findAll { key, record ->
+            key in EXPECTED && (record[1] as List).size() < (record[2] as int)
+        }.collect { key, record ->
+            def source = REGISTRATION_SOURCE_TEXT[record[0]] ?: record[0]
+            "${key} (${(record[1] as List).size()} of ${record[2]}; ${source})".toString()
+        }.sort()
     }
 
     private static List<String> trustList(String state) {

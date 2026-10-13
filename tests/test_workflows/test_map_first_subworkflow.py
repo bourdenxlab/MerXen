@@ -1375,7 +1375,46 @@ def test_main_nf_calls_map_first_only_through_hook_h5() -> None:
             assert "CLUSTERING_SQUIDPY_COMPUTE_CPU(" not in path.read_text(), path
 
 
-REGISTRATION_MAIN = """
+# RESOLVE's registration input (modules/annotation.nf): the harness stages the
+# checks with the same declaration, so a staged check keeps its name.
+RESOLVE_REGISTRATION_INPUT = (
+    'path(registration_files, arity: "0..*", '
+    'stageAs: "resolve_inputs/registration_qc/*")'
+)
+# Hook H5's registration block in main.nf, from its comment to the ALIGN files.
+REGISTRATION_BLOCK_START = "        // The registration checks RESOLVE reads"
+REGISTRATION_BLOCK_END = "        map_first_alignment_ch = alignment_results_ch"
+# The run record's source of a branch whose row runs QC in the launch but not
+# for that segmentation (AnnotationRunRecord.REGISTRATION_SOURCE_TEXT).
+ROW_RUNS_QC_TEXT = "row runs QC, not for this segmentation; published checks not used"
+
+REGISTRATION_MAIN = r'''
+process STAGE_AS_RESOLVE {
+    tag "${pair_id}:${segmentation}"
+
+    input:
+    tuple val(pair_id), val(segmentation), __RESOLVE_INPUT__
+
+    output:
+    tuple val(pair_id), val(segmentation), path("staged.txt")
+
+    script:
+    def arguments = AnnotationReferences.resolveArguments(
+        [species: "mouse"], [], [], registration_files as List
+    )
+    def directory = arguments.contains("--registration-qc-dir")
+        ? "with-dir"
+        : "without-dir"
+    """
+    echo "${directory}" > staged.txt
+    for check in resolve_inputs/registration_qc/*; do
+        if [ -e "\$check" ]; then
+            echo "\$(basename "\$check") \$(cat "\$check")" >> staged.txt
+        fi
+    done
+    """
+}
+
 workflow {
     def rows = new groovy.json.JsonSlurperClassic().parseText(params.rows)
     sample_rows_ch = channel.fromList(
@@ -1392,6 +1431,21 @@ workflow {
             )
         }
     )
+    // Every branch enters clustering, as hook H5 records it.
+    AnnotationRunRecord.reset()
+    rows.each { row ->
+        row.settings.analysis_input_segmentations.each { segmentation ->
+            AnnotationRunRecord.expect(row.pair_id, segmentation)
+        }
+    }
+    // params is out of scope in the handler, as in main.nf's hook H6.
+    def runInfoPath = params.run_info
+    def harnessWorkflow = workflow
+    harnessWorkflow.onComplete {
+        new File(runInfoPath).text = groovy.json.JsonOutput.toJson(
+            AnnotationRunRecord.runInfo()
+        )
+    }
 __REGISTRATION__
     map_first_registration_ch
         .map { pairId, segmentation, files ->
@@ -1402,8 +1456,17 @@ __REGISTRATION__
         .subscribe { items ->
             new File(params.out).text = groovy.json.JsonOutput.toJson(items)
         }
+    STAGE_AS_RESOLVE(map_first_registration_ch)
+        .map { pairId, segmentation, staged ->
+            [pairId, segmentation, staged.text.readLines()]
+        }
+        .collect(flat: false)
+        .ifEmpty([])
+        .subscribe { items ->
+            new File(params.staged).text = groovy.json.JsonOutput.toJson(items)
+        }
 }
-"""
+'''
 
 
 def _main_nf_block(main_text: str, start: str, end: str) -> str:
@@ -1412,11 +1475,129 @@ def _main_nf_block(main_text: str, start: str, end: str) -> str:
     return main_text[begin : main_text.index(end, begin)]
 
 
-def test_the_registration_branches_complement_the_qc_stage() -> None:
-    """Hook H5 gives [] exactly to the branches qc_inputs_ch leaves out.
+def _registration_block() -> str:
+    return _main_nf_block(
+        MAIN_NF.read_text(), REGISTRATION_BLOCK_START, REGISTRATION_BLOCK_END
+    )
 
-    A branch given [] although its QC runs could resolve before its checks
-    arrive, so the two predicates must stay each other's negation.
+
+def _write_qc_out(
+    qc_out: Path, prefix: str, files: list[str], content: str = "{}"
+) -> Path:
+    """Write a QC task's qc_out: ``files`` and a nested check never staged."""
+    qc_out.mkdir(parents=True)
+    for file_name in files:
+        (qc_out / file_name).write_text(content)
+    (qc_out / "nested").mkdir()
+    (qc_out / "nested" / f"{prefix}_registration_qc.json").write_text("{}")
+    return qc_out
+
+
+def _publish_qc_out(
+    work: Path,
+    outdir: Path,
+    pair_id: str,
+    platform: str,
+    segmentation: str,
+    files: list[str],
+) -> Path:
+    """Publish an earlier launch's QC output as the QC process does.
+
+    ``<outdir>/<pair>/<platform lower-case>/<segmentation>/qc/qc_out``, a
+    symlink to the task's qc_out (publishDir mode "symlink").
+    """
+    prefix = f"{pair_id.lower()}_{platform.lower()}"
+    target = _write_qc_out(
+        work / f"{pair_id}_{platform}_{segmentation}" / "qc_out",
+        prefix,
+        files,
+        content="published",
+    )
+    published = outdir / pair_id / platform.lower() / segmentation / "qc"
+    published.mkdir(parents=True)
+    (published / "qc_out").symlink_to(target, target_is_directory=True)
+    return published / "qc_out"
+
+
+def _run_registration_block(
+    root: Path,
+    rows: list[dict[str, Any]],
+    qc: list[dict[str, str]],
+    outdir: Path,
+) -> tuple[list[Any], list[Any], dict[str, Any], str]:
+    """Run hook H5's own registration block, then stage as RESOLVE does.
+
+    Returns:
+        The registration tuples (pair, segmentation, paths), the staged
+        checks per branch (directory flag, then "name content" lines), the
+        run record's facts and the Nextflow log.
+    """
+    assert NEXTFLOW is not None
+    assert RESOLVE_REGISTRATION_INPUT in MODULE.read_text()
+    (root / "lib").mkdir()
+    for source in LIB_DIR.glob("*.groovy"):
+        shutil.copy(source, root / "lib" / source.name)
+    (root / "main.nf").write_text(
+        REGISTRATION_MAIN.replace("__REGISTRATION__", _registration_block()).replace(
+            "__RESOLVE_INPUT__", RESOLVE_REGISTRATION_INPUT
+        )
+    )
+    out = root / "registration.json"
+    staged = root / "staged.json"
+    run_info = root / "run_info.json"
+    (root / "nextflow.config").write_text(
+        f"params.rows = '{json.dumps(rows)}'\n"
+        f"params.qc = '{json.dumps(qc)}'\n"
+        f"params.outdir = '{outdir}'\n"
+        f"params.out = '{out}'\n"
+        f"params.staged = '{staged}'\n"
+        f"params.run_info = '{run_info}'\n"
+    )
+    completed = subprocess.run(
+        [NEXTFLOW, "-log", str(root / "nextflow.log"), "run", "main.nf"],
+        cwd=root,
+        env=_nextflow_env(),
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    return (
+        sorted(json.loads(out.read_text())),
+        sorted(json.loads(staged.read_text())),
+        json.loads(run_info.read_text()),
+        (root / "nextflow.log").read_text() + completed.stdout,
+    )
+
+
+def _settings(
+    platforms: list[str],
+    *,
+    run_qc: bool,
+    analysis: list[str],
+    inputs: list[str],
+    start_stage: str = "build_spatialdata",
+) -> dict[str, Any]:
+    """Return the row settings hook H5's registration block reads."""
+    return {
+        "clustering_squidpy_mode": "map_first",
+        "active_platforms": platforms,
+        "start_stage": start_stage,
+        "run_qc": run_qc,
+        "analysis_segmentations": analysis,
+        "analysis_input_segmentations": inputs,
+    }
+
+
+def test_the_registration_branches_complement_the_qc_stage() -> None:
+    """Hook H5 covers exactly the branches qc_inputs_ch leaves out.
+
+    A branch that took a published check although its QC runs in the launch
+    could resolve on an older check (or before its own arrives), so the two
+    predicates must stay each other's negation. Of those branches, only a row
+    whose QC stage does not run looks up published checks: a segmentation
+    the QC of a running row skips may have been re-segmented in the launch.
     """
     main_text = MAIN_NF.read_text()
     qc_filter = _main_nf_block(
@@ -1426,11 +1607,7 @@ def test_the_registration_branches_complement_the_qc_stage() -> None:
         "settings.run_qc && settings.analysis_segmentations.contains(_segmentation)"
         in qc_filter
     )
-    block = _main_nf_block(
-        main_text,
-        "        map_first_registration_ch = qc_results_ch",
-        "        map_first_alignment_ch = alignment_results_ch",
-    )
+    block = _registration_block()
     assert (
         "!(settings.run_qc && settings.analysis_segmentations.contains(segmentation))"
         in block
@@ -1438,10 +1615,34 @@ def test_the_registration_branches_complement_the_qc_stage() -> None:
     assert "settings.analysis_input_segmentations" in block
     assert "groupKey(" in block and ".groupTuple(remainder: true)" in block
     assert "AnnotationReferences.registrationQcFiles(qcOutDirs)" in block
+    assert "AnnotationReferences.publishedRegistrationQcFiles(" in block
+    assert "AnnotationRunRecord.registrationChecks(" in block
+    row_runs_qc = block.index("                    if (settings.run_qc) {")
+    published = block.index("AnnotationReferences.publishedRegistrationQcFiles(")
+    assert (
+        row_runs_qc
+        < block.index("AnnotationRunRecord.REGISTRATION_ROW_RUNS_QC")
+        < block.index("                    } else {", row_runs_qc)
+        < published
+    )
     branch = main_text.index("    if (AnnotationSettings.isMapFirstRun(params)) {")
     legacy = main_text.index("\n    } else {\n", branch)
     assert branch < main_text.index(block) < legacy
     assert "            map_first_registration_ch,\n        ).computed" in main_text
+
+
+def test_the_published_registration_checks_follow_the_qc_publish_dir() -> None:
+    """The fallback reads where the QC process publishes its qc_out."""
+    qc_module = (WORKFLOWS / "modules" / "qc.nf").read_text()
+    process = qc_module[qc_module.index("process QC {") :]
+    assert (
+        'publishDir { "${params.outdir}/${pair_id}/${platform.toLowerCase()}'
+        '/${segmentation}/qc" }, mode: "symlink"'
+    ) in process
+    assert 'path("qc_out"),' in process
+    references = (LIB_DIR / "AnnotationReferences.groovy").read_text()
+    assert 'static final String QC_PUBLISH_DIR = "qc"' in references
+    assert 'static final String QC_OUTPUT_DIR = "qc_out"' in references
 
 
 @needs_nextflow
@@ -1449,106 +1650,60 @@ def test_map_first_registration_gives_one_tuple_per_branch(tmp_path: Path) -> No
     """Hook H5's registration checks (M13 C15): main.nf's own block.
 
     Per pair x segmentation: the QC tasks' ``*_registration_qc.json`` (one
-    per active platform, released once all have finished), ``[]`` for a
-    branch the QC stage skips (``run_qc`` off, or a segmentation that is not
-    an analysis segmentation) and for a QC output without a registration
-    check. The QC summary CSV is never staged.
+    per active platform, released once all have finished), ``[]`` for a row
+    whose QC stage does not run when nothing is published, for a segmentation
+    that is not an analysis segmentation of a row whose QC runs, and for a QC
+    output without a registration check. The QC summary CSV is never staged.
     """
-    assert NEXTFLOW is not None
-    block = _main_nf_block(
-        MAIN_NF.read_text(),
-        "        map_first_registration_ch = qc_results_ch",
-        "        map_first_alignment_ch = alignment_results_ch",
-    )
-    outputs = {}
-    for name, files in (
-        (
-            "p1_merscope",
-            ["p1_merscope_registration_qc.json", "p1_merscope_qc_summary.csv"],
-        ),
-        ("p1_xenium", ["p1_xenium_registration_qc.json"]),
-        ("p3_merscope", ["p3_merscope_qc_summary.csv"]),
-    ):
-        qc_out = tmp_path / name / "qc_out"
-        qc_out.mkdir(parents=True)
-        for file_name in files:
-            (qc_out / file_name).write_text("{}")
-        (qc_out / "nested").mkdir()
-        (qc_out / "nested" / f"{name}_registration_qc.json").write_text("{}")
-        outputs[name] = qc_out
+    outputs = {
+        name: _write_qc_out(tmp_path / name / "qc_out", name, files)
+        for name, files in (
+            (
+                "p1_merscope",
+                ["p1_merscope_registration_qc.json", "p1_merscope_qc_summary.csv"],
+            ),
+            ("p1_xenium", ["p1_xenium_registration_qc.json"]),
+            ("p3_merscope", ["p3_merscope_qc_summary.csv"]),
+        )
+    }
     both = ["MERSCOPE", "XENIUM"]
+    analysis = ["proseg_hybrid"]
     rows = [
         {
             "pair_id": "P1",
-            "settings": {
-                "active_platforms": both,
-                "run_qc": True,
-                "analysis_segmentations": ["proseg_hybrid"],
-                "analysis_input_segmentations": ["proseg_hybrid", "reseg"],
-            },
+            "settings": _settings(
+                both, run_qc=True, analysis=analysis, inputs=["proseg_hybrid", "reseg"]
+            ),
         },
         {
             "pair_id": "P2",
-            "settings": {
-                "active_platforms": both,
-                "run_qc": False,
-                "analysis_segmentations": ["proseg_hybrid"],
-                "analysis_input_segmentations": ["proseg_hybrid"],
-            },
+            "settings": _settings(
+                both, run_qc=False, analysis=analysis, inputs=analysis
+            ),
         },
         {
             "pair_id": "P3",
-            "settings": {
-                "active_platforms": ["MERSCOPE"],
-                "run_qc": True,
-                "analysis_segmentations": ["proseg_hybrid"],
-                "analysis_input_segmentations": ["proseg_hybrid"],
-            },
+            "settings": _settings(
+                ["MERSCOPE"], run_qc=True, analysis=analysis, inputs=analysis
+            ),
         },
     ]
     qc = [
         {
-            "pair_id": "P1",
-            "platform": "MERSCOPE",
+            "pair_id": pair_id,
+            "platform": platform,
             "segmentation": "proseg_hybrid",
-            "qc_out": str(outputs["p1_merscope"]),
-        },
-        {
-            "pair_id": "P3",
-            "platform": "MERSCOPE",
-            "segmentation": "proseg_hybrid",
-            "qc_out": str(outputs["p3_merscope"]),
-        },
-        {
-            "pair_id": "P1",
-            "platform": "XENIUM",
-            "segmentation": "proseg_hybrid",
-            "qc_out": str(outputs["p1_xenium"]),
-        },
+            "qc_out": str(outputs[f"{pair_id.lower()}_{platform.lower()}"]),
+        }
+        for pair_id, platform in (
+            ("P1", "MERSCOPE"),
+            ("P3", "MERSCOPE"),
+            ("P1", "XENIUM"),
+        )
     ]
-    (tmp_path / "lib").mkdir()
-    for source in LIB_DIR.glob("*.groovy"):
-        shutil.copy(source, tmp_path / "lib" / source.name)
-    (tmp_path / "main.nf").write_text(
-        REGISTRATION_MAIN.replace("__REGISTRATION__", block)
+    items, _staged, info, _log = _run_registration_block(
+        tmp_path, rows, qc, tmp_path / "results"
     )
-    out = tmp_path / "registration.json"
-    (tmp_path / "nextflow.config").write_text(
-        f"params.rows = '{json.dumps(rows)}'\n"
-        f"params.qc = '{json.dumps(qc)}'\n"
-        f"params.out = '{out}'\n"
-    )
-    completed = subprocess.run(
-        [NEXTFLOW, "-log", str(tmp_path / "nextflow.log"), "run", "main.nf"],
-        cwd=tmp_path,
-        env=_nextflow_env(),
-        capture_output=True,
-        text=True,
-        timeout=300,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    items = sorted(json.loads(out.read_text()))
     assert items == [
         [
             "P1",
@@ -1562,6 +1717,203 @@ def test_map_first_registration_gives_one_tuple_per_branch(tmp_path: Path) -> No
         ["P2", "proseg_hybrid", []],
         ["P3", "proseg_hybrid", []],
     ]
+    assert info["registration_published"] == []
+    assert info["registration_missing"] == [
+        f"P1:reseg (0 of 2; {ROW_RUNS_QC_TEXT})",
+        "P2:proseg_hybrid (0 of 2; published QC outputs)",
+        "P3:proseg_hybrid (0 of 1; QC stage of this launch)",
+    ]
+
+
+@needs_nextflow
+def test_map_first_registration_falls_back_to_the_published_checks(
+    tmp_path: Path,
+) -> None:
+    """A row whose QC stage does not run takes the published checks.
+
+    The usual re-annotation of published results starts after qc
+    (``start_stage clustering_squidpy``): the row's QC stage does not run,
+    and RESOLVE stages each active platform's check from the QC stage's
+    publish location under ``params.outdir`` (VZG2 mouse, 2026-10-13: all
+    four segmentations refused for want of G1), for every segmentation of
+    the row. A branch whose QC runs in the launch takes its own QC tasks'
+    checks, never the published ones. A segmentation that is not an
+    analysis segmentation of a row whose QC runs (a MENDER-only one) gets
+    none even when a check is published: the launch may have re-segmented
+    it, and the published check would be an older launch's. A branch with
+    neither gets none, as before. The run record lists the published and the
+    missing checks, with the reason.
+    """
+    outdir = tmp_path / "results"
+    work = tmp_path / "earlier_work"
+    both = ["MERSCOPE", "XENIUM"]
+    analysis = ["proseg_hybrid"]
+    names = {
+        (pair_id, platform): f"{pair_id}_{platform}_registration_qc.json".lower()
+        for pair_id in ("P1", "P2", "P5")
+        for platform in both
+    }
+    summary = "{}_qc_summary.csv"
+
+    def publish(pair_id: str, platform: str, segmentation: str, check: bool) -> Path:
+        prefix = f"{pair_id.lower()}_{platform.lower()}"
+        files = [summary.format(prefix)]
+        if check:
+            files.append(f"{prefix}_registration_qc.json")
+        return _publish_qc_out(work, outdir, pair_id, platform, segmentation, files)
+
+    # P1: QC runs for proseg_hybrid in this launch (and an earlier launch
+    # published it too); reseg is not an analysis segmentation (MENDER-only),
+    # so its QC does not run although the row's does, and its published
+    # checks, an older launch's, are not staged.
+    launch = {
+        platform: _write_qc_out(
+            tmp_path / "launch" / f"p1_{platform.lower()}" / "qc_out",
+            f"p1_{platform.lower()}",
+            [names[("P1", platform)]],
+            content="qc_stage",
+        )
+        for platform in both
+    }
+    published = {
+        (pair_id, platform, segmentation): publish(
+            pair_id, platform, segmentation, check
+        )
+        for pair_id, platform, segmentation, check in (
+            ("P1", "MERSCOPE", "proseg_hybrid", True),
+            ("P1", "XENIUM", "proseg_hybrid", True),
+            ("P1", "MERSCOPE", "reseg", True),
+            ("P1", "XENIUM", "reseg", True),
+            # P2: a paired row started at clustering_squidpy; reseg is not
+            # one of its analysis segmentations.
+            ("P2", "MERSCOPE", "proseg_hybrid", True),
+            ("P2", "XENIUM", "proseg_hybrid", True),
+            ("P2", "MERSCOPE", "reseg", True),
+            ("P2", "XENIUM", "reseg", True),
+            # P5: only its MERSCOPE QC output holds a check.
+            ("P5", "MERSCOPE", "proseg_hybrid", True),
+            ("P5", "XENIUM", "proseg_hybrid", False),
+        )
+    }
+    # P4: its published qc_out points at a removed work directory.
+    dangling = outdir / "P4" / "merscope" / "proseg_hybrid" / "qc"
+    dangling.mkdir(parents=True)
+    (dangling / "qc_out").symlink_to(work / "removed" / "qc_out")
+    restarted = {"run_qc": False, "start_stage": "clustering_squidpy"}
+    rows = [
+        {
+            "pair_id": "P1",
+            "settings": _settings(
+                both, run_qc=True, analysis=analysis, inputs=["proseg_hybrid", "reseg"]
+            ),
+        },
+        {
+            "pair_id": "P2",
+            "settings": _settings(
+                both,
+                analysis=analysis,
+                inputs=["proseg_hybrid", "reseg"],
+                **restarted,
+            ),
+        },
+        # P3: a mouse section started at clustering_squidpy, nothing published.
+        {
+            "pair_id": "P3",
+            "settings": _settings(
+                ["MERSCOPE"], analysis=analysis, inputs=analysis, **restarted
+            ),
+        },
+        {
+            "pair_id": "P4",
+            "settings": _settings(
+                ["MERSCOPE"], analysis=analysis, inputs=analysis, **restarted
+            ),
+        },
+        {
+            "pair_id": "P5",
+            "settings": _settings(
+                both, analysis=analysis, inputs=analysis, **restarted
+            ),
+        },
+    ]
+    qc = [
+        {
+            "pair_id": "P1",
+            "platform": platform,
+            "segmentation": "proseg_hybrid",
+            "qc_out": str(launch[platform]),
+        }
+        for platform in both
+    ]
+    items, staged, info, log = _run_registration_block(tmp_path, rows, qc, outdir)
+
+    def published_check(pair_id: str, platform: str, segmentation: str) -> str:
+        return str(
+            published[(pair_id, platform, segmentation)] / names[(pair_id, platform)]
+        )
+
+    assert items == [
+        [
+            "P1",
+            "proseg_hybrid",
+            [str(launch[platform] / names[("P1", platform)]) for platform in both],
+        ],
+        ["P1", "reseg", []],
+        [
+            "P2",
+            "proseg_hybrid",
+            [published_check("P2", platform, "proseg_hybrid") for platform in both],
+        ],
+        [
+            "P2",
+            "reseg",
+            [published_check("P2", platform, "reseg") for platform in both],
+        ],
+        ["P3", "proseg_hybrid", []],
+        ["P4", "proseg_hybrid", []],
+        ["P5", "proseg_hybrid", [published_check("P5", "MERSCOPE", "proseg_hybrid")]],
+    ]
+    # RESOLVE stages each check under its own name (it matches
+    # <sample_id lower-case>_registration_qc.json) and reads the directory.
+    assert staged == [
+        [
+            "P1",
+            "proseg_hybrid",
+            ["with-dir", *(f"{names[('P1', p)]} qc_stage" for p in both)],
+        ],
+        ["P1", "reseg", ["without-dir"]],
+        [
+            "P2",
+            "proseg_hybrid",
+            ["with-dir", *(f"{names[('P2', p)]} published" for p in both)],
+        ],
+        ["P2", "reseg", ["with-dir", *(f"{names[('P2', p)]} published" for p in both)]],
+        ["P3", "proseg_hybrid", ["without-dir"]],
+        ["P4", "proseg_hybrid", ["without-dir"]],
+        [
+            "P5",
+            "proseg_hybrid",
+            ["with-dir", f"{names[('P5', 'MERSCOPE')]} published"],
+        ],
+    ]
+    assert info["registration_published"] == [
+        f"P2:proseg_hybrid ({names[('P2', 'MERSCOPE')]}; {names[('P2', 'XENIUM')]})",
+        f"P2:reseg ({names[('P2', 'MERSCOPE')]}; {names[('P2', 'XENIUM')]})",
+        f"P5:proseg_hybrid ({names[('P5', 'MERSCOPE')]})",
+    ]
+    assert info["registration_missing"] == [
+        f"P1:reseg (0 of 2; {ROW_RUNS_QC_TEXT})",
+        "P3:proseg_hybrid (0 of 1; published QC outputs)",
+        "P4:proseg_hybrid (0 of 1; published QC outputs)",
+        "P5:proseg_hybrid (1 of 2; published QC outputs)",
+    ]
+    assert "P2:proseg_hybrid: the QC stage does not run in this launch" in log
+    assert str(dangling / "qc_out") in log
+    assert (
+        "P1:reseg: the row's QC stage runs in this launch but not for this segmentation"
+    ) in log
+    # P1:reseg's published checks are never looked up.
+    assert str(published[("P1", "MERSCOPE", "reseg")]) not in log
 
 
 # --------------------------------------------------------------------------

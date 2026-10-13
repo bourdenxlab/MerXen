@@ -367,6 +367,12 @@ class AnnotationTestHarness {
                 (c.reported ?: []).each { item ->
                     AnnotationRunRecord.reported(item[0], item[1], item[2])
                 }
+                (c.registration ?: []).each { item ->
+                    AnnotationRunRecord.registrationChecks(
+                        item.pair_id, item.segmentation, item.source,
+                        item.files, item.n_platforms,
+                    )
+                }
                 def info = AnnotationRunRecord.runInfo()
                 AnnotationRunRecord.reset()
                 return info
@@ -990,6 +996,27 @@ def _add_m5_cases(
             ["P2", "proseg_hybrid", str(reports / "P2")],
             ["P5", "proseg_hybrid", str(reports / "P5")],
         ],
+        # Hook H5's registration sources: P1 from this launch's QC, P2 and
+        # P3 (one platform short) from published QC outputs, P4 without a
+        # check; P9 is a legacy branch that never entered clustering.
+        "registration": [
+            {
+                "pair_id": pair_id,
+                "segmentation": segmentation,
+                "source": source,
+                "files": [
+                    f"/qc/{pair_id.lower()}_{p}_registration_qc.json" for p in found
+                ],
+                "n_platforms": n_platforms,
+            }
+            for pair_id, segmentation, source, found, n_platforms in (
+                ("P1", "proseg_hybrid", "qc_stage", ["merscope", "xenium"], 2),
+                ("P2", "proseg_hybrid", "published", ["xenium", "merscope"], 2),
+                ("P3", "reseg", "published", ["merscope"], 2),
+                ("P4", "reseg", "qc_stage", [], 1),
+                ("P9", "proseg_hybrid", "published", [], 2),
+            )
+        ],
     }
 
 
@@ -1279,6 +1306,10 @@ def test_groovy_completion_summary(groovy_results: dict[str, dict[str, Any]]) ->
         in summary.splitlines()
     )
     assert "  refused panels: none" in summary.splitlines()
+    assert (
+        "  registration checks from published QC outputs "
+        "(QC stage not run in this launch): none"
+    ) in summary.splitlines()
     assert "not wired" not in summary
 
 
@@ -1448,6 +1479,16 @@ def test_groovy_run_record_lists_stopped_branches_and_panels(
     assert info["failed_reports"] == ["P1:proseg_hybrid"]
     assert info["failed_report_items"] == [
         "P2:proseg_hybrid (item04_reference_expectation)"
+    ]
+    # Hook H5: where each clustered branch's registration checks came from.
+    assert info["registration_published"] == [
+        "P2:proseg_hybrid (p2_merscope_registration_qc.json; "
+        "p2_xenium_registration_qc.json)",
+        "P3:reseg (p3_merscope_registration_qc.json)",
+    ]
+    assert info["registration_missing"] == [
+        "P3:reseg (1 of 2; published QC outputs)",
+        "P4:reseg (0 of 1; QC stage of this launch)",
     ]
 
 

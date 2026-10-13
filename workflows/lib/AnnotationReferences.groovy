@@ -80,6 +80,12 @@ class AnnotationReferences {
     // staged under RESOLVE_INPUT_DIR/RESOLVE_REGISTRATION_DIR.
     static final String REGISTRATION_QC_SUFFIX = "_registration_qc.json"
     static final String RESOLVE_REGISTRATION_DIR = "registration_qc"
+    // Where the QC process publishes a branch's qc_out (modules/qc.nf:
+    // <outdir>/<pair_id>/<platform lower-case>/<segmentation>/qc/qc_out, a
+    // symlink to the task's qc_out): the registration checks hook H5 stages
+    // for a branch whose QC stage does not run in the launch.
+    static final String QC_PUBLISH_DIR = "qc"
+    static final String QC_OUTPUT_DIR = "qc_out"
 
     // What the RESOLVE rules fingerprint covers, relative to this checkout's
     // src/: the threshold, floor, trust, consensus, flag and composition code
@@ -697,8 +703,9 @@ class AnnotationReferences {
      * @param bundleRefs Staged bundle_ref.json paths.
      * @param alignmentFiles Staged [shared_tissue_mask.npy,
      *     registration_summary.json], or an empty list.
-     * @param registrationFiles Staged *_registration_qc.json files, or an
-     *     empty list (no QC stage for the branch).
+     * @param registrationFiles Staged *_registration_qc.json files (this
+     *     launch's QC tasks' or the published ones), or an empty list (no
+     *     check for the branch).
      * @return Shell-quoted arguments (without --annotation-config and --out).
      */
     static String resolveArguments(
@@ -755,6 +762,65 @@ class AnnotationReferences {
             }
         }
         return files.sort { Path path -> path.fileName.toString() }
+    }
+
+    /**
+     * Return the published qc_out directories of a pair x segmentation.
+     *
+     * One per active platform, where the QC process publishes it
+     * (QC_PUBLISH_DIR, QC_OUTPUT_DIR). A relative outdir resolves against
+     * the launch directory, as publishDir resolves it.
+     *
+     * @param outdir params.outdir (null: "results").
+     * @param pairId Pair id.
+     * @param platforms The row's active platforms.
+     * @param segmentation Segmentation.
+     * @return Absolute directories in platform order; they need not exist.
+     */
+    static List<Path> publishedQcOutDirs(
+        Object outdir,
+        Object pairId,
+        Collection platforms,
+        Object segmentation
+    ) {
+        return (platforms ?: []).collect { platform ->
+            Paths.get(
+                (outdir ?: "results").toString(),
+                pairId.toString(),
+                platform.toString().toLowerCase(),
+                segmentation.toString(),
+                QC_PUBLISH_DIR,
+                QC_OUTPUT_DIR,
+            ).toAbsolutePath().normalize()
+        }
+    }
+
+    /**
+     * Return the published registration checks of a pair x segmentation.
+     *
+     * Hook H5 stages them into RESOLVE only for the branches of a row whose
+     * QC stage does not run in the launch (run_qc false: a start_stage after
+     * qc or an only_stage): the checks an earlier launch's QC published for
+     * the outputs this launch starts from. A branch whose QC runs takes its
+     * own QC tasks' checks (registrationQcFiles) and never these; nor does a
+     * segmentation that is not an analysis segmentation of a row whose QC
+     * runs, which the launch may have re-segmented (it takes none). A qc_out
+     * whose work directory is gone (a dangling symlink) gives none.
+     *
+     * @param outdir params.outdir.
+     * @param pairId Pair id.
+     * @param platforms The row's active platforms.
+     * @param segmentation Segmentation.
+     * @return The *_registration_qc.json files, sorted by name; an empty list
+     *     when none is published.
+     */
+    static List publishedRegistrationQcFiles(
+        Object outdir,
+        Object pairId,
+        Collection platforms,
+        Object segmentation
+    ) {
+        return registrationQcFiles(publishedQcOutDirs(outdir, pairId, platforms, segmentation))
     }
 
     /** Return RESOLVE's <pair>_resolve_summary.json name. */

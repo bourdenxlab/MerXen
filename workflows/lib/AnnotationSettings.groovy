@@ -45,6 +45,13 @@ class AnnotationSettings {
         mender_skipped: "MENDER skipped (no assigned cell state)",
         failed_reports: "annotation reports not built (see the failed tasks above)",
         failed_report_items: "annotation report items failed (see the report)",
+        registration_published: (
+            "registration checks from published QC outputs (QC stage not run in this launch)"
+        ),
+        registration_missing: (
+            "registration checks missing (found of active platforms; " +
+            "mouse RESOLVE refuses, human registration G1 not_evaluable)"
+        ),
     ].asImmutable()
 
     /**

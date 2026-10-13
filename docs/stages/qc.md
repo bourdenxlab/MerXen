@@ -130,6 +130,23 @@ Written under `qc_out/` (published to
 The `<dataset>` stem is lowercased, e.g. `example01_merscope_qc_summary.csv`.
 Hybrid-only files are emitted only for the `proseg_hybrid` branch.
 
+`<dataset>_registration_qc.json` is also read by the map_first annotation's
+RESOLVE task as registration G1 (mouse gate G1; human real-data QC G1, NR9;
+see [annotation.md](annotation.md)). It takes the file from this launch's QC
+task when the branch's QC runs. When the row's QC stage does not run at all
+(a launch started after `qc`, or an `only_stage`), it takes the published
+`qc/qc_out/` above for every segmentation of the row, so a re-annotation
+started after `qc` uses the checks of the last QC task that succeeded for
+the branch (a failed one is not published, see
+[Registration check](#registration-check)). A segmentation that is not an
+analysis segmentation of a row whose QC runs (a MENDER-only one) gets no
+check and its published one is not used, since the launch may have
+re-segmented it; list it in `analysis_segmentation` to check it. A launch
+started after `qc` cannot tell whether a published check belongs to the
+segmentation it reads: when a branch has been re-segmented since its QC last
+ran (say, by a launch stopped before `qc`), run from `qc` or earlier before
+re-annotating from published results.
+
 ## Interpreting the summary
 
 | Field | What to watch for |

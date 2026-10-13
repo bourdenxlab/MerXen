@@ -52,8 +52,13 @@ EXPECTED_SHA256: dict[str, str] = {
     # M13 C15: the map_first branch also builds RESOLVE's registration
     # checks from the QC stage and passes them to CLUSTERING_MAP_FIRST; the
     # else-branch, the process texts and the legacy inputs are unchanged.
+    # 2026-10-13: the map_first branch falls back to the published
+    # registration checks when the QC stage does not run for a branch; the
+    # else-branch, the process texts and the legacy inputs are unchanged.
+    # 2026-10-13: that fallback is narrowed to rows whose QC stage does not
+    # run at all; again only the map_first branch changed.
     "main.nf wiring": (
-        "e3f78c9a688945365e9272a732e49d847250da1613115bfb65d5ac4297d82917"
+        "65ea609bc42e7f079a6a805ddb61d6b9140ef4ad39842dc88593178af6696d4a"
     ),
     "param defaults": (
         "fe4ca1ed06ba1c74dba06b3a50219cfac58a719376ead6792ae7ae0568c5f3c2"

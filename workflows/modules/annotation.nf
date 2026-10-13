@@ -287,7 +287,10 @@ process CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE {
     // the pair's shared tissue mask and registration summary from ALIGN (M5),
     // or none; registration_files: the QC stage's registration checks of the
     // pair x segmentation, one per platform (G1: the mouse gate's, the human
-    // real-data QC's; M13 C15), or none without a QC stage.
+    // real-data QC's; M13 C15), from this launch's QC tasks or the published
+    // QC outputs (main.nf hook H5), or none. Staged under their own names,
+    // and hashed by content, so an identical check from either source keeps
+    // RESOLVE cached.
     tuple val(pair_id),
         val(segmentation),
         val(resolve_spec),
