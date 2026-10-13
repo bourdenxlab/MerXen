@@ -130,6 +130,15 @@ Written under `qc_out/` (published to
 The `<dataset>` stem is lowercased, e.g. `example01_merscope_qc_summary.csv`.
 Hybrid-only files are emitted only for the `proseg_hybrid` branch.
 
+`<dataset>_registration_qc.json` is also read by the map_first annotation's
+RESOLVE task as registration G1 (mouse gate G1; human real-data QC G1, NR9;
+see [annotation.md](annotation.md)). It takes the file from this launch's QC
+task when the branch's QC runs, and otherwise from the published
+`qc/qc_out/` above, so a re-annotation started after `qc` uses the checks of
+the last QC task that succeeded for the branch (a failed one is not
+published, see [Registration check](#registration-check)). After
+re-segmenting a branch, run from `qc` again rather than starting after it.
+
 ## Interpreting the summary
 
 | Field | What to watch for |

@@ -1295,7 +1295,9 @@ MAP peak RSS ≤ 11.3 GB. The warnings to read the labels with:
 - NR9: registration G1 was not evaluated. The family's results hold no
   registration check from the QC stage, so every RESOLVE recorded it
   `not_evaluable`; computed read-only for the record, no section meets the
-  fail rule and P5822 would warn (density ratio 1.75).
+  fail rule and P5822 would warn (density ratio 1.75). (A launch started
+  after `qc` now stages the published checks where they exist; see the
+  RESOLVE task above.)
 - NR13: the predicted levels were not recorded before the outputs were read.
 
 ### Xenium Prime 5K panel card (M3c)
@@ -1560,13 +1562,35 @@ for `ANNOTATE_PANEL`); until then RESOLVE reports the whole-section JSD and
 never looks for a published `align_out` that ALIGN may still be writing
 (`--no-alignment-lookup`). The task also stages the QC stage's
 registration checks of its pair × segmentation (each platform's
-`<pair>_<platform>_registration_qc.json`, from the QC tasks' output channel
-once all of the branch's QC tasks have finished; M13 C15) and reads them with
+`<pair>_<platform>_registration_qc.json`; M13 C15) and reads them with
 `--registration-qc-dir`: G1 of the mouse gate and the human real-data QC's
-registration G1 (NR9). A branch the QC stage skips (`run_qc` off, or not an
-analysis segmentation) stages none: its human G1 is `not_evaluable`, and a
-pipeline RESOLVE (`--require-bundle-refs`) refuses a mouse sample without a
-check. A mouse MAP output is resolved with the M6 mouse rules
+registration G1 (NR9). Their source, per pair × segmentation:
+
+1. **QC stage of this launch.** When the branch's QC runs in the launch
+   (`run_qc` and an analysis segmentation), RESOLVE takes the checks from the
+   QC tasks' output channel once all of the branch's QC tasks have finished,
+   and only those: a published check is never mixed in, even when this
+   launch's QC wrote none.
+2. **Published QC outputs.** When the QC stage does not run for the branch
+   (`start_stage` after `qc`, the usual way to re-annotate published
+   results; `only_stage`; or not an analysis segmentation), RESOLVE takes
+   each active platform's check where the QC process publishes it:
+   `<outdir>/<pair_id>/<platform lower-case>/<segmentation>/qc/qc_out/<pair_id lower-case>_<platform lower-case>_registration_qc.json`
+   (`qc_out` is a symlink to the QC task's work directory; a removed work
+   directory gives no check).
+3. **Neither.** The branch stages none, as before: its human G1 is
+   `not_evaluable`, and a pipeline RESOLVE (`--require-bundle-refs`) refuses
+   a mouse sample without a check ("mouse RESOLVE needs the M0a registration
+   check (gate G1) ...").
+
+The staged files keep their names, so RESOLVE matches each sample's
+`<sample_id lower-case>_registration_qc.json` whatever the source, and its
+task hash (content, `cache "deep"`) is the same for an identical check from
+either source. RESOLVE's outputs therefore do not record the source: the
+launch logs it per branch whose QC stage does not run (the files staged, or
+a warning naming the directories searched), and the end-of-run summary lists
+the branches whose checks came from published QC outputs and those with
+fewer checks than active platforms. A mouse MAP output is resolved with the M6 mouse rules
 ([Mouse rules v1](#mouse-rules-v1-consensusresolve_mouse-73-m6)); mouse
 `map_first` still needs the rest of M5's wiring
 ([Mouse region step](#mouse-region-step-m6), pipeline wiring). RESOLVE caches on content (`cache
@@ -1662,11 +1686,17 @@ PREPARE -> ANNOTATE_PANEL -> ANNOTATE_REFERENCE_PREP (per unique bundle)
   (the pair JSD's shared-mask restriction); a pair without alignment gets
   none.
 - **Registration checks.** Each pair × segmentation's
-  `*_registration_qc.json` come from the QC tasks' output channel (hook H5
-  groups the branch's QC tasks, one per active platform) and are staged
-  into RESOLVE (`--registration-qc-dir`: mouse gate G1, human real-data QC
-  G1; M13 C15); a branch the QC stage skips gets none. RESOLVE waits for its
-  branch's QC tasks, which the clustering inputs already wait for.
+  `*_registration_qc.json` are staged into RESOLVE (`--registration-qc-dir`:
+  mouse gate G1, human real-data QC G1; M13 C15). A branch whose QC runs in
+  the launch takes them from the QC tasks' output channel (hook H5 groups
+  the branch's QC tasks, one per active platform), and RESOLVE waits for
+  them, as the clustering inputs already do. A branch whose QC stage does
+  not run (a launch started after `qc`) takes each active platform's check
+  from the QC stage's publish location under `params.outdir`
+  (`AnnotationReferences.publishedRegistrationQcFiles`), and none when there
+  is none. The same launch's QC always wins; the source of each branch's
+  checks is logged and listed in the end-of-run summary
+  (`registration_published`, `registration_missing`).
 - **COMPUTE_CPU** stages RESOLVE's label tables, annotation manifests and
   pair summary as files and caches on their content (`cache "deep"` hashes a
   file's content but a directory only by its metadata): a RESOLVE re-run
@@ -2814,8 +2844,9 @@ held-out-gene CSV is not produced in the pipeline, so item 8 is
   .819 on the same sections [L]. G4 is not evaluated until M6b's AP
   estimate chooses the MERFISH window (standalone runs pass
   `--mouse-g4-sections`). The pipeline's RESOLVE task stages the QC
-  stage's registration checks (M13 C15) and refuses a mouse sample without
-  one (a branch the QC stage skips); a standalone run passes `--registration-qc` or
+  stage's registration checks (M13 C15; the published ones when the QC
+  stage does not run in the launch) and refuses a mouse sample without
+  one; a standalone run passes `--registration-qc` or
   `--registration-qc-dir`, and without either G1 is not evaluated and the
   gate warns. G1 is the signal that catches misregistered data: per-cell confidence does not
   (class bootstrap ≥ 0.9 covers .733 of the invalid VZG2 proseg_hybrid cells
